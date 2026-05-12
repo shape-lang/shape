@@ -675,6 +675,112 @@ Branch: `bulldozer-strictly-typed-w12-jit-call-return-kind`
 Audit commit: `f58abc8d`
 Fix commit: (pending — appended at merge)
 
+## Round 7 — partial (Round 7A closed; 7B in flight)
+
+Two sub-clusters dispatched in parallel 2026-05-12 from the Round 6B
+audit's surfaced trinity territory:
+
+| Sub-cluster | Branch | Status |
+|---|---|---|
+| W12-jit-result-option-trinity (7A) | `bulldozer-strictly-typed-w12-jit-result-option-trinity` | **closed** (2026-05-12) |
+| W12-jit-collection-typed-arc-ffi (7B) | `bulldozer-strictly-typed-w12-jit-collection-typed-arc-ffi` | dispatching (parallel) |
+
+### W12-jit-result-option-trinity close (2026-05-12)
+
+Integrated trinity landing per the Round 6B audit blueprint at
+`docs/cluster-audits/w12-jit-match-enum-inline-audit.md`. Three close
+commits:
+
+- `d01d83b7` — `(i) + (ii)`: `Rvalue::EnumTest` / `EnumPayload` MIR
+  variants + `VariantTag` enum + Arc-shape Result/Option FFI
+  (`jit_v2_make_result_ok/_err`, `jit_v2_make_option_some/_none`,
+  `jit_arc_result_is_ok/_is_err/_payload`,
+  `jit_arc_option_is_some/_is_none/_payload`). All FFIs read/write
+  from `*const ResultData` / `*const OptionData` directly per
+  ADR-006 §2.7.17 — no NaN-box tag decode, no `is_heap_kind` probe.
+  6 new round-trip tests (Ok/Err/Some/None construction, predicates,
+  payload extraction, null-bits safety, kind label match).
+- `ae5d57f2` — `(iii)`: EnumStore non-empty payload consumer in
+  `mir_compiler/statements.rs`. Replaces the surface-and-stop with
+  real Arc-shape producer dispatch on `VariantTag::from_name`.
+  User-defined enum variants surface-and-stop with structured §-cite
+  per §2.7.7 #9.
+- `9f27edcd` — Producer-site MIR (`lower_match_pattern_condition_operand`,
+  `Pattern::Constructor` arm in `lower_pattern_bindings_from_place_opt`)
+  + producer-side concrete-type stamping (`helpers.rs` EnumStore
+  Result/Option classification) + **critical bug fix**: Arc-shape
+  kinded retain/release ABI.
+
+**Critical bug discovered & fixed during integration**: The legacy
+`jit_arc_retain`/`jit_arc_release` operate on `UnifiedValue<T>` refcount
+layout (offset 4 of the pointer). The new `Arc<ResultData>` /
+`Arc<OptionData>` carriers use Rust's standard Arc layout (refcount at
+offset -16). Calling the legacy retain on a trinity Arc would
+`fetch_add(1) as u32` at offset 4 of `payload.slot.0` — CORRUPTING the
+high 32 bits with the spurious refcount. Symptom: `let r = Ok(5); match
+r { Ok(v) => print(v) }` printed `4294967301` = `0x100000005` = 5 + 2^32.
+
+Fix: new Arc-aware FFI entries `jit_arc_result_retain/_release`,
+`jit_arc_option_retain/_release` calling
+`Arc::increment_strong_count::<T>` / `Arc::decrement_strong_count::<T>`
+per Rust standard Arc contract. Dispatched via new
+`retain_func_for_place` / `release_func_for_place` helpers that pick
+the right entry based on `place_native_kind` —
+`Ptr(HeapKind::Result)` → `arc_result_retain`,
+`Ptr(HeapKind::Option)` → `arc_option_retain`,
+else → legacy `arc_retain`. Three retain/release call sites updated.
+
+**Smoke results**:
+
+- Smoke 1.5 (`fn divide(...) -> Result<int, string>; let r = divide(10,2);
+  match r { Ok(v) => print(v), Err(e) => print(e) }`): VM `5`, JIT `5` —
+  end-to-end identical.
+- Smoke 2 (`fn first_positive(...) -> Option<int>; print(...)`) hangs
+  in JIT mode. **VERIFIED PRE-EXISTING** (stash trinity changes + rebuild
+  + run on the baseline branch: same hang). Hang in `first_positive`'s
+  for-loop / Array<int> iteration combined with `print(Some(3))` heap-arm
+  classification — orthogonal to trinity. Tracked separately.
+
+**Compile-failure count on Smoke 1.5 under SHAPE_JIT_DEBUG=1**: pre-fix
+30 (5 EnumStore + 23 Rvalue::Aggregate + 2 compile_binop_dynamic_arith);
+post-fix 25 (0 EnumStore + 23 Aggregate + 2 binop_dynamic). The 5
+EnumStore failures (for `divide` body + 4 stdlib functions that
+construct Result/Option payloads) ALL closed. Remaining 23 Aggregate
+failures are pre-existing W11-jit-new-array territory, NOT trinity work.
+
+**Close gates (devenv exit-code-verified)**:
+- `cargo check --workspace --lib --tests` EXIT=0
+- `cargo test -p shape-jit --lib` 328 passed / 0 failed / 26 ignored
+  (matches baseline 322/0/26 + 6 new Arc-shape FFI round-trip tests)
+- `cargo test -p shape-vm --lib` pre-existing SIGABRT in
+  v2-raw-heap-audit cluster (documented in CLAUDE.md)
+- `bash scripts/verify-merge.sh` 12/12 (Passed: 12 / Failed: 0)
+- `bash scripts/check-no-dynamic.sh` EXIT=0
+
+**Sites surfaced (cite-tracked)**:
+- (a) Smoke 2 hang in JIT mode — pre-existing, not trinity territory.
+  Cluster-2 candidate.
+- (b) `print(arc_bits)` for heap arms (Result/Option) still goes
+  through `format_value_word`'s NaN-box decode — surfaced item #3 in
+  phase-3-cluster-0-status. Cluster-2 candidate.
+- (c) User-defined enum variant codegen via EnumStore (non-trinity
+  names) surface-and-stops with structured cite — separate workstream
+  per audit §7 row 5.
+- (d) The other Arc-shape carriers (HashSet/Deque/Channel/Mutex/Atomic/
+  Lazy) have the same Arc-vs-UnifiedValue refcount-offset gap as
+  Result/Option had. When they get JIT codegen, they'll need the same
+  kinded retain/release dispatch. Same pattern as `arc_result_retain`
+  — generalize as the carrier family migrates (load-bearing for 7B
+  `W12-jit-collection-typed-arc-ffi`).
+
+**ADR-006 amendment**: NOT required. §2.7.17 / Q18 already specifies
+the Arc-shape carrier semantics; the trinity implements them at the
+JIT FFI tier. The Arc-contract refcount-offset issue is a JIT-FFI
+implementation specific, not a §2.7 design question.
+
+Branch: `bulldozer-strictly-typed-w12-jit-result-option-trinity`
+Close commits: `d01d83b7`, `ae5d57f2`, `9f27edcd`
+
 ## Cluster-0 close gate
 
 Per phase-3-kickoff-prompt §"Cluster-0 sub-cluster sequencing":

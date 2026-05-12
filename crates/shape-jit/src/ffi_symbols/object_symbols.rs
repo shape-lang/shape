@@ -68,6 +68,76 @@ pub fn register_object_symbols(builder: &mut JITBuilder) {
         "jit_make_some",
         super::super::ffi::result::jit_make_some as *const u8,
     );
+    // ADR-006 §2.7.17 / Q18 — Arc-shape Result/Option producers + accessors
+    // (W12-jit-result-option-trinity, Phase 3 cluster-0 Round 7A, 2026-05-12).
+    // Match the VM-side `BuiltinFunction::OkCtor` / `ErrCtor` / `SomeCtor` /
+    // `NoneCtor` output shape — `Arc::into_raw(Arc<ResultData>) as u64` /
+    // `Arc::into_raw(Arc<OptionData>) as u64` with kind labels
+    // `NativeKind::Ptr(HeapKind::Result)` / `NativeKind::Ptr(HeapKind::Option)`.
+    // Replaces the legacy `jit_make_ok` etc. NaN-box producer family at the
+    // JIT EnumStore consumer (the production-code consumer migration gap the
+    // pre-trinity result.rs:178-200 deletion comment documented).
+    builder.symbol(
+        "jit_v2_make_result_ok",
+        super::super::ffi::result::jit_v2_make_result_ok as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_make_result_err",
+        super::super::ffi::result::jit_v2_make_result_err as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_make_option_some",
+        super::super::ffi::result::jit_v2_make_option_some as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_make_option_none",
+        super::super::ffi::result::jit_v2_make_option_none as *const u8,
+    );
+    builder.symbol(
+        "jit_arc_result_is_ok",
+        super::super::ffi::result::jit_arc_result_is_ok as *const u8,
+    );
+    builder.symbol(
+        "jit_arc_result_is_err",
+        super::super::ffi::result::jit_arc_result_is_err as *const u8,
+    );
+    builder.symbol(
+        "jit_arc_result_payload",
+        super::super::ffi::result::jit_arc_result_payload as *const u8,
+    );
+    builder.symbol(
+        "jit_arc_option_is_some",
+        super::super::ffi::result::jit_arc_option_is_some as *const u8,
+    );
+    builder.symbol(
+        "jit_arc_option_is_none",
+        super::super::ffi::result::jit_arc_option_is_none as *const u8,
+    );
+    builder.symbol(
+        "jit_arc_option_payload",
+        super::super::ffi::result::jit_arc_option_payload as *const u8,
+    );
+    // Arc-shape kinded retain/release per ADR-006 §2.7.17 / Q18.
+    // Required because the legacy `jit_arc_retain`/`jit_arc_release`
+    // operate on the `UnifiedValue<T>` refcount layout at offset 4,
+    // which would corrupt `Arc<ResultData>`/`Arc<OptionData>` allocations
+    // (whose refcount lives at offset -16 per Rust Arc contract).
+    builder.symbol(
+        "jit_arc_result_retain",
+        super::super::ffi::result::jit_arc_result_retain as *const u8,
+    );
+    builder.symbol(
+        "jit_arc_result_release",
+        super::super::ffi::result::jit_arc_result_release as *const u8,
+    );
+    builder.symbol(
+        "jit_arc_option_retain",
+        super::super::ffi::result::jit_arc_option_retain as *const u8,
+    );
+    builder.symbol(
+        "jit_arc_option_release",
+        super::super::ffi::result::jit_arc_option_release as *const u8,
+    );
     builder.symbol("jit_print", jit_print as *const u8);
     // W11-jit-new-array (ADR-006 §2.7.5 stamp-at-compile-time): per-kind
     // print entry points dispatched by the MIR-side print emitter when
@@ -508,6 +578,87 @@ pub fn declare_object_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<
         let mut sig = module.make_signature();
         sig.params.push(AbiParam::new(types::I64)); // inner_bits
         sig.returns.push(AbiParam::new(types::I64));
+        let func_id = module
+            .declare_function(name, Linkage::Import, &sig)
+            .unwrap_or_else(|e| panic!("Failed to declare {}: {:?}", name, e));
+        ffi_funcs.insert(name.to_string(), func_id);
+    }
+
+    // ADR-006 §2.7.17 / Q18 — Arc-shape Result/Option producers
+    // (W12-jit-result-option-trinity, Phase 3 cluster-0 Round 7A,
+    // 2026-05-12). Signature:
+    // `(payload_bits: u64, payload_kind_code: i8) -> u64`.
+    // The payload_kind_code is the §2.7.7 / Q9 parallel-track byte encoding
+    // (`crates/shape-jit/src/ffi/stack_kind_code.rs`) stamped at JIT-compile
+    // time from the EnumStore operand's MIR-inferred kind per §2.7.5.
+    // Return is `Arc::into_raw(Arc<ResultData>) as u64` /
+    // `Arc::into_raw(Arc<OptionData>) as u64` with kind labels
+    // `Ptr(HeapKind::Result)` / `Ptr(HeapKind::Option)`.
+    for name in [
+        "jit_v2_make_result_ok",
+        "jit_v2_make_result_err",
+        "jit_v2_make_option_some",
+    ] {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // payload_bits
+        sig.params.push(AbiParam::new(types::I8));  // payload_kind_code
+        sig.returns.push(AbiParam::new(types::I64));
+        let func_id = module
+            .declare_function(name, Linkage::Import, &sig)
+            .unwrap_or_else(|e| panic!("Failed to declare {}: {:?}", name, e));
+        ffi_funcs.insert(name.to_string(), func_id);
+    }
+    // jit_v2_make_option_none takes no payload (None has no payload).
+    {
+        let mut sig = module.make_signature();
+        sig.returns.push(AbiParam::new(types::I64));
+        let func_id = module
+            .declare_function("jit_v2_make_option_none", Linkage::Import, &sig)
+            .expect("Failed to declare jit_v2_make_option_none");
+        ffi_funcs.insert("jit_v2_make_option_none".to_string(), func_id);
+    }
+    // ADR-006 §2.7.17 — Arc-shape predicates: read is_ok / is_err / is_some /
+    // is_none from `*const ResultData` / `*const OptionData` directly.
+    // Signature: `(bits: u64) -> u8` (native bool).
+    for name in [
+        "jit_arc_result_is_ok",
+        "jit_arc_result_is_err",
+        "jit_arc_option_is_some",
+        "jit_arc_option_is_none",
+    ] {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I8));
+        let func_id = module
+            .declare_function(name, Linkage::Import, &sig)
+            .unwrap_or_else(|e| panic!("Failed to declare {}: {:?}", name, e));
+        ffi_funcs.insert(name.to_string(), func_id);
+    }
+    // Arc-shape payload extractors: clone the inner KindedSlot's share +
+    // return its raw bits. Signature: `(bits: u64) -> u64`.
+    for name in ["jit_arc_result_payload", "jit_arc_option_payload"] {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        let func_id = module
+            .declare_function(name, Linkage::Import, &sig)
+            .unwrap_or_else(|e| panic!("Failed to declare {}: {:?}", name, e));
+        ffi_funcs.insert(name.to_string(), func_id);
+    }
+    // Arc-shape retain/release: bump/decrement the standard Rust Arc
+    // refcount at offset -16 per Arc contract. Signature: `(bits: u64)`.
+    // Required by `refcount_disposition` when the slot kind is
+    // `Ptr(HeapKind::Result)` or `Ptr(HeapKind::Option)` — the legacy
+    // `jit_arc_retain`/`jit_arc_release` for `UnifiedValue<T>` corrupt
+    // these allocations.
+    for name in [
+        "jit_arc_result_retain",
+        "jit_arc_result_release",
+        "jit_arc_option_retain",
+        "jit_arc_option_release",
+    ] {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
         let func_id = module
             .declare_function(name, Linkage::Import, &sig)
             .unwrap_or_else(|e| panic!("Failed to declare {}: {:?}", name, e));

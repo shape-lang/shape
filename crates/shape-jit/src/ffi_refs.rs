@@ -226,6 +226,50 @@ pub struct FFIFuncRefs {
     pub(crate) make_err: FuncRef,
     pub(crate) make_some: FuncRef,
 
+    // ADR-006 §2.7.17 / Q18 — Arc-shape Result/Option producers
+    // (W12-jit-result-option-trinity, Phase 3 cluster-0 Round 7A,
+    // 2026-05-12). These produce `Arc::into_raw(Arc<ResultData>) as u64`
+    // / `Arc::into_raw(Arc<OptionData>) as u64` directly per the strict-
+    // typed §2.7.17 carrier — matching the VM-side `BuiltinFunction::
+    // OkCtor` / `ErrCtor` / `SomeCtor` / `NoneCtor` output. The producer
+    // signature is `(payload_bits: u64, payload_kind_code: u8) -> u64`
+    // where the kind code is the §2.7.7 / Q9 parallel-track byte
+    // (`stack_kind_code::encode(payload_kind)`) stamped at JIT-compile
+    // time from the EnumStore operand's MIR-inferred kind. Replaces the
+    // legacy `make_ok` / `make_err` / `make_some` NaN-box family at the
+    // strict-typed EnumStore consumer (those FFI fields above remain
+    // referenced by ffi/conversion.rs for the JIT↔VM trampoline boundary).
+    pub(crate) v2_make_result_ok: FuncRef,
+    pub(crate) v2_make_result_err: FuncRef,
+    pub(crate) v2_make_option_some: FuncRef,
+    pub(crate) v2_make_option_none: FuncRef,
+
+    // ADR-006 §2.7.17 — Arc-shape Result/Option predicates + payload
+    // extractors. Read `is_ok` / `is_some` from the `*const ResultData` /
+    // `*const OptionData` borrow directly — NO NaN-box tag decode, NO
+    // `is_heap_kind` probe (§2.7.7 #4 / #7 forbidden per CLAUDE.md
+    // "Forbidden code" — runtime tag_bits dispatch deleted with the
+    // W-series). Used by the JIT `Rvalue::EnumTest` / `Rvalue::EnumPayload`
+    // consumer in `mir_compiler/rvalues.rs`.
+    pub(crate) arc_result_is_ok: FuncRef,
+    pub(crate) arc_result_is_err: FuncRef,
+    pub(crate) arc_result_payload: FuncRef,
+    pub(crate) arc_option_is_some: FuncRef,
+    pub(crate) arc_option_is_none: FuncRef,
+    pub(crate) arc_option_payload: FuncRef,
+
+    // Arc-shape kinded retain/release for `Arc<ResultData>` /
+    // `Arc<OptionData>` carriers (W12-jit-result-option-trinity,
+    // 2026-05-12). The legacy `arc_retain` / `arc_release` operate on
+    // the `UnifiedValue<T>` refcount layout (offset 4) and corrupt the
+    // typed-Arc allocations (whose refcount lives at offset -16 per
+    // Rust Arc contract). Refcount sites for Result/Option-kinded
+    // slots dispatch HERE instead of the legacy entries.
+    pub(crate) arc_result_retain: FuncRef,
+    pub(crate) arc_result_release: FuncRef,
+    pub(crate) arc_option_retain: FuncRef,
+    pub(crate) arc_option_release: FuncRef,
+
     // v2 typed HashMap<string, ...> access.
     //
     // SURFACE (ADR-006 §2.7.14 Q15 / W11-jit-carrier-conversion sub-cluster):

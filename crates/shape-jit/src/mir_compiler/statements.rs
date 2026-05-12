@@ -201,7 +201,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             }
 
             StatementKind::EnumStore {
-                container_slot: _,
+                container_slot,
                 operands,
                 variant_name,
             } => {
@@ -272,47 +272,149 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 if operands.is_empty() {
                     return Ok(());
                 }
-                // W12-jit-aggregate-non-array audit (2026-05-12):
-                // Threading variant_name and registering kinded
-                // make_ok / make_err / make_some FFI entries is in place
-                // (commits in this sub-cluster), but the JIT consumer that
-                // would call them depends on downstream kind-flow
-                // infrastructure that isn't ready yet:
+
+                // W12-jit-result-option-trinity (Phase 3 cluster-0
+                // Round 7A, 2026-05-12). EnumStore non-empty payload
+                // consumer per item (iii) of the trinity. The
+                // `variant_name` was producer-stamped at MIR-emission
+                // time (§2.7.5) by the bare-form enum-variant intercept
+                // in `mir/lowering/expr.rs:1556-1577` + the qualified
+                // `Expr::EnumConstructor` arm at `expr.rs:1669-1693`.
                 //
-                // 1. The top-level caller slot for `let r = divide(...)`
-                //    receives a `Call` terminator return; its kind isn't
-                //    classified as `Ptr(HeapKind::Result)` by the conduit
-                //    (which only walks MIR statements, not return-kind
-                //    flow). Without that classification, print and match
-                //    on `r` mis-decode the bits.
-                // 2. JIT pattern-matching for `match r { Ok(v) => ..., }`
-                //    doesn't yet have an inline path for the legacy
-                //    NaN-boxed `box_ok/err/some` shape OR the typed-Arc
-                //    `Arc<ResultData>` shape.
-                // 3. The legacy `jit_make_ok/err/some` FFI returns
-                //    NaN-boxed bits; the VM-side `Arc<ResultData>`
-                //    consumer needs conversion at the boundary, which
-                //    isn't audited end-to-end.
+                // Dispatches to the Arc-shape producers at
+                // `crates/shape-jit/src/ffi/result.rs::jit_v2_make_*`
+                // (committed as item (ii) of the trinity), which return
+                // `Arc::into_raw(Arc<ResultData>) as u64` /
+                // `Arc::into_raw(Arc<OptionData>) as u64` matching the
+                // VM-side `BuiltinFunction::OkCtor` / `ErrCtor` /
+                // `SomeCtor` / `NoneCtor` output shape per ADR-006
+                // §2.7.17.
                 //
-                // The right fix is an ADR-amendment-level co-design of
-                // (Call-return kind tracking + match-on-enum codegen +
-                // NaN-box↔Arc conversion). Per CLAUDE.md surface-and-
-                // stop discipline, this consumer surfaces honestly here
-                // with the structured §-cite. The audit doc spells out
-                // the deeper scope at §8 "Sites surfaced".
-                let variant_label = variant_name.as_deref().unwrap_or("<missing>");
-                Err(format!(
-                    "EnumStore: SURFACE — variant '{}' (operands.len()={}) \
-                     requires a co-designed Call-return kind track + \
-                     pattern-match codegen + NaN-box↔Arc conversion that \
-                     exceeds this sub-cluster's scope. Conduit extension \
-                     (option (ii)) is landed; this consumer is option (iii) \
-                     territory per W12-jit-aggregate-non-array audit \
-                     `docs/cluster-audits/w12-jit-aggregate-non-array-audit.md` §4. \
-                     ADR-006 §2.7.14 / §2.7.5.",
-                    variant_label,
-                    operands.len()
-                ))
+                // Payload kind is stamped from the operand's MIR-inferred
+                // kind via `operand_slot_kind(op)` → `stack_kind_code::
+                // encode(kind)` at call-site time per §2.7.5. NOT a
+                // Bool-default fallback: when the operand's kind isn't
+                // proven (the `None` arm of `operand_slot_kind`), surface-
+                // and-stop with the structured cite per §2.7.7 #9.
+                //
+                // Unsupported variant names (user-defined enum variants
+                // that aren't Ok / Err / Some / None) surface-and-stop —
+                // user-defined enum codegen is a separate workstream per
+                // the trinity audit §7 row 5.
+                let Some(name) = variant_name.as_deref() else {
+                    return Err(
+                        "EnumStore: SURFACE — variant_name is None on a \
+                         non-empty payload. The MIR producer sites in \
+                         `mir/lowering/{expr,stmt}.rs` MUST thread \
+                         `variant_name` per ADR-006 §2.7.5 producer-site \
+                         classification; reaching here means a producer \
+                         site emitted EnumStore without classification \
+                         (forbidden #9). \
+                         W12-jit-result-option-trinity (Phase 3 cluster-0 \
+                         Round 7A) / ADR-006 §2.7.17."
+                            .to_string(),
+                    );
+                };
+
+                let Some(variant_tag) = shape_vm::mir::types::VariantTag::from_name(name) else {
+                    return Err(format!(
+                        "EnumStore: SURFACE — variant '{}' (operands.len()={}) \
+                         is not in the trinity-supported set \
+                         (Ok / Err / Some / None). User-defined enum \
+                         variant codegen via EnumStore is a separate \
+                         workstream per `docs/cluster-audits/\
+                         w12-jit-match-enum-inline-audit.md` §7 row 5 — \
+                         needs `VariantTag::User(EnumLayoutId, variant_id)` \
+                         extension + parallel `jit_v2_make_user_enum_*` \
+                         FFI family. \
+                         W12-jit-result-option-trinity (Phase 3 cluster-0 \
+                         Round 7A) / ADR-006 §2.7.17.",
+                        name,
+                        operands.len()
+                    ));
+                };
+
+                // None has no payload — handled separately (empty operands
+                // already returned above, but `MirConstant::None` lowers
+                // to `MirConstant::None` operand which still gets here
+                // with operands.len()==1 in some paths). For safety:
+                if matches!(variant_tag, shape_vm::mir::types::VariantTag::None_) {
+                    // None construction via the Arc-shape producer —
+                    // no payload, no kind code. The producer always
+                    // builds the same `Arc<OptionData>` with
+                    // `is_some=false` + the §2.7.17 placeholder.
+                    let inst = self.builder.ins().call(
+                        self.ffi.v2_make_option_none,
+                        &[],
+                    );
+                    let arc_bits = self.builder.inst_results(inst)[0];
+                    let place = Place::Local(*container_slot);
+                    self.release_old_value_if_heap(&place)?;
+                    self.write_place(&place, arc_bits)?;
+                    return Ok(());
+                }
+
+                // Ok / Err / Some — single-payload producers. The MIR
+                // enforces exactly one operand for these via the producer-
+                // side intercepts (`is_bare_enum_variant_ctor` + the
+                // `Expr::EnumConstructor` tuple-payload arm). If we ever
+                // see operands.len() != 1, that's a producer-site bug.
+                if operands.len() != 1 {
+                    return Err(format!(
+                        "EnumStore: SURFACE — variant '{}' expects 1 \
+                         operand, got {}. Producer-site contract \
+                         violated. W12-jit-result-option-trinity / \
+                         ADR-006 §2.7.17.",
+                        name,
+                        operands.len()
+                    ));
+                }
+                let operand = &operands[0];
+
+                // Producer-site kind classification per §2.7.5: the
+                // operand's MIR-inferred kind IS the payload kind.
+                // `operand_slot_kind` projects through Field / Index /
+                // Local with the §2.7.5 conduit's `concrete_types` map +
+                // the constant arms — every operand the trinity supports
+                // has a proven kind by construction (the bare-form
+                // intercept's operand is a typed local; the qualified
+                // EnumConstructor's operand is a typed expression). When
+                // the kind is genuinely unprovable, the carrier fallback
+                // (NativeKind::UInt64) is the §2.7.5 stable-FFI carrier
+                // kind for raw I64-wide bits — NOT a Bool-default
+                // rationalization per §2.7.7 #9.
+                let payload_kind = self
+                    .operand_slot_kind_or_carrier(operand);
+                let kind_code = super::super::ffi::stack_kind_code::encode(payload_kind);
+
+                // Compile the operand to its raw payload bits (the call
+                // signature is I64-wide per the §2.7.5 stable-FFI
+                // convention; widen narrow native values to I64).
+                let payload_val = self.compile_operand_raw(operand)?;
+                let payload_i64 = self.widen_to_i64(payload_val);
+
+                let kind_code_val = self
+                    .builder
+                    .ins()
+                    .iconst(types::I8, kind_code as i64);
+
+                let func_ref = match variant_tag {
+                    shape_vm::mir::types::VariantTag::Ok => self.ffi.v2_make_result_ok,
+                    shape_vm::mir::types::VariantTag::Err => self.ffi.v2_make_result_err,
+                    shape_vm::mir::types::VariantTag::Some_ => self.ffi.v2_make_option_some,
+                    shape_vm::mir::types::VariantTag::None_ => unreachable!("handled above"),
+                };
+
+                let inst = self
+                    .builder
+                    .ins()
+                    .call(func_ref, &[payload_i64, kind_code_val]);
+                let arc_bits = self.builder.inst_results(inst)[0];
+
+                let place = Place::Local(*container_slot);
+                self.release_old_value_if_heap(&place)?;
+                self.write_place(&place, arc_bits)?;
+                Ok(())
             }
 
             StatementKind::Nop => Ok(()),

@@ -1239,7 +1239,44 @@ fn lower_match_pattern_condition_operand(
             );
             Some(Operand::Copy(Place::Local(matches_slot)))
         }
-        ast::Pattern::Array(_) | ast::Pattern::Object(_) | ast::Pattern::Constructor { .. } => {
+        ast::Pattern::Constructor { variant, .. } => {
+            // W12-jit-result-option-trinity (Phase 3 cluster-0 Round 7A,
+            // 2026-05-12). For `Ok(v)` / `Err(e)` / `Some(x)` / `None`
+            // patterns (per ADR-006 §2.7.17 / Q18 — kinded
+            // `Arc<ResultData>` / `Arc<OptionData>` carrier), the
+            // SwitchBool operand is NOT `Copy(scrutinee)` — that would
+            // be a kind-blind I64 truthy check on the Arc<...> pointer
+            // (always truthy → every arm takes the first branch). The
+            // correct lowering emits an explicit `Rvalue::EnumTest {
+            // operand, variant: <tag> }` into a fresh Bool slot, then
+            // returns that slot as the SwitchBool operand. The JIT
+            // consumer calls `jit_arc_result_is_ok` etc., reading the
+            // discriminator field directly from the `*const ResultData`/
+            // `*const OptionData` borrow per §2.7.17.
+            //
+            // Producer-site classification per §2.7.5; consumer dispatch
+            // on `VariantTag` (no runtime tag-bit decode, §2.7.7 #4 / #7
+            // forbidden).
+            if let Some(tag) = VariantTag::from_name(variant) {
+                let bool_slot = builder.alloc_temp(LocalTypeInfo::Copy);
+                builder.push_stmt(
+                    StatementKind::Assign(
+                        Place::Local(bool_slot),
+                        Rvalue::EnumTest {
+                            operand: Operand::Copy(Place::Local(scrutinee_slot)),
+                            variant: tag,
+                        },
+                    ),
+                    pattern_span,
+                );
+                return Some(Operand::Copy(Place::Local(bool_slot)));
+            }
+            // Non-trinity constructor (user-defined enum variant) — fall
+            // back to the legacy kind-blind operand. JIT codegen will
+            // surface-and-stop downstream until user-enum codegen lands.
+            Some(Operand::Copy(Place::Local(scrutinee_slot)))
+        }
+        ast::Pattern::Array(_) | ast::Pattern::Object(_) => {
             Some(Operand::Copy(Place::Local(scrutinee_slot)))
         }
     }

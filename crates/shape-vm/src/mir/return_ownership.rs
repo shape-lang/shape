@@ -146,6 +146,10 @@ fn classify_rvalue(
         // Binary/unary ops produce primitives (int/bool/float) — treat as NewlyOwned:
         // no Arc wrap is needed for primitives, so the caller can consume directly.
         Rvalue::BinaryOp(_, _, _) | Rvalue::UnaryOp(_, _) => ReturnOwnershipMode::NewlyOwned,
+        // EnumTest produces a fresh native Bool — NewlyOwned by construction.
+        // EnumPayload extracts an owned share from the wrapped Result/Option
+        // payload per §2.7.17 receiver-recovery soundness; also NewlyOwned.
+        Rvalue::EnumTest { .. } | Rvalue::EnumPayload { .. } => ReturnOwnershipMode::NewlyOwned,
     }
 }
 
@@ -293,6 +297,8 @@ fn classify_defining_rvalue(
     match rvalue {
         Rvalue::Aggregate(_) | Rvalue::Clone(_) => ReturnOwnershipMode::NewlyOwned,
         Rvalue::BinaryOp(_, _, _) | Rvalue::UnaryOp(_, _) => ReturnOwnershipMode::NewlyOwned,
+        // EnumTest emits a Bool; EnumPayload emits an owned-share payload.
+        Rvalue::EnumTest { .. } | Rvalue::EnumPayload { .. } => ReturnOwnershipMode::NewlyOwned,
         Rvalue::Borrow(kind, p) => classify_borrow_rvalue(*kind, p, mir),
         Rvalue::Use(op) => match op {
             Operand::Constant(c) => classify_constant(c),

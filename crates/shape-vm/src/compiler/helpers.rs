@@ -509,13 +509,89 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_returns(
                             );
                     }
                 }
-                StatementKind::EnumStore { container_slot, .. } => {
+                StatementKind::EnumStore {
+                    container_slot,
+                    operands,
+                    variant_name,
+                } => {
                     let idx = container_slot.0 as usize;
                     if idx < n {
-                        concrete_types[idx] =
-                            shape_value::v2::ConcreteType::Enum(
-                                shape_value::v2::concrete_type::EnumLayoutId(0),
-                            );
+                        // W12-jit-result-option-trinity (Phase 3 cluster-0
+                        // Round 7A, 2026-05-12): for the trinity variant
+                        // family (Ok / Err / Some / None) we stamp the
+                        // concrete `Result(_,_)` / `Option(_)` shape
+                        // rather than the generic `Enum(EnumLayoutId(0))`
+                        // placeholder. The Ok/Err arm pair share a
+                        // `Result(ok_inner, err_inner)`; since the
+                        // single-EnumStore site only knows one arm at a
+                        // time, we set the other arm to `Void` and rely
+                        // on bidirectional flow (e.g. both `Ok` and `Err`
+                        // arms returned from the same function share the
+                        // function's return type via the resolver pass
+                        // below). For `let r = Ok(5)` literal sites, the
+                        // Err arm stays `Void` — the JIT's
+                        // `infer_enum_payload_kind` reads the right arm
+                        // for the variant being extracted, so a `Void`
+                        // arm only matters when extracting that arm
+                        // (which doesn't happen in the load-bearing
+                        // smokes — `let r = Ok(5)` is only matched with
+                        // its known Ok payload kind).
+                        //
+                        // ADR-006 §2.7.17 producer-site classification:
+                        // the variant_name IS the proof of which carrier
+                        // shape, and the operand kind IS the inner type.
+                        // No Bool-default — when we can't classify the
+                        // operand kind we fall back to the generic
+                        // `Enum(0)` placeholder (legacy behavior).
+                        let variant_tag = variant_name
+                            .as_deref()
+                            .and_then(crate::mir::types::VariantTag::from_name);
+                        let inner_concrete = if operands.len() == 1 {
+                            operand_concrete_type(&operands[0], &slot_scalar_kind)
+                        } else {
+                            None
+                        };
+                        match (variant_tag, inner_concrete) {
+                            (
+                                Some(crate::mir::types::VariantTag::Ok),
+                                Some(inner),
+                            ) => {
+                                concrete_types[idx] = shape_value::v2::ConcreteType::Result(
+                                    Box::new(inner),
+                                    Box::new(shape_value::v2::ConcreteType::Void),
+                                );
+                            }
+                            (
+                                Some(crate::mir::types::VariantTag::Err),
+                                Some(inner),
+                            ) => {
+                                concrete_types[idx] = shape_value::v2::ConcreteType::Result(
+                                    Box::new(shape_value::v2::ConcreteType::Void),
+                                    Box::new(inner),
+                                );
+                            }
+                            (
+                                Some(crate::mir::types::VariantTag::Some_),
+                                Some(inner),
+                            ) => {
+                                concrete_types[idx] = shape_value::v2::ConcreteType::Option(
+                                    Box::new(inner),
+                                );
+                            }
+                            (Some(crate::mir::types::VariantTag::None_), _) => {
+                                // None has no payload — inner is unknown.
+                                concrete_types[idx] = shape_value::v2::ConcreteType::Option(
+                                    Box::new(shape_value::v2::ConcreteType::Void),
+                                );
+                            }
+                            _ => {
+                                // Legacy / user-defined enum variant.
+                                concrete_types[idx] =
+                                    shape_value::v2::ConcreteType::Enum(
+                                        shape_value::v2::concrete_type::EnumLayoutId(0),
+                                    );
+                            }
+                        }
                     }
                 }
                 StatementKind::ArrayStore {
@@ -660,6 +736,38 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_returns(
 /// Returns `None` for empty / heterogeneous / unresolved operand vectors
 /// — the caller leaves the slot's `ConcreteType` as `Void` (the "no
 /// information" sentinel per §2.7.5.1, NOT a Bool-default fallback).
+/// Project an `Operand` to a scalar `ConcreteType` via the same
+/// constant + pre-pass scalar-slot lookup that
+/// `infer_array_elem_from_operands` uses. Used by the EnumStore Result/
+/// Option inference to stamp the inner type of `Ok(v)` / `Err(e)` /
+/// `Some(x)` from the operand at MIR-emission time per ADR-006 §2.7.5.
+///
+/// Returns `None` when the operand isn't a scalar — caller stamps the
+/// arm as `Void` (and downstream resolver-based propagation may refine
+/// it). NOT a Bool-default fallback per §2.7.7 #9.
+fn operand_concrete_type(
+    operand: &crate::mir::types::Operand,
+    slot_scalar_kind: &[Option<shape_value::v2::ConcreteType>],
+) -> Option<shape_value::v2::ConcreteType> {
+    use crate::mir::types::{MirConstant, Operand, Place};
+    match operand {
+        Operand::Constant(MirConstant::Int(_)) => Some(shape_value::v2::ConcreteType::I64),
+        Operand::Constant(MirConstant::Float(_)) => Some(shape_value::v2::ConcreteType::F64),
+        Operand::Constant(MirConstant::Bool(_)) => Some(shape_value::v2::ConcreteType::Bool),
+        Operand::Constant(MirConstant::Str(_))
+        | Operand::Constant(MirConstant::StringId(_)) => {
+            Some(shape_value::v2::ConcreteType::String)
+        }
+        Operand::Move(Place::Local(s))
+        | Operand::Copy(Place::Local(s))
+        | Operand::MoveExplicit(Place::Local(s)) => {
+            let idx = s.0 as usize;
+            slot_scalar_kind.get(idx).and_then(|k| k.clone())
+        }
+        _ => None,
+    }
+}
+
 fn infer_array_elem_from_operands(
     operands: &[crate::mir::types::Operand],
     slot_scalar_kind: &[Option<shape_value::v2::ConcreteType>],

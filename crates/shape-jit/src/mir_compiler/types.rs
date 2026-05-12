@@ -782,7 +782,75 @@ fn infer_rvalue_kind_with_projections(
         ),
         Rvalue::Borrow(_, _) => None,     // References are heap pointers
         Rvalue::Aggregate(_) => None,      // Arrays are heap objects
+        // EnumTest emits a native Bool — kind is Bool by construction
+        // per the JIT consumer's `jit_arc_result_is_ok` / `_is_some`
+        // signature (returns I8 / `NativeKind::Bool`).
+        Rvalue::EnumTest { .. } => Some(NativeKind::Bool),
+        // EnumPayload extracts the inner payload bits from
+        // `Arc<ResultData>` / `Arc<OptionData>`. The payload's kind is
+        // classified at the OPERAND's source via 6A's call-return-kind
+        // conduit — `concrete_types[base_slot]` holds the
+        // `ConcreteType::Result(Ok_inner, Err_inner)` /
+        // `ConcreteType::Option(Some_inner)` for a slot bound to a
+        // function-call result. The variant tag selects which arm's
+        // inner type to project.
+        //
+        // When the projection succeeds, the inner type maps to a
+        // `NativeKind` via `concrete_to_native_kind` (existing helper).
+        // When the operand's `concrete_types` entry isn't `Result(_,_)`
+        // / `Option(_)` (e.g. opaque source), returning `None` lets
+        // bidirectional inference pick up the kind from downstream uses
+        // — not a Bool-default fallback per §2.7.7 #9.
+        //
+        // Producer-site classification chains via:
+        //   `Ok(a/b)` emit → EnumStore[r, var:Ok, op:a/b] → r is
+        //   Arc<ResultData> → caller's `let r = divide(...)` slot has
+        //   `concrete_types[r] = Result(I64, String)` via 6A → in
+        //   downstream `match r { Ok(v) => ... }`, the binding's
+        //   `EnumPayload { operand: Copy(r), variant: Ok }` reads
+        //   `concrete_types[r].ok_arm` = I64 → v's slot kind = Int64.
+        Rvalue::EnumPayload { operand, variant } => {
+            infer_enum_payload_kind(operand, *variant, concrete_types)
+        }
     }
+}
+
+/// Project an EnumPayload Rvalue to the destination slot's kind.
+/// Reads `concrete_types[operand.root_local()]` and dispatches on the
+/// `VariantTag` to select the arm's inner `ConcreteType`, then maps to
+/// `NativeKind` via the scalar-kind helper.
+///
+/// Returns `None` when:
+/// - The operand isn't a `Place::Local` projection (e.g. constant or
+///   complex projection) — no concrete_types entry exists.
+/// - The operand slot's `ConcreteType` isn't `Result(_,_)` / `Option(_)`
+///   (e.g. opaque receiver, intermediate temp before the 6A conduit's
+///   propagation pass).
+/// - The arm's inner `ConcreteType` doesn't map to a scalar
+///   `NativeKind` (e.g. nested heap container — the EnumPayload returns
+///   the raw inner-Arc bits and the destination slot kind would be a
+///   Ptr; the §2.7.5 conduit hasn't yet stamped Ptr arms for inner
+///   types but the upcoming 6A propagation does).
+fn infer_enum_payload_kind(
+    operand: &Operand,
+    variant: VariantTag,
+    concrete_types: Option<&[ConcreteType]>,
+) -> Option<NativeKind> {
+    let concrete_types = concrete_types?;
+    let place = match operand {
+        Operand::Copy(p) | Operand::Move(p) | Operand::MoveExplicit(p) => p,
+        Operand::Constant(_) => return None,
+    };
+    let base_slot = place.root_local();
+    let ct = concrete_types.get(base_slot.0 as usize)?;
+    let inner: &ConcreteType = match (variant, ct) {
+        (VariantTag::Ok, ConcreteType::Result(ok, _)) => ok.as_ref(),
+        (VariantTag::Err, ConcreteType::Result(_, err)) => err.as_ref(),
+        (VariantTag::Some_, ConcreteType::Option(inner)) => inner.as_ref(),
+        // None has no payload — kind isn't meaningful.
+        _ => return None,
+    };
+    elem_slot_kind_for_concrete(inner)
 }
 
 /// Infer the NativeKind of an operand.
