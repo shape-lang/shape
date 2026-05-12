@@ -225,6 +225,43 @@ pub(super) fn lower_binary_op(op: ast::BinaryOp) -> Option<BinOp> {
     }
 }
 
+/// W12-enum-constructor-mir-lowering (Phase 3 cluster-0 Round 4):
+/// Identify a bare-form built-in enum-variant constructor name.
+///
+/// The parser produces `Expr::FunctionCall { name: "Ok" / "Err" / "Some",
+/// ... }` for the bare surface forms `Ok(x)` / `Err(x)` / `Some(x)` —
+/// indistinguishable in AST shape from any other function call. These
+/// names are NOT registered in the runtime function table; the VM
+/// intercepts them at bytecode-compile time via `classify_builtin_function`
+/// (`crates/shape-vm/src/compiler/helpers.rs:3194-3209`) and dispatches
+/// them via `OpCode::BuiltinCall(OkCtor / ErrCtor / SomeCtor)` to the
+/// executor's hand-written constructor bodies
+/// (`executor/vm_impl/builtins.rs:529-586`).
+///
+/// MIR emission must perform the equivalent producer-side classification
+/// at the MIR-lowering layer, otherwise it leaks
+/// `MirConstant::Function("Ok")` operands into MIR — operands the JIT
+/// cannot resolve through its function index table, producing
+/// `iconst(I64, 0)` callee bits and segfaulting downstream of
+/// `jit_call_value`'s graceful surface-and-stop.
+///
+/// The list here mirrors the enum-variant subset of
+/// `classify_builtin_function`. The collection-constructor subset
+/// (`HashMap`, `Set`, `Deque`, `PriorityQueue`, `Channel`, `Mutex`,
+/// `Atomic`, `Lazy`) shares the same MIR-emission failure mode but
+/// targets a different downstream JIT consumer (empty-collection FFI),
+/// is not load-bearing for any current cluster-0 smoke, and is tracked
+/// as the follow-up sub-cluster
+/// `W12-collection-constructor-mir-lowering`. See
+/// `docs/cluster-audits/w12-enum-constructor-audit.md` §5.3 for the
+/// scope decision.
+///
+/// `None` is not listed: the parser emits it as `Literal::None`, which
+/// lowers to `MirConstant::None` directly — not a constructor surface.
+pub(super) fn is_bare_enum_variant_ctor(name: &str) -> bool {
+    matches!(name, "Ok" | "Err" | "Some")
+}
+
 pub(super) fn lower_unary_op(op: ast::UnaryOp) -> Option<UnOp> {
     match op {
         ast::UnaryOp::Neg => Some(UnOp::Neg),

@@ -213,6 +213,73 @@ Sites surfaced (NOT silently skipped):
   no smoke in the cluster-0 matrix uses HashMap; not a close blocker.
   Cluster-2 or later territory.
 
+## Round 4 — closed
+
+One sub-cluster dispatched 2026-05-12 from a surfaced item in
+W12-jit-stack-parallel-kind-track Round 3 close `1a4d1156`:
+
+| Sub-cluster | Branch | Audit commit | Fix commit | Smoke unblocked |
+|---|---|---|---|---|
+| W12-enum-constructor-mir-lowering | `bulldozer-strictly-typed-w12-enum-constructor-lowering` | `588fba2c` | `2429b5ee` | 1.5 segfault chain (constructor side) |
+
+### Deliverables
+
+- **W12-enum-constructor-mir-lowering** — closes the documented
+  segfault chain from W12-jit-stack-parallel-kind-track Round 3 close
+  `1a4d1156` ("`MirConstant::Function("Ok")` is not registered in
+  function_indices, so `compile_constant` emits `iconst(I64, 0)` for
+  the constructor reference; the indirect-call dispatches with
+  `callee_bits = 0`; the JIT's UInt64-arm classifier sees no inline
+  function and no HK_CLOSURE match and surfaces TAG_NULL; downstream
+  code dereferences the null result and segfaults").
+
+  Audit grid found 11 broken constructors in 2 mechanically-identical
+  families (3 bare enum variants `Ok`/`Err`/`Some` + 8 collection
+  constructors). NOT the ~50-site rescope ceiling. Fixed §2.1 in
+  Commit 2 (Smoke 1.5 load-bearing); surfaced §2.3 as follow-up
+  sub-cluster `W12-collection-constructor-mir-lowering`.
+
+  Fix is a pure compile-time MIR rewrite at `mir/lowering/expr.rs` —
+  bare-form constructor names (`Ok` / `Err` / `Some`) are intercepted
+  AFTER local-shadow resolution and lowered to the same `Aggregate` +
+  `EnumStore` MIR shape the qualified `Result::Ok(x)` /
+  `Expr::EnumConstructor` path already produces. Producer-side
+  classification per ADR-006 §2.7.5 — no decode, no Bool-default, no
+  new MIR opcode, no new HeapKind, no new dispatch shape. Same
+  classification the VM-side bytecode compiler already uses at
+  `compiler/helpers.rs:3194-3209`.
+
+  Three sites intercepted: `Expr::FunctionCall` direct call, pipe-
+  operator `FunctionCall` arm, pipe-operator `Identifier` arm.
+
+  Post-fix Smoke 1.5 (`fn divide(...) -> Result<int> { ... }; match
+  divide(10,2) { Ok(v) => print(v), Err(e) => print(e) }`): VM `5`
+  exit 0; JIT surfaces with the pre-existing `can't resolve symbol
+  main_f194_divide` linker panic (`W12-jit-linker-symbol-resolution`
+  cluster's territory, orthogonal). Without the function-call
+  dependency (`let r = Ok(5); match r { ... }`), JIT post-fix
+  surfaces a clean `Rvalue::Aggregate` Route-A surface-and-stop via
+  `mir_compiler/rvalues.rs:144-176` — the documented §2.7.14
+  heterogeneous-element-array carrier gap that qualified `Result::
+  Ok(5)` already surfaces, tracked as W11-jit-new-array follow-up.
+
+  Smoke equivalence ratchet moves forward (structural bug becomes
+  documented gap with a tracked follow-up) without expanding
+  cluster-0 scope into §2.7.14 carrier work.
+
+  Close gates: `cargo check --workspace --lib --tests` EXIT=0;
+  `cargo test -p shape-jit --lib` 316/0/38 (matches baseline 316,
+  verified by stash-and-rerun); `bash scripts/verify-merge.sh` 12/12;
+  `bash scripts/check-no-dynamic.sh` EXIT=0. Pre-existing v2-raw-heap-
+  audit SIGABRT in `cargo test -p shape-vm --lib` verified identical
+  on baseline.
+
+### Round 4 follow-up sub-clusters surfaced
+
+| # | Surface | Site / §-cite | Disposition |
+|---|---|---|---|
+| 8 | §2.3 collection-constructor MIR-emission family (HashMap / Set / Deque / PriorityQueue / Channel / Mutex / Atomic / Lazy) lowers to `MirConstant::Function(name)` with same failure mode as the §2.1 enum-variant family closed by W12-enum-constructor-mir-lowering | `mir/lowering/expr.rs::Expr::FunctionCall` arm; §2.7.5 producing-site classification | **future sub-cluster** `W12-collection-constructor-mir-lowering` — mechanically identical rewrite, NOT load-bearing for any current cluster-0 smoke. Verified pre-fix and post-fix that Smoke 4 (Set) prints the same garbage output in JIT mode (denormalized number from null-bit slot used as Set value). Audit doc §5.3 / §8 documents the scope decision |
+
 **Cluster-0 close criterion (unchanged):** the smoke matrix passes
 end-to-end identical to `--mode vm`:
 
