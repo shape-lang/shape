@@ -307,6 +307,27 @@ pub struct BytecodeProgram {
     #[serde(skip, default)]
     pub top_level_local_concrete_types: Vec<shape_value::v2::ConcreteType>,
 
+    /// Per-user-function per-MIR-slot `ConcreteType` side-table.
+    ///
+    /// `function_local_concrete_types[f][slot]` is the proven
+    /// `ConcreteType` for MIR slot `slot` in function index `f`. Empty
+    /// inner vec when the function has no MIR data or the conduit
+    /// couldn't prove anything for the slot.
+    ///
+    /// Producer: `infer_top_level_concrete_types_from_mir` (name is
+    /// historical — its body is generic over any MIR function) called
+    /// per `Function::mir_data` in
+    /// `compiler_impl_reference_model::compile_post_assembly`.
+    ///
+    /// Consumer: `compile_function_with_user_funcs` at
+    /// `crates/shape-jit/src/compiler/program.rs`, which threads the
+    /// per-function entry into `MirToIR::concrete_types`.
+    ///
+    /// ADR-006 §2.7.5 — W12-jit-aggregate-non-array close, 2026-05-12.
+    /// Same NOT-serialized rationale as `top_level_local_concrete_types`.
+    #[serde(skip, default)]
+    pub function_local_concrete_types: Vec<Vec<shape_value::v2::ConcreteType>>,
+
     /// Type schema registry for TypedObject field resolution
     /// Used to convert TypedObject back to Object when needed
     #[serde(default)]

@@ -488,6 +488,15 @@ impl BytecodeCompiler {
                     .program
                     .top_level_local_concrete_types
                     .clone(),
+                // ADR-006 §2.7.5 conduit (W12-jit-aggregate-non-array,
+                // 2026-05-12): per-user-function concrete-types side-table
+                // propagated through the content-addressed path for the
+                // JIT's TypedObject Aggregate short-circuit inside user
+                // function bodies.
+                function_local_concrete_types: self
+                    .program
+                    .function_local_concrete_types
+                    .clone(),
                 // Closure spec §14.6 (H6.5): propagate layouts through the
                 // content-addressed path so `load_linked_program` → VM
                 // preserves enough metadata for the raw producer path.

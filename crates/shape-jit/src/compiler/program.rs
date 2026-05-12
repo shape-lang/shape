@@ -300,6 +300,7 @@ impl JITCompiler {
                 function_local_storage_hints: Vec::new(),
                 top_level_frame: None,
                 top_level_local_concrete_types: Vec::new(),
+                function_local_concrete_types: Vec::new(),
                 top_level_mir: None,
                 compiled_annotations: program.compiled_annotations.clone(),
                 trait_method_symbols: program.trait_method_symbols.clone(),
@@ -334,13 +335,30 @@ impl JITCompiler {
                     .as_ref()
                     .map(|fd| fd.slots.iter().copied().map(Some).collect())
                     .unwrap_or_default();
-                // v2: per-slot ConcreteTypes for the v2 typed-array fast path.
-                // The bytecode-program-level side-table is in flux upstream
-                // (other Phase 3.1 agents are refactoring it), so we pass an
-                // empty vec for now — MirToIR's v2 fast path falls through to
-                // the legacy NaN-boxed path on `None`. Wire-up will happen
-                // once Agent 1 lands the BytecodeProgram concrete-types vec.
-                let concrete_types: Vec<shape_value::v2::ConcreteType> = Vec::new();
+                // ADR-006 §2.7.5 conduit: thread the bytecode compiler's
+                // proven per-MIR-slot `ConcreteType` for THIS user function
+                // into MirToIR (W12-jit-aggregate-non-array close,
+                // 2026-05-12). The producer
+                // (`infer_top_level_concrete_types_from_mir`) was already
+                // landed for top-level code by Round 3; its body is generic
+                // over any MirFunction, and Round 5B extends the populate
+                // site to per-user-function MIR via
+                // `BytecodeProgram.function_local_concrete_types`. The
+                // top-level conduit's user-visible benefit (Smoke 3
+                // `Point{}` literal short-circuit) now extends to user
+                // function bodies (`Ok(v)`/`Err(e)`/`Some(x)` inside
+                // `divide` / `first_positive` / 28 stdlib helpers).
+                //
+                // Empty inner vec (function has no MIR data, or the conduit
+                // couldn't prove a particular slot) → MirToIR's v2 fast
+                // path falls through to the legacy NaN-boxed path / surfaces
+                // honestly per ADR-006 §2.7.5.1 (no Bool-default).
+                let concrete_types: Vec<shape_value::v2::ConcreteType> =
+                    program
+                        .function_local_concrete_types
+                        .get(func_idx)
+                        .cloned()
+                        .unwrap_or_default();
                 // Build function name → index map for Call terminator resolution.
                 // Use the original program's functions (sub_program has empty functions list).
                 let function_indices: std::collections::HashMap<String, u16> = program

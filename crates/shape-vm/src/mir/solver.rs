@@ -433,6 +433,7 @@ pub fn extract_facts(
                 StatementKind::EnumStore {
                     container_slot,
                     operands,
+                    variant_name: _,
                 } => {
                     for loan_id in local_loans_from_operands(&slot_loans, operands) {
                         facts.enum_store_loans.push((loan_id, stmt.span));

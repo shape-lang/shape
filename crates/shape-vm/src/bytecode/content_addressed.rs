@@ -205,6 +205,20 @@ pub struct Program {
     #[serde(skip, default)]
     pub top_level_local_concrete_types: Vec<shape_value::v2::ConcreteType>,
 
+    /// Per-user-function per-MIR-slot `ConcreteType` side-table.
+    ///
+    /// ADR-006 §2.7.5 conduit (W12-jit-aggregate-non-array, 2026-05-12):
+    /// content-addressed mirror of
+    /// `BytecodeProgram.function_local_concrete_types`. Survives the
+    /// `Program` → `link()` → `LinkedProgram` → `BytecodeProgram` round-
+    /// trip so JIT compilation of in-memory-compiled programs can use
+    /// the TypedObject Aggregate short-circuit inside user-function
+    /// bodies (Smoke 1.5 `divide`, Smoke 2 `first_positive`, 28 stdlib
+    /// helpers). Not serialised — same rationale as
+    /// `top_level_local_concrete_types`.
+    #[serde(skip, default)]
+    pub function_local_concrete_types: Vec<Vec<shape_value::v2::ConcreteType>>,
+
     /// DataFrame schema for column name resolution.
     pub data_schema: Option<DataFrameSchema>,
 
@@ -355,6 +369,17 @@ pub struct LinkedProgram {
     /// NaN-boxed path.
     #[serde(skip, default)]
     pub top_level_local_concrete_types: Vec<shape_value::v2::ConcreteType>,
+
+    /// Per-user-function per-MIR-slot `ConcreteType` side-table.
+    ///
+    /// ADR-006 §2.7.5 conduit (W12-jit-aggregate-non-array, 2026-05-12):
+    /// LinkedProgram mirror of `Program.function_local_concrete_types`
+    /// — propagated through the linker so JIT compilation of linked
+    /// programs can use the TypedObject Aggregate short-circuit inside
+    /// user-function bodies. Not serialised — same rationale as
+    /// `top_level_local_concrete_types`.
+    #[serde(skip, default)]
+    pub function_local_concrete_types: Vec<Vec<shape_value::v2::ConcreteType>>,
 
     /// Trait method dispatch registry.
     pub trait_method_symbols: HashMap<String, String>,

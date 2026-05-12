@@ -1560,11 +1560,18 @@ pub(crate) fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotI
                     ),
                     span,
                 );
-                emit_container_store_if_needed(
+                // ADR-006 §2.7.5 — thread the variant name into EnumStore
+                // so the JIT consumer (`crates/shape-jit/src/mir_compiler/
+                // statements.rs::EnumStore`) can dispatch to
+                // `jit_v2_make_result_ok` / `_err` / `jit_v2_make_option_some`.
+                // The W12-jit-aggregate-non-array fix.
+                emit_container_store_full(
                     builder,
                     ContainerStoreKind::Enum,
                     temp,
                     operands,
+                    Vec::new(),
+                    Some(name.clone()),
                     span,
                 );
                 return temp;
@@ -1610,7 +1617,7 @@ pub(crate) fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotI
             )));
             builder.emit_call(func_op, arg_ops, Place::Local(temp), span);
         }
-        Expr::EnumConstructor { payload, .. } => match payload {
+        Expr::EnumConstructor { variant, payload, .. } => match payload {
             ast::EnumConstructorPayload::Unit => {
                 assign_none(builder, temp, span);
             }
@@ -1623,11 +1630,16 @@ pub(crate) fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotI
                     StatementKind::Assign(Place::Local(temp), Rvalue::Aggregate(operands.clone())),
                     span,
                 );
-                emit_container_store_if_needed(
+                // ADR-006 §2.7.5 — thread the variant name into EnumStore
+                // so the JIT EnumStore consumer can dispatch to the right
+                // typed-Arc producer (W12-jit-aggregate-non-array).
+                emit_container_store_full(
                     builder,
                     ContainerStoreKind::Enum,
                     temp,
                     operands,
+                    Vec::new(),
+                    Some(variant.clone()),
                     span,
                 );
             }
@@ -1640,11 +1652,13 @@ pub(crate) fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotI
                     StatementKind::Assign(Place::Local(temp), Rvalue::Aggregate(operands.clone())),
                     span,
                 );
-                emit_container_store_if_needed(
+                emit_container_store_full(
                     builder,
                     ContainerStoreKind::Enum,
                     temp,
                     operands,
+                    Vec::new(),
+                    Some(variant.clone()),
                     span,
                 );
             }
@@ -1881,11 +1895,13 @@ fn lower_pipe_expr(
                     ),
                     span,
                 );
-                emit_container_store_if_needed(
+                emit_container_store_full(
                     builder,
                     ContainerStoreKind::Enum,
                     temp,
                     operands,
+                    Vec::new(),
+                    Some(name.clone()),
                     span,
                 );
                 return;
@@ -1930,11 +1946,13 @@ fn lower_pipe_expr(
                     ),
                     span,
                 );
-                emit_container_store_if_needed(
+                emit_container_store_full(
                     builder,
                     ContainerStoreKind::Enum,
                     temp,
                     operands,
+                    Vec::new(),
+                    Some(name.clone()),
                     span,
                 );
                 return;

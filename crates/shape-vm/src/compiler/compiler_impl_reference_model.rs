@@ -1460,6 +1460,38 @@ impl BytecodeCompiler {
             self.program.top_level_local_concrete_types = concrete_types;
         }
 
+        // ADR-006 §2.7.5 conduit (W12-jit-aggregate-non-array close,
+        // 2026-05-12): same MIR-walk inference applied per user function.
+        // The producer (`infer_top_level_concrete_types_from_mir`) is
+        // generic over any MirFunction — its name is historical from the
+        // earlier top-level-only landing (Round 3). User-function bodies
+        // hit the JIT consumer at
+        // `crates/shape-jit/src/compiler/program.rs::compile_function_with_user_funcs`,
+        // which currently passes `concrete_types: Vec::new()` and therefore
+        // surfaces `Rvalue::Aggregate` for every `Ok(v)` / `Err(e)` /
+        // `Some(x)` / struct-literal construction inside a user function
+        // body (Smoke 1.5 `divide`, Smoke 2 `first_positive`, 28 stdlib
+        // helpers verified at audit time).
+        //
+        // `ConcreteType::Void` per slot per §2.7.5.1 — NOT a Bool-default
+        // fallback per forbidden #9. Functions without `mir_data` get an
+        // empty inner vec; downstream consumers fall back to the legacy
+        // NaN-boxed path naturally.
+        let mut per_fn: Vec<Vec<shape_value::v2::ConcreteType>> =
+            Vec::with_capacity(self.program.functions.len());
+        for func in &self.program.functions {
+            if let Some(ref mir_data) = func.mir_data {
+                per_fn.push(
+                    crate::compiler::helpers::infer_top_level_concrete_types_from_mir(
+                        &mir_data.mir,
+                    ),
+                );
+            } else {
+                per_fn.push(Vec::new());
+            }
+        }
+        self.program.function_local_concrete_types = per_fn;
+
         // Closure-spec Phase H1: build a `function_id → ClosureLayout` side
         // table for the JIT worker. `emit_heap_closure` consumes this to lay
         // out captures at their natural-width offsets without going through

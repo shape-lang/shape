@@ -3135,6 +3135,7 @@ mod tests {
                     StatementKind::EnumStore {
                         container_slot: SlotId(2),
                         operands: vec![Operand::Copy(Place::Local(SlotId(1)))],
+                        variant_name: None,
                     },
                     2,
                 ),

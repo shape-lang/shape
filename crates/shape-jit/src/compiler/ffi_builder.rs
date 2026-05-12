@@ -203,6 +203,14 @@ impl JITCompiler {
             // NativeKind::String operands, incl. f-string desugared chains).
             string_concat: r!("jit_string_concat"),
 
+            // ADR-006 §2.7.5 — kinded EnumStore producers
+            // (W12-jit-aggregate-non-array, 2026-05-12). Dispatched from
+            // the EnumStore consumer based on the MIR statement's
+            // `variant_name` field.
+            make_ok: r!("jit_make_ok"),
+            make_err: r!("jit_make_err"),
+            make_some: r!("jit_make_some"),
+
             // v2 typed HashMap<string, ...>
             //
             // SURFACE (ADR-006 §2.7.14 Q15 / W11-jit-carrier-conversion):

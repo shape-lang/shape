@@ -55,6 +55,19 @@ pub fn register_object_symbols(builder: &mut JITBuilder) {
     builder.symbol("jit_to_number", jit_to_number as *const u8);
     // F5.a/F5.b: string `+` for `"a" + "b"` and `f"..."`-desugared concat chains.
     builder.symbol("jit_string_concat", jit_string_concat as *const u8);
+    // ADR-006 §2.7.5 — kinded EnumStore producers (W12-jit-aggregate-non-array)
+    builder.symbol(
+        "jit_make_ok",
+        super::super::ffi::result::jit_make_ok as *const u8,
+    );
+    builder.symbol(
+        "jit_make_err",
+        super::super::ffi::result::jit_make_err as *const u8,
+    );
+    builder.symbol(
+        "jit_make_some",
+        super::super::ffi::result::jit_make_some as *const u8,
+    );
     builder.symbol("jit_print", jit_print as *const u8);
     // W11-jit-new-array (ADR-006 §2.7.5 stamp-at-compile-time): per-kind
     // print entry points dispatched by the MIR-side print emitter when
@@ -480,6 +493,25 @@ pub fn declare_object_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<
             .declare_function("jit_string_concat", Linkage::Import, &sig)
             .expect("Failed to declare jit_string_concat");
         ffi_funcs.insert("jit_string_concat".to_string(), func_id);
+    }
+
+    // ADR-006 §2.7.5 — kinded EnumStore producers
+    // (W12-jit-aggregate-non-array, 2026-05-12). Signature:
+    // `(inner_bits: u64) -> u64`. The JIT EnumStore consumer widens
+    // every operand to I64 bits (via `widen_to_i64`) per the §2.7.5
+    // stable-FFI carrier convention before calling. Return is the
+    // heap-pointer bits with HK_OK / HK_ERR / HK_SOME prefix tag —
+    // `jit_bits_to_nanboxed` at the JIT↔VM boundary converts to
+    // `Arc<ResultData>` / `Arc<OptionData>` (`crates/shape-jit/src/
+    // ffi/conversion.rs:246-258`).
+    for name in ["jit_make_ok", "jit_make_err", "jit_make_some"] {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // inner_bits
+        sig.returns.push(AbiParam::new(types::I64));
+        let func_id = module
+            .declare_function(name, Linkage::Import, &sig)
+            .unwrap_or_else(|e| panic!("Failed to declare {}: {:?}", name, e));
+        ffi_funcs.insert(name.to_string(), func_id);
     }
 
     // jit_print(value_bits: u64) -> void

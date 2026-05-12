@@ -204,6 +204,28 @@ pub struct FFIFuncRefs {
     //   chain emitted by `f"..."` formatted strings as well.
     pub(crate) string_concat: FuncRef,
 
+    // ADR-006 §2.7.5 — kinded EnumStore producers
+    // (W12-jit-aggregate-non-array, 2026-05-12). Three entry points
+    // matching the VM-side `BuiltinFunction::OkCtor` / `ErrCtor` /
+    // `SomeCtor` shapes (`crates/shape-vm/src/executor/vm_impl/
+    // builtins.rs:551-586`). The JIT-side bodies use the existing
+    // `box_ok` / `box_err` / `box_some` heap-pointer encoding (legacy
+    // NaN-box shape with HK_OK / HK_ERR / HK_SOME prefix); conversion
+    // to the post-strict-typing `Arc<ResultData>` / `Arc<OptionData>`
+    // carrier happens at the JIT↔VM boundary via the existing
+    // `jit_bits_to_nanboxed` conversion infrastructure
+    // (`crates/shape-jit/src/ffi/conversion.rs:246-258` — same path as
+    // `jit_unwrap_ok` / `jit_is_ok` etc.).
+    //
+    // The JIT EnumStore consumer dispatches on the MIR statement's
+    // `variant_name` field to pick the right entry. Slot kind stamped
+    // from the conduit (`concrete_types[container_slot]` →
+    // `Ptr(HeapKind::Result)` / `Ptr(HeapKind::Option)`); no
+    // Bool-default per §2.7.7 #9.
+    pub(crate) make_ok: FuncRef,
+    pub(crate) make_err: FuncRef,
+    pub(crate) make_some: FuncRef,
+
     // v2 typed HashMap<string, ...> access.
     //
     // SURFACE (ADR-006 §2.7.14 Q15 / W11-jit-carrier-conversion sub-cluster):
