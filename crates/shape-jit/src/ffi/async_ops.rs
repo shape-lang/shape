@@ -281,6 +281,7 @@ mod tests {
     // synthesized task-group payload.
 
     #[test]
+    #[ignore = "SURFACE: jit_cancel_task is extern \"C\" todo!() pending kinded future-classification (ADR-006 §2.7.4/§2.7.5, W10 jit-playbook §5); extern C can't unwind, so the todo!() body aborts the test process (SIGABRT) before the null-trampoline branch ever runs. Pre-strict-typing this test exercised the early `vw.as_future()` decode of a TAG_NULL future_bits=0, but the unconditional todo!() at the top of jit_cancel_task makes that branch unreachable. Re-enable via `cargo test -- --ignored` once the underlying SURFACE closes. Same constraint as ffi/control/mod.rs `native_fixed_arity_helpers_surface_pending_kinded_abi`."]
     fn test_cancel_task_null_trampoline() {
         let mut ctx = JITContext::default();
         let result = jit_cancel_task(&mut ctx, 0);

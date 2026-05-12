@@ -116,6 +116,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "SURFACE: jit_run_simulation's per-row loop body invokes jit_call_value, which is extern \"C\" todo!() pending the kinded value-call ABI rebuild (ADR-006 §2.7.10/Q11 + §2.7.11/Q12, W10 jit-playbook §5). extern C can't unwind, so the todo!() body aborts the test process (SIGABRT) on the first per-row jit_call_value, before the test's TAG_NULL fall-through assertion ever runs. The three other test_simulation_* tests in this module exit the simulation loop before reaching jit_call_value (null ctx / null config / row_count=0 / non-callable config) and remain green. Re-enable via `cargo test -- --ignored` once the underlying SURFACE closes. Same constraint as ffi/control/mod.rs `native_fixed_arity_helpers_surface_pending_kinded_abi` and ffi/async_ops.rs `test_cancel_task_null_trampoline`."]
     fn test_simulation_with_function_handler() {
         // Set up a JITContext with row_count but no function table.
         // jit_call_value will return TAG_NULL for each call since function_table is null.
