@@ -259,6 +259,9 @@ fn rvalue_uses_slot(rvalue: &Rvalue, slot: SlotId) -> bool {
             operand_uses_slot(lhs, slot) || operand_uses_slot(rhs, slot)
         }
         Rvalue::Aggregate(ops) => ops.iter().any(|op| operand_uses_slot(op, slot)),
+        Rvalue::EnumTest { operand, .. } | Rvalue::EnumPayload { operand, .. } => {
+            operand_uses_slot(operand, slot)
+        }
     }
 }
 
@@ -844,6 +847,9 @@ fn rvalue_uses_any_slot(rvalue: &Rvalue, slots: &HashSet<SlotId>) -> bool {
             operand_uses_any_slot(lhs, slots) || operand_uses_any_slot(rhs, slots)
         }
         Rvalue::Aggregate(ops) => ops.iter().any(|op| operand_uses_any_slot(op, slots)),
+        Rvalue::EnumTest { operand, .. } | Rvalue::EnumPayload { operand, .. } => {
+            operand_uses_any_slot(operand, slots)
+        }
     }
 }
 

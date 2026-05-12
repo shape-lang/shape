@@ -608,6 +608,9 @@ fn statement_read_places(kind: &StatementKind) -> Vec<Place> {
                     operand_read_places(operand, &mut reads);
                 }
             }
+            Rvalue::EnumTest { operand, .. } | Rvalue::EnumPayload { operand, .. } => {
+                operand_read_places(operand, &mut reads);
+            }
         },
         StatementKind::Drop(place) => place_nested_read_places(place, &mut reads),
         StatementKind::TaskBoundary(operands, _kind) => {
@@ -1511,6 +1514,9 @@ fn rvalue_uses_any(rvalue: &Rvalue, slots: &HashSet<SlotId>) -> bool {
             operand_uses_any(lhs, slots) || operand_uses_any(rhs, slots)
         }
         Rvalue::Aggregate(ops) => ops.iter().any(|op| operand_uses_any(op, slots)),
+        Rvalue::EnumTest { operand, .. } | Rvalue::EnumPayload { operand, .. } => {
+            operand_uses_any(operand, slots)
+        }
     }
 }
 
@@ -1546,6 +1552,9 @@ fn rvalue_uses_param(rvalue: &Rvalue, param_slot: SlotId) -> bool {
             operand_uses_param(lhs, param_slot) || operand_uses_param(rhs, param_slot)
         }
         Rvalue::Aggregate(ops) => ops.iter().any(|op| operand_uses_param(op, param_slot)),
+        Rvalue::EnumTest { operand, .. } | Rvalue::EnumPayload { operand, .. } => {
+            operand_uses_param(operand, param_slot)
+        }
     }
 }
 

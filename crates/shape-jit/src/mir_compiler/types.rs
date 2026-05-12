@@ -782,6 +782,27 @@ fn infer_rvalue_kind_with_projections(
         ),
         Rvalue::Borrow(_, _) => None,     // References are heap pointers
         Rvalue::Aggregate(_) => None,      // Arrays are heap objects
+        // EnumTest emits a native Bool — kind is Bool by construction
+        // per the JIT consumer's `jit_arc_result_is_ok` / `_is_some`
+        // signature (returns I8 / `NativeKind::Bool`).
+        Rvalue::EnumTest { .. } => Some(NativeKind::Bool),
+        // EnumPayload emits the inner payload's raw `u64` bits. The kind
+        // is not inferable from the rvalue alone — it depends on the
+        // EnumStore producer's kind stamp (the inner `KindedSlot.kind` of
+        // the wrapped `Arc<ResultData>` / `Arc<OptionData>`). Producer-
+        // side classification through 6A's call-return-kind track would
+        // be needed to thread the precise inner kind; for now return
+        // `None` so the destination slot inherits the surrounding context
+        // (typically `Int64` for `Ok(i: int)` via the constructor's MIR
+        // emit-time kind classification at the bare-form intercept).
+        //
+        // This is NOT a Bool-default fallback: returning None means
+        // "this Rvalue does not constrain the destination slot's kind"
+        // and the bidirectional inference picks up the kind from other
+        // uses (e.g. `print(v)` arms emit `print_i64` / `_f64` per
+        // §2.7.5 kinded dispatch). The honest surface for the strict-
+        // typing migration's per-payload-kind tracking is 6A's territory.
+        Rvalue::EnumPayload { .. } => None,
     }
 }
 

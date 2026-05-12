@@ -174,6 +174,67 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         .to_string(),
                 )
             }
+
+            Rvalue::EnumTest { operand, variant } => {
+                // ADR-006 §2.7.17 / Q18 (W12-jit-result-option-trinity,
+                // Phase 3 cluster-0 Round 7A, 2026-05-12). The operand is
+                // an `Arc::into_raw(Arc<ResultData>) as u64` or
+                // `Arc::into_raw(Arc<OptionData>) as u64` slot per the
+                // §2.7.7 stack-tier kind label; the FFI accessor reads
+                // `is_ok` / `is_some` from the `*const T` directly. NOT a
+                // NaN-box tag decode (§2.7.7 #4 / #7 forbidden), NOT a
+                // generic SwitchBool fallthrough — kind-aware codegen per
+                // the audit blueprint at
+                // `docs/cluster-audits/w12-jit-match-enum-inline-audit.md`
+                // §6.1.
+                let bits = self.compile_operand_raw(operand)?;
+                let bits_i64 = self.to_i64_bits(bits);
+                let func_ref = match variant {
+                    VariantTag::Ok => self.ffi.arc_result_is_ok,
+                    VariantTag::Err => self.ffi.arc_result_is_err,
+                    VariantTag::Some_ => self.ffi.arc_option_is_some,
+                    VariantTag::None_ => self.ffi.arc_option_is_none,
+                };
+                let inst = self.builder.ins().call(func_ref, &[bits_i64]);
+                // FFI returns I8 (native bool). Caller's destination slot
+                // kind is `Bool` per `infer_rvalue_kind`'s EnumTest arm.
+                Ok(self.builder.inst_results(inst)[0])
+            }
+
+            Rvalue::EnumPayload { operand, variant } => {
+                // ADR-006 §2.7.17 / Q18 (W12-jit-result-option-trinity).
+                // Caller has proven the variant matches via `EnumTest` and
+                // control-flow only enters this arm in the matching branch.
+                // The FFI clones the inner KindedSlot's share (per §2.7.17
+                // receiver-recovery soundness) and returns the raw bits as
+                // an owned slot at the caller's destination. Payload kind
+                // flows via the EnumStore producer's compile-time stamp +
+                // 6A's call-return-kind track (the destination slot's kind
+                // is set at MIR-inference time, not at this codegen site).
+                //
+                // `VariantTag::None_` here is a producer-side bug — the
+                // None arm has no payload to extract. Surface-and-stop.
+                let func_ref = match variant {
+                    VariantTag::Ok | VariantTag::Err => self.ffi.arc_result_payload,
+                    VariantTag::Some_ => self.ffi.arc_option_payload,
+                    VariantTag::None_ => {
+                        return Err(
+                            "EnumPayload: SURFACE — VariantTag::None_ has no \
+                             payload to extract per ADR-006 §2.7.17 \
+                             `OptionData::none()` (placeholder Bool slot). \
+                             The MIR producer in \
+                             `lower_constructor_bindings_from_place_opt` \
+                             must not emit `EnumPayload { variant: None_ }`. \
+                             Producer-site contract violated."
+                                .to_string(),
+                        );
+                    }
+                };
+                let bits = self.compile_operand_raw(operand)?;
+                let bits_i64 = self.to_i64_bits(bits);
+                let inst = self.builder.ins().call(func_ref, &[bits_i64]);
+                Ok(self.builder.inst_results(inst)[0])
+            }
         }
     }
 

@@ -251,6 +251,46 @@ impl fmt::Display for BorrowKind {
     }
 }
 
+/// Result/Option variant tag — classification is producer-side per
+/// ADR-006 §2.7.5 stamp-at-compile-time. Carried by `Rvalue::EnumTest`
+/// and `Rvalue::EnumPayload`; the JIT consumer dispatches on this enum
+/// directly, never decodes from bits (§2.7.7 #4 / #7 forbidden).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VariantTag {
+    Ok,
+    Err,
+    Some_,
+    None_,
+}
+
+impl fmt::Display for VariantTag {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            VariantTag::Ok => write!(f, "Ok"),
+            VariantTag::Err => write!(f, "Err"),
+            VariantTag::Some_ => write!(f, "Some"),
+            VariantTag::None_ => write!(f, "None"),
+        }
+    }
+}
+
+impl VariantTag {
+    /// Map a constructor name to a VariantTag. Returns `None` for non-
+    /// builtin (`Ok`/`Err`/`Some`/`None`) names so the producer site can
+    /// fall back to the generic `Aggregate` / `EnumStore` path for user-
+    /// defined enum variants.
+    #[inline]
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "Ok" => Some(VariantTag::Ok),
+            "Err" => Some(VariantTag::Err),
+            "Some" => Some(VariantTag::Some_),
+            "None" => Some(VariantTag::None_),
+            _ => None,
+        }
+    }
+}
+
 /// Right-hand side of an assignment.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Rvalue {
@@ -267,6 +307,51 @@ pub enum Rvalue {
     Aggregate(Vec<Operand>),
     /// Clone of a value (explicit or auto-inferred).
     Clone(Operand),
+    /// Test whether a Result/Option scrutinee matches a specific variant
+    /// (per ADR-006 §2.7.17 / Q18 — kinded `Arc<ResultData>` /
+    /// `Arc<OptionData>` carrier). Result: native Bool (`I8`).
+    ///
+    /// Emitted by `lower_match_pattern_condition_operand` when the scrutinee
+    /// is a `Pattern::Constructor` with a recognised `VariantTag::Ok` /
+    /// `Err` / `Some_` / `None_`. JIT consumer dispatches to the
+    /// `jit_arc_result_is_ok` / `_is_err` / `jit_arc_option_is_some` /
+    /// `_is_none` FFI which reads `is_ok` / `is_some` from the
+    /// `*const ResultData` / `*const OptionData` directly per §2.7.17
+    /// — no NaN-box tag decode, no `is_heap_kind` probe (§2.7.7 #4 / #7
+    /// forbidden).
+    ///
+    /// Producer-side classification per W12-jit-result-option-trinity
+    /// audit (`docs/cluster-audits/w12-jit-match-enum-inline-audit.md` §6.1).
+    EnumTest {
+        operand: Operand,
+        variant: VariantTag,
+    },
+    /// Extract the inner payload bits from a Result/Option scrutinee.
+    /// Caller must have already proven the variant via `EnumTest`
+    /// (control flow guarantees the matching arm is entered only when
+    /// the variant matches; the `variant` tag here is the producer-side
+    /// classification for kind sourcing, NOT a runtime check).
+    ///
+    /// Result: raw `u64` payload bits — the payload's kind flows out of
+    /// band via 6A's Call-return-kind track + the EnumStore producer's
+    /// kind stamp.
+    ///
+    /// JIT consumer dispatches to `jit_arc_result_payload` /
+    /// `jit_arc_option_payload` which read the inner `KindedSlot.raw()`
+    /// from the `*const ResultData` / `*const OptionData` and bump the
+    /// inner refcount per the receiver-recovery soundness rule —
+    /// the returned bits are an owned slot.
+    ///
+    /// `VariantTag::None_` is rejected at consumer time (no payload to
+    /// extract — None's payload field is a zero-bits Bool placeholder
+    /// per ADR-006 §2.7.17 `OptionData::none()`).
+    ///
+    /// Producer-side classification per W12-jit-result-option-trinity
+    /// audit §6.2.
+    EnumPayload {
+        operand: Operand,
+        variant: VariantTag,
+    },
 }
 
 /// Binary operations in MIR.
