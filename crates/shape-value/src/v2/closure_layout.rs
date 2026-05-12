@@ -561,6 +561,15 @@ impl Drop for SharedCell {
                     HeapKind::Future => {
                         // No-op: future-id inline scalar.
                     }
+                    // W17-comptime-vm-dispatch (ADR-006 §2.7.26, 2026-05-12):
+                    // module-fn-id inline scalar payload — no `Arc<T>`,
+                    // no heap state. Same shape as `HeapKind::Future` /
+                    // `HeapKind::Char`. A SharedCell carrying a
+                    // ModuleFn-labeled inner payload retires no
+                    // refcount share.
+                    HeapKind::ModuleFn => {
+                        // No-op: module-fn-id inline scalar.
+                    }
                     // Wave 8 W8-T25 (ADR-006 §2.7.12 / Q13 amendment,
                     // 2026-05-10): a `SharedCell` whose `kind` companion
                     // is `NativeKind::Ptr(HeapKind::SharedCell)` carries

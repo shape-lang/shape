@@ -309,6 +309,27 @@ macro_rules! define_heap_types {
             // `l.is_initialized()`). Pre-assigned ordinal 32 per the
             // wave-2.5 W17-concurrency dispatch contract.
             Lazy,          // 32  (Wave 17 W17-concurrency, 2026-05-11)
+            // ADR-006 §2.7.26 amendment (Wave 17 W17-comptime-vm-dispatch,
+            // 2026-05-12): module-function reference carrier — labels a
+            // slot whose `bits` are a `module_fn_id: usize` cast to `u64`.
+            // Pure-discriminator variant (no corresponding `HeapValue`
+            // arm); inline-scalar payload (no `Arc<T>`, no heap state) —
+            // same shape as `HeapKind::Future` and `HeapKind::Char`.
+            // `clone_with_kind` / `drop_with_kind` are no-ops on this
+            // arm. Used by `populate_module_objects` to encode the
+            // `__comptime__` (and any other extension) module's typed-
+            // object field references that the compiled bytecode chain
+            // `LoadModuleBinding + GetFieldTyped + CallValue` dispatches
+            // through to `invoke_module_fn_id_stub`. See
+            // `executor/vm_impl/modules.rs::populate_module_objects` for
+            // the construction-side contract and
+            // `executor/call_convention.rs::call_value_immediate_nb`
+            // (`NativeKind::Ptr(HeapKind::ModuleFn)` arm) for the
+            // dispatch-side contract. `as_heap_value()` is unsound on
+            // `ModuleFn`-labeled bits (mirror of FilterExpr /
+            // SharedCell / Reference's pure-discriminator-style
+            // dispatch).
+            ModuleFn,      // 33  (Wave 17 W17-comptime-vm-dispatch, 2026-05-12)
         }
 
         /// Compact heap-allocated value. Strict-typed variants only — every
@@ -599,6 +620,25 @@ macro_rules! define_heap_types {
             /// Closure-call path is unlocked by W17-make-closure
             /// (merged at `aa47364`). Full HeapValue arm.
             Lazy(std::sync::Arc<$crate::heap_value::LazyData>),
+            // ===== W17-comptime-vm-dispatch (ADR-006 §2.7.26, 2026-05-12) =====
+            /// Module-function reference inline-scalar carrier — labels
+            /// a slot whose bits decode to a `module_fn_id: u64` indexing
+            /// `VirtualMachine.module_fn_table`. Inline-scalar payload
+            /// (no `Arc<T>`, no heap state) — same shape as
+            /// `HeapValue::Future(u64)` / `HeapValue::Char(char)`.
+            ///
+            /// Pure-discriminator pattern: in current code ModuleFn
+            /// payloads are emitted directly to the kinded stack /
+            /// TypedObject slot as `module_fn_id as u64` with kind
+            /// `NativeKind::Ptr(HeapKind::ModuleFn)` and never wrapped
+            /// in `HeapValue`. The arm exists to preserve the ADR-005
+            /// §1 / ADR-006 §2.3 `HeapKind`↔`HeapValue` symmetry — same
+            /// pattern as `HeapValue::FilterExpr` (§2.7.9) /
+            /// `HeapValue::Reference` (§2.7.13). Calling
+            /// `slot.as_heap_value()` on a ModuleFn-labeled slot is
+            /// undefined behavior; the canonical recovery is reading
+            /// the raw `u64` bits as the `module_fn_id`.
+            ModuleFn(u64),
         }
 
         impl HeapValue {
@@ -638,6 +678,7 @@ macro_rules! define_heap_types {
                     HeapValue::Mutex(..) => HeapKind::Mutex,
                     HeapValue::Atomic(..) => HeapKind::Atomic,
                     HeapValue::Lazy(..) => HeapKind::Lazy,
+                    HeapValue::ModuleFn(..) => HeapKind::ModuleFn,
                 }
             }
 
@@ -711,6 +752,9 @@ macro_rules! define_heap_types {
                     HeapValue::Mutex(_) => true,
                     HeapValue::Atomic(_) => true,
                     HeapValue::Lazy(_) => true,
+                    // ModuleFn references are always truthy when present
+                    // (a live module-fn-id is a usable callable handle).
+                    HeapValue::ModuleFn(_) => true,
                 }
             }
 
@@ -756,6 +800,7 @@ macro_rules! define_heap_types {
                     HeapValue::Mutex(_) => "mutex",
                     HeapValue::Atomic(_) => "atomic",
                     HeapValue::Lazy(_) => "lazy",
+                    HeapValue::ModuleFn(_) => "module_fn",
                 }
             }
         }

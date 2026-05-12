@@ -201,6 +201,40 @@ pub(in crate::executor) fn push_field_value(
     vm.push_kinded(bits, kind)
 }
 
+/// Push a TypedObject field onto the kinded VM stack using the
+/// storage's parallel `field_kinds` track as the kind source.
+///
+/// **W17-comptime-vm-dispatch (ADR-006 §2.7.26, 2026-05-12).** Mirror
+/// of [`push_field_value`] but sources `NativeKind` from
+/// `TypedObjectStorage::field_kinds[i]` rather than the operand-encoded
+/// `field_type_tag`. Used at `FIELD_TAG_ANY` operand sites where the
+/// schema declares the field as `FieldType::Any` but the runtime
+/// storage carries a concrete kind in its parallel track (the
+/// hardening §(f) resolution path — "add a `Any → Dynamic` readback
+/// path that's bounded by `KindedSlot.kind` rather than the schema").
+///
+/// The original `push_field_value` path stays the fast/typed path for
+/// statically-known field types; this helper is the dynamic-typed
+/// fallback for `FIELD_TAG_ANY` slots whose payload kind is observed
+/// at storage construction time (e.g. `populate_module_objects`
+/// writing `Ptr(HeapKind::ModuleFn)` slots into the `__mod___comptime__`
+/// TypedObject).
+///
+/// The dispatched kind drives `clone_with_kind` retain semantics —
+/// inline-scalar kinds (Bool, Int*, Float*, ModuleFn, Future, Char)
+/// are no-op, heap-bearing kinds bump one `Arc<T>` strong-count
+/// share per ADR-006 §2.7.7.
+#[inline]
+pub(in crate::executor) fn push_field_value_with_kind(
+    vm: &mut super::VirtualMachine,
+    slot: &ValueSlot,
+    kind: NativeKind,
+) -> Result<(), VMError> {
+    let bits = slot.raw();
+    clone_with_kind(bits, kind);
+    vm.push_kinded(bits, kind)
+}
+
 /// TypedObject operations for VirtualMachine
 pub trait TypedObjectOps {
     /// Get field from typed object using precomputed offset (JIT optimization)
@@ -247,24 +281,39 @@ impl TypedObjectOps for super::VirtualMachine {
             return self.push_kinded(0u64, NativeKind::Bool);
         }
 
-        // Single-discriminator dispatch (ADR-005 §1, Q8): build a borrow-
-        // only ValueSlot view of the bits, then `as_heap_value()` +
-        // `HeapValue::TypedObject(arc)` match.
-        let recv_slot = ValueSlot::from_raw(recv_bits);
-        let recv_hv = recv_slot.as_heap_value();
-        let HeapValue::TypedObject(storage) = recv_hv else {
-            // Kind said TypedObject but heap arm disagrees — surface the
-            // soundness gap rather than papering over with a Bool-default
-            // sentinel (the W-series defection-attractor §2.7.7 names
-            // verbatim). Drop the receiver share before erroring.
-            drop_with_kind(recv_bits, recv_kind);
-            return Err(VMError::NotImplemented(format!(
-                "op_get_field_typed SURFACE: receiver kind says \
-                 Ptr(TypedObject) but HeapValue arm is {:?} — \
-                 ADR-005 §1 single-discriminator violation",
-                recv_hv.kind(),
-            )));
-        };
+        // W17-comptime-vm-dispatch (ADR-006 §2.7.26 close, 2026-05-12):
+        // canonical 5-arm receiver-recovery soundness pattern per
+        // CLAUDE.md "Receiver-recovery soundness rule" — receiver bits
+        // are `Arc::into_raw(Arc<TypedObjectStorage>)` (the
+        // `ValueSlot::from_typed_object` convention), NOT
+        // `Arc::into_raw(Arc<HeapValue>)`. Casting to `*const HeapValue`
+        // is wrong-type recovery — reads `TypedObjectStorage`'s first
+        // 8 bytes (the `schema_id: u64`) as if they were a HeapValue
+        // enum discriminator. For schema ids that happen to match a
+        // small `HeapKind` ordinal (≤32) the match arm "succeeds" and
+        // we segfault when dereferencing the spurious Arc payload that
+        // follows; for larger ids we either crash on UB or return a
+        // bogus discriminator. Use the canonical Arc::<X>::from_raw +
+        // read + into_raw recovery pattern that `op_set_field_typed`
+        // (line 472) and the post-`3ac2f11` method-handler files
+        // already use.
+        if recv_bits == 0 {
+            return Err(VMError::RuntimeError(
+                "op_get_field_typed: null TypedObject receiver".to_string(),
+            ));
+        }
+        // SAFETY: per ValueSlot::from_typed_object's construction-side
+        // contract, kind=Ptr(HeapKind::TypedObject) bits are
+        // Arc::into_raw(Arc<TypedObjectStorage>) and the popped slot
+        // owns one strong-count share. Reconstruct as Arc, take an
+        // immutable borrow for the field read; when `storage_arc`
+        // goes out of scope its `Drop` retires the receiver's share —
+        // equivalent to the prior `drop_with_kind(recv_bits, recv_kind)`
+        // path on a `Ptr(HeapKind::TypedObject)` slot.
+        let storage_arc: std::sync::Arc<shape_value::heap_value::TypedObjectStorage> =
+            unsafe { std::sync::Arc::from_raw(recv_bits as *const _) };
+        let _ = recv_kind; // suppress unused-warning; share retire goes via storage_arc::Drop
+        let storage: &shape_value::heap_value::TypedObjectStorage = &storage_arc;
 
         let schema_id = storage.schema_id;
         let field_count = storage.slots.len();
@@ -285,9 +334,19 @@ impl TypedObjectOps for super::VirtualMachine {
                 let src_idx = hit.field_idx as usize;
                 if src_idx < field_count {
                     let is_heap = (storage.heap_mask & (1u64 << src_idx)) != 0;
-                    let result =
-                        push_field_value(self, &storage.slots[src_idx], is_heap, hit.field_type_tag);
-                    drop_with_kind(recv_bits, recv_kind);
+                    // W17-comptime-vm-dispatch (ADR-006 §2.7.26): FIELD_TAG_ANY
+                    // sources kind from the storage's parallel field_kinds track.
+                    let result = if hit.field_type_tag == FIELD_TAG_ANY
+                        && src_idx < storage.field_kinds.len()
+                    {
+                        push_field_value_with_kind(
+                            self,
+                            &storage.slots[src_idx],
+                            storage.field_kinds[src_idx],
+                        )
+                    } else {
+                        push_field_value(self, &storage.slots[src_idx], is_heap, hit.field_type_tag)
+                    };
                     return result;
                 }
             }
@@ -333,19 +392,33 @@ impl TypedObjectOps for super::VirtualMachine {
                     let src_idx = hit.field_idx as usize;
                     if src_idx < field_count {
                         let is_heap = (storage.heap_mask & (1u64 << src_idx)) != 0;
-                        let result = push_field_value(
-                            self,
-                            &storage.slots[src_idx],
-                            is_heap,
-                            hit.field_type_tag,
-                        );
-                        drop_with_kind(recv_bits, recv_kind);
+                        // W17-comptime-vm-dispatch (ADR-006 §2.7.26): FIELD_TAG_ANY
+                        // sources kind from the storage's parallel field_kinds track.
+                        let result = if hit.field_type_tag == FIELD_TAG_ANY
+                            && src_idx < storage.field_kinds.len()
+                        {
+                            push_field_value_with_kind(
+                                self,
+                                &storage.slots[src_idx],
+                                storage.field_kinds[src_idx],
+                            )
+                        } else {
+                            push_field_value(
+                                self,
+                                &storage.slots[src_idx],
+                                is_heap,
+                                hit.field_type_tag,
+                            )
+                        };
                         return result;
                     }
                 }
             }
 
             // Full name-based fallback: use pre-resolved field mapping.
+            // NOTE: `storage` borrow ends before any `&mut self` call. We
+            // re-snapshot the needed bits from storage and let the borrow
+            // expire before invoking IC recording (which takes &mut self).
             if let Some((field_name, src_field_idx, tag)) = resolved {
                 let src_idx = src_field_idx as usize;
                 if src_idx < field_count {
@@ -368,15 +441,22 @@ impl TypedObjectOps for super::VirtualMachine {
                         src_field_idx,
                         tag,
                     );
-                    let result = push_field_value(self, &storage.slots[src_idx], is_heap, tag);
-                    drop_with_kind(recv_bits, recv_kind);
+                    // W17-comptime-vm-dispatch (ADR-006 §2.7.26): FIELD_TAG_ANY
+                    // sources kind from the storage's parallel field_kinds track.
+                    let result = if tag == FIELD_TAG_ANY && src_idx < storage.field_kinds.len() {
+                        push_field_value_with_kind(
+                            self,
+                            &storage.slots[src_idx],
+                            storage.field_kinds[src_idx],
+                        )
+                    } else {
+                        push_field_value(self, &storage.slots[src_idx], is_heap, tag)
+                    };
                     return result;
                 }
             }
 
-            // Field not found on either side: push None sentinel, drop
-            // receiver share.
-            drop_with_kind(recv_bits, recv_kind);
+            // Field not found on either side: push None sentinel.
             return self.push_kinded(0u64, NativeKind::Bool);
         }
 
@@ -392,18 +472,36 @@ impl TypedObjectOps for super::VirtualMachine {
 
         if field_index < field_count {
             let is_heap = (storage.heap_mask & (1u64 << field_index)) != 0;
-            let result = push_field_value(
-                self,
-                &storage.slots[field_index],
-                is_heap,
-                *field_type_tag,
-            );
-            drop_with_kind(recv_bits, recv_kind);
+            // W17-comptime-vm-dispatch (ADR-006 §2.7.26, 2026-05-12):
+            // FIELD_TAG_ANY operand → source kind from the storage's
+            // parallel `field_kinds` track (the construction-side
+            // recorded the concrete kind at write time, even when the
+            // schema declares the field as `FieldType::Any`). Resolves
+            // hardening item (f) — `Any → Dynamic` readback bounded
+            // by `KindedSlot.kind`. Required for the
+            // `populate_module_objects` chain: `__comptime__` schema
+            // fields are `FieldType::Any` but storage carries
+            // `Ptr(HeapKind::ModuleFn)` kinds.
+            let result = if *field_type_tag == FIELD_TAG_ANY
+                && field_index < storage.field_kinds.len()
+            {
+                push_field_value_with_kind(
+                    self,
+                    &storage.slots[field_index],
+                    storage.field_kinds[field_index],
+                )
+            } else {
+                push_field_value(
+                    self,
+                    &storage.slots[field_index],
+                    is_heap,
+                    *field_type_tag,
+                )
+            };
             return result;
         }
 
         // Out-of-bounds: push None sentinel.
-        drop_with_kind(recv_bits, recv_kind);
         self.push_kinded(0u64, NativeKind::Bool)
     }
 

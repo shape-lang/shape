@@ -684,6 +684,8 @@ fn kind_type_name(kind: NativeKind) -> &'static str {
         NativeKind::Ptr(HeapKind::Lazy) => "lazy",
         // W17-trait-object-storage (ADR-006 §2.7.24 / Q25.C, 2026-05-11).
         NativeKind::Ptr(HeapKind::TraitObject) => "trait_object",
+        // W17-comptime-vm-dispatch (ADR-006 §2.7.26, 2026-05-12).
+        NativeKind::Ptr(HeapKind::ModuleFn) => "module_fn",
     }
 }
 

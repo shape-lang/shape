@@ -875,15 +875,41 @@ impl VirtualMachine {
                 let (bits, kind) = self.pop_kinded()?;
                 Ok(KindedSlot::new(ValueSlot::from_raw(bits), kind))
             }
-            // Match is exhaustive: Closure, UInt64, all-others-error.
-            // No polymorphic fall-through that fabricates kinds (W7
-            // playbook §6 #6 forbidden). Per §8 surface-and-stop:
-            // trait-object closure dispatch (`Ptr(HeapKind::TypedObject)`
-            // carrying a `dyn Trait` vtable) is W9 TR territory and
-            // routes through this RuntimeError until that wave lands.
+            // W17-comptime-vm-dispatch (ADR-006 §2.7.26, 2026-05-12):
+            // ModuleFn callee — the slot bits are a `module_fn_id`
+            // (cast to u64), indexing the VM's `module_fn_table` per
+            // the `populate_module_objects` construction-side contract.
+            // Dispatch goes directly through `invoke_module_fn_id_stub`
+            // (sync `Typed` or async `TypedAsync` per the §2.7.4
+            // task-scheduler boundary in `vm_impl/modules.rs`). The
+            // dispatcher converts the `&[KindedSlot]` args at the
+            // boundary to the body's `&[u64]` slice + `ModuleContext`,
+            // then projects the `TypedReturn` back to a `KindedSlot`
+            // via `project_typed_return`. Pure-discriminator inline-
+            // scalar dispatch (no Arc bookkeeping on the callee
+            // bits — `clone_with_kind` / `drop_with_kind` arms are
+            // no-op for `HeapKind::ModuleFn`).
+            NativeKind::Ptr(shape_value::HeapKind::ModuleFn) => {
+                let module_fn_id = callee.slot.raw() as usize;
+                // `invoke_module_fn_id_stub` returns a fresh KindedSlot
+                // whose share was minted by `project_typed_return`. We
+                // return it directly; the dispatch shell at
+                // `dispatch_call_value_immediate` transfers the share
+                // into the caller's stack slot via `push_kinded` +
+                // `mem::forget` on the result carrier.
+                self.invoke_module_fn_id_stub(module_fn_id, args)
+            }
+            // Match is exhaustive: Closure, UInt64, ModuleFn,
+            // all-others-error. No polymorphic fall-through that
+            // fabricates kinds (W7 playbook §6 #6 forbidden). Per §8
+            // surface-and-stop: trait-object closure dispatch
+            // (`Ptr(HeapKind::TypedObject)` carrying a `dyn Trait`
+            // vtable) is W9 TR territory and routes through this
+            // RuntimeError until that wave lands.
             other => Err(VMError::RuntimeError(format!(
                 "call_value_immediate_nb: callee must be \
-                 NativeKind::Ptr(HeapKind::Closure) or NativeKind::UInt64, \
+                 NativeKind::Ptr(HeapKind::Closure), \
+                 NativeKind::Ptr(HeapKind::ModuleFn), or NativeKind::UInt64, \
                  got {:?}",
                 other
             ))),

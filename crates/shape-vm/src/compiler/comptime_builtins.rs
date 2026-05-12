@@ -272,24 +272,40 @@ pub(crate) fn create_comptime_builtins_module(trait_impl_keys: HashSet<String>) 
                 ("target_os", nb_str(std::env::consts::OS)),
                 ("target_arch", nb_str(std::env::consts::ARCH)),
             ]);
-            // SAFETY (ADR-006 §2.7.6 heap-dispatch pattern): the kinded
-            // slot is a fresh TypedObject pointer constructed above; its
-            // bits are a valid `Arc::into_raw::<TypedObjectStorage>` and
-            // the carrier owns one strong-count share for the duration
-            // of this scope. `as_heap_value()` borrows; we clone the
-            // inner `Arc<TypedObjectStorage>` into a fresh
-            // `Arc<HeapValue>` for the marshal layer to project.
-            let storage = match kinded.slot().as_heap_value() {
-                HeapValue::TypedObject(s) => s.clone(),
-                other => panic!(
-                    "build_config: typed_object_from_pairs produced \
-                     non-TypedObject HeapValue: {:?}",
-                    other.kind()
-                ),
-            };
-            // Drop the carrier explicitly — `Arc::clone(&storage)` above
-            // bumped the strong-count share for the new `HeapValue`
-            // wrapper, so the carrier's share retires cleanly.
+            // W17-comptime-vm-dispatch (ADR-006 §2.7.26, 2026-05-12):
+            // canonical receiver-recovery pattern per CLAUDE.md
+            // "5-arm receiver-recovery soundness rule" — the kinded
+            // slot's bits are `Arc::into_raw(Arc<TypedObjectStorage>)`
+            // (the `ValueSlot::from_typed_object` convention), NOT
+            // `Arc::into_raw(Arc<HeapValue>)`. The pre-W17 body used
+            // `kinded.slot().as_heap_value()` which is wrong-type
+            // recovery — it reads `TypedObjectStorage`'s first 8 bytes
+            // (the `schema_id: u64`) as if they were a `HeapValue`
+            // discriminator and segfaults. Reconstruct via the
+            // canonical `Arc::<TypedObjectStorage>::from_raw` pattern
+            // (mirror of `op_set_field_typed` in `typed_object_ops.rs`
+            // and the post-`3ac2f11` method-handler files); clone the
+            // share for the outer `HeapValue` wrapper; let `kinded`'s
+            // Drop release the original share via its kind-dispatched
+            // arm (the §2.7.26 ModuleFn no-op arm doesn't apply here —
+            // kind is TypedObject, drop is `Arc::decrement_strong_count`
+            // per §2.7.7 / Q9 dispatch table).
+            let bits = kinded.slot().raw();
+            // SAFETY: per `typed_object_from_pairs`'s construction-side
+            // contract (`type_schema/mod.rs:287`), bits are
+            // `Arc::into_raw(Arc<TypedObjectStorage>)` with one
+            // strong-count share owned by `kinded`. Reconstruct as Arc,
+            // clone the share for the outer wrapper, then `into_raw` to
+            // restore the original share — when `kinded` drops, the
+            // ADR-006 §2.7.6 / Q8 TypedObject arm of `KindedSlot::drop`
+            // (`kinded_slot.rs`) releases that share via
+            // `Arc::decrement_strong_count::<TypedObjectStorage>`.
+            let storage_arc: Arc<shape_value::heap_value::TypedObjectStorage> =
+                unsafe { Arc::from_raw(bits as *const _) };
+            let storage = Arc::clone(&storage_arc);
+            // Restore the original share so `kinded`'s Drop releases
+            // through the standard typed-Arc kind-dispatch path.
+            let _ = Arc::into_raw(storage_arc);
             drop(kinded);
             Ok(TypedReturn::Concrete(ConcreteReturn::OpaqueTypedObject(
                 Arc::new(HeapValue::TypedObject(storage)),

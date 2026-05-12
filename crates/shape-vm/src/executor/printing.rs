@@ -523,6 +523,13 @@ impl<'a> ValueFormatter<'a> {
                     .unwrap_or("?");
                 format!("<dyn {} #{}>", trait_name, t.value.schema_id)
             }
+            // W17-comptime-vm-dispatch (ADR-006 §2.7.26, 2026-05-12):
+            // ModuleFn references render as `<module_fn:id>`. Same
+            // inline-scalar pattern as Future — bits are the
+            // module_fn_id directly, no heap dispatch.
+            HeapKind::ModuleFn => {
+                format!("<module_fn:{}>", bits)
+            }
         }
     }
 
@@ -953,6 +960,8 @@ impl<'a> ValueFormatter<'a> {
                     .unwrap_or("?");
                 format!("<dyn {} #{}>", trait_name, t.value.schema_id)
             }
+            // W17-comptime-vm-dispatch (ADR-006 §2.7.26, 2026-05-12).
+            HeapValue::ModuleFn(id) => format!("<module_fn:{}>", id),
         }
     }
 }
