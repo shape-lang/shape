@@ -135,70 +135,113 @@ pub const TAG_NUMBER: u64 = 0x0000_0000_0000_0000;
 pub const TAG_DATA_ROW: u64 = TAG_BASE | (TAG_INT_BITS << TAG_SHIFT);
 
 // ============================================================================
-// Heap Kind shortcuts (HK_* = HeapKind ordinal as u16)
+// Heap Kind shortcuts (HK_*)
 //
 // Use these as the `kind: u16` prefix on `unified_box` / `jit_box`
 // allocations: `unified_box(HK_STRING, Arc::new(s))`. Match arms read the
 // prefix back via `jit_kinds::read_heap_kind(bits)`.
 // ============================================================================
 //
-// `HeapKind` is the canonical heap-shape discriminator; these `HK_*`
-// constants are the `u16` form referenced by JIT-emitted Cranelift code
-// (`iconst(types::I16, HK_TYPED_OBJECT as i64)` etc.). Variants the v2
-// `HeapValue` enum no longer carries (Range / Enum / TraitObject / etc.)
-// keep their historical ordinals for ABI stability of the JIT-emitted
-// constants — the kind is just an integer prefix on a `JitAlloc<T>`
-// allocation, no `HeapValue` arm is implied.
+// Two-tier layout (W17-jit-legacy-ordinal-disambiguation, 2026-05-12,
+// phase-2d-hardening item (i)):
+//
+//   Tier 1 — canonical kinds aliased to `HeapKind as u16` (ordinal range 0..127):
+//     HK_STRING, HK_TYPED_OBJECT, HK_CLOSURE, HK_DECIMAL, HK_BIG_INT,
+//     HK_DATATABLE, HK_HASHMAP, HK_FUTURE, HK_TASK_GROUP, HK_FILTER_EXPR.
+//     These ARE the runtime `HeapKind` discriminator; producers / consumers
+//     using these constants speak the same kind label as the runtime tier.
+//
+//   Tier 2 — JIT-private ordinals (range 256..511):
+//     Every other HK_* constant. These label `JitAlloc<T>` / `UnifiedValue<T>`
+//     heap prefixes for JIT-internal values whose `T` payload type is
+//     determined by the producing call and consumed by sibling JIT arms
+//     pattern-matching the same `HK_*` prefix. They do NOT cross the JIT FFI
+//     boundary as runtime `HeapKind` labels; they MUST stay outside the
+//     `HeapKind as u16` range so a stray runtime-tier slot that does cross
+//     the boundary (e.g. via the `jit_bits_to_nanboxed` / `nanboxed_to_jit_bits`
+//     carrier when those land per W11) cannot collide with a JIT-internal
+//     `JitAlloc<T>` prefix.
+//
+// JIT-private base. Chosen so that the entire JIT-private block sits above
+// the `HeapKind as u16` representable range *and* above the existing
+// `jit_kinds::HK_JIT_*` block (128..132) / `v2_struct::HK_V2_TYPED_STRUCT`
+// (132). HeapKind can grow to 255 variants before the boundary needs to
+// move; ample headroom.
+pub const JIT_LEGACY_HK_BASE: u16 = 256;
 
+// ----------------------------------------------------------------------------
+// Tier 1 — canonical HeapKind-aliased
+// ----------------------------------------------------------------------------
 pub const HK_STRING: u16 = HeapKind::String as u16;
-pub const HK_ARRAY: u16 = 1; // legacy ordinal — no surviving HeapValue arm
 pub const HK_TYPED_OBJECT: u16 = HeapKind::TypedObject as u16;
 pub const HK_CLOSURE: u16 = HeapKind::Closure as u16;
 pub const HK_DECIMAL: u16 = HeapKind::Decimal as u16;
 pub const HK_BIG_INT: u16 = HeapKind::BigInt as u16;
-pub const HK_HOST_CLOSURE: u16 = 6;  // legacy ordinal
 pub const HK_DATATABLE: u16 = HeapKind::DataTable as u16;
 pub const HK_HASHMAP: u16 = HeapKind::HashMap as u16;
-pub const HK_TYPED_TABLE: u16 = 8; // legacy ordinal
-pub const HK_ROW_VIEW: u16 = 9; // legacy ordinal
-pub const HK_COLUMN_REF: u16 = 10; // legacy ordinal
-pub const HK_INDEXED_TABLE: u16 = 11; // legacy ordinal
-pub const HK_RANGE: u16 = 12; // legacy ordinal
-pub const HK_ENUM: u16 = 13; // legacy ordinal
-pub const HK_SOME: u16 = 14; // legacy ordinal
-pub const HK_OK: u16 = 15; // legacy ordinal
-pub const HK_ERR: u16 = 16; // legacy ordinal
 pub const HK_FUTURE: u16 = HeapKind::Future as u16;
 pub const HK_TASK_GROUP: u16 = HeapKind::TaskGroup as u16;
-pub const HK_TRAIT_OBJECT: u16 = 19; // legacy ordinal
-pub const HK_EXPR_PROXY: u16 = 20; // legacy ordinal
 pub const HK_FILTER_EXPR: u16 = HeapKind::FilterExpr as u16;
-pub const HK_TIME: u16 = 22; // legacy ordinal
-pub const HK_DURATION: u16 = 23; // legacy ordinal
-pub const HK_TIMESPAN: u16 = 24; // legacy ordinal
-pub const HK_TIMEFRAME: u16 = 25; // legacy ordinal
-pub const HK_TIME_REFERENCE: u16 = 26; // legacy ordinal
-pub const HK_DATETIME_EXPR: u16 = 27; // legacy ordinal
-pub const HK_DATA_DATETIME_REF: u16 = 28; // legacy ordinal
-pub const HK_TYPE_ANNOTATION: u16 = 29; // legacy ordinal
-pub const HK_TYPE_ANNOTATED_VALUE: u16 = 30; // legacy ordinal
-pub const HK_PRINT_RESULT: u16 = 31; // legacy ordinal
-pub const HK_SIMULATION_CALL: u16 = 32; // legacy ordinal
-pub const HK_FUNCTION_REF: u16 = 33; // legacy ordinal
-pub const HK_DATA_REFERENCE: u16 = 34; // legacy ordinal
-pub const HK_FLOAT_ARRAY: u16 = 49; // legacy ordinal
-pub const HK_INT_ARRAY: u16 = 48; // legacy ordinal
-pub const HK_FLOAT_ARRAY_SLICE: u16 = 71; // legacy ordinal
-pub const HK_MATRIX: u16 = 51; // legacy ordinal
-pub const HK_BOOL_ARRAY: u16 = 50; // legacy ordinal
-pub const HK_I8_ARRAY: u16 = 57; // legacy ordinal
-pub const HK_I16_ARRAY: u16 = 58; // legacy ordinal
-pub const HK_I32_ARRAY: u16 = 59; // legacy ordinal
-pub const HK_U8_ARRAY: u16 = 60; // legacy ordinal
-pub const HK_U16_ARRAY: u16 = 61; // legacy ordinal
-pub const HK_U32_ARRAY: u16 = 62; // legacy ordinal
-pub const HK_U64_ARRAY: u16 = 63; // legacy ordinal
-pub const HK_F32_ARRAY: u16 = 64; // legacy ordinal
+
+// ----------------------------------------------------------------------------
+// Tier 2 — JIT-private kinds (no surviving HeapValue arm; JIT-emitted-and-
+// JIT-consumed only). Contiguous block starting at JIT_LEGACY_HK_BASE so the
+// CHECK 12 grep guard in verify-merge.sh can assert every JIT-private HK_*
+// constant sits at or above the base.
+// ----------------------------------------------------------------------------
+pub const HK_ARRAY: u16 = JIT_LEGACY_HK_BASE; // 256 — was 1 (collided HeapKind::TypedObject)
+pub const HK_HOST_CLOSURE: u16 = JIT_LEGACY_HK_BASE + 1; // 257 — was 6
+pub const HK_TYPED_TABLE: u16 = JIT_LEGACY_HK_BASE + 2; // 258 — was 8 (collided HeapKind::TypedArray)
+pub const HK_ROW_VIEW: u16 = JIT_LEGACY_HK_BASE + 3; // 259 — was 9 (collided HeapKind::Temporal)
+pub const HK_COLUMN_REF: u16 = JIT_LEGACY_HK_BASE + 4; // 260 — was 10 (collided HeapKind::TableView)
+pub const HK_INDEXED_TABLE: u16 = JIT_LEGACY_HK_BASE + 5; // 261 — was 11 (collided HeapKind::Content)
+pub const HK_RANGE: u16 = JIT_LEGACY_HK_BASE + 6; // 262 — was 12 (collided HeapKind::Instant)
+pub const HK_ENUM: u16 = JIT_LEGACY_HK_BASE + 7; // 263 — was 13 (collided HeapKind::IoHandle)
+pub const HK_SOME: u16 = JIT_LEGACY_HK_BASE + 8; // 264 — was 14 (collided HeapKind::NativeScalar)
+pub const HK_OK: u16 = JIT_LEGACY_HK_BASE + 9; // 265 — was 15 (collided HeapKind::NativeView)
+pub const HK_ERR: u16 = JIT_LEGACY_HK_BASE + 10; // 266 — was 16 (collided HeapKind::Char)
+pub const HK_TRAIT_OBJECT: u16 = JIT_LEGACY_HK_BASE + 11; // 267 — was 19 (collided HeapKind::Reference)
+pub const HK_EXPR_PROXY: u16 = JIT_LEGACY_HK_BASE + 12; // 268 — was 20 (collided HeapKind::SharedCell)
+pub const HK_TIME: u16 = JIT_LEGACY_HK_BASE + 13; // 269 — was 22 (collided HeapKind::Iterator)
+pub const HK_DURATION: u16 = JIT_LEGACY_HK_BASE + 14; // 270 — was 23 (collided HeapKind::Deque)
+pub const HK_TIMESPAN: u16 = JIT_LEGACY_HK_BASE + 15; // 271 — was 24 (collided HeapKind::Channel)
+pub const HK_TIMEFRAME: u16 = JIT_LEGACY_HK_BASE + 16; // 272 — was 25 (collided HeapKind::PriorityQueue)
+pub const HK_TIME_REFERENCE: u16 = JIT_LEGACY_HK_BASE + 17; // 273 — was 26 (collided HeapKind::Range)
+pub const HK_DATETIME_EXPR: u16 = JIT_LEGACY_HK_BASE + 18; // 274 — was 27 (collided HeapKind::Result)
+pub const HK_DATA_DATETIME_REF: u16 = JIT_LEGACY_HK_BASE + 19; // 275 — was 28 (collided HeapKind::Option)
+pub const HK_TYPE_ANNOTATION: u16 = JIT_LEGACY_HK_BASE + 20; // 276 — was 29 (collided HeapKind::TraitObject)
+pub const HK_TYPE_ANNOTATED_VALUE: u16 = JIT_LEGACY_HK_BASE + 21; // 277 — was 30 (collided HeapKind::Mutex)
+pub const HK_PRINT_RESULT: u16 = JIT_LEGACY_HK_BASE + 22; // 278 — was 31 (collided HeapKind::Atomic)
+pub const HK_SIMULATION_CALL: u16 = JIT_LEGACY_HK_BASE + 23; // 279 — was 32 (collided HeapKind::Lazy)
+pub const HK_FUNCTION_REF: u16 = JIT_LEGACY_HK_BASE + 24; // 280 — was 33 (collided HeapKind::ModuleFn)
+pub const HK_DATA_REFERENCE: u16 = JIT_LEGACY_HK_BASE + 25; // 281 — was 34 (one above current HeapKind tail; bumped pre-emptively)
+pub const HK_INT_ARRAY: u16 = JIT_LEGACY_HK_BASE + 26; // 282 — was 48 (above current HeapKind range; bumped to preserve invariant)
+pub const HK_FLOAT_ARRAY: u16 = JIT_LEGACY_HK_BASE + 27; // 283 — was 49
+pub const HK_BOOL_ARRAY: u16 = JIT_LEGACY_HK_BASE + 28; // 284 — was 50
+pub const HK_MATRIX: u16 = JIT_LEGACY_HK_BASE + 29; // 285 — was 51
+pub const HK_I8_ARRAY: u16 = JIT_LEGACY_HK_BASE + 30; // 286 — was 57
+pub const HK_I16_ARRAY: u16 = JIT_LEGACY_HK_BASE + 31; // 287 — was 58
+pub const HK_I32_ARRAY: u16 = JIT_LEGACY_HK_BASE + 32; // 288 — was 59
+pub const HK_U8_ARRAY: u16 = JIT_LEGACY_HK_BASE + 33; // 289 — was 60
+pub const HK_U16_ARRAY: u16 = JIT_LEGACY_HK_BASE + 34; // 290 — was 61
+pub const HK_U32_ARRAY: u16 = JIT_LEGACY_HK_BASE + 35; // 291 — was 62
+pub const HK_U64_ARRAY: u16 = JIT_LEGACY_HK_BASE + 36; // 292 — was 63
+pub const HK_F32_ARRAY: u16 = JIT_LEGACY_HK_BASE + 37; // 293 — was 64
+pub const HK_FLOAT_ARRAY_SLICE: u16 = JIT_LEGACY_HK_BASE + 38; // 294 — was 71
+
+// Compile-time invariants for the JIT-private block:
+//   * base sits strictly above the `HeapKind as u16` representable range;
+//   * base sits strictly above the existing JIT-private blocks in
+//     `jit_kinds.rs` (128..132) and `v2_struct.rs` (132).
+const _: () = {
+    // 192 = current HeapKind tail (33) plus headroom for the existing
+    // 128..132 JIT-private block; if HeapKind grows past 127 a future
+    // sub-cluster must move JIT_LEGACY_HK_BASE up and renumber.
+    assert!(
+        JIT_LEGACY_HK_BASE >= 192,
+        "JIT_LEGACY_HK_BASE must sit above the HeapKind / jit_kinds.rs / v2_struct.rs blocks"
+    );
+};
 
 // Compile-time layout verification
 const _: () = {
