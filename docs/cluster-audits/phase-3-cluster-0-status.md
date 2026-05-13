@@ -2149,6 +2149,66 @@ wave-5d so cluster-0 closes with documented exception" framing refused
 on sight when the gap blocks the kickoff matrix — same Q2 disposition,
 refused upfront.
 
+## Round 12 post-merge smoke matrix verification (2026-05-13)
+
+Both Round 12 sub-clusters merged:
+- T1 surface-and-stop close at `4447e698` (named 3 conduit gaps; ADR amendment territory absorbed into Round 13)
+- T2/T3 at `61687564` — **Kickoff Smoke 4 JIT NOW PASSES**
+
+Post-merge verify-merge 12/12 inside devenv. CLI rebuilt + full smoke matrix re-run.
+
+### Post-Round-12 smoke matrix
+
+| Smoke | VM | JIT | Status |
+|---|---|---|---|
+| 1 (kickoff) `for i in 0..100 { sum = sum+i }` → 4950 | ✅ 4950 | ✅ 4950 | **passing** |
+| 2 partial `[1,2,3].sum()` → 6 | ❌ T4 IntrinsicSum | ✅ 6 | T4 (VM) |
+| 2 full `.map(\|x\|x*2).sum()` → 30 | ❌ T5 closure | ❌ downstream of T5 | T5 + downstream |
+| 3 (kickoff) trait `t.name()` → "x" | ✅ x | ❌ T1' cross-crate trait return-kind side-table | T1' |
+| 4 (kickoff) `let mut s = Set(); .add; .size` → 2 | ✅ 2 | ✅ 2 | **PASSING (NEW from T2/T3)** |
+
+### Kickoff close progress
+
+**2 of 4 kickoff smokes fully passing** (1 + 4). Remaining:
+- Smoke 2 needs T4 + T5 (both VM-side, both Round 13).
+- Smoke 3 needs T1' cross-crate trait return-kind side-table (Round 13).
+
+Cluster-0 close attempt projected post-Round-13 if all 4 kickoff smokes VM == JIT.
+
+### Round 13 dispatch plan (per supervisor's Option 4 cadence)
+
+Three sub-clusters, dispatched parallel from post-Round-12 baseline:
+
+- **T4 W17-vm-intrinsic-sum-wave-5d-migration**: scope-narrowed to ONLY
+  `BuiltinFunction::IntrinsicSum` body migration. Other wave-5d todo!()
+  blocks remain Phase-1B residual unless they block kickoff smokes.
+  Unblocks kickoff Smoke 2 VM (.sum() body).
+- **T5 W17-vm-call-value-closure-kind-mismatch**: AUDIT-FIRST. Producer-
+  side mis-labeling source needs identification before fix shape commits.
+  Unblocks kickoff Smoke 2 full VM (.map() closure call).
+- **T1' W12-trait-method-return-conduit-cross-crate**: cross-crate
+  `BytecodeProgram::trait_method_return_concrete_types` side-table per
+  Round 6A's `function_return_concrete_types` precedent. Populated at
+  impl-block compile time from `TraitDef.members`, threaded through
+  linker / remote / content-addressed shapes + MirToIR. Closes the 3
+  conduit gaps T1 named. Unblocks kickoff Smoke 3 JIT.
+
+All three: standard Round-3-pattern close gate + surface-and-stop +
+refuse-on-sight forbidden frames.
+
+### Cluster-1 candidates surfaced (NOT cluster-0 blocking)
+
+NEW cluster-1 candidates surfaced by Round 12 close reports:
+
+- `W17-jit-err-ctor-kind-classification` — `print(Err("x"))` classifier
+  mis-stamps Err arm as `Ptr(TypedObject)` instead of `Ptr(Result)`.
+  Affects Smoke 1.5-ext (Result/match payload codegen); does NOT block
+  kickoff smokes.
+- `W17-jit-typed-object-arc-storage-migration` — JIT-internal TypedObject
+  struct (`ffi/typed_object/`) vs VM-side `Arc<TypedObjectStorage>` are
+  different Rust types; 17+ JIT-internal consumers; migration is broader
+  cluster-1 hardening work.
+
 ## Cluster-0 close gate
 
 Per phase-3-kickoff-prompt §"Cluster-0 sub-cluster sequencing":
