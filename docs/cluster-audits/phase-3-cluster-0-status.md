@@ -4722,3 +4722,141 @@ the procedural gap was timing.
 parallel) is authorized contingent on all three follow-up
 surfacings landing (the three subsections above) + W17-narrow-
 follow-up-A back-patch ratification (independent timing).*
+
+---
+
+## Round 18 sub-cluster S1 — W12-typed-array-data-scalar-migration close (2026-05-13)
+
+Branch `bulldozer-strictly-typed-w12-typed-array-data-scalar-migration` at
+parent `52dbe312` (post-W17-narrow-follow-up-A merge HEAD). **Production
+close**; 6 of 12 dispatch-named scalar variants migrated mechanically per
+audit §3.1; 3 variants surfaced as structural obstacles per audit §2 /
+phase-2d-handover §0 surface-and-stop discipline.
+
+### Variants migrated (6)
+
+`I8`, `U8`, `I16`, `U16`, `U32`, `U64` — each gets a `TypedArrayKind::<X>`
+enum variant, 4 new `OpCode` variants (`New/Get/Push/SetTypedArray<X>`),
+an `ELEM_TYPE_<X>` element-type-tag byte (distinct from `ELEM_TYPE_BOOL`
+for U8 per audit §2.1's "collides with Bool element-type-tag" note),
+`V2ElemType::<X>` variant, executor handler bodies, dispatch routing,
+JIT preflight whitelist registration, v2→legacy materialization arms in
+`array_transform.rs`, slice arms, iter-next arms, and method-dispatch
+classifier integration. Already-supported `F64 / I64 / I32 / Bool` paths
+unchanged — those producers were already on `TypedArray<T>` at HEAD.
+
+### Variants NOT migrated, surfaced as structural obstacles (3)
+
+**F32**: dispatch named in scope but `NativeKind` has no `Float32`
+variant and `ConcreteType` has no `F32` variant at HEAD `52dbe312`. The
+mechanical recipe in audit §3.1 step (3) (per-kind `NativeKind` dispatch
+in `should_use_typed_array_from_slot_kind`) requires the variant to
+exist. Resolution shape if pursued: ADR-006 §2.7.5 amendment adding
+`NativeKind::Float32` + cascading `decode_f64`/`is_integer`/
+`is_nullable_integer`/`is_floating`/etc. across `native_kind.rs` (~30
+sites) + cascading every `KindedSlot::from_<X>` constructor + adding
+`ConcreteType::F32` + monomorphisation cascade. Cluster-equivalent
+scope — explicitly out of S1's stated mechanical-recipe boundary.
+
+**Char**: same shape as F32. No `NativeKind::Char` nor
+`ConcreteType::Char` at HEAD. Audit §3.1 included Char among 12 scalar
+variants but the prerequisite NativeKind variant does not exist.
+Cluster-equivalent scope.
+
+**String**: audit §2.2 explicit out-of-S1-scope. The `StringObj`
+v2-raw carrier exists at HEAD (`crates/shape-value/src/v2/string_obj.rs`),
+but `TypedArray<*const StringObj>` would require per-element retain on
+push + release on pop + release-all on drop_array — `TypedArray<T>::
+drop_array` does NOT release per-element refcounts because `T: Copy`
+semantics apply. This is the audit §2.2 S2 sub-cluster's territory.
+Including String in S1 would either silently leak StringObj refcounts
+(defection-class fallback) or require S2 prerequisite work to land
+alongside (scope explosion).
+
+### O-2 (F64 SIMD alignment) disposition
+
+**Not applicable to S1**. S1 is producer migration only; F64 is in the
+4 already-supported kinds (not migrated). The `Array<number>` producer
+at HEAD already emits `OpCode::NewTypedArrayF64` → `TypedArray<f64>`
+with `Layout::array::<f64>` 8-byte alignment. The legacy
+`AlignedTypedBuffer` lives behind the `TypedArrayData::F64` enum
+consumer-side, untouched by producer migration. SIMD reductions at
+`v2_array_detect.rs::simd_sum_f64` use `f64x4::from([*data.add(i),...])`
+(scalar loads + lane construction, not aligned-vector loads), so the
+existing F64 v2 path already runs without aligned-load semantics — no
+SIMD regression introduced by S1, no `AlignedTypedArray<f64>` parallel
+preservation (refused on sight per audit §4.2 O-2.b).
+
+### Defensive fix landed alongside S1
+
+`as_v2_typed_array` low-address-pointer guard (`bits < 0x1_0000 ->
+None`) added — pre-existing `NativeKind::UInt64` ambiguity hazard
+surfaced by the new `TypedArrayGetU64` opcode. Result kind is `UInt64`,
+same as v2-typed-array-pointer kind; `print` probes any UInt64 slot
+for typed-array-ness via `as_v2_typed_array(bits, UInt64)`, which
+unconditionally dereferenced `bits as *const HeapHeader`. Small U64
+element values like `1000` would deref into unmapped memory at
+`*(1000 as *const HeapHeader)` → SIGSEGV. Guard preserves the
+documented "kind-only" classification — there's no pointer-bit probing
+fast path that should ever resolve a small integer as a v2 typed array.
+
+### Close gates (devenv-wrapped, exit-code-verified)
+
+- `cargo check --workspace --lib --tests` EXIT=0
+- `bash scripts/verify-merge.sh` SCRIPT_EXIT=0, **Passed: 12 / Failed: 0**
+- `bash scripts/check-no-dynamic.sh` EXIT=0
+- `cargo test -p shape-vm --lib v2_typed_emission` 56/56 PASS (12 new
+  sized-integer tests)
+- `cargo test -p shape-vm --lib v2_array_detect` 5/5 PASS
+
+### Smoke results
+
+Smoke S1 (comprehensive 10-variant: `let a: Array<i8> = [...]; print(a[0]);
+... let f: Array<u64> = [1000, 2000, 3000]; print(f[0]); ...` across all
+6 new variants + 4 existing F64/I64/Bool/i32):
+
+- `--mode vm`: `-5 / 100 / 255 / 30000 / 30000 / 300 / 1000 / 2.5 / 30 / true`
+- `--mode jit`: identical sequence (VM ≡ JIT for all 10 variants)
+
+Smoke 2 baseline state (kickoff smoke that touches typed-array producer
+paths): not regressed by S1 (S1 doesn't touch the I64 producer that
+drives Smoke 2; baseline VM=`60` matches pre-S1).
+
+### Recurrence pattern note
+
+This S1 close demonstrates the named audit §2 framing pattern: "every
+variant either has clean migration OR surfaces a specific structural
+obstacle to the supervisor — no 'keep both' disposition." S1 followed
+this exactly: 6 mechanical migrations + 3 structural-obstacle surfacings
++ 0 Bool-default fallbacks + 0 silent enum-arm preservations. The
+`TypedArrayData::I8`/`U8`/`I16`/`U16`/`U32`/`U64` arms still live in
+source at this commit but are unreachable from S1-migrated producer
+paths (the recipe makes them unreachable, not deleted — S5's commit
+deletes the arms).
+
+### Round 18 S3 coordination
+
+S3 (W12-matrix-floatslice-heapkind-exit) runs in parallel from the
+same base `52dbe312`. S3 territory (HeapKind enum + Matrix/FloatSlice
+variant removal + §2.7.22 Q23 amendment text) has zero file-territory
+overlap with S1 (scalar-variant producer migration). AGENTS.md row
+collisions handled by take-both at merge per dispatch convention.
+
+### S2/S3/S4/S5 follow-up surfaces
+
+- **S2** (heap-element TypedArray<*const <X>Obj> migration including
+  String): blocked on per-element retain/release plumbing in
+  `TypedArray<T>` for heap-element T, plus the v2-raw `<X>Obj` carrier
+  structs for Decimal/BigInt/Temporal/Instant that audit §2.2 names.
+- **S3** (TypedObject/TraitObject migration): blocked on O-3/O-3a
+  (`TypedObjectStorage`/`TraitObjectStorage` Arc-vs-HeapHeader carrier
+  shape resolution); audit recommends O-3.c defer.
+- **F32/Char element-kind extension** (new follow-up surfaced by this
+  S1 close): blocked on `NativeKind` + `ConcreteType` variant additions
+  via ADR-006 §2.7.5 amendment. Either land before a re-dispatch of S1
+  to cover F32/Char, or surface as separate Phase 3 cluster-equivalent
+  scope.
+- **S4** (Matrix/FloatSlice exit + new `HeapKind::Matrix = 34` /
+  `HeapKind::MatrixSlice = 35`): independent of S1.
+- **S5** (`TypedArrayData` enum + `TypedBuffer<T>` deletion):
+  unchanged from audit §3.5; remains blocked on S2/S3/S4.

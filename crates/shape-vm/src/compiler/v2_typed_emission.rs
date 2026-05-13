@@ -40,6 +40,21 @@ pub enum TypedArrayKind {
     I32,
     /// `TypedArray<bool>` — backing for `Array<bool>`.
     Bool,
+    /// `TypedArray<i8>` — backing for `Array<i8>` (W12 S1, 2026-05-13).
+    I8,
+    /// `TypedArray<u8>` — backing for `Array<u8>` (W12 S1, 2026-05-13).
+    /// Distinct from `Bool` at the runtime element-type-tag layer
+    /// (`ELEM_TYPE_U8` vs `ELEM_TYPE_BOOL`) — same byte storage, different
+    /// user-facing semantics.
+    U8,
+    /// `TypedArray<i16>` — backing for `Array<i16>` (W12 S1, 2026-05-13).
+    I16,
+    /// `TypedArray<u16>` — backing for `Array<u16>` (W12 S1, 2026-05-13).
+    U16,
+    /// `TypedArray<u32>` — backing for `Array<u32>` (W12 S1, 2026-05-13).
+    U32,
+    /// `TypedArray<u64>` — backing for `Array<u64>` (W12 S1, 2026-05-13).
+    U64,
 }
 
 impl TypedArrayKind {
@@ -51,6 +66,12 @@ impl TypedArrayKind {
             TypedArrayKind::I64 => OpCode::NewTypedArrayI64,
             TypedArrayKind::I32 => OpCode::NewTypedArrayI32,
             TypedArrayKind::Bool => OpCode::NewTypedArrayBool,
+            TypedArrayKind::I8 => OpCode::NewTypedArrayI8,
+            TypedArrayKind::U8 => OpCode::NewTypedArrayU8,
+            TypedArrayKind::I16 => OpCode::NewTypedArrayI16,
+            TypedArrayKind::U16 => OpCode::NewTypedArrayU16,
+            TypedArrayKind::U32 => OpCode::NewTypedArrayU32,
+            TypedArrayKind::U64 => OpCode::NewTypedArrayU64,
         }
     }
 
@@ -62,6 +83,12 @@ impl TypedArrayKind {
             TypedArrayKind::I64 => OpCode::TypedArrayGetI64,
             TypedArrayKind::I32 => OpCode::TypedArrayGetI32,
             TypedArrayKind::Bool => OpCode::TypedArrayGetBool,
+            TypedArrayKind::I8 => OpCode::TypedArrayGetI8,
+            TypedArrayKind::U8 => OpCode::TypedArrayGetU8,
+            TypedArrayKind::I16 => OpCode::TypedArrayGetI16,
+            TypedArrayKind::U16 => OpCode::TypedArrayGetU16,
+            TypedArrayKind::U32 => OpCode::TypedArrayGetU32,
+            TypedArrayKind::U64 => OpCode::TypedArrayGetU64,
         }
     }
 
@@ -73,6 +100,12 @@ impl TypedArrayKind {
             TypedArrayKind::I64 => OpCode::TypedArrayPushI64,
             TypedArrayKind::I32 => OpCode::TypedArrayPushI32,
             TypedArrayKind::Bool => OpCode::TypedArrayPushBool,
+            TypedArrayKind::I8 => OpCode::TypedArrayPushI8,
+            TypedArrayKind::U8 => OpCode::TypedArrayPushU8,
+            TypedArrayKind::I16 => OpCode::TypedArrayPushI16,
+            TypedArrayKind::U16 => OpCode::TypedArrayPushU16,
+            TypedArrayKind::U32 => OpCode::TypedArrayPushU32,
+            TypedArrayKind::U64 => OpCode::TypedArrayPushU64,
         }
     }
 
@@ -84,6 +117,12 @@ impl TypedArrayKind {
             TypedArrayKind::I64 => OpCode::TypedArraySetI64,
             TypedArrayKind::I32 => OpCode::TypedArraySetI32,
             TypedArrayKind::Bool => OpCode::TypedArraySetBool,
+            TypedArrayKind::I8 => OpCode::TypedArraySetI8,
+            TypedArrayKind::U8 => OpCode::TypedArraySetU8,
+            TypedArrayKind::I16 => OpCode::TypedArraySetI16,
+            TypedArrayKind::U16 => OpCode::TypedArraySetU16,
+            TypedArrayKind::U32 => OpCode::TypedArraySetU32,
+            TypedArrayKind::U64 => OpCode::TypedArraySetU64,
         }
     }
 }
@@ -105,6 +144,13 @@ pub fn should_use_typed_array(elem_type: &ConcreteType) -> Option<TypedArrayKind
         ConcreteType::I64 => Some(TypedArrayKind::I64),
         ConcreteType::I32 => Some(TypedArrayKind::I32),
         ConcreteType::Bool => Some(TypedArrayKind::Bool),
+        // W12 S1 (2026-05-13) — sized integer monomorphizations.
+        ConcreteType::I8 => Some(TypedArrayKind::I8),
+        ConcreteType::U8 => Some(TypedArrayKind::U8),
+        ConcreteType::I16 => Some(TypedArrayKind::I16),
+        ConcreteType::U16 => Some(TypedArrayKind::U16),
+        ConcreteType::U32 => Some(TypedArrayKind::U32),
+        ConcreteType::U64 => Some(TypedArrayKind::U64),
         _ => None,
     }
 }
@@ -132,6 +178,13 @@ pub fn should_use_typed_array_from_slot_kind(
         NativeKind::Int64 => Some(TypedArrayKind::I64),
         NativeKind::Int32 => Some(TypedArrayKind::I32),
         NativeKind::Bool => Some(TypedArrayKind::Bool),
+        // W12 S1 (2026-05-13) — sized integer monomorphizations.
+        NativeKind::Int8 => Some(TypedArrayKind::I8),
+        NativeKind::UInt8 => Some(TypedArrayKind::U8),
+        NativeKind::Int16 => Some(TypedArrayKind::I16),
+        NativeKind::UInt16 => Some(TypedArrayKind::U16),
+        NativeKind::UInt32 => Some(TypedArrayKind::U32),
+        NativeKind::UInt64 => Some(TypedArrayKind::U64),
         _ => None,
     }
 }
@@ -150,6 +203,13 @@ pub fn typed_array_kind_from_type_name(type_name: &str) -> Option<TypedArrayKind
         "int" | "i64" => Some(TypedArrayKind::I64),
         "i32" => Some(TypedArrayKind::I32),
         "bool" => Some(TypedArrayKind::Bool),
+        // W12 S1 (2026-05-13) — sized integer monomorphizations.
+        "i8" => Some(TypedArrayKind::I8),
+        "u8" => Some(TypedArrayKind::U8),
+        "i16" => Some(TypedArrayKind::I16),
+        "u16" => Some(TypedArrayKind::U16),
+        "u32" => Some(TypedArrayKind::U32),
+        "u64" => Some(TypedArrayKind::U64),
         _ => None,
     }
 }
@@ -277,9 +337,52 @@ mod tests {
     }
 
     #[test]
-    fn test_u8_falls_back_to_legacy() {
-        // Sized ints other than i32/i64 don't yet have typed opcodes.
-        assert_eq!(should_use_typed_array(&ConcreteType::U8), None);
+    fn test_u8_maps_to_typed_array_u8() {
+        // W12 S1 (2026-05-13) — U8 now has a typed array opcode kind.
+        assert_eq!(
+            should_use_typed_array(&ConcreteType::U8),
+            Some(TypedArrayKind::U8)
+        );
+    }
+
+    #[test]
+    fn test_i8_maps_to_typed_array_i8() {
+        assert_eq!(
+            should_use_typed_array(&ConcreteType::I8),
+            Some(TypedArrayKind::I8)
+        );
+    }
+
+    #[test]
+    fn test_i16_maps_to_typed_array_i16() {
+        assert_eq!(
+            should_use_typed_array(&ConcreteType::I16),
+            Some(TypedArrayKind::I16)
+        );
+    }
+
+    #[test]
+    fn test_u16_maps_to_typed_array_u16() {
+        assert_eq!(
+            should_use_typed_array(&ConcreteType::U16),
+            Some(TypedArrayKind::U16)
+        );
+    }
+
+    #[test]
+    fn test_u32_maps_to_typed_array_u32() {
+        assert_eq!(
+            should_use_typed_array(&ConcreteType::U32),
+            Some(TypedArrayKind::U32)
+        );
+    }
+
+    #[test]
+    fn test_u64_maps_to_typed_array_u64() {
+        assert_eq!(
+            should_use_typed_array(&ConcreteType::U64),
+            Some(TypedArrayKind::U64)
+        );
     }
 
     #[test]
@@ -290,12 +393,18 @@ mod tests {
 
     #[test]
     fn test_opcode_lookup_round_trip() {
-        // Sanity check that all four kinds expose all four opcodes.
+        // Sanity check that all ten kinds expose all four opcodes.
         for kind in [
             TypedArrayKind::F64,
             TypedArrayKind::I64,
             TypedArrayKind::I32,
             TypedArrayKind::Bool,
+            TypedArrayKind::I8,
+            TypedArrayKind::U8,
+            TypedArrayKind::I16,
+            TypedArrayKind::U16,
+            TypedArrayKind::U32,
+            TypedArrayKind::U64,
         ] {
             let _ = kind.new_opcode();
             let _ = kind.get_opcode();
@@ -357,10 +466,59 @@ mod tests {
     // removed (the variants no longer exist; nothing to fall back from).
 
     #[test]
-    fn test_slot_kind_int8_falls_back() {
-        // Sized ints we don't have typed opcodes for fall back to legacy.
+    fn test_slot_kind_int8_maps_to_i8() {
+        // W12 S1 (2026-05-13) — sized integer kinds now have typed opcode
+        // monomorphizations.
         use crate::type_tracking::NativeKind;
-        assert_eq!(should_use_typed_array_from_slot_kind(NativeKind::Int8), None);
+        assert_eq!(
+            should_use_typed_array_from_slot_kind(NativeKind::Int8),
+            Some(TypedArrayKind::I8)
+        );
+    }
+
+    #[test]
+    fn test_slot_kind_uint8_maps_to_u8() {
+        use crate::type_tracking::NativeKind;
+        assert_eq!(
+            should_use_typed_array_from_slot_kind(NativeKind::UInt8),
+            Some(TypedArrayKind::U8)
+        );
+    }
+
+    #[test]
+    fn test_slot_kind_int16_maps_to_i16() {
+        use crate::type_tracking::NativeKind;
+        assert_eq!(
+            should_use_typed_array_from_slot_kind(NativeKind::Int16),
+            Some(TypedArrayKind::I16)
+        );
+    }
+
+    #[test]
+    fn test_slot_kind_uint16_maps_to_u16() {
+        use crate::type_tracking::NativeKind;
+        assert_eq!(
+            should_use_typed_array_from_slot_kind(NativeKind::UInt16),
+            Some(TypedArrayKind::U16)
+        );
+    }
+
+    #[test]
+    fn test_slot_kind_uint32_maps_to_u32() {
+        use crate::type_tracking::NativeKind;
+        assert_eq!(
+            should_use_typed_array_from_slot_kind(NativeKind::UInt32),
+            Some(TypedArrayKind::U32)
+        );
+    }
+
+    #[test]
+    fn test_slot_kind_uint64_maps_to_u64() {
+        use crate::type_tracking::NativeKind;
+        assert_eq!(
+            should_use_typed_array_from_slot_kind(NativeKind::UInt64),
+            Some(TypedArrayKind::U64)
+        );
     }
 
     // ---- typed_array_kind_from_type_name ----

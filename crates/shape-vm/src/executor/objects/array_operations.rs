@@ -60,7 +60,8 @@
 
 use crate::bytecode::{Instruction, Operand};
 use crate::executor::v2_handlers::v2_array_detect::{
-    self, ELEM_TYPE_BOOL, ELEM_TYPE_F64, ELEM_TYPE_I32, ELEM_TYPE_I64, V2ElemType,
+    self, ELEM_TYPE_BOOL, ELEM_TYPE_F64, ELEM_TYPE_I16, ELEM_TYPE_I32, ELEM_TYPE_I64,
+    ELEM_TYPE_I8, ELEM_TYPE_U16, ELEM_TYPE_U32, ELEM_TYPE_U64, ELEM_TYPE_U8, V2ElemType,
     V2TypedArrayView,
 };
 use crate::executor::vm_impl::stack::drop_with_kind;
@@ -848,6 +849,79 @@ fn slice_v2_typed_array(
             };
             let new_ptr = TypedArray::<u8>::from_slice(slice);
             stamp_elem_type(new_ptr as *mut u8, ELEM_TYPE_BOOL);
+            new_ptr as *mut u8
+        },
+        // W12 S1 (2026-05-13) — sized-integer slice paths.
+        V2ElemType::I8 => unsafe {
+            let src = view.ptr as *const TypedArray<i8>;
+            let slice: &[i8] = if s < e {
+                let data = (*src).data as *const i8;
+                std::slice::from_raw_parts(data.add(s), e - s)
+            } else {
+                &[]
+            };
+            let new_ptr = TypedArray::<i8>::from_slice(slice);
+            stamp_elem_type(new_ptr as *mut u8, ELEM_TYPE_I8);
+            new_ptr as *mut u8
+        },
+        V2ElemType::U8 => unsafe {
+            let src = view.ptr as *const TypedArray<u8>;
+            let slice: &[u8] = if s < e {
+                let data = (*src).data as *const u8;
+                std::slice::from_raw_parts(data.add(s), e - s)
+            } else {
+                &[]
+            };
+            let new_ptr = TypedArray::<u8>::from_slice(slice);
+            stamp_elem_type(new_ptr as *mut u8, ELEM_TYPE_U8);
+            new_ptr as *mut u8
+        },
+        V2ElemType::I16 => unsafe {
+            let src = view.ptr as *const TypedArray<i16>;
+            let slice: &[i16] = if s < e {
+                let data = (*src).data as *const i16;
+                std::slice::from_raw_parts(data.add(s), e - s)
+            } else {
+                &[]
+            };
+            let new_ptr = TypedArray::<i16>::from_slice(slice);
+            stamp_elem_type(new_ptr as *mut u8, ELEM_TYPE_I16);
+            new_ptr as *mut u8
+        },
+        V2ElemType::U16 => unsafe {
+            let src = view.ptr as *const TypedArray<u16>;
+            let slice: &[u16] = if s < e {
+                let data = (*src).data as *const u16;
+                std::slice::from_raw_parts(data.add(s), e - s)
+            } else {
+                &[]
+            };
+            let new_ptr = TypedArray::<u16>::from_slice(slice);
+            stamp_elem_type(new_ptr as *mut u8, ELEM_TYPE_U16);
+            new_ptr as *mut u8
+        },
+        V2ElemType::U32 => unsafe {
+            let src = view.ptr as *const TypedArray<u32>;
+            let slice: &[u32] = if s < e {
+                let data = (*src).data as *const u32;
+                std::slice::from_raw_parts(data.add(s), e - s)
+            } else {
+                &[]
+            };
+            let new_ptr = TypedArray::<u32>::from_slice(slice);
+            stamp_elem_type(new_ptr as *mut u8, ELEM_TYPE_U32);
+            new_ptr as *mut u8
+        },
+        V2ElemType::U64 => unsafe {
+            let src = view.ptr as *const TypedArray<u64>;
+            let slice: &[u64] = if s < e {
+                let data = (*src).data as *const u64;
+                std::slice::from_raw_parts(data.add(s), e - s)
+            } else {
+                &[]
+            };
+            let new_ptr = TypedArray::<u64>::from_slice(slice);
+            stamp_elem_type(new_ptr as *mut u8, ELEM_TYPE_U64);
             new_ptr as *mut u8
         },
     }

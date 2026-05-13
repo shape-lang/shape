@@ -250,6 +250,102 @@ pub(super) fn typed_array_arc_from_kinded(
                     }
                     Arc::new(TypedArrayData::Bool(Arc::new(TypedBuffer::from_vec(data))))
                 }
+                // W12 S1 (2026-05-13) — sized-integer materialisations into the
+                // legacy `Arc<TypedArrayData>` arms for method-dispatch
+                // consumers that haven't yet migrated off the enum. These
+                // arms vanish when S5 (TypedArrayData enum deletion) lands;
+                // until then, S1 producers must round-trip cleanly through
+                // any consumer that still expects the legacy carrier.
+                V2ElemType::I8 => {
+                    let arr_ptr = bits as usize as *const TypedArray<i8>;
+                    let mut data: Vec<i8> = Vec::with_capacity(len);
+                    for i in 0..(view.len) {
+                        let v = unsafe { TypedArray::<i8>::get(arr_ptr, i) }
+                            .ok_or_else(|| {
+                                VMError::RuntimeError(format!(
+                                    "{}: v2 I8 array read out-of-bounds at {}",
+                                    op, i
+                                ))
+                            })?;
+                        data.push(v);
+                    }
+                    Arc::new(TypedArrayData::I8(Arc::new(TypedBuffer::from_vec(data))))
+                }
+                V2ElemType::U8 => {
+                    let arr_ptr = bits as usize as *const TypedArray<u8>;
+                    let mut data: Vec<u8> = Vec::with_capacity(len);
+                    for i in 0..(view.len) {
+                        let v = unsafe { TypedArray::<u8>::get(arr_ptr, i) }
+                            .ok_or_else(|| {
+                                VMError::RuntimeError(format!(
+                                    "{}: v2 U8 array read out-of-bounds at {}",
+                                    op, i
+                                ))
+                            })?;
+                        data.push(v);
+                    }
+                    Arc::new(TypedArrayData::U8(Arc::new(TypedBuffer::from_vec(data))))
+                }
+                V2ElemType::I16 => {
+                    let arr_ptr = bits as usize as *const TypedArray<i16>;
+                    let mut data: Vec<i16> = Vec::with_capacity(len);
+                    for i in 0..(view.len) {
+                        let v = unsafe { TypedArray::<i16>::get(arr_ptr, i) }
+                            .ok_or_else(|| {
+                                VMError::RuntimeError(format!(
+                                    "{}: v2 I16 array read out-of-bounds at {}",
+                                    op, i
+                                ))
+                            })?;
+                        data.push(v);
+                    }
+                    Arc::new(TypedArrayData::I16(Arc::new(TypedBuffer::from_vec(data))))
+                }
+                V2ElemType::U16 => {
+                    let arr_ptr = bits as usize as *const TypedArray<u16>;
+                    let mut data: Vec<u16> = Vec::with_capacity(len);
+                    for i in 0..(view.len) {
+                        let v = unsafe { TypedArray::<u16>::get(arr_ptr, i) }
+                            .ok_or_else(|| {
+                                VMError::RuntimeError(format!(
+                                    "{}: v2 U16 array read out-of-bounds at {}",
+                                    op, i
+                                ))
+                            })?;
+                        data.push(v);
+                    }
+                    Arc::new(TypedArrayData::U16(Arc::new(TypedBuffer::from_vec(data))))
+                }
+                V2ElemType::U32 => {
+                    let arr_ptr = bits as usize as *const TypedArray<u32>;
+                    let mut data: Vec<u32> = Vec::with_capacity(len);
+                    for i in 0..(view.len) {
+                        let v = unsafe { TypedArray::<u32>::get(arr_ptr, i) }
+                            .ok_or_else(|| {
+                                VMError::RuntimeError(format!(
+                                    "{}: v2 U32 array read out-of-bounds at {}",
+                                    op, i
+                                ))
+                            })?;
+                        data.push(v);
+                    }
+                    Arc::new(TypedArrayData::U32(Arc::new(TypedBuffer::from_vec(data))))
+                }
+                V2ElemType::U64 => {
+                    let arr_ptr = bits as usize as *const TypedArray<u64>;
+                    let mut data: Vec<u64> = Vec::with_capacity(len);
+                    for i in 0..(view.len) {
+                        let v = unsafe { TypedArray::<u64>::get(arr_ptr, i) }
+                            .ok_or_else(|| {
+                                VMError::RuntimeError(format!(
+                                    "{}: v2 U64 array read out-of-bounds at {}",
+                                    op, i
+                                ))
+                            })?;
+                        data.push(v);
+                    }
+                    Arc::new(TypedArrayData::U64(Arc::new(TypedBuffer::from_vec(data))))
+                }
             };
             Ok(arc)
         }
