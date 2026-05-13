@@ -260,19 +260,21 @@ pub(crate) fn format_value_word(value_bits: u64) -> String {
     }
 }
 
-/// Print a ValueWord value to stdout with a newline.
-///
-/// W11-jit-new-array note: this is the kind-blind fallback retained for
-/// receivers whose `NativeKind` the MIR-side print emitter could not
-/// prove (heap pointers etc.). The kinded entry points
-/// `jit_print_i64` / `jit_print_f64` / `jit_print_bool` below are the
-/// §2.7.5 stamp-at-compile-time path the MIR emitter routes through
-/// when the operand's slot kind is statically known. Future ADR-006
-/// §2.7.5 follow-ups extend this to `jit_print_str` /
-/// `jit_print_ptr<HeapKind::*>` per heap arm.
-pub extern "C" fn jit_print(value_bits: u64) {
-    println!("{}", format_value_word(value_bits));
-}
+// `jit_print(value_bits: u64)` — the kind-blind print FFI dispatched
+// through `format_value_word` — DELETED in W12-jit-print-heap-arm-
+// classification verification (Phase 3 cluster-0 Round 8A reopen,
+// 2026-05-13). The deleted body called `format_value_word` (the
+// deleted-W-series tag-bit dispatch documented at `format_value_word`'s
+// comment lines 200-217), routing every unproven-kind print operand
+// through the deleted-W-series shape — a defection-attractor preserved
+// "for one edge case" (CLAUDE.md "Forbidden rationalizations" #1) per
+// the pre-Round-8A-verification close. The §2.7.5 producer-site
+// classification conduit extension (`infer_enum_payload_kind` now uses
+// `native_kind_from_concrete_type` for the full ConcreteType →
+// NativeKind mapping, not the scalar-only `elem_slot_kind_for_
+// concrete`) closes the kind-source gap on Smoke 1.5's Err arm; the
+// terminators.rs print Call-terminator dispatch now surfaces-and-stops
+// on the `_` arm rather than routing through this deleted shape.
 
 /// Print a raw native i64 to stdout with a newline.
 ///

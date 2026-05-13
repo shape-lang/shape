@@ -81,8 +81,10 @@ impl JITCompiler {
             // dispatcher. Consumers that lack a kind source surface-and-stop
             // at JIT compile time per §2.7.5.
             //
-            // Print fallback + kinded entries (W11-jit-new-array)
-            print: r!("jit_print"),
+            // Kinded print entries (W11-jit-new-array scalar arms +
+            // W12-jit-print-heap-arm-classification heap arms). The
+            // kind-blind `r!("jit_print")` lookup DELETED in Round 8A
+            // reopen (2026-05-13).
             print_i64: r!("jit_print_i64"),
             print_f64: r!("jit_print_f64"),
             print_bool: r!("jit_print_bool"),

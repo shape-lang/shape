@@ -1076,26 +1076,136 @@ site (a).
   MIR-emission audit.
 
 - (d) **The kind-blind `jit_print` fallback for unproven operand
-  `NativeKind` is preserved per the pre-8A Round 5C baseline**. The
-  fallback dispatches through `format_value_word` (documented as the
-  deleted W-series shape in `ffi/conversion.rs:200-217`) — retained
-  pending the cluster-1 §2.7.5 producer-side migration that would
-  shrink the `_`-arm to "no proven kind only" (the principled
-  surface-and-stop target). Round 7A's smoke 1.5 close gate depends
-  on this path because EnumPayload-derived locals don't always carry
-  a stamped kind through to the consumer site. Removing the fallback
-  in this round would regress Round 7A — the inverse of the W11
-  round-1 walk-back pattern, refused on sight.
+  `NativeKind` is DELETED at every layer** (Round 8A reopen,
+  2026-05-13 — see "REOPEN" subsection below).
 
-**ADR-006 amendment**: NOT required. The fix is producer-site
-classification at the MIR-emit layer per §2.7.5, kind-aware FFI bodies
-per §2.7.6 / §2.7.17, and surface-and-stop discipline per §2.7.7 #4
-/ #7. The cluster-1 carrier-unification arc is the next step (already
-named in Round 6A's surfaced items); §-cited explicitly in the
-surfaced items table.
+#### W12-jit-print-heap-arm-classification REOPEN verification (2026-05-13)
+
+Supervisor reopened the Round 8A close at `1639148a` with one
+verification: was the kind-blind `_`-arm fallback genuinely
+load-bearing for Smoke 1.5, or did it match CLAUDE.md "Forbidden
+rationalizations" #1/#4/#5 ("just one edge case" / "follow-up
+for later phase" / "document as out-of-scope")?
+
+**Step (i) SHAPE_JIT_DEBUG trace on Smoke 1.5** (`fn divide(...) ->
+Result<int, string>; let r = divide(10, 2); match r { Ok(v) =>
+print(v), Err(e) => print(e) }`):
+
+- `print(v)` Ok-arm Call-terminator: `args[0] = Copy(Local(SlotId(8)))`,
+  `kind_hint = Some(Int64)` — kinded `print_i64` arm catches; `_`
+  arm was dead-code for this print call.
+- `print(e)` Err-arm Call-terminator: `args[0] = Copy(Local(SlotId(12)))`,
+  `kind_hint = None` — genuine §2.7.5 producer-side conduit gap.
+
+Mixed result — Ok-arm dead-code (path ii territory) + Err-arm gap
+(path iii territory). Per supervisor's spec: path (iii) extends the
+conduit honestly.
+
+**Root cause of the producer-side gap**: `infer_enum_payload_kind`
+in `crates/shape-jit/src/mir_compiler/types.rs` used the scalar-only
+`elem_slot_kind_for_concrete` classifier, which maps only
+`ConcreteType::{F64, I64, I32, ..., Bool}` to `NativeKind` — leaving
+`String` / `Ptr(HeapKind::*)` inner ConcreteTypes unstamped at the
+EnumPayload destination. The trace confirms: `infer_enum_payload_kind
+base_slot=6 ct=Result(I64, String) variant=Err` produced `inferred=
+None` for the Err arm even though `concrete_types[r] = Result(I64,
+String)` was correctly stamped by Round 6A's conduit.
+
+**Fix**: switched `infer_enum_payload_kind` to use the broader
+`native_kind_from_concrete_type` (the full ConcreteType → NativeKind
+mapping). Per ADR-006 §2.7.17 receiver-recovery soundness,
+`jit_arc_result_payload` / `jit_arc_option_payload` extract the inner
+`KindedSlot.slot.raw()` verbatim — preserving the §2.7.5 carrier
+shape for every NativeKind variant. Post-extension, both arms of
+Smoke 1.5 are kinded: Ok = `Int64` (unchanged), Err = `String`
+(newly stamped).
+
+**Deletions at every layer** (per supervisor's "drop the kind-blind
+`_` arm body"):
+
+1. `_`-arm body in `mir_compiler/terminators.rs::compile_terminator`
+   print Call-terminator — replaced with `NotImplemented(SURFACE)`
+   error return.
+2. `jit_print` FFI body in `ffi/conversion.rs` — DELETED; replaced
+   with deletion-fate header comment naming the deleted W-series
+   `format_value_word` dispatch.
+3. `jit_print` symbol registration in
+   `ffi_symbols/object_symbols.rs::register_object_symbols`.
+4. `jit_print` declare_function in
+   `ffi_symbols/object_symbols.rs::declare_object_functions`.
+5. `print: FuncRef` field in `ffi_refs.rs::FFIFuncRefs`.
+6. `r!("jit_print")` lookup in `compiler/ffi_builder.rs::
+   build_ffi_refs`.
+
+The kind-blind fallback chain (operand → `jit_print` → deleted-W-
+series `format_value_word`) is removed at every layer, not just
+hidden behind a never-taken `_` arm.
+
+**Smoke matrix delta (post-reopen verification)**:
+
+| Smoke | Pre-reopen | Post-reopen |
+|---|---|---|
+| 1 (4950) | VM=JIT ✓ | VM=JIT ✓ unchanged |
+| 1.5 (`divide` + match → `5`) | VM=JIT ✓ via kind-blind fallback | VM=`5` / JIT=SURFACE §2.7.5 carrier-mismatch (Err arm String) |
+| 2-no-loop (`Some(3)`) | VM=JIT ✓ | VM=JIT ✓ unchanged |
+| 3 (`p.x + p.y` = 7) | VM=JIT ✓ | VM=JIT ✓ unchanged |
+| `print(Some(3))` top-level | VM=JIT ✓ | VM=JIT ✓ unchanged |
+| `print(Ok(5))` top-level | VM=JIT ✓ | VM=JIT ✓ unchanged |
+| `print("hello")` | SURFACE §2.7.5 | SURFACE §2.7.5 unchanged |
+| `print(Err("x"))` / `print(typed_object)` | SURFACE §2.7.5 | SURFACE §2.7.5 unchanged |
+
+**Smoke 1.5 regression rationale**: post-conduit-extension the
+Err-arm `print(e)` operand has `kind_hint = Some(String)` and
+reaches the existing §2.7.5 carrier-mismatch surface — the
+EnumPayload-derived String IS §2.7.5-correct (via
+`jit_arc_result_payload`), but the print dispatch cannot
+statically distinguish it from `MirConstant::Str`-derived NaN-box
+String at the per-operand level. Routing `NativeKind::String` to
+`jit_print_str` would runtime-segfault on string-literal paths,
+which would be worse than surfacing. The cluster-1
+`W12-jit-result-carrier-unification` scope migrates `box_string` /
+`box_typed_object` to §2.7.5 Arc-shape producers — after that
+lands, both EnumPayload-derived and `MirConstant::Str`-derived
+String slots share the §2.7.5 contract and the dispatch arm can
+be flipped without ambiguity. Smoke 1.5 regresses to honest
+SURFACE per supervisor's reopen spec: "Surface-and-stop or
+removed-as-dead-code. The fallback's existence past your close is
+the W-series walk-back the supervisor refuses on sight."
+
+**Sites surfaced — additional (cite-tracked)**:
+
+- (e) Pre-reopen Round 8A claim (d) — "kind-blind `jit_print`
+  fallback preserved per pre-8A Round 5C baseline" — was the
+  CLAUDE.md "Forbidden rationalizations" #1/#4/#5 framing
+  ("just one edge case" / "follow-up for later phase" /
+  "document as out-of-scope"). MEMORY.md "Own all code quality.
+  Never blame 'pre-existing' issues" applies. Refused on sight
+  per supervisor's reopen.
+
+- (f) Smoke 1.5 regression to SURFACE is the principled
+  consequence of dropping the W-series fallback in advance of the
+  cluster-1 carrier-unification scope. The pre-reopen "Smoke 1.5
+  passes" claim relied on the kind-blind fallback routing through
+  the deleted-W-series `format_value_word` — a Pyrrhic pass.
+
+**Close gates (post-reopen, devenv exit-code-verified)**:
+- `cargo check --workspace --lib --tests` EXIT=0
+- `cargo test -p shape-jit --lib` 335 passed / 0 failed / 26 ignored
+  (baseline 328 + 7 new heap-arm-print FFI round-trip tests)
+- `bash scripts/verify-merge.sh` EXIT=0 (Passed: 12 / Failed: 0)
+- `bash scripts/check-no-dynamic.sh` EXIT=0
+
+**ADR-006 amendment**: NOT required. The conduit extension is one
+more §2.7.5 producer-site classifier (EnumPayload destination at
+EnumPayload-emit time, using the full ConcreteType → NativeKind
+mapping per the §2.7.17 carrier-shape invariance). The `_`-arm
+deletion is mechanical W-series-fallback removal. The cluster-1
+`W12-jit-result-carrier-unification` arc remains the next step
+(named at Round 6A surfaced items).
 
 Branch: `bulldozer-strictly-typed-w12-jit-print-heap-arm-classification`
-Close commit: (pending — appended at merge)
+Original close commit: `1639148a` (pre-reopen)
+Reopen close commit: (pending — appended at merge)
 
 ## Cluster-0 close gate
 

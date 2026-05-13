@@ -520,83 +520,95 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                                     kind_hint,
                                 ));
                             }
-                            // ── Unproven kind / unwired heap arm: pre-
-                            //    existing kind-blind fallback (Round 5C
-                            //    baseline) ─────────────────────────────
+                            // ── NotImplemented(SURFACE): unproven kind /
+                            //    unwired heap arm ─────────────────────
                             //
-                            // Pre-existing Round 5C-and-earlier fallback
-                            // for operands whose `NativeKind` is `None`
-                            // (no producer-site proof reaching the JIT
-                            // consumer site). Round 7A's smoke 1.5 close
-                            // depends on this path because the §2.7.5
-                            // producer-site classification conduit for
-                            // EnumPayload-derived locals doesn't yet
-                            // stamp the destination slot's kind in every
-                            // shape (the `concrete_types` entry for the
-                            // matched local doesn't always reach
-                            // `infer_enum_payload_kind`'s `concrete_
-                            // types` parameter — a separate kind-source
-                            // gap tracked under cluster-1 §2.7.5 conduit
-                            // extension scope).
+                            // ADR-006 §2.7.5 / §2.7.7 #4 / #7. The kind-
+                            // blind `jit_print` fallback (which routed
+                            // through the deleted-W-series
+                            // `format_value_word` per `ffi/conversion.
+                            // rs` lines 200-217) was retired in Round 8A
+                            // verification (2026-05-13). Round 7A's
+                            // smoke 1.5 close depended on this fallback
+                            // because `infer_enum_payload_kind` used
+                            // the scalar-only `elem_slot_kind_for_
+                            // concrete` classifier, leaving `Err(String)`
+                            // / `Some(typed_object)` payload slots
+                            // without a kind stamp. Round 8A
+                            // verification extended that classifier to
+                            // the full `native_kind_from_concrete_type`
+                            // mapping (per §2.7.17 receiver-recovery
+                            // soundness — `jit_arc_*_payload` returns
+                            // the inner `KindedSlot.slot.raw()`
+                            // verbatim, preserving the §2.7.5 carrier
+                            // shape for every NativeKind variant). With
+                            // that extension the kinded arms above
+                            // catch every EnumPayload-derived print
+                            // operand on Smoke 1.5 — both Ok(I64) and
+                            // Err(String) reach their matching kinded
+                            // entry.
                             //
-                            // The fallback routes through the kind-blind
-                            // `jit_print` FFI which dispatches via
-                            // `format_value_word` (documented as the
-                            // deleted-W-series shape in `ffi/conversion.
-                            // rs` lines 200-217). It is retained PER
-                            // THE PRE-EXISTING BASELINE pending cluster-
-                            // 1 §2.7.5 producer-side migration. Removing
-                            // it without first migrating every callee's
-                            // kind source would regress Round 7A's
-                            // smoke 1.5 close gate — the inverse of the
-                            // W11-round-1 walk-back pattern.
+                            // Remaining `_`-arm operands are either:
+                            // - kind-source gaps upstream of the print
+                            //   site (the §2.7.5 conduit doesn't yet
+                            //   stamp every MIR shape — e.g. closure-
+                            //   return locals without `concrete_types`
+                            //   propagation), or
+                            // - heap arms beyond {Option, Result,
+                            //   String, TypedObject} not yet wired with
+                            //   per-kind FFI bodies (TypedArray,
+                            //   HashMap, HashSet, ...).
                             //
-                            // Heap arms beyond {Option, Result, String,
-                            // TypedObject} also flow here today (e.g.
-                            // TypedArray, HashMap, HashSet, etc.). The
-                            // cluster-2 follow-up surfaces additional
-                            // per-HeapKind kinded entries as carrier
-                            // migration lands. The §2.7.5 carrier-
-                            // unification arc (cluster-1) is the path
-                            // that shrinks this _-arm to "no proven
-                            // kind only" — the principled surface-and-
-                            // stop target.
+                            // Both are honest surface-and-stop cases.
+                            // No tag-decode, no Bool-default fallback
+                            // per CLAUDE.md "Forbidden rationalizations"
+                            // + "Renames to refuse on sight". The
+                            // pre-Round-8A "preserved baseline"
+                            // rationalization was itself the W-series
+                            // walk-back the supervisor refuses on
+                            // sight (CLAUDE.md "Just a small fallback
+                            // for this one edge case" / "Mark this as
+                            // a follow-up for a later phase").
                             _ => {
                                 if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
                                     eprintln!(
-                                        "[jit-mir] print: kind-blind \
-                                         fallback for operand NativeKind \
-                                         {:?} — pre-existing Round 5C \
-                                         baseline preserved pending \
-                                         cluster-1 §2.7.5 producer-side \
-                                         migration. Heap-arm kinded \
-                                         entries land per-kind in \
-                                         W12-jit-print-heap-arm-\
-                                         classification (Option/Result \
-                                         live; String/TypedObject \
-                                         surface-and-stop until \
-                                         cluster-1 carrier-unification \
-                                         migrates the producers; \
-                                         remaining heap arms tracked as \
-                                         cluster-2 follow-up).",
+                                        "[jit-mir] print: SURFACE §2.7.5 \
+                                         — operand NativeKind not proven \
+                                         ({:?}) or unwired heap arm. \
+                                         ADR-006 §2.7.5 / §2.7.7 #4 / \
+                                         #7 — extend producer-site \
+                                         classification at the upstream \
+                                         MIR shape (the §2.7.5 conduit's \
+                                         producing-site walk) or wire \
+                                         the kinded FFI body for the \
+                                         heap kind. No kind-blind \
+                                         fallback per CLAUDE.md \
+                                         \"Forbidden rationalizations\".",
                                         kind_hint,
                                     );
                                 }
-                                let val_ty = self.builder.func.dfg.value_type(val);
-                                let widened = if val_ty == types::I64 {
-                                    val
-                                } else if val_ty == types::F64 {
-                                    self.builder
-                                        .ins()
-                                        .bitcast(types::I64, MemFlags::new(), val)
-                                } else if val_ty == types::I32 {
-                                    self.builder.ins().sextend(types::I64, val)
-                                } else if val_ty == types::I8 {
-                                    self.builder.ins().uextend(types::I64, val)
-                                } else {
-                                    val
-                                };
-                                self.builder.ins().call(self.ffi.print, &[widened]);
+                                return Err(format!(
+                                    "Route A surface-and-stop: \
+                                     NotImplemented(SURFACE) — \
+                                     `print` Call-terminator operand \
+                                     NativeKind is {:?}; either the \
+                                     §2.7.5 producer-site \
+                                     classification conduit doesn't \
+                                     stamp this operand's kind at the \
+                                     upstream MIR shape (extend \
+                                     `infer_*_kind` for that shape per \
+                                     §2.7.5 / §2.7.7 #4), or the heap \
+                                     arm isn't wired with a per-kind \
+                                     `jit_print_<heap_kind>` FFI body. \
+                                     The pre-Round-8A kind-blind \
+                                     `jit_print` fallback was retired \
+                                     in Round 8A verification per \
+                                     CLAUDE.md \"Forbidden \
+                                     rationalizations\" (\"just a small \
+                                     fallback for this one edge case\" \
+                                     refused on sight).",
+                                    kind_hint,
+                                ));
                             }
                         }
 

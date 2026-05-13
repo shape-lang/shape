@@ -10,7 +10,7 @@ use cranelift_module::{FuncId, Linkage, Module};
 use std::collections::HashMap;
 
 use super::super::ffi::conversion::{
-    jit_print, jit_print_bool, jit_print_f64, jit_print_i64, jit_print_option,
+    jit_print_bool, jit_print_f64, jit_print_i64, jit_print_option,
     jit_print_result, jit_print_str, jit_print_typed_object, jit_string_concat,
     jit_to_number, jit_to_string, jit_type_check, jit_typeof,
 };
@@ -139,7 +139,12 @@ pub fn register_object_symbols(builder: &mut JITBuilder) {
         "jit_arc_option_release",
         super::super::ffi::result::jit_arc_option_release as *const u8,
     );
-    builder.symbol("jit_print", jit_print as *const u8);
+    // `jit_print` (kind-blind) symbol DELETED — see ffi/conversion.rs
+    // header comment. The MIR-side Call-terminator dispatch surfaces-
+    // and-stops on `_` arm rather than routing through the deleted
+    // W-series shape (W12-jit-print-heap-arm-classification reopen,
+    // 2026-05-13).
+    //
     // W11-jit-new-array (ADR-006 §2.7.5 stamp-at-compile-time): per-kind
     // print entry points dispatched by the MIR-side print emitter when
     // the operand's `NativeKind` is statically known. Replaces the
@@ -682,15 +687,11 @@ pub fn declare_object_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<
         ffi_funcs.insert(name.to_string(), func_id);
     }
 
-    // jit_print(value_bits: u64) -> void
-    {
-        let mut sig = module.make_signature();
-        sig.params.push(AbiParam::new(types::I64)); // value_bits
-        let func_id = module
-            .declare_function("jit_print", Linkage::Import, &sig)
-            .expect("Failed to declare jit_print");
-        ffi_funcs.insert("jit_print".to_string(), func_id);
-    }
+    // `jit_print` (kind-blind) declare_function DELETED in
+    // W12-jit-print-heap-arm-classification reopen (2026-05-13). See
+    // `ffi/conversion.rs` header comment + the MIR-side Call-terminator
+    // dispatch's `_`-arm surface-and-stop.
+
 
     // W11-jit-new-array kinded print entries (ADR-006 §2.7.5).
     // jit_print_i64(value: i64) -> void

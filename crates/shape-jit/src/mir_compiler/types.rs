@@ -831,6 +831,36 @@ fn infer_rvalue_kind_with_projections(
 ///   the raw inner-Arc bits and the destination slot kind would be a
 ///   Ptr; the §2.7.5 conduit hasn't yet stamped Ptr arms for inner
 ///   types but the upcoming 6A propagation does).
+/// Project an `EnumPayload` Rvalue to the destination slot's `NativeKind`
+/// per ADR-006 §2.7.5 producing-site classification + §2.7.17 receiver-
+/// recovery soundness.
+///
+/// `jit_arc_result_payload` / `jit_arc_option_payload` extract the inner
+/// `KindedSlot.slot.raw()` from the typed-Arc carrier. The returned bits
+/// preserve the inner's §2.7.5 carrier shape verbatim — for an `Int64`
+/// inner the bits are raw native i64; for a `String` inner the bits are
+/// `Arc::into_raw(Arc<String>) as u64`; for a `Ptr(HeapKind::*)` inner
+/// the bits are the corresponding typed-Arc raw pointer.
+///
+/// This classifier uses `native_kind_from_concrete_type` (the full
+/// ConcreteType → NativeKind mapping) rather than the more restrictive
+/// `elem_slot_kind_for_concrete` (which only handles scalar arms for the
+/// v2 typed-array fast path) because the inner carrier coming out of
+/// `jit_arc_*_payload` IS the §2.7.5-shaped raw bits + kind label for
+/// every NativeKind variant. Pre-Round-8A this used the scalar-only
+/// classifier, which left `Err(String)` / `Some(typed_object)` payload
+/// slots without a kind stamp; the consumer-side print dispatch then
+/// surfaced as `kind_hint = None` and routed through the kind-blind
+/// `jit_print` fallback — the W-series defection pattern this round
+/// closes.
+///
+/// Returns `None` only when:
+/// - operand isn't a `Place::Local` projection — no `concrete_types[idx]`
+///   to read (e.g. `Operand::Constant(_)`),
+/// - the operand slot's ConcreteType isn't `Result(_,_)` / `Option(_)` —
+///   producer-side gap upstream of EnumPayload,
+/// - the arm's inner ConcreteType is `Void` (None variant of an Option,
+///   or unmatched Err arm of an Ok-only Result) — no payload exists.
 fn infer_enum_payload_kind(
     operand: &Operand,
     variant: VariantTag,
@@ -850,7 +880,7 @@ fn infer_enum_payload_kind(
         // None has no payload — kind isn't meaningful.
         _ => return None,
     };
-    elem_slot_kind_for_concrete(inner)
+    native_kind_from_concrete_type(inner)
 }
 
 /// Infer the NativeKind of an operand.

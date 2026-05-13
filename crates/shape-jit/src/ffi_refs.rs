@@ -44,13 +44,19 @@ pub struct FFIFuncRefs {
     // `v2_array_push` dispatched by element byte size. Call sites that
     // lack a proven element kind surface-and-stop per §2.7.5.
     //
-    // Builtin print fallback (used by emit_print).
-    pub(crate) print: FuncRef,
+    // `print: FuncRef` (kind-blind builtin print fallback) DELETED in
+    // W12-jit-print-heap-arm-classification reopen (2026-05-13). Routed
+    // through the deleted-W-series `format_value_word` shape and was
+    // preserved "for one edge case" (Smoke 1.5's Err arm) — exactly the
+    // W-series walk-back CLAUDE.md "Forbidden rationalizations" refuses.
+    // The §2.7.5 producer-site classification conduit extension
+    // (`infer_enum_payload_kind` now uses `native_kind_from_concrete_type`)
+    // closes the kind-source gap; remaining `_`-arm operands at the
+    // print Call-terminator are NotImplemented(SURFACE).
+    //
     // W11-jit-new-array (ADR-006 §2.7.5): per-kind print entry points
     // dispatched by the MIR-side print emitter when the operand's
-    // `NativeKind` is statically known. The kind-blind `print` fallback
-    // is reserved for receivers whose kind the MIR could not prove
-    // (heap arms remain a §2.7.5 follow-up).
+    // `NativeKind` is statically known.
     pub(crate) print_i64: FuncRef,
     pub(crate) print_f64: FuncRef,
     pub(crate) print_bool: FuncRef,
