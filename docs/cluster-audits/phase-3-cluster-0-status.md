@@ -4409,9 +4409,179 @@ Audit doc: `docs/cluster-audits/w12-option-b-reframed-audit.md`.
 
 ---
 
-*Next session: read this file first, then continue with Round 17
-dispatch (supervisor disposition between B' / B'' / A-§2.7.7 / status-
-quo per W12-Option-B-reframed audit §8; W17-narrow-follow-up-A +
-W17-narrow-follow-up-B may close in parallel if territory remains
-non-overlapping). After Round 17 merges, full 4-kickoff-smoke matrix
-re-verification; if Smokes 2 + 3 close JIT, cluster-0 close report.*
+## Round 17 — W12-typed-array-data-deletion close (AUDIT-ONLY, 2026-05-13)
+
+Phase 3 cluster-0 Round 17 sub-cluster
+`W12-typed-array-data-deletion-audit` — strategic-owner-authorized
+aggressive deletion of `TypedArrayData` enum + `TypedBuffer<T>`
+wrapper layer; `TypedArray<T>` flat struct becomes the universal
+`Array<T>` carrier. The Round 16 W12-Option-B-reframed audit named
+the dual-carrier reality (`Arc<TypedArrayData>` Arc-wrapped enum vs
+`*mut TypedArray<T>` 24-byte flat struct as runtime peers selected
+at bytecode-emission time, not convertible variants). Round 17
+authorized deletion of one side.
+
+Branch `bulldozer-strictly-typed-w12-typed-array-data-deletion-audit`,
+parent `aa5de4ab` (post-Round-16 A+C merge HEAD).
+
+**Audit-only close.** Zero source changes per supervisor's
+audit-only mandate. Deliverables (a-h) landed in
+`docs/cluster-audits/w12-typed-array-data-deletion-audit.md`.
+
+### Phase 1 findings
+
+**(a) Per-variant migration disposition** (audit §2): all 22 live
+`TypedArrayData` variants classified into three buckets —
+
+- **Clean (12 scalar variants)**: I64/F64/Bool/I8/I16/I32/U8/U16/
+  U32/U64/F32/Char migrate to `TypedArray<T>` monomorphization
+  with mechanical 6-step recipe per kind (size-assert + tag-byte +
+  bytecode emission + VM handler + JIT FFI + element-type-tag
+  byte). 4 of 12 (`f64`/`i64`/`i32`/`u8`) already wired at
+  HEAD `aa5de4ab` — 8 new monomorphizations required.
+- **Clean with prereq (5 heap-element variants)**: String /
+  Decimal / BigInt / DateTime / Timespan / Duration / Instant
+  migrate to `TypedArray<*const <X>Obj>` once the v2-raw
+  `<X>Obj` carrier structs land. `StringObj` exists post-R12
+  W12-jit-string-carrier-unification close. `DecimalObj` /
+  `BigIntObj` / `TemporalObj` / `InstantObj` are new
+  monomorphizations.
+- **Structural-obstacle (2 heap-element variants)**: TypedObject /
+  TraitObject — `TypedObjectStorage` / `TraitObjectStorage` are
+  `Arc<>`-wrapped without `HeapHeader` at offset 0. Per-element
+  retain/release inside `TypedArray<T>` would have to use
+  `Arc::increment_strong_count` (-16 offset) vs `v2_retain`
+  (+0 offset) per-T — breaks retain-uniformity. Resolution:
+  defer until `TypedObjectStorage` v2-raw migration lands as own
+  cluster-level work order.
+- **Category-error (2 variants)**: `Matrix(Arc<MatrixData>)` is a
+  **single Matrix**, not a buffer-of-Matrix. The variant exists
+  because ADR-006 §2.7.22 Q23 (W15-matrix audit, 2026-05-10)
+  refused `HeapKind::Matrix` parallel discriminator under ADR-005
+  §1 single-discriminator. Under Round 17 deletion authorization
+  Q23's reasoning collapses: with `TypedArrayData::Matrix`
+  deleted there's no parallel HeapKind label. Audit recommends
+  Matrix exits the array-carrier hierarchy entirely via new
+  `HeapKind::Matrix = 34` + `HeapValue::Matrix(Arc<MatrixData>)`
+  arm. FloatSlice gets `HeapKind::MatrixSlice = 35`.
+
+**(b) "Keep TypedArrayData::X for one variant" refused on sight**
+per supervisor's framing. Every variant has named disposition or
+named structural obstacle with named resolution shape.
+
+**(c) HashMapValueBuf parallel-consideration verdict** (audit §5):
+same deletion principle applies. `HashMapData::values:
+HashMapValueBuf` migrates to `*mut TypedArray<V>` with per-V
+monomorphization. Same O-1/O-3/O-3a obstacles apply. **Separate
+cluster-1 deletion target with parallel migration shape — NOT
+cluster-0 scope.** Forward-visibility for cluster-1+ planning.
+
+**(d) Sub-cluster migration plan (S1-S5)** (audit §3):
+- **S1 — scalar-variant width pass** (12 variants, 1 session,
+  ~3-4k LoC mechanical).
+- **S2 — heap-element migration** (5 variants, ~2 sessions,
+  requires `<X>Obj` carrier structs to land in parallel).
+- **S3 — TypedObject/TraitObject migration** (gated on
+  O-3/O-3a resolution; defer until `TypedObjectStorage` v2-raw
+  migration lands as own cluster).
+- **S4 — Matrix/FloatSlice exit** to own HeapKinds (1 session,
+  ~3-4k LoC; supersedes ADR-006 §2.7.22 Q23 ruling).
+- **S5 — `TypedArrayData` enum + `TypedBuffer<T>` actual
+  deletion** (0.5 session, ~2-3k LoC subtractive).
+
+**Deprecation cadence**: per-variant `#[deprecated]` annotations
+land in matching S1-S4 closes; S5 deletes the enum in full.
+
+**(e) Drafted §2.7.24 Q25.A amendment text** (audit §6, NOT
+committed in this audit; commits in S5 close with enum deletion).
+Q25.B parallel text drafted for cluster-1 HashMapValueBuf
+deletion. Q25.A's framing retired: "TypedArrayData with per-built-
+in-heap-type specialized variants" → "`TypedArray<T>` flat struct
+with per-T monomorphization at every layer (VM/JIT/snapshot/wire)
++ no runtime tag decode".
+
+**(f) Session-count estimate** (audit §3.7): **floor 4 sessions,
+ceiling 6 sessions** at Phase 2d post-audit production-first
+cadence (~3 sub-clusters/session). Ceiling triggered if O-3
+resolution requires multi-week `TypedObjectStorage` v2-raw
+migration as own cluster-level work order before S3 lands.
+
+**(g) Structural obstacles surfaced for supervisor disposition**
+(audit §4):
+- **O-1** — DateTime/Timespan/Duration share `Arc<TemporalData>`
+  payload, distinguish at user-facing-type via enum variant tag.
+  Resolution options: O-1.a element-type-tag byte extension (ADR
+  §2.7.5 amendment) / O-1.b separate `<X>Obj` carriers per
+  semantic kind / O-1.c language-level merge.
+- **O-2** — F64 SIMD alignment. `AlignedTypedBuffer` uses
+  AlignedVec<f64>'s stricter alignment; `Layout::array::<f64>`
+  only gives 8-byte. Resolution options: O-2.a per-T alignment
+  parameter on `TypedArray<T>` (v2-spec amendment) / O-2.c
+  accept unaligned-load trade-off. **NOT O-2.b parallel
+  `AlignedTypedArray<f64>` carrier** — that's the carrier-duality
+  the deletion is solving.
+- **O-3 / O-3a** — TypedObject/TraitObject Arc-vs-HeapHeader.
+  Recommend O-3.c defer until `TypedObjectStorage` migration
+  lands as own cluster.
+- **O-4** — TypedBuffer<T>'s null-validity bitmap has no
+  `TypedArray<T>` equivalent. Clean resolution O-4.a: bitmap-
+  bearing path migrates to separate `ArrowBuffer<T>` v2-raw
+  shape (matches runtime-v2-spec.md §6.4 Arrow C Data
+  Interface long-term shape). TypedArray<T> stays at 24-byte
+  v2-spec contract.
+
+### CLAUDE.md amendment landed
+
+Per supervisor's verbatim ADDITIONAL DIRECTIVE, the
+"Parallel-implementation across producer/consumer carrier-shape
+boundaries" sub-section appended to "Forbidden Patterns" →
+"Renames to refuse on sight". Refuses "documented intentional
+duality" / "preserve both carriers" / "carrier unification via
+boundary deletion" applied as one-off patch / "per-variant
+unwrap-and-flatten" framing. Names 5-instance class history
+(W12-jit-string-carrier-unification R12, W17-jit-typed-object-arc-
+storage-migration R14, W12-Option-B R15, W12-Option-B-reframed
+R16, this audit R17). Names deletion target: `TypedArrayData`
+enum + `TypedBuffer<T>` wrapper layer; keep `TypedArray<T>` flat
+struct.
+
+### Close gates
+
+Zero source changes. Baseline gates verified pre-commit at HEAD
+`aa5de4ab`:
+- `cargo check --workspace --lib --tests` EXIT=0.
+- `bash scripts/verify-merge.sh` 12/12 PASS, EXIT=0.
+- `bash scripts/check-no-dynamic.sh` EXIT=0.
+
+### Defection-attractor class is now 5-instance
+
+- Round 12 (R12) W12-jit-string-carrier-unification: MirConstant::
+  Str producer migration.
+- Round 14 (R14) W17-jit-typed-object-arc-storage-migration: JIT
+  receiver_type_name NaN-box-decode vs VM-side raw-Arc-bits.
+- Round 15 (R15) W12-map-chained-option-b: literal Option B
+  prescription is no-op on producer.
+- Round 16 (R16) W12-Option-B-reframed: working hypothesis
+  "boundary conversion site" premise refuted; §2.7.14-A draft
+  mis-describes runtime reality.
+- Round 17 (R17, this audit) W12-typed-array-data-deletion:
+  strategic-owner-authorized whole-enum deletion target; per-
+  variant migration plan delivered; 4 structural obstacles
+  surfaced for supervisor disposition.
+
+CLAUDE.md amendment binding per supervisor's 2026-05-13
+recurrent-pattern note. Audit doc:
+`docs/cluster-audits/w12-typed-array-data-deletion-audit.md`.
+
+---
+
+*Next session: read this file first, then continue with Round 18
+dispatch — supervisor disposition required on O-1 (DateTime/
+Timespan/Duration semantic-kind disambiguation), O-2 (F64 SIMD
+alignment), O-3/O-3a (TypedObject/TraitObject Arc-vs-HeapHeader),
+and S4-Matrix-exit ratification (new `HeapKind::Matrix = 34` /
+`HeapKind::MatrixSlice = 35` ordinal assignments superseding
+ADR-006 §2.7.22 Q23). Sub-cluster S1 (scalar width pass) can
+dispatch immediately if F64 is not in S1 scope (otherwise depends
+on O-2). HashMapValueBuf parallel deletion (Q25.B) surfaces as
+cluster-1+ work order, NOT cluster-0 scope.*

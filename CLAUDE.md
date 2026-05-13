@@ -278,6 +278,36 @@ These are specific phrases past sessions used to dress up dynamic dispatch and m
 
 Tags don't exist post-strict-typing. Calling deleted code a "bridge" or "probe" or "helper" or "translator" between tagged and untagged forms perpetuates the wrong-architecture framing the W-series was an attempt to formalize — same defection-attractor family as the entries above. Describe deleted code by name (`tag_bits::is_tagged`, `synthesize_value_word_from_raw`) or by deletion-fate (`the deleted W-series pattern`), never by hypothetical role.
 
+#### Parallel-implementation across producer/consumer carrier-shape boundaries
+
+Defection-attractor framings refused on sight:
+
+- "Documented intentional duality" / "preserve both carriers, one for VM
+  side and one for JIT side" / "two solutions for two different problems"
+  — without explicit ADR amendment naming the duality + a compile-time
+  classification rule selecting between them, this is the parallel-
+  implementation pattern dressed as a feature.
+- "Carrier unification via boundary deletion" (delete one entirely OR
+  delete the conversion) when applied as a one-off patch rather than as
+  systematic producer migration.
+- "Per-variant unwrap-and-flatten" / "conversion at the FFI boundary" /
+  any bridge/probe/helper/hop/translator/adapter/shim descriptor implying
+  the carriers meet at a structural-equivalence layer — refuse per the
+  broader-family rule already established.
+
+Instances surfaced and resolved in cluster-0 (2026-05-12 to 2026-05-13):
+
+- W12-jit-string-carrier-unification (R12): MirConstant::Str producer
+  migration
+- W17-jit-typed-object-arc-storage-migration (R14 audit): JIT
+  receiver_type_name NaN-box-decode vs VM-side raw-Arc-bits
+- W12-Option-B (R15 audit) / W12-Option-B-reframed (R16 audit):
+  TypedArray<T> flat struct vs Arc<TypedArrayData::T> Arc-enum, including
+  supervisor-drafted §2.7.14-A text repeating the conflation
+- Deletion target: TypedArrayData enum + TypedBuffer<T> wrapper layer;
+  keep TypedArray<T> flat struct (cluster-0 close prerequisite per
+  strategic-owner authorization 2026-05-13)
+
 ### Why this matters
 
 The `v2-nanbox-removal-plan.md` Step 6 ("delete `ValueWord`") was quietly downgraded mid-execution to "ValueBits shim retained as documented FFI-boundary bridge". That single rename converted a one-time deletion into permanent maintenance debt: 2,650-line `ValueWord` module preserved, plus 9 W-series commits of decode bridges, plus 4 deferred v2-raw-heap aliasing tests, plus 23 ignored shape-jit tests, plus ~48 shape-test failures in the same bug class. Estimated cost of the rename: 4–6 weeks of cumulative cleanup. Don't repeat it.
