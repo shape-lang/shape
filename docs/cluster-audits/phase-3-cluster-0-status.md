@@ -1206,6 +1206,97 @@ deletion is mechanical W-series-fallback removal. The cluster-1
 Branch: `bulldozer-strictly-typed-w12-jit-print-heap-arm-classification`
 Original close commit: `1639148a` (pre-reopen)
 Reopen close commit: (pending — appended at merge)
+### W12-jit-collection-method-dispatch-abi close (2026-05-13)
+
+**Closed audit-only — option (iii) surfaced for supervisor scope decision.**
+Audit doc at `docs/cluster-audits/w12-jit-collection-method-dispatch-abi-
+audit.md` (12 sections).
+
+**Load-bearing scope refinement (audit §2.1)**: The dispatch's described
+trinity item (iii) ("per-HeapKind kinded MethodFnV2 entries on JIT side")
+is **not required**. The VM-side handlers in
+`crates/shape-vm/src/executor/objects/method_registry.rs` are already
+kinded per ADR-006 §2.7.10/Q11 (`fn(&mut VM, &[KindedSlot], _) ->
+Result<KindedSlot, VMError>`). All 8 collection HeapKinds have full PHF
+maps with ~73 method entries (HashSet=14, HashMap=22, Deque=11, PQ=9,
+Channel=6, Mutex=4, Atomic=5, Lazy=2). The JIT-side dispatch shell does
+not need to mirror these handlers; it needs to **delegate** to the VM's
+existing kinded dispatch via a new public
+`VirtualMachine::jit_trampoline_call_method` API, structurally identical
+to the existing `jit_trampoline_call_closure` at
+`crates/shape-vm/src/executor/call_convention.rs:953`.
+
+**Corrected scope estimate (audit §10.1)**: ~1310 LoC across ~9 files
+including a **cross-crate** shape-vm public-API addition. The dispatch's
+"Touch points" did not anticipate the cross-crate API extension.
+
+| Item | LoC | Files |
+|---|---|---|
+| 8 typed-Arc ctor FFI bodies | ~150 | `ffi/v2/collection_ctors.rs` (NEW) |
+| 16 retain/release FFI bodies | ~200 | `ffi/v2/collection_arc_refcount.rs` (NEW) |
+| `jit_call_method` shell rebuild | ~150 | `ffi/call_method/mod.rs` (edit) |
+| New `VirtualMachine::jit_trampoline_call_method` | ~120 | `executor/call_convention.rs` — **CROSS-CRATE** |
+| EnumStore consumer collection_ctor arm | ~80 | `mir_compiler/statements.rs` (edit) |
+| Symbol registration (24 symbols) | ~80 | `ffi_symbols/v2_symbols.rs` (edit) |
+| FuncRef slots (24 fields) | ~60 | `ffi_refs.rs` (edit) |
+| `r!(...)` lookups (24 entries) | ~40 | `compiler/ffi_builder.rs` (edit) |
+| `retain_func_for_place` / `release_func_for_place` extension | ~30 | `mir_compiler/` (edit) |
+| Tests | ~400 | new test modules |
+| **Total** | **~1310 LoC** | **~9 files** |
+
+**Disposition (audit §11)**: At the high end of a single-round budget
+(1.5×-2× Round 7A's ~800 LoC). The dispatch instruction explicitly
+allows audit-only close *"If your audit also finds that the integrated
+trinity scope exceeds a single round's reasonable budget"*.
+
+**Recommended split (audit §10.2)**:
+- **8B.1 W12-jit-collection-arc-ffi-ctors-and-refcount** (~580 LoC,
+  ~5 files): 8 typed-Arc ctor FFI bodies + 16 kinded retain/release
+  pairs + 24 symbol/FuncRef/lookup registrations + retain/release
+  helper extension. Close criterion: workspace check + FFI round-trip
+  tests; does NOT close Smoke 4 (EnumStore consumer still surfaces).
+- **8B.2 W12-jit-call-method-shell-rebuild** (~730 LoC, ~4 files):
+  new `VirtualMachine::jit_trampoline_call_method` cross-crate API +
+  `jit_call_method` shell rebuild reading from `stack_kinds` +
+  EnumStore consumer collection_ctor arm dispatching to 8B.1's ctors.
+  Close criterion: Smoke 4 + HashMap + Mutex VM == JIT.
+
+**Carrier-shape table (audit §5)**: typed-Arc collections use
+`Arc::into_raw(Arc<XData>) as u64` (Arc internal refcount at offset
+-16); W11 TypedArray family uses `Box::into_raw(Box::new(UnifiedValue<T>))`
+(HeapHeader at offset 4); Round 7A Result/Option family uses Arc shape
+matching this audit. Mixing carrier shapes corrupts refcounts and
+segfaults at retain/release sites — load-bearing per Round 7A bug
+finding (`9f27edcd`).
+
+**Sites surfaced (audit §8)**:
+1. `jit_call_method` shell — load-bearing for Smoke 4 + HashMap + Mutex.
+2. `dispatch_method_via_trampoline` extern-C `todo!()` — orthogonal
+   structured-error fix becomes unnecessary if shell rebuild lands.
+3. Missing `VirtualMachine::jit_trampoline_call_method` public API —
+   cross-crate boundary not in dispatch's touch-points list.
+4. EnumStore consumer arm at `mir_compiler/statements.rs:239-268`.
+5. `retain_func_for_place` / `release_func_for_place` 8-arm extension.
+6. HashMap K/V kind threading is **not** an ADR-amendment trigger —
+   per-arg kinds come from dispatch-shell carrier slice; HashMapData
+   stores `Arc<HeapValue>` values heterogeneously.
+7. Lazy's `l.get()` closure-call path inherits `call_value_immediate_nb`
+   via the delegation chain — no additional JIT-side wiring needed.
+
+**ADR-006 amendment**: NOT required. The §2.1 delegation insight means
+the JIT side does not need any new ABI shape; the §2.7.10/Q11 ABI is
+correctly specified end-to-end on the VM side; the JIT crosses into
+the VM's existing kinded dispatch entry.
+
+**Close gates (audit is doc-only, no regressions)**:
+- `bash scripts/verify-merge.sh` 12/12 Passed (devenv shell).
+- `bash scripts/check-no-dynamic.sh` EXIT=0 (devenv shell).
+- Smoke 4 / HashMap / Mutex smokes UNCHANGED — Round 6C/7B clean
+  SURFACE state preserved under `--mode jit`; VM mode prints correct
+  values.
+
+Branch: `bulldozer-strictly-typed-w12-jit-collection-method-dispatch-abi`
+Parent: `267b1ca2` (post-Round-7B + Round 8 dispatch metadata)
 
 ## Cluster-0 close gate
 
