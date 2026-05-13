@@ -1972,6 +1972,64 @@ If any of 11A / 11D / trinity surfaces a sixth gap, Round 12. The N+1
 expansion has been honest principled surfacing every round; same
 discipline holds.
 
+## Round 11 post-merge smoke matrix verification (2026-05-13)
+
+All three Round 11 sub-clusters merged into `bulldozer-strictly-typed`:
+- 11A `e550ae6f` (op_new_array kinded reentry)
+- 11D `863fcdf5` (MIR mutation-writeback)
+- Trinity `80de14ce` (ConcreteType taxonomy + method-return conduit + Rvalue::Aggregate)
+
+Post-merge `bash scripts/verify-merge.sh` 12/12 inside devenv. CLI rebuilt
+and full smoke matrix re-run.
+
+### Smoke matrix (post-Round-11)
+
+| Smoke | VM | JIT | Round 11 delta | Round 12 candidate |
+|---|---|---|---|---|
+| 1 (kickoff) `for i in 0..100 { sum = sum+i }` → 4950 | ✅ 4950 | ✅ 4950 | unchanged | passing |
+| 2 partial `[1,2,3].sum()` → 6 | ❌ T4 | ✅ 6 | **JIT NEW** (trinity Part b conduit) | T4 (VM intrinsic) |
+| 2 full `.map(\|x\|x*2).sum()` → 30 | ❌ T5 | ❌ downstream | both blocked | T5 + downstream |
+| 3 (kickoff) trait `t.name()` → "x" | ✅ x | ❌ T1 | unchanged | T1 |
+| 4 (kickoff) `let mut s = Set(); .add; .size` → 2 | ✅ 2 | ❌ T2/T3 | mutation-writeback fix verified via Deque + PriorityQueue | T2/T3 |
+
+### Round 12 candidates (surfaced by Round 11)
+
+**(T1) `W12-jit-trait-dispatch-return-kind`** — JIT-side conduit extension
+for trait-method return kinds. Surfaced by trinity Part c: Aggregate path
+unblocked exposes the next-layer trait-dispatch return-kind classification.
+Required for kickoff Smoke 3 JIT.
+
+**(T2/T3) `W12-jit-string-carrier-unification`** — JIT-side producer
+migration for `MirConstant::Str`. `box_string(s)` currently emits
+`UnifiedValue<Arc<String>>` NaN-box; §2.7.5 contract is raw
+`Arc::into_raw(Arc<String>)`. VM-side handlers consume per the §2.7.5
+contract → carrier-mismatch UB/segfault. Surfaced jointly by Round 8A
+(compile-time SURFACE for `print("hello")`) + Round 11D (runtime segfault
+for `s.add("a")`). Required for kickoff Smoke 4 JIT + Smoke 3 JIT (when
+trait method returns String).
+
+**(T4) `W17-vm-intrinsic-sum-wave-5d-migration`** — VM-side intrinsic body
+migration for `IntrinsicSum`. Phase-1B wave-5d `todo!()` at
+`crates/shape-vm/src/executor/vm_impl/builtins.rs:471-520`. Surfaced by
+11A: now that `op_new_array` works, `.sum()` invocation reveals the
+unmigrated intrinsic body. Required for kickoff Smoke 2 VM.
+
+**(T5) `W17-vm-call-value-closure-kind-mismatch`** — VM-side
+`call_value_immediate_nb` kind-mismatch at
+`crates/shape-vm/src/executor/call_convention.rs:798`:
+`HeapKind::Closure label with non-ClosureRaw HeapValue payload: "string"`.
+Fires when `xs.map(|x|x*2)` invokes the closure with `xs` as a V2 typed-
+int-array (`NativeKind::UInt64`). Pre-existing kind-source bug at method-
+dispatch tier; surfaced by 11A `op_new_array` fix revealing it downstream.
+Required for kickoff Smoke 2 full VM.
+
+### Cluster-0 close criterion status
+
+3 of 4 kickoff smokes still blocked under JIT or VM (or both). N+1
+trajectory expansion holds: Round 12 absorbs T1/T2/T3/T4/T5 (4 sub-clusters
+if T2 and T3 merge). Cluster-0 close attempt projected for post-Round-12
+merge if all 4 kickoff smokes pass VM == JIT.
+
 ## Cluster-0 close gate
 
 Per phase-3-kickoff-prompt §"Cluster-0 sub-cluster sequencing":
