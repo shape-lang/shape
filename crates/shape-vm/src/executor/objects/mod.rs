@@ -405,12 +405,15 @@ impl VirtualMachine {
 
         // Resolve method name. The string pool index was offset-fixed
         // at link time (`executor/mod.rs:883`), so direct indexing is
-        // always in-range for a well-formed program.
-        let method_name: &str = self
+        // always in-range for a well-formed program. We clone into an
+        // owned `String` to release the immutable borrow on
+        // `self.program.strings` before the `dispatch_method_kinded`
+        // call below takes a mutable borrow on `self`.
+        let method_name: String = self
             .program
             .strings
             .get(string_id)
-            .map(|s| s.as_str())
+            .cloned()
             .ok_or_else(|| {
                 VMError::RuntimeError(format!(
                     "op_call_method: string_id {} out of bounds (pool size {})",
@@ -419,16 +422,11 @@ impl VirtualMachine {
                 ))
             })?;
 
-        // Classify the receiver and resolve the handler. UFCS / unknown
-        // is signalled by `Ok(None)` from the resolver so the helper can
-        // fall back to a user-defined function lookup before raising
-        // `RuntimeError`.
-        let handler = self.resolve_method_handler(&args, method_name)?;
-
-        // Dispatch — borrow-only ABI per §2.7.10 / Q11. The handler
-        // borrows each KindedSlot; share ownership stays with the
-        // carriers in `args`.
-        let result = handler(self, &args, ctx)?;
+        // Classify the receiver, resolve the handler, and dispatch via
+        // the shared `dispatch_method_kinded` entry — borrow-only ABI per
+        // §2.7.10 / Q11. The handler borrows each KindedSlot; share
+        // ownership stays with the carriers in `args`.
+        let result = self.dispatch_method_kinded(&args, &method_name, ctx)?;
 
         // Transfer the result share onto the kinded stack. The result
         // carrier is forgotten so its Drop does not double-release.
@@ -440,6 +438,38 @@ impl VirtualMachine {
         // `Arc::decrement_strong_count::<T>` arm — no bare vw_drop
         // (forbidden), no Bool-default fallback (forbidden §2.7.7 #9).
         Ok(())
+    }
+
+    /// Shared method-dispatch entry: resolve the handler via
+    /// [`resolve_method_handler`](Self::resolve_method_handler) and call
+    /// it with the kinded carrier slice.
+    ///
+    /// Two callers consume this entry:
+    ///
+    /// 1. `op_call_method` (above) — VM-side dispatch shell after popping
+    ///    the receiver + args from the §2.7.7 stack parallel-kind track.
+    /// 2. `jit_trampoline_call_method` (in
+    ///    `crates/shape-vm/src/executor/call_convention.rs`) — the
+    ///    §2.7.5 cross-crate stable-FFI consumer that converts the JIT's
+    ///    pair-slice form into `&[KindedSlot]` carriers and delegates
+    ///    here for the actual dispatch.
+    ///
+    /// `args[0]` is the receiver, `args[1..]` are the call args. Every
+    /// entry's `kind` came from the §2.7.7 parallel-kind track at the
+    /// producing site — no fabrication. The handler borrows each
+    /// `KindedSlot` (§2.7.10 / Q11 borrow-only ABI); share ownership
+    /// stays with the carriers at the caller. The returned `KindedSlot`
+    /// owns its result share — the caller pushes it onto the stack or
+    /// transfers it across the FFI boundary, then `mem::forget`s the
+    /// returned carrier to balance refcounts.
+    pub(crate) fn dispatch_method_kinded(
+        &mut self,
+        args: &[KindedSlot],
+        method_name: &str,
+        ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+    ) -> Result<KindedSlot, VMError> {
+        let handler = self.resolve_method_handler(args, method_name)?;
+        handler(self, args, ctx)
     }
 
     /// Resolve a method handler from `(receiver_kind, method_name)`.

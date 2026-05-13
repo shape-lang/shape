@@ -1735,6 +1735,221 @@ deeper gaps for cluster-1.
 
 ---
 
+### W12-jit-call-method-shell-rebuild close (2026-05-13)
+
+**Branch**: `bulldozer-strictly-typed-w12-jit-call-method-shell-rebuild`
+**Round**: 10 / 8B.2 (standalone per supervisor sequential split from
+Round 8B audit's §10.2 sub-cluster split).
+
+#### Smoke matrix delta
+
+| Smoke | Pre-Round-10 | Post-Round-10 | Status |
+|---|---|---|---|
+| `Set()` + `print(size)` (non-mutating) | JIT SURFACE at EnumStore consumer | VM=0 / JIT=0 ✓ | **EQUIVALENCE landed** |
+| Smoke 4 — `Set()` + `add("a")` + `add("b")` + `print(size)` | JIT SURFACE at EnumStore consumer | VM=2 / JIT crashes after 2nd add | **BLOCKED by surfaced gap (A)** |
+| HashMap — `HashMap()` + `set(k,v)` + `print(size)` | JIT SURFACE at EnumStore consumer | VM=1 / JIT crashes | **BLOCKED by surfaced gap (A)** |
+| Mutex — `Mutex(42)` + `print(m.get())` | JIT SURFACE at EnumStore consumer | VM=42 / JIT SURFACE at print-operand-kind-None | **BLOCKED by surfaced gap (B)** |
+
+The Round 10 dispatch shell + EnumStore consumer + VM trampoline +
+slot-kind inference all land functional — verified by the
+non-mutating Set smoke achieving VM == JIT equivalence at `0`. The
+remaining smoke failures fall into two pre-existing MIR-level gaps
+surfaced upstream of the dispatch-ABI rebuild.
+
+#### Close-gate exit codes
+
+- `cargo check --workspace --lib --tests` (inside devenv shell): **EXIT=0**
+- `cargo test -p shape-jit --lib`: **361 passed; 0 failed; 26 ignored**
+  (matches Round 9 baseline 361)
+- `bash scripts/check-no-dynamic.sh`: **EXIT=0**
+- `bash scripts/verify-merge.sh`: **12/12 passed**
+
+#### Files touched
+
+- `crates/shape-vm/src/executor/call_convention.rs` — NEW pub fn
+  `jit_trampoline_call_method(method_name, (u64, NativeKind), &[(u64,
+  NativeKind)], ctx) -> Result<u64, VMError>` next to
+  `jit_trampoline_call_closure` (~80 LoC). Sibling §2.7.5 cross-crate
+  stable FFI consumer; converts pair-slices to `&[KindedSlot]`
+  internally then delegates to `dispatch_method_kinded`.
+- `crates/shape-vm/src/executor/objects/mod.rs` — NEW pub(crate) fn
+  `dispatch_method_kinded(&[KindedSlot], method_name, ctx)`
+  extracted from `op_call_method`'s post-pop dispatch body (~20 LoC).
+  Shared by `op_call_method` (VM dispatch shell) and the new
+  trampoline. `op_call_method` now clones method_name into an owned
+  `String` before the mutable dispatch call (releases the immutable
+  borrow on `self.program.strings`).
+- `crates/shape-jit/src/ffi/call_method/mod.rs` — Rebuild of
+  `jit_call_method` (~290 LoC). Reads receiver+args kinds from §2.7.7
+  `JITContext.stack_kinds` parallel-kind track via
+  `stack_kind_code::decode`. Delegates to `vm.jit_trampoline_call_method`
+  via `with_trampoline_vm_mut` when receiver kind is in the delegated
+  set (HashSet / HashMap / Deque / PriorityQueue / Channel / Mutex /
+  Atomic / Lazy / Result / Option / scalar kinds). Method-name pop
+  now uses the parallel-kind track's `NativeKind::String` stamp
+  (not the deleted `is_heap_kind(method_bits, HK_STRING)` NaN-box
+  probe — raw `Box::into_raw` pointers don't satisfy the NaN-box
+  shape under strict-typed unified-heap). Legacy JIT-format dispatch
+  (higher-order array methods + `call_*_method` cascade) preserved
+  under the `UInt64` carrier-kind fallback for opaque JIT bits.
+  **Deleted**: `dispatch_method_via_trampoline` extern-C `todo!()`
+  stub. **Deleted**: the `heap_kind(receiver_bits)`-driven NaN-box
+  cascade as the primary receiver discriminator (kept only as the
+  JIT-internal field-load on opaque-bits slots — a known-classified
+  heap-allocation field read, NOT a §2.7.7 #4/#7 forbidden
+  tag-decode for kind determination).
+- `crates/shape-jit/src/mir_compiler/statements.rs` — NEW
+  `emit_collection_ctor` helper (~150 LoC). Dispatches the EnumStore
+  consumer's collection_ctor arm to Round 9's 8 typed-Arc ctor
+  FuncRefs: `jit_v2_make_hashset` / `_hashmap` / `_deque` /
+  `_priorityqueue` / `_channel` (zero-arg), `jit_v2_make_atomic` /
+  `_lazy` (single-arg), `jit_v2_make_mutex` (carrier-pair with kind
+  code). The pre-Round-10 SURFACE-and-stop at lines 239-268 is
+  replaced with the dispatching arm.
+- `crates/shape-jit/src/mir_compiler/types.rs` — Two extensions to
+  `infer_slot_kinds_with_concrete`: (1) NEW `StatementKind::EnumStore`
+  arm stamps `NativeKind::Ptr(HeapKind::*)` for the 8 collection-ctor
+  variant names (override of the upstream `concrete_seed`'s
+  `Struct(_)` → `Ptr(TypedObject)` misclassification — the stdlib
+  defines Set/HashMap/etc. as typed structs but their typed-Arc
+  carriers per Round 9 do NOT use `Arc<TypedObjectStorage>` shape);
+  (2) NEW post-pass propagates collection kinds through
+  `Assign(dst, Use(Move/Copy(src)))` identity chains until fixpoint
+  (closes the seed-vs-EnumStore conflict for the user-visible
+  binding slot — pre-pass leaves `s` slot at `Ptr(TypedObject)` from
+  the seed while the EnumStore container slot is corrected to
+  `Ptr(HashSet)`).
+
+#### Decisions called
+
+1. **Pair-slice → KindedSlot conversion single-direction** at the
+   §2.7.5 FFI boundary, mirroring the `jit_trampoline_call_closure`
+   precedent. Forbidden alternatives refused on sight per §2.7.6/Q8
+   carrier-API-bound: parallel `&[NativeKind]` second-slice
+   parameter, `&mut [KindedSlot]` mutable form, `Vec<KindedSlot>`
+   by-move.
+
+2. **Lifetime accounting contrast with closure trampoline**: the
+   closure trampoline `mem::forget(kinded_args)` because args were
+   transferred into the callee frame's locals via
+   `stack_write_kinded`. Method dispatch's borrow-only PHF ABI does
+   NOT transfer shares — handlers borrow each `KindedSlot`. The
+   transient trampoline carriers therefore DO release on scope exit
+   to balance the JIT-side retain-before-crossing pattern. Documented
+   in the trampoline's docstring "Ownership" paragraph.
+
+3. **EnumStore producer-side classification override of
+   `concrete_seed`**: necessary because the bytecode compiler's
+   type-checker classifies stdlib-defined `Set` / `HashMap` / etc.
+   as typed structs. The `concrete_seed` then maps these to
+   `Ptr(TypedObject)`, which would route retain/release through
+   the legacy `arc_retain` / `arc_release` (operating on the
+   `UnifiedValue<T>` HeapHeader at offset 4) — wrong-carrier-shape
+   crash on `Arc<HashSetData>` payloads (audit §5 rule). Tracked as
+   `W17-collection-concrete-types` follow-up to extend `ConcreteType`
+   with `HashSet` / `Deque` / etc. arms so the bytecode compiler
+   gets these right at the source.
+
+4. **Trait-object reentry not preserved in the trampoline path**.
+   `op_call_method` includes a `TraitObject` early-return that
+   reconstructs an `Instruction` and routes to `op_dyn_method_call`.
+   The trampoline (called from JIT, no `Instruction` context) does
+   NOT replicate this — trait-object dispatch through the JIT path
+   surfaces (out of Round 10 scope; W17-trait-object-emission
+   territory).
+
+5. **Higher-order JIT array methods preserved** in the legacy path.
+   The `find` / `filter` / `map` / `reduce` etc. routes through
+   `jit_control_*` FFI bodies that invoke JIT-compiled closures via
+   the function table. Routing these through VM delegation would
+   lose this perf path; preserved under the `UInt64` carrier-kind
+   fallback guard. Migration to full kinded dispatch for JIT-format
+   arrays is W10 jit-playbook §5 / §2.7.4 territory.
+
+#### Surfaced items (separate workstreams)
+
+**(A) `W17-mir-mutation-writeback`** — MIR-level writeback for
+`MUT_SELF_*` methods is missing.
+
+The bytecode compiler at `crates/shape-vm/src/compiler/
+mutation_writeback.rs` emits `Dup; StoreLocal recv` post-`CallMethod`
+for mutating container methods (HashSet.add, HashMap.set, etc.) so
+the new Arc identity propagates back to the binding slot per ADR-006
+§2.7.27 / Item 4. The MIR builder at `crates/shape-vm/src/mir/
+lowering/expr.rs::Expr::MethodCall` (around line 1806) does NOT emit
+the equivalent `Assign(receiver_slot, Use(Move(temp)))` writeback.
+The JIT compiles from MIR, so under JIT execution
+`let mut s = Set(); s.add("a")` produces the new HashSet Arc into a
+fresh temp slot but `s` slot retains the OLD Arc bits. Next access
+to `s` operates on stale bits — when the post-CallMethod release
+fires on the temp slot, the new Arc gets retired; the old `s` slot
+still holds the old Arc which gets accessed on the next call,
+crashing if the underlying allocation was already freed.
+
+Fix scope: extend MIR lowering for `Expr::MethodCall` to consult
+`crates/shape-vm/src/executor/objects/method_registry::
+is_mut_self_method_name` (already `pub`) and emit a post-Call
+writeback `Assign(receiver_slot, Use(Move(temp)))` when the receiver
+is a `Local`. ~30 LoC of MIR lowering change + slot-mapping work to
+identify the binding-side `Local` from the receiver Expr.
+
+**(B) `W17-collection-concrete-types` / kind-inference for
+method-call returns** — Methods whose return kind varies by receiver
+type are not classifiable by `well_known_method_return_kind`.
+
+Specifically: `Mutex.get` returns the wrapped `T`, `HashMap.get`
+returns `Option<V>`, `Atomic.load` returns `i64`, etc. None of these
+have a kind that's invariant across receiver classes, so they can't
+go into `well_known_method_return_kind`. The destination slot of the
+CallMethod stays at `None` kind. Downstream `print(m.get())` then
+surfaces with "Call-terminator operand NativeKind is None" per the
+Round 8A print-kind discipline (§2.7.5 conduit gap).
+
+Fix scope: extend the `concrete_types` conduit to propagate inner-
+kind information for parametric container types (Mutex<T>, Atomic<T>,
+Lazy<T>, HashMap<K,V>, etc.) through method-call return-type
+inference. The bytecode compiler already has the inner-type
+information at the binding's TypeAnnotation; the MIR-side needs a
+new `ConcreteType` variant for these containers (currently absent —
+neither `ConcreteType::Mutex` nor `Atomic` nor `Lazy` exist in
+`crates/shape-value/src/v2/concrete_type.rs`). Tracked already in
+inline source comments at `types.rs`'s EnumStore arm.
+
+#### Forbidden frames refused on sight
+
+Per CLAUDE.md "Renames to refuse on sight" §2.7.10/Q11 + §2.7.11/Q12
+broader-family regex: deleted code is described by deletion-fate or
+by name, never via bridge/probe/helper/hop/translator/adapter/shim
+framing:
+
+- The deleted `dispatch_method_via_trampoline` extern-C `todo!()`
+  stub at `call_method/mod.rs:179-199` (described by name —
+  function name preserved in source comments).
+- The deleted kind-blind `heap_kind(receiver_bits)`-driven NaN-box
+  cascade as the primary receiver discriminator (described by
+  deletion-fate — the `match heap_kind(receiver_bits)` cascade at
+  the pre-rebuild lines 349-366).
+- The deleted `is_heap_kind(method_bits, HK_STRING)` method-name
+  validation (described by deletion-fate — the NaN-box discriminator
+  on raw `Box::into_raw` pointers that don't carry the JIT NaN-box
+  tag under strict-typed unified-heap; replaced by parallel-kind
+  track `NativeKind::String` stamp at `terminators.rs:243`).
+
+#### Cluster-0 Round 10 state
+
+- 8B.1 (Round 9): typed-Arc ctors + 16 kinded retain/release —
+  closed in Round 9 (`81acb62e` + merge `2bd103ac`).
+- 8B.2 (Round 10): shell rebuild + VM trampoline API + EnumStore
+  consumer + slot-kind inference — closed in this commit.
+- Smoke 4 / HashMap / Mutex equivalence: blocked by surfaced gaps
+  (A) and (B), tracked as separate workstreams. The dispatch-ABI
+  layer is functionally complete; the remaining gaps are at the
+  MIR-lowering tier (writeback) and the kind-inference conduit tier
+  (parametric-container return kinds), neither of which is in
+  W12-jit-call-method-shell-rebuild's scope per Round 8B audit.
+
+---
+
 *Next session: read this file first, then continue with Round-2
 close-out (or pivot per supervisor's call between cluster-1 hardening
 and cluster-2 Wave-3 surfaces).*

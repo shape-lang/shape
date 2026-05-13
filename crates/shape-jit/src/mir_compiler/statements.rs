@@ -207,64 +207,39 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             } => {
                 // Enum variant construction.
                 //
-                // W12-collection-constructor-mir-lowering (Phase 3 cluster-
-                // 0 Round 6C, 2026-05-12): the `EnumStore` MIR shape is
-                // also used by the primitive-collection ctor family
-                // (`Set` / `HashMap` / `Deque` / `PriorityQueue` /
-                // `Channel` / `Mutex` / `Atomic` / `Lazy`) per the
-                // W12-enum-constructor audit's §5.3 "reuse `EnumStore`
-                // with `kind`-on-the-slot threading" recommendation. The
-                // `variant_name` disambiguates enum-variant from
-                // collection-ctor. Surface-and-stop with a collection-
-                // ctor-specific cite for those names — both empty-args
-                // (`Set()` etc., `operands.is_empty()`) and with-arg
-                // (`Mutex(x)`, operands.len()==1) forms hit this path,
-                // because the typed-Arc allocation FFI for these
-                // kinds (Arc<HashSetData>/Arc<HashMapData>/Arc<MutexData>/
-                // ...) is not yet plumbed into the JIT-side FFI table.
-                // The bytecode/VM path is unaffected — bytecode-compile
-                // intercepts these names at AST time via
-                // `classify_builtin_function` and emits
-                // `OpCode::BuiltinCall(SetCtor)` etc., never reaching
-                // MIR-driven JIT codegen.
+                // W12-collection-constructor-mir-lowering (Phase 3
+                // cluster-0 Round 6C → Round 10, 2026-05-13): the
+                // `EnumStore` MIR shape is also used by the primitive-
+                // collection ctor family (`Set` / `HashMap` / `Deque` /
+                // `PriorityQueue` / `Channel` / `Mutex` / `Atomic` /
+                // `Lazy`) per the W12-enum-constructor audit's §5.3
+                // "reuse `EnumStore` with `kind`-on-the-slot threading"
+                // recommendation. The `variant_name` disambiguates
+                // enum-variant from collection-ctor. Round 10 wires
+                // each collection-ctor name to the Round 9 typed-Arc
+                // allocator FuncRef.
                 //
-                // ADR-006 §2.7.5 producer-side classification holds: the
-                // ctor kind is known here at MIR-emission time, threaded
-                // through `variant_name`, and the JIT honestly surfaces
-                // (not Bool-default fallback) when its consumer-side
-                // FFI is incomplete. Cross-boundary Arc-payload FFI is a
-                // future cluster-0+ workstream (see
-                // `docs/cluster-audits/w12-enum-constructor-audit.md`
-                // §8 "Sites surfaced" for the cite-tracked follow-up).
-                let is_collection_ctor = variant_name
-                    .as_deref()
-                    .map(is_collection_ctor_name)
-                    .unwrap_or(false);
-                if is_collection_ctor {
-                    let variant_label = variant_name.as_deref().unwrap_or("<missing>");
-                    return Err(format!(
-                        "EnumStore: SURFACE — primitive-collection \
-                         constructor '{}' (operands.len()={}) requires the \
-                         typed-Arc allocation FFI for its `HeapKind` \
-                         (`Arc<HashSetData>` / `Arc<HashMapData>` / \
-                         `Arc<MutexData>` / etc., per \
-                         `executor/vm_impl/builtins.rs:587-749`) plumbed \
-                         into the JIT FFI table — not yet landed at \
-                         W12-collection-constructor-mir-lowering. The \
-                         bare-form name is intercepted at MIR-emission \
-                         (ADR-006 §2.7.5 producer-side classification) \
-                         to avoid the pre-fix garbage-bits propagation \
-                         from `MirConstant::Function('{}')` → \
-                         `iconst(I64, 0)` callee bits → null-Arc method \
-                         dispatch; this surface is the honest equivalence-\
-                         ratchet step (no false answer, no segfault). \
-                         Tracked as future-cluster FFI work — \
-                         `docs/cluster-audits/w12-enum-constructor-audit.md` \
-                         §8 + §5.3 / ADR-006 §2.7.5.",
-                        variant_label,
-                        operands.len(),
-                        variant_label,
-                    ));
+                // ADR-006 §2.7.5 producer-side classification: the ctor
+                // kind is known here at MIR-emission time, threaded
+                // through `variant_name`, and dispatched to the
+                // matching `jit_v2_make_*` FFI body.
+                //
+                // Carrier shape (audit §4.1 + Round 9 binding): all
+                // entries return `Arc::into_raw(Arc<XData>) as u64`
+                // with the standard Rust Arc layout (refcount at
+                // offset -16). Retain/release on the receiver / result
+                // slots dispatches through Round 9's
+                // `retain_func_for_place` / `release_func_for_place`
+                // 8-arm extension keyed on the slot's proven
+                // `NativeKind::Ptr(HeapKind::*)`.
+                if let Some(name) = variant_name.as_deref() {
+                    if is_collection_ctor_name(name) {
+                        return self.emit_collection_ctor(
+                            name,
+                            *container_slot,
+                            operands,
+                        );
+                    }
                 }
                 // For unit variants (empty operands), the preceding
                 // `Assign(Aggregate)` short-circuit already left the slot
@@ -1137,6 +1112,152 @@ fn is_collection_ctor_name(name: &str) -> bool {
         name,
         "HashMap" | "Set" | "Deque" | "PriorityQueue" | "Channel" | "Mutex" | "Atomic" | "Lazy"
     )
+}
+
+impl<'a, 'b> super::MirToIR<'a, 'b> {
+    /// W12-jit-call-method-shell-rebuild Part 3 (Phase 3 cluster-0 Round
+    /// 10 / 8B.2, 2026-05-13): dispatch an `EnumStore` collection-ctor
+    /// arm to Round 9's typed-Arc allocator FuncRef.
+    ///
+    /// `name` is one of the 8 names in `is_collection_ctor_name`. The
+    /// allocator FuncRef shape:
+    ///
+    /// - Zero-arg: `Set` / `HashSet` / `HashMap` / `Deque` /
+    ///   `PriorityQueue` / `Channel` — call with `&[]`, store the
+    ///   resulting `Arc::into_raw(Arc<XData>) as u64` bits.
+    /// - Single-int: `Atomic(i64)` — compile the inner operand to its
+    ///   I64-widened raw payload bits, call with `&[bits]`.
+    /// - Single-closure: `Lazy(closure_bits)` — same shape as Atomic
+    ///   but the operand is a closure-kinded slot. The producer-side
+    ///   MIR classifier (`mir/lowering/expr.rs::is_bare_collection_ctor_with_arg`)
+    ///   validated the kind at emit time; the FFI body accepts raw
+    ///   u64 closure-Arc bits.
+    /// - Carrier-pair: `Mutex(bits, kind_code)` — compile the inner
+    ///   operand to its I64-widened raw payload bits, encode the
+    ///   operand's MIR-inferred kind into a `kind_code: u8` per
+    ///   §2.7.5 stamp-at-compile-time, call with `&[bits, kind_code]`.
+    ///
+    /// The container slot's old value is released via
+    /// `release_old_value_if_heap` (which dispatches through
+    /// `release_func_for_place` — Round 9's 8-arm extension already
+    /// fires the correct typed-Arc release for the destination slot).
+    /// The new Arc bits are written via `write_place`.
+    pub(crate) fn emit_collection_ctor(
+        &mut self,
+        name: &str,
+        container_slot: SlotId,
+        operands: &[Operand],
+    ) -> Result<(), String> {
+        // Zero-arg ctor dispatch: pick the FuncRef and call with no args.
+        let zero_arg_func_ref = match name {
+            "Set" => Some(self.ffi.v2_make_hashset),
+            "HashMap" => Some(self.ffi.v2_make_hashmap),
+            "Deque" => Some(self.ffi.v2_make_deque),
+            "PriorityQueue" => Some(self.ffi.v2_make_priorityqueue),
+            "Channel" => Some(self.ffi.v2_make_channel),
+            _ => None,
+        };
+        if let Some(func_ref) = zero_arg_func_ref {
+            if !operands.is_empty() {
+                return Err(format!(
+                    "EnumStore collection_ctor: SURFACE — '{}' is a \
+                     zero-arg ctor but operands.len()={}. Producer-site \
+                     contract violated (`mir/lowering/helpers.rs::\
+                     is_bare_collection_ctor`). ADR-006 §2.7.5 / \
+                     W12-jit-call-method-shell-rebuild.",
+                    name,
+                    operands.len(),
+                ));
+            }
+            let inst = self.builder.ins().call(func_ref, &[]);
+            let arc_bits = self.builder.inst_results(inst)[0];
+            let place = Place::Local(container_slot);
+            self.release_old_value_if_heap(&place)?;
+            self.write_place(&place, arc_bits)?;
+            return Ok(());
+        }
+
+        // Single-arg ctor dispatch (Atomic / Lazy): one inner operand,
+        // I64-widened raw payload bits. Per §2.7.25, inner-kind
+        // constraints (Atomic→Int64, Lazy→Ptr(HeapKind::Closure)) are
+        // validated by the producer-side classifier at MIR-emission
+        // time; the JIT consumer here accepts the raw bits as-is.
+        let single_arg_func_ref = match name {
+            "Atomic" => Some(self.ffi.v2_make_atomic),
+            "Lazy" => Some(self.ffi.v2_make_lazy),
+            _ => None,
+        };
+        if let Some(func_ref) = single_arg_func_ref {
+            if operands.len() != 1 {
+                return Err(format!(
+                    "EnumStore collection_ctor: SURFACE — '{}' expects \
+                     1 operand, got {}. Producer-site contract violated \
+                     (`mir/lowering/helpers.rs::is_bare_collection_ctor_with_arg`). \
+                     ADR-006 §2.7.5 / W12-jit-call-method-shell-rebuild.",
+                    name,
+                    operands.len(),
+                ));
+            }
+            let payload_val = self.compile_operand_raw(&operands[0])?;
+            let payload_i64 = self.widen_to_i64(payload_val);
+            let inst = self.builder.ins().call(func_ref, &[payload_i64]);
+            let arc_bits = self.builder.inst_results(inst)[0];
+            let place = Place::Local(container_slot);
+            self.release_old_value_if_heap(&place)?;
+            self.write_place(&place, arc_bits)?;
+            return Ok(());
+        }
+
+        // Carrier-pair ctor: Mutex(bits, kind_code). The kind is
+        // sourced from the operand's MIR-inferred kind via §2.7.5
+        // producing-site classification. NOT a Bool-default fallback:
+        // when `operand_slot_kind`'s `None` arm fires (the operand's
+        // kind cannot be proven at MIR-emission time), the call falls
+        // through to the carrier kind `UInt64` per the §2.7.5 stable-
+        // FFI raw-bits carrier convention (the same convention Round 7A
+        // / §2.7.5 conduit uses for Ok/Err/Some/None inner payloads).
+        // The Mutex FFI body itself surface-and-stops on a SENTINEL
+        // kind ord, leaking the inner share rather than fabricating
+        // Bool (`ffi/v2/collection_arc.rs::jit_v2_make_mutex`).
+        if name == "Mutex" {
+            if operands.len() != 1 {
+                return Err(format!(
+                    "EnumStore collection_ctor: SURFACE — 'Mutex' \
+                     expects 1 operand, got {}. Producer-site contract \
+                     violated. ADR-006 §2.7.5 / W12-jit-call-method-\
+                     shell-rebuild.",
+                    operands.len(),
+                ));
+            }
+            let payload_val = self.compile_operand_raw(&operands[0])?;
+            let payload_i64 = self.widen_to_i64(payload_val);
+            let payload_kind = self.operand_slot_kind_or_carrier(&operands[0]);
+            let kind_code =
+                super::super::ffi::stack_kind_code::encode(payload_kind);
+            let kind_code_val = self
+                .builder
+                .ins()
+                .iconst(types::I8, kind_code as i64);
+            let inst = self
+                .builder
+                .ins()
+                .call(self.ffi.v2_make_mutex, &[payload_i64, kind_code_val]);
+            let arc_bits = self.builder.inst_results(inst)[0];
+            let place = Place::Local(container_slot);
+            self.release_old_value_if_heap(&place)?;
+            self.write_place(&place, arc_bits)?;
+            return Ok(());
+        }
+
+        Err(format!(
+            "EnumStore collection_ctor: SURFACE — unrecognized \
+             collection-ctor name '{}'. `is_collection_ctor_name` and \
+             `emit_collection_ctor` must stay in lockstep; adding a \
+             new name requires extending both. ADR-006 §2.7.5 / \
+             W12-jit-call-method-shell-rebuild.",
+            name,
+        ))
+    }
 }
 
 /// Closure-spec Phase H1: map a capture's `FieldKind` to the Cranelift

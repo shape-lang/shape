@@ -169,107 +169,353 @@ unsafe fn try_call_user_method(
 // ============================================================================
 // Main Dispatcher
 // ============================================================================
-
-/// Call a method on a value
-/// Stack layout at call: [receiver, arg1, ..., argN, method_name, arg_count]
-/// The FFI pops values from ctx.stack and dispatches to the appropriate method
-/// Dispatch a method call through the trampoline VM for receivers
-/// that the JIT's built-in method dispatch doesn't handle (VM-format
-/// HashMaps, TypedObjects, etc.).
-fn dispatch_method_via_trampoline(
-    _receiver_bits: u64,
-    _method_name: &str,
-    _args: &[u64],
-    _ctx: *mut JITContext,
-) -> Option<u64> {
-    todo!(
-        "phase-2c §2.7.10/Q11: JIT-side kinded MethodFnV2 ABI rebuild — \
-         dispatch_method_via_trampoline. The trampoline VM's op_call_method \
-         is now driven by the kinded MethodFnV2 ABI ({{args: &[KindedSlot]}} \
-         carrier with per-arg NativeKind from the §2.7.7 stack parallel-kind \
-         track) per ADR-006 §2.7.10/Q11. The deleted machinery (ValueBits \
-         is_unified_heap probe, ValueWord::clone_from_bits receiver decode, \
-         as_hashmap_data / as_typed_object accessors, push_raw_u64 / \
-         pop_raw_u64 stack ABI, vmarray_from_vec, ValueWord::from_string / \
-         from_hashmap_pairs / from_array constructors) was the kind-blind \
-         pre-§2.7.10 dispatch shell. Reconstruction must thread NativeKind \
-         through the JIT call signature per §2.7.5. See \
-         docs/cluster-audits/wave-10-jit-playbook.md §5."
-    )
-}
+//
+// W12-jit-call-method-shell-rebuild (Phase 3 cluster-0 Round 10 / 8B.2,
+// 2026-05-13). The shell now reads receiver + args kinds from the
+// §2.7.7 / Q9 `JITContext.stack_kinds` parallel-kind track at every pop,
+// per the producer-side classification at MIR-emit time
+// (`mir_compiler/terminators.rs:202-247`). When the receiver kind decodes
+// to a delegated-to-VM kind (the 8 Round 9 typed-Arc collection kinds +
+// Round 7A Result/Option Arc carriers + scalar kinds for unified VM
+// method dispatch), the shell builds `(u64, NativeKind)` pair-slices and
+// calls into the new public `VirtualMachine::jit_trampoline_call_method`
+// (sibling to `jit_trampoline_call_closure` at
+// `crates/shape-vm/src/executor/call_convention.rs`) — the §2.7.5
+// cross-crate stable FFI consumer.
+//
+// **Deleted in this rebuild:**
+//
+// - The kind-blind `heap_kind(receiver_bits)`-driven NaN-box dispatch
+//   cascade (pre-§2.7.10 `match heap_kind(receiver_bits)` at the prior
+//   shell body) — forbidden under §2.7.7 #4 / #7 (`is_heap()` probe on
+//   raw bits). Kind comes from the producing call signature now.
+// - The `dispatch_method_via_trampoline` extern-C `todo!()` stub —
+//   replaced by the principled `VirtualMachine::jit_trampoline_call_method`
+//   delegation per audit §2.1's load-bearing delegation insight.
+//
+// **Preserved fast path (JIT-internal kind, not a kind-decode):**
+//
+// The higher-order JIT array methods (find/filter/map/etc.) special-case
+// stays IF the receiver kind on the parallel track tells us the slot
+// carries opaque JIT-format bits (kind = `UInt64`, the documented §2.7.5
+// I64-wide raw bits carrier). For JIT-format `HK_ARRAY` NaN-boxed
+// receivers paired with closure callbacks, the `jit_control_*` FFI bodies
+// dispatch callback execution via the JIT function table — VM delegation
+// would lose this perf path. The receiver's JIT-format-array
+// classification still uses `is_heap_kind(receiver_bits, HK_ARRAY)` for
+// the inner discrimination, but only under the `UInt64` carrier-kind
+// guard — i.e. only when the producing site explicitly stamped the slot
+// as opaque-bits-no-classification. Not a §2.7.7 #4 / #7 violation: the
+// outer dispatch comes from the parallel-kind track; the inner read is
+// a JIT-format struct-field load on a known-opaque-bits slot. Migrating
+// to fully kinded arrays is W10 jit-playbook §5 territory.
 
 pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u64 {
+    use crate::ffi::stack_kind_code;
+    use shape_value::{HeapKind, NativeKind};
+
     unsafe {
         if ctx.is_null() || stack_count < 3 {
             return TAG_NULL;
         }
 
         let ctx_ref = &mut *ctx;
+        let debug = std::env::var_os("SHAPE_JIT_DEBUG").is_some();
 
-        // Pop arg_count from stack.
-        // ABI: the MIR producer stores arg_count as a raw i64 (see
-        // mir_compiler/terminators.rs CallMethod lowering). We decode it directly
-        // as usize — do NOT attempt NaN-box decode.
+        // ── Pop arg_count ──────────────────────────────────────────────
+        // ABI: the MIR producer stores `arg_count` as a raw i64 with
+        // parallel-kind `UInt64` (sentinel slot — `terminators.rs:259`).
+        // We decode it directly as usize — no NaN-box.
         if ctx_ref.stack_ptr == 0 {
             return TAG_NULL;
         }
         ctx_ref.stack_ptr -= 1;
         let arg_count = ctx_ref.stack[ctx_ref.stack_ptr] as usize;
+        ctx_ref.stack_kinds[ctx_ref.stack_ptr] = stack_kind_code::SENTINEL;
 
-        // Pop method_name from stack (string)
+        // ── Pop method_name ────────────────────────────────────────────
+        // The MIR producer pushes the method name as a raw
+        // `Box::into_raw(Box::new(UnifiedValue<Arc<String>>))` pointer
+        // (via `box_string` at `terminators.rs:235`) with the parallel-
+        // kind track stamped `NativeKind::String` per §2.7.7 / Q9 at
+        // `terminators.rs:243-246`. The JIT-internal `unbox_string`
+        // reads `&Arc<String>` from the unified-heap allocation. This is
+        // a field read on a known-classified slot (kind track says
+        // String), NOT a §2.7.7 #4 / #7 tag-decode on raw bits — the
+        // kind IS the discriminator. Pre-Round-10 the bits were validated
+        // via `is_heap_kind(method_bits, HK_STRING)` (a NaN-box
+        // discrimination); under §2.7.5 strict-typed unified-heap the
+        // bits are raw `Box::into_raw` pointers without the NaN-box
+        // wrapper, so the parallel-kind track is the producer-side
+        // classification source.
         if ctx_ref.stack_ptr == 0 {
             return TAG_NULL;
         }
         ctx_ref.stack_ptr -= 1;
         let method_bits = ctx_ref.stack[ctx_ref.stack_ptr];
-        let method_name = if is_heap_kind(method_bits, HK_STRING) {
-            unbox_string(method_bits).to_string()
-        } else {
-            return method_bits; // Return non-string value as-is
+        let method_kind_code = ctx_ref.stack_kinds[ctx_ref.stack_ptr];
+        ctx_ref.stack_kinds[ctx_ref.stack_ptr] = stack_kind_code::SENTINEL;
+        let method_kind = match stack_kind_code::decode(method_kind_code) {
+            Some(k) => k,
+            None => {
+                if debug {
+                    eprintln!(
+                        "[jit-call-method] SURFACE §2.7.7 / Q9: method-name \
+                         kind-byte {} at stack[{}] is SENTINEL / reserved. \
+                         The producing call site at terminators.rs:243 must \
+                         stamp NativeKind::String — no Bool-default.",
+                        method_kind_code, ctx_ref.stack_ptr
+                    );
+                }
+                return TAG_NULL;
+            }
         };
-        // Pop args from stack
-        let mut args = Vec::with_capacity(arg_count);
+        if !matches!(method_kind, NativeKind::String) {
+            if debug {
+                eprintln!(
+                    "[jit-call-method] SURFACE: method-name kind {:?} != \
+                     NativeKind::String. Producer-site contract violated \
+                     (terminators.rs:243 must stamp String).",
+                    method_kind
+                );
+            }
+            return TAG_NULL;
+        }
+        let method_name: String = unbox_string(method_bits).to_string();
+        if debug {
+            eprintln!(
+                "[jit-call-method] arg_count={} method='{}' stack_ptr={}",
+                arg_count, method_name, ctx_ref.stack_ptr
+            );
+        }
+
+        // ── Pop args paired with their parallel-track kinds ───────────
+        // Reverse pop order, then reverse to source order. The §2.7.7 /
+        // Q9 lockstep invariant: each `(bits, kind)` pair lives at the
+        // same slot index.
+        let mut arg_pairs: Vec<(u64, NativeKind)> = Vec::with_capacity(arg_count);
         for _ in 0..arg_count {
             if ctx_ref.stack_ptr == 0 {
                 return TAG_NULL;
             }
             ctx_ref.stack_ptr -= 1;
-            args.push(ctx_ref.stack[ctx_ref.stack_ptr]);
+            let bits = ctx_ref.stack[ctx_ref.stack_ptr];
+            let code = ctx_ref.stack_kinds[ctx_ref.stack_ptr];
+            ctx_ref.stack_kinds[ctx_ref.stack_ptr] = stack_kind_code::SENTINEL;
+            let kind = match stack_kind_code::decode(code) {
+                Some(k) => k,
+                None => {
+                    if debug {
+                        eprintln!(
+                            "[jit-call-method] SURFACE §2.7.7 / Q9: arg \
+                             kind-byte {} at stack[{}] is SENTINEL / \
+                             reserved. The producing call site at \
+                             `mir_compiler/terminators.rs` must stamp \
+                             a concrete NativeKind per ADR-006 §2.7.5 \
+                             producer-side classification — no Bool-\
+                             default fallback (§2.7.7 #9).",
+                            code, ctx_ref.stack_ptr
+                        );
+                    }
+                    return TAG_NULL;
+                }
+            };
+            arg_pairs.push((bits, kind));
         }
-        args.reverse(); // Restore original order
+        arg_pairs.reverse();
 
-        // Pop receiver from stack
+        // ── Pop receiver paired with its parallel-track kind ──────────
         if ctx_ref.stack_ptr == 0 {
             return TAG_NULL;
         }
         ctx_ref.stack_ptr -= 1;
         let receiver_bits = ctx_ref.stack[ctx_ref.stack_ptr];
+        let receiver_code = ctx_ref.stack_kinds[ctx_ref.stack_ptr];
+        ctx_ref.stack_kinds[ctx_ref.stack_ptr] = stack_kind_code::SENTINEL;
+        let receiver_kind = match stack_kind_code::decode(receiver_code) {
+            Some(k) => k,
+            None => {
+                if debug {
+                    eprintln!(
+                        "[jit-call-method] SURFACE §2.7.7 / Q9: receiver \
+                         kind-byte {} at stack[{}] is SENTINEL / \
+                         reserved. The producing call site must stamp \
+                         the receiver's NativeKind per ADR-006 §2.7.5. \
+                         No Bool-default fallback (§2.7.7 #9).",
+                        receiver_code, ctx_ref.stack_ptr
+                    );
+                }
+                return TAG_NULL;
+            }
+        };
+        if debug {
+            eprintln!(
+                "[jit-call-method] method='{}' receiver_kind={:?} receiver_code={} \
+                 receiver_bits={:#x}",
+                method_name, receiver_kind, receiver_code, receiver_bits
+            );
+        }
 
-        // Special-case higher-order methods that need callback execution
-        // Handle both arrays and series
+        // ── Classification: delegate to VM or fall back to JIT-format ──
+        //
+        // The receiver kind from the §2.7.7 / Q9 parallel-kind track is
+        // the §2.7.10 / Q11 dispatch discriminator. Kinds whose carriers
+        // are kinded `Arc::into_raw(Arc<XData>)` (Round 7A Result/Option
+        // + Round 9 typed-Arc collections HashSet/HashMap/Deque/
+        // PriorityQueue/Channel/Mutex/Atomic/Lazy) route through the VM
+        // trampoline's PHF dispatch tables in
+        // `crates/shape-vm/src/executor/objects/method_registry.rs` —
+        // ~73 already-kinded `MethodFnV2` entries per audit §2.1.
+        //
+        // Scalar kinds (Int64/Float64/Bool/String) also delegate to VM
+        // for uniformity — the VM has full scalar method registries
+        // (`NUMBER_METHODS` / `BOOL_METHODS` / `STRING_METHODS`).
+        //
+        // `UInt64` carrier kind: this is the §2.7.5 documented "I64-wide
+        // raw bits without further classification" carrier. JIT-format
+        // arrays / objects / etc. land here when MIR cannot prove a
+        // precise kind. Fall back to legacy JIT-format dispatch — the
+        // JIT-internal `is_heap_kind(receiver_bits, HK_*)` probe on
+        // the heap-allocation kind field discriminates these.
+        let delegated = match receiver_kind {
+            NativeKind::Ptr(HeapKind::HashSet)
+            | NativeKind::Ptr(HeapKind::HashMap)
+            | NativeKind::Ptr(HeapKind::Deque)
+            | NativeKind::Ptr(HeapKind::PriorityQueue)
+            | NativeKind::Ptr(HeapKind::Channel)
+            | NativeKind::Ptr(HeapKind::Mutex)
+            | NativeKind::Ptr(HeapKind::Atomic)
+            | NativeKind::Ptr(HeapKind::Lazy)
+            | NativeKind::Ptr(HeapKind::Result)
+            | NativeKind::Ptr(HeapKind::Option)
+            | NativeKind::Float64
+            | NativeKind::NullableFloat64
+            | NativeKind::Int8
+            | NativeKind::NullableInt8
+            | NativeKind::UInt8
+            | NativeKind::NullableUInt8
+            | NativeKind::Int16
+            | NativeKind::NullableInt16
+            | NativeKind::UInt16
+            | NativeKind::NullableUInt16
+            | NativeKind::Int32
+            | NativeKind::NullableInt32
+            | NativeKind::UInt32
+            | NativeKind::NullableUInt32
+            | NativeKind::Int64
+            | NativeKind::NullableInt64
+            | NativeKind::NullableUInt64
+            | NativeKind::IntSize
+            | NativeKind::NullableIntSize
+            | NativeKind::UIntSize
+            | NativeKind::NullableUIntSize
+            | NativeKind::Bool => true,
+            // String: deliberately NOT delegated — JIT-format string
+            // method registries (`call_string_method`) operate on
+            // NaN-boxed JIT String carriers (`box_string` returns
+            // `Arc<String>` raw pointer with the JIT NaN-box tag wrapper
+            // for kind classification at the heap-header `kind` field).
+            // VM-side `STRING_METHODS` would expect the kinded Arc
+            // shape. Routing through JIT-format path preserves the
+            // existing string method tests. This is a §2.7.5 carrier-
+            // shape mismatch territory — full kinded String migration
+            // is W10 jit-playbook §5.
+            NativeKind::String => false,
+            // UInt64: §2.7.5 carrier kind for opaque JIT bits. Fall
+            // through to legacy JIT-format dispatch.
+            NativeKind::UInt64 => false,
+            // Other Ptr(*) kinds — TypedArray, TypedObject, String
+            // (heap), Closure, TraitObject, etc. — fall through to
+            // legacy JIT-format dispatch. The kinded path for these
+            // is W10 jit-playbook §5 / §2.7.4 territory.
+            NativeKind::Ptr(_) => false,
+        };
+
+        if delegated {
+            if debug {
+                eprintln!(
+                    "[jit-call-method] delegating '{}' to VM, recv kind={:?} \
+                     recv_bits={:#x} arg_count={}",
+                    method_name, receiver_kind, receiver_bits, arg_count
+                );
+            }
+            // VM-trampoline delegation per §2.7.5 cross-crate stable FFI.
+            // The pair-slice form is single-direction at the boundary;
+            // the VM converts to `&[KindedSlot]` internally before
+            // `dispatch_method_kinded`. The JIT pre-incremented each
+            // share via `retain_func_for_place` on the producing read;
+            // the VM's transient KindedSlot carriers adopt those shares
+            // and release on scope exit per §2.7.7 retain-on-read +
+            // drop-on-write discipline (see
+            // `VirtualMachine::jit_trampoline_call_method`'s ownership
+            // contract docstring).
+            let receiver_pair = (receiver_bits, receiver_kind);
+            let result = super::control::with_trampoline_vm_mut(|vm| {
+                vm.jit_trampoline_call_method(
+                    &method_name,
+                    receiver_pair,
+                    &arg_pairs,
+                    None,
+                )
+            });
+            match result {
+                Some(Ok(bits)) => return bits,
+                Some(Err(e)) => {
+                    if debug {
+                        eprintln!(
+                            "[jit-call-method] VM trampoline returned \
+                             error for '{}' on receiver kind {:?}: {:?}",
+                            method_name, receiver_kind, e
+                        );
+                    }
+                    return TAG_NULL;
+                }
+                None => {
+                    if debug {
+                        eprintln!(
+                            "[jit-call-method] VM trampoline unavailable \
+                             — TRAMPOLINE_VM is null. '{}' on receiver \
+                             kind {:?} surfaces.",
+                            method_name, receiver_kind
+                        );
+                    }
+                    return TAG_NULL;
+                }
+            }
+        }
+
+        // ── Legacy JIT-format dispatch (UInt64 carrier kind path) ─────
+        //
+        // The receiver kind on the §2.7.7 / Q9 parallel-kind track is
+        // `UInt64` (or another non-delegated kind) — the slot carries
+        // opaque JIT-format bits. The JIT-internal heap allocator
+        // (`jit_box(HK_*, ...)` / `unified_box`) embeds the `kind: u16`
+        // discriminator at offset 0 of the heap allocation per ADR-006
+        // §2.7.5; the inner `heap_kind(receiver_bits)` probe is a
+        // field-load on that known-opaque-bits allocation, NOT a
+        // §2.7.7 #4 / #7 forbidden tag-decode on raw bits for kind
+        // determination.
+        let args: Vec<u64> = arg_pairs.iter().map(|(b, _)| *b).collect();
+
+        // Higher-order array methods (find/filter/map/reduce/...) need
+        // closure callback execution via `jit_control_*` FFI bodies —
+        // preserved for JIT-format `HK_ARRAY` receivers.
         if is_heap_kind(receiver_bits, HK_ARRAY) {
             match method_name.as_str() {
-                "find" | "findIndex" | "some" | "every" | "filter" | "map" | "count" | "group"
-                | "groupBy" | "reduce" => {
-                    // These methods need callback execution via control functions
+                "find" | "findIndex" | "some" | "every" | "filter" | "map"
+                | "count" | "group" | "groupBy" | "reduce" => {
                     if args.is_empty() {
                         return TAG_NULL;
                     }
-                    let predicate = args[0]; // The callback function
-
+                    let predicate = args[0];
                     let working_array_bits = receiver_bits;
 
-                    // Handle reduce separately (needs initial value)
-                    // Shape syntax: arr.reduce(initial, callback)
-                    // So args[0] = initial, args[1] = callback
                     if method_name == "reduce" {
                         let (callback, initial) = if args.len() > 1 {
                             (args[1], args[0])
                         } else {
-                            // Single arg — treat it as callback with default initial
                             (args[0], box_number(0.0))
                         };
-                        // Push: [array, callback, initial, arg_count=3]
                         ctx_ref.stack[ctx_ref.stack_ptr] = working_array_bits;
                         ctx_ref.stack_ptr += 1;
                         ctx_ref.stack[ctx_ref.stack_ptr] = callback;
@@ -281,13 +527,10 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
                         return super::control::jit_control_reduce(ctx);
                     }
 
-                    // Push array onto stack for other operations
                     ctx_ref.stack[ctx_ref.stack_ptr] = working_array_bits;
                     ctx_ref.stack_ptr += 1;
-                    // Push predicate onto stack
                     ctx_ref.stack[ctx_ref.stack_ptr] = predicate;
                     ctx_ref.stack_ptr += 1;
-                    // Push arg_count onto stack
                     ctx_ref.stack[ctx_ref.stack_ptr] = box_number(2.0);
                     ctx_ref.stack_ptr += 1;
 
@@ -302,8 +545,7 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
                             // SURFACE (W10 jit-playbook §5 / ADR-006
                             // §2.7.4): count = filter(pred).length —
                             // the .length read decoded the deleted
-                            // JitArray layout. Kinded rebuild reads
-                            // `Arc<TypedArrayData>::len`.
+                            // JitArray layout.
                             let _ = super::control::jit_control_filter(ctx);
                             todo!(
                                 "phase-2c §2.7.4 / W10 jit-playbook §5: \
@@ -311,12 +553,6 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
                             )
                         }
                         "group" | "groupBy" => {
-                            // SURFACE (W10 jit-playbook §5 / ADR-006
-                            // §2.7.4): the receiver array walk and
-                            // per-group result allocation both decoded
-                            // the deleted JitArray layout. Kinded
-                            // rebuild reads/writes
-                            // `Arc<TypedArrayData>` per element kind.
                             let _ = (predicate, working_array_bits);
                             todo!(
                                 "phase-2c §2.7.4 / W10 jit-playbook §5: \
@@ -333,39 +569,30 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
             }
         }
 
-        // Phase-2c §2.7.10/Q11: VM-format-heap probe and HashMap fast-path
-        // are gated on the kinded MethodFnV2 ABI rebuild — the deleted
-        // machinery (tag_bits::TAG_HEAP discriminator, ValueBits is_unified_heap
-        // probe, ValueWord::clone_from_bits, as_hashmap_data accessor,
-        // vmarray_from_vec) flowed kind-blind from raw bits in violation of
-        // §2.7.7 #4 / #7. The receiver's NativeKind must come from the JIT
-        // call signature per §2.7.5; until the lowering site threads it
-        // through, the VM-format-heap branch is unreachable from JIT code
-        // and the receiver falls through to built-in JIT-format dispatch
-        // below. See docs/cluster-audits/wave-10-jit-playbook.md §5.
-
-        // Try built-in methods first
-        // Check for Result types (Ok/Err) before the heap kind match since they use sub-tags
+        // Built-in JIT-format method dispatch. Each `call_*_method` body
+        // reads from the receiver's known-opaque heap-allocation kind
+        // field (NOT raw-bits tag-decode for kind determination).
         let builtin_result = if is_ok_tag(receiver_bits) || is_err_tag(receiver_bits) {
             call_result_method(receiver_bits, &method_name, &args)
         } else if is_number(receiver_bits) {
             call_number_method(receiver_bits, &method_name, &args)
         } else if is_inline_function(receiver_bits) {
-            TAG_NULL // Functions don't have methods
+            TAG_NULL
         } else {
             match heap_kind(receiver_bits) {
                 Some(HK_ARRAY) => call_array_method(receiver_bits, &method_name, &args),
                 Some(HK_STRING) => call_string_method(receiver_bits, &method_name, &args),
                 Some(HK_JIT_OBJECT) => call_object_method(receiver_bits, &method_name, &args),
                 Some(HK_DURATION) => call_duration_method(receiver_bits, &method_name, &args),
-                Some(HK_COLUMN_REF) => TAG_NULL, // Series type removed
+                Some(HK_COLUMN_REF) => TAG_NULL,
                 Some(HK_MATRIX) => call_matrix_method(receiver_bits, &method_name, &args),
                 Some(HK_TIME) => call_time_method(receiver_bits, &method_name, &args),
                 _ => TAG_NULL,
             }
         };
 
-        // If built-in method returned NULL, try user-defined methods from TypeMethodRegistry
+        // User-defined method dispatch (UFCS — `"TypeName::method"`
+        // functions in the JIT function table).
         if builtin_result == TAG_NULL {
             if let Some(user_result) = try_call_user_method(ctx, receiver_bits, &method_name, &args)
             {
@@ -373,16 +600,14 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
             }
         }
 
-        // If still NULL, try dispatching through the trampoline VM.
-        // This handles VM-allocated objects (HashMap, TypedObject, etc.)
-        // that the JIT's built-in method dispatch doesn't recognize.
-        if builtin_result == TAG_NULL {
-            if let Some(result) = dispatch_method_via_trampoline(
-                receiver_bits, &method_name, &args, ctx,
-            ) {
-                return result;
-            }
-        }
+        // The pre-§2.7.10 `dispatch_method_via_trampoline` extern-C
+        // `todo!()` (and the `_ => TAG_NULL` cascade fall-through to it)
+        // is deleted. Method dispatch on VM-allocated objects now routes
+        // through the §2.7.10 / Q11 kinded `vm.jit_trampoline_call_method`
+        // path above when the receiver kind is one of the delegated-to-VM
+        // kinds; the legacy JIT-format dispatch handles JIT-internal
+        // opaque receivers (UInt64 carrier kind) per the producer-side
+        // classification.
 
         builtin_result
     }

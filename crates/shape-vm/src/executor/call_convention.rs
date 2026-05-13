@@ -1041,6 +1041,94 @@ impl VirtualMachine {
         Ok(bits)
     }
 
+    /// Trampoline entry: dispatch a method call on a kinded receiver +
+    /// kinded args, returning the result as raw `u64` bits.
+    ///
+    /// **W12-jit-call-method-shell-rebuild (Phase 3 cluster-0 Round 10 /
+    /// 8B.2 close).** Sibling to [`jit_trampoline_call_closure`]; same
+    /// §2.7.5 cross-crate stable-FFI consumer shape. The JIT-side
+    /// `jit_call_method` shell pops `(bits, kind)` pairs from the JIT's
+    /// `ctx.stack` + `ctx.stack_kinds` parallel-kind track per §2.7.7 / Q9,
+    /// passes them across the FFI boundary as `&[(u64, NativeKind)]`
+    /// pair-slices, and this function converts them to the kinded
+    /// carrier form before delegating to
+    /// [`dispatch_method_kinded`](Self::dispatch_method_kinded) — the
+    /// §2.7.10 / Q11 kinded method-dispatch entry shared with
+    /// `op_call_method`.
+    ///
+    /// **Pair-slice → KindedSlot conversion is single-direction** per
+    /// the module-level docstring's "sole `_raw` survivor" rule. The
+    /// pair-slice is the canonical §2.7.5 boundary shape; internally
+    /// only `&[KindedSlot]` flows. Forbidden alternatives (per ADR-006
+    /// §2.7.6 / Q8 + §2.7.10 / Q11):
+    /// - parallel `&[NativeKind]` second-slice parameter (carrier-API-
+    ///   bound rejection — kind goes on the carrier struct, not a
+    ///   side-channel);
+    /// - decoding receiver kind from `receiver.0` raw bits via tag-bit
+    ///   probe (the deleted §2.7.7 #4 / #7 dispatch);
+    /// - Bool-default kinded carrier for unknown receiver kind
+    ///   (§2.7.7 #9 — the surface-and-stop discipline forbids this).
+    ///
+    /// **Ownership.** Each `(bits, kind)` pair carries a pre-incremented
+    /// share installed by the JIT producer (per §2.7.7 retain-on-read
+    /// semantics on the JIT-side stack). The transient `KindedSlot`
+    /// carriers adopt those shares for the call duration. PHF handlers
+    /// borrow-only (`&[KindedSlot]` per §2.7.10 / Q11), so the carriers
+    /// retain ownership of the JIT-pre-incremented shares throughout
+    /// dispatch. When the carriers `Drop` at end of scope, each kind's
+    /// `drop_with_kind` releases its share — balancing the JIT-side
+    /// retain-before-crossing pattern. The returned `KindedSlot`'s share
+    /// is transferred back to the JIT caller as raw u64 bits via
+    /// `mem::forget`; the kind is discarded — the JIT caller knows the
+    /// static return kind from the callee method signature at the
+    /// §2.7.5 stamp-at-compile-time producing site.
+    ///
+    /// **Lifetime accounting contrast vs. `jit_trampoline_call_closure`.**
+    /// The closure trampoline's `mem::forget(kinded_args)` (line 1035)
+    /// is because the args were transferred into the callee's frame
+    /// locals via `stack_write_kinded` — the shares moved into the
+    /// frame, so the transient carriers must NOT release them. Method
+    /// dispatch's PHF handlers do not transfer the shares anywhere —
+    /// they only borrow — so the transient carriers DO release at end
+    /// of scope. Both patterns preserve §2.7.7 retain-on-read +
+    /// drop-on-write discipline; the difference is which slot owns the
+    /// share at the call's exit boundary.
+    pub fn jit_trampoline_call_method(
+        &mut self,
+        method_name: &str,
+        receiver: (u64, NativeKind),
+        args: &[(u64, NativeKind)],
+        ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+    ) -> Result<u64, VMError> {
+        // Wrap receiver + args as transient `&[KindedSlot]` per the
+        // §2.7.10 / Q11 dispatch-slice form (`args[0]` is the receiver,
+        // `args[1..]` are the call args). No Arc bump: the JIT
+        // pre-incremented each share before crossing the FFI boundary;
+        // the transient KindedSlots adopt those shares, dispatch
+        // borrow-only, and release on scope exit via `KindedSlot::Drop`.
+        let mut kinded_args: Vec<KindedSlot> = Vec::with_capacity(args.len() + 1);
+        let (rbits, rkind) = receiver;
+        kinded_args.push(KindedSlot::new(ValueSlot::from_raw(rbits), rkind));
+        for (bits, kind) in args.iter().copied() {
+            kinded_args.push(KindedSlot::new(ValueSlot::from_raw(bits), kind));
+        }
+
+        let result = self.dispatch_method_kinded(&kinded_args, method_name, ctx)?;
+
+        // Transfer the result share back to the JIT caller as raw bits.
+        // The kind is discarded — the JIT caller knows the static return
+        // kind from the callee method signature at the §2.7.5 stamp-at-
+        // compile-time producing site.
+        let bits = result.slot.raw();
+        std::mem::forget(result);
+
+        // `kinded_args` drops here. `KindedSlot::Drop` dispatches on
+        // each entry's kind and retires the JIT-pre-incremented share
+        // via `drop_with_kind` — no bare `vw_drop`, no Bool-default
+        // (forbidden §2.7.7 #9), no decode (forbidden §2.7.7 #4 / #7).
+        Ok(bits)
+    }
+
     /// Fast-path frame setup: args are already on the value stack at
     /// `[self.sp - arg_count .. self.sp]` from the producing push
     /// opcodes (e.g. `LoadLocal*`, `PushConst`). The new frame's
