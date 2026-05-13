@@ -2641,6 +2641,179 @@ disposition per the N+1 trajectory.
 
 ---
 
+### W12-jit-trait-dispatch-return-kind close (2026-05-13)
+
+**Branch**: `bulldozer-strictly-typed-w12-jit-trait-dispatch-return-kind`
+**Round**: 12 T1 (standalone, parallel with T2/T3 W12-jit-string-
+carrier-unification).
+**Disposition**: **SURFACE-AND-STOP** per the agent prompt's named
+condition ("If the trait registry isn't accessible from the JIT MIR
+builder layer (cross-crate boundary issue) — STOP and surface").
+
+#### Surface analysis (3 conduit gaps; ALL three must close for the
+classifier to soundly stamp `t.name() → NativeKind::String`)
+
+The Smoke 3 minimal program `trait T { name(): string } type X {} impl
+T for X { method name() { "x" } } let t = X {} print(t.name())` cannot
+be classified by the existing `parametric_method_return_kind_from_
+receiver` (trinity Part b) classifier because the kind sources the
+classifier needs to produce `NativeKind::String` are all missing at
+JIT MIR builder layer:
+
+**Gap 1 — receiver struct identity erasure**:
+`concrete_type_from_annotation` (`crates/shape-vm/src/compiler/
+v2_map_emission.rs:357`) returns the `StructLayoutId(0)` placeholder
+for every user struct name. The `_ => None` arm at line 378 carries
+the comment "Phase 1.1 Agent 3 will fill this in" — the layout-id
+registry is not wired. So the receiver slot's `ConcreteType` is
+`Struct(StructLayoutId(0))` regardless of whether the user struct is
+`X`, `Y`, `Point`, etc. The classifier has no struct-name
+information to disambiguate at MIR time.
+
+**Gap 2 — trait registry not persisted in `BytecodeProgram`**:
+`TypeRegistry::traits: HashMap<String, TraitDef>` in
+`crates/shape-runtime/src/type_system/environment/registry.rs:111`
+holds the trait's declared return type
+(`InterfaceMember::Method { return_type: TypeAnnotation, .. }`), but
+the `BytecodeProgram` (`crates/shape-vm/src/bytecode/core_types.rs`)
+does NOT persist this — only `trait_method_symbols: HashMap<String,
+String>` (resolved function name per `(trait, type, impl, method)`
+key) and `trait_vtables` (vtables keyed by `Trait::ConcreteType`).
+Neither carries declared trait method return types. The bytecode→JIT
+data conduit has no channel for this metadata.
+
+**Gap 3 — impl method return type fallback insufficient**:
+`function_return_concrete_types: Vec<ConcreteType>`
+(`core_types.rs:356`) is keyed on function index and built from
+`FunctionDef.return_type` annotations
+(`compiler_impl_reference_model.rs:1473`). For trait impl methods
+desugared via `desugar_impl_method`
+(`crates/shape-vm/src/compiler/statements.rs:1646`), the impl's
+`method.return_type` is whatever the impl source declared. For
+Smoke 3's `impl T for X { method name() { "x" } }`, the impl
+doesn't repeat the trait's `: string` annotation, so
+`method.return_type = None` → `function_return_concrete_types[X::
+name] = ConcreteType::Void`. The trait's declared return type does
+not propagate to the impl's `FunctionDef`.
+
+**Bridging strategy considered but rejected as out-of-scope for T1**:
+the principled fix is a new `BytecodeProgram` side-table persisting
+per-trait-method declared return `ConcreteType`s, populated at impl-
+block compilation time from `TraitDef.members[*].Required(Method
+{ return_type, .. })` / `Default(MethodDef { return_type, .. })`,
+threaded through the linker / `remote.rs` / content-addressed
+program shapes (~6 mirror-of-existing-pattern files), threaded into
+MirToIR via `crates/shape-jit/src/compiler/strategy.rs` alongside
+`function_indices`. This mirrors the Round-6 `function_return_
+concrete_types` precedent. **Cross-crate extension; ADR amendment
+territory** per the agent prompt's surface-and-stop list. Out of
+scope for T1 per the prompt's scope statement ("Touch: `crates/
+shape-jit/src/mir_compiler/types.rs` ... different region than
+T2/T3, but same file").
+
+#### Contribution
+
+Doc-only surface pin in `crates/shape-jit/src/mir_compiler/types.rs`:
+
+1. **Extended doc block** on `parametric_method_return_kind_from_
+   receiver` adding a "User-defined-trait surface boundary" section
+   that names the 3 conduit gaps above, traces each gap to its
+   specific file:line, and documents the cross-crate extension
+   shape required to close the surface.
+
+2. **3 new pin tests** in `mir_compiler::types::tests`:
+
+   - `user_defined_trait_method_on_struct_returns_none` — asserts
+     the classifier returns `None` for the Smoke 3 minimal shape
+     (`name` method on a `Struct(StructLayoutId(0))` receiver).
+     Pin against a future hard-coded `"name"` → `String` walk-back.
+   - `user_defined_trait_method_call_terminator_remains_unstamped`
+     — integration pin: the full Call-terminator destination-stamp
+     pass (`well_known.or_else(parametric)`) leaves the destination
+     slot's kind `None`. Also asserts `"name"` is correctly NOT in
+     the `well_known_method_return_kind` cohort (different traits
+     could declare `name` with different return types — soundness
+     pin).
+   - `parametric_classifier_remains_silent_for_struct_receiver_
+     with_known_method_names` — cohort pin: the parametric arms
+     (`get` / `sum` / `mean` / `min` / `max` / `first` / `last` /
+     `pop` / `load` / `fetch_*` / `compare_exchange`) and trait-
+     dispatch-shaped names (`name` / `display` / `to_string` /
+     `into` / `from` / `try_into` / `try_from`) must all return
+     `None` for a `Struct(_)` receiver. Pin against a wrong-
+     carrier walk-back (a user struct with a `.sum()` method is
+     not an `Array<T>`).
+
+#### Smoke matrix delta (JIT-side)
+
+| Smoke | Pre-Round-12-T1 | Post-Round-12-T1 | Disposition |
+|---|---|---|---|
+| 3 (`trait T + impl + dyn + t.name() → "x"`) | ❌ `Route A surface-and-stop: NotImplemented(SURFACE) — print Call-terminator operand NativeKind is None` (trinity Part c surfaced) | ❌ same surface, **documented + pinned with 3 surface tests** | T1 closes SURFACE-AND-STOP; ADR amendment + cross-crate side-table required to close end-to-end |
+
+The Smoke 3 JIT-side surface is **not closed by T1**. T1's
+contribution is the cite-tracked surface-and-stop documentation +
+pin tests preventing a future walk-back. T2/T3 (W12-jit-string-
+carrier-unification) is the parallel migration that closes the
+downstream `NativeKind::String` carrier-mismatch — but even after
+T2/T3 lands, Smoke 3 JIT still requires the cross-crate trait-
+method-return side-table extension to flow the trait's declared
+return type into the JIT MIR builder's classifier.
+
+#### Close gates (devenv exit-code-verified)
+
+- `cargo check --workspace --lib --tests` EXIT=0
+- `cargo test -p shape-jit --lib` **376 passed / 0 failed / 26
+  ignored** (373 baseline + 3 new pin tests = 376 exact)
+- `bash scripts/verify-merge.sh` **12/12 Passed** ("ALL CHECKS
+  PASSED. Safe to merge.")
+- `bash scripts/check-no-dynamic.sh` EXIT=0
+
+#### Refuse-on-sight discipline preserved
+
+- No `bridge`/`probe`/`helper`/`hop`/`translator`/`adapter`/`shim`
+  framing in commit, doc block, status doc, or AGENTS.md row. The
+  3 conduit gaps are named by what they are (struct identity
+  erasure / trait registry not persisted / impl method return type
+  fallback insufficient), not by hypothetical role.
+- **No hard-coded `"name"` → `String` arm** in the classifier
+  ("hard-code the kickoff Smoke 3 case for now" refused per agent
+  prompt's forbidden-rationalization list; same defection-attractor
+  pattern as the deleted W-series convert opcode (`Convert<X>To<Y>`
+  added to paper over a kind-tracker gap) per CLAUDE.md "Forbidden
+  code").
+- **No Bool-default fallback** at the kind-source gap path
+  (§2.7.7 #9) — the classifier returns `None`; the downstream
+  Route-A surface-and-stop fires at the print Call-terminator;
+  the surface is honestly named, not papered over.
+- **No "default to `string` for unknown trait return kinds"** —
+  refused per agent prompt's forbidden-rationalization list.
+- **No "skip the trait registry lookup if it's expensive"** —
+  refused per agent prompt's forbidden-rationalization list.
+- **No silent walkback** — the surface is named (`Route A
+  surface-and-stop: NotImplemented(SURFACE)`) and the cross-crate
+  extension is described in detail at status-doc + doc-block
+  granularity for the next session's audit.
+
+#### Coordination with T2/T3 (W12-jit-string-carrier-unification)
+
+T1 touched ONLY the documentation region of
+`crates/shape-jit/src/mir_compiler/types.rs` (doc block on
+`parametric_method_return_kind_from_receiver` + 3 new pin tests in
+the test module). T2/T3's territory is the kind-track propagation
+region (different region of the same file per the agent prompt).
+No source-line overlap; no mechanical merge conflict expected at
+the file level.
+
+Smoke 3 JIT end-to-end requires **T1 + T2/T3 + the cross-crate
+trait-method-return side-table extension** to land. T1 alone is
+necessary but not sufficient; T2/T3 alone is necessary but not
+sufficient; even both together would still surface at the trait-
+method return-kind classifier gap T1 documents. The cross-crate
+extension is the third leg surfaced for Round 13 cluster-0
+disposition.
+
+---
+
 *Next session: read this file first, then continue with Round-2
 close-out (or pivot per supervisor's call between cluster-1 hardening
 and cluster-2 Wave-3 surfaces).*

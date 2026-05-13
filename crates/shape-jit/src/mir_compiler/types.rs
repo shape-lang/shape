@@ -857,6 +857,67 @@ fn well_known_function_return_kind(name: &str) -> Option<NativeKind> {
 /// classifier is one of multiple kind sources at this point in the
 /// inference pass, and surfacing-and-stopping isn't appropriate here
 /// (other downstream passes still get a chance to stamp the slot).
+///
+/// # User-defined-trait surface boundary (Phase 3 cluster-0 Round 12 T1)
+///
+/// `ConcreteType::Struct(_)` receivers (user-defined `type X {}` values)
+/// fall into the `_ => None` arm by design. Smoke 3
+/// (`trait T { name(): string } type X {} impl T for X { method name()
+/// { "x" } } let t = X {} print(t.name())`) requires `t.name()` to be
+/// classified as `NativeKind::String` from the trait's declared return
+/// type. The classifier cannot do this because the receiver kind-source
+/// is structurally insufficient:
+///
+/// 1. The receiver slot's `ConcreteType` is `Struct(StructLayoutId(0))`
+///    — the bytecode compiler's `concrete_type_from_annotation`
+///    (`crates/shape-vm/src/compiler/v2_map_emission.rs:357`) returns
+///    the `StructLayoutId(0)` placeholder for every user struct name
+///    because the layout-id registry is not wired (the function's
+///    `_ => None` arm at line 378 carries the comment "Phase 1.1 Agent 3
+///    will fill this in"). So `concrete_types[receiver_slot]` does NOT
+///    distinguish `X` from `Y` from `Point` from any other user struct.
+/// 2. The trait registry (`TypeRegistry::traits: HashMap<String,
+///    TraitDef>` in `crates/shape-runtime/src/type_system/environment/
+///    registry.rs:111`) holds the trait's declared return type
+///    (`InterfaceMember::Method { return_type: TypeAnnotation, .. }`),
+///    but the `BytecodeProgram` (`crates/shape-vm/src/bytecode/
+///    core_types.rs`) does NOT persist this — it only carries
+///    `trait_method_symbols: HashMap<String, String>` (the resolved
+///    function name per `(trait, type, impl, method)` key) and
+///    `trait_vtables` (vtables keyed by `Trait::ConcreteType`). Neither
+///    carries the declared trait method return type.
+/// 3. The `function_return_concrete_types: Vec<ConcreteType>` side-table
+///    (the parallel pattern §2.7.5 the JIT consumes for direct calls,
+///    `core_types.rs:356`) is keyed on function index and built from
+///    `FunctionDef.return_type` annotations
+///    (`compiler_impl_reference_model.rs:1473`). For trait impl methods
+///    desugared via `desugar_impl_method`
+///    (`crates/shape-vm/src/compiler/statements.rs:1646`), the impl's
+///    `method.return_type` is whatever the impl source declared — for
+///    Smoke 3's `impl T for X { method name() { "x" } }` it is `None`
+///    (the impl doesn't repeat the trait's `: string` annotation), so
+///    `function_return_concrete_types[X::name] = ConcreteType::Void`.
+///    The trait's declared return type does not propagate to the impl's
+///    function definition.
+///
+/// Closing this surface requires extending the bytecode→JIT data
+/// conduit — adding a new side-table on `BytecodeProgram` that
+/// persists per-trait-method declared return `ConcreteType`s,
+/// populated at impl-block compilation time from the type registry's
+/// `TraitDef.members[*].Required(Method { return_type, .. })` and
+/// `TraitDef.members[*].Default(MethodDef { return_type, .. })`
+/// entries. This is a cross-crate extension (mirrors the existing
+/// `function_return_concrete_types` pattern from Round-6 W12-jit-call-
+/// return-kind close 2026-05-12) and is ADR amendment territory per
+/// the agent prompt's surface-and-stop list ("If the trait registry
+/// isn't accessible from the JIT MIR builder layer (cross-crate
+/// boundary issue) — STOP and surface").
+///
+/// The pin tests `user_defined_trait_method_on_struct_returns_none`
+/// and `user_defined_trait_method_call_terminator_remains_unstamped`
+/// assert the surface — they are intentional surface pins, not
+/// regressions to be papered over by a Bool-default fallback or a
+/// hard-coded `"name"` → `String` arm.
 fn parametric_method_return_kind_from_receiver(
     name: &str,
     args: &[Operand],
@@ -1914,5 +1975,177 @@ mod tests {
             Some(NativeKind::Int64),
             ".sum() on Array<int> should stamp Int64 on the destination slot"
         );
+    }
+
+    // ── Phase 3 cluster-0 Round 12 T1 surface pin tests ────────────────
+    //
+    // Surface pins for the user-defined-trait method dispatch boundary
+    // documented at `parametric_method_return_kind_from_receiver`'s
+    // "User-defined-trait surface boundary" doc block. These tests
+    // assert the surface — they are intentional pins, not regressions
+    // to be papered over by a Bool-default fallback or a hard-coded
+    // method-name arm.
+    //
+    // Smoke 3 (`trait T { name(): string } type X {} impl T for X {
+    // method name() { "x" } } let t = X {} print(t.name())` → `x`) is
+    // the load-bearing surface: the `t.name()` Call-terminator's
+    // destination slot remains unstamped at JIT MIR time. Closing this
+    // requires extending the bytecode→JIT data conduit with a new
+    // `BytecodeProgram` side-table persisting per-trait-method declared
+    // return `ConcreteType`s — cross-crate, ADR amendment territory per
+    // the agent prompt's surface-and-stop list.
+
+    #[test]
+    fn user_defined_trait_method_on_struct_returns_none() {
+        // Smoke 3 minimal case at the classifier level: receiver
+        // `t: X` carries `ConcreteType::Struct(StructLayoutId(0))`
+        // because `concrete_type_from_annotation` returns the
+        // `StructLayoutId(0)` placeholder for every user struct name
+        // (the layout-id registry is not wired — see the function's
+        // `_ => None` arm at `v2_map_emission.rs:378` "Phase 1.1
+        // Agent 3 will fill this in"). The classifier has no
+        // struct-name information to disambiguate `X` from any other
+        // user struct, and the trait registry is not threaded into
+        // the JIT MIR builder layer — so the trait method's declared
+        // return type (`string` from `trait T { name(): string }`) is
+        // unreachable from this classifier.
+        //
+        // The classifier must return `None` (surface-and-stop posture),
+        // NOT a fabricated `NativeKind::String` from hard-coding `"name"`
+        // — that would be a CLAUDE.md "Forbidden rationalizations"
+        // walk-back ("hard-code the kickoff Smoke 3 case for now").
+        let cts = vec![ConcreteType::Struct(
+            shape_value::v2::concrete_type::StructLayoutId(0),
+        )];
+        let kind =
+            parametric_method_return_kind_from_receiver("name", &[copy_local(0)], &cts);
+        assert_eq!(
+            kind, None,
+            "User-defined trait method on Struct receiver must surface \
+             (return None); the trait registry's declared return type is \
+             not threaded into the JIT MIR builder. See classifier doc \
+             block 'User-defined-trait surface boundary'."
+        );
+    }
+
+    #[test]
+    fn user_defined_trait_method_call_terminator_remains_unstamped() {
+        // Integration pin: the Call-terminator destination-stamp pass
+        // at `infer_slot_kinds_with_concrete` chains
+        // `well_known.or_else(parametric)`. Neither classifier catches
+        // `name` on a `Struct(_)` receiver:
+        //
+        // - `well_known_method_return_kind("name")` returns `None` —
+        //   `"name"` is not a collection-size / emptiness invariant.
+        // - `parametric_method_return_kind_from_receiver("name",
+        //   args, [Struct(0)])` returns `None` per the pin above.
+        //
+        // Result: the destination slot's kind remains `None` at JIT
+        // MIR time, the downstream `print(t.name())` Call-terminator
+        // surfaces at the print-operand-kind-None Route A
+        // surface-and-stop. This is the load-bearing Smoke 3 surface
+        // shape Round 12 T1 surfaces for cross-crate conduit
+        // extension.
+        let mir = MirFunction {
+            name: "test_trait_dispatch".to_string(),
+            blocks: vec![BasicBlock {
+                id: BasicBlockId(0),
+                statements: vec![],
+                terminator: Terminator {
+                    kind: TerminatorKind::Call {
+                        func: Operand::Constant(MirConstant::Method(
+                            "name".to_string(),
+                        )),
+                        args: vec![copy_local(0)],
+                        destination: Place::Local(SlotId(1)),
+                        next: BasicBlockId(0),
+                    },
+                    span: shape_ast::Span::default(),
+                },
+            }],
+            num_locals: 4,
+            param_slots: vec![],
+            param_reference_kinds: vec![],
+            local_types: vec![],
+            span: shape_ast::Span::default(),
+            field_name_table: Default::default(),
+        };
+        let concrete_types = vec![
+            ConcreteType::Struct(shape_value::v2::concrete_type::StructLayoutId(0)),
+            ConcreteType::Void,
+            ConcreteType::Void,
+            ConcreteType::Void,
+        ];
+        let kinds = infer_slot_kinds_with_concrete(&mir, &[], &concrete_types);
+        assert_eq!(
+            kinds[1],
+            None,
+            "Call-terminator destination for `t.name()` on a Struct(_) \
+             receiver must remain unstamped — the trait-dispatch return \
+             kind cannot be classified without a cross-crate conduit \
+             extension. See classifier doc block 'User-defined-trait \
+             surface boundary'."
+        );
+        // Pin the well_known cohort: `"name"` is NOT a well-known
+        // invariant method name; without the parametric arm catching
+        // it (which it cannot, per the pin above), there is no
+        // classification path.
+        assert_eq!(
+            well_known_method_return_kind("name"),
+            None,
+            "`name` must not be a well-known method name — that would \
+             be a soundness violation (different traits could declare \
+             `name` with different return types, e.g. `trait T \
+             {{ name(): string }}` vs `trait U {{ name(): int }}`)."
+        );
+    }
+
+    #[test]
+    fn parametric_classifier_remains_silent_for_struct_receiver_with_known_method_names() {
+        // Cohort pin: the parametric arms for `get` / `sum` / `mean` /
+        // `min` / `max` / `first` / `last` / `pop` / `load` / `fetch_*`
+        // / `compare_exchange` are all keyed on receiver `ConcreteType`
+        // matching `Array(_)` / `HashMap(_,_)` / `Mutex(_)` / `Atomic`
+        // / `Lazy(_)`. A `Struct(_)` receiver must NOT accidentally
+        // fall through to any of these arms — that would be a wrong-
+        // carrier classification (a user struct with a `.sum()` method
+        // is not an `Array<T>`).
+        let cts = vec![ConcreteType::Struct(
+            shape_value::v2::concrete_type::StructLayoutId(0),
+        )];
+        for method_name in [
+            "get",
+            "sum",
+            "mean",
+            "min",
+            "max",
+            "first",
+            "last",
+            "pop",
+            "load",
+            "fetch_add",
+            "fetch_sub",
+            "compare_exchange",
+            // Trait-dispatch-shaped names that could exist on user
+            // structs but are NOT well-known or parametric arms:
+            "name",
+            "display",
+            "to_string",
+            "into",
+            "from",
+            "try_into",
+            "try_from",
+        ] {
+            let kind = parametric_method_return_kind_from_receiver(
+                method_name,
+                &[copy_local(0)],
+                &cts,
+            );
+            assert_eq!(
+                kind, None,
+                "method `{method_name}` on Struct(_) receiver must \
+                 not be classified by the parametric cohort"
+            );
+        }
     }
 }
