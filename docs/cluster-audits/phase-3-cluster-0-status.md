@@ -1735,15 +1735,122 @@ Atomic.load + parametric-return method kinds):
   `crates/shape-value/src/v2/concrete_type.rs`) + propagate inner-kind
   through method-return-type inference.
 
-### Round 11 expanded scope coordination (post-Round-10 surfacing)
+### Round 11 — dispatching (3 parallel: 11A audit-first + 11D bounded + trinity)
 
-Pre-Round-10 plan was 3 parallel sub-clusters (11A VM op_new_array
-audit-first, 11B JIT .sum() return-kind conduit, 11C JIT Rvalue::
-Aggregate TypedObject). Post-Round-10 surfaces 2 more gaps. Awaiting
-supervisor disposition on whether to dispatch 5 distinct sub-clusters
-or merge thematically (11B + (B) both touch method-return kind
-threading; 11B + 11C + (B) share §2.7.5 producing-site classification
-theme).
+Dispatched 2026-05-13 from post-Round-10-merge baseline `51261265`.
+Supervisor ratified Option 3: integrated trinity (11B+11C+11E) +
+2 standalone (11A, 11D).
+
+| Sub-cluster | Branch | Status |
+|---|---|---|
+| W12-vm-new-array-untyped-construction (11A) | `bulldozer-strictly-typed-w12-vm-new-array-untyped-construction` | auditing |
+| W17-mir-mutation-writeback (11D) | `bulldozer-strictly-typed-w17-mir-mutation-writeback` | migrating (bounded ~30 LoC) |
+| W12-jit-producing-site-conduit-completeness (trinity 11B+11C+11E) | `bulldozer-strictly-typed-w12-jit-producing-site-conduit-completeness` | migrating (~800-1000 LoC) |
+
+### 11A scope (W12-vm-new-array-untyped-construction)
+
+Audit-first deliverables before writing code:
+- (a) §-cite verification — confirm real ADR § (likely §2.7.14 / §2.7.24
+  / §2.7.5, NOT §2.7.4 task-scheduler boundary; same stray-cite class
+  caught at `mir_compiler/statements.rs:236` / `w12-enum-constructor-audit.md:215`).
+- (b) Deleted-carrier identification (likely `TypedArrayData::HeapValue`
+  per §2.7.24 Q25.A — deleted Phase 2d, replaced by monomorphic per-
+  element-kind variants + TypedObject catch-all).
+- (c) Fix-shape: monomorphic dispatch on element kind at `op_new_array`
+  emit site routing to corresponding TypedArrayData variant
+  (I64 / F64 / String / Decimal / TypedObject).
+
+Surface-and-stop on ADR amendment requirement. Forbidden frames refused
+on sight: "preserve deleted-carrier emit path under documented
+disposition", Bool-default element kind, "this one edge case",
+"soft-fail counter for now".
+
+Unblocks: kickoff Smoke 2 (VM-side).
+
+### 11D scope (W17-mir-mutation-writeback)
+
+Bounded mechanical ~30 LoC. Surface (Round 10 close report Section
+"Surfaced workstreams (A)"):
+- Bytecode compiler emits `Dup; StoreLocal recv` after mutating
+  `CallMethod` per `crates/shape-vm/src/compiler/mutation_writeback.rs`.
+- MIR builder at `crates/shape-vm/src/mir/lowering/expr.rs::Expr::MethodCall`
+  does NOT emit equivalent `Assign(receiver_slot, Use(Move(temp)))`.
+- JIT compiles from MIR, sees stale receiver Arc on second access →
+  silent-fail or segfault.
+
+Fix: consult `is_mut_self_method_name` (or equivalent predicate); emit
+`Assign(receiver_slot, Use(Move(temp)))` when receiver is `Place::Local`
+and method is mutating.
+
+**Audit-first to confirm ~30 LoC scope holds**. If fix exceeds budget OR
+Arc-COW semantics break for some collection variant, surface-and-stop —
+segfault disposition becomes `NotImplemented(SURFACE)` with §-cite
+(§2.7.27 + specific HeapKind variant), actual fix lands Round 12.
+
+**Refuse on sight**: leaving silent-fail / segfault path alive past
+close — segfault is NOT surface-and-stop, it's "soft-fail counter for
+now, harden later" in disguise (CLAUDE.md "Forbidden rationalizations"
+#4).
+
+Unblocks: kickoff Smoke 4 + HashMap mutating smoke + every
+mutating-collection-method smoke.
+
+### Trinity scope (W12-jit-producing-site-conduit-completeness)
+
+Round 7A integrated-trinity precedent (~800-1000 LoC single agent).
+Three co-designed pieces with INTERNAL ORDERING:
+
+**(a) 11E ConcreteType taxonomy refinement (FOUNDATION, lands FIRST)**:
+Extend `ConcreteType` taxonomy in `crates/shape-value/src/v2/concrete_type.rs`
+with `Mutex<T>` / `Atomic<T>` / `Lazy<T>` / `HashSet` / `Deque` /
+`PriorityQueue` / `Channel` arms (currently absent). Refines ConcreteType
+to cover the shapes surfaced by Round 10 item (B) — collection containers,
+method-return kinds, Aggregate destinations — coherently.
+
+**(b) 11B method-return-kind conduit (CONSUMER of 11E)**: §2.7.5
+producer-side conduit extension for method-return kinds (`.sum()`-style
+scalar return + parametric containers like `HashMap.get → Option<V>`,
+`Mutex.get → T`, `Atomic.load → i64`). Likely shape:
+`native_kind_from_concrete_type` switch keyed on receiver+method pairs,
+populated at method-call sites for known-return-kind stdlib methods.
+
+**(c) 11C Rvalue::Aggregate TypedObject threading (CONSUMER of 11E)**:
+JIT consumer side of the TypedObject Aggregate fast path for non-Array
+destinations (Struct/Tuple/TypedObject). Resurrects deferred Round 5B
+option (iii). Fires on `let t = X {}` struct construction in kickoff
+Smoke 3.
+
+**Order inside trinity**: (a) FIRST as foundation; (b) and (c) consume
+the landed taxonomy. NO three-way concurrent extension of
+`mir_compiler/types.rs` — agent ships (a) as a coherent commit, then
+layers (b) and (c) on top.
+
+**Surface-and-stop discipline**:
+- If (a) surfaces ADR amendment requirement for taxonomy shape, STOP.
+- If (b) needs parametric-return inference shape exceeding conduit
+  pattern, STOP.
+- If (c) needs a fourth ConcreteType destination (a) didn't cover, STOP.
+
+**Refuse on sight**: ConcreteType variants projecting 1:1 to HeapKind
+(ADR-005 §1 single-discriminator); Bool-default for unproven destination
+kind; "bridge"/"probe"/"helper"/"hop"/"translator"/"adapter"/"shim"
+framing for conduit work.
+
+Unblocks: kickoff Smoke 2 JIT-side + kickoff Smoke 3 JIT-side + HashMap.get
+/ Mutex.get / Atomic.load parametric return kinds.
+
+### Cluster-0 close attempt cadence (post-Round-11)
+
+After all three Round 11 sub-clusters merge:
+- All 4 kickoff smokes VM == JIT (correct output under both).
+- Supplementary -ext smokes tracked with explicit dispositions (pass /
+  cluster-1+ tracking cite).
+- Full smoke matrix snapshot in this status doc.
+- Supervisor ratifies; user authorizes `phase-3-cluster-0-close` tag.
+
+If any of 11A / 11D / trinity surfaces a sixth gap, Round 12. The N+1
+expansion has been honest principled surfacing every round; same
+discipline holds.
 
 ## Cluster-0 close gate
 
