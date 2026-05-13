@@ -42,6 +42,15 @@ pub const ELEM_TYPE_F64: u8 = 1;
 pub const ELEM_TYPE_I64: u8 = 2;
 pub const ELEM_TYPE_I32: u8 = 3;
 pub const ELEM_TYPE_BOOL: u8 = 4;
+// W12 S1 (2026-05-13) — sized-integer element-type discriminants.
+pub const ELEM_TYPE_I8: u8 = 5;
+pub const ELEM_TYPE_U8: u8 = 6;
+pub const ELEM_TYPE_I16: u8 = 7;
+pub const ELEM_TYPE_U16: u8 = 8;
+pub const ELEM_TYPE_U32: u8 = 9;
+// ELEM_TYPE_U64 = 10 reserved for S1.5; not allocated in S1 per the
+// supervisor's reopen (Array<u64> deferred pending §2.7.7/Q9 native-
+// kind discriminator).
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum V2ElemType {
@@ -49,6 +58,13 @@ pub enum V2ElemType {
     I64,
     I32,
     Bool,
+    // W12 S1 — sized-integer monomorphizations.
+    I8,
+    U8,
+    I16,
+    U16,
+    U32,
+    // U64 omitted — deferred to S1.5 per S1 reopen.
 }
 
 impl V2ElemType {
@@ -59,6 +75,13 @@ impl V2ElemType {
             ELEM_TYPE_I64 => Some(V2ElemType::I64),
             ELEM_TYPE_I32 => Some(V2ElemType::I32),
             ELEM_TYPE_BOOL => Some(V2ElemType::Bool),
+            ELEM_TYPE_I8 => Some(V2ElemType::I8),
+            ELEM_TYPE_U8 => Some(V2ElemType::U8),
+            ELEM_TYPE_I16 => Some(V2ElemType::I16),
+            ELEM_TYPE_U16 => Some(V2ElemType::U16),
+            ELEM_TYPE_U32 => Some(V2ElemType::U32),
+            // Tag byte 10 (ELEM_TYPE_U64) reserved for S1.5; not produced
+            // by any current allocation path.
             _ => None,
         }
     }
@@ -72,6 +95,11 @@ impl V2ElemType {
             V2ElemType::I64 => NativeKind::Int64,
             V2ElemType::I32 => NativeKind::Int32,
             V2ElemType::Bool => NativeKind::Bool,
+            V2ElemType::I8 => NativeKind::Int8,
+            V2ElemType::U8 => NativeKind::UInt8,
+            V2ElemType::I16 => NativeKind::Int16,
+            V2ElemType::U16 => NativeKind::UInt16,
+            V2ElemType::U32 => NativeKind::UInt32,
         }
     }
 }
@@ -122,6 +150,20 @@ pub fn as_v2_typed_array(bits: u64, kind: NativeKind) -> Option<V2TypedArrayView
     if bits == 0 {
         return None;
     }
+    // Note (W12 S1 reopen, 2026-05-13): a defensive low-address-pointer
+    // guard (`bits < 0x1_0000 → None`) was added in the pre-reopen S1
+    // commit `4bcae991` to paper over the `NativeKind::UInt64` overload
+    // between scalar u64 and v2-typed-array-pointer carrier (small U64
+    // element values like `1000` would otherwise deref into unmapped
+    // memory at `*(bits as *const HeapHeader)` and SIGSEGV). The
+    // supervisor's reopen names that heuristic as an `is_heap()` probe
+    // in different framing — refused on sight per CLAUDE.md
+    // §"Parallel-implementation across producer/consumer carrier-shape
+    // boundaries" entry (e55b8e71). The structural fix — adding a
+    // discriminator to `NativeKind` so the kind track itself separates
+    // "pointer to TypedArray<T>" from "scalar u64" — is deferred to
+    // sub-cluster S1.5; `Array<u64>` migration is excluded from S1
+    // accordingly.
     let ptr = bits as usize as *mut u8;
     let header = unsafe { &*(ptr as *const HeapHeader) };
     if header.kind != HEAP_KIND_V2_TYPED_ARRAY {
@@ -187,7 +229,8 @@ fn decode_bool(bits: u64, kind: NativeKind) -> Option<bool> {
 /// Read element `index` from a v2 typed array, returning `(bits, NativeKind)`.
 ///
 /// The `NativeKind` is the element kind (`Float64` / `Int64` / `Int32` /
-/// `Bool`) — callers consume it directly without further inspection.
+/// `Bool` / sized-integer kinds) — callers consume it directly without
+/// further inspection.
 #[inline]
 pub fn read_element(view: &V2TypedArrayView, index: u32) -> Option<(u64, NativeKind)> {
     if index >= view.len {
@@ -213,6 +256,32 @@ pub fn read_element(view: &V2TypedArrayView, index: u32) -> Option<(u64, NativeK
             let arr = view.ptr as *const TypedArray<u8>;
             let v = TypedArray::<u8>::get_unchecked(arr, index) != 0;
             (v as u64, NativeKind::Bool)
+        },
+        // W12 S1 (2026-05-13) — sized-integer element reads.
+        V2ElemType::I8 => unsafe {
+            let arr = view.ptr as *const TypedArray<i8>;
+            let v = TypedArray::<i8>::get_unchecked(arr, index) as i64;
+            (v as u64, NativeKind::Int8)
+        },
+        V2ElemType::U8 => unsafe {
+            let arr = view.ptr as *const TypedArray<u8>;
+            let v = TypedArray::<u8>::get_unchecked(arr, index) as u64;
+            (v, NativeKind::UInt8)
+        },
+        V2ElemType::I16 => unsafe {
+            let arr = view.ptr as *const TypedArray<i16>;
+            let v = TypedArray::<i16>::get_unchecked(arr, index) as i64;
+            (v as u64, NativeKind::Int16)
+        },
+        V2ElemType::U16 => unsafe {
+            let arr = view.ptr as *const TypedArray<u16>;
+            let v = TypedArray::<u16>::get_unchecked(arr, index) as u64;
+            (v, NativeKind::UInt16)
+        },
+        V2ElemType::U32 => unsafe {
+            let arr = view.ptr as *const TypedArray<u32>;
+            let v = TypedArray::<u32>::get_unchecked(arr, index) as u64;
+            (v, NativeKind::UInt32)
         },
     };
     Some(pair)
@@ -258,6 +327,42 @@ pub fn write_element(
                 TypedArray::<u8>::set(arr, index, if v { 1 } else { 0 });
             }
         }
+        // W12 S1 (2026-05-13) — sized-integer element writes.
+        V2ElemType::I8 => {
+            let v = decode_i64(bits, kind).ok_or("expected i8-compatible value")?;
+            unsafe {
+                let arr = view.ptr as *mut TypedArray<i8>;
+                TypedArray::<i8>::set(arr, index, v as i8);
+            }
+        }
+        V2ElemType::U8 => {
+            let v = decode_i64(bits, kind).ok_or("expected u8-compatible value")?;
+            unsafe {
+                let arr = view.ptr as *mut TypedArray<u8>;
+                TypedArray::<u8>::set(arr, index, v as u8);
+            }
+        }
+        V2ElemType::I16 => {
+            let v = decode_i64(bits, kind).ok_or("expected i16-compatible value")?;
+            unsafe {
+                let arr = view.ptr as *mut TypedArray<i16>;
+                TypedArray::<i16>::set(arr, index, v as i16);
+            }
+        }
+        V2ElemType::U16 => {
+            let v = decode_i64(bits, kind).ok_or("expected u16-compatible value")?;
+            unsafe {
+                let arr = view.ptr as *mut TypedArray<u16>;
+                TypedArray::<u16>::set(arr, index, v as u16);
+            }
+        }
+        V2ElemType::U32 => {
+            let v = decode_i64(bits, kind).ok_or("expected u32-compatible value")?;
+            unsafe {
+                let arr = view.ptr as *mut TypedArray<u32>;
+                TypedArray::<u32>::set(arr, index, v as u32);
+            }
+        }
     }
     Ok(())
 }
@@ -298,6 +403,42 @@ pub fn push_element(
                 TypedArray::<u8>::push(arr, if v { 1 } else { 0 });
             }
         }
+        // W12 S1 (2026-05-13) — sized-integer element pushes.
+        V2ElemType::I8 => {
+            let v = decode_i64(bits, kind).ok_or("expected i8-compatible value")?;
+            unsafe {
+                let arr = view.ptr as *mut TypedArray<i8>;
+                TypedArray::<i8>::push(arr, v as i8);
+            }
+        }
+        V2ElemType::U8 => {
+            let v = decode_i64(bits, kind).ok_or("expected u8-compatible value")?;
+            unsafe {
+                let arr = view.ptr as *mut TypedArray<u8>;
+                TypedArray::<u8>::push(arr, v as u8);
+            }
+        }
+        V2ElemType::I16 => {
+            let v = decode_i64(bits, kind).ok_or("expected i16-compatible value")?;
+            unsafe {
+                let arr = view.ptr as *mut TypedArray<i16>;
+                TypedArray::<i16>::push(arr, v as i16);
+            }
+        }
+        V2ElemType::U16 => {
+            let v = decode_i64(bits, kind).ok_or("expected u16-compatible value")?;
+            unsafe {
+                let arr = view.ptr as *mut TypedArray<u16>;
+                TypedArray::<u16>::push(arr, v as u16);
+            }
+        }
+        V2ElemType::U32 => {
+            let v = decode_i64(bits, kind).ok_or("expected u32-compatible value")?;
+            unsafe {
+                let arr = view.ptr as *mut TypedArray<u32>;
+                TypedArray::<u32>::push(arr, v as u32);
+            }
+        }
     }
     Ok(())
 }
@@ -321,6 +462,27 @@ pub fn pop_element(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
         V2ElemType::Bool => unsafe {
             let arr = view.ptr as *mut TypedArray<u8>;
             TypedArray::<u8>::pop(arr).map(|v| ((v != 0) as u64, NativeKind::Bool))
+        },
+        // W12 S1 (2026-05-13) — sized-integer element pops.
+        V2ElemType::I8 => unsafe {
+            let arr = view.ptr as *mut TypedArray<i8>;
+            TypedArray::<i8>::pop(arr).map(|v| (v as i64 as u64, NativeKind::Int8))
+        },
+        V2ElemType::U8 => unsafe {
+            let arr = view.ptr as *mut TypedArray<u8>;
+            TypedArray::<u8>::pop(arr).map(|v| (v as u64, NativeKind::UInt8))
+        },
+        V2ElemType::I16 => unsafe {
+            let arr = view.ptr as *mut TypedArray<i16>;
+            TypedArray::<i16>::pop(arr).map(|v| (v as i64 as u64, NativeKind::Int16))
+        },
+        V2ElemType::U16 => unsafe {
+            let arr = view.ptr as *mut TypedArray<u16>;
+            TypedArray::<u16>::pop(arr).map(|v| (v as u64, NativeKind::UInt16))
+        },
+        V2ElemType::U32 => unsafe {
+            let arr = view.ptr as *mut TypedArray<u32>;
+            TypedArray::<u32>::pop(arr).map(|v| (v as u64, NativeKind::UInt32))
         },
     }
 }
@@ -375,7 +537,15 @@ pub fn sum_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
             }
             Some((s as u64, NativeKind::Int64))
         }
-        V2ElemType::Bool => None,
+        // W12 S1 — sum/avg/min/max/variance/std/dot/norm not defined for
+        // Bool or sized-integer-narrower-than-i64 element kinds. The
+        // caller falls back to a non-SIMD path or returns an error.
+        V2ElemType::Bool
+        | V2ElemType::I8
+        | V2ElemType::U8
+        | V2ElemType::I16
+        | V2ElemType::U16
+        | V2ElemType::U32 => None,
     }
 }
 
@@ -608,7 +778,14 @@ pub fn avg_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
             V2ElemType::F64 | V2ElemType::I64 | V2ElemType::I32 => {
                 Some((f64::NAN.to_bits(), NativeKind::Float64))
             }
-            V2ElemType::Bool => None,
+            // W12 S1 — sized-integer narrow kinds and Bool don't have an
+            // empty-array mean sentinel at this layer; caller surfaces None.
+            V2ElemType::Bool
+            | V2ElemType::I8
+            | V2ElemType::U8
+            | V2ElemType::I16
+            | V2ElemType::U16
+            | V2ElemType::U32 => None,
         };
     }
     match view.elem_type {
@@ -642,7 +819,15 @@ pub fn avg_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
             }
             Some(((s / view.len as f64).to_bits(), NativeKind::Float64))
         }
-        V2ElemType::Bool => None,
+        // W12 S1 — sum/avg/min/max/variance/std/dot/norm not defined for
+        // Bool or sized-integer-narrower-than-i64 element kinds. The
+        // caller falls back to a non-SIMD path or returns an error.
+        V2ElemType::Bool
+        | V2ElemType::I8
+        | V2ElemType::U8
+        | V2ElemType::I16
+        | V2ElemType::U16
+        | V2ElemType::U32 => None,
     }
 }
 
@@ -657,7 +842,15 @@ pub fn min_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
         return match view.elem_type {
             V2ElemType::F64 => Some((f64::NAN.to_bits(), NativeKind::Float64)),
             V2ElemType::I64 | V2ElemType::I32 => Some((0u64, NativeKind::Bool)),
-            V2ElemType::Bool => None,
+            // W12 S1 — narrow-int and Bool element kinds have no canonical
+            // empty-array sentinel for min/max; caller treats None as a
+            // runtime error per §2.7 sentinel discipline.
+            V2ElemType::Bool
+            | V2ElemType::I8
+            | V2ElemType::U8
+            | V2ElemType::I16
+            | V2ElemType::U16
+            | V2ElemType::U32 => None,
         };
     }
     match view.elem_type {
@@ -695,7 +888,15 @@ pub fn min_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
             }
             Some((min as u64, NativeKind::Int64))
         }
-        V2ElemType::Bool => None,
+        // W12 S1 — sum/avg/min/max/variance/std/dot/norm not defined for
+        // Bool or sized-integer-narrower-than-i64 element kinds. The
+        // caller falls back to a non-SIMD path or returns an error.
+        V2ElemType::Bool
+        | V2ElemType::I8
+        | V2ElemType::U8
+        | V2ElemType::I16
+        | V2ElemType::U16
+        | V2ElemType::U32 => None,
     }
 }
 
@@ -705,7 +906,15 @@ pub fn max_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
         return match view.elem_type {
             V2ElemType::F64 => Some((f64::NAN.to_bits(), NativeKind::Float64)),
             V2ElemType::I64 | V2ElemType::I32 => Some((0u64, NativeKind::Bool)),
-            V2ElemType::Bool => None,
+            // W12 S1 — narrow-int and Bool element kinds have no canonical
+            // empty-array sentinel for min/max; caller treats None as a
+            // runtime error per §2.7 sentinel discipline.
+            V2ElemType::Bool
+            | V2ElemType::I8
+            | V2ElemType::U8
+            | V2ElemType::I16
+            | V2ElemType::U16
+            | V2ElemType::U32 => None,
         };
     }
     match view.elem_type {
@@ -743,7 +952,15 @@ pub fn max_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
             }
             Some((max as u64, NativeKind::Int64))
         }
-        V2ElemType::Bool => None,
+        // W12 S1 — sum/avg/min/max/variance/std/dot/norm not defined for
+        // Bool or sized-integer-narrower-than-i64 element kinds. The
+        // caller falls back to a non-SIMD path or returns an error.
+        V2ElemType::Bool
+        | V2ElemType::I8
+        | V2ElemType::U8
+        | V2ElemType::I16
+        | V2ElemType::U16
+        | V2ElemType::U32 => None,
     }
 }
 
@@ -953,6 +1170,86 @@ pub fn clone_array(view: &V2TypedArrayView) -> *mut u8 {
                 p
             }
         }
+        // W12 S1 (2026-05-13) — sized-integer element clone implementations.
+        // Each variant allocates a fresh `TypedArray<T>` with matching `T`,
+        // memcpy's the element buffer, and stamps the proper `ELEM_TYPE_X`
+        // byte so subsequent `as_v2_typed_array` calls dispatch correctly.
+        V2ElemType::I8 => {
+            let new_arr = TypedArray::<i8>::with_capacity(view.len);
+            unsafe {
+                let src = view.ptr as *const TypedArray<i8>;
+                let src_data = (*src).data;
+                let dst_data = (*new_arr).data;
+                if view.len > 0 && !src_data.is_null() && !dst_data.is_null() {
+                    std::ptr::copy_nonoverlapping(src_data, dst_data, view.len as usize);
+                }
+                (*new_arr).len = view.len;
+                let p = new_arr as *mut u8;
+                stamp_elem_type(p, ELEM_TYPE_I8);
+                p
+            }
+        }
+        V2ElemType::U8 => {
+            let new_arr = TypedArray::<u8>::with_capacity(view.len);
+            unsafe {
+                let src = view.ptr as *const TypedArray<u8>;
+                let src_data = (*src).data;
+                let dst_data = (*new_arr).data;
+                if view.len > 0 && !src_data.is_null() && !dst_data.is_null() {
+                    std::ptr::copy_nonoverlapping(src_data, dst_data, view.len as usize);
+                }
+                (*new_arr).len = view.len;
+                let p = new_arr as *mut u8;
+                stamp_elem_type(p, ELEM_TYPE_U8);
+                p
+            }
+        }
+        V2ElemType::I16 => {
+            let new_arr = TypedArray::<i16>::with_capacity(view.len);
+            unsafe {
+                let src = view.ptr as *const TypedArray<i16>;
+                let src_data = (*src).data;
+                let dst_data = (*new_arr).data;
+                if view.len > 0 && !src_data.is_null() && !dst_data.is_null() {
+                    std::ptr::copy_nonoverlapping(src_data, dst_data, view.len as usize);
+                }
+                (*new_arr).len = view.len;
+                let p = new_arr as *mut u8;
+                stamp_elem_type(p, ELEM_TYPE_I16);
+                p
+            }
+        }
+        V2ElemType::U16 => {
+            let new_arr = TypedArray::<u16>::with_capacity(view.len);
+            unsafe {
+                let src = view.ptr as *const TypedArray<u16>;
+                let src_data = (*src).data;
+                let dst_data = (*new_arr).data;
+                if view.len > 0 && !src_data.is_null() && !dst_data.is_null() {
+                    std::ptr::copy_nonoverlapping(src_data, dst_data, view.len as usize);
+                }
+                (*new_arr).len = view.len;
+                let p = new_arr as *mut u8;
+                stamp_elem_type(p, ELEM_TYPE_U16);
+                p
+            }
+        }
+        V2ElemType::U32 => {
+            let new_arr = TypedArray::<u32>::with_capacity(view.len);
+            unsafe {
+                let src = view.ptr as *const TypedArray<u32>;
+                let src_data = (*src).data;
+                let dst_data = (*new_arr).data;
+                if view.len > 0 && !src_data.is_null() && !dst_data.is_null() {
+                    std::ptr::copy_nonoverlapping(src_data, dst_data, view.len as usize);
+                }
+                (*new_arr).len = view.len;
+                let p = new_arr as *mut u8;
+                stamp_elem_type(p, ELEM_TYPE_U32);
+                p
+            }
+        }
+        // V2ElemType::U64 omitted — deferred to S1.5 per S1 reopen.
     }
 }
 

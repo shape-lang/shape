@@ -391,6 +391,33 @@ impl VirtualMachine {
                     let v = unsafe { TypedArray::<u8>::get_unchecked(arr, i) };
                     self.push_kinded((v != 0) as u64, NativeKind::Bool)
                 }
+                // W12 S1 (2026-05-13) — sized-integer iter reads.
+                V2ElemType::I8 => {
+                    let arr = view.ptr as *const TypedArray<i8>;
+                    let v = unsafe { TypedArray::<i8>::get_unchecked(arr, i) };
+                    self.push_kinded(v as i64 as u64, NativeKind::Int8)
+                }
+                V2ElemType::U8 => {
+                    let arr = view.ptr as *const TypedArray<u8>;
+                    let v = unsafe { TypedArray::<u8>::get_unchecked(arr, i) };
+                    self.push_kinded(v as u64, NativeKind::UInt8)
+                }
+                V2ElemType::I16 => {
+                    let arr = view.ptr as *const TypedArray<i16>;
+                    let v = unsafe { TypedArray::<i16>::get_unchecked(arr, i) };
+                    self.push_kinded(v as i64 as u64, NativeKind::Int16)
+                }
+                V2ElemType::U16 => {
+                    let arr = view.ptr as *const TypedArray<u16>;
+                    let v = unsafe { TypedArray::<u16>::get_unchecked(arr, i) };
+                    self.push_kinded(v as u64, NativeKind::UInt16)
+                }
+                V2ElemType::U32 => {
+                    let arr = view.ptr as *const TypedArray<u32>;
+                    let v = unsafe { TypedArray::<u32>::get_unchecked(arr, i) };
+                    self.push_kinded(v as u64, NativeKind::UInt32)
+                }
+                // V2ElemType::U64 omitted — deferred to S1.5 per S1 reopen.
             };
             drop_with_kind(idx_bits, idx_kind);
             drop_with_kind(iter_bits, iter_kind);

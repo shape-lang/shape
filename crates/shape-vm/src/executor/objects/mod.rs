@@ -531,7 +531,19 @@ impl VirtualMachine {
                 let bits = receiver.slot.raw();
                 if let Some(view) = as_v2_typed_array(bits, kind) {
                     let typed = match view.elem_type {
-                        V2ElemType::I64 | V2ElemType::I32 => {
+                        // All integer-family kinds (I64/I32 plus W12 S1 sized
+                        // ints I8/U8/I16/U16/U32) share the typed-int method
+                        // dispatch — methods sum/min/max/etc. operate on the
+                        // integer-bit pattern regardless of width; narrower
+                        // widths sign-/zero-extend at read time. U64 omitted
+                        // — deferred to S1.5 per S1 reopen.
+                        V2ElemType::I64
+                        | V2ElemType::I32
+                        | V2ElemType::I8
+                        | V2ElemType::U8
+                        | V2ElemType::I16
+                        | V2ElemType::U16
+                        | V2ElemType::U32 => {
                             method_registry::TYPED_INT_ARRAY_METHODS
                                 .get(method_name)
                                 .copied()

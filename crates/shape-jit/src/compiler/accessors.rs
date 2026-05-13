@@ -288,6 +288,33 @@ const ALL_OPCODES: &[OpCode] = &[
     OpCode::TypedArrayPushI32,
     OpCode::TypedArrayPushBool,
     OpCode::TypedArrayLen,
+    // W12 S1 (2026-05-13) — sized-integer typed array opcodes (I8/U8/I16/U16/U32/U64).
+    // The opcodes themselves are VM-dispatched today (`exec_v2_typed_array`);
+    // the JIT registers them here to mark the parity matrix as supported
+    // and to keep `build_full_opcode_parity_matrix` exhaustive.
+    OpCode::NewTypedArrayI8,
+    OpCode::TypedArrayGetI8,
+    OpCode::TypedArrayPushI8,
+    OpCode::TypedArraySetI8,
+    OpCode::NewTypedArrayU8,
+    OpCode::TypedArrayGetU8,
+    OpCode::TypedArrayPushU8,
+    OpCode::TypedArraySetU8,
+    OpCode::NewTypedArrayI16,
+    OpCode::TypedArrayGetI16,
+    OpCode::TypedArrayPushI16,
+    OpCode::TypedArraySetI16,
+    OpCode::NewTypedArrayU16,
+    OpCode::TypedArrayGetU16,
+    OpCode::TypedArrayPushU16,
+    OpCode::TypedArraySetU16,
+    OpCode::NewTypedArrayU32,
+    OpCode::TypedArrayGetU32,
+    OpCode::TypedArrayPushU32,
+    OpCode::TypedArraySetU32,
+    // U64 typed-array opcodes intentionally NOT minted — deferred to
+    // S1.5 per supervisor's S1 reopen (2026-05-13). See
+    // crates/shape-vm/src/bytecode/opcode_defs.rs comment block.
 ];
 
 const ALL_BUILTINS: &[BuiltinFunction] = &[

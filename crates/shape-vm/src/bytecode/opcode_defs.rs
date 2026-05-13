@@ -559,6 +559,81 @@ define_opcodes! {
     /// Set element in TypedArray<bool>: pops (arr_ptr, index, value), pushes nothing
     TypedArraySetBool = 0x4C, Object, pops: 3, pushes: 0;
 
+    // ===== W12 S1 — sized-integer TypedArray<T> producer migration (2026-05-13) =====
+    // 6 new scalar element kinds extending the F64/I64/I32/Bool fast-path
+    // to I8/U8/I16/U16/U32/U64 per ADR-006 §2.7.24 Q25.A scalar-variant
+    // migration. Each kind gets New/Get/Push/Set; Len is shared via the
+    // existing OpCode::TypedArrayLen (layout is T-invariant). Byte values
+    // reuse deleted Dynamic-arithmetic/comparison slots (0x10-0x16,
+    // 0x20-0x25) and the previously-unallocated 0x118..0x122 range.
+    //
+    // U8 has its own ELEM_TYPE_U8 byte distinct from ELEM_TYPE_BOOL so the
+    // v2_array_detect dispatch can route U8 reads back as Int8/UInt8 vs
+    // Bool — runtime semantics differ even when the underlying buffer is
+    // byte-equivalent.
+
+    /// Create a new TypedArray<i8> with given capacity. Operand: Count(capacity). Pushes ptr.
+    NewTypedArrayI8 = 0x10, Object, pops: 0, pushes: 1;
+    /// Get element from TypedArray<i8>: pops (arr_ptr, index), pushes i8 value (sign-extended to i64).
+    TypedArrayGetI8 = 0x11, Object, pops: 2, pushes: 1;
+    /// Push element to TypedArray<i8>: pops (arr_ptr, value), pushes nothing.
+    TypedArrayPushI8 = 0x12, Object, pops: 2, pushes: 0;
+    /// Set element in TypedArray<i8>: pops (arr_ptr, index, value), pushes nothing.
+    TypedArraySetI8 = 0x13, Object, pops: 3, pushes: 0;
+
+    /// Create a new TypedArray<u8> with given capacity. Operand: Count(capacity). Pushes ptr.
+    NewTypedArrayU8 = 0x14, Object, pops: 0, pushes: 1;
+    /// Get element from TypedArray<u8>: pops (arr_ptr, index), pushes u8 value (zero-extended to i64).
+    TypedArrayGetU8 = 0x15, Object, pops: 2, pushes: 1;
+    /// Push element to TypedArray<u8>: pops (arr_ptr, value), pushes nothing.
+    TypedArrayPushU8 = 0x16, Object, pops: 2, pushes: 0;
+    /// Set element in TypedArray<u8>: pops (arr_ptr, index, value), pushes nothing.
+    TypedArraySetU8 = 0x20, Object, pops: 3, pushes: 0;
+
+    /// Create a new TypedArray<i16> with given capacity. Operand: Count(capacity). Pushes ptr.
+    NewTypedArrayI16 = 0x21, Object, pops: 0, pushes: 1;
+    /// Get element from TypedArray<i16>: pops (arr_ptr, index), pushes i16 value (sign-extended to i64).
+    TypedArrayGetI16 = 0x22, Object, pops: 2, pushes: 1;
+    /// Push element to TypedArray<i16>: pops (arr_ptr, value), pushes nothing.
+    TypedArrayPushI16 = 0x23, Object, pops: 2, pushes: 0;
+    /// Set element in TypedArray<i16>: pops (arr_ptr, index, value), pushes nothing.
+    TypedArraySetI16 = 0x24, Object, pops: 3, pushes: 0;
+
+    /// Create a new TypedArray<u16> with given capacity. Operand: Count(capacity). Pushes ptr.
+    NewTypedArrayU16 = 0x25, Object, pops: 0, pushes: 1;
+    /// Get element from TypedArray<u16>: pops (arr_ptr, index), pushes u16 value (zero-extended to i64).
+    TypedArrayGetU16 = 0x118, Object, pops: 2, pushes: 1;
+    /// Push element to TypedArray<u16>: pops (arr_ptr, value), pushes nothing.
+    TypedArrayPushU16 = 0x119, Object, pops: 2, pushes: 0;
+    /// Set element in TypedArray<u16>: pops (arr_ptr, index, value), pushes nothing.
+    TypedArraySetU16 = 0x11A, Object, pops: 3, pushes: 0;
+
+    /// Create a new TypedArray<u32> with given capacity. Operand: Count(capacity). Pushes ptr.
+    NewTypedArrayU32 = 0x11B, Object, pops: 0, pushes: 1;
+    /// Get element from TypedArray<u32>: pops (arr_ptr, index), pushes u32 value (zero-extended to i64).
+    TypedArrayGetU32 = 0x11C, Object, pops: 2, pushes: 1;
+    /// Push element to TypedArray<u32>: pops (arr_ptr, value), pushes nothing.
+    TypedArrayPushU32 = 0x11D, Object, pops: 2, pushes: 0;
+    /// Set element in TypedArray<u32>: pops (arr_ptr, index, value), pushes nothing.
+    TypedArraySetU32 = 0x11E, Object, pops: 3, pushes: 0;
+
+    // U64 typed-array opcodes intentionally NOT minted. Per the
+    // supervisor's S1 reopen (2026-05-13), `TypedArray<u64>` migration
+    // is gated on the §2.7.7 / Q9 NativeKind-track extension that
+    // discriminates "pointer to TypedArray<T>" from "scalar u64" — both
+    // currently share `NativeKind::UInt64` at HEAD. The defensive
+    // low-address-pointer guard at `as_v2_typed_array` (introduced in
+    // the pre-reopen S1 commit `4bcae991`) was a memory-region heuristic
+    // substituting for the missing compile-time discriminator — an
+    // `is_heap()` probe in different framing — which the CLAUDE.md
+    // §"Parallel-implementation across producer/consumer carrier-shape
+    // boundaries" entry (e55b8e71) names as the 6th instance of that
+    // defection-attractor class. Removed and deferred to sub-cluster
+    // S1.5 (W12-nativekind-typed-array-ptr-extension or equivalent per
+    // team-lead's pre-dispatch audit). See AGENTS.md S1 row's surface-
+    // and-stop list. Byte values 0x11F..0x122 left unallocated for
+    // S1.5's re-mint.
+
     // ===== v2 Typed Map Operations =====
     /// Allocate a new TypedMap<*const StringObj, f64>. Pushes ptr.
     NewTypedMapStringF64 = 0xCD, Object, pops: 0, pushes: 1;
@@ -1787,6 +1862,30 @@ impl OpCode {
             | OpCode::TypedArrayPushI32
             | OpCode::TypedArrayPushBool
             | OpCode::TypedArrayLen
+            // W12 S1 — sized-integer typed array opcodes (I8/U8/I16/U16/U32/U64)
+            | OpCode::NewTypedArrayI8
+            | OpCode::TypedArrayGetI8
+            | OpCode::TypedArrayPushI8
+            | OpCode::TypedArraySetI8
+            | OpCode::NewTypedArrayU8
+            | OpCode::TypedArrayGetU8
+            | OpCode::TypedArrayPushU8
+            | OpCode::TypedArraySetU8
+            | OpCode::NewTypedArrayI16
+            | OpCode::TypedArrayGetI16
+            | OpCode::TypedArrayPushI16
+            | OpCode::TypedArraySetI16
+            | OpCode::NewTypedArrayU16
+            | OpCode::TypedArrayGetU16
+            | OpCode::TypedArrayPushU16
+            | OpCode::TypedArraySetU16
+            | OpCode::NewTypedArrayU32
+            | OpCode::TypedArrayGetU32
+            | OpCode::TypedArrayPushU32
+            | OpCode::TypedArraySetU32
+            // U64 typed-array opcodes intentionally NOT minted — deferred to
+            // S1.5 per supervisor's S1 reopen; see comment block in the
+            // opcode-definition table above.
             // Local-slot-based typed array element access
             | OpCode::GetElemI64
             | OpCode::GetElemF64

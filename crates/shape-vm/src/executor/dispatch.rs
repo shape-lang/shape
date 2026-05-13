@@ -889,7 +889,28 @@ impl VirtualMachine {
             | TypedArrayPushI64
             | TypedArrayPushI32
             | TypedArrayPushBool
-            | TypedArrayLen => {
+            | TypedArrayLen
+            // W12 S1 — sized-integer typed array opcodes (2026-05-13)
+            | NewTypedArrayI8
+            | TypedArrayGetI8
+            | TypedArrayPushI8
+            | TypedArraySetI8
+            | NewTypedArrayU8
+            | TypedArrayGetU8
+            | TypedArrayPushU8
+            | TypedArraySetU8
+            | NewTypedArrayI16
+            | TypedArrayGetI16
+            | TypedArrayPushI16
+            | TypedArraySetI16
+            | NewTypedArrayU16
+            | TypedArrayGetU16
+            | TypedArrayPushU16
+            | TypedArraySetU16
+            | NewTypedArrayU32
+            | TypedArrayGetU32
+            | TypedArrayPushU32
+            | TypedArraySetU32 => {
                 return self.exec_v2_typed_array(instruction);
             }
 
