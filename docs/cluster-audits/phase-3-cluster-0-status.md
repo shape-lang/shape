@@ -2295,6 +2295,105 @@ broader-family regex:
   adapter/shim) for kind-source threading.
 - Bool-default for unproven kind at any site.
 
+### W17-vm-call-value-closure-kind-mismatch close (2026-05-13)
+
+T5 Round 13 close. Audit doc at
+`docs/cluster-audits/w17-vm-call-value-closure-kind-mismatch-audit.md`.
+
+**Audit finding.** The kind label is honest — `Ptr(HeapKind::Closure)`
+on both iterations of `xs.map(|x| x*2)`. The consumer at
+`call_convention.rs:795-810` correctly classifies. The bug is
+**producer-side share accounting** at the Closure arm of
+`call_value_immediate_nb` (`call_convention.rs:835-841`, introduced in
+W7-cv-static Round 2 close `06cdfce` 2026-05-09):
+
+- The `callee` carrier in `dispatch_call_value_immediate`
+  (`control_flow/mod.rs:408-409`) holds one `Arc<HeapValue>` share —
+  transferred from the stack via `pop_kinded`.
+- The Closure arm passes `Some(callee.slot.raw()), Some(callee.kind)`
+  to `call_closure_with_nb_args_keepalive` — these install on the new
+  frame's `closure_heap_bits` / `closure_heap_kind` B9 lockstep
+  companion fields.
+- On `op_return` / `op_return_value` the frame teardown at
+  `control_flow/mod.rs:712-726` / `:774-788` releases via
+  `drop_with_kind(closure_heap_bits, closure_heap_kind)` — ONE share
+  retired.
+- After `call_value_immediate_nb` returns, the `callee` carrier in the
+  caller drops at end of scope — `KindedSlot::Drop` retires ANOTHER
+  share.
+
+Net: 1 share acquired, 2 released. The closure `Arc<HeapValue>`
+reaches refcount 0 before the binding's clone share is released
+(because the binding share installed by `op_make_closure`'s producer +
+`CloneLocal Local(1)` clone is independent — but the Arc payload is
+already gone). Next iteration: `CloneLocal Local(1)` reads dangling
+bits, races the allocator, surfaces as `HeapKind::Closure label with
+non-ClosureRaw payload` in dev or `Invalid function call` in release
+(the bogus `function_id` read from the freed header fails the
+`program.functions.get(func_id)` bounds check).
+
+**W7/W8 overlap check.** NOT absorbed:
+- Round 7B audit `7753d52b` (W12-jit-collection-typed-arc-ffi):
+  JIT-territory typed-Arc allocation FFI; no touch.
+- Round 8B audit `ba09636b` (W12-jit-collection-method-dispatch-abi):
+  JIT-territory dispatch shell; no touch.
+- Round 9 close `81acb62e`: typed-Arc collection ctors + refcount; the
+  Closure arm of `clone_with_kind` / `drop_with_kind` was already
+  symmetric per W7-closure-retain `5fa4b19`; the audited bug is
+  upstream of these arms.
+- Round 10 close `2c2ecdf1`: `jit_call_method` shell rebuild; no
+  touch.
+
+NEW finding. Entered the tree at `06cdfce` (W7-cv-static Round 2),
+latent until Smoke 2's `.map(|x| x*2)` exercised the inline-loop
+CallValue path across multiple iterations. Round 11A's `op_new_array`
+fix unblocked the dispatch-table path that surfaces this bug — same
+Q2 disposition (real new finding, AND blocks kickoff smoke → cluster-0
+absorbs).
+
+**Cluster-0 disposition.** Confirmed blocks kickoff Smoke 2 full VM
+(`[1,2,3,4,5].map(|x|x*2).sum()`). Reproducer in worktree:
+
+```shape
+let xs = [1, 2, 3]
+let doubled = xs.map(|x| x * 2)
+print(doubled)
+```
+
+Pre-fix: `Error: Runtime error: Invalid function call (line 4)`.
+Post-fix: `[2, 4, 6]`.
+
+**Fix shape (Option B, single-line):**
+`clone_with_kind(callee.slot.raw(), callee.kind)` immediately before
+the `call_closure_with_nb_args_keepalive` invocation in
+`call_value_immediate_nb`'s Closure arm. The §2.7.7 / Q9 retain-on-read
+primitive is the canonical kind-aware refcount bump — no tag decode,
+no `is_heap()` probe, no Bool-default fallback, no by-move ABI
+surgery. Same share-balance pattern as
+`execute_function_with_named_args` (lines 246-250) and the existing
+W7-cv-method `op_call_method` clone-before-handle path.
+
+Pre-Smoke-2 verify-merge.sh: 12/12. check-no-dynamic.sh: exit 0.
+cargo check --workspace --lib --tests: exit 0. shape-jit lib tests:
+382/0/26 (no regression vs Round-12 baseline 382). shape-vm lib tests:
+pre-existing SIGABRT (v2-raw-heap aliasing class per CLAUDE.md Known
+Constraints) at baseline — verified by stashing the fix and re-running:
+identical SIGABRT signature, NOT a regression from this commit.
+
+**Smoke 2 still hits T4 IntrinsicSum downstream** — expected per the
+T5 prompt's close criterion. With T4's IntrinsicSum migration landing
+in parallel this round, kickoff Smoke 2 full VM closes end-to-end.
+
+**`resolve_spawned_task` same defect class?** Audited the second site
+the T5 prompt cited (`call_convention.rs:421-475`). The callable share
+comes from `take_callable` (raw u64 + NativeKind locals, no
+`KindedSlot` carrier with `Drop`). After install as
+`closure_heap_bits`, the frame teardown releases — ONE release.
+Same path UInt64 callable: no Arc share, no-op release. No double-
+release shape applies. `resolve_spawned_task` is OK as-is; the prompt's
+"same surface pattern" wording refers to the dispatch shape, not the
+defect class.
+
 ### Cluster-0 close attempt cadence (post-Round-13)
 
 After all three Round 13 sub-clusters merge:
