@@ -301,24 +301,11 @@ impl VirtualMachine {
                 // raw pointer bits directly with the matching kind.
                 self.push_kinded(bits, NativeKind::String)
             }
-            TypedArrayData::FloatSlice {
-                parent,
-                offset,
-                len,
-            } => {
-                let len = *len as usize;
-                let offset = *offset as usize;
-                if index >= len {
-                    return Err(oob(len));
-                }
-                let v = parent.data[offset + index];
-                self.push_kinded(v.to_bits(), NativeKind::Float64)
-            }
-            TypedArrayData::Matrix(_) => Err(VMError::NotImplemented(format!(
-                "SURFACE: GetProp on TypedArray::{} variant — requires a \
-                 Matrix 2D-index opcode (ADR-006 §2.7.24).",
-                arr.type_name()
-            ))),
+            // ADR-006 §2.7.22 amendment (Round 18 S3): Matrix / FloatSlice
+            // exit `TypedArrayData`. Indexing through Matrix / MatrixSlice
+            // receivers (`m[r]` / `slice[i]`) routes via dedicated
+            // GetProp handling on the new HeapKinds, not through this
+            // typed-array path.
             // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized
             // arms — push the element through the same Arc::into_raw +
             // push_kinded shape as the existing HeapKind-typed push
@@ -842,8 +829,8 @@ fn typed_array_len(arr: &TypedArrayData) -> usize {
         TypedArrayData::U64(b) => b.data.len(),
         TypedArrayData::F32(b) => b.data.len(),
         TypedArrayData::String(b) => b.data.len(),
-        TypedArrayData::Matrix(m) => m.data.len(),
-        TypedArrayData::FloatSlice { len, .. } => *len as usize,
+        // ADR-006 §2.7.22 amendment (Round 18 S3): Matrix / FloatSlice
+        // exit `TypedArrayData`.
         // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
         TypedArrayData::Decimal(b) => b.data.len(),
         TypedArrayData::BigInt(b) => b.data.len(),

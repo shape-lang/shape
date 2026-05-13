@@ -996,8 +996,8 @@ fn typed_array_len(arr: &TypedArrayData) -> usize {
         U64(b) => b.data.len(),
         F32(b) => b.data.len(),
         String(b) => b.data.len(),
-        Matrix(m) => m.data.len(),
-        FloatSlice { len, .. } => *len as usize,
+        // ADR-006 §2.7.22 amendment (Round 18 S3): Matrix / FloatSlice
+        // exit `TypedArrayData`.
         // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
         TypedArrayData::Decimal(b) => b.data.len(),
         TypedArrayData::BigInt(b) => b.data.len(),
@@ -1039,13 +1039,9 @@ fn typed_array_element_kinded(
         U32(b) => KindedSlot::from_int(b.data[idx] as i64),
         U64(b) => KindedSlot::from_int(b.data[idx] as i64),
         F32(b) => KindedSlot::from_number(b.data[idx] as f64),
-        FloatSlice { parent, offset, .. } => {
-            KindedSlot::from_number(parent.data[*offset as usize + idx])
-        }
         String(b) => KindedSlot::from_string_arc(Arc::clone(&b.data[idx])),
-        Matrix(_) => {
-            return Err("comptime literal: Matrix arrays not yet supported".to_string());
-        }
+        // ADR-006 §2.7.22 amendment (Round 18 S3): Matrix / FloatSlice
+        // exit `TypedArrayData`.
         // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
         TypedArrayData::Decimal(b) => KindedSlot::from_decimal(Arc::clone(&b.data[idx])),
         TypedArrayData::BigInt(b) => KindedSlot::from_bigint(Arc::clone(&b.data[idx])),

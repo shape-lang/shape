@@ -118,8 +118,6 @@ fn typed_array_len(arr: &TypedArrayData) -> usize {
         TypedArrayData::Char(b) => b.data.len(),
         TypedArrayData::TypedObject(b) => b.data.len(),
         TypedArrayData::TraitObject(b) => b.data.len(),
-        TypedArrayData::Matrix(m) => m.data.len(),
-        TypedArrayData::FloatSlice { len, .. } => *len as usize,
     }
 }
 

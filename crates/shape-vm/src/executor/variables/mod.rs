@@ -3668,10 +3668,8 @@ fn typed_array_element_kind(
         TypedArrayData::U64(_) => NativeKind::UInt64,
         TypedArrayData::F32(_) => NativeKind::Float64,
         TypedArrayData::String(_) => NativeKind::String,
-        // Variants without a single statically-sourceable scalar
-        // element kind. Caller surfaces (no fabrication per §2.7.7 #9).
-        TypedArrayData::FloatSlice { .. }
-        | TypedArrayData::Matrix(_) => return None,
+        // ADR-006 §2.7.22 amendment (Round 18 S3): Matrix / FloatSlice
+        // exit `TypedArrayData`.
         // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized
         // arms — each variant's element kind is the matching heap pointer.
         TypedArrayData::Decimal(_) => NativeKind::Ptr(shape_value::heap_value::HeapKind::Decimal),
@@ -3782,14 +3780,9 @@ fn typed_array_read_index_raw(
             // bump the strong-count for the pushed slot.
             raw
         }
-        TypedArrayData::FloatSlice { .. }
-        | TypedArrayData::Matrix(_) => {
-            return Err(VMError::NotImplemented(
-                "DerefLoad through TypedIndex SURFACE: FloatSlice / Matrix \
-                 variants don't support raw-bits element read — ADR-006 §2.7.13 / Q14"
-                    .into(),
-            ));
-        }
+        // ADR-006 §2.7.22 amendment (Round 18 S3): Matrix / FloatSlice
+        // exit `TypedArrayData`. DerefLoad against a Matrix / MatrixSlice
+        // receiver routes through their dedicated HeapKind paths.
         // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized
         // arms — each Arc element has `Arc::as_ptr(arc) as u64` as the
         // raw-bits encoding (mirror of the String arm above). Same

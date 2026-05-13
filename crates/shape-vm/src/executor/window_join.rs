@@ -107,8 +107,8 @@ fn typed_array_len(arr: &TypedArrayData) -> usize {
         TypedArrayData::U64(b) => b.len(),
         TypedArrayData::F32(b) => b.len(),
         TypedArrayData::String(b) => b.len(),
-        TypedArrayData::Matrix(m) => m.data.len(),
-        TypedArrayData::FloatSlice { len, .. } => *len as usize,
+        // ADR-006 §2.7.22 amendment (Round 18 S3): Matrix / FloatSlice
+        // exit `TypedArrayData`.
         // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
         TypedArrayData::Decimal(b) => b.len(),
         TypedArrayData::BigInt(b) => b.len(),

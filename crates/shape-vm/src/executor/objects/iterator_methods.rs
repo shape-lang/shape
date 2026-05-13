@@ -191,8 +191,8 @@ fn typed_array_len(arr: &TypedArrayData) -> usize {
         TypedArrayData::U64(b) => b.data.len(),
         TypedArrayData::F32(b) => b.data.len(),
         TypedArrayData::String(b) => b.data.len(),
-        TypedArrayData::Matrix(m) => m.data.len(),
-        TypedArrayData::FloatSlice { len, .. } => *len as usize,
+        // ADR-006 §2.7.22 amendment (Round 18 S3): Matrix / FloatSlice
+        // exit `TypedArrayData`.
         // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
         TypedArrayData::Decimal(b) => b.data.len(),
         TypedArrayData::BigInt(b) => b.data.len(),
@@ -225,11 +225,8 @@ fn typed_array_elem_at(arr: &TypedArrayData, idx: usize) -> Result<KindedSlot, V
         TypedArrayData::String(buf) => {
             Ok(KindedSlot::from_string_arc(Arc::clone(&buf.data[idx])))
         }
-        TypedArrayData::FloatSlice { parent, offset, len: _ } => {
-            let off = *offset as usize;
-            Ok(KindedSlot::from_number(parent.data.as_slice()[off + idx]))
-        }
-        TypedArrayData::Matrix(m) => Ok(KindedSlot::from_number(m.data.as_slice()[idx])),
+        // ADR-006 §2.7.22 amendment (Round 18 S3): Matrix / FloatSlice
+        // exit `TypedArrayData`.
         // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
         TypedArrayData::Decimal(buf) => Ok(KindedSlot::from_decimal(Arc::clone(&buf.data[idx]))),
         TypedArrayData::BigInt(buf) => Ok(KindedSlot::from_bigint(Arc::clone(&buf.data[idx]))),

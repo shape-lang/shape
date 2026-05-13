@@ -330,6 +330,54 @@ macro_rules! define_heap_types {
             // SharedCell / Reference's pure-discriminator-style
             // dispatch).
             ModuleFn,      // 33  (Wave 17 W17-comptime-vm-dispatch, 2026-05-12)
+            // ADR-006 §2.7.22 amendment (Round 18 S3
+            // W12-matrix-floatslice-heapkind-exit, 2026-05-13): Matrix exits
+            // the `TypedArrayData` carrier hierarchy. The pre-amendment
+            // Q23 ruling (Matrix lives under `HeapKind::TypedArray` via
+            // `TypedArrayData::Matrix(Arc<MatrixData>)`) is superseded by
+            // the Round 17 deletion-audit + cluster-0-transition
+            // strategic-owner authorization (2026-05-13): Matrix is a
+            // single-Matrix value (category-correctness), not a
+            // buffer-of-Matrix.
+            //
+            // Full `HeapValue::Matrix(Arc<MatrixData>)` arm exists for the
+            // ADR-005 §1 / ADR-006 §2.3 `HeapKind`↔`HeapValue` symmetry,
+            // but Matrix slot bits are
+            // `Arc::into_raw(Arc<MatrixData>) as u64` directly (typed-Arc
+            // shape, mirror of FilterExpr / Reference's pure-discriminator
+            // dispatch — NOT a `Box<HeapValue>` wrap); calling
+            // `slot.as_heap_value()` on a Matrix-labeled slot is
+            // undefined behavior. `clone_with_kind` / `drop_with_kind`
+            // dispatch the matching `Arc::increment/decrement_strong_count
+            // ::<MatrixData>` retain/release directly via the kind label.
+            //
+            // The §2.7.9 / §2.7.12 / §Q23 single-discriminator concern
+            // that motivated Q23's parallel-HeapKind-refusal is addressed
+            // by ADR-005 §1's exception clause: `HeapKind::Matrix` is NOT
+            // parallel to `HeapKind::TypedArray` (which is the
+            // array-buffer carrier with element-typed payload); Matrix is
+            // a separate value category (a structured numeric matrix
+            // value, not an array of anything).
+            Matrix,        // 34  (Round 18 S3 W12-matrix-floatslice-heapkind-exit, 2026-05-13)
+            // ADR-006 §2.7.22 amendment (Round 18 S3
+            // W12-matrix-floatslice-heapkind-exit, 2026-05-13): the
+            // `FloatSlice { parent, offset, len }` projection (returned by
+            // `Matrix.row(i)` / `Matrix.col(i)`) exits the
+            // `TypedArrayData` carrier hierarchy for the same
+            // category-correctness reason as `HeapKind::Matrix` — it is a
+            // projection-into-a-Matrix, not a buffer of floats. The new
+            // payload struct is `MatrixSliceData { parent: Arc<MatrixData>,
+            // offset: u32, len: u32 }` preserving the
+            // alias-into-parent-buffer semantics from the pre-amendment
+            // shape.
+            //
+            // Same dispatch shape as `HeapKind::Matrix`: typed-Arc
+            // pure-discriminator (slot bits =
+            // `Arc::into_raw(Arc<MatrixSliceData>)`, retain/release through
+            // the kind label, `as_heap_value()` unsound, full
+            // `HeapValue::MatrixSlice(Arc<MatrixSliceData>)` arm for the
+            // ADR-005 §1 / ADR-006 §2.3 symmetry property).
+            MatrixSlice,   // 35  (Round 18 S3 W12-matrix-floatslice-heapkind-exit, 2026-05-13)
         }
 
         /// Compact heap-allocated value. Strict-typed variants only — every
@@ -639,6 +687,30 @@ macro_rules! define_heap_types {
             /// undefined behavior; the canonical recovery is reading
             /// the raw `u64` bits as the `module_fn_id`.
             ModuleFn(u64),
+            // ===== Round 18 S3 W12-matrix-floatslice-heapkind-exit
+            // (ADR-006 §2.7.22 amendment, 2026-05-13) =====
+            /// Matrix value carrier (`Arc<MatrixData>`). Built by
+            /// `op_new_matrix` from the `matrix(rows, cols, [data...])`
+            /// surface form. In current code Matrix payloads are emitted
+            /// directly to the kinded stack / TypedObject slot as
+            /// `Arc::into_raw(Arc<MatrixData>) as u64` with kind
+            /// `NativeKind::Ptr(HeapKind::Matrix)` and never wrapped in
+            /// `HeapValue`. The arm exists to preserve the ADR-005 §1 /
+            /// ADR-006 §2.3 `HeapKind`↔`HeapValue` symmetry — same
+            /// pattern as `HeapValue::FilterExpr` (§2.7.9) /
+            /// `HeapValue::Reference` (§2.7.13). Calling
+            /// `slot.as_heap_value()` on a Matrix-labeled slot is
+            /// undefined behavior; the canonical recovery is
+            /// `Arc::<MatrixData>::from_raw(bits)`.
+            Matrix(std::sync::Arc<$crate::heap_value::MatrixData>),
+            /// Matrix-projection carrier (`Arc<MatrixSliceData>`). Built
+            /// by `Matrix.row(i)` / `Matrix.col(i)` from a parent matrix.
+            /// `MatrixSliceData { parent: Arc<MatrixData>, offset, len }`
+            /// preserves the aliasing-into-parent semantics from the
+            /// pre-amendment `TypedArrayData::FloatSlice` shape. Same
+            /// typed-Arc pure-discriminator dispatch shape as
+            /// `HeapValue::Matrix`.
+            MatrixSlice(std::sync::Arc<$crate::heap_value::MatrixSliceData>),
         }
 
         impl HeapValue {
@@ -679,6 +751,8 @@ macro_rules! define_heap_types {
                     HeapValue::Atomic(..) => HeapKind::Atomic,
                     HeapValue::Lazy(..) => HeapKind::Lazy,
                     HeapValue::ModuleFn(..) => HeapKind::ModuleFn,
+                    HeapValue::Matrix(..) => HeapKind::Matrix,
+                    HeapValue::MatrixSlice(..) => HeapKind::MatrixSlice,
                 }
             }
 
@@ -755,6 +829,13 @@ macro_rules! define_heap_types {
                     // ModuleFn references are always truthy when present
                     // (a live module-fn-id is a usable callable handle).
                     HeapValue::ModuleFn(_) => true,
+                    // ADR-006 §2.7.22 amendment (Round 18 S3, 2026-05-13):
+                    // truthy iff the underlying flat buffer / projection
+                    // length is non-empty, mirroring the pre-amendment
+                    // `TypedArrayData::Matrix` / `FloatSlice` is_truthy
+                    // shape.
+                    HeapValue::Matrix(m) => m.data.len() > 0,
+                    HeapValue::MatrixSlice(s) => s.len > 0,
                 }
             }
 
@@ -801,6 +882,9 @@ macro_rules! define_heap_types {
                     HeapValue::Atomic(_) => "atomic",
                     HeapValue::Lazy(_) => "lazy",
                     HeapValue::ModuleFn(_) => "module_fn",
+                    // ADR-006 §2.7.22 amendment (Round 18 S3, 2026-05-13).
+                    HeapValue::Matrix(_) => "matrix",
+                    HeapValue::MatrixSlice(_) => "matrix_slice",
                 }
             }
         }

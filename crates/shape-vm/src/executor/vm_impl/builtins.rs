@@ -569,17 +569,8 @@ impl VirtualMachine {
                             let s: f64 = b.as_slice().iter().copied().sum();
                             KindedSlot::from_number(s)
                         }
-                        TypedArrayData::FloatSlice {
-                            parent,
-                            offset,
-                            len,
-                        } => {
-                            let off = *offset as usize;
-                            let n = *len as usize;
-                            let slice = &parent.data.as_slice()[off..off + n];
-                            let s: f64 = slice.iter().copied().sum();
-                            KindedSlot::from_number(s)
-                        }
+                        // ADR-006 §2.7.22 amendment (Round 18 S3):
+                        // FloatSlice exits `TypedArrayData`.
                         other => {
                             return Err(VMError::RuntimeError(format!(
                                 "__intrinsic_sum: TypedArrayData::{} \

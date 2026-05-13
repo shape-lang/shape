@@ -476,8 +476,8 @@ impl VirtualMachine {
                     TypedArrayData::U32(buf) => buf.data.len(),
                     TypedArrayData::U64(buf) => buf.data.len(),
                     TypedArrayData::F32(buf) => buf.data.len(),
-                    TypedArrayData::Matrix(m) => m.data.len(),
-                    TypedArrayData::FloatSlice { len, .. } => *len as usize,
+                    // ADR-006 §2.7.22 amendment (Round 18 S3): Matrix /
+                    // FloatSlice exit `TypedArrayData`.
                     TypedArrayData::String(buf) => buf.data.len(),
                     // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
                     TypedArrayData::Decimal(b) => b.data.len(),

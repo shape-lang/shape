@@ -286,8 +286,8 @@ pub fn v2_len(
         TypedArrayData::U64(b) => b.data.len(),
         TypedArrayData::F32(b) => b.data.len(),
         TypedArrayData::String(b) => b.data.len(),
-        TypedArrayData::Matrix(m) => m.data.len(),
-        TypedArrayData::FloatSlice { len, .. } => *len as usize,
+        // ADR-006 §2.7.22 amendment (Round 18 S3): Matrix / FloatSlice
+        // exit `TypedArrayData`.
         // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
         TypedArrayData::Decimal(b) => b.data.len(),
         TypedArrayData::BigInt(b) => b.data.len(),
@@ -311,12 +311,10 @@ pub fn v2_float_sum(
     let arr = borrow_typed_array(&args[0])?;
     let s = match arr {
         TypedArrayData::F64(b) => float_buf_sum(b),
-        TypedArrayData::FloatSlice { parent, offset, len } => {
-            let off = *offset as usize;
-            let n = *len as usize;
-            let slice = &parent.data.as_slice()[off..off + n];
-            slice.iter().copied().sum()
-        }
+        // ADR-006 §2.7.22 amendment (Round 18 S3): FloatSlice exits.
+        // Sum over a MatrixSlice receiver is dispatched via
+        // `FLOAT_ARRAY_METHODS` against the `HeapKind::MatrixSlice`
+        // receiver path.
         other => {
             return Err(VMError::RuntimeError(format!(
                 "Vec<number>.sum: receiver is {} (Phase-2c: per-width \
@@ -364,17 +362,7 @@ pub fn v2_float_avg(
                 float_buf_sum(b) / n as f64
             }
         }
-        TypedArrayData::FloatSlice { parent, offset, len } => {
-            let n = *len as usize;
-            if n == 0 {
-                f64::NAN
-            } else {
-                let off = *offset as usize;
-                let slice = &parent.data.as_slice()[off..off + n];
-                let s: f64 = slice.iter().copied().sum();
-                s / n as f64
-            }
-        }
+        // ADR-006 §2.7.22 amendment (Round 18 S3): FloatSlice exits.
         other => {
             return Err(VMError::RuntimeError(format!(
                 "Vec<number>.avg: receiver is {} (Phase-2c)",
@@ -427,26 +415,7 @@ pub fn v2_float_min(
                 float_buf_min(b)
             }
         }
-        TypedArrayData::FloatSlice { parent, offset, len } => {
-            let n = *len as usize;
-            if n == 0 {
-                f64::NAN
-            } else {
-                let off = *offset as usize;
-                let slice = &parent.data.as_slice()[off..off + n];
-                if slice.iter().any(|v| v.is_nan()) {
-                    f64::NAN
-                } else {
-                    let mut m = slice[0];
-                    for &v in &slice[1..] {
-                        if v < m {
-                            m = v;
-                        }
-                    }
-                    m
-                }
-            }
-        }
+        // ADR-006 §2.7.22 amendment (Round 18 S3): FloatSlice exits.
         other => {
             return Err(VMError::RuntimeError(format!(
                 "Vec<number>.min: receiver is {} (Phase-2c)",
@@ -492,26 +461,7 @@ pub fn v2_float_max(
                 float_buf_max(b)
             }
         }
-        TypedArrayData::FloatSlice { parent, offset, len } => {
-            let n = *len as usize;
-            if n == 0 {
-                f64::NAN
-            } else {
-                let off = *offset as usize;
-                let slice = &parent.data.as_slice()[off..off + n];
-                if slice.iter().any(|v| v.is_nan()) {
-                    f64::NAN
-                } else {
-                    let mut m = slice[0];
-                    for &v in &slice[1..] {
-                        if v > m {
-                            m = v;
-                        }
-                    }
-                    m
-                }
-            }
-        }
+        // ADR-006 §2.7.22 amendment (Round 18 S3): FloatSlice exits.
         other => {
             return Err(VMError::RuntimeError(format!(
                 "Vec<number>.max: receiver is {} (Phase-2c)",
@@ -694,11 +644,10 @@ pub fn v2_bool_all(
 fn borrow_f64_slice(arr: &TypedArrayData, op: &'static str) -> Result<Vec<f64>, VMError> {
     match arr {
         TypedArrayData::F64(b) => Ok(b.as_slice().to_vec()),
-        TypedArrayData::FloatSlice { parent, offset, len } => {
-            let off = *offset as usize;
-            let n = *len as usize;
-            Ok(parent.data.as_slice()[off..off + n].to_vec())
-        }
+        // ADR-006 §2.7.22 amendment (Round 18 S3): FloatSlice exits
+        // `TypedArrayData`; MatrixSlice receivers reach the float-transform
+        // path via `FLOAT_ARRAY_METHODS` against the
+        // `HeapKind::MatrixSlice` receiver kind, not through this helper.
         other => Err(VMError::RuntimeError(format!(
             "Vec<number>.{}: requires F64 element kind, got {}",
             op,
@@ -938,7 +887,7 @@ pub(crate) fn handle_float_map(
     }
     let arr = borrow_typed_array(&args[0])?;
     let elems = match arr {
-        TypedArrayData::F64(_) | TypedArrayData::FloatSlice { .. } => {
+        TypedArrayData::F64(_) => {
             snapshot_f64_elements(arr, "map")?
         }
         _ => return Err(float_higher_order_variant_surface("map", arr)),
@@ -980,7 +929,7 @@ pub(crate) fn handle_float_filter(
     }
     let arr = borrow_typed_array(&args[0])?;
     let elems = match arr {
-        TypedArrayData::F64(_) | TypedArrayData::FloatSlice { .. } => {
+        TypedArrayData::F64(_) => {
             snapshot_f64_elements(arr, "filter")?
         }
         _ => return Err(float_higher_order_variant_surface("filter", arr)),
@@ -1021,7 +970,7 @@ pub(crate) fn handle_float_for_each(
     }
     let arr = borrow_typed_array(&args[0])?;
     let elems = match arr {
-        TypedArrayData::F64(_) | TypedArrayData::FloatSlice { .. } => {
+        TypedArrayData::F64(_) => {
             snapshot_f64_elements(arr, "forEach")?
         }
         _ => return Err(float_higher_order_variant_surface("forEach", arr)),
@@ -1050,7 +999,7 @@ pub(crate) fn handle_float_reduce(
     }
     let arr = borrow_typed_array(&args[0])?;
     let elems = match arr {
-        TypedArrayData::F64(_) | TypedArrayData::FloatSlice { .. } => {
+        TypedArrayData::F64(_) => {
             snapshot_f64_elements(arr, "reduce")?
         }
         _ => return Err(float_higher_order_variant_surface("reduce", arr)),
@@ -1078,7 +1027,7 @@ pub(crate) fn handle_float_find(
     }
     let arr = borrow_typed_array(&args[0])?;
     let elems = match arr {
-        TypedArrayData::F64(_) | TypedArrayData::FloatSlice { .. } => {
+        TypedArrayData::F64(_) => {
             snapshot_f64_elements(arr, "find")?
         }
         _ => return Err(float_higher_order_variant_surface("find", arr)),
@@ -1118,7 +1067,7 @@ pub(crate) fn handle_float_some(
     }
     let arr = borrow_typed_array(&args[0])?;
     let elems = match arr {
-        TypedArrayData::F64(_) | TypedArrayData::FloatSlice { .. } => {
+        TypedArrayData::F64(_) => {
             snapshot_f64_elements(arr, "some")?
         }
         _ => return Err(float_higher_order_variant_surface("some", arr)),
@@ -1158,7 +1107,7 @@ pub(crate) fn handle_float_every(
     }
     let arr = borrow_typed_array(&args[0])?;
     let elems = match arr {
-        TypedArrayData::F64(_) | TypedArrayData::FloatSlice { .. } => {
+        TypedArrayData::F64(_) => {
             snapshot_f64_elements(arr, "every")?
         }
         _ => return Err(float_higher_order_variant_surface("every", arr)),

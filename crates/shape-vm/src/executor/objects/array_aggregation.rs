@@ -86,8 +86,8 @@ fn typed_array_len(arr: &TypedArrayData) -> usize {
         TypedArrayData::U64(b) => b.data.len(),
         TypedArrayData::F32(b) => b.data.len(),
         TypedArrayData::String(b) => b.data.len(),
-        TypedArrayData::Matrix(m) => m.data.len(),
-        TypedArrayData::FloatSlice { len, .. } => *len as usize,
+        // ADR-006 §2.7.22 amendment (Round 18 S3): Matrix / FloatSlice
+        // exit `TypedArrayData`.
         // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
         TypedArrayData::Decimal(b) => b.data.len(),
         TypedArrayData::BigInt(b) => b.data.len(),
@@ -115,9 +115,7 @@ fn variant_numeric_domain(arr: &TypedArrayData) -> Result<NumericDomain, VMError
         | TypedArrayData::U32(_)
         | TypedArrayData::U64(_)
         | TypedArrayData::Bool(_) => Ok(NumericDomain::Int),
-        TypedArrayData::F32(_) | TypedArrayData::F64(_) | TypedArrayData::FloatSlice { .. } => {
-            Ok(NumericDomain::Float)
-        }
+        TypedArrayData::F32(_) | TypedArrayData::F64(_) => Ok(NumericDomain::Float),
         other => Err(VMError::RuntimeError(format!(
             "expected numeric Array, got {}",
             other.type_name()
@@ -181,20 +179,13 @@ fn element_kinded(arr: &TypedArrayData, idx: usize) -> Result<KindedSlot, VMErro
         TypedArrayData::U32(b) => KindedSlot::from_int(b.data[idx] as i64),
         TypedArrayData::U64(b) => KindedSlot::from_int(b.data[idx] as i64),
         TypedArrayData::F32(b) => KindedSlot::from_number(b.data[idx] as f64),
-        TypedArrayData::FloatSlice {
-            parent,
-            offset,
-            len: _,
-        } => KindedSlot::from_number(parent.data[*offset as usize + idx]),
         TypedArrayData::String(b) => KindedSlot::from_string_arc(Arc::clone(&b.data[idx])),
-        TypedArrayData::Matrix(_) => {
-            return Err(VMError::NotImplemented(
-                "Array.reduce/count(predicate): Matrix element extraction \
-                 needs row-shape KindedSlot construction — ADR-006 §2.7.4 \
-                 Phase-2c reentry follow-up"
-                    .to_string(),
-            ));
-        }
+        // ADR-006 §2.7.22 amendment (Round 18 S3): Matrix / FloatSlice
+        // exit `TypedArrayData`. Per-element extraction for Matrix /
+        // MatrixSlice receivers is the dispatch-shell's responsibility
+        // and is handled via the dedicated `HeapKind::Matrix` /
+        // `HeapKind::MatrixSlice` method tables (`MATRIX_METHODS` /
+        // `FLOAT_ARRAY_METHODS`).
         // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized
         // arms. Same shape as `array_transform::element_kinded`.
         TypedArrayData::Decimal(b) => KindedSlot::from_decimal(Arc::clone(&b.data[idx])),
@@ -253,17 +244,7 @@ where
     Ok(match arr {
         TypedArrayData::F32(b) => b.data.iter().fold(init, |a, &v| step(a, v as f64)),
         TypedArrayData::F64(b) => b.data.iter().fold(init, |a, &v| step(a, v)),
-        TypedArrayData::FloatSlice {
-            parent,
-            offset,
-            len,
-        } => {
-            let off = *offset as usize;
-            let n = *len as usize;
-            parent.data[off..off + n]
-                .iter()
-                .fold(init, |a, &v| step(a, v))
-        }
+        // ADR-006 §2.7.22 amendment (Round 18 S3): FloatSlice exits.
         TypedArrayData::I8(b) => b.data.iter().fold(init, |a, &v| step(a, v as f64)),
         TypedArrayData::I16(b) => b.data.iter().fold(init, |a, &v| step(a, v as f64)),
         TypedArrayData::I32(b) => b.data.iter().fold(init, |a, &v| step(a, v as f64)),

@@ -1,89 +1,37 @@
 //! Method handlers for the Matrix type — kinded `Arc<MatrixData>` carrier
-//! reached through `TypedArrayData::Matrix(Arc<MatrixData>)`.
+//! reached through `HeapKind::Matrix = 34` (ADR-006 §2.7.22 amendment,
+//! Round 18 S3 W12-matrix-floatslice-heapkind-exit, 2026-05-13).
 //!
-//! ## Audit finding (W15-matrix, 2026-05-10)
+//! ## §2.7.22 amendment — Matrix exits the `TypedArrayData` carrier
 //!
-//! Per playbook §2 W15-matrix: the audit asks whether Matrix needs a
-//! separate `HeapKind::Matrix` ordinal or can live inside the existing
-//! `TypedArrayData::Matrix(Arc<MatrixData>)` arm under
-//! `HeapKind::TypedArray`.
+//! The pre-amendment Q23 ruling (Matrix lives under `HeapKind::TypedArray`
+//! via `TypedArrayData::Matrix(Arc<MatrixData>)`) is superseded by the
+//! Round 17 deletion-audit + cluster-0-transition strategic-owner
+//! authorization (2026-05-13). The category-error in the Q23 ruling:
+//! `TypedArrayData::Matrix` carries a **single Matrix**, not a
+//! buffer-of-Matrix; placing it inside the element-typed-array carrier
+//! enum was a structural mismatch the prior ruling justified under
+//! ADR-005 §1 single-discriminator. With `TypedArrayData::Matrix`
+//! deleted (this sub-cluster), Matrix becomes its own top-level
+//! HeapKind / HeapValue, in the same dispatch shape as §2.7.20 Channel
+//! / §2.7.15 HashSet (typed-Arc) but with the pure-discriminator
+//! refcount-dispatch shape of §2.7.9 FilterExpr (slot bits are
+//! `Arc::into_raw(Arc<MatrixData>)` directly, `as_heap_value()` is
+//! unsound on these bits, retain/release routes through
+//! `clone_with_kind` / `drop_with_kind` matching the kind label).
 //!
-//! The state of the world at audit time:
-//!
-//! - `MatrixData` exists in `crates/shape-value/src/heap_value.rs` as the
-//!   canonical SIMD-aligned row-major `f64` storage (`AlignedVec<f64>` +
-//!   `rows` + `cols`).
-//! - `TypedArrayData::Matrix(Arc<MatrixData>)` is its surviving carrier
-//!   (`crates/shape-value/src/heap_value.rs` line ~1270).
-//! - `TypedArrayData::FloatSlice { parent: Arc<MatrixData>, offset, len }`
-//!   structurally depends on `Arc<MatrixData>` as parent.
-//! - `op_new_matrix` (`crates/shape-vm/src/executor/objects/object_creation.rs`)
-//!   already pushes `Arc<TypedArrayData>` containing
-//!   `TypedArrayData::Matrix(Arc::new(MatrixData::from_flat(...)))` with
-//!   kind `Ptr(HeapKind::TypedArray)`.
-//! - `MATRIX_METHODS` PHF table in `method_registry.rs` lists 18 method
-//!   handlers but is not yet dispatched against (waits on the W16
-//!   op_call_method shell).
-//! - `crates/shape-runtime/src/intrinsics/matrix_kernels.rs` contains
-//!   complete SIMD kernels (`matrix_transpose` / `matrix_inverse` /
-//!   `matrix_determinant` / `matrix_trace` / `matrix_add` / `matrix_sub`
-//!   / `matrix_matmul` / `matrix_matvec` / `matrix_scale` /
-//!   `matrix_element_mul`) operating directly on `&MatrixData`.
-//!
-//! Adding a separate `HeapKind::Matrix = 29` + `HeapValue::Matrix(Arc<
-//! MatrixData>)` would create **two parallel HeapKind labels for the
-//! same `Arc<MatrixData>` payload**: one through `HeapKind::TypedArray`
-//! → `HeapValue::TypedArray(Arc<TypedArrayData>)` →
-//! `TypedArrayData::Matrix(Arc<MatrixData>)`, and one through
-//! `HeapKind::Matrix` → `HeapValue::Matrix(Arc<MatrixData>)` direct.
-//! That is exactly the ADR-005 §1 single-discriminator forbidden
-//! pattern (parallel discriminators that drift), and the §2.7.9
-//! FilterExpr / Wave-γ G-heap-filter-expr precedent (commit `a27c0e4`)
-//! showed the failure mode in concrete form: wrong-type retain/release
-//! when the same Arc pointer is indexed under two different `HeapKind`
-//! labels.
-//!
-//! Per ADR-006 §2.7.22 / Q23 ruling (this commit), Matrix lives under
-//! `HeapKind::TypedArray` via the existing `TypedArrayData::Matrix` arm
-//! — no new HeapKind ordinal, no new HeapValue arm, no new dispatch
-//! table arm. The 4 lockstep dispatch tables (§2.7.7 / §2.7.8 / §2.7.9
-//! / §2.7.10) need NO updates for Matrix because `Arc<TypedArrayData>`
-//! retain/release already covers `TypedArrayData::Matrix(Arc<
-//! MatrixData>)` through its `Clone` / `Drop` impls (the inner
-//! `Arc<MatrixData>` is refcount-managed by enum variant construction).
+//! ## Receiver-projection contract (post-amendment)
 //!
 //! Method handlers project the receiver via the canonical
-//! reconstruct-clone-restore pattern (`array_transform::handle_map_v2`
-//! / `iterator_methods::clone_typed_array_arc` precedent):
-//! kind-gate on `Ptr(HeapKind::TypedArray)`,
-//! `Arc::<TypedArrayData>::from_raw(slot.raw() as *const TypedArrayData)`,
-//! then match the inner against `TypedArrayData::Matrix(matrix_arc)`
-//! and clone the inner `Arc<MatrixData>` share before restoring the
-//! outer share via `Arc::into_raw`. (`slot.as_heap_value()` is
-//! unsound on `Ptr(HeapKind::TypedArray)`-kinded bits — the slot
-//! stores `Arc::into_raw(Arc<TypedArrayData>) as u64` directly per
-//! `ValueSlot::from_typed_array`, not `Box<HeapValue>`.) Output
-//! construction goes back through
-//! `KindedSlot::from_typed_array(Arc::new(TypedArrayData::Matrix(Arc::
-//! new(out))))` for matrix returns and
-//! `KindedSlot::from_typed_array(Arc::new(TypedArrayData::F64(Arc::
-//! new(buf))))` for vector returns. Scalar returns use
+//! reconstruct-clone-restore pattern (`iterator_methods::clone_typed_array_arc`
+//! mirror): kind-gate on `Ptr(HeapKind::Matrix)`,
+//! `Arc::<MatrixData>::from_raw(slot.raw() as *const MatrixData)`,
+//! clone the inner `Arc<MatrixData>` share, then restore the outer
+//! share via `Arc::into_raw` so the slot's owned share stays balanced.
+//! Output construction goes back through `KindedSlot::from_matrix(arc)`
+//! for matrix returns, `KindedSlot::from_typed_array(Arc::new(
+//! TypedArrayData::F64(...)))` for vector returns. Scalar returns use
 //! `KindedSlot::from_number` / `from_int`.
-//!
-//! ## Pre-existing surface stops (post-audit)
-//!
-//! - The smoke target depends on a stdlib `matrix(...)` ctor (Wave 5e
-//!   per playbook); the Matrix construction path through `op_new_matrix`
-//!   reaches the runtime today, but the ctor exposing it from user code
-//!   is out of W15-matrix territory. Storage-layer unit tests in this
-//!   commit cover `MatrixData::from_flat` / `matrix_transpose` /
-//!   `matrix_determinant` end-to-end without going through the stdlib
-//!   ctor.
-//! - Method-call dispatch from user code waits on the W16
-//!   `op_call_method` shell (playbook §3). The matrix bodies are
-//!   reachable today via `MATRIX_METHODS` lookup; the dispatch shell
-//!   is the wave-γ-followup boundary HashMap and HashSet inherit
-//!   identically.
 //!
 //! ## Forbidden patterns refused
 //!
@@ -92,15 +40,9 @@
 //! - Bool-default fallback at receiver-kind mismatch — surface a
 //!   typed RuntimeError.
 //! - Transitional shims preserving deleted Matrix-shape names —
-//!   `from_matrix` / `from_float_array` / `vw_drop` / `vmarray_from_vec`
-//!   are deleted and not reintroduced.
-//! - Pure-discriminator `HeapKind::Matrix` shape (mirror of §2.7.9
-//!   FilterExpr / §2.7.12 SharedCell / §2.7.13 Reference) — Matrix
-//!   values flow through `slot.as_heap_value()` for receiver
-//!   classification and live in TypedObject slots /
-//!   `the-deleted-heterogeneous-element-carrier` buffers; pure-discriminator status
-//!   would re-introduce the §2.7.9 type-confusion pattern at a
-//!   different layer.
+//!   refused on sight.
+//! - "Keep Matrix in TypedArrayData under documented exception" —
+//!   superseded by this amendment; deletion is systematic.
 
 use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
@@ -111,6 +53,11 @@ use shape_value::typed_buffer::{AlignedTypedBuffer, TypedBuffer};
 use shape_value::{KindedSlot, NativeKind, VMError};
 use std::sync::Arc;
 
+// ADR-006 §2.7.22 amendment (Round 18 S3, 2026-05-13): Matrix slot bits
+// are `Arc::into_raw(Arc<MatrixData>) as u64` with kind
+// `Ptr(HeapKind::Matrix)`. The pre-amendment `Ptr(HeapKind::TypedArray)`
+// + `TypedArrayData::Matrix` two-step is retired.
+
 // ── Receiver projection helpers ───────────────────────────────────────────
 
 #[inline]
@@ -120,19 +67,18 @@ fn type_error(msg: impl Into<String>) -> VMError {
 
 /// Project the receiver `KindedSlot` to the inner `Arc<MatrixData>`.
 ///
-/// Recovery is the canonical reconstruct-clone-restore precedent
-/// (`array_transform::handle_map_v2` for typed-array receivers,
-/// `iterator_methods::clone_typed_array_arc` mirror): the slot bits are
-/// `Arc::into_raw(Arc<TypedArrayData>) as u64` per
-/// `ValueSlot::from_typed_array`, NOT `Box<HeapValue>` — so
-/// `slot.as_heap_value()` is unsound on these bits (the deleted
-/// `from_heap` shape). Reconstruct via `Arc::<TypedArrayData>::from_raw`,
-/// match on the inner `TypedArrayData::Matrix(m)` arm, clone the inner
-/// `Arc<MatrixData>` share, then restore the outer `Arc<TypedArrayData>`
-/// share via `Arc::into_raw` so the slot's owned share stays balanced.
+/// ADR-006 §2.7.22 amendment (Round 18 S3, 2026-05-13): the canonical
+/// recovery is reconstruct-clone-restore against the typed-Arc payload
+/// directly (mirror of §2.7.9 FilterExpr / §2.7.16 IteratorState
+/// receiver-recovery). Slot bits are
+/// `Arc::into_raw(Arc<MatrixData>) as u64` with kind
+/// `Ptr(HeapKind::Matrix)`. The pre-amendment two-step
+/// (`Ptr(HeapKind::TypedArray)` → `Arc::<TypedArrayData>::from_raw` →
+/// match `TypedArrayData::Matrix(m)`) is retired — Matrix is a
+/// first-class HeapKind, not buried inside `TypedArrayData`.
 #[inline]
 fn as_matrix(slot: &KindedSlot) -> Result<Arc<MatrixData>, VMError> {
-    if !matches!(slot.kind, NativeKind::Ptr(HeapKind::TypedArray)) {
+    if !matches!(slot.kind, NativeKind::Ptr(HeapKind::Matrix)) {
         return Err(type_error(format!(
             "Matrix method receiver must be a Matrix (got kind {:?})",
             slot.kind
@@ -142,31 +88,23 @@ fn as_matrix(slot: &KindedSlot) -> Result<Arc<MatrixData>, VMError> {
     if bits == 0 {
         return Err(type_error("Matrix method receiver: slot bits null"));
     }
-    // SAFETY: per the construction-side contract,
-    // `NativeKind::Ptr(HeapKind::TypedArray)` slot bits are
-    // `Arc::into_raw(Arc<TypedArrayData>)` and the slot owns one
-    // strong-count share. Reconstruct, project the inner Matrix arm,
-    // clone the inner Arc<MatrixData> (bumping its share), then restore
-    // the slot's outer Arc<TypedArrayData> share via Arc::into_raw.
-    let outer = unsafe { Arc::<TypedArrayData>::from_raw(bits as *const TypedArrayData) };
-    let result = match outer.as_ref() {
-        TypedArrayData::Matrix(m) => Ok(Arc::clone(m)),
-        other => Err(type_error(format!(
-            "Matrix method receiver: TypedArray inner is {}, not Matrix",
-            other.type_name()
-        ))),
-    };
-    let _ = Arc::into_raw(outer);
-    result
+    // SAFETY: per the construction-side contract on `KindedSlot::from_matrix`
+    // / `op_new_matrix`, a `Ptr(HeapKind::Matrix)` slot's bits are
+    // `Arc::into_raw(Arc<MatrixData>)` and the slot owns one strong-count
+    // share. Reconstruct, clone (bumping the share), then restore the
+    // slot's owned share via Arc::into_raw so the carrier stays balanced.
+    let arc = unsafe { Arc::<MatrixData>::from_raw(bits as *const MatrixData) };
+    let cloned = Arc::clone(&arc);
+    let _ = Arc::into_raw(arc);
+    Ok(cloned)
 }
 
 /// Wrap a `MatrixData` into a `KindedSlot` carrying
-/// `Ptr(HeapKind::TypedArray)` — mirror of `op_new_matrix`'s emit
-/// path so dispatch tables and stack-side retain/release see one shape.
+/// `Ptr(HeapKind::Matrix)` — mirror of `op_new_matrix`'s post-amendment
+/// emit path so dispatch tables and stack-side retain/release see one shape.
 #[inline]
 fn matrix_slot(m: MatrixData) -> KindedSlot {
-    let arr = Arc::new(TypedArrayData::Matrix(Arc::new(m)));
-    KindedSlot::from_typed_array(arr)
+    KindedSlot::from_matrix(Arc::new(m))
 }
 
 /// Wrap a flat `AlignedVec<f64>` into a `KindedSlot` carrying
@@ -686,23 +624,16 @@ mod tests {
 
     #[test]
     fn matrix_data_clone_shares_arc_payload() {
-        // §2.7.22 ruling: Matrix retain/release goes through
-        // Arc<TypedArrayData> on the dispatch side; the inner
-        // Arc<MatrixData> is refcount-managed by enum-variant Clone.
-        // Pin the storage shape: cloning a TypedArrayData::Matrix bumps
-        // the inner MatrixData Arc share rather than deep-copying.
+        // ADR-006 §2.7.22 amendment (Round 18 S3, 2026-05-13): Matrix
+        // retain/release goes through the typed-Arc payload directly
+        // under `HeapKind::Matrix`. Cloning an `Arc<MatrixData>` is a
+        // single strong-count bump on the shared inner buffer.
         let data = aligned_from(&[1.0, 2.0, 3.0, 4.0]);
         let m = Arc::new(MatrixData::from_flat(data, 2, 2));
-        let outer = TypedArrayData::Matrix(Arc::clone(&m));
-        let cloned = outer.clone();
-        // Both outer arms should point to the same underlying Arc<MatrixData>.
-        match (&outer, &cloned) {
-            (TypedArrayData::Matrix(a), TypedArrayData::Matrix(b)) => {
-                assert!(Arc::ptr_eq(a, b));
-            }
-            _ => panic!("expected Matrix arms"),
-        }
-        // Three live shares: m, outer.0, cloned.0
-        assert_eq!(Arc::strong_count(&m), 3);
+        let cloned = Arc::clone(&m);
+        // Both shares should point to the same underlying MatrixData.
+        assert!(Arc::ptr_eq(&m, &cloned));
+        // Two live shares: m, cloned
+        assert_eq!(Arc::strong_count(&m), 2);
     }
 }

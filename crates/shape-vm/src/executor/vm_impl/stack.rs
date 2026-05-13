@@ -29,9 +29,9 @@ use shape_value::{
     FilterNode, IteratorState, KindedSlot, NativeKind, RefTarget, VMError, ValueSlot,
     heap_value::{
         AtomicData, ChannelData, DequeData, HashMapData, HashSetData, HeapKind, HeapValue,
-        IoHandleData, LazyData, MutexData, NativeViewData, PriorityQueueData, RangeData,
-        TableViewData, TaskGroupData, TemporalData, TraitObjectStorage, TypedArrayData,
-        TypedObjectStorage,
+        IoHandleData, LazyData, MatrixData, MatrixSliceData, MutexData, NativeViewData,
+        PriorityQueueData, RangeData, TableViewData, TaskGroupData, TemporalData,
+        TraitObjectStorage, TypedArrayData, TypedObjectStorage,
     },
 };
 use std::sync::Arc;
@@ -133,6 +133,16 @@ pub(crate) fn clone_with_kind(bits: u64, kind: NativeKind) {
                 // HeapKind::Future / HeapKind::Char — no-op on retain.
                 HeapKind::ModuleFn => {
                     // No-op: module-fn-id inline scalar (no Arc payload).
+                }
+                // ADR-006 §2.7.22 amendment (Round 18 S3, 2026-05-13):
+                // Matrix / MatrixSlice slots own one typed-Arc strong-count
+                // share. Bumps one matching strong-count — same typed-Arc
+                // pure-discriminator shape as §2.7.9 FilterExpr.
+                HeapKind::Matrix => {
+                    Arc::increment_strong_count(bits as *const MatrixData);
+                }
+                HeapKind::MatrixSlice => {
+                    Arc::increment_strong_count(bits as *const MatrixSliceData);
                 }
                 // W17-trait-object-storage (ADR-006 §2.7.24 / Q25.C,
                 // 2026-05-11): TraitObject mirrors the typed-Arc
@@ -422,6 +432,18 @@ pub(crate) fn drop_with_kind(bits: u64, kind: NativeKind) {
                 // HeapKind::Char).
                 HeapKind::ModuleFn => {
                     // No-op: module-fn-id inline scalar (no Arc payload).
+                }
+                // ADR-006 §2.7.22 amendment (Round 18 S3, 2026-05-13):
+                // Matrix / MatrixSlice mirror the clone_with_kind arms.
+                // Retires one typed-Arc strong-count share. At refcount=0
+                // the auto-derived `MatrixData::Drop` releases its
+                // `AlignedVec<f64>` buffer; `MatrixSliceData::Drop`
+                // retires its `parent: Arc<MatrixData>` share.
+                HeapKind::Matrix => {
+                    Arc::decrement_strong_count(bits as *const MatrixData);
+                }
+                HeapKind::MatrixSlice => {
+                    Arc::decrement_strong_count(bits as *const MatrixSliceData);
                 }
                 // W17-trait-object-storage (ADR-006 §2.7.24 / Q25.C,
                 // 2026-05-11): TraitObject mirrors the typed-Arc

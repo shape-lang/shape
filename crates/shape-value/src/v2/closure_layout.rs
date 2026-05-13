@@ -40,9 +40,9 @@ use super::concrete_type::{ClosureTypeId, ConcreteType};
 use super::struct_layout::{FieldInfo, FieldKind};
 use crate::heap_value::{
     AtomicData, ChannelData, DequeData, HashMapData, HashSetData, HeapKind, HeapValue,
-    IoHandleData, LazyData, MutexData, NativeViewData, PriorityQueueData, RangeData,
-    TableViewData, TaskGroupData, TemporalData, TraitObjectStorage, TypedArrayData,
-    TypedObjectStorage,
+    IoHandleData, LazyData, MatrixData, MatrixSliceData, MutexData, NativeViewData,
+    PriorityQueueData, RangeData, TableViewData, TaskGroupData, TemporalData,
+    TraitObjectStorage, TypedArrayData, TypedObjectStorage,
 };
 use crate::native_kind::NativeKind;
 use std::collections::HashMap;
@@ -584,6 +584,21 @@ impl Drop for SharedCell {
                     // cell-storage tier).
                     HeapKind::SharedCell => {
                         Arc::decrement_strong_count(bits as *const SharedCell);
+                    }
+                    // ADR-006 §2.7.22 amendment (Round 18 S3, 2026-05-13):
+                    // a `SharedCell` whose `kind` companion is
+                    // `NativeKind::Ptr(HeapKind::Matrix)` /
+                    // `NativeKind::Ptr(HeapKind::MatrixSlice)` carries
+                    // `Arc::into_raw(Arc<MatrixData>) as u64` /
+                    // `Arc::into_raw(Arc<MatrixSliceData>) as u64` directly
+                    // (typed-Arc pure-discriminator dispatch, mirror of
+                    // §2.7.9 FilterExpr / §2.7.13 Reference). Retire one
+                    // matching strong-count share at cell drop.
+                    HeapKind::Matrix => {
+                        Arc::decrement_strong_count(bits as *const MatrixData);
+                    }
+                    HeapKind::MatrixSlice => {
+                        Arc::decrement_strong_count(bits as *const MatrixSliceData);
                     }
                     // `HeapKind::NativeScalar` has no kinded `Arc<T>`
                     // carrier yet — the redesign is the phase-2c

@@ -308,6 +308,18 @@ pub fn heap_value_to_wire(hv: &HeapValue, ctx: &Context) -> WireValue {
         // ModuleFn references are VM-internal callable handles
         // — same opaque-tag shape as the concurrency primitives.
         HeapValue::ModuleFn(id) => WireValue::String(format!("<module_fn:{}>", id)),
+        // ADR-006 §2.7.22 amendment (Round 18 S3, 2026-05-13): Matrix /
+        // MatrixSlice wire serialisation inherits the N7-architectural-
+        // choice deferral from the pre-amendment
+        // `TypedArrayData::Matrix` / `FloatSlice` shape (the 2D-layout
+        // encoding policy is undecided). Surface as opaque tags —
+        // same Phase-2c deferral pattern as the concurrency primitives.
+        HeapValue::Matrix(m) => {
+            WireValue::String(format!("<matrix:{}x{}:phase-2c>", m.rows, m.cols))
+        }
+        HeapValue::MatrixSlice(s) => {
+            WireValue::String(format!("<matrix_slice:{}:phase-2c>", s.len))
+        }
     }
 }
 

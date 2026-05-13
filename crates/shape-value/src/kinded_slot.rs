@@ -42,9 +42,9 @@
 // ADR-006 §2.7
 use crate::heap_value::{
     AtomicData, ChannelData, DequeData, HashMapData, HashSetData, HeapKind, HeapValue,
-    IoHandleData, LazyData, MutexData, NativeViewData, OptionData, PriorityQueueData, RangeData,
-    ResultData, TableViewData, TaskGroupData, TemporalData, TraitObjectStorage, TypedArrayData,
-    TypedObjectStorage,
+    IoHandleData, LazyData, MatrixData, MatrixSliceData, MutexData, NativeViewData, OptionData,
+    PriorityQueueData, RangeData, ResultData, TableViewData, TaskGroupData, TemporalData,
+    TraitObjectStorage, TypedArrayData, TypedObjectStorage,
 };
 use crate::iterator_state::IteratorState;
 use crate::native_kind::NativeKind;
@@ -340,6 +340,43 @@ impl KindedSlot {
     #[inline]
     pub fn from_char(c: char) -> Self {
         Self::new(ValueSlot::from_char(c), NativeKind::Ptr(HeapKind::Char))
+    }
+
+    /// Convenience: a `Ptr(HeapKind::Matrix)`-kind slot. ADR-006 §2.7.22
+    /// amendment (Round 18 S3 W12-matrix-floatslice-heapkind-exit,
+    /// 2026-05-13). Slot bits are `Arc::into_raw(Arc<MatrixData>) as u64`;
+    /// recovery goes through the canonical reconstruct-clone-restore
+    /// pattern (`Arc::<MatrixData>::from_raw(bits)` → clone → `into_raw`)
+    /// to bump the inner share while preserving the carrier's owned
+    /// outer share. Mirror of `from_iterator` / `from_range` typed-Arc
+    /// dispatch shape — `as_heap_value()` on a Matrix-labeled slot is
+    /// unsound (the slot bits are an `Arc<MatrixData>` pointer, not a
+    /// `*const HeapValue`). The Drop / Clone arms for `HeapKind::Matrix`
+    /// dispatch the matching `Arc::increment/decrement_strong_count
+    /// ::<MatrixData>` retain/release.
+    #[inline]
+    pub fn from_matrix(m: Arc<MatrixData>) -> Self {
+        let bits = Arc::into_raw(m) as u64;
+        Self::new(ValueSlot::from_raw(bits), NativeKind::Ptr(HeapKind::Matrix))
+    }
+
+    /// Convenience: a `Ptr(HeapKind::MatrixSlice)`-kind slot. ADR-006
+    /// §2.7.22 amendment (Round 18 S3 W12-matrix-floatslice-heapkind-exit,
+    /// 2026-05-13). Slot bits are
+    /// `Arc::into_raw(Arc<MatrixSliceData>) as u64`. Same typed-Arc
+    /// pure-discriminator dispatch shape as `from_matrix`. The inner
+    /// `MatrixSliceData { parent, offset, len }` retains a separate
+    /// strong-count share on its parent matrix; cloning the outer share
+    /// does NOT bump the parent — that bump happens at
+    /// `MatrixSliceData::clone` (auto-derived) when the inner struct is
+    /// duplicated under `Arc::make_mut`.
+    #[inline]
+    pub fn from_matrix_slice(s: Arc<MatrixSliceData>) -> Self {
+        let bits = Arc::into_raw(s) as u64;
+        Self::new(
+            ValueSlot::from_raw(bits),
+            NativeKind::Ptr(HeapKind::MatrixSlice),
+        )
     }
 
     /// Convenience: a `Ptr(HeapKind::ModuleFn)`-kind slot. Stores the
@@ -725,6 +762,21 @@ impl Drop for KindedSlot {
                             bits as *const crate::v2::closure_layout::SharedCell,
                         );
                     }
+                    // ADR-006 §2.7.22 amendment (Round 18 S3, 2026-05-13):
+                    // Matrix / MatrixSlice slots own one typed-Arc
+                    // strong-count share. Slot bits are
+                    // `Arc::into_raw(Arc<MatrixData>) as u64` /
+                    // `Arc::into_raw(Arc<MatrixSliceData>) as u64`. Retire
+                    // one matching strong-count share. Typed-Arc
+                    // pure-discriminator dispatch (mirror of §2.7.9
+                    // FilterExpr); `as_heap_value()` is unsound on
+                    // Matrix/MatrixSlice-labeled bits.
+                    HeapKind::Matrix => {
+                        Arc::decrement_strong_count(bits as *const MatrixData);
+                    }
+                    HeapKind::MatrixSlice => {
+                        Arc::decrement_strong_count(bits as *const MatrixSliceData);
+                    }
                     // `HeapKind::NativeScalar` has no kinded `Arc<T>`
                     // carrier yet — the redesign is the phase-2c
                     // surface tracked in ADR-006 §2.7.4. The
@@ -985,6 +1037,17 @@ impl Clone for KindedSlot {
                         Arc::increment_strong_count(
                             bits as *const crate::v2::closure_layout::SharedCell,
                         );
+                    }
+                    // ADR-006 §2.7.22 amendment (Round 18 S3, 2026-05-13):
+                    // mirror of the Drop arm above. Bumps one
+                    // `Arc<MatrixData>` / `Arc<MatrixSliceData>`
+                    // strong-count share. Typed-Arc pure-discriminator
+                    // dispatch.
+                    HeapKind::Matrix => {
+                        Arc::increment_strong_count(bits as *const MatrixData);
+                    }
+                    HeapKind::MatrixSlice => {
+                        Arc::increment_strong_count(bits as *const MatrixSliceData);
                     }
                     // `HeapKind::NativeScalar` kinded carrier pending
                     // phase-2c kinded redesign (ADR-006 §2.7.4). When

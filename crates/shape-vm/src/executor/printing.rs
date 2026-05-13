@@ -530,6 +530,27 @@ impl<'a> ValueFormatter<'a> {
             HeapKind::ModuleFn => {
                 format!("<module_fn:{}>", bits)
             }
+            // ADR-006 §2.7.22 amendment (Round 18 S3, 2026-05-13):
+            // Matrix renders as `<Mat<number>:rows x cols>`; MatrixSlice
+            // renders as a flat `Vec<number>[...]` over the projection
+            // slice — preserves the pre-amendment user-facing print
+            // shape. SAFETY: construction-side contract on
+            // `KindedSlot::from_matrix` / `from_matrix_slice` — bits are
+            // `Arc::into_raw(Arc<MatrixData>) as u64` /
+            // `Arc::into_raw(Arc<MatrixSliceData>) as u64`.
+            HeapKind::Matrix => {
+                let m: &shape_value::heap_value::MatrixData =
+                    unsafe { &*(bits as *const shape_value::heap_value::MatrixData) };
+                format!("<Mat<number>:{}x{}>", m.rows, m.cols)
+            }
+            HeapKind::MatrixSlice => {
+                let s: &shape_value::heap_value::MatrixSliceData =
+                    unsafe { &*(bits as *const shape_value::heap_value::MatrixSliceData) };
+                let slice = s.as_slice();
+                let elems: Vec<String> =
+                    slice.iter().map(|v| format_array_float(*v)).collect();
+                format!("[{}]", elems.join(", "))
+            }
         }
     }
 
@@ -578,17 +599,10 @@ impl<'a> ValueFormatter<'a> {
                 let elems: Vec<String> = a.iter().map(|v| format_array_float(*v)).collect();
                 format!("[{}]", elems.join(", "))
             }
-            TypedArrayData::FloatSlice {
-                parent,
-                offset,
-                len,
-            } => {
-                let off = *offset as usize;
-                let slice_len = *len as usize;
-                let data = &parent.data[off..off + slice_len];
-                let elems: Vec<String> = data.iter().map(|v| format_array_float(*v)).collect();
-                format!("[{}]", elems.join(", "))
-            }
+            // ADR-006 §2.7.22 amendment (Round 18 S3): FloatSlice exits
+            // `TypedArrayData`. MatrixSlice is now its own HeapValue arm
+            // with `Vec<number>[…]` Display via the HeapValue formatter
+            // (see `format_heap_value` for the MatrixSlice arm).
             TypedArrayData::Bool(a) => {
                 let elems: Vec<String> = a
                     .iter()
@@ -632,9 +646,8 @@ impl<'a> ValueFormatter<'a> {
                     .collect();
                 format!("[{}]", elems.join(", "))
             }
-            TypedArrayData::Matrix(m) => {
-                format!("<Mat<number>:{}x{}>", m.rows, m.cols)
-            }
+            // ADR-006 §2.7.22 amendment (Round 18 S3): Matrix exits
+            // `TypedArrayData`; Matrix Display is on the HeapValue arm.
             TypedArrayData::String(a) => {
                 // Inside an array, strings render quoted to disambiguate
                 // `["a", "b"]` from `[a, b]` (matches the TypedObject-field
@@ -962,6 +975,17 @@ impl<'a> ValueFormatter<'a> {
             }
             // W17-comptime-vm-dispatch (ADR-006 §2.7.26, 2026-05-12).
             HeapValue::ModuleFn(id) => format!("<module_fn:{}>", id),
+            // ADR-006 §2.7.22 amendment (Round 18 S3, 2026-05-13):
+            // Matrix renders as `<Mat<number>:rows x cols>`. MatrixSlice
+            // renders as a flat `[v1, v2, ...]` over the projection slice
+            // — preserves the pre-amendment FloatSlice Display shape.
+            HeapValue::Matrix(m) => format!("<Mat<number>:{}x{}>", m.rows, m.cols),
+            HeapValue::MatrixSlice(s) => {
+                let slice = s.as_slice();
+                let elems: Vec<String> =
+                    slice.iter().map(|v| format_array_float(*v)).collect();
+                format!("[{}]", elems.join(", "))
+            }
         }
     }
 }

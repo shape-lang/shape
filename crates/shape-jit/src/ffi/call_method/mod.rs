@@ -163,6 +163,9 @@ unsafe fn receiver_type_name(
         NativeKind::Ptr(HeapKind::Atomic) => Some("Atomic".to_string()),
         NativeKind::Ptr(HeapKind::Lazy) => Some("Lazy".to_string()),
         NativeKind::Ptr(HeapKind::ModuleFn) => Some("ModuleFn".to_string()),
+        // ADR-006 §2.7.22 amendment (Round 18 S3, 2026-05-13).
+        NativeKind::Ptr(HeapKind::Matrix) => Some("Matrix".to_string()),
+        NativeKind::Ptr(HeapKind::MatrixSlice) => Some("Vec<number>".to_string()),
         // Pure-discriminator kinds with no method receiver shape — see
         // ADR-006 §2.7.9 (FilterExpr), §2.7.12 (SharedCell), §2.7.13
         // (Reference), §2.7.14 (NativeScalar / NativeView).

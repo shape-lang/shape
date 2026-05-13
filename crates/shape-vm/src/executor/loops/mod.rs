@@ -102,8 +102,8 @@ fn typed_array_data_len(arr: &TypedArrayData) -> usize {
         TypedArrayData::U64(a) => a.len(),
         TypedArrayData::F32(a) => a.len(),
         TypedArrayData::String(a) => a.len(),
-        TypedArrayData::FloatSlice { len, .. } => *len as usize,
-        TypedArrayData::Matrix(m) => m.data.len(),
+        // ADR-006 §2.7.22 amendment (Round 18 S3): Matrix / FloatSlice
+        // exit `TypedArrayData`.
         // W17-typed-carrier-bundle-A Q25.A specialized arms.
         TypedArrayData::Decimal(b) => b.len(),
         TypedArrayData::BigInt(b) => b.len(),
@@ -541,22 +541,10 @@ impl VirtualMachine {
                 Some(&v) => vm.push_kinded((v as f64).to_bits(), NativeKind::Float64),
                 None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
             },
-            TypedArrayData::FloatSlice { parent, offset, len } => {
-                if u >= *len as usize {
-                    vm.push_kinded(Self::NONE_BITS, NativeKind::Bool)
-                } else {
-                    let off = *offset as usize;
-                    let v = parent.data[off + u];
-                    vm.push_kinded(v.to_bits(), NativeKind::Float64)
-                }
-            }
-            TypedArrayData::Matrix(m) => {
-                if u >= m.data.len() {
-                    vm.push_kinded(Self::NONE_BITS, NativeKind::Bool)
-                } else {
-                    vm.push_kinded(m.data[u].to_bits(), NativeKind::Float64)
-                }
-            }
+            // ADR-006 §2.7.22 amendment (Round 18 S3): Matrix / FloatSlice
+            // exit `TypedArrayData`. Iterating over Matrix / MatrixSlice
+            // values routes via dedicated HeapKind-level for-loop
+            // dispatch, not through this typed-array path.
             TypedArrayData::Bool(a) => match a.get(u) {
                 Some(&v) => vm.push_kinded((v != 0) as u64, NativeKind::Bool),
                 None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),

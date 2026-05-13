@@ -570,8 +570,8 @@ fn element_kind_of(arc: &Arc<TypedArrayData>) -> NativeKind {
         TypedArrayData::U64(_) => NativeKind::UInt64,
         TypedArrayData::F32(_) => NativeKind::Float64, // narrowed at push site
         TypedArrayData::String(_) => NativeKind::String,
-        TypedArrayData::Matrix(_) => NativeKind::Float64,
-        TypedArrayData::FloatSlice { .. } => NativeKind::Float64,
+        // ADR-006 §2.7.22 amendment (Round 18 S3): Matrix / FloatSlice
+        // exit `TypedArrayData`.
         // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
         TypedArrayData::Decimal(_) => NativeKind::Ptr(HeapKind::Decimal),
         TypedArrayData::BigInt(_) => NativeKind::Ptr(HeapKind::BigInt),
@@ -739,27 +739,10 @@ fn slice_typed_array(
             let new_arc = Arc::new(TypedArrayData::Bool(Arc::new(new_buf)));
             Ok((new_arc, kind))
         }
-        TypedArrayData::FloatSlice {
-            parent,
-            offset,
-            len,
-        } => {
-            // Re-slice the parent's float region. The result is an owned
-            // F64 typed array, not a nested view (matches the pre-Wave-6.5
-            // semantics — the slice operator materializes).
-            let total = *len as i64;
-            let off = *offset as usize;
-            let (s, e) = clamp_range(start, end, total);
-            let sliced: Vec<f64> = if s < e {
-                parent.data[off + s..off + e].to_vec()
-            } else {
-                Vec::new()
-            };
-            let aligned = shape_value::aligned_vec::AlignedVec::<f64>::from_vec(sliced);
-            let new_buf = shape_value::typed_buffer::AlignedTypedBuffer::from_aligned(aligned);
-            let new_arc = Arc::new(TypedArrayData::F64(Arc::new(new_buf)));
-            Ok((new_arc, kind))
-        }
+        // ADR-006 §2.7.22 amendment (Round 18 S3): FloatSlice exits
+        // `TypedArrayData`. Slicing a MatrixSlice receiver dispatches via
+        // its dedicated HeapKind path; this typed-array slice path no
+        // longer sees that receiver shape.
         other => Err(VMError::NotImplemented(format!(
             "SliceAccess: TypedArrayData variant {} — Phase-2c reentry. \
              Element-kind-aware slice required for int-width / \
