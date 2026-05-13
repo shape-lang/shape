@@ -832,6 +832,42 @@ impl VirtualMachine {
                 // `closure_heap_bits` is the raw slot bits (`Box<HeapValue>`
                 // pointer) and `closure_heap_kind` is the matching
                 // `NativeKind::Ptr(HeapKind::Closure)`.
+                //
+                // Round 13 T5 share-accounting fix (W17-vm-call-value-
+                // closure-kind-mismatch, audit doc
+                // `docs/cluster-audits/w17-vm-call-value-closure-kind-mismatch-audit.md`
+                // §4 Option B). The `callee` carrier owns one
+                // `Arc<HeapValue>` strong-count share — transferred
+                // from the stack via `pop_kinded` in the
+                // `dispatch_call_value_immediate` shell
+                // (`control_flow/mod.rs:408-409`). The carrier `Drop`
+                // releases that share at end of dispatch via
+                // `drop_with_kind`. The frame's
+                // `closure_heap_bits` companion ALSO releases via
+                // `drop_with_kind` at `op_return` / `op_return_value`
+                // teardown (`control_flow/mod.rs:712-726` / `:774-788`).
+                // Without an explicit `clone_with_kind` here the two
+                // releases retire one share more than was acquired —
+                // the closure `Arc<HeapValue>` reaches refcount 0
+                // before the closure-self binding's
+                // `Arc::decrement_strong_count` runs, freeing the
+                // header that `op_make_closure`'s producer share at
+                // Local 1 still references. On the next iteration
+                // `CloneLocal Local(1)` reads the dangling bits and
+                // races the allocator — surfacing as
+                // `HeapKind::Closure label with non-ClosureRaw payload`
+                // in debug or `Invalid function call` in release (the
+                // bogus `function_id` read from the freed header fails
+                // the `program.functions.get(func_id)` bounds check at
+                // `call_closure_with_nb_args_keepalive`).
+                //
+                // The §2.7.7 / Q9 retain-on-read primitive is the
+                // canonical kind-aware refcount bump — no tag decode,
+                // no `is_heap()` probe, no Bool-default fallback. Same
+                // share-balance pattern as
+                // `execute_function_with_named_args` (lines 246-250)
+                // which clones each named-arg into the positional vec.
+                super::vm_impl::stack::clone_with_kind(callee.slot.raw(), callee.kind);
                 self.call_closure_with_nb_args_keepalive(
                     function_id,
                     block,
