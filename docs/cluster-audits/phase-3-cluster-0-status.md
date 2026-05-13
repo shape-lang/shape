@@ -3707,6 +3707,146 @@ smoke later requires the stdlib wrapper path.
 
 ---
 
+### W17-jit-typed-object-arc-storage-migration close (2026-05-13)
+
+**Branch**: `bulldozer-strictly-typed-w17-jit-typed-object-arc-storage-migration`
+**Round**: Phase 3 cluster-0 Round 14 W17 (audit-first standalone, parallel
+with W12-map-chained).
+**Disposition**: **AUDIT-ONLY CLOSE — surface-and-stop on ADR-006 §2.3
+amendment territory.**
+
+#### Audit doc
+
+`docs/cluster-audits/w17-jit-typed-object-arc-storage-migration-audit.md`
+delivers all four audit deliverables (§1 ADR-005 §1 / §2.3 fit, §2 17+
+consumer inventory, §3 cross-crate boundary check, §4 refuse-on-sight
+discipline) plus §5 supervisor-disposition options + §6 empirical
+verification + §7 close framing.
+
+#### Key finding
+
+The dispatch text's framing conflates two distinct migrations.
+
+**(1) The load-bearing kickoff-Smoke-3 surface is a classification-layer
+gap, not a payload-shape migration.** `crates/shape-jit/src/ffi/call_method/
+mod.rs::receiver_type_name:51-81` (and the broader legacy-fallback cascade
+at `:572-612`) contains 5+ tag-bit predicates (`is_number` / `is_heap` /
+`heap_kind` / `is_typed_object` / `is_inline_function` / `is_ok_tag` /
+`is_err_tag`) that all return wrong answers on raw `Box::into_raw(
+UnifiedValue<*const u8>) as u64` carriers — the §2.7.5 stamp-at-compile-
+time discipline removed the NaN-box tag wrap; producer `box_typed_object`
+already emits raw bits (verified empirically via `SHAPE_JIT_TRACE=1`:
+`[alloc] schema=54 result=0x56c5488796a0 kind=None HK_TYPED_OBJECT=1`).
+The §2.7.7 / Q9 parallel-kind track already carries the correct kind at
+the pop site (debug: `receiver_kind=Ptr(TypedObject) receiver_code=129
+receiver_bits=0x56d0fa0f49f0`). The fix is in-crate, ~13 sites,
+~150–250 LoC, no ADR amendment — drop the tag-bit predicates and consume
+the kind directly from the parallel companion at every dispatch shell.
+
+**(2) The dispatch text's "migrate to `Arc<TypedObjectStorage>` raw bits
+per the §2.7.5 recipe" framing is ADR-006 §2.3 amendment territory.** The
+JIT-internal `#[repr(C)] TypedObject` (`ffi/typed_object/mod.rs:67-75`:
+u32 schema_id + u32 manual ref_count + 64-byte alignment + inline u64
+field cells via byte offset) and the VM-side `Arc<TypedObjectStorage>`
+(`shape-value/src/heap_value.rs:2356`: schema_id + `Vec<u64>` slots +
+`Vec<NativeKind>` field_kinds + heap_mask, Rust-Arc refcount at offset
+-16) have structurally divergent in-memory layouts. The divergences are
+real and non-bridgeable under §2.7.5 alone:
+
+1. Refcount placement (+4 vs -16) — JIT inline retain/release ops would
+   scribble on the wrong word.
+2. Field-access addressing (inline byte offset vs `Vec`-indirect) —
+   different Cranelift IR pattern at every typed-field-load/store site.
+3. Allocation surface (`alloc_zeroed` + 64-byte alignment vs `Arc::new`)
+   — JIT performance contract (documented 2ns vs HashMap 25ns at
+   `typed_object/mod.rs:28-34`) tied to inline-data shape.
+4. Lifecycle (manual inc/dec_ref vs `Arc::increment/decrement_strong_count`)
+   — different ownership machinery.
+5. Schema model (both carry `schema_id: u32` via `type_schema_registry`)
+   — this piece IS same-shape.
+
+Migrating the JIT-internal `TypedObject` to `Arc<TypedObjectStorage>`
+requires one of:
+
+- **Option β.1**: Redesign `TypedObjectStorage` to match the JIT
+  performance contract (inline-data + 64-byte alignment + custom
+  Arc-like with variably-sized payload).
+- **Option β.2**: Per-crate carrier-shape divergence under
+  `NativeKind::Ptr(HeapKind::TypedObject)`. **Defection-attractor risk**
+  per §2.7.10 / Q11 — exactly the carrier-shape drift the dispatch-ABI
+  rebuild eliminated.
+- **Option β.3**: Delete the JIT-internal struct + rebuild field-access
+  codegen for `Vec`-indirect addressing. **Loses the documented inline-
+  data performance contract**; perf-regression measurement required;
+  ~1500–3000 LoC.
+
+#### Recommendation — Option γ (scope split)
+
+Round 15 dispatches **W17-narrow** (Option α scope = classification-layer
+fix only): ~13 consumer sites, no ADR amendment, closes kickoff Smoke 3
+JIT.
+
+The typed-Arc carrier-shape decision becomes a separate **cluster-1
+follow-up** (working name: `W17-typed-object-carrier-shape-decision`)
+after supervisor disposition on β.1 / β.2 / β.3. Cluster-0 close (post
+Smoke matrix verification) does NOT block on β — kickoff Smoke 3 JIT is
+load-bearing on (1) only.
+
+#### Empirical verification
+
+- VM mode (baseline): kickoff Smoke 3 produces `x` ✓.
+- JIT mode (current head): kickoff Smoke 3 produces empty output
+  (`receiver_type_name(receiver_bits=0x56d0fa0f49f0, exec_ctx)` → `is_number`
+  returns `true` because high bits aren't TAG_BASE → returns `Some("number")`
+  → UFCS lookup `"number::name"` fails → dispatch falls through to TAG_NULL
+  → print prints nothing).
+- The §2.7.7 / Q9 parallel-kind track is correct (kind = `Ptr(TypedObject)`),
+  but the legacy cascade ignores it and re-classifies via broken tag-bit
+  predicates.
+
+#### Inventory delivered
+
+Audit §2 enumerates 12 JIT-private heap-op sites (`#1–#12`) + 3 classification-
+surface sites (`#13–#15`) + 2 producer-side sites (`#16–#17`) + 2 retain/
+release dispatch sites (`#18–#19`). For each: file:line, current call shape,
+migration target, same-shape vs ADR-territory disposition.
+
+#### Refuse-on-sight discipline preserved
+
+No NaN-box-decode-preservation framing, no Bool-default fallback, no
+bridge/probe/helper/hop/translator/adapter/shim framing (broader-family
+regex per CLAUDE.md "Renames to refuse on sight"), no "tracked as a
+follow-up for an individual consumer site" within the §2 inventory. The
+typed-Arc carrier-shape decision is surfaced as a SEPARATE workstream,
+not deferred from W17 — its scope was misframed in the dispatch text.
+
+#### Close gates
+
+- No source changes that regress Round 13 state — confirmed (only the
+  audit doc + AGENTS.md row + this status subsection are added).
+- `cargo check --workspace --lib --tests` — not re-run (no source touched).
+- `cargo test -p shape-jit --lib` — not re-run (no source touched);
+  baseline 383 + 26 ignored at the audit head per Round 13 close.
+- `bash scripts/verify-merge.sh` — not run (no source merge).
+- `bash scripts/check-no-dynamic.sh` — not run (no source touched).
+- Smoke 3 JIT — empirically demonstrated unchanged from Round 13 close
+  state (empty output; classification-layer gap reproducible).
+
+#### Coordination
+
+- W12-jit-map-chained (running parallel, no file-territory overlap —
+  W17 touches `ffi/call_method/` + `ffi/typed_object/`; W12-map-chained
+  touches `mir_compiler/types.rs` + possibly terminators).
+- No merge attempted; supervisor runs the disposition per Option γ.
+
+#### Files touched
+
+- NEW `docs/cluster-audits/w17-jit-typed-object-arc-storage-migration-audit.md`
+- `AGENTS.md` (W17 row → closed with audit-only disposition)
+- `docs/cluster-audits/phase-3-cluster-0-status.md` (this subsection)
+
+---
+
 *Next session: read this file first, then continue with Round-2
 close-out (or pivot per supervisor's call between cluster-1 hardening
 and cluster-2 Wave-3 surfaces).*
