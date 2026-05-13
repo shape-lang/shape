@@ -1494,6 +1494,89 @@ Branch: `bulldozer-strictly-typed-w12-jit-collection-arc-ffi-ctors-and-refcount`
 Parent: `1f28b2d8` (post-Round-8 merge + Round 9 dispatch metadata
 on `bulldozer-strictly-typed`).
 
+### Kickoff Smoke 2 + 3 verification (post-Round-9 merge, 2026-05-13)
+
+Per supervisor's revised cadence — kickoff smokes restored as canonical
+close criterion (`phase-3-kickoff-prompt.md:96-100`):
+
+**Smoke 2** (`let xs = [1,2,3,4,5]; let doubled = xs.map(|x| x * 2);
+print(doubled.sum())` → expect `30`):
+
+- VM: ❌ `Not implemented: op_new_array: generic untyped-array
+  construction depends on the kinded the-deleted-heterogeneous-element-
+  carrier emit path (Phase 2c reentry — see ADR-006 §2.7.4)`. VM-side
+  blocker. Phase 2c reentry territory; NOT cluster-0 JIT-rebuild scope.
+- JIT: ❌ `Route A surface-and-stop: NotImplemented(SURFACE) — print
+  Call-terminator operand NativeKind is None`. Same §2.7.5 producer-side
+  conduit gap Round 8A reopen identified for EnumPayload, generalized:
+  the conduit doesn't stamp `.sum()`'s return kind at the Call-terminator
+  print operand site. JIT-side cluster-0 territory.
+
+**Smoke 3** (Shape-syntax: `trait T { name(): string } type X {} impl T
+for X { method name() { "x" } } let t = X {} print(t.name())` → expect
+`x`. Kickoff's Rust-style `fn name(&self) -> String` doesn't parse;
+Shape trait syntax is `methodname(): ReturnType` and impl methods are
+`method name() { ... }` per `crates/shape-runtime/stdlib-src/core/display.shape`):
+
+- VM: ✅ produces `x`.
+- JIT: ❌ `Route A surface-and-stop: SURFACE — Rvalue::Aggregate reached
+  the kind-blind fallback. The v2 typed-array fast path in statements.rs
+  requires the destination Place::Local to carry a ConcreteType::Array<scalar>;
+  reaching here means the element kind is not threaded from the producing
+  call signature. Tracked as W11-jit-new-array.` Fires on `let t = X {}`
+  struct Aggregate. W11-jit-new-array TypedObject Aggregate threading
+  gap. JIT-side cluster-0 territory.
+
+### Disposition
+
+Both kickoff smokes 2 and 3 are blocked on the JIT side; Smoke 2 also
+blocked on the VM side (Phase 2c reentry, orthogonal).
+
+Two NEW cluster-0 JIT-side gaps surfaced, not covered by current Round 10
+(8B.2 `jit_call_method` shell rebuild) scope:
+
+1. **§2.7.5 producer-side conduit extension for `.sum()`-style method
+   return kinds** at the JIT Call-terminator print operand site. Same
+   defect class as Round 8A reopen's EnumPayload conduit extension,
+   generalized. Candidate sub-cluster: `W12-jit-method-return-kind-conduit`
+   (or absorb into Round 6A's `W12-jit-call-return-kind` audit scope).
+2. **W11-jit-new-array TypedObject Aggregate kind threading** — the
+   `Rvalue::Aggregate` arm for non-Array destinations (Struct / Tuple /
+   TypedObject) reaches the kind-blind fallback. Round 5B audit
+   surfaced this as option (iii) and landed option (ii) only.
+   Candidate sub-cluster: `W12-jit-aggregate-typed-object-threading`
+   (resurrects deferred Round 5B option (iii) work).
+
+Per supervisor's revised cadence ("If kickoff Smoke 2 or 3 surfaces a new
+gap during verification, Round 11 adds the work; cluster-0 stays open"),
+both gaps fold into cluster-0 close criterion. Round 10 (8B.2 Smoke 4 +
+HashMap + Mutex) proceeds as planned; Round 11+ absorbs the new gaps.
+
+**Smoke 2 VM-side blocker** (`op_new_array` Phase 2c reentry, ADR-006
+§2.7.4) — surfaced for supervisor disposition. Per cluster-0's "VM == JIT
+for all 4 kickoff smokes" close criterion, cluster-0 can't close on
+Smoke 2 regardless of JIT-side state if VM is blocked. Either (a)
+cluster-0 absorbs the VM-side fix, or (b) cluster-0 closes with VM-side
+blocker documented as out-of-scope and a Phase 2c-residual workstream
+takes the VM fix separately.
+
+### Updated cluster-0 close-criterion smoke matrix (post-Round-9)
+
+| Smoke | Description | VM | JIT | Disposition |
+|---|---|---|---|---|
+| 1 (kickoff) | `for i in 0..100 { sum += i }` → 4950 | ✅ | ✅ | passing |
+| 2 (kickoff) | `[1,2,3,4,5].map(\|x\|x*2).sum()` → 30 | ❌ Phase 2c reentry | ❌ §2.7.5 conduit for `.sum()` return kind | both surfaces, gating |
+| 3 (kickoff) | trait T + impl + dyn + `t.name()` → "x" | ✅ | ❌ Rvalue::Aggregate TypedObject threading (W11-jit-new-array) | JIT-side gating |
+| 4 (kickoff) | `HashSet + .add + .size` → 2 | ✅ | ❌ EnumStore consumer SURFACE | Round 10 (8B.2) territory |
+
+Supplementary -ext smokes (non-gating, dispatcher-introduced from R5+):
+
+| Smoke | Description | VM | JIT | Disposition |
+|---|---|---|---|---|
+| 1.5-ext | `divide` + match → 5 | ✅ | ❌ §2.7.5 String EnumPayload carrier-mismatch | cluster-1 carrier-unification candidate |
+| 2-no-loop-ext | `first_positive(3)` → Some(3) | ✅ | ✅ | passing |
+| 3-ext | TypedObject `p.x + p.y` → 7 | ✅ | ✅ | passing |
+
 ## Cluster-0 close gate
 
 Per phase-3-kickoff-prompt §"Cluster-0 sub-cluster sequencing":
