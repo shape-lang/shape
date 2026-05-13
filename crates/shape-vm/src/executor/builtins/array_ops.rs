@@ -43,10 +43,18 @@ fn typed_array_to_slot(arr: TypedArrayData) -> KindedSlot {
     KindedSlot::from_typed_array(Arc::new(arr))
 }
 
-/// Convert a `KindedSlot` element to an `Arc<HeapValue>` for storage in
-/// a `the-deleted-heterogeneous-element-carrier` buffer (catch-all heterogeneous element
-/// shape). Inline scalars wrap into the matching `HeapValue` arm.
-fn slot_to_heap_arc(slot: &KindedSlot) -> Result<Arc<HeapValue>, VMError> {
+/// Convert a `KindedSlot` element to an `Arc<HeapValue>` suitable for
+/// routing through `TypedArrayData::build_specialized_from_heap_arcs`
+/// (ADR-006 §2.7.24 Q25.A). Inline scalars wrap into the matching
+/// `HeapValue` arm (Int64 → `HeapValue::BigInt(Arc<i64>)`); heap-kinded
+/// slots clone the underlying `Arc<HeapValue>`. Float64 / Bool reject —
+/// they belong in `TypedArrayData::F64` / `TypedArrayData::Bool`
+/// specialized variants directly, not via the heap-arc-wrapper path.
+///
+/// Promoted from file-local `fn` to `pub(in crate::executor)` so
+/// `executor::objects::object_creation::op_new_array` (Round 11A,
+/// ADR-006 §2.7.24 Q25.A) can share the same projection logic.
+pub(in crate::executor) fn slot_to_heap_arc(slot: &KindedSlot) -> Result<Arc<HeapValue>, VMError> {
     match slot.kind {
         NativeKind::Int64 => {
             // BigInt is the closest Heap arm for int — but the strict-typed
