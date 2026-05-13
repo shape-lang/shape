@@ -4010,6 +4010,135 @@ producer/consumer alignment, complementing W12-map-chained's
 conduit extension (which can be un-stashed and merged once the
 downstream consumer-side gap is closed).
 
+## Round 15 — W12-map-chained Option B (AUDIT-ONLY CLOSE, 2026-05-13)
+
+Phase 3 cluster-0 Round 15 sub-cluster W12-map-chained Option B
+(supervisor-ratified producer-side carrier alignment) closes
+**audit-only** per the dispatch prompt's Phase 1 surface-and-stop
+discipline. The third surface-and-stop trigger fires:
+
+> Stop and surface to the team lead if scope is unbounded ... OR
+> the conduit extension's stamp doesn't align with the new
+> producer's carrier.
+
+Branch `bulldozer-strictly-typed-w12-map-chained-option-b`, parent
+`0d9ae51e`. Zero source changes; audit doc + AGENTS.md row + this
+subsection only.
+
+### Phase 1 finding
+
+The dispatch prompt's literal Option B prescription — "construct
+results directly as raw `Arc::into_raw(Arc<TypedArrayData<T>>) as
+u64` carriers" — describes the VM-side `.map` family's **current
+output shape**:
+
+- `int_array_result` at
+  `crates/shape-vm/src/executor/objects/typed_array_methods.rs:135-139`
+  already produces `Arc::into_raw(Arc<TypedArrayData::I64>) as u64`
+  with kind `Ptr(HeapKind::TypedArray)`.
+- `op_new_array` at
+  `crates/shape-vm/src/executor/objects/object_creation.rs:367-371`
+  + `op_array_push_local` at
+  `crates/shape-vm/src/executor/objects/array_operations.rs:215-302`
+  (the stdlib `vec.shape::map` body's bytecode lowering) produce
+  the same shape.
+
+The JIT consumer fast-path at
+`crates/shape-jit/src/mir_compiler/v2_array.rs:334-441`
+(`try_emit_v2_array_method`, specifically `jit_v2_array_sum_i64(arr:
+*const TypedArray<i64>)` at `ffi/v2/mod.rs:115-124`) reads the
+receiver slot's bits as **v2-raw `*mut TypedArray<i64>` flat
+struct** (`crates/shape-value/src/v2/typed_array.rs:28-44` —
+`#[repr(C)] { header: HeapHeader, data: *mut T, len: u32, cap: u32 }`),
+NOT `Arc<TypedArrayData>` (Rust enum with `Arc<TypedBuffer<T>>`
+variants).
+
+The two layouts are **structurally distinct**: refcount placement
+(HeapHeader-inline vs Rust-Arc-at-offset-minus-16), data addressing
+(inline `*mut T` field vs Arc-wrapped TypedBuffer indirection),
+enum discriminator presence (none vs first 8 bytes). Reading an
+`Arc<TypedArrayData::I64>` payload as `TypedArray<i64>` interprets
+the enum tag + Arc inner-pointer as header + data fields, then
+dereferences invalid bits — the exact SIGSEGV (exit 139) the
+predecessor audit `8354968a` recorded at §7.1.
+
+### Disposition options
+
+- **Reading A (dispatch prompt's literal text)**: producer should
+  produce `Arc::into_raw(Arc<TypedArrayData<T>>)`. Producer already
+  does this — Option B is a no-op on the producer side. Smoke 2
+  cannot close.
+- **Reading B (charitable — ADR-006 §2.7.14 Route A wording)**:
+  producer should produce v2-raw `*mut TypedArray<T>` matching the
+  consumer's FFI signature. Requires either:
+  - Compiler-side specialization of `vec.shape::map`'s body so the
+    inner `let mut result = []` lowers to `NewTypedArrayI64` (e.g.
+    via `let mut result: Array<U> = []` annotation + monomorphized
+    `U`-substitution propagation). Empirically verified that
+    `let mut result: Array<int> = []` already emits
+    `NewTypedArrayI64` (via `pending_variable_typed_array_kind`
+    path at `statements.rs:672-682`) but `result.push(...)` in the
+    same expression still emits `ArrayPushLocal` (kind-agnostic
+    Arc-based push) due to receiver-loc-based dispatch — multiple
+    cascading compiler changes needed.
+  - OR a new Rust-side method handler replacing the stdlib's
+    Shape-source body, with runtime-kind dispatch on the receiver
+    that produces a matching v2-raw carrier.
+  - Either way: contradicts ADR-006 §2.3's
+    `HeapValue::TypedArray(Arc<TypedArrayData>)` mandate for typed-
+    array HeapValue kinds. Would require an ADR-006 §2.3 / §2.7.14
+    amendment to acknowledge dual carrier shapes for `Array<T>`
+    where T is scalar:
+    `*mut TypedArray<T>` UInt64-tagged v2-raw vs
+    `Arc<TypedArrayData>` Ptr(HeapKind::TypedArray)-tagged typed-Arc.
+
+### Scope-bounded check
+
+The dispatch prompt's three scope-unbounded triggers:
+
+| # | Trigger | State |
+|---|---|---|
+| 1 | More producers than VM-side `.map` family | OK — bounded to ~10 stdlib `vec.shape` methods + Rust-side `array_transform::handle_*_v2`. |
+| 2 | More consumers than the typed-array fast-path families | OK — bounded to `try_emit_v2_array_method` (one file). |
+| 3 | Conduit extension's stamp doesn't align with the new producer's carrier | **TRIGGERED** — see Phase 1 finding. |
+
+### Recommendation for Round 16
+
+Mirror the W17 audit `8ae56222` Option γ scope-split pattern.
+Round 16 dispatches one of:
+
+- **B' — ADR-006 §2.3 / §2.7.14 amendment + carrier unification**:
+  unify the typed-array carrier shape across
+  `HeapValue::TypedArray(Arc<TypedArrayData>)` and `*mut TypedArray<T>`.
+  One canonical layout, one canonical drop path. Mirror of W17 β.1.
+- **B'' — Producer migration to v2-raw + ADR amendment to
+  acknowledge dual carrier shapes**: change the producer (stdlib
+  `vec.shape::map` + companions + Rust-side Arc-array path) to
+  produce v2-raw `*mut TypedArray<T>` bits with `NativeKind::UInt64`
+  when the input is scalar-element v2-raw. Requires closure-
+  return-kind inference and the cascading compiler changes named
+  in Reading B above.
+
+The producer/consumer fast-path mismatch is now a **3-instance
+class** (W12-map-chained + W12-jit-string-carrier-unification's
+TypedObject surface + W17-typed-object-arc-storage-migration) —
+CLAUDE.md amendment candidate per the supervisor's 2026-05-13
+Round-14-close recurrent-pattern note.
+
+### Close gates
+
+Zero source changes. `cargo check --workspace --lib --tests`,
+`verify-merge.sh`, `check-no-dynamic.sh` baseline state preserved
+from `0d9ae51e`. Smoke 2 baseline:
+- VM `--mode vm` prints `30` (working).
+- JIT `--mode jit` errors `Route A surface-and-stop:
+  NotImplemented(SURFACE) — print Call-terminator operand
+  NativeKind is None` (pre-conduit-extension surface; the conduit
+  extension at `8354968a` was audit-only-closed with code stashed
+  per supervisor's Round 14 disposition).
+
+Audit doc: `docs/cluster-audits/w12-map-chained-option-b-audit.md`.
+
 ---
 
 *Next session: read this file first, then continue with Round-2
