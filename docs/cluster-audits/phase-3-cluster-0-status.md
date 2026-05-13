@@ -2209,6 +2209,106 @@ NEW cluster-1 candidates surfaced by Round 12 close reports:
   different Rust types; 17+ JIT-internal consumers; migration is broader
   cluster-1 hardening work.
 
+## Round 13 — dispatching (3 parallel: T4 production-first + T5 + T1' audit-first)
+
+Dispatched 2026-05-13 from post-Round-12-merge baseline `697afed1`.
+Supervisor ratified Option 1 (3 parallel) with audit-first discipline on
+T5 + T1', production-first on T4 (scope already team-lead cite-verified).
+
+| Sub-cluster | Branch | Worktree | Status |
+|---|---|---|---|
+| W17-vm-intrinsic-sum-wave-5d-migration (T4) | `bulldozer-strictly-typed-w17-vm-intrinsic-sum-wave-5d-migration` | `../shape-w17-vm-intrinsic-sum-wave-5d-migration` | migrating |
+| W17-vm-call-value-closure-kind-mismatch (T5) | `bulldozer-strictly-typed-w17-vm-call-value-closure-kind-mismatch` | `../shape-w17-vm-call-value-closure-kind-mismatch` | auditing |
+| W12-trait-method-return-conduit-cross-crate (T1') | `bulldozer-strictly-typed-w12-trait-method-return-conduit-cross-crate` | `../shape-w12-trait-method-return-conduit-cross-crate` | auditing |
+
+### T4 scope (W17-vm-intrinsic-sum-wave-5d-migration)
+
+Production-first. ~50-100 LoC bounded migration of
+`BuiltinFunction::IntrinsicSum` body at
+`crates/shape-vm/src/executor/vm_impl/builtins.rs:472` per Phase 1B-vm
+Wave 6.5 substep-2 cluster-A canonical recipe at commit `eb24ef0`.
+
+**Scope-narrowing rationale (cite-verified by team-lead audit)**:
+IntrinsicSum is the ONLY wave-5d todo!() blocking kickoff Smoke 2 `.sum()`.
+Other 5 wave-5d sites (lines 431/449/459/467/518 — closure-driven array
+builtins, vector/matrix/minimize intrinsics) stay Phase-2d residual; no
+current smoke blocker. Follows W12-collection-constructor scope-IN/scope-
+OUT precedent.
+
+Close report MUST cite:
+1. Which kickoff smoke IntrinsicSum blocks (Smoke 2 `.sum()`).
+2. Other wave-5d sites + their dispositions (Phase-2d residual, no
+   current smoke blocker).
+3. Migration shape (consistent with Phase 1B-vm kinded API discipline).
+
+### T5 scope (W17-vm-call-value-closure-kind-mismatch)
+
+AUDIT-FIRST. Three audit deliverables before writing code:
+
+1. **Site identification**: trace exact source of kind mis-labeling at
+   producer site, file:line cite.
+2. **W7/W8 overlap check**: review Round 7B + 8B close commits
+   (trampoline scope) for pre-existing handling — if absorbed/superseded/
+   orphan, cite commit + disposition.
+3. **Cluster-0 disposition**: confirm kickoff Smoke 2 `.map(|x|x*2)`
+   closure-call path is blocked under VM mode — if yes, cluster-0 sub-
+   cluster; if no, Phase-2d residual or cluster-1 hardening with §-cite.
+
+### T1' scope (W12-trait-method-return-conduit-cross-crate)
+
+AUDIT-FIRST. Absorbs ADR amendment territory surfaced by Round 12 T1
+surface-and-stop.
+
+Three audit deliverables before writing code:
+
+1. **Round 6A precedent fit**: read `function_return_concrete_types`
+   side-table design + linker/remote/content-addressed threading.
+   Determine whether trait method return resolution fits same shape
+   (key: `(trait_id, method_id)` instead of `function_id`; same
+   threading; same wire/snapshot disposition) OR requires fundamentally
+   different cross-crate design (vtable-aware lookup, multi-impl
+   resolution).
+2. **If same shape**: proceed with cross-crate side-table extension
+   ~300-500 LoC including linker/remote/content-addressed threading.
+3. **If different shape**: surface-and-stop with audit's structural
+   findings — ADR amendment territory, supervisor makes the call,
+   Round 14 dispatches amended fix.
+
+Three gaps T1 named (must close together):
+- Receiver struct identity erasure at `v2_map_emission.rs:357`
+  `StructLayoutId(0)` placeholder.
+- Trait registry not persisted in BytecodeProgram (`TypeRegistry::traits`
+  has return types but only `trait_method_symbols` + `trait_vtables`
+  reach BytecodeProgram).
+- Impl method return type fallback insufficient (`function_return_concrete_types[X::name] = Void`).
+
+Must make Round 12 T1's 3 pin tests pass (or document why obsolete).
+
+### Forbidden frames (refused on sight across all three)
+
+Per CLAUDE.md "Renames to refuse on sight" §2.7.10/Q11 + §2.7.11/Q12
+broader-family regex:
+- "trait-id/method-id resolution as a bridge over function-id".
+- "preserve mis-labeling for now, harden later".
+- "preserve legacy body for one edge case".
+- Any defection-attractor descriptor (bridge/probe/helper/hop/translator/
+  adapter/shim) for kind-source threading.
+- Bool-default for unproven kind at any site.
+
+### Cluster-0 close attempt cadence (post-Round-13)
+
+After all three Round 13 sub-clusters merge:
+- Run full 4-kickoff-smoke matrix (1 + 2 + 3 + 4) under both VM and JIT.
+- All 4 must produce identical correct output VM == JIT.
+- Supplementary -ext smokes tracked with explicit dispositions.
+- This status doc updated with the final matrix + close artifact.
+- Supervisor ratifies; user authorizes `phase-3-cluster-0-close` tag.
+
+If Round 13 surfaces a sixth gap (N+13 trajectory), Round 14. Same
+discipline. The trajectory has been honest principled surfacing every
+round and the JIT-rebuild proper is converging; cluster-0 close remains
+the gating criterion, not a pivot target.
+
 ## Cluster-0 close gate
 
 Per phase-3-kickoff-prompt §"Cluster-0 sub-cluster sequencing":
