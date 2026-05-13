@@ -201,13 +201,23 @@ pub extern "C" fn jit_typed_object_set_field(obj_bits: u64, offset: u64, value: 
 /// Get the schema ID from a typed object.
 ///
 /// # Arguments
-/// * `obj_bits` - NaN-boxed typed object (TAG_TYPED_OBJECT)
+/// * `obj_bits` - raw `Box::into_raw(UnifiedValue<*const TypedObject>) as u64`
+///   per ADR-006 §2.7.5 stamp-at-compile-time. The companion `NativeKind` is
+///   `Ptr(HeapKind::TypedObject)` stamped at the JIT-emitted call signature.
 ///
 /// # Returns
 /// The schema ID, or 0 if invalid
+///
+/// W17-narrow (Phase 3 cluster-0 Round 15, 2026-05-13): removed the
+/// `is_typed_object(obj_bits)` precondition — same recipe as the W12 close
+/// already applied to `_get_field` / `_set_field`. Under §2.7.5 the JIT
+/// allocator returns raw `Box::into_raw` pointers without NaN-box tag bits,
+/// so the prior gate always returned 0 for valid producer outputs (the
+/// classification-layer gap surfaced by W17-narrow audit §2 row #7). The
+/// kind is the parallel-kind track companion; null-pointer guards remain.
 #[unsafe(no_mangle)]
 pub extern "C" fn jit_typed_object_schema_id(obj_bits: u64) -> u32 {
-    if !is_typed_object(obj_bits) {
+    if obj_bits == 0 {
         return 0;
     }
 
