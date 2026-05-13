@@ -334,6 +334,7 @@ mod tests {
             local_types: vec![LocalTypeInfo::Unknown],
             span: dummy_span(),
             field_name_table: StdHashMap::new(),
+            local_struct_type_names: StdHashMap::new(),
         }
     }
 

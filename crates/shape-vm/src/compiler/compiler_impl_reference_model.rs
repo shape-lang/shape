@@ -1510,15 +1510,91 @@ impl BytecodeCompiler {
             }
         };
 
+        // ADR-006 §2.7.5 — Phase 3 cluster-0 Round 13 T1' commit 2:
+        // method-returns resolver for trait-method dispatch return-kind
+        // classification. Chains:
+        //   `find_default_trait_impl_for_type_method(type_name, method_name)
+        //    → trait impl function name (e.g. "X::name")
+        //    → function_return_concrete_types[function_index]
+        //    → declared return ConcreteType (e.g. ConcreteType::String)`
+        //
+        // Used by the conduit producer to stamp `TerminatorKind::Call`
+        // destination slots for `MirConstant::Method(_)` arms with a
+        // receiver slot whose struct type name was recorded in MIR
+        // (`mir.local_struct_type_names`, T1' gap 1 closure). `None` at
+        // any link in the chain means "no information" — the destination
+        // slot stays `Void` per §2.7.5.1 (no fabricated default).
+        //
+        // Gap 3 closure (commit 1, `desugar_impl_method` trait
+        // declaration return-type substitution) ensures
+        // `function_return_concrete_types["X::name"]` carries the trait's
+        // declared `ConcreteType::String` even when the impl source
+        // doesn't repeat the `: string` annotation.
+        let trait_method_symbols = self.program.trait_method_symbols.clone();
+        let find_trait_impl_default_suffix =
+            |type_name: &str, method_name: &str| -> Option<String> {
+                // Mirror BytecodeProgram::find_default_trait_impl_for_type_method
+                // semantics (the canonical helper at
+                // `crates/shape-vm/src/bytecode/program_impl.rs:151`)
+                // without borrowing `self.program` — the closure must be
+                // passable by reference to the conduit producer
+                // alongside `callee_returns`. The "__default__" selector
+                // string is `DEFAULT_TRAIT_IMPL_SELECTOR` at
+                // `crates/shape-vm/src/bytecode.rs:15`; inlined here to
+                // avoid the borrow.
+                let default_suffix = format!(
+                    "::{}::__default__::{}",
+                    type_name, method_name
+                );
+                for (key, func_name) in &trait_method_symbols {
+                    if key.ends_with(&default_suffix) {
+                        return Some(func_name.clone());
+                    }
+                }
+                let type_segment = format!("::{}::", type_name);
+                let suffix = format!("::{}", method_name);
+                let mut matches: Vec<String> = Vec::new();
+                for (key, func_name) in &trait_method_symbols {
+                    if key.contains(&type_segment) && key.ends_with(&suffix) {
+                        matches.push(func_name.clone());
+                    }
+                }
+                // Multi-trait method-name disambiguation (audit §5):
+                // when multiple traits declare `method()` for the same
+                // receiver type, we cannot determine the return
+                // ConcreteType uniquely from name alone — return None so
+                // the downstream classifier surfaces unstamped.
+                if matches.len() == 1 {
+                    Some(matches.pop().unwrap())
+                } else {
+                    None
+                }
+            };
+        let method_returns =
+            |type_name: &str, method_name: &str| -> Option<shape_value::v2::ConcreteType> {
+                let func_name = find_trait_impl_default_suffix(type_name, method_name)?;
+                let idx = *name_to_idx.get(&func_name)?;
+                let ct = returns_vec.get(idx)?;
+                if matches!(ct, shape_value::v2::ConcreteType::Void) {
+                    None
+                } else {
+                    Some(ct.clone())
+                }
+            };
+
         // Re-run top-level conduit with the callee-return resolver so the
         // `let r = divide(10, 2)` slot picks up `Result(I64, String)` from
         // the Call terminator. (The first run above stamped `Void` for
-        // Call destinations since no resolver was available.)
+        // Call destinations since no resolver was available.) The
+        // method-returns resolver is also threaded so `t.name()`-style
+        // trait-method dispatch destinations pick up the trait's declared
+        // return ConcreteType.
         if let Some(ref mir_data) = self.program.top_level_mir {
             let concrete_types =
-                crate::compiler::helpers::infer_top_level_concrete_types_from_mir_with_returns(
+                crate::compiler::helpers::infer_top_level_concrete_types_from_mir_with_resolvers(
                     &mir_data.mir,
                     Some(&callee_returns),
+                    Some(&method_returns),
                 );
             self.program.top_level_local_concrete_types = concrete_types;
         }
@@ -1550,9 +1626,10 @@ impl BytecodeCompiler {
         for func in &self.program.functions {
             if let Some(ref mir_data) = func.mir_data {
                 per_fn.push(
-                    crate::compiler::helpers::infer_top_level_concrete_types_from_mir_with_returns(
+                    crate::compiler::helpers::infer_top_level_concrete_types_from_mir_with_resolvers(
                         &mir_data.mir,
                         Some(&callee_returns),
+                        Some(&method_returns),
                     ),
                 );
             } else {
