@@ -2030,6 +2030,125 @@ trajectory expansion holds: Round 12 absorbs T1/T2/T3/T4/T5 (4 sub-clusters
 if T2 and T3 merge). Cluster-0 close attempt projected for post-Round-12
 merge if all 4 kickoff smokes pass VM == JIT.
 
+## Round 12 — dispatching (JIT pair T1 + T2/T3 parallel) + T4 + T5 inline cite-audit
+
+Per supervisor's Option 4 ratification (2026-05-13): Round 12 dispatches
+the JIT pair in parallel from post-Round-11 baseline `b5d787ca`; T4 + T5
+get inline cite-audit by team-lead session, classification disposition
+folded into status before Round 13 dispatch.
+
+### Round 12 dispatch (parallel)
+
+| Sub-cluster | Branch | Worktree | Status |
+|---|---|---|---|
+| W12-jit-trait-dispatch-return-kind (T1) | `bulldozer-strictly-typed-w12-jit-trait-dispatch-return-kind` | `../shape-w12-jit-trait-dispatch-return-kind` | migrating |
+| W12-jit-string-carrier-unification (T2/T3) | `bulldozer-strictly-typed-w12-jit-string-carrier-unification` | `../shape-w12-jit-string-carrier-unification` | migrating |
+
+#### T1 scope (W12-jit-trait-dispatch-return-kind)
+
+JIT-side trait-dispatch return-kind inference. Surfaced by Round 11-trinity
+Part c — Aggregate path unblocked exposes the next-layer trait-dispatch
+return-kind classification. Similar shape to trinity Part (b)
+`parametric_method_return_kind_from_receiver`, extended to trait-method
+dispatch sites. Likely: extend `infer_call_return_kind` at the JIT MIR
+builder layer to consult the trait registry when the call resolves to a
+trait method, stamp destination slot NativeKind from the trait method's
+declared return type.
+
+Touch: `crates/shape-jit/src/mir_compiler/types.rs` (different region than
+T2/T3, but same file — coordinate AGENTS.md row + status doc subsection
+with T2/T3).
+
+Unblocks: kickoff Smoke 3 JIT (`t.name() → "x"`).
+
+#### T2/T3 scope (W12-jit-string-carrier-unification)
+
+Producer-side carrier migration for `MirConstant::Str` + TypedObject
+Aggregate lowering. Surface: `box_string(s)` at
+`crates/shape-jit/src/mir_compiler/ownership.rs:402-406` emits
+`UnifiedValue<Arc<String>>` NaN-box; §2.7.5 contract is raw
+`Arc::into_raw(Arc<String>) as u64`. VM-side handlers consume per §2.7.5
+→ UB/segfault at `s.add("a")` (Round 11D surfaced) + compile-time SURFACE
+at `print("hello")` (Round 8A surfaced).
+
+Fix shape: producer-side migration mirroring Round 7A Arc-shape Result/
+Option pattern. Single integrated commit (one agent integrates to avoid
+Arc-vs-NaN-box boundary disagreement, per Round 7A precedent). Also extend
+`retain_func_for_place` / `release_func_for_place` to dispatch new kinded
+`jit_arc_string_retain/_release` per Round 7A + Round 9 precedent. Also
+includes TypedObject Aggregate lowering (`box_typed_object` at
+`value_ffi.rs:516-518` returns `unified_box(HK_TYPED_OBJECT, ptr)` — same
+defect class).
+
+Touch: `crates/shape-jit/src/mir_compiler/ownership.rs` (box_string +
+retain/release arms) + `crates/shape-jit/src/ffi/value_ffi.rs`
+(box_typed_object migration) + new `crates/shape-jit/src/ffi/string.rs`
+(jit_arc_string_retain/_release) + FFI registration scaffolding +
+`crates/shape-jit/src/mir_compiler/types.rs` (kind-track propagation —
+different region than T1) + consumer-side updates per audit.
+
+Unblocks: kickoff Smoke 4 JIT (`Set + .add("a")`) + kickoff Smoke 3 JIT
+downstream (trait method returning String).
+
+### T4 + T5 inline cite-audit findings (team-lead session, 2026-05-13)
+
+**T4 — W17-vm-intrinsic-sum-wave-5d-migration**:
+
+- **Documented Phase-1B wave-5d residual**. The surface site at
+  `crates/shape-vm/src/executor/vm_impl/builtins.rs:472` is one of 6
+  related `phase-1b-vm wave 5d — intrinsic body migration` `todo!()`
+  blocks at lines 431, 449, 459, 467, 472, 518. Tracked at
+  `docs/cluster-audits/cluster-6-intrinsics-dispatch-table.md`
+  (BuiltinFunction::IntrinsicSum/Min/Max/Diff/Cumsum/RollingSum/CharCode
+  dispatch arms named at lines 34-101). The cluster-6 doc designs the
+  dispatch table; bodies remain `todo!()`.
+- **Blocks kickoff Smoke 2 VM** (`[1,2,3].sum()` and `.map(...).sum()`
+  both fire the IntrinsicSum `todo!()`).
+- **Disposition (b)** per supervisor's classification rule: real new
+  finding (the body itself is missing, even if the dispatch table is
+  documented) AND blocks kickoff smoke → cluster-0 absorbs for Round 13
+  regardless of thematic lineage. Same Q2 ruling as 11A's op_new_array
+  Phase 2c reentry.
+
+**T5 — W17-vm-call-value-closure-kind-mismatch**:
+
+- **NOT absorbed by Round 7B / 8B**. Both prior rounds were audit-only
+  closes (Round 7B `7753d52b` audit `W12-jit-collection-typed-arc-ffi`;
+  Round 8B `ba09636b` audit `W12-jit-collection-method-dispatch-abi`).
+  Neither closed call-value closure-kind plumbing.
+- **Error string** at `crates/shape-vm/src/executor/call_convention.rs:
+  444-449` (in `resolve_spawned_task`) + the same surface pattern at
+  `:798` (in `call_value_immediate_nb`) per Round 11A close report.
+  §2.7.11/Q12 value-call ABI machinery; producer-side mis-labeling.
+- **Blocks kickoff Smoke 2 full VM** (`xs.map(|x|x*2)` closure call).
+- **Disposition (b)** per supervisor's classification rule: real new
+  finding (not absorbed by existing tracked work) AND blocks kickoff
+  smoke → cluster-0 absorbs for Round 13. Audit-first dispatch shape
+  per supervisor's instruction (kind-source bug needs scope verification
+  before fix shape).
+
+### Round 13 projected dispatch
+
+After Round 12 merges:
+- T4 (W17-vm-intrinsic-sum-wave-5d-migration) — scope-narrowed to ONLY
+  `BuiltinFunction::IntrinsicSum` body migration (not the broader wave-5d
+  set, to avoid scope explosion). Other wave-5d todo!() blocks remain
+  documented Phase-1B residual unless they block kickoff smokes.
+- T5 (W17-vm-call-value-closure-kind-mismatch) — AUDIT-FIRST. The
+  producer-side mis-labeling source needs identification before fix shape
+  commits to call-convention.rs or upstream.
+
+If Round 12 surfaces additional gaps, Round 14+ per N+1 trajectory.
+Cluster-0 close attempt post-Round-13 if all 4 kickoff smokes VM == JIT.
+
+### Discipline note
+
+Per supervisor's Round-12 ratification: classification determines
+bookkeeping, NOT whether the work happens. "T4 is documented Phase-1B
+wave-5d so cluster-0 closes with documented exception" framing refused
+on sight when the gap blocks the kickoff matrix — same Q2 disposition,
+refused upfront.
+
 ## Cluster-0 close gate
 
 Per phase-3-kickoff-prompt §"Cluster-0 sub-cluster sequencing":
