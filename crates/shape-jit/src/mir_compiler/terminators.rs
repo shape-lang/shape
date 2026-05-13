@@ -315,6 +315,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         } else {
                             self.compile_operand_raw(&args[0])?
                         };
+                        use shape_value::heap_value::HeapKind;
                         use shape_vm::type_tracking::NativeKind;
                         match kind_hint {
                             Some(
@@ -361,10 +362,30 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                                 };
                                 self.builder.ins().call(self.ffi.print_bool, &[coerced]);
                             }
-                            _ => {
-                                // Kind-blind fallback. Operands flowing here
-                                // are heap-shaped or unresolved — the
-                                // kind-source gap §2.7.5 follow-up.
+                            // ── Heap-arm kinded dispatch (§2.7.5 carriers) ──
+                            // W12-jit-print-heap-arm-classification
+                            // (Phase 3 cluster-0 Round 8A, 2026-05-13):
+                            // ADR-006 §2.7.5 stamp-at-compile-time. The
+                            // operand's `NativeKind` is proven at MIR-
+                            // emit time (via `operand_slot_kind`'s
+                            // producing-site classification); route to
+                            // the matching kinded FFI entry that reads
+                            // the typed `Arc<T>` payload directly. The
+                            // FFI bodies take `(ctx_ptr, bits)` and
+                            // delegate to the canonical VM-side
+                            // `ValueFormatter::format_kinded` for
+                            // VM == JIT identical output. No NaN-box tag
+                            // decode, no `is_heap_kind` probe — kind IS
+                            // the discriminator (§2.7.7 #4 / #7).
+                            //
+                            // The Option / Result arms below match the
+                            // Round 7A `jit_v2_make_option_*` /
+                            // `_make_result_*` producer-site Arc-shape
+                            // carrier per §2.7.17 — `Arc::into_raw(Arc<
+                            // OptionData|ResultData>) as u64` with the
+                            // matching `Ptr(HeapKind::Option|Result)`
+                            // kind label.
+                            Some(NativeKind::Ptr(HeapKind::Option)) => {
                                 let val_ty = self.builder.func.dfg.value_type(val);
                                 let widened = if val_ty == types::I64 {
                                     val
@@ -372,14 +393,222 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                                     self.builder
                                         .ins()
                                         .bitcast(types::I64, MemFlags::new(), val)
-                                } else if val_ty == types::I32 {
-                                    self.builder.ins().sextend(types::I64, val)
-                                } else if val_ty == types::I8 {
-                                    self.builder.ins().uextend(types::I64, val)
                                 } else {
                                     val
                                 };
-                                self.builder.ins().call(self.ffi.print, &[widened]);
+                                self.builder.ins().call(
+                                    self.ffi.print_option,
+                                    &[self.ctx_ptr, widened],
+                                );
+                            }
+                            Some(NativeKind::Ptr(HeapKind::Result)) => {
+                                let val_ty = self.builder.func.dfg.value_type(val);
+                                let widened = if val_ty == types::I64 {
+                                    val
+                                } else if val_ty == types::F64 {
+                                    self.builder
+                                        .ins()
+                                        .bitcast(types::I64, MemFlags::new(), val)
+                                } else {
+                                    val
+                                };
+                                self.builder.ins().call(
+                                    self.ffi.print_result,
+                                    &[self.ctx_ptr, widened],
+                                );
+                            }
+                            // ── Carrier-mismatch surface-and-stop ──────
+                            // ADR-006 §2.7.5 carrier-shape audit
+                            // (W12-jit-result-carrier-unification, the
+                            // cluster-1 candidate Round 6A surfaced as
+                            // site (a)): the operand's `NativeKind` is
+                            // stamped (`NativeKind::String` for string
+                            // literals via `MirConstant::Str`,
+                            // `NativeKind::Ptr(HeapKind::TypedObject)`
+                            // for struct locals), but the JIT-side
+                            // producer stores the bits in the legacy
+                            // NaN-box UnifiedValue carrier shape
+                            // (`box_string` returns `unified_box(HK_
+                            // STRING, Arc<String>)` per `value_ffi.rs:
+                            // 535`; `box_typed_object` returns
+                            // `unified_box(HK_TYPED_OBJECT, *const u8)`
+                            // per `value_ffi.rs:516`). The §2.7.5
+                            // carrier contract for those kind labels is
+                            // raw `Arc::into_raw(Arc<T>) as u64`
+                            // pointers — NOT NaN-box-wrapped pointers.
+                            // Dispatching to `jit_print_str` /
+                            // `jit_print_typed_object` (which read
+                            // `*const String` / `*const TypedObject
+                            // Storage` directly per §2.7.17) would
+                            // dereference NaN-box header bits as a
+                            // payload pointer and segfault.
+                            //
+                            // The Round 7A trinity (§2.7.17 Result/Option
+                            // Arc-shape producers) is the matching
+                            // pattern: it MIGRATED the JIT-side producer
+                            // off `box_ok` / `box_some` (legacy NaN-box)
+                            // to `jit_v2_make_result_ok` /
+                            // `jit_v2_make_option_some` (Arc-shape).
+                            // The String / TypedObject producers
+                            // (`MirConstant::Str` lowering, struct
+                            // `Aggregate` lowering) need the same
+                            // producer-side migration — that's the
+                            // cluster-1 `W12-jit-result-carrier-
+                            // unification` scope (generalized to all
+                            // §2.7.5 heap carriers).
+                            //
+                            // Until that migration lands, surface-and-
+                            // stop is the only acceptable response per
+                            // §2.7.7 #4 / #7 forbidden list — the
+                            // deleted W-series tag_bits dispatch and
+                            // the W-series Bool-default rationalization
+                            // both refused on sight per CLAUDE.md.
+                            Some(NativeKind::String)
+                            | Some(NativeKind::Ptr(HeapKind::TypedObject)) => {
+                                if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
+                                    eprintln!(
+                                        "[jit-mir] print: SURFACE §2.7.5 carrier-\
+                                         mismatch — operand NativeKind {:?} is \
+                                         stamped, but the JIT-side producer for \
+                                         this kind label stores the bits in the \
+                                         legacy NaN-box UnifiedValue carrier \
+                                         (`box_string` / `box_typed_object`), \
+                                         NOT the §2.7.5 `Arc::into_raw(Arc<T>) as \
+                                         u64` carrier the matching kinded print \
+                                         body expects. Same defect class as \
+                                         Round 6A site (a) for Result/Option, \
+                                         which Round 7A's trinity resolved by \
+                                         migrating the JIT producers to Arc-\
+                                         shape (`jit_v2_make_result_ok` / \
+                                         `jit_v2_make_option_some`). The \
+                                         String / TypedObject producer \
+                                         migration is the cluster-1 \
+                                         `W12-jit-result-carrier-unification` \
+                                         scope (generalized to all §2.7.5 heap \
+                                         carriers).",
+                                        kind_hint,
+                                    );
+                                }
+                                return Err(format!(
+                                    "Route A surface-and-stop: SURFACE §2.7.5 \
+                                     carrier-mismatch — `print` Call-terminator \
+                                     operand NativeKind is {:?}, kind label \
+                                     stamped correctly but the JIT-side \
+                                     producer stores the bits in the legacy \
+                                     NaN-box UnifiedValue carrier shape (per \
+                                     `value_ffi.rs::box_string` / \
+                                     `box_typed_object`), NOT the §2.7.5 / \
+                                     §2.7.17 `Arc::into_raw(Arc<T>) as u64` \
+                                     carrier the matching kinded print body \
+                                     (`jit_print_str` / `jit_print_typed_\
+                                     object`) reads. Cluster-1 candidate \
+                                     `W12-jit-result-carrier-unification` \
+                                     (Round 6A site (a), generalized): \
+                                     migrate `MirConstant::Str` and struct \
+                                     Aggregate lowering to Arc-shape \
+                                     producers, then enable the dispatch \
+                                     arm. Same migration shape as Round 7A's \
+                                     `jit_v2_make_result_ok` / \
+                                     `jit_v2_make_option_some` for §2.7.17. \
+                                     Per CLAUDE.md \"Forbidden \
+                                     rationalizations\" + §2.7.7 #4 / #7, \
+                                     the deleted W-series tag_bits \
+                                     dispatch and the W-series Bool-\
+                                     default rationalization both \
+                                     refused on sight at the FFI \
+                                     boundary.",
+                                    kind_hint,
+                                ));
+                            }
+                            // ── NotImplemented(SURFACE): unproven kind /
+                            //    unwired heap arm ─────────────────────
+                            //
+                            // ADR-006 §2.7.5 / §2.7.7 #4 / #7. The kind-
+                            // blind `jit_print` fallback (which routed
+                            // through the deleted-W-series
+                            // `format_value_word` per `ffi/conversion.
+                            // rs` lines 200-217) was retired in Round 8A
+                            // verification (2026-05-13). Round 7A's
+                            // smoke 1.5 close depended on this fallback
+                            // because `infer_enum_payload_kind` used
+                            // the scalar-only `elem_slot_kind_for_
+                            // concrete` classifier, leaving `Err(String)`
+                            // / `Some(typed_object)` payload slots
+                            // without a kind stamp. Round 8A
+                            // verification extended that classifier to
+                            // the full `native_kind_from_concrete_type`
+                            // mapping (per §2.7.17 receiver-recovery
+                            // soundness — `jit_arc_*_payload` returns
+                            // the inner `KindedSlot.slot.raw()`
+                            // verbatim, preserving the §2.7.5 carrier
+                            // shape for every NativeKind variant). With
+                            // that extension the kinded arms above
+                            // catch every EnumPayload-derived print
+                            // operand on Smoke 1.5 — both Ok(I64) and
+                            // Err(String) reach their matching kinded
+                            // entry.
+                            //
+                            // Remaining `_`-arm operands are either:
+                            // - kind-source gaps upstream of the print
+                            //   site (the §2.7.5 conduit doesn't yet
+                            //   stamp every MIR shape — e.g. closure-
+                            //   return locals without `concrete_types`
+                            //   propagation), or
+                            // - heap arms beyond {Option, Result,
+                            //   String, TypedObject} not yet wired with
+                            //   per-kind FFI bodies (TypedArray,
+                            //   HashMap, HashSet, ...).
+                            //
+                            // Both are honest surface-and-stop cases.
+                            // No tag-decode, no Bool-default fallback
+                            // per CLAUDE.md "Forbidden rationalizations"
+                            // + "Renames to refuse on sight". The
+                            // pre-Round-8A "preserved baseline"
+                            // rationalization was itself the W-series
+                            // walk-back the supervisor refuses on
+                            // sight (CLAUDE.md "Just a small fallback
+                            // for this one edge case" / "Mark this as
+                            // a follow-up for a later phase").
+                            _ => {
+                                if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
+                                    eprintln!(
+                                        "[jit-mir] print: SURFACE §2.7.5 \
+                                         — operand NativeKind not proven \
+                                         ({:?}) or unwired heap arm. \
+                                         ADR-006 §2.7.5 / §2.7.7 #4 / \
+                                         #7 — extend producer-site \
+                                         classification at the upstream \
+                                         MIR shape (the §2.7.5 conduit's \
+                                         producing-site walk) or wire \
+                                         the kinded FFI body for the \
+                                         heap kind. No kind-blind \
+                                         fallback per CLAUDE.md \
+                                         \"Forbidden rationalizations\".",
+                                        kind_hint,
+                                    );
+                                }
+                                return Err(format!(
+                                    "Route A surface-and-stop: \
+                                     NotImplemented(SURFACE) — \
+                                     `print` Call-terminator operand \
+                                     NativeKind is {:?}; either the \
+                                     §2.7.5 producer-site \
+                                     classification conduit doesn't \
+                                     stamp this operand's kind at the \
+                                     upstream MIR shape (extend \
+                                     `infer_*_kind` for that shape per \
+                                     §2.7.5 / §2.7.7 #4), or the heap \
+                                     arm isn't wired with a per-kind \
+                                     `jit_print_<heap_kind>` FFI body. \
+                                     The pre-Round-8A kind-blind \
+                                     `jit_print` fallback was retired \
+                                     in Round 8A verification per \
+                                     CLAUDE.md \"Forbidden \
+                                     rationalizations\" (\"just a small \
+                                     fallback for this one edge case\" \
+                                     refused on sight).",
+                                    kind_hint,
+                                ));
                             }
                         }
 

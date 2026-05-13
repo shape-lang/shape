@@ -10,8 +10,9 @@ use cranelift_module::{FuncId, Linkage, Module};
 use std::collections::HashMap;
 
 use super::super::ffi::conversion::{
-    jit_print, jit_print_bool, jit_print_f64, jit_print_i64, jit_string_concat, jit_to_number,
-    jit_to_string, jit_type_check, jit_typeof,
+    jit_print_bool, jit_print_f64, jit_print_i64, jit_print_option,
+    jit_print_result, jit_print_str, jit_print_typed_object, jit_string_concat,
+    jit_to_number, jit_to_string, jit_type_check, jit_typeof,
 };
 #[allow(deprecated)]
 use super::super::ffi::object::{
@@ -138,7 +139,12 @@ pub fn register_object_symbols(builder: &mut JITBuilder) {
         "jit_arc_option_release",
         super::super::ffi::result::jit_arc_option_release as *const u8,
     );
-    builder.symbol("jit_print", jit_print as *const u8);
+    // `jit_print` (kind-blind) symbol DELETED — see ffi/conversion.rs
+    // header comment. The MIR-side Call-terminator dispatch surfaces-
+    // and-stops on `_` arm rather than routing through the deleted
+    // W-series shape (W12-jit-print-heap-arm-classification reopen,
+    // 2026-05-13).
+    //
     // W11-jit-new-array (ADR-006 §2.7.5 stamp-at-compile-time): per-kind
     // print entry points dispatched by the MIR-side print emitter when
     // the operand's `NativeKind` is statically known. Replaces the
@@ -147,6 +153,22 @@ pub fn register_object_symbols(builder: &mut JITBuilder) {
     builder.symbol("jit_print_i64", jit_print_i64 as *const u8);
     builder.symbol("jit_print_f64", jit_print_f64 as *const u8);
     builder.symbol("jit_print_bool", jit_print_bool as *const u8);
+    // W12-jit-print-heap-arm-classification (Phase 3 cluster-0 Round 8A,
+    // 2026-05-13): per-HeapKind kinded print entries. ADR-006 §2.7.5
+    // stamp-at-compile-time — the MIR-side Call-terminator print dispatch
+    // routes to these when the operand `NativeKind` is a heap arm
+    // (`String` / `Ptr(HeapKind::TypedObject)` / `Ptr(HeapKind::Option)` /
+    // `Ptr(HeapKind::Result)`). Each reads typed `*const T` field
+    // projections, no NaN-box tag decode, no `is_heap_kind` probe
+    // (§2.7.7 #4 / #7 forbidden). Routes through `ValueFormatter::
+    // format_kinded` so VM == JIT identical output.
+    builder.symbol("jit_print_str", jit_print_str as *const u8);
+    builder.symbol(
+        "jit_print_typed_object",
+        jit_print_typed_object as *const u8,
+    );
+    builder.symbol("jit_print_option", jit_print_option as *const u8);
+    builder.symbol("jit_print_result", jit_print_result as *const u8);
     builder.symbol("jit_make_closure", jit_make_closure as *const u8);
     // Closure-spec Phase H2: TypedClosureHeader finalizer used by
     // `MirToIR::emit_heap_closure` to convert the raw typed block into a
@@ -665,15 +687,11 @@ pub fn declare_object_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<
         ffi_funcs.insert(name.to_string(), func_id);
     }
 
-    // jit_print(value_bits: u64) -> void
-    {
-        let mut sig = module.make_signature();
-        sig.params.push(AbiParam::new(types::I64)); // value_bits
-        let func_id = module
-            .declare_function("jit_print", Linkage::Import, &sig)
-            .expect("Failed to declare jit_print");
-        ffi_funcs.insert("jit_print".to_string(), func_id);
-    }
+    // `jit_print` (kind-blind) declare_function DELETED in
+    // W12-jit-print-heap-arm-classification reopen (2026-05-13). See
+    // `ffi/conversion.rs` header comment + the MIR-side Call-terminator
+    // dispatch's `_`-arm surface-and-stop.
+
 
     // W11-jit-new-array kinded print entries (ADR-006 §2.7.5).
     // jit_print_i64(value: i64) -> void
@@ -702,6 +720,57 @@ pub fn declare_object_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<
             .declare_function("jit_print_bool", Linkage::Import, &sig)
             .expect("Failed to declare jit_print_bool");
         ffi_funcs.insert("jit_print_bool".to_string(), func_id);
+    }
+
+    // W12-jit-print-heap-arm-classification (Phase 3 cluster-0 Round 8A,
+    // 2026-05-13): heap-arm kinded print entries (ADR-006 §2.7.5).
+    //
+    // Each takes `(ctx_ptr: *const JITContext, bits: u64)` — `ctx_ptr` is
+    // I64 carrying the JIT context pointer so the FFI body can resolve
+    // the type schema registry for TypedObject field-name rendering, and
+    // `bits` is the typed-Arc raw pointer (`Arc::into_raw(Arc<T>) as u64`).
+    // The kind is implicit in the chosen entry by §2.7.5 stamp-at-compile-
+    // time discipline; no kind-code parameter, no Bool-default fallback.
+    //
+    // jit_print_str(ctx_ptr: *const JITContext, bits: u64) -> void
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // ctx_ptr
+        sig.params.push(AbiParam::new(types::I64)); // bits (Arc<String>)
+        let func_id = module
+            .declare_function("jit_print_str", Linkage::Import, &sig)
+            .expect("Failed to declare jit_print_str");
+        ffi_funcs.insert("jit_print_str".to_string(), func_id);
+    }
+    // jit_print_typed_object(ctx_ptr: *const JITContext, bits: u64) -> void
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // ctx_ptr
+        sig.params.push(AbiParam::new(types::I64)); // bits (Arc<TypedObjectStorage>)
+        let func_id = module
+            .declare_function("jit_print_typed_object", Linkage::Import, &sig)
+            .expect("Failed to declare jit_print_typed_object");
+        ffi_funcs.insert("jit_print_typed_object".to_string(), func_id);
+    }
+    // jit_print_option(ctx_ptr: *const JITContext, bits: u64) -> void
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // ctx_ptr
+        sig.params.push(AbiParam::new(types::I64)); // bits (Arc<OptionData>)
+        let func_id = module
+            .declare_function("jit_print_option", Linkage::Import, &sig)
+            .expect("Failed to declare jit_print_option");
+        ffi_funcs.insert("jit_print_option".to_string(), func_id);
+    }
+    // jit_print_result(ctx_ptr: *const JITContext, bits: u64) -> void
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // ctx_ptr
+        sig.params.push(AbiParam::new(types::I64)); // bits (Arc<ResultData>)
+        let func_id = module
+            .declare_function("jit_print_result", Linkage::Import, &sig)
+            .expect("Failed to declare jit_print_result");
+        ffi_funcs.insert("jit_print_result".to_string(), func_id);
     }
 
     // jit_make_closure(ctx, func_idx, capture_count) -> u64

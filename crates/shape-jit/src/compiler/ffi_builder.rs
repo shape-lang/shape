@@ -81,11 +81,29 @@ impl JITCompiler {
             // dispatcher. Consumers that lack a kind source surface-and-stop
             // at JIT compile time per §2.7.5.
             //
-            // Print fallback + kinded entries (W11-jit-new-array)
-            print: r!("jit_print"),
+            // Kinded print entries (W11-jit-new-array scalar arms +
+            // W12-jit-print-heap-arm-classification heap arms). The
+            // kind-blind `r!("jit_print")` lookup DELETED in Round 8A
+            // reopen (2026-05-13).
             print_i64: r!("jit_print_i64"),
             print_f64: r!("jit_print_f64"),
             print_bool: r!("jit_print_bool"),
+            // W12-jit-print-heap-arm-classification (Phase 3 cluster-0
+            // Round 8A, 2026-05-13): heap-arm kinded print entries —
+            // ADR-006 §2.7.5 stamp-at-compile-time. The MIR-side
+            // Call-terminator dispatch in `mir_compiler/terminators.rs`
+            // routes the operand's `NativeKind` to the matching FuncRef
+            // (`String` → `print_str`, `Ptr(HeapKind::TypedObject)` →
+            // `print_typed_object`, `Ptr(HeapKind::Option)` →
+            // `print_option`, `Ptr(HeapKind::Result)` → `print_result`).
+            // Each entry takes `(ctx_ptr, bits)` so the FFI body can
+            // resolve the type schema registry for TypedObject field-
+            // name rendering and route through the canonical VM-side
+            // `ValueFormatter::format_kinded`.
+            print_str: r!("jit_print_str"),
+            print_typed_object: r!("jit_print_typed_object"),
+            print_option: r!("jit_print_option"),
+            print_result: r!("jit_print_result"),
 
             // Closure construction
             make_closure: r!("jit_make_closure"),
