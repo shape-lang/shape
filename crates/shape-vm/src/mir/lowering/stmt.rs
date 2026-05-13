@@ -119,6 +119,23 @@ pub(super) fn lower_var_decl(builder: &mut MirBuilder, decl: &ast::VariableDecl,
         };
 
         if let Some(init_expr) = &decl.value {
+            // ADR-006 §2.7.27 / W17-mutation-writeback: when the initializer
+            // is a recognized COW-container ctor (`Set()` / `HashMap()` /
+            // `Deque()` / `PriorityQueue()`), record the binding slot's
+            // container kind so a subsequent `s.add(...)` method call can
+            // emit the `Assign(receiver, Use(Move(temp)))` write-back. This
+            // mirrors the bytecode compiler's `mut_self_container_locals`
+            // tracking (see `compiler/statements.rs:4707` and
+            // `compiler/expressions/function_calls.rs:967`).
+            if let Expr::FunctionCall { name: ctor_name, .. } = init_expr {
+                if let Some(kind) =
+                    crate::compiler::mutation_writeback::ContainerKind::from_ctor_name(
+                        ctor_name,
+                    )
+                {
+                    builder.record_mut_self_container_local(slot, kind);
+                }
+            }
             // Determine operand based on ownership modifier
             let operand = match decl.ownership {
                 ast::OwnershipModifier::Move => {

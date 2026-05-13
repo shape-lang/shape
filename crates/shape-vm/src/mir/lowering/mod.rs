@@ -111,6 +111,14 @@ pub struct MirBuilder {
     /// Spans where lowering had to fall back to placeholder/Nop handling.
     /// Empty means clean lowering with no fallbacks.
     fallback_spans: Vec<Span>,
+    /// Per-local container-kind track mirroring the bytecode compiler's
+    /// `mut_self_container_locals` (ADR-006 §2.7.27 / W17-mutation-writeback).
+    /// Populated at let-binding time when the initializer is a recognised
+    /// COW-container ctor (`Set()` / `HashMap()` / `Deque()` /
+    /// `PriorityQueue()`); consumed at `Expr::MethodCall` lowering to decide
+    /// whether to emit the receiver write-back assignment after the call.
+    mut_self_container_locals:
+        HashMap<SlotId, crate::compiler::mutation_writeback::ContainerKind>,
 }
 
 #[derive(Debug)]
@@ -163,7 +171,31 @@ impl MirBuilder {
             exit_block: None,
             span,
             fallback_spans: Vec::new(),
+            mut_self_container_locals: HashMap::new(),
         }
+    }
+
+    /// Record a recognized COW-container kind for a binding slot. Called
+    /// from let-binding lowering when the initializer is a known ctor
+    /// (`Set()` / `HashMap()` / `Deque()` / `PriorityQueue()`). Read at
+    /// `Expr::MethodCall` lowering to gate the mut-self write-back per
+    /// ADR-006 §2.7.27.
+    pub(super) fn record_mut_self_container_local(
+        &mut self,
+        slot: SlotId,
+        kind: crate::compiler::mutation_writeback::ContainerKind,
+    ) {
+        self.mut_self_container_locals.insert(slot, kind);
+    }
+
+    /// Look up a recognized COW-container kind for a binding slot. Returns
+    /// `None` when the binding is not a tracked container (the standard
+    /// no-writeback path).
+    pub(super) fn lookup_mut_self_container_local(
+        &self,
+        slot: SlotId,
+    ) -> Option<crate::compiler::mutation_writeback::ContainerKind> {
+        self.mut_self_container_locals.get(&slot).copied()
     }
 
     /// Allocate a new local variable slot.
