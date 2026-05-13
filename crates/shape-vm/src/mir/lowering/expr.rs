@@ -89,6 +89,47 @@ pub(super) fn lower_expr_to_explicit_move_operand(
     }
 }
 
+/// ADR-006 §2.7.27 / W17-mutation-writeback: emit a receiver write-back
+/// after a mutating method call so the JIT (which compiles from MIR) sees
+/// the new Arc in the receiver slot on subsequent reads. Mirrors the
+/// bytecode compiler's `Dup; StoreLocal recv` pattern at
+/// `compiler/expressions/function_calls.rs:2356` — there the result also
+/// stays on the stack as the call's expression value; here the call's
+/// destination temp is already populated, so the writeback is the
+/// secondary `Assign(receiver_slot, Use(Move(temp)))`.
+///
+/// Gate: receiver must be `Expr::Identifier` resolving to a slot tracked
+/// in `mut_self_container_locals`, AND `method` must be in that kind's
+/// `MUT_SELF_*` set. Interior-mutability primitives (Mutex / Atomic /
+/// Lazy / Channel) are not registered, so this returns without emitting.
+pub(super) fn emit_mut_self_writeback_if_needed(
+    builder: &mut MirBuilder,
+    receiver: &Expr,
+    method: &str,
+    temp: SlotId,
+    span: Span,
+) {
+    let Expr::Identifier(name, _) = receiver else {
+        return;
+    };
+    let Some(slot) = builder.lookup_local(name) else {
+        return;
+    };
+    let Some(kind) = builder.lookup_mut_self_container_local(slot) else {
+        return;
+    };
+    if !kind.is_mut_self_method(method) {
+        return;
+    }
+    builder.push_stmt(
+        StatementKind::Assign(
+            Place::Local(slot),
+            Rvalue::Use(Operand::Move(Place::Local(temp))),
+        ),
+        span,
+    );
+}
+
 pub(super) fn lower_expr_as_moved_operand(builder: &mut MirBuilder, expr: &Expr) -> Operand {
     if let Some(place) = lower_expr_to_place(builder, expr) {
         // Use Copy for named variables (identifiers, property accesses, index accesses)
@@ -1824,6 +1865,7 @@ pub(crate) fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotI
             );
             let func_op = Operand::Constant(MirConstant::Method(method.clone()));
             builder.emit_call(func_op, arg_ops, Place::Local(temp), span);
+            emit_mut_self_writeback_if_needed(builder, receiver, method, temp, span);
         }
         Expr::Range { start, end, .. } => {
             let mut operands = Vec::new();
@@ -2040,6 +2082,7 @@ fn lower_pipe_expr(
             arg_ops.extend(named_args.iter().map(|(_, expr)| lower_expr_as_moved_operand(builder, expr)));
             let func_op = Operand::Constant(MirConstant::Method(method.clone()));
             builder.emit_call(func_op, arg_ops, Place::Local(temp), span);
+            emit_mut_self_writeback_if_needed(builder, receiver, method, temp, span);
         }
         Expr::Identifier(name, _) => {
             // W12-collection-constructor-mir-lowering: Site 3 of 3 —

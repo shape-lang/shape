@@ -1744,7 +1744,7 @@ Supervisor ratified Option 3: integrated trinity (11B+11C+11E) +
 | Sub-cluster | Branch | Status |
 |---|---|---|
 | W12-vm-new-array-untyped-construction (11A) | `bulldozer-strictly-typed-w12-vm-new-array-untyped-construction` | auditing |
-| W17-mir-mutation-writeback (11D) | `bulldozer-strictly-typed-w17-mir-mutation-writeback` | migrating (bounded ~30 LoC) |
+| W17-mir-mutation-writeback (11D) | `bulldozer-strictly-typed-w17-mir-mutation-writeback` | **closed 2026-05-13** (92 LoC; Deque/PQ JIT 0→2; HashSet/HashMap blocked by surfaced JIT string-carrier shape gap, independent of writeback) |
 | W12-jit-producing-site-conduit-completeness (trinity 11B+11C+11E) | `bulldozer-strictly-typed-w12-jit-producing-site-conduit-completeness` | migrating (~800-1000 LoC) |
 
 ### 11A scope (W12-vm-new-array-untyped-construction)
@@ -1794,6 +1794,126 @@ now, harden later" in disguise (CLAUDE.md "Forbidden rationalizations"
 
 Unblocks: kickoff Smoke 4 + HashMap mutating smoke + every
 mutating-collection-method smoke.
+
+### W17-mir-mutation-writeback close (2026-05-13)
+
+**Closed**: Phase 3 cluster-0 Round 11D. MIR builder writeback for
+mutating method calls landed per ADR-006 §2.7.27 base, mirroring the
+bytecode compiler's `Dup; StoreLocal recv` pattern
+(`crates/shape-vm/src/compiler/expressions/function_calls.rs:2356`) at
+the MIR layer.
+
+**Audit (§1-§4, completed before code edit)**:
+
+- §1 Predicate identification — `is_mut_self_method_name` exists at
+  `crates/shape-vm/src/executor/objects/method_registry.rs:151` as the
+  liberal name-only classifier ("write-back is harmless when actual
+  receiver kind is pure" per the docstring at line 140-148). However,
+  this is unsafe at the MIR layer: `let dt = DateTime(...); dt.add(period)`
+  would emit `Assign(Place::Local(dt_slot), Use(Move(temp)))` and
+  `compute_mutability_errors` at `mir/lowering/mod.rs:603-628` would
+  flag the assignment as a mutability error on the immutable `dt`
+  binding. Receiver-kind narrowing via the bytecode compiler's
+  `mut_self_container_locals` / `ContainerKind::is_mut_self_method`
+  pattern is required.
+- §2 MIR emission site — two `Expr::MethodCall` sites in
+  `mir/lowering/expr.rs` (line ~1806 standalone form + line ~2027 pipe
+  form). After `builder.emit_call(...)` terminates the current block
+  and starts the continuation block, the writeback `Assign` is emitted
+  there.
+- §3 Arc-COW semantics — verified for all 5 covered kinds (HashSet /
+  HashMap / Deque / PriorityQueue / Array). Their mut-self handlers
+  call `Arc::make_mut(&mut arc)` and return the (possibly-cloned)
+  Arc; the writeback safely overwrites the receiver slot with the new
+  Arc. Interior-mutability primitives (Mutex / Atomic / Lazy / Channel)
+  are NOT registered in any `MUT_SELF_*_METHODS` PHF set — the
+  receiver-kind narrowing returns `None` for these and no writeback
+  is emitted (Arc identity preserved through interior mutability per
+  `mutation_writeback.rs:27-33`).
+- §4 Scope — ~30 LoC mechanical budget held. Total file diff is 92 LoC
+  including docstrings and the `MirBuilder` helper methods
+  (`record_mut_self_container_local` / `lookup_mut_self_container_local`).
+  Core mechanical change is ~25-27 LoC: field + init + 2 helpers + 8
+  LoC ctor-name detection in `lower_var_decl` + ~22 LoC writeback
+  emitter helper + 2 LoC of MethodCall-site invocations.
+
+**Fix shape** (3 files):
+
+- `mir/lowering/mod.rs`: new `MirBuilder::mut_self_container_locals:
+  HashMap<SlotId, ContainerKind>` field + `record_mut_self_container_local`
+  / `lookup_mut_self_container_local` helper methods.
+- `mir/lowering/stmt.rs::lower_var_decl`: when initializer AST is
+  `Expr::FunctionCall { name: ctor_name, .. }` and
+  `ContainerKind::from_ctor_name(ctor_name).is_some()`, call
+  `builder.record_mut_self_container_local(slot, kind)` before lowering
+  the init expression.
+- `mir/lowering/expr.rs`: new `emit_mut_self_writeback_if_needed`
+  helper — for `Expr::Identifier(name, _)` receivers resolving via
+  `builder.lookup_local(name)` to a slot tracked in
+  `mut_self_container_locals`, emit
+  `Assign(Place::Local(slot), Rvalue::Use(Operand::Move(Place::Local(temp))))`
+  after the call when `kind.is_mut_self_method(method)` matches.
+  Invoked at both `Expr::MethodCall` lowering sites (standalone +
+  pipe form).
+
+**Smoke results** (VM ↔ JIT after fix):
+
+| Smoke | VM | JIT (baseline) | JIT (post-fix) |
+|---|---|---|---|
+| Deque `pushBack`×2 + `size` | `2` ✓ | `0` (silent fail) | `2` ✓ |
+| PriorityQueue `push`×2 + `size` | `2` ✓ | `0` (silent fail) | `2` ✓ |
+| HashSet `add`×2 + `size` (Smoke 4) | `2` ✓ | segfault | segfault (NOT writeback-related — see surfaced gap) |
+| HashMap `set` + `size` | works | crash | crash (same independent JIT bug as Smoke 4) |
+
+Deque and PriorityQueue prove the MIR writeback fix works end-to-end:
+JIT goes from silent-fail (stale receiver Arc on second access) to
+correct output. These collections take non-string args (`pushBack(1)`,
+`push(3)`) so they don't trip the secondary blocker described next.
+
+**Surfaced gap (independent of writeback)** —
+**W17-jit-string-constant-carrier-shape** (NEW). HashSet/HashMap JIT
+segfaults reproduce identically WITHOUT my writeback fix (verified by
+`git stash` + re-run) — the crash happens at the very FIRST `s.add("a")`
+call, before any second access could matter. Root cause is a JIT-side
+string-carrier shape mismatch:
+
+- `mir_compiler/ownership.rs:402-406` lowers `MirConstant::Str("a")` via
+  `box_string(s)` which produces a unified-heap `UnifiedValue<Arc<String>>`
+  NaN-box.
+- `mir_compiler/rvalues.rs:309-313` labels the kind track entry for
+  `MirConstant::Str(_)` as `NativeKind::String` — the strict-typed
+  `Arc<String>::into_raw` raw-pointer carrier per the docstring at
+  `rvalues.rs:307-310` ("Method-name string constant... carrier kind
+  is String — the §2.7.5 String arm — `Arc<String>` raw pointer
+  carrier").
+- VM-side string-method handlers (e.g. `set_methods.rs:136-155::result_slot_to_string_arc`)
+  consume via `Arc::from_raw(bits as *const String)` — reading the
+  unified-heap `UnifiedValue<Arc<String>>` layout as a raw String
+  Arc → UB / segfault / `slice::from_raw_parts requires the pointer to
+  be aligned and non-null` panic.
+
+This is a §2.7.5 producer-site carrier-shape gap orthogonal to MIR
+mutation-writeback. The two paths are wired separately: writeback is
+about whether the receiver slot picks up the new Arc after the call;
+this gap is about whether the call sees a valid string key in the
+first place. The HashSet/HashMap segfaults occur before any writeback
+opportunity, so writeback is not the load-bearing fix for those
+specific smokes — it is the load-bearing fix for the broader class
+of "mutating method calls on collection locals". Folds under a NEW
+follow-up `W17-jit-string-constant-carrier-shape` row, or is naturally
+absorbed by `W17-collection-concrete-types` if that scope extends to
+JIT string-carrier alignment.
+
+**Close gates**:
+
+- `cargo check --workspace --lib --tests` EXIT=0 inside devenv.
+- `cargo test -p shape-jit --lib` 361 passed 0 failed (== baseline 361).
+- `bash scripts/check-no-dynamic.sh` EXIT=0.
+- `bash scripts/verify-merge.sh` 12/12 inside devenv.
+- Pre-existing `cargo test -p shape-vm --lib` SIGABRT at
+  `compiler::comptime::tests::w17_comptime_*` reproduces identically
+  at branch HEAD without my changes (v2-raw-heap aliasing class per
+  CLAUDE.md Known Constraints — out of scope for W17-mir-mutation-writeback).
 
 ### Trinity scope (W12-jit-producing-site-conduit-completeness)
 
