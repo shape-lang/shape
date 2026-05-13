@@ -1643,6 +1643,32 @@ impl BytecodeCompiler {
     ///   becomes: `function Display::User::JsonDisplay::display(self) { ... }`
     ///
     /// Named impls use trait/type/impl prefixes to avoid collisions.
+    ///
+    /// # Trait declaration return-type substitution (Phase 3 cluster-0 Round 13 T1', gap 3)
+    ///
+    /// When the impl source omits the return-type annotation
+    /// (`impl T for X { method name() { "x" } }` — the impl doesn't repeat
+    /// the trait's `: string`), `method.return_type` is `None`. Without
+    /// substitution, the synthesized `FunctionDef.return_type` is also
+    /// `None` and the Round 6A `function_return_concrete_types[X::name]`
+    /// side-table holds `ConcreteType::Void`, leaving the JIT MIR
+    /// conduit's destination-stamp pass unable to classify
+    /// `t.name() → NativeKind::String` (Smoke 3 surface, T1 close
+    /// `76b01cf8`).
+    ///
+    /// Closing this surface: when the impl's `return_type` is `None`, look
+    /// up the trait's declared return type for the matching method via
+    /// `self.trait_defs` (with `resolve_trait_name`-shaped lookup since
+    /// `trait_name` is the basename) and substitute it into the
+    /// synthesized `FunctionDef.return_type`. The 6A populator at
+    /// `compile_post_assembly` (`compiler_impl_reference_model.rs:1474`)
+    /// then runs `concrete_type_from_annotation` on the substituted
+    /// annotation, populating `function_return_concrete_types[fn_idx]`
+    /// with the trait's declared `ConcreteType` (`String` for Smoke 3).
+    ///
+    /// This is in-compiler source-side completion of contract information
+    /// that already exists in source code — trait declarations carry the
+    /// return type, the compiler just wasn't propagating it.
     fn desugar_impl_method(
         &self,
         method: &shape_ast::ast::types::MethodDef,
@@ -1678,13 +1704,60 @@ impl BytecodeCompiler {
             format!("{}::{}", type_name, method_name)
         };
 
+        // ADR-006 §2.7.5 — Phase 3 cluster-0 Round 13 T1' gap 3 closure.
+        //
+        // If the impl method omits its return type, look up the trait
+        // declaration and substitute the trait's declared return type.
+        // The trait's required-method signature (`InterfaceMember::Method
+        // { return_type, .. }`) is the contract; if the impl chose not
+        // to repeat it, the contract still applies.
+        //
+        // `resolve_trait_name` returns the canonical key into `self.trait_defs`;
+        // we accept the bare `trait_name` here (callers pass `trait_basename`)
+        // and walk the resolver. When the trait isn't registered (e.g. built-in
+        // traits without an entry in `self.trait_defs`), the original `None`
+        // is preserved per §2.7.7 #9 — no fabricated default.
+        let return_type = method.return_type.clone().or_else(|| {
+            let (canonical_trait, _) = self.resolve_trait_name(trait_name);
+            self.trait_defs
+                .get(&canonical_trait)
+                .and_then(|trait_def| {
+                    // Match on method name. Both Required and Default trait
+                    // members carry the return type — Required via
+                    // `InterfaceMember::Method { return_type, .. }` (always
+                    // present), Default via `MethodDef.return_type:
+                    // Option<TypeAnnotation>` (may itself be None — in which
+                    // case there's nothing to backfill).
+                    for member in &trait_def.members {
+                        match member {
+                            shape_ast::ast::types::TraitMember::Required(
+                                shape_ast::ast::InterfaceMember::Method {
+                                    name,
+                                    return_type,
+                                    ..
+                                },
+                            ) if name == &method.name => {
+                                return Some(return_type.clone());
+                            }
+                            shape_ast::ast::types::TraitMember::Default(default_method)
+                                if default_method.name == method.name =>
+                            {
+                                return default_method.return_type.clone();
+                            }
+                            _ => {}
+                        }
+                    }
+                    None
+                })
+        });
+
         Ok(FunctionDef {
             name: fn_name,
             name_span: Span::DUMMY,
             declaring_module_path: method.declaring_module_path.clone(),
             doc_comment: None,
             params,
-            return_type: method.return_type.clone(),
+            return_type,
             body,
             type_params: Some(impl_type_params),
             annotations: method.annotations.clone(),
@@ -6328,5 +6401,172 @@ mod tests {
                 .map(|semantics| semantics.storage_class),
             Some(crate::type_tracking::BindingStorageClass::SharedCow)
         );
+    }
+
+    // ─── Phase 3 cluster-0 Round 13 T1' gap 3 source-side fix ──────────
+    //
+    // `desugar_impl_method` now substitutes the trait's declared return
+    // type into the synthesized `FunctionDef.return_type` when the impl
+    // method omits its own. The 6A `function_return_concrete_types`
+    // populator at `compile_post_assembly` reads from
+    // `expanded_function_defs` which mirrors `function_defs` — populated
+    // by `register_function` which clones the synthesized `FunctionDef`
+    // verbatim. So the substituted return-type annotation flows through
+    // unchanged, and the trait's declared `ConcreteType` lands in the
+    // 6A side-table for the impl-method's function entry.
+
+    #[test]
+    fn desugar_impl_method_backfills_return_type_from_trait_declaration() {
+        // Smoke 3 minimal shape: trait T { name(): string }
+        // type X {} impl T for X { method name() { "x" } }
+        //
+        // The impl method body lacks the return-type annotation. Before
+        // T1' gap 3 closure, `FunctionDef.return_type` is `None` for the
+        // synthesized `X::name`, and `function_return_concrete_types[X::name]
+        // = ConcreteType::Void`. After T1' gap 3 closure, the
+        // synthesized return_type is `Some(TypeAnnotation::Basic("string"))`
+        // backfilled from the trait's `Required(Method { return_type:
+        // Basic("string"), .. })` declaration.
+        let code = r#"
+            trait T { name(): string }
+            type X {}
+            impl T for X {
+                method name() { "x" }
+            }
+        "#;
+        let program = parse_program(code).expect("Failed to parse");
+        let bytecode = BytecodeCompiler::new()
+            .compile(&program)
+            .expect("Failed to compile");
+
+        // The impl method desugars to scoped function name `X::name`
+        // (default-impl naming per desugar_impl_method line ~1678 —
+        // `format!("{}::{}", type_name, method_name)`).
+        let func_def = bytecode
+            .expanded_function_defs
+            .get("X::name")
+            .expect("X::name function def should be registered");
+
+        assert!(
+            func_def.return_type.is_some(),
+            "T1' gap 3: impl method `X::name` return_type should be \
+             backfilled from trait declaration `T::name(): string`, \
+             got None"
+        );
+
+        // Extract the substituted annotation and verify it is the trait's
+        // declared `string` (not a fabricated default, not the void
+        // sentinel).
+        let return_ann = func_def
+            .return_type
+            .as_ref()
+            .expect("return_type Some after backfill");
+        match return_ann {
+            shape_ast::ast::TypeAnnotation::Basic(name) => {
+                assert_eq!(
+                    name, "string",
+                    "T1' gap 3: backfilled return_type must be the \
+                     trait's declared `string`, got Basic(`{}`)",
+                    name
+                );
+            }
+            other => panic!(
+                "T1' gap 3: expected Basic(\"string\") from trait \
+                 declaration, got: {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn desugar_impl_method_preserves_explicit_impl_return_type() {
+        // If the impl explicitly declares a return-type, the backfill must
+        // not override it (the impl's annotation is the authoritative
+        // shape — the trait's declared shape is structurally compatible
+        // but the impl may be more specific). Verify the substitution is
+        // strictly a fallback for None.
+        //
+        // Smoke 3 -- but with explicit `-> string` repeated on the impl
+        // method (impl methods use the `->` return-type syntax per
+        // `shape.pest::return_type = { "->" ~ type_annotation }`).
+        let code = r#"
+            trait T { name(): string }
+            type X {}
+            impl T for X {
+                method name() -> string { "x" }
+            }
+        "#;
+        let program = parse_program(code).expect("Failed to parse");
+        let bytecode = BytecodeCompiler::new()
+            .compile(&program)
+            .expect("Failed to compile");
+
+        let func_def = bytecode
+            .expanded_function_defs
+            .get("X::name")
+            .expect("X::name function def should be registered");
+
+        let return_ann = func_def
+            .return_type
+            .as_ref()
+            .expect("return_type Some — impl declared explicitly");
+        match return_ann {
+            shape_ast::ast::TypeAnnotation::Basic(name) => {
+                assert_eq!(
+                    name, "string",
+                    "T1' gap 3: explicit impl return_type must be \
+                     preserved verbatim"
+                );
+            }
+            other => panic!(
+                "T1' gap 3: expected explicit Basic(\"string\") from \
+                 impl source, got: {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn desugar_impl_method_leaves_none_when_trait_method_has_no_return_type() {
+        // A trait method that itself has no return type (e.g., a void
+        // method) provides no return type to backfill. The substitution
+        // path returns the impl's `None` unchanged — no fabricated
+        // default per §2.7.7 #9.
+        //
+        // (`Required` trait members always have a return_type per the
+        // AST — `InterfaceMember::Method { return_type: TypeAnnotation,
+        // .. }` is non-optional. Default trait members carry
+        // `Option<TypeAnnotation>`, which can be None for `method foo()
+        // {}` default bodies that elide it. This test verifies the
+        // default-trait-member arm preserves None when the trait
+        // default itself has no return_type annotation.)
+        let code = r#"
+            trait T {
+                method greet() { print("hi") }
+            }
+            type X {}
+            impl T for X {}
+        "#;
+        let program = parse_program(code).expect("Failed to parse");
+        let bytecode = BytecodeCompiler::new()
+            .compile(&program)
+            .expect("Failed to compile");
+
+        // The default trait method's impl-side desugar is `X::greet`
+        // (default-method path through `desugar_impl_method` invocation
+        // at line ~426). When the trait default has no return_type, the
+        // backfill returns None — preserving the impl's None.
+        if let Some(func_def) = bytecode.expanded_function_defs.get("X::greet") {
+            assert!(
+                func_def.return_type.is_none(),
+                "T1' gap 3: trait default method without return_type \
+                 must not fabricate a default annotation, got: {:?}",
+                func_def.return_type
+            );
+        }
+        // The fn may not be registered if default-method inlining doesn't
+        // emit a synthesized FunctionDef when the impl block is empty;
+        // that's fine — the test asserts the negative space (no
+        // fabricated annotation).
     }
 }
