@@ -5451,4 +5451,76 @@ mod call_return_kind_tests {
         assert_eq!(result[3], expected, "Call destination slot stamped");
         assert_eq!(result[5], expected, "Move destination propagated");
     }
+
+    // ── Phase 3 cluster-0 Round 11-trinity Part c (2026-05-13) ──────────
+    // Tests for the empty-operands ObjectStore conduit fix at
+    // `mir/lowering/helpers.rs::emit_container_store_full`. The producer
+    // previously short-circuited the StatementKind::ObjectStore emission
+    // for empty operands (`if operands.is_empty() { return; }`),
+    // dropping the conduit's kind-source for `let t = X {}`-style empty
+    // struct literals. The fix preserves the short-circuit for
+    // Array/Enum/Closure (no per-element work to record) but emits the
+    // empty ObjectStore so the conduit's
+    // `StatementKind::ObjectStore { container_slot, .. }` walk can
+    // stamp Struct(StructLayoutId(0)) on the destination slot. The JIT's
+    // `is_typed_object_slot` short-circuit at `statements.rs:61` then
+    // fires for the preceding `Rvalue::Aggregate(vec![])`, and the
+    // existing ObjectStore consumer's `typed_object_alloc(schema, 0)`
+    // path allocates the empty TypedObject.
+
+    #[test]
+    fn empty_struct_literal_conduit_stamps_struct() {
+        // MIR shape produced by `Expr::StructLiteral { fields: [] }`
+        // after the Part (c) producer-side fix:
+        //   Assign(Local(2), Aggregate(vec![]))
+        //   ObjectStore { container_slot: 2, operands: [], field_names: [] }
+        // The conduit must walk the empty-operands ObjectStore and
+        // stamp `concrete_types[2] = Struct(_)`.
+        let span = mk_span();
+        let bb0 = BasicBlock {
+            id: BasicBlockId(0),
+            statements: vec![
+                crate::mir::types::MirStatement {
+                    kind: StatementKind::Assign(
+                        Place::Local(SlotId(2)),
+                        Rvalue::Aggregate(vec![]),
+                    ),
+                    span,
+                    point: Point(0),
+                },
+                crate::mir::types::MirStatement {
+                    kind: StatementKind::ObjectStore {
+                        container_slot: SlotId(2),
+                        operands: vec![],
+                        field_names: vec![],
+                    },
+                    span,
+                    point: Point(0),
+                },
+            ],
+            terminator: Terminator {
+                kind: TerminatorKind::Return,
+                span,
+            },
+        };
+        let mir = MirFunction {
+            name: "empty_struct".to_string(),
+            blocks: vec![bb0],
+            num_locals: 4,
+            param_slots: vec![],
+            param_reference_kinds: vec![],
+            local_types: vec![
+                crate::mir::types::LocalTypeInfo::Unknown;
+                4
+            ],
+            span,
+            field_name_table: Default::default(),
+        };
+        let result = infer_top_level_concrete_types_from_mir(&mir);
+        assert!(
+            matches!(result[2], ConcreteType::Struct(_)),
+            "empty-operands ObjectStore must still stamp Struct, got {:?}",
+            result[2]
+        );
+    }
 }

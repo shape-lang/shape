@@ -79,7 +79,55 @@ pub(super) fn emit_container_store_full(
     span: Span,
 ) {
     if operands.is_empty() {
-        return;
+        // Empty-operands container stores: most kinds short-circuit
+        // because there's no per-element work to record (no array
+        // element to push, no enum payload to wire, no closure capture
+        // to box). The exception is `Object` for empty struct literals
+        // (`let t = X {}`): the JIT-MIR consumer at
+        // `crates/shape-jit/src/mir_compiler/statements.rs` relies on
+        // the `StatementKind::ObjectStore` site to allocate the empty
+        // TypedObject via `typed_object_alloc(schema_id, 0)`, and the
+        // producer-side conduit at
+        // `crates/shape-vm/src/compiler/helpers.rs::infer_top_level_
+        // concrete_types_from_mir` keys its `Struct(StructLayoutId(0))`
+        // stamp on `ObjectStore { container_slot, .. }` — without the
+        // empty-operands ObjectStore, the slot's `ConcreteType` stays
+        // `Void`, the JIT's `is_typed_object_slot` short-circuit at
+        // `statements.rs:61` doesn't fire, and Aggregate falls through
+        // to the kind-blind fallback (Phase 3 cluster-0 Round 11-trinity
+        // Part c, 2026-05-13 — closes the kickoff Smoke 3 JIT-side
+        // regression: `type X {}; let t = X {}` surfacing with
+        // `Rvalue::Aggregate reached the kind-blind fallback`).
+        //
+        // ADR-006 §2.7.5 producing-site classification: the empty
+        // ObjectStore IS the proof of struct-construction at MIR-emit
+        // time. The downstream conduit walks ObjectStore unconditionally
+        // (operand-count-independent), and the JIT consumer's empty-
+        // operand `typed_object_alloc(schema_id, 0)` path already
+        // handles the zero-field case correctly (loop body executes
+        // zero times). No new MIR statement kind, no new dispatch shape,
+        // no Bool-default fallback.
+        //
+        // Array / Enum / Closure containers preserve the short-circuit:
+        // - `ArrayStore { ops: [] }` would have no v2 typed-array
+        //   element kind source (the Round 5C `concrete_types[arr] =
+        //   Array<scalar>` seed flows from element constant kinds, and
+        //   empty arrays have no elements to classify) — the JIT's v2
+        //   `emit_v2_array_aggregate` requires element kind, so empty
+        //   arrays would surface anyway. The bytecode compiler emits
+        //   `op_new_array` directly for empty literal arrays.
+        // - `EnumStore { ops: [] }` is the unit-variant pattern
+        //   (`None`, `Ok` of unit, user-enum unit variants) — handled
+        //   by the Round 7A / Round 10 `EnumStore` consumer through the
+        //   `variant_name` discriminator, no operand storage needed.
+        //   The conduit walks EnumStore container slot regardless of
+        //   operand count, so the stamp lands without the early-return
+        //   guard.
+        // - `ClosureCapture { ops: [] }` is a no-capture closure — no
+        //   shared cell payload to wire.
+        if !matches!(kind, ContainerStoreKind::Object) {
+            return;
+        }
     }
     let stmt_kind = match kind {
         ContainerStoreKind::Array => StatementKind::ArrayStore {
