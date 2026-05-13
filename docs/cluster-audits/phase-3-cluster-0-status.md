@@ -675,15 +675,15 @@ Branch: `bulldozer-strictly-typed-w12-jit-call-return-kind`
 Audit commit: `f58abc8d`
 Fix commit: (pending — appended at merge)
 
-## Round 7 — partial (Round 7A closed; 7B in flight)
+## Round 7 — closed (7A migrating-close + 7B audit-only close)
 
 Two sub-clusters dispatched in parallel 2026-05-12 from the Round 6B
 audit's surfaced trinity territory:
 
 | Sub-cluster | Branch | Status |
 |---|---|---|
-| W12-jit-result-option-trinity (7A) | `bulldozer-strictly-typed-w12-jit-result-option-trinity` | **closed** (2026-05-12) |
-| W12-jit-collection-typed-arc-ffi (7B) | `bulldozer-strictly-typed-w12-jit-collection-typed-arc-ffi` | dispatching (parallel) |
+| W12-jit-result-option-trinity (7A) | `bulldozer-strictly-typed-w12-jit-result-option-trinity` | **closed** (2026-05-12, migrating-close) |
+| W12-jit-collection-typed-arc-ffi (7B) | `bulldozer-strictly-typed-w12-jit-collection-typed-arc-ffi` | **closed audit-only** (2026-05-12, option (iii) surfaced) |
 
 ### W12-jit-result-option-trinity close (2026-05-12)
 
@@ -780,6 +780,169 @@ implementation specific, not a §2.7 design question.
 
 Branch: `bulldozer-strictly-typed-w12-jit-result-option-trinity`
 Close commits: `d01d83b7`, `ae5d57f2`, `9f27edcd`
+
+### W12-jit-collection-typed-arc-ffi close (audit-only, 2026-05-12)
+
+Audit doc landed: `docs/cluster-audits/w12-jit-collection-typed-arc-ffi-audit.md`
+(12 sections). **Audit grid for 8 HeapKinds** (HashSet/HashMap/Deque/PriorityQueue/
+Channel/Mutex/Atomic/Lazy): all 8 still SURFACE at the JIT EnumStore consumer
+per Round 6C close. Zero-arg ctors (Set/HashMap/Deque/PriorityQueue/Channel)
+map to single FFI entries (`Arc<XData>::new()` + `Arc::into_raw`); with-arg
+ctors split (Atomic(i64)/Lazy(Closure) compile-time-validate single inner kind;
+Mutex(any) uses §2.7.5 `(bits, kind)` carrier-pair form).
+
+**Why audit-only (option-(iii) territory surfaced, not option-(i) partial
+landing)**: even with all 8 typed-Arc allocation FFI entries landed, the smoke
+target `let s = Set(); s.add("a"); s.add("b"); print(s.size())` cannot pass
+because `jit_call_method` (`crates/shape-jit/src/ffi/call_method/mod.rs:201`)
+dispatches via `heap_kind(receiver_bits)` (NaN-box tag decode at
+`value_ffi.rs:330-336`). Typed-Arc bits per `KindedSlot::from_hashset(arc)`
+are raw `Arc::into_raw(arc) as u64` pointers — no NaN-box tag; `is_heap(bits)`
+returns false; `heap_kind(bits)` returns None; method dispatch falls through
+to `dispatch_method_via_trampoline` extern-C `todo!()` (aborts process).
+Landing allocation FFI alone REGRESSES the equivalence-ratchet: Round 6C's
+clean compile-time surface becomes a runtime extern-C `todo!()` process
+abort. CLAUDE.md "Forbidden rationalizations" + W11-round-1 walk-back
+precedent applies.
+
+**The deeper architectural piece is ADR-006 §2.7.10 / Q11 — JIT-side kinded
+MethodFnV2 ABI rebuild**. Same root cause as Round 7A's Result/Option trinity
+applied to a different HeapKind family. Round 7A explicitly absorbed the
+trinity (match-on-enum + Arc-shape producers + EnumStore consumer) for
+Result/Option; the broader `jit_call_method` shell rebuild is a co-design
+co-trinity scope of its own — dispatched as Round 8B.
+
+**Carrier-shape clarification (audit §8)**: typed-Arc collections use
+`Arc::into_raw(Arc<XData>) as u64` (Arc internal refcount at offset -16);
+this is NOT interchangeable with W11's `Box::into_raw(Box::new(UnifiedValue<T>))
+as u64` (own HeapHeader refcount at offset 4). Mixing would segfault at every
+`jit_arc_release` reclaim. Documentation hygiene item: a clarification clause
+in §2.7.6 / Q8 carrier-API-bound (or central in the carrier-family amendments
+§2.7.15 / §2.7.18 / §2.7.19 / §2.7.20 / §2.7.25) would prevent the W11-
+TypedArray-shape literal-prescription error.
+
+**Close gates (audit is doc-only, no regressions)**:
+- `cargo check --workspace --lib --tests` EXIT=0
+- `cargo test -p shape-jit --lib` 322/0/26 unchanged
+- `bash scripts/verify-merge.sh` 12/12
+
+Branch: `bulldozer-strictly-typed-w12-jit-collection-typed-arc-ffi`
+Merge: `7dc0ce5d` (post-Round-7A merge baseline)
+
+### Post-Round-7 final smoke matrix (bulldozer HEAD `7dc0ce5d`)
+
+| Smoke | Description | VM | JIT | Note |
+|---|---|---|---|---|
+| 1 | scalar loop `let mut acc = 0; for i in 1..=99 { acc = acc + i }; print(acc)` | `4950` | `4950` | ✅ identical |
+| 1.5 | `fn divide(...) -> Result<int, string>; match divide(10,2) { Ok(v) => print(v), Err(e) => print(e) }` | `5` | `5` | ✅ identical — Round 7A trinity delivered |
+| 2 | `fn first_positive(...) -> Option<int>; print(first_positive([-1,-2,3,-4]))` | `Some(3)` | (no output) | ❌ heap-arm `jit_print` classification gap — Round 8A territory |
+| 3 | TypedObject `let p = Point { x: 3, y: 4 }; print(p.x + p.y)` | `7` | `7` | ✅ identical — Round 5A binop-after-heap-read |
+| 4 | `let s = Set(); s.add("a"); s.add("b"); print(s.size())` | `2` | clean SURFACE at JIT EnumStore consumer (no extern-C abort) | ❌ Round 8B territory — §2.7.10/Q11 MethodFnV2 ABI rebuild |
+
+Cluster-0 sub-cluster total: 18 (4 kickoff + 4 R3 + 1 R4 + 3 R5 + 3 R6 + 2 R7
++ 1 walked-back W11). Trajectory matches Phase 2d's N+1 growth pattern per
+supervisor's earlier ruling. Cluster-0 close criterion (VM == JIT identical
+output for all 5 smokes) unchanged; 3/5 currently passing. The W-series
+declare-victory-at-the-artifact-tagging-layer pattern is explicitly refused.
+
+## Round 8 — dispatching (post-Round-7 audit-surfaced trinities split across two HeapKind families)
+
+Two sub-clusters dispatched in parallel 2026-05-13 from the Round 7 audit
+surfaces:
+
+| Sub-cluster | Branch | Worktree | Status |
+|---|---|---|---|
+| W12-jit-print-heap-arm-classification (8A) | `bulldozer-strictly-typed-w12-jit-print-heap-arm-classification` | `../shape-w12-jit-print-heap-arm-classification` | dispatching (parallel) |
+| W12-jit-collection-method-dispatch-abi (8B) | `bulldozer-strictly-typed-w12-jit-collection-method-dispatch-abi` | `../shape-w12-jit-collection-method-dispatch-abi` | dispatching (parallel) |
+
+### 8A scope (W12-jit-print-heap-arm-classification)
+
+Per-HeapKind kinded `jit_print` entries — bounded mechanical, ~1 session
+estimated. Scalar arms (`jit_print_i64` / `jit_print_f64` / `jit_print_bool`)
+already landed in W11-jit-new-array Round 1. Round 7A's Arc-shape FFI pattern
+is the model: read carrier via `*const T` field projections (like
+`jit_arc_result_is_ok` reads `(*r).is_ok` directly), NOT via NaN-box tag decode.
+
+Target surface: `print(Some(3))` in Smoke 2 currently produces no output —
+heap-arm classification gap at the JIT `print` Call-terminator dispatch.
+The operand's `NativeKind` is not threaded to a kinded fn-id; falls through
+to kind-blind `jit_print` which W11 round-2 routed only for scalar arms.
+
+Touch points (zero overlap with 8B):
+- `crates/shape-jit/src/mir_compiler/terminators.rs` — Call-terminator
+  `print` dispatch: thread operand's `NativeKind` to kinded fn-id;
+  surface-and-stop on unknown kind (§2.7.7 #4/#7).
+- `crates/shape-jit/src/ffi/` — new per-HeapKind kinded print entries
+  (`jit_print_str`, `jit_print_typed_object`, `jit_print_option`,
+  `jit_print_result`, plus any HeapKind surfaced during audit).
+- `crates/shape-jit/src/ffi_symbols/` (registration) +
+  `crates/shape-jit/src/ffi_refs.rs` (FuncRef slots) +
+  `crates/shape-jit/src/compiler/ffi_builder.rs` (`r!(...)` lookups).
+
+Close criterion: Smoke 2 `print(Some(3))` displays `Some(3)` matching VM
+output; verify-merge 12/12; no regressions.
+
+### 8B scope (W12-jit-collection-method-dispatch-abi)
+
+**AUDIT-FIRST**. §2.7.10/Q11 kinded MethodFnV2 ABI rebuild for 8 collection
+HeapKinds (HashSet=21, HashMap=17, Deque=23, PriorityQueue=25, Channel=24,
+Mutex=30, Atomic=31, Lazy=32). Round 7B audit established this as option
+(iii) territory — load-bearing for Smoke 4 + 2 additional smokes
+(HashMap, Mutex).
+
+Integrated trinity-style scope:
+1. Typed-Arc allocation FFI bodies (5 zero-arg + 2 single-kind + 1
+   `(bits, kind)` carrier-pair Mutex) per audit §3.1.
+2. `jit_call_method` shell rebuild — read receiver kind from `stack_kinds`
+   parallel-kind track (§2.7.7) instead of NaN-box tags; thread receiver+args
+   `NativeKind` to kinded MethodFnV2 entries.
+3. Per-HeapKind MethodFnV2 kinded entries — exhaustive set per
+   `crates/shape-vm/src/executor/objects/method_registry.rs` for each of
+   the 8 HeapKinds. Includes EnumStore consumer arm for collection_ctor
+   variant in `mir_compiler/statements.rs` (Round 6C MIR-emission side
+   landed; this round wires the JIT consumer).
+
+**STOP and surface if ADR-006 amendment territory detected** — most likely
+amendment-trigger per audit §9(d) is HashMap K/V kind threading exceeding
+Q15 Route A's monomorphic-per-element-kind contract for non-Array HeapKinds.
+Audit-only close (with structured §-cite surfacing) is acceptable; partial
+landing that regresses Round 6C/7B clean SURFACE is NOT.
+
+Touch points (zero overlap with 8A):
+- `crates/shape-jit/src/ffi/call_method/mod.rs` — `jit_call_method` shell
+  rebuild per §2.7.10/Q11.
+- `crates/shape-jit/src/ffi/v2/collection_ctors.rs` (NEW) — 8 typed-Arc
+  allocation bodies per audit §3.1.
+- `crates/shape-jit/src/ffi/v2/collection_methods.rs` (NEW) — per-HeapKind
+  MethodFnV2 kinded entries.
+- `crates/shape-jit/src/ffi_symbols/v2_symbols.rs` (~24 symbol registrations).
+- `crates/shape-jit/src/ffi_refs.rs` (FuncRef slots) +
+  `crates/shape-jit/src/compiler/ffi_builder.rs` (`r!(...)` lookups).
+- `crates/shape-jit/src/mir_compiler/statements.rs` (EnumStore consumer
+  collection_ctor arm).
+- Possibly `crates/shape-jit/src/mir_compiler/terminators.rs` (method-call
+  terminator: thread `stack_kinds` track receiver+args kind to kinded
+  MethodFnV2).
+- Possibly `docs/adr/006-value-and-memory-model.md` §2.7.x amendment if
+  option (iii) surfaces during audit.
+
+Carrier-shape: use `Arc::into_raw(Arc<XData>)` (Arc internal refcount at
+offset -16), NOT `Box::into_raw(Box::new(UnifiedValue<T>))` (W11 TypedArray
+shape with own HeapHeader at offset 4). Per audit §8.
+
+Close criterion: Smoke 4 (`Set()` + `.add()` + `.size()` + print) VM == JIT
+— OR audit-only close with option (iii) surface if ADR amendment territory
+fires. The ratchet rule applies: do not regress Round 6C/7B's clean
+SURFACE-at-EnumStore-consumer state.
+
+### Coordination
+
+Zero file-territory overlap between 8A (jit_print + heap-arm print FFI) and
+8B (jit_call_method + collection MethodFnV2 + collection typed-Arc ctors).
+Different FuncRef slots, different Cranelift codegen sites, different
+mir_compiler dispatch arms (Call-terminator print vs method-call terminator
++ EnumStore collection_ctor). Both proceed in parallel from
+post-Round-7 baseline `7dc0ce5d`.
 
 ## Cluster-0 close gate
 
