@@ -135,6 +135,39 @@ pub fn concrete_to_annotation(ct: &ConcreteType) -> TypeAnnotation {
             TypeAnnotation::Reference(TypePath::simple(format!("__mono_fn_{}", id.0)))
         }
 
+        // ── Phase 3 cluster-0 Round 11-trinity 11E (2026-05-13) ─────────
+        // Collection / concurrency carriers from ADR-006 §2.7.15 /
+        // §2.7.17 / §2.7.18 / §2.7.20 / §2.7.25 round-trip back to the
+        // user-written `Generic { name, args }` form for downstream type
+        // inference. Parametric arms unwrap their inner ConcreteType
+        // recursively; nullary arms (`PriorityQueue`, `Atomic`) map to
+        // the no-args reference form — same shape as a user-written
+        // `PriorityQueue` / `Atomic` identifier in source.
+        ConcreteType::HashSet(elem) => TypeAnnotation::Generic {
+            name: TypePath::simple("HashSet"),
+            args: vec![concrete_to_annotation(elem)],
+        },
+        ConcreteType::Deque(elem) => TypeAnnotation::Generic {
+            name: TypePath::simple("Deque"),
+            args: vec![concrete_to_annotation(elem)],
+        },
+        ConcreteType::PriorityQueue => {
+            TypeAnnotation::Reference(TypePath::simple("PriorityQueue"))
+        }
+        ConcreteType::Channel(elem) => TypeAnnotation::Generic {
+            name: TypePath::simple("Channel"),
+            args: vec![concrete_to_annotation(elem)],
+        },
+        ConcreteType::Mutex(inner) => TypeAnnotation::Generic {
+            name: TypePath::simple("Mutex"),
+            args: vec![concrete_to_annotation(inner)],
+        },
+        ConcreteType::Atomic => TypeAnnotation::Reference(TypePath::simple("Atomic")),
+        ConcreteType::Lazy(inner) => TypeAnnotation::Generic {
+            name: TypePath::simple("Lazy"),
+            args: vec![concrete_to_annotation(inner)],
+        },
+
         ConcreteType::Void => TypeAnnotation::Void,
     }
 }

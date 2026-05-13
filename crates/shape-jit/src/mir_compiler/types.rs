@@ -169,6 +169,24 @@ pub(crate) fn native_kind_from_concrete_type(ct: &ConcreteType) -> Option<Native
         // tuple-codegen convention; treat as TypedObject for the
         // kind track.
         ConcreteType::Tuple(_) => NativeKind::Ptr(HeapKind::TypedObject),
+        // ── Phase 3 cluster-0 Round 11-trinity 11E (2026-05-13) ─────────
+        // Collection / concurrency carriers — taxonomy extended in
+        // `shape-value/src/v2/concrete_type.rs` per the Round 10 surfaced
+        // item (B). Each ConcreteType arm maps to its dedicated
+        // `HeapKind` ordinal (§2.7.15 / §2.7.17 / §2.7.18 / §2.7.20 /
+        // §2.7.25) and dispatches through Round 9's `retain_func_for_place`
+        // / `release_func_for_place` 8-arm extension. Pre-11E the JIT
+        // EnumStore consumer carried out-of-band kind seeding at the
+        // `mir_compiler/types.rs` EnumStore arm because ConcreteType
+        // didn't have these variants; with 11E landed the in-band
+        // `concrete_seed` path is authoritative.
+        ConcreteType::HashSet(_) => NativeKind::Ptr(HeapKind::HashSet),
+        ConcreteType::Deque(_) => NativeKind::Ptr(HeapKind::Deque),
+        ConcreteType::PriorityQueue => NativeKind::Ptr(HeapKind::PriorityQueue),
+        ConcreteType::Channel(_) => NativeKind::Ptr(HeapKind::Channel),
+        ConcreteType::Mutex(_) => NativeKind::Ptr(HeapKind::Mutex),
+        ConcreteType::Atomic => NativeKind::Ptr(HeapKind::Atomic),
+        ConcreteType::Lazy(_) => NativeKind::Ptr(HeapKind::Lazy),
         // Void has no carrier slot.
         ConcreteType::Void => return None,
     })

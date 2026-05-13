@@ -857,6 +857,25 @@ pub fn native_kind_from_concrete_type(ty: &ConcreteType) -> NativeKind {
         // runtime; the Ptr-side payload is the underlying typed object.
         ConcreteType::Option(_) => NativeKind::Ptr(HeapKind::TypedObject),
         ConcreteType::Result(_, _) => NativeKind::Ptr(HeapKind::TypedObject),
+        // ── Phase 3 cluster-0 Round 11-trinity 11E (2026-05-13) ─────────
+        // Collection / concurrency carriers from §2.7.15 / §2.7.17 /
+        // §2.7.18 / §2.7.20 / §2.7.25. Each ConcreteType arm maps to its
+        // own dedicated `HeapKind` ordinal — the kind label drives
+        // refcount discipline through `clone_with_kind` / `drop_with_kind`
+        // (§2.7.7 / §2.7.8) which dispatch each ordinal to the matching
+        // `Arc::increment/decrement_strong_count::<XData>`. A
+        // `Ptr(HeapKind::TypedObject)`-labeled slot would route through
+        // the wrong `Arc<TypedObjectStorage>` retain/release on these
+        // carriers — the same wrong-carrier defect Round 9's
+        // `retain_func_for_place` / `release_func_for_place` 8-arm
+        // extension specifically corrects.
+        ConcreteType::HashSet(_) => NativeKind::Ptr(HeapKind::HashSet),
+        ConcreteType::Deque(_) => NativeKind::Ptr(HeapKind::Deque),
+        ConcreteType::PriorityQueue => NativeKind::Ptr(HeapKind::PriorityQueue),
+        ConcreteType::Channel(_) => NativeKind::Ptr(HeapKind::Channel),
+        ConcreteType::Mutex(_) => NativeKind::Ptr(HeapKind::Mutex),
+        ConcreteType::Atomic => NativeKind::Ptr(HeapKind::Atomic),
+        ConcreteType::Lazy(_) => NativeKind::Ptr(HeapKind::Lazy),
         // `Void` captures are not a well-formed bytecode shape — a void
         // value has no bits to capture. Reaching this arm signals a
         // construction-side bug upstream. We refuse to map `Void` to a
