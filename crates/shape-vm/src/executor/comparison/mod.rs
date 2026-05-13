@@ -486,6 +486,9 @@ fn kind_type_name(kind: NativeKind) -> &'static str {
         // W17-comptime-vm-dispatch (ADR-006 §2.7.26, 2026-05-12):
         // ModuleFn references — inline-scalar module-fn-id label.
         NativeKind::Ptr(HeapKind::ModuleFn) => "module_fn",
+        // ADR-006 §2.7.22 amendment (Round 18 S3, 2026-05-13).
+        NativeKind::Ptr(HeapKind::Matrix) => "matrix",
+        NativeKind::Ptr(HeapKind::MatrixSlice) => "matrix_slice",
     }
 }
 

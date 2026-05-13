@@ -295,8 +295,10 @@ pub(crate) fn handle_to_mat(
     }
     let aligned = AlignedVec::from_vec(flat);
     let matrix = MatrixData::from_flat(aligned, row_count as u32, col_count as u32);
-    let inner = TypedArrayData::Matrix(Arc::new(matrix));
-    Ok(KindedSlot::from_typed_array(Arc::new(inner)))
+    // ADR-006 §2.7.22 amendment (Round 18 S3, 2026-05-13): Matrix is its
+    // own `HeapKind::Matrix` carrier — push directly as
+    // `Ptr(HeapKind::Matrix)`, not wrapped under `TypedArrayData::Matrix`.
+    Ok(KindedSlot::from_matrix(Arc::new(matrix)))
 }
 
 /// `dt.limit(n)` — alias for take-first-n.

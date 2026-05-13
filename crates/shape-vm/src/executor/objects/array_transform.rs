@@ -294,8 +294,8 @@ pub(super) fn typed_array_len(arr: &TypedArrayData) -> usize {
         // workspace as of checkpoint 2 (verified via rg). Body becomes
         // unreachable!() with the structural-unreachability cite.
         // checkpoint 4 deletes the arm entirely.
-        TypedArrayData::Matrix(m) => m.data.len(),
-        TypedArrayData::FloatSlice { len, .. } => *len as usize,
+        // ADR-006 §2.7.22 amendment (Round 18 S3): Matrix / FloatSlice
+        // exit `TypedArrayData`.
         // §2.7.24 Q25.A specialized arms — checkpoint 3 wires real bodies.
         TypedArrayData::Decimal(b) => b.data.len(),
         TypedArrayData::BigInt(b) => b.data.len(),
@@ -471,30 +471,10 @@ fn slice_typed_array(
                 TypedBuffer::from_vec(sliced),
             ))))
         }
-        TypedArrayData::FloatSlice {
-            parent,
-            offset,
-            len,
-        } => {
-            let total = *len as i64;
-            let off = *offset as usize;
-            let (s, e) = clamp_range(start, end, total);
-            let sliced: Vec<f64> = if s < e {
-                parent.data.as_slice()[off + s..off + e].to_vec()
-            } else {
-                Vec::new()
-            };
-            let aligned = AlignedVec::<f64>::from_vec(sliced);
-            Ok(Arc::new(TypedArrayData::F64(Arc::new(
-                AlignedTypedBuffer::from_aligned(aligned),
-            ))))
-        }
-        TypedArrayData::Matrix(_) => Err(VMError::NotImplemented(
-            "slice: Matrix variant — Phase-2c reentry. Slicing a row-major \
-             matrix into a flat array needs a reshape contract that is not \
-             yet specified."
-                .to_string(),
-        )),
+        // ADR-006 §2.7.22 amendment (Round 18 S3): Matrix / FloatSlice
+        // exit `TypedArrayData`. `Array.slice` over a Matrix /
+        // MatrixSlice receiver is dispatched at the HeapKind layer
+        // (own `MATRIX_METHODS` / `FLOAT_ARRAY_METHODS` PHF tables).
         // W17-typed-carrier-bundle-A checkpoint 3/4: §2.7.24 Q25.A
         // specialized arms — homogeneous per-element-kind buffers all use
         // the same `buf.data[s..e].to_vec()` slice pattern.
@@ -721,74 +701,10 @@ fn concat_typed_array(
         // arms below materialize to a flat F64 result. Same-side and
         // cross-side combinations with F64 are admissible (both ultimately
         // float). Cross-variant with non-float surfaces.
-        (
-            TypedArrayData::FloatSlice {
-                parent: lp,
-                offset: loff,
-                len: llen,
-            },
-            TypedArrayData::FloatSlice {
-                parent: rp,
-                offset: roff,
-                len: rlen,
-            },
-        ) => {
-            let l_off = *loff as usize;
-            let l_n = *llen as usize;
-            let r_off = *roff as usize;
-            let r_n = *rlen as usize;
-            let mut out = Vec::with_capacity(l_n + r_n);
-            out.extend_from_slice(&lp.data.as_slice()[l_off..l_off + l_n]);
-            out.extend_from_slice(&rp.data.as_slice()[r_off..r_off + r_n]);
-            let aligned = AlignedVec::<f64>::from_vec(out);
-            Ok(Arc::new(TypedArrayData::F64(Arc::new(
-                AlignedTypedBuffer::from_aligned(aligned),
-            ))))
-        }
-        (
-            TypedArrayData::FloatSlice {
-                parent,
-                offset,
-                len,
-            },
-            TypedArrayData::F64(rb),
-        ) => {
-            let off = *offset as usize;
-            let n = *len as usize;
-            let mut out = Vec::with_capacity(n + rb.data.len());
-            out.extend_from_slice(&parent.data.as_slice()[off..off + n]);
-            out.extend_from_slice(rb.data.as_slice());
-            let aligned = AlignedVec::<f64>::from_vec(out);
-            Ok(Arc::new(TypedArrayData::F64(Arc::new(
-                AlignedTypedBuffer::from_aligned(aligned),
-            ))))
-        }
-        (
-            TypedArrayData::F64(la),
-            TypedArrayData::FloatSlice {
-                parent,
-                offset,
-                len,
-            },
-        ) => {
-            let off = *offset as usize;
-            let n = *len as usize;
-            let mut out = Vec::with_capacity(la.data.len() + n);
-            out.extend_from_slice(la.data.as_slice());
-            out.extend_from_slice(&parent.data.as_slice()[off..off + n]);
-            let aligned = AlignedVec::<f64>::from_vec(out);
-            Ok(Arc::new(TypedArrayData::F64(Arc::new(
-                AlignedTypedBuffer::from_aligned(aligned),
-            ))))
-        }
-        (TypedArrayData::Matrix(_), _) | (_, TypedArrayData::Matrix(_)) => {
-            Err(VMError::NotImplemented(
-                "concat: Matrix variant — Phase-2c reentry. Concatenating a \
-                 row-major matrix with another array shape needs a reshape \
-                 contract that is not yet specified."
-                    .to_string(),
-            ))
-        }
+        // ADR-006 §2.7.22 amendment (Round 18 S3): Matrix / FloatSlice
+        // exit `TypedArrayData`. Concatenation of MatrixSlice / Matrix
+        // receivers with array receivers is dispatched at the HeapKind
+        // layer; no inner-arm cross-variant routing here.
         (a, b) => Err(VMError::NotImplemented(format!(
             "concat: cross-variant {} + {} — SURFACE: strict-typing \
              precludes implicit numeric promotion (CLAUDE.md \"No runtime \
@@ -839,17 +755,10 @@ pub(super) fn element_kinded(arr: &TypedArrayData, idx: usize) -> Result<KindedS
             // transfers cleanly through `call_value_immediate_nb`.
             Ok(KindedSlot::from_string_arc(Arc::clone(&buf.data[idx])))
         }
-        TypedArrayData::FloatSlice {
-            parent,
-            offset,
-            len,
-        } => {
-            let off = *offset as usize;
-            let n = *len as usize;
-            debug_assert!(idx < n, "FloatSlice element_kinded: idx out of bounds");
-            Ok(KindedSlot::from_number(parent.data.as_slice()[off + idx]))
-        }
-        TypedArrayData::Matrix(m) => Ok(KindedSlot::from_number(m.data.as_slice()[idx])),
+        // ADR-006 §2.7.22 amendment (Round 18 S3): Matrix / FloatSlice
+        // exit `TypedArrayData`. Per-element extraction for Matrix /
+        // MatrixSlice receivers is the dispatch-shell's responsibility
+        // (their dedicated PHF tables).
         // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized
         // arms — each builds a `KindedSlot` of the variant's element type.
         TypedArrayData::Decimal(buf) => Ok(KindedSlot::from_decimal(Arc::clone(&buf.data[idx]))),
@@ -981,29 +890,9 @@ pub(super) fn project_indices(arr: &TypedArrayData, keep: &[usize]) -> Result<Ar
                 TypedBuffer::from_vec(v),
             ))))
         }
-        TypedArrayData::FloatSlice {
-            parent,
-            offset,
-            len: _,
-        } => {
-            let off = *offset as usize;
-            let v: Vec<f64> = keep
-                .iter()
-                .map(|&i| parent.data.as_slice()[off + i])
-                .collect();
-            let aligned = AlignedVec::<f64>::from_vec(v);
-            Ok(Arc::new(TypedArrayData::F64(Arc::new(
-                AlignedTypedBuffer::from_aligned(aligned),
-            ))))
-        }
-        TypedArrayData::Matrix(_) => {
-            Err(VMError::NotImplemented(format!(
-                "filter: {} variant — SURFACE: projecting a Matrix to a \
-                 flat array needs a reshape contract (ADR-006 §2.7.4). \
-                 Wave-10 / Phase-2c reentry.",
-                arr.type_name()
-            )))
-        }
+        // ADR-006 §2.7.22 amendment (Round 18 S3): Matrix / FloatSlice
+        // exit `TypedArrayData`. Filter over Matrix / MatrixSlice
+        // receivers is dispatched at the HeapKind layer.
         // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms
         // — uniform-element-kind project via per-element Arc::clone.
         TypedArrayData::Decimal(buf) => {
@@ -1473,27 +1362,9 @@ fn sort_natural(arr: &TypedArrayData) -> Result<Arc<TypedArrayData>, VMError> {
                 TypedBuffer::from_vec(v),
             ))))
         }
-        TypedArrayData::FloatSlice {
-            parent,
-            offset,
-            len,
-        } => {
-            let off = *offset as usize;
-            let n = *len as usize;
-            let mut v: Vec<f64> = parent.data.as_slice()[off..off + n].to_vec();
-            v.sort_by(|a, b| a.total_cmp(b));
-            let aligned = AlignedVec::<f64>::from_vec(v);
-            Ok(Arc::new(TypedArrayData::F64(Arc::new(
-                AlignedTypedBuffer::from_aligned(aligned),
-            ))))
-        }
-        TypedArrayData::Matrix(_) => {
-            Err(VMError::NotImplemented(format!(
-                "sort: {} variant — SURFACE: row-major matrix needs a \
-                 reshape contract (ADR-006 §2.7.4). Wave-10 / Phase-2c reentry.",
-                arr.type_name()
-            )))
-        }
+        // ADR-006 §2.7.22 amendment (Round 18 S3): Matrix / FloatSlice
+        // exit `TypedArrayData`. Sort over Matrix / MatrixSlice receivers
+        // is dispatched at the HeapKind layer.
         // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized
         // sort arms. Decimal / BigInt / Char have natural total orders;
         // DateTime / Timespan / Duration / Instant share `TemporalData`
@@ -1642,28 +1513,10 @@ pub(crate) fn handle_flatten_v2(
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
     with_typed_array(args, "flatten", |arr| match arr {
-        TypedArrayData::FloatSlice {
-            parent,
-            offset,
-            len,
-        } => {
-            let off = *offset as usize;
-            let n = *len as usize;
-            let flat: Vec<f64> = parent.data.as_slice()[off..off + n].to_vec();
-            let aligned = AlignedVec::<f64>::from_vec(flat);
-            Ok(KindedSlot::from_typed_array(Arc::new(TypedArrayData::F64(
-                Arc::new(AlignedTypedBuffer::from_aligned(aligned)),
-            ))))
-        }
-        TypedArrayData::Matrix(m) => {
-            // A Matrix in flat form is the row-major data; flatten() is
-            // the natural projection to a 1-D F64 array.
-            let flat: Vec<f64> = m.data.as_slice().to_vec();
-            let aligned = AlignedVec::<f64>::from_vec(flat);
-            Ok(KindedSlot::from_typed_array(Arc::new(TypedArrayData::F64(
-                Arc::new(AlignedTypedBuffer::from_aligned(aligned)),
-            ))))
-        }
+        // ADR-006 §2.7.22 amendment (Round 18 S3): Matrix / FloatSlice
+        // exit `TypedArrayData`. Matrix.flatten() / MatrixSlice.flatten()
+        // dispatch through the HeapKind layer; `MATRIX_METHODS` contains
+        // the body returning the row-major flat data as `Array<number>`.
         // I64/F64/Bool/I*/U*/F32/String already 1-D — flatten is identity.
         TypedArrayData::I64(_)
         | TypedArrayData::F64(_)

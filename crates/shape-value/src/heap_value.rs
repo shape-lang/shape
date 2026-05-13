@@ -25,7 +25,15 @@ use crate::aligned_vec::AlignedVec;
 use std::fmt;
 use std::sync::Arc;
 
-// ── Matrix storage (used by TypedArrayData::Matrix and FloatSlice) ──────────
+// ── Matrix storage (carries `HeapKind::Matrix` and `HeapKind::MatrixSlice`) ──
+//
+// ADR-006 §2.7.22 amendment (Round 18 S3 W12-matrix-floatslice-heapkind-exit,
+// 2026-05-13): Matrix is a single Matrix value (NOT a buffer-of-Matrix), and
+// exits the `TypedArrayData` carrier hierarchy. `HeapKind::Matrix = 34` +
+// `HeapValue::Matrix(Arc<MatrixData>)`; FloatSlice projection becomes
+// `HeapKind::MatrixSlice = 35` + `HeapValue::MatrixSlice(Arc<MatrixSliceData>)`.
+// The prior §2.7.22 Q23 ruling (Matrix lives under `HeapKind::TypedArray` via
+// `TypedArrayData::Matrix`) is superseded — see §2.7.22 amendment text.
 
 /// Flat, SIMD-aligned matrix storage (row-major order).
 #[derive(Debug, Clone)]
@@ -81,6 +89,41 @@ impl MatrixData {
     #[inline]
     pub fn row_data(&self, row: u32) -> &[f64] {
         self.row_slice(row)
+    }
+}
+
+/// Row/column projection into a parent `MatrixData` (`{ parent, offset, len }`).
+///
+/// ADR-006 §2.7.22 amendment (Round 18 S3 W12-matrix-floatslice-heapkind-exit,
+/// 2026-05-13): FloatSlice exits the `TypedArrayData` carrier hierarchy as a
+/// category-error. It is a projection-into-a-Matrix, not a buffer of floats.
+/// The carrier is `Arc<MatrixSliceData>` with kind `Ptr(HeapKind::MatrixSlice)`,
+/// constructed by `Matrix.row(i)` / `Matrix.col(i)` projection methods.
+///
+/// Aliasing semantics: the projection shares the parent Matrix's buffer
+/// (mutating through the projection writes through to the parent), preserved
+/// from the pre-amendment `TypedArrayData::FloatSlice` shape. The `parent`
+/// Arc retains one strong-count share for the projection's lifetime.
+#[derive(Debug, Clone)]
+pub struct MatrixSliceData {
+    pub parent: Arc<MatrixData>,
+    pub offset: u32,
+    pub len: u32,
+}
+
+impl MatrixSliceData {
+    /// Construct a projection into a parent matrix.
+    #[inline]
+    pub fn new(parent: Arc<MatrixData>, offset: u32, len: u32) -> Self {
+        Self { parent, offset, len }
+    }
+
+    /// Borrow the underlying slice into the parent's flat data buffer.
+    #[inline]
+    pub fn as_slice(&self) -> &[f64] {
+        let off = self.offset as usize;
+        let n = self.len as usize;
+        &self.parent.data.as_slice()[off..off + n]
     }
 }
 
@@ -2796,6 +2839,27 @@ impl Drop for TypedObjectStorage {
                         HeapKind::ModuleFn => {
                             // No-op: module-fn-id inline scalar.
                         }
+                        // ADR-006 §2.7.22 amendment (Round 18 S3,
+                        // 2026-05-13): a TypedObject field of kind
+                        // `NativeKind::Ptr(HeapKind::Matrix)` /
+                        // `NativeKind::Ptr(HeapKind::MatrixSlice)` holds
+                        // slot bits = `Arc::into_raw(Arc<MatrixData>)` /
+                        // `Arc::into_raw(Arc<MatrixSliceData>)` directly.
+                        // Retire one strong-count share at storage drop.
+                        // Same typed-Arc pure-discriminator dispatch shape
+                        // as the §2.7.9 FilterExpr / §2.7.13 Reference
+                        // amendments — `as_heap_value()` is unsound on
+                        // these bits; the kind label IS the dispatch.
+                        HeapKind::Matrix => {
+                            std::sync::Arc::decrement_strong_count(
+                                bits as *const MatrixData,
+                            );
+                        }
+                        HeapKind::MatrixSlice => {
+                            std::sync::Arc::decrement_strong_count(
+                                bits as *const MatrixSliceData,
+                            );
+                        }
                         // Wave 8 W8-T25 (ADR-006 §2.7.12 / Q13 amendment,
                         // 2026-05-10): when a TypedObject field of kind
                         // `NativeKind::Ptr(HeapKind::SharedCell)` is dropped
@@ -2879,7 +2943,12 @@ pub enum TypedArrayData {
     I64(Arc<crate::typed_buffer::TypedBuffer<i64>>),
     F64(Arc<crate::typed_buffer::AlignedTypedBuffer>),
     Bool(Arc<crate::typed_buffer::TypedBuffer<u8>>),
-    Matrix(Arc<MatrixData>),
+    // ADR-006 §2.7.22 amendment (Round 18 S3, 2026-05-13): the legacy
+    // `Matrix(Arc<MatrixData>)` variant is DELETED. Matrix is a category-error
+    // here — it is a single Matrix value, not a buffer-of-Matrix. Matrix now
+    // lives at `HeapKind::Matrix = 34` + `HeapValue::Matrix(Arc<MatrixData>)`
+    // with the typed-Arc pure-discriminator dispatch shape (mirror of
+    // §2.7.9 FilterExpr). See §2.7.22 amendment text + S3 close commit.
     I8(Arc<crate::typed_buffer::TypedBuffer<i8>>),
     I16(Arc<crate::typed_buffer::TypedBuffer<i16>>),
     I32(Arc<crate::typed_buffer::TypedBuffer<i32>>),
@@ -2915,11 +2984,13 @@ pub enum TypedArrayData {
     // variant in checkpoint 2; every reader was filled with real per-arm
     // bodies in checkpoint 3. Do not reintroduce under any rename — see
     // §Q25.E #1 forbidden pattern list.
-    FloatSlice {
-        parent: Arc<MatrixData>,
-        offset: u32,
-        len: u32,
-    },
+    // ADR-006 §2.7.22 amendment (Round 18 S3, 2026-05-13): the legacy
+    // `FloatSlice { parent, offset, len }` variant is DELETED. It is a
+    // projection-into-a-Matrix (category-error in a TypedArrayData carrier).
+    // The projection lives at `HeapKind::MatrixSlice = 35` +
+    // `HeapValue::MatrixSlice(Arc<MatrixSliceData>)` with the typed-Arc
+    // pure-discriminator dispatch shape (mirror of §2.7.9 FilterExpr).
+    // See §2.7.22 amendment text + S3 close commit.
 }
 
 impl TypedArrayData {
@@ -3028,7 +3099,6 @@ impl TypedArrayData {
             TypedArrayData::I64(_) => "Vec<int>",
             TypedArrayData::F64(_) => "Vec<number>",
             TypedArrayData::Bool(_) => "Vec<bool>",
-            TypedArrayData::Matrix(_) => "Mat<number>",
             TypedArrayData::I8(_) => "Vec<i8>",
             TypedArrayData::I16(_) => "Vec<i16>",
             TypedArrayData::I32(_) => "Vec<i32>",
@@ -3047,7 +3117,6 @@ impl TypedArrayData {
             TypedArrayData::Char(_) => "Vec<char>",
             TypedArrayData::TypedObject(_) => "Vec<object>",
             TypedArrayData::TraitObject(_) => "Vec<dyn>",
-            TypedArrayData::FloatSlice { .. } => "Vec<number>",
         }
     }
 
@@ -3057,7 +3126,6 @@ impl TypedArrayData {
             TypedArrayData::I64(a) => !a.is_empty(),
             TypedArrayData::F64(a) => !a.is_empty(),
             TypedArrayData::Bool(a) => !a.is_empty(),
-            TypedArrayData::Matrix(m) => m.data.len() > 0,
             TypedArrayData::I8(a) => !a.is_empty(),
             TypedArrayData::I16(a) => !a.is_empty(),
             TypedArrayData::I32(a) => !a.is_empty(),
@@ -3076,7 +3144,6 @@ impl TypedArrayData {
             TypedArrayData::Char(a) => !a.is_empty(),
             TypedArrayData::TypedObject(a) => !a.is_empty(),
             TypedArrayData::TraitObject(a) => !a.is_empty(),
-            TypedArrayData::FloatSlice { len, .. } => *len > 0,
         }
     }
 
@@ -3253,9 +3320,7 @@ impl TypedArrayData {
             // are heap-typed-Arc-element buffers whose write paths go
             // through dedicated per-arm typed entry-points (commit 2-3
             // wiring; commit 4 deletes the HeapValue arm).
-            TypedArrayData::FloatSlice { .. }
-            | TypedArrayData::Matrix(_)
-            | TypedArrayData::Decimal(_)
+            TypedArrayData::Decimal(_)
             | TypedArrayData::BigInt(_)
             | TypedArrayData::DateTime(_)
             | TypedArrayData::Timespan(_)
@@ -3305,9 +3370,6 @@ impl fmt::Display for TypedArrayData {
                     write!(f, "{}", *v != 0)?;
                 }
                 write!(f, "]")
-            }
-            TypedArrayData::Matrix(m) => {
-                write!(f, "<Mat<number>:{}x{}>", m.rows, m.cols)
             }
             TypedArrayData::I8(a) => {
                 write!(f, "Vec<i8>[")?;
@@ -3474,25 +3536,6 @@ impl fmt::Display for TypedArrayData {
                 // No construction site on this branch; this arm is
                 // unreachable until W17-trait-object-storage lands.
                 write!(f, "Vec<dyn>[<{} elements>]", a.data.len())
-            }
-            TypedArrayData::FloatSlice {
-                parent,
-                offset,
-                len,
-            } => {
-                let slice = &parent.data[*offset as usize..(*offset + *len) as usize];
-                write!(f, "Vec<number>[")?;
-                for (i, v) in slice.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    if *v == v.trunc() && v.abs() < 1e15 {
-                        write!(f, "{}", *v as i64)?;
-                    } else {
-                        write!(f, "{}", v)?;
-                    }
-                }
-                write!(f, "]")
             }
         }
     }
@@ -3732,6 +3775,20 @@ impl Clone for HeapValue {
             // W17-comptime-vm-dispatch (ADR-006 §2.7.26, 2026-05-12):
             // ModuleFn is an inline-scalar payload (no Arc).
             HeapValue::ModuleFn(v) => HeapValue::ModuleFn(*v),
+            // ADR-006 §2.7.22 amendment (Round 18 S3, 2026-05-13): Matrix
+            // and MatrixSlice arms share the typed-Arc clone shape — single
+            // strong-count bump on the shared `Arc<MatrixData>` /
+            // `Arc<MatrixSliceData>`. MatrixSlice's inner `parent: Arc<MatrixData>`
+            // share stays shared with the source (cloning the slice does not
+            // copy the parent matrix data). The HeapValue arm exists for the
+            // ADR-005 §1 / ADR-006 §2.3 `HeapKind`↔`HeapValue` symmetry but
+            // calling `slot.as_heap_value()` on Matrix/MatrixSlice-labeled
+            // slot bits is unsound — slot bits are
+            // `Arc::into_raw(Arc<MatrixData>)` / `Arc::into_raw(Arc<MatrixSliceData>)`,
+            // NOT `Box<HeapValue>`. Pure-discriminator dispatch shape, mirror
+            // of §2.7.9 FilterExpr / §2.7.13 Reference.
+            HeapValue::Matrix(v) => HeapValue::Matrix(Arc::clone(v)),
+            HeapValue::MatrixSlice(v) => HeapValue::MatrixSlice(Arc::clone(v)),
         }
     }
 }
@@ -3815,15 +3872,6 @@ fn typed_array_structural_eq(a: &TypedArrayData, b: &TypedArrayData) -> bool {
         (TypedArrayData::U32(x), TypedArrayData::U32(y)) => x == y,
         (TypedArrayData::U64(x), TypedArrayData::U64(y)) => x == y,
         (TypedArrayData::F32(x), TypedArrayData::F32(y)) => x == y,
-        (TypedArrayData::Matrix(x), TypedArrayData::Matrix(y)) => matrix_eq(x, y),
-        (
-            TypedArrayData::FloatSlice { parent: p1, offset: o1, len: l1 },
-            TypedArrayData::FloatSlice { parent: p2, offset: o2, len: l2 },
-        ) => {
-            let s1 = &p1.data[*o1 as usize..(*o1 + *l1) as usize];
-            let s2 = &p2.data[*o2 as usize..(*o2 + *l2) as usize];
-            s1 == s2
-        }
         _ => false,
     }
 }
@@ -4027,6 +4075,33 @@ impl fmt::Display for HeapValue {
             // W17-comptime-vm-dispatch (ADR-006 §2.7.26, 2026-05-12):
             // ModuleFn references render as `<module_fn:id>`.
             HeapValue::ModuleFn(id) => write!(f, "<module_fn:{}>", id),
+            // ADR-006 §2.7.22 amendment (Round 18 S3, 2026-05-13):
+            // Matrix renders as `<Mat<number>:rows x cols>`, mirroring the
+            // pre-amendment `TypedArrayData::Matrix` Display shape.
+            // MatrixSlice renders as a flat `Vec<number>[...]` over the
+            // projection's element slice, mirroring the pre-amendment
+            // `TypedArrayData::FloatSlice` Display shape. These Display
+            // surfaces are diagnostic fallbacks; pretty-printing of
+            // Matrix/MatrixSlice values goes through `printing.rs` at
+            // the VM tier.
+            HeapValue::Matrix(m) => {
+                write!(f, "<Mat<number>:{}x{}>", m.rows, m.cols)
+            }
+            HeapValue::MatrixSlice(s) => {
+                let slice = s.as_slice();
+                write!(f, "Vec<number>[")?;
+                for (i, v) in slice.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    if *v == v.trunc() && v.abs() < 1e15 {
+                        write!(f, "{}", *v as i64)?;
+                    } else {
+                        write!(f, "{}", v)?;
+                    }
+                }
+                write!(f, "]")
+            }
         }
     }
 }
@@ -4092,6 +4167,17 @@ impl HeapValue {
             }
             (HeapValue::TypedArray(a), HeapValue::TypedArray(b)) => {
                 typed_array_structural_eq(a.as_ref(), b.as_ref())
+            }
+            // ADR-006 §2.7.22 amendment (Round 18 S3, 2026-05-13): Matrix
+            // equality is structural (rows + cols + element-wise compare);
+            // MatrixSlice equality is element-wise over the projection slice
+            // (parent identity is NOT required — two slices with identical
+            // elements compare equal even when projecting from different
+            // parents). Mirror of the pre-amendment TypedArrayData::Matrix /
+            // FloatSlice equality semantics.
+            (HeapValue::Matrix(a), HeapValue::Matrix(b)) => matrix_eq(a, b),
+            (HeapValue::MatrixSlice(a), HeapValue::MatrixSlice(b)) => {
+                a.as_slice() == b.as_slice()
             }
             _ => false,
         }
@@ -4182,6 +4268,12 @@ impl HeapValue {
             (HeapValue::NativeView(a), HeapValue::NativeView(b)) => native_view_eq(a, b),
             (HeapValue::TypedArray(a), HeapValue::TypedArray(b)) => {
                 typed_array_structural_eq(a.as_ref(), b.as_ref())
+            }
+            // ADR-006 §2.7.22 amendment (Round 18 S3, 2026-05-13): Matrix
+            // and MatrixSlice equality match the structural_eq shape above.
+            (HeapValue::Matrix(a), HeapValue::Matrix(b)) => matrix_eq(a, b),
+            (HeapValue::MatrixSlice(a), HeapValue::MatrixSlice(b)) => {
+                a.as_slice() == b.as_slice()
             }
             // Cross-type numeric
             (HeapValue::NativeScalar(a), HeapValue::BigInt(b)) => native_scalar_bigint_eq(a, b.as_ref()),

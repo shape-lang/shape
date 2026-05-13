@@ -121,12 +121,9 @@ fn element_to_string(arr: &TypedArrayData, idx: usize, out: &mut String) -> Resu
             out.push_str(buf.data[idx].as_str());
             Ok(())
         }
-        TypedArrayData::Matrix(_) | TypedArrayData::FloatSlice { .. } => Err(type_error(format!(
-            "joinStr: TypedArrayData variant {} not part of the Wave-δ joinStr migration \
-             (Phase-2c reentry — matrix / float-slice element stringification needs \
-             per-NativeKind formatter dispatch via the kinded output-adapter path)",
-            arr.type_name()
-        ))),
+        // ADR-006 §2.7.22 amendment (Round 18 S3): Matrix / FloatSlice
+        // exit `TypedArrayData`. Their joinStr lives on the new HeapKind
+        // method registries when needed.
         // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
         TypedArrayData::Decimal(buf) => {
             write!(out, "{}", buf.data[idx]).map_err(|e| type_error(e.to_string()))
@@ -169,8 +166,8 @@ fn array_len(arr: &TypedArrayData) -> Result<usize, VMError> {
         TypedArrayData::U64(b) => b.len(),
         TypedArrayData::F32(b) => b.len(),
         TypedArrayData::String(b) => b.len(),
-        TypedArrayData::Matrix(m) => m.data.len(),
-        TypedArrayData::FloatSlice { len, .. } => *len as usize,
+        // ADR-006 §2.7.22 amendment (Round 18 S3): Matrix / FloatSlice
+        // exit `TypedArrayData`.
         // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
         TypedArrayData::Decimal(b) => b.len(),
         TypedArrayData::BigInt(b) => b.len(),

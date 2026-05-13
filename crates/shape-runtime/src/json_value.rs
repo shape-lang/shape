@@ -254,6 +254,21 @@ pub fn heap_to_json_value(hv: &HeapValue) -> Result<JsonValue, String> {
         // which is rebuilt per-VM-instance, not part of the
         // serialisable program state.
         HeapValue::ModuleFn(_) => Err("cannot serialize: ModuleFn".into()),
+        // ADR-006 §2.7.22 amendment (Round 18 S3, 2026-05-13): Matrix /
+        // MatrixSlice JSON serialization-policy is N7-architectural-choice
+        // deferred (mirror of the pre-amendment
+        // `TypedArrayData::Matrix` / `FloatSlice` rejection at this layer;
+        // 2D-layout encoding is undecided — nested array-of-arrays vs
+        // flat row-major vs `{rows, cols, data}` forms have different
+        // round-trip properties). MatrixSlice inherits the same deferral.
+        HeapValue::Matrix(_) => Err(
+            "Matrix serialization policy not yet decided (N7 architectural-choice deferral; multiple natural encodings: nested array-of-arrays vs flat row-major vs {rows, cols, data})"
+                .into(),
+        ),
+        HeapValue::MatrixSlice(_) => Err(
+            "MatrixSlice serialization policy not yet decided (N7 architectural-choice deferral; structurally inherits Matrix's encoding question)"
+                .into(),
+        ),
     }
 }
 
@@ -313,16 +328,13 @@ fn typed_array_to_json_value(ta: &TypedArrayData) -> Result<JsonValue, String> {
                 .collect(),
         )),
 
-        // Architectural-choice deferred (REFINEMENT-1B-ITEM-A) — first-landing
-        // Err. 2D-layout encoding policy not yet decided.
-        TypedArrayData::Matrix(_) => Err(
-            "Matrix serialization policy not yet decided (N7 architectural-choice deferral; multiple natural encodings: nested array-of-arrays vs flat row-major vs {rows, cols, data})"
-                .into(),
-        ),
-        TypedArrayData::FloatSlice { .. } => Err(
-            "FloatSlice serialization policy not yet decided (N7 architectural-choice deferral; structurally inherits Matrix's encoding question)"
-                .into(),
-        ),
+        // ADR-006 §2.7.22 amendment (Round 18 S3, 2026-05-13): the
+        // `Matrix` / `FloatSlice` arms previously rejected here are
+        // DELETED from `TypedArrayData`. Matrix and MatrixSlice are now
+        // top-level `HeapValue` arms (and `HeapKind::Matrix = 34` /
+        // `HeapKind::MatrixSlice = 35`); their JSON serialization-policy
+        // rejection lives at the top-level `heap_to_json_value` match
+        // below.
         // ── W17-typed-carrier-bundle-A commit 1/4: §2.7.24 Q25.A arms ───
         // Per-arm JSON serialisation lands in commit 3 (mechanical-yes for
         // Decimal/BigInt/Char/TypedObject; deferred-Err for the

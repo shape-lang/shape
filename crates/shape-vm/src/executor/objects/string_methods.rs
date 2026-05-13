@@ -551,30 +551,9 @@ pub fn v2_string_join(
             .map(|s| s.as_str().to_string())
             .collect::<Vec<_>>()
             .join(sep),
-        // FloatSlice: same f64 storage as F64 with a window.
-        TypedArrayData::FloatSlice {
-            parent,
-            offset,
-            len,
-        } => {
-            let off = *offset as usize;
-            let n = *len as usize;
-            parent.data[off..off + n]
-                .iter()
-                .map(format_f64)
-                .collect::<Vec<_>>()
-                .join(sep)
-        }
-        // Matrix and HeapValue variants would need richer Display
-        // wiring (matrix is 2D; HeapValue join needs per-element
-        // HeapValue Display routing). Surface as a Phase-2c reentry
-        // rather than fabricate a partial Display.
-        TypedArrayData::Matrix(_) => {
-            return Err(VMError::NotImplemented(
-                "Array<Matrix>.join: matrix display in join is Phase-2c"
-                    .to_string(),
-            ));
-        }
+        // ADR-006 §2.7.22 amendment (Round 18 S3): Matrix / FloatSlice
+        // exit `TypedArrayData`. Their join surfaces dispatch via their
+        // dedicated HeapKind paths.
         // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
         TypedArrayData::Decimal(buf) => {
             buf.data.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(sep)

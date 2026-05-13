@@ -14,11 +14,14 @@
 //! Wave-δ MR-string-misc body migration (2026-05-09): `op_new_matrix` and
 //! `op_new_typed_array` migrate to real bodies.
 //!
-//! - **`op_new_matrix`**: pops `rows * cols` numeric (`Float64`) bits per
-//!   the operand's `MatrixDims`; constructs
-//!   `Arc<TypedArrayData::Matrix(Arc<MatrixData>)>` via
+//! - **`op_new_matrix`** (post Round 18 S3 ADR-006 §2.7.22 amendment,
+//!   2026-05-13): pops `rows * cols` numeric (`Float64`) bits per the
+//!   operand's `MatrixDims`; constructs `Arc<MatrixData>` via
 //!   `MatrixData::from_flat`; pushes via `Arc::into_raw + push_kinded(_,
-//!   NativeKind::Ptr(HeapKind::TypedArray))`.
+//!   NativeKind::Ptr(HeapKind::Matrix))`. The pre-amendment shape pushed
+//!   `Arc<TypedArrayData::Matrix(Arc<MatrixData>)>` with kind
+//!   `Ptr(HeapKind::TypedArray)`; the new shape exits the
+//!   `TypedArrayData` carrier hierarchy entirely.
 //! - **`op_new_typed_array`**: pops N elements with their kinds; if all
 //!   elements share `Int64` / `Float64` / `Bool` / `String` kind, builds
 //!   the matching `TypedArrayData::*` variant. Mixed-kind input still
@@ -225,12 +228,14 @@ impl VirtualMachine {
     /// Stack: [...f64_values (rows*cols)] -> [matrix]
     /// Operand: MatrixDims { rows, cols }
     ///
-    /// Wave-δ MR-string-misc: `Arc::new(TypedArrayData::Matrix(Arc::new(
-    /// MatrixData::from_flat(...))))` + `push_kinded(_, NativeKind::Ptr(
-    /// HeapKind::TypedArray))`. Element kinds are expected to be `Float64`
-    /// per the compiler's matrix-emit contract; `Int64` is widened to
-    /// `f64` for backward compatibility (existing emit paths sometimes
-    /// push `int` literals through this op).
+    /// ADR-006 §2.7.22 amendment (Round 18 S3 W12-matrix-floatslice-heapkind
+    /// -exit, 2026-05-13): the construction site pushes
+    /// `Arc<MatrixData>` directly under kind `Ptr(HeapKind::Matrix)`. The
+    /// pre-amendment shape (`Arc<TypedArrayData::Matrix(Arc<MatrixData>)>`
+    /// under `Ptr(HeapKind::TypedArray)`) is retired. Element kinds are
+    /// expected to be `Float64` per the compiler's matrix-emit contract;
+    /// `Int64` is widened to `f64` for backward compatibility (existing
+    /// emit paths sometimes push `int` literals through this op).
     pub(in crate::executor) fn op_new_matrix(
         &mut self,
         instruction: &Instruction,
@@ -288,11 +293,9 @@ impl VirtualMachine {
         }
 
         let matrix = shape_value::heap_value::MatrixData::from_flat(data, rows, cols);
-        let arr = Arc::new(
-            shape_value::heap_value::TypedArrayData::Matrix(Arc::new(matrix)),
-        );
-        let bits = Arc::into_raw(arr) as u64;
-        self.push_kinded(bits, NativeKind::Ptr(HeapKind::TypedArray))
+        let arc = Arc::new(matrix);
+        let bits = Arc::into_raw(arc) as u64;
+        self.push_kinded(bits, NativeKind::Ptr(HeapKind::Matrix))
     }
 
     /// Create a generic Array from N stack elements.

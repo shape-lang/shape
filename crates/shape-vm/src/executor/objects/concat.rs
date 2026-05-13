@@ -241,81 +241,10 @@ fn concat_typed_arrays(
                 shape_value::typed_buffer::TypedBuffer::from_vec(data),
             ))))
         }
-        // FloatSlice + FloatSlice: materialize into an owned F64 array
-        // (matches the slice operator's materialize-not-view semantics
-        // in `array_operations.rs::slice_typed_array`).
-        (
-            TypedArrayData::FloatSlice {
-                parent: pa,
-                offset: oa,
-                len: la,
-            },
-            TypedArrayData::FloatSlice {
-                parent: pb,
-                offset: ob,
-                len: lb,
-            },
-        ) => {
-            let mut data: Vec<f64> = Vec::with_capacity(*la as usize + *lb as usize);
-            let oa = *oa as usize;
-            let la = *la as usize;
-            let ob = *ob as usize;
-            let lb = *lb as usize;
-            data.extend_from_slice(&pa.data[oa..oa + la]);
-            data.extend_from_slice(&pb.data[ob..ob + lb]);
-            let aligned = shape_value::aligned_vec::AlignedVec::<f64>::from_vec(data);
-            let buf =
-                shape_value::typed_buffer::AlignedTypedBuffer::from_aligned(aligned);
-            Ok(Arc::new(TypedArrayData::F64(Arc::new(buf))))
-        }
-        // Cross-FloatSlice <-> F64 cases: materialize the slice and
-        // concat through the F64 path. Avoids a Phase-2c surface for
-        // a near-identical-shape concat — both arms are f64 storage.
-        (
-            TypedArrayData::FloatSlice {
-                parent: pa,
-                offset: oa,
-                len: la,
-            },
-            TypedArrayData::F64(lb),
-        ) => {
-            let mut data: Vec<f64> = Vec::with_capacity(*la as usize + lb.data.len());
-            let oa = *oa as usize;
-            let la = *la as usize;
-            data.extend_from_slice(&pa.data[oa..oa + la]);
-            data.extend_from_slice(&lb.data);
-            let aligned = shape_value::aligned_vec::AlignedVec::<f64>::from_vec(data);
-            let buf =
-                shape_value::typed_buffer::AlignedTypedBuffer::from_aligned(aligned);
-            Ok(Arc::new(TypedArrayData::F64(Arc::new(buf))))
-        }
-        (
-            TypedArrayData::F64(la),
-            TypedArrayData::FloatSlice {
-                parent: pb,
-                offset: ob,
-                len: lb,
-            },
-        ) => {
-            let mut data: Vec<f64> = Vec::with_capacity(la.data.len() + *lb as usize);
-            let ob = *ob as usize;
-            let lb = *lb as usize;
-            data.extend_from_slice(&la.data);
-            data.extend_from_slice(&pb.data[ob..ob + lb]);
-            let aligned = shape_value::aligned_vec::AlignedVec::<f64>::from_vec(data);
-            let buf =
-                shape_value::typed_buffer::AlignedTypedBuffer::from_aligned(aligned);
-            Ok(Arc::new(TypedArrayData::F64(Arc::new(buf))))
-        }
-        // Matrix concat is undefined (the slice operator surfaces too;
-        // matrix is a 2D view, not a 1D Vec).
-        (TypedArrayData::Matrix(_), _) | (_, TypedArrayData::Matrix(_)) => {
-            Err(VMError::NotImplemented(format!(
-                "ArrayConcat: Matrix variant — Phase-2c reentry. Matrix \
-                 is a 2D view, not a 1D Vec; concat semantics undefined \
-                 (mirrors slice_typed_array in array_operations.rs)."
-            )))
-        }
+        // ADR-006 §2.7.22 amendment (Round 18 S3): Matrix / FloatSlice
+        // exit `TypedArrayData`. Concat of Matrix / MatrixSlice receivers
+        // with array receivers is dispatched at the HeapKind layer (no
+        // inner-arm cross-variant routing here).
         // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized
         // same-variant arms. Per-element Arc::clone preserves refcount
         // discipline.

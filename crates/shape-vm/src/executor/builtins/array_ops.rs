@@ -165,7 +165,11 @@ fn typed_array_element(arr: &TypedArrayData, idx: usize) -> Option<KindedSlot> {
         TypedArrayData::Char(buf) => buf.data.get(idx).copied().map(KindedSlot::from_char),
         TypedArrayData::TypedObject(buf) => buf.data.get(idx).map(|o| KindedSlot::from_typed_object(Arc::clone(o))),
         TypedArrayData::TraitObject(buf) => buf.data.get(idx).map(|t| KindedSlot::from_trait_object(Arc::clone(t))),
-        TypedArrayData::Matrix(_) | TypedArrayData::FloatSlice { .. } => None,
+        // ADR-006 §2.7.22 amendment (Round 18 S3, 2026-05-13): Matrix /
+        // FloatSlice arms deleted from TypedArrayData — Matrix is now its
+        // own `HeapKind::Matrix`; MatrixSlice projections are their own
+        // `HeapKind::MatrixSlice`. Indexing into a Matrix or MatrixSlice
+        // receiver is handled at the HeapKind dispatch shell, not here.
     }
 }
 
@@ -346,7 +350,10 @@ pub(in crate::executor) fn builtin_last(args: &[KindedSlot]) -> Result<KindedSlo
         TypedArrayData::Char(b) => b.len(),
         TypedArrayData::TypedObject(b) => b.len(),
         TypedArrayData::TraitObject(b) => b.len(),
-        TypedArrayData::Matrix(_) | TypedArrayData::FloatSlice { .. } => 0,
+        // ADR-006 §2.7.22 amendment (Round 18 S3): Matrix / FloatSlice
+        // arms deleted from TypedArrayData; receivers of those types
+        // arrive at the HeapKind::Matrix / HeapKind::MatrixSlice
+        // dispatch shell, not here.
     };
     if len == 0 {
         return Ok(KindedSlot::none());
@@ -627,7 +634,8 @@ pub(in crate::executor) fn builtin_slice(args: &[KindedSlot]) -> Result<KindedSl
         TypedArrayData::Char(x) => x.len(),
         TypedArrayData::TypedObject(x) => x.len(),
         TypedArrayData::TraitObject(x) => x.len(),
-        TypedArrayData::Matrix(_) | TypedArrayData::FloatSlice { .. } => 0,
+        // ADR-006 §2.7.22 amendment (Round 18 S3): Matrix / FloatSlice
+        // arms deleted from TypedArrayData.
     } as isize;
 
     let start = super::kind_coerce::coerce_to_f64(&args[1])

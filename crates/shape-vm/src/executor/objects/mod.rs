@@ -575,6 +575,12 @@ impl VirtualMachine {
                     // (per playbook §10 D-objects-mod receiver-class).
                     // `as_heap_value()` is sound here — TypedArray is a
                     // full `HeapValue` arm (ADR-005 §1).
+                    //
+                    // ADR-006 §2.7.22 amendment (Round 18 S3, 2026-05-13):
+                    // Matrix and MatrixSlice exit this sub-classification.
+                    // Matrix receivers arrive at `HeapKind::Matrix` →
+                    // `MATRIX_METHODS` directly; MatrixSlice receivers at
+                    // `HeapKind::MatrixSlice` → `FLOAT_ARRAY_METHODS`.
                     let typed = match receiver.slot.as_heap_value() {
                         HeapValue::TypedArray(arc) => match arc.as_ref() {
                             TypedArrayData::I64(_)
@@ -587,9 +593,7 @@ impl VirtualMachine {
                             | TypedArrayData::U64(_) => method_registry::INT_ARRAY_METHODS
                                 .get(method_name)
                                 .copied(),
-                            TypedArrayData::F64(_)
-                            | TypedArrayData::F32(_)
-                            | TypedArrayData::FloatSlice { .. } => {
+                            TypedArrayData::F64(_) | TypedArrayData::F32(_) => {
                                 method_registry::FLOAT_ARRAY_METHODS
                                     .get(method_name)
                                     .copied()
@@ -597,9 +601,6 @@ impl VirtualMachine {
                             TypedArrayData::Bool(_) => method_registry::BOOL_ARRAY_METHODS
                                 .get(method_name)
                                 .copied(),
-                            TypedArrayData::Matrix(_) => {
-                                method_registry::MATRIX_METHODS.get(method_name).copied()
-                            }
                             TypedArrayData::String(_) => None,
                             // W17-typed-carrier-bundle-A checkpoint 3/4:
                             // Q25.A specialized arms — no per-element-type
@@ -621,6 +622,17 @@ impl VirtualMachine {
                     };
                     typed.or_else(|| method_registry::ARRAY_METHODS.get(method_name).copied())
                 }
+                // ADR-006 §2.7.22 amendment (Round 18 S3, 2026-05-13):
+                // Matrix is a first-class HeapKind — receivers route
+                // directly to `MATRIX_METHODS` (no inner-TypedArrayData
+                // sub-classification two-step). MatrixSlice receivers
+                // route to `FLOAT_ARRAY_METHODS` (their methods are
+                // numeric-aggregations over a flat f64 region; the same
+                // PHF that handles `F64`-typed arrays applies).
+                HeapKind::Matrix => method_registry::MATRIX_METHODS.get(method_name).copied(),
+                HeapKind::MatrixSlice => method_registry::FLOAT_ARRAY_METHODS
+                    .get(method_name)
+                    .copied(),
                 HeapKind::Temporal => {
                     // C1-temporal-lowering (Phase 2d Wave 2): Temporal
                     // slots are `Arc::into_raw::<TemporalData>` — NOT a

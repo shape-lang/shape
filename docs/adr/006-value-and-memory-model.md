@@ -3753,7 +3753,154 @@ in-flight Deque state (the §2.7.4 phase-2c marshal rebuild covers
 this for HashMap / HashSet / Deque uniformly); element-kind
 specialisation (Path B `TypedDeque<T>` per kind, future
 amendment).
-#### 2.7.22 Matrix lives under `HeapKind::TypedArray` — Q23 audit-only ruling (Wave 15 W15-matrix, 2026-05-10)
+#### 2.7.22 Matrix and MatrixSlice exit `TypedArrayData` — Q23 amendment (Round 18 S3 W12-matrix-floatslice-heapkind-exit, 2026-05-13)
+
+Round 18 S3 supersedes the prior Q23 audit-only ruling (§2.7.22 below,
+W15-matrix 2026-05-10) and the §2.7.22 subsection's "no new HeapKind"
+disposition. The Round 17 W12-typed-array-data-deletion audit
+(`docs/cluster-audits/w12-typed-array-data-deletion-audit.md` §2.3 /
+§2.4) named `TypedArrayData::Matrix(Arc<MatrixData>)` and
+`TypedArrayData::FloatSlice { parent, offset, len }` as
+**category-error** variants: Matrix is a **single Matrix value**, not
+a buffer-of-Matrix; FloatSlice is a **projection-into-a-Matrix**, not
+a buffer of floats. Their residency in `TypedArrayData` was a
+second-order consequence of the ADR-005 §1 single-discriminator
+concern that motivated Q23's parallel-HeapKind-refusal.
+
+Under the Round 17 deletion-audit + cluster-0-transition
+strategic-owner authorization (2026-05-13), `TypedArrayData::Matrix`
+and `TypedArrayData::FloatSlice` are deleted. Once the second label
+is gone, the parallel-HeapKind-discriminator concern that motivated
+Q23 evaporates: `HeapKind::Matrix` and `HeapKind::MatrixSlice` are
+**not parallel discriminators of `HeapKind::TypedArray`** (which is
+the array-buffer carrier with element-typed payload); they are
+**separate value categories** — a structured numeric matrix value and
+a row/column projection — that share zero structural shape with the
+element-typed-array carrier.
+
+**Decision (Q23 amendment, Round 18 S3):**
+
+- `HeapKind::Matrix = 34` (next free after `ModuleFn = 33`).
+- `HeapValue::Matrix(Arc<MatrixData>)` — typed-Arc pure-discriminator
+  arm, mirror of §2.7.9 FilterExpr. Slot bits are
+  `Arc::into_raw(Arc<MatrixData>) as u64`; `as_heap_value()` is
+  unsound on Matrix-labeled bits (the slot stores an
+  `Arc<MatrixData>` pointer, not a `*const HeapValue`). Heap dispatch
+  for retain/release routes through the kind label
+  (`clone_with_kind` / `drop_with_kind`), not through HeapValue
+  materialization. Receiver classification in
+  `op_call_method` dispatches `Ptr(HeapKind::Matrix)` directly to
+  `MATRIX_METHODS` (no inner-arm sub-classification two-step).
+- `HeapKind::MatrixSlice = 35` (next free).
+- `HeapValue::MatrixSlice(Arc<MatrixSliceData>)` — typed-Arc
+  pure-discriminator arm with the same dispatch shape as
+  `HeapValue::Matrix`. `MatrixSliceData { parent: Arc<MatrixData>,
+  offset: u32, len: u32 }` preserves the aliasing-into-parent
+  semantics from the pre-amendment `TypedArrayData::FloatSlice`
+  payload. Receiver classification dispatches
+  `Ptr(HeapKind::MatrixSlice)` to `FLOAT_ARRAY_METHODS` (their
+  numeric aggregations apply uniformly over the projection's flat
+  f64 region).
+
+**4-table lockstep updates** (post-§2.7.6 / Q8 cardinality rule):
+
+1. `crates/shape-vm/src/executor/vm_impl/stack.rs` — `clone_with_kind`
+   / `drop_with_kind` retain/release at the matching
+   `Arc::increment/decrement_strong_count::<MatrixData>` /
+   `::<MatrixSliceData>` per kind label.
+2. `crates/shape-value/src/kinded_slot.rs` — `KindedSlot::Clone` /
+   `KindedSlot::Drop` mirror the same arms;
+   `KindedSlot::from_matrix(Arc<MatrixData>)` /
+   `KindedSlot::from_matrix_slice(Arc<MatrixSliceData>)`
+   constructors land (§2.7.6 / Q8 carrier-API-bound preserved: one
+   constructor per new heap variant, no per-heap accessor on
+   `KindedSlot` itself).
+3. `crates/shape-value/src/v2/closure_layout.rs` — `SharedCell::drop`
+   dispatches the new arms.
+4. `crates/shape-value/src/heap_value.rs` — `TypedObjectStorage::drop`
+   dispatches the new arms (matrix/slice payloads can live in
+   TypedObject field slots).
+
+Plus knock-on exhaustive-match additions in `printing.rs` /
+`arithmetic/mod.rs::kind_type_name` /
+`comparison/mod.rs::kind_type_name` /
+`objects/typed_access.rs::kind_type_name`;
+`shape-jit/src/ffi/call_method/mod.rs::receiver_type_name`
+(JIT-side type-name dispatch); `wire_conversion.rs` /
+`json_value.rs` arms (HeapValue serialization — same N7
+architectural-choice deferral as the pre-amendment `TypedArrayData`
+arms had: 2D-layout encoding policy undecided).
+
+**Construction site migration:**
+
+- `executor/objects/object_creation.rs::op_new_matrix` — pushes
+  `Arc::into_raw(Arc<MatrixData>) as u64` with kind
+  `Ptr(HeapKind::Matrix)` directly (pre-amendment shape:
+  `Arc<TypedArrayData::Matrix(Arc<MatrixData>)>` under
+  `Ptr(HeapKind::TypedArray)` — retired).
+- `executor/objects/datatable_methods/core.rs::handle_toMat` —
+  builds an `Arc<MatrixData>` and pushes via
+  `KindedSlot::from_matrix`.
+- `executor/objects/matrix_methods.rs::as_matrix` — recovers
+  `Arc<MatrixData>` via the canonical reconstruct-clone-restore
+  pattern at the typed-Arc payload directly (no inner-enum
+  projection), kind-gating on `Ptr(HeapKind::Matrix)`. `matrix_slot`
+  wraps via `KindedSlot::from_matrix`.
+- No MatrixSlice construction site exists in current code (the
+  pre-amendment `TypedArrayData::FloatSlice` variant had no
+  constructor either — it was a dormant variant pinned to the
+  category-error shape). The `KindedSlot::from_matrix_slice`
+  constructor is provided for the eventual Matrix.row/col
+  projection methods to land their projection-into-parent-buffer
+  semantics (currently `mat.row(i)` / `mat.col(i)` materialise to
+  fresh `Arc<TypedArrayData::F64>` arrays per the pre-amendment
+  matrix_methods bodies).
+
+**Cardinality cost:** `HeapKind` grows from 34 variants (0..33) to 36
+(0..35); the §2.7.6 Q8 bound (~25 constructors / ~5-10 scalar
+accessors max on `KindedSlot`) is unchanged because Matrix /
+MatrixSlice each get one matching constructor and no scalar
+accessor — heap dispatch goes through the kind label per the
+§2.7.9 FilterExpr precedent. Total dispatch surface grows by two
+arms per dispatch table.
+
+**Forbidden alternatives this amendment rules out (defection-attractor
+class extends per CLAUDE.md "Renames to refuse on sight"):**
+
+- "Keep Matrix in `TypedArrayData` under documented exception" —
+  refused on sight. The deletion is systematic; Q23 is being
+  superseded, not preserved with a footnote.
+- "Preserve TypedArrayData::Matrix for one variant" —
+  parallel-implementation-across-producer/consumer-carrier-shape-
+  boundaries defection (CLAUDE.md "Forbidden Patterns" §
+  "Parallel-implementation across producer/consumer carrier-shape
+  boundaries").
+- "Bridge / probe / helper / hop / translator / adapter / shim
+  framing for the Matrix-out-of-TypedArrayData migration" —
+  broader-family rule. Describe the migration by name (Matrix
+  HeapKind exit, FloatSlice HeapKind exit) or by deletion-fate
+  (the deleted `TypedArrayData::Matrix` / `FloatSlice` arms),
+  never by hypothetical role.
+
+**Provenance:** Round 17 W12-typed-array-data-deletion audit
+(`docs/cluster-audits/w12-typed-array-data-deletion-audit.md` §2.3
+/ §2.4 — the category-error finding) + cluster-0-transition
+strategic-owner authorization (2026-05-13). Round 18 S3
+W12-matrix-floatslice-heapkind-exit closes the migration in a
+single commit per the supervisor's directive (new HeapKind
+allocations + variant removal + dispatch tables + amendment text
+co-located).
+
+#### 2.7.22 Matrix lives under `HeapKind::TypedArray` — Q23 audit-only ruling (Wave 15 W15-matrix, 2026-05-10, **SUPERSEDED**)
+
+**Status (2026-05-13):** SUPERSEDED by the §2.7.22 Round 18 S3
+amendment above. The text below is preserved for historical
+provenance — the Q23 ruling that Matrix continues to live under
+`HeapKind::TypedArray` via `TypedArrayData::Matrix` was retired when
+the Round 17 deletion-audit named the category-error and Round 18 S3
+landed the systematic exit. Read the amendment above for the
+current ruling.
+
 
 W15-matrix (close 2026-05-10) audited the wave-14-15-16 playbook §2
 W15-matrix sub-cluster proposal to add `HeapKind::Matrix = 29` +
