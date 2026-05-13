@@ -551,6 +551,20 @@ impl BytecodeCompiler {
                 // Clear closure_function_ids for the next function
                 self.closure_function_ids.clear();
 
+                // ADR-006 §2.7.5 stamp-at-compile-time, Phase 3
+                // cluster-0 Round 16 W17-narrow-follow-up-A: thread
+                // the user-declared (or anonymous-inline) schema id
+                // through every `StatementKind::ObjectStore` carrier
+                // before the MIR ships to the JIT. The bytecode-side
+                // `OpCode::NewTypedObject` operand carries the same
+                // id; this back-patch aligns the two so the JIT's
+                // `typed_object_alloc(schema_id, ...)` preserves the
+                // user-declared schema identity.
+                crate::compiler::mir_schema_threading::back_patch_schema_ids(
+                    &mut mir,
+                    &mut self.type_tracker,
+                );
+
                 self.program.functions[func_idx].mir_data =
                     Some(std::sync::Arc::new(crate::bytecode::MirFunctionData {
                         mir,

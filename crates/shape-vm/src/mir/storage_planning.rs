@@ -3184,6 +3184,7 @@ mod tests {
                         container_slot: SlotId(2),
                         operands: vec![Operand::Copy(Place::Local(SlotId(1)))],
                         field_names: vec!["f".to_string()],
+                        schema_id: None,
                     },
                     2,
                 ),

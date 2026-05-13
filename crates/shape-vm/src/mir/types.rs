@@ -430,10 +430,28 @@ pub enum StatementKind {
     /// Operands are the fields/spreads being stored.
     /// `field_names` carries the string key for each operand (from the AST).
     /// When present, JIT codegen can construct a proper object with named fields.
+    ///
+    /// `schema_id` carries the user-declared (or anonymous-inline) schema id
+    /// from the bytecode-side `OpCode::NewTypedObject` operand
+    /// (`Operand::TypedObjectAlloc { schema_id, field_count }`). MIR lowering
+    /// emits `None`; the bytecode compiler back-patches the resolved
+    /// `SchemaId` via `crate::compiler::mir_schema_threading::
+    /// back_patch_schema_ids` (Phase 3 cluster-0 Round 16 W17-narrow-
+    /// follow-up-A, ADR-006 §2.7.5 stamp-at-compile-time). The JIT MIR
+    /// consumer at `crates/shape-jit/src/mir_compiler/statements.rs::
+    /// StatementKind::ObjectStore` uses this id directly for
+    /// `typed_object_alloc`, preserving the user-declared schema identity
+    /// (e.g. `X` schema = 53 in Smoke 3) instead of the prior
+    /// `register_predeclared_any_schema` `__predecl_*`-named id (54).
+    ///
+    /// `None` when the back-patch could not resolve the schema (the
+    /// downstream JIT consumer surfaces-and-stops per §2.7.5 — no
+    /// `register_predeclared_any_schema` fallback, no Bool-default).
     ObjectStore {
         container_slot: SlotId,
         operands: Vec<Operand>,
         field_names: Vec<String>,
+        schema_id: Option<u32>,
     },
     /// Store values into an enum payload.
     /// Operands are the tuple/struct payload values being stored.
