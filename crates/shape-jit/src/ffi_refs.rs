@@ -345,6 +345,20 @@ pub struct FFIFuncRefs {
     pub(crate) arc_lazy_retain: FuncRef,
     pub(crate) arc_lazy_release: FuncRef,
 
+    // ADR-006 §2.7.5 — `Arc<String>` strict-typed carrier retain/release
+    // (W12-jit-string-carrier-unification, Phase 3 cluster-0 Round 12 T2/T3,
+    // 2026-05-13). The §2.7.5 `NativeKind::String` slot carries
+    // `Arc::into_raw(Arc<String>) as u64`; refcount at offset -16 per the
+    // standard Rust Arc layout. The legacy `arc_retain` / `arc_release`
+    // operate on the W11 `UnifiedValue<T>` HeapHeader at offset 4 and
+    // would scribble on the `String` payload's `ptr/cap/len` words.
+    //
+    // Bodies in `ffi/string.rs::jit_arc_string_retain` / `_release`.
+    // Mirror of Round 7A's `arc_result_retain` / `_release` and Round 9's
+    // typed-Arc collection retain/release pairs.
+    pub(crate) arc_string_retain: FuncRef,
+    pub(crate) arc_string_release: FuncRef,
+
     // v2 typed HashMap<string, ...> access.
     //
     // SURFACE (ADR-006 §2.7.14 Q15 / W11-jit-carrier-conversion sub-cluster):

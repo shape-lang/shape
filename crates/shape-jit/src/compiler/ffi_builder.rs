@@ -296,6 +296,16 @@ impl JITCompiler {
             arc_lazy_retain: r!("jit_arc_lazy_retain"),
             arc_lazy_release: r!("jit_arc_lazy_release"),
 
+            // ADR-006 §2.7.5 — `Arc<String>` strict-typed carrier
+            // retain/release (W12-jit-string-carrier-unification, Phase 3
+            // cluster-0 Round 12 T2/T3, 2026-05-13). Bodies in
+            // `ffi/string.rs`. Refcount discipline at slots whose
+            // `NativeKind` is `String` dispatches here per the
+            // `ownership::retain_func_for_place` / `release_func_for_place`
+            // String arm.
+            arc_string_retain: r!("jit_arc_string_retain"),
+            arc_string_release: r!("jit_arc_string_release"),
+
             // v2 typed HashMap<string, ...>
             //
             // SURFACE (ADR-006 §2.7.14 Q15 / W11-jit-carrier-conversion):

@@ -24,6 +24,11 @@ pub mod math;
 pub mod references;
 pub mod result;
 pub mod simd;
+// W12-jit-string-carrier-unification (Phase 3 cluster-0 Round 12 T2/T3,
+// 2026-05-13). §2.7.5 `Arc<String>` strict-typed carrier retain/release +
+// compile-time constant helper. See module header for the carrier-shape
+// rule binding.
+pub mod string;
 pub mod typed_object;
 pub mod v2;
 pub mod value_ffi;

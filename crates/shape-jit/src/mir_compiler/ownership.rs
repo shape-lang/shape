@@ -279,6 +279,14 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             Some(NativeKind::Ptr(HeapKind::Mutex)) => self.ffi.arc_mutex_retain,
             Some(NativeKind::Ptr(HeapKind::Atomic)) => self.ffi.arc_atomic_retain,
             Some(NativeKind::Ptr(HeapKind::Lazy)) => self.ffi.arc_lazy_retain,
+            // W12-jit-string-carrier-unification (Phase 3 cluster-0 Round 12
+            // T2/T3, 2026-05-13). ADR-006 §2.7.5 `NativeKind::String` slots
+            // carry `Arc::into_raw(Arc<String>) as u64`; retain bumps the
+            // Rust Arc control-block refcount at offset -16 via
+            // `Arc::increment_strong_count::<String>`. The legacy
+            // `arc_retain` would write a `fetch_add` at offset +4 — inside
+            // the `String` payload, scribbling on `ptr/cap/len`.
+            Some(NativeKind::String) => self.ffi.arc_string_retain,
             _ => self.ffi.arc_retain,
         }
     }
@@ -302,6 +310,9 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             Some(NativeKind::Ptr(HeapKind::Mutex)) => self.ffi.arc_mutex_release,
             Some(NativeKind::Ptr(HeapKind::Atomic)) => self.ffi.arc_atomic_release,
             Some(NativeKind::Ptr(HeapKind::Lazy)) => self.ffi.arc_lazy_release,
+            // W12-jit-string-carrier-unification: mirror of the
+            // `retain_func_for_place` String arm.
+            Some(NativeKind::String) => self.ffi.arc_string_release,
             _ => self.ffi.arc_release,
         }
     }
@@ -386,11 +397,27 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     .iconst(types::I64, 0i64))
             }
             MirConstant::StringId(id) => {
-                // Look up the string from the string table and NaN-box it at compile time.
+                // W12-jit-string-carrier-unification (Phase 3 cluster-0 Round
+                // 12 T2/T3, 2026-05-13). ADR-006 §2.7.5: a `NativeKind::String`
+                // slot carries `Arc::into_raw(Arc<String>) as u64`, refcount
+                // at offset -16 per the standard Rust Arc layout. The VM-side
+                // consumer (`set_methods.rs::result_slot_to_string_arc` and
+                // `KindedSlot::Drop` for `NativeKind::String`) decodes via
+                // `Arc::from_raw(bits as *const String)` / `Arc::decrement_
+                // strong_count::<String>(bits)`. Pre-Round-12 this site
+                // emitted `box_string(s)` returning `Box::into_raw(Box::new(
+                // UnifiedValue<Arc<String>>))` — wrong carrier shape; the
+                // VM consumer's `Arc::from_raw` read the UnifiedValue header
+                // bytes as `String` pointer/cap/len, segfaulting on access.
+                //
+                // `arc_string_constant` boosts the initial refcount to keep
+                // the constant alive across the JIT-compiled function's
+                // full lifetime — see the helper's docstring for the
+                // permanent-share discipline.
                 let idx = *id as usize;
                 if idx < self.strings.len() {
                     let s = self.strings[idx].clone();
-                    let boxed = crate::ffi::value_ffi::box_string(s);
+                    let boxed = crate::ffi::string::arc_string_constant(s);
                     Ok(self.builder.ins().iconst(types::I64, boxed as i64))
                 } else {
                     Ok(self
@@ -400,8 +427,11 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 }
             }
             MirConstant::Str(s) => {
-                // String literal carried in MIR — NaN-box at compile time.
-                let boxed = crate::ffi::value_ffi::box_string(s.clone());
+                // String literal carried in MIR. Same §2.7.5 producer
+                // discipline as `MirConstant::StringId` above —
+                // `Arc::into_raw(Arc<String>) as u64` with refcount boosted
+                // for constant-lifetime stability.
+                let boxed = crate::ffi::string::arc_string_constant(s.clone());
                 Ok(self.builder.ins().iconst(types::I64, boxed as i64))
             }
             MirConstant::Function(name) => {
@@ -417,8 +447,22 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 }
             }
             MirConstant::Method(name) => {
-                // Method name for dispatch — NaN-box the string at compile time.
-                let boxed = crate::ffi::value_ffi::box_string(name.clone());
+                // Method name. Per `rvalues.rs:310` the operand-kind stamp
+                // for `MirConstant::Method` is `NativeKind::String` — the
+                // §2.7.5 String carrier shape. W12-jit-string-carrier-
+                // unification migrates this arm to match the stamp.
+                //
+                // Note: `MirConstant::Method` is principally used as the
+                // `func` field of a Call terminator (see `terminators.rs`
+                // method-call path); the method-name push at line 235 of
+                // that file uses `crate::ffi::value_ffi::box_string`
+                // directly (JIT-internal NaN-box; dispatch shell decodes
+                // via the same NaN-box `unbox_string`). This
+                // `compile_constant` arm covers the residual case where
+                // `MirConstant::Method` flows as a value operand — its
+                // stamp on the parallel-kind track says `String`, so the
+                // §2.7.5 Arc-shape carrier is the correct producer.
+                let boxed = crate::ffi::string::arc_string_constant(name.clone());
                 Ok(self.builder.ins().iconst(types::I64, boxed as i64))
             }
             MirConstant::ClosurePlaceholder => {

@@ -417,106 +417,106 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                                     &[self.ctx_ptr, widened],
                                 );
                             }
-                            // ── Carrier-mismatch surface-and-stop ──────
-                            // ADR-006 §2.7.5 carrier-shape audit
-                            // (W12-jit-result-carrier-unification, the
-                            // cluster-1 candidate Round 6A surfaced as
-                            // site (a)): the operand's `NativeKind` is
-                            // stamped (`NativeKind::String` for string
-                            // literals via `MirConstant::Str`,
-                            // `NativeKind::Ptr(HeapKind::TypedObject)`
-                            // for struct locals), but the JIT-side
-                            // producer stores the bits in the legacy
-                            // NaN-box UnifiedValue carrier shape
-                            // (`box_string` returns `unified_box(HK_
-                            // STRING, Arc<String>)` per `value_ffi.rs:
-                            // 535`; `box_typed_object` returns
-                            // `unified_box(HK_TYPED_OBJECT, *const u8)`
-                            // per `value_ffi.rs:516`). The §2.7.5
-                            // carrier contract for those kind labels is
-                            // raw `Arc::into_raw(Arc<T>) as u64`
-                            // pointers — NOT NaN-box-wrapped pointers.
-                            // Dispatching to `jit_print_str` /
-                            // `jit_print_typed_object` (which read
-                            // `*const String` / `*const TypedObject
-                            // Storage` directly per §2.7.17) would
-                            // dereference NaN-box header bits as a
-                            // payload pointer and segfault.
+                            // ── §2.7.5 String carrier arm ───────────────
+                            // W12-jit-string-carrier-unification (Phase 3
+                            // cluster-0 Round 12 T2/T3, 2026-05-13). The
+                            // `MirConstant::Str` / `MirConstant::StringId`
+                            // sites in `mir_compiler/ownership.rs` now emit
+                            // `arc_string_constant(s)` → `Arc::into_raw(
+                            // Arc<String>) as u64` per ADR-006 §2.7.5.
+                            // `jit_print_str` reads `&String` via
+                            // `ValueSlot::from_raw(bits) + KindedSlot::new(
+                            // ..., NativeKind::String)` and delegates to the
+                            // canonical `ValueFormatter::format_kinded` — VM
+                            // == JIT identical output.
                             //
-                            // The Round 7A trinity (§2.7.17 Result/Option
-                            // Arc-shape producers) is the matching
-                            // pattern: it MIGRATED the JIT-side producer
-                            // off `box_ok` / `box_some` (legacy NaN-box)
-                            // to `jit_v2_make_result_ok` /
-                            // `jit_v2_make_option_some` (Arc-shape).
-                            // The String / TypedObject producers
-                            // (`MirConstant::Str` lowering, struct
-                            // `Aggregate` lowering) need the same
-                            // producer-side migration — that's the
-                            // cluster-1 `W12-jit-result-carrier-
-                            // unification` scope (generalized to all
-                            // §2.7.5 heap carriers).
+                            // The String EnumPayload extractor at Round 8A
+                            // (`infer_enum_payload_kind` switched to the
+                            // full `native_kind_from_concrete_type` mapping)
+                            // also produces this same §2.7.5 carrier per
+                            // §2.7.17 receiver-recovery soundness, so
+                            // `print(Err("x"))` reaches this arm with the
+                            // matching carrier shape.
+                            Some(NativeKind::String) => {
+                                let val_ty = self.builder.func.dfg.value_type(val);
+                                let widened = if val_ty == types::I64 {
+                                    val
+                                } else if val_ty == types::F64 {
+                                    self.builder
+                                        .ins()
+                                        .bitcast(types::I64, MemFlags::new(), val)
+                                } else {
+                                    val
+                                };
+                                self.builder.ins().call(
+                                    self.ffi.print_str,
+                                    &[self.ctx_ptr, widened],
+                                );
+                            }
+                            // ── TypedObject SURFACE-and-stop (residual) ──
+                            // The JIT-internal TypedObject path
+                            // (`box_typed_object` at `value_ffi.rs:516-518`
+                            // returning `unified_box(HK_TYPED_OBJECT, *const
+                            // u8)` over a JIT-owned `TypedObject` struct, NOT
+                            // the VM-side `Arc<TypedObjectStorage>`) cannot
+                            // be reused unchanged for `jit_print_typed_object`
+                            // — that body expects an `Arc::into_raw(Arc<
+                            // TypedObjectStorage>) as u64` carrier (a
+                            // different Rust type with different layout).
+                            // Migrating the JIT-side TypedObject to the VM-
+                            // side `Arc<TypedObjectStorage>` is a larger
+                            // surgery (W11 TypedArray family invariant + 17+
+                            // JIT-internal consumers in `typed_object/`,
+                            // `data.rs`, `property_access.rs`, etc.).
                             //
-                            // Until that migration lands, surface-and-
-                            // stop is the only acceptable response per
-                            // §2.7.7 #4 / #7 forbidden list — the
-                            // deleted W-series tag_bits dispatch and
-                            // the W-series Bool-default rationalization
-                            // both refused on sight per CLAUDE.md.
-                            Some(NativeKind::String)
-                            | Some(NativeKind::Ptr(HeapKind::TypedObject)) => {
+                            // Per W12-jit-string-carrier-unification surface-
+                            // and-stop discipline (round dispatch §"Surface-
+                            // and-stop expected"): "If the TypedObject
+                            // migration scope exceeds the budget OR breaks
+                            // the W11-jit-new-array TypedArray<T> shape ...
+                            // STOP and surface to disambiguate." This arm
+                            // stays SURFACE; cluster-1 absorbs the
+                            // TypedObject producer migration via a separate
+                            // sub-cluster.
+                            Some(NativeKind::Ptr(HeapKind::TypedObject)) => {
                                 if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
                                     eprintln!(
-                                        "[jit-mir] print: SURFACE §2.7.5 carrier-\
-                                         mismatch — operand NativeKind {:?} is \
-                                         stamped, but the JIT-side producer for \
-                                         this kind label stores the bits in the \
-                                         legacy NaN-box UnifiedValue carrier \
-                                         (`box_string` / `box_typed_object`), \
-                                         NOT the §2.7.5 `Arc::into_raw(Arc<T>) as \
-                                         u64` carrier the matching kinded print \
-                                         body expects. Same defect class as \
-                                         Round 6A site (a) for Result/Option, \
-                                         which Round 7A's trinity resolved by \
-                                         migrating the JIT producers to Arc-\
-                                         shape (`jit_v2_make_result_ok` / \
-                                         `jit_v2_make_option_some`). The \
-                                         String / TypedObject producer \
-                                         migration is the cluster-1 \
-                                         `W12-jit-result-carrier-unification` \
-                                         scope (generalized to all §2.7.5 heap \
-                                         carriers).",
-                                        kind_hint,
+                                        "[jit-mir] print: SURFACE §2.7.5 \
+                                         carrier-mismatch — operand \
+                                         NativeKind Ptr(TypedObject) stamped \
+                                         but the JIT-side `box_typed_object` \
+                                         producer at `value_ffi.rs:516-518` \
+                                         emits a JIT-internal `TypedObject` \
+                                         struct under NaN-box wrap, NOT the \
+                                         VM-side `Arc<TypedObjectStorage>` \
+                                         the `jit_print_typed_object` body \
+                                         expects. Migrating the JIT \
+                                         TypedObject to `Arc<TypedObjectStorage>` \
+                                         is out of W12 T2/T3 scope per the \
+                                         round's surface-and-stop discipline \
+                                         (round dispatch text). Cluster-1 \
+                                         follow-up: W17 `jit-typed-object-\
+                                         arc-storage-migration`."
                                     );
                                 }
                                 return Err(format!(
-                                    "Route A surface-and-stop: SURFACE §2.7.5 \
-                                     carrier-mismatch — `print` Call-terminator \
-                                     operand NativeKind is {:?}, kind label \
-                                     stamped correctly but the JIT-side \
-                                     producer stores the bits in the legacy \
-                                     NaN-box UnifiedValue carrier shape (per \
-                                     `value_ffi.rs::box_string` / \
-                                     `box_typed_object`), NOT the §2.7.5 / \
-                                     §2.7.17 `Arc::into_raw(Arc<T>) as u64` \
-                                     carrier the matching kinded print body \
-                                     (`jit_print_str` / `jit_print_typed_\
-                                     object`) reads. Cluster-1 candidate \
-                                     `W12-jit-result-carrier-unification` \
-                                     (Round 6A site (a), generalized): \
-                                     migrate `MirConstant::Str` and struct \
-                                     Aggregate lowering to Arc-shape \
-                                     producers, then enable the dispatch \
-                                     arm. Same migration shape as Round 7A's \
-                                     `jit_v2_make_result_ok` / \
-                                     `jit_v2_make_option_some` for §2.7.17. \
-                                     Per CLAUDE.md \"Forbidden \
-                                     rationalizations\" + §2.7.7 #4 / #7, \
-                                     the deleted W-series tag_bits \
-                                     dispatch and the W-series Bool-\
-                                     default rationalization both \
-                                     refused on sight at the FFI \
-                                     boundary.",
+                                    "Route A surface-and-stop: SURFACE \
+                                     §2.7.5 carrier-mismatch — `print` \
+                                     Call-terminator operand NativeKind \
+                                     Ptr(TypedObject); the JIT-side \
+                                     `box_typed_object` at \
+                                     `ffi/value_ffi.rs:516-518` emits a \
+                                     JIT-internal `TypedObject` struct under \
+                                     NaN-box wrap (a JIT-owned type, NOT the \
+                                     VM-side `Arc<TypedObjectStorage>` the \
+                                     `jit_print_typed_object` body reads). \
+                                     Migrating the JIT TypedObject to \
+                                     `Arc<TypedObjectStorage>` is out of \
+                                     W12 T2/T3 scope per the round's \
+                                     surface-and-stop discipline. Tracked \
+                                     for cluster-1 follow-up \
+                                     W17-jit-typed-object-arc-storage-\
+                                     migration. kind_hint={:?}",
                                     kind_hint,
                                 ));
                             }
