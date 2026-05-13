@@ -1680,6 +1680,71 @@ Cluster-0 close attempt after Round 11 merges if all 4 kickoff smokes
 pass VM == JIT. If any 11A/B/C surfaces a fourth gap, Round 12 absorbs
 per N+1 trajectory discipline.
 
+### Round 10 close (post-merge verification, 2026-05-13)
+
+Round 10 merged into `bulldozer-strictly-typed` at `51261265` from
+sub-cluster close commit `2c2ecdf1`. Dispatch-ABI shell rebuild + cross-
+crate trampoline + EnumStore consumer + slot-kind inference all landed
+functional.
+
+**Non-mutating Set equivalence (NEW post-Round-10)**:
+
+```shape
+let s = Set()
+print(s.size())     # VM=0 / JIT=0 — EQUIVALENCE LANDED
+```
+
+First end-to-end VM == JIT for a collection-HeapKind smoke. Proves:
+§2.7.10/Q11 dispatch-ABI shell rebuild + §2.7.5 cross-crate trampoline +
+Round 9 typed-Arc ctors + EnumStore consumer collection_ctor arm +
+slot-kind inference all wire correctly through §2.7.7 parallel-kind
+track.
+
+**Kickoff Smoke 4 still blocked** (`let mut s = Set(); s.add("a");
+s.add("b"); print(s.size())` → expect `2`):
+- VM: ✅ `2`.
+- JIT: ❌ silent failure (no `2` printed; bytecode verification 15
+  violations from stdlib FrameDescriptor warnings; exit 0). Symptom
+  varies between silent fail and segfault per agent diagnosis — root
+  cause is gap (A) below.
+
+### Surfaced gaps (Round 10 close report)
+
+**(A) W17-mir-mutation-writeback** (Smoke 4 + HashMap + every mutating
+collection method):
+- Bytecode compiler emits `Dup; StoreLocal recv` after mutating
+  `CallMethod` per `crates/shape-vm/src/compiler/mutation_writeback.rs`.
+- MIR builder at `mir/lowering/expr.rs::Expr::MethodCall` does NOT emit
+  the equivalent `Assign(receiver_slot, Use(Move(temp)))`.
+- JIT compiles from MIR, so `s.add()` produces new Arc into temp slot
+  but user-visible `s` slot retains OLD Arc. Second access operates on
+  stale Arc whose share was retired → segfault or silent-fail.
+- Fix scope: ~30 LoC MIR lowering consulting `is_mut_self_method_name`
+  + emitting writeback when receiver is `Place::Local`.
+
+**(B) W17-collection-concrete-types** (Mutex.get / HashMap.get /
+Atomic.load + parametric-return method kinds):
+- Method return kinds for parametric containers (`Mutex.get → T`,
+  `HashMap.get → Option<V>`, `Atomic.load → i64`) aren't in
+  `well_known_method_return_kind` because they vary by receiver type.
+- Downstream `print(m.get())` surfaces with kind None per Round 8A
+  print-kind discipline.
+- Fix scope: extend `ConcreteType` taxonomy with `Mutex<T>` /
+  `Atomic<T>` / `Lazy<T>` / `HashSet` / `Deque` / `PriorityQueue` /
+  `Channel` arms (currently absent in
+  `crates/shape-value/src/v2/concrete_type.rs`) + propagate inner-kind
+  through method-return-type inference.
+
+### Round 11 expanded scope coordination (post-Round-10 surfacing)
+
+Pre-Round-10 plan was 3 parallel sub-clusters (11A VM op_new_array
+audit-first, 11B JIT .sum() return-kind conduit, 11C JIT Rvalue::
+Aggregate TypedObject). Post-Round-10 surfaces 2 more gaps. Awaiting
+supervisor disposition on whether to dispatch 5 distinct sub-clusters
+or merge thematically (11B + (B) both touch method-return kind
+threading; 11B + 11C + (B) share §2.7.5 producing-site classification
+theme).
+
 ## Cluster-0 close gate
 
 Per phase-3-kickoff-prompt §"Cluster-0 sub-cluster sequencing":
