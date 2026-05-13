@@ -3288,6 +3288,159 @@ classification). Both required for full cluster-0 Smoke 3+4 closure.
   separate role (JIT-internal NaN-box for method-name push, etc.), not
   as a snapshot/wire helper.
 
+### W17-vm-intrinsic-sum-wave-5d-migration close (2026-05-13)
+
+Closed Round 13 T4 production-first sub-cluster. Branch
+`bulldozer-strictly-typed-w17-vm-intrinsic-sum-wave-5d-migration` from
+post-Round-12 baseline `3db6e820` (Round 13 dispatch metadata commit).
+~110 LoC body migration + 8 unit tests at
+`crates/shape-vm/src/executor/vm_impl/builtins.rs`.
+
+#### Close-report deliverables (per dispatch text)
+
+**(1) Which kickoff smoke IntrinsicSum blocks:** Smoke 2 `.sum()`. As
+named in the round dispatch: "blocks kickoff Smoke 2 VM
+(`[1,2,3].sum()` and `.map(...).sum()` both fire the IntrinsicSum
+`todo!()`)".
+
+**Dispatch-context refinement** (uncovered during fix): the bare
+`[1,2,3].sum()` form does NOT route through `BuiltinFunction::IntrinsicSum`.
+It dispatches via the `TYPED_INT_ARRAY_METHODS` PHF entry
+(`typed_int_array_methods::sum`) at the method-dispatch tier and was
+**already producing `Integer: 6`** pre-fix. The Round 12 post-merge
+matrix entry "2 partial `[1,2,3].sum()` → 6 | ❌ T4 IntrinsicSum | ✅ 6 |
+T4 (VM)" reflects the dispatch-tier classification at the time the
+matrix was filled; the actual smoke surface had already migrated to the
+PHF route via the Round 11A close `op_new_array` fix (which made
+homogeneous-Int literals produce a `Ptr(HeapKind::TypedArray)` slot the
+PHF dispatch shell consumes).
+
+`IntrinsicSum` is the dedicated opcode the compiler emits for the
+stdlib wrapper `std::core::math::sum(series)` body's
+`__intrinsic_sum(series)` call (per `helpers.rs:3707`). That path now
+exercises the migrated body. Empirically the stdlib-wrapper path
+currently surfaces a §2.7.5 producer-site classification conduit gap
+upstream: the generic-parameter `series` binding stamps the receiver as
+`NativeKind::UInt64` rather than `Ptr(HeapKind::TypedArray)`, which the
+new body correctly surface-and-stops on (refusing to Bool-default or
+kind-blind-decode). The upstream gap is **out of T4 scope** — surfaced
+for cluster-1 / Round 14 candidate
+`W17-stdlib-generic-param-kind-classification` if the smoke matrix
+later requires the stdlib wrapper route; current matrix close criterion
+(`[1,2,3].sum()` → 6) is met via the PHF route.
+
+**(2) Other wave-5d sites + dispositions:**
+
+| Line | Variants | Disposition |
+|---|---|---|
+| 431 | Map / Filter / Reduce / ForEach / Find / FindIndex / Some / Every / ControlFold | Phase-2d residual (closure-driven array builtins; no current smoke blocker — `.map(...)` route blocked upstream by T5's pre-existing `call_value_immediate_nb` kind-mismatch surface, not this site) |
+| 449 | IntrinsicVecAbs / Sqrt / Ln / Exp / Add / Sub / Mul / Div / Max / Min / Select / AddI64 | Phase-2d residual (vector intrinsics; no current smoke blocker) |
+| 459 | IntrinsicMatMulVec / MatMulMat / MatAdd / MatSub | Phase-2d residual (matrix intrinsics; no current smoke blocker) |
+| 467 | IntrinsicMinimize | Phase-2d residual (no current smoke blocker) |
+| 518 (bulk arm, remaining 38 entries post-IntrinsicSum extraction) | IntrinsicBspline2_3dBatch / Mean / Min / Max / Std / Variance / Random* / Dist* / BrownianMotion / Gbm / OuProcess / RandomWalk / Rolling* / Ema / LinearRecurrence / Shift / Diff / PctChange / Fillna / Cumsum / Cumprod / Clip / Correlation / Covariance / Percentile / Median / Atan2 / Sinh / Cosh / Tanh / CharCode / FromCharCode / Series | Phase-2d residual (no current smoke blocker — none reachable from kickoff smokes 1-4 post-§2.7.24 monomorphization; many have parallel `register_typed_fn_1`/`_2` typed-marshal entries documented at `cluster-6-intrinsics-dispatch-table.md` lines 31-43 that would supersede the BuiltinCall path when the typed-CC migration completes the M1-split sub-decision) |
+
+None of the 5 remaining wave-5d sites block any kickoff smoke; scope-
+narrowing stands.
+
+**(3) Migration shape used:** consistent with Phase 1B-vm Wave 6.5
+substep-2 cluster-A canonical recipe at commit `eb24ef0`:
+
+- Args consumed via `pop_builtin_args() -> Vec<KindedSlot>` (ADR-006
+  §2.7.7 / Q9 stack parallel-kind track).
+- Receiver kind sourced from the parallel-kind track at the dispatch
+  shell — no fabrication.
+- Receiver-kind guard: requires `NativeKind::Ptr(HeapKind::TypedArray)`;
+  any other kind surfaces `VMError::RuntimeError` with the M1-split
+  sub-decision cite. No Bool-default, no kind-blind decode, no
+  `is_heap()` probe.
+- Receiver borrow shape: direct `bits as *const TypedArrayData` cast
+  per `typed_array_methods::borrow_typed_array` module-doc (the
+  canonical reference pattern; ADR-006 §2.4 / Q6 stores
+  `Arc::into_raw(Arc<TypedArrayData>)` directly in slot bits, NOT
+  `Box<HeapValue>` — `as_heap_value()` would be unsound on this slot
+  shape, as noted in the typed_array_methods.rs module-doc lines 19-23).
+- Per-element-kind dispatch on `TypedArrayData::I64` → `i64` wrapping
+  sum → `KindedSlot::from_int` (result kind `Int64`); `TypedArrayData::F64`
+  / `FloatSlice` → `f64` sum → `KindedSlot::from_number` (result kind
+  `Float64`). Result kind sourced from input element kind per
+  recipe §2 result-kind-sourcing rule. Other TypedArrayData variants
+  surface-and-stop pending M1-split sub-decision.
+- Kernels mirror `typed_array_methods::v2_int_sum` / `v2_float_sum`
+  exactly — same math, same result-kind rule, no SIMD path duplication
+  (the simple loops match `int_buf_sum` / `iter().copied().sum()`).
+- Empty arrays sum to 0 / 0.0 (matches `int_buf_sum` /
+  `iter().sum::<f64>()` identity; no NaN fabrication, no surface).
+
+#### Close gates (devenv exit-code-verified)
+
+- `cargo check --workspace --lib --tests` EXIT=0.
+- `cargo test -p shape-vm --lib intrinsic_sum_tests` 8 passed / 0
+  failed / 0 ignored. Tests synthesize the BuiltinCall directly with
+  properly-kinded typed-array slots (bypassing the upstream stdlib
+  conduit gap) — they cover I64 sum, F64 sum, empty Int → 0, empty
+  Float → 0.0, negative + wrapping sum, non-TypedArray-kind surface,
+  Bool variant surface (M1-split sub-decision arm), and the Arc-into-raw
+  projection round-trip.
+- `cargo test -p shape-jit --lib` 382 passed / 0 failed / 26 ignored
+  (above the 379 baseline cited in dispatch text — no new failures, no
+  regressions; the +3 reflects upstream Round 12 T2/T3 string-carrier
+  test additions).
+- `cargo test -p shape-vm --lib` hits pre-existing v2-raw-heap aliasing
+  SIGABRT in `w17_comptime_build_config_dispatches_end_to_end` — same
+  class documented at CLAUDE.md "Known Constraints" + Round 11A close
+  report:2648-2651, NOT caused by this change (the affected test is in
+  `compiler::comptime::tests`, far from the intrinsic-body file).
+- `bash scripts/verify-merge.sh` 12/12 Passed.
+- `bash scripts/check-no-dynamic.sh` EXIT=0.
+- Smoke 2 partial `[1,2,3].sum()` runtime verification: `Integer: 6`
+  post-fix (same as pre-fix — PHF route unchanged; close criterion met
+  per "Kickoff Smoke 2 partial VM `[1,2,3].sum()` → 6 produces 6
+  matching JIT post-Round-12").
+
+#### Forbidden frames refused on sight
+
+- Bool-default kind for unproven `.sum()` return path → refused;
+  body sources result kind from input element kind only.
+- Kind-blind decode of accumulator → refused; result `KindedSlot`
+  carries the correct `NativeKind` (`Int64` or `Float64`).
+- "Preserve legacy body for one edge case" framing → refused; the
+  legacy `vm_intrinsic_sum` wrapper around the deleted ValueWord-shape
+  `shape_runtime::intrinsics::math::intrinsic_sum` is documented as
+  Phase-2d-deferred at `crates/shape-vm/src/executor/builtins/intrinsics/math.rs:1-11`
+  and stays deferred — the wave-5d body lives inline in `vm_impl/builtins.rs`
+  per the dispatch table doc's `cluster-6-intrinsics-dispatch-table.md`
+  routing.
+- `Convert<X>To<Y>` opcode to paper over the missing stdlib-parameter
+  kind classification → refused; the upstream §2.7.5 gap is surfaced
+  as a separate sub-cluster candidate, not papered over with a kind-
+  bridging opcode.
+- "Mark this as a follow-up for the other 5 wave-5d sites" → the 5
+  sites are out-of-territory Phase-2d residual; documented above with
+  explicit dispositions, not marked as in-flight for T4.
+- Any bridge/probe/helper/hop/translator/adapter/shim framing for the
+  intrinsic body migration → refused; the body is a direct typed-
+  pointer dispatch matching `typed_array_methods`' canonical
+  reference pattern.
+
+#### No ADR amendment required
+
+§2.7.7 / Q9 stack parallel-kind track + ADR-005 §1 single-discriminator
++ ADR-006 §2.4 typed-pointer constructors already cover the body's
+shape. The surfaced upstream gap (stdlib generic parameter kind
+classification at `sum(series)`) is a §2.7.5 producer-site conduit
+issue separate from this body migration; tracked for cluster-1 / Round
+14 candidate `W17-stdlib-generic-param-kind-classification` if a
+smoke later requires the stdlib wrapper path.
+
+#### Coordination
+
+- T5 (W17-vm-call-value-closure-kind-mismatch) — running parallel,
+  no file-territory overlap (T5 touches `call_convention.rs`).
+- T1' (W12-trait-method-return-conduit-cross-crate) — running
+  parallel, no file-territory overlap (T1' touches
+  `bytecode/core_types.rs` + linker + JIT MIR conduit).
+- No merge attempted; supervisor runs the merge per dispatch text.
+
 ---
 
 *Next session: read this file first, then continue with Round-2

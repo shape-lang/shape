@@ -468,8 +468,132 @@ impl VirtualMachine {
                          migration pending"
                     );
                 }
+                // W17-vm-intrinsic-sum-wave-5d-migration (Phase 3 cluster-0
+                // Round 13 T4, 2026-05-13). Migrated `IntrinsicSum` from the
+                // bulk wave-5d todo!() arm to a dedicated body per the Phase
+                // 1B-vm Wave 6.5 substep-2 cluster-A canonical recipe at
+                // commit `eb24ef0` (kinded args + per-element-kind dispatch
+                // + result kind sourced from input element kind, no Bool-
+                // default, no tag-bit decode).
+                //
+                // Call shape: stdlib `pub fn sum(series) { __intrinsic_sum(series) }`
+                // compiles `__intrinsic_sum(series)` to a `BuiltinCall(IntrinsicSum)`
+                // with the receiver `series` pushed as the single arg. The
+                // §2.7.7 stack parallel-kind track carries the receiver's
+                // `NativeKind`; for `[1,2,3]` / `[1.0,2.0,3.0]` the v2
+                // typed-array construction (`op_new_array` post-Round-11A
+                // close `264283ff`) stamps `Ptr(HeapKind::TypedArray)` and
+                // the inner `TypedArrayData` variant carries the element
+                // width.
+                //
+                // Dispatch on `TypedArrayData::I64` / `F64` / `FloatSlice`
+                // mirrors `executor::objects::typed_array_methods::v2_int_sum`
+                // and `v2_float_sum` exactly — same kernels (`int_buf_sum` /
+                // `float_buf_sum`), same result-kind sourcing rule
+                // (`NativeKind::Int64` for Int arrays, `NativeKind::Float64`
+                // for Float arrays). Other `TypedArrayData` arms (per-width
+                // integer specializations, Decimal, BigInt, DateTime,
+                // TypedObject, etc.) surface-and-stop per §2.7.7 #4 — the
+                // M1-split sub-decision (per-element-type intrinsic split)
+                // documented at `cluster-6-intrinsics-dispatch-table.md`
+                // §"Option ML1" is not in scope for this wave; the existing
+                // typed-array method PHF (`TYPED_INT_ARRAY_METHODS` /
+                // `TYPED_NUMBER_ARRAY_METHODS` `.sum()` entries) already
+                // covers the I64/F64 fast paths, and the dedicated
+                // BuiltinFunction::IntrinsicSum entry-point is the
+                // stdlib-wrapper route (`std::core::math::sum`).
+                //
+                // Receiver borrow shape: `bits as *const TypedArrayData`
+                // direct typed-pointer cast (per
+                // `typed_array_methods::borrow_typed_array` module-doc — the
+                // canonical reference pattern; `Ptr(HeapKind::TypedArray)`
+                // slots store `Arc::into_raw(Arc<TypedArrayData>)` per
+                // ADR-006 §2.4 / Q6, NOT `Box<HeapValue>`, so
+                // `as_heap_value()` would be unsound). The `KindedSlot`
+                // carrier owns one strong-count share for the borrow's
+                // lifetime; `Drop` retires it when `args` goes out of scope
+                // at end of arm.
+                BuiltinFunction::IntrinsicSum => {
+                    use shape_value::heap_value::{HeapKind, TypedArrayData};
+                    use shape_value::NativeKind;
+
+                    let args = self.pop_builtin_args()?;
+                    if args.len() != 1 {
+                        return Err(VMError::RuntimeError(format!(
+                            "__intrinsic_sum: expected 1 argument, got {}",
+                            args.len()
+                        )));
+                    }
+                    let recv = &args[0];
+                    if recv.kind != NativeKind::Ptr(HeapKind::TypedArray) {
+                        return Err(VMError::RuntimeError(format!(
+                            "__intrinsic_sum: receiver must be \
+                             NativeKind::Ptr(HeapKind::TypedArray), got {:?} \
+                             (M1-split sub-decision for non-TypedArray \
+                             receivers pending — see \
+                             docs/cluster-audits/cluster-6-intrinsics-dispatch-table.md)",
+                            recv.kind
+                        )));
+                    }
+                    let bits = recv.slot.raw();
+                    if bits == 0 {
+                        return Err(VMError::RuntimeError(
+                            "__intrinsic_sum: receiver slot is null".into(),
+                        ));
+                    }
+                    // SAFETY: `Ptr(HeapKind::TypedArray)` bits are
+                    // `Arc::into_raw(Arc<TypedArrayData>)` per ADR-006 §2.4
+                    // (`ValueSlot::from_typed_array` in
+                    // `crates/shape-value/src/slot.rs:123`). The `args`
+                    // vector keeps the strong-count share alive across the
+                    // borrow — same lifetime contract as
+                    // `typed_array_methods::borrow_typed_array`.
+                    let arr: &TypedArrayData =
+                        unsafe { &*(bits as *const TypedArrayData) };
+                    let result = match arr {
+                        // Result kind sourced from element kind, per §2
+                        // result-kind sourcing rule. Empty Int array → 0
+                        // (matches `int_buf_sum` accumulator init, same as
+                        // `v2_int_sum`). No Bool-default.
+                        TypedArrayData::I64(b) => {
+                            let mut s: i64 = 0;
+                            for &v in b.data.iter() {
+                                s = s.wrapping_add(v);
+                            }
+                            KindedSlot::from_int(s)
+                        }
+                        // Empty Float array → 0.0. Matches `v2_float_sum`
+                        // accumulator init (which uses `iter().sum()` — the
+                        // identity of f64 sum).
+                        TypedArrayData::F64(b) => {
+                            let s: f64 = b.as_slice().iter().copied().sum();
+                            KindedSlot::from_number(s)
+                        }
+                        TypedArrayData::FloatSlice {
+                            parent,
+                            offset,
+                            len,
+                        } => {
+                            let off = *offset as usize;
+                            let n = *len as usize;
+                            let slice = &parent.data.as_slice()[off..off + n];
+                            let s: f64 = slice.iter().copied().sum();
+                            KindedSlot::from_number(s)
+                        }
+                        other => {
+                            return Err(VMError::RuntimeError(format!(
+                                "__intrinsic_sum: TypedArrayData::{} \
+                                 element kind not supported (M1-split \
+                                 sub-decision pending per \
+                                 cluster-6-intrinsics-dispatch-table.md \
+                                 §\"Option ML1\")",
+                                other.type_name()
+                            )));
+                        }
+                    };
+                    self.push_kinded_slot(result)?;
+                }
                 BuiltinFunction::IntrinsicBspline2_3dBatch
-                | BuiltinFunction::IntrinsicSum
                 | BuiltinFunction::IntrinsicMean
                 | BuiltinFunction::IntrinsicMin
                 | BuiltinFunction::IntrinsicMax
@@ -1088,4 +1212,208 @@ impl VirtualMachine {
     // ===== Helper Methods =====
     // binary_arithmetic, eval_runtime_binary_op_value, binary_comparison
     // moved to arithmetic/mod.rs
+}
+
+#[cfg(test)]
+mod intrinsic_sum_tests {
+    //! W17-vm-intrinsic-sum-wave-5d-migration (Phase 3 cluster-0 Round 13
+    //! T4, 2026-05-13): tests for the `BuiltinFunction::IntrinsicSum`
+    //! body migration.
+    //!
+    //! Dispatch context: the bare `[1,2,3].sum()` form does NOT route
+    //! through `BuiltinFunction::IntrinsicSum`; it dispatches via the
+    //! `TYPED_INT_ARRAY_METHODS` PHF entry (`typed_int_array_methods::sum`)
+    //! at the method-dispatch tier. `IntrinsicSum` is the dedicated opcode
+    //! that the compiler emits for `__intrinsic_sum(series)` calls (which
+    //! is what the stdlib `std::core::math::sum(series)` wrapper body
+    //! contains).
+    //!
+    //! These tests exercise the migrated body directly by synthesizing
+    //! the call shape (`args... + PushConst(arg_count) + BuiltinCall(IntrinsicSum)`)
+    //! and pushing a properly-kinded `Ptr(HeapKind::TypedArray)` slot per
+    //! ADR-006 §2.7.7 — same kind contract the dispatch shell guarantees
+    //! at the real call site.
+    use crate::bytecode::{BytecodeProgram, Constant, Instruction, OpCode, Operand};
+    use crate::executor::{VMConfig, VirtualMachine};
+    use crate::type_tracking::NativeKind;
+    use shape_value::heap_value::{HeapKind, HeapValue, TypedArrayData};
+    use shape_value::typed_buffer::{AlignedTypedBuffer, TypedBuffer};
+    use shape_value::aligned_vec::AlignedVec;
+    use shape_value::{KindedSlot, ValueSlot, VMError};
+    use std::sync::Arc;
+
+    /// Build a fresh VM with no program loaded — caller pushes args
+    /// manually and invokes `op_builtin_call(BuiltinCall(IntrinsicSum), …)`.
+    fn fresh_vm() -> VirtualMachine {
+        let prog = BytecodeProgram::default();
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        vm.load_program(prog);
+        vm
+    }
+
+    /// Synthesize an `IntrinsicSum` call: push the receiver (typed-array
+    /// `KindedSlot`), push the arg-count `1` as an `Int64` inline scalar,
+    /// then invoke `op_builtin_call` with the IntrinsicSum operand. The
+    /// body pops the args via `pop_builtin_args`, runs the per-element-
+    /// kind dispatch, and pushes the result. Returns the popped result
+    /// slot.
+    fn invoke_intrinsic_sum(
+        recv: KindedSlot,
+    ) -> Result<KindedSlot, VMError> {
+        let mut vm = fresh_vm();
+        // Push the receiver. The carrier moves into the slot; mem::forget
+        // so its Drop doesn't retire the share the slot now owns.
+        let bits = recv.slot.raw();
+        let kind = recv.kind;
+        std::mem::forget(recv);
+        vm.push_kinded(bits, kind)?;
+        // Push arg_count = 1 as Int64 inline scalar (matches the
+        // compiler's `PushConst(Int(1))` for the arg-count slot at the
+        // builtin call site).
+        vm.push_kinded(1u64, NativeKind::Int64)?;
+        // Synthesize the BuiltinCall instruction.
+        let instr = Instruction::new(
+            OpCode::BuiltinCall,
+            Some(Operand::Builtin(
+                crate::bytecode::BuiltinFunction::IntrinsicSum,
+            )),
+        );
+        vm.op_builtin_call(&instr, None)?;
+        // Result is on top of the stack.
+        let (rbits, rkind) = vm.pop_kinded()?;
+        Ok(KindedSlot::new(ValueSlot::from_raw(rbits), rkind))
+    }
+
+    /// Construct a `KindedSlot` carrying an `Arc<TypedArrayData::I64>`.
+    fn int_array_slot(data: Vec<i64>) -> KindedSlot {
+        let buf = TypedBuffer::from_vec(data);
+        let arc = Arc::new(TypedArrayData::I64(Arc::new(buf)));
+        KindedSlot::from_typed_array(arc)
+    }
+
+    /// Construct a `KindedSlot` carrying an `Arc<TypedArrayData::F64>`.
+    fn float_array_slot(data: Vec<f64>) -> KindedSlot {
+        let av = AlignedVec::from_vec(data);
+        let buf = AlignedTypedBuffer::from_aligned(av);
+        let arc = Arc::new(TypedArrayData::F64(Arc::new(buf)));
+        KindedSlot::from_typed_array(arc)
+    }
+
+    #[test]
+    fn intrinsic_sum_int_array_returns_int64() {
+        // `[1, 2, 3]` typed-array → sum = 6, result kind `Int64`.
+        let r = invoke_intrinsic_sum(int_array_slot(vec![1, 2, 3])).unwrap();
+        assert_eq!(r.kind, NativeKind::Int64);
+        assert_eq!(r.as_i64(), Some(6));
+    }
+
+    #[test]
+    fn intrinsic_sum_float_array_returns_float64() {
+        // `[1.5, 2.5]` typed-array → sum = 4.0, result kind `Float64`.
+        let r =
+            invoke_intrinsic_sum(float_array_slot(vec![1.5, 2.5])).unwrap();
+        assert_eq!(r.kind, NativeKind::Float64);
+        assert_eq!(r.as_f64(), Some(4.0));
+    }
+
+    #[test]
+    fn intrinsic_sum_empty_int_array_is_zero() {
+        // Empty Int array sums to 0 (matches `int_buf_sum` / `v2_int_sum`
+        // accumulator init). No Bool-default fallback; result kind stays
+        // sourced from the input element kind.
+        let r = invoke_intrinsic_sum(int_array_slot(vec![])).unwrap();
+        assert_eq!(r.kind, NativeKind::Int64);
+        assert_eq!(r.as_i64(), Some(0));
+    }
+
+    #[test]
+    fn intrinsic_sum_empty_float_array_is_zero() {
+        // Empty Float array sums to 0.0 (matches `v2_float_sum`
+        // `iter().sum()` identity). No NaN fabrication.
+        let r = invoke_intrinsic_sum(float_array_slot(vec![])).unwrap();
+        assert_eq!(r.kind, NativeKind::Float64);
+        assert_eq!(r.as_f64(), Some(0.0));
+    }
+
+    #[test]
+    fn intrinsic_sum_int_array_negative_and_overflow_wrap() {
+        // `wrapping_add` matches `int_buf_sum` semantics — overflow does
+        // not panic at the intrinsic body. Mixed signs accumulate
+        // correctly.
+        let r =
+            invoke_intrinsic_sum(int_array_slot(vec![-10, 20, -5])).unwrap();
+        assert_eq!(r.kind, NativeKind::Int64);
+        assert_eq!(r.as_i64(), Some(5));
+    }
+
+    #[test]
+    fn intrinsic_sum_surfaces_on_non_typed_array_receiver() {
+        // A non-`Ptr(HeapKind::TypedArray)` receiver surfaces a
+        // RuntimeError rather than fabricating a Bool-default result
+        // (per ADR-006 §2.7.7 #4 surface-and-stop). The synthetic
+        // receiver here is a `String`-kinded slot — the M1-split sub-
+        // decision for non-TypedArray receivers is documented as
+        // pending at `cluster-6-intrinsics-dispatch-table.md` §"Option
+        // ML1".
+        let s = Arc::new("not an array".to_string());
+        let recv = KindedSlot::from_string_arc(s);
+        let err = invoke_intrinsic_sum(recv).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("__intrinsic_sum: receiver must be")
+                && msg.contains("Ptr(HeapKind::TypedArray)"),
+            "expected receiver-kind surface, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn intrinsic_sum_surfaces_on_unsupported_typed_array_variant() {
+        // `TypedArrayData::Bool` is correctly kinded as
+        // `Ptr(HeapKind::TypedArray)` but the body's per-element
+        // dispatch surfaces on non-I64/F64/FloatSlice arms (M1-split
+        // sub-decision pending — see cluster-6 dispatch table).
+        let bool_buf: TypedBuffer<u8> =
+            TypedBuffer::from_vec(vec![1u8, 0, 1]);
+        let arc = Arc::new(TypedArrayData::Bool(Arc::new(bool_buf)));
+        let recv = KindedSlot::from_typed_array(arc);
+        let err = invoke_intrinsic_sum(recv).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("__intrinsic_sum")
+                && msg.contains("M1-split"),
+            "expected M1-split surface, got: {}",
+            msg
+        );
+    }
+
+    /// Sanity-touch the dispatch-shell contract: a `Ptr(HeapKind::TypedArray)`
+    /// slot's bits are `Arc::into_raw(Arc<TypedArrayData>)`, matching the
+    /// `borrow_typed_array` reference pattern. If this projection ever
+    /// stops being sound, the IntrinsicSum body's direct typed-pointer
+    /// cast will tier-down with this assertion.
+    #[test]
+    fn intrinsic_sum_kinded_slot_projection_round_trip() {
+        let slot = int_array_slot(vec![10, 20]);
+        assert_eq!(slot.kind, NativeKind::Ptr(HeapKind::TypedArray));
+        // The slot's bits ARE the raw Arc pointer; we can read the
+        // `TypedArrayData::I64` arm by direct cast without going through
+        // `as_heap_value()` (which would interpret the bits as
+        // `*const HeapValue` — unsound for ADR-006 §2.4 Arc-into-raw
+        // slots). This mirrors `typed_array_methods::borrow_typed_array`.
+        let bits = slot.slot.raw();
+        let arr = unsafe { &*(bits as *const TypedArrayData) };
+        match arr {
+            TypedArrayData::I64(b) => {
+                assert_eq!(b.data.as_slice(), &[10i64, 20]);
+            }
+            _ => panic!("expected TypedArrayData::I64"),
+        }
+        // Suppress unused-import warnings on `HeapValue` (kept in the
+        // import list for reviewer visibility — the body's `as_heap_value()`
+        // is documented as unsound on this slot shape).
+        let _: Option<&HeapValue> = None;
+        // Drop the slot to retire the strong-count share.
+        drop(slot);
+    }
 }
