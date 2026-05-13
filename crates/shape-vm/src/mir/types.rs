@@ -519,6 +519,34 @@ pub struct MirFunction {
     pub span: Span,
     /// Mapping from FieldIdx to field name, for JIT field access resolution.
     pub field_name_table: std::collections::HashMap<FieldIdx, String>,
+    /// Per-slot user-struct type name for slots produced by
+    /// `Expr::StructLiteral { name, .. }` lowering.
+    ///
+    /// ADR-006 §2.7.5 producing-site classification — Phase 3 cluster-0
+    /// Round 13 T1' gap 1 closure. The bytecode compiler's
+    /// `concrete_type_from_annotation`
+    /// (`crates/shape-vm/src/compiler/v2_map_emission.rs:357`) does
+    /// NOT resolve user-struct names to a per-struct `StructLayoutId`
+    /// (the `_ => None` arm at line 378), and the conduit producer at
+    /// `compiler/helpers.rs:508` stamps `Struct(StructLayoutId(0))`
+    /// for every `ObjectStore` regardless of struct identity. Neither
+    /// path makes user-struct type name observable at conduit-time.
+    ///
+    /// This map is populated at MIR lowering for
+    /// `Expr::StructLiteral { name, .. }` sites (the canonical
+    /// user-struct construction shape — `let t = X {}`,
+    /// `let p = Point { x: 1, y: 2 }`). The conduit producer reads
+    /// the map at Call-terminator destination-stamp time for
+    /// `MirConstant::Method(_)` terminators to look up the trait method
+    /// declared return ConcreteType via the
+    /// `find_default_trait_impl_for_type_method` chain.
+    ///
+    /// `None` (no entry) for slots that aren't user-struct constructions
+    /// — primitives, collections, plain object literals, function returns,
+    /// etc. The downstream classifier surfaces unstamped per §2.7.7 #9 /
+    /// forbidden #9 (no fabricated default).
+    pub local_struct_type_names:
+        std::collections::HashMap<SlotId, String>,
 }
 
 /// Type information for a local variable, used for Copy/Clone inference.

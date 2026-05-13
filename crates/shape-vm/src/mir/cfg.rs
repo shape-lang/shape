@@ -194,6 +194,7 @@ mod tests {
             local_types: vec![],
             span: span(),
             field_name_table: std::collections::HashMap::new(),
+            local_struct_type_names: std::collections::HashMap::new(),
         };
         let cfg = ControlFlowGraph::build(&mir);
         assert_eq!(cfg.successors(BasicBlockId(0)), &[BasicBlockId(1)]);
@@ -236,6 +237,7 @@ mod tests {
             local_types: vec![],
             span: span(),
             field_name_table: std::collections::HashMap::new(),
+            local_struct_type_names: std::collections::HashMap::new(),
         };
         let cfg = ControlFlowGraph::build(&mir);
         let rpo = cfg.reverse_postorder();
@@ -279,6 +281,7 @@ mod tests {
             local_types: vec![],
             span: span(),
             field_name_table: std::collections::HashMap::new(),
+            local_struct_type_names: std::collections::HashMap::new(),
         };
         let cfg = ControlFlowGraph::build(&mir);
         // Block 1 should have two predecessors: 0 (entry) and 2 (back edge)

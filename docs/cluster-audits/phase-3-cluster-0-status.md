@@ -2409,6 +2409,113 @@ discipline. The trajectory has been honest principled surfacing every
 round and the JIT-rebuild proper is converging; cluster-0 close remains
 the gating criterion, not a pivot target.
 
+### W12-trait-method-return-conduit-cross-crate close (2026-05-13)
+
+T1' closed with 3-gap closure (gaps 1, 2, 3 named by Round 12 T1
+surface-and-stop) + surface-and-stop on downstream
+W17-jit-typed-object-arc-storage-migration receiver-classification gap.
+
+**Disposition**: §2 (a) same shape — Round 6A `function_return_concrete_types`
+precedent fit. No ADR amendment required. Audit doc:
+`docs/cluster-audits/w12-trait-method-return-conduit-cross-crate-audit.md`
+(commit `2b01ecaa`).
+
+**Commits**:
+- `119c4f7e` — Commit 1: gap 3 closure (trait declaration return-type
+  substitution at `desugar_impl_method`).
+- `1f9f757a` — Commit 2: gaps 1+2 closure (MirFunction
+  `local_struct_type_names` + conduit producer
+  `infer_top_level_concrete_types_from_mir_with_resolvers` +
+  JIT consumer extension).
+
+**Key insight not in audit**: gap 2 closes by **deduction** from existing
+data rather than a new `BytecodeProgram` side-table. The Round 6A
+`function_return_concrete_types` (populated by commit 1's gap 3
+backfill) + the existing `trait_method_symbols`
+(populated at impl-block compile time) + the existing
+`find_default_trait_impl_for_type_method` helper together carry the
+trait method declared return ConcreteType. The new `method_returns`
+resolver chains these — pure deduction. LoC budget contracted from
+audit's ~365 estimate to ~200 net source LoC.
+
+**Round 12 T1 pin tests**: preserved AS-IS. They pin the JIT-internal
+parametric classifier's posture (user-defined trait methods are NOT
+classified at the JIT layer — by design). T1' moves classification one
+tier upstream to the VM-side conduit producer; the JIT consumer picks
+up the upstream stamp via the existing `concrete_seed` → existing-seed
+pathway. Doc-block updated to reflect post-T1' state. New positive pin
+`trait_method_call_destination_seeded_from_concrete_types` asserts the
+upstream-landing pathway.
+
+**NEW SURFACE uncovered (W17 cluster-1 follow-up)**:
+`crates/shape-jit/src/ffi/call_method/mod.rs::receiver_type_name`
+(line 51-81) classifies receiver via legacy NaN-box tag-decode
+(`is_number(receiver_bits)`, `heap_kind(receiver_bits)`). With
+Round 12 T2/T3's producer-side migration to raw `Arc::into_raw(
+Arc<TypedObjectStorage>)` pointer bits, the receiver bits no longer
+carry the NaN-box tag — `is_number()` returns true for raw heap-pointer
+values (non-TAG_BASE), so `receiver_type_name` returns `"number"`
+instead of `"X"`, dispatch fails, segfault. This is exactly the
+**W17-jit-typed-object-arc-storage-migration** cluster-1 follow-up
+named in the Round 12 T2/T3 close report (`61687564`). T1' has
+done its 3-gap closure; the deeper carrier-shape mismatch at the JIT
+trampoline's receiver classification is one tier downstream of T1' —
+same necessary-but-not-sufficient relationship to Smoke 3 that T1
+had to T1'.
+
+**Smoke 3 status post-T1' merge**:
+- VM mode: `x` ✓ (unchanged).
+- JIT mode: kind classification correct (verified via debug
+  instrumentation — `kind_hint = Some(NativeKind::String)` at the
+  print Call-terminator); dispatch routes to `jit_print_string_arc`;
+  but trampoline receiver classification segfaults due to W17
+  follow-on at `receiver_type_name`'s legacy NaN-box tag-decode.
+
+**Recommendation for Round 14**: dispatch **W17-jit-typed-object-arc-storage-migration**
+sub-cluster to migrate `receiver_type_name` (and the broader
+JIT-internal TypedObject struct consumers in `typed_object/`,
+`data.rs`, `property_access.rs`, etc.) to read receiver type identity
+from the parallel-kind track + heap-pointer dereference (the
+`Arc<TypedObjectStorage>` schema id) rather than NaN-box tag-decode.
+This is the cluster-1 hardening work the Round 12 T2/T3 close
+explicitly named as a follow-up.
+
+**Close gates (devenv exit-code-verified)**:
+- `cargo check --workspace --lib --tests` EXIT=0.
+- `cargo test -p shape-jit --lib` 383 passed / 0 failed / 26 ignored
+  (376 baseline + 7 new). All 3 T1 pin tests preserved.
+- `cargo test -p shape-vm --lib --skip compiler::comptime`
+  1319 passed / 332 failed (baseline 1312/332; +7 new, no regressions).
+- `bash scripts/verify-merge.sh` 12/12 Passed.
+- `bash scripts/check-no-dynamic.sh` EXIT=0.
+
+**Pre-existing issues NOT caused by T1'** (reproduce identically with
+my changes stashed):
+- `compiler::comptime::tests::w17_comptime_*` SIGABRT (v2-raw-heap
+  aliasing class per CLAUDE.md "Known Constraints").
+- 15 bytecode verification warnings on stdlib functions
+  (`coefficient_of_variation`, `Json.get`, `TryFrom::*::Json::tryFrom`,
+  etc.) for "Trusted opcode ... has no FrameDescriptor" — orthogonal
+  to T1' scope.
+
+**Refuse-on-sight discipline preserved**:
+- New `MirFunction.local_struct_type_names` named for what it IS, not
+  via bridge/probe/helper/hop/translator/adapter/shim framing.
+- New `infer_top_level_concrete_types_from_mir_with_resolvers` named
+  by parameter shape (resolvers plural), same name+extra-parameter
+  pattern as Round 6A — not a "trait-method translator" or
+  "dispatch-site helper".
+- No Bool-default fallback at any classifier site (4 dedicated pin
+  tests assert None when struct identity / resolver / method-returns
+  are missing).
+- No hard-coded Smoke 3 case — the resolver chain is fully generic
+  over (type_name, method_name) pairs.
+- No new ConcreteType variant / HeapKind / opcode.
+- No ADR amendment.
+- W17 surface named honestly by what it IS — receiver classification
+  via legacy NaN-box tag-decode versus raw Arc pointer bits — and
+  surfaced for Round 14 dispatch.
+
 ## Cluster-0 close gate
 
 Per phase-3-kickoff-prompt §"Cluster-0 sub-cluster sequencing":

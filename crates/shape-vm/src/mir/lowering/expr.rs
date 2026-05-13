@@ -1889,7 +1889,9 @@ pub(crate) fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotI
         Expr::SimulationCall { params, .. } => {
             lower_exprs_to_aggregate(builder, temp, params.iter().map(|(_, expr)| expr), span);
         }
-        Expr::StructLiteral { fields, .. } => {
+        Expr::StructLiteral {
+            type_name, fields, ..
+        } => {
             let operands: Vec<_> = fields
                 .iter()
                 .map(|(_, expr)| lower_expr_as_moved_operand(builder, expr))
@@ -1910,6 +1912,14 @@ pub(crate) fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotI
                 field_names,
                 span,
             );
+            // ADR-006 §2.7.5 producing-site classification — Phase 3
+            // cluster-0 Round 13 T1' gap 1 closure. Record the struct
+            // type name on the destination slot so the conduit
+            // producer (and downstream JIT trait-method return-kind
+            // classifier) can map receiver-slot → struct-type-name →
+            // trait method declared return ConcreteType for
+            // `t.method()`-style call terminators.
+            builder.record_local_struct_type_name(temp, type_name.name().to_string());
         }
         Expr::Annotated {
             annotation, target, ..

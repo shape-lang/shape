@@ -1110,6 +1110,7 @@ mod tests {
             local_types: (0..num_locals).map(|_| LocalTypeInfo::Unknown).collect(),
             span: span(),
             field_name_table: std::collections::HashMap::new(),
+            local_struct_type_names: std::collections::HashMap::new(),
         }
     }
 

@@ -119,6 +119,14 @@ pub struct MirBuilder {
     /// whether to emit the receiver write-back assignment after the call.
     mut_self_container_locals:
         HashMap<SlotId, crate::compiler::mutation_writeback::ContainerKind>,
+    /// Per-slot user-struct type name for slots produced by
+    /// `Expr::StructLiteral { type_name, .. }` lowering — ADR-006 §2.7.5
+    /// producing-site classification, Phase 3 cluster-0 Round 13 T1' gap 1
+    /// closure. Threaded into `MirFunction.local_struct_type_names` at
+    /// finalization; consumed at conduit-time by the trait-method
+    /// return-kind classifier to map receiver slot → struct type name →
+    /// trait method declared return ConcreteType.
+    local_struct_type_names: HashMap<SlotId, String>,
 }
 
 #[derive(Debug)]
@@ -172,7 +180,23 @@ impl MirBuilder {
             span,
             fallback_spans: Vec::new(),
             mut_self_container_locals: HashMap::new(),
+            local_struct_type_names: HashMap::new(),
         }
+    }
+
+    /// Record the user-struct type name for a slot produced by an
+    /// `Expr::StructLiteral { type_name, .. }` lowering. ADR-006 §2.7.5
+    /// producing-site classification, Phase 3 cluster-0 Round 13 T1' gap 1
+    /// closure.
+    ///
+    /// Read at conduit-time (compiler `infer_top_level_concrete_types_from_mir_with_returns`
+    /// and JIT `mir_compiler/types::infer_slot_kinds_with_concrete`) to map
+    /// the receiver slot of a trait-method dispatch call (e.g. `t.name()`
+    /// where `t = X {}`) to the struct type name `"X"`, which then resolves
+    /// the trait method declared return ConcreteType via the
+    /// `find_default_trait_impl_for_type_method` chain.
+    pub(super) fn record_local_struct_type_name(&mut self, slot: SlotId, type_name: String) {
+        self.local_struct_type_names.insert(slot, type_name);
     }
 
     /// Record a recognized COW-container kind for a binding slot. Called
@@ -522,6 +546,7 @@ impl MirBuilder {
                 local_types,
                 span: self.span,
                 field_name_table: field_names.clone(),
+                local_struct_type_names: self.local_struct_type_names,
             },
             had_fallbacks,
             fallback_spans,

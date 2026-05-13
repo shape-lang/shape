@@ -455,9 +455,48 @@ pub(crate) fn infer_top_level_concrete_types_from_mir(
 /// declared return type is the proof source for the destination slot's
 /// ConcreteType. No tag-bit decode, no Bool-default — when the
 /// resolver returns `None` the slot stays `Void`.
+///
+/// Wrapper for the trait-method-aware variant — preserves existing
+/// callers that don't have access to a method-return resolver.
 pub(crate) fn infer_top_level_concrete_types_from_mir_with_returns(
     mir: &crate::mir::MirFunction,
     callee_returns: Option<&dyn Fn(&str) -> Option<shape_value::v2::ConcreteType>>,
+) -> Vec<shape_value::v2::ConcreteType> {
+    infer_top_level_concrete_types_from_mir_with_resolvers(mir, callee_returns, None)
+}
+
+/// Trait-method-aware variant of the conduit producer.
+///
+/// `method_returns(type_name, method_name) -> Option<ConcreteType>`
+/// resolves trait-method dispatch return ConcreteType — the implementation
+/// looks up `find_default_trait_impl_for_type_method(type_name, method_name)`
+/// on the `BytecodeProgram`, then maps the resulting function name through
+/// `function_return_concrete_types`. When the chain resolves cleanly the
+/// returned ConcreteType stamps the destination slot of the
+/// `MirConstant::Method(name)` Call terminator.
+///
+/// ADR-006 §2.7.5 — Phase 3 cluster-0 Round 13 T1' gap 1 + gap 2
+/// closure (2026-05-13). The receiver-type-name source is
+/// `mir.local_struct_type_names`, populated at MIR lowering for
+/// `Expr::StructLiteral { type_name, .. }` sites (T1' gap 1 closure
+/// at `mir/lowering/expr.rs::Expr::StructLiteral`). The trait method
+/// return-type chain reuses commit 1's gap 3 closure: the impl
+/// method's `FunctionDef.return_type` is backfilled from the trait
+/// declaration when the impl source omits it, so
+/// `function_return_concrete_types["X::name"] = ConcreteType::String`
+/// for Smoke 3 and the method-returns resolver looks up the same
+/// table via the trait-impl function name.
+///
+/// Trait-dispatch receivers carry the struct identity through slot
+/// moves via the slot-move propagation pass below — `let t = X {}; let
+/// u = t; u.name()` propagates the struct type name from `t`'s
+/// construction slot to `u`'s binding slot.
+pub(crate) fn infer_top_level_concrete_types_from_mir_with_resolvers(
+    mir: &crate::mir::MirFunction,
+    callee_returns: Option<&dyn Fn(&str) -> Option<shape_value::v2::ConcreteType>>,
+    method_returns: Option<
+        &dyn Fn(&str, &str) -> Option<shape_value::v2::ConcreteType>,
+    >,
 ) -> Vec<shape_value::v2::ConcreteType> {
     use crate::mir::types::{MirConstant, Operand, StatementKind};
     let n = mir.num_locals as usize;
@@ -491,6 +530,27 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_returns(
                     };
                 }
             }
+        }
+    }
+
+    // ADR-006 §2.7.5 — Phase 3 cluster-0 Round 13 T1' gap 1 closure.
+    //
+    // Parallel `struct_names: Vec<Option<String>>` track populated from
+    // `mir.local_struct_type_names` (MIR-lowering output for
+    // `Expr::StructLiteral { type_name, .. }` sites). Read at the
+    // Call-terminator stamping pass below for `MirConstant::Method` arms,
+    // and propagated through slot moves in the second pass alongside
+    // `concrete_types`.
+    //
+    // `None` per slot is "no struct identity known" — the slot wasn't
+    // produced by a struct-literal expression. Per §2.7.7 #9 no
+    // fabricated default; the trait-method classifier surfaces unstamped
+    // (returns the slot's existing `ConcreteType::Void` placeholder).
+    let mut struct_names: Vec<Option<String>> = vec![None; n];
+    for (slot, name) in &mir.local_struct_type_names {
+        let idx = slot.0 as usize;
+        if idx < n {
+            struct_names[idx] = Some(name.clone());
         }
     }
 
@@ -693,6 +753,13 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_returns(
     // ConcreteType.
     //
     // Iterate to a fixed point — slot chains can be longer than 1.
+    //
+    // T1' gap 1 closure: the same propagation discipline applies to
+    // `struct_names` — `let t = X {}; let u = t; u.name()` flows the
+    // struct identity from `t`'s construction slot to `u`'s binding
+    // slot via the same Move/Copy chain. The trait-method classifier
+    // below runs AFTER this propagation so it sees the receiver slot's
+    // propagated struct type name.
     use crate::mir::types::{Place, Rvalue};
     let mut changed = true;
     let mut iter_budget = n.max(1) * 4; // hard cap against pathological MIR
@@ -718,6 +785,87 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_returns(
                         {
                             concrete_types[di] = src_ct;
                             changed = true;
+                        }
+                        if let Some(src_name) = struct_names[si].clone() {
+                            if struct_names[di].as_deref() != Some(src_name.as_str()) {
+                                struct_names[di] = Some(src_name);
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ADR-006 §2.7.5 — Phase 3 cluster-0 Round 13 T1' commit 2: trait-
+    // method dispatch return-kind classification at Call-terminator
+    // destination.
+    //
+    // For `t.method()` lowered as `TerminatorKind::Call { func:
+    // MirConstant::Method(name), args, destination, .. }`, look up the
+    // receiver slot's struct type name in `struct_names` (propagated
+    // through slot moves above), then resolve the trait method's
+    // declared return ConcreteType via the `method_returns` resolver
+    // (which chains `find_default_trait_impl_for_type_method(type_name,
+    // method_name)` through `function_return_concrete_types`). When the
+    // chain resolves cleanly, stamp the destination slot.
+    //
+    // No tag-bit decode, no Bool-default, no fabricated default — when
+    // any link in the chain returns `None` the slot stays `Void` per
+    // §2.7.5.1. Multi-trait `method()` conflicts (two traits declare
+    // `method()` with different return ConcreteTypes for the same
+    // receiver type) surface as `None` per §5 of the audit; the
+    // downstream JIT consumer reaches its surface-and-stop posture.
+    //
+    // Runs AFTER the slot-move propagation pass so receiver slots
+    // that flow through `let u = t` chains carry the propagated struct
+    // identity.
+    if let Some(method_resolver) = method_returns {
+        use crate::mir::types::TerminatorKind;
+        for block in mir.iter_blocks() {
+            if let TerminatorKind::Call {
+                func,
+                args,
+                destination,
+                ..
+            } = &block.terminator.kind
+            {
+                if let Operand::Constant(MirConstant::Method(method_name)) = func {
+                    if let crate::mir::types::Place::Local(dst) = destination {
+                        let idx = dst.0 as usize;
+                        if idx < n
+                            && matches!(
+                                concrete_types[idx],
+                                shape_value::v2::ConcreteType::Void
+                            )
+                        {
+                            // Receiver is `args[0]` per the MIR lowering
+                            // convention at `mir/lowering/expr.rs::Expr::MethodCall`
+                            // line ~1856 (`arg_ops.push(receiver_op);`).
+                            let receiver_slot = match args.first() {
+                                Some(Operand::Move(crate::mir::types::Place::Local(s)))
+                                | Some(Operand::Copy(crate::mir::types::Place::Local(s)))
+                                | Some(Operand::MoveExplicit(crate::mir::types::Place::Local(s))) => s.0 as usize,
+                                _ => continue,
+                            };
+                            if receiver_slot >= n {
+                                continue;
+                            }
+                            let type_name = match &struct_names[receiver_slot] {
+                                Some(n) => n.clone(),
+                                None => continue,
+                            };
+                            if let Some(ct) =
+                                method_resolver(&type_name, method_name.as_str())
+                            {
+                                if !matches!(
+                                    ct,
+                                    shape_value::v2::ConcreteType::Void
+                                ) {
+                                    concrete_types[idx] = ct;
+                                }
+                            }
                         }
                     }
                 }
@@ -5319,6 +5467,7 @@ mod call_return_kind_tests {
             ],
             span,
             field_name_table: Default::default(),
+            local_struct_type_names: Default::default(),
         }
     }
 
@@ -5429,6 +5578,7 @@ mod call_return_kind_tests {
             ],
             span,
             field_name_table: Default::default(),
+            local_struct_type_names: Default::default(),
         };
         let resolver = |name: &str| -> Option<ConcreteType> {
             if name == "divide" {
@@ -5515,12 +5665,332 @@ mod call_return_kind_tests {
             ],
             span,
             field_name_table: Default::default(),
+            local_struct_type_names: Default::default(),
         };
         let result = infer_top_level_concrete_types_from_mir(&mir);
         assert!(
             matches!(result[2], ConcreteType::Struct(_)),
             "empty-operands ObjectStore must still stamp Struct, got {:?}",
             result[2]
+        );
+    }
+
+    // ── Phase 3 cluster-0 Round 13 T1' commit 2 (2026-05-13) ────────────
+    //
+    // VM-side conduit producer tests for the trait-method dispatch
+    // return-kind classifier. The producer reads
+    // `mir.local_struct_type_names[receiver_slot]` (populated at MIR
+    // lowering for `Expr::StructLiteral` sites, T1' gap 1 closure),
+    // resolves the trait method declared return ConcreteType via the
+    // `method_returns` resolver, and stamps the Call destination
+    // slot's `concrete_types`.
+
+    #[test]
+    fn trait_method_call_destination_stamps_from_method_returns_resolver() {
+        // Smoke 3 minimal MIR shape at the conduit producer level:
+        //   bb0:
+        //     ObjectStore { container_slot: SlotId(2), operands: [], field_names: [] }
+        //     terminator: Call { func: Method("name"), args: [Move(2)],
+        //                        destination: SlotId(3), next: bb1 }
+        //   bb1: Return
+        //
+        // `mir.local_struct_type_names[SlotId(2)] = "X"` (gap 1 closure
+        // — populated by MIR lowering of `let t = X {}`).
+        // `method_returns("X", "name") = Some(ConcreteType::String)`
+        // (gap 2 + gap 3 closure — chains
+        // `find_default_trait_impl_for_type_method` →
+        // `function_return_concrete_types[fn_idx]`).
+        //
+        // Asserts: `concrete_types[3] = ConcreteType::String`.
+        let span = mk_span();
+        let bb0 = BasicBlock {
+            id: BasicBlockId(0),
+            statements: vec![crate::mir::types::MirStatement {
+                kind: StatementKind::ObjectStore {
+                    container_slot: SlotId(2),
+                    operands: vec![],
+                    field_names: vec![],
+                },
+                span,
+                point: Point(0),
+            }],
+            terminator: Terminator {
+                kind: TerminatorKind::Call {
+                    func: Operand::Constant(MirConstant::Method(
+                        "name".to_string(),
+                    )),
+                    args: vec![Operand::Move(Place::Local(SlotId(2)))],
+                    destination: Place::Local(SlotId(3)),
+                    next: BasicBlockId(1),
+                },
+                span,
+            },
+        };
+        let bb1 = BasicBlock {
+            id: BasicBlockId(1),
+            statements: vec![],
+            terminator: Terminator {
+                kind: TerminatorKind::Return,
+                span,
+            },
+        };
+        let mut local_struct_type_names = std::collections::HashMap::new();
+        local_struct_type_names.insert(SlotId(2), "X".to_string());
+        let mir = MirFunction {
+            name: "smoke3".to_string(),
+            blocks: vec![bb0, bb1],
+            num_locals: 5,
+            param_slots: vec![],
+            param_reference_kinds: vec![],
+            local_types: vec![
+                crate::mir::types::LocalTypeInfo::Unknown;
+                5
+            ],
+            span,
+            field_name_table: Default::default(),
+            local_struct_type_names,
+        };
+        let method_returns =
+            |type_name: &str, method_name: &str| -> Option<ConcreteType> {
+                if type_name == "X" && method_name == "name" {
+                    Some(ConcreteType::String)
+                } else {
+                    None
+                }
+            };
+        let result = infer_top_level_concrete_types_from_mir_with_resolvers(
+            &mir,
+            None,
+            Some(&method_returns),
+        );
+        assert_eq!(
+            result[3],
+            ConcreteType::String,
+            "Call destination slot must be stamped ConcreteType::String \
+             from the method_returns resolver for `t.name()` where \
+             `local_struct_type_names[t] = \"X\"` and \
+             `method_returns(\"X\", \"name\") = Some(String)`"
+        );
+    }
+
+    #[test]
+    fn trait_method_call_propagates_struct_identity_through_slot_move() {
+        // Verifies the slot-move propagation pass propagates struct
+        // identity through `let u = t; u.name()`:
+        //   bb0:
+        //     ObjectStore { container_slot: SlotId(2), .. }  // let t = X {}
+        //     Assign(SlotId(3), Use(Move(SlotId(2))))         // let u = t
+        //     terminator: Call { func: Method("name"), args: [Move(3)],
+        //                        destination: SlotId(4), next: bb1 }
+        //
+        // The struct identity flows from `t`'s construction slot (2) to
+        // `u`'s binding slot (3) through the slot-move propagation pass,
+        // so the trait-method classifier finds `struct_names[3] = "X"`
+        // and stamps `concrete_types[4] = String`.
+        let span = mk_span();
+        let bb0 = BasicBlock {
+            id: BasicBlockId(0),
+            statements: vec![
+                crate::mir::types::MirStatement {
+                    kind: StatementKind::ObjectStore {
+                        container_slot: SlotId(2),
+                        operands: vec![],
+                        field_names: vec![],
+                    },
+                    span,
+                    point: Point(0),
+                },
+                crate::mir::types::MirStatement {
+                    kind: StatementKind::Assign(
+                        Place::Local(SlotId(3)),
+                        Rvalue::Use(Operand::Move(Place::Local(SlotId(2)))),
+                    ),
+                    span,
+                    point: Point(1),
+                },
+            ],
+            terminator: Terminator {
+                kind: TerminatorKind::Call {
+                    func: Operand::Constant(MirConstant::Method(
+                        "name".to_string(),
+                    )),
+                    args: vec![Operand::Move(Place::Local(SlotId(3)))],
+                    destination: Place::Local(SlotId(4)),
+                    next: BasicBlockId(1),
+                },
+                span,
+            },
+        };
+        let bb1 = BasicBlock {
+            id: BasicBlockId(1),
+            statements: vec![],
+            terminator: Terminator {
+                kind: TerminatorKind::Return,
+                span,
+            },
+        };
+        let mut local_struct_type_names = std::collections::HashMap::new();
+        local_struct_type_names.insert(SlotId(2), "X".to_string());
+        let mir = MirFunction {
+            name: "smoke3_moved".to_string(),
+            blocks: vec![bb0, bb1],
+            num_locals: 6,
+            param_slots: vec![],
+            param_reference_kinds: vec![],
+            local_types: vec![
+                crate::mir::types::LocalTypeInfo::Unknown;
+                6
+            ],
+            span,
+            field_name_table: Default::default(),
+            local_struct_type_names,
+        };
+        let method_returns =
+            |type_name: &str, method_name: &str| -> Option<ConcreteType> {
+                if type_name == "X" && method_name == "name" {
+                    Some(ConcreteType::String)
+                } else {
+                    None
+                }
+            };
+        let result = infer_top_level_concrete_types_from_mir_with_resolvers(
+            &mir,
+            None,
+            Some(&method_returns),
+        );
+        assert_eq!(
+            result[4],
+            ConcreteType::String,
+            "Call destination must be stamped String even when receiver \
+             flows through `let u = t` — struct identity propagated \
+             through slot moves alongside concrete_types"
+        );
+    }
+
+    #[test]
+    fn trait_method_no_resolver_leaves_destination_void() {
+        // Without a `method_returns` resolver, the producer's
+        // trait-method arm doesn't run — destinations stay Void. The
+        // conduit doesn't fabricate per §2.7.5.1 / forbidden #9.
+        let span = mk_span();
+        let mut local_struct_type_names = std::collections::HashMap::new();
+        local_struct_type_names.insert(SlotId(2), "X".to_string());
+        let bb0 = BasicBlock {
+            id: BasicBlockId(0),
+            statements: vec![crate::mir::types::MirStatement {
+                kind: StatementKind::ObjectStore {
+                    container_slot: SlotId(2),
+                    operands: vec![],
+                    field_names: vec![],
+                },
+                span,
+                point: Point(0),
+            }],
+            terminator: Terminator {
+                kind: TerminatorKind::Call {
+                    func: Operand::Constant(MirConstant::Method(
+                        "name".to_string(),
+                    )),
+                    args: vec![Operand::Move(Place::Local(SlotId(2)))],
+                    destination: Place::Local(SlotId(3)),
+                    next: BasicBlockId(1),
+                },
+                span,
+            },
+        };
+        let bb1 = BasicBlock {
+            id: BasicBlockId(1),
+            statements: vec![],
+            terminator: Terminator {
+                kind: TerminatorKind::Return,
+                span,
+            },
+        };
+        let mir = MirFunction {
+            name: "smoke3_no_resolver".to_string(),
+            blocks: vec![bb0, bb1],
+            num_locals: 5,
+            param_slots: vec![],
+            param_reference_kinds: vec![],
+            local_types: vec![
+                crate::mir::types::LocalTypeInfo::Unknown;
+                5
+            ],
+            span,
+            field_name_table: Default::default(),
+            local_struct_type_names,
+        };
+        // No method_returns resolver — destination stays Void.
+        let result =
+            infer_top_level_concrete_types_from_mir_with_resolvers(&mir, None, None);
+        assert_eq!(
+            result[3],
+            ConcreteType::Void,
+            "Without a method-returns resolver, the trait-method \
+             classifier must not fabricate a kind — destination stays Void"
+        );
+    }
+
+    #[test]
+    fn trait_method_no_struct_identity_leaves_destination_void() {
+        // When the receiver slot has no `local_struct_type_names` entry
+        // (e.g. the receiver isn't a struct-literal construction —
+        // could be a function call result, a method chain result, etc.),
+        // the trait-method classifier returns None — destination stays
+        // Void.
+        let span = mk_span();
+        let bb0 = BasicBlock {
+            id: BasicBlockId(0),
+            statements: vec![],
+            terminator: Terminator {
+                kind: TerminatorKind::Call {
+                    func: Operand::Constant(MirConstant::Method(
+                        "name".to_string(),
+                    )),
+                    args: vec![Operand::Move(Place::Local(SlotId(2)))],
+                    destination: Place::Local(SlotId(3)),
+                    next: BasicBlockId(1),
+                },
+                span,
+            },
+        };
+        let bb1 = BasicBlock {
+            id: BasicBlockId(1),
+            statements: vec![],
+            terminator: Terminator {
+                kind: TerminatorKind::Return,
+                span,
+            },
+        };
+        let mir = MirFunction {
+            name: "smoke3_no_struct_id".to_string(),
+            blocks: vec![bb0, bb1],
+            num_locals: 5,
+            param_slots: vec![],
+            param_reference_kinds: vec![],
+            local_types: vec![
+                crate::mir::types::LocalTypeInfo::Unknown;
+                5
+            ],
+            span,
+            field_name_table: Default::default(),
+            local_struct_type_names: std::collections::HashMap::new(),
+        };
+        let method_returns = |_type_name: &str, _method_name: &str| -> Option<ConcreteType> {
+            // Resolver would return String, but it's unreachable
+            // because struct identity is missing.
+            Some(ConcreteType::String)
+        };
+        let result = infer_top_level_concrete_types_from_mir_with_resolvers(
+            &mir,
+            None,
+            Some(&method_returns),
+        );
+        assert_eq!(
+            result[3],
+            ConcreteType::Void,
+            "Without struct identity on the receiver slot, the trait-method \
+             classifier must not invoke the resolver — destination stays Void"
         );
     }
 }

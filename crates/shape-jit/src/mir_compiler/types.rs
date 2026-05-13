@@ -1515,6 +1515,7 @@ mod tests {
             local_types: vec![],
             span: shape_ast::Span::default(),
             field_name_table: Default::default(),
+            local_struct_type_names: Default::default(),
         }
     }
 
@@ -1962,6 +1963,7 @@ mod tests {
             local_types: vec![],
             span: shape_ast::Span::default(),
             field_name_table: Default::default(),
+            local_struct_type_names: Default::default(),
         };
         let concrete_types = vec![
             ConcreteType::Array(Box::new(ConcreteType::I64)),
@@ -1982,18 +1984,47 @@ mod tests {
     // Surface pins for the user-defined-trait method dispatch boundary
     // documented at `parametric_method_return_kind_from_receiver`'s
     // "User-defined-trait surface boundary" doc block. These tests
-    // assert the surface — they are intentional pins, not regressions
-    // to be papered over by a Bool-default fallback or a hard-coded
-    // method-name arm.
+    // assert the JIT-internal classifier's posture — they are
+    // intentional pins, not regressions to be papered over by a
+    // Bool-default fallback or a hard-coded method-name arm.
     //
-    // Smoke 3 (`trait T { name(): string } type X {} impl T for X {
-    // method name() { "x" } } let t = X {} print(t.name())` → `x`) is
-    // the load-bearing surface: the `t.name()` Call-terminator's
-    // destination slot remains unstamped at JIT MIR time. Closing this
-    // requires extending the bytecode→JIT data conduit with a new
-    // `BytecodeProgram` side-table persisting per-trait-method declared
-    // return `ConcreteType`s — cross-crate, ADR amendment territory per
-    // the agent prompt's surface-and-stop list.
+    // ── Round 13 T1' status (2026-05-13) ────────────────────────────
+    //
+    // The user-defined-trait method dispatch boundary closes at the
+    // **VM-side conduit producer**, not at the JIT-internal
+    // parametric classifier. The producer
+    // (`crates/shape-vm/src/compiler/helpers.rs::infer_top_level_concrete_types_from_mir_with_resolvers`)
+    // stamps the Call-terminator destination slot's ConcreteType from
+    // the trait's declared return type via the new method-returns
+    // resolver chain:
+    //
+    //   `mir.local_struct_type_names[receiver_slot]` (gap 1 closure)
+    //   → `find_default_trait_impl_for_type_method(type_name, method)`
+    //   → `function_return_concrete_types[fn_idx]` (post gap 3 backfill)
+    //
+    // So Smoke 3 (`trait T { name(): string } type X {} impl T for X {
+    // method name() { "x" } } let t = X {} print(t.name())` → `x`)
+    // closes via the upstream `concrete_types[t_name_slot]
+    // = ConcreteType::String` stamp; the JIT consumer at
+    // `infer_slot_kinds_with_concrete` projects this through
+    // `concrete_seed` (`crates/shape-jit/src/mir_compiler/mod.rs:564`)
+    // to `NativeKind::String` automatically — no change to the
+    // JIT-internal `parametric_method_return_kind_from_receiver`
+    // classifier needed.
+    //
+    // The 3 pin tests below remain valid post-T1': they assert that the
+    // JIT-internal classifier is NOT the place where user-defined trait
+    // method classification happens (it would be a wrong-layer
+    // classification per CLAUDE.md "Renames to refuse on sight" / Round
+    // 6A precedent). The classification correctly lives at the VM-side
+    // conduit producer one tier upstream.
+    //
+    // The new positive pin
+    // (`trait_method_call_destination_seeded_from_concrete_types`)
+    // asserts the upstream-landing pathway: when the VM-side conduit
+    // has stamped `concrete_types[result_slot] = ConcreteType::String`,
+    // the JIT consumer's `concrete_seed` projection picks it up to
+    // `NativeKind::String`.
 
     #[test]
     fn user_defined_trait_method_on_struct_returns_none() {
@@ -2069,6 +2100,7 @@ mod tests {
             local_types: vec![],
             span: shape_ast::Span::default(),
             field_name_table: Default::default(),
+            local_struct_type_names: Default::default(),
         };
         let concrete_types = vec![
             ConcreteType::Struct(shape_value::v2::concrete_type::StructLayoutId(0)),
@@ -2147,5 +2179,89 @@ mod tests {
                  not be classified by the parametric cohort"
             );
         }
+    }
+
+    // ── Phase 3 cluster-0 Round 13 T1' positive pin (2026-05-13) ────────
+    //
+    // The companion of the 3 surface pins above. Asserts the
+    // upstream-landing pathway works: when the VM-side conduit
+    // producer
+    // (`crates/shape-vm/src/compiler/helpers.rs::infer_top_level_concrete_types_from_mir_with_resolvers`)
+    // has stamped `concrete_types[result_slot] = ConcreteType::String`
+    // via the method-returns resolver chain (`mir.local_struct_type_names`
+    // → `find_default_trait_impl_for_type_method` →
+    // `function_return_concrete_types`), the JIT consumer's
+    // `concrete_seed` projection
+    // (`crates/shape-jit/src/mir_compiler/mod.rs:564`) picks it up to
+    // `NativeKind::String` and `infer_slot_kinds_with_concrete`
+    // preserves that kind through its existing-seed pass.
+
+    #[test]
+    fn trait_method_call_destination_seeded_from_concrete_types() {
+        // Simulates the post-T1' compilation state: the VM-side
+        // conduit producer has stamped the Call destination slot's
+        // ConcreteType to the trait's declared return type
+        // (`ConcreteType::String` for Smoke 3's `t.name()` where
+        // `trait T { name(): string }`). The caller threads this
+        // through `concrete_seed` so `existing[result_slot] =
+        // Some(NativeKind::String)` when `infer_slot_kinds_with_concrete`
+        // is invoked.
+        //
+        // Verifies: the existing-seed pass preserves the upstream
+        // stamp — the Call-terminator pass at lines ~306-359 only
+        // sets `kinds[idx]` if `kinds[idx].is_none()` (the
+        // `idx < n && kinds[idx].is_none()` guard at line 316), so
+        // the upstream `Some(NativeKind::String)` flows through
+        // untouched.
+        let mir = MirFunction {
+            name: "test_trait_dispatch_post_t1prime".to_string(),
+            blocks: vec![BasicBlock {
+                id: BasicBlockId(0),
+                statements: vec![],
+                terminator: Terminator {
+                    kind: TerminatorKind::Call {
+                        func: Operand::Constant(MirConstant::Method(
+                            "name".to_string(),
+                        )),
+                        args: vec![copy_local(0)],
+                        destination: Place::Local(SlotId(1)),
+                        next: BasicBlockId(0),
+                    },
+                    span: shape_ast::Span::default(),
+                },
+            }],
+            num_locals: 4,
+            param_slots: vec![],
+            param_reference_kinds: vec![],
+            local_types: vec![],
+            span: shape_ast::Span::default(),
+            field_name_table: Default::default(),
+            local_struct_type_names: Default::default(),
+        };
+        // Simulate post-T1' upstream state: `concrete_types[1]` is
+        // stamped String by the VM-side conduit; the caller has
+        // projected it through `native_kind_from_concrete_type` to
+        // form `existing[1] = Some(NativeKind::String)`.
+        let concrete_types = vec![
+            ConcreteType::Struct(shape_value::v2::concrete_type::StructLayoutId(0)),
+            ConcreteType::String,
+            ConcreteType::Void,
+            ConcreteType::Void,
+        ];
+        let existing = vec![
+            None,
+            Some(NativeKind::String),
+            None,
+            None,
+        ];
+        let kinds = infer_slot_kinds_with_concrete(&mir, &existing, &concrete_types);
+        assert_eq!(
+            kinds[1],
+            Some(NativeKind::String),
+            "Post-T1' upstream-seeded Call-terminator destination slot \
+             must preserve the trait-method declared return kind through \
+             the JIT consumer's existing-seed pass — no clobber by the \
+             classifier fallthrough"
+        );
     }
 }
