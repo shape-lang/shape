@@ -2368,6 +2368,99 @@ Forbidden frames refused on sight (per audit §7):
 No ADR amendment required (audit §8). All architectural decisions live
 in §2.7.24 Q25.A + §2.7.5 + §2.7.10/Q11; helpers and variant grid
 already in place pre-Round-11A.
+### W12-jit-producing-site-conduit-completeness close (2026-05-13)
+
+**Branch**: `bulldozer-strictly-typed-w12-jit-producing-site-conduit-completeness`
+**Round**: 11-trinity INTEGRATED (Round 7A precedent, ~800-1000 LoC single
+agent) — closes Round 10's surfaced item (B) at the §2.7.5 conduit
+completeness level.
+
+Three commits on the same branch per the trinity's internal ordering
+rule "(a) FIRST as foundation; (b) and (c) consume the landed taxonomy":
+
+| Part | Commit | LoC | Scope |
+|---|---|---|---|
+| (a) 11E ConcreteType taxonomy | `82dfecd9` | ~228 | Extend `shape_value::v2::ConcreteType` with 7 new arms: `HashSet(Box<_>)`, `Deque(Box<_>)`, `PriorityQueue`, `Channel(Box<_>)`, `Mutex(Box<_>)`, `Atomic`, `Lazy(Box<_>)`. Updates `is_heap`, `mono_key`, `type_tag`, `Display`. Cross-crate exhaustive-match updates in 3 sites (`closure_layout.rs::native_kind_from_concrete_type`, `mir_compiler/types.rs::native_kind_from_concrete_type`, `monomorphization/substitution.rs::concrete_to_annotation`). No ADR amendment — all 7 arms mirror existing parametric (Array/HashMap) or nullary shape and dispatch through existing HeapKind ordinals. Wire-format unaffected (`#[serde(skip)]` on every `ConcreteType`-bearing field reaching `FunctionBlob`). |
+| (b) 11B method-return-kind conduit | `5b113145` | ~371 | New `parametric_method_return_kind_from_receiver(name, args, concrete_types)` classifier in `mir_compiler/types.rs`, wired into `infer_slot_kinds_with_concrete`'s `TerminatorKind::Call` destination-stamp pass via `well_known.or_else(parametric)`. Covers `Array<T>.{sum,mean,min,max,get,first,last,pop}`, `HashMap<K,V>.get`, `Mutex<T>.get`, `Atomic.{load,fetch_add,fetch_sub,compare_exchange}`, `Lazy<T>.get`. Receiver-recovery per §2.7.5 (args[0] is the receiver per MIR lowering convention). Same defect class as Round 8A reopen's `infer_enum_payload_kind` extension via `native_kind_from_concrete_type`, generalized to method-call sites. |
+| (c) 11C Rvalue::Aggregate TypedObject threading | `a181abd9` | ~121 | Producer-side fix at `mir/lowering/helpers.rs::emit_container_store_full`: preserve empty-operands short-circuit for Array/Enum/Closure (no per-element work to record) but emit the empty `StatementKind::ObjectStore` for the Object case. Closes the Smoke 3 JIT-side `let t = X {}` regression: the conduit walks the empty ObjectStore and stamps `Struct(StructLayoutId(0))`, the JIT `is_typed_object_slot` short-circuit fires for the preceding `Rvalue::Aggregate(vec![])`, and the existing ObjectStore consumer's `typed_object_alloc(schema_id, 0)` allocates the empty TypedObject. One-line fix in the producer + new conduit test. |
+
+**Smoke matrix delta (JIT-side)**:
+
+| Smoke | Pre-trinity | Post-trinity | Disposition |
+|---|---|---|---|
+| 1 (`4950`) | ✅ | ✅ unchanged | passing |
+| 1.5 (`divide` + match → `5`) | ❌ §2.7.5 String EnumPayload carrier-mismatch | ❌ same (cluster-1 carrier-unification candidate) | cluster-1 |
+| 2 partial (`[1,2,3].sum()` → `6`) | ❌ print SURFACE at operand NativeKind=None | ✅ prints `6` (Part b parametric classifier flows Int64) | **trinity-closed** |
+| 2 full (`[1,2,3,4,5].map(\|x\|x*2).sum()` → `30`) | ❌ VM `op_new_array`; JIT print SURFACE | ❌ VM `op_new_array` (11A territory); JIT print **PART-B FLOWS** Int64 (waiting for 11A VM-side fix to test end-to-end) | depends on 11A |
+| 3 (`type X {} let t = X {} print(t.name())` → `x`) | ❌ JIT `Rvalue::Aggregate` SURFACE | ❌ Aggregate UNBLOCKED → SURFACE moves DOWNSTREAM to `t.name()` trait-dispatch return-kind classification | **trinity-closed at Aggregate**; surfaced for cluster-1 / Round 12 |
+| 4 (`Set + .add + .size` → `2`) | ❌ writeback (11D territory) | ❌ same | 11D territory |
+
+**Surfaced items (cite-tracked, NOT silently fallback'd)**:
+
+- (T1) **Trait-dispatch return-kind classification** — `t.name()` Call-
+  terminator destination remains unstamped because the method-return-
+  kind classifier (Part b's `parametric_method_return_kind_from_
+  receiver`) only covers receiver-parametric cases keyed on
+  `ConcreteType::{Array<T>, HashMap<K,V>, Mutex<T>, Atomic, Lazy<T>}`
+  shape. Arbitrary trait methods like `name(): string` declared in
+  `trait T { ... }` and dispatched via `impl T for X` need the trait
+  registry's declared return type threaded into the conduit — a
+  separate sub-cluster's audit territory. NOT trinity scope.
+
+- (T2) **`NativeKind::String` carrier-mismatch surface** at print
+  Call-terminator (pre-existing Round 8A reopen's identified cluster-1
+  candidate `W12-jit-result-carrier-unification`, generalized to all
+  §2.7.5 heap carriers). Even if (T1) were closed, `print(string)`
+  would still surface. Cluster-1 territory.
+
+**Close gates (devenv exit-code-verified)**:
+
+- `cargo check --workspace --lib --tests` EXIT=0
+- `cargo test -p shape-value --lib` 402 passed / 2 failed / 0 ignored
+  (2 hashmap_mutation failures pre-existing — verified by stash + rebuild
+  on parent `8db19d21`; baseline 400 + 2 new Part-a tests = 402)
+- `cargo test -p shape-jit --lib` 373 passed / 0 failed / 26 ignored
+  (361 baseline + 12 new Part-b tests = 373)
+- `cargo test -p shape-vm --lib compiler::helpers::call_return_kind_tests`
+  5 passed / 0 failed (4 existing + 1 new Part-c conduit test)
+- `cargo test -p shape-vm --lib mir::lowering` 63 passed / 0 failed
+  (lowering tests unaffected by Part-c producer-side fix)
+- `cargo test -p shape-vm --lib` FAILED with v2-raw-heap aliasing
+  SIGABRT — pre-existing per Round 4 close report ("v2-raw-heap-audit"
+  follow-up); not introduced by trinity.
+- `bash scripts/verify-merge.sh` 12/12 Passed
+- `bash scripts/check-no-dynamic.sh` EXIT=0
+
+**ADR amendments**: NONE required. Part (a) taxonomy extension mirrors
+existing parametric (Array/HashMap) and nullary shape per §2.7.15 /
+§2.7.17 / §2.7.18 / §2.7.20 / §2.7.25; none of the 7 new ConcreteType
+arms projects 1:1 to HeapKind (ADR-005 §1 single-discriminator
+preserved). Part (b) extends the §2.7.5 producing-site conduit pattern
+to method-call sites — same shape as Round 8A reopen's
+`infer_enum_payload_kind` extension. Part (c) is a one-line producer-
+side invariant fix (the empty-operands ObjectStore was silently
+dropped, masking the JIT-side conduit gap).
+
+**Refuse-on-sight discipline preserved** across all three parts:
+
+- No `bridge`/`probe`/`helper`/`hop`/`translator`/`adapter`/`shim`
+  framing in any commit or its commentary.
+- No Bool-default fallback at any kind-source gap (§2.7.7 #9).
+- No ConcreteType variants projecting 1:1 to HeapKind (ADR-005 §1).
+- No kind-blind fabrication at the Aggregate consumer site (Part c
+  works through the existing TypedObject short-circuit + ObjectStore
+  consumer chain, not by adding a new Aggregate arm that handles
+  unknown destination kinds).
+- No silent walkbacks — the trinity's downstream surface (T1, T2) is
+  honestly surface-and-stopped, not "marked as a follow-up for a
+  later phase" rationalization.
+
+Per the trinity's migrating-close criterion, the Aggregate JIT-side
+gap is closed (Part c) and the kind-inference completeness is
+extended (Parts a, b). The downstream trait-dispatch return-kind
+classification gap (T1) and the `NativeKind::String` carrier-mismatch
+surface (T2) are surfaced cleanly for Round 12 / cluster-1
+disposition per the N+1 trajectory.
 
 ---
 

@@ -169,6 +169,24 @@ pub(crate) fn native_kind_from_concrete_type(ct: &ConcreteType) -> Option<Native
         // tuple-codegen convention; treat as TypedObject for the
         // kind track.
         ConcreteType::Tuple(_) => NativeKind::Ptr(HeapKind::TypedObject),
+        // ── Phase 3 cluster-0 Round 11-trinity 11E (2026-05-13) ─────────
+        // Collection / concurrency carriers — taxonomy extended in
+        // `shape-value/src/v2/concrete_type.rs` per the Round 10 surfaced
+        // item (B). Each ConcreteType arm maps to its dedicated
+        // `HeapKind` ordinal (§2.7.15 / §2.7.17 / §2.7.18 / §2.7.20 /
+        // §2.7.25) and dispatches through Round 9's `retain_func_for_place`
+        // / `release_func_for_place` 8-arm extension. Pre-11E the JIT
+        // EnumStore consumer carried out-of-band kind seeding at the
+        // `mir_compiler/types.rs` EnumStore arm because ConcreteType
+        // didn't have these variants; with 11E landed the in-band
+        // `concrete_seed` path is authoritative.
+        ConcreteType::HashSet(_) => NativeKind::Ptr(HeapKind::HashSet),
+        ConcreteType::Deque(_) => NativeKind::Ptr(HeapKind::Deque),
+        ConcreteType::PriorityQueue => NativeKind::Ptr(HeapKind::PriorityQueue),
+        ConcreteType::Channel(_) => NativeKind::Ptr(HeapKind::Channel),
+        ConcreteType::Mutex(_) => NativeKind::Ptr(HeapKind::Mutex),
+        ConcreteType::Atomic => NativeKind::Ptr(HeapKind::Atomic),
+        ConcreteType::Lazy(_) => NativeKind::Ptr(HeapKind::Lazy),
         // Void has no carrier slot.
         ConcreteType::Void => return None,
     })
@@ -287,7 +305,10 @@ pub(crate) fn infer_slot_kinds_with_concrete(
     // (no fabricated default).
     for block in &mir.blocks {
         if let TerminatorKind::Call {
-            func, destination, ..
+            func,
+            args,
+            destination,
+            ..
         } = &block.terminator.kind
         {
             if let Place::Local(slot) = destination {
@@ -295,7 +316,36 @@ pub(crate) fn infer_slot_kinds_with_concrete(
                 if idx < n && kinds[idx].is_none() {
                     let ret_kind = match func {
                         Operand::Constant(MirConstant::Method(name)) => {
-                            well_known_method_return_kind(name)
+                            // ADR-006 §2.7.5 producing-site conduit
+                            // extension for parametric-return methods
+                            // (Phase 3 cluster-0 Round 11-trinity Part b,
+                            // 2026-05-13). Method-return kinds split into
+                            // two cohorts: invariant-across-receivers
+                            // (`size`/`isEmpty`/...) classified via
+                            // `well_known_method_return_kind(name)`, and
+                            // receiver-parametric (`HashMap.get →
+                            // Option<V>`, `Mutex.get → T`, `Atomic.load →
+                            // i64`, `Array.sum/mean/min/max → element`)
+                            // classified via
+                            // `parametric_method_return_kind(name,
+                            // receiver_ct)` where `receiver_ct` is
+                            // `concrete_types[args[0].root_local()]`.
+                            //
+                            // Invariant-name classification runs first
+                            // (current behavior); when it returns None,
+                            // fall through to the receiver-parametric
+                            // classifier. This preserves the existing
+                            // Round 5C semantics for size/len/etc.
+                            // exactly, and extends classification for
+                            // methods whose return kind genuinely
+                            // depends on the receiver shape.
+                            well_known_method_return_kind(name).or_else(|| {
+                                parametric_method_return_kind_from_receiver(
+                                    name,
+                                    args,
+                                    concrete_types,
+                                )
+                            })
                         }
                         Operand::Constant(MirConstant::Function(name)) => {
                             well_known_function_return_kind(name)
@@ -763,6 +813,121 @@ fn well_known_function_return_kind(name: &str) -> Option<NativeKind> {
         // `len(x)` global builtin — returns int for every supported
         // receiver type (Array, String, HashMap, ...).
         "len" => Some(NativeKind::Int64),
+        _ => None,
+    }
+}
+
+/// ADR-006 §2.7.5 producing-site classification for parametric-return
+/// method calls (Phase 3 cluster-0 Round 11-trinity Part b, 2026-05-13).
+///
+/// Companion of `well_known_method_return_kind`: that classifier covers
+/// methods whose return type is INVARIANT across receiver types
+/// (`size`/`len`/`length`/`count` → Int64; `isEmpty`/`contains`/`has` →
+/// Bool — verified against every dispatch table in
+/// `crates/shape-vm/src/executor/objects/method_registry.rs`). This
+/// classifier covers methods whose return type DEPENDS on the receiver's
+/// `ConcreteType` parametric form:
+///
+/// - `Array<T>.sum() / .mean() / .min() / .max() / .first() / .last() /
+///   .pop() / .get(i)` — return kind flows from `ConcreteType::Array(T)`
+///   element type to a scalar `NativeKind` (Int64 for `Array<int>`,
+///   Float64 for `Array<number>`, etc.). `.first()/.last()/.pop()`
+///   wrap in `Option<T>`, classified as `Ptr(HeapKind::Option)` carrier
+///   bits per §2.7.17.
+/// - `HashMap<K, V>.get(K) → Option<V>` — receiver
+///   `ConcreteType::HashMap(_, V)` returns `Ptr(HeapKind::Option)`
+///   (the wrapped V is on the Option's inner kind track, picked up by
+///   downstream EnumPayload via `infer_enum_payload_kind`).
+/// - `Mutex<T>.get() → T` — receiver `ConcreteType::Mutex(T)` returns
+///   `native_kind_from_concrete_type(T)`.
+/// - `Atomic.load() / .fetch_add(d) / .fetch_sub(d) /
+///   .compare_exchange(...)` — i64-only at landing per §2.7.25; return
+///   Int64 unconditionally.
+/// - `Lazy<T>.get() → T` — receiver `ConcreteType::Lazy(T)` returns
+///   `native_kind_from_concrete_type(T)`.
+///
+/// Names outside this set return `None` — the slot's kind genuinely
+/// isn't statically classifiable from the receiver+method pair alone,
+/// per §2.7.7 (no Bool-default fallback).
+///
+/// The receiver's `ConcreteType` is sourced from `concrete_types[args[0]
+/// .root_local()]` per §2.7.5 producing-site discipline. When the
+/// receiver isn't a `Place::Local` projection (e.g. constant receiver,
+/// no concrete_types entry), the classifier returns `None` — the
+/// classifier is one of multiple kind sources at this point in the
+/// inference pass, and surfacing-and-stopping isn't appropriate here
+/// (other downstream passes still get a chance to stamp the slot).
+fn parametric_method_return_kind_from_receiver(
+    name: &str,
+    args: &[Operand],
+    concrete_types: &[ConcreteType],
+) -> Option<NativeKind> {
+    use shape_value::heap_value::HeapKind;
+    // args[0] is the receiver per the MIR lowering convention
+    // (`mir/lowering/expr.rs::Expr::MethodCall` pushes the receiver as
+    // arg index 0). Constant receivers can't carry a ConcreteType slot
+    // — no classification possible.
+    let receiver = args.first()?;
+    let receiver_slot = match receiver {
+        Operand::Copy(p) | Operand::Move(p) | Operand::MoveExplicit(p) => p.root_local(),
+        Operand::Constant(_) => return None,
+    };
+    let receiver_ct = concrete_types.get(receiver_slot.0 as usize)?;
+    // Skip when the receiver slot's ConcreteType wasn't proven by the
+    // upstream concrete-types conduit (the Void placeholder).
+    if matches!(receiver_ct, ConcreteType::Void) {
+        return None;
+    }
+    match (name, receiver_ct) {
+        // ── Array element-typed accessors ──────────────────────────
+        // `Array<T>.sum() / .mean() / .min() / .max()` return the
+        // element type's scalar kind. The VM-side `array_basic.rs` /
+        // `typed_array_methods.rs` PHF entries return
+        // `KindedSlot::from_<elem>(...)` per receiver-element kind.
+        // ADR-006 §2.7.5 / Round 8A receiver-recovery soundness:
+        // the §2.7.5 carrier shape for the element is preserved
+        // verbatim in the return value.
+        ("sum" | "mean" | "min" | "max", ConcreteType::Array(elem)) => {
+            native_kind_from_concrete_type(elem)
+        }
+        // `Array.get(i)` — returns element T directly (the VM-side
+        // bounds-checked accessor; non-Option return).
+        ("get", ConcreteType::Array(elem)) => native_kind_from_concrete_type(elem),
+        // `Array.first() / .last() / .pop()` — wrap in Option<T>.
+        // The destination slot's bits are an `Arc::into_raw(Arc<
+        // OptionData>) as u64` carrier per §2.7.17; the EnumPayload
+        // path picks up the inner V from the surrounding
+        // `concrete_types[r]` Option arm.
+        ("first" | "last" | "pop", ConcreteType::Array(_)) => {
+            Some(NativeKind::Ptr(HeapKind::Option))
+        }
+        // ── HashMap.get ────────────────────────────────────────────
+        // `HashMap<K, V>.get(k) → Option<V>` — the VM-side
+        // `hashmap_methods::v2_get` returns
+        // `KindedSlot::from_option(Arc<OptionData::some/none>(v))`.
+        // Carrier kind is `Ptr(HeapKind::Option)`; the inner V flows
+        // through EnumPayload at the destructure site.
+        ("get", ConcreteType::HashMap(_, _)) => Some(NativeKind::Ptr(HeapKind::Option)),
+        // ── Mutex.get ──────────────────────────────────────────────
+        // `Mutex<T>.get() → T` per §2.7.25. The VM-side
+        // `executor/objects/mutex_methods::v2_get` clones the inner
+        // `KindedSlot::value` payload — the §2.7.5 carrier shape for
+        // the inner T is preserved verbatim.
+        ("get", ConcreteType::Mutex(inner)) => native_kind_from_concrete_type(inner),
+        // ── Atomic.load / fetch_add / fetch_sub / compare_exchange ─
+        // `Atomic` is i64-only at landing per §2.7.25; every return
+        // path produces a raw i64 (the `AtomicI64::load` / `fetch_*`
+        // result). Pre-typed-payload-amendment all four method names
+        // surface Int64.
+        (
+            "load" | "fetch_add" | "fetch_sub" | "compare_exchange",
+            ConcreteType::Atomic,
+        ) => Some(NativeKind::Int64),
+        // ── Lazy.get ───────────────────────────────────────────────
+        // `Lazy<T>.get() → T` per §2.7.25. The cached value's
+        // `KindedSlot::value` payload is cloned from `LazyInner.value`
+        // after first-init; same receiver-recovery shape as Mutex.
+        ("get", ConcreteType::Lazy(inner)) => native_kind_from_concrete_type(inner),
         _ => None,
     }
 }
@@ -1527,5 +1692,227 @@ mod tests {
                 size
             );
         }
+    }
+
+    // ── Phase 3 cluster-0 Round 11-trinity Part b (2026-05-13) ──────────
+    // Tests for `parametric_method_return_kind_from_receiver`. Verifies
+    // the receiver+method-name pair classification against
+    // ConcreteType-bearing receivers.
+
+    use shape_value::heap_value::HeapKind;
+    use shape_value::v2::ConcreteType;
+
+    fn copy_local(slot: u16) -> Operand {
+        Operand::Copy(Place::Local(SlotId(slot)))
+    }
+
+    #[test]
+    fn parametric_array_sum_returns_element_kind() {
+        // `Array<int>.sum() → Int64`
+        let cts = vec![
+            ConcreteType::Array(Box::new(ConcreteType::I64)),
+        ];
+        let kind = parametric_method_return_kind_from_receiver("sum", &[copy_local(0)], &cts);
+        assert_eq!(kind, Some(NativeKind::Int64));
+
+        // `Array<number>.sum() → Float64`
+        let cts = vec![ConcreteType::Array(Box::new(ConcreteType::F64))];
+        let kind = parametric_method_return_kind_from_receiver("sum", &[copy_local(0)], &cts);
+        assert_eq!(kind, Some(NativeKind::Float64));
+    }
+
+    #[test]
+    fn parametric_array_mean_and_min_max_inherit_element() {
+        let cts = vec![ConcreteType::Array(Box::new(ConcreteType::F64))];
+        assert_eq!(
+            parametric_method_return_kind_from_receiver("mean", &[copy_local(0)], &cts),
+            Some(NativeKind::Float64)
+        );
+        assert_eq!(
+            parametric_method_return_kind_from_receiver("min", &[copy_local(0)], &cts),
+            Some(NativeKind::Float64)
+        );
+        assert_eq!(
+            parametric_method_return_kind_from_receiver("max", &[copy_local(0)], &cts),
+            Some(NativeKind::Float64)
+        );
+    }
+
+    #[test]
+    fn parametric_array_first_last_pop_return_option_carrier() {
+        // Array.first/last/pop wrap in Option<T> — destination slot
+        // carries Ptr(HeapKind::Option) per §2.7.17.
+        let cts = vec![ConcreteType::Array(Box::new(ConcreteType::I64))];
+        assert_eq!(
+            parametric_method_return_kind_from_receiver("first", &[copy_local(0)], &cts),
+            Some(NativeKind::Ptr(HeapKind::Option))
+        );
+        assert_eq!(
+            parametric_method_return_kind_from_receiver("last", &[copy_local(0)], &cts),
+            Some(NativeKind::Ptr(HeapKind::Option))
+        );
+        assert_eq!(
+            parametric_method_return_kind_from_receiver("pop", &[copy_local(0)], &cts),
+            Some(NativeKind::Ptr(HeapKind::Option))
+        );
+    }
+
+    #[test]
+    fn parametric_hashmap_get_returns_option_carrier() {
+        // HashMap.get(k) → Option<V>; destination slot carries
+        // Ptr(HeapKind::Option) per §2.7.17. The wrapped V flows
+        // through EnumPayload at the destructure site.
+        let cts = vec![ConcreteType::HashMap(
+            Box::new(ConcreteType::String),
+            Box::new(ConcreteType::I64),
+        )];
+        let kind =
+            parametric_method_return_kind_from_receiver("get", &[copy_local(0)], &cts);
+        assert_eq!(kind, Some(NativeKind::Ptr(HeapKind::Option)));
+    }
+
+    #[test]
+    fn parametric_mutex_get_returns_inner_kind() {
+        // Mutex<int>.get() → Int64 per §2.7.25 receiver-recovery.
+        let cts = vec![ConcreteType::Mutex(Box::new(ConcreteType::I64))];
+        let kind =
+            parametric_method_return_kind_from_receiver("get", &[copy_local(0)], &cts);
+        assert_eq!(kind, Some(NativeKind::Int64));
+
+        // Mutex<bool>.get() → Bool.
+        let cts = vec![ConcreteType::Mutex(Box::new(ConcreteType::Bool))];
+        let kind =
+            parametric_method_return_kind_from_receiver("get", &[copy_local(0)], &cts);
+        assert_eq!(kind, Some(NativeKind::Bool));
+    }
+
+    #[test]
+    fn parametric_atomic_load_fetch_returns_int64() {
+        // Atomic is i64-only at landing per §2.7.25.
+        let cts = vec![ConcreteType::Atomic];
+        for name in &["load", "fetch_add", "fetch_sub", "compare_exchange"] {
+            let kind =
+                parametric_method_return_kind_from_receiver(name, &[copy_local(0)], &cts);
+            assert_eq!(
+                kind,
+                Some(NativeKind::Int64),
+                "Atomic.{name} should return Int64"
+            );
+        }
+    }
+
+    #[test]
+    fn parametric_lazy_get_returns_inner_kind() {
+        // Lazy<int>.get() → Int64 per §2.7.25 receiver-recovery.
+        let cts = vec![ConcreteType::Lazy(Box::new(ConcreteType::I64))];
+        let kind =
+            parametric_method_return_kind_from_receiver("get", &[copy_local(0)], &cts);
+        assert_eq!(kind, Some(NativeKind::Int64));
+    }
+
+    #[test]
+    fn parametric_unknown_method_returns_none() {
+        // Unknown method names produce None — no Bool-default fallback
+        // per §2.7.7 #9.
+        let cts = vec![ConcreteType::Array(Box::new(ConcreteType::I64))];
+        let kind = parametric_method_return_kind_from_receiver(
+            "unknown_method",
+            &[copy_local(0)],
+            &cts,
+        );
+        assert_eq!(kind, None);
+    }
+
+    #[test]
+    fn parametric_constant_receiver_returns_none() {
+        // A constant-operand receiver has no slot to source ConcreteType
+        // from — classification is impossible, return None.
+        let kind = parametric_method_return_kind_from_receiver(
+            "sum",
+            &[Operand::Constant(MirConstant::Int(42))],
+            &[],
+        );
+        assert_eq!(kind, None);
+    }
+
+    #[test]
+    fn parametric_void_receiver_returns_none() {
+        // When the receiver slot's ConcreteType is Void (the upstream
+        // conduit couldn't prove a kind), classification falls through
+        // to None — no fabricated default.
+        let cts = vec![ConcreteType::Void];
+        let kind =
+            parametric_method_return_kind_from_receiver("sum", &[copy_local(0)], &cts);
+        assert_eq!(kind, None);
+    }
+
+    #[test]
+    fn parametric_size_is_invariant_not_parametric() {
+        // `size` is in `well_known_method_return_kind` (invariant
+        // across receivers); the parametric classifier should NOT
+        // catch it. This pins the cohort split — invariant names land
+        // in the well_known path, parametric names in the parametric
+        // path. No overlap.
+        let cts = vec![ConcreteType::Array(Box::new(ConcreteType::I64))];
+        let kind =
+            parametric_method_return_kind_from_receiver("size", &[copy_local(0)], &cts);
+        assert_eq!(
+            kind, None,
+            "size belongs to well_known_method_return_kind, not the parametric cohort"
+        );
+        // But well_known catches it.
+        assert_eq!(
+            well_known_method_return_kind("size"),
+            Some(NativeKind::Int64)
+        );
+    }
+
+    #[test]
+    fn parametric_method_return_kind_integrates_in_call_terminator_seed() {
+        // Integration test: a Call terminator for `arr.sum()` on an
+        // Array<int> receiver seeds the destination slot's kind to
+        // Int64 via the parametric classifier. Mirrors the
+        // Round 5C TerminatorKind::Call destination-stamp path; the
+        // parametric extension reaches it via the
+        // `well_known.or_else(parametric)` chain at the Call-terminator
+        // pass.
+        //
+        // MIR shape:
+        //   local 0 = Array<int> receiver (concrete_types seeded)
+        //   call .sum(local 0) → local 1
+        let mir = MirFunction {
+            name: "test_sum".to_string(),
+            blocks: vec![BasicBlock {
+                id: BasicBlockId(0),
+                statements: vec![],
+                terminator: Terminator {
+                    kind: TerminatorKind::Call {
+                        func: Operand::Constant(MirConstant::Method("sum".to_string())),
+                        args: vec![copy_local(0)],
+                        destination: Place::Local(SlotId(1)),
+                        next: BasicBlockId(0),
+                    },
+                    span: shape_ast::Span::default(),
+                },
+            }],
+            num_locals: 4,
+            param_slots: vec![],
+            param_reference_kinds: vec![],
+            local_types: vec![],
+            span: shape_ast::Span::default(),
+            field_name_table: Default::default(),
+        };
+        let concrete_types = vec![
+            ConcreteType::Array(Box::new(ConcreteType::I64)),
+            ConcreteType::Void,
+            ConcreteType::Void,
+            ConcreteType::Void,
+        ];
+        let kinds = infer_slot_kinds_with_concrete(&mir, &[], &concrete_types);
+        assert_eq!(
+            kinds[1],
+            Some(NativeKind::Int64),
+            ".sum() on Array<int> should stamp Int64 on the destination slot"
+        );
     }
 }
