@@ -7079,3 +7079,123 @@ rebuild recipe.
 - `crates/shape-runtime/src/type_schema/mod.rs` —
   `typed_object_from_pairs` rebuilt without tag-decode hops (N9
   cleanup)
+
+
+---
+
+## W12-jit-trait-dispatch-return-kind surface-and-stop (2026-05-13)
+
+### Context
+
+Phase 3 cluster-0 Round 12 T1. The Smoke 3 JIT-side surface
+(`trait T { name(): string } type X {} impl T for X { method name()
+{ "x" } } let t = X {} print(t.name())` → `Route A surface-and-stop:
+NotImplemented(SURFACE) — print Call-terminator operand NativeKind
+is None`) is the next-layer gap after Round 11-trinity Part c
+unblocked the `Rvalue::Aggregate` site for `let t = X {}`.
+
+The agent prompt asked for an extension of the JIT MIR builder's
+call-terminator return-kind conduit (similar shape to trinity Part b's
+`parametric_method_return_kind_from_receiver` classifier) to consult
+the trait registry when the call resolves to a trait method, and stamp
+the destination slot's `NativeKind` from the trait method's declared
+return type. The prompt named the surface-and-stop condition: "If the
+trait registry isn't accessible from the JIT MIR builder layer (cross-
+crate boundary issue) — STOP and surface."
+
+The surface-and-stop condition holds. The three conduit gaps are:
+
+1. **Receiver struct identity erasure**:
+   `concrete_type_from_annotation` (`crates/shape-vm/src/compiler/
+   v2_map_emission.rs:357`) returns the `StructLayoutId(0)`
+   placeholder for every user struct name (the layout-id registry
+   is not wired; `_ => None` arm at line 378). So the receiver
+   slot's `ConcreteType` is `Struct(StructLayoutId(0))` regardless
+   of whether the user struct is `X`, `Y`, or `Point`.
+
+2. **Trait registry not persisted in `BytecodeProgram`**:
+   `TypeRegistry::traits: HashMap<String, TraitDef>`
+   (`crates/shape-runtime/src/type_system/environment/registry.rs:
+   111`) holds the trait's declared return type, but
+   `BytecodeProgram` does not persist this — only
+   `trait_method_symbols` (resolved function name per `(trait,
+   type, impl, method)`) and `trait_vtables` (vtables keyed by
+   `Trait::ConcreteType`).
+
+3. **Impl method return type fallback insufficient**:
+   `function_return_concrete_types: Vec<ConcreteType>` is built
+   from `FunctionDef.return_type` annotations. For trait impl
+   methods desugared via `desugar_impl_method`
+   (`crates/shape-vm/src/compiler/statements.rs:1646`), the impl's
+   `method.return_type` is `None` for Smoke 3 (the impl source
+   doesn't repeat the trait's `: string` annotation), so
+   `function_return_concrete_types[X::name] = ConcreteType::Void`.
+
+### Considered-but-rejected during the close
+
+**Hard-coded `"name"` → `NativeKind::String` arm** in
+`well_known_method_return_kind` or `parametric_method_return_kind_
+from_receiver`. Refused on sight per agent prompt's forbidden-
+rationalization list ("hard-code the kickoff Smoke 3 case for now").
+Same defection-attractor pattern as the deleted W-series `Convert<X>
+To<Y>` opcodes (added to paper over a kind-tracker gap). The "name"
+arm would be unsound: different traits could declare `name` with
+different return types (`trait T { name(): string }` vs `trait U
+{ name(): int }`), and the classifier has no receiver-type info to
+disambiguate.
+
+**Bool-default fallback** for unproven trait method return kinds.
+Refused per §2.7.7 #9. The correct response is `None` → Route-A
+surface-and-stop at the print Call-terminator.
+
+**Cohort-scanning `trait_method_symbols` for unique return types**
+at JIT MIR time. Considered: scan `trait_method_symbols` for all
+entries with `method == "name"`, resolve to function indices,
+read `function_return_concrete_types[f]` for each, classify if
+all candidates agree. Rejected: gap 3 above invalidates the
+strategy — `function_return_concrete_types[X::name] = Void` for
+Smoke 3 because the impl's `return_type` is `None`; the trait
+declaration's annotation does not propagate.
+
+**Cross-crate `BytecodeProgram` side-table extension** (the
+principled fix). New `BytecodeProgram::trait_method_return_concrete
+_types` or similar, populated at impl-block compile time from
+`TraitDef.members[*].Required(Method { return_type, .. })` /
+`Default(MethodDef { return_type, .. })`, threaded through linker
+/ remote / content-addressed program shapes, threaded into MirToIR
+via strategy.rs alongside `function_indices`. Mirrors the Round-6
+`function_return_concrete_types` precedent. **Out of scope for T1**
+per the agent prompt's scope statement ("Touch: `crates/shape-jit/
+src/mir_compiler/types.rs` ... different region than T2/T3, but
+same file"). The extension is the right shape for the close-out;
+T1 surfaces it for Round 13 cluster-0 disposition.
+
+### Defection record
+
+- **No hard-coded `"name"` arm.** The classifier returns `None`;
+  the surface fires at the print Call-terminator. The 3 surface
+  pin tests in `mir_compiler::types::tests` pin this against a
+  future walk-back.
+- **No Bool-default fallback** at any kind-source gap (§2.7.7 #9).
+- **No `bridge`/`probe`/`helper`/`hop`/`translator`/`adapter`/
+  `shim` framing** in commit, doc block, status doc, or AGENTS.md
+  row. The 3 conduit gaps are named by what they are (struct
+  identity erasure / trait registry not persisted / impl method
+  return type fallback insufficient), not by hypothetical role.
+- **No silent walkback** — the surface is named (`Route A
+  surface-and-stop: NotImplemented(SURFACE)`) and the cross-crate
+  extension is described in detail at status-doc + doc-block
+  granularity.
+
+### References
+
+- ADR-006 §2.7.5 (producing-site classification)
+- ADR-006 §2.7.10 / Q11 (method-dispatch ABI)
+- `crates/shape-jit/src/mir_compiler/types.rs::parametric_method_
+  return_kind_from_receiver` — extended doc block "User-defined-
+  trait surface boundary" naming the 3 conduit gaps
+- `crates/shape-jit/src/mir_compiler/types.rs::tests::user_defined_
+  trait_method_*` — 3 surface pin tests
+- `docs/cluster-audits/phase-3-cluster-0-status.md` §
+  "W12-jit-trait-dispatch-return-kind close (2026-05-13)" —
+  full surface analysis + bridging strategy
