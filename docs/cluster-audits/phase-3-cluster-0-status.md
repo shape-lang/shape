@@ -4585,3 +4585,140 @@ ADR-006 §2.7.22 Q23). Sub-cluster S1 (scalar width pass) can
 dispatch immediately if F64 is not in S1 scope (otherwise depends
 on O-2). HashMapValueBuf parallel deletion (Q25.B) surfaces as
 cluster-1+ work order, NOT cluster-0 scope.*
+
+---
+
+## Round 17 audit-only merge (POST-MERGE, 2026-05-13)
+
+R17 deletion-audit merged into `bulldozer-strictly-typed` at commit
+**`038066de`**. Audit close was `e55b8e71`. Doc-only merge (audit
+doc + status doc subsection + CLAUDE.md amendment + AGENTS.md row);
+no source changes. Post-merge gate `verify-merge.sh` 12/12 PASS via
+devenv shell.
+
+### Supervisor dispositions on the 4 structural obstacles
+
+- **O-1 (Temporal disambiguation)** — newtype-wrapper path:
+  `TypedArray<DateTimeData>` / `TypedArray<TimespanData>` /
+  `TypedArray<DurationData>`. Surface-and-stop in S2 dispatch if
+  the semantic tag turns out to be load-bearing internal to
+  `TemporalData` (newtype-infeasibility). Default: newtype.
+- **O-2 (F64 SIMD alignment)** — preserve alignment via explicit
+  override in `TypedArray<f64>`. **No regression accepted.**
+  Surface-and-stop in S1 with measured perf delta if preservation
+  isn't feasible within `TypedArray<T>`'s structural constraints.
+  Default: preserved.
+- **O-3 / O-3a (TypedObject / TraitObject)** — defer to cluster-1.
+  Tracked as candidate `W12-typed-object-array-retain-migration`
+  (audit §4.4). Kickoff Smoke 3 uses `box(X{})` (single TypedObject,
+  not `Array<TypedObject>`), so cluster-0 close is not affected.
+- **O-4 (ArrowBuffer<T> nullable carrier)** — cluster-1 deferral
+  confirmed (see follow-up below).
+
+### Three Round 18 follow-up surfacings (per supervisor)
+
+- **(O-4 nullable-array reachability)** — verified by audit §4.5:
+  the `TypedBuffer<T>` validity bitmap is used "only ... by the
+  DataTable / column-ref paths, NOT by user-visible `Array<T?>`
+  typed arrays." Cross-checked against all 4 kickoff smokes:
+  Smoke 1 (scalar `for` loop — no arrays), Smoke 2 (`Array<int>`
+  literal + `.map().sum()` — non-nullable), Smoke 3 (trait dispatch
+  via `box(X{})` — no arrays), Smoke 4 (`HashSet<string>` — not
+  `Array<T?>`). **None reach nullable-array territory.** Per
+  supervisor's contingent directive, **S4 ArrowBuffer<T> defers to
+  cluster-1.** Round 18 dispatches S1 + S3 in parallel, no
+  concurrent S4.
+- **(§2.7.22 Q23 amendment draft status)** — audit §6 contains the
+  **§2.7.24 Q25.A** amendment draft (for the enum deletion at S5),
+  NOT §2.7.22 Q23. Audit §3.4 names "ADR-006 §2.7.22 amendment
+  text: Q23 ruling reframed (Matrix exits the array carrier, gets
+  its own HeapKind)" as an S3 close-gate deliverable. So **§2.7.22
+  Q23 amendment text is not yet drafted**; **S3 dispatch must
+  include draft-and-commit of the §2.7.22 Q23 amendment text
+  alongside the new `HeapKind::Matrix=34` / `HeapKind::MatrixSlice=35`
+  allocations.**
+- **(W17-narrow-follow-up-A back-patch design surfacing)** —
+  the dispatch prescribed threading `Option<u32> schema_id` from
+  the bytecode-side `OpCode::NewTypedObject` operand through MIR
+  `ObjectStore` directly at MIR-lowering time. Agent observed
+  `crates/shape-vm/src/mir/lowering/` operates on AST only and
+  lacks access to the bytecode compiler's
+  `type_tracker.schema_registry`; direct threading would have been
+  intrusive across all callers. Agent adopted a **post-lowering
+  back-patch pattern** in a new module
+  `crates/shape-vm/src/compiler/mir_schema_threading.rs`
+  (`back_patch_schema_ids`, ~120 LoC), mirroring the established
+  `ClosurePlaceholder` / `ClosureCapture` back-patch precedent at
+  `functions.rs:493-549` + `compiler_impl_reference_model.rs:1354-1410`.
+  Named structs resolve via `mir.local_struct_type_names` +
+  bytecode compiler's tracker; anonymous inline objects via
+  `register_inline_object_schema` (idempotent). **Discipline rule
+  motivating the change**: ADR-006 §2.7.5 stamp-at-compile-time
+  discipline + "consult the most-specific source at the latest
+  reliable moment" — using the bytecode compiler's tracker
+  (post-AST-lowering) preserves user-declared schema-id identity
+  without intrusive cross-tier coupling at MIR lowering. **Same
+  precedent shape as W17-narrow's `try_call_user_method` widening
+  surfacing** (Round 15). +228/−9 LoC across 10 files; deletes
+  `register_predeclared_any_schema` call site at JIT consumer;
+  no forbidden patterns. **Awaiting supervisor ratification**, then
+  merge of `b9115aea` independent of R17 timing.
+
+### Cluster-1 candidate list (post-R17)
+
+Cluster-1 hardening now includes (newly added by R17 audit
+findings):
+
+- `W12-typed-object-array-retain-migration` — O-3/O-3a; audit §4.4
+- `HashMapValueBuf` deletion (parallel to TypedArrayData
+  deletion) — audit §5; ADR-006 §2.7.24 Q25.B amendment scope
+- `ArrowBuffer<T>` carrier — O-4; conditional deferral confirmed
+
+Plus the prior 5 cluster-1 items already tracked.
+
+### 5-instance defection-attractor count
+
+Producer/consumer carrier-shape-mismatch class now stands at 5
+instances (R12 / R14 / R15 / R16 / R17 audit-ratification). The
+CLAUDE.md amendment landed in `038066de` (line 281, "Renames to
+refuse on sight" → "#### Parallel-implementation across producer/
+consumer carrier-shape boundaries") names the 4 prior instances;
+R17 is itself an instance via the deletion-target framing it
+ratifies.
+
+### Revised cluster-0 close trajectory (3-4 rounds remaining)
+
+| Phase | Sub-clusters | Sessions |
+|---|---|---|
+| Round 18 | S1 (scalar) + S3 (Matrix exit) parallel | 1-2 |
+| Round 19 | S2 (heap-element + `<X>Obj` prereqs) | 1-2 |
+| Round 20 | S5 (enum deletion + §2.7.24 Q25.A amendment commit) | 1 |
+| Cluster-0 close attempt | full 4-kickoff-smoke matrix VM==JIT | 1 |
+
+Cluster-1 hardening now widened to 8 items (5 prior + 3 new from
+R17). Total handoff-to-v1 estimate: 17-23 sessions.
+
+### Handover-doc annotation re: CLAUDE.md authorization
+
+Folded into the same commit as this status doc subsection.
+`phase-3-team-lead-handover.md` §Decision authority pattern now
+notes: **CLAUDE.md modifications require explicit user
+ratification; supervisor draft != pre-authorization.** The R17
+sequence (supervisor drafted text + asked for user authorization
++ user replied "authorized text for CLAUDE.md" + team-lead folded
+the landing directive into the agent dispatch prematurely) is the
+one-time learning moment. Going forward: supervisor's drafted text
++ user's explicit ratification of *the landing* (not just *the
+text*) are both required before a CLAUDE.md modification appears
+in any agent's commit.
+
+Strategic owner retroactively ratified `038066de`'s CLAUDE.md hunk
+per supervisor's Option (a). Substance is what was authorized;
+the procedural gap was timing.
+
+---
+
+*Next session: read this file first; Round 18 dispatch (S1 + S3
+parallel) is authorized contingent on all three follow-up
+surfacings landing (the three subsections above) + W17-narrow-
+follow-up-A back-patch ratification (independent timing).*

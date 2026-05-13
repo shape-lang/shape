@@ -115,6 +115,7 @@ You are NOT authorized without explicit supervisor approval:
 - Authorize ADR amendments.
 - Re-scope cluster boundaries (cluster-0 → cluster-1 reclassification, kickoff matrix changes, close criterion modifications).
 - Tag `phase-3-cluster-0-close` (user authorizes after supervisor ratifies).
+- **Land `CLAUDE.md` modifications in any commit (agent dispatch directive OR team-lead direct edit) without explicit user ratification of *the landing*.** Supervisor drafting text != pre-authorization. The chain is: supervisor drafts → user ratifies the text AND the landing → team lead folds the landing directive into the next dispatch / commits the change. R17 (2026-05-13) was the one-time learning instance — supervisor drafted text, user said "authorized text for CLAUDE.md", team lead folded landing into the deletion-audit agent's dispatch without waiting for supervisor's planned next-relay formalization. Strategic owner retroactively ratified per Option (a). Going forward: text + landing both require explicit user authorization.
 
 ## User preferences + working style
 
