@@ -291,6 +291,60 @@ pub struct FFIFuncRefs {
     pub(crate) arc_option_retain: FuncRef,
     pub(crate) arc_option_release: FuncRef,
 
+    // ADR-006 §2.7.5 / §2.7.25 — Typed-Arc collection allocators
+    // (W12-jit-collection-arc-ffi-ctors-and-refcount, Phase 3 cluster-0
+    // Round 9 / 8B.1, 2026-05-13). Each entry produces
+    // `Arc::into_raw(Arc<XData>) as u64` with the standard Rust Arc
+    // layout (refcount at offset -16). Distinct from W11's
+    // `Box::into_raw(Box::new(UnifiedValue<T>))` carrier (HeapHeader
+    // refcount at offset 4) — see `ffi/v2/collection_arc.rs` header
+    // for the carrier-shape rule audit §5 codified.
+    //
+    // Zero-arg ctors (5 entries): no payload, take no parameters.
+    pub(crate) v2_make_hashset: FuncRef,
+    pub(crate) v2_make_hashmap: FuncRef,
+    pub(crate) v2_make_deque: FuncRef,
+    pub(crate) v2_make_priorityqueue: FuncRef,
+    pub(crate) v2_make_channel: FuncRef,
+    // Single-kind ctors (2 entries): compile-time-validated inner kind
+    // per §2.7.25 (Atomic→Int64, Lazy→Ptr(HeapKind::Closure)). The
+    // EnumStore consumer surfaces-and-stops on inner-kind mismatch at
+    // MIR-emit time before reaching these bodies.
+    pub(crate) v2_make_atomic: FuncRef,
+    pub(crate) v2_make_lazy: FuncRef,
+    // Carrier-pair ctor (1 entry): Mutex accepts any inner kind via
+    // the `(bits, kind_code: u8)` carrier-pair per §2.7.5. Unknown
+    // kind ords surface via §2.7.7 #9 — no Bool-default.
+    pub(crate) v2_make_mutex: FuncRef,
+
+    // ADR-006 §2.7.5 / §2.7.17 — Per-HeapKind kinded retain/release
+    // entries for the 8 typed-Arc collection carriers. Required because
+    // the legacy `arc_retain` / `arc_release` operate on the
+    // `UnifiedValue<T>` HeapHeader refcount at offset 4, which would
+    // scribble on the inner payload of an `Arc::into_raw(Arc<XData>)`
+    // carrier (whose refcount lives at offset -16). Same defection-
+    // shape Round 7A's `arc_result_retain` / `arc_option_retain` pair
+    // resolved at the Result/Option Arc-carrier site.
+    //
+    // 16 entries: retain + release per HashSet, HashMap, Deque,
+    // PriorityQueue, Channel, Mutex, Atomic, Lazy.
+    pub(crate) arc_hashset_retain: FuncRef,
+    pub(crate) arc_hashset_release: FuncRef,
+    pub(crate) arc_hashmap_retain: FuncRef,
+    pub(crate) arc_hashmap_release: FuncRef,
+    pub(crate) arc_deque_retain: FuncRef,
+    pub(crate) arc_deque_release: FuncRef,
+    pub(crate) arc_priorityqueue_retain: FuncRef,
+    pub(crate) arc_priorityqueue_release: FuncRef,
+    pub(crate) arc_channel_retain: FuncRef,
+    pub(crate) arc_channel_release: FuncRef,
+    pub(crate) arc_mutex_retain: FuncRef,
+    pub(crate) arc_mutex_release: FuncRef,
+    pub(crate) arc_atomic_retain: FuncRef,
+    pub(crate) arc_atomic_release: FuncRef,
+    pub(crate) arc_lazy_retain: FuncRef,
+    pub(crate) arc_lazy_release: FuncRef,
+
     // v2 typed HashMap<string, ...> access.
     //
     // SURFACE (ADR-006 §2.7.14 Q15 / W11-jit-carrier-conversion sub-cluster):

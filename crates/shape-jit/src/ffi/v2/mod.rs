@@ -4,12 +4,22 @@
 //! NaN-boxed u64 values. They are called from JIT-compiled v2 code via direct
 //! extern "C" calls.
 
+pub mod collection_arc;
 pub mod typed_map;
 
 // jit_v2_map_* re-exports removed — see typed_map.rs SURFACE comment.
 // The kind-blind ValueWord-shape map FFI is gone; the strict-typing
 // rebuild routes through `Arc<HashMapData>` + `KindedSlot` per ADR-006
 // §2.7.5 / §2.7.6 / Q8.
+//
+// W12-jit-collection-arc-ffi-ctors-and-refcount (Phase 3 cluster-0
+// Round 9 / 8B.1, 2026-05-13): 8 typed-Arc collection ctors + 16
+// per-HeapKind kinded retain/release entries live in `collection_arc`.
+// Carrier shape is `Arc::into_raw(Arc<XData>) as u64` per audit §5,
+// distinct from the W11 `UnifiedValue<T>` HeapHeader-style allocations
+// in the rest of this module. Round 10 (8B.2) wires the MIR EnumStore
+// consumer + `jit_call_method` shell to dispatch through these
+// entry-points; until then they are inert at the program surface.
 
 use shape_value::v2::heap_header::HeapHeader;
 use shape_value::v2::typed_array::TypedArray;

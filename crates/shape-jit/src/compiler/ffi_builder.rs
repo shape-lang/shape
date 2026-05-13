@@ -252,6 +252,50 @@ impl JITCompiler {
             arc_option_retain: r!("jit_arc_option_retain"),
             arc_option_release: r!("jit_arc_option_release"),
 
+            // ADR-006 §2.7.5 / §2.7.25 — Typed-Arc collection allocators
+            // (W12-jit-collection-arc-ffi-ctors-and-refcount, Phase 3
+            // cluster-0 Round 9 / 8B.1, 2026-05-13). Bodies in
+            // `ffi/v2/collection_arc.rs` — each produces
+            // `Arc::into_raw(Arc<XData>) as u64`. The MIR EnumStore
+            // consumer for collection ctors dispatches here (Round 10
+            // / 8B.2 work — until then these are inert at the program
+            // surface but the FuncRefs are populated so consumers can
+            // pre-resolve them).
+            v2_make_hashset: r!("jit_v2_make_hashset"),
+            v2_make_hashmap: r!("jit_v2_make_hashmap"),
+            v2_make_deque: r!("jit_v2_make_deque"),
+            v2_make_priorityqueue: r!("jit_v2_make_priorityqueue"),
+            v2_make_channel: r!("jit_v2_make_channel"),
+            v2_make_atomic: r!("jit_v2_make_atomic"),
+            v2_make_lazy: r!("jit_v2_make_lazy"),
+            v2_make_mutex: r!("jit_v2_make_mutex"),
+
+            // ADR-006 §2.7.5 / §2.7.17 — Per-HeapKind kinded retain/
+            // release for the 8 typed-Arc collection carriers. The
+            // ownership-aware codegen path in `mir_compiler/ownership.rs`
+            // (`retain_func_for_place` / `release_func_for_place`)
+            // dispatches per slot's proven `NativeKind::Ptr(HeapKind::*)`
+            // to the matching FuncRef. The legacy `arc_retain` /
+            // `arc_release` fallback stays for kinds NOT in the
+            // typed-Arc family (Array / TypedObject / etc. still use
+            // the `UnifiedValue<T>` HeapHeader-refcount shape).
+            arc_hashset_retain: r!("jit_arc_hashset_retain"),
+            arc_hashset_release: r!("jit_arc_hashset_release"),
+            arc_hashmap_retain: r!("jit_arc_hashmap_retain"),
+            arc_hashmap_release: r!("jit_arc_hashmap_release"),
+            arc_deque_retain: r!("jit_arc_deque_retain"),
+            arc_deque_release: r!("jit_arc_deque_release"),
+            arc_priorityqueue_retain: r!("jit_arc_priorityqueue_retain"),
+            arc_priorityqueue_release: r!("jit_arc_priorityqueue_release"),
+            arc_channel_retain: r!("jit_arc_channel_retain"),
+            arc_channel_release: r!("jit_arc_channel_release"),
+            arc_mutex_retain: r!("jit_arc_mutex_retain"),
+            arc_mutex_release: r!("jit_arc_mutex_release"),
+            arc_atomic_retain: r!("jit_arc_atomic_retain"),
+            arc_atomic_release: r!("jit_arc_atomic_release"),
+            arc_lazy_retain: r!("jit_arc_lazy_retain"),
+            arc_lazy_release: r!("jit_arc_lazy_release"),
+
             // v2 typed HashMap<string, ...>
             //
             // SURFACE (ADR-006 §2.7.14 Q15 / W11-jit-carrier-conversion):

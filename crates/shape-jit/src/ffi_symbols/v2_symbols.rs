@@ -10,6 +10,7 @@ use cranelift_module::{FuncId, Linkage, Module};
 use std::collections::HashMap;
 
 use super::super::ffi::v2;
+use super::super::ffi::v2::collection_arc;
 
 /// Register all v2 FFI symbols with the JIT builder.
 pub fn register_v2_symbols(builder: &mut JITBuilder) {
@@ -83,6 +84,98 @@ pub fn register_v2_symbols(builder: &mut JITBuilder) {
     // SIMD element-wise binary ops (allocating, f64)
     builder.symbol("jit_v2_array_add_f64", v2::jit_v2_array_add_f64 as *const u8);
     builder.symbol("jit_v2_array_mul_f64", v2::jit_v2_array_mul_f64 as *const u8);
+
+    // ADR-006 §2.7.5 / §2.7.25 — Typed-Arc collection allocators
+    // (W12-jit-collection-arc-ffi-ctors-and-refcount, Phase 3 cluster-0
+    // Round 9 / 8B.1, 2026-05-13). Bodies live in
+    // `ffi/v2/collection_arc.rs`. Each ctor returns
+    // `Arc::into_raw(Arc<XData>) as u64` — the carrier-shape rule
+    // (audit §5) bans mixing this layout with W11's `Box<UnifiedValue<T>>`
+    // HeapHeader carriers; the per-HeapKind retain/release entries
+    // registered below operate on the Arc control block at offset -16,
+    // never the offset-4 UnifiedValue path.
+    builder.symbol("jit_v2_make_hashset", collection_arc::jit_v2_make_hashset as *const u8);
+    builder.symbol("jit_v2_make_hashmap", collection_arc::jit_v2_make_hashmap as *const u8);
+    builder.symbol("jit_v2_make_deque", collection_arc::jit_v2_make_deque as *const u8);
+    builder.symbol(
+        "jit_v2_make_priorityqueue",
+        collection_arc::jit_v2_make_priorityqueue as *const u8,
+    );
+    builder.symbol("jit_v2_make_channel", collection_arc::jit_v2_make_channel as *const u8);
+    builder.symbol("jit_v2_make_atomic", collection_arc::jit_v2_make_atomic as *const u8);
+    builder.symbol("jit_v2_make_lazy", collection_arc::jit_v2_make_lazy as *const u8);
+    builder.symbol("jit_v2_make_mutex", collection_arc::jit_v2_make_mutex as *const u8);
+
+    // Per-HeapKind kinded retain/release. Refcount discipline at slots
+    // whose `NativeKind` is `Ptr(HeapKind::HashSet|HashMap|Deque|
+    // PriorityQueue|Channel|Mutex|Atomic|Lazy)` dispatches HERE instead
+    // of the legacy `jit_arc_retain` / `jit_arc_release` — see
+    // `mir_compiler/ownership.rs::retain_func_for_place` /
+    // `release_func_for_place` for the dispatch arms.
+    builder.symbol(
+        "jit_arc_hashset_retain",
+        collection_arc::jit_arc_hashset_retain as *const u8,
+    );
+    builder.symbol(
+        "jit_arc_hashset_release",
+        collection_arc::jit_arc_hashset_release as *const u8,
+    );
+    builder.symbol(
+        "jit_arc_hashmap_retain",
+        collection_arc::jit_arc_hashmap_retain as *const u8,
+    );
+    builder.symbol(
+        "jit_arc_hashmap_release",
+        collection_arc::jit_arc_hashmap_release as *const u8,
+    );
+    builder.symbol(
+        "jit_arc_deque_retain",
+        collection_arc::jit_arc_deque_retain as *const u8,
+    );
+    builder.symbol(
+        "jit_arc_deque_release",
+        collection_arc::jit_arc_deque_release as *const u8,
+    );
+    builder.symbol(
+        "jit_arc_priorityqueue_retain",
+        collection_arc::jit_arc_priorityqueue_retain as *const u8,
+    );
+    builder.symbol(
+        "jit_arc_priorityqueue_release",
+        collection_arc::jit_arc_priorityqueue_release as *const u8,
+    );
+    builder.symbol(
+        "jit_arc_channel_retain",
+        collection_arc::jit_arc_channel_retain as *const u8,
+    );
+    builder.symbol(
+        "jit_arc_channel_release",
+        collection_arc::jit_arc_channel_release as *const u8,
+    );
+    builder.symbol(
+        "jit_arc_mutex_retain",
+        collection_arc::jit_arc_mutex_retain as *const u8,
+    );
+    builder.symbol(
+        "jit_arc_mutex_release",
+        collection_arc::jit_arc_mutex_release as *const u8,
+    );
+    builder.symbol(
+        "jit_arc_atomic_retain",
+        collection_arc::jit_arc_atomic_retain as *const u8,
+    );
+    builder.symbol(
+        "jit_arc_atomic_release",
+        collection_arc::jit_arc_atomic_release as *const u8,
+    );
+    builder.symbol(
+        "jit_arc_lazy_retain",
+        collection_arc::jit_arc_lazy_retain as *const u8,
+    );
+    builder.symbol(
+        "jit_arc_lazy_release",
+        collection_arc::jit_arc_lazy_release as *const u8,
+    );
 
     // Typed HashMap<string, ...> access — SURFACE per ADR-006 §2.7.4 /
     // W10 jit-playbook §5. The deleted ValueWord-shape map FFI
@@ -480,6 +573,75 @@ pub fn declare_v2_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<Stri
         sig.params.push(AbiParam::new(types::I64));
         sig.returns.push(AbiParam::new(types::I64));
         declare(module, ffi_funcs, "jit_v2_array_mul_f64", &sig);
+    }
+
+    // ========================================================================
+    // Typed-Arc collection allocators (Round 9 / 8B.1, ADR-006 §2.7.5 / §2.7.25)
+    // ========================================================================
+    //
+    // 5 zero-arg ctors: `() -> i64` (returns the raw u64 Arc::into_raw bits).
+    for name in [
+        "jit_v2_make_hashset",
+        "jit_v2_make_hashmap",
+        "jit_v2_make_deque",
+        "jit_v2_make_priorityqueue",
+        "jit_v2_make_channel",
+    ] {
+        let mut sig = module.make_signature();
+        sig.returns.push(AbiParam::new(types::I64));
+        declare(module, ffi_funcs, name, &sig);
+    }
+
+    // Single-kind ctors:
+    // jit_v2_make_atomic(i: i64) -> i64
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        declare(module, ffi_funcs, "jit_v2_make_atomic", &sig);
+    }
+    // jit_v2_make_lazy(closure_bits: i64) -> i64
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        declare(module, ffi_funcs, "jit_v2_make_lazy", &sig);
+    }
+
+    // Carrier-pair ctor:
+    // jit_v2_make_mutex(bits: i64, kind: i8) -> i64
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // bits
+        sig.params.push(AbiParam::new(types::I8));  // kind code
+        sig.returns.push(AbiParam::new(types::I64));
+        declare(module, ffi_funcs, "jit_v2_make_mutex", &sig);
+    }
+
+    // Per-HeapKind kinded retain (each takes `bits: i64` and returns void)
+    // — operates on the Arc control block refcount at offset -16 per
+    // Rust Arc contract, NOT the W11 UnifiedValue<T> HeapHeader at offset 4.
+    for name in [
+        "jit_arc_hashset_retain",
+        "jit_arc_hashset_release",
+        "jit_arc_hashmap_retain",
+        "jit_arc_hashmap_release",
+        "jit_arc_deque_retain",
+        "jit_arc_deque_release",
+        "jit_arc_priorityqueue_retain",
+        "jit_arc_priorityqueue_release",
+        "jit_arc_channel_retain",
+        "jit_arc_channel_release",
+        "jit_arc_mutex_retain",
+        "jit_arc_mutex_release",
+        "jit_arc_atomic_retain",
+        "jit_arc_atomic_release",
+        "jit_arc_lazy_retain",
+        "jit_arc_lazy_release",
+    ] {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        declare(module, ffi_funcs, name, &sig);
     }
 
     // ========================================================================
