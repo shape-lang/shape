@@ -17,6 +17,7 @@ use crate::context::JITContext;
 use crate::ffi::jit_kinds::*;
 use crate::ffi::value_ffi::*;
 use shape_runtime::context::ExecutionContext;
+use shape_value::{HeapKind, NativeKind};
 use std::collections::HashMap;
 
 // Module declarations
@@ -43,40 +44,173 @@ pub use time::call_time_method;
 // User-Defined Method Support
 // ============================================================================
 
-/// Determine the type name of a JIT NaN-boxed receiver value.
+/// Determine the type name of a JIT receiver value via kind-from-parallel-
+/// track dispatch (ADR-006 §2.7.5 / §2.7.7 / Q9, §2.7.9 / Q11, §2.7.10).
 ///
-/// For TypedObjects, uses the schema_id to look up the type name from the
-/// ExecutionContext's type_schema_registry. For other types, returns a static
-/// type name string.
-unsafe fn receiver_type_name(receiver_bits: u64, exec_ctx: &ExecutionContext) -> Option<String> {
+/// W17-narrow (Phase 3 cluster-0 Round 15, 2026-05-13): replaces the prior
+/// 5-arm NaN-box tag-bit cascade (`is_number` / `TAG_BOOL_*` / `TAG_NULL` /
+/// `heap_kind` match) with classification driven by the receiver's
+/// `NativeKind` companion popped from the §2.7.7 / Q9 parallel-kind track
+/// at `jit_call_method`'s dispatch entry (line 332-350). The prior tag-bit
+/// predicates all return wrong answers on raw `Box::into_raw` carriers
+/// because the §2.7.5 stamp-at-compile-time discipline removed the NaN-
+/// box tag wrap (empirically verified by the W17-narrow audit §6:
+/// `box_typed_object` returns `0x56c5…` with high bits clear, so
+/// `is_number()` returned true on every TypedObject receiver and dispatch
+/// fell through to `"number"`).
+///
+/// For `Ptr(HeapKind::TypedObject)` the schema id is recovered via a
+/// direct `(*ptr).schema_id` field read after unboxing the JIT-internal
+/// UnifiedValue prefix — same kind-from-parallel-track path the field-
+/// access fast path uses (`field_access.rs::jit_typed_object_get_field`).
+/// For UInt64-carrier opaque-bits receivers the inner kind discriminator
+/// is read directly from the heap-allocation prefix at offset 0 via
+/// `read_heap_kind` (a field-load on the JitAlloc / UnifiedValue prefix,
+/// NOT a tag-bit predicate on raw bits — §2.7.5 explicitly carves this
+/// out as "*not* tag-bit dispatch — it reads a field from a heap-resident
+/// struct that the producing call placed there").
+unsafe fn receiver_type_name(
+    receiver_bits: u64,
+    receiver_kind: NativeKind,
+    exec_ctx: &ExecutionContext,
+) -> Option<String> {
     use crate::ffi::typed_object::jit_typed_object_schema_id;
 
-    if is_number(receiver_bits) {
-        return Some("number".to_string());
-    }
-    if receiver_bits == TAG_BOOL_TRUE || receiver_bits == TAG_BOOL_FALSE {
-        return Some("bool".to_string());
-    }
-    if receiver_bits == TAG_NULL || receiver_bits == TAG_NONE {
-        return None;
-    }
+    match receiver_kind {
+        // Scalar kinds — fixed type names.
+        NativeKind::Float64
+        | NativeKind::NullableFloat64
+        | NativeKind::Int8
+        | NativeKind::NullableInt8
+        | NativeKind::UInt8
+        | NativeKind::NullableUInt8
+        | NativeKind::Int16
+        | NativeKind::NullableInt16
+        | NativeKind::UInt16
+        | NativeKind::NullableUInt16
+        | NativeKind::Int32
+        | NativeKind::NullableInt32
+        | NativeKind::UInt32
+        | NativeKind::NullableUInt32
+        | NativeKind::Int64
+        | NativeKind::NullableInt64
+        | NativeKind::NullableUInt64
+        | NativeKind::IntSize
+        | NativeKind::NullableIntSize
+        | NativeKind::UIntSize
+        | NativeKind::NullableUIntSize => Some("number".to_string()),
+        NativeKind::Bool => Some("bool".to_string()),
+        NativeKind::String => Some("string".to_string()),
 
-    match heap_kind(receiver_bits) {
-        Some(HK_STRING) => Some("string".to_string()),
-        Some(HK_ARRAY) => Some("Array".to_string()),
-        Some(HK_TYPED_OBJECT) => {
-            // Look up the schema name from the type_schema_registry
+        // Typed heap pointer kinds — straight kind→name map per the
+        // surviving HeapKind discriminants.
+        NativeKind::Ptr(HeapKind::String) => Some("string".to_string()),
+        NativeKind::Ptr(HeapKind::TypedObject) => {
+            // Resolve the schema name via the JIT-internal TypedObject's
+            // `(*ptr).schema_id` field — `jit_typed_object_schema_id` is
+            // post-W17-narrow correct on raw `Box::into_raw` carriers
+            // (its prior `is_typed_object` gate was dropped in the same
+            // round). Schema lookup follows the same two-tier shape as
+            // `object/property_access.rs::HK_TYPED_OBJECT` (the W12-jit-
+            // binop-after-heap-read-kind-tracker close): try the global
+            // stdlib registry first, then fall back to the trampoline VM's
+            // bytecode program registry (where user-defined types like X
+            // live). Both halves are required because `ExecutionContext`'s
+            // direct registry only covers global stdlib schemas, not the
+            // per-program user-defined ones.
             let schema_id = jit_typed_object_schema_id(receiver_bits);
             if schema_id == 0 {
                 return None;
             }
-            let registry = exec_ctx.type_schema_registry();
-            registry.get_by_id(schema_id).map(|s| s.name.clone())
+            let global = shape_runtime::type_schema::lookup_schema_by_id_public(schema_id)
+                .map(|s| s.name.clone());
+            if global.is_some() {
+                return global;
+            }
+            let _ = exec_ctx;
+            super::control::with_trampoline_vm(|vm| {
+                vm.program()
+                    .type_schema_registry
+                    .get_by_id(schema_id)
+                    .map(|s| s.name.clone())
+            })
+            .flatten()
         }
-        Some(HK_JIT_OBJECT) => Some("object".to_string()),
-        Some(HK_DURATION) => Some("Duration".to_string()),
-        Some(HK_TIME) => Some("DateTime".to_string()),
-        _ => None,
+        NativeKind::Ptr(HeapKind::TypedArray) => Some("Array".to_string()),
+        NativeKind::Ptr(HeapKind::Decimal) => Some("decimal".to_string()),
+        NativeKind::Ptr(HeapKind::BigInt) => Some("bigint".to_string()),
+        NativeKind::Ptr(HeapKind::DataTable) => Some("Table".to_string()),
+        NativeKind::Ptr(HeapKind::HashMap) => Some("HashMap".to_string()),
+        NativeKind::Ptr(HeapKind::HashSet) => Some("Set".to_string()),
+        NativeKind::Ptr(HeapKind::Future) => Some("Future".to_string()),
+        NativeKind::Ptr(HeapKind::TaskGroup) => Some("TaskGroup".to_string()),
+        NativeKind::Ptr(HeapKind::Closure) => Some("Closure".to_string()),
+        NativeKind::Ptr(HeapKind::Temporal) => Some("Temporal".to_string()),
+        NativeKind::Ptr(HeapKind::TableView) => Some("TableView".to_string()),
+        NativeKind::Ptr(HeapKind::Content) => Some("Content".to_string()),
+        NativeKind::Ptr(HeapKind::Instant) => Some("Instant".to_string()),
+        NativeKind::Ptr(HeapKind::IoHandle) => Some("IoHandle".to_string()),
+        NativeKind::Ptr(HeapKind::Char) => Some("char".to_string()),
+        NativeKind::Ptr(HeapKind::Iterator) => Some("Iterator".to_string()),
+        NativeKind::Ptr(HeapKind::Deque) => Some("Deque".to_string()),
+        NativeKind::Ptr(HeapKind::Channel) => Some("Channel".to_string()),
+        NativeKind::Ptr(HeapKind::PriorityQueue) => Some("PriorityQueue".to_string()),
+        NativeKind::Ptr(HeapKind::Range) => Some("Range".to_string()),
+        NativeKind::Ptr(HeapKind::Result) => Some("Result".to_string()),
+        NativeKind::Ptr(HeapKind::Option) => Some("Option".to_string()),
+        NativeKind::Ptr(HeapKind::TraitObject) => Some("TraitObject".to_string()),
+        NativeKind::Ptr(HeapKind::Mutex) => Some("Mutex".to_string()),
+        NativeKind::Ptr(HeapKind::Atomic) => Some("Atomic".to_string()),
+        NativeKind::Ptr(HeapKind::Lazy) => Some("Lazy".to_string()),
+        NativeKind::Ptr(HeapKind::ModuleFn) => Some("ModuleFn".to_string()),
+        // Pure-discriminator kinds with no method receiver shape — see
+        // ADR-006 §2.7.9 (FilterExpr), §2.7.12 (SharedCell), §2.7.13
+        // (Reference), §2.7.14 (NativeScalar / NativeView).
+        NativeKind::Ptr(HeapKind::FilterExpr)
+        | NativeKind::Ptr(HeapKind::Reference)
+        | NativeKind::Ptr(HeapKind::SharedCell)
+        | NativeKind::Ptr(HeapKind::NativeScalar)
+        | NativeKind::Ptr(HeapKind::NativeView) => None,
+
+        // UInt64 carrier — opaque JIT-format bits whose inner kind lives in
+        // the JitAlloc / UnifiedValue prefix at offset 0. Read the prefix
+        // via `read_heap_kind` (§2.7.5 "not tag-bit dispatch — field-load
+        // from a heap-resident struct"). The null-pointer check guards
+        // against UInt64-carrier callers that legitimately stamp a
+        // sentinel value (e.g. arg_count) — those don't reach this
+        // function in practice but the defensive null guard is cheap.
+        NativeKind::UInt64 => {
+            if receiver_bits == 0 || receiver_bits == TAG_NULL || receiver_bits == TAG_NONE {
+                return None;
+            }
+            match read_heap_kind(receiver_bits) {
+                HK_STRING => Some("string".to_string()),
+                HK_ARRAY => Some("Array".to_string()),
+                HK_TYPED_OBJECT => {
+                    let schema_id = jit_typed_object_schema_id(receiver_bits);
+                    if schema_id == 0 {
+                        return None;
+                    }
+                    let global = shape_runtime::type_schema::lookup_schema_by_id_public(schema_id)
+                        .map(|s| s.name.clone());
+                    if global.is_some() {
+                        return global;
+                    }
+                    let _ = exec_ctx;
+                    super::control::with_trampoline_vm(|vm| {
+                        vm.program()
+                            .type_schema_registry
+                            .get_by_id(schema_id)
+                            .map(|s| s.name.clone())
+                    })
+                    .flatten()
+                }
+                HK_JIT_OBJECT => Some("object".to_string()),
+                HK_DURATION => Some("Duration".to_string()),
+                HK_TIME => Some("DateTime".to_string()),
+                _ => None,
+            }
+        }
     }
 }
 
@@ -101,19 +235,31 @@ unsafe fn find_function_by_name(ctx_ref: &JITContext, ufcs_name: &str) -> Option
 ///
 /// User-defined methods (from `extend` / `impl` blocks) are compiled as functions
 /// named `"TypeName::method_name"`. This function:
-/// 1. Determines the receiver type name from the NaN-boxed bits
+/// 1. Determines the receiver type name from the receiver's `NativeKind`
+///    (kind-from-parallel-track per §2.7.7 / Q9) and, for typed-object /
+///    UInt64 carriers, the schema id / heap-prefix `kind: u16` field at
+///    offset 0 of the JIT allocation (§2.7.5 "*not* tag-bit dispatch —
+///    field-load from a heap-resident struct").
 /// 2. Constructs the UFCS name `"TypeName::method_name"`
 /// 3. Looks up the function index in function_names
 /// 4. Calls the function via function_table, passing (receiver, ...args)
-/// 5. Returns the result as NaN-boxed u64
+/// 5. Returns the result as raw u64 bits
 ///
 /// Returns Some(result) if the method was found and executed, None otherwise.
+///
+/// W17-narrow (Phase 3 cluster-0 Round 15, 2026-05-13): `receiver_kind`
+/// is threaded through from `jit_call_method`'s dispatch entry's
+/// parallel-kind pop (line 332-350) so `receiver_type_name` can classify
+/// without re-decoding tag bits (the W-series defection-attractor pattern).
 unsafe fn try_call_user_method(
     ctx: *const JITContext,
     receiver_bits: u64,
+    receiver_kind: NativeKind,
     method_name: &str,
-    args: &[u64],
+    arg_pairs: &[(u64, NativeKind)],
 ) -> Option<u64> {
+    use crate::ffi::stack_kind_code;
+
     let ctx_ref = unsafe { &*ctx };
 
     // Need execution context to access the type schema registry
@@ -123,7 +269,7 @@ unsafe fn try_call_user_method(
     let exec_ctx = unsafe { &*(ctx_ref.exec_context_ptr as *const ExecutionContext) };
 
     // Determine the receiver's type name
-    let type_name = unsafe { receiver_type_name(receiver_bits, exec_ctx) }?;
+    let type_name = unsafe { receiver_type_name(receiver_bits, receiver_kind, exec_ctx) }?;
 
     // Construct UFCS function name: "TypeName::method_name"
     let ufcs_name = format!("{}::{}", type_name, method_name);
@@ -146,21 +292,40 @@ unsafe fn try_call_user_method(
 
     // Push receiver + args onto the JIT stack for the function call.
     // UFCS convention: first parameter is `self` (the receiver), then the rest.
+    //
+    // ADR-006 §2.7.7 / Q9 lockstep: every data push stamps the parallel-
+    // kind track in the same slot. The receiver kind is the W17-narrow-
+    // threaded `receiver_kind` (classified from the producing call's stamp
+    // at the dispatch entry); each arg pair carries its own kind from the
+    // §2.7.7 / Q9 parallel-track pop at the dispatch entry. Pre-W17-narrow
+    // the code wrote only the data half of the lockstep — under the prior
+    // tag-bit cascade `receiver_type_name` returned `"number"` for raw
+    // typed-object carriers so `find_function_by_name("number::name")`
+    // always missed and the body was unreachable; now that classification
+    // is correct the stack_kinds writes are observable by the called
+    // JIT-compiled function's parallel-track pops.
     let ctx_mut = unsafe { &mut *(ctx as *mut JITContext) };
     ctx_mut.stack[ctx_mut.stack_ptr] = receiver_bits;
+    ctx_mut.stack_kinds[ctx_mut.stack_ptr] = stack_kind_code::encode(receiver_kind);
     ctx_mut.stack_ptr += 1;
-    for &arg in args {
-        ctx_mut.stack[ctx_mut.stack_ptr] = arg;
+    for &(bits, kind) in arg_pairs {
+        ctx_mut.stack[ctx_mut.stack_ptr] = bits;
+        ctx_mut.stack_kinds[ctx_mut.stack_ptr] = stack_kind_code::encode(kind);
         ctx_mut.stack_ptr += 1;
     }
 
     // Call the JIT-compiled function
     let _result_code = unsafe { fn_ptr(ctx_mut) };
 
-    // Pop result from stack
+    // Pop result from stack. The callee stamped the result kind on the
+    // parallel track per its own producer-side classification; clear it
+    // back to SENTINEL on pop to preserve the §2.7.7 / Q9 invariant for
+    // the slot the caller will reuse.
     if ctx_mut.stack_ptr > 0 {
         ctx_mut.stack_ptr -= 1;
-        Some(ctx_mut.stack[ctx_mut.stack_ptr])
+        let result = ctx_mut.stack[ctx_mut.stack_ptr];
+        ctx_mut.stack_kinds[ctx_mut.stack_ptr] = stack_kind_code::SENTINEL;
+        Some(result)
     } else {
         Some(TAG_NULL)
     }
@@ -569,33 +734,114 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
             }
         }
 
-        // Built-in JIT-format method dispatch. Each `call_*_method` body
-        // reads from the receiver's known-opaque heap-allocation kind
-        // field (NOT raw-bits tag-decode for kind determination).
-        let builtin_result = if is_ok_tag(receiver_bits) || is_err_tag(receiver_bits) {
-            call_result_method(receiver_bits, &method_name, &args)
-        } else if is_number(receiver_bits) {
-            call_number_method(receiver_bits, &method_name, &args)
-        } else if is_inline_function(receiver_bits) {
-            TAG_NULL
-        } else {
-            match heap_kind(receiver_bits) {
-                Some(HK_ARRAY) => call_array_method(receiver_bits, &method_name, &args),
-                Some(HK_STRING) => call_string_method(receiver_bits, &method_name, &args),
-                Some(HK_JIT_OBJECT) => call_object_method(receiver_bits, &method_name, &args),
-                Some(HK_DURATION) => call_duration_method(receiver_bits, &method_name, &args),
-                Some(HK_COLUMN_REF) => TAG_NULL,
-                Some(HK_MATRIX) => call_matrix_method(receiver_bits, &method_name, &args),
-                Some(HK_TIME) => call_time_method(receiver_bits, &method_name, &args),
-                _ => TAG_NULL,
+        // Built-in JIT-format method dispatch — kind-from-parallel-track
+        // per ADR-006 §2.7.5 / §2.7.7 / Q9, §2.7.10 / Q11.
+        //
+        // W17-narrow (Phase 3 cluster-0 Round 15, 2026-05-13): replaced
+        // the prior 6-arm tag-bit cascade (`is_ok_tag` / `is_err_tag` /
+        // `is_number` / `is_inline_function` / `heap_kind` cascade for
+        // HK_ARRAY / HK_STRING / HK_JIT_OBJECT / …) with classification
+        // driven by the receiver's `NativeKind` companion (already
+        // popped from the §2.7.7 / Q9 parallel-kind track at line
+        // 332-350). The prior predicates all required `is_heap()` /
+        // `is_tagged()` / `is_number()` checks on raw bits — those
+        // return wrong answers on §2.7.5 raw `Box::into_raw` carriers
+        // (audit §6 empirical evidence). For UInt64-carrier opaque-bits
+        // receivers the inner discriminator is read directly from the
+        // JitAlloc / UnifiedValue prefix at offset 0 via `read_heap_kind`
+        // — a field-load on the heap-resident struct, NOT a tag-bit
+        // predicate (§2.7.5 carves this out: "*not* tag-bit dispatch —
+        // it reads a field from a heap-resident struct that the producing
+        // call placed there").
+        let builtin_result = match receiver_kind {
+            // §2.7.5 typed Arc<String> raw-pointer carrier. The JIT-
+            // format `call_string_method` still expects the legacy
+            // NaN-boxed UnifiedValue<Arc<String>> wrapper shape; the
+            // kinded String migration is W10 jit-playbook §5 territory.
+            // Routing through call_string_method preserves the existing
+            // JIT-format string method tests.
+            NativeKind::String => call_string_method(receiver_bits, &method_name, &args),
+            // §2.7.5 typed-Arc heap carriers — these are the non-
+            // delegated `Ptr(_)` arms (TypedObject / TypedArray / Closure
+            // / TraitObject / etc.). Method dispatch on these via the
+            // JIT-format legacy path lands at the user-method UFCS
+            // fallback below — there are no JIT-format builtin method
+            // registries for these kinds. The W10 jit-playbook §5
+            // kinded-array migration will fill this surface in a
+            // future cluster.
+            NativeKind::Ptr(_) => TAG_NULL,
+            // UInt64 carrier — discriminate via the heap-prefix
+            // `kind: u16` field-load. This is the canonical path for
+            // legacy JIT-format kinds (HK_ARRAY / HK_JIT_OBJECT /
+            // HK_DURATION / HK_TIME / HK_MATRIX / HK_OK / HK_ERR / …)
+            // whose producing allocator (`jit_box` / `unified_box`)
+            // places the kind discriminator at offset 0 of the
+            // allocation.
+            NativeKind::UInt64 => {
+                if receiver_bits == 0
+                    || receiver_bits == TAG_NULL
+                    || receiver_bits == TAG_NONE
+                {
+                    TAG_NULL
+                } else {
+                    match read_heap_kind(receiver_bits) {
+                        HK_OK | HK_ERR => {
+                            call_result_method(receiver_bits, &method_name, &args)
+                        }
+                        HK_ARRAY => call_array_method(receiver_bits, &method_name, &args),
+                        HK_STRING => call_string_method(receiver_bits, &method_name, &args),
+                        HK_JIT_OBJECT => call_object_method(receiver_bits, &method_name, &args),
+                        HK_DURATION => {
+                            call_duration_method(receiver_bits, &method_name, &args)
+                        }
+                        HK_COLUMN_REF => TAG_NULL,
+                        HK_MATRIX => call_matrix_method(receiver_bits, &method_name, &args),
+                        HK_TIME => call_time_method(receiver_bits, &method_name, &args),
+                        _ => TAG_NULL,
+                    }
+                }
             }
+            // Scalar / numeric kinds — all delegated to VM above (lines
+            // 380-432) so they don't reach this cascade in practice;
+            // returning TAG_NULL is defensive (a stack-pop-then-re-
+            // classification bug would have surfaced before here).
+            NativeKind::Float64
+            | NativeKind::NullableFloat64
+            | NativeKind::Int8
+            | NativeKind::NullableInt8
+            | NativeKind::UInt8
+            | NativeKind::NullableUInt8
+            | NativeKind::Int16
+            | NativeKind::NullableInt16
+            | NativeKind::UInt16
+            | NativeKind::NullableUInt16
+            | NativeKind::Int32
+            | NativeKind::NullableInt32
+            | NativeKind::UInt32
+            | NativeKind::NullableUInt32
+            | NativeKind::Int64
+            | NativeKind::NullableInt64
+            | NativeKind::NullableUInt64
+            | NativeKind::IntSize
+            | NativeKind::NullableIntSize
+            | NativeKind::UIntSize
+            | NativeKind::NullableUIntSize
+            | NativeKind::Bool => TAG_NULL,
         };
 
         // User-defined method dispatch (UFCS — `"TypeName::method"`
-        // functions in the JIT function table).
+        // functions in the JIT function table). The receiver kind from
+        // the §2.7.7 / Q9 parallel-kind track flows into
+        // `receiver_type_name` so dispatch classifies on the producing
+        // call's stamp, not on tag-bit decode.
         if builtin_result == TAG_NULL {
-            if let Some(user_result) = try_call_user_method(ctx, receiver_bits, &method_name, &args)
-            {
+            if let Some(user_result) = try_call_user_method(
+                ctx,
+                receiver_bits,
+                receiver_kind,
+                &method_name,
+                &arg_pairs,
+            ) {
                 return user_result;
             }
         }
