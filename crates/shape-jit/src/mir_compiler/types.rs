@@ -436,7 +436,177 @@ pub(crate) fn infer_slot_kinds_with_concrete(
                         kinds[idx] = Some(NativeKind::Ptr(HeapKind::Closure));
                     }
                 }
+                // W12-jit-call-method-shell-rebuild (Phase 3 cluster-0
+                // Round 10 / 8B.2, 2026-05-13): ADR-006 §2.7.5 producer-
+                // side classification for primitive-collection ctors.
+                //
+                // The bytecode compiler doesn't synthesize a
+                // `ConcreteType::HashSet` / `Deque` / `PriorityQueue` /
+                // `Channel` / `Mutex` / `Atomic` / `Lazy` variant — those
+                // types aren't modeled in the §2.7.6 concrete-types
+                // taxonomy yet (W17-collection-concrete-types is the
+                // tracked follow-up). The MIR-emit-side EnumStore is the
+                // load-bearing kind source: when `variant_name` is one of
+                // the 8 collection names, the container slot bits are
+                // exactly `Arc::into_raw(Arc<XData>) as u64` per Round 9's
+                // typed-Arc ctor FFI bodies, and the slot's `NativeKind`
+                // is the matching `Ptr(HeapKind::*)` arm.
+                //
+                // Without this seed the slot kind on the §2.7.7 / Q9
+                // parallel-kind track stays `None` → falls back to the
+                // §2.7.5 carrier kind `UInt64` at the receiver push site
+                // → the `jit_call_method` shell's delegation predicate
+                // routes to the legacy JIT-format dispatch path (which
+                // doesn't know how to read `Arc<HashSetData>` raw
+                // pointers as JIT NaN-box bits) → method dispatch
+                // surfaces silently as TAG_NULL. The kind seed here
+                // closes that gap.
+                //
+                // The `HashMap` collection ctor maps to
+                // `Ptr(HeapKind::HashMap)`. Note that this overlaps with
+                // the `ConcreteType::HashMap(K, V)` →
+                // `Ptr(HeapKind::HashMap)` seed for v2 typed HashMaps;
+                // both paths converge on the same carrier kind. The MIR
+                // EnumStore for `HashMap()` runs only for the bare-form
+                // ctor (`is_bare_collection_ctor` accepts it); typed
+                // HashMaps from `HashMap<string, int>()` go through the
+                // bytecode compiler's typed-HashMap fast path, which
+                // populates `concrete_types[slot] = HashMap(_, _)`
+                // directly and the `concrete_seed` upstream of this pass
+                // already handled it.
+                StatementKind::EnumStore {
+                    container_slot,
+                    variant_name: Some(name),
+                    ..
+                } => {
+                    let collection_kind = match name.as_str() {
+                        "Set" | "HashSet" => Some(NativeKind::Ptr(HeapKind::HashSet)),
+                        "HashMap" => Some(NativeKind::Ptr(HeapKind::HashMap)),
+                        "Deque" => Some(NativeKind::Ptr(HeapKind::Deque)),
+                        "PriorityQueue" => {
+                            Some(NativeKind::Ptr(HeapKind::PriorityQueue))
+                        }
+                        "Channel" => Some(NativeKind::Ptr(HeapKind::Channel)),
+                        "Mutex" => Some(NativeKind::Ptr(HeapKind::Mutex)),
+                        "Atomic" => Some(NativeKind::Ptr(HeapKind::Atomic)),
+                        "Lazy" => Some(NativeKind::Ptr(HeapKind::Lazy)),
+                        _ => None,
+                    };
+                    if let Some(k) = collection_kind {
+                        let idx = container_slot.0 as usize;
+                        if idx < n {
+                            // Override the upstream concrete_seed: the
+                            // bytecode compiler's type-checker classifies
+                            // `Set` / `HashMap` / etc. as `ConcreteType::
+                            // Struct(_)` (since the stdlib defines them as
+                            // typed structs), which `concrete_seed` maps
+                            // to `Ptr(HeapKind::TypedObject)`. That's a
+                            // wrong-carrier classification for the typed-
+                            // Arc ctors landed in Round 9 — the slot bits
+                            // are `Arc::into_raw(Arc<HashSetData>)`, NOT
+                            // `Arc::into_raw(Arc<TypedObjectStorage>)`,
+                            // and the kind drives downstream
+                            // retain/release dispatch through Round 9's
+                            // `retain_func_for_place` /
+                            // `release_func_for_place` 8-arm extension.
+                            // A `TypedObject`-labeled slot would dispatch
+                            // through `arc_retain` / `arc_release` on the
+                            // legacy `UnifiedValue<T>` HeapHeader at
+                            // offset 4, which would scribble on the
+                            // `HashSetData` payload (audit §5 carrier-
+                            // shape rule). The EnumStore producer-site
+                            // classification IS authoritative for these
+                            // slots per the §2.7.5 stamp-at-MIR-emit
+                            // discipline.
+                            //
+                            // ADR-006 W17-collection-concrete-types is the
+                            // tracked follow-up to extend `ConcreteType`
+                            // with `HashSet` / `Deque` / `PriorityQueue`
+                            // / `Channel` / `Mutex` / `Atomic` / `Lazy`
+                            // arms so the bytecode compiler's seed gets
+                            // these right at the source.
+                            kinds[idx] = Some(k);
+                        }
+                    }
+                }
                 _ => {}
+            }
+        }
+    }
+
+    // W12-jit-call-method-shell-rebuild post-pass (Phase 3 cluster-0 Round
+    // 10 / 8B.2, 2026-05-13): propagate collection-ctor kinds through
+    // identity-Use chains. The bytecode compiler's `concrete_seed` maps
+    // `let s = Set()`'s user-visible slot to `Ptr(HeapKind::TypedObject)`
+    // (since the stdlib defines `Set` as a typed struct). The forward
+    // pass's "first write wins / no overwrite on conflict" rule preserves
+    // that wrong-carrier classification: the EnumStore arm above
+    // overrides the EnumStore container slot to `Ptr(HeapKind::HashSet)`,
+    // but a downstream `Assign(s_slot, Use(Move(tmp_slot)))` leaves
+    // `s_slot` at its pre-seeded `Ptr(TypedObject)` instead of inheriting
+    // the corrected `Ptr(HashSet)` from `tmp_slot`.
+    //
+    // This post-pass walks Assign-Use chains and propagates any of the 8
+    // typed-Arc collection kinds from source to destination, overriding
+    // the pre-seeded `Ptr(TypedObject)` (or any other carrier kind) —
+    // because the typed-Arc carrier-shape rule (audit §5) requires the
+    // slot kind to drive retain/release dispatch correctly. A
+    // `TypedObject`-labeled slot would route through `arc_retain` /
+    // `arc_release` on the `UnifiedValue<T>` HeapHeader at offset 4,
+    // scribbling on the `Arc<HashSetData>` payload. Override is correct
+    // because the EnumStore producer is authoritative.
+    //
+    // The pass iterates until fixpoint (bounded: each iteration converts
+    // at most one slot, so it terminates in O(num_locals) iterations).
+    // For `let s = Set(); let t = s; let u = t; ...` chains this
+    // propagates through every binding to the deepest use.
+    fn is_collection_kind(k: NativeKind) -> bool {
+        matches!(
+            k,
+            NativeKind::Ptr(HeapKind::HashSet)
+                | NativeKind::Ptr(HeapKind::HashMap)
+                | NativeKind::Ptr(HeapKind::Deque)
+                | NativeKind::Ptr(HeapKind::PriorityQueue)
+                | NativeKind::Ptr(HeapKind::Channel)
+                | NativeKind::Ptr(HeapKind::Mutex)
+                | NativeKind::Ptr(HeapKind::Atomic)
+                | NativeKind::Ptr(HeapKind::Lazy)
+        )
+    }
+    let mut changed = true;
+    let mut iterations = 0;
+    let max_iterations = n + 4; // safety bound
+    while changed && iterations < max_iterations {
+        changed = false;
+        iterations += 1;
+        for block in &mir.blocks {
+            for stmt in &block.statements {
+                if let StatementKind::Assign(
+                    Place::Local(dst),
+                    Rvalue::Use(operand),
+                ) = &stmt.kind
+                {
+                    let src_slot = match operand {
+                        Operand::Copy(Place::Local(s))
+                        | Operand::Move(Place::Local(s))
+                        | Operand::MoveExplicit(Place::Local(s)) => Some(*s),
+                        _ => None,
+                    };
+                    if let Some(src) = src_slot {
+                        let dst_idx = dst.0 as usize;
+                        let src_idx = src.0 as usize;
+                        if dst_idx < n && src_idx < n {
+                            if let Some(src_kind) = kinds[src_idx] {
+                                if is_collection_kind(src_kind)
+                                    && kinds[dst_idx] != Some(src_kind)
+                                {
+                                    kinds[dst_idx] = Some(src_kind);
+                                    changed = true;
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
