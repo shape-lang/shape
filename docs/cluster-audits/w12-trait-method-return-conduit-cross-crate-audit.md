@@ -580,15 +580,90 @@ sequencing follows supervisor disposition at Round 13 close.
 
 ## §10. Audit decision
 
-**Disposition: §2 (a) — same shape, proceed with cross-crate side-table
-extension.**
+**Disposition: §2 (a) — same shape, proceeded with the 3-gap closure.**
 
 The 3 gaps fit the 6A precedent shape with one structural augmentation
-(ObjectStore::type_name MIR field). No ADR amendment required. Estimated
-LoC budget ~300-500 holds (§2 enumeration totals ~365 LoC across
-~14 touchpoints). The plumbing is mechanical mirror-of-6A work plus one
-in-compiler return-type backfill plus one MIR-shape extension.
+(MirFunction `local_struct_type_names` field). No ADR amendment required.
 
-Implementation commits per §3 sequence (commit 1 → 2 → 3 → 4).
+## §11. Implementation summary (close, 2026-05-13)
 
-Audit complete. Proceeding to commit 1.
+Implementation contracted from the original §2 plan after deeper
+review: gap 2 closes by **deduction** from existing data rather than a
+new BytecodeProgram side-table.
+
+Commit sequence landed:
+
+**Commit 1** (`119c4f7e`) — Gap 3: trait declaration return-type
+substitution at `desugar_impl_method`. ~30 LoC + 3 unit tests. The
+impl method's `FunctionDef.return_type` is backfilled from the trait
+declaration when the impl source omits it; `function_return_concrete_types["X::name"]`
+now carries `ConcreteType::String` for Smoke 3.
+
+**Commit 2** (`1f9f757a`) — Gaps 1+2: MIR struct identity + conduit
+producer trait-method dispatch + 4 unit tests. ~770 LoC including the
+41 MirFunction construction site updates for the new field.
+
+Key insight not in the original audit: gap 2 doesn't need a new
+BytecodeProgram side-table. The existing `trait_method_symbols` map
+(populated at impl-block compile time) + `function_return_concrete_types`
+(populated by commit 1's gap 3 closure) together carry the trait
+method declared return ConcreteType. The new `method_returns` resolver
+chains `find_default_trait_impl_for_type_method(type_name, method_name)`
+through `function_return_concrete_types[fn_idx]` — pure deduction
+from existing data, no new cross-crate threading. This contracted the
+LoC budget from ~365 to ~200 net source LoC.
+
+The original audit's §2 piece 3 (NEW `BytecodeProgram` side-table
+`trait_method_declared_return_concrete_types`) is NOT needed — the
+data is already there.
+
+## §12. NEW SURFACE uncovered: W17 receiver classification
+
+End-to-end Smoke 3 JIT does NOT print `x` post-T1'. The kind-classification
+surface T1 named is closed (verified via debug instrumentation:
+`concrete_types[result_slot] = ConcreteType::String` flows through;
+JIT `kind_hint = Some(NativeKind::String)` at the print Call-terminator;
+dispatch routes to `jit_print_string_arc`). But the JIT trampoline
+returns bits that segfault `Arc::from_raw(bits as *const String)`.
+
+Root cause traced via debug instrumentation:
+`crates/shape-jit/src/ffi/call_method/mod.rs::receiver_type_name`
+(line 51-81) classifies the receiver via legacy NaN-box tag-decode:
+`is_number(receiver_bits)`, `heap_kind(receiver_bits)`. With Round 12
+T2/T3's producer-side migration to raw `Arc::into_raw(Arc<TypedObjectStorage>)`
+pointer bits, the receiver bits no longer carry the NaN-box tag —
+the raw heap-pointer bits look like a "number" to `is_number()`
+(which returns true for non-TAG_BASE bits). So `receiver_type_name`
+returns `"number"` instead of `"X"`,
+`find_function_by_name("number::name")` returns None,
+`try_call_user_method` returns None, `jit_call_method` returns
+TAG_NULL (`0xfffb000000000000`), and `print(t.name())` reads TAG_NULL
+as `*const String` → segfault.
+
+This is the **W17-jit-typed-object-arc-storage-migration** class
+named as a cluster-1 follow-up in the Round 12 T2/T3 close report
+(`61687564`). The Round 12 T2/T3 close commit explicitly documented:
+"`box_typed_object` at `value_ffi.rs:516-518` returning `unified_box(
+HK_TYPED_OBJECT, *const u8)` over a JIT-owned `TypedObject` struct,
+NOT the VM-side `Arc<TypedObjectStorage>` ... Migrating the JIT-side
+TypedObject to the VM-side `Arc<TypedObjectStorage>` is a larger
+surgery (W11 TypedArray family invariant + 17+ JIT-internal consumers
+in `typed_object/`, `data.rs`, `property_access.rs`, etc.)."
+
+T1' has done its 3-gap closure (gaps 1, 2, 3 named by T1
+surface-and-stop). The deeper carrier-shape mismatch at the JIT
+trampoline's receiver classification (`receiver_type_name` decoding
+NaN-box tags from raw Arc pointer bits) prevents Smoke 3 end-to-end
+JIT success. This is exactly the same surface-and-stop posture T1
+took: T1' is one tier downstream of T1, with the same
+necessary-but-not-sufficient relationship to the Smoke 3 close.
+
+**Recommendation**: Round 14 absorbs **W17-jit-typed-object-arc-storage-migration**
+sub-cluster to migrate `receiver_type_name` (and the broader JIT-internal
+TypedObject struct consumers) to read receiver type identity from
+the parallel-kind track + heap-pointer dereference rather than NaN-box
+tag-decode.
+
+Audit complete. Implementation closed at commit 2 (`1f9f757a`); the
+W17 receiver-classification surface is documented here and in the
+commit 2 message for supervisor dispatch.
