@@ -2594,6 +2594,85 @@ If either surfaces a 7th gap, Round 15 per N+1 trajectory discipline.
   verbatim shape; Option B (clone_with_kind) chosen for round budget.
   May warrant cluster-1 follow-up.
 
+## Round 14 — dispatching (2 parallel audit-first sub-clusters)
+
+Dispatched 2026-05-13 from post-Round-13-merge baseline `b53f090d`.
+Supervisor ratified Option 1 (2 parallel) with audit-first discipline on
+BOTH sub-clusters. Projected last sub-cluster round of cluster-0 if
+neither audit surfaces ADR amendment.
+
+| Sub-cluster | Branch | Worktree | Status |
+|---|---|---|---|
+| W17-jit-typed-object-arc-storage-migration | `bulldozer-strictly-typed-w17-jit-typed-object-arc-storage-migration` | `../shape-w17-jit-typed-object-arc-storage-migration` | auditing |
+| W12-jit-map-chained-method-return-kind-propagation | `bulldozer-strictly-typed-w12-jit-map-chained-method-return-kind-propagation` | `../shape-w12-jit-map-chained-method-return-kind-propagation` | auditing |
+
+### W17-jit-typed-object-arc-storage-migration scope
+
+Four audit deliverables before writing code:
+
+1. **ADR-005 §1 / ADR-006 §2.3 fit**: confirm migration target
+   (`Arc<TypedObjectStorage>` raw bits, JIT-side) preserves single-
+   discriminator + typed-Arc shape, OR surface-and-stop with ADR
+   amendment proposal if divergent shape required (fat-pointer for
+   vtable lookup, separate vtable cache, etc.).
+2. **17+ consumer inventory**: list each JIT-internal consumer site
+   (file:line), current call shape (NaN-box decode of receiver_type_name
+   vs other), migration target per site. Use Phase-1B-vm Wave 6.5
+   substep-2 cluster-A close at `eb24ef0` as the canonical kinded-API
+   migration recipe.
+3. **Cross-crate boundary check**: does any consumer site cross the
+   shape-jit → shape-vm boundary requiring §2.7.5 stable-FFI shape? If
+   yes, mirror `jit_trampoline_call_closure` pattern at
+   `call_convention.rs:53-66`. If no, in-crate migration.
+4. **Refuse-on-sight discipline**: "preserve NaN-box decode for one
+   edge case", bool-default for unproven receiver_type kind,
+   bridge/probe/helper/hop/translator/adapter/shim descriptor for any
+   layer, "tracked as a follow-up" for any individual consumer site.
+
+Unblocks kickoff Smoke 3 JIT.
+
+### W12-jit-map-chained-method-return-kind-propagation scope
+
+Three audit deliverables before writing code:
+
+1. **Layer identification**: is failure a conduit extension (similar
+   shape to Round 11 trinity Part b method-return-kind conduit, now
+   extended to chained-method-call sites) OR a kind-track propagation
+   gap (different layer — §2.7.7 stack parallel-kind track extension
+   or MIR-level kind threading for intermediate slot results)?
+   file:line cite for failure site required.
+2. **Cluster-0 disposition**: confirm gap blocks kickoff Smoke 2 JIT
+   (`.map(|x|x*2).sum()`). If reachable from other call shapes but
+   not this specific smoke, classification matters (cluster-0
+   absorbed only if it blocks kickoff Smoke 2).
+3. **Surface-and-stop if ADR-amendment territory**: e.g. §2.7.7
+   parallel-track invariant extension for chained-method intermediate
+   results — well-established invariant but specific extension might
+   need a Q-ruling. Supervisor makes the call; Round 15 dispatches
+   amended fix.
+
+Refuse on sight: bool-default for unproven chained-method return kind,
+bridge/probe/helper/hop/translator/adapter/shim descriptor for the
+propagation layer, "preserve kind-blind fallback because intermediate
+slot kind isn't always available" framing (correct response is to
+extend kind-track or surface-and-stop, NOT preserve fallback).
+
+Unblocks kickoff Smoke 2 JIT.
+
+### Cluster-0 close attempt cadence (post-Round-14)
+
+After both Round 14 sub-clusters merge:
+- Run full 4-kickoff-smoke matrix (1 + 2 + 3 + 4) under both VM and JIT.
+- All 4 must produce identical correct output VM == JIT.
+- Supplementary -ext smokes tracked with explicit dispositions.
+- This status doc updated with the final matrix + close artifact.
+- Supervisor ratifies; user authorizes `phase-3-cluster-0-close` tag.
+
+Trajectory: Round 14 is the projected last sub-cluster round of cluster-0
+if neither audit surfaces ADR amendment. If either does, Round 15 absorbs
+the amended fix per N+1 trajectory discipline. JIT-rebuild proper is
+converging; remaining gaps are well-scoped + named.
+
 ## Cluster-0 close gate
 
 Per phase-3-kickoff-prompt §"Cluster-0 sub-cluster sequencing":
