@@ -3844,6 +3844,118 @@ not deferred from W17 — its scope was misframed in the dispatch text.
 - NEW `docs/cluster-audits/w17-jit-typed-object-arc-storage-migration-audit.md`
 - `AGENTS.md` (W17 row → closed with audit-only disposition)
 - `docs/cluster-audits/phase-3-cluster-0-status.md` (this subsection)
+### W12-jit-map-chained-method-return-kind-propagation close (2026-05-13)
+
+**Branch**: `bulldozer-strictly-typed-w12-jit-map-chained-method-return-kind-propagation`
+**Round**: 14 (audit-first standalone, parallel with W17-typed-object-arc).
+**Status**: `blocked` (surface-and-stop fired post-implementation;
+WIP code stashed).
+
+#### Audit findings
+
+§1 layer identification: **§1 (a) conduit extension** at bytecode-side
+`infer_top_level_concrete_types_from_mir_with_resolvers`
+(`crates/shape-vm/src/compiler/helpers.rs:494`). The
+`MirConstant::Method(_)` Call-terminator destination stamping is
+missing for built-in container receivers (`Array<T>`, `HashMap<K,V>`,
+`Mutex<T>`, etc.). Same shape as Round 11-trinity Part b's JIT-side
+parametric classifier (`parametric_method_return_kind_from_receiver`
+at `mir_compiler/types.rs:921`) generalized one tier upstream to
+produce `ConcreteType` instead of `NativeKind` so chained-method
+receivers pick up the upstream stamp.
+
+§2 cluster-0 disposition: kickoff Smoke 2 JIT
+(`[1,2,3,4,5].map(|x|x*2).sum()` → `30`) confirmed blocked at the
+pre-implementation baseline. Cluster-0 absorbs per supervisor's Q2
+ruling.
+
+§3 ADR-amendment posture (initial audit): no ADR amendment required;
+fix is bounded conduit extension matching Round 6A + Round 11-trinity
+Part b + Round 13 T1' precedents.
+
+#### Implementation outcome
+
+Conduit extension implemented end-to-end (~570 LoC across
+`helpers.rs` + `compiler_impl_reference_model.rs`):
+
+- New `parametric_method_return_concrete_type_from_receiver_and_closure`
+  helper covering `Array<T>.map / filter / flatMap / sort / reverse /
+  slice / take / skip / concat`.
+- New Call-terminator destination stamping pass with fixed-point
+  slot-move propagation interleaved for chained shapes.
+- Two-pass closure-callable map handling BOTH closure-emission shapes
+  (`ClosureCapture` for non-empty captures + `Assign(slot,
+  Use(Constant(Function(name))))` for empty captures — the
+  load-bearing form for `|x| x*2`).
+- Three-tier `closure_returns` resolver: (i)
+  `function_return_concrete_types[fid]`, (ii) scan closure body's
+  typed `ReturnValue<Kind>` opcodes, (iii) None → Void per §2.7.5.1.
+
+Verified via debug instrumentation that
+`concrete_types[doubled_slot] = Array(I64)` is stamped correctly and
+flows through the slot-move propagation to
+`concrete_types[sum_receiver_slot] = Array(I64)`.
+
+#### NEW SURFACE (audit §7)
+
+JIT compilation now succeeds (no more `Route A surface-and-stop` at
+print operand), but the resulting JIT-compiled code SIGSEGVs at
+runtime (exit code 139) — strictly worse from triage perspective.
+Trace:
+
+1. `.map()` Call-terminator: generic dispatch via `jit_call_method`
+   (no `"map"` arm in `try_emit_v2_array_method`).
+2. `.sum()` Call-terminator: with `concrete_types[receiver_slot] =
+   Array(I64)` stamp, the JIT dispatches to the FAST PATH at
+   `crates/shape-jit/src/mir_compiler/v2_array.rs:367-387`
+   (`jit_v2_array_sum_i64(arr_ptr)` direct FFI call).
+3. The fast path FFI expects `arr_ptr` to be a raw
+   `*const TypedArrayData<i64>`, but `.map()`'s generic dispatch
+   returns a different carrier shape → segfault.
+
+This is the **producer/consumer fast-path mismatch** defection-
+attractor class — the JIT consumer's `try_emit_v2_array_method`
+makes an unverified assumption about slot-storage shape that
+doesn't hold across all producer paths. The conduit extension is
+correct (`concrete_types[slot] = Array(I64)` is the right
+classification), but the JIT consumer expected a stricter invariant
+than the conduit's stamp guarantees.
+
+#### Disposition
+
+Per audit §7.2: **surface-and-stop, audit-only close.** The
+honest options for closing kickoff Smoke 2 JIT are outside
+cluster-0 W12-map-chained scope:
+
+- **Option A** — `W12-jit-typed-array-fast-path-producer-verification`:
+  narrow the JIT fast path to verify producer-side raw-pointer
+  invariant via a `producer_kind` track.
+- **Option B** — `W12-vm-map-typed-array-producer-migration`:
+  migrate VM-side `.map` (and friends) to construct typed-array
+  Arc pointer carriers matching the JIT fast-path expectation.
+- **Option C** — both.
+
+Surfaced for Round 15 supervisor disposition. WIP implementation
+stashed (`git stash list` on this branch — message: "WIP:
+W12-map-chained conduit extension exposes JIT consumer-side
+fast-path gap").
+
+#### Audit doc
+
+`docs/cluster-audits/w12-jit-map-chained-method-return-kind-propagation-audit.md`
+— §1 (layer identification), §2 (cluster-0 disposition), §3
+(ADR-amendment posture, initial), §4 (refuse-on-sight discipline),
+§5 (implementation budget), §6 (close gates), §7
+(implementation attempt — NEW SURFACE uncovered, options A/B/C
+for closing Smoke 2 JIT), §8 (audit-only close conclusion).
+
+#### Round 15 recommendation
+
+Dispatch either Option A or Option B per supervisor disposition.
+Both close kickoff Smoke 2 JIT through the fast-path's
+producer/consumer alignment, complementing W12-map-chained's
+conduit extension (which can be un-stashed and merged once the
+downstream consumer-side gap is closed).
 
 ---
 
