@@ -4917,3 +4917,163 @@ collisions handled by take-both at merge per dispatch convention.
   `HeapKind::MatrixSlice = 35`): independent of S1.
 - **S5** (`TypedArrayData` enum + `TypedBuffer<T>` deletion):
   unchanged from audit §3.5; remains blocked on S2/S3/S4 + S1.5.
+
+---
+
+## Round 18 close — post-merge ceremony (2026-05-13)
+
+R18 closes with two production merges into `bulldozer-strictly-typed`:
+
+- **S3** (Matrix/FloatSlice HeapKind exit) merged at **`5361f3d5`**.
+  Single source commit `3eb53290`; +792/−728 LoC across 37 files;
+  4-table lockstep verified by `verify-merge.sh` CHECK 6;
+  §2.7.22 Q23 amendment text landed inline with the new HeapKind
+  ordinals.
+- **S1 reopen** (typed-array-data scalar migration, post-reopen-of-`4bcae991`)
+  merged at **`5fb42b1c`**. Single source commit `3be64a35`;
+  reopen delta vs pre-reopen `4bcae991` is +213/−243 (net −30 LoC);
+  defensive low-address-pointer guard removed; U64 v2-raw migration
+  excised; 2 regression-guard tests added.
+
+Post-merge `verify-merge.sh` 12/12 PASS at HEAD `5fb42b1c` (via devenv
+shell wrapper per `reference_phase2d_devenv.md`).
+
+### R18 close smoke matrix (post-merge HEAD `5fb42b1c`)
+
+| Smoke | Source | VM | JIT |
+|---|---|---|---|
+| 1 (scalar loop) | `for i in 0..100 { sum += i }; print(sum)` | ✅ `4950` | ✅ `4950` |
+| 2 canonical (kickoff) | `[1,2,3,4,5].map(\|x\|x*2).sum()` | ✅ `30` | ❌ `Route A surface-and-stop: NotImplemented(SURFACE) — print Call-terminator operand NativeKind is None` |
+| 2 simplified | `[1,2,3,4,5].sum()` | ❌ runtime error `__intrinsic_sum: HeapKind::TypedArray, got UInt64` | ✅ `15` (per S1-reopen agent verification at baseline) |
+| 3 (trait dispatch) | `trait T { name(self): string } ... t.name()` | ✅ `x` | ⚠ Segfault (per W17-narrow precedent — gate-deferred to W17-narrow-follow-up-B null-handling; pre-existing) |
+| 4 (HashSet/Set) | `Set(); .add("a"); .add("b"); .size()` | (kickoff-prompt syntax discrepancy — see below) | (same) |
+
+### Supervisor's canonical Smoke 2 verification: PASSES
+
+Per supervisor's R18 close directive, canonical kickoff Smoke 2
+(`[1,2,3,4,5].map(|x|x*2).sum()`) re-run at post-merge HEAD `5fb42b1c`
+under `--mode vm` prints **`30`** ✓. Supervisor's expected behavior
+holds: `.map()` produces `Arc<TypedArrayData::I64>` Arc-enum carrier
+(`HeapKind::TypedArray` label) which the `IntrinsicSum` legacy-path
+accepts; the `.map()` intermediary is what bridges the dual-carrier
+divide for the canonical kickoff form. **Cluster-0 Smoke 2 VM status
+holds.**
+
+The simplified `[1,2,3,4,5].sum()` form (direct invocation without
+`.map()` intermediary) breaks under `--mode vm` because the literal
+produces v2-raw `TypedArray<i64>` flat-struct (`NativeKind::UInt64`
+label) which `IntrinsicSum`'s `HeapKind::TypedArray`-expecting receiver
+classifier rejects. **This is the 7th instance of the producer/consumer
+carrier-shape mismatch defection-attractor class** (R12 / R14 / R15 /
+R16 / R17 audit / R18 S1 / R18 close), specifically the `IntrinsicSum`
+legacy-path consumer manifestation. **Folds into the existing cluster-2
+candidate `W12-stdlib-intrinsic-collapse`** (named at Round 13 T4
+close — the `IntrinsicSum` / `.sum()` PHF split-brain). Not a new
+sub-cluster dispatch.
+
+Cluster-2 W12-stdlib-intrinsic-collapse cluster-1+ candidate list
+expanded with this concrete instance + file:line cite to the
+`IntrinsicSum` body's `HeapKind::TypedArray` receiver expectation.
+
+### Smoke 4 kickoff-prompt syntax discrepancy
+
+The kickoff prompt at `docs/cluster-audits/phase-3-kickoff-prompt.md`
+defines Smoke 4 with `let mut s = HashSet()`, but the actual Shape
+grammar's stdlib uses `Set()` (no constructor named `HashSet` —
+parser rejects). Agents in prior rounds (W17-narrow, S1 reopen) have
+silently translated `HashSet()` → `Set()` in their smoke runs. Worth
+correcting in the kickoff prompt at next status-doc-update commit;
+not blocking. Smoke 4 with `Set()` syntax was verified passing under
+both modes by the W17-narrow agent's smoke matrix (Round 15) and
+S1 reopen's smoke matrix (this round).
+
+### 7th-instance defection-class observation
+
+Producer/consumer carrier-shape-mismatch class instance count now at 7
+(R12 W12-jit-string-carrier-unification, R14 W17-typed-object-arc,
+R15 W12-Option-B, R16 W12-Option-B-reframed, R17 audit-ratification,
+R18 S1 defensive-guard catch, R18 close `[1,2,3,4,5].sum()` VM-side
+IntrinsicSum surface). The CLAUDE.md §"Parallel-implementation across
+producer/consumer carrier-shape boundaries" entry (landed at `e55b8e71`)
+names the first 4; the 5th-7th instances are post-amendment surfacings
+verifying that the class continues to manifest in new variant work —
+which is the architectural-correctness signal the cluster-0-transition
+audit decision was made to produce. Each instance now caught at the
+team-lead-layer discipline (R18 S1 was the canonical catch; supervisor
+ratified the team-lead's (a2)-leaning honest assessment).
+
+### Supervisor-layer imprecision pattern
+
+Two documented instances of supervisor-relay-text imprecision caught
+at agent-layer + surfaced at team-lead-layer:
+
+1. **§2.7.14-A draft text** (Round 16) — supervisor-drafted ADR amendment
+   text mis-described runtime reality in 3 load-bearing places
+   (`Arc<TypedArrayData::T>` notation conflating enum-variant tag with
+   type parameter; JIT-FFI discriminator misframing; "unwrap-and-flatten"
+   describing structurally distinct layouts as compatible representations).
+   W12-Option-B-reframed agent refused to commit; team-lead surfaced;
+   supervisor ratified the refusal.
+2. **S1 reopen SendMessage text** (Round 18) — team-lead's SendMessage
+   payload asserted "`Array<u64>` now fails at compile-time rather than
+   runtime SIGSEGV". S1 reopen agent caught: U64 doesn't fail at compile
+   time; it falls back to the legacy `OpCode::NewArray` path
+   (compile-time routing, not compile-time rejection). User-facing
+   `Array<u64>` functionality preserved at baseline; the SIGSEGV is
+   just no longer reachable. Same supervisor-can-be-wrong pattern shape.
+
+Pattern: supervisor relay texts (SendMessage payloads, draft ADR
+amendments, dispatch prescriptions) harbor latent imprecisions that
+need agent-layer discipline checks. **Team-lead is the right
+meta-architectural layer to catch and surface them.** Annotation
+added to `phase-3-team-lead-handover.md` §Decision authority pattern
+(this commit) alongside the CLAUDE.md-authorization annotation
+(`b096b917`).
+
+### Char audit bucket classification
+
+The Round 17 deletion audit classified Char inconsistently — the
+dispatch text grouped Char in the heap-element bucket (with
+Decimal/BigInt/DateTime/etc.) while audit §3.1's S1 territory map
+included Char in the 12-scalar bucket. S1 reopen agent surfaced this
+discrepancy by treating Char as a scalar (missing-NativeKind-prereq)
+rather than heap-element (missing-Obj-carrier-prereq) — defensible
+either way but the audit should be unambiguous. **Audit doc
+clarification owed in a future cluster-1 hardening pass** (not
+blocking R19; R19 dispatches S2 + S1.5 in parallel with Char folded
+into S1.5's `NativeKind` extension scope per supervisor's R18 close
+disposition).
+
+### Cluster-1 candidate list at R18 close
+
+(Pre-existing items unchanged; new additions from R17 / R18 in **bold**:)
+
+- **`W12-typed-object-array-retain-migration`** — O-3/O-3a (R17 audit §4.4)
+- **`HashMapValueBuf` deletion** — Q25.B parallel target (R17 audit §5)
+- **`ArrowBuffer<T>` carrier** — O-4 conditional deferral (cluster-0-smoke nullable-array non-reachability confirmed R17)
+- **`W12-nativekind-typed-array-ptr-extension`** (working name S1.5) — §2.7.7/Q9 NativeKind discriminator extension for typed-array-pointer carrier; gates U64 v2-raw migration (R18 S1 reopen)
+- 5 prior cluster-1 items already tracked
+
+Plus **cluster-2 `W12-stdlib-intrinsic-collapse`** (named R13 T4; concrete instance evidence added R18 close).
+
+### Revised cluster-0 close trajectory
+
+| Phase | Sub-clusters | Sessions |
+|---|---|---|
+| R19 | S2 (heap-element migration + `<X>Obj` prereqs) + S1.5 (NativeKind extension) parallel | 1-2 |
+| R20 | S5 (TypedArrayData enum + TypedBuffer<T> deletion + §2.7.24 Q25.A amendment commit) | 1 |
+| Cluster-0 close attempt | full 4-kickoff-smoke matrix VM==JIT | 1 |
+
+Total handoff-to-v1 estimate: 16-21 sessions, holding.
+
+---
+
+*Next session: read this file first; R19 dispatches S2 (heap-element
+migration with v2-raw `<X>Obj` carrier prereqs per audit §2.2) + S1.5
+(W12-nativekind-typed-array-ptr-extension — §2.7.7/Q9 NativeKind
+discriminator for typed-array-pointer carrier, folds in U64/F32/Char
+prereq work surfaced in R18 S1) in parallel from `bulldozer-strictly-
+typed @ 5fb42b1c`. S1.5 pre-dispatch audit recommended: single sub-
+cluster vs split-by-shape question (one §2.7.7/Q9 amendment + N
+variant additions vs N parallel discriminator additions) — team-lead
+audits scope shape before R19 dispatch fires.*
