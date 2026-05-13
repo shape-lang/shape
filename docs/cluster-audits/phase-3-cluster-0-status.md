@@ -1389,6 +1389,111 @@ under both `--mode vm` and `--mode jit`; if either kickoff smoke surfaces
 a new gap, Round 10 or Round 11 absorbs the work per N+1 trajectory
 discipline.
 
+### W12-jit-collection-arc-ffi-ctors-and-refcount close (2026-05-13)
+
+Round 9 (8B.1 standalone) closed exactly per audit §10.2 scope. 8
+typed-Arc collection ctors + 16 per-HeapKind kinded retain/release
+entries + ownership.rs 8-arm dispatch extension landed. Smoke matrix
+delta: zero changes (Round 9 is INERT at the program surface until
+Round 10 wires the EnumStore consumer + `jit_call_method` shell).
+
+**Smoke matrix (VM vs JIT, post-Round-9)**:
+
+| Smoke | VM | Pre-9 JIT | Post-9 JIT | Status |
+|---|---|---|---|---|
+| 1 (scalar loop) | `4950` | `4950` | `4950` | ✅ unchanged |
+| 1.5 (`divide` + match) | `5` | `5` | `5` | ✅ unchanged (Round 8A) |
+| 2 no-loop (`first_positive(3)`) | `Some(3)` | `Some(3)` | `Some(3)` | ✅ unchanged (Round 8A) |
+| 3 (`Point{}.x + .y`) | `7` | `7` | `7` | ✅ unchanged |
+| 4 (`Set()` + `.size()`) | `2` | clean SURFACE | clean SURFACE | ➖ Round 10 territory (8B.2) |
+
+**Close gates (devenv exit-code-verified)**:
+
+- `cargo check --workspace --lib --tests` EXIT=0 (full workspace,
+  including shape-test compilation)
+- `cargo test -p shape-jit --lib` 361 passed / 0 failed / 26 ignored
+  (baseline 335 + 26 new collection-arc round-trip tests = 361 exact)
+- `bash scripts/verify-merge.sh` 12/12 Passed
+- `bash scripts/check-no-dynamic.sh` EXIT=0
+
+**Files touched**:
+
+- `crates/shape-jit/src/ffi/v2/collection_arc.rs` (NEW, ~700 LoC):
+  combined 8 typed-Arc ctor FFI bodies + 16 per-HeapKind kinded
+  retain/release bodies + 26 unit tests. Co-located in one module
+  per the carrier-shape rule (audit §5) — ctors produce `Arc::into_raw(
+  Arc<XData>)` shape; retain/release consume the same shape via
+  `Arc::increment/decrement_strong_count::<XData>`; mixing carrier
+  shapes between them would segfault. Single source-of-truth for the
+  audit §5 header comment.
+- `crates/shape-jit/src/ffi/v2/mod.rs`: module wire + carrier-shape
+  rule pointer in module-doc comment.
+- `crates/shape-jit/src/ffi_refs.rs`: 24 new `FuncRef` slots (8 ctors
+  + 16 retain/release).
+- `crates/shape-jit/src/compiler/ffi_builder.rs`: 24 new `r!(...)`
+  lookups.
+- `crates/shape-jit/src/ffi_symbols/v2_symbols.rs`: 24 `builder.symbol(...)`
+  registrations + 24 `declare_function` signature declarations.
+  Signatures: zero-arg ctors `() -> i64`; Atomic ctor `(i64) -> i64`;
+  Lazy ctor `(i64) -> i64`; Mutex ctor `(i64, i8) -> i64`; all retain/
+  release `(i64) -> ()`.
+- `crates/shape-jit/src/mir_compiler/ownership.rs`:
+  `retain_func_for_place` / `release_func_for_place` 8-arm extension
+  (HashSet / HashMap / Deque / PriorityQueue / Channel / Mutex /
+  Atomic / Lazy → matching kinded retain/release FuncRef). Legacy
+  `arc_retain` / `arc_release` fallback preserved for kinds NOT in
+  the typed-Arc family.
+
+**Decisions called beyond audit + Round 7A precedent**:
+
+1. **Single combined module `collection_arc.rs` rather than separate
+   files**. The audit §6 file table lists `collection_ctors.rs` +
+   `collection_arc_refcount.rs` as separate candidates, but the
+   substantive constraint is the carrier-shape rule from §5 (the
+   load-bearing audit insight). Co-locating ctors + retain/release
+   for the same HeapKind family in one module makes the shared
+   `Arc::into_raw` / `Arc::increment_strong_count` discipline visible
+   at a glance, and keeps the audit §5 header comment as one
+   source-of-truth. The audit §6 table is non-binding on file
+   granularity; the binding constraint is the carrier-shape rule
+   which the single-module layout satisfies.
+
+2. **Mutex SENTINEL kind ord surfacing returns null bits, not Bool-
+   default**. ADR-006 §2.7.7 #9 forbids Bool-default fallback for
+   unknown kind ords. The Mutex ctor body decodes the `kind: u8`
+   parameter via `stack_kind_code::decode`; on `None` (SENTINEL or
+   unknown ord) the body returns 0 with a `SHAPE_JIT_DEBUG` diagnostic
+   and **leaks** the inner share rather than dropping it with a
+   fabricated Bool kind. Rationale: dropping with a fabricated Bool
+   kind would either leak (if the true kind is heap but labeled
+   non-refcounted) or double-free (if the true kind is heap but
+   the bits don't match Arc's contract). Leaking is the principled
+   response to a kind-source gap. The upstream caller's MIR-emit-time
+   kind classifier is the load-bearing surface point for the gap;
+   the FFI body's null return surfaces that gap at the dispatch
+   shell rather than silently compounding it.
+
+3. **Lazy ctor stamps `Ptr(HeapKind::Closure)` directly**. ADR-006
+   §2.7.25 constrains the Lazy initializer to a closure-typed
+   inner kind. The FFI body adopts the caller's `closure_bits` as
+   `Arc<ClosureRaw>` share via `KindedSlot::new(slot, Ptr(HeapKind::
+   Closure))`. The compile-time validation lives at the MIR EnumStore
+   consumer (Round 10 territory); the FFI body is the inner-arm
+   surface where the producing-site's kind classifier has already
+   proven the constraint. Same shape as Round 7A's
+   `jit_v2_make_option_some` body adopting its `payload_kind_code`
+   via `decode_payload_kind_or_surface`.
+
+**Surfaced items**: None new. Round 9 closes exactly per audit §10.2
+/ 8B.1 scope; no architectural gap surfaced. Round 10 (8B.2)
+inherits Round 9's pre-resolved FuncRefs for consumer-side wiring
+of the EnumStore consumer + `jit_call_method` shell + cross-crate
+`VirtualMachine::jit_trampoline_call_method` API.
+
+Branch: `bulldozer-strictly-typed-w12-jit-collection-arc-ffi-ctors-and-refcount`
+Parent: `1f28b2d8` (post-Round-8 merge + Round 9 dispatch metadata
+on `bulldozer-strictly-typed`).
+
 ## Cluster-0 close gate
 
 Per phase-3-kickoff-prompt §"Cluster-0 sub-cluster sequencing":

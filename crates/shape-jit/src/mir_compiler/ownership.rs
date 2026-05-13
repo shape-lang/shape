@@ -251,13 +251,16 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// `UnifiedValue<T>` shape. The legacy `jit_arc_retain` would write
     /// to the wrong offset and corrupt the inner payload.
     ///
-    /// Returns `arc_result_retain` / `arc_option_retain` for the typed-Arc
-    /// kinds; falls back to the legacy `arc_retain` for all other heap
-    /// kinds (still on `UnifiedValue<T>` until W11-jit-new-array's wider
-    /// migration). Same dispatch shape that release uses.
-    ///
-    /// W12-jit-result-option-trinity (Phase 3 cluster-0 Round 7A,
-    /// 2026-05-12).
+    /// Round 7A added `arc_result_retain` / `arc_option_retain` for
+    /// Result/Option. W12-jit-collection-arc-ffi-ctors-and-refcount
+    /// (Phase 3 cluster-0 Round 9 / 8B.1, 2026-05-13) extends the
+    /// dispatch with 8 more typed-Arc collection carriers — HashSet,
+    /// HashMap, Deque, PriorityQueue, Channel, Mutex, Atomic, Lazy.
+    /// All 10 dispatch arms operate on `Arc::into_raw(Arc<XData>) as
+    /// u64` carriers (refcount at offset -16); the legacy `arc_retain`
+    /// fallback stays for kinds NOT in the typed-Arc family
+    /// (Array / TypedObject / Closure / etc. — still on
+    /// `UnifiedValue<T>` HeapHeader at offset 4).
     pub(crate) fn retain_func_for_place(
         &self,
         place: &Place,
@@ -268,6 +271,14 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         match kind {
             Some(NativeKind::Ptr(HeapKind::Result)) => self.ffi.arc_result_retain,
             Some(NativeKind::Ptr(HeapKind::Option)) => self.ffi.arc_option_retain,
+            Some(NativeKind::Ptr(HeapKind::HashSet)) => self.ffi.arc_hashset_retain,
+            Some(NativeKind::Ptr(HeapKind::HashMap)) => self.ffi.arc_hashmap_retain,
+            Some(NativeKind::Ptr(HeapKind::Deque)) => self.ffi.arc_deque_retain,
+            Some(NativeKind::Ptr(HeapKind::PriorityQueue)) => self.ffi.arc_priorityqueue_retain,
+            Some(NativeKind::Ptr(HeapKind::Channel)) => self.ffi.arc_channel_retain,
+            Some(NativeKind::Ptr(HeapKind::Mutex)) => self.ffi.arc_mutex_retain,
+            Some(NativeKind::Ptr(HeapKind::Atomic)) => self.ffi.arc_atomic_retain,
+            Some(NativeKind::Ptr(HeapKind::Lazy)) => self.ffi.arc_lazy_retain,
             _ => self.ffi.arc_retain,
         }
     }
@@ -283,6 +294,14 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         match kind {
             Some(NativeKind::Ptr(HeapKind::Result)) => self.ffi.arc_result_release,
             Some(NativeKind::Ptr(HeapKind::Option)) => self.ffi.arc_option_release,
+            Some(NativeKind::Ptr(HeapKind::HashSet)) => self.ffi.arc_hashset_release,
+            Some(NativeKind::Ptr(HeapKind::HashMap)) => self.ffi.arc_hashmap_release,
+            Some(NativeKind::Ptr(HeapKind::Deque)) => self.ffi.arc_deque_release,
+            Some(NativeKind::Ptr(HeapKind::PriorityQueue)) => self.ffi.arc_priorityqueue_release,
+            Some(NativeKind::Ptr(HeapKind::Channel)) => self.ffi.arc_channel_release,
+            Some(NativeKind::Ptr(HeapKind::Mutex)) => self.ffi.arc_mutex_release,
+            Some(NativeKind::Ptr(HeapKind::Atomic)) => self.ffi.arc_atomic_release,
+            Some(NativeKind::Ptr(HeapKind::Lazy)) => self.ffi.arc_lazy_release,
             _ => self.ffi.arc_release,
         }
     }
