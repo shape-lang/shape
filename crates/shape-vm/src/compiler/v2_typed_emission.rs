@@ -53,8 +53,15 @@ pub enum TypedArrayKind {
     U16,
     /// `TypedArray<u32>` — backing for `Array<u32>` (W12 S1, 2026-05-13).
     U32,
-    /// `TypedArray<u64>` — backing for `Array<u64>` (W12 S1, 2026-05-13).
-    U64,
+    // U64 deliberately omitted. Per S1 reopen (2026-05-13), `Array<u64>`
+    // migration is deferred to S1.5: `NativeKind::UInt64` at HEAD is
+    // ambiguous between scalar u64 and v2-typed-array-pointer carrier,
+    // and the §2.7.7 / Q9 parallel-kind track has no discriminating
+    // variant. The defensive low-address-pointer guard the pre-reopen
+    // commit `4bcae991` added at `as_v2_typed_array` was an `is_heap()`
+    // probe in different framing — refused on sight per CLAUDE.md
+    // §"Parallel-implementation across producer/consumer carrier-shape
+    // boundaries".
 }
 
 impl TypedArrayKind {
@@ -71,7 +78,6 @@ impl TypedArrayKind {
             TypedArrayKind::I16 => OpCode::NewTypedArrayI16,
             TypedArrayKind::U16 => OpCode::NewTypedArrayU16,
             TypedArrayKind::U32 => OpCode::NewTypedArrayU32,
-            TypedArrayKind::U64 => OpCode::NewTypedArrayU64,
         }
     }
 
@@ -88,7 +94,6 @@ impl TypedArrayKind {
             TypedArrayKind::I16 => OpCode::TypedArrayGetI16,
             TypedArrayKind::U16 => OpCode::TypedArrayGetU16,
             TypedArrayKind::U32 => OpCode::TypedArrayGetU32,
-            TypedArrayKind::U64 => OpCode::TypedArrayGetU64,
         }
     }
 
@@ -105,7 +110,6 @@ impl TypedArrayKind {
             TypedArrayKind::I16 => OpCode::TypedArrayPushI16,
             TypedArrayKind::U16 => OpCode::TypedArrayPushU16,
             TypedArrayKind::U32 => OpCode::TypedArrayPushU32,
-            TypedArrayKind::U64 => OpCode::TypedArrayPushU64,
         }
     }
 
@@ -122,7 +126,6 @@ impl TypedArrayKind {
             TypedArrayKind::I16 => OpCode::TypedArraySetI16,
             TypedArrayKind::U16 => OpCode::TypedArraySetU16,
             TypedArrayKind::U32 => OpCode::TypedArraySetU32,
-            TypedArrayKind::U64 => OpCode::TypedArraySetU64,
         }
     }
 }
@@ -150,7 +153,12 @@ pub fn should_use_typed_array(elem_type: &ConcreteType) -> Option<TypedArrayKind
         ConcreteType::I16 => Some(TypedArrayKind::I16),
         ConcreteType::U16 => Some(TypedArrayKind::U16),
         ConcreteType::U32 => Some(TypedArrayKind::U32),
-        ConcreteType::U64 => Some(TypedArrayKind::U64),
+        // ConcreteType::U64 intentionally falls through to the legacy
+        // NaN-boxed path. Per S1 reopen (2026-05-13), `TypedArray<u64>`
+        // migration is deferred to S1.5 — the §2.7.7/Q9 parallel-kind-
+        // track invariant requires a discriminator between scalar u64
+        // and v2-typed-array-pointer before the U64 carrier can dispatch
+        // without runtime `is_heap()` probes.
         _ => None,
     }
 }
@@ -184,7 +192,13 @@ pub fn should_use_typed_array_from_slot_kind(
         NativeKind::Int16 => Some(TypedArrayKind::I16),
         NativeKind::UInt16 => Some(TypedArrayKind::U16),
         NativeKind::UInt32 => Some(TypedArrayKind::U32),
-        NativeKind::UInt64 => Some(TypedArrayKind::U64),
+        // NativeKind::UInt64 deliberately falls through. The slot kind
+        // is shared with v2-typed-array pointers (every `*mut TypedArray<T>`
+        // flows through `NativeKind::UInt64`), so a `Some(TypedArrayKind::U64)`
+        // dispatch here would route producer-emission and consumer-classification
+        // through the same overloaded discriminator — the §2.7.7/Q9 parallel-
+        // kind-track invariant the S1.5 sub-cluster must resolve before this
+        // arm can light up.
         _ => None,
     }
 }
@@ -209,7 +223,8 @@ pub fn typed_array_kind_from_type_name(type_name: &str) -> Option<TypedArrayKind
         "i16" => Some(TypedArrayKind::I16),
         "u16" => Some(TypedArrayKind::U16),
         "u32" => Some(TypedArrayKind::U32),
-        "u64" => Some(TypedArrayKind::U64),
+        // "u64" intentionally falls through — `Array<u64>` migration
+        // deferred to S1.5 per the supervisor's S1 reopen.
         _ => None,
     }
 }
@@ -378,11 +393,14 @@ mod tests {
     }
 
     #[test]
-    fn test_u64_maps_to_typed_array_u64() {
-        assert_eq!(
-            should_use_typed_array(&ConcreteType::U64),
-            Some(TypedArrayKind::U64)
-        );
+    fn test_u64_falls_back_to_legacy() {
+        // Per S1 reopen (2026-05-13), `Array<u64>` deliberately falls
+        // back to the legacy NaN-boxed `NewArray` path: `NativeKind::UInt64`
+        // is overloaded between scalar u64 and v2-typed-array-pointer
+        // carrier at HEAD, so a typed-array fast path would route both
+        // through the same overloaded discriminator. Deferred to S1.5
+        // pending §2.7.7/Q9 parallel-kind-track extension.
+        assert_eq!(should_use_typed_array(&ConcreteType::U64), None);
     }
 
     #[test]
@@ -393,7 +411,8 @@ mod tests {
 
     #[test]
     fn test_opcode_lookup_round_trip() {
-        // Sanity check that all ten kinds expose all four opcodes.
+        // Sanity check that all nine kinds expose all four opcodes.
+        // U64 deliberately omitted — deferred to S1.5 per S1 reopen.
         for kind in [
             TypedArrayKind::F64,
             TypedArrayKind::I64,
@@ -404,7 +423,6 @@ mod tests {
             TypedArrayKind::I16,
             TypedArrayKind::U16,
             TypedArrayKind::U32,
-            TypedArrayKind::U64,
         ] {
             let _ = kind.new_opcode();
             let _ = kind.get_opcode();
@@ -513,11 +531,17 @@ mod tests {
     }
 
     #[test]
-    fn test_slot_kind_uint64_maps_to_u64() {
+    fn test_slot_kind_uint64_falls_back_to_legacy() {
+        // Per S1 reopen (2026-05-13): `NativeKind::UInt64` is overloaded
+        // between scalar u64 and v2-typed-array-pointer carrier at HEAD
+        // (every `*mut TypedArray<T>` flows through `UInt64`). Routing
+        // through a typed-array fast path here would conflate the two
+        // shapes. Deferred to S1.5 pending §2.7.7/Q9 parallel-kind-track
+        // extension that adds a discriminating variant.
         use crate::type_tracking::NativeKind;
         assert_eq!(
             should_use_typed_array_from_slot_kind(NativeKind::UInt64),
-            Some(TypedArrayKind::U64)
+            None
         );
     }
 

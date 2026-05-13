@@ -312,10 +312,9 @@ const ALL_OPCODES: &[OpCode] = &[
     OpCode::TypedArrayGetU32,
     OpCode::TypedArrayPushU32,
     OpCode::TypedArraySetU32,
-    OpCode::NewTypedArrayU64,
-    OpCode::TypedArrayGetU64,
-    OpCode::TypedArrayPushU64,
-    OpCode::TypedArraySetU64,
+    // U64 typed-array opcodes intentionally NOT minted — deferred to
+    // S1.5 per supervisor's S1 reopen (2026-05-13). See
+    // crates/shape-vm/src/bytecode/opcode_defs.rs comment block.
 ];
 
 const ALL_BUILTINS: &[BuiltinFunction] = &[

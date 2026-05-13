@@ -61,7 +61,7 @@
 use crate::bytecode::{Instruction, Operand};
 use crate::executor::v2_handlers::v2_array_detect::{
     self, ELEM_TYPE_BOOL, ELEM_TYPE_F64, ELEM_TYPE_I16, ELEM_TYPE_I32, ELEM_TYPE_I64,
-    ELEM_TYPE_I8, ELEM_TYPE_U16, ELEM_TYPE_U32, ELEM_TYPE_U64, ELEM_TYPE_U8, V2ElemType,
+    ELEM_TYPE_I8, ELEM_TYPE_U16, ELEM_TYPE_U32, ELEM_TYPE_U8, V2ElemType,
     V2TypedArrayView,
 };
 use crate::executor::vm_impl::stack::drop_with_kind;
@@ -912,18 +912,7 @@ fn slice_v2_typed_array(
             stamp_elem_type(new_ptr as *mut u8, ELEM_TYPE_U32);
             new_ptr as *mut u8
         },
-        V2ElemType::U64 => unsafe {
-            let src = view.ptr as *const TypedArray<u64>;
-            let slice: &[u64] = if s < e {
-                let data = (*src).data as *const u64;
-                std::slice::from_raw_parts(data.add(s), e - s)
-            } else {
-                &[]
-            };
-            let new_ptr = TypedArray::<u64>::from_slice(slice);
-            stamp_elem_type(new_ptr as *mut u8, ELEM_TYPE_U64);
-            new_ptr as *mut u8
-        },
+        // V2ElemType::U64 omitted — deferred to S1.5 per S1 reopen.
     }
 }
 

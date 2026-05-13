@@ -19,7 +19,7 @@ use shape_value::{NativeKind, VMError};
 use super::super::VirtualMachine;
 use super::v2_array_detect::{
     ELEM_TYPE_BOOL, ELEM_TYPE_F64, ELEM_TYPE_I16, ELEM_TYPE_I32, ELEM_TYPE_I64, ELEM_TYPE_I8,
-    ELEM_TYPE_U16, ELEM_TYPE_U32, ELEM_TYPE_U64, ELEM_TYPE_U8, stamp_elem_type,
+    ELEM_TYPE_U16, ELEM_TYPE_U32, ELEM_TYPE_U8, stamp_elem_type,
 };
 
 impl VirtualMachine {
@@ -503,52 +503,11 @@ impl VirtualMachine {
                 Ok(())
             }
 
-            OpCode::NewTypedArrayU64 => {
-                let cap = match instruction.operand {
-                    Some(Operand::Count(n)) => n as u32,
-                    _ => 0,
-                };
-                let ptr = TypedArray::<u64>::with_capacity(cap);
-                unsafe { stamp_elem_type(ptr as *mut u8, ELEM_TYPE_U64) };
-                self.push_kinded(ptr as usize as u64, NativeKind::UInt64)?;
-                Ok(())
-            }
-            OpCode::TypedArrayGetU64 => {
-                let (idx_bits, _idx_kind) = self.pop_kinded()?;
-                let index = idx_bits as i64 as u32;
-                let (arr_bits, arr_kind) = self.pop_kinded()?;
-                let arr = arr_bits as usize as *const TypedArray<u64>;
-                let len = unsafe { TypedArray::len(arr) };
-                let val = unsafe {
-                    TypedArray::get(arr, index).ok_or(VMError::IndexOutOfBounds {
-                        index: index as i32,
-                        length: len as usize,
-                    })?
-                };
-                drop_with_kind(arr_bits, arr_kind);
-                self.push_kinded(val, NativeKind::UInt64)?;
-                Ok(())
-            }
-            OpCode::TypedArrayPushU64 => {
-                let (val_bits, _vk) = self.pop_kinded()?;
-                let val = val_bits;
-                let (arr_bits, arr_kind) = self.pop_kinded()?;
-                let arr = arr_bits as usize as *mut TypedArray<u64>;
-                unsafe { TypedArray::push(arr, val); }
-                drop_with_kind(arr_bits, arr_kind);
-                Ok(())
-            }
-            OpCode::TypedArraySetU64 => {
-                let (val_bits, _vk) = self.pop_kinded()?;
-                let val = val_bits;
-                let (idx_bits, _ik) = self.pop_kinded()?;
-                let index = idx_bits as i64 as u32;
-                let (arr_bits, arr_kind) = self.pop_kinded()?;
-                let arr = arr_bits as usize as *mut TypedArray<u64>;
-                unsafe { TypedArray::set(arr, index, val); }
-                drop_with_kind(arr_bits, arr_kind);
-                Ok(())
-            }
+            // U64 typed-array opcode handlers intentionally NOT minted —
+            // see opcode_defs.rs comment block. The S1.5 sub-cluster
+            // re-mints OpCode::{New,Get,Push,Set}TypedArrayU64 + their
+            // handler bodies once the §2.7.7/Q9 NativeKind discriminator
+            // for "pointer to TypedArray<T>" vs "scalar u64" lands.
 
             // ── Length ───────────────────────────────────────────────
 

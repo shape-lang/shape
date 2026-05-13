@@ -617,14 +617,22 @@ define_opcodes! {
     /// Set element in TypedArray<u32>: pops (arr_ptr, index, value), pushes nothing.
     TypedArraySetU32 = 0x11E, Object, pops: 3, pushes: 0;
 
-    /// Create a new TypedArray<u64> with given capacity. Operand: Count(capacity). Pushes ptr.
-    NewTypedArrayU64 = 0x11F, Object, pops: 0, pushes: 1;
-    /// Get element from TypedArray<u64>: pops (arr_ptr, index), pushes u64 value (raw u64 bits).
-    TypedArrayGetU64 = 0x120, Object, pops: 2, pushes: 1;
-    /// Push element to TypedArray<u64>: pops (arr_ptr, value), pushes nothing.
-    TypedArrayPushU64 = 0x121, Object, pops: 2, pushes: 0;
-    /// Set element in TypedArray<u64>: pops (arr_ptr, index, value), pushes nothing.
-    TypedArraySetU64 = 0x122, Object, pops: 3, pushes: 0;
+    // U64 typed-array opcodes intentionally NOT minted. Per the
+    // supervisor's S1 reopen (2026-05-13), `TypedArray<u64>` migration
+    // is gated on the §2.7.7 / Q9 NativeKind-track extension that
+    // discriminates "pointer to TypedArray<T>" from "scalar u64" — both
+    // currently share `NativeKind::UInt64` at HEAD. The defensive
+    // low-address-pointer guard at `as_v2_typed_array` (introduced in
+    // the pre-reopen S1 commit `4bcae991`) was a memory-region heuristic
+    // substituting for the missing compile-time discriminator — an
+    // `is_heap()` probe in different framing — which the CLAUDE.md
+    // §"Parallel-implementation across producer/consumer carrier-shape
+    // boundaries" entry (e55b8e71) names as the 6th instance of that
+    // defection-attractor class. Removed and deferred to sub-cluster
+    // S1.5 (W12-nativekind-typed-array-ptr-extension or equivalent per
+    // team-lead's pre-dispatch audit). See AGENTS.md S1 row's surface-
+    // and-stop list. Byte values 0x11F..0x122 left unallocated for
+    // S1.5's re-mint.
 
     // ===== v2 Typed Map Operations =====
     /// Allocate a new TypedMap<*const StringObj, f64>. Pushes ptr.
@@ -1875,10 +1883,9 @@ impl OpCode {
             | OpCode::TypedArrayGetU32
             | OpCode::TypedArrayPushU32
             | OpCode::TypedArraySetU32
-            | OpCode::NewTypedArrayU64
-            | OpCode::TypedArrayGetU64
-            | OpCode::TypedArrayPushU64
-            | OpCode::TypedArraySetU64
+            // U64 typed-array opcodes intentionally NOT minted — deferred to
+            // S1.5 per supervisor's S1 reopen; see comment block in the
+            // opcode-definition table above.
             // Local-slot-based typed array element access
             | OpCode::GetElemI64
             | OpCode::GetElemF64

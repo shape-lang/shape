@@ -910,11 +910,7 @@ impl VirtualMachine {
             | NewTypedArrayU32
             | TypedArrayGetU32
             | TypedArrayPushU32
-            | TypedArraySetU32
-            | NewTypedArrayU64
-            | TypedArrayGetU64
-            | TypedArrayPushU64
-            | TypedArraySetU64 => {
+            | TypedArraySetU32 => {
                 return self.exec_v2_typed_array(instruction);
             }
 

@@ -4725,17 +4725,27 @@ follow-up-A back-patch ratification (independent timing).*
 
 ---
 
-## Round 18 sub-cluster S1 — W12-typed-array-data-scalar-migration close (2026-05-13)
+## Round 18 sub-cluster S1 — W12-typed-array-data-scalar-migration close (2026-05-13, closed-with-reopen)
 
 Branch `bulldozer-strictly-typed-w12-typed-array-data-scalar-migration` at
-parent `52dbe312` (post-W17-narrow-follow-up-A merge HEAD). **Production
-close**; 6 of 12 dispatch-named scalar variants migrated mechanically per
-audit §3.1; 3 variants surfaced as structural obstacles per audit §2 /
-phase-2d-handover §0 surface-and-stop discipline.
+parent `52dbe312` (post-W17-narrow-follow-up-A merge HEAD). Initial close
+at `4bcae991` landed 6 mechanical scalar variants (I8/U8/I16/U16/U32/U64)
++ a defensive low-address-pointer guard at
+`v2_array_detect.rs::as_v2_typed_array`. **Supervisor reopen
+(W11-round-1 reopen precedent)** excised the U64 variant + the defensive
+guard before merge per the CLAUDE.md §"Parallel-implementation across
+producer/consumer carrier-shape boundaries" entry (e55b8e71, R17 audit
+close): the guard's `bits < 0x1_0000 → None` memory-region heuristic is
+an `is_heap()` probe in different framing, refused on sight per ADR-006
+§2.7.7 ("kind-aware clone/drop dispatch — no tag decode, no `is_heap()`
+probe"). Post-reopen close: **5 of 12 dispatch-named scalar variants
+migrated mechanically per audit §3.1**; **4 variants surfaced as
+structural obstacles** per audit §2 / phase-2d-handover §0 surface-and-
+stop discipline.
 
-### Variants migrated (6)
+### Variants migrated (5, post-reopen)
 
-`I8`, `U8`, `I16`, `U16`, `U32`, `U64` — each gets a `TypedArrayKind::<X>`
+`I8`, `U8`, `I16`, `U16`, `U32` — each gets a `TypedArrayKind::<X>`
 enum variant, 4 new `OpCode` variants (`New/Get/Push/SetTypedArray<X>`),
 an `ELEM_TYPE_<X>` element-type-tag byte (distinct from `ELEM_TYPE_BOOL`
 for U8 per audit §2.1's "collides with Bool element-type-tag" note),
@@ -4745,7 +4755,30 @@ JIT preflight whitelist registration, v2→legacy materialization arms in
 classifier integration. Already-supported `F64 / I64 / I32 / Bool` paths
 unchanged — those producers were already on `TypedArray<T>` at HEAD.
 
-### Variants NOT migrated, surfaced as structural obstacles (3)
+OpCode byte values 0x11F..0x122 left unallocated for S1.5's U64 re-mint;
+`ELEM_TYPE_U64 = 10` reserved (not produced by any current allocation
+path).
+
+### Variants NOT migrated, surfaced as structural obstacles (4, post-reopen)
+
+**U64** [NEW post-reopen]: `NativeKind::UInt64` at HEAD is overloaded
+between scalar u64 and v2-typed-array-pointer carrier (every
+`*mut TypedArray<T>` flows through this kind). Routing producer-emission
+and consumer-classification through the same overloaded discriminator
+violates the §2.7.7/Q9 parallel-kind-track invariant. The pre-reopen S1
+commit added a defensive memory-region heuristic (`bits < 0x1_0000 →
+None`) at `as_v2_typed_array` to paper over the symptom (small U64
+element values would deref into unmapped memory and SIGSEGV when `print`
+probed them as potential typed-array pointers); the supervisor reopen
+named that heuristic as the 6th instance of the CLAUDE.md §Parallel-
+implementation defection-attractor class — refused on sight. Resolution
+shape: ADR-006 §2.7.7/Q9 amendment adding a discriminating `NativeKind`
+variant (e.g. `NativeKind::TypedArrayPtr`) that flows alongside
+`NativeKind::UInt64` on the §2.7.7 parallel-kind track, so producers
+and consumers can dispatch on kind without runtime bit-pattern probes.
+Cluster-equivalent scope. **Deferred to sub-cluster S1.5
+(W12-nativekind-typed-array-ptr-extension or equivalent per team-lead's
+pre-dispatch audit)**.
 
 **F32**: dispatch named in scope but `NativeKind` has no `Float32`
 variant and `ConcreteType` has no `F32` variant at HEAD `52dbe312`. The
@@ -4787,52 +4820,69 @@ existing F64 v2 path already runs without aligned-load semantics — no
 SIMD regression introduced by S1, no `AlignedTypedArray<f64>` parallel
 preservation (refused on sight per audit §4.2 O-2.b).
 
-### Defensive fix landed alongside S1
+### Defensive guard REMOVED at reopen
 
-`as_v2_typed_array` low-address-pointer guard (`bits < 0x1_0000 ->
-None`) added — pre-existing `NativeKind::UInt64` ambiguity hazard
-surfaced by the new `TypedArrayGetU64` opcode. Result kind is `UInt64`,
-same as v2-typed-array-pointer kind; `print` probes any UInt64 slot
-for typed-array-ness via `as_v2_typed_array(bits, UInt64)`, which
-unconditionally dereferenced `bits as *const HeapHeader`. Small U64
-element values like `1000` would deref into unmapped memory at
-`*(1000 as *const HeapHeader)` → SIGSEGV. Guard preserves the
-documented "kind-only" classification — there's no pointer-bit probing
-fast path that should ever resolve a small integer as a v2 typed array.
+The `as_v2_typed_array` low-address-pointer guard (`bits < 0x1_0000 →
+None`) that the pre-reopen S1 commit `4bcae991` added is excised. The
+supervisor's reopen named the heuristic as the 6th instance of the
+CLAUDE.md §"Parallel-implementation across producer/consumer carrier-
+shape boundaries" defection-attractor class — an `is_heap()` probe in
+different framing, refused on sight per ADR-006 §2.7.7's "no tag decode,
+no `is_heap()` probe" mandate. The site at `v2_array_detect.rs:148-167`
+now carries a surface-and-stop comment block citing CLAUDE.md
+§Parallel-implementation + the deletion-fate of S1.5's discriminator
+extension as the structural fix. The runtime SIGSEGV that motivated the
+guard is replaced by compile-time legacy-path dispatch
+(`should_use_typed_array(ConcreteType::U64) → None` at the bytecode
+emitter routes `Array<u64>` literals to `OpCode::NewArray`, which never
+lights up the `as_v2_typed_array` probe path on U64 element reads).
 
-### Close gates (devenv-wrapped, exit-code-verified)
+### Close gates (devenv-wrapped, exit-code-verified, post-reopen)
 
 - `cargo check --workspace --lib --tests` EXIT=0
 - `bash scripts/verify-merge.sh` SCRIPT_EXIT=0, **Passed: 12 / Failed: 0**
 - `bash scripts/check-no-dynamic.sh` EXIT=0
-- `cargo test -p shape-vm --lib v2_typed_emission` 56/56 PASS (12 new
-  sized-integer tests)
+- `cargo test -p shape-vm --lib v2_typed_emission` 56/56 PASS — includes
+  the post-reopen regression guards `test_u64_falls_back_to_legacy` +
+  `test_slot_kind_uint64_falls_back_to_legacy` (both assert `None`,
+  preventing U64 from re-entering the typed fast path before S1.5)
 - `cargo test -p shape-vm --lib v2_array_detect` 5/5 PASS
 
-### Smoke results
+### Smoke results (post-reopen)
 
-Smoke S1 (comprehensive 10-variant: `let a: Array<i8> = [...]; print(a[0]);
-... let f: Array<u64> = [1000, 2000, 3000]; print(f[0]); ...` across all
-6 new variants + 4 existing F64/I64/Bool/i32):
+Smoke S1 (comprehensive 9-variant post-reopen: `let a: Array<i8> = [...];
+print(a[0]); ...` across the 5 newly-migrated variants + 4 already-
+supported F64/I64/I32/Bool; U64 omitted):
 
-- `--mode vm`: `-5 / 100 / 255 / 30000 / 30000 / 300 / 1000 / 2.5 / 30 / true`
-- `--mode jit`: identical sequence (VM ≡ JIT for all 10 variants)
+- `--mode vm`: `-5 / 100 / 255 / 30000 / 30000 / 300 / 2.5 / 30 / true`
+- `--mode jit`: identical sequence (VM ≡ JIT for all 9 variants)
 
-Smoke 2 baseline state (kickoff smoke that touches typed-array producer
-paths): not regressed by S1 (S1 doesn't touch the I64 producer that
-drives Smoke 2; baseline VM=`60` matches pre-S1).
+**U64 compile-time fall-through verification post-reopen**:
+`let d: Array<u64> = [1000, 2000, 3000]; print(d[0])` lowers via the
+legacy NaN-boxed `OpCode::NewArray` path (compiler's
+`should_use_typed_array(ConcreteType::U64) → None` routes to the legacy
+generic-array fallback in `compile_expr_array`), prints `1000` correctly
+under VM — the runtime SIGSEGV that motivated the (now-removed)
+defensive guard is replaced by compile-time legacy-path dispatch.
+
+Smoke 2 baseline state (kickoff smoke `print([1,2,3,4,5].sum())`): not
+regressed by S1 (S1 doesn't touch the I64 producer paths Smoke 2
+exercises); VM=`15` ✓ JIT=`15` ✓ post-reopen.
 
 ### Recurrence pattern note
 
-This S1 close demonstrates the named audit §2 framing pattern: "every
-variant either has clean migration OR surfaces a specific structural
-obstacle to the supervisor — no 'keep both' disposition." S1 followed
-this exactly: 6 mechanical migrations + 3 structural-obstacle surfacings
-+ 0 Bool-default fallbacks + 0 silent enum-arm preservations. The
+This S1 close (post-reopen) demonstrates the named audit §2 framing
+pattern: "every variant either has clean migration OR surfaces a
+specific structural obstacle to the supervisor — no 'keep both'
+disposition." S1 post-reopen followed this exactly: **5 mechanical
+migrations + 4 structural-obstacle surfacings + 0 Bool-default fallbacks
++ 0 memory-region heuristics + 0 silent enum-arm preservations**. The
 `TypedArrayData::I8`/`U8`/`I16`/`U16`/`U32`/`U64` arms still live in
 source at this commit but are unreachable from S1-migrated producer
-paths (the recipe makes them unreachable, not deleted — S5's commit
-deletes the arms).
+paths for the 5 migrated kinds (the recipe makes them unreachable, not
+deleted — S5's commit deletes the arms). `TypedArrayData::U64` remains
+reachable via the legacy `OpCode::NewArray` path until S1.5 lands the
+§2.7.7/Q9 discriminator extension.
 
 ### Round 18 S3 coordination
 
@@ -4842,8 +4892,15 @@ variant removal + §2.7.22 Q23 amendment text) has zero file-territory
 overlap with S1 (scalar-variant producer migration). AGENTS.md row
 collisions handled by take-both at merge per dispatch convention.
 
-### S2/S3/S4/S5 follow-up surfaces
+### S1.5/S2/S3/S4/S5 follow-up surfaces
 
+- **S1.5** (W12-nativekind-typed-array-ptr-extension, NEW post-reopen):
+  ADR-006 §2.7.7/Q9 amendment adding a discriminating `NativeKind`
+  variant for "pointer-to-`TypedArray<T>`" distinct from scalar
+  `UInt64`, cascading through every kind-keyed dispatch (clone_with_kind /
+  drop_with_kind / printing / KindedSlot accessors / etc.). Required
+  before U64 carrier migration + defensive guard removal can land
+  cleanly. Cluster-equivalent scope.
 - **S2** (heap-element TypedArray<*const <X>Obj> migration including
   String): blocked on per-element retain/release plumbing in
   `TypedArray<T>` for heap-element T, plus the v2-raw `<X>Obj` carrier
@@ -4851,12 +4908,12 @@ collisions handled by take-both at merge per dispatch convention.
 - **S3** (TypedObject/TraitObject migration): blocked on O-3/O-3a
   (`TypedObjectStorage`/`TraitObjectStorage` Arc-vs-HeapHeader carrier
   shape resolution); audit recommends O-3.c defer.
-- **F32/Char element-kind extension** (new follow-up surfaced by this
-  S1 close): blocked on `NativeKind` + `ConcreteType` variant additions
+- **F32/Char element-kind extension** (follow-up surfaced by this S1
+  close): blocked on `NativeKind` + `ConcreteType` variant additions
   via ADR-006 §2.7.5 amendment. Either land before a re-dispatch of S1
   to cover F32/Char, or surface as separate Phase 3 cluster-equivalent
   scope.
 - **S4** (Matrix/FloatSlice exit + new `HeapKind::Matrix = 34` /
   `HeapKind::MatrixSlice = 35`): independent of S1.
 - **S5** (`TypedArrayData` enum + `TypedBuffer<T>` deletion):
-  unchanged from audit §3.5; remains blocked on S2/S3/S4.
+  unchanged from audit §3.5; remains blocked on S2/S3/S4 + S1.5.

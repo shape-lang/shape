@@ -417,11 +417,7 @@ impl VirtualMachine {
                     let v = unsafe { TypedArray::<u32>::get_unchecked(arr, i) };
                     self.push_kinded(v as u64, NativeKind::UInt32)
                 }
-                V2ElemType::U64 => {
-                    let arr = view.ptr as *const TypedArray<u64>;
-                    let v = unsafe { TypedArray::<u64>::get_unchecked(arr, i) };
-                    self.push_kinded(v, NativeKind::UInt64)
-                }
+                // V2ElemType::U64 omitted — deferred to S1.5 per S1 reopen.
             };
             drop_with_kind(idx_bits, idx_kind);
             drop_with_kind(iter_bits, iter_kind);

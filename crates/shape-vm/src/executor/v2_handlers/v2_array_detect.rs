@@ -48,7 +48,9 @@ pub const ELEM_TYPE_U8: u8 = 6;
 pub const ELEM_TYPE_I16: u8 = 7;
 pub const ELEM_TYPE_U16: u8 = 8;
 pub const ELEM_TYPE_U32: u8 = 9;
-pub const ELEM_TYPE_U64: u8 = 10;
+// ELEM_TYPE_U64 = 10 reserved for S1.5; not allocated in S1 per the
+// supervisor's reopen (Array<u64> deferred pending §2.7.7/Q9 native-
+// kind discriminator).
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum V2ElemType {
@@ -62,7 +64,7 @@ pub enum V2ElemType {
     I16,
     U16,
     U32,
-    U64,
+    // U64 omitted — deferred to S1.5 per S1 reopen.
 }
 
 impl V2ElemType {
@@ -78,7 +80,8 @@ impl V2ElemType {
             ELEM_TYPE_I16 => Some(V2ElemType::I16),
             ELEM_TYPE_U16 => Some(V2ElemType::U16),
             ELEM_TYPE_U32 => Some(V2ElemType::U32),
-            ELEM_TYPE_U64 => Some(V2ElemType::U64),
+            // Tag byte 10 (ELEM_TYPE_U64) reserved for S1.5; not produced
+            // by any current allocation path.
             _ => None,
         }
     }
@@ -97,7 +100,6 @@ impl V2ElemType {
             V2ElemType::I16 => NativeKind::Int16,
             V2ElemType::U16 => NativeKind::UInt16,
             V2ElemType::U32 => NativeKind::UInt32,
-            V2ElemType::U64 => NativeKind::UInt64,
         }
     }
 }
@@ -148,21 +150,20 @@ pub fn as_v2_typed_array(bits: u64, kind: NativeKind) -> Option<V2TypedArrayView
     if bits == 0 {
         return None;
     }
-    // W12 S1 (2026-05-13) — low-address-pointer guard. v2 heap allocations
-    // come from `std::alloc::alloc(Layout::new::<TypedArray<_>>())`, which
-    // on every supported target returns a pointer well above the first
-    // memory page (e.g. on Linux x86_64 the minimum mmap address is
-    // 0x1_0000 / 64 KiB). Small `NativeKind::UInt64` *scalar* values that
-    // happen to flow through the same kinded slot (e.g. an element read
-    // from a `TypedArray<u64>` via `TypedArrayGetU64`) would otherwise
-    // hit an unmapped-memory deref at `*(bits as *const HeapHeader)`.
-    // The guard preserves the documented "kind-only" classification —
-    // there's no pointer-bit probing fast path that should ever resolve
-    // a small integer as a v2 typed array; the check just keeps unsafe
-    // dereferences confined to the heap-pointer regime.
-    if bits < 0x1_0000 {
-        return None;
-    }
+    // Note (W12 S1 reopen, 2026-05-13): a defensive low-address-pointer
+    // guard (`bits < 0x1_0000 → None`) was added in the pre-reopen S1
+    // commit `4bcae991` to paper over the `NativeKind::UInt64` overload
+    // between scalar u64 and v2-typed-array-pointer carrier (small U64
+    // element values like `1000` would otherwise deref into unmapped
+    // memory at `*(bits as *const HeapHeader)` and SIGSEGV). The
+    // supervisor's reopen names that heuristic as an `is_heap()` probe
+    // in different framing — refused on sight per CLAUDE.md
+    // §"Parallel-implementation across producer/consumer carrier-shape
+    // boundaries" entry (e55b8e71). The structural fix — adding a
+    // discriminator to `NativeKind` so the kind track itself separates
+    // "pointer to TypedArray<T>" from "scalar u64" — is deferred to
+    // sub-cluster S1.5; `Array<u64>` migration is excluded from S1
+    // accordingly.
     let ptr = bits as usize as *mut u8;
     let header = unsafe { &*(ptr as *const HeapHeader) };
     if header.kind != HEAP_KIND_V2_TYPED_ARRAY {
@@ -282,11 +283,6 @@ pub fn read_element(view: &V2TypedArrayView, index: u32) -> Option<(u64, NativeK
             let v = TypedArray::<u32>::get_unchecked(arr, index) as u64;
             (v, NativeKind::UInt32)
         },
-        V2ElemType::U64 => unsafe {
-            let arr = view.ptr as *const TypedArray<u64>;
-            let v = TypedArray::<u64>::get_unchecked(arr, index);
-            (v, NativeKind::UInt64)
-        },
     };
     Some(pair)
 }
@@ -367,13 +363,6 @@ pub fn write_element(
                 TypedArray::<u32>::set(arr, index, v as u32);
             }
         }
-        V2ElemType::U64 => {
-            let v = decode_i64(bits, kind).ok_or("expected u64-compatible value")?;
-            unsafe {
-                let arr = view.ptr as *mut TypedArray<u64>;
-                TypedArray::<u64>::set(arr, index, v as u64);
-            }
-        }
     }
     Ok(())
 }
@@ -450,13 +439,6 @@ pub fn push_element(
                 TypedArray::<u32>::push(arr, v as u32);
             }
         }
-        V2ElemType::U64 => {
-            let v = decode_i64(bits, kind).ok_or("expected u64-compatible value")?;
-            unsafe {
-                let arr = view.ptr as *mut TypedArray<u64>;
-                TypedArray::<u64>::push(arr, v as u64);
-            }
-        }
     }
     Ok(())
 }
@@ -501,10 +483,6 @@ pub fn pop_element(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
         V2ElemType::U32 => unsafe {
             let arr = view.ptr as *mut TypedArray<u32>;
             TypedArray::<u32>::pop(arr).map(|v| (v as u64, NativeKind::UInt32))
-        },
-        V2ElemType::U64 => unsafe {
-            let arr = view.ptr as *mut TypedArray<u64>;
-            TypedArray::<u64>::pop(arr).map(|v| (v, NativeKind::UInt64))
         },
     }
 }
@@ -567,8 +545,7 @@ pub fn sum_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
         | V2ElemType::U8
         | V2ElemType::I16
         | V2ElemType::U16
-        | V2ElemType::U32
-        | V2ElemType::U64 => None,
+        | V2ElemType::U32 => None,
     }
 }
 
@@ -808,8 +785,7 @@ pub fn avg_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
             | V2ElemType::U8
             | V2ElemType::I16
             | V2ElemType::U16
-            | V2ElemType::U32
-            | V2ElemType::U64 => None,
+            | V2ElemType::U32 => None,
         };
     }
     match view.elem_type {
@@ -851,8 +827,7 @@ pub fn avg_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
         | V2ElemType::U8
         | V2ElemType::I16
         | V2ElemType::U16
-        | V2ElemType::U32
-        | V2ElemType::U64 => None,
+        | V2ElemType::U32 => None,
     }
 }
 
@@ -875,8 +850,7 @@ pub fn min_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
             | V2ElemType::U8
             | V2ElemType::I16
             | V2ElemType::U16
-            | V2ElemType::U32
-            | V2ElemType::U64 => None,
+            | V2ElemType::U32 => None,
         };
     }
     match view.elem_type {
@@ -922,8 +896,7 @@ pub fn min_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
         | V2ElemType::U8
         | V2ElemType::I16
         | V2ElemType::U16
-        | V2ElemType::U32
-        | V2ElemType::U64 => None,
+        | V2ElemType::U32 => None,
     }
 }
 
@@ -941,8 +914,7 @@ pub fn max_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
             | V2ElemType::U8
             | V2ElemType::I16
             | V2ElemType::U16
-            | V2ElemType::U32
-            | V2ElemType::U64 => None,
+            | V2ElemType::U32 => None,
         };
     }
     match view.elem_type {
@@ -988,8 +960,7 @@ pub fn max_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
         | V2ElemType::U8
         | V2ElemType::I16
         | V2ElemType::U16
-        | V2ElemType::U32
-        | V2ElemType::U64 => None,
+        | V2ElemType::U32 => None,
     }
 }
 
@@ -1278,21 +1249,7 @@ pub fn clone_array(view: &V2TypedArrayView) -> *mut u8 {
                 p
             }
         }
-        V2ElemType::U64 => {
-            let new_arr = TypedArray::<u64>::with_capacity(view.len);
-            unsafe {
-                let src = view.ptr as *const TypedArray<u64>;
-                let src_data = (*src).data;
-                let dst_data = (*new_arr).data;
-                if view.len > 0 && !src_data.is_null() && !dst_data.is_null() {
-                    std::ptr::copy_nonoverlapping(src_data, dst_data, view.len as usize);
-                }
-                (*new_arr).len = view.len;
-                let p = new_arr as *mut u8;
-                stamp_elem_type(p, ELEM_TYPE_U64);
-                p
-            }
-        }
+        // V2ElemType::U64 omitted — deferred to S1.5 per S1 reopen.
     }
 }
 
