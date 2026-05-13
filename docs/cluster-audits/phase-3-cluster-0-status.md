@@ -2516,6 +2516,84 @@ my changes stashed):
   via legacy NaN-box tag-decode versus raw Arc pointer bits — and
   surfaced for Round 14 dispatch.
 
+## Round 13 post-merge smoke matrix verification (2026-05-13)
+
+All three Round 13 sub-clusters merged:
+- T5 (`68adb9f4`) — call_value_immediate_nb closure share-accounting fix
+- T4 (`d2a4ba19`) — IntrinsicSum body kinded-API migration
+- T1' (`e87881ef`) — 3-gap cross-crate trait return-kind conduit closure
+
+Post-merge `bash scripts/verify-merge.sh` 12/12 inside devenv. CLI rebuilt
++ canonical kickoff smoke matrix re-run.
+
+### Post-Round-13 canonical kickoff smoke matrix
+
+| Smoke | VM | JIT | Round 13 delta |
+|---|---|---|---|
+| 1 (kickoff) `for i in 0..100 { sum = sum+i }` → 4950 | ✅ 4950 | ✅ 4950 | unchanged passing |
+| 2 (kickoff) `[1,2,3,4,5].map(\|x\|x*2).sum()` → 30 | **✅ 30 NEW** (T5 closure share fix) | ❌ print operand NativeKind=None | **VM CLOSED** |
+| 3 (kickoff) `trait + impl + t.name()` → "x" | ✅ x | ❌ empty (W17 carrier-shape gap) | T1' kind correct; downstream blocker |
+| 4 (kickoff) `let mut Set + .add + .size` → 2 | ✅ 2 | ✅ 2 | unchanged passing |
+
+**3 of 4 kickoff smokes have VM passing**. **2 of 4 kickoff smokes fully
+passing VM == JIT** (1 + 4). Smoke 2 + Smoke 3 JIT remain blocked.
+
+### Important T4 close-report correction
+
+T4's close report claimed `[1,2,3].sum()` (debug-simplified Smoke 2 partial)
+uses `TYPED_INT_ARRAY_METHODS` PHF and produces `6` pre-fix. Empirical
+post-merge state contradicts: `[1,2,3].sum()` actually hits the
+`IntrinsicSum` opcode body, which T4's new body correctly surface-and-
+stops on (`receiver must be NativeKind::Ptr(HeapKind::TypedArray), got
+UInt64`). The actual gap is the upstream §2.7.5 producer-site
+classification conduit not stamping the typed-array receiver kind —
+`W17-stdlib-generic-param-kind-classification` per T4's surfaced item.
+
+**However**: `[1,2,3].sum()` is the DEBUG-simplified Smoke 2 partial,
+NOT the canonical kickoff Smoke 2. Canonical kickoff Smoke 2 is
+`[1,2,3,4,5].map(|x|x*2).sum()` which now passes VM `30`. The
+partial-form regression is not a kickoff-blocker; it's an upstream
+conduit gap surfaced honestly by T4's new body discipline. Track as
+non-kickoff-blocking cluster-1 candidate.
+
+### Round 14 candidates
+
+Two cluster-0 sub-clusters needed to close the remaining kickoff smokes:
+
+1. **`W17-jit-typed-object-arc-storage-migration`** (load-bearing for
+   kickoff Smoke 3 JIT). Surfaced jointly by Round 12 T2/T3 close + Round
+   13 T1' close.
+   `crates/shape-jit/src/ffi/call_method/mod.rs::receiver_type_name`
+   (line 51-81) classifies receiver via legacy NaN-box tag-decode
+   (`is_number(receiver_bits)`). With Round 12 T2/T3's producer
+   migration to raw `Arc::into_raw(Arc<TypedObjectStorage>)` pointer
+   bits, `is_number()` returns true for non-TAG_BASE bits →
+   `receiver_type_name` returns `"number"` instead of `"X"` → dispatch
+   fails → segfault. Per supervisor's Q2 discipline ruling: classification
+   determines bookkeeping, NOT whether work happens. Cluster-0 absorbs.
+
+2. **NEW SURFACE — `W12-jit-map-chained-method-return-kind-propagation`**:
+   `print` Call-terminator operand NativeKind=None for `.map(|x|x*2).sum()`
+   chain. Likely trinity Part b `parametric_method_return_kind_from_receiver`
+   classifier doesn't propagate return kinds through chained method calls
+   (the `.map()` return kind doesn't flow into `.sum()`'s receiver-kind
+   classification). AUDIT-FIRST to determine whether it's a conduit
+   extension or a kind-track propagation gap.
+
+If both close cleanly, cluster-0 close attempt projected post-Round-14.
+If either surfaces a 7th gap, Round 15 per N+1 trajectory discipline.
+
+### Cluster-1 / cluster-2 candidates surfaced or named (NOT cluster-0 blocking)
+
+- `W17-stdlib-generic-param-kind-classification` (T4 surfaced) — upstream
+  §2.7.5 conduit gap for stdlib wrapper `__intrinsic_sum(series)`. Affects
+  Smoke 2 partial debug form, not canonical kickoff.
+- `W12-stdlib-intrinsic-collapse` (cluster-2) — added to surfaced items
+  table item 8. Parallel-implementation cleanup.
+- Option A2 by-move callee ABI surgery (T5 surfaced) — ADR-§2.7.11/Q12-
+  verbatim shape; Option B (clone_with_kind) chosen for round budget.
+  May warrant cluster-1 follow-up.
+
 ## Cluster-0 close gate
 
 Per phase-3-kickoff-prompt §"Cluster-0 sub-cluster sequencing":
