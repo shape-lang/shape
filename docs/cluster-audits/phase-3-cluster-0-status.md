@@ -4268,8 +4268,150 @@ quality" + smoke-gate-deferred close. Supervisor ratified.
 
 ---
 
-*Next session: read this file first, then continue with Round 16
-dispatch (three parallel sub-clusters: W12-Option-B-reframed audit-
-first + W17-narrow-follow-up-A production + W17-narrow-follow-up-B
-production). After Round 16 merges, full 4-kickoff-smoke matrix
+## Round 16 — W12-Option-B-reframed close (AUDIT-ONLY, 2026-05-13)
+
+Phase 3 cluster-0 Round 16 sub-cluster `W12-Option-B-reframed`
+(supervisor-ratified after Round 15 W12-Option-B audit-only close
+surfaced that the literal Round 14 prescription conflated
+`TypedArrayData<T>` Arc-wrapped Rust enum with `TypedArray<T>` 24-byte
+`#[repr(C)]` flat struct).
+
+Branch `bulldozer-strictly-typed-w12-option-b-reframed`, parent
+`a7b93def` (post-Round-15-W17-narrow-merge + status doc HEAD).
+
+**Audit-only close.** Phase 1 surface-and-stop fires.
+
+### Phase 1 finding
+
+Kickoff working hypothesis: "Option B''' boundary conversion per
+§2.7.14-A. Per-variant unwrap-and-flatten from `Arc<TypedArrayData::T>`
+to `*const TypedArray<T>` at the JIT FFI boundary. **Other typed-array
+fast-paths already work for direct invocation (e.g. `[1,2,3].sum()`
+after Round 11A) — they must already perform this conversion
+somewhere. Find that site.**"
+
+**Audit's response (audit deliverable a, §1.1)**: no such conversion
+site exists. The two carrier shapes (`Arc<TypedArrayData>` and
+`*mut TypedArray<T>`) travel through **bytecode-emitter-disjoint
+paths**:
+
+- **Literal `[1,2,3]` working JIT path** —
+  `crates/shape-vm/src/compiler/expressions/collections.rs:214-228`
+  emits `OpCode::NewTypedArrayI64` for annotated/inferred-homogeneous-
+  int literals; VM handler at
+  `crates/shape-vm/src/executor/v2_handlers/array.rs:44-53` runs
+  `TypedArray::<i64>::with_capacity(...)` and pushes
+  `*mut TypedArray<i64>` raw pointer with `NativeKind::UInt64`. The
+  JIT consumer at `crates/shape-jit/src/mir_compiler/v2_array.rs:367-387`
+  passes that pointer to `jit_v2_array_sum_i64(arr: *const TypedArray<i64>)`
+  at `crates/shape-jit/src/ffi/v2/mod.rs:115-124`. **Both ends are
+  natively the flat-struct shape — no Arc to unwrap, no enum tag to
+  dispatch on.** Empirical at this commit: `[1,2,3,4,5].sum()`
+  produces `15` under `--mode jit`.
+- **Stdlib `vec.shape::map`'s `let mut result = []` failing path** —
+  `collections.rs:229-264` else branch emits `OpCode::NewArray`
+  (empty literal, no annotation, no spread); VM handler at
+  `crates/shape-vm/src/executor/objects/object_creation.rs:367-371`
+  runs `Arc::new(TypedArrayData::I64(Arc::new(buf)))` and pushes
+  `Arc::into_raw(arc) as u64` with
+  `NativeKind::Ptr(HeapKind::TypedArray)`. Per-iteration
+  `result.push(...)` lowers to `OpCode::ArrayPushLocal`, handled at
+  `crates/shape-vm/src/executor/objects/array_operations.rs:215-302`,
+  which has **two per-carrier-shape arms** (Ptr(HeapKind::TypedArray)
+  Arc-path vs UInt64 v2-raw-path). The two runtime carriers are
+  **first-class peers** in the VM, supported in lockstep.
+
+The JIT consumer fast-path gate at
+`crates/shape-jit/src/mir_compiler/terminators.rs:116-118` reads
+`concrete_types[slot]` (compile-time ConcreteType stamp), not the
+runtime NativeKind track. Both runtime carriers map to ConcreteType
+`Array(I64)`; only the flat-struct carrier is sound to dispatch to
+the flat-struct FFI.
+
+### §2.7.14-A draft NOT committed (audit deliverable d)
+
+The supervisor-provided §2.7.14-A draft text mis-describes the runtime
+reality in three load-bearing places (audit §1.4):
+
+1. "Heap carrier (canonical per §2.3): `Arc<TypedArrayData::T>` where
+   T is the per-element-kind enum variant" — `T` is an enum-variant
+   tag (`I64`/`F64`/...), not a type parameter on a carrier struct.
+2. "Conversion site is the JIT FFI dispatch shell: per-variant
+   unwrap-and-flatten before calling the monomorphized FFI entry" —
+   no such site exists; the JIT-FFI-boundary discriminator is the
+   `NativeKind` (`Ptr(HeapKind::TypedArray)` vs `UInt64`), not the
+   `TypedArrayData` variant tag.
+3. "Unwrap-and-flatten" framing reads as if the layouts are
+   variants of a compatible representation; they are structurally
+   distinct types with separate allocations. A real conversion would
+   require allocating a fresh `TypedArray<T>` + O(n) byte copy of
+   the `TypedBuffer<T>` payload + Arc-share release on the original
+   — a **synthesis** (not conversion) of a new value with a
+   different lifecycle.
+
+Committing the draft as-is would lock in the Round 14 conflation in
+different vocabulary, repeating the W-series defection-attractor
+pattern. The draft is preserved verbatim in audit §5 for the
+considered-and-not-committed record.
+
+### Disposition options for Round 17 (audit §3 / §8)
+
+Four structural options, supervisor disposition required:
+
+1. **B'** — ADR-006 §2.3 amendment to unify carrier shapes (multi-week).
+2. **B''** — Producer migration to v2-raw + ADR amendment to
+   acknowledge dual carrier shapes for scalar `Array<T>`.
+3. **A-§2.7.7** (new disposition — explicitly distinct from the
+   Round-15-refused Option A by mechanism): change
+   `v2_typed_array_elem_kind` from `concrete_types[slot]` to runtime
+   `NativeKind` track lookup at the dispatch shell. Same shape as
+   W17-narrow Round 15. No ADR amendment, smallest scope. Accepts
+   performance gap: `.map().sum()` runs through generic method-
+   dispatch trampoline instead of inline SIMD reduction until B' or
+   B'' lands.
+4. **Status quo** — close Smoke 2 by extending the
+   `infer_top_level_concrete_types_from_mir_with_resolvers` conduit
+   at `crates/shape-vm/src/compiler/helpers.rs:494` for the
+   **non-fast-path generic dispatch route's** kind propagation
+   through `print` (the original surface in the audit baseline:
+   "operand NativeKind is None").
+
+### Defection-attractor pattern
+
+Producer/consumer fast-path mismatch with carrier-shape divergence
+at the JIT FFI boundary is now a **4-instance class**:
+- Round 14 W12-map-chained (conduit stashed at `4ddd1bfb`).
+- Round 14 W17-typed-object-arc-storage-migration (ADR-006 §2.3
+  amendment territory).
+- Round 15 W12-Option-B (literal prompt is no-op on producer;
+  charitable Reading-B requires ADR amendment).
+- Round 16 W12-Option-B-reframed (working hypothesis premise refuted;
+  §2.7.14-A draft mis-describes reality).
+
+CLAUDE.md "Forbidden Patterns" amendment is binding per the
+supervisor's 2026-05-13 Round-14-close recurrent-pattern note.
+
+### Close gates
+
+Zero source changes. Baseline gates verified pre-commit:
+- `cargo check --workspace --lib --tests` EXIT=0.
+- `bash scripts/verify-merge.sh` 12/12 Passed, EXIT=0.
+- `bash scripts/check-no-dynamic.sh` EXIT=0.
+
+Smoke 2 baseline state:
+- `--mode vm` prints `30` (working).
+- `--mode jit` errors `Route A surface-and-stop:
+  NotImplemented(SURFACE) — print Call-terminator operand NativeKind
+  is None` (pre-conduit-extension surface; SIGSEGV NOT reachable on
+  this baseline because predecessor stash `4ddd1bfb` is NOT applied).
+
+Audit doc: `docs/cluster-audits/w12-option-b-reframed-audit.md`.
+
+---
+
+*Next session: read this file first, then continue with Round 17
+dispatch (supervisor disposition between B' / B'' / A-§2.7.7 / status-
+quo per W12-Option-B-reframed audit §8; W17-narrow-follow-up-A +
+W17-narrow-follow-up-B may close in parallel if territory remains
+non-overlapping). After Round 17 merges, full 4-kickoff-smoke matrix
 re-verification; if Smokes 2 + 3 close JIT, cluster-0 close report.*
