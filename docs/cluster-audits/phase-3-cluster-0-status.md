@@ -2120,6 +2120,135 @@ framing:
   (parametric-container return kinds), neither of which is in
   W12-jit-call-method-shell-rebuild's scope per Round 8B audit.
 
+### W12-vm-new-array-untyped-construction close (2026-05-13)
+
+Closed Round 11A standalone audit-first sub-cluster. Branch
+`bulldozer-strictly-typed-w12-vm-new-array-untyped-construction` from
+post-Round-10-merge `8db19d21`. Audit commit `7cda8e1d`, fix commit
+`264283ff`.
+
+Surface: kickoff Smoke 2 (`[1,2,3,4,5].map(|x|x*2).sum()`) under
+`--mode vm` was failing with `Not implemented: op_new_array: generic
+untyped-array construction depends on the kinded the-deleted-
+heterogeneous-element-carrier emit path (Phase 2c reentry — see
+ADR-006 §2.7.4)`.
+
+Audit findings:
+
+1. **§-cite stray confirmed.** `§2.7.4` is "API rebuild scope
+   clarification" (Phase 1.B/Phase 2c snapshot + stdlib registration
+   scope), NOT array-construction territory. Correct cite is
+   `§2.7.24 Q25.A` (typed-carrier monomorphization bundle). Same
+   stray-cite class previously caught at `mir_compiler/statements.rs:236`
+   (Round 5B `§2.7.4 → §2.7.14` fix) and
+   `w12-enum-constructor-audit.md:215`.
+
+2. **Deleted carrier identified.** The polymorphic
+   `TypedArrayData::HeapValue(Arc<TypedBuffer<Arc<HeapValue>>>)` arm
+   was deleted in Phase 2d W17-typed-carrier-bundle-A checkpoint 4/4,
+   replaced by per-element-kind monomorphic specializations (Decimal /
+   BigInt / DateTime / Timespan / Duration / Instant / Char /
+   TypedObject / TraitObject) plus the projection helper
+   `TypedArrayData::build_specialized_from_heap_arcs` (in
+   `shape_value::heap_value` line 2937).
+
+3. **Helpers already in place.** Both the build helper and the
+   `(bits, kind) → Arc<HeapValue>` projection helper
+   (`slot_to_heap_arc` at `executor/builtins/array_ops.rs:49`) were
+   available — `op_new_array` just needed to consume them.
+
+Fix shape (`264283ff`, ~250 LoC across 2 files):
+
+- **`op_new_array` body** rewritten in
+  `crates/shape-vm/src/executor/objects/object_creation.rs:287-...`.
+  Empty `Count(0)` defaults to `TypedArrayData::I64` matching
+  `op_new_typed_array`'s stable empty default. Homogeneous-kind input
+  dispatches to the matching specialized variant via new private
+  helper `build_homogeneous_typed_array` (Int64 / Float64 / Bool /
+  Char inline scalars; String / Decimal / BigInt / TypedObject
+  heap-arc reconstruction via `Arc::from_raw`). Heterogeneous-kind
+  input routes through `slot_to_heap_arc` +
+  `TypedArrayData::build_specialized_from_heap_arcs`; cross-arm
+  surfaces as `VMError::RuntimeError` per Q25.A "Arrays do not
+  [admit heterogeneous slots]", NOT `NotImplemented(SURFACE)`.
+
+- **`slot_to_heap_arc` visibility** bumped from file-local `fn` to
+  `pub(in crate::executor)` in `array_ops.rs:49` so
+  `object_creation.rs` shares the same projection logic without
+  duplication.
+
+- Module docstring at `object_creation.rs:14-39` updated to document
+  the Round 11A `op_new_array` migration. The
+  `the-deleted-heterogeneous-element-carrier` deletion-fate descriptor
+  is removed at the rewritten body sites; remaining hits in
+  `op_new_typed_array`'s heterogeneous-fallback arm and sibling
+  SURFACE sites are left as follow-up §-cite mechanical cleanup
+  (out of scope for this runtime-fix commit; §4.C of the audit doc).
+
+Close gates (devenv exit-code-verified):
+
+- `cargo check --workspace --lib --tests` EXIT=0.
+- `cargo test -p shape-vm --lib` SIGABRT matches pre-existing
+  v2-raw-heap-audit baseline (`tcache_thread_shutdown(): unaligned
+  tcache chunk detected` firing in monomorphization cache tests,
+  identical to the Round 4 close report:273-275 documented baseline).
+- `cargo test -p shape-jit --lib` 361 / 0 / 26 — matches baseline 361
+  exactly.
+- `bash scripts/verify-merge.sh` 12/12 Passed.
+- `bash scripts/check-no-dynamic.sh` EXIT=0.
+- AGENTS.md row updated to `closed`.
+
+Runtime verification:
+
+- Pre-fix `cargo run --bin shape -- run /tmp/smoke2.shape --mode vm`
+  surfaced `op_new_array` `NotImplemented`. Post-fix the
+  `op_new_array` surface is closed.
+- Smoke 2 end-to-end VM `30` output remains blocked — two NEW
+  pre-existing-bug surfaces revealed downstream of the `op_new_array`
+  fix:
+
+  - **`IntrinsicSum` Phase-1B wave-5d gap** at
+    `crates/shape-vm/src/executor/vm_impl/builtins.rs:471-520`
+    (`todo!("phase-1b-vm wave 5d — intrinsic body migration pending
+    (handle_intrinsic_builtin): IntrinsicSum")`). Fires when
+    `.sum()` is invoked on an `Array<int>` receiver. Same wave-5d
+    closure-driven-builtins migration as `Map`/`Filter`/`Reduce`/etc.
+    Out of scope for Round 11A.
+
+  - **`call_value_immediate_nb` kind-mismatch surface** at
+    `crates/shape-vm/src/executor/call_convention.rs:798` —
+    `HeapKind::Closure label with non-ClosureRaw HeapValue payload:
+    "string"`. Fires when `xs.map(|x|x*2)` is invoked with `xs` as a
+    V2 typed-int-array (`NativeKind::UInt64`). The dispatch shell
+    appears to pass the wrong slot as the closure-callee carrier in
+    some configurations; this is a pre-existing kind-source bug at
+    the method-dispatch tier, unrelated to `op_new_array`. Surfaced
+    independently — both VM-side `xs.map(closure)` and
+    `let f = |x| x; xs.map(f)` reproduce the panic with the
+    `HeapValue::String` payload signature, suggesting a stale
+    receiver slot being read.
+
+  Both gaps are pre-existing on this branch — they were masked by
+  the upstream `op_new_array` surface and are now visible. **Neither
+  is in Round 11A's territory.** Surfaced for supervisor disposition
+  as follow-up workstreams; the `op_new_array` close criterion is
+  bounded by §2.7.24 Q25.A reentry scope per the dispatch text.
+
+Forbidden frames refused on sight (per audit §7):
+- "preserve deleted-carrier emit path under documented disposition",
+- Bool-default element kind for unknown-kind array,
+- "just one edge case" / "soft-fail counter for now",
+- "this is Phase 2c-residual, document as out-of-scope" — supervisor's
+  Round-11 ratification rules this out for cluster-0 close criterion,
+- Add a transitional `TypedArrayData::HeapValueShim / Untyped / Mixed
+  / Generic` variant,
+- "Defer to a new ADR amendment introducing dynamic-typed empty
+  arrays".
+
+No ADR amendment required (audit §8). All architectural decisions live
+in §2.7.24 Q25.A + §2.7.5 + §2.7.10/Q11; helpers and variant grid
+already in place pre-Round-11A.
+
 ---
 
 *Next session: read this file first, then continue with Round-2
