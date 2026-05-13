@@ -1298,6 +1298,97 @@ the VM's existing kinded dispatch entry.
 Branch: `bulldozer-strictly-typed-w12-jit-collection-method-dispatch-abi`
 Parent: `267b1ca2` (post-Round-7B + Round 8 dispatch metadata)
 
+## Round 9 — dispatching (8B.1 standalone per supervisor sequential split)
+
+Dispatched 2026-05-13 from the post-Round-8 merge baseline `3d3f1258`.
+Supervisor ratified the sequential split (Round 9 = 8B.1, Round 10 = 8B.2)
+per Round 8B audit's corrected scope estimate (~1310 LoC integrated
+trinity vs. Round 7A's ~800 LoC precedent — at the high end of single-round
+budget with cross-crate API addition; sequential split respects budget +
+isolates crate-boundary review risk in 8B.2).
+
+| Sub-cluster | Branch | Worktree | Status |
+|---|---|---|---|
+| W12-jit-collection-arc-ffi-ctors-and-refcount (9 / 8B.1) | `bulldozer-strictly-typed-w12-jit-collection-arc-ffi-ctors-and-refcount` | `../shape-w12-jit-collection-arc-ffi-ctors-and-refcount` | dispatching |
+
+### Scope (Round 9 / 8B.1)
+
+Per Round 8B audit `docs/cluster-audits/w12-jit-collection-method-dispatch-abi-audit.md`
+§3.1 + §10.2 sub-cluster split (8B.1 row).
+
+**Typed-Arc ctor FFI** (8 entries):
+- Zero-arg: `jit_v2_make_hashset` / `_hashmap` / `_deque` / `_priorityqueue` /
+  `_channel` → return `Arc::into_raw(Arc::new(<XData>::default())) as u64`.
+- Single-kind: `jit_v2_make_atomic(i: i64)` /
+  `jit_v2_make_lazy(closure_bits: u64)` — compile-time-validated inner kind
+  per §2.7.25.
+- Carrier-pair: `jit_v2_make_mutex(bits: u64, kind: u8)` — JitFfiCarrier
+  `(bits, NativeKind)` form per §2.7.5.
+
+**Kinded retain/release** (16 entries — 8 retain + 8 release):
+Per Round 7A precedent (`jit_arc_result_retain/_release` /
+`jit_arc_option_retain/_release` calling
+`Arc::increment_strong_count::<T>` / `Arc::decrement_strong_count::<T>`):
+new `jit_arc_<heapkind>_retain/_release` for HashSet / HashMap / Deque /
+PriorityQueue / Channel / Mutex / Atomic / Lazy.
+
+`retain_func_for_place` / `release_func_for_place` in
+`mir_compiler/ownership.rs` extended with 8-arm match for
+`Ptr(HeapKind::HashSet|HashMap|Deque|PriorityQueue|Channel|Mutex|Atomic|Lazy)`
+routing to the new kinded entries.
+
+**Carrier-shape rule (audit §5)**: `Arc::into_raw(Arc<XData>) as u64`
+(Arc internal refcount at offset -16 per Rust standard Arc layout). Do
+NOT mix with `Box::into_raw(Box::new(UnifiedValue<T>))` (W11 TypedArray
+shape with own HeapHeader at offset 4) — mixing would segfault at every
+`jit_arc_release` reclaim.
+
+### Out of scope (Round 10 territory)
+
+- `jit_call_method` shell rebuild — reading receiver+args kind from
+  `stack_kinds` parallel-kind track per §2.7.7, removing NaN-box tag
+  decode at `value_ffi.rs:330-336`.
+- New `VirtualMachine::jit_trampoline_call_method` cross-crate API per
+  audit §2.1 (mirrors `jit_trampoline_call_closure` at
+  `crates/shape-vm/src/executor/call_convention.rs:953`).
+- EnumStore consumer collection_ctor arm in `mir_compiler/statements.rs`
+  dispatching to this round's ctors.
+
+**Round 9 lands the ctors + retain/release; Round 10 wires the shell +
+trampoline + consumer.** Round 9 landings are inert until Round 10 consumer
+wiring catches them, preventing the equivalence-ratchet regression
+Round 7B audit flagged.
+
+### Close criterion
+
+- FFI round-trip tests (~24 minimum: 8 ctor + 16 retain/release; mirror
+  Round 7A's 6 round-trip pattern).
+- `cargo check --workspace --lib --tests` EXIT=0 (inside `devenv shell`).
+- `cargo test -p shape-jit --lib` no regressions from baseline 335.
+- `bash scripts/verify-merge.sh` 12/12 (inside devenv).
+- `bash scripts/check-no-dynamic.sh` EXIT=0.
+- AGENTS.md row updated to `closed`.
+- Status doc subsection `### W12-jit-collection-arc-ffi-ctors-and-refcount
+  close (2026-05-13)`.
+
+### Forbidden frames (refused on sight)
+
+Per CLAUDE.md "Renames to refuse on sight" §2.7.10/Q11 + §2.7.11/Q12
+broader-family regex: "collection-FFI bridge" / "typed-Arc translator" /
+"container-allocation helper" / "kind-injection adapter" / "value-call
+bridge" / "callee-kind helper" / "capture-injection adapter". Describe
+deleted code by deletion-fate (the deleted-W-series `unified_box(HK_*, ...)`
+shape, the kind-blind ABI), never by hypothetical role.
+
+### Round 10 readiness gate
+
+Round 9 closes → merge → dispatch Round 10. Per supervisor's revised
+cadence: post-Round-9 merge also includes kickoff Smoke 2 + 3 verification
+(`xs.map(|x|x*2).sum()` and `trait T + impl T for X + dyn T + t.name()`)
+under both `--mode vm` and `--mode jit`; if either kickoff smoke surfaces
+a new gap, Round 10 or Round 11 absorbs the work per N+1 trajectory
+discipline.
+
 ## Cluster-0 close gate
 
 Per phase-3-kickoff-prompt §"Cluster-0 sub-cluster sequencing":
