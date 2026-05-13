@@ -1420,6 +1420,22 @@ impl BytecodeCompiler {
                     callee_summaries: Some(&self.function_borrow_summaries),
                 };
                 let storage_plan = crate::mir::storage_planning::plan_storage(&planner_input);
+
+                // ADR-006 §2.7.5 stamp-at-compile-time, Phase 3
+                // cluster-0 Round 16 W17-narrow-follow-up-A: thread
+                // schema ids on top-level MIR `ObjectStore`
+                // statements (canonical Smoke 3 site — `let t = X {}`
+                // is top-level). Same back-patch as the per-function
+                // path at `compiler/functions.rs` post-closure-id
+                // patching; reads `mir.local_struct_type_names` +
+                // `type_tracker.schema_registry()` to align with the
+                // parallel bytecode-side `OpCode::NewTypedObject`
+                // operand.
+                crate::compiler::mir_schema_threading::back_patch_schema_ids(
+                    &mut mir,
+                    &mut self.type_tracker,
+                );
+
                 self.program.top_level_mir =
                     Some(std::sync::Arc::new(crate::bytecode::MirFunctionData {
                         mir,

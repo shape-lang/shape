@@ -54,6 +54,7 @@ mod helpers_binding;
 mod helpers_reference;
 mod literals;
 mod loops;
+pub(crate) mod mir_schema_threading;
 pub(crate) mod monomorphization;
 mod patterns;
 mod statements;

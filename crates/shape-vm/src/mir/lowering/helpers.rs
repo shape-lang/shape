@@ -138,6 +138,16 @@ pub(super) fn emit_container_store_full(
             container_slot,
             operands,
             field_names,
+            // ADR-006 §2.7.5 stamp-at-compile-time, Phase 3 cluster-0
+            // Round 16 W17-narrow-follow-up-A: MIR lowering does not
+            // have direct access to the bytecode compiler's
+            // `type_tracker.schema_registry`. The schema_id is
+            // back-patched by `crate::compiler::mir_schema_threading::
+            // back_patch_schema_ids` after MIR lowering completes,
+            // using the user-declared (or inline-anonymous) schema id
+            // that matches the parallel bytecode-side
+            // `OpCode::NewTypedObject` operand.
+            schema_id: None,
         },
         ContainerStoreKind::Enum => StatementKind::EnumStore {
             container_slot,

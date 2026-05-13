@@ -142,16 +142,49 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 container_slot,
                 operands,
                 field_names,
+                schema_id: stmt_schema_id,
             } => {
-                // Register a schema for cross-boundary compatibility.
-                let real_field_names: Vec<String> = field_names
-                    .iter()
-                    .filter(|n| !n.is_empty())
-                    .cloned()
-                    .collect();
-                let sid = shape_runtime::type_schema::register_predeclared_any_schema(
-                    &real_field_names,
-                );
+                // ADR-006 §2.7.5 stamp-at-compile-time — Phase 3 cluster-0
+                // Round 16 W17-narrow-follow-up-A: use the user-declared
+                // (or anonymous-inline) schema id threaded through the
+                // MIR `ObjectStore` carrier. The bytecode-side
+                // `OpCode::NewTypedObject` operand
+                // (`Operand::TypedObjectAlloc { schema_id, .. }`) carries
+                // the same id; the bytecode compiler's
+                // `crate::compiler::mir_schema_threading::
+                // back_patch_schema_ids` post-MIR-lowering pass aligns the
+                // two so the JIT-side `typed_object_alloc(schema_id, ...)`
+                // writes the user-declared schema id into
+                // `(*ptr).schema_id`. The W17-narrow classification-layer
+                // `receiver_type_name` then resolves `schema_id` →
+                // `vm.program().type_schema_registry.get_by_id(...)` →
+                // user type name (e.g. `"X"` for Smoke 3 schema = 53).
+                //
+                // Refuse-on-sight (§2.7.5 forbidden list): no
+                // `register_predeclared_any_schema` fallback when the
+                // back-patch could not resolve the schema. The correct
+                // surface-and-stop response is a structured error citing
+                // the producer-side gap.
+                let sid = match stmt_schema_id {
+                    Some(id) => *id,
+                    None => {
+                        return Err(format!(
+                            "ObjectStore: SURFACE — schema_id not threaded from \
+                             producer (bytecode-side `OpCode::NewTypedObject` \
+                             operand). Container slot SlotId({}) has no schema \
+                             id on the MIR `StatementKind::ObjectStore` carrier; \
+                             the bytecode compiler's \
+                             `mir_schema_threading::back_patch_schema_ids` pass \
+                             did not resolve it (struct type name missing from \
+                             `mir.local_struct_type_names` and no inline \
+                             schema match for the field set). Tracked as \
+                             W17-narrow-follow-up-A per \
+                             docs/cluster-audits/phase-3-cluster-0-status.md \
+                             §\"Round 15 — W17-narrow close\". ADR-006 §2.7.5.",
+                            container_slot.0,
+                        ));
+                    }
+                };
 
                 let schema_id = self.builder.ins().iconst(
                     cranelift::prelude::types::I32,
