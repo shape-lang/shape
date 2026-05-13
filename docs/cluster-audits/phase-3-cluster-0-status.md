@@ -2641,6 +2641,225 @@ disposition per the N+1 trajectory.
 
 ---
 
+### W12-jit-string-carrier-unification close (2026-05-13)
+
+**Branch**: `bulldozer-strictly-typed-w12-jit-string-carrier-unification`
+**Round**: 12 T2/T3 (parallel with T1 `W12-jit-trait-dispatch-return-kind`).
+**Branched from**: `b23e2548` (Round 12 dispatch metadata on
+`bulldozer-strictly-typed`).
+
+#### Smoke matrix delta
+
+| Smoke | Pre-Round-12 | Post-Round-12 | Status |
+|---|---|---|---|
+| Smoke 1 (`for i in 0..100 { sum += i }; print(sum)` → `4950`) | VM == JIT | VM == JIT | unchanged |
+| `print("hello")` | JIT clean SURFACE (Round 8A item) | VM=`hello` JIT=`hello` | **closed** |
+| `let s = "hello"; print(s)` | (unverified, but same producer site) | VM=`hello` JIT=`hello` | **closed** |
+| Smoke 4 (`let mut s = Set(); s.add("a"); s.add("b"); print(s.size())` → `2`) | VM=2 JIT segfault (Round 11D surfaced) | VM=2 JIT=2 | **closed** |
+| `print(Some(3))` | VM == JIT | VM == JIT | unchanged |
+| `print(Ok(5))` | VM == JIT | VM == JIT | unchanged |
+| `[1,2,3].sum()` → `6` | JIT=6 (Round 11-trinity Part b) | JIT=6 | unchanged |
+| `print(Err("x"))` → `Err("x")` | JIT clean SURFACE (kind=Ptr(TypedObject)) | JIT clean SURFACE (same kind=Ptr(TypedObject)) | **NOT closed** — pre-existing kind classifier bug surfaced as separate sub-cluster (see "Surfaced" below) |
+
+#### Close-gate exit codes
+
+- `cargo check --workspace --lib --tests` (inside devenv shell): **EXIT=0**
+- `cargo test -p shape-jit --lib`: **379 passed; 0 failed; 26 ignored** (baseline 373 + 6 new String tests — exact, no regressions)
+- `bash scripts/verify-merge.sh`: **12/12 Passed**
+- `bash scripts/check-no-dynamic.sh`: **EXIT=0**
+
+#### Fix shape
+
+ADR-006 §2.7.5 producer-side migration mirroring Round 7A (§2.7.17
+Result/Option Arc-shape producers) and Round 9 (typed-Arc collection
+retain/release pairs) precedents.
+
+7 files, ~250 LoC incl. docstrings:
+
+1. **NEW** `crates/shape-jit/src/ffi/string.rs` — kinded
+   `jit_arc_string_retain` / `jit_arc_string_release` operating on
+   `Arc::increment/decrement_strong_count::<String>` at offset -16 (Rust
+   Arc contract); `arc_string_constant(s: String) -> u64` compile-time
+   helper that boosts the initial refcount to 2 so the constant survives
+   the JIT-compiled function's full lifetime. Without the boost, a
+   single use-then-drop release would underflow to 0 and free the
+   constant → next call → use-after-free. The "constant's permanent
+   share" + "active share" discipline parallels how string interning
+   works. 6 round-trip tests mirror Round 7A's `result.rs::tests`
+   pattern: refcount-boost stability, retain-bumps, release-drops,
+   null-bits safety, Arc::from_raw round-trip, use-drop cycle survival.
+
+2. `crates/shape-jit/src/ffi/mod.rs` — `pub mod string;` registration.
+
+3. `crates/shape-jit/src/mir_compiler/ownership.rs::compile_constant` —
+   `MirConstant::Str` / `MirConstant::StringId` / `MirConstant::Method`
+   arms migrated from `value_ffi::box_string(s)` (legacy
+   `Box::into_raw(Box::new(UnifiedValue<Arc<String>>))`) to
+   `ffi::string::arc_string_constant(s)` (§2.7.5 raw
+   `Arc::into_raw(Arc<String>) as u64`).
+
+4. `crates/shape-jit/src/mir_compiler/ownership.rs::retain_func_for_place`
+   / `release_func_for_place` — new `Some(NativeKind::String)` arm
+   routes to `self.ffi.arc_string_retain` / `_release` instead of the
+   legacy `arc_retain` / `arc_release` fallback (which would scribble on
+   the `String` payload's `ptr/cap/len` words at offset +4).
+
+5. `crates/shape-jit/src/ffi_refs.rs` — 2 new FuncRef slots
+   (`arc_string_retain` / `arc_string_release`).
+
+6. `crates/shape-jit/src/ffi_symbols/arc_symbols.rs` — 2 new
+   `register_arc_symbols` entries + 2 new `declare_arc_functions`
+   signatures (`extern "C" fn(bits: i64)` per Round 7A's
+   `jit_arc_result_retain` ABI shape).
+
+7. `crates/shape-jit/src/compiler/ffi_builder.rs` — 2 new `r!()` lookups
+   for the FuncRef slots.
+
+8. `crates/shape-jit/src/mir_compiler/terminators.rs` — print
+   Call-terminator's `Some(NativeKind::String)` arm flipped from
+   SURFACE-and-stop to `self.ffi.print_str` dispatch (Round 8A's
+   surfaced item closes). The `Some(NativeKind::Ptr(HeapKind::
+   TypedObject))` arm refined to a more specific SURFACE message naming
+   the cluster-1 follow-up sub-cluster.
+
+#### Producer-side migration rationale (§2.7.5 carrier-shape rule)
+
+The §2.7.5 `NativeKind::String` slot contract is
+`Arc::into_raw(Arc<String>) as u64` — refcount at offset -16 per the
+standard Rust Arc layout. VM-side consumers
+(`set_methods.rs::result_slot_to_string_arc` and `KindedSlot::Drop` for
+`NativeKind::String` at `kinded_slot.rs:500-502`) decode via
+`Arc::from_raw(bits as *const String)` /
+`Arc::decrement_strong_count::<String>(bits)`. Pre-Round-12 the JIT-side
+`box_string` producer returned `Box::into_raw(Box::new(UnifiedValue<
+Arc<String>>)) as u64` — the W11 TypedArray-shape NaN-box carrier with
+refcount at offset +4 inside the UnifiedValue allocation. VM-side
+consumer's `Arc::from_raw` read the UnifiedValue header bytes as
+`String`'s `ptr/cap/len` words → UB / segfault on access.
+
+Producer-side migration is the principled fix per ADR-006 §2.7.17 (Round
+7A precedent for Result/Option) generalized to the
+`NativeKind::String` carrier. JIT-internal NaN-box paths
+(dispatch-shell's method-name push at `terminators.rs:235`,
+`call_string_method` returns, etc.) continue to use `value_ffi::box_string`
+unchanged — those paths flow within JIT and consume via the same
+`unbox_string` NaN-box decoder. The kind-track stamp for the
+method-name push slot is `NativeKind::String` (decorative for the
+JIT-internal pathway; the dispatch shell's `unbox_string(method_bits)`
+body knows the carrier shape from its own ABI contract, not from the
+kind track).
+
+#### Compile-time-constant refcount discipline
+
+`arc_string_constant` boosts the initial refcount to 2. This is
+load-bearing for two reasons:
+
+1. **Constant survival across multiple JIT-compiled function calls**:
+   the JIT embeds the `Arc::into_raw` pointer as a compile-time-emitted
+   `iconst I64`. Every runtime occurrence of the site reads this same
+   constant pointer. Without the boost, a single use-then-drop pattern
+   (e.g., `let s = "a"; some_call(s); /* scope exit */`) would
+   decrement to 0 and free; next call → use-after-free.
+
+2. **Tolerance to imbalanced retain/release**: any code path where a
+   release fires without a paired prior retain (e.g., the
+   `MirConstant::Str` arg flowing through the dispatch shell where the
+   VM trampoline's `KindedSlot::Drop` decrements without the JIT having
+   pre-incremented for the constant arg) leaves the constant at
+   refcount=1 (still alive) rather than 0 (freed). The constant's
+   "permanent share" absorbs the imbalance.
+
+The "leaked" extra share is a deliberate per-constant-site one-time
+memory cost — `O(distinct string constants × Arc<String> size)` per
+JIT-compiled function. Same lifecycle as the legacy NaN-box `box_string`
+path (which also leaked the UnifiedValue allocation via `Box::into_raw`
+without a paired `Box::from_raw`).
+
+#### Decision: TypedObject migration surface-and-stops
+
+The `Ptr(HeapKind::TypedObject)` arm in `terminators.rs` print
+Call-terminator stays SURFACE per the round's surface-and-stop
+discipline (round dispatch §"Surface-and-stop expected": "If the
+TypedObject migration scope exceeds the budget OR breaks the
+W11-jit-new-array TypedArray<T> shape ... STOP and surface to
+disambiguate").
+
+Rationale: the JIT-internal `TypedObject` struct (in
+`crates/shape-jit/src/ffi/typed_object/`) and the VM-side
+`Arc<TypedObjectStorage>` (in `crates/shape-value/src/heap_value.rs`)
+are TWO DIFFERENT Rust types with different layouts. The JIT-side has
+its own ref-counting in the `TypedObject` struct's header (offset +4
+HeapHeader-style). The VM-side carrier is a strict-typed Arc-shape with
+refcount at offset -16. Migrating `box_typed_object` to
+`Arc::into_raw(Arc<TypedObjectStorage>)` would break 17+ JIT-internal
+consumers in `typed_object/`, `data.rs`, `property_access.rs` etc. that
+read the JIT TypedObject struct directly via `unbox_typed_object`.
+
+This is a separate sub-cluster's scope. Tracked as cluster-1 follow-up
+**W17-jit-typed-object-arc-storage-migration** (NEW surface, surfaced
+by this round).
+
+#### Surfaced (NOT regressions, pre-existing)
+
+- **`print(Err("x"))` JIT — kind classifier upstream stamps
+  `Ptr(TypedObject)` instead of `Ptr(Result)` for `Err` arm of Result**.
+  Verified pre-existing by stashing all my changes and rebuilding:
+  baseline produces the same `Some(Ptr(TypedObject))` kind at the print
+  Call-terminator surface site. The bug is somewhere in the MIR-builder
+  / type-inference layer for `BuiltinCall(ErrCtor)` destination slots
+  — `Ok(5)` correctly stamps `Ptr(Result)` (per the working
+  `print(Ok(5))` smoke), but `Err("x")` stamps `Ptr(TypedObject)`.
+  Asymmetric defect at the upstream producer-side classifier.
+  Orthogonal to W12 T2/T3's territory (which migrated the JIT-side
+  String / Method `MirConstant` lowering, not the `BuiltinCall(ErrCtor)`
+  destination kind stamp). Tracked for cluster-1 / Round 13+
+  sub-cluster **W17-jit-err-ctor-kind-classification**.
+
+- **TypedObject Aggregate path** (`let p = {x:1, y:2}; print(p.x)`).
+  Aggregate lowering in `Rvalue::Aggregate` is surface-and-stop per W11
+  / Route A; `print(p.x)` reaches the Aggregate fallback before any
+  TypedObject carrier consideration is reached. Out of scope for W12
+  T2/T3.
+
+#### Coordination with T1 (W12-jit-trait-dispatch-return-kind)
+
+The dispatch metadata noted both T1 and T2/T3 might touch
+`mir_compiler/types.rs` (different regions). At close, **T2/T3 did NOT
+touch `mir_compiler/types.rs` at all** — the kind track flows for
+`NativeKind::String` already work post-§2.7.5-conduit-extensions from
+Rounds 6A / 8A / 11-trinity. The producer-site migration affected only
+`mir_compiler/ownership.rs::compile_constant`. T1 and T2/T3 ship with
+zero file-level conflicts.
+
+T2/T3 unblocks Smoke 4 JIT (verified VM == JIT for the kickoff Smoke 4
+target). T1 unblocks Smoke 3 JIT (trait method dispatch return-kind
+classification). Both required for full cluster-0 Smoke 3+4 closure.
+
+#### Forbidden patterns refused on sight (audit trail)
+
+- "string-carrier bridge" / "TypedObject probe" / "Arc-NaN-box
+  translator" / "boundary adapter" — all refused on sight per CLAUDE.md
+  "Renames to refuse on sight" broader-family regex. Producer-side
+  migration is the actual fix; describing the deletion as a "bridge"
+  perpetuates the wrong-architecture framing.
+- "Compat shim for `unified_box` callers" — refused. Full producer-side
+  migration at the §2.7.5-stamped sites; no transitional shim. JIT-
+  internal NaN-box paths keep `box_string` unchanged because they speak
+  a different ABI contract internally (not a §2.7.5 carrier), not
+  because of a "compat shim".
+- "Mark TypedObject migration as Round 13 follow-up" — surfaced as
+  cluster-1 W17 sub-cluster (NEW surface), NOT marked as a thing-to-do-
+  later within W12. The surface-and-stop in `terminators.rs` is honest
+  refusal-to-fabricate; the new sub-cluster is the principled
+  follow-up shape.
+- "Keep `unified_box(HK_STRING, ...)` for snapshot/wire compat" —
+  refused. Snapshot/wire uses per-slot kind metadata; no NaN-box at
+  runtime. `box_string` is still in the codebase because it serves a
+  separate role (JIT-internal NaN-box for method-name push, etc.), not
+  as a snapshot/wire helper.
+
+---
+
 *Next session: read this file first, then continue with Round-2
 close-out (or pivot per supervisor's call between cluster-1 hardening
 and cluster-2 Wave-3 surfaces).*
