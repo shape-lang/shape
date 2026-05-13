@@ -2673,6 +2673,59 @@ if neither audit surfaces ADR amendment. If either does, Round 15 absorbs
 the amended fix per N+1 trajectory discipline. JIT-rebuild proper is
 converging; remaining gaps are well-scoped + named.
 
+## Round 14 — close (both audit-only, Round 15 plan ratified)
+
+Both Round 14 sub-clusters merged audit-only into `bulldozer-strictly-typed`:
+- W17-jit-typed-object-arc-storage-migration merge commit (post-`8ae56222`)
+- W12-jit-map-chained-method-return-kind-propagation merge commit (post-`8354968a`)
+
+### Post-Round-14 canonical kickoff smoke matrix
+
+| Smoke | VM | JIT | Status |
+|---|---|---|---|
+| 1 (kickoff) `for i in 0..100 { sum = sum+i }` → 4950 | ✅ 4950 | ✅ 4950 | **passing** |
+| 2 (kickoff) `[1,2,3,4,5].map(\|x\|x*2).sum()` → 30 | ✅ 30 (R13 T5) | ❌ JIT compiles + runtime SIGSEGV (NEW surface — producer/consumer fast-path mismatch) | Round 15 Option B |
+| 3 (kickoff) `trait + impl + t.name()` → "x" | ✅ x | ❌ receiver_type_name NaN-box-decode-on-raw-bits surface | Round 15 W17-narrow |
+| 4 (kickoff) `let mut Set + .add + .size` → 2 | ✅ 2 | ✅ 2 | **passing** |
+
+**Pre-merge state had Smoke 2 JIT failing at compile-time `Route A surface-and-stop`**. W12-map-chained's conduit extension WIP (stashed at sub-cluster `stash@{0}`) closes the compile-time surface; runtime SIGSEGV now surfaces honestly. Both new surfaces are well-named and ready for Round 15.
+
+### Round 14 W17 audit findings (committed at merge)
+
+Recommendation **Option γ (scope split)** ratified by supervisor:
+- Round 15 **W17-narrow** = classification-layer fix only (Option α scope): ~13 sites, ~150-250 LoC, in-crate, NO ADR amendment. Closes kickoff Smoke 3 JIT.
+- β typed-Arc carrier-shape decision → cluster-1 follow-up. Cluster-0 close does NOT block on β.
+
+Audit doc: `docs/cluster-audits/w17-jit-typed-object-arc-storage-migration-audit.md` (636 LoC, 4 deliverables + supervisor disposition options + empirical verification).
+
+Also: Round 13 T1' framing correction landed — T1' attributed surface to "Round 12 T2/T3 carrier migration"; audit §1.4 corrects to "Round 12 T2/T3 migrated String only; TypedObject producer was surface-and-stopped; TypedObject producer TODAY emits raw `Box::into_raw(UnifiedValue<*const u8>)`". Classification gap real regardless of carrier shape.
+
+### Round 14 W12-map-chained audit findings (committed at merge)
+
+§1 layer identification: **§1 (a) conduit extension** at bytecode-side `infer_top_level_concrete_types_from_mir_with_resolvers` (`compiler/helpers.rs:494`). Missing `MirConstant::Method(_)` Call-terminator destination stamping for built-in container receivers. Same shape as Round 11-trinity Part b's JIT-side parametric classifier, generalized one tier upstream to produce `ConcreteType`.
+
+§2 cluster-0 disposition: kickoff Smoke 2 JIT blocked at pre-implementation baseline. Cluster-0 absorbs.
+
+§3 ADR-amendment posture: no ADR amendment required; matches Round 6A + Round 11-trinity Part b + Round 13 T1' precedents.
+
+Implementation outcome: ~570 LoC conduit extension landed end-to-end on the sub-cluster branch. Verified via debug instrumentation that `concrete_types[doubled_slot] = Array(I64)` is stamped correctly and flows through to `.sum()`'s receiver slot. JIT compilation succeeds — no more compile-time `Route A surface-and-stop`.
+
+**NEW SURFACE uncovered**: JIT-compiled code SIGSEGVs at runtime (exit 139). `try_emit_v2_array_method` fast path at `crates/shape-jit/src/mir_compiler/v2_array.rs:367-387` (`jit_v2_array_sum_i64`) assumes `concrete_types[slot] = Array(elem)` implies raw `*const TypedArrayData<elem>` bits, but `.map()`'s `jit_call_method` dispatch returns a different carrier shape → invalid dereference. **PRODUCER/CONSUMER FAST-PATH MISMATCH defection-attractor class**.
+
+WIP stashed at sub-cluster branch `stash@{0}` for Round 15 if needed.
+
+Round 15 disposition: **Option B** (W12-vm-map-typed-array-producer-migration) — producer-side carrier alignment. `.map()` returns the raw `TypedArrayData<T>` shape the fast path expects. Supervisor refused Option A (consumer-side fallback, defection-attractor) and Option C (both, scope expansion).
+
+### Cluster-1 / cluster-2 follow-ups added by Round 14
+
+1. **W17-typed-object-arc β typed-Arc carrier-shape decision** (cluster-1 follow-up per Option γ split). Pending supervisor β.1 (redesign `TypedObjectStorage` for layout compatibility) / β.2 (per-crate carrier-shape divergence, defection-attractor risk) / β.3 (delete JIT-internal struct + rebuild field-access codegen, ~1500-3000 LoC, loses inline-data performance contract) disposition. Cite: `docs/cluster-audits/w17-jit-typed-object-arc-storage-migration-audit.md` Option γ section.
+
+2. **W12-jit-typed-array-fast-path-consumer-defensive-narrowing** (cluster-1 or cluster-2 candidate). Option A.2 disposition: defense-in-depth at `try_emit_v2_array_method` (verify producer-bit assumption before dereferencing; surface-and-stop on mismatch). Land IF the producer/consumer fast-path mismatch architectural class recurs. NOT cluster-0 territory.
+
+### Recurrent-pattern observation (CLAUDE.md amendment candidate)
+
+The W12-map-chained NEW SURFACE is the SECOND instance of a producer/consumer mismatch defection-attractor in cluster-0 (first instance: `W12-stdlib-intrinsic-collapse` cluster-2 candidate from Round 13 T4 — `[1,2,3].sum()` PHF vs `IntrinsicSum` opcode split-brain). Both have the same shape: a consumer assumes a producer-side carrier/dispatch contract that isn't statically enforced. If a third instance surfaces, this becomes a CLAUDE.md "Forbidden Patterns" amendment candidate alongside the W-series.
+
 ## Cluster-0 close gate
 
 Per phase-3-kickoff-prompt §"Cluster-0 sub-cluster sequencing":
