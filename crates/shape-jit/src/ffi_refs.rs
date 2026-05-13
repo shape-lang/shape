@@ -54,6 +54,21 @@ pub struct FFIFuncRefs {
     pub(crate) print_i64: FuncRef,
     pub(crate) print_f64: FuncRef,
     pub(crate) print_bool: FuncRef,
+    // W12-jit-print-heap-arm-classification (Phase 3 cluster-0 Round 8A,
+    // 2026-05-13): per-HeapKind kinded print entries (ADR-006 §2.7.5
+    // stamp-at-compile-time). Dispatched by the MIR-side Call-terminator
+    // print emitter when the operand's `NativeKind` is a heap arm —
+    // `NativeKind::String` → `print_str`,
+    // `Ptr(HeapKind::TypedObject)` → `print_typed_object`,
+    // `Ptr(HeapKind::Option)` → `print_option`,
+    // `Ptr(HeapKind::Result)` → `print_result`. The kind is the FFI entry
+    // by construction; no kind-code parameter; surface-and-stop on
+    // unknown heap kinds at the dispatch site (§2.7.7 #4 / #7 forbid
+    // tag-decode + Bool-default).
+    pub(crate) print_str: FuncRef,
+    pub(crate) print_typed_object: FuncRef,
+    pub(crate) print_option: FuncRef,
+    pub(crate) print_result: FuncRef,
 
     // Closure construction (Phase H2: typed closure block → Arc<Closure>).
     pub(crate) make_closure: FuncRef,

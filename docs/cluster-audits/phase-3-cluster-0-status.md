@@ -944,6 +944,159 @@ mir_compiler dispatch arms (Call-terminator print vs method-call terminator
 + EnumStore collection_ctor). Both proceed in parallel from
 post-Round-7 baseline `7dc0ce5d`.
 
+### W12-jit-print-heap-arm-classification close (2026-05-13)
+
+Partial migrating-close: Option/Result heap arms wired end-to-end with
+§2.7.17 Arc-shape carriers (the Round 7A pattern); String / TypedObject
+heap arms FFI bodies landed but dispatch surfaces-and-stops at
+carrier-mismatch with structured §-cite per ADR-006 §2.7.5 + Round 6A
+site (a).
+
+**Landed**:
+
+- 4 new FFI bodies in `crates/shape-jit/src/ffi/conversion.rs`:
+  `jit_print_str(ctx_ptr, bits)`, `jit_print_typed_object(ctx_ptr, bits)`,
+  `jit_print_option(ctx_ptr, bits)`, `jit_print_result(ctx_ptr, bits)`.
+  Each takes the JITContext pointer (for `exec_context_ptr →
+  type_schema_registry()` lookup) and the typed-Arc raw pointer per
+  §2.7.5, then routes through the canonical VM-side
+  `shape_vm::executor::printing::ValueFormatter::format_kinded` for
+  VM == JIT identical output. No NaN-box tag decode, no `is_heap_kind`
+  probe (§2.7.7 #4 / #7 forbidden).
+- New `print_kinded_inner(ctx_ptr, bits, kind)` helper that constructs a
+  `KindedSlot` from the raw bits + kind label, calls the VM formatter,
+  and `std::mem::forget`s the carrier (caller's slot keeps its
+  strong-count share). Schema registry fallback to empty when
+  `ctx.exec_context_ptr` is null — matches `format_typed_object`'s
+  documented schema-less-render path (`_0`, `_1`, ... positional names
+  per `printing.rs:754`).
+- Symbol registration in `ffi_symbols/object_symbols.rs` (4 new
+  `builder.symbol(...)` calls + 4 new `declare_function(...)` calls
+  with the `(i64, i64)` signature per the `(ctx_ptr, bits)` ABI).
+- FuncRef slots `print_str` / `print_typed_object` / `print_option` /
+  `print_result` in `ffi_refs.rs::FFIFuncRefs`.
+- `r!("jit_print_*")` lookups in `compiler/ffi_builder.rs::build_ffi_refs`.
+- Call-terminator print dispatch arm in
+  `crates/shape-jit/src/mir_compiler/terminators.rs::compile_terminator`
+  extended with the Option / Result heap arms routing per §2.7.5 stamp-
+  at-compile-time. The String / TypedObject arms surface-and-stop with
+  the carrier-mismatch §-cite (see "Surfaced" below).
+- 7 new FFI round-trip tests in `ffi::conversion::heap_arm_print_tests`
+  (mirrors Round 7A's pattern at `result.rs::tests`): Option/Some +
+  Option/None + Result/Ok + Result/Err + String/Arc + TypedObject/Arc
+  + null-ctx-with-unknown-schema. All 7 green.
+
+**Smoke matrix delta** (VM vs JIT, after Round 8A landing):
+
+| Smoke | VM | Pre-8A JIT | Post-8A JIT | Status |
+|---|---|---|---|---|
+| 1 (scalar loop) | `4950` | `4950` | `4950` | ✅ unchanged |
+| 1.5 (`divide` + match) | `5` | `5` | `5` | ✅ unchanged |
+| 2 strict (`first_positive([..])` for-loop + print) | `Some(3)` | (no output; pre-existing hang per Round 7A) | (no output; same bytecode-verification gap on `first_positive`) | ➖ pre-existing, not 8A territory |
+| 2 no-loop (`first_positive(3)` + print) | `Some(3)` | (no output) | `Some(3)` | ✅ 8A fix — top-level VM path renders the Arc<OptionData> via `ValueFormatter` correctly |
+| 3 (`Point{}.x + .y`) | `7` | `7` | `7` | ✅ unchanged |
+| 4 (`Set()` + `.size()`) | `2` | clean SURFACE (Round 6C) | clean SURFACE (unchanged) | ➖ Round 8B territory |
+| `print(Some(3))` top-level | `Some(3)` | denormal garbage `0.000…509…` | `Some(3)` | ✅ 8A fix |
+| `print(Ok(5))` top-level | `Ok(5)` | denormal garbage | `Ok(5)` | ✅ 8A fix |
+| `print(Some(7) annotated)` top-level | `Some(7)` | denormal garbage | `Some(7)` | ✅ 8A fix |
+| `print("hello")` | `hello` | denormal garbage | clean SURFACE §2.7.5 carrier-mismatch | ➖ ratchet-improvement (segfault → structured surface), cluster-1 territory |
+| `print(Err("x"))` | `Err("x")` | denormal garbage | clean SURFACE §2.7.5 carrier-mismatch | ➖ same |
+| `print(typed_object_instance)` | `{x: 3, y: 4}` | denormal garbage | clean SURFACE §2.7.5 carrier-mismatch | ➖ same |
+| `print(None)` | `false` | `0` | `0` | ➖ pre-existing VM bug (`None` bare-form resolves to bool) + kind-blind fallback path; not 8A territory |
+
+**Close gates (devenv exit-code-verified)**:
+
+- `cargo check --workspace --lib --tests` EXIT=0
+- `cargo test -p shape-jit --lib` EXIT=0 (335 passed / 0 failed / 26
+  ignored — baseline 328 + 7 new FFI round-trip tests)
+- `bash scripts/verify-merge.sh` EXIT=0 (Passed: 12 / Failed: 0)
+- `bash scripts/check-no-dynamic.sh` EXIT=0
+
+**Sites surfaced (cite-tracked, NOT silently fallback'd)**:
+
+- (a) **§2.7.5 carrier-mismatch for `NativeKind::String` and
+  `NativeKind::Ptr(HeapKind::TypedObject)`**. The MIR-side
+  `operand_slot_kind` correctly stamps these labels at the print Call-
+  terminator site (per `MirConstant::Str`'s `Some(NativeKind::String)`
+  return and a struct local's `Ptr(HeapKind::TypedObject)`), but the
+  JIT-side producers for these kind labels store the bits in the legacy
+  NaN-box UnifiedValue carrier shape:
+  - `MirConstant::Str` lowering at `mir_compiler/ownership.rs:383`
+    calls `crate::ffi::value_ffi::box_string(s.clone())` → wraps
+    `Arc<String>` inside `UnifiedValue<Arc<String>>` (the
+    `unified_box(HK_STRING, ...)` shape per `value_ffi.rs:535-538`).
+  - Struct Aggregate lowering goes through
+    `crate::ffi::value_ffi::box_typed_object(ptr)` → `unified_box(HK_
+    TYPED_OBJECT, ptr)` per `value_ffi.rs:516-518`.
+  The §2.7.5 carrier contract for `NativeKind::String` is
+  `Arc::into_raw(Arc<String>) as u64` (raw `*const String`); for
+  `NativeKind::Ptr(HeapKind::TypedObject)` it is `Arc::into_raw(Arc<
+  TypedObjectStorage>) as u64`. The matching kinded print bodies
+  (`jit_print_str` / `jit_print_typed_object`) read these via direct
+  `*const T` field projection. Dispatching the kind-stamped slots
+  through the kinded bodies would dereference NaN-box header bits
+  as if they were the payload pointer → segfault.
+
+  **Same defect class as Round 6A site (a) for Result/Option**, which
+  Round 7A's trinity resolved by migrating the producers
+  (`jit_make_ok` → `jit_v2_make_result_ok` etc.). The String /
+  TypedObject migration is the **cluster-1 candidate
+  `W12-jit-result-carrier-unification` (generalized to all §2.7.5
+  heap carriers)** — already named in Round 6A's surfaced items
+  table. The String / TypedObject FFI bodies are correctly
+  implemented per §2.7.5 and ready for wire-up once the producer
+  migration lands; until then the Call-terminator dispatch
+  surfaces-and-stops with a structured §-cite.
+
+  The FFI bodies + FuncRef slots + symbol registrations are retained
+  (not deleted) to avoid double-work when cluster-1 lands; the
+  dispatch arm flip is the only edit at that point. Tests
+  exercising the §2.7.5 Arc carrier directly (`print_str_arc_
+  carrier_matches_vm`, `print_typed_object_arc_carrier_no_schema_
+  renders_positional`) verify the FFI body is correct against the
+  post-migration carrier.
+
+- (b) **Smoke 2 strict form (`first_positive` for-loop + Array<int>
+  iteration + `print`)** doesn't hang post-8A but produces no output
+  because `first_positive`'s bytecode verification fails on
+  `TypedArrayPushI64` having no `FrameDescriptor`. This is a
+  pre-existing Phase 2d FrameDescriptor stamping gap for V2 typed
+  opcodes, NOT 8A territory. The Round 7A close report's "Smoke 2
+  hang" framing was accurate at that time — the for-loop interaction
+  later evolved into clean compile failure rather than runtime hang.
+  Either way, the print classification piece (8A scope) is fully
+  resolved for non-iter forms; the for-loop interaction is cluster-2
+  / Phase 2d hardening territory.
+
+- (c) **`print(None)` produces `false` on VM and `0` on JIT** — neither
+  matches the canonical `None` string per §2.7.17. Pre-existing VM
+  bug at the bare-form `None` MIR lowering site (likely `MirConstant::
+  None` → `iconst(I64, 0)` then bool-coerced at print). Not 8A
+  territory — surfaced as a cluster-1 candidate for the bare-`None`
+  MIR-emission audit.
+
+- (d) **The kind-blind `jit_print` fallback for unproven operand
+  `NativeKind` is preserved per the pre-8A Round 5C baseline**. The
+  fallback dispatches through `format_value_word` (documented as the
+  deleted W-series shape in `ffi/conversion.rs:200-217`) — retained
+  pending the cluster-1 §2.7.5 producer-side migration that would
+  shrink the `_`-arm to "no proven kind only" (the principled
+  surface-and-stop target). Round 7A's smoke 1.5 close gate depends
+  on this path because EnumPayload-derived locals don't always carry
+  a stamped kind through to the consumer site. Removing the fallback
+  in this round would regress Round 7A — the inverse of the W11
+  round-1 walk-back pattern, refused on sight.
+
+**ADR-006 amendment**: NOT required. The fix is producer-site
+classification at the MIR-emit layer per §2.7.5, kind-aware FFI bodies
+per §2.7.6 / §2.7.17, and surface-and-stop discipline per §2.7.7 #4
+/ #7. The cluster-1 carrier-unification arc is the next step (already
+named in Round 6A's surfaced items); §-cited explicitly in the
+surfaced items table.
+
+Branch: `bulldozer-strictly-typed-w12-jit-print-heap-arm-classification`
+Close commit: (pending — appended at merge)
+
 ## Cluster-0 close gate
 
 Per phase-3-kickoff-prompt §"Cluster-0 sub-cluster sequencing":
