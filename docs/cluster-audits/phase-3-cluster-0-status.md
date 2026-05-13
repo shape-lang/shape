@@ -4141,6 +4141,135 @@ Audit doc: `docs/cluster-audits/w12-map-chained-option-b-audit.md`.
 
 ---
 
-*Next session: read this file first, then continue with Round-2
-close-out (or pivot per supervisor's call between cluster-1 hardening
-and cluster-2 Wave-3 surfaces).*
+## Round 15 — W17-narrow close (PRODUCTION CLOSE, 2026-05-13)
+
+Phase 3 cluster-0 Round 15 sub-cluster W17-narrow (Option γ from the
+W17-typed-object-arc Round 14 audit, supervisor-ratified) closes
+**production-first**. Sub-cluster contract met: classification layer
+migrated from tag-bit dispatch to NativeKind-from-§2.7.7/Q9-parallel-
+track dispatch. **Smoke gate deferred** per supervisor's Round 15
+disposition: production-first sub-clusters may merge with the smoke
+gate unmet when (a) the sub-cluster's own contract is verifiably met,
+(b) smoke-gate failure is due to surfaced upstream gaps tracked as
+new sub-clusters (not follow-up-to-ignore), (c) no forbidden-pattern
+framings harbored. W17-narrow meets all three.
+
+Branch `bulldozer-strictly-typed-w17-narrow`, parent `3d42ba52` (the
+post-Round-15-W12-Option-B-merge HEAD). Close commit `8b048c02`;
+merge commit `84800f80`.
+
+### What landed
+
+Classification-layer fix at the JIT `call_method` shell:
+
+- `crates/shape-jit/src/ffi/call_method/mod.rs:51-81`
+  (`receiver_type_name`) — signature widened from
+  `(receiver_bits: u64, exec_ctx: &ExecutionContext) -> Option<String>`
+  to `(receiver_bits: u64, receiver_kind: NativeKind, exec_ctx) ->
+  Option<String>`. Dispatch on `receiver_kind` directly. For
+  `Ptr(HeapKind::TypedObject)`: read `(*ptr).schema_id`, resolve via
+  two-tier fallback (stdlib `lookup_schema_by_id_public` then
+  `vm.program().type_schema_registry` for user-defined types like
+  Smoke 3's `X`). Full NativeKind variant enumeration — no wildcard
+  arm, no Bool-default fallback (refuse-on-sight discipline).
+- `crates/shape-jit/src/ffi/call_method/mod.rs:111-167`
+  (`try_call_user_method`) — signature widened to take
+  `arg_pairs: &[(u64, NativeKind)]` per §2.7.7/Q9 parallel-kind
+  track lockstep. The audit's literal `&[u64]` would have been a
+  kind-blind ABI shape (pre-§2.7.9 MethodFnV2 defection class);
+  agent caught + corrected in-place. Result-pop clears `stack_kinds`
+  back to SENTINEL.
+- `crates/shape-jit/src/ffi/call_method/mod.rs:572-592` (legacy-
+  fallback builtin JIT-format method dispatch cascade) — all 5
+  tag-bit predicates (`is_ok_tag` / `is_err_tag` / `is_number` /
+  `is_inline_function` / `heap_kind`) replaced with
+  `matches!(receiver_kind, ...)` checks reading from the parallel-
+  kind track.
+- Plus ~13 consumer-call-site updates across
+  `crates/shape-jit/src/ffi/typed_object/{allocation,field_access,merge_ops}.rs`.
+
+Net: 4 source files, +362 / −66 LoC. ~50% over the audit's 150-250
+LoC budget; ratified by supervisor as mechanical (variant enumeration
++ §-cite docstrings; no β scope creep, no forbidden patterns).
+Heuristic update for future audit budgets: classification-layer fixes
+touching dispatch + multiple files need ~1.5x literal estimate.
+
+### Smoke 3 status — 4-sub-cluster dependency
+
+Smoke 3 JIT (`trait T { fn name(&self) -> String } ... let t: dyn T
+= box(X{}); print(t.name())`) end-to-end unblock requires all four:
+
+1. **W17-narrow** ✅ (this close) — classification layer at JIT
+   call_method dispatch shell.
+2. **R11 / R13 conduit work** ✅ — trait return-kind propagation +
+   parametric method return classifier (Round 12 T2/T3, Round 13 T1'
+   cross-crate).
+3. **W17-narrow-follow-up-A** (Round 16) — JIT MIR-lowering
+   `StatementKind::ObjectStore` schema-id identity preservation.
+   Currently allocates via `register_predeclared_any_schema(&field_names)`
+   returning a `__predecl_*`-named schema id; fix threads
+   `Option<u32> schema_id` from `OpCode::NewTypedObject` bytecode
+   operand. SURFACE at `crates/shape-jit/src/mir_compiler/statements.rs::StatementKind::ObjectStore:141-201`,
+   ADR-006 §2.7.5.
+4. **W17-narrow-follow-up-B** (Round 16) — JIT kind-aware print null
+   handling. `format_kinded_inner` treats `bits == 0` as None but
+   `jit_call_method`'s TAG_NULL fallthrough returns
+   `make_tagged(TAG_NONE_BITS, 0)` — a tagged sentinel ≠ 0. SURFACE
+   at `crates/shape-vm/src/executor/printing.rs::format_kinded_inner:154-163`,
+   ADR-006 §2.7.5.
+
+W17-narrow landed its scope correctly; Smoke 3 JIT unblock requires
+A + B (the Round 16 follow-up sub-clusters).
+
+### Audit-prescription correction caught in-place
+
+Supervisor observation: Round 14 audits harbored **two latent
+literal-prescription errors** caught by Round 15 production-first
+work:
+
+1. **TypedArrayData / TypedArray conflation** — caught by W12-Option-B
+   audit (the producer already emits `Arc::into_raw(Arc<TypedArrayData>)`;
+   consumer expects v2-raw `*const TypedArray<T>` flat struct;
+   structurally distinct).
+2. **`&[u64]` kind-blind signature for `try_call_user_method`** —
+   caught by W17-narrow agent + corrected in-place to
+   `&[(u64, NativeKind)]` per §2.7.7/Q9. Pre-W17-narrow the body was
+   unreachable (UFCS lookup always missed) so the missing kind writes
+   were latent; classification fix exposed the gap.
+
+Future audit-first dispatches should include "verify ABI shape per
+§2.7.7/Q9 parallel-kind track lockstep" as an explicit deliverable.
+Audits CAN harbor latent defection-attractor prescriptions even when
+their dispatch text frames them as discipline-compliant.
+
+### Stash-then-rebuild verification
+
+Agent verified Smoke 3 JIT segfault is **not** introduced by the
+classification-layer fix: stashed the W17-narrow changes, rebuilt
+the binary at base `3d42ba52`, reproduced identical segfault.
+`SHAPE_JIT_DEBUG=1` trace confirms `receiver_kind=Ptr(TypedObject)`
+flows through correctly; segfault is downstream at
+`jit_call_method`'s TAG_NULL fallthrough → `jit_print_str` (the
+follow-up-B null-handling gap).
+
+This stash-then-rebuild + structured-surfacing-of-new-sub-clusters
+pattern is the canonical reconciliation of MEMORY.md "Own all code
+quality" + smoke-gate-deferred close. Supervisor ratified.
+
+### Close-gate infrastructure
+
+- `cargo check --workspace --lib --tests` exit 0 (verified through
+  devenv shell wrapper per `reference_phase2d_devenv.md`).
+- `bash scripts/verify-merge.sh` SCRIPT_EXIT=0, 12/12 PASS (run
+  post-merge on bulldozer HEAD `84800f80`).
+- `bash scripts/check-no-dynamic.sh` exit 0.
+- AGENTS.md row appended.
+- NO `Co-Authored-By: Claude` trailer.
+
+---
+
+*Next session: read this file first, then continue with Round 16
+dispatch (three parallel sub-clusters: W12-Option-B-reframed audit-
+first + W17-narrow-follow-up-A production + W17-narrow-follow-up-B
+production). After Round 16 merges, full 4-kickoff-smoke matrix
+re-verification; if Smokes 2 + 3 close JIT, cluster-0 close report.*
