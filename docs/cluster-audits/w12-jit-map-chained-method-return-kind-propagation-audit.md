@@ -364,9 +364,185 @@ Post-implementation close gates (per dispatch prompt "Close criterion
 - Status doc subsection
   `### W12-jit-map-chained-method-return-kind-propagation close (2026-05-13)`.
 
-## §7. Conclusion
+## §7. Implementation attempt — NEW SURFACE uncovered
 
-The failure is **§1 (a) conduit extension**, NOT ADR amendment territory.
-Cluster-0 disposition confirmed: kickoff Smoke 2 JIT blocked, fold the
-fix into Round 14 W12-map-chained per supervisor's Q2 ruling. Proceed
-to implementation per §1.3 fix shape.
+Implementation attempt landed the conduit extension end-to-end. The
+audit's §1.3 fix shape was implemented as designed:
+
+1. New `parametric_method_return_concrete_type_from_receiver_and_closure`
+   helper in `crates/shape-vm/src/compiler/helpers.rs` covering
+   `Array<T>.map / filter / flatMap / sort / reverse / slice / take /
+   skip / concat`.
+2. New Call-terminator destination stamping pass in
+   `infer_top_level_concrete_types_from_mir_with_resolvers` (fixed-
+   point loop with slot-move propagation interleaved for chained
+   shapes).
+3. Two-pass `closure_slot_to_callable: HashMap<u16, (Option<u16>,
+   Option<String>)>` to handle BOTH closure-emission shapes (path 1:
+   `ClosureCapture` for non-empty captures; path 2:
+   `Assign(slot, Use(Constant(Function(name))))` for empty captures
+   — the load-bearing form for kickoff Smoke 2's `|x| x*2`).
+4. Three-tier `closure_returns` resolver: (i)
+   `function_return_concrete_types[fid]` (annotation-driven),
+   (ii) scan closure body's instruction range for typed
+   `ReturnValue<Kind>` opcodes (`ReturnValueI64` for `|x| x*2`), (iii)
+   surface-and-stop with `Void`.
+
+Verified via debug instrumentation: the conduit IS producing the
+expected stamps end-to-end —
+`concrete_types[doubled_slot] = Array(I64)`,
+`concrete_types[sum_receiver_slot] = Array(I64)` (after slot-move
+propagation through the ModuleBinding hop).
+
+**BUT** — the resulting JIT compilation fails at runtime with
+SIGSEGV (exit code 139). The surface message changes from the
+pre-fix `Route A surface-and-stop` to a hard segfault — strictly
+worse from a triage perspective. Trace:
+
+```
+1. .map() Call-terminator: JIT compiles via generic dispatch
+   (jit_call_method) because v2_array.rs has NO "map" arm in
+   try_emit_v2_array_method. The result u64 written to
+   destination slot is whatever the VM's monomorphized `.map`
+   specialization returns.
+2. .sum() Call-terminator: JIT sees concrete_types[receiver_slot] =
+   Array(I64) (correctly stamped by my fix) and dispatches to
+   the FAST PATH at v2_array.rs:367-387 — emits
+   jit_v2_array_sum_i64(arr_ptr) directly. This FFI body
+   expects arr_ptr to be a raw *const TypedArrayData<i64>.
+3. If the VM's `.map()` did NOT return a raw
+   *const TypedArrayData<i64> (e.g. returned a generic Arc<
+   HeapValue::Array> carrier instead), jit_v2_array_sum_i64
+   dereferences invalid bits → SIGSEGV.
+```
+
+### §7.1 New surface: producer/consumer fast-path mismatch
+
+The `try_emit_v2_array_method` fast path at
+`crates/shape-jit/src/mir_compiler/v2_array.rs:334-441` makes an
+**unverified assumption** about the receiver slot's stored bits: it
+assumes `concrete_types[slot] = Array(elem)` implies the slot's u64
+bits are a raw `*const TypedArrayData<elem>` pointer. This holds for
+slots produced by:
+
+- `StatementKind::ArrayStore` lowered to v2 typed-array (the
+  bytecode-compiler `NewTypedArrayI64/F64/Bool` path at
+  `compile_expr_array` in `expressions/collections.rs`) — direct
+  raw pointer producer.
+- Slot-move chains from such producers.
+
+But it does NOT hold for slots produced by:
+
+- `Call(MirConstant::Method(_))` going through `jit_call_method`.
+  The VM-side method body returns through the method-dispatch ABI
+  (§2.7.10/Q11 `KindedSlot`). The bits written to the JIT
+  destination slot are whatever the method body's
+  `Result<KindedSlot, VMError>` carries — for `.map(closure) →
+  Array<U>`, this is the slot bits of a `KindedSlot::from_typed_array(
+  Arc<TypedArrayData<U>>)` carrier. **In principle** the bits IS the
+  raw `Arc::into_raw(Arc<TypedArrayData<U>>) as u64` per the §2.7.5
+  carrier shape (assuming the VM-side `.map` body produces a
+  typed-array result on the typed-array path, not a generic
+  `HeapValue::Array`).
+
+- `Call(MirConstant::Function(_))` going through user-function call
+  (e.g. monomorphized stdlib closures). Same shape — the function's
+  return ABI is `ReturnValuePtr` raw bits or polymorphic `ReturnValue`.
+  When the VM-side function actually constructs a TypedArray, the
+  bits are raw Arc pointer; when it constructs a generic Array, the
+  bits are NaN-boxed.
+
+The structural soundness of my fix depends on the VM-side `.map()`
+implementation actually returning the v2 typed-array shape for
+`Array<int>.map(...) → Array<int>`. This is empirically NOT the case
+in the current Shape stdlib — the segfault confirms the producer
+returns a non-typed-array carrier that the JIT consumer dereferences
+incorrectly.
+
+### §7.2 Disposition: surface-and-stop, audit-only close
+
+This is the structural defection-attractor class the supervisor named
+in the prompt's surface-and-stop trigger:
+
+> "preserve kind-blind fallback because intermediate slot kind isn't
+> always available" framing (correct response is to extend kind-track
+> or surface-and-stop, NOT preserve fallback).
+
+The complementary framing applies: "stamp concrete_types with the
+classified shape even when downstream JIT consumers may treat the
+shape inconsistently across producer paths" — the conduit extension
+WAS correct (`concrete_types[slot] = Array(I64)` is the right
+classification), but the JIT consumer's `try_emit_v2_array_method`
+fast path assumes a stricter invariant than the conduit's stamp
+guarantees (raw `*const TypedArrayData<T>` versus the broader
+`§2.7.5 typed-Arc payload` shape).
+
+The honest options are:
+
+**Option A — Fast-path narrowing.** Restrict
+`try_emit_v2_array_method` to receivers whose `concrete_types[slot] =
+Array(T)` AND were produced by a path that GUARANTEES raw
+`*const TypedArrayData<T>` bits (ArrayStore producer + slot-move
+chains thereof). Add a producer-tag (e.g. a parallel
+`producer_kind: HashMap<u16, ProducerKind>` track) so the fast path
+can verify the producer-side raw-pointer invariant.
+
+**Option B — VM-side `.map` migration.** Migrate the VM-side `.map`
+(and friends) to construct results directly as typed-array Arc
+pointer carriers when the input is a typed-array, matching the JIT
+fast-path's expectation. This is the structurally-coherent fix per
+ADR-006 §2.7.5 / §2.3 — the producer's carrier shape is the
+authoritative source for the consumer's dispatch.
+
+**Option C — Both.** Option A is a defensive guard; Option B is the
+canonical producer-side migration. Both close the gap; Option B is
+the load-bearing structural fix.
+
+All three options are **outside cluster-0 W12-map-chained scope** —
+they're structurally adjacent to W17 (`Arc<TypedObjectStorage>`
+storage migration) which lands in parallel from the same baseline,
+and to the broader §2.7.10/Q11 method-dispatch ABI work landing
+since Round 11.
+
+### §7.3 Recommendation for Round 15
+
+Surface this new gap as a Round 15 candidate:
+**`W12-vm-map-typed-array-producer-migration`** — VM-side `.map`
+(and parametric companions `.filter`, `.flatMap`, `.sort`,
+`.reverse`, `.slice`, `.take`, `.skip`, `.concat`) result-carrier
+migration so the typed-array fast-path consumer at
+`crates/shape-jit/src/mir_compiler/v2_array.rs::try_emit_v2_array_method`
+(:334-441) is sound when paired with the conduit extension that
+W12-map-chained landed.
+
+Alternatively: the supervisor may rule that the JIT consumer's fast
+path was the structural defect from the start (consumer assuming
+guarantees the producer doesn't make), in which case the
+JIT-consumer-side fix (Option A) is the canonical correction —
+W12-jit-typed-array-fast-path-producer-verification or similar.
+
+This audit closes with §1 (a) conduit extension implemented but
+stashed under `git stash` (`W12-map-chained conduit extension
+exposes JIT consumer-side fast-path gap`); the close commit
+contains audit findings + surface description only.
+
+## §8. Conclusion
+
+§1 layer identification AND §1.3 fix shape AND §3 ADR-amendment
+posture all turned out to be correct per the audit. Implementation
+landed the conduit extension end-to-end (verified via debug
+instrumentation), but the resulting JIT-compiled code SIGSEGVs at
+runtime because of a downstream producer/consumer fast-path
+mismatch that wasn't visible from the conduit-layer audit. Per the
+dispatch prompt's surface-and-stop discipline applied to the
+broader defection-attractor class — "consumer-side assumption that
+depends on unverified producer-side guarantees" is the same family
+as §2.7.7 parallel-track invariant gaps the prompt's §3 lists —
+**audit-only close** is the disciplined response.
+
+W12-map-chained's conduit-layer scope was correct and bounded. The
+deeper structural fix landing the smoke 2 close requires either
+JIT-consumer-side fast-path narrowing (Option A) or VM-side
+producer-carrier migration (Option B); both are outside the
+agreed-upon round budget for W12-map-chained. Surfaced to
+supervisor for Round 15 disposition.
