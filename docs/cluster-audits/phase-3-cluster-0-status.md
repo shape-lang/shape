@@ -1577,6 +1577,109 @@ Supplementary -ext smokes (non-gating, dispatcher-introduced from R5+):
 | 2-no-loop-ext | `first_positive(3)` → Some(3) | ✅ | ✅ | passing |
 | 3-ext | TypedObject `p.x + p.y` → 7 | ✅ | ✅ | passing |
 
+## Round 10 — dispatching (8B.2 standalone per supervisor sequential split)
+
+Dispatched 2026-05-13 from the post-Round-9-merge + kickoff-verification
+baseline `2cb68ece`. Supervisor confirmed Round 10 (8B.2) proceeds as
+previously authorized — kickoff Smoke 2 + 3 gaps fold into Round 11
+(not Round 10).
+
+| Sub-cluster | Branch | Worktree | Status |
+|---|---|---|---|
+| W12-jit-call-method-shell-rebuild (10 / 8B.2) | `bulldozer-strictly-typed-w12-jit-call-method-shell-rebuild` | `../shape-w12-jit-call-method-shell-rebuild` | dispatching |
+
+### Scope (Round 10 / 8B.2)
+
+Per Round 8B audit `docs/cluster-audits/w12-jit-collection-method-dispatch-abi-audit.md`
+§2.1 delegation insight + §10.2 sub-cluster split (8B.2 row).
+
+**Delegation pattern**: §2.7.10/Q11 dispatch is already kinded VM-side
+(~73 MethodFnV2 entries in `crates/shape-vm/src/executor/objects/method_registry.rs`);
+JIT-side does NOT mirror those handlers — it delegates to VM's existing
+kinded dispatch via a new public `VirtualMachine::jit_trampoline_call_method`
+API mirroring `jit_trampoline_call_closure` at
+`crates/shape-vm/src/executor/call_convention.rs:953` (the §2.7.5
+cross-crate stable FFI consumer with single-direction pair-slice→KindedSlot
+pattern per module-level docstring lines 53-66).
+
+**Three landed pieces**:
+
+1. **New cross-crate `VirtualMachine::jit_trampoline_call_method`** in
+   shape-vm crate. Signature mirrors `jit_trampoline_call_closure`:
+   `fn jit_trampoline_call_method(&mut self, method_name: &str,
+   receiver: (u64, NativeKind), args: &[(u64, NativeKind)], ctx:
+   Option<&mut ExecutionContext>) -> Result<u64, VMError>`. Body
+   converts pair-slices to `&[KindedSlot]` internally then calls into
+   the existing kinded method-dispatch entry-point.
+2. **`jit_call_method` shell rebuild** in
+   `crates/shape-jit/src/ffi/call_method/mod.rs:201-388`. Receiver+args
+   kind comes from `stack_kinds` parallel-kind track per §2.7.7 (NOT
+   NaN-box tag decode at `value_ffi.rs:330-336`). Deletes
+   `dispatch_method_via_trampoline` extern-C `todo!()` fallback at
+   `call_method/mod.rs:179-199`.
+3. **EnumStore consumer collection_ctor arm** in
+   `crates/shape-jit/src/mir_compiler/statements.rs:239-268`. Dispatches
+   to Round 9's pre-resolved typed-Arc ctor FuncRefs
+   (`jit_v2_make_hashset` / `_hashmap` / `_deque` / `_priorityqueue` /
+   `_channel` / `_atomic` / `_lazy` / `_mutex`).
+
+~730 LoC across ~4 files. Cross-crate shape-vm public-API addition is the
+key risk surface; audit §10.4 anticipates a potential closure-trigger
+extension per §2.7.10 if `jit_trampoline_call_method` can't pass
+`&[KindedSlot]` cleanly across the Cranelift FFI boundary — surface-and-stop
+if encountered (ADR amendment territory).
+
+### Close criterion
+
+- Smoke 4 (`Set()` + .add() + .size() + print → `2`) VM == JIT.
+- HashMap smoke (`HashMap()` + .set() + .size() + print → `1`) VM == JIT.
+- Mutex smoke (`Mutex(42)` + .lock() + print → `42`) VM == JIT.
+- `cargo check --workspace --lib --tests` EXIT=0 inside devenv.
+- `cargo test -p shape-jit --lib` no regressions from baseline 361.
+- `bash scripts/verify-merge.sh` 12/12.
+- `bash scripts/check-no-dynamic.sh` EXIT=0.
+
+### Forbidden frames (refused on sight)
+
+Per CLAUDE.md "Renames to refuse on sight" §2.7.10/Q11 + §2.7.11/Q12
+broader-family regex: "MethodFnV2 bridge" / "MethodFn translator" /
+"dispatch-slice probe" / "boundary adapter for handler ABI" /
+"kind-injection helper" / "method-dispatch translator" / "value-call
+bridge" / "callee-kind helper" / "capture-injection adapter".
+Describe deleted code by deletion-fate (the deleted kind-blind
+`args: &mut [u64]` MethodFnV2 ABI, the deleted NaN-box receiver tag
+decode), never by hypothetical role.
+
+### Round 11 readiness gate
+
+Round 10 closes → merge → dispatch Round 11 with **three parallel
+sub-clusters** per supervisor's ratified Round-11 scope (post-kickoff-
+verification):
+
+- **11A — W12-vm-new-array-untyped-construction** (AUDIT FIRST): VM-side
+  `op_new_array` Phase 2c reentry fix. Cite-verify §-claim (likely
+  §2.7.14 / §2.7.24, NOT §2.7.4 task-scheduler boundary). Identify
+  deleted-carrier shape (likely `TypedArrayData::HeapValue` per §2.7.24
+  Q25.A). Migrate emit path to monomorphic per-element-kind dispatch.
+  Surface-and-stop on ADR amendment requirement. Unblocks kickoff
+  Smoke 2 VM side.
+- **11B — W12-jit-method-return-kind-conduit**: §2.7.5 producer-side
+  conduit extension for method-return kinds (`.sum()`-style). Same
+  defect class as Round 8A reopen's `infer_enum_payload_kind`
+  extension, generalized to method-call sites. Audit-first on whether
+  generic-over-receiver/method or per-method registration. Unblocks
+  kickoff Smoke 2 JIT side.
+- **11C — W12-jit-aggregate-typed-object-threading**: Resurrects deferred
+  Round 5B option (iii). `Rvalue::Aggregate` arm for non-Array
+  destinations (Struct/Tuple/TypedObject) reaches kind-blind fallback.
+  Round 5B landed option (ii) ConcreteType threading; option (iii) is
+  the consumer-side TypedObject Aggregate fast path. Unblocks kickoff
+  Smoke 3 JIT side.
+
+Cluster-0 close attempt after Round 11 merges if all 4 kickoff smokes
+pass VM == JIT. If any 11A/B/C surfaces a fourth gap, Round 12 absorbs
+per N+1 trajectory discipline.
+
 ## Cluster-0 close gate
 
 Per phase-3-kickoff-prompt §"Cluster-0 sub-cluster sequencing":
