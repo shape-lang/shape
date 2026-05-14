@@ -249,7 +249,19 @@ pub fn v2_values(
         HashMapValueBuf::Decimal(b) => TypedArrayData::Decimal(Arc::clone(b)),
         HashMapValueBuf::BigInt(b) => TypedArrayData::BigInt(Arc::clone(b)),
         HashMapValueBuf::Char(b) => TypedArrayData::Char(Arc::clone(b)),
-        HashMapValueBuf::TypedObject(b) => TypedArrayData::TypedObject(Arc::clone(b)),
+        // Wave 2 Round 4 D4 ckpt-3 (2026-05-14): HashMapValueBuf::TypedObject
+        // inner shifted to `*const TypedObjectStorage` (raw-ptr v2-raw shape).
+        // TypedArrayData::TypedObject still holds `Arc<TypedBuffer<Arc<
+        // TypedObjectStorage>>>` until ckpt-final atomic flip — the two
+        // variant signatures must flip in lockstep because the inner Vec
+        // element type differs. Marked as SURFACE pending ckpt-final.
+        HashMapValueBuf::TypedObject(_b) => {
+            return Err(VMError::NotImplemented(format!(
+                "SURFACE: HashMap.values() TypedObject arm pending ckpt-final \
+                 TypedArrayData::TypedObject variant signature flip — Phase 3 \
+                 cluster-0+1 Wave 2 Round 4 D4"
+            )));
+        }
     };
     Ok(KindedSlot::from_typed_array(Arc::new(arr)))
 }
