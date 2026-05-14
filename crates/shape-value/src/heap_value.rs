@@ -537,13 +537,13 @@ pub enum HashMapValueBuf {
     // `Arc::clone` / `Arc::drop` paths.
     Decimal(Arc<crate::typed_buffer::TypedBuffer<Arc<rust_decimal::Decimal>>>),
     BigInt(Arc<crate::typed_buffer::TypedBuffer<Arc<i64>>>),
-    DateTime(Arc<crate::typed_buffer::TypedBuffer<Arc<TemporalData>>>),
-    Timespan(Arc<crate::typed_buffer::TypedBuffer<Arc<TemporalData>>>),
-    Duration(Arc<crate::typed_buffer::TypedBuffer<Arc<TemporalData>>>),
-    Instant(Arc<crate::typed_buffer::TypedBuffer<Arc<std::time::Instant>>>),
+    // ── ADR-006 §2.7.24 Q25.B mirror dead-arm wholesale deletion ──────────
+    // Wave 2 Round 1 Agent F (2026-05-14): DateTime / Timespan / Duration /
+    // Instant / TraitObject deleted. Mirror of TypedArrayData dead-arm
+    // deletion (Wave 1 §C.5 mirror finding). Zero root constructors;
+    // specialize_values has no arms for these HeapValue variants.
     Char(Arc<crate::typed_buffer::TypedBuffer<char>>),
     TypedObject(Arc<crate::typed_buffer::TypedBuffer<Arc<TypedObjectStorage>>>),
-    TraitObject(Arc<crate::typed_buffer::TypedBuffer<Arc<TraitObjectStorage>>>),
     // The polymorphic `HeapValue(Arc<TypedBuffer<Arc<HeapValue>>>)` catch-all
     // was DELETED in checkpoint 4 of W17-typed-carrier-bundle-A per ADR-006
     // §2.7.24 Q25.B. Same discipline as Q25.A for TypedArrayData — no
@@ -562,13 +562,8 @@ impl HashMapValueBuf {
             HashMapValueBuf::String(b) => b.data.len(),
             HashMapValueBuf::Decimal(b) => b.data.len(),
             HashMapValueBuf::BigInt(b) => b.data.len(),
-            HashMapValueBuf::DateTime(b) => b.data.len(),
-            HashMapValueBuf::Timespan(b) => b.data.len(),
-            HashMapValueBuf::Duration(b) => b.data.len(),
-            HashMapValueBuf::Instant(b) => b.data.len(),
             HashMapValueBuf::Char(b) => b.data.len(),
             HashMapValueBuf::TypedObject(b) => b.data.len(),
-            HashMapValueBuf::TraitObject(b) => b.data.len(),
         }
     }
 
@@ -624,27 +619,9 @@ impl HashMapValueBuf {
             HashMapValueBuf::String(b) => Arc::new(HeapValue::String(Arc::clone(&b.data[i]))),
             HashMapValueBuf::Decimal(b) => Arc::new(HeapValue::Decimal(Arc::clone(&b.data[i]))),
             HashMapValueBuf::BigInt(b) => Arc::new(HeapValue::BigInt(Arc::clone(&b.data[i]))),
-            HashMapValueBuf::DateTime(b)
-            | HashMapValueBuf::Timespan(b)
-            | HashMapValueBuf::Duration(b) => {
-                Arc::new(HeapValue::Temporal(Arc::clone(&b.data[i])))
-            }
-            HashMapValueBuf::Instant(b) => Arc::new(HeapValue::Instant(Arc::clone(&b.data[i]))),
             HashMapValueBuf::Char(b) => Arc::new(HeapValue::Char(b.data[i])),
             HashMapValueBuf::TypedObject(b) => {
                 Arc::new(HeapValue::TypedObject(Arc::clone(&b.data[i])))
-            }
-            HashMapValueBuf::TraitObject(_) => {
-                // No construction site for the TraitObject arm on this
-                // branch. Reaching this point indicates the
-                // W17-trait-object-storage carrier landed independently;
-                // surface-and-stop until the boxing thunk and HeapValue
-                // arm are in place (§2.7.24 Q25.C).
-                unreachable!(
-                    "HashMapValueBuf::TraitObject reader called before \
-                     W17-trait-object-storage / W17-trait-object-emission landed; \
-                     ADR-006 §2.7.24 Q25.C"
-                )
             }
         }
     }
@@ -659,13 +636,8 @@ impl Clone for HashMapValueBuf {
             HashMapValueBuf::String(b) => HashMapValueBuf::String(Arc::clone(b)),
             HashMapValueBuf::Decimal(b) => HashMapValueBuf::Decimal(Arc::clone(b)),
             HashMapValueBuf::BigInt(b) => HashMapValueBuf::BigInt(Arc::clone(b)),
-            HashMapValueBuf::DateTime(b) => HashMapValueBuf::DateTime(Arc::clone(b)),
-            HashMapValueBuf::Timespan(b) => HashMapValueBuf::Timespan(Arc::clone(b)),
-            HashMapValueBuf::Duration(b) => HashMapValueBuf::Duration(Arc::clone(b)),
-            HashMapValueBuf::Instant(b) => HashMapValueBuf::Instant(Arc::clone(b)),
             HashMapValueBuf::Char(b) => HashMapValueBuf::Char(Arc::clone(b)),
             HashMapValueBuf::TypedObject(b) => HashMapValueBuf::TypedObject(Arc::clone(b)),
-            HashMapValueBuf::TraitObject(b) => HashMapValueBuf::TraitObject(Arc::clone(b)),
         }
     }
 }
@@ -1099,21 +1071,10 @@ impl HashMapData {
             HashMapValueBuf::BigInt(b) => {
                 Arc::make_mut(b).data.remove(i);
             }
-            HashMapValueBuf::DateTime(b)
-            | HashMapValueBuf::Timespan(b)
-            | HashMapValueBuf::Duration(b) => {
-                Arc::make_mut(b).data.remove(i);
-            }
-            HashMapValueBuf::Instant(b) => {
-                Arc::make_mut(b).data.remove(i);
-            }
             HashMapValueBuf::Char(b) => {
                 Arc::make_mut(b).data.remove(i);
             }
             HashMapValueBuf::TypedObject(b) => {
-                Arc::make_mut(b).data.remove(i);
-            }
-            HashMapValueBuf::TraitObject(b) => {
                 Arc::make_mut(b).data.remove(i);
             }
         }
@@ -2966,18 +2927,20 @@ pub enum TypedArrayData {
     // kind track.
     Decimal(Arc<crate::typed_buffer::TypedBuffer<Arc<rust_decimal::Decimal>>>),
     BigInt(Arc<crate::typed_buffer::TypedBuffer<Arc<i64>>>),
-    DateTime(Arc<crate::typed_buffer::TypedBuffer<Arc<TemporalData>>>),
-    Timespan(Arc<crate::typed_buffer::TypedBuffer<Arc<TemporalData>>>),
-    Duration(Arc<crate::typed_buffer::TypedBuffer<Arc<TemporalData>>>),
-    Instant(Arc<crate::typed_buffer::TypedBuffer<Arc<std::time::Instant>>>),
+    // ── ADR-006 §2.7.24 Q25.A SUPERSEDED dead-arm wholesale deletion ──────
+    // Wave 2 Round 1 Agent F (2026-05-14): the DateTime / Timespan / Duration
+    // / Instant / TraitObject specialized arms are DELETED. Wave 1 §F +
+    // R20 S2-prime §4.1.A.2 dead-arm finding ground-truthed zero root
+    // constructors at HEAD aa047356. The producer hits in array_transform.rs
+    // / concat.rs were derived (slice/zip/reverse/concat) cascading off
+    // upstream build_specialized_from_heap_arcs, which itself has no arms
+    // for these HeapValue variants — the `other =>` errors. Per Q25.A
+    // SUPERSEDED forbidden #1, no resurrection under any rename. If
+    // Array<DateTime/Timespan/Instant> becomes user-facing reachable in a
+    // future cluster, a v2-raw `TypedArray<*const <X>Obj>` carrier lands
+    // then per §2.2 / §A.3 audit row.
     Char(Arc<crate::typed_buffer::TypedBuffer<char>>),
     TypedObject(Arc<crate::typed_buffer::TypedBuffer<Arc<TypedObjectStorage>>>),
-    /// Trait-object element array. Carrier shape mirrors §Q25.C's
-    /// `Arc<TraitObjectStorage>`. **No construction site on this branch** —
-    /// `HeapKind::TraitObject = 29` and `TraitObjectStorage`'s real
-    /// fat-pointer shape come from W17-trait-object-storage (parallel
-    /// dispatch). The variant exists here for type-shape completeness.
-    TraitObject(Arc<crate::typed_buffer::TypedBuffer<Arc<TraitObjectStorage>>>),
     // The polymorphic `HeapValue(Arc<TypedBuffer<Arc<HeapValue>>>)` catch-all
     // was DELETED in checkpoint 4 of W17-typed-carrier-bundle-A per ADR-006
     // §2.7.24 Q25.A. Every construction site migrated to a specialized
@@ -3110,13 +3073,8 @@ impl TypedArrayData {
             TypedArrayData::String(_) => "Vec<string>",
             TypedArrayData::Decimal(_) => "Vec<decimal>",
             TypedArrayData::BigInt(_) => "Vec<int>",
-            TypedArrayData::DateTime(_) => "Vec<datetime>",
-            TypedArrayData::Timespan(_) => "Vec<timespan>",
-            TypedArrayData::Duration(_) => "Vec<duration>",
-            TypedArrayData::Instant(_) => "Vec<instant>",
             TypedArrayData::Char(_) => "Vec<char>",
             TypedArrayData::TypedObject(_) => "Vec<object>",
-            TypedArrayData::TraitObject(_) => "Vec<dyn>",
         }
     }
 
@@ -3137,13 +3095,8 @@ impl TypedArrayData {
             TypedArrayData::String(a) => !a.is_empty(),
             TypedArrayData::Decimal(a) => !a.is_empty(),
             TypedArrayData::BigInt(a) => !a.is_empty(),
-            TypedArrayData::DateTime(a) => !a.is_empty(),
-            TypedArrayData::Timespan(a) => !a.is_empty(),
-            TypedArrayData::Duration(a) => !a.is_empty(),
-            TypedArrayData::Instant(a) => !a.is_empty(),
             TypedArrayData::Char(a) => !a.is_empty(),
             TypedArrayData::TypedObject(a) => !a.is_empty(),
-            TypedArrayData::TraitObject(a) => !a.is_empty(),
         }
     }
 
@@ -3322,13 +3275,8 @@ impl TypedArrayData {
             // wiring; commit 4 deletes the HeapValue arm).
             TypedArrayData::Decimal(_)
             | TypedArrayData::BigInt(_)
-            | TypedArrayData::DateTime(_)
-            | TypedArrayData::Timespan(_)
-            | TypedArrayData::Duration(_)
-            | TypedArrayData::Instant(_)
             | TypedArrayData::Char(_)
-            | TypedArrayData::TypedObject(_)
-            | TypedArrayData::TraitObject(_) => return None,
+            | TypedArrayData::TypedObject(_) => return None,
         };
         Some(prior)
     }
@@ -3484,34 +3432,6 @@ impl fmt::Display for TypedArrayData {
                 }
                 write!(f, "]")
             }
-            TypedArrayData::DateTime(a)
-            | TypedArrayData::Timespan(a)
-            | TypedArrayData::Duration(a) => {
-                let label = match self {
-                    TypedArrayData::DateTime(_) => "Vec<datetime>",
-                    TypedArrayData::Timespan(_) => "Vec<timespan>",
-                    TypedArrayData::Duration(_) => "Vec<duration>",
-                    _ => unreachable!(),
-                };
-                write!(f, "{}[", label)?;
-                for (i, v) in a.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", v)?;
-                }
-                write!(f, "]")
-            }
-            TypedArrayData::Instant(a) => {
-                write!(f, "Vec<instant>[")?;
-                for (i, _v) in a.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "<instant>")?;
-                }
-                write!(f, "]")
-            }
             TypedArrayData::Char(a) => {
                 write!(f, "Vec<char>[")?;
                 for (i, v) in a.iter().enumerate() {
@@ -3531,11 +3451,6 @@ impl fmt::Display for TypedArrayData {
                     write!(f, "{{...}}")?;
                 }
                 write!(f, "]")
-            }
-            TypedArrayData::TraitObject(a) => {
-                // No construction site on this branch; this arm is
-                // unreachable until W17-trait-object-storage lands.
-                write!(f, "Vec<dyn>[<{} elements>]", a.data.len())
             }
         }
     }

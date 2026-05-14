@@ -264,38 +264,6 @@ fn concat_typed_arrays(
                 shape_value::typed_buffer::TypedBuffer::from_vec(data),
             ))))
         }
-        (TypedArrayData::DateTime(la), TypedArrayData::DateTime(lb)) => {
-            let mut data = Vec::with_capacity(la.data.len() + lb.data.len());
-            for d in la.data.iter() { data.push(Arc::clone(d)); }
-            for d in lb.data.iter() { data.push(Arc::clone(d)); }
-            Ok(Arc::new(TypedArrayData::DateTime(Arc::new(
-                shape_value::typed_buffer::TypedBuffer::from_vec(data),
-            ))))
-        }
-        (TypedArrayData::Timespan(la), TypedArrayData::Timespan(lb)) => {
-            let mut data = Vec::with_capacity(la.data.len() + lb.data.len());
-            for d in la.data.iter() { data.push(Arc::clone(d)); }
-            for d in lb.data.iter() { data.push(Arc::clone(d)); }
-            Ok(Arc::new(TypedArrayData::Timespan(Arc::new(
-                shape_value::typed_buffer::TypedBuffer::from_vec(data),
-            ))))
-        }
-        (TypedArrayData::Duration(la), TypedArrayData::Duration(lb)) => {
-            let mut data = Vec::with_capacity(la.data.len() + lb.data.len());
-            for d in la.data.iter() { data.push(Arc::clone(d)); }
-            for d in lb.data.iter() { data.push(Arc::clone(d)); }
-            Ok(Arc::new(TypedArrayData::Duration(Arc::new(
-                shape_value::typed_buffer::TypedBuffer::from_vec(data),
-            ))))
-        }
-        (TypedArrayData::Instant(la), TypedArrayData::Instant(lb)) => {
-            let mut data = Vec::with_capacity(la.data.len() + lb.data.len());
-            for d in la.data.iter() { data.push(Arc::clone(d)); }
-            for d in lb.data.iter() { data.push(Arc::clone(d)); }
-            Ok(Arc::new(TypedArrayData::Instant(Arc::new(
-                shape_value::typed_buffer::TypedBuffer::from_vec(data),
-            ))))
-        }
         (TypedArrayData::Char(la), TypedArrayData::Char(lb)) => {
             let mut data = Vec::with_capacity(la.data.len() + lb.data.len());
             data.extend_from_slice(&la.data);
@@ -309,14 +277,6 @@ fn concat_typed_arrays(
             for d in la.data.iter() { data.push(Arc::clone(d)); }
             for d in lb.data.iter() { data.push(Arc::clone(d)); }
             Ok(Arc::new(TypedArrayData::TypedObject(Arc::new(
-                shape_value::typed_buffer::TypedBuffer::from_vec(data),
-            ))))
-        }
-        (TypedArrayData::TraitObject(la), TypedArrayData::TraitObject(lb)) => {
-            let mut data = Vec::with_capacity(la.data.len() + lb.data.len());
-            for d in la.data.iter() { data.push(Arc::clone(d)); }
-            for d in lb.data.iter() { data.push(Arc::clone(d)); }
-            Ok(Arc::new(TypedArrayData::TraitObject(Arc::new(
                 shape_value::typed_buffer::TypedBuffer::from_vec(data),
             ))))
         }

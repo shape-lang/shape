@@ -320,18 +320,6 @@ impl VirtualMachine {
                 let bits = std::sync::Arc::into_raw(arc) as u64;
                 self.push_kinded(bits, NativeKind::Ptr(HeapKind::BigInt))
             }
-            TypedArrayData::DateTime(buf)
-            | TypedArrayData::Timespan(buf)
-            | TypedArrayData::Duration(buf) => {
-                let arc = std::sync::Arc::clone(&buf.data[index]);
-                let bits = std::sync::Arc::into_raw(arc) as u64;
-                self.push_kinded(bits, NativeKind::Ptr(HeapKind::Temporal))
-            }
-            TypedArrayData::Instant(buf) => {
-                let arc = std::sync::Arc::clone(&buf.data[index]);
-                let bits = std::sync::Arc::into_raw(arc) as u64;
-                self.push_kinded(bits, NativeKind::Ptr(HeapKind::Instant))
-            }
             TypedArrayData::Char(buf) => {
                 self.push_kinded(buf.data[index] as u32 as u64, NativeKind::Ptr(HeapKind::Char))
             }
@@ -339,11 +327,6 @@ impl VirtualMachine {
                 let arc = std::sync::Arc::clone(&buf.data[index]);
                 let bits = std::sync::Arc::into_raw(arc) as u64;
                 self.push_kinded(bits, NativeKind::Ptr(HeapKind::TypedObject))
-            }
-            TypedArrayData::TraitObject(buf) => {
-                let arc = std::sync::Arc::clone(&buf.data[index]);
-                let bits = std::sync::Arc::into_raw(arc) as u64;
-                self.push_kinded(bits, NativeKind::Ptr(HeapKind::TraitObject))
             }
         }
     }
@@ -834,13 +817,8 @@ fn typed_array_len(arr: &TypedArrayData) -> usize {
         // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
         TypedArrayData::Decimal(b) => b.data.len(),
         TypedArrayData::BigInt(b) => b.data.len(),
-        TypedArrayData::DateTime(b) => b.data.len(),
-        TypedArrayData::Timespan(b) => b.data.len(),
-        TypedArrayData::Duration(b) => b.data.len(),
-        TypedArrayData::Instant(b) => b.data.len(),
         TypedArrayData::Char(b) => b.data.len(),
         TypedArrayData::TypedObject(b) => b.data.len(),
-        TypedArrayData::TraitObject(b) => b.data.len(),
     }
 }
 

@@ -291,13 +291,8 @@ pub fn v2_len(
         // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
         TypedArrayData::Decimal(b) => b.data.len(),
         TypedArrayData::BigInt(b) => b.data.len(),
-        TypedArrayData::DateTime(b) => b.data.len(),
-        TypedArrayData::Timespan(b) => b.data.len(),
-        TypedArrayData::Duration(b) => b.data.len(),
-        TypedArrayData::Instant(b) => b.data.len(),
         TypedArrayData::Char(b) => b.data.len(),
         TypedArrayData::TypedObject(b) => b.data.len(),
-        TypedArrayData::TraitObject(b) => b.data.len(),
     };
     Ok(KindedSlot::from_int(len as i64))
 }

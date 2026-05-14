@@ -364,9 +364,13 @@ fn nested_wrap_target_path_is_walked_correctly() {
 
 #[test]
 fn typed_array_self_elements_are_rewrapped_into_trait_object_buffer() {
-    // `Array<Self>` return — wrap_targets path=[0]. The element
-    // buffer's `TypedArrayData::TypedObject` arm gets rewrapped to
-    // `TypedArrayData::TraitObject` with the receiver's vtable.
+    // `Array<Self>` return — wrap_targets path=[0]. Wave 2 Round 1
+    // Agent F deletion: `TypedArrayData::TraitObject` arm is gone
+    // (dead-arm wholesale deletion per Wave 1 §F + R20 S2-prime
+    // §4.1.A.2 — zero root constructors). The dispatch path now
+    // surface-and-stops with §2.7.24 / SURFACE — the test's
+    // structured-error acceptance branch handles the new disposition
+    // until a user-facing Array<dyn T> carrier lands per audit §A.3.
     let result = eval_result(
         r#"
         trait Listable {

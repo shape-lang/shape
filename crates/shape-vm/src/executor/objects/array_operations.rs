@@ -576,13 +576,8 @@ fn element_kind_of(arc: &Arc<TypedArrayData>) -> NativeKind {
         // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
         TypedArrayData::Decimal(_) => NativeKind::Ptr(HeapKind::Decimal),
         TypedArrayData::BigInt(_) => NativeKind::Ptr(HeapKind::BigInt),
-        TypedArrayData::DateTime(_)
-        | TypedArrayData::Timespan(_)
-        | TypedArrayData::Duration(_) => NativeKind::Ptr(HeapKind::Temporal),
-        TypedArrayData::Instant(_) => NativeKind::Ptr(HeapKind::Instant),
         TypedArrayData::Char(_) => NativeKind::Ptr(HeapKind::Char),
         TypedArrayData::TypedObject(_) => NativeKind::Ptr(HeapKind::TypedObject),
-        TypedArrayData::TraitObject(_) => NativeKind::Ptr(HeapKind::TraitObject),
     }
 }
 

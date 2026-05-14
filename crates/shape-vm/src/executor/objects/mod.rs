@@ -635,13 +635,8 @@ impl VirtualMachine {
                             // ARRAY_METHODS lookup.
                             TypedArrayData::Decimal(_)
                             | TypedArrayData::BigInt(_)
-                            | TypedArrayData::DateTime(_)
-                            | TypedArrayData::Timespan(_)
-                            | TypedArrayData::Duration(_)
-                            | TypedArrayData::Instant(_)
                             | TypedArrayData::Char(_)
-                            | TypedArrayData::TypedObject(_)
-                            | TypedArrayData::TraitObject(_) => None,
+                            | TypedArrayData::TypedObject(_) => None,
                         },
                         _ => None,
                     };

@@ -1038,11 +1038,10 @@ fn rewrap_typed_object_fields(
 /// Re-wrap inside a `HashMap` whose value arm names `Self`. Descend
 /// into each entry's value buffer position.
 ///
-/// Same shape-issue as `rewrap_typed_object_fields`: the in-place
-/// values-buffer rewrite would need a typed-buffer mutation entry
-/// for `HashMapValueBuf::TraitObject` (the storage carrier already
-/// has the arm — see hashmap_methods.rs:259). Surfacing here keeps
-/// the dispatch correct while the values-buffer write-path is built.
+/// Wave 2 Round 1 Agent F (2026-05-14): `HashMapValueBuf::TraitObject` was
+/// deleted as a dead-arm mirror per Wave 1 §C.5 / §F (zero producers at
+/// HEAD aa047356). Surface-and-stop pending a future Array<dyn T> /
+/// HashMap<K, dyn T> carrier landing per audit §C.8 row.
 fn rewrap_hashmap_values(
     ret_bits: u64,
     wrap_targets: &[WrapTarget],
@@ -1051,98 +1050,44 @@ fn rewrap_hashmap_values(
     drop_kinded(ret_bits, NativeKind::Ptr(HeapKind::HashMap));
     Err(VMError::NotImplemented(format!(
         "SURFACE: DynMethodCall BoxedReturn with HashMap<K, Self> \
-         return + wrap_targets {:?} per ADR-006 §2.7.24 Q25.C.5 — \
-         values-buffer rewrap requires a typed-buffer write-path \
-         that takes a `HashMapValueBuf::TraitObject` arm + a per-\
-         entry re-box. The dispatch shell surfaces; lifting this \
-         pairs with the `rewrap_typed_object_fields` follow-up.",
+         return + wrap_targets {:?} per ADR-006 §2.7.24 Q25.A SUPERSEDED \
+         #1 — the prior values-buffer rewrap path targeted \
+         `HashMapValueBuf::TraitObject`, which is deleted (Wave 2 Round 1 \
+         Agent F, 2026-05-14, dead-arm wholesale deletion).",
         wrap_targets.iter().map(|w| w.path.as_slice()).collect::<Vec<_>>()
     )))
 }
 
 /// Re-wrap inside a `TypedArray` whose elements name `Self`. Each
-/// element is a `TypedObject`-shaped Self leaf; rewrap into a
-/// `TypedArrayData::TraitObject` buffer using the receiver vtable.
+/// element is a `TypedObject`-shaped Self leaf; the prior implementation
+/// rewrapped into a `TypedArrayData::TraitObject` buffer using the
+/// receiver vtable.
+///
+/// Wave 2 Round 1 Agent F (2026-05-14): `TypedArrayData::TraitObject` was
+/// deleted as a dead-arm per Wave 1 §F + R20 S2-prime §4.1.A.2 — zero root
+/// constructors at HEAD aa047356 + this rewrap path was the only producer.
+/// `Array<Self>`-returning trait methods on dyn-trait receivers now
+/// surface-and-stop here per ADR-006 §2.7.24 Q25.A SUPERSEDED #1
+/// (forbidden — resurrection of specialized arms). A future
+/// `Array<dyn T>` carrier lands per audit §A.3 row when user-facing
+/// reachable; surface-and-stop is the disposition until then. Test
+/// `typed_array_self_elements_are_rewrapped_into_trait_object_buffer`
+/// already accepts §2.7.24 / SURFACE error returns.
 fn rewrap_typed_array_elements(
     ret_bits: u64,
     wrap_targets: &[WrapTarget],
-    receiver_vtable: &Arc<VTable>,
+    _receiver_vtable: &Arc<VTable>,
 ) -> Result<(u64, NativeKind), VMError> {
-    if ret_bits == 0 {
-        return Err(VMError::RuntimeError(
-            "DynMethodCall BoxedReturn: null TypedArray return".to_string(),
-        ));
-    }
-    // SAFETY: kind=Ptr(TypedArray); bits are
-    // `Arc::into_raw::<TypedArrayData>(arc)`. Consume.
-    let arr: Arc<shape_value::heap_value::TypedArrayData> =
-        unsafe { Arc::from_raw(ret_bits as *const shape_value::heap_value::TypedArrayData) };
-    // Only path=[0] applies to array elements (single generic arg).
-    let descendants: SmallVec<[WrapTarget; 2]> = wrap_targets
-        .iter()
-        .filter(|w| !w.path.is_empty() && w.path[0] == 0)
-        .map(|w| WrapTarget {
-            path: w.path[1..].iter().copied().collect(),
-            wrap_as_trait_id: w.wrap_as_trait_id,
-        })
-        .collect();
-    if descendants.is_empty() {
-        let raw = Arc::into_raw(arr) as u64;
-        return Ok((raw, NativeKind::Ptr(HeapKind::TypedArray)));
-    }
-    // Read the array's elements per its current TypedArrayData arm
-    // and re-box each into a TraitObject. The most common arm for
-    // a `Self`-returning method on a TypedObject impl is
-    // `TypedArrayData::TypedObject` (the impl built the array as a
-    // typed buffer of its concrete type).
-    use shape_value::heap_value::TypedArrayData;
-    match &*arr {
-        TypedArrayData::TypedObject(buf) => {
-            // Build a new TraitObject buffer.
-            let new_data: Vec<Arc<TraitObjectStorage>> = buf
-                .data
-                .iter()
-                .map(|to_inner| {
-                    Arc::new(TraitObjectStorage::new(
-                        Arc::clone(to_inner),
-                        Arc::clone(receiver_vtable),
-                    ))
-                })
-                .collect();
-            let new_buf = Arc::new(
-                shape_value::typed_buffer::TypedBuffer::from_vec(new_data),
-            );
-            let new_arr = Arc::new(TypedArrayData::TraitObject(new_buf));
-            let raw = Arc::into_raw(new_arr) as u64;
-            drop(arr);
-            Ok((raw, NativeKind::Ptr(HeapKind::TypedArray)))
-        }
-        TypedArrayData::TraitObject(_) => {
-            // Already a TraitObject buffer — passthrough.
-            let raw = Arc::into_raw(arr) as u64;
-            Ok((raw, NativeKind::Ptr(HeapKind::TypedArray)))
-        }
-        other => {
-            // Other element kinds with Self-named target are an
-            // emission-tier shape we don't expect — surface.
-            let other_name = match other {
-                TypedArrayData::F64(_) => "F64",
-                TypedArrayData::I64(_) => "I64",
-                TypedArrayData::String(_) => "String",
-                _ => "<other>",
-            };
-            drop(arr);
-            Err(VMError::NotImplemented(format!(
-                "SURFACE: DynMethodCall BoxedReturn TypedArray with \
-                 element arm {} + wrap_targets {:?} — Self-leaf re-box \
-                 expects TypedObject-arm element buffer (the impl built \
-                 a typed buffer of its concrete type). Per ADR-006 \
-                 §2.7.24 Q25.C.5.",
-                other_name,
-                wrap_targets.iter().map(|w| w.path.as_slice()).collect::<Vec<_>>()
-            )))
-        }
-    }
+    drop_kinded(ret_bits, NativeKind::Ptr(HeapKind::TypedArray));
+    Err(VMError::NotImplemented(format!(
+        "SURFACE: DynMethodCall BoxedReturn with Array<Self> return + \
+         wrap_targets {:?} per ADR-006 §2.7.24 Q25.A SUPERSEDED #1 — \
+         the prior re-box pathway produced TypedArrayData::TraitObject, \
+         which is deleted (Wave 2 Round 1 Agent F, 2026-05-14, dead-arm \
+         wholesale deletion). A user-facing Array<dyn T> carrier lands \
+         per audit §A.3 row when reachability is required.",
+        wrap_targets.iter().map(|w| w.path.as_slice()).collect::<Vec<_>>()
+    )))
 }
 
 

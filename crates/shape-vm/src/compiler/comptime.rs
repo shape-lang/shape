@@ -1001,13 +1001,8 @@ fn typed_array_len(arr: &TypedArrayData) -> usize {
         // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
         TypedArrayData::Decimal(b) => b.data.len(),
         TypedArrayData::BigInt(b) => b.data.len(),
-        TypedArrayData::DateTime(b) => b.data.len(),
-        TypedArrayData::Timespan(b) => b.data.len(),
-        TypedArrayData::Duration(b) => b.data.len(),
-        TypedArrayData::Instant(b) => b.data.len(),
         TypedArrayData::Char(b) => b.data.len(),
         TypedArrayData::TypedObject(b) => b.data.len(),
-        TypedArrayData::TraitObject(b) => b.data.len(),
     }
 }
 
@@ -1045,13 +1040,8 @@ fn typed_array_element_kinded(
         // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
         TypedArrayData::Decimal(b) => KindedSlot::from_decimal(Arc::clone(&b.data[idx])),
         TypedArrayData::BigInt(b) => KindedSlot::from_bigint(Arc::clone(&b.data[idx])),
-        TypedArrayData::DateTime(b)
-        | TypedArrayData::Timespan(b)
-        | TypedArrayData::Duration(b) => KindedSlot::from_temporal(Arc::clone(&b.data[idx])),
-        TypedArrayData::Instant(b) => KindedSlot::from_instant(Arc::clone(&b.data[idx])),
         TypedArrayData::Char(b) => KindedSlot::from_char(b.data[idx]),
         TypedArrayData::TypedObject(b) => KindedSlot::from_typed_object(Arc::clone(&b.data[idx])),
-        TypedArrayData::TraitObject(b) => KindedSlot::from_trait_object(Arc::clone(&b.data[idx])),
     })
 }
 

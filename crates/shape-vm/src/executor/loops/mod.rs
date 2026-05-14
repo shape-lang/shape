@@ -107,13 +107,8 @@ fn typed_array_data_len(arr: &TypedArrayData) -> usize {
         // W17-typed-carrier-bundle-A Q25.A specialized arms.
         TypedArrayData::Decimal(b) => b.len(),
         TypedArrayData::BigInt(b) => b.len(),
-        TypedArrayData::DateTime(b) => b.len(),
-        TypedArrayData::Timespan(b) => b.len(),
-        TypedArrayData::Duration(b) => b.len(),
-        TypedArrayData::Instant(b) => b.len(),
         TypedArrayData::Char(b) => b.len(),
         TypedArrayData::TypedObject(b) => b.len(),
-        TypedArrayData::TraitObject(b) => b.len(),
     }
 }
 
@@ -610,22 +605,6 @@ impl VirtualMachine {
                 }
                 None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
             },
-            TypedArrayData::DateTime(a) | TypedArrayData::Timespan(a) | TypedArrayData::Duration(a) => {
-                match a.get(u) {
-                    Some(arc) => {
-                        let bits = std::sync::Arc::into_raw(std::sync::Arc::clone(arc)) as u64;
-                        vm.push_kinded(bits, NativeKind::Ptr(shape_value::heap_value::HeapKind::Temporal))
-                    }
-                    None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
-                }
-            }
-            TypedArrayData::Instant(a) => match a.get(u) {
-                Some(arc) => {
-                    let bits = std::sync::Arc::into_raw(std::sync::Arc::clone(arc)) as u64;
-                    vm.push_kinded(bits, NativeKind::Ptr(shape_value::heap_value::HeapKind::Instant))
-                }
-                None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
-            },
             TypedArrayData::Char(a) => match a.get(u) {
                 Some(&c) => vm.push_kinded(c as u32 as u64, NativeKind::Ptr(shape_value::heap_value::HeapKind::Char)),
                 None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
@@ -634,13 +613,6 @@ impl VirtualMachine {
                 Some(arc) => {
                     let bits = std::sync::Arc::into_raw(std::sync::Arc::clone(arc)) as u64;
                     vm.push_kinded(bits, NativeKind::Ptr(shape_value::heap_value::HeapKind::TypedObject))
-                }
-                None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
-            },
-            TypedArrayData::TraitObject(a) => match a.get(u) {
-                Some(arc) => {
-                    let bits = std::sync::Arc::into_raw(std::sync::Arc::clone(arc)) as u64;
-                    vm.push_kinded(bits, NativeKind::Ptr(shape_value::heap_value::HeapKind::TraitObject))
                 }
                 None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
             },

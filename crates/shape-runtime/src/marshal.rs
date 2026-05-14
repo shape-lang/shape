@@ -515,18 +515,6 @@ fn materialize_heap_arcs(arr: &shape_value::TypedArrayData) -> Vec<Arc<shape_val
             .iter()
             .map(|b| Arc::new(HeapValue::BigInt(Arc::clone(b))))
             .collect(),
-        TypedArrayData::DateTime(buf)
-        | TypedArrayData::Timespan(buf)
-        | TypedArrayData::Duration(buf) => buf
-            .data
-            .iter()
-            .map(|td| Arc::new(HeapValue::Temporal(Arc::clone(td))))
-            .collect(),
-        TypedArrayData::Instant(buf) => buf
-            .data
-            .iter()
-            .map(|inst| Arc::new(HeapValue::Instant(Arc::clone(inst))))
-            .collect(),
         TypedArrayData::Char(buf) => buf
             .data
             .iter()
@@ -536,11 +524,6 @@ fn materialize_heap_arcs(arr: &shape_value::TypedArrayData) -> Vec<Arc<shape_val
             .data
             .iter()
             .map(|o| Arc::new(HeapValue::TypedObject(Arc::clone(o))))
-            .collect(),
-        TypedArrayData::TraitObject(buf) => buf
-            .data
-            .iter()
-            .map(|t| Arc::new(HeapValue::TraitObject(Arc::clone(t))))
             .collect(),
         other => panic!(
             "FromSlot<Vec<Arc<HeapValue>>>: TypedArray variant {} cannot \

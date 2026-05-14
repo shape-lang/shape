@@ -169,13 +169,8 @@ fn typed_array_len(arr: &TypedArrayData) -> usize {
         // W17-typed-carrier-bundle-A commit 1/4: §2.7.24 Q25.A specialized arms.
         TypedArrayData::Decimal(b) => b.data.len(),
         TypedArrayData::BigInt(b) => b.data.len(),
-        TypedArrayData::DateTime(b) => b.data.len(),
-        TypedArrayData::Timespan(b) => b.data.len(),
-        TypedArrayData::Duration(b) => b.data.len(),
-        TypedArrayData::Instant(b) => b.data.len(),
         TypedArrayData::Char(b) => b.data.len(),
         TypedArrayData::TypedObject(b) => b.data.len(),
-        TypedArrayData::TraitObject(b) => b.data.len(),
         // ADR-006 §2.7.22 amendment (Round 18 S3): Matrix / FloatSlice
         // exit `TypedArrayData`; receivers of those kinds dispatch via
         // `HeapKind::Matrix` / `HeapKind::MatrixSlice` directly.

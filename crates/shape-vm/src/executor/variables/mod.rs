@@ -3674,13 +3674,8 @@ fn typed_array_element_kind(
         // arms — each variant's element kind is the matching heap pointer.
         TypedArrayData::Decimal(_) => NativeKind::Ptr(shape_value::heap_value::HeapKind::Decimal),
         TypedArrayData::BigInt(_) => NativeKind::Ptr(shape_value::heap_value::HeapKind::BigInt),
-        TypedArrayData::DateTime(_)
-        | TypedArrayData::Timespan(_)
-        | TypedArrayData::Duration(_) => NativeKind::Ptr(shape_value::heap_value::HeapKind::Temporal),
-        TypedArrayData::Instant(_) => NativeKind::Ptr(shape_value::heap_value::HeapKind::Instant),
         TypedArrayData::Char(_) => NativeKind::Ptr(shape_value::heap_value::HeapKind::Char),
         TypedArrayData::TypedObject(_) => NativeKind::Ptr(shape_value::heap_value::HeapKind::TypedObject),
-        TypedArrayData::TraitObject(_) => NativeKind::Ptr(shape_value::heap_value::HeapKind::TraitObject),
     })
 }
 
@@ -3799,18 +3794,6 @@ fn typed_array_read_index_raw(
             })?;
             std::sync::Arc::as_ptr(arc) as u64
         }
-        TypedArrayData::DateTime(buf) | TypedArrayData::Timespan(buf) | TypedArrayData::Duration(buf) => {
-            let arc = buf.data.get(index).ok_or_else(|| VMError::IndexOutOfBounds {
-                index: index as i32, length: buf.data.len(),
-            })?;
-            std::sync::Arc::as_ptr(arc) as u64
-        }
-        TypedArrayData::Instant(buf) => {
-            let arc = buf.data.get(index).ok_or_else(|| VMError::IndexOutOfBounds {
-                index: index as i32, length: buf.data.len(),
-            })?;
-            std::sync::Arc::as_ptr(arc) as u64
-        }
         TypedArrayData::Char(buf) => {
             let c = buf.data.get(index).ok_or_else(|| VMError::IndexOutOfBounds {
                 index: index as i32, length: buf.data.len(),
@@ -3818,12 +3801,6 @@ fn typed_array_read_index_raw(
             *c as u64
         }
         TypedArrayData::TypedObject(buf) => {
-            let arc = buf.data.get(index).ok_or_else(|| VMError::IndexOutOfBounds {
-                index: index as i32, length: buf.data.len(),
-            })?;
-            std::sync::Arc::as_ptr(arc) as u64
-        }
-        TypedArrayData::TraitObject(buf) => {
             let arc = buf.data.get(index).ok_or_else(|| VMError::IndexOutOfBounds {
                 index: index as i32, length: buf.data.len(),
             })?;

@@ -111,13 +111,8 @@ fn typed_array_len(arr: &TypedArrayData) -> usize {
         // arms on this branch yet; commit 2 wires writers in.
         TypedArrayData::Decimal(b) => b.data.len(),
         TypedArrayData::BigInt(b) => b.data.len(),
-        TypedArrayData::DateTime(b) => b.data.len(),
-        TypedArrayData::Timespan(b) => b.data.len(),
-        TypedArrayData::Duration(b) => b.data.len(),
-        TypedArrayData::Instant(b) => b.data.len(),
         TypedArrayData::Char(b) => b.data.len(),
         TypedArrayData::TypedObject(b) => b.data.len(),
-        TypedArrayData::TraitObject(b) => b.data.len(),
     }
 }
 

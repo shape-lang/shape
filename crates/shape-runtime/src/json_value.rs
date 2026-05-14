@@ -350,16 +350,6 @@ fn typed_array_to_json_value(ta: &TypedArrayData) -> Result<JsonValue, String> {
         TypedArrayData::BigInt(buf) => Ok(JsonValue::Array(
             buf.data.iter().map(|n| JsonValue::Int(**n)).collect(),
         )),
-        TypedArrayData::DateTime(_)
-        | TypedArrayData::Timespan(_)
-        | TypedArrayData::Duration(_) => Err(
-            "Temporal-array JSON serialization policy not yet decided (W17-typed-carrier-bundle-A commit 3 follow-up; ADR-006 §2.7.24 Q25.A)"
-                .into(),
-        ),
-        TypedArrayData::Instant(_) => Err(
-            "Instant-array JSON serialization unsupported (Instant is a monotonic clock reading, not a wall-clock value; W17-typed-carrier-bundle-A commit 3)"
-                .into(),
-        ),
         TypedArrayData::Char(buf) => Ok(JsonValue::Array(
             buf.data
                 .iter()
@@ -381,10 +371,6 @@ fn typed_array_to_json_value(ta: &TypedArrayData) -> Result<JsonValue, String> {
             }
             Ok(JsonValue::Array(elems))
         }
-        TypedArrayData::TraitObject(_) => Err(
-            "TraitObject array JSON serialization deferred (needs per-vtable schema dispatch; ADR-006 §2.7.24 Q25.C)"
-                .into(),
-        ),
     }
 }
 

@@ -381,13 +381,8 @@ pub(super) fn typed_array_len(arr: &TypedArrayData) -> usize {
         // §2.7.24 Q25.A specialized arms — checkpoint 3 wires real bodies.
         TypedArrayData::Decimal(b) => b.data.len(),
         TypedArrayData::BigInt(b) => b.data.len(),
-        TypedArrayData::DateTime(b) => b.data.len(),
-        TypedArrayData::Timespan(b) => b.data.len(),
-        TypedArrayData::Duration(b) => b.data.len(),
-        TypedArrayData::Instant(b) => b.data.len(),
         TypedArrayData::Char(b) => b.data.len(),
         TypedArrayData::TypedObject(b) => b.data.len(),
-        TypedArrayData::TraitObject(b) => b.data.len(),
     }
 }
 
@@ -572,30 +567,6 @@ fn slice_typed_array(
             let sliced = if s < e { buf.data[s..e].to_vec() } else { Vec::new() };
             Ok(Arc::new(TypedArrayData::BigInt(Arc::new(TypedBuffer::from_vec(sliced)))))
         }
-        TypedArrayData::DateTime(buf) => {
-            let len = buf.data.len() as i64;
-            let (s, e) = clamp_range(start, end, len);
-            let sliced = if s < e { buf.data[s..e].to_vec() } else { Vec::new() };
-            Ok(Arc::new(TypedArrayData::DateTime(Arc::new(TypedBuffer::from_vec(sliced)))))
-        }
-        TypedArrayData::Timespan(buf) => {
-            let len = buf.data.len() as i64;
-            let (s, e) = clamp_range(start, end, len);
-            let sliced = if s < e { buf.data[s..e].to_vec() } else { Vec::new() };
-            Ok(Arc::new(TypedArrayData::Timespan(Arc::new(TypedBuffer::from_vec(sliced)))))
-        }
-        TypedArrayData::Duration(buf) => {
-            let len = buf.data.len() as i64;
-            let (s, e) = clamp_range(start, end, len);
-            let sliced = if s < e { buf.data[s..e].to_vec() } else { Vec::new() };
-            Ok(Arc::new(TypedArrayData::Duration(Arc::new(TypedBuffer::from_vec(sliced)))))
-        }
-        TypedArrayData::Instant(buf) => {
-            let len = buf.data.len() as i64;
-            let (s, e) = clamp_range(start, end, len);
-            let sliced = if s < e { buf.data[s..e].to_vec() } else { Vec::new() };
-            Ok(Arc::new(TypedArrayData::Instant(Arc::new(TypedBuffer::from_vec(sliced)))))
-        }
         TypedArrayData::Char(buf) => {
             let len = buf.data.len() as i64;
             let (s, e) = clamp_range(start, end, len);
@@ -607,12 +578,6 @@ fn slice_typed_array(
             let (s, e) = clamp_range(start, end, len);
             let sliced = if s < e { buf.data[s..e].to_vec() } else { Vec::new() };
             Ok(Arc::new(TypedArrayData::TypedObject(Arc::new(TypedBuffer::from_vec(sliced)))))
-        }
-        TypedArrayData::TraitObject(buf) => {
-            let len = buf.data.len() as i64;
-            let (s, e) = clamp_range(start, end, len);
-            let sliced = if s < e { buf.data[s..e].to_vec() } else { Vec::new() };
-            Ok(Arc::new(TypedArrayData::TraitObject(Arc::new(TypedBuffer::from_vec(sliced)))))
         }
     }
 }
@@ -737,30 +702,6 @@ fn concat_typed_array(
             out.extend_from_slice(&lb.data);
             Ok(Arc::new(TypedArrayData::BigInt(Arc::new(TypedBuffer::from_vec(out)))))
         }
-        (TypedArrayData::DateTime(la), TypedArrayData::DateTime(lb)) => {
-            let mut out = Vec::with_capacity(la.data.len() + lb.data.len());
-            out.extend_from_slice(&la.data);
-            out.extend_from_slice(&lb.data);
-            Ok(Arc::new(TypedArrayData::DateTime(Arc::new(TypedBuffer::from_vec(out)))))
-        }
-        (TypedArrayData::Timespan(la), TypedArrayData::Timespan(lb)) => {
-            let mut out = Vec::with_capacity(la.data.len() + lb.data.len());
-            out.extend_from_slice(&la.data);
-            out.extend_from_slice(&lb.data);
-            Ok(Arc::new(TypedArrayData::Timespan(Arc::new(TypedBuffer::from_vec(out)))))
-        }
-        (TypedArrayData::Duration(la), TypedArrayData::Duration(lb)) => {
-            let mut out = Vec::with_capacity(la.data.len() + lb.data.len());
-            out.extend_from_slice(&la.data);
-            out.extend_from_slice(&lb.data);
-            Ok(Arc::new(TypedArrayData::Duration(Arc::new(TypedBuffer::from_vec(out)))))
-        }
-        (TypedArrayData::Instant(la), TypedArrayData::Instant(lb)) => {
-            let mut out = Vec::with_capacity(la.data.len() + lb.data.len());
-            out.extend_from_slice(&la.data);
-            out.extend_from_slice(&lb.data);
-            Ok(Arc::new(TypedArrayData::Instant(Arc::new(TypedBuffer::from_vec(out)))))
-        }
         (TypedArrayData::Char(la), TypedArrayData::Char(lb)) => {
             let mut out = Vec::with_capacity(la.data.len() + lb.data.len());
             out.extend_from_slice(&la.data);
@@ -772,12 +713,6 @@ fn concat_typed_array(
             out.extend_from_slice(&la.data);
             out.extend_from_slice(&lb.data);
             Ok(Arc::new(TypedArrayData::TypedObject(Arc::new(TypedBuffer::from_vec(out)))))
-        }
-        (TypedArrayData::TraitObject(la), TypedArrayData::TraitObject(lb)) => {
-            let mut out = Vec::with_capacity(la.data.len() + lb.data.len());
-            out.extend_from_slice(&la.data);
-            out.extend_from_slice(&lb.data);
-            Ok(Arc::new(TypedArrayData::TraitObject(Arc::new(TypedBuffer::from_vec(out)))))
         }
         // FloatSlice is a view into a parent matrix's F64 region; both
         // arms below materialize to a flat F64 result. Same-side and
@@ -845,13 +780,8 @@ pub(super) fn element_kinded(arr: &TypedArrayData, idx: usize) -> Result<KindedS
         // arms — each builds a `KindedSlot` of the variant's element type.
         TypedArrayData::Decimal(buf) => Ok(KindedSlot::from_decimal(Arc::clone(&buf.data[idx]))),
         TypedArrayData::BigInt(buf) => Ok(KindedSlot::from_bigint(Arc::clone(&buf.data[idx]))),
-        TypedArrayData::DateTime(buf) => Ok(KindedSlot::from_temporal(Arc::clone(&buf.data[idx]))),
-        TypedArrayData::Timespan(buf) => Ok(KindedSlot::from_temporal(Arc::clone(&buf.data[idx]))),
-        TypedArrayData::Duration(buf) => Ok(KindedSlot::from_temporal(Arc::clone(&buf.data[idx]))),
-        TypedArrayData::Instant(buf) => Ok(KindedSlot::from_instant(Arc::clone(&buf.data[idx]))),
         TypedArrayData::Char(buf) => Ok(KindedSlot::from_char(buf.data[idx])),
         TypedArrayData::TypedObject(buf) => Ok(KindedSlot::from_typed_object(Arc::clone(&buf.data[idx]))),
-        TypedArrayData::TraitObject(buf) => Ok(KindedSlot::from_trait_object(Arc::clone(&buf.data[idx]))),
     }
 }
 
@@ -986,26 +916,6 @@ pub(super) fn project_indices(arr: &TypedArrayData, keep: &[usize]) -> Result<Ar
             let v: Vec<Arc<i64>> = keep.iter().map(|&i| Arc::clone(&buf.data[i])).collect();
             Ok(Arc::new(TypedArrayData::BigInt(Arc::new(TypedBuffer::from_vec(v)))))
         }
-        TypedArrayData::DateTime(buf) => {
-            let v: Vec<Arc<shape_value::heap_value::TemporalData>> =
-                keep.iter().map(|&i| Arc::clone(&buf.data[i])).collect();
-            Ok(Arc::new(TypedArrayData::DateTime(Arc::new(TypedBuffer::from_vec(v)))))
-        }
-        TypedArrayData::Timespan(buf) => {
-            let v: Vec<Arc<shape_value::heap_value::TemporalData>> =
-                keep.iter().map(|&i| Arc::clone(&buf.data[i])).collect();
-            Ok(Arc::new(TypedArrayData::Timespan(Arc::new(TypedBuffer::from_vec(v)))))
-        }
-        TypedArrayData::Duration(buf) => {
-            let v: Vec<Arc<shape_value::heap_value::TemporalData>> =
-                keep.iter().map(|&i| Arc::clone(&buf.data[i])).collect();
-            Ok(Arc::new(TypedArrayData::Duration(Arc::new(TypedBuffer::from_vec(v)))))
-        }
-        TypedArrayData::Instant(buf) => {
-            let v: Vec<Arc<std::time::Instant>> =
-                keep.iter().map(|&i| Arc::clone(&buf.data[i])).collect();
-            Ok(Arc::new(TypedArrayData::Instant(Arc::new(TypedBuffer::from_vec(v)))))
-        }
         TypedArrayData::Char(buf) => {
             let v: Vec<char> = keep.iter().map(|&i| buf.data[i]).collect();
             Ok(Arc::new(TypedArrayData::Char(Arc::new(TypedBuffer::from_vec(v)))))
@@ -1014,11 +924,6 @@ pub(super) fn project_indices(arr: &TypedArrayData, keep: &[usize]) -> Result<Ar
             let v: Vec<Arc<shape_value::heap_value::TypedObjectStorage>> =
                 keep.iter().map(|&i| Arc::clone(&buf.data[i])).collect();
             Ok(Arc::new(TypedArrayData::TypedObject(Arc::new(TypedBuffer::from_vec(v)))))
-        }
-        TypedArrayData::TraitObject(buf) => {
-            let v: Vec<Arc<shape_value::heap_value::TraitObjectStorage>> =
-                keep.iter().map(|&i| Arc::clone(&buf.data[i])).collect();
-            Ok(Arc::new(TypedArrayData::TraitObject(Arc::new(TypedBuffer::from_vec(v)))))
         }
     }
 }
@@ -1469,12 +1374,7 @@ fn sort_natural(arr: &TypedArrayData) -> Result<Arc<TypedArrayData>, VMError> {
             v.sort();
             Ok(Arc::new(TypedArrayData::Char(Arc::new(TypedBuffer::from_vec(v)))))
         }
-        TypedArrayData::DateTime(_)
-        | TypedArrayData::Timespan(_)
-        | TypedArrayData::Duration(_)
-        | TypedArrayData::Instant(_)
-        | TypedArrayData::TypedObject(_)
-        | TypedArrayData::TraitObject(_) => Err(VMError::NotImplemented(format!(
+        TypedArrayData::TypedObject(_) => Err(VMError::NotImplemented(format!(
             "sort: {} variant — SURFACE: ordering needs a user-supplied \
              comparator. Use `.orderBy(|x| ...)` instead of bare `sort()` \
              (ADR-006 §2.7.24).",
@@ -1630,13 +1530,8 @@ pub(crate) fn handle_flatten_v2(
         // I64/F64/Bool identity clone above.
         TypedArrayData::Decimal(_)
         | TypedArrayData::BigInt(_)
-        | TypedArrayData::DateTime(_)
-        | TypedArrayData::Timespan(_)
-        | TypedArrayData::Duration(_)
-        | TypedArrayData::Instant(_)
         | TypedArrayData::Char(_)
-        | TypedArrayData::TypedObject(_)
-        | TypedArrayData::TraitObject(_) => {
+        | TypedArrayData::TypedObject(_) => {
             let bits = args[0].slot.raw();
             unsafe {
                 Arc::increment_strong_count(bits as *const TypedArrayData);

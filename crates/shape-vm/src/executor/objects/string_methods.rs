@@ -564,12 +564,7 @@ pub fn v2_string_join(
         TypedArrayData::Char(buf) => {
             buf.data.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(sep)
         }
-        TypedArrayData::DateTime(_)
-        | TypedArrayData::Timespan(_)
-        | TypedArrayData::Duration(_)
-        | TypedArrayData::Instant(_)
-        | TypedArrayData::TypedObject(_)
-        | TypedArrayData::TraitObject(_) => {
+        TypedArrayData::TypedObject(_) => {
             return Err(VMError::NotImplemented(format!(
                 "Array<{}>.join: per-element stringification needs the \
                  kinded output-adapter — use .map(|x| x.toString()).join() \
