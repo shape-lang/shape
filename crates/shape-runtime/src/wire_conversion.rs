@@ -73,6 +73,17 @@ pub fn slot_to_wire(bits: u64, kind: NativeKind, ctx: &Context) -> WireValue {
         | NativeKind::NullableIntSize
         | NativeKind::NullableUIntSize => WireValue::Integer(bits as i64),
         NativeKind::Bool => WireValue::Bool(bits != 0),
+        // Round 19 S1.5 W12-nativekind-scalar-additions (2026-05-14):
+        // ADR-006 §2.7.5 amendment adds F32 + Char as 4-byte scalar
+        // variants. Wire projection: F32 widens to `WireValue::Number`
+        // (`f64::from(f32)` is lossless); Char projects to a single-
+        // codepoint string (mirror of the `HeapValue::Char` arm below)
+        // because `WireValue` has no dedicated Char variant.
+        NativeKind::Float32 => WireValue::Number(f64::from(f32::from_bits(bits as u32))),
+        NativeKind::Char => match char::from_u32(bits as u32) {
+            Some(c) => WireValue::String(c.to_string()),
+            None => WireValue::Null,
+        },
         NativeKind::String => {
             // bits is an Arc<String> raw pointer
             let ptr = bits as *const String;

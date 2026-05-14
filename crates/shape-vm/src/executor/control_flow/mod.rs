@@ -54,6 +54,11 @@ fn kinded_truthy(bits: u64, kind: NativeKind) -> bool {
         | NativeKind::NullableUInt32
         | NativeKind::NullableUInt64
         | NativeKind::NullableUIntSize => bits != 0,
+        // Round 19 S1.5 W12-nativekind-scalar-additions (2026-05-14):
+        // F32 truthy iff `!= 0.0` (matches Float64); Char truthy iff
+        // codepoint bits non-zero (NUL is the only falsy char).
+        NativeKind::Float32 => f32::from_bits(bits as u32) != 0.0,
+        NativeKind::Char => bits != 0,
         NativeKind::String | NativeKind::Ptr(_) => bits != 0,
     }
 }

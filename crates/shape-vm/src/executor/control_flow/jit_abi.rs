@@ -58,6 +58,11 @@ pub fn marshal_arg_to_jit(bits: u64, kind: NativeKind) -> u64 {
         | NativeKind::UIntSize
         | NativeKind::NullableUIntSize
         | NativeKind::Bool
+        // Round 19 S1.5 W12-nativekind-scalar-additions (2026-05-14):
+        // ADR-006 §2.7.5 amendment — F32 + Char identity by bits
+        // (same raw-u64 cross-crate ABI as every other scalar).
+        | NativeKind::Float32
+        | NativeKind::Char
         | NativeKind::String
         | NativeKind::Ptr(_) => bits,
     }
@@ -96,6 +101,11 @@ pub fn unmarshal_jit_result(bits: u64, kind: NativeKind) -> u64 {
         | NativeKind::UIntSize
         | NativeKind::NullableUIntSize
         | NativeKind::Bool
+        // Round 19 S1.5 W12-nativekind-scalar-additions (2026-05-14):
+        // ADR-006 §2.7.5 amendment — F32 + Char identity by bits
+        // (same raw-u64 cross-crate ABI as every other scalar).
+        | NativeKind::Float32
+        | NativeKind::Char
         | NativeKind::String
         | NativeKind::Ptr(_) => bits,
     }

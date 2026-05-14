@@ -76,6 +76,10 @@ pub fn concrete_to_annotation(ct: &ConcreteType) -> TypeAnnotation {
         // Primitive scalar mapping. Width-specific integers use the spelling
         // accepted by the parser (see `shape.pest` and `BuiltinTypes`).
         ConcreteType::F64 => TypeAnnotation::Basic("number".into()),
+        // Round 19 S1.5 W12-nativekind-scalar-additions (2026-05-14):
+        // ADR-006 §2.7.5 amendment.
+        ConcreteType::F32 => TypeAnnotation::Basic("f32".into()),
+        ConcreteType::Char => TypeAnnotation::Basic("char".into()),
         ConcreteType::I64 => TypeAnnotation::Basic("int".into()),
         ConcreteType::I32 => TypeAnnotation::Basic("i32".into()),
         ConcreteType::I16 => TypeAnnotation::Basic("i16".into()),

@@ -4979,6 +4979,14 @@ pub(crate) fn storage_hint_to_field_kind(
         StorageHint::UInt8 => FieldKind::U8,
         StorageHint::IntSize | StorageHint::UIntSize => return None,
         StorageHint::Bool => FieldKind::Bool,
+        // Round 19 S1.5 W12-nativekind-scalar-additions (2026-05-14):
+        // ADR-006 §2.7.5 amendment — F32 + Char route through the
+        // polymorphic-legacy fallback at this layer (FieldKind has no
+        // F32 / Char variants; per-FieldKind typed emission is a
+        // follow-up sub-cluster). Returning `None` from
+        // `storage_hint_to_field_kind` triggers the polymorphic-legacy
+        // emit path, which already handles raw-u64 carriers.
+        StorageHint::Float32 | StorageHint::Char => return None,
         // Heap-bearing / nullable / unresolved → polymorphic fallback.
         // String is a Ptr by storage but routes via the legacy
         // LoadLocal/StoreLocal path that does refcount accounting; until
@@ -5075,6 +5083,10 @@ pub(crate) mod typed_emit_metrics {
             StorageHint::UIntSize => "usize",
             StorageHint::NullableUIntSize => "nullable_usize",
             StorageHint::Bool => "bool",
+            // Round 19 S1.5 W12-nativekind-scalar-additions (2026-05-14):
+            // ADR-006 §2.7.5 amendment.
+            StorageHint::Float32 => "f32",
+            StorageHint::Char => "char",
             StorageHint::String => "string",
             // ADR-006 §2.7.5.1: `StorageHint::{Dynamic, Unknown}` were
             // deleted; the compiler-tier "kind not yet proven" state is

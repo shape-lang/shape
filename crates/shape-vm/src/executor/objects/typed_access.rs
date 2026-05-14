@@ -510,6 +510,10 @@ fn kind_type_name(kind: NativeKind) -> &'static str {
     match kind {
         NativeKind::Bool => "bool",
         NativeKind::Float64 | NativeKind::NullableFloat64 => "number",
+        // Round 19 S1.5 W12-nativekind-scalar-additions (2026-05-14):
+        // ADR-006 §2.7.5 amendment.
+        NativeKind::Float32 => "f32",
+        NativeKind::Char => "char",
         NativeKind::Int8
         | NativeKind::NullableInt8
         | NativeKind::Int16

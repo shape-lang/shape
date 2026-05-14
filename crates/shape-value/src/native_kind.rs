@@ -35,6 +35,40 @@ pub enum NativeKind {
     /// Nullable f64 using NaN sentinel (Option<f64>)
     /// IEEE 754: NaN + x = NaN, so null propagates automatically
     NullableFloat64,
+    /// Plain f32 value (4-byte single-precision float). ADR-006 §2.7.5
+    /// amendment (Round 19 S1.5 W12-nativekind-scalar-additions,
+    /// 2026-05-14): non-parametric scalar variant introduced for
+    /// `Array<f32>` v2-raw producer paths. `f32` is `Copy + 4-byte` and
+    /// fits the v2-raw `TypedArray<T>` flat-struct shape without Arc
+    /// wrapping. Slot bits store the `f32` zero-extended into the low 32
+    /// bits of the 8-byte slot via `f32::to_bits` (zero-extended).
+    Float32,
+    /// Plain `char` value (4-byte Unicode scalar). ADR-006 §2.7.5
+    /// amendment (Round 19 S1.5 W12-nativekind-scalar-additions,
+    /// 2026-05-14): non-parametric scalar variant introduced for
+    /// `Array<char>` v2-raw producer paths. `char` is `Copy + 4-byte`
+    /// (UTF-32 scalar-value subset of `u32`) and fits the v2-raw
+    /// `TypedArray<T>` flat-struct shape without Arc wrapping. Slot bits
+    /// store the codepoint as `c as u32` zero-extended into the low 32
+    /// bits of the 8-byte slot.
+    ///
+    /// **Parallel-discriminator note** (CLAUDE.md §Parallel-implementation
+    /// across producer/consumer carrier-shape boundaries): the existing
+    /// `NativeKind::Ptr(HeapKind::Char)` carrier remains in source for
+    /// inline-char-value paths that push char values directly to the
+    /// VM stack without going through the §2.7.6/Q8 `KindedSlot::from_char`
+    /// constructor. `NativeKind::Char` is the scalar-bucket carrier (the
+    /// canonical §2.7.6/Q8 constructor target); `NativeKind::Ptr(HeapKind::Char)`
+    /// is a per-element carrier label for the inline-codepoint payload
+    /// pattern. Both labels are read-side-equivalent (slot bits in both
+    /// shapes are `c as u32` zero-extended), but consumer dispatch sites
+    /// MUST handle either label exhaustively for correctness — the
+    /// `NativeKind::Char` arm is the §Q8 carrier-API target, the
+    /// `Ptr(HeapKind::Char)` arm is the pre-amendment inline-payload
+    /// pattern. A future sub-cluster (cluster-1 hardening) folds the
+    /// `Ptr(HeapKind::Char)` arms into `NativeKind::Char` exhaustively
+    /// once the `HeapKind::Char` label can be retired.
+    Char,
     /// Plain i8 value
     Int8,
     /// Nullable i8 value
@@ -154,7 +188,23 @@ impl NativeKind {
 
     #[inline]
     pub fn is_float_family(self) -> bool {
-        matches!(self, Self::Float64 | Self::NullableFloat64)
+        // Round 19 S1.5 (2026-05-14): Float32 joins the floating
+        // family. No `NullableFloat32` sibling at this amendment per
+        // the scope-bounded "F32 + Char additions only" disposition.
+        matches!(self, Self::Float64 | Self::NullableFloat64 | Self::Float32)
+    }
+
+    /// Whether this is the `Char` scalar (per ADR-006 §2.7.5
+    /// amendment, Round 19 S1.5). Note: this does NOT include the
+    /// pre-amendment `NativeKind::Ptr(HeapKind::Char)` carrier label
+    /// — callers that want to recognize both shapes must check
+    /// `is_char_family()` instead. The scalar-only predicate exists
+    /// because `Char` is a non-heap scalar at the §Q8 carrier-API
+    /// layer (no `Arc<T>` payload, refcount-equivalent to other
+    /// 4-byte scalars).
+    #[inline]
+    pub fn is_char_scalar(self) -> bool {
+        matches!(self, Self::Char)
     }
 
     #[inline]

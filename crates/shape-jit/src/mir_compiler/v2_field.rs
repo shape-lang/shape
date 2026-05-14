@@ -76,6 +76,15 @@ pub fn cranelift_type_for_slot(kind: NativeKind) -> types::Type {
         | NativeKind::UIntSize
         | NativeKind::NullableUIntSize => types::I64, // pointer-width
 
+        // Round 19 S1.5 W12-nativekind-scalar-additions (2026-05-14):
+        // ADR-006 §2.7.5 amendment — F32 is 4-byte IEEE-754 single-
+        // precision (Cranelift `F32`); Char is 4-byte UTF-32 codepoint
+        // stored as a u32 bit pattern (Cranelift `I32` — read/store
+        // width matches; `char::from_u32` recovers the semantic type
+        // at the consumer boundary).
+        NativeKind::Float32 => types::F32,
+        NativeKind::Char => types::I32,
+
         // Boxed/pointer-sized values: String (Arc<String> raw ptr) and
         // every `Ptr(_)` heap arm.
         NativeKind::String | NativeKind::Ptr(_) => types::I64,
@@ -104,6 +113,9 @@ pub fn slot_byte_width(kind: NativeKind) -> u32 {
         | NativeKind::NullableIntSize
         | NativeKind::UIntSize
         | NativeKind::NullableUIntSize => 8,
+        // Round 19 S1.5 W12-nativekind-scalar-additions (2026-05-14):
+        // ADR-006 §2.7.5 amendment — F32 + Char are 4 bytes.
+        NativeKind::Float32 | NativeKind::Char => 4,
         NativeKind::String | NativeKind::Ptr(_) => 8,
     }
 }
