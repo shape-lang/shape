@@ -512,28 +512,36 @@ impl IoHandleData {
 // (`e58218c`). 4-table lockstep landed there; HeapKind::TraitObject = 29
 // is the assigned ordinal.
 
-/// Transparent newtype around `*const TypedObjectStorage` to satisfy Rust's
-/// auto-trait rule.
+/// Owning newtype around `*const TypedObjectStorage` carrying one
+/// v2-raw refcount share on the pointed-to allocation's HeapHeader.
 ///
-/// **Wave 2 Round 4 D4 ckpt-3 (2026-05-14):** introduced to carry the
-/// v2-raw TypedObjectStorage pointer through `TypedBuffer<TypedObjectPtr>`
-/// (the inner shape of `HashMapValueBuf::TypedObject`) without triggering
-/// the auto-trait suppression rule. Rust disables auto-Send/Sync for ALL
-/// instantiations of a generic struct as soon as ANY manual impl is
-/// written; wrapping the raw pointer in this newtype localizes the manual
-/// Send/Sync impl to a single concrete type so `TypedBuffer<T>` for every
-/// OTHER T keeps its auto-derived impls.
+/// **Wave 2 Round 4 D4 ckpt-final (2026-05-14):** redesigned to own its
+/// share. Previously a trivially-Copy transparent newtype; that shape
+/// leaks element refcounts when the enclosing `Vec<TypedObjectPtr>`
+/// drops because trivial bit-copy Drop never calls `release_elem`. Now
+/// the wrapper:
+/// - Owns one v2-raw HeapHeader-at-offset-0 refcount share.
+/// - `Clone` bumps the refcount via `v2_retain`.
+/// - `Drop` retires the share via `TypedObjectStorage::release_elem`.
+/// - `Default` is the null pointer (no refcount share owed).
 ///
-/// `#[repr(transparent)]` so the layout is identical to `*const
-/// TypedObjectStorage` — zero ABI cost, just a Rust type-system marker.
+/// `#[repr(transparent)]` so the in-memory layout is identical to
+/// `*const TypedObjectStorage` — zero ABI cost vs the raw pointer; the
+/// wrapper exists only to localize the manual Send/Sync impl + the
+/// Drop/Clone refcount discipline (Rust disables auto-Send/Sync for ALL
+/// instantiations of a generic struct as soon as ANY manual impl exists,
+/// so per-T newtypes are the canonical workaround for raw-ptr inner
+/// elements in generic buffers).
 ///
-/// The pointer is non-owning at the field level; ownership lifecycle goes
-/// through the enclosing `HashMapValueBuf::TypedObject` variant +
-/// `TypedObjectStorage::release_elem` discipline (mirror of the v2-raw
-/// HeapElement contract). The wrapper itself doesn't impl Drop — see
-/// the variant-comment above.
+/// Used as the inner element type of:
+/// - `HashMapValueBuf::TypedObject(Arc<TypedBuffer<TypedObjectPtr>>)`
+/// - `TypedArrayData::TypedObject(Arc<TypedBuffer<TypedObjectPtr>>)`
+///
+/// Construction-side contract: callers transfer one strong-count share
+/// on the v2-raw HeapHeader to the new `TypedObjectPtr`. Reads via
+/// `as_ptr()` return the underlying pointer without bumping refcount.
 #[repr(transparent)]
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct TypedObjectPtr(pub *const TypedObjectStorage);
 
 // SAFETY: `*const TypedObjectStorage` is `!Send + !Sync` by default. The
@@ -550,21 +558,59 @@ unsafe impl Sync for TypedObjectPtr {}
 impl Default for TypedObjectPtr {
     /// Null pointer default — used by `TypedBuffer::<TypedObjectPtr>::push_null`
     /// and similar default-requiring construction sites. Callers must
-    /// not dereference a default-constructed `TypedObjectPtr`.
+    /// not dereference a default-constructed `TypedObjectPtr`. No
+    /// refcount share is owed for a null wrapper; Drop on a null
+    /// pointer is a no-op.
     #[inline]
     fn default() -> Self {
         Self(std::ptr::null())
     }
 }
 
+impl Clone for TypedObjectPtr {
+    /// v2-raw refcount bump via `v2_retain` on the pointed-to
+    /// HeapHeader. The clone owns its own share, retired at its own
+    /// `Drop`.
+    #[inline]
+    fn clone(&self) -> Self {
+        if !self.0.is_null() {
+            // SAFETY: per the construction-side contract, `self.0` points
+            // to a live `TypedObjectStorage` allocated via `_new` (or a
+            // legacy Arc-allocated one whose embedded HeapHeader is
+            // unused but still bumpable safely — atomic increment is
+            // sound on any aligned u32 within the legitimate allocation).
+            unsafe { crate::v2::refcount::v2_retain(&(*self.0).header) };
+        }
+        Self(self.0)
+    }
+}
+
+impl Drop for TypedObjectPtr {
+    /// Retire the owned share via `TypedObjectStorage::release_elem`
+    /// (HeapElement trait — calls `v2_release` and, on refcount=0,
+    /// runs `_drop` to dealloc the allocation + retire heap-mask
+    /// shares). No-op on null wrappers.
+    #[inline]
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            use crate::v2::heap_element::HeapElement;
+            // SAFETY: per the construction-side contract this carrier owns
+            // one share on the HeapHeader-at-offset-0 refcount.
+            unsafe { TypedObjectStorage::release_elem(self.0) };
+        }
+    }
+}
+
 impl TypedObjectPtr {
     /// Construct from a raw pointer obtained via `TypedObjectStorage::_new`.
+    /// The caller transfers one strong-count share to the wrapper.
     #[inline]
     pub fn new(ptr: *const TypedObjectStorage) -> Self {
         Self(ptr)
     }
 
-    /// Recover the underlying raw pointer.
+    /// Recover the underlying raw pointer. Does NOT bump refcount;
+    /// the returned pointer is borrowed for the wrapper's lifetime.
     #[inline]
     pub fn as_ptr(&self) -> *const TypedObjectStorage {
         self.0
@@ -575,6 +621,16 @@ impl TypedObjectPtr {
     #[inline]
     pub fn is_null(&self) -> bool {
         self.0.is_null()
+    }
+
+    /// Consume the wrapper without running Drop, returning the raw
+    /// pointer. The caller takes over the one refcount share. Mirror
+    /// of `Arc::into_raw`.
+    #[inline]
+    pub fn into_raw(self) -> *const TypedObjectStorage {
+        let ptr = self.0;
+        std::mem::forget(self);
+        ptr
     }
 }
 
