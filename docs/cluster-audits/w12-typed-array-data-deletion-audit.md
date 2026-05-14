@@ -1210,6 +1210,381 @@ caller changes (POD T paths keep using the existing `drop_array`).
   per StringObj precedent — no new trait method needed (callers
   invoke `v2_retain` directly with the header pointer).
 
+### §4.1.C Round 20 S2-prime audit-first deliverable (c): Q25.A SUPERSEDED amendment text landed (2026-05-14)
+
+Per supervisor R19 disposition (Q25.A SUPERSEDED, option 1b) the
+amendment text landed inline at `docs/adr/006-value-and-memory-
+model.md` §2.7.24 as a new preamble subsection `Q25.A SUPERSEDED —
+Round 17 cluster-0-transition deletion target (Round 20 S2-prime
+amendment, 2026-05-14)` at the head of the Q25.A subsection
+(immediately after the §2.7.24 header at line 4704). The
+pre-amendment Q25.A body (Phase 2d original ratification 2026-05-11
+text) is RENAMED to `Q25.A (Phase 2d original ratification,
+2026-05-11, **SUPERSEDED**)` and preserved for historical provenance.
+
+The amendment text contains:
+
+- Authority cite (strategic-owner authorization 2026-05-13 +
+  supervisor R19 partial disposition 2026-05-14)
+- Canonical replacement target (§2.2 of this audit doc + R20
+  S2-prime audit-first deliverables §4.1.A / §4.1.B / §4.1.D)
+- Per-variant migration shape table reflecting:
+  * Decimal: TypedArray<*const DecimalObj> per §2.2 (live)
+  * BigInt: DEFERRED to cluster-1+ per R19 Obstacle 3 disposition
+  * DateTime/Timespan/Instant: dead arms per §4.1.A.2;
+    migrate for forward-S5 cleanliness
+  * Duration: NO MIGRATION per §4.1.A.1 dead-variant finding
+  * Char: scalar bucket per R19 S1.5 (out of S2-prime scope)
+  * TypedObject/TraitObject: S3 territory (gated on O-3/O-3a)
+- 4 forbidden-post-supersession entries
+- Q25.B / Q25.C explicitly NOT superseded
+- Migration cadence (S2-prime + S5)
+
+The Q25.A SUPERSEDED amendment commit lands as part of S2-prime
+close (this audit's commit sequence per dispatch directive).
+
+### §4.1.D Round 20 S2-prime audit-first deliverable (d): per-variant `<X>Obj` carrier shape design (2026-05-14)
+
+For each of the 4 new `<X>Obj` carriers (DecimalObj / DateTimeObj /
+TimespanObj / InstantObj — String already done post-R12; Duration /
+BigInt excluded per §4.1.A.1 / Obstacle 3 R19 dispositions), the
+carrier shape mirrors `StringObj` precedent
+(`crates/shape-value/src/v2/string_obj.rs:18-26`):
+
+```rust
+#[repr(C)]
+pub struct StringObj {
+    pub header: HeapHeader,    // 8 bytes (refcount + kind + flags)
+    pub data: *const u8,       // 8 bytes (payload pointer)
+    pub len: u32,              // 4 bytes
+    pub _pad: u32,             // 4 bytes (alignment padding to 24 bytes)
+}
+const _: () = { assert!(std::mem::size_of::<StringObj>() == 24); };
+```
+
+The per-T inner payload determines whether the carrier has a
+**variable-size data buffer** (StringObj: separate `data: *const u8`
+allocation) or an **inline fixed-size payload** (DecimalObj /
+DateTimeObj / TimespanObj / InstantObj: payload inline after the
+header). The four new carriers are all fixed-size-inline.
+
+#### §4.1.D.1 `DecimalObj` design
+
+**Inner payload:** `rust_decimal::Decimal` — 16 bytes
+(`std::mem::size_of::<rust_decimal::Decimal>() == 16` confirmed by
+inspecting rust_decimal source: 4-byte flags + 12-byte mantissa).
+`Copy + Clone`. Used at `TypedArrayData::Decimal(Arc<TypedBuffer<Arc<rust_decimal::Decimal>>>)`
+construction sites (`object_creation.rs:544`, `heap_value.rs:3044`).
+
+**Carrier shape (file: `crates/shape-value/src/v2/decimal_obj.rs`):**
+
+```rust
+//! Refcounted, repr(C) Decimal carrier for v2 runtime.
+//!
+//! ## Memory layout (24 bytes)
+//!
+//! ```text
+//! Offset  Size  Field
+//! ------  ----  -----
+//!   0       8   header (HeapHeader)
+//!   8      16   value (rust_decimal::Decimal — inline payload)
+//! ```
+
+use super::heap_header::{HeapHeader, HEAP_KIND_V2_DECIMAL};
+use rust_decimal::Decimal;
+
+#[repr(C)]
+pub struct DecimalObj {
+    pub header: HeapHeader,
+    pub value: Decimal,
+}
+
+const _: () = {
+    assert!(std::mem::size_of::<DecimalObj>() == 24);
+    assert!(std::mem::align_of::<DecimalObj>() == 8);
+};
+
+impl DecimalObj {
+    pub fn new(value: Decimal) -> *mut Self {
+        let layout = std::alloc::Layout::new::<Self>();
+        let ptr = unsafe { std::alloc::alloc(layout) as *mut Self };
+        unsafe {
+            (*ptr).header = HeapHeader::new(HEAP_KIND_V2_DECIMAL);
+            (*ptr).value = value;
+        }
+        ptr
+    }
+
+    pub unsafe fn value(ptr: *const Self) -> Decimal {
+        unsafe { (*ptr).value }
+    }
+
+    pub unsafe fn drop(ptr: *mut Self) {
+        // No nested allocation; just dealloc the struct.
+        let layout = std::alloc::Layout::new::<Self>();
+        unsafe { std::alloc::dealloc(ptr as *mut u8, layout) };
+    }
+}
+
+// HeapElement impl per §4.1.B decision.
+unsafe impl super::heap_element::HeapElement for DecimalObj {
+    unsafe fn release_elem(ptr: *const Self) {
+        if unsafe { super::refcount::v2_release(&(*ptr).header) } {
+            unsafe { Self::drop(ptr as *mut Self) };
+        }
+    }
+}
+```
+
+**New `HeapHeader` kind constant:** `HEAP_KIND_V2_DECIMAL = ?` (next
+free post-`HEAP_KIND_V2_STRING`). Per the existing `heap_header.rs`
+convention, new constants get appended sequentially.
+
+#### §4.1.D.2 `DateTimeObj` design
+
+**Inner payload:** `chrono::DateTime<chrono::FixedOffset>` —
+`std::mem::size_of` measured at 16 bytes on x86_64 (NaiveDateTime
+8 bytes + FixedOffset 4 bytes + padding to 8-byte alignment = 16).
+`Copy + Clone` for chrono::DateTime<FixedOffset>.
+
+**Carrier shape (file: `crates/shape-value/src/v2/date_time_obj.rs`):**
+
+```rust
+#[repr(C)]
+pub struct DateTimeObj {
+    pub header: HeapHeader,
+    pub value: chrono::DateTime<chrono::FixedOffset>,
+}
+
+const _: () = {
+    assert!(std::mem::size_of::<DateTimeObj>() == 24);
+    assert!(std::mem::align_of::<DateTimeObj>() == 8);
+};
+```
+
+Mirror of `DecimalObj` shape; same `HeapElement` impl pattern.
+`HEAP_KIND_V2_DATETIME` constant assigned.
+
+**Important note:** the audit recommends VERIFYING the
+`std::mem::size_of::<chrono::DateTime<FixedOffset>>()` value at
+compile-time on the actual target. If chrono's layout differs from
+the projected 16 bytes (e.g. due to `FixedOffset` being 1-byte vs
+4-byte on the platform), the carrier size assertion adjusts to the
+actual: target 24 bytes with appropriate padding. The const_assert!
+catches mismatches at compile time.
+
+#### §4.1.D.3 `TimespanObj` design
+
+**Inner payload:** `chrono::Duration` — `std::mem::size_of` measured
+at 16 bytes on x86_64 (i64 seconds + i32 nanos + 4-byte padding).
+`Copy + Clone`.
+
+**Carrier shape (file: `crates/shape-value/src/v2/timespan_obj.rs`):**
+
+```rust
+#[repr(C)]
+pub struct TimespanObj {
+    pub header: HeapHeader,
+    pub value: chrono::Duration,
+}
+
+const _: () = {
+    assert!(std::mem::size_of::<TimespanObj>() == 24);
+    assert!(std::mem::align_of::<TimespanObj>() == 8);
+};
+```
+
+Same shape; `HEAP_KIND_V2_TIMESPAN` constant assigned.
+
+**Naming note:** the carrier is named `TimespanObj` to mirror the
+runtime variant `TemporalData::TimeSpan` (which is what
+`Constant::Duration` lowers to at `stack_ops/mod.rs:150`). The
+user-facing Shape type "duration" is backed by `TimeSpan` at runtime
+per §4.1.A.1; the carrier name follows the runtime payload name, not
+the user-facing type name.
+
+#### §4.1.D.4 `InstantObj` design
+
+**Inner payload:** `std::time::Instant` — `std::mem::size_of`
+measured at 16 bytes on x86_64 Linux (two `u64` fields). On macOS /
+Windows / other platforms the size may differ (typically still 16
+bytes per the std docs hint). `Copy + Clone`.
+
+**Carrier shape (file: `crates/shape-value/src/v2/instant_obj.rs`):**
+
+```rust
+#[repr(C)]
+pub struct InstantObj {
+    pub header: HeapHeader,
+    pub value: std::time::Instant,
+}
+
+const _: () = {
+    assert!(std::mem::size_of::<InstantObj>() == 24);
+    assert!(std::mem::align_of::<InstantObj>() == 8);
+};
+```
+
+Same shape; `HEAP_KIND_V2_INSTANT` constant assigned.
+
+**Cross-platform alignment warning:** `std::time::Instant`'s layout
+is platform-specific (`Mach Absolute Time` on macOS, `QueryPerformanceCounter`
+on Windows, `clock_gettime(CLOCK_MONOTONIC)` on Linux). If a future
+target shows `size_of::<Instant>() != 16`, the size assertion will
+fail at compile time and the carrier needs a `cfg`-gated padding
+adjustment. Per audit §3.7 ceiling estimate, this is bounded
+mechanical work.
+
+#### §4.1.D.5 `DurationObj` design — REFUSED per §4.1.A.1 dead-variant finding
+
+**Audit deliverable (d) does NOT include a `DurationObj` carrier.**
+
+Per §4.1.A.1: `TemporalData::Duration(shape_ast::ast::Duration)` is a
+dead enum variant with zero constructors. Shipping a `DurationObj`
+carrier would create:
+
+- A new heap kind constant (`HEAP_KIND_V2_DURATION`) with zero live
+  producers.
+- A `TypedArray<*const DurationObj>` instantiation with no
+  reachable user-facing `Array<duration>` path (the user-facing
+  "duration" type maps to `TimeSpan` at runtime per the inference /
+  lowering chain at `type_system/inference/expressions.rs:757` →
+  `stack_ops/mod.rs:150`).
+- An `unsafe impl HeapElement for DurationObj` body that's never
+  invoked.
+
+This is forward-S5-cleanliness work for a variant that the codebase
+treats as already-dead. The discipline-coherent disposition is
+either:
+
+- **(D-1) Skip `DurationObj` entirely** at S2-prime; the
+  `TypedArrayData::Duration` enum arm + the `TemporalData::Duration`
+  variant both fall to S5's enum deletion + a future cluster-1+
+  language-design cleanup that decides whether the "duration" user-
+  facing type should keep mapping to `TimeSpan` or get genuine
+  runtime representation. **Recommended.**
+- **(D-2) Ship a `DurationObj` carrier wrapping `shape_ast::ast::Duration`**
+  for symmetry with the other Temporal arms. Costs the carrier
+  surface + HeapElement impl + heap kind constant; benefits forward-
+  S5 cleanliness if a future language-design decision adds genuine
+  Duration runtime constructors. **Not recommended** without the
+  upstream language-design ratification.
+
+**S2-prime ships D-1.** The `TypedArrayData::Duration` enum arm
+stays in place (consistent with the audit §3.6 deprecation cadence —
+the arm is `#[deprecated]` and has zero live producers post-S2-prime;
+S5 deletes it alongside the rest of the enum). Surface the
+language-design cleanup for cluster-1+ tracking.
+
+#### §4.1.D.6 `BigIntObj` design — REFUSED per Obstacle 3 R19 defer
+
+**Audit deliverable (d) does NOT include a `BigIntObj` carrier.**
+
+Per Obstacle 3 R19 supervisor disposition (defer): "BigInt type
+design (i64 placeholder vs full-width vs external crate) is a
+separate workstream out of cluster-0 scope; S2-prime migrates the 6
+other heap-element variants and surfaces BigInt as cluster-1
+territory."
+
+The `TypedArrayData::BigInt` enum arm has live producers
+(`object_creation.rs:563`, `heap_value.rs:3058`, `builtins/array_ops.rs:492`),
+but the placeholder payload `Arc<i64>` is itself a temporary shape
+pending the BigInt Rust struct design. Migrating to
+`TypedArray<*const BigIntObj>` would either (a) preserve the i64-only
+placeholder under a new carrier name (forward-S5 cleanliness for an
+arm whose payload shape will change), or (b) gate on the BigInt
+type design landing (out of cluster-0 scope).
+
+**S2-prime ships neither.** `TypedArrayData::BigInt` enum arm stays
+in place; S5 deletes it alongside the rest of the enum. The
+cluster-1+ BigInt full-width design lands its own v2-raw carrier
+shape (or not, depending on the BigInt-as-i64-forever ruling)
+separately.
+
+#### §4.1.D.7 ConcreteType extension surface
+
+Per status doc §"R19 parallel-sub-cluster coordination note": the
+`ConcreteType` enum at `crates/shape-value/src/v2/concrete_type.rs`
+has `String / Decimal / BigInt / DateTime` arms but lacks `Timespan
+/ Instant`. The S2-prime production migration needs the
+`ConcreteType::Timespan` and `ConcreteType::Instant` arms added in
+lockstep with the producer-side migration; `Duration` is NOT added
+(per §4.1.D.5 D-1 disposition — Duration stays on legacy
+`Arc<TemporalData>` carrier).
+
+**Required ConcreteType extensions:**
+
+- `ConcreteType::Timespan` — non-parametric scalar concrete type
+  (mirror of existing `ConcreteType::DateTime` shape; the inner
+  payload is `chrono::Duration`, structurally similar to
+  `chrono::DateTime<FixedOffset>` for the typed-array purposes).
+- `ConcreteType::Instant` — non-parametric scalar concrete type
+  (mirror).
+
+Both additions follow the §2.7.5 stamp-at-compile-time discipline +
+the R19 S1.5 precedent for `ConcreteType::F32` / `ConcreteType::Char`
+non-parametric scalar additions. The cascade fan-out (`ConcreteType`
+exhaustive matches at `concrete_type.rs::stack_size` /
+`field_size` / `alignment` / `is_integer_family` / `is_floating_family` /
+`Display` impl / etc.) follows R19 S1.5's pattern — ~22 sites under
+~100-site cascade-surface-and-stop ceiling per S1.5's precedent.
+
+**HeapKind ordinals:** the new HEAP_KIND_V2_DECIMAL / DATETIME /
+TIMESPAN / INSTANT constants do NOT add new `HeapKind` enum variants
+(per ADR-005 §1 single-discriminator — every variant projects 1:1 to
+a heap-kind discriminator, and these v2-raw `<X>Obj` carriers ride
+existing HeapKind labels: `NativeKind::Ptr(HeapKind::Decimal)` /
+`Ptr(HeapKind::Temporal)` / `Ptr(HeapKind::Instant)`). The new
+constants are HEAP_KIND values (the `kind: u16` field of HeapHeader),
+not HeapKind enum variants. This preserves the cardinality bound on
+HeapKind.
+
+**Naming review against §Renames-to-refuse-on-sight:** `DecimalObj`,
+`DateTimeObj`, `TimespanObj`, `InstantObj` are structural type names
+(mirror of `StringObj` precedent). None match
+`(decode|tag|kind|dispatch|value.call|closure.callback|frame.setup|
+callee|capture) (bridge|probe|helper|hop|translator|adapter|shim)`.
+The `*Obj` suffix is a structural marker meaning "v2-raw HeapHeader-
+equipped carrier for inner T" — consistent with `StringObj`'s
+established meaning. Not a defection-attractor framing.
+
+#### §4.1.D.8 Total file additions for production migration
+
+If S2-prime closes production migration (vs audit-only-close):
+
+- **NEW files (~4 files):**
+  - `crates/shape-value/src/v2/heap_element.rs` (new module — ~30 LoC)
+  - `crates/shape-value/src/v2/decimal_obj.rs` (~80 LoC + tests)
+  - `crates/shape-value/src/v2/date_time_obj.rs` (~80 LoC + tests)
+  - `crates/shape-value/src/v2/timespan_obj.rs` (~80 LoC + tests)
+  - `crates/shape-value/src/v2/instant_obj.rs` (~80 LoC + tests)
+
+  (5 files total counted; "~4" rounded for the dispatch prompt's
+  estimate of "5 new <X>Obj files".)
+
+- **EXTENSIONS to existing files:**
+  - `crates/shape-value/src/v2/mod.rs` — register new modules
+  - `crates/shape-value/src/v2/heap_header.rs` — append HEAP_KIND_V2_*
+    constants
+  - `crates/shape-value/src/v2/typed_array.rs` — add
+    `drop_array_heap<T: HeapElement>` variant
+  - `crates/shape-value/src/v2/concrete_type.rs` — add `Timespan` +
+    `Instant` arms + ~22 cascade fan-out arms (~100-site ceiling)
+  - Producer-side bytecode emission + VM/JIT handlers per audit §3.2
+    estimate (53 construction sites across 14 files for String /
+    Decimal live arms; DateTime / Timespan / Instant dead arms get
+    `build_specialized_from_heap_arcs` arms added for completeness)
+  - 4-table lockstep cascade for any new ConcreteType arms
+
+Estimated LoC: ~600-1200 LoC for the new carrier infrastructure +
+~5-7k LoC for the producer-side migration per audit §3.2 estimate
+("2 sessions of mechanical work"). The audit-first deliverables (a)
+through (d) inclusive account for **roughly half of one
+agent-session** of work (per the dispatch prompt's "Token budget
+... generous (multi-session-equivalent work)").
+
+---
+
 ### §4.2 Obstacle O-2 — F64 AVX-512 alignment downgrade
 
 **The shape**: `TypedArrayData::F64(Arc<AlignedTypedBuffer>)`
