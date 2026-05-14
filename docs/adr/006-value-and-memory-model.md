@@ -4712,7 +4712,47 @@ It bundles three coordinated changes that share design DNA:
 
 The three changes land as one ADR amendment because they share the same forbidden-pattern (polymorphic catch-all arms with kind-blind raw-bits decode at use site) and the same replacement discipline (kind known at the variant level, runtime dispatch through typed Arcs).
 
-##### Q25.A — `TypedArrayData::HeapValue` deletion + monomorphic specialization
+##### Q25.A SUPERSEDED — Round 17 cluster-0-transition deletion target (Round 20 S2-prime amendment, 2026-05-14)
+
+**Status:** Q25.A's specialized-variants-inside-`TypedArrayData` monomorphization (the body below this preamble, lines 4715–4756 prior to this amendment) is **SUPERSEDED** by the Round 17 W12-typed-array-data-deletion authorization (`docs/cluster-audits/w12-typed-array-data-deletion-audit.md`) under cluster-0-transition strategic-owner authorization (2026-05-13). Phase 2d Q25.A was a transitional architectural state — its specialized-`TypedArrayData::<X>` variants are themselves part of the deletion target.
+
+**Authority:** strategic-owner authorization 2026-05-13 (cluster-0-transition); supervisor R19 partial disposition 2026-05-14 (§2.2-vs-Q25.A architectural conflict resolution 1b — §2.2's v2-raw `TypedArray<*const <X>Obj>` carrier wins; Q25.A specialized monomorphization retires). Landing branch: Phase 3 cluster-0 Round 20 sub-cluster S2-prime (W12-typed-array-data-heap-element-migration-prime).
+
+**Canonical replacement target:** `docs/cluster-audits/w12-typed-array-data-deletion-audit.md` §2.2 — heap-element variants migrate to v2-raw `TypedArray<*const <X>Obj>` carriers (carrier OUTSIDE the enum; per-T monomorphization via `<X>Obj` newtypes). The R20 S2-prime audit-first deliverables (`docs/cluster-audits/w12-typed-array-data-deletion-audit.md` §4.1.A / §4.1.B / §4.1.C / §4.1.D) refine the migration shape against the actual ADR-006 + Q25.A text + StringObj precedent.
+
+**Per-variant migration shape post-supersession:**
+
+| Q25.A variant (pre-supersession) | Post-supersession replacement |
+|---|---|
+| `TypedArrayData::Decimal(Arc<TypedBuffer<Decimal>>)` | `TypedArray<*const DecimalObj>` per §2.2 |
+| `TypedArrayData::BigInt(Arc<TypedBuffer<BigInt>>)` | DEFERRED to cluster-1+ per R19 disposition (Obstacle 3); BigInt Rust type design not landed |
+| `TypedArrayData::DateTime(Arc<TypedBuffer<DateTimeData>>)` | `TypedArray<*const DateTimeObj>` per §2.2 (DEAD ARM per §4.1.A.2 audit finding — no live producers today; carrier lands for forward-S5 cleanliness) |
+| `TypedArrayData::Timespan(Arc<TypedBuffer<TimespanData>>)` | `TypedArray<*const TimespanObj>` per §2.2 (DEAD ARM per §4.1.A.2 audit finding) |
+| `TypedArrayData::Duration(Arc<TypedBuffer<DurationData>>)` | NO MIGRATION — `TemporalData::Duration` is a dead enum variant per §4.1.A.1 audit finding; cluster-1+ language-design cleanup candidate |
+| `TypedArrayData::Instant(Arc<TypedBuffer<InstantData>>)` | `TypedArray<*const InstantObj>` per §2.2 (DEAD ARM per §4.1.A.2 audit finding) |
+| `TypedArrayData::Char(Arc<TypedBuffer<u32>>)` | NO MIGRATION via S2-prime path — Char is a scalar bucket per R19 S1.5 §2.7.5 amendment; `Array<char>` rides `TypedArray<char>` directly per the S1 scalar recipe |
+| `TypedArrayData::TypedObject(Arc<TypedBuffer<Arc<TypedObjectStorage>>>)` | S3 territory per §3.3; gated on Obstacle O-3 resolution (O-3.c defer per audit recommendation) |
+| `TypedArrayData::TraitObject(Arc<TypedBuffer<Arc<TraitObjectStorage>>>)` | S3 territory per §3.3; gated on Obstacle O-3a resolution |
+
+**The `String` arm** is already migrated post-R12 (W12-jit-string-carrier-unification); `StringObj` lives at `crates/shape-value/src/v2/string_obj.rs`. `TypedArrayData::String` retains live producers at root-construction sites (`object_creation.rs:518/799`, `concat.rs:240`, `array_transform.rs` derived sites) — those migrate via S2-prime per the §2.2 String row as part of the live-producer migration scope (alongside `Decimal`).
+
+**Forbidden post-supersession** (extending Q25.E #1 list with the supersession-specific entries):
+
+1. **Resurrection of specialized-`TypedArrayData::<X>` variants** under any rename ("specialized monomorphization preserved", "Q25.A-inside-enum carriers retained for cluster-0 close", "documented intentional duality between specialized arms and v2-raw `TypedArray<*const <X>Obj>` carriers"). The cluster-0-transition authorization 2026-05-13 stands; specialized-variants-inside-enum is the deletion target, not a preserved-alongside-v2-raw alternative.
+
+2. **"Preserve fallback for one period"** framing: "cluster-0 keeps Q25.A specialized variants, cluster-1 deletes" is the W-series declare-victory pattern at sub-cluster-disposition layer (caught at R18 in Smoke 3 JIT framing; refused at supervisor layer). The S2-prime migration retires Q25.A's specialized variants IN cluster-0 by migrating their producers to v2-raw carriers. The Q25.A enum arms themselves stay in source until S5 deletes the entire `TypedArrayData` enum — but they are `#[deprecated]` and have zero live producers post-S2-prime.
+
+3. **Mixed-migration shape** preserving some Q25.A specialized variants while migrating others to v2-raw `TypedArray<*const <X>Obj>` — the migration is single-target (v2-raw flat-struct carrier), per-variant decision is **whether to migrate now (S2-prime) or defer (S3-S4)**, not **whether to migrate to Q25.A or v2-raw**. Per-variant disposition table above; deviations require a separate ADR amendment.
+
+4. **`Decimal` / `DateTime` / etc. payload type-name from Q25.A draft text**: Q25.A's draft text referenced `DateTimeData` / `TimespanData` / `DurationData` / `InstantData` as the per-T inner payload type names. The R20 audit (§4.1.A) clarifies these are AST-internal `TemporalData` arms (`TimeSpan(chrono::Duration)` / `DateTime(chrono::DateTime<FixedOffset>)` / `std::time::Instant`). The S2-prime newtype carriers wrap the **actual runtime payload types** (e.g. `DateTimeObj` wraps `chrono::DateTime<FixedOffset>`, not a hypothetical `DateTimeData`). The Q25.A draft text's `<X>Data` names were placeholders; refining to actual runtime payload types is part of deliverable (d).
+
+**Preservation:** Q25.B (HashMapData parametric value buffer) and Q25.C (`HeapKind::TraitObject` re-introduction with universal `dyn Trait`) are **NOT** superseded by this amendment. Q25.B's `HashMapValueBuf` enum has the same parallel-implementation-defection-attractor shape as `TypedArrayData` and is a future cluster-1+ deletion target (audit §5 verdict, "out of cluster-0 scope"); Q25.C is the binding TraitObject rebuild authority untouched by S2-prime scope.
+
+**Migration cadence:** S2-prime (Round 20) lands the v2-raw producer migrations for live arms (String + Decimal) + Obj carriers for forward-S5 cleanliness arms (DateTime + Timespan + Instant — Duration excluded per §4.1.A.1 dead-variant finding). S5 deletes the `TypedArrayData` enum + the per-Q25.A specialized arms in one mechanical sub-cluster (per audit §3.5 close gate: `grep -rn 'TypedArrayData::' crates/` returns zero hits).
+
+The body below this preamble (Q25.A's original ratification text from Phase 2d 2026-05-11) is **PRESERVED FOR HISTORICAL PROVENANCE**. Readers benefit from seeing what was retired and why the supersession landed. Code-level enforcement (the `grep -rn 'TypedArrayData::<X>' crates/` close gates in S2-prime / S5) operates against the post-supersession migration target, not the body below.
+
+##### Q25.A (Phase 2d original ratification, 2026-05-11, **SUPERSEDED**) — `TypedArrayData::HeapValue` deletion + monomorphic specialization
 
 **Decision:** the `TypedArrayData::HeapValue(Arc<TypedBuffer<Arc<HeapValue>>>)` arm is deleted. `TypedArrayData` gains specialized variants for every built-in heap type:
 

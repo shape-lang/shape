@@ -648,6 +648,943 @@ discipline-coherent but accumulates source carriers; O-1.a is
 the smallest delta but requires the §2.7.5 amendment. Without
 supervisor disposition, S2 cannot close cleanly.
 
+### §4.1.A Round 20 S2-prime audit-first deliverable (a): TemporalData variant classification (2026-05-14)
+
+**Supervisor R19 disposition (selected):** O-1.b — separate v2-raw
+carrier per user-facing semantic kind (newtype path).
+
+**Supervisor's prediction:** 3 user-facing variants
+(DateTime/Duration/TimeSpan) need `<X>Obj` carriers; 4 AST-internal
+variants (Timeframe/TimeReference/DateTimeExpr/DataDateTimeRef) stay
+on legacy `Arc<TemporalData>` carrier.
+
+**Audit deliverable (a) ground-truths the prediction against actual
+source at HEAD `7e95069f`. The classification refines the prediction
+in two structurally important ways.**
+
+#### §4.1.A.1 Construction-site inventory for `TemporalData::*` variants
+
+Per-variant `Arc::new(TemporalData::<Variant>(...))` constructor
+audit (`grep -rn "Arc::new(TemporalData::" crates/ --include="*.rs"`,
+excluding test fixtures and string-name-only references):
+
+| Variant | Genuine root constructors | User-facing semantics |
+|---|---|---|
+| `TemporalData::DateTime(chrono::DateTime<FixedOffset>)` | **3 sites** — `executor/stack_ops/mod.rs:169` (Constant::DateTimeExpr lowering: `@now`, `@today`, `@"2026-01-01"`); `executor/objects/datetime_methods.rs:440/454/464/522/545/570/583/596/609/637/714/720/787` (multiple, all DateTime-returning method-handlers); test fixtures in `kinded_slot.rs`. **USER-FACING — reachable from user code.** |
+| `TemporalData::TimeSpan(chrono::Duration)` | **2 site-classes** — `executor/stack_ops/mod.rs:150` (Constant::Duration lowering: `3d`, `10s`, `2h30m` literals via `ast_duration_to_chrono`); `executor/objects/datetime_methods.rs:549/714/742/797` (multiple, all TimeSpan-returning method-handlers). **USER-FACING — reachable from user code via duration literals + TimeSpan-returning methods.** |
+| `TemporalData::Duration(shape_ast::ast::Duration)` | **ZERO root constructors.** Searched: `grep -rn "Arc::new(TemporalData::Duration\|TemporalData::Duration(" crates/ --include="*.rs"`. Hits are pattern-matches in `Display` impl (`heap_value.rs:3583`), `type_name()` impl (`heap_value.rs:3564`), equality checks (`heap_value.rs:4262`), method-routing fallback (`objects/mod.rs:692`). **DEAD ENUM VARIANT — has no constructor at runtime.** |
+| `TemporalData::Timeframe(shape_ast::data::Timeframe)` | **ZERO constructors.** Only `type_name()` / `Display` / equality (`heap_value.rs:3566/3585/4264`). **AST-INTERNAL — never lifted to runtime value.** |
+| `TemporalData::TimeReference(Box<shape_ast::ast::TimeReference>)` | **ZERO constructors.** Only `type_name()` / `Display` (`heap_value.rs:3567/3586`). **AST-INTERNAL.** |
+| `TemporalData::DateTimeExpr(Box<shape_ast::ast::DateTimeExpr>)` | **ZERO constructors.** Only doc-comment reference in `window_join.rs:385` and `type_name()` / `Display` (`heap_value.rs:3568/3587`). **AST-INTERNAL** (the `Constant::DateTimeExpr` lowering at `stack_ops/mod.rs:165` evaluates the AST into a `chrono::DateTime<FixedOffset>` and wraps as `TemporalData::DateTime`, NOT as `TemporalData::DateTimeExpr`). |
+| `TemporalData::DataDateTimeRef(Box<shape_ast::ast::DataDateTimeRef>)` | **ZERO constructors.** Only `type_name()` / `Display` (`heap_value.rs:3569/3588`). **AST-INTERNAL.** |
+
+**Audit finding refines supervisor's prediction in TWO ways:**
+
+1. **Only 2 of the 7 variants are user-facing, not 3.** The user-facing
+   set is `{DateTime, TimeSpan}` (2 variants), not the predicted
+   `{DateTime, Duration, TimeSpan}` (3 variants). `TemporalData::Duration`
+   is a dead enum variant — has zero constructors anywhere in source.
+   The user-facing Shape type "duration" (inferred from `Expr::Duration`
+   at `type_system/inference/expressions.rs:757`) is backed at runtime
+   by `TemporalData::TimeSpan(chrono::Duration)`, NOT by
+   `TemporalData::Duration(shape_ast::ast::Duration)`. The lowering site
+   `stack_ops/mod.rs:150` converts `shape_ast::ast::Duration` via
+   `ast_duration_to_chrono(d)` to `chrono::Duration` and wraps as
+   `TimeSpan`. The `Duration` enum variant is an architectural
+   leftover from a pre-bulldozer design where `shape_ast::ast::Duration`
+   was preserved verbatim at the value tier; current strict-typing
+   discipline lowers to `chrono::Duration` at value-construction time.
+
+2. **5 of the 7 variants are AST-internal**, not 4 as predicted. The
+   AST-internal set is `{Duration, Timeframe, TimeReference, DateTimeExpr,
+   DataDateTimeRef}` — Duration joins the other 4 as a never-constructed
+   variant. The `HeapValue::Temporal(Arc<TemporalData>)` arm in
+   `heap_variants.rs:736` stays alive post-S2-prime for these 5 variants;
+   the per-Q25.A specialized `TypedArrayData::DateTime/Timespan/Duration`
+   arms are correspondingly dead targets (see §4.1.A.2 below).
+
+#### §4.1.A.2 `TypedArrayData::<Variant>` root-constructor inventory (the S2-prime migration territory)
+
+`grep -rn "TypedArrayData::<Variant>(Arc::new" crates/ --include="*.rs"`
+for the 6 R19-S2-named variants (String / Decimal / BigInt / DateTime /
+Timespan / Duration / Instant):
+
+| Variant | Root constructors | Reachability |
+|---|---|---|
+| `TypedArrayData::String(...)` | `object_creation.rs:518/799`, `concat.rs:240`, `array_transform.rs:multiple-derived`. **Multiple live root sites.** | User-facing reachable via `Array<string>` literal + string-stdlib methods. |
+| `TypedArrayData::Decimal(...)` | `object_creation.rs:544`, `heap_value.rs:3044` (build_specialized), `builtins/array_ops.rs:485` (filled), `array_transform.rs:567/732/983/1460`, `concat.rs:255`. **Multiple live root sites.** | User-facing reachable via `Array<decimal>` literal + decimal methods. |
+| `TypedArrayData::BigInt(...)` | `object_creation.rs:563`, `heap_value.rs:3058` (build_specialized), `builtins/array_ops.rs:492` (filled), `array_transform.rs:573/738/987/1465`, `concat.rs:263`. **Multiple live root sites.** | User-facing reachable (mostly — see Obstacle 3 BigInt-type-design defer). |
+| `TypedArrayData::DateTime(...)` | **ZERO root constructors.** All apparent constructions in `array_transform.rs:579/744/992` and `concat.rs:271` are **derived operations** (`slice` / `zip` / `concat`) that re-wrap an existing buffer originating from `op_new_array`. `op_new_array`'s only path producing `TypedArrayData::DateTime` is `build_specialized_from_heap_arcs` via the `other => Err(...)` fallthrough at `heap_value.rs:3088` (which **does NOT have a `HeapValue::Temporal` arm** — see source at `heap_value.rs:3060-3093`). Therefore: **NO live producer chains exist for `TypedArrayData::DateTime`.** |
+| `TypedArrayData::Timespan(...)` | Same as DateTime — only `array_transform.rs:585/750/997` and `concat.rs:279` derived sites. No root. | **DEAD POST-Q25.A.** |
+| `TypedArrayData::Duration(...)` | Same as DateTime — only `array_transform.rs:591/756/1002` and `concat.rs:287` derived sites. No root. | **DEAD POST-Q25.A** (compounded — even the upstream `TemporalData::Duration` is a dead variant per §4.1.A.1). |
+| `TypedArrayData::Instant(...)` | Same as DateTime — only `array_transform.rs:597/762/1007` and `concat.rs:295` derived sites. No root. | **DEAD POST-Q25.A.** |
+
+**Audit finding (load-bearing for S2-prime scope):**
+
+The Q25.A monomorphization (W17-typed-carrier-bundle-A,
+commit 1/4 2026-05-11) added the specialized `TypedArrayData::DateTime`,
+`Timespan`, `Duration`, `Instant` arms but **never wired root
+producers**. `build_specialized_from_heap_arcs` (the
+W17-typed-carrier-bundle-A checkpoint 2/4 helper) handles only
+`String / Decimal / BigInt / TypedObject / Char`, with a
+`other => Err(...)` fallthrough for `HeapValue::Temporal` /
+`HeapValue::Instant`. Empirical grep confirms zero `Array<datetime>` /
+`Array<duration>` / `Array<timespan>` / `Array<instant>` source
+references anywhere in crates/ or tests/.
+
+This means **the heap-element S2-prime migration scope for
+DateTime / Timespan / Duration / Instant is migrating dead arms,
+not live producers**. The user-facing impact of producing v2-raw
+`*const DateTimeObj` / `TimespanObj` / `DurationObj` / `InstantObj`
+carriers per the supervisor's R19 disposition is **zero behavior
+change** (no user-reachable production path uses them today).
+The migration is structural cleanliness for S5's
+`TypedArrayData` enum deletion — it ensures that when the enum is
+deleted, the arms vacated are confirmed-dead, not silently-broken
+production paths.
+
+#### §4.1.A.3 HashMapValueBuf parallel deletion mirror
+
+`grep -rn "HashMapValueBuf::<Variant>(Arc::new" crates/ --include="*.rs"`
+for the temporal/instant arms:
+
+- `HashMapValueBuf::DateTime` / `Timespan` / `Duration` / `Instant`:
+  **ZERO root constructors.** Only the `hashmap_methods.rs:253-256`
+  HashMap→TypedArrayData projection helper consumes them, and that
+  helper itself is unreachable on the heap-element types since no
+  HashMap construction emits them.
+
+This confirms the Q25.A specialized-variant pattern is **uniformly
+dead** for the temporal-family element kinds in BOTH `TypedArrayData`
+and `HashMapValueBuf`. The §5 HashMapValueBuf parallel deletion
+shape inherits this finding: the temporal/instant arms are dead
+targets in HashMapValueBuf too.
+
+#### §4.1.A.4 Refined supervisor-disposition map
+
+Restated audit deliverable (a) finding for the team-lead handover +
+status-doc record:
+
+| User-facing? | `TemporalData` variant | `<X>Obj` carrier needed in S2-prime? |
+|---|---|---|
+| YES | `DateTime(chrono::DateTime<FixedOffset>)` | YES — `DateTimeObj` newtype carrier |
+| YES | `TimeSpan(chrono::Duration)` | YES — `TimespanObj` newtype carrier (mirrors runtime variant naming) |
+| NO | `Duration(shape_ast::ast::Duration)` | NO — dead enum variant; arm stays on legacy `Arc<TemporalData>` carrier indefinitely (cluster-1+ language-design cleanup candidate) |
+| NO | `Timeframe(shape_ast::data::Timeframe)` | NO — AST-internal |
+| NO | `TimeReference(Box<...>)` | NO — AST-internal |
+| NO | `DateTimeExpr(Box<...>)` | NO — AST-internal |
+| NO | `DataDateTimeRef(Box<...>)` | NO — AST-internal |
+
+**Plus `Instant`** (out of `TemporalData` family; lives at
+`crates/shape-value/src/heap_value.rs` near
+`HeapValue::Instant(Arc<std::time::Instant>)`):
+
+| User-facing? | `Arc<T>` payload | `<X>Obj` carrier needed in S2-prime? |
+|---|---|---|
+| YES | `std::time::Instant` (16-byte Copy on most platforms) | YES — `InstantObj` newtype carrier (NOTE: `TypedArrayData::Instant` is dead per §4.1.A.2, so this carrier lands for forward-S5 cleanliness, not for reachable code paths) |
+
+**Plus `Decimal`** (already mapped per audit §2.2):
+
+| User-facing? | `Arc<T>` payload | `<X>Obj` carrier needed in S2-prime? |
+|---|---|---|
+| YES | `rust_decimal::Decimal` (16-byte Copy) | YES — `DecimalObj` carrier; **live producers exist** (`object_creation.rs:544`, `array_ops.rs:485`, `heap_value.rs:3044` build_specialized arm); migration is non-trivial. |
+
+**String already migrated** post-R12 (W12-jit-string-carrier-unification);
+`StringObj` exists at `crates/shape-value/src/v2/string_obj.rs`. Per
+audit §2.2 String row, no new `StringObj` carrier is built. However,
+**`TypedArrayData::String` is still live** at root-construction sites
+(see §4.1.A.2) — those producers still construct
+`TypedArrayData::String(Arc::new(TypedBuffer::from_vec(...)))` rather
+than `*mut TypedArray<*const StringObj>`. The producer-migration is
+S2-prime territory for the String arm too.
+
+**Total live-producer migration surface for S2-prime:**
+
+- **String** — Multiple live root sites. Migration to
+  `TypedArray<*const StringObj>` is mechanical but non-trivial (53
+  sites across 14 files per status doc).
+- **Decimal** — Multiple live root sites. Migration to
+  `TypedArray<*const DecimalObj>` requires creating `DecimalObj` +
+  per-element retain/release plumbing.
+
+**Dead-arm migration surface for S2-prime (structural cleanliness
+for S5):**
+
+- **DateTime / TimeSpan / Instant** — Zero live root producers
+  today. Migration creates the carriers + threads them through
+  `build_specialized_from_heap_arcs` (gaining the missing arms)
+  + smoke-tests the producer/consumer chain end-to-end. Net
+  behavior change: enables `Array<DateTime>` / `Array<Timespan>` /
+  `Array<Instant>` as reachable user-facing types (which they
+  currently are not, per the surface-and-stop at
+  `heap_value.rs:3088`).
+
+#### §4.1.A.5 Architectural implication for S2-prime scope
+
+The dead-arm finding has two competing interpretations:
+
+- **(A) Minimal scope.** Only migrate `String` (live) + `Decimal`
+  (live). Leave `DateTime / Timespan / Duration / Instant /
+  BigInt` arms entirely in place (dead) for S5 deletion-time
+  cleanup. This minimizes S2-prime scope to genuinely-load-bearing
+  migration work.
+
+- **(B) Comprehensive scope.** Migrate all 5 user-facing carriers
+  (String / Decimal / DateTime / Timespan / Instant — Duration
+  excluded per §4.1.A.4) + thread through
+  `build_specialized_from_heap_arcs` for forward-S5 cleanliness.
+  Some of the migration touches dead code; nevertheless the v2-raw
+  carrier structs + their tests still land, providing structural
+  cleanliness for S5's enum deletion + enabling future user-facing
+  reachability of these `Array<T>` types.
+
+**Audit recommendation: surface for supervisor disposition.** The
+dead-arm finding genuinely refines the dispatch's working hypothesis
+that "S2-prime migrates 6 user-facing variants per audit §2.2." The
+correct count is 2 live + 3 dead-but-create-forward (DateTime /
+Timespan / Instant) + 1 deferred (BigInt) + 1 cluster-1 cleanup
+candidate (Duration enum variant). Option (A) is the smaller-scope
+discipline-coherent close; Option (B) is the supervisor's R19
+disposition taken literally. Surface to team-lead for relay.
+
+### §4.1.B Round 20 S2-prime audit-first deliverable (b): Per-element retain/release ABI shape (2026-05-14)
+
+**Dispatch obstacle:** the existing v2 refcount ABI at
+`crates/shape-value/src/v2/refcount.rs:14-38` operates on
+`*const HeapHeader` and manipulates the refcount but **does NOT free
+the allocation on refcount==0** — caller-responsibility per the
+`v2_release` docstring at line 26-28:
+
+> If this returns `true`, the caller must deallocate the object and
+> must not access it again.
+
+For `TypedArray<*const <X>Obj>::drop_array` to release per-element
+shares cleanly at the right per-T deallocator, the dispatch needs a
+per-T entry point that knows about the `<X>Obj`'s sub-allocations.
+The `StringObj` precedent at `crates/shape-value/src/v2/string_obj.rs:89-99`
+illustrates this: `StringObj::drop(ptr: *mut Self)` frees both the
+inner `data` buffer (via `Layout::from_size_align(len, 1)`) and the
+`StringObj` struct itself (via `Layout::new::<Self>`). A future
+`DecimalObj` would have just the inline 16-byte Decimal payload + a
+single `Layout::new::<Self>` dealloc; an `InstantObj` would mirror
+that shape.
+
+Three options surfaced in R19 surface-and-stop §4.1:
+
+- **(a)** `unsafe trait HeapElement { unsafe fn release_elem(*const Self); }`
+  per-T monomorphized dispatch. Each `<X>Obj` impls it, calling
+  `v2_release(self.header)` then the per-T deallocator on
+  return-true. `TypedArray<T>::drop_array` constrains its `T` impl
+  to `T: HeapElement` for the heap-element variants; per-T dispatch
+  is at the trait layer, not runtime.
+
+- **(b)** `TypedArray<T>` becomes specialized-per-element-T with
+  per-T `drop_array` bodies (effectively
+  `impl TypedArray<*const StringObj>`, `impl TypedArray<*const DecimalObj>`,
+  etc.). No new trait, but multiplies the impl block surface area.
+
+- **(c)** `drop_array` is invoked with a runtime kind discriminator
+  (e.g. `*mut TypedArray<dyn HeapElement>` or a side-table mapping
+  the array's heap-kind tag to a `fn(*const HeapHeader)` deallocator
+  pointer). Selects per-T deallocator from kind at runtime.
+
+#### §4.1.B.1 Detailed analysis of each option
+
+**Option (a) — `HeapElement` trait dispatch.**
+
+Shape:
+
+```rust
+// crates/shape-value/src/v2/heap_element.rs (new file)
+pub unsafe trait HeapElement {
+    /// Decrement the refcount of `*ptr`. If the refcount reaches
+    /// zero, fully deallocate the object (including any nested
+    /// payload buffers per the implementor's drop semantics).
+    ///
+    /// # Safety
+    /// `ptr` must point to a valid, live `Self` allocated via the
+    /// canonical v2-raw allocator. After this call returns,
+    /// `ptr` must not be dereferenced (the allocation may have
+    /// been freed).
+    unsafe fn release_elem(ptr: *const Self);
+}
+
+// crates/shape-value/src/v2/string_obj.rs (impl block addition)
+unsafe impl HeapElement for StringObj {
+    unsafe fn release_elem(ptr: *const Self) {
+        if unsafe { crate::v2::refcount::v2_release(&(*ptr).header) } {
+            unsafe { Self::drop(ptr as *mut Self) };
+        }
+    }
+}
+```
+
+`TypedArray<*const T>::drop_array` for the heap-element variants
+becomes:
+
+```rust
+// Inside impl<T: Copy> TypedArray<*const T> where T: HeapElement {
+pub unsafe fn drop_array_with_elem_release(ptr: *mut Self) {
+    let arr = &*ptr;
+    if arr.cap > 0 && !arr.data.is_null() {
+        for i in 0..arr.len {
+            let elem_ptr = unsafe { *arr.data.add(i as usize) };
+            unsafe { T::release_elem(elem_ptr) };
+        }
+        // ... rest of existing drop_array body
+    }
+}
+```
+
+The compile-time monomorphization guarantees per-T dispatch with
+zero runtime cost.
+
+**Pros:**
+
+- Compile-time monomorphized — no runtime dispatch.
+- Bounded surface: one trait, one method, per-T implementation
+  lives alongside the `<X>Obj` struct definition (locality).
+- Mirrors Rust stdlib precedent (`Drop` trait for owned types).
+- Plays cleanly with the dead-arm finding from deliverable (a):
+  arms can be created without producing dead trait impls (the
+  trait is implemented eagerly for forward-S5 readiness, even if
+  no live producer fires it yet).
+
+**Cons:**
+
+- Audit §4.3 named option (a) as **O-3.b** for TypedObject
+  specifically and refused it: "perpetuates Arc-vs-HeapHeader
+  duality." But that objection applies to `TypedObjectStorage`
+  (which is Arc-wrapped, NOT HeapHeader-equipped). For uniformly
+  HeapHeader-equipped `<X>Obj` carriers (StringObj already, +
+  to-be-created DecimalObj/DateTimeObj/etc.), the duality
+  objection does NOT apply — every `<X>Obj` has the same
+  HeapHeader-at-offset-0 contract. The audit's O-3.b refusal is
+  scoped to TypedObject; deliverable (b) extends to heap-element
+  `<X>Obj` carriers without that scoping issue.
+
+- Forbidden-pattern check: does `HeapElement` perpetuate a
+  defection-attractor framing? Per CLAUDE.md "Renames to refuse
+  on sight" broader-family regex
+  `(decode|tag|kind|dispatch|...) (bridge|probe|helper|hop|translator|adapter|shim)`:
+  "HeapElement" is none of these descriptors. It is a structural
+  trait describing "this type lives on the v2-raw heap with
+  refcount discipline." Compared to `as_heap_value()` (which is
+  a legacy Box<HeapValue> recovery method) or `Arc<HeapValue>`
+  catch-all wrappers (forbidden under §2.7.24 Q25.E #1), the
+  `HeapElement` trait is a typed-Arc-shape-preserving construct
+  consistent with ADR-005 §1 single-discriminator. The trait does
+  not introduce a parallel sum type; it constrains how T is
+  released within `TypedArray<*const T>` whose discriminator is
+  the `HeapKind` carried on the slot (per ADR-006 §2.7.7).
+
+**Option (b) — Per-T `TypedArray<T>` impl specialization.**
+
+Shape:
+
+```rust
+// crates/shape-value/src/v2/typed_array.rs (impl block additions)
+impl TypedArray<*const StringObj> {
+    pub unsafe fn drop_array(ptr: *mut Self) {
+        let arr = &*ptr;
+        if arr.cap > 0 && !arr.data.is_null() {
+            for i in 0..arr.len {
+                let elem_ptr = unsafe { *arr.data.add(i as usize) };
+                if unsafe { crate::v2::refcount::v2_release(&(*elem_ptr).header) } {
+                    unsafe { StringObj::drop(elem_ptr as *mut StringObj) };
+                }
+            }
+            // ... rest of existing drop_array body
+        }
+    }
+}
+
+impl TypedArray<*const DecimalObj> {
+    pub unsafe fn drop_array(ptr: *mut Self) {
+        // mirror of above, with DecimalObj::drop
+    }
+}
+// ... per <X>Obj
+```
+
+This shape conflicts with Rust's coherence rules: there's already a
+blanket `impl<T: Copy> TypedArray<T>` containing a `drop_array(ptr)`
+method. The per-T impls would have to **shadow** the blanket impl
+for those specific `T = *const <X>Obj` cases — Rust doesn't allow
+that directly (you can't have two `impl` blocks both providing a
+method named `drop_array` for overlapping `T`).
+
+**Workarounds:**
+
+- (b.1) Rename the blanket version to `drop_array_pod` (for
+  plain-old-data T) and have a separate `drop_array_heap` family
+  per-T. Caller chooses which to invoke based on element kind.
+- (b.2) Use specialization (`#[cfg(feature = "specialization")]`)
+  — nightly-only feature, not stable; refused.
+- (b.3) Per-T newtype wrappers (`pub struct StringArray(TypedArray<*const StringObj>);`)
+  with their own `drop_array`. Each newtype is a separate Rust
+  type; coherence OK. Cost: API surface multiplication, callers
+  juggle distinct types per element kind.
+
+**Pros:**
+
+- No new trait surface.
+- Per-T deallocator body lives alongside `TypedArray<T>` definition
+  (locality vs being scattered to per-Obj files in option (a)).
+
+**Cons:**
+
+- Requires a workaround for Rust coherence (b.1 or b.3 above);
+  every workaround adds API-surface complexity.
+- (b.1) renames the existing API contract `drop_array` — touches
+  every existing caller; not a discipline-coherent boundary
+  shift.
+- (b.3) multiplies type surface (newtype per kind); each kind has
+  its own constructor/accessor/methods.
+- For dead-arm migrations (DateTime/Timespan/Instant per §4.1.A.2):
+  shipping per-T impls for arms with zero live producers
+  bloats the API surface without immediate user-facing value.
+
+**Option (c) — Runtime kind discriminator at `drop_array`.**
+
+Shape:
+
+```rust
+impl<T: Copy> TypedArray<T> {
+    pub unsafe fn drop_array_with_element_kind(
+        ptr: *mut Self,
+        elem_kind: NativeKind,
+    ) {
+        let arr = &*ptr;
+        if arr.cap > 0 && !arr.data.is_null() {
+            for i in 0..arr.len {
+                let elem_bits: u64 = ...; // read T bytes as u64
+                // Dispatch on elem_kind to call the right per-T release
+                match elem_kind {
+                    NativeKind::Ptr(HeapKind::String) => {
+                        let elem_ptr = elem_bits as *const StringObj;
+                        if v2_release(&(*elem_ptr).header) {
+                            StringObj::drop(elem_ptr as *mut StringObj);
+                        }
+                    }
+                    NativeKind::Ptr(HeapKind::Decimal) => { /* ... */ }
+                    // ... per-kind arms
+                    _ => { /* scalar or unrecognized — no-op */ }
+                }
+            }
+            // ... rest of existing drop_array body
+        }
+    }
+}
+```
+
+**Pros:**
+
+- Single `drop_array` entry point; callers don't choose between
+  variants.
+- No new trait.
+
+**Cons (load-bearing):**
+
+- **This is a §2.7.7 #4 / #7 forbidden pattern in disguise.** The
+  `elem_kind` discriminator reaches the runtime dispatch at drop
+  time, and the match arm decodes per-element bits per-kind. Compare
+  to the deleted `UnifiedArray` (§2.7.14): "Pre-strict-typing
+  `UnifiedArray` packed an `ArrayElementKind` byte and a typed-
+  mirror pointer into the `#[repr(C)]` heap object alongside the
+  `Vec<u64>` data buffer ... Every JIT-FFI consumer consumed this
+  kind byte to dispatch element operations. This is the §2.7.7 #4
+  / #7 forbidden pattern — kind recovered at runtime via heap-byte
+  decode rather than threaded from the producing call signature."
+  Option (c) doesn't store the kind on the heap (it threads through
+  the `elem_kind` parameter), but **the runtime dispatch on the
+  kind at drop-time IS the W10-misc-deleted pattern** in another
+  layer. The architectural cleanliness of v2-raw `TypedArray<T>` is
+  "T is monomorphized at compile time; no runtime dispatch on
+  element kind."
+
+- Bool-default risk: when `elem_kind` is unknown at the drop
+  callsite, the match's `_ => { no-op }` arm silently leaks. Per
+  §2.7.7 #9 / §2.7.8 #4, this is a forbidden Bool-default-style
+  fallback (the only correct shape is surface-and-stop, but
+  surface-and-stop in a `Drop` impl is itself a bug — Rust's drop
+  semantics don't accommodate `Result<(), VMError>`-returning
+  destructors cleanly).
+
+- **Refuse option (c).** It re-introduces runtime kind dispatch at
+  the per-element retain/release path — the exact pattern v2-raw's
+  monomorphization-on-element-kind was designed to delete.
+
+#### §4.1.B.2 Decision
+
+**Audit deliverable (b) decision: Option (a) — `HeapElement` trait dispatch.**
+
+Rationale:
+
+1. **Discipline-coherent with ADR-006 §2.7.5** (stamp at compile
+   time): per-T release dispatch is monomorphized via the trait
+   at compile time; no runtime kind probe at drop time.
+2. **Discipline-coherent with ADR-005 §1** (single-discriminator):
+   the trait constrains `T: HeapElement` for heap-element
+   `TypedArray<*const T>` instantiations; `HeapElement` is not a
+   parallel sum type to `HeapKind` — every variant of the trait
+   IS a distinct Rust type (StringObj/DecimalObj/...) with its
+   own `release_elem` body. The trait is a structural constraint,
+   not a discriminator.
+3. **Discipline-coherent with §2.7.6 / Q8 carrier-API bound**: the
+   `HeapElement` trait method `release_elem` takes only `*const Self`
+   — no `NativeKind` parameter, no `HeapValue` access. The kind is
+   carried by the Rust type system, not by a runtime discriminator.
+4. **§4.3 O-3.b objection scoped correctly**: the audit's earlier
+   refusal of "per-T retain/release dispatch" was for `TypedObject` /
+   `TraitObject` (where the inner storage is Arc-wrapped, NOT
+   HeapHeader-equipped — adding `HeapElement` would perpetuate
+   Arc-vs-HeapHeader duality). For uniformly HeapHeader-equipped
+   `<X>Obj` carriers (StringObj precedent + to-be-created
+   DecimalObj/DateTimeObj/TimespanObj/InstantObj), every
+   implementor has the same HeapHeader-at-offset-0 contract.
+5. **Forward-S5 readiness**: when S5 deletes the TypedArrayData
+   enum, the `TypedArray<*const <X>Obj>` instantiations need their
+   release plumbing in place. Option (a) lets the trait be
+   implemented eagerly per-`<X>Obj` (including for dead arms per
+   §4.1.A.2), with zero runtime cost when no live producer fires.
+
+#### §4.1.B.3 Forbidden patterns the decision rules out
+
+- **Renamed "HeapElement" via defection-attractor framing**: future
+  agents must not rename `HeapElement` to "heap-bridge" /
+  "elem-helper" / "release-translator" / etc. The `(decode|tag|
+  kind|dispatch|value.call|closure.callback|frame.setup|callee|
+  capture) (bridge|probe|helper|hop|translator|adapter|shim)`
+  broader-family regex applies — `HeapElement` describes a
+  structural property (this T lives on the v2-raw heap), not a
+  dispatch role.
+
+- **`HeapElement::release_elem` taking a NativeKind parameter**:
+  refused — the trait dispatches via the Rust type system, not
+  via a runtime kind probe.
+
+- **Bool-default in `release_elem` body**: if a `<X>Obj` author
+  encounters a kind-source gap (e.g. inner `Arc<T>` field whose
+  drop body is unproven), surface-and-stop with
+  `NotImplemented(SURFACE: ...)` at the construction-site, not in
+  the release body. Per §2.7.7 #9.
+
+- **`HeapElement` for non-HeapHeader-equipped types**: refused at
+  trait-impl site. Implementing `unsafe impl HeapElement for
+  TypedObjectStorage` would fail the `(*ptr).header` field
+  access at compile time (no HeapHeader field) — the trait is
+  structurally constrained to types with `HeapHeader` at offset 0.
+
+#### §4.1.B.4 Migration recipe
+
+For each new `<X>Obj` carrier per deliverable (d):
+
+1. Create `crates/shape-value/src/v2/<x>_obj.rs` mirroring StringObj
+   shape (struct + new + drop + size assertion).
+2. Implement `unsafe impl HeapElement for <X>Obj { unsafe fn release_elem(ptr) { ... } }`
+   in the same file.
+3. Add compile-time test ensuring the trait impl satisfies the
+   HeapHeader-at-offset-0 invariant (`offset_of!(<X>Obj, header) ==
+   0`).
+4. Extend `TypedArray<T>`'s `drop_array` family with an
+   `unsafe fn drop_array_heap<T: HeapElement>(ptr: *mut TypedArray<*const T>)`
+   variant (parallel to the existing Copy-T `drop_array`); callers
+   choose at compile time based on whether the element kind is
+   POD or heap-resident.
+
+The single addition to `TypedArray<T>` API is the new
+`drop_array_heap` variant gated on `T: HeapElement`. No existing
+caller changes (POD T paths keep using the existing `drop_array`).
+
+#### §4.1.B.5 Out-of-scope this deliverable
+
+- HeapElement impl for `TypedObjectStorage` / `TraitObjectStorage`
+  — those are S3 territory per §3.3 / Obstacle O-3 / O-3a, and
+  the audit's O-3.c "defer" disposition stands. The trait surface
+  defined here is bounded to `<X>Obj`-style HeapHeader-equipped
+  carriers.
+- Retain-on-push: deliverable (b) covers release-on-drop only.
+  The retain-on-push side at `TypedArray<*const <X>Obj>::push`
+  call sites uses the same `v2_retain(&(*elem_ptr).header)` shape
+  per StringObj precedent — no new trait method needed (callers
+  invoke `v2_retain` directly with the header pointer).
+
+### §4.1.C Round 20 S2-prime audit-first deliverable (c): Q25.A SUPERSEDED amendment text landed (2026-05-14)
+
+Per supervisor R19 disposition (Q25.A SUPERSEDED, option 1b) the
+amendment text landed inline at `docs/adr/006-value-and-memory-
+model.md` §2.7.24 as a new preamble subsection `Q25.A SUPERSEDED —
+Round 17 cluster-0-transition deletion target (Round 20 S2-prime
+amendment, 2026-05-14)` at the head of the Q25.A subsection
+(immediately after the §2.7.24 header at line 4704). The
+pre-amendment Q25.A body (Phase 2d original ratification 2026-05-11
+text) is RENAMED to `Q25.A (Phase 2d original ratification,
+2026-05-11, **SUPERSEDED**)` and preserved for historical provenance.
+
+The amendment text contains:
+
+- Authority cite (strategic-owner authorization 2026-05-13 +
+  supervisor R19 partial disposition 2026-05-14)
+- Canonical replacement target (§2.2 of this audit doc + R20
+  S2-prime audit-first deliverables §4.1.A / §4.1.B / §4.1.D)
+- Per-variant migration shape table reflecting:
+  * Decimal: TypedArray<*const DecimalObj> per §2.2 (live)
+  * BigInt: DEFERRED to cluster-1+ per R19 Obstacle 3 disposition
+  * DateTime/Timespan/Instant: dead arms per §4.1.A.2;
+    migrate for forward-S5 cleanliness
+  * Duration: NO MIGRATION per §4.1.A.1 dead-variant finding
+  * Char: scalar bucket per R19 S1.5 (out of S2-prime scope)
+  * TypedObject/TraitObject: S3 territory (gated on O-3/O-3a)
+- 4 forbidden-post-supersession entries
+- Q25.B / Q25.C explicitly NOT superseded
+- Migration cadence (S2-prime + S5)
+
+The Q25.A SUPERSEDED amendment commit lands as part of S2-prime
+close (this audit's commit sequence per dispatch directive).
+
+### §4.1.D Round 20 S2-prime audit-first deliverable (d): per-variant `<X>Obj` carrier shape design (2026-05-14)
+
+For each of the 4 new `<X>Obj` carriers (DecimalObj / DateTimeObj /
+TimespanObj / InstantObj — String already done post-R12; Duration /
+BigInt excluded per §4.1.A.1 / Obstacle 3 R19 dispositions), the
+carrier shape mirrors `StringObj` precedent
+(`crates/shape-value/src/v2/string_obj.rs:18-26`):
+
+```rust
+#[repr(C)]
+pub struct StringObj {
+    pub header: HeapHeader,    // 8 bytes (refcount + kind + flags)
+    pub data: *const u8,       // 8 bytes (payload pointer)
+    pub len: u32,              // 4 bytes
+    pub _pad: u32,             // 4 bytes (alignment padding to 24 bytes)
+}
+const _: () = { assert!(std::mem::size_of::<StringObj>() == 24); };
+```
+
+The per-T inner payload determines whether the carrier has a
+**variable-size data buffer** (StringObj: separate `data: *const u8`
+allocation) or an **inline fixed-size payload** (DecimalObj /
+DateTimeObj / TimespanObj / InstantObj: payload inline after the
+header). The four new carriers are all fixed-size-inline.
+
+#### §4.1.D.1 `DecimalObj` design
+
+**Inner payload:** `rust_decimal::Decimal` — 16 bytes
+(`std::mem::size_of::<rust_decimal::Decimal>() == 16` confirmed by
+inspecting rust_decimal source: 4-byte flags + 12-byte mantissa).
+`Copy + Clone`. Used at `TypedArrayData::Decimal(Arc<TypedBuffer<Arc<rust_decimal::Decimal>>>)`
+construction sites (`object_creation.rs:544`, `heap_value.rs:3044`).
+
+**Carrier shape (file: `crates/shape-value/src/v2/decimal_obj.rs`):**
+
+```rust
+//! Refcounted, repr(C) Decimal carrier for v2 runtime.
+//!
+//! ## Memory layout (24 bytes)
+//!
+//! ```text
+//! Offset  Size  Field
+//! ------  ----  -----
+//!   0       8   header (HeapHeader)
+//!   8      16   value (rust_decimal::Decimal — inline payload)
+//! ```
+
+use super::heap_header::{HeapHeader, HEAP_KIND_V2_DECIMAL};
+use rust_decimal::Decimal;
+
+#[repr(C)]
+pub struct DecimalObj {
+    pub header: HeapHeader,
+    pub value: Decimal,
+}
+
+const _: () = {
+    assert!(std::mem::size_of::<DecimalObj>() == 24);
+    assert!(std::mem::align_of::<DecimalObj>() == 8);
+};
+
+impl DecimalObj {
+    pub fn new(value: Decimal) -> *mut Self {
+        let layout = std::alloc::Layout::new::<Self>();
+        let ptr = unsafe { std::alloc::alloc(layout) as *mut Self };
+        unsafe {
+            (*ptr).header = HeapHeader::new(HEAP_KIND_V2_DECIMAL);
+            (*ptr).value = value;
+        }
+        ptr
+    }
+
+    pub unsafe fn value(ptr: *const Self) -> Decimal {
+        unsafe { (*ptr).value }
+    }
+
+    pub unsafe fn drop(ptr: *mut Self) {
+        // No nested allocation; just dealloc the struct.
+        let layout = std::alloc::Layout::new::<Self>();
+        unsafe { std::alloc::dealloc(ptr as *mut u8, layout) };
+    }
+}
+
+// HeapElement impl per §4.1.B decision.
+unsafe impl super::heap_element::HeapElement for DecimalObj {
+    unsafe fn release_elem(ptr: *const Self) {
+        if unsafe { super::refcount::v2_release(&(*ptr).header) } {
+            unsafe { Self::drop(ptr as *mut Self) };
+        }
+    }
+}
+```
+
+**New `HeapHeader` kind constant:** `HEAP_KIND_V2_DECIMAL = ?` (next
+free post-`HEAP_KIND_V2_STRING`). Per the existing `heap_header.rs`
+convention, new constants get appended sequentially.
+
+#### §4.1.D.2 `DateTimeObj` design
+
+**Inner payload:** `chrono::DateTime<chrono::FixedOffset>` —
+`std::mem::size_of` measured at 16 bytes on x86_64 (NaiveDateTime
+8 bytes + FixedOffset 4 bytes + padding to 8-byte alignment = 16).
+`Copy + Clone` for chrono::DateTime<FixedOffset>.
+
+**Carrier shape (file: `crates/shape-value/src/v2/date_time_obj.rs`):**
+
+```rust
+#[repr(C)]
+pub struct DateTimeObj {
+    pub header: HeapHeader,
+    pub value: chrono::DateTime<chrono::FixedOffset>,
+}
+
+const _: () = {
+    assert!(std::mem::size_of::<DateTimeObj>() == 24);
+    assert!(std::mem::align_of::<DateTimeObj>() == 8);
+};
+```
+
+Mirror of `DecimalObj` shape; same `HeapElement` impl pattern.
+`HEAP_KIND_V2_DATETIME` constant assigned.
+
+**Important note:** the audit recommends VERIFYING the
+`std::mem::size_of::<chrono::DateTime<FixedOffset>>()` value at
+compile-time on the actual target. If chrono's layout differs from
+the projected 16 bytes (e.g. due to `FixedOffset` being 1-byte vs
+4-byte on the platform), the carrier size assertion adjusts to the
+actual: target 24 bytes with appropriate padding. The const_assert!
+catches mismatches at compile time.
+
+#### §4.1.D.3 `TimespanObj` design
+
+**Inner payload:** `chrono::Duration` — `std::mem::size_of` measured
+at 16 bytes on x86_64 (i64 seconds + i32 nanos + 4-byte padding).
+`Copy + Clone`.
+
+**Carrier shape (file: `crates/shape-value/src/v2/timespan_obj.rs`):**
+
+```rust
+#[repr(C)]
+pub struct TimespanObj {
+    pub header: HeapHeader,
+    pub value: chrono::Duration,
+}
+
+const _: () = {
+    assert!(std::mem::size_of::<TimespanObj>() == 24);
+    assert!(std::mem::align_of::<TimespanObj>() == 8);
+};
+```
+
+Same shape; `HEAP_KIND_V2_TIMESPAN` constant assigned.
+
+**Naming note:** the carrier is named `TimespanObj` to mirror the
+runtime variant `TemporalData::TimeSpan` (which is what
+`Constant::Duration` lowers to at `stack_ops/mod.rs:150`). The
+user-facing Shape type "duration" is backed by `TimeSpan` at runtime
+per §4.1.A.1; the carrier name follows the runtime payload name, not
+the user-facing type name.
+
+#### §4.1.D.4 `InstantObj` design
+
+**Inner payload:** `std::time::Instant` — `std::mem::size_of`
+measured at 16 bytes on x86_64 Linux (two `u64` fields). On macOS /
+Windows / other platforms the size may differ (typically still 16
+bytes per the std docs hint). `Copy + Clone`.
+
+**Carrier shape (file: `crates/shape-value/src/v2/instant_obj.rs`):**
+
+```rust
+#[repr(C)]
+pub struct InstantObj {
+    pub header: HeapHeader,
+    pub value: std::time::Instant,
+}
+
+const _: () = {
+    assert!(std::mem::size_of::<InstantObj>() == 24);
+    assert!(std::mem::align_of::<InstantObj>() == 8);
+};
+```
+
+Same shape; `HEAP_KIND_V2_INSTANT` constant assigned.
+
+**Cross-platform alignment warning:** `std::time::Instant`'s layout
+is platform-specific (`Mach Absolute Time` on macOS, `QueryPerformanceCounter`
+on Windows, `clock_gettime(CLOCK_MONOTONIC)` on Linux). If a future
+target shows `size_of::<Instant>() != 16`, the size assertion will
+fail at compile time and the carrier needs a `cfg`-gated padding
+adjustment. Per audit §3.7 ceiling estimate, this is bounded
+mechanical work.
+
+#### §4.1.D.5 `DurationObj` design — REFUSED per §4.1.A.1 dead-variant finding
+
+**Audit deliverable (d) does NOT include a `DurationObj` carrier.**
+
+Per §4.1.A.1: `TemporalData::Duration(shape_ast::ast::Duration)` is a
+dead enum variant with zero constructors. Shipping a `DurationObj`
+carrier would create:
+
+- A new heap kind constant (`HEAP_KIND_V2_DURATION`) with zero live
+  producers.
+- A `TypedArray<*const DurationObj>` instantiation with no
+  reachable user-facing `Array<duration>` path (the user-facing
+  "duration" type maps to `TimeSpan` at runtime per the inference /
+  lowering chain at `type_system/inference/expressions.rs:757` →
+  `stack_ops/mod.rs:150`).
+- An `unsafe impl HeapElement for DurationObj` body that's never
+  invoked.
+
+This is forward-S5-cleanliness work for a variant that the codebase
+treats as already-dead. The discipline-coherent disposition is
+either:
+
+- **(D-1) Skip `DurationObj` entirely** at S2-prime; the
+  `TypedArrayData::Duration` enum arm + the `TemporalData::Duration`
+  variant both fall to S5's enum deletion + a future cluster-1+
+  language-design cleanup that decides whether the "duration" user-
+  facing type should keep mapping to `TimeSpan` or get genuine
+  runtime representation. **Recommended.**
+- **(D-2) Ship a `DurationObj` carrier wrapping `shape_ast::ast::Duration`**
+  for symmetry with the other Temporal arms. Costs the carrier
+  surface + HeapElement impl + heap kind constant; benefits forward-
+  S5 cleanliness if a future language-design decision adds genuine
+  Duration runtime constructors. **Not recommended** without the
+  upstream language-design ratification.
+
+**S2-prime ships D-1.** The `TypedArrayData::Duration` enum arm
+stays in place (consistent with the audit §3.6 deprecation cadence —
+the arm is `#[deprecated]` and has zero live producers post-S2-prime;
+S5 deletes it alongside the rest of the enum). Surface the
+language-design cleanup for cluster-1+ tracking.
+
+#### §4.1.D.6 `BigIntObj` design — REFUSED per Obstacle 3 R19 defer
+
+**Audit deliverable (d) does NOT include a `BigIntObj` carrier.**
+
+Per Obstacle 3 R19 supervisor disposition (defer): "BigInt type
+design (i64 placeholder vs full-width vs external crate) is a
+separate workstream out of cluster-0 scope; S2-prime migrates the 6
+other heap-element variants and surfaces BigInt as cluster-1
+territory."
+
+The `TypedArrayData::BigInt` enum arm has live producers
+(`object_creation.rs:563`, `heap_value.rs:3058`, `builtins/array_ops.rs:492`),
+but the placeholder payload `Arc<i64>` is itself a temporary shape
+pending the BigInt Rust struct design. Migrating to
+`TypedArray<*const BigIntObj>` would either (a) preserve the i64-only
+placeholder under a new carrier name (forward-S5 cleanliness for an
+arm whose payload shape will change), or (b) gate on the BigInt
+type design landing (out of cluster-0 scope).
+
+**S2-prime ships neither.** `TypedArrayData::BigInt` enum arm stays
+in place; S5 deletes it alongside the rest of the enum. The
+cluster-1+ BigInt full-width design lands its own v2-raw carrier
+shape (or not, depending on the BigInt-as-i64-forever ruling)
+separately.
+
+#### §4.1.D.7 ConcreteType extension surface
+
+Per status doc §"R19 parallel-sub-cluster coordination note": the
+`ConcreteType` enum at `crates/shape-value/src/v2/concrete_type.rs`
+has `String / Decimal / BigInt / DateTime` arms but lacks `Timespan
+/ Instant`. The S2-prime production migration needs the
+`ConcreteType::Timespan` and `ConcreteType::Instant` arms added in
+lockstep with the producer-side migration; `Duration` is NOT added
+(per §4.1.D.5 D-1 disposition — Duration stays on legacy
+`Arc<TemporalData>` carrier).
+
+**Required ConcreteType extensions:**
+
+- `ConcreteType::Timespan` — non-parametric scalar concrete type
+  (mirror of existing `ConcreteType::DateTime` shape; the inner
+  payload is `chrono::Duration`, structurally similar to
+  `chrono::DateTime<FixedOffset>` for the typed-array purposes).
+- `ConcreteType::Instant` — non-parametric scalar concrete type
+  (mirror).
+
+Both additions follow the §2.7.5 stamp-at-compile-time discipline +
+the R19 S1.5 precedent for `ConcreteType::F32` / `ConcreteType::Char`
+non-parametric scalar additions. The cascade fan-out (`ConcreteType`
+exhaustive matches at `concrete_type.rs::stack_size` /
+`field_size` / `alignment` / `is_integer_family` / `is_floating_family` /
+`Display` impl / etc.) follows R19 S1.5's pattern — ~22 sites under
+~100-site cascade-surface-and-stop ceiling per S1.5's precedent.
+
+**HeapKind ordinals:** the new HEAP_KIND_V2_DECIMAL / DATETIME /
+TIMESPAN / INSTANT constants do NOT add new `HeapKind` enum variants
+(per ADR-005 §1 single-discriminator — every variant projects 1:1 to
+a heap-kind discriminator, and these v2-raw `<X>Obj` carriers ride
+existing HeapKind labels: `NativeKind::Ptr(HeapKind::Decimal)` /
+`Ptr(HeapKind::Temporal)` / `Ptr(HeapKind::Instant)`). The new
+constants are HEAP_KIND values (the `kind: u16` field of HeapHeader),
+not HeapKind enum variants. This preserves the cardinality bound on
+HeapKind.
+
+**Naming review against §Renames-to-refuse-on-sight:** `DecimalObj`,
+`DateTimeObj`, `TimespanObj`, `InstantObj` are structural type names
+(mirror of `StringObj` precedent). None match
+`(decode|tag|kind|dispatch|value.call|closure.callback|frame.setup|
+callee|capture) (bridge|probe|helper|hop|translator|adapter|shim)`.
+The `*Obj` suffix is a structural marker meaning "v2-raw HeapHeader-
+equipped carrier for inner T" — consistent with `StringObj`'s
+established meaning. Not a defection-attractor framing.
+
+#### §4.1.D.8 Total file additions for production migration
+
+If S2-prime closes production migration (vs audit-only-close):
+
+- **NEW files (~4 files):**
+  - `crates/shape-value/src/v2/heap_element.rs` (new module — ~30 LoC)
+  - `crates/shape-value/src/v2/decimal_obj.rs` (~80 LoC + tests)
+  - `crates/shape-value/src/v2/date_time_obj.rs` (~80 LoC + tests)
+  - `crates/shape-value/src/v2/timespan_obj.rs` (~80 LoC + tests)
+  - `crates/shape-value/src/v2/instant_obj.rs` (~80 LoC + tests)
+
+  (5 files total counted; "~4" rounded for the dispatch prompt's
+  estimate of "5 new <X>Obj files".)
+
+- **EXTENSIONS to existing files:**
+  - `crates/shape-value/src/v2/mod.rs` — register new modules
+  - `crates/shape-value/src/v2/heap_header.rs` — append HEAP_KIND_V2_*
+    constants
+  - `crates/shape-value/src/v2/typed_array.rs` — add
+    `drop_array_heap<T: HeapElement>` variant
+  - `crates/shape-value/src/v2/concrete_type.rs` — add `Timespan` +
+    `Instant` arms + ~22 cascade fan-out arms (~100-site ceiling)
+  - Producer-side bytecode emission + VM/JIT handlers per audit §3.2
+    estimate (53 construction sites across 14 files for String /
+    Decimal live arms; DateTime / Timespan / Instant dead arms get
+    `build_specialized_from_heap_arcs` arms added for completeness)
+  - 4-table lockstep cascade for any new ConcreteType arms
+
+Estimated LoC: ~600-1200 LoC for the new carrier infrastructure +
+~5-7k LoC for the producer-side migration per audit §3.2 estimate
+("2 sessions of mechanical work"). The audit-first deliverables (a)
+through (d) inclusive account for **roughly half of one
+agent-session** of work (per the dispatch prompt's "Token budget
+... generous (multi-session-equivalent work)").
+
+---
+
 ### §4.2 Obstacle O-2 — F64 AVX-512 alignment downgrade
 
 **The shape**: `TypedArrayData::F64(Arc<AlignedTypedBuffer>)`
