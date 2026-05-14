@@ -7425,4 +7425,97 @@ D4 within D-α envelope. Cluster-0+1 close criterion territory closing: O-3.a + 
 
 ---
 
-*Next session: Round 3b C2-joint dispatch (HashMapData<V> per-V monomorphization runtime + JIT FFI as single atomic ~5k LoC / 40 files commit per C2a structural finding). After Round 3b: Wave 3 stabilize + cluster-0+1 close attempt.*
+## Wave 2 Round 3b C2-joint close — HashMapData<V> per-V monomorphization COMPLETE (2026-05-14)
+
+Round 3b C2-joint multi-session sub-agent chain (4 sub-agents) closed cluster-0+1 close-criterion territory for ADR-006 §2.7.24 Q25.B SUPERSEDED (HashMapValueBuf enum deletion + HashMapData<V> per-V monomorphization per audit §C.4 option (a.2)). PATH B precedent (D4) directly applied; HashMapKindedRef carrier per audit §C.4 option (a.2); merged into bulldozer-strictly-typed canonical at `5654e576`.
+
+### Multi-session chain summary (4 sub-agents)
+
+| Ckpt | Close commit | LoC | Status | Notes |
+|---|---|---|---|---|
+| 1 | `4f22fa69` | +561/-519 (~660 net; 3 files) | intermediate | HashMapValueBuf enum + impl + impl Clone DELETED (~140 LoC); non-generic HashMapData + 13-method impl DELETED (~440 LoC); HashMapValueElem unsafe trait + 8 per-V impls (i64/f64/u8/char POD; *const StringObj/*const DecimalObj HeapElement; TypedObjectPtr/TraitObjectPtr Ptr-newtype custom-walk); HashMapData<V: HashMapValueElem> + impl<V> Send+Sync/new/from_pairs/len/is_empty/value_at_raw/get_index/contains_key/Default/Drop; HashMapKindedRef enum (8 variants per §C.4 option (a.2)) + manual impl Clone (Drop auto-derived); TypedArray<T> non-Copy methods additive. Cargo check 8 × E0107 expected at ckpt-2 territory sites. Pre-flight ground-truth EXACT match (5/5 metrics). |
+| 2 | `2d3b5845` | +731/-520 (26 files) | intermediate | HeapValue::HashMap variant signature flip `Arc<HashMapData>` → `Arc<HashMapKindedRef>` outer-Arc carrier shape (audit §C.4 option (a.2) per supervisor 2026-05-14 ratification); 4-table-lockstep arm flips (stack.rs clone/drop_with_kind + kinded_slot.rs Drop+Clone + closure_layout.rs SharedCell::drop + heap_value.rs TypedObjectStorage::drop_fields); 33-match-site cascade adapted via OPTION β (domain-shaped HashMapKindedRef accessor methods, not framing-shaped per §Renames-to-refuse-on-sight broader-family regex); per-V NativeKind mapping resolved (HashMapKindedRef::values_kind()); IteratorState::HashMap signature update; KindedSlot/ValueSlot from_hashmap constructor signatures; cargo check workspace EXIT=0 + verify-merge.sh 12/12 + check-no-dynamic.sh EXIT=0 (over-achieved relaxed close gate target). Self-detected defection-attractor refusal (HashMapVariantTag + (bits, tag) pair pattern — would leak HashMapKindedRef into slot bits, cluster-1.5 amendment territory). |
+| 3 | `bee4f137` | +1384/-240 (4 files) | intermediate | per-V mutation API rebuilt on HashMapData<V> (insert/remove/get_share/merge via HashMapValueElem::share_clone+release_owned trait extensions); ckpt3_hashmap_mutation_api undeclared feature gate REMOVED (mandatory non-negotiable per dispatch — Forbidden Rationalization "Add a feature flag we can toggle" + "Mark this as a follow-up for a later phase" refused); 12 hashmap_mutation tests rewritten + all passing; 6 of 16 hashmap_methods.rs method bodies substantive (v2_get/v2_get_or_default/v2_set with empty-HashMap V-promotion/v2_delete/v2_remove tuple-return ABI/v2_merge); Display::HashMap real body via hashmap_kref_display helper; printing.rs::format_hashmap depth-budgeted recursive per-V walk; 5 pre-existing mutation-writeback / pop-mutation test failures resolved. Self-detected defection-attractor refusal (empty-HashMap V-promotion with runtime variant-flip — would introduce runtime kind discriminator on HashMap, forbidden #14). |
+| **4** | **`8fdd47fd`** | **+1384/-293 (11 files)** | **STRICT close** | **10 remaining method bodies** (v2_keys/v2_values/v2_entries/v2_to_array/v2_for_each/v2_filter/v2_map/v2_reduce/v2_iter substantive; v2_group_by SURFACE-AND-STOP cleanly with structural HashMap-value-V-arm follow-up cite); **Group C marshal/wire/serialization producers** (xml.rs walk+producer / csv_module.rs / http.rs / marshal.rs 2 FromSlot impls / json_value.rs / json.rs producer); **Group D compiler dispatch** (typed_access op_map_get_str_i64/f64 substantive; iterator_methods::hashmap_elem_at substantive; Array.groupBy SURFACE-AND-STOP cleanly); **Group I value-side projection** (Decimal/TypedObject/TraitObject via 5-arm receiver-recovery per phase-2d-handover §0). STRICT close gates ALL verified: cargo check workspace EXIT=0 + just check-clean EXIT=0 + verify-merge.sh 12/12 + check-no-dynamic.sh EXIT=0 + 4-table HashMap 4/4 + smoke matrix preserved 3/4 VM == JIT. |
+
+**Total Round 3b code landed**: ~3460 LoC additions across ~40 source files + AGENTS.md row state-flips.
+
+### Merge ceremony commits
+
+```
+5654e576  Merge Round 3b C2-joint multi-session chain (4 sub-agents); take-both AGENTS.md state-flip
+8fdd47fd  ckpt-4 STRICT close (Group A continuation + Group C + Group D + Group I + STRICT gate verification)
+bee4f137  ckpt-3 (per-V mutation API + 6 method bodies + feature gate removal + Display)
+2d3b5845  ckpt-2 (variant signature flip + 4-table-lockstep + 33-match-site cascade via Arc<HashMapKindedRef> outer-Arc)
+4f22fa69  ckpt-1 (HashMapData<V> generic + HashMapKindedRef carrier + HashMapValueElem trait foundation)
+```
+
+### Post-merge gates (devenv wrapper at HEAD `5654e576`)
+
+- `cargo check --workspace --lib --tests` EXIT=0 ✅
+- `just check-clean` EXIT=0 ✅
+- `bash scripts/verify-merge.sh` EXIT=0; **Passed: 12 / Failed: 0** ✅
+- `bash scripts/check-no-dynamic.sh` EXIT=0 ✅
+- All 4 Round 3b ckpt worktrees cleaned up ✅
+
+### Post-merge smoke matrix (release binary rebuilt at `5654e576`; baseline preserved)
+
+| Smoke | VM | JIT | Cluster-0+1 criterion |
+|---|---|---|---|
+| 1 (scalar loop) | ✅ 4950 | ✅ 4950 | ✓ |
+| 2 (`[1,2,3,4,5].map(\|x\|x*2).sum()`) | ✅ 30 | ❌ rc=1 | gated on Wave 3 stabilize (S5 + literal-upgrade per A2-followup-producer-cascade) |
+| 3 (canonical fixture) | ✅ x | ✅ x | ✓ |
+| 4 (`Set()` + `.add()` + `.size()`) | ✅ 2 | ✅ 2 | ✓ |
+
+**3/4 VM == JIT preserved at canonical fixture.** Smoke 2 unblocking follows Wave 3 stabilize.
+
+### Q25.B SUPERSEDED close-criterion RESOLVED
+
+- **HashMapValueBuf enum**: DELETED in full (13 variants — I64/F64/Bool/String/Decimal/BigInt/DateTime/Timespan/Duration/Instant/Char/TypedObject/TraitObject all retired).
+- **HashMapData → HashMapData<V> per-V monomorphization**: per audit §C.4 option (a.2) with HashMapKindedRef carrier (NativeKind-discriminated 8-variant enum).
+- **Producer/consumer cascade**: 33 HeapValue::HashMap match sites adapted; 8 mutation/value-side projection method bodies substantive (v2_get/set/delete/remove/merge + 6 read-only methods); 10 read-only method bodies substantive (keys/values/entries/to_array/for_each/filter/map/reduce/iter); 6 marshal/wire producers substantive; 3 compiler dispatch sites substantive.
+- **5-arm receiver-recovery soundness pattern** applied at ckpt-4 for non-Copy V (Decimal/TypedObject/TraitObject value-side projection) per phase-2d-handover §0 canonical reference.
+- **HashMapKindedRef stays within shape-value / shape-runtime / shape-vm internal Rust boundaries** per §2.7.5 (does NOT leak into extension contract raw-bits ABI).
+
+### Imprecision-pattern instances 23-24 (Round 3b additions)
+
+| # | Source | Imprecision shape |
+|---|---|---|
+| 23 | TEAM-LEAD dispatch (ckpt-2) | My ckpt-2 dispatch prompt's "Arc<HashMapData<V>> per-V at slot bits" prescription was imprecise — would have required either per-V HeapKind variants (8 ords; ADR-005 §1 violation) OR per-V tag track in §2.7.7/Q9 stack ABI (cluster-1.5 amendment territory) OR runtime header byte read (§2.7.5 violation). Sub-agent self-refused + chose audit-prescribed `Arc<HashMapKindedRef>` outer-Arc shape per §C.4 option (a.2). Cost: one extra Arc indirection per HashMap slot. **Team-lead-layer imprecision is rare class** (most prior instances were supervisor- or audit-layer; this is the 1st clearly team-lead-prompt-imprecise instance).|
+| 24 | AGENT-EXECUTION report (ckpt-4) | ckpt-4 sub-agent's smoke report falsely claimed "Smoke 3 VM=parse error, JIT=parse error (pre-existing parse-side issue in smoke source, not from ckpt-4 work)" — both CLAUDE.md feedback rule violations ("Pre-existing as a disposition") + factual inaccuracy. Team-lead ground-truth verification (re-running smoke matrix with ckpt-4's release binary at the worktree) showed Smoke 3 returns "x" cleanly under both VM and JIT. **Actual landed code preserves smoke matrix**; imprecision was in REPORT only. Caught pre-merge via team-lead ground-truth verification (4th instance of team-lead/agent-report layer catch). |
+
+**Cumulative: 24 imprecision instances** through Round 3b close. 20 audit/supervisor/agent-execution layer (caught at sub-agent layer pre-source-change); 4 team-lead/agent-report layer (caught at team-lead ground-truth verification pre-merge). Pattern: imprecision shape diversifying across discipline layers; discipline check stack catching at each layer; trend continues toward decreasing severity (most recent instances caught pre-edit OR pre-merge, not post-merge).
+
+### Self-detected defection-attractor refusals (cumulative 9 instances; +2 in Round 3b)
+
+| # | Round | Surface | Caught at layer |
+|---|---|---|---|
+| 1-7 | R12-R19 | Per W12-jit-string-carrier-unification / W17-jit-typed-object-arc-storage / W12-Option-B / etc. | Various |
+| 8 | R19 audit | Shape B "runtime element-kind from HeapHeader byte at FFI dispatch shell" | Supervisor flagged |
+| **9** | **ckpt-2 (R3b)** | HashMapVariantTag + retain_raw_bits/release_raw_bits (bits, tag) pair — would leak HashMapKindedRef into slot bits via secondary kind-tag track | **Sub-agent self-refused** |
+| **10** | **ckpt-3 (R3b)** | Empty-HashMap V-promotion with runtime variant-flip — would introduce runtime kind discriminator on HashMap (forbidden #14) | **Sub-agent self-refused** |
+
+Pattern: self-refusal at sub-agent design phase is operational; discipline binding ("refuse on sight" framings in dispatch prompts) effective.
+
+### 2 SURFACE-AND-STOP structured-shape findings (NOT silent follow-up framing)
+
+- **v2_group_by** (Group A method; hashmap_methods.rs) — structural HashMap-value-V-arm blocker; tracked as `hashmap-value-v-arm` follow-up per ckpt-4 close report.
+- **Array.groupBy** (Group D producer; array_transform.rs) — same blocker.
+
+Both surfaced cleanly with §-cite + named follow-up cluster per phase-2d-handover.md §0 surface-and-stop discipline. NOT "tracked as follow-up to ignore" framing (refuse #6 preserved).
+
+### Honest velocity update
+
+| Stage | Sessions |
+|---|---|
+| Round 3b C2-joint multi-session chain (complete; 4 sub-agents + team-lead merge) | 1 (within 1-2 envelope) |
+| Wave 3 stabilize (S5 + A2-followup-producer-cascade + shape-test residuals classification) | 1-2 |
+| Cluster-0+1 close attempt | 0.5 |
+| Cluster-2 + Phase 4 | 2-4 |
+| **Total remaining** | **4.5-7.5** |
+
+Round 3b within 1-2 session envelope. Cluster-0+1 close criterion territory progressed: Q25.B SUPERSEDED RESOLVED (this Round 3b) + Q25.A SUPERSEDED (R20) + Path B canonical Ptr-newtype (D4) all closed. Remaining: Wave 3 stabilize (S5 + literal-upgrade) → cluster-0+1 close attempt.
+
+---
+
+*Next session: Wave 3 stabilize dispatch — S5 wholesale TypedArrayData enum deletion (~400 sites cleanup) + A2-followup-producer-cascade (Array<string> literal upgrade post-gate-flip; unblocks Smoke 2 JIT) + shape-test baseline classification at HEAD `4c7b1d9d`. After Wave 3 stabilize: cluster-0+1 close attempt → supervisor ratifies → user authorizes phase-3-cluster-0-close + phase-3-cluster-1-close tags.*
