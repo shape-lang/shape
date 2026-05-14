@@ -43,6 +43,28 @@ use std::sync::Arc;
 ///
 /// Returns `Err(TypeError)` when the receiver kind is not
 /// `Ptr(HeapKind::TypedArray)`.
+///
+/// ## Wave 2 Round 3a' Agent β v2-raw receiver arm (2026-05-14)
+///
+/// The `NativeKind::UInt64` arm recognizes v2-raw `*const TypedArray<T>`
+/// receivers via `as_v2_typed_array` (mirror of
+/// `array_transform::typed_array_arc_from_kinded`). Per ADR-006 §2.7.24
+/// Q25.A SUPERSEDED + audit §4.1.B.3, the `V2ElemType::String` and
+/// `V2ElemType::Decimal` arms surface-and-stop with a structured §-cite —
+/// materializing `*const StringObj` / `*const DecimalObj` element bits into
+/// an `Arc<TypedArrayData::String/Decimal>` snapshot at this layer is the
+/// `materialize-on-read forbidden` pattern. Other v2-raw element kinds
+/// route through `array_transform::typed_array_arc_from_kinded` which
+/// snapshots scalar (`I64/F64/Bool/Int*/UInt*/F32/Char`) v2-raw buffers
+/// into the legacy `Arc<TypedArrayData>` arms for uniform aggregation
+/// dispatch.
+///
+/// At this commit the arm is UNREACHABLE: the producer gate
+/// `should_use_typed_array` in `v2_typed_emission.rs` returns `None` for
+/// `ConcreteType::String` / `ConcreteType::Decimal` pending the
+/// `A2-followup-gate-flip` sub-cluster. The arm lands per Round 3a' Agent β
+/// scope so the gate-flip ceremony has a structured surface to land
+/// against (no type-confusion window per Round 3a' pre-dispatch invariant).
 fn with_typed_array<F, R>(args: &[KindedSlot], expected: &'static str, f: F) -> Result<R, VMError>
 where
     F: FnOnce(&TypedArrayData) -> Result<R, VMError>,
@@ -63,6 +85,66 @@ where
             let result = f(&arc);
             let _ = Arc::into_raw(arc);
             result
+        }
+        // Wave 2 Round 3a' Agent β (2026-05-14) — v2-raw receiver arm.
+        // UNREACHABLE at this commit per the explicit non-flip binding
+        // (producer gate `should_use_typed_array` returns `None` for
+        // `ConcreteType::String` / `ConcreteType::Decimal` at HEAD).
+        NativeKind::UInt64 => {
+            use crate::executor::v2_handlers::v2_array_detect::{
+                as_v2_typed_array, V2ElemType,
+            };
+            let bits = args[0].slot.raw();
+            match as_v2_typed_array(bits, NativeKind::UInt64) {
+                Some(view) => match view.elem_type {
+                    V2ElemType::String | V2ElemType::Decimal => {
+                        // ADR-006 §2.7.24 Q25.A SUPERSEDED + audit §4.1.B.3
+                        // materialize-on-read forbidden. The right fix is
+                        // a per-handler v2-raw body (lexicographic min/max
+                        // for String, arithmetic sum/avg/min/max for
+                        // Decimal, length-count for both, closure-callback
+                        // reduce/count(predicate) for both) reading
+                        // elements via `TypedArray::<*const <X>Obj>::get`
+                        // and pushing results as `NativeKind::StringV2` /
+                        // `NativeKind::DecimalV2` (Agent B Round 1
+                        // variants). The materialize-into-`Arc<TypedArrayData>`
+                        // path taken by other v2-raw kinds is the forbidden
+                        // pattern for heap-element kinds — refused on
+                        // sight per §4.1.B.3.
+                        Err(VMError::NotImplemented(format!(
+                            "{}: SURFACE — v2-raw TypedArray<*const StringObj/DecimalObj> \
+                             receiver reached the aggregation dispatch shell. Per-handler \
+                             v2-raw bodies (lexicographic min/max + Decimal arithmetic + \
+                             length-count + closure-callback reduce/count) land via the \
+                             A2-followup-gate-flip ceremony's per-handler routing; this arm \
+                             is UNREACHABLE at this commit per Round 3a' non-flip binding \
+                             (producer gate `should_use_typed_array` in `v2_typed_emission.rs` \
+                             returns `None` for `ConcreteType::String/Decimal`). \
+                             Tracked as W12-typed-array-data-s2-prime-production-mechanical \
+                             per audit §3.2 + ADR-006 §2.7.24 Q25.A SUPERSEDED + §4.1.B.3 \
+                             materialize-on-read forbidden.",
+                            expected
+                        )))
+                    }
+                    // Scalar v2-raw element kinds (I64/F64/Bool/I8/U8/I16/
+                    // U16/U32/F32/Char) snapshot into `Arc<TypedArrayData>`
+                    // via the cross-file `typed_array_arc_from_kinded`
+                    // helper. The snapshot is the W12 S1 / Wave 2 Agent A1
+                    // transitional carrier (scalar arms survive S5
+                    // deletion target until `TypedArrayData` is dropped
+                    // entirely).
+                    _ => {
+                        let arc = crate::executor::objects::array_transform::typed_array_arc_from_kinded(
+                            &args[0], expected,
+                        )?;
+                        f(&arc)
+                    }
+                },
+                None => Err(VMError::RuntimeError(format!(
+                    "{}: UInt64 receiver is not a v2 typed-array pointer",
+                    expected
+                ))),
+            }
         }
         other => Err(VMError::RuntimeError(format!(
             "{}: expected Array receiver, got kind {:?}",
