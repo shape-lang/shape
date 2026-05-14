@@ -333,6 +333,22 @@ Provisional agent partition (Wave 1 (L) refines):
 
 Wave 2 dispatches in 2 rounds if Wave 1 (L) suggests inter-agent file overlap that requires staging (e.g. Agent A + Agent B both touch consumer cascade in executor/objects/ — stage A first, then B), OR all 7-8 agents in parallel if file territories are clean.
 
+## Multi-session chain pattern (D-α; user-ratified 2026-05-14)
+
+For atomic-lockstep cascades that exceed single-LLM-session execution capacity
+(ceiling-c per Round 3a D3 finding: ~50-100 non-mechanical edits per session
+at discipline-coherent quality bar), dispatch uses the multi-session sub-agent
+chain pattern. See `docs/cluster-audits/bulldozer-multi-session-chain-pattern.md`
+for the full discipline doc (authority, operational shape, structured state
+pointer, discipline preserved + relaxed bounds, forbidden under pattern,
+recovery from sub-agent failure, velocity expectation).
+
+Pattern instantiated for D4 (TypedObjectStorage Arc→raw cascade ~270-320 sites)
+per supervisor Round 3a' close 2026-05-14 + user 2026-05-14 D-α ratification.
+Dynamic chain authorization: team-lead may extend chain length if a sub-agent
+surface-and-stops mid-scope (no per-instance supervisor authorization needed
+for chain progression).
+
 ## Wave 3 dispatch shape — Stabilize + close (after Wave 2 ratifies)
 
 After Wave 2 merges:
