@@ -44,6 +44,21 @@ use crate::executor::objects::array_transform::{
     typed_array_len as transform_typed_array_len,
 };
 
+// Wave 2 Round 3a' Agent epsilon (2026-05-14) — Round 3a' per-handler-family
+// split of A2-followup-mechanical. Imports for the v2-raw String/Decimal
+// fast-path in `handle_join_str_v2` + surface-and-stop guards in
+// `handle_order_by_v2` / `handle_then_by_v2`. UNREACHABLE at this commit
+// (producer gate `should_use_typed_array` in `compiler/typed_emission.rs`
+// returns None for ConcreteType::String/Decimal — no producer constructs
+// a v2-raw `TypedArray<*const StringObj/DecimalObj>` and therefore no
+// receiver reaches these branches). Cargo-check-clean per supervisor
+// 2026-05-14 disposition (1); gate-flip itself lands as a separate
+// sequential A2-followup-gate-flip agent post-Round-3a'-merge ceremony.
+use crate::executor::v2_handlers::v2_array_detect::{as_v2_typed_array, V2ElemType};
+use shape_value::v2::decimal_obj::DecimalObj;
+use shape_value::v2::string_obj::StringObj;
+use shape_value::v2::typed_array::TypedArray;
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Local helpers
 // ═══════════════════════════════════════════════════════════════════════════
@@ -211,6 +226,41 @@ enum SortDirection {
     Descending,
 }
 
+/// Wave 2 Round 3a' Agent epsilon (2026-05-14) — surface-and-stop guard
+/// for v2-raw String/Decimal receivers entering a closure-callback sort
+/// (`orderBy` / `thenBy`). UNREACHABLE at this commit (producer gate
+/// `should_use_typed_array` returns None for ConcreteType::String/Decimal
+/// per ADR-006 §2.7.24 Q25.A SUPERSEDED #3 mixed-migration forbidden).
+/// The v2-raw key-fn sort recipe (read element with `v2_retain`, push as
+/// `KindedSlot{kind: StringV2/DecimalV2}`, call keyFn, sort indices,
+/// allocate `TypedArray<*const StringObj/DecimalObj>` output with
+/// per-stored-elem `v2_retain`) is W17-array-closure-callback-v2-raw
+/// territory — out of Round 3a' ε per-handler-family scope. The non-
+/// closure direct-read path lives in `handle_join_str_v2` (in scope).
+#[inline]
+fn surface_and_stop_v2_raw_closure(slot: &KindedSlot, op: &'static str) -> Result<(), VMError> {
+    if let Some(view) = as_v2_typed_array(slot.slot.raw(), slot.kind) {
+        if matches!(view.elem_type, V2ElemType::String | V2ElemType::Decimal) {
+            return Err(VMError::NotImplemented(format!(
+                "{}: SURFACE — v2-raw Array<{}> (NativeKind::StringV2/DecimalV2) \
+                 closure-callback sort reached the per-handler entry-point before \
+                 W17-array-closure-callback-v2-raw lands the keyFn ABI extension. \
+                 Per Round 3a' ε per-handler-family scope: the closure-callback \
+                 path is out of scope; `handle_join_str_v2` covers the non-closure \
+                 direct-read path. Tracked as W17-array-closure-callback-v2-raw \
+                 per ADR-006 §2.7.11 / Q12 + §2.7.24 Q25.A SUPERSEDED.",
+                op,
+                if matches!(view.elem_type, V2ElemType::String) {
+                    "string"
+                } else {
+                    "decimal"
+                }
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Compare two `KindedSlot` keys produced by `keyFn(elem)`. Both keys
 /// must share the same `NativeKind`; mismatched kinds surface as a
 /// `RuntimeError` (no implicit coercion per CLAUDE.md "No runtime
@@ -349,9 +399,19 @@ pub(crate) fn handle_order_by_v2(
             "orderBy: expected (array, key_fn, direction?)",
         ));
     }
-    let receiver_arc = receiver_arc_clone(&args[0], "orderBy")?;
+    // Wave 2 Round 3a' Agent epsilon (2026-05-14) — v2-raw String/Decimal
+    // SURFACE-AND-STOP guard. UNREACHABLE at this commit (producer gate
+    // closed). The closure-callback path on `NativeKind::StringV2` /
+    // `NativeKind::DecimalV2` element kinds is W17-array-closure-callback-
+    // v2-raw territory (not Round 3a' ε per-handler-family scope). The
+    // v2-raw output-shape (`TypedArray<*const StringObj/DecimalObj>`)
+    // allocation pattern lands in that sub-cluster alongside the keyFn
+    // ABI extension. See `handle_join_str_v2` for the v2-raw direct-read
+    // fast-path landed in this commit (no closure, in scope).
+    surface_and_stop_v2_raw_closure(&args[0], "orderBy")?;
     let closure = closure_arg(args, "orderBy")?;
     let direction = parse_direction(args, "orderBy")?;
+    let receiver_arc = receiver_arc_clone(&args[0], "orderBy")?;
     let out = sort_by_key_fn(vm, &receiver_arc, closure, direction, ctx, "orderBy")?;
     Ok(KindedSlot::from_typed_array(out))
 }
@@ -373,9 +433,12 @@ pub(crate) fn handle_then_by_v2(
     if args.len() < 2 {
         return Err(type_error("thenBy: expected (array, key_fn, direction?)"));
     }
-    let receiver_arc = receiver_arc_clone(&args[0], "thenBy")?;
+    // Wave 2 Round 3a' Agent epsilon (2026-05-14) — v2-raw String/Decimal
+    // SURFACE-AND-STOP guard (mirror of `handle_order_by_v2`).
+    surface_and_stop_v2_raw_closure(&args[0], "thenBy")?;
     let closure = closure_arg(args, "thenBy")?;
     let direction = parse_direction(args, "thenBy")?;
+    let receiver_arc = receiver_arc_clone(&args[0], "thenBy")?;
     let out = sort_by_key_fn(vm, &receiver_arc, closure, direction, ctx, "thenBy")?;
     Ok(KindedSlot::from_typed_array(out))
 }
@@ -398,9 +461,6 @@ pub(crate) fn handle_join_str_v2(
             "joinStr() requires 2 arguments (array, separator)",
         ));
     }
-    let arc = as_typed_array(&args[0])
-        .ok_or_else(|| type_error("joinStr(): receiver must be an Array"))?;
-    let arr = arc.as_ref();
 
     let sep: &str = match args[1].kind {
         NativeKind::String => args[1]
@@ -413,6 +473,50 @@ pub(crate) fn handle_join_str_v2(
             )));
         }
     };
+
+    // Wave 2 Round 3a' Agent epsilon (2026-05-14) — v2-raw String/Decimal
+    // fast-path. UNREACHABLE at this commit (producer gate closed). Per
+    // audit §4.1.B.4: read each element pointer directly from the v2-raw
+    // `TypedArray<*const StringObj/DecimalObj>` data buffer and stringify
+    // in place — NO materialize-on-read into Arc<TypedArrayData::String/
+    // Decimal> (forbidden per §4.1.B.3). Receiver slot is owned by the
+    // caller's KindedSlot (no refcount-share consumption needed; we only
+    // READ, the slot's own share keeps element pointers alive).
+    if let Some(view) = as_v2_typed_array(args[0].slot.raw(), args[0].kind) {
+        match view.elem_type {
+            V2ElemType::String => {
+                let arr = view.ptr as *const TypedArray<*const StringObj>;
+                let mut out = String::new();
+                for i in 0..view.len {
+                    if i > 0 {
+                        out.push_str(sep);
+                    }
+                    let elem = unsafe { TypedArray::<*const StringObj>::get_unchecked(arr, i) };
+                    out.push_str(unsafe { StringObj::as_str(elem) });
+                }
+                return Ok(KindedSlot::from_string_arc(Arc::new(out)));
+            }
+            V2ElemType::Decimal => {
+                use std::fmt::Write as _;
+                let arr = view.ptr as *const TypedArray<*const DecimalObj>;
+                let mut out = String::new();
+                for i in 0..view.len {
+                    if i > 0 {
+                        out.push_str(sep);
+                    }
+                    let elem = unsafe { TypedArray::<*const DecimalObj>::get_unchecked(arr, i) };
+                    write!(out, "{}", unsafe { DecimalObj::value(elem) })
+                        .map_err(|e| type_error(e.to_string()))?;
+                }
+                return Ok(KindedSlot::from_string_arc(Arc::new(out)));
+            }
+            _ => {}
+        }
+    }
+
+    let arc = as_typed_array(&args[0])
+        .ok_or_else(|| type_error("joinStr(): receiver must be an Array"))?;
+    let arr = arc.as_ref();
 
     let len = array_len(arr)?;
     let mut out = String::new();
