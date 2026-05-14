@@ -65,8 +65,23 @@ fn typed_array_arc(slot: &KindedSlot, op: &str) -> Result<Arc<TypedArrayData>, V
 
 /// Borrow the `&TypedArrayData` referenced by a `Ptr(HeapKind::TypedArray)`-
 /// kinded receiver. Mirrors `array_basic::typed_array_ref`.
+///
+/// Wave 2 Round 3a' Agent γ (2026-05-14) — explicit V2ElemType::String /
+/// V2ElemType::Decimal arm for the value-search handlers (`handle_index_of_v2`
+/// / `handle_includes_v2`) per supervisor-2026-05-14 disposition (1)
+/// A2-followup-mechanical split. These value-search handlers borrow via
+/// `typed_array_ref` (NOT via `typed_array_arc` / `typed_array_arc_from_kinded`),
+/// so the central A2 SURFACE-AND-STOP arm at `array_transform.rs::typed_array_arc_from_kinded`
+/// (lines 369-394) does NOT cover them. UNREACHABLE at this commit because
+/// the producer gate `should_use_typed_array` returns None for
+/// ConcreteType::String/Decimal (see `compiler/typed_emission.rs:102-110`);
+/// the gate-flip lands as a separate sequential A2-followup-gate-flip
+/// agent AFTER Round 3a' α-η merge ceremony. Surface message names the
+/// handler (`op`) for per-call-site observability per ADR-006 §2.7.24
+/// Q25.A SUPERSEDED #3 mixed-migration forbidden pattern + §4.1.B.3
+/// materialize-on-read forbidden.
 #[inline]
-fn typed_array_ref<'a>(slot: &'a KindedSlot) -> Result<&'a TypedArrayData, VMError> {
+fn typed_array_ref<'a>(slot: &'a KindedSlot, op: &str) -> Result<&'a TypedArrayData, VMError> {
     match slot.kind {
         NativeKind::Ptr(HeapKind::TypedArray) => {
             let bits = slot.slot.raw();
@@ -74,6 +89,57 @@ fn typed_array_ref<'a>(slot: &'a KindedSlot) -> Result<&'a TypedArrayData, VMErr
             // bits are `Arc::into_raw::<TypedArrayData>` and the dispatch
             // shell owns one strong-count share for the call duration.
             Ok(unsafe { &*(bits as *const TypedArrayData) })
+        }
+        NativeKind::UInt64 => {
+            // v2-raw typed-array pointer carrier (no refcount; the raw
+            // pointer is owned by the slot it was pushed into). Classify
+            // the element type via the header stamp so the SURFACE message
+            // names the v2-raw shape explicitly (mirrors the A2 arm at
+            // `array_transform.rs::typed_array_arc_from_kinded`).
+            use crate::executor::v2_handlers::v2_array_detect::{
+                as_v2_typed_array, V2ElemType,
+            };
+            let view = match as_v2_typed_array(slot.slot.raw(), NativeKind::UInt64) {
+                Some(v) => v,
+                None => {
+                    return Err(VMError::TypeError {
+                        expected: "Array",
+                        got: "non-array",
+                    });
+                }
+            };
+            match view.elem_type {
+                V2ElemType::String | V2ElemType::Decimal => Err(VMError::NotImplemented(format!(
+                    "Array.{}: SURFACE — v2-raw TypedArray<*const StringObj/DecimalObj> \
+                     reached value-search borrow path (`typed_array_ref`) before the \
+                     A2-followup-gate-flip agent's producer-gate flip + consumer arm \
+                     migration lockstep. Borrowing v2-raw bits as `&TypedArrayData` is \
+                     wrong-type recovery (the bits are `*mut TypedArray<*const <X>Obj>`, \
+                     not `Arc::into_raw::<TypedArrayData>`); the right fix is the \
+                     A2-followup-gate-flip lockstep (producers + all 158 consumer arms \
+                     flip together). Tracked as W12-typed-array-data-s2-prime-\
+                     production-mechanical per audit §3.2 + ADR-006 §2.7.24 \
+                     Q25.A SUPERSEDED #3 + §4.1.B.3 materialize-on-read forbidden.",
+                    op
+                ))),
+                // Non-String/Decimal v2-raw shapes (I64/F64/Bool/I8/U8/I16/U16/U32/F32/Char)
+                // already have value-search bodies operating on the Arc-form
+                // `TypedArrayData` produced by `typed_array_arc_from_kinded`; the
+                // value-search handlers don't go through that helper today, so
+                // these arms also surface — but with a different reason. Once a
+                // user-facing case for v2-raw value-search emerges, wire a
+                // dedicated `find_first_index_v2` against the raw `TypedArray<T>`
+                // pointer.
+                other => Err(VMError::NotImplemented(format!(
+                    "Array.{}: SURFACE — v2-raw typed-array element type {:?} reached \
+                     `typed_array_ref` (borrow-as-`&TypedArrayData`) path. Value-search \
+                     handlers (`indexOf` / `includes`) currently operate on the Arc-form \
+                     `TypedArrayData` only; v2-raw value-search needs a dedicated \
+                     `*const TypedArray<T>` walker per ADR-006 §2.7.6 / Q8 per-variant \
+                     constructor matrix. Phase-2c reentry per §2.7.4.",
+                    op, other
+                ))),
+            }
         }
         _ => Err(VMError::TypeError {
             expected: "Array",
@@ -404,7 +470,7 @@ pub(crate) fn handle_index_of_v2(
     if args.len() < 2 {
         return Err(VMError::argument_count_error("indexOf", 1, 0));
     }
-    let arr = typed_array_ref(&args[0])?;
+    let arr = typed_array_ref(&args[0], "indexOf")?;
     let idx = find_first_index(arr, &args[1])?;
     Ok(KindedSlot::from_int(idx.map(|i| i as i64).unwrap_or(-1)))
 }
@@ -419,7 +485,7 @@ pub(crate) fn handle_includes_v2(
     if args.len() < 2 {
         return Err(VMError::argument_count_error("includes", 1, 0));
     }
-    let arr = typed_array_ref(&args[0])?;
+    let arr = typed_array_ref(&args[0], "includes")?;
     let idx = find_first_index(arr, &args[1])?;
     Ok(KindedSlot::from_bool(idx.is_some()))
 }
