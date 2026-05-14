@@ -132,6 +132,22 @@ YOU MUST read these docs in order before touching the codebase:
 6. /home/dev/dev/shape-lang/shape/docs/cluster-audits/phase-3-team-lead-handover.md
    §In-flight state (the deletion-target list below is your starting scope)
 
+BINDING SUPERVISOR DISPOSITIONS (carry into your design analysis):
+
+- R20 prereq 1 disposition: +8 typed opcodes per kind for String + Decimal producer
+  migration (mirror S1 scalar recipe per audit §3.1). Re-shape op_new_array path is
+  REFUSED as too-easily-defection-attractor-adjacent (any single change that makes
+  the operand element-kind reader read from heap header instead of operand silently
+  violates §2.7.5 stamp-at-compile-time).
+- R20 prereq 3 disposition: VM Decimal SIGSEGV at baseline is pre-existing v2-raw-
+  heap aliasing class (status doc known constraint). NOT a Wave 2 blocker; document
+  that the migration moves Array<decimal> from legacy carrier (broken) to v2-raw
+  carrier (may surface same bug class); v2-raw-heap-audit is the cross-cutting fix
+  folded into Wave 2 if territory permits OR Wave 3 stabilize-fix.
+- Surface A all three options (a)/(b)/(c): map without blocking. Supervisor
+  recommendation (c) split — but user-pending. Your audit deliverable (I) covers
+  all three scope estimates.
+
 YOUR TERRITORY: produce
 docs/cluster-audits/bulldozer-wave-1-inventory.md
 with sections per deletion target. NO source changes. NO partial migration. NO new
@@ -258,6 +274,12 @@ FORBIDDEN IN THIS DISPATCH (refuse on sight):
 - Audit-text imprecisions that lack file:line ground truth (R20 S2-prime caught
   the rust_decimal align-of=8 vs measured align-of=4 imprecision via ground-
   truthing; same discipline applies here)
+- "Single deletion target requires CLAUDE.md modification" without flagging it
+  explicitly — if any deletion target's design surfaces a NEW forbidden pattern or
+  refuse-on-sight phrase that should land in CLAUDE.md, FLAG IT EXPLICITLY in your
+  close report. CLAUDE.md modifications require explicit user authorization (R17
+  precedent + 2026-05-14 compaction precedent); team-lead does not land them
+  without user ratification.
 
 CLOSE GATE:
 - bulldozer-wave-1-inventory.md exists with A-L sections; every section has
@@ -282,6 +304,9 @@ message. Then report back with:
 6. Surface A coverage: all three (a)/(b)/(c) options mapped per the audit
 7. Any genuinely intractable deletion-target that requires supervisor ADR-level
    decision before Wave 2 dispatches (surface-and-stop with structured shape)
+8. CLAUDE.md modifications surfaced (if any) — flag the proposed change + draft
+   text + which deletion target requires it. Team-lead surfaces to supervisor for
+   supervisor-to-user-relay; user ratifies landing.
 ```
 
 After Wave 1 closes: team-lead reads audit doc + verify-merge.sh; status-doc R20+1 update; surface to supervisor with the Wave 2 dispatch shape for ratification.
