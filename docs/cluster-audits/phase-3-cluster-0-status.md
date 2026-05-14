@@ -7130,3 +7130,104 @@ Bulldozer cadence delivering: structural complexity surfacing at agent execution
 ---
 
 *Next session: Wave 2 Round 3a dispatch (2 agents in parallel — D3 + A2-followup-mechanical) after supervisor ratifies Round 2 close. D3 dispatches with cascade-ceiling WAIVER binding (~250-300 sites in single atomic commit including E's 4-table TraitObject flip + pre-existing 5-arm receiver-recovery violation fix). A2-followup-mechanical dispatches with atomic-lockstep binding. Round 3b (C2-joint) sequential post-Round-3a.*
+
+---
+
+## Wave 2 Round 3a close — team-lead merge ceremony (2026-05-14)
+
+Round 3a dispatched 2 agents in parallel (D3 cascade-ceiling waiver + A2-followup-mechanical atomic gate-flip per Wave 2 Round 2 close revised partition). Both agents closed with STRUCTURED SURFACE-AND-STOP — zero source changes; baseline preserved at HEAD 4c7b1d9d.
+
+### Per-agent close summary (0 substantive + 2 structured S-A-S)
+
+| Agent | Close commit | Status | Notes |
+|---|---|---|---|
+| D3 | `2d185f1a` | ⚠ STRUCTURED S-A-S (execution-capacity bound) | Pre-flight ground truth: 383 TypedObjectStorage refs / 48 files (D2 reported 365; +18 in 2 sessions); 149 TraitObjectStorage refs / 16 files; 80 TypedArrayData::TypedObject cascade / 15 files; 13 HashMapValueBuf::TypedObject cascade / 2 files; 11 TypedObject + 2 TraitObject production sites; 8 dispatch arms confirmed (refines D2's 6). D3-1: TraitObjectStorage inner Arc<TypedObjectStorage> at heap_value.rs:1940 is 5th production-site class. D3-2: 5-arm receiver-recovery violation at object_ops.rs:59 NOT independently landable. CORE FINDING: cascade-execution at single-LLM-session capacity exceeded — ~270-320 individual edits each non-mechanical (variant signature changes × consumer destructure pattern interactions). |
+| A2-followup-mechanical | `7be0b245` | ⚠ STRUCTURED S-A-S (48-handler ceiling) | Pre-flight ground truth: 159 refs / 36 files (kickoff 158/35; +1/+1); 31 expression sites / 29 conceptual locations; line numbers off by ~20-150. STRUCTURAL FINDING (G5): cascade-ceiling is NOT 158-site match-arm count; it's 48-handler entry-point dispatch ceiling across 6 array-method files. Every ARRAY_METHODS handler materializes receiver via typed_array_arc_from_kinded which already SURFACE-AND-STOPs for V2ElemType::String|Decimal per §4.1.B.3. Atomic unit extends ~1500-2500 LoC beyond cascade-site count. |
+
+### Post-merge gates (devenv wrapper; baselines preserved zero-source-change)
+
+- `cargo check --workspace --lib --tests` EXIT=0 ✅
+- `bash scripts/verify-merge.sh` EXIT=0; **Passed: 12 / Failed: 0** ✅
+- `bash scripts/check-no-dynamic.sh` EXIT=0 ✅
+- Smoke matrix preserved (3/4 VM == JIT; Smoke 2 gated on S5 + Round 3a'/D4 unblocks)
+- 2 Round 3a worktrees cleaned up
+
+### Round 3a merge ceremony commits
+
+```
+<merged-d3>     Merge D3 STRUCTURED S-A-S (execution-capacity bound; AGENTS.md row only)
+<merged-a2-fu>  Merge A2-followup-mechanical STRUCTURED S-A-S (48-handler ceiling; AGENTS.md row only)
+```
+
+### NEW CEILING TAXONOMY (canonical; per supervisor 2026-05-14 disposition (3))
+
+Three independent ceilings affect atomic-flip cascade landings:
+
+| Ceiling | Description | First-instance precedent |
+|---|---|---|
+| (a) ~100-site cascade | Cascade-site count per single migration | R19 S1.5 (preserved) |
+| (b) ~48-handler entry-point dispatch | Method-handler entry-point materializers in same dispatch family | A2-followup G5 (Round 3a; NEW) |
+| (c) Single-LLM-session execution capacity | ~50-100 non-mechanical edits per session at discipline-coherent quality bar | D3 finding (Round 3a; NEW) |
+
+Each ceiling is independent. Atomic-flip cascades that exceed any of the three need:
+1. Cascade-ceiling waiver authorization with multi-session sub-agent chain pattern (D-α per user 2026-05-14)
+2. Per-sub-family atomic sub-commit split with gate-flip-in-last-commit shape (A2-followup option (a) per supervisor 2026-05-14)
+3. Re-architect to avoid the atomicity requirement (rare; sometimes structurally impossible)
+
+### Pre-flight ground-truth check binding EXTENDED (per supervisor disposition (3))
+
+Wave 2 Round 3a' + future wave dispatch prompts MUST include:
+
+```
+PRE-FLIGHT GROUND-TRUTH CHECK (mandatory; surface in close report):
+
+Before writing any migration code:
+1. Grep your territory at HEAD <post-prior-round-merge> for prior W-series
+   landings vs current source state.
+2. Enumerate method-handler entry-point materializers in your scope —
+   count how many handlers transitively materialize via your touched
+   surfaces. Surface if exceeds ~48 (ceiling-b: A2-followup G5).
+3. Estimate single-session execution capacity for atomic edits in your
+   scope — count non-mechanical edits (variant signature changes,
+   destructure pattern translations, dispatch arm flips). Surface if
+   exceeds ~50-100 per session (ceiling-c: D3 finding).
+4. Surface any of the 3 ceiling exceedances IN YOUR CLOSE REPORT
+   pre-source-change; team-lead reopens with the appropriate cadence
+   pattern.
+```
+
+### Imprecision-pattern instances 13-15 (Round 3a additions)
+
+| # | Source | Imprecision shape |
+|---|---|---|
+| 13 | A2-followup G5 (R3a) | 48-handler entry-point dispatch ceiling (new ceiling-b) |
+| 14 | D3 (R3a) | D3-1 (5th production-site class) + D3-2 (5-arm receiver-recovery non-independently-landable) + 8-arm dispatch refinement (D2 said 6) |
+| 15 | D3 core finding (R3a) | Single-LLM-session execution capacity ceiling (new ceiling-c) |
+
+Cumulative: **15 imprecision instances**.
+
+### Supervisor + USER dispositions (2026-05-14)
+
+- **Item (1) — A2-followup-mechanical split into Round 3a' RATIFIED** (supervisor): 7 per-handler-family sub-agents in parallel (α/β/γ/δ/ε/ζ/η = array_transform / array_aggregation / array_query / array_sets / array_sort / array_basic / array_joins) each cargo-check-clean with v2-raw arms landing as UNREACHABLE code while gate stays closed; + 1 sequential A2-followup-gate-flip agent dispatched after α-η merge ceremony lands.
+
+- **Item (2) — D3 path RATIFIED by user 2026-05-14: (D-α) multi-session sub-agent chain.** Round 4 D4 wave dispatches N sub-agents sequentially on feature branch bulldozer-strictly-typed-d4-checkpoint-N; each intermediate sub-agent's dispatch prompt authorizes broken-cargo-check feature-branch commits with structured state pointer; final sub-agent's close gate STRICT (cargo check passes + verify-merge.sh 12/12). Team-lead merges feature-branch-final into bulldozer-strictly-typed canonical. New discipline pattern requires handover doc + ADR amendment shape per user 2026-05-14 binding.
+
+- **Item (3) — ceiling taxonomy + pre-flight ground-truth check binding update RATIFIED** (supervisor): see canonical taxonomy + extended binding above.
+
+### Honest velocity update
+
+| Stage | Sessions |
+|---|---|
+| Round 3a merge ceremony (this turn) | 0.25 |
+| Round 3a' A2-followup-split (7 parallel + 1 gate-flip) | 1 |
+| D4 multi-session execution (D-α path; user-ratified) | 2-3 |
+| Round 3b C2-joint (post-D4 + post-Round-3a'-merged) | 1 |
+| Wave 3 S5 + cluster-0+1 close attempt | 1 |
+| Cluster-2 + Phase 4 | 2-4 |
+| **Total remaining (D-α path)** | **7-10** |
+
++2 sessions from prior projection absorbed by D3 execution-capacity finding. Honest trajectory; bulldozer cadence revealing real structural shape.
+
+---
+
+*Next session: Round 3a' A2-followup-split dispatch (7 parallel sub-agents α-η + 1 sequential gate-flip post-merge). After Round 3a' close: D4 multi-session sub-agent chain dispatch per D-α user ratification. Then Round 3b C2-joint sequential.*
