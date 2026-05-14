@@ -6369,3 +6369,160 @@ out).
 R20-complete subsection first; the team-lead handover doc + this
 status doc + the bulldozer Wave 1 dispatch prompt template (in the
 team-lead handover §Wave 1 dispatch shape) are the canonical state.*
+
+---
+
+## Wave 1 — single-audit-day close (2026-05-14)
+
+Wave 1 dispatched from `bulldozer-strictly-typed @ aa047356` per
+supervisor R20-ratification + Wave 1 authorization 2026-05-14 (after
+predecessor team-lead's R20 ceremony executed under bulldozer cadence
+refusal #10). Single agent, audit-only deliverable, 1-2 days estimated.
+
+Sub-agent dispatched in worktree `../shape-wave-1-audit` produced the
+substantive audit work (2,035 LoC `bulldozer-wave-1-inventory.md`
+covering sections A-R + 16 ground-truth grep claims at HEAD §M with
+zero imprecisions surfaced + Wave 2 partition recommendation §L 6+3+1
+agents + 3 surfaces for supervisor §P) but **stalled at the watchdog
+600s seam at the very last finalization step** (last action: "Now let
+me run the verify-merge.sh gate, then commit"; status: failed; stream
+watchdog did not recover). All audit work was complete pre-stall;
+only the `git add` + `git commit` step was missing.
+
+**Recovery via team-lead-completes-ceremony for verified-correct WIP**
+per S1 reopen R18 precedent (second instance; per-instance supervisor
+authorization continues until pattern is durable). Team-lead independently
+ran the close gates in the worktree pre-commit:
+`cargo check --workspace --lib --tests` EXIT=0; `verify-merge.sh` 12/12
+PASS; `check-no-dynamic.sh` EXIT=0; AGENTS.md row state-flip verified
+active → closed with full close-summary; doc structure verified A-R
+sections present + §M ground-truth claims grep-verified. Sub-agent's
+work attributable in close commit message; ceremony completion
+attributable to team-lead per recovery precedent.
+
+### Ceremony commits (2 commits)
+
+1. **Wave 1 close commit** (`29bf1cdf`, on `bulldozer-strictly-typed-
+   wave-1-audit`): `bulldozer-wave-1-inventory.md` + AGENTS.md row
+   state-flip active → closed; substantive audit work attributed to
+   sub-agent; ceremony completion attributed to team-lead per S1 reopen
+   R18 precedent (second instance per supervisor authorization
+   2026-05-14).
+2. **Merge into bulldozer-strictly-typed** (this commit's parent):
+   take-both for AGENTS.md row state-flip (auto-resolved cleanly
+   because parent's "active" row is the one being modified to
+   "closed"; not separate-row collision).
+
+### Post-merge gates (devenv wrapper)
+
+- `cargo check --workspace --lib --tests` EXIT=0 ✅
+- `bash scripts/verify-merge.sh` EXIT=0, **Passed: 12 / Failed: 0** ✅
+- `bash scripts/check-no-dynamic.sh` EXIT=0 ✅
+
+### Post-merge smoke matrix (release binary, unchanged from b83a3042 baseline)
+
+| Smoke | VM | JIT | Cluster-0 criterion |
+|---|---|---|---|
+| 1 (scalar loop) | ✅ 4950 | ✅ 4950 | ✓ |
+| 2 (`[1,2,3,4,5].map(\|x\|x*2).sum()`) | ✅ 30 | ❌ rc=1 | gated on Wave 2 |
+| 3 (canonical fixture `let t = X{}`) | ✅ x | ✅ x | ✓ |
+| 4 (`Set()` + `.add()` + `.size()`) | ✅ 2 | ✅ 2 | ✓ |
+
+3/4 VM == JIT; Smoke 2 still gated on Wave 2. Audit-only ceremony
+preserved baseline (zero source changes).
+
+### Wave 1 §P supervisor dispositions (received from supervisor 2026-05-14)
+
+- **§P.1 Q8 cardinality bump for `NativeKind::StringV2` + `NativeKind::DecimalV2`:
+  RATIFIED.** H-c option is the right call (20-50x perf vs H-a
+  materialize-on-read; refuses H-b parallel-carrier defection per
+  CLAUDE.md §Parallel-implementation entry; mirrors R19 S1.5
+  W12-nativekind-scalar-additions precedent). Wave 2 Agent B's
+  territory expands to include the StringV2 + DecimalV2 cascade
+  (`native_kind.rs` + `concrete_type.rs` + `kinded_slot.rs`
+  constructors/accessors/Drop+Clone arms + 4-table HeapKind lockstep
+  in `vm_impl/stack.rs` + `closure_layout.rs` + `heap_value.rs`
+  TypedObjectStorage::drop arms). ADR-006 §2.7.5 amendment text shape
+  mirrors S1.5 amendment; Wave 2 Agent B refines + lands in close
+  commit. Forbidden under this amendment: parametric variants;
+  materialize-on-read fallback at any consumer site (H-a refused);
+  StringV2 / DecimalV2 nullable siblings without exhaustive cascade
+  (S1.5 precedent for non-nullable-only at landing).
+- **§P.2 Surface A (kickoff-prompt-vs-fixture mismatch): user-pending.**
+  Wave 2 Rounds 1+2 dispatch without waiting (territory non-overlapping
+  with Q25.C TraitObject rebuild scope). Round 3 Agent H conditional
+  on user-decision (b). Supervisor recommendation (c) split. Surface
+  escalated to user this turn; user decision flows back through
+  team-lead relay before Round 3 dispatches.
+- **§P.3 §K 48 shape-test failures cluster-2 audit triage: RATIFIED.**
+  7 categories observed at branch baseline `jit-v2-phase1@53a06ce`;
+  categories (c)/(f)/(g) MAY get partial fixes from Wave 2 v2-raw-heap
+  migration territory (Agent A + Agent B incidental); Wave 3
+  stabilize re-runs the 48 + re-categorizes remaining failures;
+  genuinely-pre-existing-architectural-debt categories ((a)/(b)/(d)/(e))
+  become cluster-2 audit triage scope. Tracked as
+  "shape-test-residuals-audit" follow-up workstream; cluster-2
+  audit-day dispatches the triage after cluster-0+1 close.
+
+### Durable-pattern observation (supervisor relay)
+
+Second instance of team-lead-completes-ceremony-for-agent-API-error-WIP
+suggests the pattern is generalizable. If a third instance surfaces,
+supervisor will propose making it durable (team-lead executes ceremony
+without per-instance supervisor authorization) so the operational gate
+doesn't bottleneck every API-error recovery. Not yet durable;
+per-instance authorization continues until then.
+
+### Wave 2 dispatch shape (post-Wave-1 close, pre-supervisor §L ratification)
+
+Per Wave 1 §L:
+
+- **Round 1 (6 agents in parallel):** A1 (TypedArrayData enum scalar
+  arms) + B (TypedBuffer<T> + AlignedTypedBuffer wrapper layer +
+  StringV2 + DecimalV2 NativeKind/Q8 cascade per §P.1) + C
+  (HashMapValueBuf per-V monomorphization) + D1 (TypedObjectStorage
+  Arc → HeapHeader shape change ~50 sites) + F (Q25.A specialization
+  dead arms wholesale deletion) + G (W12-stdlib-intrinsic-collapse).
+- **Round 2 (3 agents, post-Round-1 close + smoke matrix):** A2
+  (TypedArrayData enum heap-element + Matrix arms cascade) + D2
+  (TypedObjectStorage cascade ~250 sites) + E (TraitObjectStorage
+  HeapHeader migration; gated on D1).
+- **Round 3 (1 agent, conditional on Surface A user-decision (b)):**
+  H (Q25.C TraitObject rebuild ~1,100 LoC).
+
+Team-lead surfaces §L verbatim to supervisor for partition ratification
+post-this-commit. Supervisor reads §L + ratifies (or returns targeted
+edits if any agent territory overlaps beyond take-both ceremony scope).
+Then team-lead dispatches Round 1 in parallel.
+
+### Surface A escalation to user (received from supervisor 2026-05-14)
+
+Supervisor escalated Surface A user-pending decision this turn.
+Three options summarized for user:
+
+- (a) Smoke fixtures pass VM == JIT — silent re-scope of close
+  criterion from kickoff prompt prose to operational fixtures.
+- (b) Kickoff prompt prose intent matches — requires Q25.C TraitObject
+  rebuild (Wave 2 Agent H + fat-pointer Arc<TraitObjectStorage> +
+  VTable thunks + Self-arg runtime check + generic-method type-info
+  + ETO-001/ETO-002 errors); +3-5 sessions before close attempt.
+- (c) Split — current fixture-based smokes = cluster-0 close criterion;
+  "Smoke 3-trait-object dispatch" = explicit cluster-1.5 close-criterion
+  item dispatching post-cluster-0+1 close.
+
+Supervisor recommendation: (c) split. Reasoning: fixture-as-operational-
+gate convention is what R10-R20 shipped against; (a) silently re-scopes
+9 rounds of verified work; (b) adds Q25.C TraitObject rebuild scope =
++3-5 sessions before close attempt; (c) honestly acknowledges
+prose-vs-fixture drift and preserves both intents.
+
+User decision needed before Round 3 dispatches (~1-2 sessions out
+under current cadence). Round 3 dispatch shape locks on user's answer.
+
+---
+
+*Next session: Wave 2 Round 1 dispatch under bulldozer cadence after
+supervisor §L partition ratification. Read this Wave-1-close subsection
+first; the team-lead handover doc + this status doc + the Wave 1
+inventory at `docs/cluster-audits/bulldozer-wave-1-inventory.md` are
+the canonical state.*
