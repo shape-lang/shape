@@ -661,6 +661,48 @@ define_opcodes! {
     /// Set element in TypedArray<char>: pops (arr_ptr, index, value), pushes nothing.
     TypedArraySetChar = 0x1AA, Object, pops: 3, pushes: 0;
 
+    // ===== Wave 2 Agent A2 (2026-05-14) — String + Decimal heap-element monomorphizations =====
+    //
+    // Per ADR-006 §2.7.24 Q25.A SUPERSEDED + audit §3.2 sub-cluster S2-prime, the
+    // String and Decimal element kinds migrate to v2-raw `TypedArray<*const StringObj>` /
+    // `TypedArray<*const DecimalObj>` shape. The 8 new opcodes mirror the §2.1
+    // scalar-monomorphization recipe (New / Get / Push / Set per kind) but the
+    // element-read path pushes `NativeKind::StringV2` / `NativeKind::DecimalV2`
+    // (Agent B's Round 1 carrier-shape variants) — distinct from the legacy
+    // `NativeKind::String` (Phase-2c `Arc<String>` carrier; ADR-005 §2 exception).
+    // Per-element retain via `v2_retain(&(*elem_ptr).header)` at read time before
+    // pushing the StringV2/DecimalV2-kind slot per audit §4.1.B.4 migration recipe.
+    //
+    // Heap element discipline: `T: HeapElement` constraint per audit §4.1.B (the
+    // §4.1.B Option (a) ratification) is satisfied structurally — both StringObj
+    // and DecimalObj have `HeapHeader` at offset 0 with refcount initialized to 1
+    // by their ::new constructors. `TypedArray<*const T>::drop_array_heap` walks
+    // the element buffer and calls `T::release_elem(elem_ptr)` per-T at drop time,
+    // monomorphized at compile time (no runtime kind probe).
+    //
+    // Architectural surface only — landed in A2 close. Producer-site migration
+    // (~29 construction sites) + consumer-arm cascade (~158 references across 35
+    // files) surface-and-stop to A2 follow-up sub-cluster per ~100-site cascade
+    // ceiling + Q25.A SUPERSEDED #3 mixed-migration forbidden pattern.
+
+    /// Create a new TypedArray<*const StringObj> with given capacity. Operand: Count(capacity). Pushes ptr.
+    NewTypedArrayString = 0x1AB, Object, pops: 0, pushes: 1;
+    /// Get element from TypedArray<*const StringObj>: pops (arr_ptr, index), pushes (*const StringObj) bits with NativeKind::StringV2 (retains element).
+    TypedArrayGetString = 0x1AC, Object, pops: 2, pushes: 1;
+    /// Push element to TypedArray<*const StringObj>: pops (arr_ptr, value), pushes nothing. Caller transfers their refcount share to the array.
+    TypedArrayPushString = 0x1AD, Object, pops: 2, pushes: 0;
+    /// Set element in TypedArray<*const StringObj>: pops (arr_ptr, index, value), pushes nothing. Releases prior element, transfers new value's refcount share.
+    TypedArraySetString = 0x1AE, Object, pops: 3, pushes: 0;
+
+    /// Create a new TypedArray<*const DecimalObj> with given capacity. Operand: Count(capacity). Pushes ptr.
+    NewTypedArrayDecimal = 0x1AF, Object, pops: 0, pushes: 1;
+    /// Get element from TypedArray<*const DecimalObj>: pops (arr_ptr, index), pushes (*const DecimalObj) bits with NativeKind::DecimalV2 (retains element).
+    TypedArrayGetDecimal = 0x1B0, Object, pops: 2, pushes: 1;
+    /// Push element to TypedArray<*const DecimalObj>: pops (arr_ptr, value), pushes nothing. Caller transfers their refcount share to the array.
+    TypedArrayPushDecimal = 0x1B1, Object, pops: 2, pushes: 0;
+    /// Set element in TypedArray<*const DecimalObj>: pops (arr_ptr, index, value), pushes nothing. Releases prior element, transfers new value's refcount share.
+    TypedArraySetDecimal = 0x1B2, Object, pops: 3, pushes: 0;
+
     // ===== v2 Typed Map Operations =====
     /// Allocate a new TypedMap<*const StringObj, f64>. Pushes ptr.
     NewTypedMapStringF64 = 0xCD, Object, pops: 0, pushes: 1;
@@ -1922,6 +1964,15 @@ impl OpCode {
             | OpCode::TypedArrayGetChar
             | OpCode::TypedArrayPushChar
             | OpCode::TypedArraySetChar
+            // Wave 2 Agent A2 (2026-05-14) — String + Decimal heap-element monomorphizations.
+            | OpCode::NewTypedArrayString
+            | OpCode::TypedArrayGetString
+            | OpCode::TypedArrayPushString
+            | OpCode::TypedArraySetString
+            | OpCode::NewTypedArrayDecimal
+            | OpCode::TypedArrayGetDecimal
+            | OpCode::TypedArrayPushDecimal
+            | OpCode::TypedArraySetDecimal
             // Local-slot-based typed array element access
             | OpCode::GetElemI64
             | OpCode::GetElemF64

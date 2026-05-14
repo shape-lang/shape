@@ -424,6 +424,25 @@ impl VirtualMachine {
                     let v = unsafe { TypedArray::<char>::get_unchecked(arr, i) };
                     self.push_kinded(v as u32 as u64, NativeKind::Char)
                 }
+                // Wave 2 Agent A2 (2026-05-14) — String + Decimal iter reads.
+                // Per audit §4.1.B.4: retain the per-element header before
+                // pushing the slot bits as NativeKind::StringV2 / DecimalV2.
+                V2ElemType::String => {
+                    use shape_value::v2::refcount::v2_retain;
+                    use shape_value::v2::string_obj::StringObj;
+                    let arr = view.ptr as *const TypedArray<*const StringObj>;
+                    let elem_ptr = unsafe { TypedArray::<*const StringObj>::get_unchecked(arr, i) };
+                    unsafe { v2_retain(&(*elem_ptr).header) };
+                    self.push_kinded(elem_ptr as u64, NativeKind::StringV2)
+                }
+                V2ElemType::Decimal => {
+                    use shape_value::v2::decimal_obj::DecimalObj;
+                    use shape_value::v2::refcount::v2_retain;
+                    let arr = view.ptr as *const TypedArray<*const DecimalObj>;
+                    let elem_ptr = unsafe { TypedArray::<*const DecimalObj>::get_unchecked(arr, i) };
+                    unsafe { v2_retain(&(*elem_ptr).header) };
+                    self.push_kinded(elem_ptr as u64, NativeKind::DecimalV2)
+                }
             };
             drop_with_kind(idx_bits, idx_kind);
             drop_with_kind(iter_bits, iter_kind);

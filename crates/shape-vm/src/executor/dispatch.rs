@@ -910,7 +910,28 @@ impl VirtualMachine {
             | NewTypedArrayU32
             | TypedArrayGetU32
             | TypedArrayPushU32
-            | TypedArraySetU32 => {
+            | TypedArraySetU32
+            // Wave 2 Agent A1 (2026-05-14) — F32 + Char monomorphizations
+            // (drive-by routing fix: opcode handlers landed in array.rs at A1 close
+            // but were never added to the dispatch table — instructions fell
+            // through to the default branch).
+            | NewTypedArrayF32
+            | TypedArrayGetF32
+            | TypedArrayPushF32
+            | TypedArraySetF32
+            | NewTypedArrayChar
+            | TypedArrayGetChar
+            | TypedArrayPushChar
+            | TypedArraySetChar
+            // Wave 2 Agent A2 (2026-05-14) — String + Decimal heap-element monomorphizations.
+            | NewTypedArrayString
+            | TypedArrayGetString
+            | TypedArrayPushString
+            | TypedArraySetString
+            | NewTypedArrayDecimal
+            | TypedArrayGetDecimal
+            | TypedArrayPushDecimal
+            | TypedArraySetDecimal => {
                 return self.exec_v2_typed_array(instruction);
             }
 
