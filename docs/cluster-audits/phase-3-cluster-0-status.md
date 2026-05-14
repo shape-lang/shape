@@ -5803,3 +5803,156 @@ Velocity: handoff-to-v1 unchanged at ~17-23 sessions.
 *Next session: R20 dispatches S2-prime-production + γ in parallel. Read
 this R20-S2-prime-merge-ceremony subsection first; the team-lead handover
 doc + this status doc are the canonical state.*
+
+---
+
+## Round 20 sub-cluster γ — W12-jit-trait-impl-method-registry close (2026-05-14)
+
+R20 γ dispatched from `bulldozer-strictly-typed @ 3fe3ffa9` (post-R20
+S2-prime audit-only merge ceremony + status-doc close + Smoke 4 kickoff
+typo fix HEAD) per team-lead R20 dispatch and supervisor R20 partial
+disposition (γ named at R19 C close as the upstream root-cause of Smoke 3
+JIT TAG_NULL fallthrough that the R19 C β filter intercepts downstream
+at `print_kinded_inner`).
+
+Branch `bulldozer-strictly-typed-w12-jit-trait-impl-method-registry`.
+Smoke 3 JIT now returns `x` matching VM — **cluster-0 close criterion
+met for Smoke 3**.
+
+### Audit findings (file:line cites)
+
+1. **W17-narrow R15 classification IS correct.** `SHAPE_JIT_DEBUG=1`
+   trace confirms `receiver_kind=Ptr(TypedObject)` flows through
+   `jit_call_method` at
+   `crates/shape-jit/src/ffi/call_method/mod.rs:507-525`. The
+   §2.7.7/Q9 parallel-kind track delivers the producer-stamped kind
+   correctly; no classification gap remains here post-R15.
+2. **`receiver_type_name` resolution IS correct.** At
+   `crates/shape-jit/src/ffi/call_method/mod.rs:115-145` the
+   `Ptr(HeapKind::TypedObject)` arm resolves the schema-id via
+   `jit_typed_object_schema_id` (a direct `(*ptr).schema_id` field-load
+   per §2.7.5 stamp-at-compile-time, not a tag-byte probe), then
+   queries the global stdlib registry, then falls back to the
+   trampoline VM's per-program registry — returns `"X"` for the
+   user-defined type `X` in Smoke 3.
+3. **UFCS name construction IS correct.** At
+   `crates/shape-jit/src/ffi/call_method/mod.rs:285` (R15 W17-narrow
+   landing site) the format constructs `"X::name"` correctly.
+4. **Function compilation IS correct.** Trace output:
+   `[jit-mir] func[194]='X::name' jit_compat=true has_mir=true ...
+   Compiled function 'X::name' via MirToIR`. The `X::name` UFCS-named
+   function is registered + compiled at `function_table[194]`.
+5. **The gap is layer (c) — JITContext function-name table never
+   linked.** `JITContext.function_names_ptr` initializes to
+   `std::ptr::null()` at `crates/shape-jit/src/context.rs:611` and
+   **no producer site anywhere in the codebase populates it** (grep
+   `function_names_ptr\s*=` across `crates/` + `bin/` returns only the
+   one initializer site at line 611). The consumer at
+   `find_function_by_name`
+   (`crates/shape-jit/src/ffi/call_method/mod.rs:229-242`) early-returns
+   `None` on null `function_names_ptr` — every UFCS dispatch falls
+   through to TAG_NULL.
+
+### Production fix
+
+1 file, +33 LoC, no deletions:
+
+- `crates/shape-jit/src/executor.rs:189-221` — linked
+  `function_names_ptr` + `function_names_len` in the JIT context setup
+  immediately after the existing `function_table` linking block. Built
+  a stable `Vec<String> = bytecode.functions.iter().map(|f|
+  f.name.clone()).collect()` in scope `function_names_storage`
+  paralleling the `function_table` slot ordering
+  (`compile_program_selective`'s loop at
+  `crates/shape-jit/src/compiler/program.rs:800-823` populates both
+  by `program.functions` index 1:1 — `function_names[idx]` describes
+  the same function as `function_table[idx]`). Same lifetime discipline
+  as the function-table borrow + trampoline VM lifecycle: storage
+  lives until `jit_fn` completes and is dropped after execution.
+
+The β filter at `print_kinded_inner` (R19 C close, commit `9bf2cf35`)
+is preserved as defensive guard for any TAG_NULL sources from other
+upstream paths.
+
+### Architectural note for supervisor visibility
+
+Smoke 3's `let t = X{}` is a plain TypedObject binding (NOT
+`let t: dyn T = box(X{})` as the dispatch text described); the JIT-side
+method dispatch for `t.name()` flows through the TypedObject schema-id
+path, NOT the §2.7.24 Q25.C `HeapKind::TraitObject` carrier. The
+§2.7.24 Q25.C TraitObject rebuild (W17-typed-carrier-monomorphization,
+ord 29 reserved) remains the future-work territory for true `dyn T`
+receivers with `Arc<TraitObjectStorage>` carriers; γ closes the
+cluster-0 close criterion via the existing TypedObject + UFCS-by-name
+path, which is the path the bytecode compiler emits today for this
+smoke shape.
+
+### Refuse-on-sight discipline preserved
+
+- No `ValueWord` resurrection.
+- No Bool-default fallback (`receiver_kind` flows through from the
+  §2.7.7/Q9 parallel-kind track at `jit_call_method`'s dispatch entry
+  per W17-narrow R15 — γ does not touch the kind-sourcing path).
+- No `Convert<X>To<Y>` opcode added to paper over a kind-tracker gap.
+- No bridge/probe/helper/hop/translator/adapter/shim framing for the
+  fix (described by name: "JIT function-name table linkage in
+  executor.rs paralleling function-table linkage" / by deletion-fate:
+  "the missing linkage between `JITContext.function_names_ptr` and
+  `bytecode.functions[*].name`").
+- No tag-bit decode at FFI boundary (the linkage is a
+  `Vec<String>::as_ptr()` analogous to the function_table linkage; no
+  NaN-box / heap-prefix probing).
+- No resurrection of deleted shape under renamed alias.
+- No 5-arm receiver-recovery violation (no `Arc<TraitObjectStorage>`
+  recovery needed — the live Smoke 3 path uses TypedObject, not the
+  §2.7.24 Q25.C TraitObject rebuild territory).
+- No `Co-Authored-By: Claude` trailer (MEMORY.md user rule).
+- No blame "pre-existing" — the missing linkage is owned as γ's
+  responsibility; it was a latent gap from the JIT-context wiring
+  that only manifested after W17-narrow R15's classification fix
+  exposed the UFCS dispatch path as the load-bearing route for
+  user-defined trait methods on TypedObject receivers.
+
+### Close gates (devenv wrapper)
+
+- `cargo check --workspace --lib --tests` EXIT=0.
+- `bash scripts/verify-merge.sh` SCRIPT_EXIT=0, **Passed: 12 /
+  Failed: 0**.
+- `bash scripts/check-no-dynamic.sh` EXIT=0.
+- `cargo test -p shape-jit --lib` 383 passed / 0 failed / 26 ignored —
+  no regressions.
+
+### Smoke matrix re-verification (release binary)
+
+| Smoke | VM | JIT (pre-γ) | JIT (post-γ) | Outcome |
+|---|---|---|---|---|
+| 1 (`sum 0..100`) | 4950 | 4950 | 4950 | ✓ no delta |
+| 2 (`[1..5].map(x*2).sum()`) | 30 | R14 conduit blocker | R14 conduit blocker (unchanged) | unchanged — S5 territory |
+| 3 (`trait T + impl + t.name()`) | `x` | `None` (β filter) | **`x` ✓** | **γ unblocks (load-bearing close gate)** |
+| 4 (`Set().add().size()`) | 2 | 2 | 2 | ✓ no delta |
+
+**Cluster-0 close criterion for Smoke 3: MET.**
+
+### Cluster-0 close readiness
+
+Post-γ status of the four kickoff smokes vs cluster-0 close criterion
+(full VM == JIT identity):
+
+- Smoke 1: VM == JIT ✓
+- Smoke 2: VM only — JIT blocked on dual-carrier reality elimination
+  (R14 conduit blocker; resolves post-S5)
+- Smoke 3: **VM == JIT ✓** (γ unblocked)
+- Smoke 4: VM == JIT ✓
+
+Cluster-0 close attempt is now gated on S5 (TypedArrayData enum +
+TypedBuffer<T> deletion) unblocking Smoke 2 JIT. Per the R20 next-
+dispatch shape: S2-prime-production lands String + Decimal v2-raw
+migration first; then S5 dispatches; cluster-0 close attempt
+projected at R21+1 or R22.
+
+---
+
+*Next session: γ closes. R20 next-dispatch is S2-prime-production +
+S5 sequencing per supervisor's R20 disposition. Smoke 3 JIT
+end-to-end matches VM — the load-bearing cluster-0 close criterion
+for the trait-dispatch surface is achieved.*
