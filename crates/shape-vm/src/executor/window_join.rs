@@ -112,13 +112,8 @@ fn typed_array_len(arr: &TypedArrayData) -> usize {
         // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
         TypedArrayData::Decimal(b) => b.len(),
         TypedArrayData::BigInt(b) => b.len(),
-        TypedArrayData::DateTime(b) => b.len(),
-        TypedArrayData::Timespan(b) => b.len(),
-        TypedArrayData::Duration(b) => b.len(),
-        TypedArrayData::Instant(b) => b.len(),
         TypedArrayData::Char(b) => b.len(),
         TypedArrayData::TypedObject(b) => b.len(),
-        TypedArrayData::TraitObject(b) => b.len(),
     }
 }
 

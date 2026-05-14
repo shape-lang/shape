@@ -684,24 +684,6 @@ impl<'a> ValueFormatter<'a> {
                 let elems: Vec<String> = buf.data.iter().map(|b| b.to_string()).collect();
                 format!("[{}]", elems.join(", "))
             }
-            TypedArrayData::DateTime(buf)
-            | TypedArrayData::Timespan(buf)
-            | TypedArrayData::Duration(buf) => {
-                let elems: Vec<String> = buf
-                    .data
-                    .iter()
-                    .map(|td| self.format_heap_value(&HeapValue::Temporal(Arc::clone(td)), depth + 1))
-                    .collect();
-                format!("[{}]", elems.join(", "))
-            }
-            TypedArrayData::Instant(buf) => {
-                let elems: Vec<String> = buf
-                    .data
-                    .iter()
-                    .map(|inst| self.format_heap_value(&HeapValue::Instant(Arc::clone(inst)), depth + 1))
-                    .collect();
-                format!("[{}]", elems.join(", "))
-            }
             TypedArrayData::Char(buf) => {
                 let elems: Vec<String> = buf.data.iter().map(|c| format!("'{}'", c)).collect();
                 format!("[{}]", elems.join(", "))
@@ -711,14 +693,6 @@ impl<'a> ValueFormatter<'a> {
                     .data
                     .iter()
                     .map(|o| self.format_heap_value(&HeapValue::TypedObject(Arc::clone(o)), depth + 1))
-                    .collect();
-                format!("[{}]", elems.join(", "))
-            }
-            TypedArrayData::TraitObject(buf) => {
-                let elems: Vec<String> = buf
-                    .data
-                    .iter()
-                    .map(|to| self.format_heap_value(&HeapValue::TraitObject(Arc::clone(to)), depth + 1))
                     .collect();
                 format!("[{}]", elems.join(", "))
             }

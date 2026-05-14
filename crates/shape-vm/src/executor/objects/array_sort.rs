@@ -131,20 +131,11 @@ fn element_to_string(arr: &TypedArrayData, idx: usize, out: &mut String) -> Resu
         TypedArrayData::BigInt(buf) => {
             write!(out, "{}", *buf.data[idx]).map_err(|e| type_error(e.to_string()))
         }
-        TypedArrayData::DateTime(buf)
-        | TypedArrayData::Timespan(buf)
-        | TypedArrayData::Duration(buf) => {
-            write!(out, "{}", buf.data[idx].type_name()).map_err(|e| type_error(e.to_string()))
-        }
-        TypedArrayData::Instant(_) => {
-            out.push_str("<instant>");
-            Ok(())
-        }
         TypedArrayData::Char(buf) => {
             out.push(buf.data[idx]);
             Ok(())
         }
-        TypedArrayData::TypedObject(_) | TypedArrayData::TraitObject(_) => Err(type_error(format!(
+        TypedArrayData::TypedObject(_) => Err(type_error(format!(
             "joinStr: {} elements need per-schema stringification — out of joinStr \
              scope; use .map(|x| x.toString()).join() form",
             arr.type_name()
@@ -171,13 +162,8 @@ fn array_len(arr: &TypedArrayData) -> Result<usize, VMError> {
         // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
         TypedArrayData::Decimal(b) => b.len(),
         TypedArrayData::BigInt(b) => b.len(),
-        TypedArrayData::DateTime(b) => b.len(),
-        TypedArrayData::Timespan(b) => b.len(),
-        TypedArrayData::Duration(b) => b.len(),
-        TypedArrayData::Instant(b) => b.len(),
         TypedArrayData::Char(b) => b.len(),
         TypedArrayData::TypedObject(b) => b.len(),
-        TypedArrayData::TraitObject(b) => b.len(),
     })
 }
 

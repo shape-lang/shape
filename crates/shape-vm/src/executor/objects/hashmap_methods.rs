@@ -250,13 +250,8 @@ pub fn v2_values(
         HashMapValueBuf::String(b) => TypedArrayData::String(Arc::clone(b)),
         HashMapValueBuf::Decimal(b) => TypedArrayData::Decimal(Arc::clone(b)),
         HashMapValueBuf::BigInt(b) => TypedArrayData::BigInt(Arc::clone(b)),
-        HashMapValueBuf::DateTime(b) => TypedArrayData::DateTime(Arc::clone(b)),
-        HashMapValueBuf::Timespan(b) => TypedArrayData::Timespan(Arc::clone(b)),
-        HashMapValueBuf::Duration(b) => TypedArrayData::Duration(Arc::clone(b)),
-        HashMapValueBuf::Instant(b) => TypedArrayData::Instant(Arc::clone(b)),
         HashMapValueBuf::Char(b) => TypedArrayData::Char(Arc::clone(b)),
         HashMapValueBuf::TypedObject(b) => TypedArrayData::TypedObject(Arc::clone(b)),
-        HashMapValueBuf::TraitObject(b) => TypedArrayData::TraitObject(Arc::clone(b)),
     };
     Ok(KindedSlot::from_typed_array(Arc::new(arr)))
 }

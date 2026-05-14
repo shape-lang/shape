@@ -152,19 +152,8 @@ fn typed_array_element(arr: &TypedArrayData, idx: usize) -> Option<KindedSlot> {
         // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
         TypedArrayData::Decimal(buf) => buf.data.get(idx).map(|d| KindedSlot::from_decimal(Arc::clone(d))),
         TypedArrayData::BigInt(buf) => buf.data.get(idx).map(|b| KindedSlot::from_bigint(Arc::clone(b))),
-        TypedArrayData::DateTime(buf) | TypedArrayData::Timespan(buf) | TypedArrayData::Duration(buf) => {
-            buf.data.get(idx).map(|td| {
-                let bits = Arc::into_raw(Arc::clone(td)) as u64;
-                KindedSlot::new(shape_value::ValueSlot::from_raw(bits), NativeKind::Ptr(HeapKind::Temporal))
-            })
-        }
-        TypedArrayData::Instant(buf) => buf.data.get(idx).map(|inst| {
-            let bits = Arc::into_raw(Arc::clone(inst)) as u64;
-            KindedSlot::new(shape_value::ValueSlot::from_raw(bits), NativeKind::Ptr(HeapKind::Instant))
-        }),
         TypedArrayData::Char(buf) => buf.data.get(idx).copied().map(KindedSlot::from_char),
         TypedArrayData::TypedObject(buf) => buf.data.get(idx).map(|o| KindedSlot::from_typed_object(Arc::clone(o))),
-        TypedArrayData::TraitObject(buf) => buf.data.get(idx).map(|t| KindedSlot::from_trait_object(Arc::clone(t))),
         // ADR-006 §2.7.22 amendment (Round 18 S3, 2026-05-13): Matrix /
         // FloatSlice arms deleted from TypedArrayData — Matrix is now its
         // own `HeapKind::Matrix`; MatrixSlice projections are their own
@@ -343,13 +332,8 @@ pub(in crate::executor) fn builtin_last(args: &[KindedSlot]) -> Result<KindedSlo
         // W17-typed-carrier-bundle-A commit 1/4: §2.7.24 Q25.A arms.
         TypedArrayData::Decimal(b) => b.len(),
         TypedArrayData::BigInt(b) => b.len(),
-        TypedArrayData::DateTime(b) => b.len(),
-        TypedArrayData::Timespan(b) => b.len(),
-        TypedArrayData::Duration(b) => b.len(),
-        TypedArrayData::Instant(b) => b.len(),
         TypedArrayData::Char(b) => b.len(),
         TypedArrayData::TypedObject(b) => b.len(),
-        TypedArrayData::TraitObject(b) => b.len(),
         // ADR-006 §2.7.22 amendment (Round 18 S3): Matrix / FloatSlice
         // arms deleted from TypedArrayData; receivers of those types
         // arrive at the HeapKind::Matrix / HeapKind::MatrixSlice
@@ -627,13 +611,8 @@ pub(in crate::executor) fn builtin_slice(args: &[KindedSlot]) -> Result<KindedSl
         // W17-typed-carrier-bundle-A commit 1/4: §2.7.24 Q25.A arms.
         TypedArrayData::Decimal(x) => x.len(),
         TypedArrayData::BigInt(x) => x.len(),
-        TypedArrayData::DateTime(x) => x.len(),
-        TypedArrayData::Timespan(x) => x.len(),
-        TypedArrayData::Duration(x) => x.len(),
-        TypedArrayData::Instant(x) => x.len(),
         TypedArrayData::Char(x) => x.len(),
         TypedArrayData::TypedObject(x) => x.len(),
-        TypedArrayData::TraitObject(x) => x.len(),
         // ADR-006 §2.7.22 amendment (Round 18 S3): Matrix / FloatSlice
         // arms deleted from TypedArrayData.
     } as isize;
