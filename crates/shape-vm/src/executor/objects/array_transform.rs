@@ -881,10 +881,14 @@ fn concat_typed_array(
             out.extend_from_slice(&lb.data);
             Ok(Arc::new(TypedArrayData::Char(Arc::new(TypedBuffer::from_vec(out)))))
         }
+        // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): TypedObjectPtr
+        // inner is Clone (not Copy); use `cloned()` instead of
+        // `extend_from_slice`. Each Clone bumps the v2-raw refcount.
         (TypedArrayData::TypedObject(la), TypedArrayData::TypedObject(lb)) => {
-            let mut out = Vec::with_capacity(la.data.len() + lb.data.len());
-            out.extend_from_slice(&la.data);
-            out.extend_from_slice(&lb.data);
+            let mut out: Vec<shape_value::heap_value::TypedObjectPtr> =
+                Vec::with_capacity(la.data.len() + lb.data.len());
+            out.extend(la.data.iter().cloned());
+            out.extend(lb.data.iter().cloned());
             Ok(Arc::new(TypedArrayData::TypedObject(Arc::new(TypedBuffer::from_vec(out)))))
         }
         // FloatSlice is a view into a parent matrix's F64 region; both
@@ -954,7 +958,8 @@ pub(super) fn element_kinded(arr: &TypedArrayData, idx: usize) -> Result<KindedS
         TypedArrayData::Decimal(buf) => Ok(KindedSlot::from_decimal(Arc::clone(&buf.data[idx]))),
         TypedArrayData::BigInt(buf) => Ok(KindedSlot::from_bigint(Arc::clone(&buf.data[idx]))),
         TypedArrayData::Char(buf) => Ok(KindedSlot::from_char(buf.data[idx])),
-        TypedArrayData::TypedObject(buf) => Ok(KindedSlot::from_typed_object(Arc::clone(&buf.data[idx]))),
+        // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): TypedObjectPtr.
+        TypedArrayData::TypedObject(buf) => Ok(KindedSlot::from_typed_object_raw(buf.data[idx].clone().into_raw())),
     }
 }
 
@@ -1093,9 +1098,11 @@ pub(super) fn project_indices(arr: &TypedArrayData, keep: &[usize]) -> Result<Ar
             let v: Vec<char> = keep.iter().map(|&i| buf.data[i]).collect();
             Ok(Arc::new(TypedArrayData::Char(Arc::new(TypedBuffer::from_vec(v)))))
         }
+        // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): TypedObjectPtr inner.
+        // Clone bumps v2-raw refcount per element.
         TypedArrayData::TypedObject(buf) => {
-            let v: Vec<Arc<shape_value::heap_value::TypedObjectStorage>> =
-                keep.iter().map(|&i| Arc::clone(&buf.data[i])).collect();
+            let v: Vec<shape_value::heap_value::TypedObjectPtr> =
+                keep.iter().map(|&i| buf.data[i].clone()).collect();
             Ok(Arc::new(TypedArrayData::TypedObject(Arc::new(TypedBuffer::from_vec(v)))))
         }
     }

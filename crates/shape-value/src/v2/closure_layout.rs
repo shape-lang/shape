@@ -377,8 +377,24 @@ impl Drop for SharedCell {
                     HeapKind::TypedArray => {
                         Arc::decrement_strong_count(bits as *const TypedArrayData);
                     }
+                    // Wave 2 Agent D4 ckpt-2 (ADR-006 §2.3 / §2.7.5
+                    // amendment, 2026-05-14): a `SharedCell` whose
+                    // single-slot payload is a
+                    // `NativeKind::Ptr(HeapKind::TypedObject)` carries
+                    // `ptr as u64` where `ptr: *const TypedObjectStorage`
+                    // (v2-raw carrier per Agent D1's `_new` /
+                    // `impl HeapElement for TypedObjectStorage`). Retire
+                    // one refcount share at cell drop via `release_elem`
+                    // (HeapElement trait — calls `v2_release` against the
+                    // HeapHeader at offset 0; on refcount=0 the
+                    // carrier-side `_drop` runs the per-field heap-mask
+                    // walk and deallocates). Mirror of the §2.7.5 StringV2
+                    // / DecimalV2 release arms above.
                     HeapKind::TypedObject => {
-                        Arc::decrement_strong_count(bits as *const TypedObjectStorage);
+                        use crate::v2::heap_element::HeapElement;
+                        TypedObjectStorage::release_elem(
+                            bits as *const TypedObjectStorage,
+                        );
                     }
                     HeapKind::HashMap => {
                         Arc::decrement_strong_count(bits as *const HashMapData);
@@ -443,8 +459,17 @@ impl Drop for SharedCell {
                     // drop — auto-derived `TraitObjectStorage::Drop`
                     // releases the inner value + vtable Arcs at
                     // refcount=0.
+                    // Wave 2 Agent D4 ckpt-2 (ADR-006 §2.7.24 / Q25.C.5 +
+                    // E close 2026-05-14): TraitObject release via
+                    // `HeapElement::release_elem` + carrier-side `_drop`
+                    // (per Agent E's `impl HeapElement for
+                    // TraitObjectStorage`). Mirror of the TypedObject
+                    // arm above.
                     HeapKind::TraitObject => {
-                        Arc::decrement_strong_count(bits as *const TraitObjectStorage);
+                        use crate::v2::heap_element::HeapElement;
+                        TraitObjectStorage::release_elem(
+                            bits as *const TraitObjectStorage,
+                        );
                     }
                     HeapKind::Decimal => {
                         Arc::decrement_strong_count(bits as *const rust_decimal::Decimal);

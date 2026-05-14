@@ -567,7 +567,12 @@ impl<'a> ValueFormatter<'a> {
                     .first()
                     .map(|s| s.as_str())
                     .unwrap_or("?");
-                format!("<dyn {} #{}>", trait_name, t.value.schema_id)
+                // Wave 2 Round 4 D4 ckpt-3 (2026-05-14): t.value is now
+                // `*const TypedObjectStorage` (raw); deref to read
+                // schema_id. SAFETY: t holds one v2-raw refcount share so
+                // t.value points to a live storage.
+                let schema_id = unsafe { (*t.value).schema_id };
+                format!("<dyn {} #{}>", trait_name, schema_id)
             }
             // W17-comptime-vm-dispatch (ADR-006 §2.7.26, 2026-05-12):
             // ModuleFn references render as `<module_fn:id>`. Same
@@ -722,11 +727,12 @@ impl<'a> ValueFormatter<'a> {
                 let elems: Vec<String> = buf.data.iter().map(|c| format!("'{}'", c)).collect();
                 format!("[{}]", elems.join(", "))
             }
+            // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): TypedObjectPtr inner.
             TypedArrayData::TypedObject(buf) => {
                 let elems: Vec<String> = buf
                     .data
                     .iter()
-                    .map(|o| self.format_heap_value(&HeapValue::TypedObject(Arc::clone(o)), depth + 1))
+                    .map(|o| self.format_heap_value(&HeapValue::TypedObject(o.clone()), depth + 1))
                     .collect();
                 format!("[{}]", elems.join(", "))
             }
@@ -900,7 +906,10 @@ impl<'a> ValueFormatter<'a> {
             HeapValue::Char(c) => format!("'{}'", c),
             HeapValue::Future(id) => format!("[Future:{}]", id),
             HeapValue::TypedArray(arr) => self.format_typed_array(arr.as_ref(), depth),
-            HeapValue::TypedObject(o) => self.format_typed_object(o.as_ref(), depth),
+            // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): TypedObjectPtr
+            // derefs to &TypedObjectStorage; use `&**o` to bridge through the
+            // outer `&` and the wrapper's Deref impl.
+            HeapValue::TypedObject(o) => self.format_typed_object(&**o, depth),
             HeapValue::HashMap(m) => self.format_hashmap(m.as_ref(), depth),
             HeapValue::HashSet(s) => self.format_hashset(s.as_ref()),
             HeapValue::Deque(d) => self.format_deque(d.as_ref(), depth),
@@ -991,7 +1000,12 @@ impl<'a> ValueFormatter<'a> {
                     .first()
                     .map(|s| s.as_str())
                     .unwrap_or("?");
-                format!("<dyn {} #{}>", trait_name, t.value.schema_id)
+                // Wave 2 Round 4 D4 ckpt-3 (2026-05-14): t.value is now
+                // `*const TypedObjectStorage` (raw); deref to read
+                // schema_id. SAFETY: t holds one v2-raw refcount share so
+                // t.value points to a live storage.
+                let schema_id = unsafe { (*t.value).schema_id };
+                format!("<dyn {} #{}>", trait_name, schema_id)
             }
             // W17-comptime-vm-dispatch (ADR-006 §2.7.26, 2026-05-12).
             HeapValue::ModuleFn(id) => format!("<module_fn:{}>", id),

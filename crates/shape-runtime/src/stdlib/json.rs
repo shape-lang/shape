@@ -170,13 +170,17 @@ fn build_json_enum_heap_value(value: serde_json::Value, json_schema_id: u64) -> 
 /// truth at read time — no per-slot kind table is recorded on this
 /// fast path (mirrors `type_schema::typed_object_from_pairs`).
 fn build_typed_object(schema_id: u64, slots: Vec<ValueSlot>, heap_mask: u64) -> HeapValue {
-    let storage = Arc::new(shape_value::TypedObjectStorage::new(
+    // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): variant signature
+    // flipped to `HeapValue::TypedObject(TypedObjectPtr)`. Wrap the
+    // `_new`-returned raw pointer (refcount=1) in `TypedObjectPtr`,
+    // transferring the share to the wrapper.
+    let storage = shape_value::TypedObjectStorage::_new(
         schema_id,
         slots.into_boxed_slice(),
         heap_mask,
         Arc::from(Vec::<shape_value::NativeKind>::new().into_boxed_slice()),
-    ));
-    HeapValue::TypedObject(storage)
+    );
+    HeapValue::TypedObject(shape_value::heap_value::TypedObjectPtr::new(storage))
 }
 
 /// Convert a `serde_json::Value` into the strict-typed `JsonValue` sum
@@ -272,7 +276,11 @@ fn build_field_slot_from_json(
 /// `ValueSlot::from_heap(HeapValue)` boxing path.
 fn heap_to_slot(hv: HeapValue) -> ValueSlot {
     match hv {
-        HeapValue::TypedObject(arc) => ValueSlot::from_typed_object(arc),
+        // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): variant payload
+        // flipped to `TypedObjectPtr`. The `from_typed_object_raw`
+        // constructor stores the raw pointer directly; the wrapper's
+        // refcount share moves to the slot via `into_raw()`.
+        HeapValue::TypedObject(ptr) => ValueSlot::from_typed_object_raw(ptr.into_raw()),
         HeapValue::String(arc) => ValueSlot::from_string_arc(arc),
         HeapValue::TypedArray(arc) => ValueSlot::from_typed_array(arc),
         HeapValue::HashMap(arc) => ValueSlot::from_hashmap(arc),

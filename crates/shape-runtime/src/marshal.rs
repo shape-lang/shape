@@ -523,7 +523,11 @@ fn materialize_heap_arcs(arr: &shape_value::TypedArrayData) -> Vec<Arc<shape_val
         TypedArrayData::TypedObject(buf) => buf
             .data
             .iter()
-            .map(|o| Arc::new(HeapValue::TypedObject(Arc::clone(o))))
+            // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): `o`
+            // is `&TypedObjectPtr`. `Clone` bumps the v2-raw refcount
+            // via `v2_retain`; the cloned wrapper is moved into the
+            // `HeapValue::TypedObject` payload as the new owning share.
+            .map(|o| Arc::new(HeapValue::TypedObject(o.clone())))
             .collect(),
         other => panic!(
             "FromSlot<Vec<Arc<HeapValue>>>: TypedArray variant {} cannot \

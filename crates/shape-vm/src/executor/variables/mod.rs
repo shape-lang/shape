@@ -3800,11 +3800,14 @@ fn typed_array_read_index_raw(
             })?;
             *c as u64
         }
+        // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): TypedObjectPtr.
+        // The wrapper holds a `*const TypedObjectStorage` directly; surface
+        // the raw pointer as bits.
         TypedArrayData::TypedObject(buf) => {
-            let arc = buf.data.get(index).ok_or_else(|| VMError::IndexOutOfBounds {
+            let ptr = buf.data.get(index).ok_or_else(|| VMError::IndexOutOfBounds {
                 index: index as i32, length: buf.data.len(),
             })?;
-            std::sync::Arc::as_ptr(arc) as u64
+            ptr.as_ptr() as u64
         }
     };
     Ok(bits)

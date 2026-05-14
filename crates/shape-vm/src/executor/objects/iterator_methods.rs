@@ -226,7 +226,9 @@ fn typed_array_elem_at(arr: &TypedArrayData, idx: usize) -> Result<KindedSlot, V
         TypedArrayData::Decimal(buf) => Ok(KindedSlot::from_decimal(Arc::clone(&buf.data[idx]))),
         TypedArrayData::BigInt(buf) => Ok(KindedSlot::from_bigint(Arc::clone(&buf.data[idx]))),
         TypedArrayData::Char(buf) => Ok(KindedSlot::from_char(buf.data[idx])),
-        TypedArrayData::TypedObject(buf) => Ok(KindedSlot::from_typed_object(Arc::clone(&buf.data[idx]))),
+        // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): TypedObjectPtr
+        // inner. Clone bumps refcount; into_raw moves share to slot.
+        TypedArrayData::TypedObject(buf) => Ok(KindedSlot::from_typed_object_raw(buf.data[idx].clone().into_raw())),
     }
 }
 
@@ -280,7 +282,8 @@ fn heap_value_arc_to_slot(hv: &Arc<HeapValue>) -> KindedSlot {
         HeapValue::Decimal(d) => KindedSlot::from_decimal(Arc::clone(d)),
         HeapValue::BigInt(b) => KindedSlot::from_bigint(Arc::clone(b)),
         HeapValue::TypedArray(a) => KindedSlot::from_typed_array(Arc::clone(a)),
-        HeapValue::TypedObject(o) => KindedSlot::from_typed_object(Arc::clone(o)),
+        // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): TypedObjectPtr.
+        HeapValue::TypedObject(o) => KindedSlot::from_typed_object_raw(o.clone().into_raw()),
         HeapValue::HashMap(m) => KindedSlot::from_hashmap(Arc::clone(m)),
         HeapValue::Char(c) => KindedSlot::from_char(*c),
         _ => KindedSlot::none(),
@@ -875,7 +878,8 @@ fn build_specialized_array_from_yields(yields: Vec<KindedSlot>) -> Result<Kinded
     if yields.is_empty() {
         // Empty pipeline — pick a default (empty TypedObject array) which
         // satisfies the "no HeapValue arm" gate post-Q25.A.
-        let buf: TypedBuffer<Arc<shape_value::heap_value::TypedObjectStorage>> =
+        // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): TypedObjectPtr inner.
+        let buf: TypedBuffer<shape_value::heap_value::TypedObjectPtr> =
             TypedBuffer::from_vec(Vec::new());
         return Ok(KindedSlot::from_typed_array(Arc::new(
             TypedArrayData::TypedObject(Arc::new(buf)),
@@ -933,19 +937,28 @@ fn build_specialized_array_from_yields(yields: Vec<KindedSlot>) -> Result<Kinded
                 TypedArrayData::String(Arc::new(TypedBuffer::from_vec(data))),
             )))
         }
+        // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): canonical
+        // 5-arm receiver-recovery — slot bits for `Ptr(TypedObject)` are
+        // `*const TypedObjectStorage` (NOT `Arc::into_raw(Arc<HeapValue>)`),
+        // so `as_heap_value()` is unsound. Read raw bits, bump via
+        // v2_retain to claim the buffer's owned share; y's Drop retires
+        // its own share through the §2.7.7 / Q9 dispatch table.
         NativeKind::Ptr(HeapKind::TypedObject) => {
-            let mut data: Vec<Arc<shape_value::heap_value::TypedObjectStorage>> =
+            let mut data: Vec<shape_value::heap_value::TypedObjectPtr> =
                 Vec::with_capacity(yields.len());
             for y in yields.iter() {
-                match y.slot.as_heap_value() {
-                    HeapValue::TypedObject(o) => data.push(Arc::clone(o)),
-                    other => {
-                        return Err(type_error(format!(
-                            "Iterator.collect: TypedObject-kinded yield with mismatched heap arm: {:?}",
-                            other.kind()
-                        )))
-                    }
+                let bits = y.slot.raw();
+                if bits == 0 {
+                    return Err(type_error(
+                        "Iterator.collect: TypedObject-kinded yield slot bits null",
+                    ));
                 }
+                let ptr = bits as *const shape_value::heap_value::TypedObjectStorage;
+                // SAFETY: per construction-side contract, bits with
+                // kind=Ptr(TypedObject) are a live `*const TypedObjectStorage`
+                // with refcount ≥ 1.
+                unsafe { shape_value::v2::refcount::v2_retain(&(*ptr).header); }
+                data.push(shape_value::heap_value::TypedObjectPtr::new(ptr));
             }
             Ok(KindedSlot::from_typed_array(Arc::new(
                 TypedArrayData::TypedObject(Arc::new(TypedBuffer::from_vec(data))),

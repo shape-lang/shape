@@ -43,12 +43,13 @@ fn project_typed_return(
                 Ok(KindedSlot::from_string_arc(Arc::new(s)))
             }
             ConcreteReturn::OpaqueTypedObject(hv) => {
-                // hv is `Arc<HeapValue::TypedObject(Arc<TypedObjectStorage>)>`.
-                // Extract the inner Arc<TypedObjectStorage> and rewrap as a
-                // typed slot via `KindedSlot::from_typed_object`.
+                // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): hv is
+                // `Arc<HeapValue::TypedObject(TypedObjectPtr)>`. Clone the
+                // wrapper (bumps v2-raw refcount); into_raw moves the share
+                // to the slot via `from_typed_object_raw`.
                 match &*hv {
                     shape_value::heap_value::HeapValue::TypedObject(s) => Ok(
-                        KindedSlot::from_typed_object(Arc::clone(s)),
+                        KindedSlot::from_typed_object_raw(s.clone().into_raw()),
                     ),
                     other => Err(VMError::RuntimeError(format!(
                         "project_typed_return: OpaqueTypedObject expected \
@@ -424,19 +425,24 @@ impl VirtualMachine {
                 }
             }
 
-            let storage = Arc::new(TypedObjectStorage::new(
+            // Wave 2 Round 4 D4 ckpt-1: migrated to v2-raw `_new` per D1
+            // API surface. The raw pointer is directly the carrier bits;
+            // `module_binding_write_kinded` consumes a u64 + NativeKind
+            // pair so this site cleanly migrates without depending on
+            // the `HeapValue::TypedObject` variant signature flip.
+            let ptr = TypedObjectStorage::_new(
                 schema.id as u64,
                 slots.into_boxed_slice(),
                 heap_mask,
                 Arc::from(field_kinds.into_boxed_slice()),
-            ));
+            );
 
-            // Hand off one share to the binding slot. `Arc::into_raw`
-            // converts the Arc<TypedObjectStorage> to its raw pointer
-            // bits; `module_binding_write_kinded` retires the prior
-            // occupant (sentinel pair → no-op) and transfers our
-            // share into the binding.
-            let bits = Arc::into_raw(storage) as u64;
+            // Hand off one share to the binding slot. The v2-raw pointer
+            // bits are the carrier directly (per ADR-006 §2.4 / D1's
+            // `from_typed_object_raw` constructor contract). One strong
+            // count owned by us is transferred into the binding via
+            // `module_binding_write_kinded`.
+            let bits = ptr as u64;
             self.module_binding_write_kinded(
                 binding_idx,
                 bits,

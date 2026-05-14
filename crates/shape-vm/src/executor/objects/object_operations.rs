@@ -89,35 +89,46 @@ impl VirtualMachine {
             }
         }
 
-        // Reconstruct the typed Arcs. Each `from_raw` takes ownership of
-        // the share that `pop_kinded` transferred; we'll either move
-        // those shares onto the merged storage or drop them at end.
-        let left = unsafe {
-            Arc::<TypedObjectStorage>::from_raw(left_bits as *const TypedObjectStorage)
-        };
-        let right = unsafe {
-            Arc::<TypedObjectStorage>::from_raw(right_bits as *const TypedObjectStorage)
-        };
+        // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): pop_kinded
+        // returns slot bits which are `*const TypedObjectStorage` (v2-raw
+        // shape per the post-D2 contract). The pop transferred one v2-raw
+        // refcount share to us. Borrow as &TypedObjectStorage for the merge
+        // (the slot bits hold the share for the duration of this op);
+        // build_concat_merged_storage clones each retained slot's heap
+        // share via clone_with_kind. After the merge, release the input
+        // shares via TypedObjectStorage::release_elem (5-arm receiver-
+        // recovery soundness rule — bits are *const TypedObjectStorage,
+        // NOT Arc::into_raw).
+        use shape_value::v2::heap_element::HeapElement;
+        let left_ptr = left_bits as *const TypedObjectStorage;
+        let right_ptr = right_bits as *const TypedObjectStorage;
+        // SAFETY: per the construction-side contract on
+        // KindedSlot::from_typed_object_raw, kind=Ptr(TypedObject) bits
+        // are a live `*const TypedObjectStorage` with refcount ≥ 1.
+        let left: &TypedObjectStorage = unsafe { &*left_ptr };
+        let right: &TypedObjectStorage = unsafe { &*right_ptr };
 
         // Slot counts capped by both the operand byte counts and the
         // actual storage length — schema mismatches would otherwise UB.
         let left_count = left.slots.len().min(left_size / 8);
         let right_count = right.slots.len().min(right_size / 8);
 
-        let merged = build_concat_merged_storage(
+        let merged_ptr = build_concat_merged_storage(
             target_schema_id as u64,
-            &left,
+            left,
             left_count,
-            &right,
+            right,
             right_count,
         );
 
-        // Source Arc shares now drop (we cloned-on-read each retained
+        // Release the input shares (we cloned-on-read each retained
         // slot via `clone_with_kind`).
-        drop(left);
-        drop(right);
+        unsafe {
+            TypedObjectStorage::release_elem(left_ptr);
+            TypedObjectStorage::release_elem(right_ptr);
+        }
 
-        let bits = Arc::into_raw(Arc::new(merged)) as u64;
+        let bits = merged_ptr as u64;
         self.push_kinded(bits, NativeKind::Ptr(HeapKind::TypedObject))
     }
 
@@ -145,12 +156,16 @@ impl VirtualMachine {
             }
         }
 
-        let target = unsafe {
-            Arc::<TypedObjectStorage>::from_raw(target_bits as *const TypedObjectStorage)
-        };
-        let source = unsafe {
-            Arc::<TypedObjectStorage>::from_raw(source_bits as *const TypedObjectStorage)
-        };
+        // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): same v2-raw
+        // recovery pattern as op_typed_merge_object above — slot bits are
+        // `*const TypedObjectStorage`, not Arc::into_raw.
+        use shape_value::v2::heap_element::HeapElement;
+        let target_ptr = target_bits as *const TypedObjectStorage;
+        let source_ptr = source_bits as *const TypedObjectStorage;
+        // SAFETY: per construction-side contract, both pointers are live
+        // TypedObjectStorages with refcount ≥ 1.
+        let target: &TypedObjectStorage = unsafe { &*target_ptr };
+        let source: &TypedObjectStorage = unsafe { &*source_ptr };
 
         let target_id = target.schema_id as u32;
         let source_id = source.schema_id as u32;
@@ -186,25 +201,29 @@ impl VirtualMachine {
         let merged_schema_id = match self.derive_merged_schema(target_id, source_id) {
             Ok(id) => id,
             Err(e) => {
-                // Source Arcs drop here, retiring the shares.
-                drop(target);
-                drop(source);
+                // Release the input shares before returning.
+                unsafe {
+                    TypedObjectStorage::release_elem(target_ptr);
+                    TypedObjectStorage::release_elem(source_ptr);
+                }
                 return Err(e);
             }
         };
 
-        let merged = build_named_merged_storage(
+        let merged_ptr = build_named_merged_storage(
             merged_schema_id as u64,
-            &target,
+            target,
             &keep_left_indices,
-            &source,
+            source,
             right_count.min(source.slots.len()),
         );
 
-        drop(target);
-        drop(source);
+        unsafe {
+            TypedObjectStorage::release_elem(target_ptr);
+            TypedObjectStorage::release_elem(source_ptr);
+        }
 
-        let bits = Arc::into_raw(Arc::new(merged)) as u64;
+        let bits = merged_ptr as u64;
         self.push_kinded(bits, NativeKind::Ptr(HeapKind::TypedObject))
     }
 }
@@ -218,13 +237,17 @@ impl VirtualMachine {
 /// Used by `op_typed_merge_object`. The merged schema is pre-registered
 /// with field count `left_count + right_count` and field types matching
 /// the concatenation order.
+// Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): rewritten to take
+// &TypedObjectStorage (NOT &Arc<...>) and return *mut Self via _new — the
+// v2-raw allocator path. Pairs with HeapValue::TypedObject(TypedObjectPtr)
+// + ValueSlot::from_typed_object_raw.
 fn build_concat_merged_storage(
     merged_schema_id: u64,
-    left: &Arc<TypedObjectStorage>,
+    left: &TypedObjectStorage,
     left_count: usize,
-    right: &Arc<TypedObjectStorage>,
+    right: &TypedObjectStorage,
     right_count: usize,
-) -> TypedObjectStorage {
+) -> *mut TypedObjectStorage {
     let total = left_count + right_count;
     let mut merged_slots: Vec<ValueSlot> = Vec::with_capacity(total);
     let mut merged_kinds: Vec<NativeKind> = Vec::with_capacity(total);
@@ -245,7 +268,7 @@ fn build_concat_merged_storage(
         &mut merged_mask,
     );
 
-    TypedObjectStorage::new(
+    TypedObjectStorage::_new(
         merged_schema_id,
         merged_slots.into_boxed_slice(),
         merged_mask,
@@ -259,13 +282,15 @@ fn build_concat_merged_storage(
 ///
 /// Used by `op_merge_object`. The merged schema's field layout is
 /// `(left's kept fields) ++ (all of right's fields)`.
+// Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): same v2-raw migration
+// as build_concat_merged_storage above.
 fn build_named_merged_storage(
     merged_schema_id: u64,
-    left: &Arc<TypedObjectStorage>,
+    left: &TypedObjectStorage,
     keep_left_indices: &[usize],
-    right: &Arc<TypedObjectStorage>,
+    right: &TypedObjectStorage,
     right_count: usize,
-) -> TypedObjectStorage {
+) -> *mut TypedObjectStorage {
     let total = keep_left_indices.len() + right_count;
     let mut merged_slots: Vec<ValueSlot> = Vec::with_capacity(total);
     let mut merged_kinds: Vec<NativeKind> = Vec::with_capacity(total);
@@ -287,7 +312,7 @@ fn build_named_merged_storage(
         &mut merged_mask,
     );
 
-    TypedObjectStorage::new(
+    TypedObjectStorage::_new(
         merged_schema_id,
         merged_slots.into_boxed_slice(),
         merged_mask,
@@ -305,7 +330,7 @@ fn build_named_merged_storage(
 /// (`heap_value.rs:761`). Reading it here is the same single-discriminator
 /// dispatch as `builtins/object_ops.rs:113`.
 fn append_kept_slots(
-    src: &Arc<TypedObjectStorage>,
+    src: &TypedObjectStorage,
     indices: &[usize],
     merged_slots: &mut Vec<ValueSlot>,
     merged_kinds: &mut Vec<NativeKind>,

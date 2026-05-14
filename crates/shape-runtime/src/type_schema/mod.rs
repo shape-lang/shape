@@ -272,19 +272,23 @@ pub fn typed_object_from_pairs(fields: &[(&str, KindedSlot)]) -> KindedSlot {
         }
     }
 
-    let storage = Arc::new(shape_value::TypedObjectStorage::new(
+    // Wave 2 Round 4 D4 ckpt-1: migrated from
+    // `Arc::new(TypedObjectStorage::new(...))` to v2-raw `_new`
+    // returning `*mut TypedObjectStorage`; slot constructed via
+    // `from_typed_object_raw` per D1 API surface. The legacy
+    // `Arc<TypedObjectStorage>` carrier through `HeapValue::TypedObject`
+    // remains the variant signature until ckpt-final atomic flip; the
+    // intermediate type-witness check is dropped because `_new` returns
+    // a raw pointer rather than an `Arc` (cargo check expected broken
+    // here until the variant signature flips in ckpt-final lockstep).
+    let ptr = shape_value::TypedObjectStorage::_new(
         schema.id as u64,
         slots.into_boxed_slice(),
         heap_mask,
-        // W17-typed-carrier-bundle-A checkpoint 4/4: pass the per-slot
-        // kind table so `TypedObjectStorage::new`'s slot/field_kinds
-        // length-match debug_assert holds. Required for the
-        // Entry/Pair construction path lit up by C+ resolution.
         Arc::from(field_kinds.into_boxed_slice()),
-    ));
-    let _: &HeapValue = &HeapValue::TypedObject(storage.clone());
+    );
     KindedSlot::new(
-        ValueSlot::from_typed_object(storage),
+        ValueSlot::from_typed_object_raw(ptr),
         NativeKind::Ptr(HeapKind::TypedObject),
     )
 }

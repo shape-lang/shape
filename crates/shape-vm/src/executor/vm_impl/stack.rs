@@ -89,8 +89,20 @@ pub(crate) fn clone_with_kind(bits: u64, kind: NativeKind) {
                 HeapKind::TypedArray => {
                     Arc::increment_strong_count(bits as *const TypedArrayData);
                 }
+                // Wave 2 Agent D4 ckpt-2 (ADR-006 §2.3 / §2.7.5 amendment,
+                // 2026-05-14): TypedObject is a v2-raw HeapHeader-equipped
+                // carrier per Agent D1's `_new` / `_drop` + `impl HeapElement
+                // for TypedObjectStorage`. Slot bits are `ptr as u64` where
+                // `ptr: *const TypedObjectStorage`. Refcount discipline goes
+                // through `v2_retain` against the `HeapHeader` at offset 0
+                // of the carrier (NOT `Arc::increment_strong_count` — these
+                // are manually-allocated `repr(C)` carriers per
+                // `heap_value.rs::TypedObjectStorage::_new`, not `Arc<T>`
+                // allocations). Mirror of the §2.7.5 StringV2 / DecimalV2
+                // arms above (Agent B precedent).
                 HeapKind::TypedObject => {
-                    Arc::increment_strong_count(bits as *const TypedObjectStorage);
+                    let hdr = &(*(bits as *const TypedObjectStorage)).header;
+                    shape_value::v2::refcount::v2_retain(hdr);
                 }
                 HeapKind::HashMap => {
                     Arc::increment_strong_count(bits as *const HashMapData);
@@ -172,8 +184,18 @@ pub(crate) fn clone_with_kind(bits: u64, kind: NativeKind) {
                 // source. `Arc::ptr_eq` on the vtable preserves the
                 // §Q25.C.2 `Self`-arg identity contract across the
                 // clone.
+                // Wave 2 Agent D4 ckpt-2 (ADR-006 §2.7.24 / Q25.C.5 +
+                // E close 2026-05-14): TraitObject is a v2-raw
+                // HeapHeader-equipped carrier per Agent E's
+                // `TraitObjectStorage::_drop` + `impl HeapElement for
+                // TraitObjectStorage` migration. Slot bits are `ptr as u64`
+                // where `ptr: *const TraitObjectStorage`. Refcount
+                // discipline goes through `v2_retain` against the
+                // `HeapHeader` at offset 0 of the carrier — mirror of the
+                // TypedObject arm above.
                 HeapKind::TraitObject => {
-                    Arc::increment_strong_count(bits as *const TraitObjectStorage);
+                    let hdr = &(*(bits as *const TraitObjectStorage)).header;
+                    shape_value::v2::refcount::v2_retain(hdr);
                 }
                 HeapKind::Decimal => {
                     Arc::increment_strong_count(bits as *const rust_decimal::Decimal);
@@ -424,8 +446,17 @@ pub(crate) fn drop_with_kind(bits: u64, kind: NativeKind) {
                 HeapKind::TypedArray => {
                     Arc::decrement_strong_count(bits as *const TypedArrayData);
                 }
+                // Wave 2 Agent D4 ckpt-2 (ADR-006 §2.3 / §2.7.5 amendment,
+                // 2026-05-14): TypedObject release via
+                // `HeapElement::release_elem` + carrier-side `_drop` (per
+                // Agent D1's `impl HeapElement for TypedObjectStorage` —
+                // calls `v2_release` against the HeapHeader at offset 0; on
+                // refcount=0 the carrier-side `_drop` runs the per-field
+                // heap-mask walk and deallocates the struct). Mirror of the
+                // §2.7.5 StringV2 / DecimalV2 release arms above.
                 HeapKind::TypedObject => {
-                    Arc::decrement_strong_count(bits as *const TypedObjectStorage);
+                    use shape_value::v2::heap_element::HeapElement;
+                    TypedObjectStorage::release_elem(bits as *const TypedObjectStorage);
                 }
                 HeapKind::HashMap => {
                     Arc::decrement_strong_count(bits as *const HashMapData);
@@ -495,8 +526,14 @@ pub(crate) fn drop_with_kind(bits: u64, kind: NativeKind) {
                 // `Arc<TypedObjectStorage>` value half +
                 // `Arc<VTable>` vtable half — each a single
                 // `Arc::drop` decrement per the typed-Arc shape.
+                // Wave 2 Agent D4 ckpt-2 (ADR-006 §2.7.24 / Q25.C.5 +
+                // E close 2026-05-14): TraitObject release via
+                // `HeapElement::release_elem` + carrier-side `_drop` (per
+                // Agent E's `impl HeapElement for TraitObjectStorage`).
+                // Mirror of the TypedObject arm above.
                 HeapKind::TraitObject => {
-                    Arc::decrement_strong_count(bits as *const TraitObjectStorage);
+                    use shape_value::v2::heap_element::HeapElement;
+                    TraitObjectStorage::release_elem(bits as *const TraitObjectStorage);
                 }
                 HeapKind::Decimal => {
                     Arc::decrement_strong_count(bits as *const rust_decimal::Decimal);

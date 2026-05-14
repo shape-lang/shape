@@ -153,7 +153,10 @@ fn typed_array_element(arr: &TypedArrayData, idx: usize) -> Option<KindedSlot> {
         TypedArrayData::Decimal(buf) => buf.data.get(idx).map(|d| KindedSlot::from_decimal(Arc::clone(d))),
         TypedArrayData::BigInt(buf) => buf.data.get(idx).map(|b| KindedSlot::from_bigint(Arc::clone(b))),
         TypedArrayData::Char(buf) => buf.data.get(idx).copied().map(KindedSlot::from_char),
-        TypedArrayData::TypedObject(buf) => buf.data.get(idx).map(|o| KindedSlot::from_typed_object(Arc::clone(o))),
+        // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): inner is
+        // `TypedObjectPtr`. Clone bumps v2-raw refcount; into_raw moves
+        // the share into the slot via `from_typed_object_raw`.
+        TypedArrayData::TypedObject(buf) => buf.data.get(idx).map(|o| KindedSlot::from_typed_object_raw(o.clone().into_raw())),
         // ADR-006 §2.7.22 amendment (Round 18 S3, 2026-05-13): Matrix /
         // FloatSlice arms deleted from TypedArrayData — Matrix is now its
         // own `HeapKind::Matrix`; MatrixSlice projections are their own
@@ -171,7 +174,9 @@ fn heap_value_to_slot(hv: &Arc<HeapValue>) -> KindedSlot {
         HeapValue::Decimal(d) => KindedSlot::from_decimal(Arc::clone(d)),
         HeapValue::BigInt(b) => KindedSlot::from_bigint(Arc::clone(b)),
         HeapValue::TypedArray(a) => KindedSlot::from_typed_array(Arc::clone(a)),
-        HeapValue::TypedObject(o) => KindedSlot::from_typed_object(Arc::clone(o)),
+        // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): TypedObjectPtr
+        // payload — clone bumps refcount, into_raw moves share into slot.
+        HeapValue::TypedObject(o) => KindedSlot::from_typed_object_raw(o.clone().into_raw()),
         HeapValue::HashMap(m) => KindedSlot::from_hashmap(Arc::clone(m)),
         HeapValue::Char(c) => KindedSlot::from_char(*c),
         // Other heap arms — fall back to none() for now; they're
@@ -382,7 +387,9 @@ pub(in crate::executor) fn builtin_zip(args: &[KindedSlot]) -> Result<KindedSlot
     };
     let n = len_a.min(len_b);
 
-    let mut pair_storages: Vec<Arc<shape_value::heap_value::TypedObjectStorage>> =
+    // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): TypedArrayData::TypedObject
+    // inner element type flipped to TypedObjectPtr.
+    let mut pair_storages: Vec<shape_value::heap_value::TypedObjectPtr> =
         Vec::with_capacity(n);
     for i in 0..n {
         let xa = typed_array_element(a, i).unwrap_or_else(KindedSlot::none);
@@ -391,21 +398,17 @@ pub(in crate::executor) fn builtin_zip(args: &[KindedSlot]) -> Result<KindedSlot
             ("first", xa),
             ("second", xb),
         ]);
-        // SAFETY: typed_object_from_pairs returns a KindedSlot whose
-        // bits are `Arc::into_raw(Arc<TypedObjectStorage>)` (NOT
-        // `*const HeapValue`) — `as_heap_value()` is wrong-type recovery.
-        // Recover the typed Arc directly per the 5-arm soundness rule;
-        // see `hashmap_methods.rs::build_entries_array` for the canonical form.
+        // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): pair_slot's bits
+        // are `*const TypedObjectStorage` (per `typed_object_from_pairs`'s
+        // v2-raw construction-side contract). Bump via `v2_retain` to claim
+        // a share for the buffer's element; pair_slot's Drop retires its
+        // own share through the §2.7.7 / Q9 dispatch table.
         let bits = pair_slot.slot.raw();
-        let storage = unsafe {
-            let arc = Arc::<shape_value::heap_value::TypedObjectStorage>::from_raw(
-                bits as *const shape_value::heap_value::TypedObjectStorage,
-            );
-            let cloned = Arc::clone(&arc);
-            let _ = Arc::into_raw(arc);
-            cloned
-        };
-        pair_storages.push(storage);
+        let ptr = bits as *const shape_value::heap_value::TypedObjectStorage;
+        // SAFETY: per `typed_object_from_pairs`'s contract, ptr is a live
+        // TypedObjectStorage with refcount ≥ 1.
+        unsafe { shape_value::v2::refcount::v2_retain(&(*ptr).header); }
+        pair_storages.push(shape_value::heap_value::TypedObjectPtr::new(ptr));
         drop(pair_slot);
     }
     Ok(KindedSlot::from_typed_array(Arc::new(
@@ -454,12 +457,30 @@ pub(in crate::executor) fn builtin_filled(args: &[KindedSlot]) -> Result<KindedS
         // dispatches to the specialized variant per §2.7.24 Q25.A. Each
         // arm holds a single Arc cloned `size` times — no HeapValue
         // catch-all carrier. The element kind is uniform per variant.
+        // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): receiver-recovery
+        // for v2-raw TypedObject — slot bits are `*const TypedObjectStorage`,
+        // NOT `Arc::into_raw(Arc<HeapValue>)`. `as_heap_value()` is unsound
+        // on this slot kind. Read raw bits, build TypedObjectPtrs cloning
+        // (each Clone bumps the v2-raw refcount).
         NativeKind::Ptr(HeapKind::TypedObject) => {
-            let storage = match value.slot.as_heap_value() {
-                HeapValue::TypedObject(s) => Arc::clone(s),
-                _ => return Err(type_error("KindedSlot kind=Ptr(TypedObject) heap arm mismatched")),
-            };
-            TypedArrayData::TypedObject(Arc::new(TypedBuffer::from_vec(vec![storage; size])))
+            let bits = value.slot.raw();
+            if bits == 0 {
+                return Err(type_error("KindedSlot kind=Ptr(TypedObject) bits null"));
+            }
+            let ptr = bits as *const shape_value::heap_value::TypedObjectStorage;
+            // Build the seed wrapper without bumping (we'll explicitly bump
+            // for each cloned slot below); the seed itself does not own a
+            // share — it's a borrow of the value's slot.
+            let seed = std::mem::ManuallyDrop::new(
+                shape_value::heap_value::TypedObjectPtr::new(ptr),
+            );
+            // For `size` elements, each Clone bumps the v2-raw refcount by 1.
+            let mut data: Vec<shape_value::heap_value::TypedObjectPtr> =
+                Vec::with_capacity(size);
+            for _ in 0..size {
+                data.push((*seed).clone());
+            }
+            TypedArrayData::TypedObject(Arc::new(TypedBuffer::from_vec(data)))
         }
         NativeKind::Ptr(HeapKind::Decimal) => {
             let d = match value.slot.as_heap_value() {

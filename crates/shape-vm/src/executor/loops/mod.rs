@@ -639,9 +639,12 @@ impl VirtualMachine {
                 Some(&c) => vm.push_kinded(c as u32 as u64, NativeKind::Ptr(shape_value::heap_value::HeapKind::Char)),
                 None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
             },
+            // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): inner
+            // is `TypedObjectPtr`. Clone bumps v2-raw refcount; into_raw
+            // moves the share to the slot bits.
             TypedArrayData::TypedObject(a) => match a.get(u) {
-                Some(arc) => {
-                    let bits = std::sync::Arc::into_raw(std::sync::Arc::clone(arc)) as u64;
+                Some(ptr) => {
+                    let bits = ptr.clone().into_raw() as u64;
                     vm.push_kinded(bits, NativeKind::Ptr(shape_value::heap_value::HeapKind::TypedObject))
                 }
                 None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
@@ -674,17 +677,23 @@ mod tests {
     /// `TypedObjectStorage` entries — the post-bundle-A shape produced by
     /// `HashMap.entries()` / `Array.zip()` / `IteratorTransform::Enumerate`.
     fn build_typed_object_array(n: usize) -> Arc<TypedArrayData> {
-        let entries: Vec<Arc<TypedObjectStorage>> = (0..n)
+        // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): variant flipped
+        // to `Arc<TypedBuffer<TypedObjectPtr>>`. Each `_new` returns a raw
+        // pointer with refcount=1 (transferred to the wrapping
+        // TypedObjectPtr).
+        use shape_value::heap_value::TypedObjectPtr;
+        let entries: Vec<TypedObjectPtr> = (0..n)
             .map(|_| {
                 // Zero-slot TypedObject — schema_id is irrelevant for the
                 // iteration-protocol tests; the iterator only reads
-                // `TypedBuffer::len()` and clones the per-element Arc.
-                Arc::new(TypedObjectStorage::new(
+                // `TypedBuffer::len()` and clones the per-element pointer.
+                let ptr = TypedObjectStorage::_new(
                     0,
                     Box::new([]) as Box<[_]>,
                     0,
                     Arc::from(Vec::<NativeKind>::new()),
-                ))
+                );
+                TypedObjectPtr::new(ptr)
             })
             .collect();
         Arc::new(TypedArrayData::TypedObject(Arc::new(

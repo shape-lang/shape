@@ -259,29 +259,37 @@ impl ComptimeTarget {
         // carrier-monomorphization sub-cluster will swap this for the
         // specialized `TypedArrayData::TypedObject` arm per
         // ADR-006 §2.7.24 Q25.A; flagged in the C2 close report).
-        // W17-typed-carrier-bundle-A checkpoint 2/4: comptime_target.rs::nb_object_array
-        // now writes the specialized `TypedArrayData::TypedObject` arm
-        // per ADR-006 §2.7.24 Q25.A. Each element is unwrapped from
-        // `Arc<HeapValue::TypedObject>` to the inner `Arc<TypedObjectStorage>` —
-        // the storage typed-Arc shape mirrors Q25.A's spec.
+        // W17-typed-carrier-bundle-A checkpoint 2/4 + Wave 2 Round 4 D4
+        // ckpt-final-prime² (2026-05-14): comptime_target.rs::nb_object_array
+        // writes the specialized `TypedArrayData::TypedObject` arm per
+        // ADR-006 §2.7.24 Q25.A. Inner element type flipped to
+        // `TypedObjectPtr`. Recovery follows the canonical 5-arm
+        // receiver-recovery soundness rule — slot bits are
+        // `*const TypedObjectStorage` (NOT `Arc::into_raw(Arc<HeapValue>)`),
+        // so `as_heap_value()` is unsound. Read raw bits, bump via
+        // `v2_retain` for the buffer's owned share, wrap as
+        // `TypedObjectPtr`.
         let nb_object_array = |objs: Vec<KindedSlot>| -> KindedSlot {
-            let mut elems: Vec<Arc<TypedObjectStorage>> = Vec::with_capacity(objs.len());
+            let mut elems: Vec<shape_value::heap_value::TypedObjectPtr> =
+                Vec::with_capacity(objs.len());
             for obj in objs {
-                let obj_slot = obj.slot();
-                let hv = obj_slot.as_heap_value();
-                let storage = match hv {
-                    HeapValue::TypedObject(s) => Arc::clone(s),
-                    other => panic!(
+                let bits = obj.slot().raw();
+                if bits == 0 {
+                    panic!(
                         "ComptimeTarget::to_nanboxed: nested object element \
-                         is not a TypedObject: {:?}",
-                        other.kind()
-                    ),
-                };
-                // `obj` Drop will retire its strong-count share; we
-                // cloned the inner Arc above, so the buffer owns one
-                // independent share per element.
+                         slot bits null"
+                    );
+                }
+                let ptr = bits as *const TypedObjectStorage;
+                // SAFETY: per the construction-side contract on
+                // KindedSlot::from_typed_object[_raw], `kind=Ptr(TypedObject)`
+                // bits are a live `*const TypedObjectStorage` with refcount ≥ 1.
+                unsafe { shape_value::v2::refcount::v2_retain(&(*ptr).header); }
+                // `obj` Drop retires its original share through the §2.7.7
+                // / Q9 dispatch table TypedObject arm; the bumped share
+                // moves into the new TypedObjectPtr.
                 drop(obj);
-                elems.push(storage);
+                elems.push(shape_value::heap_value::TypedObjectPtr::new(ptr));
             }
             let buf = TypedBuffer::from_vec(elems);
             KindedSlot::from_typed_array(Arc::new(TypedArrayData::TypedObject(Arc::new(buf))))

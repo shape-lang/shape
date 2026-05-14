@@ -291,24 +291,25 @@ pub(crate) fn create_comptime_builtins_module(trait_impl_keys: HashSet<String>) 
             // kind is TypedObject, drop is `Arc::decrement_strong_count`
             // per §2.7.7 / Q9 dispatch table).
             let bits = kinded.slot().raw();
+            // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): canonical
+            // receiver-recovery for v2-raw TypedObjectStorage payloads.
+            // Slot bits are `*const TypedObjectStorage` (NOT
+            // `Arc::into_raw(Arc<...>)`); the carrier owns one share on
+            // the on-header refcount. Bump via `v2_retain` to claim a
+            // share for the outer `HeapValue::TypedObject(TypedObjectPtr)`
+            // wrapper; `kinded`'s Drop retires its original share through
+            // the §2.7.7 / Q9 dispatch table (TypedObject arm calls
+            // `release_elem` per the ckpt-2 lockstep).
+            let ptr = bits as *const shape_value::heap_value::TypedObjectStorage;
             // SAFETY: per `typed_object_from_pairs`'s construction-side
-            // contract (`type_schema/mod.rs:287`), bits are
-            // `Arc::into_raw(Arc<TypedObjectStorage>)` with one
-            // strong-count share owned by `kinded`. Reconstruct as Arc,
-            // clone the share for the outer wrapper, then `into_raw` to
-            // restore the original share — when `kinded` drops, the
-            // ADR-006 §2.7.6 / Q8 TypedObject arm of `KindedSlot::drop`
-            // (`kinded_slot.rs`) releases that share via
-            // `Arc::decrement_strong_count::<TypedObjectStorage>`.
-            let storage_arc: Arc<shape_value::heap_value::TypedObjectStorage> =
-                unsafe { Arc::from_raw(bits as *const _) };
-            let storage = Arc::clone(&storage_arc);
-            // Restore the original share so `kinded`'s Drop releases
-            // through the standard typed-Arc kind-dispatch path.
-            let _ = Arc::into_raw(storage_arc);
+            // contract, `ptr` points to a live TypedObjectStorage with
+            // refcount ≥ 1.
+            unsafe { shape_value::v2::refcount::v2_retain(&(*ptr).header); }
             drop(kinded);
             Ok(TypedReturn::Concrete(ConcreteReturn::OpaqueTypedObject(
-                Arc::new(HeapValue::TypedObject(storage)),
+                Arc::new(HeapValue::TypedObject(
+                    shape_value::heap_value::TypedObjectPtr::new(ptr),
+                )),
             )))
         },
     );

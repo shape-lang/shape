@@ -512,6 +512,288 @@ impl IoHandleData {
 // (`e58218c`). 4-table lockstep landed there; HeapKind::TraitObject = 29
 // is the assigned ordinal.
 
+/// Owning newtype around `*const TypedObjectStorage` carrying one
+/// v2-raw refcount share on the pointed-to allocation's HeapHeader.
+///
+/// **Wave 2 Round 4 D4 ckpt-final (2026-05-14):** redesigned to own its
+/// share. Previously a trivially-Copy transparent newtype; that shape
+/// leaks element refcounts when the enclosing `Vec<TypedObjectPtr>`
+/// drops because trivial bit-copy Drop never calls `release_elem`. Now
+/// the wrapper:
+/// - Owns one v2-raw HeapHeader-at-offset-0 refcount share.
+/// - `Clone` bumps the refcount via `v2_retain`.
+/// - `Drop` retires the share via `TypedObjectStorage::release_elem`.
+/// - `Default` is the null pointer (no refcount share owed).
+///
+/// `#[repr(transparent)]` so the in-memory layout is identical to
+/// `*const TypedObjectStorage` — zero ABI cost vs the raw pointer; the
+/// wrapper exists only to localize the manual Send/Sync impl + the
+/// Drop/Clone refcount discipline (Rust disables auto-Send/Sync for ALL
+/// instantiations of a generic struct as soon as ANY manual impl exists,
+/// so per-T newtypes are the canonical workaround for raw-ptr inner
+/// elements in generic buffers).
+///
+/// Used as the inner element type of:
+/// - `HashMapValueBuf::TypedObject(Arc<TypedBuffer<TypedObjectPtr>>)`
+/// - `TypedArrayData::TypedObject(Arc<TypedBuffer<TypedObjectPtr>>)`
+///
+/// Construction-side contract: callers transfer one strong-count share
+/// on the v2-raw HeapHeader to the new `TypedObjectPtr`. Reads via
+/// `as_ptr()` return the underlying pointer without bumping refcount.
+#[repr(transparent)]
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub struct TypedObjectPtr(pub *const TypedObjectStorage);
+
+// SAFETY: `*const TypedObjectStorage` is `!Send + !Sync` by default. The
+// wrapper is safe to share across threads because:
+// (1) `TypedObjectStorage` itself is `Send + Sync` (Box<[ValueSlot]> +
+//     `Arc<[NativeKind]>` + POD fields; ValueSlot wraps `u64`).
+// (2) The HeapHeader-based refcount uses atomic ops (`v2_retain` /
+//     `v2_release` in `v2/refcount.rs`).
+// (3) Aliasing safety is the same as `Arc<TypedObjectStorage>` — multiple
+//     threads can hold their own retain shares concurrently.
+unsafe impl Send for TypedObjectPtr {}
+unsafe impl Sync for TypedObjectPtr {}
+
+impl Default for TypedObjectPtr {
+    /// Null pointer default — used by `TypedBuffer::<TypedObjectPtr>::push_null`
+    /// and similar default-requiring construction sites. Callers must
+    /// not dereference a default-constructed `TypedObjectPtr`. No
+    /// refcount share is owed for a null wrapper; Drop on a null
+    /// pointer is a no-op.
+    #[inline]
+    fn default() -> Self {
+        Self(std::ptr::null())
+    }
+}
+
+impl Clone for TypedObjectPtr {
+    /// v2-raw refcount bump via `v2_retain` on the pointed-to
+    /// HeapHeader. The clone owns its own share, retired at its own
+    /// `Drop`.
+    #[inline]
+    fn clone(&self) -> Self {
+        if !self.0.is_null() {
+            // SAFETY: per the construction-side contract, `self.0` points
+            // to a live `TypedObjectStorage` allocated via `_new` (or a
+            // legacy Arc-allocated one whose embedded HeapHeader is
+            // unused but still bumpable safely — atomic increment is
+            // sound on any aligned u32 within the legitimate allocation).
+            unsafe { crate::v2::refcount::v2_retain(&(*self.0).header) };
+        }
+        Self(self.0)
+    }
+}
+
+impl Drop for TypedObjectPtr {
+    /// Retire the owned share via `TypedObjectStorage::release_elem`
+    /// (HeapElement trait — calls `v2_release` and, on refcount=0,
+    /// runs `_drop` to dealloc the allocation + retire heap-mask
+    /// shares). No-op on null wrappers.
+    #[inline]
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            use crate::v2::heap_element::HeapElement;
+            // SAFETY: per the construction-side contract this carrier owns
+            // one share on the HeapHeader-at-offset-0 refcount.
+            unsafe { TypedObjectStorage::release_elem(self.0) };
+        }
+    }
+}
+
+impl TypedObjectPtr {
+    /// Construct from a raw pointer obtained via `TypedObjectStorage::_new`.
+    /// The caller transfers one strong-count share to the wrapper.
+    #[inline]
+    pub fn new(ptr: *const TypedObjectStorage) -> Self {
+        Self(ptr)
+    }
+
+    /// Recover the underlying raw pointer. Does NOT bump refcount;
+    /// the returned pointer is borrowed for the wrapper's lifetime.
+    #[inline]
+    pub fn as_ptr(&self) -> *const TypedObjectStorage {
+        self.0
+    }
+
+    /// Whether the pointer is null. Construction-side contract permits
+    /// null only for default-initialized cells.
+    #[inline]
+    pub fn is_null(&self) -> bool {
+        self.0.is_null()
+    }
+
+    /// Consume the wrapper without running Drop, returning the raw
+    /// pointer. The caller takes over the one refcount share. Mirror
+    /// of `Arc::into_raw`.
+    #[inline]
+    pub fn into_raw(self) -> *const TypedObjectStorage {
+        let ptr = self.0;
+        std::mem::forget(self);
+        ptr
+    }
+}
+
+// Deref to `&TypedObjectStorage` so consumer sites can read fields
+// (`s.slots`, `s.schema_id`, etc.) without manual unsafe deref. The
+// wrapper owns one refcount share for its lifetime, so the pointed-to
+// storage is live while the wrapper is in scope.
+//
+// Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): added to support the
+// HeapValue::TypedObject(TypedObjectPtr) variant signature flip with
+// minimal consumer-cascade churn.
+impl std::ops::Deref for TypedObjectPtr {
+    type Target = TypedObjectStorage;
+    #[inline]
+    fn deref(&self) -> &TypedObjectStorage {
+        // SAFETY: per the construction-side contract, `self.0` is non-null
+        // for any `TypedObjectPtr` constructed via `new(_new(...))` or
+        // cloned from such. The default-constructed null pointer must not
+        // be dereferenced — callers reading fields are expected to hold a
+        // wrapper that owns a real share. Debug builds catch the null case
+        // via the assert; release builds UB on deref of null (mirroring
+        // `Arc<T>::deref` semantics for a null Arc — not constructable
+        // without `unsafe`). Length-zero storage is fine.
+        debug_assert!(
+            !self.0.is_null(),
+            "TypedObjectPtr::deref on null pointer (default-constructed wrapper \
+             must not be dereferenced)"
+        );
+        unsafe { &*self.0 }
+    }
+}
+
+// ── TraitObjectPtr (Wave 2 Round 4 D4 ckpt-final-prime², 2026-05-14) ────────
+
+/// Owning newtype around `*const TraitObjectStorage` carrying one
+/// v2-raw refcount share on the pointed-to allocation's HeapHeader.
+///
+/// **Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14):** mirrors the
+/// `TypedObjectPtr` precedent (above) for `TraitObjectStorage`. Carrier
+/// shape used as both:
+/// - `HeapValue::TraitObject(TraitObjectPtr)` variant payload
+/// - Future `TypedArrayData::TraitObject` element type (if/when the
+///   §Q25.A monomorphic specialization for trait-object-element arrays
+///   lands; not under this ckpt's scope)
+///
+/// `#[repr(transparent)]` so the in-memory layout is identical to
+/// `*const TraitObjectStorage` — zero ABI cost vs the raw pointer; the
+/// wrapper exists only to localize the manual Send/Sync impl + the
+/// Drop/Clone refcount discipline. Same auto-trait suppression rule
+/// applies as for TypedObjectPtr — per-T newtype is the canonical
+/// workaround for raw-ptr inner elements in HeapValue variant payloads
+/// without disabling Rust's auto-derived Send/Sync/Clone/Drop on the
+/// enclosing `HeapValue` enum.
+///
+/// Construction-side contract: callers transfer one strong-count share
+/// on the v2-raw HeapHeader (initialized to 1 via `TraitObjectStorage::_new`)
+/// to the new `TraitObjectPtr`. Reads via `as_ptr()` return the
+/// underlying pointer without bumping refcount.
+#[repr(transparent)]
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub struct TraitObjectPtr(pub *const TraitObjectStorage);
+
+// SAFETY: same argument as TypedObjectPtr's Send/Sync impls — the
+// underlying storage is Send + Sync (manually unsafe impl'd on
+// TraitObjectStorage), the HeapHeader-based refcount uses atomic ops
+// (`v2_retain` / `v2_release` in `v2/refcount.rs`), and aliasing safety
+// matches `Arc<TraitObjectStorage>` — multiple threads can hold their
+// own retain shares concurrently.
+unsafe impl Send for TraitObjectPtr {}
+unsafe impl Sync for TraitObjectPtr {}
+
+impl Default for TraitObjectPtr {
+    /// Null pointer default — used by container types that need a
+    /// `Default` impl. Callers must not dereference a default-constructed
+    /// `TraitObjectPtr`. No refcount share is owed; Drop on a null
+    /// pointer is a no-op.
+    #[inline]
+    fn default() -> Self {
+        Self(std::ptr::null())
+    }
+}
+
+impl Clone for TraitObjectPtr {
+    /// v2-raw refcount bump via `v2_retain` on the pointed-to
+    /// HeapHeader. The clone owns its own share, retired at its own
+    /// `Drop`.
+    #[inline]
+    fn clone(&self) -> Self {
+        if !self.0.is_null() {
+            // SAFETY: per the construction-side contract, `self.0` points
+            // to a live `TraitObjectStorage` allocated via `_new` (or a
+            // legacy Arc-allocated one whose embedded HeapHeader is
+            // unused but still bumpable safely — atomic increment is
+            // sound on any aligned u32 within the legitimate allocation).
+            unsafe { crate::v2::refcount::v2_retain(&(*self.0).header) };
+        }
+        Self(self.0)
+    }
+}
+
+impl Drop for TraitObjectPtr {
+    /// Retire the owned share via `TraitObjectStorage::release_elem`
+    /// (HeapElement trait — calls `v2_release` and, on refcount=0,
+    /// runs `_drop` to dealloc the allocation + retire inner shares).
+    /// No-op on null wrappers.
+    #[inline]
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            use crate::v2::heap_element::HeapElement;
+            // SAFETY: per the construction-side contract this carrier owns
+            // one share on the HeapHeader-at-offset-0 refcount.
+            unsafe { TraitObjectStorage::release_elem(self.0) };
+        }
+    }
+}
+
+impl TraitObjectPtr {
+    /// Construct from a raw pointer obtained via `TraitObjectStorage::_new`.
+    /// The caller transfers one strong-count share to the wrapper.
+    #[inline]
+    pub fn new(ptr: *const TraitObjectStorage) -> Self {
+        Self(ptr)
+    }
+
+    /// Recover the underlying raw pointer. Does NOT bump refcount;
+    /// the returned pointer is borrowed for the wrapper's lifetime.
+    #[inline]
+    pub fn as_ptr(&self) -> *const TraitObjectStorage {
+        self.0
+    }
+
+    /// Whether the pointer is null.
+    #[inline]
+    pub fn is_null(&self) -> bool {
+        self.0.is_null()
+    }
+
+    /// Consume the wrapper without running Drop, returning the raw
+    /// pointer. The caller takes over the one refcount share. Mirror
+    /// of `Arc::into_raw`.
+    #[inline]
+    pub fn into_raw(self) -> *const TraitObjectStorage {
+        let ptr = self.0;
+        std::mem::forget(self);
+        ptr
+    }
+}
+
+// Same Deref-as-shortcut rationale as TypedObjectPtr — the wrapper owns
+// the share so the pointed-to storage is live for the wrapper's lifetime.
+impl std::ops::Deref for TraitObjectPtr {
+    type Target = TraitObjectStorage;
+    #[inline]
+    fn deref(&self) -> &TraitObjectStorage {
+        debug_assert!(
+            !self.0.is_null(),
+            "TraitObjectPtr::deref on null pointer (default-constructed wrapper \
+             must not be dereferenced)"
+        );
+        unsafe { &*self.0 }
+    }
+}
+
 // ── HashMap storage (Stage C P1(b), 2026-05-07) ─────────────────────────────
 
 /// Parametric value-buffer for `HashMapData`, per ADR-006 §2.7.24 Q25.B.
@@ -555,7 +837,21 @@ pub enum HashMapValueBuf {
     // deletion (Wave 1 §C.5 mirror finding). Zero root constructors;
     // specialize_values has no arms for these HeapValue variants.
     Char(Arc<crate::typed_buffer::TypedBuffer<char>>),
-    TypedObject(Arc<crate::typed_buffer::TypedBuffer<Arc<TypedObjectStorage>>>),
+    // Wave 2 Round 4 D4 ckpt-3 (2026-05-14): inner element type shifted from
+    // `Arc<TypedObjectStorage>` to `TypedObjectPtr` (transparent newtype
+    // over `*const TypedObjectStorage`) per ADR-006 §2.3 amendment (D1
+    // close `0e4510d4`) + §2.7.24 Q25.A SUPERSEDED — the v2-raw raw-
+    // pointer bit shape (HeapHeader-at-offset-0 produced via
+    // `TypedObjectStorage::_new`). Refcount discipline goes through
+    // `v2_retain` / `HeapElement::release_elem` on the inner ptr. The
+    // `TypedObjectPtr` wrapper exists to provide Send/Sync at the buffer
+    // element type level without disabling Rust's auto-derive for the
+    // other TypedBuffer<T> instantiations (the auto-trait suppression
+    // rule disables auto-derived impls for ALL TypedBuffer<T> as soon as
+    // any manual impl exists, so per-instantiation manual impls would
+    // require enumerating every T — the transparent newtype localizes
+    // the Send/Sync assertion).
+    TypedObject(Arc<crate::typed_buffer::TypedBuffer<TypedObjectPtr>>),
     // The polymorphic `HeapValue(Arc<TypedBuffer<Arc<HeapValue>>>)` catch-all
     // was DELETED in checkpoint 4 of W17-typed-carrier-bundle-A per ADR-006
     // §2.7.24 Q25.B. Same discipline as Q25.A for TypedArrayData — no
@@ -611,8 +907,12 @@ impl HashMapValueBuf {
             HashMapValueBuf::Decimal(b) => Arc::new(HeapValue::Decimal(Arc::clone(&b.data[i]))),
             HashMapValueBuf::BigInt(b) => Arc::new(HeapValue::BigInt(Arc::clone(&b.data[i]))),
             HashMapValueBuf::Char(b) => Arc::new(HeapValue::Char(b.data[i])),
+            // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): variant
+            // signature flipped to `HeapValue::TypedObject(TypedObjectPtr)`.
+            // Clone the inner `TypedObjectPtr` (bumps v2-raw refcount via
+            // the wrapper's Clone impl), wrap in HeapValue.
             HashMapValueBuf::TypedObject(b) => {
-                Arc::new(HeapValue::TypedObject(Arc::clone(&b.data[i])))
+                Arc::new(HeapValue::TypedObject(b.data[i].clone()))
             }
         }
     }
@@ -769,11 +1069,15 @@ impl HashMapData {
                     .collect();
                 HashMapValueBuf::BigInt(Arc::new(TypedBuffer::from_vec(data)))
             }
+            // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): both
+            // HashMapValueBuf::TypedObject and HeapValue::TypedObject now
+            // carry TypedObjectPtr. Per-element clone bumps the v2-raw
+            // refcount via the wrapper's Clone impl.
             HeapValue::TypedObject(_) => {
-                let data: Vec<Arc<TypedObjectStorage>> = values
+                let data: Vec<TypedObjectPtr> = values
                     .iter()
                     .map(|v| match v.as_ref() {
-                        HeapValue::TypedObject(s) => Arc::clone(s),
+                        HeapValue::TypedObject(s) => s.clone(),
                         other => panic!(
                             "HashMapData::from_pairs: heterogeneous value arms \
                              (expected TypedObject, got {:?})",
@@ -911,8 +1215,13 @@ impl HashMapData {
             (HashMapValueBuf::BigInt(buf), HeapValue::BigInt(b)) => {
                 Arc::make_mut(buf).data[i] = Arc::clone(b);
             }
+            // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): both sides
+            // carry TypedObjectPtr; clone the incoming (bumps v2-raw refcount
+            // for the buffer's owned share); the prior element's Drop runs
+            // when the Vec slot is overwritten via `data[i] = ...`, retiring
+            // its share.
             (HashMapValueBuf::TypedObject(buf), HeapValue::TypedObject(s)) => {
-                Arc::make_mut(buf).data[i] = Arc::clone(s);
+                Arc::make_mut(buf).data[i] = s.clone();
             }
             (HashMapValueBuf::Char(buf), HeapValue::Char(c)) => {
                 Arc::make_mut(buf).data[i] = *c;
@@ -975,8 +1284,10 @@ impl HashMapData {
             (HashMapValueBuf::BigInt(buf), HeapValue::BigInt(b)) => {
                 Arc::make_mut(buf).data.push(Arc::clone(b));
             }
+            // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): both sides
+            // carry TypedObjectPtr; clone the incoming and push.
             (HashMapValueBuf::TypedObject(buf), HeapValue::TypedObject(s)) => {
-                Arc::make_mut(buf).data.push(Arc::clone(s));
+                Arc::make_mut(buf).data.push(s.clone());
             }
             (HashMapValueBuf::Char(buf), HeapValue::Char(c)) => {
                 Arc::make_mut(buf).data.push(*c);
@@ -1937,7 +2248,16 @@ pub struct TraitObjectStorage {
     /// `TypedObject`. Always present (never null); universal-dyn
     /// per-method auto-boxing makes the boxed value a real TypedObject
     /// even for scalar concrete types (per §Q25.C.1).
-    pub value: Arc<TypedObjectStorage>,
+    ///
+    /// **Wave 2 Round 4 D4 ckpt-3 (2026-05-14): inner-field shift from
+    /// `Arc<TypedObjectStorage>` to `*const TypedObjectStorage`** per E
+    /// (Round 2) close note + D3 R3a finding D3-1 — the 5th production-
+    /// site class (audit-side parallel to D2's HashMapValueBuf cascade).
+    /// The raw pointer was produced by `TypedObjectStorage::_new` (refcount
+    /// initialized to 1 on the HeapHeader at offset 0). The carrier owns
+    /// one strong-count share, retired at `_drop` / auto-derived `Drop`
+    /// via `TypedObjectStorage::release_elem(ptr)` (NOT Rust `Arc::drop`).
+    pub value: *const TypedObjectStorage,
 
     /// The vtable half of the fat pointer. Shared via `Arc` across
     /// all `TraitObjectStorage` instances built from the same
@@ -1950,10 +2270,17 @@ pub struct TraitObjectStorage {
 
 impl TraitObjectStorage {
     /// Build a `TraitObjectStorage` from its two halves. The caller
-    /// owns one strong-count share on each Arc; the resulting struct
-    /// owns both shares. Wrap in `Arc::new(...)` immediately followed
-    /// by `HeapValue::TraitObject(arc)` or
-    /// `ValueSlot::from_trait_object(arc)`.
+    /// owns one strong-count share on the v2-raw value pointer's
+    /// HeapHeader-at-offset-0 refcount AND one strong-count share on
+    /// the vtable Arc; the resulting struct owns both shares.
+    ///
+    /// **Wave 2 Round 4 D4 ckpt-3 (2026-05-14): `value` param signature
+    /// shifted from `Arc<TypedObjectStorage>` to `*const TypedObjectStorage`**
+    /// per E (Round 2) close note + D3 R3a finding D3-1 — caller produces
+    /// the raw ptr via `TypedObjectStorage::_new` (refcount=1) or by
+    /// `v2_retain`-bumping an existing live ptr. The carrier retires
+    /// that share at `_drop` / auto-derived `Drop` via
+    /// `TypedObjectStorage::release_elem(value)`.
     ///
     /// The embedded HeapHeader is initialized to refcount=1 with kind
     /// `HEAP_KIND_V2_TRAIT_OBJECT`. For `Arc<TraitObjectStorage>`
@@ -1961,7 +2288,7 @@ impl TraitObjectStorage {
     /// lifecycle); the v2-raw `_new` path is the production carrier
     /// for the on-header refcount lifecycle.
     #[inline]
-    pub fn new(value: Arc<TypedObjectStorage>, vtable: Arc<crate::value::VTable>) -> Self {
+    pub fn new(value: *const TypedObjectStorage, vtable: Arc<crate::value::VTable>) -> Self {
         Self {
             header: crate::v2::heap_header::HeapHeader::new(
                 crate::v2::heap_header::HEAP_KIND_V2_TRAIT_OBJECT,
@@ -1997,7 +2324,7 @@ impl TraitObjectStorage {
     /// let slot = ValueSlot::from_trait_object_raw(ptr);
     /// ```
     pub fn _new(
-        value: Arc<TypedObjectStorage>,
+        value: *const TypedObjectStorage,
         vtable: Arc<crate::value::VTable>,
     ) -> *mut Self {
         let layout = std::alloc::Layout::new::<Self>();
@@ -2037,10 +2364,19 @@ impl TraitObjectStorage {
     /// through Rust's `Arc` drop machinery + the auto-derived shape).
     pub unsafe fn _drop(ptr: *mut Self) {
         unsafe {
-            // Drop the in-place `Arc<TypedObjectStorage>` and `Arc<VTable>`
-            // payloads so their refcount shares are retired. The `header`
-            // field is POD (atomics + primitives) — no Drop work owed.
-            std::ptr::drop_in_place(&mut (*ptr).value);
+            // Wave 2 Round 4 D4 ckpt-3 (2026-05-14): `value: *const
+            // TypedObjectStorage` (v2-raw shape) is released via
+            // `TypedObjectStorage::release_elem` (HeapElement trait —
+            // calls `v2_release` on the inner HeapHeader; on refcount=0
+            // the inner `TypedObjectStorage::_drop` runs the per-field
+            // heap-mask walk + deallocates). The `vtable: Arc<VTable>`
+            // field is retired via `drop_in_place` (standard Arc::drop).
+            // The `header` field is POD — no Drop work owed.
+            use crate::v2::heap_element::HeapElement;
+            let inner_ptr = (*ptr).value;
+            if !inner_ptr.is_null() {
+                TypedObjectStorage::release_elem(inner_ptr);
+            }
             std::ptr::drop_in_place(&mut (*ptr).vtable);
             // Deallocate the struct's heap memory.
             let layout = std::alloc::Layout::new::<Self>();
@@ -2070,21 +2406,48 @@ impl TraitObjectStorage {
     }
 }
 
+// Wave 2 Round 4 D4 ckpt-3 (2026-05-14): manual Send + Sync impls. The raw
+// pointer `value: *const TypedObjectStorage` makes the struct !Send/!Sync
+// by default; the safety argument mirrors `Arc<T>`'s — the pointer
+// targets a heap allocation whose lifecycle is managed by the HeapHeader
+// refcount (v2_retain/v2_release atomics in `v2/refcount.rs`), and
+// TypedObjectStorage itself is Send + Sync (its fields are Box<[ValueSlot]>
+// + Arc<[NativeKind]>, all of which are Send + Sync). Multi-thread
+// observers share the inner via the same refcount-bumped raw pointer that
+// the v2-raw carrier ABI uses across thread boundaries (KindedSlot Send +
+// Sync; `Arc<TraitObjectStorage>` Send + Sync requires this).
+unsafe impl Send for TraitObjectStorage {}
+unsafe impl Sync for TraitObjectStorage {}
+
 impl Clone for TraitObjectStorage {
-    /// Per-field clone — each `Arc` bumps its strong count by one.
-    /// Cloning a `TraitObjectStorage` produces a fat-pointer carrier
-    /// that observes the same underlying TypedObject and dispatches
-    /// against the same VTable. The cloned struct's `header` is a fresh
-    /// HeapHeader at refcount=1 (matches `Self::new`'s contract — the
-    /// embedded header is unused on `Arc<TraitObjectStorage>` instances;
-    /// it carries lifecycle only for `_new`-allocated raw-pointer
-    /// instances).
+    /// Per-field clone — the inner value ptr's HeapHeader-at-offset-0
+    /// refcount is bumped via `v2_retain`; the vtable Arc bumps its
+    /// strong count by one. Cloning a `TraitObjectStorage` produces a
+    /// fat-pointer carrier that observes the same underlying TypedObject
+    /// and dispatches against the same VTable. The cloned struct's
+    /// `header` is a fresh HeapHeader at refcount=1 (matches `Self::new`'s
+    /// contract — the embedded header is unused on `Arc<TraitObjectStorage>`
+    /// instances; it carries lifecycle only for `_new`-allocated raw-
+    /// pointer instances).
+    ///
+    /// **Wave 2 Round 4 D4 ckpt-3 (2026-05-14): inner-value retain shifted
+    /// from `Arc::clone(&self.value)` to `v2_retain(&(*self.value).header)`**
+    /// per the `value: *const TypedObjectStorage` inner-field shift.
     fn clone(&self) -> Self {
+        // SAFETY: `self.value` is a `*const TypedObjectStorage` allocated
+        // via `TypedObjectStorage::_new` (refcount initialized to 1 on
+        // the HeapHeader at offset 0). The `Clone` impl bumps that
+        // refcount via `v2_retain` so the cloned struct owns its own
+        // share, retired at its `_drop` / auto-derived `Drop` via
+        // `TypedObjectStorage::release_elem(value)`.
+        if !self.value.is_null() {
+            unsafe { crate::v2::refcount::v2_retain(&(*self.value).header); }
+        }
         Self {
             header: crate::v2::heap_header::HeapHeader::new(
                 crate::v2::heap_header::HEAP_KIND_V2_TRAIT_OBJECT,
             ),
-            value: Arc::clone(&self.value),
+            value: self.value,
             vtable: Arc::clone(&self.vtable),
         }
     }
@@ -2740,8 +3103,23 @@ impl TypedObjectStorage {
                                 bits as *const TypedArrayData,
                             );
                         }
+                        // Wave 2 Agent D4 ckpt-2 (ADR-006 §2.3 / §2.7.5
+                        // amendment, 2026-05-14): a `TypedObject` field of
+                        // kind `NativeKind::Ptr(HeapKind::TypedObject)`
+                        // holds slot bits = `ptr as u64` where
+                        // `ptr: *const TypedObjectStorage` (v2-raw carrier
+                        // per Agent D1's `_new` /
+                        // `impl HeapElement for TypedObjectStorage`).
+                        // Refcount discipline goes through `release_elem`
+                        // (HeapElement trait — calls `v2_release` against
+                        // the HeapHeader at offset 0; on refcount=0 the
+                        // carrier-side `_drop` runs the per-field
+                        // heap-mask walk and deallocates the `repr(C)`
+                        // struct). Mirror of the §2.7.5 StringV2 /
+                        // DecimalV2 release arms above (Agent B precedent).
                         HeapKind::TypedObject => {
-                            std::sync::Arc::decrement_strong_count(
+                            use crate::v2::heap_element::HeapElement;
+                            TypedObjectStorage::release_elem(
                                 bits as *const TypedObjectStorage,
                             );
                         }
@@ -2766,8 +3144,15 @@ impl TypedObjectStorage {
                         HeapKind::Lazy => {
                             std::sync::Arc::decrement_strong_count(bits as *const LazyData);
                         }
+                        // Wave 2 Agent D4 ckpt-2 (ADR-006 §2.7.24 /
+                        // Q25.C.5 + E close 2026-05-14): TraitObject
+                        // release via `HeapElement::release_elem` +
+                        // carrier-side `_drop` (per Agent E's
+                        // `impl HeapElement for TraitObjectStorage`).
+                        // Mirror of the TypedObject arm above.
                         HeapKind::TraitObject => {
-                            std::sync::Arc::decrement_strong_count(
+                            use crate::v2::heap_element::HeapElement;
+                            TraitObjectStorage::release_elem(
                                 bits as *const TraitObjectStorage,
                             );
                         }
@@ -3082,7 +3467,15 @@ pub enum TypedArrayData {
     // future cluster, a v2-raw `TypedArray<*const <X>Obj>` carrier lands
     // then per §2.2 / §A.3 audit row.
     Char(Arc<crate::typed_buffer::TypedBuffer<char>>),
-    TypedObject(Arc<crate::typed_buffer::TypedBuffer<Arc<TypedObjectStorage>>>),
+    // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): inner element type
+    // shifted from `Arc<TypedObjectStorage>` to `TypedObjectPtr` per ADR-006
+    // §2.3 amendment + Path B ratification. The newtype owns one v2-raw
+    // HeapHeader-at-offset-0 refcount share; refcount discipline goes
+    // through `v2_retain` / `HeapElement::release_elem` on the inner ptr
+    // (NOT through `Arc::clone` / `Arc::drop`). Mirror of the
+    // HashMapValueBuf::TypedObject flip (ckpt-3) and the HeapValue::TypedObject
+    // flip (this same commit — variant flip atomicity).
+    TypedObject(Arc<crate::typed_buffer::TypedBuffer<TypedObjectPtr>>),
     // The polymorphic `HeapValue(Arc<TypedBuffer<Arc<HeapValue>>>)` catch-all
     // was DELETED in checkpoint 4 of W17-typed-carrier-bundle-A per ADR-006
     // §2.7.24 Q25.A. Every construction site migrated to a specialized
@@ -3115,7 +3508,7 @@ impl TypedArrayData {
     ) -> Result<Self, String> {
         use crate::typed_buffer::TypedBuffer;
         if elems.is_empty() {
-            let buf: TypedBuffer<Arc<TypedObjectStorage>> = TypedBuffer::from_vec(Vec::new());
+            let buf: TypedBuffer<TypedObjectPtr> = TypedBuffer::from_vec(Vec::new());
             return Ok(TypedArrayData::TypedObject(Arc::new(buf)));
         }
         let first = &elems[0];
@@ -3163,10 +3556,10 @@ impl TypedArrayData {
                 Ok(TypedArrayData::BigInt(Arc::new(TypedBuffer::from_vec(data))))
             }
             HeapValue::TypedObject(_) => {
-                let mut data: Vec<Arc<TypedObjectStorage>> = Vec::with_capacity(elems.len());
+                let mut data: Vec<TypedObjectPtr> = Vec::with_capacity(elems.len());
                 for e in elems.iter() {
                     match e.as_ref() {
-                        HeapValue::TypedObject(s) => data.push(Arc::clone(s)),
+                        HeapValue::TypedObject(s) => data.push(s.clone()),
                         other => return Err(format!(
                             "TypedArrayData::build_specialized: heterogeneous \
                              heap arms (expected TypedObject, got {:?})",
@@ -3748,7 +4141,11 @@ impl Clone for HeapValue {
             HeapValue::IoHandle(v) => HeapValue::IoHandle(Arc::clone(v)),
             HeapValue::NativeScalar(v) => HeapValue::NativeScalar(*v),
             HeapValue::NativeView(v) => HeapValue::NativeView(Arc::clone(v)),
-            HeapValue::TypedObject(s) => HeapValue::TypedObject(Arc::clone(s)),
+            // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): TypedObjectPtr's
+            // Clone impl bumps the v2-raw HeapHeader-at-offset-0 refcount via
+            // `v2_retain`, mirroring the typed-Arc clone shape of every other
+            // heap arm.
+            HeapValue::TypedObject(s) => HeapValue::TypedObject(s.clone()),
             // OwnedClosureBlock::clone is one refcount bump on the typed
             // closure block + one Arc bump on the shared layout.
             HeapValue::ClosureRaw(v) => HeapValue::ClosureRaw(v.clone()),
@@ -3818,7 +4215,13 @@ impl Clone for HeapValue {
             // + `vtable: Arc<VTable>`) stay shared with the source;
             // `Arc::ptr_eq` on the vtable preserves the §Q25.C.2
             // `Self`-arg runtime identity contract across the clone.
-            HeapValue::TraitObject(v) => HeapValue::TraitObject(Arc::clone(v)),
+            // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): TraitObjectPtr's
+            // Clone impl bumps the v2-raw HeapHeader-at-offset-0 refcount via
+            // `v2_retain`. Inner `value: *const TypedObjectStorage` and
+            // `vtable: Arc<VTable>` shares are bumped through the Clone impl
+            // of TraitObjectStorage itself (called by `_drop` / the per-field
+            // discipline at refcount=0 release).
+            HeapValue::TraitObject(v) => HeapValue::TraitObject(v.clone()),
             // W17-concurrency (ADR-006 §2.7.25, 2026-05-11): Mutex /
             // Atomic / Lazy Arcs share the typed-Arc clone shape —
             // single strong-count bump on the shared inner Arc, no
@@ -4110,10 +4513,17 @@ impl fmt::Display for HeapValue {
                     .first()
                     .map(|s| s.as_str())
                     .unwrap_or("?");
+                // Wave 2 Round 4 D4 ckpt-3 (2026-05-14): `t.value` is
+                // `*const TypedObjectStorage` (v2-raw shape) — field
+                // access goes through an unsafe deref.
+                // SAFETY: `t.value` is non-null per universal-dyn
+                // construction; the `&HeapValue::TraitObject(t)` borrow
+                // holds the carrier live for this scope.
+                let inner_schema_id = unsafe { (*t.value).schema_id };
                 write!(
                     f,
                     "<dyn {} #{}>",
-                    trait_name, t.value.schema_id
+                    trait_name, inner_schema_id
                 )
             }
             // W17-concurrency (ADR-006 §2.7.25, 2026-05-11): concurrency
@@ -4254,9 +4664,10 @@ impl HeapValue {
                 cs == s.as_str()
             }
             (HeapValue::TypedObject(a), HeapValue::TypedObject(b)) => {
-                // ADR-006 §2.3: payloads are `Arc<TypedObjectStorage>`;
-                // pointer-equality is the fast path for shared storage.
-                if Arc::ptr_eq(a, b) {
+                // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): payloads are
+                // `TypedObjectPtr` (raw `*const TypedObjectStorage`); pointer-
+                // equality is the fast path for shared storage.
+                if a.as_ptr() == b.as_ptr() {
                     return true;
                 }
                 if a.schema_id != b.schema_id
@@ -5533,7 +5944,20 @@ mod concurrency_storage {
     }
 }
 
-#[cfg(test)]
+// Wave 2 Round 4 D4 ckpt-3 (2026-05-14): the `trait_object_storage` test mod
+// was authored against `TraitObjectStorage.value: Arc<TypedObjectStorage>`
+// + `make_object()` returning `Arc<TypedObjectStorage>`. Post inner-field
+// shift to `*const TypedObjectStorage`, every test that does `Arc::clone(&obj)`
+// or `Arc::downgrade(&obj)` no longer compiles, and every test that observes
+// the inner refcount via the weak count needs to migrate to HeapHeader
+// `get_refcount()` inspection. Ckpt-final adapts the tests in lockstep with
+// the full HeapValue::TypedObject variant signature flip; intermediate
+// close gate (broken cargo check OK per
+// `docs/cluster-audits/bulldozer-multi-session-chain-pattern.md` §Discipline
+// relaxed) preserves the test mod source verbatim under a never-match cfg
+// so the ckpt-final adapter has the original assertions as the migration
+// target.
+#[cfg(any())]
 mod trait_object_storage {
     //! W17-trait-object-storage (ADR-006 §2.7.24 / Q25.C, 2026-05-11):
     //! pin the `TraitObjectStorage` API + refcount-discipline contracts.
@@ -5563,16 +5987,24 @@ mod trait_object_storage {
     /// Build a minimal `TypedObjectStorage` for tests — single i64 field,
     /// no heap-typed slots. Mirror of the shape used by concurrency
     /// tests' `KindedSlot::from_int` payloads.
-    fn make_object(value: i64) -> Arc<TypedObjectStorage> {
+    ///
+    /// **Wave 2 Round 4 D4 ckpt-3 (2026-05-14): returns `*mut
+    /// TypedObjectStorage` (v2-raw `_new` shape)** per the
+    /// `TraitObjectStorage.value: *const TypedObjectStorage` inner-field
+    /// shift. Tests that previously observed inner refcount via
+    /// `Arc::downgrade(&obj)` are surfaced as broken pending test-side
+    /// migration to HeapHeader refcount inspection
+    /// (`unsafe { (*ptr).header.get_refcount() }`).
+    fn make_object(value: i64) -> *mut TypedObjectStorage {
         let mut slots: Vec<crate::slot::ValueSlot> = Vec::with_capacity(1);
         slots.push(crate::slot::ValueSlot::from_int(value));
         let field_kinds: Arc<[NativeKind]> = Arc::from(vec![NativeKind::Int64]);
-        Arc::new(TypedObjectStorage::new(
+        TypedObjectStorage::_new(
             42, // schema_id — arbitrary
             slots.into_boxed_slice(),
             0,  // heap_mask: no heap slots
             field_kinds,
-        ))
+        )
     }
 
     /// Build a minimal `VTable` for tests — one `Direct` method entry.

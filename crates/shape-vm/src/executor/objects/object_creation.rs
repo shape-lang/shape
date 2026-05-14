@@ -166,15 +166,17 @@ impl VirtualMachine {
         // dispatch per-slot `Arc::decrement_strong_count`.
         let field_kinds: Vec<NativeKind> = popped.iter().map(|(_, k)| *k).collect();
 
-        // Construct the storage, transfer ownership to the stack via
-        // `Arc::into_raw` + `push_kinded(NativeKind::Ptr(HeapKind::TypedObject))`.
-        let storage = Arc::new(TypedObjectStorage::new(
+        // Wave 2 Round 4 D4 ckpt-1: migrated to v2-raw `_new`. The raw
+        // pointer is directly the stack carrier bits per ADR-006 §2.4 /
+        // D1's `from_typed_object_raw` contract. No variant signature
+        // dependency at this site.
+        let ptr = TypedObjectStorage::_new(
             schema_id as u64,
             slots.into_boxed_slice(),
             heap_mask,
             Arc::from(field_kinds.into_boxed_slice()),
-        ));
-        let bits = Arc::into_raw(storage) as u64;
+        );
+        let bits = ptr as u64;
         self.push_kinded(bits, NativeKind::Ptr(HeapKind::TypedObject))
     }
 
@@ -562,8 +564,14 @@ impl VirtualMachine {
                 popped.clear();
                 Ok(TypedArrayData::BigInt(Arc::new(TypedBuffer::from_vec(data))))
             }
+            // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): bits are
+            // `*const TypedObjectStorage` (v2-raw) per the post-D2 contract.
+            // Wrap directly in TypedObjectPtr (transferring the slot's
+            // owned share to the wrapper); the popped slot's bits become
+            // owned by the buffer's TypedObjectPtr element.
             NativeKind::Ptr(HeapKind::TypedObject) => {
-                let mut data: Vec<Arc<TypedObjectStorage>> =
+                use shape_value::heap_value::TypedObjectPtr;
+                let mut data: Vec<TypedObjectPtr> =
                     Vec::with_capacity(count);
                 for (bits, _kind) in popped.iter() {
                     if *bits == 0 {
@@ -573,12 +581,12 @@ impl VirtualMachine {
                                 .to_string(),
                         ));
                     }
-                    // SAFETY: bits are `Arc::into_raw::<TypedObjectStorage>`
-                    // per `KindedSlot::from_typed_object`.
-                    let o: Arc<TypedObjectStorage> = unsafe {
-                        Arc::from_raw(*bits as *const TypedObjectStorage)
-                    };
-                    data.push(o);
+                    // The slot owned one v2-raw refcount share; we transfer
+                    // ownership to the new TypedObjectPtr by wrapping the
+                    // raw pointer (no v2_retain needed — share count
+                    // unchanged, ownership transfers).
+                    let ptr = *bits as *const TypedObjectStorage;
+                    data.push(TypedObjectPtr::new(ptr));
                 }
                 popped.clear();
                 Ok(TypedArrayData::TypedObject(Arc::new(

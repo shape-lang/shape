@@ -268,7 +268,8 @@ fn element_kinded(arr: &TypedArrayData, idx: usize) -> Result<KindedSlot, VMErro
         TypedArrayData::Decimal(b) => KindedSlot::from_decimal(Arc::clone(&b.data[idx])),
         TypedArrayData::BigInt(b) => KindedSlot::from_bigint(Arc::clone(&b.data[idx])),
         TypedArrayData::Char(b) => KindedSlot::from_char(b.data[idx]),
-        TypedArrayData::TypedObject(b) => KindedSlot::from_typed_object(Arc::clone(&b.data[idx])),
+        // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): TypedObjectPtr.
+        TypedArrayData::TypedObject(b) => KindedSlot::from_typed_object_raw(b.data[idx].clone().into_raw()),
     })
 }
 

@@ -270,13 +270,20 @@ pub fn create_csv_module() -> ModuleExports {
                     };
                     slots.push(ValueSlot::from_string_arc(Arc::new(cell)));
                 }
-                let storage = Arc::new(TypedObjectStorage::new(
+                // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): variant
+                // signature flipped to `HeapValue::TypedObject(TypedObjectPtr)`.
+                // `_new` returns `*mut TypedObjectStorage` with refcount=1; we
+                // wrap it in `TypedObjectPtr` (transferring the share to the
+                // wrapper).
+                let storage = TypedObjectStorage::_new(
                     schema_id as u64,
                     slots.into_boxed_slice(),
                     heap_mask,
                     Arc::clone(&field_kinds),
-                ));
-                records.push(Arc::new(HeapValue::TypedObject(storage)));
+                );
+                records.push(Arc::new(HeapValue::TypedObject(
+                    shape_value::heap_value::TypedObjectPtr::new(storage),
+                )));
             }
 
             Ok(TypedReturn::Concrete(ConcreteReturn::ArrayHeapValue(

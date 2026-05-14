@@ -299,6 +299,86 @@ multi-week-sequential framing; Wave 1 §D ground-truthed the 18
 production construction sites + ~300 cascade sites; supervisor
 authorized the D1+D2 split-into-2-rounds restatement of the cost.
 
+##### §2.3 amendment (Wave 2 Round 4 D4 ckpt-final-prime², 2026-05-14): Path B TypedObjectPtr/TraitObjectPtr newtype-as-variant-payload canonical pattern
+
+Per supervisor 2026-05-14 Path B ratification, `HeapValue::TypedObject`
+and `HeapValue::TraitObject` payloads use the `TypedObjectPtr` /
+`TraitObjectPtr` newtypes respectively — NOT raw `*const T` with manual
+`HeapValue` impls (Path A was REFUSED).
+
+The newtype-as-variant-payload pattern is the canonical v2-raw heap-element
+shape for HeapHeader-equipped storage types. Pattern characteristics:
+
+- `#[repr(transparent)]` newtype around `*const T` where `T` has
+  `HeapHeader` at offset 0
+- Manual `Drop` calling `release_elem` (which calls `v2_release` plus
+  `Self::_drop` on return-true)
+- Manual `Clone` calling `v2_retain`
+- Manual `unsafe impl Send + Sync` (orphan-rule workaround for raw
+  pointer; safe per `<X>Storage` itself being Send + Sync, atomic
+  refcount, and Arc<T>-equivalent multi-thread aliasing semantics)
+- `Default` returns null pointer (used by container types requiring
+  `Default`; callers must not dereference a default-constructed wrapper)
+- `Deref<Target = T>` for read-side ergonomics (`s.slots`,
+  `s.schema_id`, etc., work without manual unsafe deref). The wrapper
+  owns one share, so the pointed-to storage is live for the wrapper's
+  lifetime.
+- `into_raw(self) -> *const T` mirror of `Arc::into_raw` for share
+  ownership transfer to typed-Arc-shaped slot constructors
+- Used as both `TypedArrayData` element type AND `HeapValue` variant
+  payload (when the heap-element type has a `HeapValue` variant)
+- ZERO ABI cost; ZERO semantic content beyond the raw pointer; pure
+  localization of the Send/Sync/Drop/Clone discipline
+
+Used at:
+
+- `HeapValue::TypedObject(TypedObjectPtr)` (this amendment)
+- `HeapValue::TraitObject(TraitObjectPtr)` (this amendment)
+- `TypedArrayData::TypedObject(Arc<TypedBuffer<TypedObjectPtr>>)`
+- `HashMapValueBuf::TypedObject(Arc<TypedBuffer<TypedObjectPtr>>)`
+  (per ckpt-3)
+
+Auto-derived `Drop` / `Clone` / `Send` / `Sync` on `HeapValue` chain
+through the wrapper's manual discipline — load-bearing reason Path B
+saves ~50 LoC + 1 sub-agent vs Path A (no manual `impl Drop / Clone /
+Send / Sync for HeapValue` needed).
+
+**Forbidden under this pattern** (extends Renames-to-refuse-on-sight):
+
+- "TypedObjectPtr shim" / "TraitObjectPtr bridge" / "Ptr-newtype helper"
+  framing — the "Ptr" suffix is canonical typed-pointer designation,
+  NOT shim/bridge/helper. Per §Parallel-implementation #1-#3 thresholds
+  do NOT apply (single canonical payload; no parallel `Arc<X>`; no
+  boundary-deletion-as-one-off; no bridge framing).
+- Re-introducing `Arc<TypedObjectStorage>` or `Arc<TraitObjectStorage>`
+  as parallel payload alongside `TypedObjectPtr`/`TraitObjectPtr` post-D4.
+  Single canonical payload.
+- Adding sibling Ptr-newtypes for heap kinds that don't have HeapHeader-
+  equipped storage. E.g. `Arc<String>` is ADR-005 §2 exception;
+  "StringPtr" is forbidden under this pattern.
+- Manual `impl Drop / Clone / Send / Sync for HeapValue` — defeats Path B's
+  auto-derive-chain advantage.
+- Path A's raw `*const T` payload shape on HeapValue variants (refused).
+
+The legacy Arc-path constructors (`TypedObjectStorage::new(...)` returning
+`Self`, used by ~15 production callers and the `impl Drop for
+TypedObjectStorage` they depend on) **continue to coexist** with the
+v2-raw raw-pointer carrier per the original §2.3 amendment's coexistence
+clause — those callers produce `Arc<TypedObjectStorage>` whose embedded
+HeapHeader sits unused at refcount=1 (the enclosing Arc owns lifecycle).
+Their retirement is a follow-up workstream (`TypedObjectStorage::new`-
+deletion follow-up); the variant-flip atomic landing in this commit does
+NOT require that retirement.
+
+ADR-005 §1 single-discriminator: PRESERVED. `HeapValue::TypedObject`
+remains the discriminator; the payload SHAPE changes from
+`Arc<TypedObjectStorage>` to `TypedObjectPtr`. Same for
+`HeapValue::TraitObject`.
+
+**Authority:** Phase 3 cluster-0+1 Wave 2 Round 4 D4 ckpt-final-prime²
+close + supervisor 2026-05-14 Path B ratification (refused Path A
+manual `HeapValue` impls + raw `*const T`).
+
 ### 2.4 ValueSlot per-FieldType constructors
 
 ```rust
@@ -5333,6 +5413,25 @@ construction sites (2 actual at HEAD `e766dbef`; audit predicted 3,
 discrepancy surfaced at E close) + ~80 cascade sites (estimate); E
 inherits D1's API surface mirror pattern + D2's parallel close
 provides the inner-field flip lockstep.
+
+**Consistency check (Wave 2 Round 4 D4 ckpt-final-prime², 2026-05-14):**
+This amendment's text (Wave 2 Agent E close) describes the inner
+`value: Arc<TypedObjectStorage>` field as the canonical Wave 2
+transitional shape. ckpt-3 (`0ee49620`) shifted that inner field to
+`value: *const TypedObjectStorage` (raw, v2-raw shape) per E (Round 2)
+close note + D3 R3a finding D3-1. ckpt-final-prime² preserves the
+ckpt-3 inner-field shape (raw `*const TypedObjectStorage`) and
+additionally consumes the §2.3 Path B amendment for the OUTER carrier
+shape: `HeapValue::TraitObject(TraitObjectPtr)` per the §2.3 amendment
+TypedObjectPtr/TraitObjectPtr canonical pattern. The inner-field +
+outer-carrier shapes compose cleanly: the `TraitObjectPtr` newtype's
+Drop calls `release_elem` on the outer `*const TraitObjectStorage`,
+which calls the carrier's `_drop`, which calls `release_elem` on the
+inner `*const TypedObjectStorage` (the ckpt-3 inner-field shift's
+discipline). No further §Q25.C.5 amendment text needed for ckpt-final-
+prime² — the amendment's "Wave 3 stabilize cascade" lockstep
+description is satisfied by ckpt-final-prime² itself (the cascade flip
+landed atomically with the variant signature flip).
 
 ###### Q25.C.6 — IC devirtualization
 

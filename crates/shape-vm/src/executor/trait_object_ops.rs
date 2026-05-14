@@ -108,31 +108,30 @@ impl VirtualMachine {
         };
 
         // Pop the concrete value (transfer of share). The slot owned
-        // one `Arc<TypedObjectStorage>` strong-count share; we now own
-        // it via the (bits, kind) pair.
+        // one v2-raw `*const TypedObjectStorage` strong-count share on
+        // the HeapHeader at offset 0; we now own it via the (bits, kind)
+        // pair.
         let (bits, kind) = self.pop_kinded()?;
 
         // The concrete value must be a `TypedObject` per §Q25.C.1
-        // universal-dyn auto-boxing rule. Recover the `Arc` using the
-        // canonical `Arc::from_raw` pattern (typed-Arc shape per
-        // ADR-006 §2.3); pair with `Arc::into_raw` to transfer the
-        // share back when we hand it to `TraitObjectStorage::new`.
-        let typed_object_arc = match kind {
+        // universal-dyn auto-boxing rule.
+        //
+        // **Wave 2 Round 4 D4 ckpt-3 (2026-05-14): post-cascade the slot
+        // bits are v2-raw `*const TypedObjectStorage` (allocated via
+        // `TypedObjectStorage::_new`), not `Arc::into_raw(Arc::new(...))`.**
+        // We pass the raw pointer directly into `TraitObjectStorage::new`'s
+        // post-flip `value: *const TypedObjectStorage` parameter without
+        // an Arc round-trip. The popped slot's share transfers to the
+        // outer carrier (retained by `TraitObjectStorage::_drop` via
+        // `TypedObjectStorage::release_elem`).
+        let typed_object_ptr: *const shape_value::heap_value::TypedObjectStorage = match kind {
             NativeKind::Ptr(HeapKind::TypedObject) => {
                 if bits == 0 {
                     return Err(VMError::RuntimeError(
                         "BoxTraitObject: null TypedObject pointer".to_string(),
                     ));
                 }
-                // SAFETY: kind=Ptr(TypedObject); bits are
-                // `Arc::into_raw::<TypedObjectStorage>(arc)` per the
-                // §2.3 typed-Arc invariant established by
-                // `ValueSlot::from_typed_object`. The popped slot
-                // owned one strong-count share; this `Arc::from_raw`
-                // takes ownership of that share.
-                unsafe {
-                    Arc::from_raw(bits as *const shape_value::heap_value::TypedObjectStorage)
-                }
+                bits as *const shape_value::heap_value::TypedObjectStorage
             }
             other => {
                 drop_kinded(bits, kind);
@@ -146,7 +145,10 @@ impl VirtualMachine {
         };
 
         // Look up the concrete type name from the schema_id.
-        let schema_id = typed_object_arc.schema_id;
+        // SAFETY: `typed_object_ptr` is non-null and points to a live
+        // `TypedObjectStorage` per the kind-check above + the slot ABI's
+        // share contract (this scope owns the share).
+        let schema_id = unsafe { (*typed_object_ptr).schema_id };
         let type_name = self
             .program
             .type_schema_registry
@@ -175,12 +177,12 @@ impl VirtualMachine {
                 ))
             })?;
 
-        // Allocate the fat-pointer carrier. The `typed_object_arc`
-        // owns the original share — moving it into `TraitObjectStorage::new`
+        // Allocate the fat-pointer carrier. The `typed_object_ptr` owns
+        // the original share — moving it into `TraitObjectStorage::new`
         // transfers ownership without a refcount bump. The vtable was
         // cloned above (`get(&key).cloned()` returned a fresh
         // `Arc<VTable>` share).
-        let trait_object = Arc::new(TraitObjectStorage::new(typed_object_arc, vtable));
+        let trait_object = Arc::new(TraitObjectStorage::new(typed_object_ptr, vtable));
         let to_bits = Arc::into_raw(trait_object) as u64;
         self.push_kinded(to_bits, NativeKind::Ptr(HeapKind::TraitObject))?;
         Ok(())
@@ -292,15 +294,23 @@ impl VirtualMachine {
             .first()
             .cloned()
             .unwrap_or_default();
+        // Wave 2 Round 4 D4 ckpt-3 (2026-05-14): `trait_object.value` is
+        // now `*const TypedObjectStorage` (v2-raw) — field access goes
+        // through an unsafe deref.
+        // SAFETY: `trait_object.value` is non-null (universal-dyn auto-
+        // boxing per §Q25.C.1 always produces a real TypedObject); the
+        // `Arc<TraitObjectStorage>` we borrow from holds one share so
+        // the inner v2-raw ptr stays live for this scope.
+        let inner_schema_id = unsafe { (*trait_object.value).schema_id };
         let concrete_type_name = self
             .program
             .type_schema_registry
-            .get_by_id(trait_object.value.schema_id as u32)
+            .get_by_id(inner_schema_id as u32)
             .map(|s| s.name.clone())
             .ok_or_else(|| {
                 VMError::RuntimeError(format!(
                     "DynMethodCall: no type schema for schema_id {}",
-                    trait_object.value.schema_id
+                    inner_schema_id
                 ))
             })?;
         // First try the trait-qualified symbol (default impl):
@@ -519,12 +529,20 @@ impl VirtualMachine {
         }
 
         // Step 2: lower the receiver and any Self-typed arguments
-        // from `dyn` carriers to their inner `Arc<TypedObjectStorage>`.
+        // from `dyn` carriers to their inner `*const TypedObjectStorage`.
         // `stack_write_kinded` drops the previous occupant (releasing
         // the `Arc<TraitObjectStorage>` share) and installs the
         // new share.
-        let inner_typed_object = Arc::clone(&trait_object.value);
-        let new_bits = Arc::into_raw(inner_typed_object) as u64;
+        //
+        // **Wave 2 Round 4 D4 ckpt-3 (2026-05-14): `trait_object.value`
+        // is `*const TypedObjectStorage` (v2-raw shape).** Bump the
+        // inner refcount via `v2_retain` on the HeapHeader at offset 0
+        // so the new share owns its own count; the existing
+        // `Arc<TraitObjectStorage>` carrier still holds the original.
+        // SAFETY: `trait_object.value` is non-null per universal-dyn
+        // construction; the borrowed Arc keeps it live for this scope.
+        unsafe { shape_value::v2::refcount::v2_retain(&(*trait_object.value).header); }
+        let new_bits = trait_object.value as u64;
         let new_kind = NativeKind::Ptr(HeapKind::TypedObject);
         self.stack_write_kinded(receiver_idx, new_bits, new_kind);
 
@@ -534,12 +552,15 @@ impl VirtualMachine {
             // Already validated as TraitObject above.
             debug_assert_eq!(arg_kind, NativeKind::Ptr(HeapKind::TraitObject));
             // SAFETY: validated above; transient borrow to read the
-            // inner typed object share, then clone-bump and install.
+            // inner typed object ptr, then v2_retain-bump and install.
             let arg_to: &TraitObjectStorage = unsafe {
                 &*(arg_bits as *const TraitObjectStorage)
             };
-            let arg_inner = Arc::clone(&arg_to.value);
-            let new_arg_bits = Arc::into_raw(arg_inner) as u64;
+            let arg_inner_ptr = arg_to.value;
+            // SAFETY: same as above — inner ptr is non-null and live
+            // for the duration of the borrowed Arc carrier.
+            unsafe { shape_value::v2::refcount::v2_retain(&(*arg_inner_ptr).header); }
+            let new_arg_bits = arg_inner_ptr as u64;
             self.stack_write_kinded(arg_idx, new_arg_bits, new_kind);
         }
 
@@ -855,14 +876,14 @@ fn rebox_self_value(
                         .to_string(),
                 ));
             }
-            // SAFETY: kind=Ptr(TypedObject); bits are
-            // `Arc::into_raw::<TypedObjectStorage>(arc)`. The caller's
-            // share transfers to us.
-            let inner: Arc<TypedObjectStorage> = unsafe {
-                Arc::from_raw(bits as *const TypedObjectStorage)
-            };
+            // Wave 2 Round 4 D4 ckpt-3 (2026-05-14): post-cascade slot
+            // bits are v2-raw `*const TypedObjectStorage` (from
+            // `TypedObjectStorage::_new`). Pass directly into
+            // `TraitObjectStorage::new`'s post-flip raw-ptr parameter
+            // — no Arc round-trip.
+            let inner_ptr = bits as *const TypedObjectStorage;
             let new_to = Arc::new(TraitObjectStorage::new(
-                inner,
+                inner_ptr,
                 Arc::clone(receiver_vtable),
             ));
             let to_bits = Arc::into_raw(new_to) as u64;

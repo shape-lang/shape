@@ -141,7 +141,8 @@ fn heap_value_arc_to_slot(hv: &Arc<HeapValue>) -> KindedSlot {
         HeapValue::Decimal(d) => KindedSlot::from_decimal(Arc::clone(d)),
         HeapValue::BigInt(b) => KindedSlot::from_bigint(Arc::clone(b)),
         HeapValue::TypedArray(a) => KindedSlot::from_typed_array(Arc::clone(a)),
-        HeapValue::TypedObject(o) => KindedSlot::from_typed_object(Arc::clone(o)),
+        // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): TypedObjectPtr.
+        HeapValue::TypedObject(o) => KindedSlot::from_typed_object_raw(o.clone().into_raw()),
         HeapValue::HashMap(m) => KindedSlot::from_hashmap(Arc::clone(m)),
         HeapValue::Char(c) => KindedSlot::from_char(*c),
         // Other heap arms — fall back to `none()` (Bool-kind null sentinel).

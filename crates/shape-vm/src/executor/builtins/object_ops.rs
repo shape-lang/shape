@@ -53,19 +53,34 @@ impl VirtualMachine {
             }
         }
 
-        // Project the receiver as a TypedObject. ADR-005 §1: heap dispatch
-        // goes through HeapValue match; no per-heap-variant accessor.
-        let receiver_storage: Arc<TypedObjectStorage> = match args[0].kind {
-            NativeKind::Ptr(HeapKind::TypedObject) => match args[0].slot.as_heap_value() {
-                HeapValue::TypedObject(s) => Arc::clone(s),
-                _ => unreachable!("kind says TypedObject"),
-            },
+        // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): canonical
+        // 5-arm receiver-recovery soundness rule for v2-raw TypedObject —
+        // slot bits are `*const TypedObjectStorage` (NOT
+        // `Arc::into_raw(Arc<HeapValue>)`). `as_heap_value()` would read
+        // the storage's HeapHeader bytes as a HeapValue discriminator and
+        // segfault. Read the raw pointer directly and borrow it for the
+        // duration of this function (the slot owns the share; we don't
+        // need to retain).
+        let receiver_storage_ptr: *const TypedObjectStorage = match args[0].kind {
+            NativeKind::Ptr(HeapKind::TypedObject) => {
+                let bits = args[0].slot.raw();
+                if bits == 0 {
+                    return Err(type_error(
+                        "object_rest() first argument: TypedObject slot bits null",
+                    ));
+                }
+                bits as *const TypedObjectStorage
+            }
             _ => {
                 return Err(type_error(
                     "object_rest() first argument must be an object",
                 ));
             }
         };
+        // SAFETY: `receiver_storage_ptr` is a live `*const TypedObjectStorage`
+        // per the slot-construction-side contract; it's valid for the
+        // duration of this function (caller's slot holds the strong share).
+        let receiver_storage: &TypedObjectStorage = unsafe { &*receiver_storage_ptr };
 
         let sid = receiver_storage.schema_id as u32;
 
@@ -161,12 +176,15 @@ impl VirtualMachine {
             }
         }
 
-        let new_storage = TypedObjectStorage::new(
+        // Wave 2 Round 4 D4 ckpt-1: migrated to v2-raw `_new` + D1's
+        // `from_typed_object_raw` constructor — no variant signature
+        // dependency at this site.
+        let ptr = TypedObjectStorage::_new(
             subset_id as u64,
             new_slots.into_boxed_slice(),
             new_mask,
             Arc::from(new_kinds.into_boxed_slice()),
         );
-        Ok(KindedSlot::from_typed_object(Arc::new(new_storage)))
+        Ok(KindedSlot::from_typed_object_raw(ptr))
     }
 }

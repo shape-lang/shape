@@ -684,8 +684,21 @@ impl Drop for KindedSlot {
                     HeapKind::TypedArray => {
                         Arc::decrement_strong_count(bits as *const TypedArrayData);
                     }
+                    // Wave 2 Agent D4 ckpt-2 (ADR-006 §2.3 / §2.7.5
+                    // amendment, 2026-05-14): TypedObject release via
+                    // `HeapElement::release_elem` + carrier-side `_drop`
+                    // (per Agent D1's `impl HeapElement for
+                    // TypedObjectStorage` — calls `v2_release` against the
+                    // HeapHeader at offset 0; on refcount=0 the
+                    // carrier-side `_drop` runs the per-field heap-mask
+                    // walk and deallocates the `repr(C)` struct). Mirror
+                    // of the §2.7.5 StringV2 / DecimalV2 release arms
+                    // above.
                     HeapKind::TypedObject => {
-                        Arc::decrement_strong_count(bits as *const TypedObjectStorage);
+                        use crate::v2::heap_element::HeapElement;
+                        TypedObjectStorage::release_elem(
+                            bits as *const TypedObjectStorage,
+                        );
                     }
                     HeapKind::HashMap => {
                         Arc::decrement_strong_count(bits as *const HashMapData);
@@ -721,8 +734,17 @@ impl Drop for KindedSlot {
                     // releasing its inner `Arc<TypedObjectStorage>`
                     // value half + `Arc<VTable>` vtable half via
                     // auto-derived `Drop`.
+                    // Wave 2 Agent D4 ckpt-2 (ADR-006 §2.7.24 / Q25.C.5 +
+                    // E close 2026-05-14): TraitObject release via
+                    // `HeapElement::release_elem` + carrier-side `_drop`
+                    // (per Agent E's `impl HeapElement for
+                    // TraitObjectStorage`). Mirror of the TypedObject arm
+                    // above.
                     HeapKind::TraitObject => {
-                        Arc::decrement_strong_count(bits as *const TraitObjectStorage);
+                        use crate::v2::heap_element::HeapElement;
+                        TraitObjectStorage::release_elem(
+                            bits as *const TraitObjectStorage,
+                        );
                     }
                     // W17-concurrency (ADR-006 §2.7.25, 2026-05-11):
                     // Mutex / Atomic / Lazy mirror the Channel arm.
@@ -1011,8 +1033,15 @@ impl Clone for KindedSlot {
                     HeapKind::TypedArray => {
                         Arc::increment_strong_count(bits as *const TypedArrayData);
                     }
+                    // Wave 2 Agent D4 ckpt-2 (ADR-006 §2.3 / §2.7.5
+                    // amendment, 2026-05-14): TypedObject retain via
+                    // `v2_retain` against the HeapHeader at offset 0 of
+                    // the v2-raw carrier. Mirror of the §2.7.5 StringV2
+                    // / DecimalV2 retain arms above (Agent B precedent).
                     HeapKind::TypedObject => {
-                        Arc::increment_strong_count(bits as *const TypedObjectStorage);
+                        let hdr =
+                            &(*(bits as *const TypedObjectStorage)).header;
+                        crate::v2::refcount::v2_retain(hdr);
                     }
                     HeapKind::HashMap => {
                         Arc::increment_strong_count(bits as *const HashMapData);
@@ -1047,8 +1076,15 @@ impl Clone for KindedSlot {
                     // source carrier. `Arc::ptr_eq` on the vtable
                     // preserves the §Q25.C.2 `Self`-arg identity
                     // contract across the clone.
+                    // Wave 2 Agent D4 ckpt-2 (ADR-006 §2.7.24 / Q25.C.5 +
+                    // E close 2026-05-14): TraitObject retain via
+                    // `v2_retain` against the HeapHeader at offset 0 of
+                    // the v2-raw carrier. Mirror of the TypedObject arm
+                    // above.
                     HeapKind::TraitObject => {
-                        Arc::increment_strong_count(bits as *const TraitObjectStorage);
+                        let hdr =
+                            &(*(bits as *const TraitObjectStorage)).header;
+                        crate::v2::refcount::v2_retain(hdr);
                     }
                     // W17-concurrency (ADR-006 §2.7.25, 2026-05-11):
                     // Mutex / Atomic / Lazy mirror the Channel arm.

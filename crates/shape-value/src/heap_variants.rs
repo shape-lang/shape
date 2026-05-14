@@ -441,13 +441,17 @@ macro_rules! define_heap_types {
             // ===== Struct variants =====
             /// Object value with schema-defined typed slots.
             ///
-            // ADR-006 §2.3: payload is `Arc<TypedObjectStorage>` rather
-            // than the previous inline `{ schema_id, slots, heap_mask }`
-            // struct. The Drop impl (Step 5) lives on the inner struct
-            // and dispatches per-field on `NativeKind` looked up via
-            // `schema_id` (Q8 ruling). See
-            // docs/adr/006-value-and-memory-model.md.
-            TypedObject(std::sync::Arc<$crate::heap_value::TypedObjectStorage>),
+            // ADR-006 §2.3: payload was `Arc<TypedObjectStorage>` post the
+            // first §2.3 amendment. Wave 2 Round 4 D4 ckpt-final-prime²
+            // (2026-05-14): payload flipped to `TypedObjectPtr`
+            // (`#[repr(transparent)]` newtype around
+            // `*const TypedObjectStorage`) per the §2.3 amendment + Path B
+            // ratification. The newtype owns one v2-raw HeapHeader-at-offset-0
+            // refcount share; Clone bumps via `v2_retain`, Drop retires via
+            // `TypedObjectStorage::release_elem`. Auto-derived Drop/Clone/
+            // Send/Sync on `HeapValue` chain through the wrapper's manual
+            // discipline. See docs/adr/006-value-and-memory-model.md §2.3.
+            TypedObject($crate::heap_value::TypedObjectPtr),
             /// Track A.5 — the canonical closure representation.
             ///
             /// Raw `TypedClosureHeader`-backed closure. Captures live in a
@@ -640,12 +644,21 @@ macro_rules! define_heap_types {
             /// (W17-trait-object-emission round) populates the slot
             /// via `OpCode::BoxTraitObject` and dispatches method
             /// calls via `OpCode::DynMethodCall` against the recovered
-            /// `Arc<TraitObjectStorage>`. See ADR-006 §2.7.24 Q25.C.1
+            /// trait-object carrier. See ADR-006 §2.7.24 Q25.C.1
             /// (universal-dyn auto-boxing), Q25.C.2 (Self-arg runtime
             /// vtable-identity check), Q25.C.3 (generic-method
             /// TypeInfo dispatch), Q25.C.5 (`VTableEntry` 6-variant
             /// shape).
-            TraitObject(std::sync::Arc<$crate::heap_value::TraitObjectStorage>),
+            ///
+            /// **Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): payload
+            /// flipped from `Arc<TraitObjectStorage>` to `TraitObjectPtr`**
+            /// (`#[repr(transparent)]` newtype around
+            /// `*const TraitObjectStorage`) per the §Q25.C.5 amendment +
+            /// Path B ratification. Mirror of the TypedObject flip in the
+            /// same commit — the newtype owns one v2-raw HeapHeader-at-
+            /// offset-0 refcount share; Clone via `v2_retain`, Drop via
+            /// `TraitObjectStorage::release_elem`.
+            TraitObject($crate::heap_value::TraitObjectPtr),
             // ===== W17-concurrency (ADR-006 §2.7.25, 2026-05-11) =====
             /// `Mutex<T>` concurrency-primitive carrier
             /// (`Arc<MutexData>`). The inner `MutexData` wraps a
