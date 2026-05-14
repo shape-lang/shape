@@ -548,6 +548,20 @@ parallelizable with non-conflicting work).
   per-warning.
 - **S2 close**: `#[deprecated]` extended to String / Decimal /
   BigInt / DateTime / Timespan / Duration / Instant arms.
+- **R20 S2-prime-production close (2026-05-14)**: `#[deprecated]`
+  annotations DEFERRED. The R20 close lands HeapElement trait +
+  DecimalObj carrier + StringObj HeapElement impl + TypedArray::
+  drop_array_heap infrastructure, but does NOT migrate any producer
+  sites. Adding `#[deprecated]` on `TypedArrayData::String` /
+  `Decimal` enum arms at `heap_value.rs:2960/2967` per the cadence
+  above would surface ~147 deprecation warnings across 35 files
+  (one per construction or match-arm site) — noise, not signal,
+  until producer migration is complete enough that the remaining
+  warnings count as the deletion-track to S5. A future
+  S2-prime-production-mechanical sub-cluster lands the producer
+  migrations in batches (per file-territory or per-opcode-addition
+  group); each batch's close adds `#[deprecated]` to the arms its
+  batch retires from live production.
 - **S3 close**: `#[deprecated]` extended to TypedObject /
   TraitObject arms (only after O-3 / O-3a resolution lands).
 - **S4 close**: `#[deprecated]` extended to Matrix / FloatSlice
@@ -1336,9 +1350,28 @@ unsafe impl super::heap_element::HeapElement for DecimalObj {
 }
 ```
 
-**New `HeapHeader` kind constant:** `HEAP_KIND_V2_DECIMAL = ?` (next
-free post-`HEAP_KIND_V2_STRING`). Per the existing `heap_header.rs`
+**New `HeapHeader` kind constant:** `HEAP_KIND_V2_DECIMAL = 85` (next
+free post-`HEAP_KIND_V2_CLOSURE = 84`). Per the existing `heap_header.rs`
 convention, new constants get appended sequentially.
+
+**Status (Round 20 S2-prime-production close, 2026-05-14):** `DecimalObj`
+LANDED at `crates/shape-value/src/v2/decimal_obj.rs` per this design.
+Alignment-of-Decimal correction landed inline: rust_decimal::Decimal
+measures `size_of=16, align_of=4` on x86_64 (4-byte flags + 12-byte
+mantissa with 4-byte alignment); the inline payload yields `DecimalObj`
+size=24 with align=4 (not align=8 as the §4.1.D.1 draft text shows).
+The compile-time size assertion in `decimal_obj.rs` reflects the
+correction: `assert!(size_of::<DecimalObj>() == 24) && assert!(align_of::<DecimalObj>() == 4)`.
+`unsafe impl HeapElement for DecimalObj` landed alongside per audit
+§4.1.B option (a) ratification: calls `v2_release(&(*ptr).header)`
+and `Self::drop(ptr)` on return-true. 10 module tests landed and pass;
+all 175 v2-tier tests pass. The `HEAP_KIND_V2_DECIMAL = 85` constant
+landed at `crates/shape-value/src/v2/heap_header.rs` with the §2.7.24
+Q25.A SUPERSEDED + §4.1.D.1 cite. **`DateTimeObj` / `TimespanObj` /
+`InstantObj` NOT LANDED — supervisor R20 (A) Minimal disposition
+binding**; their carriers land in a future cluster-1+ dispatch when
+either user-facing reachability emerges or S5 wholesale enum deletion
+ratification proceeds without dead-arm forward infrastructure.
 
 #### §4.1.D.2 `DateTimeObj` design
 
@@ -1503,6 +1536,16 @@ separately.
 
 #### §4.1.D.7 ConcreteType extension surface
 
+**Status (Round 20 S2-prime-production close, 2026-05-14):**
+**MOOT-UNDER-(A)-MINIMAL per supervisor R20 disposition.** The
+ConcreteType cascade for Timespan + Instant is only needed if we
+migrate those producers; (A) Minimal scope migrates String + Decimal
+only. String + Decimal `ConcreteType` arms already exist at
+`crates/shape-value/src/v2/concrete_type.rs`; no new arms needed.
+The ~22-site cascade fan-out for Timespan + Instant drops out of R20
+scope entirely and lands as a future cluster-1+ dispatch if/when
+those producers become user-facing reachable.
+
 Per status doc §"R19 parallel-sub-cluster coordination note": the
 `ConcreteType` enum at `crates/shape-value/src/v2/concrete_type.rs`
 has `String / Decimal / BigInt / DateTime` arms but lacks `Timespan
@@ -1510,7 +1553,9 @@ has `String / Decimal / BigInt / DateTime` arms but lacks `Timespan
 `ConcreteType::Timespan` and `ConcreteType::Instant` arms added in
 lockstep with the producer-side migration; `Duration` is NOT added
 (per §4.1.D.5 D-1 disposition — Duration stays on legacy
-`Arc<TemporalData>` carrier).
+`Arc<TemporalData>` carrier). **NOTE: this paragraph captures the
+pre-R20 dispatch shape; supervisor R20 (A) Minimal disposition above
+retires this requirement from S2-prime-production scope.**
 
 **Required ConcreteType extensions:**
 

@@ -28,6 +28,12 @@ pub const HEAP_KIND_V2_STRUCT: u16 = 83;
 /// releases each pointer capture. See `docs/v2-closure-specialization.md` §1.3
 /// and §5.3 for the full ABI.
 pub const HEAP_KIND_V2_CLOSURE: u16 = 84;
+/// R20 S2-prime-production: v2-raw `DecimalObj` carrier kind. The 24-byte
+/// `#[repr(C)]` struct (HeapHeader at offset 0 + inline `rust_decimal::Decimal`
+/// at offset 8) lives in `decimal_obj.rs`. Per ADR-006 §2.7.24 Q25.A SUPERSEDED
+/// + audit §4.1.D.1 — the on-header `kind` byte tags the v2-raw carrier; the
+/// `NativeKind::Ptr(HeapKind::Decimal)` label is unchanged at the slot ABI.
+pub const HEAP_KIND_V2_DECIMAL: u16 = 85;
 
 // Flag bits
 pub const FLAG_MARKED: u8 = 0x01;
@@ -224,6 +230,7 @@ mod tests {
             HEAP_KIND_V2_TYPED_MAP,
             HEAP_KIND_V2_STRUCT,
             HEAP_KIND_V2_CLOSURE,
+            HEAP_KIND_V2_DECIMAL,
         ];
         for i in 0..kinds.len() {
             for j in (i + 1)..kinds.len() {

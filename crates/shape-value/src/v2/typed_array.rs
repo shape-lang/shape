@@ -277,6 +277,49 @@ impl<T: Copy> TypedArray<T> {
     }
 }
 
+/// Heap-element-aware drop dispatch for `TypedArray<*const T>` where `T:
+/// HeapElement`.
+///
+/// Per ADR-006 §2.7.24 Q25.A SUPERSEDED + R20 S2-prime audit deliverable (b)
+/// §4.1.B decision: `drop_array_heap` walks the element buffer and calls
+/// `T::release_elem(elem_ptr)` for each stored pointer, then frees the data
+/// buffer + the TypedArray struct itself. Per-T dispatch is monomorphized at
+/// compile time via the `HeapElement` trait — no runtime `NativeKind` probe.
+///
+/// Pairs with the POD-element `drop_array` for `T: Copy` (above). Callers
+/// pick at compile time based on whether the element type is POD (plain
+/// scalar like f64/i64) or HeapHeader-equipped (`*const StringObj` /
+/// `*const DecimalObj` / ...).
+impl<T: super::heap_element::HeapElement> TypedArray<*const T> {
+    /// Deallocate the array, releasing per-element shares via
+    /// `T::release_elem`, then freeing the data buffer + the struct.
+    ///
+    /// # Safety
+    /// `ptr` must point to a `TypedArray<*const T>` that was allocated by
+    /// this module. Each stored `*const T` must be a valid pointer to a
+    /// live `T` allocation with at least one refcount share owned by this
+    /// array. After this call, `ptr` is invalid.
+    pub unsafe fn drop_array_heap(ptr: *mut Self) {
+        unsafe {
+            let arr = &*ptr;
+            if arr.cap > 0 && !arr.data.is_null() {
+                // Walk element buffer; release per-element shares.
+                for i in 0..arr.len {
+                    let elem_ptr = ptr::read(arr.data.add(i as usize));
+                    T::release_elem(elem_ptr);
+                }
+                // Free the data buffer.
+                let data_layout = Layout::array::<*const T>(arr.cap as usize)
+                    .expect("invalid array layout");
+                dealloc(arr.data as *mut u8, data_layout);
+            }
+            // Free the TypedArray struct itself.
+            let layout = Layout::new::<Self>();
+            dealloc(ptr as *mut u8, layout);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -602,6 +645,81 @@ mod tests {
 
             // Don't call v2_release to 0 here since we use drop_array for cleanup
             TypedArray::drop_array(arr);
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // drop_array_heap tests per ADR-006 §2.7.24 Q25.A SUPERSEDED + R20
+    // S2-prime audit deliverable (b) §4.1.B.
+    // ──────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_drop_array_heap_string_obj() {
+        use crate::v2::string_obj::StringObj;
+        unsafe {
+            // Allocate a TypedArray<*const StringObj> with capacity 4.
+            let arr: *mut TypedArray<*const StringObj> = TypedArray::with_capacity(4);
+            // Push 3 StringObj pointers.
+            let s1 = StringObj::new("hello");
+            let s2 = StringObj::new("world");
+            let s3 = StringObj::new("!");
+            TypedArray::push(arr, s1 as *const StringObj);
+            TypedArray::push(arr, s2 as *const StringObj);
+            TypedArray::push(arr, s3 as *const StringObj);
+            assert_eq!(TypedArray::len(arr), 3);
+            // drop_array_heap releases per-element shares then dealloc the
+            // buffer + struct.
+            TypedArray::<*const StringObj>::drop_array_heap(arr);
+        }
+    }
+
+    #[test]
+    fn test_drop_array_heap_decimal_obj() {
+        use crate::v2::decimal_obj::DecimalObj;
+        use rust_decimal::Decimal;
+        use rust_decimal::prelude::FromPrimitive;
+        unsafe {
+            let arr: *mut TypedArray<*const DecimalObj> = TypedArray::with_capacity(4);
+            let d1 = DecimalObj::new(Decimal::from_f64(1.5).unwrap());
+            let d2 = DecimalObj::new(Decimal::from_f64(2.5).unwrap());
+            let d3 = DecimalObj::new(Decimal::ZERO);
+            TypedArray::push(arr, d1 as *const DecimalObj);
+            TypedArray::push(arr, d2 as *const DecimalObj);
+            TypedArray::push(arr, d3 as *const DecimalObj);
+            assert_eq!(TypedArray::len(arr), 3);
+            TypedArray::<*const DecimalObj>::drop_array_heap(arr);
+        }
+    }
+
+    #[test]
+    fn test_drop_array_heap_empty() {
+        use crate::v2::string_obj::StringObj;
+        unsafe {
+            // Empty TypedArray (no allocated buffer).
+            let arr: *mut TypedArray<*const StringObj> = TypedArray::new();
+            TypedArray::<*const StringObj>::drop_array_heap(arr);
+        }
+    }
+
+    #[test]
+    fn test_drop_array_heap_with_held_share() {
+        use crate::v2::refcount::{v2_get_refcount, v2_retain};
+        use crate::v2::string_obj::StringObj;
+        unsafe {
+            // Allocate one StringObj with refcount 2 (one for the array, one held
+            // externally). drop_array_heap should decrement to 1, not deallocate.
+            let arr: *mut TypedArray<*const StringObj> = TypedArray::with_capacity(2);
+            let s = StringObj::new("shared");
+            v2_retain(&(*s).header); // refcount = 2
+            TypedArray::push(arr, s as *const StringObj);
+
+            TypedArray::<*const StringObj>::drop_array_heap(arr);
+
+            // External share still valid; refcount should be 1.
+            assert_eq!(v2_get_refcount(&(*s).header), 1);
+            assert_eq!(StringObj::as_str(s), "shared");
+            // Clean up.
+            StringObj::drop(s);
         }
     }
 }
