@@ -91,6 +91,42 @@ pub fn slot_to_wire(bits: u64, kind: NativeKind, ctx: &Context) -> WireValue {
             let s = unsafe { &*ptr };
             WireValue::String(s.clone())
         }
+        // Wave 2 Agent B W12-StringV2-DecimalV2-NativeKind-additions
+        // (ADR-006 §2.7.5 amendment, 2026-05-14): the v2-raw `*const StringObj`
+        // carrier projects to the same `WireValue::String` wire shape as
+        // `NativeKind::String` (Arc-wrapped sibling), via the carrier's
+        // `as_str` accessor reading the UTF-8 payload at offset 8 (data ptr)
+        // / 16 (len) of the `repr(C)` struct. The slot bits are NOT an
+        // `Arc<T>` pointer — `StringObj` is a manually-allocated `repr(C)`
+        // 24-byte carrier per `v2/string_obj.rs`.
+        NativeKind::StringV2 => {
+            if bits == 0 {
+                return WireValue::Null;
+            }
+            // SAFETY: per the §2.7.5 amendment construction contract,
+            // kind=StringV2 means bits = `ptr as u64` pointing to a live
+            // `StringObj` with bumped refcount — the slot owns one
+            // v2-retain share for the duration of this call.
+            let ptr = bits as *const shape_value::v2::string_obj::StringObj;
+            let s: &str = unsafe { shape_value::v2::string_obj::StringObj::as_str(ptr) };
+            WireValue::String(s.to_string())
+        }
+        // Wave 2 Agent B: the v2-raw `*const DecimalObj` carrier projects
+        // to `WireValue::Number` (the same wire shape as
+        // `HeapValue::Decimal` per `heap_value_to_wire` below) via the
+        // carrier's `value` accessor reading the inline `rust_decimal::Decimal`
+        // at offset 8 of the `repr(C)` struct.
+        NativeKind::DecimalV2 => {
+            if bits == 0 {
+                return WireValue::Null;
+            }
+            // SAFETY: per the §2.7.5 amendment construction contract,
+            // kind=DecimalV2 means bits = `ptr as u64` pointing to a live
+            // `DecimalObj` with bumped refcount.
+            let ptr = bits as *const shape_value::v2::decimal_obj::DecimalObj;
+            let value = unsafe { shape_value::v2::decimal_obj::DecimalObj::value(ptr) };
+            WireValue::Number(value.to_string().parse().unwrap_or(0.0))
+        }
         NativeKind::Ptr(hk) => heap_to_wire(bits, hk, ctx),
     }
 }

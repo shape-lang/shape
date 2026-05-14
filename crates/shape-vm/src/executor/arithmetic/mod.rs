@@ -632,6 +632,14 @@ fn kind_type_name(kind: NativeKind) -> &'static str {
         // ADR-006 §2.7.5 amendment adds F32 + Char as scalar variants.
         NativeKind::Float32 => "f32",
         NativeKind::Char => "char",
+        // Wave 2 Agent B W12-StringV2-DecimalV2-NativeKind-additions
+        // (2026-05-14): ADR-006 §2.7.5 amendment adds StringV2 +
+        // DecimalV2 as v2-raw heap-pointer variants. Type-name surfaces
+        // are the same as their Arc-wrapped siblings (`string` /
+        // `decimal`) — the carrier-shape distinction is at the
+        // refcount-dispatch layer, not the surface error message.
+        NativeKind::StringV2 => "string",
+        NativeKind::DecimalV2 => "decimal",
         NativeKind::Int8 | NativeKind::NullableInt8 => "i8",
         NativeKind::Int16 | NativeKind::NullableInt16 => "i16",
         NativeKind::Int32 | NativeKind::NullableInt32 => "i32",

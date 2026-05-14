@@ -2539,6 +2539,30 @@ impl Drop for TypedObjectStorage {
                     NativeKind::String => {
                         std::sync::Arc::decrement_strong_count(bits as *const String);
                     }
+                    // Wave 2 Agent B (ADR-006 §2.7.5 amendment, 2026-05-14):
+                    // A TypedObject field of kind `NativeKind::StringV2` /
+                    // `NativeKind::DecimalV2` holds slot bits = `ptr as u64`
+                    // where `ptr: *const StringObj` / `*const DecimalObj`
+                    // — v2-raw carrier shape per the §H.4 H-c decision.
+                    // Refcount discipline at storage drop goes through
+                    // `release_elem` (HeapElement trait — calls `v2_release`
+                    // against the HeapHeader at offset 0; on refcount=0
+                    // the carrier-side `drop` deallocates the `repr(C)`
+                    // 24-byte struct). NOT `Arc::decrement_strong_count`
+                    // — these are manually-allocated carriers, not
+                    // `Arc<T>` allocations.
+                    NativeKind::StringV2 => {
+                        use crate::v2::heap_element::HeapElement;
+                        crate::v2::string_obj::StringObj::release_elem(
+                            bits as *const crate::v2::string_obj::StringObj,
+                        );
+                    }
+                    NativeKind::DecimalV2 => {
+                        use crate::v2::heap_element::HeapElement;
+                        crate::v2::decimal_obj::DecimalObj::release_elem(
+                            bits as *const crate::v2::decimal_obj::DecimalObj,
+                        );
+                    }
                     NativeKind::Ptr(hk) => match hk {
                         HeapKind::String => {
                             std::sync::Arc::decrement_strong_count(bits as *const String);

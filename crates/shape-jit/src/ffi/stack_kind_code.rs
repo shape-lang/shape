@@ -76,6 +76,14 @@ pub const C_STRING: u8 = 23;
 // still well below `PTR_BASE = 128`.
 pub const C_FLOAT32: u8 = 24;
 pub const C_CHAR: u8 = 25;
+// Wave 2 Agent B W12-StringV2-DecimalV2-NativeKind-additions (2026-05-14):
+// ADR-006 §2.7.5 amendment adds StringV2 + DecimalV2 as v2-raw heap-pointer
+// scalar codes for `Array<string>` / `Array<decimal>` element read paths.
+// Codes allocated contiguously after Round 19 S1.5 F32 + Char (24, 25); still
+// well below `PTR_BASE = 128`. The codes carry the v2-raw carrier-shape
+// discrimination at the JIT FFI parallel-kind track per §2.7.7 / Q9.
+pub const C_STRING_V2: u8 = 26;
+pub const C_DECIMAL_V2: u8 = 27;
 
 /// Base code for `Ptr(HeapKind::*)` arms. Each `HeapKind` ordinal is
 /// added to `PTR_BASE` to produce the byte. With HeapKind ordinals 0..=28
@@ -120,6 +128,10 @@ pub const fn encode(kind: NativeKind) -> u8 {
         // Round 19 S1.5 W12-nativekind-scalar-additions (2026-05-14).
         NativeKind::Float32 => C_FLOAT32,
         NativeKind::Char => C_CHAR,
+        // Wave 2 Agent B W12-StringV2-DecimalV2-NativeKind-additions
+        // (2026-05-14).
+        NativeKind::StringV2 => C_STRING_V2,
+        NativeKind::DecimalV2 => C_DECIMAL_V2,
         NativeKind::Ptr(hk) => PTR_BASE.wrapping_add(hk as u8),
     }
 }
@@ -160,6 +172,10 @@ pub fn decode(code: u8) -> Option<NativeKind> {
         // Round 19 S1.5 W12-nativekind-scalar-additions (2026-05-14).
         C_FLOAT32 => Some(NativeKind::Float32),
         C_CHAR => Some(NativeKind::Char),
+        // Wave 2 Agent B W12-StringV2-DecimalV2-NativeKind-additions
+        // (2026-05-14).
+        C_STRING_V2 => Some(NativeKind::StringV2),
+        C_DECIMAL_V2 => Some(NativeKind::DecimalV2),
         c if c >= PTR_BASE && c < SENTINEL => {
             decode_heap_kind(c - PTR_BASE).map(NativeKind::Ptr)
         }

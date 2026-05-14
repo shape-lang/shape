@@ -4995,6 +4995,14 @@ pub(crate) fn storage_hint_to_field_kind(
         // helpers (ADR-006 §2.7.7) with typed Ptr ops, leave String on
         // polymorphic.
         StorageHint::String => return None,
+        // Wave 2 Agent B W12-StringV2-DecimalV2-NativeKind-additions
+        // (2026-05-14): StringV2 / DecimalV2 are v2-raw heap-pointer
+        // carriers — same polymorphic-legacy fallback as String per the
+        // refcount-discipline rationale above. FieldKind has no dedicated
+        // StringV2 / DecimalV2 variants; per-FieldKind typed emission is
+        // a follow-up sub-cluster gated on the cluster-1 hardening
+        // retirement of the polymorphic LoadLocal / StoreLocal path.
+        StorageHint::StringV2 | StorageHint::DecimalV2 => return None,
         StorageHint::NullableFloat64
         | StorageHint::NullableInt8
         | StorageHint::NullableUInt8
@@ -5089,6 +5097,14 @@ pub(crate) mod typed_emit_metrics {
             StorageHint::Float32 => "f32",
             StorageHint::Char => "char",
             StorageHint::String => "string",
+            // Wave 2 Agent B W12-StringV2-DecimalV2-NativeKind-additions
+            // (2026-05-14): joint-counter labels for the v2-raw carrier
+            // variants. Distinct labels from "string" / "decimal" so the
+            // joint-counter telemetry can distinguish v2-raw vs Arc-wrapped
+            // fallback distributions when the producer migration (Agent A2)
+            // lands.
+            StorageHint::StringV2 => "string_v2",
+            StorageHint::DecimalV2 => "decimal_v2",
             // ADR-006 §2.7.5.1: `StorageHint::{Dynamic, Unknown}` were
             // deleted; the compiler-tier "kind not yet proven" state is
             // `Option<StorageHint>` and the joint-counter call sites

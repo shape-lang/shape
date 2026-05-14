@@ -59,6 +59,11 @@ fn kinded_truthy(bits: u64, kind: NativeKind) -> bool {
         // codepoint bits non-zero (NUL is the only falsy char).
         NativeKind::Float32 => f32::from_bits(bits as u32) != 0.0,
         NativeKind::Char => bits != 0,
+        // Wave 2 Agent B W12-StringV2-DecimalV2-NativeKind-additions
+        // (2026-05-14): truthy iff `bits != 0` — the v2-raw carrier ptr is
+        // non-null when live (same shape as the String / Ptr(_) heap-arm
+        // truthy rule below).
+        NativeKind::StringV2 | NativeKind::DecimalV2 => bits != 0,
         NativeKind::String | NativeKind::Ptr(_) => bits != 0,
     }
 }

@@ -582,6 +582,156 @@ has no dedicated `Char` variant). The wire-format arms preserve the
 §2.7.5.1 post-proof-shape rule (no `Option<NativeKind>` wrap, no
 `Unspecialized` placeholder).
 
+##### §2.7.5 amendment (Wave 2 Agent B W12-StringV2-DecimalV2-NativeKind-additions, 2026-05-14)
+
+Heap-pointer `NativeKind` extended with `StringV2` + `DecimalV2`
+variants for v2-raw `Array<string>` / `Array<decimal>` element read
+paths per `TypedArray<*const StringObj>` /
+`TypedArray<*const DecimalObj>` (Wave 2 W12-typed-array-data-deletion
+deletion target migration; the §A2 producer migration in Round 2
+emits these slot kinds at `op_typed_array_get`'s read site when the
+element kind is the v2-raw carrier). Both are heap-pointer carriers
+holding `*const StringObj` / `*const DecimalObj` raw pointers — manually-
+allocated `repr(C)` 24-byte HeapHeader-equipped structs per
+`v2/string_obj.rs` / `v2/decimal_obj.rs` (R20 S2-prime-production close
+landed the `<X>Obj` carrier infrastructure with `HeapElement` impls).
+Refcount discipline goes through `v2_retain` / `v2_release` against
+the `HeapHeader` at offset 0 of the carrier (NOT
+`Arc::increment/decrement_strong_count` — these are not `Arc<T>`
+allocations). The 4-table HeapKind lockstep (§2.7.7 / Q9
+`vm_impl/stack.rs::clone_with_kind` + `drop_with_kind`, §2.7.6 / Q8
+`kinded_slot.rs` Drop + Clone, §2.7.8 / Q10 `closure_layout.rs::
+SharedCell::drop`, §2.5 `heap_value.rs::TypedObjectStorage::drop`)
+all dispatch the `StringV2` / `DecimalV2` arms via the carrier-side
+`HeapElement::release_elem` (release-on-drop) and direct
+`v2_retain` (retain-on-clone).
+
+This is the audit §H.4 H-c decision (per Wave 1 `bulldozer-wave-1-
+inventory.md`, ratified at supervisor §P.1 2026-05-14). Read cost is
+~10 cycles per element (slot bits = ptr + kind discriminator stamp;
+1 atomic increment), 20-50× faster than the materialize-on-read shape
+of option H-a (~200-500 cycles per element: 1 heap allocation + 2
+atomic ops + UTF-8 reconstruction). Option H-b (reuse
+`NativeKind::Ptr(HeapKind::String)` for both `Arc<String>` and
+v2-raw `*const StringObj` carriers) was refused as parallel-carrier
+defection at the discriminator layer per CLAUDE.md
+§Parallel-implementation across producer/consumer carrier-shape
+boundaries.
+
+Q8 cardinality bump: scalar-bucket cardinality grows by 2 (5 → 7
+post the R19 S1.5 F32+Char addition; this amendment adds 2 more
+heap-pointer carriers under the Q8 "one constructor per `NativeKind`
+heap variant" rule — `KindedSlot::from_string_v2_ptr` /
+`from_decimal_v2_ptr`, no per-heap-variant accessors per the
+§2.7.6 carrier-API-bound). Heap dispatch from a `KindedSlot` whose
+kind is `StringV2` / `DecimalV2` does NOT go through
+`slot.as_heap_value()` (the slot bits are NOT `Arc::into_raw(Arc<HeapValue>)`
+— `as_heap_value()` is unsound on these bits, mirror of the §2.7.9
+FilterExpr / §2.7.13 Reference / §2.7.16 Iterator / §2.7.22 Matrix
+typed-Arc pure-discriminator dispatch shape). Consumer sites read
+the carrier payload directly: `StringObj::as_str(ptr)` for UTF-8
+bytes, `DecimalObj::value(ptr)` for the inline `rust_decimal::Decimal`.
+
+The amendment shape is:
+
+- `NativeKind::StringV2` / `NativeKind::DecimalV2` non-parametric
+  heap-pointer variants. Slot bits = `ptr as u64`; kind alone is
+  the dispatch label (§2.7.5 stamp-at-compile-time).
+- `ValueSlot::from_string_v2_ptr(ptr) -> Self` + `from_decimal_v2_ptr`
+  constructors at `slot.rs`: slot bits = `ptr as u64`. Caller's
+  construction-side contract: `ptr` must point to a live carrier with
+  refcount bumped to claim the share.
+- `KindedSlot::from_string_v2_ptr(ptr)` / `from_decimal_v2_ptr(ptr)`
+  constructors per §2.7.6 / Q8 carrier-API-bound (one constructor per
+  scalar variant; no per-heap-variant accessors).
+- Drop arms for `NativeKind::StringV2` / `NativeKind::DecimalV2`:
+  dispatch `StringObj::release_elem` / `DecimalObj::release_elem`
+  (HeapElement trait — calls `v2_release` against the HeapHeader at
+  offset 0; on refcount=0 the carrier-side `drop` deallocates the
+  `repr(C)` struct). Added to the heap-arm group in
+  `KindedSlot::Drop`, `vm_impl/stack.rs::drop_with_kind`,
+  `v2/closure_layout.rs::SharedCell::drop`, and
+  `heap_value.rs::TypedObjectStorage::drop`.
+- Clone arms for `NativeKind::StringV2` / `NativeKind::DecimalV2`:
+  call `v2_retain` against the HeapHeader at offset 0 of the carrier.
+  Added to `KindedSlot::Clone` and
+  `vm_impl/stack.rs::clone_with_kind`.
+- `is_refcounted()` returns `true` for both variants (matches String /
+  Ptr(_) row).
+- JIT FFI parallel-kind track encoding: `C_STRING_V2 = 26` /
+  `C_DECIMAL_V2 = 27` codes added to `stack_kind_code.rs` `encode` /
+  `decode` (contiguous after R19 S1.5 F32 + Char codes 24, 25; well
+  below `PTR_BASE = 128`).
+- JIT cross-crate ABI (`mir_compiler/v2_call_abi.rs::slot_kind_to_clif_type`
+  + `mir_compiler/v2_field.rs::cranelift_type_for_slot` /
+  `slot_byte_width`): pointer-width I64 / 8 bytes (same as the
+  Arc-wrapped sibling row).
+- JIT method-dispatch routing (`ffi/call_method/mod.rs`): StringV2 /
+  DecimalV2 receivers delegate to VM (same routing as String per
+  §2.7.5 carrier-shape boundary; method-handler bodies dispatch on
+  the kind label to read the carrier payload).
+- Wire-format projection: `NativeKind::StringV2` projects to
+  `SerializableVMValue::String(s.to_string())` and
+  `WireValue::String(s.to_string())` (same wire shape as
+  `NativeKind::String` Arc-wrapped sibling, via
+  `StringObj::as_str(ptr)`); `NativeKind::DecimalV2` projects to
+  `SerializableVMValue::Decimal(value)` and
+  `WireValue::Number(value.to_string().parse().unwrap_or(0.0))`
+  (same wire shape as `HeapKind::Decimal`, via
+  `DecimalObj::value(ptr)`).
+- Surface-error type-name (`arithmetic` / `comparison` /
+  `objects/typed_access` / JIT `receiver_type_name`): same as
+  Arc-wrapped siblings — `"string"` / `"decimal"` (the carrier-shape
+  distinction is invisible at the surface error message; refcount-
+  discipline distinction is at the dispatch layer).
+- Method-registry routing (`objects/mod.rs::dispatch_method_kinded`):
+  StringV2 → `STRING_METHODS`; DecimalV2 → `NUMBER_METHODS` (same
+  routing as their Arc-wrapped siblings).
+- Truthy: non-null pointer → truthy (`bits != 0`; same rule as String
+  / Ptr(_) heap arms — added to `kinded_truthy` in
+  `executor/control_flow/mod.rs`, `executor/logical/mod.rs`, and
+  `slot_truthy` in `executor/objects/array_aggregation.rs`).
+- Print formatting (`executor/printing.rs::format_kinded_inner`):
+  StringV2 prints with the same surface as String (quoted-when-nested
+  via `format!("\"{}\"", s)`, unquoted at top level via `s.to_string()`
+  on `StringObj::as_str(ptr)`); DecimalV2 prints via
+  `DecimalObj::value(ptr).to_string()` (mirror of `HeapValue::Decimal`'s
+  format arm).
+
+ConcreteType is NOT extended in this amendment — `StringV2` /
+`DecimalV2` are per-carrier-shape NativeKind discriminators, not
+distinct shape-language types (the underlying type is still `string`
+/ `decimal`). The producer-side carrier-shape decision (Wave 2
+Agent A2 producer migration) flows from the array element kind +
+v2-raw-ness at the producer site, NOT through ConcreteType.
+
+Forbidden under this amendment:
+
+- Parametric `NativeKind::StringV2(precision)` / `NativeKind::DecimalV2(precision)`
+  variants (per existing `Ptr(HeapKind)` docstring watchlist refusing
+  parametric NativeKind sum-type defection at `native_kind.rs`).
+- Materialize-on-read fallback path at any consumer site (the H-a
+  defection refused per audit §H.2 + §P.1: reading `Array<string>`
+  element produces a `NativeKind::StringV2` pointer slot, NOT an
+  `NativeKind::String` Arc-shape allocated on the fly).
+- StringV2 / DecimalV2 nullable siblings without exhaustive cascade
+  (R19 S1.5 precedent for F32/Char non-nullable-only at landing).
+- Mixing v2-raw and Arc-wrapped slots under the same NativeKind (the
+  H-b defection refused per audit §H.2 + CLAUDE.md
+  §Parallel-implementation across producer/consumer carrier-shape
+  boundaries — each carrier shape gets its own NativeKind variant).
+- Conversion-on-the-fly at the method-handler boundary ("Arc
+  transparency" / "shape unification at the call site") — the carrier
+  discriminator stays at the slot layer; downstream code dispatches
+  per discriminator. The carrier-side `release_elem` /
+  `StringObj::as_str` / `DecimalObj::value` accessors are the
+  bounded cross-shape API surface; no implicit conversion to
+  `Arc<String>` / `Arc<Decimal>` at consumer entry.
+- Renaming StringV2 / DecimalV2 to suggest a generic role
+  ("v2-wrapper", "boundary-discriminator", "decode-carrier") —
+  refused per CLAUDE.md broader-family regex
+  `(decode|tag|kind|dispatch|value.call|closure.callback|frame.setup|callee|capture) (bridge|probe|helper|hop|translator|adapter|shim)`.
+
 #### 2.7.5.1 Wire-format structs are post-proof shapes
 
 `FrameDescriptor` (`crates/shape-vm/src/type_tracking.rs`) is

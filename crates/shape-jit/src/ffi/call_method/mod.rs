@@ -108,6 +108,11 @@ unsafe fn receiver_type_name(
         // `NativeKind::Ptr(HeapKind::Char)` arm below).
         NativeKind::Float32 => Some("number".to_string()),
         NativeKind::Char => Some("char".to_string()),
+        // Wave 2 Agent B W12-StringV2-DecimalV2-NativeKind-additions
+        // (2026-05-14): v2-raw heap-pointer carriers report the same
+        // type-name surface as their Arc-wrapped siblings.
+        NativeKind::StringV2 => Some("string".to_string()),
+        NativeKind::DecimalV2 => Some("decimal".to_string()),
 
         // Typed heap pointer kinds — straight kind→name map per the
         // surviving HeapKind discriminants.
@@ -591,6 +596,16 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
             // receiver kind for char methods).
             | NativeKind::Float32
             | NativeKind::Char => true,
+            // Wave 2 Agent B W12-StringV2-DecimalV2-NativeKind-additions
+            // (2026-05-14): v2-raw heap-pointer carriers delegate to VM —
+            // same routing rationale as the §H.4 H-c amendment: producer
+            // (Agent A2) emits v2-raw slots, consumer (this dispatch
+            // shell) routes them to the VM-side method registry where the
+            // method-handler bodies dispatch on the StringV2 / DecimalV2
+            // kind label to read the carrier's payload. The JIT-format
+            // path expects Arc-wrapped carriers; VM-side handlers are
+            // carrier-aware.
+            NativeKind::StringV2 | NativeKind::DecimalV2 => true,
             // String: deliberately NOT delegated — JIT-format string
             // method registries (`call_string_method`) operate on
             // NaN-boxed JIT String carriers (`box_string` returns
@@ -847,7 +862,13 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
             // F32 / Char already delegated to VM above; defensive
             // TAG_NULL arm if they reach this fallthrough.
             | NativeKind::Float32
-            | NativeKind::Char => TAG_NULL,
+            | NativeKind::Char
+            // Wave 2 Agent B W12-StringV2-DecimalV2-NativeKind-additions
+            // (2026-05-14): StringV2 / DecimalV2 already delegated to VM
+            // above; defensive TAG_NULL arm if they reach this
+            // fallthrough.
+            | NativeKind::StringV2
+            | NativeKind::DecimalV2 => TAG_NULL,
         };
 
         // User-defined method dispatch (UFCS — `"TypeName::method"`

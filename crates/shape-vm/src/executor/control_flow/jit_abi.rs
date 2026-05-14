@@ -63,6 +63,13 @@ pub fn marshal_arg_to_jit(bits: u64, kind: NativeKind) -> u64 {
         // (same raw-u64 cross-crate ABI as every other scalar).
         | NativeKind::Float32
         | NativeKind::Char
+        // Wave 2 Agent B W12-StringV2-DecimalV2-NativeKind-additions
+        // (2026-05-14): StringV2 / DecimalV2 are v2-raw heap-pointer
+        // carriers (slot bits = `ptr as u64`). Identity by bits across
+        // the JIT FFI boundary — same raw-u64 cross-crate ABI rule as
+        // every other heap-pointer NativeKind variant.
+        | NativeKind::StringV2
+        | NativeKind::DecimalV2
         | NativeKind::String
         | NativeKind::Ptr(_) => bits,
     }
@@ -106,6 +113,13 @@ pub fn unmarshal_jit_result(bits: u64, kind: NativeKind) -> u64 {
         // (same raw-u64 cross-crate ABI as every other scalar).
         | NativeKind::Float32
         | NativeKind::Char
+        // Wave 2 Agent B W12-StringV2-DecimalV2-NativeKind-additions
+        // (2026-05-14): StringV2 / DecimalV2 are v2-raw heap-pointer
+        // carriers (slot bits = `ptr as u64`). Identity by bits across
+        // the JIT FFI boundary — same raw-u64 cross-crate ABI rule as
+        // every other heap-pointer NativeKind variant.
+        | NativeKind::StringV2
+        | NativeKind::DecimalV2
         | NativeKind::String
         | NativeKind::Ptr(_) => bits,
     }

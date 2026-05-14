@@ -350,6 +350,26 @@ impl Drop for SharedCell {
                 NativeKind::String => {
                     Arc::decrement_strong_count(bits as *const String);
                 }
+                // Wave 2 Agent B (ADR-006 §2.7.5 amendment, 2026-05-14):
+                // A `SharedCell` whose `kind` companion is
+                // `NativeKind::StringV2` / `NativeKind::DecimalV2` carries
+                // `ptr as u64` where `ptr: *const StringObj` / `*const
+                // DecimalObj`. Retire one refcount share at cell drop via
+                // `release_elem` (HeapElement trait — calls `v2_release`
+                // against the HeapHeader at offset 0; on refcount=0 the
+                // carrier-side `drop` deallocates the `repr(C)` struct).
+                NativeKind::StringV2 => {
+                    use crate::v2::heap_element::HeapElement;
+                    crate::v2::string_obj::StringObj::release_elem(
+                        bits as *const crate::v2::string_obj::StringObj,
+                    );
+                }
+                NativeKind::DecimalV2 => {
+                    use crate::v2::heap_element::HeapElement;
+                    crate::v2::decimal_obj::DecimalObj::release_elem(
+                        bits as *const crate::v2::decimal_obj::DecimalObj,
+                    );
+                }
                 NativeKind::Ptr(hk) => match hk {
                     HeapKind::String => {
                         Arc::decrement_strong_count(bits as *const String);

@@ -338,6 +338,36 @@ impl KindedSlot {
         )
     }
 
+    /// Convenience: a `StringV2`-kind slot from a v2-raw `*const StringObj`
+    /// pointer. ADR-006 §2.7.5 amendment (Wave 2 Agent B W12-StringV2-
+    /// DecimalV2-NativeKind-additions, 2026-05-14): paired with
+    /// `NativeKind::StringV2` per the audit §H.4 H-c decision. Slot bits
+    /// = `ptr as u64`; the `KindedSlot` owns one refcount share on the
+    /// underlying `StringObj` — Drop dispatches the matching `v2_release`
+    /// against the `HeapHeader` at offset 0.
+    ///
+    /// Caller's construction-side contract: `ptr` MUST point to a live
+    /// `StringObj` whose refcount has been incremented (typically via
+    /// `v2_retain` at the producing `op_typed_array_get` site) to claim
+    /// the share this `KindedSlot` now owns. Mirror of `from_string_arc`'s
+    /// "slot owns one strong share" contract — but the underlying retain
+    /// is `v2_retain` against the `repr(C)` HeapHeader, not
+    /// `Arc::increment_strong_count` against an `Arc<String>`.
+    #[inline]
+    pub fn from_string_v2_ptr(ptr: *const crate::v2::string_obj::StringObj) -> Self {
+        Self::new(ValueSlot::from_string_v2_ptr(ptr), NativeKind::StringV2)
+    }
+
+    /// Convenience: a `DecimalV2`-kind slot from a v2-raw `*const DecimalObj`
+    /// pointer. ADR-006 §2.7.5 amendment (Wave 2 Agent B W12-StringV2-
+    /// DecimalV2-NativeKind-additions, 2026-05-14): mirror of
+    /// `from_string_v2_ptr` for the `DecimalObj` sibling. Same construction-
+    /// side contract.
+    #[inline]
+    pub fn from_decimal_v2_ptr(ptr: *const crate::v2::decimal_obj::DecimalObj) -> Self {
+        Self::new(ValueSlot::from_decimal_v2_ptr(ptr), NativeKind::DecimalV2)
+    }
+
     /// Convenience: a `Ptr(HeapKind::BigInt)`-kind slot.
     #[inline]
     pub fn from_bigint(b: Arc<i64>) -> Self {
@@ -583,6 +613,29 @@ impl Drop for KindedSlot {
             match self.kind {
                 NativeKind::String => {
                     Arc::decrement_strong_count(bits as *const String);
+                }
+                // Wave 2 Agent B (ADR-006 §2.7.5 amendment, 2026-05-14):
+                // StringV2 / DecimalV2 are v2-raw heap-pointer carriers per
+                // the §H.4 H-c decision. Slot bits are `ptr as u64` where
+                // `ptr: *const StringObj` / `*const DecimalObj`. Refcount
+                // discipline goes through `v2_release` against the
+                // `HeapHeader` at offset 0 of the carrier (NOT
+                // `Arc::decrement_strong_count` — these are manually-
+                // allocated `repr(C)` carriers per `v2/string_obj.rs` /
+                // `v2/decimal_obj.rs`, not `Arc<T>` allocations). On
+                // refcount=0, the carrier's `HeapElement::release_elem`
+                // implementation deallocates the struct.
+                NativeKind::StringV2 => {
+                    use crate::v2::heap_element::HeapElement;
+                    crate::v2::string_obj::StringObj::release_elem(
+                        bits as *const crate::v2::string_obj::StringObj,
+                    );
+                }
+                NativeKind::DecimalV2 => {
+                    use crate::v2::heap_element::HeapElement;
+                    crate::v2::decimal_obj::DecimalObj::release_elem(
+                        bits as *const crate::v2::decimal_obj::DecimalObj,
+                    );
                 }
                 NativeKind::Ptr(hk) => match hk {
                     HeapKind::String => {
@@ -896,6 +949,20 @@ impl Clone for KindedSlot {
             match self.kind {
                 NativeKind::String => {
                     Arc::increment_strong_count(bits as *const String);
+                }
+                // Wave 2 Agent B (ADR-006 §2.7.5 amendment, 2026-05-14):
+                // StringV2 / DecimalV2 retain via `v2_retain` against the
+                // HeapHeader at offset 0 of the carrier — mirror of the
+                // Drop arms above.
+                NativeKind::StringV2 => {
+                    let hdr =
+                        &(*(bits as *const crate::v2::string_obj::StringObj)).header;
+                    crate::v2::refcount::v2_retain(hdr);
+                }
+                NativeKind::DecimalV2 => {
+                    let hdr =
+                        &(*(bits as *const crate::v2::decimal_obj::DecimalObj)).header;
+                    crate::v2::refcount::v2_retain(hdr);
                 }
                 NativeKind::Ptr(hk) => match hk {
                     HeapKind::String => {

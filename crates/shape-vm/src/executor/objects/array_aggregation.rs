@@ -223,6 +223,10 @@ fn slot_truthy(slot: &KindedSlot) -> bool {
         // Round 19 S1.5 W12-nativekind-scalar-additions (2026-05-14).
         NativeKind::Float32 => f32::from_bits(bits as u32) != 0.0,
         NativeKind::Char => bits != 0,
+        // Wave 2 Agent B W12-StringV2-DecimalV2-NativeKind-additions
+        // (2026-05-14): non-null v2-raw pointer → truthy (same rule as
+        // String / Ptr(_)).
+        NativeKind::StringV2 | NativeKind::DecimalV2 => bits != 0,
         NativeKind::String | NativeKind::Ptr(_) => bits != 0,
     }
 }

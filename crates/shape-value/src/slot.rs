@@ -138,6 +138,32 @@ impl ValueSlot {
         Self(Arc::into_raw(d) as u64)
     }
 
+    /// Store a v2-raw `*const StringObj` carrier pointer directly. ADR-006
+    /// §2.7.5 amendment (Wave 2 Agent B W12-StringV2-DecimalV2-NativeKind-
+    /// additions, 2026-05-14): paired with `NativeKind::StringV2` per the
+    /// audit §H.4 H-c decision. Slot bits = `ptr as u64`; refcount discipline
+    /// goes through `v2_retain` / `v2_release` against the `HeapHeader` at
+    /// offset 0 of the `StringObj` (NOT `Arc::increment_strong_count` —
+    /// `StringObj` is a manually-allocated `repr(C)` 24-byte carrier per
+    /// `v2/string_obj.rs`, not an `Arc<String>` allocation).
+    ///
+    /// Caller's construction-side contract: `ptr` MUST point to a live
+    /// `StringObj` whose refcount has been incremented to claim the share
+    /// this slot now owns (e.g. via `v2_retain` at the producer site).
+    pub fn from_string_v2_ptr(ptr: *const crate::v2::string_obj::StringObj) -> Self {
+        Self(ptr as u64)
+    }
+
+    /// Store a v2-raw `*const DecimalObj` carrier pointer directly. ADR-006
+    /// §2.7.5 amendment (Wave 2 Agent B W12-StringV2-DecimalV2-NativeKind-
+    /// additions, 2026-05-14): mirror of `from_string_v2_ptr` for the
+    /// `DecimalObj` sibling per `v2/decimal_obj.rs`. Slot bits = `ptr as u64`;
+    /// refcount via `v2_retain` / `v2_release` against the `HeapHeader` at
+    /// offset 0 of the `DecimalObj`.
+    pub fn from_decimal_v2_ptr(ptr: *const crate::v2::decimal_obj::DecimalObj) -> Self {
+        Self(ptr as u64)
+    }
+
     /// Store an `Arc<i64>` (BigInt payload) directly. Mirrors
     /// `HeapValue::BigInt(Arc<i64>)` (post Step 3).
     pub fn from_bigint(b: Arc<i64>) -> Self {
