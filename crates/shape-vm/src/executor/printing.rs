@@ -866,18 +866,139 @@ impl<'a> ValueFormatter<'a> {
         out
     }
 
-    /// Format a `HashMapKindedRef` as `{key1: val1, key2: val2}`.
+    /// Format a `HashMapKindedRef` as `{"key1": val1, "key2": val2}`.
     ///
-    /// **Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14):** payload flipped
-    /// to `HashMapKindedRef`. Per-V keys/values walk (read
-    /// `*mut TypedArray<*const StringObj>` keys + per-V values; format
-    /// each via `format_heap_value`) is ckpt-3 territory. At ckpt-2 we
-    /// render a compact summary `<hashmap:N>` so the printing path
-    /// compiles and the smoke matrix can still inspect typed-objects-
-    /// containing-hashmaps. Full per-V Display is restored at ckpt-3.
-    /// ADR-006 §2.7.24 Q25.B SUPERSEDED + audit §C.4.
-    fn format_hashmap(&self, map: &shape_value::heap_value::HashMapKindedRef, _depth: usize) -> String {
-        format!("<hashmap:{}>", map.len())
+    /// **Wave 2 Round 3b C2-joint ckpt-3 (2026-05-14):** full per-V
+    /// keys/values walk. The keys buffer is `*mut TypedArray<*const StringObj>`;
+    /// the values buffer is per-V (`*mut TypedArray<V>`). Each entry's
+    /// value is rendered via the per-V Display shape (matching the
+    /// HeapValue::HashMap Display impl at `heap_value.rs:hashmap_kref_display`).
+    /// For TypedObject / TraitObject value variants we recurse through the
+    /// canonical `format_typed_object` / opaque tag path. ADR-006 §2.7.24
+    /// Q25.B SUPERSEDED + audit §C.4.
+    fn format_hashmap(
+        &self,
+        map: &shape_value::heap_value::HashMapKindedRef,
+        depth: usize,
+    ) -> String {
+        use shape_value::heap_value::HashMapKindedRef;
+        let mut out = String::with_capacity(2 + map.len() * 8);
+        out.push('{');
+
+        // Walk keys buffer; per-V dispatch the value rendering.
+        unsafe {
+            // The keys buffer + values buffer come from each variant's inner Arc.
+            // SAFETY: HashMapData<V>'s contract — keys is a live
+            // *mut TypedArray<*const StringObj>; *(arc.values) is a live
+            // TypedArray<V>.
+            let render_key = |out: &mut String, i: usize, k: &str| {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                out.push('"');
+                out.push_str(k);
+                out.push_str("\": ");
+            };
+
+            // Read all keys generically.
+            let read_keys = |keys_ptr: *const shape_value::v2::typed_array::TypedArray<
+                *const shape_value::v2::string_obj::StringObj,
+            >|
+             -> Vec<&'static str> {
+                let n = shape_value::v2::typed_array::TypedArray::len(keys_ptr) as usize;
+                let mut ks = Vec::with_capacity(n);
+                for i in 0..n {
+                    let ptr =
+                        shape_value::v2::typed_array::TypedArray::get_unchecked(keys_ptr, i as u32);
+                    ks.push(shape_value::v2::string_obj::StringObj::as_str(ptr));
+                }
+                ks
+            };
+
+            match map {
+                HashMapKindedRef::I64(arc) => {
+                    let keys = read_keys(arc.keys);
+                    for (i, k) in keys.iter().enumerate() {
+                        render_key(&mut out, i, k);
+                        let v = *(*arc.values).data.add(i);
+                        out.push_str(&v.to_string());
+                    }
+                }
+                HashMapKindedRef::F64(arc) => {
+                    let keys = read_keys(arc.keys);
+                    for (i, k) in keys.iter().enumerate() {
+                        render_key(&mut out, i, k);
+                        let v: f64 = *(*arc.values).data.add(i);
+                        out.push_str(&v.to_string());
+                    }
+                }
+                HashMapKindedRef::Bool(arc) => {
+                    let keys = read_keys(arc.keys);
+                    for (i, k) in keys.iter().enumerate() {
+                        render_key(&mut out, i, k);
+                        let v: u8 = *(*arc.values).data.add(i);
+                        out.push_str(if v != 0 { "true" } else { "false" });
+                    }
+                }
+                HashMapKindedRef::Char(arc) => {
+                    let keys = read_keys(arc.keys);
+                    for (i, k) in keys.iter().enumerate() {
+                        render_key(&mut out, i, k);
+                        let v: char = *(*arc.values).data.add(i);
+                        out.push('\'');
+                        out.push(v);
+                        out.push('\'');
+                    }
+                }
+                HashMapKindedRef::String(arc) => {
+                    let keys = read_keys(arc.keys);
+                    for (i, k) in keys.iter().enumerate() {
+                        render_key(&mut out, i, k);
+                        let v_ptr: *const shape_value::v2::string_obj::StringObj =
+                            *(*arc.values).data.add(i);
+                        let s = shape_value::v2::string_obj::StringObj::as_str(v_ptr);
+                        out.push('"');
+                        out.push_str(s);
+                        out.push('"');
+                    }
+                }
+                HashMapKindedRef::Decimal(arc) => {
+                    let keys = read_keys(arc.keys);
+                    for (i, k) in keys.iter().enumerate() {
+                        render_key(&mut out, i, k);
+                        let v_ptr: *const shape_value::v2::decimal_obj::DecimalObj =
+                            *(*arc.values).data.add(i);
+                        let d = (*v_ptr).value;
+                        out.push_str(&format!("{}D", d));
+                    }
+                }
+                HashMapKindedRef::TypedObject(arc) => {
+                    let keys = read_keys(arc.keys);
+                    for (i, k) in keys.iter().enumerate() {
+                        render_key(&mut out, i, k);
+                        let v_ref: &shape_value::heap_value::TypedObjectPtr =
+                            &*(*arc.values).data.add(i);
+                        if v_ref.is_null() {
+                            out.push_str("null");
+                        } else {
+                            let storage = &**v_ref;
+                            out.push_str(&self.format_typed_object(storage, depth + 1));
+                        }
+                    }
+                }
+                HashMapKindedRef::TraitObject(arc) => {
+                    let keys = read_keys(arc.keys);
+                    for (i, k) in keys.iter().enumerate() {
+                        render_key(&mut out, i, k);
+                        let v_ref: &shape_value::heap_value::TraitObjectPtr =
+                            &*(*arc.values).data.add(i);
+                        out.push_str(&format!("<trait_object:{:p}>", v_ref.as_ptr()));
+                    }
+                }
+            }
+        }
+        out.push('}');
+        out
     }
 
     /// Format a `HeapValue` reference (the value side of `HashMapData`'s

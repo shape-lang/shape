@@ -171,6 +171,13 @@ fn heap_value_arc_to_slot(hv: &Arc<HeapValue>) -> KindedSlot {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// HashMap.get(key) -> value | none
+///
+/// Wave 2 Round 3b C2-joint ckpt-3 (2026-05-14): per-V dispatch on
+/// `HashMapKindedRef::V(arc).get_share(key)`. Returns a KindedSlot
+/// constructed via the matching per-V `KindedSlot::from_*` constructor;
+/// the slot owns one fresh share (POD V: trivial copy; HeapElement /
+/// Ptr-newtype V: v2_retain bump via `HashMapValueElem::share_clone`).
+/// On miss returns `KindedSlot::none()`.
 pub fn v2_get(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
@@ -181,21 +188,51 @@ pub fn v2_get(
             "HashMap.get() requires exactly 1 argument (key)",
         ));
     }
-    let _map = as_hashmap(&args[0])?;
-    let _key = as_string_key(&args[1])?;
-    // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): per-V HashMap.get(key)
-    // → KindedSlot dispatch is ckpt-3 territory (consumer cascade alongside
-    // hashmap_methods.rs body rewrites). At ckpt-2 the receiver-recovery
-    // helper `as_hashmap` returns `Arc<HashMapKindedRef>` (per-V enum
-    // carrier); the per-V `match kref { I64(arc) => arc.get(...) ... }`
-    // body is restored at ckpt-3. SURFACE-AND-STOP at ckpt-2.
-    Err(VMError::RuntimeError(
-        "HashMap.get(): per-V dispatch is ckpt-3 territory (per-V \
-         HashMapKindedRef body rewrite not landed). ADR-006 §2.7.24 \
-         Q25.B SUPERSEDED + audit §C.4 — Round 3b C2-joint cascade \
-         pending."
-            .to_string(),
-    ))
+    let map = as_hashmap(&args[0])?;
+    let key = as_string_key(&args[1])?;
+    Ok(get_kinded(&map, key).unwrap_or_else(KindedSlot::none))
+}
+
+/// Per-V get → `KindedSlot` dispatcher. Reads `arc.get_share(key)` for the
+/// matching variant; wraps each per-V value type in the matching
+/// `KindedSlot::from_*` constructor. ADR-006 §2.7.24 Q25.B SUPERSEDED.
+fn get_kinded(map: &HashMapKindedRef, key: &str) -> Option<KindedSlot> {
+    match map {
+        HashMapKindedRef::I64(arc) => arc.get_share(key).map(KindedSlot::from_int),
+        HashMapKindedRef::F64(arc) => arc.get_share(key).map(KindedSlot::from_number),
+        HashMapKindedRef::Bool(arc) => arc.get_share(key).map(|v| KindedSlot::from_bool(v != 0)),
+        HashMapKindedRef::Char(arc) => arc.get_share(key).map(KindedSlot::from_char),
+        HashMapKindedRef::String(arc) => {
+            // V = *const StringObj. get_share v2_retains the share; deep-
+            // copy to Arc<String> + retire the bumped share for user-
+            // visible compatibility with NativeKind::String paths.
+            arc.get_share(key).map(|ptr| {
+                let s = unsafe {
+                    shape_value::v2::string_obj::StringObj::as_str(ptr).to_owned()
+                };
+                unsafe {
+                    use shape_value::v2::heap_element::HeapElement;
+                    shape_value::v2::string_obj::StringObj::release_elem(ptr);
+                }
+                KindedSlot::from_string_arc(Arc::new(s))
+            })
+        }
+        HashMapKindedRef::Decimal(arc) => {
+            // V = *const DecimalObj.
+            arc.get_share(key).map(KindedSlot::from_decimal_v2_ptr)
+        }
+        HashMapKindedRef::TypedObject(arc) => {
+            // V = TypedObjectPtr. get_share returns a new wrapper with
+            // v2_retain bumped refcount; convert to slot via into_raw.
+            arc.get_share(key)
+                .map(|ptr| KindedSlot::from_typed_object_raw(ptr.into_raw()))
+        }
+        HashMapKindedRef::TraitObject(arc) => {
+            // V = TraitObjectPtr. Same shape as TypedObject.
+            arc.get_share(key)
+                .map(|ptr| KindedSlot::from_trait_object_raw(ptr.into_raw()))
+        }
+    }
 }
 
 /// HashMap.has(key) -> bool
@@ -320,8 +357,9 @@ pub fn v2_is_empty(
 
 /// HashMap.getOrDefault(key, default) -> value
 ///
-/// Same value-side dispatch as `get`; on miss the kinded `default` slot is
-/// returned by clone (refcount bump for heap arms via `KindedSlot::clone`).
+/// Wave 2 Round 3b C2-joint ckpt-3 (2026-05-14): per-V dispatch via
+/// `get_kinded`; on miss the kinded `default` slot is returned by
+/// clone (refcount bump for heap arms via `KindedSlot::clone`).
 pub fn v2_get_or_default(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
@@ -334,21 +372,7 @@ pub fn v2_get_or_default(
     }
     let map = as_hashmap(&args[0])?;
     let key = as_string_key(&args[1])?;
-    // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): per-V HashMap.get(key)
-    // → KindedSlot dispatch is ckpt-3 territory. For the simple
-    // `contains_key`-checked default-or-surface pattern: on miss return
-    // the default (which works at ckpt-2 since default is `KindedSlot`
-    // already); on hit SURFACE since per-V projection of the value
-    // pointer/scalar into a `KindedSlot` requires ckpt-3.
-    if map.contains_key(key) {
-        Err(VMError::RuntimeError(
-            "HashMap.getOrDefault(): per-V hit-path dispatch is ckpt-3 \
-             territory. ADR-006 §2.7.24 Q25.B SUPERSEDED."
-                .to_string(),
-        ))
-    } else {
-        Ok(args[2].clone())
-    }
+    Ok(get_kinded(&map, key).unwrap_or_else(|| args[2].clone()))
 }
 
 /// HashMap.toArray() -> Array<[key, value]>
@@ -398,13 +422,16 @@ fn build_entries_array(receiver: &KindedSlot) -> Result<KindedSlot, VMError> {
 
 /// HashMap.set(key, value) -> HashMap
 ///
-/// W13-hashmap-mutation (2026-05-10) close: routes through
-/// `HashMapData::insert(Arc<String>, Arc<HeapValue>)`. The receiver
-/// `Arc<HashMapData>` is cloned up-front so `Arc::make_mut` clones the
-/// underlying data only when other shares exist (clone-on-write per
-/// ADR-006 §2.7.4 / playbook). Returns the (possibly newly-cloned)
-/// `Arc<HashMapData>` as the result so chained `m.set(...).set(...)`
-/// continues to flow through the post-mutation share.
+/// Wave 2 Round 3b C2-joint ckpt-3 (2026-05-14): per-V dispatch.
+/// Requires the value arg's kind to match the receiver's existing V
+/// variant (no V-flip / promotion at this layer — that would require
+/// a full HashMap-clone-into-new-V transition not yet supported). The
+/// new HashMap with the (possibly newly-cloned) inner data is returned
+/// so chained `m.set(...).set(...)` flows through the post-mutation
+/// share.
+///
+/// Mismatched value kind surfaces as a RuntimeError per playbook §6
+/// (no fallback coercion; kind soundness preserved).
 pub fn v2_set(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
@@ -415,28 +442,236 @@ pub fn v2_set(
             "HashMap.set() requires exactly 2 arguments (key, value)",
         ));
     }
-    let _ = &args[0]; // suppress unused
-    let _ = &args[1];
-    let _ = &args[2];
-    // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): per-V HashMap.set is
-    // ckpt-3 territory. The new shape requires (a) classifying the value
-    // arg's kind to pick the right HashMapKindedRef::V arm, (b) per-V
-    // Arc::make_mut on the inner Arc<HashMapData<V>>, (c) per-V
-    // `*mut TypedArray<V>::push` mutation. ADR-006 §2.7.24 Q25.B SUPERSEDED.
-    Err(VMError::RuntimeError(
-        "HashMap.set(): per-V dispatch is ckpt-3 territory. ADR-006 \
-         §2.7.24 Q25.B SUPERSEDED."
-            .to_string(),
-    ))
+    let map_arc = as_hashmap(&args[0])?;
+    let key = as_string_key(&args[1])?.to_owned();
+    let value_slot = &args[2];
+    // Build the new outer Arc<HashMapKindedRef> via per-V clone-on-write.
+    let new_kref = set_kinded(&map_arc, &key, value_slot)?;
+    Ok(KindedSlot::from_hashmap(std::sync::Arc::new(new_kref)))
+}
+
+/// Per-V set: clone the inner Arc<HashMapData<V>>, project the value
+/// arg's slot into a V (Arc::make_mut clone-on-write), insert. Returns
+/// the new `HashMapKindedRef` carrier.
+fn set_kinded(
+    map: &HashMapKindedRef,
+    key: &str,
+    value_slot: &KindedSlot,
+) -> Result<HashMapKindedRef, VMError> {
+    use shape_value::heap_value::HashMapData;
+    // Empty-HashMap V-promotion: if the receiver has zero entries + the
+    // current V doesn't match the incoming value's kind, rebuild as the
+    // matching V. Sound because an empty HashMap has no live values to
+    // re-cast. Resolves the `let m = HashMap(); m.set("k", 1)` pattern
+    // where HashMapCtor defaults to V=*const StringObj but the first
+    // insert is V=i64. ADR-006 §2.7.24 Q25.B SUPERSEDED.
+    if map.is_empty() && map.values_kind() != value_kind_hint(value_slot) {
+        if let Some(promoted) = empty_set_with_promotion(key, value_slot)? {
+            return Ok(promoted);
+        }
+    }
+    match map {
+        HashMapKindedRef::I64(arc) => {
+            let v = match value_slot.kind {
+                NativeKind::Int64 => value_slot.as_i64().ok_or_else(|| {
+                    type_error("HashMap.set(): Int64 slot bits not a valid integer")
+                })?,
+                other => {
+                    return Err(type_error(format!(
+                        "HashMap.set(): value kind {:?} incompatible with HashMap<string, int>",
+                        other
+                    )))
+                }
+            };
+            let mut new_arc = Arc::clone(arc);
+            unsafe { Arc::make_mut(&mut new_arc).insert(key, v) };
+            Ok(HashMapKindedRef::I64(new_arc))
+        }
+        HashMapKindedRef::F64(arc) => {
+            let v = match value_slot.kind {
+                NativeKind::Float64 => value_slot.as_f64().ok_or_else(|| {
+                    type_error("HashMap.set(): Float64 slot bits not a valid f64")
+                })?,
+                other => {
+                    return Err(type_error(format!(
+                        "HashMap.set(): value kind {:?} incompatible with HashMap<string, number>",
+                        other
+                    )))
+                }
+            };
+            let mut new_arc = Arc::clone(arc);
+            unsafe { Arc::make_mut(&mut new_arc).insert(key, v) };
+            Ok(HashMapKindedRef::F64(new_arc))
+        }
+        HashMapKindedRef::Bool(arc) => {
+            let v: u8 = match value_slot.kind {
+                NativeKind::Bool => {
+                    let b = value_slot.as_bool().ok_or_else(|| {
+                        type_error("HashMap.set(): Bool slot bits not a valid bool")
+                    })?;
+                    if b {
+                        1
+                    } else {
+                        0
+                    }
+                }
+                other => {
+                    return Err(type_error(format!(
+                        "HashMap.set(): value kind {:?} incompatible with HashMap<string, bool>",
+                        other
+                    )))
+                }
+            };
+            let mut new_arc = Arc::clone(arc);
+            unsafe { Arc::make_mut(&mut new_arc).insert(key, v) };
+            Ok(HashMapKindedRef::Bool(new_arc))
+        }
+        HashMapKindedRef::Char(arc) => {
+            let v: char = match value_slot.kind {
+                NativeKind::Char => value_slot.as_char().ok_or_else(|| {
+                    type_error("HashMap.set(): Char slot bits not a valid char")
+                })?,
+                other => {
+                    return Err(type_error(format!(
+                        "HashMap.set(): value kind {:?} incompatible with HashMap<string, char>",
+                        other
+                    )))
+                }
+            };
+            let mut new_arc = Arc::clone(arc);
+            unsafe { Arc::make_mut(&mut new_arc).insert(key, v) };
+            Ok(HashMapKindedRef::Char(new_arc))
+        }
+        HashMapKindedRef::String(arc) => {
+            // V = *const StringObj. Project value slot to a fresh-share
+            // *const StringObj via the §2.7.6 / Q8 dispatch.
+            let v_ptr = string_slot_to_v2_ptr(value_slot).ok_or_else(|| {
+                type_error(format!(
+                    "HashMap.set(): value kind {:?} incompatible with HashMap<string, string>",
+                    value_slot.kind
+                ))
+            })?;
+            let mut new_arc = Arc::clone(arc);
+            unsafe { Arc::make_mut(&mut new_arc).insert(key, v_ptr) };
+            Ok(HashMapKindedRef::String(new_arc))
+        }
+        HashMapKindedRef::Decimal(_)
+        | HashMapKindedRef::TypedObject(_)
+        | HashMapKindedRef::TraitObject(_) => {
+            // Decimal / TypedObject / TraitObject value-arg projection
+            // requires §2.7.6 / Q8 slot → pointer recovery with proper
+            // share semantics. SURFACE-AND-STOP at ckpt-3: the projection
+            // path requires careful refcount handling that's bounded by
+            // ckpt-final scope (each variant's recovery shape mirrors
+            // the §3ac2f11 5-arm receiver-recovery pattern). ADR-006
+            // §2.7.24 Q25.B SUPERSEDED + audit §C.4.
+            Err(VMError::RuntimeError(format!(
+                "HashMap.set(): value-side projection for V={:?} is ckpt-final \
+                 territory (5-arm receiver-recovery shape pending). \
+                 ADR-006 §2.7.24 Q25.B SUPERSEDED.",
+                map.values_kind()
+            )))
+        }
+    }
+}
+
+/// Classify a value-slot's `NativeKind` to the matching HashMapKindedRef
+/// variant's `values_kind()`. Used by the empty-HashMap V-promotion path
+/// to decide if the variant needs to be rebuilt.
+fn value_kind_hint(slot: &KindedSlot) -> NativeKind {
+    slot.kind
+}
+
+/// Empty-HashMap V-promotion helper. Builds a new HashMapKindedRef
+/// variant matching the incoming value's kind + inserts the first
+/// entry. Returns `None` if the value kind isn't supported (caller
+/// falls through to the regular kind-mismatch error path).
+fn empty_set_with_promotion(
+    key: &str,
+    value_slot: &KindedSlot,
+) -> Result<Option<HashMapKindedRef>, VMError> {
+    use shape_value::heap_value::HashMapData;
+    match value_slot.kind {
+        NativeKind::Int64 => {
+            let v = value_slot
+                .as_i64()
+                .ok_or_else(|| type_error("HashMap.set(): Int64 slot bits not a valid integer"))?;
+            let mut data: HashMapData<i64> = HashMapData::new();
+            unsafe { data.insert(key, v) };
+            Ok(Some(HashMapKindedRef::I64(Arc::new(data))))
+        }
+        NativeKind::Float64 => {
+            let v = value_slot
+                .as_f64()
+                .ok_or_else(|| type_error("HashMap.set(): Float64 slot bits not a valid f64"))?;
+            let mut data: HashMapData<f64> = HashMapData::new();
+            unsafe { data.insert(key, v) };
+            Ok(Some(HashMapKindedRef::F64(Arc::new(data))))
+        }
+        NativeKind::Bool => {
+            let b = value_slot
+                .as_bool()
+                .ok_or_else(|| type_error("HashMap.set(): Bool slot bits not a valid bool"))?;
+            let mut data: HashMapData<u8> = HashMapData::new();
+            unsafe { data.insert(key, if b { 1 } else { 0 }) };
+            Ok(Some(HashMapKindedRef::Bool(Arc::new(data))))
+        }
+        NativeKind::Char => {
+            let c = value_slot
+                .as_char()
+                .ok_or_else(|| type_error("HashMap.set(): Char slot bits not a valid char"))?;
+            let mut data: HashMapData<char> = HashMapData::new();
+            unsafe { data.insert(key, c) };
+            Ok(Some(HashMapKindedRef::Char(Arc::new(data))))
+        }
+        NativeKind::String | NativeKind::Ptr(HeapKind::String) => {
+            let v_ptr = string_slot_to_v2_ptr(value_slot).ok_or_else(|| {
+                type_error("HashMap.set(): string slot bits could not be projected to *const StringObj")
+            })?;
+            let mut data: HashMapData<*const shape_value::v2::string_obj::StringObj> =
+                HashMapData::new();
+            unsafe { data.insert(key, v_ptr) };
+            Ok(Some(HashMapKindedRef::String(Arc::new(data))))
+        }
+        // Other value kinds (Decimal / TypedObject / TraitObject) fall
+        // through to the regular kind-mismatch path which surfaces
+        // structured ckpt-final territory error.
+        _ => Ok(None),
+    }
+}
+
+/// Project a `KindedSlot` whose kind is `String` / `Ptr(HeapKind::String)`
+/// to a fresh-share `*const StringObj`. Bumps v2_retain on the inner
+/// allocation; returns the raw pointer (caller takes one share).
+///
+/// Returns `None` for non-string kinds. Used by `set_kinded`'s String arm.
+fn string_slot_to_v2_ptr(slot: &KindedSlot) -> Option<*const shape_value::v2::string_obj::StringObj> {
+    use shape_value::v2::string_obj::StringObj;
+    // Two shapes carry strings:
+    // 1. NativeKind::String — slot bits = Arc::into_raw::<String>, owned.
+    // 2. NativeKind::Ptr(HeapKind::String) — slot bits = `Arc::into_raw(Arc<HeapValue>)`
+    //    where HeapValue is HeapValue::String(Arc<String>).
+    // In both cases we extract a `&str`, allocate a fresh StringObj with
+    // v2_retain=1, and return that as the new owned share.
+    let s_owned = match slot.kind {
+        NativeKind::String => slot.as_str().map(|s| s.to_owned())?,
+        NativeKind::Ptr(HeapKind::String) => match slot.slot.as_heap_value() {
+            HeapValue::String(arc) => (**arc).clone(),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    Some(StringObj::new(&s_owned) as *const StringObj)
 }
 
 /// HashMap.delete(key) -> HashMap
 ///
-/// W13-hashmap-mutation close: routes through `HashMapData::remove(&str)`.
-/// Returns the (possibly newly-cloned) `Arc<HashMapData>` post-removal —
-/// missing-key removals are a no-op at the `HashMapData` layer (the
-/// `bool` return is ignored at this surface; the result still carries the
-/// receiver share for chaining).
+/// Wave 2 Round 3b C2-joint ckpt-3 (2026-05-14): per-V dispatch. Routes
+/// through `HashMapData<V>::remove(&str)` via Arc::make_mut clone-on-write.
+/// Returns the (possibly newly-cloned) HashMap as a new outer Arc<
+/// HashMapKindedRef> wrapper post-removal — missing-key removals leave
+/// the map unchanged. The removed value's share is retired immediately
+/// (we drop it; if the caller wants the removed value use `remove()`).
 pub fn v2_delete(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
@@ -447,15 +682,72 @@ pub fn v2_delete(
             "HashMap.delete() requires exactly 1 argument (key)",
         ));
     }
-    let _ = as_string_key(&args[1])?;
-    let _ = as_hashmap(&args[0])?;
-    // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): per-V HashMap.delete
-    // is ckpt-3 territory (per-V Arc::make_mut + per-V remove). ADR-006
-    // §2.7.24 Q25.B SUPERSEDED.
-    Err(VMError::RuntimeError(
-        "HashMap.delete(): per-V dispatch is ckpt-3 territory."
-            .to_string(),
-    ))
+    let map_arc = as_hashmap(&args[0])?;
+    let key = as_string_key(&args[1])?.to_owned();
+    let new_kref = delete_kinded(&map_arc, &key);
+    Ok(KindedSlot::from_hashmap(std::sync::Arc::new(new_kref)))
+}
+
+/// Per-V delete: clone the inner `Arc<HashMapData<V>>`, remove the key,
+/// drop the returned value's share. Returns the new HashMapKindedRef.
+fn delete_kinded(map: &HashMapKindedRef, key: &str) -> HashMapKindedRef {
+    match map {
+        HashMapKindedRef::I64(arc) => {
+            let mut new_arc = Arc::clone(arc);
+            unsafe { Arc::make_mut(&mut new_arc).remove(key) }; // POD: removed value drops trivially
+            HashMapKindedRef::I64(new_arc)
+        }
+        HashMapKindedRef::F64(arc) => {
+            let mut new_arc = Arc::clone(arc);
+            unsafe { Arc::make_mut(&mut new_arc).remove(key) };
+            HashMapKindedRef::F64(new_arc)
+        }
+        HashMapKindedRef::Bool(arc) => {
+            let mut new_arc = Arc::clone(arc);
+            unsafe { Arc::make_mut(&mut new_arc).remove(key) };
+            HashMapKindedRef::Bool(new_arc)
+        }
+        HashMapKindedRef::Char(arc) => {
+            let mut new_arc = Arc::clone(arc);
+            unsafe { Arc::make_mut(&mut new_arc).remove(key) };
+            HashMapKindedRef::Char(new_arc)
+        }
+        HashMapKindedRef::String(arc) => {
+            let mut new_arc = Arc::clone(arc);
+            let removed = unsafe { Arc::make_mut(&mut new_arc).remove(key) };
+            // Retire the removed *const StringObj share (HeapElement V).
+            if let Some(ptr) = removed {
+                unsafe {
+                    use shape_value::v2::heap_element::HeapElement;
+                    shape_value::v2::string_obj::StringObj::release_elem(ptr);
+                }
+            }
+            HashMapKindedRef::String(new_arc)
+        }
+        HashMapKindedRef::Decimal(arc) => {
+            let mut new_arc = Arc::clone(arc);
+            let removed = unsafe { Arc::make_mut(&mut new_arc).remove(key) };
+            if let Some(ptr) = removed {
+                unsafe {
+                    use shape_value::v2::heap_element::HeapElement;
+                    shape_value::v2::decimal_obj::DecimalObj::release_elem(ptr);
+                }
+            }
+            HashMapKindedRef::Decimal(new_arc)
+        }
+        HashMapKindedRef::TypedObject(arc) => {
+            let mut new_arc = Arc::clone(arc);
+            // TypedObjectPtr has a Drop impl — letting `removed` go out of
+            // scope retires the share automatically.
+            let _ = unsafe { Arc::make_mut(&mut new_arc).remove(key) };
+            HashMapKindedRef::TypedObject(new_arc)
+        }
+        HashMapKindedRef::TraitObject(arc) => {
+            let mut new_arc = Arc::clone(arc);
+            let _ = unsafe { Arc::make_mut(&mut new_arc).remove(key) };
+            HashMapKindedRef::TraitObject(new_arc)
+        }
+    }
 }
 
 /// HashMap.remove(key) -> Option<value>
@@ -475,7 +767,7 @@ pub fn v2_delete(
 /// pop-shape ABI; both methods can coexist on HashMap with distinct
 /// return contracts (decision-call #3 per W17-pop-mutation dispatch).
 pub fn v2_remove(
-    _vm: &mut VirtualMachine,
+    vm: &mut VirtualMachine,
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
@@ -484,23 +776,113 @@ pub fn v2_remove(
             "HashMap.remove() requires exactly 1 argument (key)",
         ));
     }
-    let _ = as_string_key(&args[1])?;
-    let _ = as_hashmap(&args[0])?;
-    // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): per-V HashMap.remove
-    // is ckpt-3 territory. The tuple-return ABI + side-channel publish
-    // both depend on per-V Arc::make_mut + per-V value-at-key projection.
-    Err(VMError::RuntimeError(
-        "HashMap.remove(): per-V dispatch is ckpt-3 territory."
-            .to_string(),
-    ))
+    let map_arc = as_hashmap(&args[0])?;
+    let key = as_string_key(&args[1])?.to_owned();
+    // Wave 2 Round 3b C2-joint ckpt-3 (2026-05-14): tuple-return ABI per
+    // ADR-006 §2.7.27 + W17-pop-mutation. Per-V dispatch: clone the inner
+    // Arc, remove the entry, side-channel-publish the new map, return the
+    // popped value (or `none` on miss).
+    let (new_kref, popped_slot) = remove_kinded(&map_arc, &key);
+    // Side-channel-publish NewContainer for compiler write-back.
+    let new_self_slot = KindedSlot::from_hashmap(std::sync::Arc::new(new_kref));
+    vm.push_kinded(new_self_slot.raw(), new_self_slot.kind())?;
+    std::mem::forget(new_self_slot);
+    Ok(popped_slot)
+}
+
+/// Per-V remove: clone the inner Arc<HashMapData<V>>, remove the key
+/// (transferring the share to a KindedSlot for the caller). Returns
+/// `(new HashMapKindedRef, popped KindedSlot)`. Missing key yields
+/// `KindedSlot::none()`.
+fn remove_kinded(map: &HashMapKindedRef, key: &str) -> (HashMapKindedRef, KindedSlot) {
+    match map {
+        HashMapKindedRef::I64(arc) => {
+            let mut new_arc = Arc::clone(arc);
+            let popped = unsafe { Arc::make_mut(&mut new_arc).remove(key) };
+            let slot = popped.map(KindedSlot::from_int).unwrap_or_else(KindedSlot::none);
+            (HashMapKindedRef::I64(new_arc), slot)
+        }
+        HashMapKindedRef::F64(arc) => {
+            let mut new_arc = Arc::clone(arc);
+            let popped = unsafe { Arc::make_mut(&mut new_arc).remove(key) };
+            let slot = popped.map(KindedSlot::from_number).unwrap_or_else(KindedSlot::none);
+            (HashMapKindedRef::F64(new_arc), slot)
+        }
+        HashMapKindedRef::Bool(arc) => {
+            let mut new_arc = Arc::clone(arc);
+            let popped = unsafe { Arc::make_mut(&mut new_arc).remove(key) };
+            let slot = popped
+                .map(|v| KindedSlot::from_bool(v != 0))
+                .unwrap_or_else(KindedSlot::none);
+            (HashMapKindedRef::Bool(new_arc), slot)
+        }
+        HashMapKindedRef::Char(arc) => {
+            let mut new_arc = Arc::clone(arc);
+            let popped = unsafe { Arc::make_mut(&mut new_arc).remove(key) };
+            let slot = popped.map(KindedSlot::from_char).unwrap_or_else(KindedSlot::none);
+            (HashMapKindedRef::Char(new_arc), slot)
+        }
+        HashMapKindedRef::String(arc) => {
+            let mut new_arc = Arc::clone(arc);
+            let popped = unsafe { Arc::make_mut(&mut new_arc).remove(key) };
+            // V = *const StringObj. Convert to NativeKind::String slot
+            // (Arc<String>) for user-visible compatibility with `as_str()`
+            // + downstream string-handling paths. Deep-copies the StringObj
+            // content; retires the popped share.
+            let slot = popped
+                .map(|ptr| {
+                    let s = unsafe {
+                        shape_value::v2::string_obj::StringObj::as_str(ptr).to_owned()
+                    };
+                    // Retire the popped StringObj share.
+                    unsafe {
+                        use shape_value::v2::heap_element::HeapElement;
+                        shape_value::v2::string_obj::StringObj::release_elem(ptr);
+                    }
+                    KindedSlot::from_string_arc(Arc::new(s))
+                })
+                .unwrap_or_else(KindedSlot::none);
+            (HashMapKindedRef::String(new_arc), slot)
+        }
+        HashMapKindedRef::Decimal(arc) => {
+            let mut new_arc = Arc::clone(arc);
+            let popped = unsafe { Arc::make_mut(&mut new_arc).remove(key) };
+            let slot = popped
+                .map(KindedSlot::from_decimal_v2_ptr)
+                .unwrap_or_else(KindedSlot::none);
+            (HashMapKindedRef::Decimal(new_arc), slot)
+        }
+        HashMapKindedRef::TypedObject(arc) => {
+            let mut new_arc = Arc::clone(arc);
+            let popped = unsafe { Arc::make_mut(&mut new_arc).remove(key) };
+            // TypedObjectPtr: into_raw to transfer share to the slot.
+            let slot = popped
+                .map(|p| KindedSlot::from_typed_object_raw(p.into_raw()))
+                .unwrap_or_else(KindedSlot::none);
+            (HashMapKindedRef::TypedObject(new_arc), slot)
+        }
+        HashMapKindedRef::TraitObject(arc) => {
+            let mut new_arc = Arc::clone(arc);
+            let popped = unsafe { Arc::make_mut(&mut new_arc).remove(key) };
+            let slot = popped
+                .map(|p| KindedSlot::from_trait_object_raw(p.into_raw()))
+                .unwrap_or_else(KindedSlot::none);
+            (HashMapKindedRef::TraitObject(new_arc), slot)
+        }
+    }
 }
 
 /// HashMap.merge(other) -> HashMap
 ///
-/// W13-hashmap-mutation close: routes through `HashMapData::merge(&other)`.
-/// Last-write-wins on key collision (matches `Object.assign` /
-/// `dict.update` semantics). The `other` receiver is borrowed via
-/// `as_hashmap` and never has its share decremented at this surface.
+/// Wave 2 Round 3b C2-joint ckpt-3 (2026-05-14): per-V dispatch. Routes
+/// through `HashMapData<V>::merge(&other)` via Arc::make_mut clone-on-
+/// write. Last-write-wins on key collision (matches `Object.assign` /
+/// `dict.update` semantics). The `other` receiver is borrowed and its
+/// shares are bumped via `share_clone` for each merged element.
+///
+/// Both receivers MUST have the same V variant (no V-flip / unification
+/// at this layer). Mismatched V surfaces as a RuntimeError per playbook
+/// §6 (no fallback coercion).
 pub fn v2_merge(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
@@ -511,14 +893,66 @@ pub fn v2_merge(
             "HashMap.merge() requires exactly 1 argument (other)",
         ));
     }
-    let _ = as_hashmap(&args[1])?;
-    let _ = as_hashmap(&args[0])?;
-    // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): per-V HashMap.merge is
-    // ckpt-3 territory (per-V Arc::make_mut + per-V buffer extend).
-    Err(VMError::RuntimeError(
-        "HashMap.merge(): per-V dispatch is ckpt-3 territory."
-            .to_string(),
-    ))
+    let a = as_hashmap(&args[0])?;
+    let b = as_hashmap(&args[1])?;
+    let new_kref = merge_kinded(&a, &b)?;
+    Ok(KindedSlot::from_hashmap(std::sync::Arc::new(new_kref)))
+}
+
+/// Per-V merge: requires both receivers have matching V. Clone the
+/// inner Arc, call HashMapData<V>::merge, return the new carrier.
+fn merge_kinded(a: &HashMapKindedRef, b: &HashMapKindedRef) -> Result<HashMapKindedRef, VMError> {
+    let mismatch = || {
+        type_error(format!(
+            "HashMap.merge(): value-kind mismatch ({:?} vs {:?}); merge requires \
+             same-V receivers at this layer",
+            a.values_kind(),
+            b.values_kind()
+        ))
+    };
+    match (a, b) {
+        (HashMapKindedRef::I64(arc_a), HashMapKindedRef::I64(arc_b)) => {
+            let mut new_arc = Arc::clone(arc_a);
+            unsafe { Arc::make_mut(&mut new_arc).merge(arc_b) };
+            Ok(HashMapKindedRef::I64(new_arc))
+        }
+        (HashMapKindedRef::F64(arc_a), HashMapKindedRef::F64(arc_b)) => {
+            let mut new_arc = Arc::clone(arc_a);
+            unsafe { Arc::make_mut(&mut new_arc).merge(arc_b) };
+            Ok(HashMapKindedRef::F64(new_arc))
+        }
+        (HashMapKindedRef::Bool(arc_a), HashMapKindedRef::Bool(arc_b)) => {
+            let mut new_arc = Arc::clone(arc_a);
+            unsafe { Arc::make_mut(&mut new_arc).merge(arc_b) };
+            Ok(HashMapKindedRef::Bool(new_arc))
+        }
+        (HashMapKindedRef::Char(arc_a), HashMapKindedRef::Char(arc_b)) => {
+            let mut new_arc = Arc::clone(arc_a);
+            unsafe { Arc::make_mut(&mut new_arc).merge(arc_b) };
+            Ok(HashMapKindedRef::Char(new_arc))
+        }
+        (HashMapKindedRef::String(arc_a), HashMapKindedRef::String(arc_b)) => {
+            let mut new_arc = Arc::clone(arc_a);
+            unsafe { Arc::make_mut(&mut new_arc).merge(arc_b) };
+            Ok(HashMapKindedRef::String(new_arc))
+        }
+        (HashMapKindedRef::Decimal(arc_a), HashMapKindedRef::Decimal(arc_b)) => {
+            let mut new_arc = Arc::clone(arc_a);
+            unsafe { Arc::make_mut(&mut new_arc).merge(arc_b) };
+            Ok(HashMapKindedRef::Decimal(new_arc))
+        }
+        (HashMapKindedRef::TypedObject(arc_a), HashMapKindedRef::TypedObject(arc_b)) => {
+            let mut new_arc = Arc::clone(arc_a);
+            unsafe { Arc::make_mut(&mut new_arc).merge(arc_b) };
+            Ok(HashMapKindedRef::TypedObject(new_arc))
+        }
+        (HashMapKindedRef::TraitObject(arc_a), HashMapKindedRef::TraitObject(arc_b)) => {
+            let mut new_arc = Arc::clone(arc_a);
+            unsafe { Arc::make_mut(&mut new_arc).merge(arc_b) };
+            Ok(HashMapKindedRef::TraitObject(new_arc))
+        }
+        _ => Err(mismatch()),
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
