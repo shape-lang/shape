@@ -6729,3 +6729,301 @@ landed across 6 Round 1 agents within wave-scope timeboxing.
 E, C2a) after supervisor ratifies Round 1 close + Round 2 dispatch
 prompts (with pre-flight ground-truth check binding per item 6 + D2
 critical lockstep binding per item 3).*
+
+---
+
+## Wave 2 Round 2 Agent C2a close (2026-05-14) — STRUCTURED SURFACE-AND-STOP
+
+**Branch:** `bulldozer-strictly-typed-wave-2-c2a` (HEAD at parent
+`e766dbef` post-Round-1-close — zero source changes; doc-only close
+commit).
+
+**Status:** surface-and-stopped per ADR-006 §2.7.24 Q25.B SUPERSEDED
+post-supersession point 4 ("Preserve fallback for one period" framing
+acceptable ONLY under structured surface-and-stop with documented
+joint-dispatch shape) + bulldozer-handover §0 surface-and-stop
+discipline. 8th supervisor-/audit-layer imprecision pattern instance.
+
+### Pre-flight ground-truth check (supervisor item 6 binding)
+
+Per dispatch item 6, grep results at HEAD `e766dbef` for territory that
+Round 1 agents touched + audit predictions vs ground truth:
+
+**HashMapData reference distribution** (against audit §C.6's "~110
+sites / 4 files" prediction):
+
+```
+HashMapData: 212 refs across 40 files
+  21 hashmap_methods.rs           (audit-named, in scope)
+  12 jit/ffi/v2/collection_arc.rs (audit-named, C2b territory)
+   4 jit/ffi/v2/typed_map.rs      (audit-named, C2b territory)
+   3 slot.rs                      (audit-not-named, in-scope blocker)
+   3 heap_variants.rs             (audit-not-named, in-scope blocker)
+   3 stdlib/xml.rs                (audit-named, in scope)
+   2 vm_impl/builtins.rs          (audit-named, in scope)
+   2 executor/objects/typed_access.rs       (audit-not-named, in-scope blocker)
+   2 executor/objects/property_access.rs    (audit-not-named, in-scope blocker)
+   2 executor/objects/iterator_methods.rs   (audit-not-named, in-scope blocker)
+   2 executor/loops/mod.rs        (audit-not-named, in-scope blocker)
+   2 heap_value.rs                (audit-named, in scope)
+   2 mir_compiler/v2_typed_map.rs (audit-named, C2b territory)
+   2 ffi_symbols/v2_symbols.rs    (audit-named, C2b territory)
+   1 compiler/expressions/function_calls.rs (audit-not-named)
+   1 kinded_slot.rs               (audit-not-named, in-scope blocker)
+   1 iterator_state.rs            (audit-not-named, in-scope blocker)
+   1 mir_compiler/types.rs        (audit-named, C2b territory)
+   1 ffi/v2/mod.rs                (audit-named, C2b territory)
+   1 ffi_refs.rs                  (audit-named, C2b territory)
+   1 compiler/ffi_builder.rs      (audit-named, C2b territory)
+   ... + 10 more files in shape-runtime / shape-jit / shape-vm cascade
+```
+
+Ground truth: **40 files / 212 refs** vs audit §C.6 prediction
+**4 files / 110 refs**. 6th imprecision-pattern instance from C1
+already-named ratio holds; this confirms it at HEAD `e766dbef`.
+
+**HashMapValueBuf reference distribution** (against C1 close evidence):
+
+```
+HashMapValueBuf: 68 refs across 4 files
+  57 heap_value.rs                (definition + impl Clone + value_at + specialize_values)
+   8 hashmap_methods.rs            (per-arm dispatch in v2_values)
+   2 trait_object_ops.rs           (comments only; arms deleted by F)
+   1 printing.rs                    (Display arm count comment)
+```
+
+5 live arms remain post-C1 (String / Decimal / BigInt / Char / TypedObject)
+matching ADR-006 §2.7.24 Q25.B SUPERSEDED migration table verbatim.
+
+**HeapValue::HashMap arm match-site distribution** (audit-not-counted):
+
+```
+HeapValue::HashMap: 33 refs across 17 files
+   4 hashmap_methods.rs
+   4 heap_variants.rs              (clone_with_kind / drop_with_kind / kind() / is_truthy / type_name)
+   4 csv_module.rs                 (producer sites)
+   3 heap_value.rs
+   3 stdlib/xml.rs                 (producer sites)
+   2 iterator_methods.rs
+   2 stdlib/http.rs                (producer sites)
+   2 marshal.rs
+   1 each in: printing.rs, deque_methods.rs, array_ops.rs, slot.rs,
+              wire_conversion.rs, typed_module_exports.rs, stdlib/json.rs,
+              json_value.rs, ffi/v2/typed_map.rs (JIT FFI — C2b territory)
+```
+
+### Round 1 agent outputs that change HashMap-aware paths
+
+Reviewed per dispatch item 6 binding:
+
+- **A1** (TypedArrayData scalar variants F32/Char monomorphization +
+  partial-with-surfaces): no overlap with HashMap-aware paths
+  (TypedArray scalar arms vs HashMap value arms are orthogonal storage
+  shapes).
+- **B** (NativeKind::StringV2 + DecimalV2 v2-raw heap-pointer variants):
+  GATING DEPENDENCY for C2a's String / Decimal HashMapData<V>
+  specializations. B landed the carrier; A2 (in flight, Round 2) is
+  migrating producer sites. C2a's String / Decimal arms require BOTH
+  B's NativeKind variants AND A2's `*const StringObj` / `*const DecimalObj`
+  v2-raw root constructors. **A2 is parallel-in-flight; not closed at
+  C2a dispatch time.**
+- **C1 partial close (7e4d6719)**: deleted 8 dead HashMapValueBuf arms +
+  landed ADR-006 §2.7.24 Q25.B SUPERSEDED amendment. C2a is the
+  continuation; verified Q25.B SUPERSEDED forbidden rules at
+  `006-value-and-memory-model.md:5037-5043` (post-supersession
+  forbidden #1-#4 binding).
+- **D1** (TypedObjectStorage Arc → HeapHeader shape change): GATING
+  DEPENDENCY for C2a's TypedObject specialization. D1 landed
+  transitional Arc-style consumer arms; D2 (Round 2 parallel) flips
+  them to v2_retain / v2_release in single commit. C2a's TypedObject
+  arm migration to `*const TypedObjectStorage` requires D2's post-flip
+  API. **D2 is parallel-in-flight; not closed at C2a dispatch time.**
+- **F** (Q25.A specialization dead-arm deletion): TypedArrayData +
+  HashMapValueBuf temporal-family + TraitObject arms deleted in same
+  Round 1 commit `a170c4ce`. No remaining overlap.
+- **G** (IntrinsicSum deletion): no overlap with HashMap-aware paths.
+
+**Aggregate finding**: 2 of 3 producer-carrier dependencies (A2 for
+String/Decimal; D2 for TypedObject) are parallel-in-flight at C2a
+dispatch time. The third (BigInt) is deferred to cluster-1+ per Q25.B
+SUPERSEDED migration table. Char is dead-but-derived. **No live arm
+has all gates green at C2a dispatch time.**
+
+### Why C2a runtime tier cannot safely advance independently
+
+**Structural finding**: The migration's atomic unit is the
+`HeapValue::HashMap` arm signature change from `Arc<HashMapData>` to
+`HashMapKindedRef` (audit §C.4 option a.2). This change:
+
+1. **Ripples through 33 HeapValue::HashMap match arms across 17 files**
+   — every `match heap_value { ... HeapValue::HashMap(d) => ... }`
+   site needs the new payload shape.
+2. **Invalidates JIT FFI's `Arc<HashMapData>` retain/release**
+   (`jit_v2_make_hashmap`, `jit_arc_hashmap_retain`,
+   `jit_arc_hashmap_release` at
+   `crates/shape-jit/src/ffi/v2/collection_arc.rs:74-263`). These
+   symbols call `Arc::increment_strong_count(bits as *const HashMapData)`
+   — if HashMapData becomes generic `HashMapData<V>`, the FFI bits no
+   longer have a single concrete Rust type to decrement against.
+3. **Requires per-V producer migration** (xml.rs, json.rs,
+   csv_module.rs, http.rs, hashmap_methods.rs, array_transform.rs +
+   marshal.rs + iterator_methods.rs producer paths) — each producer
+   needs a typed V tag, but two of the live V types (String, Decimal)
+   require A2's StringObj / DecimalObj v2-raw carriers landed at the
+   producer site first.
+4. **Cannot be split between Rust-internal-only and FFI-only halves
+   without breaking either gate**:
+   - Land HashMapKindedRef-shape in shape-value + shape-vm ONLY:
+     → JIT FFI's `Arc::decrement_strong_count(bits as *const HashMapData)`
+       on bits whose actual layout is `Arc<HashMapData<V>>` is heap
+       corruption (Q25.B SUPERSEDED forbidden #2 violation).
+   - Keep `Arc<HashMapData>` shape but make HashMapData internally
+     parametric via type erasure: → either reintroduces a runtime kind
+     discriminator on the parent struct (Q25.B SUPERSEDED forbidden #3
+     violation) OR unsafe-casts type-erased pointers with a side-table
+     of kinds (defection-attractor under §Renames-to-refuse-on-sight
+     "type-erasure helper" category).
+
+### Audit §C.4 framing recapped vs structural reality
+
+The audit §C.4 option a.2 recommendation ("HashMapKindedRef bundles
+type-erased pointer + NativeKind discriminator — same shape as
+`KindedSlot::from_typed_array(arc)` per ADR-006 §2.7.6 / Q8
+carrier-API-bound") is architecturally correct as a target. The
+**dispatch's runtime-tier-only slicing assumption is structurally
+unsound** for HashMap specifically because:
+
+- `KindedSlot::from_typed_array(Arc<TypedArrayData>)` works because
+  `TypedArrayData` is an enum tag at the element level (the buffer
+  inside is per-V), and JIT FFI's `jit_arc_typed_array_*` symbols
+  operate on the enum tag, not on the inner `*mut TypedArray<V>` —
+  the inner buffer's V is invisible to FFI retain/release.
+- `HashMapKindedRef::String(Arc<HashMapData<Arc<String>>>)` requires
+  `HashMapData<V>` to be parametric at the Rust type level, and JIT
+  FFI's `jit_arc_hashmap_*` operates on `Arc<HashMapData>` —
+  parametric V at the struct level means the FFI symbol needs the
+  parameter explicit.
+
+The audit recommendation is **landable as a single coordinated
+runtime+FFI commit**; it is **not landable as a runtime-only slice
+followed by an FFI-only slice** without violating Q25.B SUPERSEDED
+forbidden #2 (`Arc<TypedBuffer<...>>` transitional shape) and
+introducing a heap-corruption window between C2a and C2b.
+
+### 8th supervisor-/audit-layer imprecision pattern instance
+
+The Round-2 dispatch's C2a/C2b split (announced 7d7354dc, ratified
+6163e93a) modeled the migration as: C2a = runtime tier ~3k LoC; C2b =
+JIT FFI tier ~2k LoC; orthogonal slices landable independently.
+Ground-truth at HEAD `e766dbef`: the runtime/FFI boundary for HashMap
+is **not orthogonal** because both sides operate on the same
+`HeapValue::HashMap` arm shape. The split is structurally a sequential
+single-commit dependency, not a parallel-coordinated pair.
+
+Per the cluster-0+1 status doc imprecision-pattern tracking:
+- 1st-5th (R20 audit + structural mismatches landed at S1/S2/S2-prime)
+- 6th (Agent C Round 1 — Wave 1 §C predicted 1.5k LoC / 7 files;
+  ground truth ~5k LoC / 40 files)
+- 7th (Agent A1 Round 1 — Wave 1 §A predicted 8 monomorphizations;
+  ground truth = 5 of 8 already landed via prior W12 S1)
+- **8th (Agent C2a Round 2 — Round-2 dispatch modeled runtime/FFI
+  split as parallel-orthogonal slices; ground truth = atomic single-
+  commit dependency on HeapValue::HashMap arm shape).**
+
+Pattern trend continues at the dispatch layer rather than shipped
+code. C2a closes without breaking the build because surface-and-stop
+fires before any defection-attractor pattern lands.
+
+### Dispatch shape recommended for joint C2+B+D landing
+
+**Cluster-2 candidate** (per audit §C.7 "single Wave 2 agent" framing,
+revised post-ground-truth):
+
+| Phase | Scope | LoC estimate | Gates |
+|---|---|---|---|
+| 0 — prerequisites | A2 closed (String + Decimal HeapElement v2-raw carriers at producer sites); D2 closed (TypedObject Arc→v2_retain consumer flip); B closed (NativeKind::StringV2/DecimalV2 — landed Round 1) | — | A2 close + D2 close |
+| 1 — atomic flip | `HashMapData` → `HashMapData<V>` generic + `HashMapKindedRef` carrier + `HeapValue::HashMap` arm signature change + all 33 HeapValue::HashMap match sites + JIT FFI `jit_arc_hashmap_*` per-V variants + all producer sites flipped | ~5k LoC / 40 files (single commit) | verify-merge.sh 12/12; cargo check EXIT=0; check-no-dynamic.sh EXIT=0; smoke matrix 4/4 |
+| 2 — S5 wholesale deletion | `grep -rn 'HashMapValueBuf::' crates/` → 0; delete the enum definition + impl Clone + value_at + specialize_values + from_pairs Vec-Arc-HeapValue entry signature | ~200 LoC net deletion | bleached close gate |
+
+**The "C2a runtime tier ~3k / C2b JIT FFI ~2k" split is refused** per
+ADR-006 §2.7.24 Q25.B SUPERSEDED forbidden #2 (`Arc<TypedBuffer<...>>`
+transitional shape is forbidden — there is no transitional shape that
+satisfies both runtime + FFI between the C2a/C2b checkpoints).
+
+**Recommended dispatch**: post-A2-close + post-D2-close, single Agent
+C2 (~5k LoC / 40 files / single atomic commit) lands the full
+HeapValue::HashMap arm signature change + JIT FFI + producer-site
+migration. Estimated 1-1.5 sessions of focused work; the take-both
+ceremony pattern handles file-level conflict with E + remaining
+Round 2 work.
+
+### Round 2 Agent C2a deliverable
+
+Zero source changes. This subsection is the deliverable: structured
+surface-and-stop documentation per ADR-006 §2.7.24 Q25.B SUPERSEDED
+post-supersession point 4 with documented joint-dispatch shape (Phase
+0/1/2 above).
+
+**No new ADR amendment owed** — C2a materially exercises Q25.B
+SUPERSEDED amendment text (landed at 7d7354dc / Round 1 Agent C close;
+relocated to ADR-006 file at the same commit). The ADR amendment's
+"Migration cadence" paragraph already names C2a + C2b split as the
+intended cadence — this subsection adds the structural-unfeasibility
+finding to the status doc tracking layer, NOT to ADR-006 (per
+phase-2d-handover.md §0 ADR-amendment discipline: amendments live in
+ADR file only when materially changing rules; status-doc tracking
+finds live in status doc).
+
+### Smoke matrix re-verification (zero source changes; baseline preserved)
+
+| Smoke | VM | JIT | Cluster-0 criterion |
+|---|---|---|---|
+| 1 (scalar loop) | ✅ 4950 | ✅ 4950 | ✓ (preserved from Round 1 close) |
+| 2 (`[1,2,3,4,5].map(\|x\|x*2).sum()`) | ✅ 30 | ❌ rc=1 | gated on Round 2 A2 (unchanged) |
+| 3 (canonical fixture) | ✅ x | ✅ x | ✓ (preserved from Round 1 close) |
+| 4 (`Set()` + `.add()` + `.size()`) | ✅ 2 | ✅ 2 | ✓ (preserved from Round 1 close) |
+
+Identical to Round 1 close matrix at `e766dbef`. C2a's surface-and-stop
+does not advance OR regress smoke 2 JIT (A2 owns).
+
+### Gates
+
+- `cargo check --workspace --lib --tests` EXIT=0 ✅
+- `bash scripts/verify-merge.sh` EXIT=0; **Passed: 12 / Failed: 0** ✅
+- `bash scripts/check-no-dynamic.sh` EXIT=0 ✅
+- AGENTS.md row state-flipped: active → closed-with-surface-and-stop
+- No new ADR amendment owed (C2a materially exercises Q25.B
+  SUPERSEDED already at 7d7354dc)
+
+### Cascade-site count actual vs ~100-site ceiling
+
+**N/A — zero source changes.** The structured-surface-and-stop
+deliverable does not consume cascade-site budget. The ~100-site
+ceiling applies to the joint C2+B+D landing recommended above (the
+estimated ~5k LoC / 40 files exceeds the per-file ceiling; this is
+the existing 6th + 8th imprecision-pattern instance disposition —
+NOT a new ceiling violation by C2a).
+
+### CLAUDE.md modifications surfaced
+
+None. Forbidden patterns + Renames-to-refuse-on-sight + Q25.B
+SUPERSEDED post-supersession forbidden rules all preserved
+verbatim. The surface-and-stop disposition is the dispatch's
+documented exit path per ADR-006 §2.7.24 Q25.B SUPERSEDED
+post-supersession point 4 + Q25.B SUPERSEDED migration cadence
+paragraph + supervisor clarification 2 (2026-05-14).
+
+---
+
+*Next session: supervisor disposition on C2a's structured
+surface-and-stop finding. Decision points:*
+- *(a) Ratify 8th imprecision-pattern instance + re-plan as joint
+  Phase 0/1/2 cluster-2 candidate.*
+- *(b) Refuse surface-and-stop; demand C2a re-attempt with a specific
+  architectural alternative not enumerated above (none identified at
+  C2a analysis layer — all enumerated alternatives violate Q25.B
+  SUPERSEDED post-supersession forbidden #1/#2/#3 or
+  §Renames-to-refuse-on-sight).*
+- *(c) Accept surface-and-stop as Round 2 C2a final disposition; merge
+  to bulldozer-strictly-typed as doc-only close; redispatch C2 jointly
+  after A2 + D2 close.*
