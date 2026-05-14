@@ -104,7 +104,7 @@ Paste verbatim into the Agent tool with subagent_type="general-purpose":
       let t: dyn T = box(X{})
       print(t.name())                        # x
 
-      let mut s = HashSet()
+      let mut s = Set()
       s.add("a")
       s.add("b")
       print(s.size())                        # 2

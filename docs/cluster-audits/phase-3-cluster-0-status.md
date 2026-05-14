@@ -5697,7 +5697,109 @@ close ships with the gates exercised cleanly against baseline.
 
 ---
 
-*Next session: R20+ dispatches per supervisor's disposition on
-the 3 surfaces above. Read this S2-prime audit-first close
-subsection first; the team-lead handover doc + this status doc
-are the canonical state.*
+## Round 20 — S2-prime audit-only merge ceremony + supervisor disposition (2026-05-14)
+
+R20 S2-prime audit-only close (HEAD `98d68101`) merged into
+`bulldozer-strictly-typed` per supervisor RATIFY disposition. Merge
+commit `64a61338` ("Merge W12-typed-array-data-heap-element-migration-prime
+... supervisor RATIFIED ... 3 disposition surfaces resolved").
+
+Post-merge gates (team-lead-verified via devenv heredoc shell):
+
+- `bash scripts/verify-merge.sh` EXIT=0, **Passed: 12 / Failed: 0**
+- `bash scripts/check-no-dynamic.sh` EXIT=0
+- `cargo check --workspace --lib --tests` EXIT=0
+- Smoke matrix re-verification (release binary): Smoke 1 VM=4950 / JIT=4950 ✓;
+  Smoke 2 VM=30 ✓ / JIT rc=1 (canonical R14 conduit blocker unchanged);
+  Smoke 3 VM=`x` ✓ / JIT=`None` (β filter intercepts, γ R20 unblocks);
+  Smoke 4 VM=2 / JIT=2 ✓. Baseline preserved.
+
+### Supervisor R20 partial dispositions (ratified for R20 next-dispatch)
+
+- **§4.1.A.5 — S2-prime-production scope:** Option **(A) Minimal**.
+  Migrate String + Decimal producers only. DateTime / TimeSpan / Duration / Instant
+  stay `#[deprecated]` with zero producers until S5 deletes them wholesale.
+  Reasoning: dead arms have zero producers AND zero consumers (the audit
+  confirmed `build_specialized_from_heap_arcs` has `other => Err(...)` for
+  Temporal/Instant); (B) would build orphan v2-raw infrastructure with zero
+  callers — speculative scaffolding refused per CLAUDE.md "Don't design for
+  hypothetical future requirements."
+- **§4.1.D.5 — DurationObj disposition:** Option **(D-1) Skip**. Same logic
+  as (A): zero live producers + zero user-facing reachable path. Additional
+  reason: `shape_ast::ast::Duration` is a parsed-AST shape, not a runtime
+  value shape; force-fitting to 16-byte inline payload is shape-mismatch
+  defection.
+- **§4.1.D.7 / §4.1.D.8 — ConcreteType cascade:** MOOT under (A). The
+  Timespan/Instant ConcreteType arms are only needed IF we migrate those
+  producers; (A) doesn't. String + Decimal arms already exist. The ~22-site
+  cascade drops out of R20 scope entirely.
+
+### Supervisor architectural distinctions (annotation owed in handover-doc imprecision subsection)
+
+- **Dead-arm scaffolding ≠ producer/consumer carrier-shape mismatch.** R20
+  S2-prime surfaced **dead-arm scaffolding** (specialized variants with no
+  producers at all from W17-typed-carrier-bundle-A's incomplete landing),
+  which is architecturally distinct from the 8-instance parallel-implementation
+  defection class. Both bad; different cleanups: parallel-implementation →
+  unify carrier (S2-prime-production for String+Decimal); dead-arm scaffolding
+  → delete the dead code (S5 wholesale).
+- **Cluster-0 close criterion clarification:** the 4 kickoff smokes passing
+  VM == JIT, NOT TypedArrayData being fully empty. S5 closes with the 20
+  deletable arms removed; the 2 TypedObject/TraitObject arms remain as a
+  2-arm-shadow pending cluster-1+ TypedObjectStorage v2-raw migration (per
+  audit §4.3 O-3.c defer). Cluster-0 close is achievable with the shadow.
+- **4th imprecision-pattern instance ratified:** R19 S2 dispatch double-bind
+  (refuse-on-sight rule for Q25.A amendment text vs §2.2-vs-Q25.A
+  architectural conflict) caught + corrected via R19 partial disposition;
+  R20 S2-prime deliverable (c) ratifies the correction by landing the clean
+  Q25.A SUPERSEDED text. Pattern trend is decreasing severity (R16 substantive
+  ADR prose → R20 framing-level corrections caught earlier in the cycle).
+
+### Held items landed alongside R20 merge ceremony
+
+- **Smoke 4 kickoff-prompt typo fix:** `phase-3-kickoff-prompt.md:107`
+  `HashSet()` → `Set()`. Held from R18 close; lands in this status doc commit
+  per supervisor R20 disposition ("land alongside R20 next close commit").
+- **Audit-doc Char-bucket clarification:** already landed inline in R19 S1.5
+  close commit `80d8c485` per supervisor disposition; cross-referenced from
+  R20 S2-prime audit deliverable (a) §4.1.A.
+
+### R20 next-dispatch shape (per supervisor disposition)
+
+Parallel dispatch (file-territory non-overlap confirmed; S2-prime-production
+is in `shape-value/src/v2/` + producer call-sites; γ is in `shape-jit/src/`
+method-registry):
+
+- **S2-prime-production** — String + Decimal v2-raw migration. Build
+  `DecimalObj` carrier per audit (d) design (24-byte HeapHeader +
+  `rust_decimal::Decimal`); migrate String + Decimal producers from
+  `TypedArrayData::String/Decimal` to `TypedArray<*const StringObj/DecimalObj>`;
+  land `HeapElement` trait + impls per audit (b) ratification; zero work
+  on DateTime/Timespan/Duration/Instant arms.
+- **γ** — W12-jit-trait-impl-method-registry. UFCS-lookup gap for `dyn T`
+  receivers at `jit_call_method`. Unblocks Smoke 3 JIT → `x` cluster-0 close
+  criterion.
+
+### R21 dispatch (post-S2-prime-production + γ close)
+
+- **S5** — TypedArrayData enum + TypedBuffer<T> wholesale deletion. Deletes
+  20 arms (12 scalar + 6 heap-element + Char + 1 Matrix legacy); preserves
+  TypedObject/TraitObject 2-arm-shadow pending cluster-1+ O-3 resolution.
+  U64 relabel-step folds into S5 commit message per Shape D disposition.
+  Q25.A SUPERSEDED text already landed at R20 (c); S5 ratifies source-change-
+  matches-amendment.
+
+### Cluster-0 close attempt (R21+1, projected R22)
+
+Full kickoff smoke matrix VM == JIT confirmed (Smoke 2 unblocks post-S5
+dual-carrier reality elimination; Smoke 3 unblocks post-γ UFCS fix). Status
+doc cluster-0 close summary + surface to user for `phase-3-cluster-0-close`
+tag authorization.
+
+Velocity: handoff-to-v1 unchanged at ~17-23 sessions.
+
+---
+
+*Next session: R20 dispatches S2-prime-production + γ in parallel. Read
+this R20-S2-prime-merge-ceremony subsection first; the team-lead handover
+doc + this status doc are the canonical state.*
