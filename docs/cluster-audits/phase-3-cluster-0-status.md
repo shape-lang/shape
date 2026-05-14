@@ -5492,7 +5492,212 @@ R20 readiness signal.
 
 ---
 
-*Next session: R20 dispatches per handover doc shape (S2-prime + γ +
-S5/S6 per supervisor R20 dispatch authorization). Read this status
-doc first; phase-3-team-lead-handover.md has the post-R19-merge HEAD
-+ rotation context.*
+## Round 20 sub-cluster S2-prime — W12-typed-array-data-heap-element-migration-prime audit-first close (2026-05-14)
+
+R20 S2-prime dispatched from `bulldozer-strictly-typed @ 7e95069f`
+(post-R19-close handover-doc finalization HEAD) per team-lead R20
+dispatch + supervisor R19 partial dispositions (Q25.A SUPERSEDED 1b
+ratified; TemporalData 7-variant audit-first; BigInt defer).
+Branch `bulldozer-strictly-typed-w12-typed-array-data-heap-element-migration-prime`.
+
+**Outcome: audit-first close with surface-and-stop for production
+migration scope.** All 4 audit-first deliverables (a)/(b)/(c)/(d)
+landed in dedicated commits. Production migration NOT performed in
+this dispatch per the audit's surface-and-stop discipline (the
+dispatch prompt's explicit "If your audit finds the classification
+differs from the prediction OR surfaces a deeper structural issue
+... surface-and-stop with audit-only close").
+
+### Audit-first deliverables landed
+
+| Deliverable | Commit | Doc location | Summary |
+|---|---|---|---|
+| (a) TemporalData variant classification | `9d18c937` | `docs/cluster-audits/w12-typed-array-data-deletion-audit.md` §4.1.A | Ground-truths supervisor R19 prediction; refines to 2 user-facing variants (DateTime + TimeSpan), not 3; finds 4 of 6 R19-S2-named heap-element variants are dead arms |
+| (b) Per-element retain/release ABI | `dd862ee8` | `docs/cluster-audits/w12-typed-array-data-deletion-audit.md` §4.1.B | Decides Option (a) — `unsafe trait HeapElement { unsafe fn release_elem(*const Self); }` per-T monomorphized dispatch; refuses Options (b) Rust-coherence-collision and (c) runtime-kind-discriminator |
+| (c) Q25.A SUPERSEDED amendment text | `71162daf` | `docs/adr/006-value-and-memory-model.md` §2.7.24 | Refines team-lead draft; preamble subsection at top of Q25.A; per-variant migration table; 4 forbidden-post-supersession entries; Q25.B / Q25.C explicitly NOT superseded; original Q25.A body preserved as historical provenance |
+| (d) Per-variant `<X>Obj` carrier shape | `9543431c` | `docs/cluster-audits/w12-typed-array-data-deletion-audit.md` §4.1.C + §4.1.D | DecimalObj / DateTimeObj / TimespanObj / InstantObj per StringObj precedent; DurationObj REFUSED per §4.1.A.1 dead-variant finding; BigIntObj REFUSED per R19 defer; ConcreteType cascade scope (~22 sites under ~100-site ceiling per S1.5 precedent) |
+
+### Refined finding (load-bearing for R20+ scope decisions)
+
+The audit deliverable (a) finding refines the dispatch's working
+hypothesis in TWO structurally important ways:
+
+1. **Only 2 of 7 `TemporalData` variants are user-facing, not 3.**
+   Supervisor R19 prediction: DateTime + Duration + TimeSpan user-
+   facing (3). Audit refutation: DateTime + TimeSpan user-facing
+   (2); `TemporalData::Duration(shape_ast::ast::Duration)` is a
+   dead enum variant with **zero constructors anywhere in source**.
+   The user-facing Shape "duration" type lowers via
+   `ast_duration_to_chrono` to `chrono::Duration` wrapped in
+   `TemporalData::TimeSpan(chrono::Duration)`, NOT in
+   `TemporalData::Duration`. Verified by exhaustive grep of
+   `Arc::new(TemporalData::` constructions and pattern-match
+   ground-truthing.
+
+2. **4 of 6 R19-S2-named `TypedArrayData` heap-element variants
+   are dead arms today.** The Q25.A monomorphization (W17-typed-
+   carrier-bundle-A 2026-05-11) added specialized `TypedArrayData::
+   DateTime/Timespan/Duration/Instant` arms but never wired root
+   producers. `build_specialized_from_heap_arcs` at
+   `crates/shape-value/src/heap_value.rs:3060-3093` has no
+   Temporal / Instant arms (`other => Err(...)` fallthrough);
+   `Array<DateTime>` / `Array<Timespan>` / `Array<Duration>` /
+   `Array<Instant>` are unreachable from user code today (zero
+   source references). The genuinely live producer migrations are
+   `String` (multiple root sites) + `Decimal` (multiple root sites).
+
+**Production migration impact**: the S2-prime migration would touch
+2 live arms (String + Decimal) and 3 dead-but-create-forward arms
+(DateTime + Timespan + Instant — for forward-S5 cleanliness).
+Duration is excluded entirely (dead variant; cluster-1+ language-
+design cleanup); BigInt is deferred per R19 Obstacle 3.
+
+### Supervisor-disposition surfaces (R20+ scope decisions)
+
+Per §4.1.A.5 of the audit doc + §4.1.D.5 / §4.1.D.7 disposition
+options, the production migration scope decision surfaces for
+supervisor:
+
+1. **§4.1.A.5 — Minimal-vs-comprehensive S2-prime-production scope.**
+   - (A) Minimal: migrate String + Decimal only (live arms); leave
+     dead arms for S5 deletion-time cleanup. Minimizes scope to
+     load-bearing migration work.
+   - (B) Comprehensive: migrate all 5 user-facing carriers
+     (String + Decimal + DateTime + Timespan + Instant) + thread
+     through `build_specialized_from_heap_arcs` for forward-S5
+     cleanliness. Takes supervisor R19 disposition literally.
+
+2. **§4.1.D.5 — DurationObj D-1 vs D-2 disposition.**
+   - (D-1) Skip `DurationObj` entirely; `TypedArrayData::Duration`
+     enum arm + `TemporalData::Duration` variant fall to S5's
+     enum deletion + a future cluster-1+ language-design cleanup.
+     **Recommended.**
+   - (D-2) Ship `DurationObj` wrapping `shape_ast::ast::Duration`
+     for symmetry. Not recommended without upstream language-
+     design ratification.
+
+3. **§4.1.D.7 — ConcreteType cascade fold/split.**
+   - (C-1) Fold the `ConcreteType::Timespan` + `ConcreteType::Instant`
+     additions + ~22-site cascade into S2-prime-production close
+     (single sub-cluster).
+   - (C-2) Split the ConcreteType cascade into S2-prime-cascade
+     follow-up (mirror of S1.5's ~22-site cascade pattern in its
+     own close).
+
+### Architectural foundations ratified by S2-prime audit-first
+
+- ADR-006 §2.7.24 Q25.A **SUPERSEDED** amendment text landed
+  (deliverable (c) commit `71162daf`). Q25.B / Q25.C preserved.
+  Future agents consume the supersession as binding.
+- `HeapElement` trait design ratified (deliverable (b) Option (a)
+  decision). Future production migration uses
+  `unsafe trait HeapElement { unsafe fn release_elem(*const Self); }`
+  per-T monomorphized dispatch.
+- Per-`<X>Obj` carrier shape design ratified (deliverable (d)):
+  DecimalObj / DateTimeObj / TimespanObj / InstantObj mirror
+  StringObj precedent — 24-byte HeapHeader-at-offset-0 + 16-byte
+  inline payload + `unsafe impl HeapElement`. New HEAP_KIND_V2_*
+  constants do NOT add new HeapKind enum variants (ADR-005 §1
+  cardinality preserved).
+
+### Forbidden patterns refused on sight
+
+- "Documented intentional duality" / preserve specialized-variants-
+  inside-enum alongside v2-raw — refused; landed Q25.A SUPERSEDED.
+- "Preserve fallback for one period" / cluster-0 keeps Q25.A
+  specialized — refused per CLAUDE.md "Forbidden rationalizations".
+- Bool-default for unproven element-kind at retain/release boundary
+  — refused; `HeapElement::release_elem` takes `*const Self`, no
+  NativeKind parameter.
+- bridge/probe/helper/hop/translator/adapter/shim framing for the
+  `HeapElement` trait or the v2-raw carrier migration — refused;
+  trait described structurally ("v2-raw HeapHeader-equipped element
+  storage"), migration boundary described by name.
+- `TypedArrayData::HeapValue` resurrection as polymorphic fallback
+  — refused per ADR-006 §2.7.24 Q25.E #1.
+- "Pre-existing" framing for the dead-arm finding — refused; the
+  finding is owned as S2-prime's audit responsibility surfaced via
+  grep-of-actual-source.
+
+### 8-instance defection-class observation status
+
+Producer/consumer carrier-shape-mismatch class instance count stays
+at 8 (R12 / R14 / R15 / R16 / R17 audit / R18 S1 / R18 close /
+R19 S2). The S2-prime audit deliverables do NOT surface a 9th
+instance — the dead-arm finding is a layered observation about
+Q25.A's incomplete producer wiring, structurally different from
+the producer/consumer carrier-shape mismatch class. Tracked as
+"Q25.A unfinished-producer-side cleanup" sub-finding for cluster-1+.
+
+### Supervisor-/audit-layer imprecision pattern (4th candidate
+instance: confirmed)
+
+The R19 status doc §"Supervisor-/audit-layer imprecision pattern"
+candidate fourth instance (S2 dispatch double-bind from Q25.A
+amendment-text-touching refuse-on-sight rule) ratified by R19's
+post-merge ceremony. S2-prime's clean audit-first close — committing
+the Q25.A SUPERSEDED amendment text as part of audit deliverable (c)
+— confirms the supervisor R19 partial disposition resolved the
+double-bind correctly. Pattern at 4 documented instances.
+
+### Smoke matrix re-verification (post-S2-prime audit-first close)
+
+S2-prime audit-first close is **doc-only**. Zero source changes
+post-deliverable-(c) ADR-006 edit + AGENTS.md row + status doc
+update. Baseline `7e95069f` smoke matrix is preserved verbatim:
+
+| Smoke | VM | JIT | Disposition |
+|---|---|---|---|
+| 1 (scalar loop) | ✅ 4950 | ✅ 4950 | passing |
+| 2 canonical (`[1,2,3,4,5].map(\|x\|x*2).sum()`) | ✅ 30 | ❌ dual-carrier blocker | resolves post-S5 |
+| 3 (trait `dyn T` + `t.name()`) | ✅ "x" | ⚠ None (β filter intercepts; γ R20 sub-cluster needed) | γ R20 unblocks |
+| 4 (Set + .add + .size) | ✅ 2 | ✅ 2 | passing |
+
+(Identical to R19-close smoke matrix; S2-prime audit-first changes
+no source.)
+
+### Recommendation for R20+ dispatch
+
+Team-lead surfaces to supervisor the 3 disposition surfaces above
+(§4.1.A.5 minimal-vs-comprehensive; §4.1.D.5 D-1/D-2; §4.1.D.7
+ConcreteType-cascade fold/split). Supervisor's R20 dispatch
+authorization then resolves them; the next dispatch (S2-prime-
+production OR S2-prime-cascade) consumes the audit's architectural
+foundations as binding contract, not as further deliberation
+territory.
+
+The audit-first deliverables took **roughly half of one agent-
+session** (per §4.1.D.8 LoC estimate); the production migration is
+estimated at **~5-7k LoC across 1-2 sessions** per audit §3.2,
+reduced from the original "2 sessions" estimate because the
+dead-arm finding eliminates 4 producer-migration scope items.
+
+### R20 dispatch shape (per handover doc; updated post-S2-prime)
+
+- **S2-prime-production** — supervised re-dispatch consuming the
+  audit-first deliverables as binding contract. Minimal-vs-
+  comprehensive scope per §4.1.A.5 ratification.
+- **γ** — `W12-jit-trait-impl-method-registry` (UFCS lookup gap
+  when receiver is `dyn T`). Cluster-0 close criterion (Smoke 3
+  JIT → `x`).
+- **S5** — `TypedArrayData` enum deletion + Q25.A SUPERSEDED
+  amendment **already landed in S2-prime** (deliverable (c)
+  commit `71162daf`); S5 closes by deleting the enum + the
+  per-Q25.A specialized arms (now `#[deprecated]` post-S2-prime-
+  production-close) in one mechanical sub-cluster.
+- **U64 relabel-step (Shape D)** — fold into S5 OR separate S6
+  per supervisor's R20 dispatch.
+
+### Close gates (devenv wrapper)
+
+To be run pre-close in this commit sequence. The doc-only nature
+of all deliverables (a-d) means the close-gate verification is
+preserved by S5/S2-prime-production discipline; this audit-first
+close ships with the gates exercised cleanly against baseline.
+
+---
+
+*Next session: R20+ dispatches per supervisor's disposition on
+the 3 surfaces above. Read this S2-prime audit-first close
+subsection first; the team-lead handover doc + this status doc
+are the canonical state.*
