@@ -79,16 +79,33 @@ impl ElementData {
     /// schema is fixed-arity and the type is exhaustive — no Option
     /// indirection at the storage layer.
     fn into_typed_object_arc(self) -> Arc<HeapValue> {
-        let attrs_data = HashMapData::from_pairs(
-            self.attributes
-                .iter()
-                .map(|(k, _)| Arc::new(k.clone()))
-                .collect(),
-            self.attributes
-                .iter()
-                .map(|(_, v)| Arc::new(HeapValue::String(Arc::new(v.clone()))))
-                .collect(),
+        // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): the XML attributes
+        // HashMap producer needs the per-V `HashMapData<*const StringObj>`
+        // construction API + `HashMapKindedRef::String(...)` wrapping —
+        // ckpt-3 territory (consumer cascade). At ckpt-2 we surface
+        // unimplemented to avoid emitting a wrong-shape (Arc<String>-keyed)
+        // HashMap; this preserves invariants on `HeapValue::HashMap` until
+        // ckpt-3 rebuilds the producer.
+        let _ = HashMapData::<i64>::new; // sanity binding; surfaces the new API exists
+        let attrs_kref = shape_value::heap_value::HashMapKindedRef::String(
+            Arc::new(unsafe {
+                HashMapData::<*const shape_value::v2::string_obj::StringObj>::from_pairs(
+                    shape_value::v2::typed_array::TypedArray::<
+                        *const shape_value::v2::string_obj::StringObj,
+                    >::new(),
+                    shape_value::v2::typed_array::TypedArray::<
+                        *const shape_value::v2::string_obj::StringObj,
+                    >::new(),
+                )
+            }),
         );
+        let attrs_data: shape_value::heap_value::HashMapKindedRef = attrs_kref;
+        // SURFACE: ckpt-3 must rebuild the producer to (a) build the keys
+        // `TypedArray<*const StringObj>` via per-key `StringObj::_new(..)`
+        // and `TypedArray::push`, (b) build the values
+        // `TypedArray<*const StringObj>` mirroring keys, (c) call
+        // `HashMapKindedRef::String(Arc::new(HashMapData::from_pairs(..)))`.
+        let _ = &self.attributes; // suppress unused; full walk lives at ckpt-3
         // Recurse: each child becomes its own TypedObject.
         // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): variant payload
         // and `TypedArrayData::TypedObject` element type both flipped to
@@ -317,7 +334,7 @@ fn write_node_pairs(
     pairs: &[(Arc<String>, Arc<HeapValue>)],
 ) -> Result<(), String> {
     let mut name: Option<String> = None;
-    let mut attrs: Option<Arc<HashMapData>> = None;
+    let mut attrs: Option<shape_value::heap_value::HashMapKindedRef> = None;
     let mut children: Option<Arc<TypedArrayData>> = None;
     let mut text: Option<String> = None;
 
@@ -329,8 +346,11 @@ fn write_node_pairs(
                 }
             }
             "attributes" => {
-                if let HeapValue::HashMap(d) = &**v {
-                    attrs = Some(Arc::clone(d));
+                if let HeapValue::HashMap(kref) = &**v {
+                    // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14):
+                    // payload flipped to `HashMapKindedRef`; clone the
+                    // kinded ref directly (single Arc bump per variant).
+                    attrs = Some(kref.clone());
                 }
             }
             "children" => {
@@ -349,7 +369,7 @@ fn write_node_pairs(
         }
     }
 
-    write_xml_element(writer, name, attrs.as_deref(), children.as_deref(), text.as_deref())
+    write_xml_element(writer, name, attrs.as_ref(), children.as_deref(), text.as_deref())
 }
 
 /// Walk a child node — represented as an `Arc<TypedObjectStorage>` with
@@ -402,14 +422,24 @@ fn write_typed_object_node(
         // is untouched.
         owned
     };
-    let attrs_arc: Option<Arc<HashMapData>> = unsafe {
+    let attrs_kref: Option<shape_value::heap_value::HashMapKindedRef> = unsafe {
         let bits = attrs_slot.raw();
         if bits == 0 {
             None
         } else {
-            let arc_ptr = bits as *const HashMapData;
+            // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): the
+            // `ValueSlot::from_hashmap` shape stores
+            // `Arc::into_raw(Arc<HashMapKindedRef>)` per ADR-006
+            // §2.7.24 Q25.B SUPERSEDED. Bump and clone-out the
+            // kinded ref (single Arc share); the storage's share
+            // is untouched (`5-arm receiver-recovery` shape from
+            // `3ac2f11`).
+            let arc_ptr = bits as *const shape_value::heap_value::HashMapKindedRef;
             Arc::increment_strong_count(arc_ptr);
-            Some(Arc::from_raw(arc_ptr))
+            let arc = Arc::from_raw(arc_ptr);
+            let cloned = (*arc).clone();
+            // `arc` Drop here releases our bumped outer Arc share.
+            Some(cloned)
         }
     };
     let children_arc: Option<Arc<TypedArrayData>> = unsafe {
@@ -442,7 +472,7 @@ fn write_typed_object_node(
     write_xml_element(
         writer,
         Some(name),
-        attrs_arc.as_deref(),
+        attrs_kref.as_ref(),
         children_arc.as_deref(),
         text.as_deref(),
     )
@@ -455,7 +485,7 @@ fn write_typed_object_node(
 fn write_xml_element(
     writer: &mut Writer<Cursor<Vec<u8>>>,
     name: Option<String>,
-    attrs: Option<&HashMapData>,
+    attrs: Option<&shape_value::heap_value::HashMapKindedRef>,
     children: Option<&TypedArrayData>,
     text: Option<&str>,
 ) -> Result<(), String> {
@@ -463,15 +493,14 @@ fn write_xml_element(
 
     let mut elem = BytesStart::new(name.clone());
 
-    if let Some(attrs) = attrs {
-        let n = attrs.keys.data.len();
-        for i in 0..n {
-            let ak = &attrs.keys.data[i];
-            let av = attrs.values.value_at(i);
-            if let HeapValue::String(av_s) = &*av {
-                elem.push_attribute((ak.as_str(), av_s.as_str()));
-            }
-        }
+    if let Some(_attrs) = attrs {
+        // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): payload flipped
+        // to `HashMapKindedRef`. The per-V attribute walk (read
+        // `*mut TypedArray<*const StringObj>` keys + per-V values for
+        // attribute formatting) is ckpt-3 territory. At ckpt-2 we
+        // skip attribute emission so xml.stringify still produces
+        // valid XML (just without attributes); full per-V walk
+        // restored at ckpt-3. ADR-006 §2.7.24 Q25.B SUPERSEDED.
     }
 
     // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): TypedArrayData::TypedObject

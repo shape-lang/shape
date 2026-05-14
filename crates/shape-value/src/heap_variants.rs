@@ -483,14 +483,19 @@ macro_rules! define_heap_types {
             // `Arc<DataTable>` internally.
             TableView(std::sync::Arc<$crate::heap_value::TableViewData>),
             // ===== Stage C HashMap-marshal P1(b) =====
-            /// HashMap with string keys + heap-allocated values.
-            /// Two-buffer storage reusing Phase 2d Array shapes (keys via
-            /// `TypedArrayData::String`-equivalent buffer; values via
-            /// `the-deleted-heterogeneous-element-carrier`-equivalent buffer) plus an eager
-            /// bucket-index for O(1) `map.get(key)`. See
-            /// `$crate::heap_value::HashMapData` for the storage shape.
-            /// Stage C P1(b), 2026-05-07.
-            HashMap(std::sync::Arc<$crate::heap_value::HashMapData>),
+            /// HashMap with string keys + per-V monomorphized values.
+            ///
+            /// **Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14):** payload flipped
+            /// from `Arc<HashMapData>` (non-generic) to `HashMapKindedRef`
+            /// (per-V enum carrier) per ADR-006 §2.7.24 Q25.B SUPERSEDED +
+            /// audit §C.4 option (a.2). The variant tag IS the per-V
+            /// `NativeKind` discriminator; per-V dispatch at consumer sites
+            /// goes through the `HashMapKindedRef::{I64, F64, Bool, Char,
+            /// String, Decimal, TypedObject, TraitObject}` arms.
+            ///
+            /// See `$crate::heap_value::HashMapData<V>` + `HashMapKindedRef`
+            /// for the storage shape. Stage C P1(b), 2026-05-07.
+            HashMap($crate::heap_value::HashMapKindedRef),
             // ===== Wave-γ G-heap-filter-expr (2026-05-09) =====
             /// Filter-expression tree (`Arc<FilterNode>`) used by the query
             /// DSL's `And` / `Or` / `Not` opcodes (`executor/logical/mod.rs`).

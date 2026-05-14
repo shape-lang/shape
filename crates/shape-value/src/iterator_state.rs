@@ -29,7 +29,7 @@
 //! (the same shape as the §2.7.9 FilterExpr / §2.7.12 SharedCell /
 //! §2.7.13 Reference precedents).
 
-use crate::heap_value::{HashMapData, HeapValue, TypedArrayData};
+use crate::heap_value::{HashMapKindedRef, HeapValue, TypedArrayData};
 use std::sync::Arc;
 
 /// Source backing a lazy iterator pipeline. Each variant holds a typed
@@ -62,7 +62,12 @@ pub enum IteratorSource {
     /// Iteration over a HashMap receiver. Per-entry yields are
     /// 2-element `[key, value]` inner arrays, mirroring the
     /// `HashMap.entries()` shape.
-    HashMap(Arc<HashMapData>),
+    ///
+    /// **Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14):** payload flipped
+    /// from `Arc<HashMapData>` (non-generic) to `HashMapKindedRef` per
+    /// ADR-006 §2.7.24 Q25.B SUPERSEDED. Per-entry yields dispatch per-V
+    /// at iteration time via the inner `HashMapKindedRef` arm.
+    HashMap(HashMapKindedRef),
 }
 
 impl IteratorSource {

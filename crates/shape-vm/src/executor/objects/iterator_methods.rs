@@ -32,7 +32,7 @@
 
 use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
-use shape_value::heap_value::{HashMapData, HeapKind, HeapValue, TypedArrayData};
+use shape_value::heap_value::{HashMapKindedRef, HeapKind, HeapValue, TypedArrayData};
 use shape_value::iterator_state::{IteratorSource, IteratorState, IteratorTransform};
 use shape_value::typed_buffer::TypedBuffer;
 use shape_value::{KindedSlot, NativeKind, VMError};
@@ -118,15 +118,17 @@ fn clone_string_arc(slot: &KindedSlot) -> Result<Arc<String>, VMError> {
 }
 
 #[inline]
-fn clone_hashmap_arc(slot: &KindedSlot) -> Result<Arc<HashMapData>, VMError> {
+fn clone_hashmap_arc(slot: &KindedSlot) -> Result<HashMapKindedRef, VMError> {
     if !matches!(slot.kind, NativeKind::Ptr(HeapKind::HashMap)) {
         return Err(type_error(format!(
             "iter: expected HashMap receiver, got kind {:?}",
             slot.kind
         )));
     }
+    // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): payload flipped to
+    // `HashMapKindedRef`. Clone the kinded ref (per-V Arc bump).
     match slot.slot.as_heap_value() {
-        HeapValue::HashMap(arc) => Ok(Arc::clone(arc)),
+        HeapValue::HashMap(kref) => Ok(kref.clone()),
         _ => Err(type_error("iter: HashMap kind says HashMap but heap arm mismatched")),
     }
 }
@@ -261,15 +263,15 @@ fn range_elem_at(start: i64, _end: i64, step: i64, idx: usize) -> KindedSlot {
 /// TypedObject (`closure_layout.rs:843` maps `ConcreteType::Tuple` →
 /// `NativeKind::Ptr(HeapKind::TypedObject)`); there is no distinct tuple
 /// runtime carrier, so named fields are the right shape.
-fn hashmap_elem_at(m: &HashMapData, idx: usize) -> KindedSlot {
-    let key_arc = Arc::clone(&m.keys.data[idx]);
-    let value_arc = m.values.value_at(idx);
-    let key_slot = KindedSlot::from_string_arc(key_arc);
-    let value_slot = heap_value_arc_to_slot(&value_arc);
-    shape_runtime::type_schema::typed_object_from_pairs(&[
-        ("key", key_slot),
-        ("value", value_slot),
-    ])
+fn hashmap_elem_at(_m: &HashMapKindedRef, _idx: usize) -> KindedSlot {
+    // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): per-V iterator element
+    // construction is ckpt-3 territory. The walk requires (a) reading
+    // `*mut TypedArray<*const StringObj>` keys → `Arc<String>` via
+    // StringObj projection, (b) per-V `*mut TypedArray<V>` values →
+    // `KindedSlot::from_V`. Returns a placeholder `none()` slot at ckpt-2
+    // so the iterator dispatch shell can drive but yields signal an empty
+    // iteration. ADR-006 §2.7.24 Q25.B SUPERSEDED + audit §C.4.
+    KindedSlot::none()
 }
 
 /// Convert an `Arc<HeapValue>` to a `KindedSlot` via the matching per-
@@ -284,7 +286,9 @@ fn heap_value_arc_to_slot(hv: &Arc<HeapValue>) -> KindedSlot {
         HeapValue::TypedArray(a) => KindedSlot::from_typed_array(Arc::clone(a)),
         // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): TypedObjectPtr.
         HeapValue::TypedObject(o) => KindedSlot::from_typed_object_raw(o.clone().into_raw()),
-        HeapValue::HashMap(m) => KindedSlot::from_hashmap(Arc::clone(m)),
+        // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): payload flipped
+        // to `HashMapKindedRef`; wrap in `Arc::new(m.clone())`.
+        HeapValue::HashMap(m) => KindedSlot::from_hashmap(Arc::new(m.clone())),
         HeapValue::Char(c) => KindedSlot::from_char(*c),
         _ => KindedSlot::none(),
     }

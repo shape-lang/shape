@@ -143,7 +143,9 @@ fn heap_value_arc_to_slot(hv: &Arc<HeapValue>) -> KindedSlot {
         HeapValue::TypedArray(a) => KindedSlot::from_typed_array(Arc::clone(a)),
         // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): TypedObjectPtr.
         HeapValue::TypedObject(o) => KindedSlot::from_typed_object_raw(o.clone().into_raw()),
-        HeapValue::HashMap(m) => KindedSlot::from_hashmap(Arc::clone(m)),
+        // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): payload flipped to
+        // `HashMapKindedRef`. Wrap in `Arc::new(m.clone())` per-V Arc bump.
+        HeapValue::HashMap(m) => KindedSlot::from_hashmap(Arc::new(m.clone())),
         HeapValue::Char(c) => KindedSlot::from_char(*c),
         // Other heap arms — fall back to `none()` (Bool-kind null sentinel).
         // Same coverage shape as `hashmap_methods.rs::heap_value_arc_to_slot`

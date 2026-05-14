@@ -74,7 +74,7 @@
 
 use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
-use shape_value::heap_value::{HashMapData, HeapKind, HeapValue, TypedArrayData};
+use shape_value::heap_value::{HashMapKindedRef, HeapKind, HeapValue, TypedArrayData};
 use shape_value::typed_buffer::TypedBuffer;
 use shape_value::{KindedSlot, NativeKind, VMError};
 use std::sync::Arc;
@@ -92,7 +92,7 @@ fn type_error(msg: impl Into<String>) -> VMError {
 /// `HeapValue::HashMap(arc)`. The receiver retains its share — the caller
 /// borrows through the `&Arc<HashMapData>` and never decrements.
 #[inline]
-fn as_hashmap(slot: &KindedSlot) -> Result<Arc<HashMapData>, VMError> {
+fn as_hashmap(slot: &KindedSlot) -> Result<Arc<HashMapKindedRef>, VMError> {
     if !matches!(slot.kind, NativeKind::Ptr(HeapKind::HashMap)) {
         return Err(type_error(format!(
             "HashMap method receiver must be a HashMap (got kind {:?})",
@@ -103,13 +103,15 @@ fn as_hashmap(slot: &KindedSlot) -> Result<Arc<HashMapData>, VMError> {
     if bits == 0 {
         return Err(type_error("HashMap method receiver slot bits null"));
     }
-    // SAFETY: per the construction-side contract on `KindedSlot::
-    // from_hashmap`, `Ptr(HeapKind::HashMap)` slot bits are
-    // `Arc::into_raw(Arc<HashMapData>)` and the slot owns one
-    // strong-count share. Reconstruct, clone, restore. The W13 version
-    // went through `slot.as_heap_value()` — wrong-type cast (the
-    // underlying allocation is `HashMapData`, not a `HeapValue` enum).
-    let arc = unsafe { Arc::<HashMapData>::from_raw(bits as *const HashMapData) };
+    // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): slot bits are
+    // `Arc::into_raw(Arc<HashMapKindedRef>) as u64` per ADR-006 §2.7.24
+    // Q25.B SUPERSEDED. Recovery: bump strong count, clone the outer
+    // Arc<HashMapKindedRef> share, drop the bumped share (the slot's
+    // original share remains intact — 5-arm receiver-recovery shape).
+    // SAFETY: construction-side contract on KindedSlot::from_hashmap.
+    let arc = unsafe {
+        Arc::<HashMapKindedRef>::from_raw(bits as *const HashMapKindedRef)
+    };
     let cloned = Arc::clone(&arc);
     let _ = Arc::into_raw(arc);
     Ok(cloned)
@@ -150,7 +152,12 @@ fn heap_value_arc_to_slot(hv: &Arc<HeapValue>) -> KindedSlot {
         HeapValue::TypedArray(a) => KindedSlot::from_typed_array(Arc::clone(a)),
         // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): TypedObjectPtr.
         HeapValue::TypedObject(o) => KindedSlot::from_typed_object_raw(o.clone().into_raw()),
-        HeapValue::HashMap(m) => KindedSlot::from_hashmap(Arc::clone(m)),
+        // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): payload flipped
+        // to `HashMapKindedRef`. The Arc-wrapped clone is built fresh
+        // (Arc::new on a cloned kinded ref — Clone is per-V Arc bump per
+        // HashMapKindedRef::clone). Mirrors the post-flip
+        // `ValueSlot::from_hashmap(Arc<HashMapKindedRef>)` signature.
+        HeapValue::HashMap(m) => KindedSlot::from_hashmap(Arc::new(m.clone())),
         HeapValue::Char(c) => KindedSlot::from_char(*c),
         // Other heap arms — fall back to `none()` (Bool-kind null sentinel).
         // Same coverage gap as `array_ops::heap_value_to_slot`; widening is
@@ -174,16 +181,21 @@ pub fn v2_get(
             "HashMap.get() requires exactly 1 argument (key)",
         ));
     }
-    let map = as_hashmap(&args[0])?;
-    let key = as_string_key(&args[1])?;
-    match map.get(key) {
-        // W17-typed-carrier-bundle-A: HashMapData::get now returns
-        // Option<Arc<HeapValue>> (owned) per Q25.B specialized arms, since
-        // the value buffer may be a per-variant typed buffer with no
-        // underlying `&Arc<HeapValue>` to borrow.
-        Some(value_arc) => Ok(heap_value_arc_to_slot(&value_arc)),
-        None => Ok(KindedSlot::none()),
-    }
+    let _map = as_hashmap(&args[0])?;
+    let _key = as_string_key(&args[1])?;
+    // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): per-V HashMap.get(key)
+    // → KindedSlot dispatch is ckpt-3 territory (consumer cascade alongside
+    // hashmap_methods.rs body rewrites). At ckpt-2 the receiver-recovery
+    // helper `as_hashmap` returns `Arc<HashMapKindedRef>` (per-V enum
+    // carrier); the per-V `match kref { I64(arc) => arc.get(...) ... }`
+    // body is restored at ckpt-3. SURFACE-AND-STOP at ckpt-2.
+    Err(VMError::RuntimeError(
+        "HashMap.get(): per-V dispatch is ckpt-3 territory (per-V \
+         HashMapKindedRef body rewrite not landed). ADR-006 §2.7.24 \
+         Q25.B SUPERSEDED + audit §C.4 — Round 3b C2-joint cascade \
+         pending."
+            .to_string(),
+    ))
 }
 
 /// HashMap.has(key) -> bool
@@ -216,9 +228,21 @@ pub fn v2_keys(
     if args.len() != 1 {
         return Err(type_error("HashMap.keys() takes no arguments"));
     }
-    let map = as_hashmap(&args[0])?;
-    let arr = TypedArrayData::String(Arc::clone(&map.keys));
-    Ok(KindedSlot::from_typed_array(Arc::new(arr)))
+    let _map = as_hashmap(&args[0])?;
+    // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): per-V HashMap.keys()
+    // → `TypedArrayData::String` projection is ckpt-3 territory (the new
+    // keys buffer shape is `*mut TypedArray<*const StringObj>`; the
+    // projection into `TypedArrayData::String(Arc<TypedBuffer<Arc<String>>>)`
+    // requires either a new TypedArrayData::StringV2 variant or a buffer
+    // copy step). SURFACE-AND-STOP at ckpt-2. ADR-006 §2.7.24 Q25.B
+    // SUPERSEDED + audit §C.4.
+    Err(VMError::RuntimeError(
+        "HashMap.keys(): per-V dispatch is ckpt-3 territory (keys-buffer \
+         shape flipped to *mut TypedArray<*const StringObj>; projection \
+         to TypedArrayData::String requires ckpt-3 cascade). Round 3b \
+         C2-joint pending."
+            .to_string(),
+    ))
 }
 
 /// HashMap.values() -> Array<value>
@@ -234,31 +258,21 @@ pub fn v2_values(
     if args.len() != 1 {
         return Err(type_error("HashMap.values() takes no arguments"));
     }
-    let map = as_hashmap(&args[0])?;
-    // W17-typed-carrier-bundle-A checkpoint 3/4: HashMapValueBuf per-arm
-    // dispatch — each variant projects to its matching TypedArrayData
-    // arm via a single Arc::clone on the inner typed buffer.
-    //
-    // Wave 2 Agent C dead-arm deletion (2026-05-15): HashMapValueBuf's dead
-    // arms (I64/F64/Bool/DateTime/Timespan/Duration/Instant/TraitObject) were
-    // wholesale-deleted per `docs/cluster-audits/bulldozer-wave-1-inventory.md`
-    // §C.5 (zero root producers). Surviving live arms: String/Decimal/BigInt/
-    // TypedObject/Char. ADR-006 §2.7.24 Q25.B SUPERSEDED.
-    use shape_value::heap_value::HashMapValueBuf;
-    let arr = match &map.values {
-        HashMapValueBuf::String(b) => TypedArrayData::String(Arc::clone(b)),
-        HashMapValueBuf::Decimal(b) => TypedArrayData::Decimal(Arc::clone(b)),
-        HashMapValueBuf::BigInt(b) => TypedArrayData::BigInt(Arc::clone(b)),
-        HashMapValueBuf::Char(b) => TypedArrayData::Char(Arc::clone(b)),
-        // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): both
-        // HashMapValueBuf::TypedObject and TypedArrayData::TypedObject now
-        // carry `Arc<TypedBuffer<TypedObjectPtr>>` — direct buffer Arc::clone
-        // (mirror of String/Decimal/BigInt/Char arms above). No per-element
-        // walk needed; refcount discipline lives on TypedObjectPtr's
-        // Drop/Clone impls.
-        HashMapValueBuf::TypedObject(b) => TypedArrayData::TypedObject(Arc::clone(b)),
-    };
-    Ok(KindedSlot::from_typed_array(Arc::new(arr)))
+    let _map = as_hashmap(&args[0])?;
+    // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): the values projection
+    // now lives at the `HashMapKindedRef` enum level — each variant's
+    // inner `Arc<HashMapData<V>>` projects to its matching
+    // `TypedArrayData::<V>` arm by reading `arc.values: *mut TypedArray<V>`
+    // and (a) wrapping in `TypedBuffer::<V>::wrap_raw` (requires the
+    // per-V wrap helper, not yet built) OR (b) deep-copying into a fresh
+    // `TypedBuffer<V>`. Per-V cascade is ckpt-3 territory. SURFACE-AND-
+    // STOP at ckpt-2. ADR-006 §2.7.24 Q25.B SUPERSEDED + audit §C.4.
+    Err(VMError::RuntimeError(
+        "HashMap.values(): per-V dispatch is ckpt-3 territory (values-buffer \
+         shape flipped to *mut TypedArray<V>; per-V TypedArrayData::<V> \
+         projection requires ckpt-3 cascade). Round 3b C2-joint pending."
+            .to_string(),
+    ))
 }
 
 /// HashMap.entries() -> Array<[key, value]>
@@ -320,9 +334,20 @@ pub fn v2_get_or_default(
     }
     let map = as_hashmap(&args[0])?;
     let key = as_string_key(&args[1])?;
-    match map.get(key) {
-        Some(value_arc) => Ok(heap_value_arc_to_slot(&value_arc)),
-        None => Ok(args[2].clone()),
+    // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): per-V HashMap.get(key)
+    // → KindedSlot dispatch is ckpt-3 territory. For the simple
+    // `contains_key`-checked default-or-surface pattern: on miss return
+    // the default (which works at ckpt-2 since default is `KindedSlot`
+    // already); on hit SURFACE since per-V projection of the value
+    // pointer/scalar into a `KindedSlot` requires ckpt-3.
+    if map.contains_key(key) {
+        Err(VMError::RuntimeError(
+            "HashMap.getOrDefault(): per-V hit-path dispatch is ckpt-3 \
+             territory. ADR-006 §2.7.24 Q25.B SUPERSEDED."
+                .to_string(),
+        ))
+    } else {
+        Ok(args[2].clone())
     }
 }
 
@@ -349,36 +374,22 @@ pub fn v2_to_array(
 /// User code reads `entry.key` / `entry.value` rather than `entry[0]` /
 /// `entry[1]` — breaking change for stdlib + tests.
 fn build_entries_array(receiver: &KindedSlot) -> Result<KindedSlot, VMError> {
-    let map = as_hashmap(receiver)?;
-    let n = map.len();
-    // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): TypedArrayData::TypedObject
-    // inner element type flipped to TypedObjectPtr; recovery for v2-raw
-    // payload uses raw bits + v2_retain (NOT Arc::from_raw).
-    let mut entry_storages: Vec<shape_value::heap_value::TypedObjectPtr> =
-        Vec::with_capacity(n);
-    for i in 0..n {
-        let key_arc: Arc<String> = Arc::clone(&map.keys.data[i]);
-        let value_arc: Arc<HeapValue> = map.values.value_at(i);
-        let key_slot = KindedSlot::from_string_arc(key_arc);
-        let value_slot = heap_value_arc_to_slot(&value_arc);
-        let entry_slot = shape_runtime::type_schema::typed_object_from_pairs(&[
-            ("key", key_slot),
-            ("value", value_slot),
-        ]);
-        // typed_object_from_pairs's bits are `*const TypedObjectStorage`
-        // (v2-raw shape per construction-side contract). Bump for the
-        // buffer's owned share; entry_slot's Drop retires its share.
-        let bits = entry_slot.slot.raw();
-        let ptr = bits as *const shape_value::heap_value::TypedObjectStorage;
-        // SAFETY: ptr is a live TypedObjectStorage with refcount ≥ 1.
-        unsafe { shape_value::v2::refcount::v2_retain(&(*ptr).header); }
-        entry_storages.push(shape_value::heap_value::TypedObjectPtr::new(ptr));
-        drop(entry_slot); // releases the original share via Drop's kind-aware path
-    }
-    let buf = TypedBuffer::from_vec(entry_storages);
-    Ok(KindedSlot::from_typed_array(Arc::new(
-        TypedArrayData::TypedObject(Arc::new(buf)),
-    )))
+    let _map = as_hashmap(receiver)?;
+    // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): per-V HashMap entries
+    // walk is ckpt-3 territory. The new HashMapData<V> shape requires
+    // (a) walking `*mut TypedArray<*const StringObj>` keys → `Arc<String>`
+    // per element (via StringObj-to-Arc<String> projection), and
+    // (b) walking `*mut TypedArray<V>` values per-V → `KindedSlot::from_V`
+    // dispatch. Both walks are ckpt-3 cascade. SURFACE-AND-STOP at ckpt-2.
+    // ADR-006 §2.7.24 Q25.B SUPERSEDED + audit §C.4.
+    let _ = TypedBuffer::<i64>::from_vec; // sanity binding
+    Err(VMError::RuntimeError(
+        "HashMap.entries() / toArray(): per-V dispatch is ckpt-3 territory \
+         (per-V HashMapKindedRef walk into entry TypedObjects not landed). \
+         ADR-006 §2.7.24 Q25.B SUPERSEDED + audit §C.4 — Round 3b C2-joint \
+         cascade pending."
+            .to_string(),
+    ))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -404,26 +415,19 @@ pub fn v2_set(
             "HashMap.set() requires exactly 2 arguments (key, value)",
         ));
     }
-    // Project the key arg into an owned `Arc<String>`. `result_slot_to_string_arc`
-    // is the construction-side projection used by `groupBy`; same encoding
-    // contract for both `NativeKind::String` and `NativeKind::Ptr(HeapKind::String)`
-    // (per the constructor doc in `kinded_slot.rs:474..480`).
-    let key_arc: Arc<String> = result_slot_to_string_arc(&args[1]).ok_or_else(|| {
-        type_error(format!(
-            "HashMap.set(): key must be a string (got kind {:?})",
-            args[1].kind()
-        ))
-    })?;
-    // Project the value arg into an `Arc<HeapValue>` matching the
-    // `HashMapData::values` storage shape. Same projection as
-    // `HashMap.map()`'s closure result re-pack.
-    let value_arc: Arc<HeapValue> = result_slot_to_heap_value_arc(&args[2])?;
-    // Take an owned share of the receiver Arc, then `Arc::make_mut` to
-    // mutate without disturbing other live shares. Clone-on-write per
-    // ADR-006 §2.7.4 (the same shape as `typed_array_elem.rs:255`).
-    let mut hm: Arc<HashMapData> = as_hashmap(&args[0])?;
-    Arc::make_mut(&mut hm).insert(key_arc, value_arc);
-    Ok(KindedSlot::from_hashmap(hm))
+    let _ = &args[0]; // suppress unused
+    let _ = &args[1];
+    let _ = &args[2];
+    // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): per-V HashMap.set is
+    // ckpt-3 territory. The new shape requires (a) classifying the value
+    // arg's kind to pick the right HashMapKindedRef::V arm, (b) per-V
+    // Arc::make_mut on the inner Arc<HashMapData<V>>, (c) per-V
+    // `*mut TypedArray<V>::push` mutation. ADR-006 §2.7.24 Q25.B SUPERSEDED.
+    Err(VMError::RuntimeError(
+        "HashMap.set(): per-V dispatch is ckpt-3 territory. ADR-006 \
+         §2.7.24 Q25.B SUPERSEDED."
+            .to_string(),
+    ))
 }
 
 /// HashMap.delete(key) -> HashMap
@@ -443,10 +447,15 @@ pub fn v2_delete(
             "HashMap.delete() requires exactly 1 argument (key)",
         ));
     }
-    let key = as_string_key(&args[1])?;
-    let mut hm: Arc<HashMapData> = as_hashmap(&args[0])?;
-    Arc::make_mut(&mut hm).remove(key);
-    Ok(KindedSlot::from_hashmap(hm))
+    let _ = as_string_key(&args[1])?;
+    let _ = as_hashmap(&args[0])?;
+    // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): per-V HashMap.delete
+    // is ckpt-3 territory (per-V Arc::make_mut + per-V remove). ADR-006
+    // §2.7.24 Q25.B SUPERSEDED.
+    Err(VMError::RuntimeError(
+        "HashMap.delete(): per-V dispatch is ckpt-3 territory."
+            .to_string(),
+    ))
 }
 
 /// HashMap.remove(key) -> Option<value>
@@ -466,7 +475,7 @@ pub fn v2_delete(
 /// pop-shape ABI; both methods can coexist on HashMap with distinct
 /// return contracts (decision-call #3 per W17-pop-mutation dispatch).
 pub fn v2_remove(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
@@ -475,22 +484,15 @@ pub fn v2_remove(
             "HashMap.remove() requires exactly 1 argument (key)",
         ));
     }
-    let key = as_string_key(&args[1])?;
-    let mut hm: Arc<HashMapData> = as_hashmap(&args[0])?;
-    // Snapshot the value-at-key BEFORE removal — Arc::make_mut may
-    // clone the underlying buffers, so post-removal `hm.get(key)` would
-    // return `None` and produce a wrong-typed Option result. Borrowing
-    // here is safe: `hm` still holds at least one share until we drop it.
-    let popped = hm.get(key);
-    Arc::make_mut(&mut hm).remove(key);
-    // Side-channel-publish NewContainer for compiler write-back.
-    let new_self_slot = KindedSlot::from_hashmap(hm);
-    vm.push_kinded(new_self_slot.raw(), new_self_slot.kind())?;
-    std::mem::forget(new_self_slot);
-    match popped {
-        Some(value_arc) => Ok(heap_value_arc_to_slot(&value_arc)),
-        None => Ok(KindedSlot::none()),
-    }
+    let _ = as_string_key(&args[1])?;
+    let _ = as_hashmap(&args[0])?;
+    // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): per-V HashMap.remove
+    // is ckpt-3 territory. The tuple-return ABI + side-channel publish
+    // both depend on per-V Arc::make_mut + per-V value-at-key projection.
+    Err(VMError::RuntimeError(
+        "HashMap.remove(): per-V dispatch is ckpt-3 territory."
+            .to_string(),
+    ))
 }
 
 /// HashMap.merge(other) -> HashMap
@@ -509,10 +511,14 @@ pub fn v2_merge(
             "HashMap.merge() requires exactly 1 argument (other)",
         ));
     }
-    let other: Arc<HashMapData> = as_hashmap(&args[1])?;
-    let mut hm: Arc<HashMapData> = as_hashmap(&args[0])?;
-    Arc::make_mut(&mut hm).merge(&other);
-    Ok(KindedSlot::from_hashmap(hm))
+    let _ = as_hashmap(&args[1])?;
+    let _ = as_hashmap(&args[0])?;
+    // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): per-V HashMap.merge is
+    // ckpt-3 territory (per-V Arc::make_mut + per-V buffer extend).
+    Err(VMError::RuntimeError(
+        "HashMap.merge(): per-V dispatch is ckpt-3 territory."
+            .to_string(),
+    ))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -549,16 +555,18 @@ pub fn v2_for_each(
             "HashMap.forEach() requires exactly 1 argument (callback)",
         ));
     }
-    let map: Arc<HashMapData> = as_hashmap(&args[0])?;
-    let closure = &args[1];
-    let n = map.len();
-    for i in 0..n {
-        let key_slot = KindedSlot::from_string_arc(Arc::clone(&map.keys.data[i]));
-        let value_slot = heap_value_arc_to_slot(&map.values.value_at(i));
-        // Result share released via `KindedSlot::drop` at end of scope.
-        let _ = vm.call_value_immediate_nb(closure, &[key_slot, value_slot], ctx.as_deref_mut())?;
-    }
-    Ok(KindedSlot::none())
+    let _ = as_hashmap(&args[0])?;
+    let _closure = &args[1];
+    let _ = vm;
+    let _ = ctx;
+    // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): per-V HashMap.forEach
+    // iteration is ckpt-3 territory (per-V keys/values walk + per-V
+    // kinded-slot construction for each closure-call). ADR-006 §2.7.24
+    // Q25.B SUPERSEDED.
+    Err(VMError::RuntimeError(
+        "HashMap.forEach(): per-V iteration is ckpt-3 territory."
+            .to_string(),
+    ))
 }
 
 /// HashMap.filter(fn(key, value) -> bool) -> HashMap
@@ -576,30 +584,16 @@ pub fn v2_filter(
             "HashMap.filter() requires exactly 1 argument (predicate)",
         ));
     }
-    let map: Arc<HashMapData> = as_hashmap(&args[0])?;
-    let closure = &args[1];
-    let n = map.len();
-    let mut out_keys: Vec<Arc<String>> = Vec::new();
-    let mut out_values: Vec<Arc<HeapValue>> = Vec::new();
-    for i in 0..n {
-        let key_arc = Arc::clone(&map.keys.data[i]);
-        let value_arc = map.values.value_at(i);
-        let key_slot = KindedSlot::from_string_arc(Arc::clone(&key_arc));
-        let value_slot = heap_value_arc_to_slot(&value_arc);
-        let result = vm.call_value_immediate_nb(closure, &[key_slot, value_slot], ctx.as_deref_mut())?;
-        let keep = result
-            .as_bool()
-            .ok_or_else(|| type_error(format!(
-                "HashMap.filter(): predicate must return bool (got kind {:?})",
-                result.kind()
-            )))?;
-        if keep {
-            out_keys.push(key_arc);
-            out_values.push(value_arc);
-        }
-    }
-    let new_map = HashMapData::from_pairs(out_keys, out_values);
-    Ok(KindedSlot::from_hashmap(Arc::new(new_map)))
+    let _ = as_hashmap(&args[0])?;
+    let _ = (vm, ctx, &args[1]);
+    // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): per-V HashMap.filter
+    // is ckpt-3 territory (per-V iteration + per-V new HashMap construction
+    // for surviving entries). ADR-006 §2.7.24 Q25.B SUPERSEDED.
+    Err(VMError::RuntimeError(
+        "HashMap.filter(): per-V iteration + construction is ckpt-3 \
+         territory."
+            .to_string(),
+    ))
 }
 
 /// HashMap.map(fn(key, value) -> new_value) -> HashMap
@@ -617,22 +611,15 @@ pub fn v2_map(
             "HashMap.map() requires exactly 1 argument (mapper)",
         ));
     }
-    let map: Arc<HashMapData> = as_hashmap(&args[0])?;
-    let closure = &args[1];
-    let n = map.len();
-    let mut out_keys: Vec<Arc<String>> = Vec::with_capacity(n);
-    let mut out_values: Vec<Arc<HeapValue>> = Vec::with_capacity(n);
-    for i in 0..n {
-        let key_arc = Arc::clone(&map.keys.data[i]);
-        let value_slot = heap_value_arc_to_slot(&map.values.value_at(i));
-        let key_slot = KindedSlot::from_string_arc(Arc::clone(&key_arc));
-        let result = vm.call_value_immediate_nb(closure, &[key_slot, value_slot], ctx.as_deref_mut())?;
-        let new_value = result_slot_to_heap_value_arc(&result)?;
-        out_keys.push(key_arc);
-        out_values.push(new_value);
-    }
-    let new_map = HashMapData::from_pairs(out_keys, out_values);
-    Ok(KindedSlot::from_hashmap(Arc::new(new_map)))
+    let _ = as_hashmap(&args[0])?;
+    let _ = (vm, ctx, &args[1]);
+    // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): per-V HashMap.map is
+    // ckpt-3 territory (per-V iteration + per-V new HashMap construction
+    // with closure-result re-pack). ADR-006 §2.7.24 Q25.B SUPERSEDED.
+    Err(VMError::RuntimeError(
+        "HashMap.map(): per-V iteration + construction is ckpt-3 territory."
+            .to_string(),
+    ))
 }
 
 /// HashMap.reduce(fn(acc, key, value) -> acc, initial) -> value
@@ -649,20 +636,14 @@ pub fn v2_reduce(
             "HashMap.reduce() requires exactly 2 arguments (reducer, initial)",
         ));
     }
-    let map: Arc<HashMapData> = as_hashmap(&args[0])?;
-    let closure = &args[1];
-    let mut acc: KindedSlot = args[2].clone();
-    let n = map.len();
-    for i in 0..n {
-        let key_slot = KindedSlot::from_string_arc(Arc::clone(&map.keys.data[i]));
-        let value_slot = heap_value_arc_to_slot(&map.values.value_at(i));
-        acc = vm.call_value_immediate_nb(
-            closure,
-            &[acc, key_slot, value_slot],
-            ctx.as_deref_mut(),
-        )?;
-    }
-    Ok(acc)
+    let _ = as_hashmap(&args[0])?;
+    let _ = (vm, ctx, &args[1], &args[2]);
+    // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): per-V HashMap.reduce
+    // iteration is ckpt-3 territory. ADR-006 §2.7.24 Q25.B SUPERSEDED.
+    Err(VMError::RuntimeError(
+        "HashMap.reduce(): per-V iteration is ckpt-3 territory."
+            .to_string(),
+    ))
 }
 
 /// HashMap.groupBy(fn(key, value) -> group_key) -> HashMap<group_key, HashMap>
@@ -681,53 +662,17 @@ pub fn v2_group_by(
             "HashMap.groupBy() requires exactly 1 argument (key-extractor)",
         ));
     }
-    let map: Arc<HashMapData> = as_hashmap(&args[0])?;
-    let closure = &args[1];
-    let n = map.len();
-
-    // Insertion-ordered list of group_keys plus a parallel pair of
-    // (group_keys-collected, group_values-collected). A side hash maps
-    // group_key string → index into `groups` for O(1) lookup.
-    let mut groups: Vec<(Arc<String>, Vec<Arc<String>>, Vec<Arc<HeapValue>>)> = Vec::new();
-    let mut group_index: std::collections::HashMap<String, usize> =
-        std::collections::HashMap::new();
-
-    for i in 0..n {
-        let key_arc = Arc::clone(&map.keys.data[i]);
-        let value_arc = map.values.value_at(i);
-        let key_slot = KindedSlot::from_string_arc(Arc::clone(&key_arc));
-        let value_slot = heap_value_arc_to_slot(&value_arc);
-        let result = vm.call_value_immediate_nb(closure, &[key_slot, value_slot], ctx.as_deref_mut())?;
-        let group_key_arc: Arc<String> = result_slot_to_string_arc(&result).ok_or_else(|| {
-            type_error(format!(
-                "HashMap.groupBy(): key-extractor must return a string (got kind {:?})",
-                result.kind()
-            ))
-        })?;
-
-        let gi = match group_index.get(group_key_arc.as_str()) {
-            Some(&idx) => idx,
-            None => {
-                let idx = groups.len();
-                group_index.insert((*group_key_arc).clone(), idx);
-                groups.push((Arc::clone(&group_key_arc), Vec::new(), Vec::new()));
-                idx
-            }
-        };
-        groups[gi].1.push(key_arc);
-        groups[gi].2.push(value_arc);
-    }
-
-    // Build outer HashMap: group_key -> inner HashMap (as Arc<HeapValue>).
-    let mut outer_keys: Vec<Arc<String>> = Vec::with_capacity(groups.len());
-    let mut outer_values: Vec<Arc<HeapValue>> = Vec::with_capacity(groups.len());
-    for (gk, inner_keys, inner_values) in groups {
-        outer_keys.push(gk);
-        let inner_map = HashMapData::from_pairs(inner_keys, inner_values);
-        outer_values.push(Arc::new(HeapValue::HashMap(Arc::new(inner_map))));
-    }
-    let outer = HashMapData::from_pairs(outer_keys, outer_values);
-    Ok(KindedSlot::from_hashmap(Arc::new(outer)))
+    let _ = as_hashmap(&args[0])?;
+    let _ = (vm, ctx, &args[1]);
+    // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): per-V HashMap.groupBy
+    // is ckpt-3 territory. The inner-/outer-HashMap construction depends
+    // on per-V `HashMapData<V>::from_pairs` API and HashMap-of-HashMap
+    // wiring through HashMapKindedRef. ADR-006 §2.7.24 Q25.B SUPERSEDED.
+    Err(VMError::RuntimeError(
+        "HashMap.groupBy(): per-V iteration + outer/inner HashMap \
+         construction is ckpt-3 territory."
+            .to_string(),
+    ))
 }
 
 /// Project a callback-return `KindedSlot` to an `Arc<HeapValue>` suitable

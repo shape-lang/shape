@@ -208,9 +208,19 @@ impl ValueSlot {
         Self(Arc::into_raw(b) as u64)
     }
 
-    /// Store an `Arc<HashMapData>` directly. Mirrors
-    /// `HeapValue::HashMap(Arc<HashMapData>)`.
-    pub fn from_hashmap(h: Arc<HashMapData>) -> Self {
+    /// Store an `Arc<HashMapKindedRef>` directly. Mirrors
+    /// `HeapValue::HashMap(HashMapKindedRef)`.
+    ///
+    /// **Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14):** signature flipped
+    /// from `Arc<HashMapData>` (non-generic) to `Arc<HashMapKindedRef>`
+    /// (per-V enum carrier wrapped in Arc) per ADR-006 §2.7.24 Q25.B
+    /// SUPERSEDED. Single Arc indirection — the inner enum's variant tag
+    /// carries the per-V discriminator at the carrier layer, and the
+    /// 4-table-lockstep arms in `kinded_slot.rs` + `stack.rs` retain/release
+    /// the outer `Arc<HashMapKindedRef>` (single-discriminator preserved
+    /// per ADR-005 §1; per-V Arc<HashMapData<V>> retire occurs at
+    /// HashMapKindedRef's Drop on refcount-0 of the outer Arc).
+    pub fn from_hashmap(h: Arc<crate::heap_value::HashMapKindedRef>) -> Self {
         Self(Arc::into_raw(h) as u64)
     }
 

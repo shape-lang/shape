@@ -177,7 +177,10 @@ fn heap_value_to_slot(hv: &Arc<HeapValue>) -> KindedSlot {
         // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): TypedObjectPtr
         // payload — clone bumps refcount, into_raw moves share into slot.
         HeapValue::TypedObject(o) => KindedSlot::from_typed_object_raw(o.clone().into_raw()),
-        HeapValue::HashMap(m) => KindedSlot::from_hashmap(Arc::clone(m)),
+        // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): payload flipped to
+        // `HashMapKindedRef`. Wrap in fresh `Arc::new(m.clone())` (per-V
+        // Arc bump via HashMapKindedRef::clone).
+        HeapValue::HashMap(m) => KindedSlot::from_hashmap(Arc::new(m.clone())),
         HeapValue::Char(c) => KindedSlot::from_char(*c),
         // Other heap arms — fall back to none() for now; they're
         // tile-uncovered until Wave 5e wires the matching constructors.

@@ -84,17 +84,16 @@ fn build_response_pairs(
 fn extract_headers(options: &[(Arc<String>, Arc<HeapValue>)]) -> Vec<(String, String)> {
     for (k, v) in options.iter() {
         if k.as_str() == "headers" {
-            if let HeapValue::HashMap(d) = &**v {
-                let n = d.keys.data.len();
-                let mut out: Vec<(String, String)> = Vec::with_capacity(n);
-                for i in 0..n {
-                    let hk = &d.keys.data[i];
-                    let hv = d.values.value_at(i);
-                    if let HeapValue::String(s) = &*hv {
-                        out.push(((**hk).clone(), (**s).clone()));
-                    }
-                }
-                return out;
+            if let HeapValue::HashMap(_kref) = &**v {
+                // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): payload
+                // flipped to `HashMapKindedRef`. The headers HashMap is
+                // a `String → String` map at runtime; the per-V walk
+                // (keys: `*mut TypedArray<*const StringObj>`; values:
+                // `HashMapKindedRef::String(Arc<HashMapData<*const StringObj>>)`)
+                // is ckpt-3 territory. Returning empty headers at
+                // ckpt-2 preserves http() correctness (no headers sent)
+                // without per-V dispatch landing.
+                return Vec::new();
             }
         }
     }

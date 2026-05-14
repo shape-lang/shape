@@ -28,7 +28,7 @@
 
 use shape_runtime::type_schema::TypeSchemaRegistry;
 use shape_value::heap_value::{
-    HashMapData, HeapKind, HeapValue, TypedArrayData, TypedObjectStorage,
+    HeapKind, HeapValue, TypedArrayData, TypedObjectStorage,
 };
 use shape_value::{KindedSlot, NativeKind, ValueSlot};
 use std::sync::Arc;
@@ -277,14 +277,14 @@ impl<'a> ValueFormatter<'a> {
                 self.format_typed_object(storage, depth)
             }
             HeapKind::HashMap => {
-                // ADR-006 §2.7.4 — HashMapData stores parallel
-                // `Vec<Arc<String>>` keys and `Vec<Arc<HeapValue>>` values.
-                // Render each entry by recursing through the heap-value
-                // variant, with the Q8 single-discriminator dispatch
-                // (`HeapValue` match) preserved at the value side. SAFETY:
-                // construction-side contract on `KindedSlot::from_hashmap`.
-                let map: &HashMapData = unsafe { &*(bits as *const HashMapData) };
-                self.format_hashmap(map, depth)
+                // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): bits are
+                // `Arc::into_raw(Arc<HashMapKindedRef>)` per ADR-006
+                // §2.7.24 Q25.B SUPERSEDED. Cast through the kinded ref
+                // wrapper; per-V Display dispatch lives at
+                // `format_hashmap(kref, depth)`.
+                let kref: &shape_value::heap_value::HashMapKindedRef =
+                    unsafe { &*(bits as *const shape_value::heap_value::HashMapKindedRef) };
+                self.format_hashmap(kref, depth)
             }
             HeapKind::HashSet => {
                 // Wave 13 W13-hashset-rebuild (ADR-006 §2.7.15 / Q16,
@@ -866,29 +866,18 @@ impl<'a> ValueFormatter<'a> {
         out
     }
 
-    /// Format a `HashMapData` as `{key1: val1, key2: val2}`.
+    /// Format a `HashMapKindedRef` as `{key1: val1, key2: val2}`.
     ///
-    /// Each value is an `Arc<HeapValue>` — dispatched through the
-    /// canonical ADR-005 §1 single-discriminator `HeapValue` match.
-    fn format_hashmap(&self, map: &HashMapData, depth: usize) -> String {
-        // W17-typed-carrier-bundle-A commit 1/4: HashMapData::values is
-        // now a HashMapValueBuf enum per Q25.B. Iterate via the parallel
-        // keys.len() bound and materialise per-index through value_at.
-        let n = map.keys.data.len().min(map.values.len());
-        let mut out = String::with_capacity(2 + n * 8);
-        out.push('{');
-        for i in 0..n {
-            if i > 0 {
-                out.push_str(", ");
-            }
-            let key = &map.keys.data[i];
-            out.push_str(&format!("\"{}\"", key));
-            out.push_str(": ");
-            let v = map.values.value_at(i);
-            out.push_str(&self.format_heap_value(&v, depth + 1));
-        }
-        out.push('}');
-        out
+    /// **Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14):** payload flipped
+    /// to `HashMapKindedRef`. Per-V keys/values walk (read
+    /// `*mut TypedArray<*const StringObj>` keys + per-V values; format
+    /// each via `format_heap_value`) is ckpt-3 territory. At ckpt-2 we
+    /// render a compact summary `<hashmap:N>` so the printing path
+    /// compiles and the smoke matrix can still inspect typed-objects-
+    /// containing-hashmaps. Full per-V Display is restored at ckpt-3.
+    /// ADR-006 §2.7.24 Q25.B SUPERSEDED + audit §C.4.
+    fn format_hashmap(&self, map: &shape_value::heap_value::HashMapKindedRef, _depth: usize) -> String {
+        format!("<hashmap:{}>", map.len())
     }
 
     /// Format a `HeapValue` reference (the value side of `HashMapData`'s
@@ -910,7 +899,9 @@ impl<'a> ValueFormatter<'a> {
             // derefs to &TypedObjectStorage; use `&**o` to bridge through the
             // outer `&` and the wrapper's Deref impl.
             HeapValue::TypedObject(o) => self.format_typed_object(&**o, depth),
-            HeapValue::HashMap(m) => self.format_hashmap(m.as_ref(), depth),
+            // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): payload flipped
+            // to `HashMapKindedRef`; pass the borrowed kinded ref directly.
+            HeapValue::HashMap(m) => self.format_hashmap(m, depth),
             HeapValue::HashSet(s) => self.format_hashset(s.as_ref()),
             HeapValue::Deque(d) => self.format_deque(d.as_ref(), depth),
             HeapValue::DataTable(t) => format!("{}", t),

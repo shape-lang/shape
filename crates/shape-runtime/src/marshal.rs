@@ -641,27 +641,22 @@ impl FromSlot for Vec<(Arc<String>, Arc<String>)> {
             Arc::increment_strong_count(ptr);
             let arc_hv = Arc::from_raw(ptr);
             match &*arc_hv {
-                shape_value::HeapValue::HashMap(d) => {
-                    let n = d.keys.data.len();
-                    let mut out: Vec<(Arc<String>, Arc<String>)> = Vec::with_capacity(n);
-                    for i in 0..n {
-                        let k = &d.keys.data[i];
-                        let v = d.values.value_at(i);
-                        match &*v {
-                            shape_value::HeapValue::String(s) => {
-                                out.push((Arc::clone(k), Arc::clone(s)));
-                            }
-                            other => panic!(
-                                "FromSlot<Vec<(Arc<String>, Arc<String>)>>: HashMap value at \
-                                 key '{}' is HeapValue::{:?}, not String. Body's parameter \
-                                 type Vec<(Arc<String>, Arc<String>)> requires string-typed \
-                                 values. Marshal kind contract violated by caller.",
-                                k,
-                                other.kind()
-                            ),
-                        }
-                    }
-                    out
+                shape_value::HeapValue::HashMap(_kref) => {
+                    // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): payload
+                    // flipped to `HashMapKindedRef`. The per-V walk
+                    // (`HashMapKindedRef::String(arc) → arc.keys/values`)
+                    // is ckpt-3 territory. This `FromSlot<Vec<(Arc<String>,
+                    // Arc<String>)>>` marshal path is exercised by
+                    // `extension/marshal_string_string_map` extension
+                    // bodies; ckpt-3 cascade restores the full per-V walk
+                    // alongside hashmap_methods.rs. SURFACE at ckpt-2.
+                    panic!(
+                        "FromSlot<Vec<(Arc<String>, Arc<String>)>>: HashMap \
+                         marshal is ckpt-3 territory (per-V HashMapKindedRef \
+                         dispatch not landed). ADR-006 §2.7.24 Q25.B \
+                         SUPERSEDED + audit §C.4 — Round 3b C2-joint cascade \
+                         pending."
+                    );
                 }
                 other => panic!(
                     "FromSlot<Vec<(Arc<String>, Arc<String>)>>: slot bits decoded to \
@@ -693,15 +688,18 @@ impl FromSlot for Vec<(Arc<String>, Arc<shape_value::heap_value::HeapValue>)> {
             Arc::increment_strong_count(ptr);
             let arc_hv = Arc::from_raw(ptr);
             match &*arc_hv {
-                shape_value::HeapValue::HashMap(d) => {
-                    let n = d.keys.data.len();
-                    let mut out: Vec<(Arc<String>, Arc<shape_value::heap_value::HeapValue>)> =
-                        Vec::with_capacity(n);
-                    for i in 0..n {
-                        let k = &d.keys.data[i];
-                        out.push((Arc::clone(k), d.values.value_at(i)));
-                    }
-                    out
+                shape_value::HeapValue::HashMap(_kref) => {
+                    // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): payload
+                    // flipped to `HashMapKindedRef`. Per-V walk →
+                    // `Vec<(Arc<String>, Arc<HeapValue>)>` reconstruction
+                    // is ckpt-3 territory. SURFACE at ckpt-2. ADR-006
+                    // §2.7.24 Q25.B SUPERSEDED + audit §C.4.
+                    panic!(
+                        "FromSlot<Vec<(Arc<String>, Arc<HeapValue>)>>: HashMap \
+                         marshal is ckpt-3 territory (per-V HashMapKindedRef \
+                         dispatch not landed). ADR-006 §2.7.24 Q25.B \
+                         SUPERSEDED + audit §C.4."
+                    );
                 }
                 other => panic!(
                     "FromSlot<Vec<(Arc<String>, Arc<HeapValue>)>>: slot bits decoded to \

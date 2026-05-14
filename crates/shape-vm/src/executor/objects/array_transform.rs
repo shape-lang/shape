@@ -38,7 +38,7 @@
 use shape_runtime::context::ExecutionContext;
 use crate::executor::VirtualMachine;
 use shape_value::aligned_vec::AlignedVec;
-use shape_value::heap_value::{HashMapData, HeapKind, HeapValue, TypedArrayData};
+use shape_value::heap_value::{HeapKind, HeapValue, TypedArrayData};
 use shape_value::typed_buffer::{AlignedTypedBuffer, TypedBuffer};
 use shape_value::{KindedSlot, NativeKind, VMError};
 use std::sync::Arc;
@@ -1942,18 +1942,19 @@ pub(crate) fn handle_group_by_v2(
         }
     }
 
-    // Materialize each bucket as a same-variant Arc<TypedArrayData>,
-    // wrap in HeapValue::TypedArray, and compose into a HashMapData
-    // via `from_pairs`.
-    let mut keys: Vec<Arc<String>> = Vec::with_capacity(buckets.len());
-    let mut values: Vec<Arc<HeapValue>> = Vec::with_capacity(buckets.len());
-    for (key, indices) in buckets {
-        let bucket_arr = project_indices(&receiver_arc, &indices)?;
-        keys.push(Arc::new(key));
-        values.push(Arc::new(HeapValue::TypedArray(bucket_arr)));
-    }
-    let map = HashMapData::from_pairs(keys, values);
-    Ok(KindedSlot::from_hashmap(Arc::new(map)))
+    // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): per-V HashMap
+    // construction is ckpt-3 territory. The Array.groupBy producer
+    // would need the new HashMapData<V> producer API (keys =
+    // `*mut TypedArray<*const StringObj>`, values per-V), then wrapped
+    // in HashMapKindedRef::String / etc. SURFACE-AND-STOP at ckpt-2.
+    // ADR-006 §2.7.24 Q25.B SUPERSEDED + audit §C.4.
+    let _ = (buckets, receiver_arc);
+    Err(VMError::RuntimeError(
+        "Array.groupBy(): HashMap producer is ckpt-3 territory (per-V \
+         HashMapData<V> construction not landed). ADR-006 §2.7.24 Q25.B \
+         SUPERSEDED."
+            .to_string(),
+    ))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

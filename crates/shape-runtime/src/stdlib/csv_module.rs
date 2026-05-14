@@ -336,8 +336,19 @@ pub fn create_csv_module() -> ModuleExports {
                 explicit_headers.iter().map(|s| (**s).clone()).collect()
             } else if let Some(first) = data.first() {
                 match &**first {
-                    HeapValue::HashMap(d) => {
-                        d.keys.data.iter().map(|s| (**s).clone()).collect()
+                    HeapValue::HashMap(_kref) => {
+                        // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14):
+                        // payload flipped to `HashMapKindedRef`. The per-V
+                        // headers extraction (walk
+                        // `*mut TypedArray<*const StringObj>` keys → `&str`)
+                        // is ckpt-3 territory. SURFACE-AND-STOP at ckpt-2.
+                        return Err(
+                            "csv.stringify_records(): HashMap record \
+                             headers extraction is ckpt-3 territory \
+                             (per-V HashMapKindedRef dispatch not landed). \
+                             ADR-006 §2.7.24 Q25.B SUPERSEDED + audit §C.4."
+                                .to_string(),
+                        );
                     }
                     HeapValue::TypedObject(s) => {
                         let schema = crate::type_schema::lookup_schema_by_id_public(
@@ -373,20 +384,18 @@ pub fn create_csv_module() -> ModuleExports {
 
             for record_arc in data.iter() {
                 let row: Vec<String> = match &**record_arc {
-                    HeapValue::HashMap(d) => {
-                        let mut r = Vec::with_capacity(headers.len());
-                        for header in &headers {
-                            // O(1) lookup via eager bucket-index.
-                            let cell = match d.get(header) {
-                                Some(v) => match &*v {
-                                    HeapValue::String(s) => (**s).clone(),
-                                    other => other.to_string(),
-                                },
-                                None => String::new(),
-                            };
-                            r.push(cell);
-                        }
-                        r
+                    HeapValue::HashMap(_kref) => {
+                        // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14):
+                        // payload flipped to `HashMapKindedRef`. The per-V
+                        // get(header) → cell extraction is ckpt-3 territory.
+                        // SURFACE-AND-STOP at ckpt-2.
+                        return Err(
+                            "csv.stringify_records(): HashMap record row \
+                             extraction is ckpt-3 territory (per-V \
+                             HashMapKindedRef dispatch not landed). \
+                             ADR-006 §2.7.24 Q25.B SUPERSEDED + audit §C.4."
+                                .to_string(),
+                        );
                     }
                     HeapValue::TypedObject(storage) => {
                         let schema = crate::type_schema::lookup_schema_by_id_public(

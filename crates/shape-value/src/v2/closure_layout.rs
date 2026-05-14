@@ -397,7 +397,13 @@ impl Drop for SharedCell {
                         );
                     }
                     HeapKind::HashMap => {
-                        Arc::decrement_strong_count(bits as *const HashMapData);
+                        // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14):
+                        // bits are `Arc::into_raw(Arc<HashMapKindedRef>)`;
+                        // release dispatches outer Arc decrement → enum
+                        // Drop chains to per-V `Arc<HashMapData<V>>` release.
+                        Arc::decrement_strong_count(
+                            bits as *const crate::heap_value::HashMapKindedRef,
+                        );
                     }
                     // Wave 13 W13-hashset-rebuild (ADR-006 §2.7.15 / Q16,
                     // 2026-05-10): mirror of the HashMap arm. A

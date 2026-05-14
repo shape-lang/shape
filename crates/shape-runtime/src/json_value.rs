@@ -95,15 +95,19 @@ pub fn heap_to_json_value(hv: &HeapValue) -> Result<JsonValue, String> {
         HeapValue::BigInt(n) => Ok(JsonValue::Int(**n)),
         HeapValue::Char(c) => Ok(JsonValue::String(c.to_string())),
         HeapValue::TypedArray(ta) => typed_array_to_json_value(&**ta),
-        HeapValue::HashMap(d) => {
-            let n = d.keys.data.len();
-            let mut pairs: Vec<(String, JsonValue)> = Vec::with_capacity(n);
-            for i in 0..n {
-                let k = &d.keys.data[i];
-                let v = d.values.value_at(i);
-                pairs.push(((**k).clone(), heap_to_json_value(&v)?));
-            }
-            Ok(JsonValue::Object(pairs))
+        HeapValue::HashMap(_kref) => {
+            // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): payload
+            // flipped to `HashMapKindedRef`. The per-V JSON entry walk
+            // (keys: `*mut TypedArray<*const StringObj>` → `&str`;
+            // values: `*mut TypedArray<V>` → `JsonValue` per V) is
+            // ckpt-3 territory (consumer cascade alongside printing.rs
+            // / xml.rs / csv_module.rs / wire_conversion.rs / marshal.rs).
+            // SURFACE-AND-STOP at ckpt-2 with the audit §C.4 cite.
+            Err("HeapValue::HashMap → JsonValue: ckpt-3 territory (per-V \
+                 HashMapKindedRef dispatch not landed). ADR-006 §2.7.24 \
+                 Q25.B SUPERSEDED + audit §C.4 — Round 3b C2-joint \
+                 cascade pending."
+                .to_string())
         }
 
         // Wave 13 W13-hashset-rebuild (ADR-006 §2.7.15 / Q16,

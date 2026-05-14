@@ -150,8 +150,13 @@ impl KindedSlot {
     }
 
     /// Convenience: a `Ptr(HeapKind::HashMap)`-kind slot.
+    ///
+    /// **Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14):** parameter type
+    /// flipped from `Arc<HashMapData>` (non-generic) to
+    /// `Arc<HashMapKindedRef>` (per-V enum carrier in Arc) per ADR-006
+    /// §2.7.24 Q25.B SUPERSEDED.
     #[inline]
-    pub fn from_hashmap(h: Arc<HashMapData>) -> Self {
+    pub fn from_hashmap(h: Arc<crate::heap_value::HashMapKindedRef>) -> Self {
         Self::new(
             ValueSlot::from_hashmap(h),
             NativeKind::Ptr(HeapKind::HashMap),
@@ -701,7 +706,13 @@ impl Drop for KindedSlot {
                         );
                     }
                     HeapKind::HashMap => {
-                        Arc::decrement_strong_count(bits as *const HashMapData);
+                        // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14):
+                        // bits are `Arc::into_raw(Arc<HashMapKindedRef>)`;
+                        // release dispatches outer Arc decrement → enum
+                        // Drop chains to per-V `Arc<HashMapData<V>>` release.
+                        Arc::decrement_strong_count(
+                            bits as *const crate::heap_value::HashMapKindedRef,
+                        );
                     }
                     // Wave 13 W13-hashset-rebuild (ADR-006 §2.7.15 / Q16,
                     // 2026-05-10): mirror of the HashMap arm. Retires
@@ -1044,7 +1055,14 @@ impl Clone for KindedSlot {
                         crate::v2::refcount::v2_retain(hdr);
                     }
                     HeapKind::HashMap => {
-                        Arc::increment_strong_count(bits as *const HashMapData);
+                        // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14):
+                        // bits are `Arc::into_raw(Arc<HashMapKindedRef>)`;
+                        // retain dispatches outer Arc increment (the per-V
+                        // inner `Arc<HashMapData<V>>` is preserved by-share
+                        // via the enum's structural sharing).
+                        Arc::increment_strong_count(
+                            bits as *const crate::heap_value::HashMapKindedRef,
+                        );
                     }
                     // Wave 13 W13-hashset-rebuild (ADR-006 §2.7.15 / Q16,
                     // 2026-05-10): mirror of the HashMap arm. Bumps one
