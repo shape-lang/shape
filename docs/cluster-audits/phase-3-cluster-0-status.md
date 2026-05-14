@@ -7231,3 +7231,101 @@ Cumulative: **15 imprecision instances**.
 ---
 
 *Next session: Round 3a' A2-followup-split dispatch (7 parallel sub-agents α-η + 1 sequential gate-flip post-merge). After Round 3a' close: D4 multi-session sub-agent chain dispatch per D-α user ratification. Then Round 3b C2-joint sequential.*
+
+---
+
+## Wave 2 Round 3a' close — team-lead merge ceremony + S1-R18 DURABLE PATTERN ratification (2026-05-14)
+
+Round 3a' dispatched 7 per-handler-family parallel sub-agents (α/β/γ/δ/ε/ζ/η) per supervisor 2026-05-14 disposition (1) A2-followup-mechanical split. All 7 closed; merge ceremony executed cleanly; gates green; smoke matrix preserved at HEAD post-cleanup.
+
+### Per-agent close summary (4 fully agent-closed + 3 team-lead-completed-ceremony)
+
+| Agent | Close commit | LoC | Status | Notes |
+|---|---|---|---|---|
+| η | `50162622` | 0 (zero source) | STRUCTURED S-A-S | array_joins.rs delegating-only territory — all 3 handlers transitively consume α's upstream materializer; 16th imprecision instance (G6 territory mismatch + G7 per-family asymmetry) |
+| β | `ea8d9337` | +82 | ✓ clean | array_aggregation.rs LOCAL `with_typed_array` helper extension covering 6 handlers (sum/avg/min/max/count/reduce); semantically-incompatible distinction deferred to gate-flip |
+| α | `a0c39643` | +197 | ✓ clean | array_transform.rs 11 handlers + 2 helpers; ground-truth correction (17th imprecision shape): α handlers don't call shared materializer — siblings do |
+| γ | `1ee89751` | +72/-3 | ✓ clean | array_query.rs 14 handlers; typed_array_ref signature extension with op:&str for handler-name tracing |
+| δ | `d763a9d8` | +280 | ⚠ team-lead-ceremony | array_sets.rs V2RawSetOp dispatcher; sub-agent rate-limited (3rd S1-R18 instance this round) |
+| ε | `7cec661e` | +109/-5 | ⚠ team-lead-ceremony | array_sort.rs sort/sortBy/reverse paths; sub-agent stalled watchdog mid-import-cleanup (4th S1-R18) |
+| ζ | `65e662ba` | +186 | ⚠ team-lead-ceremony | array_basic.rs push/pop/first/last/slice/len paths; sub-agent rate-limited (5th S1-R18) |
+
+**Total Round 3a' code landed**: +926 LoC across 6 source files + AGENTS.md row state-flips.
+
+### S1-R18 DURABLE PATTERN RATIFICATION (user 2026-05-14)
+
+3rd + 4th + 5th simultaneous S1-R18 instances surfaced in single round (δ rate-limited / ε stalled watchdog / ζ rate-limited; all with verified-correct WIP uncommitted; gates green in each worktree pre-commit). Per supervisor 2026-05-14 disposition: 3rd instance triggers durability escalation to user. User-ratified option (a) **pattern-durability**: team-lead-completes-ceremony-for-verified-correct-agent-API-error-WIP becomes durable discipline.
+
+**Binding criteria for team-lead direct ceremony completion (no per-instance supervisor authorization required):**
+
+1. cargo check workspace EXIT=0 in agent worktree (pre-commit verification by team-lead)
+2. verify-merge.sh 12/12 PASS in agent worktree (pre-commit)
+3. Diff scoped to agent's assigned territory (no scope creep)
+4. Commit message attributes substantive work to sub-agent + ceremony completion to team-lead
+
+Supervisor escalation only if any criterion fails. Future API-error instances also resolved by team-lead directly without per-instance relay round. Documentation owed: handover doc annotation + ADR amendment shape (deferred to status doc continuation OR D4 dispatch preparation; not blocking Round 3a' merge ceremony).
+
+### Round 3a' merge ceremony commits (7 merges + AGENTS.md cleanup)
+
+```
+320551d7  AGENTS.md cleanup (state-flip 5 placeholders to closed + drop 2 stale α/β placeholders)
+<merged-ζ>  Merge ζ (+186 LoC team-lead-ceremony)
+<merged-ε>  Merge ε (+109 LoC team-lead-ceremony)
+<merged-δ>  Merge δ (+280 LoC team-lead-ceremony)
+<merged-γ>  Merge γ (+72 LoC; typed_array_ref signature extension)
+<merged-α>  Merge α (+197 LoC; 11 handlers + 2 helpers)
+<merged-β>  Merge β (+82 LoC structural envelope)
+<merged-η>  Merge η (zero source — delegating-only)
+```
+
+### Post-merge gates (devenv wrapper)
+
+- `cargo check --workspace --lib --tests` EXIT=0 ✅
+- `bash scripts/verify-merge.sh` EXIT=0; **Passed: 12 / Failed: 0** ✅
+- `bash scripts/check-no-dynamic.sh` EXIT=0 ✅
+- 7 Round 3a' worktrees cleaned up ✅
+
+### Post-merge smoke matrix (release binary rebuilt; baseline preserved)
+
+| Smoke | VM | JIT | Cluster-0+1 criterion |
+|---|---|---|---|
+| 1 (scalar loop) | ✅ 4950 | ✅ 4950 | ✓ |
+| 2 (`[1,2,3,4,5].map(\|x\|x*2).sum()`) | ✅ 30 | ❌ rc=1 | gated on S5 (gate-flip + S5 wholesale enum deletion) |
+| 3 (canonical fixture) | ✅ x | ✅ x | ✓ |
+| 4 (`Set()` + `.add()` + `.size()`) | ✅ 2 | ✅ 2 | ✓ |
+
+3/4 VM == JIT preserved. Gate still closed; v2-raw String/Decimal handler arms UNREACHABLE until A2-followup-gate-flip lands (next agent dispatch).
+
+### Imprecision-pattern instances 16-17 (Round 3a' additions)
+
+| # | Source | Imprecision shape |
+|---|---|---|
+| 16 | η (R3a') | G6 territory mismatch (zip→array_basic, concat→array_transform, joinStr→array_sort; only innerJoin/leftJoin/crossJoin in array_joins) + G7 per-family asymmetry (η = 0 direct refs vs siblings 3-12 each) |
+| 17 | α (R3a') | Dispatch claim re: "Each handler currently has a SURFACE-AND-STOP arm for V2ElemType::String / V2ElemType::Decimal in the shared typed_array_arc_from_kinded materializer" was off — array_transform handlers don't call the shared materializer themselves; the siblings do |
+
+Cumulative: **17 imprecision instances** through Round 3a' close. Pattern continuing to surface honestly at agent-execution layer with pre-flight ground-truth check binding catching each.
+
+### Next-action shape
+
+1. **Dispatch A2-followup-gate-flip** (single sequential agent) — flips `should_use_typed_array` gate in `compiler/typed_emission.rs` to `Some` for `ConcreteType::String/Decimal`. Makes all 7 sub-agents' v2-raw String/Decimal handler arms reachable atomically. Single-commit drive-by; small scope (~10-20 LoC).
+
+2. **Plan D4 multi-session sub-agent chain** per user 2026-05-14 D-α ratification. New discipline pattern: relaxed intermediate-sub-agent close gate (broken-cargo-check feature-branch commits authorized with structured state pointer); STRICT close gate on final sub-agent only. Document in handover doc + ADR amendment shape.
+
+3. **Round 3b C2-joint** sequential after D4 + A2-followup-gate-flip close.
+
+### Honest velocity update
+
+| Stage | Sessions |
+|---|---|
+| A2-followup-gate-flip (this turn) | 0.25 |
+| D4 multi-session chain (N sub-agents) | 2-3 |
+| Round 3b C2-joint (post-D4 + gate-flip) | 1 |
+| Wave 3 S5 + cluster-0+1 close attempt | 1 |
+| Cluster-2 + Phase 4 | 2-4 |
+| **Total remaining (D-α path)** | **6-9** |
+
+Tighter than prior projection by 1 session as Round 3a' + merge fit inside session boundary.
+
+---
+
+*Next session: A2-followup-gate-flip single-commit drive-by + D4 multi-session sub-agent chain dispatch per user-ratified D-α + Round 3b C2-joint sequential. Wave 3 S5 + cluster-0+1 close report follows.*
