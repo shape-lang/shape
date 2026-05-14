@@ -43,12 +43,13 @@ fn project_typed_return(
                 Ok(KindedSlot::from_string_arc(Arc::new(s)))
             }
             ConcreteReturn::OpaqueTypedObject(hv) => {
-                // hv is `Arc<HeapValue::TypedObject(Arc<TypedObjectStorage>)>`.
-                // Extract the inner Arc<TypedObjectStorage> and rewrap as a
-                // typed slot via `KindedSlot::from_typed_object`.
+                // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): hv is
+                // `Arc<HeapValue::TypedObject(TypedObjectPtr)>`. Clone the
+                // wrapper (bumps v2-raw refcount); into_raw moves the share
+                // to the slot via `from_typed_object_raw`.
                 match &*hv {
                     shape_value::heap_value::HeapValue::TypedObject(s) => Ok(
-                        KindedSlot::from_typed_object(Arc::clone(s)),
+                        KindedSlot::from_typed_object_raw(s.clone().into_raw()),
                     ),
                     other => Err(VMError::RuntimeError(format!(
                         "project_typed_return: OpaqueTypedObject expected \

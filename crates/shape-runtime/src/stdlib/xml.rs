@@ -90,13 +90,17 @@ impl ElementData {
                 .collect(),
         );
         // Recurse: each child becomes its own TypedObject.
-        let child_objs: Vec<Arc<TypedObjectStorage>> = self
+        // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): variant payload
+        // and `TypedArrayData::TypedObject` element type both flipped to
+        // `TypedObjectPtr`. The clone bumps the v2-raw refcount via
+        // `v2_retain` per the wrapper's Clone impl.
+        let child_objs: Vec<shape_value::heap_value::TypedObjectPtr> = self
             .children
             .into_iter()
             .map(|c| {
                 let child_hv = c.into_typed_object_arc();
                 match &*child_hv {
-                    HeapValue::TypedObject(s) => Arc::clone(s),
+                    HeapValue::TypedObject(s) => s.clone(),
                     _ => unreachable!(
                         "into_typed_object_arc must return HeapValue::TypedObject"
                     ),
@@ -132,17 +136,19 @@ impl ElementData {
             .into_boxed_slice(),
         );
         let heap_mask: u64 = 0b1111; // all 4 fields heap-resident
-        // Wave 2 Round 4 D4 ckpt-1: migrated to v2-raw `_new` per D1 API
-        // surface. `HeapValue::TypedObject` variant signature flip is
-        // ckpt-final territory; the wrap below will not compile until
-        // the variant signature shifts to `*const TypedObjectStorage`.
+        // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): variant signature
+        // flipped to `HeapValue::TypedObject(TypedObjectPtr)`. The
+        // `_new`-returned raw pointer (refcount=1) is wrapped in
+        // `TypedObjectPtr`, transferring the share to the wrapper.
         let storage = TypedObjectStorage::_new(
             schema_id as u64,
             slots,
             heap_mask,
             field_kinds,
         );
-        Arc::new(HeapValue::TypedObject(storage))
+        Arc::new(HeapValue::TypedObject(
+            shape_value::heap_value::TypedObjectPtr::new(storage),
+        ))
     }
 
     /// Project this element's TOP-LEVEL form as a `Vec<(String,
@@ -468,7 +474,9 @@ fn write_xml_element(
         }
     }
 
-    let child_objs: Option<&Arc<TypedBuffer<Arc<TypedObjectStorage>>>> = match children {
+    // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): TypedArrayData::TypedObject
+    // inner element type flipped from `Arc<TypedObjectStorage>` to `TypedObjectPtr`.
+    let child_objs: Option<&Arc<TypedBuffer<shape_value::heap_value::TypedObjectPtr>>> = match children {
         Some(TypedArrayData::TypedObject(buf)) => Some(buf),
         _ => None,
     };
@@ -492,7 +500,10 @@ fn write_xml_element(
 
         if let Some(buf) = child_objs {
             for child in buf.data.iter() {
-                write_typed_object_node(writer, child)?;
+                // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): `child`
+                // is `&TypedObjectPtr`. Deref to `&TypedObjectStorage` for
+                // the helper signature.
+                write_typed_object_node(writer, &**child)?;
             }
         }
 

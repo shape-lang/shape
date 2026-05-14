@@ -634,6 +634,166 @@ impl TypedObjectPtr {
     }
 }
 
+// Deref to `&TypedObjectStorage` so consumer sites can read fields
+// (`s.slots`, `s.schema_id`, etc.) without manual unsafe deref. The
+// wrapper owns one refcount share for its lifetime, so the pointed-to
+// storage is live while the wrapper is in scope.
+//
+// Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): added to support the
+// HeapValue::TypedObject(TypedObjectPtr) variant signature flip with
+// minimal consumer-cascade churn.
+impl std::ops::Deref for TypedObjectPtr {
+    type Target = TypedObjectStorage;
+    #[inline]
+    fn deref(&self) -> &TypedObjectStorage {
+        // SAFETY: per the construction-side contract, `self.0` is non-null
+        // for any `TypedObjectPtr` constructed via `new(_new(...))` or
+        // cloned from such. The default-constructed null pointer must not
+        // be dereferenced — callers reading fields are expected to hold a
+        // wrapper that owns a real share. Debug builds catch the null case
+        // via the assert; release builds UB on deref of null (mirroring
+        // `Arc<T>::deref` semantics for a null Arc — not constructable
+        // without `unsafe`). Length-zero storage is fine.
+        debug_assert!(
+            !self.0.is_null(),
+            "TypedObjectPtr::deref on null pointer (default-constructed wrapper \
+             must not be dereferenced)"
+        );
+        unsafe { &*self.0 }
+    }
+}
+
+// ── TraitObjectPtr (Wave 2 Round 4 D4 ckpt-final-prime², 2026-05-14) ────────
+
+/// Owning newtype around `*const TraitObjectStorage` carrying one
+/// v2-raw refcount share on the pointed-to allocation's HeapHeader.
+///
+/// **Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14):** mirrors the
+/// `TypedObjectPtr` precedent (above) for `TraitObjectStorage`. Carrier
+/// shape used as both:
+/// - `HeapValue::TraitObject(TraitObjectPtr)` variant payload
+/// - Future `TypedArrayData::TraitObject` element type (if/when the
+///   §Q25.A monomorphic specialization for trait-object-element arrays
+///   lands; not under this ckpt's scope)
+///
+/// `#[repr(transparent)]` so the in-memory layout is identical to
+/// `*const TraitObjectStorage` — zero ABI cost vs the raw pointer; the
+/// wrapper exists only to localize the manual Send/Sync impl + the
+/// Drop/Clone refcount discipline. Same auto-trait suppression rule
+/// applies as for TypedObjectPtr — per-T newtype is the canonical
+/// workaround for raw-ptr inner elements in HeapValue variant payloads
+/// without disabling Rust's auto-derived Send/Sync/Clone/Drop on the
+/// enclosing `HeapValue` enum.
+///
+/// Construction-side contract: callers transfer one strong-count share
+/// on the v2-raw HeapHeader (initialized to 1 via `TraitObjectStorage::_new`)
+/// to the new `TraitObjectPtr`. Reads via `as_ptr()` return the
+/// underlying pointer without bumping refcount.
+#[repr(transparent)]
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub struct TraitObjectPtr(pub *const TraitObjectStorage);
+
+// SAFETY: same argument as TypedObjectPtr's Send/Sync impls — the
+// underlying storage is Send + Sync (manually unsafe impl'd on
+// TraitObjectStorage), the HeapHeader-based refcount uses atomic ops
+// (`v2_retain` / `v2_release` in `v2/refcount.rs`), and aliasing safety
+// matches `Arc<TraitObjectStorage>` — multiple threads can hold their
+// own retain shares concurrently.
+unsafe impl Send for TraitObjectPtr {}
+unsafe impl Sync for TraitObjectPtr {}
+
+impl Default for TraitObjectPtr {
+    /// Null pointer default — used by container types that need a
+    /// `Default` impl. Callers must not dereference a default-constructed
+    /// `TraitObjectPtr`. No refcount share is owed; Drop on a null
+    /// pointer is a no-op.
+    #[inline]
+    fn default() -> Self {
+        Self(std::ptr::null())
+    }
+}
+
+impl Clone for TraitObjectPtr {
+    /// v2-raw refcount bump via `v2_retain` on the pointed-to
+    /// HeapHeader. The clone owns its own share, retired at its own
+    /// `Drop`.
+    #[inline]
+    fn clone(&self) -> Self {
+        if !self.0.is_null() {
+            // SAFETY: per the construction-side contract, `self.0` points
+            // to a live `TraitObjectStorage` allocated via `_new` (or a
+            // legacy Arc-allocated one whose embedded HeapHeader is
+            // unused but still bumpable safely — atomic increment is
+            // sound on any aligned u32 within the legitimate allocation).
+            unsafe { crate::v2::refcount::v2_retain(&(*self.0).header) };
+        }
+        Self(self.0)
+    }
+}
+
+impl Drop for TraitObjectPtr {
+    /// Retire the owned share via `TraitObjectStorage::release_elem`
+    /// (HeapElement trait — calls `v2_release` and, on refcount=0,
+    /// runs `_drop` to dealloc the allocation + retire inner shares).
+    /// No-op on null wrappers.
+    #[inline]
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            use crate::v2::heap_element::HeapElement;
+            // SAFETY: per the construction-side contract this carrier owns
+            // one share on the HeapHeader-at-offset-0 refcount.
+            unsafe { TraitObjectStorage::release_elem(self.0) };
+        }
+    }
+}
+
+impl TraitObjectPtr {
+    /// Construct from a raw pointer obtained via `TraitObjectStorage::_new`.
+    /// The caller transfers one strong-count share to the wrapper.
+    #[inline]
+    pub fn new(ptr: *const TraitObjectStorage) -> Self {
+        Self(ptr)
+    }
+
+    /// Recover the underlying raw pointer. Does NOT bump refcount;
+    /// the returned pointer is borrowed for the wrapper's lifetime.
+    #[inline]
+    pub fn as_ptr(&self) -> *const TraitObjectStorage {
+        self.0
+    }
+
+    /// Whether the pointer is null.
+    #[inline]
+    pub fn is_null(&self) -> bool {
+        self.0.is_null()
+    }
+
+    /// Consume the wrapper without running Drop, returning the raw
+    /// pointer. The caller takes over the one refcount share. Mirror
+    /// of `Arc::into_raw`.
+    #[inline]
+    pub fn into_raw(self) -> *const TraitObjectStorage {
+        let ptr = self.0;
+        std::mem::forget(self);
+        ptr
+    }
+}
+
+// Same Deref-as-shortcut rationale as TypedObjectPtr — the wrapper owns
+// the share so the pointed-to storage is live for the wrapper's lifetime.
+impl std::ops::Deref for TraitObjectPtr {
+    type Target = TraitObjectStorage;
+    #[inline]
+    fn deref(&self) -> &TraitObjectStorage {
+        debug_assert!(
+            !self.0.is_null(),
+            "TraitObjectPtr::deref on null pointer (default-constructed wrapper \
+             must not be dereferenced)"
+        );
+        unsafe { &*self.0 }
+    }
+}
+
 // ── HashMap storage (Stage C P1(b), 2026-05-07) ─────────────────────────────
 
 /// Parametric value-buffer for `HashMapData`, per ADR-006 §2.7.24 Q25.B.
@@ -747,23 +907,12 @@ impl HashMapValueBuf {
             HashMapValueBuf::Decimal(b) => Arc::new(HeapValue::Decimal(Arc::clone(&b.data[i]))),
             HashMapValueBuf::BigInt(b) => Arc::new(HeapValue::BigInt(Arc::clone(&b.data[i]))),
             HashMapValueBuf::Char(b) => Arc::new(HeapValue::Char(b.data[i])),
-            HashMapValueBuf::TypedObject(_b) => {
-                // Wave 2 Round 4 D4 ckpt-3 (2026-05-14): inner shifted to
-                // `*const TypedObjectStorage`. Bridging from raw-ptr to
-                // `HeapValue::TypedObject(Arc<TypedObjectStorage>)` requires
-                // HeapValue::TypedObject's variant signature to flip to raw
-                // first — that's ckpt-final atomic territory. Marked as
-                // SURFACE here to flag the variant-signature-blocking
-                // bridge site; ckpt-final atomic flip resolves by changing
-                // HeapValue::TypedObject's inner shape to `*const
-                // TypedObjectStorage` so this projection becomes a single
-                // `v2_retain` + raw-ptr clone (mirror of the post-ckpt-2
-                // dispatch arm pattern at `vm_impl/stack.rs::clone_with_kind`).
-                unimplemented!(
-                    "HashMapValueBuf::TypedObject value_at projection \
-                     pending ckpt-final HeapValue::TypedObject variant \
-                     signature flip — Phase 3 cluster-0+1 Wave 2 Round 4 D4"
-                )
+            // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): variant
+            // signature flipped to `HeapValue::TypedObject(TypedObjectPtr)`.
+            // Clone the inner `TypedObjectPtr` (bumps v2-raw refcount via
+            // the wrapper's Clone impl), wrap in HeapValue.
+            HashMapValueBuf::TypedObject(b) => {
+                Arc::new(HeapValue::TypedObject(b.data[i].clone()))
             }
         }
     }
@@ -920,22 +1069,23 @@ impl HashMapData {
                     .collect();
                 HashMapValueBuf::BigInt(Arc::new(TypedBuffer::from_vec(data)))
             }
+            // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): both
+            // HashMapValueBuf::TypedObject and HeapValue::TypedObject now
+            // carry TypedObjectPtr. Per-element clone bumps the v2-raw
+            // refcount via the wrapper's Clone impl.
             HeapValue::TypedObject(_) => {
-                // Wave 2 Round 4 D4 ckpt-3 (2026-05-14): post-variant-flip
-                // HashMapValueBuf::TypedObject holds `*const TypedObjectStorage`,
-                // but HeapValue::TypedObject still holds `Arc<TypedObjectStorage>`
-                // until ckpt-final atomic flip. The cross-shape bridge here
-                // requires both variants to flip atomically (the Arc-to-raw
-                // memory layout migration cannot be staged via Arc::into_raw
-                // because Arc allocations don't match the v2-raw layout from
-                // `TypedObjectStorage::_new`). Marked as SURFACE pending
-                // ckpt-final atomic flip; the post-flip body is a single
-                // `v2_retain` + raw-ptr clone per element.
-                unimplemented!(
-                    "HashMapData::specialize_values TypedObject arm pending \
-                     ckpt-final HeapValue::TypedObject variant signature flip \
-                     — Phase 3 cluster-0+1 Wave 2 Round 4 D4"
-                )
+                let data: Vec<TypedObjectPtr> = values
+                    .iter()
+                    .map(|v| match v.as_ref() {
+                        HeapValue::TypedObject(s) => s.clone(),
+                        other => panic!(
+                            "HashMapData::from_pairs: heterogeneous value arms \
+                             (expected TypedObject, got {:?})",
+                            other.kind()
+                        ),
+                    })
+                    .collect();
+                HashMapValueBuf::TypedObject(Arc::new(TypedBuffer::from_vec(data)))
             }
             HeapValue::Char(_) => {
                 let data: Vec<char> = values
@@ -1065,16 +1215,13 @@ impl HashMapData {
             (HashMapValueBuf::BigInt(buf), HeapValue::BigInt(b)) => {
                 Arc::make_mut(buf).data[i] = Arc::clone(b);
             }
-            (HashMapValueBuf::TypedObject(_buf), HeapValue::TypedObject(_s)) => {
-                // Wave 2 Round 4 D4 ckpt-3 (2026-05-14): cross-shape bridge
-                // pending ckpt-final atomic flip — buf inner shifted to raw,
-                // HeapValue::TypedObject still Arc-shaped. See SURFACE note
-                // in `specialize_values` for the full reasoning.
-                unimplemented!(
-                    "HashMapData::insert_heap_overwrite_at TypedObject arm \
-                     pending ckpt-final HeapValue::TypedObject variant \
-                     signature flip — Phase 3 cluster-0+1 Wave 2 Round 4 D4"
-                )
+            // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): both sides
+            // carry TypedObjectPtr; clone the incoming (bumps v2-raw refcount
+            // for the buffer's owned share); the prior element's Drop runs
+            // when the Vec slot is overwritten via `data[i] = ...`, retiring
+            // its share.
+            (HashMapValueBuf::TypedObject(buf), HeapValue::TypedObject(s)) => {
+                Arc::make_mut(buf).data[i] = s.clone();
             }
             (HashMapValueBuf::Char(buf), HeapValue::Char(c)) => {
                 Arc::make_mut(buf).data[i] = *c;
@@ -1137,15 +1284,10 @@ impl HashMapData {
             (HashMapValueBuf::BigInt(buf), HeapValue::BigInt(b)) => {
                 Arc::make_mut(buf).data.push(Arc::clone(b));
             }
-            (HashMapValueBuf::TypedObject(_buf), HeapValue::TypedObject(_s)) => {
-                // Wave 2 Round 4 D4 ckpt-3 (2026-05-14): cross-shape bridge
-                // pending ckpt-final atomic flip — buf inner shifted to raw,
-                // HeapValue::TypedObject still Arc-shaped.
-                unimplemented!(
-                    "HashMapData::push_heap_value_typed_arm TypedObject arm \
-                     pending ckpt-final HeapValue::TypedObject variant \
-                     signature flip — Phase 3 cluster-0+1 Wave 2 Round 4 D4"
-                )
+            // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): both sides
+            // carry TypedObjectPtr; clone the incoming and push.
+            (HashMapValueBuf::TypedObject(buf), HeapValue::TypedObject(s)) => {
+                Arc::make_mut(buf).data.push(s.clone());
             }
             (HashMapValueBuf::Char(buf), HeapValue::Char(c)) => {
                 Arc::make_mut(buf).data.push(*c);
@@ -3325,7 +3467,15 @@ pub enum TypedArrayData {
     // future cluster, a v2-raw `TypedArray<*const <X>Obj>` carrier lands
     // then per §2.2 / §A.3 audit row.
     Char(Arc<crate::typed_buffer::TypedBuffer<char>>),
-    TypedObject(Arc<crate::typed_buffer::TypedBuffer<Arc<TypedObjectStorage>>>),
+    // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): inner element type
+    // shifted from `Arc<TypedObjectStorage>` to `TypedObjectPtr` per ADR-006
+    // §2.3 amendment + Path B ratification. The newtype owns one v2-raw
+    // HeapHeader-at-offset-0 refcount share; refcount discipline goes
+    // through `v2_retain` / `HeapElement::release_elem` on the inner ptr
+    // (NOT through `Arc::clone` / `Arc::drop`). Mirror of the
+    // HashMapValueBuf::TypedObject flip (ckpt-3) and the HeapValue::TypedObject
+    // flip (this same commit — variant flip atomicity).
+    TypedObject(Arc<crate::typed_buffer::TypedBuffer<TypedObjectPtr>>),
     // The polymorphic `HeapValue(Arc<TypedBuffer<Arc<HeapValue>>>)` catch-all
     // was DELETED in checkpoint 4 of W17-typed-carrier-bundle-A per ADR-006
     // §2.7.24 Q25.A. Every construction site migrated to a specialized
@@ -3358,7 +3508,7 @@ impl TypedArrayData {
     ) -> Result<Self, String> {
         use crate::typed_buffer::TypedBuffer;
         if elems.is_empty() {
-            let buf: TypedBuffer<Arc<TypedObjectStorage>> = TypedBuffer::from_vec(Vec::new());
+            let buf: TypedBuffer<TypedObjectPtr> = TypedBuffer::from_vec(Vec::new());
             return Ok(TypedArrayData::TypedObject(Arc::new(buf)));
         }
         let first = &elems[0];
@@ -3406,10 +3556,10 @@ impl TypedArrayData {
                 Ok(TypedArrayData::BigInt(Arc::new(TypedBuffer::from_vec(data))))
             }
             HeapValue::TypedObject(_) => {
-                let mut data: Vec<Arc<TypedObjectStorage>> = Vec::with_capacity(elems.len());
+                let mut data: Vec<TypedObjectPtr> = Vec::with_capacity(elems.len());
                 for e in elems.iter() {
                     match e.as_ref() {
-                        HeapValue::TypedObject(s) => data.push(Arc::clone(s)),
+                        HeapValue::TypedObject(s) => data.push(s.clone()),
                         other => return Err(format!(
                             "TypedArrayData::build_specialized: heterogeneous \
                              heap arms (expected TypedObject, got {:?})",
@@ -3991,7 +4141,11 @@ impl Clone for HeapValue {
             HeapValue::IoHandle(v) => HeapValue::IoHandle(Arc::clone(v)),
             HeapValue::NativeScalar(v) => HeapValue::NativeScalar(*v),
             HeapValue::NativeView(v) => HeapValue::NativeView(Arc::clone(v)),
-            HeapValue::TypedObject(s) => HeapValue::TypedObject(Arc::clone(s)),
+            // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): TypedObjectPtr's
+            // Clone impl bumps the v2-raw HeapHeader-at-offset-0 refcount via
+            // `v2_retain`, mirroring the typed-Arc clone shape of every other
+            // heap arm.
+            HeapValue::TypedObject(s) => HeapValue::TypedObject(s.clone()),
             // OwnedClosureBlock::clone is one refcount bump on the typed
             // closure block + one Arc bump on the shared layout.
             HeapValue::ClosureRaw(v) => HeapValue::ClosureRaw(v.clone()),
@@ -4061,7 +4215,13 @@ impl Clone for HeapValue {
             // + `vtable: Arc<VTable>`) stay shared with the source;
             // `Arc::ptr_eq` on the vtable preserves the §Q25.C.2
             // `Self`-arg runtime identity contract across the clone.
-            HeapValue::TraitObject(v) => HeapValue::TraitObject(Arc::clone(v)),
+            // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): TraitObjectPtr's
+            // Clone impl bumps the v2-raw HeapHeader-at-offset-0 refcount via
+            // `v2_retain`. Inner `value: *const TypedObjectStorage` and
+            // `vtable: Arc<VTable>` shares are bumped through the Clone impl
+            // of TraitObjectStorage itself (called by `_drop` / the per-field
+            // discipline at refcount=0 release).
+            HeapValue::TraitObject(v) => HeapValue::TraitObject(v.clone()),
             // W17-concurrency (ADR-006 §2.7.25, 2026-05-11): Mutex /
             // Atomic / Lazy Arcs share the typed-Arc clone shape —
             // single strong-count bump on the shared inner Arc, no
@@ -4504,9 +4664,10 @@ impl HeapValue {
                 cs == s.as_str()
             }
             (HeapValue::TypedObject(a), HeapValue::TypedObject(b)) => {
-                // ADR-006 §2.3: payloads are `Arc<TypedObjectStorage>`;
-                // pointer-equality is the fast path for shared storage.
-                if Arc::ptr_eq(a, b) {
+                // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): payloads are
+                // `TypedObjectPtr` (raw `*const TypedObjectStorage`); pointer-
+                // equality is the fast path for shared storage.
+                if a.as_ptr() == b.as_ptr() {
                     return true;
                 }
                 if a.schema_id != b.schema_id

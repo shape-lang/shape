@@ -272,10 +272,13 @@ fn concat_typed_arrays(
                 shape_value::typed_buffer::TypedBuffer::from_vec(data),
             ))))
         }
+        // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): TypedObjectPtr inner.
+        // Clone bumps v2-raw refcount per element.
         (TypedArrayData::TypedObject(la), TypedArrayData::TypedObject(lb)) => {
-            let mut data = Vec::with_capacity(la.data.len() + lb.data.len());
-            for d in la.data.iter() { data.push(Arc::clone(d)); }
-            for d in lb.data.iter() { data.push(Arc::clone(d)); }
+            let mut data: Vec<shape_value::heap_value::TypedObjectPtr> =
+                Vec::with_capacity(la.data.len() + lb.data.len());
+            for d in la.data.iter() { data.push(d.clone()); }
+            for d in lb.data.iter() { data.push(d.clone()); }
             Ok(Arc::new(TypedArrayData::TypedObject(Arc::new(
                 shape_value::typed_buffer::TypedBuffer::from_vec(data),
             ))))

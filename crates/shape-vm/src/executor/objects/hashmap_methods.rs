@@ -148,7 +148,8 @@ fn heap_value_arc_to_slot(hv: &Arc<HeapValue>) -> KindedSlot {
         HeapValue::Decimal(d) => KindedSlot::from_decimal(Arc::clone(d)),
         HeapValue::BigInt(b) => KindedSlot::from_bigint(Arc::clone(b)),
         HeapValue::TypedArray(a) => KindedSlot::from_typed_array(Arc::clone(a)),
-        HeapValue::TypedObject(o) => KindedSlot::from_typed_object(Arc::clone(o)),
+        // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): TypedObjectPtr.
+        HeapValue::TypedObject(o) => KindedSlot::from_typed_object_raw(o.clone().into_raw()),
         HeapValue::HashMap(m) => KindedSlot::from_hashmap(Arc::clone(m)),
         HeapValue::Char(c) => KindedSlot::from_char(*c),
         // Other heap arms — fall back to `none()` (Bool-kind null sentinel).
@@ -249,19 +250,13 @@ pub fn v2_values(
         HashMapValueBuf::Decimal(b) => TypedArrayData::Decimal(Arc::clone(b)),
         HashMapValueBuf::BigInt(b) => TypedArrayData::BigInt(Arc::clone(b)),
         HashMapValueBuf::Char(b) => TypedArrayData::Char(Arc::clone(b)),
-        // Wave 2 Round 4 D4 ckpt-3 (2026-05-14): HashMapValueBuf::TypedObject
-        // inner shifted to `*const TypedObjectStorage` (raw-ptr v2-raw shape).
-        // TypedArrayData::TypedObject still holds `Arc<TypedBuffer<Arc<
-        // TypedObjectStorage>>>` until ckpt-final atomic flip — the two
-        // variant signatures must flip in lockstep because the inner Vec
-        // element type differs. Marked as SURFACE pending ckpt-final.
-        HashMapValueBuf::TypedObject(_b) => {
-            return Err(VMError::NotImplemented(format!(
-                "SURFACE: HashMap.values() TypedObject arm pending ckpt-final \
-                 TypedArrayData::TypedObject variant signature flip — Phase 3 \
-                 cluster-0+1 Wave 2 Round 4 D4"
-            )));
-        }
+        // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): both
+        // HashMapValueBuf::TypedObject and TypedArrayData::TypedObject now
+        // carry `Arc<TypedBuffer<TypedObjectPtr>>` — direct buffer Arc::clone
+        // (mirror of String/Decimal/BigInt/Char arms above). No per-element
+        // walk needed; refcount discipline lives on TypedObjectPtr's
+        // Drop/Clone impls.
+        HashMapValueBuf::TypedObject(b) => TypedArrayData::TypedObject(Arc::clone(b)),
     };
     Ok(KindedSlot::from_typed_array(Arc::new(arr)))
 }
@@ -356,7 +351,10 @@ pub fn v2_to_array(
 fn build_entries_array(receiver: &KindedSlot) -> Result<KindedSlot, VMError> {
     let map = as_hashmap(receiver)?;
     let n = map.len();
-    let mut entry_storages: Vec<Arc<shape_value::heap_value::TypedObjectStorage>> =
+    // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): TypedArrayData::TypedObject
+    // inner element type flipped to TypedObjectPtr; recovery for v2-raw
+    // payload uses raw bits + v2_retain (NOT Arc::from_raw).
+    let mut entry_storages: Vec<shape_value::heap_value::TypedObjectPtr> =
         Vec::with_capacity(n);
     for i in 0..n {
         let key_arc: Arc<String> = Arc::clone(&map.keys.data[i]);
@@ -367,26 +365,14 @@ fn build_entries_array(receiver: &KindedSlot) -> Result<KindedSlot, VMError> {
             ("key", key_slot),
             ("value", value_slot),
         ]);
-        // SAFETY: typed_object_from_pairs returns a KindedSlot whose
-        // kind is `Ptr(HeapKind::TypedObject)` and whose bits are
-        // `Arc::into_raw(Arc<TypedObjectStorage>)` (NOT `*const HeapValue`
-        // — using `as_heap_value()` here is wrong-type recovery per the
-        // 5-arm receiver-recovery soundness rule). Recover the typed Arc
-        // directly, clone the inner share into the buffer, and consume
-        // the original via `Arc::from_raw` to release entry_slot's share
-        // without dropping the KindedSlot (which would also decrement).
+        // typed_object_from_pairs's bits are `*const TypedObjectStorage`
+        // (v2-raw shape per construction-side contract). Bump for the
+        // buffer's owned share; entry_slot's Drop retires its share.
         let bits = entry_slot.slot.raw();
-        let storage = unsafe {
-            let arc = Arc::<shape_value::heap_value::TypedObjectStorage>::from_raw(
-                bits as *const shape_value::heap_value::TypedObjectStorage,
-            );
-            let cloned = Arc::clone(&arc);
-            // Re-raw the original so entry_slot's Drop's decrement runs
-            // cleanly on the still-owned share.
-            let _ = Arc::into_raw(arc);
-            cloned
-        };
-        entry_storages.push(storage);
+        let ptr = bits as *const shape_value::heap_value::TypedObjectStorage;
+        // SAFETY: ptr is a live TypedObjectStorage with refcount ≥ 1.
+        unsafe { shape_value::v2::refcount::v2_retain(&(*ptr).header); }
+        entry_storages.push(shape_value::heap_value::TypedObjectPtr::new(ptr));
         drop(entry_slot); // releases the original share via Drop's kind-aware path
     }
     let buf = TypedBuffer::from_vec(entry_storages);

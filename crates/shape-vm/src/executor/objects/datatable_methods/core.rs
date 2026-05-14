@@ -380,13 +380,12 @@ pub(crate) fn handle_rows(
         m
     };
 
-    // Wave 2 Round 4 D4 ckpt-1: migrated to v2-raw `_new` per D1 API
-    // surface. The `TypedArrayData::TypedObject` variant signature flip
-    // (`Arc<TypedBuffer<Arc<TypedObjectStorage>>>` →
-    // `Arc<TypedBuffer<*const TypedObjectStorage>>`) is ckpt-final
-    // territory; the `Vec<Arc<TypedObjectStorage>>` collection below
-    // will not compile until that variant signature lands.
-    let mut row_storages: Vec<Arc<TypedObjectStorage>> = Vec::with_capacity(row_count);
+    // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): TypedArrayData::TypedObject
+    // inner element type flipped to TypedObjectPtr. Each `_new` returns a
+    // raw pointer with refcount=1 (transferred to the wrapping
+    // TypedObjectPtr).
+    use shape_value::heap_value::TypedObjectPtr;
+    let mut row_storages: Vec<TypedObjectPtr> = Vec::with_capacity(row_count);
     for r in 0..row_count {
         let mut slots: Vec<ValueSlot> = Vec::with_capacity(col_readers.len());
         for reader in col_readers.iter() {
@@ -398,7 +397,7 @@ pub(crate) fn handle_rows(
             heap_mask,
             Arc::clone(&field_kinds),
         );
-        row_storages.push(storage);
+        row_storages.push(TypedObjectPtr::new(storage));
     }
     let buf = TypedBuffer::from_vec(row_storages);
     Ok(KindedSlot::from_typed_array(Arc::new(
@@ -433,12 +432,10 @@ pub(crate) fn handle_columns_ref(
     );
     let heap_mask: u64 = 0b11;
 
-    // Wave 2 Round 4 D4 ckpt-1: migrated to v2-raw `_new` per D1 API
-    // surface. Variant signature dependency same as `handle_rows` above:
-    // `TypedArrayData::TypedObject` variant signature flip is ckpt-final
-    // territory; the `Vec<Arc<TypedObjectStorage>>` collection below
-    // will not compile until that variant signature lands.
-    let mut col_storages: Vec<Arc<TypedObjectStorage>> = Vec::with_capacity(col_count);
+    // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): TypedArrayData::TypedObject
+    // inner element type flipped to TypedObjectPtr.
+    use shape_value::heap_value::TypedObjectPtr;
+    let mut col_storages: Vec<TypedObjectPtr> = Vec::with_capacity(col_count);
     for (idx, name) in col_names.iter().enumerate() {
         let arrow_col = dt_arc.inner().column(idx);
         let kind_name = format!("{:?}", arrow_col.data_type());
@@ -452,7 +449,7 @@ pub(crate) fn handle_columns_ref(
             heap_mask,
             Arc::clone(&field_kinds),
         );
-        col_storages.push(storage);
+        col_storages.push(TypedObjectPtr::new(storage));
     }
     let buf = TypedBuffer::from_vec(col_storages);
     Ok(KindedSlot::from_typed_array(Arc::new(

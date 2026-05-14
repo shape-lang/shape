@@ -323,9 +323,11 @@ impl VirtualMachine {
             TypedArrayData::Char(buf) => {
                 self.push_kinded(buf.data[index] as u32 as u64, NativeKind::Ptr(HeapKind::Char))
             }
+            // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): TypedObjectPtr.
+            // Clone bumps v2-raw refcount; into_raw moves the share to the
+            // slot bits.
             TypedArrayData::TypedObject(buf) => {
-                let arc = std::sync::Arc::clone(&buf.data[index]);
-                let bits = std::sync::Arc::into_raw(arc) as u64;
+                let bits = buf.data[index].clone().into_raw() as u64;
                 self.push_kinded(bits, NativeKind::Ptr(HeapKind::TypedObject))
             }
         }
