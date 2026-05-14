@@ -1,10 +1,10 @@
-# Phase 3 cluster-0 — Supervisor handover (R19 dispatch seam)
+# Phase 3 cluster-0+1 — Supervisor handover (R20-complete → bulldozer-cadence seam)
 
 **Generated:** 2026-05-14.
-**Updated:** 2026-05-14 with R19-close delta (see Pre-handover update §R19 close update for accumulated dispositions through R19 merge ceremony).
-**Successor handoff point:** R19 complete (C + S1.5 + S2 audit-only all merged; supervisor R19 partial dispositions ratified). New supervisor's first action: receive R20 dispatch authorization request from team-lead OR S2-prime close report when it lands.
-**Predecessor supervisor session:** rolled at session-close after R19 merge ceremony completed; this is the continuation.
-**Team-lead session:** rotated at the same R19-complete seam (synchronous rotation per Option C); new team-lead session active per `phase-3-team-lead-handover.md`.
+**Updated:** 2026-05-14 with R20-close delta + **bulldozer-cadence authorization** (strategic-owner 2026-05-14). Audit-first sub-cluster cadence (R7-R20) replaced by bulldozer waves for remaining cluster-0 + cluster-1 deletion targets. See §Cadence shift below + §Pre-handover update.
+**Successor handoff point:** R20 complete (γ merged at `14494605` + S2-prime-production audit-only-close RATIFIED for merge + cadence shift authorized). New supervisor's first action: receive Wave 1 close report when it lands (single audit-day; comprehensive deletion inventory).
+**Predecessor supervisor session:** rolled at session-close after R20 disposition + cadence-shift authorization; this is the continuation.
+**Team-lead session:** rotated at the same R20-complete + cadence-shift seam (synchronous rotation per strategic-owner authorization 2026-05-14 — fresh context infuses bulldozer cadence without audit-first attractors); new team-lead session active per `phase-3-team-lead-handover.md`.
 
 ## Your role this session
 
@@ -31,37 +31,95 @@ You do NOT operate the dispatch machinery yourself. The team-lead session (separ
 
 Post a 1-line confirmation: *"Read 8 mandatory docs; Phase 3 supervisor role ready. Current state: <one sentence>."*
 
+## Cadence shift — bulldozer waves (load-bearing, 2026-05-14)
+
+**Strategic-owner authorization 2026-05-14:** audit-first sub-cluster cadence (R7-R20) replaced by **bulldozer waves** for remaining cluster-0 + cluster-1 deletion targets. User's framing:
+
+> "what happened to the bulldozer approach? why are we not deleting first, then finding
+> out what that means? i think with our current plan, we leave attractors too long in
+> the code. why are we deferring the removal, instead of agressively remove, then look
+> at the blast radius and how to migrate? code removal is the best way to easier
+> readability. the surface currently is huge, and i think at least 50% is outdated/
+> wrong architecture/dead or only used by also outdated paths"
+
+Supervisor honest assessment confirming user instinct: audit-first cadence preserved attractors in source for months (W17-typed-carrier-bundle-A Q25.A dead arms ~2 months; TypedArrayData 2-arm-shadow under O-3.c deferral; HashMapValueBuf parallel deletion target cluster-1+ deferred); 5-instance supervisor-/audit-layer imprecision pattern is the signal that audits encode beliefs not measured reality until grep verifies; session expansion 10-15 → 17-23 sessions is not justified by bug-prevention math.
+
+**Bulldozer cadence shape:**
+
+```
+Wave 1 — Single audit-day (1 session, 1 agent)
+Wave 2 — Parallel bulldoze (1-2 sessions, 6-8 agents in parallel)
+Wave 3 — Stabilize + cluster-0+1 close (1 session)
+```
+
+Total: 3-4 sessions to cluster-0 + cluster-1 close. v1 trajectory becomes ~6-9 sessions remaining (Wave 1+2+3 + cluster-2 cleanup + Phase 4), not 11-16.
+
+**Wave 2 in-scope deletion targets** (cluster-0 + cluster-1 folded together):
+
+- TypedArrayData enum (all 22 arms; ~25 producer sites; ~120 consumer match arms)
+- TypedBuffer<T> + AlignedTypedBuffer wrapper layer (485 LoC)
+- HashMapValueBuf enum (Q25.B parallel deletion target)
+- O-3.a TypedObjectStorage Arc → HeapHeader migration (audit §4.3 multi-week estimate restated as 1 parallel agent)
+- O-3a TraitObjectStorage HeapHeader migration
+- Q25.A specialization dead arms (Q25.A SUPERSEDED already landed at R20 (c))
+- W12-stdlib-intrinsic-collapse (IntrinsicSum / .sum() PHF split-brain — 7th defection-attractor instance evidence)
+- String + Decimal producer migration to v2-raw TypedArray<*const StringObj/DecimalObj>
+- Q25.C TraitObject rebuild IF Surface A user-decision is (b)
+
+**Discipline preserved verbatim:** all CLAUDE.md Forbidden Patterns + Renames to refuse on sight + Parallel-implementation entry; all ADR-006 §2.7.x rulings; 4-table HeapKind lockstep; §2.7.5 stamp-at-compile-time; 5-arm receiver-recovery soundness; verify-merge.sh 12/12 gate; check-no-dynamic.sh exit 0 gate; surface-and-stop discipline; no Co-Authored-By trailers; own all code quality.
+
+**New refusal #10 (added 2026-05-14):** "Preserve X for cluster-1+" / "needs its own audit sub-cluster" / "multi-week scope is too risky" / "defer to cluster-1.5 post-close" / any framing reverting bulldozer cadence to audit-first. Cadence shift is explicit refusal of deferral framings within wave scope. Genuinely intractable in-wave gaps surface-and-stop with structured shape; supervisor disposes whether to extend wave or genuinely defer.
+
+**What you (supervisor) authorize under bulldozer cadence:**
+
+- Wave 1 single-audit-day dispatch (after team-lead readiness + R20 status-doc close commit lands)
+- Wave 2 parallel-bulldoze dispatch (after Wave 1 ratifies; per Wave 1 (L) agent partition recommendation)
+- Wave 3 stabilize + close dispatch (after Wave 2 ratifies; smoke matrix VM == JIT + cluster-0+1 close report)
+- ADR amendments fold into wave merge commits (Q25.B HashMapValueBuf deletion + §4.3 O-3.a/O-3a + §2.7.5 / §2.7.6 / Q8 amendments per Wave 1 (H) cross-tier shape-conversion design)
+- Cluster-1 deletion targets dispatched IN cluster-0 wave (HashMapValueBuf, O-3/O-3a, IntrinsicSum) — strategic-owner authorized as part of cadence shift
+
+**What you do NOT do under bulldozer cadence:**
+
+- Authorize per-target audit sub-clusters (the audit-first cadence) — refuse #10 applies at supervisor layer too
+- Defer deletion targets to cluster-N+1 without surface-and-stop justification
+- Re-introduce sequencing where Wave 1 (L) recommends parallel territory non-overlap
+- Land CLAUDE.md modifications without explicit user ratification (R17 + 2026-05-14 compaction precedents)
+
 ## Current state at handover
 
-**Bulldozer HEAD:** `bulldozer-strictly-typed @ 05a00c0a` (R19 close + handover docs commit; R19 merge HEAD was `214e8661`, then status-doc commit). Predecessor team-lead merged R19 sub-clusters in this order: S1.5 (`5346ca5c`) → C (`7de3b1d6` take-both AGENTS.md) → S2 audit-only (`214e8661` auto-merge). Post-merge `verify-merge.sh` 12/12 PASS via devenv.
+**Bulldozer HEAD at rotation:** `bulldozer-strictly-typed @ 14494605` (γ merge only). Predecessor team-lead ceremony OWED at rotation seam: S2-prime-production audit-only merge (RATIFIED by R20 supervisor; branch at `10cd1a56`) + R20 status-doc close commit + 5 annotations including cadence-shift authorization. Predecessor team-lead held on merge pending Surfaces A/B/C/D disposition; that hold was over-cautious (Surface B was RATIFIED standalone). Successor team-lead inherits merge-RATIFIED state and executes ceremony as their first action after reading docs.
 
-**Smoke matrix (canonical kickoff, post-R18):**
+**Smoke matrix (canonical kickoff, post-R20):**
 
-| Smoke | VM | JIT | Disposition |
+| Smoke | VM | JIT | Cluster-0 criterion |
 |---|---|---|---|
-| 1 (scalar loop) | ✅ 4950 | ✅ 4950 | passing |
-| 2 canonical (`[1,2,3,4,5].map(\|x\|x*2).sum()`) | ✅ 30 | ❌ dual-carrier blocker | resolves post-S5 (R20) |
-| 3 (trait `dyn T` + `t.name()`) | ✅ "x" | ❌ TAG_NULL null-handling | C in R19 unblocks |
-| 4 (Set + .add + .size) | ✅ 2 | ✅ 2 | passing |
+| 1 (scalar loop) | ✅ 4950 | ✅ 4950 | ✓ |
+| 2 (`[1,2,3,4,5].map(\|x\|x*2).sum()`) | ✅ 30 | ❌ rc=1 | gated on Wave 2 (TypedArrayData deletion eliminates dual-carrier reality) |
+| 3 (canonical fixture `let t = X{}`) | ✅ x | ✅ x | ✓ post-γ |
+| 4 (Set + .add + .size) | ✅ 2 | ✅ 2 | ✓ |
 
-**Cumulative through R18:** 30+ sub-clusters across 18 rounds, ~3 / session steady cadence.
+**3 of 4 kickoff smokes pass VM == JIT at canonical fixture.** Smoke 2 unblocks post-Wave-2. Smoke 3 fixture-vs-prose drift (Surface A) awaits user disposition.
 
-**R19 closed + all sub-clusters merged.** Predecessor supervisor's R19 partial dispositions ratified; predecessor team-lead executed R19 merge ceremony before rotation.
+**Surface A — user-pending disposition (cluster-0 close criterion shape):**
 
-R19 close summary:
-- **C** (9bf2cf35 → merge 7de3b1d6): β filter at JIT print path intercepts TAG_NULL; SIGSEGV → None for Smoke 3 JIT. W17-narrow R15 precedent (production-fix-correct + smoke-gate-deferred). γ upstream gap named as R20 sub-cluster.
-- **S1.5** (80d8c485 → merge 5346ca5c): F32 + Char NativeKind/ConcreteType additions per Shape D ratification; ADR-006 §2.7.5 amendment + audit-doc Char-bucket clarification inline; +522/-27 LoC across 26 files; ~22 cascade sites (well under ~100-site ceiling — cascade-surface-and-stop fallback not triggered). Cross-tier compat: `KindedSlot::as_char` dual-label match handles both `NativeKind::Char` (new) AND `NativeKind::Ptr(HeapKind::Char)` (pre-amendment); 32 unmigrated `Ptr(HeapKind::Char)` consumer sites named as cluster-1 hardening territory.
-- **S2** (1bf8dbd → auto-merge 214e8661): audit-only merged for doc-record. Surface-and-stop with 3 obstacles dispositioned: 1b Q25.A SUPERSEDED, TemporalData 7-variant audit-first deferred to S2-prime, BigInt deferred to cluster-1.
+- (a) "Smoke fixtures pass VM == JIT" — what's been operationally tested R10-R20; silent re-scope
+- (b) "Kickoff prompt prose intent matches" — requires Q25.C TraitObject rebuild pre-close; +3-5 sessions
+- (c) Split — current canonical-smokes-as-fixtures = cluster-0 close; Q25.C rebuild + `dyn T = box(X{})` fixture = explicit cluster-1.5 close-criterion item
 
-**R20 dispatch (your first authorization):**
-- **S2-prime** — W12-typed-array-data-heap-element-migration REOPEN with Q25.A SUPERSEDED amendment scope. Audit-first deliverables: TemporalData variant classification (user-facing vs AST-internal); per-element retain/release ABI shape; Q25.A SUPERSEDED amendment text refined against actual ADR-006 + Q25.A text; per-variant `<X>Obj` carrier shape mirroring StringObj precedent. Standard close gate; refuse on sight "documented intentional duality" / "preserve fallback for one period" / bridge/probe/helper framings.
-- **γ** — W12-jit-trait-impl-method-registry. `jit_call_method` UFCS-lookup gap for `dyn T` receivers; gates Smoke 3 JIT → x cluster-0 close criterion. Can dispatch in parallel with S2-prime (file-territory non-overlapping) OR sequence per your judgment.
-- **S5** — W12-typed-array-data-enum-deletion + ADR-006 §2.7.24 Q25.A SUPERSEDED amendment commit. Dispatches after S2-prime completes (S5 requires all producers migrated).
-- **U64 relabel-step (Shape D)** — fold into S5 OR dispatch as separate S6 sub-cluster per your judgment of S5 scope.
+Supervisor recommendation: (c) split. User decides; Wave 1 audit-day maps all three options without blocking.
 
-**Smoke 4 kickoff-prompt typo** confirmed real at R19-close smoke matrix verification (`HashSet()` → `Set()`); fix owed alongside R20 close commit (small doc-only update to `docs/cluster-audits/phase-3-kickoff-prompt.md` and any operational test programs).
+**Cumulative through R20:** ~33+ sub-clusters across 20 rounds; cadence shift converts remainder from N+ audit-first sub-clusters to 3-4 bulldozer waves.
 
-**Velocity:** total handoff-to-v1 ~16-22 sessions. Cluster-0 close projected at R20+1 (R19 + R20 + close attempt).
+**R20 close summary:**
+- **γ** (`28bd0a7f` → merge `14494605`, LANDED): JITContext.function_names_ptr/_len linking after the function_table linking block; +33 LoC at `crates/shape-jit/src/executor.rs:189-221`. R19 C β filter intercepted TAG_NULL downstream; γ fixed upstream UFCS function-id resolution. Smoke 3 canonical fixture VM == JIT == "x".
+- **S2-prime** (`98d68101`, MERGED): TemporalData variant classification (2 user-facing not 3 — Duration is dead enum variant; 4 of 6 R19-S2-named arms are dead with zero producers) + HeapElement trait ABI (audit §4.1.B option (a)) + Q25.A SUPERSEDED amendment text landed at (c) + 4 ratified `<X>Obj` carrier shapes at (d).
+- **S2-prime-production** (`10cd1a56`, RATIFIED-but-MERGE-OWED): infrastructure-landed-+-producer-migration-surface-and-stop. HeapElement trait + DecimalObj (audit imprecision caught: align-of=4 measured vs audit text =8) + StringObj HeapElement impl + TypedArray::drop_array_heap + HEAP_KIND_V2_DECIMAL=85. 175 v2-tier tests pass. 3 architectural prerequisites surfaced for production migration (now folded into Wave 1 audit-day inventory). Merge ceremony is successor team-lead's first action.
+
+**Wave 1 dispatch (your first authorization):**
+
+Single-audit-day comprehensive deletion-inventory per `phase-3-team-lead-handover.md` §Wave 1 dispatch shape. Team-lead dispatches after R20 status-doc close commit lands + your ratification of the Wave 1 prompt template.
+
+**Velocity:** total handoff-to-v1 ~6-9 sessions under bulldozer cadence (Wave 1 + Wave 2 + Wave 3 + cluster-2 + Phase 4). Was 17-23 sessions under audit-first.
 
 ## Discipline rules (load-bearing — refuse on sight)
 
