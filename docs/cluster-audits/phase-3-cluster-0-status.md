@@ -6153,3 +6153,219 @@ per audit §3.2's 5-7k LoC estimate.
 the R20 S2-prime-production landed infrastructure) + γ continuation if not
 yet closed. Read this R20-S2-prime-production-close subsection first; the
 team-lead handover doc + this status doc are the canonical state.*
+
+---
+
+## Round 20 — complete: S2-prime-production merge ceremony + bulldozer-cadence rotation seam (2026-05-14)
+
+R20 closed at this rotation seam with both R20 sub-cluster merges landed
+into `bulldozer-strictly-typed` and the predecessor-team-lead's prepared
+cadence-shift updates committed. Predecessor team-lead held over-cautiously
+on S2-prime-production merge pending Surfaces A/B/C/D disposition;
+Surface B (merge) was RATIFIED standalone in the R20 supervisor relay
+(not conditional on Surfaces A/C/D). Successor team-lead executed the
+ceremony as first action under bulldozer-cadence refusal #10 ("wait for
+every disposition before any action" IS the audit-first attractor the
+cadence shift refuses).
+
+### Ceremony commits
+
+1. **CLAUDE.md compaction** (`535619cb`) — 44.9k → 35.6k chars; rules
+   preserved verbatim. Renames-to-refuse-on-sight bullet list collapsed
+   to comma-separated lines grouped by family; broader-family regex
+   moved to fenced code block for grep-visibility; Parallel-implementation
+   entry collapsed prose paragraphs to terser bullets + dropped per-
+   instance roll-up (cluster-0 instances now referenced via cite to
+   status doc + audit doc, not enumerated inline); ADR-006 "Key rules"
+   intro tightened. Landed as separate dedicated commit per user
+   disposition 2026-05-14 (content authorized 2026-05-14; landing
+   ratified 2026-05-14 per team-lead-handover §Decision-authority
+   pattern R17 + 2026-05-14-compaction precedents).
+2. **Handover docs cadence-shift updates** (`566fe583`) — predecessor
+   team-lead's prepared updates to `phase-3-supervisor-handover.md` +
+   `phase-3-team-lead-handover.md` reflecting the R20-complete →
+   bulldozer-cadence seam, refusal #10 anti-deferral framing, Wave 1
+   single-audit-day dispatch shape, Wave 2 parallel-bulldoze partition,
+   Wave 3 stabilize + close.
+3. **S2-prime-production audit-only merge** (`759ec693`) — `10cd1a56` →
+   `bulldozer-strictly-typed` with take-both conflict resolution on
+   `phase-3-cluster-0-status.md` (γ subsection from HEAD + S2-prime-
+   production subsection from `10cd1a56` preserved chronologically;
+   stale "Next session: R20 dispatches S2-prime-production + γ in
+   parallel" trailer from 3fe3ffa9 dropped, superseded by both
+   subsequent subsections). AGENTS.md auto-merged with both R20 rows
+   (γ at line 186 + S2-prime-production at line 188).
+
+### Post-ceremony gates (devenv wrapper)
+
+- `cargo check --workspace --lib --tests` EXIT=0 ✅
+- `bash scripts/verify-merge.sh` EXIT=0, **Passed: 12 / Failed: 0** ✅
+- `bash scripts/check-no-dynamic.sh` EXIT=0 ✅
+- NO `Co-Authored-By: Claude` trailer in any ceremony commit ✅
+
+### Post-R20 smoke matrix (canonical kickoff fixtures at `/tmp/smokes/s{1,2,3,4}.shape`)
+
+Release binary at `target/release/shape` (rebuilt post-merge).
+
+| Smoke | VM | JIT | Cluster-0 criterion |
+|---|---|---|---|
+| 1 (scalar loop) | ✅ 4950 | ✅ 4950 | ✓ |
+| 2 (`[1,2,3,4,5].map(\|x\|x*2).sum()`) | ✅ 30 | ❌ rc=1 | gated on Wave 2 (TypedArrayData enum + TypedBuffer<T> deletion eliminates dual-carrier reality, R14 conduit blocker) |
+| 3 (canonical fixture `let t = X{}`) | ✅ x | ✅ x | ✓ post-γ |
+| 4 (`Set()` + `.add()` + `.size()`) | ✅ 2 | ✅ 2 | ✓ |
+
+**3 of 4 kickoff smokes pass VM == JIT at canonical fixture; Smoke 2
+gated on Wave 2.** Baseline preserved from pre-merge HEAD `14494605`.
+Surface A (kickoff-prompt-vs-fixture mismatch for Smoke 3 — fixture uses
+plain TypedObject binding `let t = X{}` while kickoff prompt prose at
+`phase-3-kickoff-prompt.md:102-105` aspires to `let t: dyn T = box(X{})`
+trait-object dispatch through Q25.C HeapKind::TraitObject) is
+user-pending disposition; supervisor recommendation (c) split. Wave 1
+audit-day maps all three options (a)/(b)/(c) without blocking dispatch.
+
+### Cadence-shift authorization annotation (strategic-owner 2026-05-14)
+
+The audit-first sub-cluster cadence (R7-R20; ~33 sub-clusters across
+20 rounds at ~3/session steady cadence) is replaced by **bulldozer
+waves** for remaining cluster-0 + cluster-1 deletion targets per
+strategic-owner authorization 2026-05-14. User's framing (verbatim):
+
+> "what happened to the bulldozer approach? why are we not deleting
+> first, then finding out what that means? i think with our current
+> plan, we leave attractors too long in the code. why are we deferring
+> the removal, instead of agressively remove, then look at the blast
+> radius and how to migrate? code removal is the best way to easier
+> readability. the surface currently is huge, and i think at least 50%
+> is outdated/wrong architecture/dead or only used by also outdated
+> paths"
+
+Supervisor confirming-assessment ratified by user: audit-first cadence
+preserved attractors in source for months (W17-typed-carrier-bundle-A
+Q25.A dead arms ~2 months; TypedArrayData 2-arm-shadow under O-3.c
+deferral; HashMapValueBuf parallel deletion target cluster-1+
+deferred); 5-instance supervisor-/audit-layer imprecision pattern is
+the signal that audits encode beliefs not measured reality until grep
+verifies; session expansion 10-15 → 17-23 sessions is not justified
+by bug-prevention math.
+
+Bulldozer cadence shape: Wave 1 (single audit-day, 1 session, 1 agent;
+comprehensive deletion-inventory) → Wave 2 (parallel bulldoze, 1-2
+sessions, 6-8 agents) → Wave 3 (stabilize + cluster-0+1 close, 1
+session). Total 3-4 sessions to cluster-0+1 close; v1 trajectory
+becomes ~6-9 sessions remaining.
+
+**Discipline preserved verbatim** (per supervisor handover doc + team-
+lead handover doc + CLAUDE.md): all Forbidden Patterns, all Renames to
+refuse on sight (now including the broader-family regex), all
+Parallel-implementation framings, all ADR-006 §2.7.x rulings (4-table
+HeapKind lockstep, §2.7.5 stamp-at-compile-time, §2.7.6/Q8 carrier-API-
+bound, §2.7.7/Q9 stack parallel-kind, §2.7.8/Q10 cell-storage parallel-
+kind, §2.7.10/Q11 method-dispatch ABI, §2.7.11/Q12 value-call ABI),
+ADR-005 §1 single-discriminator + §2 String exception, 5-arm receiver-
+recovery soundness rule, verify-merge.sh 12/12 + check-no-dynamic.sh
+exit 0 gates, surface-and-stop discipline, no Co-Authored-By trailers,
+own-all-code-quality.
+
+**New refusal #10 added to refuse-on-sight list** (2026-05-14):
+"Preserve X for cluster-1+" / "needs its own audit sub-cluster" /
+"multi-week scope is too risky" / "defer to cluster-1.5 post-close"
+/ any framing reverting bulldozer cadence to audit-first. Cadence
+shift is the explicit refusal of deferral framings within the wave
+scope. Genuinely intractable in-wave gaps surface-and-stop with
+structured shape; supervisor disposes whether to extend the wave or
+genuinely defer (not the wave-agent's call).
+
+### Held items landed alongside R20 close (cumulative annotations)
+
+- ✓ **Smoke 4 kickoff-prompt typo `HashSet()` → `Set()`** — landed at
+  R20 close commit `3fe3ffa9` ("Phase 3 cluster-0 R20 close: status
+  doc S2-prime-merge-ceremony subsection + Smoke 4 kickoff typo fix").
+  Held from R18/R19; cleared.
+- ✓ **Audit-doc Char-bucket clarification** — landed inline in R19
+  S1.5 close commit `80d8c485` per supervisor R19 (3) ratification
+  (Char joined F32 in scalar bucket; audit doc §2.1/§2.2/§3.1/§3.2
+  updated). Cross-referenced from R20 S2-prime audit deliverable (a)
+  §4.1.A. Held from R18/R19; cleared.
+
+### 5th supervisor-/audit-layer imprecision pattern instance (annotation)
+
+Caught at R20 γ agent-execution layer via `SHAPE_JIT_DEBUG=1` trace
+ground-truthing: the kickoff prompt prose at `phase-3-kickoff-prompt.md:102-105`
+describes Smoke 3 as `let t: dyn T = box(X{})` (trait-object dispatch
+through Q25.C HeapKind::TraitObject), but the operational smoke fixture
+at `/tmp/smokes/s3.shape` is `let t = X{}` (plain TypedObject binding
+through UFCS dispatch). γ closed the cluster-0 close criterion via the
+existing TypedObject + UFCS-by-name path (the path the bytecode compiler
+emits today for the fixture shape), NOT through Q25.C TraitObject
+rebuild territory.
+
+Pattern shape: audit-text + kickoff-prompt prose + operational-fixture
+ground truth can drift across multiple sessions without surfacing until
+an agent's debug trace ground-truths against actual binary behavior.
+The 5 cumulative instances at cluster-0:
+
+1. R16 §2.7.14-A draft — supervisor's "unwrap-and-flatten" framing
+   (caught by W12-Option-B-reframed agent)
+2. R18 S1 reopen SendMessage — "Array<u64> fails at compile-time"
+   imprecise (legacy fallback ≠ compile-time rejection; caught by S1
+   reopen agent)
+3. R19 S1.5 audit Shape B framing — "runtime element-kind from
+   HeapHeader byte" §2.7.5 risk (caught by supervisor pre-dispatch)
+4. R19 S2 dispatch double-bind (refuse-on-sight vs ADR-conflict;
+   caught + corrected via R19 partial disposition + ratified at R20
+   S2-prime (c))
+5. R20 γ kickoff-prompt-vs-fixture mismatch (5th instance, this
+   annotation; canonical artifact ≠ canonical prose; 9 rounds against
+   fixture before surfaced; caught at γ agent-execution layer via
+   SHAPE_JIT_DEBUG trace ground-truthing)
+
+Trend: decreasing severity from R16 (substantive ADR prose) to R20
+(framing-vs-fixture drift caught at execution layer before bad code
+merged). The bulldozer cadence Wave 1 single-audit-day adds **pre-
+flight ground-truth verification** at the wave-agent dispatch level
+(every audit claim grep-verified against source at HEAD before agent
+commits) as a structural counter to this pattern.
+
+### 2 pre-existing hashmap_mutation test failures (annotation)
+
+`insert_overwrite_releases_old_value_share` + `remove_releases_value_share`
+in `crates/shape-value/src/hashmap_data.rs` assert
+`Arc::strong_count == 2` but observe 1. Tracked under Q25.A-unfinished-
+producer-side cleanup territory (the same migration class as the S5
+producer-side cascade Wave 2 will land); root cause is the
+TypedArrayData::HashMap consumer's per-value retain semantics
+intermediate-state (R19 cross-tier compat dual-label match preserved
+the pre-amendment carrier shape but the test asserts the post-
+amendment refcount discipline). Folds into Wave 2 hashmap-related
+agent territory; not blocking cluster-0 close.
+
+### Bulldozer-cadence rotation seam summary
+
+**Branch HEAD at rotation:** `bulldozer-strictly-typed` post-this-
+commit (R20-complete; γ merged at `14494605`, S2-prime-production
+merged at `759ec693`, predecessor handover docs at `566fe583`,
+CLAUDE.md compaction at `535619cb`).
+
+**Successor team-lead's first execute action (this ceremony):
+COMPLETE.** Next action: surface "ceremony complete; ready for Wave 1
+dispatch authorization" relay to supervisor via user. Supervisor
+ratifies Wave 1 prompt template (per team-lead handover §Wave 1
+dispatch shape); team-lead dispatches Wave 1 single-audit-day per
+the prompt template; Wave 1 agent produces
+`docs/cluster-audits/bulldozer-wave-1-inventory.md` covering A–L
+deletion targets; team-lead verifies close gate + surfaces Wave 2
+partition recommendation; supervisor ratifies; Wave 2 dispatches 6-8
+parallel agents.
+
+**Surface A user disposition** awaits the supervisor relay; supervisor
+recommendation (c) split. Wave 1 audit-day maps all three options
+(a)/(b)/(c) so Wave 2 partition adapts to the user's decision without
+blocking dispatch. Needed before Wave 2 dispatches (~1-2 sessions
+out).
+
+---
+
+*Next session: Wave 1 dispatch under bulldozer cadence. Read this
+R20-complete subsection first; the team-lead handover doc + this
+status doc + the bulldozer Wave 1 dispatch prompt template (in the
+team-lead handover §Wave 1 dispatch shape) are the canonical state.*
