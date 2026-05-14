@@ -7027,3 +7027,106 @@ surface-and-stop finding. Decision points:*
 - *(c) Accept surface-and-stop as Round 2 C2a final disposition; merge
   to bulldozer-strictly-typed as doc-only close; redispatch C2 jointly
   after A2 + D2 close.*
+
+---
+
+## Wave 2 Round 2 close — team-lead merge ceremony (2026-05-14)
+
+All 4 Round 2 agents closed; supervisor 2026-05-14 dispositions ratified
+each agent's status; merge ceremony executed per §L.4 sequence
+(E → C2a → D2 → A2). 1 fully clean + 3 surface-and-stop;
+12 imprecision-pattern instances cumulative.
+
+### Per-agent close summary (1 clean + 3 surface-and-stop)
+
+| Agent | Close commit | Status | Notes |
+|---|---|---|---|
+| E | `d8bf9a6f` | ✓ clean | TraitObjectStorage HeapHeader migration; ~5 cascade sites vs ~80 predicted (8th imprecision); ADR-006 §Q25.C.5 amendment IN FILE lines 5241-5335 (~95 LoC); inner Arc<TypedObjectStorage> kept Arc-typed (D3 handles in lockstep); vtable Arc<VTable> stays indefinitely; 4-table dispatch flip staged for D3 per supervisor disposition |
+| D2 | `7c7ced22` | ⚠ SURFACE-AND-STOP | Cascade overflow: ~250-300 sites vs ~100 ceiling. ZERO source changes. 365 TypedObjectStorage refs / 48 files; 11 production sites (audit said 18); 6 dispatch arms ACTUAL (D1 said 4). Pre-existing 5-arm receiver-recovery violation surfaced at object_ops.rs:59 — folds into D3 per supervisor item 4. 9th imprecision. Spill: D3 + cascade-ceiling waiver |
+| A2 | `c8ef1cc0` | ⚠ partial + S-A-S | Architectural-surface-land mirror of A1: ~755 LoC across 8 source files; 8 typed opcodes for String + Decimal + dispatch routing (with A1 F32/Char drive-by fix). Producer gate stays CLOSED. 10th imprecision (99→158 refs) + 11th (dispatch-layer Smoke 2 unblock claim incorrect — Smoke 2 uses Array<int>, resolves post-S5). Spill: A2-followup-mechanical |
+| C2a | `89c3d43e` | ⚠ STRUCTURED S-A-S | ZERO source changes; doc-only close. Structural finding: HashMapData<V> migration's atomic unit = HeapValue::HashMap arm signature change cascading through 33 match sites / 17 files + JIT FFI retain/release + every producer site. C2a runtime / C2b JIT FFI tier split is NOT structurally parallel-orthogonal. 12th imprecision (212 refs / 40 files; ~5k LoC single-atomic-commit). Spill: C2-joint at Round 3b sequential |
+
+### Round 2 merge ceremony commits (4 merges)
+
+```
+4c269015  Merge A2 (architectural foundation; ~755 LoC; producer gate closed)
+453ed8f3  Merge D2 (S-A-S; zero source changes; cascade overflow)
+8b06f662  Merge C2a (S-A-S; doc-only; structural-finding)
+98bc0505  Merge E (TraitObjectStorage + §Q25.C.5 in ADR file)
+```
+
+### Post-merge gates (devenv wrapper)
+
+- `cargo check --workspace --lib --tests` EXIT=0 ✅
+- `bash scripts/verify-merge.sh` EXIT=0; **Passed: 12 / Failed: 0** ✅
+- `bash scripts/check-no-dynamic.sh` EXIT=0 ✅
+- 4 Wave 2 Round 2 worktrees cleaned up ✅
+
+### Post-merge smoke matrix (release binary rebuilt; baseline preserved)
+
+| Smoke | VM | JIT | Cluster-0+1 criterion |
+|---|---|---|---|
+| 1 (scalar loop) | ✅ 4950 | ✅ 4950 | ✓ |
+| 2 (`[1,2,3,4,5].map(\|x\|x*2).sum()`) | ✅ 30 | ❌ rc=1 | gated on S5 (CORRECTED per A2 finding) |
+| 3 (canonical fixture) | ✅ x | ✅ x | ✓ |
+| 4 (`Set()` + `.add()` + `.size()`) | ✅ 2 | ✅ 2 | ✓ |
+
+3 of 4 VM == JIT preserved. **Smoke 2 gating CORRECTED via A2 ground-truth finding** — resolves post-S5 (Smoke 2 uses Array<int>, unaffected by String/Decimal migration per status doc R20 close lines 5936-5937). The original Round 1 close summary that said "Smoke 2 still gated on Round 2 A2 territory" was incorrect; Smoke 2 was always gated on S5.
+
+### Imprecision-pattern instances 8-12 (Round 2 burst)
+
+| # | Source | Imprecision shape |
+|---|---|---|
+| 8 | Agent E (R2) | Wave 1 §E.2 predicted 3 production sites; actual = 2 (line 1106 stale) |
+| 9 | Agent D2 (R2) | Wave 1 §D.7 predicted 18 production sites; actual = 11 (7 of 18 were tests). D1 close-report said 4 dispatch arms; actual = 6 (kinded_slot.rs has both Clone AND Drop separate tables) |
+| 10 | Agent A2 (R2) | Audit §A predicted 99 sites; actual = 158 refs / 35 files (R20 S2-prime already surfaced this at 147 refs) |
+| 11 | Agent A2 (R2) | **Dispatch-layer imprecision** — supervisor dispatch claim "Smoke 2 JIT unblocks post-A2" was incorrect per status doc R20 close lines 5936-5937 |
+| 12 | Agent C2a (R2) | Audit §C.6 predicted ~110 refs / 4 files; actual = 212 / 40 files. Expanded scope: ~5k LoC single-atomic-commit cascade NOT splittable into runtime+JIT-FFI tiers |
+
+Pattern observations (supervisor 2026-05-14):
+- 4 new instances in Round 2 alone (~3x acceleration vs Round 1)
+- Pre-flight ground-truth check binding per supervisor item 6 IS working — caught each instance BEFORE bad code landed
+- Supervisor decision: NO re-verification of remaining wave-2 audit predictions before Round 3 (pre-flight check binding sufficient)
+- 2 of the 5 Round 2 instances are supervisor-layer (#11 + #12 expanded scope) — supervisor absorbs corrections
+
+### Round 3 dispatch shape (REVISED per supervisor 2026-05-14)
+
+Original Round 3 (single C2b agent) RESTRUCTURED per C2a structural finding:
+
+**Round 3a (parallel; 2 agents)** — gates Round 3b:
+- **D3** (TypedObjectStorage cascade with cascade-ceiling WAIVER) — ~250-300 sites in single atomic commit including E's 4-table TraitObject dispatch flip folded in + pre-existing 5-arm receiver-recovery violation at object_ops.rs:59 fixed as part of the cascade. Mirror Agent F precedent.
+- **A2-followup-mechanical** — gate flip + 29-producer migration + ~129-consumer cascade in single lockstep commit. Mirror A1 spill pattern.
+
+Round 3a territories non-overlapping: D3 = TypedObjectStorage; A2-followup = TypedArrayData String/Decimal.
+
+**Round 3b (sequential post-Round-3a close + merge)** — 1 agent:
+- **C2-joint** — HashMapData<V> per-V monomorphization runtime + JIT FFI as single atomic ~5k LoC / 40 files commit. Structurally dependent on D3 + A2-followup closes.
+
+**Wave 3 stabilize** (post-Round-3b):
+- S5 wholesale TypedArrayData enum deletion (consumes A1 + A2 spills) + scalar arm cleanup + U64 relabel-step (Shape D)
+- Cluster-0+1 close report → supervisor ratifies → user authorizes phase-3-cluster-0-close + phase-3-cluster-1-close tags
+
+### Velocity update (honest)
+
+| Stage | Sessions |
+|---|---|
+| Round 2 merge ceremony + Round 3a dispatch | 0.5 (this turn + next) |
+| Round 3a close + merge + Round 3b dispatch | 1 |
+| Round 3b close + merge + Wave 3 S5 dispatch | 1 |
+| Wave 3 S5 close + cluster-0+1 close attempt | 1 |
+| Cluster-2 cleanup | 1-2 |
+| Phase 4 | 1-2 |
+| **Total remaining** | **5.5-7.5** |
+
++1 session from prior projection (Round 3a + Round 3b split absorbed by C2a's
+structural finding). Honest trajectory: 6.5-8.5 sessions to v1.
+
+### Recovery-pattern observation (continued)
+
+Round 2 ran without a 3rd S1-reopen-R18 instance. Pattern durability ratification still not yet needed (2 cumulative: Wave 1 + D1 drive-by).
+
+Bulldozer cadence delivering: structural complexity surfacing at agent execution layer with surface-and-stop discipline; honest trajectory adjustments; discipline working at all 12 imprecision instances.
+
+---
+
+*Next session: Wave 2 Round 3a dispatch (2 agents in parallel — D3 + A2-followup-mechanical) after supervisor ratifies Round 2 close. D3 dispatches with cascade-ceiling WAIVER binding (~250-300 sites in single atomic commit including E's 4-table TraitObject flip + pre-existing 5-arm receiver-recovery violation fix). A2-followup-mechanical dispatches with atomic-lockstep binding. Round 3b (C2-joint) sequential post-Round-3a.*
