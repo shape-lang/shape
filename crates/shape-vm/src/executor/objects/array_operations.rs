@@ -60,8 +60,9 @@
 
 use crate::bytecode::{Instruction, Operand};
 use crate::executor::v2_handlers::v2_array_detect::{
-    self, ELEM_TYPE_BOOL, ELEM_TYPE_CHAR, ELEM_TYPE_F32, ELEM_TYPE_F64, ELEM_TYPE_I16,
-    ELEM_TYPE_I32, ELEM_TYPE_I64, ELEM_TYPE_I8, ELEM_TYPE_U16, ELEM_TYPE_U32, ELEM_TYPE_U8,
+    self, ELEM_TYPE_BOOL, ELEM_TYPE_CHAR, ELEM_TYPE_DECIMAL, ELEM_TYPE_F32, ELEM_TYPE_F64,
+    ELEM_TYPE_I16, ELEM_TYPE_I32, ELEM_TYPE_I64, ELEM_TYPE_I8, ELEM_TYPE_STRING, ELEM_TYPE_U16,
+    ELEM_TYPE_U32, ELEM_TYPE_U8,
     V2ElemType,
     V2TypedArrayView,
 };
@@ -915,6 +916,47 @@ fn slice_v2_typed_array(
             };
             let new_ptr = TypedArray::<char>::from_slice(slice);
             stamp_elem_type(new_ptr as *mut u8, ELEM_TYPE_CHAR);
+            new_ptr as *mut u8
+        },
+        // Wave 2 Agent A2 (2026-05-14) — String + Decimal slice paths.
+        // Per audit §4.1.B.4: copy element pointers from source slice + retain
+        // each per-element header (both arrays own valid shares post-slice).
+        V2ElemType::String => unsafe {
+            use shape_value::v2::refcount::v2_retain;
+            use shape_value::v2::string_obj::StringObj;
+            let src = view.ptr as *const TypedArray<*const StringObj>;
+            let count = e.saturating_sub(s);
+            let new_ptr = TypedArray::<*const StringObj>::with_capacity(count as u32);
+            if count > 0 {
+                let src_data = (*src).data;
+                let dst_data = (*new_ptr).data;
+                for i in 0..count {
+                    let elem = *src_data.add(s + i);
+                    v2_retain(&(*elem).header);
+                    *dst_data.add(i) = elem;
+                }
+                (*new_ptr).len = count as u32;
+            }
+            stamp_elem_type(new_ptr as *mut u8, ELEM_TYPE_STRING);
+            new_ptr as *mut u8
+        },
+        V2ElemType::Decimal => unsafe {
+            use shape_value::v2::decimal_obj::DecimalObj;
+            use shape_value::v2::refcount::v2_retain;
+            let src = view.ptr as *const TypedArray<*const DecimalObj>;
+            let count = e.saturating_sub(s);
+            let new_ptr = TypedArray::<*const DecimalObj>::with_capacity(count as u32);
+            if count > 0 {
+                let src_data = (*src).data;
+                let dst_data = (*new_ptr).data;
+                for i in 0..count {
+                    let elem = *src_data.add(s + i);
+                    v2_retain(&(*elem).header);
+                    *dst_data.add(i) = elem;
+                }
+                (*new_ptr).len = count as u32;
+            }
+            stamp_elem_type(new_ptr as *mut u8, ELEM_TYPE_DECIMAL);
             new_ptr as *mut u8
         },
     }

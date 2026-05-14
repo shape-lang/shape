@@ -597,6 +597,19 @@ impl VirtualMachine {
                         // dispatch falls back to the generic `ARRAY_METHODS`
                         // PHF below (length / first / last / etc).
                         V2ElemType::Char => None,
+                        // Wave 2 Agent A2 (2026-05-14) — String + Decimal v2-raw
+                        // typed-array method dispatch. The architectural surface
+                        // landed for `TypedArray<*const StringObj/DecimalObj>` but
+                        // the producer gate is INTENTIONALLY closed (see
+                        // `should_use_typed_array` in v2_typed_emission.rs;
+                        // Q25.A SUPERSEDED #3 mixed-migration forbidden pattern).
+                        // No producer emits these v2-raw shapes at HEAD; the arm
+                        // here exists for exhaustiveness so future A2-followup
+                        // sub-cluster work can flip the gate + wire up the
+                        // STRING_ARRAY_METHODS / DECIMAL_ARRAY_METHODS PHF
+                        // registries in a single lockstep commit. For now: fall
+                        // back to ARRAY_METHODS (length / first / last / etc).
+                        V2ElemType::String | V2ElemType::Decimal => None,
                     };
                     typed.or_else(|| method_registry::ARRAY_METHODS.get(method_name).copied())
                 } else {

@@ -366,6 +366,32 @@ pub(super) fn typed_array_arc_from_kinded(
                     }
                     Arc::new(TypedArrayData::Char(Arc::new(TypedBuffer::from_vec(data))))
                 }
+                // Wave 2 Agent A2 (2026-05-14) — String + Decimal v2-raw arrays
+                // SHOULD NEVER REACH THIS MATERIALIZATION PATH at present: the
+                // producer gate `should_use_typed_array` in `v2_typed_emission.rs`
+                // returns None for ConcreteType::String / Decimal pending the
+                // A2-followup sub-cluster (full producer migration + ~158
+                // consumer cascade landing in lockstep per ADR-006 §2.7.24
+                // Q25.A SUPERSEDED #3 mixed-migration forbidden pattern).
+                // Reaching here would mean a producer somewhere emitted
+                // `NewTypedArrayString` / `NewTypedArrayDecimal` without the
+                // gate flip — surface-and-stop with a structured error citing
+                // the gate as the missing prerequisite.
+                V2ElemType::String | V2ElemType::Decimal => {
+                    return Err(VMError::NotImplemented(format!(
+                        "{}: SURFACE — v2-raw TypedArray<*const StringObj/DecimalObj> \
+                         reached materialize-to-Arc<TypedArrayData> path before the \
+                         A2-followup sub-cluster's producer-gate flip + consumer arm \
+                         migration lockstep. Materializing from *const <X>Obj → \
+                         Arc<String>/Arc<Decimal> at this layer is the §4.1.B.3 \
+                         materialize-on-read forbidden pattern — the right fix is \
+                         the A2-followup lockstep (producers + all 158 consumer \
+                         arms flip together). Tracked as W12-typed-array-data-s2-prime-\
+                         production-mechanical per audit §3.2 + ADR-006 §2.7.24 \
+                         Q25.A SUPERSEDED.",
+                        op
+                    )));
+                }
             };
             Ok(arc)
         }
