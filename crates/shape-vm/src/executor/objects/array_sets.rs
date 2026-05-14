@@ -290,6 +290,264 @@ fn unique_indices(arr: &TypedArrayData) -> Result<Vec<usize>, VMError> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Wave 2 Round 3a' Agent δ — v2-raw String/Decimal handler arms.
+//
+// Per supervisor 2026-05-14 disposition (1): A2-followup-mechanical split into
+// 7 per-handler-family parallel sub-agents; each per-handler-family file lands
+// v2-raw String/Decimal handler arms as UNREACHABLE code while the producer
+// gate `should_use_typed_array` in `compiler/typed_emission.rs` stays CLOSED
+// for `ConcreteType::String / Decimal`. The gate-flip itself lands as a
+// SEPARATE sequential `A2-followup-gate-flip` agent dispatched AFTER α-η merge
+// ceremony — between sub-commits no type-confusion-window risk (unreachable
+// code is just unreachable code).
+//
+// **Producer gate state (verified at HEAD `5d0f1524`)**:
+//   `should_use_typed_array(ConcreteType::String / Decimal) → None`
+//   → producers emit legacy `OpCode::NewArray` → `TypedArrayData::String /
+//     Decimal(Arc::new(TypedBuffer::from_vec(...)))` shape, NOT v2-raw
+//     `*mut TypedArray<*const StringObj/DecimalObj>` shape.
+//   → no `args[0].kind == NativeKind::UInt64` with elem_type stamp
+//     String/Decimal can reach these handlers under user code.
+//
+// **Why this arm exists pre-gate-flip**: lockstep landing requires the v2-raw
+// shape's consumer surface to be complete BEFORE the gate flips; otherwise the
+// gate-flip commit would itself need to land the consumer arms across 7+ files
+// and exceed single-LLM-session capacity (ceiling-c finding from D3 Round 3a
+// close). Splitting the consumer-side landing across α-η parallel sub-agents
+// keeps each cargo-check-clean with bounded scope (~20-50 LoC each) while
+// preserving the atomic-flip invariant for the gate flip itself.
+//
+// **Shape**: per audit §4.1.B.4 migration recipe. The receiver's v2-raw
+// `TypedArray<*const StringObj/DecimalObj>` pointer is walked directly (no
+// materialize-to-Arc<TypedArrayData> hop per §4.1.B.3 forbidden); equality
+// uses pointer-content comparison via `StringObj::as_str(ptr)` /
+// `DecimalObj::value(ptr)`; the result is a fresh
+// `TypedArray::<*const StringObj/DecimalObj>::with_capacity(n)` with
+// `v2_retain(&(*elem_ptr).header)` per stored element (the array owns one
+// share per stored element); the result slot is
+// `KindedSlot::new(ValueSlot::from_raw(ptr as u64), NativeKind::UInt64)`
+// matching the v2-raw producer carrier shape.
+
+/// Operation tag for the unified v2-raw String/Decimal set-op dispatcher.
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum V2RawSetOp {
+    /// `union(lhs, rhs)` — order-preserving dedup over concat lhs ++ rhs.
+    Union,
+    /// `intersect(lhs, rhs)` — elements in both, order over lhs, deduped.
+    Intersect,
+    /// `except(lhs, rhs)` — elements in lhs but not rhs, order over lhs, deduped.
+    Except,
+    /// `unique(arr)` / `distinct(arr)` — order-preserving dedup. No rhs.
+    Unique,
+}
+
+/// Probe whether a `KindedSlot` is a v2-raw `*mut TypedArray<*const StringObj>`
+/// (`V2ElemType::String`) or `*mut TypedArray<*const DecimalObj>`
+/// (`V2ElemType::Decimal`) carrier. Returns the matched `V2ElemType` plus the
+/// raw pointer bits + element count, or `None` for any other receiver shape.
+///
+/// **Unreachable at runtime under HEAD `5d0f1524`** — the producer gate stays
+/// closed; documented as audit-deliverable for the A2-followup-gate-flip
+/// sequential close. Compile-time correctness only.
+#[inline]
+fn as_v2_raw_string_decimal(
+    slot: &KindedSlot,
+) -> Option<(crate::executor::v2_handlers::v2_array_detect::V2ElemType, u64, u32)> {
+    use crate::executor::v2_handlers::v2_array_detect::{as_v2_typed_array, V2ElemType};
+    if slot.kind != NativeKind::UInt64 {
+        return None;
+    }
+    let bits = slot.slot.raw();
+    let view = as_v2_typed_array(bits, NativeKind::UInt64)?;
+    match view.elem_type {
+        V2ElemType::String | V2ElemType::Decimal => Some((view.elem_type, bits, view.len)),
+        _ => None,
+    }
+}
+
+/// v2-raw set-op dispatcher for `V2ElemType::String / Decimal` carriers.
+///
+/// Per audit §4.1.B.4: snapshots the receiver buffer(s) into local key vectors
+/// (`Vec<&str>` for String, `Vec<Decimal>` for Decimal) for per-element-kind
+/// equality (mirrors the heap-Arc helper contract — `Arc<String>` content
+/// equality + `Decimal == Decimal` `PartialEq`); computes the kept-index
+/// permutation per `op`; allocates a fresh `TypedArray<*const <X>Obj>` with
+/// `v2_retain(&(*p).header)` on each stored element pointer; stamps the
+/// elem_type byte; returns a `KindedSlot` of kind `NativeKind::UInt64`. The
+/// source receivers are NOT consumed — the dispatch shell owns the source
+/// shares; this helper only READS the source buffers.
+///
+/// **Unreachable at runtime under HEAD `5d0f1524`** per the gate-state comment
+/// at the section head. The body is the consumer-surface contract for the
+/// post-gate-flip lockstep close per A2-followup-gate-flip directive.
+fn set_op_v2_raw_string_decimal(
+    op: V2RawSetOp,
+    lhs_args: &KindedSlot,
+    rhs_args: Option<&KindedSlot>,
+) -> Result<KindedSlot, VMError> {
+    use crate::executor::v2_handlers::v2_array_detect::{
+        stamp_elem_type, V2ElemType, ELEM_TYPE_DECIMAL, ELEM_TYPE_STRING,
+    };
+    use shape_value::v2::decimal_obj::DecimalObj;
+    use shape_value::v2::refcount::v2_retain;
+    use shape_value::v2::string_obj::StringObj;
+    use shape_value::v2::typed_array::TypedArray;
+    use shape_value::ValueSlot;
+
+    let (lhs_elem, lhs_bits, lhs_len) = as_v2_raw_string_decimal(lhs_args)
+        .ok_or_else(|| type_error("set op v2-raw: lhs not a v2-raw String/Decimal array"))?;
+    let rhs_triple = match rhs_args {
+        Some(rhs) => {
+            let (re, rb, rl) = as_v2_raw_string_decimal(rhs)
+                .ok_or_else(|| type_error("set op v2-raw: rhs not a v2-raw String/Decimal array"))?;
+            if re != lhs_elem {
+                return Err(type_error(
+                    "set op v2-raw: lhs/rhs element-type mismatch (String vs Decimal)",
+                ));
+            }
+            Some((rb, rl))
+        }
+        None => None,
+    };
+
+    // Generic kept-index builder. Given lhs / rhs key vectors of equal-kind
+    // values that support `PartialEq`, returns `(lhs_keep, rhs_keep)` per the
+    // operation. Mirrors `already_seen` / `lhs_in_rhs` / `unique_indices` in
+    // the heap-Arc helpers above.
+    fn build_keep<K: PartialEq>(
+        op: V2RawSetOp,
+        lhs: &[K],
+        rhs: Option<&[K]>,
+    ) -> (Vec<u32>, Vec<u32>) {
+        let mut lhs_keep: Vec<u32> = Vec::new();
+        let mut rhs_keep: Vec<u32> = Vec::new();
+        let lhs_dedup = |lhs_keep: &mut Vec<u32>, i: usize| {
+            if !lhs_keep.iter().any(|&j| lhs[j as usize] == lhs[i]) {
+                lhs_keep.push(i as u32);
+            }
+        };
+        match op {
+            V2RawSetOp::Unique => {
+                for i in 0..lhs.len() {
+                    lhs_dedup(&mut lhs_keep, i);
+                }
+            }
+            V2RawSetOp::Intersect => {
+                let rhs = rhs.expect("intersect requires rhs");
+                for i in 0..lhs.len() {
+                    if rhs.iter().any(|x| *x == lhs[i]) {
+                        lhs_dedup(&mut lhs_keep, i);
+                    }
+                }
+            }
+            V2RawSetOp::Except => {
+                let rhs = rhs.expect("except requires rhs");
+                for i in 0..lhs.len() {
+                    if !rhs.iter().any(|x| *x == lhs[i]) {
+                        lhs_dedup(&mut lhs_keep, i);
+                    }
+                }
+            }
+            V2RawSetOp::Union => {
+                let rhs = rhs.expect("union requires rhs");
+                for i in 0..lhs.len() {
+                    lhs_dedup(&mut lhs_keep, i);
+                }
+                for i in 0..rhs.len() {
+                    if lhs_keep.iter().any(|&j| lhs[j as usize] == rhs[i]) {
+                        continue;
+                    }
+                    if !rhs_keep.iter().any(|&j| rhs[j as usize] == rhs[i]) {
+                        rhs_keep.push(i as u32);
+                    }
+                }
+            }
+        }
+        (lhs_keep, rhs_keep)
+    }
+
+    // Allocate the output, retain per stored element, return the v2-raw slot.
+    // The elem_type byte at offset 7 of the HeapHeader is stamped per the
+    // producer convention in `executor/v2_handlers/array.rs::OpCode::
+    // NewTypedArrayString / NewTypedArrayDecimal`.
+    let out_bits = match lhs_elem {
+        V2ElemType::String => unsafe {
+            let lhs_arr = lhs_bits as *const TypedArray<*const StringObj>;
+            let lhs_keys: Vec<&str> = (0..lhs_len)
+                .map(|i| StringObj::as_str(TypedArray::<*const StringObj>::get_unchecked(lhs_arr, i)))
+                .collect();
+            let rhs_keys_storage: Vec<&str> = match rhs_triple {
+                Some((rb, rl)) => {
+                    let rhs_arr = rb as *const TypedArray<*const StringObj>;
+                    (0..rl)
+                        .map(|i| StringObj::as_str(TypedArray::<*const StringObj>::get_unchecked(rhs_arr, i)))
+                        .collect()
+                }
+                None => Vec::new(),
+            };
+            let rhs_keys_opt: Option<&[&str]> = rhs_triple.map(|_| rhs_keys_storage.as_slice());
+            let (lhs_keep, rhs_keep) = build_keep(op, &lhs_keys, rhs_keys_opt);
+
+            let total = lhs_keep.len() + rhs_keep.len();
+            let out = TypedArray::<*const StringObj>::with_capacity(total as u32);
+            stamp_elem_type(out as *mut u8, ELEM_TYPE_STRING);
+            for &i in &lhs_keep {
+                let p = TypedArray::<*const StringObj>::get_unchecked(lhs_arr, i);
+                v2_retain(&(*p).header);
+                TypedArray::<*const StringObj>::push(out, p);
+            }
+            if let Some((rb, _)) = rhs_triple {
+                let rhs_arr = rb as *const TypedArray<*const StringObj>;
+                for &i in &rhs_keep {
+                    let p = TypedArray::<*const StringObj>::get_unchecked(rhs_arr, i);
+                    v2_retain(&(*p).header);
+                    TypedArray::<*const StringObj>::push(out, p);
+                }
+            }
+            out as u64
+        },
+        V2ElemType::Decimal => unsafe {
+            let lhs_arr = lhs_bits as *const TypedArray<*const DecimalObj>;
+            let lhs_keys: Vec<rust_decimal::Decimal> = (0..lhs_len)
+                .map(|i| DecimalObj::value(TypedArray::<*const DecimalObj>::get_unchecked(lhs_arr, i)))
+                .collect();
+            let rhs_keys_storage: Vec<rust_decimal::Decimal> = match rhs_triple {
+                Some((rb, rl)) => {
+                    let rhs_arr = rb as *const TypedArray<*const DecimalObj>;
+                    (0..rl)
+                        .map(|i| DecimalObj::value(TypedArray::<*const DecimalObj>::get_unchecked(rhs_arr, i)))
+                        .collect()
+                }
+                None => Vec::new(),
+            };
+            let rhs_keys_opt: Option<&[rust_decimal::Decimal]> =
+                rhs_triple.map(|_| rhs_keys_storage.as_slice());
+            let (lhs_keep, rhs_keep) = build_keep(op, &lhs_keys, rhs_keys_opt);
+
+            let total = lhs_keep.len() + rhs_keep.len();
+            let out = TypedArray::<*const DecimalObj>::with_capacity(total as u32);
+            stamp_elem_type(out as *mut u8, ELEM_TYPE_DECIMAL);
+            for &i in &lhs_keep {
+                let p = TypedArray::<*const DecimalObj>::get_unchecked(lhs_arr, i);
+                v2_retain(&(*p).header);
+                TypedArray::<*const DecimalObj>::push(out, p);
+            }
+            if let Some((rb, _)) = rhs_triple {
+                let rhs_arr = rb as *const TypedArray<*const DecimalObj>;
+                for &i in &rhs_keep {
+                    let p = TypedArray::<*const DecimalObj>::get_unchecked(rhs_arr, i);
+                    v2_retain(&(*p).header);
+                    TypedArray::<*const DecimalObj>::push(out, p);
+                }
+            }
+            out as u64
+        },
+        _ => unreachable!("as_v2_raw_string_decimal filtered other variants"),
+    };
+    Ok(KindedSlot::new(ValueSlot::from_raw(out_bits), NativeKind::UInt64))
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // MethodFnV2 (native ABI) handlers
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -303,6 +561,12 @@ pub(crate) fn handle_union_v2(
 ) -> Result<KindedSlot, VMError> {
     if args.len() != 2 {
         return Err(type_error("union() requires 2 arguments (array, other)"));
+    }
+    // Wave 2 Round 3a' Agent δ — v2-raw String/Decimal fast path. UNREACHABLE
+    // under HEAD `5d0f1524`: gate `should_use_typed_array` returns None for
+    // ConcreteType::String/Decimal. See section comment above.
+    if as_v2_raw_string_decimal(&args[0]).is_some() {
+        return set_op_v2_raw_string_decimal(V2RawSetOp::Union, &args[0], Some(&args[1]));
     }
     let lhs = as_typed_array(&args[0])
         .ok_or_else(|| type_error("union(): receiver must be an Array"))?;
@@ -387,6 +651,11 @@ pub(crate) fn handle_intersect_v2(
             "intersect() requires 2 arguments (array, other)",
         ));
     }
+    // Wave 2 Round 3a' Agent δ — v2-raw String/Decimal fast path (UNREACHABLE
+    // under closed producer gate; see section comment).
+    if as_v2_raw_string_decimal(&args[0]).is_some() {
+        return set_op_v2_raw_string_decimal(V2RawSetOp::Intersect, &args[0], Some(&args[1]));
+    }
     let lhs = as_typed_array(&args[0])
         .ok_or_else(|| type_error("intersect(): receiver must be an Array"))?;
     let rhs = as_typed_array(&args[1])
@@ -443,6 +712,11 @@ pub(crate) fn handle_except_v2(
     if args.len() != 2 {
         return Err(type_error("except() requires 2 arguments (array, other)"));
     }
+    // Wave 2 Round 3a' Agent δ — v2-raw String/Decimal fast path (UNREACHABLE
+    // under closed producer gate; see section comment).
+    if as_v2_raw_string_decimal(&args[0]).is_some() {
+        return set_op_v2_raw_string_decimal(V2RawSetOp::Except, &args[0], Some(&args[1]));
+    }
     let lhs = as_typed_array(&args[0])
         .ok_or_else(|| type_error("except(): receiver must be an Array"))?;
     let rhs = as_typed_array(&args[1])
@@ -497,6 +771,12 @@ pub(crate) fn handle_unique_v2(
 ) -> Result<KindedSlot, VMError> {
     if args.len() != 1 {
         return Err(type_error("unique() requires 1 argument (array)"));
+    }
+    // Wave 2 Round 3a' Agent δ — v2-raw String/Decimal fast path (UNREACHABLE
+    // under closed producer gate; see section comment). `distinct` aliases
+    // `unique` so it inherits this routing.
+    if as_v2_raw_string_decimal(&args[0]).is_some() {
+        return set_op_v2_raw_string_decimal(V2RawSetOp::Unique, &args[0], None);
     }
     let arc = as_typed_array(&args[0])
         .ok_or_else(|| type_error("unique(): receiver must be an Array"))?;
