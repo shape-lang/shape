@@ -648,6 +648,205 @@ discipline-coherent but accumulates source carriers; O-1.a is
 the smallest delta but requires the §2.7.5 amendment. Without
 supervisor disposition, S2 cannot close cleanly.
 
+### §4.1.A Round 20 S2-prime audit-first deliverable (a): TemporalData variant classification (2026-05-14)
+
+**Supervisor R19 disposition (selected):** O-1.b — separate v2-raw
+carrier per user-facing semantic kind (newtype path).
+
+**Supervisor's prediction:** 3 user-facing variants
+(DateTime/Duration/TimeSpan) need `<X>Obj` carriers; 4 AST-internal
+variants (Timeframe/TimeReference/DateTimeExpr/DataDateTimeRef) stay
+on legacy `Arc<TemporalData>` carrier.
+
+**Audit deliverable (a) ground-truths the prediction against actual
+source at HEAD `7e95069f`. The classification refines the prediction
+in two structurally important ways.**
+
+#### §4.1.A.1 Construction-site inventory for `TemporalData::*` variants
+
+Per-variant `Arc::new(TemporalData::<Variant>(...))` constructor
+audit (`grep -rn "Arc::new(TemporalData::" crates/ --include="*.rs"`,
+excluding test fixtures and string-name-only references):
+
+| Variant | Genuine root constructors | User-facing semantics |
+|---|---|---|
+| `TemporalData::DateTime(chrono::DateTime<FixedOffset>)` | **3 sites** — `executor/stack_ops/mod.rs:169` (Constant::DateTimeExpr lowering: `@now`, `@today`, `@"2026-01-01"`); `executor/objects/datetime_methods.rs:440/454/464/522/545/570/583/596/609/637/714/720/787` (multiple, all DateTime-returning method-handlers); test fixtures in `kinded_slot.rs`. **USER-FACING — reachable from user code.** |
+| `TemporalData::TimeSpan(chrono::Duration)` | **2 site-classes** — `executor/stack_ops/mod.rs:150` (Constant::Duration lowering: `3d`, `10s`, `2h30m` literals via `ast_duration_to_chrono`); `executor/objects/datetime_methods.rs:549/714/742/797` (multiple, all TimeSpan-returning method-handlers). **USER-FACING — reachable from user code via duration literals + TimeSpan-returning methods.** |
+| `TemporalData::Duration(shape_ast::ast::Duration)` | **ZERO root constructors.** Searched: `grep -rn "Arc::new(TemporalData::Duration\|TemporalData::Duration(" crates/ --include="*.rs"`. Hits are pattern-matches in `Display` impl (`heap_value.rs:3583`), `type_name()` impl (`heap_value.rs:3564`), equality checks (`heap_value.rs:4262`), method-routing fallback (`objects/mod.rs:692`). **DEAD ENUM VARIANT — has no constructor at runtime.** |
+| `TemporalData::Timeframe(shape_ast::data::Timeframe)` | **ZERO constructors.** Only `type_name()` / `Display` / equality (`heap_value.rs:3566/3585/4264`). **AST-INTERNAL — never lifted to runtime value.** |
+| `TemporalData::TimeReference(Box<shape_ast::ast::TimeReference>)` | **ZERO constructors.** Only `type_name()` / `Display` (`heap_value.rs:3567/3586`). **AST-INTERNAL.** |
+| `TemporalData::DateTimeExpr(Box<shape_ast::ast::DateTimeExpr>)` | **ZERO constructors.** Only doc-comment reference in `window_join.rs:385` and `type_name()` / `Display` (`heap_value.rs:3568/3587`). **AST-INTERNAL** (the `Constant::DateTimeExpr` lowering at `stack_ops/mod.rs:165` evaluates the AST into a `chrono::DateTime<FixedOffset>` and wraps as `TemporalData::DateTime`, NOT as `TemporalData::DateTimeExpr`). |
+| `TemporalData::DataDateTimeRef(Box<shape_ast::ast::DataDateTimeRef>)` | **ZERO constructors.** Only `type_name()` / `Display` (`heap_value.rs:3569/3588`). **AST-INTERNAL.** |
+
+**Audit finding refines supervisor's prediction in TWO ways:**
+
+1. **Only 2 of the 7 variants are user-facing, not 3.** The user-facing
+   set is `{DateTime, TimeSpan}` (2 variants), not the predicted
+   `{DateTime, Duration, TimeSpan}` (3 variants). `TemporalData::Duration`
+   is a dead enum variant — has zero constructors anywhere in source.
+   The user-facing Shape type "duration" (inferred from `Expr::Duration`
+   at `type_system/inference/expressions.rs:757`) is backed at runtime
+   by `TemporalData::TimeSpan(chrono::Duration)`, NOT by
+   `TemporalData::Duration(shape_ast::ast::Duration)`. The lowering site
+   `stack_ops/mod.rs:150` converts `shape_ast::ast::Duration` via
+   `ast_duration_to_chrono(d)` to `chrono::Duration` and wraps as
+   `TimeSpan`. The `Duration` enum variant is an architectural
+   leftover from a pre-bulldozer design where `shape_ast::ast::Duration`
+   was preserved verbatim at the value tier; current strict-typing
+   discipline lowers to `chrono::Duration` at value-construction time.
+
+2. **5 of the 7 variants are AST-internal**, not 4 as predicted. The
+   AST-internal set is `{Duration, Timeframe, TimeReference, DateTimeExpr,
+   DataDateTimeRef}` — Duration joins the other 4 as a never-constructed
+   variant. The `HeapValue::Temporal(Arc<TemporalData>)` arm in
+   `heap_variants.rs:736` stays alive post-S2-prime for these 5 variants;
+   the per-Q25.A specialized `TypedArrayData::DateTime/Timespan/Duration`
+   arms are correspondingly dead targets (see §4.1.A.2 below).
+
+#### §4.1.A.2 `TypedArrayData::<Variant>` root-constructor inventory (the S2-prime migration territory)
+
+`grep -rn "TypedArrayData::<Variant>(Arc::new" crates/ --include="*.rs"`
+for the 6 R19-S2-named variants (String / Decimal / BigInt / DateTime /
+Timespan / Duration / Instant):
+
+| Variant | Root constructors | Reachability |
+|---|---|---|
+| `TypedArrayData::String(...)` | `object_creation.rs:518/799`, `concat.rs:240`, `array_transform.rs:multiple-derived`. **Multiple live root sites.** | User-facing reachable via `Array<string>` literal + string-stdlib methods. |
+| `TypedArrayData::Decimal(...)` | `object_creation.rs:544`, `heap_value.rs:3044` (build_specialized), `builtins/array_ops.rs:485` (filled), `array_transform.rs:567/732/983/1460`, `concat.rs:255`. **Multiple live root sites.** | User-facing reachable via `Array<decimal>` literal + decimal methods. |
+| `TypedArrayData::BigInt(...)` | `object_creation.rs:563`, `heap_value.rs:3058` (build_specialized), `builtins/array_ops.rs:492` (filled), `array_transform.rs:573/738/987/1465`, `concat.rs:263`. **Multiple live root sites.** | User-facing reachable (mostly — see Obstacle 3 BigInt-type-design defer). |
+| `TypedArrayData::DateTime(...)` | **ZERO root constructors.** All apparent constructions in `array_transform.rs:579/744/992` and `concat.rs:271` are **derived operations** (`slice` / `zip` / `concat`) that re-wrap an existing buffer originating from `op_new_array`. `op_new_array`'s only path producing `TypedArrayData::DateTime` is `build_specialized_from_heap_arcs` via the `other => Err(...)` fallthrough at `heap_value.rs:3088` (which **does NOT have a `HeapValue::Temporal` arm** — see source at `heap_value.rs:3060-3093`). Therefore: **NO live producer chains exist for `TypedArrayData::DateTime`.** |
+| `TypedArrayData::Timespan(...)` | Same as DateTime — only `array_transform.rs:585/750/997` and `concat.rs:279` derived sites. No root. | **DEAD POST-Q25.A.** |
+| `TypedArrayData::Duration(...)` | Same as DateTime — only `array_transform.rs:591/756/1002` and `concat.rs:287` derived sites. No root. | **DEAD POST-Q25.A** (compounded — even the upstream `TemporalData::Duration` is a dead variant per §4.1.A.1). |
+| `TypedArrayData::Instant(...)` | Same as DateTime — only `array_transform.rs:597/762/1007` and `concat.rs:295` derived sites. No root. | **DEAD POST-Q25.A.** |
+
+**Audit finding (load-bearing for S2-prime scope):**
+
+The Q25.A monomorphization (W17-typed-carrier-bundle-A,
+commit 1/4 2026-05-11) added the specialized `TypedArrayData::DateTime`,
+`Timespan`, `Duration`, `Instant` arms but **never wired root
+producers**. `build_specialized_from_heap_arcs` (the
+W17-typed-carrier-bundle-A checkpoint 2/4 helper) handles only
+`String / Decimal / BigInt / TypedObject / Char`, with a
+`other => Err(...)` fallthrough for `HeapValue::Temporal` /
+`HeapValue::Instant`. Empirical grep confirms zero `Array<datetime>` /
+`Array<duration>` / `Array<timespan>` / `Array<instant>` source
+references anywhere in crates/ or tests/.
+
+This means **the heap-element S2-prime migration scope for
+DateTime / Timespan / Duration / Instant is migrating dead arms,
+not live producers**. The user-facing impact of producing v2-raw
+`*const DateTimeObj` / `TimespanObj` / `DurationObj` / `InstantObj`
+carriers per the supervisor's R19 disposition is **zero behavior
+change** (no user-reachable production path uses them today).
+The migration is structural cleanliness for S5's
+`TypedArrayData` enum deletion — it ensures that when the enum is
+deleted, the arms vacated are confirmed-dead, not silently-broken
+production paths.
+
+#### §4.1.A.3 HashMapValueBuf parallel deletion mirror
+
+`grep -rn "HashMapValueBuf::<Variant>(Arc::new" crates/ --include="*.rs"`
+for the temporal/instant arms:
+
+- `HashMapValueBuf::DateTime` / `Timespan` / `Duration` / `Instant`:
+  **ZERO root constructors.** Only the `hashmap_methods.rs:253-256`
+  HashMap→TypedArrayData projection helper consumes them, and that
+  helper itself is unreachable on the heap-element types since no
+  HashMap construction emits them.
+
+This confirms the Q25.A specialized-variant pattern is **uniformly
+dead** for the temporal-family element kinds in BOTH `TypedArrayData`
+and `HashMapValueBuf`. The §5 HashMapValueBuf parallel deletion
+shape inherits this finding: the temporal/instant arms are dead
+targets in HashMapValueBuf too.
+
+#### §4.1.A.4 Refined supervisor-disposition map
+
+Restated audit deliverable (a) finding for the team-lead handover +
+status-doc record:
+
+| User-facing? | `TemporalData` variant | `<X>Obj` carrier needed in S2-prime? |
+|---|---|---|
+| YES | `DateTime(chrono::DateTime<FixedOffset>)` | YES — `DateTimeObj` newtype carrier |
+| YES | `TimeSpan(chrono::Duration)` | YES — `TimespanObj` newtype carrier (mirrors runtime variant naming) |
+| NO | `Duration(shape_ast::ast::Duration)` | NO — dead enum variant; arm stays on legacy `Arc<TemporalData>` carrier indefinitely (cluster-1+ language-design cleanup candidate) |
+| NO | `Timeframe(shape_ast::data::Timeframe)` | NO — AST-internal |
+| NO | `TimeReference(Box<...>)` | NO — AST-internal |
+| NO | `DateTimeExpr(Box<...>)` | NO — AST-internal |
+| NO | `DataDateTimeRef(Box<...>)` | NO — AST-internal |
+
+**Plus `Instant`** (out of `TemporalData` family; lives at
+`crates/shape-value/src/heap_value.rs` near
+`HeapValue::Instant(Arc<std::time::Instant>)`):
+
+| User-facing? | `Arc<T>` payload | `<X>Obj` carrier needed in S2-prime? |
+|---|---|---|
+| YES | `std::time::Instant` (16-byte Copy on most platforms) | YES — `InstantObj` newtype carrier (NOTE: `TypedArrayData::Instant` is dead per §4.1.A.2, so this carrier lands for forward-S5 cleanliness, not for reachable code paths) |
+
+**Plus `Decimal`** (already mapped per audit §2.2):
+
+| User-facing? | `Arc<T>` payload | `<X>Obj` carrier needed in S2-prime? |
+|---|---|---|
+| YES | `rust_decimal::Decimal` (16-byte Copy) | YES — `DecimalObj` carrier; **live producers exist** (`object_creation.rs:544`, `array_ops.rs:485`, `heap_value.rs:3044` build_specialized arm); migration is non-trivial. |
+
+**String already migrated** post-R12 (W12-jit-string-carrier-unification);
+`StringObj` exists at `crates/shape-value/src/v2/string_obj.rs`. Per
+audit §2.2 String row, no new `StringObj` carrier is built. However,
+**`TypedArrayData::String` is still live** at root-construction sites
+(see §4.1.A.2) — those producers still construct
+`TypedArrayData::String(Arc::new(TypedBuffer::from_vec(...)))` rather
+than `*mut TypedArray<*const StringObj>`. The producer-migration is
+S2-prime territory for the String arm too.
+
+**Total live-producer migration surface for S2-prime:**
+
+- **String** — Multiple live root sites. Migration to
+  `TypedArray<*const StringObj>` is mechanical but non-trivial (53
+  sites across 14 files per status doc).
+- **Decimal** — Multiple live root sites. Migration to
+  `TypedArray<*const DecimalObj>` requires creating `DecimalObj` +
+  per-element retain/release plumbing.
+
+**Dead-arm migration surface for S2-prime (structural cleanliness
+for S5):**
+
+- **DateTime / TimeSpan / Instant** — Zero live root producers
+  today. Migration creates the carriers + threads them through
+  `build_specialized_from_heap_arcs` (gaining the missing arms)
+  + smoke-tests the producer/consumer chain end-to-end. Net
+  behavior change: enables `Array<DateTime>` / `Array<Timespan>` /
+  `Array<Instant>` as reachable user-facing types (which they
+  currently are not, per the surface-and-stop at
+  `heap_value.rs:3088`).
+
+#### §4.1.A.5 Architectural implication for S2-prime scope
+
+The dead-arm finding has two competing interpretations:
+
+- **(A) Minimal scope.** Only migrate `String` (live) + `Decimal`
+  (live). Leave `DateTime / Timespan / Duration / Instant /
+  BigInt` arms entirely in place (dead) for S5 deletion-time
+  cleanup. This minimizes S2-prime scope to genuinely-load-bearing
+  migration work.
+
+- **(B) Comprehensive scope.** Migrate all 5 user-facing carriers
+  (String / Decimal / DateTime / Timespan / Instant — Duration
+  excluded per §4.1.A.4) + thread through
+  `build_specialized_from_heap_arcs` for forward-S5 cleanliness.
+  Some of the migration touches dead code; nevertheless the v2-raw
+  carrier structs + their tests still land, providing structural
+  cleanliness for S5's enum deletion + enabling future user-facing
+  reachability of these `Array<T>` types.
+
+**Audit recommendation: surface for supervisor disposition.** The
+dead-arm finding genuinely refines the dispatch's working hypothesis
+that "S2-prime migrates 6 user-facing variants per audit §2.2." The
+correct count is 2 live + 3 dead-but-create-forward (DateTime /
+Timespan / Instant) + 1 deferred (BigInt) + 1 cluster-1 cleanup
+candidate (Duration enum variant). Option (A) is the smaller-scope
+discipline-coherent close; Option (B) is the supervisor's R19
+disposition taken literally. Surface to team-lead for relay.
+
 ### §4.2 Obstacle O-2 — F64 AVX-512 alignment downgrade
 
 **The shape**: `TypedArrayData::F64(Arc<AlignedTypedBuffer>)`
