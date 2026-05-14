@@ -76,6 +76,119 @@ where
     }
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// Wave 2 Round 3a' sub-cluster α — v2-raw `TypedArray<*const StringObj>` /
+// `TypedArray<*const DecimalObj>` receiver-arm helpers
+// (Phase 3 cluster-0+1 W12-typed-array-data-heap-element-migration-prime
+//  A2-followup-mechanical α; supervisor 2026-05-14 disposition (1) split).
+// ───────────────────────────────────────────────────────────────────────────
+
+/// Detect a v2-raw `TypedArray<*const StringObj/DecimalObj>` receiver in
+/// `slot`. Returns `Some(view)` only when the slot carries
+/// `NativeKind::UInt64` + a `HEAP_KIND_V2_TYPED_ARRAY`-stamped heap header
+/// + a `V2ElemType::String | V2ElemType::Decimal` element-type byte.
+/// Detection runs through `v2_array_detect::as_v2_typed_array` and reads
+/// only header metadata — **no `v2_retain` is issued** here, so a `None`
+/// or `Some` return both leave the carrier's refcount untouched.
+///
+/// Per ADR-006 §2.7.5 amendment (Wave 2 Agent B Round 1 W12-StringV2-
+/// DecimalV2-NativeKind-additions, 2026-05-14): post-gate-flip handler
+/// bodies read elements via `v2_array_detect::read_element` (which
+/// internally calls `v2_retain` against the per-element `HeapHeader` at
+/// offset 0 of the `*const <X>Obj` carrier) and push the resulting slot
+/// bits as `NativeKind::StringV2` / `DecimalV2` per audit §4.1.B.4
+/// migration recipe. The downstream closure-callback / aggregation path
+/// dispatches on the kind discriminator per Agent B's §2.7.5 amendment
+/// (`STRING_METHODS` / `NUMBER_METHODS` routing on the kind label).
+///
+/// At this commit the producer gate `should_use_typed_array` in
+/// `crates/shape-vm/src/compiler/v2_typed_emission.rs` stays CLOSED for
+/// `ConcreteType::String` / `ConcreteType::Decimal` (Wave 2 Round 2
+/// Agent A2 architectural-surface-land + surface-and-stop close at
+/// commit `c8ef1cc0`; supervisor 2026-05-14 disposition (1) Round 3a'
+/// split — sub-agents α–η land v2-raw arms as UNREACHABLE code;
+/// A2-followup-gate-flip post-Round-3a'-merge-ceremony flips the gate
+/// atomically and makes every Round 3a' sub-agent's v2-raw arms
+/// reachable in one commit). The `Some`-return of this helper is
+/// therefore UNREACHABLE at HEAD; every call site surfaces-and-stops via
+/// `v2_raw_string_decimal_surface_error` below.
+#[inline]
+fn detect_v2_raw_string_or_decimal_receiver(
+    slot: &KindedSlot,
+) -> Option<crate::executor::v2_handlers::v2_array_detect::V2TypedArrayView> {
+    use crate::executor::v2_handlers::v2_array_detect::{as_v2_typed_array, V2ElemType};
+    if slot.kind != NativeKind::UInt64 {
+        return None;
+    }
+    let view = as_v2_typed_array(slot.slot.raw(), NativeKind::UInt64)?;
+    match view.elem_type {
+        V2ElemType::String | V2ElemType::Decimal => Some(view),
+        _ => None,
+    }
+}
+
+/// Single source of truth for the v2-raw `String`/`Decimal` receiver
+/// surface-and-stop error message at every array_transform handler
+/// entry-point. The structured cite carries:
+///
+/// - the operation name (per-handler `op`),
+/// - the receiver shape (element type + length, both from the view
+///   metadata — no element reads, no retain),
+/// - the post-gate-flip routing target (Wave 2 Agent B Round 1's
+///   `StringV2`/`DecimalV2` kind discriminator + audit §4.1.B.4
+///   migration recipe),
+/// - the deferral target (A2-followup-gate-flip, supervisor 2026-05-14
+///   disposition (1) split, Round 3a' Wave-3a-prime-α landing as
+///   unreachable code).
+///
+/// The legacy `Arc<TypedArrayData::String>` / `Arc<TypedArrayData::Decimal>`
+/// output-construction body in each handler is the **materialize-on-
+/// write** inverse of audit §4.1.B.3 materialize-on-read forbidden —
+/// refused at the same dispatch layer. ADR-006 §2.7.24 Q25.A SUPERSEDED
+/// authorizes the v2-raw `TypedArray<*const <X>Obj>` migration target;
+/// these arms structurally land the migration's read-side routing
+/// decision pre-gate-flip.
+fn v2_raw_string_decimal_surface_error(
+    op: &str,
+    view: &crate::executor::v2_handlers::v2_array_detect::V2TypedArrayView,
+) -> VMError {
+    use crate::executor::v2_handlers::v2_array_detect::V2ElemType;
+    let (elem_name, kind_name) = match view.elem_type {
+        V2ElemType::String => ("String", "StringV2"),
+        V2ElemType::Decimal => ("Decimal", "DecimalV2"),
+        // Helper's caller filters to String|Decimal; this arm is
+        // structurally unreachable but kept exhaustive to avoid an
+        // unused-variant compile warning.
+        _ => ("Unknown", "Unknown"),
+    };
+    VMError::NotImplemented(format!(
+        "{op}: SURFACE — v2-raw TypedArray<*const {elem}Obj> receiver \
+         (elem_type={etype:?}, len={len}); post-gate-flip {op} body reads \
+         elements via v2_array_detect::read_element (which internally \
+         v2_retains the per-element HeapHeader at offset 0 of *const \
+         {elem}Obj) and pushes each as NativeKind::{kind} per ADR-006 \
+         §2.7.5 amendment (Wave 2 Agent B Round 1 W12-StringV2-DecimalV2-\
+         NativeKind-additions) + audit §4.1.B.4 migration recipe. \
+         Legacy Arc<TypedArrayData::{elem}> output-construction body in \
+         this handler is the materialize-on-write inverse of audit \
+         §4.1.B.3 materialize-on-read forbidden — refused at the same \
+         dispatch layer. Tracked as Phase 3 cluster-0+1 Wave 2 Round 3a' \
+         sub-cluster α (W12-typed-array-data-heap-element-migration-prime \
+         A2-followup-mechanical α). A2-followup-gate-flip flips the \
+         producer gate `should_use_typed_array` in v2_typed_emission.rs \
+         to Some(TypedArrayKind::{elem}) post-Round-3a'-merge-ceremony \
+         (supervisor 2026-05-14 disposition (1) split) and replaces this \
+         surface arm with the v2-raw read-loop + output-carrier body in \
+         a single atomic commit. ADR-006 §2.7.24 Q25.A SUPERSEDED. \
+         UNREACHABLE at HEAD per closed-gate discipline.",
+        op = op,
+        elem = elem_name,
+        etype = view.elem_type,
+        len = view.len,
+        kind = kind_name,
+    ))
+}
+
 /// Bump a closure carrier's strong-count share before passing it to
 /// `vm.call_value_immediate_nb`. The frame teardown via
 /// `op_return` releases the share carried in `CallFrame.closure_heap_bits`
@@ -1102,6 +1215,13 @@ pub(crate) fn handle_map_v2(
     }
     let closure = &args[1];
 
+    // Wave 2 Round 3a' α v2-raw String/Decimal arm — UNREACHABLE at HEAD
+    // per closed producer gate; structurally lands the v2-raw routing
+    // decision pre A2-followup-gate-flip.
+    if let Some(view) = detect_v2_raw_string_or_decimal_receiver(&args[0]) {
+        return Err(v2_raw_string_decimal_surface_error("map", &view));
+    }
+
     // Borrow the receiver arc without disturbing its share, take a
     // local copy for indexed access — we cannot hold the borrow across
     // a `&mut self` re-entry into the VM through `call_value_immediate_nb`.
@@ -1158,6 +1278,11 @@ pub(crate) fn handle_filter_v2(
     }
     let closure = &args[1];
 
+    // Wave 2 Round 3a' α v2-raw String/Decimal arm — UNREACHABLE at HEAD.
+    if let Some(view) = detect_v2_raw_string_or_decimal_receiver(&args[0]) {
+        return Err(v2_raw_string_decimal_surface_error("filter", &view));
+    }
+
     let receiver_arc: Arc<TypedArrayData> = match args[0].kind {
         NativeKind::Ptr(HeapKind::TypedArray) => {
             let arc = unsafe {
@@ -1211,6 +1336,12 @@ pub(crate) fn handle_sort_v2(
     if args.is_empty() {
         return Err(VMError::RuntimeError("sort: missing receiver".to_string()));
     }
+
+    // Wave 2 Round 3a' α v2-raw String/Decimal arm — UNREACHABLE at HEAD.
+    if let Some(view) = detect_v2_raw_string_or_decimal_receiver(&args[0]) {
+        return Err(v2_raw_string_decimal_surface_error("sort", &view));
+    }
+
     let receiver_arc: Arc<TypedArrayData> = match args[0].kind {
         NativeKind::Ptr(HeapKind::TypedArray) => {
             let arc = unsafe {
@@ -1458,6 +1589,12 @@ pub(crate) fn handle_slice_v2(
     }
     let start = read_int_arg(&args[1], "slice")?;
     let end = read_int_arg(&args[2], "slice")?;
+
+    // Wave 2 Round 3a' α v2-raw String/Decimal arm — UNREACHABLE at HEAD.
+    if let Some(view) = detect_v2_raw_string_or_decimal_receiver(&args[0]) {
+        return Err(v2_raw_string_decimal_surface_error("slice", &view));
+    }
+
     with_typed_array(args, "slice", |arr| {
         let result = slice_typed_array(arr, start, end)?;
         Ok(KindedSlot::from_typed_array(result))
@@ -1477,6 +1614,22 @@ pub(crate) fn handle_concat_v2(
             "concat: expected 1 argument (other array)".to_string(),
         ));
     }
+
+    // Wave 2 Round 3a' α v2-raw String/Decimal arm — UNREACHABLE at HEAD.
+    // Either operand carrying a v2-raw String/Decimal carrier surfaces;
+    // the mixed cross-shape case (one v2-raw + one Arc) is structurally
+    // also a SURFACE (Q25.A SUPERSEDED #3 mixed-migration forbidden) and
+    // is caught by the same arm — the gate-flip lockstep guarantees
+    // both producers emit the same carrier shape for the same element
+    // type post-flip, so this arm's UNREACHABLE-at-HEAD discipline
+    // extends to cross-shape mixing.
+    if let Some(view) = detect_v2_raw_string_or_decimal_receiver(&args[0]) {
+        return Err(v2_raw_string_decimal_surface_error("concat", &view));
+    }
+    if let Some(view) = detect_v2_raw_string_or_decimal_receiver(&args[1]) {
+        return Err(v2_raw_string_decimal_surface_error("concat", &view));
+    }
+
     // Both receiver and `other` must be Arrays. Reconstruct both shares
     // borrow-only, project, then `Arc::into_raw` to restore.
     let (a_kind, a_bits) = (args[0].kind, args[0].slot.raw());
@@ -1510,6 +1663,12 @@ pub(crate) fn handle_take_v2(
         ));
     }
     let n = read_int_arg(&args[1], "take")?;
+
+    // Wave 2 Round 3a' α v2-raw String/Decimal arm — UNREACHABLE at HEAD.
+    if let Some(view) = detect_v2_raw_string_or_decimal_receiver(&args[0]) {
+        return Err(v2_raw_string_decimal_surface_error("take", &view));
+    }
+
     with_typed_array(args, "take", |arr| {
         let result = slice_typed_array(arr, 0, n.max(0))?;
         Ok(KindedSlot::from_typed_array(result))
@@ -1528,6 +1687,15 @@ pub(crate) fn handle_drop_v2(
         ));
     }
     let n = read_int_arg(&args[1], "drop")?;
+
+    // Wave 2 Round 3a' α v2-raw String/Decimal arm — UNREACHABLE at HEAD.
+    // `handle_skip_v2` delegates to this handler, so the v2-raw surface
+    // arm covers both `drop` and `skip` entry-points (the dispatch shell
+    // routes both `arr.drop(n)` and `arr.skip(n)` through `handle_drop_v2`).
+    if let Some(view) = detect_v2_raw_string_or_decimal_receiver(&args[0]) {
+        return Err(v2_raw_string_decimal_surface_error("drop", &view));
+    }
+
     with_typed_array(args, "drop", |arr| {
         let len = typed_array_len(arr) as i64;
         let result = slice_typed_array(arr, n.max(0), len)?;
@@ -1554,6 +1722,25 @@ pub(crate) fn handle_flatten_v2(
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
+    // Wave 2 Round 3a' α v2-raw String/Decimal arm — UNREACHABLE at HEAD.
+    // `Array<string>.flatten()` / `Array<decimal>.flatten()` are
+    // identity-clone operations under the existing flatten semantics
+    // (the v2-raw element type is non-nested) — but the identity-clone
+    // body's receiver-arc bump path threads through
+    // `Arc::increment_strong_count(bits as *const TypedArrayData)` on
+    // a v2-raw `*mut TypedArray<*const StringObj/DecimalObj>` pointer,
+    // which is wrong-type recovery (the v2-raw carrier is NOT
+    // `Arc<TypedArrayData>` — it's a manually-allocated
+    // `repr(C)` HeapHeader-equipped struct). The post-gate-flip body
+    // performs the identity clone via `v2_retain` against the v2-raw
+    // HeapHeader. Surface-and-stop here documents the routing decision;
+    // gate-flip replaces this arm with the v2-raw identity-clone body.
+    if !args.is_empty() {
+        if let Some(view) = detect_v2_raw_string_or_decimal_receiver(&args[0]) {
+            return Err(v2_raw_string_decimal_surface_error("flatten", &view));
+        }
+    }
+
     with_typed_array(args, "flatten", |arr| match arr {
         // ADR-006 §2.7.22 amendment (Round 18 S3): Matrix / FloatSlice
         // exit `TypedArrayData`. Matrix.flatten() / MatrixSlice.flatten()
@@ -1624,6 +1811,11 @@ pub(crate) fn handle_flat_map_v2(
         )));
     }
     let closure = &args[1];
+
+    // Wave 2 Round 3a' α v2-raw String/Decimal arm — UNREACHABLE at HEAD.
+    if let Some(view) = detect_v2_raw_string_or_decimal_receiver(&args[0]) {
+        return Err(v2_raw_string_decimal_surface_error("flatMap", &view));
+    }
 
     let receiver_arc: Arc<TypedArrayData> = match args[0].kind {
         NativeKind::Ptr(HeapKind::TypedArray) => {
@@ -1705,6 +1897,11 @@ pub(crate) fn handle_group_by_v2(
         )));
     }
     let closure = &args[1];
+
+    // Wave 2 Round 3a' α v2-raw String/Decimal arm — UNREACHABLE at HEAD.
+    if let Some(view) = detect_v2_raw_string_or_decimal_receiver(&args[0]) {
+        return Err(v2_raw_string_decimal_surface_error("groupBy", &view));
+    }
 
     let receiver_arc: Arc<TypedArrayData> = match args[0].kind {
         NativeKind::Ptr(HeapKind::TypedArray) => {
