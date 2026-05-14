@@ -108,6 +108,19 @@ const _: () = {
     assert!(std::mem::size_of::<StringObj>() == 24);
 };
 
+// HeapElement impl per ADR-006 §2.7.24 Q25.A SUPERSEDED + R20 S2-prime
+// audit deliverable (b) §4.1.B decision. Constrains `StringObj` to the
+// HeapHeader-at-offset-0 v2-raw element-carrier contract; enables
+// `TypedArray<*const StringObj>::drop_array_heap` per-T release dispatch
+// via compile-time monomorphization (no runtime NativeKind probe).
+unsafe impl super::heap_element::HeapElement for StringObj {
+    unsafe fn release_elem(ptr: *const Self) {
+        if unsafe { super::refcount::v2_release(&(*ptr).header) } {
+            unsafe { Self::drop(ptr as *mut Self) };
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

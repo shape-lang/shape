@@ -5800,6 +5800,203 @@ Velocity: handoff-to-v1 unchanged at ~17-23 sessions.
 
 ---
 
-*Next session: R20 dispatches S2-prime-production + γ in parallel. Read
-this R20-S2-prime-merge-ceremony subsection first; the team-lead handover
-doc + this status doc are the canonical state.*
+## Round 20 — S2-prime-production infrastructure-landed + surface-and-stop close (2026-05-14)
+
+R20 S2-prime-production sub-cluster (`bulldozer-strictly-typed-w12-typed-array-data-s2-prime-production`)
+closed with **infrastructure landed (audit deliverables (b) + (d) production
+implementations)** and **production producer-side migration NOT performed**
+per surface-and-stop discipline. Branched from `bulldozer-strictly-typed @ 3fe3ffa9`
+(post-R20-S2-prime-audit-only merge `64a61338` + R20 status-doc close + Smoke 4 typo fix).
+
+### Infrastructure landed (6 file changes; 2 new files + 4 extensions)
+
+- **NEW `crates/shape-value/src/v2/heap_element.rs`** (~80 LoC): `unsafe trait
+  HeapElement { unsafe fn release_elem(*const Self); }` per audit §4.1.B
+  Option (a) ratification. Trait constrains `T: HeapElement` for
+  `TypedArray<*const T>` heap-element instantiations; per-T release dispatch
+  is monomorphized at compile time via the Rust type system — no runtime
+  NativeKind probe, no `is_heap()` probe, no Bool-default fallback. Module
+  doc cites ADR-006 §2.7.24 Q25.A SUPERSEDED + audit §4.1.B and lists the
+  forbidden-pattern checks the trait passes (no defection-attractor framing,
+  no NativeKind parameter, no Bool-default body, no non-HeapHeader-equipped
+  impls).
+- **NEW `crates/shape-value/src/v2/decimal_obj.rs`** (~200 LoC including 10
+  tests): `DecimalObj` is `#[repr(C)]` 24-byte struct (HeapHeader 8 + inline
+  `rust_decimal::Decimal` 16) with `new` / `value` / `drop` allocator
+  surface + `OFFSET_VALUE = 8` for JIT codegen + `unsafe impl HeapElement
+  for DecimalObj` calling `v2_release(&(*ptr).header)` + `Self::drop(ptr)`
+  on return-true. Compile-time size + alignment assertions: `size_of=24`,
+  `align_of=4` (matching rust_decimal::Decimal's measured `size_of=16,
+  align_of=4` on x86_64 — 4-byte flags + 12-byte mantissa). 10 module tests:
+  `test_size_of_decimal_obj`, `test_create_and_read_decimal`,
+  `test_create_zero_decimal`, `test_create_max_decimal`,
+  `test_drop_does_not_leak`, `test_field_offsets`,
+  `test_refcount_starts_at_one`, `test_refcount_retain_release`,
+  `test_heap_element_release_elem_to_zero`,
+  `test_heap_element_release_elem_held_share`. All pass.
+- **EXT `crates/shape-value/src/v2/string_obj.rs`**: `unsafe impl HeapElement
+  for StringObj` added (calls `v2_release(&(*ptr).header)` + `Self::drop(ptr)`
+  on return-true, mirroring DecimalObj). The 9 existing StringObj tests
+  preserved untouched.
+- **EXT `crates/shape-value/src/v2/typed_array.rs`**: `impl<T: HeapElement>
+  TypedArray<*const T>` block added with `unsafe fn drop_array_heap(ptr:
+  *mut Self)` per audit §4.1.B.4 migration recipe. Body walks per-element
+  pointers, calls `T::release_elem(elem_ptr)`, then frees the data buffer +
+  the TypedArray struct. Original POD-element `drop_array` (`impl<T: Copy>`)
+  untouched — callers pick at compile time based on whether the element
+  type is POD or HeapHeader-equipped. 4 new tests:
+  `test_drop_array_heap_string_obj`, `test_drop_array_heap_decimal_obj`,
+  `test_drop_array_heap_empty`, `test_drop_array_heap_with_held_share`. All
+  pass.
+- **EXT `crates/shape-value/src/v2/heap_header.rs`**: `HEAP_KIND_V2_DECIMAL =
+  85` constant appended (next free post-`HEAP_KIND_V2_CLOSURE = 84`);
+  provenance comment cites ADR-006 §2.7.24 Q25.A SUPERSEDED + audit §4.1.D.1.
+  Added to `test_kind_constants_are_distinct` test.
+- **EXT `crates/shape-value/src/v2/mod.rs`**: `pub mod decimal_obj;` + `pub
+  mod heap_element;` registrations.
+
+All 175 v2-tier tests pass (existing 161 + 10 new DecimalObj + 4 new
+TypedArray drop_array_heap tests).
+
+### Production producer-side migration NOT performed
+
+The actual producer migration scope is structurally larger than a single
+sub-cluster session can land cleanly. Concrete grep of HEAD source:
+`grep -rn 'TypedArrayData::(String|Decimal)' crates/ --include='*.rs' | wc -l`
+returns **147 references across 35 files**. Of these:
+
+- **~25 sites are construction sites** (`TypedArrayData::String(Arc::new(...))`
+  / `TypedArrayData::Decimal(Arc::new(...))`)
+- **~120 sites are consumer match arms** that today receive
+  `Ptr(HeapKind::TypedArray)` + `Arc<TypedArrayData::String|Decimal>` shape
+  from those producers.
+
+The dispatch directive named the canonical producer sites (`object_creation.rs:518/799/544`,
+`concat.rs:240/255`, `heap_value.rs:3044` build_specialized, `builtins/array_ops.rs:485`
+filled, `array_transform.rs:567/732/983/1460`); but the grep finds **additional
+producer sites the dispatch list missed**: `string_methods.rs:414/604`
+(split returning Array<string>), `array_ops.rs:262/304/467/676/696`
+(filtered/mapped/filled/empty/clone), `array_sort.rs:120` (sorted),
+`array_transform.rs:544/552/717/721/834/969/971/1093` (multiple derived
+ops), `array_basic.rs:259/324/425` (multiple). Migrating only the named
+root sites without the additional derived sites produces **partial
+mixed-carrier reality at runtime** — refused per CLAUDE.md
+"Parallel-implementation across producer/consumer carrier-shape boundaries"
++ ADR-006 §2.7.24 Q25.A SUPERSEDED §4 #3 ("Mixed-migration shape preserving
+some Q25.A specialized variants while migrating others to v2-raw
+`TypedArray<*const <X>Obj>` — the migration is single-target ... deviations
+require a separate ADR amendment").
+
+### Additional architectural prerequisites surfaced
+
+1. **No `NewTypedArrayString` / `NewTypedArrayDecimal` opcodes exist at
+   HEAD.** The compiler at `crates/shape-vm/src/compiler/typed_emission.rs::TypedArrayKind`
+   enumerates only `F64 / I64 / I32 / Bool`, and `should_use_typed_array`
+   returns `None` for all other element types. For `Array<string>` and
+   `Array<decimal>` literals the compiler emits the legacy `OpCode::NewArray`
+   (which routes to `op_new_array` → `TypedArrayData::String/Decimal(Arc::new(...))`).
+   Migrating the producer requires either (a) adding 8 new opcodes
+   (`NewTypedArrayString/Decimal`, `TypedArrayGetString/Decimal`,
+   `TypedArrayPushString/Decimal`, `TypedArraySetString/Decimal`) + compiler
+   emission via `TypedArrayKind::String / Decimal` variants + executor
+   handlers + 4-table lockstep, or (b) reworking `op_new_array`'s
+   String/Decimal arms to push v2-raw shape (which breaks every existing
+   consumer expecting `Ptr(HeapKind::TypedArray)` for that element type).
+2. **Cross-tier shape-conversion at the array-element read boundary needs
+   ADR ratification.** Today a `TypedArrayData::String` element-read pushes
+   `Arc<String>` bits with `NativeKind::String`. A v2-raw `TypedArray<*const
+   StringObj>` element-read would need to either (i) push `*const StringObj`
+   bits with `NativeKind::String` (the bits aren't an `Arc<String>` — they're
+   a different carrier shape, requires every String consumer to discriminate),
+   or (ii) materialize an `Arc<String>` from the `StringObj`'s data buffer
+   at read time (allocation per read; defeats the v2-raw flat-struct
+   performance goal). This cross-tier shape conversion at the per-element
+   read boundary is not covered by existing ADR-006 §2.7.6 / Q8 dispatch
+   tables.
+3. **VM Decimal SIGSEGV at baseline.** Confirmed via baseline binary at
+   `/home/dev/dev/shape-lang/shape/target/release/shape` (built from
+   `bulldozer-strictly-typed @ 3fe3ffa9`): `let xs: Array<decimal> = [1.0d,
+   2.0d, 3.0d]; print(xs[0])` segfaults in VM mode (RC=139). Pre-existing,
+   in the legacy `TypedArrayData::Decimal` consumer path (likely the
+   v2-raw-heap aliasing class CLAUDE.md describes). Migrating the producer
+   to v2-raw with HeapElement retain/release at read time could either fix
+   or worsen this depending on whether the consumer path's drop-glue
+   accounts for v2-raw shape. Owned as S2-prime-production's audit
+   responsibility per MEMORY.md "Don't blame pre-existing".
+
+### `#[deprecated]` annotations NOT added
+
+Per audit §3.6 deprecation cadence amendment landed in this close: adding
+`#[deprecated]` on `TypedArrayData::String / Decimal` enum arms at
+`heap_value.rs:2960/2967` would surface ~147 deprecation warnings across 35
+files (one per construction or match-arm site) — noise, not signal, until
+producer migration is complete enough that the remaining warnings count as
+the deletion-track to S5. A future S2-prime-production-mechanical sub-cluster
+lands the producer migrations in batches; each batch's close adds
+`#[deprecated]` to the arms its batch retires from live production.
+
+### Smoke matrix re-verification (post-S2-prime-production close)
+
+Release binary built at `target/release/shape` post-infrastructure-landing.
+
+| Smoke | VM | JIT | Disposition |
+|---|---|---|---|
+| 1 (hot loop) | ✅ 4950 | ✅ 4950 | Baseline preserved |
+| 2 (`Array<int>.map.sum`) | ✅ 30 | ⚠ rc=1 (R14 conduit) | Unchanged |
+| 3 (trait `dyn T` + `t.name()`) | ✅ "x" | ⚠ None (β filter; γ R20 unblocks) | γ R20 unblocks |
+| 4 (`Set<string>.add.size`) | ✅ 2 | ✅ 2 | Baseline preserved |
+| **New: `Array<string> = ["a","b","c"]; xs.len(); xs[0]`** | ✅ 3, "a" | ⚠ rc=1 (W11-jit-new-array pre-existing) | W11 follow-up unblocks JIT |
+| **New: `Array<decimal> = [1.0d,2.0d,3.0d]; xs.len(); xs[0]`** | ⚠ rc=139 SIGSEGV (pre-existing baseline) | ⚠ JIT returns 0 (wrong-answer pre-existing) | Pre-existing baseline; surface-and-stop |
+
+All 4 kickoff smokes preserved at baseline. The 2 new smokes surface
+pre-existing baseline issues (W11-jit-new-array gap for String; VM
+SIGSEGV + JIT wrong-answer for Decimal) — these are not regressions
+from this sub-cluster's infrastructure-landing.
+
+### Close gates (devenv heredoc per `reference_phase2d_devenv.md`)
+
+- `cargo check --workspace --lib --tests` EXIT=0 ✅
+- `bash scripts/verify-merge.sh` EXIT=0, **Passed: 12 / Failed: 0** ✅
+- `bash scripts/check-no-dynamic.sh` EXIT=0 ✅
+- All 175 v2-tier tests pass ✅
+- AGENTS.md row appended ✅
+- NO `Co-Authored-By: Claude` trailer ✅
+- Audit-doc cross-references landed (§4.1.D.1 LANDED note +
+  §4.1.D.7 MOOT-UNDER-A-MINIMAL note + §3.6 R20 close cadence
+  amendment) ✅
+- ADR-006 §2.7.24 Q25.A SUPERSEDED amendment unchanged (was
+  landed at R20 audit-first close commit `71162daf`; this
+  sub-cluster doesn't touch it) ✅
+
+### Recommendation for R20+ / supervisor disposition
+
+Re-dispatch **S2-prime-production-mechanical** with explicit scope ratification
+on:
+
+1. **The 8-typed-opcodes addition path** (mirror of S1's per-kind opcode
+   landing pattern: `NewTypedArrayString`, `NewTypedArrayDecimal`, +
+   Get/Push/Set per kind).
+2. **The consumer-side v2-raw String/Decimal element-kind detection
+   extension** at `v2_array_detect.rs` (`V2ElemType::String /
+   Decimal` arms with per-T retain via `v2_retain(&(*elem_ptr).header)` at
+   element-read time, returning element-bits paired with the appropriate
+   NativeKind — and ADR ratification for the cross-tier shape conversion
+   at the read boundary per prerequisite (2) above).
+3. **The producer-site migration cadence** — fold all ~25 sites into a
+   single sub-cluster (highest discipline; multi-session bandwidth) vs
+   split by file-territory (`object_creation.rs` + `concat.rs` first, then
+   `array_transform.rs` derived sites, then `string_methods.rs` /
+   `array_ops.rs` / `array_sort.rs` / `array_basic.rs`).
+
+The HeapElement trait + DecimalObj + drop_array_heap landed in this
+sub-cluster are the **ratified architectural foundation** for the next
+dispatch; no further deliberation territory on the carrier shape itself.
+Estimated session count for S2-prime-production-mechanical: 2-3 sessions
+per audit §3.2's 5-7k LoC estimate.
+
+---
+
+*Next session: R21 dispatches S2-prime-production-mechanical (consuming
+the R20 S2-prime-production landed infrastructure) + γ continuation if not
+yet closed. Read this R20-S2-prime-production-close subsection first; the
+team-lead handover doc + this status doc are the canonical state.*
