@@ -113,6 +113,49 @@ pub enum NativeKind {
     Bool,
     /// String reference (Arc<String> raw pointer)
     String,
+    /// v2-raw `*const StringObj` carrier reference. ADR-006 §2.7.5
+    /// amendment (Wave 2 Agent B W12-StringV2-DecimalV2-NativeKind-additions,
+    /// 2026-05-14): new heap-pointer variant introduced for v2-raw
+    /// `Array<string>` element read paths per
+    /// `TypedArray<*const StringObj>` (Wave 2 §A2 producer migration).
+    /// Slot bits store `ptr as u64` where `ptr: *const StringObj` —
+    /// retain/release uses `v2_retain` / `v2_release` against the
+    /// `HeapHeader` at offset 0 of `StringObj` (NOT `Arc::increment_strong_count`
+    /// — `StringObj` is a manually-allocated `repr(C)` carrier with its
+    /// own refcount discipline per `v2/refcount.rs`, not an `Arc<String>`).
+    ///
+    /// **Parallel-discriminator note** (CLAUDE.md §Parallel-implementation
+    /// across producer/consumer carrier-shape boundaries): this variant
+    /// is a per-carrier-shape discriminator distinct from `NativeKind::String`
+    /// (`Arc<String>` carrier); the two are structurally distinct
+    /// (`StringObj` is a `repr(C)` 24-byte HeapHeader-equipped struct,
+    /// `Arc<String>` is a Rust-managed `Arc<T>` allocation). Mixing the
+    /// two carriers under the same NativeKind discriminator is the H-b
+    /// defection refused per the audit §H.2; the H-c decision (option
+    /// adopted at §H.4 + supervisor §P.1 ratification 2026-05-14) gives
+    /// each carrier its own NativeKind variant explicitly.
+    StringV2,
+    /// v2-raw `*const DecimalObj` carrier reference. ADR-006 §2.7.5
+    /// amendment (Wave 2 Agent B W12-StringV2-DecimalV2-NativeKind-additions,
+    /// 2026-05-14): new heap-pointer variant introduced for v2-raw
+    /// `Array<decimal>` element read paths per
+    /// `TypedArray<*const DecimalObj>` (Wave 2 §A2 producer migration).
+    /// Slot bits store `ptr as u64` where `ptr: *const DecimalObj` —
+    /// retain/release uses `v2_retain` / `v2_release` against the
+    /// `HeapHeader` at offset 0 of `DecimalObj` (NOT
+    /// `Arc::increment_strong_count` against an `Arc<rust_decimal::Decimal>`
+    /// — `DecimalObj` is a manually-allocated `repr(C)` carrier per
+    /// `v2/decimal_obj.rs` + `v2/refcount.rs`).
+    ///
+    /// **Parallel-discriminator note** (CLAUDE.md §Parallel-implementation
+    /// across producer/consumer carrier-shape boundaries): this variant
+    /// is a per-carrier-shape discriminator distinct from
+    /// `NativeKind::Ptr(HeapKind::Decimal)` (`Arc<rust_decimal::Decimal>`
+    /// carrier); the two are structurally distinct (`DecimalObj` is a
+    /// `repr(C)` 24-byte HeapHeader-equipped struct, `Arc<Decimal>` is
+    /// a Rust-managed `Arc<T>` allocation). Same H-c decision rationale
+    /// as `StringV2`.
+    DecimalV2,
     /// Heap pointer (`Arc<HeapValue>` raw pointer) whose `HeapValue`
     /// discriminant is `kind`. The marshal/wire/snapshot layer dispatches
     /// on `kind` to project the slot to its typed shape — it does not
@@ -289,7 +332,14 @@ impl NativeKind {
     /// response, not a Bool-default-like silent retain.
     #[inline]
     pub fn is_refcounted(self) -> bool {
-        matches!(self, Self::String | Self::Ptr(_))
+        // Wave 2 Agent B (ADR-006 §2.7.5 amendment, 2026-05-14): StringV2
+        // / DecimalV2 are v2-raw heap-pointer carriers per the §H.4 H-c
+        // decision — refcount via `v2_retain` / `v2_release` against the
+        // HeapHeader at offset 0 of the StringObj / DecimalObj target.
+        matches!(
+            self,
+            Self::String | Self::StringV2 | Self::DecimalV2 | Self::Ptr(_)
+        )
     }
 
     #[inline]

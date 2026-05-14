@@ -127,6 +127,12 @@ pub fn slot_kind_to_clif_type(kind: NativeKind) -> types::Type {
         NativeKind::Float32 => types::F32,
         NativeKind::Char => types::I32,
 
+        // Wave 2 Agent B W12-StringV2-DecimalV2-NativeKind-additions
+        // (2026-05-14): v2-raw `*const StringObj` / `*const DecimalObj`
+        // pointers — pointer-sized I64 across the JIT FFI boundary
+        // (same as the Arc-wrapped sibling row below).
+        NativeKind::StringV2 | NativeKind::DecimalV2 => types::I64,
+
         // --- pointer-sized typed slots (heap arms + String) ---
         NativeKind::String | NativeKind::Ptr(_) => types::I64,
     }

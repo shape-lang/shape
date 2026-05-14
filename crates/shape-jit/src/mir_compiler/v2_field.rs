@@ -85,6 +85,12 @@ pub fn cranelift_type_for_slot(kind: NativeKind) -> types::Type {
         NativeKind::Float32 => types::F32,
         NativeKind::Char => types::I32,
 
+        // Wave 2 Agent B W12-StringV2-DecimalV2-NativeKind-additions
+        // (2026-05-14): v2-raw `*const StringObj` / `*const DecimalObj`
+        // pointers — pointer-width I64 load/store (same as the
+        // Arc-wrapped sibling row below).
+        NativeKind::StringV2 | NativeKind::DecimalV2 => types::I64,
+
         // Boxed/pointer-sized values: String (Arc<String> raw ptr) and
         // every `Ptr(_)` heap arm.
         NativeKind::String | NativeKind::Ptr(_) => types::I64,
@@ -116,6 +122,9 @@ pub fn slot_byte_width(kind: NativeKind) -> u32 {
         // Round 19 S1.5 W12-nativekind-scalar-additions (2026-05-14):
         // ADR-006 §2.7.5 amendment — F32 + Char are 4 bytes.
         NativeKind::Float32 | NativeKind::Char => 4,
+        // Wave 2 Agent B W12-StringV2-DecimalV2-NativeKind-additions
+        // (2026-05-14): v2-raw heap-pointer carriers — pointer-width 8 bytes.
+        NativeKind::StringV2 | NativeKind::DecimalV2 => 8,
         NativeKind::String | NativeKind::Ptr(_) => 8,
     }
 }

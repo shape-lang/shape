@@ -179,6 +179,40 @@ impl<'a> ValueFormatter<'a> {
                     s.clone()
                 }
             }
+            // ── Wave 2 Agent B v2-raw carriers ───────────────────────────
+            // W12-StringV2-DecimalV2-NativeKind-additions (2026-05-14): the
+            // v2-raw `*const StringObj` / `*const DecimalObj` carriers print
+            // with the same surface as their Arc-wrapped siblings. The
+            // carrier shape (HeapHeader-equipped 24-byte `repr(C)` struct
+            // per `v2/string_obj.rs` / `v2/decimal_obj.rs`) is invisible to
+            // the print output — only the inner payload (UTF-8 bytes /
+            // Decimal value) is rendered.
+            NativeKind::StringV2 => {
+                if bits == 0 {
+                    return "None".to_string();
+                }
+                // SAFETY: per the §2.7.5 amendment construction contract,
+                // kind=StringV2 means bits = `ptr as u64` pointing to a live
+                // `StringObj` with bumped refcount.
+                let ptr = bits as *const shape_value::v2::string_obj::StringObj;
+                let s: &str = unsafe { shape_value::v2::string_obj::StringObj::as_str(ptr) };
+                if quote_strings {
+                    format!("\"{}\"", s)
+                } else {
+                    s.to_string()
+                }
+            }
+            NativeKind::DecimalV2 => {
+                if bits == 0 {
+                    return "None".to_string();
+                }
+                // SAFETY: per the §2.7.5 amendment construction contract,
+                // kind=DecimalV2 means bits = `ptr as u64` pointing to a live
+                // `DecimalObj` with bumped refcount.
+                let ptr = bits as *const shape_value::v2::decimal_obj::DecimalObj;
+                let value = unsafe { shape_value::v2::decimal_obj::DecimalObj::value(ptr) };
+                value.to_string()
+            }
             // ── Heap-pointer kinds: dispatch via HeapKind ───────────────
             NativeKind::Ptr(hk) => self.format_heap_kind(bits, hk, depth, quote_strings),
         }

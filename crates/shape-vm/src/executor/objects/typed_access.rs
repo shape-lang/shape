@@ -514,6 +514,10 @@ fn kind_type_name(kind: NativeKind) -> &'static str {
         // ADR-006 §2.7.5 amendment.
         NativeKind::Float32 => "f32",
         NativeKind::Char => "char",
+        // Wave 2 Agent B W12-StringV2-DecimalV2-NativeKind-additions
+        // (2026-05-14): same surface as Arc-wrapped siblings.
+        NativeKind::StringV2 => "string",
+        NativeKind::DecimalV2 => "decimal",
         NativeKind::Int8
         | NativeKind::NullableInt8
         | NativeKind::Int16

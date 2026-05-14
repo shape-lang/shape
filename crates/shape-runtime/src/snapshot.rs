@@ -913,6 +913,45 @@ pub fn slot_to_serializable(
                 Ok(SV::String(cloned))
             }
         }
+        // Wave 2 Agent B W12-StringV2-DecimalV2-NativeKind-additions
+        // (ADR-006 §2.7.5 amendment, 2026-05-14): the v2-raw `*const StringObj`
+        // carrier projects to the same `SV::String` wire shape as
+        // `NativeKind::String` — `StringObj::as_str` reads the UTF-8 payload
+        // directly off the `repr(C)` carrier. The slot bits are NOT an
+        // `Arc<T>` pointer, so we do not reconstruct + clone an `Arc`; we
+        // borrow the inner `&str` (`StringObj::as_str` is `unsafe fn`
+        // returning a `'static` borrow tied to the carrier's lifetime; the
+        // slot owns one v2-retain share so the carrier is live for the
+        // duration of this call).
+        NativeKind::StringV2 => {
+            if bits == 0 {
+                return Err("slot_to_serializable: StringV2 slot with null bits".into());
+            }
+            // SAFETY: per the §2.7.5 amendment construction contract,
+            // kind=StringV2 means bits = `ptr as u64` where `ptr` points to
+            // a live `StringObj` whose refcount has been bumped to claim
+            // this share. We borrow the inner UTF-8 bytes via
+            // `StringObj::as_str`.
+            let ptr = bits as *const shape_value::v2::string_obj::StringObj;
+            let s: &str = unsafe { shape_value::v2::string_obj::StringObj::as_str(ptr) };
+            Ok(SV::String(s.to_string()))
+        }
+        // Wave 2 Agent B: the v2-raw `*const DecimalObj` carrier projects
+        // to the same `SV::Decimal` wire shape as
+        // `NativeKind::Ptr(HeapKind::Decimal)` — `DecimalObj::value` returns
+        // the inline `rust_decimal::Decimal` directly off the `repr(C)`
+        // carrier. Same construction-side contract as `StringV2`.
+        NativeKind::DecimalV2 => {
+            if bits == 0 {
+                return Err("slot_to_serializable: DecimalV2 slot with null bits".into());
+            }
+            // SAFETY: per the §2.7.5 amendment construction contract,
+            // kind=DecimalV2 means bits = `ptr as u64` pointing to a live
+            // `DecimalObj` with bumped refcount.
+            let ptr = bits as *const shape_value::v2::decimal_obj::DecimalObj;
+            let value = unsafe { shape_value::v2::decimal_obj::DecimalObj::value(ptr) };
+            Ok(SV::Decimal(value))
+        }
         NativeKind::Ptr(heap_kind) => slot_heap_to_serializable(bits, heap_kind),
     }
 }

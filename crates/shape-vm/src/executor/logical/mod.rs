@@ -71,6 +71,10 @@ fn kinded_truthy(bits: u64, kind: NativeKind) -> bool {
         // F32 truthy iff `!= 0.0`; Char truthy iff codepoint bits non-zero.
         NativeKind::Float32 => f32::from_bits(bits as u32) != 0.0,
         NativeKind::Char => bits != 0,
+        // Wave 2 Agent B W12-StringV2-DecimalV2-NativeKind-additions
+        // (2026-05-14): same non-null pointer → truthy rule as
+        // String / Ptr(_) below.
+        NativeKind::StringV2 | NativeKind::DecimalV2 => bits != 0,
         // Heap-bearing kinds: non-null pointer → truthy.
         NativeKind::String | NativeKind::Ptr(_) => bits != 0,
     }

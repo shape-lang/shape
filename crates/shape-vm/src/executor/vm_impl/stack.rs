@@ -64,6 +64,24 @@ pub(crate) fn clone_with_kind(bits: u64, kind: NativeKind) {
             NativeKind::String => {
                 Arc::increment_strong_count(bits as *const String);
             }
+            // Wave 2 Agent B (ADR-006 §2.7.5 amendment, 2026-05-14):
+            // StringV2 / DecimalV2 are v2-raw heap-pointer carriers per
+            // the §H.4 H-c decision. Slot bits are `ptr as u64` where
+            // `ptr: *const StringObj` / `*const DecimalObj`. Refcount
+            // discipline goes through `v2_retain` against the
+            // `HeapHeader` at offset 0 of the carrier (NOT
+            // `Arc::increment_strong_count` — these are manually-allocated
+            // `repr(C)` carriers, not `Arc<T>` allocations).
+            NativeKind::StringV2 => {
+                let hdr =
+                    &(*(bits as *const shape_value::v2::string_obj::StringObj)).header;
+                shape_value::v2::refcount::v2_retain(hdr);
+            }
+            NativeKind::DecimalV2 => {
+                let hdr =
+                    &(*(bits as *const shape_value::v2::decimal_obj::DecimalObj)).header;
+                shape_value::v2::refcount::v2_retain(hdr);
+            }
             NativeKind::Ptr(hk) => match hk {
                 HeapKind::String => {
                     Arc::increment_strong_count(bits as *const String);
@@ -382,6 +400,22 @@ pub(crate) fn drop_with_kind(bits: u64, kind: NativeKind) {
         match kind {
             NativeKind::String => {
                 Arc::decrement_strong_count(bits as *const String);
+            }
+            // Wave 2 Agent B (ADR-006 §2.7.5 amendment, 2026-05-14):
+            // StringV2 / DecimalV2 release via `v2_release` + carrier-side
+            // `release_elem` (HeapElement trait). Mirror of clone_with_kind
+            // retain arms above.
+            NativeKind::StringV2 => {
+                use shape_value::v2::heap_element::HeapElement;
+                shape_value::v2::string_obj::StringObj::release_elem(
+                    bits as *const shape_value::v2::string_obj::StringObj,
+                );
+            }
+            NativeKind::DecimalV2 => {
+                use shape_value::v2::heap_element::HeapElement;
+                shape_value::v2::decimal_obj::DecimalObj::release_elem(
+                    bits as *const shape_value::v2::decimal_obj::DecimalObj,
+                );
             }
             NativeKind::Ptr(hk) => match hk {
                 HeapKind::String => {

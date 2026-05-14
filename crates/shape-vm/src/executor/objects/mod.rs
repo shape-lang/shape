@@ -537,6 +537,19 @@ impl VirtualMachine {
             // both labels per the §2.7.5 amendment).
             NativeKind::Float32 => method_registry::NUMBER_METHODS.get(method_name).copied(),
             NativeKind::Char => method_registry::CHAR_METHODS.get(method_name).copied(),
+            // Wave 2 Agent B W12-StringV2-DecimalV2-NativeKind-additions
+            // (2026-05-14): the v2-raw `*const StringObj` / `*const DecimalObj`
+            // carrier receivers route to the same method registry as their
+            // Arc-wrapped siblings — the method-handler bodies dispatch on
+            // the carrier shape (the slot's kind label drives the per-
+            // carrier read of UTF-8 bytes / Decimal value). Method-handler
+            // body migration for v2-raw reads is the Agent A2 (producer)
+            // / consumer-side cluster-1 hardening territory; this row pins
+            // method-registry selection at the dispatch shell.
+            NativeKind::StringV2 => method_registry::STRING_METHODS.get(method_name).copied(),
+            // DecimalV2 routes to NUMBER_METHODS — same as the Arc-wrapped
+            // `HeapKind::Decimal` sibling per the heap-arm row below.
+            NativeKind::DecimalV2 => method_registry::NUMBER_METHODS.get(method_name).copied(),
             // UInt64 may be a v2 typed-array pointer (raw `*mut
             // TypedArray<T>`, no Arc) or a plain unsigned integer.
             // Classify via the stamped element-type byte.
