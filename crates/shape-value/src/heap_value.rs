@@ -1899,8 +1899,40 @@ impl LazyData {
 /// the `op_dyn_method_call` opcode handler (compiler-emission tier)
 /// uses the recovered `Arc<TraitObjectStorage>` to look up the method
 /// in `vtable.methods` and dispatch the appropriate `VTableEntry`.
+///
+/// **Wave 2 Agent E (2026-05-14): HeapHeader-equipped shape change.**
+/// Per audit §4.3 Obstacle O-3.a resolution + ADR-006 §Q25.C.5 amendment,
+/// the struct now carries a `HeapHeader` at offset 0 (`#[repr(C)]`) so
+/// v2-raw raw-pointer allocations (`_new` / `_drop` + `impl HeapElement`)
+/// can dispatch refcount on the header via `v2_retain` / `v2_release`.
+/// Existing `Arc<TraitObjectStorage>` construction sites continue to work
+/// unchanged — `Arc::new(TraitObjectStorage::new(...))` produces a Rust
+/// `Arc`-wrapped instance whose embedded header sits at refcount=1 unused;
+/// the dispatch arms continue to use `Arc::increment_strong_count` /
+/// `Arc::decrement_strong_count` on those bits. The new `_new`-allocated
+/// raw-pointer bits use the header's refcount via the `HeapElement` trait.
+///
+/// The inner `value: Arc<TypedObjectStorage>` field remains Arc-typed in
+/// E's scope per Wave 1 §E.6 dispatch contract (the audit's E-a path
+/// recommends both inner pointers become raw, but D2 owns the inner
+/// `*mut TypedObjectStorage` flip in lockstep with TypedObjectStorage's
+/// own Arc-path retirement; E's struct shape change exposes the
+/// HeapHeader at offset 0 + manual lifecycle so subsequent rounds can
+/// flip the inner field without re-shaping the outer carrier). The
+/// `vtable: Arc<VTable>` field stays Arc-typed indefinitely under E's
+/// scope — VTable lifecycle is decoupled from this migration (audit
+/// §E.3 recommended a separate VTable HeapHeader migration if/when
+/// IC devirtualization measurement justifies it).
+#[repr(C)]
 #[derive(Debug)]
 pub struct TraitObjectStorage {
+    /// v2-raw HeapHeader at offset 0 (8 bytes). Refcount/kind/flags.
+    /// Initialized to `HeapHeader::new(HEAP_KIND_V2_TRAIT_OBJECT)` by
+    /// `_new`; for `Arc`-wrapped instances allocated via
+    /// `TraitObjectStorage::new` the header sits at refcount=1 unused
+    /// (the enclosing `Arc` owns the lifecycle). See struct docstring.
+    pub header: crate::v2::heap_header::HeapHeader,
+
     /// The data half of the fat pointer — owned, heap-allocated as a
     /// `TypedObject`. Always present (never null); universal-dyn
     /// per-method auto-boxing makes the boxed value a real TypedObject
@@ -1922,9 +1954,98 @@ impl TraitObjectStorage {
     /// owns both shares. Wrap in `Arc::new(...)` immediately followed
     /// by `HeapValue::TraitObject(arc)` or
     /// `ValueSlot::from_trait_object(arc)`.
+    ///
+    /// The embedded HeapHeader is initialized to refcount=1 with kind
+    /// `HEAP_KIND_V2_TRAIT_OBJECT`. For `Arc<TraitObjectStorage>`
+    /// instances the header sits unused (the enclosing `Arc` owns the
+    /// lifecycle); the v2-raw `_new` path is the production carrier
+    /// for the on-header refcount lifecycle.
     #[inline]
     pub fn new(value: Arc<TypedObjectStorage>, vtable: Arc<crate::value::VTable>) -> Self {
-        Self { value, vtable }
+        Self {
+            header: crate::v2::heap_header::HeapHeader::new(
+                crate::v2::heap_header::HEAP_KIND_V2_TRAIT_OBJECT,
+            ),
+            value,
+            vtable,
+        }
+    }
+
+    /// Wave 2 Agent E (2026-05-14): v2-raw raw-pointer allocator.
+    ///
+    /// Allocates a new `TraitObjectStorage` on the heap and returns a raw
+    /// pointer with refcount initialized to 1. Mirrors the `TypedObjectStorage::_new`
+    /// precedent at `heap_value.rs` (D1, 2026-05-14) — `#[repr(C)]` struct
+    /// with `HeapHeader` at offset 0; refcount discipline goes through
+    /// `v2_retain` / `v2_release` via the `HeapElement` trait.
+    ///
+    /// Construction-side contract: the caller transfers ownership of one
+    /// strong-count share on `value: Arc<TypedObjectStorage>` and on
+    /// `vtable: Arc<VTable>` to the storage; the storage retires those
+    /// shares at `_drop` (via the in-place `drop_in_place` on the field
+    /// payloads). The inner Arcs follow normal Rust `Arc` discipline —
+    /// only the outer struct's lifecycle is HeapHeader-managed.
+    ///
+    /// Callers (Wave 2 Round 2): replace the legacy pattern
+    /// ```ignore
+    /// let arc = Arc::new(TraitObjectStorage::new(value, vtable));
+    /// let slot = ValueSlot::from_trait_object(arc);
+    /// ```
+    /// with the v2-raw pattern
+    /// ```ignore
+    /// let ptr = TraitObjectStorage::_new(value, vtable);
+    /// let slot = ValueSlot::from_trait_object_raw(ptr);
+    /// ```
+    pub fn _new(
+        value: Arc<TypedObjectStorage>,
+        vtable: Arc<crate::value::VTable>,
+    ) -> *mut Self {
+        let layout = std::alloc::Layout::new::<Self>();
+        let ptr = unsafe { std::alloc::alloc(layout) as *mut Self };
+        assert!(!ptr.is_null(), "allocation failed for TraitObjectStorage");
+        unsafe {
+            // SAFETY: `ptr` points to fresh, uninitialized memory of size
+            // `Layout::new::<Self>()`. We write every field via `ptr::write`
+            // to avoid running drop on uninitialized bytes (the existing
+            // memory contains garbage, never a valid prior `Self`).
+            std::ptr::write(
+                &mut (*ptr).header,
+                crate::v2::heap_header::HeapHeader::new(
+                    crate::v2::heap_header::HEAP_KIND_V2_TRAIT_OBJECT,
+                ),
+            );
+            std::ptr::write(&mut (*ptr).value, value);
+            std::ptr::write(&mut (*ptr).vtable, vtable);
+        }
+        ptr
+    }
+
+    /// Wave 2 Agent E (2026-05-14): v2-raw raw-pointer deallocator.
+    ///
+    /// Runs `drop_in_place` on the inner `Arc<TypedObjectStorage>` value
+    /// field and `Arc<VTable>` vtable field (retires one strong-count
+    /// share on each via standard Rust `Arc::drop`), then deallocates
+    /// the struct's heap memory via `Layout::new::<Self>()`.
+    ///
+    /// Mirrors the `TypedObjectStorage::_drop` precedent.
+    ///
+    /// # Safety
+    /// `ptr` must point to a live `TraitObjectStorage` allocated via
+    /// `Self::_new` with no remaining references. Must not be called
+    /// more than once on the same pointer; must not be called on
+    /// `Arc<TraitObjectStorage>`-allocated instances (those run
+    /// through Rust's `Arc` drop machinery + the auto-derived shape).
+    pub unsafe fn _drop(ptr: *mut Self) {
+        unsafe {
+            // Drop the in-place `Arc<TypedObjectStorage>` and `Arc<VTable>`
+            // payloads so their refcount shares are retired. The `header`
+            // field is POD (atomics + primitives) — no Drop work owed.
+            std::ptr::drop_in_place(&mut (*ptr).value);
+            std::ptr::drop_in_place(&mut (*ptr).vtable);
+            // Deallocate the struct's heap memory.
+            let layout = std::alloc::Layout::new::<Self>();
+            std::alloc::dealloc(ptr as *mut u8, layout);
+        }
     }
 
     /// Convenience: look up a method by name in the vtable. Returns
@@ -1953,11 +2074,40 @@ impl Clone for TraitObjectStorage {
     /// Per-field clone — each `Arc` bumps its strong count by one.
     /// Cloning a `TraitObjectStorage` produces a fat-pointer carrier
     /// that observes the same underlying TypedObject and dispatches
-    /// against the same VTable.
+    /// against the same VTable. The cloned struct's `header` is a fresh
+    /// HeapHeader at refcount=1 (matches `Self::new`'s contract — the
+    /// embedded header is unused on `Arc<TraitObjectStorage>` instances;
+    /// it carries lifecycle only for `_new`-allocated raw-pointer
+    /// instances).
     fn clone(&self) -> Self {
         Self {
+            header: crate::v2::heap_header::HeapHeader::new(
+                crate::v2::heap_header::HEAP_KIND_V2_TRAIT_OBJECT,
+            ),
             value: Arc::clone(&self.value),
             vtable: Arc::clone(&self.vtable),
+        }
+    }
+}
+
+// Wave 2 Agent E (2026-05-14): v2-raw HeapElement impl per ADR-006
+// §Q25.C.5 amendment + audit §4.3 Obstacle O-3.a resolution. Constrains
+// `TraitObjectStorage` to the HeapHeader-at-offset-0 v2-raw element-carrier
+// contract so future call sites can store raw `*const TraitObjectStorage`
+// bits and dispatch retain/release via the trait.
+//
+// The trait dispatches refcount through the on-header refcount via
+// `v2_release` — distinct from the legacy `Arc<TraitObjectStorage>` path
+// which dispatches via Rust `Arc::decrement_strong_count`. Per the struct
+// docstring, both carrier shapes coexist at the struct level during the
+// Wave 2 dispatch transition; the slot ABI discriminates them by
+// allocation provenance (call sites that use `_new` and
+// `from_trait_object_raw` follow the raw-pointer lifecycle; existing
+// `Arc::new` + `from_trait_object` callers retain Arc-style lifecycle).
+unsafe impl crate::v2::heap_element::HeapElement for TraitObjectStorage {
+    unsafe fn release_elem(ptr: *const Self) {
+        if unsafe { crate::v2::refcount::v2_release(&(*ptr).header) } {
+            unsafe { Self::_drop(ptr as *mut Self) };
         }
     }
 }
@@ -5638,5 +5788,157 @@ mod trait_object_storage {
         drop(storage);
         assert_eq!(obj_weak.strong_count(), 0, "TypedObject share must retire");
         assert_eq!(vt_weak.strong_count(), 0, "VTable share must retire");
+    }
+
+    // ── Wave 2 Agent E (2026-05-14): v2-raw HeapHeader migration tests ──────
+
+    #[test]
+    fn new_initializes_heap_header() {
+        // Wave 2 Agent E: confirm `TraitObjectStorage::new` initializes the
+        // HeapHeader at offset 0 with HEAP_KIND_V2_TRAIT_OBJECT and
+        // refcount=1. The header sits unused for `Arc<TraitObjectStorage>`
+        // instances (Arc owns the lifecycle).
+        let obj = make_object(1);
+        let vt = make_vtable("Animal", 100, "name");
+        let storage = TraitObjectStorage::new(obj, vt);
+        assert_eq!(
+            storage.header.kind(),
+            crate::v2::heap_header::HEAP_KIND_V2_TRAIT_OBJECT,
+        );
+        assert_eq!(storage.header.get_refcount(), 1);
+    }
+
+    #[test]
+    fn v2_raw_new_drop_round_trip_balances_inner_arcs() {
+        // Wave 2 Agent E: verify the v2-raw lifecycle (`_new` + `_drop`)
+        // round-trips cleanly without leaking the inner Arc shares.
+        // Mirror of D1's `TypedObjectStorage` round-trip test (commit
+        // 0e4510d4).
+        let obj = make_object(7);
+        let vt = make_vtable("Animal", 100, "name");
+        let obj_weak = Arc::downgrade(&obj);
+        let vt_weak = Arc::downgrade(&vt);
+        unsafe {
+            let ptr = TraitObjectStorage::_new(obj, vt);
+            assert!(!ptr.is_null());
+            // Header refcount=1 + inner Arcs hold one share each.
+            assert_eq!((*ptr).header.get_refcount(), 1);
+            assert_eq!(obj_weak.strong_count(), 1);
+            assert_eq!(vt_weak.strong_count(), 1);
+            assert_eq!(
+                (*ptr).header.kind(),
+                crate::v2::heap_header::HEAP_KIND_V2_TRAIT_OBJECT,
+            );
+            // `_drop` retires the inner shares + deallocates.
+            TraitObjectStorage::_drop(ptr);
+        }
+        assert_eq!(
+            obj_weak.strong_count(),
+            0,
+            "TypedObject share must retire on _drop",
+        );
+        assert_eq!(
+            vt_weak.strong_count(),
+            0,
+            "VTable share must retire on _drop",
+        );
+    }
+
+    #[test]
+    fn heap_element_release_elem_to_zero_drops_payload() {
+        // Wave 2 Agent E: verify the HeapElement trait dispatch
+        // (`release_elem`) deallocates the carrier at refcount=0 and
+        // retires the inner Arc shares. Mirror of D1's
+        // `TypedObjectStorage::test_heap_element_release_elem_to_zero`.
+        use crate::v2::heap_element::HeapElement;
+        let obj = make_object(13);
+        let vt = make_vtable("Animal", 100, "name");
+        let obj_weak = Arc::downgrade(&obj);
+        let vt_weak = Arc::downgrade(&vt);
+        unsafe {
+            let ptr = TraitObjectStorage::_new(obj, vt);
+            assert_eq!((*ptr).header.get_refcount(), 1);
+            // `release_elem` decrements to 0 and runs `_drop`.
+            TraitObjectStorage::release_elem(ptr);
+        }
+        assert_eq!(
+            obj_weak.strong_count(),
+            0,
+            "TypedObject share must retire after release_elem to zero",
+        );
+        assert_eq!(
+            vt_weak.strong_count(),
+            0,
+            "VTable share must retire after release_elem to zero",
+        );
+    }
+
+    #[test]
+    fn heap_element_release_elem_held_share_preserves_payload() {
+        // Wave 2 Agent E: verify `release_elem` is a no-op at refcount > 1
+        // (it decrements but does not deallocate). The inner Arc shares
+        // remain held until the final `_drop`. Mirror of D1's
+        // `TypedObjectStorage::test_heap_element_release_elem_held_share`.
+        use crate::v2::heap_element::HeapElement;
+        let obj = make_object(17);
+        let vt = make_vtable("Animal", 100, "name");
+        let obj_weak = Arc::downgrade(&obj);
+        let vt_weak = Arc::downgrade(&vt);
+        unsafe {
+            let ptr = TraitObjectStorage::_new(obj, vt);
+            // Bump refcount to 2 (simulate a second slot holding this
+            // carrier).
+            (*ptr).header.retain();
+            assert_eq!((*ptr).header.get_refcount(), 2);
+            // First release_elem: refcount=2 → 1, no dealloc.
+            TraitObjectStorage::release_elem(ptr);
+            assert_eq!((*ptr).header.get_refcount(), 1);
+            // Inner shares still held.
+            assert_eq!(obj_weak.strong_count(), 1);
+            assert_eq!(vt_weak.strong_count(), 1);
+            // Final _drop retires.
+            TraitObjectStorage::_drop(ptr);
+        }
+        assert_eq!(obj_weak.strong_count(), 0);
+        assert_eq!(vt_weak.strong_count(), 0);
+    }
+
+    #[test]
+    fn kinded_slot_from_trait_object_raw_constructor_kind_and_bits() {
+        // Wave 2 Agent E: `KindedSlot::from_trait_object_raw` stores a
+        // raw `*const TraitObjectStorage` directly (NOT `Arc::into_raw`)
+        // with kind `NativeKind::Ptr(HeapKind::TraitObject)`. Mirror of
+        // D1's `from_typed_object_raw_constructor_kind_and_bits` test.
+        let obj = make_object(2);
+        let vt = make_vtable("Animal", 100, "name");
+        unsafe {
+            let ptr = TraitObjectStorage::_new(obj, vt);
+            let slot = KindedSlot::from_trait_object_raw(ptr);
+            assert_eq!(slot.kind(), NativeKind::Ptr(HeapKind::TraitObject));
+            // Slot bits are the raw pointer (NOT Arc::into_raw).
+            assert_eq!(slot.slot().raw(), ptr as u64);
+            // Forget the slot — Wave 2 transitional Arc-style dispatch
+            // arms would call `Arc::decrement_strong_count` on raw
+            // pointer bits (heap corruption) — see the D1 follow-up
+            // lockstep requirement. Deallocate manually instead.
+            std::mem::forget(slot);
+            TraitObjectStorage::_drop(ptr);
+        }
+    }
+
+    #[test]
+    fn v2_raw_carrier_size_matches_expected_layout() {
+        // Wave 2 Agent E: pin the v2-raw struct layout — HeapHeader (8)
+        // + Arc<TypedObjectStorage> (8) + Arc<VTable> (8) = 24 bytes
+        // (matching the audit §E.3 24-byte size contract for the E-a
+        // path). The inner Arcs stay 8-byte each in E's Round 2 scope;
+        // D2's lockstep flip migrates the inner pointers but the
+        // outer size contract is set here.
+        assert_eq!(
+            std::mem::size_of::<TraitObjectStorage>(),
+            24,
+            "TraitObjectStorage v2-raw layout must be 24 bytes \
+             (HeapHeader 8 + Arc<TypedObjectStorage> 8 + Arc<VTable> 8)",
+        );
     }
 }

@@ -5238,6 +5238,102 @@ bitflags::bitflags! {
 }
 ```
 
+###### Q25.C.5 amendment (Wave 2 Agent E, 2026-05-14): TraitObjectStorage HeapHeader migration — audit §4.3 Obstacle O-3.a resolution
+
+`TraitObjectStorage` now carries a `HeapHeader` at offset 0 (`#[repr(C)]`)
+per audit §4.3 Obstacle O-3.a resolution under the bulldozer-cadence
+strategic-owner authorization 2026-05-14 (Wave 2 Round 2 Agent E close,
+on `bulldozer-strictly-typed-wave-2-e`).
+
+The struct gains v2-raw raw-pointer lifecycle:
+
+- `TraitObjectStorage::_new(value, vtable) -> *mut Self` — Layout-based allocator returning `*mut Self` with refcount=1 via `HeapHeader::new(HEAP_KIND_V2_TRAIT_OBJECT)`.
+- `unsafe TraitObjectStorage::_drop(ptr: *mut Self)` — `drop_in_place` on the inner `Arc<TypedObjectStorage>` value field + `Arc<VTable>` vtable field, then Layout-based deallocation.
+- `unsafe impl HeapElement for TraitObjectStorage` — `release_elem` dispatches via `v2_release` on the header.
+- `HEAP_KIND_V2_TRAIT_OBJECT = 87` constant in `crates/shape-value/src/v2/heap_header.rs` (next free post-`HEAP_KIND_V2_TYPED_OBJECT = 86`).
+
+`ValueSlot` gains a per-FieldType raw-pointer constructor
+`from_trait_object_raw(*const TraitObjectStorage)`; `KindedSlot` gains
+the equivalent. The existing `from_trait_object(Arc<TraitObjectStorage>)`
+constructor is **retained as a legacy transitional entry point** during
+the Wave 2 transition (deleted when the last caller migrates to
+`from_trait_object_raw`).
+
+The struct continues to carry an inner `value: Arc<TypedObjectStorage>`
+field and `vtable: Arc<VTable>` field in E's Round 2 scope. The inner
+`Arc<TypedObjectStorage>` wrapping is the canonical Wave 2 transitional
+shape — D2's parallel close handles the inner shift to `*mut TypedObjectStorage`
+in lockstep with TypedObjectStorage's own Arc-path retirement. The
+`vtable: Arc<VTable>` field stays Arc-typed indefinitely under E's
+scope; a separate VTable HeapHeader migration is an independent
+follow-up if/when IC devirtualization measurement (§Q25.C.6) justifies
+flipping `Arc::ptr_eq(&self.vtable, &other.vtable)` to a raw-pointer
+equality check (audit §E.3).
+
+The dispatch arms in `clone_with_kind` / `drop_with_kind` /
+`SharedCell::drop` / `TypedObjectStorage::drop_fields` retain the
+Arc-style retain/release semantics for `HeapKind::TraitObject` during
+the Wave 2 transition (mirror of D1's §2.3 amendment lockstep
+discipline). A subsequent cascade migration in Wave 3 stabilize (or a
+dedicated `E2` agent if cascade-site count justifies splitting) will
+flip the 4-table dispatch arms to `v2_retain(&(*ptr).header)` /
+`v2_release(&(*ptr).header)` + `Self::_drop(ptr)` on return-true **in
+a single commit** (atomic producer/consumer flip — leaving Arc-style
+consumer arms with raw-pointer producers would call
+`Arc::decrement_strong_count` on non-Arc pointers = heap corruption /
+SIGSEGV, same lockstep requirement as D1→D2).
+
+The slot-ABI discriminator `NativeKind::Ptr(HeapKind::TraitObject)`
+is **unchanged**. No new `HeapKind` variant added (existing ordinal
+29 preserved). Refcount semantics mirror the `TypedObjectStorage`
+(D1) / `StringObj` / `DecimalObj` precedents — `HeapHeader` at
+offset 0; `v2_retain` / `v2_release` on the header; deallocation via
+`Self::_drop` on `release_elem` return-true.
+
+The carrier struct layout pins at 24 bytes (HeapHeader 8 +
+`Arc<TypedObjectStorage>` 8 + `Arc<VTable>` 8) per the audit §E.3 E-a
+size contract. Once D2's cascade flips the inner field, the layout
+stays 24 bytes (`*mut TypedObjectStorage` 8 replaces the 8-byte
+`Arc<TypedObjectStorage>`); the outer struct size is preserved
+across both transitional shapes.
+
+**Forbidden under this amendment** (extends the Wave 2 forbidden
+block; same shape as D1's §2.3 forbidden block):
+
+- Resurrection of `Arc<TraitObjectStorage>` wrapper as the load-bearing
+  carrier shape post-cascade-close (the transitional pattern is
+  binding for Wave 2 Round 2 only; the cascade flip removes it).
+- Mixed dispatch shape (some consumer arms `v2_retain`-ing while
+  others `Arc::increment_strong_count`-ing) post-cascade close.
+- Per-`TraitObjectStorage` runtime kind discriminator at the consumer
+  layer — the dispatch is monomorphized at compile time via the
+  `HeapElement` trait per `<X>Obj` / TypedObjectStorage precedent.
+- **`Box<u64>` data half of trait-object carrier** (continues §Q25.E #3
+  forbidden — kind-blind raw-bits storage, same defection-attractor
+  as the deleted `ValueWord`).
+- "Preserve `Arc<TypedObjectStorage>` wrapping for cluster-1+" as a
+  long-term framing — the inner Arc<TypedObjectStorage> field shape
+  is binding for E's Round 2 scope only and evaporates alongside D2's
+  parallel close (or in a Wave 3 stabilize cascade if D2's flip is
+  staged separately); refused per §Parallel-implementation across
+  producer/consumer carrier-shape boundaries entry framing if framed
+  as a permanent shape.
+- "VTable also grows a HeapHeader at offset 0 simultaneously" without
+  measurement — audit §E.3 explicitly recommended deferring VTable
+  HeapHeader migration unless/until IC devirtualization measurement
+  justifies it. The VTable refcount-share semantics are
+  "shared-cloned-into-each-boxing-site" per §Q25.C.5 docstring; that
+  works with the existing `Arc<VTable>` shape today.
+
+**Authority:** Phase 3 cluster-0+1 Wave 2 Round 2 strategic-owner
+cadence shift 2026-05-14. Audit §4.3 Obstacle O-3.a identified the
+fat-pointer carrier as needing the same HeapHeader migration as
+TypedObjectStorage; Wave 1 §E ground-truthed the production
+construction sites (2 actual at HEAD `e766dbef`; audit predicted 3,
+discrepancy surfaced at E close) + ~80 cascade sites (estimate); E
+inherits D1's API surface mirror pattern + D2's parallel close
+provides the inner-field flip lockstep.
+
 ###### Q25.C.6 — IC devirtualization
 
 The JIT IC (`feedback.rs:9-128`) at each `dyn T` call site records `(self_vtable_arc_id, g_type_info.concrete_type_id_per_generic)`. State transitions:

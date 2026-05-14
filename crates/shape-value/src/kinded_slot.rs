@@ -204,10 +204,30 @@ impl KindedSlot {
     /// `TraitObjectStorage` is the typed-Arc replacement for the
     /// bulldozer-deleted `HeapValue::TraitObject { value: Box<u64>,
     /// vtable: Arc<VTable> }` shape.
+    ///
+    /// **Wave 2 Agent E (2026-05-14): legacy transitional constructor.**
+    /// See `ValueSlot::from_trait_object` docstring for the Arc-vs-raw-pointer
+    /// staging.
     #[inline]
     pub fn from_trait_object(t: Arc<TraitObjectStorage>) -> Self {
         Self::new(
             ValueSlot::from_trait_object(t),
+            NativeKind::Ptr(HeapKind::TraitObject),
+        )
+    }
+
+    /// Convenience: a `Ptr(HeapKind::TraitObject)`-kind slot from a raw
+    /// `*const TraitObjectStorage`. **Wave 2 Agent E (2026-05-14): v2-raw
+    /// raw-pointer constructor.** Per ADR-006 §Q25.C.5 amendment + audit
+    /// §4.3 O-3.a resolution. Pairs with `TraitObjectStorage::_new`
+    /// allocator; refcount discipline goes through the on-header refcount
+    /// via `v2_retain` / `v2_release` (NOT Rust `Arc::increment/decrement_
+    /// strong_count`). See `ValueSlot::from_trait_object_raw` docstring
+    /// for the full call-site migration pattern.
+    #[inline]
+    pub fn from_trait_object_raw(ptr: *const TraitObjectStorage) -> Self {
+        Self::new(
+            ValueSlot::from_trait_object_raw(ptr),
             NativeKind::Ptr(HeapKind::TraitObject),
         )
     }
