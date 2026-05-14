@@ -4945,7 +4945,7 @@ shell wrapper per `reference_phase2d_devenv.md`).
 | 1 (scalar loop) | `for i in 0..100 { sum += i }; print(sum)` | ✅ `4950` | ✅ `4950` |
 | 2 canonical (kickoff) | `[1,2,3,4,5].map(\|x\|x*2).sum()` | ✅ `30` | ❌ `Route A surface-and-stop: NotImplemented(SURFACE) — print Call-terminator operand NativeKind is None` |
 | 2 simplified | `[1,2,3,4,5].sum()` | ❌ runtime error `__intrinsic_sum: HeapKind::TypedArray, got UInt64` | ✅ `15` (per S1-reopen agent verification at baseline) |
-| 3 (trait dispatch) | `trait T { name(self): string } ... t.name()` | ✅ `x` | ⚠ Segfault (per W17-narrow precedent — gate-deferred to W17-narrow-follow-up-B null-handling; pre-existing) |
+| 3 (trait dispatch) | `trait T { name(self): string } ... t.name()` | ✅ `x` | ❌ Segfault per W17-narrow-follow-up-B null-handling gap. **γ.3 disproven** (R16 dispatch hypothesis: "follow-up-A's schema-id fix renders TAG_NULL fallthrough unreachable for Smoke 3" did NOT hold post-A-merge); per R18 close supervisor disposition, **C dispatches in R19 as cluster-0 scope** (NOT cluster-1 deferral — that framing is the W-series declare-victory pattern at the sub-cluster-disposition layer, refused on sight per CLAUDE.md). |
 | 4 (HashSet/Set) | `Set(); .add("a"); .add("b"); .size()` | (kickoff-prompt syntax discrepancy — see below) | (same) |
 
 ### Supervisor's canonical Smoke 2 verification: PASSES
@@ -5040,9 +5040,9 @@ discrepancy by treating Char as a scalar (missing-NativeKind-prereq)
 rather than heap-element (missing-Obj-carrier-prereq) — defensible
 either way but the audit should be unambiguous. **Audit doc
 clarification owed in a future cluster-1 hardening pass** (not
-blocking R19; R19 dispatches S2 + S1.5 in parallel with Char folded
-into S1.5's `NativeKind` extension scope per supervisor's R18 close
-disposition).
+blocking R19; R19 dispatches **S2 + S1.5 + C** in parallel with Char
+folded into S1.5's `NativeKind` extension scope per supervisor's R18
+close disposition).
 
 ### Cluster-1 candidate list at R18 close
 
@@ -5060,7 +5060,7 @@ Plus **cluster-2 `W12-stdlib-intrinsic-collapse`** (named R13 T4; concrete insta
 
 | Phase | Sub-clusters | Sessions |
 |---|---|---|
-| R19 | S2 (heap-element migration + `<X>Obj` prereqs) + S1.5 (NativeKind extension) parallel | 1-2 |
+| R19 | S2 (heap-element migration + `<X>Obj` prereqs) + S1.5 (NativeKind extension) + C (W17-narrow-follow-up-B-β: TAG_NULL filter at JIT producer-site) parallel | 1-2 |
 | R20 | S5 (TypedArrayData enum + TypedBuffer<T> deletion + §2.7.24 Q25.A amendment commit) | 1 |
 | Cluster-0 close attempt | full 4-kickoff-smoke matrix VM==JIT | 1 |
 
@@ -5068,12 +5068,17 @@ Total handoff-to-v1 estimate: 16-21 sessions, holding.
 
 ---
 
-*Next session: read this file first; R19 dispatches S2 (heap-element
-migration with v2-raw `<X>Obj` carrier prereqs per audit §2.2) + S1.5
-(W12-nativekind-typed-array-ptr-extension — §2.7.7/Q9 NativeKind
-discriminator for typed-array-pointer carrier, folds in U64/F32/Char
-prereq work surfaced in R18 S1) in parallel from `bulldozer-strictly-
-typed @ 5fb42b1c`. S1.5 pre-dispatch audit recommended: single sub-
-cluster vs split-by-shape question (one §2.7.7/Q9 amendment + N
-variant additions vs N parallel discriminator additions) — team-lead
-audits scope shape before R19 dispatch fires.*
+*Next session: read this file first; R19 dispatches **S2 + S1.5 + C
+in parallel** from `bulldozer-strictly-typed @ fc43e356` (or post-
+S1.5-audit-commit HEAD). C = W17-narrow-follow-up-B-β (TAG_NULL filter
+at JIT-producer site `shape-jit/src/ffi/conversion.rs::print_kinded_inner`
+or per-`jit_print_*` body before constructing `KindedSlot`; bounded
+mechanical, in-crate to shape-jit) — **cluster-0 scope per R18 close
+supervisor disposition; γ.3 disproven, NOT cluster-1 deferral.**
+S2 = W12-typed-array-data-heap-element-migration (audit §2.2 with
+`<X>Obj` carrier prereqs per O-1 newtype ruling; Char inclusion
+depends on bucket-classification clarification from S1.5 audit).
+S1.5 = W12-nativekind-typed-array-ptr-extension (provisional name;
+ADR-006 §2.7.7/Q9 amendment for U64 discriminator + F32 cascade +
+possibly Char). S1.5 pre-dispatch audit fires first (this team-lead
+session); supervisor ratifies dispatch shape post-audit; R19 dispatches.*
