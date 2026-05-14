@@ -2830,7 +2830,10 @@ mod tests {
     fn test_intrinsic_builtin_blocked_from_user_code() {
         // Verify that __intrinsic_* and __json_* builtins are gated from user code.
         // Note: __into_*/__try_into_* are NOT gated (compiler-generated for type assertions).
-        for intrinsic in &["__intrinsic_sum", "__intrinsic_mean", "__json_object_get"] {
+        // W12-stdlib-intrinsic-collapse (Wave-2-Agent-G, 2026-05-14):
+        // `__intrinsic_sum` deleted — substitute another still-gated
+        // intrinsic (`__intrinsic_std`) to exercise the gating path.
+        for intrinsic in &["__intrinsic_std", "__intrinsic_mean", "__json_object_get"] {
             let code = format!(
                 r#"
                 fn test() {{
@@ -2860,9 +2863,12 @@ mod tests {
 
     #[test]
     fn test_intrinsic_builtin_method_syntax_blocked_from_user_code() {
+        // W12-stdlib-intrinsic-collapse (Wave-2-Agent-G, 2026-05-14):
+        // `__intrinsic_sum` was deleted — substitute `__intrinsic_std`
+        // (still gated) to exercise the gating path.
         let code = r#"
             fn test() {
-                [1, 2, 3].__intrinsic_sum()
+                [1, 2, 3].__intrinsic_std()
             }
         "#;
         let compiler = BytecodeCompiler::new();
@@ -2872,7 +2878,7 @@ mod tests {
             .expect_err("__intrinsic_* method syntax should be blocked from user code");
         let msg = format!("{}", err);
         assert!(
-            msg.contains("'__intrinsic_sum' resolves to internal intrinsic scope")
+            msg.contains("'__intrinsic_std' resolves to internal intrinsic scope")
                 && msg.contains("not available from ordinary user code"),
             "Expected internal-only intrinsic method error, got: {}",
             msg

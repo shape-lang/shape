@@ -2255,9 +2255,13 @@ pub enum BuiltinFunction {
 
     // Optimization
     IntrinsicMinimize,
-    // Math intrinsics (7 functions)
+    // Math intrinsics (6 functions)
+    // W12-stdlib-intrinsic-collapse (Wave-2-Agent-G, 2026-05-14): deleted
+    // `IntrinsicSum` per the parallel-implementation defection close —
+    // PHF `.sum()` (array_aggregation::handle_sum_v2, typed_array_methods
+    // ::v2_int_sum/v2_float_sum, matrix_methods::v2_sum, etc.) is the
+    // canonical single-discriminator dispatch surface (ADR-005 §1).
     IntrinsicBspline2_3dBatch,
-    IntrinsicSum,
     IntrinsicMean,
     IntrinsicMin,
     IntrinsicMax,
@@ -2555,9 +2559,9 @@ impl BuiltinFunction {
             BuiltinFunction::FormatValueWithSpec,
             // Optimization
             BuiltinFunction::IntrinsicMinimize,
-            // Math intrinsics (7)
+            // Math intrinsics (6) — W12-stdlib-intrinsic-collapse close
+            // deleted `IntrinsicSum`; PHF `.sum()` is canonical.
             BuiltinFunction::IntrinsicBspline2_3dBatch,
-            BuiltinFunction::IntrinsicSum,
             BuiltinFunction::IntrinsicMean,
             BuiltinFunction::IntrinsicMin,
             BuiltinFunction::IntrinsicMax,

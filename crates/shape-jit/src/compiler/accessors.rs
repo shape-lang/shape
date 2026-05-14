@@ -388,8 +388,9 @@ const ALL_BUILTINS: &[BuiltinFunction] = &[
     // Format (2)
     BuiltinFunction::FormatValueWithMeta,
     BuiltinFunction::FormatValueWithSpec,
-    // Math intrinsics (6)
-    BuiltinFunction::IntrinsicSum,
+    // Math intrinsics (5)
+    // W12-stdlib-intrinsic-collapse (Wave-2-Agent-G, 2026-05-14):
+    // `IntrinsicSum` deleted — PHF `.sum()` is canonical (ADR-005 §1).
     BuiltinFunction::IntrinsicMean,
     BuiltinFunction::IntrinsicMin,
     BuiltinFunction::IntrinsicMax,

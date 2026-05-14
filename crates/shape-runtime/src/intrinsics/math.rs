@@ -5,14 +5,18 @@
 //! correction subsection + intrinsics-typed-CC entry's Q2 lifecycle
 //! subsection), 14 of math.rs's 19 intrinsics migrate to
 //! `register_typed_fn_N` typed entries via [`create_math_intrinsics_module`].
-//! 5 polymorphic intrinsics remain as legacy `IntrinsicFn` bodies pending
+//! 4 polymorphic intrinsics remain as legacy `IntrinsicFn` bodies pending
 //! follow-on architectural sub-decisions:
 //!
-//! - **`intrinsic_sum` / `intrinsic_min` / `intrinsic_max`**: polymorphic
-//!   return (`i64` for `Vec<int>` fast path vs `f64` for `Vec<number>`).
-//!   Single typed entry can't carry both. Awaits **M1-split** sub-decision
-//!   (per-element-type intrinsics; cross-crate change to shape-vm
-//!   compiler emission + opcode discriminants + classification logic).
+//! - **`intrinsic_min` / `intrinsic_max`**: polymorphic return (`i64` for
+//!   `Vec<int>` fast path vs `f64` for `Vec<number>`). Single typed entry
+//!   can't carry both. Awaits **M1-split** sub-decision (per-element-type
+//!   intrinsics; cross-crate change to shape-vm compiler emission + opcode
+//!   discriminants + classification logic).
+//! - **`intrinsic_sum` deleted** (W12-stdlib-intrinsic-collapse,
+//!   Wave-2-Agent-G, 2026-05-14): stdlib `pub fn sum(series)` now routes
+//!   through PHF method dispatch (`series.sum()`) — single discriminator
+//!   per ADR-005 §1, `MethodFnV2` ABI per ADR-006 §2.7.10/Q11.
 //! - **`intrinsic_char_code`**: polymorphic input (`Char` vs `String`).
 //!   `HeapValue::Char` is first-class post-bulldozer (`heap_value.rs:846`)
 //!   so dropping the `Char` branch would break callers iterating
@@ -39,9 +43,11 @@ use std::sync::Arc;
 // ───────────────────── Module factory (14 typed entries) ─────────────────────
 
 /// Create the math intrinsics module with 14 typed-marshal entry points.
-/// The 5 polymorphic intrinsics (sum, min, max, char_code, bspline2_3d_batch)
+/// The 4 polymorphic intrinsics (min, max, char_code, bspline2_3d_batch)
 /// remain as legacy `IntrinsicFn` bodies in this module until their
-/// follow-on architectural sub-decisions land.
+/// follow-on architectural sub-decisions land. `sum` was deleted by
+/// W12-stdlib-intrinsic-collapse (Wave-2-Agent-G, 2026-05-14) — stdlib
+/// now routes through PHF `.sum()` method dispatch.
 pub fn create_math_intrinsics_module() -> ModuleExports {
     let mut module = ModuleExports::new("std::core::intrinsics::math");
     module.description =
@@ -175,19 +181,12 @@ fn register_unary_f64_op(
     );
 }
 
-// ───────────────────── Legacy bodies (5 polymorphic intrinsics) ─────────────────────
+// ───────────────────── Legacy bodies (4 polymorphic intrinsics) ─────────────────────
 
-/// Intrinsic: Sum of all values in a series.
-///
-/// **Migration deferred** pending M1-split sub-decision (polymorphic return:
-/// `i64` for `Vec<int>` fast path vs `f64` for `Vec<number>`). Cross-crate
-/// change required to shape-vm compiler emission for type-driven dispatch.
-pub fn intrinsic_sum(_args: &[KindedSlot], _ctx: &mut ExecutionContext) -> Result<KindedSlot> {
-    Err(ShapeError::RuntimeError {
-        message: "intrinsic_sum: pending Phase 2c intrinsic kind threading + M1-split — see ADR-006 §2.7.4".to_string(),
-        location: None,
-    })
-}
+// W12-stdlib-intrinsic-collapse (Wave-2-Agent-G, 2026-05-14): the legacy
+// `intrinsic_sum` body was deleted alongside `BuiltinFunction::IntrinsicSum`.
+// Stdlib `pub fn sum(series)` now routes through PHF `.sum()` method
+// dispatch — single discriminator per ADR-005 §1.
 
 /// Intrinsic: Minimum value in a series or among multi-scalar arguments.
 ///
