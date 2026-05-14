@@ -79,33 +79,20 @@ impl ElementData {
     /// schema is fixed-arity and the type is exhaustive — no Option
     /// indirection at the storage layer.
     fn into_typed_object_arc(self) -> Arc<HeapValue> {
-        // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): the XML attributes
-        // HashMap producer needs the per-V `HashMapData<*const StringObj>`
-        // construction API + `HashMapKindedRef::String(...)` wrapping —
-        // ckpt-3 territory (consumer cascade). At ckpt-2 we surface
-        // unimplemented to avoid emitting a wrong-shape (Arc<String>-keyed)
-        // HashMap; this preserves invariants on `HeapValue::HashMap` until
-        // ckpt-3 rebuilds the producer.
-        let _ = HashMapData::<i64>::new; // sanity binding; surfaces the new API exists
-        let attrs_kref = shape_value::heap_value::HashMapKindedRef::String(
-            Arc::new(unsafe {
-                HashMapData::<*const shape_value::v2::string_obj::StringObj>::from_pairs(
-                    shape_value::v2::typed_array::TypedArray::<
-                        *const shape_value::v2::string_obj::StringObj,
-                    >::new(),
-                    shape_value::v2::typed_array::TypedArray::<
-                        *const shape_value::v2::string_obj::StringObj,
-                    >::new(),
-                )
-            }),
-        );
-        let attrs_data: shape_value::heap_value::HashMapKindedRef = attrs_kref;
-        // SURFACE: ckpt-3 must rebuild the producer to (a) build the keys
-        // `TypedArray<*const StringObj>` via per-key `StringObj::_new(..)`
-        // and `TypedArray::push`, (b) build the values
-        // `TypedArray<*const StringObj>` mirroring keys, (c) call
-        // `HashMapKindedRef::String(Arc::new(HashMapData::from_pairs(..)))`.
-        let _ = &self.attributes; // suppress unused; full walk lives at ckpt-3
+        // Wave 2 Round 3b C2-joint ckpt-4 (2026-05-14): build the XML
+        // attributes HashMap via the per-V mutation API on
+        // `HashMapData<*const StringObj>` (V = string). Each (k, v) pair
+        // becomes one fresh StringObj insert; the wrapper carries one
+        // refcount share per element. ADR-006 §2.7.24 Q25.B SUPERSEDED.
+        let mut attrs_data: HashMapData<*const shape_value::v2::string_obj::StringObj> =
+            HashMapData::new();
+        for (k, v) in &self.attributes {
+            let v_obj = shape_value::v2::string_obj::StringObj::new(v.as_str())
+                as *const shape_value::v2::string_obj::StringObj;
+            unsafe { attrs_data.insert(k.as_str(), v_obj) };
+        }
+        let attrs_data: shape_value::heap_value::HashMapKindedRef =
+            shape_value::heap_value::HashMapKindedRef::String(Arc::new(attrs_data));
         // Recurse: each child becomes its own TypedObject.
         // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): variant payload
         // and `TypedArrayData::TypedObject` element type both flipped to
@@ -493,14 +480,38 @@ fn write_xml_element(
 
     let mut elem = BytesStart::new(name.clone());
 
-    if let Some(_attrs) = attrs {
-        // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): payload flipped
-        // to `HashMapKindedRef`. The per-V attribute walk (read
-        // `*mut TypedArray<*const StringObj>` keys + per-V values for
-        // attribute formatting) is ckpt-3 territory. At ckpt-2 we
-        // skip attribute emission so xml.stringify still produces
-        // valid XML (just without attributes); full per-V walk
-        // restored at ckpt-3. ADR-006 §2.7.24 Q25.B SUPERSEDED.
+    if let Some(attrs) = attrs {
+        // Wave 2 Round 3b C2-joint ckpt-4 (2026-05-14): per-V walk —
+        // attributes are always `HashMap<string, string>` (V = String).
+        // Other V variants are a producer-side type error (xml.stringify
+        // declares the attribute slot type at the marshal boundary).
+        use shape_value::heap_value::HashMapKindedRef;
+        match attrs {
+            HashMapKindedRef::String(arc) => {
+                let n = arc.len();
+                for i in 0..n {
+                    let key: String = unsafe {
+                        let ptr = shape_value::v2::typed_array::TypedArray::get_unchecked(
+                            arc.keys, i as u32,
+                        );
+                        shape_value::v2::string_obj::StringObj::as_str(ptr).to_owned()
+                    };
+                    let val: String = unsafe {
+                        let v_ptr: *const shape_value::v2::string_obj::StringObj =
+                            *(*arc.values).data.add(i);
+                        shape_value::v2::string_obj::StringObj::as_str(v_ptr).to_owned()
+                    };
+                    elem.push_attribute((key.as_bytes(), val.as_bytes()));
+                }
+            }
+            other => {
+                return Err(format!(
+                    "xml.stringify(): attributes HashMap must be HashMap<string, string>, \
+                     got V={:?}",
+                    other.values_kind()
+                ));
+            }
+        }
     }
 
     // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): TypedArrayData::TypedObject

@@ -84,15 +84,31 @@ fn build_response_pairs(
 fn extract_headers(options: &[(Arc<String>, Arc<HeapValue>)]) -> Vec<(String, String)> {
     for (k, v) in options.iter() {
         if k.as_str() == "headers" {
-            if let HeapValue::HashMap(_kref) = &**v {
-                // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): payload
-                // flipped to `HashMapKindedRef`. The headers HashMap is
-                // a `String → String` map at runtime; the per-V walk
-                // (keys: `*mut TypedArray<*const StringObj>`; values:
-                // `HashMapKindedRef::String(Arc<HashMapData<*const StringObj>>)`)
-                // is ckpt-3 territory. Returning empty headers at
-                // ckpt-2 preserves http() correctness (no headers sent)
-                // without per-V dispatch landing.
+            if let HeapValue::HashMap(kref) = &**v {
+                // Wave 2 Round 3b C2-joint ckpt-4 (2026-05-14): per-V walk
+                // for HashMap<string, string> (the canonical headers shape).
+                // Other V variants return empty (caller's contract is
+                // string headers; non-string Vs are a producer-side bug).
+                use shape_value::heap_value::HashMapKindedRef;
+                if let HashMapKindedRef::String(arc) = kref {
+                    let n = arc.len();
+                    let mut out = Vec::with_capacity(n);
+                    for i in 0..n {
+                        let key: String = unsafe {
+                            let ptr = shape_value::v2::typed_array::TypedArray::get_unchecked(
+                                arc.keys, i as u32,
+                            );
+                            shape_value::v2::string_obj::StringObj::as_str(ptr).to_owned()
+                        };
+                        let val: String = unsafe {
+                            let v_ptr: *const shape_value::v2::string_obj::StringObj =
+                                *(*arc.values).data.add(i);
+                            shape_value::v2::string_obj::StringObj::as_str(v_ptr).to_owned()
+                        };
+                        out.push((key, val));
+                    }
+                    return out;
+                }
                 return Vec::new();
             }
         }

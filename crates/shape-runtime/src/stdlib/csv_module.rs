@@ -336,19 +336,27 @@ pub fn create_csv_module() -> ModuleExports {
                 explicit_headers.iter().map(|s| (**s).clone()).collect()
             } else if let Some(first) = data.first() {
                 match &**first {
-                    HeapValue::HashMap(_kref) => {
-                        // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14):
-                        // payload flipped to `HashMapKindedRef`. The per-V
-                        // headers extraction (walk
-                        // `*mut TypedArray<*const StringObj>` keys → `&str`)
-                        // is ckpt-3 territory. SURFACE-AND-STOP at ckpt-2.
-                        return Err(
-                            "csv.stringify_records(): HashMap record \
-                             headers extraction is ckpt-3 territory \
-                             (per-V HashMapKindedRef dispatch not landed). \
-                             ADR-006 §2.7.24 Q25.B SUPERSEDED + audit §C.4."
-                                .to_string(),
-                        );
+                    HeapValue::HashMap(kref) => {
+                        // Wave 2 Round 3b C2-joint ckpt-4 (2026-05-14):
+                        // per-V walk of `*mut TypedArray<*const StringObj>`
+                        // keys. V-agnostic (keys are always string-typed).
+                        let keys_ptr = match kref {
+                            shape_value::heap_value::HashMapKindedRef::I64(arc) => arc.keys,
+                            shape_value::heap_value::HashMapKindedRef::F64(arc) => arc.keys,
+                            shape_value::heap_value::HashMapKindedRef::Bool(arc) => arc.keys,
+                            shape_value::heap_value::HashMapKindedRef::Char(arc) => arc.keys,
+                            shape_value::heap_value::HashMapKindedRef::String(arc) => arc.keys,
+                            shape_value::heap_value::HashMapKindedRef::Decimal(arc) => arc.keys,
+                            shape_value::heap_value::HashMapKindedRef::TypedObject(arc) => arc.keys,
+                            shape_value::heap_value::HashMapKindedRef::TraitObject(arc) => arc.keys,
+                        };
+                        let n = unsafe { shape_value::v2::typed_array::TypedArray::len(keys_ptr) as usize };
+                        (0..n)
+                            .map(|i| unsafe {
+                                let ptr = shape_value::v2::typed_array::TypedArray::get_unchecked(keys_ptr, i as u32);
+                                shape_value::v2::string_obj::StringObj::as_str(ptr).to_owned()
+                            })
+                            .collect()
                     }
                     HeapValue::TypedObject(s) => {
                         let schema = crate::type_schema::lookup_schema_by_id_public(
@@ -384,18 +392,36 @@ pub fn create_csv_module() -> ModuleExports {
 
             for record_arc in data.iter() {
                 let row: Vec<String> = match &**record_arc {
-                    HeapValue::HashMap(_kref) => {
-                        // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14):
-                        // payload flipped to `HashMapKindedRef`. The per-V
-                        // get(header) → cell extraction is ckpt-3 territory.
-                        // SURFACE-AND-STOP at ckpt-2.
-                        return Err(
-                            "csv.stringify_records(): HashMap record row \
-                             extraction is ckpt-3 territory (per-V \
-                             HashMapKindedRef dispatch not landed). \
-                             ADR-006 §2.7.24 Q25.B SUPERSEDED + audit §C.4."
-                                .to_string(),
-                        );
+                    HeapValue::HashMap(kref) => {
+                        // Wave 2 Round 3b C2-joint ckpt-4 (2026-05-14):
+                        // per-V get(header) → cell extraction. CSV records
+                        // are conventionally HashMap<string, string>
+                        // (V=String); other V variants surface as a
+                        // structured error.
+                        use shape_value::heap_value::HashMapKindedRef;
+                        match kref {
+                            HashMapKindedRef::String(arc) => headers
+                                .iter()
+                                .map(|h| {
+                                    arc.get_index(h.as_str())
+                                        .map(|idx| {
+                                            let ptr: *const shape_value::v2::string_obj::StringObj =
+                                                unsafe { *(*arc.values).data.add(idx) };
+                                            unsafe {
+                                                shape_value::v2::string_obj::StringObj::as_str(ptr).to_owned()
+                                            }
+                                        })
+                                        .unwrap_or_default()
+                                })
+                                .collect(),
+                            other => {
+                                return Err(format!(
+                                    "csv.stringify_records(): HashMap records must be \
+                                     HashMap<string, string>, got V={:?}",
+                                    other.values_kind()
+                                ));
+                            }
+                        }
                     }
                     HeapValue::TypedObject(storage) => {
                         let schema = crate::type_schema::lookup_schema_by_id_public(

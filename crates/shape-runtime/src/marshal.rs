@@ -641,22 +641,47 @@ impl FromSlot for Vec<(Arc<String>, Arc<String>)> {
             Arc::increment_strong_count(ptr);
             let arc_hv = Arc::from_raw(ptr);
             match &*arc_hv {
-                shape_value::HeapValue::HashMap(_kref) => {
-                    // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): payload
-                    // flipped to `HashMapKindedRef`. The per-V walk
-                    // (`HashMapKindedRef::String(arc) → arc.keys/values`)
-                    // is ckpt-3 territory. This `FromSlot<Vec<(Arc<String>,
-                    // Arc<String>)>>` marshal path is exercised by
-                    // `extension/marshal_string_string_map` extension
-                    // bodies; ckpt-3 cascade restores the full per-V walk
-                    // alongside hashmap_methods.rs. SURFACE at ckpt-2.
-                    panic!(
-                        "FromSlot<Vec<(Arc<String>, Arc<String>)>>: HashMap \
-                         marshal is ckpt-3 territory (per-V HashMapKindedRef \
-                         dispatch not landed). ADR-006 §2.7.24 Q25.B \
-                         SUPERSEDED + audit §C.4 — Round 3b C2-joint cascade \
-                         pending."
-                    );
+                shape_value::HeapValue::HashMap(kref) => {
+                    // Wave 2 Round 3b C2-joint ckpt-4 (2026-05-14): per-V
+                    // walk for HashMap<string, string> (V=String). Other V
+                    // variants panic — the marshal contract says caller
+                    // declared a string-valued map; non-string V is a
+                    // construction-side type error.
+                    use shape_value::heap_value::HashMapKindedRef;
+                    match kref {
+                        HashMapKindedRef::String(arc) => {
+                            let n = arc.len();
+                            let mut out: Vec<(Arc<String>, Arc<String>)> =
+                                Vec::with_capacity(n);
+                            for i in 0..n {
+                                let key = unsafe {
+                                    let ptr = shape_value::v2::typed_array::TypedArray::get_unchecked(
+                                        arc.keys, i as u32,
+                                    );
+                                    Arc::new(
+                                        shape_value::v2::string_obj::StringObj::as_str(ptr)
+                                            .to_owned(),
+                                    )
+                                };
+                                let val = unsafe {
+                                    let v_ptr: *const shape_value::v2::string_obj::StringObj =
+                                        *(*arc.values).data.add(i);
+                                    Arc::new(
+                                        shape_value::v2::string_obj::StringObj::as_str(v_ptr)
+                                            .to_owned(),
+                                    )
+                                };
+                                out.push((key, val));
+                            }
+                            out
+                        }
+                        other => panic!(
+                            "FromSlot<Vec<(Arc<String>, Arc<String>)>>: HashMap V \
+                             variant {:?} not supported — marshal contract requires \
+                             V=String. ADR-006 §2.7.24 Q25.B SUPERSEDED.",
+                            other.values_kind()
+                        ),
+                    }
                 }
                 other => panic!(
                     "FromSlot<Vec<(Arc<String>, Arc<String>)>>: slot bits decoded to \
@@ -688,18 +713,91 @@ impl FromSlot for Vec<(Arc<String>, Arc<shape_value::heap_value::HeapValue>)> {
             Arc::increment_strong_count(ptr);
             let arc_hv = Arc::from_raw(ptr);
             match &*arc_hv {
-                shape_value::HeapValue::HashMap(_kref) => {
-                    // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): payload
-                    // flipped to `HashMapKindedRef`. Per-V walk →
-                    // `Vec<(Arc<String>, Arc<HeapValue>)>` reconstruction
-                    // is ckpt-3 territory. SURFACE at ckpt-2. ADR-006
-                    // §2.7.24 Q25.B SUPERSEDED + audit §C.4.
-                    panic!(
-                        "FromSlot<Vec<(Arc<String>, Arc<HeapValue>)>>: HashMap \
-                         marshal is ckpt-3 territory (per-V HashMapKindedRef \
-                         dispatch not landed). ADR-006 §2.7.24 Q25.B \
-                         SUPERSEDED + audit §C.4."
-                    );
+                shape_value::HeapValue::HashMap(kref) => {
+                    // Wave 2 Round 3b C2-joint ckpt-4 (2026-05-14): per-V
+                    // walk → `Vec<(Arc<String>, Arc<HeapValue>)>` for the
+                    // polymorphic-valued marshal path. Each per-V slot
+                    // projects into the canonical `Arc<HeapValue>` arm.
+                    use shape_value::heap_value::{HashMapKindedRef, HeapValue};
+                    let n = kref.len();
+                    let mut out: Vec<(Arc<String>, Arc<HeapValue>)> = Vec::with_capacity(n);
+                    let keys_ptr = match kref {
+                        HashMapKindedRef::I64(arc) => arc.keys,
+                        HashMapKindedRef::F64(arc) => arc.keys,
+                        HashMapKindedRef::Bool(arc) => arc.keys,
+                        HashMapKindedRef::Char(arc) => arc.keys,
+                        HashMapKindedRef::String(arc) => arc.keys,
+                        HashMapKindedRef::Decimal(arc) => arc.keys,
+                        HashMapKindedRef::TypedObject(arc) => arc.keys,
+                        HashMapKindedRef::TraitObject(arc) => arc.keys,
+                    };
+                    for i in 0..n {
+                        let key = unsafe {
+                            let ptr = shape_value::v2::typed_array::TypedArray::get_unchecked(
+                                keys_ptr, i as u32,
+                            );
+                            Arc::new(
+                                shape_value::v2::string_obj::StringObj::as_str(ptr)
+                                    .to_owned(),
+                            )
+                        };
+                        let value: Arc<HeapValue> = match kref {
+                            HashMapKindedRef::I64(arc) => {
+                                let v: i64 = unsafe { *(*arc.values).data.add(i) };
+                                Arc::new(HeapValue::BigInt(Arc::new(v)))
+                            }
+                            HashMapKindedRef::F64(_) => {
+                                panic!(
+                                    "FromSlot<Vec<(Arc<String>, Arc<HeapValue>)>>: \
+                                     HashMap<string, number> has no canonical \
+                                     HeapValue arm (number is inline-scalar). \
+                                     Marshal contract violation."
+                                );
+                            }
+                            HashMapKindedRef::Bool(_) => {
+                                panic!(
+                                    "FromSlot<Vec<(Arc<String>, Arc<HeapValue>)>>: \
+                                     HashMap<string, bool> has no canonical \
+                                     HeapValue arm (bool is inline-scalar). \
+                                     Marshal contract violation."
+                                );
+                            }
+                            HashMapKindedRef::Char(arc) => {
+                                let v: char = unsafe { *(*arc.values).data.add(i) };
+                                Arc::new(HeapValue::Char(v))
+                            }
+                            HashMapKindedRef::String(arc) => {
+                                let ptr: *const shape_value::v2::string_obj::StringObj =
+                                    unsafe { *(*arc.values).data.add(i) };
+                                let s = unsafe {
+                                    shape_value::v2::string_obj::StringObj::as_str(ptr)
+                                        .to_owned()
+                                };
+                                Arc::new(HeapValue::String(Arc::new(s)))
+                            }
+                            HashMapKindedRef::Decimal(arc) => {
+                                let ptr: *const shape_value::v2::decimal_obj::DecimalObj =
+                                    unsafe { *(*arc.values).data.add(i) };
+                                let d = unsafe { (*ptr).value };
+                                Arc::new(HeapValue::Decimal(Arc::new(d)))
+                            }
+                            HashMapKindedRef::TypedObject(arc) => {
+                                let elem: &shape_value::heap_value::TypedObjectPtr =
+                                    unsafe { &*(*arc.values).data.add(i) };
+                                Arc::new(HeapValue::TypedObject(elem.clone()))
+                            }
+                            HashMapKindedRef::TraitObject(_) => {
+                                panic!(
+                                    "FromSlot<Vec<(Arc<String>, Arc<HeapValue>)>>: \
+                                     HashMap<string, TraitObject> marshal not yet \
+                                     wired (HeapValue::TraitObject arm exists but \
+                                     payload kind dispatch is its own cluster)."
+                                );
+                            }
+                        };
+                        out.push((key, value));
+                    }
+                    out
                 }
                 other => panic!(
                     "FromSlot<Vec<(Arc<String>, Arc<HeapValue>)>>: slot bits decoded to \

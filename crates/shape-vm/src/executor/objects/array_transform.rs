@@ -1942,18 +1942,23 @@ pub(crate) fn handle_group_by_v2(
         }
     }
 
-    // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): per-V HashMap
-    // construction is ckpt-3 territory. The Array.groupBy producer
-    // would need the new HashMapData<V> producer API (keys =
-    // `*mut TypedArray<*const StringObj>`, values per-V), then wrapped
-    // in HashMapKindedRef::String / etc. SURFACE-AND-STOP at ckpt-2.
-    // ADR-006 §2.7.24 Q25.B SUPERSEDED + audit §C.4.
+    // Wave 2 Round 3b C2-joint ckpt-4 (2026-05-14): the Array.groupBy
+    // result shape is HashMap<string, Array<T>>. The current
+    // HashMapKindedRef enum (audit §C.4 option (a.2)) has no Array-of-T
+    // value-V arm — its variants are I64 / F64 / Bool / Char / String /
+    // Decimal / TypedObject / TraitObject, all scalar or single-heap-
+    // pointer. Adding a per-T `HashMapKindedRef::TypedArray<T>` arm
+    // (or equivalently storing the inner Array as a TypedObject-wrapper
+    // V via the TypedObject arm) requires a non-trivial cluster — same
+    // structural blocker as HashMap.groupBy. SURFACE-AND-STOP per
+    // playbook §6 (no degraded synthetic carrier shape).
     let _ = (buckets, receiver_arc);
-    Err(VMError::RuntimeError(
-        "Array.groupBy(): HashMap producer is ckpt-3 territory (per-V \
-         HashMapData<V> construction not landed). ADR-006 §2.7.24 Q25.B \
-         SUPERSEDED."
-            .to_string(),
+    Err(VMError::NotImplemented(
+        "Array.groupBy(): result shape HashMap<string, Array<T>> requires a \
+         HashMap value-V arm for Array<T>, which is not landed in \
+         HashMapKindedRef. Surface-and-stop per playbook §6 (no degraded \
+         carrier). Tracked alongside hashmap-value-v-arm in the follow-up \
+         cluster.".into(),
     ))
 }
 

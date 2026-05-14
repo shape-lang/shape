@@ -95,19 +95,78 @@ pub fn heap_to_json_value(hv: &HeapValue) -> Result<JsonValue, String> {
         HeapValue::BigInt(n) => Ok(JsonValue::Int(**n)),
         HeapValue::Char(c) => Ok(JsonValue::String(c.to_string())),
         HeapValue::TypedArray(ta) => typed_array_to_json_value(&**ta),
-        HeapValue::HashMap(_kref) => {
-            // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): payload
-            // flipped to `HashMapKindedRef`. The per-V JSON entry walk
-            // (keys: `*mut TypedArray<*const StringObj>` → `&str`;
-            // values: `*mut TypedArray<V>` → `JsonValue` per V) is
-            // ckpt-3 territory (consumer cascade alongside printing.rs
-            // / xml.rs / csv_module.rs / wire_conversion.rs / marshal.rs).
-            // SURFACE-AND-STOP at ckpt-2 with the audit §C.4 cite.
-            Err("HeapValue::HashMap → JsonValue: ckpt-3 territory (per-V \
-                 HashMapKindedRef dispatch not landed). ADR-006 §2.7.24 \
-                 Q25.B SUPERSEDED + audit §C.4 — Round 3b C2-joint \
-                 cascade pending."
-                .to_string())
+        HeapValue::HashMap(kref) => {
+            // Wave 2 Round 3b C2-joint ckpt-4 (2026-05-14): per-V walk
+            // reading keys (`*mut TypedArray<*const StringObj>` → `&str`)
+            // and values (`*mut TypedArray<V>` → `JsonValue` per V).
+            // ADR-006 §2.7.24 Q25.B SUPERSEDED + audit §C.4.
+            use shape_value::heap_value::HashMapKindedRef;
+            let n = kref.len();
+            let mut out: Vec<(String, JsonValue)> = Vec::with_capacity(n);
+            // Read keys helper: walk `*mut TypedArray<*const StringObj>` for any V.
+            let keys_ptr = match kref {
+                HashMapKindedRef::I64(arc) => arc.keys,
+                HashMapKindedRef::F64(arc) => arc.keys,
+                HashMapKindedRef::Bool(arc) => arc.keys,
+                HashMapKindedRef::Char(arc) => arc.keys,
+                HashMapKindedRef::String(arc) => arc.keys,
+                HashMapKindedRef::Decimal(arc) => arc.keys,
+                HashMapKindedRef::TypedObject(arc) => arc.keys,
+                HashMapKindedRef::TraitObject(arc) => arc.keys,
+            };
+            for i in 0..n {
+                let key: String = unsafe {
+                    let ptr = shape_value::v2::typed_array::TypedArray::get_unchecked(
+                        keys_ptr, i as u32,
+                    );
+                    shape_value::v2::string_obj::StringObj::as_str(ptr).to_owned()
+                };
+                let value: JsonValue = match kref {
+                    HashMapKindedRef::I64(arc) => {
+                        let v: i64 = unsafe { *(*arc.values).data.add(i) };
+                        JsonValue::Int(v)
+                    }
+                    HashMapKindedRef::F64(arc) => {
+                        let v: f64 = unsafe { *(*arc.values).data.add(i) };
+                        JsonValue::Number(v)
+                    }
+                    HashMapKindedRef::Bool(arc) => {
+                        let v: u8 = unsafe { *(*arc.values).data.add(i) };
+                        JsonValue::Bool(v != 0)
+                    }
+                    HashMapKindedRef::Char(arc) => {
+                        let v: char = unsafe { *(*arc.values).data.add(i) };
+                        JsonValue::String(v.to_string())
+                    }
+                    HashMapKindedRef::String(arc) => {
+                        let ptr: *const shape_value::v2::string_obj::StringObj =
+                            unsafe { *(*arc.values).data.add(i) };
+                        JsonValue::String(unsafe {
+                            shape_value::v2::string_obj::StringObj::as_str(ptr).to_owned()
+                        })
+                    }
+                    HashMapKindedRef::Decimal(_) => {
+                        return Err("HeapValue::HashMap<string, decimal> → JsonValue: \
+                            decimal serialization policy not yet decided (precision \
+                            preservation vs lossy f64 cast). Surface-and-stop per \
+                            playbook §6."
+                            .to_string());
+                    }
+                    HashMapKindedRef::TypedObject(_) => {
+                        return Err("HeapValue::HashMap<string, TypedObject> → JsonValue: \
+                            nested TypedObject serialization requires the schema \
+                            walker which is its own cluster. Surface-and-stop."
+                            .to_string());
+                    }
+                    HashMapKindedRef::TraitObject(_) => {
+                        return Err("HeapValue::HashMap<string, TraitObject> → JsonValue: \
+                            no canonical JSON shape for TraitObject. Surface-and-stop."
+                            .to_string());
+                    }
+                };
+                out.push((key, value));
+            }
+            Ok(JsonValue::Object(out))
         }
 
         // Wave 13 W13-hashset-rebuild (ADR-006 §2.7.15 / Q16,

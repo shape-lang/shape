@@ -142,23 +142,30 @@ fn build_json_enum_heap_value(value: serde_json::Value, json_schema_id: u64) -> 
             (JSON_VARIANT_ARRAY, ValueSlot::from_typed_array(data), true)
         }
         serde_json::Value::Object(map) => {
-            // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): the JSON
-            // HashMap-object producer needs per-V `HashMapData<V>`
-            // construction (keys: `*mut TypedArray<*const StringObj>`,
-            // values: per-V `*mut TypedArray<V>`). Producer rebuild is
-            // ckpt-3 territory. At ckpt-2 we emit an empty
-            // `HashMapKindedRef::String` so the JSON parse path
-            // surfaces structurally (object recognised, content empty);
-            // ckpt-3 walks `map.into_iter()` and builds per-V buffers.
-            let _ = &map; // suppress unused; full walk lives at ckpt-3
-            let empty_kref = shape_value::heap_value::HashMapKindedRef::String(
-                Arc::new(shape_value::heap_value::HashMapData::<
-                    *const shape_value::v2::string_obj::StringObj,
-                >::new()),
-            );
+            // Wave 2 Round 3b C2-joint ckpt-4 (2026-05-14): build the
+            // JSON object as a `HashMap<string, TypedObject>` where each
+            // value is a nested Json-enum TypedObject. The result V is
+            // `TypedObject` (heterogeneous JSON values are flattened
+            // through the Json enum wrapper — one schema, every variant
+            // structurally captured). ADR-006 §2.7.24 Q25.B SUPERSEDED.
+            let mut data: shape_value::heap_value::HashMapData<
+                shape_value::heap_value::TypedObjectPtr,
+            > = shape_value::heap_value::HashMapData::new();
+            for (k, v) in map.into_iter() {
+                let nested = build_json_enum_heap_value(v, json_schema_id);
+                let to_ptr = match nested {
+                    HeapValue::TypedObject(p) => p,
+                    other => panic!(
+                        "build_json_enum_heap_value must return TypedObject, got {:?}",
+                        other.kind()
+                    ),
+                };
+                unsafe { data.insert(k.as_str(), to_ptr) };
+            }
+            let kref = shape_value::heap_value::HashMapKindedRef::TypedObject(Arc::new(data));
             (
                 JSON_VARIANT_OBJECT,
-                ValueSlot::from_hashmap(Arc::new(empty_kref)),
+                ValueSlot::from_hashmap(Arc::new(kref)),
                 true,
             )
         }
