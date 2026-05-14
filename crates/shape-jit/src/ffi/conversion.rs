@@ -372,6 +372,33 @@ fn registry_from_ctx(
     std::sync::Arc::clone(exec_ctx.type_schema_registry())
 }
 
+/// JIT-side sentinel filter for the kinded print FFI bodies.
+///
+/// Returns `true` when `bits` is the JIT's `TAG_NULL` / `TAG_NONE`
+/// sentinel (`is_none_tag` per `value_ffi.rs:417`). At the kinded print
+/// FFI boundary the parallel-kind track says the slot SHOULD carry a
+/// typed-Arc payload (`NativeKind::String` ↔ `Arc::into_raw(Arc<String>)`,
+/// `NativeKind::Ptr(HeapKind::TypedObject)` ↔
+/// `Arc::into_raw(Arc<TypedObjectStorage>)`, etc., per ADR-006 §2.7.5
+/// stamp-at-compile-time). When the bits instead match the JIT's null
+/// sentinel, the producer did not stamp a §2.7.5 typed-Arc carrier —
+/// constructing a `KindedSlot` with the carrier kind would route the
+/// sentinel through `format_kinded_inner`'s `Arc<T>` deref path
+/// (`printing.rs:163` for the String arm, the per-`HeapKind` arms in
+/// `format_heap_kind` for the heap-pointer kinds) and segfault.
+///
+/// This filter is the bounded mechanical realization of the §2.7.5
+/// producer-site discipline at the kinded print FFI boundary: the kind
+/// label says what the slot SHOULD carry; `is_none_tag` says what the
+/// bits ACTUALLY are; the filter early-returns only when bits-don't-
+/// match-kind-expectation. Used by every `jit_print_<heap_arm>` body
+/// (DRY discipline — single helper, no per-call-site bit-pattern
+/// duplication).
+#[inline]
+fn is_jit_null_sentinel(bits: u64) -> bool {
+    super::value_ffi::is_none_tag(bits)
+}
+
 /// Format `bits` as a `KindedSlot { kind, slot: ValueSlot::from_raw(bits) }`
 /// and write the rendered string + newline to stdout. The carrier is
 /// borrowed for the lifetime of the call (no refcount bump, no
@@ -380,11 +407,20 @@ fn registry_from_ctx(
 ///
 /// `kind` is implicit in the chosen FFI entry by construction. This is
 /// the inner helper shared by every `jit_print_<heap_arm>` body below.
+///
+/// W17-narrow-follow-up-B-β (Phase 3 cluster-0 Round 19, 2026-05-14):
+/// early-return "None" before constructing the `KindedSlot` when `bits`
+/// is the JIT `TAG_NULL` / `TAG_NONE` sentinel. See
+/// `is_jit_null_sentinel` for the §2.7.5/§2.7.7 discipline framing.
 fn print_kinded_inner(
     ctx_ptr: *const crate::context::JITContext,
     bits: u64,
     kind: shape_value::NativeKind,
 ) {
+    if is_jit_null_sentinel(bits) {
+        println!("None");
+        return;
+    }
     let registry = registry_from_ctx(ctx_ptr);
     let formatter = shape_vm::executor::printing::ValueFormatter::new(&registry);
     let slot = shape_value::ValueSlot::from_raw(bits);
