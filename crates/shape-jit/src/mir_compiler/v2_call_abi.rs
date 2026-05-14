@@ -121,6 +121,12 @@ pub fn slot_kind_to_clif_type(kind: NativeKind) -> types::Type {
         // --- boolean ---
         NativeKind::Bool => types::I8,
 
+        // Round 19 S1.5 W12-nativekind-scalar-additions (2026-05-14):
+        // ADR-006 §2.7.5 amendment — F32 ABI passes in XMM (F32 native
+        // type); Char ABI passes as I32 (codepoint bits).
+        NativeKind::Float32 => types::F32,
+        NativeKind::Char => types::I32,
+
         // --- pointer-sized typed slots (heap arms + String) ---
         NativeKind::String | NativeKind::Ptr(_) => types::I64,
     }

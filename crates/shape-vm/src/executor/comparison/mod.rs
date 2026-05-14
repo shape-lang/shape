@@ -406,6 +406,10 @@ fn kind_type_name(kind: NativeKind) -> &'static str {
     match kind {
         NativeKind::Bool => "bool",
         NativeKind::Float64 | NativeKind::NullableFloat64 => "number",
+        // Round 19 S1.5 W12-nativekind-scalar-additions (2026-05-14):
+        // ADR-006 §2.7.5 amendment adds F32 + Char as scalar variants.
+        NativeKind::Float32 => "f32",
+        NativeKind::Char => "char",
         NativeKind::Int8 | NativeKind::NullableInt8 => "i8",
         NativeKind::Int16 | NativeKind::NullableInt16 => "i16",
         NativeKind::Int32 | NativeKind::NullableInt32 => "i32",

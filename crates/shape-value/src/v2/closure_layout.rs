@@ -641,7 +641,16 @@ impl Drop for SharedCell {
                 | NativeKind::NullableIntSize
                 | NativeKind::UIntSize
                 | NativeKind::NullableUIntSize
-                | NativeKind::Bool => {}
+                | NativeKind::Bool
+                // Round 19 S1.5 W12-nativekind-scalar-additions
+                // (2026-05-14): Float32 + Char are inline 4-byte scalars
+                // per ADR-006 §2.7.5 amendment. A `SharedCell` whose
+                // `kind` companion is one of these stores raw f32 bit
+                // pattern / `c as u32` codepoint bits zero-extended into
+                // the low 32 bits of the 8-byte cell. No `Arc<T>`
+                // payload, no refcount work at cell drop.
+                | NativeKind::Float32
+                | NativeKind::Char => {}
             }
         }
     }
@@ -891,6 +900,12 @@ pub fn native_kind_from_concrete_type(ty: &ConcreteType) -> NativeKind {
         ConcreteType::Mutex(_) => NativeKind::Ptr(HeapKind::Mutex),
         ConcreteType::Atomic => NativeKind::Ptr(HeapKind::Atomic),
         ConcreteType::Lazy(_) => NativeKind::Ptr(HeapKind::Lazy),
+        // ── Round 19 S1.5 W12-nativekind-scalar-additions ──────────
+        // (2026-05-14) — ADR-006 §2.7.5 amendment adds F32 + Char as
+        // 4-byte scalar concrete types. Each maps to its matching
+        // scalar `NativeKind` variant per the §Q8 carrier-API bound.
+        ConcreteType::F32 => NativeKind::Float32,
+        ConcreteType::Char => NativeKind::Char,
         // `Void` captures are not a well-formed bytecode shape — a void
         // value has no bits to capture. Reaching this arm signals a
         // construction-side bug upstream. We refuse to map `Void` to a

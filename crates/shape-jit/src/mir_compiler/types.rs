@@ -93,6 +93,10 @@ pub(crate) fn elem_slot_kind_for_concrete(elem: &ConcreteType) -> Option<NativeK
         ConcreteType::U16 => Some(NativeKind::UInt16),
         ConcreteType::U8 => Some(NativeKind::UInt8),
         ConcreteType::Bool => Some(NativeKind::Bool),
+        // Round 19 S1.5 W12-nativekind-scalar-additions (2026-05-14):
+        // ADR-006 §2.7.5 amendment.
+        ConcreteType::F32 => Some(NativeKind::Float32),
+        ConcreteType::Char => Some(NativeKind::Char),
         _ => None,
     }
 }
@@ -187,6 +191,10 @@ pub(crate) fn native_kind_from_concrete_type(ct: &ConcreteType) -> Option<Native
         ConcreteType::Mutex(_) => NativeKind::Ptr(HeapKind::Mutex),
         ConcreteType::Atomic => NativeKind::Ptr(HeapKind::Atomic),
         ConcreteType::Lazy(_) => NativeKind::Ptr(HeapKind::Lazy),
+        // ── Round 19 S1.5 W12-nativekind-scalar-additions ──────────
+        // (2026-05-14) — ADR-006 §2.7.5 amendment.
+        ConcreteType::F32 => NativeKind::Float32,
+        ConcreteType::Char => NativeKind::Char,
         // Void has no carrier slot.
         ConcreteType::Void => return None,
     })

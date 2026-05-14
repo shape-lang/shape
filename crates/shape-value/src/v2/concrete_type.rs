@@ -37,6 +37,16 @@ pub struct FunctionTypeId(pub u32);
 pub enum ConcreteType {
     /// f64 — the default `number` type.
     F64,
+    /// f32 — 4-byte single-precision float. ADR-006 §2.7.5 amendment
+    /// (Round 19 S1.5, 2026-05-14): scalar concrete type introduced
+    /// alongside `NativeKind::Float32` for `Array<f32>` v2-raw
+    /// producer paths.
+    F32,
+    /// `char` — 4-byte Unicode scalar (UTF-32 subset of `u32`). ADR-006
+    /// §2.7.5 amendment (Round 19 S1.5, 2026-05-14): scalar concrete
+    /// type introduced alongside `NativeKind::Char` for `Array<char>`
+    /// v2-raw producer paths.
+    Char,
     /// i64 — the default `int` type (i48 in NaN-boxed representation).
     I64,
     /// i32
@@ -164,7 +174,12 @@ impl ConcreteType {
         match self {
             ConcreteType::I8 | ConcreteType::U8 | ConcreteType::Bool => 1,
             ConcreteType::I16 | ConcreteType::U16 => 2,
-            ConcreteType::I32 | ConcreteType::U32 => 4,
+            // Round 19 S1.5 (2026-05-14): F32 and Char are 4-byte
+            // scalars per the §2.7.5 amendment.
+            ConcreteType::I32
+            | ConcreteType::U32
+            | ConcreteType::F32
+            | ConcreteType::Char => 4,
             _ => 8, // f64, i64, u64, pointers, etc.
         }
     }
@@ -175,7 +190,12 @@ impl ConcreteType {
         match self {
             ConcreteType::I8 | ConcreteType::U8 | ConcreteType::Bool => 1,
             ConcreteType::I16 | ConcreteType::U16 => 2,
-            ConcreteType::I32 | ConcreteType::U32 => 4,
+            // Round 19 S1.5 (2026-05-14): F32 and Char are 4-byte
+            // scalars per the §2.7.5 amendment.
+            ConcreteType::I32
+            | ConcreteType::U32
+            | ConcreteType::F32
+            | ConcreteType::Char => 4,
             _ => 8,
         }
     }
@@ -186,6 +206,7 @@ impl ConcreteType {
         matches!(
             self,
             ConcreteType::F64
+                | ConcreteType::F32
                 | ConcreteType::I64
                 | ConcreteType::I32
                 | ConcreteType::I16
@@ -251,6 +272,7 @@ impl ConcreteType {
         matches!(
             self,
             ConcreteType::F64
+                | ConcreteType::F32
                 | ConcreteType::I64
                 | ConcreteType::I32
                 | ConcreteType::I16
@@ -260,6 +282,7 @@ impl ConcreteType {
                 | ConcreteType::U16
                 | ConcreteType::U8
                 | ConcreteType::Bool
+                | ConcreteType::Char
         )
     }
 
@@ -277,6 +300,17 @@ impl ConcreteType {
             ConcreteType::U16 => FieldKind::U16,
             ConcreteType::U8 => FieldKind::U8,
             ConcreteType::Bool => FieldKind::Bool,
+            // Round 19 S1.5 (2026-05-14): F32 and Char are 4-byte
+            // scalars per the §2.7.5 amendment. FieldKind has no
+            // dedicated F32 / Char variants, so the bit-equivalent
+            // 4-byte FieldKind::U32 is the struct-layout carrier (size
+            // + alignment + load/store width all match). Semantic
+            // float-vs-bits / codepoint-vs-bits distinction is preserved
+            // at the NativeKind layer, NOT the struct-layout layer.
+            // FieldKind cardinality extension is a follow-up sub-cluster
+            // (cluster-1 hardening) if struct-field-layout typing of F32
+            // / Char becomes load-bearing.
+            ConcreteType::F32 | ConcreteType::Char => FieldKind::U32,
             // All reference/heap types are pointer-sized
             _ => FieldKind::Ptr,
         }
@@ -287,6 +321,8 @@ impl ConcreteType {
     pub fn mono_key(&self) -> String {
         match self {
             ConcreteType::F64 => "f64".into(),
+            ConcreteType::F32 => "f32".into(),
+            ConcreteType::Char => "char".into(),
             ConcreteType::I64 => "i64".into(),
             ConcreteType::I32 => "i32".into(),
             ConcreteType::I16 => "i16".into(),
@@ -365,6 +401,12 @@ impl ConcreteType {
             ConcreteType::Mutex(_) => 29,
             ConcreteType::Atomic => 30,
             ConcreteType::Lazy(_) => 31,
+            // ── Round 19 S1.5 W12-nativekind-scalar-additions ──────────
+            // (2026-05-14) — ADR-006 §2.7.5 amendment adds F32 + Char
+            // as 4-byte scalar concrete types. Tags 32 and 33 allocated
+            // contiguously after the Round-11 collection/concurrency arms.
+            ConcreteType::F32 => 32,
+            ConcreteType::Char => 33,
         }
     }
 }
@@ -394,6 +436,8 @@ impl std::fmt::Display for ConcreteType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ConcreteType::F64 => write!(f, "number"),
+            ConcreteType::F32 => write!(f, "f32"),
+            ConcreteType::Char => write!(f, "char"),
             ConcreteType::I64 => write!(f, "int"),
             ConcreteType::I32 => write!(f, "i32"),
             ConcreteType::I16 => write!(f, "i16"),
@@ -504,10 +548,39 @@ mod tests {
             ConcreteType::Mutex(Box::new(ConcreteType::I64)),
             ConcreteType::Atomic,
             ConcreteType::Lazy(Box::new(ConcreteType::I64)),
+            // ── Round 19 S1.5 W12-nativekind-scalar-additions ─────────
+            ConcreteType::F32,
+            ConcreteType::Char,
         ];
         let tags: Vec<u8> = types.iter().map(|t| t.type_tag()).collect();
         let unique: std::collections::HashSet<u8> = tags.iter().copied().collect();
         assert_eq!(tags.len(), unique.len(), "type tags must be unique");
+    }
+
+    /// Round 19 S1.5 (2026-05-14): F32 + Char additions ride the same
+    /// scalar dispatch shape as the existing 4-byte scalars (I32 / U32).
+    #[test]
+    fn test_round_19_f32_char_scalars() {
+        assert_eq!(ConcreteType::F32.mono_key(), "f32");
+        assert_eq!(ConcreteType::Char.mono_key(), "char");
+        assert_eq!(format!("{}", ConcreteType::F32), "f32");
+        assert_eq!(format!("{}", ConcreteType::Char), "char");
+        // 4-byte alignment + field-size match I32 / U32.
+        assert_eq!(ConcreteType::F32.alignment(), 4);
+        assert_eq!(ConcreteType::F32.field_size(), 4);
+        assert_eq!(ConcreteType::Char.alignment(), 4);
+        assert_eq!(ConcreteType::Char.field_size(), 4);
+        // Both are scalar; F32 is numeric (float-family), Char is NOT
+        // numeric (UTF-32 codepoint, not a numeric type).
+        assert!(ConcreteType::F32.is_scalar());
+        assert!(ConcreteType::Char.is_scalar());
+        assert!(ConcreteType::F32.is_numeric());
+        assert!(!ConcreteType::Char.is_numeric());
+        assert!(!ConcreteType::F32.is_integer());
+        assert!(!ConcreteType::Char.is_integer());
+        // Neither is heap-allocated.
+        assert!(!ConcreteType::F32.is_heap());
+        assert!(!ConcreteType::Char.is_heap());
     }
 
     #[test]

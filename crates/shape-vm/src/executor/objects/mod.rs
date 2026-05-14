@@ -524,6 +524,19 @@ impl VirtualMachine {
             | NativeKind::NullableUIntSize => method_registry::NUMBER_METHODS.get(method_name).copied(),
             NativeKind::Bool => method_registry::BOOL_METHODS.get(method_name).copied(),
             NativeKind::String => method_registry::STRING_METHODS.get(method_name).copied(),
+            // Round 19 S1.5 W12-nativekind-scalar-additions (2026-05-14):
+            // ADR-006 §2.7.5 amendment adds F32 + Char as scalar variants.
+            // F32 receivers route to NUMBER_METHODS (same numeric method
+            // surface as F64). Char receivers route to CHAR_METHODS — the
+            // existing receiver registry already covers char methods
+            // (`.to_uppercase()`, `.is_alphabetic()`, etc.) and was wired
+            // for the `NativeKind::Ptr(HeapKind::Char)` carrier; the same
+            // method surface applies regardless of which Char carrier
+            // label flows through (both labels store the same codepoint
+            // bits and method bodies read via `as_char` which recognizes
+            // both labels per the §2.7.5 amendment).
+            NativeKind::Float32 => method_registry::NUMBER_METHODS.get(method_name).copied(),
+            NativeKind::Char => method_registry::CHAR_METHODS.get(method_name).copied(),
             // UInt64 may be a v2 typed-array pointer (raw `*mut
             // TypedArray<T>`, no Arc) or a plain unsigned integer.
             // Classify via the stamped element-type byte.

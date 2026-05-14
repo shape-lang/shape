@@ -858,6 +858,20 @@ pub fn slot_to_serializable(
         NativeKind::IntSize => Ok(SV::Int(bits as isize as i64)),
         NativeKind::UIntSize => Ok(SV::Int((bits as usize) as i64)),
         NativeKind::Float64 => Ok(SV::Number(f64::from_bits(bits))),
+        // Round 19 S1.5 W12-nativekind-scalar-additions (2026-05-14):
+        // ADR-006 §2.7.5 amendment adds F32 + Char as 4-byte scalar
+        // variants. Wire-format projection: F32 widens to `SV::Number`
+        // via `f64::from(f32)` (lossless); Char projects to `SV::Char`
+        // by recovering the codepoint from the low 32 bits.
+        NativeKind::Float32 => Ok(SV::Number(f64::from(f32::from_bits(bits as u32)))),
+        NativeKind::Char => match char::from_u32(bits as u32) {
+            Some(c) => Ok(SV::Char(c)),
+            None => Err(format!(
+                "slot_to_serializable: NativeKind::Char slot has invalid \
+                 codepoint bits 0x{:x} — construction-side contract violated",
+                bits,
+            )),
+        },
         NativeKind::Bool => Ok(SV::Bool(bits != 0)),
         NativeKind::NullableInt64
         | NativeKind::NullableInt32

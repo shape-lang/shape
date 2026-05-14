@@ -351,7 +351,15 @@ pub(crate) fn clone_with_kind(bits: u64, kind: NativeKind) {
             | NativeKind::NullableIntSize
             | NativeKind::UIntSize
             | NativeKind::NullableUIntSize
-            | NativeKind::Bool => {}
+            | NativeKind::Bool
+            // Round 19 S1.5 W12-nativekind-scalar-additions (2026-05-14):
+            // ADR-006 §2.7.5 amendment adds F32 + Char as 4-byte
+            // inline scalar variants. Slot bits store the raw f32
+            // bit pattern / `c as u32` codepoint bits zero-extended
+            // into the low 32 bits; no `Arc<T>` payload, no refcount
+            // work at clone-on-read / drop-on-write.
+            | NativeKind::Float32
+            | NativeKind::Char => {}
         }
     }
 }
@@ -632,7 +640,15 @@ pub(crate) fn drop_with_kind(bits: u64, kind: NativeKind) {
             | NativeKind::NullableIntSize
             | NativeKind::UIntSize
             | NativeKind::NullableUIntSize
-            | NativeKind::Bool => {}
+            | NativeKind::Bool
+            // Round 19 S1.5 W12-nativekind-scalar-additions (2026-05-14):
+            // ADR-006 §2.7.5 amendment adds F32 + Char as 4-byte
+            // inline scalar variants. Slot bits store the raw f32
+            // bit pattern / `c as u32` codepoint bits zero-extended
+            // into the low 32 bits; no `Arc<T>` payload, no refcount
+            // work at clone-on-read / drop-on-write.
+            | NativeKind::Float32
+            | NativeKind::Char => {}
         }
     }
 }

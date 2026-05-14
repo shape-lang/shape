@@ -85,6 +85,20 @@ impl KindedSlot {
         Self::new(ValueSlot::from_number(n), NativeKind::Float64)
     }
 
+    /// Convenience: a `Float32`-kind slot. ADR-006 §2.7.5 amendment
+    /// (Round 19 S1.5 W12-nativekind-scalar-additions, 2026-05-14).
+    /// `f32` is a 4-byte scalar; slot bits store the IEEE-754
+    /// single-precision pattern zero-extended into the low 32 bits of
+    /// the 8-byte slot (via `f32::to_bits` reinterpreted as `u64`).
+    /// Drop is a no-op (inline scalar, no `Arc<T>` payload).
+    #[inline]
+    pub fn from_f32(f: f32) -> Self {
+        Self::new(
+            ValueSlot::from_raw(f.to_bits() as u64),
+            NativeKind::Float32,
+        )
+    }
+
     /// Convenience: a `Bool`-kind slot.
     #[inline]
     pub fn from_bool(b: bool) -> Self {
@@ -330,16 +344,28 @@ impl KindedSlot {
         Self::new(ValueSlot::from_bigint(b), NativeKind::Ptr(HeapKind::BigInt))
     }
 
-    /// Convenience: a `Ptr(HeapKind::Char)`-kind slot. `Char` is an inline-
-    /// scalar payload tagged through `HeapKind` for dispatch uniformity
-    /// (no `Arc<T>`); construction shares the slot bits with the `char`
-    /// codepoint directly. Drop is a no-op (matched in `Drop` impl below
-    /// via the `Closure | Future | Char | NativeScalar` debug-assert arm
-    /// — `Char` slots never carry pointer bits, so the arm fires only on
-    /// construction-side bugs).
+    /// Convenience: a `Char`-kind slot. ADR-006 §2.7.5 amendment (Round
+    /// 19 S1.5 W12-nativekind-scalar-additions, 2026-05-14): Char joins
+    /// the scalar bucket — `char` is `Copy + 4-byte` (UTF-32 codepoint),
+    /// no Arc payload. Slot bits store `c as u32` zero-extended into
+    /// the low 32 bits of the 8-byte slot.
+    ///
+    /// Pre-amendment (Round 18 and earlier) this constructor returned
+    /// a slot with kind `NativeKind::Ptr(HeapKind::Char)` — the inline-
+    /// codepoint payload tagged through `HeapKind` for dispatch
+    /// uniformity. The post-amendment shape is a pure scalar variant
+    /// (`NativeKind::Char`), aligning Char with the other 4-byte
+    /// scalars (`Int32` / `UInt32` / `Float32`) per §Q8 carrier-API
+    /// bound (one constructor per scalar variant). The
+    /// `NativeKind::Ptr(HeapKind::Char)` label still exists in source
+    /// (direct `push_kinded(c as u64, NativeKind::Ptr(HeapKind::Char))`
+    /// call-sites have NOT been migrated in this dispatch — a future
+    /// cluster-1 hardening sub-cluster retires that parallel label).
+    /// Drop is a no-op (inline scalar; the `NativeKind::Char` arm in
+    /// `Drop` is part of the inline-scalar group).
     #[inline]
     pub fn from_char(c: char) -> Self {
-        Self::new(ValueSlot::from_char(c), NativeKind::Ptr(HeapKind::Char))
+        Self::new(ValueSlot::from_char(c), NativeKind::Char)
     }
 
     /// Convenience: a `Ptr(HeapKind::Matrix)`-kind slot. ADR-006 §2.7.22
@@ -468,15 +494,35 @@ impl KindedSlot {
         }
     }
 
-    /// Read as `char` if `self.kind == NativeKind::Ptr(HeapKind::Char)`,
-    /// else `None`. `Char` lives on the `HeapKind` arm of `NativeKind` (it
-    /// is an inline-bits payload tagged through `HeapKind` for dispatch
-    /// uniformity); the accessor still 1:1 maps to a single `NativeKind`
-    /// variant per the §2.7.6 bound.
+    /// Read as `char` if `self.kind == NativeKind::Char`, else `None`.
+    /// ADR-006 §2.7.5 amendment (Round 19 S1.5, 2026-05-14): the §Q8
+    /// carrier-API bound binds `as_char` to the new scalar
+    /// `NativeKind::Char` variant. The pre-amendment
+    /// `NativeKind::Ptr(HeapKind::Char)` carrier label is ALSO recognized
+    /// for cross-tier-compatibility — the label still exists in source
+    /// (direct `push_kinded(c as u64, NativeKind::Ptr(HeapKind::Char))`
+    /// call-sites have NOT been migrated in this dispatch); recognizing
+    /// both labels avoids producer/consumer mismatch when those call-
+    /// sites flow values through code paths that materialize as
+    /// `KindedSlot` before consuming `as_char`. Both labels store
+    /// codepoint bits zero-extended in the low 32 bits of the slot, so
+    /// the read is identical in either kind.
     #[inline]
     pub fn as_char(&self) -> Option<char> {
         match self.kind {
-            NativeKind::Ptr(HeapKind::Char) => self.slot.as_char(),
+            NativeKind::Char | NativeKind::Ptr(HeapKind::Char) => self.slot.as_char(),
+            _ => None,
+        }
+    }
+
+    /// Read as `f32` if `self.kind == NativeKind::Float32`, else `None`.
+    /// ADR-006 §2.7.5 amendment (Round 19 S1.5, 2026-05-14). Slot bits
+    /// store the IEEE-754 single-precision pattern zero-extended into
+    /// the low 32 bits; `f32::from_bits` reinterprets the low 32 bits.
+    #[inline]
+    pub fn as_f32(&self) -> Option<f32> {
+        match self.kind {
+            NativeKind::Float32 => Some(f32::from_bits(self.slot.raw() as u32)),
             _ => None,
         }
     }
@@ -821,7 +867,14 @@ impl Drop for KindedSlot {
                 | NativeKind::NullableIntSize
                 | NativeKind::UIntSize
                 | NativeKind::NullableUIntSize
-                | NativeKind::Bool => {}
+                | NativeKind::Bool
+                // Round 19 S1.5 W12-nativekind-scalar-additions
+                // (2026-05-14): Float32 + Char are inline 4-byte scalars
+                // per ADR-006 §2.7.5 amendment. No `Arc<T>` payload, no
+                // refcount work. Slot bits are the raw f32 bit pattern
+                // / `c as u32` zero-extended into the low 32 bits.
+                | NativeKind::Float32
+                | NativeKind::Char => {}
             }
         }
     }
@@ -1086,7 +1139,14 @@ impl Clone for KindedSlot {
                 | NativeKind::NullableIntSize
                 | NativeKind::UIntSize
                 | NativeKind::NullableUIntSize
-                | NativeKind::Bool => {}
+                | NativeKind::Bool
+                // Round 19 S1.5 W12-nativekind-scalar-additions
+                // (2026-05-14): Float32 + Char are inline 4-byte scalars
+                // per ADR-006 §2.7.5 amendment. No `Arc<T>` payload, no
+                // refcount work. Slot bits are the raw f32 bit pattern
+                // / `c as u32` zero-extended into the low 32 bits.
+                | NativeKind::Float32
+                | NativeKind::Char => {}
             }
         }
         Self {

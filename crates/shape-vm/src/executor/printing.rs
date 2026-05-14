@@ -150,6 +150,18 @@ impl<'a> ValueFormatter<'a> {
             NativeKind::Float64 | NativeKind::NullableFloat64 => {
                 format_number(slot.slot.as_f64())
             }
+            // Round 19 S1.5 W12-nativekind-scalar-additions (2026-05-14):
+            // ADR-006 §2.7.5 amendment adds F32 + Char as 4-byte scalar
+            // variants. F32 prints via `format_number(f64::from(f32))`
+            // (lossless widening, same numeric formatting as F64); Char
+            // prints its codepoint as a single character (mirror of the
+            // pre-amendment `HeapKind::Char` printing arm).
+            NativeKind::Float32 => format_number(f64::from(f32::from_bits(bits as u32))),
+            NativeKind::Char => match char::from_u32(bits as u32) {
+                Some(c) if quote_strings => format!("'{}'", c),
+                Some(c) => c.to_string(),
+                None => format!("<invalid-char:0x{:x}>", bits),
+            },
             // ── String (top-level NativeKind::String) ───────────────────
             NativeKind::String => {
                 if bits == 0 {

@@ -490,6 +490,98 @@ pointers, structs, enums) uses `KindedSlot`.** A new internal Rust
 API surface that mirrors a stable raw-bits ABI on the runtime side is
 acceptable and expected.
 
+##### §2.7.5 amendment (Round 19 S1.5 W12-nativekind-scalar-additions, 2026-05-14)
+
+Scalar `NativeKind` extended with `Float32` + `Char` variants for
+`Array<f32>` / `Array<char>` v2-raw producer paths. Both are `Copy`
+scalars (4 bytes each on supported targets); both fit the v2-raw
+`TypedArray<T>` flat-struct shape without Arc wrapping. `ConcreteType`
+extended in lockstep with `F32` + `Char` variants (mono-key `"f32"` /
+`"char"`, Display `"f32"` / `"char"`, type-tag 32 / 33 contiguous with
+the Round-11 collection/concurrency block). `KindedSlot` grows
+`from_f32` / `from_char` constructors per §2.7.6 / Q8 carrier-API-
+bound (one constructor per scalar variant; no per-heap-variant
+accessors) and matching scalar accessors `as_f32` / `as_char`. The
+`KindedSlot::as_char` accessor recognizes both the new
+`NativeKind::Char` scalar label and the pre-amendment
+`NativeKind::Ptr(HeapKind::Char)` carrier label (cross-tier
+compatibility while the existing `Ptr(HeapKind::Char)` arms in
+direct-`push_kinded` call-sites remain unmigrated; a future cluster-1
+hardening sub-cluster retires the `Ptr(HeapKind::Char)` label
+exhaustively).
+
+U64 v2-raw migration is explicitly NOT part of this amendment — that's
+the post-S5 relabel-to-existing-`Ptr(HeapKind::TypedArray)` per
+cluster-0-transition strategic-owner authorization (deletion-fate of
+the Arc-enum carrier resolves the UInt64 ambiguity naturally; the
+existing `NativeKind::Ptr(HeapKind::TypedArray)` becomes
+unambiguously "v2-raw pointer" with no Arc-enum to conflate post-S5).
+
+Forbidden under this amendment:
+
+- Parametric `NativeKind::Float32(precision)` / `NativeKind::Char(encoding)`
+  variants (per existing `Ptr(HeapKind)` docstring watchlist refusing
+  parametric NativeKind sum-type defection at `native_kind.rs`).
+- F32 / Char nullable siblings without exhaustive cascade. This
+  amendment lands F32 + Char as non-nullable scalars only;
+  `NullableFloat32` / `NullableChar` would require cascading all
+  `is_integer_family` / `is_floating_family` / `decode_*` / nullable-
+  scalar wire-format arms in lockstep, which is out of scope for this
+  dispatch.
+- Migrating the existing `NativeKind::Ptr(HeapKind::Char)` arms in the
+  30 cross-crate consumer files (`arithmetic`, `comparison`, `printing`,
+  `concat`, `typed_access`, `builtins`, `exceptions`, `comptime`, `snapshot`,
+  `wire_conversion`, etc.) to `NativeKind::Char` exhaustively — that
+  retirement is a follow-up sub-cluster (cluster-1 hardening). The
+  current cascade adds parallel `NativeKind::Char` arms only where
+  Rust pattern-match exhaustivity demands it (the
+  `NativeKind`-exhaustive matches in `vm_impl/stack.rs`, `printing.rs`,
+  `arithmetic`, `comparison`, `typed_access`, `objects/mod.rs`,
+  `objects/array_aggregation.rs`, `control_flow/mod.rs`,
+  `control_flow/jit_abi.rs`, `logical/mod.rs`, `compiler/helpers.rs`,
+  `compiler/monomorphization/substitution.rs`,
+  `closure_layout.rs::SharedCell::drop`, `kinded_slot.rs` Drop/Clone,
+  `runtime/snapshot.rs`, `runtime/wire_conversion.rs`, `jit/stack_kind_code.rs`,
+  `jit/call_method/mod.rs` 3 sites, `jit/mir_compiler/types.rs`,
+  `jit/mir_compiler/v2_field.rs` 2 sites, `jit/mir_compiler/v2_call_abi.rs`).
+
+The amendment shape is:
+
+- `NativeKind::Float32` / `NativeKind::Char` non-parametric scalar
+  variants (§2.7.5 stamp-at-compile-time; no payload, kind alone is
+  the dispatch label).
+- `ConcreteType::F32` / `ConcreteType::Char` non-parametric concrete
+  variants.
+- `KindedSlot::from_f32(f: f32) -> Self` constructor: slot bits =
+  `f.to_bits() as u64` (zero-extended into low 32 bits), kind =
+  `NativeKind::Float32`.
+- `KindedSlot::from_char(c: char) -> Self` constructor: slot bits =
+  `ValueSlot::from_char(c)` (`c as u64`, zero-extended into low 32
+  bits), kind = `NativeKind::Char` (was `NativeKind::Ptr(HeapKind::Char)`
+  pre-amendment).
+- `KindedSlot::as_f32(&self) -> Option<f32>` accessor: returns
+  `Some(f32::from_bits(self.slot.raw() as u32))` when
+  `self.kind == NativeKind::Float32`, else `None`.
+- `KindedSlot::as_char(&self) -> Option<char>` accessor: returns
+  `self.slot.as_char()` when `self.kind` matches `NativeKind::Char`
+  OR `NativeKind::Ptr(HeapKind::Char)` (both labels recognized for
+  cross-tier compatibility per the migration-bounded scope), else `None`.
+- Drop / Clone arms for `NativeKind::Float32` and `NativeKind::Char`:
+  no-op (inline scalar; no `Arc<T>` payload). Added to the inline-
+  scalar group in `KindedSlot::Drop`, `KindedSlot::Clone`,
+  `vm_impl/stack.rs::clone_with_kind`,
+  `vm_impl/stack.rs::drop_with_kind`, and
+  `v2/closure_layout.rs::SharedCell::drop`.
+
+§2.7.5.1 wire-format projection: `NativeKind::Float32` projects to
+`SerializableVMValue::Number(f64::from(f32))` and
+`WireValue::Number(f64::from(f32))` (lossless widening); `NativeKind::Char`
+projects to `SerializableVMValue::Char(char)` directly and
+`WireValue::String(c.to_string())` (single-codepoint string; `WireValue`
+has no dedicated `Char` variant). The wire-format arms preserve the
+§2.7.5.1 post-proof-shape rule (no `Option<NativeKind>` wrap, no
+`Unspecialized` placeholder).
+
 #### 2.7.5.1 Wire-format structs are post-proof shapes
 
 `FrameDescriptor` (`crates/shape-vm/src/type_tracking.rs`) is

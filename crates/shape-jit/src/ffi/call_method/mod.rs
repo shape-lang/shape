@@ -101,6 +101,13 @@ unsafe fn receiver_type_name(
         | NativeKind::NullableUIntSize => Some("number".to_string()),
         NativeKind::Bool => Some("bool".to_string()),
         NativeKind::String => Some("string".to_string()),
+        // Round 19 S1.5 W12-nativekind-scalar-additions (2026-05-14):
+        // ADR-006 §2.7.5 amendment adds F32 + Char as scalar variants.
+        // F32 receivers report as `"number"` (same fix-point as F64);
+        // Char receivers report as `"char"` (matches the existing
+        // `NativeKind::Ptr(HeapKind::Char)` arm below).
+        NativeKind::Float32 => Some("number".to_string()),
+        NativeKind::Char => Some("char".to_string()),
 
         // Typed heap pointer kinds — straight kind→name map per the
         // surviving HeapKind discriminants.
@@ -577,7 +584,13 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
             | NativeKind::NullableIntSize
             | NativeKind::UIntSize
             | NativeKind::NullableUIntSize
-            | NativeKind::Bool => true,
+            | NativeKind::Bool
+            // Round 19 S1.5 W12-nativekind-scalar-additions (2026-05-14):
+            // F32 receivers delegate to VM (NUMBER_METHODS); Char
+            // receivers delegate to VM (CHAR_METHODS — the existing
+            // receiver kind for char methods).
+            | NativeKind::Float32
+            | NativeKind::Char => true,
             // String: deliberately NOT delegated — JIT-format string
             // method registries (`call_string_method`) operate on
             // NaN-boxed JIT String carriers (`box_string` returns
@@ -829,7 +842,12 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
             | NativeKind::NullableIntSize
             | NativeKind::UIntSize
             | NativeKind::NullableUIntSize
-            | NativeKind::Bool => TAG_NULL,
+            | NativeKind::Bool
+            // Round 19 S1.5 W12-nativekind-scalar-additions (2026-05-14):
+            // F32 / Char already delegated to VM above; defensive
+            // TAG_NULL arm if they reach this fallthrough.
+            | NativeKind::Float32
+            | NativeKind::Char => TAG_NULL,
         };
 
         // User-defined method dispatch (UFCS — `"TypeName::method"`

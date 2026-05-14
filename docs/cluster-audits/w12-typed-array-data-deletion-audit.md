@@ -216,14 +216,40 @@ recipe shape per variant is fixed:
    `crates/shape-jit/src/ffi_symbols/v2_symbols.rs` get the
    per-kind FFI registrations.
 6. Per-kind ADR-006 §2.7.7 / Q9 stack-track entries — `UInt64`
-   carrier suffices for raw pointers (no new `NativeKind` arm).
+   carrier suffices for the array-pointer slot (no new `NativeKind`
+   arm). **Per-element kind**: I8/U8/I16/U16/I32/U32/I64/Bool/F64
+   ride existing `NativeKind` arms; **F32 and Char get new scalar
+   `NativeKind::Float32` / `NativeKind::Char` arms per ADR-006 §2.7.5
+   amendment (R19 S1.5 W12-nativekind-scalar-additions, 2026-05-14)**.
+   The element-kind dispatch (`should_use_typed_array_from_slot_kind`)
+   recognizes both new scalar variants alongside the existing ones;
+   U64 element-kind dispatch is the deferred S1.5-equivalent that
+   the R18 reopen excised (resolves naturally post-S5).
 
 **No new HeapKind variants** for these — `*mut TypedArray<T>` flat
 pointers ride the existing `NativeKind::UInt64` v2-raw carrier per
 the W12-Option-B-reframed audit §1.1 mapping. Refcount lives
-on-header per `v2_retain` / `v2_release`.
+on-header per `v2_retain` / `v2_release`. (F32 + Char additions in
+R19 S1.5 are `NativeKind`-only — no new `HeapKind` variants, no new
+`HeapValue` arms, no parametric `NativeKind::Float32(_)` /
+`NativeKind::Char(_)` shapes per the existing `Ptr(HeapKind)`
+docstring watchlist refusing parametric NativeKind sum types.)
 
 ### §2.2 Heap-element variants — 5 CLEAN + 2 STRUCTURAL-OBSTACLE
+
+> **Char-bucket clarification** (Round 19 S1.5 close, 2026-05-14): Char
+> belongs in §2.1 scalar bucket above, NOT in this §2.2 heap-element
+> bucket. The pre-R19 audit text grouped Char in the heap-element
+> bucket (with Decimal/BigInt/DateTime/Timespan/Duration/Instant)
+> alongside the audit §3.1 listing in the scalar bucket, creating a
+> bucket-classification ambiguity surfaced by R18 S1 reopen (status
+> doc §"Char audit bucket classification"). R19 S1.5 resolves the
+> ambiguity definitively: **Char is a `Copy + 4-byte` scalar with no
+> heap indirection** and rides `NativeKind::Char` post-R19 per
+> ADR-006 §2.7.5 amendment (alongside F32). The pre-R19 Char row at
+> line 238 of this §2.2 (reclassified-to-scalar note) is REMOVED in
+> this same R19 close commit — Char no longer appears in §2.2 in any
+> form.
 
 These variants store `Arc<HeapInner>` per element. `TypedArray<T>`
 already supports `T = *mut U` (pointer) for the
@@ -235,7 +261,6 @@ StringObj` etc. is the same pattern.
 |---|---|---|---|
 | `TypedArrayData::String(Arc<TypedBuffer<Arc<String>>>)` | `Arc<String>` | `TypedArray<*const StringObj>` where `StringObj` is the runtime-v2-spec.md §"String" 24-byte refcounted struct (`crates/shape-value/src/v2/string.rs` if it exists, OR a transcribed version of `runtime-v2-spec.md:142-151`). | **Clean** — but requires the v2-raw `StringObj` carrier to land first. **W12-jit-string-carrier-unification (R12 close)** has already migrated `MirConstant::Str` producer to a v2-raw form; that work's `StringObj`-equivalent struct is the migration target. Per-element retain/release uses `v2_retain` / `v2_release` on the `StringObj.header`. |
 | `TypedArrayData::Decimal(Arc<TypedBuffer<Arc<Decimal>>>)` | `Arc<rust_decimal::Decimal>` | `TypedArray<*const DecimalObj>` (v2-raw Decimal carrier — needs to land in parallel). | **Clean** — same shape as String. `rust_decimal::Decimal` is `Copy + 16-byte`; the v2-raw `DecimalObj` carrier is `HeapHeader + Decimal = 24 bytes` natural-aligned. |
-| `TypedArrayData::Char(Arc<TypedBuffer<char>>)` | `char` (Rust `char`, 4-byte) | `TypedArray<char>` | (Reclassified into §2.1 scalar bucket above — `char` is a `Copy` scalar with no heap indirection, listed here only because ADR-006 §2.7.24 Q25.A's drafted shape was `TypedBuffer<u32>`.) |
 | `TypedArrayData::BigInt(Arc<TypedBuffer<Arc<i64>>>)` | `Arc<i64>` | `TypedArray<*const BigIntObj>` (v2-raw BigInt carrier — does not exist yet). | **Clean** — but the existing payload `Arc<i64>` is a temporary placeholder (BigInt at landing is i64-only per the W14 / Wave 14 BigInt stubs), so this variant is **either** (a) a thin TypedArray<i64> wrapping while the BigInt full-width payload remains unimplemented, **or** (b) the bigint full-width migration lands in the same sub-cluster as this one. **Migrates clean** at the layer this audit operates on; the BigInt payload-width question is its own follow-up. |
 | `TypedArrayData::DateTime(Arc<TypedBuffer<Arc<TemporalData>>>)` | `Arc<TemporalData>` | `TypedArray<*const TemporalObj>` (v2-raw Temporal carrier — does not exist yet; would mirror `runtime-v2-spec.md:118-130` TypedStruct shape with `HeapHeader + TemporalData`). | **Clean** — recipe identical to String / Decimal. |
 | `TypedArrayData::Timespan(Arc<TypedBuffer<Arc<TemporalData>>>)` | `Arc<TemporalData>` | (same target as DateTime — `TemporalData` is the shared payload struct per `crates/shape-value/src/heap_value.rs`; the `TypedArrayData` variant tag is what distinguishes DateTime / Timespan / Duration on the read path). | **Clean** — but raises **obstacle O-1** (semantic-kind disambiguation): DateTime / Timespan / Duration all share the same `Arc<TemporalData>` payload but read as different user-facing types. In the enum-tagged carrier the variant tag carries the user-facing distinction; in `TypedArray<*const TemporalObj>` the distinction must live **on the element-type-tag byte** at the v2-raw header offset. See §4 obstacle O-1. |
@@ -395,6 +420,13 @@ the whole thing closes as one sub-cluster).
 BigInt / DateTime / Timespan / Duration / Instant) PLUS the
 String migration (which depends on the W12-jit-string-carrier-
 unification R12 close's `StringObj` carrier as precondition).
+
+> **Char NOT in S2 territory** (Round 19 S1.5 close, 2026-05-14): Char
+> belongs in §3.1 (scalar bucket) per the §2.2 Char-bucket
+> clarification note above. Char's `NativeKind::Char` scalar variant
+> landed in R19 S1.5 (`W12-nativekind-scalar-additions`) alongside
+> F32; the typed-array-of-char producer migration follows the §3.1
+> S1 scalar-recipe shape, not the §3.2 S2 heap-element recipe.
 
 **Per-variant work:** introduce a v2-raw `<X>Obj` carrier struct
 per element kind (`StringObj` already exists post-R12;
