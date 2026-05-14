@@ -142,17 +142,30 @@ fn build_json_enum_heap_value(value: serde_json::Value, json_schema_id: u64) -> 
             (JSON_VARIANT_ARRAY, ValueSlot::from_typed_array(data), true)
         }
         serde_json::Value::Object(map) => {
-            // Build a HashMap-shaped HeapValue (insertion order preserved).
-            let mut keys_vec: Vec<Arc<String>> = Vec::with_capacity(map.len());
-            let mut values_vec: Vec<Arc<HeapValue>> = Vec::with_capacity(map.len());
+            // Wave 2 Round 3b C2-joint ckpt-4 (2026-05-14): build the
+            // JSON object as a `HashMap<string, TypedObject>` where each
+            // value is a nested Json-enum TypedObject. The result V is
+            // `TypedObject` (heterogeneous JSON values are flattened
+            // through the Json enum wrapper — one schema, every variant
+            // structurally captured). ADR-006 §2.7.24 Q25.B SUPERSEDED.
+            let mut data: shape_value::heap_value::HashMapData<
+                shape_value::heap_value::TypedObjectPtr,
+            > = shape_value::heap_value::HashMapData::new();
             for (k, v) in map.into_iter() {
-                keys_vec.push(Arc::new(k));
-                values_vec.push(Arc::new(build_json_enum_heap_value(v, json_schema_id)));
+                let nested = build_json_enum_heap_value(v, json_schema_id);
+                let to_ptr = match nested {
+                    HeapValue::TypedObject(p) => p,
+                    other => panic!(
+                        "build_json_enum_heap_value must return TypedObject, got {:?}",
+                        other.kind()
+                    ),
+                };
+                unsafe { data.insert(k.as_str(), to_ptr) };
             }
-            let hm = shape_value::heap_value::HashMapData::from_pairs(keys_vec, values_vec);
+            let kref = shape_value::heap_value::HashMapKindedRef::TypedObject(Arc::new(data));
             (
                 JSON_VARIANT_OBJECT,
-                ValueSlot::from_hashmap(Arc::new(hm)),
+                ValueSlot::from_hashmap(Arc::new(kref)),
                 true,
             )
         }
@@ -283,7 +296,10 @@ fn heap_to_slot(hv: HeapValue) -> ValueSlot {
         HeapValue::TypedObject(ptr) => ValueSlot::from_typed_object_raw(ptr.into_raw()),
         HeapValue::String(arc) => ValueSlot::from_string_arc(arc),
         HeapValue::TypedArray(arc) => ValueSlot::from_typed_array(arc),
-        HeapValue::HashMap(arc) => ValueSlot::from_hashmap(arc),
+        // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): payload flipped to
+        // `HashMapKindedRef`; wrap in `Arc::new` for the slot's Arc-storage
+        // shape per ADR-006 §2.7.24 Q25.B SUPERSEDED.
+        HeapValue::HashMap(kref) => ValueSlot::from_hashmap(Arc::new(kref)),
         HeapValue::Decimal(arc) => ValueSlot::from_decimal(arc),
         HeapValue::BigInt(arc) => ValueSlot::from_bigint(arc),
         HeapValue::DataTable(arc) => ValueSlot::from_data_table(arc),

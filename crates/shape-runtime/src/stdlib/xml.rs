@@ -79,16 +79,20 @@ impl ElementData {
     /// schema is fixed-arity and the type is exhaustive — no Option
     /// indirection at the storage layer.
     fn into_typed_object_arc(self) -> Arc<HeapValue> {
-        let attrs_data = HashMapData::from_pairs(
-            self.attributes
-                .iter()
-                .map(|(k, _)| Arc::new(k.clone()))
-                .collect(),
-            self.attributes
-                .iter()
-                .map(|(_, v)| Arc::new(HeapValue::String(Arc::new(v.clone()))))
-                .collect(),
-        );
+        // Wave 2 Round 3b C2-joint ckpt-4 (2026-05-14): build the XML
+        // attributes HashMap via the per-V mutation API on
+        // `HashMapData<*const StringObj>` (V = string). Each (k, v) pair
+        // becomes one fresh StringObj insert; the wrapper carries one
+        // refcount share per element. ADR-006 §2.7.24 Q25.B SUPERSEDED.
+        let mut attrs_data: HashMapData<*const shape_value::v2::string_obj::StringObj> =
+            HashMapData::new();
+        for (k, v) in &self.attributes {
+            let v_obj = shape_value::v2::string_obj::StringObj::new(v.as_str())
+                as *const shape_value::v2::string_obj::StringObj;
+            unsafe { attrs_data.insert(k.as_str(), v_obj) };
+        }
+        let attrs_data: shape_value::heap_value::HashMapKindedRef =
+            shape_value::heap_value::HashMapKindedRef::String(Arc::new(attrs_data));
         // Recurse: each child becomes its own TypedObject.
         // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): variant payload
         // and `TypedArrayData::TypedObject` element type both flipped to
@@ -317,7 +321,7 @@ fn write_node_pairs(
     pairs: &[(Arc<String>, Arc<HeapValue>)],
 ) -> Result<(), String> {
     let mut name: Option<String> = None;
-    let mut attrs: Option<Arc<HashMapData>> = None;
+    let mut attrs: Option<shape_value::heap_value::HashMapKindedRef> = None;
     let mut children: Option<Arc<TypedArrayData>> = None;
     let mut text: Option<String> = None;
 
@@ -329,8 +333,11 @@ fn write_node_pairs(
                 }
             }
             "attributes" => {
-                if let HeapValue::HashMap(d) = &**v {
-                    attrs = Some(Arc::clone(d));
+                if let HeapValue::HashMap(kref) = &**v {
+                    // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14):
+                    // payload flipped to `HashMapKindedRef`; clone the
+                    // kinded ref directly (single Arc bump per variant).
+                    attrs = Some(kref.clone());
                 }
             }
             "children" => {
@@ -349,7 +356,7 @@ fn write_node_pairs(
         }
     }
 
-    write_xml_element(writer, name, attrs.as_deref(), children.as_deref(), text.as_deref())
+    write_xml_element(writer, name, attrs.as_ref(), children.as_deref(), text.as_deref())
 }
 
 /// Walk a child node — represented as an `Arc<TypedObjectStorage>` with
@@ -402,14 +409,24 @@ fn write_typed_object_node(
         // is untouched.
         owned
     };
-    let attrs_arc: Option<Arc<HashMapData>> = unsafe {
+    let attrs_kref: Option<shape_value::heap_value::HashMapKindedRef> = unsafe {
         let bits = attrs_slot.raw();
         if bits == 0 {
             None
         } else {
-            let arc_ptr = bits as *const HashMapData;
+            // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): the
+            // `ValueSlot::from_hashmap` shape stores
+            // `Arc::into_raw(Arc<HashMapKindedRef>)` per ADR-006
+            // §2.7.24 Q25.B SUPERSEDED. Bump and clone-out the
+            // kinded ref (single Arc share); the storage's share
+            // is untouched (`5-arm receiver-recovery` shape from
+            // `3ac2f11`).
+            let arc_ptr = bits as *const shape_value::heap_value::HashMapKindedRef;
             Arc::increment_strong_count(arc_ptr);
-            Some(Arc::from_raw(arc_ptr))
+            let arc = Arc::from_raw(arc_ptr);
+            let cloned = (*arc).clone();
+            // `arc` Drop here releases our bumped outer Arc share.
+            Some(cloned)
         }
     };
     let children_arc: Option<Arc<TypedArrayData>> = unsafe {
@@ -442,7 +459,7 @@ fn write_typed_object_node(
     write_xml_element(
         writer,
         Some(name),
-        attrs_arc.as_deref(),
+        attrs_kref.as_ref(),
         children_arc.as_deref(),
         text.as_deref(),
     )
@@ -455,7 +472,7 @@ fn write_typed_object_node(
 fn write_xml_element(
     writer: &mut Writer<Cursor<Vec<u8>>>,
     name: Option<String>,
-    attrs: Option<&HashMapData>,
+    attrs: Option<&shape_value::heap_value::HashMapKindedRef>,
     children: Option<&TypedArrayData>,
     text: Option<&str>,
 ) -> Result<(), String> {
@@ -464,12 +481,35 @@ fn write_xml_element(
     let mut elem = BytesStart::new(name.clone());
 
     if let Some(attrs) = attrs {
-        let n = attrs.keys.data.len();
-        for i in 0..n {
-            let ak = &attrs.keys.data[i];
-            let av = attrs.values.value_at(i);
-            if let HeapValue::String(av_s) = &*av {
-                elem.push_attribute((ak.as_str(), av_s.as_str()));
+        // Wave 2 Round 3b C2-joint ckpt-4 (2026-05-14): per-V walk —
+        // attributes are always `HashMap<string, string>` (V = String).
+        // Other V variants are a producer-side type error (xml.stringify
+        // declares the attribute slot type at the marshal boundary).
+        use shape_value::heap_value::HashMapKindedRef;
+        match attrs {
+            HashMapKindedRef::String(arc) => {
+                let n = arc.len();
+                for i in 0..n {
+                    let key: String = unsafe {
+                        let ptr = shape_value::v2::typed_array::TypedArray::get_unchecked(
+                            arc.keys, i as u32,
+                        );
+                        shape_value::v2::string_obj::StringObj::as_str(ptr).to_owned()
+                    };
+                    let val: String = unsafe {
+                        let v_ptr: *const shape_value::v2::string_obj::StringObj =
+                            *(*arc.values).data.add(i);
+                        shape_value::v2::string_obj::StringObj::as_str(v_ptr).to_owned()
+                    };
+                    elem.push_attribute((key.as_bytes(), val.as_bytes()));
+                }
+            }
+            other => {
+                return Err(format!(
+                    "xml.stringify(): attributes HashMap must be HashMap<string, string>, \
+                     got V={:?}",
+                    other.values_kind()
+                ));
             }
         }
     }

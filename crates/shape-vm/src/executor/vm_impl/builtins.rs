@@ -593,14 +593,24 @@ impl VirtualMachine {
                     self.push_kinded_slot(KindedSlot::from_result(res))?;
                 }
                 BuiltinFunction::HashMapCtor => {
-                    // Wave 5e W13-hashmap-ctor (2026-05-10): `let m = HashMap()`
-                    // produces a fresh empty `Arc<HashMapData>` slot.
-                    // Reader contract: kind == Ptr(HeapKind::HashMap),
-                    // bits = Arc::into_raw::<HashMapData>.
+                    // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): per
+                    // ADR-006 §2.7.24 Q25.B SUPERSEDED, `let m = HashMap()`
+                    // produces a fresh empty `Arc<HashMapKindedRef>` slot.
+                    // Default empty variant chosen is `String` (the typical
+                    // initial element type in user code; the variant tag
+                    // gets specialized on first insert via clone-on-write
+                    // — ckpt-3 mutation-API rebuild). Reader contract: kind
+                    // == Ptr(HeapKind::HashMap), bits =
+                    // Arc::into_raw::<HashMapKindedRef>.
                     let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
-                    let hm = std::sync::Arc::new(
-                        shape_value::heap_value::HashMapData::new(),
+                    let empty_kref = shape_value::heap_value::HashMapKindedRef::String(
+                        std::sync::Arc::new(
+                            shape_value::heap_value::HashMapData::<
+                                *const shape_value::v2::string_obj::StringObj,
+                            >::new(),
+                        ),
                     );
+                    let hm = std::sync::Arc::new(empty_kref);
                     self.push_kinded_slot(KindedSlot::from_hashmap(hm))?;
                 }
                 BuiltinFunction::SetCtor => {

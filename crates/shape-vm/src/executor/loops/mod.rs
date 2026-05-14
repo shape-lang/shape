@@ -50,7 +50,7 @@ use crate::{
 use crate::executor::vm_impl::stack::drop_with_kind;
 use shape_value::datatable::DataTable;
 use shape_value::heap_value::{
-    HashMapData, HeapKind, TableViewData, TypedArrayData,
+    HashMapKindedRef, HeapKind, TableViewData, TypedArrayData,
 };
 use shape_value::{NativeKind, VMError};
 use std::sync::Arc;
@@ -288,11 +288,14 @@ impl VirtualMachine {
                 result
             }
             NativeKind::Ptr(HeapKind::HashMap) => {
-                // SAFETY: per `KindedSlot::from_hashmap` contract, slot
-                // bits are `Arc::into_raw(Arc<HashMapData>)`.
-                let arc =
-                    unsafe { Arc::<HashMapData>::from_raw(iter_bits as *const HashMapData) };
-                let len = arc.keys.len();
+                // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): bits are
+                // `Arc::into_raw(Arc<HashMapKindedRef>)` per ADR-006 §2.7.24
+                // Q25.B SUPERSEDED. Recover the outer Arc, read len() via
+                // the kinded ref's per-V len() accessor, restore.
+                let arc = unsafe {
+                    Arc::<HashMapKindedRef>::from_raw(iter_bits as *const HashMapKindedRef)
+                };
+                let len = arc.len();
                 let _ = Arc::into_raw(arc);
                 Ok(idx < 0 || idx as usize >= len)
             }

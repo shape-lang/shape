@@ -53,7 +53,7 @@ use crate::executor::VirtualMachine;
 use crate::executor::vm_impl::stack::{clone_with_kind, drop_with_kind};
 use shape_value::{
     NativeKind, VMError,
-    heap_value::{HashMapData, HeapKind, TypedArrayData},
+    heap_value::{HashMapKindedRef, HeapKind, TypedArrayData},
 };
 use std::sync::Arc;
 
@@ -767,10 +767,12 @@ impl VirtualMachine {
                         "length() on null HashMap".to_string(),
                     ))
                 } else {
-                    // SAFETY: kind says `Ptr(HeapKind::HashMap)`; bits are
-                    // `Arc::into_raw::<HashMapData>`. Transient borrow.
-                    let map: Arc<HashMapData> =
-                        unsafe { Arc::from_raw(bits as *const HashMapData) };
+                    // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): bits are
+                    // `Arc::into_raw(Arc<HashMapKindedRef>)`. Transient
+                    // borrow to read `len()` via the kinded ref accessor.
+                    let map: Arc<HashMapKindedRef> = unsafe {
+                        Arc::from_raw(bits as *const HashMapKindedRef)
+                    };
                     let len = map.len() as i64;
                     let _ = Arc::into_raw(map);
                     self.push_kinded(len as u64, NativeKind::Int64)

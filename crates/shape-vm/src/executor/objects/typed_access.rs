@@ -89,14 +89,18 @@ impl VirtualMachine {
         }
     }
 
-    /// Borrow the receiver slot at `slot_idx` as `&HeapValue`, requiring kind
-    /// == `Ptr(HeapKind::HashMap)`. Returns `&HashMapData` borrowed from the
-    /// slot (the slot retains its share — no refcount change).
+    /// Borrow the receiver slot at `slot_idx` as `&HashMapKindedRef`,
+    /// requiring kind == `Ptr(HeapKind::HashMap)`. Returns the borrowed
+    /// kinded ref (the slot retains its share — no refcount change).
+    ///
+    /// **Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14):** signature flipped
+    /// from `&HashMapData` to `&HashMapKindedRef` per ADR-006 §2.7.24
+    /// Q25.B SUPERSEDED.
     #[inline]
     fn borrow_hashmap_slot(
         &self,
         slot_idx: u16,
-    ) -> Result<&shape_value::heap_value::HashMapData, VMError> {
+    ) -> Result<&shape_value::heap_value::HashMapKindedRef, VMError> {
         let bp = self.current_locals_base();
         let (bits, kind) = self.stack_read_kinded_raw(bp + slot_idx as usize);
         match kind {
@@ -107,9 +111,11 @@ impl VirtualMachine {
                         got: "null",
                     });
                 }
-                // SAFETY: kind == Ptr(HashMap) means bits = `Arc::into_raw::<HashMapData>`
-                // and the slot owns one strong share. Borrow through the live Arc.
-                let arc_ptr = bits as *const shape_value::heap_value::HashMapData;
+                // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): bits are
+                // `Arc::into_raw(Arc<HashMapKindedRef>)`. SAFETY: slot
+                // owns one outer Arc share — borrow through the live
+                // outer Arc's payload.
+                let arc_ptr = bits as *const shape_value::heap_value::HashMapKindedRef;
                 Ok(unsafe { &*arc_ptr })
             }
             _ => Err(VMError::TypeError {
@@ -148,54 +154,55 @@ impl VirtualMachine {
 
     /// MapGetStrI64: get value from HashMap<string, int>. Key on stack, map in local slot.
     /// Pushes the value (int) or none if key not found.
+    ///
+    /// Wave 2 Round 3b C2-joint ckpt-4 (2026-05-14): per-V dispatch.
+    /// Receiver MUST be HashMapKindedRef::I64; mismatched V surfaces as a
+    /// TypeError per playbook §6 (no fallback coercion). On miss, pushes
+    /// `0i64` (the typed default for HashMap<string, int> per the typed
+    /// fast-path's "no Option indirection at storage layer" invariant).
     fn op_map_get_str_i64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let slot_idx = Self::extract_local_slot(instruction)?;
 
-        // Pop the string key, look it up by string-borrowed slice.
-        let lookup = self.pop_string_key(|key_str| {
-            // Re-fetch the map borrow inside the closure — borrow_hashmap_slot
-            // takes &self and the closure runs after pop_kinded mutated the
-            // stack, so re-borrow here.
-            // (We can't borrow `&self` outside and call `pop_string_key` with
-            // `&mut self` simultaneously.)
-            key_str.to_owned()
-        })??;
+        let lookup = self.pop_string_key(|key_str| key_str.to_owned())??;
 
         let map = self.borrow_hashmap_slot(slot_idx)?;
-        match map.get(&lookup) {
-            // SURFACE: ADR-006 §2.7.4 — the v2 HashMapData stores values as
-            // `Arc<HeapValue>` (polymorphic). Pulling a typed `i64` out of an
-            // `Arc<HeapValue>` requires the storage protocol to specialize
-            // homogeneous-int maps to a `TypedBuffer<i64>` shape (cluster
-            // E-builtins-backlog / Wave 5b). Until that lands, the typed-Get
-            // fast path cannot satisfy the opcode contract.
-            Some(_value_arc) => Err(VMError::NotImplemented(
-                "MapGetStrI64: phase-2c — Arc<HeapValue> → typed i64 extraction \
-                 awaits homogeneous-typed HashMap storage. See ADR-006 §2.7.4."
-                    .into(),
-            )),
-            None => self.push_kinded(Self::NONE_BITS, NativeKind::Bool),
-        }
+        let value: i64 = match map {
+            shape_value::heap_value::HashMapKindedRef::I64(arc) => {
+                arc.get_share(&lookup).unwrap_or(0)
+            }
+            other => {
+                return Err(VMError::TypeError {
+                    expected: "HashMap<string, int>",
+                    got: hashmap_v_kind_name(other),
+                })
+            }
+        };
+        self.push_kinded(value as u64, NativeKind::Int64)
     }
 
     /// MapGetStrF64: get value from HashMap<string, float>. Key on stack, map in local slot.
     /// Pushes the value (float) or none if key not found.
+    ///
+    /// Wave 2 Round 3b C2-joint ckpt-4 (2026-05-14): per-V dispatch. Mirror
+    /// of `op_map_get_str_i64`. On miss returns 0.0.
     fn op_map_get_str_f64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let slot_idx = Self::extract_local_slot(instruction)?;
 
         let lookup = self.pop_string_key(|key_str| key_str.to_owned())??;
 
         let map = self.borrow_hashmap_slot(slot_idx)?;
-        match map.get(&lookup) {
-            // SURFACE: same shape as MapGetStrI64 — Arc<HeapValue> values
-            // need a typed-extraction path. Phase-2c.
-            Some(_value_arc) => Err(VMError::NotImplemented(
-                "MapGetStrF64: phase-2c — Arc<HeapValue> → typed f64 extraction \
-                 awaits homogeneous-typed HashMap storage. See ADR-006 §2.7.4."
-                    .into(),
-            )),
-            None => self.push_kinded(Self::NONE_BITS, NativeKind::Bool),
-        }
+        let value: f64 = match map {
+            shape_value::heap_value::HashMapKindedRef::F64(arc) => {
+                arc.get_share(&lookup).unwrap_or(0.0)
+            }
+            other => {
+                return Err(VMError::TypeError {
+                    expected: "HashMap<string, number>",
+                    got: hashmap_v_kind_name(other),
+                })
+            }
+        };
+        self.push_kinded(value.to_bits(), NativeKind::Float64)
     }
 
     /// MapSetStrI64: set value in HashMap<string, int>. Key and value on stack, map in local slot.
@@ -595,6 +602,24 @@ fn kind_type_name(kind: NativeKind) -> &'static str {
 // Suppress dead-import warning when no test arms use `HeapValue` directly.
 #[allow(dead_code)]
 fn _heap_value_marker(_: &HeapValue) {}
+
+/// Static name for a `HashMapKindedRef` variant (the V discriminator) for
+/// use in `VMError::TypeError`. Wave 2 Round 3b C2-joint ckpt-4
+/// (2026-05-14). ADR-006 §2.7.24 Q25.B SUPERSEDED + audit §C.4.
+#[inline]
+fn hashmap_v_kind_name(kref: &shape_value::heap_value::HashMapKindedRef) -> &'static str {
+    use shape_value::heap_value::HashMapKindedRef;
+    match kref {
+        HashMapKindedRef::I64(_) => "HashMap<string, int>",
+        HashMapKindedRef::F64(_) => "HashMap<string, number>",
+        HashMapKindedRef::Bool(_) => "HashMap<string, bool>",
+        HashMapKindedRef::Char(_) => "HashMap<string, char>",
+        HashMapKindedRef::String(_) => "HashMap<string, string>",
+        HashMapKindedRef::Decimal(_) => "HashMap<string, decimal>",
+        HashMapKindedRef::TypedObject(_) => "HashMap<string, TypedObject>",
+        HashMapKindedRef::TraitObject(_) => "HashMap<string, TraitObject>",
+    }
+}
 
 #[cfg(test)]
 mod tests {

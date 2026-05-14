@@ -143,8 +143,11 @@ impl VirtualMachine {
                                 );
                             }
                             NativeKind::Ptr(HeapKind::HashMap) => {
+                                // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14):
+                                // bits are `Arc::into_raw(Arc<HashMapKindedRef>)`
+                                // per ADR-006 §2.7.24 Q25.B SUPERSEDED.
                                 Arc::increment_strong_count(
-                                    bits as *const shape_value::heap_value::HashMapData,
+                                    bits as *const shape_value::heap_value::HashMapKindedRef,
                                 );
                             }
                             NativeKind::Ptr(HeapKind::Decimal) => {

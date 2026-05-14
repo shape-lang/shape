@@ -40,7 +40,7 @@
 //! matrix is unchanged.
 
 use shape_value::heap_value::{
-    AtomicData, ChannelData, DequeData, HashMapData, HashSetData, LazyData,
+    AtomicData, ChannelData, DequeData, HashSetData, LazyData,
     MutexData, PriorityQueueData,
 };
 use shape_value::kinded_slot::KindedSlot;
@@ -68,12 +68,19 @@ pub extern "C" fn jit_v2_make_hashset() -> u64 {
     Arc::into_raw(Arc::new(data)) as u64
 }
 
-/// Allocate an empty `Arc<HashMapData>`. Same shape as
-/// `jit_v2_make_hashset`.
+/// Allocate an empty `Arc<HashMapKindedRef>`. Same shape as
+/// `jit_v2_make_hashset` but per ADR-006 §2.7.24 Q25.B SUPERSEDED the
+/// HashMap variant carrier is `HashMapKindedRef` (per-V enum). Default
+/// variant chosen is `String` (typical initial element type); the
+/// variant tag specializes on first insert via clone-on-write
+/// (ckpt-3 mutation-API rebuild).
 #[unsafe(no_mangle)]
 pub extern "C" fn jit_v2_make_hashmap() -> u64 {
-    let data = HashMapData::default();
-    Arc::into_raw(Arc::new(data)) as u64
+    use shape_value::heap_value::{HashMapData, HashMapKindedRef};
+    let inner: Arc<HashMapData<*const shape_value::v2::string_obj::StringObj>> =
+        Arc::new(HashMapData::new());
+    let kref = HashMapKindedRef::String(inner);
+    Arc::into_raw(Arc::new(kref)) as u64
 }
 
 /// Allocate an empty `Arc<DequeData>`. Same shape as
@@ -238,27 +245,39 @@ pub extern "C" fn jit_arc_hashset_release(bits: u64) {
     }
 }
 
-/// Retain (clone) an `Arc<HashMapData>` strong-count share. Mirror of
-/// `jit_arc_hashset_retain`.
+/// Retain (clone) an `Arc<HashMapKindedRef>` strong-count share. Mirror
+/// of `jit_arc_hashset_retain`.
+///
+/// **Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14):** bits flipped from
+/// `Arc::into_raw(Arc<HashMapData>)` to `Arc::into_raw(Arc<HashMapKindedRef>)`
+/// per ADR-006 §2.7.24 Q25.B SUPERSEDED. The outer Arc retains the
+/// per-V structural sharing; refcount-0 of outer Arc runs the enum
+/// Drop which chains to per-V `Arc<HashMapData<V>>` release.
 #[unsafe(no_mangle)]
 pub extern "C" fn jit_arc_hashmap_retain(bits: u64) {
     if bits == 0 {
         return;
     }
     unsafe {
-        Arc::increment_strong_count(bits as *const HashMapData);
+        Arc::increment_strong_count(
+            bits as *const shape_value::heap_value::HashMapKindedRef,
+        );
     }
 }
 
-/// Release an `Arc<HashMapData>` strong-count share. Reaching refcount
-/// zero runs `HashMapData::Drop`.
+/// Release an `Arc<HashMapKindedRef>` strong-count share. Reaching
+/// refcount zero runs `HashMapKindedRef::Drop` → per-V
+/// `Arc<HashMapData<V>>::Drop` → `HashMapData<V>::Drop` (retires
+/// keys/values v2-raw shares via the `HashMapValueElem` dispatcher).
 #[unsafe(no_mangle)]
 pub extern "C" fn jit_arc_hashmap_release(bits: u64) {
     if bits == 0 {
         return;
     }
     unsafe {
-        Arc::decrement_strong_count(bits as *const HashMapData);
+        Arc::decrement_strong_count(
+            bits as *const shape_value::heap_value::HashMapKindedRef,
+        );
     }
 }
 
@@ -464,8 +483,11 @@ mod tests {
         let bits = jit_v2_make_hashmap();
         assert_ne!(bits, 0);
         unsafe {
-            assert_eq!(observe_strong_count::<HashMapData>(bits), 1);
-            drop_arc::<HashMapData>(bits);
+            // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): bits now
+            // point to Arc<HashMapKindedRef> per ADR-006 §2.7.24 Q25.B
+            // SUPERSEDED.
+            assert_eq!(observe_strong_count::<shape_value::heap_value::HashMapKindedRef>(bits), 1);
+            drop_arc::<shape_value::heap_value::HashMapKindedRef>(bits);
         }
     }
 
@@ -577,12 +599,15 @@ mod tests {
     #[test]
     fn hashmap_retain_bumps_refcount() {
         let bits = jit_v2_make_hashmap();
+        // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): bits point to
+        // Arc<HashMapKindedRef> per Q25.B SUPERSEDED.
+        type HM = shape_value::heap_value::HashMapKindedRef;
         unsafe {
-            assert_eq!(observe_strong_count::<HashMapData>(bits), 1);
+            assert_eq!(observe_strong_count::<HM>(bits), 1);
             jit_arc_hashmap_retain(bits);
-            assert_eq!(observe_strong_count::<HashMapData>(bits), 2);
-            drop_arc::<HashMapData>(bits);
-            drop_arc::<HashMapData>(bits);
+            assert_eq!(observe_strong_count::<HM>(bits), 2);
+            drop_arc::<HM>(bits);
+            drop_arc::<HM>(bits);
         }
     }
 
@@ -680,12 +705,15 @@ mod tests {
     #[test]
     fn hashmap_release_decrements_without_dealloc() {
         let bits = jit_v2_make_hashmap();
+        // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): bits point to
+        // Arc<HashMapKindedRef> per Q25.B SUPERSEDED.
+        type HM = shape_value::heap_value::HashMapKindedRef;
         unsafe {
             jit_arc_hashmap_retain(bits);
-            assert_eq!(observe_strong_count::<HashMapData>(bits), 2);
+            assert_eq!(observe_strong_count::<HM>(bits), 2);
             jit_arc_hashmap_release(bits);
-            assert_eq!(observe_strong_count::<HashMapData>(bits), 1);
-            drop_arc::<HashMapData>(bits);
+            assert_eq!(observe_strong_count::<HM>(bits), 1);
+            drop_arc::<HM>(bits);
         }
     }
 

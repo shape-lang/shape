@@ -38,7 +38,7 @@
 use shape_runtime::context::ExecutionContext;
 use crate::executor::VirtualMachine;
 use shape_value::aligned_vec::AlignedVec;
-use shape_value::heap_value::{HashMapData, HeapKind, HeapValue, TypedArrayData};
+use shape_value::heap_value::{HeapKind, HeapValue, TypedArrayData};
 use shape_value::typed_buffer::{AlignedTypedBuffer, TypedBuffer};
 use shape_value::{KindedSlot, NativeKind, VMError};
 use std::sync::Arc;
@@ -1942,18 +1942,24 @@ pub(crate) fn handle_group_by_v2(
         }
     }
 
-    // Materialize each bucket as a same-variant Arc<TypedArrayData>,
-    // wrap in HeapValue::TypedArray, and compose into a HashMapData
-    // via `from_pairs`.
-    let mut keys: Vec<Arc<String>> = Vec::with_capacity(buckets.len());
-    let mut values: Vec<Arc<HeapValue>> = Vec::with_capacity(buckets.len());
-    for (key, indices) in buckets {
-        let bucket_arr = project_indices(&receiver_arc, &indices)?;
-        keys.push(Arc::new(key));
-        values.push(Arc::new(HeapValue::TypedArray(bucket_arr)));
-    }
-    let map = HashMapData::from_pairs(keys, values);
-    Ok(KindedSlot::from_hashmap(Arc::new(map)))
+    // Wave 2 Round 3b C2-joint ckpt-4 (2026-05-14): the Array.groupBy
+    // result shape is HashMap<string, Array<T>>. The current
+    // HashMapKindedRef enum (audit §C.4 option (a.2)) has no Array-of-T
+    // value-V arm — its variants are I64 / F64 / Bool / Char / String /
+    // Decimal / TypedObject / TraitObject, all scalar or single-heap-
+    // pointer. Adding a per-T `HashMapKindedRef::TypedArray<T>` arm
+    // (or equivalently storing the inner Array as a TypedObject-wrapper
+    // V via the TypedObject arm) requires a non-trivial cluster — same
+    // structural blocker as HashMap.groupBy. SURFACE-AND-STOP per
+    // playbook §6 (no degraded synthetic carrier shape).
+    let _ = (buckets, receiver_arc);
+    Err(VMError::NotImplemented(
+        "Array.groupBy(): result shape HashMap<string, Array<T>> requires a \
+         HashMap value-V arm for Array<T>, which is not landed in \
+         HashMapKindedRef. Surface-and-stop per playbook §6 (no degraded \
+         carrier). Tracked alongside hashmap-value-v-arm in the follow-up \
+         cluster.".into(),
+    ))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

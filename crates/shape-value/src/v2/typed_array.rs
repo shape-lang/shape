@@ -323,6 +323,108 @@ impl<T: super::heap_element::HeapElement> TypedArray<*const T> {
     }
 }
 
+// Allocation + size-only operations available for non-Copy element types
+// (e.g. `TypedObjectPtr` with manual `Drop`). Per ADR-006 §2.7.24 Q25.B
+// SUPERSEDED + Wave 2 Round 3b C2-joint ckpt-1 — `HashMapData<V>` (in
+// `crates/shape-value/src/heap_value.rs`) instantiates `TypedArray<V>` for
+// `V = TypedObjectPtr` / `TraitObjectPtr` (transparent newtypes with manual
+// Drop), which are not `Copy`. The methods here are size/allocation only —
+// no `ptr::read` / `ptr::write` that would require `T: Copy` for soundness.
+//
+// Methods needing element copy semantics (`get_unchecked`, `set`, `push`,
+// `pop`, `from_slice`) remain bounded by `T: Copy` in the impl block above;
+// non-Copy element types use the per-element-Drop-aware paths in
+// `HashMapValueElem::release_typed_array`.
+impl<T> TypedArray<T> {
+    /// Allocate a new empty TypedArray with capacity 0 — non-Copy variant.
+    ///
+    /// Returns a raw pointer to the heap-allocated array. The caller is
+    /// responsible for eventually freeing it via `HashMapValueElem::
+    /// release_typed_array` (for `HashMapData<V>` value buffers) or the
+    /// equivalent per-T release path.
+    #[doc(alias = "new")]
+    pub fn new_generic() -> *mut Self {
+        Self::with_capacity_generic(0)
+    }
+
+    /// Allocate a new TypedArray with the given capacity — non-Copy variant.
+    ///
+    /// Returns a raw pointer to the heap-allocated array. No elements are
+    /// written; the data buffer is uninitialized memory of length `cap *
+    /// size_of::<T>()`.
+    #[doc(alias = "with_capacity")]
+    pub fn with_capacity_generic(cap: u32) -> *mut Self {
+        let layout = Layout::new::<Self>();
+        let ptr = unsafe { alloc(layout) as *mut Self };
+        assert!(!ptr.is_null(), "allocation failed for TypedArray");
+
+        let data = if cap > 0 {
+            let data_layout = Layout::array::<T>(cap as usize).expect("invalid array layout");
+            let data_ptr = unsafe { alloc(data_layout) as *mut T };
+            assert!(!data_ptr.is_null(), "allocation failed for TypedArray data");
+            data_ptr
+        } else {
+            ptr::null_mut()
+        };
+
+        unsafe {
+            ptr::write(
+                ptr,
+                Self {
+                    header: HeapHeader::new(HEAP_KIND_V2_TYPED_ARRAY),
+                    data,
+                    len: 0,
+                    cap,
+                },
+            );
+        }
+
+        ptr
+    }
+
+    /// Get the number of elements — non-Copy variant.
+    ///
+    /// # Safety
+    /// `this` must point to a valid, live `TypedArray<T>`.
+    #[inline]
+    pub unsafe fn len_generic(this: *const Self) -> u32 {
+        unsafe { (*this).len }
+    }
+
+    /// Get the allocated capacity — non-Copy variant.
+    ///
+    /// # Safety
+    /// `this` must point to a valid, live `TypedArray<T>`.
+    #[inline]
+    pub unsafe fn capacity_generic(this: *const Self) -> u32 {
+        unsafe { (*this).cap }
+    }
+
+    /// Check if the array is empty — non-Copy variant.
+    ///
+    /// # Safety
+    /// `this` must point to a valid, live `TypedArray<T>`.
+    #[inline]
+    pub unsafe fn is_empty_generic(this: *const Self) -> bool {
+        unsafe { (*this).len == 0 }
+    }
+
+    /// Get the elements as a slice — non-Copy variant.
+    ///
+    /// # Safety
+    /// `this` must point to a valid, live `TypedArray<T>`.
+    #[inline]
+    pub unsafe fn as_slice_generic<'a>(this: *const Self) -> &'a [T] {
+        unsafe {
+            if (*this).len == 0 {
+                &[]
+            } else {
+                std::slice::from_raw_parts((*this).data, (*this).len as usize)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

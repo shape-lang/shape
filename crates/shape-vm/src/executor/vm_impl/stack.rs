@@ -105,7 +105,19 @@ pub(crate) fn clone_with_kind(bits: u64, kind: NativeKind) {
                     shape_value::v2::refcount::v2_retain(hdr);
                 }
                 HeapKind::HashMap => {
-                    Arc::increment_strong_count(bits as *const HashMapData);
+                    // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): slot
+                    // bits are `Arc::into_raw(Arc<HashMapKindedRef>) as u64`
+                    // per the §C.4 Q25.B SUPERSEDED carrier-API-bound
+                    // shape. Single Arc indirection — the outer Arc carries
+                    // the kinded-ref enum; per-V `Arc<HashMapData<V>>`
+                    // refcount discipline lives at HashMapKindedRef's Drop
+                    // (refcount-0 of the outer Arc → enum Drop → inner
+                    // per-V Arc release via Clone/Drop derive on the inner
+                    // Arc fields per variant). The outer retain is a single
+                    // `Arc::increment_strong_count::<HashMapKindedRef>`.
+                    Arc::increment_strong_count(
+                        bits as *const shape_value::heap_value::HashMapKindedRef,
+                    );
                 }
                 // Wave 13 W13-hashset-rebuild (ADR-006 §2.7.15 / Q16,
                 // 2026-05-10): mirror of the HashMap arm. Slot bits are
@@ -459,7 +471,16 @@ pub(crate) fn drop_with_kind(bits: u64, kind: NativeKind) {
                     TypedObjectStorage::release_elem(bits as *const TypedObjectStorage);
                 }
                 HeapKind::HashMap => {
-                    Arc::decrement_strong_count(bits as *const HashMapData);
+                    // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): mirror
+                    // of the `clone_with_kind` arm. Bits are
+                    // `Arc::into_raw(Arc<HashMapKindedRef>) as u64`; release
+                    // dispatches a single Arc<HashMapKindedRef> decrement.
+                    // On refcount-0 the enum's Drop chains to per-V
+                    // `Arc<HashMapData<V>>` release via the inner-field
+                    // Drop derive at each variant arm.
+                    Arc::decrement_strong_count(
+                        bits as *const shape_value::heap_value::HashMapKindedRef,
+                    );
                 }
                 // Wave 13 W13-hashset-rebuild (ADR-006 §2.7.15 / Q16,
                 // 2026-05-10): mirror of the HashMap arm. Retires one

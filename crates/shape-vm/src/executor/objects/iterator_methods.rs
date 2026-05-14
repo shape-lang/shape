@@ -32,7 +32,7 @@
 
 use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
-use shape_value::heap_value::{HashMapData, HeapKind, HeapValue, TypedArrayData};
+use shape_value::heap_value::{HashMapKindedRef, HeapKind, HeapValue, TypedArrayData};
 use shape_value::iterator_state::{IteratorSource, IteratorState, IteratorTransform};
 use shape_value::typed_buffer::TypedBuffer;
 use shape_value::{KindedSlot, NativeKind, VMError};
@@ -118,15 +118,17 @@ fn clone_string_arc(slot: &KindedSlot) -> Result<Arc<String>, VMError> {
 }
 
 #[inline]
-fn clone_hashmap_arc(slot: &KindedSlot) -> Result<Arc<HashMapData>, VMError> {
+fn clone_hashmap_arc(slot: &KindedSlot) -> Result<HashMapKindedRef, VMError> {
     if !matches!(slot.kind, NativeKind::Ptr(HeapKind::HashMap)) {
         return Err(type_error(format!(
             "iter: expected HashMap receiver, got kind {:?}",
             slot.kind
         )));
     }
+    // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): payload flipped to
+    // `HashMapKindedRef`. Clone the kinded ref (per-V Arc bump).
     match slot.slot.as_heap_value() {
-        HeapValue::HashMap(arc) => Ok(Arc::clone(arc)),
+        HeapValue::HashMap(kref) => Ok(kref.clone()),
         _ => Err(type_error("iter: HashMap kind says HashMap but heap arm mismatched")),
     }
 }
@@ -261,15 +263,98 @@ fn range_elem_at(start: i64, _end: i64, step: i64, idx: usize) -> KindedSlot {
 /// TypedObject (`closure_layout.rs:843` maps `ConcreteType::Tuple` →
 /// `NativeKind::Ptr(HeapKind::TypedObject)`); there is no distinct tuple
 /// runtime carrier, so named fields are the right shape.
-fn hashmap_elem_at(m: &HashMapData, idx: usize) -> KindedSlot {
-    let key_arc = Arc::clone(&m.keys.data[idx]);
-    let value_arc = m.values.value_at(idx);
-    let key_slot = KindedSlot::from_string_arc(key_arc);
-    let value_slot = heap_value_arc_to_slot(&value_arc);
-    shape_runtime::type_schema::typed_object_from_pairs(&[
-        ("key", key_slot),
-        ("value", value_slot),
-    ])
+fn hashmap_elem_at(m: &HashMapKindedRef, idx: usize) -> KindedSlot {
+    // Wave 2 Round 3b C2-joint ckpt-4 (2026-05-14): per-V iterator element
+    // construction. Walks (a) `*mut TypedArray<*const StringObj>` keys →
+    // `Arc<String>` via StringObj projection, (b) per-V `*mut TypedArray<V>`
+    // values → matching per-V slot kind. Each yield is an Entry TypedObject
+    // `{key, value}` per W17-typed-carrier-bundle-A checkpoint-2 amendment.
+    // ADR-006 §2.7.24 Q25.B SUPERSEDED + audit §C.4.
+    use shape_value::heap_value::{TypedObjectPtr, TypedObjectStorage};
+    use shape_value::ValueSlot;
+
+    let keys_ptr = match m {
+        HashMapKindedRef::I64(arc) => arc.keys,
+        HashMapKindedRef::F64(arc) => arc.keys,
+        HashMapKindedRef::Bool(arc) => arc.keys,
+        HashMapKindedRef::Char(arc) => arc.keys,
+        HashMapKindedRef::String(arc) => arc.keys,
+        HashMapKindedRef::Decimal(arc) => arc.keys,
+        HashMapKindedRef::TypedObject(arc) => arc.keys,
+        HashMapKindedRef::TraitObject(arc) => arc.keys,
+    };
+    // Read the key string at index `idx`. Deep-copy to Arc<String>.
+    let key_arc: Arc<String> = unsafe {
+        let key_ptr = shape_value::v2::typed_array::TypedArray::get_unchecked(
+            keys_ptr,
+            idx as u32,
+        );
+        Arc::new(shape_value::v2::string_obj::StringObj::as_str(key_ptr).to_owned())
+    };
+    // Read the value at idx → bits + NativeKind (one owned share).
+    let (value_bits, value_kind) = match m {
+        HashMapKindedRef::I64(arc) => {
+            let v: i64 = unsafe { *(*arc.values).data.add(idx) };
+            (v as u64, NativeKind::Int64)
+        }
+        HashMapKindedRef::F64(arc) => {
+            let v: f64 = unsafe { *(*arc.values).data.add(idx) };
+            (v.to_bits(), NativeKind::Float64)
+        }
+        HashMapKindedRef::Bool(arc) => {
+            let v: u8 = unsafe { *(*arc.values).data.add(idx) };
+            (v as u64, NativeKind::Bool)
+        }
+        HashMapKindedRef::Char(arc) => {
+            let v: char = unsafe { *(*arc.values).data.add(idx) };
+            (v as u64, NativeKind::Char)
+        }
+        HashMapKindedRef::String(arc) => {
+            let ptr: *const shape_value::v2::string_obj::StringObj =
+                unsafe { *(*arc.values).data.add(idx) };
+            let s = unsafe { shape_value::v2::string_obj::StringObj::as_str(ptr).to_owned() };
+            let arc_s = Arc::new(s);
+            (Arc::into_raw(arc_s) as u64, NativeKind::String)
+        }
+        HashMapKindedRef::Decimal(arc) => {
+            let ptr: *const shape_value::v2::decimal_obj::DecimalObj =
+                unsafe { *(*arc.values).data.add(idx) };
+            unsafe { shape_value::v2::refcount::v2_retain(&(*ptr).header); }
+            (ptr as u64, NativeKind::DecimalV2)
+        }
+        HashMapKindedRef::TypedObject(arc) => {
+            let elem: &shape_value::heap_value::TypedObjectPtr =
+                unsafe { &*(*arc.values).data.add(idx) };
+            let bumped = elem.clone();
+            (bumped.into_raw() as u64, NativeKind::Ptr(HeapKind::TypedObject))
+        }
+        HashMapKindedRef::TraitObject(arc) => {
+            let elem: &shape_value::heap_value::TraitObjectPtr =
+                unsafe { &*(*arc.values).data.add(idx) };
+            let bumped = elem.clone();
+            (bumped.into_raw() as u64, NativeKind::Ptr(HeapKind::TraitObject))
+        }
+    };
+    // Build the Entry TypedObject {key, value}.
+    let schema_id = {
+        let fields = [String::from("key"), String::from("value")];
+        shape_runtime::type_schema::register_predeclared_any_schema(&fields)
+    };
+    let key_bits = Arc::into_raw(key_arc) as u64;
+    let slots: Box<[ValueSlot]> = Box::new([
+        ValueSlot::from_raw(key_bits),
+        ValueSlot::from_raw(value_bits),
+    ]);
+    let field_kinds: Arc<[NativeKind]> =
+        Arc::from(vec![NativeKind::String, value_kind].into_boxed_slice());
+    let heap_mask: u64 = 0b11;
+    let ptr = TypedObjectStorage::_new(
+        schema_id as u64,
+        slots,
+        heap_mask,
+        field_kinds,
+    );
+    KindedSlot::from_typed_object_raw(TypedObjectPtr::new(ptr).into_raw())
 }
 
 /// Convert an `Arc<HeapValue>` to a `KindedSlot` via the matching per-
@@ -284,7 +369,9 @@ fn heap_value_arc_to_slot(hv: &Arc<HeapValue>) -> KindedSlot {
         HeapValue::TypedArray(a) => KindedSlot::from_typed_array(Arc::clone(a)),
         // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): TypedObjectPtr.
         HeapValue::TypedObject(o) => KindedSlot::from_typed_object_raw(o.clone().into_raw()),
-        HeapValue::HashMap(m) => KindedSlot::from_hashmap(Arc::clone(m)),
+        // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): payload flipped
+        // to `HashMapKindedRef`; wrap in `Arc::new(m.clone())`.
+        HeapValue::HashMap(m) => KindedSlot::from_hashmap(Arc::new(m.clone())),
         HeapValue::Char(c) => KindedSlot::from_char(*c),
         _ => KindedSlot::none(),
     }

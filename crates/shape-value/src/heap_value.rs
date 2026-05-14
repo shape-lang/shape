@@ -795,349 +795,510 @@ impl std::ops::Deref for TraitObjectPtr {
 }
 
 // ── HashMap storage (Stage C P1(b), 2026-05-07) ─────────────────────────────
+//
+// Wave 2 Round 3b C2-joint ckpt-1 (2026-05-14): `HashMapValueBuf` deleted;
+// `HashMapData` replaced with `HashMapData<V>` generic per audit §C.4
+// option (a.2) — values buffer is `*mut TypedArray<V>` (per-V monomorphized
+// at compile time via the `HashMapValueElem` trait). `HashMapKindedRef`
+// enum bundles per-V `Arc<HashMapData<V>>` variants as the HeapValue-arm
+// carrier (ckpt-2 flips `HeapValue::HashMap(Arc<HashMapData>)` to
+// `HeapValue::HashMap(HashMapKindedRef)`). See ADR-006 §2.7.24 Q25.B
+// SUPERSEDED + `docs/cluster-audits/bulldozer-wave-1-inventory.md` §C.
 
-/// Parametric value-buffer for `HashMapData`, per ADR-006 §2.7.24 Q25.B.
+/// Per-V dispatcher trait for `HashMapData<V>::Drop` — releases the value
+/// buffer (`*mut TypedArray<V>`) at refcount-0 of the enclosing
+/// `Arc<HashMapData<V>>`.
 ///
-/// W17-typed-carrier-bundle-A commit 1/4 (2026-05-11): replaces the previous
-/// `Arc<TypedBuffer<Arc<HeapValue>>>` shape with a discriminated enum where
-/// each arm pins the per-value kind at the variant level. No parallel kind
-/// track is needed at this layer — the variant tag IS the kind.
+/// Authority: ADR-006 §2.7.24 Q25.B SUPERSEDED + `bulldozer-wave-1-inventory.md`
+/// §C.4 option (a.2). The trait dispatches per-V release at compile time via
+/// the Rust type system — no runtime `NativeKind` probe, no `is_heap()` probe,
+/// no Bool-default fallback. Mirror of `v2::heap_element::HeapElement` shape,
+/// but operates on the OUTER `TypedArray<V>` allocation rather than on
+/// individual heap-element pointers.
 ///
-/// The `HeapValue` arm is retained during commits 1-3 to keep existing
-/// readers/writers compiling; commit 4 deletes it (Q25.A/B forbidden-pattern
-/// list). Construction sites migrate to the specialized arms in commit 2;
-/// read sites add per-arm dispatch in commit 3.
+/// Impls partition V into:
 ///
-/// Phase 3 cluster-0+1 Wave 2 Agent C partial close (2026-05-15): dead-arm
-/// wholesale deletion landed for variants with **zero root producers** per
-/// `docs/cluster-audits/bulldozer-wave-1-inventory.md` §C.5 audit finding.
-/// Variants deleted: I64, F64, Bool, DateTime, Timespan, Duration, Instant,
-/// TraitObject. Surviving live arms: String, Decimal, BigInt, TypedObject,
-/// Char (Char is dead-but-derived per §C.5; preserved for forward-cleanliness
-/// in `specialize_values` defensive arm). The full `HashMapData<V>` generic
-/// monomorphization (audit §C.4 option (a.2) HashMapKindedRef carrier) is
-/// surfaced-and-stopped per the dispatch's pragmatic-fallback clause — the
-/// 40-file `Arc<HashMapData>` cascade exceeds the dispatch's ~1500 LoC /
-/// 7-file budget and entangles with Agent A1 (TypedArrayData scalar deletion),
-/// Agent A2 (TypedArrayData heap-element String/Decimal deletion), Agent D1
-/// (TypedObjectStorage HeapHeader migration), and JIT FFI map carriers.
-/// See close report for the Q25.B SUPERSEDED amendment text + structured
-/// surface-and-stop.
-#[derive(Debug)]
-pub enum HashMapValueBuf {
-    // Heap-typed value arms — payload type mirrors the matching `HeapValue`
-    // variant's `Arc<T>` payload so refcount discipline reuses the existing
-    // `Arc::clone` / `Arc::drop` paths.
-    String(Arc<crate::typed_buffer::TypedBuffer<Arc<String>>>),
-    Decimal(Arc<crate::typed_buffer::TypedBuffer<Arc<rust_decimal::Decimal>>>),
-    BigInt(Arc<crate::typed_buffer::TypedBuffer<Arc<i64>>>),
-    // ── ADR-006 §2.7.24 Q25.B mirror dead-arm wholesale deletion ──────────
-    // Wave 2 Round 1 Agent F (2026-05-14): DateTime / Timespan / Duration /
-    // Instant / TraitObject deleted. Mirror of TypedArrayData dead-arm
-    // deletion (Wave 1 §C.5 mirror finding). Zero root constructors;
-    // specialize_values has no arms for these HeapValue variants.
-    Char(Arc<crate::typed_buffer::TypedBuffer<char>>),
-    // Wave 2 Round 4 D4 ckpt-3 (2026-05-14): inner element type shifted from
-    // `Arc<TypedObjectStorage>` to `TypedObjectPtr` (transparent newtype
-    // over `*const TypedObjectStorage`) per ADR-006 §2.3 amendment (D1
-    // close `0e4510d4`) + §2.7.24 Q25.A SUPERSEDED — the v2-raw raw-
-    // pointer bit shape (HeapHeader-at-offset-0 produced via
-    // `TypedObjectStorage::_new`). Refcount discipline goes through
-    // `v2_retain` / `HeapElement::release_elem` on the inner ptr. The
-    // `TypedObjectPtr` wrapper exists to provide Send/Sync at the buffer
-    // element type level without disabling Rust's auto-derive for the
-    // other TypedBuffer<T> instantiations (the auto-trait suppression
-    // rule disables auto-derived impls for ALL TypedBuffer<T> as soon as
-    // any manual impl exists, so per-instantiation manual impls would
-    // require enumerating every T — the transparent newtype localizes
-    // the Send/Sync assertion).
-    TypedObject(Arc<crate::typed_buffer::TypedBuffer<TypedObjectPtr>>),
-    // The polymorphic `HeapValue(Arc<TypedBuffer<Arc<HeapValue>>>)` catch-all
-    // was DELETED in checkpoint 4 of W17-typed-carrier-bundle-A per ADR-006
-    // §2.7.24 Q25.B. Same discipline as Q25.A for TypedArrayData — no
-    // production caller produces this shape; the value buffer is fully
-    // per-variant strict-typed.
-    //
-    // Wave 2 Agent C dead-arm deletion (2026-05-15): I64, F64, Bool, DateTime,
-    // Timespan, Duration, Instant, TraitObject deleted. Zero root producers
-    // per `docs/cluster-audits/bulldozer-wave-1-inventory.md` §C.5.
+/// - POD scalar Vs (`i64`, `f64`, `u8` for Bool): `TypedArray::<V>::drop_array`
+///   frees the data buffer + the struct; no per-element work.
+/// - HeapHeader-equipped raw pointers (`*const StringObj`, `*const DecimalObj`):
+///   `TypedArray::<*const T>::drop_array_heap` walks the data buffer and
+///   calls `T::release_elem` per element, then frees the struct. Requires
+///   `T: v2::heap_element::HeapElement`.
+/// - `#[repr(transparent)]` newtype-as-element shapes (`TypedObjectPtr`,
+///   `TraitObjectPtr`): manual walk that `ptr::read`s each element to invoke
+///   its `Drop` (which retires the v2-raw refcount share via `release_elem`
+///   on the inner `*const TypedObjectStorage` / `*const TraitObjectStorage`).
+///
+/// Char (`char` codepoint) is reachable per §C.5 dead-but-derived disposition
+/// — included as a POD-scalar V.
+///
+/// # Safety
+///
+/// Implementors must guarantee:
+/// 1. `release_typed_array(ptr)` is sound when `ptr` points to a live
+///    `TypedArray<Self>` allocation produced by `TypedArray::<Self>::new` /
+///    `with_capacity` / `from_slice`.
+/// 2. After this call, `ptr` is invalid; the data buffer + struct are freed.
+/// 3. Per-element ownership semantics match the storage contract — POD
+///    elements need no per-element release; HeapHeader-equipped elements
+///    have their shares retired before the data buffer is freed.
+pub unsafe trait HashMapValueElem {
+    /// Release a `*mut TypedArray<Self>` allocation: retire per-element
+    /// shares (where applicable) + free the data buffer + free the struct.
+    ///
+    /// # Safety
+    /// `ptr` must point to a valid, live `TypedArray<Self>` allocated by
+    /// the v2-raw `TypedArray::<Self>` allocator (`new`, `with_capacity`,
+    /// `from_slice`). After this call returns, `ptr` is invalid.
+    unsafe fn release_typed_array(ptr: *mut crate::v2::typed_array::TypedArray<Self>)
+    where
+        Self: Sized;
+
+    /// Clone a single element with proper refcount-share semantics.
+    ///
+    /// - POD scalar Vs (`i64`/`f64`/`u8`/`char`): byte copy — no refcount work.
+    /// - HeapHeader-equipped raw pointers (`*const StringObj`/`*const DecimalObj`):
+    ///   pointer copy + `v2_retain` on the pointed-to HeapHeader.
+    /// - `#[repr(transparent)]` ptr-newtypes (`TypedObjectPtr`/`TraitObjectPtr`):
+    ///   delegate to the wrapper's `Clone` impl (which does v2_retain).
+    ///
+    /// Wave 2 Round 3b C2-joint ckpt-3 (2026-05-14): added to support the
+    /// per-V mutation API (insert / merge / get_share) on `HashMapData<V>`.
+    /// Per ADR-006 §2.7.24 Q25.B SUPERSEDED + audit §C.4.
+    ///
+    /// # Safety
+    /// `elem` must reference a live element of a `TypedArray<Self>` (or a
+    /// freshly-allocated element owned by the caller). The implementor
+    /// must produce a new owned share — for HeapElement / ptr-newtype V
+    /// this bumps the refcount on the pointed-to allocation; for POD V
+    /// it is a trivial copy.
+    unsafe fn share_clone(elem: &Self) -> Self
+    where
+        Self: Sized;
+
+    /// Release a single owned value (one refcount share). For POD V it is
+    /// a no-op (byte copy falls out of scope). For HeapElement V the
+    /// share is retired via `release_elem` on the pointer. For Ptr-newtype
+    /// V the wrapper's Drop runs automatically when the value drops.
+    ///
+    /// Wave 2 Round 3b C2-joint ckpt-3 (2026-05-14): added for the per-V
+    /// mutation API's overwrite path (insert when key already present —
+    /// the old value's share must be retired before the slot is overwritten).
+    ///
+    /// # Safety
+    /// `value` must be a valid owned V — for HeapElement / ptr-newtype V
+    /// types the caller transfers one refcount share to this method, which
+    /// retires it.
+    unsafe fn release_owned(value: Self)
+    where
+        Self: Sized;
 }
 
-impl HashMapValueBuf {
-    /// Number of values in the buffer.
+// ── POD scalar V impls (i64 / f64 / u8 / char) ─────────────────────────────
+
+unsafe impl HashMapValueElem for i64 {
     #[inline]
-    pub fn len(&self) -> usize {
-        match self {
-            HashMapValueBuf::String(b) => b.data.len(),
-            HashMapValueBuf::Decimal(b) => b.data.len(),
-            HashMapValueBuf::BigInt(b) => b.data.len(),
-            HashMapValueBuf::Char(b) => b.data.len(),
-            HashMapValueBuf::TypedObject(b) => b.data.len(),
+    unsafe fn release_typed_array(ptr: *mut crate::v2::typed_array::TypedArray<Self>) {
+        // SAFETY: caller-bound contract; `i64` is Copy/POD — no per-element
+        // shares to retire.
+        unsafe { crate::v2::typed_array::TypedArray::<i64>::drop_array(ptr) }
+    }
+    #[inline]
+    unsafe fn share_clone(elem: &Self) -> Self {
+        *elem
+    }
+    #[inline]
+    unsafe fn release_owned(_value: Self) {
+        // POD: byte copy falls out of scope; no-op.
+    }
+}
+
+unsafe impl HashMapValueElem for f64 {
+    #[inline]
+    unsafe fn release_typed_array(ptr: *mut crate::v2::typed_array::TypedArray<Self>) {
+        unsafe { crate::v2::typed_array::TypedArray::<f64>::drop_array(ptr) }
+    }
+    #[inline]
+    unsafe fn share_clone(elem: &Self) -> Self {
+        *elem
+    }
+    #[inline]
+    unsafe fn release_owned(_value: Self) {}
+}
+
+unsafe impl HashMapValueElem for u8 {
+    /// Used as the `Bool` V (one byte per element).
+    #[inline]
+    unsafe fn release_typed_array(ptr: *mut crate::v2::typed_array::TypedArray<Self>) {
+        unsafe { crate::v2::typed_array::TypedArray::<u8>::drop_array(ptr) }
+    }
+    #[inline]
+    unsafe fn share_clone(elem: &Self) -> Self {
+        *elem
+    }
+    #[inline]
+    unsafe fn release_owned(_value: Self) {}
+}
+
+unsafe impl HashMapValueElem for char {
+    /// Char codepoint (4 bytes / element). Dead-but-derived per §C.5;
+    /// included for forward-cleanliness with the `HeapValue::Char`
+    /// xml/json marshal path.
+    #[inline]
+    unsafe fn release_typed_array(ptr: *mut crate::v2::typed_array::TypedArray<Self>) {
+        unsafe { crate::v2::typed_array::TypedArray::<char>::drop_array(ptr) }
+    }
+    #[inline]
+    unsafe fn share_clone(elem: &Self) -> Self {
+        *elem
+    }
+    #[inline]
+    unsafe fn release_owned(_value: Self) {}
+}
+
+// ── HeapHeader-equipped raw-pointer V impls (*const StringObj / *const DecimalObj) ──
+
+unsafe impl HashMapValueElem for *const crate::v2::string_obj::StringObj {
+    #[inline]
+    unsafe fn release_typed_array(ptr: *mut crate::v2::typed_array::TypedArray<Self>) {
+        // SAFETY: `StringObj: HeapElement`; `drop_array_heap` walks elements,
+        // calls `StringObj::release_elem` per `*const StringObj`, then frees
+        // the data buffer + struct.
+        unsafe {
+            crate::v2::typed_array::TypedArray::<*const crate::v2::string_obj::StringObj>::drop_array_heap(ptr)
         }
     }
-
     #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
+    unsafe fn share_clone(elem: &Self) -> Self {
+        // SAFETY: per the construction-side contract on
+        // `HashMapData<*const StringObj>` element buffer, *elem points at a
+        // live StringObj with HeapHeader at offset 0; v2_retain bumps the
+        // refcount via atomic increment.
+        if !elem.is_null() {
+            unsafe { crate::v2::refcount::v2_retain(&(**elem).header) };
+        }
+        *elem
     }
-
-    /// Iterate over all values materialized as `Arc<HeapValue>`. Helper
-    /// for callers that need to walk the buffer once during the
-    /// W17-typed-carrier-bundle-A transition. Commit 3 audits readers and
-    /// converts hot paths to per-arm dispatch; this generic helper covers
-    /// cold paths (Display, JSON/XML marshal) that don't need per-element
-    /// specialisation.
-    pub fn iter_heap_arcs(&self) -> impl Iterator<Item = Arc<HeapValue>> + '_ {
-        let n = self.len();
-        (0..n).map(move |i| self.value_at(i))
-    }
-
-    /// Materialize the value at index `i` as an owned `Arc<HeapValue>`.
-    /// Cheap thin Arc::clone for the HeapValue arm; for typed arms the
-    /// element is wrapped into a freshly-constructed HeapValue.
-    ///
-    /// This is the read-side accessor used by callers that haven't yet
-    /// migrated to per-arm dispatch (commits 1-3 of W17-typed-carrier-
-    /// bundle-A). Commit 3 audits and rewrites match-on-HeapValue sites
-    /// into exhaustive HashMapValueBuf matches; commit 4 deletes the
-    /// HeapValue arm.
-    pub fn value_at(&self, i: usize) -> Arc<HeapValue> {
-        match self {
-            HashMapValueBuf::String(b) => Arc::new(HeapValue::String(Arc::clone(&b.data[i]))),
-            HashMapValueBuf::Decimal(b) => Arc::new(HeapValue::Decimal(Arc::clone(&b.data[i]))),
-            HashMapValueBuf::BigInt(b) => Arc::new(HeapValue::BigInt(Arc::clone(&b.data[i]))),
-            HashMapValueBuf::Char(b) => Arc::new(HeapValue::Char(b.data[i])),
-            // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): variant
-            // signature flipped to `HeapValue::TypedObject(TypedObjectPtr)`.
-            // Clone the inner `TypedObjectPtr` (bumps v2-raw refcount via
-            // the wrapper's Clone impl), wrap in HeapValue.
-            HashMapValueBuf::TypedObject(b) => {
-                Arc::new(HeapValue::TypedObject(b.data[i].clone()))
+    #[inline]
+    unsafe fn release_owned(value: Self) {
+        // SAFETY: caller transfers one share on a live StringObj; route
+        // through HeapElement::release_elem to atomic-decrement + dealloc
+        // on refcount=0.
+        if !value.is_null() {
+            unsafe {
+                use crate::v2::heap_element::HeapElement;
+                crate::v2::string_obj::StringObj::release_elem(value);
             }
         }
     }
 }
 
-impl Clone for HashMapValueBuf {
-    fn clone(&self) -> Self {
-        match self {
-            HashMapValueBuf::String(b) => HashMapValueBuf::String(Arc::clone(b)),
-            HashMapValueBuf::Decimal(b) => HashMapValueBuf::Decimal(Arc::clone(b)),
-            HashMapValueBuf::BigInt(b) => HashMapValueBuf::BigInt(Arc::clone(b)),
-            HashMapValueBuf::Char(b) => HashMapValueBuf::Char(Arc::clone(b)),
-            HashMapValueBuf::TypedObject(b) => HashMapValueBuf::TypedObject(Arc::clone(b)),
+unsafe impl HashMapValueElem for *const crate::v2::decimal_obj::DecimalObj {
+    #[inline]
+    unsafe fn release_typed_array(ptr: *mut crate::v2::typed_array::TypedArray<Self>) {
+        unsafe {
+            crate::v2::typed_array::TypedArray::<*const crate::v2::decimal_obj::DecimalObj>::drop_array_heap(ptr)
+        }
+    }
+    #[inline]
+    unsafe fn share_clone(elem: &Self) -> Self {
+        // SAFETY: see *const StringObj impl above. DecimalObj has
+        // HeapHeader at offset 0 (HeapElement contract).
+        if !elem.is_null() {
+            unsafe { crate::v2::refcount::v2_retain(&(**elem).header) };
+        }
+        *elem
+    }
+    #[inline]
+    unsafe fn release_owned(value: Self) {
+        if !value.is_null() {
+            unsafe {
+                use crate::v2::heap_element::HeapElement;
+                crate::v2::decimal_obj::DecimalObj::release_elem(value);
+            }
         }
     }
 }
 
-/// HashMap storage — two parallel Phase 2d Array buffers (string keys +
-/// heap-allocated values) plus an eager bucket-index for O(1) lookup.
+// ── Ptr-newtype V impls (TypedObjectPtr / TraitObjectPtr) ───────────────────
+
+unsafe impl HashMapValueElem for TypedObjectPtr {
+    /// `TypedObjectPtr` is `#[repr(transparent)]` over `*const TypedObjectStorage`
+    /// but has a manual `Drop` impl (calls `release_elem`). Walk the buffer
+    /// via `ptr::read` to invoke each element's Drop (which retires the v2-raw
+    /// HeapHeader share), then free the data allocation + struct.
+    #[inline]
+    unsafe fn release_typed_array(ptr: *mut crate::v2::typed_array::TypedArray<Self>) {
+        unsafe {
+            let arr = &*ptr;
+            if arr.cap > 0 && !arr.data.is_null() {
+                // Walk: read each element; the read transfers ownership to a
+                // local `TypedObjectPtr`, which drops at scope-end via its
+                // manual `Drop` impl (calls `release_elem` on the inner
+                // `*const TypedObjectStorage`).
+                for i in 0..arr.len {
+                    let _elem: TypedObjectPtr = std::ptr::read(arr.data.add(i as usize));
+                }
+                let data_layout =
+                    std::alloc::Layout::array::<TypedObjectPtr>(arr.cap as usize)
+                        .expect("invalid array layout");
+                std::alloc::dealloc(arr.data as *mut u8, data_layout);
+            }
+            let layout = std::alloc::Layout::new::<crate::v2::typed_array::TypedArray<Self>>();
+            std::alloc::dealloc(ptr as *mut u8, layout);
+        }
+    }
+    #[inline]
+    unsafe fn share_clone(elem: &Self) -> Self {
+        // Delegate to the wrapper's Clone impl (which bumps the v2_retain
+        // refcount on the inner *const TypedObjectStorage's HeapHeader).
+        elem.clone()
+    }
+    #[inline]
+    unsafe fn release_owned(_value: Self) {
+        // TypedObjectPtr has a manual Drop impl that calls release_elem;
+        // letting `_value` go out of scope runs Drop. No explicit work.
+    }
+}
+
+unsafe impl HashMapValueElem for TraitObjectPtr {
+    /// Mirror of the `TypedObjectPtr` impl above; per-element Drop runs
+    /// `release_elem` on `*const TraitObjectStorage`.
+    #[inline]
+    unsafe fn release_typed_array(ptr: *mut crate::v2::typed_array::TypedArray<Self>) {
+        unsafe {
+            let arr = &*ptr;
+            if arr.cap > 0 && !arr.data.is_null() {
+                for i in 0..arr.len {
+                    let _elem: TraitObjectPtr = std::ptr::read(arr.data.add(i as usize));
+                }
+                let data_layout =
+                    std::alloc::Layout::array::<TraitObjectPtr>(arr.cap as usize)
+                        .expect("invalid array layout");
+                std::alloc::dealloc(arr.data as *mut u8, data_layout);
+            }
+            let layout = std::alloc::Layout::new::<crate::v2::typed_array::TypedArray<Self>>();
+            std::alloc::dealloc(ptr as *mut u8, layout);
+        }
+    }
+    #[inline]
+    unsafe fn share_clone(elem: &Self) -> Self {
+        // Delegate to TraitObjectPtr's Clone impl (v2_retain on inner
+        // *const TraitObjectStorage's HeapHeader).
+        elem.clone()
+    }
+    #[inline]
+    unsafe fn release_owned(_value: Self) {
+        // TraitObjectPtr's Drop impl runs at scope-end.
+    }
+}
+
+/// HashMap storage — keys buffer (string-typed v2-raw `*mut TypedArray<*const StringObj>`)
+/// + per-V monomorphized values buffer (`*mut TypedArray<V>`) + eager
+/// bucket-index for O(1) lookup.
 ///
-/// Stage C HashMap-marshal P1(b) per supervisor sign-off. Reuses Phase
-/// 2d Array's `TypedBuffer<Arc<String>>` and `TypedBuffer<Arc<HeapValue>>`
-/// shapes verbatim — no new buffer-storage type. Insertion order is the
-/// canonical storage; the `index` is a sidecar acceleration structure for
-/// `executor/objects/hashmap_methods.rs`-style O(1) lookup.
+/// **Wave 2 Round 3b C2-joint ckpt-1 (2026-05-14):** the parametric
+/// `HashMapValueBuf` enum has been REPLACED with a generic type parameter `V`
+/// constrained by `HashMapValueElem`. Per audit §C.4 option (a.2):
+/// per-V monomorphization at compile time via the `HashMapKindedRef` carrier
+/// (defined below). No runtime kind discriminator field on this struct (the
+/// variant tag lives on `HashMapKindedRef` at the carrier layer).
 ///
-/// **Eager bucket-only at first landing** (per supervisor sign-off):
-/// `index` is built at construction and maintained incrementally on
-/// insert/remove. The `shape_id` hidden-class fast-path that the
-/// pre-bulldozer arch used for ≤64-string-keyed-maps is **deferred to a
-/// separate optimization workstream** — refused here as
-/// architectural-decision-bundling per supervisor watchlist.
+/// The values buffer is a raw `*mut TypedArray<V>` — the v2-raw heap shape
+/// (HeapHeader-at-offset-0 produced via `TypedArray::<V>::new`). Drop runs
+/// `V::release_typed_array(self.values)` via the `HashMapValueElem` trait —
+/// per-V monomorphized at compile time. The keys buffer is a `*mut
+/// TypedArray<*const StringObj>` — v2-raw shape using the `HeapElement`
+/// dispatch on `StringObj`.
 ///
-/// Element-type discrimination is body-side via Rust types: `FromSlot`
-/// impls for `Vec<(Arc<String>, Arc<String>)>` (string-string) and
-/// `Vec<(Arc<String>, Arc<HeapValue>)>` (polymorphic-value) both decode
-/// the same `HeapValue::HashMap` slot, with the Vec element type pinning
-/// which payload pattern the body expects. Same option ε pattern as
-/// Phase 2d Array's `Vec<Arc<String>>` / `Vec<Arc<HeapValue>>` impls.
+/// Per-V monomorphizations supported at landing (mirror of §A migration):
+/// `i64`, `f64`, `u8` (Bool), `*const StringObj`, `*const DecimalObj`,
+/// `TypedObjectPtr`, `TraitObjectPtr`. DateTime / Timespan / Duration /
+/// Instant / Char are dead per §C.5 (Char retained as POD-scalar arm only
+/// for the dead-but-derived defensive path; no live root producer).
+///
+/// **Eager bucket-only at first landing** (preserved from Stage C): `index`
+/// is built at construction and maintained incrementally on insert / remove.
+/// The `shape_id` hidden-class fast-path that the pre-bulldozer architecture
+/// used for ≤64-string-keyed-maps remains deferred to a separate
+/// optimization workstream.
+///
+/// **Forbidden under Q25.B SUPERSEDED:**
+/// - `Arc<TypedBuffer<V>>` field shape (the value-buffer carrier is
+///   `*mut TypedArray<V>` per audit §C.4).
+/// - HashMap-wide runtime kind discriminator on this struct (per-V
+///   monomorphization at compile time via the carrier; no inline tag
+///   byte on `HashMapData<V>` itself).
+/// - Re-introducing `HashMapValueBuf` arms under any rename.
 #[derive(Debug)]
-pub struct HashMapData {
-    /// Insertion-ordered keys (string-typed buffer).
-    pub keys: Arc<crate::typed_buffer::TypedBuffer<Arc<String>>>,
-    /// Insertion-ordered values, parametric per ADR-006 §2.7.24 Q25.B.
-    /// Variant tag IS the per-value kind — no parallel kind track.
-    pub values: HashMapValueBuf,
-    /// Eager bucket-index: hash → list of indices into `keys`/`values`
-    /// arrays. Enables O(1) lookup at the user-facing `map.get(key)`
-    /// path. Hash is computed via FNV-1a over the key string bytes.
+pub struct HashMapData<V: HashMapValueElem> {
+    /// Insertion-ordered keys — v2-raw `*mut TypedArray<*const StringObj>`.
+    /// Owned by this struct (one strong-count share on the keys array's
+    /// HeapHeader at offset 0). Drop calls `<*const StringObj as
+    /// HashMapValueElem>::release_typed_array` to retire the share.
+    pub keys: *mut crate::v2::typed_array::TypedArray<*const crate::v2::string_obj::StringObj>,
+    /// Insertion-ordered values — v2-raw `*mut TypedArray<V>`. Owned by
+    /// this struct. Drop calls `V::release_typed_array(self.values)`.
+    pub values: *mut crate::v2::typed_array::TypedArray<V>,
+    /// Eager bucket-index: hash → list of indices into `keys` / `values`
+    /// arrays. Enables O(1) lookup at the user-facing `map.get(key)` path.
+    /// Hash is computed via FNV-1a over the key string bytes.
     pub index: std::collections::HashMap<u64, Vec<u32>>,
 }
 
-impl HashMapData {
+// SAFETY: `*mut TypedArray<T>` is `!Send + !Sync` by default. `HashMapData<V>`
+// is safe to share across threads because:
+// (1) `TypedArray<T>` is HeapHeader-equipped with atomic refcount ops
+//     (`v2_retain` / `v2_release` in `v2/refcount.rs`).
+// (2) Element-level Send/Sync is preserved by the `HashMapValueElem` impls
+//     (StringObj / DecimalObj / TypedObjectPtr / TraitObjectPtr all carry
+//     manual `unsafe impl Send + Sync`; scalar V types are auto-Send/Sync).
+// (3) `HashMapData<V>` is treated as immutable at the marshal boundary;
+//     mutation goes through `Arc::make_mut` on the consumer side (ckpt-3
+//     territory).
+unsafe impl<V: HashMapValueElem> Send for HashMapData<V> {}
+unsafe impl<V: HashMapValueElem> Sync for HashMapData<V> {}
+
+impl<V: HashMapValueElem> HashMapData<V> {
     /// Build an empty HashMapData with no entries.
     ///
-    /// W17-typed-carrier-bundle-A checkpoint 4/4: the post-§2.7.24 Q25.B
-    /// default arm is `HashMapValueBuf::TypedObject` — when callers
-    /// `.set(key, value)` for the first time, the per-value-kind dispatch
-    /// in `insert` selects the matching specialized arm. The TypedObject
-    /// default lets cold callers that never write (just read empty
-    /// entries/values arrays) avoid panicking on an unselected arm.
+    /// Allocates two v2-raw `TypedArray` storages (keys + values) at
+    /// capacity 0. The struct owns one strong-count share on each.
     pub fn new() -> Self {
         Self {
-            keys: Arc::new(crate::typed_buffer::TypedBuffer::from_vec(Vec::new())),
-            values: HashMapValueBuf::TypedObject(Arc::new(
-                crate::typed_buffer::TypedBuffer::from_vec(Vec::new()),
-            )),
+            // `*const StringObj` is `Copy` (raw pointer), so the Copy-bounded
+            // `TypedArray::<*const StringObj>::new` works here.
+            keys: crate::v2::typed_array::TypedArray::<
+                *const crate::v2::string_obj::StringObj,
+            >::new(),
+            // V may be non-Copy (e.g. `TypedObjectPtr` has manual `Drop`),
+            // so use the non-Copy `TypedArray::<V>::new_generic` path
+            // (allocation only; no element-level reads/writes).
+            values: crate::v2::typed_array::TypedArray::<V>::new_generic(),
             index: std::collections::HashMap::new(),
         }
     }
 
-    /// Build from parallel `Vec`s of keys and values, computing the
-    /// bucket index eagerly. Panics if `keys.len() != values.len()`.
+    /// Build from parallel buffers — caller transfers one strong-count share
+    /// on each `TypedArray` to this struct. Computes the bucket index eagerly
+    /// from the keys buffer.
     ///
-    /// W17-typed-carrier-bundle-A checkpoint 4/4: dispatches to a
-    /// specialized `HashMapValueBuf` arm via per-element `HeapValue`
-    /// inspection per ADR-006 §2.7.24 Q25.B (mirror of
-    /// `TypedArrayData::build_specialized_from_heap_arcs`). Heterogeneous-
-    /// arm value vectors surface (production callers that produced mixed
-    /// HeapValue arms migrate by either uniform-typing the input or
-    /// using a typed-arm constructor).
-    pub fn from_pairs(keys: Vec<Arc<String>>, values: Vec<Arc<HeapValue>>) -> Self {
+    /// # Safety
+    /// `keys` must point to a live `TypedArray<*const StringObj>` and
+    /// `values` to a live `TypedArray<V>`, both with at least one
+    /// strong-count share owned by the caller (transferred to this struct).
+    /// `keys.len` must equal `values.len`.
+    pub unsafe fn from_pairs(
+        keys: *mut crate::v2::typed_array::TypedArray<*const crate::v2::string_obj::StringObj>,
+        values: *mut crate::v2::typed_array::TypedArray<V>,
+    ) -> Self {
+        // SAFETY: caller-bound contract per docstring.
+        let (n_keys, n_values) = unsafe {
+            (
+                // keys is `TypedArray<*const StringObj>` — Copy-bounded `len`.
+                crate::v2::typed_array::TypedArray::len(keys),
+                // values is `TypedArray<V>` where V may be non-Copy — use the
+                // non-Copy `len_generic`.
+                crate::v2::typed_array::TypedArray::len_generic(values),
+            )
+        };
         assert_eq!(
-            keys.len(),
-            values.len(),
-            "HashMapData::from_pairs: keys/values length mismatch"
+            n_keys, n_values,
+            "HashMapData::from_pairs: keys/values length mismatch \
+             (keys.len={}, values.len={})",
+            n_keys, n_values,
         );
+
+        // Build the bucket index from the keys buffer. Walks `*const StringObj`
+        // pointers without taking ownership; each `StringObj::as_str` is a
+        // borrow that's valid while the keys buffer is alive.
         let mut index: std::collections::HashMap<u64, Vec<u32>> =
             std::collections::HashMap::new();
-        for (i, k) in keys.iter().enumerate() {
+        // SAFETY: keys is live + len is the element count.
+        let keys_slice: &[*const crate::v2::string_obj::StringObj] = unsafe {
+            crate::v2::typed_array::TypedArray::as_slice(keys)
+        };
+        for (i, &key_ptr) in keys_slice.iter().enumerate() {
+            // SAFETY: keys-buffer elements are live `*const StringObj` per the
+            // construction-side contract (caller owned one share each; that
+            // share moved into the buffer at `TypedArray::push`).
+            let key_bytes = unsafe {
+                let len = (*key_ptr).len as usize;
+                if len == 0 {
+                    &[][..]
+                } else {
+                    std::slice::from_raw_parts((*key_ptr).data, len)
+                }
+            };
             index
-                .entry(fnv1a_hash(k.as_bytes()))
+                .entry(fnv1a_hash(key_bytes))
                 .or_default()
                 .push(i as u32);
         }
-        let values_buf = Self::specialize_values(values);
-        Self {
-            keys: Arc::new(crate::typed_buffer::TypedBuffer::from_vec(keys)),
-            values: values_buf,
-            index,
-        }
-    }
 
-    /// W17-typed-carrier-bundle-A checkpoint 4/4: dispatch a
-    /// `Vec<Arc<HeapValue>>` into the matching specialized
-    /// `HashMapValueBuf` arm. Empty inputs default to `TypedObject`.
-    /// Mirror of `TypedArrayData::build_specialized_from_heap_arcs`.
-    fn specialize_values(values: Vec<Arc<HeapValue>>) -> HashMapValueBuf {
-        use crate::typed_buffer::TypedBuffer;
-        if values.is_empty() {
-            return HashMapValueBuf::TypedObject(Arc::new(TypedBuffer::from_vec(Vec::new())));
-        }
-        let first = &values[0];
-        match first.as_ref() {
-            HeapValue::String(_) => {
-                let data: Vec<Arc<String>> = values
-                    .iter()
-                    .map(|v| match v.as_ref() {
-                        HeapValue::String(s) => Arc::clone(s),
-                        other => panic!(
-                            "HashMapData::from_pairs: heterogeneous value arms \
-                             (expected String, got {:?})",
-                            other.kind()
-                        ),
-                    })
-                    .collect();
-                HashMapValueBuf::String(Arc::new(TypedBuffer::from_vec(data)))
-            }
-            HeapValue::Decimal(_) => {
-                let data: Vec<Arc<rust_decimal::Decimal>> = values
-                    .iter()
-                    .map(|v| match v.as_ref() {
-                        HeapValue::Decimal(d) => Arc::clone(d),
-                        other => panic!(
-                            "HashMapData::from_pairs: heterogeneous value arms \
-                             (expected Decimal, got {:?})",
-                            other.kind()
-                        ),
-                    })
-                    .collect();
-                HashMapValueBuf::Decimal(Arc::new(TypedBuffer::from_vec(data)))
-            }
-            HeapValue::BigInt(_) => {
-                let data: Vec<Arc<i64>> = values
-                    .iter()
-                    .map(|v| match v.as_ref() {
-                        HeapValue::BigInt(b) => Arc::clone(b),
-                        other => panic!(
-                            "HashMapData::from_pairs: heterogeneous value arms \
-                             (expected BigInt, got {:?})",
-                            other.kind()
-                        ),
-                    })
-                    .collect();
-                HashMapValueBuf::BigInt(Arc::new(TypedBuffer::from_vec(data)))
-            }
-            // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): both
-            // HashMapValueBuf::TypedObject and HeapValue::TypedObject now
-            // carry TypedObjectPtr. Per-element clone bumps the v2-raw
-            // refcount via the wrapper's Clone impl.
-            HeapValue::TypedObject(_) => {
-                let data: Vec<TypedObjectPtr> = values
-                    .iter()
-                    .map(|v| match v.as_ref() {
-                        HeapValue::TypedObject(s) => s.clone(),
-                        other => panic!(
-                            "HashMapData::from_pairs: heterogeneous value arms \
-                             (expected TypedObject, got {:?})",
-                            other.kind()
-                        ),
-                    })
-                    .collect();
-                HashMapValueBuf::TypedObject(Arc::new(TypedBuffer::from_vec(data)))
-            }
-            HeapValue::Char(_) => {
-                let data: Vec<char> = values
-                    .iter()
-                    .map(|v| match v.as_ref() {
-                        HeapValue::Char(c) => *c,
-                        other => panic!(
-                            "HashMapData::from_pairs: heterogeneous value arms \
-                             (expected Char, got {:?})",
-                            other.kind()
-                        ),
-                    })
-                    .collect();
-                HashMapValueBuf::Char(Arc::new(TypedBuffer::from_vec(data)))
-            }
-            other => panic!(
-                "HashMapData::from_pairs: HeapValue arm {:?} not yet \
-                 supported post-§2.7.24 Q25.B — add a specialized \
-                 HashMapValueBuf arm.",
-                other.kind()
-            ),
+        Self {
+            keys,
+            values,
+            index,
         }
     }
 
     /// Number of entries.
     #[inline]
     pub fn len(&self) -> usize {
-        self.keys.data.len()
+        // SAFETY: `self.keys` is live for the lifetime of `&self`.
+        unsafe { crate::v2::typed_array::TypedArray::len(self.keys) as usize }
     }
 
     /// Whether the map is empty.
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.keys.data.is_empty()
+        self.len() == 0
     }
 
-    /// Look up a value by string key. O(1) via the bucket index plus a
-    /// short bucket scan for collision disambiguation.
+    /// Read the value at index `i`. Returns a copy of the `V` element
+    /// (POD scalars copy bytes; `*const StringObj` / `*const DecimalObj` /
+    /// `TypedObjectPtr` / `TraitObjectPtr` copy the pointer bits — caller
+    /// must NOT treat the returned value as carrying refcount ownership
+    /// unless the caller explicitly bumps the v2-raw refcount).
     ///
-    /// Returns an **owned** `Arc<HeapValue>` rather than a borrow because
-    /// post-§2.7.24 the value buffer can be a specialized variant
-    /// (`HashMapValueBuf::I64`, etc.) where there is no underlying
-    /// `Arc<HeapValue>` to borrow — the materialized HeapValue is
-    /// freshly constructed by `HashMapValueBuf::value_at`. For the
-    /// HeapValue arm this is a thin atomic refcount bump.
-    pub fn get(&self, key: &str) -> Option<Arc<HeapValue>> {
+    /// For owned-share semantics use `value_at_owned` (ckpt-2 / ckpt-3
+    /// territory; not in scope for ckpt-1 foundation).
+    ///
+    /// # Safety
+    /// `i` must be less than `self.len()`.
+    #[inline]
+    pub unsafe fn value_at_raw(&self, i: usize) -> V
+    where
+        V: Copy,
+    {
+        // SAFETY: caller-bound bounds contract + values is live.
+        unsafe {
+            crate::v2::typed_array::TypedArray::get_unchecked(self.values, i as u32)
+        }
+    }
+
+    /// Look up a value by string key. Returns `Some(i)` (the index into the
+    /// values buffer) if the key is present, else `None`. The returned
+    /// index can be used with `value_at_raw` / `Arc::make_mut`-based
+    /// mutation paths (ckpt-3 territory).
+    ///
+    /// O(1) via the bucket index plus a short bucket scan for collision
+    /// disambiguation.
+    pub fn get_index(&self, key: &str) -> Option<usize> {
         let hash = fnv1a_hash(key.as_bytes());
         let bucket = self.index.get(&hash)?;
+        // SAFETY: keys is live; len is the bucket-recorded element count.
+        let keys_slice = unsafe {
+            crate::v2::typed_array::TypedArray::as_slice(self.keys)
+        };
         for &idx in bucket {
             let i = idx as usize;
-            if self.keys.data[i].as_str() == key {
-                return Some(self.values.value_at(i));
+            // SAFETY: key-buffer elements are live `*const StringObj`.
+            let stored = unsafe { keys_slice[i] };
+            let stored_str = unsafe { crate::v2::string_obj::StringObj::as_str(stored) };
+            if stored_str == key {
+                return Some(i);
             }
         }
         None
@@ -1146,185 +1307,108 @@ impl HashMapData {
     /// Whether the map contains the given key.
     #[inline]
     pub fn contains_key(&self, key: &str) -> bool {
-        self.get(key).is_some()
+        self.get_index(key).is_some()
     }
 
-    // ── Mutation API (W13-hashmap-mutation, 2026-05-10) ─────────────────────
+    // ── Mutation API (Wave 2 Round 3b C2-joint ckpt-3, 2026-05-14) ────────
     //
-    // The post-§2.7.4 storage shape (`Arc<TypedBuffer<Arc<String>>>` keys +
-    // `Arc<TypedBuffer<Arc<HeapValue>>>` values + eager bucket-index)
-    // already has refcount-aware payload types: `Arc<String>` keys and
-    // `Arc<HeapValue>` values both clone via a single atomic refcount bump
-    // and drop via `Arc::decrement_strong_count` — no parallel `NativeKind`
-    // track is needed at this layer (§2.7.7's parallel-kind invariant
-    // applies to the kinded stack, not to typed `Arc<HeapValue>` payloads,
-    // which carry their own discriminator via `HeapValue::kind()`).
+    // Per-V mutation surface mirroring `HashSetData::insert/remove` shape
+    // (line 1514+ above) but with parallel values-buffer maintenance.
+    // ADR-006 §2.7.24 Q25.B SUPERSEDED + audit §C.4 option (a.2).
     //
-    // The mutation entry-points therefore take `Arc<String>` / `Arc<HeapValue>`
-    // directly. The `shape-vm`-side handlers (`v2_set` / `v2_delete` /
-    // `v2_merge` in `executor/objects/hashmap_methods.rs`) project the
-    // `KindedSlot` carrier args into these typed Arcs via the existing
-    // `result_slot_to_heap_value_arc` / `as_string_key` helpers, then
-    // `Arc::make_mut` the receiver `Arc<HashMapData>` so that shared
-    // references stay immutable (clone-on-write).
+    // Uses raw `ptr::write` / `ptr::read` against the `*mut TypedArray<V>`
+    // values buffer (bypassing TypedArray::<T:Copy>::push/pop since
+    // `TypedObjectPtr` / `TraitObjectPtr` are non-Copy). `HashMapValueElem
+    // ::share_clone` handles per-V refcount-aware copying when callers need
+    // to clone elements (e.g. `merge`).
+    //
+    // Caller-managed ownership: `insert`/`insert_share` take a `V` by value,
+    // transferring one share. `remove` returns the `V` by value, transferring
+    // the share to the caller. `merge` uses `share_clone` to bump shares on
+    // the source's elements before inserting them locally.
 
-    /// Insert or overwrite a key/value entry. If the key already exists,
-    /// the value is replaced in-place (the old `Arc<HeapValue>` is dropped,
-    /// releasing its refcount). Otherwise the entry is appended to the
-    /// insertion-ordered buffers and registered in the bucket index.
+    /// Insert a key/value pair, transferring one share on `value` to the
+    /// map. If the key was already present, the old value's share is
+    /// retired (via `V::release_typed_array`-style single-element drop)
+    /// and the slot is overwritten with `value`. Returns `true` on
+    /// new-key insert, `false` on overwrite.
     ///
-    /// Per ADR-006 §2.7.24 Q25.B this mutation entry-point assumes the
-    /// values buffer is the `HashMapValueBuf::HeapValue` arm. Specialized
-    /// arms get their own typed mutation entry-points in commit 2; until
-    /// the migration completes, attempting to insert into a specialized
-    /// arm panics (unreachable in current callers — commit 4 deletes the
-    /// HeapValue arm and the specialized paths replace this entry-point).
-    pub fn insert(&mut self, key: Arc<String>, value: Arc<HeapValue>) {
+    /// The `key` is allocated as a new `StringObj` (one fresh
+    /// `v2_retain`=1 share owned by the map).
+    ///
+    /// # Safety
+    /// `value` must be a valid owned V — for HeapElement / ptr-newtype V
+    /// types, the caller must transfer ownership of one refcount share
+    /// to this method. POD V types (`i64`/`f64`/`u8`/`char`) trivially
+    /// own themselves.
+    pub unsafe fn insert(&mut self, key: &str, value: V) -> bool {
         let hash = fnv1a_hash(key.as_bytes());
-        // Look for an existing entry under the same hash bucket.
+        // Check for existing key — overwrite path.
         if let Some(bucket) = self.index.get(&hash) {
             for &idx in bucket {
                 let i = idx as usize;
-                if self.keys.data[i].as_str() == key.as_str() {
-                    // Overwrite in place via the HeapValue-arm-aware
-                    // helper. Specialized arms have their own typed
-                    // insert paths (commit 2 / commit 3).
-                    self.insert_heap_overwrite_at(i, value);
-                    return;
+                // SAFETY: keys live + index points into keys range.
+                let stored_ptr = unsafe {
+                    crate::v2::typed_array::TypedArray::get_unchecked(self.keys, idx)
+                };
+                let stored_str = unsafe { crate::v2::string_obj::StringObj::as_str(stored_ptr) };
+                if stored_str == key {
+                    // Overwrite: read+drop the old value, write the new.
+                    unsafe {
+                        let data_ptr = (*self.values).data.add(i);
+                        let old_value: V = std::ptr::read(data_ptr);
+                        // Drop the old value's share by walking through a
+                        // single-element TypedArray. Simpler: rely on V's
+                        // Drop impl (or for HeapElement V types, manual
+                        // release_elem). For uniformity, route through the
+                        // share_clone-aware path: since old_value is owned,
+                        // letting it go out of scope at end of this block
+                        // invokes its Drop impl (TypedObjectPtr/TraitObjectPtr
+                        // Drop calls release_elem; *const StringObj has no
+                        // Drop — we must manually release).
+                        Self::drop_owned_value(old_value);
+                        std::ptr::write(data_ptr, value);
+                    }
+                    return false;
                 }
             }
         }
-        // New entry: append to keys + values, then register in the index.
-        let new_idx = self.keys.data.len();
-        Arc::make_mut(&mut self.keys).data.push(key);
-        self.push_heap_value(value);
-        self.index.entry(hash).or_default().push(new_idx as u32);
+        // New-key insert path. Allocate new StringObj for the key.
+        let key_obj: *const crate::v2::string_obj::StringObj =
+            crate::v2::string_obj::StringObj::new(key);
+        let new_idx_u32 = unsafe { crate::v2::typed_array::TypedArray::len(self.keys) };
+        // Push key into the StringObj keys buffer (Copy-bounded *const T).
+        unsafe { crate::v2::typed_array::TypedArray::push(self.keys, key_obj) };
+        // Push value into the values buffer via raw write (V may be non-Copy).
+        unsafe { Self::values_push(self.values, value) };
+        // Update bucket index.
+        self.index.entry(hash).or_default().push(new_idx_u32);
+        true
     }
 
-    /// W17-typed-carrier-bundle-A checkpoint 4/4: per-arm overwrite-in-place
-    /// at index `i`. Dispatches on the current `HashMapValueBuf` arm and
-    /// requires `value`'s HeapValue arm to match.
-    fn insert_heap_overwrite_at(&mut self, i: usize, value: Arc<HeapValue>) {
-        match (&mut self.values, value.as_ref()) {
-            (HashMapValueBuf::String(buf), HeapValue::String(s)) => {
-                Arc::make_mut(buf).data[i] = Arc::clone(s);
-            }
-            (HashMapValueBuf::Decimal(buf), HeapValue::Decimal(d)) => {
-                Arc::make_mut(buf).data[i] = Arc::clone(d);
-            }
-            (HashMapValueBuf::BigInt(buf), HeapValue::BigInt(b)) => {
-                Arc::make_mut(buf).data[i] = Arc::clone(b);
-            }
-            // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): both sides
-            // carry TypedObjectPtr; clone the incoming (bumps v2-raw refcount
-            // for the buffer's owned share); the prior element's Drop runs
-            // when the Vec slot is overwritten via `data[i] = ...`, retiring
-            // its share.
-            (HashMapValueBuf::TypedObject(buf), HeapValue::TypedObject(s)) => {
-                Arc::make_mut(buf).data[i] = s.clone();
-            }
-            (HashMapValueBuf::Char(buf), HeapValue::Char(c)) => {
-                Arc::make_mut(buf).data[i] = *c;
-            }
-            (existing, incoming) => panic!(
-                "HashMapData::insert: value arm mismatch (buf={:?}, value={:?}) — \
-                 callers must produce values of the same kind as the existing entries; \
-                 ADR-006 §2.7.24 Q25.B forbids mid-life arm changes",
-                std::mem::discriminant(existing),
-                incoming.kind()
-            ),
-        }
-    }
-
-    /// W17-typed-carrier-bundle-A checkpoint 4/4: append a value to the
-    /// current arm. On an empty map (TypedObject default from `new()`),
-    /// the first push selects the arm; subsequent pushes require the
-    /// same HeapValue kind.
-    fn push_heap_value(&mut self, value: Arc<HeapValue>) {
-        // Empty-values first-push: re-target the arm to match `value`'s
-        // kind. `keys` may already have the new key pushed by `insert`
-        // (the caller `insert` pushes key first, then this); the values
-        // arm-selection key is the buffer's own emptiness.
-        if matches!(&self.values, HashMapValueBuf::TypedObject(b) if b.data.is_empty()) {
-            self.values = match value.as_ref() {
-                HeapValue::String(_) => HashMapValueBuf::String(Arc::new(
-                    crate::typed_buffer::TypedBuffer::from_vec(Vec::new()),
-                )),
-                HeapValue::Decimal(_) => HashMapValueBuf::Decimal(Arc::new(
-                    crate::typed_buffer::TypedBuffer::from_vec(Vec::new()),
-                )),
-                HeapValue::BigInt(_) => HashMapValueBuf::BigInt(Arc::new(
-                    crate::typed_buffer::TypedBuffer::from_vec(Vec::new()),
-                )),
-                HeapValue::TypedObject(_) => HashMapValueBuf::TypedObject(Arc::new(
-                    crate::typed_buffer::TypedBuffer::from_vec(Vec::new()),
-                )),
-                HeapValue::Char(_) => HashMapValueBuf::Char(Arc::new(
-                    crate::typed_buffer::TypedBuffer::from_vec(Vec::new()),
-                )),
-                _ => {
-                    // Other kinds default to TypedObject (already set);
-                    // the next match arm will panic with the precise reason.
-                    return self.push_heap_value_typed_arm(value);
-                }
-            };
-        }
-        self.push_heap_value_typed_arm(value)
-    }
-
-    /// Append to the (already-selected) typed arm.
-    fn push_heap_value_typed_arm(&mut self, value: Arc<HeapValue>) {
-        match (&mut self.values, value.as_ref()) {
-            (HashMapValueBuf::String(buf), HeapValue::String(s)) => {
-                Arc::make_mut(buf).data.push(Arc::clone(s));
-            }
-            (HashMapValueBuf::Decimal(buf), HeapValue::Decimal(d)) => {
-                Arc::make_mut(buf).data.push(Arc::clone(d));
-            }
-            (HashMapValueBuf::BigInt(buf), HeapValue::BigInt(b)) => {
-                Arc::make_mut(buf).data.push(Arc::clone(b));
-            }
-            // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): both sides
-            // carry TypedObjectPtr; clone the incoming and push.
-            (HashMapValueBuf::TypedObject(buf), HeapValue::TypedObject(s)) => {
-                Arc::make_mut(buf).data.push(s.clone());
-            }
-            (HashMapValueBuf::Char(buf), HeapValue::Char(c)) => {
-                Arc::make_mut(buf).data.push(*c);
-            }
-            (existing, incoming) => panic!(
-                "HashMapData::push: value arm {:?} does not match buf {:?} \
-                 (ADR-006 §2.7.24 Q25.B — values buffer is monomorphic)",
-                incoming.kind(),
-                std::mem::discriminant(existing),
-            ),
-        }
-    }
-
-    /// Remove the entry under `key`. Returns `true` if the key was present
-    /// (and removed), `false` if no entry existed. The bucket index is
-    /// updated to reflect the buffer's post-removal indices: every entry
-    /// after the removed slot shifts down by one position.
-    pub fn remove(&mut self, key: &str) -> bool {
+    /// Remove the entry under `key`. Returns the removed value (transferring
+    /// one share to the caller) if present, else `None`.
+    ///
+    /// The bucket index is updated to reflect the buffer's post-removal
+    /// indices: every entry after the removed slot shifts down by one
+    /// position (mirror of `HashSetData::remove`).
+    pub unsafe fn remove(&mut self, key: &str) -> Option<V> {
         let hash = fnv1a_hash(key.as_bytes());
-        // Locate the position within the bucket whose stored key matches.
         let removed_idx: usize = {
-            let Some(bucket) = self.index.get(&hash) else {
-                return false;
-            };
+            let bucket = self.index.get(&hash)?;
             let mut found: Option<usize> = None;
             for (bucket_pos, &idx) in bucket.iter().enumerate() {
-                if self.keys.data[idx as usize].as_str() == key {
+                // SAFETY: keys live.
+                let stored_ptr = unsafe {
+                    crate::v2::typed_array::TypedArray::get_unchecked(self.keys, idx)
+                };
+                let stored_str = unsafe { crate::v2::string_obj::StringObj::as_str(stored_ptr) };
+                if stored_str == key {
                     found = Some(bucket_pos);
                     break;
                 }
             }
-            let bucket_pos = match found {
-                Some(p) => p,
-                None => return false,
-            };
-            // Take the index, drop the bucket borrow before re-borrowing
-            // the index mutably below.
+            let bucket_pos = found?;
             let bucket = self.index.get_mut(&hash).expect("bucket present");
             let removed_idx = bucket.swap_remove(bucket_pos) as usize;
             if bucket.is_empty() {
@@ -1332,11 +1416,32 @@ impl HashMapData {
             }
             removed_idx
         };
-        // Remove from the parallel buffers via Arc::make_mut.
-        Arc::make_mut(&mut self.keys).data.remove(removed_idx);
-        self.remove_value_at(removed_idx);
-        // Shift down every index in the bucket map that pointed at a
-        // position past `removed_idx`.
+        // Read the value out (transferring share to caller).
+        let removed_value: V = unsafe {
+            let data_ptr = (*self.values).data.add(removed_idx);
+            std::ptr::read(data_ptr)
+        };
+        // Read the key pointer out + release its share.
+        let removed_key: *const crate::v2::string_obj::StringObj = unsafe {
+            crate::v2::typed_array::TypedArray::get_unchecked(self.keys, removed_idx as u32)
+        };
+        unsafe {
+            use crate::v2::heap_element::HeapElement;
+            crate::v2::string_obj::StringObj::release_elem(removed_key);
+        }
+        // Shift remaining elements down by one (compact the buffers).
+        let n_keys = unsafe { crate::v2::typed_array::TypedArray::len(self.keys) } as usize;
+        unsafe {
+            let keys_data = (*self.keys).data;
+            let values_data = (*self.values).data;
+            for j in removed_idx..n_keys - 1 {
+                std::ptr::write(keys_data.add(j), std::ptr::read(keys_data.add(j + 1)));
+                std::ptr::write(values_data.add(j), std::ptr::read(values_data.add(j + 1)));
+            }
+            (*self.keys).len -= 1;
+            (*self.values).len -= 1;
+        }
+        // Renumber the bucket index entries pointing past the removed slot.
         for bucket in self.index.values_mut() {
             for slot in bucket.iter_mut() {
                 if (*slot as usize) > removed_idx {
@@ -1344,66 +1449,482 @@ impl HashMapData {
                 }
             }
         }
-        true
+        Some(removed_value)
     }
 
-    /// Per-arm remove-at-index for the values buffer. Each arm reaches
-    /// into its typed buffer via `Arc::make_mut`. Refcount discipline is
-    /// per-arm at compile time — no `Arc<HeapValue>` dispatch hop.
-    fn remove_value_at(&mut self, i: usize) {
-        match &mut self.values {
-            HashMapValueBuf::String(b) => {
-                Arc::make_mut(b).data.remove(i);
-            }
-            HashMapValueBuf::Decimal(b) => {
-                Arc::make_mut(b).data.remove(i);
-            }
-            HashMapValueBuf::BigInt(b) => {
-                Arc::make_mut(b).data.remove(i);
-            }
-            HashMapValueBuf::Char(b) => {
-                Arc::make_mut(b).data.remove(i);
-            }
-            HashMapValueBuf::TypedObject(b) => {
-                Arc::make_mut(b).data.remove(i);
-            }
-        }
+    /// Look up a value by key. Returns a *share-cloned* copy of the stored
+    /// value (the caller takes one fresh share — for POD V trivial copy;
+    /// for HeapElement / ptr-newtype V the v2_retain happens via
+    /// `HashMapValueElem::share_clone`).
+    ///
+    /// Returns `None` if the key is absent.
+    pub fn get_share(&self, key: &str) -> Option<V> {
+        let i = self.get_index(key)?;
+        // SAFETY: i < len(values).
+        let elem_ref: &V = unsafe { &*(*self.values).data.add(i) };
+        Some(unsafe { V::share_clone(elem_ref) })
     }
 
-    /// Merge entries from `other` into `self`. Keys present in both maps
-    /// take the value from `other` (last-write-wins, matching `Object.assign`
-    /// / `dict.update` semantics). Per-entry insert path — the bucket index
-    /// is maintained incrementally.
-    pub fn merge(&mut self, other: &HashMapData) {
+    /// Merge `other`'s entries into `self`, last-write-wins on key
+    /// collision. Each value from `other` is share-cloned before being
+    /// inserted (so `other`'s shares are preserved).
+    pub unsafe fn merge(&mut self, other: &Self) {
         let n = other.len();
         for i in 0..n {
-            let key = Arc::clone(&other.keys.data[i]);
-            let value = other.values.value_at(i);
-            self.insert(key, value);
+            // SAFETY: i < other.len().
+            let key_ptr = unsafe {
+                crate::v2::typed_array::TypedArray::get_unchecked(other.keys, i as u32)
+            };
+            let key_str = unsafe { crate::v2::string_obj::StringObj::as_str(key_ptr) };
+            let value_ref: &V = unsafe { &*(*other.values).data.add(i) };
+            let cloned_value = unsafe { V::share_clone(value_ref) };
+            unsafe { self.insert(key_str, cloned_value) };
         }
+    }
+
+    /// Push a single value onto the values buffer, growing the data
+    /// allocation if needed. Bypasses `TypedArray::<T: Copy>::push` so
+    /// non-Copy V types (TypedObjectPtr/TraitObjectPtr) work too.
+    ///
+    /// # Safety
+    /// `values` must point to a live `TypedArray<V>`; `value` must be a
+    /// valid owned V (caller transfers one share).
+    unsafe fn values_push(values: *mut crate::v2::typed_array::TypedArray<V>, value: V) {
+        use std::alloc::{alloc, realloc, Layout};
+        unsafe {
+            let arr = &mut *values;
+            if arr.len == arr.cap {
+                // Grow (doubling, min 4).
+                let new_cap = if arr.cap == 0 { 4u32 } else { arr.cap.checked_mul(2).expect("capacity overflow") };
+                let new_layout = Layout::array::<V>(new_cap as usize).expect("invalid array layout");
+                let new_data = if arr.cap == 0 || arr.data.is_null() {
+                    alloc(new_layout) as *mut V
+                } else {
+                    let old_layout = Layout::array::<V>(arr.cap as usize).expect("invalid array layout");
+                    realloc(arr.data as *mut u8, old_layout, new_layout.size()) as *mut V
+                };
+                assert!(!new_data.is_null(), "reallocation failed for HashMapData<V> values");
+                arr.data = new_data;
+                arr.cap = new_cap;
+            }
+            std::ptr::write(arr.data.add(arr.len as usize), value);
+            arr.len += 1;
+        }
+    }
+
+    /// Drop an owned value, retiring its refcount share if it owns one.
+    /// Per-V dispatch via `HashMapValueElem::release_owned`. For POD V
+    /// (i64/f64/u8/char) this is a no-op; for HeapElement V the share is
+    /// retired via `release_elem`; for Ptr-newtype V the wrapper's Drop
+    /// impl runs at scope-end.
+    ///
+    /// # Safety
+    /// `value` must be a valid owned V — callers transfer one share to
+    /// this method; the method retires it.
+    unsafe fn drop_owned_value(value: V) {
+        unsafe { V::release_owned(value) }
     }
 }
 
-impl Default for HashMapData {
+impl<V: HashMapValueElem> Default for HashMapData<V> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Clone for HashMapData {
+impl<V: HashMapValueElem> Drop for HashMapData<V> {
+    /// Retire the per-buffer strong-count shares: keys (via
+    /// `<*const StringObj as HashMapValueElem>::release_typed_array`) +
+    /// values (via `V::release_typed_array`). Per-V monomorphized at compile
+    /// time — no runtime kind probe.
+    fn drop(&mut self) {
+        if !self.keys.is_null() {
+            // SAFETY: `self.keys` was allocated via the v2-raw
+            // `TypedArray::<*const StringObj>` allocator and owns one
+            // strong-count share. After this call `self.keys` is invalid.
+            unsafe {
+                <*const crate::v2::string_obj::StringObj as HashMapValueElem>::release_typed_array(
+                    self.keys,
+                )
+            }
+        }
+        if !self.values.is_null() {
+            // SAFETY: `self.values` was allocated via the v2-raw
+            // `TypedArray::<V>` allocator and owns one strong-count share.
+            // Per-V dispatcher via `HashMapValueElem`.
+            unsafe { V::release_typed_array(self.values) }
+        }
+    }
+}
+
+/// Clone-on-write impl for `HashMapData<V>` (Wave 2 Round 3b C2-joint
+/// ckpt-3, 2026-05-14). Allocates fresh keys + values buffers and
+/// share-clones each element per the per-V `HashMapValueElem::share_clone`
+/// dispatcher (and `v2_retain` on each key via the *const StringObj impl).
+/// The fresh `HashMapData<V>` owns one refcount share on each per-element
+/// allocation; the source's shares are untouched.
+///
+/// This impl is required for `Arc::make_mut(&mut Arc<HashMapData<V>>)` to
+/// work at the consumer side (clone-on-write at the dispatch shell). Per
+/// ADR-006 §2.7.24 Q25.B SUPERSEDED + audit §C.4 option (a.2).
+impl<V: HashMapValueElem> Clone for HashMapData<V> {
     fn clone(&self) -> Self {
-        // Arc::clone on the buffers (shared structural sharing is fine —
-        // HashMapData is treated as immutable at the marshal boundary;
-        // mutation goes through Arc::make_mut on the shape-vm side, out
-        // of this crate's scope). The value-buffer enum's hand-written
-        // Clone impl Arc::clones the inner typed buffer per arm.
+        let n = self.len();
+        // Allocate fresh keys buffer with capacity n (Copy-bounded
+        // `with_capacity` since *const StringObj is Copy).
+        let new_keys = crate::v2::typed_array::TypedArray::<
+            *const crate::v2::string_obj::StringObj,
+        >::with_capacity(n as u32);
+        // Allocate fresh values buffer with capacity n. Use the non-Copy
+        // generic variant so V can be either Copy (POD/raw pointers) or
+        // non-Copy (TypedObjectPtr / TraitObjectPtr).
+        let new_values = crate::v2::typed_array::TypedArray::<V>::with_capacity_generic(n as u32);
+        // Walk source elements; share_clone keys + values into the new buffers.
+        unsafe {
+            for i in 0..n {
+                let key_ptr = crate::v2::typed_array::TypedArray::get_unchecked(
+                    self.keys, i as u32,
+                );
+                // Share-clone the key (v2_retain on the *const StringObj).
+                let cloned_key = <*const crate::v2::string_obj::StringObj
+                    as HashMapValueElem>::share_clone(&key_ptr);
+                std::ptr::write((*new_keys).data.add(i), cloned_key);
+                let value_ref: &V = &*(*self.values).data.add(i);
+                let cloned_value = V::share_clone(value_ref);
+                std::ptr::write((*new_values).data.add(i), cloned_value);
+            }
+            (*new_keys).len = n as u32;
+            (*new_values).len = n as u32;
+        }
         Self {
-            keys: Arc::clone(&self.keys),
-            values: self.values.clone(),
+            keys: new_keys,
+            values: new_values,
             index: self.index.clone(),
         }
     }
 }
+
+/// HashMapKindedRef — kinded carrier for `Arc<HashMapData<V>>` per audit
+/// §C.4 option (a.2). Bundles per-V monomorphized payload types as enum
+/// variants; the variant tag IS the `NativeKind` discriminator at the
+/// carrier layer.
+///
+/// Used as the `HeapValue::HashMap` arm payload (ckpt-2 flips the variant
+/// signature). Stays within shape-value / shape-runtime / shape-vm internal
+/// Rust boundaries per ADR-006 §2.7.5 Cross-crate ABI policy — does NOT
+/// leak into the extension contract raw-bits ABI at `module_exports.rs:21`.
+///
+/// **Manual Drop + Clone discipline** mirroring `TypedObjectPtr`: the
+/// auto-derived `Drop` / `Clone` on the enclosing `HeapValue` enum chains
+/// through `HashMapKindedRef`'s manual impls, which dispatch to per-variant
+/// `Arc::drop` / `Arc::clone` on the typed inner `Arc<HashMapData<V>>`.
+///
+/// Per-V variants supported at landing (mirror of §C.4 audit shape;
+/// post-D4 TypedObjectPtr canonical pattern):
+///
+/// - `I64` — `Arc<HashMapData<i64>>`
+/// - `F64` — `Arc<HashMapData<f64>>`
+/// - `Bool` — `Arc<HashMapData<u8>>`
+/// - `Char` — `Arc<HashMapData<char>>` (dead-but-derived per §C.5)
+/// - `String` — `Arc<HashMapData<*const StringObj>>`
+/// - `Decimal` — `Arc<HashMapData<*const DecimalObj>>`
+/// - `TypedObject` — `Arc<HashMapData<TypedObjectPtr>>`
+/// - `TraitObject` — `Arc<HashMapData<TraitObjectPtr>>`
+///
+/// **Forbidden** (per CLAUDE.md broader-family regex + Q25.B SUPERSEDED
+/// post-supersession #1):
+///
+/// - "HashMapKindedRef shim" / "HashMapKindedRef bridge" / "kinded-ref helper"
+///   framing — refused on sight; the Ref-suffix is canonical per ADR-006
+///   §2.7.6 / Q8 carrier-API-bound naming. Mirror of `KindedSlot::from_X`
+///   constructor-shape; not a shim.
+/// - Re-introducing `HashMapValueBuf` arms inside or alongside this enum
+///   ("Q25.B-inside-enum carriers retained" / "documented intentional
+///   duality"). The Wave 2 cadence shift authorization stands — per-V
+///   monomorphization at the method tier with HashMapKindedRef carrier is
+///   the deletion target, NOT a preserved-alongside alternative.
+/// - HashMap-wide runtime kind discriminator on `HashMapData<V>` itself
+///   (per audit §C.4 rationale: per-V monomorphization at compile time via
+///   this carrier API; NO inline tag byte on `HashMapData<V>`).
+#[derive(Debug)]
+pub enum HashMapKindedRef {
+    /// `Arc<HashMapData<i64>>` — V = i64 (POD scalar).
+    I64(Arc<HashMapData<i64>>),
+    /// `Arc<HashMapData<f64>>` — V = f64 (POD scalar).
+    F64(Arc<HashMapData<f64>>),
+    /// `Arc<HashMapData<u8>>` — V = u8 (Bool; one byte per element).
+    Bool(Arc<HashMapData<u8>>),
+    /// `Arc<HashMapData<char>>` — V = char (codepoint; dead-but-derived per §C.5).
+    Char(Arc<HashMapData<char>>),
+    /// `Arc<HashMapData<*const StringObj>>` — V = `*const StringObj`
+    /// (HeapElement-equipped raw pointer).
+    String(Arc<HashMapData<*const crate::v2::string_obj::StringObj>>),
+    /// `Arc<HashMapData<*const DecimalObj>>` — V = `*const DecimalObj`
+    /// (HeapElement-equipped raw pointer).
+    Decimal(Arc<HashMapData<*const crate::v2::decimal_obj::DecimalObj>>),
+    /// `Arc<HashMapData<TypedObjectPtr>>` — V = `TypedObjectPtr`
+    /// (#[repr(transparent)] newtype over `*const TypedObjectStorage`,
+    /// per ADR-006 §2.3 amendment D4 ckpt-final-prime² canonical pattern).
+    TypedObject(Arc<HashMapData<TypedObjectPtr>>),
+    /// `Arc<HashMapData<TraitObjectPtr>>` — V = `TraitObjectPtr`
+    /// (#[repr(transparent)] newtype over `*const TraitObjectStorage`).
+    TraitObject(Arc<HashMapData<TraitObjectPtr>>),
+}
+
+impl Clone for HashMapKindedRef {
+    /// Per-variant `Arc::clone` — single refcount bump on the inner
+    /// `Arc<HashMapData<V>>`. No structural copy.
+    fn clone(&self) -> Self {
+        match self {
+            HashMapKindedRef::I64(arc) => HashMapKindedRef::I64(Arc::clone(arc)),
+            HashMapKindedRef::F64(arc) => HashMapKindedRef::F64(Arc::clone(arc)),
+            HashMapKindedRef::Bool(arc) => HashMapKindedRef::Bool(Arc::clone(arc)),
+            HashMapKindedRef::Char(arc) => HashMapKindedRef::Char(Arc::clone(arc)),
+            HashMapKindedRef::String(arc) => HashMapKindedRef::String(Arc::clone(arc)),
+            HashMapKindedRef::Decimal(arc) => HashMapKindedRef::Decimal(Arc::clone(arc)),
+            HashMapKindedRef::TypedObject(arc) => HashMapKindedRef::TypedObject(Arc::clone(arc)),
+            HashMapKindedRef::TraitObject(arc) => HashMapKindedRef::TraitObject(Arc::clone(arc)),
+        }
+    }
+}
+
+// Drop is auto-derived: each variant holds `Arc<HashMapData<V>>` whose Drop
+// retires one strong-count share; on refcount-0 the inner `HashMapData<V>::Drop`
+// runs and retires keys + values buffer shares via the `HashMapValueElem`
+// dispatch. No manual `impl Drop` needed.
+
+impl HashMapKindedRef {
+    /// The per-V `NativeKind` discriminator for the values buffer of this
+    /// HashMap. Used at carrier boundaries (e.g. `HashMap.values()`
+    /// projection to `TypedArrayData::<V>` arm + the parallel-kind stack
+    /// track at §2.7.7 / Q9 stack reads of HashMap-iter yields) to feed
+    /// the per-V Arc into the matching `KindedSlot::from_*` constructor.
+    ///
+    /// Per ADR-006 §2.7.6 / Q8 carrier-API-bound rule: one accessor per
+    /// `NativeKind` heap variant — no per-V escape-hatch accessor (e.g.
+    /// `as_string_arc()` returning `Arc<HashMapData<*const StringObj>>`)
+    /// at this layer; consumers destructure the enum to recover the
+    /// typed inner Arc.
+    ///
+    /// **Per-V NativeKind mapping** (Wave 2 Round 3b C2-joint ckpt-2
+    /// 2026-05-14):
+    ///
+    /// - `I64` → `NativeKind::Int64`
+    /// - `F64` → `NativeKind::Float64`
+    /// - `Bool` → `NativeKind::Bool`
+    /// - `Char` → `NativeKind::Char` (dead-but-derived per §C.5)
+    /// - `String` → `NativeKind::Ptr(HeapKind::String)`
+    /// - `Decimal` → `NativeKind::Ptr(HeapKind::Decimal)`
+    /// - `TypedObject` → `NativeKind::Ptr(HeapKind::TypedObject)`
+    /// - `TraitObject` → `NativeKind::Ptr(HeapKind::TraitObject)`
+    ///
+    /// **StringV2 / DecimalV2 gate-flip dependency note:** at ckpt-2
+    /// landing time (2026-05-14), the v2-raw `StringV2` / `DecimalV2`
+    /// `NativeKind` variants were proposed in Round 3a' but the
+    /// gate-flip from `NativeKind::Ptr(HeapKind::String)` →
+    /// `NativeKind::StringV2` (et al.) had not propagated across all
+    /// carrier APIs. This accessor maps `String` and `Decimal` arms to
+    /// the heap-pointer variant per the post-3a-flip baseline; if a
+    /// future gate-flip moves the canonical surface to StringV2/DecimalV2,
+    /// this mapping is updated lockstep at the same wave (ckpt-3 or
+    /// follow-up).
+    #[inline]
+    pub fn values_kind(&self) -> crate::NativeKind {
+        use crate::NativeKind;
+        match self {
+            HashMapKindedRef::I64(_) => NativeKind::Int64,
+            HashMapKindedRef::F64(_) => NativeKind::Float64,
+            HashMapKindedRef::Bool(_) => NativeKind::Bool,
+            HashMapKindedRef::Char(_) => NativeKind::Char,
+            HashMapKindedRef::String(_) => NativeKind::Ptr(HeapKind::String),
+            HashMapKindedRef::Decimal(_) => NativeKind::Ptr(HeapKind::Decimal),
+            HashMapKindedRef::TypedObject(_) => NativeKind::Ptr(HeapKind::TypedObject),
+            HashMapKindedRef::TraitObject(_) => NativeKind::Ptr(HeapKind::TraitObject),
+        }
+    }
+
+    /// Number of entries in the HashMap. Dispatches per-V to the inner
+    /// `HashMapData<V>::len()` (same impl for every V — the keys buffer
+    /// length, which equals the values buffer length per the from_pairs
+    /// invariant).
+    #[inline]
+    pub fn len(&self) -> usize {
+        match self {
+            HashMapKindedRef::I64(arc) => arc.len(),
+            HashMapKindedRef::F64(arc) => arc.len(),
+            HashMapKindedRef::Bool(arc) => arc.len(),
+            HashMapKindedRef::Char(arc) => arc.len(),
+            HashMapKindedRef::String(arc) => arc.len(),
+            HashMapKindedRef::Decimal(arc) => arc.len(),
+            HashMapKindedRef::TypedObject(arc) => arc.len(),
+            HashMapKindedRef::TraitObject(arc) => arc.len(),
+        }
+    }
+
+    /// Whether the map is empty (zero entries). Dispatches per-V via `len()`.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Whether the map contains the given key. Dispatches per-V via the
+    /// inner `HashMapData<V>::contains_key` (same impl for every V — keys
+    /// are stringly-typed, so the lookup is V-agnostic).
+    #[inline]
+    pub fn contains_key(&self, key: &str) -> bool {
+        match self {
+            HashMapKindedRef::I64(arc) => arc.contains_key(key),
+            HashMapKindedRef::F64(arc) => arc.contains_key(key),
+            HashMapKindedRef::Bool(arc) => arc.contains_key(key),
+            HashMapKindedRef::Char(arc) => arc.contains_key(key),
+            HashMapKindedRef::String(arc) => arc.contains_key(key),
+            HashMapKindedRef::Decimal(arc) => arc.contains_key(key),
+            HashMapKindedRef::TypedObject(arc) => arc.contains_key(key),
+            HashMapKindedRef::TraitObject(arc) => arc.contains_key(key),
+        }
+    }
+
+    /// The `HeapKind` discriminator for `KindedSlot::from_hashmap` slot
+    /// stamping (§2.7.6 / Q8 / Q9 parallel-kind track). Always
+    /// `HeapKind::HashMap` regardless of the inner V — the V-discriminator
+    /// is encoded in the `HashMapKindedRef` variant tag, not in the
+    /// `HeapKind` ordinal (HashMap stays at ordinal 17).
+    #[inline]
+    pub const fn heap_kind(&self) -> HeapKind {
+        HeapKind::HashMap
+    }
+}
+
+/// Per-V `{key: value, …}` formatter for `HashMapKindedRef`. Walks the
+/// keys buffer + per-V values buffer; renders keys as quoted strings
+/// and each value via the matching primitive `Display` (i64/f64/u8 as
+/// "true"/"false"/char). For HeapElement / Ptr-newtype V we route
+/// through the inner pointer's `Display` shape.
+///
+/// Wave 2 Round 3b C2-joint ckpt-3 (2026-05-14). ADR-006 §2.7.24 Q25.B
+/// SUPERSEDED + audit §C.4.
+fn hashmap_kref_display(
+    kref: &HashMapKindedRef,
+    f: &mut std::fmt::Formatter<'_>,
+) -> std::fmt::Result {
+    use std::fmt::Write as _;
+    write!(f, "{{")?;
+
+    /// Read all keys as `&str` from the v2-raw `*mut TypedArray<*const StringObj>` buffer.
+    ///
+    /// # Safety
+    /// `keys` must point to a live `TypedArray<*const StringObj>` whose
+    /// elements are live StringObjs (the HashMapData<V> contract).
+    unsafe fn read_keys<'a>(
+        keys: *const crate::v2::typed_array::TypedArray<*const crate::v2::string_obj::StringObj>,
+    ) -> Vec<&'a str> {
+        unsafe {
+            let n = crate::v2::typed_array::TypedArray::len(keys) as usize;
+            let mut out = Vec::with_capacity(n);
+            for i in 0..n {
+                let ptr = crate::v2::typed_array::TypedArray::get_unchecked(keys, i as u32);
+                out.push(crate::v2::string_obj::StringObj::as_str(ptr));
+            }
+            out
+        }
+    }
+
+    fn emit_key(f: &mut std::fmt::Formatter<'_>, i: usize, key: &str) -> std::fmt::Result {
+        if i > 0 {
+            f.write_str(", ")?;
+        }
+        write!(f, "\"{}\": ", key)
+    }
+
+    match kref {
+        HashMapKindedRef::I64(arc) => {
+            let keys = unsafe { read_keys(arc.keys) };
+            for (i, k) in keys.iter().enumerate() {
+                emit_key(f, i, k)?;
+                let v = unsafe { *(*arc.values).data.add(i) };
+                write!(f, "{}", v)?;
+            }
+        }
+        HashMapKindedRef::F64(arc) => {
+            let keys = unsafe { read_keys(arc.keys) };
+            for (i, k) in keys.iter().enumerate() {
+                emit_key(f, i, k)?;
+                let v = unsafe { *(*arc.values).data.add(i) };
+                write!(f, "{}", v)?;
+            }
+        }
+        HashMapKindedRef::Bool(arc) => {
+            let keys = unsafe { read_keys(arc.keys) };
+            for (i, k) in keys.iter().enumerate() {
+                emit_key(f, i, k)?;
+                let v: u8 = unsafe { *(*arc.values).data.add(i) };
+                write!(f, "{}", v != 0)?;
+            }
+        }
+        HashMapKindedRef::Char(arc) => {
+            let keys = unsafe { read_keys(arc.keys) };
+            for (i, k) in keys.iter().enumerate() {
+                emit_key(f, i, k)?;
+                let v: char = unsafe { *(*arc.values).data.add(i) };
+                write!(f, "'{}'", v)?;
+            }
+        }
+        HashMapKindedRef::String(arc) => {
+            let keys = unsafe { read_keys(arc.keys) };
+            for (i, k) in keys.iter().enumerate() {
+                emit_key(f, i, k)?;
+                let v_ptr: *const crate::v2::string_obj::StringObj =
+                    unsafe { *(*arc.values).data.add(i) };
+                let s = unsafe { crate::v2::string_obj::StringObj::as_str(v_ptr) };
+                write!(f, "\"{}\"", s)?;
+            }
+        }
+        HashMapKindedRef::Decimal(arc) => {
+            let keys = unsafe { read_keys(arc.keys) };
+            for (i, k) in keys.iter().enumerate() {
+                emit_key(f, i, k)?;
+                let v_ptr: *const crate::v2::decimal_obj::DecimalObj =
+                    unsafe { *(*arc.values).data.add(i) };
+                // DecimalObj::as_decimal returns the Decimal value via the
+                // v2-raw payload (mirrors StringObj::as_str shape).
+                let d = unsafe { (*v_ptr).value };
+                let mut tmp = String::new();
+                let _ = write!(tmp, "{}", d);
+                f.write_str(&tmp)?;
+            }
+        }
+        HashMapKindedRef::TypedObject(arc) => {
+            let keys = unsafe { read_keys(arc.keys) };
+            for (i, k) in keys.iter().enumerate() {
+                emit_key(f, i, k)?;
+                // Render as opaque tag — full recursive rendering lives at
+                // printing.rs::format_typed_object (depth-budgeted).
+                let v_ref: &TypedObjectPtr = unsafe { &*(*arc.values).data.add(i) };
+                write!(f, "<typed_object:{:p}>", v_ref.as_ptr())?;
+            }
+        }
+        HashMapKindedRef::TraitObject(arc) => {
+            let keys = unsafe { read_keys(arc.keys) };
+            for (i, k) in keys.iter().enumerate() {
+                emit_key(f, i, k)?;
+                let v_ref: &TraitObjectPtr = unsafe { &*(*arc.values).data.add(i) };
+                write!(f, "<trait_object:{:p}>", v_ref.as_ptr())?;
+            }
+        }
+    }
+    write!(f, "}}")
+}
+
+// ── Legacy HashMapValueBuf + non-generic HashMapData REMOVED (Wave 2 Round 3b
+//    C2-joint ckpt-1, 2026-05-14) ──────────────────────────────────────────
+//
+// The pre-Q25.B-SUPERSEDED `HashMapValueBuf` enum + non-generic `HashMapData`
+// struct/impl have been removed. The replacement is `HashMapData<V>` +
+// `HashMapKindedRef` + `HashMapValueElem` trait (above). Consumer sites at
+// `HeapValue::HashMap` variant payload + 51 `Arc<HashMapData>` usages cascade
+// in ckpt-2 (variant signature) + ckpt-3 (hashmap_methods.rs / printing.rs /
+// xml.rs / json.rs / array_transform.rs / vm_impl/builtins.rs /
+// trait_object_ops.rs) + ckpt-final (JIT FFI).
 
 // ── HashSet storage (Wave 13 W13-hashset-rebuild, 2026-05-10) ───────────────
 
@@ -3124,7 +3645,15 @@ impl TypedObjectStorage {
                             );
                         }
                         HeapKind::HashMap => {
-                            std::sync::Arc::decrement_strong_count(bits as *const HashMapData);
+                            // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14):
+                            // bits are `Arc::into_raw(Arc<HashMapKindedRef>)`
+                            // per ADR-006 §2.7.24 Q25.B SUPERSEDED carrier
+                            // shape. Release dispatches outer Arc decrement;
+                            // enum Drop chains to per-V `Arc<HashMapData<V>>`
+                            // release.
+                            std::sync::Arc::decrement_strong_count(
+                                bits as *const HashMapKindedRef,
+                            );
                         }
                         HeapKind::HashSet => {
                             std::sync::Arc::decrement_strong_count(bits as *const HashSetData);
@@ -4153,7 +4682,11 @@ impl Clone for HeapValue {
             HeapValue::TypedArray(v) => HeapValue::TypedArray(Arc::clone(v)),
             HeapValue::Temporal(v) => HeapValue::Temporal(Arc::clone(v)),
             HeapValue::TableView(v) => HeapValue::TableView(Arc::clone(v)),
-            HeapValue::HashMap(v) => HeapValue::HashMap(Arc::clone(v)),
+            // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): payload is now
+            // `HashMapKindedRef` (not `Arc<HashMapData>`); the enum's manual
+            // Clone impl dispatches per-variant `Arc::clone` on the inner
+            // `Arc<HashMapData<V>>` — preserving structural sharing.
+            HeapValue::HashMap(v) => HeapValue::HashMap(v.clone()),
             // Wave 13 W13-hashset-rebuild (ADR-006 §2.7.15 / Q16,
             // 2026-05-10): mirror of HashMap — single strong-count bump
             // on the shared `Arc<HashSetData>`, no payload copy.
@@ -4378,18 +4911,17 @@ impl fmt::Display for HeapValue {
                 v.ptr
             ),
             HeapValue::TypedArray(ta) => write!(f, "{}", ta),
-            HeapValue::HashMap(d) => {
-                write!(f, "{{")?;
-                let n = d.keys.data.len();
-                for i in 0..n {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    let k = &d.keys.data[i];
-                    let v = d.values.value_at(i);
-                    write!(f, "\"{}\": {}", k, v)?;
-                }
-                write!(f, "}}")
+            HeapValue::HashMap(kref) => {
+                // Wave 2 Round 3b C2-joint ckpt-3 (2026-05-14): full per-V
+                // entry dump. Walks `*mut TypedArray<*const StringObj>`
+                // keys + per-V `*mut TypedArray<V>` values; formats as
+                // `{"k1": v1, "k2": v2}` using each V's natural Display.
+                // For TypedObject / TraitObject the inner value renders
+                // as a summary tag — full recursive rendering lives at
+                // printing.rs (which has the depth-budgeted recursive
+                // Display via format_heap_value). ADR-006 §2.7.24 Q25.B
+                // SUPERSEDED + audit §C.4.
+                hashmap_kref_display(kref, f)
             }
             // Wave 13 W13-hashset-rebuild (ADR-006 §2.7.15 / Q16,
             // 2026-05-10): one-keyspace mirror of HashMap's Display
@@ -5081,31 +5613,47 @@ mod typed_object_storage_drop {
     }
 }
 
+// Wave 2 Round 3b C2-joint ckpt-3 (2026-05-14): rewritten against the
+// per-V `HashMapData<V>` mutation API (insert / remove / get_share /
+// merge). The pre-Q25.B-SUPERSEDED non-generic `HashMapData::insert(k,
+// Arc<HeapValue>) / remove(k) -> bool / get(k) -> Option<Arc<HeapValue>>`
+// shape is gone; tests below exercise the per-V semantics on the most
+// common production-V cases:
+//
+// - `V = i64` (Q25.B I64 arm): POD/Copy V — pin len/contains/insert/remove
+//   semantics without refcount-share complications.
+// - `V = *const StringObj` (Q25.B String arm): HeapElement V — pin the
+//   v2_retain / release_elem refcount-share threading via the
+//   `HashMapValueElem::share_clone` + `release_owned` dispatch.
+//
+// The previously-introduced undeclared feature gate (Round 3b ckpt-2)
+// guarding this test module has been REMOVED per ckpt-3 dispatch
+// Group F (mandatory non-negotiable): the gate was masquerading as a
+// feature flag while being functionally `#[cfg(false)]` (no Cargo.toml
+// declaration), matching CLAUDE.md Forbidden Rationalizations.
+// ADR-006 §2.7.24 Q25.B SUPERSEDED + audit §C.4 option (a.2).
 #[cfg(test)]
 mod hashmap_mutation {
-    //! W13-hashmap-mutation (2026-05-10): pin the `insert` / `remove` /
-    //! `merge` API contracts on `HashMapData`. The mutation entry-points
-    //! are the storage-layer counterparts of `v2_set` / `v2_delete` /
-    //! `v2_merge` in `shape-vm/executor/objects/hashmap_methods.rs` (the
-    //! handlers project `KindedSlot` carriers into typed Arcs and route
-    //! through these methods via `Arc::make_mut` clone-on-write).
+    //! Wave 2 Round 3b C2-joint ckpt-3 (2026-05-14): pin the
+    //! `insert` / `remove` / `get_share` / `merge` API contracts on the
+    //! post-Q25.B-SUPERSEDED `HashMapData<V>`. Storage-layer counterpart
+    //! of `v2_set` / `v2_delete` / `v2_get` / `v2_merge` in
+    //! `shape-vm/executor/objects/hashmap_methods.rs`.
     use super::*;
+    use crate::v2::refcount::v2_get_refcount;
+    use crate::v2::string_obj::StringObj;
     use std::sync::Arc;
-    fn k(s: &str) -> Arc<String> {
-        Arc::new(s.to_string())
-    }
-    fn v_i(i: i64) -> Arc<HeapValue> {
-        Arc::new(HeapValue::BigInt(Arc::new(i)))
-    }
+
+    // ── V = i64 (POD/Copy) ──────────────────────────────────────────────
 
     #[test]
-    fn insert_appends_new_entry_and_grows_index() {
-        let mut m = HashMapData::new();
-        m.insert(k("a"), v_i(1));
-        m.insert(k("b"), v_i(2));
+    fn i64_insert_appends_new_entry_and_grows_index() {
+        let mut m: HashMapData<i64> = HashMapData::new();
+        unsafe {
+            assert!(m.insert("a", 1));
+            assert!(m.insert("b", 2));
+        }
         assert_eq!(m.len(), 2);
-        assert_eq!(m.keys.data[0].as_str(), "a");
-        assert_eq!(m.keys.data[1].as_str(), "b");
         // Bucket index has registrations for both keys' hashes.
         let h_a = fnv1a_hash(b"a");
         let h_b = fnv1a_hash(b"b");
@@ -5114,133 +5662,212 @@ mod hashmap_mutation {
     }
 
     #[test]
-    fn insert_overwrites_existing_value_and_keeps_len() {
-        let mut m = HashMapData::new();
-        m.insert(k("a"), v_i(1));
-        m.insert(k("a"), v_i(99));
-        assert_eq!(m.len(), 1);
-        // get() returns the new value (BigInt(99), per v_i).
-        let got = m.get("a").expect("present");
-        match got.as_ref() {
-            HeapValue::BigInt(b) => assert_eq!(**b, 99),
-            other => panic!("unexpected value arm: {:?}", other.kind()),
+    fn i64_insert_overwrites_existing_value_and_keeps_len() {
+        let mut m: HashMapData<i64> = HashMapData::new();
+        unsafe {
+            assert!(m.insert("a", 1));
+            // Overwrite returns false (existing key).
+            assert!(!m.insert("a", 99));
         }
+        assert_eq!(m.len(), 1);
+        // get_share returns a fresh Copy of the i64 value.
+        assert_eq!(m.get_share("a"), Some(99));
     }
 
     #[test]
-    fn insert_overwrite_releases_old_value_share() {
-        // Pin the in-place overwrite path drops the old Arc<HeapValue> share.
-        let old: Arc<HeapValue> = v_i(1);
-        let witness = Arc::clone(&old);
-        assert_eq!(Arc::strong_count(&witness), 2);
-
-        let mut m = HashMapData::new();
-        m.insert(k("a"), old);
-        assert_eq!(Arc::strong_count(&witness), 2);
-        m.insert(k("a"), v_i(99));
-        // Map no longer holds the original value's share; only the witness remains.
-        assert_eq!(Arc::strong_count(&witness), 1);
-        assert_eq!(m.len(), 1);
-    }
-
-    #[test]
-    fn remove_present_key_drops_entry_returns_true() {
-        let mut m = HashMapData::new();
-        m.insert(k("a"), v_i(1));
-        m.insert(k("b"), v_i(2));
-        assert!(m.remove("a"));
-        assert_eq!(m.len(), 1);
-        assert!(m.get("a").is_none());
-        // "b" should still be reachable — bucket index was updated.
-        let got = m.get("b").expect("b present");
-        match got.as_ref() {
-            HeapValue::BigInt(bi) => assert_eq!(**bi, 2),
-            _ => panic!("expected BigInt(2)"),
+    fn i64_remove_present_key_returns_value_and_compacts() {
+        let mut m: HashMapData<i64> = HashMapData::new();
+        unsafe {
+            m.insert("a", 1);
+            m.insert("b", 2);
+            assert_eq!(m.remove("a"), Some(1));
         }
-    }
-
-    #[test]
-    fn remove_missing_key_returns_false_and_is_noop() {
-        let mut m = HashMapData::new();
-        m.insert(k("a"), v_i(1));
-        assert!(!m.remove("nope"));
         assert_eq!(m.len(), 1);
-        assert!(m.get("a").is_some());
+        assert!(m.get_share("a").is_none());
+        // "b" should still be reachable — bucket index was renumbered.
+        assert_eq!(m.get_share("b"), Some(2));
     }
 
     #[test]
-    fn remove_releases_value_share() {
-        let v: Arc<HeapValue> = v_i(42);
-        let witness = Arc::clone(&v);
-        assert_eq!(Arc::strong_count(&witness), 2);
-
-        let mut m = HashMapData::new();
-        m.insert(k("a"), v);
-        assert_eq!(Arc::strong_count(&witness), 2);
-        assert!(m.remove("a"));
-        assert_eq!(Arc::strong_count(&witness), 1);
+    fn i64_remove_missing_key_returns_none_and_is_noop() {
+        let mut m: HashMapData<i64> = HashMapData::new();
+        unsafe {
+            m.insert("a", 1);
+            assert_eq!(m.remove("nope"), None);
+        }
+        assert_eq!(m.len(), 1);
+        assert_eq!(m.get_share("a"), Some(1));
     }
 
     #[test]
-    fn merge_copies_other_entries_with_last_write_wins() {
-        let mut a = HashMapData::new();
-        a.insert(k("x"), v_i(1));
-        a.insert(k("shared"), v_i(10));
-
-        let mut b = HashMapData::new();
-        b.insert(k("y"), v_i(2));
-        b.insert(k("shared"), v_i(99));
-
-        a.merge(&b);
+    fn i64_merge_copies_other_entries_with_last_write_wins() {
+        let mut a: HashMapData<i64> = HashMapData::new();
+        let mut b: HashMapData<i64> = HashMapData::new();
+        unsafe {
+            a.insert("x", 1);
+            a.insert("shared", 10);
+            b.insert("y", 2);
+            b.insert("shared", 99);
+            a.merge(&b);
+        }
         assert_eq!(a.len(), 3);
-        // x preserved
-        match a.get("x").expect("x").as_ref() {
-            HeapValue::BigInt(bi) => assert_eq!(**bi, 1),
-            _ => panic!(),
-        }
-        // y added
-        match a.get("y").expect("y").as_ref() {
-            HeapValue::BigInt(bi) => assert_eq!(**bi, 2),
-            _ => panic!(),
-        }
+        assert_eq!(a.get_share("x"), Some(1));
+        assert_eq!(a.get_share("y"), Some(2));
         // shared overwritten by b's value
-        match a.get("shared").expect("shared").as_ref() {
-            HeapValue::BigInt(bi) => assert_eq!(**bi, 99),
-            _ => panic!(),
+        assert_eq!(a.get_share("shared"), Some(99));
+    }
+
+    #[test]
+    fn i64_smoke_set_set_delete_size() {
+        // Storage-layer counterpart of W13-hashmap-mutation smoke:
+        //   let m = HashMap(); m.set("a", 1); m.set("b", 2); m.delete("a");
+        //   m.size() == 1
+        let mut m: HashMapData<i64> = HashMapData::new();
+        unsafe {
+            m.insert("a", 1);
+            m.insert("b", 2);
+            assert_eq!(m.remove("a"), Some(1));
         }
-    }
-
-    #[test]
-    fn smoke_set_set_delete_size() {
-        // Mirrors the W13-hashmap-mutation smoke goal at the storage layer:
-        //   let m = HashMap()
-        //   m.set("a", 1); m.set("b", 2); m.delete("a"); m.size() == 1
-        let mut m = HashMapData::new();
-        m.insert(k("a"), v_i(1));
-        m.insert(k("b"), v_i(2));
-        assert!(m.remove("a"));
         assert_eq!(m.len(), 1);
-        assert!(m.get("a").is_none());
-        assert!(m.get("b").is_some());
+        assert!(m.get_share("a").is_none());
+        assert_eq!(m.get_share("b"), Some(2));
     }
 
     #[test]
-    fn arc_make_mut_clone_on_write_does_not_disturb_shared_handle() {
-        // The shape-vm-side handlers `Arc::make_mut` the receiver share —
-        // this tests that the underlying `HashMapData::clone()` (which
-        // Arc::clone()s the inner buffers + clones the bucket-index
-        // HashMap) preserves the pre-mutation observer's view.
-        let mut owned = Arc::new(HashMapData::new());
-        Arc::make_mut(&mut owned).insert(k("a"), v_i(1));
+    fn i64_arc_make_mut_clone_on_write_does_not_disturb_shared_handle() {
+        // The shape-vm-side handlers Arc::make_mut the receiver share —
+        // this exercises the per-V Clone impl which allocates fresh
+        // keys + values buffers and share-clones each element.
+        let mut owned: Arc<HashMapData<i64>> = Arc::new(HashMapData::new());
+        unsafe { Arc::make_mut(&mut owned).insert("a", 1) };
         // Snapshot share — second observer.
         let snapshot = Arc::clone(&owned);
         // Mutate via the local share — should clone-on-write.
-        Arc::make_mut(&mut owned).insert(k("b"), v_i(2));
+        unsafe { Arc::make_mut(&mut owned).insert("b", 2) };
         assert_eq!(owned.len(), 2);
         // Snapshot is undisturbed.
         assert_eq!(snapshot.len(), 1);
-        assert!(snapshot.get("a").is_some());
-        assert!(snapshot.get("b").is_none());
+        assert_eq!(snapshot.get_share("a"), Some(1));
+        assert!(snapshot.get_share("b").is_none());
+    }
+
+    // ── V = *const StringObj (HeapElement) ──────────────────────────────
+
+    fn s_obj(s: &str) -> *const StringObj {
+        StringObj::new(s) as *const StringObj
+    }
+
+    #[test]
+    fn string_insert_v2_retain_share_threading() {
+        // Pin: insert transfers one share to the map; the original share
+        // we keep here is the "witness" that survives.
+        let mut m: HashMapData<*const StringObj> = HashMapData::new();
+        let v1 = s_obj("hello");
+        // Bump witness share so we can observe the map's share separately
+        // — refcount=2 after retain.
+        unsafe { crate::v2::refcount::v2_retain(&(*v1).header) };
+        assert_eq!(unsafe { v2_get_refcount(&(*v1).header) }, 2);
+        // Insert (transfers one share to the map).
+        unsafe { m.insert("k", v1) };
+        // Refcount: witness share + map share = 2 (unchanged because
+        // we transferred 1 to the map, leaving 1 with the witness).
+        assert_eq!(unsafe { v2_get_refcount(&(*v1).header) }, 2);
+        // Map drops at end — retires its share. Manually drop to observe.
+        drop(m);
+        assert_eq!(unsafe { v2_get_refcount(&(*v1).header) }, 1);
+        // Release the witness share.
+        unsafe {
+            use crate::v2::heap_element::HeapElement;
+            StringObj::release_elem(v1);
+        }
+    }
+
+    #[test]
+    fn string_insert_overwrite_retires_old_share() {
+        // Pin: insert with existing key retires the old value's share via
+        // V::release_owned.
+        let mut m: HashMapData<*const StringObj> = HashMapData::new();
+        let old = s_obj("old");
+        let witness = old;
+        unsafe { crate::v2::refcount::v2_retain(&(*old).header) }; // witness = 2
+        unsafe { m.insert("k", old) };
+        assert_eq!(unsafe { v2_get_refcount(&(*witness).header) }, 2);
+        // Overwrite with new value; the old share inside the map is retired.
+        let new_val = s_obj("new");
+        unsafe { m.insert("k", new_val) };
+        // Map no longer holds the original value's share — witness alone.
+        assert_eq!(unsafe { v2_get_refcount(&(*witness).header) }, 1);
+        // Release witness.
+        unsafe {
+            use crate::v2::heap_element::HeapElement;
+            StringObj::release_elem(witness);
+        }
+        // m drops new_val + key allocations naturally at scope end.
+    }
+
+    #[test]
+    fn string_remove_transfers_share_to_caller() {
+        // Pin: remove returns the value, transferring its share to the caller.
+        let mut m: HashMapData<*const StringObj> = HashMapData::new();
+        let v = s_obj("val");
+        unsafe { crate::v2::refcount::v2_retain(&(*v).header) }; // witness shares = 2
+        unsafe { m.insert("k", v) };
+        assert_eq!(unsafe { v2_get_refcount(&(*v).header) }, 2);
+        let removed = unsafe { m.remove("k") };
+        assert!(removed.is_some());
+        let removed_ptr = removed.unwrap();
+        assert_eq!(removed_ptr, v);
+        // Refcount unchanged: map released its share + remove transferred
+        // a share to the caller (this fn) = net 0 change.
+        assert_eq!(unsafe { v2_get_refcount(&(*v).header) }, 2);
+        // Release the witness + the removed share.
+        unsafe {
+            use crate::v2::heap_element::HeapElement;
+            StringObj::release_elem(removed_ptr);
+            StringObj::release_elem(v);
+        }
+    }
+
+    #[test]
+    fn string_get_share_bumps_refcount_for_caller() {
+        // Pin: get_share returns a fresh refcount-share copy, leaving
+        // the map's share intact.
+        let mut m: HashMapData<*const StringObj> = HashMapData::new();
+        let v = s_obj("val");
+        unsafe { m.insert("k", v) }; // map owns the only share now.
+        assert_eq!(unsafe { v2_get_refcount(&(*v).header) }, 1);
+        let got = m.get_share("k").expect("present");
+        assert_eq!(got, v);
+        // Refcount bumped — map (1) + caller's share (1) = 2.
+        assert_eq!(unsafe { v2_get_refcount(&(*v).header) }, 2);
+        // Release caller's share.
+        unsafe {
+            use crate::v2::heap_element::HeapElement;
+            StringObj::release_elem(got);
+        }
+        assert_eq!(unsafe { v2_get_refcount(&(*v).header) }, 1);
+        // Map drops at scope end, retiring last share.
+    }
+
+    #[test]
+    fn string_merge_share_clones_each_other_entry() {
+        // Pin: merge bumps refcount on each value cloned from other.
+        let mut a: HashMapData<*const StringObj> = HashMapData::new();
+        let mut b: HashMapData<*const StringObj> = HashMapData::new();
+        let v_x = s_obj("x_val");
+        let v_y = s_obj("y_val");
+        unsafe {
+            a.insert("x", v_x);
+            b.insert("y", v_y);
+            assert_eq!(v2_get_refcount(&(*v_x).header), 1);
+            assert_eq!(v2_get_refcount(&(*v_y).header), 1);
+            a.merge(&b);
+        }
+        assert_eq!(a.len(), 2);
+        // After merge: y is share-cloned into a — refcount = 2 (a + b).
+        assert_eq!(unsafe { v2_get_refcount(&(*v_y).header) }, 2);
+        // x is unchanged (only in a).
+        assert_eq!(unsafe { v2_get_refcount(&(*v_x).header) }, 1);
     }
 }
 
