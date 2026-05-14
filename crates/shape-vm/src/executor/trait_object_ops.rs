@@ -1040,8 +1040,13 @@ fn rewrap_typed_object_fields(
 ///
 /// Wave 2 Round 1 Agent F (2026-05-14): `HashMapValueBuf::TraitObject` was
 /// deleted as a dead-arm mirror per Wave 1 §C.5 / §F (zero producers at
-/// HEAD aa047356). Surface-and-stop pending a future Array<dyn T> /
-/// HashMap<K, dyn T> carrier landing per audit §C.8 row.
+/// HEAD aa047356). Wave 2 Round 1 Agent C (2026-05-15) reinforced this
+/// deletion via the Q25.B SUPERSEDED amendment at ADR-006 §2.7.24.
+/// Surface-and-stop pending the C2+ Wave 2 Round 2/3 rebuild — the
+/// values-buffer rewrite requires the full `HashMapData<V>` generic
+/// monomorphization (audit §C.4 option (a.2) HashMapKindedRef carrier);
+/// lifting this pairs with the `rewrap_typed_object_fields` follow-up
+/// after Wave 2 Agent C2a (runtime tier) + C2b (JIT FFI tier) close.
 fn rewrap_hashmap_values(
     ret_bits: u64,
     wrap_targets: &[WrapTarget],
@@ -1050,10 +1055,16 @@ fn rewrap_hashmap_values(
     drop_kinded(ret_bits, NativeKind::Ptr(HeapKind::HashMap));
     Err(VMError::NotImplemented(format!(
         "SURFACE: DynMethodCall BoxedReturn with HashMap<K, Self> \
-         return + wrap_targets {:?} per ADR-006 §2.7.24 Q25.A SUPERSEDED \
-         #1 — the prior values-buffer rewrap path targeted \
+         return + wrap_targets {:?} per ADR-006 §2.7.24 Q25.B SUPERSEDED \
+         + Q25.C.5 — the prior values-buffer rewrap path targeted \
          `HashMapValueBuf::TraitObject`, which is deleted (Wave 2 Round 1 \
-         Agent F, 2026-05-14, dead-arm wholesale deletion).",
+         Agent F 2026-05-14 dead-arm wholesale deletion + Agent C 2026-05-15 \
+         Q25.B SUPERSEDED amendment). Values-buffer rewrap requires the \
+         full HashMapData<V> generic monomorphization (audit §C.4 option \
+         (a.2) HashMapKindedRef carrier) which is gated on Wave 2 Agent \
+         C2a (runtime tier) + C2b (JIT FFI tier) close. The dispatch \
+         shell surfaces; lifting this pairs with the \
+         `rewrap_typed_object_fields` follow-up.",
         wrap_targets.iter().map(|w| w.path.as_slice()).collect::<Vec<_>>()
     )))
 }

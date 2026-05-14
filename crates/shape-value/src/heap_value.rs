@@ -525,16 +525,28 @@ impl IoHandleData {
 /// readers/writers compiling; commit 4 deletes it (Q25.A/B forbidden-pattern
 /// list). Construction sites migrate to the specialized arms in commit 2;
 /// read sites add per-arm dispatch in commit 3.
+///
+/// Phase 3 cluster-0+1 Wave 2 Agent C partial close (2026-05-15): dead-arm
+/// wholesale deletion landed for variants with **zero root producers** per
+/// `docs/cluster-audits/bulldozer-wave-1-inventory.md` §C.5 audit finding.
+/// Variants deleted: I64, F64, Bool, DateTime, Timespan, Duration, Instant,
+/// TraitObject. Surviving live arms: String, Decimal, BigInt, TypedObject,
+/// Char (Char is dead-but-derived per §C.5; preserved for forward-cleanliness
+/// in `specialize_values` defensive arm). The full `HashMapData<V>` generic
+/// monomorphization (audit §C.4 option (a.2) HashMapKindedRef carrier) is
+/// surfaced-and-stopped per the dispatch's pragmatic-fallback clause — the
+/// 40-file `Arc<HashMapData>` cascade exceeds the dispatch's ~1500 LoC /
+/// 7-file budget and entangles with Agent A1 (TypedArrayData scalar deletion),
+/// Agent A2 (TypedArrayData heap-element String/Decimal deletion), Agent D1
+/// (TypedObjectStorage HeapHeader migration), and JIT FFI map carriers.
+/// See close report for the Q25.B SUPERSEDED amendment text + structured
+/// surface-and-stop.
 #[derive(Debug)]
 pub enum HashMapValueBuf {
-    // Scalar-keyed value arms (mirror of TypedArrayData scalar arms).
-    I64(Arc<crate::typed_buffer::TypedBuffer<i64>>),
-    F64(Arc<crate::typed_buffer::TypedBuffer<f64>>),
-    Bool(Arc<crate::typed_buffer::TypedBuffer<u8>>),
-    String(Arc<crate::typed_buffer::TypedBuffer<Arc<String>>>),
     // Heap-typed value arms — payload type mirrors the matching `HeapValue`
     // variant's `Arc<T>` payload so refcount discipline reuses the existing
     // `Arc::clone` / `Arc::drop` paths.
+    String(Arc<crate::typed_buffer::TypedBuffer<Arc<String>>>),
     Decimal(Arc<crate::typed_buffer::TypedBuffer<Arc<rust_decimal::Decimal>>>),
     BigInt(Arc<crate::typed_buffer::TypedBuffer<Arc<i64>>>),
     // ── ADR-006 §2.7.24 Q25.B mirror dead-arm wholesale deletion ──────────
@@ -549,6 +561,10 @@ pub enum HashMapValueBuf {
     // §2.7.24 Q25.B. Same discipline as Q25.A for TypedArrayData — no
     // production caller produces this shape; the value buffer is fully
     // per-variant strict-typed.
+    //
+    // Wave 2 Agent C dead-arm deletion (2026-05-15): I64, F64, Bool, DateTime,
+    // Timespan, Duration, Instant, TraitObject deleted. Zero root producers
+    // per `docs/cluster-audits/bulldozer-wave-1-inventory.md` §C.5.
 }
 
 impl HashMapValueBuf {
@@ -556,9 +572,6 @@ impl HashMapValueBuf {
     #[inline]
     pub fn len(&self) -> usize {
         match self {
-            HashMapValueBuf::I64(b) => b.data.len(),
-            HashMapValueBuf::F64(b) => b.data.len(),
-            HashMapValueBuf::Bool(b) => b.data.len(),
             HashMapValueBuf::String(b) => b.data.len(),
             HashMapValueBuf::Decimal(b) => b.data.len(),
             HashMapValueBuf::BigInt(b) => b.data.len(),
@@ -594,28 +607,6 @@ impl HashMapValueBuf {
     /// HeapValue arm.
     pub fn value_at(&self, i: usize) -> Arc<HeapValue> {
         match self {
-            HashMapValueBuf::I64(b) => {
-                Arc::new(HeapValue::NativeScalar(NativeScalar::I64(b.data[i])))
-            }
-            HashMapValueBuf::F64(_) => {
-                // NativeScalar has no F64 arm (only F32); F64 values need to
-                // round-trip through a Temporal-style typed payload or the
-                // caller migrates to per-arm dispatch in commit 3. No
-                // construction site for HashMapValueBuf::F64 on this branch,
-                // so reaching this arm is a wiring bug.
-                unreachable!(
-                    "HashMapValueBuf::F64 read via value_at — no construction \
-                     site on this branch (W17-typed-carrier-bundle-A commit 1)"
-                )
-            }
-            HashMapValueBuf::Bool(_) => {
-                // NativeScalar has no Bool arm. Same disposition as F64
-                // above — caller migrates to per-arm dispatch.
-                unreachable!(
-                    "HashMapValueBuf::Bool read via value_at — no construction \
-                     site on this branch (W17-typed-carrier-bundle-A commit 1)"
-                )
-            }
             HashMapValueBuf::String(b) => Arc::new(HeapValue::String(Arc::clone(&b.data[i]))),
             HashMapValueBuf::Decimal(b) => Arc::new(HeapValue::Decimal(Arc::clone(&b.data[i]))),
             HashMapValueBuf::BigInt(b) => Arc::new(HeapValue::BigInt(Arc::clone(&b.data[i]))),
@@ -630,9 +621,6 @@ impl HashMapValueBuf {
 impl Clone for HashMapValueBuf {
     fn clone(&self) -> Self {
         match self {
-            HashMapValueBuf::I64(b) => HashMapValueBuf::I64(Arc::clone(b)),
-            HashMapValueBuf::F64(b) => HashMapValueBuf::F64(Arc::clone(b)),
-            HashMapValueBuf::Bool(b) => HashMapValueBuf::Bool(Arc::clone(b)),
             HashMapValueBuf::String(b) => HashMapValueBuf::String(Arc::clone(b)),
             HashMapValueBuf::Decimal(b) => HashMapValueBuf::Decimal(Arc::clone(b)),
             HashMapValueBuf::BigInt(b) => HashMapValueBuf::BigInt(Arc::clone(b)),
@@ -1053,15 +1041,6 @@ impl HashMapData {
     /// per-arm at compile time — no `Arc<HeapValue>` dispatch hop.
     fn remove_value_at(&mut self, i: usize) {
         match &mut self.values {
-            HashMapValueBuf::I64(b) => {
-                Arc::make_mut(b).data.remove(i);
-            }
-            HashMapValueBuf::F64(b) => {
-                Arc::make_mut(b).data.remove(i);
-            }
-            HashMapValueBuf::Bool(b) => {
-                Arc::make_mut(b).data.remove(i);
-            }
             HashMapValueBuf::String(b) => {
                 Arc::make_mut(b).data.remove(i);
             }
