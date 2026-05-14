@@ -5082,3 +5082,269 @@ S1.5 = W12-nativekind-typed-array-ptr-extension (provisional name;
 ADR-006 §2.7.7/Q9 amendment for U64 discriminator + F32 cascade +
 possibly Char). S1.5 pre-dispatch audit fires first (this team-lead
 session); supervisor ratifies dispatch shape post-audit; R19 dispatches.*
+
+---
+
+## Round 19 sub-cluster S2 — W12-typed-array-data-heap-element-migration surface-and-stop (2026-05-14)
+
+R19 S2 sub-cluster (W12-typed-array-data-heap-element-migration) dispatched
+from `bulldozer-strictly-typed @ 9135a8a6` per team-lead R19 dispatch.
+Branch `bulldozer-strictly-typed-w12-typed-array-data-heap-element-migration`.
+
+**Outcome: surface-and-stop close (zero source changes).** Three structural
+obstacles surfaced for supervisor disposition; 0 of 7 named variants migrated;
+0 Obj carriers landed; 0 silent refcount leaks; 0 Bool-default fallbacks.
+
+### Dispatched scope (verbatim)
+
+Migrate heap-element `TypedArrayData` variants per audit §2.2 to
+`TypedArray<*const <X>Obj>` carriers with per-element retain/release
+plumbing. Variants in scope:
+
+- **String** (`StringObj` exists at `crates/shape-value/src/v2/string_obj.rs:19-26`)
+- **Decimal** (`DecimalObj` v2-raw struct — NEEDS TO BE CREATED if not at HEAD)
+- **BigInt** (`BigIntObj` v2-raw struct — NEEDS TO BE CREATED if not at HEAD)
+- **DateTime / Timespan / Duration** (per O-1 newtype ruling: separate
+  `Arc<DateTimeData>` / `Arc<TimespanData>` / `Arc<DurationData>` Obj structs,
+  NOT a shared `TemporalData` payload — supervisor R17 disposition)
+- **Instant** (`InstantObj` v2-raw struct — NEEDS TO BE CREATED if not at HEAD)
+
+Char EXCLUDED per R19 supervisor disposition (folded into S1.5 NativeKind
+extension scope per R18 close).
+
+### Obstacle 1 — Target-shape conflict between audit §2.2 and ADR-006 §2.7.24 Q25.A
+
+Audit §2.2 (Round 17 W12-typed-array-data-deletion-audit, file
+`docs/cluster-audits/w12-typed-array-data-deletion-audit.md:226-246`)
+prescribes `TypedArray<*const <X>Obj>` — v2-raw flat-struct carrier,
+exits the `TypedArrayData` enum. The dispatch's stated goal
+("S2 makes the heap-element arms unreachable from production code
+paths, not deleted") aligns with this path.
+
+ADR-006 §2.7.24 Q25.A (formally-committed amendment text, file
+`docs/adr/006-value-and-memory-model.md:4623-4663`) prescribes a
+different shape: specialized monomorphic variants kept inside
+`TypedArrayData`:
+
+```rust
+Decimal(Arc<TypedBuffer<Decimal>>),
+BigInt(Arc<TypedBuffer<BigInt>>),
+DateTime(Arc<TypedBuffer<DateTimeData>>),
+Timespan(Arc<TypedBuffer<TimespanData>>),
+Duration(Arc<TypedBuffer<DurationData>>),
+Instant(Arc<TypedBuffer<InstantData>>),
+```
+
+The two prescriptions produce structurally different target shapes.
+
+The team-lead's "Refuse on sight" list forbids touching §2.7.24 Q25.A
+amendment text (S5's commit) — so the agent cannot land the Q25.A path
+even if it were the correct one. And committing to the §2.2 path without
+explicit Q25.A supersession authorization would land a sub-cluster output
+that contradicts a formally-committed ADR amendment — the parallel-
+implementation defection-attractor pattern in a fresh form.
+
+**Resolution shape (supervisor disposition required):**
+
+(a) Confirm §2.2 over Q25.A as the canonical S2 migration target with
+    explicit Q25.A amendment-text supersession authorization. S2-prime
+    re-dispatches with the supersession committed as part of its scope
+    OR as a pre-dispatch ADR amendment that lands first.
+(b) Flip S2 to the Q25.A path (specialized TypedArrayData variants
+    `Decimal(Arc<TypedBuffer<Decimal>>)` etc.) with the §2.2 path
+    documented as audit-only-deferred. S2-prime re-dispatches against
+    Q25.A.
+(c) Reframe S2 as a smaller "Obj-carrier prereq landing only" sub-
+    cluster with the actual producer migration deferred to a Round-20+
+    S2-prime that gets the architectural ratification.
+
+### Obstacle 2 — `TemporalData` enum has 7 variants, not 3
+
+Per dispatch O-1 newtype ruling (R17 disposition), DateTime / Timespan /
+Duration "get separate Obj carriers via newtype path (NOT a shared
+`Arc<TemporalData>` with semantic-kind tag)". The current `TemporalData`
+enum at `crates/shape-value/src/heap_value.rs:3549-3557` carries **7**
+variants:
+
+```rust
+pub enum TemporalData {
+    DateTime(chrono::DateTime<chrono::FixedOffset>),
+    Duration(shape_ast::ast::Duration),
+    TimeSpan(chrono::Duration),
+    Timeframe(shape_ast::data::Timeframe),
+    TimeReference(Box<shape_ast::ast::TimeReference>),
+    DateTimeExpr(Box<shape_ast::ast::DateTimeExpr>),
+    DataDateTimeRef(Box<shape_ast::ast::DataDateTimeRef>),
+}
+```
+
+Only 3 of the 7 are user-facing (DateTime / TimeSpan / Duration); the
+other 4 (Timeframe / TimeReference / DateTimeExpr / DataDateTimeRef)
+are AST/internal payloads that flow through `HeapValue::Temporal(Arc<TemporalData>)`
+but aren't separately exposed at the language type layer. The O-1.b
+newtype ruling implicitly assumes a 3-way split, but the underlying
+carrier has 7 payload shapes.
+
+**Resolution shape (supervisor disposition required):**
+
+(a) Define `DateTimeObj` / `TimespanObj` / `DurationObj` as newtype
+    wrappers around just the 3 user-facing variant payloads
+    (`chrono::DateTime<FixedOffset>` / `chrono::Duration` /
+    `shape_ast::ast::Duration`), and treat the other 4 TemporalData
+    variants as continuing to use the legacy `HeapValue::Temporal(Arc<TemporalData>)`
+    carrier (so TemporalData stays alive, just isn't a `TypedArray`
+    element type for user `Array<DateTime>` / `Array<Timespan>` /
+    `Array<Duration>`).
+(b) Refactor TemporalData to extract the 3 user-facing variants into
+    dedicated structs (`DateTimeData` / `TimespanData` / `DurationData`)
+    and leave the AST-internal 4 in a renamed enum (`TemporalAstData`
+    or similar).
+
+### Obstacle 3 — `BigInt` type doesn't exist at HEAD
+
+Audit §2.2 names BigInt explicitly as in-scope but notes the payload is
+`Arc<i64>` placeholder per W14 stubs ("BigInt at landing is i64-only
+per the W14 / Wave 14 BigInt stubs"). Q25.A prescribes
+`BigInt(Arc<TypedBuffer<BigInt>>)` but no `BigInt` Rust type exists at
+HEAD `9135a8a6` — `grep -rn 'pub struct BigInt\b\|pub enum BigInt\b'
+crates/` returns zero hits.
+
+The dispatch directs creating `BigIntObj` but does not specify what
+payload `BigIntObj` should wrap (the i64 placeholder? a stub
+`bigint`/`malachite`/`num-bigint` external dependency? an arbitrary-
+precision integer carrier yet to be designed?).
+
+The audit §2.2 explicitly notes "the BigInt payload-width question is
+its own follow-up" and offers either (a) thin `TypedArray<i64>` wrapping
+while BigInt full-width remains unimplemented OR (b) the bigint full-
+width migration lands in the same sub-cluster.
+
+**Resolution shape (supervisor disposition required):**
+
+(a) Approve the thin `Array<bigint>` = `TypedArray<*const BigIntObj>`
+    where `BigIntObj` is just a `HeapHeader` + `i64` payload at landing
+    (24-byte struct, deferring full-width to follow-up).
+(b) Defer BigInt from S2 scope until the full-width payload design
+    lands as its own sub-cluster.
+(c) Take a specific external `bigint` crate dependency
+    (`malachite-nz` / `num-bigint` / etc.) which would be a workspace-
+    `Cargo.toml`-touching decision.
+
+### Producer-site migration scope (post-resolution mechanical work)
+
+`grep -rn 'TypedArrayData::(String|Decimal|BigInt|DateTime|Timespan|Duration|Instant)\(Arc::new'
+crates/ --include="*.rs"` returns **53 construction sites across 14
+files** in `crates/shape-vm/src/executor/{objects/{array_sets,array_transform,
+array_operations,builtins/array_ops,concat,iterator_methods,object_creation,
+string_methods},loops/mod.rs,window_join.rs,v2_handlers/typed_array_elem.rs}`,
+`crates/shape-vm/src/compiler/{comptime,comptime_target}.rs`,
+`crates/shape-value/src/heap_value.rs`, plus **193+ consumer match-arm
+sites** across ~30 files.
+
+Audit §3.2 estimates ~5-7k LoC across 2 sessions for the full migration
+(Session-2 part 1: String+Decimal+BigInt; Session-2 part 2: DateTime+
+Timespan+Duration+Instant); each variant requires producer + consumer +
+JIT FFI + 4-table lockstep cascade per the S1 recipe.
+
+### Per-element retain/release ABI gap (in-scope-resolvable once §2.2-vs-Q25.A decided)
+
+Named in dispatch prompt's "Surface-and-stop if the existing `v2_retain`
+/ `v2_release` ABI doesn't support per-element type-specific release"
+trigger. The v2 refcount ABI at `crates/shape-value/src/v2/refcount.rs:14-38`
+operates on `*const HeapHeader` and manipulates the refcount but does
+NOT free the allocation on refcount==0 — caller-responsibility: caller
+must invoke the per-T `<X>Obj::drop` body that knows about per-T sub-
+allocations (StringObj has a separate `data` buffer at
+`string_obj.rs:88-99::StringObj::drop`; a DecimalObj would have just the
+inline 16-byte Decimal payload; an InstantObj would have just the 16-
+byte Instant payload).
+
+For `TypedArray<*const StringObj>::drop_array` to release per-element
+refcounts at the right per-T deallocator, either:
+
+(a) A new `unsafe trait HeapElement { unsafe fn release_elem(*const Self); }`
+    per-T monomorphized dispatch needs to land (each `<X>Obj` impls it,
+    calling `v2_release` then the per-T deallocator on return-true).
+(b) `TypedArray<T>` becomes specialized-per-element-T with per-T
+    `drop_array` bodies.
+(c) `drop_array` is invoked with a runtime kind discriminator that
+    selects the per-T deallocator.
+
+Path (a) is the audit §4.3 "O-3.b style" approach but was audit-flagged
+forbidden for TypedObject specifically (since for TypedObject it
+perpetuates Arc-vs-HeapHeader duality); for the heap-element Obj structs
+(all uniformly HeapHeader-equipped) the O-3.b objection does NOT apply —
+there's no second retain/release shape, and the `HeapElement` trait
+approach is the in-scope clean resolution. But path (a) is itself a
+non-trivial ABI extension that touches the canonical `TypedArray<T>`
+flat-struct API and would benefit from supervisor disposition before
+landing.
+
+### Surface-and-stop discipline preserved
+
+- No Bool-default fallback for any unproven kind.
+- No silent per-element refcount leak (dispatch prompt's "Do NOT
+  silently leak refcounts" rule observed).
+- No preservation of `TypedArrayData::<heap-element>` arms via
+  "documented exception" framing.
+- No Q25.A amendment text touched (S5's commit, refused on sight per
+  dispatch).
+- No shared `Arc<TemporalData>` carrier with semantic-kind tag (refused
+  on sight per O-1 newtype ruling).
+- No Char inclusion (S1.5's NativeKind extension territory per R18
+  supervisor disposition).
+- No addition to S5's territory.
+- No `ValueWord` resurrection.
+- No bridge/probe/helper/hop/translator/adapter/shim framing for the
+  migration boundary.
+
+### R19 parallel-sub-cluster coordination note
+
+S1.5 (W12-nativekind-typed-array-ptr-extension) touches
+`crates/shape-value/src/v2/concrete_type.rs` for F32 + Char additions.
+S2 would have needed to add Timespan / Duration / Instant variants to
+the same enum (the `ConcreteType` enum at
+`crates/shape-value/src/v2/concrete_type.rs:36-90` has `String` /
+`Decimal` / `BigInt` / `DateTime` arms but lacks `Timespan` / `Duration`
+/ `Instant`). The dispatch said "NO file-territory overlap" between S2
+and S1.5 — flagging for team-lead awareness as a pre-existing audit-doc
+detail gap (the audit §3.2 did not enumerate the `ConcreteType` enum
+additions S2 would need), not an obstacle to S2 close since S2 surfaces
+without source changes.
+
+### Recommendation for Round 20 / supervisor disposition
+
+Re-dispatch S2-prime once supervisor rules on:
+
+1. §2.2-vs-Q25.A canonical target shape (either authorize Q25.A
+   supersession or amend §2.2's prescription to match Q25.A).
+2. TemporalData 7-variant disposition (newtype-wrappers-for-3 keeping
+   legacy carrier for the other 4, vs full extraction-into-3-data-
+   structs).
+3. BigInt payload-width at landing (thin i64-wrapper, deferred-from-S2,
+   or external crate dependency).
+
+Pre-dispatch audit-document amendments (analogous to the team-lead's
+pre-S1.5 audit pattern from R18 close) would land the supervisor's
+rulings as named §-citations on the audit doc + ADR-006 + AGENTS.md
+sub-cluster row before S2-prime dispatches mechanical work. Following
+that ratification the S2-prime scope (per-variant producer migration +
+Obj carrier creation + HeapElement trait or per-T `drop_array`
+specialization + 4-table lockstep cascade) is plausibly ~2 sessions of
+mechanical work as audit §3.2 originally estimated.
+
+### Close gates (devenv wrapper)
+
+- `cargo check --workspace --lib --tests` EXIT=0 — verified at baseline
+  `9135a8a6` (no source changes, baseline state preserved).
+- `bash scripts/verify-merge.sh` — not run because source state is
+  identical to baseline `9135a8a6`; the verify-merge.sh gate validates
+  merge-state coherence, and a no-source-change commit on a branch
+  identical to its parent has nothing for the gate to validate.
+- `bash scripts/check-no-dynamic.sh` EXIT=0 — verified at baseline
+  `9135a8a6`.
+- AGENTS.md row appended (line 182).
+- NO `Co-Authored-By: Claude` trailer.
+- NEVER blame "pre-existing" — the BigInt non-existence, the
+  TemporalData 7-variant shape, and the §2.2-vs-Q25.A target-shape
+  conflict are all owned as S2's surface-and-stop responsibility.
