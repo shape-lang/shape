@@ -6526,3 +6526,77 @@ supervisor §L partition ratification. Read this Wave-1-close subsection
 first; the team-lead handover doc + this status doc + the Wave 1
 inventory at `docs/cluster-audits/bulldozer-wave-1-inventory.md` are
 the canonical state.*
+
+---
+
+## Surface A user disposition — (c) split (2026-05-14)
+
+User disposed Surface A: **option (c) split**. Canonical kickoff-prompt
+smoke fixtures (the 4 smokes at `/tmp/smokes/s{1,2,3,4}.shape` per
+operational practice R10-R20) = cluster-0 close criterion. The
+kickoff-prompt prose intent at `phase-3-kickoff-prompt.md:102-105`
+(`let t: dyn T = box(X{})` trait-object dispatch through Q25.C
+HeapKind::TraitObject) = explicit cluster-1.5 close-criterion follow-up
+item dispatching post-cluster-0+1 close.
+
+**Wave 2 Round 3 (Agent H — Q25.C TraitObject rebuild ~1,100 LoC) is
+NOT dispatched for cluster-0+1 close.** Agent H is re-scoped to
+cluster-1.5 (post-cluster-0+1-close) as the canonical "Smoke 3-trait-
+object dispatch" close-criterion item. Wave 2 dispatch shape becomes:
+
+- Round 1 (6 agents in parallel): A1, B, C, D1, F, G
+- Round 2 (3 agents in parallel): A2, D2, E (gated on Round 1 close
+  + smoke matrix re-verification)
+- Round 3 SKIPPED for cluster-0+1 close (Agent H Q25.C TraitObject
+  rebuild = cluster-1.5 follow-up)
+
+Not blocking Rounds 1+2; needed before Round 3 (which is now
+re-scoped). Cluster-1.5 close-criterion item will be tracked in a
+follow-up handover doc at cluster-0+1 close.
+
+---
+
+## Wave 2 Round 1 dispatch (2026-05-14)
+
+Wave 2 Round 1 dispatched from `bulldozer-strictly-typed @ 1c68a720`
+post supervisor §L ratification 2026-05-14 (with 3 Agent C
+clarifications inline) + Surface A user disposition (c) above.
+
+6 agents in parallel via `subagent_type="general-purpose"`:
+
+| Agent | Territory | LoC scope | Cascade ceiling |
+|---|---|---|---|
+| A1 | TypedArrayData scalar variant deletion + v2-raw `TypedArray<T>` 8 new scalar monomorphizations | ~3,000 | ~100-site applies; ~88 predicted; spill discipline pre-authorized |
+| B | NativeKind::StringV2 + DecimalV2 NativeKind additions per §P.1 + 4-table lockstep + ADR-006 §2.7.5 amendment | ~600 | ~100-site applies |
+| C | HashMapValueBuf wholesale deletion + HashMapData<V> per-V mono + Q25.B SUPERSEDED amendment | ~1,500 | ~100-site applies; trailing TypedObject arm step gated on D1 |
+| D1 | TypedObjectStorage Arc → HeapHeader shape change + ADR-006 §2.3 amendment | ~800 | ~100-site applies; gates A2/D2/E in Round 2 |
+| F | Q25.A specialization dead arm wholesale deletion (9 arms) | ~600 | bounded — wholesale deletion |
+| G | W12-stdlib-intrinsic-collapse (IntrinsicSum delete + route through PHF) | ~300 | bounded — isolated |
+
+**Total Round 1 scope: ~6,800 LoC across 6 agents.**
+
+Worktrees `../shape-wave-2-{a1,b,c,d1,f,g}` created on branches
+`bulldozer-strictly-typed-wave-2-{a1,b,c,d1,f,g}`. AGENTS.md placeholder
+rows in active state (state-flip to closed at each agent's close
+commit).
+
+Cascade-ceiling pre-authorization: ~100-site ceiling per single
+migration applies to A1, B, C, D1 (not F/G which are wholesale-
+deletion-with-known-bounded-cascade). If any agent's cascade exceeds
+ceiling: surface-and-stop with structured spill scope; team-lead
+surfaces to supervisor for spill sub-cluster dispatch.
+
+Recovery-pattern observation continued: 6 parallel agents + ~6.8k LoC
+Round 1 raises the probability of agent-API-error mid-execution. If a
+3rd S1-reopen-R18 instance hits during Round 1, supervisor escalates
+to user for pattern-durability ratification (team-lead-completes-
+ceremony-without-per-instance-authorization would unblock Wave 2's
+operational gate from a relay round per recovery).
+
+---
+
+*Next session: Wave 2 Round 1 agents close. Team-lead verifies gates
++ executes merge ceremony (take-both for AGENTS.md + dispatch-table
+arms + ADR-006 amendment text scattering across §2.3, §Q25.A SUPERSEDED
+text refinement, §Q25.B SUPERSEDED, §2.7.5 + Q8 amendment) + smoke
+matrix re-verification + Round 2 dispatch authorization request.*
