@@ -847,6 +847,369 @@ candidate (Duration enum variant). Option (A) is the smaller-scope
 discipline-coherent close; Option (B) is the supervisor's R19
 disposition taken literally. Surface to team-lead for relay.
 
+### §4.1.B Round 20 S2-prime audit-first deliverable (b): Per-element retain/release ABI shape (2026-05-14)
+
+**Dispatch obstacle:** the existing v2 refcount ABI at
+`crates/shape-value/src/v2/refcount.rs:14-38` operates on
+`*const HeapHeader` and manipulates the refcount but **does NOT free
+the allocation on refcount==0** — caller-responsibility per the
+`v2_release` docstring at line 26-28:
+
+> If this returns `true`, the caller must deallocate the object and
+> must not access it again.
+
+For `TypedArray<*const <X>Obj>::drop_array` to release per-element
+shares cleanly at the right per-T deallocator, the dispatch needs a
+per-T entry point that knows about the `<X>Obj`'s sub-allocations.
+The `StringObj` precedent at `crates/shape-value/src/v2/string_obj.rs:89-99`
+illustrates this: `StringObj::drop(ptr: *mut Self)` frees both the
+inner `data` buffer (via `Layout::from_size_align(len, 1)`) and the
+`StringObj` struct itself (via `Layout::new::<Self>`). A future
+`DecimalObj` would have just the inline 16-byte Decimal payload + a
+single `Layout::new::<Self>` dealloc; an `InstantObj` would mirror
+that shape.
+
+Three options surfaced in R19 surface-and-stop §4.1:
+
+- **(a)** `unsafe trait HeapElement { unsafe fn release_elem(*const Self); }`
+  per-T monomorphized dispatch. Each `<X>Obj` impls it, calling
+  `v2_release(self.header)` then the per-T deallocator on
+  return-true. `TypedArray<T>::drop_array` constrains its `T` impl
+  to `T: HeapElement` for the heap-element variants; per-T dispatch
+  is at the trait layer, not runtime.
+
+- **(b)** `TypedArray<T>` becomes specialized-per-element-T with
+  per-T `drop_array` bodies (effectively
+  `impl TypedArray<*const StringObj>`, `impl TypedArray<*const DecimalObj>`,
+  etc.). No new trait, but multiplies the impl block surface area.
+
+- **(c)** `drop_array` is invoked with a runtime kind discriminator
+  (e.g. `*mut TypedArray<dyn HeapElement>` or a side-table mapping
+  the array's heap-kind tag to a `fn(*const HeapHeader)` deallocator
+  pointer). Selects per-T deallocator from kind at runtime.
+
+#### §4.1.B.1 Detailed analysis of each option
+
+**Option (a) — `HeapElement` trait dispatch.**
+
+Shape:
+
+```rust
+// crates/shape-value/src/v2/heap_element.rs (new file)
+pub unsafe trait HeapElement {
+    /// Decrement the refcount of `*ptr`. If the refcount reaches
+    /// zero, fully deallocate the object (including any nested
+    /// payload buffers per the implementor's drop semantics).
+    ///
+    /// # Safety
+    /// `ptr` must point to a valid, live `Self` allocated via the
+    /// canonical v2-raw allocator. After this call returns,
+    /// `ptr` must not be dereferenced (the allocation may have
+    /// been freed).
+    unsafe fn release_elem(ptr: *const Self);
+}
+
+// crates/shape-value/src/v2/string_obj.rs (impl block addition)
+unsafe impl HeapElement for StringObj {
+    unsafe fn release_elem(ptr: *const Self) {
+        if unsafe { crate::v2::refcount::v2_release(&(*ptr).header) } {
+            unsafe { Self::drop(ptr as *mut Self) };
+        }
+    }
+}
+```
+
+`TypedArray<*const T>::drop_array` for the heap-element variants
+becomes:
+
+```rust
+// Inside impl<T: Copy> TypedArray<*const T> where T: HeapElement {
+pub unsafe fn drop_array_with_elem_release(ptr: *mut Self) {
+    let arr = &*ptr;
+    if arr.cap > 0 && !arr.data.is_null() {
+        for i in 0..arr.len {
+            let elem_ptr = unsafe { *arr.data.add(i as usize) };
+            unsafe { T::release_elem(elem_ptr) };
+        }
+        // ... rest of existing drop_array body
+    }
+}
+```
+
+The compile-time monomorphization guarantees per-T dispatch with
+zero runtime cost.
+
+**Pros:**
+
+- Compile-time monomorphized — no runtime dispatch.
+- Bounded surface: one trait, one method, per-T implementation
+  lives alongside the `<X>Obj` struct definition (locality).
+- Mirrors Rust stdlib precedent (`Drop` trait for owned types).
+- Plays cleanly with the dead-arm finding from deliverable (a):
+  arms can be created without producing dead trait impls (the
+  trait is implemented eagerly for forward-S5 readiness, even if
+  no live producer fires it yet).
+
+**Cons:**
+
+- Audit §4.3 named option (a) as **O-3.b** for TypedObject
+  specifically and refused it: "perpetuates Arc-vs-HeapHeader
+  duality." But that objection applies to `TypedObjectStorage`
+  (which is Arc-wrapped, NOT HeapHeader-equipped). For uniformly
+  HeapHeader-equipped `<X>Obj` carriers (StringObj already, +
+  to-be-created DecimalObj/DateTimeObj/etc.), the duality
+  objection does NOT apply — every `<X>Obj` has the same
+  HeapHeader-at-offset-0 contract. The audit's O-3.b refusal is
+  scoped to TypedObject; deliverable (b) extends to heap-element
+  `<X>Obj` carriers without that scoping issue.
+
+- Forbidden-pattern check: does `HeapElement` perpetuate a
+  defection-attractor framing? Per CLAUDE.md "Renames to refuse
+  on sight" broader-family regex
+  `(decode|tag|kind|dispatch|...) (bridge|probe|helper|hop|translator|adapter|shim)`:
+  "HeapElement" is none of these descriptors. It is a structural
+  trait describing "this type lives on the v2-raw heap with
+  refcount discipline." Compared to `as_heap_value()` (which is
+  a legacy Box<HeapValue> recovery method) or `Arc<HeapValue>`
+  catch-all wrappers (forbidden under §2.7.24 Q25.E #1), the
+  `HeapElement` trait is a typed-Arc-shape-preserving construct
+  consistent with ADR-005 §1 single-discriminator. The trait does
+  not introduce a parallel sum type; it constrains how T is
+  released within `TypedArray<*const T>` whose discriminator is
+  the `HeapKind` carried on the slot (per ADR-006 §2.7.7).
+
+**Option (b) — Per-T `TypedArray<T>` impl specialization.**
+
+Shape:
+
+```rust
+// crates/shape-value/src/v2/typed_array.rs (impl block additions)
+impl TypedArray<*const StringObj> {
+    pub unsafe fn drop_array(ptr: *mut Self) {
+        let arr = &*ptr;
+        if arr.cap > 0 && !arr.data.is_null() {
+            for i in 0..arr.len {
+                let elem_ptr = unsafe { *arr.data.add(i as usize) };
+                if unsafe { crate::v2::refcount::v2_release(&(*elem_ptr).header) } {
+                    unsafe { StringObj::drop(elem_ptr as *mut StringObj) };
+                }
+            }
+            // ... rest of existing drop_array body
+        }
+    }
+}
+
+impl TypedArray<*const DecimalObj> {
+    pub unsafe fn drop_array(ptr: *mut Self) {
+        // mirror of above, with DecimalObj::drop
+    }
+}
+// ... per <X>Obj
+```
+
+This shape conflicts with Rust's coherence rules: there's already a
+blanket `impl<T: Copy> TypedArray<T>` containing a `drop_array(ptr)`
+method. The per-T impls would have to **shadow** the blanket impl
+for those specific `T = *const <X>Obj` cases — Rust doesn't allow
+that directly (you can't have two `impl` blocks both providing a
+method named `drop_array` for overlapping `T`).
+
+**Workarounds:**
+
+- (b.1) Rename the blanket version to `drop_array_pod` (for
+  plain-old-data T) and have a separate `drop_array_heap` family
+  per-T. Caller chooses which to invoke based on element kind.
+- (b.2) Use specialization (`#[cfg(feature = "specialization")]`)
+  — nightly-only feature, not stable; refused.
+- (b.3) Per-T newtype wrappers (`pub struct StringArray(TypedArray<*const StringObj>);`)
+  with their own `drop_array`. Each newtype is a separate Rust
+  type; coherence OK. Cost: API surface multiplication, callers
+  juggle distinct types per element kind.
+
+**Pros:**
+
+- No new trait surface.
+- Per-T deallocator body lives alongside `TypedArray<T>` definition
+  (locality vs being scattered to per-Obj files in option (a)).
+
+**Cons:**
+
+- Requires a workaround for Rust coherence (b.1 or b.3 above);
+  every workaround adds API-surface complexity.
+- (b.1) renames the existing API contract `drop_array` — touches
+  every existing caller; not a discipline-coherent boundary
+  shift.
+- (b.3) multiplies type surface (newtype per kind); each kind has
+  its own constructor/accessor/methods.
+- For dead-arm migrations (DateTime/Timespan/Instant per §4.1.A.2):
+  shipping per-T impls for arms with zero live producers
+  bloats the API surface without immediate user-facing value.
+
+**Option (c) — Runtime kind discriminator at `drop_array`.**
+
+Shape:
+
+```rust
+impl<T: Copy> TypedArray<T> {
+    pub unsafe fn drop_array_with_element_kind(
+        ptr: *mut Self,
+        elem_kind: NativeKind,
+    ) {
+        let arr = &*ptr;
+        if arr.cap > 0 && !arr.data.is_null() {
+            for i in 0..arr.len {
+                let elem_bits: u64 = ...; // read T bytes as u64
+                // Dispatch on elem_kind to call the right per-T release
+                match elem_kind {
+                    NativeKind::Ptr(HeapKind::String) => {
+                        let elem_ptr = elem_bits as *const StringObj;
+                        if v2_release(&(*elem_ptr).header) {
+                            StringObj::drop(elem_ptr as *mut StringObj);
+                        }
+                    }
+                    NativeKind::Ptr(HeapKind::Decimal) => { /* ... */ }
+                    // ... per-kind arms
+                    _ => { /* scalar or unrecognized — no-op */ }
+                }
+            }
+            // ... rest of existing drop_array body
+        }
+    }
+}
+```
+
+**Pros:**
+
+- Single `drop_array` entry point; callers don't choose between
+  variants.
+- No new trait.
+
+**Cons (load-bearing):**
+
+- **This is a §2.7.7 #4 / #7 forbidden pattern in disguise.** The
+  `elem_kind` discriminator reaches the runtime dispatch at drop
+  time, and the match arm decodes per-element bits per-kind. Compare
+  to the deleted `UnifiedArray` (§2.7.14): "Pre-strict-typing
+  `UnifiedArray` packed an `ArrayElementKind` byte and a typed-
+  mirror pointer into the `#[repr(C)]` heap object alongside the
+  `Vec<u64>` data buffer ... Every JIT-FFI consumer consumed this
+  kind byte to dispatch element operations. This is the §2.7.7 #4
+  / #7 forbidden pattern — kind recovered at runtime via heap-byte
+  decode rather than threaded from the producing call signature."
+  Option (c) doesn't store the kind on the heap (it threads through
+  the `elem_kind` parameter), but **the runtime dispatch on the
+  kind at drop-time IS the W10-misc-deleted pattern** in another
+  layer. The architectural cleanliness of v2-raw `TypedArray<T>` is
+  "T is monomorphized at compile time; no runtime dispatch on
+  element kind."
+
+- Bool-default risk: when `elem_kind` is unknown at the drop
+  callsite, the match's `_ => { no-op }` arm silently leaks. Per
+  §2.7.7 #9 / §2.7.8 #4, this is a forbidden Bool-default-style
+  fallback (the only correct shape is surface-and-stop, but
+  surface-and-stop in a `Drop` impl is itself a bug — Rust's drop
+  semantics don't accommodate `Result<(), VMError>`-returning
+  destructors cleanly).
+
+- **Refuse option (c).** It re-introduces runtime kind dispatch at
+  the per-element retain/release path — the exact pattern v2-raw's
+  monomorphization-on-element-kind was designed to delete.
+
+#### §4.1.B.2 Decision
+
+**Audit deliverable (b) decision: Option (a) — `HeapElement` trait dispatch.**
+
+Rationale:
+
+1. **Discipline-coherent with ADR-006 §2.7.5** (stamp at compile
+   time): per-T release dispatch is monomorphized via the trait
+   at compile time; no runtime kind probe at drop time.
+2. **Discipline-coherent with ADR-005 §1** (single-discriminator):
+   the trait constrains `T: HeapElement` for heap-element
+   `TypedArray<*const T>` instantiations; `HeapElement` is not a
+   parallel sum type to `HeapKind` — every variant of the trait
+   IS a distinct Rust type (StringObj/DecimalObj/...) with its
+   own `release_elem` body. The trait is a structural constraint,
+   not a discriminator.
+3. **Discipline-coherent with §2.7.6 / Q8 carrier-API bound**: the
+   `HeapElement` trait method `release_elem` takes only `*const Self`
+   — no `NativeKind` parameter, no `HeapValue` access. The kind is
+   carried by the Rust type system, not by a runtime discriminator.
+4. **§4.3 O-3.b objection scoped correctly**: the audit's earlier
+   refusal of "per-T retain/release dispatch" was for `TypedObject` /
+   `TraitObject` (where the inner storage is Arc-wrapped, NOT
+   HeapHeader-equipped — adding `HeapElement` would perpetuate
+   Arc-vs-HeapHeader duality). For uniformly HeapHeader-equipped
+   `<X>Obj` carriers (StringObj precedent + to-be-created
+   DecimalObj/DateTimeObj/TimespanObj/InstantObj), every
+   implementor has the same HeapHeader-at-offset-0 contract.
+5. **Forward-S5 readiness**: when S5 deletes the TypedArrayData
+   enum, the `TypedArray<*const <X>Obj>` instantiations need their
+   release plumbing in place. Option (a) lets the trait be
+   implemented eagerly per-`<X>Obj` (including for dead arms per
+   §4.1.A.2), with zero runtime cost when no live producer fires.
+
+#### §4.1.B.3 Forbidden patterns the decision rules out
+
+- **Renamed "HeapElement" via defection-attractor framing**: future
+  agents must not rename `HeapElement` to "heap-bridge" /
+  "elem-helper" / "release-translator" / etc. The `(decode|tag|
+  kind|dispatch|value.call|closure.callback|frame.setup|callee|
+  capture) (bridge|probe|helper|hop|translator|adapter|shim)`
+  broader-family regex applies — `HeapElement` describes a
+  structural property (this T lives on the v2-raw heap), not a
+  dispatch role.
+
+- **`HeapElement::release_elem` taking a NativeKind parameter**:
+  refused — the trait dispatches via the Rust type system, not
+  via a runtime kind probe.
+
+- **Bool-default in `release_elem` body**: if a `<X>Obj` author
+  encounters a kind-source gap (e.g. inner `Arc<T>` field whose
+  drop body is unproven), surface-and-stop with
+  `NotImplemented(SURFACE: ...)` at the construction-site, not in
+  the release body. Per §2.7.7 #9.
+
+- **`HeapElement` for non-HeapHeader-equipped types**: refused at
+  trait-impl site. Implementing `unsafe impl HeapElement for
+  TypedObjectStorage` would fail the `(*ptr).header` field
+  access at compile time (no HeapHeader field) — the trait is
+  structurally constrained to types with `HeapHeader` at offset 0.
+
+#### §4.1.B.4 Migration recipe
+
+For each new `<X>Obj` carrier per deliverable (d):
+
+1. Create `crates/shape-value/src/v2/<x>_obj.rs` mirroring StringObj
+   shape (struct + new + drop + size assertion).
+2. Implement `unsafe impl HeapElement for <X>Obj { unsafe fn release_elem(ptr) { ... } }`
+   in the same file.
+3. Add compile-time test ensuring the trait impl satisfies the
+   HeapHeader-at-offset-0 invariant (`offset_of!(<X>Obj, header) ==
+   0`).
+4. Extend `TypedArray<T>`'s `drop_array` family with an
+   `unsafe fn drop_array_heap<T: HeapElement>(ptr: *mut TypedArray<*const T>)`
+   variant (parallel to the existing Copy-T `drop_array`); callers
+   choose at compile time based on whether the element kind is
+   POD or heap-resident.
+
+The single addition to `TypedArray<T>` API is the new
+`drop_array_heap` variant gated on `T: HeapElement`. No existing
+caller changes (POD T paths keep using the existing `drop_array`).
+
+#### §4.1.B.5 Out-of-scope this deliverable
+
+- HeapElement impl for `TypedObjectStorage` / `TraitObjectStorage`
+  — those are S3 territory per §3.3 / Obstacle O-3 / O-3a, and
+  the audit's O-3.c "defer" disposition stands. The trait surface
+  defined here is bounded to `<X>Obj`-style HeapHeader-equipped
+  carriers.
+- Retain-on-push: deliverable (b) covers release-on-drop only.
+  The retain-on-push side at `TypedArray<*const <X>Obj>::push`
+  call sites uses the same `v2_retain(&(*elem_ptr).header)` shape
+  per StringObj precedent — no new trait method needed (callers
+  invoke `v2_retain` directly with the header pointer).
+
 ### §4.2 Obstacle O-2 — F64 AVX-512 alignment downgrade
 
 **The shape**: `TypedArrayData::F64(Arc<AlignedTypedBuffer>)`
