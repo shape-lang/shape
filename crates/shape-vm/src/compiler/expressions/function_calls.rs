@@ -98,7 +98,10 @@ fn builtin_return_numeric_type(name: &str) -> Option<NumericType> {
         // such as `coefficient_of_variation` need return-type info too,
         // otherwise their `let std_val = __intrinsic_std(series)`
         // bindings stay typeless and `std_val / mean_val` fails strict-typing.
-        | "__intrinsic_sum" | "__intrinsic_mean" | "__intrinsic_min" | "__intrinsic_max"
+        // W12-stdlib-intrinsic-collapse (Wave-2-Agent-G, 2026-05-14):
+        // `__intrinsic_sum` deleted — stdlib `sum()` routes through PHF
+        // method dispatch (per ADR-005 §1).
+        | "__intrinsic_mean" | "__intrinsic_min" | "__intrinsic_max"
         | "__intrinsic_std" | "__intrinsic_variance" | "__intrinsic_correlation"
         | "__intrinsic_covariance" | "__intrinsic_percentile" | "__intrinsic_median" => {
             Some(NumericType::Number)

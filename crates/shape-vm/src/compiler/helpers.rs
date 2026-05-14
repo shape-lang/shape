@@ -3850,9 +3850,11 @@ impl BytecodeCompiler {
             "fold" => BuiltinFunction::ControlFold,
 
             // Math intrinsics
+            // W12-stdlib-intrinsic-collapse (Wave-2-Agent-G, 2026-05-14):
+            // `__intrinsic_sum` deleted. Stdlib `pub fn sum(series)` now
+            // routes via PHF method dispatch (`series.sum()`) — ADR-005 §1.
             "__intrinsic_minimize" => BuiltinFunction::IntrinsicMinimize,
             "__intrinsic_bspline2_3d_batch" => BuiltinFunction::IntrinsicBspline2_3dBatch,
-            "__intrinsic_sum" => BuiltinFunction::IntrinsicSum,
             "__intrinsic_mean" => BuiltinFunction::IntrinsicMean,
             "__intrinsic_min" => BuiltinFunction::IntrinsicMin,
             "__intrinsic_max" => BuiltinFunction::IntrinsicMax,
@@ -4068,7 +4070,6 @@ impl BytecodeCompiler {
                 | BuiltinFunction::ControlFold
                 | BuiltinFunction::IntrinsicMinimize
                 | BuiltinFunction::IntrinsicBspline2_3dBatch
-                | BuiltinFunction::IntrinsicSum
                 | BuiltinFunction::IntrinsicMean
                 | BuiltinFunction::IntrinsicMin
                 | BuiltinFunction::IntrinsicMax

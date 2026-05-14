@@ -126,7 +126,9 @@ impl IntrinsicsRegistry {
     /// represent). Until M1-split lands, calls produce a runtime error
     /// rather than emit a silent wrong-typed value.
     fn register_math_intrinsics(functions: &mut HashMap<String, IntrinsicFn>) {
-        functions.insert("__intrinsic_sum".to_string(), math::intrinsic_sum);
+        // W12-stdlib-intrinsic-collapse (Wave-2-Agent-G, 2026-05-14):
+        // `__intrinsic_sum` deleted — stdlib `sum()` now routes through
+        // PHF `.sum()` method dispatch (ADR-005 §1).
         functions.insert("__intrinsic_min".to_string(), math::intrinsic_min);
         functions.insert("__intrinsic_max".to_string(), math::intrinsic_max);
         functions.insert(

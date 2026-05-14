@@ -5,8 +5,11 @@
 // ===== Basic Statistics =====
 
 /// Compute the sum of all values in `series`.
+///
+/// Routes through the PHF method dispatch — single discriminator per
+/// ADR-005 §1 (W12-stdlib-intrinsic-collapse, Wave-2-Agent-G, 2026-05-14).
 pub fn sum(series) {
-    __intrinsic_sum(series)
+    series.sum()
 }
 
 /// Compute the arithmetic mean of `series`.
