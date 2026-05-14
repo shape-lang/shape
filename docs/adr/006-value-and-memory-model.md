@@ -4794,7 +4794,48 @@ pub enum TypedArrayData {
 - **Replaced** with a per-variant exhaustive match (no `_` catch-all) where each arm dispatches monomorphically; or
 - **Re-routed** through `TypedObject` / `TraitObject` for the user-type cases, where the schema or vtable carries the dispatch decision.
 
-##### Q25.B — `HashMapData` parametric value buffer
+##### Q25.B SUPERSEDED — `HashMapValueBuf` deletion (Wave 2 Agent C partial close, 2026-05-15)
+
+**Status:** Q25.B's `HashMapValueBuf` enum-tagged value-buffer monomorphization (the body below this preamble) is **SUPERSEDED**. The `HashMapValueBuf` enum at `crates/shape-value/src/heap_value.rs:529-552` is the deletion target under the Phase 3 cluster-0+1 Wave 2 bulldozer cadence (strategic-owner authorization 2026-05-14). `HashMapData` migrates to `HashMapData<V>` per audit §C.4 option (a.2) — HashMapKindedRef carrier with per-V monomorphization at the method tier; HeapValue::HashMap gains a kinded constructor per the §2.7.6 / Q8 carrier-API-bound rule.
+
+**Authority:** Phase 3 cluster-0+1 Wave 2 strategic-owner cadence shift 2026-05-14. Q25.B parallel-deletion target identified at audit §5 of `docs/cluster-audits/w12-typed-array-data-deletion-audit.md` (Round 17, 2026-05-13); Wave 1 inventory (`docs/cluster-audits/bulldozer-wave-1-inventory.md` §C, 2026-05-14) ground-truthed producer counts and named the migration shape. Landing branch: `bulldozer-strictly-typed-wave-2-c` (Wave 2 Round 1 Agent C).
+
+**Wave 2 Agent C partial close scope (2026-05-15):** dead-arm wholesale deletion landed for variants with **zero root producers** per §C.5 audit finding. The full `HashMapData<V>` generic monomorphization (audit §C.4 option (a.2) HashMapKindedRef carrier) is **surfaced-and-stopped** with structured shape per the dispatch's pragmatic-fallback clause — the ~40-file `Arc<HashMapData>` cascade exceeds the dispatch's ~1500 LoC / 7-file budget and entangles with Agent A1 (TypedArrayData scalar deletion), Agent A2 (TypedArrayData heap-element String/Decimal deletion), Agent D1 (TypedObjectStorage HeapHeader migration), and JIT FFI map carriers (`crates/shape-jit/src/ffi/v2/typed_map.rs`, `mir_compiler/v2_typed_map.rs`, etc.). The trailing-step coordination with D1 explicitly described in the dispatch became mechanically impossible alongside the full generic transition. Remaining work tracked as **Wave 2 Agent C+ (split into C1-tail + C2 per dispatch's pragmatic-fallback clause)**.
+
+**Per-variant migration shape post-supersession:**
+
+| Q25.B variant | Wave 2 Agent C partial close disposition | Post-supersession final replacement |
+|---|---|---|
+| I64 | DELETED 2026-05-15 (zero root producers per §C.5) | n/a |
+| F64 | DELETED 2026-05-15 (zero root producers per §C.5; panicking `unreachable!` arm in `value_at`) | n/a |
+| Bool | DELETED 2026-05-15 (zero root producers per §C.5; panicking `unreachable!` arm in `value_at`) | n/a |
+| DateTime / Timespan / Duration / Instant | DELETED 2026-05-15 (zero root producers per §C.5; `HashMap<string, DateTime>` is not a reachable user-facing type today) | n/a |
+| TraitObject | DELETED 2026-05-15 (zero root producers per §C.5; panicking `unreachable!` arm in `value_at`) | n/a |
+| String | PRESERVED (live arm; root producers in xml.rs / json.rs) | per-V monomorphization in `HashMapData<V>` + `TypedArray<*const StringObj>` values pointer (gated on Wave 2 Agent A2 close — `StringObj` v2-raw carrier + Agent B's `NativeKind::StringV2`) |
+| Decimal | PRESERVED (live arm; root producers in json.rs) | per-V monomorphization in `HashMapData<V>` + `TypedArray<*const DecimalObj>` values pointer (gated on Wave 2 Agent A2 close — `DecimalObj` v2-raw carrier + Agent B's `NativeKind::DecimalV2`) |
+| BigInt | PRESERVED (live arm; root producers in `hashmap_methods.rs:754` via `HashMap.map()` Int64 round-trip) | DEFERRED to cluster-1+ (same as §A.3 Decimal cluster-1+ disposition for BigInt Rust type design) |
+| Char | PRESERVED (dead-but-derived per §C.5; defensive arm in `specialize_values` for xml/json marshalling of `HeapValue::Char` first-elements) | per-V monomorphization in `HashMapData<V>` + `TypedArray<char>` values pointer (Char scalar bucket per R19 S1.5 §2.7.5 amendment) |
+| TypedObject | PRESERVED (live arm; root producers in xml.rs + json.rs + hashmap_methods groupBy + tests) | per-V monomorphization in `HashMapData<V>` + `TypedArray<*const TypedObjectStorage>` values pointer (gated on Wave 2 Agent D1 close — TypedObjectStorage HeapHeader migration) |
+
+**HashMapKindedRef carrier scope (per supervisor clarification 2, 2026-05-14):** HashMapKindedRef carrier (post-Wave-2-Agent-C-full-close) stays within shape-value / shape-runtime / shape-vm internal Rust boundaries (trait objects, function pointers, structs) per §2.7.5 Cross-crate ABI policy. It does NOT leak into the extension contract `unsafe fn(*mut c_void, &u64, &[u64]) -> Result<u64, String>` raw-bits ABI at `module_exports.rs:21`. If a case surfaces where HashMapKindedRef would need to cross the extension boundary, surface-and-stop with §-cite — warrants an ADR amendment scope expansion.
+
+**Forbidden post-supersession** (extending Q25.E #2 list):
+
+1. **Resurrection of `HashMapValueBuf` arms** under any rename ("Q25.B-inside-enum carriers retained", "documented intentional duality between HashMapValueBuf and HashMapKindedRef carriers"). The Wave 2 cadence shift authorization stands; per-V monomorphization at the method tier with HashMapKindedRef carrier is the deletion target, not a preserved-alongside-HashMapValueBuf alternative.
+
+2. **`HashMapData::values: Arc<TypedBuffer<...>>` field shape** — the value-buffer carrier is `*mut TypedArray<V>` per audit §C.4. The remaining `Arc<TypedBuffer<T>>` wrappers on the 5 surviving live arms (String / Decimal / BigInt / Char / TypedObject) are TRANSITIONAL — the Wave 2 Agent C+ continuation migrates them to v2-raw `TypedArray<V>` pointers; until then they remain in source under the dead-arm-deleted shape but with the same Q25.B SUPERSEDED disposition.
+
+3. **HashMap-wide runtime kind discriminator on the parent struct** (e.g. a `NativeKind` byte field on `HashMapData` naming what `*mut TypedArray<T>` the values pointer is) — same shape as the v2-raw `stamp_elem_type` byte just on the parent struct. Refused per audit §C.4 rationale: per-V monomorphization at compile time via HashMapKindedRef carrier API, no inline tag byte on HashMapData itself (same family as the deleted UnifiedArray ELEMENT_KIND byte, W10-misc deletion, §2.7.14).
+
+4. **"Preserve fallback for one period"** framing on the surviving live arms: "Wave 2 Agent C keeps String/Decimal/BigInt/Char/TypedObject arms, Wave 2 Agent C+ deletes" is acceptable ONLY under the structured surface-and-stop documented in this preamble (Wave 2 Agent C+ continuation territory). Without that structure, the framing is the W-series declare-victory pattern at sub-cluster-disposition layer.
+
+**Migration cadence:** Wave 2 Agent C partial close (Round 1, 2026-05-15) lands dead-arm wholesale deletion (8 dead arms: I64/F64/Bool/DateTime/Timespan/Duration/Instant/TraitObject). Wave 2 Agent C+ continuation (Round 2 or Round 3, scope split per dispatch's pragmatic-fallback clause) lands the full `HashMapData<V>` generic monomorphization + HashMapKindedRef carrier + the ~40-file `Arc<HashMapData>` consumer cascade alongside Agent A2's String/Decimal closes, Agent D1's TypedObjectStorage HeapHeader migration, and Agent B's StringV2/DecimalV2 NativeKind additions. S5-equivalent for HashMapValueBuf deletes the remaining 5 surviving live arms in one mechanical sub-cluster (close gate: `grep -rn 'HashMapValueBuf::' crates/` returns zero hits).
+
+**Preservation:** Q25.C (`HeapKind::TraitObject` re-introduction with universal `dyn Trait`) is **NOT** superseded by this amendment — Q25.C remains the binding TraitObject rebuild authority. Q25.A SUPERSEDED preamble at §2.7.24 above stands.
+
+The body below this preamble (Q25.B's original ratification text from Phase 2d 2026-05-11) is **PRESERVED FOR HISTORICAL PROVENANCE**. Readers benefit from seeing what was retired and why the supersession landed. Code-level enforcement (the `grep -rn 'HashMapValueBuf::' crates/` close gate at Wave 2 Agent C+ continuation close) operates against the post-supersession migration target, not the body below.
+
+##### Q25.B (Phase 2d original ratification, 2026-05-11, **SUPERSEDED**) — `HashMapData` parametric value buffer
 
 **Decision:** `HashMapData` is refactored from a single struct with `values: Arc<TypedBuffer<Arc<HeapValue>>>` to a struct with a parametric `HashMapValueBuf` enum:
 

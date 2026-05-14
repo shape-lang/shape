@@ -237,26 +237,19 @@ pub fn v2_values(
     // W17-typed-carrier-bundle-A checkpoint 3/4: HashMapValueBuf per-arm
     // dispatch — each variant projects to its matching TypedArrayData
     // arm via a single Arc::clone on the inner typed buffer.
+    //
+    // Wave 2 Agent C dead-arm deletion (2026-05-15): HashMapValueBuf's dead
+    // arms (I64/F64/Bool/DateTime/Timespan/Duration/Instant/TraitObject) were
+    // wholesale-deleted per `docs/cluster-audits/bulldozer-wave-1-inventory.md`
+    // §C.5 (zero root producers). Surviving live arms: String/Decimal/BigInt/
+    // TypedObject/Char. ADR-006 §2.7.24 Q25.B SUPERSEDED.
     use shape_value::heap_value::HashMapValueBuf;
     let arr = match &map.values {
-        HashMapValueBuf::I64(b) => TypedArrayData::I64(Arc::clone(b)),
-        HashMapValueBuf::F64(b) => {
-            // F64 TypedArray uses AlignedTypedBuffer; copy data through.
-            let data: Vec<f64> = b.data.to_vec();
-            let av = shape_value::AlignedVec::from_vec(data);
-            TypedArrayData::F64(Arc::new(shape_value::AlignedTypedBuffer::from(av)))
-        }
-        HashMapValueBuf::Bool(b) => TypedArrayData::Bool(Arc::clone(b)),
         HashMapValueBuf::String(b) => TypedArrayData::String(Arc::clone(b)),
         HashMapValueBuf::Decimal(b) => TypedArrayData::Decimal(Arc::clone(b)),
         HashMapValueBuf::BigInt(b) => TypedArrayData::BigInt(Arc::clone(b)),
-        HashMapValueBuf::DateTime(b) => TypedArrayData::DateTime(Arc::clone(b)),
-        HashMapValueBuf::Timespan(b) => TypedArrayData::Timespan(Arc::clone(b)),
-        HashMapValueBuf::Duration(b) => TypedArrayData::Duration(Arc::clone(b)),
-        HashMapValueBuf::Instant(b) => TypedArrayData::Instant(Arc::clone(b)),
         HashMapValueBuf::Char(b) => TypedArrayData::Char(Arc::clone(b)),
         HashMapValueBuf::TypedObject(b) => TypedArrayData::TypedObject(Arc::clone(b)),
-        HashMapValueBuf::TraitObject(b) => TypedArrayData::TraitObject(Arc::clone(b)),
     };
     Ok(KindedSlot::from_typed_array(Arc::new(arr)))
 }

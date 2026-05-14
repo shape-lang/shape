@@ -1039,10 +1039,15 @@ fn rewrap_typed_object_fields(
 /// into each entry's value buffer position.
 ///
 /// Same shape-issue as `rewrap_typed_object_fields`: the in-place
-/// values-buffer rewrite would need a typed-buffer mutation entry
-/// for `HashMapValueBuf::TraitObject` (the storage carrier already
-/// has the arm — see hashmap_methods.rs:259). Surfacing here keeps
-/// the dispatch correct while the values-buffer write-path is built.
+/// values-buffer rewrite requires a typed-buffer write-path with a
+/// per-entry trait-object re-box. Wave 2 Agent C dead-arm deletion
+/// (2026-05-15) removed the `HashMapValueBuf::TraitObject` arm (zero
+/// root producers per `docs/cluster-audits/bulldozer-wave-1-inventory.md`
+/// §C.5); reintroducing trait-object value buffers requires the full
+/// `HashMapData<V>` generic monomorphization per ADR-006 §2.7.24 Q25.B
+/// SUPERSEDED (audit §C.4 option (a.2) HashMapKindedRef carrier). The
+/// dispatch shell surfaces; lifting this pairs with the
+/// `rewrap_typed_object_fields` follow-up after Wave 2 Agent C+ closes.
 fn rewrap_hashmap_values(
     ret_bits: u64,
     wrap_targets: &[WrapTarget],
@@ -1052,10 +1057,11 @@ fn rewrap_hashmap_values(
     Err(VMError::NotImplemented(format!(
         "SURFACE: DynMethodCall BoxedReturn with HashMap<K, Self> \
          return + wrap_targets {:?} per ADR-006 §2.7.24 Q25.C.5 — \
-         values-buffer rewrap requires a typed-buffer write-path \
-         that takes a `HashMapValueBuf::TraitObject` arm + a per-\
-         entry re-box. The dispatch shell surfaces; lifting this \
-         pairs with the `rewrap_typed_object_fields` follow-up.",
+         values-buffer rewrap requires the full HashMapData<V> generic \
+         monomorphization (audit §C.4 option (a.2) HashMapKindedRef \
+         carrier) which is gated on Wave 2 Agent C+ close. The dispatch \
+         shell surfaces; lifting this pairs with the \
+         `rewrap_typed_object_fields` follow-up.",
         wrap_targets.iter().map(|w| w.path.as_slice()).collect::<Vec<_>>()
     )))
 }
