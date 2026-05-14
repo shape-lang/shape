@@ -60,8 +60,9 @@
 
 use crate::bytecode::{Instruction, Operand};
 use crate::executor::v2_handlers::v2_array_detect::{
-    self, ELEM_TYPE_BOOL, ELEM_TYPE_F64, ELEM_TYPE_I16, ELEM_TYPE_I32, ELEM_TYPE_I64,
-    ELEM_TYPE_I8, ELEM_TYPE_U16, ELEM_TYPE_U32, ELEM_TYPE_U8, V2ElemType,
+    self, ELEM_TYPE_BOOL, ELEM_TYPE_CHAR, ELEM_TYPE_F32, ELEM_TYPE_F64, ELEM_TYPE_I16,
+    ELEM_TYPE_I32, ELEM_TYPE_I64, ELEM_TYPE_I8, ELEM_TYPE_U16, ELEM_TYPE_U32, ELEM_TYPE_U8,
+    V2ElemType,
     V2TypedArrayView,
 };
 use crate::executor::vm_impl::stack::drop_with_kind;
@@ -896,6 +897,31 @@ fn slice_v2_typed_array(
             new_ptr as *mut u8
         },
         // V2ElemType::U64 omitted — deferred to S1.5 per S1 reopen.
+        // Wave 2 Agent A1 (2026-05-14) — F32 + Char slice paths.
+        V2ElemType::F32 => unsafe {
+            let src = view.ptr as *const TypedArray<f32>;
+            let slice: &[f32] = if s < e {
+                let data = (*src).data as *const f32;
+                std::slice::from_raw_parts(data.add(s), e - s)
+            } else {
+                &[]
+            };
+            let new_ptr = TypedArray::<f32>::from_slice(slice);
+            stamp_elem_type(new_ptr as *mut u8, ELEM_TYPE_F32);
+            new_ptr as *mut u8
+        },
+        V2ElemType::Char => unsafe {
+            let src = view.ptr as *const TypedArray<char>;
+            let slice: &[char] = if s < e {
+                let data = (*src).data as *const char;
+                std::slice::from_raw_parts(data.add(s), e - s)
+            } else {
+                &[]
+            };
+            let new_ptr = TypedArray::<char>::from_slice(slice);
+            stamp_elem_type(new_ptr as *mut u8, ELEM_TYPE_CHAR);
+            new_ptr as *mut u8
+        },
     }
 }
 

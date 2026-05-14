@@ -41,6 +41,9 @@ const _: () = {
     assert!(std::mem::size_of::<TypedArray<f64>>() == 24);
     assert!(std::mem::size_of::<TypedArray<i32>>() == 24);
     assert!(std::mem::size_of::<TypedArray<u8>>() == 24);
+    // Wave 2 Agent A1 (2026-05-14) — F32 + Char scalar monomorphizations.
+    assert!(std::mem::size_of::<TypedArray<f32>>() == 24);
+    assert!(std::mem::size_of::<TypedArray<char>>() == 24);
 };
 
 impl<T: Copy> TypedArray<T> {
@@ -698,6 +701,74 @@ mod tests {
             // Empty TypedArray (no allocated buffer).
             let arr: *mut TypedArray<*const StringObj> = TypedArray::new();
             TypedArray::<*const StringObj>::drop_array_heap(arr);
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Wave 2 Agent A1 (2026-05-14) — F32 + Char monomorphization smokes.
+    // ──────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_size_of_typed_array_f32_char() {
+        assert_eq!(std::mem::size_of::<TypedArray<f32>>(), 24);
+        assert_eq!(std::mem::size_of::<TypedArray<char>>(), 24);
+    }
+
+    #[test]
+    fn test_push_and_get_f32() {
+        let arr = TypedArray::<f32>::new();
+        unsafe {
+            TypedArray::push(arr, 1.5_f32);
+            TypedArray::push(arr, 2.25_f32);
+            TypedArray::push(arr, std::f32::consts::PI);
+            assert_eq!(TypedArray::len(arr), 3);
+            assert_eq!(TypedArray::get(arr, 0), Some(1.5_f32));
+            assert_eq!(TypedArray::get(arr, 1), Some(2.25_f32));
+            assert_eq!(TypedArray::get(arr, 2), Some(std::f32::consts::PI));
+            assert_eq!(TypedArray::get(arr, 3), None);
+            TypedArray::drop_array(arr);
+        }
+    }
+
+    #[test]
+    fn test_push_and_get_char() {
+        let arr = TypedArray::<char>::new();
+        unsafe {
+            TypedArray::push(arr, 'a');
+            TypedArray::push(arr, '☃');
+            TypedArray::push(arr, '👋');
+            assert_eq!(TypedArray::len(arr), 3);
+            assert_eq!(TypedArray::get(arr, 0), Some('a'));
+            assert_eq!(TypedArray::get(arr, 1), Some('☃'));
+            assert_eq!(TypedArray::get(arr, 2), Some('👋'));
+            assert_eq!(TypedArray::get(arr, 3), None);
+            TypedArray::drop_array(arr);
+        }
+    }
+
+    #[test]
+    fn test_from_slice_f32() {
+        let data: [f32; 5] = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let arr = TypedArray::from_slice(&data);
+        unsafe {
+            assert_eq!(TypedArray::len(arr), 5);
+            for (i, &expected) in data.iter().enumerate() {
+                assert_eq!(TypedArray::get(arr, i as u32), Some(expected));
+            }
+            TypedArray::drop_array(arr);
+        }
+    }
+
+    #[test]
+    fn test_from_slice_char() {
+        let data = ['h', 'i', '!'];
+        let arr = TypedArray::from_slice(&data);
+        unsafe {
+            assert_eq!(TypedArray::len(arr), 3);
+            for (i, &expected) in data.iter().enumerate() {
+                assert_eq!(TypedArray::get(arr, i as u32), Some(expected));
+            }
+            TypedArray::drop_array(arr);
         }
     }
 

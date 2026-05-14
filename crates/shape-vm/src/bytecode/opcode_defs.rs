@@ -633,6 +633,33 @@ define_opcodes! {
     // team-lead's pre-dispatch audit). See AGENTS.md S1 row's surface-
     // and-stop list. Byte values 0x11F..0x122 left unallocated for
     // S1.5's re-mint.
+    //
+    // ===== Wave 2 Agent A1 (2026-05-14) — F32 + Char monomorphizations =====
+    //
+    // R19 S1.5 amendment (W12-nativekind-scalar-additions, 2026-05-14)
+    // introduced `NativeKind::Float32` and `NativeKind::Char` as scalar
+    // bucket carriers per ADR-006 §2.7.5. F32 and Char are `Copy + 4-byte`
+    // scalars with no heap indirection — same recipe as I8/I16/U16/U32 in
+    // S1. No new HeapKind variants, no parametric NativeKind shapes.
+    // Audit §2.1 + §3.1 row.
+
+    /// Create a new TypedArray<f32> with given capacity. Operand: Count(capacity). Pushes ptr.
+    NewTypedArrayF32 = 0x1A3, Object, pops: 0, pushes: 1;
+    /// Get element from TypedArray<f32>: pops (arr_ptr, index), pushes f32 value (zero-extended into f64 bit pattern).
+    TypedArrayGetF32 = 0x1A4, Object, pops: 2, pushes: 1;
+    /// Push element to TypedArray<f32>: pops (arr_ptr, value), pushes nothing.
+    TypedArrayPushF32 = 0x1A5, Object, pops: 2, pushes: 0;
+    /// Set element in TypedArray<f32>: pops (arr_ptr, index, value), pushes nothing.
+    TypedArraySetF32 = 0x1A6, Object, pops: 3, pushes: 0;
+
+    /// Create a new TypedArray<char> with given capacity. Operand: Count(capacity). Pushes ptr.
+    NewTypedArrayChar = 0x1A7, Object, pops: 0, pushes: 1;
+    /// Get element from TypedArray<char>: pops (arr_ptr, index), pushes char codepoint as u32.
+    TypedArrayGetChar = 0x1A8, Object, pops: 2, pushes: 1;
+    /// Push element to TypedArray<char>: pops (arr_ptr, value), pushes nothing.
+    TypedArrayPushChar = 0x1A9, Object, pops: 2, pushes: 0;
+    /// Set element in TypedArray<char>: pops (arr_ptr, index, value), pushes nothing.
+    TypedArraySetChar = 0x1AA, Object, pops: 3, pushes: 0;
 
     // ===== v2 Typed Map Operations =====
     /// Allocate a new TypedMap<*const StringObj, f64>. Pushes ptr.
@@ -1886,6 +1913,15 @@ impl OpCode {
             // U64 typed-array opcodes intentionally NOT minted — deferred to
             // S1.5 per supervisor's S1 reopen; see comment block in the
             // opcode-definition table above.
+            // Wave 2 Agent A1 (2026-05-14) — F32 + Char monomorphizations.
+            | OpCode::NewTypedArrayF32
+            | OpCode::TypedArrayGetF32
+            | OpCode::TypedArrayPushF32
+            | OpCode::TypedArraySetF32
+            | OpCode::NewTypedArrayChar
+            | OpCode::TypedArrayGetChar
+            | OpCode::TypedArrayPushChar
+            | OpCode::TypedArraySetChar
             // Local-slot-based typed array element access
             | OpCode::GetElemI64
             | OpCode::GetElemF64
