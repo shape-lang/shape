@@ -6600,3 +6600,132 @@ operational gate from a relay round per recovery).
 arms + ADR-006 amendment text scattering across §2.3, §Q25.A SUPERSEDED
 text refinement, §Q25.B SUPERSEDED, §2.7.5 + Q8 amendment) + smoke
 matrix re-verification + Round 2 dispatch authorization request.*
+
+---
+
+## Wave 2 Round 1 close (2026-05-14)
+
+All 6 Round 1 agents closed; supervisor R20 disposition ratified each
+agent's status; merge ceremony executed per §L.4 sequence (F first →
+C → G → B → D1+follow-up → A1). Gate verification, take-both
+resolution, and smoke matrix preservation all green.
+
+### Per-agent close summary (3 fully clean + 3 partial/deviation)
+
+| Agent | Close commit | Status | Notes |
+|---|---|---|---|
+| G | `0862a8ec` | ✓ clean | IntrinsicSum cleanup; 284 LoC net deletion; PHF .sum() canonical (I64+F64 coverage verified) |
+| B | `dcc01005` | ✓ clean | NativeKind::StringV2 + DecimalV2 + ADR-006 §2.7.5 amendment landed in file (~150 LoC); 22 files / +608 LoC; ~37 cascade sites well under ~100 ceiling |
+| C | `7e4d6719` | ⚠ partial + surface-and-stop | C1 = 8 dead arms deleted + Q25.B SUPERSEDED amendment landed in file (date 2026-05-15 filled). C2 (full HashMapData<V> rebuild) deferred per supervisor disposition (1) — C2a Round 2 + C2b Round 3 split (~5k LoC / 40 files vs audit-stated 1.5k LoC / 7 files; 6th imprecision-pattern instance) |
+| F | `37c92b96` | ✓ clean | Q25.A 9 dead arms × zero producers; -525 LoC across 27 files; ~200 match-arm deletions; 2 in-scope surface-and-stops at trait_object_ops.rs::rewrap_* converted to NotImplemented + §2.7.24 Q25.A SUPERSEDED #1 cite |
+| D1 | `0e4510d4` + follow-up `da82e4cf` | ⚠ ADR-landing deviation (fixed) + transitional state | TypedObjectStorage Arc → HeapHeader shape change (~30 cascade sites vs ~50 predicted). ADR-006 §2.3 amendment initially in commit message body only; team-lead drive-by fixup at `da82e4cf` relocated text into ADR-006 file per supervisor item 2 disposition. Transitional Arc-style consumer dispatch arms preserved as legacy infrastructure for D2 lockstep flip per supervisor item 3 disposition (critical lockstep binding for D2 dispatch) |
+| A1 | `d4e05bf4` | ⚠ partial + 2 surface-and-stops | F32 + Char monomorphizations landed (~30 cascade sites; 20 new tests); 7th imprecision-pattern instance (Wave 1 §A predicted 8 new monomorphizations; 5 of 8 — i8/i16/u8/u16/u32 — already landed via prior W12 S1). U64 monomorphization spilled (§2.7.7/Q9 NativeKind discriminator gap; deferred to Wave 3 stabilize per Shape D R19 S1.5 ratification — relabel from NativeKind::UInt64 to NativeKind::Ptr(HeapKind::TypedArray) once Arc-enum path deleted). TypedArrayData scalar arm deletion spilled (~400+ refs exceed ~100-site ceiling; deferred to Wave 3 stabilize / S5 wholesale enum deletion) |
+
+### Merge ceremony commits (7 total)
+
+```
+1f2b27e2  Merge A1 (final; AGENTS.md take-both with placeholder→closed deduplication)
+9a8453f7  Merge D1 + follow-up (heap_value.rs conflict: take D1 structural rename to drop_fields helper + migrate B's StringV2/DecimalV2 arms INTO helper)
+e6dba749  Merge B (AGENTS.md take-both)
+d56453d0  Merge G (clean — isolated; no conflicts)
+7d7354dc  Merge C (heap_value.rs HashMapValueBuf doc-comment merge + trait_object_ops.rs comment + error-message synthesis)
+a170c4ce  Merge F (AGENTS.md take-both)
+da82e4cf  D1 follow-up drive-by: §2.3 amendment text into ADR-006 file
+```
+
+### Post-merge gates (devenv wrapper)
+
+- `cargo check --workspace --lib --tests` EXIT=0 ✅
+- `bash scripts/verify-merge.sh` EXIT=0; **Passed: 12 / Failed: 0** ✅
+- `bash scripts/check-no-dynamic.sh` EXIT=0 ✅
+- 6 Wave 2 Round 1 worktrees cleaned up ✅
+
+### Post-merge smoke matrix (release binary rebuilt; baseline preserved)
+
+| Smoke | VM | JIT | Cluster-0 criterion |
+|---|---|---|---|
+| 1 (scalar loop) | ✅ 4950 | ✅ 4950 | ✓ |
+| 2 (`[1,2,3,4,5].map(\|x\|x*2).sum()`) | ✅ 30 | ❌ rc=1 | gated on Round 2 A2 |
+| 3 (canonical fixture) | ✅ x | ✅ x | ✓ |
+| 4 (`Set()` + `.add()` + `.size()`) | ✅ 2 | ✅ 2 | ✓ |
+
+3 of 4 VM == JIT preserved. Smoke 2 still gated on Round 2 A2 territory
+(String + Decimal heap-element migration consuming B's StringV2 +
+DecimalV2 NativeKind output).
+
+### Discipline observations (cumulative through Round 1 close)
+
+**6th + 7th supervisor-/audit-layer imprecision pattern instances**:
+- 6th (Agent C): Wave 1 §C predicted HashMapData<V> rebuild ~1.5k LoC /
+  7 files; ground truth ~5k LoC / 40 files (JIT FFI map carriers
+  separate cross-crate ABI per §2.7.5).
+- 7th (Agent A1): Wave 1 §A predicted 8 new monomorphizations
+  (~3k LoC); ground truth = 5 of 8 already landed via prior W12 S1
+  sub-cluster.
+
+Pattern trend continues decreasing in severity (caught at wave-agent
+execution layer, not in shipped code). Supervisor item 6 disposition:
+new pre-flight ground-truth check binding for Round 2 + Round 3
+dispatch prompts ("grep your territory at HEAD for prior W12 S1 sub-
+cluster landings / prior W17-typed-carrier-bundle-A landings / prior
+Wave 1 §X audit predictions vs current source state / prior Round 1
+agent outputs that change your territory").
+
+**Pre-existing baseline reconfirmation** (3 independent observations
+across B, D1, F all stash-round-tripped at parent 1c68a720): 2
+hashmap_mutation tests + 1 SIGABRT in cargo-test teardown. Owned as
+Wave 2 baseline state per MEMORY.md "don't blame pre-existing".
+
+**Recovery-pattern observation**: Round 1 ran without a 3rd S1-reopen-
+R18 instance. The D1 ADR-landing deviation was a different class
+(team-lead drive-by fixup, smaller scope than ceremony) — does NOT
+count as a 3rd instance per supervisor 2026-05-14. If a 3rd instance
+surfaces during Round 2 (more likely with 4 parallel agents and
+~7.6k LoC), supervisor escalates to user for pattern-durability
+ratification.
+
+### Round 2 dispatch readiness (4 agents in parallel)
+
+Per supervisor disposition + §L Round 2 partition (with C2a folded in
+per disposition (1)):
+
+- Agent A2 — TypedArrayData heap-element migration (String + Decimal)
+  consuming B output. ~2,500 LoC.
+- Agent D2 — TypedObjectStorage construction-site cascade consuming D1
+  output. ~1,500 LoC. **CRITICAL LOCKSTEP** per supervisor item 3:
+  consumer dispatch arms MUST flip from Arc-style to v2_retain/v2_release
+  in SAME commit as producer-site migration.
+- Agent E — TraitObjectStorage HeapHeader migration consuming D1 output.
+  ~600 LoC.
+- Agent C2a — HashMapData<V> per-V monomorphization runtime tier
+  consuming Round 1 outputs. ~3,000 LoC.
+
+Total Round 2 scope: ~7,600 LoC across 4 agents. Pre-flight ground-truth
+check binding inline in each dispatch prompt per supervisor item 6.
+
+### Round 3 dispatch shape (repurposed for C2b)
+
+Per supervisor disposition (1): Round 3 = Agent C2b (HashMapData<V> JIT
+FFI tier; ~2,000 LoC; maintains stable raw-bits FFI signatures per
+§2.7.5 extension contract policy). Agent H (Q25.C TraitObject rebuild)
+skipped per Surface A (c) user disposition; cluster-1.5 follow-up.
+
+### Velocity update
+
+- Round 1 merge ceremony complete (this commit) — 0.5 sessions
+- Round 2 dispatch + close + merge + Round 3 dispatch — 1 session
+- Round 3 close + merge + Wave 3 S5 dispatch — 1 session
+- Wave 3 S5 close + cluster-0+1 close attempt — 1 session
+- Cluster-2 cleanup — 1-2 sessions
+- Phase 4 — 1-2 sessions
+- **Total remaining**: 4.5-7 sessions
+
+Trajectory unchanged from bulldozer-cadence projection. ~6.8k LoC
+landed across 6 Round 1 agents within wave-scope timeboxing.
+
+---
+
+*Next session: Wave 2 Round 2 dispatch (4 agents in parallel — A2, D2,
+E, C2a) after supervisor ratifies Round 1 close + Round 2 dispatch
+prompts (with pre-flight ground-truth check binding per item 6 + D2
+critical lockstep binding per item 3).*
