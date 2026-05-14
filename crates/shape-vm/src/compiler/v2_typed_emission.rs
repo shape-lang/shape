@@ -203,35 +203,19 @@ pub fn should_use_typed_array(elem_type: &ConcreteType) -> Option<TypedArrayKind
         // per R19 S1.5 amendment to ADR-006 §2.7.5.
         ConcreteType::F32 => Some(TypedArrayKind::F32),
         ConcreteType::Char => Some(TypedArrayKind::Char),
-        // Wave 2 Agent A2 (2026-05-14) — String + Decimal heap-element opcode
-        // surface landed (NewTypedArrayString/Decimal + Get/Push/Set per kind +
-        // V2ElemType::String/Decimal + TypedArrayKind variants + executor
-        // handlers), BUT the producer gate INTENTIONALLY remains None. Per
-        // ADR-006 §2.7.24 Q25.A SUPERSEDED #3 mixed-migration forbidden pattern
-        // + R20 S2-prime-production surface-and-stop precedent (status doc
-        // 2026-05-14): flipping this arm to Some routes new `Array<string>` /
-        // `Array<decimal>` literals to v2-raw `TypedArray<*const StringObj>` /
-        // `TypedArray<*const DecimalObj>` shape, but ~158 consumer match-arm
-        // references across 35 files (grep `TypedArrayData::(String|Decimal)`)
-        // still expect `Ptr(HeapKind::TypedArray) + Arc<TypedArrayData::*>`
-        // shape, and ~29 additional producer sites (`object_creation.rs`,
-        // `concat.rs`, `array_transform.rs`, `string_methods.rs::split`, etc.)
-        // still construct `Arc<TypedArrayData::String|Decimal>` directly. A
-        // partial flip produces a runtime carrier-shape conflict (Array<string>
-        // literals → v2-raw shape, but `string.split()` → Arc-enum shape;
-        // consumers downcast on the Arc-enum arm and CORRUPT when called on
-        // v2-raw bits — the §"Parallel-implementation across producer/consumer
-        // carrier-shape boundaries" defection-attractor class).
-        //
-        // Surface-and-stop: the gate flip + the full producer cascade + the
-        // ~158 consumer arm migration is the A2-followup sub-cluster
-        // (~5-7k LoC / 35-file landing per audit §3.2 estimate — exceeds
-        // Wave 2 Round 2 single-agent timeboxing). The architectural surface
-        // (opcodes, V2ElemType arms, allocator handlers, compiler routing
-        // tables) is landed in this commit; flipping the gate is the next
-        // sub-cluster's first commit, in lockstep with the producer migration.
-        // ConcreteType::String / Decimal stay on the legacy Arc-enum path
-        // until that lockstep flip.
+        // Wave 2 Round 3a' A2-followup-gate-flip (2026-05-14) — String +
+        // Decimal heap-element gate FLIPPED to v2-raw `TypedArray<*const
+        // StringObj>` / `TypedArray<*const DecimalObj>` shape, in lockstep
+        // with the Round 3a' α/β/γ/δ/ε/ζ/η v2-raw consumer arms landed in
+        // the array_{transform,aggregation,query,sets,sort,basic,joins}.rs
+        // executor handlers. Per ADR-006 §2.7.24 Q25.A SUPERSEDED + audit
+        // §3.2 sub-cluster S2-prime + §4.1.B per-element retain/release ABI:
+        // `Array<string>` / `Array<decimal>` literals now route through the
+        // NewTypedArrayString / NewTypedArrayDecimal opcodes; element-read
+        // pushes `NativeKind::StringV2` / `NativeKind::DecimalV2`; per-element
+        // retain via `v2_retain(&(*elem_ptr).header)` at element-read time.
+        ConcreteType::String => Some(TypedArrayKind::String),
+        ConcreteType::Decimal => Some(TypedArrayKind::Decimal),
         _ => None,
     }
 }
@@ -275,17 +259,34 @@ pub fn should_use_typed_array_from_slot_kind(
         // Wave 2 Agent A1 (2026-05-14) — F32 + Char scalar monomorphizations.
         NativeKind::Float32 => Some(TypedArrayKind::F32),
         NativeKind::Char => Some(TypedArrayKind::Char),
-        // Wave 2 Agent A2 (2026-05-14) — String + Decimal heap-element opcode
-        // surface landed but producer gate INTENTIONALLY stays None per the
-        // mirror policy at `should_use_typed_array` above. See that function's
-        // ConcreteType::String/Decimal comment for full rationale (forbidden
-        // mixed-migration shape, ~158 consumer cascade, A2-followup territory).
-        // The post-gate-flip caller will additionally need to handle the
-        // legacy `NativeKind::String` (Phase-2c Arc<String>) → `StringV2`
-        // (v2-raw *const StringObj) transition at all binding sites where a
-        // `let arr: Array<string> = [s1, s2]` literal feeds the new producer
-        // path with elements that originated from the legacy String carrier
-        // (current production path).
+        // Wave 2 Round 3a' A2-followup-gate-flip (2026-05-14) — String +
+        // Decimal heap-element slot-kind mirror flipped in lockstep with
+        // the `should_use_typed_array(ConcreteType)` gate above. Two routing
+        // shapes light up:
+        //
+        //   - `NativeKind::String` (legacy Phase-2c `Arc<String>` carrier
+        //     label) routes here from `typed_array_from_annotation("string")`
+        //     when an `Array<string>` annotation drives binding initialization
+        //     (`statements.rs:681` flow). Post-flip, the literal-elements'
+        //     legacy `Arc<String>` bits + `NativeKind::String` source label
+        //     no longer match the `TypedArrayPushString` consumer invariant
+        //     (which strictly requires `NativeKind::StringV2`). The literal-
+        //     upgrade transition (string literal `LoadConst` → `NewStringV2`)
+        //     is the downstream A2-followup-producer-cascade territory; until
+        //     that lands, `let xs: Array<string> = [...]` literals will
+        //     surface a structured RuntimeError at push time, NOT a SIGSEGV.
+        //   - `NativeKind::StringV2` / `NativeKind::DecimalV2` are the v2-raw
+        //     carrier labels that match the typed opcode runtime invariants;
+        //     these flow from `TypedArrayGetString` / `TypedArrayGetDecimal`
+        //     element reads (per `v2_handlers/array.rs:682`).
+        //
+        // Per ADR-006 §2.7.24 Q25.A SUPERSEDED + audit §3.2 sub-cluster
+        // S2-prime + §4.1.B per-element retain/release ABI. Aligned with the
+        // Round 3a' α/β/γ/δ/ε/ζ/η consumer arms that landed as UNREACHABLE
+        // code with the gate closed; this flip makes them reachable atomically.
+        NativeKind::String => Some(TypedArrayKind::String),
+        NativeKind::StringV2 => Some(TypedArrayKind::String),
+        NativeKind::DecimalV2 => Some(TypedArrayKind::Decimal),
         _ => None,
     }
 }
@@ -413,8 +414,22 @@ mod tests {
     }
 
     #[test]
-    fn test_string_falls_back_to_legacy() {
-        assert_eq!(should_use_typed_array(&ConcreteType::String), None);
+    fn test_string_maps_to_typed_array_string() {
+        // Wave 2 Round 3a' A2-followup-gate-flip (2026-05-14) — gate flipped
+        // in lockstep with the Round 3a' v2-raw consumer arms.
+        assert_eq!(
+            should_use_typed_array(&ConcreteType::String),
+            Some(TypedArrayKind::String)
+        );
+    }
+
+    #[test]
+    fn test_decimal_maps_to_typed_array_decimal() {
+        // Wave 2 Round 3a' A2-followup-gate-flip (2026-05-14).
+        assert_eq!(
+            should_use_typed_array(&ConcreteType::Decimal),
+            Some(TypedArrayKind::Decimal)
+        );
     }
 
     #[test]
@@ -623,11 +638,37 @@ mod tests {
     }
 
     #[test]
-    fn test_slot_kind_string_falls_back() {
+    fn test_slot_kind_string_maps_to_string() {
+        // Wave 2 Round 3a' A2-followup-gate-flip (2026-05-14) — legacy
+        // `NativeKind::String` (Arc<String> carrier label) routes here from
+        // `typed_array_from_annotation("string")`; literal-upgrade transition
+        // to `StringV2` is downstream A2-followup-producer-cascade territory.
         use crate::type_tracking::NativeKind;
         assert_eq!(
             should_use_typed_array_from_slot_kind(NativeKind::String),
-            None
+            Some(TypedArrayKind::String)
+        );
+    }
+
+    #[test]
+    fn test_slot_kind_stringv2_maps_to_string() {
+        // Wave 2 Round 3a' A2-followup-gate-flip — v2-raw `StringV2` label
+        // (matches `TypedArrayPushString` consumer kind invariant).
+        use crate::type_tracking::NativeKind;
+        assert_eq!(
+            should_use_typed_array_from_slot_kind(NativeKind::StringV2),
+            Some(TypedArrayKind::String)
+        );
+    }
+
+    #[test]
+    fn test_slot_kind_decimalv2_maps_to_decimal() {
+        // Wave 2 Round 3a' A2-followup-gate-flip — v2-raw `DecimalV2` label
+        // (matches `TypedArrayPushDecimal` consumer kind invariant).
+        use crate::type_tracking::NativeKind;
+        assert_eq!(
+            should_use_typed_array_from_slot_kind(NativeKind::DecimalV2),
+            Some(TypedArrayKind::Decimal)
         );
     }
 
