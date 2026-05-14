@@ -18,8 +18,8 @@ use shape_value::{NativeKind, VMError};
 
 use super::super::VirtualMachine;
 use super::v2_array_detect::{
-    ELEM_TYPE_BOOL, ELEM_TYPE_F64, ELEM_TYPE_I16, ELEM_TYPE_I32, ELEM_TYPE_I64, ELEM_TYPE_I8,
-    ELEM_TYPE_U16, ELEM_TYPE_U32, ELEM_TYPE_U8, stamp_elem_type,
+    ELEM_TYPE_BOOL, ELEM_TYPE_CHAR, ELEM_TYPE_F32, ELEM_TYPE_F64, ELEM_TYPE_I16, ELEM_TYPE_I32,
+    ELEM_TYPE_I64, ELEM_TYPE_I8, ELEM_TYPE_U16, ELEM_TYPE_U32, ELEM_TYPE_U8, stamp_elem_type,
 };
 
 impl VirtualMachine {
@@ -508,6 +508,126 @@ impl VirtualMachine {
             // re-mints OpCode::{New,Get,Push,Set}TypedArrayU64 + their
             // handler bodies once the §2.7.7/Q9 NativeKind discriminator
             // for "pointer to TypedArray<T>" vs "scalar u64" lands.
+
+            // ── Wave 2 Agent A1 (2026-05-14) — F32 + Char monomorphizations ──
+            //
+            // F32 and Char are `Copy + 4-byte` scalars per R19 S1.5 amendment
+            // (W12-nativekind-scalar-additions). Same shape as I8/U16/I32
+            // arms above: raw bit transfer through `push_kinded`, with the
+            // result `NativeKind::Float32` / `NativeKind::Char` per audit
+            // §2.1 row. No new HeapKind, no Arc share, no refcount probe.
+
+            OpCode::NewTypedArrayF32 => {
+                let cap = match instruction.operand {
+                    Some(Operand::Count(n)) => n as u32,
+                    _ => 0,
+                };
+                let ptr = TypedArray::<f32>::with_capacity(cap);
+                unsafe { stamp_elem_type(ptr as *mut u8, ELEM_TYPE_F32) };
+                self.push_kinded(ptr as usize as u64, NativeKind::UInt64)?;
+                Ok(())
+            }
+            OpCode::TypedArrayGetF32 => {
+                let (idx_bits, _idx_kind) = self.pop_kinded()?;
+                let index = idx_bits as i64 as u32;
+                let (arr_bits, arr_kind) = self.pop_kinded()?;
+                let arr = arr_bits as usize as *const TypedArray<f32>;
+                let len = unsafe { TypedArray::len(arr) };
+                let val = unsafe {
+                    TypedArray::get(arr, index).ok_or(VMError::IndexOutOfBounds {
+                        index: index as i32,
+                        length: len as usize,
+                    })?
+                };
+                drop_with_kind(arr_bits, arr_kind);
+                // Pass f32 bits in the low 32 bits; high bits zero.
+                self.push_kinded(val.to_bits() as u64, NativeKind::Float32)?;
+                Ok(())
+            }
+            OpCode::TypedArrayPushF32 => {
+                let (val_bits, _vk) = self.pop_kinded()?;
+                // F32 bits stored in the low 32 bits of the slot.
+                let val = f32::from_bits(val_bits as u32);
+                let (arr_bits, arr_kind) = self.pop_kinded()?;
+                let arr = arr_bits as usize as *mut TypedArray<f32>;
+                unsafe { TypedArray::push(arr, val); }
+                drop_with_kind(arr_bits, arr_kind);
+                Ok(())
+            }
+            OpCode::TypedArraySetF32 => {
+                let (val_bits, _vk) = self.pop_kinded()?;
+                let val = f32::from_bits(val_bits as u32);
+                let (idx_bits, _ik) = self.pop_kinded()?;
+                let index = idx_bits as i64 as u32;
+                let (arr_bits, arr_kind) = self.pop_kinded()?;
+                let arr = arr_bits as usize as *mut TypedArray<f32>;
+                unsafe { TypedArray::set(arr, index, val); }
+                drop_with_kind(arr_bits, arr_kind);
+                Ok(())
+            }
+
+            OpCode::NewTypedArrayChar => {
+                let cap = match instruction.operand {
+                    Some(Operand::Count(n)) => n as u32,
+                    _ => 0,
+                };
+                let ptr = TypedArray::<char>::with_capacity(cap);
+                unsafe { stamp_elem_type(ptr as *mut u8, ELEM_TYPE_CHAR) };
+                self.push_kinded(ptr as usize as u64, NativeKind::UInt64)?;
+                Ok(())
+            }
+            OpCode::TypedArrayGetChar => {
+                let (idx_bits, _idx_kind) = self.pop_kinded()?;
+                let index = idx_bits as i64 as u32;
+                let (arr_bits, arr_kind) = self.pop_kinded()?;
+                let arr = arr_bits as usize as *const TypedArray<char>;
+                let len = unsafe { TypedArray::len(arr) };
+                let val = unsafe {
+                    TypedArray::get(arr, index).ok_or(VMError::IndexOutOfBounds {
+                        index: index as i32,
+                        length: len as usize,
+                    })?
+                };
+                drop_with_kind(arr_bits, arr_kind);
+                // Char codepoint pushed as inline bits per
+                // §2.7.6/Q8 KindedSlot::from_char shape.
+                self.push_kinded(val as u32 as u64, NativeKind::Char)?;
+                Ok(())
+            }
+            OpCode::TypedArrayPushChar => {
+                let (val_bits, _vk) = self.pop_kinded()?;
+                // Codepoint validity check — `from_u32` rejects surrogates
+                // and out-of-range values. A runtime corruption here is a
+                // VM-internal error; surface-and-stop with a structured
+                // error rather than panic on `unwrap`.
+                let val = char::from_u32(val_bits as u32).ok_or_else(|| {
+                    VMError::RuntimeError(format!(
+                        "TypedArrayPushChar: invalid char codepoint 0x{:X}",
+                        val_bits as u32
+                    ))
+                })?;
+                let (arr_bits, arr_kind) = self.pop_kinded()?;
+                let arr = arr_bits as usize as *mut TypedArray<char>;
+                unsafe { TypedArray::push(arr, val); }
+                drop_with_kind(arr_bits, arr_kind);
+                Ok(())
+            }
+            OpCode::TypedArraySetChar => {
+                let (val_bits, _vk) = self.pop_kinded()?;
+                let val = char::from_u32(val_bits as u32).ok_or_else(|| {
+                    VMError::RuntimeError(format!(
+                        "TypedArraySetChar: invalid char codepoint 0x{:X}",
+                        val_bits as u32
+                    ))
+                })?;
+                let (idx_bits, _ik) = self.pop_kinded()?;
+                let index = idx_bits as i64 as u32;
+                let (arr_bits, arr_kind) = self.pop_kinded()?;
+                let arr = arr_bits as usize as *mut TypedArray<char>;
+                unsafe { TypedArray::set(arr, index, val); }
+                drop_with_kind(arr_bits, arr_kind);
+                Ok(())
+            }
 
             // ── Length ───────────────────────────────────────────────
 

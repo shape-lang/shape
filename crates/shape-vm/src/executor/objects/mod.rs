@@ -577,9 +577,26 @@ impl VirtualMachine {
                         V2ElemType::F64 => method_registry::TYPED_NUMBER_ARRAY_METHODS
                             .get(method_name)
                             .copied(),
+                        // Wave 2 Agent A1 (2026-05-14) — F32 rides the same
+                        // floating-point method family as F64 (sum / min /
+                        // max / etc. with NaN-aware semantics). Per-method
+                        // bodies that today operate on `*const TypedArray<f64>`
+                        // currently return None for F32 inputs at the
+                        // v2_array_detect layer (see sum_elements / etc.);
+                        // routing F32 to TYPED_NUMBER_ARRAY_METHODS gives the
+                        // shared method-name surface while preserving the
+                        // per-handler element-kind gate.
+                        V2ElemType::F32 => method_registry::TYPED_NUMBER_ARRAY_METHODS
+                            .get(method_name)
+                            .copied(),
                         V2ElemType::Bool => method_registry::BOOL_ARRAY_METHODS
                             .get(method_name)
                             .copied(),
+                        // Wave 2 Agent A1 (2026-05-14) — Char has no
+                        // dedicated typed-array method registry today;
+                        // dispatch falls back to the generic `ARRAY_METHODS`
+                        // PHF below (length / first / last / etc).
+                        V2ElemType::Char => None,
                     };
                     typed.or_else(|| method_registry::ARRAY_METHODS.get(method_name).copied())
                 } else {

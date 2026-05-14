@@ -62,6 +62,12 @@ pub enum TypedArrayKind {
     // probe in different framing — refused on sight per CLAUDE.md
     // §"Parallel-implementation across producer/consumer carrier-shape
     // boundaries".
+    /// `TypedArray<f32>` — backing for `Array<f32>` (Wave 2 A1, 2026-05-14).
+    F32,
+    /// `TypedArray<char>` — backing for `Array<char>` (Wave 2 A1, 2026-05-14).
+    /// Per R19 S1.5 amendment to ADR-006 §2.7.5, `Char` is a scalar bucket
+    /// carrier (4-byte `Copy`, no heap indirection) — same recipe as F32.
+    Char,
 }
 
 impl TypedArrayKind {
@@ -78,6 +84,8 @@ impl TypedArrayKind {
             TypedArrayKind::I16 => OpCode::NewTypedArrayI16,
             TypedArrayKind::U16 => OpCode::NewTypedArrayU16,
             TypedArrayKind::U32 => OpCode::NewTypedArrayU32,
+            TypedArrayKind::F32 => OpCode::NewTypedArrayF32,
+            TypedArrayKind::Char => OpCode::NewTypedArrayChar,
         }
     }
 
@@ -94,6 +102,8 @@ impl TypedArrayKind {
             TypedArrayKind::I16 => OpCode::TypedArrayGetI16,
             TypedArrayKind::U16 => OpCode::TypedArrayGetU16,
             TypedArrayKind::U32 => OpCode::TypedArrayGetU32,
+            TypedArrayKind::F32 => OpCode::TypedArrayGetF32,
+            TypedArrayKind::Char => OpCode::TypedArrayGetChar,
         }
     }
 
@@ -110,6 +120,8 @@ impl TypedArrayKind {
             TypedArrayKind::I16 => OpCode::TypedArrayPushI16,
             TypedArrayKind::U16 => OpCode::TypedArrayPushU16,
             TypedArrayKind::U32 => OpCode::TypedArrayPushU32,
+            TypedArrayKind::F32 => OpCode::TypedArrayPushF32,
+            TypedArrayKind::Char => OpCode::TypedArrayPushChar,
         }
     }
 
@@ -126,6 +138,8 @@ impl TypedArrayKind {
             TypedArrayKind::I16 => OpCode::TypedArraySetI16,
             TypedArrayKind::U16 => OpCode::TypedArraySetU16,
             TypedArrayKind::U32 => OpCode::TypedArraySetU32,
+            TypedArrayKind::F32 => OpCode::TypedArraySetF32,
+            TypedArrayKind::Char => OpCode::TypedArraySetChar,
         }
     }
 }
@@ -159,6 +173,10 @@ pub fn should_use_typed_array(elem_type: &ConcreteType) -> Option<TypedArrayKind
         // track invariant requires a discriminator between scalar u64
         // and v2-typed-array-pointer before the U64 carrier can dispatch
         // without runtime `is_heap()` probes.
+        // Wave 2 Agent A1 (2026-05-14) — F32 + Char scalar monomorphizations
+        // per R19 S1.5 amendment to ADR-006 §2.7.5.
+        ConcreteType::F32 => Some(TypedArrayKind::F32),
+        ConcreteType::Char => Some(TypedArrayKind::Char),
         _ => None,
     }
 }
@@ -199,6 +217,9 @@ pub fn should_use_typed_array_from_slot_kind(
         // through the same overloaded discriminator — the §2.7.7/Q9 parallel-
         // kind-track invariant the S1.5 sub-cluster must resolve before this
         // arm can light up.
+        // Wave 2 Agent A1 (2026-05-14) — F32 + Char scalar monomorphizations.
+        NativeKind::Float32 => Some(TypedArrayKind::F32),
+        NativeKind::Char => Some(TypedArrayKind::Char),
         _ => None,
     }
 }
@@ -225,6 +246,9 @@ pub fn typed_array_kind_from_type_name(type_name: &str) -> Option<TypedArrayKind
         "u32" => Some(TypedArrayKind::U32),
         // "u64" intentionally falls through — `Array<u64>` migration
         // deferred to S1.5 per the supervisor's S1 reopen.
+        // Wave 2 Agent A1 (2026-05-14) — F32 + Char.
+        "f32" => Some(TypedArrayKind::F32),
+        "char" => Some(TypedArrayKind::Char),
         _ => None,
     }
 }
@@ -393,6 +417,66 @@ mod tests {
     }
 
     #[test]
+    fn test_f32_maps_to_typed_array_f32() {
+        // Wave 2 Agent A1 (2026-05-14) — F32 scalar monomorphization.
+        assert_eq!(
+            should_use_typed_array(&ConcreteType::F32),
+            Some(TypedArrayKind::F32)
+        );
+    }
+
+    #[test]
+    fn test_char_maps_to_typed_array_char() {
+        // Wave 2 Agent A1 (2026-05-14) — Char scalar monomorphization.
+        assert_eq!(
+            should_use_typed_array(&ConcreteType::Char),
+            Some(TypedArrayKind::Char)
+        );
+    }
+
+    #[test]
+    fn test_slot_kind_float32_maps_to_f32() {
+        use crate::type_tracking::NativeKind;
+        assert_eq!(
+            should_use_typed_array_from_slot_kind(NativeKind::Float32),
+            Some(TypedArrayKind::F32)
+        );
+    }
+
+    #[test]
+    fn test_slot_kind_char_maps_to_char() {
+        use crate::type_tracking::NativeKind;
+        assert_eq!(
+            should_use_typed_array_from_slot_kind(NativeKind::Char),
+            Some(TypedArrayKind::Char)
+        );
+    }
+
+    #[test]
+    fn test_type_name_vec_f32_maps_to_f32() {
+        assert_eq!(
+            typed_array_kind_from_type_name("Vec<f32>"),
+            Some(TypedArrayKind::F32)
+        );
+        assert_eq!(
+            typed_array_kind_from_type_name("Array<f32>"),
+            Some(TypedArrayKind::F32)
+        );
+    }
+
+    #[test]
+    fn test_type_name_vec_char_maps_to_char() {
+        assert_eq!(
+            typed_array_kind_from_type_name("Vec<char>"),
+            Some(TypedArrayKind::Char)
+        );
+        assert_eq!(
+            typed_array_kind_from_type_name("Array<char>"),
+            Some(TypedArrayKind::Char)
+        );
+    }
+
+    #[test]
     fn test_u64_falls_back_to_legacy() {
         // Per S1 reopen (2026-05-13), `Array<u64>` deliberately falls
         // back to the legacy NaN-boxed `NewArray` path: `NativeKind::UInt64`
@@ -411,8 +495,9 @@ mod tests {
 
     #[test]
     fn test_opcode_lookup_round_trip() {
-        // Sanity check that all nine kinds expose all four opcodes.
+        // Sanity check that all eleven kinds expose all four opcodes.
         // U64 deliberately omitted — deferred to S1.5 per S1 reopen.
+        // Wave 2 Agent A1 (2026-05-14) — F32 + Char added.
         for kind in [
             TypedArrayKind::F64,
             TypedArrayKind::I64,
@@ -423,6 +508,8 @@ mod tests {
             TypedArrayKind::I16,
             TypedArrayKind::U16,
             TypedArrayKind::U32,
+            TypedArrayKind::F32,
+            TypedArrayKind::Char,
         ] {
             let _ = kind.new_opcode();
             let _ = kind.get_opcode();

@@ -413,6 +413,17 @@ impl VirtualMachine {
                     self.push_kinded(v as u64, NativeKind::UInt32)
                 }
                 // V2ElemType::U64 omitted — deferred to S1.5 per S1 reopen.
+                // Wave 2 Agent A1 (2026-05-14) — F32 + Char iter reads.
+                V2ElemType::F32 => {
+                    let arr = view.ptr as *const TypedArray<f32>;
+                    let v = unsafe { TypedArray::<f32>::get_unchecked(arr, i) };
+                    self.push_kinded(v.to_bits() as u64, NativeKind::Float32)
+                }
+                V2ElemType::Char => {
+                    let arr = view.ptr as *const TypedArray<char>;
+                    let v = unsafe { TypedArray::<char>::get_unchecked(arr, i) };
+                    self.push_kinded(v as u32 as u64, NativeKind::Char)
+                }
             };
             drop_with_kind(idx_bits, idx_kind);
             drop_with_kind(iter_bits, iter_kind);

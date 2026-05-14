@@ -332,6 +332,40 @@ pub(super) fn typed_array_arc_from_kinded(
                     Arc::new(TypedArrayData::U32(Arc::new(TypedBuffer::from_vec(data))))
                 }
                 // V2ElemType::U64 omitted — deferred to S1.5 per S1 reopen.
+                // Wave 2 Agent A1 (2026-05-14) — F32 + Char materialisations
+                // into the legacy `Arc<TypedArrayData>` arms for the
+                // method-dispatch consumers that haven't yet migrated off
+                // the enum (mirror of the I8/U8/I16/U16/U32 arms above).
+                V2ElemType::F32 => {
+                    let arr_ptr = bits as usize as *const TypedArray<f32>;
+                    let mut data: Vec<f32> = Vec::with_capacity(len);
+                    for i in 0..(view.len) {
+                        let v = unsafe { TypedArray::<f32>::get(arr_ptr, i) }
+                            .ok_or_else(|| {
+                                VMError::RuntimeError(format!(
+                                    "{}: v2 F32 array read out-of-bounds at {}",
+                                    op, i
+                                ))
+                            })?;
+                        data.push(v);
+                    }
+                    Arc::new(TypedArrayData::F32(Arc::new(TypedBuffer::from_vec(data))))
+                }
+                V2ElemType::Char => {
+                    let arr_ptr = bits as usize as *const TypedArray<char>;
+                    let mut data: Vec<char> = Vec::with_capacity(len);
+                    for i in 0..(view.len) {
+                        let v = unsafe { TypedArray::<char>::get(arr_ptr, i) }
+                            .ok_or_else(|| {
+                                VMError::RuntimeError(format!(
+                                    "{}: v2 Char array read out-of-bounds at {}",
+                                    op, i
+                                ))
+                            })?;
+                        data.push(v);
+                    }
+                    Arc::new(TypedArrayData::Char(Arc::new(TypedBuffer::from_vec(data))))
+                }
             };
             Ok(arc)
         }

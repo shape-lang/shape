@@ -51,6 +51,11 @@ pub const ELEM_TYPE_U32: u8 = 9;
 // ELEM_TYPE_U64 = 10 reserved for S1.5; not allocated in S1 per the
 // supervisor's reopen (Array<u64> deferred pending §2.7.7/Q9 native-
 // kind discriminator).
+// Wave 2 Agent A1 (2026-05-14) — F32 + Char monomorphizations per
+// R19 S1.5 amendment (W12-nativekind-scalar-additions). Each is a
+// `Copy + 4-byte` scalar with no heap indirection.
+pub const ELEM_TYPE_F32: u8 = 11;
+pub const ELEM_TYPE_CHAR: u8 = 12;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum V2ElemType {
@@ -65,6 +70,9 @@ pub enum V2ElemType {
     U16,
     U32,
     // U64 omitted — deferred to S1.5 per S1 reopen.
+    // Wave 2 Agent A1 (2026-05-14) — F32 + Char scalar monomorphizations.
+    F32,
+    Char,
 }
 
 impl V2ElemType {
@@ -82,6 +90,8 @@ impl V2ElemType {
             ELEM_TYPE_U32 => Some(V2ElemType::U32),
             // Tag byte 10 (ELEM_TYPE_U64) reserved for S1.5; not produced
             // by any current allocation path.
+            ELEM_TYPE_F32 => Some(V2ElemType::F32),
+            ELEM_TYPE_CHAR => Some(V2ElemType::Char),
             _ => None,
         }
     }
@@ -100,6 +110,8 @@ impl V2ElemType {
             V2ElemType::I16 => NativeKind::Int16,
             V2ElemType::U16 => NativeKind::UInt16,
             V2ElemType::U32 => NativeKind::UInt32,
+            V2ElemType::F32 => NativeKind::Float32,
+            V2ElemType::Char => NativeKind::Char,
         }
     }
 }
@@ -226,6 +238,40 @@ fn decode_bool(bits: u64, kind: NativeKind) -> Option<bool> {
     }
 }
 
+/// Decode `(bits, kind)` to an `f32`. Accepts `Float32` directly (low 32
+/// bits hold the f32 bit pattern), `Float64` (narrowed via cast), and any
+/// integer-family kind (cast to f32). Returns `None` on incompatible kinds.
+#[inline]
+fn decode_f32(bits: u64, kind: NativeKind) -> Option<f32> {
+    if matches!(kind, NativeKind::Float32) {
+        return Some(f32::from_bits(bits as u32));
+    }
+    if let Some(v) = decode_f64(bits, kind) {
+        return Some(v as f32);
+    }
+    None
+}
+
+/// Decode `(bits, kind)` to a `char`. Accepts `NativeKind::Char` directly
+/// (bits are the codepoint per `KindedSlot::from_char`); for integer kinds
+/// in the valid range (0..=0x10FFFF, excluding surrogates), produces the
+/// corresponding `char`. Returns `None` on out-of-range codepoints or
+/// incompatible kinds.
+#[inline]
+fn decode_char(bits: u64, kind: NativeKind) -> Option<char> {
+    if matches!(kind, NativeKind::Char) {
+        return char::from_u32(bits as u32);
+    }
+    if kind.is_integer_family() {
+        let cp = decode_i64(bits, kind)?;
+        if cp < 0 {
+            return None;
+        }
+        return char::from_u32(cp as u32);
+    }
+    None
+}
+
 /// Read element `index` from a v2 typed array, returning `(bits, NativeKind)`.
 ///
 /// The `NativeKind` is the element kind (`Float64` / `Int64` / `Int32` /
@@ -282,6 +328,17 @@ pub fn read_element(view: &V2TypedArrayView, index: u32) -> Option<(u64, NativeK
             let arr = view.ptr as *const TypedArray<u32>;
             let v = TypedArray::<u32>::get_unchecked(arr, index) as u64;
             (v, NativeKind::UInt32)
+        },
+        // Wave 2 Agent A1 (2026-05-14) — F32 + Char element reads.
+        V2ElemType::F32 => unsafe {
+            let arr = view.ptr as *const TypedArray<f32>;
+            let v = TypedArray::<f32>::get_unchecked(arr, index);
+            (v.to_bits() as u64, NativeKind::Float32)
+        },
+        V2ElemType::Char => unsafe {
+            let arr = view.ptr as *const TypedArray<char>;
+            let v = TypedArray::<char>::get_unchecked(arr, index);
+            (v as u32 as u64, NativeKind::Char)
         },
     };
     Some(pair)
@@ -363,6 +420,21 @@ pub fn write_element(
                 TypedArray::<u32>::set(arr, index, v as u32);
             }
         }
+        // Wave 2 Agent A1 (2026-05-14) — F32 + Char element writes.
+        V2ElemType::F32 => {
+            let v = decode_f32(bits, kind).ok_or("expected f32-compatible value")?;
+            unsafe {
+                let arr = view.ptr as *mut TypedArray<f32>;
+                TypedArray::<f32>::set(arr, index, v);
+            }
+        }
+        V2ElemType::Char => {
+            let v = decode_char(bits, kind).ok_or("expected char-compatible value")?;
+            unsafe {
+                let arr = view.ptr as *mut TypedArray<char>;
+                TypedArray::<char>::set(arr, index, v);
+            }
+        }
     }
     Ok(())
 }
@@ -439,6 +511,21 @@ pub fn push_element(
                 TypedArray::<u32>::push(arr, v as u32);
             }
         }
+        // Wave 2 Agent A1 (2026-05-14) — F32 + Char element pushes.
+        V2ElemType::F32 => {
+            let v = decode_f32(bits, kind).ok_or("expected f32-compatible value")?;
+            unsafe {
+                let arr = view.ptr as *mut TypedArray<f32>;
+                TypedArray::<f32>::push(arr, v);
+            }
+        }
+        V2ElemType::Char => {
+            let v = decode_char(bits, kind).ok_or("expected char-compatible value")?;
+            unsafe {
+                let arr = view.ptr as *mut TypedArray<char>;
+                TypedArray::<char>::push(arr, v);
+            }
+        }
     }
     Ok(())
 }
@@ -483,6 +570,15 @@ pub fn pop_element(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
         V2ElemType::U32 => unsafe {
             let arr = view.ptr as *mut TypedArray<u32>;
             TypedArray::<u32>::pop(arr).map(|v| (v as u64, NativeKind::UInt32))
+        },
+        // Wave 2 Agent A1 (2026-05-14) — F32 + Char element pops.
+        V2ElemType::F32 => unsafe {
+            let arr = view.ptr as *mut TypedArray<f32>;
+            TypedArray::<f32>::pop(arr).map(|v| (v.to_bits() as u64, NativeKind::Float32))
+        },
+        V2ElemType::Char => unsafe {
+            let arr = view.ptr as *mut TypedArray<char>;
+            TypedArray::<char>::pop(arr).map(|v| (v as u32 as u64, NativeKind::Char))
         },
     }
 }
@@ -540,12 +636,16 @@ pub fn sum_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
         // W12 S1 — sum/avg/min/max/variance/std/dot/norm not defined for
         // Bool or sized-integer-narrower-than-i64 element kinds. The
         // caller falls back to a non-SIMD path or returns an error.
+        // Wave 2 Agent A1 — F32 / Char also fall through; F32 reductions
+        // are domain-deferred to a follow-up SIMD lane sub-cluster.
         V2ElemType::Bool
         | V2ElemType::I8
         | V2ElemType::U8
         | V2ElemType::I16
         | V2ElemType::U16
-        | V2ElemType::U32 => None,
+        | V2ElemType::U32
+        | V2ElemType::F32
+        | V2ElemType::Char => None,
     }
 }
 
@@ -785,7 +885,9 @@ pub fn avg_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
             | V2ElemType::U8
             | V2ElemType::I16
             | V2ElemType::U16
-            | V2ElemType::U32 => None,
+            | V2ElemType::U32
+            | V2ElemType::F32
+            | V2ElemType::Char => None,
         };
     }
     match view.elem_type {
@@ -822,12 +924,16 @@ pub fn avg_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
         // W12 S1 — sum/avg/min/max/variance/std/dot/norm not defined for
         // Bool or sized-integer-narrower-than-i64 element kinds. The
         // caller falls back to a non-SIMD path or returns an error.
+        // Wave 2 Agent A1 — F32 / Char also fall through; F32 reductions
+        // are domain-deferred to a follow-up SIMD lane sub-cluster.
         V2ElemType::Bool
         | V2ElemType::I8
         | V2ElemType::U8
         | V2ElemType::I16
         | V2ElemType::U16
-        | V2ElemType::U32 => None,
+        | V2ElemType::U32
+        | V2ElemType::F32
+        | V2ElemType::Char => None,
     }
 }
 
@@ -850,7 +956,9 @@ pub fn min_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
             | V2ElemType::U8
             | V2ElemType::I16
             | V2ElemType::U16
-            | V2ElemType::U32 => None,
+            | V2ElemType::U32
+            | V2ElemType::F32
+            | V2ElemType::Char => None,
         };
     }
     match view.elem_type {
@@ -891,12 +999,16 @@ pub fn min_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
         // W12 S1 — sum/avg/min/max/variance/std/dot/norm not defined for
         // Bool or sized-integer-narrower-than-i64 element kinds. The
         // caller falls back to a non-SIMD path or returns an error.
+        // Wave 2 Agent A1 — F32 / Char also fall through; F32 reductions
+        // are domain-deferred to a follow-up SIMD lane sub-cluster.
         V2ElemType::Bool
         | V2ElemType::I8
         | V2ElemType::U8
         | V2ElemType::I16
         | V2ElemType::U16
-        | V2ElemType::U32 => None,
+        | V2ElemType::U32
+        | V2ElemType::F32
+        | V2ElemType::Char => None,
     }
 }
 
@@ -914,7 +1026,9 @@ pub fn max_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
             | V2ElemType::U8
             | V2ElemType::I16
             | V2ElemType::U16
-            | V2ElemType::U32 => None,
+            | V2ElemType::U32
+            | V2ElemType::F32
+            | V2ElemType::Char => None,
         };
     }
     match view.elem_type {
@@ -955,12 +1069,16 @@ pub fn max_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
         // W12 S1 — sum/avg/min/max/variance/std/dot/norm not defined for
         // Bool or sized-integer-narrower-than-i64 element kinds. The
         // caller falls back to a non-SIMD path or returns an error.
+        // Wave 2 Agent A1 — F32 / Char also fall through; F32 reductions
+        // are domain-deferred to a follow-up SIMD lane sub-cluster.
         V2ElemType::Bool
         | V2ElemType::I8
         | V2ElemType::U8
         | V2ElemType::I16
         | V2ElemType::U16
-        | V2ElemType::U32 => None,
+        | V2ElemType::U32
+        | V2ElemType::F32
+        | V2ElemType::Char => None,
     }
 }
 
@@ -1250,6 +1368,37 @@ pub fn clone_array(view: &V2TypedArrayView) -> *mut u8 {
             }
         }
         // V2ElemType::U64 omitted — deferred to S1.5 per S1 reopen.
+        // Wave 2 Agent A1 (2026-05-14) — F32 + Char element clone.
+        V2ElemType::F32 => {
+            let new_arr = TypedArray::<f32>::with_capacity(view.len);
+            unsafe {
+                let src = view.ptr as *const TypedArray<f32>;
+                let src_data = (*src).data;
+                let dst_data = (*new_arr).data;
+                if view.len > 0 && !src_data.is_null() && !dst_data.is_null() {
+                    std::ptr::copy_nonoverlapping(src_data, dst_data, view.len as usize);
+                }
+                (*new_arr).len = view.len;
+                let p = new_arr as *mut u8;
+                stamp_elem_type(p, ELEM_TYPE_F32);
+                p
+            }
+        }
+        V2ElemType::Char => {
+            let new_arr = TypedArray::<char>::with_capacity(view.len);
+            unsafe {
+                let src = view.ptr as *const TypedArray<char>;
+                let src_data = (*src).data;
+                let dst_data = (*new_arr).data;
+                if view.len > 0 && !src_data.is_null() && !dst_data.is_null() {
+                    std::ptr::copy_nonoverlapping(src_data, dst_data, view.len as usize);
+                }
+                (*new_arr).len = view.len;
+                let p = new_arr as *mut u8;
+                stamp_elem_type(p, ELEM_TYPE_CHAR);
+                p
+            }
+        }
     }
 }
 
@@ -1484,6 +1633,148 @@ mod tests {
         assert_eq!(read_element(&cloned_view, 0), Some((100u64, NativeKind::Int64)));
         unsafe {
             TypedArray::<i64>::drop_array(cloned_ptr as *mut TypedArray<i64>);
+            TypedArray::drop_array(arr);
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Wave 2 Agent A1 (2026-05-14) — F32 + Char round-trip smokes.
+    // ──────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_stamp_and_read_elem_type_f32_char() {
+        let arr_f32 = TypedArray::<f32>::with_capacity(0);
+        let arr_char = TypedArray::<char>::with_capacity(0);
+        unsafe {
+            stamp_elem_type(arr_f32 as *mut u8, ELEM_TYPE_F32);
+            stamp_elem_type(arr_char as *mut u8, ELEM_TYPE_CHAR);
+            assert_eq!(read_elem_type_byte(arr_f32 as *const u8), ELEM_TYPE_F32);
+            assert_eq!(read_elem_type_byte(arr_char as *const u8), ELEM_TYPE_CHAR);
+            TypedArray::drop_array(arr_f32);
+            TypedArray::drop_array(arr_char);
+        }
+    }
+
+    #[test]
+    fn test_as_v2_typed_array_recognizes_stamped_f32() {
+        let arr = TypedArray::<f32>::with_capacity(4);
+        unsafe {
+            TypedArray::push(arr, 1.5_f32);
+            TypedArray::push(arr, 2.5_f32);
+            stamp_elem_type(arr as *mut u8, ELEM_TYPE_F32);
+        }
+        let (bits, kind) = ptr_pair(arr as *mut u8);
+        let view = as_v2_typed_array(bits, kind).expect("should recognize v2 typed array");
+        assert_eq!(view.elem_type, V2ElemType::F32);
+        assert_eq!(view.len, 2);
+        unsafe { TypedArray::drop_array(arr); }
+    }
+
+    #[test]
+    fn test_as_v2_typed_array_recognizes_stamped_char() {
+        let arr = TypedArray::<char>::with_capacity(4);
+        unsafe {
+            TypedArray::push(arr, 'A');
+            TypedArray::push(arr, '☃');
+            stamp_elem_type(arr as *mut u8, ELEM_TYPE_CHAR);
+        }
+        let (bits, kind) = ptr_pair(arr as *mut u8);
+        let view = as_v2_typed_array(bits, kind).expect("should recognize v2 typed array");
+        assert_eq!(view.elem_type, V2ElemType::Char);
+        assert_eq!(view.len, 2);
+        unsafe { TypedArray::drop_array(arr); }
+    }
+
+    #[test]
+    fn test_read_element_f32() {
+        let arr = TypedArray::<f32>::from_slice(&[1.5_f32, 2.25_f32, 3.0_f32]);
+        unsafe { stamp_elem_type(arr as *mut u8, ELEM_TYPE_F32); }
+        let (bits, kind) = ptr_pair(arr as *mut u8);
+        let view = as_v2_typed_array(bits, kind).unwrap();
+        let r0 = read_element(&view, 0).unwrap();
+        let r1 = read_element(&view, 1).unwrap();
+        let r2 = read_element(&view, 2).unwrap();
+        assert_eq!(r0.1, NativeKind::Float32);
+        assert_eq!(f32::from_bits(r0.0 as u32), 1.5_f32);
+        assert_eq!(f32::from_bits(r1.0 as u32), 2.25_f32);
+        assert_eq!(f32::from_bits(r2.0 as u32), 3.0_f32);
+        assert!(read_element(&view, 3).is_none());
+        unsafe { TypedArray::drop_array(arr); }
+    }
+
+    #[test]
+    fn test_read_element_char() {
+        let arr = TypedArray::<char>::from_slice(&['h', 'i', '!']);
+        unsafe { stamp_elem_type(arr as *mut u8, ELEM_TYPE_CHAR); }
+        let (bits, kind) = ptr_pair(arr as *mut u8);
+        let view = as_v2_typed_array(bits, kind).unwrap();
+        for (i, expected) in ['h', 'i', '!'].iter().enumerate() {
+            let (b, k) = read_element(&view, i as u32).unwrap();
+            assert_eq!(k, NativeKind::Char);
+            assert_eq!(char::from_u32(b as u32).unwrap(), *expected);
+        }
+        assert!(read_element(&view, 3).is_none());
+        unsafe { TypedArray::drop_array(arr); }
+    }
+
+    #[test]
+    fn test_push_element_f32() {
+        let arr = TypedArray::<f32>::with_capacity(4);
+        unsafe { stamp_elem_type(arr as *mut u8, ELEM_TYPE_F32); }
+        let (bits, kind) = ptr_pair(arr as *mut u8);
+        let view = as_v2_typed_array(bits, kind).unwrap();
+        push_element(&view, (1.5_f32).to_bits() as u64, NativeKind::Float32).unwrap();
+        // Refresh view to see the new len.
+        let view = as_v2_typed_array(bits, kind).unwrap();
+        let (b, k) = read_element(&view, 0).unwrap();
+        assert_eq!(k, NativeKind::Float32);
+        assert_eq!(f32::from_bits(b as u32), 1.5_f32);
+        unsafe { TypedArray::drop_array(arr); }
+    }
+
+    #[test]
+    fn test_push_element_char() {
+        let arr = TypedArray::<char>::with_capacity(4);
+        unsafe { stamp_elem_type(arr as *mut u8, ELEM_TYPE_CHAR); }
+        let (bits, kind) = ptr_pair(arr as *mut u8);
+        let view = as_v2_typed_array(bits, kind).unwrap();
+        push_element(&view, 'Z' as u32 as u64, NativeKind::Char).unwrap();
+        let view = as_v2_typed_array(bits, kind).unwrap();
+        let (b, _) = read_element(&view, 0).unwrap();
+        assert_eq!(char::from_u32(b as u32).unwrap(), 'Z');
+        unsafe { TypedArray::drop_array(arr); }
+    }
+
+    #[test]
+    fn test_clone_array_f32() {
+        let arr = TypedArray::<f32>::from_slice(&[1.0_f32, 2.0_f32, 3.0_f32]);
+        unsafe { stamp_elem_type(arr as *mut u8, ELEM_TYPE_F32); }
+        let (bits, kind) = ptr_pair(arr as *mut u8);
+        let view = as_v2_typed_array(bits, kind).unwrap();
+        let cloned = clone_array(&view);
+        let (cb, ck) = ptr_pair(cloned);
+        let cv = as_v2_typed_array(cb, ck).unwrap();
+        assert_eq!(cv.elem_type, V2ElemType::F32);
+        assert_eq!(cv.len, 3);
+        unsafe {
+            TypedArray::<f32>::drop_array(cloned as *mut TypedArray<f32>);
+            TypedArray::drop_array(arr);
+        }
+    }
+
+    #[test]
+    fn test_clone_array_char() {
+        let arr = TypedArray::<char>::from_slice(&['a', 'b', 'c']);
+        unsafe { stamp_elem_type(arr as *mut u8, ELEM_TYPE_CHAR); }
+        let (bits, kind) = ptr_pair(arr as *mut u8);
+        let view = as_v2_typed_array(bits, kind).unwrap();
+        let cloned = clone_array(&view);
+        let (cb, ck) = ptr_pair(cloned);
+        let cv = as_v2_typed_array(cb, ck).unwrap();
+        assert_eq!(cv.elem_type, V2ElemType::Char);
+        assert_eq!(cv.len, 3);
+        unsafe {
+            TypedArray::<char>::drop_array(cloned as *mut TypedArray<char>);
             TypedArray::drop_array(arr);
         }
     }
