@@ -2740,8 +2740,23 @@ impl TypedObjectStorage {
                                 bits as *const TypedArrayData,
                             );
                         }
+                        // Wave 2 Agent D4 ckpt-2 (ADR-006 §2.3 / §2.7.5
+                        // amendment, 2026-05-14): a `TypedObject` field of
+                        // kind `NativeKind::Ptr(HeapKind::TypedObject)`
+                        // holds slot bits = `ptr as u64` where
+                        // `ptr: *const TypedObjectStorage` (v2-raw carrier
+                        // per Agent D1's `_new` /
+                        // `impl HeapElement for TypedObjectStorage`).
+                        // Refcount discipline goes through `release_elem`
+                        // (HeapElement trait — calls `v2_release` against
+                        // the HeapHeader at offset 0; on refcount=0 the
+                        // carrier-side `_drop` runs the per-field
+                        // heap-mask walk and deallocates the `repr(C)`
+                        // struct). Mirror of the §2.7.5 StringV2 /
+                        // DecimalV2 release arms above (Agent B precedent).
                         HeapKind::TypedObject => {
-                            std::sync::Arc::decrement_strong_count(
+                            use crate::v2::heap_element::HeapElement;
+                            TypedObjectStorage::release_elem(
                                 bits as *const TypedObjectStorage,
                             );
                         }
@@ -2766,8 +2781,15 @@ impl TypedObjectStorage {
                         HeapKind::Lazy => {
                             std::sync::Arc::decrement_strong_count(bits as *const LazyData);
                         }
+                        // Wave 2 Agent D4 ckpt-2 (ADR-006 §2.7.24 /
+                        // Q25.C.5 + E close 2026-05-14): TraitObject
+                        // release via `HeapElement::release_elem` +
+                        // carrier-side `_drop` (per Agent E's
+                        // `impl HeapElement for TraitObjectStorage`).
+                        // Mirror of the TypedObject arm above.
                         HeapKind::TraitObject => {
-                            std::sync::Arc::decrement_strong_count(
+                            use crate::v2::heap_element::HeapElement;
+                            TraitObjectStorage::release_elem(
                                 bits as *const TraitObjectStorage,
                             );
                         }
