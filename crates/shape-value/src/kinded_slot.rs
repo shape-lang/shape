@@ -111,11 +111,31 @@ impl KindedSlot {
         Self::new(ValueSlot::from_string_arc(s), NativeKind::String)
     }
 
-    /// Convenience: a `Ptr(HeapKind::TypedObject)`-kind slot.
+    /// Convenience: a `Ptr(HeapKind::TypedObject)`-kind slot from an
+    /// `Arc<TypedObjectStorage>`. **Wave 2 Agent D1 (2026-05-14): legacy
+    /// transitional constructor** — see `ValueSlot::from_typed_object`
+    /// docstring for the Arc-vs-raw-pointer staging. Slot bits are
+    /// `Arc::into_raw(o)`.
     #[inline]
     pub fn from_typed_object(o: Arc<TypedObjectStorage>) -> Self {
         Self::new(
             ValueSlot::from_typed_object(o),
+            NativeKind::Ptr(HeapKind::TypedObject),
+        )
+    }
+
+    /// Convenience: a `Ptr(HeapKind::TypedObject)`-kind slot from a raw
+    /// `*const TypedObjectStorage`. **Wave 2 Agent D1 (2026-05-14): v2-raw
+    /// raw-pointer constructor.** Per ADR-006 §2.3 amendment + audit §4.3
+    /// O-3.a resolution. Pairs with `TypedObjectStorage::_new` allocator;
+    /// refcount discipline goes through the on-header refcount via
+    /// `v2_retain` / `v2_release` (NOT Rust `Arc::increment/decrement_
+    /// strong_count`). See `ValueSlot::from_typed_object_raw` docstring
+    /// for the full call-site migration pattern.
+    #[inline]
+    pub fn from_typed_object_raw(ptr: *const TypedObjectStorage) -> Self {
+        Self::new(
+            ValueSlot::from_typed_object_raw(ptr),
             NativeKind::Ptr(HeapKind::TypedObject),
         )
     }
@@ -1312,6 +1332,44 @@ mod tests {
         let n = KindedSlot::none();
         assert_eq!(n.slot.raw(), 0);
         drop(n);
+    }
+
+    /// Wave 2 Agent D1 (2026-05-14): the new
+    /// `KindedSlot::from_typed_object_raw` constructor stores a
+    /// `*const TypedObjectStorage` pointer (v2-raw carrier; refcount on the
+    /// on-header). The slot carries the `NativeKind::Ptr(HeapKind::TypedObject)`
+    /// kind; bits are the raw pointer value. This test exercises the
+    /// constructor + slot-bit round-trip; Drop semantics for the raw-pointer
+    /// path are exercised by the `heap_value` module's
+    /// `heap_element_release_elem_*` tests since `KindedSlot::Drop` still
+    /// dispatches Arc-style (the Wave-2-pre-D2 transitional bit-shape).
+    #[test]
+    fn from_typed_object_raw_constructor_kind_and_bits() {
+        let kinds: Arc<[NativeKind]> = Arc::from(vec![NativeKind::Int64]);
+        unsafe {
+            let ptr = TypedObjectStorage::_new(
+                99,
+                vec![ValueSlot::from_int(0)].into_boxed_slice(),
+                0,
+                kinds,
+            );
+            // Construct via the v2-raw constructor; assert the kind label
+            // and slot bits.
+            let slot = KindedSlot::from_typed_object_raw(ptr);
+            assert_eq!(slot.kind, NativeKind::Ptr(HeapKind::TypedObject));
+            assert_eq!(slot.slot.raw(), ptr as u64);
+            // The raw-pointer carrier owns the refcount independently; we
+            // leak the slot here (don't drop it through the Arc-style
+            // KindedSlot::Drop arms) and clean up via `_drop`. D2 wires the
+            // dispatch arms to v2_release; pre-D2 this constructor's slot
+            // bits MUST NOT flow into Arc-style dispatch (Drop or
+            // clone_with_kind on these bits would call
+            // Arc::decrement_strong_count on a non-Arc pointer →
+            // segfault / heap corruption). Test exits via mem::forget +
+            // explicit _drop.
+            std::mem::forget(slot);
+            TypedObjectStorage::_drop(ptr);
+        }
     }
 
     // ── §2.7.6 / Q8 scalar accessor coverage ──────────────────────────────

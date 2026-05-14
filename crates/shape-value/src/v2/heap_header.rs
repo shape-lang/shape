@@ -34,6 +34,16 @@ pub const HEAP_KIND_V2_CLOSURE: u16 = 84;
 /// + audit §4.1.D.1 — the on-header `kind` byte tags the v2-raw carrier; the
 /// `NativeKind::Ptr(HeapKind::Decimal)` label is unchanged at the slot ABI.
 pub const HEAP_KIND_V2_DECIMAL: u16 = 85;
+/// Wave 2 Agent D1 (2026-05-14): v2-raw `TypedObjectStorage` carrier kind.
+/// `TypedObjectStorage` grows a `HeapHeader` at offset 0 (per ADR-006 §2.3
+/// amendment and audit §4.3 Obstacle O-3.a resolution). The struct is
+/// `#[repr(C)]`; allocation goes through `TypedObjectStorage::_new` which
+/// returns `*mut TypedObjectStorage` with the header initialized via
+/// `HeapHeader::new(HEAP_KIND_V2_TYPED_OBJECT)`. Refcount discipline on the
+/// raw-pointer path goes through `v2_retain` / `v2_release` per the
+/// `HeapElement` trait. The `NativeKind::Ptr(HeapKind::TypedObject)` label
+/// is unchanged at the slot ABI. Next free post-`HEAP_KIND_V2_DECIMAL=85`.
+pub const HEAP_KIND_V2_TYPED_OBJECT: u16 = 86;
 
 // Flag bits
 pub const FLAG_MARKED: u8 = 0x01;
@@ -43,6 +53,7 @@ pub const FLAG_READONLY: u8 = 0x04;
 /// 8-byte header for all v2 heap-allocated objects.
 /// Refcount at offset 0 for fastest access.
 #[repr(C)]
+#[derive(Debug)]
 pub struct HeapHeader {
     /// Atomic reference count (offset 0, 4 bytes).
     pub refcount: AtomicU32,
@@ -231,6 +242,7 @@ mod tests {
             HEAP_KIND_V2_STRUCT,
             HEAP_KIND_V2_CLOSURE,
             HEAP_KIND_V2_DECIMAL,
+            HEAP_KIND_V2_TYPED_OBJECT,
         ];
         for i in 0..kinds.len() {
             for j in (i + 1)..kinds.len() {

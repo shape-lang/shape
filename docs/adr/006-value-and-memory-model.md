@@ -236,6 +236,69 @@ the precondition for unblocking `op_alloc_shared_local` /
 `op_alloc_shared_module_binding`; see §2.7.12 for the precedent
 mirror.
 
+##### §2.3 amendment (Wave 2 Agent D1, 2026-05-14): TypedObjectStorage HeapHeader migration — audit §4.3 Obstacle O-3.a resolution
+
+`TypedObjectStorage` now carries a `HeapHeader` at offset 0 (`#[repr(C)]`)
+per audit §4.3 Obstacle O-3.a resolution under the bulldozer-cadence
+strategic-owner authorization 2026-05-14 (Wave 2 Round 1 Agent D1 close,
+commit `0e4510d4` on `bulldozer-strictly-typed-wave-2-d1`).
+
+The struct gains v2-raw raw-pointer lifecycle:
+
+- `TypedObjectStorage::_new(schema_id, slots, heap_mask, field_kinds) -> *mut Self` — Layout-based allocator returning `*mut Self` with refcount=1 via `HeapHeader::new(HEAP_KIND_V2_TYPED_OBJECT)`.
+- `unsafe TypedObjectStorage::_drop(ptr: *mut Self)` — heap-mask field walk via shared `drop_fields` helper + Layout-based deallocation.
+- `unsafe impl HeapElement for TypedObjectStorage` — `release_elem` dispatches via `v2_release` on the header.
+- `HEAP_KIND_V2_TYPED_OBJECT = 86` constant in `crates/shape-value/src/v2/heap_header.rs` (next free post-`HEAP_KIND_V2_DECIMAL = 85`).
+
+`ValueSlot` gains a per-FieldType raw-pointer constructor
+`from_typed_object_raw(*const TypedObjectStorage)`; `KindedSlot` gains
+the equivalent. The existing `from_typed_object(Arc<TypedObjectStorage>)`
+constructor is **retained as a legacy transitional entry point** during
+the Wave 2 transition (deleted when Agent D2 / E migrate the last
+caller in Round 2).
+
+The dispatch arms in `clone_with_kind` / `drop_with_kind` /
+`SharedCell::drop` / `TypedObjectStorage::drop_fields` retain the
+Arc-style retain/release semantics for `HeapKind::TypedObject` during
+the Wave 2 transition (mirror of R19 S1.5 cross-tier compat dual-label
+precedent that folded into Wave 2 cascade per bulldozer cadence).
+Agent D2's cascade in Round 2 migrates the 18 production construction
+sites to the raw-pointer path AND flips the 4-table dispatch arms to
+`v2_retain(&(*ptr).header)` / `v2_release(&(*ptr).header)` +
+`Self::_drop(ptr)` on return-true **in a single commit** (atomic
+producer/consumer flip — leaving Arc-style consumer arms with
+raw-pointer producers would call `Arc::decrement_strong_count` on
+non-Arc pointers = heap corruption / SIGSEGV).
+
+Once D2 closes, the Arc-path constructor and `impl Drop for
+TypedObjectStorage` are deleted in the same commit, leaving only the
+`HeapElement`-trait-dispatched raw-pointer lifecycle.
+
+The slot-ABI discriminator `NativeKind::Ptr(HeapKind::TypedObject)`
+is **unchanged**. No new `HeapKind` variant added (existing ordinal
+preserved). Refcount semantics mirror the `StringObj` / `DecimalObj`
+precedents — `HeapHeader` at offset 0; `v2_retain` / `v2_release` on
+the header; deallocation via `Self::_drop` on `release_elem`
+return-true.
+
+**Forbidden under this amendment** (extends the Wave 2 forbidden
+block):
+
+- Resurrection of `Arc<TypedObjectStorage>` wrapper as the load-bearing
+  carrier shape post-D2 close (the transitional pattern is binding
+  for Wave 2 Round 1 only; D2 close removes it).
+- Mixed dispatch shape (some consumer arms `v2_retain`-ing while
+  others `Arc::increment_strong_count`-ing) post-D2 close.
+- Per-`TypedObjectStorage` runtime kind discriminator at the consumer
+  layer — the dispatch is monomorphized at compile time via the
+  `HeapElement` trait per `<X>Obj` precedent.
+
+**Authority:** Phase 3 cluster-0+1 Wave 2 Round 1 strategic-owner
+cadence shift 2026-05-14. Audit §4.3 Obstacle O-3.a identified the
+multi-week-sequential framing; Wave 1 §D ground-truthed the 18
+production construction sites + ~300 cascade sites; supervisor
+authorized the D1+D2 split-into-2-rounds restatement of the cost.
+
 ### 2.4 ValueSlot per-FieldType constructors
 
 ```rust

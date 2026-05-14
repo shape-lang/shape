@@ -128,8 +128,46 @@ impl ValueSlot {
     /// `FieldType::Object(_)` / `NativeKind::Ptr(HeapKind::TypedObject)` /
     /// `HeapValue::TypedObject(Arc<TypedObjectStorage>)` (post Step 4 /
     /// ADR-006 §2.3).
+    ///
+    /// **Wave 2 Agent D1 (2026-05-14): legacy transitional constructor.**
+    /// Per ADR-006 §2.3 amendment, `TypedObjectStorage` grew a `HeapHeader`
+    /// at offset 0 to support v2-raw raw-pointer carriers
+    /// (`from_typed_object_raw`). This `Arc`-shaped constructor remains the
+    /// canonical Wave-2-pre-D2 entry point; the 18 production construction
+    /// sites migrate to `from_typed_object_raw` in D2 (Round 2). After D2's
+    /// close, the last caller is gone and this constructor is deleted
+    /// alongside the legacy `impl Drop for TypedObjectStorage` path. Slot
+    /// bits stored are `Arc::into_raw(arc) as u64` — refcount-managed by
+    /// Rust `Arc` at offset -16, NOT by the on-header refcount at offset 0
+    /// (which sits unused at 1 for the Arc lifetime).
     pub fn from_typed_object(o: Arc<TypedObjectStorage>) -> Self {
         Self(Arc::into_raw(o) as u64)
+    }
+
+    /// Store a raw `*const TypedObjectStorage` directly. Mirrors
+    /// `FieldType::Object(_)` / `NativeKind::Ptr(HeapKind::TypedObject)`.
+    ///
+    /// **Wave 2 Agent D1 (2026-05-14): v2-raw raw-pointer constructor.**
+    /// Per ADR-006 §2.3 amendment + audit §4.3 Obstacle O-3.a resolution,
+    /// `TypedObjectStorage` carries a `HeapHeader` at offset 0; the v2-raw
+    /// allocator `TypedObjectStorage::_new` returns `*mut TypedObjectStorage`
+    /// with refcount=1 on the header. The slot bits stored are the raw
+    /// pointer (NOT `Arc::into_raw`); refcount discipline goes through
+    /// `v2_retain` / `v2_release` via the `HeapElement` trait. Drop runs
+    /// at refcount=0 via `TypedObjectStorage::_drop` (NOT Rust `Arc::drop`).
+    ///
+    /// Callers (Wave 2 Agent D2, Round 2): replace the legacy pattern
+    /// ```ignore
+    /// let arc = Arc::new(TypedObjectStorage::new(schema_id, slots, mask, kinds));
+    /// let slot = ValueSlot::from_typed_object(arc);
+    /// ```
+    /// with the v2-raw pattern
+    /// ```ignore
+    /// let ptr = TypedObjectStorage::_new(schema_id, slots, mask, kinds);
+    /// let slot = ValueSlot::from_typed_object_raw(ptr);
+    /// ```
+    pub fn from_typed_object_raw(ptr: *const TypedObjectStorage) -> Self {
+        Self(ptr as u64)
     }
 
     /// Store an `Arc<rust_decimal::Decimal>` directly. Mirrors
