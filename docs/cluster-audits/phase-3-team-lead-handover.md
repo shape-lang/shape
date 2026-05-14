@@ -162,6 +162,8 @@ Pattern: when audits or supervisor relays propose "minimal extension via runtime
 2. Team-lead completes ceremony for verified-correct agent WIP — requires supervisor authorization per instance; guardrails per the §Decision authority pattern; commit message attributes substantive work to agent + ceremony to team-lead.
 3. Re-dispatch fresh agent — conservative-wasteful; only when (1)/(2) aren't viable.
 
+**Cross-tier compat pattern during NativeKind variant additions** (S1.5 R19 precedent): when adding a new NativeKind variant that replaces a pre-amendment label (e.g. `NativeKind::Char` replacing `NativeKind::Ptr(HeapKind::Char)`), the accessor/dispatch sites need a dual-label match during the migration window — both old and new labels recognized at the consumer layer while producer sites migrate incrementally. After consumer-site migration completes (typically as a follow-up cluster-1 hardening item), the dual-label match collapses to single-label. S1.5's `KindedSlot::as_char` (recognizing both `NativeKind::Char` new variant AND `NativeKind::Ptr(HeapKind::Char)` pre-amendment) is the model. 32 unmigrated `Ptr(HeapKind::Char)` consumer sites tracked as cluster-1 territory.
+
 ## User preferences + working style
 
 - **No `Co-Authored-By: Claude` trailer in commits.** MEMORY.md rule.

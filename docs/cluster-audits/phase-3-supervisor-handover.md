@@ -1,9 +1,10 @@
 # Phase 3 cluster-0 — Supervisor handover (R19 dispatch seam)
 
 **Generated:** 2026-05-14.
-**Successor handoff point:** R19 (S2 + S1.5 + C parallel) authorized but execution pending; team-lead session rotates independently at their natural seam.
-**Predecessor supervisor session:** rolled at context-fill (~end of R18 close-and-R19-dispatch-authorization cycle); this is the continuation.
-**Team-lead session:** in-flight (separate Claude instance); continuous through their rotation.
+**Updated:** 2026-05-14 with R19-close delta (see Pre-handover update §R19 close update for accumulated dispositions through R19 merge ceremony).
+**Successor handoff point:** R19 complete (C + S1.5 + S2 audit-only all merged; supervisor R19 partial dispositions ratified). New supervisor's first action: receive R20 dispatch authorization request from team-lead OR S2-prime close report when it lands.
+**Predecessor supervisor session:** rolled at session-close after R19 merge ceremony completed; this is the continuation.
+**Team-lead session:** rotated at the same R19-complete seam (synchronous rotation per Option C); new team-lead session active per `phase-3-team-lead-handover.md`.
 
 ## Your role this session
 
@@ -32,7 +33,7 @@ Post a 1-line confirmation: *"Read 8 mandatory docs; Phase 3 supervisor role rea
 
 ## Current state at handover
 
-**Bulldozer HEAD:** `bulldozer-strictly-typed @ 9135a8a6` (post-Smoke-3-framing-correction, R19 dispatch base).
+**Bulldozer HEAD:** `bulldozer-strictly-typed @ 05a00c0a` (R19 close + handover docs commit; R19 merge HEAD was `214e8661`, then status-doc commit). Predecessor team-lead merged R19 sub-clusters in this order: S1.5 (`5346ca5c`) → C (`7de3b1d6` take-both AGENTS.md) → S2 audit-only (`214e8661` auto-merge). Post-merge `verify-merge.sh` 12/12 PASS via devenv.
 
 **Smoke matrix (canonical kickoff, post-R18):**
 
@@ -45,14 +46,20 @@ Post a 1-line confirmation: *"Read 8 mandatory docs; Phase 3 supervisor role rea
 
 **Cumulative through R18:** 30+ sub-clusters across 18 rounds, ~3 / session steady cadence.
 
-**R19 authorized + dispatch text drafted** (in prior supervisor session's last relay):
-- **S2** — W12-typed-array-data-heap-element-migration. Heap-element variants per audit §2.2 with `<X>Obj` carrier prereqs (Decimal/BigInt/Temporal-via-newtypes/Instant/String; Char NOW in scalar bucket per audit-doc clarification, joins S1.5 instead).
-- **S1.5** — W12-nativekind-scalar-additions. Revised scope: F32 + Char NativeKind/ConcreteType additions ONLY. U64 v2-raw migration DEFERRED post-S5 (Shape D: relabel to existing `Ptr(HeapKind::TypedArray)` once Arc-enum path is deleted). ADR-006 §2.7.5 amendment for F32/Char.
-- **C** — W17-narrow-follow-up-B-β. TAG_NULL filter at JIT-producer site. Unblocks kickoff Smoke 3 JIT.
+**R19 closed + all sub-clusters merged.** Predecessor supervisor's R19 partial dispositions ratified; predecessor team-lead executed R19 merge ceremony before rotation.
 
-R19 expects 3 parallel sub-cluster close reports; file-territory non-overlapping; standard close gate.
+R19 close summary:
+- **C** (9bf2cf35 → merge 7de3b1d6): β filter at JIT print path intercepts TAG_NULL; SIGSEGV → None for Smoke 3 JIT. W17-narrow R15 precedent (production-fix-correct + smoke-gate-deferred). γ upstream gap named as R20 sub-cluster.
+- **S1.5** (80d8c485 → merge 5346ca5c): F32 + Char NativeKind/ConcreteType additions per Shape D ratification; ADR-006 §2.7.5 amendment + audit-doc Char-bucket clarification inline; +522/-27 LoC across 26 files; ~22 cascade sites (well under ~100-site ceiling — cascade-surface-and-stop fallback not triggered). Cross-tier compat: `KindedSlot::as_char` dual-label match handles both `NativeKind::Char` (new) AND `NativeKind::Ptr(HeapKind::Char)` (pre-amendment); 32 unmigrated `Ptr(HeapKind::Char)` consumer sites named as cluster-1 hardening territory.
+- **S2** (1bf8dbd → auto-merge 214e8661): audit-only merged for doc-record. Surface-and-stop with 3 obstacles dispositioned: 1b Q25.A SUPERSEDED, TemporalData 7-variant audit-first deferred to S2-prime, BigInt deferred to cluster-1.
 
-**R20 projected:** S5 enum deletion + ADR-006 §2.7.24 Q25.A amendment + U64 relabel-step (folded into S5 OR as separate S6 sub-cluster; supervisor's call at R20 dispatch authorization based on S5 scope).
+**R20 dispatch (your first authorization):**
+- **S2-prime** — W12-typed-array-data-heap-element-migration REOPEN with Q25.A SUPERSEDED amendment scope. Audit-first deliverables: TemporalData variant classification (user-facing vs AST-internal); per-element retain/release ABI shape; Q25.A SUPERSEDED amendment text refined against actual ADR-006 + Q25.A text; per-variant `<X>Obj` carrier shape mirroring StringObj precedent. Standard close gate; refuse on sight "documented intentional duality" / "preserve fallback for one period" / bridge/probe/helper framings.
+- **γ** — W12-jit-trait-impl-method-registry. `jit_call_method` UFCS-lookup gap for `dyn T` receivers; gates Smoke 3 JIT → x cluster-0 close criterion. Can dispatch in parallel with S2-prime (file-territory non-overlapping) OR sequence per your judgment.
+- **S5** — W12-typed-array-data-enum-deletion + ADR-006 §2.7.24 Q25.A SUPERSEDED amendment commit. Dispatches after S2-prime completes (S5 requires all producers migrated).
+- **U64 relabel-step (Shape D)** — fold into S5 OR dispatch as separate S6 sub-cluster per your judgment of S5 scope.
+
+**Smoke 4 kickoff-prompt typo** confirmed real at R19-close smoke matrix verification (`HashSet()` → `Set()`); fix owed alongside R20 close commit (small doc-only update to `docs/cluster-audits/phase-3-kickoff-prompt.md` and any operational test programs).
 
 **Velocity:** total handoff-to-v1 ~16-22 sessions. Cluster-0 close projected at R20+1 (R19 + R20 + close attempt).
 
@@ -140,27 +147,35 @@ Sub-cluster close reports arrive via user relay. Disposition rules:
 
 ## In-flight state at handover
 
-**R19 dispatch authorized but execution pending.** Team-lead's last status (S1.5 pre-dispatch audit ratification) received my disposition. Their next action: execute R19 dispatch with manual worktree creation per the relay text in the prior supervisor session's last response (S2 + S1.5 + C parallel from bulldozer @ 9135a8a6).
+**R19 complete; new team-lead's first action is S2-prime dispatch.** The team-lead handover doc at `docs/cluster-audits/phase-3-team-lead-handover.md` describes their immediate-next-actions queue starting with S2-prime dispatch per supervisor's R19 partial disposition (already captured in the team-lead handover's §Pre-handover update).
 
-**Expected close-report cadence:**
-- C (W17-narrow-follow-up-B-β): smallest scope (~50 LoC TAG_NULL filter in shape-jit/src/ffi/conversion.rs or per jit_print_* body); likely first to land
-- S1.5 (W12-nativekind-scalar-additions, F32 + Char only): ~100 site cascade; medium scope
-- S2 (W12-typed-array-data-heap-element-migration): heap-element variants + `<X>Obj` prereqs; largest scope
+**Expected close-report cadence from new team-lead:**
+- **S2-prime** (W12-typed-array-data-heap-element-migration REOPEN with Q25.A SUPERSEDED amendment scope): audit-first deliverables + per-T `<X>Obj` carrier migration. Medium-to-large scope (4 user-facing heap-element variants likely: Decimal/Instant + DateTime/Duration/TimeSpan after TemporalData split). Multi-session possibly.
+- **γ** (W12-jit-trait-impl-method-registry): UFCS lookup gap for `dyn T` receivers. Bounded mechanical (method-registry path).
+- **S5** (TypedArrayData enum deletion + Q25.A SUPERSEDED amendment): mechanical deletion + amendment commit; bounded if S2-prime migrated all producers cleanly.
+- **U64 relabel-step:** fold into S5 OR S6 — your call at R20 dispatch.
 
-**R19 surface-and-stop dispositions you may need to make:**
-- If C surfaces TAG_NULL predicates not cleanly available in shape-jit: revisit α (move predicates to shape-value + ADR amendment) vs β-with-local-synthesis (β was selected; α is fallback)
-- If S1.5 F32 cascade exceeds ~100 sites materially: split F32 into S1.6 follow-up sub-cluster; S1.5 ships Char only
-- If S2 surfaces heap-element variants needing different `<X>Obj` carrier shape than audit projected: surface for design decision
+**R20 surface-and-stop dispositions you may need to make:**
+- S2-prime TemporalData audit reveals more user-facing variants than the 3 projected (DateTime/Duration/TimeSpan) — surface for design decision on additional `<X>Obj` carriers
+- S2-prime per-element retain/release ABI surfaces a structural obstacle (HeapElement trait vs per-T drop_array specialization isn't cleanly choosable) — surface for design decision
+- γ surfaces a deeper method-registry rebuild scope beyond UFCS lookup fix — surface for re-scoping
+- S5 reveals producer sites that didn't migrate cleanly (Q25.A specialized variants linger) — reopen relevant earlier sub-cluster
 
-**R20 dispatch authority preview** (when R19 closes):
-- **S5** — W12-typed-array-data-enum-deletion + ADR-006 §2.7.24 Q25.A amendment. Deletes `TypedArrayData` enum + `TypedBuffer<T>` wrapper layer. Critical close criterion: all producers migrate to `TypedArray<T>` flat-struct.
-- **U64 relabel-step:** decide at R20 dispatch whether to fold into S5 OR dispatch as separate S6 sub-cluster. Folding is cleaner if S5 is well-scoped; separating is safer if S5 is large.
-- Cluster-0 close attempt after R20 merges + full kickoff smoke matrix passes VM == JIT.
+**Cluster-0 close attempt** after R20 merges + full kickoff smoke matrix passes VM == JIT:
+- Smoke 1: passing
+- Smoke 2 canonical: JIT resolves post-S5 (dual-carrier reality eliminated)
+- Smoke 3: JIT resolves post-γ (UFCS lookup unblocks `x` return)
+- Smoke 4: passing post-typo-fix in R20 close
 
-**Pending items owed at next status-doc-update:**
-- Team-lead handover-doc annotations (CLAUDE.md user-authorization rule + supervisor-imprecision pattern with 3 instances)
-- Audit-doc clarification: Char in §2.1/§3.1 scalar bucket (remove from §2.2/§3.2 heap-element)
-- 8th defection-attractor instance documented in status doc
+**Pending items already landed in R19 close** (visibility, not action items):
+- ✓ Team-lead handover-doc annotations (CLAUDE.md user-authorization rule + supervisor-imprecision pattern with 3 instances) — landed
+- ✓ Audit-doc Char-bucket clarification — landed inline in S1.5 close
+- ✓ Smoke 3 JIT framing correction — C merged; β filter intercepts; γ named as R20 sub-cluster
+- ✓ 8th defection-attractor instance — documented in status doc
+
+**Pending items still owed (R20 close):**
+- Smoke 4 typo fix in `phase-3-kickoff-prompt.md` + operational test programs (`HashSet()` → `Set()`)
+- ADR-006 §2.7.24 Q25.A SUPERSEDED amendment text refinement + landing in S2-prime close commit (draft shape in team-lead handover §Pre-handover update; agent verifies-and-refines against actual ADR + code)
 
 ## Decision authority pattern
 
