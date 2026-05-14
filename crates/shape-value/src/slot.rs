@@ -294,8 +294,40 @@ impl ValueSlot {
     /// an `Arc<TypedObjectStorage>` data half + an `Arc<VTable>`
     /// vtable half. The `Box<u64>` data-half is explicitly forbidden
     /// per §Q25.E #3 (kind-blind raw-bits storage).
+    ///
+    /// **Wave 2 Agent E (2026-05-14): legacy transitional constructor.**
+    /// Per ADR-006 §Q25.C.5 amendment, `TraitObjectStorage` grew a
+    /// `HeapHeader` at offset 0 to support v2-raw raw-pointer carriers
+    /// (`from_trait_object_raw`). This `Arc`-shaped constructor remains
+    /// a valid entry point during the Wave 2 Round 2 transition; slot
+    /// bits stored are `Arc::into_raw(arc) as u64` — refcount-managed
+    /// by Rust `Arc` at offset -16, NOT by the on-header refcount at
+    /// offset 0 (which sits unused at 1 for the Arc lifetime).
     pub fn from_trait_object(t: Arc<crate::heap_value::TraitObjectStorage>) -> Self {
         Self(Arc::into_raw(t) as u64)
+    }
+
+    /// Store a raw `*const TraitObjectStorage` directly. Mirrors
+    /// `NativeKind::Ptr(HeapKind::TraitObject)`.
+    ///
+    /// **Wave 2 Agent E (2026-05-14): v2-raw raw-pointer constructor.**
+    /// Per ADR-006 §Q25.C.5 amendment + audit §4.3 Obstacle O-3.a
+    /// resolution, `TraitObjectStorage` carries a `HeapHeader` at offset 0;
+    /// the v2-raw allocator `TraitObjectStorage::_new` returns
+    /// `*mut TraitObjectStorage` with refcount=1 on the header. The slot
+    /// bits stored are the raw pointer (NOT `Arc::into_raw`); refcount
+    /// discipline goes through `v2_retain` / `v2_release` via the
+    /// `HeapElement` trait. Drop runs at refcount=0 via
+    /// `TraitObjectStorage::_drop` (NOT Rust `Arc::drop`).
+    ///
+    /// The inner `value: Arc<TypedObjectStorage>` field stays Arc-typed
+    /// in E's Round 2 scope per dispatch contract; D2's lockstep flip
+    /// handles the inner shift to `*mut TypedObjectStorage` once the
+    /// TypedObjectStorage Arc-path retires.
+    pub fn from_trait_object_raw(
+        ptr: *const crate::heap_value::TraitObjectStorage,
+    ) -> Self {
+        Self(ptr as u64)
     }
 
     /// Store an `Arc<OptionData>` directly. Mirrors
