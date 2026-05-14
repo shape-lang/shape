@@ -5348,3 +5348,151 @@ mechanical work as audit §3.2 originally estimated.
 - NEVER blame "pre-existing" — the BigInt non-existence, the
   TemporalData 7-variant shape, and the §2.2-vs-Q25.A target-shape
   conflict are all owned as S2's surface-and-stop responsibility.
+
+---
+
+## Round 19 close — post-merge ceremony (2026-05-14)
+
+R19 closes with three merges into `bulldozer-strictly-typed` per
+supervisor's R19 partial dispositions (relayed via team-lead handover
+doc update):
+
+- **S1.5** (`W12-nativekind-scalar-additions`) — close commit
+  `80d8c485`, merge `5346ca5c`. Clean production close: F32 + Char
+  NativeKind/ConcreteType scalar additions per Shape D ratification;
+  ADR-006 §2.7.5 amendment text inline; audit doc Char-bucket
+  clarification (§2.1/§2.2/§3.1/§3.2 updated to remove Char from
+  heap-element bucket). 26 files / +522/−27 net; cascade landed at
+  ~22 sites (well under ~100-site surface-and-stop ceiling).
+- **C** (`W17-narrow-follow-up-B-β`) — close commit `9bf2cf35`, merge
+  `7de3b1d6`. β filter at JIT-producer site landed cleanly: `is_jit_null_sentinel`
+  helper at `print_kinded_inner` intercepts TAG_NULL before
+  `KindedSlot` construction; SIGSEGV → `None` for Smoke 3 JIT. Per
+  W17-narrow R15 precedent (production-first sub-cluster merges with
+  smoke gate unmet IFF own contract verifiably met + smoke-gate failure
+  due to surfaced upstream gaps tracked as new sub-clusters + no
+  forbidden-pattern framings). γ workstream (`jit_call_method` TAG_NULL
+  fallthrough at UFCS-lookup-for-`dyn T = X{}` site) named as R20
+  sub-cluster.
+- **S2** (`W12-typed-array-data-heap-element-migration`) — close commit
+  `1bf8dbd`, merge `214e8661`. Audit-only doc-record close per
+  established R14/R15/R16/R17 audit-only-close precedent. 3 structural
+  obstacles surfaced; supervisor R19 dispositions (per handover doc
+  update): Q25.A SUPERSEDED amendment (1b — §2.2 wins); TemporalData
+  7-variant split audit-first in S2-prime; BigInt defer.
+
+Post-R19-merge gate `verify-merge.sh` 12/12 PASS at HEAD `214e8661`
+via devenv shell.
+
+### Supervisor R19 partial dispositions (relayed via handover doc)
+
+- **§2.2-vs-Q25.A architectural conflict** (S2 Obstacle 1): resolved
+  via Q25.A SUPERSEDED amendment (1b). §2.2's v2-raw `TypedArray<*const
+  <X>Obj>` carrier wins; Q25.A's specialized-`TypedArrayData::<X>`-inside-
+  enum ratification is retired. S2-prime re-dispatches in R20 with
+  the Q25.A SUPERSEDED amendment text as part of its scope (committed
+  alongside S2-prime close or S5 close depending on R20 dispatch
+  sequencing).
+- **TemporalData 7-variant disposition** (S2 Obstacle 2): audit-first
+  in S2-prime — supervisor wants the agent's audit-doc-shape analysis
+  of the 4 AST-internal variants (Timeframe / TimeReference /
+  DateTimeExpr / DataDateTimeRef) before mechanical migration. Newtype
+  path for the 3 user-facing variants (DateTime / Timespan / Duration)
+  preserves O-1 ruling.
+- **BigInt non-existence** (S2 Obstacle 3): defer. BigInt type design
+  (i64 placeholder vs full-width vs external crate) is a separate
+  workstream out of cluster-0 scope; S2-prime migrates the 6 other
+  heap-element variants and surfaces BigInt as cluster-1 territory.
+- **C close-criterion gate-deferred to γ workstream**: per W17-narrow
+  R15 precedent. C's β filter is a real architectural improvement
+  (SIGSEGV → defined `None` value); cluster-0 close criterion (Smoke 3
+  JIT → `x` matching VM) gates on γ workstream's UFCS-lookup-for-`dyn T`
+  fix.
+
+### 8-instance defection-class observation
+
+Producer/consumer carrier-shape-mismatch class instance count now at 8
+(R12 / R14 / R15 / R16 / R17 audit / R18 S1 / R18 close `[1,2,3,4,5].sum()`
+VM-side IntrinsicSum / R19 S2 §2.2-vs-Q25.A architectural conflict).
+Continued surfacing at the rate of ~1 per round validates the
+cluster-0-transition decision; the CLAUDE.md §"Parallel-implementation
+across producer/consumer carrier-shape boundaries" entry at line 281
+(landed `e55b8e71`) names the first 4; the 5th-8th instances are
+post-amendment surfacings caught at the team-lead-layer discipline.
+
+### Supervisor-/audit-layer imprecision pattern (3 instances + 1 candidate)
+
+(Pattern instances unchanged from R18 close subsection plus a new
+candidate from R19 audit work:)
+
+1. §2.7.14-A draft text (R16) — supervisor-drafted ADR amendment
+   mis-described runtime reality in 3 places; W12-Option-B-reframed
+   agent refused to commit; team-lead surfaced; supervisor ratified
+   refusal.
+2. S1 reopen SendMessage text (R18) — team-lead's SendMessage payload
+   asserted "Array<u64> fails at compile-time"; agent caught: actually
+   compile-time routing-to-legacy-path, NOT rejection. User-facing
+   functionality preserved.
+3. S1.5 audit Shape B "runtime element-kind from header byte" framing
+   (R19 pre-dispatch audit) — caught by supervisor as §2.7.5
+   stamp-at-compile-time risk; resolved via Shape D deferral
+   (U64 v2-raw migration post-S5). Documented in handover doc.
+
+Candidate fourth instance (not yet ratified as pattern): S2 dispatch's
+explicit "§2.7.24 Q25.A amendment text touching — that's S5's commit"
+refuse-on-sight rule, combined with the §2.2-vs-Q25.A architectural
+conflict means the dispatch shape forbade the agent from making
+progress (the conflict resolution REQUIRES touching Q25.A amendment
+text). Pattern shape: a dispatch refuse-on-sight rule may create an
+unrecoverable double-bind when the dispatch's working hypothesis
+contradicts an existing ADR ratification. Supervisor caught + corrected
+via R19 partial disposition; worth noting in the handover-doc imprecision-
+pattern annotation as the fourth documented instance.
+
+### R20 dispatch shape (per handover doc + supervisor R19 dispositions)
+
+- **S2-prime** — `W12-typed-array-data-heap-element-migration` reopen
+  with Q25.A SUPERSEDED amendment scope. Heap-element variants (String
+  / Decimal / DateTime / Timespan / Duration / Instant — BigInt
+  deferred) migrate to v2-raw `TypedArray<*const <X>Obj>` carriers.
+  TemporalData 7-variant audit-first deliverable. ADR-006 §2.7.24
+  Q25.A amendment text retired in same commit (or co-located with S5
+  per supervisor R20 dispatch authorization).
+- **γ** (`W12-jit-trait-impl-method-registry`) — `jit_call_method`
+  UFCS-lookup gap for `dyn T` receivers; gates cluster-0 close criterion
+  (Smoke 3 JIT → `x`). Dispatches alongside S2-prime per supervisor
+  R20 authorization (parallel OR sequential).
+- **S5** — `TypedArrayData` enum + `TypedBuffer<T>` deletion +
+  §2.7.24 Q25.A amendment commit (if not already retired by S2-prime).
+  Dispatches after S2-prime + γ complete (sequencing per supervisor
+  R20 dispatch).
+- **U64 relabel-step** (Shape D) — fold into S5 OR separate S6
+  sub-cluster per supervisor R20 dispatch authorization based on S5
+  scope.
+
+### Smoke 4 kickoff-prompt typo
+
+Owed at next status-doc-update commit (held from R18 close): update
+`docs/cluster-audits/phase-3-kickoff-prompt.md` from `HashSet()` to
+`Set()`. Not blocking R20 dispatch.
+
+### Handover-doc annotations
+
+Two annotations owed (held from R18 + R19):
+
+1. CLAUDE.md modifications require explicit user ratification (R17
+   close precedent) — already landed in handover doc commit `b096b917`
+   per R17 close.
+2. Supervisor-/audit-layer imprecision pattern with documented
+   instances (§2.7.14-A R16 + S1 reopen SendMessage R18 + Shape B
+   R19 audit + candidate S2-dispatch double-bind R19).
+
+Annotation (2) folds into post-R19 status-doc-update commit alongside
+R20 readiness signal.
+
+---
+
+*Next session: R20 dispatches per handover doc shape (S2-prime + γ +
+S5/S6 per supervisor R20 dispatch authorization). Read this status
+doc first; phase-3-team-lead-handover.md has the post-R19-merge HEAD
++ rotation context.*
