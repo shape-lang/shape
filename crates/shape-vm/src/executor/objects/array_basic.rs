@@ -57,6 +57,40 @@ use std::sync::Arc;
 // Local helpers (kinded-API only; no shim usage)
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Wave-3a' Agent ζ (2026-05-14) — recognize a v2-raw `Array<string>` /
+/// `Array<decimal>` receiver (kind = `NativeKind::UInt64`, header stamped
+/// `ELEM_TYPE_STRING` / `ELEM_TYPE_DECIMAL`). Per ADR-006 §2.7.24 Q25.A
+/// SUPERSEDED + audit §4.1.B.4 migration recipe.
+///
+/// **Gate-state binding**: at HEAD `5d0f1524` the producer gate
+/// `should_use_typed_array` in `v2_typed_emission.rs` returns `None` for
+/// `ConcreteType::String` / `ConcreteType::Decimal`; therefore NO live
+/// caller path produces a v2-raw `*const StringObj` / `*const DecimalObj`
+/// receiver today. These arms are reachable ONLY post-A2-followup-gate-flip
+/// (Round 3a' sequential close per supervisor 2026-05-14 disposition).
+/// They land UNREACHABLE-but-cargo-check-clean per the per-handler-family
+/// split — see AGENTS.md Wave-3a-prime-Agent-zeta row.
+///
+/// Returns `Some(view)` only for the two heap-element kinds; every other
+/// v2-raw element kind (I64/F64/Bool/sized-int/F32/Char) returns `None`
+/// so the caller falls through to the Arc-based path (which surfaces
+/// `TypeError` for those today — handled by sibling agents α/β/γ/δ/ε/η
+/// per the 6-array-method-file partition).
+#[inline]
+fn v2_string_decimal_view(
+    slot: &KindedSlot,
+) -> Option<crate::executor::v2_handlers::v2_array_detect::V2TypedArrayView> {
+    use crate::executor::v2_handlers::v2_array_detect::{as_v2_typed_array, V2ElemType};
+    if slot.kind != NativeKind::UInt64 {
+        return None;
+    }
+    let view = as_v2_typed_array(slot.slot.raw(), NativeKind::UInt64)?;
+    match view.elem_type {
+        V2ElemType::String | V2ElemType::Decimal => Some(view),
+        _ => None,
+    }
+}
+
 /// Borrow the `&TypedArrayData` referenced by a `Ptr(HeapKind::TypedArray)`-
 /// kinded receiver. The dispatch shell owns the strong-count share, so the
 /// referent is alive for the borrow's lifetime.
@@ -187,6 +221,12 @@ pub(crate) fn handle_len_v2(
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
+    // Wave-3a' Agent ζ — v2-raw `Array<string>` / `Array<decimal>` arm.
+    // Element count lives in `view.len` (u32 field on the v2 TypedArray
+    // header); no per-element refcount work.
+    if let Some(view) = v2_string_decimal_view(&args[0]) {
+        return Ok(KindedSlot::from_int(view.len as i64));
+    }
     let arr = typed_array_ref(&args[0])?;
     Ok(KindedSlot::from_int(typed_array_len(arr) as i64))
 }
@@ -197,6 +237,23 @@ pub(crate) fn handle_first_v2(
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
+    // Wave-3a' Agent ζ — v2-raw `Array<string>` / `Array<decimal>` arm.
+    // `read_element` already does `v2_retain(&(*elem_ptr).header)` and
+    // returns `(bits, NativeKind::StringV2|DecimalV2)` per audit §4.1.B.4.
+    if let Some(view) = v2_string_decimal_view(&args[0]) {
+        if view.len == 0 {
+            return Err(VMError::IndexOutOfBounds {
+                index: 0,
+                length: 0,
+            });
+        }
+        let (bits, kind) = crate::executor::v2_handlers::v2_array_detect::read_element(&view, 0)
+            .ok_or(VMError::IndexOutOfBounds {
+                index: 0,
+                length: view.len as usize,
+            })?;
+        return Ok(KindedSlot::new(ValueSlot::from_raw(bits), kind));
+    }
     let arr = typed_array_ref(&args[0])?;
     let len = typed_array_len(arr);
     if len == 0 {
@@ -214,6 +271,25 @@ pub(crate) fn handle_last_v2(
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
+    // Wave-3a' Agent ζ — v2-raw `Array<string>` / `Array<decimal>` arm.
+    // Symmetric to first(): retain via `read_element`, push as StringV2 /
+    // DecimalV2 per audit §4.1.B.4.
+    if let Some(view) = v2_string_decimal_view(&args[0]) {
+        if view.len == 0 {
+            return Err(VMError::IndexOutOfBounds {
+                index: 0,
+                length: 0,
+            });
+        }
+        let last_idx = view.len - 1;
+        let (bits, kind) =
+            crate::executor::v2_handlers::v2_array_detect::read_element(&view, last_idx)
+                .ok_or(VMError::IndexOutOfBounds {
+                    index: last_idx as i32,
+                    length: view.len as usize,
+                })?;
+        return Ok(KindedSlot::new(ValueSlot::from_raw(bits), kind));
+    }
     let arr = typed_array_ref(&args[0])?;
     let len = typed_array_len(arr);
     if len == 0 {
@@ -288,6 +364,79 @@ pub(crate) fn handle_push_v2(
 ) -> Result<KindedSlot, VMError> {
     if args.len() < 2 {
         return Err(VMError::argument_count_error("push", 1, 0));
+    }
+    // Wave-3a' Agent ζ — v2-raw `Array<string>` / `Array<decimal>` arm.
+    // `push_element` enforces caller-kind (StringV2/DecimalV2) and stores
+    // the raw pointer without retain (audit §4.1.B.4: caller's share
+    // transfers to the array). But the args[1] carrier in the op_call_method
+    // shell will run StringV2/DecimalV2 Drop after we return, calling
+    // v2_release on the same pointer — double-release. We retain BEFORE
+    // push so the array's share is independent of the carrier's, then the
+    // carrier's Drop balances back to one share (held by the array).
+    // Self-return ABI: hand back the same v2-raw pointer (the TypedArray<T>
+    // outer wrapper is stable across grow; only inner `data` reallocates).
+    // Bytecode `Dup; Store*(receiver)` writes the same pointer back —
+    // mutation in-place is visible. UInt64 Drop on the receiver carrier is
+    // a no-op so returning the same pointer is refcount-safe.
+    if let Some(view) = v2_string_decimal_view(&args[0]) {
+        let value = &args[1];
+        // Retain-on-push before transferring: audit §4.1.B.4.
+        unsafe {
+            use shape_value::v2::refcount::v2_retain;
+            match value.kind {
+                NativeKind::StringV2 => {
+                    use shape_value::v2::string_obj::StringObj;
+                    let p = value.slot.raw() as *const StringObj;
+                    if !p.is_null() {
+                        v2_retain(&(*p).header);
+                    }
+                }
+                NativeKind::DecimalV2 => {
+                    use shape_value::v2::decimal_obj::DecimalObj;
+                    let p = value.slot.raw() as *const DecimalObj;
+                    if !p.is_null() {
+                        v2_retain(&(*p).header);
+                    }
+                }
+                _ => {} // push_element below will reject mismatched kinds
+            }
+        }
+        let push_res = crate::executor::v2_handlers::v2_array_detect::push_element(
+            &view,
+            value.slot.raw(),
+            value.kind,
+        );
+        if let Err(msg) = push_res {
+            // Push refused (kind mismatch). Release the retain we just did.
+            unsafe {
+                use shape_value::v2::refcount::v2_release;
+                match value.kind {
+                    NativeKind::StringV2 => {
+                        use shape_value::v2::string_obj::StringObj;
+                        let p = value.slot.raw() as *const StringObj;
+                        if !p.is_null() {
+                            v2_release(&(*p).header);
+                        }
+                    }
+                    NativeKind::DecimalV2 => {
+                        use shape_value::v2::decimal_obj::DecimalObj;
+                        let p = value.slot.raw() as *const DecimalObj;
+                        if !p.is_null() {
+                            v2_release(&(*p).header);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            return Err(VMError::TypeError {
+                expected: "v2-raw element kind matching array elem_type",
+                got: msg,
+            });
+        }
+        return Ok(KindedSlot::new(
+            ValueSlot::from_raw(args[0].slot.raw()),
+            NativeKind::UInt64,
+        ));
     }
     let mut arc = owned_typed_array_clone(&args[0])?;
     let value = &args[1];
@@ -385,6 +534,28 @@ pub(crate) fn handle_pop_v2(
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
+    // Wave-3a' Agent ζ — v2-raw `Array<string>` / `Array<decimal>` arm.
+    // Tuple-return ABI (§2.7.27 amendment, W17-pop-mutation): side-channel
+    // publishes the (unchanged) v2-raw pointer as the new container; the
+    // bytecode `Swap; Store*(receiver)` writes it back. `pop_element` for
+    // String/Decimal transfers the array's owned per-element share into
+    // the returned (bits, NativeKind::StringV2|DecimalV2) — no extra
+    // retain, per audit §4.1.B.4. UInt64 Drop on args[0] is a no-op, so
+    // re-publishing the same pointer is refcount-safe.
+    if let Some(view) = v2_string_decimal_view(&args[0]) {
+        let popped =
+            crate::executor::v2_handlers::v2_array_detect::pop_element(&view).ok_or(
+                VMError::IndexOutOfBounds {
+                    index: 0,
+                    length: 0,
+                },
+            )?;
+        let (bits, kind) = popped;
+        // Side-channel-publish the (same) v2-raw receiver pointer. Bytecode
+        // `Swap; Store*(receiver)` consumes it as NewContainer.
+        vm.push_kinded(args[0].slot.raw(), NativeKind::UInt64)?;
+        return Ok(KindedSlot::new(ValueSlot::from_raw(bits), kind));
+    }
     let mut arc = owned_typed_array_clone(&args[0])?;
     let popped: Result<KindedSlot, VMError> = match Arc::make_mut(&mut arc) {
         TypedArrayData::I64(buf) => {
@@ -487,6 +658,21 @@ pub(crate) fn handle_clone_v2(
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
+    // Wave-3a' Agent ζ — v2-raw `Array<string>` / `Array<decimal>` arm.
+    // Unlike the Arc path's shallow share (refcount bump + CoW via
+    // make_mut), v2-raw has no Arc — clone is a deep copy of the
+    // TypedArray<T> outer wrapper with per-element `v2_retain` on each
+    // shared `*const StringObj` / `*const DecimalObj` pointer. The
+    // existing `clone_array` helper in `v2_array_detect.rs:1356` already
+    // implements this for all element kinds (audit §4.1.B.4 retain-on-
+    // element-share). Result kind = `NativeKind::UInt64` (v2-raw carrier).
+    if let Some(view) = v2_string_decimal_view(&args[0]) {
+        let new_ptr = crate::executor::v2_handlers::v2_array_detect::clone_array(&view);
+        return Ok(KindedSlot::new(
+            ValueSlot::from_raw(new_ptr as u64),
+            NativeKind::UInt64,
+        ));
+    }
     match args[0].kind {
         NativeKind::Ptr(HeapKind::TypedArray) => {
             let bits = args[0].slot.raw();
