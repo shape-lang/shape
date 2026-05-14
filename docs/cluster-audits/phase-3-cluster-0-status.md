@@ -7329,3 +7329,100 @@ Tighter than prior projection by 1 session as Round 3a' + merge fit inside sessi
 ---
 
 *Next session: A2-followup-gate-flip single-commit drive-by + D4 multi-session sub-agent chain dispatch per user-ratified D-α + Round 3b C2-joint sequential. Wave 3 S5 + cluster-0+1 close report follows.*
+
+---
+
+## Wave 2 Round 4 D4 close — TypedObjectStorage Arc → HeapHeader migration COMPLETE (2026-05-14)
+
+D4 multi-session sub-agent chain (PATH B per supervisor 2026-05-14 ratification) closed cluster-0+1 close-criterion territory for audit §4.3 Obstacles O-3.a + O-3a. 6 sub-agents on bulldozer-multi-session-chain-pattern.md feature branches; ckpt-final-prime² landed STRICT close gate; merged into bulldozer-strictly-typed canonical at 8a87ddd7.
+
+### Multi-session chain summary (6 sub-agents)
+
+| Ckpt | Close commit | LoC | Status | Notes |
+|---|---|---|---|---|
+| 1 | `0214f107` | +89/-39 | intermediate | 11 producer-site migrations Arc::new(TypedObjectStorage::new(...)) → TypedObjectStorage::_new (19th imprecision: count-definition — 10 direct + 1 two-step + 2 helper-wrap deferred) |
+| 2 | `86812859` | +144/-16 | intermediate | 12 consumer dispatch arm flips in 4-table-lockstep × 2 kinds (20th imprecision: refines D2's "8" prediction — kinded_slot.rs has both Clone AND Drop separate tables; closure_layout.rs + heap_value.rs are drop-only) |
+| 3 | `0ee49620` | +307/-80 | intermediate | HashMapValueBuf::TypedObject signature flip + TraitObjectStorage.value inner-Arc shift + **TypedObjectPtr transparent newtype landed** (Rust auto-trait orphan-rule workaround — manual Send/Sync impl on TypedBuffer<*const X> would disable auto-derive for ALL TypedBuffer<T>; 482 errors empirically when bypassed) |
+| final | `e67e4971` | +77/-20 | S-A-S | TypedObjectPtr Drop/Clone discipline redesign (real correctness improvement: prevents Vec<TypedObjectPtr>::Drop refcount leak; mirrors StringObj/DecimalObj precedent; ckpt-3's trivially-Copy/Clone newtype was unsound for refcount discipline). 21st imprecision: territory-enumeration vs actual cascade ~10x understatement. Path A vs Path B disposition surfaced. |
+| final-prime | `68ed93e0` | 0 prod | S-A-S | Re-affirmation surface-and-stop with structural finding: heterogeneous-producer-bits invariant — items (j) 5-arm receiver-recovery + (n) helper-wrap producers + variant flip form ONE mutually-inter-dependent atomic landing unit (cannot split). Two structural-disposition paths surfaced for supervisor decision. |
+| **final-prime²** | **`47b55a63`** | **+~50 across 27 files** | **STRICT close** | **Path B atomic single-commit per supervisor 2026-05-14 ratification.** HeapValue::TypedObject(TypedObjectPtr) + HeapValue::TraitObject(TraitObjectPtr — new mirror newtype at heap_value.rs:638-808) + TypedArrayData::TypedObject(Arc<TypedBuffer<TypedObjectPtr>>) variant flips + 35 destructure-cascade s.clone() mechanical + 4 unimplemented!() SURFACE fills + 5-arm receiver-recovery fix at object_ops.rs:59 (per D3-2; raw-pointer recovery via TypedObjectPtr::as_raw + iterator_methods::clone_typed_array_arc precedent) + 3 csv/json/xml + 5 Vec collection + 2 helper-wrap (per ckpt-1 19th imprecision deferral) + legacy impl Drop / TypedObjectStorage::new retirement + ADR-006 §2.3 amendment (Path B canonical pattern; lines 301-388) + §Q25.C.5 consistency note. |
+
+**Total D4 code landed**: ~617 LoC across ~30 source files + AGENTS.md row state-flips.
+
+### Path B vs Path A — supervisor 2026-05-14 ratification
+
+Path B (TypedObjectPtr/TraitObjectPtr newtype-as-variant-payload) RATIFIED; Path A (raw *const T + manual `impl Drop / Clone / Send / Sync for HeapValue` + ManuallyDrop dance at 35 destructure sites) REFUSED.
+
+Reasoning per supervisor:
+- §Parallel-implementation #1-#3 thresholds NOT applicable
+- §Renames-to-refuse-on-sight broader-family regex NOT a match (Ptr-suffix is canonical typed-pointer designation)
+- ADR-005 §1 single-discriminator PRESERVED
+- Path B saves ~50 LoC + 1 sub-agent vs Path A (auto-derive Drop/Clone/Send/Sync chains through TypedObjectPtr's manual discipline; no manual HeapValue impls needed)
+
+**Bounded ratification**: TypedObjectPtr/TraitObjectPtr newtype-as-variant-payload is canonical v2-raw heap-element payload shape per ADR-006 §2.3 amendment (this commit). Future agents REFUSE ON SIGHT "TypedObjectPtr shim" / "TraitObjectPtr bridge" / "Ptr-newtype helper" framings + parallel Arc<X> payloads alongside Ptr-newtypes + sibling Ptr-newtypes for non-HeapHeader-equipped types.
+
+### S1-R18 DURABLE PATTERN (cumulative)
+
+D4 chain ran with 0 S1-R18 instances (all 6 sub-agents closed without API errors). Cumulative through D4: 5 instances (Wave 1 audit + D1 drive-by + Round 3a' δ/ε/ζ user-ratified durable). Pattern operational; bulldozer-cadence chain progression worked as designed.
+
+### D4 merge ceremony commits
+
+```
+8a87ddd7  Merge D4 multi-session chain (6 sub-agents); take-both AGENTS.md state-flip
+47b55a63  ckpt-final-prime² STRICT close (PATH B atomic single-commit)
+68ed93e0  ckpt-final-prime S-A-S (re-affirmation; Path A/B disposition surface)
+e67e4971  ckpt-final S-A-S + TypedObjectPtr Drop/Clone discipline correctness improvement
+0ee49620  ckpt-3 (HashMapValueBuf flip + TraitObjectStorage inner shift + TypedObjectPtr newtype)
+86812859  ckpt-2 (12 dispatch arm flips)
+0214f107  ckpt-1 (11 producer migrations)
+```
+
+### Post-merge gates (devenv wrapper at HEAD 8a87ddd7)
+
+- `cargo check --workspace --lib --tests` EXIT=0 ✅
+- `bash scripts/verify-merge.sh` EXIT=0; **Passed: 12 / Failed: 0** ✅
+- `bash scripts/check-no-dynamic.sh` EXIT=0 ✅
+- All 6 D4 chain worktrees cleaned up ✅
+
+### Post-merge smoke matrix (release binary rebuilt; baseline preserved)
+
+| Smoke | VM | JIT | Cluster-0+1 criterion |
+|---|---|---|---|
+| 1 (scalar loop) | ✅ 4950 | ✅ 4950 | ✓ |
+| 2 (`[1,2,3,4,5].map(\|x\|x*2).sum()`) | ✅ 30 | ❌ rc=1 | gated on S5 + literal-upgrade per A2 R2 + gate-flip |
+| 3 (canonical fixture) | ✅ x | ✅ x | ✓ |
+| 4 (`Set()` + `.add()` + `.size()`) | ✅ 2 | ✅ 2 | ✓ |
+
+3/4 VM == JIT preserved post-D4-merge. Note: ckpt-final-prime²'s close-report smoke-matrix output was incorrect (reported regressions due to stale binary or wrong fixtures); team-lead verified actual smoke matrix at agent worktree HEAD 47b55a63 pre-merge — preserved exactly. STRICT close gate genuinely met.
+
+### Imprecision-pattern instances 19-22 (D4 additions)
+
+| # | Source | Imprecision shape |
+|---|---|---|
+| 19 | ckpt-1 (D4) | Count-definition: 11 producer sites = 10 direct-form + 1 two-step + 2 helper-wrap deferred (object_operations.rs:120/207) |
+| 20 | ckpt-2 (D4) | D3 R3a "8 dispatch arms" undercount — actual = 12 (kinded_slot.rs has both Clone AND Drop separate tables; closure_layout.rs + heap_value.rs are drop-only). Same root cause as ckpt-3's TypedObjectPtr newtype: Rust auto-trait orphan rule. |
+| 21 | ckpt-final (D4) | Territory-enumeration vs actual cascade ~10x understatement (~12 dispatched items → ~130+ actual cascade including manual impl Drop/Send/Sync/Clone on HeapValue). Pre-flight territory-enumeration check binding extended for future sub-agents per supervisor disposition. |
+| 22 | ckpt-final-prime (D4) | Heterogeneous-producer-bits invariant: items (j) 5-arm receiver-recovery + (n) helper-wrap producers + variant flip form mutually-inter-dependent atomic landing unit (cannot split into independently-landable pieces). |
+
+Cumulative: **22 imprecision instances** through D4 close. Pattern continuing to surface honestly at agent execution layer; pre-flight ground-truth + territory-enumeration check bindings catching each pre-edit or in close report.
+
+### Audit §4.3 Obstacles RESOLVED
+
+- **O-3.a** (TypedObjectStorage Arc → HeapHeader migration): RESOLVED via D1's HeapHeader-equipped TypedObjectStorage struct + D4's variant payload flip to TypedObjectPtr.
+- **O-3a** (TraitObjectStorage HeapHeader migration): RESOLVED via E (Round 2)'s HeapHeader-equipped TraitObjectStorage struct + ckpt-3's inner-field shift + ckpt-final-prime²'s TraitObjectPtr newtype variant payload flip.
+
+### Honest velocity update
+
+| Stage | Sessions |
+|---|---|
+| D4 multi-session chain (complete; 6 sub-agents) | 2 sessions (within D-α envelope) |
+| Round 3b C2-joint (post-D4 merged; HashMapData<V> per-V mono runtime + JIT FFI ~5k LoC atomic) | 1 |
+| Wave 3 stabilize (S5 + A2-followup-producer-cascade + shape-test residuals classification) | 1-2 |
+| Cluster-2 + Phase 4 | 2-4 |
+| **Total remaining** | **4-7** |
+
+D4 within D-α envelope. Cluster-0+1 close criterion territory closing: O-3.a + O-3a resolved; remaining Wave 3 stabilize work + cluster-2 cleanup + Phase 4.
+
+---
+
+*Next session: Round 3b C2-joint dispatch (HashMapData<V> per-V monomorphization runtime + JIT FFI as single atomic ~5k LoC / 40 files commit per C2a structural finding). After Round 3b: Wave 3 stabilize + cluster-0+1 close attempt.*
