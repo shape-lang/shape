@@ -166,15 +166,17 @@ impl VirtualMachine {
         // dispatch per-slot `Arc::decrement_strong_count`.
         let field_kinds: Vec<NativeKind> = popped.iter().map(|(_, k)| *k).collect();
 
-        // Construct the storage, transfer ownership to the stack via
-        // `Arc::into_raw` + `push_kinded(NativeKind::Ptr(HeapKind::TypedObject))`.
-        let storage = Arc::new(TypedObjectStorage::new(
+        // Wave 2 Round 4 D4 ckpt-1: migrated to v2-raw `_new`. The raw
+        // pointer is directly the stack carrier bits per ADR-006 §2.4 /
+        // D1's `from_typed_object_raw` contract. No variant signature
+        // dependency at this site.
+        let ptr = TypedObjectStorage::_new(
             schema_id as u64,
             slots.into_boxed_slice(),
             heap_mask,
             Arc::from(field_kinds.into_boxed_slice()),
-        ));
-        let bits = Arc::into_raw(storage) as u64;
+        );
+        let bits = ptr as u64;
         self.push_kinded(bits, NativeKind::Ptr(HeapKind::TypedObject))
     }
 

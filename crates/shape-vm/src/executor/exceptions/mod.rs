@@ -493,13 +493,16 @@ impl VirtualMachine {
             vec![NativeKind::String; 6].into_boxed_slice(),
         );
 
-        let storage = Arc::new(TypedObjectStorage::new(
+        // Wave 2 Round 4 D4 ckpt-1: migrated to v2-raw `_new` + D1's
+        // `from_typed_object_raw` constructor — no variant signature
+        // dependency at this site.
+        let ptr = TypedObjectStorage::_new(
             schema_id as u64,
             slots.into_boxed_slice(),
             heap_mask,
             field_kinds,
-        ));
-        Ok(KindedSlot::from_typed_object(storage))
+        );
+        Ok(KindedSlot::from_typed_object_raw(ptr))
     }
 
     /// Normalize an arbitrary thrown payload to an AnyError-shaped

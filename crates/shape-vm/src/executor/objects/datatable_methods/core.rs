@@ -380,18 +380,24 @@ pub(crate) fn handle_rows(
         m
     };
 
+    // Wave 2 Round 4 D4 ckpt-1: migrated to v2-raw `_new` per D1 API
+    // surface. The `TypedArrayData::TypedObject` variant signature flip
+    // (`Arc<TypedBuffer<Arc<TypedObjectStorage>>>` →
+    // `Arc<TypedBuffer<*const TypedObjectStorage>>`) is ckpt-final
+    // territory; the `Vec<Arc<TypedObjectStorage>>` collection below
+    // will not compile until that variant signature lands.
     let mut row_storages: Vec<Arc<TypedObjectStorage>> = Vec::with_capacity(row_count);
     for r in 0..row_count {
         let mut slots: Vec<ValueSlot> = Vec::with_capacity(col_readers.len());
         for reader in col_readers.iter() {
             slots.push((reader.read)(r));
         }
-        let storage = Arc::new(TypedObjectStorage::new(
+        let storage = TypedObjectStorage::_new(
             schema_id as u64,
             slots.into_boxed_slice(),
             heap_mask,
             Arc::clone(&field_kinds),
-        ));
+        );
         row_storages.push(storage);
     }
     let buf = TypedBuffer::from_vec(row_storages);
@@ -427,6 +433,11 @@ pub(crate) fn handle_columns_ref(
     );
     let heap_mask: u64 = 0b11;
 
+    // Wave 2 Round 4 D4 ckpt-1: migrated to v2-raw `_new` per D1 API
+    // surface. Variant signature dependency same as `handle_rows` above:
+    // `TypedArrayData::TypedObject` variant signature flip is ckpt-final
+    // territory; the `Vec<Arc<TypedObjectStorage>>` collection below
+    // will not compile until that variant signature lands.
     let mut col_storages: Vec<Arc<TypedObjectStorage>> = Vec::with_capacity(col_count);
     for (idx, name) in col_names.iter().enumerate() {
         let arrow_col = dt_arc.inner().column(idx);
@@ -435,12 +446,12 @@ pub(crate) fn handle_columns_ref(
             ValueSlot::from_string_arc(Arc::new(name.clone())),
             ValueSlot::from_string_arc(Arc::new(kind_name)),
         ]);
-        let storage = Arc::new(TypedObjectStorage::new(
+        let storage = TypedObjectStorage::_new(
             schema_id as u64,
             slots,
             heap_mask,
             Arc::clone(&field_kinds),
-        ));
+        );
         col_storages.push(storage);
     }
     let buf = TypedBuffer::from_vec(col_storages);

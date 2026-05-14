@@ -132,12 +132,16 @@ impl ElementData {
             .into_boxed_slice(),
         );
         let heap_mask: u64 = 0b1111; // all 4 fields heap-resident
-        let storage = Arc::new(TypedObjectStorage::new(
+        // Wave 2 Round 4 D4 ckpt-1: migrated to v2-raw `_new` per D1 API
+        // surface. `HeapValue::TypedObject` variant signature flip is
+        // ckpt-final territory; the wrap below will not compile until
+        // the variant signature shifts to `*const TypedObjectStorage`.
+        let storage = TypedObjectStorage::_new(
             schema_id as u64,
             slots,
             heap_mask,
             field_kinds,
-        ));
+        );
         Arc::new(HeapValue::TypedObject(storage))
     }
 

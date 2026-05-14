@@ -170,12 +170,16 @@ fn build_json_enum_heap_value(value: serde_json::Value, json_schema_id: u64) -> 
 /// truth at read time — no per-slot kind table is recorded on this
 /// fast path (mirrors `type_schema::typed_object_from_pairs`).
 fn build_typed_object(schema_id: u64, slots: Vec<ValueSlot>, heap_mask: u64) -> HeapValue {
-    let storage = Arc::new(shape_value::TypedObjectStorage::new(
+    // Wave 2 Round 4 D4 ckpt-1: migrated to v2-raw `_new` per D1 API
+    // surface. `HeapValue::TypedObject` variant signature flip is
+    // ckpt-final territory; the wrap below will not compile until the
+    // variant signature shifts to `*const TypedObjectStorage`.
+    let storage = shape_value::TypedObjectStorage::_new(
         schema_id,
         slots.into_boxed_slice(),
         heap_mask,
         Arc::from(Vec::<shape_value::NativeKind>::new().into_boxed_slice()),
-    ));
+    );
     HeapValue::TypedObject(storage)
 }
 

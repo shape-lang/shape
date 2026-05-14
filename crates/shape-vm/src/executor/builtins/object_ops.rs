@@ -161,12 +161,15 @@ impl VirtualMachine {
             }
         }
 
-        let new_storage = TypedObjectStorage::new(
+        // Wave 2 Round 4 D4 ckpt-1: migrated to v2-raw `_new` + D1's
+        // `from_typed_object_raw` constructor — no variant signature
+        // dependency at this site.
+        let ptr = TypedObjectStorage::_new(
             subset_id as u64,
             new_slots.into_boxed_slice(),
             new_mask,
             Arc::from(new_kinds.into_boxed_slice()),
         );
-        Ok(KindedSlot::from_typed_object(Arc::new(new_storage)))
+        Ok(KindedSlot::from_typed_object_raw(ptr))
     }
 }

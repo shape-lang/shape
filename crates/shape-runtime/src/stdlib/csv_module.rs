@@ -270,12 +270,18 @@ pub fn create_csv_module() -> ModuleExports {
                     };
                     slots.push(ValueSlot::from_string_arc(Arc::new(cell)));
                 }
-                let storage = Arc::new(TypedObjectStorage::new(
+                // Wave 2 Round 4 D4 ckpt-1: migrated to v2-raw `_new` per
+                // D1 API surface. `HeapValue::TypedObject` variant
+                // signature flip from `Arc<TypedObjectStorage>` to
+                // `*const TypedObjectStorage` is ckpt-final territory;
+                // the `HeapValue::TypedObject(storage)` wrap below will
+                // not compile until that variant signature lands.
+                let storage = TypedObjectStorage::_new(
                     schema_id as u64,
                     slots.into_boxed_slice(),
                     heap_mask,
                     Arc::clone(&field_kinds),
-                ));
+                );
                 records.push(Arc::new(HeapValue::TypedObject(storage)));
             }
 

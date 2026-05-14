@@ -674,17 +674,23 @@ mod tests {
     /// `TypedObjectStorage` entries — the post-bundle-A shape produced by
     /// `HashMap.entries()` / `Array.zip()` / `IteratorTransform::Enumerate`.
     fn build_typed_object_array(n: usize) -> Arc<TypedArrayData> {
+        // Wave 2 Round 4 D4 ckpt-1: migrated to v2-raw `_new` per D1 API
+        // surface. The `TypedArrayData::TypedObject` variant signature flip
+        // (`Arc<TypedBuffer<Arc<TypedObjectStorage>>>` →
+        // `Arc<TypedBuffer<*const TypedObjectStorage>>`) is ckpt-final
+        // territory; the `Vec<Arc<TypedObjectStorage>>` collection below
+        // will not compile until that variant signature lands.
         let entries: Vec<Arc<TypedObjectStorage>> = (0..n)
             .map(|_| {
                 // Zero-slot TypedObject — schema_id is irrelevant for the
                 // iteration-protocol tests; the iterator only reads
-                // `TypedBuffer::len()` and clones the per-element Arc.
-                Arc::new(TypedObjectStorage::new(
+                // `TypedBuffer::len()` and clones the per-element pointer.
+                TypedObjectStorage::_new(
                     0,
                     Box::new([]) as Box<[_]>,
                     0,
                     Arc::from(Vec::<NativeKind>::new()),
-                ))
+                )
             })
             .collect();
         Arc::new(TypedArrayData::TypedObject(Arc::new(
