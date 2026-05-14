@@ -187,6 +187,39 @@ impl JITExecutor {
             jit_ctx.function_table_len = table.len();
         }
 
+        // ADR-006 §2.7.10 / Q11 (Phase 3 cluster-0 Round 20 sub-cluster γ —
+        // W12-jit-trait-impl-method-registry, 2026-05-14): link the JIT
+        // function-name table into the context so `jit_call_method`'s
+        // user-method UFCS dispatch (`try_call_user_method` →
+        // `find_function_by_name("TypeName::method")`) can resolve user-
+        // defined trait/impl methods at runtime.
+        //
+        // The R15 W17-narrow sub-cluster fixed the upstream classification
+        // (`receiver_type_name`) to correctly return the schema's type
+        // name for `Ptr(HeapKind::TypedObject)` receivers. Without the
+        // function-name table linkage here, every UFCS lookup at
+        // `find_function_by_name` returned None (the early-return guard at
+        // `call_method/mod.rs:230` triggered because `function_names_ptr`
+        // was always the `JITContext::default()` null sentinel). That
+        // returned TAG_NULL from `try_call_user_method`, which surfaced as
+        // `None` at the print path (post-R19 C β filter; pre-β SIGSEGV).
+        //
+        // Cluster-0 close criterion for Smoke 3: `t.name()` on
+        // `let t = X{}` returns `"x"` under `--mode jit` matching VM.
+        //
+        // The names slice is built from `bytecode.functions` 1:1 by index
+        // so `function_table[idx]` and `function_names[idx]` describe the
+        // same function — the same invariant `compile_program_selective`
+        // upholds for the function-table itself (see
+        // `compiler/program.rs:800-823`). The `Vec<String>` lives in the
+        // local `function_names_storage` and is dropped after `jit_fn`
+        // executes — same lifetime discipline as the function-table
+        // borrow above and the trampoline VM below.
+        let function_names_storage: Vec<String> =
+            bytecode.functions.iter().map(|f| f.name.clone()).collect();
+        jit_ctx.function_names_ptr = function_names_storage.as_ptr();
+        jit_ctx.function_names_len = function_names_storage.len();
+
         // Set up the trampoline VM that JIT's `jit_call_value` falls back
         // to when a callee's function_table slot is null (i.e. the
         // function was not JIT-compiled, typically because its MIR
