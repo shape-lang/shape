@@ -38,6 +38,24 @@ pub fn register_v2_symbols(builder: &mut JITBuilder) {
     builder.symbol("jit_v2_array_set_bool", v2::jit_v2_array_set_bool as *const u8);
     builder.symbol("jit_v2_array_len_bool", v2::jit_v2_array_len_bool as *const u8);
 
+    // ADR-006 §2.7.5 + §2.7.24 Q25.A SUPERSEDED + audit deliverable (b)
+    // §4.1.B — v2-raw `TypedArray<*const StringObj>` / `TypedArray<*const
+    // DecimalObj>` heap-element allocators. Phase 3 cluster-0+1 Wave 3
+    // Stabilize Round 2 V3-S5 ckpt-6-prime Group X JIT FFI String/Decimal
+    // BUILD (2026-05-15). Bodies live in `ffi/v2/mod.rs` mirroring
+    // `jit_v2_array_new_<scalar>`'s shape; per-element refcount discipline
+    // is the caller's responsibility per the VM-side
+    // `NewStringV2` / `TypedArrayPushString` per-element transfer convention
+    // at `crates/shape-vm/src/executor/v2_handlers/array.rs:803-858`.
+    builder.symbol(
+        "jit_new_typed_array_string",
+        v2::jit_new_typed_array_string as *const u8,
+    );
+    builder.symbol(
+        "jit_new_typed_array_decimal",
+        v2::jit_new_typed_array_decimal as *const u8,
+    );
+
     // Generic typed-array push dispatcher (R7.2 consolidation)
     builder.symbol("jit_v2_array_push", v2::jit_v2_array_push as *const u8);
 
@@ -365,6 +383,34 @@ pub fn declare_v2_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<Stri
         sig.params.push(AbiParam::new(types::I64));
         sig.returns.push(AbiParam::new(types::I32));
         declare(module, ffi_funcs, "jit_v2_array_len_bool", &sig);
+    }
+
+    // ========================================================================
+    // Array — *const StringObj / *const DecimalObj (v2-raw heap-element)
+    // ========================================================================
+    //
+    // ADR-006 §2.7.5 + §2.7.24 Q25.A SUPERSEDED + audit deliverable (b)
+    // §4.1.B — v2-raw `TypedArray<*const StringObj>` / `TypedArray<*const
+    // DecimalObj>` heap-element allocators. Phase 3 cluster-0+1 Wave 3
+    // Stabilize Round 2 V3-S5 ckpt-6-prime Group X JIT FFI String/Decimal
+    // BUILD (2026-05-15). Mirrors `jit_v2_array_new_<scalar>` ABI:
+    // `(capacity: u32) -> *mut TypedArray<*const T>` (carrier returned as
+    // I64 raw bits).
+
+    // jit_new_typed_array_string(capacity: u32) -> ptr
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I32)); // capacity
+        sig.returns.push(AbiParam::new(types::I64)); // *mut TypedArray<*const StringObj>
+        declare(module, ffi_funcs, "jit_new_typed_array_string", &sig);
+    }
+
+    // jit_new_typed_array_decimal(capacity: u32) -> ptr
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I32)); // capacity
+        sig.returns.push(AbiParam::new(types::I64)); // *mut TypedArray<*const DecimalObj>
+        declare(module, ffi_funcs, "jit_new_typed_array_decimal", &sig);
     }
 
     // ========================================================================

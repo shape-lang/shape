@@ -153,12 +153,24 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     }
 
     /// Return the FFI `FuncRef` for `jit_v2_array_new_<elem>`.
+    ///
+    /// ckpt-6-prime Group X JIT FFI String/Decimal BUILD (2026-05-15):
+    /// extended with `StringV2` / `DecimalV2` arms routing to
+    /// `jit_new_typed_array_string` / `jit_new_typed_array_decimal`. These
+    /// allocate `TypedArray<*const StringObj>` / `TypedArray<*const
+    /// DecimalObj>` carriers per ADR-006 §2.7.5 + §2.7.24 Q25.A SUPERSEDED +
+    /// audit deliverable (b) §4.1.B. Per-element pointer payload is the
+    /// v2-raw heap-element shape produced by VM-side `NewStringV2` /
+    /// `NewDecimalV2` opcodes at
+    /// `crates/shape-vm/src/executor/v2_handlers/array.rs:803-858`.
     pub(crate) fn v2_array_new_func(&self, elem: NativeKind) -> Option<cranelift::codegen::ir::FuncRef> {
         match elem {
             NativeKind::Float64 => Some(self.ffi.v2_array_new_f64),
             NativeKind::Int64 | NativeKind::UInt64 => Some(self.ffi.v2_array_new_i64),
             NativeKind::Int32 | NativeKind::UInt32 => Some(self.ffi.v2_array_new_i32),
             NativeKind::Bool | NativeKind::Int8 | NativeKind::UInt8 => Some(self.ffi.v2_array_new_bool),
+            NativeKind::StringV2 => Some(self.ffi.v2_array_new_string),
+            NativeKind::DecimalV2 => Some(self.ffi.v2_array_new_decimal),
             _ => None,
         }
     }
@@ -167,12 +179,18 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// `jit_v2_array_push` dispatcher, or `None` for unsupported kinds. The
     /// caller uses the returned size as the `elem_size` I8 immediate passed
     /// to the dispatcher.
+    ///
+    /// ckpt-6-prime Group X JIT FFI String/Decimal BUILD (2026-05-15):
+    /// `StringV2` / `DecimalV2` are 8-byte pointer carriers — the element
+    /// payload is a `*const StringObj` / `*const DecimalObj` raw pointer,
+    /// pushed via the generic `jit_v2_array_push` I64-shaped dispatcher.
     pub(crate) fn v2_array_push_elem_size(&self, elem: NativeKind) -> Option<i64> {
         match elem {
             NativeKind::Float64 => Some(8),
             NativeKind::Int64 | NativeKind::UInt64 => Some(8),
             NativeKind::Int32 | NativeKind::UInt32 => Some(4),
             NativeKind::Bool | NativeKind::Int8 | NativeKind::UInt8 => Some(1),
+            NativeKind::StringV2 | NativeKind::DecimalV2 => Some(8),
             _ => None,
         }
     }
@@ -277,6 +295,13 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     val
                 }
             }
+            // ckpt-6-prime Group X JIT FFI String/Decimal BUILD (2026-05-15):
+            // StringV2 / DecimalV2 elements are 8-byte raw pointers — the
+            // operand value is already an I64-shaped `*const StringObj` /
+            // `*const DecimalObj` produced by the per-element constant
+            // materializer in `emit_v2_array_aggregate`'s StringV2/DecimalV2
+            // arm. No coercion needed.
+            NativeKind::StringV2 | NativeKind::DecimalV2 => val,
             _ => val,
         }
     }
@@ -304,6 +329,26 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// Allocate a v2 typed array of the given element kind via FFI, then push
     /// each operand value into it. Returns the raw `*mut TypedArray<T>` as an
     /// `i64` Cranelift value, or `None` when no v2 helper exists.
+    ///
+    /// ckpt-6-prime Group X JIT FFI String/Decimal BUILD (2026-05-15):
+    /// `StringV2` element kind takes a kind-specific per-element path —
+    /// each `MirConstant::Str` / `MirConstant::StringId` operand is
+    /// materialized at JIT-compile time as a `*const StringObj` constant
+    /// via `crate::ffi::v2::string_obj_constant` (refcount-boosted permanent
+    /// share, mirroring `crate::ffi::string::arc_string_constant` for the
+    /// legacy `Arc<String>` carrier). The constant pointer is embedded as
+    /// an `iconst I64` and pushed via the generic `jit_v2_array_push`
+    /// dispatcher with elem_size=8. This is the JIT-side equivalent of the
+    /// VM's `NewStringV2` opcode + `TypedArrayPushString` per-element
+    /// transfer at `crates/shape-vm/src/executor/v2_handlers/array.rs:803`.
+    ///
+    /// `DecimalV2` element kind currently surfaces-and-stops at the MIR
+    /// producer site — `MirConstant` has no `Decimal` variant, so Array
+    /// <decimal> literals can't currently flow through MIR. Wiring the
+    /// per-element NewDecimalV2 equivalent requires MIR-side producer
+    /// support (`MirConstant::Decimal` variant or equivalent constant-pool
+    /// reference), which is downstream territory beyond Group X's JIT FFI
+    /// build scope.
     pub(crate) fn emit_v2_array_aggregate(
         &mut self,
         operands: &[Operand],
@@ -321,10 +366,92 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         let inst = self.builder.ins().call(alloc_func, &[cap]);
         let arr_ptr = self.builder.inst_results(inst)[0];
 
-        for op in operands {
-            let raw = self.compile_operand_raw(op)?;
-            let val = self.coerce_to_v2_elem(raw, elem);
-            self.emit_v2_array_push_call(arr_ptr, val, elem)?;
+        match elem {
+            // ckpt-6-prime Group X JIT FFI String/Decimal BUILD: per-element
+            // NewStringV2 equivalent at the JIT mir_compiler dispatch site.
+            // Each operand must be a `MirConstant::Str` / `MirConstant::
+            // StringId` — the only producer sites for `NativeKind::StringV2`
+            // Array<string> literals per ADR-006 §2.7.5 + audit deliverable
+            // (b) §4.1.B. Other operand shapes structurally cannot produce
+            // a StringV2-kind value and surface-and-stop here (no Bool-
+            // default per §2.7.7 #9 / CLAUDE.md "Forbidden rationalizations").
+            NativeKind::StringV2 => {
+                use shape_vm::mir::types::MirConstant;
+                for op in operands {
+                    let s: String = match op {
+                        Operand::Constant(MirConstant::Str(s)) => s.clone(),
+                        Operand::Constant(MirConstant::StringId(id)) => {
+                            let idx = *id as usize;
+                            if idx >= self.strings.len() {
+                                return Err(format!(
+                                    "emit_v2_array_aggregate: StringV2 elem StringId({}) \
+                                     out of bounds (pool len = {}) — string-pool conduit \
+                                     mismatch at JIT compile time. ADR-006 §2.7.5 / Group X \
+                                     JIT FFI String/Decimal BUILD.",
+                                    id, self.strings.len()
+                                ));
+                            }
+                            self.strings[idx].clone()
+                        }
+                        other => {
+                            return Err(format!(
+                                "emit_v2_array_aggregate: SURFACE — StringV2 elem kind \
+                                 requires `MirConstant::Str` / `MirConstant::StringId` \
+                                 operand per Group X NewStringV2-equivalent dispatch \
+                                 (ADR-006 §2.7.5 + §2.7.24 Q25.A SUPERSEDED + audit \
+                                 deliverable (b) §4.1.B). Got: {:?}. No Bool-default \
+                                 fallback per §2.7.7 #9 / CLAUDE.md Forbidden \
+                                 rationalizations.",
+                                other
+                            ));
+                        }
+                    };
+                    // Compile-time materialize a `*const StringObj` permanent-
+                    // share constant (refcount=2; one share is the active
+                    // share transferred to the array, the other is the
+                    // constant's permanent share that survives JIT-function
+                    // Drop chains).
+                    let string_obj_ptr = crate::ffi::v2::string_obj_constant(&s);
+                    let val = self
+                        .builder
+                        .ins()
+                        .iconst(types::I64, string_obj_ptr as usize as i64);
+                    self.emit_v2_array_push_call(arr_ptr, val, elem)?;
+                }
+            }
+            // ckpt-6-prime Group X JIT FFI String/Decimal BUILD: per-element
+            // NewDecimalV2 equivalent surface-and-stop. `MirConstant` has no
+            // `Decimal` variant so Array<decimal> literals can't currently
+            // flow through MIR — the FFI allocator + carrier-routing is
+            // wired (above) but the per-element producer requires MIR-side
+            // support that's beyond Group X's JIT FFI build scope.
+            NativeKind::DecimalV2 => {
+                return Err(format!(
+                    "emit_v2_array_aggregate: SURFACE — DecimalV2 elem-kind \
+                     per-element materialization requires MIR-side producer \
+                     support (`MirConstant::Decimal` variant or equivalent \
+                     constant-pool reference) which is not yet wired. Group X \
+                     scope covers the JIT FFI allocator + carrier-routing \
+                     (jit_new_typed_array_decimal + v2_array_new_func \
+                     DecimalV2 arm); per-element materializer awaits the MIR \
+                     producer's wiring. ADR-006 §2.7.5 + §2.7.24 Q25.A \
+                     SUPERSEDED + audit deliverable (b) §4.1.B. {} operands \
+                     received; no Bool-default per §2.7.7 #9.",
+                    operands.len()
+                ));
+            }
+            _ => {
+                // Scalar element kinds (Float64/Int64/Int32/Bool/etc.) —
+                // existing inline path. compile_operand_raw produces a
+                // Cranelift SSA value already in the native element type;
+                // coerce_to_v2_elem normalizes and emit_v2_array_push_call
+                // routes through the generic dispatcher.
+                for op in operands {
+                    let raw = self.compile_operand_raw(op)?;
+                    let val = self.coerce_to_v2_elem(raw, elem);
+                    self.emit_v2_array_push_call(arr_ptr, val, elem)?;
+                }
+            }
         }
 
         Ok(Some(arr_ptr))

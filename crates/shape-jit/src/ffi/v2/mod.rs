@@ -21,7 +21,9 @@ pub mod typed_map;
 // consumer + `jit_call_method` shell to dispatch through these
 // entry-points; until then they are inert at the program surface.
 
+use shape_value::v2::decimal_obj::DecimalObj;
 use shape_value::v2::heap_header::HeapHeader;
+use shape_value::v2::string_obj::StringObj;
 use shape_value::v2::typed_array::TypedArray;
 
 // ============================================================================
@@ -31,6 +33,89 @@ use shape_value::v2::typed_array::TypedArray;
 #[unsafe(no_mangle)]
 pub extern "C" fn jit_v2_array_new_f64(capacity: u32) -> *mut TypedArray<f64> {
     TypedArray::<f64>::with_capacity(capacity)
+}
+
+// ============================================================================
+// Array FFI — *const StringObj / *const DecimalObj — v2-raw heap-element
+// element carrier per ADR-006 §2.7.5 + §2.7.24 Q25.A SUPERSEDED + audit
+// deliverable (b) §4.1.B + Wave 2 Agent B W12-StringV2-DecimalV2-NativeKind
+// additions (2026-05-14). Phase 3 cluster-0+1 Wave 3 Stabilize Round 2 V3-S5
+// ckpt-6-prime Group X JIT FFI String/Decimal BUILD (2026-05-15) — 10th and
+// LAST checkpoint of the EXTENDED 10-ckpt chain.
+//
+// Element type is `*const T` where T: HeapElement (StringObj / DecimalObj),
+// not a flat scalar. The allocators mirror `jit_v2_array_new_f64`'s shape
+// (`TypedArray::with_capacity` returning a `*mut TypedArray<T>` carrier);
+// per-element refcount discipline is the caller's responsibility (the bytecode
+// emits `TypedArrayPushString` / `TypedArrayPushDecimal` consuming the
+// per-element share allocated by the corresponding `NewStringV2` /
+// `NewDecimalV2` site — matches the VM-side handler at
+// `crates/shape-vm/src/executor/v2_handlers/array.rs:803-858`).
+// ============================================================================
+
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_new_typed_array_string(
+    capacity: u32,
+) -> *mut TypedArray<*const StringObj> {
+    TypedArray::<*const StringObj>::with_capacity(capacity)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_new_typed_array_decimal(
+    capacity: u32,
+) -> *mut TypedArray<*const DecimalObj> {
+    TypedArray::<*const DecimalObj>::with_capacity(capacity)
+}
+
+/// JIT-compile-time per-element materializer for `*const StringObj` constants
+/// inside Array<string> literal aggregates. Allocates a fresh `StringObj`
+/// (refcount = 1) and boosts the refcount by one for the constant's permanent
+/// share — the JIT-emitted code pushes the returned pointer onto a freshly
+/// allocated `TypedArray<*const StringObj>` and transfers the share to the
+/// array's per-element slot (matches the VM-side `NewStringV2` +
+/// `TypedArrayPushString` transfer convention at
+/// `crates/shape-vm/src/executor/v2_handlers/array.rs:803-828`).
+///
+/// Mirrors `crate::ffi::string::arc_string_constant`'s permanent-share
+/// discipline for the §2.7.5 `Arc<String>` carrier, but uses the v2-raw
+/// `StringObj` carrier per ADR-006 §2.7.5 + §2.7.24 Q25.A SUPERSEDED + audit
+/// deliverable (b) §4.1.B.
+///
+/// ckpt-6-prime Group X JIT FFI String/Decimal BUILD (2026-05-15) — per-
+/// element NewStringV2 equivalent at the JIT mir_compiler dispatch site.
+pub fn string_obj_constant(s: &str) -> *const StringObj {
+    let ptr = StringObj::new(s);
+    // SAFETY: ptr was just produced by StringObj::new with refcount=1.
+    // Bump the refcount to 2 to retain the constant's permanent share.
+    // The constant's "active share" is the one the JIT-emitted code
+    // pushes onto the freshly allocated TypedArray; the permanent share
+    // is the one that survives Drop chains across multiple invocations
+    // of the JIT-compiled function. Same lifecycle as
+    // `crate::ffi::string::arc_string_constant`.
+    unsafe {
+        (*ptr).header.retain();
+    }
+    ptr as *const StringObj
+}
+
+/// JIT-compile-time per-element materializer for `*const DecimalObj`
+/// constants inside Array<decimal> literal aggregates. Same permanent-share
+/// discipline as `string_obj_constant`. The `bits` argument is the
+/// `Decimal::serialize()` byte-array packed into a `[u8; 16]` carrier —
+/// `Decimal::deserialize(bits)` reconstructs the `Decimal` value at JIT
+/// compile time, then `DecimalObj::new(value)` allocates a refcounted
+/// `DecimalObj` heap object.
+///
+/// ckpt-6-prime Group X JIT FFI String/Decimal BUILD (2026-05-15) — per-
+/// element NewDecimalV2 equivalent at the JIT mir_compiler dispatch site.
+pub fn decimal_obj_constant(value: rust_decimal::Decimal) -> *const DecimalObj {
+    let ptr = DecimalObj::new(value);
+    // SAFETY: ptr was just produced by DecimalObj::new with refcount=1.
+    // See `string_obj_constant` for the permanent-share rationale.
+    unsafe {
+        (*ptr).header.retain();
+    }
+    ptr as *const DecimalObj
 }
 
 #[unsafe(no_mangle)]
