@@ -786,6 +786,77 @@ impl VirtualMachine {
                 Ok(())
             }
 
+            // ── Wave 3 Stabilize Round 1 V3-A2-followup-producer-cascade (2026-05-15) ──
+            //
+            // v2-raw heap-element literal constructors. Read the source value
+            // from the program constant / string pool, allocate a fresh
+            // `StringObj` / `DecimalObj` (refcount = 1), push the raw pointer
+            // bits with `NativeKind::StringV2` / `NativeKind::DecimalV2`. The
+            // caller's share is then transferred to the typed array on the
+            // subsequent `TypedArrayPushString` / `TypedArrayPushDecimal`
+            // (matches the per-element refcount discipline of the existing
+            // `TypedArrayGet*` arms at lines 663+/733+).
+            //
+            // Per ADR-006 §2.7.5 stamp-at-compile-time: the kind is proven at
+            // compile-time emission; no runtime decode/probe at the FFI boundary.
+
+            OpCode::NewStringV2 => {
+                let str_id = match instruction.operand {
+                    Some(Operand::Property(id)) => id as usize,
+                    Some(Operand::Const(id)) => id as usize,
+                    _ => {
+                        return Err(VMError::RuntimeError(
+                            "NewStringV2 requires a Property/Const string-id operand".to_string(),
+                        ));
+                    }
+                };
+                let s = self
+                    .program
+                    .strings
+                    .get(str_id)
+                    .ok_or_else(|| {
+                        VMError::RuntimeError(format!(
+                            "NewStringV2: string id {} out of bounds (pool len = {})",
+                            str_id,
+                            self.program.strings.len()
+                        ))
+                    })?
+                    .clone();
+                let ptr = StringObj::new(&s);
+                self.push_kinded(ptr as usize as u64, NativeKind::StringV2)?;
+                Ok(())
+            }
+
+            OpCode::NewDecimalV2 => {
+                let const_id = match instruction.operand {
+                    Some(Operand::Const(id)) => id as usize,
+                    _ => {
+                        return Err(VMError::RuntimeError(
+                            "NewDecimalV2 requires a Const constant-id operand".to_string(),
+                        ));
+                    }
+                };
+                let constant = self.program.constants.get(const_id).ok_or_else(|| {
+                    VMError::RuntimeError(format!(
+                        "NewDecimalV2: constant id {} out of bounds (pool len = {})",
+                        const_id,
+                        self.program.constants.len()
+                    ))
+                })?;
+                let d = match constant {
+                    crate::bytecode::Constant::Decimal(d) => *d,
+                    other => {
+                        return Err(VMError::RuntimeError(format!(
+                            "NewDecimalV2: expected Constant::Decimal, got {:?}",
+                            other
+                        )));
+                    }
+                };
+                let ptr = DecimalObj::new(d);
+                self.push_kinded(ptr as usize as u64, NativeKind::DecimalV2)?;
+                Ok(())
+            }
+
             // ── Length ───────────────────────────────────────────────
 
             OpCode::TypedArrayLen => {

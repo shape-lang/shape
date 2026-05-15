@@ -703,6 +703,34 @@ define_opcodes! {
     /// Set element in TypedArray<*const DecimalObj>: pops (arr_ptr, index, value), pushes nothing. Releases prior element, transfers new value's refcount share.
     TypedArraySetDecimal = 0x1B2, Object, pops: 3, pushes: 0;
 
+    // ── Wave 3 Stabilize Round 1 V3-A2-followup-producer-cascade (2026-05-15) ──
+    //
+    // v2-raw heap-element literal constructors. The producer side of the Wave 2
+    // Round 3a' gate-flip: `Array<string>` / `Array<decimal>` literals route
+    // through `NewTypedArrayString` / `NewTypedArrayDecimal` followed by per-
+    // element `TypedArrayPushString` / `TypedArrayPushDecimal`, which require
+    // the element value to carry `NativeKind::StringV2` / `NativeKind::DecimalV2`
+    // (per `v2_handlers/array.rs:687/703` strict-kind invariants). The legacy
+    // `LoadConst` path produces `NativeKind::String` (Arc<String> carrier) /
+    // `NativeKind::Decimal` (Arc<Decimal>), so a literal-element upgrade opcode
+    // is required to round-trip through the typed-array push handler.
+    //
+    // `NewStringV2` reads `program.strings[id]` and pushes a fresh
+    // `StringObj::new(&s) as *const StringObj` with `NativeKind::StringV2`,
+    // refcount = 1 (caller transfers share to the array on `TypedArrayPushString`).
+    //
+    // `NewDecimalV2` reads `program.constants[id]` (must be `Constant::Decimal`)
+    // and pushes a fresh `DecimalObj::new(d) as *const DecimalObj` with
+    // `NativeKind::DecimalV2`, refcount = 1 (same transfer-share discipline).
+    //
+    // Per ADR-006 §2.7.5 stamp-at-compile-time: the compiler proves the element
+    // type at literal-emission time; no runtime kind probe at the FFI boundary.
+
+    /// Create a v2-raw StringObj from a constant string. Operand: Property(string_id). Pushes (*const StringObj) bits with NativeKind::StringV2 (refcount = 1, owned by caller).
+    NewStringV2 = 0x1B3, Object, pops: 0, pushes: 1;
+    /// Create a v2-raw DecimalObj from a constant decimal. Operand: Const(constant_id). Pushes (*const DecimalObj) bits with NativeKind::DecimalV2 (refcount = 1, owned by caller).
+    NewDecimalV2 = 0x1B4, Object, pops: 0, pushes: 1;
+
     // ===== v2 Typed Map Operations =====
     /// Allocate a new TypedMap<*const StringObj, f64>. Pushes ptr.
     NewTypedMapStringF64 = 0xCD, Object, pops: 0, pushes: 1;
