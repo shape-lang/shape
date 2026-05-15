@@ -7,7 +7,7 @@
 //! preserving ADR-005 §1's single-discriminator discipline.
 
 use crate::executor::VirtualMachine;
-use shape_value::{HeapKind, HeapValue, KindedSlot, NativeKind, TypedArrayData, TypedObjectStorage, VMError};
+use shape_value::{HeapKind, HeapValue, KindedSlot, NativeKind, TypedObjectStorage, VMError};
 use std::sync::Arc;
 
 #[inline]
@@ -28,30 +28,30 @@ impl VirtualMachine {
             return Err(type_error("object_rest() requires exactly 2 arguments"));
         }
 
-        // Extract exclude keys: arg 1 is an Array<string>.
-        let mut exclude = std::collections::HashSet::new();
+        // V3-S5 ckpt-5: extracting exclude keys via the deleted
+        // `TypedArrayData::String` arm + `HeapValue::TypedArray` arm
+        // surface-and-stops. Rebuild at ckpt-6 STRICT close per v2-raw
+        // `TypedArray<*const StringObj>` direct-access target.
         match args[1].kind {
-            NativeKind::Ptr(HeapKind::TypedArray) => match args[1].slot.as_heap_value() {
-                HeapValue::TypedArray(arr) => match arr.as_ref() {
-                    TypedArrayData::String(buf) => {
-                        for s in buf.data.iter() {
-                            exclude.insert(s.as_str().to_string());
-                        }
-                    }
-                    _ => {
-                        return Err(type_error(
-                            "object_rest() second argument must be Array<string>",
-                        ));
-                    }
-                },
-                _ => unreachable!("kind says TypedArray"),
-            },
+            NativeKind::Ptr(HeapKind::TypedArray) => {
+                return Err(VMError::NotImplemented(
+                    "object_rest: SURFACE — V3-S5 ckpt-5 consumer-cascade \
+                     tier 3. `TypedArrayData::String` exclude-keys carrier \
+                     DELETED at ckpt-1..ckpt-4. Rebuild at ckpt-6 STRICT \
+                     close per v2-raw `TypedArray<*const StringObj>` \
+                     direct-access. Refusal #1."
+                        .to_string(),
+                ));
+            }
             _ => {
                 return Err(type_error(
                     "object_rest() second argument must be an array",
                 ));
             }
         }
+        // Suppress dead-code warnings via fake variable construction.
+        #[allow(unreachable_code)]
+        let exclude: std::collections::HashSet<String> = std::collections::HashSet::new();
 
         // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): canonical
         // 5-arm receiver-recovery soundness rule for v2-raw TypedObject —

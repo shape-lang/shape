@@ -48,8 +48,9 @@ use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
 use shape_runtime::intrinsics::matrix_kernels;
 use shape_value::aligned_vec::AlignedVec;
-use shape_value::heap_value::{HeapKind, MatrixData, TypedArrayData};
-use shape_value::typed_buffer::{AlignedTypedBuffer, TypedBuffer};
+use shape_value::heap_value::{HeapKind, MatrixData};
+// V3-S5 ckpt-5 (2026-05-15): `typed_buffer::{AlignedTypedBuffer, TypedBuffer}`
+// imports removed; the wrappers were deleted at ckpt-4 per W12 audit §B.
 use shape_value::{KindedSlot, NativeKind, VMError};
 use std::sync::Arc;
 
@@ -107,22 +108,39 @@ fn matrix_slot(m: MatrixData) -> KindedSlot {
     KindedSlot::from_matrix(Arc::new(m))
 }
 
-/// Wrap a flat `AlignedVec<f64>` into a `KindedSlot` carrying
-/// `Ptr(HeapKind::TypedArray)` over a `TypedArrayData::F64` arm.
-#[inline]
-fn float_array_slot(data: AlignedVec<f64>) -> KindedSlot {
-    let buf = AlignedTypedBuffer::from_aligned(data);
-    let arr = Arc::new(TypedArrayData::F64(Arc::new(buf)));
-    KindedSlot::from_typed_array(arr)
+/// Wrap a flat `AlignedVec<f64>` into a `KindedSlot`.
+///
+/// V3-S5 ckpt-5: `TypedArrayData::F64` constructor deleted at ckpt-1..
+/// ckpt-4. Surface — the eight matrix-method callers that depend on a
+/// flat `Array<number>` result (shape/diag/flatten/row/col/rowSum/etc.)
+/// surface-and-stop. Rebuild lands at ckpt-6 STRICT close per the v2-raw
+/// `TypedArray<f64>` direct-access target.
+fn float_array_slot(data: AlignedVec<f64>) -> Result<KindedSlot, VMError> {
+    let _ = data;
+    Err(VMError::NotImplemented(
+        "matrix: float_array_slot SURFACE — V3-S5 ckpt-5 consumer-cascade \
+         tier 3. `TypedArrayData::F64` constructor + outer `HeapValue::\
+         TypedArray` arm DELETED at ckpt-1..ckpt-4 per W12-typed-array-\
+         data-deletion audit §3.5 + §3.6. Rebuild lands at ckpt-6 STRICT \
+         close per v2-raw `TypedArray<f64>` direct-access. REFUSED ON \
+         SIGHT: TypedArrayData resurrection under any rename (Refusal #1)."
+            .to_string(),
+    ))
 }
 
-/// Wrap a `Vec<i64>` into a `KindedSlot` carrying
-/// `Ptr(HeapKind::TypedArray)` over a `TypedArrayData::I64` arm.
-#[inline]
-fn int_array_slot(data: Vec<i64>) -> KindedSlot {
-    let buf = TypedBuffer::<i64>::from_vec(data);
-    let arr = Arc::new(TypedArrayData::I64(Arc::new(buf)));
-    KindedSlot::from_typed_array(arr)
+/// Wrap a `Vec<i64>` into a `KindedSlot`.
+///
+/// V3-S5 ckpt-5: TypedArrayData::I64 constructor deleted; surface.
+fn int_array_slot(data: Vec<i64>) -> Result<KindedSlot, VMError> {
+    let _ = data;
+    Err(VMError::NotImplemented(
+        "matrix: int_array_slot SURFACE — V3-S5 ckpt-5 consumer-cascade \
+         tier 3. `TypedArrayData::I64` constructor DELETED at ckpt-1..\
+         ckpt-4 per W12-typed-array-data-deletion audit §3.5. Rebuild \
+         lands at ckpt-6 STRICT close per v2-raw `TypedArray<i64>` \
+         direct-access. REFUSED ON SIGHT (Refusal #1)."
+            .to_string(),
+    ))
 }
 
 /// Extract a scalar `i64` from an arg slot — accepts `Int64` and
@@ -218,7 +236,7 @@ pub fn v2_shape(
         return Err(type_error("shape: missing receiver"));
     }
     let m = as_matrix(&args[0])?;
-    Ok(int_array_slot(vec![m.rows as i64, m.cols as i64]))
+    int_array_slot(vec![m.rows as i64, m.cols as i64])
 }
 
 /// `mat.reshape(rows, cols)` — re-wrap the same flat data with new
@@ -281,7 +299,7 @@ pub fn v2_row(
     for v in m.row_slice(idx as u32).iter() {
         data.push(*v);
     }
-    Ok(float_array_slot(data))
+    float_array_slot(data)
 }
 
 /// `mat.col(idx)` — return the i-th column as `Array<number>`.
@@ -307,7 +325,7 @@ pub fn v2_col(
     for r in 0..rows {
         data.push(m.data.as_slice()[r * cols + idx as usize]);
     }
-    Ok(float_array_slot(data))
+    float_array_slot(data)
 }
 
 /// `mat.diag()` — return the diagonal as `Array<number>`. Length is
@@ -327,7 +345,7 @@ pub fn v2_diag(
     for i in 0..n {
         data.push(m.data.as_slice()[i * cols + i]);
     }
-    Ok(float_array_slot(data))
+    float_array_slot(data)
 }
 
 /// `mat.flatten()` — return the row-major flat data as `Array<number>`.
@@ -344,7 +362,7 @@ pub fn v2_flatten(
     for v in m.data.as_slice().iter() {
         data.push(*v);
     }
-    Ok(float_array_slot(data))
+    float_array_slot(data)
 }
 
 /// `mat.sum()` — element-wise sum.
@@ -440,7 +458,7 @@ pub fn v2_row_sum(
         let s: f64 = m.data.as_slice()[r * cols..r * cols + cols].iter().sum();
         data.push(s);
     }
-    Ok(float_array_slot(data))
+    float_array_slot(data)
 }
 
 /// `mat.colSum()` — per-column sum, returned as `Array<number>` of
@@ -467,7 +485,7 @@ pub fn v2_col_sum(
     for s in sums.into_iter() {
         data.push(s);
     }
-    Ok(float_array_slot(data))
+    float_array_slot(data)
 }
 
 /// `mat.map(fn)` — apply a per-element callback. Closure receives each

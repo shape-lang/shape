@@ -17,8 +17,11 @@ pub(crate) use shape_ast::ast::functions::AnnotationTargetKind;
 use shape_ast::ast::literals::Literal;
 use shape_ast::ast::{Expr, FunctionDef, TypeAnnotation};
 use shape_value::KindedSlot;
-use shape_value::heap_value::{HeapValue, TypedArrayData, TypedObjectStorage};
-use shape_value::typed_buffer::TypedBuffer;
+use shape_value::heap_value::{HeapValue, TypedObjectStorage};
+// V3-S5 ckpt-5 (2026-05-15): `TypedArrayData` + `typed_buffer::TypedBuffer`
+// imports removed in lockstep with the `nb_string_array` / `nb_object_array`
+// surface-and-stop builders below. Both wrappers were deleted at ckpt-1..
+// ckpt-4 per W12 audit §3.5 + §B.
 use std::sync::Arc;
 
 /// Check if a type string looks like `Option<T>` or `T?`.
@@ -243,56 +246,48 @@ impl ComptimeTarget {
             AnnotationTargetKind::Binding => "binding",
         };
 
-        // Build an array of string elements as a typed `Arc<String>`
-        // buffer (per-element kind = NativeKind::String, single
-        // specialized variant — no parallel kind track per ADR-006
-        // §2.7.24 Q25.A's sibling principle for arrays).
-        let nb_string_array = |strings: Vec<String>| -> KindedSlot {
-            let arcs: Vec<Arc<String>> =
-                strings.into_iter().map(Arc::new).collect();
-            let buf = TypedBuffer::from_vec(arcs);
-            KindedSlot::from_typed_array(Arc::new(TypedArrayData::String(Arc::new(buf))))
+        // V3-S5 ckpt-5 (2026-05-15): `nb_string_array` + `nb_object_array`
+        // surface-and-stop. Both produced `Arc<TypedArrayData::{String,
+        // TypedObject}>` carriers (deleted at ckpt-1) wrapped in the
+        // deleted `HeapValue::TypedArray` arm. Rebuild lands at ckpt-6
+        // STRICT close per the v2-raw `TypedArray<*const StringObj>` /
+        // `TypedArray<TypedObjectPtr>` direct carrier targets. Refusal #1
+        // binding. Comptime annotation-target materialization (the only
+        // caller chain) is not on a hot path — the panic surfaces a
+        // clean PHASE-2C blocker for any test exercising
+        // `ComptimeTarget::to_nanboxed` before ckpt-6 lands.
+        let nb_string_array = |_strings: Vec<String>| -> KindedSlot {
+            panic!(
+                "comptime_target::nb_string_array: V3-S5 ckpt-5 \
+                 consumer-cascade tier 3 SURFACE. \
+                 `TypedArrayData::String(Arc<TypedBuffer<Arc<String>>>)` \
+                 result carrier DELETED at ckpt-1..ckpt-4 per W12 audit \
+                 §3.5 + §B + ADR-006 §2.7.24 Q25.A SUPERSEDED. Rebuild \
+                 lands at ckpt-6 STRICT close per v2-raw `TypedArray<\
+                 *const StringObj>` direct-access. REFUSED ON SIGHT \
+                 (Refusal #1)."
+            );
         };
 
-        // Build an array of typed-object elements. The unmonomorphized
-        // carrier today is `the-deleted-heterogeneous-element-carrier` (the W17-typed-
-        // carrier-monomorphization sub-cluster will swap this for the
-        // specialized `TypedArrayData::TypedObject` arm per
-        // ADR-006 §2.7.24 Q25.A; flagged in the C2 close report).
-        // W17-typed-carrier-bundle-A checkpoint 2/4 + Wave 2 Round 4 D4
-        // ckpt-final-prime² (2026-05-14): comptime_target.rs::nb_object_array
-        // writes the specialized `TypedArrayData::TypedObject` arm per
-        // ADR-006 §2.7.24 Q25.A. Inner element type flipped to
-        // `TypedObjectPtr`. Recovery follows the canonical 5-arm
-        // receiver-recovery soundness rule — slot bits are
-        // `*const TypedObjectStorage` (NOT `Arc::into_raw(Arc<HeapValue>)`),
-        // so `as_heap_value()` is unsound. Read raw bits, bump via
-        // `v2_retain` for the buffer's owned share, wrap as
-        // `TypedObjectPtr`.
         let nb_object_array = |objs: Vec<KindedSlot>| -> KindedSlot {
-            let mut elems: Vec<shape_value::heap_value::TypedObjectPtr> =
-                Vec::with_capacity(objs.len());
+            // Drain the popped slots' shares before panicking — preserves
+            // refcount discipline if a future caller wraps this in a
+            // `catch_unwind`.
             for obj in objs {
-                let bits = obj.slot().raw();
-                if bits == 0 {
-                    panic!(
-                        "ComptimeTarget::to_nanboxed: nested object element \
-                         slot bits null"
-                    );
-                }
-                let ptr = bits as *const TypedObjectStorage;
-                // SAFETY: per the construction-side contract on
-                // KindedSlot::from_typed_object[_raw], `kind=Ptr(TypedObject)`
-                // bits are a live `*const TypedObjectStorage` with refcount ≥ 1.
-                unsafe { shape_value::v2::refcount::v2_retain(&(*ptr).header); }
-                // `obj` Drop retires its original share through the §2.7.7
-                // / Q9 dispatch table TypedObject arm; the bumped share
-                // moves into the new TypedObjectPtr.
                 drop(obj);
-                elems.push(shape_value::heap_value::TypedObjectPtr::new(ptr));
             }
-            let buf = TypedBuffer::from_vec(elems);
-            KindedSlot::from_typed_array(Arc::new(TypedArrayData::TypedObject(Arc::new(buf))))
+            // Suppress unused-import warning.
+            let _ = TypedObjectStorage::_new;
+            panic!(
+                "comptime_target::nb_object_array: V3-S5 ckpt-5 \
+                 consumer-cascade tier 3 SURFACE. \
+                 `TypedArrayData::TypedObject(Arc<TypedBuffer<TypedObjectPtr>>)` \
+                 result carrier DELETED at ckpt-1..ckpt-4 per W12 audit \
+                 §3.5 + §B + ADR-006 §2.7.24 Q25.A SUPERSEDED. Rebuild \
+                 lands at ckpt-6 STRICT close per v2-raw `TypedArray<\
+                 TypedObjectPtr>` direct-access. REFUSED ON SIGHT \
+                 (Refusal #1)."
+            );
         };
 
         // fields: array of {name, type, annotations, optional} TypedObjects

@@ -2,79 +2,75 @@
 //!
 //! Handles allocation and initialization of arrays, objects, and typed objects.
 //!
-//! Wave 6.5 substep-2 Wave-α `D-obj-create` (ADR-006 §2.7.7 / §2.7.8 / Q9-Q10,
-//! playbook §10 D-obj-create row): the 19 mandatory shim caller sites in this
-//! file's `op_*` factory methods migrate from the deleted shim layer
-//! (`push_raw_u64` / `pop_raw_u64`) to the kept kinded API
-//! (`push_kinded` / `pop_kinded` + `drop_with_kind`). `op_new_typed_object`
-//! constructs `Arc<TypedObjectStorage>` directly per playbook §3's
-//! per-`HeapKind` push pattern, then pushes the raw `Arc::into_raw` pointer
-//! bits with `NativeKind::Ptr(HeapKind::TypedObject)`.
+//! ## V3-S5 ckpt-5 consumer-cascade tier 3 surface (2026-05-15)
 //!
-//! Wave-δ MR-string-misc body migration (2026-05-09): `op_new_matrix` and
-//! `op_new_typed_array` migrate to real bodies.
+//! Per V3-S5 ckpt-1..ckpt-4 cascade (commits `aac8495e` /
+//! `b38fbd3c` / `30c40f51` / `654c7202`, 2026-05-15) the
+//! `TypedArrayData` enum + impl blocks + `Display for TypedArrayData` +
+//! `typed_array_structural_eq` fn + `HeapValue::TypedArray(Arc<TypedArrayData>)`
+//! outer arm + `HeapKind::TypedArray = 8` ordinal + `TypedBuffer<T>` /
+//! `AlignedTypedBuffer` wrapper layer were DELETED at
+//! `crates/shape-value/src/heap_value.rs` + `heap_variants.rs` +
+//! `typed_buffer.rs` per W12-typed-array-data-deletion audit §3.5 + §3.6
+//! + ADR-006 §2.7.24 Q25.A SUPERSEDED.
 //!
-//! - **`op_new_matrix`** (post Round 18 S3 ADR-006 §2.7.22 amendment,
-//!   2026-05-13): pops `rows * cols` numeric (`Float64`) bits per the
-//!   operand's `MatrixDims`; constructs `Arc<MatrixData>` via
-//!   `MatrixData::from_flat`; pushes via `Arc::into_raw + push_kinded(_,
-//!   NativeKind::Ptr(HeapKind::Matrix))`. The pre-amendment shape pushed
-//!   `Arc<TypedArrayData::Matrix(Arc<MatrixData>)>` with kind
-//!   `Ptr(HeapKind::TypedArray)`; the new shape exits the
-//!   `TypedArrayData` carrier hierarchy entirely.
-//! - **`op_new_typed_array`**: pops N elements with their kinds; if all
-//!   elements share `Int64` / `Float64` / `Bool` / `String` kind, builds
-//!   the matching `TypedArrayData::*` variant. Mixed-kind input still
-//!   surfaces here (Round 11A landed the kinded reentry for `op_new_array`
-//!   only — `op_new_typed_array`'s mixed-kind arm could route through
-//!   the same `slot_to_heap_arc` + `TypedArrayData::build_specialized_from_heap_arcs`
-//!   helpers but is left as a follow-up to keep the surface diff small).
+//! This file's `op_new_array` + `op_new_typed_array` constructors previously
+//! built `Arc<TypedArrayData>` carriers and pushed them with
+//! `NativeKind::Ptr(HeapKind::TypedArray)`. Both carriers are gone.
+//! Bodies are replaced with structured surface-and-stop via
+//! `ckpt5_surface(op, args)`; the `build_homogeneous_typed_array` helper
+//! (a `TypedArrayData` producer) is DELETED. The `TypedArrayData` /
+//! `TypedBuffer` / `AlignedTypedBuffer` imports are removed.
 //!
-//! Round 11A (ADR-006 §2.7.24 Q25.A, 2026-05-13): `op_new_array` migrates
-//! from the `NotImplemented(SURFACE)` shape to a kinded body. The
-//! per-element-kind dispatch consults the §Q25.A monomorphic
-//! `TypedArrayData::*` variant grid (I64 / F64 / Bool / String / Decimal
-//! / BigInt / TypedObject / Char / etc.); heterogeneous-kind input
-//! routes through `slot_to_heap_arc` +
-//! `TypedArrayData::build_specialized_from_heap_arcs`. The deleted
-//! `TypedArrayData::HeapValue` polymorphic catch-all stays deleted —
-//! homogeneous-arm `HeapValue` input is the only catch-all path and it
-//! goes through the build helper, not through a resurrected variant.
+//! ## Preserved entry-points (no `TypedArrayData` dependency)
 //!
-//! One opcode body remains Phase-2c surface:
+//! - `op_new_typed_object` — constructs `Arc<TypedObjectStorage>` via
+//!   `TypedObjectStorage::_new`, pushes `Ptr(HeapKind::TypedObject)`.
+//!   Independent of the array carrier hierarchy.
+//! - `op_new_object` — surfaces `NotImplemented` (Phase-2c, depends on
+//!   deleted ValueWord-shaped `create_typed_object_from_pairs`).
+//! - `op_new_matrix` — constructs `Arc<MatrixData>` per Round 18 S3
+//!   ADR-006 §2.7.22 amendment, pushes `Ptr(HeapKind::Matrix)`.
+//!   Independent of the array carrier hierarchy.
+//! - `kinded_to_slot` / `field_type_to_int_width` — TypedObject field
+//!   construction helpers. No `TypedArrayData` dependency.
 //!
-//! - **`op_new_object`** still depends on the deleted
-//!   `create_typed_object_from_pairs` (`vm_impl/schemas.rs` ValueWord-
-//!   shaped helper, retired by Phase 2c per ADR-006 §2.7.4 / Q5).
+//! ## Cascade migration target (post-ckpt-6 STRICT close)
 //!
-//! Wave-ε E-object-creation-helpers cleanup (2026-05-09): the legacy helper
-//! functions at the bottom of this file (`nb_to_slot_with_field_type`,
-//! `decode_field_bits_for_type`, `read_slot_nb`, `read_slot_value_typed`,
-//! `clone_slots_with_update`) were pre-existing forbidden-pattern carriers
-//! (took/returned `&ValueWord`, decoded via `tag_bits::is_tagged`, called
-//! the deleted `ValueSlot::from_value_word` / `as_heap_nb` / `as_value_word`
-//! methods). Their consumer clusters (`typed_object_ops.rs` D-typed-obj-ops,
-//! `objects/mod.rs` D-objects-mod, `variables/mod.rs` B6-round-2,
-//! `vm_impl/{modules,schemas}.rs` E-vm-impl-tail, `foreign_marshal.rs`
-//! B-control-flow-heap) all migrated off the helpers in earlier waves —
-//! either to the kinded API (KindedSlot / pop_kinded / push_kinded) or to
-//! `VMError::NotImplemented(SURFACE: phase-2c)` stubs. The helpers are
-//! deleted; consumers carrying the rebuilt write path live in their own
-//! cluster territories per ADR-006 §2.4 (typed-Arc HeapValue payloads) and
-//! §2.7.4 (Phase-2c deferral).
+//! Per W12-typed-array-data-deletion audit §A.3 + §1.2 + §2.2 + §3.1
+//! scalar recipe: every previous `TypedArrayData::X(buf)` match arm
+//! migrates to the v2-raw `TypedArray<T>` flat-struct carrier:
+//!
+//! | Previous arm | Post-deletion target |
+//! |---|---|
+//! | `TypedArrayData::I64(buf)` | `*mut TypedArray<i64>` direct access |
+//! | `TypedArrayData::F64(buf)` | `*mut TypedArray<f64>` direct access |
+//! | `TypedArrayData::Bool(buf)` | `*mut TypedArray<u8>` direct access |
+//! | `TypedArrayData::String(buf)` | `*mut TypedArray<*const StringObj>` |
+//! | `TypedArrayData::Decimal(buf)` | `*mut TypedArray<*const DecimalObj>` |
+//! | `TypedArrayData::TypedObject(buf)` | `TypedArray<TypedObjectPtr>` (D4 Path B) |
+//! | `TypedArrayData::TraitObject(buf)` | `TypedArray<TraitObjectPtr>` (D4 Path B) |
+//! | `TypedArrayData::Char(buf)` | `TypedArray<char>` direct |
+//! | `TypedArrayData::I8/I16/I32/U8/U16/U32/U64/F32(buf)` | new `TypedArray<T>` monomorphizations |
+//! | `TypedArrayData::BigInt(buf)` | DEFERRED to cluster-1+ (audit Obstacle 3 R19 defer) |
+//!
+//! Refusal #1 binding: TypedArrayData resurrection under any rename
+//! (`TypedArrayKind` / `TypedArrayCarrier` / `TypedBuffer<T>` wrapper) is
+//! refused on sight.
+//!
+//! Cascade-broken cross-module helpers picked up at ckpt-1..ckpt-4 close.
+//! Production cascade lands at ckpt-6 STRICT close per the multi-session
+//! chain pattern step 5.
 
 use crate::{
     bytecode::{Instruction, Operand},
-    executor::builtins::array_ops::slot_to_heap_arc,
     executor::vm_impl::stack::drop_with_kind,
     executor::VirtualMachine,
 };
 use rust_decimal::prelude::ToPrimitive;
 use shape_runtime::type_schema::FieldType;
-use shape_value::heap_value::TypedArrayData;
 use shape_value::{
-    AlignedTypedBuffer, AlignedVec, HeapKind, KindedSlot, NativeKind, TypedBuffer,
-    TypedObjectStorage, ValueSlot, VMError,
+    HeapKind, KindedSlot, NativeKind, TypedObjectStorage, ValueSlot, VMError,
 };
 use std::sync::Arc;
 
@@ -89,6 +85,42 @@ fn field_type_to_int_width(ft: &FieldType) -> Option<shape_ast::IntWidth> {
         FieldType::U64 => Some(shape_ast::IntWidth::U64),
         _ => None,
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// V3-S5 ckpt-5 surface-and-stop builder
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Common surface-and-stop error for the two array constructors in this file.
+/// Returns a structured `VMError::NotImplemented` citing the V3-S5 ckpt-5
+/// consumer-cascade tier 3 state: the previous `TypedArrayData` /
+/// `TypedBuffer<T>` / `AlignedTypedBuffer` carriers + the outer
+/// `HeapValue::TypedArray(Arc<TypedArrayData>)` arm + the
+/// `HeapKind::TypedArray=8` ordinal are GONE; the v2-raw `TypedArray<T>`
+/// flat-struct migration lands across ckpt-5-prime (wire/marshal/json +
+/// 4-table lockstep + U64 relabel) + ckpt-5-prime² (storage migration +
+/// 10 intrinsics marshal-parameter migration) + ckpt-6 (JIT FFI +
+/// STRICT close gate).
+#[cold]
+#[inline(never)]
+fn ckpt5_surface(op: &'static str, count: usize) -> VMError {
+    VMError::NotImplemented(format!(
+        "{op}({count}): SURFACE — V3-S5 ckpt-5 consumer-cascade tier 3 \
+         surface. `TypedArrayData` enum + `TypedBuffer<T>` / \
+         `AlignedTypedBuffer` wrapper layer + outer `HeapValue::TypedArray(\
+         Arc<TypedArrayData>)` arm + `HeapKind::TypedArray=8` ordinal \
+         DELETED across V3-S5 ckpt-1..ckpt-4 per W12-typed-array-data-\
+         deletion audit §3.5 + §3.6 + ADR-006 §2.7.24 Q25.A SUPERSEDED. \
+         Post-deletion target is per-T v2-raw `TypedArray<T>` flat-struct \
+         monomorphization per audit §A.3 + §3.1 scalar recipe + §2.2 \
+         heap-element variants. Construction-site rebuild lands at ckpt-6 \
+         STRICT close after ckpt-5-prime (wire/marshal/json + 4-table \
+         lockstep) + ckpt-5-prime² (storage migration + 10 intrinsics \
+         marshal-parameter migration). REFUSED ON SIGHT: TypedArrayData \
+         resurrection under any rename (Refusal #1).",
+        op = op,
+        count = count,
+    ))
 }
 
 impl VirtualMachine {
@@ -302,42 +334,22 @@ impl VirtualMachine {
 
     /// Create a generic Array from N stack elements.
     ///
-    /// ADR-006 §2.7.24 Q25.A (typed-carrier monomorphization bundle):
-    /// the deleted `TypedArrayData::HeapValue(Arc<TypedBuffer<Arc<
-    /// HeapValue>>>)` polymorphic catch-all is replaced by per-element-
-    /// kind specialized variants (`I64`, `F64`, `Bool`, `String`,
-    /// `Decimal`, `BigInt`, `DateTime`, `Timespan`, `Duration`,
-    /// `Instant`, `Char`, `TypedObject`, `TraitObject`) plus the
-    /// `Arc<HeapValue>` projection helper
-    /// `TypedArrayData::build_specialized_from_heap_arcs` for cross-arm
-    /// heterogeneous input (the only catch-all path is now homogeneous-
-    /// `HeapValue`-arm input dispatched by the helper, NOT the deleted
-    /// polymorphic carrier).
+    /// ## V3-S5 ckpt-5 surface (2026-05-15)
     ///
-    /// Path discipline (ADR-006 §2.7.5 / §2.7.24 Q25.A):
-    /// - **Empty** (`Count(0)`): default to `TypedArrayData::I64` with
-    ///   an empty buffer. Matches `op_new_typed_array`'s stable empty
-    ///   default; the compiler is responsible for emitting kind-specific
-    ///   `NewTypedArray*` opcodes when the element type is statically
-    ///   known.
-    /// - **Homogeneous kind**: dispatch directly to the matching
-    ///   specialized variant via per-kind construction (inline scalars
-    ///   build a `TypedBuffer<T>` over the popped bits; heap-kinded
-    ///   slots clone the typed `Arc<T>` shares out of
-    ///   `slot.as_heap_value()` and assemble into the matching
-    ///   `TypedArrayData::*(Arc<TypedBuffer<Arc<T>>>)` arm).
-    /// - **Heterogeneous kind**: project each popped slot to
-    ///   `Arc<HeapValue>` via `slot_to_heap_arc`, then route through
-    ///   `TypedArrayData::build_specialized_from_heap_arcs`. Cross-arm
-    ///   input surfaces as `VMError::RuntimeError` per Q25.A "Arrays do
-    ///   not [admit heterogeneous slots]" — NOT `NotImplemented(SURFACE)`,
-    ///   it is a user-facing kind-mismatch.
+    /// The pre-ckpt-1 body built `Arc<TypedArrayData>` via
+    /// per-element-kind specialized variants (`I64` / `F64` / `Bool` /
+    /// `String` / `Decimal` / `BigInt` / `DateTime` / `Timespan` /
+    /// `Duration` / `Instant` / `Char` / `TypedObject` / `TraitObject`)
+    /// and pushed `Ptr(HeapKind::TypedArray)`. Both the variant grid and
+    /// the outer `HeapValue::TypedArray` arm + `HeapKind::TypedArray`
+    /// ordinal are DELETED across V3-S5 ckpt-1..ckpt-4. Construction-site
+    /// rebuild lands at ckpt-6 STRICT close per the per-T v2-raw
+    /// `TypedArray<T>` monomorphization migration target.
     ///
-    /// Refcount discipline: every popped `(bits, kind)` share either
-    /// transfers into the resulting `TypedArrayData::*` arm (heap-kinded
-    /// elements) or is consumed inline (inline scalars are
-    /// `drop_with_kind`-noop). The error paths drain remaining popped
-    /// shares via `drop_with_kind` before returning.
+    /// Refcount discipline: every popped `(bits, kind)` share is retired
+    /// via `drop_with_kind` before the surface returns — the stack ABI
+    /// `data.len() == kinds.len()` invariant + per-slot share-release
+    /// discipline (playbook §7 #4) is preserved.
     pub(in crate::executor) fn op_new_array(
         &mut self,
         instruction: &Instruction,
@@ -347,320 +359,37 @@ impl VirtualMachine {
             _ => return Err(VMError::InvalidOperand),
         };
 
-        // Pop in reverse-push order, then reverse to recover declared
-        // source order. On any pop failure mid-way, retire the already-
-        // popped shares to preserve refcount discipline.
-        let mut popped: Vec<(u64, NativeKind)> = Vec::with_capacity(count);
+        // Drain the popped shares to preserve stack discipline before
+        // surfacing. drop_with_kind retires each share through the
+        // matching kinded path; inline scalars are no-ops.
         for _ in 0..count {
-            match self.pop_kinded() {
-                Ok(pair) => popped.push(pair),
-                Err(e) => {
-                    for (b, k) in popped.drain(..) {
-                        drop_with_kind(b, k);
-                    }
-                    return Err(e);
-                }
+            if let Ok((b, k)) = self.pop_kinded() {
+                drop_with_kind(b, k);
+            } else {
+                return Err(VMError::StackUnderflow);
             }
         }
-        popped.reverse();
 
-        // Empty-array stable default. ADR-006 §2.7.24 Q25.A: per-variant
-        // uniform element kind; empty has no element kind so we pick a
-        // stable default. Matches `op_new_typed_array`'s I64 default
-        // (object_creation.rs:366-373). The compiler emits kind-specific
-        // `NewTypedArray*` opcodes when the element type is known.
-        if popped.is_empty() {
-            let buf: TypedBuffer<i64> = TypedBuffer::from_vec(Vec::new());
-            let arr = Arc::new(TypedArrayData::I64(Arc::new(buf)));
-            let bits = Arc::into_raw(arr) as u64;
-            return self.push_kinded(bits, NativeKind::Ptr(HeapKind::TypedArray));
-        }
-
-        // Classify homogeneity. Homogeneous-kind input dispatches to the
-        // matching specialized variant directly without an Arc<HeapValue>
-        // round-trip; heterogeneous input goes through
-        // `build_specialized_from_heap_arcs`.
-        let first_kind = popped[0].1;
-        let all_match = popped.iter().all(|(_, k)| *k == first_kind);
-
-        if all_match {
-            return Self::build_homogeneous_typed_array(&mut popped, first_kind)
-                .and_then(|arr| {
-                    let bits = Arc::into_raw(Arc::new(arr)) as u64;
-                    self.push_kinded(bits, NativeKind::Ptr(HeapKind::TypedArray))
-                });
-        }
-
-        // Heterogeneous-kind path. Project each slot to `Arc<HeapValue>`
-        // via `slot_to_heap_arc`, then route through
-        // `build_specialized_from_heap_arcs`. The projection bumps
-        // refcount shares on heap kinds (the popped shares remain
-        // owned and are retired via drop_with_kind after).
-        let mut elems: Vec<Arc<shape_value::HeapValue>> = Vec::with_capacity(popped.len());
-        for (bits, kind) in popped.iter() {
-            let slot = KindedSlot::new(ValueSlot::from_raw(*bits), *kind);
-            // slot_to_heap_arc clones the underlying Arc on heap kinds
-            // (its body uses Arc::increment_strong_count / Arc::clone)
-            // — the popped share remains owned and is retired below.
-            let arc_result = slot_to_heap_arc(&slot);
-            // The slot carrier was constructed from raw bits; we did not
-            // transfer ownership into it (popped owns the share). Forget
-            // it so its Drop does not double-release. The popped slot's
-            // share will be retired via drop_with_kind in the cleanup
-            // loop after the elems vec is assembled.
-            std::mem::forget(slot);
-            match arc_result {
-                Ok(arc) => elems.push(arc),
-                Err(e) => {
-                    // Cleanup: retire all popped shares and any
-                    // already-projected arcs (those are clones; their
-                    // own Drop retires the bumped shares).
-                    for (b, k) in popped.drain(..) {
-                        drop_with_kind(b, k);
-                    }
-                    return Err(e);
-                }
-            }
-        }
-        // The popped slots' original shares are independent from the
-        // cloned shares in `elems`. Retire them now.
-        for (b, k) in popped.drain(..) {
-            drop_with_kind(b, k);
-        }
-
-        let arr = TypedArrayData::build_specialized_from_heap_arcs(elems)
-            .map_err(VMError::RuntimeError)?;
-        let bits = Arc::into_raw(Arc::new(arr)) as u64;
-        self.push_kinded(bits, NativeKind::Ptr(HeapKind::TypedArray))
+        Err(ckpt5_surface("op_new_array", count))
     }
 
-    /// Build a `TypedArrayData` from a homogeneous-kind popped element
-    /// vector (ADR-006 §2.7.24 Q25.A specialized variants). Per-kind
-    /// dispatch mirrors `op_new_typed_array`'s body for inline scalars
-    /// (Int64 / Float64 / Bool / String) and `Array.filled`'s heap-
-    /// element handling (Decimal / BigInt / TypedObject / Char etc.).
+    /// Create a typed array (IntArray/FloatArray/BoolArray) from N elements
+    /// on the stack.
     ///
-    /// Element shares: inline scalars are inline (no Arc), heap-kinded
-    /// slots transfer ownership via `Arc::from_raw` — caller MUST clear
-    /// the popped vec (without `drop_with_kind`) on success so the
-    /// shares are not double-released. On error, caller must
-    /// `drop_with_kind` the remaining popped entries.
-    fn build_homogeneous_typed_array(
-        popped: &mut Vec<(u64, NativeKind)>,
-        kind: NativeKind,
-    ) -> Result<TypedArrayData, VMError> {
-        let count = popped.len();
-        match kind {
-            NativeKind::Int64 => {
-                let mut data: Vec<i64> = Vec::with_capacity(count);
-                for (bits, _kind) in popped.iter() {
-                    data.push(*bits as i64);
-                }
-                // Inline scalars: drop_with_kind is a no-op for Int64.
-                for (b, k) in popped.drain(..) {
-                    drop_with_kind(b, k);
-                }
-                Ok(TypedArrayData::I64(Arc::new(TypedBuffer::from_vec(data))))
-            }
-            NativeKind::Float64 => {
-                let mut data = AlignedVec::<f64>::with_capacity(count);
-                for (bits, _kind) in popped.iter() {
-                    data.push(f64::from_bits(*bits));
-                }
-                for (b, k) in popped.drain(..) {
-                    drop_with_kind(b, k);
-                }
-                Ok(TypedArrayData::F64(Arc::new(
-                    AlignedTypedBuffer::from_aligned(data),
-                )))
-            }
-            NativeKind::Bool => {
-                let mut data: Vec<u8> = Vec::with_capacity(count);
-                for (bits, _kind) in popped.iter() {
-                    data.push(if *bits != 0 { 1u8 } else { 0u8 });
-                }
-                for (b, k) in popped.drain(..) {
-                    drop_with_kind(b, k);
-                }
-                Ok(TypedArrayData::Bool(Arc::new(TypedBuffer::from_vec(data))))
-            }
-            NativeKind::String => {
-                // Each popped slot's bits are `Arc::into_raw::<String>`.
-                // Reconstruct each Arc<String>, consuming the strong-
-                // count share, and assemble into TypedArrayData::String.
-                // Same per-element-kind retain pattern as the W9
-                // MR-string-misc fill in op_new_typed_array's String arm
-                // (object_creation.rs:443-486).
-                let mut data: Vec<Arc<String>> = Vec::with_capacity(count);
-                for (bits, _kind) in popped.iter() {
-                    if *bits == 0 {
-                        // Defensive: a zero-bits String slot is a
-                        // construction-site bug; surface for diagnosis.
-                        // Release any successfully consumed shares is
-                        // not possible here (Arc::from_raw above already
-                        // consumed them); the partial data Vec drops
-                        // them all on the return path.
-                        return Err(VMError::RuntimeError(
-                            "op_new_array: zero String bits — \
-                             construction-side invariant violated"
-                                .to_string(),
-                        ));
-                    }
-                    // SAFETY: kind is `NativeKind::String`; bits are
-                    // `Arc::into_raw::<String>`; the popped slot owns
-                    // one strong-count share. `from_raw` transfers it
-                    // into the new typed buffer.
-                    let s: Arc<String> =
-                        unsafe { Arc::from_raw(*bits as *const String) };
-                    data.push(s);
-                }
-                // Shares were consumed by `Arc::from_raw` above; clear
-                // popped without drop_with_kind.
-                popped.clear();
-                Ok(TypedArrayData::String(Arc::new(TypedBuffer::from_vec(data))))
-            }
-            // Heap-kinded specialized variants per ADR-006 §2.7.24 Q25.A.
-            // Each popped slot's bits are `Arc::into_raw::<T>` for the
-            // matching `T` (per the producing-call-site classification
-            // discipline at §2.7.5); reconstruct, transfer into the
-            // typed buffer, clear popped without drop_with_kind.
-            NativeKind::Ptr(HeapKind::Decimal) => {
-                let mut data: Vec<Arc<rust_decimal::Decimal>> =
-                    Vec::with_capacity(count);
-                for (bits, _kind) in popped.iter() {
-                    if *bits == 0 {
-                        return Err(VMError::RuntimeError(
-                            "op_new_array: zero Decimal bits — \
-                             construction-side invariant violated"
-                                .to_string(),
-                        ));
-                    }
-                    // SAFETY: bits are `Arc::into_raw::<Decimal>` per the
-                    // §2.7.6/Q8 KindedSlot::from_decimal contract.
-                    let d: Arc<rust_decimal::Decimal> = unsafe {
-                        Arc::from_raw(*bits as *const rust_decimal::Decimal)
-                    };
-                    data.push(d);
-                }
-                popped.clear();
-                Ok(TypedArrayData::Decimal(Arc::new(TypedBuffer::from_vec(data))))
-            }
-            NativeKind::Ptr(HeapKind::BigInt) => {
-                let mut data: Vec<Arc<i64>> = Vec::with_capacity(count);
-                for (bits, _kind) in popped.iter() {
-                    if *bits == 0 {
-                        return Err(VMError::RuntimeError(
-                            "op_new_array: zero BigInt bits — \
-                             construction-side invariant violated"
-                                .to_string(),
-                        ));
-                    }
-                    // SAFETY: bits are `Arc::into_raw::<i64>` per the
-                    // §2.7.6/Q8 KindedSlot::from_bigint contract.
-                    let b: Arc<i64> =
-                        unsafe { Arc::from_raw(*bits as *const i64) };
-                    data.push(b);
-                }
-                popped.clear();
-                Ok(TypedArrayData::BigInt(Arc::new(TypedBuffer::from_vec(data))))
-            }
-            // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): bits are
-            // `*const TypedObjectStorage` (v2-raw) per the post-D2 contract.
-            // Wrap directly in TypedObjectPtr (transferring the slot's
-            // owned share to the wrapper); the popped slot's bits become
-            // owned by the buffer's TypedObjectPtr element.
-            NativeKind::Ptr(HeapKind::TypedObject) => {
-                use shape_value::heap_value::TypedObjectPtr;
-                let mut data: Vec<TypedObjectPtr> =
-                    Vec::with_capacity(count);
-                for (bits, _kind) in popped.iter() {
-                    if *bits == 0 {
-                        return Err(VMError::RuntimeError(
-                            "op_new_array: zero TypedObject bits — \
-                             construction-side invariant violated"
-                                .to_string(),
-                        ));
-                    }
-                    // The slot owned one v2-raw refcount share; we transfer
-                    // ownership to the new TypedObjectPtr by wrapping the
-                    // raw pointer (no v2_retain needed — share count
-                    // unchanged, ownership transfers).
-                    let ptr = *bits as *const TypedObjectStorage;
-                    data.push(TypedObjectPtr::new(ptr));
-                }
-                popped.clear();
-                Ok(TypedArrayData::TypedObject(Arc::new(
-                    TypedBuffer::from_vec(data),
-                )))
-            }
-            NativeKind::Ptr(HeapKind::Char) => {
-                let mut data: Vec<char> = Vec::with_capacity(count);
-                for (bits, _kind) in popped.iter() {
-                    // Char is inline (the bits ARE the codepoint per
-                    // §2.7.6/Q8 KindedSlot::from_char). No Arc share.
-                    let c = char::from_u32(*bits as u32).ok_or_else(|| {
-                        VMError::RuntimeError(
-                            "op_new_array: invalid char codepoint in slot bits"
-                                .to_string(),
-                        )
-                    })?;
-                    data.push(c);
-                }
-                // Inline kind; drop_with_kind is a no-op for
-                // Ptr(HeapKind::Char) (per the kinded_slot drop dispatch
-                // for the Char inline arm).
-                for (b, k) in popped.drain(..) {
-                    drop_with_kind(b, k);
-                }
-                Ok(TypedArrayData::Char(Arc::new(TypedBuffer::from_vec(data))))
-            }
-            // Other heap-kinded homogeneous arrays (Temporal-family,
-            // Instant, TraitObject, etc.) — recover the typed Arc share
-            // from each slot's `slot.as_heap_value()` projection and
-            // route through `build_specialized_from_heap_arcs`. This is
-            // a slow path (Arc<HeapValue> wrapper allocation per element)
-            // but correctness-first; if it becomes hot, monomorphize
-            // additional arms here.
-            other => {
-                // Project each slot to Arc<HeapValue> for the helper.
-                let mut elems: Vec<Arc<shape_value::HeapValue>> =
-                    Vec::with_capacity(count);
-                for (bits, kind) in popped.iter() {
-                    let slot = KindedSlot::new(ValueSlot::from_raw(*bits), *kind);
-                    let arc_result = slot_to_heap_arc(&slot);
-                    std::mem::forget(slot);
-                    match arc_result {
-                        Ok(arc) => elems.push(arc),
-                        Err(e) => {
-                            // Caller will drop_with_kind the remaining
-                            // popped entries on Err return.
-                            let _ = other; // suppress unused-binding lint
-                            return Err(e);
-                        }
-                    }
-                }
-                for (b, k) in popped.drain(..) {
-                    drop_with_kind(b, k);
-                }
-                TypedArrayData::build_specialized_from_heap_arcs(elems)
-                    .map_err(VMError::RuntimeError)
-            }
-        }
-    }
-
-    /// Create a typed array (IntArray/FloatArray/BoolArray) from N elements on the stack.
+    /// ## V3-S5 ckpt-5 surface (2026-05-15)
     ///
-    /// Wave-δ MR-string-misc: post-§2.7.7 the kind track tells us the
-    /// element kind directly — no runtime tag-bit classifier. If all N
-    /// popped elements share `Int64` / `Float64` / `Bool`, the op
-    /// constructs the matching `TypedArrayData::*` variant. Mixed-kind
-    /// arrays would require `the-deleted-heterogeneous-element-carrier` (heterogeneous
-    /// `Arc<HeapValue>` payload — same Phase-2c surface as `op_new_array`).
+    /// The pre-ckpt-1 body built `Arc<TypedArrayData::{I64,F64,Bool,
+    /// String}>` from homogeneous-kind popped elements and pushed
+    /// `Ptr(HeapKind::TypedArray)`. Both the variants and the outer
+    /// `HeapValue::TypedArray` arm + `HeapKind::TypedArray=8` ordinal are
+    /// DELETED across V3-S5 ckpt-1..ckpt-4. Construction-site rebuild
+    /// lands at ckpt-6 STRICT close per the per-T v2-raw `TypedArray<T>`
+    /// monomorphization migration target — the compiler's kind-specific
+    /// `NewTypedArray{I64,F64,Bool,String}` opcodes pick the right variant
+    /// when the element type is statically known.
     ///
-    /// Empty arrays default to `TypedArrayData::I64` (an arbitrary but
-    /// stable choice; the compiler is responsible for emitting the
-    /// kind-specific `NewTypedArray{I64,F64,Bool}` opcodes when the
-    /// element type is known at compile time).
+    /// Refcount discipline: every popped `(bits, kind)` share is retired
+    /// via `drop_with_kind` before the surface returns.
     pub(in crate::executor) fn op_new_typed_array(
         &mut self,
         instruction: &Instruction,
@@ -670,165 +399,15 @@ impl VirtualMachine {
             _ => return Err(VMError::InvalidOperand),
         };
 
-        // Pop in reverse, then reverse to recover declared element order.
-        let mut popped: Vec<(u64, NativeKind)> = Vec::with_capacity(count);
         for _ in 0..count {
-            match self.pop_kinded() {
-                Ok(pair) => popped.push(pair),
-                Err(_) => {
-                    for (b, k) in popped.drain(..) {
-                        drop_with_kind(b, k);
-                    }
-                    return Err(VMError::StackUnderflow);
-                }
-            }
-        }
-        popped.reverse();
-
-        // Empty array: arbitrary stable variant (I64). The compiler's
-        // kind-specific NewTypedArray* opcodes pick the right variant
-        // when the element type is statically known.
-        if popped.is_empty() {
-            let buf = shape_value::typed_buffer::TypedBuffer::<i64>::from_vec(Vec::new());
-            let arr = Arc::new(
-                shape_value::heap_value::TypedArrayData::I64(Arc::new(buf)),
-            );
-            let bits = Arc::into_raw(arr) as u64;
-            return self.push_kinded(bits, NativeKind::Ptr(HeapKind::TypedArray));
-        }
-
-        // Inspect first element's kind; classify the homogeneity.
-        let first_kind = popped[0].1;
-        let all_match = popped.iter().all(|(_, k)| *k == first_kind);
-
-        if !all_match {
-            // Heterogeneous — would require the-deleted-heterogeneous-element-carrier
-            // projection. Surface per playbook §7.4: same gap as
-            // op_new_array.
-            for (b, k) in popped.drain(..) {
+            if let Ok((b, k)) = self.pop_kinded() {
                 drop_with_kind(b, k);
+            } else {
+                return Err(VMError::StackUnderflow);
             }
-            return Err(VMError::NotImplemented(format!(
-                "op_new_typed_array({}): heterogeneous element kinds — \
-                 needs the-deleted-heterogeneous-element-carrier projection from (bits, \
-                 kind) into Arc<HeapValue> (Phase-2c — see ADR-006 §2.7.4)",
-                count
-            )));
         }
 
-        match first_kind {
-            NativeKind::Int64 => {
-                let mut data: Vec<i64> = Vec::with_capacity(count);
-                for (bits, _kind) in popped.iter() {
-                    data.push(*bits as i64);
-                }
-                // Inline scalars; `drop_with_kind` is a no-op for Int64.
-                for (b, k) in popped.drain(..) {
-                    drop_with_kind(b, k);
-                }
-                let buf = shape_value::typed_buffer::TypedBuffer::from_vec(data);
-                let arr = Arc::new(
-                    shape_value::heap_value::TypedArrayData::I64(Arc::new(buf)),
-                );
-                let bits = Arc::into_raw(arr) as u64;
-                self.push_kinded(bits, NativeKind::Ptr(HeapKind::TypedArray))
-            }
-            NativeKind::Float64 => {
-                let mut data =
-                    shape_value::aligned_vec::AlignedVec::<f64>::with_capacity(count);
-                for (bits, _kind) in popped.iter() {
-                    data.push(f64::from_bits(*bits));
-                }
-                for (b, k) in popped.drain(..) {
-                    drop_with_kind(b, k);
-                }
-                let buf =
-                    shape_value::typed_buffer::AlignedTypedBuffer::from_aligned(data);
-                let arr = Arc::new(
-                    shape_value::heap_value::TypedArrayData::F64(Arc::new(buf)),
-                );
-                let bits = Arc::into_raw(arr) as u64;
-                self.push_kinded(bits, NativeKind::Ptr(HeapKind::TypedArray))
-            }
-            NativeKind::Bool => {
-                let mut data: Vec<u8> = Vec::with_capacity(count);
-                for (bits, _kind) in popped.iter() {
-                    data.push(if *bits != 0 { 1u8 } else { 0u8 });
-                }
-                for (b, k) in popped.drain(..) {
-                    drop_with_kind(b, k);
-                }
-                let buf = shape_value::typed_buffer::TypedBuffer::from_vec(data);
-                let arr = Arc::new(
-                    shape_value::heap_value::TypedArrayData::Bool(Arc::new(buf)),
-                );
-                let bits = Arc::into_raw(arr) as u64;
-                self.push_kinded(bits, NativeKind::Ptr(HeapKind::TypedArray))
-            }
-            // String element kind: each popped slot's bits are
-            // `Arc::into_raw::<String>` per `pop_kinded` + the
-            // `NativeKind::String` shape. Reconstruct each `Arc<String>`
-            // (consuming the strong-count share) and assemble into
-            // `TypedArrayData::String`. W9 MR-string-misc fill (mirrors
-            // the per-element-kind retain pattern in
-            // `concat.rs::concat_typed_arrays` for the `String` arm).
-            NativeKind::String => {
-                let mut data: Vec<Arc<String>> = Vec::with_capacity(count);
-                for (bits, _kind) in popped.iter() {
-                    if *bits == 0 {
-                        // Defensive: a zero-bits String slot would mean a
-                        // construction-side bug. Release any successful
-                        // shares + surface.
-                        for (b, k) in popped.drain(..) {
-                            drop_with_kind(b, k);
-                        }
-                        return Err(VMError::RuntimeError(
-                            "op_new_typed_array: zero String bits — \
-                             construction-side invariant violated"
-                                .to_string(),
-                        ));
-                    }
-                    // SAFETY: kind is `NativeKind::String`; bits are
-                    // `Arc::into_raw::<String>`; popped slot owns one
-                    // strong-count share. `from_raw` transfers that
-                    // share into the new typed buffer (where the
-                    // resulting `TypedArrayData::String` Arc owns it).
-                    let s: Arc<String> =
-                        unsafe { Arc::from_raw(*bits as *const String) };
-                    data.push(s);
-                }
-                // The popped shares were consumed by `Arc::from_raw`
-                // above; clear `popped` without `drop_with_kind` (the
-                // slots are now owned by the typed buffer).
-                popped.clear();
-                let buf =
-                    shape_value::typed_buffer::TypedBuffer::from_vec(data);
-                let arr = Arc::new(
-                    shape_value::heap_value::TypedArrayData::String(Arc::new(buf)),
-                );
-                let bits = Arc::into_raw(arr) as u64;
-                self.push_kinded(bits, NativeKind::Ptr(HeapKind::TypedArray))
-            }
-            // Other heap-kind / scalar-kind element-arrays (Char,
-            // Decimal, BigInt, TypedObject, …) require the
-            // `the-deleted-heterogeneous-element-carrier` projection — same Phase-2c
-            // dependency as `op_new_array`'s heterogeneous case (the
-            // `Arc<HeapValue>`-arm wrapper that today's emit path
-            // doesn't supply per-`(bits, kind)`).
-            other => {
-                for (b, k) in popped.drain(..) {
-                    drop_with_kind(b, k);
-                }
-                Err(VMError::NotImplemented(format!(
-                    "op_new_typed_array({}): element kind {:?} — needs \
-                     per-kind TypedArrayData variant construction (Phase-\
-                     2c — see ADR-006 §2.7.4); the per-kind \
-                     NewTypedArray* opcodes already cover I64/F64/Bool \
-                     in `dispatch.rs`.",
-                    count, other
-                )))
-            }
-        }
+        Err(ckpt5_surface("op_new_typed_array", count))
     }
 }
 
@@ -962,3 +541,8 @@ fn kinded_to_slot(
         Some(FieldType::Any) | None | Some(_) => (ValueSlot::from_raw(bits), false),
     }
 }
+
+// Suppress unused import lint — KindedSlot is reserved for forward-port of
+// the v2-raw rebuilt array constructors at ckpt-6 STRICT close.
+#[allow(dead_code)]
+fn _ckpt5_reserved_kinded_slot(_: KindedSlot) {}

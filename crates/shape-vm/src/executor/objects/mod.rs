@@ -184,7 +184,7 @@ use crate::{
     bytecode::{Instruction, OpCode, Operand},
     executor::VirtualMachine,
 };
-use shape_value::{HeapKind, HeapValue, KindedSlot, NativeKind, TemporalData, TypedArrayData, ValueSlot, VMError};
+use shape_value::{HeapKind, HeapValue, KindedSlot, NativeKind, TemporalData, ValueSlot, VMError};
 
 impl VirtualMachine {
     /// Dispatch shell for object opcodes.
@@ -639,51 +639,15 @@ impl VirtualMachine {
                 HeapKind::Decimal => method_registry::NUMBER_METHODS.get(method_name).copied(),
                 HeapKind::BigInt => method_registry::NUMBER_METHODS.get(method_name).copied(),
                 HeapKind::TypedArray => {
-                    // Sub-classify on the inner TypedArrayData variant
-                    // (per playbook §10 D-objects-mod receiver-class).
-                    // `as_heap_value()` is sound here — TypedArray is a
-                    // full `HeapValue` arm (ADR-005 §1).
-                    //
-                    // ADR-006 §2.7.22 amendment (Round 18 S3, 2026-05-13):
-                    // Matrix and MatrixSlice exit this sub-classification.
-                    // Matrix receivers arrive at `HeapKind::Matrix` →
-                    // `MATRIX_METHODS` directly; MatrixSlice receivers at
-                    // `HeapKind::MatrixSlice` → `FLOAT_ARRAY_METHODS`.
-                    let typed = match receiver.slot.as_heap_value() {
-                        HeapValue::TypedArray(arc) => match arc.as_ref() {
-                            TypedArrayData::I64(_)
-                            | TypedArrayData::I8(_)
-                            | TypedArrayData::I16(_)
-                            | TypedArrayData::I32(_)
-                            | TypedArrayData::U8(_)
-                            | TypedArrayData::U16(_)
-                            | TypedArrayData::U32(_)
-                            | TypedArrayData::U64(_) => method_registry::INT_ARRAY_METHODS
-                                .get(method_name)
-                                .copied(),
-                            TypedArrayData::F64(_) | TypedArrayData::F32(_) => {
-                                method_registry::FLOAT_ARRAY_METHODS
-                                    .get(method_name)
-                                    .copied()
-                            }
-                            TypedArrayData::Bool(_) => method_registry::BOOL_ARRAY_METHODS
-                                .get(method_name)
-                                .copied(),
-                            TypedArrayData::String(_) => None,
-                            // W17-typed-carrier-bundle-A checkpoint 3/4:
-                            // Q25.A specialized arms — no per-element-type
-                            // PHF table (Decimal/BigInt arrays use the
-                            // generic ARRAY_METHODS fallback below). The
-                            // None return falls through to the .or_else
-                            // ARRAY_METHODS lookup.
-                            TypedArrayData::Decimal(_)
-                            | TypedArrayData::BigInt(_)
-                            | TypedArrayData::Char(_)
-                            | TypedArrayData::TypedObject(_) => None,
-                        },
-                        _ => None,
-                    };
-                    typed.or_else(|| method_registry::ARRAY_METHODS.get(method_name).copied())
+                    // V3-S5 ckpt-5: TypedArrayData enum + outer
+                    // HeapValue::TypedArray arm DELETED at ckpt-1..ckpt-4.
+                    // Sub-classification by inner variant is gone; fall
+                    // through to the generic ARRAY_METHODS PHF. Per-element-
+                    // kind dispatch lands at ckpt-6 STRICT close via the
+                    // v2-raw `TypedArray<T>` direct-access target (caller
+                    // classifies element type from the v2 header's
+                    // element-type byte instead of the deleted variant).
+                    method_registry::ARRAY_METHODS.get(method_name).copied()
                 }
                 // ADR-006 §2.7.22 amendment (Round 18 S3, 2026-05-13):
                 // Matrix is a first-class HeapKind — receivers route

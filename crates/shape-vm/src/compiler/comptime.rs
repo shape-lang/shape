@@ -12,7 +12,7 @@ use shape_ast::ast::{
     VariableDecl,
 };
 use shape_ast::error::{Result, ShapeError};
-use shape_value::heap_value::{HeapKind, HeapValue, TypedArrayData};
+use shape_value::heap_value::{HeapKind, HeapValue};
 use shape_value::{KindedSlot, NativeKind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -921,14 +921,11 @@ fn nb_to_expr(nb: &KindedSlot, span: Span) -> std::result::Result<Expr, String> 
         HeapValue::Decimal(d) => Ok(Expr::Literal(shape_ast::ast::Literal::Decimal(**d), span)),
         HeapValue::BigInt(i) => Ok(Expr::Literal(shape_ast::ast::Literal::Int(**i), span)),
         HeapValue::Char(c) => Ok(Expr::Literal(shape_ast::ast::Literal::Char(*c), span)),
-        HeapValue::TypedArray(arr) => {
-            let mut elements = Vec::new();
-            for i in 0..typed_array_len(arr.as_ref()) {
-                let element = typed_array_element_kinded(arr.as_ref(), i)?;
-                elements.push(nb_to_expr(&element, span)?);
-            }
-            Ok(Expr::Array(elements, span))
-        }
+        // V3-S5 ckpt-5: HeapValue::TypedArray outer arm DELETED at ckpt-4
+        // in lockstep with TypedArrayData enum + TypedBuffer<T> wrapper
+        // layer per W12 audit §3.6. Comptime materialization of v2-raw
+        // `TypedArray<T>` arrays lands at ckpt-6 STRICT close.
+        //   HeapValue::TypedArray(arr) => { ... }
         HeapValue::TypedObject(storage) => {
             // Read fields back via the schema's `FieldType`. The schema
             // is looked up by id from the ambient registry. Field
@@ -978,75 +975,11 @@ fn nb_to_expr(nb: &KindedSlot, span: Span) -> std::result::Result<Expr, String> 
     }
 }
 
-/// Length of a `TypedArrayData` regardless of variant.
-///
-/// Mirror of `array_aggregation::typed_array_len` (kept private there).
-fn typed_array_len(arr: &TypedArrayData) -> usize {
-    use shape_value::heap_value::TypedArrayData::*;
-    match arr {
-        I64(b) => b.data.len(),
-        F64(b) => b.data.len(),
-        Bool(b) => b.data.len(),
-        I8(b) => b.data.len(),
-        I16(b) => b.data.len(),
-        I32(b) => b.data.len(),
-        U8(b) => b.data.len(),
-        U16(b) => b.data.len(),
-        U32(b) => b.data.len(),
-        U64(b) => b.data.len(),
-        F32(b) => b.data.len(),
-        String(b) => b.data.len(),
-        // ADR-006 §2.7.22 amendment (Round 18 S3): Matrix / FloatSlice
-        // exit `TypedArrayData`.
-        // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
-        TypedArrayData::Decimal(b) => b.data.len(),
-        TypedArrayData::BigInt(b) => b.data.len(),
-        TypedArrayData::Char(b) => b.data.len(),
-        TypedArrayData::TypedObject(b) => b.data.len(),
-    }
-}
-
-/// Read element `idx` of a `TypedArrayData` as a fresh `KindedSlot`,
-/// owning one strong-count share for heap-bearing element kinds.
-///
-/// Mirror of `array_aggregation::element_kinded`; kept local so the
-/// comptime layer doesn't pull in executor-tier visibility. Per-element
-/// kind is uniform per variant (ADR-006 §2.3 / §2.7.24 Q25.A sibling
-/// principle for arrays).
-fn typed_array_element_kinded(
-    arr: &TypedArrayData,
-    idx: usize,
-) -> std::result::Result<KindedSlot, String> {
-    use shape_value::heap_value::TypedArrayData::*;
-    let len = typed_array_len(arr);
-    if idx >= len {
-        return Err(format!("array index {} out of bounds (len={})", idx, len));
-    }
-    Ok(match arr {
-        I64(b) => KindedSlot::from_int(b.data[idx]),
-        F64(b) => KindedSlot::from_number(b.data[idx]),
-        Bool(b) => KindedSlot::from_bool(b.data[idx] != 0),
-        I8(b) => KindedSlot::from_int(b.data[idx] as i64),
-        I16(b) => KindedSlot::from_int(b.data[idx] as i64),
-        I32(b) => KindedSlot::from_int(b.data[idx] as i64),
-        U8(b) => KindedSlot::from_int(b.data[idx] as i64),
-        U16(b) => KindedSlot::from_int(b.data[idx] as i64),
-        U32(b) => KindedSlot::from_int(b.data[idx] as i64),
-        U64(b) => KindedSlot::from_int(b.data[idx] as i64),
-        F32(b) => KindedSlot::from_number(b.data[idx] as f64),
-        String(b) => KindedSlot::from_string_arc(Arc::clone(&b.data[idx])),
-        // ADR-006 §2.7.22 amendment (Round 18 S3): Matrix / FloatSlice
-        // exit `TypedArrayData`.
-        // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
-        TypedArrayData::Decimal(b) => KindedSlot::from_decimal(Arc::clone(&b.data[idx])),
-        TypedArrayData::BigInt(b) => KindedSlot::from_bigint(Arc::clone(&b.data[idx])),
-        TypedArrayData::Char(b) => KindedSlot::from_char(b.data[idx]),
-        // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): inner element
-        // is `TypedObjectPtr`. Clone bumps the v2-raw refcount; into_raw
-        // transfers the share to the slot via `from_typed_object_raw`.
-        TypedArrayData::TypedObject(b) => KindedSlot::from_typed_object_raw(b.data[idx].clone().into_raw()),
-    })
-}
+// V3-S5 ckpt-5 (2026-05-15): `typed_array_len` + `typed_array_element_kinded`
+// helpers DELETED. Both consumed `&TypedArrayData` (deleted at ckpt-1) for
+// the deleted `HeapValue::TypedArray` arm in `nb_to_expr` (lines 924-931
+// above). Comptime materialization of v2-raw `TypedArray<T>` arrays lands
+// at ckpt-6 STRICT close per W12-typed-array-data-deletion audit §B.
 
 /// Project a `FieldType` to the `NativeKind` used to interpret slot bits
 /// at TypedObject readback.
