@@ -140,7 +140,12 @@ fn heap_value_arc_to_slot(hv: &Arc<HeapValue>) -> KindedSlot {
         HeapValue::String(s) => KindedSlot::from_string_arc(Arc::clone(s)),
         HeapValue::Decimal(d) => KindedSlot::from_decimal(Arc::clone(d)),
         HeapValue::BigInt(b) => KindedSlot::from_bigint(Arc::clone(b)),
-        HeapValue::TypedArray(a) => KindedSlot::from_typed_array(Arc::clone(a)),
+        // V3-S5 ckpt-6 STRICT close (2026-05-15): `HeapValue::TypedArray(a)
+        // => KindedSlot::from_typed_array(Arc::clone(a))` arm DELETED in
+        // lockstep with the outer `HeapValue::TypedArray` variant + the
+        // `KindedSlot::from_typed_array(Arc<...>)` convenience constructor
+        // (ADR-006 §2.7.24 Q25.A SUPERSEDED). Per-element-T v2-raw
+        // `*mut TypedArray<T>` re-wrapping is downstream-wave territory.
         // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): TypedObjectPtr.
         HeapValue::TypedObject(o) => KindedSlot::from_typed_object_raw(o.clone().into_raw()),
         // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): payload flipped to

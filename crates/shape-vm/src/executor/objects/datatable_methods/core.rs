@@ -79,7 +79,7 @@ pub(crate) fn handle_columns(
     let _ = borrow_data_table(args, "columns")?;
     Err(VMError::NotImplemented(
         "DataTable.columns: SURFACE — V3-S5 ckpt-5 consumer-cascade tier \
-         3 surface. `TypedArrayData::String` result carrier DELETED at \
+         3 surface. The deleted typed-array-data String result carrier DELETED at \
          ckpt-1..ckpt-4 per W12 audit §3.5 + §B + ADR-006 §2.7.24 Q25.A \
          SUPERSEDED. Rebuild lands at ckpt-6 STRICT close per v2-raw \
          `TypedArray<*const StringObj>` direct-access. REFUSED ON SIGHT \
@@ -392,7 +392,7 @@ pub(crate) fn handle_rows(
     let _ = (col_readers, row_count, heap_mask, &field_kinds, schema_id);
     Err(VMError::NotImplemented(
         "DataTable.rows: SURFACE — V3-S5 ckpt-5 consumer-cascade tier 3 \
-         surface. `TypedArrayData::TypedObject` result carrier DELETED at \
+         surface. The deleted typed-array-data TypedObject result carrier DELETED at \
          ckpt-1..ckpt-4. Rebuild at ckpt-6 STRICT close. Refusal #1."
             .to_string(),
     ))
@@ -430,7 +430,7 @@ pub(crate) fn handle_columns_ref(
     let _ = (col_count, col_names, schema_id, heap_mask, &field_kinds, &dt_arc);
     Err(VMError::NotImplemented(
         "DataTable.columnsRef: SURFACE — V3-S5 ckpt-5 consumer-cascade \
-         tier 3 surface. `TypedArrayData::TypedObject` result carrier \
+         tier 3 surface. The deleted typed-array-data TypedObject result carrier \
          DELETED at ckpt-1..ckpt-4. Rebuild at ckpt-6 STRICT close. \
          Refusal #1."
             .to_string(),

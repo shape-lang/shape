@@ -64,8 +64,8 @@ use std::sync::Arc;
 fn ckpt4_surface(op: &str, detail: &str) -> VMError {
     VMError::NotImplemented(format!(
         "{op} SURFACE (V3-S5 ckpt-4 wholesale rewrite, 2026-05-15): \
-         {detail}. The `TypedArrayData` enum + `TypedBuffer<T>` / \
-         `AlignedTypedBuffer` wrapper layer were retired wholesale at \
+         {detail}. The deleted typed-array-data enum + `Buf<T>` / \
+         aligned-typed-buf wrapper layer were retired wholesale at \
          V3-S5 ckpt-1..ckpt-4 per W12-typed-array-data-deletion-audit \
          §3.5 + §B + ADR-006 §2.7.24 Q25.A SUPERSEDED; the per-arm \
          dispatch graph has no discriminator until the v2-raw \
@@ -558,10 +558,12 @@ impl VirtualMachine {
     // `Ptr(HeapKind::TypedArrayF64)` / `Ptr(HeapKind::TypedArrayI64)` /
     // etc. arms. Refusal #1 binding.
 
-    /// Sentinel for "no element" in the iterator-protocol element-push
-    /// path. Bool-kind 0. Preserved for downstream-wave reuse.
-    #[allow(dead_code)]
-    const NONE_BITS: u64 = 0;
+    // V3-S5 ckpt-6 STRICT close (2026-05-15): local `NONE_BITS` sentinel
+    // DELETED — duplicate of `vm_impl/stack.rs::NONE_BITS` (the canonical
+    // definition with the dead-slot doc-comment). Callers below reference
+    // `Self::NONE_BITS`, which resolves via the inherent-impl-method-shadowing
+    // rule to the canonical stack.rs constant. Removing the local-impl
+    // duplicate eliminates the E0034 ambiguity.
 }
 
 // V3-S5 ckpt-4 (2026-05-15): unit tests over the deleted

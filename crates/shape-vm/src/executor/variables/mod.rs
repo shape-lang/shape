@@ -2595,7 +2595,7 @@ impl VirtualMachine {
             "MakeIndexRef: SURFACE — V3-S5 ckpt-5 consumer-cascade tier 3 \
              surface. `RefTarget::TypedIndex { receiver: Arc<TypedArrayData>, \
              ... }` variant DELETED at ckpt-4 in lockstep with TypedArrayData \
-             enum + TypedBuffer<T> wrapper layer deletion (W12-typed-array-\
+             enum + Buf<T> wrapper layer deletion (W12-typed-array-\
              data-deletion-audit §3.5 + §B + ADR-006 §2.7.24 Q25.A \
              SUPERSEDED). Construction-site rebuild lands at ckpt-6 STRICT \
              close per per-element-kind RefTarget variant target. \
@@ -2736,8 +2736,8 @@ impl VirtualMachine {
         Err(VMError::NotImplemented(
             "SetIndexRef: SURFACE — V3-S5 ckpt-5 consumer-cascade tier 3 \
              surface. `RefTarget::TypedIndex` variant + \
-             `TypedArrayData::write_index_in_place` API + `Arc<\
-             TypedArrayData>` carrier all DELETED at ckpt-1..ckpt-4 per \
+             the deleted typed-array-data `write_index_in_place` API + the deleted-enum's \
+             `Arc<...>` carrier all DELETED at ckpt-1..ckpt-4 per \
              W12-typed-array-data-deletion-audit §3.5 + §B + ADR-006 \
              §2.7.24 Q25.A SUPERSEDED. Rebuild lands at ckpt-6 STRICT \
              close per per-element-kind v2-raw `TypedArray<T>` \
@@ -2835,12 +2835,12 @@ impl VirtualMachine {
                     ))
                 }
             }
-            shape_value::RefTarget::TypedIndex { .. } => Err(VMError::RuntimeError(
-                "MakeFieldRef chained off a TypedIndex base is unsupported \
-                 — array elements aren't TypedObject-typed at the projection \
-                 layer (ADR-006 §2.7.13)"
-                    .into(),
-            )),
+            // V3-S5 ckpt-6 STRICT close (2026-05-15):
+            // `RefTarget::TypedIndex { .. }` arm DELETED in lockstep with
+            // the variant retirement at `shape-value/src/reference.rs`
+            // (per ADR-006 §2.7.24 Q25.A SUPERSEDED). The variant carried
+            // a deleted Arc payload; per-element-T v2-raw receiver
+            // variants are downstream-wave territory.
         }
     }
 

@@ -1040,7 +1040,14 @@ fn read_typed_object_field(
                     Arc::increment_strong_count(bits as *const String);
                 }
                 HeapKind::TypedArray => {
-                    Arc::increment_strong_count(bits as *const TypedArrayData);
+                    // V3-S5 ckpt-6 STRICT close (2026-05-15): slot bits are
+                    // v2-raw `*mut TypedArray<T>` per ADR-006 §2.7.24 Q25.A
+                    // SUPERSEDED. Refcount discipline goes through
+                    // `v2_retain` against the `HeapHeader` at offset 0 of
+                    // the carrier (mirror of vm_impl/stack.rs StringV2 /
+                    // DecimalV2 / TypedObject retain dispatch).
+                    let hdr = bits as *const shape_value::v2::heap_header::HeapHeader;
+                    shape_value::v2::refcount::v2_retain(hdr);
                 }
                 HeapKind::TypedObject => {
                     Arc::increment_strong_count(

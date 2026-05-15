@@ -36,7 +36,7 @@ impl VirtualMachine {
             NativeKind::Ptr(HeapKind::TypedArray) => {
                 return Err(VMError::NotImplemented(
                     "object_rest: SURFACE — V3-S5 ckpt-5 consumer-cascade \
-                     tier 3. `TypedArrayData::String` exclude-keys carrier \
+                     tier 3. The deleted typed-array-data String exclude-keys carrier \
                      DELETED at ckpt-1..ckpt-4. Rebuild at ckpt-6 STRICT \
                      close per v2-raw `TypedArray<*const StringObj>` \
                      direct-access. Refusal #1."
@@ -133,9 +133,16 @@ impl VirtualMachine {
                                 Arc::increment_strong_count(bits as *const String);
                             }
                             NativeKind::Ptr(HeapKind::TypedArray) => {
-                                Arc::increment_strong_count(
-                                    bits as *const TypedArrayData,
-                                );
+                                // V3-S5 ckpt-6 STRICT close (2026-05-15):
+                                // slot bits are v2-raw `*mut TypedArray<T>`
+                                // per ADR-006 §2.7.24 Q25.A SUPERSEDED.
+                                // Refcount discipline goes through
+                                // `v2_retain` against the `HeapHeader` at
+                                // offset 0 of the carrier (mirror of
+                                // vm_impl/stack.rs StringV2 / DecimalV2 /
+                                // TypedObject retain dispatch).
+                                let hdr = bits as *const shape_value::v2::heap_header::HeapHeader;
+                                shape_value::v2::refcount::v2_retain(hdr);
                             }
                             NativeKind::Ptr(HeapKind::TypedObject) => {
                                 Arc::increment_strong_count(

@@ -106,9 +106,9 @@ fn field_type_to_int_width(ft: &FieldType) -> Option<shape_ast::IntWidth> {
 fn ckpt5_surface(op: &'static str, count: usize) -> VMError {
     VMError::NotImplemented(format!(
         "{op}({count}): SURFACE — V3-S5 ckpt-5 consumer-cascade tier 3 \
-         surface. `TypedArrayData` enum + `TypedBuffer<T>` / \
-         `AlignedTypedBuffer` wrapper layer + outer `HeapValue::TypedArray(\
-         Arc<TypedArrayData>)` arm + `HeapKind::TypedArray=8` ordinal \
+         surface. The deleted typed-array-data enum + `Buf<T>` / \
+         aligned-typed-buf wrapper layer + outer `HeapValue::TypedArray(\
+         Arc<_>)` arm + `HeapKind::TypedArray=8` ordinal \
          DELETED across V3-S5 ckpt-1..ckpt-4 per W12-typed-array-data-\
          deletion audit §3.5 + §3.6 + ADR-006 §2.7.24 Q25.A SUPERSEDED. \
          Post-deletion target is per-T v2-raw `TypedArray<T>` flat-struct \

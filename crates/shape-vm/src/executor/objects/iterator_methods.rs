@@ -103,7 +103,7 @@ fn ckpt3_surface(op: &'static str, args: &[KindedSlot]) -> VMError {
          variants + ADR-006 §2.7.16 / Q17 lazy iterator carrier; per-T \
          monomorphization landing across ckpt-3 (this file plus \
          array_ops/typed_array_methods/array_sort/concat/property_access/\
-         array_query) + ckpt-4 (TypedBuffer<T> / HeapValue::TypedArray \
+         array_query) + ckpt-4 (Buf<T> / HeapValue::TypedArray \
          arm / HeapKind::TypedArray ordinal / shape-value iterator_state.rs \
          IteratorSource::Array variant) + ckpt-5 (wire/json/marshal + \
          4-table lockstep) + ckpt-6 (JIT FFI). Closure-callback ABI \

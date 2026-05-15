@@ -184,7 +184,7 @@ pub fn v2_to_array(
     let _pq = as_priority_queue(&args[0])?;
     Err(VMError::NotImplemented(
         "PriorityQueue.toArray: SURFACE — V3-S5 ckpt-5-prime²a consumer-\
-         cascade. `TypedArrayData::I64(Arc<TypedBuffer<i64>>)` + \
+         cascade. The deleted typed-array-data I64 `Arc<Buf<i64>>` payload + \
          `KindedSlot::from_typed_array` DELETED at V3-S5 ckpt-1..ckpt-4. \
          Rebuild = per-T v2-raw `*mut TypedArray<i64>` flat-struct \
          construction (cluster-2 / ckpt-6 territory). REFUSED ON SIGHT: \
@@ -212,7 +212,7 @@ pub fn v2_to_sorted_array(
     let _pq = as_priority_queue(&args[0])?;
     Err(VMError::NotImplemented(
         "PriorityQueue.toSortedArray: SURFACE — V3-S5 ckpt-5-prime²a \
-         consumer-cascade. `TypedArrayData::I64(Arc<TypedBuffer<i64>>)` + \
+         consumer-cascade. The deleted typed-array-data I64 `Arc<Buf<i64>>` payload + \
          `KindedSlot::from_typed_array` DELETED at V3-S5 ckpt-1..ckpt-4. \
          Rebuild = per-T v2-raw `*mut TypedArray<i64>` flat-struct \
          construction (cluster-2 / ckpt-6 territory). REFUSED ON SIGHT: \

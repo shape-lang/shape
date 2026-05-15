@@ -54,7 +54,7 @@ use std::sync::Arc;
 fn ckpt5_string_array_surface(op: &'static str) -> VMError {
     VMError::NotImplemented(format!(
         "String.{op}: SURFACE — V3-S5 ckpt-5 consumer-cascade tier 3 \
-         surface. `Arc<TypedArrayData::String(Arc<TypedBuffer<Arc<String>>>)>` \
+         surface. The deleted typed-array-data String `Arc<Buf<Arc<String>>>` \
          result carrier DELETED at V3-S5 ckpt-1..ckpt-4 per W12-typed-\
          array-data-deletion audit §3.5 + §3.6 + §B + ADR-006 §2.7.24 \
          Q25.A SUPERSEDED. Rebuild lands at ckpt-6 STRICT close per the \

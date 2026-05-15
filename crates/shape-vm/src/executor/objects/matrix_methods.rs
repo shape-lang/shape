@@ -119,8 +119,8 @@ fn float_array_slot(data: AlignedVec<f64>) -> Result<KindedSlot, VMError> {
     let _ = data;
     Err(VMError::NotImplemented(
         "matrix: float_array_slot SURFACE — V3-S5 ckpt-5 consumer-cascade \
-         tier 3. `TypedArrayData::F64` constructor + outer `HeapValue::\
-         TypedArray` arm DELETED at ckpt-1..ckpt-4 per W12-typed-array-\
+         tier 3. The deleted typed-array-data F64 constructor + outer \
+         `HeapValue::TypedArray` arm DELETED at ckpt-1..ckpt-4 per W12-typed-array-\
          data-deletion audit §3.5 + §3.6. Rebuild lands at ckpt-6 STRICT \
          close per v2-raw `TypedArray<f64>` direct-access. REFUSED ON \
          SIGHT: TypedArrayData resurrection under any rename (Refusal #1)."
@@ -135,7 +135,7 @@ fn int_array_slot(data: Vec<i64>) -> Result<KindedSlot, VMError> {
     let _ = data;
     Err(VMError::NotImplemented(
         "matrix: int_array_slot SURFACE — V3-S5 ckpt-5 consumer-cascade \
-         tier 3. `TypedArrayData::I64` constructor DELETED at ckpt-1..\
+         tier 3. The deleted typed-array-data I64 constructor DELETED at ckpt-1..\
          ckpt-4 per W12-typed-array-data-deletion audit §3.5. Rebuild \
          lands at ckpt-6 STRICT close per v2-raw `TypedArray<i64>` \
          direct-access. REFUSED ON SIGHT (Refusal #1)."

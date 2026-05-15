@@ -160,7 +160,7 @@ fn ckpt3_surface(op: &'static str, a_kind: NativeKind, b_kind: NativeKind) -> VM
          heap-element variants — per-T `data.extend_from_slice()` append; \
          landing across ckpt-3 (this file plus array_ops/typed_array_methods/\
          iterator_methods/array_sort/property_access/array_query) + ckpt-4 \
-         (TypedBuffer<T> / HeapValue::TypedArray arm / HeapKind::TypedArray \
+         (Buf<T> / HeapValue::TypedArray arm / HeapKind::TypedArray \
          ordinal) + ckpt-5 (wire/json/marshal + 4-table lockstep) + ckpt-6 \
          (JIT FFI). Operand kinds: a={a_kind:?}, b={b_kind:?}. UNREACHABLE \
          until ckpt-6 STRICT close. REFUSED ON SIGHT: TypedArrayData \

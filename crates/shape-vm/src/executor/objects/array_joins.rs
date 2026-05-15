@@ -75,7 +75,7 @@ fn ckpt3_surface(op: &'static str, args: &[KindedSlot]) -> VMError {
          audit §1.2 + §A.3 + §3.1 scalar recipe; per-T monomorphization \
          landing across ckpt-3 (this file plus array_ops/typed_array_methods/\
          iterator_methods/array_sort/concat/property_access/array_query) + \
-         ckpt-4 (TypedBuffer<T> / HeapValue::TypedArray arm / \
+         ckpt-4 (Buf<T> / HeapValue::TypedArray arm / \
          HeapKind::TypedArray ordinal) + ckpt-5 (wire/json/marshal + \
          4-table lockstep) + ckpt-6 (JIT FFI). Closure-callback ABI \
          (ADR-006 §2.7.11 / Q12 `vm.call_value_immediate_nb`) is \

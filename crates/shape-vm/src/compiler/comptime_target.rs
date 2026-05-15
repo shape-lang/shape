@@ -260,7 +260,7 @@ impl ComptimeTarget {
             panic!(
                 "comptime_target::nb_string_array: V3-S5 ckpt-5 \
                  consumer-cascade tier 3 SURFACE. \
-                 `TypedArrayData::String(Arc<TypedBuffer<Arc<String>>>)` \
+                 the deleted typed-array-data String `Arc<Buf<Arc<String>>>` \
                  result carrier DELETED at ckpt-1..ckpt-4 per W12 audit \
                  §3.5 + §B + ADR-006 §2.7.24 Q25.A SUPERSEDED. Rebuild \
                  lands at ckpt-6 STRICT close per v2-raw `TypedArray<\
@@ -281,7 +281,7 @@ impl ComptimeTarget {
             panic!(
                 "comptime_target::nb_object_array: V3-S5 ckpt-5 \
                  consumer-cascade tier 3 SURFACE. \
-                 `TypedArrayData::TypedObject(Arc<TypedBuffer<TypedObjectPtr>>)` \
+                 the deleted typed-array-data TypedObject `Arc<Buf<TypedObjectPtr>>` \
                  result carrier DELETED at ckpt-1..ckpt-4 per W12 audit \
                  §3.5 + §B + ADR-006 §2.7.24 Q25.A SUPERSEDED. Rebuild \
                  lands at ckpt-6 STRICT close per v2-raw `TypedArray<\

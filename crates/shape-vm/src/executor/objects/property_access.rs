@@ -80,7 +80,7 @@ fn ckpt3_surface(op: &'static str, key_kind: NativeKind) -> VMError {
          variants — per-T `*buf.data.add(idx)` element read + per-T \
          `data.len()` length; landing across ckpt-3 (this file plus \
          array_ops/typed_array_methods/iterator_methods/array_sort/concat/\
-         array_query) + ckpt-4 (TypedBuffer<T> / HeapValue::TypedArray \
+         array_query) + ckpt-4 (Buf<T> / HeapValue::TypedArray \
          arm / HeapKind::TypedArray ordinal) + ckpt-5 (wire/json/marshal \
          + 4-table lockstep) + ckpt-6 (JIT FFI). Key kind: {key_kind:?}. \
          UNREACHABLE until ckpt-6 STRICT close. REFUSED ON SIGHT: \
@@ -180,7 +180,7 @@ impl VirtualMachine {
             | NativeKind::Ptr(_) => Err(VMError::NotImplemented(format!(
                 "SURFACE: GetProp on {:?} not yet kinded — requires the \
                  W17-typed-carrier-monomorphization replacement for the \
-                 deleted HashMapData::values: Arc<TypedBuffer<Arc<HeapValue>>> \
+                 deleted HashMapData::values: `Arc<Buf<Arc<HeapValue>>>` \
                  carrier (ADR-006 §2.7.24 Q25.B) or the per-receiver \
                  heterogeneous-kind body. Key kind observed: {:?}.",
                 obj_kind, key_kind

@@ -95,7 +95,7 @@ fn ckpt5_surface(op: &'static str, args: &[KindedSlot]) -> VMError {
     };
     VMError::NotImplemented(format!(
         "{op}: SURFACE — V3-S5 ckpt-5 consumer-cascade tier 3 surface. \
-         `TypedArrayData` enum + `TypedBuffer<T>` / `AlignedTypedBuffer` \
+         the deleted typed-array-data enum + `Buf<T>` / aligned-typed-buf \
          wrapper layer + `HeapValue::TypedArray(Arc<TypedArrayData>)` \
          outer arm + `HeapKind::TypedArray=8` ordinal DELETED at V3-S5 \
          ckpt-1..ckpt-4 per W12-typed-array-data-deletion audit §3.5 + \

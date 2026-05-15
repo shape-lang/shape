@@ -97,7 +97,7 @@ fn ckpt3_surface(op: &'static str, args: &[KindedSlot]) -> VMError {
          heap-element variants; per-T monomorphization landing across \
          ckpt-3 (this file plus typed_array_methods/iterator_methods/\
          array_sort/concat/property_access/array_query) + ckpt-4 \
-         (TypedBuffer<T> / HeapValue::TypedArray arm / HeapKind::TypedArray \
+         (Buf<T> / HeapValue::TypedArray arm / HeapKind::TypedArray \
          ordinal) + ckpt-5 (wire/json/marshal + 4-table lockstep) + \
          ckpt-6 (JIT FFI). Receiver kind: {kind}. UNREACHABLE until ckpt-6 \
          STRICT close. REFUSED ON SIGHT: TypedArrayData resurrection under \

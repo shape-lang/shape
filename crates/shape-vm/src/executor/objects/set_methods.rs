@@ -234,7 +234,7 @@ pub fn v2_to_array(
     let _set = as_hashset(&args[0])?;
     Err(VMError::NotImplemented(
         "Set.toArray: SURFACE — V3-S5 ckpt-5-prime²a consumer-cascade. \
-         `TypedArrayData::String(Arc<TypedBuffer<Arc<String>>>)` + \
+         The deleted typed-array-data String `Arc<Buf<Arc<String>>>` payload + \
          `KindedSlot::from_typed_array` DELETED at V3-S5 ckpt-1..ckpt-4. \
          Rebuild = per-T v2-raw `*mut TypedArray<Arc<String>>` flat-struct \
          construction (cluster-2 / ckpt-6 territory). REFUSED ON SIGHT: \
