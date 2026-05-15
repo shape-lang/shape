@@ -372,6 +372,36 @@ pub struct MirToIR<'a, 'b> {
     /// the bounds-checked path, preserving the v2_array_tests OOB
     /// zero-default semantics.
     pub(crate) bounds_elision: bounds_elision::BoundsElisionPlan,
+
+    // ── V3-S6c JIT method-monomorph routing side-table ─────────────
+    /// ADR-006 §2.7.5 V3-S6c-jit-method-monomorph-routing (PATH α-prime
+    /// per supervisor 2026-05-15 ratification): the V3-S6b side-table
+    /// `BytecodeProgram.monomorphized_method_call_sites` cloned into the
+    /// JIT MirToIR so the Call-terminator compile path can re-route
+    /// `MirConstant::Method` Call terminators to direct Cranelift FuncRef
+    /// calls via `user_func_refs[specialized_idx]`. Key is
+    /// `(call_site_span, caller_function_id)` where `caller_function_id`
+    /// is the bytecode compiler's `self.current_function` at
+    /// `try_monomorphize_method_call` success (matches the JIT-side
+    /// `caller_function_id` field below).
+    ///
+    /// Empty when the bytecode compiler did not specialize any method
+    /// call (no generic method calls in the program, or all monomorph
+    /// attempts bailed). JIT falls through to the existing
+    /// `jit_call_method` trampoline path for any miss — preserves V3-S6b
+    /// baseline behaviour.
+    pub(crate) monomorphized_method_call_sites:
+        HashMap<(shape_ast::ast::span::Span, Option<usize>), usize>,
+
+    /// V3-S6c routing: the caller function id used as the second
+    /// component of the `monomorphized_method_call_sites` composite key.
+    /// `None` for top-level (`__main__`) code per the same convention
+    /// the bytecode compiler uses (`self.current_function == None` when
+    /// compiling top-level statements). For user functions, this is the
+    /// post-monomorphization specialized FunctionId (matches the
+    /// `func_idx: usize` passed to `compile_function_with_user_funcs` at
+    /// `compiler/program.rs:236`).
+    pub(crate) caller_function_id: Option<usize>,
 }
 
 /// Result of MIR preflight check.
@@ -775,7 +805,30 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             closure_placeholder_fids,
             next_closure_placeholder_idx: std::cell::Cell::new(0),
             bounds_elision: bounds_elision::BoundsElisionPlan::default(),
+            // V3-S6c: side-table + caller-id default empty/None; populated
+            // by `set_monomorph_routing_context` from the JIT compile
+            // orchestration layer (`compiler/program.rs` per-function path +
+            // `compiler/strategy.rs` top-level path).
+            monomorphized_method_call_sites: HashMap::new(),
+            caller_function_id: None,
         }
+    }
+
+    /// V3-S6c JIT method-monomorph routing: install the bytecode compiler's
+    /// `monomorphized_method_call_sites` side-table + the caller function
+    /// id used for the `(span, caller_function_id)` composite key. Callers
+    /// normally clone `program.monomorphized_method_call_sites` and pass
+    /// the post-monomorphization `func_idx: usize` (per-function path) or
+    /// `None` (top-level path). An empty map / `None` caller is sound —
+    /// every Method-call falls through to the existing `jit_call_method`
+    /// trampoline path, preserving V3-S6b baseline behaviour.
+    pub fn set_monomorph_routing_context(
+        &mut self,
+        sites: HashMap<(shape_ast::ast::span::Span, Option<usize>), usize>,
+        caller_function_id: Option<usize>,
+    ) {
+        self.monomorphized_method_call_sites = sites;
+        self.caller_function_id = caller_function_id;
     }
 
     /// Install a precomputed bounds-elision plan so `Place::Index` codegen

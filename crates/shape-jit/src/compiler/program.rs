@@ -396,6 +396,22 @@ impl JITCompiler {
                     user_func_arities.clone(),
                     closure_function_layouts,
                 );
+                // V3-S6c-jit-method-monomorph-routing (ADR-006 §2.7.5
+                // stamp-at-compile-time; supervisor 2026-05-15 PATH α-prime
+                // RATIFIED): thread the V3-S6b side-table from the ORIGINAL
+                // `program: &BytecodeProgram` (the `sub_program` above
+                // clears it at line ~305 to keep the per-function compile
+                // scope minimal) so the Call-terminator pass can re-route
+                // `MirConstant::Method` sites to direct FuncRef calls.
+                //
+                // Composite key `(call_site_span, caller_function_id)`:
+                // `caller_function_id = Some(func_idx)` matches the
+                // bytecode compiler's `self.current_function` at
+                // specialization time (`expressions/function_calls.rs:3278`).
+                mir_compiler.set_monomorph_routing_context(
+                    program.monomorphized_method_call_sites.clone(),
+                    Some(func_idx),
+                );
                 // Bounds-check elision: install the per-function plan
                 // before MIR codegen so `Place::Index` lowering can
                 // bypass the inline bounds check on trusted (arr, iv)

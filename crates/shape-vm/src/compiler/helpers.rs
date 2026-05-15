@@ -807,97 +807,39 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_resolvers(
     // visible binding slot. Without this ordering the move-propagation
     // would observe `concrete_types[temp_map_result] = Void` and leave
     // `doubled` unstamped, defeating the V3-S6b conduit.
-    // V3-S6b-jit-method-monomorph-conduit surface-and-stop 2026-05-15:
-    // The consumer-side stamping infrastructure is wired and verified
-    // correct (the side-table is populated by
-    // `try_monomorphize_method_call` at bytecode-compile time; the
-    // resolver returns the specialized callee's return ConcreteType for
-    // matching `(span, current_function)` keys). However, materially
-    // ENABLING the stamping triggers the same JIT-side carrier-shape
-    // mismatch SIGSEGV V3-S6a's sub-agent identified for PATH γ:
+    // V3-S6c-jit-method-monomorph-routing (supervisor 2026-05-15 PATH
+    // α-prime RATIFIED) SUPERSEDES the V3-S6b stamping consume path. The
+    // V3-S6c routing reads the same
+    // `monomorphized_method_call_sites` side-table but consumes it at the
+    // JIT Call-terminator pass (`crates/shape-jit/src/mir_compiler/
+    // terminators.rs:176`), emitting a direct Cranelift FuncRef call to
+    // `user_func_refs[specialized_idx]` instead of stamping
+    // `concrete_types[dst]` and routing through `jit_call_method`. This
+    // bypasses the V3-S6b dual-consumer SIGSEGV class
+    // (`v2_typed_array_elem_kind(slot)` → `try_emit_v2_array_method` →
+    // `handle_int_map` ckpt3_surface) entirely — the routing decision is
+    // structural at the JIT Call terminator, not a kind-stamp consumed
+    // by downstream `concrete_types[slot]` readers.
     //
-    // The chain is `xs.map(...).sum()`. Pre-V3-S6b the JIT compilation
-    // of `__main__` SURFACEs at the `print` Call-terminator (operand
-    // NativeKind = None because `.sum()` destination kind wasn't
-    // classified), gracefully falling back to VM execution. WITH the
-    // V3-S6b stamping enabled, the conduit stamps
-    // `concrete_types[doubled] = Array(I64)`; the JIT's downstream
-    // consumers then:
-    //   (a) `parametric_method_return_kind_from_receiver` classifies
-    //       `.sum()` destination as Int64 — the intended PATH α target
-    //       per the dispatch's Step 5 prediction.
-    //   (b) BUT `v2_typed_array_elem_kind(doubled)` ALSO returns
-    //       Some(I64), activating the v2 typed-array fast path
-    //       (`terminators.rs:104-135` → `try_emit_v2_array_method`
-    //       → `jit_v2_array_sum_i64(doubled_bits)`). The doubled bits
-    //       come from `jit_call_method` which dispatches `xs.map(...)`
-    //       through the VM trampoline. The VM-side PHF route for
-    //       `Vec<int>.map` is the V3-S5 SURFACE-AND-STOP
-    //       (`handle_int_map` at `typed_array_methods.rs:452` returns
-    //       `Err(ckpt3_surface("Vec<int>.map", args))` always — V3-S5
-    //       architectural sunset for the deleted `TypedArrayData::I64`
-    //       carrier). The error-path unwinding SIGSEGVs because the
-    //       transient `KindedSlot` carriers receive raw JIT-pushed bits
-    //       whose carrier-shape doesn't match the kind label's
-    //       discipline (mirror of V3-S6a SIGSEGV finding).
+    // The V3-S6b infrastructure (side-table field on BytecodeProgram /
+    // Program / LinkedProgram + linker threading + population at
+    // `try_monomorphize_method_call` success + per-fn closure threading
+    // through `compile_post_assembly`) remains LIVE and is CONSUMED by
+    // V3-S6c. The `monomorph_method_returns` parameter on this resolver
+    // signature is preserved for ABI stability but no longer consumed
+    // here — the JIT consumes the side-table directly via
+    // `MirToIR::set_monomorph_routing_context` (see
+    // `crates/shape-jit/src/compiler/program.rs` per-function path +
+    // `crates/shape-jit/src/compiler/strategy.rs` top-level path).
     //
-    // PATH α as specified in the V3-S6b dispatch is architecturally
-    // sound (side-table threading; compile-time consultation per §2.7.5
-    // stamp-at-compile-time discipline) but the JIT-side consumer
-    // landscape has TWO entry points off `concrete_types[slot] =
-    // Array(I64)`: the dispatch's intended `parametric_*` arm AND the
-    // v2 fast path. Disabling the latter selectively for conduit-
-    // stamped slots OR re-routing the `MirConstant::Method` call to
-    // `Function(specialized_idx)` at terminators.rs:176 (a JIT call-
-    // routing change rather than a stamping change) would close the
-    // chain. Both options exceed the V3-S6b PATH α dispatch scope
-    // (~200-400 LoC) and require supervisor disposition per the
-    // surface-and-stop discipline.
-    //
-    // The stamping is GATED OFF here pending supervisor disposition.
-    // The side-table infrastructure (population at
-    // `try_monomorphize_method_call` success; threading through
-    // Program/LinkedProgram; resolver wiring at compile_post_assembly)
-    // remains LIVE so downstream landings consume the same shape.
-    //
-    // Refused on sight per CLAUDE.md "Forbidden rationalizations": NO
-    // "Bool-default fallback for one edge case" (the SIGSEGV is
-    // honestly surfaced; no rationalized stamping); NO "tag-decode
-    // bridge between carrier shapes"; NO PATH γ shape (the conduit-
-    // extend-to-runtime path).
+    // ADR-006 §2.7.5 stamp-at-compile-time preserved: the routing
+    // decision is made at JIT codegen (compile time), never via a
+    // runtime tag-byte read. Refused on sight per CLAUDE.md "Forbidden
+    // rationalizations": NO PATH γ shape (extend v2-fast-path or
+    // handle_int_map — re-opens V3-S5 architectural sunset); NO PATH β
+    // shape (MIR mutation pass — fallback only); NO defection-attractor
+    // descriptors per CLAUDE.md "Renames to refuse on sight".
     let _ = monomorph_method_returns;
-    #[cfg(any())]
-    if let Some(monomorph_resolver) = monomorph_method_returns {
-        use crate::mir::types::TerminatorKind;
-        for block in mir.iter_blocks() {
-            if let TerminatorKind::Call {
-                func, destination, ..
-            } = &block.terminator.kind
-            {
-                if let Operand::Constant(MirConstant::Method(_)) = func {
-                    if let crate::mir::types::Place::Local(dst) = destination {
-                        let idx = dst.0 as usize;
-                        if idx < n
-                            && matches!(
-                                concrete_types[idx],
-                                shape_value::v2::ConcreteType::Void
-                            )
-                        {
-                            let span = block.terminator.span;
-                            if let Some(ct) = monomorph_resolver(span) {
-                                if !matches!(
-                                    ct,
-                                    shape_value::v2::ConcreteType::Void
-                                ) {
-                                    concrete_types[idx] = ct;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
 
     // Second pass: propagate Struct/Enum/Array through simple slot moves.
     // The MIR lowering for `let p = Point{...}` first builds the
