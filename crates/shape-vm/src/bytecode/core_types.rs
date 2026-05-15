@@ -355,6 +355,47 @@ pub struct BytecodeProgram {
     #[serde(skip, default)]
     pub function_return_concrete_types: Vec<shape_value::v2::ConcreteType>,
 
+    /// ADR-006 §2.7.5 conduit — per-call-site monomorphized-method
+    /// FunctionId side-table (V3-S6b-jit-method-monomorph-conduit close,
+    /// 2026-05-15; supervisor 2026-05-15 PATH α RATIFIED).
+    ///
+    /// Populated at bytecode-compile time by
+    /// `try_monomorphize_method_call` /
+    /// `try_monomorphize_method_call_with_closures` on specialization
+    /// success: the AST `Expr::MethodCall.span` together with the
+    /// currently-compiling caller function index keys the specialized
+    /// FunctionId of the callee. The composite `(Span, calling_function)`
+    /// key disambiguates specialization-within-generic-function cases
+    /// where the same source-level Span gets monomorphized multiple
+    /// times under different caller specialization contexts.
+    ///
+    /// Consumed at the conduit producer
+    /// (`infer_top_level_concrete_types_from_mir_with_resolvers`'s
+    /// `MirConstant::Method` Call-terminator pass) — when the side-table
+    /// has an entry for `(terminator.span, current_function)`, the
+    /// destination slot's `ConcreteType` is lifted from
+    /// `function_return_concrete_types[specialized_idx]` (i.e. the
+    /// callee specialization's declared return type). This carries the
+    /// `.map()` chain's intermediate carrier shape through to the JIT-
+    /// side `parametric_method_return_kind_from_receiver` arm at
+    /// `crates/shape-jit/src/mir_compiler/types.rs:946`, which then
+    /// trivially classifies `.sum()` after `.map()` on `Vec<I64>` →
+    /// `Int64` via the existing
+    /// `("sum"|"mean"|..., ConcreteType::Array(elem))` arm.
+    ///
+    /// PATH α per supervisor 2026-05-15 ratification (side-table on
+    /// BytecodeProgram + Program + LinkedProgram; PATH β MIR back-patching
+    /// is FALLBACK ONLY; PATH γ runtime conduit-extension REFUSED per
+    /// V3-S6a sub-agent SIGSEGV finding — carrier-shape mismatch
+    /// soundness violation).
+    ///
+    /// `#[serde(skip, default)]` per the same wire-format rationale as
+    /// `function_return_concrete_types` — opaque FunctionId indices into
+    /// the per-program function table aren't a stable wire shape.
+    #[serde(skip, default)]
+    pub monomorphized_method_call_sites:
+        std::collections::HashMap<(shape_ast::ast::span::Span, Option<usize>), usize>,
+
     /// Type schema registry for TypedObject field resolution
     /// Used to convert TypedObject back to Object when needed
     #[serde(default)]

@@ -231,6 +231,19 @@ pub struct Program {
     #[serde(skip, default)]
     pub function_return_concrete_types: Vec<shape_value::v2::ConcreteType>,
 
+    /// ADR-006 §2.7.5 conduit (V3-S6b-jit-method-monomorph-conduit
+    /// close, 2026-05-15): content-addressed mirror of
+    /// `BytecodeProgram.monomorphized_method_call_sites`. Survives the
+    /// `Program` → `link()` → `LinkedProgram` → `BytecodeProgram`
+    /// round-trip so the conduit producer can lift
+    /// `function_return_concrete_types[specialized_idx]` into the
+    /// destination slot's ConcreteType at `MirConstant::Method` Call-
+    /// terminator sites. Not serialised — opaque per-program FunctionId
+    /// indices aren't a stable wire shape.
+    #[serde(skip, default)]
+    pub monomorphized_method_call_sites:
+        HashMap<(shape_ast::ast::span::Span, Option<usize>), usize>,
+
     /// DataFrame schema for column name resolution.
     pub data_schema: Option<DataFrameSchema>,
 
@@ -403,6 +416,17 @@ pub struct LinkedProgram {
     /// same rationale.
     #[serde(skip, default)]
     pub function_return_concrete_types: Vec<shape_value::v2::ConcreteType>,
+
+    /// ADR-006 §2.7.5 conduit (V3-S6b-jit-method-monomorph-conduit
+    /// close, 2026-05-15): LinkedProgram mirror of
+    /// `Program.monomorphized_method_call_sites` — propagated through
+    /// the linker so the conduit producer can lift
+    /// `function_return_concrete_types[specialized_idx]` into the
+    /// destination slot's ConcreteType at `MirConstant::Method` Call-
+    /// terminator sites. Not serialised — same rationale.
+    #[serde(skip, default)]
+    pub monomorphized_method_call_sites:
+        HashMap<(shape_ast::ast::span::Span, Option<usize>), usize>,
 
     /// Trait method dispatch registry.
     pub trait_method_symbols: HashMap<String, String>,

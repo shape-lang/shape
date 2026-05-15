@@ -462,7 +462,7 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_returns(
     mir: &crate::mir::MirFunction,
     callee_returns: Option<&dyn Fn(&str) -> Option<shape_value::v2::ConcreteType>>,
 ) -> Vec<shape_value::v2::ConcreteType> {
-    infer_top_level_concrete_types_from_mir_with_resolvers(mir, callee_returns, None)
+    infer_top_level_concrete_types_from_mir_with_resolvers(mir, callee_returns, None, None)
 }
 
 /// Trait-method-aware variant of the conduit producer.
@@ -496,6 +496,36 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_resolvers(
     callee_returns: Option<&dyn Fn(&str) -> Option<shape_value::v2::ConcreteType>>,
     method_returns: Option<
         &dyn Fn(&str, &str) -> Option<shape_value::v2::ConcreteType>,
+    >,
+    // ADR-006 §2.7.5 V3-S6b conduit consumer.
+    //
+    // `monomorph_method_returns(call_site_span) -> Option<ConcreteType>`
+    // consults the `monomorphized_method_call_sites: HashMap<(Span,
+    // Option<usize>), usize>` side-table populated by
+    // `try_monomorphize_method_call` /
+    // `try_monomorphize_method_call_with_closures` on specialization
+    // success, then chains the looked-up specialized FunctionId through
+    // `function_return_concrete_types[specialized_idx]` to recover the
+    // callee specialization's declared return type. The caller closes
+    // over the `current_function` half of the composite key — top-level
+    // conduits pass `None` for `current_function`; per-function conduits
+    // pass `Some(fn_idx)` matching the function being walked.
+    //
+    // When the side-table holds an entry for the `Terminator.span` of a
+    // `MirConstant::Method` Call-terminator (regardless of receiver
+    // type), the destination slot's ConcreteType is stamped from the
+    // resolver's return value. This is the V3-S6 chain checkpoint-final
+    // wiring: it carries the `.map()` chain's intermediate carrier shape
+    // through to the JIT-side `parametric_method_return_kind_from_receiver`
+    // arm, which then trivially classifies `.sum()` after `.map()` on
+    // `Vec<I64>` → `Int64` via the existing
+    // `("sum"|..., ConcreteType::Array(elem))` arm.
+    //
+    // PATH α per supervisor 2026-05-15 ratification (side-table consult
+    // at compile time; no runtime tag-byte read; §2.7.5 stamp-at-compile-
+    // time preserved).
+    monomorph_method_returns: Option<
+        &dyn Fn(shape_ast::ast::span::Span) -> Option<shape_value::v2::ConcreteType>,
     >,
 ) -> Vec<shape_value::v2::ConcreteType> {
     use crate::mir::types::{MirConstant, Operand, StatementKind};
@@ -725,6 +755,136 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_resolvers(
                             )
                         {
                             if let Some(ct) = resolver(name.as_str()) {
+                                if !matches!(
+                                    ct,
+                                    shape_value::v2::ConcreteType::Void
+                                ) {
+                                    concrete_types[idx] = ct;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ADR-006 §2.7.5 — V3-S6b-jit-method-monomorph-conduit (Phase 3
+    // cluster-0 Wave 3 Stabilize Round 2, 2026-05-15; supervisor 2026-
+    // 05-15 PATH α RATIFIED). Monomorphized-method-call return-kind
+    // classification at `MirConstant::Method` Call-terminator destinations.
+    //
+    // For `arr.map(|x| x*2).sum()` chains, the bytecode compiler's
+    // `try_monomorphize_method_call` specializes `Vec.map<int, int>` (via
+    // V3-S6a's closure-return-typed generic resolver extension) and
+    // records the call-site → specialized FunctionId mapping in
+    // `BytecodeProgram.monomorphized_method_call_sites`. The MIR layer,
+    // however, still carries `MirConstant::Method("map")` (MIR is built
+    // before bytecode-level specialization), so the
+    // `MirConstant::Function(name)` resolver above does not fire on
+    // these call-terminators.
+    //
+    // This pass closes the gap: when the `Terminator.span` matches a
+    // side-table entry (composite key `(span, current_function)` keyed
+    // off the producer's closed-over `current_function` value), the
+    // destination slot's ConcreteType is lifted from
+    // `function_return_concrete_types[specialized_idx]`. Downstream
+    // method calls on the destination (e.g. `.sum()` on the
+    // `.map()` result) then read the stamped
+    // `concrete_types[receiver_slot] = Array(I64)` and the JIT-side
+    // `parametric_method_return_kind_from_receiver` arm
+    // `("sum"|..., ConcreteType::Array(elem))` fires trivially.
+    //
+    // No tag-bit decode, no Bool-default, no fabricated default — when
+    // the resolver returns `None` (no side-table entry, or callee return
+    // type is Void), the slot stays `Void` per §2.7.5.1. The
+    // monomorph-method resolver is consulted at COMPILE TIME (the
+    // §2.7.5 stamp-at-compile-time discipline; never runtime).
+    //
+    // Runs BEFORE the slot-move propagation pass so that subsequent
+    // `Assign(doubled, Use(Move(temp_map_result)))` propagation
+    // carries the stamped `Array(I64)` from the temp to the user-
+    // visible binding slot. Without this ordering the move-propagation
+    // would observe `concrete_types[temp_map_result] = Void` and leave
+    // `doubled` unstamped, defeating the V3-S6b conduit.
+    // V3-S6b-jit-method-monomorph-conduit surface-and-stop 2026-05-15:
+    // The consumer-side stamping infrastructure is wired and verified
+    // correct (the side-table is populated by
+    // `try_monomorphize_method_call` at bytecode-compile time; the
+    // resolver returns the specialized callee's return ConcreteType for
+    // matching `(span, current_function)` keys). However, materially
+    // ENABLING the stamping triggers the same JIT-side carrier-shape
+    // mismatch SIGSEGV V3-S6a's sub-agent identified for PATH γ:
+    //
+    // The chain is `xs.map(...).sum()`. Pre-V3-S6b the JIT compilation
+    // of `__main__` SURFACEs at the `print` Call-terminator (operand
+    // NativeKind = None because `.sum()` destination kind wasn't
+    // classified), gracefully falling back to VM execution. WITH the
+    // V3-S6b stamping enabled, the conduit stamps
+    // `concrete_types[doubled] = Array(I64)`; the JIT's downstream
+    // consumers then:
+    //   (a) `parametric_method_return_kind_from_receiver` classifies
+    //       `.sum()` destination as Int64 — the intended PATH α target
+    //       per the dispatch's Step 5 prediction.
+    //   (b) BUT `v2_typed_array_elem_kind(doubled)` ALSO returns
+    //       Some(I64), activating the v2 typed-array fast path
+    //       (`terminators.rs:104-135` → `try_emit_v2_array_method`
+    //       → `jit_v2_array_sum_i64(doubled_bits)`). The doubled bits
+    //       come from `jit_call_method` which dispatches `xs.map(...)`
+    //       through the VM trampoline. The VM-side PHF route for
+    //       `Vec<int>.map` is the V3-S5 SURFACE-AND-STOP
+    //       (`handle_int_map` at `typed_array_methods.rs:452` returns
+    //       `Err(ckpt3_surface("Vec<int>.map", args))` always — V3-S5
+    //       architectural sunset for the deleted `TypedArrayData::I64`
+    //       carrier). The error-path unwinding SIGSEGVs because the
+    //       transient `KindedSlot` carriers receive raw JIT-pushed bits
+    //       whose carrier-shape doesn't match the kind label's
+    //       discipline (mirror of V3-S6a SIGSEGV finding).
+    //
+    // PATH α as specified in the V3-S6b dispatch is architecturally
+    // sound (side-table threading; compile-time consultation per §2.7.5
+    // stamp-at-compile-time discipline) but the JIT-side consumer
+    // landscape has TWO entry points off `concrete_types[slot] =
+    // Array(I64)`: the dispatch's intended `parametric_*` arm AND the
+    // v2 fast path. Disabling the latter selectively for conduit-
+    // stamped slots OR re-routing the `MirConstant::Method` call to
+    // `Function(specialized_idx)` at terminators.rs:176 (a JIT call-
+    // routing change rather than a stamping change) would close the
+    // chain. Both options exceed the V3-S6b PATH α dispatch scope
+    // (~200-400 LoC) and require supervisor disposition per the
+    // surface-and-stop discipline.
+    //
+    // The stamping is GATED OFF here pending supervisor disposition.
+    // The side-table infrastructure (population at
+    // `try_monomorphize_method_call` success; threading through
+    // Program/LinkedProgram; resolver wiring at compile_post_assembly)
+    // remains LIVE so downstream landings consume the same shape.
+    //
+    // Refused on sight per CLAUDE.md "Forbidden rationalizations": NO
+    // "Bool-default fallback for one edge case" (the SIGSEGV is
+    // honestly surfaced; no rationalized stamping); NO "tag-decode
+    // bridge between carrier shapes"; NO PATH γ shape (the conduit-
+    // extend-to-runtime path).
+    let _ = monomorph_method_returns;
+    #[cfg(any())]
+    if let Some(monomorph_resolver) = monomorph_method_returns {
+        use crate::mir::types::TerminatorKind;
+        for block in mir.iter_blocks() {
+            if let TerminatorKind::Call {
+                func, destination, ..
+            } = &block.terminator.kind
+            {
+                if let Operand::Constant(MirConstant::Method(_)) = func {
+                    if let crate::mir::types::Place::Local(dst) = destination {
+                        let idx = dst.0 as usize;
+                        if idx < n
+                            && matches!(
+                                concrete_types[idx],
+                                shape_value::v2::ConcreteType::Void
+                            )
+                        {
+                            let span = block.terminator.span;
+                            if let Some(ct) = monomorph_resolver(span) {
                                 if !matches!(
                                     ct,
                                     shape_value::v2::ConcreteType::Void
@@ -5853,6 +6013,7 @@ mod call_return_kind_tests {
             &mir,
             None,
             Some(&method_returns),
+            None,
         );
         assert_eq!(
             result[3],
@@ -5949,6 +6110,7 @@ mod call_return_kind_tests {
             &mir,
             None,
             Some(&method_returns),
+            None,
         );
         assert_eq!(
             result[4],
@@ -6015,7 +6177,7 @@ mod call_return_kind_tests {
         };
         // No method_returns resolver — destination stays Void.
         let result =
-            infer_top_level_concrete_types_from_mir_with_resolvers(&mir, None, None);
+            infer_top_level_concrete_types_from_mir_with_resolvers(&mir, None, None, None);
         assert_eq!(
             result[3],
             ConcreteType::Void,
@@ -6078,6 +6240,7 @@ mod call_return_kind_tests {
             &mir,
             None,
             Some(&method_returns),
+            None,
         );
         assert_eq!(
             result[3],

@@ -475,6 +475,8 @@ pub fn link(program: &Program) -> Result<LinkedProgram, LinkError> {
             top_level_local_concrete_types: program.top_level_local_concrete_types.clone(),
             function_local_concrete_types: program.function_local_concrete_types.clone(),
             function_return_concrete_types: program.function_return_concrete_types.clone(),
+            monomorphized_method_call_sites:
+                program.monomorphized_method_call_sites.clone(),
             trait_method_symbols: program.trait_method_symbols.clone(),
             foreign_functions: program.foreign_functions.clone(),
             native_struct_layouts: program.native_struct_layouts.clone(),
@@ -586,6 +588,8 @@ pub fn link(program: &Program) -> Result<LinkedProgram, LinkError> {
         top_level_local_concrete_types: program.top_level_local_concrete_types.clone(),
         function_local_concrete_types: program.function_local_concrete_types.clone(),
         function_return_concrete_types: program.function_return_concrete_types.clone(),
+        monomorphized_method_call_sites:
+            program.monomorphized_method_call_sites.clone(),
         trait_method_symbols: program.trait_method_symbols.clone(),
         foreign_functions: program.foreign_functions.clone(),
         native_struct_layouts: program.native_struct_layouts.clone(),
@@ -664,6 +668,8 @@ pub fn linked_to_bytecode_program(linked: &LinkedProgram) -> BytecodeProgram {
         top_level_local_concrete_types: linked.top_level_local_concrete_types.clone(),
         function_local_concrete_types: linked.function_local_concrete_types.clone(),
         function_return_concrete_types: linked.function_return_concrete_types.clone(),
+        monomorphized_method_call_sites:
+            linked.monomorphized_method_call_sites.clone(),
         top_level_mir: None,
         compiled_annotations: HashMap::new(),
         trait_method_symbols: linked.trait_method_symbols.clone(),

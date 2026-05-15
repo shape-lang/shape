@@ -506,6 +506,16 @@ impl BytecodeCompiler {
                     .program
                     .function_return_concrete_types
                     .clone(),
+                // ADR-006 §2.7.5 conduit (V3-S6b-jit-method-monomorph-
+                // conduit close, 2026-05-15): per-call-site monomorphized
+                // method-call FunctionId side-table propagated through
+                // the content-addressed path so the conduit producer can
+                // lift `function_return_concrete_types[specialized_idx]`
+                // at `MirConstant::Method` Call-terminator sites.
+                monomorphized_method_call_sites: self
+                    .program
+                    .monomorphized_method_call_sites
+                    .clone(),
                 // Closure spec §14.6 (H6.5): propagate layouts through the
                 // content-addressed path so `load_linked_program` → VM
                 // preserves enough metadata for the raw producer path.
