@@ -45,8 +45,9 @@ use crate::type_schema::register_predeclared_any_schema;
 use crate::typed_module_exports::{ConcreteReturn, ConcreteType, TypedReturn};
 use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::{Reader, Writer};
-use shape_value::heap_value::{HashMapData, HeapValue, TypedArrayData, TypedObjectStorage};
-use shape_value::{HeapKind, NativeKind, TypedBuffer, ValueSlot};
+use shape_value::heap_value::{HashMapData, HeapValue, TypedObjectStorage};
+use shape_value::v2::typed_array::TypedArray;
+use shape_value::{HeapKind, NativeKind, ValueSlot};
 use std::io::Cursor;
 use std::sync::Arc;
 
@@ -93,27 +94,43 @@ impl ElementData {
         }
         let attrs_data: shape_value::heap_value::HashMapKindedRef =
             shape_value::heap_value::HashMapKindedRef::String(Arc::new(attrs_data));
-        // Recurse: each child becomes its own TypedObject.
-        // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): variant payload
-        // and `TypedArrayData::TypedObject` element type both flipped to
-        // `TypedObjectPtr`. The clone bumps the v2-raw refcount via
-        // `v2_retain` per the wrapper's Clone impl.
-        let child_objs: Vec<shape_value::heap_value::TypedObjectPtr> = self
+        // Recurse: each child becomes its own TypedObject. The child raw
+        // `*const TypedObjectStorage` pointers are packed into a
+        // `*mut TypedArray<*const TypedObjectStorage>` flat-struct carrier
+        // per V3-S5 ckpt-5-prime²c Migration shape (a) (the deleted
+        // `TypedArrayData::TypedObject` enum-arm shape). The
+        // `TypedObjectStorage` type impls `v2::heap_element::HeapElement`
+        // (`heap_value.rs:3971`), so per-element retain/release dispatches
+        // through `v2_retain` / `v2_release` on the on-header refcount.
+        //
+        // Each child `into_typed_object_arc()` returns an `Arc<HeapValue>`
+        // wrapping `HeapValue::TypedObject(TypedObjectPtr)` — we extract
+        // the inner raw pointer via `into_raw()` (transferring the
+        // wrapper's one refcount share to the raw pointer, which the
+        // `TypedArray` takes ownership of as an element).
+        let child_ptrs: Vec<*const TypedObjectStorage> = self
             .children
             .into_iter()
             .map(|c| {
                 let child_hv = c.into_typed_object_arc();
-                match &*child_hv {
+                // Extract inner TypedObjectPtr by cloning out and consuming.
+                let to_ptr = match &*child_hv {
                     HeapValue::TypedObject(s) => s.clone(),
                     _ => unreachable!(
                         "into_typed_object_arc must return HeapValue::TypedObject"
                     ),
-                }
+                };
+                to_ptr.into_raw()
             })
             .collect();
-        let children_array_data = TypedArrayData::TypedObject(Arc::new(
-            TypedBuffer::from_vec(child_objs),
-        ));
+        let children_arr: *mut TypedArray<*const TypedObjectStorage> =
+            TypedArray::<*const TypedObjectStorage>::from_slice(&child_ptrs);
+        // `from_slice` copies each `*const TypedObjectStorage` bit-for-bit
+        // (raw pointers are Copy). The refcount shares were transferred
+        // from the source `TypedObjectPtr` wrappers into raw pointers
+        // already; the source `Vec<*const _>` doesn't own any share, so
+        // ordinary Drop suffices for the source Vec's heap allocation.
+        // Element-share ownership now lives with the array.
 
         let schema_id = ensure_xml_node_schema();
         // Field-order: name(0), attributes(1), children(2), text(3).
@@ -121,13 +138,21 @@ impl ElementData {
         // text(String) — all 4 fields are heap-resident.
         let name_arc = Arc::new(self.name);
         let attrs_arc = Arc::new(attrs_data);
-        let children_arc = Arc::new(children_array_data);
         let text_arc = Arc::new(self.text.unwrap_or_default());
 
         let slots: Box<[ValueSlot]> = Box::new([
             ValueSlot::from_string_arc(name_arc),
             ValueSlot::from_hashmap(attrs_arc),
-            ValueSlot::from_typed_array(children_arc),
+            // V3-S5 ckpt-5-prime²c (2026-05-15) Migration shape (a): the
+            // `ValueSlot::from_typed_array(Arc<TypedArrayData>)` constructor
+            // is deleted; per-element-kind constructors aren't landed yet
+            // (Round 2 follow-up). Store the raw `*mut TypedArray<T>`
+            // pointer directly via `ValueSlot::from_u64` — this is the
+            // canonical slot-bit shape for `NativeKind::Ptr(HeapKind::
+            // TypedArray)` per `docs/runtime-v2-spec.md`. The schema's
+            // field_kinds[2] = `Ptr(HeapKind::TypedArray)` controls
+            // drop dispatch at slot release time.
+            ValueSlot::from_u64(children_arr as u64),
             ValueSlot::from_string_arc(text_arc),
         ]);
         let field_kinds: Arc<[NativeKind]> = Arc::from(
@@ -320,43 +345,24 @@ fn write_node_pairs(
     writer: &mut Writer<Cursor<Vec<u8>>>,
     pairs: &[(Arc<String>, Arc<HeapValue>)],
 ) -> Result<(), String> {
-    let mut name: Option<String> = None;
-    let mut attrs: Option<shape_value::heap_value::HashMapKindedRef> = None;
-    let mut children: Option<Arc<TypedArrayData>> = None;
-    let mut text: Option<String> = None;
-
-    for (k, v) in pairs.iter() {
-        match k.as_str() {
-            "name" => {
-                if let HeapValue::String(s) = &**v {
-                    name = Some((**s).clone());
-                }
-            }
-            "attributes" => {
-                if let HeapValue::HashMap(kref) = &**v {
-                    // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14):
-                    // payload flipped to `HashMapKindedRef`; clone the
-                    // kinded ref directly (single Arc bump per variant).
-                    attrs = Some(kref.clone());
-                }
-            }
-            "children" => {
-                if let HeapValue::TypedArray(arr) = &**v {
-                    children = Some(Arc::clone(arr));
-                }
-            }
-            "text" => {
-                if let HeapValue::String(s) = &**v {
-                    if !s.is_empty() {
-                        text = Some((**s).clone());
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    write_xml_element(writer, name, attrs.as_ref(), children.as_deref(), text.as_deref())
+    // V3-S5 ckpt-5-prime²c (2026-05-15) SURFACE: the top-level pair-list
+    // shape carries `Arc<HeapValue>` values, but the `HeapValue::TypedArray`
+    // outer arm is deleted (V3-S5 ckpt-5). The `children` field now arrives
+    // as a `*mut TypedArray<TypedObjectPtr>` raw pointer, which has no
+    // `HeapValue::*` wrapper — `Vec<(Arc<String>, Arc<HeapValue>)>` cannot
+    // express it. xml.stringify's top-level reader thus requires the Round 2
+    // `Vec<Arc<HeapValue>>` rewire follow-up to add a per-element-T marshal
+    // path (pairs with `from_typed_array_<T>` constructor wave at
+    // `crates/shape-value/src/slot.rs:142`).
+    let _ = (writer, pairs);
+    let _ = write_xml_element; // keep helper reachable
+    Err(
+        "xml.stringify(): V3-S5 ckpt-5-prime²c SURFACE — top-level \
+         pair-list reader needs Vec<Arc<HeapValue>> rewire for the deleted \
+         outer-array-arm. Round 2 follow-up (pairs with per-element-kind \
+         constructor wave). ADR-006 §2.7.24 Q25.A SUPERSEDED."
+            .to_string(),
+    )
 }
 
 /// Walk a child node — represented as an `Arc<TypedObjectStorage>` with
@@ -429,14 +435,19 @@ fn write_typed_object_node(
             Some(cloned)
         }
     };
-    let children_arc: Option<Arc<TypedArrayData>> = unsafe {
+    // V3-S5 ckpt-5-prime²c (2026-05-15): the children slot now holds a
+    // raw `*mut TypedArray<*const TypedObjectStorage>` per Migration
+    // shape (a) — no outer Arc/wrapper. Element-kind enforcement is by
+    // the storage's `field_kinds[2] = Ptr(HeapKind::TypedArray)` +
+    // body-side element-`T` choice. `TypedObjectStorage` impls
+    // `v2::heap_element::HeapElement` (`heap_value.rs:3971`), so the
+    // element pointers carry on-header refcount shares.
+    let children_ptr: *const TypedArray<*const TypedObjectStorage> = {
         let bits = children_slot.raw();
         if bits == 0 {
-            None
+            std::ptr::null()
         } else {
-            let arc_ptr = bits as *const TypedArrayData;
-            Arc::increment_strong_count(arc_ptr);
-            Some(Arc::from_raw(arc_ptr))
+            bits as usize as *const TypedArray<*const TypedObjectStorage>
         }
     };
     let text: Option<String> = unsafe {
@@ -460,7 +471,7 @@ fn write_typed_object_node(
         writer,
         Some(name),
         attrs_kref.as_ref(),
-        children_arc.as_deref(),
+        children_ptr,
         text.as_deref(),
     )
 }
@@ -469,11 +480,15 @@ fn write_typed_object_node(
 /// given the four parsed XmlNode fields. Pulled out so the top-level
 /// `write_node_pairs` path and the recursive
 /// `write_typed_object_node` path share the same output discipline.
+///
+/// V3-S5 ckpt-5-prime²c (2026-05-15): `children` is the raw
+/// `*const TypedArray<TypedObjectPtr>` carrier per Migration shape (a).
+/// Null pointer means "no children".
 fn write_xml_element(
     writer: &mut Writer<Cursor<Vec<u8>>>,
     name: Option<String>,
     attrs: Option<&shape_value::heap_value::HashMapKindedRef>,
-    children: Option<&TypedArrayData>,
+    children: *const TypedArray<*const TypedObjectStorage>,
     text: Option<&str>,
 ) -> Result<(), String> {
     let name = name.ok_or_else(|| "xml.stringify(): node missing 'name' field".to_string())?;
@@ -514,13 +529,16 @@ fn write_xml_element(
         }
     }
 
-    // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): TypedArrayData::TypedObject
-    // inner element type flipped from `Arc<TypedObjectStorage>` to `TypedObjectPtr`.
-    let child_objs: Option<&Arc<TypedBuffer<shape_value::heap_value::TypedObjectPtr>>> = match children {
-        Some(TypedArrayData::TypedObject(buf)) => Some(buf),
-        _ => None,
+    // V3-S5 ckpt-5-prime²c (2026-05-15) Migration shape (a): children
+    // carrier is `*const TypedArray<TypedObjectPtr>`. Null means "no
+    // children". Element discriminator is the body-side `T` choice +
+    // schema's `field_kinds[2] = Ptr(HeapKind::TypedArray)`.
+    let child_count: u32 = if children.is_null() {
+        0
+    } else {
+        unsafe { TypedArray::<*const TypedObjectStorage>::len(children) }
     };
-    let has_children = child_objs.map(|b| !b.data.is_empty()).unwrap_or(false);
+    let has_children = child_count > 0;
     let has_text = text.is_some();
 
     if !has_children && !has_text {
@@ -538,12 +556,20 @@ fn write_xml_element(
                 .map_err(|e| format!("xml.stringify() write error: {}", e))?;
         }
 
-        if let Some(buf) = child_objs {
-            for child in buf.data.iter() {
-                // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): `child`
-                // is `&TypedObjectPtr`. Deref to `&TypedObjectStorage` for
-                // the helper signature.
-                write_typed_object_node(writer, &**child)?;
+        if has_children {
+            // SAFETY: `children` is non-null (checked above) and points to
+            // a live `TypedArray<*const TypedObjectStorage>` per the
+            // construction contract in `ElementData::into_typed_object_arc`.
+            let slice = unsafe {
+                TypedArray::<*const TypedObjectStorage>::as_slice(children)
+            };
+            for &child_ptr in slice.iter() {
+                // SAFETY: per the construction contract each element is a
+                // live `*const TypedObjectStorage` with refcount >= 1 owed
+                // to the array's element slot.
+                unsafe {
+                    write_typed_object_node(writer, &*child_ptr)?;
+                }
             }
         }
 

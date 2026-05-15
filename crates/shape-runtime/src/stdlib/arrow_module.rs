@@ -94,7 +94,7 @@ pub fn create_arrow_module() -> ModuleExports {
             // W17-typed-carrier-array-datatable follow-up.
             Err(format!(
                 "arrow.read_tables(): SURFACE — `Array<DataTable>` needs a \
-                 `TypedArrayData::DataTable` specialized variant in ADR-006 \
+                 typed-array-data DataTable specialized variant in ADR-006 \
                  §2.7.24 Q25.A's spec list. Tracked as \
                  W17-typed-carrier-array-datatable follow-up \
                  (out of bundle-A-followups scope: new TypedArrayData arm \

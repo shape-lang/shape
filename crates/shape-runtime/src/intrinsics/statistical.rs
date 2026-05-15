@@ -18,7 +18,6 @@ use crate::marshal::{register_typed_fn_1, register_typed_fn_2};
 use crate::module_exports::ModuleExports;
 use crate::simd_statistics;
 use crate::typed_module_exports::{ConcreteReturn, ConcreteType, TypedReturn};
-use shape_value::AlignedTypedBuffer;
 use std::sync::Arc;
 
 // ───────────────────── Module factory (4 typed entries) ─────────────────────
@@ -29,7 +28,7 @@ pub fn create_statistical_intrinsics_module() -> ModuleExports {
     module.description = "Statistical intrinsics (correlation, covariance, percentile, median)"
         .to_string();
 
-    register_typed_fn_2::<_, Arc<AlignedTypedBuffer>, Arc<AlignedTypedBuffer>>(
+    register_typed_fn_2::<_, Arc<Vec<f64>>, Arc<Vec<f64>>>(
         &mut module,
         "__intrinsic_correlation",
         "Pearson correlation coefficient between two Vec<number>",
@@ -53,7 +52,7 @@ pub fn create_statistical_intrinsics_module() -> ModuleExports {
         },
     );
 
-    register_typed_fn_2::<_, Arc<AlignedTypedBuffer>, Arc<AlignedTypedBuffer>>(
+    register_typed_fn_2::<_, Arc<Vec<f64>>, Arc<Vec<f64>>>(
         &mut module,
         "__intrinsic_covariance",
         "Covariance between two Vec<number>",
@@ -73,7 +72,7 @@ pub fn create_statistical_intrinsics_module() -> ModuleExports {
         },
     );
 
-    register_typed_fn_2::<_, Arc<AlignedTypedBuffer>, f64>(
+    register_typed_fn_2::<_, Arc<Vec<f64>>, f64>(
         &mut module,
         "__intrinsic_percentile",
         "Percentile (0-100) of a Vec<number> via O(n) average-case quickselect",
@@ -95,7 +94,7 @@ pub fn create_statistical_intrinsics_module() -> ModuleExports {
         },
     );
 
-    register_typed_fn_1::<_, Arc<AlignedTypedBuffer>>(
+    register_typed_fn_1::<_, Arc<Vec<f64>>>(
         &mut module,
         "__intrinsic_median",
         "Median (50th percentile) of a Vec<number>",

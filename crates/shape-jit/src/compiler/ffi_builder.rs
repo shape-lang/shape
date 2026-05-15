@@ -194,6 +194,9 @@ impl JITCompiler {
             v2_array_new_i64: r!("jit_v2_array_new_i64"),
             v2_array_new_i32: r!("jit_v2_array_new_i32"),
             v2_array_new_bool: r!("jit_v2_array_new_bool"),
+            // ckpt-6-prime Group X JIT FFI String/Decimal BUILD (2026-05-15)
+            v2_array_new_string: r!("jit_new_typed_array_string"),
+            v2_array_new_decimal: r!("jit_new_typed_array_decimal"),
 
             // v2 typed-array push (generic dispatcher — see ffi_refs.rs)
             v2_array_push: r!("jit_v2_array_push"),

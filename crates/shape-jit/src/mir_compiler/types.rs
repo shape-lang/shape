@@ -81,6 +81,16 @@ pub(crate) fn is_v2_heap_slot(kind: NativeKind) -> bool {
 
 /// Map a `ConcreteType` element type to the matching `NativeKind` for the v2
 /// typed-array codegen helpers (`v2_array_get`/`v2_array_set`).
+///
+/// ckpt-6-prime Group X JIT FFI String/Decimal BUILD (2026-05-15):
+/// extended with `String → StringV2` / `Decimal → DecimalV2` per ADR-006
+/// §2.7.5 + §2.7.24 Q25.A SUPERSEDED + audit deliverable (b) §4.1.B. The
+/// `StringV2` / `DecimalV2` element kinds route through the v2-raw
+/// `TypedArray<*const StringObj>` / `TypedArray<*const DecimalObj>`
+/// allocators added in `v2_array_new_func`; per-element literal-upgrade
+/// is handled in `emit_v2_array_aggregate`'s StringV2/DecimalV2 arms
+/// mirroring the VM-side `NewStringV2` / `NewDecimalV2` opcodes at
+/// `crates/shape-vm/src/executor/v2_handlers/array.rs:803-858`.
 pub(crate) fn elem_slot_kind_for_concrete(elem: &ConcreteType) -> Option<NativeKind> {
     match elem {
         ConcreteType::F64 => Some(NativeKind::Float64),
@@ -97,6 +107,13 @@ pub(crate) fn elem_slot_kind_for_concrete(elem: &ConcreteType) -> Option<NativeK
         // ADR-006 §2.7.5 amendment.
         ConcreteType::F32 => Some(NativeKind::Float32),
         ConcreteType::Char => Some(NativeKind::Char),
+        // ckpt-6-prime Group X JIT FFI String/Decimal BUILD (2026-05-15):
+        // Array<string> / Array<decimal> route through v2-raw
+        // `TypedArray<*const StringObj>` / `TypedArray<*const DecimalObj>`
+        // carriers per ADR-006 §2.7.5 + §2.7.24 Q25.A SUPERSEDED + audit
+        // deliverable (b) §4.1.B.
+        ConcreteType::String => Some(NativeKind::StringV2),
+        ConcreteType::Decimal => Some(NativeKind::DecimalV2),
         _ => None,
     }
 }

@@ -1114,7 +1114,8 @@ fn rewrap_typed_array_elements(
     Err(VMError::NotImplemented(format!(
         "SURFACE: DynMethodCall BoxedReturn with Array<Self> return + \
          wrap_targets {:?} per ADR-006 §2.7.24 Q25.A SUPERSEDED #1 — \
-         the prior re-box pathway produced TypedArrayData::TraitObject, \
+         the prior re-box pathway produced the deleted typed-array-data \
+         TraitObject variant, \
          which is deleted (Wave 2 Round 1 Agent F, 2026-05-14, dead-arm \
          wholesale deletion). A user-facing Array<dyn T> carrier lands \
          per audit §A.3 row when reachability is required.",

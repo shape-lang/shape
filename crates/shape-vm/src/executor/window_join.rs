@@ -40,13 +40,13 @@ use crate::executor::vm_impl::stack::drop_with_kind;
 use shape_runtime::context::ExecutionContext;
 use shape_value::heap_value::HeapKind;
 use shape_value::{
-    HeapValue, KindedSlot, NativeKind, TableViewData, TypedArrayData, VMError,
+    HeapValue, KindedSlot, NativeKind, TableViewData, VMError,
 };
 
 use super::VirtualMachine;
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Local helpers (§2.7.6 / Q8 heterogeneous-kind body pattern)
+// Local helpers
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[inline]
@@ -54,67 +54,41 @@ fn type_error(msg: impl Into<String>) -> VMError {
     VMError::RuntimeError(msg.into())
 }
 
-/// Borrow the `Arc<TypedArrayData>` payload from a `KindedSlot` whose
-/// `kind == NativeKind::Ptr(HeapKind::TypedArray)`. Heap dispatch follows
-/// ADR-005 §1: project through `slot.as_heap_value()` then pattern-match
-/// the `HeapValue::TypedArray` arm — no per-heap-variant `KindedSlot`
-/// accessor (§2.7.6 / Q8 carrier-API-bound).
-#[inline]
-fn as_typed_array(slot: &KindedSlot) -> Option<&Arc<TypedArrayData>> {
-    if !matches!(slot.kind, NativeKind::Ptr(HeapKind::TypedArray)) {
-        return None;
-    }
-    match slot.slot.as_heap_value() {
-        HeapValue::TypedArray(arc) => Some(arc),
-        _ => None,
-    }
-}
+// ═══════════════════════════════════════════════════════════════════════════
+// V3-S5 ckpt-5 (2026-05-15): TypedArrayData helpers DELETED
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// `as_typed_array` / `typed_array_to_f64_vec` / `typed_array_len`
+// (TypedArrayData consumers) were deleted. The `Arc<TypedArrayData>`
+// payload + `HeapValue::TypedArray` outer arm + `HeapKind::TypedArray=8`
+// ordinal were retired at V3-S5 ckpt-1..ckpt-4 per W12-typed-array-data-
+// deletion-audit §3.5 + §B + ADR-006 §2.7.24 Q25.A SUPERSEDED. The
+// window-function aggregate handlers (`handle_window_sum_v2`,
+// `handle_window_avg_v2`, `handle_window_min_v2`, `handle_window_max_v2`,
+// `handle_window_count_v2`) that consumed those helpers surface-and-stop
+// at ckpt-5; rebuild lands at ckpt-6 STRICT close per the per-element-kind
+// v2-raw `TypedArray<T>` direct-access target.
+//
+// Refusal #1 binding.
 
-/// Project a numeric `TypedArrayData` arm to a `Vec<f64>` for aggregate
-/// dispatch. Returns `None` for non-numeric arms (`Bool`, `String`,
-/// `HeapValue`, `Matrix`, `FloatSlice`) — caller surfaces a type error.
-/// Kind-source: per-arm `TypedArrayData::*` match (§2.7.7 parallel-kind
-/// already encoded in the arm choice). Mirrors the `builtins/math.rs`
-/// `builtin_stddev` body pattern.
-fn typed_array_to_f64_vec(arr: &TypedArrayData) -> Option<Vec<f64>> {
-    Some(match arr {
-        TypedArrayData::F64(buf) => buf.iter().copied().collect(),
-        TypedArrayData::I64(buf) => buf.iter().map(|&v| v as f64).collect(),
-        TypedArrayData::I32(buf) => buf.iter().map(|&v| v as f64).collect(),
-        TypedArrayData::I16(buf) => buf.iter().map(|&v| v as f64).collect(),
-        TypedArrayData::I8(buf) => buf.iter().map(|&v| v as f64).collect(),
-        TypedArrayData::U64(buf) => buf.iter().map(|&v| v as f64).collect(),
-        TypedArrayData::U32(buf) => buf.iter().map(|&v| v as f64).collect(),
-        TypedArrayData::U16(buf) => buf.iter().map(|&v| v as f64).collect(),
-        TypedArrayData::U8(buf) => buf.iter().map(|&v| v as f64).collect(),
-        TypedArrayData::F32(buf) => buf.iter().map(|&v| v as f64).collect(),
-        _ => return None,
-    })
-}
-
-/// Length of any `TypedArrayData` arm.
-fn typed_array_len(arr: &TypedArrayData) -> usize {
-    match arr {
-        TypedArrayData::I64(b) => b.len(),
-        TypedArrayData::F64(b) => b.len(),
-        TypedArrayData::Bool(b) => b.len(),
-        TypedArrayData::I8(b) => b.len(),
-        TypedArrayData::I16(b) => b.len(),
-        TypedArrayData::I32(b) => b.len(),
-        TypedArrayData::U8(b) => b.len(),
-        TypedArrayData::U16(b) => b.len(),
-        TypedArrayData::U32(b) => b.len(),
-        TypedArrayData::U64(b) => b.len(),
-        TypedArrayData::F32(b) => b.len(),
-        TypedArrayData::String(b) => b.len(),
-        // ADR-006 §2.7.22 amendment (Round 18 S3): Matrix / FloatSlice
-        // exit `TypedArrayData`.
-        // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
-        TypedArrayData::Decimal(b) => b.len(),
-        TypedArrayData::BigInt(b) => b.len(),
-        TypedArrayData::Char(b) => b.len(),
-        TypedArrayData::TypedObject(b) => b.len(),
-    }
+/// Common surface-and-stop body for the TypedArrayData-dependent window
+/// aggregate handlers in this file. Returns a structured
+/// `VMError::NotImplemented` citing the V3-S5 ckpt-5 cascade state.
+#[cold]
+#[inline(never)]
+fn ckpt5_window_surface(op: &'static str) -> VMError {
+    VMError::NotImplemented(format!(
+        "{op}: SURFACE — V3-S5 ckpt-5 consumer-cascade tier 3 surface. \
+         `Arc<TypedArrayData>` carrier + per-arm dispatch helpers \
+         (`as_typed_array` / `typed_array_to_f64_vec` / `typed_array_len`) \
+         DELETED across V3-S5 ckpt-1..ckpt-4 per W12-typed-array-data-\
+         deletion-audit §3.5 + §B + ADR-006 §2.7.24 Q25.A SUPERSEDED. \
+         Window-aggregate scalar arm preserved (Int64/Float64); array arm \
+         rebuild lands at ckpt-6 STRICT close per per-element-kind v2-raw \
+         `TypedArray<T>` direct-access target. REFUSED ON SIGHT: \
+         TypedArrayData resurrection under any rename (Refusal #1).",
+        op = op,
+    ))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -204,16 +178,9 @@ pub(crate) fn handle_window_sum_v2(
     })?;
     match arg.kind {
         NativeKind::Int64 | NativeKind::Float64 => Ok(arg.clone()),
-        NativeKind::Ptr(HeapKind::TypedArray) => {
-            let arc = as_typed_array(arg).ok_or_else(|| {
-                type_error("WindowSum: receiver kind=TypedArray but heap arm mismatched")
-            })?;
-            match typed_array_to_f64_vec(arc.as_ref()) {
-                Some(values) => Ok(KindedSlot::from_number(values.iter().sum())),
-                None => Ok(KindedSlot::from_number(0.0)),
-            }
-        }
-        _ => Ok(KindedSlot::from_number(0.0)),
+        // V3-S5 ckpt-5: TypedArray arm surface; rebuild at ckpt-6 STRICT
+        // close per per-element-kind v2-raw `TypedArray<T>` direct access.
+        _ => Err(ckpt5_window_surface("WindowSum")),
     }
 }
 
@@ -236,19 +203,8 @@ pub(crate) fn handle_window_avg_v2(
             Ok(KindedSlot::from_number(i as f64))
         }
         NativeKind::Float64 => Ok(arg.clone()),
-        NativeKind::Ptr(HeapKind::TypedArray) => {
-            let arc = as_typed_array(arg).ok_or_else(|| {
-                type_error("WindowAvg: receiver kind=TypedArray but heap arm mismatched")
-            })?;
-            match typed_array_to_f64_vec(arc.as_ref()) {
-                Some(values) if !values.is_empty() => {
-                    let sum: f64 = values.iter().sum();
-                    Ok(KindedSlot::from_number(sum / values.len() as f64))
-                }
-                _ => Ok(KindedSlot::none()),
-            }
-        }
-        _ => Ok(KindedSlot::none()),
+        // V3-S5 ckpt-5: TypedArray arm surface; ckpt-6 rebuild target.
+        _ => Err(ckpt5_window_surface("WindowAvg")),
     }
 }
 
@@ -278,40 +234,14 @@ fn handle_window_min_max_inner(
     args: &[KindedSlot],
     pick_max: bool,
 ) -> Result<KindedSlot, VMError> {
+    let _ = pick_max;
     let arg = args.first().ok_or_else(|| {
         type_error("WindowMin/Max requires at least 1 argument (value or array)")
     })?;
     match arg.kind {
         NativeKind::Int64 | NativeKind::Float64 => Ok(arg.clone()),
-        NativeKind::Ptr(HeapKind::TypedArray) => {
-            let arc = as_typed_array(arg).ok_or_else(|| {
-                type_error("WindowMin/Max: receiver kind=TypedArray but heap arm mismatched")
-            })?;
-            match typed_array_to_f64_vec(arc.as_ref()) {
-                Some(values) if !values.is_empty() => {
-                    let init = if pick_max {
-                        f64::NEG_INFINITY
-                    } else {
-                        f64::INFINITY
-                    };
-                    let folded = values.iter().fold(
-                        init,
-                        if pick_max {
-                            |a: f64, &b: &f64| a.max(b)
-                        } else {
-                            |a: f64, &b: &f64| a.min(b)
-                        },
-                    );
-                    if folded.is_infinite() {
-                        Ok(KindedSlot::none())
-                    } else {
-                        Ok(KindedSlot::from_number(folded))
-                    }
-                }
-                _ => Ok(KindedSlot::none()),
-            }
-        }
-        _ => Ok(KindedSlot::none()),
+        // V3-S5 ckpt-5: TypedArray arm surface; ckpt-6 rebuild target.
+        _ => Err(ckpt5_window_surface("WindowMin/Max")),
     }
 }
 
@@ -332,20 +262,12 @@ pub(crate) fn handle_window_count_v2(
         None => return Ok(KindedSlot::from_int(0)),
     };
     match arg.kind {
-        NativeKind::Ptr(HeapKind::TypedArray) => {
-            let arc = as_typed_array(arg).ok_or_else(|| {
-                type_error("WindowCount: receiver kind=TypedArray but heap arm mismatched")
-            })?;
-            // Typed buffer entries are non-null by §2.7.7 storage shape;
-            // `Vec<T?>` would dispatch through a Nullable* arm not yet
-            // wired (Phase-2c reentry alongside HashMapData / nullable
-            // typed-buffer track).
-            Ok(KindedSlot::from_int(typed_array_len(arc.as_ref()) as i64))
-        }
         // Inline scalars: count 1 for non-null. None / unit slots have
         // raw bits == 0 and Bool kind by convention; treat raw 0 as 0.
         NativeKind::Bool if arg.slot.raw() == 0 => Ok(KindedSlot::from_int(0)),
-        _ => Ok(KindedSlot::from_int(1)),
+        NativeKind::Int64 | NativeKind::Float64 | NativeKind::Bool => Ok(KindedSlot::from_int(1)),
+        // V3-S5 ckpt-5: TypedArray arm surface; ckpt-6 rebuild target.
+        _ => Err(ckpt5_window_surface("WindowCount")),
     }
 }
 
@@ -733,50 +655,13 @@ impl VirtualMachine {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    //! Pure-fn coverage for the local helpers + the receiver-classification
-    //! fast paths of the window handlers. Full handler tests need a
-    //! `VirtualMachine` instance and are deferred to the W9 / W11
-    //! integration-harness re-fill (mirrors the test deferral pattern
-    //! `array_sort.rs::handle_join_str_v2` documents).
-    use super::*;
-    use shape_value::AlignedVec;
-    use shape_value::typed_buffer::{AlignedTypedBuffer, TypedBuffer};
-
-    fn f64_arr(values: &[f64]) -> Arc<TypedArrayData> {
-        let mut av = AlignedVec::new();
-        for &v in values {
-            av.push(v);
-        }
-        Arc::new(TypedArrayData::F64(Arc::new(AlignedTypedBuffer::from(av))))
-    }
-
-    fn i64_arr(values: Vec<i64>) -> Arc<TypedArrayData> {
-        Arc::new(TypedArrayData::I64(Arc::new(TypedBuffer::from(values))))
-    }
-
-    fn bool_arr(values: Vec<u8>) -> Arc<TypedArrayData> {
-        Arc::new(TypedArrayData::Bool(Arc::new(TypedBuffer::from(values))))
-    }
-
-    #[test]
-    fn typed_array_len_arms() {
-        assert_eq!(typed_array_len(&f64_arr(&[1.0, 2.0, 3.0])), 3);
-        assert_eq!(typed_array_len(&i64_arr(vec![10, 20, 30, 40])), 4);
-        assert_eq!(typed_array_len(&bool_arr(vec![1, 0, 1])), 3);
-    }
-
-    #[test]
-    fn typed_array_to_f64_vec_numeric_arms() {
-        assert_eq!(
-            typed_array_to_f64_vec(&f64_arr(&[1.5, 2.5, 3.5])).unwrap(),
-            vec![1.5, 2.5, 3.5]
-        );
-        assert_eq!(
-            typed_array_to_f64_vec(&i64_arr(vec![10, 20, 30])).unwrap(),
-            vec![10.0, 20.0, 30.0]
-        );
-        assert!(typed_array_to_f64_vec(&bool_arr(vec![1, 0])).is_none());
-    }
-}
+// V3-S5 ckpt-5 (2026-05-15): test module gated. The tests asserted on
+// `typed_array_len` and `typed_array_to_f64_vec` (deleted helpers) and
+// constructed `Arc<TypedArrayData>` via `TypedBuffer::from(values)` /
+// `AlignedTypedBuffer::from(av)` (deleted carriers per V3-S5 ckpt-1..
+// ckpt-4 per W12-typed-array-data-deletion-audit §3.5 + §B + ADR-006
+// §2.7.24 Q25.A SUPERSEDED). Tests preserved in git history at the
+// W8-WJ landing commit. Rebuild lands at ckpt-6 STRICT close per the
+// per-element-kind v2-raw `TypedArray<T>` direct-access target.
+#[cfg(any())]
+mod tests {}

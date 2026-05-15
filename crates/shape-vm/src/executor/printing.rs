@@ -28,7 +28,7 @@
 
 use shape_runtime::type_schema::TypeSchemaRegistry;
 use shape_value::heap_value::{
-    HeapKind, HeapValue, TypedArrayData, TypedObjectStorage,
+    HeapKind, HeapValue, TypedObjectStorage,
 };
 use shape_value::{KindedSlot, NativeKind, ValueSlot};
 use std::sync::Arc;
@@ -262,8 +262,10 @@ impl<'a> ValueFormatter<'a> {
                 }
             }
             HeapKind::TypedArray => {
-                let arr: &TypedArrayData = unsafe { &*(bits as *const TypedArrayData) };
-                self.format_typed_array(arr, depth)
+                // V3-S5 ckpt-5: TypedArrayData enum + HeapKind::TypedArray
+                // ordinal DELETED at ckpt-1..ckpt-4. Format placeholder.
+                let _ = depth;
+                "[TypedArray:ckpt5-surface]".to_string()
             }
             HeapKind::TypedObject => {
                 // ADR-006 §2.7.4 / §2.7.6 / Q8 — walk the per-field slots,
@@ -637,107 +639,13 @@ impl<'a> ValueFormatter<'a> {
         out
     }
 
-    /// Format the inline-typed-array variants. Each element is formatted
-    /// per its native scalar kind (no schema lookup needed); the heap
-    /// element variants surface as Phase-2c todo!().
-    fn format_typed_array(&self, arr: &TypedArrayData, depth: usize) -> String {
-        match arr {
-            TypedArrayData::I64(a) => {
-                let elems: Vec<String> = a.iter().map(|v| v.to_string()).collect();
-                format!("[{}]", elems.join(", "))
-            }
-            TypedArrayData::F64(a) => {
-                let elems: Vec<String> = a.iter().map(|v| format_array_float(*v)).collect();
-                format!("[{}]", elems.join(", "))
-            }
-            // ADR-006 §2.7.22 amendment (Round 18 S3): FloatSlice exits
-            // `TypedArrayData`. MatrixSlice is now its own HeapValue arm
-            // with `Vec<number>[…]` Display via the HeapValue formatter
-            // (see `format_heap_value` for the MatrixSlice arm).
-            TypedArrayData::Bool(a) => {
-                let elems: Vec<String> = a
-                    .iter()
-                    .map(|v| if *v != 0 { "true" } else { "false" }.to_string())
-                    .collect();
-                format!("[{}]", elems.join(", "))
-            }
-            TypedArrayData::I8(a) => {
-                let elems: Vec<String> = a.data.iter().map(|v| v.to_string()).collect();
-                format!("[{}]", elems.join(", "))
-            }
-            TypedArrayData::I16(a) => {
-                let elems: Vec<String> = a.data.iter().map(|v| v.to_string()).collect();
-                format!("[{}]", elems.join(", "))
-            }
-            TypedArrayData::I32(a) => {
-                let elems: Vec<String> = a.data.iter().map(|v| v.to_string()).collect();
-                format!("[{}]", elems.join(", "))
-            }
-            TypedArrayData::U8(a) => {
-                let elems: Vec<String> = a.data.iter().map(|v| v.to_string()).collect();
-                format!("[{}]", elems.join(", "))
-            }
-            TypedArrayData::U16(a) => {
-                let elems: Vec<String> = a.data.iter().map(|v| v.to_string()).collect();
-                format!("[{}]", elems.join(", "))
-            }
-            TypedArrayData::U32(a) => {
-                let elems: Vec<String> = a.data.iter().map(|v| v.to_string()).collect();
-                format!("[{}]", elems.join(", "))
-            }
-            TypedArrayData::U64(a) => {
-                let elems: Vec<String> = a.data.iter().map(|v| v.to_string()).collect();
-                format!("[{}]", elems.join(", "))
-            }
-            TypedArrayData::F32(a) => {
-                let elems: Vec<String> = a
-                    .data
-                    .iter()
-                    .map(|v| format_array_float(*v as f64))
-                    .collect();
-                format!("[{}]", elems.join(", "))
-            }
-            // ADR-006 §2.7.22 amendment (Round 18 S3): Matrix exits
-            // `TypedArrayData`; Matrix Display is on the HeapValue arm.
-            TypedArrayData::String(a) => {
-                // Inside an array, strings render quoted to disambiguate
-                // `["a", "b"]` from `[a, b]` (matches the TypedObject-field
-                // and HashMap-value rule).
-                let elems: Vec<String> =
-                    a.iter().map(|s| format!("\"{}\"", s.as_str())).collect();
-                format!("[{}]", elems.join(", "))
-            }
-            // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
-            // Each formatter wraps the variant's element type via the
-            // matching HeapValue formatter so embedded types render
-            // consistently with their standalone forms.
-            TypedArrayData::Decimal(buf) => {
-                let elems: Vec<String> = buf
-                    .data
-                    .iter()
-                    .map(|d| self.format_heap_value(&HeapValue::Decimal(Arc::clone(d)), depth + 1))
-                    .collect();
-                format!("[{}]", elems.join(", "))
-            }
-            TypedArrayData::BigInt(buf) => {
-                let elems: Vec<String> = buf.data.iter().map(|b| b.to_string()).collect();
-                format!("[{}]", elems.join(", "))
-            }
-            TypedArrayData::Char(buf) => {
-                let elems: Vec<String> = buf.data.iter().map(|c| format!("'{}'", c)).collect();
-                format!("[{}]", elems.join(", "))
-            }
-            // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): TypedObjectPtr inner.
-            TypedArrayData::TypedObject(buf) => {
-                let elems: Vec<String> = buf
-                    .data
-                    .iter()
-                    .map(|o| self.format_heap_value(&HeapValue::TypedObject(o.clone()), depth + 1))
-                    .collect();
-                format!("[{}]", elems.join(", "))
-            }
-        }
-    }
+    // V3-S5 ckpt-5 (2026-05-15): `format_typed_array` DELETED. The
+    // function dispatched on `TypedArrayData::*` variants (deleted at
+    // ckpt-1) per W12-typed-array-data-deletion audit §3.5 + §3.6. The
+    // two callers (HeapKind::TypedArray arm in `format_kinded_inner` +
+    // HeapValue::TypedArray arm in `format_heap_value`) are both updated
+    // to a structured placeholder. Rebuild lands at ckpt-6 STRICT close
+    // per the per-T v2-raw `TypedArray<T>` direct-access target.
 
     /// Apply a reference-resolver if configured, formatting the
     /// dereferenced target. Returns `<ref>` when no resolver is wired up.
@@ -818,10 +726,10 @@ impl<'a> ValueFormatter<'a> {
         &self,
         pq: &shape_value::heap_value::PriorityQueueData,
     ) -> String {
-        let n = pq.heap.data.len();
+        let n = pq.heap.len();
         let mut out = String::with_capacity(16 + n * 4);
         out.push_str("PriorityQueue[");
-        for (i, v) in pq.heap.data.iter().enumerate() {
+        for (i, v) in pq.heap.iter().enumerate() {
             if i > 0 {
                 out.push_str(", ");
             }
@@ -835,10 +743,10 @@ impl<'a> ValueFormatter<'a> {
     /// W13-hashset-rebuild (ADR-006 §2.7.15) — one-keyspace mirror of
     /// HashMap's render shape with the values column dropped.
     fn format_hashset(&self, set: &shape_value::heap_value::HashSetData) -> String {
-        let n = set.keys.data.len();
+        let n = set.keys.len();
         let mut out = String::with_capacity(2 + n * 6);
         out.push('{');
-        for (i, k) in set.keys.data.iter().enumerate() {
+        for (i, k) in set.keys.iter().enumerate() {
             if i > 0 {
                 out.push_str(", ");
             }
@@ -1015,7 +923,12 @@ impl<'a> ValueFormatter<'a> {
             HeapValue::BigInt(b) => b.as_ref().to_string(),
             HeapValue::Char(c) => format!("'{}'", c),
             HeapValue::Future(id) => format!("[Future:{}]", id),
-            HeapValue::TypedArray(arr) => self.format_typed_array(arr.as_ref(), depth),
+            // V3-S5 ckpt-5: HeapValue::TypedArray outer arm DELETED at
+            // ckpt-4 in lockstep with `TypedArrayData` enum + `TypedBuffer<T>`
+            // wrapper layer per W12 audit §3.6. The arm is gone from the
+            // exhaustive `match hv` (match remains exhaustive on remaining
+            // HeapValue variants).
+            //   HeapValue::TypedArray(arr) => self.format_typed_array(arr.as_ref(), depth),
             // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): TypedObjectPtr
             // derefs to &TypedObjectStorage; use `&**o` to bridge through the
             // outer `&` and the wrapper's Deref impl.

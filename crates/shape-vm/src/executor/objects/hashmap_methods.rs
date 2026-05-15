@@ -76,11 +76,29 @@ use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
 use shape_value::heap_value::{
     HashMapData, HashMapKindedRef, HashMapValueElem, HeapKind, HeapValue,
-    TraitObjectPtr, TypedArrayData, TypedObjectPtr, TypedObjectStorage,
+    TraitObjectPtr, TypedObjectPtr, TypedObjectStorage,
 };
-use shape_value::typed_buffer::TypedBuffer;
 use shape_value::{KindedSlot, NativeKind, ValueSlot, VMError};
 use std::sync::Arc;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// V3-S5 ckpt-5 surface-and-stop builder (TypedArrayData-result methods)
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[cold]
+#[inline(never)]
+fn ckpt5_hashmap_array_surface(op: &'static str) -> VMError {
+    VMError::NotImplemented(format!(
+        "HashMap.{op}: SURFACE — V3-S5 ckpt-5 consumer-cascade tier 3 \
+         surface. `Arc<TypedArrayData>` result carrier DELETED at V3-S5 \
+         ckpt-1..ckpt-4 per W12-typed-array-data-deletion audit §3.5 + \
+         §3.6 + §B + ADR-006 §2.7.24 Q25.A SUPERSEDED. Rebuild lands at \
+         ckpt-6 STRICT close per the per-T v2-raw `TypedArray<T>` carrier \
+         shape. REFUSED ON SIGHT: TypedArrayData resurrection under any \
+         rename (Refusal #1).",
+        op = op,
+    ))
+}
 
 // ── Local helpers ─────────────────────────────────────────────────────────
 
@@ -454,7 +472,12 @@ fn heap_value_arc_to_slot(hv: &Arc<HeapValue>) -> KindedSlot {
         HeapValue::String(s) => KindedSlot::from_string_arc(Arc::clone(s)),
         HeapValue::Decimal(d) => KindedSlot::from_decimal(Arc::clone(d)),
         HeapValue::BigInt(b) => KindedSlot::from_bigint(Arc::clone(b)),
-        HeapValue::TypedArray(a) => KindedSlot::from_typed_array(Arc::clone(a)),
+        // V3-S5 ckpt-6 STRICT close (2026-05-15): `HeapValue::TypedArray(a)
+        // => KindedSlot::from_typed_array(Arc::clone(a))` arm DELETED in
+        // lockstep with the outer `HeapValue::TypedArray` variant + the
+        // `KindedSlot::from_typed_array(Arc<...>)` convenience constructor
+        // (ADR-006 §2.7.24 Q25.A SUPERSEDED). Per-element-T v2-raw
+        // `*mut TypedArray<T>` re-wrapping is downstream-wave territory.
         // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): TypedObjectPtr.
         HeapValue::TypedObject(o) => KindedSlot::from_typed_object_raw(o.clone().into_raw()),
         // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): payload flipped
@@ -570,29 +593,11 @@ pub fn v2_keys(
     if args.len() != 1 {
         return Err(type_error("HashMap.keys() takes no arguments"));
     }
-    let map = as_hashmap(&args[0])?;
-    // Wave 2 Round 3b C2-joint ckpt-4 (2026-05-14): per-V dispatch reads
-    // the v2-raw `*mut TypedArray<*const StringObj>` keys buffer for any
-    // V; deep-copies each StringObj content into `Arc<String>` to satisfy
-    // `TypedArrayData::String(Arc<TypedBuffer<Arc<String>>>)`. The deep
-    // copy is structurally required because the two carriers use
-    // different ownership disciplines (v2-raw refcount vs Rust Arc). The
-    // V variant only affects which `arc.keys` we read — the projection
-    // shape is V-uniform.
-    let keys_ptr = match &*map {
-        HashMapKindedRef::I64(arc) => arc.keys,
-        HashMapKindedRef::F64(arc) => arc.keys,
-        HashMapKindedRef::Bool(arc) => arc.keys,
-        HashMapKindedRef::Char(arc) => arc.keys,
-        HashMapKindedRef::String(arc) => arc.keys,
-        HashMapKindedRef::Decimal(arc) => arc.keys,
-        HashMapKindedRef::TypedObject(arc) => arc.keys,
-        HashMapKindedRef::TraitObject(arc) => arc.keys,
-    };
-    let keys_vec: Vec<Arc<String>> = unsafe { read_keys_owned(keys_ptr) };
-    Ok(KindedSlot::from_typed_array(Arc::new(
-        TypedArrayData::String(Arc::new(TypedBuffer::from_vec(keys_vec))),
-    )))
+    let _ = as_hashmap(&args[0])?;
+    // Suppress unused-fn warning for the helper used by the deleted
+    // body; the helper itself has no TypedArrayData dependency.
+    let _ = read_keys_owned;
+    Err(ckpt5_hashmap_array_surface("keys"))
 }
 
 /// HashMap.values() -> Array<value>
@@ -608,96 +613,9 @@ pub fn v2_values(
     if args.len() != 1 {
         return Err(type_error("HashMap.values() takes no arguments"));
     }
-    let map = as_hashmap(&args[0])?;
-    // Wave 2 Round 3b C2-joint ckpt-4 (2026-05-14): per-V dispatch reads
-    // `arc.values: *mut TypedArray<V>` and deep-copies elements into the
-    // matching `TypedArrayData::<V>` arm. Deep copy is structurally
-    // required (different carrier ownership disciplines).
-    let n = kref_len(&map);
-    let array = match &*map {
-        HashMapKindedRef::I64(arc) => {
-            let data: Vec<i64> = (0..n)
-                .map(|i| unsafe { *(*arc.values).data.add(i) })
-                .collect();
-            TypedArrayData::I64(Arc::new(TypedBuffer::from_vec(data)))
-        }
-        HashMapKindedRef::F64(arc) => {
-            let data: Vec<f64> = (0..n)
-                .map(|i| unsafe { *(*arc.values).data.add(i) })
-                .collect();
-            let av = shape_value::AlignedVec::from_vec(data);
-            TypedArrayData::F64(Arc::new(shape_value::AlignedTypedBuffer::from(av)))
-        }
-        HashMapKindedRef::Bool(arc) => {
-            let data: Vec<u8> = (0..n)
-                .map(|i| unsafe { *(*arc.values).data.add(i) })
-                .collect();
-            TypedArrayData::Bool(Arc::new(TypedBuffer::from_vec(data)))
-        }
-        HashMapKindedRef::Char(arc) => {
-            let data: Vec<char> = (0..n)
-                .map(|i| unsafe { *(*arc.values).data.add(i) })
-                .collect();
-            TypedArrayData::Char(Arc::new(TypedBuffer::from_vec(data)))
-        }
-        HashMapKindedRef::String(arc) => {
-            // V = *const StringObj. Deep-copy to Arc<String> (mirror of
-            // v2_get's projection — TypedArrayData::String stores
-            // Arc<String>, not v2-raw *const StringObj).
-            let data: Vec<Arc<String>> = (0..n)
-                .map(|i| {
-                    let ptr: *const shape_value::v2::string_obj::StringObj =
-                        unsafe { *(*arc.values).data.add(i) };
-                    let s = unsafe {
-                        shape_value::v2::string_obj::StringObj::as_str(ptr).to_owned()
-                    };
-                    Arc::new(s)
-                })
-                .collect();
-            TypedArrayData::String(Arc::new(TypedBuffer::from_vec(data)))
-        }
-        HashMapKindedRef::Decimal(arc) => {
-            // V = *const DecimalObj. Deep-copy to Arc<rust_decimal::Decimal>
-            // for `TypedArrayData::Decimal(Arc<TypedBuffer<Arc<Decimal>>>)`.
-            let data: Vec<Arc<rust_decimal::Decimal>> = (0..n)
-                .map(|i| {
-                    let ptr: *const shape_value::v2::decimal_obj::DecimalObj =
-                        unsafe { *(*arc.values).data.add(i) };
-                    Arc::new(unsafe { (*ptr).value })
-                })
-                .collect();
-            TypedArrayData::Decimal(Arc::new(TypedBuffer::from_vec(data)))
-        }
-        HashMapKindedRef::TypedObject(arc) => {
-            // V = TypedObjectPtr. Clone each element (bumps refcount via
-            // v2_retain on the inner *const TypedObjectStorage) — the new
-            // TypedBuffer owns one fresh share per element.
-            let data: Vec<TypedObjectPtr> = (0..n)
-                .map(|i| {
-                    let elem: &TypedObjectPtr = unsafe { &*(*arc.values).data.add(i) };
-                    elem.clone()
-                })
-                .collect();
-            TypedArrayData::TypedObject(Arc::new(TypedBuffer::from_vec(data)))
-        }
-        HashMapKindedRef::TraitObject(_) => {
-            // TypedArrayData has no TraitObject arm — the dead-but-derived
-            // §C.5 deletion ground-truthed zero root constructors at
-            // HEAD aa047356 (per CLAUDE.md §C.5). Building a HashMap with
-            // `V = TraitObjectPtr` and then calling `.values()` is not
-            // currently reachable from user code; surface cleanly so any
-            // future construction path surfaces the structural gap (per
-            // playbook §6 — no fallback coercion, no synthetic carrier).
-            return Err(type_error(
-                "HashMap.values(): TraitObject value-buffer projection has \
-                 no matching TypedArrayData arm (TraitObject was dead-but-\
-                 derived deleted in Wave 2 Round 1 Agent F per §C.5). \
-                 Adding a v2-raw TypedArrayData::TraitObject arm is a \
-                 separate cluster.",
-            ));
-        }
-    };
-    Ok(KindedSlot::from_typed_array(Arc::new(array)))
+    let _ = as_hashmap(&args[0])?;
+    let _ = kref_len;
+    Err(ckpt5_hashmap_array_surface("values"))
 }
 
 /// HashMap.entries() -> Array<[key, value]>
@@ -786,31 +704,10 @@ pub fn v2_to_array(
 /// User code reads `entry.key` / `entry.value` rather than `entry[0]` /
 /// `entry[1]` — breaking change for stdlib + tests.
 fn build_entries_array(receiver: &KindedSlot) -> Result<KindedSlot, VMError> {
-    let map = as_hashmap(receiver)?;
-    // Wave 2 Round 3b C2-joint ckpt-4 (2026-05-14): per-V walk reading
-    // keys (StringObj → Arc<String>) + per-V values; each entry is a
-    // `{key, value}` Entry TypedObject (W17-typed-carrier-bundle-A
-    // checkpoint-2 amendment). The outer carrier is
-    // `TypedArrayData::TypedObject(Arc<TypedBuffer<TypedObjectPtr>>)`.
-    let keys_ptr = match &*map {
-        HashMapKindedRef::I64(arc) => arc.keys,
-        HashMapKindedRef::F64(arc) => arc.keys,
-        HashMapKindedRef::Bool(arc) => arc.keys,
-        HashMapKindedRef::Char(arc) => arc.keys,
-        HashMapKindedRef::String(arc) => arc.keys,
-        HashMapKindedRef::Decimal(arc) => arc.keys,
-        HashMapKindedRef::TypedObject(arc) => arc.keys,
-        HashMapKindedRef::TraitObject(arc) => arc.keys,
-    };
-    let keys_vec: Vec<Arc<String>> = unsafe { read_keys_owned(keys_ptr) };
-    let n = keys_vec.len();
-    let mut entries: Vec<TypedObjectPtr> = Vec::with_capacity(n);
-    for (i, key_arc) in keys_vec.into_iter().enumerate() {
-        entries.push(entry_object_at(&map, i, key_arc));
-    }
-    Ok(KindedSlot::from_typed_array(Arc::new(
-        TypedArrayData::TypedObject(Arc::new(TypedBuffer::from_vec(entries))),
-    )))
+    let _ = as_hashmap(receiver)?;
+    // Suppress unused-fn warnings for helpers used by the deleted body.
+    let _ = entry_object_at;
+    Err(ckpt5_hashmap_array_surface("entries/toArray"))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

@@ -2,80 +2,97 @@
 //!
 //! Wave 6.5 cluster D sub-cluster D-prop-access (ADR-006 §2.7.6, §2.7.7,
 //! §2.7.8). Heap dispatch uses per-`HeapKind` `Arc::from_raw` recovery
-//! per ADR-006 §2.4 (typed-Arc slots — `as_heap_value()` is the legacy
-//! `Box<HeapValue>` shape and is unsound on `Arc::into_raw`-stored slot
-//! bits for everything except `TypedObject` and the Box-wrapped legacy
-//! arms). Result kinds are sourced from the schema's per-slot
-//! `field_kinds` track (ADR-006 §2.5) for TypedObject reads, never
-//! defaulted to Bool.
+//! per ADR-006 §2.4 (typed-Arc slots).
 //!
-//! ## Wave 9 W9-property-access body re-fill (2026-05-10)
+//! ## V3-S5 ckpt-3 consumer-cascade tier 2 surface (2026-05-15)
 //!
-//! Read-only receiver paths previously left as `NotImplemented(SURFACE)`
-//! are filled per the wave-9 playbook §1 recipe + §2 row:
+//! Per V3-S5 ckpt-1 close (commit `aac8495e`, 2026-05-15), the
+//! `TypedArrayData` enum + impl blocks + `Display for TypedArrayData` +
+//! `typed_array_structural_eq` fn were DELETED at
+//! `crates/shape-value/src/heap_value.rs` per W12-typed-array-data-deletion
+//! audit §3.5 + ADR-006 §2.7.24 Q25.A SUPERSEDED. This file's previous
+//! consumer-shape — TypedArray-receiver paths in `dispatch_get_prop`
+//! (`read_typed_array_index` per-variant element read), `op_length`'s
+//! `Ptr(HeapKind::TypedArray)` arm using `typed_array_len` over
+//! `TypedArrayData::I64 / F64 / Bool / I8 / I16 / I32 / U8 / U16 / U32 /
+//! U64 / F32 / String / Decimal / BigInt / Char / TypedObject` arms —
+//! cascade-breaks here as the deletion's consumer cascade tier 2.
 //!
-//! - **`op_length`**: `Ptr(HeapKind::TypedArray)` walks `TypedArrayData`
-//!   variants for element count; `NativeKind::String` /
-//!   `Ptr(HeapKind::String)` returns `chars().count()` per the
-//!   `v2_string_len` precedent in `string_methods.rs`;
-//!   `Ptr(HeapKind::HashMap)` returns `HashMapData::len()`.
-//! - **`op_get_prop`** with numeric key on `Ptr(HeapKind::TypedArray)`:
-//!   reads the indexed element, retains heap-bearing payloads via
-//!   `clone_with_kind` per WB2.4, pushes `(bits, element_kind)` where
-//!   the element kind is sourced from the variant arm directly.
+//! TypedArray-receiver arms in `dispatch_get_prop` and `op_length` are
+//! replaced with structured surface-and-stop returning
+//! `VMError::NotImplemented`. Local helpers `read_typed_array_index` and
+//! `typed_array_len` are DELETED. Tests `length_typed_array_i64` and
+//! `get_prop_typed_array_i64_index` (which constructed
+//! `TypedArrayData::I64` buffers) are DELETED.
 //!
-//! Mutation paths:
+//! PRESERVED INTACT (no `TypedArrayData` dependency):
+//! - `op_get_prop` outer / `dispatch_get_prop` non-TypedArray arms
+//!   (TypedObject, HashMap/String SURFACE).
+//! - `op_set_prop` full path: TypedObject mutation via
+//!   `TypedObjectStorage::write_slot_in_place`; non-TypedObject SURFACE.
+//! - `write_typed_object_field_by_name` — schema-driven kinded writer.
+//! - `op_set_local_index` / `op_set_module_binding_index` — already SURFACE.
+//! - `op_length`'s `TypedObject` / `String` / `HashMap` arms.
+//! - `numeric_index_from_kinded` — pure `(bits, kind) → usize` projection.
+//! - Tests `length_typed_object_empty`, `length_string_returns_chars_count`,
+//!   `set_prop_typed_object_int_field`, `set_prop_typed_object_non_string_key_errors`.
 //!
-//! - **`op_set_prop`** — TypedObject-receiver arm filled in
-//!   W17-typed-object-mutation (2026-05-11) via
-//!   `TypedObjectStorage::write_slot_in_place` (the kinded projection
-//!   writer added by W17-references-mutation `30b9ebf`, ADR-006
-//!   §2.7.13 / Q14). Non-TypedObject receivers (HashMap, String
-//!   per-codepoint, etc.) remain surfaced — they cascade through
-//!   ADR-006 §2.7.24 Q25.A/B (W17-typed-carrier-monomorphization
-//!   sub-cluster).
-//! - **`op_set_local_index` / `op_set_module_binding_index`** —
-//!   `SetLocalIndex` / `SetModuleBindingIndex` are emitted only for
-//!   array-index assignment when the compiler couldn't resolve the
-//!   element kind statically (the `TypedArraySet*` fast path was not
-//!   chosen). Those fallbacks depend on the deleted
-//!   `the-deleted-heterogeneous-element-carrier` heterogeneous-element carrier
-//!   (ADR-006 §2.7.24 Q25.A); W17-typed-carrier-monomorphization
-//!   territory. Surface-and-stop.
+//! ## Cascade migration target (post-ckpt-6 STRICT close)
 //!
-//! See `docs/cluster-audits/phase-1b-vm-wave-6-5-playbook.md` §10
-//! D-prop-access row + `docs/cluster-audits/wave-9-method-refill-playbook.md`
-//! + `docs/cluster-audits/phase-2d-playbook.md` §2
-//! W17-typed-object-mutation row.
+//! Per W12-typed-array-data-deletion audit §A.3 + §2.1 scalar recipe +
+//! §2.2 heap-element variants, every previous `TypedArrayData::X(buf)`
+//! match arm in `read_typed_array_index` / `typed_array_len` migrates to
+//! the v2-raw `TypedArray<T>` flat-struct carrier — per-T direct
+//! `*buf.data.add(idx)` reads + per-T `data.len()` length.
+//!
+//! Bodies REFUSED ON SIGHT under Refusal #1 (resurrection under rename
+//! per ckpt-1 close-marker at `heap_value.rs:3956`).
 
 use crate::bytecode::{Instruction, Operand};
 use crate::executor::VirtualMachine;
 use crate::executor::vm_impl::stack::{clone_with_kind, drop_with_kind};
 use shape_value::{
     NativeKind, VMError,
-    heap_value::{HashMapKindedRef, HeapKind, TypedArrayData},
+    heap_value::{HashMapKindedRef, HeapKind},
 };
 use std::sync::Arc;
 
+// ═══════════════════════════════════════════════════════════════════════════
+// V3-S5 ckpt-3 surface-and-stop builder
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Common surface-and-stop body for TypedArray-receiver arms in
+/// `dispatch_get_prop` and `op_length`.
+#[cold]
+#[inline(never)]
+fn ckpt3_surface(op: &'static str, key_kind: NativeKind) -> VMError {
+    VMError::NotImplemented(format!(
+        "{op}: SURFACE — V3-S5 ckpt-3 consumer-cascade tier 2 surface. \
+         `TypedArrayData` enum DELETED at ckpt-1 (2026-05-15) per W12-\
+         typed-array-data-deletion audit §3.5 + ADR-006 §2.7.24 Q25.A \
+         SUPERSEDED. The previous `Arc<TypedArrayData>` receiver-recovery \
+         + per-variant element-read / length-read dispatch path (~34 \
+         references across `read_typed_array_index` 16 arms + \
+         `typed_array_len` 16 arms) cascade-broke at the enum deletion \
+         site (`crates/shape-value/src/heap_value.rs:3944`). Post-deletion \
+         target is the v2-raw `TypedArray<T>` flat-struct carrier per \
+         audit §1.2 + §A.3 + §3.1 scalar recipe + §2.2 heap-element \
+         variants — per-T `*buf.data.add(idx)` element read + per-T \
+         `data.len()` length; landing across ckpt-3 (this file plus \
+         array_ops/typed_array_methods/iterator_methods/array_sort/concat/\
+         array_query) + ckpt-4 (Buf<T> / HeapValue::TypedArray \
+         arm / HeapKind::TypedArray ordinal) + ckpt-5 (wire/json/marshal \
+         + 4-table lockstep) + ckpt-6 (JIT FFI). Key kind: {key_kind:?}. \
+         UNREACHABLE until ckpt-6 STRICT close. REFUSED ON SIGHT: \
+         TypedArrayData resurrection under any rename (Refusal #1, W12 \
+         audit §7).",
+        op = op,
+        key_kind = key_kind,
+    ))
+}
+
 impl VirtualMachine {
     /// `GetProp`: read a property from a heap object.
-    ///
-    /// **Migrated path (Wave 6.5 cluster D-prop-access):** TypedObject
-    /// property dispatch via the TypedObjectStorage's per-slot
-    /// `field_kinds` track (ADR-006 §2.5). The slot's `NativeKind`
-    /// determines the push kind; heap-bearing slots are shared via
-    /// `clone_with_kind` (WB2.4 retain-on-read).
-    ///
-    /// **Surfaced (`NotImplemented(SURFACE)`):** every other receiver
-    /// shape — typed arrays, strings, hashmaps, table views, native
-    /// views, matrices, etc. The legacy code paths used the deleted
-    /// dynamic-word carrier, the deleted `raw_helpers` tag_bits
-    /// dispatch, and the deleted `is_tagged()` index call — all
-    /// forbidden by §2.7.7. Those paths need first-class kinded
-    /// handlers that consume `(bits, kind)` pairs and never round-trip
-    /// through a tagged encoding; that work belongs to the matching
-    /// cluster (typed-array element ops, hashmap, table-view) per
-    /// playbook §10.
     pub(in crate::executor) fn op_get_prop(
         &mut self,
         _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
@@ -107,34 +124,24 @@ impl VirtualMachine {
         let result = self.dispatch_get_prop(obj_bits, obj_kind, key_bits, key_kind, key_str);
 
         // Retire the popped key + object shares per WB2.4 drop discipline.
-        // Heap-bearing arms are no-ops on zero bits; inline scalars are
-        // always no-ops.
         drop_with_kind(key_bits, key_kind);
         drop_with_kind(obj_bits, obj_kind);
 
         result
     }
 
-    /// Inner dispatch for `op_get_prop`. Borrows are valid per the
-    /// outer pop's WB2.4 retain — the shares are released at the end
-    /// of `op_get_prop` regardless of which arm fires.
+    /// Inner dispatch for `op_get_prop`.
     #[inline]
     fn dispatch_get_prop(
         &mut self,
         obj_bits: u64,
         obj_kind: NativeKind,
-        key_bits: u64,
+        _key_bits: u64,
         key_kind: NativeKind,
         key_str: Option<&str>,
     ) -> Result<(), VMError> {
         match obj_kind {
             // ── TypedObject: schema-driven field read ────────────────────
-            //
-            // The slot bits are `Arc::into_raw::<TypedObjectStorage>`.
-            // Recover via `Arc::from_raw` per the typed-Arc slot contract
-            // (ADR-006 §2.4); pattern-match the schema and read the
-            // field via the schema registry, sourcing the push kind from
-            // `field_kinds[index]` (ADR-006 §2.5).
             NativeKind::Ptr(HeapKind::TypedObject) => {
                 let ks = key_str.ok_or_else(|| VMError::TypeError {
                     expected: "string property name",
@@ -150,65 +157,30 @@ impl VirtualMachine {
                 // the popped slot owns one strong-count share. Borrow via
                 // a transient `Arc` (does NOT add a refcount because we
                 // pair `Arc::from_raw` with `Arc::into_raw` immediately).
-                //
-                // The schema's per-slot `NativeKind` table is the canonical
-                // kind source per ADR-006 §2.5.
                 let storage_arc: Arc<shape_value::heap_value::TypedObjectStorage> =
                     unsafe { Arc::from_raw(obj_bits as *const _) };
                 let result = self.read_typed_object_field(&storage_arc, ks);
-                // Release our transient borrow without dropping a share —
-                // the original popped slot still owns it (it's released
-                // by the caller's `drop_with_kind`).
                 let _ = Arc::into_raw(storage_arc);
                 result
             }
 
-            // ── TypedArray: numeric index access (W9 fill) ───────────────
+            // ── TypedArray: V3-S5 ckpt-3 surface-and-stop ────────────────
             //
-            // `arr[i]` lowers to `PushConst Int|Number i` + `GetProp`
-            // (see `compiler/expressions/data_access.rs`,
-            // `compiler/loops.rs` array-destructuring). Recover the
-            // typed-Arc array, dispatch on `TypedArrayData` variant for
-            // raw-bits read + element kind. Heap-bearing arms
-            // (`String` / `HeapValue` / `FloatSlice` / `Matrix`) are
-            // partially supported: scalar variants + `String` flow
-            // through the kinded retain path; `HeapValue`-payload arrays
-            // surface (HeapValue→KindedSlot projection is Phase-2c — see
-            // ADR-006 §2.7.4).
+            // Previous body: recover `Arc<TypedArrayData>` via
+            // `Arc::from_raw`, dispatch on `TypedArrayData` variant for
+            // raw-bits read + element kind per `read_typed_array_index`.
+            // The 16-arm dispatch cascade-broke at ckpt-1.
             NativeKind::Ptr(HeapKind::TypedArray) => {
-                if obj_bits == 0 {
-                    return Err(VMError::RuntimeError(
-                        "GetProp on null TypedArray".to_string(),
-                    ));
-                }
-                let index = numeric_index_from_kinded(key_bits, key_kind)?;
-                // SAFETY: kind says `Ptr(HeapKind::TypedArray)`; bits are
-                // `Arc::into_raw::<TypedArrayData>`; popped slot owns one
-                // strong-count share. Transient borrow — re-into_raw
-                // before return so caller's `drop_with_kind` still
-                // releases the original share.
-                let arr_arc: Arc<TypedArrayData> =
-                    unsafe { Arc::from_raw(obj_bits as *const _) };
-                let result = self.read_typed_array_index(&arr_arc, index);
-                let _ = Arc::into_raw(arr_arc);
-                result
+                Err(ckpt3_surface("GetProp(TypedArray)", key_kind))
             }
 
             // ── HashMap, String index, NativeView, Temporal, TableView,
             //    DataTable, Decimal, BigInt, etc. ─────────────────────────
-            //
-            // SURFACE: HashMap value reads project through `Arc<HeapValue>`
-            // payloads (`HashMapData::values: Arc<TypedBuffer<Arc<HeapValue>>>`)
-            // and require the same `Arc<HeapValue>`→`KindedSlot` projection
-            // as `op_new_array`'s heterogeneous path. String per-codepoint
-            // indexing, table-view row dispatch, etc. each need their own
-            // §2.7.6/Q8 heterogeneous-kind body. Phase-2c reentry per
-            // ADR-006 §2.7.4.
             NativeKind::String
             | NativeKind::Ptr(_) => Err(VMError::NotImplemented(format!(
                 "SURFACE: GetProp on {:?} not yet kinded — requires the \
                  W17-typed-carrier-monomorphization replacement for the \
-                 deleted HashMapData::values: Arc<TypedBuffer<Arc<HeapValue>>> \
+                 deleted HashMapData::values: `Arc<Buf<Arc<HeapValue>>>` \
                  carrier (ADR-006 §2.7.24 Q25.B) or the per-receiver \
                  heterogeneous-kind body. Key kind observed: {:?}.",
                 obj_kind, key_kind
@@ -222,117 +194,6 @@ impl VirtualMachine {
         }
     }
 
-    /// Read the `index`-th element of a `TypedArrayData` and push it onto
-    /// the kinded stack with the matching element kind.
-    ///
-    /// Scalar variants push raw native bits + their `NativeKind`. The
-    /// `String` variant retains an independent `Arc<String>` strong-count
-    /// share for the pushed slot (the buffer keeps its share). Variants
-    /// without a single statically-sourceable scalar element kind
-    /// (`HeapValue` / `FloatSlice` / `Matrix`) surface — the
-    /// `Arc<HeapValue>` projection is Phase-2c reentry territory per
-    /// ADR-006 §2.7.4.
-    fn read_typed_array_index(
-        &mut self,
-        arr: &TypedArrayData,
-        index: usize,
-    ) -> Result<(), VMError> {
-        let oob = |len: usize| VMError::IndexOutOfBounds {
-            index: index as i32,
-            length: len,
-        };
-        match arr {
-            TypedArrayData::I64(buf) => {
-                let v = *buf.data.get(index).ok_or_else(|| oob(buf.data.len()))?;
-                self.push_kinded(v as u64, NativeKind::Int64)
-            }
-            TypedArrayData::F64(buf) => {
-                let v = *buf.data.get(index).ok_or_else(|| oob(buf.data.len()))?;
-                self.push_kinded(v.to_bits(), NativeKind::Float64)
-            }
-            TypedArrayData::Bool(buf) => {
-                let v = *buf.data.get(index).ok_or_else(|| oob(buf.data.len()))?;
-                self.push_kinded(v as u64, NativeKind::Bool)
-            }
-            TypedArrayData::I8(buf) => {
-                let v = *buf.data.get(index).ok_or_else(|| oob(buf.data.len()))?;
-                self.push_kinded(v as i64 as u64, NativeKind::Int8)
-            }
-            TypedArrayData::I16(buf) => {
-                let v = *buf.data.get(index).ok_or_else(|| oob(buf.data.len()))?;
-                self.push_kinded(v as i64 as u64, NativeKind::Int16)
-            }
-            TypedArrayData::I32(buf) => {
-                let v = *buf.data.get(index).ok_or_else(|| oob(buf.data.len()))?;
-                self.push_kinded(v as i64 as u64, NativeKind::Int32)
-            }
-            TypedArrayData::U8(buf) => {
-                let v = *buf.data.get(index).ok_or_else(|| oob(buf.data.len()))?;
-                self.push_kinded(v as u64, NativeKind::UInt8)
-            }
-            TypedArrayData::U16(buf) => {
-                let v = *buf.data.get(index).ok_or_else(|| oob(buf.data.len()))?;
-                self.push_kinded(v as u64, NativeKind::UInt16)
-            }
-            TypedArrayData::U32(buf) => {
-                let v = *buf.data.get(index).ok_or_else(|| oob(buf.data.len()))?;
-                self.push_kinded(v as u64, NativeKind::UInt32)
-            }
-            TypedArrayData::U64(buf) => {
-                let v = *buf.data.get(index).ok_or_else(|| oob(buf.data.len()))?;
-                self.push_kinded(v, NativeKind::UInt64)
-            }
-            TypedArrayData::F32(buf) => {
-                // F32 read widens to f64 to match the cross-crate
-                // numeric-element contract (`typed_array_read_index_raw`
-                // in `executor/variables/mod.rs`).
-                let v = *buf.data.get(index).ok_or_else(|| oob(buf.data.len()))?;
-                self.push_kinded((v as f64).to_bits(), NativeKind::Float64)
-            }
-            TypedArrayData::String(buf) => {
-                let s_arc = buf.data.get(index).ok_or_else(|| oob(buf.data.len()))?;
-                // The buffer holds the canonical `Arc<String>` share;
-                // clone it for the pushed slot so the buffer's share
-                // remains intact.
-                let pushed: Arc<String> = Arc::clone(s_arc);
-                let bits = Arc::into_raw(pushed) as u64;
-                // `clone_with_kind` here would double-bump because
-                // `Arc::clone` already added one share above. Push the
-                // raw pointer bits directly with the matching kind.
-                self.push_kinded(bits, NativeKind::String)
-            }
-            // ADR-006 §2.7.22 amendment (Round 18 S3): Matrix / FloatSlice
-            // exit `TypedArrayData`. Indexing through Matrix / MatrixSlice
-            // receivers (`m[r]` / `slice[i]`) routes via dedicated
-            // GetProp handling on the new HeapKinds, not through this
-            // typed-array path.
-            // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized
-            // arms — push the element through the same Arc::into_raw +
-            // push_kinded shape as the existing HeapKind-typed push
-            // (`stack_ops/mod.rs:153` for Temporal precedent).
-            TypedArrayData::Decimal(buf) => {
-                let arc = std::sync::Arc::clone(&buf.data[index]);
-                let bits = std::sync::Arc::into_raw(arc) as u64;
-                self.push_kinded(bits, NativeKind::Ptr(HeapKind::Decimal))
-            }
-            TypedArrayData::BigInt(buf) => {
-                let arc = std::sync::Arc::clone(&buf.data[index]);
-                let bits = std::sync::Arc::into_raw(arc) as u64;
-                self.push_kinded(bits, NativeKind::Ptr(HeapKind::BigInt))
-            }
-            TypedArrayData::Char(buf) => {
-                self.push_kinded(buf.data[index] as u32 as u64, NativeKind::Ptr(HeapKind::Char))
-            }
-            // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): TypedObjectPtr.
-            // Clone bumps v2-raw refcount; into_raw moves the share to the
-            // slot bits.
-            TypedArrayData::TypedObject(buf) => {
-                let bits = buf.data[index].clone().into_raw() as u64;
-                self.push_kinded(bits, NativeKind::Ptr(HeapKind::TypedObject))
-            }
-        }
-    }
-
     /// Read a named field from a `TypedObjectStorage`, sourcing the push
     /// kind from `field_kinds[index]` per ADR-006 §2.5. Heap-bearing
     /// slots are shared via `clone_with_kind` (WB2.4 retain-on-read) so
@@ -342,12 +203,6 @@ impl VirtualMachine {
         storage: &shape_value::heap_value::TypedObjectStorage,
         key: &str,
     ) -> Result<(), VMError> {
-        // W17-typed-carrier-bundle-A checkpoint 4/4: fall back to the
-        // ambient runtime registry's predeclared-schemas lookup for
-        // schemas auto-registered by `typed_object_from_pairs` (Entry /
-        // Pair / annotation metadata). The program's per-bytecode
-        // registry covers user-defined types; predeclared schemas live
-        // in `shape_runtime::type_schema::lookup_schema_by_id_public`.
         let schema = self
             .program
             .type_schema_registry
@@ -388,56 +243,19 @@ impl VirtualMachine {
         let bits = storage.slots[idx].raw();
         let kind = storage.field_kinds[idx];
 
-        // WB2.4 retain-on-read: the storage owns the strong-count share;
-        // the pushed slot must own an independent share. `clone_with_kind`
-        // is a no-op on inline scalars and zero bits.
+        // WB2.4 retain-on-read.
         clone_with_kind(bits, kind);
         self.push_kinded(bits, kind)
     }
 
     /// `SetProp`: write a property on a heap object. Pops value, key,
     /// object; mutates object; pushes object back.
-    ///
-    /// **SURFACE.** The legacy implementation took a `&mut` borrow on
-    /// the dynamic-word carrier and used `Arc::make_mut`, plus the
-    /// deleted heap-mut accessor, the deleted unified-array
-    /// from-heap-bits-mut hop, and the deleted refcount-release
-    /// helper, for in-place mutation through tag-encoded slots —
-    /// every one of which is forbidden by ADR-006 §2.7.7 / §2.7.8.
-    ///
-    /// Migrating SetProp requires structural choices that are out of
-    /// scope for D-prop-access:
-    ///
-    /// 1. The cell-storage parallel-kind invariant (§2.7.8 / Q10) for
-    ///    binding writes — `Wave-α B7-B9` territory.
-    /// 2. Mutable-receiver handling for typed arrays / hashmaps —
-    ///    `D-array-ops` and `D-typed-access` territory.
-    /// 3. NativeView field write — kept inline below (the helpers are
-    ///    in this file) but driven by a TypedObject SURFACE today.
-    ///
-    /// Per playbook §7 REVISED #3 / §10 D-prop-access, surface-and-stop
-    /// is the correct response when the call site cannot be migrated
-    /// without reaching into another cluster's territory.
     pub(in crate::executor) fn op_set_prop(&mut self) -> Result<(), VMError> {
-        // W17-typed-object-mutation: TypedObject-receiver arm is filled
-        // via `TypedObjectStorage::write_slot_in_place` (the kinded in-
-        // place projection writer added by W17-references-mutation
-        // `30b9ebf`, ADR-006 §2.7.13 / Q14). Non-TypedObject receivers
-        // (HashMap with non-string keys / array keyed by HeapValue /
-        // etc.) remain surfaced — those require either the to-be-
-        // deleted `the-deleted-heterogeneous-element-carrier` carrier (forbidden by
-        // playbook line 32 / ADR-006 §2.7.24 Q25.A) or the per-
-        // receiver heterogeneous-kind body that the W17-typed-carrier-
-        // monomorphization sub-cluster will land.
         let (val_bits, val_kind) = self.pop_kinded()?;
         let (key_bits, key_kind) = self.pop_kinded()?;
         let (obj_bits, obj_kind) = self.pop_kinded()?;
 
         if obj_kind == NativeKind::Ptr(HeapKind::TypedObject) {
-            // Borrow the key as &str for name-based field lookup. The
-            // key share is owned by the popped slot; it stays alive
-            // through this scope and is released via drop_with_kind
-            // at the end.
             let key_str: Option<&str> = match key_kind {
                 NativeKind::String | NativeKind::Ptr(HeapKind::String) => {
                     if key_bits == 0 {
@@ -445,8 +263,7 @@ impl VirtualMachine {
                     } else {
                         // SAFETY: kind is `String`; bits are
                         // `Arc::into_raw::<String>` with one share owned
-                        // by the popped slot. Borrow is valid for this
-                        // scope.
+                        // by the popped slot.
                         let s: &String = unsafe { &*(key_bits as *const String) };
                         Some(s.as_str())
                     }
@@ -472,11 +289,9 @@ impl VirtualMachine {
                 ));
             }
 
-            // SAFETY: kind says `Ptr(HeapKind::TypedObject)`; obj_bits
-            // is `Arc::into_raw::<TypedObjectStorage>` with one share
-            // owned by the popped slot. Reconstruct, mutate in place,
-            // re-into_raw to transfer the same share onto the result
-            // stack push (no refcount change).
+            // SAFETY: kind says `Ptr(HeapKind::TypedObject)`; obj_bits is
+            // `Arc::into_raw::<TypedObjectStorage>` with one share owned
+            // by the popped slot.
             let storage_arc: Arc<shape_value::heap_value::TypedObjectStorage> =
                 unsafe { Arc::from_raw(obj_bits as *const _) };
 
@@ -489,27 +304,18 @@ impl VirtualMachine {
 
             let obj_bits_back = Arc::into_raw(storage_arc) as u64;
 
-            // Key share is no longer needed; drop it.
             drop_with_kind(key_bits, key_kind);
 
             return match write_result {
                 Ok(()) => self.push_kinded(obj_bits_back, obj_kind),
                 Err(e) => {
-                    // val_bits share was dropped inside
-                    // write_typed_object_field_by_name on error; release
-                    // the receiver share.
                     drop_with_kind(obj_bits_back, obj_kind);
                     Err(e)
                 }
             };
         }
 
-        // Non-TypedObject receivers: drain and surface. The legacy code
-        // path used `Arc::make_mut` on the deleted dynamic-word receiver
-        // and the `the-deleted-heterogeneous-element-carrier` heterogeneous-element
-        // carrier — both forbidden by ADR-006 §2.7.7/§2.7.8 + §2.7.24
-        // Q25.A. The replacement work is W17-typed-carrier-
-        // monomorphization sub-cluster territory per playbook §2.
+        // Non-TypedObject receivers: drain and surface.
         drop_with_kind(val_bits, val_kind);
         drop_with_kind(key_bits, key_kind);
         drop_with_kind(obj_bits, obj_kind);
@@ -524,14 +330,7 @@ impl VirtualMachine {
         )))
     }
 
-    /// Write a named field on a `TypedObjectStorage`, sourcing the
-    /// target field's kind from `field_kinds[idx]` per ADR-006 §2.5 and
-    /// rotating the slot's share via the kinded in-place writer from
-    /// `TypedObjectStorage::write_slot_in_place` (W17-references-
-    /// mutation `30b9ebf`, ADR-006 §2.7.13 / Q14). On success the
-    /// `val_bits` share is transferred to the slot and the prior
-    /// occupant's share is released via `drop_with_kind`. On error the
-    /// `val_bits` share is dropped before return.
+    /// Write a named field on a `TypedObjectStorage`.
     fn write_typed_object_field_by_name(
         &mut self,
         storage: &Arc<shape_value::heap_value::TypedObjectStorage>,
@@ -539,11 +338,6 @@ impl VirtualMachine {
         val_bits: u64,
         val_kind: NativeKind,
     ) -> Result<(), VMError> {
-        // Pre-resolve schema + field; on lookup failure drop the value
-        // share and propagate. Avoid `ok_or_else` closures here so the
-        // `drop_with_kind` side-effect order is explicit.
-        // W17-typed-carrier-bundle-A checkpoint 4/4: fall back to the
-        // ambient runtime registry's predeclared schemas (see read path).
         let schema_owned = self
             .program
             .type_schema_registry
@@ -587,9 +381,6 @@ impl VirtualMachine {
         }
 
         let stored_kind = storage.field_kinds[idx];
-        // Allow tag-equivalence for width-integer fields (all store as
-        // I64), and accept the canonical String form for both
-        // NativeKind::String and Ptr(String).
         let kind_compatible = val_kind == stored_kind
             || matches!(
                 (stored_kind, val_kind),
@@ -618,14 +409,10 @@ impl VirtualMachine {
             });
         }
 
-        // Pre-read prior bits for the write-barrier helper.
         let prior_bits = storage.slots[idx].raw();
         crate::memory::write_barrier_slot(prior_bits, val_bits);
 
-        // SAFETY: per `TypedObjectStorage::write_slot_in_place` contract
-        // — single-threaded VM, no aliased `&mut ValueSlot` outstanding,
-        // kind invariance verified above. `val_bits` share transfers to
-        // the slot; the prior occupant's share is released below.
+        // SAFETY: per `TypedObjectStorage::write_slot_in_place` contract.
         let _returned_prior = unsafe { storage.write_slot_in_place(idx, val_bits) };
         debug_assert_eq!(
             _returned_prior, prior_bits,
@@ -638,21 +425,6 @@ impl VirtualMachine {
     }
 
     /// `SetLocalIndex`: in-place index assignment on a local. SURFACE.
-    ///
-    /// This opcode is only emitted by the compiler when
-    /// `resolve_receiver_typed_array_kind` returned None (the typed-
-    /// array I64/F64/Bool fast path `SetElem*` was not chosen). The
-    /// fallback path covers heterogeneous-element arrays (`Array<P>`,
-    /// mixed-kind arrays, object-keyed access) — exactly the shapes
-    /// that depended on the `the-deleted-heterogeneous-element-carrier` heterogeneous-
-    /// element carrier. That carrier is to be deleted per ADR-006
-    /// §2.7.24 Q25.A; the replacement work is W17-typed-carrier-
-    /// monomorphization sub-cluster territory.
-    ///
-    /// Resurrecting `the-deleted-heterogeneous-element-carrier` here would violate
-    /// playbook line 32 ("Resurrecting deleted shape under a rename"
-    /// — `the-deleted-heterogeneous-element-carrier (deleted by §2.7.24 Q25.A)`).
-    /// Surface-and-stop is the correct response.
     pub(in crate::executor) fn op_set_local_index(
         &mut self,
         _instruction: &Instruction,
@@ -675,9 +447,7 @@ impl VirtualMachine {
     }
 
     /// `SetModuleBindingIndex`: in-place index assignment on a module
-    /// binding. SURFACE — same cascade as `op_set_local_index`:
-    /// depends on ADR-006 §2.7.24 Q25.A heterogeneous-element carrier
-    /// replacement (W17-typed-carrier-monomorphization sub-cluster).
+    /// binding. SURFACE.
     pub(in crate::executor) fn op_set_module_binding_index(
         &mut self,
         instruction: &Instruction,
@@ -686,7 +456,6 @@ impl VirtualMachine {
         let (key_bits, key_kind) = self.pop_kinded()?;
         drop_with_kind(val_bits, val_kind);
         drop_with_kind(key_bits, key_kind);
-        // Decode the operand only to validate the bytecode shape.
         let _binding_idx = match instruction.operand {
             Some(Operand::ModuleBinding(idx)) => idx as usize,
             _ => return Err(VMError::InvalidOperand),
@@ -702,17 +471,15 @@ impl VirtualMachine {
 
     /// `Length`: read the length of an array, string, hashmap, etc.
     ///
-    /// **Migrated paths:**
-    /// - `TypedObject` (Wave 6.5): slot count.
-    /// - `TypedArray` (W9): per-variant element count.
-    /// - `String` / `Ptr(String)` (W9): `chars().count()` per the
+    /// **Migrated paths (preserved through V3-S5 ckpt-3):**
+    /// - `TypedObject`: slot count.
+    /// - `String` / `Ptr(String)`: `chars().count()` per the
     ///   `v2_string_len` precedent in `string_methods.rs`.
-    /// - `HashMap` (W9): `HashMapData::len()`.
+    /// - `HashMap`: `HashMapKindedRef::len()`.
     ///
-    /// Other heap receivers (NativeView, Temporal, TableView, DataTable,
-    /// FilterExpr, SharedCell, Reference, etc.) have no semantic length
-    /// — they remain TypeError. The remaining SURFACE arm is reserved
-    /// for Phase-2c additions if a new length-bearing HeapKind is added.
+    /// **V3-S5 ckpt-3 surface:**
+    /// - `Ptr(HeapKind::TypedArray)` arm — `TypedArrayData` enum gone;
+    ///   per-variant `typed_array_len` cascade-broke at ckpt-1.
     pub(in crate::executor) fn op_length(&mut self) -> Result<(), VMError> {
         let (bits, kind) = self.pop_kinded()?;
         let result = match kind {
@@ -733,18 +500,13 @@ impl VirtualMachine {
                 }
             }
             NativeKind::Ptr(HeapKind::TypedArray) => {
+                // V3-S5 ckpt-3 surface-and-stop — TypedArrayData enum gone.
                 if bits == 0 {
                     Err(VMError::RuntimeError(
                         "length() on null TypedArray".to_string(),
                     ))
                 } else {
-                    // SAFETY: kind says `Ptr(HeapKind::TypedArray)`; bits
-                    // are `Arc::into_raw::<TypedArrayData>`. Transient borrow.
-                    let arr: Arc<TypedArrayData> =
-                        unsafe { Arc::from_raw(bits as *const _) };
-                    let len = typed_array_len(&arr) as i64;
-                    let _ = Arc::into_raw(arr);
-                    self.push_kinded(len as u64, NativeKind::Int64)
+                    Err(ckpt3_surface("Length(TypedArray)", kind))
                 }
             }
             NativeKind::String | NativeKind::Ptr(HeapKind::String) => {
@@ -778,10 +540,7 @@ impl VirtualMachine {
                     self.push_kinded(len as u64, NativeKind::Int64)
                 }
             }
-            // Other heap kinds — no semantic length. (BigInt, Decimal,
-            // Char, Future, Closure, Instant, IoHandle, NativeScalar,
-            // NativeView, TableView, Temporal, DataTable, TaskGroup,
-            // Content, FilterExpr, Reference, SharedCell.)
+            // Other heap kinds — no semantic length.
             NativeKind::Ptr(_) => Err(VMError::TypeError {
                 expected: "array, object, string, or hashmap",
                 got: "heap value without length semantics",
@@ -797,40 +556,13 @@ impl VirtualMachine {
     }
 }
 
-/// Element count for a `TypedArrayData`, dispatching on the variant.
-/// Mirrors the local helper in `executor/objects/array_basic.rs` (kept
-/// duplicated to avoid forcing a shared-helpers cluster cascade in this
-/// sub-cluster).
-#[inline]
-fn typed_array_len(arr: &TypedArrayData) -> usize {
-    match arr {
-        TypedArrayData::I64(b) => b.data.len(),
-        TypedArrayData::F64(b) => b.data.len(),
-        TypedArrayData::Bool(b) => b.data.len(),
-        TypedArrayData::I8(b) => b.data.len(),
-        TypedArrayData::I16(b) => b.data.len(),
-        TypedArrayData::I32(b) => b.data.len(),
-        TypedArrayData::U8(b) => b.data.len(),
-        TypedArrayData::U16(b) => b.data.len(),
-        TypedArrayData::U32(b) => b.data.len(),
-        TypedArrayData::U64(b) => b.data.len(),
-        TypedArrayData::F32(b) => b.data.len(),
-        TypedArrayData::String(b) => b.data.len(),
-        // ADR-006 §2.7.22 amendment (Round 18 S3): Matrix / FloatSlice
-        // exit `TypedArrayData`.
-        // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
-        TypedArrayData::Decimal(b) => b.data.len(),
-        TypedArrayData::BigInt(b) => b.data.len(),
-        TypedArrayData::Char(b) => b.data.len(),
-        TypedArrayData::TypedObject(b) => b.data.len(),
-    }
-}
-
 /// Convert a kinded `(bits, kind)` pair into a `usize` index. Accepts
 /// `Int64` / `UInt64` / `Float64` (truncating to integer) — matches the
-/// constants the compiler emits for `arr[i]` (`Constant::Int` /
-/// `Constant::Number`). Negative or non-finite values are rejected.
+/// constants the compiler emits for `arr[i]`.
+///
+/// Preserved through V3-S5 ckpt-3: no `TypedArrayData` dependency.
 #[inline]
+#[allow(dead_code)]
 fn numeric_index_from_kinded(bits: u64, kind: NativeKind) -> Result<usize, VMError> {
     let i = match kind {
         NativeKind::Int64 => bits as i64,
@@ -914,43 +646,6 @@ mod tests {
         let (len_bits, len_kind) = vm.pop_kinded().unwrap();
         assert_eq!(len_bits, 5);
         assert_eq!(len_kind, NativeKind::Int64);
-    }
-
-    /// `op_length` on a TypedArray scalar variant returns the element
-    /// count as Int64 (W9 fill).
-    #[test]
-    fn length_typed_array_i64() {
-        use shape_value::heap_value::TypedArrayData;
-        use shape_value::typed_buffer::TypedBuffer;
-        let mut vm = VirtualMachine::new(VMConfig::default());
-        let buf = TypedBuffer::from_vec(vec![10i64, 20, 30, 40]);
-        let arr = Arc::new(TypedArrayData::I64(Arc::new(buf)));
-        let bits = Arc::into_raw(arr) as u64;
-        vm.push_kinded(bits, NativeKind::Ptr(HeapKind::TypedArray))
-            .unwrap();
-        vm.op_length().unwrap();
-        let (len_bits, len_kind) = vm.pop_kinded().unwrap();
-        assert_eq!(len_bits, 4);
-        assert_eq!(len_kind, NativeKind::Int64);
-    }
-
-    /// `op_get_prop` on a TypedArray with `Int64` key reads the indexed
-    /// element with the variant's element kind (W9 fill).
-    #[test]
-    fn get_prop_typed_array_i64_index() {
-        use shape_value::heap_value::TypedArrayData;
-        use shape_value::typed_buffer::TypedBuffer;
-        let mut vm = VirtualMachine::new(VMConfig::default());
-        let buf = TypedBuffer::from_vec(vec![10i64, 20, 30, 40]);
-        let arr = Arc::new(TypedArrayData::I64(Arc::new(buf)));
-        let bits = Arc::into_raw(arr) as u64;
-        vm.push_kinded(bits, NativeKind::Ptr(HeapKind::TypedArray))
-            .unwrap();
-        vm.push_kinded(2u64, NativeKind::Int64).unwrap();
-        vm.op_get_prop(None).unwrap();
-        let (v_bits, v_kind) = vm.pop_kinded().unwrap();
-        assert_eq!(v_bits as i64, 30);
-        assert_eq!(v_kind, NativeKind::Int64);
     }
 
     /// `op_set_prop` on a TypedObject with a string key writes the

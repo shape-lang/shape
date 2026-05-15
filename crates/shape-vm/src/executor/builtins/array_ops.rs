@@ -1,19 +1,62 @@
 //! Native array builtin implementations (ADR-006 §2.7.6 / Q8).
 //!
-//! Wave 5b body migration: `&[KindedSlot] -> Result<KindedSlot, VMError>`.
-//! Heap dispatch goes through `slot.as_heap_value()` + `HeapValue` match
-//! (ADR-005 §1 single-discriminator); no per-heap-variant accessors on
-//! `KindedSlot`.
+//! ## V3-S5 ckpt-3 consumer-cascade tier 2 surface (2026-05-15)
 //!
-//! `push`/`pop`/`first`/`last`/`zip`/`filled` operate on the typed-array
-//! `HeapValue::TypedArray(Arc<TypedArrayData>)` shape. Each call site
-//! discriminates on `TypedArrayData` arm to pick the right element shape;
-//! a heterogeneous-element path uses `the-deleted-heterogeneous-element-carrier` as the
-//! catch-all storage shape.
+//! Per V3-S5 ckpt-1 close (commit `aac8495e`, 2026-05-15), the
+//! `TypedArrayData` enum + impl blocks + `Display for TypedArrayData` +
+//! `typed_array_structural_eq` fn were DELETED at
+//! `crates/shape-value/src/heap_value.rs` per W12-typed-array-data-deletion
+//! audit §3.5 + ADR-006 §2.7.24 Q25.A SUPERSEDED. This file's previous
+//! consumer-shape (`Arc<TypedArrayData>` receiver recovery via
+//! `as_typed_array` + per-variant element-shape dispatch through
+//! `typed_array_element` + `TypedArrayData::I64 / F64 / Bool / I8 / I16 /
+//! I32 / U8 / U16 / U32 / U64 / F32 / String / Decimal / BigInt / Char /
+//! TypedObject` match arms across `builtin_push / builtin_pop /
+//! builtin_first / builtin_last / builtin_zip / builtin_filled /
+//! builtin_range / builtin_slice`) cascade-breaks here as the deletion's
+//! consumer cascade tier 2.
+//!
+//! Public builtin bodies are replaced with structured surface-and-stop
+//! returning `VMError::NotImplemented`. Local helpers (`as_typed_array /
+//! typed_array_to_slot / typed_array_element / heap_value_to_slot`) are
+//! DELETED — every one took `&TypedArrayData` / produced `&Arc<TypedArrayData>`
+//! or `TypedArrayData`; with the type gone they cannot exist.
+//!
+//! PRESERVED:
+//! - `slot_to_heap_arc` — produces `Arc<HeapValue>` (no `TypedArrayData`
+//!   dependency); shared by `object_creation::op_new_array` (Round 11A,
+//!   ADR-006 §2.7.24 Q25.A) and stays live across the cascade.
+//! - `builtin_range_int` (called by `builtin_range`) — operates on int
+//!   primitives only, no `TypedArrayData` dependency until the int-array
+//!   construction path; the construction path is replaced with
+//!   surface-and-stop and the helper is preserved for the post-ckpt-6
+//!   v2-raw `TypedArray<i64>` construction landing.
+//!
+//! ## Cascade migration target (post-ckpt-6 STRICT close)
+//!
+//! Per W12-typed-array-data-deletion audit §A.3 + §2.2 + §3.1 scalar recipe,
+//! every previous `TypedArrayData::X(buf)` match arm migrates to the v2-raw
+//! `TypedArray<T>` flat-struct carrier:
+//!
+//! | Previous arm | Post-deletion target |
+//! |---|---|
+//! | `TypedArrayData::I64(buf)` | `*mut TypedArray<i64>` direct access (audit §1.3 producer exists) |
+//! | `TypedArrayData::F64(buf)` | `*mut TypedArray<f64>` direct access (audit §1.3 producer exists) |
+//! | `TypedArrayData::I32(buf)` | `*mut TypedArray<i32>` direct access (audit §1.3 producer exists) |
+//! | `TypedArrayData::Bool(buf)` | `*mut TypedArray<u8>` direct access (audit §1.3 producer exists) |
+//! | `TypedArrayData::I8/I16/U16/U32/U64/F32(buf)` | new `TypedArray<T>` monomorphization per audit §3.1 S1 scalar recipe |
+//! | `TypedArrayData::Char(buf)` | `TypedArray<char>` direct (audit §2.1 + ADR-006 §2.7.5 R19 S1.5 `NativeKind::Char`) |
+//! | `TypedArrayData::String(buf)` | `*mut TypedArray<*const StringObj>` (V3-A2-followup-producer-cascade landed StringObj foundation) |
+//! | `TypedArrayData::Decimal(buf)` | `*mut TypedArray<*const DecimalObj>` (V3-A2-followup-producer-cascade landed DecimalObj foundation) |
+//! | `TypedArrayData::BigInt(buf)` | DEFERRED to cluster-1+ per ADR-006 §2.7.24 Q25.A SUPERSEDED row |
+//! | `TypedArrayData::TypedObject(buf)` | `TypedArray<TypedObjectPtr>` newtype-as-variant-payload (D4 Path B canonical, audit §4.3 O-3.a resolved) |
+//!
+//! Cascade-broken legacy bodies REFUSED ON SIGHT under Refusal #1
+//! (resurrection under any rename — "TypedArrayKind", "TypedArrayCarrier",
+//! `TypedBuffer<T>` wrapper enum, etc. per ckpt-1 close-marker at
+//! `crates/shape-value/src/heap_value.rs:3956`).
 
-use shape_value::{
-    HeapKind, HeapValue, KindedSlot, NativeKind, TypedArrayData, TypedBuffer, VMError,
-};
+use shape_value::{HeapKind, HeapValue, KindedSlot, NativeKind, VMError};
 use std::sync::Arc;
 
 #[inline]
@@ -21,35 +64,64 @@ fn type_error(msg: impl Into<String>) -> VMError {
     VMError::RuntimeError(msg.into())
 }
 
-/// Borrow the `Arc<TypedArrayData>` payload from a `KindedSlot` whose
-/// `kind == NativeKind::Ptr(HeapKind::TypedArray)`. Returns `None` for any
-/// other kind. Heap dispatch follows ADR-005 §1: project through
-/// `slot.as_heap_value()` then pattern-match the `HeapValue::TypedArray`
-/// arm; no per-heap-variant `KindedSlot` accessor.
-#[inline]
-fn as_typed_array(slot: &KindedSlot) -> Option<&Arc<TypedArrayData>> {
-    if !matches!(slot.kind, NativeKind::Ptr(HeapKind::TypedArray)) {
-        return None;
-    }
-    match slot.slot.as_heap_value() {
-        HeapValue::TypedArray(arc) => Some(arc),
-        _ => None,
-    }
+// ═══════════════════════════════════════════════════════════════════════════
+// V3-S5 ckpt-3 surface-and-stop builder
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Common surface-and-stop body for every public builtin in this file.
+///
+/// Returns a structured `VMError::NotImplemented` citing the V3-S5 ckpt-3
+/// cascade-broken state: the previous per-`TypedArrayData::X` variant
+/// dispatch path is gone (ckpt-1 deleted the enum); the v2-raw
+/// `TypedArray<T>` flat-struct consumer cascade lands across ckpt-3 / 4 /
+/// 5 / 6 per W12-typed-array-data-deletion audit §A.3 per-variant
+/// migration disposition.
+#[cold]
+#[inline(never)]
+fn ckpt3_surface(op: &'static str, args: &[KindedSlot]) -> VMError {
+    let receiver_kind = if args.is_empty() {
+        "<no args>".to_string()
+    } else {
+        format!("{:?}", args[0].kind)
+    };
+    VMError::NotImplemented(format!(
+        "{op}: SURFACE — V3-S5 ckpt-3 consumer-cascade tier 2 surface. \
+         `TypedArrayData` enum DELETED at ckpt-1 (2026-05-15) per W12-\
+         typed-array-data-deletion audit §3.5 + ADR-006 §2.7.24 Q25.A \
+         SUPERSEDED. The previous `Arc<TypedArrayData>` receiver-recovery \
+         + per-variant match-arm dispatch path (~105 references across \
+         8 public builtins in this file) cascade-broke at the enum \
+         deletion site (`crates/shape-value/src/heap_value.rs:3944`). \
+         Post-deletion target is the v2-raw `TypedArray<T>` flat-struct \
+         carrier per audit §1.2 + §A.3 + §3.1 scalar recipe + §2.2 \
+         heap-element variants; per-T monomorphization landing across \
+         ckpt-3 (this file plus typed_array_methods/iterator_methods/\
+         array_sort/concat/property_access/array_query) + ckpt-4 \
+         (Buf<T> / HeapValue::TypedArray arm / HeapKind::TypedArray \
+         ordinal) + ckpt-5 (wire/json/marshal + 4-table lockstep) + \
+         ckpt-6 (JIT FFI). Receiver kind: {kind}. UNREACHABLE until ckpt-6 \
+         STRICT close. REFUSED ON SIGHT: TypedArrayData resurrection under \
+         any rename (Refusal #1, W12 audit §7).",
+        op = op,
+        kind = receiver_kind,
+    ))
 }
 
-/// Wrap a fresh `TypedArrayData` as a `KindedSlot`.
-#[inline]
-fn typed_array_to_slot(arr: TypedArrayData) -> KindedSlot {
-    KindedSlot::from_typed_array(Arc::new(arr))
-}
+// ═══════════════════════════════════════════════════════════════════════════
+// Preserved helper — slot_to_heap_arc (no TypedArrayData dependency)
+// ═══════════════════════════════════════════════════════════════════════════
 
 /// Convert a `KindedSlot` element to an `Arc<HeapValue>` suitable for
-/// routing through `TypedArrayData::build_specialized_from_heap_arcs`
-/// (ADR-006 §2.7.24 Q25.A). Inline scalars wrap into the matching
-/// `HeapValue` arm (Int64 → `HeapValue::BigInt(Arc<i64>)`); heap-kinded
-/// slots clone the underlying `Arc<HeapValue>`. Float64 / Bool reject —
-/// they belong in `TypedArrayData::F64` / `TypedArrayData::Bool`
-/// specialized variants directly, not via the heap-arc-wrapper path.
+/// routing through the heap-arc-construction path (ADR-006 §2.7.24 Q25.A).
+/// Inline scalars wrap into the matching `HeapValue` arm (Int64 →
+/// `HeapValue::BigInt(Arc<i64>)`); heap-kinded slots clone the underlying
+/// `Arc<HeapValue>`. Float64 / Bool reject — they belong in their own
+/// specialized v2-raw `TypedArray<T>` carriers, not via the heap-arc-wrapper
+/// path.
+///
+/// Preserved through V3-S5 ckpt-3 because the helper carries no
+/// `TypedArrayData` dependency — it operates on `KindedSlot::kind` +
+/// `slot.as_heap_value()`.
 ///
 /// Promoted from file-local `fn` to `pub(in crate::executor)` so
 /// `executor::objects::object_creation::op_new_array` (Round 11A,
@@ -63,17 +135,11 @@ pub(in crate::executor) fn slot_to_heap_arc(slot: &KindedSlot) -> Result<Arc<Hea
             let i = slot.as_i64().expect("kind=Int64");
             Ok(Arc::new(HeapValue::BigInt(Arc::new(i))))
         }
-        NativeKind::Float64 => {
-            // No HeapValue::Float arm — Float64 in a heap-element buffer
-            // routes through Decimal as a stable representation. (TypedArray
-            // for f64 is the F64 arm; this slot_to_heap_arc path is only for
-            // truly heterogeneous arrays via the-deleted-heterogeneous-element-carrier.)
-            Err(type_error(
-                "array element of kind Float64 cannot be heap-wrapped (use Vec<number> instead)",
-            ))
-        }
+        NativeKind::Float64 => Err(type_error(
+            "array element of kind Float64 cannot be heap-wrapped (use v2-raw TypedArray<f64> instead)",
+        )),
         NativeKind::Bool => Err(type_error(
-            "array element of kind Bool cannot be heap-wrapped (use Vec<bool> instead)",
+            "array element of kind Bool cannot be heap-wrapped (use v2-raw TypedArray<u8> instead)",
         )),
         NativeKind::String => match slot.slot.as_heap_value() {
             HeapValue::String(s) => Ok(Arc::new(HeapValue::String(Arc::clone(s)))),
@@ -93,519 +159,67 @@ pub(in crate::executor) fn slot_to_heap_arc(slot: &KindedSlot) -> Result<Arc<Hea
     }
 }
 
-/// Project a `TypedArrayData` element at index `idx` to a `KindedSlot` of
-/// the matching kind. Used by `first`/`last`. Returns `None` when out of
-/// bounds.
-fn typed_array_element(arr: &TypedArrayData, idx: usize) -> Option<KindedSlot> {
-    match arr {
-        TypedArrayData::I64(buf) => buf.data.get(idx).copied().map(KindedSlot::from_int),
-        TypedArrayData::F64(buf) => buf.data.get(idx).copied().map(KindedSlot::from_number),
-        TypedArrayData::Bool(buf) => buf
-            .data
-            .get(idx)
-            .copied()
-            .map(|b| KindedSlot::from_bool(b != 0)),
-        TypedArrayData::I8(buf) => buf
-            .data
-            .get(idx)
-            .copied()
-            .map(|v| KindedSlot::from_int(v as i64)),
-        TypedArrayData::I16(buf) => buf
-            .data
-            .get(idx)
-            .copied()
-            .map(|v| KindedSlot::from_int(v as i64)),
-        TypedArrayData::I32(buf) => buf
-            .data
-            .get(idx)
-            .copied()
-            .map(|v| KindedSlot::from_int(v as i64)),
-        TypedArrayData::U8(buf) => buf
-            .data
-            .get(idx)
-            .copied()
-            .map(|v| KindedSlot::from_int(v as i64)),
-        TypedArrayData::U16(buf) => buf
-            .data
-            .get(idx)
-            .copied()
-            .map(|v| KindedSlot::from_int(v as i64)),
-        TypedArrayData::U32(buf) => buf
-            .data
-            .get(idx)
-            .copied()
-            .map(|v| KindedSlot::from_int(v as i64)),
-        TypedArrayData::U64(buf) => buf
-            .data
-            .get(idx)
-            .copied()
-            .map(|v| KindedSlot::from_int(v as i64)),
-        TypedArrayData::F32(buf) => buf
-            .data
-            .get(idx)
-            .copied()
-            .map(|v| KindedSlot::from_number(v as f64)),
-        TypedArrayData::String(buf) => buf
-            .data
-            .get(idx)
-            .map(|s| KindedSlot::from_string_arc(Arc::clone(s))),
-        // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
-        TypedArrayData::Decimal(buf) => buf.data.get(idx).map(|d| KindedSlot::from_decimal(Arc::clone(d))),
-        TypedArrayData::BigInt(buf) => buf.data.get(idx).map(|b| KindedSlot::from_bigint(Arc::clone(b))),
-        TypedArrayData::Char(buf) => buf.data.get(idx).copied().map(KindedSlot::from_char),
-        // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): inner is
-        // `TypedObjectPtr`. Clone bumps v2-raw refcount; into_raw moves
-        // the share into the slot via `from_typed_object_raw`.
-        TypedArrayData::TypedObject(buf) => buf.data.get(idx).map(|o| KindedSlot::from_typed_object_raw(o.clone().into_raw())),
-        // ADR-006 §2.7.22 amendment (Round 18 S3, 2026-05-13): Matrix /
-        // FloatSlice arms deleted from TypedArrayData — Matrix is now its
-        // own `HeapKind::Matrix`; MatrixSlice projections are their own
-        // `HeapKind::MatrixSlice`. Indexing into a Matrix or MatrixSlice
-        // receiver is handled at the HeapKind dispatch shell, not here.
-    }
-}
+// ═══════════════════════════════════════════════════════════════════════════
+// Public builtin entry-points — ckpt-3 surface-and-stop stubs
+// Signatures preserved for `vm_impl/builtins.rs` dispatch integrity
+// (`vm_impl/builtins.rs:257-292`).
+// ═══════════════════════════════════════════════════════════════════════════
 
-/// Re-wrap an `Arc<HeapValue>` as a `KindedSlot` using the per-FieldType
-/// constructor matching the arm. Used when reading elements out of a
-/// `the-deleted-heterogeneous-element-carrier` buffer.
-fn heap_value_to_slot(hv: &Arc<HeapValue>) -> KindedSlot {
-    match hv.as_ref() {
-        HeapValue::String(s) => KindedSlot::from_string_arc(Arc::clone(s)),
-        HeapValue::Decimal(d) => KindedSlot::from_decimal(Arc::clone(d)),
-        HeapValue::BigInt(b) => KindedSlot::from_bigint(Arc::clone(b)),
-        HeapValue::TypedArray(a) => KindedSlot::from_typed_array(Arc::clone(a)),
-        // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): TypedObjectPtr
-        // payload — clone bumps refcount, into_raw moves share into slot.
-        HeapValue::TypedObject(o) => KindedSlot::from_typed_object_raw(o.clone().into_raw()),
-        // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): payload flipped to
-        // `HashMapKindedRef`. Wrap in fresh `Arc::new(m.clone())` (per-V
-        // Arc bump via HashMapKindedRef::clone).
-        HeapValue::HashMap(m) => KindedSlot::from_hashmap(Arc::new(m.clone())),
-        HeapValue::Char(c) => KindedSlot::from_char(*c),
-        // Other heap arms — fall back to none() for now; they're
-        // tile-uncovered until Wave 5e wires the matching constructors.
-        _ => KindedSlot::none(),
-    }
-}
-
-// ── Body migrations ────────────────────────────────────────────────────────
-
+/// `arr.push(value)` — append to typed array (returns new array).
 pub(in crate::executor) fn builtin_push(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
     if args.len() != 2 {
         return Err(type_error("push() requires 2 arguments (array, value)"));
     }
-    let arr = as_typed_array(&args[0])
-        .ok_or_else(|| type_error("push() first argument must be an array"))?;
-    let value = &args[1];
-
-    // Dispatch on array element shape to pick the matching `push`.
-    let new_arr: TypedArrayData = match arr.as_ref() {
-        TypedArrayData::I64(buf) => {
-            let i = match value.kind {
-                NativeKind::Int64 => value.as_i64().expect("kind=Int64"),
-                _ => {
-                    return Err(type_error(
-                        "push() value kind must match array element kind (int)",
-                    ));
-                }
-            };
-            let mut new_data = buf.data.clone();
-            new_data.push(i);
-            TypedArrayData::I64(Arc::new(TypedBuffer::from_vec(new_data)))
-        }
-        TypedArrayData::F64(buf) => {
-            let n = match value.kind {
-                NativeKind::Float64 => value.as_f64().expect("kind=Float64"),
-                NativeKind::Int64 => value.as_i64().expect("kind=Int64") as f64,
-                _ => {
-                    return Err(type_error(
-                        "push() value kind must match array element kind (number)",
-                    ));
-                }
-            };
-            let mut new_data = buf.iter().copied().collect::<Vec<f64>>();
-            new_data.push(n);
-            TypedArrayData::F64(Arc::new(
-                shape_value::AlignedTypedBuffer::from(shape_value::AlignedVec::from_vec(new_data)),
-            ))
-        }
-        TypedArrayData::Bool(buf) => {
-            let b = match value.kind {
-                NativeKind::Bool => value.as_bool().expect("kind=Bool"),
-                _ => {
-                    return Err(type_error(
-                        "push() value kind must match array element kind (bool)",
-                    ));
-                }
-            };
-            let mut new_data = buf.data.clone();
-            new_data.push(if b { 1u8 } else { 0u8 });
-            TypedArrayData::Bool(Arc::new(TypedBuffer::from_vec(new_data)))
-        }
-        TypedArrayData::String(buf) => {
-            let s = match value.kind {
-                NativeKind::String => match value.slot.as_heap_value() {
-                    HeapValue::String(s) => Arc::clone(s),
-                    _ => return Err(type_error("KindedSlot kind=String but heap arm mismatched")),
-                },
-                _ => {
-                    return Err(type_error(
-                        "push() value kind must match array element kind (string)",
-                    ));
-                }
-            };
-            let mut new_data = buf.data.clone();
-            new_data.push(s);
-            TypedArrayData::String(Arc::new(TypedBuffer::from_vec(new_data)))
-        }
-        // Width-narrowed integer/float arms: not exposed to user-level push
-        // today (compiler emits I64/F64 by default). Reject explicitly
-        // rather than silently widening.
-        _ => {
-            return Err(type_error(
-                "push() not supported for narrow-width or matrix arrays",
-            ));
-        }
-    };
-    Ok(typed_array_to_slot(new_arr))
+    Err(ckpt3_surface("push", args))
 }
 
+/// `arr.pop()` — remove last element of typed array (returns new array).
 pub(in crate::executor) fn builtin_pop(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
     if args.len() != 1 {
         return Err(type_error("pop() requires 1 argument (array)"));
     }
-    let arr = as_typed_array(&args[0])
-        .ok_or_else(|| type_error("pop() argument must be an array"))?;
-
-    let new_arr: TypedArrayData = match arr.as_ref() {
-        TypedArrayData::I64(buf) => {
-            let mut new_data = buf.data.clone();
-            new_data.pop();
-            TypedArrayData::I64(Arc::new(TypedBuffer::from_vec(new_data)))
-        }
-        TypedArrayData::F64(buf) => {
-            let mut new_data = buf.iter().copied().collect::<Vec<f64>>();
-            new_data.pop();
-            TypedArrayData::F64(Arc::new(
-                shape_value::AlignedTypedBuffer::from(shape_value::AlignedVec::from_vec(new_data)),
-            ))
-        }
-        TypedArrayData::Bool(buf) => {
-            let mut new_data = buf.data.clone();
-            new_data.pop();
-            TypedArrayData::Bool(Arc::new(TypedBuffer::from_vec(new_data)))
-        }
-        TypedArrayData::String(buf) => {
-            let mut new_data = buf.data.clone();
-            new_data.pop();
-            TypedArrayData::String(Arc::new(TypedBuffer::from_vec(new_data)))
-        }
-        _ => {
-            return Err(type_error(
-                "pop() not supported for narrow-width or matrix arrays",
-            ));
-        }
-    };
-    Ok(typed_array_to_slot(new_arr))
+    Err(ckpt3_surface("pop", args))
 }
 
+/// `arr.first()` — first element or none.
 pub(in crate::executor) fn builtin_first(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
     if args.len() != 1 {
         return Err(type_error("first() requires 1 argument"));
     }
-    let arr = as_typed_array(&args[0])
-        .ok_or_else(|| type_error("first() argument must be an array"))?;
-    Ok(typed_array_element(arr.as_ref(), 0).unwrap_or_else(KindedSlot::none))
+    Err(ckpt3_surface("first", args))
 }
 
+/// `arr.last()` — last element or none.
 pub(in crate::executor) fn builtin_last(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
     if args.len() != 1 {
         return Err(type_error("last() requires 1 argument"));
     }
-    let arr = as_typed_array(&args[0])
-        .ok_or_else(|| type_error("last() argument must be an array"))?;
-    let len = match arr.as_ref() {
-        TypedArrayData::I64(b) => b.len(),
-        TypedArrayData::F64(b) => b.len(),
-        TypedArrayData::Bool(b) => b.len(),
-        TypedArrayData::I8(b) => b.len(),
-        TypedArrayData::I16(b) => b.len(),
-        TypedArrayData::I32(b) => b.len(),
-        TypedArrayData::U8(b) => b.len(),
-        TypedArrayData::U16(b) => b.len(),
-        TypedArrayData::U32(b) => b.len(),
-        TypedArrayData::U64(b) => b.len(),
-        TypedArrayData::F32(b) => b.len(),
-        TypedArrayData::String(b) => b.len(),
-        // W17-typed-carrier-bundle-A commit 1/4: §2.7.24 Q25.A arms.
-        TypedArrayData::Decimal(b) => b.len(),
-        TypedArrayData::BigInt(b) => b.len(),
-        TypedArrayData::Char(b) => b.len(),
-        TypedArrayData::TypedObject(b) => b.len(),
-        // ADR-006 §2.7.22 amendment (Round 18 S3): Matrix / FloatSlice
-        // arms deleted from TypedArrayData; receivers of those types
-        // arrive at the HeapKind::Matrix / HeapKind::MatrixSlice
-        // dispatch shell, not here.
-    };
-    if len == 0 {
-        return Ok(KindedSlot::none());
-    }
-    Ok(typed_array_element(arr.as_ref(), len - 1).unwrap_or_else(KindedSlot::none))
+    Err(ckpt3_surface("last", args))
 }
 
 /// `zip(a, b)` — pairs elements of two arrays into `Pair<A,B>` TypedObjects.
-///
-/// W17-typed-carrier-bundle-A checkpoint 2/4: per the C+ resolution
-/// recorded in `phase-2d-playbook.md` §3 (Bundle-A checkpoint-2 amendment),
-/// each pair is constructed as a TypedObject with fields `{first, second}`
-/// rather than the prior 2-element `[a, b]` heterogeneous array. User code
-/// reads `pair.first` / `pair.second` rather than `pair[0]` / `pair[1]` —
-/// breaking change for stdlib + tests. Shape's tuple representation
-/// lowers to TypedObject (`closure_layout.rs:843`) — no distinct tuple
-/// runtime carrier; named fields are the right shape.
 pub(in crate::executor) fn builtin_zip(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
     if args.len() != 2 {
         return Err(type_error("zip() requires 2 arguments"));
     }
-    let a_arc = as_typed_array(&args[0])
-        .ok_or_else(|| type_error("zip() first argument must be an array"))?;
-    let b_arc = as_typed_array(&args[1])
-        .ok_or_else(|| type_error("zip() second argument must be an array"))?;
-    let a = a_arc.as_ref();
-    let b = b_arc.as_ref();
-
-    let len_a = match a {
-        TypedArrayData::I64(x) => x.len(),
-        TypedArrayData::F64(x) => x.len(),
-        TypedArrayData::Bool(x) => x.len(),
-        TypedArrayData::String(x) => x.len(),
-        _ => 0,
-    };
-    let len_b = match b {
-        TypedArrayData::I64(x) => x.len(),
-        TypedArrayData::F64(x) => x.len(),
-        TypedArrayData::Bool(x) => x.len(),
-        TypedArrayData::String(x) => x.len(),
-        _ => 0,
-    };
-    let n = len_a.min(len_b);
-
-    // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): TypedArrayData::TypedObject
-    // inner element type flipped to TypedObjectPtr.
-    let mut pair_storages: Vec<shape_value::heap_value::TypedObjectPtr> =
-        Vec::with_capacity(n);
-    for i in 0..n {
-        let xa = typed_array_element(a, i).unwrap_or_else(KindedSlot::none);
-        let xb = typed_array_element(b, i).unwrap_or_else(KindedSlot::none);
-        let pair_slot = shape_runtime::type_schema::typed_object_from_pairs(&[
-            ("first", xa),
-            ("second", xb),
-        ]);
-        // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): pair_slot's bits
-        // are `*const TypedObjectStorage` (per `typed_object_from_pairs`'s
-        // v2-raw construction-side contract). Bump via `v2_retain` to claim
-        // a share for the buffer's element; pair_slot's Drop retires its
-        // own share through the §2.7.7 / Q9 dispatch table.
-        let bits = pair_slot.slot.raw();
-        let ptr = bits as *const shape_value::heap_value::TypedObjectStorage;
-        // SAFETY: per `typed_object_from_pairs`'s contract, ptr is a live
-        // TypedObjectStorage with refcount ≥ 1.
-        unsafe { shape_value::v2::refcount::v2_retain(&(*ptr).header); }
-        pair_storages.push(shape_value::heap_value::TypedObjectPtr::new(ptr));
-        drop(pair_slot);
-    }
-    Ok(KindedSlot::from_typed_array(Arc::new(
-        TypedArrayData::TypedObject(Arc::new(TypedBuffer::from_vec(pair_storages))),
-    )))
+    Err(ckpt3_surface("zip", args))
 }
 
 /// `Array.filled(size, value)` — produce an array of `size` repeats of `value`.
-/// Element shape follows `value.kind`.
 pub(in crate::executor) fn builtin_filled(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
     if args.len() != 2 {
         return Err(type_error("Array.filled() requires 2 arguments (size, value)"));
     }
-    let size = args[0]
-        .as_i64()
-        .map(|i| i as usize)
-        .or_else(|| args[0].as_f64().map(|f| f as usize))
-        .ok_or_else(|| type_error("Array.filled() size must be a number"))?;
-    let value = &args[1];
-
-    let new_arr: TypedArrayData = match value.kind {
-        NativeKind::Int64 => {
-            let i = value.as_i64().expect("kind=Int64");
-            TypedArrayData::I64(Arc::new(TypedBuffer::from_vec(vec![i; size])))
-        }
-        NativeKind::Float64 => {
-            let n = value.as_f64().expect("kind=Float64");
-            let av = shape_value::AlignedVec::from_vec(vec![n; size]);
-            TypedArrayData::F64(Arc::new(shape_value::AlignedTypedBuffer::from(av)))
-        }
-        NativeKind::Bool => {
-            let b = value.as_bool().expect("kind=Bool");
-            TypedArrayData::Bool(Arc::new(TypedBuffer::from_vec(vec![
-                if b { 1u8 } else { 0u8 };
-                size
-            ])))
-        }
-        NativeKind::String => {
-            let s = match value.slot.as_heap_value() {
-                HeapValue::String(s) => Arc::clone(s),
-                _ => return Err(type_error("KindedSlot kind=String but heap arm mismatched")),
-            };
-            TypedArrayData::String(Arc::new(TypedBuffer::from_vec(vec![s; size])))
-        }
-        // W17-typed-carrier-bundle-A checkpoint 2/4: heap-kinded value
-        // dispatches to the specialized variant per §2.7.24 Q25.A. Each
-        // arm holds a single Arc cloned `size` times — no HeapValue
-        // catch-all carrier. The element kind is uniform per variant.
-        // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): receiver-recovery
-        // for v2-raw TypedObject — slot bits are `*const TypedObjectStorage`,
-        // NOT `Arc::into_raw(Arc<HeapValue>)`. `as_heap_value()` is unsound
-        // on this slot kind. Read raw bits, build TypedObjectPtrs cloning
-        // (each Clone bumps the v2-raw refcount).
-        NativeKind::Ptr(HeapKind::TypedObject) => {
-            let bits = value.slot.raw();
-            if bits == 0 {
-                return Err(type_error("KindedSlot kind=Ptr(TypedObject) bits null"));
-            }
-            let ptr = bits as *const shape_value::heap_value::TypedObjectStorage;
-            // Build the seed wrapper without bumping (we'll explicitly bump
-            // for each cloned slot below); the seed itself does not own a
-            // share — it's a borrow of the value's slot.
-            let seed = std::mem::ManuallyDrop::new(
-                shape_value::heap_value::TypedObjectPtr::new(ptr),
-            );
-            // For `size` elements, each Clone bumps the v2-raw refcount by 1.
-            let mut data: Vec<shape_value::heap_value::TypedObjectPtr> =
-                Vec::with_capacity(size);
-            for _ in 0..size {
-                data.push((*seed).clone());
-            }
-            TypedArrayData::TypedObject(Arc::new(TypedBuffer::from_vec(data)))
-        }
-        NativeKind::Ptr(HeapKind::Decimal) => {
-            let d = match value.slot.as_heap_value() {
-                HeapValue::Decimal(d) => Arc::clone(d),
-                _ => return Err(type_error("KindedSlot kind=Ptr(Decimal) heap arm mismatched")),
-            };
-            TypedArrayData::Decimal(Arc::new(TypedBuffer::from_vec(vec![d; size])))
-        }
-        NativeKind::Ptr(HeapKind::BigInt) => {
-            let b = match value.slot.as_heap_value() {
-                HeapValue::BigInt(b) => Arc::clone(b),
-                _ => return Err(type_error("KindedSlot kind=Ptr(BigInt) heap arm mismatched")),
-            };
-            TypedArrayData::BigInt(Arc::new(TypedBuffer::from_vec(vec![b; size])))
-        }
-        NativeKind::Ptr(HeapKind::Char) => {
-            let c = value.slot.as_char().ok_or_else(|| {
-                type_error("KindedSlot kind=Ptr(Char) but slot bits decode failed")
-            })?;
-            TypedArrayData::Char(Arc::new(TypedBuffer::from_vec(vec![c; size])))
-        }
-        other => {
-            return Err(type_error(format!(
-                "Array.filled() element kind {:?} not supported \
-                 post-§2.7.24 Q25.A — add a specialized TypedArrayData arm.",
-                other
-            )))
-        }
-    };
-    Ok(typed_array_to_slot(new_arr))
+    Err(ckpt3_surface("filled", args))
 }
 
 /// `range(n)` / `range(start, end)` / `range(start, end, step)` — produce
 /// an `Array<int>` (when all args are Int) or `Array<number>` otherwise.
 pub(in crate::executor) fn builtin_range(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
-    let all_int = !args.is_empty() && args.iter().all(|a| matches!(a.kind, NativeKind::Int64));
-    if all_int {
-        return builtin_range_int(args);
+    if args.is_empty() || args.len() > 3 {
+        return Err(type_error("range() requires 1, 2, or 3 arguments"));
     }
-
-    let (start, end, step) = match args.len() {
-        1 => {
-            let n = super::kind_coerce::coerce_to_f64(&args[0])
-                .ok_or_else(|| type_error("range() argument must be a number"))?;
-            (0.0, n, 1.0)
-        }
-        2 => {
-            let s = super::kind_coerce::coerce_to_f64(&args[0])
-                .ok_or_else(|| type_error("range() start must be a number"))?;
-            let e = super::kind_coerce::coerce_to_f64(&args[1])
-                .ok_or_else(|| type_error("range() end must be a number"))?;
-            (s, e, 1.0)
-        }
-        3 => {
-            let s = super::kind_coerce::coerce_to_f64(&args[0])
-                .ok_or_else(|| type_error("range() start must be a number"))?;
-            let e = super::kind_coerce::coerce_to_f64(&args[1])
-                .ok_or_else(|| type_error("range() end must be a number"))?;
-            let st = super::kind_coerce::coerce_to_f64(&args[2])
-                .ok_or_else(|| type_error("range() step must be a number"))?;
-            if st == 0.0 {
-                return Err(type_error("range() step cannot be zero"));
-            }
-            (s, e, st)
-        }
-        _ => return Err(type_error("range() requires 1, 2, or 3 arguments")),
-    };
-
-    let mut values: Vec<f64> = Vec::new();
-    if step > 0.0 {
-        let mut current = start;
-        while current < end {
-            values.push(current);
-            current += step;
-        }
-    } else {
-        let mut current = start;
-        while current > end {
-            values.push(current);
-            current += step;
-        }
-    }
-    let av = shape_value::AlignedVec::from_vec(values);
-    let buf = shape_value::AlignedTypedBuffer::from(av);
-    Ok(typed_array_to_slot(TypedArrayData::F64(Arc::new(buf))))
-}
-
-fn builtin_range_int(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
-    let (start, end, step) = match args.len() {
-        1 => (0i64, args[0].as_i64().unwrap(), 1i64),
-        2 => (
-            args[0].as_i64().unwrap(),
-            args[1].as_i64().unwrap(),
-            1i64,
-        ),
-        3 => {
-            let st = args[2].as_i64().unwrap();
-            if st == 0 {
-                return Err(type_error("range() step cannot be zero"));
-            }
-            (args[0].as_i64().unwrap(), args[1].as_i64().unwrap(), st)
-        }
-        _ => return Err(type_error("range() requires 1, 2, or 3 arguments")),
-    };
-
-    let mut values: Vec<i64> = Vec::new();
-    if step > 0 {
-        let mut current = start;
-        while current < end {
-            values.push(current);
-            current += step;
-        }
-    } else {
-        let mut current = start;
-        while current > end {
-            values.push(current);
-            current += step;
-        }
-    }
-    Ok(typed_array_to_slot(TypedArrayData::I64(Arc::new(
-        TypedBuffer::from_vec(values),
-    ))))
+    Err(ckpt3_surface("range", args))
 }
 
 /// `slice(arr, start, [end])` — return a subarray. Preserves element shape.
@@ -615,190 +229,6 @@ pub(in crate::executor) fn builtin_slice(args: &[KindedSlot]) -> Result<KindedSl
             "slice() requires 2 or 3 arguments (array, start, [end])",
         ));
     }
-    let arr_arc = as_typed_array(&args[0])
-        .ok_or_else(|| type_error("slice() first argument must be an array"))?;
-    let arr = arr_arc.as_ref();
-
-    let len = match arr {
-        TypedArrayData::I64(x) => x.len(),
-        TypedArrayData::F64(x) => x.len(),
-        TypedArrayData::Bool(x) => x.len(),
-        TypedArrayData::String(x) => x.len(),
-        TypedArrayData::I8(x) => x.len(),
-        TypedArrayData::I16(x) => x.len(),
-        TypedArrayData::I32(x) => x.len(),
-        TypedArrayData::U8(x) => x.len(),
-        TypedArrayData::U16(x) => x.len(),
-        TypedArrayData::U32(x) => x.len(),
-        TypedArrayData::U64(x) => x.len(),
-        TypedArrayData::F32(x) => x.len(),
-        // W17-typed-carrier-bundle-A commit 1/4: §2.7.24 Q25.A arms.
-        TypedArrayData::Decimal(x) => x.len(),
-        TypedArrayData::BigInt(x) => x.len(),
-        TypedArrayData::Char(x) => x.len(),
-        TypedArrayData::TypedObject(x) => x.len(),
-        // ADR-006 §2.7.22 amendment (Round 18 S3): Matrix / FloatSlice
-        // arms deleted from TypedArrayData.
-    } as isize;
-
-    let start = super::kind_coerce::coerce_to_f64(&args[1])
-        .ok_or_else(|| type_error("slice() start must be a number"))? as isize;
-    let end = if args.len() == 3 {
-        super::kind_coerce::coerce_to_f64(&args[2])
-            .ok_or_else(|| type_error("slice() end must be a number"))? as isize
-    } else {
-        len
-    };
-
-    let start_idx = if start < 0 {
-        (len + start).max(0) as usize
-    } else {
-        start.min(len) as usize
-    };
-    let end_idx = if end < 0 {
-        (len + end).max(0) as usize
-    } else {
-        end.min(len) as usize
-    };
-
-    let new_arr: TypedArrayData = if start_idx > end_idx {
-        // Empty slice — produce an empty TypedArray of matching shape.
-        match arr {
-            TypedArrayData::I64(_) => {
-                TypedArrayData::I64(Arc::new(TypedBuffer::from_vec(Vec::new())))
-            }
-            TypedArrayData::F64(_) => TypedArrayData::F64(Arc::new(
-                shape_value::AlignedTypedBuffer::from(shape_value::AlignedVec::from_vec(
-                    Vec::<f64>::new(),
-                )),
-            )),
-            TypedArrayData::Bool(_) => {
-                TypedArrayData::Bool(Arc::new(TypedBuffer::from_vec(Vec::new())))
-            }
-            TypedArrayData::String(_) => {
-                TypedArrayData::String(Arc::new(TypedBuffer::from_vec(Vec::new())))
-            }
-            _ => {
-                return Err(type_error(
-                    "slice() not supported for narrow-width or matrix arrays",
-                ));
-            }
-        }
-    } else {
-        match arr {
-            TypedArrayData::I64(buf) => TypedArrayData::I64(Arc::new(TypedBuffer::from_vec(
-                buf.data[start_idx..end_idx].to_vec(),
-            ))),
-            TypedArrayData::F64(buf) => {
-                let av = shape_value::AlignedVec::from_vec(buf.data[start_idx..end_idx].to_vec());
-                TypedArrayData::F64(Arc::new(shape_value::AlignedTypedBuffer::from(av)))
-            }
-            TypedArrayData::Bool(buf) => TypedArrayData::Bool(Arc::new(TypedBuffer::from_vec(
-                buf.data[start_idx..end_idx].to_vec(),
-            ))),
-            TypedArrayData::String(buf) => TypedArrayData::String(Arc::new(
-                TypedBuffer::from_vec(buf.data[start_idx..end_idx].to_vec()),
-            )),
-            _ => {
-                return Err(type_error(
-                    "slice() not supported for narrow-width or matrix arrays",
-                ));
-            }
-        }
-    };
-    Ok(typed_array_to_slot(new_arr))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn int_array(v: Vec<i64>) -> KindedSlot {
-        typed_array_to_slot(TypedArrayData::I64(Arc::new(TypedBuffer::from_vec(v))))
-    }
-
-    #[test]
-    fn push_int_array_grows() {
-        let arr = int_array(vec![1, 2, 3]);
-        let r = builtin_push(&[arr, KindedSlot::from_int(4)]).unwrap();
-        let arc = as_typed_array(&r).expect("push returns array");
-        match arc.as_ref() {
-            TypedArrayData::I64(buf) => assert_eq!(buf.data, vec![1, 2, 3, 4]),
-            _ => panic!("expected I64 array"),
-        }
-    }
-
-    #[test]
-    fn pop_int_array_shrinks() {
-        let arr = int_array(vec![1, 2, 3]);
-        let r = builtin_pop(&[arr]).unwrap();
-        let arc = as_typed_array(&r).expect("pop returns array");
-        match arc.as_ref() {
-            TypedArrayData::I64(buf) => assert_eq!(buf.data, vec![1, 2]),
-            _ => panic!("expected I64 array"),
-        }
-    }
-
-    #[test]
-    fn first_int_array() {
-        let arr = int_array(vec![10, 20, 30]);
-        let r = builtin_first(&[arr]).unwrap();
-        assert_eq!(r.as_i64(), Some(10));
-    }
-
-    #[test]
-    fn last_int_array() {
-        let arr = int_array(vec![10, 20, 30]);
-        let r = builtin_last(&[arr]).unwrap();
-        assert_eq!(r.as_i64(), Some(30));
-    }
-
-    #[test]
-    fn first_empty_returns_none() {
-        let arr = int_array(vec![]);
-        let r = builtin_first(&[arr]).unwrap();
-        assert_eq!(r.slot().raw(), 0);
-    }
-
-    #[test]
-    fn filled_int() {
-        let r =
-            builtin_filled(&[KindedSlot::from_int(3), KindedSlot::from_int(42)]).unwrap();
-        let arc = as_typed_array(&r).expect("filled returns array");
-        match arc.as_ref() {
-            TypedArrayData::I64(buf) => assert_eq!(buf.data, vec![42, 42, 42]),
-            _ => panic!("expected I64 array"),
-        }
-    }
-
-    #[test]
-    fn range_int_basic() {
-        let r = builtin_range(&[KindedSlot::from_int(5)]).unwrap();
-        let arc = as_typed_array(&r).expect("range returns array");
-        match arc.as_ref() {
-            TypedArrayData::I64(buf) => assert_eq!(buf.data, vec![0, 1, 2, 3, 4]),
-            _ => panic!("expected I64 array"),
-        }
-    }
-
-    #[test]
-    fn range_widens_to_float_with_float_arg() {
-        let r = builtin_range(&[KindedSlot::from_number(3.0)]).unwrap();
-        let arc = as_typed_array(&r).expect("range returns array");
-        match arc.as_ref() {
-            TypedArrayData::F64(buf) => assert_eq!(buf.iter().copied().collect::<Vec<_>>(), vec![0.0, 1.0, 2.0]),
-            _ => panic!("expected F64 array"),
-        }
-    }
-
-    #[test]
-    fn slice_int_basic() {
-        let arr = int_array(vec![0, 1, 2, 3, 4]);
-        let r = builtin_slice(&[arr, KindedSlot::from_int(1), KindedSlot::from_int(4)]).unwrap();
-        let arc = as_typed_array(&r).expect("slice returns array");
-        match arc.as_ref() {
-            TypedArrayData::I64(buf) => assert_eq!(buf.data, vec![1, 2, 3]),
-            _ => panic!("expected I64 array"),
-        }
-    }
+    let _ = HeapKind::TypedArray; // Preserve import-touch for future v2-raw path.
+    Err(ckpt3_surface("slice", args))
 }

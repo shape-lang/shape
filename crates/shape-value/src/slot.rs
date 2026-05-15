@@ -3,8 +3,10 @@
 //! Each slot stores exactly 8 bytes of raw bits. Simple types (f64, i64, bool)
 //! use their native bit representation. Heap types are stored as the raw
 //! pointer of an `Arc<T>` produced by `Arc::into_raw`, where `T` is the
-//! exact typed payload (e.g. `String`, `TypedArrayData`, `HashMapData`,
-//! `Decimal`). Drop dispatch consults the schema's `FieldType` /
+//! exact typed payload (e.g. `String`, `HashMapData`, `Decimal`; for
+//! array fields post-V3-S5, `TypedArray<f64>`/`TypedArray<i64>` /etc.
+//! per the v2-raw per-element-kind carrier shape). Drop dispatch
+//! consults the schema's `FieldType` /
 //! `NativeKind` to pick the matching `Arc::decrement_strong_count`; there
 //! is no `Box<HeapValue>` wrapping in new code.
 //!
@@ -16,10 +18,17 @@
 //! `from_heap` is `#[deprecated]` transitional — new code uses the typed
 //! constructors below. See `docs/adr/006-value-and-memory-model.md`.
 
+// V3-S5 ckpt-4 (2026-05-15): `TypedArrayData` import deleted — the enum
+// was retired at ckpt-1 per W12-typed-array-data-deletion-audit §3.5 +
+// ADR-006 §2.7.24 Q25.A SUPERSEDED. The `from_typed_array(Arc<
+// TypedArrayData>)` constructor below is deleted in lockstep; slot
+// construction for array fields cascade-breaks here for v2-raw
+// `TypedArray<T>` per-element-kind constructor rebuild in a downstream
+// wave (e.g. `from_typed_array_f64(Arc<TypedArray<f64>>)` /
+// `from_typed_array_i64(...)` per the new monomorphic carrier shape).
 use crate::heap_value::{
     AtomicData, ChannelData, DequeData, HashMapData, HashSetData, HeapValue, IoHandleData,
-    LazyData, MutexData, NativeViewData, PriorityQueueData, RangeData, TypedArrayData,
-    TypedObjectStorage,
+    LazyData, MutexData, NativeViewData, PriorityQueueData, RangeData, TypedObjectStorage,
 };
 use crate::datatable::DataTable;
 use std::sync::Arc;
@@ -76,9 +85,13 @@ impl ValueSlot {
     #[cfg(not(feature = "gc"))]
     #[deprecated(
         note = "Box<HeapValue> wrapping. Use a per-FieldType constructor \
-                (`from_string_arc`, `from_typed_array`, `from_typed_object`, \
+                (`from_string_arc`, `from_typed_object`, \
                 `from_decimal`, `from_bigint`, `from_hashmap`, ...). \
-                See ADR-006 §2.4."
+                Array fields: V3-S5 ckpt-4 deleted `from_typed_array` along \
+                with the `TypedArrayData` enum; per-element-kind \
+                `from_typed_array_<T>(Arc<TypedArray<T>>)` constructors \
+                are the v2-raw replacement (downstream wave rebuild). \
+                See ADR-006 §2.4 + W12 audit §3.5/§B."
     )]
     pub fn from_heap(value: HeapValue) -> Self {
         let ptr = Box::into_raw(Box::new(value)) as u64;
@@ -89,9 +102,13 @@ impl ValueSlot {
     #[cfg(feature = "gc")]
     #[deprecated(
         note = "Box<HeapValue> wrapping. Use a per-FieldType constructor \
-                (`from_string_arc`, `from_typed_array`, `from_typed_object`, \
+                (`from_string_arc`, `from_typed_object`, \
                 `from_decimal`, `from_bigint`, `from_hashmap`, ...). \
-                See ADR-006 §2.4."
+                Array fields: V3-S5 ckpt-4 deleted `from_typed_array` along \
+                with the `TypedArrayData` enum; per-element-kind \
+                `from_typed_array_<T>(Arc<TypedArray<T>>)` constructors \
+                are the v2-raw replacement (downstream wave rebuild). \
+                See ADR-006 §2.4 + W12 audit §3.5/§B."
     )]
     pub fn from_heap(value: HeapValue) -> Self {
         let heap = shape_gc::thread_gc_heap();
@@ -117,12 +134,16 @@ impl ValueSlot {
         Self(Arc::into_raw(s) as u64)
     }
 
-    /// Store an `Arc<TypedArrayData>` directly. Mirrors `FieldType::Array(_)` /
-    /// `NativeKind::Ptr(HeapKind::TypedArray)` /
-    /// `HeapValue::TypedArray(Arc<TypedArrayData>)` (post Step 3 / ADR-006 §2.3).
-    pub fn from_typed_array(a: Arc<TypedArrayData>) -> Self {
-        Self(Arc::into_raw(a) as u64)
-    }
+    // V3-S5 ckpt-4 (2026-05-15): `from_typed_array(a: Arc<TypedArrayData>)`
+    // constructor DELETED. The `TypedArrayData` enum + `TypedBuffer<T>` /
+    // `AlignedTypedBuffer` wrapper layer are retired wholesale at
+    // ckpt-1..ckpt-4 per W12-typed-array-data-deletion-audit §3.5 + §B
+    // + ADR-006 §2.7.24 Q25.A SUPERSEDED. Replacement (downstream wave):
+    // per-element-kind constructors — `from_typed_array_f64(Arc<
+    // TypedArray<f64>>)`, `from_typed_array_i64(Arc<TypedArray<i64>>)`,
+    // etc. — matching the v2-raw monomorphic flat-struct carrier shape
+    // at `crate::v2::typed_array::TypedArray<T>` per
+    // `docs/runtime-v2-spec.md`. Refusal #1 binding.
 
     /// Store an `Arc<TypedObjectStorage>` directly. Mirrors
     /// `FieldType::Object(_)` / `NativeKind::Ptr(HeapKind::TypedObject)` /

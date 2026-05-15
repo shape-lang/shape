@@ -308,33 +308,19 @@ pub(in crate::executor) fn builtin_is_finite(args: &[KindedSlot]) -> Result<Kind
 /// routes through `slot.as_heap_value()` + `HeapValue` match.
 pub(in crate::executor) fn builtin_stddev(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
     check_arity(args, 1, "stddev")?;
-    use shape_value::heap_value::{HeapValue, TypedArrayData};
-
     match args[0].kind {
         NativeKind::Ptr(shape_value::HeapKind::TypedArray) => {
-            let hv: &HeapValue = args[0].slot.as_heap_value();
-            let arr = match hv {
-                HeapValue::TypedArray(a) => a,
-                _ => unreachable!("kind says TypedArray"),
-            };
-            let values: Vec<f64> = match arr.as_ref() {
-                TypedArrayData::F64(buf) => buf.iter().copied().collect(),
-                TypedArrayData::I64(buf) => buf.iter().map(|&v| v as f64).collect(),
-                TypedArrayData::I32(buf) => buf.iter().map(|&v| v as f64).collect(),
-                TypedArrayData::F32(buf) => buf.iter().map(|&v| v as f64).collect(),
-                _ => {
-                    return Err(type_error(
-                        "stddev() requires a numeric array (Vec<number>/Vec<int>)",
-                    ));
-                }
-            };
-            if values.is_empty() {
-                return Ok(KindedSlot::from_number(0.0));
-            }
-            let n = values.len() as f64;
-            let mean = values.iter().sum::<f64>() / n;
-            let variance = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / n;
-            Ok(KindedSlot::from_number(variance.sqrt()))
+            // V3-S5 ckpt-5: TypedArrayData numeric arms (F64/I64/I32/F32)
+            // deleted at ckpt-1..ckpt-4 per W12 audit §3.5. Rebuild at
+            // ckpt-6 STRICT close per per-T v2-raw `TypedArray<T>`
+            // direct-access target. Refusal #1.
+            Err(VMError::NotImplemented(
+                "stddev: SURFACE — V3-S5 ckpt-5 consumer-cascade tier 3. \
+                 `Arc<TypedArrayData>` numeric-arm dispatch DELETED at \
+                 ckpt-1..ckpt-4. Rebuild at ckpt-6 STRICT close per v2-raw \
+                 `TypedArray<T>` direct-access. Refusal #1."
+                    .to_string(),
+            ))
         }
         _ => Err(type_error("stddev() argument must be an array")),
     }

@@ -1015,13 +1015,13 @@ fn slot_heap_to_serializable(
         }
         HeapKind::HashSet => unsafe {
             let arc = Arc::<HashSetData>::from_raw(bits as *const HashSetData);
-            let keys: Vec<String> = arc.keys.data.iter().map(|k| (**k).clone()).collect();
+            let keys: Vec<String> = arc.keys.iter().map(|k| (**k).clone()).collect();
             let _ = Arc::into_raw(arc);
             Ok(SV::HashSet { keys })
         },
         HeapKind::PriorityQueue => unsafe {
             let arc = Arc::<PriorityQueueData>::from_raw(bits as *const PriorityQueueData);
-            let heap = arc.heap.data.clone();
+            let heap: Vec<i64> = (*arc.heap).clone();
             let _ = Arc::into_raw(arc);
             Ok(SV::PriorityQueueHeap { heap })
         },

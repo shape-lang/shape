@@ -23,7 +23,7 @@
 //! `stdlib-src/core/json_value.shape`). See
 //! `docs/adr/005-typed-slot-construction.md`.
 
-use shape_value::heap_value::{HeapValue, TypedArrayData};
+use shape_value::heap_value::HeapValue;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum JsonValue {
@@ -82,19 +82,22 @@ impl JsonValue {
 /// behavioral commitment requiring explicit decision per consumer
 /// demand.
 ///
-/// **TypedArrayData inner-dispatch**: 13 mechanical-yes sub-variants
-/// (8 integer-widths → JsonValue::Int; F32/F64 → JsonValue::Number;
-/// Bool → JsonValue::Bool with `u8 0/1` → bool semantic mapping;
-/// String → JsonValue::String; HeapValue → recurse) + 2
-/// architectural-choice deferred sub-variants (Matrix, FloatSlice;
-/// 2D-layout encoding policy not yet decided).
+/// V3-S5 ckpt-5-prime (2026-05-15): the **TypedArrayData inner-dispatch**
+/// description below previously named the 13-arm `typed_array_to_json_value`
+/// helper. That helper + the `HeapValue::TypedArray(ta)` outer arm here are
+/// RETIRED in lockstep with the deleted `HeapValue::TypedArray` variant
+/// (ckpt-4) + deleted `TypedArrayData` inner enum (ckpt-1). The v2-raw
+/// `*mut TypedArray<T>` JSON-serialisation path lands at the ckpt-5-prime²
+/// + ckpt-6 producer/consumer storage-shape migration (per W12 audit §3.6
+/// — no `*mut TypedArray<T>` value ever reaches `heap_to_json_value`
+/// post-V3-S5 ckpt-5: the JSON projection happens at the marshal layer
+/// before the value becomes a `HeapValue`). Refusal #1 binding.
 pub fn heap_to_json_value(hv: &HeapValue) -> Result<JsonValue, String> {
     match hv {
-        // Mechanical-yes top-level (5)
+        // Mechanical-yes top-level (4 after V3-S5 ckpt-5-prime TypedArray retirement)
         HeapValue::String(s) => Ok(JsonValue::String((**s).clone())),
         HeapValue::BigInt(n) => Ok(JsonValue::Int(**n)),
         HeapValue::Char(c) => Ok(JsonValue::String(c.to_string())),
-        HeapValue::TypedArray(ta) => typed_array_to_json_value(&**ta),
         HeapValue::HashMap(kref) => {
             // Wave 2 Round 3b C2-joint ckpt-4 (2026-05-14): per-V walk
             // reading keys (`*mut TypedArray<*const StringObj>` → `&str`)
@@ -176,7 +179,6 @@ pub fn heap_to_json_value(hv: &HeapValue) -> Result<JsonValue, String> {
         // architectural-choice deferral.
         HeapValue::HashSet(d) => Ok(JsonValue::Array(
             d.keys
-                .data
                 .iter()
                 .map(|k| JsonValue::String((**k).clone()))
                 .collect(),
@@ -268,7 +270,6 @@ pub fn heap_to_json_value(hv: &HeapValue) -> Result<JsonValue, String> {
         // serialisation preserves heap order to match Display.
         HeapValue::PriorityQueue(d) => Ok(JsonValue::Array(
             d.heap
-                .data
                 .iter()
                 .map(|v| JsonValue::Int(*v))
                 .collect(),
@@ -335,107 +336,17 @@ pub fn heap_to_json_value(hv: &HeapValue) -> Result<JsonValue, String> {
     }
 }
 
-/// Walk a `TypedArrayData` and produce `JsonValue::Array`.
-///
-/// 13 mechanical-yes sub-variants + 2 architectural-choice deferred
-/// (Matrix, FloatSlice) per REFINEMENT-1B-ITEM-A. The
-/// `TypedArrayData::Bool` variant maps `u8 0/1` storage to semantic
-/// `bool` (NOT integer coercion).
-fn typed_array_to_json_value(ta: &TypedArrayData) -> Result<JsonValue, String> {
-    match ta {
-        TypedArrayData::I8(buf) => Ok(JsonValue::Array(
-            buf.data.iter().map(|&v| JsonValue::Int(v as i64)).collect(),
-        )),
-        TypedArrayData::I16(buf) => Ok(JsonValue::Array(
-            buf.data.iter().map(|&v| JsonValue::Int(v as i64)).collect(),
-        )),
-        TypedArrayData::I32(buf) => Ok(JsonValue::Array(
-            buf.data.iter().map(|&v| JsonValue::Int(v as i64)).collect(),
-        )),
-        TypedArrayData::I64(buf) => Ok(JsonValue::Array(
-            buf.data.iter().map(|&v| JsonValue::Int(v)).collect(),
-        )),
-        TypedArrayData::U8(buf) => Ok(JsonValue::Array(
-            buf.data.iter().map(|&v| JsonValue::Int(v as i64)).collect(),
-        )),
-        TypedArrayData::U16(buf) => Ok(JsonValue::Array(
-            buf.data.iter().map(|&v| JsonValue::Int(v as i64)).collect(),
-        )),
-        TypedArrayData::U32(buf) => Ok(JsonValue::Array(
-            buf.data.iter().map(|&v| JsonValue::Int(v as i64)).collect(),
-        )),
-        TypedArrayData::U64(buf) => Ok(JsonValue::Array(
-            buf.data.iter().map(|&v| JsonValue::Int(v as i64)).collect(),
-        )),
-        TypedArrayData::F32(buf) => Ok(JsonValue::Array(
-            buf.data
-                .iter()
-                .map(|&v| JsonValue::Number(v as f64))
-                .collect(),
-        )),
-        TypedArrayData::F64(buf) => Ok(JsonValue::Array(
-            buf.data.iter().map(|&v| JsonValue::Number(v)).collect(),
-        )),
-        // Bool storage is `Arc<TypedBuffer<u8>>` (heap_value.rs:619); semantic
-        // type is bool; map u8 0/1 → JsonValue::Bool (NOT JsonValue::Int).
-        TypedArrayData::Bool(buf) => Ok(JsonValue::Array(
-            buf.data
-                .iter()
-                .map(|&b| JsonValue::Bool(b != 0))
-                .collect(),
-        )),
-        TypedArrayData::String(buf) => Ok(JsonValue::Array(
-            buf.data
-                .iter()
-                .map(|s| JsonValue::String((**s).clone()))
-                .collect(),
-        )),
-
-        // ADR-006 §2.7.22 amendment (Round 18 S3, 2026-05-13): the
-        // `Matrix` / `FloatSlice` arms previously rejected here are
-        // DELETED from `TypedArrayData`. Matrix and MatrixSlice are now
-        // top-level `HeapValue` arms (and `HeapKind::Matrix = 34` /
-        // `HeapKind::MatrixSlice = 35`); their JSON serialization-policy
-        // rejection lives at the top-level `heap_to_json_value` match
-        // below.
-        // ── W17-typed-carrier-bundle-A commit 1/4: §2.7.24 Q25.A arms ───
-        // Per-arm JSON serialisation lands in commit 3 (mechanical-yes for
-        // Decimal/BigInt/Char/TypedObject; deferred-Err for the
-        // Temporal/Instant/TraitObject arms whose JSON encoding policy
-        // needs a separate ruling). No construction sites on this branch
-        // yet — these arms are unreachable in current callers.
-        TypedArrayData::Decimal(buf) => Ok(JsonValue::Array(
-            buf.data
-                .iter()
-                .map(|d| JsonValue::String(d.to_string()))
-                .collect(),
-        )),
-        TypedArrayData::BigInt(buf) => Ok(JsonValue::Array(
-            buf.data.iter().map(|n| JsonValue::Int(**n)).collect(),
-        )),
-        TypedArrayData::Char(buf) => Ok(JsonValue::Array(
-            buf.data
-                .iter()
-                .map(|c| JsonValue::String(c.to_string()))
-                .collect(),
-        )),
-        TypedArrayData::TypedObject(buf) => {
-            // W17-typed-carrier-bundle-A checkpoint 3/4: each element is
-            // an `Arc<TypedObjectStorage>` carrying a schema-keyed record.
-            // Recurse through `typed_object_to_json_value` for per-element
-            // schema dispatch.
-            let mut elems: Vec<JsonValue> = Vec::with_capacity(buf.data.len());
-            for storage in buf.data.iter() {
-                elems.push(typed_object_to_json_value(
-                    storage.schema_id,
-                    &storage.slots,
-                    storage.heap_mask,
-                )?);
-            }
-            Ok(JsonValue::Array(elems))
-        }
-    }
-}
+// V3-S5 ckpt-5-prime (2026-05-15): `typed_array_to_json_value` helper RETIRED
+// per W12 audit §3.6. The helper pattern-matched on the deleted `TypedArrayData`
+// enum (retired at ckpt-1) and was called by the deleted `HeapValue::TypedArray`
+// outer arm (retired at ckpt-4) above. The 13 mechanical-yes inner-arm
+// dispatches (I8/I16/I32/I64/U8/U16/U32/U64/F32/F64/Bool/String + later
+// Decimal/BigInt/Char/TypedObject from W17-typed-carrier-bundle-A) lose their
+// landing point with the carrier enum gone. The v2-raw `*mut TypedArray<T>`
+// JSON-serialisation path lands at the ckpt-5-prime² + ckpt-6 producer/
+// consumer storage-shape migration (per-element-type marshal-layer projection
+// before the value becomes a `HeapValue`). Refusal #1 binding: do not
+// reintroduce under any rename/shim/bridge.
 
 /// Walk a `HeapValue::TypedObject` and produce `JsonValue::Object`.
 ///

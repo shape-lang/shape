@@ -2562,72 +2562,47 @@ impl VirtualMachine {
         self.push_kinded(bits, NativeKind::Ptr(HeapKind::Reference))
     }
 
-    /// `MakeIndexRef` — pops [base_ref, index] from the kinded stack
-    /// (top is index), resolves the receiver to an `Arc<TypedArrayData>`,
-    /// and pushes a `RefTarget::TypedIndex` ref. The element kind is
-    /// sourced by matching on the receiver `TypedArrayData` variant —
-    /// the producing opcode (`NewTypedArray*`) emitted typed elements,
-    /// so the variant identifies the element kind unambiguously.
+    /// `MakeIndexRef` — pops [base_ref, index] from the kinded stack.
+    ///
+    /// ## V3-S5 ckpt-5 surface (2026-05-15)
+    ///
+    /// The pre-ckpt-1 body constructed `RefTarget::TypedIndex { receiver:
+    /// Arc<TypedArrayData>, index, elem_kind }`. The
+    /// `RefTarget::TypedIndex` variant was DELETED at ckpt-4 in lockstep
+    /// with the `TypedArrayData` enum + `TypedBuffer<T>` wrapper layer
+    /// deletion (commits `aac8495e` ckpt-1 + `654c7202` ckpt-4) per
+    /// W12-typed-array-data-deletion-audit §3.5 + §B + ADR-006 §2.7.24
+    /// Q25.A SUPERSEDED.
+    ///
+    /// Construction-site rebuild lands at ckpt-6 STRICT close per the
+    /// per-element-kind receiver variant target (`Arc<TypedArray<f64>>` /
+    /// `Arc<TypedArray<i64>>` / etc.) — the replacement requires
+    /// per-element-kind RefTarget variants, not a single
+    /// `Arc<TypedArrayData>` enum.
+    ///
+    /// Stack discipline: pops [base_ref, index] and retires both shares
+    /// via `drop_with_kind` before surfacing. Refusal #1 binding.
     pub(in crate::executor) fn op_make_index_ref(
         &mut self,
         _instruction: &Instruction,
     ) -> Result<(), VMError> {
-        use shape_value::HeapKind;
-        // Pop index (top of stack) — must be Int64 per the producing
-        // opcode emitting integer index expressions.
         let (idx_bits, idx_kind) = self.pop_kinded()?;
-        if idx_kind != NativeKind::Int64 {
-            crate::executor::vm_impl::stack::drop_with_kind(idx_bits, idx_kind);
-            return Err(VMError::RuntimeError(format!(
-                "MakeIndexRef expected Int64 index, got {:?}",
-                idx_kind
-            )));
-        }
-        let index = idx_bits as i64;
-        if index < 0 {
-            return Err(VMError::RuntimeError(format!(
-                "MakeIndexRef negative index {}",
-                index
-            )));
-        }
-        // Pop the base-ref carrier.
-        let (base_bits, base_kind) = self.pop_kinded()?;
-        if base_kind != NativeKind::Ptr(HeapKind::Reference) {
+        crate::executor::vm_impl::stack::drop_with_kind(idx_bits, idx_kind);
+        if let Ok((base_bits, base_kind)) = self.pop_kinded() {
             crate::executor::vm_impl::stack::drop_with_kind(base_bits, base_kind);
-            return Err(VMError::RuntimeError(format!(
-                "MakeIndexRef expected Reference receiver, got {:?}",
-                base_kind
-            )));
         }
-        // SAFETY: kind == Ptr(HeapKind::Reference) — see op_make_field_ref.
-        let base_arc: std::sync::Arc<shape_value::RefTarget> =
-            unsafe { std::sync::Arc::from_raw(base_bits as *const shape_value::RefTarget) };
-        let receiver = match self.resolve_typed_array_receiver(&base_arc) {
-            Ok(r) => r,
-            Err(e) => {
-                drop(base_arc);
-                return Err(e);
-            }
-        };
-        drop(base_arc);
-        // Source the element NativeKind from the receiver's variant —
-        // the producing opcode (`NewTypedArray*`) committed to a typed
-        // variant; the variant is the kind-source. No fabrication.
-        let elem_kind = typed_array_element_kind(&receiver).ok_or_else(|| {
-            VMError::NotImplemented(format!(
-                "MakeIndexRef SURFACE: TypedArrayData variant has no \
-                 statically-sourceable element NativeKind (e.g. \
-                 HeapValue / FloatSlice / Matrix) — ADR-006 §2.7.13 / Q14"
-            ))
-        })?;
-        let rt = shape_value::RefTarget::TypedIndex {
-            receiver,
-            index: index as u64,
-            elem_kind,
-        };
-        let arc = std::sync::Arc::new(rt);
-        let bits = std::sync::Arc::into_raw(arc) as u64;
-        self.push_kinded(bits, NativeKind::Ptr(HeapKind::Reference))
+        Err(VMError::NotImplemented(
+            "MakeIndexRef: SURFACE — V3-S5 ckpt-5 consumer-cascade tier 3 \
+             surface. `RefTarget::TypedIndex { receiver: Arc<TypedArrayData>, \
+             ... }` variant DELETED at ckpt-4 in lockstep with TypedArrayData \
+             enum + Buf<T> wrapper layer deletion (W12-typed-array-\
+             data-deletion-audit §3.5 + §B + ADR-006 §2.7.24 Q25.A \
+             SUPERSEDED). Construction-site rebuild lands at ckpt-6 STRICT \
+             close per per-element-kind RefTarget variant target. \
+             REFUSED ON SIGHT: TypedArrayData / RefTarget::TypedIndex \
+             resurrection under any rename (Refusal #1)."
+                .to_string(),
+        ))
     }
 
     /// `DerefLoad { Operand::Local(idx) }` — reads the ref-bearing local
@@ -2731,84 +2706,46 @@ impl VirtualMachine {
         self.write_ref_target(rt, val_bits, val_kind)
     }
 
-    /// `SetIndexRef { Operand::Local(idx) }` — variant of `DerefStore`
-    /// for the `arr[i] = value` shape. Pops [index, value] (top is value),
-    /// reads the ref-bearing local, pre-projects through the index to
-    /// build a one-shot `TypedIndex`-projection write, and writes the
-    /// value into the array element. Conceptually equivalent to
-    /// `MakeIndexRef + DerefStore` collapsed into one opcode.
+    /// `SetIndexRef { Operand::Local(idx) }` — `arr[i] = value` shape.
+    ///
+    /// ## V3-S5 ckpt-5 surface (2026-05-15)
+    ///
+    /// The pre-ckpt-1 body resolved the ref's receiver to
+    /// `Arc<TypedArrayData>`, sourced the element kind from the variant,
+    /// constructed a synthetic `RefTarget::TypedIndex` projection, and
+    /// wrote through it via `write_index_in_place`. All three pieces
+    /// (`Arc<TypedArrayData>` carrier + `RefTarget::TypedIndex` variant +
+    /// the `write_index_in_place` API) were DELETED at ckpt-1..ckpt-4
+    /// per W12-typed-array-data-deletion-audit §3.5 + §B + ADR-006
+    /// §2.7.24 Q25.A SUPERSEDED.
+    ///
+    /// Construction-site rebuild lands at ckpt-6 STRICT close per the
+    /// per-element-kind v2-raw `TypedArray<T>` direct-mutation target.
+    ///
+    /// Stack discipline: pops [index, value] and retires both shares via
+    /// `drop_with_kind` before surfacing. Refusal #1 binding.
     pub(in crate::executor) fn op_set_index_ref(
         &mut self,
-        instruction: &Instruction,
+        _instruction: &Instruction,
     ) -> Result<(), VMError> {
-        use shape_value::HeapKind;
-        let Some(Operand::Local(local_idx)) = instruction.operand else {
-            return Err(VMError::InvalidOperand);
-        };
-        // Pop value (top of stack), then index.
         let (val_bits, val_kind) = self.pop_kinded()?;
-        let (idx_bits, idx_kind) = self.pop_kinded()?;
-        if idx_kind != NativeKind::Int64 {
-            crate::executor::vm_impl::stack::drop_with_kind(val_bits, val_kind);
+        crate::executor::vm_impl::stack::drop_with_kind(val_bits, val_kind);
+        if let Ok((idx_bits, idx_kind)) = self.pop_kinded() {
             crate::executor::vm_impl::stack::drop_with_kind(idx_bits, idx_kind);
-            return Err(VMError::RuntimeError(format!(
-                "SetIndexRef expected Int64 index, got {:?}",
-                idx_kind
-            )));
         }
-        let index = idx_bits as i64;
-        if index < 0 {
-            crate::executor::vm_impl::stack::drop_with_kind(val_bits, val_kind);
-            return Err(VMError::RuntimeError(format!(
-                "SetIndexRef negative index {}",
-                index
-            )));
-        }
-        let bp = self.current_locals_base();
-        let slot = bp + local_idx as usize;
-        if slot >= self.stack.len() {
-            crate::executor::vm_impl::stack::drop_with_kind(val_bits, val_kind);
-            return Err(VMError::RuntimeError(format!(
-                "SetIndexRef slot {} out of bounds (stack len {})",
-                local_idx,
-                self.stack.len()
-            )));
-        }
-        let (ref_bits, ref_kind) = self.stack_read_kinded_raw(slot);
-        if ref_kind != NativeKind::Ptr(HeapKind::Reference) {
-            crate::executor::vm_impl::stack::drop_with_kind(val_bits, val_kind);
-            return Err(VMError::RuntimeError(format!(
-                "SetIndexRef expected Reference local, got {:?}",
-                ref_kind
-            )));
-        }
-        // SAFETY: same as DerefLoad / DerefStore.
-        let rt: &shape_value::RefTarget =
-            unsafe { &*(ref_bits as *const shape_value::RefTarget) };
-        // Resolve the ref to the receiving TypedArray, then construct a
-        // synthetic `TypedIndex` projection for the element write.
-        let receiver = self.resolve_typed_array_receiver(rt)?;
-        let elem_kind = typed_array_element_kind(&receiver).ok_or_else(|| {
-            VMError::NotImplemented(format!(
-                "SetIndexRef SURFACE: TypedArrayData variant has no \
-                 statically-sourceable element NativeKind — \
-                 ADR-006 §2.7.13 / Q14"
-            ))
-        })?;
-        // Cross-check: val_kind matches the array element kind.
-        debug_assert_eq!(
-            val_kind, elem_kind,
-            "SetIndexRef kind drift: popped value {:?}, element {:?} — \
-             ADR-006 §2.7.13 invariant violated",
-            val_kind, elem_kind
-        );
-        let synthetic = shape_value::RefTarget::TypedIndex {
-            receiver,
-            index: index as u64,
-            elem_kind,
-        };
-        record_heap_write();
-        self.write_ref_target(&synthetic, val_bits, val_kind)
+        Err(VMError::NotImplemented(
+            "SetIndexRef: SURFACE — V3-S5 ckpt-5 consumer-cascade tier 3 \
+             surface. `RefTarget::TypedIndex` variant + \
+             the deleted typed-array-data `write_index_in_place` API + the deleted-enum's \
+             `Arc<...>` carrier all DELETED at ckpt-1..ckpt-4 per \
+             W12-typed-array-data-deletion-audit §3.5 + §B + ADR-006 \
+             §2.7.24 Q25.A SUPERSEDED. Rebuild lands at ckpt-6 STRICT \
+             close per per-element-kind v2-raw `TypedArray<T>` \
+             direct-mutation target. REFUSED ON SIGHT: TypedArrayData / \
+             RefTarget::TypedIndex resurrection under any rename \
+             (Refusal #1)."
+                .to_string(),
+        ))
     }
 
     // ────────────────────────────────────────────────────────────────────
@@ -2898,99 +2835,22 @@ impl VirtualMachine {
                     ))
                 }
             }
-            shape_value::RefTarget::TypedIndex { .. } => Err(VMError::RuntimeError(
-                "MakeFieldRef chained off a TypedIndex base is unsupported \
-                 — array elements aren't TypedObject-typed at the projection \
-                 layer (ADR-006 §2.7.13)"
-                    .into(),
-            )),
+            // V3-S5 ckpt-6 STRICT close (2026-05-15):
+            // `RefTarget::TypedIndex { .. }` arm DELETED in lockstep with
+            // the variant retirement at `shape-value/src/reference.rs`
+            // (per ADR-006 §2.7.24 Q25.A SUPERSEDED). The variant carried
+            // a deleted Arc payload; per-element-T v2-raw receiver
+            // variants are downstream-wave territory.
         }
     }
 
-    /// Resolve a `RefTarget` to its underlying `Arc<TypedArrayData>`
-    /// receiver. Symmetric to `resolve_typed_object_receiver`.
-    fn resolve_typed_array_receiver(
-        &self,
-        rt: &shape_value::RefTarget,
-    ) -> Result<std::sync::Arc<shape_value::heap_value::TypedArrayData>, VMError> {
-        use shape_value::HeapKind;
-        match rt {
-            shape_value::RefTarget::Local {
-                frame_index,
-                slot_index,
-                kind,
-            } => {
-                if *kind != NativeKind::Ptr(HeapKind::TypedArray) {
-                    return Err(VMError::RuntimeError(format!(
-                        "MakeIndexRef / SetIndexRef base must reference a TypedArray; got {:?}",
-                        kind
-                    )));
-                }
-                let frame =
-                    self.call_stack.get(*frame_index as usize).ok_or_else(|| {
-                        VMError::RuntimeError(format!(
-                            "RefTarget::Local frame_index {} out of bounds",
-                            frame_index
-                        ))
-                    })?;
-                let slot = frame.base_pointer + *slot_index as usize;
-                let (bits, _) = self.stack_read_kinded_raw(slot);
-                unsafe {
-                    std::sync::Arc::increment_strong_count(
-                        bits as *const shape_value::heap_value::TypedArrayData,
-                    );
-                    Ok(std::sync::Arc::from_raw(
-                        bits as *const shape_value::heap_value::TypedArrayData,
-                    ))
-                }
-            }
-            shape_value::RefTarget::ModuleBinding { binding_idx, kind } => {
-                if *kind != NativeKind::Ptr(HeapKind::TypedArray) {
-                    return Err(VMError::RuntimeError(format!(
-                        "MakeIndexRef / SetIndexRef base must reference a TypedArray; got {:?}",
-                        kind
-                    )));
-                }
-                let (bits, _) =
-                    self.module_binding_read_kinded_raw(*binding_idx as usize);
-                unsafe {
-                    std::sync::Arc::increment_strong_count(
-                        bits as *const shape_value::heap_value::TypedArrayData,
-                    );
-                    Ok(std::sync::Arc::from_raw(
-                        bits as *const shape_value::heap_value::TypedArrayData,
-                    ))
-                }
-            }
-            shape_value::RefTarget::TypedField {
-                receiver,
-                field_offset,
-                kind,
-            } => {
-                if *kind != NativeKind::Ptr(HeapKind::TypedArray) {
-                    return Err(VMError::RuntimeError(format!(
-                        "MakeIndexRef base via TypedField must project a TypedArray; got {:?}",
-                        kind
-                    )));
-                }
-                let bits = receiver.slots[*field_offset as usize].raw();
-                unsafe {
-                    std::sync::Arc::increment_strong_count(
-                        bits as *const shape_value::heap_value::TypedArrayData,
-                    );
-                    Ok(std::sync::Arc::from_raw(
-                        bits as *const shape_value::heap_value::TypedArrayData,
-                    ))
-                }
-            }
-            shape_value::RefTarget::TypedIndex { .. } => Err(VMError::RuntimeError(
-                "MakeIndexRef chained off a TypedIndex base is unsupported \
-                 — element-of-element projection is not modelled (ADR-006 \
-                 §2.7.13)"
-                    .into(),
-            )),
-        }
-    }
+    // V3-S5 ckpt-5 (2026-05-15): `resolve_typed_array_receiver` DELETED.
+    // The helper produced `Arc<TypedArrayData>` (deleted at ckpt-1) for
+    // the `MakeIndexRef` / `SetIndexRef` consumers; both consumers
+    // surface-and-stop at ckpt-5 per the V3-S5 ckpt-1..ckpt-4 cascade.
+    // Per-element-kind v2-raw `TypedArray<T>` receiver resolution lands
+    // at ckpt-6 STRICT close per W12-typed-array-data-deletion-audit
+    // §B + ADR-006 §2.7.24 Q25.A SUPERSEDED.
 
     /// Read the projected slot of a `RefTarget` as `(bits, kind)` —
     /// borrows the place's share (the place retains ownership). Caller
@@ -3029,14 +2889,11 @@ impl VirtualMachine {
                 let bits = receiver.slots[*field_offset as usize].raw();
                 Ok((bits, *kind))
             }
-            shape_value::RefTarget::TypedIndex {
-                receiver,
-                index,
-                elem_kind,
-            } => {
-                let bits = typed_array_read_index_raw(receiver, *index as usize)?;
-                Ok((bits, *elem_kind))
-            }
+            // V3-S5 ckpt-5: `RefTarget::TypedIndex` arm deleted (variant
+            // retired at ckpt-4 lockstep with TypedArrayData enum). The
+            // match is now exhaustive on Local | ModuleBinding |
+            // TypedField; the read-via-index path surface-and-stops at
+            // `op_make_index_ref` (one level up) per V3-S5 ckpt-5.
         }
     }
 
@@ -3162,68 +3019,12 @@ impl VirtualMachine {
                 );
                 Ok(())
             }
-            shape_value::RefTarget::TypedIndex {
-                receiver,
-                index,
-                elem_kind,
-            } => {
-                // Q14 / ADR-006 §2.7.13 projection-write (array element):
-                // mirror of the TypedField arm via
-                // `TypedArrayData::write_index_in_place`. The receiver
-                // `Arc<TypedArrayData>` is shared between the ref carrier
-                // and the originating binding — same constraint as
-                // TypedField above. The inner `Arc<TypedBuffer<T>>` /
-                // `Arc<AlignedTypedBuffer>` is also shared; `Arc::make_mut`
-                // there would clone the entire buffer and break ref
-                // semantics. In-place write through the kinded element
-                // is the design.
-                let idx = *index as usize;
-                // Cross-check: the captured elem_kind matches the
-                // popped value's kind (already debug_asserted at the
-                // op_deref_store / op_set_index_ref level for clarity,
-                // mirror it here for write_ref_target call sites).
-                debug_assert_eq!(
-                    val_kind, *elem_kind,
-                    "DerefStore: TypedIndex elem_kind {:?} drift vs popped \
-                     value kind {:?} — ADR-006 §2.7.13 / Q14",
-                    elem_kind, val_kind,
-                );
-                // SAFETY: same contract as the TypedField arm above —
-                // single-threaded VM; refs constrained to non-escaping
-                // task scope; kind invariance asserted. Returns `Some(prior)`
-                // for the scalar / String element-kind arms (the only
-                // arms for which `typed_array_element_kind` returned
-                // `Some` at MakeIndexRef construction time); returns
-                // `None` only for HeapValue / FloatSlice / Matrix —
-                // which means the projection should not have been
-                // constructible in the first place (a
-                // construction-side bug). Defensive surface for the
-                // unreachable-by-construction case.
-                let prior_opt = unsafe {
-                    receiver.write_index_in_place(idx, val_bits)
-                };
-                let Some(prior_bits) = prior_opt else {
-                    crate::executor::vm_impl::stack::drop_with_kind(
-                        val_bits, val_kind,
-                    );
-                    return Err(VMError::NotImplemented(
-                        "DerefStore / SetIndexRef SURFACE: TypedArrayData \
-                         variant has no scalar in-place writer (HeapValue \
-                         / FloatSlice / Matrix) — construction-side \
-                         MakeIndexRef should have rejected per \
-                         typed_array_element_kind. ADR-006 §2.7.13 / Q14."
-                            .into(),
-                    ));
-                };
-                write_barrier_slot(prior_bits, val_bits);
-                // Release the prior occupant's share (no-op for non-heap
-                // element kinds — the kinded dispatch table makes
-                // `drop_with_kind` a no-op for `Int64`, `Float64`, etc.).
-                crate::executor::vm_impl::stack::drop_with_kind(
-                    prior_bits, *elem_kind,
-                );
-                Ok(())
-            }
+            // V3-S5 ckpt-5: `RefTarget::TypedIndex` arm deleted (variant
+            // retired at ckpt-4 lockstep with TypedArrayData enum +
+            // `write_index_in_place` API). The match is now exhaustive on
+            // Local | ModuleBinding | TypedField; the write-via-index
+            // path surface-and-stops at `op_set_index_ref` (one level
+            // up) per V3-S5 ckpt-5.
         }
     }
 
@@ -3634,184 +3435,19 @@ impl VirtualMachine {
 }
 
 // ────────────────────────────────────────────────────────────────────────
-// `RefTarget::TypedIndex` element-kind / read helpers (ADR-006 §2.7.13).
+// V3-S5 ckpt-5 (2026-05-15): `typed_array_element_kind` +
+// `typed_array_read_index_raw` helpers DELETED. Both consumed
+// `Arc<TypedArrayData>` (deleted at ckpt-1) and dispatched through the
+// per-variant grid (`I64` / `F64` / `Bool` / `I8` / `I16` / `I32` / `U8`
+// / `U16` / `U32` / `U64` / `F32` / `String` / `Decimal` / `BigInt` /
+// `Char` / `TypedObject`) which is gone wholesale per W12-typed-array-
+// data-deletion-audit §3.5 + ADR-006 §2.7.24 Q25.A SUPERSEDED.
 //
-// `TypedArrayData` variants are typed-element buffers; the variant is
-// the kind-source. `MakeIndexRef` / `SetIndexRef` / `DerefLoad` over a
-// `TypedIndex` projection match the variant to recover the element
-// `NativeKind` and read the element at `index`.
-//
-// Variants without a statically-sourceable scalar element kind
-// (`HeapValue`, `FloatSlice`, `Matrix`) surface back to the caller via
-// `None` — the §2.7.13 invariant forbids fabrication. These variants
-// land when the v2-raw-heap mutation rebuild closes (CLAUDE.md
-// "v2-raw-heap-audit" follow-up).
+// `op_make_index_ref` / `op_set_index_ref` (the only callers) surface-
+// and-stop at V3-S5 ckpt-5 per the multi-session-chain pattern step 2.
+// Per-element-kind v2-raw `TypedArray<T>` read/write helpers land at
+// ckpt-6 STRICT close per the per-element-kind RefTarget variant target.
 // ────────────────────────────────────────────────────────────────────────
-
-/// Element `NativeKind` of a `TypedArrayData` variant, or `None` for
-/// variants whose element kind isn't a single inline-scalar kind.
-#[inline]
-fn typed_array_element_kind(
-    arr: &shape_value::heap_value::TypedArrayData,
-) -> Option<NativeKind> {
-    use shape_value::heap_value::TypedArrayData;
-    Some(match arr {
-        TypedArrayData::I64(_) => NativeKind::Int64,
-        TypedArrayData::F64(_) => NativeKind::Float64,
-        TypedArrayData::Bool(_) => NativeKind::Bool,
-        TypedArrayData::I8(_) => NativeKind::Int8,
-        TypedArrayData::I16(_) => NativeKind::Int16,
-        TypedArrayData::I32(_) => NativeKind::Int32,
-        TypedArrayData::U8(_) => NativeKind::UInt8,
-        TypedArrayData::U16(_) => NativeKind::UInt16,
-        TypedArrayData::U32(_) => NativeKind::UInt32,
-        TypedArrayData::U64(_) => NativeKind::UInt64,
-        TypedArrayData::F32(_) => NativeKind::Float64,
-        TypedArrayData::String(_) => NativeKind::String,
-        // ADR-006 §2.7.22 amendment (Round 18 S3): Matrix / FloatSlice
-        // exit `TypedArrayData`.
-        // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized
-        // arms — each variant's element kind is the matching heap pointer.
-        TypedArrayData::Decimal(_) => NativeKind::Ptr(shape_value::heap_value::HeapKind::Decimal),
-        TypedArrayData::BigInt(_) => NativeKind::Ptr(shape_value::heap_value::HeapKind::BigInt),
-        TypedArrayData::Char(_) => NativeKind::Ptr(shape_value::heap_value::HeapKind::Char),
-        TypedArrayData::TypedObject(_) => NativeKind::Ptr(shape_value::heap_value::HeapKind::TypedObject),
-    })
-}
-
-/// Read the `index`-th element of a `TypedArrayData` as raw bits.
-/// Returns an error for out-of-bounds reads or for variants that don't
-/// support raw-bits read (HeapValue / FloatSlice / Matrix — the
-/// element layout isn't a single u64 slot in those shapes).
-#[inline]
-fn typed_array_read_index_raw(
-    arr: &shape_value::heap_value::TypedArrayData,
-    index: usize,
-) -> Result<u64, VMError> {
-    use shape_value::heap_value::TypedArrayData;
-    let bits = match arr {
-        TypedArrayData::I64(buf) => *buf
-            .data
-            .get(index)
-            .ok_or_else(|| VMError::IndexOutOfBounds {
-                index: index as i32,
-                length: buf.data.len(),
-            })? as u64,
-        TypedArrayData::F64(buf) => buf
-            .data
-            .get(index)
-            .ok_or_else(|| VMError::IndexOutOfBounds {
-                index: index as i32,
-                length: buf.data.len(),
-            })?
-            .to_bits(),
-        TypedArrayData::Bool(buf) => *buf.data.get(index).ok_or_else(|| {
-            VMError::IndexOutOfBounds {
-                index: index as i32,
-                length: buf.data.len(),
-            }
-        })? as u64,
-        TypedArrayData::I8(buf) => *buf.data.get(index).ok_or_else(|| {
-            VMError::IndexOutOfBounds {
-                index: index as i32,
-                length: buf.data.len(),
-            }
-        })? as i64 as u64,
-        TypedArrayData::I16(buf) => *buf.data.get(index).ok_or_else(|| {
-            VMError::IndexOutOfBounds {
-                index: index as i32,
-                length: buf.data.len(),
-            }
-        })? as i64 as u64,
-        TypedArrayData::I32(buf) => *buf.data.get(index).ok_or_else(|| {
-            VMError::IndexOutOfBounds {
-                index: index as i32,
-                length: buf.data.len(),
-            }
-        })? as i64 as u64,
-        TypedArrayData::U8(buf) => *buf.data.get(index).ok_or_else(|| {
-            VMError::IndexOutOfBounds {
-                index: index as i32,
-                length: buf.data.len(),
-            }
-        })? as u64,
-        TypedArrayData::U16(buf) => *buf.data.get(index).ok_or_else(|| {
-            VMError::IndexOutOfBounds {
-                index: index as i32,
-                length: buf.data.len(),
-            }
-        })? as u64,
-        TypedArrayData::U32(buf) => *buf.data.get(index).ok_or_else(|| {
-            VMError::IndexOutOfBounds {
-                index: index as i32,
-                length: buf.data.len(),
-            }
-        })? as u64,
-        TypedArrayData::U64(buf) => *buf.data.get(index).ok_or_else(|| {
-            VMError::IndexOutOfBounds {
-                index: index as i32,
-                length: buf.data.len(),
-            }
-        })?,
-        TypedArrayData::F32(buf) => (*buf.data.get(index).ok_or_else(|| {
-            VMError::IndexOutOfBounds {
-                index: index as i32,
-                length: buf.data.len(),
-            }
-        })? as f64)
-            .to_bits(),
-        TypedArrayData::String(buf) => {
-            // Each element is `Arc<String>`; the slot bits are
-            // `Arc::into_raw::<String>(arc)`. Bump the strong-count so
-            // the read produces an independent share for the caller.
-            let s_arc = buf.data.get(index).ok_or_else(|| VMError::IndexOutOfBounds {
-                index: index as i32,
-                length: buf.data.len(),
-            })?;
-            let raw = std::sync::Arc::as_ptr(s_arc) as u64;
-            // Caller (`read_ref_target`) does not bump — this read path
-            // is borrow-only; the buffer keeps its share. The caller
-            // (`op_deref_load`) runs `clone_with_kind(bits, String)` to
-            // bump the strong-count for the pushed slot.
-            raw
-        }
-        // ADR-006 §2.7.22 amendment (Round 18 S3): Matrix / FloatSlice
-        // exit `TypedArrayData`. DerefLoad against a Matrix / MatrixSlice
-        // receiver routes through their dedicated HeapKind paths.
-        // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized
-        // arms — each Arc element has `Arc::as_ptr(arc) as u64` as the
-        // raw-bits encoding (mirror of the String arm above). Same
-        // borrow-only contract: caller bumps the share via clone_with_kind.
-        TypedArrayData::Decimal(buf) => {
-            let arc = buf.data.get(index).ok_or_else(|| VMError::IndexOutOfBounds {
-                index: index as i32, length: buf.data.len(),
-            })?;
-            std::sync::Arc::as_ptr(arc) as u64
-        }
-        TypedArrayData::BigInt(buf) => {
-            let arc = buf.data.get(index).ok_or_else(|| VMError::IndexOutOfBounds {
-                index: index as i32, length: buf.data.len(),
-            })?;
-            std::sync::Arc::as_ptr(arc) as u64
-        }
-        TypedArrayData::Char(buf) => {
-            let c = buf.data.get(index).ok_or_else(|| VMError::IndexOutOfBounds {
-                index: index as i32, length: buf.data.len(),
-            })?;
-            *c as u64
-        }
-        // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): TypedObjectPtr.
-        // The wrapper holds a `*const TypedObjectStorage` directly; surface
-        // the raw pointer as bits.
-        TypedArrayData::TypedObject(buf) => {
-            let ptr = buf.data.get(index).ok_or_else(|| VMError::IndexOutOfBounds {
-                index: index as i32, length: buf.data.len(),
-            })?;
-            ptr.as_ptr() as u64
-        }
-    };
-    Ok(bits)
-}
 
 // ────────────────────────────────────────────────────────────────────────
 // Test module — gated until the deleted ValueWord / ValueWordExt ABI

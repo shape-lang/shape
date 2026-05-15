@@ -20,7 +20,6 @@ use crate::module_exports::ModuleExports;
 use crate::typed_module_exports::{ConcreteReturn, ConcreteType, TypedReturn};
 use rand::Rng;
 use rand_chacha::ChaCha8Rng;
-use shape_value::AlignedTypedBuffer;
 use std::sync::Arc;
 
 // ───────────────────── Module factory (5 typed entries) ─────────────────────
@@ -97,7 +96,7 @@ pub fn create_distributions_intrinsics_module() -> ModuleExports {
         },
     );
 
-    register_typed_fn_3::<_, Arc<String>, Arc<AlignedTypedBuffer>, i64>(
+    register_typed_fn_3::<_, Arc<String>, Arc<Vec<f64>>, i64>(
         &mut module,
         "__intrinsic_dist_sample_n",
         "Sample n values from a named distribution (uniform / lognormal / exponential / poisson)",

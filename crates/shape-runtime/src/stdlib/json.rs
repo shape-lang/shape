@@ -126,20 +126,51 @@ fn build_json_enum_heap_value(value: serde_json::Value, json_schema_id: u64) -> 
             true,
         ),
         serde_json::Value::Array(arr) => {
-            // W17-typed-carrier-bundle-A checkpoint 2/4: every JSON array
-            // element is a `Json` enum-TypedObject built by
+            // V3-S5 ckpt-5-prime²c (2026-05-15) Migration shape (a): every
+            // JSON array element is a `Json` enum-TypedObject built by
             // `build_json_enum_heap_value` — so the array always lowers to
-            // `TypedArrayData::TypedObject` per ADR-006 §2.7.24 Q25.A. The
-            // prior polymorphic `the-deleted-heterogeneous-element-carrier` carrier is gone.
-            let elements: Vec<Arc<HeapValue>> = arr
+            // a `*mut TypedArray<TypedObjectPtr>` flat-struct carrier per
+            // the v2-raw monomorphic shape. The pre-migration
+            // `TypedArrayData::TypedObject` enum-arm + `build_specialized_
+            // from_heap_arcs` dispatcher + `ValueSlot::from_typed_array`
+            // are all deleted at V3-S5 ckpt-1/ckpt-4. Element-kind
+            // enforcement is by the body-side `T = TypedObjectPtr` choice
+            // + the variant's `field_kinds[1] = Ptr(HeapKind::TypedArray)`
+            // (set on the outer Json TypedObject).
+            let element_ptrs: Vec<*const shape_value::TypedObjectStorage> = arr
                 .into_iter()
-                .map(|v| Arc::new(build_json_enum_heap_value(v, json_schema_id)))
+                .map(|v| {
+                    let hv = build_json_enum_heap_value(v, json_schema_id);
+                    let to_ptr = match hv {
+                        HeapValue::TypedObject(p) => p,
+                        other => panic!(
+                            "json: build_json_enum_heap_value must return \
+                             TypedObject, got {:?}",
+                            other.kind()
+                        ),
+                    };
+                    // Extract the inner raw `*const TypedObjectStorage`,
+                    // transferring the one refcount share from the
+                    // `TypedObjectPtr` wrapper to the raw pointer (which
+                    // the `TypedArray` will own as an element).
+                    to_ptr.into_raw()
+                })
                 .collect();
-            let data = Arc::new(
-                shape_value::TypedArrayData::build_specialized_from_heap_arcs(elements)
-                    .expect("json: build_json_enum_heap_value always returns TypedObject"),
-            );
-            (JSON_VARIANT_ARRAY, ValueSlot::from_typed_array(data), true)
+            let arr_ptr: *mut shape_value::v2::typed_array::TypedArray<
+                *const shape_value::TypedObjectStorage,
+            > = shape_value::v2::typed_array::TypedArray::<
+                *const shape_value::TypedObjectStorage,
+            >::from_slice(&element_ptrs);
+            // `from_slice` copies each raw pointer bit-for-bit (raw
+            // pointers are Copy). The refcount shares were transferred
+            // from `TypedObjectPtr` wrappers via `into_raw()` already;
+            // the source Vec doesn't own any element share, so its Drop
+            // is a no-op for the elements.
+            (
+                JSON_VARIANT_ARRAY,
+                ValueSlot::from_u64(arr_ptr as u64),
+                true,
+            )
         }
         serde_json::Value::Object(map) => {
             // Wave 2 Round 3b C2-joint ckpt-4 (2026-05-14): build the
@@ -295,7 +326,13 @@ fn heap_to_slot(hv: HeapValue) -> ValueSlot {
         // refcount share moves to the slot via `into_raw()`.
         HeapValue::TypedObject(ptr) => ValueSlot::from_typed_object_raw(ptr.into_raw()),
         HeapValue::String(arc) => ValueSlot::from_string_arc(arc),
-        HeapValue::TypedArray(arc) => ValueSlot::from_typed_array(arc),
+        // V3-S5 ckpt-5-prime²c (2026-05-15): the `HeapValue::TypedArray`
+        // outer arm + `ValueSlot::from_typed_array` constructor are
+        // deleted at V3-S5 ckpt-4/ckpt-5; per-element-kind `from_typed_
+        // array_<T>` constructors are the Round 2 follow-up. This match
+        // arm is unreachable in the new world (no Json branch produces a
+        // `HeapValue::TypedArray` since the variant doesn't exist) so it
+        // is wholesale-deleted per the lockstep table discipline.
         // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): payload flipped to
         // `HashMapKindedRef`; wrap in `Arc::new` for the slot's Arc-storage
         // shape per ADR-006 §2.7.24 Q25.B SUPERSEDED.

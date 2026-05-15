@@ -20,7 +20,15 @@
 //! property — no caller materializes a Reference through `HeapValue`
 //! pattern matching.
 
-use crate::heap_value::{TypedArrayData, TypedObjectStorage};
+// V3-S5 ckpt-4 (2026-05-15): `TypedArrayData` import deleted — the enum
+// was retired at ckpt-1 per W12-typed-array-data-deletion-audit §3.5 +
+// ADR-006 §2.7.24 Q25.A SUPERSEDED. `RefTarget::TypedIndex { receiver:
+// Arc<TypedArrayData>, ... }` variant retired in lockstep below;
+// references into typed-array elements cascade-break here for v2-raw
+// `TypedArray<T>` rebuild in a downstream wave (the carrier replacement
+// requires per-element-kind receiver variants — `Arc<TypedArray<f64>>`
+// / `Arc<TypedArray<i64>>` / etc. — not a single `Arc<T>` enum).
+use crate::heap_value::TypedObjectStorage;
 use crate::native_kind::NativeKind;
 
 /// Kinded reference target.
@@ -73,17 +81,15 @@ pub enum RefTarget {
         kind: NativeKind,
     },
 
-    /// Projected reference into a typed-array element.
-    ///
-    /// `receiver` keeps the array alive; `index` is the element index
-    /// (post-bounds-check at construction); `elem_kind` is the element-
-    /// type `NativeKind`, sourced at construction time by matching on
-    /// the receiver's `TypedArrayData` variant.
-    TypedIndex {
-        receiver: std::sync::Arc<TypedArrayData>,
-        index: u64,
-        elem_kind: NativeKind,
-    },
+    // V3-S5 ckpt-4 (2026-05-15): `TypedIndex { receiver: Arc<
+    // TypedArrayData>, index, elem_kind }` variant DELETED. The
+    // `TypedArrayData` enum + `TypedBuffer<T>` wrapper layer were
+    // retired wholesale at ckpt-1..ckpt-4 per W12-typed-array-data-
+    // deletion-audit §3.5 + §B + ADR-006 §2.7.24 Q25.A SUPERSEDED.
+    // The replacement (per-element-kind `Arc<TypedArray<f64>>` /
+    // `Arc<TypedArray<i64>>` / etc. receiver variants) is downstream-
+    // wave territory — same shape as the `IteratorSource::Array`
+    // deletion in `iterator_state.rs`. Refusal #1 binding.
 }
 
 impl RefTarget {
@@ -92,10 +98,11 @@ impl RefTarget {
     #[inline]
     pub fn projected_kind(&self) -> NativeKind {
         match self {
+            // V3-S5 ckpt-4: `RefTarget::TypedIndex` arm deleted in
+            // lockstep with the variant.
             RefTarget::Local { kind, .. }
             | RefTarget::ModuleBinding { kind, .. }
             | RefTarget::TypedField { kind, .. } => *kind,
-            RefTarget::TypedIndex { elem_kind, .. } => *elem_kind,
         }
     }
 }

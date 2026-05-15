@@ -5,26 +5,48 @@
 //! overloading on user-defined types still goes through `CallMethod`
 //! (see Phase 2.5).
 //!
-//! Phase 1.B-vm Wave 6.5 substep-2 cluster D-obj-tail (playbook §10):
+//! ## V3-S5 ckpt-3 consumer-cascade tier 2 surface (2026-05-15)
 //!
-//! - `op_string_concat` migrates to the kinded API. The operand kinds are
-//!   compile-time known (`StringConcat` is only emitted when both operands
-//!   are statically-proven `string` or `char`); the body dispatches on
-//!   `NativeKind::String` (`Arc<String>` payload) and
-//!   `NativeKind::Ptr(HeapKind::Char)` (codepoint payload, ADR-006 §2.7
-//!   Char-as-inline-scalar shape per `stack_ops::op_push_const`).
-//! - `op_array_concat` (Wave-δ MR-string-misc): typed-Arc
-//!   `Arc<TypedArrayData>` walk + same-variant element-kind concat.
-//!   Cross-variant operand combinations are a runtime type error
-//!   (CLAUDE.md "No runtime coercion" — same-variant only matches
-//!   `op_string_concat`'s "operand kinds were proven by the compiler"
-//!   contract). The typed-Arc constructor pattern mirrors the slice
-//!   pattern in `objects/array_operations.rs::slice_typed_array`
-//!   (which builds a fresh `Arc<TypedArrayData>` per source variant).
+//! Per V3-S5 ckpt-1 close (commit `aac8495e`, 2026-05-15), the
+//! `TypedArrayData` enum + impl blocks + `Display for TypedArrayData` +
+//! `typed_array_structural_eq` fn were DELETED at
+//! `crates/shape-value/src/heap_value.rs` per W12-typed-array-data-deletion
+//! audit §3.5 + ADR-006 §2.7.24 Q25.A SUPERSEDED. This file's previous
+//! consumer-shape — `op_array_concat` recovering two `Arc<TypedArrayData>`
+//! via `Arc::<TypedArrayData>::from_raw` and dispatching through
+//! `concat_typed_arrays` over per-variant pair-arms (`TypedArrayData::I64 /
+//! F64 / Bool / I8 / I16 / I32 / U8 / U16 / U32 / U64 / F32 / String /
+//! Decimal / BigInt / Char / TypedObject`) — cascade-breaks here as the
+//! deletion's consumer cascade tier 2.
+//!
+//! `op_array_concat` body is replaced with structured surface-and-stop
+//! returning `VMError::NotImplemented`. The cross-variant TypeError
+//! discrimination via `type_pair_static_str` is DELETED — it produced
+//! `&'static str` from `TypedArrayData::type_name()` which is gone.
+//! `concat_typed_arrays` is DELETED.
+//!
+//! PRESERVED:
+//! - `op_string_concat` — no `TypedArrayData` dependency; operates on
+//!   `Arc<String>` / `HeapKind::String` / `HeapKind::Char` arms only.
+//! - `read_string_or_char` — no `TypedArrayData` dependency; consumed by
+//!   `op_string_concat`.
+//!
+//! ## Cascade migration target (post-ckpt-6 STRICT close)
+//!
+//! Per W12-typed-array-data-deletion audit §A.3 + §2.1 scalar recipe +
+//! §2.2 heap-element variants, every previous `TypedArrayData::X(buf)`
+//! pair-arm in `concat_typed_arrays` migrates to the v2-raw `TypedArray<T>`
+//! flat-struct carrier with per-T `data.extend_from_slice()` append. Both
+//! operands stay typed-Arcs at the stack level (the pop_kinded contract is
+//! unchanged); the per-T body comes from monomorphizing across the v2-raw
+//! per-T allocator post-ckpt-6.
+//!
+//! Bodies REFUSED ON SIGHT under Refusal #1 (resurrection under rename
+//! per ckpt-1 close-marker at `heap_value.rs:3956`).
 
 use crate::executor::VirtualMachine;
 use crate::executor::vm_impl::stack::drop_with_kind;
-use shape_value::heap_value::{HeapKind, TypedArrayData};
+use shape_value::heap_value::HeapKind;
 use shape_value::{NativeKind, VMError};
 use std::sync::Arc;
 
@@ -36,6 +58,9 @@ impl VirtualMachine {
     /// All other operand combinations are a runtime type error (the compiler
     /// is supposed to only emit this opcode when both operands are
     /// statically proven to be `string` or `char`).
+    ///
+    /// Preserved through V3-S5 ckpt-3 because the body has no
+    /// `TypedArrayData` dependency.
     #[inline]
     pub(in crate::executor) fn op_string_concat(&mut self) -> Result<(), VMError> {
         // ADR-006 §2.7.7 / Wave 6.5: pop_kinded transfers ownership for
@@ -76,238 +101,74 @@ impl VirtualMachine {
     ///
     /// Stack: `[a, b]` → `[a ++ b]`.
     ///
-    /// Both operands must be `Ptr(HeapKind::TypedArray)` per the §2.7.7
-    /// stack ABI; cross-variant element kinds (e.g. `Vec<int>` ++
-    /// `Vec<number>`) are a runtime type error per CLAUDE.md "No runtime
-    /// coercion" — the compiler is responsible for emitting matching
-    /// variants (or surfacing a type error at compile time).
+    /// V3-S5 ckpt-3 surface-and-stop. The previous body recovered two
+    /// `Arc<TypedArrayData>` via `Arc::<TypedArrayData>::from_raw` and
+    /// dispatched through 16 per-variant pair-arms in `concat_typed_arrays`;
+    /// the type is gone (ckpt-1 deletion). Post-ckpt-6 the body becomes a
+    /// per-T v2-raw `TypedArray<T>` extend dispatch.
+    ///
+    /// Releases both operand shares before erroring to preserve refcount
+    /// discipline per ADR-006 §2.7.7.
     #[inline]
     pub(in crate::executor) fn op_array_concat(&mut self) -> Result<(), VMError> {
         // Pop b then a (LIFO).
         let (b_bits, b_kind) = self.pop_kinded()?;
         let (a_bits, a_kind) = self.pop_kinded()?;
 
-        match (a_kind, b_kind) {
+        let kinds_ok = matches!(
+            (a_kind, b_kind),
             (
                 NativeKind::Ptr(HeapKind::TypedArray),
                 NativeKind::Ptr(HeapKind::TypedArray),
-            ) => {}
-            _ => {
-                drop_with_kind(b_bits, b_kind);
-                drop_with_kind(a_bits, a_kind);
-                return Err(VMError::TypeError {
-                    expected: "two TypedArray operands for ArrayConcat",
-                    got: "non-TypedArray kind",
-                });
-            }
+            )
+        );
+
+        // Always release the popped shares — surface-and-stop emits an
+        // error regardless of operand-kind validity, but the refcount
+        // discipline is preserved per ADR-006 §2.7.7.
+        drop_with_kind(b_bits, b_kind);
+        drop_with_kind(a_bits, a_kind);
+
+        if !kinds_ok {
+            return Err(VMError::TypeError {
+                expected: "two TypedArray operands for ArrayConcat",
+                got: "non-TypedArray kind",
+            });
         }
-
-        // Reconstruct the typed Arcs. `from_raw` takes ownership of each
-        // pop_kinded share; the read-only walks below borrow `&**arc` so
-        // the shares stay alive until the explicit drops at end.
-        let a = unsafe {
-            Arc::<TypedArrayData>::from_raw(a_bits as *const TypedArrayData)
-        };
-        let b = unsafe {
-            Arc::<TypedArrayData>::from_raw(b_bits as *const TypedArrayData)
-        };
-
-        let result = concat_typed_arrays(&a, &b);
-
-        // Retire the source shares now that the result has been built.
-        drop(a);
-        drop(b);
-
-        match result {
-            Ok(arc) => {
-                let bits = Arc::into_raw(arc) as u64;
-                self.push_kinded(bits, NativeKind::Ptr(HeapKind::TypedArray))
-            }
-            Err(e) => Err(e),
-        }
+        Err(ckpt3_surface("ArrayConcat", a_kind, b_kind))
     }
 }
 
-/// Concatenate two `Arc<TypedArrayData>` values into a fresh
-/// `Arc<TypedArrayData>` of the same variant. Cross-variant
-/// (heterogeneous element kinds) is a `TypeError` — the compiler is
-/// expected to prove element-kind compatibility at emit time.
-///
-/// Mirrors `slice_typed_array` in `array_operations.rs` for the
-/// per-variant constructor pattern.
-fn concat_typed_arrays(
-    a: &Arc<TypedArrayData>,
-    b: &Arc<TypedArrayData>,
-) -> Result<Arc<TypedArrayData>, VMError> {
-    match (&**a, &**b) {
-        (TypedArrayData::I64(la), TypedArrayData::I64(lb)) => {
-            let mut data: Vec<i64> = Vec::with_capacity(la.data.len() + lb.data.len());
-            data.extend_from_slice(&la.data);
-            data.extend_from_slice(&lb.data);
-            let buf = shape_value::typed_buffer::TypedBuffer::from_vec(data);
-            Ok(Arc::new(TypedArrayData::I64(Arc::new(buf))))
-        }
-        (TypedArrayData::F64(la), TypedArrayData::F64(lb)) => {
-            let mut data: Vec<f64> =
-                Vec::with_capacity(la.data.len() + lb.data.len());
-            data.extend_from_slice(&la.data);
-            data.extend_from_slice(&lb.data);
-            let aligned = shape_value::aligned_vec::AlignedVec::<f64>::from_vec(data);
-            let buf =
-                shape_value::typed_buffer::AlignedTypedBuffer::from_aligned(aligned);
-            Ok(Arc::new(TypedArrayData::F64(Arc::new(buf))))
-        }
-        (TypedArrayData::Bool(la), TypedArrayData::Bool(lb)) => {
-            let mut data: Vec<u8> = Vec::with_capacity(la.data.len() + lb.data.len());
-            data.extend_from_slice(&la.data);
-            data.extend_from_slice(&lb.data);
-            let buf = shape_value::typed_buffer::TypedBuffer::from_vec(data);
-            Ok(Arc::new(TypedArrayData::Bool(Arc::new(buf))))
-        }
-        (TypedArrayData::I8(la), TypedArrayData::I8(lb)) => {
-            let mut data: Vec<i8> = Vec::with_capacity(la.data.len() + lb.data.len());
-            data.extend_from_slice(&la.data);
-            data.extend_from_slice(&lb.data);
-            Ok(Arc::new(TypedArrayData::I8(Arc::new(
-                shape_value::typed_buffer::TypedBuffer::from_vec(data),
-            ))))
-        }
-        (TypedArrayData::I16(la), TypedArrayData::I16(lb)) => {
-            let mut data: Vec<i16> = Vec::with_capacity(la.data.len() + lb.data.len());
-            data.extend_from_slice(&la.data);
-            data.extend_from_slice(&lb.data);
-            Ok(Arc::new(TypedArrayData::I16(Arc::new(
-                shape_value::typed_buffer::TypedBuffer::from_vec(data),
-            ))))
-        }
-        (TypedArrayData::I32(la), TypedArrayData::I32(lb)) => {
-            let mut data: Vec<i32> = Vec::with_capacity(la.data.len() + lb.data.len());
-            data.extend_from_slice(&la.data);
-            data.extend_from_slice(&lb.data);
-            Ok(Arc::new(TypedArrayData::I32(Arc::new(
-                shape_value::typed_buffer::TypedBuffer::from_vec(data),
-            ))))
-        }
-        (TypedArrayData::U8(la), TypedArrayData::U8(lb)) => {
-            let mut data: Vec<u8> = Vec::with_capacity(la.data.len() + lb.data.len());
-            data.extend_from_slice(&la.data);
-            data.extend_from_slice(&lb.data);
-            Ok(Arc::new(TypedArrayData::U8(Arc::new(
-                shape_value::typed_buffer::TypedBuffer::from_vec(data),
-            ))))
-        }
-        (TypedArrayData::U16(la), TypedArrayData::U16(lb)) => {
-            let mut data: Vec<u16> = Vec::with_capacity(la.data.len() + lb.data.len());
-            data.extend_from_slice(&la.data);
-            data.extend_from_slice(&lb.data);
-            Ok(Arc::new(TypedArrayData::U16(Arc::new(
-                shape_value::typed_buffer::TypedBuffer::from_vec(data),
-            ))))
-        }
-        (TypedArrayData::U32(la), TypedArrayData::U32(lb)) => {
-            let mut data: Vec<u32> = Vec::with_capacity(la.data.len() + lb.data.len());
-            data.extend_from_slice(&la.data);
-            data.extend_from_slice(&lb.data);
-            Ok(Arc::new(TypedArrayData::U32(Arc::new(
-                shape_value::typed_buffer::TypedBuffer::from_vec(data),
-            ))))
-        }
-        (TypedArrayData::U64(la), TypedArrayData::U64(lb)) => {
-            let mut data: Vec<u64> = Vec::with_capacity(la.data.len() + lb.data.len());
-            data.extend_from_slice(&la.data);
-            data.extend_from_slice(&lb.data);
-            Ok(Arc::new(TypedArrayData::U64(Arc::new(
-                shape_value::typed_buffer::TypedBuffer::from_vec(data),
-            ))))
-        }
-        (TypedArrayData::F32(la), TypedArrayData::F32(lb)) => {
-            let mut data: Vec<f32> = Vec::with_capacity(la.data.len() + lb.data.len());
-            data.extend_from_slice(&la.data);
-            data.extend_from_slice(&lb.data);
-            Ok(Arc::new(TypedArrayData::F32(Arc::new(
-                shape_value::typed_buffer::TypedBuffer::from_vec(data),
-            ))))
-        }
-        (TypedArrayData::String(la), TypedArrayData::String(lb)) => {
-            let mut data: Vec<Arc<String>> =
-                Vec::with_capacity(la.data.len() + lb.data.len());
-            for s in la.data.iter() {
-                data.push(Arc::clone(s));
-            }
-            for s in lb.data.iter() {
-                data.push(Arc::clone(s));
-            }
-            Ok(Arc::new(TypedArrayData::String(Arc::new(
-                shape_value::typed_buffer::TypedBuffer::from_vec(data),
-            ))))
-        }
-        // ADR-006 §2.7.22 amendment (Round 18 S3): Matrix / FloatSlice
-        // exit `TypedArrayData`. Concat of Matrix / MatrixSlice receivers
-        // with array receivers is dispatched at the HeapKind layer (no
-        // inner-arm cross-variant routing here).
-        // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized
-        // same-variant arms. Per-element Arc::clone preserves refcount
-        // discipline.
-        (TypedArrayData::Decimal(la), TypedArrayData::Decimal(lb)) => {
-            let mut data = Vec::with_capacity(la.data.len() + lb.data.len());
-            for d in la.data.iter() { data.push(Arc::clone(d)); }
-            for d in lb.data.iter() { data.push(Arc::clone(d)); }
-            Ok(Arc::new(TypedArrayData::Decimal(Arc::new(
-                shape_value::typed_buffer::TypedBuffer::from_vec(data),
-            ))))
-        }
-        (TypedArrayData::BigInt(la), TypedArrayData::BigInt(lb)) => {
-            let mut data = Vec::with_capacity(la.data.len() + lb.data.len());
-            for d in la.data.iter() { data.push(Arc::clone(d)); }
-            for d in lb.data.iter() { data.push(Arc::clone(d)); }
-            Ok(Arc::new(TypedArrayData::BigInt(Arc::new(
-                shape_value::typed_buffer::TypedBuffer::from_vec(data),
-            ))))
-        }
-        (TypedArrayData::Char(la), TypedArrayData::Char(lb)) => {
-            let mut data = Vec::with_capacity(la.data.len() + lb.data.len());
-            data.extend_from_slice(&la.data);
-            data.extend_from_slice(&lb.data);
-            Ok(Arc::new(TypedArrayData::Char(Arc::new(
-                shape_value::typed_buffer::TypedBuffer::from_vec(data),
-            ))))
-        }
-        // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): TypedObjectPtr inner.
-        // Clone bumps v2-raw refcount per element.
-        (TypedArrayData::TypedObject(la), TypedArrayData::TypedObject(lb)) => {
-            let mut data: Vec<shape_value::heap_value::TypedObjectPtr> =
-                Vec::with_capacity(la.data.len() + lb.data.len());
-            for d in la.data.iter() { data.push(d.clone()); }
-            for d in lb.data.iter() { data.push(d.clone()); }
-            Ok(Arc::new(TypedArrayData::TypedObject(Arc::new(
-                shape_value::typed_buffer::TypedBuffer::from_vec(data),
-            ))))
-        }
-        // Cross-variant: mismatched element kinds. Compiler should
-        // have caught this at type-check; surface as a runtime type
-        // error per CLAUDE.md "No runtime coercion".
-        (lhs, rhs) => Err(VMError::TypeError {
-            expected: "matching TypedArrayData element variants for ArrayConcat",
-            got: type_pair_static_str(lhs.type_name(), rhs.type_name()),
-        }),
-    }
-}
+// ═══════════════════════════════════════════════════════════════════════════
+// V3-S5 ckpt-3 surface-and-stop builder
+// ═══════════════════════════════════════════════════════════════════════════
 
-/// Map (lhs_name, rhs_name) into a static `&'static str` for the
-/// TypeError's `got` field. The variant set is finite; unknown pairs
-/// fall through to a generic "mismatched variants" tag.
-#[inline]
-fn type_pair_static_str(lhs: &'static str, rhs: &'static str) -> &'static str {
-    // Common mismatches we want named explicitly for diagnostics.
-    match (lhs, rhs) {
-        ("Vec<int>", "Vec<number>") => "Vec<int> ++ Vec<number>",
-        ("Vec<number>", "Vec<int>") => "Vec<number> ++ Vec<int>",
-        ("Vec<int>", "Vec<bool>") => "Vec<int> ++ Vec<bool>",
-        ("Vec<bool>", "Vec<int>") => "Vec<bool> ++ Vec<int>",
-        ("Vec<string>", "Vec<int>") => "Vec<string> ++ Vec<int>",
-        ("Vec<int>", "Vec<string>") => "Vec<int> ++ Vec<string>",
-        _ => "mismatched TypedArray element variants",
-    }
+/// Surface-and-stop body for `op_array_concat`.
+#[cold]
+#[inline(never)]
+fn ckpt3_surface(op: &'static str, a_kind: NativeKind, b_kind: NativeKind) -> VMError {
+    VMError::NotImplemented(format!(
+        "{op}: SURFACE — V3-S5 ckpt-3 consumer-cascade tier 2 surface. \
+         `TypedArrayData` enum DELETED at ckpt-1 (2026-05-15) per W12-\
+         typed-array-data-deletion audit §3.5 + ADR-006 §2.7.24 Q25.A \
+         SUPERSEDED. The previous `Arc<TypedArrayData>` operand-recovery \
+         + per-variant pair-arm dispatch path (~32 references across \
+         `concat_typed_arrays` 16 pair-arms) cascade-broke at the enum \
+         deletion site (`crates/shape-value/src/heap_value.rs:3944`). \
+         Post-deletion target is the v2-raw `TypedArray<T>` flat-struct \
+         carrier per audit §1.2 + §A.3 + §3.1 scalar recipe + §2.2 \
+         heap-element variants — per-T `data.extend_from_slice()` append; \
+         landing across ckpt-3 (this file plus array_ops/typed_array_methods/\
+         iterator_methods/array_sort/property_access/array_query) + ckpt-4 \
+         (Buf<T> / HeapValue::TypedArray arm / HeapKind::TypedArray \
+         ordinal) + ckpt-5 (wire/json/marshal + 4-table lockstep) + ckpt-6 \
+         (JIT FFI). Operand kinds: a={a_kind:?}, b={b_kind:?}. UNREACHABLE \
+         until ckpt-6 STRICT close. REFUSED ON SIGHT: TypedArrayData \
+         resurrection under any rename (Refusal #1, W12 audit §7).",
+        op = op,
+        a_kind = a_kind,
+        b_kind = b_kind,
+    ))
 }
 
 /// Read a `string` or `char` operand's payload as a borrow.
@@ -326,6 +187,9 @@ fn type_pair_static_str(lhs: &'static str, rhs: &'static str) -> &'static str {
 /// The returned `String` is owned and independent of the operand bits;
 /// the caller still owns the original strong-count share and must
 /// release it via `drop_with_kind` after this function returns.
+///
+/// Preserved through V3-S5 ckpt-3 because the body has no `TypedArrayData`
+/// dependency.
 #[inline]
 fn read_string_or_char(bits: u64, kind: NativeKind) -> Option<String> {
     match kind {

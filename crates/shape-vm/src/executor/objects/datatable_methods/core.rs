@@ -38,7 +38,7 @@
 use shape_runtime::context::ExecutionContext;
 use shape_value::{
     AlignedVec, DataTable, KindedSlot, NativeKind, TableViewData,
-    TypedArrayData, TypedBuffer, TypedObjectStorage, ValueSlot, VMError,
+    TypedObjectStorage, ValueSlot, VMError,
     heap_value::{HeapKind, MatrixData},
 };
 use std::sync::Arc;
@@ -76,12 +76,16 @@ pub(crate) fn handle_columns(
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    let dt = borrow_data_table(args, "columns")?;
-    let names: Vec<Arc<String>> = dt.column_names().into_iter().map(Arc::new).collect();
-    let buf = TypedBuffer::from_vec(names);
-    Ok(KindedSlot::from_typed_array(Arc::new(TypedArrayData::String(
-        Arc::new(buf),
-    ))))
+    let _ = borrow_data_table(args, "columns")?;
+    Err(VMError::NotImplemented(
+        "DataTable.columns: SURFACE — V3-S5 ckpt-5 consumer-cascade tier \
+         3 surface. The deleted typed-array-data String result carrier DELETED at \
+         ckpt-1..ckpt-4 per W12 audit §3.5 + §B + ADR-006 §2.7.24 Q25.A \
+         SUPERSEDED. Rebuild lands at ckpt-6 STRICT close per v2-raw \
+         `TypedArray<*const StringObj>` direct-access. REFUSED ON SIGHT \
+         (Refusal #1)."
+            .to_string(),
+    ))
 }
 
 /// `dt.column(name)` — returns a `ColumnRef` (`TableView` variant).
@@ -380,29 +384,18 @@ pub(crate) fn handle_rows(
         m
     };
 
-    // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): TypedArrayData::TypedObject
-    // inner element type flipped to TypedObjectPtr. Each `_new` returns a
-    // raw pointer with refcount=1 (transferred to the wrapping
-    // TypedObjectPtr).
-    use shape_value::heap_value::TypedObjectPtr;
-    let mut row_storages: Vec<TypedObjectPtr> = Vec::with_capacity(row_count);
-    for r in 0..row_count {
-        let mut slots: Vec<ValueSlot> = Vec::with_capacity(col_readers.len());
-        for reader in col_readers.iter() {
-            slots.push((reader.read)(r));
-        }
-        let storage = TypedObjectStorage::_new(
-            schema_id as u64,
-            slots.into_boxed_slice(),
-            heap_mask,
-            Arc::clone(&field_kinds),
-        );
-        row_storages.push(TypedObjectPtr::new(storage));
-    }
-    let buf = TypedBuffer::from_vec(row_storages);
-    Ok(KindedSlot::from_typed_array(Arc::new(
-        TypedArrayData::TypedObject(Arc::new(buf)),
-    )))
+    // V3-S5 ckpt-5: `TypedArrayData::TypedObject` carrier deleted at
+    // ckpt-1..ckpt-4 per W12 audit §3.5 + §B. The pre-ckpt-1 body built
+    // row_count `TypedObjectStorage` rows and wrapped them in the deleted
+    // carrier. Rebuild lands at ckpt-6 STRICT close per the v2-raw
+    // `TypedArray<TypedObjectPtr>` direct-access target.
+    let _ = (col_readers, row_count, heap_mask, &field_kinds, schema_id);
+    Err(VMError::NotImplemented(
+        "DataTable.rows: SURFACE — V3-S5 ckpt-5 consumer-cascade tier 3 \
+         surface. The deleted typed-array-data TypedObject result carrier DELETED at \
+         ckpt-1..ckpt-4. Rebuild at ckpt-6 STRICT close. Refusal #1."
+            .to_string(),
+    ))
 }
 
 /// `dt.columnsRef()` — `Array<{name, kind}>`. Each column materializes
@@ -432,29 +425,16 @@ pub(crate) fn handle_columns_ref(
     );
     let heap_mask: u64 = 0b11;
 
-    // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): TypedArrayData::TypedObject
-    // inner element type flipped to TypedObjectPtr.
-    use shape_value::heap_value::TypedObjectPtr;
-    let mut col_storages: Vec<TypedObjectPtr> = Vec::with_capacity(col_count);
-    for (idx, name) in col_names.iter().enumerate() {
-        let arrow_col = dt_arc.inner().column(idx);
-        let kind_name = format!("{:?}", arrow_col.data_type());
-        let slots: Box<[ValueSlot]> = Box::new([
-            ValueSlot::from_string_arc(Arc::new(name.clone())),
-            ValueSlot::from_string_arc(Arc::new(kind_name)),
-        ]);
-        let storage = TypedObjectStorage::_new(
-            schema_id as u64,
-            slots,
-            heap_mask,
-            Arc::clone(&field_kinds),
-        );
-        col_storages.push(TypedObjectPtr::new(storage));
-    }
-    let buf = TypedBuffer::from_vec(col_storages);
-    Ok(KindedSlot::from_typed_array(Arc::new(
-        TypedArrayData::TypedObject(Arc::new(buf)),
-    )))
+    // V3-S5 ckpt-5: same surface as `handle_rows` above; rebuild target
+    // is the v2-raw `TypedArray<TypedObjectPtr>` direct-access carrier.
+    let _ = (col_count, col_names, schema_id, heap_mask, &field_kinds, &dt_arc);
+    Err(VMError::NotImplemented(
+        "DataTable.columnsRef: SURFACE — V3-S5 ckpt-5 consumer-cascade \
+         tier 3 surface. The deleted typed-array-data TypedObject result carrier \
+         DELETED at ckpt-1..ckpt-4. Rebuild at ckpt-6 STRICT close. \
+         Refusal #1."
+            .to_string(),
+    ))
 }
 
 /// Per-column reader: closure that produces a `ValueSlot` for row `i`,

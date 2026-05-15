@@ -11,7 +11,7 @@
 //! (`option_i64_vec_to_nb`); migrating it joins `array_transforms::diff` in
 //! the validity-aware-return-variant sub-question.
 //!
-//! Migrated entries take `Arc<AlignedTypedBuffer>` (f64-aligned SIMD storage)
+//! Migrated entries take `Arc<Vec<f64>>` (boxed dense f64 storage)
 //! + `i64` (window/period scalar) and return `ConcreteReturn::ArrayF64(Vec<f64>)`
 //! per the dispatcher's `TypedReturn → slot push` projection.
 //!
@@ -25,7 +25,7 @@ use crate::module_exports::ModuleExports;
 use crate::simd_rolling;
 use crate::typed_module_exports::{ConcreteReturn, ConcreteType, TypedReturn};
 use shape_ast::error::{Result, ShapeError};
-use shape_value::{AlignedTypedBuffer, KindedSlot};
+use shape_value::KindedSlot;
 use std::sync::Arc;
 
 // ───────────────────── Module factory (3 typed entries) ─────────────────────
@@ -41,7 +41,7 @@ pub fn create_rolling_intrinsics_module() -> ModuleExports {
         "Rolling-window intrinsics (typed entries; polymorphic-input intrinsics stay as legacy bodies pending M1-split sub-decision extension)"
             .to_string();
 
-    register_typed_fn_2::<_, Arc<AlignedTypedBuffer>, i64>(
+    register_typed_fn_2::<_, Arc<Vec<f64>>, i64>(
         &mut module,
         "__intrinsic_rolling_mean",
         "Rolling mean (Simple Moving Average) over a fixed-size window",
@@ -60,7 +60,7 @@ pub fn create_rolling_intrinsics_module() -> ModuleExports {
         },
     );
 
-    register_typed_fn_2::<_, Arc<AlignedTypedBuffer>, i64>(
+    register_typed_fn_2::<_, Arc<Vec<f64>>, i64>(
         &mut module,
         "__intrinsic_rolling_std",
         "Rolling standard deviation (Welford's algorithm) over a fixed-size window",
@@ -86,7 +86,7 @@ pub fn create_rolling_intrinsics_module() -> ModuleExports {
         },
     );
 
-    register_typed_fn_2::<_, Arc<AlignedTypedBuffer>, i64>(
+    register_typed_fn_2::<_, Arc<Vec<f64>>, i64>(
         &mut module,
         "__intrinsic_ema",
         "Exponential Moving Average with smoothing alpha = 2 / (period + 1)",

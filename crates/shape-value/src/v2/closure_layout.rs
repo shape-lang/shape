@@ -39,10 +39,17 @@
 use super::concrete_type::{ClosureTypeId, ConcreteType};
 use super::struct_layout::{FieldInfo, FieldKind};
 use crate::heap_value::{
+    // V3-S5 ckpt-4 (2026-05-15): `TypedArrayData` import deleted — the
+    // enum was retired at ckpt-1 per W12-typed-array-data-deletion-audit
+    // §3.5 + ADR-006 §2.7.24 Q25.A SUPERSEDED. The
+    // `HeapKind::TypedArray` arm at line ~378 (drop dispatch) is
+    // 4-table-lockstep territory deferred to V3-S5 ckpt-5 — it stays
+    // cascade-broken at this checkpoint per multi-session chain step 2
+    // (broken state OK on feature branch).
     AtomicData, ChannelData, DequeData, HashMapData, HashSetData, HeapKind, HeapValue,
     IoHandleData, LazyData, MatrixData, MatrixSliceData, MutexData, NativeViewData,
     PriorityQueueData, RangeData, TableViewData, TaskGroupData, TemporalData,
-    TraitObjectStorage, TypedArrayData, TypedObjectStorage,
+    TraitObjectStorage, TypedObjectStorage,
 };
 use crate::native_kind::NativeKind;
 use std::collections::HashMap;
@@ -374,8 +381,20 @@ impl Drop for SharedCell {
                     HeapKind::String => {
                         Arc::decrement_strong_count(bits as *const String);
                     }
+                    // V3-S5 ckpt-5-prime (2026-05-15): `HeapKind::TypedArray`
+                    // dispatch arm RETIRED per W12 audit §3.6 + handover §0
+                    // 4-table lockstep rule (SharedCell::drop table). Mirror
+                    // of the drop_with_kind / clone_with_kind retirements in
+                    // `heap_value.rs` + `kinded_slot.rs`. Ordinal 8 vacated;
+                    // no SharedCell single-slot payload carries this kind
+                    // post-V3-S5 ckpt-4. Refusal #1 binding.
                     HeapKind::TypedArray => {
-                        Arc::decrement_strong_count(bits as *const TypedArrayData);
+                        unreachable!(
+                            "HeapKind::TypedArray ordinal 8 is vacated per W12 audit §3.6 \
+                             (SharedCell::drop); no live slot bits carry this kind \
+                             post-V3-S5 ckpt-4 (v2-raw *mut TypedArray<T> carriers per ADR-006 \
+                             §2.7.24 Q25.A SUPERSEDED)"
+                        );
                     }
                     // Wave 2 Agent D4 ckpt-2 (ADR-006 §2.3 / §2.7.5
                     // amendment, 2026-05-14): a `SharedCell` whose

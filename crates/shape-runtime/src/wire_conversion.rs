@@ -253,7 +253,14 @@ pub fn heap_value_to_wire(hv: &HeapValue, ctx: &Context) -> WireValue {
         HeapValue::TaskGroup(_data) => {
             WireValue::String("<task_group>".to_string())
         }
-        HeapValue::TypedArray(arc) => typed_array_to_wire(&**arc),
+        // V3-S5 ckpt-5-prime (2026-05-15): `HeapValue::TypedArray(arc)` arm
+        // RETIRED in lockstep with the deleted `HeapValue::TypedArray` variant
+        // (ckpt-4) + deleted `TypedArrayData` inner enum (ckpt-1). Wire
+        // serialisation of v2-raw `*mut TypedArray<T>` pointers lands at the
+        // ckpt-5-prime² + ckpt-6 producer/consumer storage-shape migration
+        // (per-element-type marshal-layer projection before the value becomes
+        // a `HeapValue`). The `typed_array_to_wire` helper below is RETIRED
+        // in the same lockstep. Refusal #1 binding.
         HeapValue::Temporal(td) => temporal_to_wire(&**td),
         HeapValue::TableView(tv) => match &**tv {
             shape_value::heap_value::TableViewData::TypedTable { table, schema_id } => {
@@ -308,7 +315,6 @@ pub fn heap_value_to_wire(hv: &HeapValue, ctx: &Context) -> WireValue {
         // (mirror of the JSON shape — i64-priority-only at landing).
         HeapValue::PriorityQueue(d) => WireValue::Array(
             d.heap
-                .data
                 .iter()
                 .map(|v| WireValue::Integer(*v))
                 .collect(),
@@ -370,30 +376,14 @@ pub fn heap_value_to_wire(hv: &HeapValue, ctx: &Context) -> WireValue {
     }
 }
 
-fn typed_array_to_wire(ta: &shape_value::heap_value::TypedArrayData) -> WireValue {
-    use shape_value::heap_value::TypedArrayData;
-    match ta {
-        TypedArrayData::I64(buf) => {
-            WireValue::Array(buf.iter().map(|v| WireValue::Integer(*v)).collect())
-        }
-        TypedArrayData::F64(buf) => {
-            WireValue::Array(buf.iter().map(|v| WireValue::Number(*v)).collect())
-        }
-        TypedArrayData::Bool(buf) => {
-            WireValue::Array(buf.iter().map(|v| WireValue::Bool(*v != 0)).collect())
-        }
-        TypedArrayData::String(buf) => WireValue::Array(
-            buf.iter()
-                .map(|s| WireValue::String((**s).clone()))
-                .collect(),
-        ),
-        // Other TypedArrayData variants (Matrix / I8/I16/I32/U8/U16/U32/U64/
-        // F32/HeapValue) — wire serialization is part of the deferred
-        // Phase 2c marshal-layer rebuild. Surface a placeholder rather
-        // than emit a wrong-shape array.
-        _ => WireValue::String("<typed_array:phase-2c>".to_string()),
-    }
-}
+// V3-S5 ckpt-5-prime (2026-05-15): `typed_array_to_wire` helper RETIRED per W12
+// audit §3.6 + handover §0 wholesale-deletion cascade. The helper
+// pattern-matched on the deleted `TypedArrayData` enum (retired at ckpt-1) and
+// was called by the deleted `HeapValue::TypedArray` outer arm (retired at
+// ckpt-4) above. The v2-raw `*mut TypedArray<T>` wire-serialisation path lands
+// at the ckpt-5-prime² + ckpt-6 producer/consumer storage-shape migration
+// (per-element-type marshal-layer projection before the value becomes a
+// `HeapValue`). Refusal #1 binding.
 
 fn temporal_to_wire(td: &shape_value::heap_value::TemporalData) -> WireValue {
     use shape_value::heap_value::TemporalData;

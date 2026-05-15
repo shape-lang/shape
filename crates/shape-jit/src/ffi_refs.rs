@@ -191,6 +191,19 @@ pub struct FFIFuncRefs {
     pub(crate) v2_array_new_i32: FuncRef,
     pub(crate) v2_array_new_bool: FuncRef,
 
+    // ADR-006 §2.7.5 + §2.7.24 Q25.A SUPERSEDED + audit deliverable (b)
+    // §4.1.B — v2-raw `TypedArray<*const StringObj>` / `TypedArray<*const
+    // DecimalObj>` heap-element allocators. Phase 3 cluster-0+1 Wave 3
+    // Stabilize Round 2 V3-S5 ckpt-6-prime Group X JIT FFI String/Decimal
+    // BUILD (2026-05-15). Routed by `v2_array_new_func` for `NativeKind::
+    // StringV2` / `NativeKind::DecimalV2` element kinds — mirrors the
+    // existing scalar-kind dispatch arms for Float64/Int64/Int32/Bool. The
+    // per-element pointer payload is `*const StringObj` / `*const DecimalObj`
+    // matching the VM-side `NewStringV2` / `NewDecimalV2` producer at
+    // `crates/shape-vm/src/executor/v2_handlers/array.rs:803-858`.
+    pub(crate) v2_array_new_string: FuncRef,
+    pub(crate) v2_array_new_decimal: FuncRef,
+
     // v2 typed-array element push — single generic helper that dispatches
     // on the `elem_size` byte immediate. Callers zero/sign-extend the native
     // value to I64 before the call; the FFI body routes to the matching

@@ -42,9 +42,27 @@
 
 use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
-use shape_value::heap_value::{HeapKind, TypedArrayData};
-use shape_value::{KindedSlot, NativeKind, VMError};
+use shape_value::{KindedSlot, VMError};
 use std::sync::Arc;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// V3-S5 ckpt-5 surface-and-stop builder (for TypedArrayData-dependent methods)
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[cold]
+#[inline(never)]
+fn ckpt5_string_array_surface(op: &'static str) -> VMError {
+    VMError::NotImplemented(format!(
+        "String.{op}: SURFACE — V3-S5 ckpt-5 consumer-cascade tier 3 \
+         surface. The deleted typed-array-data String `Arc<Buf<Arc<String>>>` \
+         result carrier DELETED at V3-S5 ckpt-1..ckpt-4 per W12-typed-\
+         array-data-deletion audit §3.5 + §3.6 + §B + ADR-006 §2.7.24 \
+         Q25.A SUPERSEDED. Rebuild lands at ckpt-6 STRICT close per the \
+         v2-raw `TypedArray<*const StringObj>` carrier shape. REFUSED ON \
+         SIGHT: TypedArrayData resurrection under any rename (Refusal #1).",
+        op = op,
+    ))
+}
 
 /// Read the receiver `&str` from `args[0]`. The dispatcher contract
 /// guarantees `args[0].kind == NativeKind::String` for STRING_METHODS
@@ -397,22 +415,19 @@ pub fn v2_string_pad_end(
     Ok(string_result(pad_to(s, target_len, pad, /*at_start=*/ false)))
 }
 
-/// split — `Array<string>` result via `TypedArrayData::String`
+/// split — `Array<string>` result.
+///
+/// V3-S5 ckpt-5: TypedArrayData::String result carrier deleted; rebuild
+/// lands at ckpt-6 STRICT close per v2-raw `TypedArray<*const StringObj>`.
 pub fn v2_string_split(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    let s = receiver_str(args)?;
-    let sep = str_arg(args, 1)?;
-    let parts: Vec<Arc<String>> = if sep.is_empty() {
-        s.chars().map(|c| Arc::new(c.to_string())).collect()
-    } else {
-        s.split(sep).map(|p| Arc::new(p.to_string())).collect()
-    };
-    let buf = shape_value::typed_buffer::TypedBuffer::from_vec(parts);
-    let arr = Arc::new(TypedArrayData::String(Arc::new(buf)));
-    Ok(KindedSlot::from_typed_array(arr))
+    let _ = receiver_str(args)?;
+    let _ = str_arg(args, 1)?;
+    let _: Option<Arc<String>> = None;
+    Err(ckpt5_string_array_surface("split"))
 }
 
 /// replace — replace all occurrences of `from` with `to`
@@ -451,130 +466,19 @@ pub fn v2_string_substring(
 
 /// join — `Array<T>` receiver, separator (`string`) argument.
 ///
-/// Wave-δ MR-string-misc: the receiver kind here is
-/// `NativeKind::Ptr(HeapKind::TypedArray)`, dispatch on the inner
-/// `TypedArrayData::*` variant. Element stringification mirrors the
-/// language's `Display` semantics for primitive variants.
+/// V3-S5 ckpt-5: `Arc<TypedArrayData>` receiver dispatch deleted; rebuild
+/// lands at ckpt-6 STRICT close per per-element-kind v2-raw `TypedArray<T>`
+/// direct access.
 pub fn v2_string_join(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    let sep = str_arg(args, 1)?;
-    // Receiver must be a TypedArray. ADR-005 §1: heap dispatch goes
-    // through `as_heap_value()` + `HeapValue::*` match.
-    let arr_ref: &TypedArrayData = match args.first().map(|a| a.kind) {
-        Some(NativeKind::Ptr(HeapKind::TypedArray)) => {
-            match args[0].slot.as_heap_value() {
-                shape_value::HeapValue::TypedArray(a) => a.as_ref(),
-                _ => unreachable!("kind says TypedArray"),
-            }
-        }
-        _ => {
-            return Err(VMError::TypeError {
-                expected: "Array<T> receiver for join",
-                got: "non-array kind",
-            });
-        }
-    };
-
-    let joined = match arr_ref {
-        TypedArrayData::I64(buf) => buf
-            .data
-            .iter()
-            .map(|v| v.to_string())
-            .collect::<Vec<_>>()
-            .join(sep),
-        TypedArrayData::F64(buf) => buf
-            .data
-            .iter()
-            .map(format_f64)
-            .collect::<Vec<_>>()
-            .join(sep),
-        TypedArrayData::Bool(buf) => buf
-            .data
-            .iter()
-            .map(|v| (*v != 0).to_string())
-            .collect::<Vec<_>>()
-            .join(sep),
-        TypedArrayData::I8(buf) => buf
-            .data
-            .iter()
-            .map(|v| v.to_string())
-            .collect::<Vec<_>>()
-            .join(sep),
-        TypedArrayData::I16(buf) => buf
-            .data
-            .iter()
-            .map(|v| v.to_string())
-            .collect::<Vec<_>>()
-            .join(sep),
-        TypedArrayData::I32(buf) => buf
-            .data
-            .iter()
-            .map(|v| v.to_string())
-            .collect::<Vec<_>>()
-            .join(sep),
-        TypedArrayData::U8(buf) => buf
-            .data
-            .iter()
-            .map(|v| v.to_string())
-            .collect::<Vec<_>>()
-            .join(sep),
-        TypedArrayData::U16(buf) => buf
-            .data
-            .iter()
-            .map(|v| v.to_string())
-            .collect::<Vec<_>>()
-            .join(sep),
-        TypedArrayData::U32(buf) => buf
-            .data
-            .iter()
-            .map(|v| v.to_string())
-            .collect::<Vec<_>>()
-            .join(sep),
-        TypedArrayData::U64(buf) => buf
-            .data
-            .iter()
-            .map(|v| v.to_string())
-            .collect::<Vec<_>>()
-            .join(sep),
-        TypedArrayData::F32(buf) => buf
-            .data
-            .iter()
-            .map(|v| format_f64(&(*v as f64)))
-            .collect::<Vec<_>>()
-            .join(sep),
-        TypedArrayData::String(buf) => buf
-            .data
-            .iter()
-            .map(|s| s.as_str().to_string())
-            .collect::<Vec<_>>()
-            .join(sep),
-        // ADR-006 §2.7.22 amendment (Round 18 S3): Matrix / FloatSlice
-        // exit `TypedArrayData`. Their join surfaces dispatch via their
-        // dedicated HeapKind paths.
-        // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
-        TypedArrayData::Decimal(buf) => {
-            buf.data.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(sep)
-        }
-        TypedArrayData::BigInt(buf) => {
-            buf.data.iter().map(|b| b.to_string()).collect::<Vec<_>>().join(sep)
-        }
-        TypedArrayData::Char(buf) => {
-            buf.data.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(sep)
-        }
-        TypedArrayData::TypedObject(_) => {
-            return Err(VMError::NotImplemented(format!(
-                "Array<{}>.join: per-element stringification needs the \
-                 kinded output-adapter — use .map(|x| x.toString()).join() \
-                 form (ADR-006 §2.7.4)",
-                arr_ref.type_name()
-            )));
-        }
-    };
-
-    Ok(string_result(joined))
+    let _ = str_arg(args, 1)?;
+    // Suppress unused-fn warnings; `format_f64` stays live for forward
+    // compatibility (will be needed when the v2-raw rebuild lands).
+    let _f = format_f64;
+    Err(ckpt5_string_array_surface("join"))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -592,12 +496,9 @@ pub fn v2_string_graphemes(
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    let s = receiver_str(args)?;
-    let parts: Vec<Arc<String>> =
-        s.chars().map(|c| Arc::new(c.to_string())).collect();
-    let buf = shape_value::typed_buffer::TypedBuffer::from_vec(parts);
-    let arr = Arc::new(TypedArrayData::String(Arc::new(buf)));
-    Ok(KindedSlot::from_typed_array(arr))
+    let _ = receiver_str(args)?;
+    let _: Option<Arc<String>> = None;
+    Err(ckpt5_string_array_surface("graphemes"))
 }
 
 /// normalize — Unicode normalization. The `unicode-normalization` crate

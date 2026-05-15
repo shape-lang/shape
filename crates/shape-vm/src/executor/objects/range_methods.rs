@@ -29,9 +29,10 @@
 
 use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
-use shape_value::heap_value::{HeapKind, RangeData, TypedArrayData};
+use shape_value::heap_value::{HeapKind, RangeData};
 use shape_value::iterator_state::{IteratorSource, IteratorState};
-use shape_value::typed_buffer::TypedBuffer;
+use shape_value::slot::ValueSlot;
+use shape_value::v2::typed_array::TypedArray;
 use shape_value::{KindedSlot, NativeKind, VMError};
 use std::sync::Arc;
 
@@ -116,9 +117,18 @@ pub fn range_to_array(
     }
     let range = clone_range_arc(&args[0])?;
     let vec = range.to_vec_i64();
-    let buffer = Arc::new(TypedBuffer::from_vec(vec));
-    let arr = Arc::new(TypedArrayData::I64(buffer));
-    Ok(KindedSlot::from_typed_array(arr))
+    // V3-S5 ckpt-6 STRICT close (2026-05-15): rewritten to v2-raw
+    // `*mut TypedArray<i64>` per ADR-006 §2.7.24 Q25.A SUPERSEDED.
+    // Slot bits are `ptr as u64`; kind is `Ptr(HeapKind::TypedArray)`.
+    // Refcount discipline goes through `v2_retain` against the
+    // `HeapHeader` at offset 0 of the carrier (mirror of the
+    // `marshal.rs` Migration shape (a) landed at ckpt-5-prime²c).
+    let arr_ptr: *mut TypedArray<i64> = TypedArray::<i64>::from_slice(&vec);
+    let slot = ValueSlot::from_u64(arr_ptr as u64);
+    Ok(KindedSlot::new(
+        slot,
+        NativeKind::Ptr(HeapKind::TypedArray),
+    ))
 }
 
 /// `range.iter()` — convert the `RangeData` to a fresh

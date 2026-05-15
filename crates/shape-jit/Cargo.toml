@@ -24,6 +24,10 @@ chrono = { workspace = true }
 sha2 = "0.10"
 libloading = "0.8"
 wide = "0.7"
+# ckpt-6-prime Group X JIT FFI String/Decimal BUILD (2026-05-15) —
+# `decimal_obj_constant` materializer needs `rust_decimal::Decimal` to
+# construct `DecimalObj` heap objects from MIR-time Decimal literals.
+rust_decimal = { workspace = true }
 
 # Cranelift is required for JIT
 cranelift = "0.110"

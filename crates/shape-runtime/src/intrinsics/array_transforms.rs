@@ -18,7 +18,7 @@ use crate::marshal::{
 use crate::module_exports::{ModuleExports, ModuleParam};
 use crate::typed_module_exports::{ConcreteReturn, ConcreteType, TypedReturn};
 use shape_ast::error::{Result, ShapeError};
-use shape_value::{AlignedTypedBuffer, KindedSlot};
+use shape_value::KindedSlot;
 use std::sync::Arc;
 
 // ───────────────────── Module factory (6 typed entries) ─────────────────────
@@ -32,7 +32,7 @@ pub fn create_array_transforms_module() -> ModuleExports {
         "Array-transform intrinsics (typed entries; polymorphic-shape intrinsics stay as legacy bodies pending M1-split sub-decision)"
             .to_string();
 
-    register_typed_fn_1::<_, Arc<AlignedTypedBuffer>>(
+    register_typed_fn_1::<_, Arc<Vec<f64>>>(
         &mut module,
         "__intrinsic_series",
         "Identity column projection of a Vec<number>",
@@ -46,7 +46,7 @@ pub fn create_array_transforms_module() -> ModuleExports {
         },
     );
 
-    register_typed_fn_2::<_, Arc<AlignedTypedBuffer>, i64>(
+    register_typed_fn_2::<_, Arc<Vec<f64>>, i64>(
         &mut module,
         "__intrinsic_shift",
         "Shift a Vec<number> by N positions, padding with NaN",
@@ -74,7 +74,7 @@ pub fn create_array_transforms_module() -> ModuleExports {
         },
     );
 
-    register_typed_fn_2_full::<_, Arc<AlignedTypedBuffer>, i64>(
+    register_typed_fn_2_full::<_, Arc<Vec<f64>>, i64>(
         &mut module,
         "__intrinsic_pct_change",
         "Percent change between consecutive (or period-spaced) Vec<number> elements",
@@ -116,7 +116,7 @@ pub fn create_array_transforms_module() -> ModuleExports {
         },
     );
 
-    register_typed_fn_2::<_, Arc<AlignedTypedBuffer>, f64>(
+    register_typed_fn_2::<_, Arc<Vec<f64>>, f64>(
         &mut module,
         "__intrinsic_fillna",
         "Replace NaN entries in a Vec<number> with a fill value",
@@ -132,7 +132,7 @@ pub fn create_array_transforms_module() -> ModuleExports {
         },
     );
 
-    register_typed_fn_1::<_, Arc<AlignedTypedBuffer>>(
+    register_typed_fn_1::<_, Arc<Vec<f64>>>(
         &mut module,
         "__intrinsic_cumprod",
         "Cumulative product of a Vec<number>",
@@ -151,7 +151,7 @@ pub fn create_array_transforms_module() -> ModuleExports {
         },
     );
 
-    register_typed_fn_3::<_, Arc<AlignedTypedBuffer>, f64, f64>(
+    register_typed_fn_3::<_, Arc<Vec<f64>>, f64, f64>(
         &mut module,
         "__intrinsic_clip",
         "Clip Vec<number> elements to the [min, max] interval",

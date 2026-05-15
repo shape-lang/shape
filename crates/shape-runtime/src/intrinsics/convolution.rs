@@ -3,7 +3,7 @@
 //! Per the intrinsics-typed-CC migration's per-file table, the single
 //! convolution intrinsic (`stencil`) migrates to a `register_typed_fn_3_full`
 //! typed entry via [`create_convolution_intrinsics_module`]. Inputs are
-//! `Arc<AlignedTypedBuffer>` (series + kernel) and an optional
+//! `Arc<Vec<f64>>` (series + kernel) and an optional
 //! `Arc<String>` mode keyword (default `"same"`). Output projects through
 //! `ConcreteReturn::ArrayF64`.
 //!
@@ -22,7 +22,6 @@
 use crate::marshal::register_typed_fn_3_full;
 use crate::module_exports::{ModuleExports, ModuleParam};
 use crate::typed_module_exports::{ConcreteReturn, ConcreteType, TypedReturn};
-use shape_value::AlignedTypedBuffer;
 use std::sync::Arc;
 use wide::f64x4;
 
@@ -34,7 +33,7 @@ pub fn create_convolution_intrinsics_module() -> ModuleExports {
     let mut module = ModuleExports::new("std::core::intrinsics::convolution");
     module.description = "1D stencil/convolution intrinsics (SIMD-accelerated)".to_string();
 
-    register_typed_fn_3_full::<_, Arc<AlignedTypedBuffer>, Arc<AlignedTypedBuffer>, Arc<String>>(
+    register_typed_fn_3_full::<_, Arc<Vec<f64>>, Arc<Vec<f64>>, Arc<String>>(
         &mut module,
         "__intrinsic_stencil",
         "1D convolution of a Vec<number> series against a kernel; modes 'valid' / 'same' / 'full'",

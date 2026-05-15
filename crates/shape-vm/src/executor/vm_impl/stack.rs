@@ -31,7 +31,7 @@ use shape_value::{
         AtomicData, ChannelData, DequeData, HashMapData, HashSetData, HeapKind, HeapValue,
         IoHandleData, LazyData, MatrixData, MatrixSliceData, MutexData, NativeViewData,
         PriorityQueueData, RangeData, TableViewData, TaskGroupData, TemporalData,
-        TraitObjectStorage, TypedArrayData, TypedObjectStorage,
+        TraitObjectStorage, TypedObjectStorage,
     },
 };
 use std::sync::Arc;
@@ -86,8 +86,20 @@ pub(crate) fn clone_with_kind(bits: u64, kind: NativeKind) {
                 HeapKind::String => {
                     Arc::increment_strong_count(bits as *const String);
                 }
+                // V3-S5 ckpt-5-prime (2026-05-15): `HeapKind::TypedArray`
+                // dispatch arm RETIRED per W12 audit §3.6 + handover §0
+                // 4-table lockstep rule (VM stack clone_with_kind table —
+                // the 4th lockstep table). Mirror of the
+                // `shape-value/heap_value.rs` + `kinded_slot.rs` +
+                // `closure_layout.rs` retirements. Ordinal 8 vacated; no live
+                // slot bits carry this kind post-V3-S5 ckpt-4. Refusal #1 binding.
                 HeapKind::TypedArray => {
-                    Arc::increment_strong_count(bits as *const TypedArrayData);
+                    unreachable!(
+                        "HeapKind::TypedArray ordinal 8 is vacated per W12 audit §3.6 \
+                         (VM stack clone_with_kind); no live slot bits carry this kind \
+                         post-V3-S5 ckpt-4 (v2-raw *mut TypedArray<T> carriers per ADR-006 \
+                         §2.7.24 Q25.A SUPERSEDED)"
+                    );
                 }
                 // Wave 2 Agent D4 ckpt-2 (ADR-006 §2.3 / §2.7.5 amendment,
                 // 2026-05-14): TypedObject is a v2-raw HeapHeader-equipped
@@ -455,8 +467,19 @@ pub(crate) fn drop_with_kind(bits: u64, kind: NativeKind) {
                 HeapKind::String => {
                     Arc::decrement_strong_count(bits as *const String);
                 }
+                // V3-S5 ckpt-5-prime (2026-05-15): `HeapKind::TypedArray`
+                // dispatch arm RETIRED per W12 audit §3.6 + handover §0
+                // 4-table lockstep rule (VM stack drop_with_kind table —
+                // the 4th lockstep table). Mirror of the clone_with_kind
+                // retire arm above. Ordinal 8 vacated; no live slot bits
+                // carry this kind post-V3-S5 ckpt-4. Refusal #1 binding.
                 HeapKind::TypedArray => {
-                    Arc::decrement_strong_count(bits as *const TypedArrayData);
+                    unreachable!(
+                        "HeapKind::TypedArray ordinal 8 is vacated per W12 audit §3.6 \
+                         (VM stack drop_with_kind); no live slot bits carry this kind \
+                         post-V3-S5 ckpt-4 (v2-raw *mut TypedArray<T> carriers per ADR-006 \
+                         §2.7.24 Q25.A SUPERSEDED)"
+                    );
                 }
                 // Wave 2 Agent D4 ckpt-2 (ADR-006 §2.3 / §2.7.5 amendment,
                 // 2026-05-14): TypedObject release via

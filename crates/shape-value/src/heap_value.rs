@@ -8,9 +8,17 @@
 //! - typed handles (datatable, content, instant, io-handle, native scalars),
 //! - typed object slots (`TypedObject` with `Box<[ValueSlot]>`),
 //! - the typed-closure-raw block (`ClosureRaw`),
-//! - typed array buckets (`TypedArrayData`),
 //! - typed temporal data (`TemporalData`),
 //! - typed table views (`TableViewData`).
+//!
+//! V3-S5 ckpt-1..ckpt-4 (2026-05-15): the inline `TypedArrayData` enum +
+//! the outer `HeapValue::TypedArray(Arc<TypedArrayData>)` arm +
+//! `TypedBuffer<T>` / `AlignedTypedBuffer` wrapper layer were retired
+//! wholesale per W12-typed-array-data-deletion-audit §3.5 + §B + ADR-006
+//! §2.7.24 Q25.A SUPERSEDED. The canonical replacement is the v2-raw
+//! `TypedArray<T>` flat struct at `crate::v2::typed_array::TypedArray<T>`
+//! (per `docs/runtime-v2-spec.md`). The `HeapKind::TypedArray = 8`
+//! ordinal is vacated; do not reuse.
 //!
 //! Variants that previously held `ValueWord` (the deleted dynamic word) —
 //! `Some`/`Ok`/`Err`/`Range`/`TraitObject`/`FunctionRef`,
@@ -1947,7 +1955,13 @@ fn hashmap_kref_display(
 #[derive(Debug)]
 pub struct HashSetData {
     /// Insertion-ordered keys (string-typed buffer).
-    pub keys: Arc<crate::typed_buffer::TypedBuffer<Arc<String>>>,
+    ///
+    /// Storage shape: `Arc<Vec<Arc<String>>>` post-V3-S5 ckpt-5-prime²a
+    /// (Migration shape (a) per supervisor 2026-05-15 ratification —
+    /// `TypedBuffer<T>` wrapper layer retired wholesale at ckpt-4;
+    /// `Arc<Vec<T>>` is the smallest delta preserving `Arc::make_mut`
+    /// clone-on-write semantics).
+    pub keys: Arc<Vec<Arc<String>>>,
     /// Eager bucket-index: hash → list of indices into `keys` array.
     /// Enables O(1) lookup at `set.has(key)`. Hash is FNV-1a over the
     /// key string bytes — same as `HashMapData::index`.
@@ -1958,7 +1972,7 @@ impl HashSetData {
     /// Build an empty HashSetData with no entries.
     pub fn new() -> Self {
         Self {
-            keys: Arc::new(crate::typed_buffer::TypedBuffer::from_vec(Vec::new())),
+            keys: Arc::new(Vec::new()),
             index: std::collections::HashMap::new(),
         }
     }
@@ -1977,13 +1991,13 @@ impl HashSetData {
     /// Number of entries.
     #[inline]
     pub fn len(&self) -> usize {
-        self.keys.data.len()
+        self.keys.len()
     }
 
     /// Whether the set is empty.
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.keys.data.is_empty()
+        self.keys.is_empty()
     }
 
     /// Whether the set contains the given key. O(1) via the bucket
@@ -1995,7 +2009,7 @@ impl HashSetData {
         };
         for &idx in bucket {
             let i = idx as usize;
-            if self.keys.data[i].as_str() == key {
+            if self.keys[i].as_str() == key {
                 return true;
             }
         }
@@ -2016,13 +2030,13 @@ impl HashSetData {
         if let Some(bucket) = self.index.get(&hash) {
             for &idx in bucket {
                 let i = idx as usize;
-                if self.keys.data[i].as_str() == key.as_str() {
+                if self.keys[i].as_str() == key.as_str() {
                     return false;
                 }
             }
         }
-        let new_idx = self.keys.data.len();
-        Arc::make_mut(&mut self.keys).data.push(key);
+        let new_idx = self.keys.len();
+        Arc::make_mut(&mut self.keys).push(key);
         self.index.entry(hash).or_default().push(new_idx as u32);
         true
     }
@@ -2040,7 +2054,7 @@ impl HashSetData {
             };
             let mut found: Option<usize> = None;
             for (bucket_pos, &idx) in bucket.iter().enumerate() {
-                if self.keys.data[idx as usize].as_str() == key {
+                if self.keys[idx as usize].as_str() == key {
                     found = Some(bucket_pos);
                     break;
                 }
@@ -2056,7 +2070,7 @@ impl HashSetData {
             }
             removed_idx
         };
-        Arc::make_mut(&mut self.keys).data.remove(removed_idx);
+        Arc::make_mut(&mut self.keys).remove(removed_idx);
         for bucket in self.index.values_mut() {
             for slot in bucket.iter_mut() {
                 if (*slot as usize) > removed_idx {
@@ -3024,47 +3038,52 @@ unsafe impl crate::v2::heap_element::HeapElement for TraitObjectStorage {
 #[derive(Debug)]
 pub struct PriorityQueueData {
     /// Heap-ordered i64 priorities. Index 0 is the current min.
-    /// Backed by an `Arc<TypedBuffer<i64>>` so a HeapValue clone is a
-    /// single atomic refcount bump and `Arc::make_mut` is the
-    /// canonical clone-on-write entry per the W13-hashmap-mutation
-    /// precedent.
-    pub heap: Arc<crate::typed_buffer::TypedBuffer<i64>>,
+    /// Backed by an `Arc<Vec<i64>>` so a HeapValue clone is a single
+    /// atomic refcount bump and `Arc::make_mut` is the canonical
+    /// clone-on-write entry per the W13-hashmap-mutation precedent.
+    ///
+    /// Storage shape: `Arc<Vec<i64>>` post-V3-S5 ckpt-5-prime²a
+    /// (Migration shape (a) per supervisor 2026-05-15 ratification —
+    /// `TypedBuffer<T>` wrapper layer retired wholesale at ckpt-4;
+    /// `Arc<Vec<T>>` is the smallest delta preserving `Arc::make_mut`
+    /// clone-on-write semantics).
+    pub heap: Arc<Vec<i64>>,
 }
 
 impl PriorityQueueData {
     /// Build an empty PriorityQueueData with no entries.
     pub fn new() -> Self {
         Self {
-            heap: Arc::new(crate::typed_buffer::TypedBuffer::from_vec(Vec::new())),
+            heap: Arc::new(Vec::new()),
         }
     }
 
     /// Number of entries.
     #[inline]
     pub fn len(&self) -> usize {
-        self.heap.data.len()
+        self.heap.len()
     }
 
     /// Whether the queue is empty.
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.heap.data.is_empty()
+        self.heap.is_empty()
     }
 
     /// Peek at the minimum (root) without removing it. Returns `None`
     /// for an empty queue.
     pub fn peek(&self) -> Option<i64> {
-        self.heap.data.first().copied()
+        self.heap.first().copied()
     }
 
     /// Push a value, restoring the min-heap invariant via sift-up.
     /// Mirror of W13-hashmap-mutation `insert`: `Arc::make_mut`
-    /// clone-on-write over the inner `Arc<TypedBuffer<i64>>`.
+    /// clone-on-write over the inner `Arc<Vec<i64>>`.
     pub fn push(&mut self, value: i64) {
         let buf = Arc::make_mut(&mut self.heap);
-        buf.data.push(value);
-        let last = buf.data.len() - 1;
-        sift_up(&mut buf.data, last);
+        buf.push(value);
+        let last = buf.len() - 1;
+        sift_up(buf, last);
     }
 
     /// Pop the minimum value, restoring the min-heap invariant via
@@ -3072,14 +3091,14 @@ impl PriorityQueueData {
     /// W13-hashmap-mutation `remove`: `Arc::make_mut` clone-on-write.
     pub fn pop(&mut self) -> Option<i64> {
         let buf = Arc::make_mut(&mut self.heap);
-        if buf.data.is_empty() {
+        if buf.is_empty() {
             return None;
         }
-        let last = buf.data.len() - 1;
-        buf.data.swap(0, last);
-        let min = buf.data.pop();
-        if !buf.data.is_empty() {
-            sift_down(&mut buf.data, 0);
+        let last = buf.len() - 1;
+        buf.swap(0, last);
+        let min = buf.pop();
+        if !buf.is_empty() {
+            sift_down(buf, 0);
         }
         min
     }
@@ -3088,13 +3107,13 @@ impl PriorityQueueData {
     /// order (NOT sorted). Used for the `toArray` method's `Vec<int>`
     /// projection; for the sorted form see `to_sorted_vec`.
     pub fn to_vec(&self) -> Vec<i64> {
-        self.heap.data.clone()
+        (*self.heap).clone()
     }
 
     /// Return the heap contents as a sorted `Vec<i64>` (ascending —
     /// pop-order). Used for the `toSortedArray` method.
     pub fn to_sorted_vec(&self) -> Vec<i64> {
-        let mut v = self.heap.data.clone();
+        let mut v: Vec<i64> = (*self.heap).clone();
         v.sort_unstable();
         v
     }
@@ -3619,9 +3638,25 @@ impl TypedObjectStorage {
                         HeapKind::String => {
                             std::sync::Arc::decrement_strong_count(bits as *const String);
                         }
+                        // V3-S5 ckpt-5-prime (2026-05-15): `HeapKind::TypedArray`
+                        // dispatch arm RETIRED per W12 audit §3.6 + handover §0
+                        // 4-table lockstep rule. The `TypedArrayData` enum was
+                        // deleted at ckpt-1; the outer `HeapValue::TypedArray`
+                        // arm at ckpt-4. Ordinal 8 remains as a vacated marker
+                        // in `heap_variants.rs::HeapKind` (per ordinal-collision
+                        // rule — `value_ffi.rs::HK_TYPED_TABLE` asserts the
+                        // collision lineage). No live slot bits in compiled
+                        // bytecode carry `NativeKind::Ptr(HeapKind::TypedArray)`
+                        // post-ckpt-4 (all producers migrated to v2-raw
+                        // `*mut TypedArray<T>` carriers per ADR-006 §2.7.24
+                        // Q25.A SUPERSEDED). Refusal #1 binding: do not
+                        // reintroduce under any rename/shim/bridge.
                         HeapKind::TypedArray => {
-                            std::sync::Arc::decrement_strong_count(
-                                bits as *const TypedArrayData,
+                            unreachable!(
+                                "HeapKind::TypedArray ordinal 8 is vacated per W12 audit §3.6; \
+                                 no live slot bits carry this kind post-V3-S5 ckpt-4 (TypedArrayData \
+                                 enum + outer HeapValue::TypedArray arm deleted; v2-raw \
+                                 *mut TypedArray<T> carriers per ADR-006 §2.7.24 Q25.A SUPERSEDED)"
                             );
                         }
                         // Wave 2 Agent D4 ckpt-2 (ADR-006 §2.3 / §2.7.5
@@ -3941,584 +3976,20 @@ unsafe impl crate::v2::heap_element::HeapElement for TypedObjectStorage {
     }
 }
 
-// ── TypedArray buckets ──────────────────────────────────────────────────────
-
-/// Typed array data — consolidates IntArray, FloatArray, BoolArray, Matrix,
-/// I8Array..F32Array, and FloatArraySlice into a single HeapValue variant.
-///
-/// Phase 2d Array cluster (2026-05-07) added the `String` and `HeapValue`
-/// arms. `String` carries `Vec<Arc<String>>` for `Array<string>`. `HeapValue`
-/// carries `Vec<Arc<HeapValue>>` for `Array<X>` where X is itself a heap-
-/// allocated typed value (e.g. `Array<DataTable>`, `Array<Array<string>>`,
-/// `Array<TypedObject>`). Element-kind discrimination at the `HeapValue`
-/// arm is a body-side type contract (option β / option ε pattern from
-/// cluster #3): each `FromSlot for Vec<Arc<X>>` impl pattern-matches the
-/// expected inner `HeapValue::*` variant, panicking on mismatch as a
-/// spec-permitted consistency check (`docs/runtime-v2-spec.md`).
-#[derive(Debug, Clone)]
-pub enum TypedArrayData {
-    I64(Arc<crate::typed_buffer::TypedBuffer<i64>>),
-    F64(Arc<crate::typed_buffer::AlignedTypedBuffer>),
-    Bool(Arc<crate::typed_buffer::TypedBuffer<u8>>),
-    // ADR-006 §2.7.22 amendment (Round 18 S3, 2026-05-13): the legacy
-    // `Matrix(Arc<MatrixData>)` variant is DELETED. Matrix is a category-error
-    // here — it is a single Matrix value, not a buffer-of-Matrix. Matrix now
-    // lives at `HeapKind::Matrix = 34` + `HeapValue::Matrix(Arc<MatrixData>)`
-    // with the typed-Arc pure-discriminator dispatch shape (mirror of
-    // §2.7.9 FilterExpr). See §2.7.22 amendment text + S3 close commit.
-    I8(Arc<crate::typed_buffer::TypedBuffer<i8>>),
-    I16(Arc<crate::typed_buffer::TypedBuffer<i16>>),
-    I32(Arc<crate::typed_buffer::TypedBuffer<i32>>),
-    U8(Arc<crate::typed_buffer::TypedBuffer<u8>>),
-    U16(Arc<crate::typed_buffer::TypedBuffer<u16>>),
-    U32(Arc<crate::typed_buffer::TypedBuffer<u32>>),
-    U64(Arc<crate::typed_buffer::TypedBuffer<u64>>),
-    F32(Arc<crate::typed_buffer::TypedBuffer<f32>>),
-    String(Arc<crate::typed_buffer::TypedBuffer<Arc<String>>>),
-    // ── ADR-006 §2.7.24 Q25.A monomorphic specializations ─────────────────
-    // W17-typed-carrier-bundle-A commit 1/4 (2026-05-11): added alongside
-    // the legacy HeapValue arm. Construction sites migrate in commit 2;
-    // read sites in commit 3; commit 4 deletes the HeapValue arm. Per-element
-    // kind is uniform per variant — variant tag IS the kind, no parallel
-    // kind track.
-    Decimal(Arc<crate::typed_buffer::TypedBuffer<Arc<rust_decimal::Decimal>>>),
-    BigInt(Arc<crate::typed_buffer::TypedBuffer<Arc<i64>>>),
-    // ── ADR-006 §2.7.24 Q25.A SUPERSEDED dead-arm wholesale deletion ──────
-    // Wave 2 Round 1 Agent F (2026-05-14): the DateTime / Timespan / Duration
-    // / Instant / TraitObject specialized arms are DELETED. Wave 1 §F +
-    // R20 S2-prime §4.1.A.2 dead-arm finding ground-truthed zero root
-    // constructors at HEAD aa047356. The producer hits in array_transform.rs
-    // / concat.rs were derived (slice/zip/reverse/concat) cascading off
-    // upstream build_specialized_from_heap_arcs, which itself has no arms
-    // for these HeapValue variants — the `other =>` errors. Per Q25.A
-    // SUPERSEDED forbidden #1, no resurrection under any rename. If
-    // Array<DateTime/Timespan/Instant> becomes user-facing reachable in a
-    // future cluster, a v2-raw `TypedArray<*const <X>Obj>` carrier lands
-    // then per §2.2 / §A.3 audit row.
-    Char(Arc<crate::typed_buffer::TypedBuffer<char>>),
-    // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): inner element type
-    // shifted from `Arc<TypedObjectStorage>` to `TypedObjectPtr` per ADR-006
-    // §2.3 amendment + Path B ratification. The newtype owns one v2-raw
-    // HeapHeader-at-offset-0 refcount share; refcount discipline goes
-    // through `v2_retain` / `HeapElement::release_elem` on the inner ptr
-    // (NOT through `Arc::clone` / `Arc::drop`). Mirror of the
-    // HashMapValueBuf::TypedObject flip (ckpt-3) and the HeapValue::TypedObject
-    // flip (this same commit — variant flip atomicity).
-    TypedObject(Arc<crate::typed_buffer::TypedBuffer<TypedObjectPtr>>),
-    // The polymorphic `HeapValue(Arc<TypedBuffer<Arc<HeapValue>>>)` catch-all
-    // was DELETED in checkpoint 4 of W17-typed-carrier-bundle-A per ADR-006
-    // §2.7.24 Q25.A. Every construction site migrated to a specialized
-    // variant in checkpoint 2; every reader was filled with real per-arm
-    // bodies in checkpoint 3. Do not reintroduce under any rename — see
-    // §Q25.E #1 forbidden pattern list.
-    // ADR-006 §2.7.22 amendment (Round 18 S3, 2026-05-13): the legacy
-    // `FloatSlice { parent, offset, len }` variant is DELETED. It is a
-    // projection-into-a-Matrix (category-error in a TypedArrayData carrier).
-    // The projection lives at `HeapKind::MatrixSlice = 35` +
-    // `HeapValue::MatrixSlice(Arc<MatrixSliceData>)` with the typed-Arc
-    // pure-discriminator dispatch shape (mirror of §2.7.9 FilterExpr).
-    // See §2.7.22 amendment text + S3 close commit.
-}
-
-impl TypedArrayData {
-    /// W17-typed-carrier-bundle-A checkpoint 2/4: build a strict-typed
-    /// `TypedArrayData` variant from a `Vec<Arc<HeapValue>>` of uniform-arm
-    /// elements per ADR-006 §2.7.24 Q25.A. Dispatch on the first element's
-    /// `HeapValue` arm and require all subsequent elements to match. The
-    /// resulting variant carries the element kind at the variant level —
-    /// no parallel kind track, no polymorphic catch-all. Heterogeneous-arm
-    /// inputs surface a structured error.
-    ///
-    /// Returns the variant directly (no Arc wrapper). Callers wrap via
-    /// `Arc::new(...)` then `KindedSlot::from_typed_array(...)` /
-    /// `HeapValue::TypedArray(...)` per their carrier needs.
-    pub fn build_specialized_from_heap_arcs(
-        elems: Vec<Arc<HeapValue>>,
-    ) -> Result<Self, String> {
-        use crate::typed_buffer::TypedBuffer;
-        if elems.is_empty() {
-            let buf: TypedBuffer<TypedObjectPtr> = TypedBuffer::from_vec(Vec::new());
-            return Ok(TypedArrayData::TypedObject(Arc::new(buf)));
-        }
-        let first = &elems[0];
-        match first.as_ref() {
-            HeapValue::String(_) => {
-                let mut data: Vec<Arc<String>> = Vec::with_capacity(elems.len());
-                for e in elems.iter() {
-                    match e.as_ref() {
-                        HeapValue::String(s) => data.push(Arc::clone(s)),
-                        other => return Err(format!(
-                            "TypedArrayData::build_specialized: heterogeneous \
-                             heap arms (expected String, got {:?})",
-                            other.kind()
-                        )),
-                    }
-                }
-                Ok(TypedArrayData::String(Arc::new(TypedBuffer::from_vec(data))))
-            }
-            HeapValue::Decimal(_) => {
-                let mut data: Vec<Arc<rust_decimal::Decimal>> = Vec::with_capacity(elems.len());
-                for e in elems.iter() {
-                    match e.as_ref() {
-                        HeapValue::Decimal(d) => data.push(Arc::clone(d)),
-                        other => return Err(format!(
-                            "TypedArrayData::build_specialized: heterogeneous \
-                             heap arms (expected Decimal, got {:?})",
-                            other.kind()
-                        )),
-                    }
-                }
-                Ok(TypedArrayData::Decimal(Arc::new(TypedBuffer::from_vec(data))))
-            }
-            HeapValue::BigInt(_) => {
-                let mut data: Vec<Arc<i64>> = Vec::with_capacity(elems.len());
-                for e in elems.iter() {
-                    match e.as_ref() {
-                        HeapValue::BigInt(b) => data.push(Arc::clone(b)),
-                        other => return Err(format!(
-                            "TypedArrayData::build_specialized: heterogeneous \
-                             heap arms (expected BigInt, got {:?})",
-                            other.kind()
-                        )),
-                    }
-                }
-                Ok(TypedArrayData::BigInt(Arc::new(TypedBuffer::from_vec(data))))
-            }
-            HeapValue::TypedObject(_) => {
-                let mut data: Vec<TypedObjectPtr> = Vec::with_capacity(elems.len());
-                for e in elems.iter() {
-                    match e.as_ref() {
-                        HeapValue::TypedObject(s) => data.push(s.clone()),
-                        other => return Err(format!(
-                            "TypedArrayData::build_specialized: heterogeneous \
-                             heap arms (expected TypedObject, got {:?})",
-                            other.kind()
-                        )),
-                    }
-                }
-                Ok(TypedArrayData::TypedObject(Arc::new(TypedBuffer::from_vec(data))))
-            }
-            HeapValue::Char(_) => {
-                let mut data: Vec<char> = Vec::with_capacity(elems.len());
-                for e in elems.iter() {
-                    match e.as_ref() {
-                        HeapValue::Char(c) => data.push(*c),
-                        other => return Err(format!(
-                            "TypedArrayData::build_specialized: heterogeneous \
-                             heap arms (expected Char, got {:?})",
-                            other.kind()
-                        )),
-                    }
-                }
-                Ok(TypedArrayData::Char(Arc::new(TypedBuffer::from_vec(data))))
-            }
-            other => Err(format!(
-                "TypedArrayData::build_specialized: HeapValue arm {:?} not yet \
-                 supported post-§2.7.24 Q25.A — add a specialized TypedArrayData arm.",
-                other.kind()
-            )),
-        }
-    }
-
-    #[inline]
-    pub fn type_name(&self) -> &'static str {
-        match self {
-            TypedArrayData::I64(_) => "Vec<int>",
-            TypedArrayData::F64(_) => "Vec<number>",
-            TypedArrayData::Bool(_) => "Vec<bool>",
-            TypedArrayData::I8(_) => "Vec<i8>",
-            TypedArrayData::I16(_) => "Vec<i16>",
-            TypedArrayData::I32(_) => "Vec<i32>",
-            TypedArrayData::U8(_) => "Vec<u8>",
-            TypedArrayData::U16(_) => "Vec<u16>",
-            TypedArrayData::U32(_) => "Vec<u32>",
-            TypedArrayData::U64(_) => "Vec<u64>",
-            TypedArrayData::F32(_) => "Vec<f32>",
-            TypedArrayData::String(_) => "Vec<string>",
-            TypedArrayData::Decimal(_) => "Vec<decimal>",
-            TypedArrayData::BigInt(_) => "Vec<int>",
-            TypedArrayData::Char(_) => "Vec<char>",
-            TypedArrayData::TypedObject(_) => "Vec<object>",
-        }
-    }
-
-    #[inline]
-    pub fn is_truthy(&self) -> bool {
-        match self {
-            TypedArrayData::I64(a) => !a.is_empty(),
-            TypedArrayData::F64(a) => !a.is_empty(),
-            TypedArrayData::Bool(a) => !a.is_empty(),
-            TypedArrayData::I8(a) => !a.is_empty(),
-            TypedArrayData::I16(a) => !a.is_empty(),
-            TypedArrayData::I32(a) => !a.is_empty(),
-            TypedArrayData::U8(a) => !a.is_empty(),
-            TypedArrayData::U16(a) => !a.is_empty(),
-            TypedArrayData::U32(a) => !a.is_empty(),
-            TypedArrayData::U64(a) => !a.is_empty(),
-            TypedArrayData::F32(a) => !a.is_empty(),
-            TypedArrayData::String(a) => !a.is_empty(),
-            TypedArrayData::Decimal(a) => !a.is_empty(),
-            TypedArrayData::BigInt(a) => !a.is_empty(),
-            TypedArrayData::Char(a) => !a.is_empty(),
-            TypedArrayData::TypedObject(a) => !a.is_empty(),
-        }
-    }
-
-    /// In-place write of element `idx` through a shared
-    /// `&TypedArrayData` (i.e. through an `Arc<TypedArrayData>` with
-    /// refcount > 1, or via the inner `Arc<TypedBuffer<T>>` likewise
-    /// shared). Returns the prior bits for the heap-pointer arms
-    /// (currently `String`) so the caller can run `drop_with_kind` on
-    /// the released share. For scalar arms, the returned bits are the
-    /// prior scalar's u64 representation (no Arc-share release needed).
-    ///
-    /// This is the Q14 / ADR-006 §2.7.13 in-place write path for
-    /// `RefTarget::TypedIndex` projection writes — same constraints as
-    /// `TypedObjectStorage::write_slot_in_place`. The receiver Arc is
-    /// shared between the ref carrier and the originating binding,
-    /// so `Arc::make_mut` would clone the buffer and break ref
-    /// semantics.
-    ///
-    /// `new_bits` is the kind-encoded element value: integer arms use
-    /// `new_bits as <T>` (two's complement / zero-extension); float
-    /// arms use `f64::from_bits(new_bits)` (matching the
-    /// `typed_array_read_index_raw` symmetry); the `String` arm
-    /// interprets `new_bits` as `Arc::into_raw::<String>` (one share
-    /// transferred to the buffer).
-    ///
-    /// Variants without a single statically-sourceable scalar element
-    /// kind (`HeapValue`, `FloatSlice`, `Matrix`) return `None` —
-    /// `typed_array_element_kind` already rejects construction of a
-    /// `TypedIndex` projection over those variants, so this path is
-    /// unreachable for them. Returning `None` rather than panicking
-    /// preserves a defensive surface for any future projection-builder
-    /// gap.
-    ///
-    /// # Safety
-    ///
-    /// Same contract as `TypedObjectStorage::write_slot_in_place`:
-    ///
-    /// 1. Single-threaded write (VM is single-threaded; refs constrained
-    ///    by §3.1 escape analysis to stay within their originating
-    ///    task).
-    /// 2. No aliased `&mut TypedBuffer<T>` outstanding for the target
-    ///    buffer.
-    /// 3. `new_bits` interprets correctly under the variant's element
-    ///    kind. The caller (`write_ref_target` in `variables/mod.rs`)
-    ///    debug_asserts kind equality between popped `val_kind` and
-    ///    the `RefTarget::TypedIndex { elem_kind, .. }` projection.
-    /// 4. `idx` is within bounds (`idx < self.element_count()`); the
-    ///    caller bounds-checks at `MakeIndexRef` / `SetIndexRef`
-    ///    construction time.
-    ///
-    /// Q14 / ADR-006 §2.7.13.
-    pub unsafe fn write_index_in_place(
-        &self,
-        idx: usize,
-        new_bits: u64,
-    ) -> Option<u64> {
-        // SAFETY (each arm): the buffer `Arc<TypedBuffer<T>>` (or
-        // `Arc<AlignedTypedBuffer>` for F64) is shared via the typed
-        // `Arc` payload. The `TypedBuffer<T>` itself owns a `Vec<T>`,
-        // which is `Sized`-laid-out with contiguous slots. We cast
-        // through `&TypedBuffer<T>` -> `*const TypedBuffer<T>` ->
-        // `*mut TypedBuffer<T>` to access the inner Vec's slot at
-        // `idx`. The element's `T` is naturally aligned per the
-        // platform's Vec invariants, and the write is single-word
-        // (or smaller — i8/u8 are still atomic at machine level via
-        // a sub-word store) given the caller's single-threaded
-        // contract.
-        let prior = match self {
-            TypedArrayData::I64(buf) => {
-                let buf_ptr = std::sync::Arc::as_ptr(buf) as *mut crate::typed_buffer::TypedBuffer<i64>;
-                let slot = (*buf_ptr).data.as_mut_ptr().add(idx);
-                let p = *slot as u64;
-                *slot = new_bits as i64;
-                p
-            }
-            TypedArrayData::F64(buf) => {
-                let buf_ptr = std::sync::Arc::as_ptr(buf) as *mut crate::typed_buffer::AlignedTypedBuffer;
-                let slot = (*buf_ptr).data.as_mut_ptr().add(idx);
-                let p = (*slot).to_bits();
-                *slot = f64::from_bits(new_bits);
-                p
-            }
-            TypedArrayData::Bool(buf) => {
-                let buf_ptr = std::sync::Arc::as_ptr(buf) as *mut crate::typed_buffer::TypedBuffer<u8>;
-                let slot = (*buf_ptr).data.as_mut_ptr().add(idx);
-                let p = *slot as u64;
-                *slot = if new_bits != 0 { 1u8 } else { 0u8 };
-                p
-            }
-            TypedArrayData::I8(buf) => {
-                let buf_ptr = std::sync::Arc::as_ptr(buf) as *mut crate::typed_buffer::TypedBuffer<i8>;
-                let slot = (*buf_ptr).data.as_mut_ptr().add(idx);
-                let p = *slot as i64 as u64;
-                *slot = new_bits as i8;
-                p
-            }
-            TypedArrayData::I16(buf) => {
-                let buf_ptr = std::sync::Arc::as_ptr(buf) as *mut crate::typed_buffer::TypedBuffer<i16>;
-                let slot = (*buf_ptr).data.as_mut_ptr().add(idx);
-                let p = *slot as i64 as u64;
-                *slot = new_bits as i16;
-                p
-            }
-            TypedArrayData::I32(buf) => {
-                let buf_ptr = std::sync::Arc::as_ptr(buf) as *mut crate::typed_buffer::TypedBuffer<i32>;
-                let slot = (*buf_ptr).data.as_mut_ptr().add(idx);
-                let p = *slot as i64 as u64;
-                *slot = new_bits as i32;
-                p
-            }
-            TypedArrayData::U8(buf) => {
-                let buf_ptr = std::sync::Arc::as_ptr(buf) as *mut crate::typed_buffer::TypedBuffer<u8>;
-                let slot = (*buf_ptr).data.as_mut_ptr().add(idx);
-                let p = *slot as u64;
-                *slot = new_bits as u8;
-                p
-            }
-            TypedArrayData::U16(buf) => {
-                let buf_ptr = std::sync::Arc::as_ptr(buf) as *mut crate::typed_buffer::TypedBuffer<u16>;
-                let slot = (*buf_ptr).data.as_mut_ptr().add(idx);
-                let p = *slot as u64;
-                *slot = new_bits as u16;
-                p
-            }
-            TypedArrayData::U32(buf) => {
-                let buf_ptr = std::sync::Arc::as_ptr(buf) as *mut crate::typed_buffer::TypedBuffer<u32>;
-                let slot = (*buf_ptr).data.as_mut_ptr().add(idx);
-                let p = *slot as u64;
-                *slot = new_bits as u32;
-                p
-            }
-            TypedArrayData::U64(buf) => {
-                let buf_ptr = std::sync::Arc::as_ptr(buf) as *mut crate::typed_buffer::TypedBuffer<u64>;
-                let slot = (*buf_ptr).data.as_mut_ptr().add(idx);
-                let p = *slot;
-                *slot = new_bits;
-                p
-            }
-            TypedArrayData::F32(buf) => {
-                let buf_ptr = std::sync::Arc::as_ptr(buf) as *mut crate::typed_buffer::TypedBuffer<f32>;
-                let slot = (*buf_ptr).data.as_mut_ptr().add(idx);
-                let p = (*slot as f64).to_bits();
-                *slot = f64::from_bits(new_bits) as f32;
-                p
-            }
-            TypedArrayData::String(buf) => {
-                // Element type is `Arc<String>`. The slot stores the
-                // current share; `new_bits` is `Arc::into_raw::<String>`
-                // of the incoming share. Reconstruct the prior `Arc<String>`
-                // to surface its `Arc::into_raw` pointer for the caller
-                // to drop, then place the new `Arc<String>` constructed
-                // from `new_bits`.
-                let buf_ptr = std::sync::Arc::as_ptr(buf) as *mut crate::typed_buffer::TypedBuffer<Arc<String>>;
-                let slot = (*buf_ptr).data.as_mut_ptr().add(idx);
-                // Move-out the prior Arc<String> without dropping (the
-                // caller releases via `drop_with_kind(prior_bits, String)`),
-                // and move-in the new one from `new_bits`.
-                let prior_arc: Arc<String> = std::ptr::read(slot);
-                let prior = Arc::into_raw(prior_arc) as u64;
-                let new_arc: Arc<String> = Arc::from_raw(new_bits as *const String);
-                std::ptr::write(slot, new_arc);
-                prior
-            }
-            // Variants without a single statically-sourceable scalar
-            // element kind. Construction-side `MakeIndexRef` /
-            // `SetIndexRef` already rejects these via
-            // `typed_array_element_kind`'s `None` return; reaching this
-            // arm is a construction-side bug, not a soundness gap.
-            //
-            // W17-typed-carrier-bundle-A commit 1/4: the new
-            // §2.7.24 Q25.A specialized arms (Decimal / BigInt /
-            // DateTime / Timespan / Duration / Instant / Char /
-            // TypedObject / TraitObject) are also rejected here — they
-            // are heap-typed-Arc-element buffers whose write paths go
-            // through dedicated per-arm typed entry-points (commit 2-3
-            // wiring; commit 4 deletes the HeapValue arm).
-            TypedArrayData::Decimal(_)
-            | TypedArrayData::BigInt(_)
-            | TypedArrayData::Char(_)
-            | TypedArrayData::TypedObject(_) => return None,
-        };
-        Some(prior)
-    }
-}
-
-impl fmt::Display for TypedArrayData {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            TypedArrayData::I64(a) => {
-                write!(f, "Vec<int>[")?;
-                for (i, v) in a.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", v)?;
-                }
-                write!(f, "]")
-            }
-            TypedArrayData::F64(a) => {
-                write!(f, "Vec<number>[")?;
-                for (i, v) in a.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    if *v == v.trunc() && v.abs() < 1e15 {
-                        write!(f, "{}", *v as i64)?;
-                    } else {
-                        write!(f, "{}", v)?;
-                    }
-                }
-                write!(f, "]")
-            }
-            TypedArrayData::Bool(a) => {
-                write!(f, "Vec<bool>[")?;
-                for (i, v) in a.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", *v != 0)?;
-                }
-                write!(f, "]")
-            }
-            TypedArrayData::I8(a) => {
-                write!(f, "Vec<i8>[")?;
-                for (i, v) in a.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", v)?;
-                }
-                write!(f, "]")
-            }
-            TypedArrayData::I16(a) => {
-                write!(f, "Vec<i16>[")?;
-                for (i, v) in a.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", v)?;
-                }
-                write!(f, "]")
-            }
-            TypedArrayData::I32(a) => {
-                write!(f, "Vec<i32>[")?;
-                for (i, v) in a.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", v)?;
-                }
-                write!(f, "]")
-            }
-            TypedArrayData::U8(a) => {
-                write!(f, "Vec<u8>[")?;
-                for (i, v) in a.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", v)?;
-                }
-                write!(f, "]")
-            }
-            TypedArrayData::U16(a) => {
-                write!(f, "Vec<u16>[")?;
-                for (i, v) in a.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", v)?;
-                }
-                write!(f, "]")
-            }
-            TypedArrayData::U32(a) => {
-                write!(f, "Vec<u32>[")?;
-                for (i, v) in a.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", v)?;
-                }
-                write!(f, "]")
-            }
-            TypedArrayData::U64(a) => {
-                write!(f, "Vec<u64>[")?;
-                for (i, v) in a.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", v)?;
-                }
-                write!(f, "]")
-            }
-            TypedArrayData::F32(a) => {
-                write!(f, "Vec<f32>[")?;
-                for (i, v) in a.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", v)?;
-                }
-                write!(f, "]")
-            }
-            TypedArrayData::String(a) => {
-                write!(f, "Vec<string>[")?;
-                for (i, v) in a.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "\"{}\"", v)?;
-                }
-                write!(f, "]")
-            }
-            // ── ADR-006 §2.7.24 Q25.A specialized arms ──────────────────
-            // W17-typed-carrier-bundle-A commit 1/4: Display impls per
-            // arm matching the per-variant `HeapValue::*` Display shape.
-            TypedArrayData::Decimal(a) => {
-                write!(f, "Vec<decimal>[")?;
-                for (i, v) in a.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", v)?;
-                }
-                write!(f, "]")
-            }
-            TypedArrayData::BigInt(a) => {
-                write!(f, "Vec<int>[")?;
-                for (i, v) in a.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", **v)?;
-                }
-                write!(f, "]")
-            }
-            TypedArrayData::Char(a) => {
-                write!(f, "Vec<char>[")?;
-                for (i, v) in a.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "'{}'", v)?;
-                }
-                write!(f, "]")
-            }
-            TypedArrayData::TypedObject(a) => {
-                write!(f, "Vec<object>[")?;
-                for (i, _v) in a.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{{...}}")?;
-                }
-                write!(f, "]")
-            }
-        }
-    }
-}
+// ── TypedArray buckets (DELETED — V3-S5 ckpt-1, 2026-05-15) ──────────────────
+//
+// The `TypedArrayData` enum + impl blocks + `Display for TypedArrayData` +
+// `typed_array_structural_eq` were DELETED here per ADR-006 §2.7.24 Q25.A
+// SUPERSEDED + W12-typed-array-data-deletion-audit §3.5. The 22-variant
+// enum migrates to v2-raw `TypedArray<T>` flat-struct per-T monomorphization.
+// Consumer cascade lands across ckpt-2 (array_transform/aggregation/sets),
+// ckpt-3 (array_operations/concat/object_creation), ckpt-4 (TypedBuffer +
+// HeapValue::TypedArray arm + HeapKind::TypedArray ordinal), ckpt-5 (wire/
+// json/marshal + 4-table lockstep delete), ckpt-6 (JIT FFI). The
+// `Arc<TypedArrayData>` payload at heap_variants.rs:476 stays until ckpt-4.
+//
+// Refusal #1 binding: do not resurrect TypedArrayData under any rename
+// (e.g. TypedArrayKind, TypedArrayCarrier, TypedBuffer<T> wrapper enum).
 
 // ── Temporal data ───────────────────────────────────────────────────────────
 
@@ -4679,7 +4150,12 @@ impl Clone for HeapValue {
             // closure block + one Arc bump on the shared layout.
             HeapValue::ClosureRaw(v) => HeapValue::ClosureRaw(v.clone()),
             HeapValue::TaskGroup(v) => HeapValue::TaskGroup(Arc::clone(v)),
-            HeapValue::TypedArray(v) => HeapValue::TypedArray(Arc::clone(v)),
+            // V3-S5 ckpt-4 (2026-05-15): `HeapValue::TypedArray(v) =>
+            // HeapValue::TypedArray(Arc::clone(v))` clone arm DELETED in
+            // lockstep with the variant + the `TypedArrayData` enum
+            // (ckpt-1) + `TypedBuffer<T>` / `AlignedTypedBuffer` wrapper
+            // layer (ckpt-4). W12 audit §3.5/§B + ADR-006 §2.7.24 Q25.A
+            // SUPERSEDED. Refusal #1 binding.
             HeapValue::Temporal(v) => HeapValue::Temporal(Arc::clone(v)),
             HeapValue::TableView(v) => HeapValue::TableView(Arc::clone(v)),
             // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): payload is now
@@ -4815,10 +4291,16 @@ fn native_scalar_decimal_eq(a: &NativeScalar, b: &rust_decimal::Decimal) -> bool
 }
 
 /// Cross-type typed array equality: IntArray vs FloatArray (element-wise i64-as-f64).
+///
+/// NOTE (V3-S5 ckpt-5-prime²a, 2026-05-15): currently unreachable post-ckpt-4
+/// HeapValue::TypedArray outer-arm deletion (no callers). Signature migrated
+/// from `&TypedBuffer<i64>` / `&AlignedTypedBuffer` to `&[i64]` / `&[f64]` per
+/// Migration shape (a). Retained for the eventual v2-raw `*mut TypedArray<T>`
+/// per-T monomorphic rebuild (cluster-2 v2-raw-heap-audit territory).
 #[inline]
 fn int_float_array_eq(
-    ints: &crate::typed_buffer::TypedBuffer<i64>,
-    floats: &crate::typed_buffer::AlignedTypedBuffer,
+    ints: &[i64],
+    floats: &[f64],
 ) -> bool {
     ints.len() == floats.len()
         && ints
@@ -4842,32 +4324,11 @@ fn native_view_eq(a: &NativeViewData, b: &NativeViewData) -> bool {
     a.ptr == b.ptr && a.mutable == b.mutable && a.layout.name == b.layout.name
 }
 
-/// Structural equality for two `TypedArrayData` payloads.
-///
-/// ADR-006 §2.3: `HeapValue::TypedArray` carries `Arc<TypedArrayData>`,
-/// so the outer pattern binds the Arc and forwards the inner-enum
-/// dispatch here. Centralising the per-arm dispatch keeps both
-/// `structural_eq` and `equals` honest about which arms genuinely
-/// compare structurally vs which fall through to `false`.
-#[inline]
-fn typed_array_structural_eq(a: &TypedArrayData, b: &TypedArrayData) -> bool {
-    match (a, b) {
-        (TypedArrayData::I64(x), TypedArrayData::I64(y)) => x == y,
-        (TypedArrayData::F64(x), TypedArrayData::F64(y)) => x == y,
-        (TypedArrayData::I64(x), TypedArrayData::F64(y)) => int_float_array_eq(x, y),
-        (TypedArrayData::F64(x), TypedArrayData::I64(y)) => int_float_array_eq(y, x),
-        (TypedArrayData::Bool(x), TypedArrayData::Bool(y)) => x == y,
-        (TypedArrayData::I8(x), TypedArrayData::I8(y)) => x == y,
-        (TypedArrayData::I16(x), TypedArrayData::I16(y)) => x == y,
-        (TypedArrayData::I32(x), TypedArrayData::I32(y)) => x == y,
-        (TypedArrayData::U8(x), TypedArrayData::U8(y)) => x == y,
-        (TypedArrayData::U16(x), TypedArrayData::U16(y)) => x == y,
-        (TypedArrayData::U32(x), TypedArrayData::U32(y)) => x == y,
-        (TypedArrayData::U64(x), TypedArrayData::U64(y)) => x == y,
-        (TypedArrayData::F32(x), TypedArrayData::F32(y)) => x == y,
-        _ => false,
-    }
-}
+// `typed_array_structural_eq` DELETED — V3-S5 ckpt-1, 2026-05-15.
+// Per-arm TypedArrayData structural equality dispatch is retired with the
+// enum. Consumer sites at structural_eq + equals (HeapValue::TypedArray
+// arm match) cascade-break here and surface for ckpt-4 (HeapValue::TypedArray
+// arm rebuild atop v2-raw `*mut TypedArray<T>` per-T monomorphic dispatch).
 
 // ── Display ─────────────────────────────────────────────────────────────────
 
@@ -4910,7 +4371,10 @@ impl fmt::Display for HeapValue {
                 v.layout.name,
                 v.ptr
             ),
-            HeapValue::TypedArray(ta) => write!(f, "{}", ta),
+            // V3-S5 ckpt-4 (2026-05-15): `HeapValue::TypedArray(ta) =>
+            // write!(f, "{}", ta)` Display arm DELETED in lockstep with the
+            // variant + the `TypedArrayData` Display impl (ckpt-1). W12
+            // audit §3.5/§B + ADR-006 §2.7.24 Q25.A SUPERSEDED.
             HeapValue::HashMap(kref) => {
                 // Wave 2 Round 3b C2-joint ckpt-3 (2026-05-14): full per-V
                 // entry dump. Walks `*mut TypedArray<*const StringObj>`
@@ -4929,7 +4393,7 @@ impl fmt::Display for HeapValue {
             // quoted strings, no values.
             HeapValue::HashSet(d) => {
                 write!(f, "{{")?;
-                for (i, k) in d.keys.data.iter().enumerate() {
+                for (i, k) in d.keys.iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
@@ -4985,7 +4449,7 @@ impl fmt::Display for HeapValue {
             // sorted output the user must call `pq.toSortedArray()`.
             HeapValue::PriorityQueue(d) => {
                 write!(f, "PriorityQueue[")?;
-                for (i, v) in d.heap.data.iter().enumerate() {
+                for (i, v) in d.heap.iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
@@ -5164,9 +4628,16 @@ impl HeapValue {
             (HeapValue::IoHandle(a), HeapValue::IoHandle(b)) => {
                 std::sync::Arc::ptr_eq(&a.resource, &b.resource)
             }
-            (HeapValue::TypedArray(a), HeapValue::TypedArray(b)) => {
-                typed_array_structural_eq(a.as_ref(), b.as_ref())
-            }
+            // V3-S5 ckpt-4 (2026-05-15): `(HeapValue::TypedArray(...), ...)`
+            // structural-eq arm DELETED. The `HeapValue::TypedArray` outer
+            // arm was retired in lockstep with this ckpt-4 +
+            // `typed_array_structural_eq` was deleted at V3-S5 ckpt-1
+            // (heap_value.rs wholesale deletion per W12 audit §3.5 + ADR-006
+            // §2.7.24 Q25.A SUPERSEDED). Per-arm TypedArrayData structural
+            // equality dispatch retires with the enum; no replacement (the
+            // v2-raw `TypedArray<T>` flat struct compares element-wise via
+            // its own `==` impl, not through `HeapValue::structural_eq`).
+            // Refusal #1 binding.
             // ADR-006 §2.7.22 amendment (Round 18 S3, 2026-05-13): Matrix
             // equality is structural (rows + cols + element-wise compare);
             // MatrixSlice equality is element-wise over the projection slice
@@ -5266,9 +4737,11 @@ impl HeapValue {
             },
             (HeapValue::NativeScalar(a), HeapValue::NativeScalar(b)) => a == b,
             (HeapValue::NativeView(a), HeapValue::NativeView(b)) => native_view_eq(a, b),
-            (HeapValue::TypedArray(a), HeapValue::TypedArray(b)) => {
-                typed_array_structural_eq(a.as_ref(), b.as_ref())
-            }
+            // V3-S5 ckpt-4 (2026-05-15): `(HeapValue::TypedArray(...), ...)`
+            // equals arm DELETED in lockstep with the structural_eq arm
+            // above + the outer `HeapValue::TypedArray` variant +
+            // `typed_array_structural_eq` (ckpt-1). W12 audit §3.5 +
+            // ADR-006 §2.7.24 Q25.A SUPERSEDED. Refusal #1 binding.
             // ADR-006 §2.7.22 amendment (Round 18 S3, 2026-05-13): Matrix
             // and MatrixSlice equality match the structural_eq shape above.
             (HeapValue::Matrix(a), HeapValue::Matrix(b)) => matrix_eq(a, b),
@@ -5929,9 +5402,9 @@ mod hashset_mutation {
     fn from_keys_collapses_duplicates_first_wins() {
         let s = HashSetData::from_keys(vec![k("a"), k("b"), k("a"), k("c")]);
         assert_eq!(s.len(), 3);
-        assert_eq!(s.keys.data[0].as_str(), "a");
-        assert_eq!(s.keys.data[1].as_str(), "b");
-        assert_eq!(s.keys.data[2].as_str(), "c");
+        assert_eq!(s.keys[0].as_str(), "a");
+        assert_eq!(s.keys[1].as_str(), "b");
+        assert_eq!(s.keys[2].as_str(), "c");
     }
 
     #[test]

@@ -40,10 +40,19 @@
 //! ADR-006 §2.7.4 / §2.7.6 / §2.7.10 / §2.7.18 + wave-14-15-16
 //! playbook §2.W15-priority-queue.
 
+// V3-S5 ckpt-5-prime²a (2026-05-15): `TypedArrayData` + `TypedBuffer` imports
+// DELETED — `TypedBuffer<T>` retired at ckpt-4 (wrapper layer wholesale
+// deletion); `TypedArrayData` enum retired across the ckpt-2/3/5 consumer-
+// cascade. Migration shape (a) per supervisor 2026-05-15 ratification:
+// `PriorityQueueData.heap` now stores `Arc<Vec<i64>>` directly (smallest
+// delta preserving `Arc::make_mut` clone-on-write at the heap-field layer).
+// The `v2_to_array` / `v2_to_sorted_array` handlers are SURFACE-AND-STOP
+// pending the cluster-2 v2-raw `*mut TypedArray<i64>` rebuild that owns the
+// `Array<int>` result-construction path (mirrors `array_basic.rs::ckpt5_surface`
+// shape).
 use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
-use shape_value::heap_value::{HeapKind, HeapValue, PriorityQueueData, TypedArrayData};
-use shape_value::typed_buffer::TypedBuffer;
+use shape_value::heap_value::{HeapKind, HeapValue, PriorityQueueData};
 use shape_value::{KindedSlot, NativeKind, VMError};
 use std::sync::Arc;
 
@@ -151,8 +160,17 @@ pub fn v2_peek(
 
 /// PriorityQueue.toArray() -> Vec<int>
 ///
-/// Returns the heap contents in heap-array order (NOT sorted). For a
-/// sorted projection see `toSortedArray`.
+/// V3-S5 ckpt-5-prime²a SURFACE-AND-STOP (2026-05-15). Pre-deletion shape
+/// constructed `TypedArrayData::I64(Arc<TypedBuffer<i64>>)` from the heap
+/// contents and returned via `KindedSlot::from_typed_array`. Post-deletion:
+/// `TypedArrayData` enum + `TypedBuffer<T>` / `AlignedTypedBuffer` wrapper
+/// layer + `HeapValue::TypedArray(Arc<TypedArrayData>)` outer arm +
+/// `HeapKind::TypedArray=8` ordinal DELETED at V3-S5 ckpt-1..ckpt-4 per
+/// W12-typed-array-data-deletion audit §3.5 + §3.6 + §B + ADR-006
+/// §2.7.24 Q25.A SUPERSEDED. Rebuild target = per-T v2-raw `*mut
+/// TypedArray<i64>` flat-struct construction per audit §A.3 + §3.1 scalar
+/// recipe (lands cluster-2 / ckpt-6). REFUSED ON SIGHT: `TypedArrayData
+/// ::I64` / `TypedBuffer<i64>` resurrection under any rename (Refusal #1).
 pub fn v2_to_array(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
@@ -163,17 +181,24 @@ pub fn v2_to_array(
             "PriorityQueue.toArray() takes no arguments",
         ));
     }
-    let pq = as_priority_queue(&args[0])?;
-    let buf = Arc::new(TypedBuffer::from_vec(pq.to_vec()));
-    let arr = Arc::new(TypedArrayData::I64(buf));
-    Ok(KindedSlot::from_typed_array(arr))
+    let _pq = as_priority_queue(&args[0])?;
+    Err(VMError::NotImplemented(
+        "PriorityQueue.toArray: SURFACE — V3-S5 ckpt-5-prime²a consumer-\
+         cascade. The deleted typed-array-data I64 `Arc<Buf<i64>>` payload + \
+         `KindedSlot::from_typed_array` DELETED at V3-S5 ckpt-1..ckpt-4. \
+         Rebuild = per-T v2-raw `*mut TypedArray<i64>` flat-struct \
+         construction (cluster-2 / ckpt-6 territory). REFUSED ON SIGHT: \
+         resurrection under any rename (Refusal #1)."
+            .to_string(),
+    ))
 }
 
 /// PriorityQueue.toSortedArray() -> Vec<int>
 ///
-/// Returns the heap contents sorted ascending (pop-order). The
-/// receiver is undisturbed — sorting happens on a fresh `Vec<i64>`
-/// clone, not on `Arc::make_mut`.
+/// V3-S5 ckpt-5-prime²a SURFACE-AND-STOP (2026-05-15). Same cascade-break
+/// shape as `v2_to_array` — pre-deletion built a fresh `TypedArrayData
+/// ::I64` from `pq.to_sorted_vec()`. Same rebuild target = per-T v2-raw
+/// `*mut TypedArray<i64>` flat-struct construction (cluster-2 / ckpt-6).
 pub fn v2_to_sorted_array(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
@@ -184,10 +209,16 @@ pub fn v2_to_sorted_array(
             "PriorityQueue.toSortedArray() takes no arguments",
         ));
     }
-    let pq = as_priority_queue(&args[0])?;
-    let buf = Arc::new(TypedBuffer::from_vec(pq.to_sorted_vec()));
-    let arr = Arc::new(TypedArrayData::I64(buf));
-    Ok(KindedSlot::from_typed_array(arr))
+    let _pq = as_priority_queue(&args[0])?;
+    Err(VMError::NotImplemented(
+        "PriorityQueue.toSortedArray: SURFACE — V3-S5 ckpt-5-prime²a \
+         consumer-cascade. The deleted typed-array-data I64 `Arc<Buf<i64>>` payload + \
+         `KindedSlot::from_typed_array` DELETED at V3-S5 ckpt-1..ckpt-4. \
+         Rebuild = per-T v2-raw `*mut TypedArray<i64>` flat-struct \
+         construction (cluster-2 / ckpt-6 territory). REFUSED ON SIGHT: \
+         resurrection under any rename (Refusal #1)."
+            .to_string(),
+    ))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
