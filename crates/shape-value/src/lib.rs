@@ -32,7 +32,13 @@ pub mod string_intern;
 pub mod shape_graph;
 pub mod shape_graph_current;
 pub mod slot;
-pub mod typed_buffer;
+// Phase 3 cluster-0+1 V3-S5 ckpt-4 (2026-05-15): `pub mod typed_buffer;`
+// deleted. The `TypedBuffer<T>` + `AlignedTypedBuffer` wrapper layer is
+// retired wholesale per W12-typed-array-data-deletion-audit §B
+// (audit §1.1 deletion targets) + ADR-006 §2.7.24 Q25.A SUPERSEDED. The
+// canonical replacement is the v2-raw `TypedArray<T>` flat struct at
+// `crate::v2::typed_array::TypedArray<T>` (per `docs/runtime-v2-spec.md`).
+// Refusal #1 binding: do not resurrect under any rename/shim/bridge.
 pub mod v2;
 pub mod value;
 pub mod vm_closure_handle;
@@ -45,7 +51,10 @@ pub use content::{
 pub use context::{ErrorLocation, LocatedVMError, VMError};
 pub use datatable::{ColumnPtrs, DataTable, DataTableBuilder};
 pub use heap_header::{FLAG_MARKED, FLAG_PINNED, FLAG_READONLY, HeapHeader};
-pub use heap_value::{HeapKind, HeapValue, TableViewData, TemporalData, TypedArrayData, TypedObjectStorage};
+// V3-S5 ckpt-4 (2026-05-15): `TypedArrayData` removed from re-exports.
+// The enum was deleted at ckpt-1 (heap_value.rs); this re-export was
+// cascade-broken at the same time. Remaining re-exports stay intact.
+pub use heap_value::{HeapKind, HeapValue, TableViewData, TemporalData, TypedObjectStorage};
 pub use ids::{FunctionId, SchemaId, StackSlotIdx, StringId};
 pub use iterator_state::{IteratorSource, IteratorState, IteratorTransform};
 pub use kinded_slot::KindedSlot;
@@ -62,7 +71,15 @@ pub use shape_graph_current::{
     with_async_shape_table_scope,
 };
 pub use slot::ValueSlot;
-pub use typed_buffer::{AlignedTypedBuffer, TypedBuffer};
+// V3-S5 ckpt-4 (2026-05-15): `pub use typed_buffer::{AlignedTypedBuffer,
+// TypedBuffer};` deleted alongside `typed_buffer.rs` itself per
+// W12-typed-array-data-deletion-audit §B + ADR-006 §2.7.24 Q25.A SUPERSEDED.
+// The wrapper layer is retired wholesale; remaining consumers (marshal.rs
+// FromSlot/ToSlot impls for `Arc<AlignedTypedBuffer>` / `Arc<TypedBuffer<i64>>`,
+// the ~10 intrinsic typed-fn registration sites in
+// `crates/shape-runtime/src/intrinsics/*.rs`) cascade-break for ckpt-5 +
+// downstream wave pickup. Refusal #1 binding: no re-introduction under
+// any rename/shim/bridge.
 pub use value::{
     ErasureError, ErasureType, FilterLiteral, FilterNode, FilterOp, RewriteResult, ThunkSignature,
     TypeInfo, VTable, VTableEntry, VTableEntryFlags, WrapTarget,

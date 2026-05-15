@@ -39,10 +39,17 @@
 use super::concrete_type::{ClosureTypeId, ConcreteType};
 use super::struct_layout::{FieldInfo, FieldKind};
 use crate::heap_value::{
+    // V3-S5 ckpt-4 (2026-05-15): `TypedArrayData` import deleted — the
+    // enum was retired at ckpt-1 per W12-typed-array-data-deletion-audit
+    // §3.5 + ADR-006 §2.7.24 Q25.A SUPERSEDED. The
+    // `HeapKind::TypedArray` arm at line ~378 (drop dispatch) is
+    // 4-table-lockstep territory deferred to V3-S5 ckpt-5 — it stays
+    // cascade-broken at this checkpoint per multi-session chain step 2
+    // (broken state OK on feature branch).
     AtomicData, ChannelData, DequeData, HashMapData, HashSetData, HeapKind, HeapValue,
     IoHandleData, LazyData, MatrixData, MatrixSliceData, MutexData, NativeViewData,
     PriorityQueueData, RangeData, TableViewData, TaskGroupData, TemporalData,
-    TraitObjectStorage, TypedArrayData, TypedObjectStorage,
+    TraitObjectStorage, TypedObjectStorage,
 };
 use crate::native_kind::NativeKind;
 use std::collections::HashMap;

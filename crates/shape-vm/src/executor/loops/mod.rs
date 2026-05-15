@@ -49,11 +49,30 @@ use crate::{
 };
 use crate::executor::vm_impl::stack::drop_with_kind;
 use shape_value::datatable::DataTable;
-use shape_value::heap_value::{
-    HashMapKindedRef, HeapKind, TableViewData, TypedArrayData,
-};
+// V3-S5 ckpt-4 (2026-05-15): `TypedArrayData` import deleted — the enum
+// was retired at ckpt-1 per W12-typed-array-data-deletion-audit §3.5 +
+// ADR-006 §2.7.24 Q25.A SUPERSEDED. Per-arm dispatch in op_iter_done /
+// op_iter_next replaced with structured surface-and-stop via the shared
+// `ckpt4_surface` builder below (ckpt-3 precedent: `ckpt3_surface` at
+// array_ops.rs / typed_array_methods.rs / iterator_methods.rs et al.).
+use shape_value::heap_value::{HashMapKindedRef, HeapKind, TableViewData};
 use shape_value::{NativeKind, VMError};
 use std::sync::Arc;
+
+/// Shared surface-and-stop builder for the V3-S5 ckpt-4 wholesale rewrite.
+#[cold]
+fn ckpt4_surface(op: &str, detail: &str) -> VMError {
+    VMError::NotImplemented(format!(
+        "{op} SURFACE (V3-S5 ckpt-4 wholesale rewrite, 2026-05-15): \
+         {detail}. The `TypedArrayData` enum + `TypedBuffer<T>` / \
+         `AlignedTypedBuffer` wrapper layer were retired wholesale at \
+         V3-S5 ckpt-1..ckpt-4 per W12-typed-array-data-deletion-audit \
+         §3.5 + §B + ADR-006 §2.7.24 Q25.A SUPERSEDED; the per-arm \
+         dispatch graph has no discriminator until the v2-raw \
+         `TypedArray<T>` per-element-kind rebuild lands in a downstream \
+         wave. Refusal #1 binding."
+    ))
+}
 
 /// Decode the loop iterator-protocol index from its kinded slot.
 ///
@@ -85,32 +104,13 @@ fn decode_iter_idx(bits: u64, kind: NativeKind) -> Result<i64, VMError> {
     }
 }
 
-/// `len()` for every `TypedArrayData` variant. Centralized so
-/// `op_iter_done` doesn't duplicate the per-arm match.
-#[inline]
-fn typed_array_data_len(arr: &TypedArrayData) -> usize {
-    match arr {
-        TypedArrayData::I64(a) => a.len(),
-        TypedArrayData::F64(a) => a.len(),
-        TypedArrayData::Bool(a) => a.len(),
-        TypedArrayData::I8(a) => a.len(),
-        TypedArrayData::I16(a) => a.len(),
-        TypedArrayData::I32(a) => a.len(),
-        TypedArrayData::U8(a) => a.len(),
-        TypedArrayData::U16(a) => a.len(),
-        TypedArrayData::U32(a) => a.len(),
-        TypedArrayData::U64(a) => a.len(),
-        TypedArrayData::F32(a) => a.len(),
-        TypedArrayData::String(a) => a.len(),
-        // ADR-006 §2.7.22 amendment (Round 18 S3): Matrix / FloatSlice
-        // exit `TypedArrayData`.
-        // W17-typed-carrier-bundle-A Q25.A specialized arms.
-        TypedArrayData::Decimal(b) => b.len(),
-        TypedArrayData::BigInt(b) => b.len(),
-        TypedArrayData::Char(b) => b.len(),
-        TypedArrayData::TypedObject(b) => b.len(),
-    }
-}
+// V3-S5 ckpt-4 (2026-05-15): `typed_array_data_len` 22-arm helper DELETED
+// in lockstep with the `TypedArrayData` enum + `TypedBuffer<T>` wrapper
+// layer. W12-typed-array-data-deletion-audit §3.5/§B + ADR-006 §2.7.24
+// Q25.A SUPERSEDED. The op_iter_done `Ptr(HeapKind::TypedArray)` arm
+// surface-and-stops via `ckpt4_surface` (helper defined above near the
+// `use` block) pending the downstream-wave v2-raw `TypedArray<T>`
+// per-element-kind rebuild.
 
 impl VirtualMachine {
     #[inline(always)]
@@ -235,18 +235,22 @@ impl VirtualMachine {
         // concrete payload. The slot's share retires via the
         // `drop_with_kind` at the bottom of the function.
         let done_result: Result<bool, VMError> = match iter_kind {
+            // V3-S5 ckpt-4 (2026-05-15): `Ptr(HeapKind::TypedArray)` arm
+            // body replaced with surface-and-stop via `ckpt4_surface`. The
+            // `Arc::<TypedArrayData>::from_raw` reconstruction is no
+            // longer constructible (the enum + `typed_array_data_len`
+            // 22-arm helper were retired at ckpt-1 + ckpt-4 wholesale
+            // deletion). Refcount discipline: the slot's share retires
+            // via `drop_with_kind` at the bottom of the function. The
+            // v2-raw `TypedArray<T>` per-element-kind rebuild reinstates
+            // typed-array iteration via parallel `Ptr(HeapKind::
+            // TypedArrayF64)` / `Ptr(HeapKind::TypedArrayI64)` arms
+            // (downstream wave).
             NativeKind::Ptr(HeapKind::TypedArray) => {
-                // SAFETY: per the §2.7.13 / §2.7.16 typed-Arc dispatch
-                // contract on `KindedSlot::from_typed_array`, slot bits
-                // labeled `Ptr(HeapKind::TypedArray)` are
-                // `Arc::into_raw(Arc<TypedArrayData>)` and the slot owns
-                // one strong-count share. Reconstruct, read len, restore.
-                let arc = unsafe {
-                    Arc::<TypedArrayData>::from_raw(iter_bits as *const TypedArrayData)
-                };
-                let len = typed_array_data_len(arc.as_ref());
-                let _ = Arc::into_raw(arc);
-                Ok(idx < 0 || idx as usize >= len)
+                Err(ckpt4_surface(
+                    "op_iter_done",
+                    "iteration over legacy Arc<TypedArrayData> carrier",
+                ))
             }
             NativeKind::Ptr(HeapKind::String) | NativeKind::String => {
                 // SAFETY: per `KindedSlot::from_string_arc` / `String`
@@ -456,15 +460,18 @@ impl VirtualMachine {
         // as `op_iter_done`). Each arm borrows the inner `Arc<T>` via
         // `Arc::from_raw::<T>(bits)` + `Arc::into_raw(arc)` restore.
         let push_result: Result<(), VMError> = match iter_kind {
+            // V3-S5 ckpt-4 (2026-05-15): `Ptr(HeapKind::TypedArray)` arm
+            // body replaced with surface-and-stop. The previous
+            // `push_typed_array_element` 22-arm helper (deleted below in
+            // this same hunk) read the inner `Arc<TypedArrayData>` and
+            // dispatched per-element-kind. With the enum + wrapper layer
+            // retired wholesale, that dispatch graph has no discriminator.
             NativeKind::Ptr(HeapKind::TypedArray) => {
-                // SAFETY: per `KindedSlot::from_typed_array` contract, slot
-                // bits are `Arc::into_raw(Arc<TypedArrayData>)`.
-                let arc = unsafe {
-                    Arc::<TypedArrayData>::from_raw(iter_bits as *const TypedArrayData)
-                };
-                let result = Self::push_typed_array_element(self, arc.as_ref(), idx);
-                let _ = Arc::into_raw(arc);
-                result
+                let _ = idx; // kept for symmetry with surfaced arms
+                Err(ckpt4_surface(
+                    "op_iter_next",
+                    "iteration over legacy Arc<TypedArrayData> carrier",
+                ))
             }
             NativeKind::Ptr(HeapKind::String) | NativeKind::String => {
                 // SAFETY: slot bits are `Arc::into_raw(Arc<String>)`.
@@ -538,255 +545,34 @@ impl VirtualMachine {
         push_result
     }
 
-    /// Push the `idx`-th element of a `TypedArrayData` with the matching
-    /// element `NativeKind`. Out-of-range → `(0, NativeKind::Bool)` None
-    /// sentinel per §2.7 (Drop-safe).
-    ///
-    /// Element-kind sourcing per the matched arm follows playbook §2:
-    /// loop iteration value kind from iterator's element FieldType,
-    /// captured per element from the runtime `TypedArrayData::*` arm.
-    #[inline]
-    fn push_typed_array_element(
-        vm: &mut VirtualMachine,
-        arr: &TypedArrayData,
-        idx: i64,
-    ) -> Result<(), VMError> {
-        if idx < 0 {
-            return vm.push_kinded(Self::NONE_BITS, NativeKind::Bool);
-        }
-        let u = idx as usize;
-        match arr {
-            TypedArrayData::I64(a) => match a.get(u) {
-                Some(&v) => vm.push_kinded(v as u64, NativeKind::Int64),
-                None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
-            },
-            TypedArrayData::I8(a) => match a.get(u) {
-                Some(&v) => vm.push_kinded(v as i64 as u64, NativeKind::Int64),
-                None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
-            },
-            TypedArrayData::I16(a) => match a.get(u) {
-                Some(&v) => vm.push_kinded(v as i64 as u64, NativeKind::Int64),
-                None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
-            },
-            TypedArrayData::I32(a) => match a.get(u) {
-                Some(&v) => vm.push_kinded(v as i64 as u64, NativeKind::Int64),
-                None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
-            },
-            TypedArrayData::U8(a) => match a.get(u) {
-                Some(&v) => vm.push_kinded(v as u64, NativeKind::Int64),
-                None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
-            },
-            TypedArrayData::U16(a) => match a.get(u) {
-                Some(&v) => vm.push_kinded(v as u64, NativeKind::Int64),
-                None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
-            },
-            TypedArrayData::U32(a) => match a.get(u) {
-                Some(&v) => vm.push_kinded(v as u64, NativeKind::Int64),
-                None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
-            },
-            TypedArrayData::U64(a) => match a.get(u) {
-                Some(&v) => vm.push_kinded(v, NativeKind::Int64),
-                None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
-            },
-            TypedArrayData::F64(a) => match a.get(u) {
-                Some(&v) => vm.push_kinded(v.to_bits(), NativeKind::Float64),
-                None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
-            },
-            TypedArrayData::F32(a) => match a.get(u) {
-                Some(&v) => vm.push_kinded((v as f64).to_bits(), NativeKind::Float64),
-                None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
-            },
-            // ADR-006 §2.7.22 amendment (Round 18 S3): Matrix / FloatSlice
-            // exit `TypedArrayData`. Iterating over Matrix / MatrixSlice
-            // values routes via dedicated HeapKind-level for-loop
-            // dispatch, not through this typed-array path.
-            TypedArrayData::Bool(a) => match a.get(u) {
-                Some(&v) => vm.push_kinded((v != 0) as u64, NativeKind::Bool),
-                None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
-            },
-            TypedArrayData::String(a) => match a.get(u) {
-                Some(arc_str) => {
-                    // SAFETY: `a` is alive (we hold `arr_arc` for the duration
-                    // of the match; `arc_str` borrows from it). We bump the
-                    // inner `Arc<String>` strong-count so the pushed share
-                    // outlives the iterator's share that retires on
-                    // `drop_with_kind` after this push.
-                    unsafe {
-                        std::sync::Arc::increment_strong_count(
-                            std::sync::Arc::as_ptr(arc_str),
-                        );
-                    }
-                    let bits = std::sync::Arc::as_ptr(arc_str) as u64;
-                    vm.push_kinded(bits, NativeKind::String)
-                }
-                None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
-            },
-            // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
-            // Bump the element Arc share before push so the carrier owns
-            // an independent strong-count that retires via drop_with_kind.
-            TypedArrayData::Decimal(a) => match a.get(u) {
-                Some(arc) => {
-                    let bits = std::sync::Arc::into_raw(std::sync::Arc::clone(arc)) as u64;
-                    vm.push_kinded(bits, NativeKind::Ptr(shape_value::heap_value::HeapKind::Decimal))
-                }
-                None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
-            },
-            TypedArrayData::BigInt(a) => match a.get(u) {
-                Some(arc) => {
-                    let bits = std::sync::Arc::into_raw(std::sync::Arc::clone(arc)) as u64;
-                    vm.push_kinded(bits, NativeKind::Ptr(shape_value::heap_value::HeapKind::BigInt))
-                }
-                None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
-            },
-            TypedArrayData::Char(a) => match a.get(u) {
-                Some(&c) => vm.push_kinded(c as u32 as u64, NativeKind::Ptr(shape_value::heap_value::HeapKind::Char)),
-                None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
-            },
-            // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): inner
-            // is `TypedObjectPtr`. Clone bumps v2-raw refcount; into_raw
-            // moves the share to the slot bits.
-            TypedArrayData::TypedObject(a) => match a.get(u) {
-                Some(ptr) => {
-                    let bits = ptr.clone().into_raw() as u64;
-                    vm.push_kinded(bits, NativeKind::Ptr(shape_value::heap_value::HeapKind::TypedObject))
-                }
-                None => vm.push_kinded(Self::NONE_BITS, NativeKind::Bool),
-            },
-        }
-    }
+    // V3-S5 ckpt-4 (2026-05-15): `push_typed_array_element` 22-arm helper
+    // (deleted in this hunk) was the per-element-kind dispatch shell that
+    // op_iter_next called for `Ptr(HeapKind::TypedArray)` iter_kind. With
+    // the `TypedArrayData` enum + `TypedBuffer<T>` wrapper layer retired
+    // wholesale at V3-S5 ckpt-1..ckpt-4 (W12-typed-array-data-deletion-
+    // audit §3.5/§B + ADR-006 §2.7.24 Q25.A SUPERSEDED), the per-arm
+    // discriminator is gone. The 22-arm body (I64/F64/Bool/I8/I16/I32/U8/
+    // U16/U32/U64/F32/String/Decimal/BigInt/Char/TypedObject) is deleted
+    // wholesale here; reinstatement comes through the downstream-wave
+    // v2-raw `TypedArray<T>` per-element-kind rebuild via parallel
+    // `Ptr(HeapKind::TypedArrayF64)` / `Ptr(HeapKind::TypedArrayI64)` /
+    // etc. arms. Refusal #1 binding.
+
+    /// Sentinel for "no element" in the iterator-protocol element-push
+    /// path. Bool-kind 0. Preserved for downstream-wave reuse.
+    #[allow(dead_code)]
+    const NONE_BITS: u64 = 0;
 }
 
-#[cfg(test)]
-mod tests {
-    //! W17-iterator-reference-rebuild regression tests.
-    //!
-    //! Pin the per-kind typed-Arc projection in `op_iter_done` /
-    //! `op_iter_next` so the wrong-type `as_heap_value()` recovery doesn't
-    //! creep back. The killer case is `TypedArrayData::TypedObject`: its
-    //! discriminant (ordinal 20 inside `TypedArrayData`) aliases
-    //! `HeapValue::Reference` (ordinal 20 inside `HeapValue`), so a stale
-    //! `as_heap_value()` cast surfaces "iter_kind=Ptr(TypedArray) but heap
-    //! arm is Reference" at every `for entry in m.entries()`.
-
-    use crate::executor::{VMConfig, VirtualMachine};
-    use shape_value::heap_value::{
-        HeapKind, TypedArrayData, TypedObjectStorage,
-    };
-    use shape_value::typed_buffer::TypedBuffer;
-    use shape_value::NativeKind;
-    use std::sync::Arc;
-
-    /// Build a `TypedArrayData::TypedObject` carrying `n` empty
-    /// `TypedObjectStorage` entries — the post-bundle-A shape produced by
-    /// `HashMap.entries()` / `Array.zip()` / `IteratorTransform::Enumerate`.
-    fn build_typed_object_array(n: usize) -> Arc<TypedArrayData> {
-        // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): variant flipped
-        // to `Arc<TypedBuffer<TypedObjectPtr>>`. Each `_new` returns a raw
-        // pointer with refcount=1 (transferred to the wrapping
-        // TypedObjectPtr).
-        use shape_value::heap_value::TypedObjectPtr;
-        let entries: Vec<TypedObjectPtr> = (0..n)
-            .map(|_| {
-                // Zero-slot TypedObject — schema_id is irrelevant for the
-                // iteration-protocol tests; the iterator only reads
-                // `TypedBuffer::len()` and clones the per-element pointer.
-                let ptr = TypedObjectStorage::_new(
-                    0,
-                    Box::new([]) as Box<[_]>,
-                    0,
-                    Arc::from(Vec::<NativeKind>::new()),
-                );
-                TypedObjectPtr::new(ptr)
-            })
-            .collect();
-        Arc::new(TypedArrayData::TypedObject(Arc::new(
-            TypedBuffer::from_vec(entries),
-        )))
-    }
-
-    #[inline]
-    fn push_kinded(vm: &mut VirtualMachine, bits: u64, kind: NativeKind) {
-        vm.push_kinded(bits, kind).unwrap();
-    }
-
-    #[inline]
-    fn pop_bool(vm: &mut VirtualMachine) -> bool {
-        let (bits, kind) = vm.pop_kinded().unwrap();
-        assert_eq!(
-            kind,
-            NativeKind::Bool,
-            "expected Bool on top-of-stack, got {:?}",
-            kind
-        );
-        bits != 0
-    }
-
-    /// `op_iter_done` on a `TypedArrayData::TypedObject` carrier must NOT
-    /// trip the "heap arm is Reference" surface. Pre-W17-iterator-reference-
-    /// rebuild this failed with that exact error message at every
-    /// `for entry in m.entries()` iteration.
-    #[test]
-    fn test_iter_done_typed_object_array_in_bounds() {
-        let arr = build_typed_object_array(3);
-        let bits = Arc::into_raw(arr) as u64;
-
-        let mut vm = VirtualMachine::new(VMConfig::default());
-        push_kinded(&mut vm, bits, NativeKind::Ptr(HeapKind::TypedArray));
-        push_kinded(&mut vm, 0, NativeKind::Int64);
-
-        vm.op_iter_done()
-            .expect("op_iter_done on TypedObject array should succeed");
-        assert!(
-            !pop_bool(&mut vm),
-            "idx=0 over 3-element TypedObject array should not be done"
-        );
-    }
-
-    /// `op_iter_done` on a TypedObject carrier must report done at the
-    /// length boundary (no panic, no spurious Reference surface).
-    #[test]
-    fn test_iter_done_typed_object_array_at_end() {
-        let arr = build_typed_object_array(3);
-        let bits = Arc::into_raw(arr) as u64;
-
-        let mut vm = VirtualMachine::new(VMConfig::default());
-        push_kinded(&mut vm, bits, NativeKind::Ptr(HeapKind::TypedArray));
-        push_kinded(&mut vm, 3, NativeKind::Int64);
-
-        vm.op_iter_done()
-            .expect("op_iter_done on TypedObject array should succeed");
-        assert!(
-            pop_bool(&mut vm),
-            "idx=3 over 3-element TypedObject array should be done"
-        );
-    }
-
-    /// `op_iter_next` on a TypedObject carrier must push the matching
-    /// `TypedObject` element with kind `Ptr(HeapKind::TypedObject)` —
-    /// not surface as "heap arm is Reference".
-    #[test]
-    fn test_iter_next_typed_object_array_pushes_element() {
-        let arr = build_typed_object_array(3);
-        let bits = Arc::into_raw(arr) as u64;
-
-        let mut vm = VirtualMachine::new(VMConfig::default());
-        push_kinded(&mut vm, bits, NativeKind::Ptr(HeapKind::TypedArray));
-        push_kinded(&mut vm, 1, NativeKind::Int64);
-
-        vm.op_iter_next()
-            .expect("op_iter_next on TypedObject array should succeed");
-        let (elem_bits, elem_kind) = vm.pop_kinded().unwrap();
-        assert_eq!(
-            elem_kind,
-            NativeKind::Ptr(HeapKind::TypedObject),
-            "TypedObject array element should push as Ptr(TypedObject)"
-        );
-        // Retire the element share — the iter_next pushed an
-        // Arc::into_raw(Arc<TypedObjectStorage>) bump.
-        unsafe {
-            Arc::<TypedObjectStorage>::decrement_strong_count(
-                elem_bits as *const TypedObjectStorage,
-            );
-        }
-    }
-}
+// V3-S5 ckpt-4 (2026-05-15): unit tests over the deleted
+// `build_typed_object_array` fixture + `TypedArrayData::TypedObject`
+// per-arm iter_done/iter_next pinning DELETED in lockstep with the
+// `TypedArrayData` enum + `TypedBuffer<T>` wrapper layer. The
+// W17-iterator-reference-rebuild regression target (the "heap arm is
+// Reference" surface when ordinal 20 of TypedArrayData aliased ordinal
+// 20 of HeapValue::Reference) is preserved in spirit at the
+// downstream-wave v2-raw per-element-kind rebuild's smoke-test layer;
+// pre-rebuild, no fixture is materializable (the wholesale-deleted
+// `Arc<TypedBuffer<TypedObjectPtr>>` payload was the only way to
+// construct the killer-case shape pre-V3-S5). W12 audit §3.5/§B +
+// ADR-006 §2.7.24 Q25.A SUPERSEDED + Refusal #1 binding.

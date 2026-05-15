@@ -8,9 +8,17 @@
 //! - typed handles (datatable, content, instant, io-handle, native scalars),
 //! - typed object slots (`TypedObject` with `Box<[ValueSlot]>`),
 //! - the typed-closure-raw block (`ClosureRaw`),
-//! - typed array buckets (`TypedArrayData`),
 //! - typed temporal data (`TemporalData`),
 //! - typed table views (`TableViewData`).
+//!
+//! V3-S5 ckpt-1..ckpt-4 (2026-05-15): the inline `TypedArrayData` enum +
+//! the outer `HeapValue::TypedArray(Arc<TypedArrayData>)` arm +
+//! `TypedBuffer<T>` / `AlignedTypedBuffer` wrapper layer were retired
+//! wholesale per W12-typed-array-data-deletion-audit §3.5 + §B + ADR-006
+//! §2.7.24 Q25.A SUPERSEDED. The canonical replacement is the v2-raw
+//! `TypedArray<T>` flat struct at `crate::v2::typed_array::TypedArray<T>`
+//! (per `docs/runtime-v2-spec.md`). The `HeapKind::TypedArray = 8`
+//! ordinal is vacated; do not reuse.
 //!
 //! Variants that previously held `ValueWord` (the deleted dynamic word) —
 //! `Some`/`Ok`/`Err`/`Range`/`TraitObject`/`FunctionRef`,
@@ -4115,7 +4123,12 @@ impl Clone for HeapValue {
             // closure block + one Arc bump on the shared layout.
             HeapValue::ClosureRaw(v) => HeapValue::ClosureRaw(v.clone()),
             HeapValue::TaskGroup(v) => HeapValue::TaskGroup(Arc::clone(v)),
-            HeapValue::TypedArray(v) => HeapValue::TypedArray(Arc::clone(v)),
+            // V3-S5 ckpt-4 (2026-05-15): `HeapValue::TypedArray(v) =>
+            // HeapValue::TypedArray(Arc::clone(v))` clone arm DELETED in
+            // lockstep with the variant + the `TypedArrayData` enum
+            // (ckpt-1) + `TypedBuffer<T>` / `AlignedTypedBuffer` wrapper
+            // layer (ckpt-4). W12 audit §3.5/§B + ADR-006 §2.7.24 Q25.A
+            // SUPERSEDED. Refusal #1 binding.
             HeapValue::Temporal(v) => HeapValue::Temporal(Arc::clone(v)),
             HeapValue::TableView(v) => HeapValue::TableView(Arc::clone(v)),
             // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): payload is now
@@ -4325,7 +4338,10 @@ impl fmt::Display for HeapValue {
                 v.layout.name,
                 v.ptr
             ),
-            HeapValue::TypedArray(ta) => write!(f, "{}", ta),
+            // V3-S5 ckpt-4 (2026-05-15): `HeapValue::TypedArray(ta) =>
+            // write!(f, "{}", ta)` Display arm DELETED in lockstep with the
+            // variant + the `TypedArrayData` Display impl (ckpt-1). W12
+            // audit §3.5/§B + ADR-006 §2.7.24 Q25.A SUPERSEDED.
             HeapValue::HashMap(kref) => {
                 // Wave 2 Round 3b C2-joint ckpt-3 (2026-05-14): full per-V
                 // entry dump. Walks `*mut TypedArray<*const StringObj>`
@@ -4579,9 +4595,16 @@ impl HeapValue {
             (HeapValue::IoHandle(a), HeapValue::IoHandle(b)) => {
                 std::sync::Arc::ptr_eq(&a.resource, &b.resource)
             }
-            (HeapValue::TypedArray(a), HeapValue::TypedArray(b)) => {
-                typed_array_structural_eq(a.as_ref(), b.as_ref())
-            }
+            // V3-S5 ckpt-4 (2026-05-15): `(HeapValue::TypedArray(...), ...)`
+            // structural-eq arm DELETED. The `HeapValue::TypedArray` outer
+            // arm was retired in lockstep with this ckpt-4 +
+            // `typed_array_structural_eq` was deleted at V3-S5 ckpt-1
+            // (heap_value.rs wholesale deletion per W12 audit §3.5 + ADR-006
+            // §2.7.24 Q25.A SUPERSEDED). Per-arm TypedArrayData structural
+            // equality dispatch retires with the enum; no replacement (the
+            // v2-raw `TypedArray<T>` flat struct compares element-wise via
+            // its own `==` impl, not through `HeapValue::structural_eq`).
+            // Refusal #1 binding.
             // ADR-006 §2.7.22 amendment (Round 18 S3, 2026-05-13): Matrix
             // equality is structural (rows + cols + element-wise compare);
             // MatrixSlice equality is element-wise over the projection slice
@@ -4681,9 +4704,11 @@ impl HeapValue {
             },
             (HeapValue::NativeScalar(a), HeapValue::NativeScalar(b)) => a == b,
             (HeapValue::NativeView(a), HeapValue::NativeView(b)) => native_view_eq(a, b),
-            (HeapValue::TypedArray(a), HeapValue::TypedArray(b)) => {
-                typed_array_structural_eq(a.as_ref(), b.as_ref())
-            }
+            // V3-S5 ckpt-4 (2026-05-15): `(HeapValue::TypedArray(...), ...)`
+            // equals arm DELETED in lockstep with the structural_eq arm
+            // above + the outer `HeapValue::TypedArray` variant +
+            // `typed_array_structural_eq` (ckpt-1). W12 audit §3.5 +
+            // ADR-006 §2.7.24 Q25.A SUPERSEDED. Refusal #1 binding.
             // ADR-006 §2.7.22 amendment (Round 18 S3, 2026-05-13): Matrix
             // and MatrixSlice equality match the structural_eq shape above.
             (HeapValue::Matrix(a), HeapValue::Matrix(b)) => matrix_eq(a, b),

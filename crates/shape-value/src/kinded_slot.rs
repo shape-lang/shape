@@ -40,11 +40,19 @@
 //! See `docs/adr/006-value-and-memory-model.md` §2.7.
 
 // ADR-006 §2.7
+// V3-S5 ckpt-4 (2026-05-15): `TypedArrayData` import deleted — the enum
+// was retired at ckpt-1 per W12-typed-array-data-deletion-audit §3.5 +
+// ADR-006 §2.7.24 Q25.A SUPERSEDED. `from_typed_array(Arc<TypedArrayData>)`
+// convenience constructor deleted in lockstep below. The 4-table-lockstep
+// dispatch arms for `HeapKind::TypedArray` in this file's clone/drop
+// dispatch tables (lines ~690 / ~1045 pre-edit) stay until V3-S5 ckpt-5
+// per supervisor 2026-05-15 partition (ckpt-5 territory: 4-table lockstep
+// deletion + U64 relabel + A1 fold).
 use crate::heap_value::{
     AtomicData, ChannelData, DequeData, HashMapData, HashSetData, HeapKind, HeapValue,
     IoHandleData, LazyData, MatrixData, MatrixSliceData, MutexData, NativeViewData, OptionData,
     PriorityQueueData, RangeData, ResultData, TableViewData, TaskGroupData, TemporalData,
-    TraitObjectStorage, TypedArrayData, TypedObjectStorage,
+    TraitObjectStorage, TypedObjectStorage,
 };
 use crate::iterator_state::IteratorState;
 use crate::native_kind::NativeKind;
@@ -140,14 +148,14 @@ impl KindedSlot {
         )
     }
 
-    /// Convenience: a `Ptr(HeapKind::TypedArray)`-kind slot.
-    #[inline]
-    pub fn from_typed_array(a: Arc<TypedArrayData>) -> Self {
-        Self::new(
-            ValueSlot::from_typed_array(a),
-            NativeKind::Ptr(HeapKind::TypedArray),
-        )
-    }
+    // V3-S5 ckpt-4 (2026-05-15): `from_typed_array(a: Arc<TypedArrayData>)`
+    // DELETED in lockstep with the `TypedArrayData` enum + `TypedBuffer<T>` /
+    // `AlignedTypedBuffer` wrapper layer + `ValueSlot::from_typed_array`
+    // constructor. W12-typed-array-data-deletion-audit §3.5 + §B +
+    // ADR-006 §2.7.24 Q25.A SUPERSEDED. Replacement (downstream wave):
+    // per-element-kind convenience constructors —
+    // `from_typed_array_f64(Arc<TypedArray<f64>>)` /
+    // `from_typed_array_i64(...)` / etc. Refusal #1 binding.
 
     /// Convenience: a `Ptr(HeapKind::HashMap)`-kind slot.
     ///

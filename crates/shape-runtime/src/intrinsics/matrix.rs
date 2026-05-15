@@ -286,15 +286,24 @@ fn matrix_data_to_heap_value_vec(mat: &MatrixData) -> Vec<Arc<HeapValue>> {
     matrix_to_heap_value_vec(mat.data.as_slice(), mat.rows as usize, mat.cols as usize)
 }
 
-// Forward-consistency hooks reserved for ckpt-4 row-carrier migration land —
-// the `AlignedVec`/`AlignedTypedBuffer` imports above remain because the v2-raw
-// `TypedArray<f64>` producer wraps an `AlignedVec<f64>` per `crates/shape-value
-// /src/v2/typed_array.rs:F64` monomorphization. Without an active row-carrier
-// production path during V3-S5 ckpt-2 these imports look unused; the
-// `#[allow(dead_code)]` const below pins them for the duration of the chain.
-#[allow(dead_code)]
-fn _ckpt4_carrier_pin() -> AlignedTypedBuffer {
-    // Holds the `AlignedTypedBuffer` import name alive until the row-rebuild
-    // path's ckpt-4 v2-raw migration restores its live use site.
-    AlignedTypedBuffer::from(AlignedVec::<f64>::new())
-}
+// V3-S5 ckpt-4 (2026-05-15): the `_ckpt4_carrier_pin` dead-code marker
+// introduced by V3-S5 ckpt-2 to hold the `AlignedTypedBuffer` import name
+// alive across the chain is DELETED. `typed_buffer.rs` (the file defining
+// `AlignedTypedBuffer`) is itself deleted at ckpt-4 per W12-typed-array-
+// data-deletion-audit §B + ADR-006 §2.7.24 Q25.A SUPERSEDED — pinning a
+// deleted type makes no sense.
+//
+// The four `register_typed_fn_2::<_, _, Arc<AlignedTypedBuffer>>` /
+// `register_typed_fn_1::<_, Arc<AlignedTypedBuffer>>` registrations
+// earlier in this file (matmul_vec at line 51 and the wider intrinsics
+// fleet at statistical.rs / math.rs / fft.rs / array_transforms.rs /
+// convolution.rs / distributions.rs / rolling.rs / recurrence.rs /
+// vector.rs) cascade-break with the typed_buffer.rs deletion. Their
+// resolution is V3-S5 ckpt-5 + downstream-wave territory (per
+// supervisor 2026-05-15 partition; the dispatch-territory list for
+// ckpt-5 names marshal.rs / wire_conversion.rs / json_value.rs cascade
+// pickup, which contains the `FromSlot<Arc<AlignedTypedBuffer>>` /
+// `ToSlot<Arc<AlignedTypedBuffer>>` impls that route the intrinsics'
+// typed-marshal contract).
+//
+// Refusal #1 binding: no resurrection under any rename/shim/bridge.

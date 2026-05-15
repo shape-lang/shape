@@ -29,7 +29,16 @@
 //! (the same shape as the §2.7.9 FilterExpr / §2.7.12 SharedCell /
 //! §2.7.13 Reference precedents).
 
-use crate::heap_value::{HashMapKindedRef, HeapValue, TypedArrayData};
+// V3-S5 ckpt-4 (2026-05-15): `TypedArrayData` import deleted — the enum
+// was retired at V3-S5 ckpt-1 per W12-typed-array-data-deletion-audit §3.5
+// + ADR-006 §2.7.24 Q25.A SUPERSEDED. `IteratorSource::Array(Arc<
+// TypedArrayData>)` variant deleted in lockstep; iterator pipelines over
+// typed-array receivers cascade-break for v2-raw `TypedArray<T>` rebuild
+// in a downstream wave (the `IteratorSource::Array` carrier needs a
+// per-element-kind redesign — the typed-Arc payload Q25.A SUPERSEDED
+// pattern produces `Arc<TypedArray<f64>>` / `Arc<TypedArray<i64>>` /
+// etc., not a single `Arc<T>` enum carrier).
+use crate::heap_value::{HashMapKindedRef, HeapValue};
 use std::sync::Arc;
 
 /// Source backing a lazy iterator pipeline. Each variant holds a typed
@@ -44,11 +53,16 @@ use std::sync::Arc;
 /// future-proof against the §2.3 / Q8 cardinality constraints).
 #[derive(Debug, Clone)]
 pub enum IteratorSource {
-    /// Iteration over a typed-array receiver. The `Arc<TypedArrayData>`
-    /// keeps the receiver alive for the iterator's lifetime; per-element
-    /// reads dispatch on the inner `TypedArrayData` variant via the
-    /// existing `element_kinded` helper at the call site.
-    Array(Arc<TypedArrayData>),
+    // V3-S5 ckpt-4 (2026-05-15): `Array(Arc<TypedArrayData>)` variant
+    // DELETED. The `TypedArrayData` enum + wrapper layer
+    // (`TypedBuffer<T>`/`AlignedTypedBuffer`) are retired wholesale at
+    // ckpt-1..ckpt-4 per W12-typed-array-data-deletion-audit §3.5 + §B
+    // + ADR-006 §2.7.24 Q25.A SUPERSEDED. Iterator pipelines over typed-
+    // array receivers cascade-break here; the v2-raw `TypedArray<T>`
+    // rebuild produces per-element-kind `Arc<TypedArray<f64>>` /
+    // `Arc<TypedArray<i64>>` payloads (not a single-Arc enum), so the
+    // replacement is per-element-kind variants whose design is
+    // downstream-wave territory. Refusal #1 binding.
 
     /// Iteration over a string receiver (per-codepoint).
     String(Arc<String>),
@@ -77,7 +91,8 @@ impl IteratorSource {
     #[inline]
     pub fn len(&self) -> usize {
         match self {
-            IteratorSource::Array(arr) => typed_array_len(arr),
+            // V3-S5 ckpt-4: `IteratorSource::Array(...)` arm deleted in
+            // lockstep with the variant.
             IteratorSource::String(s) => s.chars().count(),
             IteratorSource::Range { start, end, step } => {
                 if *step <= 0 || *end <= *start {
@@ -92,34 +107,13 @@ impl IteratorSource {
     }
 }
 
-/// Per-variant element count for `TypedArrayData`. Mirrors
-/// `executor/objects/array_transform.rs::typed_array_len` (kept module-local
-/// here so the iterator-state crate doesn't depend on shape-vm).
-#[inline]
-fn typed_array_len(arr: &TypedArrayData) -> usize {
-    match arr {
-        TypedArrayData::I64(b) => b.data.len(),
-        TypedArrayData::F64(b) => b.data.len(),
-        TypedArrayData::Bool(b) => b.data.len(),
-        TypedArrayData::I8(b) => b.data.len(),
-        TypedArrayData::I16(b) => b.data.len(),
-        TypedArrayData::I32(b) => b.data.len(),
-        TypedArrayData::U8(b) => b.data.len(),
-        TypedArrayData::U16(b) => b.data.len(),
-        TypedArrayData::U32(b) => b.data.len(),
-        TypedArrayData::U64(b) => b.data.len(),
-        TypedArrayData::F32(b) => b.data.len(),
-        TypedArrayData::String(b) => b.data.len(),
-        // W17-typed-carrier-bundle-A commit 1/4 (2026-05-11): new
-        // §2.7.24 Q25.A specialized arms — element count via the
-        // inner typed-buffer's len(). No construction site for these
-        // arms on this branch yet; commit 2 wires writers in.
-        TypedArrayData::Decimal(b) => b.data.len(),
-        TypedArrayData::BigInt(b) => b.data.len(),
-        TypedArrayData::Char(b) => b.data.len(),
-        TypedArrayData::TypedObject(b) => b.data.len(),
-    }
-}
+// V3-S5 ckpt-4 (2026-05-15): the module-local `typed_array_len` helper is
+// DELETED in lockstep with the `IteratorSource::Array` variant + the
+// `TypedArrayData` enum (ckpt-1) + `TypedBuffer<T>` wrapper layer
+// (ckpt-4). W12-typed-array-data-deletion-audit §3.5 + ADR-006 §2.7.24
+// Q25.A SUPERSEDED. Replacement (downstream wave): per-element-kind
+// `Arc<TypedArray<T>>` source variants whose len() reads the v2-raw
+// flat-struct `len` field directly.
 
 /// Lazy transform stage in an iterator pipeline. Each closure-bearing
 /// variant stores the callback as `Arc<HeapValue>` per ADR-006 §2.3 /
@@ -215,17 +209,15 @@ impl Clone for IteratorState {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::typed_buffer::TypedBuffer;
-    use std::sync::Arc;
+    //! V3-S5 ckpt-4 (2026-05-15): tests over `IteratorSource::Array(Arc<
+    //! TypedArrayData>)` DELETED in lockstep with the variant + the
+    //! `TypedArrayData` enum (ckpt-1) + `TypedBuffer<T>` wrapper layer
+    //! (ckpt-4). W12-typed-array-data-deletion-audit §3.5/§B + ADR-006
+    //! §2.7.24 Q25.A SUPERSEDED. The String / Range / HashMap source
+    //! tests below are preserved — they don't touch the deleted carrier.
 
-    #[test]
-    fn iterator_source_array_len() {
-        let buf = Arc::new(TypedBuffer::from_vec(vec![1i64, 2, 3, 4, 5]));
-        let arr = Arc::new(TypedArrayData::I64(buf));
-        let src = IteratorSource::Array(arr);
-        assert_eq!(src.len(), 5);
-    }
+    use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn iterator_source_string_len_codepoints() {
@@ -246,28 +238,5 @@ mod tests {
     fn iterator_source_range_empty_on_zero_step() {
         let src = IteratorSource::Range { start: 0, end: 10, step: 0 };
         assert_eq!(src.len(), 0);
-    }
-
-    #[test]
-    fn iterator_state_with_transform_appends() {
-        let buf = Arc::new(TypedBuffer::from_vec(vec![1i64, 2, 3]));
-        let src = IteratorSource::Array(Arc::new(TypedArrayData::I64(buf)));
-        let s0 = IteratorState::new(src);
-        assert_eq!(s0.transforms.len(), 0);
-        let s1 = s0.with_transform(IteratorTransform::Take(2));
-        assert_eq!(s1.transforms.len(), 1);
-        assert_eq!(s0.transforms.len(), 0); // s0 unchanged
-        let s2 = s1.with_transform(IteratorTransform::Skip(1));
-        assert_eq!(s2.transforms.len(), 2);
-    }
-
-    #[test]
-    fn iterator_state_clone_preserves_cursor() {
-        let buf = Arc::new(TypedBuffer::from_vec(vec![1i64, 2, 3]));
-        let src = IteratorSource::Array(Arc::new(TypedArrayData::I64(buf)));
-        let mut s = IteratorState::new(src);
-        s.cursor = 7;
-        let s2 = s.clone();
-        assert_eq!(s2.cursor, 7);
     }
 }

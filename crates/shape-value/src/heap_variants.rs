@@ -67,7 +67,26 @@ macro_rules! define_heap_types {
             DataTable,     // 5
             Future,        // 6
             TaskGroup,     // 7
-            TypedArray,    // 8
+            TypedArray,    // 8  (VACATED: V3-S5 ckpt-1..ckpt-4 (2026-05-15)
+                           //      retired the `TypedArrayData` enum + outer
+                           //      `HeapValue::TypedArray(Arc<TypedArrayData>)`
+                           //      arm + `TypedBuffer<T>` / `AlignedTypedBuffer`
+                           //      wrapper layer per W12-typed-array-data-
+                           //      deletion-audit §3.5/§3.6/§B + ADR-006
+                           //      §2.7.24 Q25.A SUPERSEDED. Ordinal 8 is
+                           //      vacated; per audit §3.6 deprecation cadence
+                           //      + handover §0 ordinal-collision rule, the
+                           //      ordinal MUST NOT be reassigned to a new
+                           //      HeapKind variant — avoids grep-history
+                           //      confusion across future agent dispatch.
+                           //      The variant identifier itself stays in the
+                           //      enum until V3-S5 ckpt-5 deletes the
+                           //      4-table-lockstep dispatch arms (clone_with_kind
+                           //      / drop_with_kind / SharedCell::drop /
+                           //      TypedObjectStorage::drop_fields) and the
+                           //      identifier finally retires. Refusal #1
+                           //      binding: do not reintroduce under any
+                           //      rename/shim/bridge.
             Temporal,      // 9
             TableView,     // 10
             Content,       // 11
@@ -468,12 +487,23 @@ macro_rules! define_heap_types {
             // are now `tg.kind` / `tg.task_ids` (Phase 1.B caller migration).
             TaskGroup(std::sync::Arc<$crate::heap_value::TaskGroupData>),
             // ===== Consolidated wrapper variants =====
-            // ADR-006 §2.3: the inline `TypedArrayData` enum migrated to
-            // `Arc<TypedArrayData>`. Each `TypedArrayData` arm already
-            // carries an `Arc<TypedBuffer<T>>` so the outer Arc is a thin
-            // refcount over the discriminant + inner buffer Arc — single
-            // pointer payload, single atomic clone.
-            TypedArray(std::sync::Arc<$crate::heap_value::TypedArrayData>),
+            // V3-S5 ckpt-4 (2026-05-15): `TypedArray(Arc<TypedArrayData>)`
+            // arm DELETED. The inner `TypedArrayData` enum was retired at
+            // V3-S5 ckpt-1 (heap_value.rs:2877-3052 wholesale deletion per
+            // W12-typed-array-data-deletion-audit §3.5 / §B + ADR-006
+            // §2.7.24 Q25.A SUPERSEDED). With no inner payload to wrap,
+            // the outer `HeapValue::TypedArray(...)` arm is now orphan and
+            // is deleted in lockstep. The `HeapKind::TypedArray = 8`
+            // ordinal becomes a "vacated ordinal" comment marker (see the
+            // HeapKind table earlier in this file). 4-table-lockstep
+            // dispatch arms for `HeapKind::TypedArray` (clone_with_kind /
+            // drop_with_kind / SharedCell::drop /
+            // TypedObjectStorage::drop_fields) are deleted at V3-S5 ckpt-5
+            // territory per supervisor 2026-05-15 partition.
+            //
+            // Refusal #1 binding: do not resurrect this arm under any
+            // rename/shim/bridge — see CLAUDE.md "Forbidden code" +
+            // "Renames to refuse on sight" broader-family regex.
             // ADR-006 §2.3: `TemporalData` enum was inline (size = largest
             // variant ≈ 32 bytes including `Box`'s overhead). `Arc` reduces
             // the slot payload to a single pointer.
@@ -750,7 +780,12 @@ macro_rules! define_heap_types {
                     HeapValue::TypedObject(..) => HeapKind::TypedObject,
                     HeapValue::ClosureRaw(..) => HeapKind::Closure,
                     HeapValue::TaskGroup(..) => HeapKind::TaskGroup,
-                    HeapValue::TypedArray(..) => HeapKind::TypedArray,
+                    // V3-S5 ckpt-4: `HeapValue::TypedArray(..)` kind arm
+                    // deleted in lockstep with the variant + the
+                    // TypedArrayData enum (ckpt-1) + wrapper layer (ckpt-4).
+                    // `HeapKind::TypedArray = 8` ordinal is vacated (see
+                    // ordinal table above) but the identifier stays until
+                    // ckpt-5 4-table-lockstep deletion.
                     HeapValue::Temporal(..) => HeapKind::Temporal,
                     HeapValue::TableView(..) => HeapKind::TableView,
                     HeapValue::HashMap(..) => HeapKind::HashMap,
@@ -792,7 +827,9 @@ macro_rules! define_heap_types {
                     HeapValue::TypedObject(s) => !s.slots.is_empty(),
                     HeapValue::ClosureRaw(..) => true,
                     HeapValue::TaskGroup(..) => true,
-                    HeapValue::TypedArray(ta) => ta.is_truthy(),
+                    // V3-S5 ckpt-4: `HeapValue::TypedArray(ta) => ta.is_truthy()`
+                    // arm deleted in lockstep with the variant + the
+                    // `TypedArrayData::is_truthy` impl (ckpt-1 wholesale deletion).
                     HeapValue::Temporal(td) => td.is_truthy(),
                     HeapValue::TableView(tv) => tv.is_truthy(),
                     HeapValue::HashMap(d) => !d.is_empty(),
@@ -881,7 +918,9 @@ macro_rules! define_heap_types {
                     HeapValue::TypedObject(..) => "object",
                     HeapValue::ClosureRaw(..) => "closure",
                     HeapValue::TaskGroup(..) => "task_group",
-                    HeapValue::TypedArray(ta) => ta.type_name(),
+                    // V3-S5 ckpt-4: `HeapValue::TypedArray(ta) => ta.type_name()`
+                    // arm deleted in lockstep with the variant + the
+                    // `TypedArrayData::type_name` impl (ckpt-1 wholesale deletion).
                     HeapValue::Temporal(td) => td.type_name(),
                     HeapValue::TableView(tv) => tv.type_name(),
                     HeapValue::HashMap(_) => "hashmap",
