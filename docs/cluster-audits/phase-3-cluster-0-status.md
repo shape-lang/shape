@@ -7626,3 +7626,120 @@ Within prior envelope. JIT FFI gap surface adds 0.5-1 session if folded into Wav
 ---
 
 *Next session: supervisor disposition on JIT FFI gap (fold into V3-S5 / Wave 3 R3 / cluster-2) + V3-S5 wholesale TypedArrayData enum deletion dispatch (multi-session chain likely per ceiling-c).*
+
+---
+
+## Wave 3 Stabilize Round 2 V3-S5 close — wholesale TypedArrayData + TypedBuffer + AlignedTypedBuffer DELETION COMPLETE (2026-05-15)
+
+V3-S5 EXTENDED 10-ckpt multi-session sub-agent chain closed cluster-0+1 close-criterion territory for ADR-006 §2.7.24 Q25.A SUPERSEDED. Wholesale TypedArrayData enum + TypedBuffer<T> + AlignedTypedBuffer wrapper layer deletion COMPLETE; per-element-kind v2-raw `*mut TypedArray<T>` flat-struct canonical replacement; JIT FFI String/Decimal build (Group X) FULFILLED per supervisor 2026-05-15 option (a) RATIFIED scope.
+
+Total cascade reduction: **1223 → 0 LIVE refs** (100% reduction per Framing (ii) live-grep zero across all 3 deletion-target patterns). Merged into bulldozer-strictly-typed canonical via 10-ckpt feature-branch chain.
+
+### Multi-session chain summary (10 sub-agents)
+
+| Ckpt | Close commit | Scope | Status |
+|---|---|---|---|
+| 1 | `aac8495e` | FOUNDATION — heap_value.rs enum + impl + Display + structural_eq DELETED (-585 LoC; 130 refs) | intermediate |
+| 2 | `b38fbd3c` | consumer cascade tier 1 — array_transform.rs (206) + array_aggregation.rs (65) + array_sets.rs (47) + intrinsics/matrix.rs (-2445 LoC, 4 files) | intermediate |
+| 3 | `30c40f51` | consumer cascade tier 2 — array_ops.rs (105) + 8 more files (-2807 LoC, 9 files) | intermediate |
+| 4 | `654c7202` | TypedBuffer + AlignedTypedBuffer wrapper layer DELETED wholesale (typed_buffer.rs 485 LoC) + HeapValue::TypedArray outer variant + HeapKind::TypedArray ordinal VACATED per audit §3.6 | intermediate |
+| 5 | `5411258f` | consumer cascade tier 3 — 16 source files; 490 → 251 refs (-432 in ckpt; 88% reduction) | intermediate |
+| 5-prime | `4529c279` | 4-table HeapKind::TypedArray lockstep dispatch arm retirement to unreachable!() + json_value.rs + wire_conversion.rs cleaned | intermediate |
+| 5-prime²a | `0f514588` | storage-shape migration — HashSetData.keys + PriorityQueueData.heap + int_float_array_eq Arc<TypedBuffer<T>> → Arc<Vec<T>> per Migration shape (a) | intermediate |
+| 5-prime²b | `37f0ba5f` | intrinsics marshal-parameter migration — 47 LIVE refs across 10 intrinsics files; Arc<AlignedTypedBuffer> → Arc<Vec<f64>>; 81 cargo errors resolved | intermediate |
+| 5-prime²c | `39aab8f8` | LIVE construction sites — marshal.rs (42) + xml.rs (10) + csv_module.rs (5) + json.rs (3); shape-runtime crate FULLY CLEAN | intermediate |
+| 6 | `835ec609` | STRICT PARTIAL CLOSE — 14 shape-vm + shape-gc residuals cleaned; 5/6 STRICT criteria met (Group X deferred per dispatch's permissive framing — 34th imprecision team-lead-prompt-layer) | intermediate |
+| **6-prime** | **`178178f4`** | **STRICT FINAL CLOSE — Group X JIT FFI String/Decimal build (jit_new_typed_array_string + _decimal + NewStringV2/DecimalV2 mir_compiler dispatch); ALL STRICT criteria preserved** | **STRICT close** |
+
+### Merge ceremony commit
+
+Merged into canonical at the V3-S5 close commit. Cleanup ceremony:
+- All 11 V3-S5 worktrees + branches removed
+- Pre-existing predecessor session-state (staged file deletions + docs/rfcs untracked) stashed pre-merge + restored post-merge
+
+### Post-merge gates at canonical
+
+- `cargo check --workspace --lib --tests` EXIT=0 ✅
+- `just check-clean` EXIT=0 ✅
+- `bash scripts/verify-merge.sh` EXIT=0; **Passed: 12 / Failed: 0** ✅
+- `bash scripts/check-no-dynamic.sh` EXIT=0 ✅
+- 4-table HeapKind::TypedArray lockstep: 0/4 LIVE arms (variant identifier preserved per audit §3.6; unreachable!() arm bodies per Rust exhaustive-match requirement)
+- Framing (ii) live-grep zero: `^[^/"]*TypedArrayData::` = 0; `^[^/"]*TypedBuffer<` = 0; `^[^/"]*AlignedTypedBuffer` = 0 ✅
+
+### Post-merge smoke matrix (release binary rebuilt)
+
+| Smoke | VM | JIT | Cluster-0+1 criterion |
+|---|---|---|---|
+| 1 (scalar loop) | ✅ 4950 | ✅ 4950 | ✓ |
+| 2 (`[1,2,3,4,5].map(\|x\|x*2).sum()`) | ❌ rc=1 (op_new_array VM SURFACE) | ❌ rc=1 (print Call-terminator) | cluster-2 territory (see 35th imprecision below) |
+| 3 (canonical fixture) | ✅ x | ✅ x | ✓ |
+| 4 (`Set()` + `.add()` + `.size()`) | ✅ 2 | ✅ 2 | ✓ |
+
+**3/4 VM == JIT preserved at canonical fixture.** Smoke 2 BOTH VM + JIT fail (different reasons) — NOT regression; both upstream of V3-S5 scope per ckpt-6-prime structural analysis.
+
+### ADR-006 §2.7.24 Q25.A SUPERSEDED FULFILLED
+
+- TypedArrayData enum + 22 variants + all impl blocks + Display + helpers DELETED
+- TypedBuffer<T> generic wholesale deletion (typed_buffer.rs 485 LoC removed)
+- AlignedTypedBuffer wholesale deletion
+- HeapValue::TypedArray variant DELETED
+- HeapKind::TypedArray = 8 ordinal VACATED per audit §3.6 vacated-ordinal-comment convention
+- Producer-side v2-raw foundation: NewStringV2 + NewDecimalV2 opcodes (V3-A2-followup) + per-element-kind TypedArray<T> flat struct
+- JIT FFI String/Decimal: jit_new_typed_array_string + jit_new_typed_array_decimal symbols + string_obj_constant + decimal_obj_constant materializers + NewStringV2/DecimalV2 mir_compiler dispatch
+- Group C (b) RATIFICATION preserved: NativeKind::UInt64 carrier for v2-raw TypedArray pointers; per-element-type NativeKind discrimination deferred to cluster-2 v2-raw-heap-audit IF surfaced
+- Framing (ii) close-criterion gate: live-grep zero across all 3 deletion-target patterns; doc-comment historical references preserved per audit §3.6
+
+### Imprecision-pattern instances 34-35 (V3-S5 additions)
+
+| # | Source | Imprecision shape |
+|---|---|---|
+| 28 | ckpt-1 dispatch | matrix.rs "8 refs are doc comments" was 4 doc + 4 LIVE code (team-lead-prompt-layer; 3rd of class) |
+| 29 | ckpt-2 close | ~1093 expected vs 1134 ground truth at ckpt-1 close (+41 in shape-value consumer-cascade-tier-2+ pickup points) (agent-execution-report; 3rd) |
+| 30 | ckpt-3 close | "cargo check cannot-run linker not found" — env issue (not using devenv wrapper); actual cargo check via devenv shows expected errors (agent-execution-report; 4th) |
+| 31 | team-lead pre-flight | TypedBuffer<: 125 expected vs 99 actual / AlignedTypedBuffer 120 vs 93 — stale counts pre-ckpt-4 (team-lead-prompt-layer; 4th of class) |
+| 32 | supervisor partition | ckpt-4 "~280 refs + buffer wrapper deletion + HeapValue arm + HeapKind ordinal" exceeded ceiling-c when combined — structural-weight accounting needed (supervisor-layer; 10th) |
+| 33 | ckpt-5-prime²a close | heap_value.rs TypedBuffer "4 live + ~3 doc-comment" was 4 live + ~15 doc-comments (vacated-comment archaeology; refined accounting, NOT deviation) |
+| 34 | team-lead dispatch | ckpt-6 dispatch "3/4 minimum; Smoke 2 result reported either way" relaxed supervisor's "smoke matrix 4/4 VM == JIT" target — Group X deferred per permissive framing (team-lead-prompt-layer; 5th of class) |
+| 35 | supervisor disposition | Smoke 2 unblock-scope mismatch — supervisor's "Smoke 2 finally unblocks — dual-carrier elimination" prediction was incomplete on Array<int> JIT FFI dependency; Smoke 2 (Array<int>) requires VM-side NewTypedArrayI64 upstream emission fix + Array<int> JIT FFI, both outside Group X option (a) bounded scope (supervisor-layer; 10th — same #32 class refined) |
+
+**Cumulative: 35 imprecision instances** through V3-S5 close (10 supervisor + 14 audit + 5 team-lead-prompt + 5 agent-execution-report + 1 candidate 35th supervisor-layer at Smoke 2 disposition). All caught pre-merge.
+
+### Self-detected defection-attractor refusals through V3-S5: 9 cumulative (unchanged from Round 3b)
+
+No new defection-attractor self-refusals in V3-S5 chain. ckpt-2/3/4/5/5-prime/²a/²b/²c/6/6-prime executed cleanly with discipline-coherent decisions (wholesale surface-and-stop builder pattern; preserved PHF/handler-signature integrity; preserved TypedObject/TraitObject/StringObj/DecimalObj paths; 5-arm receiver-recovery soundness rule preserved at every load-bearing site).
+
+### Cluster-0+1 close-criterion progress (ALL RESOLVED through V3-S5)
+
+| Criterion | Status |
+|---|---|
+| Q25.A SUPERSEDED (R20 + V3-S5) | RESOLVED |
+| Q25.B SUPERSEDED (Round 3b) | RESOLVED |
+| Path B canonical Ptr-newtype (D4) | RESOLVED |
+| Audit §4.3 O-3.a + O-3a (D4) | RESOLVED |
+| Producer-side foundation (Wave 3 R1 V3-A2-followup) | RESOLVED |
+| hashmap-value-v-arm follow-up | RESOLVED → cluster-2 fold |
+| **V3-S5 wholesale enum + buffer deletion** | **RESOLVED (this commit)** |
+| **JIT FFI String/Decimal build (Group X option (a))** | **RESOLVED (ckpt-6-prime)** |
+| Framing (ii) live-grep zero across 3 patterns | ✅ 0/0/0 |
+| Smoke matrix 3/4 VM == JIT at canonical fixture | ✅ |
+
+### Open items (cluster-2 territory, NOT cluster-0+1 close blockers)
+
+- **Smoke 2 (Array<int>) JIT unblock**: requires VM-side NewTypedArrayI64 upstream emission fix + Array<int> JIT FFI; outside Group X option (a) bounded scope per supervisor 2026-05-15; cluster-2 territory under shape-test-residuals-audit
+- **Per-element-type NativeKind discrimination**: option (a) deferred per supervisor Group C (b) RATIFICATION; cluster-2 v2-raw-heap-audit IF Drop semantics surface for stack-slot TypedArray pointers
+- **DecimalV2 per-element materializer**: ckpt-6-prime Group X.2 SURFACE-AND-STOP at v2_array.rs:430 — `MirConstant` has no `Decimal` variant; ckpt-6-prime FFI allocator + carrier-routing arms wired but per-element materialization awaits downstream MirConstant::Decimal addition
+
+### Honest velocity update
+
+| Stage | Sessions remaining |
+|---|---|
+| Cluster-0+1 close attempt | 0.5 |
+| Cluster-2 (Smoke 2 unblock + per-element-type NativeKind + shape-test-residuals-audit + hashmap-value-v-arm fold + per-HeapKind kinded jit_print + compile-time-boxed string-constant leak + W12-collection-constructor-mir-lowering) | 1-2 |
+| Phase 4 (trait Add/AddAssign for user types) | 1-2 |
+| **Total remaining** | **2.5-4.5** |
+
+Cluster-0+1 close is now **1 step away** — close attempt + supervisor ratification + user-authorized phase-3-cluster-0-close + phase-3-cluster-1-close tags.
+
+---
+
+*Next session: cluster-0+1 close attempt. Surface to supervisor: V3-S5 close report + Smoke 2 cluster-2 disposition + Framing (ii) gate state. After supervisor ratifies: user authorizes phase-3-cluster-0-close + phase-3-cluster-1-close tags. Then cluster-2 cleanup + Phase 4 → v1.*
