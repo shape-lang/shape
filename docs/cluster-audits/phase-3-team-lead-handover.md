@@ -1,9 +1,9 @@
-# Phase 3 cluster-0 — Team-lead handover (R20-complete → bulldozer-cadence seam)
+# Phase 3 cluster-0+1 — Team-lead handover (D4-complete → Round-3b seam)
 
-**Generated:** 2026-05-14.
-**Successor handoff point:** R20 complete (γ + S2-prime-production audit-only-close merged; supervisor R20 dispositions ratified; **cadence shifted from audit-first to bulldozer-wave per strategic-owner authorization 2026-05-14**). New team-lead's first action: dispatch **Wave 1 single-audit-day** per the bulldozer plan in §In-flight state. Surface A (kickoff-prompt-vs-fixture mismatch) is the one user-pending disposition; Wave 1 maps all three options A/B/C as audit deliverables — does not block dispatch.
-**Predecessor team-lead session:** rotated at the R20-complete seam (synchronous rotation; predecessor ceremony = S2-prime-production audit-only merge + status doc R20 close + 5 handover-doc annotations).
-**Supervisor session:** see `docs/cluster-audits/phase-3-supervisor-handover.md` for supervisor-side state. Cadence-shift authorization is the load-bearing update.
+**Generated:** 2026-05-14 (cadence-shift rotation); updated 2026-05-14 (D4-complete rotation).
+**Successor handoff point:** D4 multi-session chain complete (PATH B atomic landing merged at `bulldozer-strictly-typed @ 8a87ddd7`; Audit §4.3 Obstacles O-3.a + O-3a RESOLVED; smoke matrix 3/4 VM == JIT at canonical fixture). New team-lead's first action: dispatch **Round 3b C2-joint** (HashMapData<V> per-V monomorphization; ~5k LoC / 40 files single atomic commit; likely multi-session chain per ceiling-c). See §In-flight state for full territory + dispatch shape.
+**Predecessor team-lead session:** rotated at the D4-complete seam (context exhaustion at 97% post-D4-merge; supervisor absorbed handover doc updates).
+**Supervisor session:** see `docs/cluster-audits/phase-3-supervisor-handover.md` for supervisor-side state.
 
 ## Your role this session
 
@@ -390,42 +390,120 @@ git -C /home/dev/dev/shape-lang/shape worktree add \
 
 Run cargo / verify-merge.sh via `devenv shell --quiet -- bash -c "cd <worktree-path> && <command>"` from `/home/dev/dev/shape-lang/`.
 
-## In-flight state at handover
+## In-flight state at handover — D4-complete → Round-3b seam (2026-05-14)
 
-**Predecessor team-lead ceremony OWED (execute as your first action after docs + confirmation):**
+**Current HEAD:** `bulldozer-strictly-typed @ 8a87ddd7` — D4 multi-session chain complete; PATH B atomic landing merged; Audit §4.3 Obstacles O-3.a + O-3a RESOLVED.
 
-The predecessor team-lead held on S2-prime-production merge pending Surface A/B/C/D disposition. Surface B (merge) was RATIFIED standalone in the R20 supervisor relay; the hold was over-cautious. You inherit the merge-RATIFIED state and execute the ceremony directly.
+**Smoke matrix at HEAD `8a87ddd7`:**
 
-1. **S2-prime-production audit-only merge** at `10cd1a56` → bulldozer-strictly-typed (RATIFIED by supervisor R20). Take-both for AGENTS.md row + dispatch-table arms as needed.
-2. **R20 status-doc close commit** with: γ merge subsection + S2-prime-production audit-only merge subsection + post-R20 smoke matrix + cadence-shift authorization annotation.
-3. **5 handover-doc + status-doc annotations:**
-   - 5th supervisor-/audit-layer imprecision pattern instance (kickoff-prompt-vs-fixture mismatch caught at γ agent-execution layer)
-   - 2 pre-existing hashmap_mutation test failures (`insert_overwrite_releases_old_value_share` + `remove_releases_value_share` asserting `Arc::strong_count == 2` observe 1; tracked under Q25.A-unfinished-producer-side cleanup)
-   - Smoke 4 kickoff-prompt typo `HashSet()` → `Set()` (held from R18/R19)
-   - Char audit-doc bucket clarification (held from R18/R19; may already be landed at R19 S1.5 close — verify)
-   - **NEW: cadence-shift authorization annotation** (strategic-owner 2026-05-14: bulldozer cadence replaces audit-first for remaining cluster-0+1 deletion targets; preserve discipline verbatim + add refusal #10 to refuse-on-sight list)
-4. **Verify HEAD post-ceremony:** smoke matrix VM == JIT for Smokes 1/3/4 (Smoke 2 still gated on Wave 2); `verify-merge.sh` 12/12; `check-no-dynamic.sh` exit 0.
+| Smoke | VM | JIT | Status |
+|---|---|---|---|
+| 1 (scalar loop) | ✅ 4950 | ✅ 4950 | ✓ |
+| 2 (`[1,2,3,4,5].map(\|x\|x*2).sum()`) | ✅ 30 | ❌ rc=1 | gated on S5 + A2-followup-producer-cascade (literal-upgrade) |
+| 3 (canonical fixture `let t = X{}`) | ✅ x | ✅ x | ✓ post-γ |
+| 4 (Set + .add + .size) | ✅ 2 | ✅ 2 | ✓ |
 
-After ceremony lands: surface to supervisor with "predecessor ceremony complete; ready for Wave 1 dispatch authorization" relay. Supervisor ratifies Wave 1 prompt template; team-lead dispatches.
+**3 of 4 VM == JIT at canonical fixture.** Smoke 2 unblocks post-Wave-3 stabilize (S5 wholesale TypedArrayData enum deletion + A2-followup-producer-cascade for Array<string> literal upgrade post-gate-flip).
+
+**Wave 2 closed cumulative (HEAD 8a87ddd7):**
+
+- **Round 1** (6 agents): A1 + B + C + D1 + F + G. ~6.8k LoC. Round 1 surfaced 7 imprecision instances + 8 defection-attractor instances logged. RATIFIED + merged.
+- **Round 2** (4 agents): A2 + D2 + E + C2a. 1 substantive (E) + 3 surface-and-stops (A2/D2 spilled to Round 3a; C2a structurally refused runtime/FFI split → C2-joint Round 3b). 4 imprecision instances. RATIFIED + merged.
+- **Round 3a'** (8 agents: 7 per-handler-family α-η + 1 sequential gate-flip): ~951 LoC migration foundation. S1-R18 DURABLE PATTERN ratified by user (4-criterion test). 4 imprecision instances. RATIFIED + merged.
+- **Round 3a (D4)** (6 sub-agents multi-session chain per bulldozer-multi-session-chain-pattern.md): ckpt-1 + ckpt-2 + ckpt-3 + ckpt-final + ckpt-final-prime + ckpt-final-prime² with PATH B atomic single-commit. ~617 LoC across ~30 source files. ADR-006 §2.3 amendment landed (Path B TypedObjectPtr/TraitObjectPtr canonical pattern + bounded forbidden framings). 5-arm receiver-recovery violation at `executor/builtins/object_ops.rs:59` FIXED inline. 4 imprecision instances (19-22 cumulative through D4). 0 S1-R18 instances during D4 chain. RATIFIED + merged at `8a87ddd7`.
+
+**D4 PATH B canonical pattern (ADR-006 §2.3 amendment landed in `47b55a63` atomic commit):**
+
+- HeapValue::TypedObject(TypedObjectPtr) — `#[repr(transparent)]` newtype around `*const TypedObjectStorage`; manual Drop calling `release_elem → v2_release + Self::_drop`; manual Clone calling `v2_retain`; manual `unsafe impl Send + Sync` (orphan-rule workaround); HeapValue auto-derives Drop/Clone/Send/Sync chain through newtype discipline.
+- HeapValue::TraitObject(TraitObjectPtr) — mirror newtype at v2/trait_object_ptr.rs.
+- TypedArrayData::TypedObject + HashMapValueBuf::TypedObject use the same Ptr-newtype payload.
+- Pattern is CANONICAL for v2-raw HeapHeader-equipped storage types only. Arc<String> (ADR-005 §2 exception) remains canonical for String payload; no "StringPtr" sibling.
+
+**Forbidden (extending CLAUDE.md §Renames to refuse on sight, per supervisor 2026-05-14 ratification):**
+
+- "TypedObjectPtr shim" / "TraitObjectPtr bridge" / "Ptr-newtype helper" / any bridge/probe/helper/hop framing for these newtypes
+- Parallel `Arc<TypedObjectStorage>` / `Arc<TraitObjectStorage>` payloads alongside Ptr-newtype shapes (single canonical payload; refuse parallel-implementation framings)
+- Ptr-newtype siblings for non-HeapHeader-equipped storage types (no "StringPtr"; no "BigIntPtr" until BigInt itself becomes HeapHeader-equipped)
+
+**Cumulative discipline-pattern instances (22 imprecision; 5 S1-R18 durable; 8 parallel-implementation defection):**
+
+- 22 imprecision-pattern instances cumulative (8 supervisor-layer; 14 audit-layer; all caught at agent layer pre-source-change)
+- 5 S1-R18 DURABLE PATTERN instances (Wave 1 audit + D1 drive-by + Round 3a' δ/ε/ζ)
+- 8 parallel-implementation defection-attractor instances (all surfaced + caught + structurally resolved)
 
 **Immediate next actions (in order):**
 
-1. **Read 9 mandatory docs** + post 1-line confirmation.
-2. **Execute predecessor ceremony** (4 items above) → surface to supervisor for Wave 1 dispatch authorization.
-3. **Surface A awaits user disposition.** Supervisor recommendation: (c) split. User decides; team-lead receives the answer via supervisor relay before Wave 2 dispatch. Wave 1 audit-day dispatches WITHOUT waiting for Surface A (Wave 1 maps all three options).
-4. **Dispatch Wave 1 — single audit-day** per the §Wave 1 dispatch shape above. One agent, 1-2 days, comprehensive deletion-inventory audit. Surface to supervisor after agent closes for ratification of Wave 2 partition + ADR amendment shapes.
-5. **After Wave 1 ratifies:** dispatch Wave 2 — parallel bulldoze per Wave 1 (L) partition. 6-8 agents in coordinated dispatch.
-6. **After Wave 2 ratifies:** dispatch Wave 3 — stabilize + cluster-0+1 close attempt.
+1. **Read 9 mandatory docs** + post 1-line confirmation (per §First action).
+2. **Dispatch Round 3b C2-joint** — single atomic ~5k LoC / 40 files commit per C2a structural finding (HashMapData<V> per-V monomorphization runtime + JIT FFI cannot split per type-confusion-window invariant). Likely needs bulldozer-multi-session-chain-pattern.md again per ceiling-c. Territory below.
+3. **After Round 3b closes + merges:** dispatch Wave 3 stabilize. Scope: S5 wholesale TypedArrayData enum deletion + A2-followup-producer-cascade (Array<string> literal upgrade post-gate-flip) + shape-test classification per baseline check (verify pre-Round-3a' baseline async failures pre-existing vs new-regression).
+4. **After Wave 3 stabilize closes:** cluster-0+1 close attempt. Smoke matrix VM == JIT across all 4 canonical fixtures. Surface to supervisor → user authorizes `phase-3-cluster-0-close` + `phase-3-cluster-1-close` tags.
+5. **Then cluster-2 + Phase 4** to v1.
+
+**Round 3b C2-joint dispatch shape (supervisor pre-ratification; team-lead refines for multi-session chain):**
+
+Territory (single atomic ~5k LoC / 40 files):
+- `crates/shape-value/src/heap_value.rs` — HashMapData<V> generic + impl + Drop; HeapValue::HashMap arm signature change Arc<HashMapData> → HashMapKindedRef
+- `crates/shape-value/src/kinded_slot.rs` — HashMapKindedRef carrier construction + Drop + Clone
+- `crates/shape-vm/src/executor/objects/hashmap_methods.rs` — per-V dispatch
+- `crates/shape-vm/src/executor/objects/array_*.rs` — HashMap-aware paths
+- `crates/shape-vm/src/compiler/type_tracking.rs` — HashMap kind tracking
+- `crates/shape-jit/src/ffi/v2/typed_map.rs` — per-V dispatch (maintains raw-bits ABI per §2.7.5)
+- `crates/shape-jit/src/ffi/v2/collection_arc.rs:74-263` — retain/release flip
+- `crates/shape-jit/src/mir_compiler/v2_typed_map.rs` — per-V codegen
+- `crates/shape-jit/src/ffi_refs.rs` — per-V FFI refs
+- All 33 HeapValue::HashMap match sites adapt to per-V monomorphization
+
+Atomic-lockstep invariant: HeapValue::HashMap signature change cascades to JIT FFI's `Arc::decrement_strong_count` at `collection_arc.rs:74-263`; runtime-tier-only flip would leave JIT FFI operating on bits whose layout changed = heap corruption window. Single commit lands ALL of: runtime + JIT FFI + producer sites.
+
+HashMapKindedRef stays within shape-value / shape-runtime / shape-vm internal Rust boundaries per §2.7.5; does NOT leak into extension contract raw-bits ABI.
+
+ADR-006 §Q25.B SUPERSEDED amendment text already landed at C1 close (Round 1 merge). C2-joint commit reaffirms + may refine if implementation detail shifted from C1 audit prediction.
+
+Multi-session chain shape (per bulldozer-multi-session-chain-pattern.md):
+- Feature branch: `bulldozer-strictly-typed-round-3b-c2-joint-checkpoint-N`
+- ckpt-1 sub-agent: HashMapData<V> struct + impl + HashMapKindedRef carrier (foundation; ~50-100 edits)
+- ckpt-2 sub-agent: HeapValue::HashMap arm signature + 33 match sites adaptation (~50-100 edits)
+- ckpt-3 sub-agent: hashmap_methods.rs per-V dispatch + array_*.rs HashMap-aware paths (~50-100 edits)
+- ckpt-4 sub-agent (or ckpt-final): JIT FFI flip (typed_map.rs + collection_arc.rs + mir_compiler + ffi_refs) + STRICT close gate (cargo check PASSES + verify-merge.sh 12/12 + check-no-dynamic + smoke matrix preserved)
+- Team-lead merges feature branch into canonical post-final-sub-agent
+
+Pre-flight territory-enumeration check binding (extended per Round 3a' close): grep cascade at feature branch HEAD; surface site-count ratio in close report; surface-and-stop pre-edit if cascade exceeds enumeration by >2× (21st imprecision precedent).
+
+Dynamic chain authorization per D-α discipline: if any sub-agent surfaces ceiling-c capacity exceeded, dispatch sub-agent-prime continuing from state pointer.
+
+**Wave 3 stabilize scope (after Round 3b closes):**
+
+- **S5 wholesale TypedArrayData enum deletion** — single agent; ~400-site cleanup; close-gate is `grep -rn 'TypedArrayData::' crates/` returning zero hits (TypedObject + TraitObject arms migrated to Ptr-newtype payloads in D4; scalar arms deleted; dead Temporal/Instant arms deleted; U64 relabel-step per Shape D folds in)
+- **A2-followup-producer-cascade** — Array<string> literal upgrade post-gate-flip; LoadConst-to-NewStringV2 transition + bytecode-emission layer adjustments at string-literal handling sites. Unblocks Smoke 2 JIT alongside S5 dual-carrier elimination.
+- **Shape-test baseline classification** — verify pre-Round-3a' baseline async failures (9 in async_concurrency suite + 1 book_doctests) pre-existing vs new-regression via worktree at HEAD `4c7b1d9d`. Pre-existing → fold into cluster-2 `shape-test-residuals-audit`. New-regression → fix in Wave 3 stabilize.
+
+**Honest velocity: 4-7 sessions remaining to v1.**
+
+| Stage | Sessions |
+|---|---|
+| Round 3b C2-joint (multi-session chain; ~5k LoC atomic) | 1-2 |
+| Wave 3 stabilize (S5 + A2-followup-producer-cascade + shape-test classification) | 1-2 |
+| Cluster-0+1 close attempt | 0.5 |
+| Cluster-2 cleanup (per-HeapKind kinded jit_print + compile-time-boxed string-constant leak + W12-collection-constructor-mir-lowering + shape-test-residuals-audit) | 1-2 |
+| Phase 4 (trait Add/AddAssign for user types) | 1-2 |
+| **Total remaining** | **4-7** |
+
+Bulldozer cadence delivering. D4 chain validated multi-session pattern operationally; same shape applies to Round 3b. 22 imprecision instances cumulative; all caught at agent layer pre-source-change. Trust the cadence.
 
 **Pending items already at handover:**
-- ✓ S2-prime-production audit-only close RATIFIED by supervisor
-- ✓ γ merge complete (cluster-0 Smoke 3 criterion met at canonical fixture)
+- ✓ Wave 1 audit-day landed (`bulldozer-wave-1-inventory.md`)
+- ✓ Wave 2 Round 1 + Round 2 + Round 3a' (gate-flip) + Round 3a (D4) all merged
+- ✓ ADR-006 §2.3 amendment landed (D4 Path B Ptr-newtype canonical pattern at lines 301-388)
+- ✓ ADR-006 §Q25.A SUPERSEDED landed at R20 S2-prime (c); §Q25.B SUPERSEDED landed at C1 close; §Q25.C.5 consistency note at D4 close
+- ✓ `bulldozer-multi-session-chain-pattern.md` operational
+- ✓ S1-R18 DURABLE PATTERN ratified by user (4-criterion test; 5 cumulative instances)
+- ✓ Surface A user disposition (c) split — Q25.C TraitObject rebuild = cluster-1.5 follow-up; not blocking cluster-0+1 close
 - ✓ CLAUDE.md compacted (44.9k → 35.6k chars) per user authorization 2026-05-14
-- → R20 status-doc close commit (predecessor team-lead ceremony)
-- → Surface A user disposition (user-pending)
+- ✓ All forbidden-pattern + refuse-on-sight discipline preserved (10 items + #10 anti-deferral + #11 Ptr-newtype-shim refusal extended per D4)
 
-**Pending items beyond Wave 3:**
-- Cluster-2 cleanup: per-HeapKind kinded jit_print + compile-time-boxed string-constant leak + W12-collection-constructor-mir-lowering + 48 shape-test pre-existing failures triage (if not folded into Wave 2)
+**Pending items beyond Wave 3 (cluster-2 + Phase 4):**
+- Q25.C TraitObject rebuild (`dyn T = box(X{})` per kickoff prompt prose; cluster-1.5 per Surface A (c))
+- Cluster-2: per-HeapKind kinded jit_print + compile-time-boxed string-constant leak + W12-collection-constructor-mir-lowering + shape-test-residuals-audit (48 failures triage)
 - Phase 4: trait Add/AddAssign for user types
 - v1 close attempt
 

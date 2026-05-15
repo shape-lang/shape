@@ -87,7 +87,9 @@ Total: 3-4 sessions to cluster-0 + cluster-1 close. v1 trajectory becomes ~6-9 s
 
 ## Current state at handover
 
-**Bulldozer HEAD at rotation:** `bulldozer-strictly-typed @ 14494605` (γ merge only). Predecessor team-lead ceremony OWED at rotation seam: S2-prime-production audit-only merge (RATIFIED by R20 supervisor; branch at `10cd1a56`) + R20 status-doc close commit + 5 annotations including cadence-shift authorization. Predecessor team-lead held on merge pending Surfaces A/B/C/D disposition; that hold was over-cautious (Surface B was RATIFIED standalone). Successor team-lead inherits merge-RATIFIED state and executes ceremony as their first action after reading docs.
+**Bulldozer HEAD:** `bulldozer-strictly-typed @ 8a87ddd7` — D4 multi-session chain complete; PATH B atomic landing merged; Audit §4.3 Obstacles O-3.a + O-3a RESOLVED. Wave 2 cumulative through Round 3a (D4): Round 1 (6 agents) + Round 2 (4 agents) + Round 3a' (8 agents per-handler-family + gate-flip) + Round 3a (D4 6-sub-agent multi-session chain) all merged. Smoke matrix 3/4 VM == JIT at canonical fixture; Smoke 2 gated on Wave 3 stabilize (S5 + A2-followup-producer-cascade).
+
+**Team-lead session rotated at D4-complete seam** (context exhaustion at 97% post-D4-merge; supervisor absorbed handover doc updates; successor team-lead's first action is Round 3b C2-joint dispatch).
 
 **Smoke matrix (canonical kickoff, post-R20):**
 
@@ -110,16 +112,41 @@ Supervisor recommendation: (c) split. User decides; Wave 1 audit-day maps all th
 
 **Cumulative through R20:** ~33+ sub-clusters across 20 rounds; cadence shift converts remainder from N+ audit-first sub-clusters to 3-4 bulldozer waves.
 
-**R20 close summary:**
-- **γ** (`28bd0a7f` → merge `14494605`, LANDED): JITContext.function_names_ptr/_len linking after the function_table linking block; +33 LoC at `crates/shape-jit/src/executor.rs:189-221`. R19 C β filter intercepted TAG_NULL downstream; γ fixed upstream UFCS function-id resolution. Smoke 3 canonical fixture VM == JIT == "x".
-- **S2-prime** (`98d68101`, MERGED): TemporalData variant classification (2 user-facing not 3 — Duration is dead enum variant; 4 of 6 R19-S2-named arms are dead with zero producers) + HeapElement trait ABI (audit §4.1.B option (a)) + Q25.A SUPERSEDED amendment text landed at (c) + 4 ratified `<X>Obj` carrier shapes at (d).
-- **S2-prime-production** (`10cd1a56`, RATIFIED-but-MERGE-OWED): infrastructure-landed-+-producer-migration-surface-and-stop. HeapElement trait + DecimalObj (audit imprecision caught: align-of=4 measured vs audit text =8) + StringObj HeapElement impl + TypedArray::drop_array_heap + HEAP_KIND_V2_DECIMAL=85. 175 v2-tier tests pass. 3 architectural prerequisites surfaced for production migration (now folded into Wave 1 audit-day inventory). Merge ceremony is successor team-lead's first action.
+**Wave 2 close summary (R20 + Wave 1 + Wave 2 Round 1/2/3a'/3a all merged):**
 
-**Wave 1 dispatch (your first authorization):**
+- **R20 γ** (`28bd0a7f` → merge `14494605`): JITContext.function_names_ptr/_len linking. Smoke 3 canonical fixture VM == JIT.
+- **R20 S2-prime / S2-prime-production**: HeapElement trait + DecimalObj + StringObj impl + drop_array_heap; merged at predecessor ceremony.
+- **Wave 1 audit-day** (`bulldozer-wave-1-inventory.md`): A-R sections covering all cluster-0+1 deletion targets; agent partition recommendation.
+- **Wave 2 Round 1** (6 agents A1/B/C/D1/F/G): ~6.8k LoC; 7 imprecision instances; merged.
+- **Wave 2 Round 2** (4 agents A2/D2/E/C2a): E substantive land + 3 surface-and-stops; merged.
+- **Wave 2 Round 3a'** (8 agents per-handler-family α-η + gate-flip): ~951 LoC migration foundation; S1-R18 DURABLE PATTERN ratified by user; merged.
+- **Wave 2 Round 3a (D4)** (6-sub-agent multi-session chain): PATH B atomic landing at `47b55a63`; ADR-006 §2.3 amendment landed (Path B TypedObjectPtr/TraitObjectPtr canonical pattern); 5-arm receiver-recovery violation FIXED inline at `object_ops.rs:59`; merged at `8a87ddd7`. Audit §4.3 Obstacles O-3.a + O-3a RESOLVED.
 
-Single-audit-day comprehensive deletion-inventory per `phase-3-team-lead-handover.md` §Wave 1 dispatch shape. Team-lead dispatches after R20 status-doc close commit lands + your ratification of the Wave 1 prompt template.
+**D4 PATH B canonical Ptr-newtype pattern** (ratified 2026-05-14; ADR-006 §2.3 lines 301-388):
 
-**Velocity:** total handoff-to-v1 ~6-9 sessions under bulldozer cadence (Wave 1 + Wave 2 + Wave 3 + cluster-2 + Phase 4). Was 17-23 sessions under audit-first.
+- `HeapValue::TypedObject(TypedObjectPtr)` — `#[repr(transparent)]` newtype around `*const TypedObjectStorage`; manual Drop/Clone calling `release_elem`/`v2_retain`; manual `unsafe impl Send + Sync`; HeapValue auto-derives chain through newtype.
+- `HeapValue::TraitObject(TraitObjectPtr)` — mirror newtype.
+- CANONICAL for v2-raw HeapHeader-equipped storage types only. Arc<String> remains canonical for String payload (ADR-005 §2 exception); no "StringPtr" sibling.
+
+**Bounded forbidden under D4 (extends §Renames to refuse on sight):**
+
+- "TypedObjectPtr shim" / "TraitObjectPtr bridge" / "Ptr-newtype helper" / any bridge/probe/helper/hop framing for these newtypes
+- Parallel `Arc<TypedObjectStorage>` / `Arc<TraitObjectStorage>` payloads alongside Ptr-newtype shapes
+- Ptr-newtype siblings for non-HeapHeader-equipped storage types
+
+**Cumulative discipline-pattern instances through D4:**
+
+- 22 imprecision-pattern instances cumulative (8 supervisor-layer / 14 audit-layer; all caught at agent layer pre-source-change)
+- 5 S1-R18 DURABLE PATTERN instances (Wave 1 audit + D1 drive-by + Round 3a' δ/ε/ζ); pattern operational per user ratification
+- 8 parallel-implementation defection-attractor instances (all surfaced + structurally resolved)
+
+**Round 3b C2-joint dispatch (your first authorization):**
+
+HashMapData<V> per-V monomorphization atomic single-commit (~5k LoC / 40 files) per C2a structural finding. Cannot split runtime/FFI tiers per type-confusion-window invariant. Likely needs multi-session chain per ceiling-c (mirror D4 pattern). Territory + dispatch shape detailed in `phase-3-team-lead-handover.md §In-flight state`. Team-lead dispatches after successor reads 9 mandatory docs + posts confirmation.
+
+After Round 3b closes: Wave 3 stabilize (S5 wholesale TypedArrayData enum deletion + A2-followup-producer-cascade for Array<string> literal upgrade + shape-test baseline classification) → cluster-0+1 close attempt.
+
+**Velocity:** total handoff-to-v1 4-7 sessions remaining (Round 3b 1-2 + Wave 3 stabilize 1-2 + cluster-0+1 close 0.5 + cluster-2 1-2 + Phase 4 1-2). Was 17-23 sessions at session-start.
 
 ## Discipline rules (load-bearing — refuse on sight)
 
