@@ -19,7 +19,7 @@ use crate::marshal::{register_typed_fn_1, register_typed_fn_2_full};
 use crate::module_exports::{ModuleExports, ModuleParam};
 use crate::type_schema::register_predeclared_any_schema;
 use crate::typed_module_exports::{ConcreteReturn, ConcreteType, TypedReturn};
-use shape_value::heap_value::{HeapValue, TypedArrayData, TypedObjectStorage};
+use shape_value::heap_value::{HeapValue, TypedObjectStorage};
 use shape_value::{NativeKind, ValueSlot};
 use std::sync::Arc;
 
@@ -31,31 +31,29 @@ use std::sync::Arc;
 // alongside its construction call sites.
 
 /// Read a `Vec<Vec<String>>` from a `Vec<Arc<HeapValue>>` whose elements
-/// are each `HeapValue::TypedArray(TypedArrayData::String(...))`. Used by
-/// `csv.stringify` which takes `Array<Array<string>>` as input.
+/// are each the deleted outer typed-array arm.
+///
+/// V3-S5 ckpt-5-prime²c (2026-05-15) SURFACE-AND-STOP: this consumer
+/// pattern-matched `HeapValue::TypedArray(Arc<TypedArrayData>)` to extract
+/// the per-row `Vec<String>`. Both the outer arm and the inner
+/// `TypedArrayData::String` shape are deleted (V3-S5 ckpt-1/ckpt-4/ckpt-5)
+/// — the per-row carrier is now a `*mut TypedArray<*const StringObj>` raw
+/// pointer with no `HeapValue::*` wrapper, so `Vec<Arc<HeapValue>>` cannot
+/// express it. Pairs with the Round 2 `Vec<Arc<HeapValue>>` rewire
+/// follow-up at `marshal.rs:FromSlot<Vec<Arc<HeapValue>>>` and the
+/// `from_typed_array_<T>` constructor wave at `slot.rs:142`.
 fn rows_from_heap_array(
     rows: &[Arc<HeapValue>],
     fn_name: &str,
 ) -> Result<Vec<Vec<String>>, String> {
-    rows.iter()
-        .map(|row_arc| match &**row_arc {
-            HeapValue::TypedArray(arc) => match &**arc {
-                TypedArrayData::String(buf) => {
-                    Ok(buf.data.iter().map(|s| (**s).clone()).collect())
-                }
-                other => Err(format!(
-                    "{}: each row must be Array<string>, got TypedArray::{}",
-                    fn_name,
-                    other.type_name()
-                )),
-            },
-            other => Err(format!(
-                "{}: each row must be Array<string>, got {}",
-                fn_name,
-                other.type_name()
-            )),
-        })
-        .collect()
+    let _ = rows;
+    Err(format!(
+        "{}: V3-S5 ckpt-5-prime²c SURFACE — per-row outer-array-arm \
+         consumer needs Vec<Arc<HeapValue>> rewire for the deleted \
+         outer-array-arm. Round 2 follow-up. ADR-006 §2.7.24 Q25.A \
+         SUPERSEDED.",
+        fn_name
+    ))
 }
 
 /// Create the `csv` module with CSV parsing and serialization functions.
@@ -90,7 +88,7 @@ pub fn create_csv_module() -> ModuleExports {
             // per-record TypedObject dispatch in the meantime.
             Err(format!(
                 "csv.parse(): SURFACE — `Array<Array<string>>` needs a \
-                 `TypedArrayData::TypedArray` nested-array variant in ADR-006 \
+                 nested-array variant in ADR-006 \
                  §2.7.24 Q25.A's spec list. Tracked as \
                  W17-typed-carrier-array-typedarray follow-up (out of \
                  bundle-A-followups scope). Use `csv.parse_records` for \
@@ -172,7 +170,7 @@ pub fn create_csv_module() -> ModuleExports {
             // same nested-TypedArray gap as csv.parse.
             Err(format!(
                 "csv.read_file(): SURFACE — `Array<Array<string>>` needs a \
-                 `TypedArrayData::TypedArray` nested-array variant in ADR-006 \
+                 nested-array variant in ADR-006 \
                  §2.7.24 Q25.A's spec list. Tracked as \
                  W17-typed-carrier-array-typedarray follow-up. ADR-006 §2.7.24 Q25.A."
             ))

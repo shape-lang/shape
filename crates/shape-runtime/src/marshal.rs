@@ -305,286 +305,229 @@ impl ToSlot for Arc<shape_value::heap_value::IoHandleData> {
 
 // ──────────────────── typed-array FromSlot/ToSlot (option β) ─────────────────
 //
-// `Array<int>` / `Array<u8>` slots come in as `Arc<HeapValue>` pointing at
-// `HeapValue::TypedArray(TypedArrayData::*)`. The element-width discrimination
-// is via the body's declared parameter type (`Vec<u8>` vs `Vec<i64>` vs …),
-// not via NativeKind: `NATIVE_KIND` stays `Ptr(HeapKind::TypedArray)` for all
-// element widths. Element-width threading is enforced by the Rust type
-// system at the impl level, with an in-body pattern match that panics on
-// mismatch.
+// V3-S5 ckpt-5-prime²c (2026-05-15): the `HeapValue::TypedArray` outer arm +
+// `TypedArrayData` enum + `TypedBuffer<T>` / `AlignedTypedBuffer` wrapper
+// layer were retired wholesale at V3-S5 ckpt-1..ckpt-5 per
+// `docs/cluster-audits/w12-typed-array-data-deletion-audit.md` §3.5/§3.6 +
+// audit §B + ADR-006 §2.7.24 Q25.A SUPERSEDED. The strict-typed array
+// carrier is now the monomorphic flat-struct `*mut TypedArray<T>` shape per
+// `docs/runtime-v2-spec.md`; slot bits for `NativeKind::Ptr(HeapKind::
+// TypedArray)` are a raw pointer to a `crate::v2::typed_array::TypedArray<T>`
+// for the element-width `T` that the body declares.
 //
-// Per `docs/runtime-v2-spec.md`: "the kind tells you the arm; HeapValue
-// dispatch is a consistency check, not a probe." The `_ => panic!()` arm
-// in each `from_slot` is `debug_assert!`-equivalent — unreachable in a
-// well-typed system. The dispatcher's registration-time arg-kind contract
-// already verified the slot bits decode to a `HeapKind::TypedArray` heap
-// pointer; the variant pattern match verifies the body's declared element
-// type matches the actual `TypedArrayData::*` arm. If this panics in
-// production, a compiler/dispatcher contract has been violated, not a
-// user-facing condition.
+// Element-width discrimination is via the body's declared parameter type
+// (`Vec<u8>` vs `Vec<i64>` vs `Vec<f64>` vs `Vec<Arc<String>>`, or their
+// `Arc<Vec<T>>` wrappers), not via NativeKind: `NATIVE_KIND` stays
+// `Ptr(HeapKind::TypedArray)` for all element widths. Element-width threading
+// is enforced by the Rust type system at the impl level, with an unsafe
+// raw-pointer read of the matching `TypedArray<T>::as_slice` that copies
+// elements into a fresh `Vec<T>` (owns-clone semantics) or wraps in
+// `Arc<Vec<T>>` (zero-copy of the inner `Vec`, one `Arc::new` for the outer).
 //
-// Option β chosen over option α (`Arc<TypedBuffer<T>>` zero-copy), option ε
-// (FromSlot variants per element type with consistency checks), option γ
-// (`&[T]` borrowed), and path 2 (per-element `HeapKind` split). See
-// `docs/defections.md` 2026-05-06 cluster #3 entry for the trade-off
-// discussion. Adjacent deferred follow-up workstreams: `maximalist-v2-redesign`
-// (dissolve `HeapValue` sum type at discriminator level) and
-// `move-semantics-marshal` (leverage the existing `LoadLocalMove`/
-// `LoadLocalClone` bytecode opcodes at the FFI boundary instead of always-
-// clone). Both are on-record DEFERRED in the same defections.md page.
+// Per `docs/runtime-v2-spec.md`: "the kind tells you the arm; the body's
+// declared parameter type tells you the element width; no runtime
+// element-width probe." The dispatcher's registration-time arg-kind contract
+// already verified the slot bits decode to a `HeapKind::TypedArray` raw
+// pointer; the per-`T` impl picks the element width via the Rust type
+// system. If a slot's actual element-width disagrees with the impl's
+// declared `T`, the result is UB by design (compiler/dispatcher contract
+// violation), not a panic — same as the post-strict-typing dispatch
+// contract for typed slots in general.
+//
+// V3-S5 ckpt-5-prime²c migration shape (a) RATIFIED:
+//   `Arc<AlignedTypedBuffer>` → `Arc<Vec<f64>>`  (intrinsics body-type)
+//   `Arc<TypedBuffer<i64>>`   → `Arc<Vec<i64>>`  (intrinsics body-type)
+//   `Arc<TypedBuffer<u8>>`    → `Arc<Vec<u8>>`   (intrinsics body-type)
+//   `Arc<TypedBuffer<Arc<String>>>` → `Arc<Vec<Arc<String>>>`  (not yet
+//     reached by intrinsics; kept aligned to the same shape for the future
+//     string-cluster migration when a stdlib body surfaces).
+//
+// The `Vec<Arc<HeapValue>>` polymorphic-element marshal path is
+// surface-and-stop in this checkpoint: the `materialize_heap_arcs` helper
+// that re-wrapped each strict-typed element into a `HeapValue::*` Arc
+// referenced the deleted `TypedArrayData` enum directly. Stdlib bodies
+// declaring `Vec<Arc<HeapValue>>` parameters cannot decode the new
+// `*mut TypedArray<T>` slot bits without a per-`T` dispatcher (Round 2
+// follow-up — pairs with the `from_typed_array_<T>` constructor wave at
+// `crates/shape-value/src/slot.rs:142`). Active impl panics with a
+// structured error pointing at the follow-up.
 
 /// Read a `Vec<u8>` from a `NativeKind::Ptr(HeapKind::TypedArray)` slot
-/// whose payload is `TypedArrayData::U8`.
+/// whose payload is `*mut TypedArray<u8>`.
 ///
-/// Owns-clone semantics: the body receives an owned `Vec<u8>` independent
-/// of the slot's strong reference. The slot's lifetime is unaffected.
-///
-/// Panics on `TypedArrayData::*` mismatch. The dispatcher's registration
-/// contract guarantees a `HeapKind::TypedArray` slot; the body's declared
-/// `Vec<u8>` parameter type pins the expected `TypedArrayData::U8` arm.
-/// Per spec, this is a consistency check, not a runtime probe.
+/// V3-S5 ckpt-5-prime²c (2026-05-15): rewritten for the v2-raw flat-struct
+/// carrier. Slot bits are a raw `*mut TypedArray<u8>` pointer; element-data
+/// is copied into a fresh `Vec<u8>` (owns-clone semantics — body receives
+/// an owned vector independent of the slot's refcount share).
 impl FromSlot for Vec<u8> {
     const NATIVE_KIND: NativeKind =
         NativeKind::Ptr(shape_value::HeapKind::TypedArray);
     #[inline]
     fn from_slot(bits: u64) -> Self {
-        let ptr = bits as *const shape_value::HeapValue;
-        // SAFETY: NATIVE_KIND::Ptr(HeapKind::TypedArray) pins the bits to
-        // an Arc<HeapValue> with the TypedArray variant. We clone the
-        // inner buffer's data into an owned Vec without consuming the
-        // slot's strong ref.
+        // SAFETY: NATIVE_KIND::Ptr(HeapKind::TypedArray) + body-declared
+        // element type Vec<u8> pins the slot bits to a live
+        // *mut TypedArray<u8>. The marshal kind contract guarantees both;
+        // dispatcher-side stamp_elem_type at array.rs:78 carries the
+        // element discriminant for completeness but the body type is the
+        // primary discriminator per the post-strict-typing contract.
+        let arr = bits as usize as *const shape_value::v2::typed_array::TypedArray<u8>;
+        if arr.is_null() {
+            return Vec::new();
+        }
         unsafe {
-            Arc::increment_strong_count(ptr);
-            let arc_hv = Arc::from_raw(ptr);
-            match &*arc_hv {
-                shape_value::HeapValue::TypedArray(arc) => match &**arc {
-                    shape_value::TypedArrayData::U8(buf) => buf.data.clone(),
-                    other => panic!(
-                        "FromSlot<Vec<u8>>: slot bits decoded to HeapValue::TypedArray::{}, \
-                         not U8. Body's parameter type Vec<u8> requires the U8 element-width \
-                         variant. Marshal kind contract violated by caller (compiler/dispatcher \
-                         bug, not a user-facing condition).",
-                        other.type_name()
-                    ),
-                },
-                other => panic!(
-                    "FromSlot<Vec<u8>>: slot bits decoded to HeapValue::{:?}, \
-                     not TypedArray. Marshal kind contract violated by caller.",
-                    other.kind()
-                ),
-            }
+            shape_value::v2::typed_array::TypedArray::<u8>::as_slice(arr).to_vec()
         }
     }
 }
 
 /// Read a `Vec<i64>` from a `NativeKind::Ptr(HeapKind::TypedArray)` slot
-/// whose payload is `TypedArrayData::I64`.
-///
-/// Owns-clone semantics. Panics on `TypedArrayData::*` mismatch — same
-/// consistency-check rationale as `Vec<u8>` above.
+/// whose payload is `*mut TypedArray<i64>`. V3-S5 ckpt-5-prime²c
+/// (2026-05-15): rewritten for the v2-raw flat-struct carrier. Owns-clone
+/// semantics.
 impl FromSlot for Vec<i64> {
     const NATIVE_KIND: NativeKind =
         NativeKind::Ptr(shape_value::HeapKind::TypedArray);
     #[inline]
     fn from_slot(bits: u64) -> Self {
-        let ptr = bits as *const shape_value::HeapValue;
         // SAFETY: see Vec<u8>::from_slot above.
+        let arr = bits as usize as *const shape_value::v2::typed_array::TypedArray<i64>;
+        if arr.is_null() {
+            return Vec::new();
+        }
         unsafe {
-            Arc::increment_strong_count(ptr);
-            let arc_hv = Arc::from_raw(ptr);
-            match &*arc_hv {
-                shape_value::HeapValue::TypedArray(arc) => match &**arc {
-                    shape_value::TypedArrayData::I64(buf) => buf.data.clone(),
-                    other => panic!(
-                        "FromSlot<Vec<i64>>: slot bits decoded to HeapValue::TypedArray::{}, \
-                         not I64. Body's parameter type Vec<i64> requires the I64 element-width \
-                         variant. Marshal kind contract violated by caller.",
-                        other.type_name()
-                    ),
-                },
-                other => panic!(
-                    "FromSlot<Vec<i64>>: slot bits decoded to HeapValue::{:?}, \
-                     not TypedArray. Marshal kind contract violated by caller.",
-                    other.kind()
-                ),
-            }
+            shape_value::v2::typed_array::TypedArray::<i64>::as_slice(arr).to_vec()
         }
     }
 }
 
-/// Read a `Vec<Arc<String>>` from a `NativeKind::Ptr(HeapKind::TypedArray)` slot
-/// whose payload is `TypedArrayData::String`.
-///
-/// Phase 2d Array cluster (2026-05-07). Owns-clone semantics: the body
-/// receives an owned `Vec<Arc<String>>` whose Arcs are individually
-/// retained from the inner buffer. Panics on `TypedArrayData::*`
-/// mismatch — same consistency-check rationale as `Vec<u8>` above.
+/// Read a `Vec<Arc<String>>` from a `NativeKind::Ptr(HeapKind::TypedArray)`
+/// slot whose payload is `*mut TypedArray<*const StringObj>`. V3-S5
+/// ckpt-5-prime²c (2026-05-15): rewritten for the v2-raw flat-struct
+/// carrier (each element is a raw `*const StringObj` — the per-element
+/// allocator-managed v2 string carrier per `crates/shape-value/src/v2/
+/// string_obj.rs`). Each element string is copied into a fresh
+/// `Arc<String>` (owns-clone semantics — body receives an owned vector
+/// of independent Arcs).
 impl FromSlot for Vec<Arc<String>> {
     const NATIVE_KIND: NativeKind =
         NativeKind::Ptr(shape_value::HeapKind::TypedArray);
     #[inline]
     fn from_slot(bits: u64) -> Self {
-        let ptr = bits as *const shape_value::HeapValue;
-        // SAFETY: see Vec<u8>::from_slot above.
+        // SAFETY: see Vec<u8>::from_slot above. The body-declared element
+        // type pins the slot to a *mut TypedArray<*const StringObj>.
+        let arr = bits as usize
+            as *const shape_value::v2::typed_array::TypedArray<
+                *const shape_value::v2::string_obj::StringObj,
+            >;
+        if arr.is_null() {
+            return Vec::new();
+        }
         unsafe {
-            Arc::increment_strong_count(ptr);
-            let arc_hv = Arc::from_raw(ptr);
-            match &*arc_hv {
-                shape_value::HeapValue::TypedArray(arc) => match &**arc {
-                    shape_value::TypedArrayData::String(buf) => buf.data.clone(),
-                    other => panic!(
-                        "FromSlot<Vec<Arc<String>>>: slot bits decoded to HeapValue::TypedArray::{}, \
-                         not String. Body's parameter type Vec<Arc<String>> requires the String \
-                         element-width variant. Marshal kind contract violated by caller.",
-                        other.type_name()
-                    ),
-                },
-                other => panic!(
-                    "FromSlot<Vec<Arc<String>>>: slot bits decoded to HeapValue::{:?}, \
-                     not TypedArray. Marshal kind contract violated by caller.",
-                    other.kind()
-                ),
-            }
+            let slice = shape_value::v2::typed_array::TypedArray::<
+                *const shape_value::v2::string_obj::StringObj,
+            >::as_slice(arr);
+            slice
+                .iter()
+                .map(|&p| {
+                    Arc::new(
+                        shape_value::v2::string_obj::StringObj::as_str(p).to_owned(),
+                    )
+                })
+                .collect()
         }
     }
 }
 
 /// Read a `Vec<Arc<HeapValue>>` from a `NativeKind::Ptr(HeapKind::TypedArray)`
-/// slot whose payload is `the-deleted-heterogeneous-element-carrier`.
+/// slot.
 ///
-/// Phase 2d Array cluster (2026-05-07). Each element is an opaque
-/// `Arc<HeapValue>` whose inner kind is a body-side type contract.
-/// E.g. an `Array<DataTable>` body uses this `FromSlot` and then
-/// pattern-matches each element's `HeapValue::DataTable` arm —
-/// homogeneity is enforced by the body, not by the marshal layer.
+/// V3-S5 ckpt-5-prime²c (2026-05-15) SURFACE-AND-STOP: the
+/// `materialize_heap_arcs` helper (deleted alongside this comment block)
+/// re-wrapped each strict-typed element into a `HeapValue::*` Arc by
+/// pattern-matching the deleted `TypedArrayData` enum. The new
+/// `*mut TypedArray<T>` flat-struct carrier needs a per-`T` dispatcher
+/// (one impl per element width: `*const StringObj`, `*const DecimalObj`,
+/// `TypedObjectPtr`, char, etc.) plus a parallel element-kind discriminator
+/// in the marshal layer to know which `T` the slot was constructed for.
+/// The element discriminator already exists at the VM level
+/// (`stamp_elem_type` at `crates/shape-vm/src/executor/v2_handlers/array.rs`)
+/// but isn't yet exposed at the marshal-`FromSlot` boundary.
 ///
-/// Panics on `TypedArrayData::*` mismatch — same consistency-check
-/// rationale as `Vec<u8>` above.
+/// Adding this dispatcher is the Round 2 `Vec<Arc<HeapValue>>` rewire
+/// follow-up; pairs with the `from_typed_array_<T>` constructor wave at
+/// `crates/shape-value/src/slot.rs:142` and the matching ckpt-6 JIT FFI
+/// String/Decimal build work. Until that lands, the marshal-FromSlot panics
+/// with a structured error pointing at the follow-up — any stdlib body
+/// declaring `Vec<Arc<HeapValue>>` and reaching this from_slot is currently
+/// dead at the marshal boundary (consistent with V3-S5 ckpt-5's wholesale
+/// `HeapValue::TypedArray` outer-arm deletion).
 impl FromSlot for Vec<Arc<shape_value::heap_value::HeapValue>> {
     const NATIVE_KIND: NativeKind =
         NativeKind::Ptr(shape_value::HeapKind::TypedArray);
     #[inline]
-    fn from_slot(bits: u64) -> Self {
-        let ptr = bits as *const shape_value::HeapValue;
-        // SAFETY: see Vec<u8>::from_slot above.
-        unsafe {
-            Arc::increment_strong_count(ptr);
-            let arc_hv = Arc::from_raw(ptr);
-            match &*arc_hv {
-                shape_value::HeapValue::TypedArray(arc) => {
-                    // W17-typed-carrier-bundle-A checkpoint 3/4: the
-                    // prior `the-deleted-heterogeneous-element-carrier` carrier is
-                    // deleted. Reading `Vec<Arc<HeapValue>>` from a
-                    // strict-typed buffer requires re-wrapping each
-                    // typed element back into a `HeapValue::*` arm —
-                    // mirror of the construction-side dispatcher in
-                    // `TypedArrayData::build_specialized_from_heap_arcs`.
-                    materialize_heap_arcs(&**arc)
-                }
-                other => panic!(
-                    "FromSlot<Vec<Arc<HeapValue>>>: slot bits decoded to HeapValue::{:?}, \
-                     not TypedArray. Marshal kind contract violated by caller.",
-                    other.kind()
-                ),
-            }
-        }
-    }
-}
-
-/// W17-typed-carrier-bundle-A checkpoint 3/4: reverse of
-/// `TypedArrayData::build_specialized_from_heap_arcs` — given a
-/// strict-typed `TypedArrayData`, materialize each element as
-/// `Arc<HeapValue::*>` for callers that take `Vec<Arc<HeapValue>>`
-/// (legacy stdlib body signatures).
-fn materialize_heap_arcs(arr: &shape_value::TypedArrayData) -> Vec<Arc<shape_value::HeapValue>> {
-    use shape_value::heap_value::HeapValue;
-    use shape_value::TypedArrayData;
-    match arr {
-        TypedArrayData::String(buf) => buf
-            .data
-            .iter()
-            .map(|s| Arc::new(HeapValue::String(Arc::clone(s))))
-            .collect(),
-        TypedArrayData::Decimal(buf) => buf
-            .data
-            .iter()
-            .map(|d| Arc::new(HeapValue::Decimal(Arc::clone(d))))
-            .collect(),
-        TypedArrayData::BigInt(buf) => buf
-            .data
-            .iter()
-            .map(|b| Arc::new(HeapValue::BigInt(Arc::clone(b))))
-            .collect(),
-        TypedArrayData::Char(buf) => buf
-            .data
-            .iter()
-            .map(|c| Arc::new(HeapValue::Char(*c)))
-            .collect(),
-        TypedArrayData::TypedObject(buf) => buf
-            .data
-            .iter()
-            // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): `o`
-            // is `&TypedObjectPtr`. `Clone` bumps the v2-raw refcount
-            // via `v2_retain`; the cloned wrapper is moved into the
-            // `HeapValue::TypedObject` payload as the new owning share.
-            .map(|o| Arc::new(HeapValue::TypedObject(o.clone())))
-            .collect(),
-        other => panic!(
-            "FromSlot<Vec<Arc<HeapValue>>>: TypedArray variant {} cannot \
-             be re-wrapped to Vec<Arc<HeapValue>> (no matching HeapValue::* \
-             arm — body parameter type assumes a heap-element array)",
-            other.type_name()
-        ),
+    fn from_slot(_bits: u64) -> Self {
+        panic!(
+            "FromSlot<Vec<Arc<HeapValue>>>: V3-S5 ckpt-5-prime²c SURFACE — \
+             the polymorphic Vec<Arc<HeapValue>> marshal path needs a \
+             per-element-T dispatcher over the v2-raw *mut TypedArray<T> \
+             carrier. Round 2 `Vec<Arc<HeapValue>>` rewire follow-up \
+             (pairs with from_typed_array_<T> constructor wave). \
+             ADR-006 §2.7.24 Q25.A SUPERSEDED."
+        )
     }
 }
 
 /// Project a `Vec<Arc<String>>` into a `NativeKind::Ptr(HeapKind::TypedArray)`
-/// slot whose payload is `TypedArrayData::String`.
-///
-/// Phase 2d Array cluster (2026-05-07). Used by the dispatcher's
-/// `ConcreteReturn::ArrayString → slot push` step (the body returns
-/// `Vec<String>`; the dispatcher wraps each into `Arc<String>` then
-/// hands the resulting `Vec` to this impl). Yields raw bits suitable
-/// for placement into a typed slot — the slot takes ownership of the
-/// resulting `Arc<HeapValue>` strong reference.
+/// slot whose payload is `*mut TypedArray<*const StringObj>`. V3-S5
+/// ckpt-5-prime²c (2026-05-15): rewritten for the v2-raw flat-struct
+/// carrier — each input `Arc<String>` is allocated as a fresh `StringObj`
+/// with refcount=1, and the per-element pointers are packed into a new
+/// `TypedArray<*const StringObj>`. The slot takes ownership of the
+/// resulting raw pointer (refcount discipline goes through `v2_retain` /
+/// `v2_release` per `HeapHeader`).
 impl ToSlot for Vec<Arc<String>> {
     const NATIVE_KIND: NativeKind =
         NativeKind::Ptr(shape_value::HeapKind::TypedArray);
     #[inline]
     fn to_slot(self) -> u64 {
-        let buf = shape_value::TypedBuffer::from_vec(self);
-        let data = Arc::new(shape_value::TypedArrayData::String(Arc::new(buf)));
-        let hv = shape_value::HeapValue::TypedArray(data);
-        Arc::into_raw(Arc::new(hv)) as u64
+        let elems: Vec<*const shape_value::v2::string_obj::StringObj> = self
+            .into_iter()
+            .map(|s| {
+                shape_value::v2::string_obj::StringObj::new(s.as_str())
+                    as *const shape_value::v2::string_obj::StringObj
+            })
+            .collect();
+        let arr = shape_value::v2::typed_array::TypedArray::<
+            *const shape_value::v2::string_obj::StringObj,
+        >::from_slice(&elems);
+        arr as usize as u64
     }
 }
 
 /// Project a `Vec<Arc<HeapValue>>` into a `NativeKind::Ptr(HeapKind::TypedArray)`
-/// slot whose payload is a strict-typed `TypedArrayData` variant per
-/// ADR-006 §2.7.24 Q25.A.
+/// slot.
 ///
-/// W17-typed-carrier-bundle-A checkpoint 2/4: routed through
-/// `TypedArrayData::build_specialized_from_heap_arcs` — the per-element-kind
-/// dispatcher in shape-value. The prior polymorphic `the-deleted-heterogeneous-element-carrier`
-/// carrier is replaced by the matching specialized variant; element-kind
-/// uniformity is enforced (heterogeneous-arm inputs panic with a structured
-/// message — would indicate a stdlib body returning a malformed mixed-kind
-/// array, which is a real bug, not a soft error to silently widen).
+/// V3-S5 ckpt-5-prime²c (2026-05-15) SURFACE-AND-STOP: same per-element-T
+/// dispatcher gap as the `FromSlot<Vec<Arc<HeapValue>>>` reader above.
+/// The pre-deletion `build_specialized_from_heap_arcs` helper dispatched
+/// each `HeapValue` arm into the matching `TypedArrayData::*` variant; the
+/// new flat-struct carrier needs to pick the matching
+/// `TypedArray<T>::from_slice` instantiation per element kind and
+/// stamp the element discriminator before push. Pairs with the
+/// Round 2 follow-up cited in the FromSlot impl.
 impl ToSlot for Vec<Arc<shape_value::heap_value::HeapValue>> {
     const NATIVE_KIND: NativeKind =
         NativeKind::Ptr(shape_value::HeapKind::TypedArray);
     #[inline]
     fn to_slot(self) -> u64 {
-        let data = shape_value::TypedArrayData::build_specialized_from_heap_arcs(self)
-            .unwrap_or_else(|err| {
-                panic!(
-                    "marshal::ToSlot<Vec<Arc<HeapValue>>>: {} (stdlib body \
-                     returned a malformed mixed-kind Vec<Arc<HeapValue>>)",
-                    err
-                )
-            });
-        let hv = shape_value::HeapValue::TypedArray(Arc::new(data));
-        Arc::into_raw(Arc::new(hv)) as u64
+        panic!(
+            "ToSlot<Vec<Arc<HeapValue>>>: V3-S5 ckpt-5-prime²c SURFACE — \
+             polymorphic Vec<Arc<HeapValue>> projection needs a per-element-T \
+             dispatcher over the v2-raw *mut TypedArray<T> carrier (mirror \
+             of the deleted build_specialized_from_heap_arcs). Round 2 \
+             `Vec<Arc<HeapValue>>` rewire follow-up. ADR-006 §2.7.24 Q25.A \
+             SUPERSEDED."
+        )
     }
 }
 
@@ -809,222 +752,148 @@ impl FromSlot for Vec<(Arc<String>, Arc<shape_value::heap_value::HeapValue>)> {
     }
 }
 
-// ────── typed-array Arc<TypedBuffer<T>> zero-copy FromSlot/ToSlot (option α + ε) ──────
+// ────── typed-array Arc<Vec<T>> FromSlot/ToSlot (Migration shape (a)) ──────
 //
-// Stage B (`docs/defections.md` 2026-05-07 — Arc<TypedBuffer<T>> zero-copy
-// named cluster, lines 226-371; refined by the dated correction
-// subsection — per-storage-variant body-type map). The α + ε zero-copy
-// pattern lands alongside β: each impl pins a single `TypedArrayData::*`
-// storage variant via the body's declared parameter type, and the
-// `from_slot` path performs **one `Arc::clone` (atomic refcount op) and
-// zero data copy** rather than β's owned-clone (full element-by-element
-// copy of the inner buffer). β stays in production parallel for existing
-// consumers (compress / archive / byte_utils / csv / etc.) that don't
-// benefit from zero-copy.
+// V3-S5 ckpt-5-prime²c (2026-05-15) — supervisor 2026-05-15 Migration shape
+// (a) RATIFIED. The prior `Arc<AlignedTypedBuffer>` / `Arc<TypedBuffer<i64>>`
+// / `Arc<TypedBuffer<u8>>` zero-copy section is rewritten on the new
+// `*mut TypedArray<T>` flat-struct carrier shape. The pre-migration
+// per-storage-variant body-type map:
 //
-// Per-storage-variant body-type map (per the 2026-05-07 dated correction
-// subsection):
-//
-//   TypedArrayData::F64 ↔ Arc<AlignedTypedBuffer>      (this section)
-//   TypedArrayData::I64 ↔ Arc<TypedBuffer<i64>>        (this section)
-//   TypedArrayData::U8  ↔ Arc<TypedBuffer<u8>>         (this section)
-//   TypedArrayData::Bool deferred — Rust-type-collision with U8;
-//                                   resolution comes when a Bool consumer
-//                                   surfaces, likely via a newtype wrapper.
-//   I32 / Matrix / others — deferred per consumer-driven scope.
+//   TypedArrayData::F64 ↔ Arc<AlignedTypedBuffer>   → Arc<Vec<f64>>
+//   TypedArrayData::I64 ↔ Arc<TypedBuffer<i64>>     → Arc<Vec<i64>>
+//   TypedArrayData::U8  ↔ Arc<TypedBuffer<u8>>      → Arc<Vec<u8>>
 //
 // `NATIVE_KIND` stays `Ptr(HeapKind::TypedArray)` for all three — the
-// element-width discriminator lives in the body-side Rust type (ε
-// pattern), not in slot bits or `NativeKind`. Same consistency-check
-// residual as β: the in-body pattern match panics on the wrong
-// `TypedArrayData::*` arm. Per `docs/runtime-v2-spec.md`, this is a
-// `debug_assert!`-equivalent — unreachable in a well-typed system.
+// element-width discriminator lives in the body-side Rust type (option ε
+// pattern), not in slot bits or `NativeKind`. Each `from_slot` impl reads
+// the slot's raw `*mut TypedArray<T>`, materializes a `Vec<T>` by copying
+// from `TypedArray::as_slice`, and wraps in `Arc::new`. The body accesses
+// `&[T]` via `Arc::deref` → `Vec<T>`'s `Deref<Target=[T]>` impl — same
+// API surface as the prior `Arc<AlignedTypedBuffer>` / `Arc<TypedBuffer<T>>`
+// for the 39 migrated intrinsics in ckpt-5-prime²b (zero body adaptation).
 //
-// f64 uses `Arc<AlignedTypedBuffer>` rather than `Arc<TypedBuffer<f64>>`
-// because `TypedArrayData::F64` stores the SIMD-aligned `AlignedVec<f64>`
-// shape (`heap_value.rs:482`, `typed_buffer.rs:230`). This asymmetric
-// body-type map is the established codebase pattern (mirrors shape-vm's
-// `extract_float_array` / `extract_int_array` helpers in
-// `crates/shape-vm/src/executor/objects/typed_array_methods.rs:19,26`).
-// See the 2026-05-07 dated correction subsection of the zero-copy entry
-// for A1/A2/A3 surfacing, A4-A7 supervisor-checked alternatives, and
-// the structural rationale.
+// Owns-clone semantics (full element copy at the marshal boundary): a
+// later wave can revisit zero-copy by switching the body parameter type
+// to `*const TypedArray<T>` and exposing `TypedArray::<T>::as_slice` to
+// stdlib bodies; deferred per `docs/defections.md` zero-copy follow-on
+// subsection (now-superseded — the v2-raw flat-struct carrier means
+// AlignedVec SIMD-alignment is at the v2/typed_array level itself, not
+// at a wrapper).
 
-/// Read an `Arc<AlignedTypedBuffer>` from a `NativeKind::Ptr(HeapKind::TypedArray)`
-/// slot whose payload is `TypedArrayData::F64`.
-///
-/// Zero-copy semantics: the body receives a strong reference cloned from
-/// the inner `Arc<AlignedTypedBuffer>` of the heap value's TypedArray
-/// payload — one `Arc::clone` (single atomic refcount op) and **zero
-/// data copy**. The body accesses the f64 buffer via
-/// `Arc::deref` → `&[f64]` (`AlignedTypedBuffer`'s `Deref<Target=[f64]>` impl).
-///
-/// Panics on `TypedArrayData::*` mismatch — same consistency-check
-/// rationale as the β `Vec<u8>` impl above.
-impl FromSlot for Arc<shape_value::AlignedTypedBuffer> {
+/// Read an `Arc<Vec<f64>>` from a `NativeKind::Ptr(HeapKind::TypedArray)`
+/// slot whose payload is `*mut TypedArray<f64>`. V3-S5 ckpt-5-prime²c
+/// Migration shape (a) — replaces the pre-migration
+/// `FromSlot for Arc<AlignedTypedBuffer>` entry.
+impl FromSlot for Arc<Vec<f64>> {
     const NATIVE_KIND: NativeKind =
         NativeKind::Ptr(shape_value::HeapKind::TypedArray);
     #[inline]
     fn from_slot(bits: u64) -> Self {
-        let ptr = bits as *const shape_value::HeapValue;
-        // SAFETY: see Vec<u8>::from_slot above. Marshal kind contract
-        // pins this slot to an Arc<HeapValue> with the TypedArray
-        // variant; this impl pins the F64 storage arm via the body's
-        // declared Arc<AlignedTypedBuffer> parameter type.
+        // SAFETY: NATIVE_KIND::Ptr(HeapKind::TypedArray) + body-declared
+        // element type Arc<Vec<f64>> pins the slot bits to a live
+        // *mut TypedArray<f64>.
+        let arr = bits as usize as *const shape_value::v2::typed_array::TypedArray<f64>;
+        if arr.is_null() {
+            return Arc::new(Vec::new());
+        }
         unsafe {
-            Arc::increment_strong_count(ptr);
-            let arc_hv = Arc::from_raw(ptr);
-            match &*arc_hv {
-                shape_value::HeapValue::TypedArray(arc) => match &**arc {
-                    shape_value::TypedArrayData::F64(buf) => Arc::clone(buf),
-                    other => panic!(
-                        "FromSlot<Arc<AlignedTypedBuffer>>: slot bits decoded to \
-                         HeapValue::TypedArray::{}, not F64. Body's parameter type \
-                         Arc<AlignedTypedBuffer> requires the F64 storage variant. \
-                         Marshal kind contract violated by caller (compiler/dispatcher \
-                         bug, not a user-facing condition).",
-                        other.type_name()
-                    ),
-                },
-                other => panic!(
-                    "FromSlot<Arc<AlignedTypedBuffer>>: slot bits decoded to \
-                     HeapValue::{:?}, not TypedArray. Marshal kind contract \
-                     violated by caller.",
-                    other.kind()
-                ),
-            }
+            Arc::new(
+                shape_value::v2::typed_array::TypedArray::<f64>::as_slice(arr).to_vec(),
+            )
         }
     }
 }
 
-/// Project an `Arc<AlignedTypedBuffer>` into a `NativeKind::Ptr(HeapKind::TypedArray)`
-/// slot whose payload is `TypedArrayData::F64`.
-///
-/// The body's `Arc<AlignedTypedBuffer>` is already wrapped — the only
-/// allocations are constructing `HeapValue::TypedArray(TypedArrayData::F64(self))`
-/// and `Arc::new(hv)` for the slot's outer `Arc<HeapValue>`. **No
-/// element copy.**
-impl ToSlot for Arc<shape_value::AlignedTypedBuffer> {
+/// Project an `Arc<Vec<f64>>` into a `NativeKind::Ptr(HeapKind::TypedArray)`
+/// slot whose payload is `*mut TypedArray<f64>`. V3-S5 ckpt-5-prime²c
+/// Migration shape (a) — replaces the pre-migration
+/// `ToSlot for Arc<AlignedTypedBuffer>` entry.
+impl ToSlot for Arc<Vec<f64>> {
     const NATIVE_KIND: NativeKind =
         NativeKind::Ptr(shape_value::HeapKind::TypedArray);
     #[inline]
     fn to_slot(self) -> u64 {
-        let data = Arc::new(shape_value::TypedArrayData::F64(self));
-        let hv = shape_value::HeapValue::TypedArray(data);
-        Arc::into_raw(Arc::new(hv)) as u64
+        let arr = shape_value::v2::typed_array::TypedArray::<f64>::from_slice(self.as_slice());
+        arr as usize as u64
     }
 }
 
-/// Read an `Arc<TypedBuffer<i64>>` from a `NativeKind::Ptr(HeapKind::TypedArray)`
-/// slot whose payload is `TypedArrayData::I64`.
-///
-/// Zero-copy semantics: see `Arc<AlignedTypedBuffer>::from_slot` above.
-/// Body accesses `&[i64]` via `Arc::deref` → `TypedBuffer<i64>`'s
-/// `Deref<Target=[i64]>` impl.
-impl FromSlot for Arc<shape_value::TypedBuffer<i64>> {
+/// Read an `Arc<Vec<i64>>` from a `NativeKind::Ptr(HeapKind::TypedArray)`
+/// slot whose payload is `*mut TypedArray<i64>`. V3-S5 ckpt-5-prime²c
+/// Migration shape (a) — replaces the pre-migration
+/// `FromSlot for Arc<TypedBuffer<i64>>` entry.
+impl FromSlot for Arc<Vec<i64>> {
     const NATIVE_KIND: NativeKind =
         NativeKind::Ptr(shape_value::HeapKind::TypedArray);
     #[inline]
     fn from_slot(bits: u64) -> Self {
-        let ptr = bits as *const shape_value::HeapValue;
-        // SAFETY: see Vec<u8>::from_slot above.
+        // SAFETY: see Arc<Vec<f64>>::from_slot above.
+        let arr = bits as usize as *const shape_value::v2::typed_array::TypedArray<i64>;
+        if arr.is_null() {
+            return Arc::new(Vec::new());
+        }
         unsafe {
-            Arc::increment_strong_count(ptr);
-            let arc_hv = Arc::from_raw(ptr);
-            match &*arc_hv {
-                shape_value::HeapValue::TypedArray(arc) => match &**arc {
-                    shape_value::TypedArrayData::I64(buf) => Arc::clone(buf),
-                    other => panic!(
-                        "FromSlot<Arc<TypedBuffer<i64>>>: slot bits decoded to \
-                         HeapValue::TypedArray::{}, not I64. Body's parameter type \
-                         Arc<TypedBuffer<i64>> requires the I64 storage variant. \
-                         Marshal kind contract violated by caller.",
-                        other.type_name()
-                    ),
-                },
-                other => panic!(
-                    "FromSlot<Arc<TypedBuffer<i64>>>: slot bits decoded to \
-                     HeapValue::{:?}, not TypedArray. Marshal kind contract \
-                     violated by caller.",
-                    other.kind()
-                ),
-            }
+            Arc::new(
+                shape_value::v2::typed_array::TypedArray::<i64>::as_slice(arr).to_vec(),
+            )
         }
     }
 }
 
-/// Project an `Arc<TypedBuffer<i64>>` into a `NativeKind::Ptr(HeapKind::TypedArray)`
-/// slot whose payload is `TypedArrayData::I64`. **No element copy.**
-impl ToSlot for Arc<shape_value::TypedBuffer<i64>> {
+/// Project an `Arc<Vec<i64>>` into a `NativeKind::Ptr(HeapKind::TypedArray)`
+/// slot whose payload is `*mut TypedArray<i64>`. V3-S5 ckpt-5-prime²c
+/// Migration shape (a).
+impl ToSlot for Arc<Vec<i64>> {
     const NATIVE_KIND: NativeKind =
         NativeKind::Ptr(shape_value::HeapKind::TypedArray);
     #[inline]
     fn to_slot(self) -> u64 {
-        let data = Arc::new(shape_value::TypedArrayData::I64(self));
-        let hv = shape_value::HeapValue::TypedArray(data);
-        Arc::into_raw(Arc::new(hv)) as u64
+        let arr = shape_value::v2::typed_array::TypedArray::<i64>::from_slice(self.as_slice());
+        arr as usize as u64
     }
 }
 
-/// Read an `Arc<TypedBuffer<u8>>` from a `NativeKind::Ptr(HeapKind::TypedArray)`
-/// slot whose payload is `TypedArrayData::U8`.
+/// Read an `Arc<Vec<u8>>` from a `NativeKind::Ptr(HeapKind::TypedArray)`
+/// slot whose payload is `*mut TypedArray<u8>`. V3-S5 ckpt-5-prime²c
+/// Migration shape (a) — replaces the pre-migration
+/// `FromSlot for Arc<TypedBuffer<u8>>` entry.
 ///
-/// Zero-copy semantics: see `Arc<AlignedTypedBuffer>::from_slot` above.
-/// Body accesses `&[u8]` via `Arc::deref`.
-///
-/// Note: `TypedArrayData::Bool` also stores `Arc<TypedBuffer<u8>>`; this
-/// impl matches `TypedArrayData::U8` only. Bool consumer projection is
-/// deferred per the 2026-05-07 dated correction subsection (Rust-type-
-/// collision with U8 — body type alone cannot disambiguate; resolution
-/// comes when a Bool consumer surfaces, likely via a newtype wrapper).
-/// A Bool slot reaching this impl is a marshal-kind-contract violation.
-impl FromSlot for Arc<shape_value::TypedBuffer<u8>> {
+/// Note: the pre-migration Bool-vs-U8 Rust-type-collision residual carries
+/// forward — `Array<bool>` lowers to `*mut TypedArray<u8>` per the v2
+/// carrier shape (bool is stored as u8 with the dispatch-level Bool stamp
+/// at `stamp_elem_type`). A body declaring `Arc<Vec<u8>>` and being handed
+/// an `Array<bool>` slot will read raw bytes correctly but cannot
+/// distinguish "Array<u8>" from "Array<bool>" at this boundary. Resolution
+/// when a Bool consumer surfaces.
+impl FromSlot for Arc<Vec<u8>> {
     const NATIVE_KIND: NativeKind =
         NativeKind::Ptr(shape_value::HeapKind::TypedArray);
     #[inline]
     fn from_slot(bits: u64) -> Self {
-        let ptr = bits as *const shape_value::HeapValue;
-        // SAFETY: see Vec<u8>::from_slot above.
+        // SAFETY: see Arc<Vec<f64>>::from_slot above.
+        let arr = bits as usize as *const shape_value::v2::typed_array::TypedArray<u8>;
+        if arr.is_null() {
+            return Arc::new(Vec::new());
+        }
         unsafe {
-            Arc::increment_strong_count(ptr);
-            let arc_hv = Arc::from_raw(ptr);
-            match &*arc_hv {
-                shape_value::HeapValue::TypedArray(arc) => match &**arc {
-                    shape_value::TypedArrayData::U8(buf) => Arc::clone(buf),
-                    other => panic!(
-                        "FromSlot<Arc<TypedBuffer<u8>>>: slot bits decoded to \
-                         HeapValue::TypedArray::{}, not U8. Body's parameter type \
-                         Arc<TypedBuffer<u8>> requires the U8 storage variant \
-                         (Bool deferred — see zero-copy entry's 2026-05-07 dated \
-                         correction subsection). Marshal kind contract violated \
-                         by caller.",
-                        other.type_name()
-                    ),
-                },
-                other => panic!(
-                    "FromSlot<Arc<TypedBuffer<u8>>>: slot bits decoded to \
-                     HeapValue::{:?}, not TypedArray. Marshal kind contract \
-                     violated by caller.",
-                    other.kind()
-                ),
-            }
+            Arc::new(
+                shape_value::v2::typed_array::TypedArray::<u8>::as_slice(arr).to_vec(),
+            )
         }
     }
 }
 
-/// Project an `Arc<TypedBuffer<u8>>` into a `NativeKind::Ptr(HeapKind::TypedArray)`
-/// slot whose payload is `TypedArrayData::U8`. **No element copy.**
-///
-/// As with `FromSlot` above, this projects to the U8 storage variant
-/// only; Bool projection is deferred.
-impl ToSlot for Arc<shape_value::TypedBuffer<u8>> {
+/// Project an `Arc<Vec<u8>>` into a `NativeKind::Ptr(HeapKind::TypedArray)`
+/// slot whose payload is `*mut TypedArray<u8>`. V3-S5 ckpt-5-prime²c
+/// Migration shape (a).
+impl ToSlot for Arc<Vec<u8>> {
     const NATIVE_KIND: NativeKind =
         NativeKind::Ptr(shape_value::HeapKind::TypedArray);
     #[inline]
     fn to_slot(self) -> u64 {
-        let data = Arc::new(shape_value::TypedArrayData::U8(self));
-        let hv = shape_value::HeapValue::TypedArray(data);
-        Arc::into_raw(Arc::new(hv)) as u64
+        let arr = shape_value::v2::typed_array::TypedArray::<u8>::from_slice(self.as_slice());
+        arr as usize as u64
     }
 }
 
