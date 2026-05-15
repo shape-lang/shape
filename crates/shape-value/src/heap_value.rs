@@ -1955,7 +1955,13 @@ fn hashmap_kref_display(
 #[derive(Debug)]
 pub struct HashSetData {
     /// Insertion-ordered keys (string-typed buffer).
-    pub keys: Arc<crate::typed_buffer::TypedBuffer<Arc<String>>>,
+    ///
+    /// Storage shape: `Arc<Vec<Arc<String>>>` post-V3-S5 ckpt-5-prime²a
+    /// (Migration shape (a) per supervisor 2026-05-15 ratification —
+    /// `TypedBuffer<T>` wrapper layer retired wholesale at ckpt-4;
+    /// `Arc<Vec<T>>` is the smallest delta preserving `Arc::make_mut`
+    /// clone-on-write semantics).
+    pub keys: Arc<Vec<Arc<String>>>,
     /// Eager bucket-index: hash → list of indices into `keys` array.
     /// Enables O(1) lookup at `set.has(key)`. Hash is FNV-1a over the
     /// key string bytes — same as `HashMapData::index`.
@@ -1966,7 +1972,7 @@ impl HashSetData {
     /// Build an empty HashSetData with no entries.
     pub fn new() -> Self {
         Self {
-            keys: Arc::new(crate::typed_buffer::TypedBuffer::from_vec(Vec::new())),
+            keys: Arc::new(Vec::new()),
             index: std::collections::HashMap::new(),
         }
     }
@@ -1985,13 +1991,13 @@ impl HashSetData {
     /// Number of entries.
     #[inline]
     pub fn len(&self) -> usize {
-        self.keys.data.len()
+        self.keys.len()
     }
 
     /// Whether the set is empty.
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.keys.data.is_empty()
+        self.keys.is_empty()
     }
 
     /// Whether the set contains the given key. O(1) via the bucket
@@ -2003,7 +2009,7 @@ impl HashSetData {
         };
         for &idx in bucket {
             let i = idx as usize;
-            if self.keys.data[i].as_str() == key {
+            if self.keys[i].as_str() == key {
                 return true;
             }
         }
@@ -2024,13 +2030,13 @@ impl HashSetData {
         if let Some(bucket) = self.index.get(&hash) {
             for &idx in bucket {
                 let i = idx as usize;
-                if self.keys.data[i].as_str() == key.as_str() {
+                if self.keys[i].as_str() == key.as_str() {
                     return false;
                 }
             }
         }
-        let new_idx = self.keys.data.len();
-        Arc::make_mut(&mut self.keys).data.push(key);
+        let new_idx = self.keys.len();
+        Arc::make_mut(&mut self.keys).push(key);
         self.index.entry(hash).or_default().push(new_idx as u32);
         true
     }
@@ -2048,7 +2054,7 @@ impl HashSetData {
             };
             let mut found: Option<usize> = None;
             for (bucket_pos, &idx) in bucket.iter().enumerate() {
-                if self.keys.data[idx as usize].as_str() == key {
+                if self.keys[idx as usize].as_str() == key {
                     found = Some(bucket_pos);
                     break;
                 }
@@ -2064,7 +2070,7 @@ impl HashSetData {
             }
             removed_idx
         };
-        Arc::make_mut(&mut self.keys).data.remove(removed_idx);
+        Arc::make_mut(&mut self.keys).remove(removed_idx);
         for bucket in self.index.values_mut() {
             for slot in bucket.iter_mut() {
                 if (*slot as usize) > removed_idx {
@@ -3032,47 +3038,52 @@ unsafe impl crate::v2::heap_element::HeapElement for TraitObjectStorage {
 #[derive(Debug)]
 pub struct PriorityQueueData {
     /// Heap-ordered i64 priorities. Index 0 is the current min.
-    /// Backed by an `Arc<TypedBuffer<i64>>` so a HeapValue clone is a
-    /// single atomic refcount bump and `Arc::make_mut` is the
-    /// canonical clone-on-write entry per the W13-hashmap-mutation
-    /// precedent.
-    pub heap: Arc<crate::typed_buffer::TypedBuffer<i64>>,
+    /// Backed by an `Arc<Vec<i64>>` so a HeapValue clone is a single
+    /// atomic refcount bump and `Arc::make_mut` is the canonical
+    /// clone-on-write entry per the W13-hashmap-mutation precedent.
+    ///
+    /// Storage shape: `Arc<Vec<i64>>` post-V3-S5 ckpt-5-prime²a
+    /// (Migration shape (a) per supervisor 2026-05-15 ratification —
+    /// `TypedBuffer<T>` wrapper layer retired wholesale at ckpt-4;
+    /// `Arc<Vec<T>>` is the smallest delta preserving `Arc::make_mut`
+    /// clone-on-write semantics).
+    pub heap: Arc<Vec<i64>>,
 }
 
 impl PriorityQueueData {
     /// Build an empty PriorityQueueData with no entries.
     pub fn new() -> Self {
         Self {
-            heap: Arc::new(crate::typed_buffer::TypedBuffer::from_vec(Vec::new())),
+            heap: Arc::new(Vec::new()),
         }
     }
 
     /// Number of entries.
     #[inline]
     pub fn len(&self) -> usize {
-        self.heap.data.len()
+        self.heap.len()
     }
 
     /// Whether the queue is empty.
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.heap.data.is_empty()
+        self.heap.is_empty()
     }
 
     /// Peek at the minimum (root) without removing it. Returns `None`
     /// for an empty queue.
     pub fn peek(&self) -> Option<i64> {
-        self.heap.data.first().copied()
+        self.heap.first().copied()
     }
 
     /// Push a value, restoring the min-heap invariant via sift-up.
     /// Mirror of W13-hashmap-mutation `insert`: `Arc::make_mut`
-    /// clone-on-write over the inner `Arc<TypedBuffer<i64>>`.
+    /// clone-on-write over the inner `Arc<Vec<i64>>`.
     pub fn push(&mut self, value: i64) {
         let buf = Arc::make_mut(&mut self.heap);
-        buf.data.push(value);
-        let last = buf.data.len() - 1;
-        sift_up(&mut buf.data, last);
+        buf.push(value);
+        let last = buf.len() - 1;
+        sift_up(buf, last);
     }
 
     /// Pop the minimum value, restoring the min-heap invariant via
@@ -3080,14 +3091,14 @@ impl PriorityQueueData {
     /// W13-hashmap-mutation `remove`: `Arc::make_mut` clone-on-write.
     pub fn pop(&mut self) -> Option<i64> {
         let buf = Arc::make_mut(&mut self.heap);
-        if buf.data.is_empty() {
+        if buf.is_empty() {
             return None;
         }
-        let last = buf.data.len() - 1;
-        buf.data.swap(0, last);
-        let min = buf.data.pop();
-        if !buf.data.is_empty() {
-            sift_down(&mut buf.data, 0);
+        let last = buf.len() - 1;
+        buf.swap(0, last);
+        let min = buf.pop();
+        if !buf.is_empty() {
+            sift_down(buf, 0);
         }
         min
     }
@@ -3096,13 +3107,13 @@ impl PriorityQueueData {
     /// order (NOT sorted). Used for the `toArray` method's `Vec<int>`
     /// projection; for the sorted form see `to_sorted_vec`.
     pub fn to_vec(&self) -> Vec<i64> {
-        self.heap.data.clone()
+        (*self.heap).clone()
     }
 
     /// Return the heap contents as a sorted `Vec<i64>` (ascending —
     /// pop-order). Used for the `toSortedArray` method.
     pub fn to_sorted_vec(&self) -> Vec<i64> {
-        let mut v = self.heap.data.clone();
+        let mut v: Vec<i64> = (*self.heap).clone();
         v.sort_unstable();
         v
     }
@@ -4280,10 +4291,16 @@ fn native_scalar_decimal_eq(a: &NativeScalar, b: &rust_decimal::Decimal) -> bool
 }
 
 /// Cross-type typed array equality: IntArray vs FloatArray (element-wise i64-as-f64).
+///
+/// NOTE (V3-S5 ckpt-5-prime²a, 2026-05-15): currently unreachable post-ckpt-4
+/// HeapValue::TypedArray outer-arm deletion (no callers). Signature migrated
+/// from `&TypedBuffer<i64>` / `&AlignedTypedBuffer` to `&[i64]` / `&[f64]` per
+/// Migration shape (a). Retained for the eventual v2-raw `*mut TypedArray<T>`
+/// per-T monomorphic rebuild (cluster-2 v2-raw-heap-audit territory).
 #[inline]
 fn int_float_array_eq(
-    ints: &crate::typed_buffer::TypedBuffer<i64>,
-    floats: &crate::typed_buffer::AlignedTypedBuffer,
+    ints: &[i64],
+    floats: &[f64],
 ) -> bool {
     ints.len() == floats.len()
         && ints
@@ -4376,7 +4393,7 @@ impl fmt::Display for HeapValue {
             // quoted strings, no values.
             HeapValue::HashSet(d) => {
                 write!(f, "{{")?;
-                for (i, k) in d.keys.data.iter().enumerate() {
+                for (i, k) in d.keys.iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
@@ -4432,7 +4449,7 @@ impl fmt::Display for HeapValue {
             // sorted output the user must call `pq.toSortedArray()`.
             HeapValue::PriorityQueue(d) => {
                 write!(f, "PriorityQueue[")?;
-                for (i, v) in d.heap.data.iter().enumerate() {
+                for (i, v) in d.heap.iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
@@ -5385,9 +5402,9 @@ mod hashset_mutation {
     fn from_keys_collapses_duplicates_first_wins() {
         let s = HashSetData::from_keys(vec![k("a"), k("b"), k("a"), k("c")]);
         assert_eq!(s.len(), 3);
-        assert_eq!(s.keys.data[0].as_str(), "a");
-        assert_eq!(s.keys.data[1].as_str(), "b");
-        assert_eq!(s.keys.data[2].as_str(), "c");
+        assert_eq!(s.keys[0].as_str(), "a");
+        assert_eq!(s.keys[1].as_str(), "b");
+        assert_eq!(s.keys[2].as_str(), "c");
     }
 
     #[test]

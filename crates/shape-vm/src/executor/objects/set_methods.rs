@@ -56,10 +56,18 @@
 //! ADR-006 §2.7.4 / §2.7.6 / §2.7.10 / §2.7.11 / §2.7.15 + playbook
 //! §1.W13-hashset-rebuild.
 
+// V3-S5 ckpt-5-prime²a (2026-05-15): `TypedArrayData` + `TypedBuffer` imports
+// DELETED — `TypedBuffer<T>` retired at ckpt-4 (wrapper layer wholesale
+// deletion); `TypedArrayData` enum retired across the ckpt-2/3/5 consumer-
+// cascade. Migration shape (a) per supervisor 2026-05-15 ratification:
+// `HashSetData.keys` now stores `Arc<Vec<Arc<String>>>` directly (smallest
+// delta preserving `Arc::make_mut` clone-on-write at the keys-field layer).
+// The `v2_to_array` handler is SURFACE-AND-STOP pending the cluster-2 v2-raw
+// `*mut TypedArray<Arc<String>>` rebuild that owns the `Array<string>`
+// result-construction path (mirrors `array_basic.rs::ckpt5_surface` shape).
 use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
-use shape_value::heap_value::{HashSetData, HeapKind, HeapValue, TypedArrayData};
-use shape_value::typed_buffer::TypedBuffer;
+use shape_value::heap_value::{HashSetData, HeapKind, HeapValue};
 use shape_value::{KindedSlot, NativeKind, VMError};
 use std::sync::Arc;
 
@@ -203,9 +211,18 @@ pub fn v2_is_empty(
 
 /// Set.toArray() -> Array<string>
 ///
-/// Returns an `Array<string>` reusing the receiver's keys buffer
-/// (`Arc<TypedBuffer<Arc<String>>>`) — single Arc bump on the buffer,
-/// no per-element clone. Same shape as `HashMap.keys()`.
+/// V3-S5 ckpt-5-prime²a SURFACE-AND-STOP (2026-05-15). Pre-deletion shape
+/// reused the receiver's keys buffer as `TypedArrayData::String(Arc<
+/// TypedBuffer<Arc<String>>>)` for a single-Arc-bump, zero-element-copy
+/// result. Post-deletion: `TypedArrayData` enum + `TypedBuffer<T>` /
+/// `AlignedTypedBuffer` wrapper layer + `HeapValue::TypedArray(Arc<
+/// TypedArrayData>)` outer arm + `HeapKind::TypedArray=8` ordinal DELETED
+/// at V3-S5 ckpt-1..ckpt-4 per W12-typed-array-data-deletion audit §3.5 +
+/// §3.6 + §B + ADR-006 §2.7.24 Q25.A SUPERSEDED. Rebuild target =
+/// per-T v2-raw `*mut TypedArray<Arc<String>>` flat-struct construction
+/// per audit §A.3 + §3.1 scalar recipe (lands cluster-2 / ckpt-6).
+/// REFUSED ON SIGHT: `TypedArrayData::String` / `TypedBuffer<Arc<String>>`
+/// resurrection under any rename (Refusal #1).
 pub fn v2_to_array(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
@@ -214,9 +231,16 @@ pub fn v2_to_array(
     if args.len() != 1 {
         return Err(type_error("Set.toArray() takes no arguments"));
     }
-    let set = as_hashset(&args[0])?;
-    let arr = TypedArrayData::String(Arc::clone(&set.keys));
-    Ok(KindedSlot::from_typed_array(Arc::new(arr)))
+    let _set = as_hashset(&args[0])?;
+    Err(VMError::NotImplemented(
+        "Set.toArray: SURFACE — V3-S5 ckpt-5-prime²a consumer-cascade. \
+         `TypedArrayData::String(Arc<TypedBuffer<Arc<String>>>)` + \
+         `KindedSlot::from_typed_array` DELETED at V3-S5 ckpt-1..ckpt-4. \
+         Rebuild = per-T v2-raw `*mut TypedArray<Arc<String>>` flat-struct \
+         construction (cluster-2 / ckpt-6 territory). REFUSED ON SIGHT: \
+         resurrection under any rename (Refusal #1)."
+            .to_string(),
+    ))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -298,10 +322,10 @@ pub fn v2_union(
     let lhs: Arc<HashSetData> = as_hashset(&args[0])?;
     let rhs: Arc<HashSetData> = as_hashset(&args[1])?;
     let mut keys: Vec<Arc<String>> = Vec::with_capacity(lhs.len() + rhs.len());
-    for k in lhs.keys.data.iter() {
+    for k in lhs.keys.iter() {
         keys.push(Arc::clone(k));
     }
-    for k in rhs.keys.data.iter() {
+    for k in rhs.keys.iter() {
         keys.push(Arc::clone(k));
     }
     // `from_keys` collapses duplicates — first occurrence wins.
@@ -333,7 +357,7 @@ pub fn v2_intersection(
         (rhs.as_ref(), lhs.as_ref())
     };
     let mut keys: Vec<Arc<String>> = Vec::new();
-    for k in small.keys.data.iter() {
+    for k in small.keys.iter() {
         if large.contains(k.as_str()) {
             keys.push(Arc::clone(k));
         }
@@ -360,7 +384,7 @@ pub fn v2_difference(
     let lhs: Arc<HashSetData> = as_hashset(&args[0])?;
     let rhs: Arc<HashSetData> = as_hashset(&args[1])?;
     let mut keys: Vec<Arc<String>> = Vec::new();
-    for k in lhs.keys.data.iter() {
+    for k in lhs.keys.iter() {
         if !rhs.contains(k.as_str()) {
             keys.push(Arc::clone(k));
         }
@@ -391,7 +415,7 @@ pub fn v2_for_each(
     let closure = &args[1];
     let n = set.len();
     for i in 0..n {
-        let key_slot = KindedSlot::from_string_arc(Arc::clone(&set.keys.data[i]));
+        let key_slot = KindedSlot::from_string_arc(Arc::clone(&set.keys[i]));
         let _ = vm.call_value_immediate_nb(closure, &[key_slot], ctx.as_deref_mut())?;
     }
     Ok(KindedSlot::none())
@@ -419,7 +443,7 @@ pub fn v2_map(
     let n = set.len();
     let mut out_keys: Vec<Arc<String>> = Vec::with_capacity(n);
     for i in 0..n {
-        let key_slot = KindedSlot::from_string_arc(Arc::clone(&set.keys.data[i]));
+        let key_slot = KindedSlot::from_string_arc(Arc::clone(&set.keys[i]));
         let result = vm.call_value_immediate_nb(closure, &[key_slot], ctx.as_deref_mut())?;
         let new_key: Arc<String> = result_slot_to_string_arc(&result).ok_or_else(|| {
             type_error(format!(
@@ -453,7 +477,7 @@ pub fn v2_filter(
     let n = set.len();
     let mut out_keys: Vec<Arc<String>> = Vec::new();
     for i in 0..n {
-        let key_arc = Arc::clone(&set.keys.data[i]);
+        let key_arc = Arc::clone(&set.keys[i]);
         let key_slot = KindedSlot::from_string_arc(Arc::clone(&key_arc));
         let result = vm.call_value_immediate_nb(closure, &[key_slot], ctx.as_deref_mut())?;
         let keep = result.as_bool().ok_or_else(|| {
@@ -469,14 +493,18 @@ pub fn v2_filter(
     // Filter preserves order with no duplicates (the receiver is
     // already deduplicated and we don't introduce new keys); construct
     // directly without going through `from_keys`'s dedup pass.
-    let buf = TypedBuffer::from_vec(out_keys);
+    //
+    // V3-S5 ckpt-5-prime²a (2026-05-15): `TypedBuffer::from_vec` retired
+    // (wrapper layer wholesale deletion at ckpt-4); Migration shape (a)
+    // wraps the `Vec<Arc<String>>` directly in the `Arc<Vec<Arc<String>>>`
+    // post-§2.7.15 keys-field layout.
     let mut index: std::collections::HashMap<u64, Vec<u32>> = std::collections::HashMap::new();
-    for (i, k) in buf.data.iter().enumerate() {
+    for (i, k) in out_keys.iter().enumerate() {
         let h = fnv1a_hash_local(k.as_bytes());
         index.entry(h).or_default().push(i as u32);
     }
     let result = HashSetData {
-        keys: Arc::new(buf),
+        keys: Arc::new(out_keys),
         index,
     };
     Ok(KindedSlot::from_hashset(Arc::new(result)))

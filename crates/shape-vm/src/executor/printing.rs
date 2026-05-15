@@ -726,10 +726,10 @@ impl<'a> ValueFormatter<'a> {
         &self,
         pq: &shape_value::heap_value::PriorityQueueData,
     ) -> String {
-        let n = pq.heap.data.len();
+        let n = pq.heap.len();
         let mut out = String::with_capacity(16 + n * 4);
         out.push_str("PriorityQueue[");
-        for (i, v) in pq.heap.data.iter().enumerate() {
+        for (i, v) in pq.heap.iter().enumerate() {
             if i > 0 {
                 out.push_str(", ");
             }
@@ -743,10 +743,10 @@ impl<'a> ValueFormatter<'a> {
     /// W13-hashset-rebuild (ADR-006 §2.7.15) — one-keyspace mirror of
     /// HashMap's render shape with the values column dropped.
     fn format_hashset(&self, set: &shape_value::heap_value::HashSetData) -> String {
-        let n = set.keys.data.len();
+        let n = set.keys.len();
         let mut out = String::with_capacity(2 + n * 6);
         out.push('{');
-        for (i, k) in set.keys.data.iter().enumerate() {
+        for (i, k) in set.keys.iter().enumerate() {
             if i > 0 {
                 out.push_str(", ");
             }

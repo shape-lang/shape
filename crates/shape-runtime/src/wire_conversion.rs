@@ -315,7 +315,6 @@ pub fn heap_value_to_wire(hv: &HeapValue, ctx: &Context) -> WireValue {
         // (mirror of the JSON shape — i64-priority-only at landing).
         HeapValue::PriorityQueue(d) => WireValue::Array(
             d.heap
-                .data
                 .iter()
                 .map(|v| WireValue::Integer(*v))
                 .collect(),

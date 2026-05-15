@@ -179,7 +179,6 @@ pub fn heap_to_json_value(hv: &HeapValue) -> Result<JsonValue, String> {
         // architectural-choice deferral.
         HeapValue::HashSet(d) => Ok(JsonValue::Array(
             d.keys
-                .data
                 .iter()
                 .map(|k| JsonValue::String((**k).clone()))
                 .collect(),
@@ -271,7 +270,6 @@ pub fn heap_to_json_value(hv: &HeapValue) -> Result<JsonValue, String> {
         // serialisation preserves heap order to match Display.
         HeapValue::PriorityQueue(d) => Ok(JsonValue::Array(
             d.heap
-                .data
                 .iter()
                 .map(|v| JsonValue::Int(*v))
                 .collect(),
