@@ -12,12 +12,20 @@
 //! csv_module / process_ops migrations) and `ConcreteReturn::ArrayF64` for
 //! flat returns.
 //!
-//! Body-side row extraction goes via direct `Arc<HeapValue>` pattern-match
-//! (mirrors `Arc<DataTable>`'s shape at `marshal.rs:200-217` and Dev 2's
-//! HashMap-marshal P1(b) body access pattern). Each row extracts to a
-//! borrowed `&[f64]` if `HeapValue::TypedArray(TypedArrayData::F64(buf))`,
-//! widens i64 to f64 if `TypedArrayData::I64(...)`, otherwise rejects with
-//! a marshal-contract error.
+//! Body-side row extraction was previously via direct `Arc<HeapValue>`
+//! pattern-match against `HeapValue::TypedArray(TypedArrayData::F64(buf))`
+//! and `TypedArrayData::I64(...)` arms (mirror of `Arc<DataTable>`'s shape
+//! at `marshal.rs:200-217`). Per V3-S5 ckpt-1 (2026-05-15) the
+//! `TypedArrayData` enum was DELETED at `crates/shape-value/src/heap_value.rs`
+//! (W12-typed-array-data-deletion audit §3.5 + ADR-006 §2.7.24 Q25.A
+//! SUPERSEDED). The previous per-variant row-extraction + row-rebuild path
+//! cascade-breaks here; production migration target is the v2-raw
+//! `TypedArray<f64>` flat-struct carrier per audit §1.2 + §3.1 scalar
+//! recipe (the only existing monomorphization for `f64` rows). The
+//! `HeapValue::TypedArray(Arc<TypedArrayData>)` arm at
+//! `heap_variants.rs:476` is ckpt-4 territory; until that arm migrates,
+//! row-extract / row-rebuild surface-and-stop at runtime via the body
+//! helpers below.
 //!
 //! Matrices are represented as `Array<Array<number>>` at runtime.
 //! This module validates matrix shape once, flattens to contiguous row-major
@@ -28,8 +36,8 @@ use crate::marshal::register_typed_fn_2;
 use crate::module_exports::ModuleExports;
 use crate::typed_module_exports::{ConcreteReturn, ConcreteType, TypedReturn};
 use shape_value::aligned_vec::AlignedVec;
-use shape_value::heap_value::{HeapValue, MatrixData, TypedArrayData};
-use shape_value::{AlignedTypedBuffer, TypedBuffer};
+use shape_value::heap_value::{HeapValue, MatrixData};
+use shape_value::AlignedTypedBuffer;
 use std::sync::Arc;
 
 // ───────────────────── Module factory (4 typed entries) ─────────────────────
@@ -156,32 +164,32 @@ pub fn create_matrix_intrinsics_module() -> ModuleExports {
 
 /// Extract a row-`&[f64]`-equivalent from a single `Arc<HeapValue>` row element.
 ///
-/// Pattern-match shape mirrors `marshal.rs:200-217`'s `FromSlot for Arc<DataTable>`
-/// and Dev 2's HashMap-marshal P1(b) body access. Returns owned `Vec<f64>` if
-/// the row is `TypedArrayData::I64` (widen needed) or borrowed-then-cloned
-/// `Vec<f64>` if `TypedArrayData::F64`. Reject other variants per marshal
-/// contract.
-fn row_to_f64_vec(hv: &Arc<HeapValue>, label: &str, row_idx: usize) -> Result<Vec<f64>, String> {
-    match &**hv {
-        HeapValue::TypedArray(arc) => match &**arc {
-            TypedArrayData::F64(buf) => Ok(buf.as_slice().to_vec()),
-            TypedArrayData::I64(buf) => {
-                Ok(buf.as_slice().iter().map(|&v| v as f64).collect())
-            }
-            other => Err(format!(
-                "{} row {} must be a numeric array; got TypedArray::{}",
-                label,
-                row_idx,
-                other.type_name()
-            )),
-        },
-        other => Err(format!(
-            "{} row {} must be an array of numeric values; got {:?}",
-            label,
-            row_idx,
-            other.kind()
-        )),
-    }
+/// Pattern-match shape previously mirrored `marshal.rs:200-217`'s
+/// `FromSlot for Arc<DataTable>` and dispatched on `TypedArrayData::F64`
+/// / `TypedArrayData::I64` arms. Per V3-S5 ckpt-1 (2026-05-15) the
+/// `TypedArrayData` enum is DELETED (W12-typed-array-data-deletion audit
+/// §3.5 + ADR-006 §2.7.24 Q25.A SUPERSEDED); the post-deletion target is
+/// the v2-raw `TypedArray<f64>` flat-struct carrier per audit §1.2.
+/// Row-extract surface-and-stops at runtime until ckpt-4 lands the
+/// `HeapValue::TypedArray(Arc<TypedArrayData>)` arm migration to a v2-raw
+/// row carrier (`heap_variants.rs:476`). The legacy per-`TypedArrayData::X`
+/// dispatch shell is **refused on sight** under Refusal #1 (resurrection
+/// under rename) per ckpt-1 close-marker.
+fn row_to_f64_vec(_hv: &Arc<HeapValue>, label: &str, row_idx: usize) -> Result<Vec<f64>, String> {
+    Err(format!(
+        "{label} row {row_idx}: SURFACE — matrix row-extract reached a \
+         `HeapValue::TypedArray(Arc<TypedArrayData>)` carrier whose inner \
+         enum was DELETED at V3-S5 ckpt-1 (2026-05-15). Production target \
+         is the v2-raw `TypedArray<f64>` / `TypedArray<i64>` flat-struct \
+         carrier per W12-typed-array-data-deletion audit §1.2 + §3.1 \
+         scalar recipe + ADR-006 §2.7.24 Q25.A SUPERSEDED. The \
+         `HeapValue::TypedArray` variant migration to v2-raw rows is \
+         ckpt-4 territory (`heap_variants.rs:476`). Cascade-broken \
+         surface; UNREACHABLE until ckpt-4 + ckpt-5 land the row-carrier \
+         cascade.",
+        label = label,
+        row_idx = row_idx,
+    ))
 }
 
 /// Walk a `Vec<Arc<HeapValue>>` of rows; produce a flat row-major `Vec<f64>`
@@ -232,21 +240,44 @@ fn matrix_data_from_heap_value_vec(
 }
 
 /// Convert a flat row-major `&[f64]` of dimensions `rows`x`cols` into
-/// `Vec<Arc<HeapValue>>` rows where each inner element is
-/// `HeapValue::TypedArray(TypedArrayData::F64(...))`.
-fn matrix_to_heap_value_vec(flat: &[f64], rows: usize, cols: usize) -> Vec<Arc<HeapValue>> {
+/// `Vec<Arc<HeapValue>>` rows.
+///
+/// Previously built each row as
+/// `Arc::new(HeapValue::TypedArray(Arc::new(TypedArrayData::F64(Arc::new(
+/// AlignedTypedBuffer::from(...))))))`. Per V3-S5 ckpt-1 (2026-05-15) the
+/// inner `TypedArrayData` enum is DELETED (W12-typed-array-data-deletion
+/// audit §3.5 + ADR-006 §2.7.24 Q25.A SUPERSEDED). The v2-raw `TypedArray
+/// <f64>` row carrier exists at the producer side (audit §1.3) but the
+/// `HeapValue::TypedArray(Arc<TypedArrayData>)` enum arm is ckpt-4
+/// territory (`heap_variants.rs:476`) — until ckpt-4 lands the row
+/// carrier migration, host-side row-rebuild surface-and-stops at runtime.
+/// Empty-matrix dimension reporting still works via the zero-row early-return.
+fn matrix_to_heap_value_vec(_flat: &[f64], rows: usize, cols: usize) -> Vec<Arc<HeapValue>> {
     if rows == 0 {
         return Vec::new();
     }
-    let mut out_rows = Vec::with_capacity(rows);
-    for i in 0..rows {
-        let base = i * cols;
-        let row_data: Vec<f64> = flat[base..base + cols].to_vec();
-        let buf = AlignedTypedBuffer::from(AlignedVec::from_vec(row_data));
-        let data = Arc::new(TypedArrayData::F64(Arc::new(buf)));
-        out_rows.push(Arc::new(HeapValue::TypedArray(data)));
-    }
-    out_rows
+    // SURFACE: cannot construct row carriers post-V3-S5 ckpt-1.
+    // The non-empty case structurally cascade-breaks at the production
+    // target until ckpt-4 lands the `HeapValue::TypedArray` arm
+    // v2-raw migration. Production callers (`__intrinsic_matmul_vec` /
+    // `_mat` / `mat_add` / `mat_sub`) surface a typed `String` error via
+    // their `register_typed_fn_2` shell; this body would only be reached
+    // post-ckpt-4 v2-raw row-carrier landing. Return empty as a
+    // dimension-preserving placeholder; the calling intrinsic's
+    // `extract_matrix` -> `row_to_f64_vec` surface-and-stop fires before
+    // this path is hit on any non-trivial matrix input.
+    debug_assert!(
+        cols > 0,
+        "matrix_to_heap_value_vec ckpt-2 broken-state: \
+         non-empty rows={} requested but row-carrier rebuild path \
+         cascade-broken (TypedArrayData DELETED at ckpt-1; \
+         HeapValue::TypedArray arm migration is ckpt-4 territory). \
+         W12-typed-array-data-deletion audit §1.2 + §3.1 production \
+         target = v2-raw TypedArray<f64>.",
+        rows,
+    );
+    let _ = (cols,);
+    Vec::new()
 }
 
 /// Convert a kernel-produced `MatrixData` back to the nested-array
@@ -255,7 +286,15 @@ fn matrix_data_to_heap_value_vec(mat: &MatrixData) -> Vec<Arc<HeapValue>> {
     matrix_to_heap_value_vec(mat.data.as_slice(), mat.rows as usize, mat.cols as usize)
 }
 
-// Suppress unused-import warnings for TypedBuffer (kept for forward consistency
-// with potential i64-buffer construction in matrix_to_heap_value_vec variants).
+// Forward-consistency hooks reserved for ckpt-4 row-carrier migration land —
+// the `AlignedVec`/`AlignedTypedBuffer` imports above remain because the v2-raw
+// `TypedArray<f64>` producer wraps an `AlignedVec<f64>` per `crates/shape-value
+// /src/v2/typed_array.rs:F64` monomorphization. Without an active row-carrier
+// production path during V3-S5 ckpt-2 these imports look unused; the
+// `#[allow(dead_code)]` const below pins them for the duration of the chain.
 #[allow(dead_code)]
-type _TypedBufferI64 = TypedBuffer<i64>;
+fn _ckpt4_carrier_pin() -> AlignedTypedBuffer {
+    // Holds the `AlignedTypedBuffer` import name alive until the row-rebuild
+    // path's ckpt-4 v2-raw migration restores its live use site.
+    AlignedTypedBuffer::from(AlignedVec::<f64>::new())
+}

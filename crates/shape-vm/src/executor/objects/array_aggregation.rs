@@ -2,281 +2,108 @@
 //!
 //! Handles: sum, avg, min, max, count, reduce
 //!
-//! ## W9-array-aggregation closure-callback close (2026-05-10)
+//! ## V3-S5 ckpt-2 consumer-cascade surface (2026-05-15)
 //!
-//! Wave-γ `G-method-fn-v2-abi` flipped `MethodFnV2` to the kinded carrier
-//! slice form (`fn(&mut VM, &[KindedSlot], _) -> Result<KindedSlot, VMError>`).
-//! Wave 7 closed `call_value_immediate_nb` (`call_convention.rs:767`) per
-//! ADR-006 §2.7.11 / Q12 — kinded callee + kinded args + kinded result.
-//! `count(predicate)` and `reduce`/`fold` now issue per-element closure
-//! callbacks through that path; sum/avg/min/max/count(arity-0) stay on the
-//! per-`TypedArrayData::*` variant numeric reduction path (no callback).
+//! Per V3-S5 ckpt-1 close (commit `aac8495e`, 2026-05-15), the
+//! `TypedArrayData` enum + impl blocks + `Display for TypedArrayData` +
+//! `typed_array_structural_eq` fn were DELETED at
+//! `crates/shape-value/src/heap_value.rs` per W12-typed-array-data-deletion
+//! audit §3.5 + ADR-006 §2.7.24 Q25.A SUPERSEDED. This file's previous
+//! consumer-shape — `Arc<TypedArrayData>` receiver recovery via
+//! `with_typed_array` + per-variant numeric-domain dispatch via
+//! `variant_numeric_domain` + `fold_int` / `fold_float` over
+//! `TypedArrayData::I8 / I16 / I32 / I64 / U8 / U16 / U32 / U64 / Bool /
+//! F32 / F64 / String / Decimal / BigInt / Char / TypedObject` arms — cascade-
+//! breaks here as the deletion's consumer cascade tier 1.
 //!
-//! Receiver dispatches on
-//! `args[0].kind == NativeKind::Ptr(HeapKind::TypedArray)`, reconstructing
-//! the typed share via `Arc::<TypedArrayData>::from_raw` (cluster A
-//! precedent in `executor/v2_handlers/typed_array_elem.rs:119` — read by
-//! reference, then `Arc::into_raw` restores the share without disturbing
-//! the caller's `KindedSlot` ownership).
+//! Public handler bodies (`handle_sum_v2 / avg / min / max / count /
+//! reduce`) are replaced with structured surface-and-stop returning
+//! `VMError::NotImplemented`. Local helpers (`with_typed_array /
+//! typed_array_len / variant_numeric_domain / fold_int / fold_float /
+//! element_kinded`) are DELETED — every one took `&TypedArrayData` /
+//! produced `Result<R, VMError>` ranging over per-variant arms; with the
+//! type gone they cannot exist.
 //!
-//! Per-`TypedArrayData::*` numeric reductions go through
-//! `kind_coerce::numeric_domain` (Bool counts truthies; I*/U* fold to
-//! Int64; F32/F64/FloatSlice fold to Float64). Empty-array semantics match
-//! the pre-Wave-6.5 body: `sum`/`count` yield 0 of the appropriate kind,
-//! `avg` yields 0.0, `min`/`max` yield a runtime error, `reduce` returns
-//! the supplied initial value.
+//! `slot_truthy` is preserved (no `TypedArrayData` dependency — operates
+//! on raw bits + `NativeKind`).
+//!
+//! ## Cascade migration target (post-ckpt-6 STRICT close)
+//!
+//! Per W12-typed-array-data-deletion audit §A.3 + §2.1 scalar recipe +
+//! §2.2 heap-element variants, every previous `TypedArrayData::X(buf)`
+//! match arm in this file's numeric folds migrates to the v2-raw
+//! `TypedArray<T>` flat-struct carrier with per-T `as_slice()` access.
+//! Closure-callback dispatch (`count(predicate)` arity-1, `reduce`/`fold`)
+//! re-instates via `vm.call_value_immediate_nb` once the receiver-shape
+//! migration lands (the closure-callback ABI itself stays — ADR-006
+//! §2.7.11 / Q12 is unaffected by the TypedArrayData deletion).
+//!
+//! Bodies REFUSED ON SIGHT under Refusal #1 (resurrection under rename
+//! per ckpt-1 close-marker at `heap_value.rs:3956`).
 
 use shape_runtime::context::ExecutionContext;
 use crate::executor::VirtualMachine;
-use crate::executor::builtins::kind_coerce::NumericDomain;
-use shape_value::heap_value::{HeapKind, HeapValue, TypedArrayData};
 use shape_value::{KindedSlot, NativeKind, VMError};
-use std::sync::Arc;
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Local helpers — receiver borrow + numeric folds
+// V3-S5 ckpt-2 surface-and-stop builder
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Borrow the receiver `Arc<TypedArrayData>` from `args[0]` without
-/// disturbing its strong-count share. Mirrors the cluster A precedent in
-/// `executor/v2_handlers/typed_array_elem.rs:119`.
+/// Common surface-and-stop body for every public handler in this file.
 ///
-/// Returns `Err(TypeError)` when the receiver kind is not
-/// `Ptr(HeapKind::TypedArray)`.
-///
-/// ## Wave 2 Round 3a' Agent β v2-raw receiver arm (2026-05-14)
-///
-/// The `NativeKind::UInt64` arm recognizes v2-raw `*const TypedArray<T>`
-/// receivers via `as_v2_typed_array` (mirror of
-/// `array_transform::typed_array_arc_from_kinded`). Per ADR-006 §2.7.24
-/// Q25.A SUPERSEDED + audit §4.1.B.3, the `V2ElemType::String` and
-/// `V2ElemType::Decimal` arms surface-and-stop with a structured §-cite —
-/// materializing `*const StringObj` / `*const DecimalObj` element bits into
-/// an `Arc<TypedArrayData::String/Decimal>` snapshot at this layer is the
-/// `materialize-on-read forbidden` pattern. Other v2-raw element kinds
-/// route through `array_transform::typed_array_arc_from_kinded` which
-/// snapshots scalar (`I64/F64/Bool/Int*/UInt*/F32/Char`) v2-raw buffers
-/// into the legacy `Arc<TypedArrayData>` arms for uniform aggregation
-/// dispatch.
-///
-/// At this commit the arm is UNREACHABLE: the producer gate
-/// `should_use_typed_array` in `v2_typed_emission.rs` returns `None` for
-/// `ConcreteType::String` / `ConcreteType::Decimal` pending the
-/// `A2-followup-gate-flip` sub-cluster. The arm lands per Round 3a' Agent β
-/// scope so the gate-flip ceremony has a structured surface to land
-/// against (no type-confusion window per Round 3a' pre-dispatch invariant).
-fn with_typed_array<F, R>(args: &[KindedSlot], expected: &'static str, f: F) -> Result<R, VMError>
-where
-    F: FnOnce(&TypedArrayData) -> Result<R, VMError>,
-{
-    if args.is_empty() {
-        return Err(VMError::RuntimeError(format!(
-            "{}: missing receiver",
-            expected
-        )));
-    }
-    match args[0].kind {
-        NativeKind::Ptr(HeapKind::TypedArray) => {
-            // Reconstruct an Arc share to project, then `into_raw` to
-            // restore — caller's KindedSlot keeps its ownership.
-            let arc = unsafe {
-                Arc::<TypedArrayData>::from_raw(args[0].slot.raw() as *const TypedArrayData)
-            };
-            let result = f(&arc);
-            let _ = Arc::into_raw(arc);
-            result
-        }
-        // Wave 2 Round 3a' Agent β (2026-05-14) — v2-raw receiver arm.
-        // UNREACHABLE at this commit per the explicit non-flip binding
-        // (producer gate `should_use_typed_array` returns `None` for
-        // `ConcreteType::String` / `ConcreteType::Decimal` at HEAD).
-        NativeKind::UInt64 => {
-            use crate::executor::v2_handlers::v2_array_detect::{
-                as_v2_typed_array, V2ElemType,
-            };
-            let bits = args[0].slot.raw();
-            match as_v2_typed_array(bits, NativeKind::UInt64) {
-                Some(view) => match view.elem_type {
-                    V2ElemType::String | V2ElemType::Decimal => {
-                        // ADR-006 §2.7.24 Q25.A SUPERSEDED + audit §4.1.B.3
-                        // materialize-on-read forbidden. The right fix is
-                        // a per-handler v2-raw body (lexicographic min/max
-                        // for String, arithmetic sum/avg/min/max for
-                        // Decimal, length-count for both, closure-callback
-                        // reduce/count(predicate) for both) reading
-                        // elements via `TypedArray::<*const <X>Obj>::get`
-                        // and pushing results as `NativeKind::StringV2` /
-                        // `NativeKind::DecimalV2` (Agent B Round 1
-                        // variants). The materialize-into-`Arc<TypedArrayData>`
-                        // path taken by other v2-raw kinds is the forbidden
-                        // pattern for heap-element kinds — refused on
-                        // sight per §4.1.B.3.
-                        Err(VMError::NotImplemented(format!(
-                            "{}: SURFACE — v2-raw TypedArray<*const StringObj/DecimalObj> \
-                             receiver reached the aggregation dispatch shell. Per-handler \
-                             v2-raw bodies (lexicographic min/max + Decimal arithmetic + \
-                             length-count + closure-callback reduce/count) land via the \
-                             A2-followup-gate-flip ceremony's per-handler routing; this arm \
-                             is UNREACHABLE at this commit per Round 3a' non-flip binding \
-                             (producer gate `should_use_typed_array` in `v2_typed_emission.rs` \
-                             returns `None` for `ConcreteType::String/Decimal`). \
-                             Tracked as W12-typed-array-data-s2-prime-production-mechanical \
-                             per audit §3.2 + ADR-006 §2.7.24 Q25.A SUPERSEDED + §4.1.B.3 \
-                             materialize-on-read forbidden.",
-                            expected
-                        )))
-                    }
-                    // Scalar v2-raw element kinds (I64/F64/Bool/I8/U8/I16/
-                    // U16/U32/F32/Char) snapshot into `Arc<TypedArrayData>`
-                    // via the cross-file `typed_array_arc_from_kinded`
-                    // helper. The snapshot is the W12 S1 / Wave 2 Agent A1
-                    // transitional carrier (scalar arms survive S5
-                    // deletion target until `TypedArrayData` is dropped
-                    // entirely).
-                    _ => {
-                        let arc = crate::executor::objects::array_transform::typed_array_arc_from_kinded(
-                            &args[0], expected,
-                        )?;
-                        f(&arc)
-                    }
-                },
-                None => Err(VMError::RuntimeError(format!(
-                    "{}: UInt64 receiver is not a v2 typed-array pointer",
-                    expected
-                ))),
-            }
-        }
-        other => Err(VMError::RuntimeError(format!(
-            "{}: expected Array receiver, got kind {:?}",
-            expected, other
-        ))),
-    }
+/// Returns a structured `VMError::NotImplemented` citing the V3-S5 ckpt-2
+/// cascade-broken state: the previous per-`TypedArrayData::X` variant
+/// numeric-domain dispatch path is gone (ckpt-1 deleted the enum); the
+/// v2-raw `TypedArray<T>` flat-struct consumer cascade lands across
+/// ckpt-3 / 4 / 5 per W12-typed-array-data-deletion audit §A.3
+/// per-variant migration disposition.
+#[cold]
+#[inline(never)]
+fn ckpt2_surface(op: &'static str, args: &[KindedSlot]) -> VMError {
+    let receiver_kind = if args.is_empty() {
+        "<no args>".to_string()
+    } else {
+        format!("{:?}", args[0].kind)
+    };
+    VMError::NotImplemented(format!(
+        "{op}: SURFACE — V3-S5 ckpt-2 consumer-cascade tier 1 surface. \
+         `TypedArrayData` enum DELETED at ckpt-1 (2026-05-15) per W12-\
+         typed-array-data-deletion audit §3.5 + ADR-006 §2.7.24 Q25.A \
+         SUPERSEDED. The previous `Arc<TypedArrayData>` receiver-recovery \
+         (`with_typed_array`) + per-variant `fold_int / fold_float` \
+         numeric-domain dispatch path (~65 references across 6 public \
+         handlers in this file) cascade-broke at the enum deletion site \
+         (`crates/shape-value/src/heap_value.rs:3944`). Post-deletion \
+         target is the v2-raw `TypedArray<T>` flat-struct carrier per \
+         audit §1.2 + §A.3 + §3.1 scalar recipe; per-T monomorphization \
+         landing across ckpt-3 (array_ops/typed_array_methods/\
+         iterator_methods/array_sort/concat/property_access) + ckpt-4 \
+         (TypedBuffer<T> / HeapValue::TypedArray arm / \
+         HeapKind::TypedArray ordinal) + ckpt-5 (wire/json/marshal + \
+         4-table lockstep) + ckpt-6 (JIT FFI). Closure-callback ABI \
+         (ADR-006 §2.7.11 / Q12 `vm.call_value_immediate_nb` for \
+         `count(predicate)` arity-1 + `reduce`/`fold`) is unaffected \
+         and re-instates once receiver-shape migration lands. Receiver \
+         kind: {kind}. UNREACHABLE until ckpt-6 STRICT close. REFUSED \
+         ON SIGHT: TypedArrayData resurrection under any rename \
+         (Refusal #1, W12 audit §7).",
+        op = op,
+        kind = receiver_kind,
+    ))
 }
 
-/// `len()` of a `TypedArrayData`, factoring out the per-variant match.
-fn typed_array_len(arr: &TypedArrayData) -> usize {
-    match arr {
-        TypedArrayData::I64(b) => b.data.len(),
-        TypedArrayData::F64(b) => b.data.len(),
-        TypedArrayData::Bool(b) => b.data.len(),
-        TypedArrayData::I8(b) => b.data.len(),
-        TypedArrayData::I16(b) => b.data.len(),
-        TypedArrayData::I32(b) => b.data.len(),
-        TypedArrayData::U8(b) => b.data.len(),
-        TypedArrayData::U16(b) => b.data.len(),
-        TypedArrayData::U32(b) => b.data.len(),
-        TypedArrayData::U64(b) => b.data.len(),
-        TypedArrayData::F32(b) => b.data.len(),
-        TypedArrayData::String(b) => b.data.len(),
-        // ADR-006 §2.7.22 amendment (Round 18 S3): Matrix / FloatSlice
-        // exit `TypedArrayData`.
-        // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
-        TypedArrayData::Decimal(b) => b.data.len(),
-        TypedArrayData::BigInt(b) => b.data.len(),
-        TypedArrayData::Char(b) => b.data.len(),
-        TypedArrayData::TypedObject(b) => b.data.len(),
-    }
-}
-
-/// Per-variant numeric domain classification. Bool counts as Int (1/0
-/// promotion under the pre-Wave-6.5 semantics where boolean arrays summed
-/// to a count of truthies).
-fn variant_numeric_domain(arr: &TypedArrayData) -> Result<NumericDomain, VMError> {
-    match arr {
-        TypedArrayData::I8(_)
-        | TypedArrayData::I16(_)
-        | TypedArrayData::I32(_)
-        | TypedArrayData::I64(_)
-        | TypedArrayData::U8(_)
-        | TypedArrayData::U16(_)
-        | TypedArrayData::U32(_)
-        | TypedArrayData::U64(_)
-        | TypedArrayData::Bool(_) => Ok(NumericDomain::Int),
-        TypedArrayData::F32(_) | TypedArrayData::F64(_) => Ok(NumericDomain::Float),
-        other => Err(VMError::RuntimeError(format!(
-            "expected numeric Array, got {}",
-            other.type_name()
-        ))),
-    }
-}
-
-/// Fold a numeric `TypedArrayData` to `i64` (Int domain).
-fn fold_int<F>(arr: &TypedArrayData, init: i64, mut step: F) -> Result<i64, VMError>
-where
-    F: FnMut(i64, i64) -> i64,
-{
-    Ok(match arr {
-        TypedArrayData::I8(b) => b.data.iter().fold(init, |a, &v| step(a, v as i64)),
-        TypedArrayData::I16(b) => b.data.iter().fold(init, |a, &v| step(a, v as i64)),
-        TypedArrayData::I32(b) => b.data.iter().fold(init, |a, &v| step(a, v as i64)),
-        TypedArrayData::I64(b) => b.data.iter().fold(init, |a, &v| step(a, v)),
-        TypedArrayData::U8(b) => b.data.iter().fold(init, |a, &v| step(a, v as i64)),
-        TypedArrayData::U16(b) => b.data.iter().fold(init, |a, &v| step(a, v as i64)),
-        TypedArrayData::U32(b) => b.data.iter().fold(init, |a, &v| step(a, v as i64)),
-        TypedArrayData::U64(b) => b.data.iter().fold(init, |a, &v| step(a, v as i64)),
-        TypedArrayData::Bool(b) => b
-            .data
-            .iter()
-            .fold(init, |a, &v| step(a, if v != 0 { 1 } else { 0 })),
-        other => {
-            return Err(VMError::RuntimeError(format!(
-                "expected integer Array, got {}",
-                other.type_name()
-            )));
-        }
-    })
-}
-
-/// Read element `idx` of a `TypedArrayData` as a fresh `KindedSlot`,
-/// owning one strong-count share for heap-bearing element kinds. Returns
-/// `Err(IndexOutOfBounds)` when `idx` is past the per-variant length.
-///
-/// This is the per-element carrier-construction site for closure callbacks
-/// (`reduce`, `count(predicate)`) — every kinded payload (Int64, Float64,
-/// Bool, String, heterogeneous heap) gets the matching `KindedSlot`
-/// constructor (ADR-006 §2.7.6 / Q8 carrier-API-bound). Narrow-int /
-/// matrix / float-slice variants surface explicitly per playbook §8.
-fn element_kinded(arr: &TypedArrayData, idx: usize) -> Result<KindedSlot, VMError> {
-    let len = typed_array_len(arr);
-    if idx >= len {
-        return Err(VMError::IndexOutOfBounds {
-            index: idx as i32,
-            length: len,
-        });
-    }
-    Ok(match arr {
-        TypedArrayData::I64(b) => KindedSlot::from_int(b.data[idx]),
-        TypedArrayData::F64(b) => KindedSlot::from_number(b.data[idx]),
-        TypedArrayData::Bool(b) => KindedSlot::from_bool(b.data[idx] != 0),
-        TypedArrayData::I8(b) => KindedSlot::from_int(b.data[idx] as i64),
-        TypedArrayData::I16(b) => KindedSlot::from_int(b.data[idx] as i64),
-        TypedArrayData::I32(b) => KindedSlot::from_int(b.data[idx] as i64),
-        TypedArrayData::U8(b) => KindedSlot::from_int(b.data[idx] as i64),
-        TypedArrayData::U16(b) => KindedSlot::from_int(b.data[idx] as i64),
-        TypedArrayData::U32(b) => KindedSlot::from_int(b.data[idx] as i64),
-        TypedArrayData::U64(b) => KindedSlot::from_int(b.data[idx] as i64),
-        TypedArrayData::F32(b) => KindedSlot::from_number(b.data[idx] as f64),
-        TypedArrayData::String(b) => KindedSlot::from_string_arc(Arc::clone(&b.data[idx])),
-        // ADR-006 §2.7.22 amendment (Round 18 S3): Matrix / FloatSlice
-        // exit `TypedArrayData`. Per-element extraction for Matrix /
-        // MatrixSlice receivers is the dispatch-shell's responsibility
-        // and is handled via the dedicated `HeapKind::Matrix` /
-        // `HeapKind::MatrixSlice` method tables (`MATRIX_METHODS` /
-        // `FLOAT_ARRAY_METHODS`).
-        // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized
-        // arms. Same shape as `array_transform::element_kinded`.
-        TypedArrayData::Decimal(b) => KindedSlot::from_decimal(Arc::clone(&b.data[idx])),
-        TypedArrayData::BigInt(b) => KindedSlot::from_bigint(Arc::clone(&b.data[idx])),
-        TypedArrayData::Char(b) => KindedSlot::from_char(b.data[idx]),
-        // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): TypedObjectPtr.
-        TypedArrayData::TypedObject(b) => KindedSlot::from_typed_object_raw(b.data[idx].clone().into_raw()),
-    })
-}
+// ═══════════════════════════════════════════════════════════════════════════
+// Truthiness helper — preserved (no TypedArrayData dependency)
+// ═══════════════════════════════════════════════════════════════════════════
 
 /// Test a `KindedSlot` for truthiness — Bool/numeric arms read bits,
 /// heap arms are non-null → truthy. Mirrors the `kinded_truthy` helper in
-/// `executor/logical/mod.rs:43` (private there). Used by `count(predicate)`.
+/// `executor/logical/mod.rs:43` (private there). Used by `count(predicate)`
+/// post-ckpt-6 when closure-callback aggregation re-instates against the
+/// v2-raw `TypedArray<T>` receiver-shape; preserved through V3-S5 ckpt-2
+/// because it has no `TypedArrayData` dependency.
 #[inline]
+#[allow(dead_code)]
 fn slot_truthy(slot: &KindedSlot) -> bool {
     let bits = slot.slot.raw();
     match slot.kind {
@@ -303,239 +130,68 @@ fn slot_truthy(slot: &KindedSlot) -> bool {
         | NativeKind::NullableUInt32
         | NativeKind::NullableUInt64
         | NativeKind::NullableUIntSize => bits != 0,
-        // Round 19 S1.5 W12-nativekind-scalar-additions (2026-05-14).
         NativeKind::Float32 => f32::from_bits(bits as u32) != 0.0,
         NativeKind::Char => bits != 0,
-        // Wave 2 Agent B W12-StringV2-DecimalV2-NativeKind-additions
-        // (2026-05-14): non-null v2-raw pointer → truthy (same rule as
-        // String / Ptr(_)).
         NativeKind::StringV2 | NativeKind::DecimalV2 => bits != 0,
         NativeKind::String | NativeKind::Ptr(_) => bits != 0,
     }
 }
 
-/// Fold a numeric `TypedArrayData` to `f64` (Float domain). Coerces
-/// integer variants to f64 transparently (matches the pre-Wave-6.5
-/// `extract_number_coerce` semantics for Float-mode aggregation).
-fn fold_float<F>(arr: &TypedArrayData, init: f64, mut step: F) -> Result<f64, VMError>
-where
-    F: FnMut(f64, f64) -> f64,
-{
-    Ok(match arr {
-        TypedArrayData::F32(b) => b.data.iter().fold(init, |a, &v| step(a, v as f64)),
-        TypedArrayData::F64(b) => b.data.iter().fold(init, |a, &v| step(a, v)),
-        // ADR-006 §2.7.22 amendment (Round 18 S3): FloatSlice exits.
-        TypedArrayData::I8(b) => b.data.iter().fold(init, |a, &v| step(a, v as f64)),
-        TypedArrayData::I16(b) => b.data.iter().fold(init, |a, &v| step(a, v as f64)),
-        TypedArrayData::I32(b) => b.data.iter().fold(init, |a, &v| step(a, v as f64)),
-        TypedArrayData::I64(b) => b.data.iter().fold(init, |a, &v| step(a, v as f64)),
-        TypedArrayData::U8(b) => b.data.iter().fold(init, |a, &v| step(a, v as f64)),
-        TypedArrayData::U16(b) => b.data.iter().fold(init, |a, &v| step(a, v as f64)),
-        TypedArrayData::U32(b) => b.data.iter().fold(init, |a, &v| step(a, v as f64)),
-        TypedArrayData::U64(b) => b.data.iter().fold(init, |a, &v| step(a, v as f64)),
-        TypedArrayData::Bool(b) => b
-            .data
-            .iter()
-            .fold(init, |a, &v| step(a, if v != 0 { 1.0 } else { 0.0 })),
-        other => {
-            return Err(VMError::RuntimeError(format!(
-                "expected numeric Array, got {}",
-                other.type_name()
-            )));
-        }
-    })
-}
-
 // ═══════════════════════════════════════════════════════════════════════════
-// MethodFnV2 (native ABI) handlers — kinded carrier slice in/out
+// MethodFnV2 (native ABI) public handlers — ckpt-2 surface-and-stop stubs
+// Signatures preserved for `method_registry.rs` PHF integrity.
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// `arr.sum()` — fold the array via numeric addition. Result kind matches
-/// the array's numeric domain (Int → Int64, Float → Float64). Bool arrays
-/// count truthies (sum to Int64). Empty arrays sum to 0.
+/// `arr.sum()` — fold the array via numeric addition.
 pub(crate) fn handle_sum_v2(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    with_typed_array(args, "sum", |arr| match variant_numeric_domain(arr)? {
-        NumericDomain::Int => {
-            let s = fold_int(arr, 0i64, |a, v| a.wrapping_add(v))?;
-            Ok(KindedSlot::from_int(s))
-        }
-        NumericDomain::Float => {
-            let s = fold_float(arr, 0.0f64, |a, v| a + v)?;
-            Ok(KindedSlot::from_number(s))
-        }
-        // Decimal/BigInt arrays are not yet a TypedArrayData variant —
-        // would need the `the-deleted-heterogeneous-element-carrier` heterogeneous arm
-        // and per-element kind metadata (the same Wave-10 surface that
-        // `flatten` flags). Surface explicitly.
-        _ => Err(VMError::NotImplemented(
-            "sum: Decimal/BigInt array variants need the-deleted-heterogeneous-element-carrier \
-             per-element kind metadata — Wave-10 / Phase-2c reentry"
-                .to_string(),
-        )),
-    })
+    Err(ckpt2_surface("sum", args))
 }
 
-/// `arr.avg()` — arithmetic mean as Float64. Empty arrays yield `0.0`.
+/// `arr.avg()` — arithmetic mean as Float64.
 pub(crate) fn handle_avg_v2(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    with_typed_array(args, "avg", |arr| {
-        // Always coerce to f64 — avg of an integer array is fractional.
-        let n = typed_array_len(arr);
-        if n == 0 {
-            return Ok(KindedSlot::from_number(0.0));
-        }
-        let sum = fold_float(arr, 0.0f64, |a, v| a + v)?;
-        Ok(KindedSlot::from_number(sum / n as f64))
-    })
+    Err(ckpt2_surface("avg", args))
 }
 
-/// `arr.min()` — minimum element. Empty arrays surface a runtime error.
+/// `arr.min()` — minimum element.
 pub(crate) fn handle_min_v2(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    with_typed_array(args, "min", |arr| {
-        if typed_array_len(arr) == 0 {
-            return Err(VMError::RuntimeError(
-                "min: empty array".to_string(),
-            ));
-        }
-        match variant_numeric_domain(arr)? {
-            NumericDomain::Int => {
-                let s = fold_int(arr, i64::MAX, |a, v| a.min(v))?;
-                Ok(KindedSlot::from_int(s))
-            }
-            NumericDomain::Float => {
-                let s = fold_float(arr, f64::INFINITY, |a, v| a.min(v))?;
-                Ok(KindedSlot::from_number(s))
-            }
-            _ => Err(VMError::NotImplemented(
-                "min: Decimal/BigInt arrays need the-deleted-heterogeneous-element-carrier \
-                 per-element kind metadata — Wave-10 / Phase-2c reentry"
-                    .to_string(),
-            )),
-        }
-    })
+    Err(ckpt2_surface("min", args))
 }
 
-/// `arr.max()` — maximum element. Empty arrays surface a runtime error.
+/// `arr.max()` — maximum element.
 pub(crate) fn handle_max_v2(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    with_typed_array(args, "max", |arr| {
-        if typed_array_len(arr) == 0 {
-            return Err(VMError::RuntimeError(
-                "max: empty array".to_string(),
-            ));
-        }
-        match variant_numeric_domain(arr)? {
-            NumericDomain::Int => {
-                let s = fold_int(arr, i64::MIN, |a, v| a.max(v))?;
-                Ok(KindedSlot::from_int(s))
-            }
-            NumericDomain::Float => {
-                let s = fold_float(arr, f64::NEG_INFINITY, |a, v| a.max(v))?;
-                Ok(KindedSlot::from_number(s))
-            }
-            _ => Err(VMError::NotImplemented(
-                "max: Decimal/BigInt arrays need the-deleted-heterogeneous-element-carrier \
-                 per-element kind metadata — Wave-10 / Phase-2c reentry"
-                    .to_string(),
-            )),
-        }
-    })
+    Err(ckpt2_surface("max", args))
 }
 
 /// `arr.count()` / `arr.count(predicate)`.
-///
-/// - Arity-0: returns `len()` as Int64.
-/// - Arity-1: invokes the closure predicate per element via
-///   `vm.call_value_immediate_nb` (ADR-006 §2.7.11 / Q12, W7 close) and
-///   counts truthy results.
 pub(crate) fn handle_count_v2(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    mut ctx: Option<&mut ExecutionContext>,
+    _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    // Arity-0: just return the length.
-    if args.len() < 2 {
-        return with_typed_array(args, "count", |arr| {
-            Ok(KindedSlot::from_int(typed_array_len(arr) as i64))
-        });
-    }
-
-    // Arity-1 predicate path: per-element closure callback. The receiver
-    // is borrowed via `with_typed_array`; element extraction goes through
-    // `element_kinded` which builds a fresh `KindedSlot` carrier per
-    // element with one strong-count share (heap kinds) or scalar bits
-    // (Int/Float/Bool). The predicate is `args[1]` — its carrier still
-    // owns one share; we pass `&args[1]` and let `call_value_immediate_nb`
-    // route through the §2.7.11 closure / function-id arms.
-    let len = with_typed_array(args, "count", |arr| Ok(typed_array_len(arr)))?;
-    let mut total: i64 = 0;
-    for i in 0..len {
-        let elem = with_typed_array(args, "count", |arr| element_kinded(arr, i))?;
-        let call_args = [elem];
-        let result =
-            vm.call_value_immediate_nb(&args[1], &call_args, ctx.as_deref_mut())?;
-        if slot_truthy(&result) {
-            total += 1;
-        }
-    }
-    Ok(KindedSlot::from_int(total))
+    Err(ckpt2_surface("count", args))
 }
 
 /// `arr.reduce(init, |acc, x| ...)` / `arr.fold(init, |acc, x| ...)`.
-///
-/// Walks every element of the receiver array, invoking the closure with
-/// `(acc, elem)` and threading the closure's return value back as the new
-/// accumulator. Empty arrays return `init` unchanged. Per ADR-006 §2.7.11
-/// / Q12 the closure callback flows through `vm.call_value_immediate_nb`
-/// — `args[2]` is the closure, `args[1]` is the initial accumulator, and
-/// `args[0]` is the receiver array.
 pub(crate) fn handle_reduce_v2(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    mut ctx: Option<&mut ExecutionContext>,
+    _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    if args.len() < 3 {
-        return Err(VMError::RuntimeError(
-            "reduce/fold: requires (init, closure) — got fewer than 2 args"
-                .to_string(),
-        ));
-    }
-
-    // Borrow the receiver length up front so the with_typed_array borrow
-    // doesn't span the closure callbacks (which themselves drive the VM
-    // execute loop and must not hold the receiver Arc projection live).
-    let len = with_typed_array(args, "reduce", |arr| Ok(typed_array_len(arr)))?;
-
-    // The accumulator carrier owns one share; we replace it on every
-    // iteration with the closure's return value. `args[1].clone()` bumps
-    // the share so the original `args[1]` carrier (owned by the dispatch
-    // shell) is unaffected.
-    let mut acc = args[1].clone();
-    for i in 0..len {
-        let elem = with_typed_array(args, "reduce", |arr| element_kinded(arr, i))?;
-        // `acc.clone()` bumps the share so the original `acc` survives the
-        // call (it gets replaced by `result` on the next line). Both
-        // `acc.clone()` and `elem` move into `call_args`; their carriers'
-        // Drop runs at end of the inner scope. Same shape as the live
-        // dispatch shell in `control_flow/mod.rs::dispatch_call_value_immediate`.
-        let call_args = [acc.clone(), elem];
-        let result =
-            vm.call_value_immediate_nb(&args[2], &call_args, ctx.as_deref_mut())?;
-        acc = result;
-    }
-    Ok(acc)
+    Err(ckpt2_surface("reduce", args))
 }

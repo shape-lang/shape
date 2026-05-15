@@ -2,331 +2,117 @@
 //!
 //! Handles: union, intersect, except, unique, distinct, distinct_by
 //!
-//! ## Wave-δ `MR-array-sort-sets-joins` body migration (ADR-006 §2.7.10 / Q11)
+//! ## V3-S5 ckpt-2 consumer-cascade surface (2026-05-15)
 //!
-//! Bodies migrated off the prior `NotImplemented(SURFACE)` framing now
-//! that the kinded `MethodFnV2` ABI is operational (Wave-γ
-//! `G-method-fn-v2-abi`). The receiver enters as
-//! `args[0]: KindedSlot { kind: NativeKind::Ptr(HeapKind::TypedArray) }`;
-//! payload recovery follows ADR-005 §1 single-discriminator dispatch via
-//! `args[0].slot.as_heap_value()` + `HeapValue::TypedArray(arc)` match,
-//! mirroring the Wave 5b body precedent in
-//! `executor/builtins/array_ops.rs` (`as_typed_array` borrow helper).
-//! Result construction uses `KindedSlot::from_typed_array(Arc::new(...))`
-//! per playbook §3.
+//! Per V3-S5 ckpt-1 close (commit `aac8495e`, 2026-05-15), the
+//! `TypedArrayData` enum + impl blocks + `Display for TypedArrayData` +
+//! `typed_array_structural_eq` fn were DELETED at
+//! `crates/shape-value/src/heap_value.rs` per W12-typed-array-data-deletion
+//! audit §3.5 + ADR-006 §2.7.24 Q25.A SUPERSEDED. This file's
+//! `Arc<TypedArrayData>` receiver-recovery (`as_typed_array`) +
+//! per-variant set-op helpers (`empty_like / already_seen / lhs_in_rhs /
+//! build_from_indices / unique_indices / rhs_pair_eq`) all cascade-break
+//! at the enum deletion site.
 //!
-//! ## Per-element-kind equality (no closure)
+//! Heap-Arc public handler bodies are replaced with structured
+//! surface-and-stop returning `VMError::NotImplemented`. The
+//! `set_op_v2_raw_string_decimal` v2-raw dispatcher PRESERVED intact
+//! (operates on `TypedArray<*const StringObj/DecimalObj>` directly via
+//! `v2_array_detect::as_v2_typed_array` + `StringObj::as_str` /
+//! `DecimalObj::value` + `TypedArray::with_capacity / push` —
+//! independent of `TypedArrayData`); the Wave 2 Agent δ pre-gate-flip
+//! arm at each public handler stays wired so the A2-followup-gate-flip
+//! lockstep close picks up a structurally-complete v2-raw producer +
+//! consumer pair.
 //!
-//! Set ops `union` / `intersect` / `except` / `unique` / `distinct`
-//! discriminate equality via the `TypedArrayData::*` arm: each arm carries
-//! a single Rust scalar/`Arc` type, so `PartialEq` on the inner element
-//! matches the playbook's "per-element-kind equality" contract verbatim
-//! (i64 `==`, f64 `==`, `Arc<String>` content equality). Non-finite f64
-//! NaNs follow IEEE 754 (NaN != NaN); this mirrors the pre-Wave-6 body
-//! behaviour.
+//! ## Cascade migration target (post-ckpt-6 STRICT close)
 //!
-//! ## `distinctBy` — closure-discriminator path
+//! Per W12-typed-array-data-deletion audit §A.3 + §2.1 scalar recipe +
+//! §2.2 heap-element variants, every previous `TypedArrayData::X` arm
+//! in the heap-Arc helpers (`empty_like / already_seen / lhs_in_rhs /
+//! build_from_indices / unique_indices`) migrates to the v2-raw
+//! `TypedArray<T>` flat-struct carrier per-T monomorphization. Per
+//! audit §3.2 / §3.3 the heap-element variant arms (String / Decimal /
+//! BigInt / DateTime / Timespan / Duration / Instant / TypedObject /
+//! TraitObject) need carrier `<X>Obj` structs landed first; the v2-raw
+//! String/Decimal path here already operates on the canonical
+//! `StringObj` / `DecimalObj` carriers per V3-A2-followup-producer-
+//! cascade landing.
 //!
-//! `distinctBy(arr, keyFn)` calls `keyFn(elem)` per element and deduplicates
-//! by the resulting key. The kinded value-call path
-//! (`call_value_immediate_nb` in `call_convention.rs:767`,
-//! `dispatch_call_value_immediate` in `control_flow/mod.rs:389`) is live
-//! post-W7 (ADR-006 §2.7.11 / Q12). The upstream gate is `op_make_closure`
-//! in `control_flow/mod.rs:447`, still
-//! `NotImplemented(PHASE_2C_CALL_REBUILD_SURFACE)` pending the kinded
-//! capture-read + closure-block construction rebuild (ADR-006 §2.7.4 /
-//! §2.7.5 / §2.7.8). Without it no user closure `KindedSlot` carrier
-//! reaches `args[1]`. Surface per playbook §7.4 REVISED.
+//! Bodies REFUSED ON SIGHT under Refusal #1 (resurrection under rename
+//! per ckpt-1 close-marker at `heap_value.rs:3956`).
 
 use shape_runtime::context::ExecutionContext;
 use crate::executor::VirtualMachine;
-use shape_value::{
-    HeapKind, HeapValue, KindedSlot, NativeKind, TypedArrayData, TypedBuffer, VMError,
-};
-use std::sync::Arc;
-
-use crate::executor::objects::array_transform::{
-    bump_closure_share, element_kinded as transform_element_kinded,
-    project_indices as transform_project_indices, typed_array_arc_from_kinded,
-    typed_array_len as transform_typed_array_len,
-};
+use shape_value::{HeapKind, KindedSlot, NativeKind, VMError};
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Local helpers — no shim usage; pure dispatch on `TypedArrayData` variants.
+// V3-S5 ckpt-2 surface-and-stop builder
 // ═══════════════════════════════════════════════════════════════════════════
-
-/// Borrow the `Arc<TypedArrayData>` payload from a `KindedSlot` whose
-/// `kind == NativeKind::Ptr(HeapKind::TypedArray)`. Mirrors the Wave 5b
-/// `as_typed_array` precedent in `executor/builtins/array_ops.rs`.
-#[inline]
-fn as_typed_array(slot: &KindedSlot) -> Option<&Arc<TypedArrayData>> {
-    if !matches!(slot.kind, NativeKind::Ptr(HeapKind::TypedArray)) {
-        return None;
-    }
-    match slot.slot.as_heap_value() {
-        HeapValue::TypedArray(arc) => Some(arc),
-        _ => None,
-    }
-}
-
-#[inline]
-fn typed_array_to_slot(arr: TypedArrayData) -> KindedSlot {
-    KindedSlot::from_typed_array(Arc::new(arr))
-}
 
 #[inline]
 fn type_error(msg: impl Into<String>) -> VMError {
     VMError::RuntimeError(msg.into())
 }
 
-/// Empty `TypedArrayData` of the same arm shape as `arr`. Matches the
-/// pre-Wave-6 set-op contract: an empty result preserves the source
-/// element shape so downstream ops (push, sum, etc.) can keep dispatching
-/// on the same arm.
-fn empty_like(arr: &TypedArrayData) -> Result<TypedArrayData, VMError> {
-    Ok(match arr {
-        TypedArrayData::I64(_) => TypedArrayData::I64(Arc::new(TypedBuffer::from_vec(Vec::new()))),
-        TypedArrayData::F64(_) => TypedArrayData::F64(Arc::new(
-            shape_value::AlignedTypedBuffer::from(shape_value::AlignedVec::from_vec(
-                Vec::<f64>::new(),
-            )),
-        )),
-        TypedArrayData::Bool(_) => TypedArrayData::Bool(Arc::new(TypedBuffer::from_vec(Vec::new()))),
-        TypedArrayData::String(_) => {
-            TypedArrayData::String(Arc::new(TypedBuffer::from_vec(Vec::new())))
-        }
-        other => {
-            return Err(type_error(format!(
-                "set ops not supported for TypedArrayData variant {} (Phase-2c reentry — \
-                 narrow-width / matrix / heterogeneous-heap arms not part of the Wave-δ \
-                 set-ops migration)",
-                other.type_name()
-            )));
-        }
-    })
-}
-
-/// Element-kind-aware "contains" probe. Returns `Ok(true)` when `arr`
-/// already contains an element equal to `arr[probe_idx]` somewhere in
-/// `arr[0..probe_idx]`. Used by the unique/distinct stable dedup pass.
-///
-/// IEEE 754 NaN follows `==` semantics (NaN != NaN), matching the
-/// pre-Wave-6 behaviour and the Rust `PartialEq` contract.
-fn already_seen(arr: &TypedArrayData, probe_idx: usize) -> Result<bool, VMError> {
-    Ok(match arr {
-        TypedArrayData::I64(buf) => {
-            let v = buf.data[probe_idx];
-            buf.data[..probe_idx].iter().any(|&x| x == v)
-        }
-        TypedArrayData::F64(buf) => {
-            let v = buf.data[probe_idx];
-            buf.data[..probe_idx].iter().any(|&x| x == v)
-        }
-        TypedArrayData::Bool(buf) => {
-            let v = buf.data[probe_idx];
-            buf.data[..probe_idx].iter().any(|&x| x == v)
-        }
-        TypedArrayData::String(buf) => {
-            let v = &buf.data[probe_idx];
-            buf.data[..probe_idx].iter().any(|x| x.as_str() == v.as_str())
-        }
-        other => {
-            return Err(type_error(format!(
-                "set ops not supported for TypedArrayData variant {} (Phase-2c reentry — \
-                 narrow-width / matrix / heterogeneous-heap arms not part of the Wave-δ \
-                 set-ops migration)",
-                other.type_name()
-            )));
-        }
-    })
-}
-
-/// Element-kind-aware "contained in `other`" probe. Returns `true` when
-/// `lhs[lhs_idx]` equals some element of `rhs`. Both arrays must have the
-/// same arm shape; arm-shape mismatch surfaces as a `TypeError`.
-fn lhs_in_rhs(lhs: &TypedArrayData, lhs_idx: usize, rhs: &TypedArrayData) -> Result<bool, VMError> {
-    Ok(match (lhs, rhs) {
-        (TypedArrayData::I64(a), TypedArrayData::I64(b)) => {
-            let v = a.data[lhs_idx];
-            b.data.iter().any(|&x| x == v)
-        }
-        (TypedArrayData::F64(a), TypedArrayData::F64(b)) => {
-            let v = a.data[lhs_idx];
-            b.data.iter().any(|&x| x == v)
-        }
-        (TypedArrayData::Bool(a), TypedArrayData::Bool(b)) => {
-            let v = a.data[lhs_idx];
-            b.data.iter().any(|&x| x == v)
-        }
-        (TypedArrayData::String(a), TypedArrayData::String(b)) => {
-            let v = &a.data[lhs_idx];
-            b.data.iter().any(|x| x.as_str() == v.as_str())
-        }
-        (l, r) => {
-            return Err(type_error(format!(
-                "set ops require matching element shape (lhs={}, rhs={}); cross-shape \
-                 set ops are Phase-2c reentry territory",
-                l.type_name(),
-                r.type_name()
-            )));
-        }
-    })
-}
-
-/// Build a result `TypedArrayData` of the same arm as `template` from a
-/// list of source `(arr, idx)` pairs. Selecting via index avoids any
-/// element-clone roundtrip through `KindedSlot` and keeps the inner
-/// `Arc<String>` shares stable.
-fn build_from_indices(
-    template: &TypedArrayData,
-    sources: &[(&TypedArrayData, &[usize])],
-) -> Result<TypedArrayData, VMError> {
-    Ok(match template {
-        TypedArrayData::I64(_) => {
-            let mut out: Vec<i64> = Vec::new();
-            for (src, idxs) in sources {
-                let buf = match src {
-                    TypedArrayData::I64(b) => b,
-                    other => {
-                        return Err(type_error(format!(
-                            "set-op build: arm mismatch (template=I64, source={})",
-                            other.type_name()
-                        )));
-                    }
-                };
-                for &i in idxs.iter() {
-                    out.push(buf.data[i]);
-                }
-            }
-            TypedArrayData::I64(Arc::new(TypedBuffer::from_vec(out)))
-        }
-        TypedArrayData::F64(_) => {
-            let mut out: Vec<f64> = Vec::new();
-            for (src, idxs) in sources {
-                let buf = match src {
-                    TypedArrayData::F64(b) => b,
-                    other => {
-                        return Err(type_error(format!(
-                            "set-op build: arm mismatch (template=F64, source={})",
-                            other.type_name()
-                        )));
-                    }
-                };
-                for &i in idxs.iter() {
-                    out.push(buf.data[i]);
-                }
-            }
-            let av = shape_value::AlignedVec::from_vec(out);
-            TypedArrayData::F64(Arc::new(shape_value::AlignedTypedBuffer::from(av)))
-        }
-        TypedArrayData::Bool(_) => {
-            let mut out: Vec<u8> = Vec::new();
-            for (src, idxs) in sources {
-                let buf = match src {
-                    TypedArrayData::Bool(b) => b,
-                    other => {
-                        return Err(type_error(format!(
-                            "set-op build: arm mismatch (template=Bool, source={})",
-                            other.type_name()
-                        )));
-                    }
-                };
-                for &i in idxs.iter() {
-                    out.push(buf.data[i]);
-                }
-            }
-            TypedArrayData::Bool(Arc::new(TypedBuffer::from_vec(out)))
-        }
-        TypedArrayData::String(_) => {
-            let mut out: Vec<Arc<String>> = Vec::new();
-            for (src, idxs) in sources {
-                let buf = match src {
-                    TypedArrayData::String(b) => b,
-                    other => {
-                        return Err(type_error(format!(
-                            "set-op build: arm mismatch (template=String, source={})",
-                            other.type_name()
-                        )));
-                    }
-                };
-                for &i in idxs.iter() {
-                    out.push(Arc::clone(&buf.data[i]));
-                }
-            }
-            TypedArrayData::String(Arc::new(TypedBuffer::from_vec(out)))
-        }
-        other => {
-            return Err(type_error(format!(
-                "set ops not supported for TypedArrayData variant {} (Phase-2c reentry)",
-                other.type_name()
-            )));
-        }
-    })
-}
-
-/// Compute the indices of `arr` that produce the deduplicated, order-
-/// preserving "unique" subsequence. Each index `i` is included iff no
-/// earlier `j < i` has `arr[j] == arr[i]`.
-fn unique_indices(arr: &TypedArrayData) -> Result<Vec<usize>, VMError> {
-    let len = match arr {
-        TypedArrayData::I64(b) => b.len(),
-        TypedArrayData::F64(b) => b.len(),
-        TypedArrayData::Bool(b) => b.len(),
-        TypedArrayData::String(b) => b.len(),
-        other => {
-            return Err(type_error(format!(
-                "set ops not supported for TypedArrayData variant {} (Phase-2c reentry)",
-                other.type_name()
-            )));
-        }
+/// Common surface-and-stop body for the heap-Arc `Ptr(HeapKind::TypedArray)`
+/// arm of every public handler in this file. The v2-raw `UInt64` arm
+/// remains wired through `set_op_v2_raw_string_decimal` per Wave 2 Agent δ
+/// (unaffected by `TypedArrayData` deletion).
+#[cold]
+#[inline(never)]
+fn ckpt2_surface(op: &'static str, args: &[KindedSlot]) -> VMError {
+    let receiver_kind = if args.is_empty() {
+        "<no args>".to_string()
+    } else {
+        format!("{:?}", args[0].kind)
     };
-    let mut out: Vec<usize> = Vec::with_capacity(len);
-    for i in 0..len {
-        if !already_seen(arr, i)? {
-            out.push(i);
-        }
-    }
-    Ok(out)
+    VMError::NotImplemented(format!(
+        "{op}: SURFACE — V3-S5 ckpt-2 consumer-cascade tier 1 surface for \
+         the heap-Arc `Ptr(HeapKind::TypedArray)` set-op arm. \
+         `TypedArrayData` enum DELETED at ckpt-1 (2026-05-15) per W12-\
+         typed-array-data-deletion audit §3.5 + ADR-006 §2.7.24 Q25.A \
+         SUPERSEDED. The previous `Arc<TypedArrayData>` receiver-recovery \
+         (`as_typed_array`) + per-variant equality helpers \
+         (`already_seen / lhs_in_rhs / build_from_indices / \
+         unique_indices`) cascade-broke at the enum deletion site \
+         (`crates/shape-value/src/heap_value.rs:3944`). Post-deletion \
+         target is the v2-raw `TypedArray<T>` flat-struct carrier per \
+         audit §1.2 + §A.3 + §3.1 scalar recipe + §2.2 heap-element \
+         variants; per-T monomorphization landing across ckpt-3 \
+         (array_ops/typed_array_methods/iterator_methods/array_sort/\
+         concat/property_access) + ckpt-4 (TypedBuffer<T> / \
+         HeapValue::TypedArray arm / HeapKind::TypedArray ordinal) + \
+         ckpt-5 (wire/json/marshal + 4-table lockstep) + ckpt-6 (JIT \
+         FFI). The v2-raw `TypedArray<*const StringObj/DecimalObj>` \
+         path (Wave 2 Agent δ, `set_op_v2_raw_string_decimal`) remains \
+         live and is independent of `TypedArrayData` — invokable post-\
+         A2-followup-gate-flip via the per-handler fast-path. Receiver \
+         kind: {kind}. UNREACHABLE until ckpt-6 STRICT close. REFUSED \
+         ON SIGHT: TypedArrayData resurrection under any rename \
+         (Refusal #1, W12 audit §7).",
+        op = op,
+        kind = receiver_kind,
+    ))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Wave 2 Round 3a' Agent δ — v2-raw String/Decimal handler arms.
+// PRESERVED through V3-S5 ckpt-2: independent of `TypedArrayData`.
 //
-// Per supervisor 2026-05-14 disposition (1): A2-followup-mechanical split into
-// 7 per-handler-family parallel sub-agents; each per-handler-family file lands
-// v2-raw String/Decimal handler arms as UNREACHABLE code while the producer
-// gate `should_use_typed_array` in `compiler/typed_emission.rs` stays CLOSED
-// for `ConcreteType::String / Decimal`. The gate-flip itself lands as a
-// SEPARATE sequential `A2-followup-gate-flip` agent dispatched AFTER α-η merge
-// ceremony — between sub-commits no type-confusion-window risk (unreachable
-// code is just unreachable code).
+// Per supervisor 2026-05-14 disposition (1): the v2-raw `TypedArray<*const
+// StringObj/DecimalObj>` consumer surface lands as UNREACHABLE under the
+// closed producer gate (`should_use_typed_array(ConcreteType::String/Decimal)
+// → None`); the A2-followup-gate-flip ceremony post-Round 3a' merge flips
+// the gate atomically and these arms become reachable in one commit.
 //
-// **Producer gate state (verified at HEAD `5d0f1524`)**:
-//   `should_use_typed_array(ConcreteType::String / Decimal) → None`
-//   → producers emit legacy `OpCode::NewArray` → `TypedArrayData::String /
-//     Decimal(Arc::new(TypedBuffer::from_vec(...)))` shape, NOT v2-raw
-//     `*mut TypedArray<*const StringObj/DecimalObj>` shape.
-//   → no `args[0].kind == NativeKind::UInt64` with elem_type stamp
-//     String/Decimal can reach these handlers under user code.
-//
-// **Why this arm exists pre-gate-flip**: lockstep landing requires the v2-raw
-// shape's consumer surface to be complete BEFORE the gate flips; otherwise the
-// gate-flip commit would itself need to land the consumer arms across 7+ files
-// and exceed single-LLM-session capacity (ceiling-c finding from D3 Round 3a
-// close). Splitting the consumer-side landing across α-η parallel sub-agents
-// keeps each cargo-check-clean with bounded scope (~20-50 LoC each) while
-// preserving the atomic-flip invariant for the gate flip itself.
-//
-// **Shape**: per audit §4.1.B.4 migration recipe. The receiver's v2-raw
-// `TypedArray<*const StringObj/DecimalObj>` pointer is walked directly (no
-// materialize-to-Arc<TypedArrayData> hop per §4.1.B.3 forbidden); equality
-// uses pointer-content comparison via `StringObj::as_str(ptr)` /
-// `DecimalObj::value(ptr)`; the result is a fresh
-// `TypedArray::<*const StringObj/DecimalObj>::with_capacity(n)` with
-// `v2_retain(&(*elem_ptr).header)` per stored element (the array owns one
-// share per stored element); the result slot is
-// `KindedSlot::new(ValueSlot::from_raw(ptr as u64), NativeKind::UInt64)`
-// matching the v2-raw producer carrier shape.
+// Shape (audit §4.1.B.4): receiver's v2-raw `TypedArray<*const
+// StringObj/DecimalObj>` walked directly; equality via `StringObj::as_str` /
+// `DecimalObj::value` content comparison; result is a fresh `TypedArray::
+// <*const <X>Obj>::with_capacity(n)` with `v2_retain(&(*p).header)` per
+// stored element; result slot is `KindedSlot::new(ValueSlot::from_raw(ptr
+// as u64), NativeKind::UInt64)` per the v2-raw producer carrier shape.
+// ═══════════════════════════════════════════════════════════════════════════
 
 /// Operation tag for the unified v2-raw String/Decimal set-op dispatcher.
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -412,8 +198,7 @@ fn set_op_v2_raw_string_decimal(
 
     // Generic kept-index builder. Given lhs / rhs key vectors of equal-kind
     // values that support `PartialEq`, returns `(lhs_keep, rhs_keep)` per the
-    // operation. Mirrors `already_seen` / `lhs_in_rhs` / `unique_indices` in
-    // the heap-Arc helpers above.
+    // operation.
     fn build_keep<K: PartialEq>(
         op: V2RawSetOp,
         lhs: &[K],
@@ -466,10 +251,6 @@ fn set_op_v2_raw_string_decimal(
         (lhs_keep, rhs_keep)
     }
 
-    // Allocate the output, retain per stored element, return the v2-raw slot.
-    // The elem_type byte at offset 7 of the HeapHeader is stamped per the
-    // producer convention in `executor/v2_handlers/array.rs::OpCode::
-    // NewTypedArrayString / NewTypedArrayDecimal`.
     let out_bits = match lhs_elem {
         V2ElemType::String => unsafe {
             let lhs_arr = lhs_bits as *const TypedArray<*const StringObj>;
@@ -548,12 +329,13 @@ fn set_op_v2_raw_string_decimal(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// MethodFnV2 (native ABI) handlers
+// MethodFnV2 (native ABI) public handlers — ckpt-2 surface-and-stop stubs
+// Signatures preserved for `method_registry.rs` PHF integrity. Heap-Arc
+// receiver arm surface-and-stops; v2-raw String/Decimal arm reachable via
+// `set_op_v2_raw_string_decimal` post-A2-followup-gate-flip.
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// v2 `union` — set union of two arrays (deduplicated, order-preserving).
-///
-/// args: [array, other_array]
 pub(crate) fn handle_union_v2(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
@@ -562,85 +344,13 @@ pub(crate) fn handle_union_v2(
     if args.len() != 2 {
         return Err(type_error("union() requires 2 arguments (array, other)"));
     }
-    // Wave 2 Round 3a' Agent δ — v2-raw String/Decimal fast path. UNREACHABLE
-    // under HEAD `5d0f1524`: gate `should_use_typed_array` returns None for
-    // ConcreteType::String/Decimal. See section comment above.
     if as_v2_raw_string_decimal(&args[0]).is_some() {
         return set_op_v2_raw_string_decimal(V2RawSetOp::Union, &args[0], Some(&args[1]));
     }
-    let lhs = as_typed_array(&args[0])
-        .ok_or_else(|| type_error("union(): receiver must be an Array"))?;
-    let rhs = as_typed_array(&args[1])
-        .ok_or_else(|| type_error("union(): argument must be an Array"))?;
-    let lhs = lhs.as_ref();
-    let rhs = rhs.as_ref();
-
-    // Concatenated dedup, lhs-first then rhs (order-preserving). The
-    // already_seen predicate is per-element-kind equality on the concat
-    // result; we materialize the concat lazily via the index-list build.
-    let lhs_uniq_idx = unique_indices(lhs)?;
-    let mut rhs_extra_idx: Vec<usize> = Vec::new();
-    let rhs_len = match rhs {
-        TypedArrayData::I64(b) => b.len(),
-        TypedArrayData::F64(b) => b.len(),
-        TypedArrayData::Bool(b) => b.len(),
-        TypedArrayData::String(b) => b.len(),
-        other => {
-            return Err(type_error(format!(
-                "union(): arm {} unsupported",
-                other.type_name()
-            )));
-        }
-    };
-    for i in 0..rhs_len {
-        // Skip if rhs[i] is in lhs (the deduped lhs uses original
-        // ordering, so probing the full lhs is equivalent and avoids
-        // double-bookkeeping).
-        if lhs_in_rhs(rhs, i, lhs)? {
-            continue;
-        }
-        // Skip if rhs[i] equals an earlier rhs element we've already
-        // taken (rhs-internal dedup, order-preserving).
-        let already = rhs_extra_idx
-            .iter()
-            .map(|&j| j)
-            .try_fold(false, |acc, j| -> Result<bool, VMError> {
-                if acc {
-                    return Ok(true);
-                }
-                // pairwise equality at indices i and j on rhs
-                Ok(rhs_pair_eq(rhs, i, j)?)
-            })?;
-        if !already {
-            rhs_extra_idx.push(i);
-        }
-    }
-
-    let template = lhs;
-    let result = build_from_indices(template, &[(lhs, &lhs_uniq_idx), (rhs, &rhs_extra_idx)])?;
-    Ok(typed_array_to_slot(result))
+    Err(ckpt2_surface("union", args))
 }
 
-/// Pairwise equality on two indices of the same `TypedArrayData`.
-fn rhs_pair_eq(arr: &TypedArrayData, i: usize, j: usize) -> Result<bool, VMError> {
-    Ok(match arr {
-        TypedArrayData::I64(b) => b.data[i] == b.data[j],
-        TypedArrayData::F64(b) => b.data[i] == b.data[j],
-        TypedArrayData::Bool(b) => b.data[i] == b.data[j],
-        TypedArrayData::String(b) => b.data[i].as_str() == b.data[j].as_str(),
-        other => {
-            return Err(type_error(format!(
-                "set ops: arm {} unsupported",
-                other.type_name()
-            )));
-        }
-    })
-}
-
-/// v2 `intersect` — set intersection of two arrays (deduplicated, order-
-/// preserving over the lhs).
-///
-/// args: [array, other_array]
+/// v2 `intersect` — set intersection of two arrays.
 pub(crate) fn handle_intersect_v2(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
@@ -651,59 +361,13 @@ pub(crate) fn handle_intersect_v2(
             "intersect() requires 2 arguments (array, other)",
         ));
     }
-    // Wave 2 Round 3a' Agent δ — v2-raw String/Decimal fast path (UNREACHABLE
-    // under closed producer gate; see section comment).
     if as_v2_raw_string_decimal(&args[0]).is_some() {
         return set_op_v2_raw_string_decimal(V2RawSetOp::Intersect, &args[0], Some(&args[1]));
     }
-    let lhs = as_typed_array(&args[0])
-        .ok_or_else(|| type_error("intersect(): receiver must be an Array"))?;
-    let rhs = as_typed_array(&args[1])
-        .ok_or_else(|| type_error("intersect(): argument must be an Array"))?;
-    let lhs = lhs.as_ref();
-    let rhs = rhs.as_ref();
-
-    let lhs_len = match lhs {
-        TypedArrayData::I64(b) => b.len(),
-        TypedArrayData::F64(b) => b.len(),
-        TypedArrayData::Bool(b) => b.len(),
-        TypedArrayData::String(b) => b.len(),
-        other => {
-            return Err(type_error(format!(
-                "intersect(): arm {} unsupported",
-                other.type_name()
-            )));
-        }
-    };
-    let mut idxs: Vec<usize> = Vec::new();
-    for i in 0..lhs_len {
-        if !lhs_in_rhs(lhs, i, rhs)? {
-            continue;
-        }
-        // Dedup against earlier picks.
-        let mut already = false;
-        for &j in idxs.iter() {
-            if rhs_pair_eq(lhs, i, j)? {
-                already = true;
-                break;
-            }
-        }
-        if !already {
-            idxs.push(i);
-        }
-    }
-    let result = if idxs.is_empty() {
-        empty_like(lhs)?
-    } else {
-        build_from_indices(lhs, &[(lhs, &idxs)])?
-    };
-    Ok(typed_array_to_slot(result))
+    Err(ckpt2_surface("intersect", args))
 }
 
-/// v2 `except` — set difference of two arrays (deduplicated, order-
-/// preserving over the lhs).
-///
-/// args: [array, other_array]
+/// v2 `except` — set difference of two arrays.
 pub(crate) fn handle_except_v2(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
@@ -712,58 +376,13 @@ pub(crate) fn handle_except_v2(
     if args.len() != 2 {
         return Err(type_error("except() requires 2 arguments (array, other)"));
     }
-    // Wave 2 Round 3a' Agent δ — v2-raw String/Decimal fast path (UNREACHABLE
-    // under closed producer gate; see section comment).
     if as_v2_raw_string_decimal(&args[0]).is_some() {
         return set_op_v2_raw_string_decimal(V2RawSetOp::Except, &args[0], Some(&args[1]));
     }
-    let lhs = as_typed_array(&args[0])
-        .ok_or_else(|| type_error("except(): receiver must be an Array"))?;
-    let rhs = as_typed_array(&args[1])
-        .ok_or_else(|| type_error("except(): argument must be an Array"))?;
-    let lhs = lhs.as_ref();
-    let rhs = rhs.as_ref();
-
-    let lhs_len = match lhs {
-        TypedArrayData::I64(b) => b.len(),
-        TypedArrayData::F64(b) => b.len(),
-        TypedArrayData::Bool(b) => b.len(),
-        TypedArrayData::String(b) => b.len(),
-        other => {
-            return Err(type_error(format!(
-                "except(): arm {} unsupported",
-                other.type_name()
-            )));
-        }
-    };
-    let mut idxs: Vec<usize> = Vec::new();
-    for i in 0..lhs_len {
-        if lhs_in_rhs(lhs, i, rhs)? {
-            continue;
-        }
-        // Dedup against earlier picks.
-        let mut already = false;
-        for &j in idxs.iter() {
-            if rhs_pair_eq(lhs, i, j)? {
-                already = true;
-                break;
-            }
-        }
-        if !already {
-            idxs.push(i);
-        }
-    }
-    let result = if idxs.is_empty() {
-        empty_like(lhs)?
-    } else {
-        build_from_indices(lhs, &[(lhs, &idxs)])?
-    };
-    Ok(typed_array_to_slot(result))
+    Err(ckpt2_surface("except", args))
 }
 
-/// v2 `unique` — deduplicate array elements (order-preserving).
-///
-/// args: [array]
+/// v2 `unique` — deduplicate array elements.
 pub(crate) fn handle_unique_v2(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
@@ -772,27 +391,13 @@ pub(crate) fn handle_unique_v2(
     if args.len() != 1 {
         return Err(type_error("unique() requires 1 argument (array)"));
     }
-    // Wave 2 Round 3a' Agent δ — v2-raw String/Decimal fast path (UNREACHABLE
-    // under closed producer gate; see section comment). `distinct` aliases
-    // `unique` so it inherits this routing.
     if as_v2_raw_string_decimal(&args[0]).is_some() {
         return set_op_v2_raw_string_decimal(V2RawSetOp::Unique, &args[0], None);
     }
-    let arc = as_typed_array(&args[0])
-        .ok_or_else(|| type_error("unique(): receiver must be an Array"))?;
-    let arr = arc.as_ref();
-    let idxs = unique_indices(arr)?;
-    let result = if idxs.is_empty() {
-        empty_like(arr)?
-    } else {
-        build_from_indices(arr, &[(arr, &idxs)])?
-    };
-    Ok(typed_array_to_slot(result))
+    Err(ckpt2_surface("unique", args))
 }
 
 /// v2 `distinct` — alias for `unique`.
-///
-/// args: [array]
 pub(crate) fn handle_distinct_v2(
     vm: &mut VirtualMachine,
     args: &[KindedSlot],
@@ -801,124 +406,31 @@ pub(crate) fn handle_distinct_v2(
     handle_unique_v2(vm, args, ctx)
 }
 
-/// Test whether two `KindedSlot` keys are equal under strict typing.
-/// Heterogeneous kinds always compare unequal; same-kind comparison
-/// dispatches on `NativeKind` per the §2.7.6 / Q8 heterogeneous-kind
-/// body pattern (mirrors `cmp_key_kinded` in `array_sort.rs`).
-fn key_eq(a: &KindedSlot, b: &KindedSlot) -> Result<bool, VMError> {
-    if a.kind != b.kind {
-        // Strict typing: no implicit promotion. Different-kind keys are
-        // never equal (matches the IEEE 754 NaN != NaN convention used
-        // elsewhere in the dedup pass — `already_seen`).
-        return Ok(false);
-    }
-    Ok(match a.kind {
-        NativeKind::Int8
-        | NativeKind::Int16
-        | NativeKind::Int32
-        | NativeKind::Int64
-        | NativeKind::IntSize => (a.slot.raw() as i64) == (b.slot.raw() as i64),
-        NativeKind::UInt8
-        | NativeKind::UInt16
-        | NativeKind::UInt32
-        | NativeKind::UInt64
-        | NativeKind::UIntSize => a.slot.raw() == b.slot.raw(),
-        // IEEE 754 semantics: NaN never compares equal — `==` on f64
-        // matches the pre-Wave-6 set-op behaviour.
-        NativeKind::Float64 => a.slot.as_f64() == b.slot.as_f64(),
-        NativeKind::Bool => a.slot.as_bool() == b.slot.as_bool(),
-        NativeKind::String => {
-            let sa = a.as_str().unwrap_or("");
-            let sb = b.as_str().unwrap_or("");
-            sa == sb
-        }
-        other => {
-            return Err(VMError::NotImplemented(format!(
-                "distinctBy: key equality for kind {:?} — SURFACE: only \
-                 inline-scalar / String key kinds dispatched in \
-                 W17-array-closure-callback. Heap-typed keys (Decimal, \
-                 BigInt, ...) need an ADR-006 §2.7.6 / Q8 per-kind \
-                 equality table; Phase-2c reentry.",
-                other
-            )));
-        }
-    })
-}
-
-/// v2 `distinctBy` — deduplicate by a key function (order-preserving).
+/// v2 `distinctBy` — deduplicate by a key function.
 ///
-/// args: [array, key_fn]
-///
-/// W17-array-closure-callback: body filled now that `op_make_closure`
-/// (W17-make-closure close `aa47364`) and `call_value_immediate_nb`
-/// (W7 close `06cdfce`, ADR-006 §2.7.11 / Q12) are both live. Mirrors
-/// `handle_unique_v2`'s order-preserving dedup, but the equality probe
-/// runs on `key_fn(elem)` keys rather than on element identity. The
-/// keys are computed up-front in a single closure-callback pass; the
-/// dedup then walks the cached keys to build a kept-index permutation,
-/// which `array_transform::project_indices` materializes against the
-/// receiver to produce the result `TypedArrayData` of the same arm.
+/// The closure-callback dispatch shape (ADR-006 §2.7.11 / Q12) re-instates
+/// once the receiver-shape migration lands at ckpt-6 STRICT close —
+/// `vm.call_value_immediate_nb(key_fn, [elem], ctx)` itself is unaffected
+/// by `TypedArrayData` deletion. Closure-arg shape validation preserved at
+/// the entry-point.
 pub(crate) fn handle_distinct_by_v2(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    mut ctx: Option<&mut ExecutionContext>,
+    _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
     if args.len() < 2 {
         return Err(type_error(
             "distinctBy() requires 2 arguments (array, key_fn)",
         ));
     }
-    // Receiver: accept both array carriers (heap-Arc + v2 raw-pointer)
-    // via the shared helper. The returned Arc is an independent share —
-    // safe to use across `call_value_immediate_nb`.
-    let receiver_arc: Arc<TypedArrayData> = typed_array_arc_from_kinded(&args[0], "distinctBy")?;
-
-    // Validate the closure callee kind. Same shape as
-    // `array_query::closure_arg`; only Closure / function-ref accepted.
-    let closure = match args[1].kind {
-        NativeKind::Ptr(HeapKind::Closure) | NativeKind::UInt64 => &args[1],
+    match args[1].kind {
+        NativeKind::Ptr(HeapKind::Closure) | NativeKind::UInt64 => {}
         other => {
             return Err(type_error(format!(
                 "distinctBy: key function must be a closure or function ref, got kind {:?}",
                 other
             )));
         }
-    };
-
-    let len = transform_typed_array_len(&receiver_arc);
-
-    // Compute one key per element via the closure callback. Each call
-    // bumps the closure share because the frame teardown's
-    // `drop_with_kind(closure_heap_bits, ...)` would otherwise consume
-    // the dispatch-shell-owned share, leaving the carrier dangling on
-    // subsequent iterations. Same pattern as `array_sort.rs::sort_by_key_fn`.
-    let mut keys: Vec<KindedSlot> = Vec::with_capacity(len);
-    for i in 0..len {
-        let elem = transform_element_kinded(&receiver_arc, i)?;
-        bump_closure_share(closure);
-        let key = vm.call_value_immediate_nb(closure, &[elem], ctx.as_deref_mut())?;
-        keys.push(key);
     }
-
-    // Order-preserving dedup: walk indices, keep the first occurrence
-    // of each key. O(n^2) on the kept-set size — matches the existing
-    // `unique_indices` pattern; a hash-keyed variant would require a
-    // per-NativeKind hasher matrix and is deferred to the
-    // §2.7.6/Q8 follow-up.
-    let mut keep_idxs: Vec<usize> = Vec::with_capacity(len);
-    for i in 0..len {
-        let mut already = false;
-        for &j in keep_idxs.iter() {
-            if key_eq(&keys[i], &keys[j])? {
-                already = true;
-                break;
-            }
-        }
-        if !already {
-            keep_idxs.push(i);
-        }
-    }
-
-    let out = transform_project_indices(&receiver_arc, &keep_idxs)?;
-    Ok(KindedSlot::from_typed_array(out))
+    Err(ckpt2_surface("distinctBy", args))
 }
