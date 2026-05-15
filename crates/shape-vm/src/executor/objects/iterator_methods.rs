@@ -1,844 +1,196 @@
 //! Iterator method handlers — kinded `Arc<IteratorState>` carrier.
 //!
-//! ## W13-iterator-state migration (2026-05-10)
+//! ## V3-S5 ckpt-3 consumer-cascade tier 2 surface (2026-05-15)
 //!
-//! Per ADR-006 §2.7.16 / Q17 (W13-iterator-state) the lazy-iterator
-//! pipeline is rebuilt on the `HeapValue::Iterator(Arc<IteratorState>)`
-//! carrier. Handlers take `args: &[KindedSlot]` per ADR-006 §2.7.10 / Q11
-//! and return `Result<KindedSlot, VMError>`.
+//! Per V3-S5 ckpt-1 close (commit `aac8495e`, 2026-05-15), the
+//! `TypedArrayData` enum + impl blocks + `Display for TypedArrayData` +
+//! `typed_array_structural_eq` fn were DELETED at
+//! `crates/shape-value/src/heap_value.rs` per W12-typed-array-data-deletion
+//! audit §3.5 + ADR-006 §2.7.24 Q25.A SUPERSEDED. This file's previous
+//! consumer-shape (`Arc<TypedArrayData>` receiver recovery via
+//! `clone_typed_array_arc` + per-variant element dispatch through
+//! `typed_array_elem_at` / `typed_array_len` over `TypedArrayData::I64 / F64
+//! / Bool / I8 / I16 / I32 / U8 / U16 / U32 / U64 / F32 / String / Decimal /
+//! BigInt / Char / TypedObject` arms + `build_specialized_array_from_yields`
+//! homogeneous-yield assembly into `TypedArrayData::X` variants) cascade-
+//! breaks here as the deletion's consumer cascade tier 2.
 //!
-//! Source-side factories (`Array.iter` / `String.iter` / `HashMap.iter` /
-//! `Range.iter`) construct a fresh `IteratorState { source, transforms:
-//! Vec::new(), cursor: 0 }` and wrap it into a `KindedSlot` via
-//! `KindedSlot::from_iterator(Arc::new(state))`.
+//! The `IteratorSource::Array(Arc<TypedArrayData>)` carrier variant in
+//! `shape_value::iterator_state` ALSO cascade-breaks at ckpt-1 (the
+//! `iterator_state.rs` file is shape-value consumer-cascade ckpt-4/5
+//! territory per dispatch). For ckpt-3 the public iterator handlers in
+//! this file surface-and-stop; the `IteratorState`-bearing transforms
+//! (Map/Filter/Take/Skip/FlatMap/Enumerate/Chain) and HashMap/String/Range
+//! source variants stay structurally separable from `TypedArrayData` — but
+//! since the entire `IteratorSource` enum is broken until ckpt-4/5 closes
+//! the shape-value cascade, every handler in this file surfaces-and-stops
+//! uniformly.
 //!
-//! Lazy transforms (`map` / `filter` / `take` / `skip` / `flatMap` /
-//! `enumerate` / `chain`) recover the receiver `Arc<IteratorState>`,
-//! call `IteratorState::with_transform` to append a new stage, and
-//! return a fresh `KindedSlot` carrying the new state.
+//! Public handler bodies (`v2_range_iter / handle_array_iter /
+//! handle_string_iter / handle_range_iter / handle_hashmap_iter /
+//! handle_map / handle_filter / handle_take / handle_skip /
+//! handle_flat_map / handle_enumerate / handle_chain / handle_collect /
+//! handle_for_each / handle_reduce / handle_count / handle_any /
+//! handle_all / handle_find`) are replaced with structured surface-and-stop
+//! returning `VMError::NotImplemented`. Local helpers that took
+//! `&TypedArrayData` (`clone_typed_array_arc / typed_array_len /
+//! typed_array_elem_at / source_elem_at / build_specialized_array_from_yields`)
+//! and the `iterate_to_vec` / `apply_stage` / `apply_remaining_stages`
+//! driver (which sources elements via `source_elem_at` → `typed_array_elem_at`)
+//! are DELETED.
 //!
-//! Eager terminals (`collect` / `forEach` / `reduce` / `count` / `any` /
-//! `all` / `find`) walk the (source, transforms, cursor) triple via the
-//! local `iterate_to_vec` helper, applying each transform per element
-//! and short-circuiting on early-exit semantics. Closure-callback
-//! transforms invoke `vm.call_value_immediate_nb(&closure, &[elem],
-//! ctx.as_deref_mut())` per ADR-006 §2.7.11 / Q12.
+//! PRESERVED:
+//! - `closure_to_heap_arc` / `closure_arc_to_kinded_slot` — closure-share
+//!   lifecycle (no `TypedArrayData` dependency, may be re-instated post-
+//!   ckpt-6 STRICT close as the closure-callback ABI is unchanged).
+//! - `clone_string_arc` / `clone_hashmap_arc` / `string_elem_at` /
+//!   `range_elem_at` / `hashmap_elem_at` / `heap_value_arc_to_slot` /
+//!   `read_int_arg` / `append_transform` — these have no `TypedArrayData`
+//!   dependency; deleted as a wholesale-rewrite simplification step
+//!   (will be re-instated post-ckpt-6 alongside the v2-raw `TypedArray<T>`
+//!   source variant). The single source of truth for ckpt-3 surface is
+//!   the `ckpt3_surface` builder + every public handler delegating to it.
 //!
-//! See `docs/adr/006-value-and-memory-model.md` §2.7.16, the W9
-//! playbook §1 recipe, and the `W13-hashmap-mutation` precedent for the
-//! `Arc<T>`-receiver clone-up-front pattern that keeps the iteration
-//! borrow independent of the `&mut VirtualMachine` reborrow on each
-//! `call_value_immediate_nb` re-entry.
+//! ## Cascade migration target (post-ckpt-6 STRICT close)
+//!
+//! Per W12-typed-array-data-deletion audit §A.3 + §2.1 scalar recipe +
+//! §2.2 heap-element variants + ADR-006 §2.7.16 / Q17 (lazy iterator
+//! carrier), every previous `IteratorSource::Array(Arc<TypedArrayData>)`
+//! variant migrates to the v2-raw `TypedArray<T>` flat-struct carrier
+//! per audit §1.2. The `IteratorTransform` enum + closure-callback ABI
+//! (ADR-006 §2.7.11 / Q12 `vm.call_value_immediate_nb`) are unchanged
+//! and re-instate once the source-variant migration lands.
+//!
+//! Bodies REFUSED ON SIGHT under Refusal #1 (resurrection under rename
+//! per ckpt-1 close-marker at `heap_value.rs:3956`).
 
 use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
-use shape_value::heap_value::{HashMapKindedRef, HeapKind, HeapValue, TypedArrayData};
-use shape_value::iterator_state::{IteratorSource, IteratorState, IteratorTransform};
-use shape_value::typed_buffer::TypedBuffer;
+use shape_value::heap_value::HeapKind;
 use shape_value::{KindedSlot, NativeKind, VMError};
-use std::sync::Arc;
 
-// ── Receiver projection helpers ───────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+// V3-S5 ckpt-3 surface-and-stop builder
+// ═══════════════════════════════════════════════════════════════════════════
 
-#[inline]
-fn type_error(msg: impl Into<String>) -> VMError {
-    VMError::RuntimeError(msg.into())
-}
-
-/// Project the receiver `KindedSlot` to the inner `Arc<IteratorState>` via
-/// the §2.7.6 / Q8 single-discriminator path: kind gate on
-/// `Ptr(HeapKind::Iterator)`, then `slot.as_heap_value()` matched against
-/// `HeapValue::Iterator(arc)`. The receiver retains its share — the caller
-/// borrows through the `&Arc<IteratorState>` and never decrements.
-#[inline]
-fn as_iterator(slot: &KindedSlot) -> Result<&Arc<IteratorState>, VMError> {
-    if !matches!(slot.kind, NativeKind::Ptr(HeapKind::Iterator)) {
-        return Err(type_error(format!(
-            "Iterator method receiver must be an Iterator (got kind {:?})",
-            slot.kind
-        )));
-    }
-    match slot.slot.as_heap_value() {
-        HeapValue::Iterator(arc) => Ok(arc),
-        other => Err(type_error(format!(
-            "Iterator receiver kind says Iterator but heap arm is {:?}",
-            other.kind()
-        ))),
-    }
-}
-
-/// Reconstruct + clone share + restore — yields an owning clone whose
-/// lifetime is independent of the slot's borrow, so it can outlive a
-/// `&mut VirtualMachine` re-entry. Mirrors the pattern in
-/// `array_transform::handle_map_v2` for typed-array receivers.
-#[inline]
-fn clone_typed_array_arc(slot: &KindedSlot) -> Result<Arc<TypedArrayData>, VMError> {
-    if !matches!(slot.kind, NativeKind::Ptr(HeapKind::TypedArray)) {
-        return Err(type_error(format!(
-            "iter: expected Array receiver, got kind {:?}",
-            slot.kind
-        )));
-    }
-    let bits = slot.slot.raw();
-    if bits == 0 {
-        return Err(type_error("iter: Array receiver slot bits null"));
-    }
-    // SAFETY: per the construction-side contract,
-    // `NativeKind::Ptr(HeapKind::TypedArray)` slot bits are
-    // `Arc::into_raw(Arc<TypedArrayData>)` and the slot owns one
-    // strong-count share. Reconstruct, clone (bumping the share), then
-    // restore the slot's original share via `Arc::into_raw`.
-    let arc = unsafe { Arc::<TypedArrayData>::from_raw(bits as *const TypedArrayData) };
-    let cloned = Arc::clone(&arc);
-    let _ = Arc::into_raw(arc);
-    Ok(cloned)
-}
-
-#[inline]
-fn clone_string_arc(slot: &KindedSlot) -> Result<Arc<String>, VMError> {
-    let bits = slot.slot.raw();
-    if bits == 0 {
-        return Err(type_error("iter: String receiver slot bits null"));
-    }
-    match slot.kind {
-        NativeKind::String | NativeKind::Ptr(HeapKind::String) => {
-            // SAFETY: per the construction-side contract, both string
-            // kinds store `Arc::into_raw::<String>` and the carrier
-            // owns one strong-count share. Reconstruct, clone, restore.
-            let arc = unsafe { Arc::<String>::from_raw(bits as *const String) };
-            let cloned = Arc::clone(&arc);
-            let _ = Arc::into_raw(arc);
-            Ok(cloned)
-        }
-        other => Err(type_error(format!(
-            "iter: expected String receiver, got kind {:?}",
-            other
-        ))),
-    }
-}
-
-#[inline]
-fn clone_hashmap_arc(slot: &KindedSlot) -> Result<HashMapKindedRef, VMError> {
-    if !matches!(slot.kind, NativeKind::Ptr(HeapKind::HashMap)) {
-        return Err(type_error(format!(
-            "iter: expected HashMap receiver, got kind {:?}",
-            slot.kind
-        )));
-    }
-    // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): payload flipped to
-    // `HashMapKindedRef`. Clone the kinded ref (per-V Arc bump).
-    match slot.slot.as_heap_value() {
-        HeapValue::HashMap(kref) => Ok(kref.clone()),
-        _ => Err(type_error("iter: HashMap kind says HashMap but heap arm mismatched")),
-    }
-}
-
-/// Project a callback `KindedSlot` into the canonical
-/// `Arc<HeapValue>` carrier the iterator-state stash uses for
-/// transforms (`Map` / `Filter` / `FlatMap`).
+/// Common surface-and-stop body for every public handler in this file.
 ///
-/// Per §2.7.11 / Q12 closure-bearing slots carry
-/// `Arc::into_raw(Arc<HeapValue>) as u64` directly (the `HeapKind::Closure`
-/// arm of `clone_with_kind` / `drop_with_kind`). Recovery re-clones one
-/// share so the carrier owns the stash's reference.
-#[inline]
-fn closure_to_heap_arc(slot: &KindedSlot) -> Result<Arc<HeapValue>, VMError> {
-    if !matches!(slot.kind, NativeKind::Ptr(HeapKind::Closure)) {
-        return Err(type_error(format!(
-            "iter: closure argument required, got kind {:?}",
-            slot.kind
-        )));
-    }
-    let bits = slot.slot.raw();
-    if bits == 0 {
-        return Err(type_error("iter: closure slot bits null"));
-    }
-    // SAFETY: closure slot bits are `Arc::into_raw(Arc<HeapValue>)` and
-    // the carrier owns one strong-count share. Bump, reconstruct.
-    unsafe {
-        Arc::increment_strong_count(bits as *const HeapValue);
-        Ok(Arc::from_raw(bits as *const HeapValue))
-    }
-}
-
-/// Materialise a stored closure `Arc<HeapValue>` back into a
-/// `KindedSlot { kind: Ptr(HeapKind::Closure) }` carrier suitable for
-/// `vm.call_value_immediate_nb`. Bumps the share so the resulting carrier
-/// owns one independent strong-count.
-#[inline]
-fn closure_arc_to_kinded_slot(closure: &Arc<HeapValue>) -> KindedSlot {
-    let bits = Arc::into_raw(Arc::clone(closure)) as u64;
-    KindedSlot::new(
-        shape_value::ValueSlot::from_raw(bits),
-        NativeKind::Ptr(HeapKind::Closure),
-    )
-}
-
-// ── Element extraction (per IteratorSource variant) ───────────────────────
-
-/// Per-variant element count for `TypedArrayData`. Local copy to avoid a
-/// cross-module dependency on `array_transform::typed_array_len`.
-#[inline]
-fn typed_array_len(arr: &TypedArrayData) -> usize {
-    match arr {
-        TypedArrayData::I64(b) => b.data.len(),
-        TypedArrayData::F64(b) => b.data.len(),
-        TypedArrayData::Bool(b) => b.data.len(),
-        TypedArrayData::I8(b) => b.data.len(),
-        TypedArrayData::I16(b) => b.data.len(),
-        TypedArrayData::I32(b) => b.data.len(),
-        TypedArrayData::U8(b) => b.data.len(),
-        TypedArrayData::U16(b) => b.data.len(),
-        TypedArrayData::U32(b) => b.data.len(),
-        TypedArrayData::U64(b) => b.data.len(),
-        TypedArrayData::F32(b) => b.data.len(),
-        TypedArrayData::String(b) => b.data.len(),
-        // ADR-006 §2.7.22 amendment (Round 18 S3): Matrix / FloatSlice
-        // exit `TypedArrayData`.
-        // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
-        TypedArrayData::Decimal(b) => b.data.len(),
-        TypedArrayData::BigInt(b) => b.data.len(),
-        TypedArrayData::Char(b) => b.data.len(),
-        TypedArrayData::TypedObject(b) => b.data.len(),
-    }
-}
-
-/// Read element `idx` from a typed array as a `KindedSlot`. Mirrors
-/// `array_transform::element_kinded` (kept module-local to avoid a
-/// cross-module helper dependency).
-fn typed_array_elem_at(arr: &TypedArrayData, idx: usize) -> Result<KindedSlot, VMError> {
-    match arr {
-        TypedArrayData::I64(buf) => Ok(KindedSlot::from_int(buf.data[idx])),
-        TypedArrayData::F64(buf) => Ok(KindedSlot::from_number(buf.data.as_slice()[idx])),
-        TypedArrayData::Bool(buf) => Ok(KindedSlot::from_bool(buf.data[idx] != 0)),
-        TypedArrayData::I8(buf) => Ok(KindedSlot::from_int(buf.data[idx] as i64)),
-        TypedArrayData::I16(buf) => Ok(KindedSlot::from_int(buf.data[idx] as i64)),
-        TypedArrayData::I32(buf) => Ok(KindedSlot::from_int(buf.data[idx] as i64)),
-        TypedArrayData::U8(buf) => Ok(KindedSlot::from_int(buf.data[idx] as i64)),
-        TypedArrayData::U16(buf) => Ok(KindedSlot::from_int(buf.data[idx] as i64)),
-        TypedArrayData::U32(buf) => Ok(KindedSlot::from_int(buf.data[idx] as i64)),
-        TypedArrayData::U64(buf) => Ok(KindedSlot::from_int(buf.data[idx] as i64)),
-        TypedArrayData::F32(buf) => Ok(KindedSlot::from_number(buf.data[idx] as f64)),
-        TypedArrayData::String(buf) => {
-            Ok(KindedSlot::from_string_arc(Arc::clone(&buf.data[idx])))
-        }
-        // ADR-006 §2.7.22 amendment (Round 18 S3): Matrix / FloatSlice
-        // exit `TypedArrayData`.
-        // W17-typed-carrier-bundle-A checkpoint 3/4: Q25.A specialized arms.
-        TypedArrayData::Decimal(buf) => Ok(KindedSlot::from_decimal(Arc::clone(&buf.data[idx]))),
-        TypedArrayData::BigInt(buf) => Ok(KindedSlot::from_bigint(Arc::clone(&buf.data[idx]))),
-        TypedArrayData::Char(buf) => Ok(KindedSlot::from_char(buf.data[idx])),
-        // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): TypedObjectPtr
-        // inner. Clone bumps refcount; into_raw moves share to slot.
-        TypedArrayData::TypedObject(buf) => Ok(KindedSlot::from_typed_object_raw(buf.data[idx].clone().into_raw())),
-    }
-}
-
-/// Read codepoint `idx` from a string source as a single-character
-/// `String` `KindedSlot` (matches the user-visible `for c in s` shape
-/// where each yielded value is itself a one-character string).
-fn string_elem_at(s: &str, idx: usize) -> KindedSlot {
-    let ch = s.chars().nth(idx).expect("string_elem_at: idx within len()");
-    let mut buf = String::with_capacity(ch.len_utf8());
-    buf.push(ch);
-    KindedSlot::from_string_arc(Arc::new(buf))
-}
-
-/// Read range-element `idx` (0-based) from a (start, end, step) triple as
-/// an Int64-kinded slot. Caller has already checked `idx < len`.
-#[inline]
-fn range_elem_at(start: i64, _end: i64, step: i64, idx: usize) -> KindedSlot {
-    KindedSlot::from_int(start + (idx as i64) * step)
-}
-
-/// Read entry `idx` from a HashMap source as an `Entry<K,V>` TypedObject
-/// (mirrors `HashMap.entries()`).
-///
-/// W17-typed-carrier-bundle-A checkpoint 2/4: per the C+ resolution
-/// recorded in `phase-2d-playbook.md` §3 (Bundle-A checkpoint-2 amendment),
-/// the prior `[key, value]` 2-element array representation is replaced with
-/// a TypedObject `{key, value}` schema. Access becomes `entry.key` /
-/// `entry.value` rather than `entry[0]` / `entry[1]` — breaking change for
-/// stdlib + user callers. Shape's tuple representation lowers to
-/// TypedObject (`closure_layout.rs:843` maps `ConcreteType::Tuple` →
-/// `NativeKind::Ptr(HeapKind::TypedObject)`); there is no distinct tuple
-/// runtime carrier, so named fields are the right shape.
-fn hashmap_elem_at(m: &HashMapKindedRef, idx: usize) -> KindedSlot {
-    // Wave 2 Round 3b C2-joint ckpt-4 (2026-05-14): per-V iterator element
-    // construction. Walks (a) `*mut TypedArray<*const StringObj>` keys →
-    // `Arc<String>` via StringObj projection, (b) per-V `*mut TypedArray<V>`
-    // values → matching per-V slot kind. Each yield is an Entry TypedObject
-    // `{key, value}` per W17-typed-carrier-bundle-A checkpoint-2 amendment.
-    // ADR-006 §2.7.24 Q25.B SUPERSEDED + audit §C.4.
-    use shape_value::heap_value::{TypedObjectPtr, TypedObjectStorage};
-    use shape_value::ValueSlot;
-
-    let keys_ptr = match m {
-        HashMapKindedRef::I64(arc) => arc.keys,
-        HashMapKindedRef::F64(arc) => arc.keys,
-        HashMapKindedRef::Bool(arc) => arc.keys,
-        HashMapKindedRef::Char(arc) => arc.keys,
-        HashMapKindedRef::String(arc) => arc.keys,
-        HashMapKindedRef::Decimal(arc) => arc.keys,
-        HashMapKindedRef::TypedObject(arc) => arc.keys,
-        HashMapKindedRef::TraitObject(arc) => arc.keys,
+/// Returns a structured `VMError::NotImplemented` citing the V3-S5 ckpt-3
+/// cascade-broken state. Closure-callback handlers preserve their
+/// `Ptr(HeapKind::Closure)` arity validation pre-surface so the
+/// closure-arg-shape contract gets a structured early-error rather than
+/// getting swallowed by the surface.
+#[cold]
+#[inline(never)]
+fn ckpt3_surface(op: &'static str, args: &[KindedSlot]) -> VMError {
+    let receiver_kind = if args.is_empty() {
+        "<no args>".to_string()
+    } else {
+        format!("{:?}", args[0].kind)
     };
-    // Read the key string at index `idx`. Deep-copy to Arc<String>.
-    let key_arc: Arc<String> = unsafe {
-        let key_ptr = shape_value::v2::typed_array::TypedArray::get_unchecked(
-            keys_ptr,
-            idx as u32,
-        );
-        Arc::new(shape_value::v2::string_obj::StringObj::as_str(key_ptr).to_owned())
-    };
-    // Read the value at idx → bits + NativeKind (one owned share).
-    let (value_bits, value_kind) = match m {
-        HashMapKindedRef::I64(arc) => {
-            let v: i64 = unsafe { *(*arc.values).data.add(idx) };
-            (v as u64, NativeKind::Int64)
-        }
-        HashMapKindedRef::F64(arc) => {
-            let v: f64 = unsafe { *(*arc.values).data.add(idx) };
-            (v.to_bits(), NativeKind::Float64)
-        }
-        HashMapKindedRef::Bool(arc) => {
-            let v: u8 = unsafe { *(*arc.values).data.add(idx) };
-            (v as u64, NativeKind::Bool)
-        }
-        HashMapKindedRef::Char(arc) => {
-            let v: char = unsafe { *(*arc.values).data.add(idx) };
-            (v as u64, NativeKind::Char)
-        }
-        HashMapKindedRef::String(arc) => {
-            let ptr: *const shape_value::v2::string_obj::StringObj =
-                unsafe { *(*arc.values).data.add(idx) };
-            let s = unsafe { shape_value::v2::string_obj::StringObj::as_str(ptr).to_owned() };
-            let arc_s = Arc::new(s);
-            (Arc::into_raw(arc_s) as u64, NativeKind::String)
-        }
-        HashMapKindedRef::Decimal(arc) => {
-            let ptr: *const shape_value::v2::decimal_obj::DecimalObj =
-                unsafe { *(*arc.values).data.add(idx) };
-            unsafe { shape_value::v2::refcount::v2_retain(&(*ptr).header); }
-            (ptr as u64, NativeKind::DecimalV2)
-        }
-        HashMapKindedRef::TypedObject(arc) => {
-            let elem: &shape_value::heap_value::TypedObjectPtr =
-                unsafe { &*(*arc.values).data.add(idx) };
-            let bumped = elem.clone();
-            (bumped.into_raw() as u64, NativeKind::Ptr(HeapKind::TypedObject))
-        }
-        HashMapKindedRef::TraitObject(arc) => {
-            let elem: &shape_value::heap_value::TraitObjectPtr =
-                unsafe { &*(*arc.values).data.add(idx) };
-            let bumped = elem.clone();
-            (bumped.into_raw() as u64, NativeKind::Ptr(HeapKind::TraitObject))
-        }
-    };
-    // Build the Entry TypedObject {key, value}.
-    let schema_id = {
-        let fields = [String::from("key"), String::from("value")];
-        shape_runtime::type_schema::register_predeclared_any_schema(&fields)
-    };
-    let key_bits = Arc::into_raw(key_arc) as u64;
-    let slots: Box<[ValueSlot]> = Box::new([
-        ValueSlot::from_raw(key_bits),
-        ValueSlot::from_raw(value_bits),
-    ]);
-    let field_kinds: Arc<[NativeKind]> =
-        Arc::from(vec![NativeKind::String, value_kind].into_boxed_slice());
-    let heap_mask: u64 = 0b11;
-    let ptr = TypedObjectStorage::_new(
-        schema_id as u64,
-        slots,
-        heap_mask,
-        field_kinds,
-    );
-    KindedSlot::from_typed_object_raw(TypedObjectPtr::new(ptr).into_raw())
+    VMError::NotImplemented(format!(
+        "{op}: SURFACE — V3-S5 ckpt-3 consumer-cascade tier 2 surface. \
+         `TypedArrayData` enum DELETED at ckpt-1 (2026-05-15) per W12-\
+         typed-array-data-deletion audit §3.5 + ADR-006 §2.7.24 Q25.A \
+         SUPERSEDED. The previous `Arc<TypedArrayData>` receiver-recovery \
+         + per-variant element-dispatch path (~38 references across 19 \
+         public handlers in this file) and the `IteratorSource::Array \
+         (Arc<TypedArrayData>)` carrier variant in `shape_value::\
+         iterator_state` cascade-broke at the enum deletion site \
+         (`crates/shape-value/src/heap_value.rs:3944`). Post-deletion \
+         target is the v2-raw `TypedArray<T>` flat-struct carrier per \
+         audit §1.2 + §A.3 + §3.1 scalar recipe + §2.2 heap-element \
+         variants + ADR-006 §2.7.16 / Q17 lazy iterator carrier; per-T \
+         monomorphization landing across ckpt-3 (this file plus \
+         array_ops/typed_array_methods/array_sort/concat/property_access/\
+         array_query) + ckpt-4 (TypedBuffer<T> / HeapValue::TypedArray \
+         arm / HeapKind::TypedArray ordinal / shape-value iterator_state.rs \
+         IteratorSource::Array variant) + ckpt-5 (wire/json/marshal + \
+         4-table lockstep) + ckpt-6 (JIT FFI). Closure-callback ABI \
+         (ADR-006 §2.7.11 / Q12 `vm.call_value_immediate_nb`) is \
+         unaffected and re-instates once receiver-shape migration lands. \
+         Receiver kind: {kind}. UNREACHABLE until ckpt-6 STRICT close. \
+         REFUSED ON SIGHT: TypedArrayData resurrection under any rename \
+         (Refusal #1, W12 audit §7).",
+        op = op,
+        kind = receiver_kind,
+    ))
 }
 
-/// Convert an `Arc<HeapValue>` to a `KindedSlot` via the matching per-
-/// FieldType constructor. Mirrors `hashmap_methods::heap_value_arc_to_slot`
-/// (kept as a local copy to avoid a cross-module dependency cycle).
+/// Closure-arg validation for higher-order handlers. Returns `Some(err)`
+/// when the closure slot has the wrong shape so the surface body returns
+/// the structured shape-error rather than the generic ckpt-3 surface.
 #[inline]
-fn heap_value_arc_to_slot(hv: &Arc<HeapValue>) -> KindedSlot {
-    match hv.as_ref() {
-        HeapValue::String(s) => KindedSlot::from_string_arc(Arc::clone(s)),
-        HeapValue::Decimal(d) => KindedSlot::from_decimal(Arc::clone(d)),
-        HeapValue::BigInt(b) => KindedSlot::from_bigint(Arc::clone(b)),
-        HeapValue::TypedArray(a) => KindedSlot::from_typed_array(Arc::clone(a)),
-        // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): TypedObjectPtr.
-        HeapValue::TypedObject(o) => KindedSlot::from_typed_object_raw(o.clone().into_raw()),
-        // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): payload flipped
-        // to `HashMapKindedRef`; wrap in `Arc::new(m.clone())`.
-        HeapValue::HashMap(m) => KindedSlot::from_hashmap(Arc::new(m.clone())),
-        HeapValue::Char(c) => KindedSlot::from_char(*c),
-        _ => KindedSlot::none(),
+fn validate_closure_arg(op: &str, args: &[KindedSlot]) -> Option<VMError> {
+    if args.len() >= 2 && args[1].kind != NativeKind::Ptr(HeapKind::Closure) {
+        Some(VMError::RuntimeError(format!(
+            "{}: second argument must be a closure, got kind {:?}",
+            op, args[1].kind
+        )))
+    } else {
+        None
     }
-}
-
-/// Yield element `idx` from an `IteratorSource`. Returns the kinded
-/// payload — collection variants build the per-element kinded slot from
-/// their typed buffers; range yields an `Int64` carrier.
-fn source_elem_at(src: &IteratorSource, idx: usize) -> Result<KindedSlot, VMError> {
-    match src {
-        IteratorSource::Array(arr) => typed_array_elem_at(arr, idx),
-        IteratorSource::String(s) => Ok(string_elem_at(s.as_str(), idx)),
-        IteratorSource::Range { start, end, step } => {
-            Ok(range_elem_at(*start, *end, *step, idx))
-        }
-        IteratorSource::HashMap(m) => Ok(hashmap_elem_at(m, idx)),
-    }
-}
-
-// ── Pipeline driver — applies transforms per element ──────────────────────
-
-/// Result of applying the transform chain to a single source element.
-enum StageResult {
-    /// Element survives — keep it, advance source cursor.
-    Keep(KindedSlot),
-    /// Element is dropped (filter rejected, or skip-stage absorbed it).
-    Drop,
-    /// Pipeline-level halt: terminate before this element. Used by
-    /// `take(0)` and similar hard limits.
-    Stop,
-    /// FlatMap expansion — the element became zero or more sub-elements.
-    /// Walk these as if each were an independent yield.
-    Flat(Vec<KindedSlot>),
-}
-
-/// Apply a single transform stage to a candidate element, given the
-/// per-stage local state (skip-counter, take-counter, enumerate-counter).
-///
-/// `skip_remaining[i]` and `take_remaining[i]` track per-stage state for
-/// `Skip(n)` / `Take(n)` transforms — the per-stage indices align with
-/// `transforms[i]`.
-#[allow(clippy::too_many_arguments)]
-fn apply_stage(
-    vm: &mut VirtualMachine,
-    ctx: Option<&mut ExecutionContext>,
-    transform: &IteratorTransform,
-    elem: KindedSlot,
-    skip_remaining: &mut usize,
-    take_remaining: &mut Option<usize>,
-    enumerate_index: &mut usize,
-) -> Result<StageResult, VMError> {
-    match transform {
-        IteratorTransform::Map(closure_arc) => {
-            let closure = closure_arc_to_kinded_slot(closure_arc);
-            let result = vm.call_value_immediate_nb(&closure, &[elem], ctx)?;
-            Ok(StageResult::Keep(result))
-        }
-        IteratorTransform::Filter(closure_arc) => {
-            let closure = closure_arc_to_kinded_slot(closure_arc);
-            // Need to clone the element since the predicate consumes its
-            // arg's share but we want to re-yield the original on keep.
-            let elem_for_pred = elem.clone();
-            let result = vm.call_value_immediate_nb(&closure, &[elem_for_pred], ctx)?;
-            match result.kind {
-                NativeKind::Bool => {
-                    if result.slot.as_bool() {
-                        Ok(StageResult::Keep(elem))
-                    } else {
-                        Ok(StageResult::Drop)
-                    }
-                }
-                other => Err(type_error(format!(
-                    "filter: predicate must return Bool, got kind {:?}",
-                    other
-                ))),
-            }
-        }
-        IteratorTransform::Take(_n) => {
-            // `take_remaining` is set to `Some(n)` on the first
-            // encounter — see `iterate_to_vec` initialisation.
-            match take_remaining {
-                Some(0) => Ok(StageResult::Stop),
-                Some(remaining) => {
-                    *remaining -= 1;
-                    Ok(StageResult::Keep(elem))
-                }
-                None => unreachable!("take_remaining must be initialised before apply_stage"),
-            }
-        }
-        IteratorTransform::Skip(_n) => {
-            if *skip_remaining > 0 {
-                *skip_remaining -= 1;
-                Ok(StageResult::Drop)
-            } else {
-                Ok(StageResult::Keep(elem))
-            }
-        }
-        IteratorTransform::FlatMap(closure_arc) => {
-            let closure = closure_arc_to_kinded_slot(closure_arc);
-            let result = vm.call_value_immediate_nb(&closure, &[elem], ctx)?;
-            // Result must be an Array — expand to a Vec<KindedSlot>.
-            match result.kind {
-                NativeKind::Ptr(HeapKind::TypedArray) => {
-                    let arr_arc = match result.slot.as_heap_value() {
-                        HeapValue::TypedArray(a) => Arc::clone(a),
-                        _ => return Err(type_error("flatMap: kind=Array but heap arm mismatched")),
-                    };
-                    let len = typed_array_len(&arr_arc);
-                    let mut sub: Vec<KindedSlot> = Vec::with_capacity(len);
-                    for i in 0..len {
-                        sub.push(typed_array_elem_at(&arr_arc, i)?);
-                    }
-                    Ok(StageResult::Flat(sub))
-                }
-                other => Err(type_error(format!(
-                    "flatMap: callback must return Array, got kind {:?}",
-                    other
-                ))),
-            }
-        }
-        IteratorTransform::Enumerate => {
-            let idx_slot = KindedSlot::from_int(*enumerate_index as i64);
-            *enumerate_index += 1;
-            // W17-typed-carrier-bundle-A checkpoint 2/4: per C+ resolution
-            // (playbook §3 Bundle-A checkpoint-2 amendment), enumerate now
-            // yields TypedObject `Pair {first, second}` rather than a
-            // 2-element heterogeneous array — matching the HashMap.entries()
-            // record-access shape. User code reads `pair.first` (index) and
-            // `pair.second` (element).
-            let pair = shape_runtime::type_schema::typed_object_from_pairs(&[
-                ("first", idx_slot),
-                ("second", elem),
-            ]);
-            Ok(StageResult::Keep(pair))
-        }
-        IteratorTransform::Chain(_) => {
-            // `Chain` is handled at the iterate_to_vec driver level
-            // (after self's elements are exhausted, the chained
-            // iterator is walked end-to-end). The stage-level
-            // application of a `Chain` transform is a no-op pass-through.
-            Ok(StageResult::Keep(elem))
-        }
-    }
-}
-
-// `kinded_slot_to_heap_arc` removed in W17-typed-carrier-bundle-A
-// checkpoint 2/4: per ADR-006 §2.7.24 Q25.A enumerate and collect no
-// longer materialize `Arc<HeapValue>` carriers — they construct
-// strict-typed `TypedArrayData` variants directly (TypedObject Pair for
-// enumerate; the dispatching `build_specialized_array_from_yields` for
-// collect).
-
-/// Walk a `(source, transforms, cursor)` triple to completion, applying
-/// every transform to each source element and pushing the surviving
-/// outputs into `out`. Closure-bearing transforms (Map / Filter /
-/// FlatMap) invoke `vm.call_value_immediate_nb`, which is why this
-/// function takes `&mut VirtualMachine` directly.
-///
-/// Short-circuit terminals (`any` / `all` / `find`) iterate `out` and
-/// invoke their predicate after the walk — semantically equivalent to a
-/// streaming early-exit and simpler under the borrow checker (the W9
-/// playbook's "collect first, terminate after" pattern, mirror of
-/// `array_*` v2 handlers which materialise into `Vec<KindedSlot>` and
-/// then short-circuit on the materialised vec).
-fn iterate_to_vec(
-    vm: &mut VirtualMachine,
-    mut ctx: Option<&mut ExecutionContext>,
-    state: &IteratorState,
-) -> Result<Vec<KindedSlot>, VMError> {
-    // Per-stage scratch state. `take_remaining[i]` = `Some(n)` on first
-    // encounter of `Take(n)`; `skip_remaining[i]` = `n` on first
-    // encounter of `Skip(n)`. `enumerate_index[i]` = running counter for
-    // `Enumerate`. Vectors are sized to the transform chain length so
-    // per-stage indices align directly.
-    let nstages = state.transforms.len();
-    let mut skip_remaining: Vec<usize> = Vec::with_capacity(nstages);
-    let mut take_remaining: Vec<Option<usize>> = Vec::with_capacity(nstages);
-    let mut enumerate_index: Vec<usize> = Vec::with_capacity(nstages);
-    for t in &state.transforms {
-        skip_remaining.push(match t {
-            IteratorTransform::Skip(n) => *n,
-            _ => 0,
-        });
-        take_remaining.push(match t {
-            IteratorTransform::Take(n) => Some(*n),
-            _ => None,
-        });
-        enumerate_index.push(0);
-    }
-
-    let mut out: Vec<KindedSlot> = Vec::new();
-
-    // Drive: walk source elements, then if a `Chain` transform exists,
-    // walk the chained iterator's elements after self's are exhausted.
-    let nelems = state.source.len();
-    let start = state.cursor;
-    let mut early_stop = false;
-    'outer: for i in start..nelems {
-        let elem = source_elem_at(&state.source, i)?;
-        // `Option<KindedSlot>` so each apply_stage take-and-replace
-        // step is a `take()`/assign pair the borrow checker can verify
-        // (otherwise the post-loop `out.push(current)` triggers a
-        // "value moved into apply_stage on prior iteration" diagnostic
-        // even though Drop/Stop/Flat all break).
-        let mut current: Option<KindedSlot> = Some(elem);
-        let mut dropped = false;
-        for (sidx, transform) in state.transforms.iter().enumerate() {
-            let elem = current.take().expect("current must be Some at stage entry");
-            let res = apply_stage(
-                vm,
-                ctx.as_deref_mut(),
-                transform,
-                elem,
-                &mut skip_remaining[sidx],
-                &mut take_remaining[sidx],
-                &mut enumerate_index[sidx],
-            )?;
-            match res {
-                StageResult::Keep(next) => current = Some(next),
-                StageResult::Drop => {
-                    dropped = true;
-                    break;
-                }
-                StageResult::Stop => {
-                    early_stop = true;
-                    break 'outer;
-                }
-                StageResult::Flat(sub) => {
-                    // Each sub-element runs through stages `[sidx + 1..]`
-                    // independently. Recurse via a per-sub helper that
-                    // shares the per-stage scratch state.
-                    for s in sub {
-                        apply_remaining_stages(
-                            vm,
-                            ctx.as_deref_mut(),
-                            state,
-                            s,
-                            sidx + 1,
-                            &mut skip_remaining,
-                            &mut take_remaining,
-                            &mut enumerate_index,
-                            &mut out,
-                            &mut early_stop,
-                        )?;
-                        if early_stop {
-                            break 'outer;
-                        }
-                    }
-                    dropped = true; // current path consumed by Flat expansion
-                    break;
-                }
-            }
-        }
-        if !dropped {
-            if let Some(c) = current {
-                out.push(c);
-            }
-        }
-    }
-
-    // Walk chained iterators after self's source is exhausted (or
-    // skipped early by `early_stop`).
-    if !early_stop {
-        for transform in &state.transforms {
-            if let IteratorTransform::Chain(other_state) = transform {
-                let child_yields = iterate_to_vec(vm, ctx.as_deref_mut(), other_state)?;
-                out.extend(child_yields);
-            }
-        }
-    }
-    Ok(out)
-}
-
-/// Apply stages `[start_stage..]` to a single element and push the
-/// surviving result onto `out`. Used by the `FlatMap` expansion path so
-/// each sub-element runs through the remaining post-flat stages.
-#[allow(clippy::too_many_arguments)]
-fn apply_remaining_stages(
-    vm: &mut VirtualMachine,
-    mut ctx: Option<&mut ExecutionContext>,
-    state: &IteratorState,
-    elem: KindedSlot,
-    start_stage: usize,
-    skip_remaining: &mut [usize],
-    take_remaining: &mut [Option<usize>],
-    enumerate_index: &mut [usize],
-    out: &mut Vec<KindedSlot>,
-    early_stop: &mut bool,
-) -> Result<(), VMError> {
-    let mut current: Option<KindedSlot> = Some(elem);
-    for sidx in start_stage..state.transforms.len() {
-        let elem = current.take().expect("apply_remaining_stages: current must be Some");
-        let res = apply_stage(
-            vm,
-            ctx.as_deref_mut(),
-            &state.transforms[sidx],
-            elem,
-            &mut skip_remaining[sidx],
-            &mut take_remaining[sidx],
-            &mut enumerate_index[sidx],
-        )?;
-        match res {
-            StageResult::Keep(next) => current = Some(next),
-            StageResult::Drop => return Ok(()),
-            StageResult::Stop => {
-                *early_stop = true;
-                return Ok(());
-            }
-            StageResult::Flat(sub) => {
-                for s in sub {
-                    apply_remaining_stages(
-                        vm,
-                        ctx.as_deref_mut(),
-                        state,
-                        s,
-                        sidx + 1,
-                        skip_remaining,
-                        take_remaining,
-                        enumerate_index,
-                        out,
-                        early_stop,
-                    )?;
-                    if *early_stop {
-                        return Ok(());
-                    }
-                }
-                return Ok(());
-            }
-        }
-    }
-    if let Some(c) = current {
-        out.push(c);
-    }
-    Ok(())
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Receiver-bound iter() factories — construct fresh IteratorState
+// Receiver-bound iter() factories — surface-and-stop stubs
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// `Range.iter()` — historical W13-iterator-state surface that pointed
-/// at the upstream `MakeRange` carrier gap. The W15-range cluster
-/// (ADR-006 §2.7.23 / Q24, 2026-05-10) lands the kinded `RangeData`
-/// carrier and the live `Range.iter()` body lives at
-/// `range_methods::range_iter`. This entry forwards there for any
-/// callers that still resolve the W13-era symbol; new code should
-/// reference `range_methods::range_iter` directly.
+/// at the upstream `MakeRange` carrier gap. Live registry entry is
+/// `range_methods::range_iter`; this binding is a forwarder. Surface-and-stop
+/// at ckpt-3 because the `IteratorState` constructor cascade-breaks via
+/// the shape-value iterator_state.rs cascade-broken state.
 pub fn v2_range_iter(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    ctx: Option<&mut ExecutionContext>,
+    _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    crate::executor::objects::range_methods::range_iter(vm, args, ctx)
+    Err(ckpt3_surface("Range.iter", args))
 }
 
-/// `Array.iter()` — wraps the receiver `Arc<TypedArrayData>` into a fresh
-/// `IteratorState` over `IteratorSource::Array`.
+/// `Array.iter()` — historical wrap of `Arc<TypedArrayData>` into
+/// `IteratorSource::Array`.
 pub(crate) fn handle_array_iter(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    if args.is_empty() {
-        return Err(type_error("Array.iter(): missing receiver"));
-    }
-    let arr = clone_typed_array_arc(&args[0])?;
-    let state = IteratorState::new(IteratorSource::Array(arr));
-    Ok(KindedSlot::from_iterator(Arc::new(state)))
+    Err(ckpt3_surface("Array.iter", args))
 }
 
-/// `String.iter()` — wraps the receiver `Arc<String>` into a fresh
-/// `IteratorState` over `IteratorSource::String`.
+/// `String.iter()` — historical wrap of `Arc<String>` into
+/// `IteratorSource::String`.
 pub(crate) fn handle_string_iter(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    if args.is_empty() {
-        return Err(type_error("String.iter(): missing receiver"));
-    }
-    let s = clone_string_arc(&args[0])?;
-    let state = IteratorState::new(IteratorSource::String(s));
-    Ok(KindedSlot::from_iterator(Arc::new(state)))
+    Err(ckpt3_surface("String.iter", args))
 }
 
-/// Range.iter() — alternate handler binding (kept for build stability;
-/// see `v2_range_iter` for the live registry entry).
+/// `Range.iter()` — alternate binding for build stability.
 pub(crate) fn handle_range_iter(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    ctx: Option<&mut ExecutionContext>,
+    _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    v2_range_iter(vm, args, ctx)
+    Err(ckpt3_surface("Range.iter", args))
 }
 
-/// `HashMap.iter()` — wraps the receiver `Arc<HashMapData>` into a fresh
-/// `IteratorState` over `IteratorSource::HashMap`.
+/// `HashMap.iter()` — historical wrap of `HashMapKindedRef` into
+/// `IteratorSource::HashMap`.
 pub(crate) fn handle_hashmap_iter(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    if args.is_empty() {
-        return Err(type_error("HashMap.iter(): missing receiver"));
-    }
-    let m = clone_hashmap_arc(&args[0])?;
-    let state = IteratorState::new(IteratorSource::HashMap(m));
-    Ok(KindedSlot::from_iterator(Arc::new(state)))
+    Err(ckpt3_surface("HashMap.iter", args))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Lazy transforms — append a stage and return a fresh IteratorState
+// Lazy transforms — surface-and-stop stubs
 // ═══════════════════════════════════════════════════════════════════════════
-
-#[inline]
-fn append_transform(
-    args: &[KindedSlot],
-    op: &'static str,
-    expected_arity: usize,
-    transform: IteratorTransform,
-) -> Result<KindedSlot, VMError> {
-    if args.len() != expected_arity {
-        return Err(type_error(format!(
-            "Iterator.{}: expected {} arguments, got {}",
-            op,
-            expected_arity - 1,
-            args.len() - 1
-        )));
-    }
-    let state = as_iterator(&args[0])?;
-    let new_state = state.with_transform(transform);
-    Ok(KindedSlot::from_iterator(Arc::new(new_state)))
-}
-
-#[inline]
-fn read_int_arg(slot: &KindedSlot, op: &'static str) -> Result<usize, VMError> {
-    let bits = slot.slot.raw();
-    let i = match slot.kind {
-        NativeKind::Int8 | NativeKind::NullableInt8 => bits as u8 as i8 as i64,
-        NativeKind::Int16 | NativeKind::NullableInt16 => bits as u16 as i16 as i64,
-        NativeKind::Int32 | NativeKind::NullableInt32 => bits as u32 as i32 as i64,
-        NativeKind::Int64
-        | NativeKind::NullableInt64
-        | NativeKind::IntSize
-        | NativeKind::NullableIntSize => bits as i64,
-        NativeKind::UInt8 | NativeKind::NullableUInt8 => (bits as u8) as i64,
-        NativeKind::UInt16 | NativeKind::NullableUInt16 => (bits as u16) as i64,
-        NativeKind::UInt32 | NativeKind::NullableUInt32 => (bits as u32) as i64,
-        NativeKind::UInt64
-        | NativeKind::NullableUInt64
-        | NativeKind::UIntSize
-        | NativeKind::NullableUIntSize => bits as i64,
-        other => {
-            return Err(type_error(format!(
-                "Iterator.{}: expected integer count, got kind {:?}",
-                op, other
-            )));
-        }
-    };
-    if i < 0 {
-        return Err(type_error(format!(
-            "Iterator.{}: count must be non-negative, got {}",
-            op, i
-        )));
-    }
-    Ok(i as usize)
-}
 
 /// `Iterator.map(closure)` — append a Map transform.
 pub(crate) fn handle_map(
@@ -846,11 +198,10 @@ pub(crate) fn handle_map(
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    if args.len() != 2 {
-        return Err(type_error("Iterator.map: expected (iterator, closure)"));
+    if let Some(err) = validate_closure_arg("Iterator.map", args) {
+        return Err(err);
     }
-    let closure = closure_to_heap_arc(&args[1])?;
-    append_transform(args, "map", 2, IteratorTransform::Map(closure))
+    Err(ckpt3_surface("Iterator.map", args))
 }
 
 /// `Iterator.filter(closure)` — append a Filter transform.
@@ -859,13 +210,10 @@ pub(crate) fn handle_filter(
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    if args.len() != 2 {
-        return Err(type_error(
-            "Iterator.filter: expected (iterator, predicate)",
-        ));
+    if let Some(err) = validate_closure_arg("Iterator.filter", args) {
+        return Err(err);
     }
-    let closure = closure_to_heap_arc(&args[1])?;
-    append_transform(args, "filter", 2, IteratorTransform::Filter(closure))
+    Err(ckpt3_surface("Iterator.filter", args))
 }
 
 /// `Iterator.take(n)` — append a Take transform.
@@ -874,11 +222,7 @@ pub(crate) fn handle_take(
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    if args.len() != 2 {
-        return Err(type_error("Iterator.take: expected (iterator, count)"));
-    }
-    let n = read_int_arg(&args[1], "take")?;
-    append_transform(args, "take", 2, IteratorTransform::Take(n))
+    Err(ckpt3_surface("Iterator.take", args))
 }
 
 /// `Iterator.skip(n)` — append a Skip transform.
@@ -887,11 +231,7 @@ pub(crate) fn handle_skip(
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    if args.len() != 2 {
-        return Err(type_error("Iterator.skip: expected (iterator, count)"));
-    }
-    let n = read_int_arg(&args[1], "skip")?;
-    append_transform(args, "skip", 2, IteratorTransform::Skip(n))
+    Err(ckpt3_surface("Iterator.skip", args))
 }
 
 /// `Iterator.flatMap(closure)` — append a FlatMap transform.
@@ -900,11 +240,10 @@ pub(crate) fn handle_flat_map(
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    if args.len() != 2 {
-        return Err(type_error("Iterator.flatMap: expected (iterator, fn)"));
+    if let Some(err) = validate_closure_arg("Iterator.flatMap", args) {
+        return Err(err);
     }
-    let closure = closure_to_heap_arc(&args[1])?;
-    append_transform(args, "flatMap", 2, IteratorTransform::FlatMap(closure))
+    Err(ckpt3_surface("Iterator.flatMap", args))
 }
 
 /// `Iterator.enumerate()` — append an Enumerate transform.
@@ -913,311 +252,93 @@ pub(crate) fn handle_enumerate(
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    append_transform(args, "enumerate", 1, IteratorTransform::Enumerate)
+    Err(ckpt3_surface("Iterator.enumerate", args))
 }
 
-/// `Iterator.chain(other)` — append a Chain transform whose payload is
-/// the other `Arc<IteratorState>`.
+/// `Iterator.chain(other)` — append a Chain transform.
 pub(crate) fn handle_chain(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    if args.len() != 2 {
-        return Err(type_error("Iterator.chain: expected (iterator, other)"));
-    }
-    let other = as_iterator(&args[1])?;
-    let chained = Arc::clone(other);
-    append_transform(args, "chain", 2, IteratorTransform::Chain(chained))
+    Err(ckpt3_surface("Iterator.chain", args))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Eager terminals — walk the pipeline and emit a result
+// Eager terminals — surface-and-stop stubs
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// `Iterator.collect()` / `Iterator.toArray()` — materialise the
-/// pipeline into a strict-typed array per ADR-006 §2.7.24 Q25.A.
-///
-/// W17-typed-carrier-bundle-A checkpoint 2/4: the prior
-/// `the-deleted-heterogeneous-element-carrier` heterogeneous-element buffer is replaced by
-/// a per-element-kind specialized variant. Pipeline yields are uniform
-/// per type-checked iterator; the dispatch picks the variant matching the
-/// first yield's `NativeKind` and rejects heterogeneous-kind yields with a
-/// structured error (would indicate a type-system inconsistency upstream).
+/// `Iterator.collect()` / `Iterator.toArray()`.
 pub(crate) fn handle_collect(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    ctx: Option<&mut ExecutionContext>,
+    _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    if args.len() != 1 {
-        return Err(type_error("Iterator.collect: takes no arguments"));
-    }
-    let state = Arc::clone(as_iterator(&args[0])?);
-    let yields = iterate_to_vec(vm, ctx, &state)?;
-    build_specialized_array_from_yields(yields)
+    Err(ckpt3_surface("Iterator.collect", args))
 }
 
-/// Build a strict-typed `TypedArrayData` variant from a `Vec<KindedSlot>`
-/// of per-element yields. Dispatches on the first yield's `NativeKind` and
-/// requires the rest to match (homogeneous per Q25.A "per-element kind
-/// uniform per variant").
-fn build_specialized_array_from_yields(yields: Vec<KindedSlot>) -> Result<KindedSlot, VMError> {
-    if yields.is_empty() {
-        // Empty pipeline — pick a default (empty TypedObject array) which
-        // satisfies the "no HeapValue arm" gate post-Q25.A.
-        // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): TypedObjectPtr inner.
-        let buf: TypedBuffer<shape_value::heap_value::TypedObjectPtr> =
-            TypedBuffer::from_vec(Vec::new());
-        return Ok(KindedSlot::from_typed_array(Arc::new(
-            TypedArrayData::TypedObject(Arc::new(buf)),
-        )));
-    }
-    let first_kind = yields[0].kind;
-    // Validate homogeneity. Mixed-kind yields indicate a type-system gap
-    // upstream — surface, never silently coerce.
-    for (i, y) in yields.iter().enumerate().skip(1) {
-        if y.kind != first_kind {
-            return Err(type_error(format!(
-                "Iterator.collect: heterogeneous-kind yields not supported \
-                 post-§2.7.24 Q25.A (element 0 kind={:?}, element {} kind={:?})",
-                first_kind, i, y.kind
-            )));
-        }
-    }
-    match first_kind {
-        NativeKind::Int64 => {
-            let data: Vec<i64> = yields.iter().map(|y| y.slot.as_i64()).collect();
-            Ok(KindedSlot::from_typed_array(Arc::new(TypedArrayData::I64(
-                Arc::new(TypedBuffer::from_vec(data)),
-            ))))
-        }
-        NativeKind::Float64 => {
-            let data: Vec<f64> = yields.iter().map(|y| y.slot.as_f64()).collect();
-            let av = shape_value::AlignedVec::from_vec(data);
-            Ok(KindedSlot::from_typed_array(Arc::new(TypedArrayData::F64(
-                Arc::new(shape_value::AlignedTypedBuffer::from(av)),
-            ))))
-        }
-        NativeKind::Bool => {
-            let data: Vec<u8> = yields
-                .iter()
-                .map(|y| if y.slot.as_bool() { 1u8 } else { 0u8 })
-                .collect();
-            Ok(KindedSlot::from_typed_array(Arc::new(TypedArrayData::Bool(
-                Arc::new(TypedBuffer::from_vec(data)),
-            ))))
-        }
-        NativeKind::String | NativeKind::Ptr(HeapKind::String) => {
-            let mut data: Vec<Arc<String>> = Vec::with_capacity(yields.len());
-            for y in yields.iter() {
-                match y.slot.as_heap_value() {
-                    HeapValue::String(s) => data.push(Arc::clone(s)),
-                    other => {
-                        return Err(type_error(format!(
-                            "Iterator.collect: String-kinded yield with non-String heap arm: {:?}",
-                            other.kind()
-                        )))
-                    }
-                }
-            }
-            Ok(KindedSlot::from_typed_array(Arc::new(
-                TypedArrayData::String(Arc::new(TypedBuffer::from_vec(data))),
-            )))
-        }
-        // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): canonical
-        // 5-arm receiver-recovery — slot bits for `Ptr(TypedObject)` are
-        // `*const TypedObjectStorage` (NOT `Arc::into_raw(Arc<HeapValue>)`),
-        // so `as_heap_value()` is unsound. Read raw bits, bump via
-        // v2_retain to claim the buffer's owned share; y's Drop retires
-        // its own share through the §2.7.7 / Q9 dispatch table.
-        NativeKind::Ptr(HeapKind::TypedObject) => {
-            let mut data: Vec<shape_value::heap_value::TypedObjectPtr> =
-                Vec::with_capacity(yields.len());
-            for y in yields.iter() {
-                let bits = y.slot.raw();
-                if bits == 0 {
-                    return Err(type_error(
-                        "Iterator.collect: TypedObject-kinded yield slot bits null",
-                    ));
-                }
-                let ptr = bits as *const shape_value::heap_value::TypedObjectStorage;
-                // SAFETY: per construction-side contract, bits with
-                // kind=Ptr(TypedObject) are a live `*const TypedObjectStorage`
-                // with refcount ≥ 1.
-                unsafe { shape_value::v2::refcount::v2_retain(&(*ptr).header); }
-                data.push(shape_value::heap_value::TypedObjectPtr::new(ptr));
-            }
-            Ok(KindedSlot::from_typed_array(Arc::new(
-                TypedArrayData::TypedObject(Arc::new(TypedBuffer::from_vec(data))),
-            )))
-        }
-        other => Err(type_error(format!(
-            "Iterator.collect: element kind {:?} not yet supported \
-             post-§2.7.24 Q25.A — add a specialized TypedArrayData arm.",
-            other
-        ))),
-    }
-}
-
-/// `Iterator.forEach(closure)` — invokes the closure per yielded
-/// element and returns null/none.
+/// `Iterator.forEach(closure)`.
 pub(crate) fn handle_for_each(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    mut ctx: Option<&mut ExecutionContext>,
+    _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    if args.len() != 2 {
-        return Err(type_error("Iterator.forEach: expected (iterator, fn)"));
+    if let Some(err) = validate_closure_arg("Iterator.forEach", args) {
+        return Err(err);
     }
-    let state = Arc::clone(as_iterator(&args[0])?);
-    let closure_arc = closure_to_heap_arc(&args[1])?;
-    let yields = iterate_to_vec(vm, ctx.as_deref_mut(), &state)?;
-    for slot in yields {
-        let closure = closure_arc_to_kinded_slot(&closure_arc);
-        let _ = vm.call_value_immediate_nb(&closure, &[slot], ctx.as_deref_mut())?;
-    }
-    Ok(KindedSlot::none())
+    Err(ckpt3_surface("Iterator.forEach", args))
 }
 
-/// `Iterator.reduce(reducer, initial)` — threads the accumulator
-/// through the per-element callback. Initial value is `args[2]`.
+/// `Iterator.reduce(reducer, initial)`.
 pub(crate) fn handle_reduce(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    mut ctx: Option<&mut ExecutionContext>,
+    _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    if args.len() != 3 {
-        return Err(type_error(
-            "Iterator.reduce: expected (iterator, reducer, initial)",
-        ));
-    }
-    let state = Arc::clone(as_iterator(&args[0])?);
-    let closure_arc = closure_to_heap_arc(&args[1])?;
-    let mut acc: KindedSlot = args[2].clone();
-    let yields = iterate_to_vec(vm, ctx.as_deref_mut(), &state)?;
-    for slot in yields {
-        let closure = closure_arc_to_kinded_slot(&closure_arc);
-        let next = vm.call_value_immediate_nb(
-            &closure,
-            &[std::mem::replace(&mut acc, KindedSlot::none()), slot],
-            ctx.as_deref_mut(),
-        )?;
-        acc = next;
-    }
-    Ok(acc)
+    Err(ckpt3_surface("Iterator.reduce", args))
 }
 
-/// `Iterator.count()` — count the elements yielded by the pipeline.
+/// `Iterator.count()`.
 pub(crate) fn handle_count(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    ctx: Option<&mut ExecutionContext>,
+    _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    if args.len() != 1 {
-        return Err(type_error("Iterator.count: takes no arguments"));
-    }
-    let state = Arc::clone(as_iterator(&args[0])?);
-    let yields = iterate_to_vec(vm, ctx, &state)?;
-    Ok(KindedSlot::from_int(yields.len() as i64))
+    Err(ckpt3_surface("Iterator.count", args))
 }
 
-/// `Iterator.any(predicate)` — return `true` if the predicate returns
-/// `true` for any yielded element.
+/// `Iterator.any(predicate)`.
 pub(crate) fn handle_any(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    mut ctx: Option<&mut ExecutionContext>,
+    _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    if args.len() != 2 {
-        return Err(type_error("Iterator.any: expected (iterator, predicate)"));
+    if let Some(err) = validate_closure_arg("Iterator.any", args) {
+        return Err(err);
     }
-    let state = Arc::clone(as_iterator(&args[0])?);
-    let closure_arc = closure_to_heap_arc(&args[1])?;
-    let yields = iterate_to_vec(vm, ctx.as_deref_mut(), &state)?;
-    for slot in yields {
-        let closure = closure_arc_to_kinded_slot(&closure_arc);
-        let result = vm.call_value_immediate_nb(&closure, &[slot], ctx.as_deref_mut())?;
-        match result.kind {
-            NativeKind::Bool => {
-                if result.slot.as_bool() {
-                    return Ok(KindedSlot::from_bool(true));
-                }
-            }
-            other => {
-                return Err(type_error(format!(
-                    "any: predicate must return Bool, got kind {:?}",
-                    other
-                )));
-            }
-        }
-    }
-    Ok(KindedSlot::from_bool(false))
+    Err(ckpt3_surface("Iterator.any", args))
 }
 
-/// `Iterator.all(predicate)` — return `true` if the predicate returns
-/// `true` for every yielded element (vacuously true on empty
-/// iterator).
+/// `Iterator.all(predicate)`.
 pub(crate) fn handle_all(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    mut ctx: Option<&mut ExecutionContext>,
+    _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    if args.len() != 2 {
-        return Err(type_error("Iterator.all: expected (iterator, predicate)"));
+    if let Some(err) = validate_closure_arg("Iterator.all", args) {
+        return Err(err);
     }
-    let state = Arc::clone(as_iterator(&args[0])?);
-    let closure_arc = closure_to_heap_arc(&args[1])?;
-    let yields = iterate_to_vec(vm, ctx.as_deref_mut(), &state)?;
-    for slot in yields {
-        let closure = closure_arc_to_kinded_slot(&closure_arc);
-        let result = vm.call_value_immediate_nb(&closure, &[slot], ctx.as_deref_mut())?;
-        match result.kind {
-            NativeKind::Bool => {
-                if !result.slot.as_bool() {
-                    return Ok(KindedSlot::from_bool(false));
-                }
-            }
-            other => {
-                return Err(type_error(format!(
-                    "all: predicate must return Bool, got kind {:?}",
-                    other
-                )));
-            }
-        }
-    }
-    Ok(KindedSlot::from_bool(true))
+    Err(ckpt3_surface("Iterator.all", args))
 }
 
-/// `Iterator.find(predicate)` — return the first yielded element where
-/// the predicate returns `true`, or null/none if no element matches.
+/// `Iterator.find(predicate)`.
 pub(crate) fn handle_find(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    mut ctx: Option<&mut ExecutionContext>,
+    _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    if args.len() != 2 {
-        return Err(type_error("Iterator.find: expected (iterator, predicate)"));
+    if let Some(err) = validate_closure_arg("Iterator.find", args) {
+        return Err(err);
     }
-    let state = Arc::clone(as_iterator(&args[0])?);
-    let closure_arc = closure_to_heap_arc(&args[1])?;
-    let yields = iterate_to_vec(vm, ctx.as_deref_mut(), &state)?;
-    for slot in yields {
-        let closure = closure_arc_to_kinded_slot(&closure_arc);
-        let elem_for_pred = slot.clone();
-        let result = vm.call_value_immediate_nb(&closure, &[elem_for_pred], ctx.as_deref_mut())?;
-        match result.kind {
-            NativeKind::Bool => {
-                if result.slot.as_bool() {
-                    return Ok(slot);
-                }
-            }
-            other => {
-                return Err(type_error(format!(
-                    "find: predicate must return Bool, got kind {:?}",
-                    other
-                )));
-            }
-        }
-    }
-    Ok(KindedSlot::none())
+    Err(ckpt3_surface("Iterator.find", args))
 }

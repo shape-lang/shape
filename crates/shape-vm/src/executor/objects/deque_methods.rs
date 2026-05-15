@@ -246,11 +246,18 @@ pub fn v2_get(
 
 /// Deque.toArray() -> Array<T>
 ///
-/// W17-typed-carrier-bundle-A checkpoint 2/4: per ADR-006 §2.7.24 Q25.A
-/// the result is a strict-typed `TypedArrayData` variant chosen by the
-/// first element's `HeapValue` arm. Uniform-element Deques materialize to
-/// the matching specialized variant; heterogeneous Deques surface
-/// (would indicate a type-system gap upstream).
+/// V3-S5 ckpt-3 surface-and-stop (drive-by from ckpt-2 cross-module helper
+/// deletion). Per V3-S5 ckpt-1 close, the `TypedArrayData` enum was
+/// DELETED at `crates/shape-value/src/heap_value.rs` per W12-typed-array-
+/// data-deletion audit §3.5 + ADR-006 §2.7.24 Q25.A SUPERSEDED. The
+/// previous body called
+/// `array_transform::build_specialized_array_from_heap_arcs(elems)` which
+/// produced `TypedArrayData` — that helper was DELETED in ckpt-2 along
+/// with its sibling cross-module helpers. Post-deletion target is the
+/// v2-raw `TypedArray<T>` flat-struct carrier with per-T monomorphized
+/// construction over the deque's homogeneous-element-kind contents per
+/// audit §A.3 + §3.1 scalar recipe + §2.2 heap-element variants;
+/// monomorphization lands across ckpt-3 / 4 / 5 / 6.
 pub fn v2_to_array(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
@@ -259,10 +266,25 @@ pub fn v2_to_array(
     if args.len() != 1 {
         return Err(type_error("Deque.toArray() takes no arguments"));
     }
-    let d = as_deque(&args[0])?;
-    let elems: Vec<Arc<HeapValue>> = d.items.iter().map(Arc::clone).collect();
-    crate::executor::objects::array_transform::build_specialized_array_from_heap_arcs(elems)
-        .map(|arr| KindedSlot::from_typed_array(Arc::new(arr)))
+    let _d = as_deque(&args[0])?;
+    Err(VMError::NotImplemented(
+        "Deque.toArray: SURFACE — V3-S5 ckpt-3 consumer-cascade tier 2 \
+         surface (drive-by from ckpt-2 cross-module helper deletion). \
+         `TypedArrayData` enum DELETED at ckpt-1 (2026-05-15) per W12-\
+         typed-array-data-deletion audit §3.5 + ADR-006 §2.7.24 Q25.A \
+         SUPERSEDED. The previous call to \
+         `array_transform::build_specialized_array_from_heap_arcs` \
+         cascade-broke at the ckpt-2 cross-module helper deletion \
+         (that helper produced `TypedArrayData`; the type is gone). \
+         Post-deletion target is the v2-raw `TypedArray<T>` flat-struct \
+         carrier with per-T monomorphized construction over the deque's \
+         homogeneous-element-kind contents per audit §A.3 + §3.1 \
+         scalar recipe; monomorphization lands across ckpt-3 / 4 / 5 / 6. \
+         UNREACHABLE until ckpt-6 STRICT close. REFUSED ON SIGHT: \
+         TypedArrayData resurrection under any rename (Refusal #1, W12 \
+         audit §7)."
+            .to_string(),
+    ))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
