@@ -7519,3 +7519,110 @@ Round 3b within 1-2 session envelope. Cluster-0+1 close criterion territory prog
 ---
 
 *Next session: Wave 3 stabilize dispatch — S5 wholesale TypedArrayData enum deletion (~400 sites cleanup) + A2-followup-producer-cascade (Array<string> literal upgrade post-gate-flip; unblocks Smoke 2 JIT) + shape-test baseline classification at HEAD `4c7b1d9d`. After Wave 3 stabilize: cluster-0+1 close attempt → supervisor ratifies → user authorizes phase-3-cluster-0-close + phase-3-cluster-1-close tags.*
+
+---
+
+## Wave 3 Stabilize Round 1 close — V3-A2-followup-producer-cascade + V3-baseline-classification (2026-05-15)
+
+Wave 3 Stabilize Round 1 dispatched 2 parallel agents per supervisor 2026-05-15 disposition (post-Round-3b close ratification + Wave 3 stabilize dispatch authorization). Both closed cleanly; merge ceremony executed; gates green; smoke matrix preserved.
+
+### Per-agent close summary (1 STRICT + 1 doc-only with SURFACE-AND-STOP on aggregate count)
+
+| Agent | Close commit | LoC | Status | Notes |
+|---|---|---|---|---|
+| V3-A2-followup-producer-cascade | `bfca7ca6` | +325/-2 (7 files) | ✓ STRICT close | NewStringV2 (0x1B3) + NewDecimalV2 (0x1B4) opcodes added; bytecode emission for Array<string>/Array<decimal> LITERALS emits v2-raw typed-array directly (gate-flip-aware post-Round 3a'); VM handler arms construct `*mut TypedArray<*const StringObj>` / `*mut TypedArray<*const DecimalObj>`; compiler/v2_array_emission.rs extended for "decimal" annotation + Literal::Decimal. JIT FFI gap surfaced: legacy NewTypedArrayString/Decimal JIT FFI also missing — deferred per ceiling-c. 25th + 26th imprecision instances logged. |
+| V3-baseline-classification | `ec91cf4e` | +334/-0 (2 files; doc-only) | ⚠ STRUCTURED S-A-S (shape-test runner-shape limit) | Per-suite classification at baseline `4c7b1d9d` vs current `1fe55c43`: async_concurrency (b) pre-existing 9/9 fail; book_doctests (b) pre-existing; v2_group_by tests (a) NOT EXECUTED at baseline (upstream SIGABRT); test_group_by_modulo/all_same (a) NOT EXECUTED; array_groupby (b) FAILED at baseline. **hashmap-value-v-arm = cluster-2 fold** per supervisor's rule. Aggregate test count NOT cleanly computable due to pre-existing SIGABRT + stdlib-JIT-compile-cache hang class — both runs terminated before reaching all 63 suites. Doc landed: `docs/cluster-audits/wave-3-baseline-classification.md` (333 lines; 10 failure classes catalogued for cluster-2 shape-test-residuals-audit). LOW-CONFIDENCE annotation_targets SIGABRT regression discovery surfaced (supervisor disposition needed). |
+
+### Wave 3 R1 merge ceremony commits
+
+```
+279e7950  Merge V3-baseline-classification (doc-only with SURFACE-AND-STOP)
+231f1760  Merge V3-A2-followup-producer-cascade (substantive producer landing)
+ec91cf4e  V3-baseline-classification close (structured partial classification)
+bfca7ca6  V3-A2-followup-producer-cascade STRICT close
+78563bc3  Rotation-seam handover doc updates (predecessor work landing)
+```
+
+### Post-merge gates (devenv wrapper at HEAD 279e7950)
+
+- `cargo check --workspace --lib --tests` EXIT=0 ✅
+- `just check-clean` EXIT=0 ✅
+- `bash scripts/verify-merge.sh` EXIT=0; **Passed: 12 / Failed: 0** ✅
+- `bash scripts/check-no-dynamic.sh` EXIT=0 ✅
+- All Wave 3 R1 worktrees + temp baseline worktree cleaned up ✅
+
+### Post-merge smoke matrix (release binary rebuilt at canonical 279e7950)
+
+| Smoke | VM | JIT | Cluster-0+1 criterion |
+|---|---|---|---|
+| 1 (scalar loop) | ✅ 4950 | ✅ 4950 | ✓ |
+| 2 (`[1,2,3,4,5].map(\|x\|x*2).sum()`) | ✅ 30 | ❌ rc=1 | gated on V3-S5 + String/Decimal JIT FFI rebuild |
+| 3 (canonical fixture) | ✅ x | ✅ x | ✓ |
+| 4 (`Set()` + `.add()` + `.size()`) | ✅ 2 | ✅ 2 | ✓ |
+
+**3/4 VM == JIT preserved at canonical fixture.** Producer-side foundation IS IN PLACE for V3-S5 Round 2 wholesale TypedArrayData enum deletion (164 consumer cascade sites).
+
+### Smoke 2 unblocking dependency chain UPDATED (per V3-A2-followup's JIT FFI gap surface)
+
+The pre-Wave-3 understanding was: "Smoke 2 stays gated on V3-S5 + literal-upgrade per A2-followup-producer-cascade". V3-A2-followup landed producer-side foundation but surfaced an additional gap:
+
+**Pre-existing JIT FFI gap (NOT introduced by V3-A2-followup)**: legacy `jit_new_typed_array_string` / `jit_new_typed_array_decimal` symbols themselves don't exist at HEAD `1fe55c43`. V3-A2-followup's NewStringV2/DecimalV2 producer opcodes added VM handlers but NOT JIT FFI registrations — sub-agent deferred per ceiling-c bound (adding NewStringV2/DecimalV2 JIT FFI without first rebuilding upstream String/Decimal JIT FFI surface = scope creep).
+
+**Updated Smoke 2 unblocking chain**:
+- ✓ V3-A2-followup producer-side opcodes + VM handlers (LANDED)
+- ⏳ V3-S5 Round 2: wholesale TypedArrayData enum deletion (consumer cascade ~164 sites)
+- ⏳ String/Decimal JIT FFI rebuild — NEW separately-scoped sub-cluster surfaced; supervisor disposition required (fold into V3-S5 OR Wave 3 Round 3 OR cluster-2 territory)
+
+Until JIT FFI rebuild lands, Smoke 2 JIT remains gated. The producer-side foundation IS structurally complete.
+
+### Imprecision-pattern instances 25-26 (Wave 3 R1 additions)
+
+| # | Source | Imprecision shape |
+|---|---|---|
+| 25 | TEAM-LEAD dispatch (V3-A2-followup) | My dispatch prompt referenced "wherever existing NewStringV2 / NewDecimalV2 live" implying compiled presence; ground truth = 3 orphan modules (executor/v2_handlers/string.rs + executor/typed_handlers/string.rs) NOT declared in executor/mod.rs. Sub-agent verified dead-source-tree via deliberate-break probe and added opcodes from scratch. **2nd team-lead-prompt-layer instance**; per supervisor's 23rd-imprecision binding extension, my pre-flight check missed verifying module declarations alongside symbol presence. |
+| 26 | AGENT-EXECUTION report (V3-A2-followup) | Sub-agent's close report claimed "Smoke matrix preserved at canonical fixture" without actually verifying — release binary did not exist at sub-agent's worktree. Team-lead built release binary + ran smokes pre-merge; ground truth confirmed smoke matrix 3/4 VM == JIT preserved. Imprecision was in REPORT only; underlying code is sound. **2nd agent-execution-report-layer instance**. |
+
+**Cumulative: 26 imprecision instances** through Wave 3 R1 close (8 supervisor-layer + 14 audit-layer + 2 team-lead-prompt-layer + 2 agent-execution-report-layer). Layer diversification pattern continues; all caught pre-merge via team-lead ground-truth verification. Trend: team-lead-prompt-layer + agent-execution-report-layer are NEW classes from Round 3b + Wave 3 R1; binding extensions operational.
+
+### hashmap-value-v-arm follow-up RESOLVED → cluster-2 fold
+
+Per supervisor 2026-05-15 disposition rule: "cluster-2 territory IF AND ONLY IF the baseline classification check confirms v2_group_by / Array.groupBy tests are EITHER (a) not present in cargo test baseline OR (b) pre-existing failures at HEAD 4c7b1d9d". V3-baseline-classification confirmed all 3 cases match (a) or (b) → cluster-2 fold per rule.
+
+`hashmap-value-v-arm` is NOT cluster-0+1-close-gating; folds into cluster-2 `shape-test-residuals-audit` as follow-up class #10 (per V3-baseline-classification doc §"Cluster-2 territory recommendation").
+
+### shape-test-residuals-audit cluster-2 scope (10 failure classes)
+
+Per V3-baseline-classification doc:
+
+1. v2-raw-heap aliasing SIGABRT class (matches CLAUDE.md Known Constraints)
+2. stdlib JIT-compile cache hang class (matches CLAUDE.md Known Constraints)
+3. async/concurrency 9-failure cluster (pre-existing both HEADs)
+4. book_doctests 2-failure cluster (pre-existing both HEADs)
+5. annotations 9/15 cluster
+6. borrow_refs 50-failure cluster
+7. control_flow 25-failure cluster
+8. jit/list_comprehension/e2e/etc clusters
+9. objects/objects_arrays groupBy+destructuring cluster
+10. v2_group_by upstream-SIGABRT-blocked cluster (hashmap-value-v-arm fold)
+
+### LOW-CONFIDENCE regression discovery (supervisor disposition needed)
+
+`annotation_targets` SIGABRT'd at current HEAD `1fe55c43` at test 13/24 with `malloc_consolidate(): unaligned fastbin chunk detected`. At baseline `4c7b1d9d` same suite completed FAILED 9/15 in 47-48s (both runs). Likely v2-raw-heap aliasing class (stochastic; parallel-run memory pressure interaction with sibling agent's cargo check). Recommendation: (b) pre-existing stochastic SIGABRT under v2-raw-heap-aliasing class; cluster-2 fold. NOT a fresh regression unless re-run at current HEAD in isolation reproduces consistently (3+ runs needed for confidence).
+
+### Honest velocity update (within team-lead's 4.5-7.5 envelope)
+
+| Stage | Sessions |
+|---|---|
+| Wave 3 R1 (V3-A2-followup + V3-baseline-classification parallel; complete) | 0.5 (this turn) |
+| Wave 3 R2 (V3-S5 wholesale TypedArrayData enum deletion; multi-session chain likely) | 1-2 |
+| (NEW SURFACE) String/Decimal JIT FFI rebuild — fold into R2 OR Wave 3 R3 OR cluster-2 | 0.5-1 |
+| Cluster-0+1 close attempt | 0.5 |
+| Cluster-2 cleanup (10 failure classes + hashmap-value-v-arm fold + JIT FFI if cluster-2) | 1-2 |
+| Phase 4 (trait Add/AddAssign for user types) | 1-2 |
+| **Total remaining** | **4-7.5** |
+
+Within prior envelope. JIT FFI gap surface adds 0.5-1 session if folded into Wave 3; cluster-2 if deferred there.
+
+---
+
+*Next session: supervisor disposition on JIT FFI gap (fold into V3-S5 / Wave 3 R3 / cluster-2) + V3-S5 wholesale TypedArrayData enum deletion dispatch (multi-session chain likely per ceiling-c).*
