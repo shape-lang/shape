@@ -5,7 +5,7 @@
 //! `register_typed_fn_2` typed entries via [`create_matrix_intrinsics_module`].
 //!
 //! Inputs use the existing Phase 2d Array `Vec<Arc<HeapValue>>` FromSlot for
-//! nested `Array<Array<number>>` matrix arguments and `Arc<AlignedTypedBuffer>`
+//! nested `Array<Array<number>>` matrix arguments and `Arc<Vec<f64>>`
 //! for flat `Array<number>` vector arguments. Outputs project through
 //! `ConcreteReturn::ArrayHeapValue(Vec<Arc<HeapValue>>)` for nested-array
 //! returns (Phase 2d Array landed; production-active per arrow_module /
@@ -37,7 +37,6 @@ use crate::module_exports::ModuleExports;
 use crate::typed_module_exports::{ConcreteReturn, ConcreteType, TypedReturn};
 use shape_value::aligned_vec::AlignedVec;
 use shape_value::heap_value::{HeapValue, MatrixData};
-use shape_value::AlignedTypedBuffer;
 use std::sync::Arc;
 
 // ───────────────────── Module factory (4 typed entries) ─────────────────────
@@ -48,7 +47,7 @@ pub fn create_matrix_intrinsics_module() -> ModuleExports {
     module.description =
         "Matrix intrinsics (matmul_vec, matmul_mat, mat_add, mat_sub)".to_string();
 
-    register_typed_fn_2::<_, Vec<Arc<HeapValue>>, Arc<AlignedTypedBuffer>>(
+    register_typed_fn_2::<_, Vec<Arc<HeapValue>>, Arc<Vec<f64>>>(
         &mut module,
         "__intrinsic_matmul_vec",
         "Matrix-vector multiplication: `Mat<number> * Vec<number> -> Vec<number>`",

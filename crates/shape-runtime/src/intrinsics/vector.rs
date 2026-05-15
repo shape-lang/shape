@@ -3,7 +3,7 @@
 //! Twelve typed-marshal entry points (`__intrinsic_vec_*`) are registered via
 //! `register_typed_fn_N` into the module returned by
 //! [`create_vector_intrinsics_module`]. Inputs are zero-copy
-//! `Arc<AlignedTypedBuffer>` (f64) / `Arc<TypedBuffer<i64>>` (i64) per the
+//! `Arc<Vec<f64>>` (f64) / `Arc<Vec<i64>>` (i64) per the
 //! per-storage-variant body-type map in `docs/defections.md` 2026-05-07
 //! zero-copy entry. Outputs project through `ConcreteReturn::ArrayF64(Vec<f64>)`
 //! / `ConcreteReturn::ArrayI64(Vec<i64>)` (output owned-clone — full output-
@@ -24,7 +24,6 @@ use crate::marshal::{register_typed_fn_1, register_typed_fn_2, register_typed_fn
 use crate::module_exports::ModuleExports;
 use crate::typed_module_exports::{ConcreteReturn, ConcreteType, TypedReturn};
 use shape_value::aligned_vec::AlignedVec;
-use shape_value::{AlignedTypedBuffer, TypedBuffer};
 use std::sync::Arc;
 use wide::f64x4;
 
@@ -37,7 +36,7 @@ pub fn create_vector_intrinsics_module() -> ModuleExports {
     let mut module = ModuleExports::new("std::core::intrinsics::vector");
     module.description = "SIMD vector element-wise intrinsics".to_string();
 
-    register_typed_fn_1::<_, Arc<AlignedTypedBuffer>>(
+    register_typed_fn_1::<_, Arc<Vec<f64>>>(
         &mut module,
         "__intrinsic_vec_abs",
         "Element-wise absolute value of a Vec<number>",
@@ -50,7 +49,7 @@ pub fn create_vector_intrinsics_module() -> ModuleExports {
         },
     );
 
-    register_typed_fn_1::<_, Arc<AlignedTypedBuffer>>(
+    register_typed_fn_1::<_, Arc<Vec<f64>>>(
         &mut module,
         "__intrinsic_vec_sqrt",
         "Element-wise square root of a Vec<number>",
@@ -64,7 +63,7 @@ pub fn create_vector_intrinsics_module() -> ModuleExports {
     );
 
     // ln/exp: `wide::f64x4` does not vectorize transcendentals; scalar fallback.
-    register_typed_fn_1::<_, Arc<AlignedTypedBuffer>>(
+    register_typed_fn_1::<_, Arc<Vec<f64>>>(
         &mut module,
         "__intrinsic_vec_ln",
         "Element-wise natural logarithm of a Vec<number>",
@@ -77,7 +76,7 @@ pub fn create_vector_intrinsics_module() -> ModuleExports {
         },
     );
 
-    register_typed_fn_1::<_, Arc<AlignedTypedBuffer>>(
+    register_typed_fn_1::<_, Arc<Vec<f64>>>(
         &mut module,
         "__intrinsic_vec_exp",
         "Element-wise exponential of a Vec<number>",
@@ -90,7 +89,7 @@ pub fn create_vector_intrinsics_module() -> ModuleExports {
         },
     );
 
-    register_typed_fn_2::<_, Arc<AlignedTypedBuffer>, Arc<AlignedTypedBuffer>>(
+    register_typed_fn_2::<_, Arc<Vec<f64>>, Arc<Vec<f64>>>(
         &mut module,
         "__intrinsic_vec_add",
         "Element-wise addition of two Vec<number>",
@@ -103,7 +102,7 @@ pub fn create_vector_intrinsics_module() -> ModuleExports {
         },
     );
 
-    register_typed_fn_2::<_, Arc<AlignedTypedBuffer>, Arc<AlignedTypedBuffer>>(
+    register_typed_fn_2::<_, Arc<Vec<f64>>, Arc<Vec<f64>>>(
         &mut module,
         "__intrinsic_vec_sub",
         "Element-wise subtraction of two Vec<number>",
@@ -116,7 +115,7 @@ pub fn create_vector_intrinsics_module() -> ModuleExports {
         },
     );
 
-    register_typed_fn_2::<_, Arc<AlignedTypedBuffer>, Arc<AlignedTypedBuffer>>(
+    register_typed_fn_2::<_, Arc<Vec<f64>>, Arc<Vec<f64>>>(
         &mut module,
         "__intrinsic_vec_mul",
         "Element-wise multiplication of two Vec<number>",
@@ -129,7 +128,7 @@ pub fn create_vector_intrinsics_module() -> ModuleExports {
         },
     );
 
-    register_typed_fn_2::<_, Arc<AlignedTypedBuffer>, Arc<AlignedTypedBuffer>>(
+    register_typed_fn_2::<_, Arc<Vec<f64>>, Arc<Vec<f64>>>(
         &mut module,
         "__intrinsic_vec_div",
         "Element-wise division of two Vec<number>",
@@ -142,7 +141,7 @@ pub fn create_vector_intrinsics_module() -> ModuleExports {
         },
     );
 
-    register_typed_fn_2::<_, Arc<AlignedTypedBuffer>, Arc<AlignedTypedBuffer>>(
+    register_typed_fn_2::<_, Arc<Vec<f64>>, Arc<Vec<f64>>>(
         &mut module,
         "__intrinsic_vec_max",
         "Element-wise max of two Vec<number>",
@@ -155,7 +154,7 @@ pub fn create_vector_intrinsics_module() -> ModuleExports {
         },
     );
 
-    register_typed_fn_2::<_, Arc<AlignedTypedBuffer>, Arc<AlignedTypedBuffer>>(
+    register_typed_fn_2::<_, Arc<Vec<f64>>, Arc<Vec<f64>>>(
         &mut module,
         "__intrinsic_vec_min",
         "Element-wise min of two Vec<number>",
@@ -168,7 +167,7 @@ pub fn create_vector_intrinsics_module() -> ModuleExports {
         },
     );
 
-    register_typed_fn_3::<_, Arc<AlignedTypedBuffer>, Arc<AlignedTypedBuffer>, Arc<AlignedTypedBuffer>>(
+    register_typed_fn_3::<_, Arc<Vec<f64>>, Arc<Vec<f64>>, Arc<Vec<f64>>>(
         &mut module,
         "__intrinsic_vec_select",
         "Element-wise select: cond[i] != 0 ? t[i] : f[i]",
@@ -203,7 +202,7 @@ pub fn create_vector_intrinsics_module() -> ModuleExports {
         },
     );
 
-    register_typed_fn_2::<_, Arc<TypedBuffer<i64>>, Arc<TypedBuffer<i64>>>(
+    register_typed_fn_2::<_, Arc<Vec<i64>>, Arc<Vec<i64>>>(
         &mut module,
         "__intrinsic_vec_add_i64",
         "Element-wise addition of two Vec<int>, overflow-checked",

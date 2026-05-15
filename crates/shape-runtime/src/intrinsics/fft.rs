@@ -11,7 +11,7 @@
 //! future consumer with similar polymorphic-input shape. Same precedent
 //! as scan.rs deletion at `663b63a`.
 //!
-//! Migrated entries take `Arc<AlignedTypedBuffer>` (series + kernel)
+//! Migrated entries take `Arc<Vec<f64>>` (series + kernel)
 //! and scalars (frequencies, sample_rate, num_harmonics); outputs project
 //! through `ConcreteReturn::ArrayF64` (psd, bandpass) or
 //! `TypedReturn::TypedObject(...)` (fft, dominant_frequency, harmonics).
@@ -28,7 +28,6 @@ use crate::marshal::{
 use crate::module_exports::{ModuleExports, ModuleParam};
 use crate::typed_module_exports::{ConcreteReturn, ConcreteType, TypedReturn};
 use rustfft::{FftPlanner, num_complex::Complex};
-use shape_value::AlignedTypedBuffer;
 use std::sync::Arc;
 
 // ───────────────────── Module factory (4 typed entries) ─────────────────────
@@ -44,7 +43,7 @@ pub fn create_fft_intrinsics_module() -> ModuleExports {
         "FFT and frequency-domain analysis intrinsics (typed entries; ifft stays legacy pending N3 sub-decision)"
             .to_string();
 
-    register_typed_fn_1::<_, Arc<AlignedTypedBuffer>>(
+    register_typed_fn_1::<_, Arc<Vec<f64>>>(
         &mut module,
         "__intrinsic_fft",
         "Forward FFT: real series → { real, imag, magnitude, phase, frequencies, n }",
@@ -81,7 +80,7 @@ pub fn create_fft_intrinsics_module() -> ModuleExports {
         },
     );
 
-    register_typed_fn_1::<_, Arc<AlignedTypedBuffer>>(
+    register_typed_fn_1::<_, Arc<Vec<f64>>>(
         &mut module,
         "__intrinsic_psd",
         "Power spectral density: scaled |FFT(x)|^2",
@@ -105,7 +104,7 @@ pub fn create_fft_intrinsics_module() -> ModuleExports {
         },
     );
 
-    register_typed_fn_2_full::<_, Arc<AlignedTypedBuffer>, f64>(
+    register_typed_fn_2_full::<_, Arc<Vec<f64>>, f64>(
         &mut module,
         "__intrinsic_dominant_frequency",
         "Dominant frequency: { frequency, magnitude, bin } of strongest spectrum bin",
@@ -154,7 +153,7 @@ pub fn create_fft_intrinsics_module() -> ModuleExports {
         },
     );
 
-    register_typed_fn_4_full::<_, Arc<AlignedTypedBuffer>, f64, f64, f64>(
+    register_typed_fn_4_full::<_, Arc<Vec<f64>>, f64, f64, f64>(
         &mut module,
         "__intrinsic_bandpass",
         "Bandpass filter via FFT: zero frequencies outside [low_freq, high_freq]",
@@ -220,7 +219,7 @@ pub fn create_fft_intrinsics_module() -> ModuleExports {
         },
     );
 
-    register_typed_fn_4_full::<_, Arc<AlignedTypedBuffer>, f64, i64, f64>(
+    register_typed_fn_4_full::<_, Arc<Vec<f64>>, f64, i64, f64>(
         &mut module,
         "__intrinsic_harmonics",
         "Harmonic analysis: extract harmonics of a fundamental frequency",

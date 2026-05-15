@@ -28,7 +28,7 @@ use crate::marshal::register_typed_fn_3_full;
 use crate::module_exports::{ModuleExports, ModuleParam};
 use crate::typed_module_exports::{ConcreteReturn, ConcreteType, TypedReturn};
 use shape_ast::error::{Result, ShapeError};
-use shape_value::{AlignedTypedBuffer, KindedSlot};
+use shape_value::KindedSlot;
 use std::sync::Arc;
 
 // ───────────────────── Module factory (1 typed entry) ─────────────────────
@@ -45,7 +45,7 @@ pub fn create_recurrence_intrinsics_module() -> ModuleExports {
         "Recurrence intrinsics (typed entry; legacy body retained for shape-vm dispatcher consumer per cross-crate-dual-consumer pattern)"
             .to_string();
 
-    register_typed_fn_3_full::<_, Arc<AlignedTypedBuffer>, f64, Option<f64>>(
+    register_typed_fn_3_full::<_, Arc<Vec<f64>>, f64, Option<f64>>(
         &mut module,
         "__intrinsic_linear_recurrence",
         "Linear recurrence: y[t] = y[t-1] * decay + input[t]",

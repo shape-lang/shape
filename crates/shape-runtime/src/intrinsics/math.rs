@@ -27,7 +27,7 @@
 //!   removed; consumer audit of `math.shape:243` wrapper + user-code
 //!   needed before deciding fast-path-only-vs-keep-slow-path.
 //!
-//! Migrated entries take `Arc<AlignedTypedBuffer>` (for `Vec<number>`
+//! Migrated entries take `Arc<Vec<f64>>` (for `Vec<number>`
 //! aggregations) or `f64` (for trig family + `from_char_code`) typed
 //! inputs and return `ConcreteReturn::F64` / `ConcreteReturn::String`
 //! per the dispatcher's `TypedReturn → slot push` projection.
@@ -37,7 +37,7 @@ use crate::marshal::{register_typed_fn_1, register_typed_fn_2};
 use crate::module_exports::ModuleExports;
 use crate::typed_module_exports::{ConcreteReturn, ConcreteType, TypedReturn};
 use shape_ast::error::{Result, ShapeError};
-use shape_value::{AlignedTypedBuffer, KindedSlot};
+use shape_value::KindedSlot;
 use std::sync::Arc;
 
 // ───────────────────── Module factory (14 typed entries) ─────────────────────
@@ -56,7 +56,7 @@ pub fn create_math_intrinsics_module() -> ModuleExports {
 
     // ── Array aggregations ──
 
-    register_typed_fn_1::<_, Arc<AlignedTypedBuffer>>(
+    register_typed_fn_1::<_, Arc<Vec<f64>>>(
         &mut module,
         "__intrinsic_mean",
         "Mean (average) of a Vec<number>",
@@ -75,7 +75,7 @@ pub fn create_math_intrinsics_module() -> ModuleExports {
         },
     );
 
-    register_typed_fn_1::<_, Arc<AlignedTypedBuffer>>(
+    register_typed_fn_1::<_, Arc<Vec<f64>>>(
         &mut module,
         "__intrinsic_variance",
         "Population variance of a Vec<number>",
@@ -97,7 +97,7 @@ pub fn create_math_intrinsics_module() -> ModuleExports {
         },
     );
 
-    register_typed_fn_1::<_, Arc<AlignedTypedBuffer>>(
+    register_typed_fn_1::<_, Arc<Vec<f64>>>(
         &mut module,
         "__intrinsic_std",
         "Population standard deviation of a Vec<number>",
