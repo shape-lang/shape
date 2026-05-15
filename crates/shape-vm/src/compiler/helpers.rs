@@ -852,17 +852,77 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_resolvers(
                             if receiver_slot >= n {
                                 continue;
                             }
-                            let type_name = match &struct_names[receiver_slot] {
-                                Some(n) => n.clone(),
-                                None => continue,
+                            if let Some(type_name) = struct_names[receiver_slot].clone() {
+                                if let Some(ct) =
+                                    method_resolver(&type_name, method_name.as_str())
+                                {
+                                    if !matches!(
+                                        ct,
+                                        shape_value::v2::ConcreteType::Void
+                                    ) {
+                                        concrete_types[idx] = ct;
+                                        continue;
+                                    }
+                                }
+                            }
+                            // V3-S6a resolver-extension follow-up:
+                            // parametric method classification on
+                            // parametric receivers. When the trait-impl
+                            // resolver doesn't apply (the receiver is a
+                            // parametric container like `Array<T>`, not a
+                            // user-defined struct), consult the
+                            // receiver's `ConcreteType` directly. This
+                            // mirrors `parametric_method_return_kind_from_
+                            // receiver` (in shape-jit's `mir_compiler/
+                            // types.rs`) but produces a `ConcreteType`
+                            // rather than just a `NativeKind` — feeding
+                            // the conduit's full kind-source side-table.
+                            //
+                            // Scope: methods on `Array<T>` whose return
+                            // shape is fully derivable from T at MIR
+                            // time. `.sum()` / `.mean()` / `.min()` /
+                            // `.max()` / `.get(i)` → T (element scalar).
+                            // `.map(...)` / `.filter(...)` are NOT
+                            // covered here — they go through the bytecode
+                            // compiler's specialization path
+                            // (`MirConstant::Function("Vec.map::*")` at
+                            // bytecode level), and the conduit's
+                            // `Function`-arm resolver consults
+                            // `function_return_concrete_types` for the
+                            // specialized return type.
+                            let receiver_ct = &concrete_types[receiver_slot];
+                            let inferred = match (
+                                method_name.as_str(),
+                                receiver_ct,
+                            ) {
+                                // V3-S6a resolver-extension follow-up:
+                                // Array element-typed accessors. The
+                                // VM-side `array_basic.rs` /
+                                // `typed_array_methods.rs` PHF entries
+                                // return `KindedSlot::from_<elem>(...)`
+                                // per receiver-element kind — same
+                                // shape as the JIT-side
+                                // `parametric_method_return_kind_from_receiver`
+                                // arm in `crates/shape-jit/src/mir_compiler/types.rs`.
+                                // Ported here so the conduit's
+                                // `concrete_types[]` side-table also
+                                // tracks element kind through
+                                // method-chain receivers (which the
+                                // pre-V3-S6a conduit only handled for
+                                // user-defined struct receivers via the
+                                // `struct_names` lookup above).
+                                (
+                                    "sum" | "mean" | "min" | "max",
+                                    shape_value::v2::ConcreteType::Array(elem),
+                                ) => Some((**elem).clone()),
+                                (
+                                    "get",
+                                    shape_value::v2::ConcreteType::Array(elem),
+                                ) => Some((**elem).clone()),
+                                _ => None,
                             };
-                            if let Some(ct) =
-                                method_resolver(&type_name, method_name.as_str())
-                            {
-                                if !matches!(
-                                    ct,
-                                    shape_value::v2::ConcreteType::Void
-                                ) {
+                            if let Some(ct) = inferred {
+                                if !matches!(ct, shape_value::v2::ConcreteType::Void) {
                                     concrete_types[idx] = ct;
                                 }
                             }

@@ -386,7 +386,14 @@ pub fn concrete_type_from_annotation(annotation: &TypeAnnotation) -> Option<Conc
             Some(ConcreteType::Array(Box::new(elem)))
         }
         TypeAnnotation::Generic { name, args } => match name.as_str() {
-            "Array" if args.len() == 1 => {
+            // V3-S6a resolver-extension follow-up: `Vec<T>` aliases
+            // `Array<T>` in source spelling — the stdlib uses `Vec<U>` in
+            // `method map<U>(...) -> Vec<U>`. Without this arm the
+            // post-substitution `return_type = Vec<int>` failed
+            // `concrete_type_from_annotation` and the JIT's
+            // function_return_concrete_types[map_specialization] stayed
+            // Void, propagating SURFACE through downstream call sites.
+            "Array" | "Vec" if args.len() == 1 => {
                 let elem = concrete_type_from_annotation(&args[0])?;
                 Some(ConcreteType::Array(Box::new(elem)))
             }
