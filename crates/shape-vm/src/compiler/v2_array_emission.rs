@@ -99,6 +99,16 @@ fn scalar_annotation_to_slot_kind(annotation: &TypeAnnotation) -> Option<NativeK
             "usize" => Some(NativeKind::UIntSize),
             "bool" => Some(NativeKind::Bool),
             "string" => Some(NativeKind::String),
+            // Wave 3 Stabilize Round 1 V3-A2-followup-producer-cascade
+            // (2026-05-15) — `Array<decimal>` annotation maps to the v2-raw
+            // `DecimalV2` carrier kind, which `should_use_typed_array_from_slot_kind`
+            // routes to `TypedArrayKind::Decimal` (the `NewTypedArrayDecimal`
+            // opcode). Per ADR-006 §2.7.5 amendment Wave 2 Agent B
+            // W12-StringV2-DecimalV2-NativeKind-additions: the v2-raw
+            // discriminator is the canonical label for `Array<decimal>`
+            // post-gate-flip (no legacy `NativeKind::Decimal` scalar variant
+            // exists; the v1 carrier was always `NativeKind::Ptr(HeapKind::Decimal)`).
+            "decimal" => Some(NativeKind::DecimalV2),
             _ => None,
         },
         _ => None,
@@ -115,6 +125,14 @@ fn infer_from_literals(elements: &[Expr]) -> Option<NativeKind> {
             Expr::Literal(Literal::Int(_), _) => NativeKind::Int64,
             Expr::Literal(Literal::Bool(_), _) => NativeKind::Bool,
             Expr::Literal(Literal::String(_), _) => NativeKind::String,
+            // Wave 3 Stabilize Round 1 V3-A2-followup-producer-cascade
+            // (2026-05-15) — bare `[1.5d, 2.5d]` literal inference maps to
+            // the v2-raw `DecimalV2` carrier (same target as `Array<decimal>`
+            // annotation per `scalar_annotation_to_slot_kind`). The Round 3a'
+            // gate-flip routed this discriminator to `TypedArrayKind::Decimal`
+            // (`NewTypedArrayDecimal` opcode) in lockstep with the §3.2
+            // S2-prime consumer arms.
+            Expr::Literal(Literal::Decimal(_), _) => NativeKind::DecimalV2,
             Expr::Literal(Literal::TypedInt(_, w), _) => typed_int_width_to_slot(*w),
             // Non-literal or unsupported literal -- can't infer from literals alone.
             _ => return None,

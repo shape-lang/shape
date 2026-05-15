@@ -1295,4 +1295,142 @@ mod compile_integration_tests {
             "untyped array must not emit TypedArrayLen"
         );
     }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Wave 3 Stabilize Round 1 V3-A2-followup-producer-cascade (2026-05-15)
+    //
+    // Per ADR-006 §2.7.5 stamp-at-compile-time + §2.7.24 Q25.A SUPERSEDED:
+    // `Array<string>` / `Array<decimal>` literals must emit
+    // `NewStringV2` / `NewDecimalV2` for the per-element literal-upgrade
+    // path (the Round 3a' gate-flip's downstream pre-req). The element
+    // value rides through the kinded stack with `NativeKind::StringV2` /
+    // `NativeKind::DecimalV2`, satisfying the strict-kind check at
+    // `v2_handlers/array.rs:687/703` (`TypedArrayPushString` /
+    // `TypedArrayPushDecimal`).
+    // ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_string_literal_array_emits_new_string_v2_per_element() {
+        // `let arr: Array<string> = ["a", "b"]` →
+        //   NewTypedArrayString, Dup, NewStringV2("a"), TypedArrayPushString,
+        //                        Dup, NewStringV2("b"), TypedArrayPushString.
+        let prog = compile(
+            r#"
+            let arr: Array<string> = ["a", "b"]
+            arr
+            "#,
+        );
+        assert!(
+            has_opcode(&prog, OpCode::NewTypedArrayString),
+            "expected NewTypedArrayString for Array<string> literal"
+        );
+        assert!(
+            has_opcode(&prog, OpCode::TypedArrayPushString),
+            "expected TypedArrayPushString for per-element push"
+        );
+        assert!(
+            has_opcode(&prog, OpCode::NewStringV2),
+            "expected NewStringV2 for per-element v2-raw String literal \
+             upgrade (Wave 3 producer-cascade)"
+        );
+        // The legacy LoadConst(String) path MUST NOT carry the element
+        // for the typed-array push: kind would be NativeKind::String
+        // (Arc<String>), which the strict-kind check at
+        // `v2_handlers/array.rs:687` rejects.
+        let new_string_v2_count = prog
+            .instructions
+            .iter()
+            .filter(|i| i.opcode == OpCode::NewStringV2)
+            .count();
+        assert_eq!(
+            new_string_v2_count, 2,
+            "expected one NewStringV2 per string literal element (got {})",
+            new_string_v2_count
+        );
+    }
+
+    #[test]
+    fn test_decimal_literal_array_emits_new_decimal_v2_per_element() {
+        // `let arr: Array<decimal> = [1.5D, 2.5D]` →
+        //   NewTypedArrayDecimal, Dup, NewDecimalV2(1.5), TypedArrayPushDecimal,
+        //                         Dup, NewDecimalV2(2.5), TypedArrayPushDecimal.
+        let prog = compile(
+            r#"
+            let arr: Array<decimal> = [1.5D, 2.5D]
+            arr
+            "#,
+        );
+        assert!(
+            has_opcode(&prog, OpCode::NewTypedArrayDecimal),
+            "expected NewTypedArrayDecimal for Array<decimal> literal"
+        );
+        assert!(
+            has_opcode(&prog, OpCode::TypedArrayPushDecimal),
+            "expected TypedArrayPushDecimal for per-element push"
+        );
+        assert!(
+            has_opcode(&prog, OpCode::NewDecimalV2),
+            "expected NewDecimalV2 for per-element v2-raw Decimal \
+             literal upgrade (Wave 3 producer-cascade)"
+        );
+        let new_decimal_v2_count = prog
+            .instructions
+            .iter()
+            .filter(|i| i.opcode == OpCode::NewDecimalV2)
+            .count();
+        assert_eq!(
+            new_decimal_v2_count, 2,
+            "expected one NewDecimalV2 per decimal literal element (got {})",
+            new_decimal_v2_count
+        );
+    }
+
+    #[test]
+    fn test_single_element_string_literal_array_emits_new_string_v2() {
+        // Minimal Array<string> literal — one element. Verifies the per-
+        // element opcode wiring for a single-element capacity.
+        let prog = compile(
+            r#"
+            let arr: Array<string> = ["only"]
+            arr
+            "#,
+        );
+        assert!(has_opcode(&prog, OpCode::NewTypedArrayString));
+        assert!(has_opcode(&prog, OpCode::NewStringV2));
+        assert!(has_opcode(&prog, OpCode::TypedArrayPushString));
+    }
+
+    #[test]
+    fn test_single_element_decimal_literal_array_emits_new_decimal_v2() {
+        let prog = compile(
+            r#"
+            let arr: Array<decimal> = [3.14D]
+            arr
+            "#,
+        );
+        assert!(has_opcode(&prog, OpCode::NewTypedArrayDecimal));
+        assert!(has_opcode(&prog, OpCode::NewDecimalV2));
+        assert!(has_opcode(&prog, OpCode::TypedArrayPushDecimal));
+    }
+
+    #[test]
+    #[ignore]  // diagnostic-only — enable to trace opcode emission for decimal
+    fn debug_decimal_opcodes() {
+        let prog = compile(r#"
+            let arr: Array<decimal> = [1.5D, 2.5D]
+            arr
+            "#);
+        for (i, instr) in prog.instructions.iter().enumerate() {
+            eprintln!("[{i}] {:?} {:?}", instr.opcode, instr.operand);
+        }
+        eprintln!("--- constants ---");
+        for (i, c) in prog.constants.iter().enumerate() {
+            eprintln!("[{i}] {:?}", c);
+        }
+        eprintln!("--- strings ---");
+        for (i, s) in prog.strings.iter().enumerate() {
+            eprintln!("[{i}] {:?}", s);
+        }
+        panic!("DEBUG");
+    }
 }

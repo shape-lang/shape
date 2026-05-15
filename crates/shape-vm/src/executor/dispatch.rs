@@ -931,7 +931,15 @@ impl VirtualMachine {
             | NewTypedArrayDecimal
             | TypedArrayGetDecimal
             | TypedArrayPushDecimal
-            | TypedArraySetDecimal => {
+            | TypedArraySetDecimal
+            // Wave 3 Stabilize Round 1 V3-A2-followup-producer-cascade (2026-05-15) —
+            // v2-raw String/Decimal literal constructors (closes the literal-element
+            // kind mismatch surfaced at Round 3a' gate-flip: `let xs: Array<string>
+            // = ["a","b"]` previously emitted `LoadConst` of Arc<String> with
+            // NativeKind::String, which `TypedArrayPushString` rejected at the
+            // strict-kind check in `v2_handlers/array.rs:687`).
+            | NewStringV2
+            | NewDecimalV2 => {
                 return self.exec_v2_typed_array(instruction);
             }
 
