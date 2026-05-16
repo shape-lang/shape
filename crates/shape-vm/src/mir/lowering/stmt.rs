@@ -469,46 +469,135 @@ fn lower_for_loop(
 ) {
     match &for_loop.init {
         ast::ForInit::ForIn { pattern, iter } => {
+            // Per cluster-2-closure-wave-1-iter-statemachine (2026-05-16):
+            // index-counter state machine mirror of the `lower_for_expr`
+            // generic-iterator branch at `expr.rs:1035`. The
+            // `Statement::For` arm is reachable for `for x in iter { ... }`
+            // statement-form for-loops (parser emits `Rule::for_loop` →
+            // `Statement::For` per `crates/shape-ast/src/parser/statements
+            // .rs:63`); the expression-form `for x in iter { ... }`
+            // routes through `Statement::Expression(Expr::For(_, _))` →
+            // `lower_for_expr`. Both shapes share the same broken-stub
+            // class per empirical-verification §9 Q1, so the fix lands at
+            // both sites to forestall the parallel-implementation
+            // defection-attractor pattern (CLAUDE.md §Parallel-
+            // implementation across producer/consumer carrier-shape
+            // boundaries).
+            //
+            // Lowering shape: see `expr.rs::lower_for_expr` generic-
+            // iterator branch for the full design comment. The
+            // statement-form path differs only in that the for-loop
+            // produces no result value (no `temp` slot), so we omit the
+            // `temp = none` / per-iteration `temp = body_slot` writes.
             builder.push_scope();
 
             let iter_slot = lower_expr_to_temp(builder, iter);
-            let pattern_slot = builder.alloc_temp(LocalTypeInfo::Unknown);
+
+            let idx_slot = builder.alloc_temp(LocalTypeInfo::Copy);
+            let len_slot = builder.alloc_temp(LocalTypeInfo::Copy);
+
+            // __idx = 0
+            builder.push_stmt(
+                StatementKind::Assign(
+                    Place::Local(idx_slot),
+                    Rvalue::Use(Operand::Constant(MirConstant::Int(0))),
+                ),
+                span,
+            );
+
+            // __len = iter_slot.len()
+            let len_call_func =
+                Operand::Constant(MirConstant::Method("len".to_string()));
+            builder.emit_call(
+                len_call_func,
+                vec![Operand::Copy(Place::Local(iter_slot))],
+                Place::Local(len_slot),
+                span,
+            );
+
             let header = builder.new_block();
             let body_block = builder.new_block();
             let after = builder.new_block();
 
             builder.finish_block(TerminatorKind::Goto(header), span);
 
+            // Loop header: __cond = __idx < __len; switchbool __cond.
             builder.start_block(header);
+            let cond_slot = builder.alloc_temp(LocalTypeInfo::Copy);
+            builder.push_stmt(
+                StatementKind::Assign(
+                    Place::Local(cond_slot),
+                    Rvalue::BinaryOp(
+                        BinOp::Lt,
+                        Operand::Copy(Place::Local(idx_slot)),
+                        Operand::Copy(Place::Local(len_slot)),
+                    ),
+                ),
+                span,
+            );
             builder.finish_block(
                 TerminatorKind::SwitchBool {
-                    operand: Operand::Copy(Place::Local(iter_slot)),
+                    operand: Operand::Copy(Place::Local(cond_slot)),
                     true_bb: body_block,
                     false_bb: after,
                 },
                 span,
             );
 
+            // Loop body: read iter_slot[__idx] into a destructure-source
+            // slot (named for single-identifier patterns, anonymous temp
+            // otherwise), then bind the pattern, lower the body, and
+            // increment the counter.
             builder.start_block(body_block);
+
+            let pattern_slot = match pattern {
+                ast::DestructurePattern::Identifier(name, _) => {
+                    builder.alloc_local(name.clone(), LocalTypeInfo::Unknown)
+                }
+                _ => builder.alloc_temp(LocalTypeInfo::Unknown),
+            };
+
+            let index_place = Place::Index(
+                Box::new(Place::Local(iter_slot)),
+                Box::new(Operand::Copy(Place::Local(idx_slot))),
+            );
             builder.push_stmt(
                 StatementKind::Assign(
                     Place::Local(pattern_slot),
-                    Rvalue::Use(Operand::Constant(MirConstant::None)),
+                    Rvalue::Use(Operand::Copy(index_place)),
                 ),
                 span,
             );
-            lower_destructure_bindings_from_place(
-                builder,
-                pattern,
-                &Place::Local(pattern_slot),
-                span,
-                None,
-            );
+
+            if !matches!(pattern, ast::DestructurePattern::Identifier(_, _)) {
+                lower_destructure_bindings_from_place(
+                    builder,
+                    pattern,
+                    &Place::Local(pattern_slot),
+                    span,
+                    None,
+                );
+            }
+
             builder.push_loop(after, header, None);
             builder.push_scope();
             lower_statements(builder, &for_loop.body, exit_block);
             builder.pop_scope();
             builder.pop_loop();
+
+            // __idx = __idx + 1
+            builder.push_stmt(
+                StatementKind::Assign(
+                    Place::Local(idx_slot),
+                    Rvalue::BinaryOp(
+                        BinOp::Add,
+                        Operand::Copy(Place::Local(idx_slot)),
+                        Operand::Constant(MirConstant::Int(1)),
+                    ),
+                ),
+                span,
+            );
+
             builder.finish_block(TerminatorKind::Goto(header), span);
 
             builder.start_block(after);
