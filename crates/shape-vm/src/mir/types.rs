@@ -206,6 +206,19 @@ pub enum MirConstant {
     Str(String),
     /// Float (stored as bits for Eq/Hash)
     Float(u64),
+    /// Character literal (scalar codepoint).
+    ///
+    /// Phase 3 cluster-2 Round 4 cw-D-fam12 follow-up (instance 57, 2026-05-16).
+    /// ADR-006 §2.7.5 amendment Round 19 S1.5 W12-nativekind-scalar-additions
+    /// (2026-05-14): `Char` is a 4-byte scalar `NativeKind` variant (codepoint
+    /// in low 32 bits of `ValueSlot`, no Arc wrapping). Producing-site
+    /// stamp-at-compile-time discipline requires the MIR layer to preserve the
+    /// Char kind through to the JIT's `operand_slot_kind` / `infer_constant_kind`
+    /// classifiers — otherwise `Literal::Char('A')` is lost as `MirConstant::Int(65)`
+    /// at MIR lowering, the JIT stamps `NativeKind::Int64`, and the `print`
+    /// dispatch matches `print_i64(65)` instead of `print_char(65)` → JIT prints
+    /// "65" while VM prints "A" (cw-D-fam12 Char production-fixture divergence).
+    Char(char),
     /// Function reference by name
     Function(String),
     /// Method name for dispatch
@@ -224,6 +237,7 @@ impl fmt::Display for MirConstant {
             MirConstant::StringId(id) => write!(f, "str#{}", id),
             MirConstant::Str(s) => write!(f, "\"{}\"", s),
             MirConstant::Float(bits) => write!(f, "{}", f64::from_bits(*bits)),
+            MirConstant::Char(c) => write!(f, "'{}'", c.escape_default()),
             MirConstant::Function(name) => write!(f, "fn:{}", name),
             MirConstant::Method(name) => write!(f, "method:{}", name),
             MirConstant::ClosurePlaceholder => write!(f, "closure_placeholder"),

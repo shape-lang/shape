@@ -1502,7 +1502,16 @@ pub(crate) fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotI
                 Literal::Number(v) => MirConstant::Float(f64::to_bits(*v)),
                 Literal::Decimal(_) => MirConstant::Float(0), // decimal not yet modeled
                 Literal::String(s) => MirConstant::Str(s.clone()),
-                Literal::Char(c) => MirConstant::Int(*c as i64),
+                // Phase 3 cluster-2 Round 4 cw-D-fam12 follow-up (instance 57,
+                // 2026-05-16). ADR-006 §2.7.5 amendment Round 19 S1.5: preserve
+                // the Char kind through MIR lowering so the JIT's
+                // `operand_slot_kind` / `infer_constant_kind` classifiers stamp
+                // `NativeKind::Char` and the `print` dispatch routes to
+                // `print_char(codepoint)` instead of `print_i64(codepoint)`.
+                // Pre-fix divergence: `print('A')` → JIT prints "65", VM prints
+                // "A". The pre-fix `MirConstant::Int(*c as i64)` was a
+                // §2.7.5-violating producer-site kind-source loss.
+                Literal::Char(c) => MirConstant::Char(*c),
                 Literal::FormattedString { .. } => unreachable!("handled above"),
                 Literal::ContentString { .. } => MirConstant::Str(String::new()),
                 Literal::Bool(v) => MirConstant::Bool(*v),
