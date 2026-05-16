@@ -302,18 +302,55 @@ impl TypedObjectOps for super::VirtualMachine {
                 "op_get_field_typed: null TypedObject receiver".to_string(),
             ));
         }
-        // SAFETY: per ValueSlot::from_typed_object's construction-side
-        // contract, kind=Ptr(HeapKind::TypedObject) bits are
-        // Arc::into_raw(Arc<TypedObjectStorage>) and the popped slot
-        // owns one strong-count share. Reconstruct as Arc, take an
-        // immutable borrow for the field read; when `storage_arc`
-        // goes out of scope its `Drop` retires the receiver's share —
-        // equivalent to the prior `drop_with_kind(recv_bits, recv_kind)`
-        // path on a `Ptr(HeapKind::TypedObject)` slot.
-        let storage_arc: std::sync::Arc<shape_value::heap_value::TypedObjectStorage> =
-            unsafe { std::sync::Arc::from_raw(recv_bits as *const _) };
-        let _ = recv_kind; // suppress unused-warning; share retire goes via storage_arc::Drop
-        let storage: &shape_value::heap_value::TypedObjectStorage = &storage_arc;
+        // Phase 4 fix (2026-05-16): receiver bits are produced by
+        // `op_new_typed_object` via `TypedObjectStorage::_new` which uses
+        // `Layout::new::<Self>()` raw allocation (NOT `Arc::new`). The
+        // previous `Arc::from_raw(recv_bits as *const _)` recovery was
+        // wrong-type recovery for v2-raw allocations: Arc::Drop reads
+        // the strong-count at `ptr - 16` (the ArcInner header layout),
+        // but v2-raw allocations have the refcount embedded in the
+        // `HeapHeader` at offset 0 of the struct itself, so Arc::Drop
+        // mutates memory BEFORE the allocation — undefined behavior
+        // that flakily manifests as `free(): double free detected in
+        // tcache 2` on cleanup (or worse, silent heap corruption).
+        // Bisected at phase-4 close 2026-05-16 by running
+        // `/tmp/money_no_method.shape` (`Money { cents: int }; print(a.cents + b.cents)`)
+        // 20x at canonical HEAD `3cb72c2d` — reproduces 1/20 flaky.
+        //
+        // Correct v2-raw recovery: borrow the struct via a raw-pointer
+        // deref (no Arc reconstruction), and retire the one strong-count
+        // share via `drop_with_kind(recv_bits, recv_kind)` after all
+        // borrows of `storage` end. The `ReceiverGuard` RAII wrapper
+        // below ensures retirement runs on every function-exit path
+        // (success, error, early-return) without manual scattering.
+        //
+        // SAFETY: per `from_typed_object_raw`'s construction-side
+        // contract (and `from_typed_object` for the legacy Arc carrier),
+        // `Ptr(HeapKind::TypedObject)` slot bits are a valid `*const
+        // TypedObjectStorage` and the popped slot owned one share.
+        // The borrow is bounded by `ReceiverGuard`'s lifetime; on the
+        // guard's `Drop` we dispatch through `drop_with_kind` which
+        // dispatches the v2-raw `release_elem` (HEAP_KIND_V2_TYPED_OBJECT
+        // arm in `vm_impl/stack.rs::drop_with_kind`) — the correct
+        // retire path for both Arc-allocated and Layout-allocated
+        // `TypedObjectStorage` carriers (drop_with_kind matches on
+        // `NativeKind::Ptr(HeapKind::TypedObject)` and calls
+        // `TypedObjectStorage::release_elem` which uses `v2_release`
+        // against the `HeapHeader` at offset 0 — sound for both
+        // allocator paths because both populate the header).
+        struct ReceiverGuard {
+            bits: u64,
+            kind: NativeKind,
+        }
+        impl Drop for ReceiverGuard {
+            #[inline]
+            fn drop(&mut self) {
+                crate::executor::vm_impl::stack::drop_with_kind(self.bits, self.kind);
+            }
+        }
+        let _guard = ReceiverGuard { bits: recv_bits, kind: recv_kind };
+        let storage: &shape_value::heap_value::TypedObjectStorage =
+            unsafe { &*(recv_bits as *const shape_value::heap_value::TypedObjectStorage) };
 
         let schema_id = storage.schema_id;
         let field_count = storage.slots.len();

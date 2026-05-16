@@ -565,47 +565,37 @@ impl VirtualMachine {
         function_id: u16,
         ctx: Option<&mut shape_runtime::context::ExecutionContext>,
     ) -> Result<KindedSlot, VMError> {
-        // Push receiver + args onto the kinded stack. Each push needs
-        // its own share — the borrowed `args` slice retains ownership
-        // of the originals (the caller's carriers drop after we
-        // return), so we bump shares via `clone_with_kind` from
-        // shape-value's parallel-kind track ops (§2.7.7).
+        // Phase 4 fix (2026-05-16): route through the canonical
+        // `execute_function_by_id` public entry-point — the same pattern
+        // `execute_function_with_named_args` uses for borrowed-args call
+        // sites (`call_convention.rs:211-256`). The earlier hand-rolled
+        // `call_function_with_nb_args + execute_until_call_depth` path
+        // had a non-deterministic double-free that surfaced on `+=`
+        // desugar fixtures (`m = m + Money{...}`); bisect attributed it
+        // to subtle interactions between the manual `self.sp =
+        // base_pointer` adjustment and downstream frame setup. Routing
+        // through the established public entry-point eliminates the
+        // surface — that helper is the §2.7.10/Q11 canonical shape for
+        // "borrowed args, owned-share-per-call invocation".
+        //
+        // Build an owned `Vec<KindedSlot>` for the new frame by bumping
+        // one share per arg via `clone_with_kind` (§2.7.7 WB2.4) — the
+        // borrowed `args` slice's carriers retain ownership of the
+        // originals (op_call_method's `args` carriers drop those at end
+        // of scope), so we mint independent shares for the called
+        // function's locals. `execute_function_by_id` then runs the
+        // standard call protocol: `call_function_with_nb_args` transfers
+        // shares into the new frame, `mem::forget(args)` balances, the
+        // function runs to completion, the return value is popped and
+        // returned as a `KindedSlot` whose carrier owns the result share.
+        let mut call_args: Vec<KindedSlot> = Vec::with_capacity(args.len());
         for slot in args.iter() {
             let bits = slot.slot.raw();
             let kind = slot.kind;
             crate::executor::vm_impl::stack::clone_with_kind(bits, kind);
-            self.push_kinded(bits, kind)?;
+            call_args.push(KindedSlot::new(ValueSlot::from_raw(bits), kind));
         }
-
-        // Re-collect the just-pushed slots into a `Vec<KindedSlot>` so
-        // `call_function_with_nb_args` can read them by slice. We
-        // `stack_take_kinded` to transfer the shares we just installed
-        // (no extra refcount churn). This mirrors the receiver/arg
-        // collection pattern at `trait_object_ops.rs:592`.
-        let total = args.len();
-        let base_pointer = self.sp - total;
-        let mut call_args: Vec<KindedSlot> = Vec::with_capacity(total);
-        for i in 0..total {
-            let (b, k) = self.stack_take_kinded(base_pointer + i);
-            call_args.push(KindedSlot::new(ValueSlot::from_raw(b), k));
-        }
-        self.sp = base_pointer;
-
-        // Invoke. Frame setup transfers each KindedSlot's share into
-        // the new frame's local slot; we then `mem::forget` to balance
-        // refcounts (mirror of `trait_object_ops.rs:599`).
-        let saved_depth = self.call_stack.len();
-        self.call_function_with_nb_args(function_id, &call_args)?;
-        for slot in call_args {
-            std::mem::forget(slot);
-        }
-        self.execute_until_call_depth(saved_depth, ctx)?;
-
-        // The function pushed its return value on the stack via the
-        // `Return` opcode. Pop it; the carrier owns the resulting
-        // share (the pop transferred it from the stack).
-        let (ret_bits, ret_kind) = self.pop_kinded()?;
-        Ok(KindedSlot::new(ValueSlot::from_raw(ret_bits), ret_kind))
+        self.execute_function_by_id(function_id, call_args, ctx)
     }
 
     /// Resolve a method handler from `(receiver_kind, method_name)`.
