@@ -8111,3 +8111,81 @@ Parallel dispatch (3 candidates per supervisor disposition):
 ---
 
 *Next session: Round 2 parallel dispatch (3 closure-waves) → respective merges + status doc subsections → Round 3 dispatch per audit §H.2 (closure-wave-D family 1+2 — per-HeapKind kinded jit_print 30 UNCOVERED arms) → Round 4 dispatch (wave-D family 3+4 + §D class 1+2) → Round 5 (§D classes 3-10 per-class triage) → cluster-2 close attempt → Phase 4 (trait Add/AddAssign) → v1 close attempt → cluster-1.5 Q25.C TraitObject rebuild.*
+
+---
+
+## Wave 3 Round 9 cluster-2 Round 2 close — 3 closure-waves merged (cw-B + jit-string-const-loop-retain + cw-E-fix); smoke matrix 4/4 VM == JIT preserved at canonical 553ac465 (2026-05-16)
+
+Round 2 parallel dispatch complete. Sequenced merge: cw-B (Class A widening + B/C structured-defer) → jit-string-const-loop-retain (CRITICAL UAF FIX) → cw-E-fix (refined Option A intern-pool dedup). Canonical advanced b163bf4b → 553ac465.
+
+### Sub-cluster close summary
+
+| Wave | Close commit | Merge commit | Diff | ADR | Disposition |
+|---|---|---|---|---|---|
+| cw-B class-bc | `ad8b277b` | (1st merge) | +30/-7 (2 files; stmt.rs::lower_var_decl Class A annotated-binding widening + AGENTS.md) | none | Class A COVERED via annotated-binding widening; Class B + C SURFACE-AND-STOP with file:line cites at compile-time bytecode-emission layer (cw-B sub-agent surfaced team-lead dispatch territory misdispatch — instance 55) |
+| jit-string-const-loop-retain | `a8a3f50d` | (2nd merge) | +43/-4 (2 files; ownership.rs +39/-4 retain emission at 3 MirConstant arms + AGENTS.md) | none | CRITICAL UAF FIX — prog4 fixture JIT 100x "loop" (was 2x + 98x garbage); str_retain/release balanced; mirrors W11-jit-new-array retain-on-produce discipline |
+| cw-E-fix intern-pool | `91fea94b` | (3rd merge) | +229/-72 (2 files; ffi/string.rs +154 net 50 substantive intern_pool + tests + docstring + AGENTS.md) | none | Refined Option A landed (deduplication-only per §F.4); prog3 leaked 9 → 5 (−4 Arc<String>); iconst payload carrier-shape preserved |
+
+### Round 2 cumulative findings
+
+**v1 trajectory load-bearing items resolved:**
+- V3-S6f Smoke 2 JIT TIMEOUT (Round 1 closure-wave-1)
+- Phase-C inlining latency (Round 1 cw-2 Expr::For one-layer-outer)
+- HashMap V-arm + v2_group_by (Round 1 cw-C)
+- 28-site SHAPE_JIT_* → tracing crate (Round 1 cw-F)
+- String-constant leak measurement (Round 1 cw-E audit-only)
+- String-constant dedup (Round 2 cw-E-fix)
+- **JIT correctness UAF on iconst-payload string constants in loops (Round 2 jit-string-const-loop-retain — landmark correctness fix)**
+- Class A annotated-binding widening (Round 2 cw-B)
+
+**Round 3 candidates:**
+- Class B fix at `crates/shape-vm/src/compiler/expressions/function_calls.rs::compile_expr_function_call` (line 468) — value-call return-kind classification at compile-time bytecode-emission layer
+- Class C fix at `crates/shape-vm/src/compiler/statements.rs::compile_statement` (line 4202) — populate `local_array_element_types` at compiler/mod.rs:943 when RHS is typed-array-producing call (currently DECLARED + initialized but NEVER WRITTEN per cw-B empirical finding)
+- §E closure-wave-D family 1+2 (Scalar Char + Concurrency-primitive Mutex/Atomic/Lazy/Channel; 5 arms total; per inventory §E.5) — JIT FFI kinded jit_print bodies + routing arms
+- AGENTS.md V3-S6 chain rows annotation (doc-only; bundle with Round 3 close subsection)
+
+### Post-Round-2 gates at canonical 553ac465 (ALL PASS)
+
+- `cargo check --workspace --lib --tests` EXIT=0 ✅ (default + `--features shape-jit/jit-trace`)
+- `bash scripts/verify-merge.sh` 12/12 PASS EXIT=0 ✅
+- `bash scripts/check-no-dynamic.sh` EXIT=0 ✅
+- **Smoke matrix 4/4 VM == JIT preserved** at canonical fixture: s1 VM=4950/JIT=4950 ✅; s2 VM=30/JIT=30 ✅ (V3-S6f stays RESOLVED); s3 VM=x/JIT=x ✅; s4 VM=2/JIT=2 ✅
+
+### Imprecision renumbering (Round 2 cumulative 51 → 56)
+
+| # | Source | Shape | Caught at |
+|---|---|---|---|
+| 52 | cw-E-fix sub-agent | First-pass intern-pool dropped per-call Arc::increment_strong_count boost; corrupted-string output `\|�v�Sb...` in test_arc_string_constant_survives_use_drop_cycle | In-scope sub-agent self-recovery (Reading 4 pattern) |
+| 53 | cw-B sub-agent | Binder's "extend lower_function_detailed seeding for Class B/C" prediction REFUTED — closure bodies with inferred typed-array params have no annotation source available at lower_function_detailed (architectural-prediction-subclass) | Sub-agent empirical disposition |
+| 54 | cw-B sub-agent | Binder's "Class C migration is MIR-side resolver extension" PARTIALLY REFUTED — V3-S6b monomorph_method_returns stamps method-call destinations ONLY when second .map specializes; bytecode-time specialization decision gates the chain | Sub-agent empirical disposition |
+| 55 | team-lead-prompt | cw-B Round 2 territory bound `lower_function_detailed + helpers.rs` (MIR-lowering); genuine Class B + C loci are at compile-time bytecode-emission layer (Class B = `compile_expr_function_call`; Class C = `compile_statement(VariableDecl)` populating `local_array_element_types`) | Sub-agent empirical disposition |
+| 56 | cw-B sub-agent | Annotated-binding widening fix lands cleanly but narrows rather than closes Class B/C gaps — partial coverage by design per surface-and-stop discipline | In-scope sub-agent self-recovery (Reading 4 pattern) |
+
+Cumulative breakdown: 11 supervisor / 14 audit / 6 team-lead-prompt (+55) / 8 agent-execution-report / 11 candidate (+52, +53, +54, +56) — total 56. All caught pre-merge; 0 bad-code merges into canonical preserved.
+
+### Round 2 Reading observations
+
+- **Reading 4 pattern operational** across Round 2 — cw-E-fix instance 52 (in-scope retain-boost recovery) + cw-B instance 56 (annotated-binding narrowing recovery via partial-coverage surface-and-stop) extend the architectural-prediction-subclass-recovery pattern to 5 cluster-2 sub-clusters total.
+- **Team-lead territory-misdispatch class** (new pattern; instance 55): when binding sub-agents to a specific territory bound on architectural intuition rather than empirical-verification-first, the binder may misdispatch to wrong territory. Sub-agent's surface-and-stop discipline catches structurally. Future Round-N dispatches: prefer empirical-verification-first for un-mapped territories (Reading 1 cluster-2-empirical-verification-day precedent applies recursively).
+
+### Round 3 ratified dispatch shape (supervisor 2026-05-16)
+
+4 candidates per supervisor:
+- closure-wave-IB (Class B at compile_expr_function_call)
+- closure-wave-IC (Class C at compile_statement + local_array_element_types population)
+- closure-wave-D-fam-1+2 (per-HeapKind kinded jit_print: Scalar Char + Concurrency Mutex/Atomic/Lazy/Channel; 5 arms total)
+- AGENTS.md V3-S6 chain rows annotation (doc-only; bundle with Round 3 close subsection)
+
+Parallel dispatch ratified — pre-flight non-overlap verified at team-lead drafting time. IB+IC both in shape-vm/src/compiler/ but DIFFERENT FILES (expressions/function_calls.rs:468 vs statements.rs:4202 + mod.rs:943 read site); D-fam-1+2 in shape-jit/src/ffi/.
+
+### §D 10 failure classes disposition tracking (supervisor 2026-05-16)
+
+Round 3 candidate scope above does NOT include §D classes. Per supervisor: either fold into Round 4 (post-Round-3 close) OR per-class explicit defer with §-cite (cluster-3+ territory; refuse #10 applies only if framing reverts bulldozer cadence within scope). Team-lead surfaces Round 3 close summary with §D disposition shape.
+
+### Trajectory awareness (carry forward; not for re-surfacing)
+
+Per supervisor 2026-05-16: 4-6 sessions to v1 remaining (Round 3 + maybe Round 4 §D + §E + cluster-2 close + cluster-1.5 Q25.C + Phase 4 + v1 close).
+
+---
+
+*Next session: Round 3 parallel dispatch (closure-wave-IB + IC + D-fam-1+2; AGENTS.md V3-S6 annotation bundles with close) → respective merges + status doc subsection → Round 4 dispatch (§D 10 failure classes per-class triage; §E remaining 8 HeapKind families IF cluster-2-close-criterion gates require) → cluster-2 close attempt → Phase 4 (trait Add/AddAssign) → v1 close attempt → cluster-1.5 Q25.C TraitObject rebuild.*
