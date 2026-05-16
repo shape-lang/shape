@@ -634,12 +634,50 @@ pub fn lower_function_detailed(
             None
         };
         if let Some(param_name) = param.simple_name() {
-            builder.add_param(
+            let slot = builder.add_param(
                 param_name.to_string(),
                 type_info,
                 reference_kind,
                 binding_metadata,
             );
+            // cluster-2-closure-wave-1-iter-statemachine (2026-05-16):
+            // seed `local_typed_array_element_types` from a typed-array
+            // param annotation (`self: Vec<C>` / `xs: Array<C>` / etc.).
+            // The conduit producer at `crates/shape-vm/src/compiler/
+            // helpers.rs::infer_top_level_concrete_types_from_mir_with_
+            // resolvers` stamps `concrete_types[slot] = Array(elem)` for
+            // the param from this map (reusing the V3-S6e empty-array
+            // stamping pass — `concrete_type_from_annotation` resolves
+            // `Vec<C>` and `Array<C>` annotations).
+            //
+            // Load-bearing for the index-counter iter state-machine
+            // emitted by `lower_for_expr` / `lower_for_loop`
+            // generic-iterator branches at this checkpoint: when the
+            // iter is a typed-array receiver (e.g. `for item in self`
+            // inside the post-monomorphization specialized `Vec.map<T,
+            // U>` body where `self: Vec<T>` substitutes to `self:
+            // Array<I64>`), the slot-move propagation pass in the
+            // conduit producer flows `Array(I64)` from the param slot to
+            // the iter_slot, and the JIT-MIR `v2_typed_array_elem_kind`
+            // fast path fires for the `len()` Call terminator and the
+            // `Place::Index` per-iteration read. Without this seed, the
+            // trampoline gets receiver_kind=UInt64 (the §2.7.5 carrier
+            // fallback) and the `len` dispatch returns 0 (the loop body
+            // executes zero times).
+            //
+            // ADR-006 §2.7.5 stamp-at-compile-time: the param annotation
+            // IS the proof of the receiver's ConcreteType at compile
+            // time. No tag-bit decode, no Bool-default — params without
+            // typed-array annotations leave no entry in the map and the
+            // conduit producer leaves `concrete_types[slot]` as `Void`
+            // per §2.7.5.1.
+            if let Some(annotation) = param.type_annotation.as_ref() {
+                if let Some(shape_value::v2::ConcreteType::Array(elem)) =
+                    crate::compiler::v2_map_emission::concrete_type_from_annotation(annotation)
+                {
+                    builder.record_local_typed_array_element_type(slot, *elem);
+                }
+            }
         } else {
             let slot = builder.add_param(
                 format!("__mir_param{}", builder.param_slots.len()),

@@ -1033,47 +1033,100 @@ fn lower_for_expr(
         builder.start_block(after);
         builder.pop_scope();
     } else {
-        // Generic iterator path (non-range iterators).
-        // This is a placeholder — full iterator protocol not yet implemented in MIR.
+        // Generic (non-Range) iterator path. Lowered as an index-counter
+        // state machine over the iterable's length: pre-compute
+        // `__len = iter.len()`, then loop `idx in 0..__len` reading
+        // `iter[idx]` per iteration.
         //
-        // cluster-2 V3-S6f empirical-verification trace (2026-05-16).
-        // Narrow SHAPE_JIT_DEBUG site at the architectural-source root
-        // cause of the Smoke 2 JIT runtime-execution gap: the generic
-        // (non-Range) iterator branch of MIR for-expr lowering emits a
-        // STUB iterator state machine — evaluates the iterable once
-        // into `iter_slot`, branches on `SwitchBool(Copy(iter_slot))`
-        // (truthy ≡ non-null pointer for v2-raw `TypedArray<i64>`
-        // receivers per ADR-006 §2.3), binds the pattern slot to
-        // `MirConstant::None`, and unconditionally `Goto(header)`s.
-        // No advance, no termination condition, no `IterNext`/`IterDone`
-        // (the bytecode-VM-side `compile_for_loop` at
-        // `crates/shape-vm/src/compiler/loops.rs:298-516` emits a real
-        // iterator state machine with `IterDone`/`IterNext` opcodes
-        // and an index counter — that path is the live VM-side
-        // execution path). For any function whose body the JIT MIR
-        // pipeline lowers and which contains a non-Range `for x in
-        // iter` loop, JIT execution loops forever. Matches existing
-        // SHAPE_JIT_DEBUG infrastructure pattern (e.g.
-        // `terminators.rs:621/712`, `closure.rs:261/269/438`).
-        if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
-            eprintln!(
-                "[mir-for-expr-generic-stub] lower_for_expr generic-\
-                 iterator STUB emitted: iter_slot SwitchBool, pattern \
-                 slot assigned MirConstant::None, body block, \
-                 unconditional Goto(header) — no iterator advance, no \
-                 termination condition. iter_kind={:?} span={:?}",
-                std::any::type_name_of_val(for_expr.iterable.as_ref()),
-                span,
-            );
-        }
+        // cluster-2-closure-wave-1-iter-statemachine (2026-05-16):
+        // replaces the prior placeholder stub
+        // (`iter_slot SwitchBool` truthiness + unconditional Goto(header),
+        // no advance, no termination) that caused Smoke 2 JIT
+        // (`xs.map(|x|x*2).sum()`) to infinite-loop inside the
+        // specialized `Vec.map::i64_i64_closure_*` body at runtime
+        // (rc=124 TIMEOUT) — empirically dispositioned at
+        // `docs/cluster-audits/cluster-2-v3s6f-empirical-verification.md`
+        // §2 hypothesis (a) CONFIRMED. Bytecode-VM-side reference
+        // implementation: `crates/shape-vm/src/compiler/loops.rs:298-518`
+        // (`compile_for_loop` ForIn arm, which uses bytecode-level
+        // `IterDone`/`IterNext` opcodes; the MIR layer does not have
+        // those opcodes available so we use the `len()` / `[idx]`
+        // shape per the empirical-verification deliverable §2.5
+        // recommendation, "Approach (ii) — reuses existing MIR
+        // vocabulary, no new StatementKind variants").
+        //
+        // ADR-006 §2.7.5 stamp-at-compile-time: the iterable's
+        // ConcreteType drives method dispatch at runtime via the JIT's
+        // existing v2 typed-array `len`/index fast paths (e.g.
+        // `crates/shape-jit/src/mir_compiler/v2_array.rs::try_emit_v2_array_method`
+        // for `len`, `places.rs:909-918` for `Place::Index` over a
+        // v2 typed-array slot). Non-typed-array iterables fall through
+        // to the trampoline `jit_call_method("len")` + generic
+        // `inline_array_get` paths, which already handle Array /
+        // HashMap-keys / etc. uniformly.
+        //
+        // ADR-006 §2.7.7 #4 / #7 NOT violated: there is no runtime tag
+        // dispatch in the emitted MIR — the JIT compiler picks the
+        // correct codegen per iterable's compile-time ConcreteType at
+        // its consumer site. The MIR shape is uniform across iterable
+        // types (Call+Index+Add+Lt), and the per-iterable
+        // monomorphization happens downstream of MIR.
+        //
+        // Lowering shape (mirrors the bytecode-VM-side state machine):
+        //
+        //   bb_pre:
+        //     iter_slot = <iterable expr>
+        //     __idx = 0
+        //     __len = iter_slot.len()   ; Call terminator (next=bb_header)
+        //     temp = none                ; for-expr produces unit/None
+        //     goto bb_header
+        //   bb_header:
+        //     __cond = __idx < __len     ; BinaryOp::Lt
+        //     switchbool __cond -> bb_body, bb_after
+        //   bb_body:
+        //     __elem = iter_slot[__idx]  ; via Place::Index
+        //     <destructure pattern from __elem>
+        //     <body, may break / continue>
+        //     __idx = __idx + 1
+        //     goto bb_header
+        //   bb_after:
         builder.push_scope();
 
         let iter_slot = lower_expr_to_temp(builder, &for_expr.iterable);
-        let elem_slot = builder.alloc_temp(LocalTypeInfo::Unknown);
-        let header = builder.new_block();
-        let body_block = builder.new_block();
-        let after = builder.new_block();
 
+        // Counter slot and length slot are pure internal MIR temps.
+        // Both hold integer values (LocalTypeInfo::Copy → JIT will
+        // stamp Int64 via slot-kind inference).
+        let idx_slot = builder.alloc_temp(LocalTypeInfo::Copy);
+        let len_slot = builder.alloc_temp(LocalTypeInfo::Copy);
+
+        // __idx = 0
+        builder.push_stmt(
+            StatementKind::Assign(
+                Place::Local(idx_slot),
+                Rvalue::Use(Operand::Constant(MirConstant::Int(0))),
+            ),
+            span,
+        );
+
+        // __len = iter_slot.len()  — emit as a Call terminator with
+        // MirConstant::Method("len"). The JIT's v2 typed-array fast
+        // path intercepts this at `terminators.rs:108-135` for
+        // typed-array receivers; non-typed-array iterables fall
+        // through to `jit_call_method("len", [iter_slot])`. Either
+        // way, the destination slot receives an i64 length.
+        let len_call_func = Operand::Constant(MirConstant::Method("len".to_string()));
+        builder.emit_call(
+            len_call_func,
+            vec![Operand::Copy(Place::Local(iter_slot))],
+            Place::Local(len_slot),
+            span,
+        );
+
+        // The for-expr's result value defaults to None; the body's
+        // last expression overwrites it per iteration (matching the
+        // Range-case behaviour above and the bytecode-VM-side break-
+        // with-value semantics).
         builder.push_stmt(
             StatementKind::Assign(
                 Place::Local(temp),
@@ -1081,33 +1134,88 @@ fn lower_for_expr(
             ),
             span,
         );
+
+        let header = builder.new_block();
+        let body_block = builder.new_block();
+        let after = builder.new_block();
+
         builder.finish_block(TerminatorKind::Goto(header), span);
 
+        // Loop header: __cond = __idx < __len; switchbool __cond.
         builder.start_block(header);
+        let cond_slot = builder.alloc_temp(LocalTypeInfo::Copy);
+        builder.push_stmt(
+            StatementKind::Assign(
+                Place::Local(cond_slot),
+                Rvalue::BinaryOp(
+                    BinOp::Lt,
+                    Operand::Copy(Place::Local(idx_slot)),
+                    Operand::Copy(Place::Local(len_slot)),
+                ),
+            ),
+            span,
+        );
         builder.finish_block(
             TerminatorKind::SwitchBool {
-                operand: Operand::Copy(Place::Local(iter_slot)),
+                operand: Operand::Copy(Place::Local(cond_slot)),
                 true_bb: body_block,
                 false_bb: after,
             },
             span,
         );
 
+        // Loop body: read iter_slot[__idx] into a fresh element slot,
+        // destructure pattern bindings, lower the user body, increment
+        // counter, goto header.
         builder.start_block(body_block);
+
+        // Allocate the destructure-source slot as either the pattern's
+        // own named slot (single-identifier patterns: avoids one
+        // intermediate copy and matches the bytecode-VM-side path) or
+        // an anonymous temp (compound patterns: destructured downstream).
+        let elem_slot = match &for_expr.pattern {
+            ast::Pattern::Identifier(name) | ast::Pattern::Typed { name, .. } => {
+                builder.alloc_local(name.clone(), LocalTypeInfo::Unknown)
+            }
+            _ => builder.alloc_temp(LocalTypeInfo::Unknown),
+        };
+
+        // __elem = iter_slot[__idx]  — Place::Index lowering. JIT v2
+        // typed-array fast path at `places.rs:909-918` emits an
+        // inline `v2_array_get(arr_ptr, idx_i32, elem_kind)` for
+        // typed-array bases; generic arrays fall back to
+        // `inline_array_get`. Both produce an i64-shaped element
+        // value in the destination slot.
+        let index_place = Place::Index(
+            Box::new(Place::Local(iter_slot)),
+            Box::new(Operand::Copy(Place::Local(idx_slot))),
+        );
         builder.push_stmt(
             StatementKind::Assign(
                 Place::Local(elem_slot),
-                Rvalue::Use(Operand::Constant(MirConstant::None)),
+                Rvalue::Use(Operand::Copy(index_place)),
             ),
             span,
         );
-        super::stmt::lower_pattern_bindings_from_place(
-            builder,
+
+        // Bind compound patterns from the element slot; single-
+        // identifier patterns already have `elem_slot` aliased to
+        // the pattern name above (the destructure walker no-ops for
+        // matching identifier patterns since `lookup_local(name)`
+        // resolves to the slot we just allocated).
+        if !matches!(
             &for_expr.pattern,
-            &Place::Local(elem_slot),
-            span,
-            None,
-        );
+            ast::Pattern::Identifier(_) | ast::Pattern::Typed { .. }
+        ) {
+            super::stmt::lower_pattern_bindings_from_place(
+                builder,
+                &for_expr.pattern,
+                &Place::Local(elem_slot),
+                span,
+                None,
+            );
+        }
+
         builder.push_loop(after, header, Some(temp));
         let body_slot = lower_expr_to_temp(builder, &for_expr.body);
         builder.push_stmt(
@@ -1118,8 +1226,23 @@ fn lower_for_expr(
             for_expr.body.span(),
         );
         builder.pop_loop();
+
+        // __idx = __idx + 1
+        builder.push_stmt(
+            StatementKind::Assign(
+                Place::Local(idx_slot),
+                Rvalue::BinaryOp(
+                    BinOp::Add,
+                    Operand::Copy(Place::Local(idx_slot)),
+                    Operand::Constant(MirConstant::Int(1)),
+                ),
+            ),
+            span,
+        );
+
         builder.finish_block(TerminatorKind::Goto(header), span);
 
+        // After loop
         builder.start_block(after);
         builder.pop_scope();
     }
