@@ -657,6 +657,135 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                                     kind_hint,
                                 ));
                             }
+                            // ── Phase 3 cluster-2 Round 3 cw-D-fam12
+                            //    Scalar Char (Family 1) arm ─────────────
+                            //
+                            // ADR-006 §2.7.5 amendment (Round 19 S1.5
+                            // W12-nativekind-scalar-additions, 2026-05-14):
+                            // Char is a 4-byte scalar carrier (codepoint
+                            // inline in low 32 bits of `ValueSlot`, no Arc
+                            // wrapping). Both the post-amendment scalar
+                            // label `NativeKind::Char` and the
+                            // pre-amendment heap arm
+                            // `NativeKind::Ptr(HeapKind::Char)` recognize
+                            // the same carrier shape (per
+                            // `KindedSlot::as_char` accessor accepting
+                            // both labels at `kinded_slot.rs:594-597`).
+                            // Both route to `jit_print_char(u32)` which
+                            // takes the codepoint directly — mirror of
+                            // `jit_print_i64` / `jit_print_f64` /
+                            // `jit_print_bool` (scalar-by-value FFI shape,
+                            // no ctx_ptr threading needed).
+                            Some(NativeKind::Char)
+                            | Some(NativeKind::Ptr(HeapKind::Char)) => {
+                                let val_ty = self.builder.func.dfg.value_type(val);
+                                // Narrow to I32: ValueSlot::from_char stores
+                                // `c as u64` (zero-extended); the low 32 bits
+                                // carry the codepoint per `ValueSlot::as_char`
+                                // (`self.0 as u32`). Cranelift FFI passes I32
+                                // directly.
+                                let narrowed = if val_ty == types::I32 {
+                                    val
+                                } else if val_ty == types::I64
+                                    || val_ty == types::I8
+                                {
+                                    // I64: truncate to low 32 bits.
+                                    // I8: zero-extend then narrow (covers
+                                    // any upstream code that materializes a
+                                    // char as a byte).
+                                    if val_ty == types::I64 {
+                                        self.builder.ins().ireduce(types::I32, val)
+                                    } else {
+                                        self.builder.ins().uextend(types::I32, val)
+                                    }
+                                } else {
+                                    val
+                                };
+                                self.builder.ins().call(
+                                    self.ffi.print_char,
+                                    &[narrowed],
+                                );
+                            }
+                            // ── Phase 3 cluster-2 Round 3 cw-D-fam12
+                            //    Concurrency-primitive family (Family 2):
+                            //    Mutex / Atomic / Lazy / Channel arms ──
+                            //
+                            // ADR-006 §2.7.25 concurrency-primitive
+                            // rebuild trio (Mutex / Atomic / Lazy) + the
+                            // §2.7.20 Channel precedent share the same
+                            // `Arc::into_raw(Arc<XData>) as u64` carrier
+                            // shape and the same `<X:state>` opaque-tag
+                            // print format (per `printing.rs:451-464`
+                            // Channel + `:534-551` Mutex/Atomic/Lazy).
+                            // Each delegates to `print_kinded_inner` so
+                            // VM == JIT identical output is preserved
+                            // (no NaN-box tag decode, no `is_heap_kind`
+                            // probe — kind IS the discriminator per
+                            // §2.7.7 #4 / #7).
+                            Some(NativeKind::Ptr(HeapKind::Mutex)) => {
+                                let val_ty = self.builder.func.dfg.value_type(val);
+                                let widened = if val_ty == types::I64 {
+                                    val
+                                } else if val_ty == types::F64 {
+                                    self.builder
+                                        .ins()
+                                        .bitcast(types::I64, MemFlags::new(), val)
+                                } else {
+                                    val
+                                };
+                                self.builder.ins().call(
+                                    self.ffi.print_mutex,
+                                    &[self.ctx_ptr, widened],
+                                );
+                            }
+                            Some(NativeKind::Ptr(HeapKind::Atomic)) => {
+                                let val_ty = self.builder.func.dfg.value_type(val);
+                                let widened = if val_ty == types::I64 {
+                                    val
+                                } else if val_ty == types::F64 {
+                                    self.builder
+                                        .ins()
+                                        .bitcast(types::I64, MemFlags::new(), val)
+                                } else {
+                                    val
+                                };
+                                self.builder.ins().call(
+                                    self.ffi.print_atomic,
+                                    &[self.ctx_ptr, widened],
+                                );
+                            }
+                            Some(NativeKind::Ptr(HeapKind::Lazy)) => {
+                                let val_ty = self.builder.func.dfg.value_type(val);
+                                let widened = if val_ty == types::I64 {
+                                    val
+                                } else if val_ty == types::F64 {
+                                    self.builder
+                                        .ins()
+                                        .bitcast(types::I64, MemFlags::new(), val)
+                                } else {
+                                    val
+                                };
+                                self.builder.ins().call(
+                                    self.ffi.print_lazy,
+                                    &[self.ctx_ptr, widened],
+                                );
+                            }
+                            Some(NativeKind::Ptr(HeapKind::Channel)) => {
+                                let val_ty = self.builder.func.dfg.value_type(val);
+                                let widened = if val_ty == types::I64 {
+                                    val
+                                } else if val_ty == types::F64 {
+                                    self.builder
+                                        .ins()
+                                        .bitcast(types::I64, MemFlags::new(), val)
+                                } else {
+                                    val
+                                };
+                                self.builder.ins().call(
+                                    self.ffi.print_channel,
+                                    &[self.ctx_ptr, widened],
+                                );
+                            }
                             // ── NotImplemented(SURFACE): unproven kind /
                             //    unwired heap arm ─────────────────────
                             //
