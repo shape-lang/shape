@@ -5711,6 +5711,46 @@ prime² — the amendment's "Wave 3 stabilize cascade" lockstep
 description is satisfied by ckpt-final-prime² itself (the cascade flip
 landed atomically with the variant signature flip).
 
+**Producer-side cascade completion (cluster-1.5 Q25.C TraitObject rebuild
+close, 2026-05-16):** the ckpt-final-prime² consistency check above
+addresses the consumer-side dispatch tables (`release_elem` / `_drop`
+chain on the OUTER `TraitObjectPtr` carrier). However, the producer-side
+`op_box_trait_object` / `op_dyn_method_call` / `rebox_self_value` at
+`crates/shape-vm/src/executor/trait_object_ops.rs` were not flipped
+atomically with ckpt-final-prime². Result: ~2-3 weeks of mixed-dispatch
+state where `Arc::new(TraitObjectStorage { ... }) + Arc::into_raw`
+producers fed `release_elem` consumers that called `dealloc(ptr,
+Layout::new::<TraitObjectStorage>())` missing the ArcInner prefix —
+SIGABRT `free(): invalid pointer` at module-binding teardown for any
+`let t: dyn T = X{}` shape. Empirically surfaced by Smoke 5 fixture in
+cluster-1.5 Q25.C dispatch; fix: 3 producer-site flips from
+`Arc::new(...)` to direct `TraitObjectStorage::_new(...)` ALLOC-pattern
+matching the consumer `release_elem` / `_drop` Layout per ADR-005 §1
+single-discriminator + ADR-006 §2.3 Path B Ptr-newtype canonical
+pattern.
+
+**Discipline-text lesson (instances 77 + 78, cluster-1.5 Q25.C close
+2026-05-16):**
+
+1. **Producer/consumer owner attribution**: future ADR amendments
+   describing producer/consumer cascade-flip lockstep MUST name the
+   producer-flip-owner AND the consumer-flip-owner SEPARATELY (or
+   declare them the same agent atomically). The Wave 2 Agent E close
+   text described the lockstep requirement but didn't name the
+   producer-flip-owner; consumer flipped Wave 3 stabilize without
+   producer follow-up, leaving HEAD in mixed-dispatch state until Smoke
+   5 surfaced the gap. Future amendments name producer-flip-owner +
+   consumer-flip-owner attribution explicitly.
+
+2. **struct-`new` (POD constructor) vs `Arc::new(struct-new(...))`
+   (forbidden post-cascade)**: when naming deletion targets in cascade-
+   flip amendments, name the SPECIFIC Arc-wrapped pattern (`Arc::new(X
+   { ... })` + `Arc::into_raw`) rather than the bare struct `new`
+   constructor. POD struct `_new` constructors remain valid producer-
+   side ALLOC patterns; Arc-wrapping them is the forbidden post-cascade
+   shape. Conflation in amendment text risks consumer-only flips
+   without producer follow-up (same instance 77 root cause).
+
 ###### Q25.C.6 — IC devirtualization
 
 The JIT IC (`feedback.rs:9-128`) at each `dyn T` call site records `(self_vtable_arc_id, g_type_info.concrete_type_id_per_generic)`. State transitions:
