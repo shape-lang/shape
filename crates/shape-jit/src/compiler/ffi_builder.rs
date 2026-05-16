@@ -115,6 +115,19 @@ impl JITCompiler {
             print_atomic: r!("jit_print_atomic"),
             print_lazy: r!("jit_print_lazy"),
             print_channel: r!("jit_print_channel"),
+            // Phase 3 cluster-2 Round 4 cw-D-fam3 (2026-05-16):
+            // Collection family kinded print entries. ADR-006 §2.7.5
+            // stamp-at-compile-time + §2.7.5.B Family 3 amendment
+            // extension. The MIR-side Call-terminator dispatch routes
+            // the operand's `NativeKind` to the matching FuncRef
+            // (`Ptr(HeapKind::HashMap)` → `print_hashmap`, etc.).
+            // ADR-006 §2.7.5.B 2026-05-16
+            print_hashmap: r!("jit_print_hashmap"),
+            print_hashset: r!("jit_print_hashset"),
+            print_deque: r!("jit_print_deque"),
+            print_priority_queue: r!("jit_print_priority_queue"),
+            print_range: r!("jit_print_range"),
+            print_iterator: r!("jit_print_iterator"),
 
             // Closure construction
             make_closure: r!("jit_make_closure"),

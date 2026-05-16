@@ -93,6 +93,25 @@ pub struct FFIFuncRefs {
     pub(crate) print_atomic: FuncRef,
     pub(crate) print_lazy: FuncRef,
     pub(crate) print_channel: FuncRef,
+    // Phase 3 cluster-2 Round 4 cw-D-fam3 (2026-05-16): Collection
+    // family kinded print entries (ADR-006 §2.7.5 stamp-at-compile-time
+    // + §2.7.5.B per-HeapKind-family kinded jit_print dispatch arms
+    // amendment Family 3 extension). Dispatched by the MIR-side
+    // Call-terminator print emitter when the operand's `NativeKind` is
+    // `Ptr(HeapKind::HashMap)` → `print_hashmap`,
+    // `Ptr(HeapKind::HashSet)` → `print_hashset`,
+    // `Ptr(HeapKind::Deque)` → `print_deque`,
+    // `Ptr(HeapKind::PriorityQueue)` → `print_priority_queue`,
+    // `Ptr(HeapKind::Range)` → `print_range`,
+    // `Ptr(HeapKind::Iterator)` → `print_iterator`. All heap arms take
+    // `(ctx_ptr, bits)`; each delegates to `print_kinded_inner` so VM
+    // == JIT identical output is preserved. ADR-006 §2.7.5.B 2026-05-16
+    pub(crate) print_hashmap: FuncRef,
+    pub(crate) print_hashset: FuncRef,
+    pub(crate) print_deque: FuncRef,
+    pub(crate) print_priority_queue: FuncRef,
+    pub(crate) print_range: FuncRef,
+    pub(crate) print_iterator: FuncRef,
 
     // Closure construction (Phase H2: typed closure block → Arc<Closure>).
     pub(crate) make_closure: FuncRef,

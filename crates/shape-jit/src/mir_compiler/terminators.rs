@@ -786,6 +786,135 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                                     &[self.ctx_ptr, widened],
                                 );
                             }
+                            // ── Phase 3 cluster-2 Round 4 cw-D-fam3
+                            //    Collection family (Family 3) arms ────
+                            //
+                            // ADR-006 §2.7.5.B per-HeapKind-family kinded
+                            // jit_print dispatch arms (Family 3 amendment
+                            // extension, 2026-05-16). Per cluster-2-
+                            // inventory §E.5 the Collection family is
+                            // HashMap (ord 17), HashSet (21), Deque (23),
+                            // PriorityQueue (25), Range (26), Iterator (22)
+                            // — all `Arc<XData>` heap-arm carriers per
+                            // §2.7.5 stamp-at-compile-time (HashMap is
+                            // `Arc<HashMapKindedRef>` per Wave 2 Round 3b
+                            // C2-joint ckpt-2 Q25.B SUPERSEDED; the inner
+                            // per-V monomorphization dispatches at the
+                            // carrier's variant tag, transparent to the
+                            // FFI body which only forwards the outer
+                            // typed-Arc bits + the §2.7.5 kind label to
+                            // `print_kinded_inner`). Each delegates to
+                            // `print_kinded_inner` so VM == JIT identical
+                            // output is preserved (no NaN-box tag decode,
+                            // no `is_heap_kind` probe — kind IS the
+                            // discriminator per §2.7.7 #4 / #7).
+                            //
+                            // Per inventory §E.5 categorization the
+                            // Iterator HeapKind is part of the Collection
+                            // family (NOT the pure-discriminator family);
+                            // `HeapValue::Iterator(Arc<IteratorState>)`
+                            // participates in the §2.3 typed-Arc payload
+                            // pattern per ADR-006 §2.7.16 / Q17
+                            // W13-iterator-state, and the dispatch arm in
+                            // `format_heap_kind` at `printing.rs:430`
+                            // reads the bits as `*const IteratorState`.
+                            // ADR-006 §2.7.5.B 2026-05-16
+                            Some(NativeKind::Ptr(HeapKind::HashMap)) => {
+                                let val_ty = self.builder.func.dfg.value_type(val);
+                                let widened = if val_ty == types::I64 {
+                                    val
+                                } else if val_ty == types::F64 {
+                                    self.builder
+                                        .ins()
+                                        .bitcast(types::I64, MemFlags::new(), val)
+                                } else {
+                                    val
+                                };
+                                self.builder.ins().call(
+                                    self.ffi.print_hashmap,
+                                    &[self.ctx_ptr, widened],
+                                );
+                            }
+                            Some(NativeKind::Ptr(HeapKind::HashSet)) => {
+                                let val_ty = self.builder.func.dfg.value_type(val);
+                                let widened = if val_ty == types::I64 {
+                                    val
+                                } else if val_ty == types::F64 {
+                                    self.builder
+                                        .ins()
+                                        .bitcast(types::I64, MemFlags::new(), val)
+                                } else {
+                                    val
+                                };
+                                self.builder.ins().call(
+                                    self.ffi.print_hashset,
+                                    &[self.ctx_ptr, widened],
+                                );
+                            }
+                            Some(NativeKind::Ptr(HeapKind::Deque)) => {
+                                let val_ty = self.builder.func.dfg.value_type(val);
+                                let widened = if val_ty == types::I64 {
+                                    val
+                                } else if val_ty == types::F64 {
+                                    self.builder
+                                        .ins()
+                                        .bitcast(types::I64, MemFlags::new(), val)
+                                } else {
+                                    val
+                                };
+                                self.builder.ins().call(
+                                    self.ffi.print_deque,
+                                    &[self.ctx_ptr, widened],
+                                );
+                            }
+                            Some(NativeKind::Ptr(HeapKind::PriorityQueue)) => {
+                                let val_ty = self.builder.func.dfg.value_type(val);
+                                let widened = if val_ty == types::I64 {
+                                    val
+                                } else if val_ty == types::F64 {
+                                    self.builder
+                                        .ins()
+                                        .bitcast(types::I64, MemFlags::new(), val)
+                                } else {
+                                    val
+                                };
+                                self.builder.ins().call(
+                                    self.ffi.print_priority_queue,
+                                    &[self.ctx_ptr, widened],
+                                );
+                            }
+                            Some(NativeKind::Ptr(HeapKind::Range)) => {
+                                let val_ty = self.builder.func.dfg.value_type(val);
+                                let widened = if val_ty == types::I64 {
+                                    val
+                                } else if val_ty == types::F64 {
+                                    self.builder
+                                        .ins()
+                                        .bitcast(types::I64, MemFlags::new(), val)
+                                } else {
+                                    val
+                                };
+                                self.builder.ins().call(
+                                    self.ffi.print_range,
+                                    &[self.ctx_ptr, widened],
+                                );
+                            }
+                            Some(NativeKind::Ptr(HeapKind::Iterator)) => {
+                                let val_ty = self.builder.func.dfg.value_type(val);
+                                let widened = if val_ty == types::I64 {
+                                    val
+                                } else if val_ty == types::F64 {
+                                    self.builder
+                                        .ins()
+                                        .bitcast(types::I64, MemFlags::new(), val)
+                                } else {
+                                    val
+                                };
+                                self.builder.ins().call(
+                                    self.ffi.print_iterator,
+                                    &[self.ctx_ptr, widened],
+                                );
+                            }
                             // ── NotImplemented(SURFACE): unproven kind /
                             //    unwired heap arm ─────────────────────
                             //

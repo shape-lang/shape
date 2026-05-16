@@ -1058,6 +1058,100 @@ lookup) + `mir_compiler/terminators.rs` (routing arm). Per-arm scope
 ~50-100 LoC. Round 4+ dispatch follows this exact pattern per family
 sub-cluster.
 
+##### §2.7.5.B extension Round 4 cw-D-fam3 — Family 3 Collection arms (2026-05-16)
+
+Extends §2.7.5.B (cw-D-fam12, 2026-05-16) by 6 more arms grouped
+under cluster-2-inventory §E.5 Family 3 Collection. The cascade-site
+shape (5 files per arm) and the dispatch contract (kind IS the
+discriminator; `print_kinded_inner` delegate; surface-and-stop on
+unknown kind via the `_`-arm) are preserved verbatim.
+
+- **Collection family (Family 3):** `jit_print_hashmap` /
+  `jit_print_hashset` / `jit_print_deque` / `jit_print_priority_queue`
+  / `jit_print_range` / `jit_print_iterator`, each `(ctx_ptr, bits)`
+  with `bits = Arc::into_raw(Arc<XData>) as u64`. Print format follows
+  the canonical per-arm convention recorded in `printing.rs`:
+
+  - HashMap → `{"k1": v1, "k2": v2, ...}` per `format_hashmap`
+    (`printing.rs:787-...`), per-V dispatch through the
+    `HashMapKindedRef` variant tag (Wave 2 Round 3b C2-joint ckpt-2
+    Q25.B SUPERSEDED).
+  - HashSet → `{"a", "b", ...}` per `format_hashset`
+    (`printing.rs:745-757`).
+  - Deque → `Deque[elem1, elem2, ...]` front-to-back per
+    `format_deque` (`printing.rs:763-775`).
+  - PriorityQueue → `PriorityQueue[v1, v2, ...]` in heap-array order
+    (NOT sorted) per `format_priority_queue`
+    (`printing.rs:725-740`).
+  - Range → `start..end` (exclusive) / `start..=end` (inclusive) per
+    `printing.rs:479-494`.
+  - Iterator → opaque `<iterator>` tag per `printing.rs:430-439`
+    (lazy iterators have no user-facing print form; terminals must
+    materialize).
+
+**HashMap carrier note:** the slot bits are
+`Arc::into_raw(Arc<HashMapKindedRef>) as u64`, NOT
+`Arc::into_raw(Arc<HashMapData<V>>) as u64`. The per-V
+monomorphization (`HashMapKindedRef::I64` / `_::F64` / etc.) is the
+inner-tier dispatch inside `format_hashmap` — transparent to the FFI
+body, which forwards the outer typed-Arc bits + the §2.7.5 kind
+label (`NativeKind::Ptr(HeapKind::HashMap)`) to
+`print_kinded_inner`. No new `NativeKind` per-V cardinality is
+introduced at the FFI boundary; Q8 carrier-API-bound discipline is
+preserved.
+
+**Iterator family categorization:** per inventory §E.5 the Iterator
+HeapKind belongs to the Collection family (NOT the
+pure-discriminator family). The basis is the §2.3 / §2.7.16 / Q17
+W13-iterator-state typed-Arc carrier shape:
+`HeapValue::Iterator(Arc<IteratorState>)` participates in the §2.3
+typed-Arc payload pattern, and `slot.as_heap_value()` IS valid on
+Iterator-labeled bits (unlike the FilterExpr / Reference /
+SharedCell pure-discriminator arms whose `as_heap_value()` would be
+unsound). The Display rendering is the opaque tag `<iterator>` —
+distinct from the per-arm "rich" formats of the other Collection
+members (HashMap / HashSet / Deque / PriorityQueue / Range) only in
+its surface convention, not in its dispatch shape.
+
+**Coverage post-extension:** 13 / 35 live HeapKind variants have
+kinded `jit_print` FFI entries (Option / Result / TypedObject /
+Char / Mutex / Atomic / Lazy / Channel / String / HashMap / HashSet
+/ Deque / PriorityQueue / Range / Iterator — wait, that's 15 with
+the Round 3+4 additions counted; +String which is the §2.7.5 base
+scalar-carrier String entry). Remaining 22 UNCOVERED HeapKind arms
+tracked per inventory §E.5 + §H.2 across 7 closure-wave-D families
+yet to land: Numeric/temporal (Decimal / BigInt / Temporal /
+Instant), DataTable/Content (DataTable / TableView / Content /
+IoHandle), Native-foreign (NativeScalar / NativeView),
+Pure-discriminator (FilterExpr / Reference / SharedCell), Async
+(Future / TaskGroup), Matrix (Matrix / MatrixSlice),
+TraitObject+Closure+TypedObject (with TypedObject gated on the
+cluster-1 `W17-jit-typed-object-arc-storage-migration` carrier-shape
+SURFACE per the existing `terminators.rs:620-661` SURFACE arm),
+ModuleFn.
+
+**Forbidden under this extension (mirror of §2.7.5.B cw-D-fam12):**
+
+- Adding a kind-blind `jit_print` fallback for an unknown Collection
+  arm (refused per the existing `_`-arm SURFACE-and-stop at
+  `terminators.rs`).
+- Per-V `jit_print_hashmap_<V>` entries that lift the inner
+  monomorphization to the FFI boundary (`Q8` carrier-API-bound
+  discipline — one FFI entry per `NativeKind` heap variant; per-V
+  dispatch stays inside `format_hashmap`).
+- Per-routing-arm bridge / probe / helper / hop / translator /
+  adapter / shim framings (CLAUDE.md broader-family regex).
+- Bool-default fallback when the operand's `NativeKind` is `None` at
+  the producing site — the existing `_`-arm SURFACE-and-stop catches
+  this; upstream kind-source gaps surface honestly.
+
+**Code touchpoints carry the same `// ADR-006 §2.7.5.B 2026-05-16`
+marker** in the cluster-2-cw-D-fam3-collection commit edits at the
+new arm sites — auditable for the per-family migration trajectory.
+
+**Cascade-site count per new arm:** unchanged from §2.7.5.B —
+5 files per arm. 6 arms × 5 files = 30 cascade sites for Family 3.
+
 #### 2.7.5.1 Wire-format structs are post-proof shapes
 
 `FrameDescriptor` (`crates/shape-vm/src/type_tracking.rs`) is

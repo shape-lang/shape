@@ -11,9 +11,11 @@ use std::collections::HashMap;
 
 use super::super::ffi::conversion::{
     jit_print_atomic, jit_print_bool, jit_print_channel, jit_print_char,
-    jit_print_f64, jit_print_i64, jit_print_lazy, jit_print_mutex,
-    jit_print_option, jit_print_result, jit_print_str, jit_print_typed_object,
-    jit_string_concat, jit_to_number, jit_to_string, jit_type_check, jit_typeof,
+    jit_print_deque, jit_print_f64, jit_print_hashmap, jit_print_hashset,
+    jit_print_i64, jit_print_iterator, jit_print_lazy, jit_print_mutex,
+    jit_print_option, jit_print_priority_queue, jit_print_range,
+    jit_print_result, jit_print_str, jit_print_typed_object, jit_string_concat,
+    jit_to_number, jit_to_string, jit_type_check, jit_typeof,
 };
 #[allow(deprecated)]
 use super::super::ffi::object::{
@@ -184,6 +186,23 @@ pub fn register_object_symbols(builder: &mut JITBuilder) {
     builder.symbol("jit_print_atomic", jit_print_atomic as *const u8);
     builder.symbol("jit_print_lazy", jit_print_lazy as *const u8);
     builder.symbol("jit_print_channel", jit_print_channel as *const u8);
+    // Phase 3 cluster-2 Round 4 cw-D-fam3 (2026-05-16): Collection
+    // family kinded print entries (HashMap/HashSet/Deque/PriorityQueue/
+    // Range/Iterator). Each takes `(ctx_ptr, bits)` mirror of the
+    // cw-D-fam12 Concurrency-family heap-arm shape — bits are
+    // `Arc::into_raw(Arc<XData>) as u64` per the producer-side contract
+    // on the matching `KindedSlot::from_X` constructor (HashMap is
+    // `Arc<HashMapKindedRef>` per Wave 2 Round 3b C2-joint ckpt-2 Q25.B
+    // SUPERSEDED). ADR-006 §2.7.5.B 2026-05-16
+    builder.symbol("jit_print_hashmap", jit_print_hashmap as *const u8);
+    builder.symbol("jit_print_hashset", jit_print_hashset as *const u8);
+    builder.symbol("jit_print_deque", jit_print_deque as *const u8);
+    builder.symbol(
+        "jit_print_priority_queue",
+        jit_print_priority_queue as *const u8,
+    );
+    builder.symbol("jit_print_range", jit_print_range as *const u8);
+    builder.symbol("jit_print_iterator", jit_print_iterator as *const u8);
     builder.symbol("jit_make_closure", jit_make_closure as *const u8);
     // Closure-spec Phase H2: TypedClosureHeader finalizer used by
     // `MirToIR::emit_heap_closure` to convert the raw typed block into a
@@ -843,6 +862,72 @@ pub fn declare_object_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<
             .declare_function("jit_print_channel", Linkage::Import, &sig)
             .expect("Failed to declare jit_print_channel");
         ffi_funcs.insert("jit_print_channel".to_string(), func_id);
+    }
+
+    // Phase 3 cluster-2 Round 4 cw-D-fam3 (2026-05-16): Collection family
+    // kinded print entries (ADR-006 §2.7.5 stamp-at-compile-time +
+    // §2.7.5.B Family 3 amendment extension). Each mirrors the cw-D-fam12
+    // Concurrency-family heap-arm `(ctx_ptr, bits)` signature.
+    //
+    // jit_print_hashmap(ctx_ptr: *const JITContext, bits: u64) -> void
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // ctx_ptr
+        sig.params.push(AbiParam::new(types::I64)); // bits (Arc<HashMapKindedRef>)
+        let func_id = module
+            .declare_function("jit_print_hashmap", Linkage::Import, &sig)
+            .expect("Failed to declare jit_print_hashmap");
+        ffi_funcs.insert("jit_print_hashmap".to_string(), func_id);
+    }
+    // jit_print_hashset(ctx_ptr: *const JITContext, bits: u64) -> void
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // ctx_ptr
+        sig.params.push(AbiParam::new(types::I64)); // bits (Arc<HashSetData>)
+        let func_id = module
+            .declare_function("jit_print_hashset", Linkage::Import, &sig)
+            .expect("Failed to declare jit_print_hashset");
+        ffi_funcs.insert("jit_print_hashset".to_string(), func_id);
+    }
+    // jit_print_deque(ctx_ptr: *const JITContext, bits: u64) -> void
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // ctx_ptr
+        sig.params.push(AbiParam::new(types::I64)); // bits (Arc<DequeData>)
+        let func_id = module
+            .declare_function("jit_print_deque", Linkage::Import, &sig)
+            .expect("Failed to declare jit_print_deque");
+        ffi_funcs.insert("jit_print_deque".to_string(), func_id);
+    }
+    // jit_print_priority_queue(ctx_ptr: *const JITContext, bits: u64) -> void
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // ctx_ptr
+        sig.params.push(AbiParam::new(types::I64)); // bits (Arc<PriorityQueueData>)
+        let func_id = module
+            .declare_function("jit_print_priority_queue", Linkage::Import, &sig)
+            .expect("Failed to declare jit_print_priority_queue");
+        ffi_funcs.insert("jit_print_priority_queue".to_string(), func_id);
+    }
+    // jit_print_range(ctx_ptr: *const JITContext, bits: u64) -> void
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // ctx_ptr
+        sig.params.push(AbiParam::new(types::I64)); // bits (Arc<RangeData>)
+        let func_id = module
+            .declare_function("jit_print_range", Linkage::Import, &sig)
+            .expect("Failed to declare jit_print_range");
+        ffi_funcs.insert("jit_print_range".to_string(), func_id);
+    }
+    // jit_print_iterator(ctx_ptr: *const JITContext, bits: u64) -> void
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // ctx_ptr
+        sig.params.push(AbiParam::new(types::I64)); // bits (Arc<IteratorState>)
+        let func_id = module
+            .declare_function("jit_print_iterator", Linkage::Import, &sig)
+            .expect("Failed to declare jit_print_iterator");
+        ffi_funcs.insert("jit_print_iterator".to_string(), func_id);
     }
 
     // jit_make_closure(ctx, func_idx, capture_count) -> u64
