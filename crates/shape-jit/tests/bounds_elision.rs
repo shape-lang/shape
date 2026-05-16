@@ -141,6 +141,7 @@ fn build_canonical_for_loop_mir(arr: SlotId, iv: SlotId, bnd: SlotId, cond: Slot
         span: Span { start: 0, end: 0 },
         field_name_table,
         local_struct_type_names: std::collections::HashMap::new(),
+        local_typed_array_element_types: std::collections::HashMap::new(),
     }
 }
 

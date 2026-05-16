@@ -584,6 +584,55 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_resolvers(
         }
     }
 
+    // ADR-006 §2.7.5 stamp-at-compile-time — V3-S6e-jit-specialized-vec-
+    // map-aggregate-classify (Phase 3 cluster-0+1 Wave 3, 2026-05-16;
+    // V3-S6 multi-session chain checkpoint-final).
+    //
+    // Empty-typed-array-literal slot stamping pass. The MIR lowering's
+    // `mir/lowering/helpers.rs::emit_container_store_if_needed` short-
+    // circuits for `ContainerStoreKind::Array` with empty operands (line
+    // 128-130), so the ArrayStore walker below (`StatementKind::ArrayStore`
+    // arm) has no operand source to infer the element kind for empty
+    // literal initializations like `let mut result = []`. Without this
+    // pass `concrete_types[result_slot]` stays `Void`, the JIT-MIR v2-
+    // fast-path at `mir_compiler/statements.rs::v2_typed_array_elem_kind`
+    // returns `None`, the kind-blind Aggregate fallback fires, and the
+    // function fails to JIT-compile per Route A `W11-jit-new-array`
+    // SURFACE.
+    //
+    // The producer at `mir/lowering/stmt.rs::lower_var_decl` populates
+    // `mir.local_typed_array_element_types` for `let mut <name>: Array<C>
+    // = []` bindings when `C` is a `concrete_type_from_annotation`-
+    // resolvable element ConcreteType. V3-S6a's
+    // `synthesize_empty_array_result_annotation` writes the `Array<C>`
+    // annotation onto the specialized `Vec.map<U>` / `Vec.filter<U>`
+    // body's `let mut result = []` after generic substitution
+    // concretizes the return type; this consumer reads that AST→MIR-
+    // threaded element type at the conduit producer layer.
+    //
+    // Runs BEFORE the slot-move propagation pass below so that subsequent
+    // `Use(Move|Copy)` chains from the var-binding slot to a user-visible
+    // slot propagate the Array(elem) stamp correctly.
+    //
+    // No tag-bit decode, no Bool-default, no fabricated default — when
+    // the binding has no `Array<C>` annotation (legacy `let mut result =
+    // []` without explicit type), no entry exists in the map and the
+    // slot stays `Void` per §2.7.5.1 / §2.7.7 #9 (the JIT surfaces-and-
+    // stops honestly at the Aggregate site, the original W11-jit-new-
+    // array architectural-gap signal).
+    for (slot, elem) in &mir.local_typed_array_element_types {
+        let idx = slot.0 as usize;
+        if idx < n
+            && matches!(
+                concrete_types[idx],
+                shape_value::v2::ConcreteType::Void
+            )
+        {
+            concrete_types[idx] =
+                shape_value::v2::ConcreteType::Array(Box::new(elem.clone()));
+        }
+    }
+
     // First pass: stamp slots from container-store statements. These are
     // the kind-source statements emitted by the MIR lowering for
     // struct/enum/array literal construction.
@@ -5686,6 +5735,7 @@ mod call_return_kind_tests {
             span,
             field_name_table: Default::default(),
             local_struct_type_names: Default::default(),
+            local_typed_array_element_types: Default::default(),
         }
     }
 
@@ -5797,6 +5847,7 @@ mod call_return_kind_tests {
             span,
             field_name_table: Default::default(),
             local_struct_type_names: Default::default(),
+            local_typed_array_element_types: Default::default(),
         };
         let resolver = |name: &str| -> Option<ConcreteType> {
             if name == "divide" {
@@ -5885,6 +5936,7 @@ mod call_return_kind_tests {
             span,
             field_name_table: Default::default(),
             local_struct_type_names: Default::default(),
+            local_typed_array_element_types: Default::default(),
         };
         let result = infer_top_level_concrete_types_from_mir(&mir);
         assert!(
@@ -5969,6 +6021,7 @@ mod call_return_kind_tests {
             span,
             field_name_table: Default::default(),
             local_struct_type_names,
+            local_typed_array_element_types: std::collections::HashMap::new(),
         };
         let method_returns =
             |type_name: &str, method_name: &str| -> Option<ConcreteType> {
@@ -6066,6 +6119,7 @@ mod call_return_kind_tests {
             span,
             field_name_table: Default::default(),
             local_struct_type_names,
+            local_typed_array_element_types: std::collections::HashMap::new(),
         };
         let method_returns =
             |type_name: &str, method_name: &str| -> Option<ConcreteType> {
@@ -6143,6 +6197,7 @@ mod call_return_kind_tests {
             span,
             field_name_table: Default::default(),
             local_struct_type_names,
+            local_typed_array_element_types: std::collections::HashMap::new(),
         };
         // No method_returns resolver — destination stays Void.
         let result =
@@ -6199,6 +6254,7 @@ mod call_return_kind_tests {
             span,
             field_name_table: Default::default(),
             local_struct_type_names: std::collections::HashMap::new(),
+            local_typed_array_element_types: std::collections::HashMap::new(),
         };
         let method_returns = |_type_name: &str, _method_name: &str| -> Option<ConcreteType> {
             // Resolver would return String, but it's unreachable

@@ -1541,6 +1541,7 @@ mod tests {
             span: shape_ast::Span::default(),
             field_name_table: Default::default(),
             local_struct_type_names: Default::default(),
+            local_typed_array_element_types: Default::default(),
         }
     }
 
@@ -1989,6 +1990,7 @@ mod tests {
             span: shape_ast::Span::default(),
             field_name_table: Default::default(),
             local_struct_type_names: Default::default(),
+            local_typed_array_element_types: Default::default(),
         };
         let concrete_types = vec![
             ConcreteType::Array(Box::new(ConcreteType::I64)),
@@ -2126,6 +2128,7 @@ mod tests {
             span: shape_ast::Span::default(),
             field_name_table: Default::default(),
             local_struct_type_names: Default::default(),
+            local_typed_array_element_types: Default::default(),
         };
         let concrete_types = vec![
             ConcreteType::Struct(shape_value::v2::concrete_type::StructLayoutId(0)),
@@ -2262,6 +2265,7 @@ mod tests {
             span: shape_ast::Span::default(),
             field_name_table: Default::default(),
             local_struct_type_names: Default::default(),
+            local_typed_array_element_types: Default::default(),
         };
         // Simulate post-T1' upstream state: `concrete_types[1]` is
         // stamped String by the VM-side conduit; the caller has

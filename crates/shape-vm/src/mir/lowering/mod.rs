@@ -127,6 +127,13 @@ pub struct MirBuilder {
     /// return-kind classifier to map receiver slot → struct type name →
     /// trait method declared return ConcreteType.
     local_struct_type_names: HashMap<SlotId, String>,
+    /// Per-slot empty-typed-array element ConcreteType — ADR-006 §2.7.5
+    /// stamp-at-compile-time, V3-S6e-jit-specialized-vec-map-aggregate-
+    /// classify (Phase 3 cluster-0+1 Wave 3, 2026-05-16). Populated at
+    /// `lower_var_decl` for `let mut name: Array<C> = []` bindings where
+    /// `C` is a `concrete_type_from_annotation`-resolvable element type.
+    /// Threaded into `MirFunction.local_typed_array_element_types`.
+    local_typed_array_element_types: HashMap<SlotId, shape_value::v2::ConcreteType>,
 }
 
 #[derive(Debug)]
@@ -181,6 +188,7 @@ impl MirBuilder {
             fallback_spans: Vec::new(),
             mut_self_container_locals: HashMap::new(),
             local_struct_type_names: HashMap::new(),
+            local_typed_array_element_types: HashMap::new(),
         }
     }
 
@@ -197,6 +205,26 @@ impl MirBuilder {
     /// `find_default_trait_impl_for_type_method` chain.
     pub(super) fn record_local_struct_type_name(&mut self, slot: SlotId, type_name: String) {
         self.local_struct_type_names.insert(slot, type_name);
+    }
+
+    /// Record the empty-typed-array element ConcreteType for a slot
+    /// produced by `let mut name: Array<C> = []` lowering. ADR-006
+    /// §2.7.5 stamp-at-compile-time — V3-S6e-jit-specialized-vec-map-
+    /// aggregate-classify (Phase 3 cluster-0+1 Wave 3, 2026-05-16).
+    ///
+    /// Read at conduit-time
+    /// (`compiler/helpers.rs::infer_top_level_concrete_types_from_mir_with_
+    /// resolvers`) to stamp `concrete_types[slot] = Array(elem)` so the
+    /// JIT-MIR consumer's v2-fast-path (`statements.rs::v2_typed_array_
+    /// elem_kind`) activates for the empty-Aggregate site that would
+    /// otherwise short-circuit through `emit_container_store_if_needed`
+    /// (helpers.rs:128-130) without producing an `ArrayStore` statement.
+    pub(super) fn record_local_typed_array_element_type(
+        &mut self,
+        slot: SlotId,
+        elem: shape_value::v2::ConcreteType,
+    ) {
+        self.local_typed_array_element_types.insert(slot, elem);
     }
 
     /// Record a recognized COW-container kind for a binding slot. Called
@@ -547,6 +575,7 @@ impl MirBuilder {
                 span: self.span,
                 field_name_table: field_names.clone(),
                 local_struct_type_names: self.local_struct_type_names,
+                local_typed_array_element_types: self.local_typed_array_element_types,
             },
             had_fallbacks,
             fallback_spans,

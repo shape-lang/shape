@@ -335,6 +335,7 @@ mod tests {
             span: dummy_span(),
             field_name_table: StdHashMap::new(),
             local_struct_type_names: StdHashMap::new(),
+            local_typed_array_element_types: StdHashMap::new(),
         }
     }
 
