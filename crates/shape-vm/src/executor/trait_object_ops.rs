@@ -177,13 +177,33 @@ impl VirtualMachine {
                 ))
             })?;
 
-        // Allocate the fat-pointer carrier. The `typed_object_ptr` owns
-        // the original share — moving it into `TraitObjectStorage::new`
-        // transfers ownership without a refcount bump. The vtable was
-        // cloned above (`get(&key).cloned()` returned a fresh
-        // `Arc<VTable>` share).
-        let trait_object = Arc::new(TraitObjectStorage::new(typed_object_ptr, vtable));
-        let to_bits = Arc::into_raw(trait_object) as u64;
+        // Allocate the fat-pointer carrier per ADR-006 §Q25.C.5 amendment
+        // Wave 2 Agent E (2026-05-14): the 4-table dispatch consumers
+        // (`stack.rs::{clone_with_kind,drop_with_kind}`,
+        // `kinded_slot.rs::{Clone,Drop}`) are post-cascade — they call
+        // `v2_retain` on the HeapHeader at offset 0 and
+        // `TraitObjectStorage::release_elem`. The producer MUST match the
+        // consumer carrier shape (lockstep requirement: "atomic
+        // producer/consumer flip — leaving Arc-style consumer arms with
+        // raw-pointer producers would call Arc::decrement_strong_count on
+        // non-Arc pointers = heap corruption / SIGSEGV", §Q25.C.5
+        // amendment).
+        //
+        // `TraitObjectStorage::_new` allocates via
+        // `Layout::new::<TraitObjectStorage>()` (no ArcInner prefix) and
+        // initializes the embedded HeapHeader at refcount=1. The slot
+        // bits stored are the raw `*const TraitObjectStorage` directly
+        // (NOT `Arc::into_raw`). Refcount discipline goes through
+        // `v2_retain` / `v2_release` via the `HeapElement` trait.
+        //
+        // Both halves' shares transfer into the carrier:
+        //  - `typed_object_ptr` (popped above; owned share on the inner
+        //    `TypedObjectStorage::header`) — retired by `_drop` via
+        //    `TypedObjectStorage::release_elem(value)`.
+        //  - `vtable: Arc<VTable>` (cloned from `trait_vtables.get`) —
+        //    retired by `_drop` via `drop_in_place` on the Arc field.
+        let ptr = TraitObjectStorage::_new(typed_object_ptr, vtable);
+        let to_bits = ptr as u64;
         self.push_kinded(to_bits, NativeKind::Ptr(HeapKind::TraitObject))?;
         Ok(())
     }
@@ -236,29 +256,22 @@ impl VirtualMachine {
         let receiver_idx = self.sp - arg_count - 1;
         let (receiver_bits, receiver_kind) = self.stack_read_kinded_raw(receiver_idx);
 
-        // Recover Arc<TraitObjectStorage> via transient borrow. The
-        // slot still owns one strong-count share; we read the inner
-        // pointers (value: Arc<TypedObjectStorage>, vtable: Arc<VTable>)
-        // and clone them so the dispatch logic operates on owned shares
-        // independent of the slot's lifetime.
-        let trait_object: Arc<TraitObjectStorage> = match receiver_kind {
+        // Recover `*const TraitObjectStorage` per ADR-006 §Q25.C.5
+        // amendment (Wave 2 Agent E, 2026-05-14): the slot bits are
+        // raw `*const TraitObjectStorage` produced by `_new`. The slot
+        // owns one strong-count share on the carrier's HeapHeader; we
+        // hold a transient `&TraitObjectStorage` borrow scoped to this
+        // dispatch — no `Arc::from_raw` (the bits are NOT an
+        // `Arc::into_raw` result; treating them as such would be
+        // type-confusion UB).
+        let trait_object_ptr: *const TraitObjectStorage = match receiver_kind {
             NativeKind::Ptr(HeapKind::TraitObject) => {
                 if receiver_bits == 0 {
                     return Err(VMError::RuntimeError(
                         "DynMethodCall: null TraitObject pointer".to_string(),
                     ));
                 }
-                // SAFETY: kind=Ptr(TraitObject); bits are
-                // `Arc::into_raw::<TraitObjectStorage>(arc)` per §2.3
-                // typed-Arc invariant. Transient borrow — pair with
-                // `Arc::into_raw` below so the slot's share is
-                // preserved.
-                let borrowed: Arc<TraitObjectStorage> = unsafe {
-                    Arc::from_raw(receiver_bits as *const TraitObjectStorage)
-                };
-                let cloned = Arc::clone(&borrowed);
-                let _ = Arc::into_raw(borrowed);
-                cloned
+                receiver_bits as *const TraitObjectStorage
             }
             other => {
                 return Err(VMError::RuntimeError(format!(
@@ -268,6 +281,14 @@ impl VirtualMachine {
                 )));
             }
         };
+        // SAFETY: `trait_object_ptr` is non-null per the kind+bits check
+        // above; per the §Q25.C.5 amendment slot-ABI contract, bits
+        // labeled `Ptr(HeapKind::TraitObject)` were produced by
+        // `TraitObjectStorage::_new` and the slot owns one strong-count
+        // share on the carrier's HeapHeader — the allocation stays live
+        // for the duration of this dispatch (the slot is not freed
+        // mid-call).
+        let trait_object: &TraitObjectStorage = unsafe { &*trait_object_ptr };
 
         // Look up the method in the vtable.
         let entry = trait_object
@@ -361,7 +382,7 @@ impl VirtualMachine {
         match entry {
             VTableEntry::Direct { .. } => self.invoke_dyn_unified(
                 runtime_function_id,
-                &trait_object,
+                trait_object,
                 arg_count,
                 receiver_idx,
                 ctx,
@@ -370,7 +391,7 @@ impl VirtualMachine {
             ),
             VTableEntry::BoxedReturn { ref wrap_targets, .. } => self.invoke_dyn_unified(
                 runtime_function_id,
-                &trait_object,
+                trait_object,
                 arg_count,
                 receiver_idx,
                 ctx,
@@ -382,7 +403,7 @@ impl VirtualMachine {
                 ..
             } => self.invoke_dyn_unified(
                 runtime_function_id,
-                &trait_object,
+                trait_object,
                 arg_count,
                 receiver_idx,
                 ctx,
@@ -399,7 +420,7 @@ impl VirtualMachine {
                 // note above for the deferred amendment shape.
                 self.invoke_dyn_unified(
                     runtime_function_id,
-                    &trait_object,
+                    trait_object,
                     arg_count,
                     receiver_idx,
                     ctx,
@@ -413,7 +434,7 @@ impl VirtualMachine {
                 ..
             } => self.invoke_dyn_unified(
                 runtime_function_id,
-                &trait_object,
+                trait_object,
                 arg_count,
                 receiver_idx,
                 ctx,
@@ -425,7 +446,7 @@ impl VirtualMachine {
                 type_id: _,
             } => self.invoke_dyn_closure(
                 function_id,
-                &trait_object,
+                trait_object,
                 arg_count,
                 receiver_idx,
                 ctx,
@@ -460,7 +481,7 @@ impl VirtualMachine {
     fn invoke_dyn_unified(
         &mut self,
         function_id: u16,
-        trait_object: &Arc<TraitObjectStorage>,
+        trait_object: &TraitObjectStorage,
         arg_count: usize,
         receiver_idx: usize,
         ctx: Option<&mut shape_runtime::context::ExecutionContext>,
@@ -616,7 +637,7 @@ impl VirtualMachine {
     fn invoke_dyn_closure(
         &mut self,
         _function_id: u32,
-        _trait_object: &Arc<TraitObjectStorage>,
+        _trait_object: &TraitObjectStorage,
         arg_count: usize,
         receiver_idx: usize,
         ctx: Option<&mut shape_runtime::context::ExecutionContext>,
@@ -878,15 +899,14 @@ fn rebox_self_value(
             }
             // Wave 2 Round 4 D4 ckpt-3 (2026-05-14): post-cascade slot
             // bits are v2-raw `*const TypedObjectStorage` (from
-            // `TypedObjectStorage::_new`). Pass directly into
-            // `TraitObjectStorage::new`'s post-flip raw-ptr parameter
-            // — no Arc round-trip.
+            // `TypedObjectStorage::_new`). The producer-side carrier
+            // shape (cluster-1.5 Q25.C close, 2026-05-16) is `_new`
+            // matching the consumer 4-table arms per the §Q25.C.5
+            // amendment lockstep: allocate via `TraitObjectStorage::_new`
+            // and store the raw ptr in the slot.
             let inner_ptr = bits as *const TypedObjectStorage;
-            let new_to = Arc::new(TraitObjectStorage::new(
-                inner_ptr,
-                Arc::clone(receiver_vtable),
-            ));
-            let to_bits = Arc::into_raw(new_to) as u64;
+            let ptr = TraitObjectStorage::_new(inner_ptr, Arc::clone(receiver_vtable));
+            let to_bits = ptr as u64;
             Ok((to_bits, NativeKind::Ptr(HeapKind::TraitObject)))
         }
         NativeKind::Ptr(HeapKind::TraitObject) => {
