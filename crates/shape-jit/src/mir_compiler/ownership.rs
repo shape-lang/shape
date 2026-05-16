@@ -414,11 +414,32 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // the constant alive across the JIT-compiled function's
                 // full lifetime — see the helper's docstring for the
                 // permanent-share discipline.
+                //
+                // cluster-2-jit-string-const-loop-retain-gap (Phase 3
+                // cluster-2 Round 2, 2026-05-16). The per-consumption
+                // `jit_arc_string_retain` call below produces a fresh
+                // active share each time the constant is consumed by a
+                // downstream `StatementKind::Assign(Local(slot), Use(
+                // Constant(Str(...))))` (or any operand-consuming context).
+                // Without it, the second consumption of the same
+                // `MirConstant::StringId`/`Str`/`Method` in a loop body
+                // would have its slot's `release_old_value_if_heap` (or
+                // `emit_drop`) call `jit_arc_string_release` on the
+                // permanent share, freeing the constant — the cw-E
+                // empirical finding at `/tmp/cw-E-prog4-string-in-loop.
+                // shape` (STRING_RETAIN_CALLS=0 / STRING_RELEASE_CALLS=99
+                // / STRING_RELEASE_FREES=1 across 100 iterations).
+                // Producer-side retain mirrors the same retain-on-produce
+                // discipline the W11-jit-new-array refcount audit
+                // established for `jit_new_array` / `jit_v2_collection_*`
+                // ctor sites and the §2.7.5 carrier-shape boundary rule.
                 let idx = *id as usize;
                 if idx < self.strings.len() {
                     let s = self.strings[idx].clone();
                     let boxed = crate::ffi::string::arc_string_constant(s);
-                    Ok(self.builder.ins().iconst(types::I64, boxed as i64))
+                    let bits = self.builder.ins().iconst(types::I64, boxed as i64);
+                    self.builder.ins().call(self.ffi.arc_string_retain, &[bits]);
+                    Ok(bits)
                 } else {
                     Ok(self
                         .builder
@@ -430,9 +451,14 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // String literal carried in MIR. Same §2.7.5 producer
                 // discipline as `MirConstant::StringId` above —
                 // `Arc::into_raw(Arc<String>) as u64` with refcount boosted
-                // for constant-lifetime stability.
+                // for constant-lifetime stability + per-consumption retain
+                // for the cluster-2-jit-string-const-loop-retain-gap fix
+                // (see `StringId` arm docstring for the producer-side
+                // retain rationale).
                 let boxed = crate::ffi::string::arc_string_constant(s.clone());
-                Ok(self.builder.ins().iconst(types::I64, boxed as i64))
+                let bits = self.builder.ins().iconst(types::I64, boxed as i64);
+                self.builder.ins().call(self.ffi.arc_string_retain, &[bits]);
+                Ok(bits)
             }
             MirConstant::Function(name) => {
                 // Resolve function name to index. Per ADR-006 §2.7.5 the
@@ -462,8 +488,17 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // `MirConstant::Method` flows as a value operand — its
                 // stamp on the parallel-kind track says `String`, so the
                 // §2.7.5 Arc-shape carrier is the correct producer.
+                //
+                // cluster-2-jit-string-const-loop-retain-gap (Phase 3
+                // cluster-2 Round 2, 2026-05-16): per-consumption retain
+                // mirrors the `StringId` / `Str` arms above — the same
+                // §2.7.5 carrier-shape retain-on-produce discipline
+                // applies whenever the consumer's slot may run a
+                // matching `release_old_value_if_heap` / `emit_drop`.
                 let boxed = crate::ffi::string::arc_string_constant(name.clone());
-                Ok(self.builder.ins().iconst(types::I64, boxed as i64))
+                let bits = self.builder.ins().iconst(types::I64, boxed as i64);
+                self.builder.ins().call(self.ffi.arc_string_retain, &[bits]);
+                Ok(bits)
             }
             MirConstant::ClosurePlaceholder => {
                 // Canonical path: the bytecode compiler's back-patcher rewrites
