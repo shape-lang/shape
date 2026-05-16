@@ -148,23 +148,43 @@ pub(super) fn lower_var_decl(builder: &mut MirBuilder, decl: &ast::VariableDecl,
         // `emit_v2_array_aggregate` succeeds → specialized body JIT-
         // compiles → V3-S6c routing's direct FuncRef call returns
         // correct raw `*const TypedArray<i64>` bits per V3-S5.
+        //
+        // cluster-2-closure-wave-B-class-bc-coverage (Phase 3 cluster-2
+        // Round 2, 2026-05-16): widen the empty-literal gate to ALL
+        // typed-array-annotated bindings (`let doubled: Array<int> =
+        // xs.map(...)` etc.). The empty-literal-only gate covered the
+        // V3-S6a-synthesized `let mut result = []` inside specialized
+        // `Vec.map<U>` bodies; widening to non-empty initializers covers
+        // any user-written `let x: Array<C> = <expr>` whose RHS is a
+        // method call, function call, or other non-literal producing
+        // a typed-array. The annotation IS the proof per §2.7.5 stamp-
+        // at-compile-time discipline — no inference, no decode, no
+        // fabricated default. Initializer-shape-independent: stamps from
+        // the annotation directly, regardless of what the RHS expression
+        // is. Honors §2.7.7 #9 — if no annotation exists the slot stays
+        // unstamped (surface-and-stop at the JIT-MIR consumer for Class B
+        // and Class C inferred cases; tracked as gap below).
+        let annotated_array_elem: Option<shape_value::v2::ConcreteType> =
+            decl.type_annotation.as_ref().and_then(|annotation| {
+                crate::compiler::v2_map_emission::concrete_type_from_annotation(annotation)
+                    .and_then(|ct| match ct {
+                        shape_value::v2::ConcreteType::Array(elem) => Some(*elem),
+                        _ => None,
+                    })
+            });
         let empty_array_elem: Option<shape_value::v2::ConcreteType> =
-            if let (Some(annotation), Some(Expr::Array(items, _))) =
+            if let (Some(_annotation), Some(Expr::Array(items, _))) =
                 (decl.type_annotation.as_ref(), decl.value.as_ref())
             {
                 if items.is_empty() {
-                    crate::compiler::v2_map_emission::concrete_type_from_annotation(annotation)
-                        .and_then(|ct| match ct {
-                            shape_value::v2::ConcreteType::Array(elem) => Some(*elem),
-                            _ => None,
-                        })
+                    annotated_array_elem.clone()
                 } else {
                     None
                 }
             } else {
                 None
             };
-        if let Some(elem) = empty_array_elem.clone() {
+        if let Some(elem) = annotated_array_elem.clone() {
             builder.record_local_typed_array_element_type(slot, elem);
         }
 
