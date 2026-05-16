@@ -8189,3 +8189,69 @@ Per supervisor 2026-05-16: 4-6 sessions to v1 remaining (Round 3 + maybe Round 4
 ---
 
 *Next session: Round 3 parallel dispatch (closure-wave-IB + IC + D-fam-1+2; AGENTS.md V3-S6 annotation bundles with close) → respective merges + status doc subsection → Round 4 dispatch (§D 10 failure classes per-class triage; §E remaining 8 HeapKind families IF cluster-2-close-criterion gates require) → cluster-2 close attempt → Phase 4 (trait Add/AddAssign) → v1 close attempt → cluster-1.5 Q25.C TraitObject rebuild.*
+
+---
+
+## Wave 3 Round 10 cluster-2 Round 3 close — 3 closure-waves merged (cw-D-fam12 + cw-IC + cw-IB); inventory §B coverage matrix COMPLETE (8/8 user-fn classes) (2026-05-16)
+
+Round 3 parallel dispatch complete. Sequenced merge: cw-D-fam12 (5 jit_print arms; ADR §2.7.5.B amendment) → cw-IC (Class C method-chain intermediate slot coverage) → cw-IB (Class B value-call return-kind + closure body MIR seed; take-both AGENTS.md). Canonical advanced 2a12929f → 3e6cc39d.
+
+### Sub-cluster close summary
+
+| Wave | Close commit | Diff | ADR | Disposition |
+|---|---|---|---|---|
+| cw-D-fam12-jit-print | `50d8e7db` | +600/-3 (7 files; 5 FFI bodies + 5 routing arms + ffi_symbols + ffi_refs + ffi_builder + ADR §2.7.5.B +91 + AGENTS.md) | ADR-006 §2.7.5.B per-HeapKind-family kinded jit_print dispatch arms | Family 1 (Char) + Family 2 (Mutex/Atomic/Lazy/Channel) wired; 4/5 fixtures match VM == JIT; Char production-fixture VM=A/JIT=65 surfaces upstream MIR-lowering kind-source gap at `crates/shape-vm/src/mir/lowering/expr.rs:1505` (`Literal::Char(c) => MirConstant::Int(*c as i64)`) — Round 4 fold per supervisor 2026-05-16 disposition |
+| cw-IC-class-c | `b65891a3` | +193/-0 (3 files; type_resolution.rs +59 new specialized_call_return_concrete_type helper + statements.rs +131 Class C wire at compile_statement(VariableDecl) for module-binding + local-slot paths + AGENTS.md) | none | Class C COVERED — fixture VM=35/JIT=35; pre-existing dead-code `local_array_element_types` side-table at `crates/shape-vm/src/compiler/mod.rs:943` populated at let-binding time when RHS is typed-array-producing call; two-layer fix (side-table + type_tracker mirror) per Layer 2 type_tracker empirical finding |
+| cw-IB-class-b | `97a91029` | +875/-3 (16 files; ~350 substantive code + ~525 doc-comments; expressions/{closures,function_calls}.rs + helpers.rs + bytecode/{core_types,content_addressed}.rs + linker.rs/_tests.rs/remote.rs + JIT-side worker.rs + program.rs + ClosureBodyPeek + value_call_return_concrete_types side-table) | none | Class B COVERED — fixture VM=15/JIT=15; two-track fix (side-table for value-call destination kind classification + closure-body MIR seed for typed-array param info propagation); both tracks required per empirical disposition; layer-separation discipline preserved (cw-IB MIR-side `mir.local_typed_array_element_types` disjoint from cw-IC bytecode-side `local_array_element_types` per ADR-006 §2.7.5.1) |
+
+### Inventory §B user-fn-class coverage matrix COMPLETE (8/8 classes)
+
+Class A (top-level / generic-monomorphized / trait-impl / explicit-annotation closure body / extend-block / comptime-emitted) — COVERED (Round 1 closure-wave-1 lower_function_detailed + Round 2 cw-B annotated-binding widening) + Class B (closure body INFERRED typed-array param) — COVERED (Round 3 cw-IB value-call return-kind + MIR seed) + Class C (method-chain intermediate slot) — COVERED (Round 3 cw-IC let-binding side-table population). All 8 user-fn classes covered at canonical HEAD 3e6cc39d.
+
+### Take-both ceremony resolutions
+
+- cw-IB merge: AGENTS.md row appendage conflict; take-both keeps both Round 3 rows (cw-IC + cw-IB).
+
+### Post-Round-3 gates at canonical 3e6cc39d (ALL PASS)
+
+- `cargo check --workspace --lib --tests` EXIT=0 ✅ (default + `--features shape-jit/jit-trace`)
+- `bash scripts/verify-merge.sh` 12/12 PASS EXIT=0 ✅
+- `bash scripts/check-no-dynamic.sh` EXIT=0 ✅
+- Smoke matrix 4/4 VM == JIT at canonical fixture: s1 VM=4950/JIT=4950 ✅; s2 VM=30/JIT=30 ✅; s3 VM=x/JIT=x ✅; s4 VM=2/JIT=2 ✅
+
+### Imprecision renumbering (Round 3 cumulative 56 → 70)
+
+14 new imprecisions across 3 sub-agents (renumber in merge order):
+- **57** (cw-D-fam12 #57): Char production-fixture divergence upstream MIR-lowering kind-source gap at `expr.rs:1505` (FFI body correct per unit test; bounded by family-1 territory)
+- **58** (cw-IC #49; team-lead-prompt — 8th instance): binder fixture-expected-output VM=20/JIT=20 wrong arithmetic (confused Smoke 2 4-elem with Class C 5-elem); actual VM=35/JIT=35
+- **59** (cw-IC #50): cw-B close report identified dead-code `local_array_element_types` but did NOT surface Layer 2 type_tracker requirement; sub-agent empirically discovered via iterative debug-then-fix
+- **60** (cw-IC #51): placement-order constraint — initial fix BEFORE `propagate_initializer_type_to_slot` silently wiped by propagation's unknown-fallback arm
+- **61** (cw-IC #52): naming-collision class — MIR-side `local_typed_array_element_types` vs bytecode-side `local_array_element_types` (different side-tables despite similar names)
+- **62-70** (cw-IB #49-57): two-track-fix discovery (value-call return-kind alone insufficient; MIR seed required for closure body) + TAG_NULL FFI instrumentation + `MirFunctionData` Clone-trait absence + linker propagation interactions + composite-key resolver shape preservation + cross-layer kind-classifier source-of-truth maintenance — all caught in-scope per Reading 4 architectural-prediction-subclass-recovery pattern
+
+Cumulative breakdown: 11 supervisor / 14 audit / 7 team-lead-prompt (+58) / 9 agent-execution-report / 29 candidate (sub-agent execution findings 57+59-61+62-70) — total 70. All caught pre-merge; 0 bad-code merges into canonical preserved.
+
+### Reading 4 pattern operational across 8+ cluster-2 sub-clusters
+
+Architectural-prediction-subclass-recovery pattern continues to fire empirically. Round 3 instances: cw-IC instances 59-61 (Layer 2 type_tracker + placement-order + naming-collision all caught + fixed in-scope) + cw-IB instances 62-70 (two-track-fix discovery + linker propagation + MirFunctionData Clone-trait + 6 more architectural-prediction-subclass instances all caught + fixed in-scope). Pattern remains load-bearing for v1 trajectory.
+
+### AGENTS.md V3-S6 chain rows annotation — DEFERRED (scope exceeds budget)
+
+V3-S6 chain rows at AGENTS.md lines 223-261 contain dense prose with embedded bare-filename refs (substitution.rs / helpers.rs / stmt.rs) inside paragraph-length descriptions. Annotation scope across 5 V3-S6 rows exceeds the ~10-edit budget per supervisor 2026-05-16 rule. **Carry-forward as known follow-up**; supervisor disposes at v1 close ceremony OR dedicated doc-discipline sub-cluster (cluster-2-doc-discipline-agents-md candidate at Round 4 or post-cluster-2-close).
+
+### Round 4 ratified dispatch shape (supervisor 2026-05-16)
+
+3 candidates parallel where territory permits:
+- **§D 10 failure classes** (shape-test-residuals per-class disposition); per-class (i) in-cluster-2 fix / (ii) structured-defer with §-cite / (iii) cluster-1.5 fold per Surface A (c) precedent — per-class call during drafting
+- **§E 8 remaining HeapKind families** (~28 UNCOVERED jit_print arms; per inventory §E.5 Collection / Numeric-temporal / DataTable-Content / Native-foreign / Pure-discriminator / Async / Matrix / TraitObject+Closure+TypedObject / ModuleFn)
+- **Char-literal-MIR-lowering follow-up** (cw-D-fam12 Round 3 surface; instance 57; gap at `crates/shape-vm/src/mir/lowering/expr.rs:1505` Literal::Char → MirConstant::Int)
+
+Team-lead drafts Round 4 per cadence binding. Char-literal-MIR-lowering may fold with §D class 9 (objects/objects_arrays) if territory natural OR own sub-cluster.
+
+### Trajectory awareness (carry forward; not for re-surfacing)
+
+Per supervisor 2026-05-16: 3.5-5 sessions to v1 remaining (Round 4 + cluster-2 close attempt + cluster-1.5 Q25.C + Phase 4 + v1 close).
+
+---
+
+*Next session: Round 4 parallel dispatch (3 candidates with territory non-overlap check) → respective merges + status doc subsection → cluster-2 close attempt → Phase 4 (trait Add/AddAssign for user types) → v1 close attempt → cluster-1.5 Q25.C TraitObject rebuild (post-v1 or absorbed at user reauthorization).*
