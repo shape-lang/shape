@@ -1622,6 +1622,26 @@ impl BytecodeCompiler {
             }
         };
 
+        // cluster-2-cw-IB-class-b (2026-05-16, supervisor R3 binding-
+        // ratified): value-call return-ConcreteType resolver. Consumes
+        // the side-table populated at `compile_expr_function_call`'s
+        // value-call branch and returns the inferred ConcreteType
+        // result for closure-bound calls. Top-level conduit closes
+        // over `None` for the caller half of the composite key — same
+        // convention as `monomorph_method_returns_top`.
+        let value_call_sites =
+            self.program.value_call_return_concrete_types.clone();
+        let value_call_returns_top = |span: shape_ast::ast::span::Span|
+            -> Option<shape_value::v2::ConcreteType>
+        {
+            let ct = value_call_sites.get(&(span, None))?.clone();
+            if matches!(ct, shape_value::v2::ConcreteType::Void) {
+                None
+            } else {
+                Some(ct)
+            }
+        };
+
         // Re-run top-level conduit with the callee-return resolver so the
         // `let r = divide(10, 2)` slot picks up `Result(I64, String)` from
         // the Call terminator. (The first run above stamped `Void` for
@@ -1639,6 +1659,7 @@ impl BytecodeCompiler {
                     Some(&callee_returns),
                     Some(&method_returns),
                     Some(&monomorph_method_returns_top),
+                    Some(&value_call_returns_top),
                 );
             self.program.top_level_local_concrete_types = concrete_types;
         }
@@ -1688,12 +1709,28 @@ impl BytecodeCompiler {
                         Some(ct.clone())
                     }
                 };
+                // cluster-2-cw-IB-class-b: per-fn variant of the value-call
+                // return-ConcreteType resolver. Same composite-key
+                // discipline as monomorph_method_returns_per_fn above —
+                // closes over `Some(fn_idx)` so calls inside user-function
+                // bodies pick up their own caller-context entries.
+                let value_call_returns_per_fn = |span: shape_ast::ast::span::Span|
+                    -> Option<shape_value::v2::ConcreteType>
+                {
+                    let ct = value_call_sites.get(&(span, current_fn))?.clone();
+                    if matches!(ct, shape_value::v2::ConcreteType::Void) {
+                        None
+                    } else {
+                        Some(ct)
+                    }
+                };
                 per_fn.push(
                     crate::compiler::helpers::infer_top_level_concrete_types_from_mir_with_resolvers(
                         &mir_data.mir,
                         Some(&callee_returns),
                         Some(&method_returns),
                         Some(&monomorph_method_returns_per_fn),
+                        Some(&value_call_returns_per_fn),
                     ),
                 );
             } else {

@@ -616,6 +616,330 @@ impl BytecodeCompiler {
             } else {
                 self.clear_last_expr_reference_result();
             }
+
+            // cluster-2-cw-IB-class-b (2026-05-16, supervisor R3 binding-
+            // ratified): value-call return-`ConcreteType` classification
+            // at the bytecode-emission layer. ADR-006 §2.7.5 stamp-at-
+            // compile-time discipline.
+            //
+            // When the callee resolves to a local closure binding with a
+            // retained body peek (populated at let-binding time by
+            // `update_callable_binding_from_expr`), re-run the closure-
+            // body return-type inference WITH the caller-context arg
+            // types injected as typed-array param hints. If the
+            // inference yields a recognised scalar/Array return name,
+            // convert it to a `ConcreteType` and stamp the side-table
+            // `value_call_return_concrete_types[(call_span,
+            // current_function)]`. The MIR conduit's value-call
+            // destination pass then projects this onto
+            // `top_level_local_concrete_types[dst_slot]` /
+            // `function_local_concrete_types[fn_idx][dst_slot]`, the
+            // JIT-MIR `slot_kinds` projection picks up the matching
+            // `NativeKind`, and downstream consumers (`print`,
+            // BinaryOp, etc.) reach their kinded dispatch paths.
+            //
+            // Class B fixture (inventory §B.2): `let xs: Array<int> =
+            // [..]; let f = |inner| inner.sum(); print(f(xs))`. Pre-fix:
+            // VM=15 / JIT=NotImplemented(SURFACE, print operand NK=None).
+            // Post-fix: VM=15 / JIT=15 (VM == JIT load-bearing).
+            //
+            // No tag-bit decode, no Bool-default fallback, no fabricated
+            // default — when:
+            //   • The callee is not a local closure binding, OR
+            //   • No retained body peek exists (closure was passed in
+            //     from elsewhere, e.g. function parameter), OR
+            //   • The closure body's terminal expression cannot be
+            //     classified against the caller-context-seeded
+            //     param_types (the inference returns None), OR
+            //   • The classified return name cannot be mapped back to a
+            //     ConcreteType,
+            // the side-table receives no entry and the destination slot
+            // stays `Void` per §2.7.5.1 / §2.7.7 #9 — the JIT then
+            // surfaces honestly at the print dispatch site rather than
+            // fabricating a kind.
+            // Resolve the closure body peek from either the local slot
+            // map or the module-binding slot map. Locals take priority
+            // (mirrors the `tracked_callable_rt` chain above).
+            let closure_peek: Option<crate::compiler::ClosureBodyPeek> =
+                if let Some(local_idx) = self.resolve_local(name) {
+                    self.local_callable_closure_bodies.get(&local_idx).cloned()
+                } else if let Some(scoped) =
+                    self.resolve_scoped_module_binding_name(name)
+                {
+                    self.module_bindings.get(&scoped).and_then(|idx| {
+                        self.module_binding_callable_closure_bodies
+                            .get(idx)
+                            .cloned()
+                    })
+                } else {
+                    self.module_bindings.get(name).and_then(|idx| {
+                        self.module_binding_callable_closure_bodies
+                            .get(idx)
+                            .cloned()
+                    })
+                };
+            if let Some(peek) = closure_peek {
+                {
+                    // Resolve the caller-context arg type names per
+                    // argument expression. `concrete_type_for_expr` is
+                    // the same resolver the rest of the bytecode-
+                    // emission layer uses (covers tracker-recorded
+                    // primitives + typed-array bindings via
+                    // `local_array_element_types` once Class C's
+                    // sibling populator lands; meanwhile annotated
+                    // typed-array bindings flow via the type-tracker's
+                    // `Vec<scalar>` name fallback at
+                    // `monomorphization/type_resolution.rs:1493`).
+                    let caller_arg_type_names: Vec<Option<String>> = args
+                        .iter()
+                        .map(|arg_expr| {
+                            crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(self, arg_expr)
+                                .and_then(|ct| {
+                                    crate::compiler::expressions::closures::concrete_type_to_type_annotation(&ct)
+                                })
+                                .and_then(|ann| {
+                                    crate::compiler::BytecodeCompiler::tracked_type_name_from_annotation(&ann)
+                                })
+                        })
+                        .collect();
+
+                    // Run the closure-body return-type inference with
+                    // the caller-context arg types. The inference is
+                    // cheap (AST walk over the closure body, no
+                    // bytecode emission); running unconditionally covers
+                    // both:
+                    //   (a) The Class B case: the closure param is
+                    //       inferred-typed at the call site (no
+                    //       annotation, no body-literal pairing), so
+                    //       the let-binding-time inference returned
+                    //       None and `tracked_callable_rt` is None.
+                    //   (b) The let-binding-time-already-resolved case:
+                    //       e.g. `let f = || 15` — the body's terminal
+                    //       Literal(Int) is enough at let-binding time,
+                    //       `tracked_callable_rt = Some("int")`. Even
+                    //       here, the side-table must be populated so
+                    //       the JIT-MIR conduit's value-call destination
+                    //       pass can stamp `concrete_types[dst]` (the
+                    //       let-binding-time tracker recorded only the
+                    //       bytecode-side `last_expr_*`, which doesn't
+                    //       reach the JIT). The two paths converge on
+                    //       the same `ConcreteType::I64` answer here.
+                    {
+                        // Prefer the let-binding-time result when
+                        // present (it consulted the closure body
+                        // without needing caller-context); fall through
+                        // to the caller-context inference when the
+                        // let-binding-time inference returned None.
+                        let inferred = tracked_callable_rt
+                            .as_ref()
+                            .cloned()
+                            .or_else(|| {
+                                crate::compiler::expressions::closures::infer_closure_body_return_type_name_with_caller_context(
+                                    self,
+                                    &peek.params,
+                                    &peek.body,
+                                    peek.return_type.as_ref(),
+                                    &[],
+                                    &caller_arg_type_names,
+                                )
+                            });
+                        if let Some(rt_name) = inferred {
+                            // Map the return name to a ConcreteType.
+                            // Mirrors the `tracked_type_name_from_
+                            // annotation` → ConcreteType chain used by
+                            // `concrete_type_for_expr`. Scalars are
+                            // handled directly; `Vec<T>` returns are
+                            // not supported here (the typed-array-
+                            // returning closure case is Class C's
+                            // sibling territory).
+                            let ct: Option<shape_value::v2::ConcreteType> = match rt_name.as_str() {
+                                "int" | "i64" => Some(shape_value::v2::ConcreteType::I64),
+                                "i32" => Some(shape_value::v2::ConcreteType::I32),
+                                "i16" => Some(shape_value::v2::ConcreteType::I16),
+                                "i8" => Some(shape_value::v2::ConcreteType::I8),
+                                "u64" => Some(shape_value::v2::ConcreteType::U64),
+                                "u32" => Some(shape_value::v2::ConcreteType::U32),
+                                "u16" => Some(shape_value::v2::ConcreteType::U16),
+                                "u8" => Some(shape_value::v2::ConcreteType::U8),
+                                "number" | "f64" => Some(shape_value::v2::ConcreteType::F64),
+                                "bool" => Some(shape_value::v2::ConcreteType::Bool),
+                                "string" => Some(shape_value::v2::ConcreteType::String),
+                                "decimal" => Some(shape_value::v2::ConcreteType::Decimal),
+                                "bigint" => Some(shape_value::v2::ConcreteType::BigInt),
+                                "DateTime" => Some(shape_value::v2::ConcreteType::DateTime),
+                                _ => None,
+                            };
+                            if let Some(ct) = ct {
+                                self.program.value_call_return_concrete_types.insert(
+                                    (span, self.current_function),
+                                    ct,
+                                );
+
+                                // cluster-2-cw-IB-class-b (closure-body
+                                // typed-array param seed): retroactively
+                                // populate `mir.local_typed_array_element_types`
+                                // for the closure body's MIR slot
+                                // corresponding to each typed-array
+                                // caller-context arg. The MIR-side
+                                // conduit's empty-typed-array-seed
+                                // pass at `helpers.rs:623` consumes
+                                // this map at
+                                // `propagate_concrete_types_through_mir`
+                                // time (which runs AFTER bytecode
+                                // emission completes) to stamp
+                                // `concrete_types[inner_slot] =
+                                // Array(elem)` for the closure body.
+                                // The JIT-MIR's `slot_kinds`
+                                // projection then picks up
+                                // `Ptr(TypedArray)` for `inner` and
+                                // dispatches `.len()` /
+                                // `.sum()` through the kinded fast
+                                // path, returning raw scalar bits
+                                // (Int64=15 for our fixture) instead
+                                // of TAG_NULL.
+                                //
+                                // Without this, the closure body's
+                                // JIT compilation has no type info
+                                // for `inner` and the method
+                                // dispatch returns TAG_NULL — the
+                                // outer print would then read
+                                // TAG_NULL bits and print garbage
+                                // even with the destination kind
+                                // correctly stamped Int64.
+                                if let Some(closure_fn_idx) = peek.function_index {
+                                    // Wrap in a block to allow early
+                                    // exit via `break` for skip cases
+                                    // (Arc shared / mir missing).
+                                    'seed_block: {
+                                        let Some(func) = self
+                                            .program
+                                            .functions
+                                            .get_mut(closure_fn_idx)
+                                        else {
+                                            break 'seed_block;
+                                        };
+                                        let Some(mir_data_arc) = func.mir_data.as_mut() else {
+                                            break 'seed_block;
+                                        };
+                                        // `Arc::get_mut` returns
+                                        // `Some(&mut T)` only when
+                                        // the strong-count is 1 —
+                                        // the bytecode-emission
+                                        // stage's invariant for
+                                        // closure-body MIR Arcs (no
+                                        // other clone exists yet
+                                        // since content-addressed
+                                        // program build runs later).
+                                        // When this invariant is
+                                        // broken (e.g. an upstream
+                                        // change clones the Arc
+                                        // before bytecode emission
+                                        // completes), the propagation
+                                        // is skipped; the side-table
+                                        // stamping above still
+                                        // applies, so the print
+                                        // dispatch routes to
+                                        // `jit_print_i64` — only
+                                        // the closure body's typed-
+                                        // array param seed is
+                                        // missed.
+                                        let Some(mir_data) = std::sync::Arc::get_mut(mir_data_arc) else {
+                                            break 'seed_block;
+                                        };
+                                        // Match closure-body param
+                                        // slots to caller-context arg
+                                        // types. The MIR's
+                                        // `param_slots` align 1:1
+                                        // with the closure literal's
+                                        // params list (no captures
+                                        // interleaved for value-call
+                                        // shape; the captures-as-
+                                        // leading-args ABI is for the
+                                        // trampoline closure-call
+                                        // path, which doesn't fire
+                                        // here per `vm_captures=false`
+                                        // in the FAST PATH).
+                                        for (param_idx, slot) in mir_data.mir.param_slots.clone().iter().enumerate() {
+                                            let Some(Some(caller_tn)) = caller_arg_type_names.get(param_idx) else {
+                                                continue;
+                                            };
+                                            // Parse "Vec<elem>" into
+                                            // Array(elem). Mirror of
+                                            // `concrete_type_to_type_annotation`'s
+                                            // Array arm inverse;
+                                            // bounded to scalar elem
+                                            // types per the same kind-
+                                            // classifier discipline.
+                                            let Some(inner_name) = caller_tn
+                                                .strip_prefix("Vec<")
+                                                .and_then(|s| s.strip_suffix('>'))
+                                            else {
+                                                continue;
+                                            };
+                                            let elem_ct: Option<shape_value::v2::ConcreteType> = match inner_name {
+                                                "int" | "i64" => Some(shape_value::v2::ConcreteType::I64),
+                                                "i32" => Some(shape_value::v2::ConcreteType::I32),
+                                                "i16" => Some(shape_value::v2::ConcreteType::I16),
+                                                "i8" => Some(shape_value::v2::ConcreteType::I8),
+                                                "u64" => Some(shape_value::v2::ConcreteType::U64),
+                                                "u32" => Some(shape_value::v2::ConcreteType::U32),
+                                                "u16" => Some(shape_value::v2::ConcreteType::U16),
+                                                "u8" => Some(shape_value::v2::ConcreteType::U8),
+                                                "number" | "f64" => Some(shape_value::v2::ConcreteType::F64),
+                                                "bool" => Some(shape_value::v2::ConcreteType::Bool),
+                                                "string" => Some(shape_value::v2::ConcreteType::String),
+                                                _ => None,
+                                            };
+                                            if let Some(elem_ct) = elem_ct {
+                                                mir_data
+                                                    .mir
+                                                    .local_typed_array_element_types
+                                                    .entry(*slot)
+                                                    .or_insert(elem_ct);
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Also bridge to last_expr_* for
+                                // downstream binop dispatch in the same
+                                // expression, parallel to the
+                                // tracked_callable_rt block above.
+                                use crate::type_tracking::NumericType;
+                                match rt_name.as_str() {
+                                    "int" => {
+                                        self.last_expr_numeric_type =
+                                            Some(NumericType::Int);
+                                    }
+                                    "number" => {
+                                        self.last_expr_numeric_type =
+                                            Some(NumericType::Number);
+                                    }
+                                    "decimal" => {
+                                        self.last_expr_numeric_type =
+                                            Some(NumericType::Decimal);
+                                    }
+                                    other if shape_runtime::type_system::BuiltinTypes::is_integer_type_name(other) => {
+                                        self.last_expr_type_info =
+                                            Some(crate::type_tracking::VariableTypeInfo::named(
+                                                other.to_string(),
+                                            ));
+                                    }
+                                    "string" | "bool" | "char" => {
+                                        self.last_expr_type_info = Some(
+                                            crate::type_tracking::VariableTypeInfo::named(
+                                                rt_name.clone(),
+                                            ),
+                                        );
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             return Ok(());
         }
 

@@ -499,6 +499,33 @@ pub enum CompileDiagnosticMode {
     RecoverAll,
 }
 
+/// cluster-2-cw-IB-class-b (2026-05-16, supervisor R3 binding-ratified):
+/// retained closure-literal peek used to re-run body return-type
+/// inference at the value-call site with caller-context arg type hints.
+/// Stored per-local-slot in `BytecodeCompiler.local_callable_closure_bodies`
+/// at let-binding time (`update_callable_binding_from_expr` /
+/// `FunctionExpr` arm). The body is the AST `Vec<Statement>` clone — no
+/// bytecode-lowering happens at lookup time; the inference walker only
+/// inspects AST shape.
+#[derive(Debug, Clone)]
+pub struct ClosureBodyPeek {
+    /// Formal parameters of the closure literal (`|inner|` →
+    /// `[FunctionParameter { pattern: Identifier("inner"), .. }]`).
+    pub params: Vec<shape_ast::ast::FunctionParameter>,
+    /// Closure literal body statements.
+    pub body: Vec<shape_ast::ast::Statement>,
+    /// Explicit `-> T` return annotation, if any.
+    pub return_type: Option<shape_ast::ast::TypeAnnotation>,
+    /// Compiled-function index assigned to the closure body by
+    /// `compile_expr_closure`. `None` until the closure literal is
+    /// actually lowered (the peek is built from the AST; the function
+    /// index is assigned at compile-emission time). Used by the value-
+    /// call propagation path to retroactively patch
+    /// `mir.local_typed_array_element_types` for the closure body's
+    /// MIR-side typed-array param seed.
+    pub function_index: Option<usize>,
+}
+
 /// Compiler state
 pub struct BytecodeCompiler {
     /// The program being built
@@ -679,6 +706,39 @@ pub struct BytecodeCompiler {
     /// Sweep phase 3c.x: inferred return-type names for arrays of closures
     /// stored in module-binding slots (top-level `let arr = [|x| ..., ...]`).
     pub(crate) module_binding_array_callable_return_types: HashMap<u16, String>,
+
+    /// cluster-2-cw-IB-class-b (2026-05-16, supervisor R3 binding-
+    /// ratified): retained closure-literal body for local `let f = |..|
+    /// ..` bindings. Populated at let-binding time by
+    /// `update_callable_binding_from_expr`'s `FunctionExpr` arm;
+    /// consumed at `compile_expr_function_call`'s value-call branch when
+    /// re-running closure-body return-type inference with caller-context
+    /// arg types.
+    ///
+    /// The retained body is the AST `Vec<Statement>` clone (no lowering
+    /// occurs at lookup time — the inference walker only inspects AST
+    /// shape, never emits bytecode for the body). Released on
+    /// `clear_callable_binding` and on per-function compilation
+    /// snapshot/restore alongside the existing `local_callable_*`
+    /// maps (`functions.rs:1148-1151` / `:1496-1499` / `:1607-1608`).
+    ///
+    /// Memory cost: bounded by the number of local closure bindings in
+    /// the active function frame; the body is the same AST already held
+    /// by the parent `Statement::VariableDecl` initializer, just held
+    /// for the lifetime of the enclosing function-compile pass to avoid
+    /// re-walking the AST at every value-call site. Released when the
+    /// enclosing function compile completes.
+    pub(crate) local_callable_closure_bodies:
+        HashMap<u16, ClosureBodyPeek>,
+
+    /// cluster-2-cw-IB-class-b: module-binding variant of the closure
+    /// body peek. Covers top-level / REPL `let f = |..|` bindings whose
+    /// slots live in the module-binding space (not the local-slot
+    /// space). Populated/cleared alongside the existing
+    /// `module_binding_callable_return_types` map at the
+    /// `update_callable_binding_from_expr` `FunctionExpr` arm.
+    pub(crate) module_binding_callable_closure_bodies:
+        HashMap<u16, ClosureBodyPeek>,
 
     /// ADR-006 §2.7.24 Q25.C trait-object emission (Wave 2.6 round-2):
     /// per-local-slot trait name for `let a: dyn Animal = ...` bindings.

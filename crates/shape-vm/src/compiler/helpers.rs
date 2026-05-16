@@ -462,7 +462,13 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_returns(
     mir: &crate::mir::MirFunction,
     callee_returns: Option<&dyn Fn(&str) -> Option<shape_value::v2::ConcreteType>>,
 ) -> Vec<shape_value::v2::ConcreteType> {
-    infer_top_level_concrete_types_from_mir_with_resolvers(mir, callee_returns, None, None)
+    infer_top_level_concrete_types_from_mir_with_resolvers(
+        mir,
+        callee_returns,
+        None,
+        None,
+        None,
+    )
 }
 
 /// Trait-method-aware variant of the conduit producer.
@@ -525,6 +531,34 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_resolvers(
     // at compile time; no runtime tag-byte read; §2.7.5 stamp-at-compile-
     // time preserved).
     monomorph_method_returns: Option<
+        &dyn Fn(shape_ast::ast::span::Span) -> Option<shape_value::v2::ConcreteType>,
+    >,
+    // cluster-2-cw-IB-class-b (2026-05-16, supervisor R3 binding-ratified):
+    // value-call return-`ConcreteType` resolver.
+    //
+    // `value_call_returns(call_site_span) -> Option<ConcreteType>` consults
+    // the `value_call_return_concrete_types: HashMap<(Span, Option<usize>),
+    // ConcreteType>` side-table populated by `compile_expr_function_call`'s
+    // value-call branch (closure-bound callee with caller-context-inferred
+    // body return). The caller closes over the `current_function` half of
+    // the composite key — top-level conduits pass `None` for
+    // `current_function`; per-function conduits pass `Some(fn_idx)`
+    // matching the function being walked. Same shape as
+    // `monomorph_method_returns` above.
+    //
+    // When the side-table holds an entry for the `Terminator.span` of a
+    // value-call (Call-terminator with `func: Operand::Copy/Move/
+    // MoveExplicit(Place::Local(_))`), the destination slot's
+    // ConcreteType is stamped from the resolver's return. The downstream
+    // JIT-side `place_native_kind` projection picks up the destination's
+    // `NativeKind`, closing the `print(f(xs))` kind-classification chain
+    // for Class B per inventory §B.2.
+    //
+    // No tag-bit decode, no Bool-default, no fabricated default — when
+    // the resolver returns `None` the slot stays `Void` per §2.7.5.1.
+    // ADR-006 §2.7.5 stamp-at-compile-time — the side-table is populated
+    // at bytecode-emission time only; never runtime.
+    value_call_returns: Option<
         &dyn Fn(shape_ast::ast::span::Span) -> Option<shape_value::v2::ConcreteType>,
     >,
 ) -> Vec<shape_value::v2::ConcreteType> {
@@ -909,6 +943,84 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_resolvers(
                                 ) {
                                     concrete_types[idx] = ct;
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // cluster-2-cw-IB-class-b (2026-05-16, supervisor R3 binding-ratified):
+    // value-call Call-terminator destination stamping pass. ADR-006
+    // §2.7.5 stamp-at-compile-time discipline applied to closure-bound
+    // value-call sites.
+    //
+    // For `let f = |inner| inner.sum(); print(f(xs))` (Class B fixture
+    // per inventory §B.2), the bytecode-emission layer at
+    // `compile_expr_function_call::compile_expr_function_call`
+    // (`crates/shape-vm/src/compiler/expressions/function_calls.rs:498-619`)
+    // recognises the value-call site, re-runs closure-body return-type
+    // inference with the caller-context arg types injected as
+    // typed-array param hints, and inserts the result into
+    // `BytecodeProgram.value_call_return_concrete_types[(call_span,
+    // current_function)]`. This pass consumes that side-table when the
+    // Call-terminator's `func` reads from a local slot (the closure-
+    // bound slot), stamping the destination's ConcreteType.
+    //
+    // Without this stamping the closure-call result slot stays `Void`
+    // through the conduit, the JIT-MIR `slot_kinds[dst]` stays `None`,
+    // and the downstream `print(f(xs))` Call-terminator at
+    // `terminators.rs:447-744` falls into the `_` SURFACE arm because
+    // its operand's NativeKind cannot be projected.
+    //
+    // Runs AFTER the MirConstant::Function / Method / monomorph passes
+    // and BEFORE the slot-move propagation pass so that subsequent
+    // `Use(Move|Copy)` chains from the Call destination to a user-
+    // visible slot propagate the stamped ConcreteType correctly.
+    //
+    // No tag-bit decode, no Bool-default, no fabricated default — when
+    // the resolver returns `None` (no side-table entry, or the closure-
+    // body inference could not classify the return) the slot stays
+    // `Void` per §2.7.5.1. The closure-bound `func` operand
+    // recognition is structural (Operand::Copy/Move/MoveExplicit of
+    // Place::Local) — the resolver itself owns the question of whether
+    // any given local-slot's value is actually a closure (the side-
+    // table is empty for non-closure local bindings).
+    if let Some(value_call_resolver) = value_call_returns {
+        use crate::mir::types::TerminatorKind;
+        for block in mir.iter_blocks() {
+            if let TerminatorKind::Call {
+                func, destination, ..
+            } = &block.terminator.kind
+            {
+                // Value-call shape: callee operand reads from a local
+                // slot. Constant callees (Function/Method) are handled
+                // by the resolver passes above.
+                let is_local_callee = matches!(
+                    func,
+                    Operand::Copy(crate::mir::types::Place::Local(_))
+                        | Operand::Move(crate::mir::types::Place::Local(_))
+                        | Operand::MoveExplicit(crate::mir::types::Place::Local(_))
+                );
+                if !is_local_callee {
+                    continue;
+                }
+                if let crate::mir::types::Place::Local(dst) = destination {
+                    let idx = dst.0 as usize;
+                    if idx < n
+                        && matches!(
+                            concrete_types[idx],
+                            shape_value::v2::ConcreteType::Void
+                        )
+                    {
+                        let span = block.terminator.span;
+                        if let Some(ct) = value_call_resolver(span) {
+                            if !matches!(
+                                ct,
+                                shape_value::v2::ConcreteType::Void
+                            ) {
+                                concrete_types[idx] = ct;
                             }
                         }
                     }
@@ -6036,6 +6148,7 @@ mod call_return_kind_tests {
             None,
             Some(&method_returns),
             None,
+            None,
         );
         assert_eq!(
             result[3],
@@ -6134,6 +6247,7 @@ mod call_return_kind_tests {
             None,
             Some(&method_returns),
             None,
+            None,
         );
         assert_eq!(
             result[4],
@@ -6201,7 +6315,7 @@ mod call_return_kind_tests {
         };
         // No method_returns resolver — destination stays Void.
         let result =
-            infer_top_level_concrete_types_from_mir_with_resolvers(&mir, None, None, None);
+            infer_top_level_concrete_types_from_mir_with_resolvers(&mir, None, None, None, None);
         assert_eq!(
             result[3],
             ConcreteType::Void,
@@ -6265,6 +6379,7 @@ mod call_return_kind_tests {
             &mir,
             None,
             Some(&method_returns),
+            None,
             None,
         );
         assert_eq!(
