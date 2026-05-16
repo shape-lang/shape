@@ -8045,3 +8045,69 @@ Cumulative 45 imprecisions through cluster-2-inventory-audit-day close; 0 bad-co
 ---
 
 *Next session: Round 1 parallel dispatch (closure-wave-2 + C + F + E) → respective merges + status doc subsections → Round 2 dispatch per audit §H.2 (closure-wave-B + closure-wave-D family 1+2) → Round 3 dispatch (wave-D family 3+4 + §D class 1+2 + wave-E fix if measurement found leak) → Round 4 (§D classes 3-10 per-class triage) → cluster-2 close attempt → Phase 4 (trait Add/AddAssign) → v1 close attempt → cluster-1.5 Q25.C TraitObject rebuild (post-v1 or absorbed at user reauthorization).*
+
+---
+
+## Wave 3 Round 8 cluster-2 Round 1 close — 4 closure-waves merged (cw-E + cw-F + cw-2 + cw-C); smoke matrix 4/4 VM == JIT preserved at canonical (2026-05-16)
+
+Round 1 parallel dispatch complete. Sequenced merge order (small-to-large): cw-E (audit-only) → cw-F (mechanical migration) → cw-2 (substitution.rs fix) → cw-C (largest substantive + cleanup reopen). Canonical advanced bb5b2109 (Round 0) → cc5ceb0e (closure-wave-1) → 71007603 (inventory) → ca8300f0 (inventory subsection) → 329ad39b (cw-E) → 075abaee (cw-F take-both) → 52a3febc (cw-2) → ce148a01 (cw-C). Smoke matrix 4/4 VM == JIT preserved at canonical ce148a01.
+
+### Sub-cluster close summary
+
+| Wave | Close commit | Merge commit | Diff | ADR amendment | Disposition |
+|---|---|---|---|---|---|
+| cw-E (string-leak measure) | `329ad39b` | (same; first merge) | +575/-1 (5 files; 124 LoC instrumentation + 451-line deliverable + AGENTS.md) | none | audit-only Phase 1; refined Option A intern-pool deferred to cluster-2-closure-wave-E-fix follow-up |
+| cw-F (tracing-crate) | `27736dd8` | `075abaee` (take-both executor.rs) | +622/-324 (23 files; 28 SHAPE_JIT_* sites → tracing + jit-trace Cargo feature + --trace-jit CLI flag + tracing-subscriber init) | ADR-006 §2.7.5 cross-crate amendment landed (+92 LoC) | feature-OFF zero-cost (release_max_level_off); feature-ON via --trace-jit=FILTER |
+| cw-2 (hypothesis b inlining) | `ec29dcfc` | `52a3febc` | +607/-2 (3 files; substitution.rs +228/-2 inliner fix + deliverable + AGENTS.md) | none | hypothesis (b) RESOLVED — Expr::For one-layer-outer gap in inline_closure_calls_in_expr; post-fix MIR bb4 shows inlined BinaryOp(Mul, ...) |
+| cw-C (hashmap V-arm) | `3db69306` → cleanup `d4e8b691` | `ce148a01` (take-both AGENTS.md) | substantive +538/-33 (10 files; HashMapKindedRef recursive HashMap V-arm + v2_group_by body + 5 cross-crate cascade + 4 unit tests) + cleanup ~6/-2 (2 files; marshal.rs:751 inner-unsafe removal + hashmap_methods.rs:800 unused import) | ADR-006 §2.7.24 Q25.B SUPERSEDED HashMap-row amendment landed | v2_group_by no longer SURFACE; 4/4 V-arm unit tests pass; empty integration test passes; 3 non-empty hit pre-existing v2-raw-heap aliasing SIGABRT (baseline reproduction at ca8300f0 cited per Step 4) |
+
+### Take-both ceremony resolutions
+
+- **cw-F merge** (`crates/shape-jit/src/executor.rs`): cw-E added STRING_* counter eprintln blocks; cw-F migrated SHAPE_JIT_ARC_COUNTERS to `tracing::enabled!()` gate. Resolved by extending cw-F's tracing gate to cover BOTH Arc<UnifiedValue> AND Arc<String> counter sets under single `shape_jit::arc_counters` target; 3 tracing::info!() calls replace 3 eprintln!() blocks (1 cw-F-original + 2 cw-E-added).
+- **cw-C merge** (`AGENTS.md`): row appendage conflict; take-both keeps both Round 1 rows (cw-E + cw-C) chronologically.
+
+### cw-C cleanup reopen (Ask 3 + Ask 4 resolution)
+
+4-step reopen sent post-cw-C-close per supervisor 2026-05-16 disposition:
+- **Step 1** (5 `let mut new_arc` → `let new_arc`): GROUND-TRUTH-REJECTED at HEAD 3db69306. All 36 `let mut new_arc` declarations DO mutate via `Arc::make_mut(&mut new_arc)`; cargo flags ZERO unused_mut warnings workspace-wide. Team-lead-prompt-layer imprecision 38 (stale IDE diagnostic).
+- **Step 2** (unused imports): hashmap_methods.rs:800 `use shape_value::heap_value::HashMapData` REMOVED.
+- **Step 3** (marshal.rs unnecessary unsafe): 11 sites; 10 PRE-EXISTING at baseline ca8300f0 (left as-is per dispatch instruction); 1 cw-C-INTRODUCED at marshal.rs:751 (inner unsafe wrapper redundant with outer at :655) REMOVED.
+- **Step 4** (SIGABRT baseline reproduction citation): captured in commit message. Baseline commit `ca8300f0`; observed "malloc(): unaligned tcache chunk detected" + signal 6 SIGABRT at baseline pre-cw-C; confirms same v2-raw-heap aliasing bug class.
+
+### Post-Round-1 gates at canonical ce148a01 (ALL PASS)
+
+- `cargo check --workspace --lib --tests` EXIT=0 ✅ (both feature-OFF default AND feature-ON `--features shape-jit/jit-trace` verified)
+- `bash scripts/verify-merge.sh` 12/12 PASS EXIT=0 ✅
+- `bash scripts/check-no-dynamic.sh` EXIT=0 ✅
+- Smoke matrix 4/4 VM == JIT at canonical fixture: s1 VM=4950/JIT=4950 ✅; s2 VM=30/JIT=30 ✅ (V3-S6f RESOLVED preserved); s3 VM=x/JIT=x ✅; s4 VM=2/JIT=2 ✅
+
+### Imprecision renumbering (Round 1 cumulative 45 → 51)
+
+Parallel sub-agents independently numbered "33"; team-lead renumbers in merge order:
+
+| # | Source | Shape | Caught at |
+|---|---|---|---|
+| 33 | cw-E sub-agent | Out-of-scope critical JIT correctness gap: prog4 `while i<100{print("loop");i+=1}` JIT prints garbage; STRING_RETAIN_CALLS=0 + STRING_RELEASE_CALLS=99 underflow → UAF on iconst-payload string constant in loops | Sub-agent measurement phase |
+| 34 | cw-2 sub-agent | Expr::For one-layer-outer gap (dispatch §3.4 explanation 3 named MethodCall.args; actual gap in `inline_closure_calls_in_expr` missing Expr::For arm — Vec.map body falls through to `other => other.clone()`) | Sub-agent empirical disposition |
+| 35 | cw-2 sub-agent | Reading-4-pattern prediction "(b) MAY be resolved by (a) side-effects" REFUTED | Sub-agent empirical disposition |
+| 36 | cw-2 sub-agent | Subsidiary regression: Phase-2 fix arm 1 introduced VM `no method sum on receiver kind Int64` because arrow-fn parser wraps closure-body expressions as `Statement::Return(Some(expr),_)`; fixed in-scope in arm 2 per architectural-prediction-subclass-recovery pattern | Sub-agent fix iteration |
+| 37 | cw-C sub-agent | Cascade-site count 4 → 7 source files (dispatch §C.3 estimate covered new-storage-layer skeleton but missed 5 consumer dispatch sites: printing.rs + typed_access.rs + json_value.rs + marshal.rs + csv_module.rs) | Sub-agent cargo-check iteration |
+| 38 | team-lead-prompt | cw-C cleanup reopen Step 1 specified "5 `let mut new_arc` don't mutate" — stale IDE diagnostic; ground-truth at HEAD shows all 36 declarations DO mutate via `Arc::make_mut`; cargo flags zero unused_mut | cw-C sub-agent ground-truth verification |
+
+Cumulative breakdown: 11 supervisor / 14 audit / 5 team-lead-prompt (+38) → 6 team-lead-prompt / 6 agent-execution-report → 8 agent-execution-report (+33, +37) / 8 candidate (+34, +35, +36) — total 51. All caught pre-merge; 0 bad-code merges into canonical preserved across cluster-0+1+cluster-2 trajectory.
+
+### Round 1 Reading observations
+
+- **Reading 4 confirmed** (architectural-prediction-subclass-recovery pattern): closure-wave-1 instance 31 + cw-2 instance 36 + cw-C instance 37 all demonstrate in-scope-recovery of consumer-side / cascade-side gaps surfaced during empirical execution. Pattern operational across 3 distinct cluster-2 sub-clusters.
+- **Reading 5 candidate** (parallel-sub-agent imprecision-numbering collision): when 4 parallel sub-agents independently surface imprecisions, each starts numbering from their pre-dispatch cumulative; team-lead reconciles at merge ceremony by renumbering in merge order. Future Round-N parallel dispatches should expect this pattern; status doc subsection is the canonical reconciliation site.
+
+### Round 2 ratified dispatch shape (supervisor 2026-05-16)
+
+Parallel dispatch (3 candidates per supervisor disposition):
+- **cluster-2-jit-string-const-loop-retain-gap** (Ask 1): NEW sub-cluster — fix the cw-E-surfaced UAF on iconst-payload string constants in loops. Reproducer `/tmp/cw-E-prog4-string-in-loop.shape`. Refcount underflow class; CORRECTNESS gap (not leak). Bounded territory: JIT iconst-payload retain emission for `MirConstant::Str` per-iteration.
+- **cluster-2-closure-wave-E-fix** (Ask 2): refined Option A intern-pool with carrier-shape preservation; ~50 LoC in `crates/shape-jit/src/ffi/string.rs` alone; deduplication-only (does not eliminate leak entirely).
+- **§B uncovered user-fn classes** (per inventory §B.4): closure-body-with-INFERRED-typed-array-param + method-chain intermediate slots. Team-lead's call during drafting whether to fold into Ask 1/2 or dispatch separately.
+
+---
+
+*Next session: Round 2 parallel dispatch (3 closure-waves) → respective merges + status doc subsections → Round 3 dispatch per audit §H.2 (closure-wave-D family 1+2 — per-HeapKind kinded jit_print 30 UNCOVERED arms) → Round 4 dispatch (wave-D family 3+4 + §D class 1+2) → Round 5 (§D classes 3-10 per-class triage) → cluster-2 close attempt → Phase 4 (trait Add/AddAssign) → v1 close attempt → cluster-1.5 Q25.C TraitObject rebuild.*
