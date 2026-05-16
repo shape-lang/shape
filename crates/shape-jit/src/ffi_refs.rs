@@ -75,6 +75,24 @@ pub struct FFIFuncRefs {
     pub(crate) print_typed_object: FuncRef,
     pub(crate) print_option: FuncRef,
     pub(crate) print_result: FuncRef,
+    // Phase 3 cluster-2 Round 3 cw-D-fam12 (2026-05-16): scalar Char +
+    // concurrency Mutex/Atomic/Lazy/Channel kinded print entries
+    // (ADR-006 §2.7.5 stamp-at-compile-time + §2.7.25 concurrency-
+    // primitive printing convention). Dispatched by the MIR-side
+    // Call-terminator print emitter when the operand's `NativeKind` is
+    // `NativeKind::Char` (scalar — `print_char`),
+    // `Ptr(HeapKind::Mutex)` → `print_mutex`,
+    // `Ptr(HeapKind::Atomic)` → `print_atomic`,
+    // `Ptr(HeapKind::Lazy)` → `print_lazy`,
+    // `Ptr(HeapKind::Channel)` → `print_channel`. Heap arms take
+    // `(ctx_ptr, bits)`; the scalar `print_char` takes a `u32`
+    // codepoint directly (mirror of `print_i64` / `print_f64` /
+    // `print_bool`).
+    pub(crate) print_char: FuncRef,
+    pub(crate) print_mutex: FuncRef,
+    pub(crate) print_atomic: FuncRef,
+    pub(crate) print_lazy: FuncRef,
+    pub(crate) print_channel: FuncRef,
 
     // Closure construction (Phase H2: typed closure block → Arc<Closure>).
     pub(crate) make_closure: FuncRef,

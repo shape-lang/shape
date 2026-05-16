@@ -104,6 +104,17 @@ impl JITCompiler {
             print_typed_object: r!("jit_print_typed_object"),
             print_option: r!("jit_print_option"),
             print_result: r!("jit_print_result"),
+            // Phase 3 cluster-2 Round 3 cw-D-fam12 (2026-05-16): Scalar
+            // Char + Concurrency Mutex/Atomic/Lazy/Channel kinded print
+            // entries. ADR-006 §2.7.5 stamp-at-compile-time + §2.7.25
+            // concurrency-primitive printing convention. The MIR-side
+            // Call-terminator dispatch routes the operand's `NativeKind`
+            // to the matching FuncRef.
+            print_char: r!("jit_print_char"),
+            print_mutex: r!("jit_print_mutex"),
+            print_atomic: r!("jit_print_atomic"),
+            print_lazy: r!("jit_print_lazy"),
+            print_channel: r!("jit_print_channel"),
 
             // Closure construction
             make_closure: r!("jit_make_closure"),

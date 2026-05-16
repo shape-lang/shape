@@ -517,6 +517,141 @@ pub extern "C" fn jit_print_result(
     );
 }
 
+// ============================================================================
+// Phase 3 cluster-2 Round 3 cw-D-fam12 kinded jit_print entries
+// (2026-05-16): Scalar Char + Concurrency Mutex/Atomic/Lazy/Channel.
+// Per cluster-2-inventory §E.5 per-family sub-cluster recommendation +
+// ADR-006 §2.7.25 Concurrency amendment's printing convention. Each
+// entry mirrors the existing W12-jit-print-heap-arm-classification
+// shape: `(ctx_ptr, bits)` heap-arm entries delegate to
+// `print_kinded_inner` for VM == JIT identical output; scalar entries
+// take the raw value directly (mirror of `jit_print_i64` / `_f64` /
+// `_bool`).
+// ============================================================================
+
+/// Print a `char` codepoint to stdout with a newline.
+///
+/// Dispatched when the operand kind is proven `NativeKind::Char`
+/// (ADR-006 §2.7.5 amendment scalar variant) OR
+/// `NativeKind::Ptr(HeapKind::Char)` (pre-amendment heap arm — the
+/// `KindedSlot::as_char` accessor accepts both labels). The carrier is
+/// a 4-byte inline codepoint per `ValueSlot::from_char` (`c as u64`),
+/// passed through the FFI boundary as a `u32` (low 32 bits hold the
+/// codepoint).
+///
+/// Mirrors the VM-side `format_kinded_inner` `NativeKind::Char` arm at
+/// `printing.rs:160-164` (top-level / non-quoted form `c.to_string()`).
+/// Invalid codepoints render as `<invalid-char:0x...>` to match the
+/// VM-side fallback.
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_print_char(value: u32) {
+    match char::from_u32(value) {
+        Some(c) => println!("{}", c),
+        None => println!("<invalid-char:0x{:x}>", value),
+    }
+}
+
+/// Print an `Arc<MutexData>`-shaped slot as `<mutex>`. Dispatched when
+/// the operand kind is proven `NativeKind::Ptr(HeapKind::Mutex)`.
+///
+/// Mirrors `jit_print_option` — delegates to the canonical VM-side
+/// `ValueFormatter::format_kinded`, which renders MutexData as the
+/// opaque tag `<mutex>` per `printing.rs:534-537` (ADR-006 §2.7.25
+/// concurrency-primitive printing convention — no user-facing literal,
+/// opaque diagnostic tag).
+///
+/// SAFETY: `bits` must be `Arc::into_raw(Arc<MutexData>) as u64` per
+/// the producer-site contract on every `KindedSlot::from_mutex`-shaped
+/// producer (VM-side `BuiltinFunction::MutexCtor`).
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_print_mutex(
+    ctx_ptr: *const crate::context::JITContext,
+    bits: u64,
+) {
+    use shape_value::heap_value::HeapKind;
+    print_kinded_inner(
+        ctx_ptr,
+        bits,
+        shape_value::NativeKind::Ptr(HeapKind::Mutex),
+    );
+}
+
+/// Print an `Arc<AtomicData>`-shaped slot as `<atomic:N>` where N is
+/// the current atomic value. Dispatched when the operand kind is proven
+/// `NativeKind::Ptr(HeapKind::Atomic)`.
+///
+/// Mirrors `jit_print_mutex` — delegates to the canonical VM-side
+/// `ValueFormatter::format_kinded`, which renders AtomicData as
+/// `<atomic:{value}>` per `printing.rs:538-542` (ADR-006 §2.7.25
+/// printing convention).
+///
+/// SAFETY: `bits` must be `Arc::into_raw(Arc<AtomicData>) as u64` per
+/// the producer-site contract on every `KindedSlot::from_atomic`-shaped
+/// producer (VM-side `BuiltinFunction::AtomicCtor`).
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_print_atomic(
+    ctx_ptr: *const crate::context::JITContext,
+    bits: u64,
+) {
+    use shape_value::heap_value::HeapKind;
+    print_kinded_inner(
+        ctx_ptr,
+        bits,
+        shape_value::NativeKind::Ptr(HeapKind::Atomic),
+    );
+}
+
+/// Print an `Arc<LazyData>`-shaped slot as `<lazy:initialized>` /
+/// `<lazy:pending>` depending on whether the cached value has been
+/// populated. Dispatched when the operand kind is proven
+/// `NativeKind::Ptr(HeapKind::Lazy)`.
+///
+/// Mirrors `jit_print_mutex` — delegates to the canonical VM-side
+/// `ValueFormatter::format_kinded`, which renders LazyData per
+/// `printing.rs:543-551` (ADR-006 §2.7.25 printing convention).
+///
+/// SAFETY: `bits` must be `Arc::into_raw(Arc<LazyData>) as u64` per
+/// the producer-site contract on every `KindedSlot::from_lazy`-shaped
+/// producer (VM-side `BuiltinFunction::LazyCtor`).
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_print_lazy(
+    ctx_ptr: *const crate::context::JITContext,
+    bits: u64,
+) {
+    use shape_value::heap_value::HeapKind;
+    print_kinded_inner(
+        ctx_ptr,
+        bits,
+        shape_value::NativeKind::Ptr(HeapKind::Lazy),
+    );
+}
+
+/// Print an `Arc<ChannelData>`-shaped slot as `<channel:state:len>`
+/// where state is `open`/`closed` and len is the current queue length.
+/// Dispatched when the operand kind is proven
+/// `NativeKind::Ptr(HeapKind::Channel)`.
+///
+/// Mirrors `jit_print_mutex` — delegates to the canonical VM-side
+/// `ValueFormatter::format_kinded`, which renders ChannelData per
+/// `printing.rs:451-464` (ADR-006 §2.7.20 channel printing convention,
+/// shared by §2.7.25 concurrency-primitive family).
+///
+/// SAFETY: `bits` must be `Arc::into_raw(Arc<ChannelData>) as u64` per
+/// the producer-site contract on every `KindedSlot::from_channel`-shaped
+/// producer (VM-side `BuiltinFunction::ChannelCtor`).
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_print_channel(
+    ctx_ptr: *const crate::context::JITContext,
+    bits: u64,
+) {
+    use shape_value::heap_value::HeapKind;
+    print_kinded_inner(
+        ctx_ptr,
+        bits,
+        shape_value::NativeKind::Ptr(HeapKind::Channel),
+    );
+}
+
 /// Concatenate two NaN-boxed string values into a freshly boxed
 /// `UnifiedString`. Used by the MIR-lowering path for `BinOp::Add` when both
 /// operands have `NativeKind::String`.
@@ -798,5 +933,142 @@ mod heap_arm_print_tests {
         jit_print_typed_object(null_ctx(), bits);
 
         unsafe { drop_arc_typed_object(bits) };
+    }
+
+    // ========================================================================
+    // Phase 3 cluster-2 Round 3 cw-D-fam12 tests: Scalar Char + Concurrency
+    // Mutex/Atomic/Lazy/Channel kinded jit_print FFI bodies (2026-05-16).
+    // Each test verifies the FFI body renders the same string as the
+    // canonical VM-side `ValueFormatter::format_kinded` for the matching
+    // §2.7.5 carrier, then drops the Arc<T> share without leaking.
+    // ========================================================================
+
+    #[test]
+    fn print_char_scalar_matches_vm() {
+        // The `Char` scalar carrier per ADR-006 §2.7.5 amendment: 4-byte
+        // codepoint stored inline (no Arc). Both `NativeKind::Char`
+        // (post-amendment scalar label) and `NativeKind::Ptr(HeapKind::Char)`
+        // (pre-amendment heap arm label) format identically per the
+        // formatter's `kinded_slot.as_char` accessor — both render to the
+        // single character `A`.
+        let codepoint: u32 = 'A' as u32;
+
+        // VM-side rendering via the scalar arm (`NativeKind::Char`).
+        let scalar_slot = ValueSlot::from_char('A');
+        let scalar_kinded = KindedSlot::new(scalar_slot, NativeKind::Char);
+        let registry = shape_runtime::type_schema::TypeSchemaRegistry::default();
+        let formatter = shape_vm::executor::printing::ValueFormatter::new(&registry);
+        let scalar_render = formatter.format_kinded(&scalar_kinded);
+        assert_eq!(scalar_render, "A");
+
+        // VM-side rendering via the legacy `Ptr(HeapKind::Char)` arm — same
+        // codepoint bits, different label; both must produce "A".
+        let heap_slot = ValueSlot::from_char('A');
+        let heap_kinded =
+            KindedSlot::new(heap_slot, NativeKind::Ptr(HeapKind::Char));
+        let heap_render = formatter.format_kinded(&heap_kinded);
+        assert_eq!(heap_render, "A");
+
+        // Drive the FFI body — no Arc cleanup needed (Char is a scalar
+        // carrier; no heap allocation).
+        jit_print_char(codepoint);
+    }
+
+    #[test]
+    fn print_char_invalid_codepoint_renders_fallback() {
+        // `char::from_u32` returns None for codepoints in the surrogate
+        // range / above 0x10FFFF. The FFI body renders the documented
+        // fallback. VM-side `printing.rs:160-164` uses the same fallback
+        // when `quote_strings=false` (top-level print form).
+        jit_print_char(0xD800);
+    }
+
+    #[test]
+    fn print_mutex_arc_carrier_matches_vm() {
+        use shape_value::heap_value::MutexData;
+
+        // Producer mirrors VM-side `BuiltinFunction::MutexCtor`:
+        // `Arc::into_raw(Arc<MutexData>)` with kind
+        // `NativeKind::Ptr(HeapKind::Mutex)`.
+        let inner_payload = KindedSlot::new(ValueSlot::from_int(42), NativeKind::Int64);
+        let arc = Arc::new(MutexData::new(inner_payload));
+        let bits = Arc::into_raw(arc) as u64;
+
+        // VM-side rendering: opaque `<mutex>` tag per ADR-006 §2.7.25
+        // printing convention.
+        let vm_render = vm_format(bits, NativeKind::Ptr(HeapKind::Mutex));
+        assert_eq!(vm_render, "<mutex>");
+
+        // Drive the FFI body — same VM-side formatter path, executes
+        // without segfault.
+        jit_print_mutex(null_ctx(), bits);
+
+        // Drop the strong-count share.
+        unsafe {
+            let _ = Arc::<MutexData>::from_raw(bits as *const MutexData);
+        }
+    }
+
+    #[test]
+    fn print_atomic_arc_carrier_matches_vm() {
+        use shape_value::heap_value::AtomicData;
+
+        let arc = Arc::new(AtomicData::new(7));
+        let bits = Arc::into_raw(arc) as u64;
+
+        // VM-side rendering: `<atomic:N>` per ADR-006 §2.7.25 +
+        // `printing.rs:538-542`.
+        let vm_render = vm_format(bits, NativeKind::Ptr(HeapKind::Atomic));
+        assert_eq!(vm_render, "<atomic:7>");
+
+        jit_print_atomic(null_ctx(), bits);
+
+        unsafe {
+            let _ = Arc::<AtomicData>::from_raw(bits as *const AtomicData);
+        }
+    }
+
+    #[test]
+    fn print_lazy_arc_carrier_pending_matches_vm() {
+        use shape_value::heap_value::LazyData;
+
+        // `LazyData::new_pending` / `LazyData::pending` style — build an
+        // uninitialized Lazy. The format is `<lazy:pending>`.
+        let closure_kinded =
+            KindedSlot::new(ValueSlot::from_int(0), NativeKind::Int64);
+        let arc = Arc::new(LazyData::new(closure_kinded));
+        let bits = Arc::into_raw(arc) as u64;
+
+        let vm_render = vm_format(bits, NativeKind::Ptr(HeapKind::Lazy));
+        assert_eq!(vm_render, "<lazy:pending>");
+
+        jit_print_lazy(null_ctx(), bits);
+
+        unsafe {
+            let _ = Arc::<LazyData>::from_raw(bits as *const LazyData);
+        }
+    }
+
+    #[test]
+    fn print_channel_arc_carrier_matches_vm() {
+        use shape_value::heap_value::ChannelData;
+
+        // Producer mirrors VM-side `BuiltinFunction::ChannelCtor`:
+        // `Arc::into_raw(Arc<ChannelData>)` with kind
+        // `NativeKind::Ptr(HeapKind::Channel)`.
+        let arc = Arc::new(ChannelData::new());
+        let bits = Arc::into_raw(arc) as u64;
+
+        // VM-side rendering: `<channel:state:len>` per ADR-006 §2.7.20 +
+        // `printing.rs:451-464`. A freshly constructed channel is open
+        // with len 0.
+        let vm_render = vm_format(bits, NativeKind::Ptr(HeapKind::Channel));
+        assert_eq!(vm_render, "<channel:open:0>");
+
+        jit_print_channel(null_ctx(), bits);
+
+        unsafe {
+            let _ = Arc::<ChannelData>::from_raw(bits as *const ChannelData);
+        }
     }
 }

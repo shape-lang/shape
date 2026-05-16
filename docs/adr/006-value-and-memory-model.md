@@ -967,6 +967,97 @@ W11-jit-new-array supervisor reopen artifacts) where they continue to
 point readers at the CLI selector — no source code reads the env vars
 anymore.
 
+##### §2.7.5.B per-HeapKind-family kinded jit_print dispatch arms (cluster-2-cw-D-fam12-jit-print, 2026-05-16)
+
+`crates/shape-jit/src/mir_compiler/terminators.rs`'s `print`
+Call-terminator dispatch consumes the operand's `NativeKind` (stamped
+at MIR-emit time via `operand_slot_kind`'s producing-site
+classification) and routes to a matching per-kind FFI body at
+`crates/shape-jit/src/ffi/conversion.rs`. Each FFI body reads the
+typed `Arc<T>` payload directly via `*const T` field projection (or
+the scalar's inline carrier) and delegates to the canonical VM-side
+`ValueFormatter::format_kinded` for byte-identical VM == JIT output.
+The kind IS the discriminator (§2.7.7 #4 / #7) — no NaN-box tag decode,
+no `is_heap_kind` probe.
+
+This amendment extends the W12-jit-print-heap-arm-classification
+landing (Phase 3 cluster-0 Round 8A, 2026-05-13, 4 arms — `print_str`
+/ `print_typed_object` / `print_option` / `print_result`) by 5 more
+arms grouped by carrier-shape family per cluster-2-inventory §E.5:
+
+- **Scalar-family (Family 1):** `jit_print_char(value: u32)` — 4-byte
+  scalar carrier per the §2.7.5 amendment (Round 19 S1.5
+  W12-nativekind-scalar-additions). The routing arm at
+  `terminators.rs` matches BOTH `NativeKind::Char` (post-amendment
+  scalar label) AND `NativeKind::Ptr(HeapKind::Char)` (pre-amendment
+  heap arm label) per the `KindedSlot::as_char` accessor's cross-tier
+  compatibility. Signature mirrors the scalar print family
+  (`jit_print_i64` / `jit_print_f64` / `jit_print_bool`) — value by
+  value, no `ctx_ptr` threading.
+- **Concurrency-primitive family (Family 2):** `jit_print_mutex` /
+  `jit_print_atomic` / `jit_print_lazy` / `jit_print_channel`, each
+  `(ctx_ptr, bits)` with `bits = Arc::into_raw(Arc<XData>) as u64`.
+  Print format follows the §2.7.25 concurrency-primitive printing
+  convention (Mutex `<mutex>`, Atomic `<atomic:N>`, Lazy
+  `<lazy:initialized>` / `<lazy:pending>`) + §2.7.20 Channel
+  convention (`<channel:state:len>`) per `printing.rs:451-464` (Channel)
+  + `:534-551` (Mutex/Atomic/Lazy).
+
+**Coverage post-amendment:** 7 / 35 live HeapKind variants have kinded
+`jit_print` FFI entries plus the scalar Char + String + Int + Float +
+Bool kinds (12 total kinded-print entries across NativeKind ×
+HeapKind cardinality). Remaining 28 UNCOVERED HeapKind arms tracked
+per inventory §E.5 + §H.2 across 8 closure-wave-D families: Collection
+(HashMap / HashSet / Deque / PriorityQueue / Range / Iterator),
+Numeric/temporal (Decimal / BigInt / Temporal / Instant),
+DataTable/Content (DataTable / TableView / Content / IoHandle),
+Native-foreign (NativeScalar / NativeView), Pure-discriminator
+(FilterExpr / Reference / SharedCell), Async (Future / TaskGroup),
+Matrix (Matrix / MatrixSlice), TraitObject+Closure+TypedObject (with
+TypedObject gated on the cluster-1 `W17-jit-typed-object-arc-storage-
+migration` carrier-shape SURFACE per the existing `terminators.rs:
+620-661` SURFACE arm).
+
+**Forbidden under this amendment:**
+
+- Adding a kind-blind `jit_print` fallback for unknown heap arms (the
+  pre-Round-8A pattern the cluster-0 Round 8A close explicitly retired
+  per CLAUDE.md "Forbidden rationalizations" #1 "Just a small fallback
+  for this one edge case"). The `_`-arm SURFACE-and-stop at
+  `terminators.rs:709-745` is the binding shape; new kinded arms
+  insert BEFORE the `_` arm, never as a fallback.
+- Bool-default fallback for the Char dispatch when the operand's
+  `NativeKind` is `None` at the producing site (the existing
+  `_`-arm SURFACE-and-stop catches this; upstream kind-source gaps
+  for `MirConstant::Char` lowering surface honestly per the existing
+  comment block at `terminators.rs:688-693`).
+- Per-routing-arm bridge / probe / helper / hop / translator / adapter
+  / shim framings (CLAUDE.md broader-family regex; the routing arms
+  ARE per-kind dispatch, not "decode bridges" — name the operation,
+  not a hypothetical role).
+- A parametric `jit_print` signature taking a `NativeKind` arg (this
+  is the deleted-W-series shape: kind-blind dispatch with a kind-code
+  parameter at the FFI boundary; §2.7.7 #4 / #7 forbid). The kind IS
+  the FFI entry by construction — one FFI body per `NativeKind` heap
+  arm.
+- Skipping the lockstep updates (FFI body + `ffi_symbols`
+  registration + `ffi_refs.rs` FuncRef field + `ffi_builder.rs` r!()
+  lookup + `terminators.rs` routing arm). 5-file cascade per new arm
+  is the binding shape — no shortcut by omitting the FuncRef field
+  or the symbol registration.
+
+**Code touchpoints carry a `// ADR-006 §2.7.5.B 2026-05-16` marker**
+in the cluster-2-cw-D-fam12-jit-print commit edits at the new arm
+sites — auditable for the per-family migration trajectory across
+Round 4+ landings.
+
+**Cascade-site count per new arm:** 5 files — `ffi/conversion.rs` (FFI
+body) + `ffi_symbols/object_symbols.rs` (symbol reg + declare_function)
++ `ffi_refs.rs` (FuncRef field) + `compiler/ffi_builder.rs` (r!()
+lookup) + `mir_compiler/terminators.rs` (routing arm). Per-arm scope
+~50-100 LoC. Round 4+ dispatch follows this exact pattern per family
+sub-cluster.
+
 #### 2.7.5.1 Wire-format structs are post-proof shapes
 
 `FrameDescriptor` (`crates/shape-vm/src/type_tracking.rs`) is

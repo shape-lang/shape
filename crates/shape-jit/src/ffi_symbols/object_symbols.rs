@@ -10,9 +10,10 @@ use cranelift_module::{FuncId, Linkage, Module};
 use std::collections::HashMap;
 
 use super::super::ffi::conversion::{
-    jit_print_bool, jit_print_f64, jit_print_i64, jit_print_option,
-    jit_print_result, jit_print_str, jit_print_typed_object, jit_string_concat,
-    jit_to_number, jit_to_string, jit_type_check, jit_typeof,
+    jit_print_atomic, jit_print_bool, jit_print_channel, jit_print_char,
+    jit_print_f64, jit_print_i64, jit_print_lazy, jit_print_mutex,
+    jit_print_option, jit_print_result, jit_print_str, jit_print_typed_object,
+    jit_string_concat, jit_to_number, jit_to_string, jit_type_check, jit_typeof,
 };
 #[allow(deprecated)]
 use super::super::ffi::object::{
@@ -169,6 +170,20 @@ pub fn register_object_symbols(builder: &mut JITBuilder) {
     );
     builder.symbol("jit_print_option", jit_print_option as *const u8);
     builder.symbol("jit_print_result", jit_print_result as *const u8);
+    // Phase 3 cluster-2 Round 3 cw-D-fam12 (2026-05-16): Scalar Char +
+    // Concurrency Mutex/Atomic/Lazy/Channel kinded print entries
+    // (ADR-006 §2.7.5 stamp-at-compile-time + §2.7.25 concurrency-
+    // primitive printing convention per `printing.rs:451-464` Channel +
+    // `:534-551` Mutex/Atomic/Lazy). The Char entry handles both the
+    // scalar `NativeKind::Char` carrier (post-§2.7.5 amendment 4-byte
+    // codepoint scalar) and the pre-amendment
+    // `NativeKind::Ptr(HeapKind::Char)` heap arm — both labels store
+    // the codepoint inline per `ValueSlot::from_char`.
+    builder.symbol("jit_print_char", jit_print_char as *const u8);
+    builder.symbol("jit_print_mutex", jit_print_mutex as *const u8);
+    builder.symbol("jit_print_atomic", jit_print_atomic as *const u8);
+    builder.symbol("jit_print_lazy", jit_print_lazy as *const u8);
+    builder.symbol("jit_print_channel", jit_print_channel as *const u8);
     builder.symbol("jit_make_closure", jit_make_closure as *const u8);
     // Closure-spec Phase H2: TypedClosureHeader finalizer used by
     // `MirToIR::emit_heap_closure` to convert the raw typed block into a
@@ -771,6 +786,63 @@ pub fn declare_object_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<
             .declare_function("jit_print_result", Linkage::Import, &sig)
             .expect("Failed to declare jit_print_result");
         ffi_funcs.insert("jit_print_result".to_string(), func_id);
+    }
+
+    // Phase 3 cluster-2 Round 3 cw-D-fam12 (2026-05-16): Scalar Char +
+    // Concurrency Mutex/Atomic/Lazy/Channel kinded print entries
+    // (ADR-006 §2.7.5 stamp-at-compile-time + §2.7.25 concurrency-
+    // primitive printing convention). The Char entry mirrors the scalar
+    // print signature (single I32 codepoint), Mutex/Atomic/Lazy/Channel
+    // mirror the heap-arm `(ctx_ptr, bits)` signature.
+    //
+    // jit_print_char(value: u32) -> void
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I32)); // codepoint
+        let func_id = module
+            .declare_function("jit_print_char", Linkage::Import, &sig)
+            .expect("Failed to declare jit_print_char");
+        ffi_funcs.insert("jit_print_char".to_string(), func_id);
+    }
+    // jit_print_mutex(ctx_ptr: *const JITContext, bits: u64) -> void
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // ctx_ptr
+        sig.params.push(AbiParam::new(types::I64)); // bits (Arc<MutexData>)
+        let func_id = module
+            .declare_function("jit_print_mutex", Linkage::Import, &sig)
+            .expect("Failed to declare jit_print_mutex");
+        ffi_funcs.insert("jit_print_mutex".to_string(), func_id);
+    }
+    // jit_print_atomic(ctx_ptr: *const JITContext, bits: u64) -> void
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // ctx_ptr
+        sig.params.push(AbiParam::new(types::I64)); // bits (Arc<AtomicData>)
+        let func_id = module
+            .declare_function("jit_print_atomic", Linkage::Import, &sig)
+            .expect("Failed to declare jit_print_atomic");
+        ffi_funcs.insert("jit_print_atomic".to_string(), func_id);
+    }
+    // jit_print_lazy(ctx_ptr: *const JITContext, bits: u64) -> void
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // ctx_ptr
+        sig.params.push(AbiParam::new(types::I64)); // bits (Arc<LazyData>)
+        let func_id = module
+            .declare_function("jit_print_lazy", Linkage::Import, &sig)
+            .expect("Failed to declare jit_print_lazy");
+        ffi_funcs.insert("jit_print_lazy".to_string(), func_id);
+    }
+    // jit_print_channel(ctx_ptr: *const JITContext, bits: u64) -> void
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // ctx_ptr
+        sig.params.push(AbiParam::new(types::I64)); // bits (Arc<ChannelData>)
+        let func_id = module
+            .declare_function("jit_print_channel", Linkage::Import, &sig)
+            .expect("Failed to declare jit_print_channel");
+        ffi_funcs.insert("jit_print_channel".to_string(), func_id);
     }
 
     // jit_make_closure(ctx, func_idx, capture_count) -> u64
