@@ -797,7 +797,6 @@ fn set_kinded(
     key: &str,
     value_slot: &KindedSlot,
 ) -> Result<HashMapKindedRef, VMError> {
-    use shape_value::heap_value::HashMapData;
     // Empty-HashMap V-promotion: if the receiver has zero entries + the
     // current V doesn't match the incoming value's kind, rebuild as the
     // matching V. Sound because an empty HashMap has no live values to

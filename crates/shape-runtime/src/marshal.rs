@@ -747,8 +747,10 @@ impl FromSlot for Vec<(Arc<String>, Arc<shape_value::heap_value::HeapValue>)> {
                                 // share-cloned (Arc::clone on
                                 // HashMapKindedRef::clone — single refcount
                                 // bump on the inner Arc<HashMapData<V_inner>>).
+                                // Per outer `unsafe` block at line 655; no
+                                // inner unsafe wrapper needed.
                                 let inner_ref: &HashMapKindedRef =
-                                    unsafe { &*(*arc.values).data.add(i) };
+                                    &*(*arc.values).data.add(i);
                                 Arc::new(HeapValue::HashMap(inner_ref.clone()))
                             }
                         };
