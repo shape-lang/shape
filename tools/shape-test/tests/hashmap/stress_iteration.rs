@@ -622,12 +622,20 @@ fn test_hashmap_to_array_pair_content() {
 // =========================================================================
 
 /// Verifies groupBy basic.
+///
+/// Wave N hashmap-value-v-arm follow-up (cluster-2 closure-wave-C,
+/// 2026-05-16): the closure must return a `string` group key (the new
+/// `HashMapData` invariant constrains keys to `Arc<String>` per
+/// ADR-006 §2.7.24 Q25.B SUPERSEDED). Previously this test was
+/// SURFACE-and-stop'd (the HashMap-value V arm in HashMapKindedRef
+/// was not landed). Now passes via `f"{v}"` stringification of the
+/// int value.
 #[test]
 fn test_hashmap_group_by_basic() {
     ShapeTest::new(
         r#"{
         let m = HashMap().set("a", 1).set("b", 2).set("c", 1)
-        let grouped = m.groupBy(|k, v| v)
+        let grouped = m.groupBy(|k, v| f"{v}")
         grouped.len()
     }"#,
     )
@@ -640,7 +648,7 @@ fn test_hashmap_group_by_single_group() {
     ShapeTest::new(
         r#"{
         let m = HashMap().set("a", 1).set("b", 1).set("c", 1)
-        m.groupBy(|k, v| v).len()
+        m.groupBy(|k, v| f"{v}").len()
     }"#,
     )
     .expect_number(1.0);
@@ -649,7 +657,7 @@ fn test_hashmap_group_by_single_group() {
 /// Verifies groupBy on empty.
 #[test]
 fn test_hashmap_group_by_empty() {
-    ShapeTest::new(r#"HashMap().groupBy(|k, v| v).len()"#).expect_number(0.0);
+    ShapeTest::new(r#"HashMap().groupBy(|k, v| f"{v}").len()"#).expect_number(0.0);
 }
 
 /// Verifies groupBy all different.
@@ -658,7 +666,7 @@ fn test_hashmap_group_by_all_different() {
     ShapeTest::new(
         r#"{
         let m = HashMap().set("a", 1).set("b", 2).set("c", 3)
-        m.groupBy(|k, v| v).len()
+        m.groupBy(|k, v| f"{v}").len()
     }"#,
     )
     .expect_number(3.0);

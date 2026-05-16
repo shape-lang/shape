@@ -347,6 +347,7 @@ pub fn create_csv_module() -> ModuleExports {
                             shape_value::heap_value::HashMapKindedRef::Decimal(arc) => arc.keys,
                             shape_value::heap_value::HashMapKindedRef::TypedObject(arc) => arc.keys,
                             shape_value::heap_value::HashMapKindedRef::TraitObject(arc) => arc.keys,
+                            shape_value::heap_value::HashMapKindedRef::HashMap(arc) => arc.keys,
                         };
                         let n = unsafe { shape_value::v2::typed_array::TypedArray::len(keys_ptr) as usize };
                         (0..n)

@@ -1101,6 +1101,63 @@ unsafe impl HashMapValueElem for TraitObjectPtr {
     }
 }
 
+// ── Recursive HashMap-value V impl (HashMapKindedRef) ───────────────────────
+//
+// Wave N hashmap-value-v-arm follow-up (cluster-2 closure-wave-C,
+// 2026-05-16). Per ADR-006 §2.7.24 Q25.B SUPERSEDED canonical pattern
+// (HashMapKindedRef carrier + per-V monomorphization at the method tier)
+// extended to a recursive HashMap-value V arm. The values buffer is a
+// `*mut TypedArray<HashMapKindedRef>` — each element is the per-V
+// kinded-ref payload (auto-derived Drop chains through the inner Arc).
+//
+// HashMapKindedRef is non-Copy and carries a Drop (auto-derived: each
+// variant holds Arc<HashMapData<V>> whose Drop retires one strong-count
+// share). The shape matches TypedObjectPtr / TraitObjectPtr (manual Drop
+// + manual Clone): walk-with-ptr::read on release; delegate to the
+// wrapper's Clone on share; let scope-end run Drop on release_owned.
+
+unsafe impl HashMapValueElem for HashMapKindedRef {
+    /// `HashMapKindedRef` is non-Copy with an auto-derived Drop (each
+    /// variant holds `Arc<HashMapData<V>>` whose Drop retires one
+    /// strong-count share). Walk the buffer via `ptr::read` to invoke
+    /// each element's Drop, then free the data allocation + struct.
+    /// Mirror of the `TypedObjectPtr` / `TraitObjectPtr` impl shape.
+    #[inline]
+    unsafe fn release_typed_array(ptr: *mut crate::v2::typed_array::TypedArray<Self>) {
+        unsafe {
+            let arr = &*ptr;
+            if arr.cap > 0 && !arr.data.is_null() {
+                // Walk: read each element; the read transfers ownership
+                // to a local `HashMapKindedRef`, which drops at scope-end
+                // via its auto-derived Drop (chains through Arc::drop on
+                // the inner `Arc<HashMapData<V_inner>>`).
+                for i in 0..arr.len {
+                    let _elem: HashMapKindedRef =
+                        std::ptr::read(arr.data.add(i as usize));
+                }
+                let data_layout =
+                    std::alloc::Layout::array::<HashMapKindedRef>(arr.cap as usize)
+                        .expect("invalid array layout");
+                std::alloc::dealloc(arr.data as *mut u8, data_layout);
+            }
+            let layout = std::alloc::Layout::new::<crate::v2::typed_array::TypedArray<Self>>();
+            std::alloc::dealloc(ptr as *mut u8, layout);
+        }
+    }
+    #[inline]
+    unsafe fn share_clone(elem: &Self) -> Self {
+        // Delegate to HashMapKindedRef's manual Clone impl (per-variant
+        // Arc::clone on the inner `Arc<HashMapData<V_inner>>` — single
+        // refcount bump per the §C.3 audit ground-truth).
+        elem.clone()
+    }
+    #[inline]
+    unsafe fn release_owned(_value: Self) {
+        // HashMapKindedRef's auto-derived Drop runs at scope-end (per
+        // variant: Arc::drop on the inner `Arc<HashMapData<V_inner>>`).
+    }
+}
+
 /// HashMap storage — keys buffer (string-typed v2-raw `*mut TypedArray<*const StringObj>`)
 /// + per-V monomorphized values buffer (`*mut TypedArray<V>`) + eager
 /// bucket-index for O(1) lookup.
@@ -1677,6 +1734,18 @@ pub enum HashMapKindedRef {
     /// `Arc<HashMapData<TraitObjectPtr>>` — V = `TraitObjectPtr`
     /// (#[repr(transparent)] newtype over `*const TraitObjectStorage`).
     TraitObject(Arc<HashMapData<TraitObjectPtr>>),
+    /// `Arc<HashMapData<HashMapKindedRef>>` — V = `HashMapKindedRef` itself
+    /// (recursive carrier). The inner HashMaps' values buffer is a flat
+    /// array of `HashMapKindedRef` payloads (per-V kinded refs, each
+    /// holding its own `Arc<HashMapData<V_inner>>`). Used by
+    /// `HashMap.groupBy` to produce `HashMap<string, HashMap>` outputs.
+    ///
+    /// Wave N hashmap-value-v-arm follow-up (cluster-2 closure-wave-C,
+    /// 2026-05-16). Per ADR-006 §2.7.24 Q25.B SUPERSEDED canonical
+    /// pattern (HashMapKindedRef carrier + per-V monomorphization at
+    /// the method tier) extended naturally to a recursive HashMap-value
+    /// V arm via the existing `HashMapValueElem` trait dispatch shape.
+    HashMap(Arc<HashMapData<HashMapKindedRef>>),
 }
 
 impl Clone for HashMapKindedRef {
@@ -1692,6 +1761,7 @@ impl Clone for HashMapKindedRef {
             HashMapKindedRef::Decimal(arc) => HashMapKindedRef::Decimal(Arc::clone(arc)),
             HashMapKindedRef::TypedObject(arc) => HashMapKindedRef::TypedObject(Arc::clone(arc)),
             HashMapKindedRef::TraitObject(arc) => HashMapKindedRef::TraitObject(Arc::clone(arc)),
+            HashMapKindedRef::HashMap(arc) => HashMapKindedRef::HashMap(Arc::clone(arc)),
         }
     }
 }
@@ -1725,6 +1795,8 @@ impl HashMapKindedRef {
     /// - `Decimal` → `NativeKind::Ptr(HeapKind::Decimal)`
     /// - `TypedObject` → `NativeKind::Ptr(HeapKind::TypedObject)`
     /// - `TraitObject` → `NativeKind::Ptr(HeapKind::TraitObject)`
+    /// - `HashMap` → `NativeKind::Ptr(HeapKind::HashMap)` (recursive carrier;
+    ///   Wave N hashmap-value-v-arm follow-up 2026-05-16)
     ///
     /// **StringV2 / DecimalV2 gate-flip dependency note:** at ckpt-2
     /// landing time (2026-05-14), the v2-raw `StringV2` / `DecimalV2`
@@ -1748,6 +1820,7 @@ impl HashMapKindedRef {
             HashMapKindedRef::Decimal(_) => NativeKind::Ptr(HeapKind::Decimal),
             HashMapKindedRef::TypedObject(_) => NativeKind::Ptr(HeapKind::TypedObject),
             HashMapKindedRef::TraitObject(_) => NativeKind::Ptr(HeapKind::TraitObject),
+            HashMapKindedRef::HashMap(_) => NativeKind::Ptr(HeapKind::HashMap),
         }
     }
 
@@ -1766,6 +1839,7 @@ impl HashMapKindedRef {
             HashMapKindedRef::Decimal(arc) => arc.len(),
             HashMapKindedRef::TypedObject(arc) => arc.len(),
             HashMapKindedRef::TraitObject(arc) => arc.len(),
+            HashMapKindedRef::HashMap(arc) => arc.len(),
         }
     }
 
@@ -1789,6 +1863,7 @@ impl HashMapKindedRef {
             HashMapKindedRef::Decimal(arc) => arc.contains_key(key),
             HashMapKindedRef::TypedObject(arc) => arc.contains_key(key),
             HashMapKindedRef::TraitObject(arc) => arc.contains_key(key),
+            HashMapKindedRef::HashMap(arc) => arc.contains_key(key),
         }
     }
 
@@ -1917,6 +1992,18 @@ fn hashmap_kref_display(
                 emit_key(f, i, k)?;
                 let v_ref: &TraitObjectPtr = unsafe { &*(*arc.values).data.add(i) };
                 write!(f, "<trait_object:{:p}>", v_ref.as_ptr())?;
+            }
+        }
+        HashMapKindedRef::HashMap(arc) => {
+            // Recursive carrier: each value is itself a HashMapKindedRef.
+            // Recurse via this same display formatter (Wave N
+            // hashmap-value-v-arm follow-up, cluster-2 closure-wave-C,
+            // 2026-05-16).
+            let keys = unsafe { read_keys(arc.keys) };
+            for (i, k) in keys.iter().enumerate() {
+                emit_key(f, i, k)?;
+                let inner_ref: &HashMapKindedRef = unsafe { &*(*arc.values).data.add(i) };
+                hashmap_kref_display(inner_ref, f)?;
             }
         }
     }
@@ -5341,6 +5428,124 @@ mod hashmap_mutation {
         assert_eq!(unsafe { v2_get_refcount(&(*v_y).header) }, 2);
         // x is unchanged (only in a).
         assert_eq!(unsafe { v2_get_refcount(&(*v_x).header) }, 1);
+    }
+
+    // ── V = HashMapKindedRef (recursive carrier) ──────────────────────────
+    //
+    // Wave N hashmap-value-v-arm follow-up (cluster-2 closure-wave-C,
+    // 2026-05-16). Pin the per-V `insert` / `len` / `get_share` API on
+    // `HashMapData<HashMapKindedRef>`. Storage-layer counterpart of
+    // `v2_group_by` in `shape-vm/executor/objects/hashmap_methods.rs`.
+
+    #[test]
+    fn hashmap_value_v_insert_appends_and_grows_index() {
+        let mut outer: HashMapData<HashMapKindedRef> = HashMapData::new();
+        // Two inner buckets — one for "small", one for "large".
+        let mut inner_small: HashMapData<i64> = HashMapData::new();
+        let mut inner_large: HashMapData<i64> = HashMapData::new();
+        unsafe {
+            inner_small.insert("a", 1);
+            inner_small.insert("b", 2);
+            inner_large.insert("c", 100);
+            outer.insert(
+                "small",
+                HashMapKindedRef::I64(Arc::new(inner_small)),
+            );
+            outer.insert(
+                "large",
+                HashMapKindedRef::I64(Arc::new(inner_large)),
+            );
+        }
+        assert_eq!(outer.len(), 2);
+        // Bucket index has registrations for both group keys.
+        let h_small = fnv1a_hash(b"small");
+        let h_large = fnv1a_hash(b"large");
+        assert!(outer.index.get(&h_small).is_some());
+        assert!(outer.index.get(&h_large).is_some());
+        // get_share returns a fresh per-variant Arc::clone-bumped copy.
+        let small_ref = outer.get_share("small").expect("small bucket present");
+        match small_ref {
+            HashMapKindedRef::I64(arc) => assert_eq!(arc.len(), 2),
+            other => panic!("unexpected variant {:?}", other.values_kind()),
+        }
+    }
+
+    #[test]
+    fn hashmap_value_v_remove_returns_inner_and_compacts() {
+        let mut outer: HashMapData<HashMapKindedRef> = HashMapData::new();
+        let mut inner_a: HashMapData<i64> = HashMapData::new();
+        let mut inner_b: HashMapData<i64> = HashMapData::new();
+        unsafe {
+            inner_a.insert("x", 1);
+            inner_b.insert("y", 2);
+            outer.insert("group-a", HashMapKindedRef::I64(Arc::new(inner_a)));
+            outer.insert("group-b", HashMapKindedRef::I64(Arc::new(inner_b)));
+            let removed = outer.remove("group-a");
+            assert!(removed.is_some());
+            // Removed bucket has the expected inner shape.
+            match removed.unwrap() {
+                HashMapKindedRef::I64(arc) => {
+                    assert_eq!(arc.len(), 1);
+                    assert_eq!(arc.get_share("x"), Some(1));
+                }
+                other => panic!("unexpected variant {:?}", other.values_kind()),
+            }
+        }
+        assert_eq!(outer.len(), 1);
+        // "group-b" reachable post-renumber.
+        let b_ref = outer.get_share("group-b").expect("group-b present");
+        match b_ref {
+            HashMapKindedRef::I64(arc) => assert_eq!(arc.get_share("y"), Some(2)),
+            other => panic!("unexpected variant {:?}", other.values_kind()),
+        }
+    }
+
+    #[test]
+    fn hashmap_value_v_clone_share_clones_inner_arcs() {
+        // HashMapData<V>::Clone walks elements via share_clone — for
+        // V = HashMapKindedRef this calls HashMapKindedRef::clone which
+        // is per-variant Arc::clone on the inner Arc<HashMapData<V_inner>>.
+        // The clone yields fresh buffer allocations holding bumped Arcs.
+        let mut outer: HashMapData<HashMapKindedRef> = HashMapData::new();
+        let inner: Arc<HashMapData<i64>> = {
+            let mut d: HashMapData<i64> = HashMapData::new();
+            unsafe { d.insert("k", 42) };
+            Arc::new(d)
+        };
+        // Refcount before insert: 1 (only `inner` owns).
+        assert_eq!(Arc::strong_count(&inner), 1);
+        unsafe { outer.insert("g", HashMapKindedRef::I64(Arc::clone(&inner))) };
+        // Refcount after insert: 2 (inner + outer's buffer share).
+        assert_eq!(Arc::strong_count(&inner), 2);
+        // Clone outer — share_clone bumps the inner Arc one more time.
+        let _outer_clone = outer.clone();
+        assert_eq!(Arc::strong_count(&inner), 3);
+        // Drop clone; refcount drops back to 2.
+        drop(_outer_clone);
+        assert_eq!(Arc::strong_count(&inner), 2);
+    }
+
+    #[test]
+    fn hashmap_value_v_drop_releases_inner_arcs() {
+        // HashMapData<HashMapKindedRef>::Drop calls
+        // <HashMapKindedRef as HashMapValueElem>::release_typed_array,
+        // which walks the buffer with ptr::read and lets each element
+        // drop (auto-derived → Arc::drop on inner Arc<HashMapData<V_inner>>).
+        let inner: Arc<HashMapData<i64>> = {
+            let mut d: HashMapData<i64> = HashMapData::new();
+            unsafe { d.insert("k", 7) };
+            Arc::new(d)
+        };
+        assert_eq!(Arc::strong_count(&inner), 1);
+        {
+            let mut outer: HashMapData<HashMapKindedRef> = HashMapData::new();
+            unsafe {
+                outer.insert("g", HashMapKindedRef::I64(Arc::clone(&inner)));
+            }
+            assert_eq!(Arc::strong_count(&inner), 2);
+            // outer drops at scope-end; the inner Arc share retires.
+        }
+        assert_eq!(Arc::strong_count(&inner), 1);
     }
 }
 
