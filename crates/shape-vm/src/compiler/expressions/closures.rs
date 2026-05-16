@@ -284,6 +284,53 @@ pub(crate) fn infer_closure_body_return_type_name_with_outer(
     explicit_return: Option<&TypeAnnotation>,
     enclosing_params: &[shape_ast::ast::FunctionParameter],
 ) -> Option<String> {
+    infer_closure_body_return_type_name_with_caller_context(
+        compiler,
+        params,
+        body,
+        explicit_return,
+        enclosing_params,
+        &[],
+    )
+}
+
+/// cluster-2-cw-IB-class-b (2026-05-16, supervisor R3 binding-ratified):
+/// caller-context-aware variant of the closure-body return-type inference.
+///
+/// `caller_arg_type_names[i]` is the type name (e.g. `"Vec<int>"`,
+/// `"int"`, `"string"`) of the i-th argument the closure is being called
+/// with at the call site. This seeds `param_types[params[i].name]` when
+/// the closure param has no explicit annotation AND no body-literal
+/// pairing — i.e. the case where the closure's param is inferred-typed
+/// at the call site rather than declared.
+///
+/// Class B fixture (inventory §B.2):
+///   `let xs: Array<int> = [1,2,3,4,5]`
+///   `let f = |inner| inner.sum()`
+///   `print(f(xs))`
+///
+/// At `f(xs)`, `caller_arg_type_names[0] = Some("Vec<int>")` (derived
+/// from `concrete_type_for_expr(xs)` → `Array(I64)` →
+/// `concrete_type_to_type_annotation` → `Generic("Vec", [int])` →
+/// `tracked_type_name_from_annotation` → `"Vec<int>"`). The body's
+/// terminal expression `inner.sum()` then resolves via the extended
+/// `expr_type` MethodCall arm: receiver `inner` has type
+/// `"Vec<int>"`; method `sum` on `Vec<scalar>` returns the element
+/// scalar `"int"`.
+///
+/// ADR-006 §2.7.5 stamp-at-compile-time: the caller-supplied arg type
+/// IS the proof of the closure param's type at the call site — no
+/// runtime probe, no fabricated Bool-default. The inference returns
+/// `None` when the body's terminal expression cannot be resolved
+/// against the seeded param_types.
+pub(crate) fn infer_closure_body_return_type_name_with_caller_context(
+    compiler: &mut BytecodeCompiler,
+    params: &[shape_ast::ast::FunctionParameter],
+    body: &[shape_ast::ast::Statement],
+    explicit_return: Option<&TypeAnnotation>,
+    enclosing_params: &[shape_ast::ast::FunctionParameter],
+    caller_arg_type_names: &[Option<String>],
+) -> Option<String> {
     use shape_ast::ast::{BinaryOp as Op, Literal, Statement};
     use std::collections::HashMap;
 
@@ -308,7 +355,7 @@ pub(crate) fn infer_closure_body_return_type_name_with_outer(
             }
         }
     }
-    for p in params {
+    for (param_idx, p) in params.iter().enumerate() {
         let Some(ident) = p.pattern.as_identifier() else {
             continue;
         };
@@ -333,6 +380,18 @@ pub(crate) fn infer_closure_body_return_type_name_with_outer(
         if !param_types.contains_key(ident) {
             if let Some(tn) = infer_param_type_from_outer_pairing(ident, body, &param_types) {
                 param_types.insert(ident.to_string(), tn);
+            }
+        }
+        // cluster-2-cw-IB-class-b: when no inferred type from local
+        // sources, fall through to the caller-context-supplied arg
+        // type. The arg's type at the call site IS the proof of the
+        // param's type when the closure is invoked there. ADR-006
+        // §2.7.5 stamp-at-compile-time — call-site arg type comes
+        // from `concrete_type_for_expr(arg)` at bytecode-emission, not
+        // from a runtime probe.
+        if !param_types.contains_key(ident) {
+            if let Some(Some(caller_tn)) = caller_arg_type_names.get(param_idx) {
+                param_types.insert(ident.to_string(), caller_tn.clone());
             }
         }
     }
@@ -425,6 +484,84 @@ pub(crate) fn infer_closure_body_return_type_name_with_outer(
                     }
                     _ => None,
                 }
+            }
+            // cluster-2-cw-IB-class-b (2026-05-16, supervisor R3 binding-
+            // ratified): MethodCall arm. Mirrors the JIT-side
+            // `well_known_method_return_kind` +
+            // `parametric_method_return_kind_from_receiver` classifier shape
+            // (`crates/shape-jit/src/mir_compiler/types.rs:818-1019`) — the
+            // single source of truth for kind-classification across both
+            // bytecode-emission and JIT-MIR layers.
+            //
+            // Class B fixture (inventory §B.2): `let f = |inner| inner.sum()`
+            // with `inner` resolved (via caller-context arg type) to
+            // `"Vec<int>"`. `inner.sum()` matches the parametric
+            // `("sum"|..., Array(elem))` arm and returns the element
+            // scalar `"int"`. The downstream conduit value-call
+            // destination-stamping pass then stamps the Call-terminator's
+            // destination slot with `ConcreteType::I64`, and the JIT-MIR
+            // `slot_kinds` projection picks up `NativeKind::Int64`, closing
+            // the `print(f(xs))` chain.
+            //
+            // Invariant-return methods (size/len/length/count → int,
+            // isEmpty/contains/has → bool) are receiver-shape-agnostic
+            // and matched first. Parametric methods consult the
+            // receiver's resolved type name — supports `Vec<scalar>`
+            // shape recognition (i.e. element-typed accessors on typed
+            // arrays).
+            //
+            // No tag-bit decode, no Bool-default fallback, no fabricated
+            // default — when the receiver type isn't recognised or the
+            // method name isn't in either classifier, returns `None` so
+            // the outer caller's value-call stamping stays Void per
+            // §2.7.5.1 / §2.7.7 #9.
+            Expr::MethodCall { receiver, method, args, .. } => {
+                // Invariant-across-receiver methods: classify from name
+                // alone without needing the receiver's type.
+                let invariant_kind: Option<&'static str> = match method.as_str() {
+                    "size" | "len" | "length" | "count" => Some("int"),
+                    "isEmpty" | "is_empty" | "has" | "contains" => Some("bool"),
+                    _ => None,
+                };
+                if let Some(kind) = invariant_kind {
+                    return Some(kind.to_string());
+                }
+
+                // Parametric methods: receiver's resolved type name
+                // determines the return type. Resolve the receiver via
+                // the same expr_type walker (so `inner` resolves to its
+                // seeded param_types entry like "Vec<int>").
+                let recv_ty = expr_type(compiler, param_types, receiver)?;
+
+                // `Vec<T>` element-typed accessors. The element name
+                // strips the `Vec<...>` wrapper. Matches the JIT-side
+                // `("sum" | "mean" | "min" | "max", ConcreteType::Array
+                // (elem))` arm at `types.rs:976-981`.
+                if let Some(elem) = recv_ty
+                    .strip_prefix("Vec<")
+                    .and_then(|s| s.strip_suffix('>'))
+                {
+                    match method.as_str() {
+                        "sum" | "mean" | "min" | "max" | "get" => {
+                            // .get(i) returns element T directly per the
+                            // JIT-side classifier; .sum/.mean/.min/.max
+                            // also return element T (the typed-array
+                            // method registry returns
+                            // `KindedSlot::from_<elem>` per receiver-
+                            // element kind).
+                            if BytecodeCompiler::tracker_type_name_is_primitive(elem) {
+                                return Some(elem.to_string());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                // Receiver-type-specific arms for built-in scalar types
+                // can be added here as needed; bounded to the same set
+                // the JIT-side classifier supports to avoid drift.
+                let _ = args;
+                None
             }
             _ => None,
         }

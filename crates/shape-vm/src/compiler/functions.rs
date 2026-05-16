@@ -1149,6 +1149,13 @@ impl BytecodeCompiler {
             std::mem::take(&mut self.local_callable_return_types);
         let saved_local_array_callable_return_types =
             std::mem::take(&mut self.local_array_callable_return_types);
+        // cluster-2-cw-IB-class-b: snapshot/restore retained closure
+        // bodies alongside the existing callable-binding maps so the
+        // outer function's `let f = |..|` peek doesn't leak into the
+        // nested function compile (or get overwritten by a same-slot
+        // binding inside the nested function).
+        let saved_local_callable_closure_bodies =
+            std::mem::take(&mut self.local_callable_closure_bodies);
         let saved_reference_value_locals = std::mem::take(&mut self.reference_value_locals);
         let saved_exclusive_reference_value_locals =
             std::mem::take(&mut self.exclusive_reference_value_locals);
@@ -1221,6 +1228,7 @@ impl BytecodeCompiler {
         self.local_callable_pass_modes.clear();
         self.local_callable_return_reference_summaries.clear();
         self.local_callable_return_types.clear();
+        self.local_callable_closure_bodies.clear();
         self.reference_value_locals.clear();
         self.exclusive_reference_value_locals.clear();
         self.immutable_locals.clear();
@@ -1497,6 +1505,11 @@ impl BytecodeCompiler {
                             saved_local_callable_return_types.clone();
                         self.local_array_callable_return_types =
                             saved_local_array_callable_return_types.clone();
+                        // cluster-2-cw-IB-class-b: restore retained
+                        // closure bodies after the nested function
+                        // compile completes.
+                        self.local_callable_closure_bodies =
+                            saved_local_callable_closure_bodies.clone();
                         self.reference_value_locals = saved_reference_value_locals;
                         self.exclusive_reference_value_locals =
                             saved_exclusive_reference_value_locals;
@@ -1606,6 +1619,8 @@ impl BytecodeCompiler {
         // maps alongside.
         self.local_callable_return_types = saved_local_callable_return_types;
         self.local_array_callable_return_types = saved_local_array_callable_return_types;
+        // cluster-2-cw-IB-class-b: restore retained closure bodies.
+        self.local_callable_closure_bodies = saved_local_callable_closure_bodies;
         self.reference_value_locals = saved_reference_value_locals;
         self.exclusive_reference_value_locals = saved_exclusive_reference_value_locals;
         self.reference_value_module_bindings = saved_reference_value_module_bindings;

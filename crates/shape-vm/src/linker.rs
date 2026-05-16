@@ -477,6 +477,12 @@ pub fn link(program: &Program) -> Result<LinkedProgram, LinkError> {
             function_return_concrete_types: program.function_return_concrete_types.clone(),
             monomorphized_method_call_sites:
                 program.monomorphized_method_call_sites.clone(),
+            // cluster-2-cw-IB-class-b: propagate the value-call return-
+            // ConcreteType side-table through the parallel-link path so
+            // the conduit producer can stamp value-call destinations
+            // identically to the sequential path below.
+            value_call_return_concrete_types:
+                program.value_call_return_concrete_types.clone(),
             trait_method_symbols: program.trait_method_symbols.clone(),
             foreign_functions: program.foreign_functions.clone(),
             native_struct_layouts: program.native_struct_layouts.clone(),
@@ -590,6 +596,12 @@ pub fn link(program: &Program) -> Result<LinkedProgram, LinkError> {
         function_return_concrete_types: program.function_return_concrete_types.clone(),
         monomorphized_method_call_sites:
             program.monomorphized_method_call_sites.clone(),
+        // cluster-2-cw-IB-class-b: propagate the value-call return-
+        // ConcreteType side-table through the sequential-link path so
+        // the conduit producer's value-call destination stamping fires
+        // on linked programs.
+        value_call_return_concrete_types:
+            program.value_call_return_concrete_types.clone(),
         trait_method_symbols: program.trait_method_symbols.clone(),
         foreign_functions: program.foreign_functions.clone(),
         native_struct_layouts: program.native_struct_layouts.clone(),
@@ -670,6 +682,12 @@ pub fn linked_to_bytecode_program(linked: &LinkedProgram) -> BytecodeProgram {
         function_return_concrete_types: linked.function_return_concrete_types.clone(),
         monomorphized_method_call_sites:
             linked.monomorphized_method_call_sites.clone(),
+        // cluster-2-cw-IB-class-b: propagate the value-call return-
+        // ConcreteType side-table through the LinkedProgram →
+        // BytecodeProgram round-trip; the conduit producer consumes
+        // this on the post-link BytecodeProgram surface.
+        value_call_return_concrete_types:
+            linked.value_call_return_concrete_types.clone(),
         top_level_mir: None,
         compiled_annotations: HashMap::new(),
         trait_method_symbols: linked.trait_method_symbols.clone(),

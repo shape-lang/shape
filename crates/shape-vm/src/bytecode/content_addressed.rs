@@ -244,6 +244,22 @@ pub struct Program {
     pub monomorphized_method_call_sites:
         HashMap<(shape_ast::ast::span::Span, Option<usize>), usize>,
 
+    /// ADR-006 §2.7.5 conduit (cluster-2-cw-IB-class-b close, 2026-05-16):
+    /// content-addressed mirror of
+    /// `BytecodeProgram.value_call_return_concrete_types`. Survives the
+    /// `Program` → `link()` → `LinkedProgram` → `BytecodeProgram`
+    /// round-trip so the conduit producer can stamp value-call
+    /// `TerminatorKind::Call` destination slots from the closure-bound
+    /// callee's inferred return `ConcreteType`. Not serialised —
+    /// `ConcreteType` carries opaque registry IDs that aren't a stable
+    /// wire shape.
+    #[serde(skip, default)]
+    pub value_call_return_concrete_types:
+        HashMap<
+            (shape_ast::ast::span::Span, Option<usize>),
+            shape_value::v2::ConcreteType,
+        >,
+
     /// DataFrame schema for column name resolution.
     pub data_schema: Option<DataFrameSchema>,
 
@@ -427,6 +443,19 @@ pub struct LinkedProgram {
     #[serde(skip, default)]
     pub monomorphized_method_call_sites:
         HashMap<(shape_ast::ast::span::Span, Option<usize>), usize>,
+
+    /// ADR-006 §2.7.5 conduit (cluster-2-cw-IB-class-b close, 2026-05-16):
+    /// LinkedProgram mirror of `Program.value_call_return_concrete_types`
+    /// — propagated through the linker so the conduit producer can stamp
+    /// value-call `TerminatorKind::Call` destination slots from the
+    /// closure-bound callee's inferred return `ConcreteType`. Not
+    /// serialised — same rationale.
+    #[serde(skip, default)]
+    pub value_call_return_concrete_types:
+        HashMap<
+            (shape_ast::ast::span::Span, Option<usize>),
+            shape_value::v2::ConcreteType,
+        >,
 
     /// Trait method dispatch registry.
     pub trait_method_symbols: HashMap<String, String>,

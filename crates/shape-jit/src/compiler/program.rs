@@ -312,6 +312,7 @@ impl JITCompiler {
                 function_local_concrete_types: Vec::new(),
                 function_return_concrete_types: Vec::new(),
                 monomorphized_method_call_sites: Default::default(),
+                value_call_return_concrete_types: Default::default(),
                 top_level_mir: None,
                 compiled_annotations: program.compiled_annotations.clone(),
                 trait_method_symbols: program.trait_method_symbols.clone(),

@@ -396,6 +396,48 @@ pub struct BytecodeProgram {
     pub monomorphized_method_call_sites:
         std::collections::HashMap<(shape_ast::ast::span::Span, Option<usize>), usize>,
 
+    /// ADR-006 §2.7.5 conduit — per-call-site value-call return
+    /// `ConcreteType` side-table (cluster-2-cw-IB-class-b close,
+    /// 2026-05-16; supervisor R3 binding-ratified).
+    ///
+    /// Populated at bytecode-compile time by
+    /// `compile_expr_function_call`'s value-call branch
+    /// (`crates/shape-vm/src/compiler/expressions/function_calls.rs:498-619`)
+    /// when the callee resolves to a local closure binding whose body's
+    /// return `ConcreteType` is recoverable via caller-context inference
+    /// (i.e. caller-supplied typed-array args reveal the closure's
+    /// otherwise-inferred typed-array param). The composite key
+    /// `(call-site Span, calling_function)` mirrors the
+    /// `monomorphized_method_call_sites` shape so identical Spans inside
+    /// different specialization contexts can carry distinct entries.
+    ///
+    /// Consumed at the conduit producer
+    /// (`infer_top_level_concrete_types_from_mir_with_resolvers`'s
+    /// value-call Call-terminator pass) — when the side-table has an
+    /// entry for `(terminator.span, current_function)` AND the
+    /// terminator's `func` operand reads from a local slot (the
+    /// closure-bound slot), the destination slot's `ConcreteType` is
+    /// stamped from the side-table value. The downstream JIT consumer's
+    /// `place_native_kind` projection then picks up the destination's
+    /// `NativeKind`, and the `print` Call-terminator's kinded dispatch
+    /// at `terminators.rs:447-744` reaches its matching scalar arm
+    /// (e.g. `Some(NativeKind::Int64) => print_i64`).
+    ///
+    /// Class B coverage per inventory §B.2: closure body with INFERRED
+    /// typed-array param (the `let f = |inner| inner.sum(); print(f(xs))`
+    /// fixture). Pre-fix: VM=15 / JIT=NotImplemented(SURFACE,
+    /// `print` operand NativeKind=None). Post-fix: VM=15 / JIT=15.
+    ///
+    /// `#[serde(skip, default)]` per the same wire-format rationale as
+    /// `function_return_concrete_types` — `ConcreteType` carries opaque
+    /// per-program registry IDs that aren't a stable wire shape.
+    #[serde(skip, default)]
+    pub value_call_return_concrete_types:
+        std::collections::HashMap<
+            (shape_ast::ast::span::Span, Option<usize>),
+            shape_value::v2::ConcreteType,
+        >,
+
     /// Type schema registry for TypedObject field resolution
     /// Used to convert TypedObject back to Object when needed
     #[serde(default)]

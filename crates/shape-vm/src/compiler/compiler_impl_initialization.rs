@@ -51,6 +51,11 @@ impl BytecodeCompiler {
             module_binding_callable_return_types: HashMap::new(),
             local_array_callable_return_types: HashMap::new(),
             module_binding_array_callable_return_types: HashMap::new(),
+            // cluster-2-cw-IB-class-b: retained closure-literal AST for
+            // local `let f = |..| ..` bindings; consumed by value-call
+            // return-kind inference at `compile_expr_function_call`.
+            local_callable_closure_bodies: HashMap::new(),
+            module_binding_callable_closure_bodies: HashMap::new(),
             dyn_locals: HashMap::new(),
             dyn_module_bindings: HashMap::new(),
             function_return_reference_summaries: HashMap::new(),
@@ -515,6 +520,16 @@ impl BytecodeCompiler {
                 monomorphized_method_call_sites: self
                     .program
                     .monomorphized_method_call_sites
+                    .clone(),
+                // cluster-2-cw-IB-class-b: per-call-site value-call return
+                // ConcreteType side-table propagated through the content-
+                // addressed path so the conduit producer can stamp value-
+                // call `TerminatorKind::Call` destinations from the
+                // closure-bound callee's inferred return type. Same path
+                // shape as `monomorphized_method_call_sites`.
+                value_call_return_concrete_types: self
+                    .program
+                    .value_call_return_concrete_types
                     .clone(),
                 // Closure spec §14.6 (H6.5): propagate layouts through the
                 // content-addressed path so `load_linked_program` → VM
