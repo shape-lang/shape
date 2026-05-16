@@ -7926,3 +7926,76 @@ Every ground-truthable claim in supervisor/team-lead relay text MUST be grep-ver
 ---
 
 *Next session: closure-wave-1 (hypothesis a) sub-agent dispatch + close + merge → closure-wave-2 (hypothesis b) sub-agent dispatch + close + merge → cluster-2-inventory-audit-day dispatch (sections A-I per supervisor R2/R3/R4) → cluster-2 closure waves per inventory recommendation → cluster-2 close attempt → Phase 4 (trait Add/AddAssign for user types) → v1 close attempt.*
+
+---
+
+## Wave 3 Round 6 cluster-2-closure-wave-1 close — V3-S6f Smoke 2 JIT TIMEOUT RESOLVED; smoke matrix 4/4 VM == JIT at canonical (2026-05-16)
+
+Hypothesis (a) fix landed per cluster-2-empirical-verification disposition. MIR-lowering generic-iterator branch placeholder stub replaced with per-iterable-ConcreteType monomorphic state machine via existing MIR vocabulary. V3-S6f Smoke 2 JIT TIMEOUT rc=124 RESOLVED at canonical post-merge HEAD `cc5ceb0e`.
+
+### Sub-agent close (6e9ffbc5; merged at cc5ceb0e)
+
+- Branch: `bulldozer-strictly-typed-cluster-2-closure-wave-1-iter-statemachine` (from 6a485051)
+- Close commit: `6e9ffbc5`; merge commit `cc5ceb0e` on canonical (no-ff merge)
+- Diff: +306 / -55 across 4 files: `crates/shape-vm/src/mir/lowering/expr.rs` +211/-55 (lower_for_expr fix) + `crates/shape-vm/src/mir/lowering/stmt.rs` +109/-0 (lower_for_loop ForIn arm parallel fix) + `crates/shape-vm/src/mir/lowering/mod.rs` +40/-0 (param-slot ConcreteType seeding) + AGENTS.md +1
+- Well within 400-600 LoC estimate from empirical-verification §6 recommendation
+
+### Migration shape
+
+Uniform index-counter state machine emitted across ALL non-Range iterables using existing MIR vocabulary (Call/Place::Index/BinaryOp::Add/BinaryOp::Lt/SwitchBool; NO new StatementKind variants):
+
+```
+bb_pre:  iter_slot = <iterable>; __idx = 0
+         __len = iter_slot.len()                ; Call terminator
+bb_hdr:  __cond = __idx < __len                 ; BinaryOp::Lt
+         switchbool __cond -> bb_body, bb_after
+bb_body: __elem = iter_slot[__idx]              ; Place::Index
+         <destructure pattern>; <body>
+         __idx = __idx + 1                      ; BinaryOp::Add
+         goto bb_hdr
+```
+
+Per-iterable monomorphization happens downstream via JIT's existing v2 fast paths: `v2_array_len` + `v2_array_get(arr_ptr, idx, elem_kind)` inline for typed-array carriers (Array<T> / Vec<T>) when `v2_typed_array_elem_kind(receiver_place).is_some()`; `jit_call_method("len")` + `inline_array_get(base, idx)` generic fallback for HashMap/HashSet/Deque/PriorityQueue/Channel via existing receiver_kind delegation matrix at `crates/shape-jit/src/ffi/call_method/mod.rs:560-628`. All iterable cases covered (no SURFACE).
+
+### Parallel-implementation defection-attractor preemption
+
+Fix landed at BOTH `lower_for_expr` (expr.rs:1035) AND `lower_for_loop` ForIn arm (stmt.rs:471) per Q1 (Statement::For arm reachability) finding. Statement::For arm IS reachable from parser (`crates/shape-ast/src/parser/statements.rs:63` Rule::for_loop → Statement::For); not exercised by Smoke 2 fixture but exercised by other AST shapes. Per supervisor cadence shift refuse-on-sight #10 anti-deferral + parallel-implementation refuse-on-sight class, preempted defection-attractor pattern.
+
+### Post-merge gates at canonical cc5ceb0e (ALL PASS)
+
+- `cargo check --workspace --lib --tests` EXIT=0 ✅
+- `bash scripts/verify-merge.sh` 12/12 PASS EXIT=0 ✅
+- `bash scripts/check-no-dynamic.sh` EXIT=0 ✅
+- **Smoke matrix 4/4 VM == JIT at canonical fixture (release binary rebuilt):**
+  - Smoke 1 (scalar loop): VM 4950 / JIT 4950 ✅
+  - **Smoke 2 (`xs.map(|x|x*2).sum()`): VM 30 / JIT 30 ✅ ← LOAD-BEARING NEW PASSING** (was rc=124 TIMEOUT pre-fix; V3-S6f territory RESOLVED)
+  - Smoke 3 (canonical `let t = X{}` UFCS): VM x / JIT x ✅
+  - Smoke 4 (`Set()` + `.add()` + `.size()`): VM 2 / JIT 2 ✅
+
+### Hypothesis (b) latency disposition (supervisor 2026-05-16)
+
+(b) confirmed-latent + NON-GATING via SHAPE_JIT_MIR_TRACE: Phase-C `inline_closure_body_into_specialization` at `crates/shape-vm/src/compiler/monomorphization/substitution.rs:2247` still returns Ok but post-MIR bb4 shows un-inlined `Call(Copy(SlotId(2)), [item])`. Indirect-call runtime infrastructure works correctly (Smoke 2 JIT returns 30; correctness preserved). Folded into cluster-2-inventory-audit-day section A scope per supervisor disposition — audit recommends whether closure-wave-2 dispatches immediately within cluster-2 / defers / folds elsewhere.
+
+### Imprecision instance 31 (cumulative 44; all caught pre-merge)
+
+| # | Source layer | Imprecision shape | Caught at |
+|---|---|---|---|
+| 31 | sub-agent-execution-report (architectural-prediction subclass) | Empirical-verification §2.5 recommendation didn't mention JIT-side v2-fast-path consumer requires `concrete_types[receiver_slot] = Array(elem)` seeded for param slots; "MIR shape fix sufficient → wrong, consumer-side kind-classification gap revealed" | Sub-agent's empirical step 4: Smoke 2 JIT returned 0 instead of 30 with receiver_kind=UInt64 §2.7.5 carrier fallback; fixed in-scope by extending `crates/shape-vm/src/mir/lowering/mod.rs::lower_function_detailed` to seed `local_typed_array_element_types` from typed-array param annotations |
+
+Same architectural-prediction-subclass pattern as V3-S6 chain instances 37-41. In-scope-recovery means closure-wave-1 absorbed it cleanly (not deferred). Cumulative 44; 0 bad-code merges into canonical preserved across cluster-0+1+cluster-2 trajectory.
+
+Sub-agent watch-out (no imprecision logged): initial edit applied to wrong repo path (canonical instead of worktree); caught when debug marker never fired; reverted main repo + applied to worktree. No bad-code merged.
+
+### Reading 3 + Reading 4 candidates
+
+Reading 3 (logged at cluster-2-empirical-verification close, 2026-05-16) — discipline-machinery elaboration exceeded execution capacity at empirical-verification dispatch boundary; cadence-tightening binding landed at supervisor disposition 2026-05-16.
+
+Reading 4 candidate (2026-05-16) — closure-wave-1's clean in-scope recovery of imprecision 31 validates the architectural-prediction-subclass-recovery pattern: when a hypothesis-fix sub-agent surfaces a consumer-side kind-classification gap mid-execution, in-scope fix (extend the kind-classification producer) is preferable to surface-and-stop-then-dispatch-separately (which would have spawned a closure-wave-1-prime sub-cluster). Pattern shape: the architectural-prediction subclass is bounded-within-sub-cluster-territory when the gap surfaces during empirical execution of the same migration shape. Sequentially-dispatched closure-wave-2 (hypothesis b) territory may absorb (b) latency in the same shape if its sub-agent surfaces a consumer-side gap during execution.
+
+### AGENTS.md V3-S6 chain rows annotation (carry-forward; supervisor disposition pending)
+
+The team-lead surfacing at cluster-2-empirical-verification close subsection (this doc §"V3-S6 chain ref annotations") flagged AGENTS.md V3-S6 chain rows (lines 223+) exceed ~10-edit budget per supervisor's bundle-with-empirical-merge authorization. Supervisor disposition pending; not blocking cluster-2-closure-wave-1 close. Carry-forward as known follow-up; revisit at next ceremony with budget capacity OR dedicate doc-discipline sub-cluster.
+
+---
+
+*Next session: cluster-2-inventory-audit-day sub-agent dispatch (sections A-I per supervisor R2/R3/R4; section A consumes (a) closure-wave-1 close + (b) latent finding; section I = supervisor's authorization at closure-wave dispatch time per R4) → cluster-2 closure waves per inventory recommendation → cluster-2 close attempt → Phase 4 (trait Add/AddAssign for user types) → v1 close attempt.*
