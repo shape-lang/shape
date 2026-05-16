@@ -75,6 +75,38 @@ pub(crate) static JIT_ARC_RETAIN_CALLS: AtomicU64 = AtomicU64::new(0);
 pub(crate) static JIT_ARC_RELEASE_CALLS: AtomicU64 = AtomicU64::new(0);
 pub(crate) static JIT_ARC_RELEASE_FREES: AtomicU64 = AtomicU64::new(0);
 
+/// String-carrier-specific counters for the cluster-2-closure-wave-E
+/// measurement protocol (cluster-2-inventory §F). These track the §2.7.5
+/// `Arc::into_raw(Arc<String>) as u64` carrier path independently from the
+/// `UnifiedValue<T>` counters above — `arc_string_constant` allocates an
+/// `Arc<String>` and bumps the strong count to 2 (the "permanent share"
+/// + "active share" discipline at `ffi/string.rs:111-143`), while the
+/// JIT-emitted retain/release pairs operate on the active share via
+/// `jit_arc_string_retain` / `jit_arc_string_release`.
+///
+/// The leak shape per the inventory §F.3 estimate is one permanent share
+/// per distinct `arc_string_constant` allocation never released; these
+/// counters quantify it directly:
+///
+/// - `STRING_CONSTANT_ALLOCS` = number of `arc_string_constant` calls
+///   (one per JIT-compile-time `MirConstant::Str` / `MirConstant::StringId`
+///   / `MirConstant::Method` materialization)
+/// - `STRING_RETAIN_CALLS` = `jit_arc_string_retain` invocations (per
+///   runtime active-share copy)
+/// - `STRING_RELEASE_CALLS` = `jit_arc_string_release` invocations (per
+///   runtime active-share drop)
+/// - `STRING_RELEASE_FREES` = times the release reached refcount 0 (the
+///   §2.7.5 `Arc<String>` was actually deallocated). With the permanent-
+///   share discipline this should equal 0 for every constant produced by
+///   `arc_string_constant` (the leak surface).
+///
+/// Leak quantification: `STRING_CONSTANT_ALLOCS - STRING_RELEASE_FREES` =
+/// number of permanently-leaked `Arc<String>` allocations at program end.
+pub(crate) static STRING_CONSTANT_ALLOCS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static STRING_RETAIN_CALLS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static STRING_RELEASE_CALLS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static STRING_RELEASE_FREES: AtomicU64 = AtomicU64::new(0);
+
 /// Offset of the `refcount: AtomicU32` field within a JIT-emitted
 /// `UnifiedValue<T>` allocation. Must match `#[repr(C)]` layout of
 /// `crate::ffi::jit_kinds::UnifiedValue`.

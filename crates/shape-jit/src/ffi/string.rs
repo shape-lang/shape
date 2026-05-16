@@ -79,6 +79,12 @@ pub extern "C" fn jit_arc_string_retain(bits: u64) {
     if bits == 0 {
         return;
     }
+    // cluster-2-cw-E measurement (cluster-2-inventory §F): track active-
+    // share retain count for the §2.7.5 `Arc<String>` carrier. Independent
+    // counter from `JIT_ARC_RETAIN_CALLS` (the UnifiedValue<T> path) per
+    // the carrier-shape distinction at this module's docstring.
+    super::arc::STRING_RETAIN_CALLS
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     // SAFETY: see fn docs. The §2.7.5 String carrier contract names the
     // bits as `Arc::into_raw(Arc<String>) as u64`; `Arc::increment_strong_
     // count` operates on the Arc control block at offset -16.
@@ -98,8 +104,32 @@ pub extern "C" fn jit_arc_string_release(bits: u64) {
     if bits == 0 {
         return;
     }
-    // SAFETY: see fn docs.
+    // cluster-2-cw-E measurement (cluster-2-inventory §F): track active-
+    // share release count + drop-to-zero count for the §2.7.5 `Arc<String>`
+    // carrier. Independent counters from `JIT_ARC_RELEASE_CALLS` /
+    // `JIT_ARC_RELEASE_FREES` (the UnifiedValue<T> path) per the carrier-
+    // shape distinction at this module's docstring.
+    super::arc::STRING_RELEASE_CALLS
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // SAFETY: see fn docs. Read strong-count BEFORE decrement to detect
+    // the drop-to-zero transition (Arc's decrement returns void; we cannot
+    // observe the post-decrement count atomically without racing). The
+    // `strong_count == 1` read identifies the slot that will reach zero
+    // on this decrement — `Acquire` ordering pairs with the matching
+    // `Release` decrement to synchronize with the eventual drop.
     unsafe {
+        // Construct a temporary Arc to inspect strong count without
+        // perturbing it. SAFETY: bits is a live Arc::into_raw payload per
+        // the function-level contract; `from_raw` adopts one share, the
+        // following `into_raw` returns it, so strong_count is unperturbed
+        // across this block.
+        let arc = Arc::from_raw(bits as *const String);
+        let pre_release_count = Arc::strong_count(&arc);
+        let _ = Arc::into_raw(arc); // restore the share we adopted
+        if pre_release_count == 1 {
+            super::arc::STRING_RELEASE_FREES
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         Arc::decrement_strong_count(bits as *const String);
     }
 }
@@ -131,6 +161,14 @@ pub extern "C" fn jit_arc_string_release(bits: u64) {
 /// without a paired `Box::from_raw`).
 #[inline]
 pub fn arc_string_constant(s: String) -> u64 {
+    // cluster-2-cw-E measurement (cluster-2-inventory §F): track per-
+    // distinct-string-constant allocation count. With the permanent-share
+    // discipline below, every increment to this counter represents an
+    // `Arc<String>` allocation that is never released (the §F.1 leak
+    // surface). At program end:
+    //   leaked_arc_strings = STRING_CONSTANT_ALLOCS - STRING_RELEASE_FREES
+    super::arc::STRING_CONSTANT_ALLOCS
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let arc = Arc::new(s);
     let ptr = Arc::into_raw(arc);
     // SAFETY: `ptr` was just produced by `Arc::into_raw`. The increment
