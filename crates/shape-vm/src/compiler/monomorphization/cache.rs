@@ -717,6 +717,22 @@ impl BytecodeCompiler {
         // Inline each closure body in turn.
         for (i, spec_info) in closure_defs.iter().enumerate() {
             let closure_param_name = &callee_closure_param_names[i];
+            // cluster-2 V3-S6f empirical-verification trace (2026-05-16).
+            // Narrow SHAPE_JIT_DEBUG site confirming Phase-C closure-aware
+            // inlining was attempted for this specialization. Matches
+            // existing infrastructure pattern (e.g.
+            // terminators.rs:621/712, closure.rs:261/269/438).
+            if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
+                eprintln!(
+                    "[mono-phaseC] inline_closure_body_into_specialization \
+                     fn={} closure_param={} closure_param_count={} \
+                     closure_body_stmts={}",
+                    mono_key,
+                    closure_param_name,
+                    spec_info.param_names.len(),
+                    spec_info.body.len(),
+                );
+            }
             if substitution::inline_closure_body_into_specialization(
                 &mut specialized_def,
                 closure_param_name,
@@ -726,6 +742,12 @@ impl BytecodeCompiler {
             )
             .is_err()
             {
+                if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
+                    eprintln!(
+                        "[mono-phaseC] inline FAILED for fn={}",
+                        mono_key,
+                    );
+                }
                 // Inlining bailed — fall back to generic path.
                 return Ok(None);
             }
