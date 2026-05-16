@@ -8327,3 +8327,87 @@ Per supervisor 2026-05-16: 2-3.5 sessions to v1 remaining (cluster-1.5 Q25.C Tra
 ---
 
 *Next session: user authorizes `phase-3-cluster-2-close` tag on canonical 938929de → cluster-1.5 Q25.C TraitObject rebuild dispatch (per Surface A (c) split user disposition; VTable + Self-arg runtime check + generic-method type-info + ETO-001/002 errors) → Phase 4 (trait Add/AddAssign for user types) → v1 close attempt.*
+
+---
+
+## Wave 3 Round 12 cluster-1.5 Q25.C TraitObject rebuild close — Smoke 5 dyn T LANDED; producer/consumer carrier-shape mismatch fix (2026-05-16)
+
+Cluster-1.5 Q25.C closed at canonical `0f347fa4` (merge of `c421d30a`); ADR-006 §Q25.C.5 addendum at `86ad6676`. `phase-3-cluster-2-close` tag annotated at `efcf805c` → points to `938929de`. Smoke matrix **5/5 VM == JIT preserved** at canonical post-merge.
+
+### Sub-cluster close summary
+
+| Diff | Disposition |
+|---|---|
+| +259/-41 across 4 files (trait_object_ops.rs +59/-41 + trait_object_thunks.rs +15 + 184-line deliverable + AGENTS.md) | Smoke 5 VM=x/JIT=x (pre-fix VM=x then SIGABRT EC=134; post-fix EC=0); 3 producer-site flips at trait_object_ops.rs (op_box_trait_object + op_dyn_method_call + rebox_self_value) |
+
+### Root cause + fix
+
+§Q25.C.5 amendment Wave 2 Agent E (Round 2 2026-05-14) landed v2-raw HeapHeader migration on the 4 consumer dispatch tables but did NOT land the matching producer-side flip. Mixed-dispatch state ~2-3 weeks: `Arc::new(TraitObjectStorage{...}) + Arc::into_raw` producers fed `release_elem` consumers that `dealloc(ptr, Layout::new::<TraitObjectStorage>())` missing the ArcInner prefix → SIGABRT `free(): invalid pointer` at module-binding teardown for any `let t: dyn T = X{}` shape.
+
+Fix per ADR-005 §1 single-discriminator + ADR-006 §2.3 Path B Ptr-newtype canonical: 3 producer-site flips from `Arc::new(...)` to direct `TraitObjectStorage::_new(...)` ALLOC-pattern matching the consumer `release_elem` / `_drop` Layout.
+
+### Smoke 5 fixture LANDED
+
+At `/tmp/smokes/s5.shape` (kickoff prompt prose adapted to actual Shape grammar — `dyn T` annotation + `let t: dyn T = X{}` coercion per `compiler/statements.rs:4426-4463`; no `box()` keyword exists in Shape):
+```shape
+trait T { name(): string }
+type X {}
+impl T for X { method name() { "x" } }
+let t: dyn T = X {}
+print(t.name())
+```
+Pre-fix VM=x then SIGABRT EC=134; post-fix VM=x JIT=x both EC=0.
+
+### Per-Q25.C.x disposition
+
+| Subsection | Status | Disposition |
+|---|---|---|
+| Q25.C.1 universal-dyn Erase_T | LANDED (TypedObject case) | Scalar-trait-auto-boxing deferred (not load-bearing for Smoke 5) |
+| Q25.C.2 Self-arg vtable-identity check | LANDED at invoke_dyn_unified | Cluster-1.5-close-criterion MET |
+| Q25.C.3 generic method TypeInfo | PARTIAL — VTableEntry::Generic dispatch treats as Direct; TypeInfo struct never constructed | **DEFER post-v1** (not load-bearing for Smoke 5) |
+| Q25.C.4 #[static_only] opt-out | UNCOVERED at HEAD (zero parser/AST refs; ETO-002 unreachable) | **DEFER post-v1** (not load-bearing for any current Shape program) |
+| Q25.C.5 VTable + 6-variant + thunk emission | LANDED — bug fixed this dispatch | Cluster-1.5-close-criterion MET |
+| Q25.C.6 IC devirtualization | UNCOVERED at HEAD | **DEFER post-v1 polish/perf workstream** (optimization tier; ~500-1500 LoC; cluster-1.5-fast-path candidate) |
+| Q25.C.7 LSP cost-class inlay hints | UNCOVERED at HEAD | **DEFER post-v1 polish/tooling workstream** (tooling tier; depends on Q25.C.6; ~300-500 LoC; cluster-1.5-lsp candidate) |
+
+### Cluster-1.5 close scope disambiguation (per supervisor 2026-05-16)
+
+Cluster-1.5 close criterion = Smoke 5 (DONE this dispatch) + v2-raw-heap-audit (PENDING — `vw_clone`/`vw_drop` precedent territory per CLAUDE.md Known Constraints; cluster-1.5 deliverable). Q25.C.3/.4/.6/.7 are NOT cluster-1.5-close-gating; bounded follow-ups; ALL DEFER post-v1 per team-lead disposition 2026-05-16.
+
+### ADR-006 §Q25.C.5 addendum landed (per supervisor authorization 2026-05-16)
+
+At commit `86ad6676` bundled with merge ceremony. Documents:
+1. Producer-side cascade flip completion (cluster-1.5 Q25.C this dispatch)
+2. Discipline lesson instance 77: producer/consumer owner attribution discipline (future ADR amendments name producer-flip-owner + consumer-flip-owner SEPARATELY to prevent mixed-dispatch-window class repetition)
+3. Discipline lesson instance 78: struct-`new` (POD constructor) vs `Arc::new(struct-new(...))` (forbidden post-cascade) distinction (name SPECIFIC Arc-wrapped pattern; POD `_new` constructors remain valid producer-side ALLOC patterns)
+
+### Post-merge gates at canonical 0f347fa4 → 86ad6676 (ALL PASS)
+
+- `cargo check --workspace --lib --tests` EXIT=0 ✅ (default + `--features shape-jit/jit-trace`)
+- `bash scripts/verify-merge.sh` 12/12 PASS EXIT=0 ✅
+- `bash scripts/check-no-dynamic.sh` EXIT=0 ✅
+- **Smoke matrix 5/5 VM == JIT at canonical fixture:** s1 VM=4950/JIT=4950 ✅; s2 VM=30/JIT=30 ✅; s3 VM=x/JIT=x ✅; s4 VM=2/JIT=2 ✅; **s5 VM=x/JIT=x ✅** (NEW load-bearing Smoke 5 dyn T)
+
+### Imprecision instance log (cumulative 76 → 78)
+
+| # | Source | Shape |
+|---|---|---|
+| 77 | sub-agent execution (cluster-1.5 Q25.C) | §Q25.C.5 amendment Wave 2 Agent E text describes cascade-flip lockstep but doesn't specify producer/consumer owner attribution; consumer flipped Wave 3 stabilize without producer follow-up, leaving HEAD in mixed-dispatch state ~2-3 weeks until Smoke 5 surfaced via SIGABRT |
+| 78 | sub-agent execution (cluster-1.5 Q25.C) | §Q25.C.5 amendment text conflates struct-`new` (POD constructor) with `Arc::new(struct-new(...))` (forbidden post-cascade) when naming deletion targets; future amendments name SPECIFIC Arc-wrapped pattern |
+
+Cumulative breakdown: 11 supervisor / 17 audit / 7 team-lead-prompt / 10 agent-execution-report / 33 candidate (+77, +78) — total 78. All caught pre-merge. 0 bad-code merges into canonical preserved across cluster-0+1+cluster-2+cluster-1.5 trajectory.
+
+### Trajectory updated per supervisor 2026-05-16
+
+| Stage | Sessions |
+|---|---|
+| v2-raw-heap-audit + Phase 4 (parallel dispatch this turn) | 1-2 |
+| cluster-1.5 close + tag | 0.5 |
+| v1 close attempt | 0.5 |
+| **Total remaining to v1** | **2-3** |
+
+Q25.C.3/.4/.6/.7 explicitly DEFER post-v1 polish/perf/tooling workstream per team-lead disposition 2026-05-16. Not cluster-1.5-close-gating.
+
+---
+
+*Next session: parallel dispatch v2-raw-heap-audit (cluster-1.5 deliverable; vw_clone/vw_drop precedent per commit afb1651) + Phase 4 trait Add/AddAssign for user types (language feature) → respective merges → cluster-1.5 close attempt + tag authorization request → v1 close attempt.*
