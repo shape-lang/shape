@@ -673,6 +673,7 @@ impl FromSlot for Vec<(Arc<String>, Arc<shape_value::heap_value::HeapValue>)> {
                         HashMapKindedRef::Decimal(arc) => arc.keys,
                         HashMapKindedRef::TypedObject(arc) => arc.keys,
                         HashMapKindedRef::TraitObject(arc) => arc.keys,
+                        HashMapKindedRef::HashMap(arc) => arc.keys,
                     };
                     for i in 0..n {
                         let key = unsafe {
@@ -736,6 +737,19 @@ impl FromSlot for Vec<(Arc<String>, Arc<shape_value::heap_value::HeapValue>)> {
                                      wired (HeapValue::TraitObject arm exists but \
                                      payload kind dispatch is its own cluster)."
                                 );
+                            }
+                            HashMapKindedRef::HashMap(arc) => {
+                                // Recursive carrier (Wave N hashmap-value-v-arm
+                                // follow-up, cluster-2 closure-wave-C,
+                                // 2026-05-16). Each inner element is itself a
+                                // HashMapKindedRef; wrap as a fresh
+                                // HeapValue::HashMap. The inner Arc is
+                                // share-cloned (Arc::clone on
+                                // HashMapKindedRef::clone — single refcount
+                                // bump on the inner Arc<HashMapData<V_inner>>).
+                                let inner_ref: &HashMapKindedRef =
+                                    unsafe { &*(*arc.values).data.add(i) };
+                                Arc::new(HeapValue::HashMap(inner_ref.clone()))
                             }
                         };
                         out.push((key, value));

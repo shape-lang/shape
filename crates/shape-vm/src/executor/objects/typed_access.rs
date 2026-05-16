@@ -618,6 +618,7 @@ fn hashmap_v_kind_name(kref: &shape_value::heap_value::HashMapKindedRef) -> &'st
         HashMapKindedRef::Decimal(_) => "HashMap<string, decimal>",
         HashMapKindedRef::TypedObject(_) => "HashMap<string, TypedObject>",
         HashMapKindedRef::TraitObject(_) => "HashMap<string, TraitObject>",
+        HashMapKindedRef::HashMap(_) => "HashMap<string, HashMap>",
     }
 }
 
