@@ -7754,11 +7754,11 @@ V3-S6 retroactive 5-checkpoint multi-session chain MERGED into canonical at HEAD
 
 | Ckpt | Close commit | Status | Scope |
 |---|---|---|---|
-| V3-S6a | `43ac9b7a` | surface-and-stop | VM-side resolver Phase B + closure-return-typed generic monomorphization + substitution.rs::synthesize_empty_array_result_annotation + Vec<...> ConcreteType recognition + parametric Array method classifier (~435 LoC) |
+| V3-S6a | `43ac9b7a` | surface-and-stop | VM-side resolver Phase B + closure-return-typed generic monomorphization + `crates/shape-vm/src/compiler/monomorphization/substitution.rs::synthesize_empty_array_result_annotation` + Vec<...> ConcreteType recognition + parametric Array method classifier (~435 LoC) |
 | V3-S6b | `48e05f3f` | surface-and-stop | PATH α side-table infrastructure: `monomorphized_method_call_sites: HashMap<(Span, Option<usize>), usize>` on BytecodeProgram/Program/LinkedProgram with #[serde(skip)] + linker threading + population at try_monomorphize_method_call success + resolver-aware conduit; stamping pass gated off (~370 LoC) |
-| V3-S6c | `2544f89f` | surface-and-stop | PATH α-prime JIT routing block at terminators.rs:176 (direct Cranelift FuncRef call via user_func_refs[specialized_idx]; bypasses jit_call_method trampoline + handle_int_map ckpt3_surface SIGSEGV class); stamping removed per 39th-imprecision dispatch Step 2 (+256/-88 LoC) |
-| V3-S6d | `2f011e93` | surface-and-stop | PATH α-prime complementary stamping restoration at helpers.rs (V3-S6c+V3-S6d composition; routing addresses .map() execution-path; stamping addresses .sum() destination kind classification) (+58/-31 LoC) |
-| V3-S6e | `d4d5454c` | surface-and-stop | Gap B+C combined fix: new `local_typed_array_element_types` field on MirFunction + producer at mir/lowering/stmt.rs::lower_var_decl + consumer at helpers.rs::infer_top_level_concrete_types_from_mir_with_resolvers (~244 LoC; closes compile-time W11-jit-new-array gap inside monomorphized specializations; reveals V3-S6f runtime-execution inner layer per Reading 2 empirical confirmation) |
+| V3-S6c | `2544f89f` | surface-and-stop | PATH α-prime JIT routing block at `crates/shape-jit/src/mir_compiler/terminators.rs:176` (direct Cranelift FuncRef call via user_func_refs[specialized_idx]; bypasses jit_call_method trampoline + handle_int_map ckpt3_surface SIGSEGV class); stamping removed per 39th-imprecision dispatch Step 2 (+256/-88 LoC) |
+| V3-S6d | `2f011e93` | surface-and-stop | PATH α-prime complementary stamping restoration at `crates/shape-vm/src/compiler/helpers.rs` (V3-S6c+V3-S6d composition; routing addresses .map() execution-path; stamping addresses .sum() destination kind classification) (+58/-31 LoC) |
+| V3-S6e | `d4d5454c` | surface-and-stop | Gap B+C combined fix: new `local_typed_array_element_types` field on MirFunction + producer at `crates/shape-vm/src/mir/lowering/stmt.rs::lower_var_decl` + consumer at `crates/shape-vm/src/compiler/helpers.rs::infer_top_level_concrete_types_from_mir_with_resolvers` (line 494; V3-S6e consumer at line 623) (~244 LoC; closes compile-time W11-jit-new-array gap inside monomorphized specializations; reveals V3-S6f runtime-execution inner layer per Reading 2 empirical confirmation) |
 | **MERGE** | **`50e5c024`** | **MERGED into canonical** | **Take-both merge ceremony folded all 5 checkpoints into bulldozer-strictly-typed; 33 files / +1246 LoC integrated; no conflicts** |
 
 ### Merge ceremony commit
@@ -7811,7 +7811,7 @@ V3-S6f territory + the broader cluster-2 audit subjects:
 
 1. **V3-S6f-jit-specialized-vec-map-runtime-execution** — hypothesis space (per V3-S6e sub-agent enumeration):
    - (a) For-loop iterator state-machine for v2 typed-array source: `for item in self { result.push(f(item)) }` in specialized body's JIT-compiled iterator may have incorrect termination condition OR loops on uninitialized state
-   - (b) Closure-call indirect-call shape inside inlined specialization: per substitution.rs:2247 Phase-C "closure pointer sits unused in its local slot" but inlined closure body invocations (replacing `f(item)` with inlined body) may have JIT-codegen issues with captures access / argument binding / return value handling
+   - (b) Closure-call indirect-call shape inside inlined specialization: per `crates/shape-vm/src/compiler/monomorphization/substitution.rs:2247` Phase-C "closure pointer sits unused in its local slot" but inlined closure body invocations (replacing `f(item)` with inlined body) may have JIT-codegen issues with captures access / argument binding / return value handling
    - (c) Receiver-self slot kind threading: V3-S6c routing passes receiver bits = raw `*const TypedArray<i64>` per V3-S5 but specialized fn's compiled body may not have `function_local_concrete_types[specialized_idx][self_slot] = Array(I64)` — only result slot was classified by V3-S6e
 2. **Broader W11-jit-new-array general fix** (per status doc Known Constraints) — extend function_local_concrete_types population conduit to ALL user functions (not just monomorphized specializations); address runtime-execution-path classification across all parametric body slots
 3. **hashmap-value-v-arm follow-up** (per Wave 3 R1 close subsection)
@@ -7859,3 +7859,70 @@ Tag candidates: `phase-3-cluster-0-close` + `phase-3-cluster-1-close` on canonic
 ---
 
 *Next session: cluster-0+1 close-criterion ratification by supervisor → user authorizes tags → tags land on canonical at 50e5c024 → cluster-2 cleanup (V3-S6f + broader W11-jit-new-array + shape-test-residuals-audit + hashmap-value-v-arm + per-HeapKind kinded jit_print + compile-time-boxed string-constant leak + W12-collection-constructor-mir-lowering) → Phase 4 (trait Add/AddAssign for user types) → v1.*
+
+---
+
+## Wave 3 Round 5 cluster-2-empirical-verification close — V3-S6f Smoke 2 JIT TIMEOUT hypothesis disposition (2026-05-16)
+
+Cluster-2 audit-day split into two sequential sub-clusters per supervisor R1 disposition 2026-05-16 (V3-S6f hypothesis-space empirical disposition is qualitatively different from B-I inventory work; load-bearing input for inventory section A+B migration design). Sub-cluster 1 = cluster-2-empirical-verification (this close); sub-cluster 2 = cluster-2-inventory-audit-day (dispatches after closure-wave-1 (a) fix lands per supervisor's post-empirical disposition).
+
+### Sub-agent close (6c83fd05; merged at e0e92613)
+
+- Branch: `bulldozer-strictly-typed-cluster-2-empirical-verification` (from bb5b2109)
+- Close commit: `6c83fd05` on branch; merge commit `e0e92613` on canonical (no-ff merge)
+- Diff: +912 / -0 across 4 files (858-line deliverable + AGENTS.md row + 27 LoC trace at `crates/shape-vm/src/mir/lowering/expr.rs:1036` + 22 LoC trace at `crates/shape-vm/src/compiler/monomorphization/cache.rs:720`)
+- Deliverable: `docs/cluster-audits/cluster-2-v3s6f-empirical-verification.md` (§0-§9 per dispatch contract)
+- Pathway: (iii) bounded SHAPE_JIT_DEBUG-gated source-change discipline (existing 26-site eprintln!-based infrastructure leveraged; 2 narrow trace points added matching pattern exactly; tracing-crate migration deferred to future cluster-2 closure-wave per audit section H territory)
+
+### Per-hypothesis disposition
+
+| Hypothesis | Disposition | Architectural-source locus |
+|---|---|---|
+| (a) For-loop iterator state-machine for v2 typed-array source | **CONFIRMED dominant** | `crates/shape-vm/src/mir/lowering/expr.rs:1035-1094` `lower_for_expr` generic-iterator branch emits placeholder stub (no IterNext/IterDone advance, unconditional Goto(header), pattern=MirConstant::None). Literal `// This is a placeholder` comment unchanged at HEAD bb5b2109. Empirically verified via existing `SHAPE_JIT_MIR_TRACE` capturing broken MIR of specialized `Vec.map::i64_i64_closure_0_i64_be504985afd3f65e9` body bb2/bb6 infinite-loop cycle. |
+| (b) Closure-call indirect-call inside inlined specialization | **PARTIAL latent** | Phase-C `inline_closure_body_into_specialization` at `crates/shape-vm/src/compiler/monomorphization/substitution.rs:2247` IS invoked + returns Ok per `[mono-phaseC]` trace, but post-MIR bb3 still shows un-inlined `Call(Copy(f), [item])` rather than expected inlined `BinaryOp(Mul, Copy(slot_x), Constant(Int(2)))`. 4 explanations enumerated in deliverable §3.4; severity moot until (a) fixes the structural infinite loop (bb3 executes once-then-loops-forever). |
+| (c) Receiver-self slot kind threading from V3-S6c routing | **REFUTED** | V3-S6c routing at `crates/shape-jit/src/mir_compiler/terminators.rs:176` + V3-S6e stamping at `crates/shape-vm/src/compiler/helpers.rs:494` (consumer at line 623) remain correct. bb2 `SwitchBool(Copy(SlotId(6)))` reads raw pointer bits as u64 truthiness, independent of NativeKind stamp. bb6 `Goto(bb2)` is unconditional. JIT successfully reaches the specialized fn body (`[jit-debug] compilation OK, about to execute...` fires, no SIGSEGV / surface-and-stop). |
+
+### Closure-wave dispatch recommendation (supervisor RATIFIED 2026-05-16)
+
+- **Closure-wave-1 (hypothesis a fix):** single sub-cluster, single agent. Per-iterable-ConcreteType monomorphic state machine via existing MIR vocabulary (Call/Place::Index/BinaryOp; no new StatementKind variants → zero cross-crate cascade). Territory: `crates/shape-vm/src/mir/lowering/expr.rs:1035-1094` PLUS `crates/shape-vm/src/mir/lowering/stmt.rs:471-516` if Q1 confirms reachability. 400-600 LoC estimate. Reference implementation: `crates/shape-vm/src/compiler/loops.rs:298-516` (bytecode-VM-side per-iterable state machine). ADR-fit: §2.7.5 stamp-at-compile-time. Load-bearing acceptance criterion: Smoke 2 (`xs.map(|x|x*2).sum()`) under --mode jit returns 30 (NOT TIMEOUT); VM == JIT. Dispatched immediately post-merge.
+- **Closure-wave-2 (hypothesis b follow-up):** sequentially dispatched AFTER closure-wave-1 (a) merges. First phase empirical re-verification of 4 explanations (since (a) fix may resolve (b) latency entirely). Don't pre-plan; revisit at (a) close.
+- No multi-agent parallel dispatch needed; no partition-shape change at supervisor level.
+
+### Q25.C absorb-vs-separate observation
+
+None of the 3 V3-S6f hypotheses intersect Q25.C TraitObject rebuild territory. (a) is MIR iterator state-machine emission; (b) is closure-call inlining; (c) is concrete TypedArray<i64> receiver slot kind threading (not `dyn Trait`). Q25.C's `dyn T = box(X{})` runtime auto-boxing rule does not affect this fixture. Cluster-1.5 separation preserved; cluster-2 can absorb (a)+(b) closure-waves without gating on Q25.C. Revisit at inventory-audit-day section I (when that dispatches after closure-wave-2 (b) closes).
+
+### Post-merge gates at canonical e0e92613 (ALL PASS)
+
+- `cargo check --workspace --lib --tests` EXIT=0 ✅
+- `bash scripts/verify-merge.sh` 12/12 PASS EXIT=0 ✅
+- `bash scripts/check-no-dynamic.sh` EXIT=0 ✅
+- Smoke matrix 3/4 VM == JIT preserved at canonical fixture per β2 (Smoke 1 4950/4950 ✅; Smoke 3 x/x ✅; Smoke 4 2/2 ✅; Smoke 2 VM=30 ✅ / JIT TIMEOUT rc=124 ❌ — STAYS the empirical-debugging fixture per β2; closure-wave-1 (a) is the load-bearing fix).
+- Pre-existing V2 bytecode verification warnings ("no FrameDescriptor" for Json/TryFrom/Vec.map sites) on Smoke 2 JIT path are non-blocking + ground-truthed pre-existing at bb5b2109; do not affect cluster-0+1-close-criterion or empirical-verification scope.
+
+### V3-S6 chain ref annotations (per supervisor 2026-05-16 disposition)
+
+Bundled into this merge commit per supervisor authorization. In-budget subset: V3-S6 chain summary table (this doc lines 7757-7761) + V3-S6f hypothesis (b) prose (this doc line 7814) + team-lead-handover.md V3-S6 chain ancestor enumeration (line 395) annotated with crate-qualified paths. Surfaced separately for supervisor disposition: AGENTS.md V3-S6 chain rows (lines 223+) exceed in-budget edit count (~5 rows × ~3 refs/row = ~15+ edits beyond ~10-edit budget); pending supervisor narrowing-scope disposition.
+
+### Imprecision-pattern instances 27-30 (cumulative 43; all caught pre-merge; 0 bad-code merges into canonical)
+
+| # | Source layer | Imprecision shape | Caught at |
+|---|---|---|---|
+| 27 | team-lead-prompt | "SHAPE_JIT_DEBUG largely absent at HEAD bb5b2109" — actually 18+ direct sites + 7 distinct SHAPE_JIT_* env-vars; supervisor R6 framing built on this claim ("instrumentation IS the empirical work" framing) | Pre-flight ground-truth at step 1 (supervisor's NEXT ACTION sequence); pathway (iii) hybrid preserves R6 mechanism as cluster-2 closure-wave territory for future migration |
+| 28 | supervisor-prompt-expansion | Dispatch prompt cite `crates/shape-runtime/src/type_system/inference/substitution.rs` — actual `crates/shape-vm/src/compiler/monomorphization/substitution.rs`; dispatch prompt cite `crates/shape-jit/src/mir_compiler/helpers.rs::infer_top_level_concrete_types_from_mir_with_resolvers` — actual `crates/shape-vm/src/compiler/helpers.rs::infer_top_level_concrete_types_from_mir_with_resolvers` (line 494) | Team-lead pre-flight validation per Q3 recursive pre-flight check binding (mirror of 27th-imprecision recovery shape) |
+| 29 | sub-agent-execution-report (architectural-prediction subclass) | Dispatch §6 cite hypothesis (a) locus as JIT-side `terminators.rs` — actual architectural-source root cause `crates/shape-vm/src/mir/lowering/expr.rs:1035-1094` lower_for_expr (shape-vm-side producer, not JIT-side consumer) | Empirical-execution step 2 via SHAPE_JIT_MIR_TRACE surfacing broken MIR shape + producer-side grep |
+| 30 | team-lead-prompt | Pre-flight assumed `lower_for_loop` at stmt.rs:464 was reached by Smoke 2 fixture — empirically NOT reached; for-loops route through `Statement::Expression(Expr::For(ForExpr, _))` → `lower_for_expr` (expr.rs:919) | Empirical-execution step 2 via temporary unconditional eprintln! probe (removed pre-close per bounded source-change discipline) |
+
+Cumulative breakdown: 11 supervisor / 14 audit / 3 team-lead-prompt → 5 team-lead-prompt (+27, +30) / 5 agent-execution-report → 6 agent-execution-report (+29) / 2 candidate. All caught pre-merge. 0 bad-code merges into canonical preserved across cluster-0+1+cluster-2-empirical-verification trajectory.
+
+### Reading 3 candidate (2026-05-16)
+
+Discipline-machinery elaboration exceeded execution capacity at empirical-verification dispatch boundary (5 round-trips supervisor↔team-lead pre-dispatch; 2 imprecisions caught pre-dispatch; sub-agent execution not started until session-end). Cadence-tightening binding landed at supervisor disposition 2026-05-16: max ~100 lines / relay; one refinement pass / dispatch prompt; surfacings = facts + one ask, no re-citation of cumulative state. Next supervisor handover carries the binding forward.
+
+### Recursive pre-flight check binding extended (Q3, 2026-05-16)
+
+Every ground-truthable claim in supervisor/team-lead relay text MUST be grep-verified at HEAD before surfacing (not only at sub-agent dispatch). The 27th + 28th imprecisions self-fulfilled because the binding fired only at sub-agent dispatch; extending to surfacing layer caught both instances structurally before dispatch.
+
+---
+
+*Next session: closure-wave-1 (hypothesis a) sub-agent dispatch + close + merge → closure-wave-2 (hypothesis b) sub-agent dispatch + close + merge → cluster-2-inventory-audit-day dispatch (sections A-I per supervisor R2/R3/R4) → cluster-2 closure waves per inventory recommendation → cluster-2 close attempt → Phase 4 (trait Add/AddAssign for user types) → v1 close attempt.*
