@@ -308,7 +308,8 @@ pub extern "C" fn jit_call_function(
 /// the calling MIR continues with a null result rather than crashing
 /// via `extern "C" todo!()` SIGABRT. The shape mirrors the W11-round-1
 /// close's `jit_join_init` surface — graceful surface, audible via
-/// `SHAPE_JIT_DEBUG=1`, no silent leak (the Arc share remains owned by
+/// `--trace-jit=shape_jit=debug` (cluster-2 closure-wave-F tracing-crate
+/// migration 2026-05-16), no silent leak (the Arc share remains owned by
 /// the stack slot per the §2.7.7 retain-on-read discipline).
 ///
 /// ## Argument kind sourcing
@@ -354,7 +355,6 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
             return TAG_NULL;
         }
         let ctx_ref = &mut *ctx;
-        let debug = std::env::var_os("SHAPE_JIT_DEBUG").is_some();
 
         // Pop arg_count (raw i64 per the MIR-side `iconst(I64,
         // args.len() as i64)` push at terminators.rs). The parallel-kind
@@ -362,9 +362,10 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
         // §2.7.11 / §2.7.5 I64-wide raw bits carrier kind for FFI
         // scalar sentinels) per the producing emit_kind_track_write call.
         if ctx_ref.stack_ptr == 0 {
-            if debug {
-                eprintln!("[jit-call-value] BAIL: stack_ptr=0 at arg_count pop");
-            }
+            tracing::debug!(
+                target: "shape_jit",
+                "jit-call-value BAIL: stack_ptr=0 at arg_count pop",
+            );
             return TAG_NULL;
         }
         ctx_ref.stack_ptr -= 1;
@@ -392,17 +393,16 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
             let kind = match stack_kind_code::decode(code) {
                 Some(k) => k,
                 None => {
-                    if debug {
-                        eprintln!(
-                            "[jit-call-value] SURFACE §2.7.7 / Q9: arg \
-                             kind-byte {} at stack[{}] is SENTINEL / \
-                             reserved. The producing call site at \
-                             `mir_compiler/terminators.rs` must stamp a \
-                             concrete NativeKind for every push (no Bool-\
-                             default fallback per §2.7.7 #9).",
-                            code, ctx_ref.stack_ptr
-                        );
-                    }
+                    tracing::debug!(
+                        target: "shape_jit",
+                        code,
+                        stack_ptr = ctx_ref.stack_ptr,
+                        "jit-call-value SURFACE \u{a7}2.7.7 / Q9: arg \
+                         kind-byte is SENTINEL / reserved. The producing \
+                         call site at `mir_compiler/terminators.rs` must \
+                         stamp a concrete NativeKind for every push (no \
+                         Bool-default fallback per \u{a7}2.7.7 #9).",
+                    );
                     return TAG_NULL;
                 }
             };
@@ -424,17 +424,16 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
         let callee_kind = match stack_kind_code::decode(callee_code) {
             Some(k) => k,
             None => {
-                if debug {
-                    eprintln!(
-                        "[jit-call-value] SURFACE §2.7.7 / Q9: callee \
-                         kind-byte {} at stack[{}] is SENTINEL / reserved. \
-                         The producing call site must stamp the callee's \
-                         NativeKind from `operand_slot_kind` per ADR-006 \
-                         §2.7.11 / Q12. No Bool-default fallback (§2.7.7 \
-                         #9).",
-                        callee_code, ctx_ref.stack_ptr
-                    );
-                }
+                tracing::debug!(
+                    target: "shape_jit",
+                    callee_code,
+                    stack_ptr = ctx_ref.stack_ptr,
+                    "jit-call-value SURFACE \u{a7}2.7.7 / Q9: callee kind-byte \
+                     is SENTINEL / reserved. The producing call site must \
+                     stamp the callee's NativeKind from `operand_slot_kind` \
+                     per ADR-006 \u{a7}2.7.11 / Q12. No Bool-default fallback \
+                     (\u{a7}2.7.7 #9).",
+                );
                 return TAG_NULL;
             }
         };
@@ -482,13 +481,12 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
                 // `Arc<HeapValue>` shape; recover the `OwnedClosureBlock`
                 // by going through `HeapValue::ClosureRaw`.
                 if callee_bits == 0 {
-                    if debug {
-                        eprintln!(
-                            "[jit-call-value] BAIL §2.7.11/Q12: callee \
-                             stamped Ptr(HeapKind::Closure) but bits=0 — \
-                             producing site emitted a null callee."
-                        );
-                    }
+                    tracing::debug!(
+                        target: "shape_jit",
+                        "jit-call-value BAIL \u{a7}2.7.11/Q12: callee \
+                         stamped Ptr(HeapKind::Closure) but bits=0 \u{2014} \
+                         producing site emitted a null callee.",
+                    );
                     return TAG_NULL;
                 }
                 // Borrow the `Arc<HeapValue>` (use `from_raw` + `into_raw`
@@ -527,16 +525,14 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
                         // Wrong HeapValue arm under the stamped kind —
                         // a producing-site bug, not a tag-decode gap.
                         // Surface with diagnostic.
-                        if debug {
-                            eprintln!(
-                                "[jit-call-value] SURFACE §2.7.6/Q8: \
-                                 callee stamped Ptr(HeapKind::Closure) \
-                                 but HeapValue arm is {:?}, not \
-                                 ClosureRaw. Producing site mislabeled \
-                                 the slot kind.",
-                                other.kind()
-                            );
-                        }
+                        tracing::debug!(
+                            target: "shape_jit",
+                            heap_kind = ?other.kind(),
+                            "jit-call-value SURFACE \u{a7}2.7.6/Q8: callee \
+                             stamped Ptr(HeapKind::Closure) but HeapValue \
+                             arm is not ClosureRaw. Producing site \
+                             mislabeled the slot kind.",
+                        );
                         None
                     }
                 };
@@ -558,12 +554,11 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
                 // value-call surface; the bytecode compiler shouldn't
                 // emit a top-level module-fn callee through this opcode
                 // at present. Surface.
-                if debug {
-                    eprintln!(
-                        "[jit-call-value] SURFACE §2.7.26: ModuleFn \
-                         callee not implemented in jit_call_value."
-                    );
-                }
+                tracing::debug!(
+                    target: "shape_jit",
+                    "jit-call-value SURFACE \u{a7}2.7.26: ModuleFn callee \
+                     not implemented in jit_call_value.",
+                );
                 return TAG_NULL;
             }
             NativeKind::UInt64
@@ -601,33 +596,30 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
                     }
                     vm_captures = Some(caps);
                 } else {
-                    if debug {
-                        eprintln!(
-                            "[jit-call-value] SURFACE §2.7.5: \
-                             callee_bits={:#x} stamped UInt64 but is \
-                             neither inline function (TAG_FUNCTION) nor \
-                             unified-heap HK_CLOSURE. Producing site \
-                             stamped the carrier kind but emitted bits \
-                             that don't match either UInt64-class shape.",
-                            callee_bits
-                        );
-                    }
+                    tracing::debug!(
+                        target: "shape_jit",
+                        callee_bits,
+                        "jit-call-value SURFACE \u{a7}2.7.5: callee_bits \
+                         stamped UInt64 but is neither inline function \
+                         (TAG_FUNCTION) nor unified-heap HK_CLOSURE. \
+                         Producing site stamped the carrier kind but \
+                         emitted bits that don't match either UInt64-class \
+                         shape.",
+                    );
                     return TAG_NULL;
                 }
             }
             other => {
-                if debug {
-                    eprintln!(
-                        "[jit-call-value] SURFACE §2.7.11/Q12: callee \
-                         kind {:?} is not a recognized callable kind. \
-                         The §2.7.11/Q12 callee-classification kinds at \
-                         the indirect-call entry are Ptr(HeapKind::Closure) \
-                         (raw-Arc closure shape), Ptr(HeapKind::ModuleFn) \
-                         (deferred), and UInt64/Int64-family (function-id \
-                         and JIT-internal NaN-box shapes).",
-                        other
-                    );
-                }
+                tracing::debug!(
+                    target: "shape_jit",
+                    kind = ?other,
+                    "jit-call-value SURFACE \u{a7}2.7.11/Q12: callee kind \
+                     is not a recognized callable kind. The \u{a7}2.7.11/Q12 \
+                     callee-classification kinds at the indirect-call entry \
+                     are Ptr(HeapKind::Closure) (raw-Arc closure shape), \
+                     Ptr(HeapKind::ModuleFn) (deferred), and UInt64/Int64-\
+                     family (function-id and JIT-internal NaN-box shapes).",
+                );
                 return TAG_NULL;
             }
         }

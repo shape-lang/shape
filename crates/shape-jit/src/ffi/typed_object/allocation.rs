@@ -86,7 +86,7 @@ pub extern "C" fn jit_typed_object_alloc(schema_id: u32, data_size: u64) -> u64 
         TAG_NULL
     } else {
         let result = box_typed_object(ptr as *const u8);
-        if std::env::var_os("SHAPE_JIT_TRACE").is_some() {
+        if tracing::enabled!(target: "shape_jit", tracing::Level::TRACE) {
             // Per ADR-006 §2.7.5, the JIT-FFI carries raw `u64` plus a parallel
             // `NativeKind` companion stamped at JIT compile time from the call
             // signature; the trace site previously decoded the payload via the
@@ -94,9 +94,13 @@ pub extern "C" fn jit_typed_object_alloc(schema_id: u32, data_size: u64) -> u64 
             // for a typed-object allocation is statically known
             // (`HK_TYPED_OBJECT`) at the producing call signature.
             let kind = unsafe { crate::ffi::value_ffi::heap_kind(result) };
-            eprintln!(
-                "[alloc] schema={} result={:#x} kind={:?} HK_TYPED_OBJECT={}",
-                schema_id, result, kind, crate::ffi::value_ffi::HK_TYPED_OBJECT
+            tracing::trace!(
+                target: "shape_jit",
+                schema = schema_id,
+                result = result,
+                kind = ?kind,
+                hk_typed_object = crate::ffi::value_ffi::HK_TYPED_OBJECT,
+                "typed-object alloc",
             );
         }
         result

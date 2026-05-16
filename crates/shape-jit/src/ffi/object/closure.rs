@@ -258,17 +258,20 @@ pub unsafe extern "C" fn jit_arc_shared_retain(ptr: u64) -> u64 {
         // Return 0 so the caller stores a null pointer and the
         // downstream dispatch path can report a clean error rather
         // than corrupting memory.
-        if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
-            eprintln!("[jit-shared-cell] retain null (no-op)");
-        }
+        tracing::debug!(
+            target: "shape_jit",
+            "jit-shared-cell retain null (no-op)",
+        );
         return 0;
     }
     unsafe {
         Arc::<SharedCell>::increment_strong_count(ptr as *const SharedCell);
     }
-    if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
-        eprintln!("[jit-shared-cell] retain ptr={:#x}", ptr);
-    }
+    tracing::debug!(
+        target: "shape_jit",
+        ptr,
+        "jit-shared-cell retain",
+    );
     ptr
 }
 
@@ -435,9 +438,11 @@ pub unsafe extern "C" fn jit_arc_shared_release(ptr: u64) {
     if ptr == 0 {
         return;
     }
-    if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
-        eprintln!("[jit-shared-cell] release ptr={:#x}", ptr);
-    }
+    tracing::debug!(
+        target: "shape_jit",
+        ptr,
+        "jit-shared-cell release",
+    );
     // SAFETY: the caller contract (see SAFETY docs above) guarantees
     // `ptr` is a live Arc-from-raw pointer. Reconstructing the Arc
     // and dropping it releases exactly one strong share.

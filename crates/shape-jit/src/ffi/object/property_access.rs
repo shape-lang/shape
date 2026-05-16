@@ -49,10 +49,13 @@ pub extern "C" fn jit_get_prop(obj_bits: u64, key_bits: u64) -> u64 {
         // op_get_prop JIT lowering passes a `NativeKind` companion.
 
         // JIT-allocated heap objects (JitAlloc with kind header)
-        if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
-            eprintln!(
-                "[jit-get-prop] obj={:#x} heap_kind={:?} key={:?}",
-                obj_bits, heap_kind(obj_bits), key_str
+        if tracing::enabled!(target: "shape_jit", tracing::Level::DEBUG) {
+            tracing::debug!(
+                target: "shape_jit",
+                obj = obj_bits,
+                heap_kind = ?heap_kind(obj_bits),
+                key = ?key_str,
+                "jit-get-prop",
             );
         }
         if let Some(kind) = heap_kind(obj_bits) {

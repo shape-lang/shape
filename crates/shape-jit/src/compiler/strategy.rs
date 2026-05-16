@@ -267,9 +267,10 @@ impl JITCompiler {
                 // every SharedCow local slot before the body runs.
                 mir_compiler.initialize_shared_local_slots();
                 mir_compiler.compile_body()?;
-                if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
-                    eprintln!("[jit-mir] Compiled top-level code via MirToIR");
-                }
+                tracing::debug!(
+                    target: "shape_jit",
+                    "jit-mir compiled top-level code via MirToIR",
+                );
             }
             builder.finalize();
         }

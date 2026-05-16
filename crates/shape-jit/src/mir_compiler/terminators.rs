@@ -618,26 +618,24 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                             // TypedObject producer migration via a separate
                             // sub-cluster.
                             Some(NativeKind::Ptr(HeapKind::TypedObject)) => {
-                                if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
-                                    eprintln!(
-                                        "[jit-mir] print: SURFACE §2.7.5 \
-                                         carrier-mismatch — operand \
-                                         NativeKind Ptr(TypedObject) stamped \
-                                         but the JIT-side `box_typed_object` \
-                                         producer at `value_ffi.rs:516-518` \
-                                         emits a JIT-internal `TypedObject` \
-                                         struct under NaN-box wrap, NOT the \
-                                         VM-side `Arc<TypedObjectStorage>` \
-                                         the `jit_print_typed_object` body \
-                                         expects. Migrating the JIT \
-                                         TypedObject to `Arc<TypedObjectStorage>` \
-                                         is out of W12 T2/T3 scope per the \
-                                         round's surface-and-stop discipline \
-                                         (round dispatch text). Cluster-1 \
-                                         follow-up: W17 `jit-typed-object-\
-                                         arc-storage-migration`."
-                                    );
-                                }
+                                tracing::debug!(
+                                    target: "shape_jit",
+                                    "jit-mir print: SURFACE \u{a7}2.7.5 \
+                                     carrier-mismatch \u{2014} operand \
+                                     NativeKind Ptr(TypedObject) stamped but \
+                                     the JIT-side `box_typed_object` producer \
+                                     at `value_ffi.rs:516-518` emits a \
+                                     JIT-internal `TypedObject` struct under \
+                                     NaN-box wrap, NOT the VM-side \
+                                     `Arc<TypedObjectStorage>` the \
+                                     `jit_print_typed_object` body expects. \
+                                     Migrating the JIT TypedObject to \
+                                     `Arc<TypedObjectStorage>` is out of W12 \
+                                     T2/T3 scope per the round's surface-and-\
+                                     stop discipline (round dispatch text). \
+                                     Cluster-1 follow-up: W17 jit-typed-object-\
+                                     arc-storage-migration.",
+                                );
                                 return Err(format!(
                                     "Route A surface-and-stop: SURFACE \
                                      §2.7.5 carrier-mismatch — `print` \
@@ -709,23 +707,19 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                             // for this one edge case" / "Mark this as
                             // a follow-up for a later phase").
                             _ => {
-                                if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
-                                    eprintln!(
-                                        "[jit-mir] print: SURFACE §2.7.5 \
-                                         — operand NativeKind not proven \
-                                         ({:?}) or unwired heap arm. \
-                                         ADR-006 §2.7.5 / §2.7.7 #4 / \
-                                         #7 — extend producer-site \
-                                         classification at the upstream \
-                                         MIR shape (the §2.7.5 conduit's \
-                                         producing-site walk) or wire \
-                                         the kinded FFI body for the \
-                                         heap kind. No kind-blind \
-                                         fallback per CLAUDE.md \
-                                         \"Forbidden rationalizations\".",
-                                        kind_hint,
-                                    );
-                                }
+                                tracing::debug!(
+                                    target: "shape_jit",
+                                    kind_hint = ?kind_hint,
+                                    "jit-mir print: SURFACE \u{a7}2.7.5 \u{2014} \
+                                     operand NativeKind not proven or unwired \
+                                     heap arm. ADR-006 \u{a7}2.7.5 / \u{a7}2.7.7 #4 / #7 \
+                                     \u{2014} extend producer-site classification at \
+                                     the upstream MIR shape (the \u{a7}2.7.5 \
+                                     conduit's producing-site walk) or wire \
+                                     the kinded FFI body for the heap kind. \
+                                     No kind-blind fallback per CLAUDE.md \
+                                     \"Forbidden rationalizations\".",
+                                );
                                 return Err(format!(
                                     "Route A surface-and-stop: \
                                      NotImplemented(SURFACE) — \

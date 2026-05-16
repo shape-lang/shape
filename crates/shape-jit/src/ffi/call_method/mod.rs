@@ -400,7 +400,6 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
         }
 
         let ctx_ref = &mut *ctx;
-        let debug = std::env::var_os("SHAPE_JIT_DEBUG").is_some();
 
         // ── Pop arg_count ──────────────────────────────────────────────
         // ABI: the MIR producer stores `arg_count` as a raw i64 with
@@ -438,36 +437,36 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
         let method_kind = match stack_kind_code::decode(method_kind_code) {
             Some(k) => k,
             None => {
-                if debug {
-                    eprintln!(
-                        "[jit-call-method] SURFACE §2.7.7 / Q9: method-name \
-                         kind-byte {} at stack[{}] is SENTINEL / reserved. \
-                         The producing call site at terminators.rs:243 must \
-                         stamp NativeKind::String — no Bool-default.",
-                        method_kind_code, ctx_ref.stack_ptr
-                    );
-                }
+                tracing::debug!(
+                    target: "shape_jit",
+                    method_kind_code,
+                    stack_ptr = ctx_ref.stack_ptr,
+                    "jit-call-method SURFACE \u{a7}2.7.7 / Q9: method-name \
+                     kind-byte is SENTINEL / reserved. The producing call \
+                     site at terminators.rs:243 must stamp NativeKind::String \
+                     \u{2014} no Bool-default.",
+                );
                 return TAG_NULL;
             }
         };
         if !matches!(method_kind, NativeKind::String) {
-            if debug {
-                eprintln!(
-                    "[jit-call-method] SURFACE: method-name kind {:?} != \
-                     NativeKind::String. Producer-site contract violated \
-                     (terminators.rs:243 must stamp String).",
-                    method_kind
-                );
-            }
+            tracing::debug!(
+                target: "shape_jit",
+                method_kind = ?method_kind,
+                "jit-call-method SURFACE: method-name kind != \
+                 NativeKind::String. Producer-site contract violated \
+                 (terminators.rs:243 must stamp String).",
+            );
             return TAG_NULL;
         }
         let method_name: String = unbox_string(method_bits).to_string();
-        if debug {
-            eprintln!(
-                "[jit-call-method] arg_count={} method='{}' stack_ptr={}",
-                arg_count, method_name, ctx_ref.stack_ptr
-            );
-        }
+        tracing::debug!(
+            target: "shape_jit",
+            arg_count,
+            method_name = %method_name,
+            stack_ptr = ctx_ref.stack_ptr,
+            "jit-call-method dispatch",
+        );
 
         // ── Pop args paired with their parallel-track kinds ───────────
         // Reverse pop order, then reverse to source order. The §2.7.7 /
@@ -485,18 +484,17 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
             let kind = match stack_kind_code::decode(code) {
                 Some(k) => k,
                 None => {
-                    if debug {
-                        eprintln!(
-                            "[jit-call-method] SURFACE §2.7.7 / Q9: arg \
-                             kind-byte {} at stack[{}] is SENTINEL / \
-                             reserved. The producing call site at \
-                             `mir_compiler/terminators.rs` must stamp \
-                             a concrete NativeKind per ADR-006 §2.7.5 \
-                             producer-side classification — no Bool-\
-                             default fallback (§2.7.7 #9).",
-                            code, ctx_ref.stack_ptr
-                        );
-                    }
+                    tracing::debug!(
+                        target: "shape_jit",
+                        code,
+                        stack_ptr = ctx_ref.stack_ptr,
+                        "jit-call-method SURFACE \u{a7}2.7.7 / Q9: arg \
+                         kind-byte is SENTINEL / reserved. The producing \
+                         call site at `mir_compiler/terminators.rs` must \
+                         stamp a concrete NativeKind per ADR-006 \u{a7}2.7.5 \
+                         producer-side classification \u{2014} no Bool-default \
+                         fallback (\u{a7}2.7.7 #9).",
+                    );
                     return TAG_NULL;
                 }
             };
@@ -515,26 +513,26 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
         let receiver_kind = match stack_kind_code::decode(receiver_code) {
             Some(k) => k,
             None => {
-                if debug {
-                    eprintln!(
-                        "[jit-call-method] SURFACE §2.7.7 / Q9: receiver \
-                         kind-byte {} at stack[{}] is SENTINEL / \
-                         reserved. The producing call site must stamp \
-                         the receiver's NativeKind per ADR-006 §2.7.5. \
-                         No Bool-default fallback (§2.7.7 #9).",
-                        receiver_code, ctx_ref.stack_ptr
-                    );
-                }
+                tracing::debug!(
+                    target: "shape_jit",
+                    receiver_code,
+                    stack_ptr = ctx_ref.stack_ptr,
+                    "jit-call-method SURFACE \u{a7}2.7.7 / Q9: receiver \
+                     kind-byte is SENTINEL / reserved. The producing call \
+                     site must stamp the receiver's NativeKind per ADR-006 \
+                     \u{a7}2.7.5. No Bool-default fallback (\u{a7}2.7.7 #9).",
+                );
                 return TAG_NULL;
             }
         };
-        if debug {
-            eprintln!(
-                "[jit-call-method] method='{}' receiver_kind={:?} receiver_code={} \
-                 receiver_bits={:#x}",
-                method_name, receiver_kind, receiver_code, receiver_bits
-            );
-        }
+        tracing::debug!(
+            target: "shape_jit",
+            method_name = %method_name,
+            receiver_kind = ?receiver_kind,
+            receiver_code,
+            receiver_bits,
+            "jit-call-method receiver classified",
+        );
 
         // ── Classification: delegate to VM or fall back to JIT-format ──
         //
@@ -628,13 +626,14 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
         };
 
         if delegated {
-            if debug {
-                eprintln!(
-                    "[jit-call-method] delegating '{}' to VM, recv kind={:?} \
-                     recv_bits={:#x} arg_count={}",
-                    method_name, receiver_kind, receiver_bits, arg_count
-                );
-            }
+            tracing::debug!(
+                target: "shape_jit",
+                method_name = %method_name,
+                receiver_kind = ?receiver_kind,
+                receiver_bits,
+                arg_count,
+                "jit-call-method delegating to VM",
+            );
             // VM-trampoline delegation per §2.7.5 cross-crate stable FFI.
             // The pair-slice form is single-direction at the boundary;
             // the VM converts to `&[KindedSlot]` internally before
@@ -657,24 +656,23 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
             match result {
                 Some(Ok(bits)) => return bits,
                 Some(Err(e)) => {
-                    if debug {
-                        eprintln!(
-                            "[jit-call-method] VM trampoline returned \
-                             error for '{}' on receiver kind {:?}: {:?}",
-                            method_name, receiver_kind, e
-                        );
-                    }
+                    tracing::debug!(
+                        target: "shape_jit",
+                        method_name = %method_name,
+                        receiver_kind = ?receiver_kind,
+                        error = ?e,
+                        "jit-call-method VM trampoline returned error",
+                    );
                     return TAG_NULL;
                 }
                 None => {
-                    if debug {
-                        eprintln!(
-                            "[jit-call-method] VM trampoline unavailable \
-                             — TRAMPOLINE_VM is null. '{}' on receiver \
-                             kind {:?} surfaces.",
-                            method_name, receiver_kind
-                        );
-                    }
+                    tracing::debug!(
+                        target: "shape_jit",
+                        method_name = %method_name,
+                        receiver_kind = ?receiver_kind,
+                        "jit-call-method VM trampoline unavailable \u{2014} \
+                         TRAMPOLINE_VM is null. Surfaces.",
+                    );
                     return TAG_NULL;
                 }
             }

@@ -66,11 +66,15 @@
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 /// Refcount call counters for W11-jit-new-array leak-balance verification.
-/// Enabled by `SHAPE_JIT_ARC_COUNTERS=1` at process start; otherwise the
-/// atomic writes still happen (the counters are pub(crate) accessible from
-/// tests) but no eprintln fires. Per the supervisor's reopen Step 4: in
-/// addition to stdout matching, confirm the retain/release sequence is
-/// balanced via these counters.
+/// Surfaced via `--trace-jit=shape_jit::arc_counters=info` (cluster-2
+/// closure-wave-F tracing-crate migration 2026-05-16; supersedes
+/// `SHAPE_JIT_ARC_COUNTERS=1`). The atomic writes still happen
+/// unconditionally (the counters are pub(crate) accessible from tests); the
+/// tracing macros at the reader site collapse to no-ops when the `jit-trace`
+/// feature is OFF, so the read-of-counters work is skipped in release
+/// builds. Per the supervisor's reopen Step 4: in addition to stdout
+/// matching, confirm the retain/release sequence is balanced via these
+/// counters.
 pub(crate) static JIT_ARC_RETAIN_CALLS: AtomicU64 = AtomicU64::new(0);
 pub(crate) static JIT_ARC_RELEASE_CALLS: AtomicU64 = AtomicU64::new(0);
 pub(crate) static JIT_ARC_RELEASE_FREES: AtomicU64 = AtomicU64::new(0);

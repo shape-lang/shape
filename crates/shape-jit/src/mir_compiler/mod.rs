@@ -965,12 +965,27 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// Called after the caller has optionally stored function params to local variables.
     /// `param_count` indicates how many leading slots are function params (skip init).
     pub fn compile_body(&mut self) -> Result<(), String> {
-        if std::env::var_os("SHAPE_JIT_MIR_TRACE").is_some() {
+        // Cluster-2 closure-wave-F tracing-crate migration (2026-05-16):
+        // replaces SHAPE_JIT_MIR_TRACE env-var. CLI selector is
+        // `--trace-jit=shape_jit::mir=trace`. The enabled-check gates the
+        // entire MIR-walk so feature-OFF builds skip the iteration cost.
+        if tracing::enabled!(target: "shape_jit::mir", tracing::Level::TRACE) {
             for (bi, block) in self.mir.blocks.iter().enumerate() {
-                eprintln!("[mir-trace] bb{}: {} stmts, term={:?}",
-                    bi, block.statements.len(), block.terminator.kind);
+                tracing::trace!(
+                    target: "shape_jit::mir",
+                    bb = bi,
+                    stmts = block.statements.len(),
+                    term = ?block.terminator.kind,
+                    "mir-trace block",
+                );
                 for (si, stmt) in block.statements.iter().enumerate() {
-                    eprintln!("[mir-trace]   s[{}]: {:?}", si, stmt.kind);
+                    tracing::trace!(
+                        target: "shape_jit::mir",
+                        bb = bi,
+                        s = si,
+                        stmt = ?stmt.kind,
+                        "mir-trace statement",
+                    );
                 }
             }
         }

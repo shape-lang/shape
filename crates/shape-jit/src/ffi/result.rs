@@ -48,9 +48,14 @@ use std::sync::Arc;
 
 /// Create an Ok result wrapping the inner value
 pub extern "C" fn jit_make_ok(inner_bits: u64) -> u64 {
-    if std::env::var_os("SHAPE_JIT_TRACE").is_some() {
+    if tracing::enabled!(target: "shape_jit", tracing::Level::TRACE) {
         let kind = super::value_ffi::heap_kind(inner_bits);
-        eprintln!("[make_ok] inner={:#x} inner_kind={:?}", inner_bits, kind);
+        tracing::trace!(
+            target: "shape_jit",
+            inner = inner_bits,
+            inner_kind = ?kind,
+            "make_ok",
+        );
     }
     box_ok(inner_bits)
 }
@@ -240,15 +245,15 @@ fn decode_payload_kind_or_surface(
     match super::stack_kind_code::decode(code) {
         Some(k) => k,
         None => {
-            if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
-                eprintln!(
-                    "[{}] SURFACE: payload kind code {} is sentinel/unknown. \
-                     ADR-006 §2.7.7 #9 — producer-site MIR kind classification \
-                     gap. Falling back to Bool placeholder; downstream consumer \
-                     will surface on slot-kind mismatch.",
-                    func_name, code
-                );
-            }
+            tracing::debug!(
+                target: "shape_jit",
+                func_name,
+                code,
+                "SURFACE: payload kind code is sentinel/unknown. \
+                 ADR-006 \u{a7}2.7.7 #9 \u{2014} producer-site MIR kind \
+                 classification gap. Falling back to Bool placeholder; \
+                 downstream consumer will surface on slot-kind mismatch.",
+            );
             shape_value::NativeKind::Bool
         }
     }
