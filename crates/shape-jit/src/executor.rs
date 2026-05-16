@@ -273,6 +273,18 @@ impl JITExecutor {
             crate::ffi::arc::JIT_ARC_RELEASE_CALLS.load(std::sync::atomic::Ordering::Relaxed);
         let frees_before =
             crate::ffi::arc::JIT_ARC_RELEASE_FREES.load(std::sync::atomic::Ordering::Relaxed);
+        // cluster-2-cw-E measurement (cluster-2-inventory §F): §2.7.5
+        // `Arc<String>` carrier counters. Independent track from the
+        // UnifiedValue<T> counters above per `ffi/arc.rs` STRING_*
+        // counter docstrings.
+        let str_allocs_before =
+            crate::ffi::arc::STRING_CONSTANT_ALLOCS.load(std::sync::atomic::Ordering::Relaxed);
+        let str_retain_before =
+            crate::ffi::arc::STRING_RETAIN_CALLS.load(std::sync::atomic::Ordering::Relaxed);
+        let str_release_before =
+            crate::ffi::arc::STRING_RELEASE_CALLS.load(std::sync::atomic::Ordering::Relaxed);
+        let str_frees_before =
+            crate::ffi::arc::STRING_RELEASE_FREES.load(std::sync::atomic::Ordering::Relaxed);
 
         let jit_exec_start = Instant::now();
         let signal = unsafe { jit_fn(&mut jit_ctx) };
@@ -285,11 +297,51 @@ impl JITExecutor {
                 crate::ffi::arc::JIT_ARC_RELEASE_CALLS.load(std::sync::atomic::Ordering::Relaxed);
             let frees_after =
                 crate::ffi::arc::JIT_ARC_RELEASE_FREES.load(std::sync::atomic::Ordering::Relaxed);
+            let str_allocs_after =
+                crate::ffi::arc::STRING_CONSTANT_ALLOCS
+                    .load(std::sync::atomic::Ordering::Relaxed);
+            let str_retain_after =
+                crate::ffi::arc::STRING_RETAIN_CALLS
+                    .load(std::sync::atomic::Ordering::Relaxed);
+            let str_release_after =
+                crate::ffi::arc::STRING_RELEASE_CALLS
+                    .load(std::sync::atomic::Ordering::Relaxed);
+            let str_frees_after =
+                crate::ffi::arc::STRING_RELEASE_FREES
+                    .load(std::sync::atomic::Ordering::Relaxed);
             eprintln!(
                 "[shape-jit-arc] retain_calls={} release_calls={} release_frees={}",
                 retain_after - retain_before,
                 release_after - release_before,
                 frees_after - frees_before
+            );
+            // cluster-2-cw-E §F measurement output: per-call-site
+            // §2.7.5 String carrier metrics. The leak quantification
+            // shape is `str_allocs - str_frees` = number of
+            // permanently-leaked Arc<String> allocations for this
+            // execution. The "cumulative" line is the process-wide
+            // running total — surfaces compile-time allocations that
+            // happen before any jit_fn invocation (the dominant
+            // source for `MirConstant::Str` materialization).
+            eprintln!(
+                "[shape-jit-arc-str] str_allocs={} str_retain={} \
+                 str_release={} str_frees={} leaked={}",
+                str_allocs_after - str_allocs_before,
+                str_retain_after - str_retain_before,
+                str_release_after - str_release_before,
+                str_frees_after - str_frees_before,
+                (str_allocs_after - str_allocs_before)
+                    .saturating_sub(str_frees_after - str_frees_before)
+            );
+            eprintln!(
+                "[shape-jit-arc-str-cum] str_allocs_total={} \
+                 str_retain_total={} str_release_total={} \
+                 str_frees_total={} leaked_total={}",
+                str_allocs_after,
+                str_retain_after,
+                str_release_after,
+                str_frees_after,
+                str_allocs_after.saturating_sub(str_frees_after)
             );
         }
 
