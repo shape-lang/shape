@@ -1,0 +1,53 @@
+/// @module std::core::add
+/// `Add` and `AddAssign` — operator traits for `+` and `+=`.
+///
+/// Shape's strict-typing arithmetic dispatch for built-in scalar types
+/// (`int`, `number`, `decimal`, `bigint`, `string`) emits typed opcodes
+/// (`AddInt`, `AddNumber`, `StringConcatTyped`, ...) at compile time and
+/// never routes through this trait. User-defined types (`type X { ... }`)
+/// that want to participate in `+` / `+=` opt in by providing an
+/// `impl Add for X { method add(other: X) -> X { ... } }` block; the
+/// compiler then desugars `a + b` to `Add::add(a, b)` via the operator
+/// trait dispatch path at `compiler/expressions/binary_ops.rs:69-83`.
+///
+/// `AddAssign` is the in-place counterpart. `a += b` is grammar-desugared
+/// at parse time (`shape-ast/parser/expressions/binary_ops.rs:295-307`) to
+/// `a = a + b`, so authoring an `impl Add for X` already covers `+=` for
+/// user-defined types without a separate `AddAssign::add_assign` body.
+/// `AddAssign` is declared here for symmetry with future in-place
+/// optimizations (e.g. `Buffer.add_assign(other)` that mutates in-place
+/// instead of allocating a fresh value) and so generic bounds
+/// `fn f<T: AddAssign>(...)` can be authored today.
+///
+/// ## Known implementations
+///
+/// | Type        | Dispatch source                                  |
+/// |-------------|--------------------------------------------------|
+/// | int         | typed `AddInt` opcode (no trait dispatch)        |
+/// | number      | typed `AddNumber` opcode (no trait dispatch)     |
+/// | decimal     | typed decimal-add opcode (no trait dispatch)     |
+/// | bigint      | typed bigint-add opcode (no trait dispatch)      |
+/// | string      | typed `StringConcatTyped` opcode (no dispatch)   |
+/// | Array<T>    | typed `ArrayConcat` opcode (no trait dispatch)   |
+/// | DateTime    | builtin `DATETIME_METHODS::add` PHF entry        |
+/// | TimeSpan    | builtin `TIMESPAN_METHODS::add` PHF entry        |
+/// | user type X | `impl Add for X { method add(other: X) -> X }`   |
+
+/// Operator trait for `+`. Implementing `Add` for a user-defined type
+/// enables the binary `+` operator on values of that type. The compiler
+/// calls `Add::add(lhs, rhs)` via UFCS dispatch through the
+/// `function_name_index` for `X::add`.
+trait Add {
+    /// Return `self + other`. By convention the result is a fresh value;
+    /// in-place mutation belongs to `AddAssign::add_assign`.
+    add(other: Self): Self
+}
+
+/// Operator trait for `+=`. The grammar desugars `a += b` to `a = a + b`,
+/// so providing `impl Add for X` already covers `+=` for user-defined
+/// types — `AddAssign` is declared here for generic bounds and for the
+/// future in-place specialization opt-in.
+trait AddAssign {
+    /// Mutate `self` in place by adding `other`.
+    add_assign(other: Self)
+}
