@@ -7999,3 +7999,49 @@ The team-lead surfacing at cluster-2-empirical-verification close subsection (th
 ---
 
 *Next session: cluster-2-inventory-audit-day sub-agent dispatch (sections A-I per supervisor R2/R3/R4; section A consumes (a) closure-wave-1 close + (b) latent finding; section I = supervisor's authorization at closure-wave dispatch time per R4) → cluster-2 closure waves per inventory recommendation → cluster-2 close attempt → Phase 4 (trait Add/AddAssign for user types) → v1 close attempt.*
+
+---
+
+## Wave 3 Round 7 cluster-2-inventory-audit-day close — comprehensive sections A-I deliverable (2026-05-16)
+
+Cluster-2-inventory-audit-day closed at sub-agent commit `3dae3fd9`; merged at canonical HEAD `71007603` (no-ff). Audit-only deliverable: `docs/cluster-audits/cluster-2-inventory.md` (1476 lines; sections A-O). No source changes.
+
+### Section dispositions
+
+| § | Disposition |
+|---|---|
+| §A | closure-wave-2 (hypothesis b Phase-C inlining latency) → defer-within-cluster-2 sequential with first-phase empirical re-verification (correctness preserved post-closure-wave-1; 4 explanations per empirical-verification §3.4 need empirical disposition) |
+| §B | per-class coverage matrix: 6 of 8 user-fn classes COVERED at HEAD via closure-wave-1 `lower_function_detailed` seeding; 2 UNCOVERED (closure-body-with-INFERRED-typed-array-param + method-chain intermediate slots) — Round 2 tracking per supervisor 2026-05-16 |
+| §C | hashmap-value-v-arm: 4-file migration mapped (heap_value.rs:1658 + hashmap_methods.rs:1735 + 2 more) |
+| §D | 10 failure classes: per-class size estimate satisfied (Q4 binding); per-test triage = closure-wave agent territory |
+| §E | per-HeapKind kinded jit_print: 3 of 35 arms covered; 30 UNCOVERED → 10 per-family sub-clusters recommended |
+| §F | compile-time-boxed string-constant leak: 3 options (intern-pool / ManuallyDrop+free / RC-HeapHeader); measure-first dispatch |
+| §G | W12-collection-constructor-mir-lowering: **ALL 8 named constructors COVERED at HEAD; NO closure-wave-G needed** (audit velocity gain) |
+| §H | 6 closure-wave territories proposed in 3-4 staged rounds; includes tracing-crate-migration as wave-F (~150 LoC; tracing dep + jit-trace Cargo feature + release_max_level_off + --trace-jit CLI flag; ADR §2.7.5 cross-crate policy amendment owed) |
+| §I | Q25.C absorb-vs-separate: PRESERVE cluster-1.5 separation RATIFIED by supervisor 2026-05-16 per Surface A (c) split; Q25.C dispatches post-cluster-2-close as cluster-1.5 sub-cluster (or absorbed at user reauthorization) |
+
+### Round 1 parallel dispatch shape RATIFIED by supervisor 2026-05-16 (4 agents non-overlapping)
+
+- closure-wave-2 (hypothesis b empirical-first; substitution.rs Phase-C inlining latency)
+- closure-wave-C (hashmap-value-v-arm 4-file migration; ADR §2.7.24 Q25.B HashMap-row preservation owed at close)
+- closure-wave-F (tracing-crate migration per R6 mechanism; ADR §2.7.5 cross-crate amendment owed)
+- closure-wave-E (string-constant leak measure-first; option A/B/C selection at close)
+
+### ADR amendments authorized in respective closure-wave commits
+
+- §C closure-wave-C: ADR-006 §2.7.24 Q25.B SUPERSEDED HashMap-row preservation (recursive HashMapKindedRef values pointer)
+- §H closure-wave-F: ADR-006 §2.7.5 cross-crate ABI policy amendment naming tracing dep as internal-Rust-side-only (does NOT propagate to extension contract)
+- §E per-family closes: per-HeapKind §2.7.5 dispatch arm amendment (jit_print_<heap_kind> FFI body + routing arm at terminators.rs)
+- §I Q25.C.6 IC devirtualization: DEFERRED to cluster-1.5 dispatch per Q25.C separation
+
+### Imprecision instance 32 (cumulative 45; all caught pre-merge)
+
+| # | Source layer | Imprecision shape | Caught at |
+|---|---|---|---|
+| 32 | team-lead-prompt | Dispatch-prompt claim "26 existing SHAPE_JIT_* sites" — actual 28 at HEAD 5d09007e (+2 from cluster-2-empirical-verification + cluster-2-closure-wave-1 additions per their close subsections); team-lead carried stale count from cluster-2-empirical-verification pre-flight without re-counting at later HEAD | Sub-agent §H.3 pre-flight ground-truth pass (recursive Q3 binding fired at audit deliverable layer) |
+
+Cumulative 45 imprecisions through cluster-2-inventory-audit-day close; 0 bad-code merges into canonical preserved across cluster-0+1+cluster-2 trajectory. Provenance pattern: stale-count carry-forward across multiple sub-cluster boundaries — recursive Q3 binding should fire at each new dispatch prompt drafting, not just at first ground-truth pass. Future team-lead surfacings of cumulative counts (instance counts, site counts, file counts) verify at current HEAD pre-drafting.
+
+---
+
+*Next session: Round 1 parallel dispatch (closure-wave-2 + C + F + E) → respective merges + status doc subsections → Round 2 dispatch per audit §H.2 (closure-wave-B + closure-wave-D family 1+2) → Round 3 dispatch (wave-D family 3+4 + §D class 1+2 + wave-E fix if measurement found leak) → Round 4 (§D classes 3-10 per-class triage) → cluster-2 close attempt → Phase 4 (trait Add/AddAssign) → v1 close attempt → cluster-1.5 Q25.C TraitObject rebuild (post-v1 or absorbed at user reauthorization).*
