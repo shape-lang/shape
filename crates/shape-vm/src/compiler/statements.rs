@@ -4556,6 +4556,75 @@ impl BytecodeCompiler {
                             self.propagate_initializer_type_to_slot(binding_idx, false, is_mutable);
                         }
 
+                        // cluster-2-cw-IC-class-c (Phase 3 cluster-2 Round 3,
+                        // 2026-05-16): Class C method-chain intermediate
+                        // binding coverage at module-binding (top-level)
+                        // path. The canonical Class C fixture
+                        // (`/tmp/cw-B-class-c-method-chain.shape`) is
+                        // top-level (`let doubled = xs.map(...)` at module
+                        // scope), so the side-table to populate is
+                        // `module_binding_array_element_types` (consumed by
+                        // `identifier_concrete_type`'s module-binding
+                        // fallback arm at
+                        // `monomorphization/type_resolution.rs:1462`).
+                        //
+                        // Must run AFTER `propagate_initializer_type_to_slot`
+                        // because that path's fallback writes
+                        // `VariableTypeInfo::unknown()` when no type info is
+                        // available from the expression's compile-time
+                        // metadata (`last_expr_type_info` /
+                        // `last_expr_numeric_type` / `last_expr_schema`),
+                        // which would wipe a prior type_tracker entry. The
+                        // method call's `last_expr_type_info` is cleared at
+                        // `compile_expr_method_call` line 2197/2287/2438 per
+                        // the method-result clearing pattern, so the
+                        // initializer-propagate fallback unconditionally
+                        // hits the unknown-write arm for method-call RHS.
+                        //
+                        // Per ADR-006 §2.7.5 stamp-at-compile-time: the
+                        // specialized callee's substituted return-type
+                        // annotation IS the proof — no runtime decode, no
+                        // inference fabrication, no Bool-default. The
+                        // monomorphization site-table was populated by
+                        // `try_monomorphize_method_call` /
+                        // `_with_closures` per the V3-S6b conduit; this
+                        // walks the same side-tables used by the link-time
+                        // MIR resolver, but at bytecode-emission time so
+                        // subsequent statements see the type before the
+                        // resolver runs. Per §2.7.7 #9: when any chain link
+                        // is absent the helper returns None and the slot
+                        // stays unstamped (surface-and-stop preserved).
+                        //
+                        // The mirror set_module_binding_type_info call is
+                        // required because `resolve_receiver_extend_type`
+                        // at `helpers.rs:3826` consults the type_tracker
+                        // (not the side-table) to gate the UFCS extend-
+                        // function lookup for `Vec.map` at
+                        // `compile_expr_method_call:2116`. Without the
+                        // type_tracker mirror, the second `.map(...)` falls
+                        // through to the generic `CallMethod` path without
+                        // specializing, and the bytecode runtime hits the
+                        // ckpt-2 surface in `array_transform.rs::map`.
+                        if let Some(init_expr) = var_decl.value.as_ref() {
+                            if let Some(shape_value::v2::ConcreteType::Array(elem)) =
+                                crate::compiler::monomorphization::type_resolution::specialized_call_return_concrete_type(
+                                    self, init_expr,
+                                )
+                            {
+                                self.module_binding_array_element_types
+                                    .insert(binding_idx, (*elem).clone());
+                                if let Some(elem_ann) = crate::compiler::expressions::closures::concrete_type_to_type_annotation(&elem) {
+                                    let vec_ann = shape_ast::ast::TypeAnnotation::Generic {
+                                        name: shape_ast::ast::TypePath::simple("Vec"),
+                                        args: vec![elem_ann],
+                                    };
+                                    if let Some(type_name) = Self::tracked_type_name_from_annotation(&vec_ann) {
+                                        self.set_module_binding_type_info(binding_idx, &type_name);
+                                    }
+                                }
+                            }
+                        }
+
                         // Track for auto-drop at program exit
                         let binding_type_name = self
                             .type_tracker
@@ -4803,6 +4872,68 @@ impl BytecodeCompiler {
                         if let Some(name) = var_decl.pattern.as_identifier() {
                             if let Some(local_idx) = self.resolve_local(name) {
                                 self.v2_typed_array_locals.insert(local_idx, kind);
+                            }
+                        }
+                    }
+
+                    // cluster-2-cw-IC-class-c (Phase 3 cluster-2 Round 3,
+                    // 2026-05-16): Class C method-chain intermediate slot
+                    // coverage. When the RHS is a method call that just
+                    // monomorphized to a specialization whose return type
+                    // is `Array<C>`, populate `local_array_element_types`
+                    // so the next statement's
+                    // `concrete_type_for_expr(receiver_identifier)` chain
+                    // can reach the `Array<C>` annotation through
+                    // `identifier_concrete_type`'s side-table arm
+                    // (`monomorphization/type_resolution.rs:1443`). This
+                    // closes the canonical chain
+                    // `let doubled = xs.map(|x|x*2); let trebled =
+                    // doubled.map(|y|y+1); print(trebled.sum())` whose
+                    // pre-fix failure was that the SECOND `.map(...)`
+                    // could not specialize because `doubled`'s slot had
+                    // no entry in any concrete-type side-table.
+                    //
+                    // Per ADR-006 §2.7.5 stamp-at-compile-time: the
+                    // specialized callee's substituted return-type
+                    // annotation IS the proof — no runtime decode, no
+                    // inference fabrication, no Bool-default. The
+                    // monomorphization site-table was populated by
+                    // `try_monomorphize_method_call` /
+                    // `_with_closures` per the V3-S6b conduit; this
+                    // walks the same side-tables used by the link-time
+                    // MIR resolver, but at bytecode-emission time so
+                    // subsequent statements see the type before the
+                    // resolver runs. Per §2.7.7 #9: when any chain link
+                    // is absent the helper returns None and the slot
+                    // stays unstamped (surface-and-stop preserved).
+                    if let Some(init_expr) = var_decl.value.as_ref() {
+                        if let Some(shape_value::v2::ConcreteType::Array(elem)) =
+                            crate::compiler::monomorphization::type_resolution::specialized_call_return_concrete_type(
+                                self, init_expr,
+                            )
+                        {
+                            if let Some(name) = var_decl.pattern.as_identifier() {
+                                if let Some(local_idx) = self.resolve_local(name) {
+                                    self.local_array_element_types
+                                        .insert(local_idx, (*elem).clone());
+                                    // Mirror `set_local_type_info` for the
+                                    // corresponding `Vec<elem>` type name
+                                    // — see the module-binding site above
+                                    // for the full rationale on why both
+                                    // the side-table and the type_tracker
+                                    // entry are required to close the
+                                    // `let intermediate = recv.map(...)`
+                                    // → `intermediate.map(...)` chain.
+                                    if let Some(elem_ann) = crate::compiler::expressions::closures::concrete_type_to_type_annotation(&elem) {
+                                        let vec_ann = shape_ast::ast::TypeAnnotation::Generic {
+                                            name: shape_ast::ast::TypePath::simple("Vec"),
+                                            args: vec![elem_ann],
+                                        };
+                                        if let Some(type_name) = Self::tracked_type_name_from_annotation(&vec_ann) {
+                                            self.set_local_type_info(local_idx, &type_name);
+                                        }
+                                    }
+                                }
                             }
                         }
                     }

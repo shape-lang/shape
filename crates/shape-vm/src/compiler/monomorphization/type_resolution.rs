@@ -1401,6 +1401,65 @@ pub fn concrete_type_for_expr(compiler: &BytecodeCompiler, expr: &Expr) -> Optio
     }
 }
 
+/// cluster-2-cw-IC-class-c (Phase 3 cluster-2 Round 3, 2026-05-16):
+/// look up the specialized return ConcreteType for an `Expr::MethodCall`
+/// initializer whose monomorphization succeeded at bytecode-emission time.
+///
+/// Chains:
+///   `Expr::MethodCall.span + current_function`
+///   → `BytecodeProgram.monomorphized_method_call_sites[(span, current_fn)]`
+///       (populated by `try_monomorphize_method_call` /
+///        `try_monomorphize_method_call_with_closures` per ADR-006 §2.7.5
+///        V3-S6b conduit)
+///   → specialized FunctionId
+///   → `BytecodeCompiler.function_defs[specialized_name].return_type`
+///       (the substituted AST annotation written by
+///        `substitution::substitute_function_def`)
+///   → `concrete_type_from_annotation(annotation)`
+///       (the same v2 annotation→ConcreteType reduction used by the MIR
+///        resolver's `function_return_concrete_types` build)
+///
+/// Returns `None` when any link is absent — non-method-call RHS, no
+/// monomorphization at this call site, unknown specialized function name,
+/// or annotation that doesn't reduce to a v2 ConcreteType. No fabrication.
+///
+/// Per ADR-006 §2.7.5 stamp-at-compile-time: the specialized return type
+/// IS the proof — no runtime decode, no Bool-default, no inference.
+/// Per §2.7.7 #9: when proof is unavailable the slot stays unstamped;
+/// subsequent receiver-kind classification at the second `.map(...)`
+/// surfaces with `NotImplemented(SURFACE)` rather than fabricating.
+///
+/// Class C territory closure: populates `local_array_element_types` /
+/// `module_binding_array_element_types` at let-binding-time so the next
+/// statement's `concrete_type_for_expr(receiver_identifier)` chain can
+/// reach `identifier_concrete_type`'s `local_array_element_types.get(...)`
+/// arm at `type_resolution.rs:1443`, enabling
+/// `try_monomorphize_method_call` to specialize the second `.map(...)` on
+/// the now-known `Array<C>` receiver type.
+pub fn specialized_call_return_concrete_type(
+    compiler: &BytecodeCompiler,
+    expr: &Expr,
+) -> Option<ConcreteType> {
+    let span = match expr {
+        Expr::MethodCall { span, .. } => *span,
+        _ => return None,
+    };
+    let specialized_idx = *compiler
+        .program
+        .monomorphized_method_call_sites
+        .get(&(span, compiler.current_function))?;
+    let specialized_name = compiler
+        .program
+        .functions
+        .get(specialized_idx)
+        .map(|f| f.name.clone())?;
+    let return_annotation = compiler
+        .function_defs
+        .get(&specialized_name)
+        .and_then(|fd| fd.return_type.as_ref())?;
+    crate::compiler::v2_map_emission::concrete_type_from_annotation(return_annotation)
+}
+
 fn literal_concrete_type(literal: &shape_ast::ast::Literal) -> Option<ConcreteType> {
     use shape_ast::ast::Literal;
     use shape_ast::int_width::IntWidth;
