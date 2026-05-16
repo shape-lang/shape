@@ -1,8 +1,8 @@
-# Phase 3 cluster-0+1 — Team-lead handover (D4-complete → Round-3b seam)
+# Phase 3 cluster-0+1 — Team-lead handover (cluster-0+1-close seam; tag authorization pending)
 
-**Generated:** 2026-05-14 (cadence-shift rotation); updated 2026-05-14 (D4-complete rotation).
-**Successor handoff point:** D4 multi-session chain complete (PATH B atomic landing merged at `bulldozer-strictly-typed @ 8a87ddd7`; Audit §4.3 Obstacles O-3.a + O-3a RESOLVED; smoke matrix 3/4 VM == JIT at canonical fixture). New team-lead's first action: dispatch **Round 3b C2-joint** (HashMapData<V> per-V monomorphization; ~5k LoC / 40 files single atomic commit; likely multi-session chain per ceiling-c). See §In-flight state for full territory + dispatch shape.
-**Predecessor team-lead session:** rotated at the D4-complete seam (context exhaustion at 97% post-D4-merge; supervisor absorbed handover doc updates).
+**Generated:** 2026-05-14 (cadence-shift rotation); updated 2026-05-15 (V3-S5-complete + V3-S6 surface rotation); updated 2026-05-16 (cluster-0+1-close seam — V3-S6 5-checkpoint chain MERGED at `50e5c024`; cluster-0+1-close-criterion gates ALL MET under β2 disposition; tag authorization pending supervisor ratification + user authorization).
+**Successor handoff point:** V3-S6 retroactive 5-checkpoint multi-session chain (V3-S6a 43ac9b7a + V3-S6b 48e05f3f + V3-S6c 2544f89f + V3-S6d 2f011e93 + V3-S6e d4d5454c) MERGED into `bulldozer-strictly-typed` canonical at `50e5c024`. Smoke matrix 3/4 VM == JIT at canonical fixture (Smoke 2 JIT TIMEOUT rc=124 in V3-S6f territory folds to cluster-2 per β2 supervisor disposition 2026-05-16). All cluster-0+1-close-criterion gates MET. Reading 2 empirically confirmed at V3-S6e: V3-S6 chain produced real architectural work (V3-S5 conduit completion at compile-time layer) + V3-S6f is the next architectural layer (runtime-execution within specialized body) belonging to cluster-2's broader §2.7.5 JIT-side conduit completion. New team-lead's first execute action: receive supervisor's tag authorization relay + apply `phase-3-cluster-0-close` + `phase-3-cluster-1-close` tags on canonical at `50e5c024` + dispatch cluster-2 audit-day per supervisor's next-phase disposition.
+**Predecessor team-lead session:** rotated at the cluster-0+1-close-seam after V3-S6 chain merge + status doc cluster-0+1 close subsection landing.
 **Supervisor session:** see `docs/cluster-audits/phase-3-supervisor-handover.md` for supervisor-side state.
 
 ## Your role this session
@@ -390,20 +390,153 @@ git -C /home/dev/dev/shape-lang/shape worktree add \
 
 Run cargo / verify-merge.sh via `devenv shell --quiet -- bash -c "cd <worktree-path> && <command>"` from `/home/dev/dev/shape-lang/`.
 
-## In-flight state at handover — D4-complete → Round-3b seam (2026-05-14)
+## In-flight state at handover — cluster-0+1-close seam (2026-05-16)
 
-**Current HEAD:** `bulldozer-strictly-typed @ 8a87ddd7` — D4 multi-session chain complete; PATH B atomic landing merged; Audit §4.3 Obstacles O-3.a + O-3a RESOLVED.
+**Canonical HEAD:** `bulldozer-strictly-typed @ 50e5c024` — V3-S5 architectural sunset COMPLETE at 9523d57a + V3-S6 retroactive 5-checkpoint multi-session chain MERGED via take-both ceremony. V3-S6 chain ancestors integrated: V3-S6a 43ac9b7a (VM-side resolver Phase B + closure-return-typed generic monomorphization + Vec<> conduit + parametric Array method classifier ~435 LoC) + V3-S6b 48e05f3f (PATH α side-table infrastructure on BytecodeProgram/Program/LinkedProgram + linker threading + population at try_monomorphize_method_call ~370 LoC) + V3-S6c 2544f89f (PATH α-prime JIT routing block at terminators.rs:176 bypassing jit_call_method trampoline + handle_int_map ckpt3_surface SIGSEGV class +256/-88 LoC) + V3-S6d 2f011e93 (complementary stamping restoration at helpers.rs +58/-31 LoC) + V3-S6e d4d5454c (Gap B+C combined fix: local_typed_array_element_types on MirFunction + lowering producer + helpers.rs consumer ~244 LoC). Total V3-S6 chain ~1500 LoC integrated.
 
-**Smoke matrix at HEAD `8a87ddd7`:**
+**Cluster-0+1 close criterion (β2 supervisor disposition 2026-05-16):** MET
+
+**Smoke matrix at canonical 50e5c024:**
+
+| Smoke | VM | JIT | Cluster-0+1 close criterion (β2) |
+|---|---|---|---|
+| 1 (scalar loop) | ✅ 4950 | ✅ 4950 | ✓ |
+| 2 (`[1,2,3,4,5].map(\|x\|x*2).sum()`) | ✅ 30 | ❌ TIMEOUT rc=124 (V3-S6f runtime infinite-loop in specialized Vec.map body) | cluster-2 fold per β2 |
+| 3 (canonical fixture) | ✅ x | ✅ x | ✓ |
+| 4 (Set + .add + .size) | ✅ 2 | ✅ 2 | ✓ |
+
+**3/4 VM == JIT at canonical fixture.** Smoke 2 JIT runtime-execution gap folds to cluster-2 as canonical fixture for broader §2.7.5 JIT-side conduit completion work.
+
+**All cluster-0+1-close-criterion gates met under β2:**
+
+- ✓ Q25.A SUPERSEDED (R20 + V3-S5) + Q25.B SUPERSEDED (Round 3b)
+- ✓ Path B canonical Ptr-newtype (D4); Audit §4.3 O-3.a + O-3a RESOLVED (D4)
+- ✓ Producer-side foundation (Wave 3 R1 V3-A2-followup); hashmap-value-v-arm → cluster-2 fold
+- ✓ V3-S5 wholesale enum + buffer deletion (Framing (ii) live-grep 0/0/0 LIVE .rs preserved; 1 pre-existing markdown audit doc hit at V2_METHOD_DISPATCH_AUDIT.md:252 from phase-1b-vm commit 26f30d98)
+- ✓ JIT FFI String/Decimal build (Group X option (a))
+- ✓ V3-S6 retroactive 5-checkpoint chain MERGED (V3-S6a/b/c/d/e folded into canonical at 50e5c024)
+- ✓ `cargo check --workspace --lib --tests` EXIT=0
+- ✓ `just check-clean` EXIT=0
+- ✓ `bash scripts/verify-merge.sh` 12/12 PASS EXIT=0
+- ✓ `bash scripts/check-no-dynamic.sh` EXIT=0
+- ✓ 4-table HeapKind::TypedArray lockstep 0/4 LIVE arms (variant identifier preserved per V3-S5 audit §3.6 unreachable!() arm bodies)
+- ✓ Smoke matrix 3/4 VM == JIT at canonical fixture (β2 disposition; Smoke 2 JIT cluster-2 fold)
+
+**Tag authorization request:** pending supervisor cluster-0+1-close-criterion ratification + user tag authorization. Tags: `phase-3-cluster-0-close` + `phase-3-cluster-1-close` on canonical at `50e5c024`.
+
+**V3-S6 chain meta-pattern: architectural-prediction subclass — 5 instances (37/38/39/40/41) all caught pre-merge:**
+
+- 37th (V3-S6 dispatch): "same gap at two layers" → wrong (two distinct gaps)
+- 38th (V3-S6b PATH α): "single intended consumer" → wrong (implicit-consumer-activation; v2-fast-path dual-consumer SIGSEGV)
+- 39th (V3-S6c Step 2): "alternatives" → wrong (complementary-not-alternatives; V3-S6c + V3-S6d both needed)
+- 40th (V3-S6d): "callee FuncRef exists" → wrong (callee FuncRef points to -1 stub because callee body fails JIT-compile)
+- 41st (V3-S6e): "compile-time fix sufficient" → wrong (runtime execution layer revealed V3-S6f inner gap; Reading 2 empirically confirmed)
+
+**Reading 2 empirically confirmed:** chain pattern is incomplete-conduit-completion-at-multiple-layers; cluster-2 absorbs broader §2.7.5 JIT-side conduit completion for cleaner architectural conversation. The V3-S6 chain produced real architectural work (V3-S5 conduit completion at compile-time layer); V3-S6f + broader work is cluster-2 territory.
+
+**Cumulative discipline-pattern instances through cluster-0+1 close:**
+
+- 41 imprecision-pattern instances (10 supervisor / 14 audit / 10 team-lead-prompt / 5 agent-execution-report / 2 candidate); all caught pre-merge
+- 9 self-detected defection-attractor refusals (unchanged from V3-S5; V3-S6 chain preserved discipline at every checkpoint — PATH γ refused; PATH β fallback-only; no bridge/probe/helper/hop framings)
+- 5 S1-R18 DURABLE PATTERN instances (unchanged; pattern operational)
+- 4 successful multi-session chains (D4 6-sub-agent + Round 3b 4-sub-agent + V3-S5 10-checkpoint + V3-S6 5-checkpoint)
+- 8 parallel-implementation defection-attractor instances all structurally resolved
+- 0 bad-code merges into canonical across entire cluster-0+1 trajectory
+
+**Next workstream: cluster-2** (§2.7.5 JIT-side conduit completion):
+
+- **V3-S6f-jit-specialized-vec-map-runtime-execution** — Smoke 2 JIT cluster-2 canonical fixture; hypothesis space: (a) for-loop iterator state-machine for v2 typed-array source; (b) closure-call indirect-call shape inside inlined specialization; (c) receiver-self slot kind threading from V3-S6c routing
+- **Broader W11-jit-new-array general fix** — extend function_local_concrete_types population to ALL user functions (not just monomorphized specializations); address runtime-execution-path classification across all parametric body slots
+- **hashmap-value-v-arm follow-up** (per Wave 3 R1 close subsection)
+- **shape-test-residuals-audit** (10 failure classes per Wave 3 R1 baseline-classification)
+- **per-HeapKind kinded jit_print** + **compile-time-boxed string-constant leak** + **W12-collection-constructor-mir-lowering**
+
+Cluster-2 dispatch shape: audit-day first (single sub-agent comprehensive inventory) → closure waves after (parallel sub-agents per Wave 1 partition recommendation). Trajectory remains 3-5 sessions to v1 (cluster-2 cleanup 1-2 + Phase 4 trait Add/AddAssign 1-2 + v1 close attempt 0.5).
+
+**Immediate next actions (in order):**
+
+1. **Read 9 mandatory docs** + post 1-line confirmation (per §First action).
+2. **Receive supervisor cluster-0+1-close-criterion ratification relay from user** + apply `phase-3-cluster-0-close` + `phase-3-cluster-1-close` tags on canonical at `50e5c024` once user authorizes.
+3. **After tag authorization lands:** dispatch cluster-2 audit-day per supervisor's next-phase disposition. Territory: V3-S6f hypothesis space + broader W11-jit-new-array general fix + shape-test-residuals-audit + hashmap-value-v-arm + per-HeapKind kinded jit_print + compile-time-boxed string-constant leak + W12-collection-constructor-mir-lowering. Single sub-agent at ceiling-c expected for audit-only deliverable.
+4. **After cluster-2 audit-day closes + ratifies:** dispatch parallel cluster-2 sub-cluster waves per audit recommendation.
+5. **After cluster-2 closes:** Phase 4 (trait Add/AddAssign for user types).
+6. **Then v1 close attempt.**
+
+**Pending items archived at handover:**
+
+- ✓ Wave 1 audit-day + Wave 2 Round 1/2/3a'/3a + Round 3b + Wave 3 R1 V3-A2-followup + Wave 3 R2 V3-S5 + Wave 3 R3 V3-S6 chain all merged
+- ✓ ADR-006 amendments landed (Q25.A SUPERSEDED + Q25.B SUPERSEDED + Path B §2.3 + §Q25.C.5 from V3-S5 + Round 3b + D4)
+- ✓ Status doc cluster-0+1 close subsection landed (this session)
+- ✓ S1-R18 DURABLE PATTERN ratified by user (4-criterion test; 5 instances)
+- ✓ Surface A user disposition (c) split — Q25.C TraitObject rebuild = cluster-1.5 follow-up
+- ✓ CLAUDE.md compacted (44.9k → 35.6k chars; 2026-05-14)
+- ✓ All forbidden-pattern + refuse-on-sight discipline preserved (10 items + #10 anti-deferral + #11 Ptr-newtype-shim refusal)
+
+**Pending items beyond cluster-0+1 (cluster-2 + Phase 4):**
+
+- V3-S6f-jit-specialized-vec-map-runtime-execution (Smoke 2 JIT canonical fixture)
+- Broader W11-jit-new-array general fix (§2.7.5 JIT-side conduit completion across all user functions)
+- Q25.C TraitObject rebuild (`dyn T = box(X{})` per kickoff prompt prose; cluster-1.5)
+- Cluster-2 audit subjects: per-HeapKind kinded jit_print + compile-time-boxed string-constant leak + W12-collection-constructor-mir-lowering + shape-test-residuals-audit (10 failure classes)
+- Phase 4: trait Add/AddAssign for user types
+- v1 close attempt
+
+## In-flight state (archived) — V3-S5-complete + V3-S6 surface-and-stop + user (B') seam (2026-05-15)
+
+**Archived pre-V3-S6 in-flight state preserved below for historical reference.**
+
+**Pre-cluster-0+1-close-seam HEAD:** `bulldozer-strictly-typed @ 9523d57a` — V3-S5 10-ckpt multi-session chain COMPLETE + MERGED + VERIFIED. TypedArrayData enum + TypedBuffer<T> + AlignedTypedBuffer wholesale deletion done. 1223 LIVE refs → 0 LIVE refs (Framing (ii) live-grep zero across all 3 patterns). ADR-006 §2.7.24 Q25.A SUPERSEDED fully fulfilled.
+
+**Wave 2 + Wave 3 cumulative through V3-S5:**
+
+- Wave 1 audit-day (`bulldozer-wave-1-inventory.md`): A-R sections; cluster-0+1 deletion targets mapped.
+- Wave 2 Round 1 (6 agents A1/B/C/D1/F/G): ~6.8k LoC. RATIFIED + merged.
+- Wave 2 Round 2 (4 agents A2/D2/E/C2a): E substantive + 3 surface-and-stops. RATIFIED + merged.
+- Wave 2 Round 3a' (8 agents handler-family α-η + gate-flip): ~951 LoC migration foundation. RATIFIED + merged.
+- Wave 2 Round 3a (D4 6-sub-agent multi-session chain): PATH B atomic Ptr-newtype canonical landed; Audit §4.3 O-3.a/O-3a RESOLVED. RATIFIED + merged.
+- Wave 2 Round 3b (C2-joint 4-sub-agent multi-session chain): HashMapData<V> per-V monomorphization; Q25.B SUPERSEDED. RATIFIED + merged.
+- Wave 3 R1 (V3-A2-followup-producer-cascade + V3-baseline-classification): Array<string>/<decimal> literal LoadConst-to-NewStringV2/DecimalV2 + baseline classification (10 failure classes cluster-2 territory). RATIFIED + merged.
+- Wave 3 R2 V3-S5 (10-ckpt multi-session chain ckpt-1 through ckpt-6-prime): TypedArrayData wholesale architectural sunset + JIT FFI String/Decimal build. RATIFIED + merged at 9523d57a.
+
+**Smoke matrix at HEAD `9523d57a`:**
 
 | Smoke | VM | JIT | Status |
 |---|---|---|---|
 | 1 (scalar loop) | ✅ 4950 | ✅ 4950 | ✓ |
-| 2 (`[1,2,3,4,5].map(\|x\|x*2).sum()`) | ✅ 30 | ❌ rc=1 | gated on S5 + A2-followup-producer-cascade (literal-upgrade) |
-| 3 (canonical fixture `let t = X{}`) | ✅ x | ✅ x | ✓ post-γ |
+| 2 (`[1,2,3,4,5].map(\|x\|x*2).sum()`) | ❌ SURFACE | ❌ SURFACE | V3-S5 regression; V3-S6a-resolver-extension dispatch authorized (user choice (B') 2026-05-15) |
+| 3 (canonical fixture `let t = X{}`) | ✅ x | ✅ x | ✓ |
 | 4 (Set + .add + .size) | ✅ 2 | ✅ 2 | ✓ |
 
-**3 of 4 VM == JIT at canonical fixture.** Smoke 2 unblocks post-Wave-3 stabilize (S5 wholesale TypedArrayData enum deletion + A2-followup-producer-cascade for Array<string> literal upgrade post-gate-flip).
+**3 of 4 VM == JIT at canonical fixture.** Smoke 2 regressed from VM=30 → SURFACE during V3-S5 ckpt-5 consumer-cascade tier 3 (locus: Vec.map<U> body `let mut result = []` empty literal where closure-return-typed generic U doesn't bind through resolver chain). V3-S6a-resolver-extension is the cluster-0+1-close-gating fix.
+
+**V3-S6 SURFACE-AND-STOP (2026-05-15, clean working tree, no commits):**
+
+Initial V3-S6 dispatch was based on supervisor 36th-imprecision (my Part 1 framing claimed "[1,2,3,4,5] literal emission falls through to legacy op_new_array path"). Sub-agent verified via existing passing tests (test_int_array_emits_typed_opcodes + test_int_array_executes_correctly at typed_emission.rs:468/543) that `[1,2,3,4,5]` ALREADY emits NewTypedArrayI64. Producer-side for Array<int> literals is sound. The regression locus is in `crates/shape-runtime/stdlib-src/core/vec.shape:51-57` Vec.map<U> body's empty `[]` literal — closure-return-typed generic U doesn't bind through `resolve_call_site_type_args_with_closures` resolver chain.
+
+**User choice (B') RATIFIED 2026-05-15:** dispatch V3-S6a-resolver-extension to extend `resolve_call_site_type_args_with_closures` at `crates/shape-runtime/src/type_system/inference/type_resolution.rs:760-850+` to bind generics from closure return types when the type-only resolver leaves them unbound. ~100-200 LoC; single sub-agent at ceiling-c expected. Fix unblocks both Smoke 2 VM AND JIT simultaneously (sub-agent finding: same gap surfaces at both layers).
+
+**Cumulative discipline-pattern instances through V3-S5 + V3-S6 surface:**
+
+- 36 imprecision instances cumulative (11 supervisor-layer / 14 audit-layer / 5 team-lead-prompt-layer / 5 agent-execution-report-layer; +1 36th from V3-S6 framing); all caught pre-merge
+- 9 self-detected defection-attractor refusals (unchanged from V3-S5; clean execution)
+- 5 S1-R18 DURABLE PATTERN instances (unchanged; pattern operational)
+- 8 parallel-implementation defection-attractor instances all structurally resolved
+
+**Cluster-0+1-close-criterion gates at HEAD 9523d57a:**
+
+Resolved (RATIFIED by supervisor):
+- ✓ Q25.A SUPERSEDED (R20 + V3-S5) + Q25.B SUPERSEDED (Round 3b)
+- ✓ Path B canonical Ptr-newtype pattern (D4)
+- ✓ Audit §4.3 O-3.a + O-3a (D4)
+- ✓ Producer-side foundation (Wave 3 R1)
+- ✓ hashmap-value-v-arm → cluster-2 fold
+- ✓ V3-S5 wholesale enum + buffer deletion (live-grep 0/0/0)
+- ✓ JIT FFI String/Decimal build (Group X, ckpt-6-prime)
+- ✓ All gate checks (cargo check / just check-clean / verify-merge.sh 12/12 / check-no-dynamic / 4-table lockstep 0/4 LIVE)
+- ✓ Framing (ii) live-grep zero across all 3 patterns
+
+Pending V3-S6a:
+- ⏳ Smoke matrix 4/4 VM == JIT at canonical fixture producing expected values (Smoke 2 30/30; restored by V3-S6a-resolver-extension)
 
 **Wave 2 closed cumulative (HEAD 8a87ddd7):**
 
