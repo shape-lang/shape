@@ -1503,6 +1503,14 @@ fn infer_constant_kind(constant: &MirConstant) -> Option<NativeKind> {
         MirConstant::Float(_) => Some(NativeKind::Float64),
         MirConstant::Int(_) => Some(NativeKind::Int64),
         MirConstant::Bool(_) => Some(NativeKind::Bool),
+        // Phase 3 cluster-2 Round 4 cw-D-fam12 follow-up (instance 57,
+        // 2026-05-16). ADR-006 §2.7.5 amendment Round 19 S1.5: Char is a
+        // 4-byte scalar `NativeKind` variant (codepoint inline in low 32
+        // bits, no Arc wrapping). Stamp at the producing site so the `print`
+        // dispatch in `terminators.rs` matches the `NativeKind::Char` arm at
+        // line ~679 (post-amendment scalar label) and routes to
+        // `jit_print_char(u32)`.
+        MirConstant::Char(_) => Some(NativeKind::Char),
         MirConstant::None => None,
         MirConstant::StringId(_) | MirConstant::Str(_) => Some(NativeKind::String),
         MirConstant::Function(_) => Some(NativeKind::UInt64),

@@ -295,6 +295,15 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             Operand::Constant(MirConstant::Int(_)) => Some(NativeKind::Int64),
             Operand::Constant(MirConstant::Float(_)) => Some(NativeKind::Float64),
             Operand::Constant(MirConstant::Bool(_)) => Some(NativeKind::Bool),
+            // Phase 3 cluster-2 Round 4 cw-D-fam12 follow-up (instance 57,
+            // 2026-05-16). ADR-006 §2.7.5 amendment Round 19 S1.5: Char is a
+            // 4-byte scalar `NativeKind` variant (codepoint inline in low 32
+            // bits of `ValueSlot`, no Arc wrapping). Producer-site
+            // classification at the MIR constant operand mirrors the
+            // `infer_constant_kind` arm in `types.rs` — both feed the same
+            // §2.7.5 stamp-at-compile-time discipline for the print dispatch
+            // at `terminators.rs` ~679 `NativeKind::Char` arm.
+            Operand::Constant(MirConstant::Char(_)) => Some(NativeKind::Char),
             // ADR-006 §2.7.11/Q12 function-id-class callee-classification
             // kind: a `MirConstant::Function(name)` lowers to the JIT-
             // internal `box_function(fn_id)` shape (TAG_FUNCTION NaN-box),

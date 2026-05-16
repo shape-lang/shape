@@ -390,6 +390,19 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // Native I8 bool — 0 or 1.
                 Ok(self.builder.ins().iconst(types::I8, *b as i64))
             }
+            MirConstant::Char(c) => {
+                // Phase 3 cluster-2 Round 4 cw-D-fam12 follow-up (instance 57,
+                // 2026-05-16). ADR-006 §2.7.5 amendment Round 19 S1.5: Char is
+                // a 4-byte scalar (codepoint in low 32 bits of `ValueSlot`).
+                // Emit as Cranelift I32 — the `print` dispatch's
+                // `NativeKind::Char` arm at `terminators.rs` ~679 narrows
+                // I32/I64/I8 to I32 before calling `jit_print_char(u32)`
+                // which takes the codepoint directly (mirror of scalar
+                // `jit_print_i64` / `_f64` / `_bool` shape, scalar-by-value
+                // FFI). Cranelift handles I32 in the parallel-kind track
+                // without NaN-box / `tag_bits` wrap (§2.7.7 #4 / #7 forbidden).
+                Ok(self.builder.ins().iconst(types::I32, *c as i64))
+            }
             MirConstant::None => {
                 Ok(self
                     .builder

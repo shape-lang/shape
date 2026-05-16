@@ -200,9 +200,14 @@ fn classify_constant(c: &MirConstant) -> ReturnOwnershipMode {
         | MirConstant::StringId(_)
         | MirConstant::Function(_)
         | MirConstant::Method(_) => ReturnOwnershipMode::Static,
+        // `MirConstant::Char` is a 4-byte scalar codepoint (no Arc, no heap
+        // allocation) — same NewlyOwned discipline as Int/Bool/Float scalars
+        // per ADR-006 §2.7.5 amendment Round 19 S1.5 (Char is a
+        // non-nullable scalar `NativeKind` variant; Drop/Clone is no-op).
         MirConstant::Int(_)
         | MirConstant::Bool(_)
         | MirConstant::Float(_)
+        | MirConstant::Char(_)
         | MirConstant::None => ReturnOwnershipMode::NewlyOwned,
         MirConstant::ClosurePlaceholder => ReturnOwnershipMode::Unknown,
     }
