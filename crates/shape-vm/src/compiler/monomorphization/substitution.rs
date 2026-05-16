@@ -2276,6 +2276,39 @@ pub fn inline_closure_body_into_specialization(
     // — it becomes live once Phase D/E wires up capture hoisting.
     let _ = capture_names;
 
+    // cluster-2-cw-2-phaseC-inlining empirical-verification trace
+    // (2026-05-16). Per cluster-2-v3s6f-empirical-verification.md §3.4,
+    // disposition between the 4 explanations (AST-vs-MIR retention,
+    // name mismatch, recursion descent gap, post-Phase-C re-introduction)
+    // requires SHAPE_JIT_DEBUG-gated visibility into the AST visit
+    // pattern inside `inline_closure_calls_in_expr`. The thread-local
+    // counter below is the smallest empirical instrument: it counts
+    // every FunctionCall visit AND its name vs `closure_param_name`
+    // comparison outcome. Surface name MISMATCHES (explanation 2) +
+    // MethodCall/MethodCall.args recursion (explanation 3) + AST shape
+    // dump of the specialized body before and after Phase-C (explanation
+    // 1) are recorded simultaneously per single empirical pass.
+    if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
+        PHASEC_TRACE_FN_CALL_TOTAL.with(|c| c.set(0));
+        PHASEC_TRACE_FN_CALL_MATCH.with(|c| c.set(0));
+        PHASEC_TRACE_METHOD_CALL.with(|c| c.set(0));
+        PHASEC_TRACE_FOR_STMT.with(|c| c.set(0));
+        eprintln!(
+            "[phaseC-empirical] specialization fn={} body stmt count BEFORE inline = {}",
+            specialized.name,
+            specialized.body.len(),
+        );
+        // Dump every top-level statement discriminant so we can confirm
+        // the for-loop carrying f(item) is present.
+        for (i, s) in specialized.body.iter().enumerate() {
+            eprintln!(
+                "[phaseC-empirical]   pre-body[{}] discriminant={}",
+                i,
+                statement_discriminant(s),
+            );
+        }
+    }
+
     specialized.body = specialized
         .body
         .iter()
@@ -2289,7 +2322,56 @@ pub fn inline_closure_body_into_specialization(
         })
         .collect();
 
+    if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
+        eprintln!(
+            "[phaseC-empirical] specialization fn={} body stmt count AFTER inline = {} \
+             fn_call_total={} fn_call_match={} method_call={} for_stmt={}",
+            specialized.name,
+            specialized.body.len(),
+            PHASEC_TRACE_FN_CALL_TOTAL.with(|c| c.get()),
+            PHASEC_TRACE_FN_CALL_MATCH.with(|c| c.get()),
+            PHASEC_TRACE_METHOD_CALL.with(|c| c.get()),
+            PHASEC_TRACE_FOR_STMT.with(|c| c.get()),
+        );
+        for (i, s) in specialized.body.iter().enumerate() {
+            eprintln!(
+                "[phaseC-empirical]   post-body[{}] discriminant={}",
+                i,
+                statement_discriminant(s),
+            );
+        }
+    }
+
     Ok(())
+}
+
+// cluster-2-cw-2-phaseC-inlining empirical trace counters (2026-05-16).
+// SHAPE_JIT_DEBUG-gated; reset per Phase-C invocation. See
+// inline_closure_body_into_specialization for the instrumentation
+// rationale (§3.4 of cluster-2-v3s6f-empirical-verification.md, 4
+// explanations dispositionable per single empirical pass).
+thread_local! {
+    static PHASEC_TRACE_FN_CALL_TOTAL: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static PHASEC_TRACE_FN_CALL_MATCH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static PHASEC_TRACE_METHOD_CALL: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static PHASEC_TRACE_FOR_STMT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn statement_discriminant(s: &shape_ast::ast::Statement) -> &'static str {
+    use shape_ast::ast::Statement;
+    match s {
+        Statement::Return(..) => "Return",
+        Statement::Expression(..) => "Expression",
+        Statement::VariableDecl(..) => "VariableDecl",
+        Statement::Assignment(..) => "Assignment",
+        Statement::For(..) => "For",
+        Statement::While(..) => "While",
+        Statement::If(..) => "If",
+        Statement::Break(..) => "Break",
+        Statement::Continue(..) => "Continue",
+        Statement::Extend(..) => "Extend",
+        _ => "Other",
+    }
 }
 
 /// Recursively walk a statement and rewrite any `Expr::FunctionCall` whose
@@ -2330,6 +2412,14 @@ fn inline_closure_calls_in_statement(
             Statement::Assignment(new_assign, *span)
         }
         Statement::For(for_loop, span) => {
+            // cluster-2-cw-2-phaseC-inlining empirical trace (2026-05-16).
+            if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
+                PHASEC_TRACE_FOR_STMT.with(|c| c.set(c.get() + 1));
+                eprintln!(
+                    "[phaseC-empirical]   For statement encountered (body_stmts={})",
+                    for_loop.body.len(),
+                );
+            }
             let new_init = match &for_loop.init {
                 ForInit::ForIn { pattern, iter } => ForInit::ForIn {
                     pattern: pattern.clone(),
@@ -2461,6 +2551,18 @@ fn inline_closure_calls_in_expr(
     // (they could contain nested calls), but swapping with the inlined body
     // happens here.
     if let Expr::FunctionCall { name, args, .. } = expr {
+        // cluster-2-cw-2-phaseC-inlining empirical trace (2026-05-16).
+        if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
+            PHASEC_TRACE_FN_CALL_TOTAL.with(|c| c.set(c.get() + 1));
+            let matched = name == closure_param_name;
+            if matched {
+                PHASEC_TRACE_FN_CALL_MATCH.with(|c| c.set(c.get() + 1));
+            }
+            eprintln!(
+                "[phaseC-empirical]   FunctionCall name={:?} closure_param={:?} matched={}",
+                name, closure_param_name, matched,
+            );
+        }
         if name == closure_param_name {
             // Recursively walk each arg first so any nested closure-param
             // calls get replaced too.
@@ -2510,6 +2612,14 @@ fn inline_closure_calls_in_expr(
             span: *span,
         },
         Expr::MethodCall { receiver, method, args, named_args, optional, span } => {
+            // cluster-2-cw-2-phaseC-inlining empirical trace (2026-05-16).
+            if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
+                PHASEC_TRACE_METHOD_CALL.with(|c| c.set(c.get() + 1));
+                eprintln!(
+                    "[phaseC-empirical]   MethodCall method={:?} args_count={}",
+                    method, args.len(),
+                );
+            }
             Expr::MethodCall {
                 receiver: rec_box(receiver),
                 method: method.clone(),
@@ -2586,6 +2696,86 @@ fn inline_closure_calls_in_expr(
                 .collect();
             Expr::Block(BlockExpr { items }, *span)
         }
+        // cluster-2-cw-2-phaseC-inlining (2026-05-16): missing arms that
+        // wrap sub-expressions where a closure-parameter call may live.
+        // Empirical verification at HEAD ca8300f0 confirmed (a)'s fix did
+        // NOT make hypothesis (b) latent — the Vec.map body's
+        // `for item in self { result.push(f(item)) }` was wrapped as
+        // `Expr::For(...)` and silently passed through `other =>
+        // other.clone()` below, so the inliner NEVER descended to the
+        // `f(item)` call. Per cluster-2-v3s6f-empirical-verification.md
+        // §3.4 explanation 3 (recursion-descent gap, now CONFIRMED at the
+        // Expr layer rather than the MethodCall.args layer the original
+        // §3.4 hypothesized): add explicit arms for every Expr variant
+        // that can contain sub-expressions which can carry the formal
+        // closure parameter call.
+        Expr::For(for_expr, span) => {
+            use shape_ast::ast::expr_helpers::ForExpr;
+            Expr::For(
+                Box::new(ForExpr {
+                    pattern: for_expr.pattern.clone(),
+                    iterable: rec_box(&for_expr.iterable),
+                    body: rec_box(&for_expr.body),
+                    is_async: for_expr.is_async,
+                }),
+                *span,
+            )
+        }
+        Expr::While(while_expr, span) => {
+            use shape_ast::ast::expr_helpers::WhileExpr;
+            Expr::While(
+                Box::new(WhileExpr {
+                    condition: rec_box(&while_expr.condition),
+                    body: rec_box(&while_expr.body),
+                }),
+                *span,
+            )
+        }
+        Expr::Loop(loop_expr, span) => {
+            use shape_ast::ast::expr_helpers::LoopExpr;
+            Expr::Loop(
+                Box::new(LoopExpr {
+                    body: rec_box(&loop_expr.body),
+                }),
+                *span,
+            )
+        }
+        Expr::Let(let_expr, span) => {
+            use shape_ast::ast::expr_helpers::LetExpr;
+            Expr::Let(
+                Box::new(LetExpr {
+                    pattern: let_expr.pattern.clone(),
+                    type_annotation: let_expr.type_annotation.clone(),
+                    value: let_expr.value.as_ref().map(|v| rec_box(v)),
+                    body: rec_box(&let_expr.body),
+                }),
+                *span,
+            )
+        }
+        Expr::Match(match_expr, span) => {
+            use shape_ast::ast::expr_helpers::{MatchArm, MatchExpr};
+            Expr::Match(
+                Box::new(MatchExpr {
+                    scrutinee: rec_box(&match_expr.scrutinee),
+                    arms: match_expr
+                        .arms
+                        .iter()
+                        .map(|arm| MatchArm {
+                            pattern: arm.pattern.clone(),
+                            guard: arm.guard.as_ref().map(|g| rec_box(g)),
+                            body: rec_box(&arm.body),
+                            pattern_span: arm.pattern_span,
+                        })
+                        .collect(),
+                }),
+                *span,
+            )
+        }
+        Expr::Break(value, span) => Expr::Break(value.as_ref().map(|e| rec_box(e)), *span),
+        Expr::TryOperator(inner, span) => Expr::TryOperator(rec_box(inner), *span),
+        Expr::Await(inner, span) => Expr::Await(rec_box(inner), *span),
+        Expr::AsyncScope(inner, span) => Expr::AsyncScope(rec_box(inner), *span),
+        Expr::Spread(inner, span) => Expr::Spread(rec_box(inner), *span),
         // Everything else passes through verbatim — call expressions of the
         // closure parameter cannot appear in AST positions we don't traverse
         // here. Extend this match if additional shapes appear in stdlib
@@ -2621,8 +2811,44 @@ fn build_inlined_closure_block(
         };
         items.push(BlockItem::Statement(Statement::VariableDecl(decl, span)));
     }
-    // Append the closure body statements.
-    for stmt in closure_body {
+    // cluster-2-cw-2-phaseC-inlining (2026-05-16): preserve the closure
+    // body's tail-expression value semantics AND prevent in-body
+    // `Statement::Return(...)` from becoming a function-level return of
+    // the OUTER (monomorphized stdlib template) function.
+    //
+    // The arrow-function / pipe-lambda parser at
+    // `crates/shape-ast/src/parser/expressions/functions.rs:62-64` /
+    // `:134-135` wraps an expression-form closure body
+    // (`|x| x * 2` / `x => x + 1`) as `vec![Statement::Return(Some(expr),
+    // Span::DUMMY)]`. Inlining that statement verbatim into the
+    // specialized body via `BlockItem::Statement(stmt.clone())` would
+    // emit a MIR `lower_return_control_flow` → `Assign(SlotId(0),
+    // body_value) + TerminatorKind::Return` inside the for-loop body of
+    // the specialized fn, returning the FIRST iteration's mapped value
+    // instead of pushing it.
+    //
+    // Fix: rewrite a trailing `Statement::Return(Some(expr), _)` AND
+    // `Statement::Expression(expr, _)` as `BlockItem::Expression(expr)`
+    // so the block evaluates to the expression's value and the OUTER
+    // method-call arg receives that value, without emitting a
+    // function-level return. Empirically dispositioned at HEAD
+    // ca8300f0 via the `[phaseC-empirical]` trace + smoke-2 VM
+    // observation of `no method 'sum' on receiver kind Int64`.
+    let last_idx = closure_body.len().saturating_sub(1);
+    for (i, stmt) in closure_body.iter().enumerate() {
+        if i == last_idx {
+            match stmt {
+                shape_ast::ast::Statement::Expression(expr, _) => {
+                    items.push(BlockItem::Expression(expr.clone()));
+                    continue;
+                }
+                shape_ast::ast::Statement::Return(Some(expr), _) => {
+                    items.push(BlockItem::Expression(expr.clone()));
+                    continue;
+                }
+                _ => {}
+            }
+        }
         items.push(BlockItem::Statement(stmt.clone()));
     }
 
