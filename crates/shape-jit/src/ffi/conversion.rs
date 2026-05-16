@@ -652,6 +652,185 @@ pub extern "C" fn jit_print_channel(
     );
 }
 
+// ============================================================================
+// Phase 3 cluster-2 Round 4 cw-D-fam3 kinded jit_print entries
+// (2026-05-16): Collection family — HashMap / HashSet / Deque /
+// PriorityQueue / Range / Iterator. Per cluster-2-inventory §E.5
+// per-family sub-cluster recommendation + ADR-006 §2.7.5.B amendment
+// extension (Family 3 Collection). Each entry mirrors the existing
+// W12-jit-print-heap-arm-classification pattern + cw-D-fam12 Concurrency
+// shape: `(ctx_ptr, bits)` heap-arm entries delegate to
+// `print_kinded_inner` for VM == JIT identical output through the
+// canonical `ValueFormatter::format_kinded` dispatch on the matching
+// `NativeKind::Ptr(HeapKind::X)` label.
+// ============================================================================
+
+/// Print an `Arc<HashMapKindedRef>`-shaped slot as
+/// `{"k1": v1, "k2": v2, ...}` with per-V value rendering (POD scalars
+/// rendered directly, heap-payload values rendered via the canonical
+/// `HeapValue` Display dispatch). Dispatched when the operand kind is
+/// proven `NativeKind::Ptr(HeapKind::HashMap)`.
+///
+/// Mirrors `jit_print_mutex` — delegates to the canonical VM-side
+/// `ValueFormatter::format_kinded`, which renders HashMapKindedRef per
+/// `printing.rs:281-289` + `format_hashmap` (`printing.rs:787-...`,
+/// per-V dispatch through the carrier's variant tag).
+///
+/// SAFETY: `bits` must be
+/// `Arc::into_raw(Arc<HashMapKindedRef>) as u64` per the producer-site
+/// contract on every `KindedSlot::from_hashmap`-shaped producer
+/// (VM-side `BuiltinFunction::HashMapCtor` / Q25.B SUPERSEDED
+/// per-V monomorphization). ADR-006 §2.7.5.B 2026-05-16
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_print_hashmap(
+    ctx_ptr: *const crate::context::JITContext,
+    bits: u64,
+) {
+    use shape_value::heap_value::HeapKind;
+    print_kinded_inner(
+        ctx_ptr,
+        bits,
+        shape_value::NativeKind::Ptr(HeapKind::HashMap),
+    );
+}
+
+/// Print an `Arc<HashSetData>`-shaped slot as `{"a", "b", ...}`.
+/// Dispatched when the operand kind is proven
+/// `NativeKind::Ptr(HeapKind::HashSet)`.
+///
+/// Mirrors `jit_print_mutex` — delegates to the canonical VM-side
+/// `ValueFormatter::format_kinded`, which renders HashSetData per
+/// `printing.rs:291-302` + `format_hashset` (`printing.rs:745-757`).
+///
+/// SAFETY: `bits` must be `Arc::into_raw(Arc<HashSetData>) as u64` per
+/// the producer-site contract on every `KindedSlot::from_hashset`-shaped
+/// producer (VM-side `BuiltinFunction::HashSetCtor`).
+/// ADR-006 §2.7.5.B 2026-05-16
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_print_hashset(
+    ctx_ptr: *const crate::context::JITContext,
+    bits: u64,
+) {
+    use shape_value::heap_value::HeapKind;
+    print_kinded_inner(
+        ctx_ptr,
+        bits,
+        shape_value::NativeKind::Ptr(HeapKind::HashSet),
+    );
+}
+
+/// Print an `Arc<DequeData>`-shaped slot as
+/// `Deque[elem1, elem2, ...]` front-to-back. Dispatched when the
+/// operand kind is proven `NativeKind::Ptr(HeapKind::Deque)`.
+///
+/// Mirrors `jit_print_mutex` — delegates to the canonical VM-side
+/// `ValueFormatter::format_kinded`, which renders DequeData per
+/// `printing.rs:440-450` + `format_deque` (`printing.rs:763-775`).
+///
+/// SAFETY: `bits` must be `Arc::into_raw(Arc<DequeData>) as u64` per
+/// the producer-site contract on every `KindedSlot::from_deque`-shaped
+/// producer (VM-side `BuiltinFunction::DequeCtor`).
+/// ADR-006 §2.7.5.B 2026-05-16
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_print_deque(
+    ctx_ptr: *const crate::context::JITContext,
+    bits: u64,
+) {
+    use shape_value::heap_value::HeapKind;
+    print_kinded_inner(
+        ctx_ptr,
+        bits,
+        shape_value::NativeKind::Ptr(HeapKind::Deque),
+    );
+}
+
+/// Print an `Arc<PriorityQueueData>`-shaped slot as
+/// `PriorityQueue[v1, v2, ...]` in heap-array order (NOT sorted).
+/// Dispatched when the operand kind is proven
+/// `NativeKind::Ptr(HeapKind::PriorityQueue)`.
+///
+/// Mirrors `jit_print_mutex` — delegates to the canonical VM-side
+/// `ValueFormatter::format_kinded`, which renders PriorityQueueData per
+/// `printing.rs:465-478` + `format_priority_queue`
+/// (`printing.rs:725-740`).
+///
+/// SAFETY: `bits` must be
+/// `Arc::into_raw(Arc<PriorityQueueData>) as u64` per the producer-site
+/// contract on every `KindedSlot::from_priority_queue`-shaped producer
+/// (VM-side `BuiltinFunction::PriorityQueueCtor`).
+/// ADR-006 §2.7.5.B 2026-05-16
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_print_priority_queue(
+    ctx_ptr: *const crate::context::JITContext,
+    bits: u64,
+) {
+    use shape_value::heap_value::HeapKind;
+    print_kinded_inner(
+        ctx_ptr,
+        bits,
+        shape_value::NativeKind::Ptr(HeapKind::PriorityQueue),
+    );
+}
+
+/// Print an `Arc<RangeData>`-shaped slot as `start..end` (exclusive)
+/// or `start..=end` (inclusive). Dispatched when the operand kind is
+/// proven `NativeKind::Ptr(HeapKind::Range)`.
+///
+/// Mirrors `jit_print_mutex` — delegates to the canonical VM-side
+/// `ValueFormatter::format_kinded`, which renders RangeData per
+/// `printing.rs:479-494`.
+///
+/// SAFETY: `bits` must be `Arc::into_raw(Arc<RangeData>) as u64` per
+/// the producer-site contract on every `KindedSlot::from_range`-shaped
+/// producer (VM-side `op_make_range` / Range-literal lowering).
+/// ADR-006 §2.7.5.B 2026-05-16
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_print_range(
+    ctx_ptr: *const crate::context::JITContext,
+    bits: u64,
+) {
+    use shape_value::heap_value::HeapKind;
+    print_kinded_inner(
+        ctx_ptr,
+        bits,
+        shape_value::NativeKind::Ptr(HeapKind::Range),
+    );
+}
+
+/// Print an `Arc<IteratorState>`-shaped slot as the opaque tag
+/// `<iterator>` (lazy iterators have no user-facing print form; a
+/// terminal operation must materialize the values per
+/// `printing.rs:430-439`). Dispatched when the operand kind is proven
+/// `NativeKind::Ptr(HeapKind::Iterator)`.
+///
+/// Mirrors `jit_print_mutex` — delegates to the canonical VM-side
+/// `ValueFormatter::format_kinded`. Note: per inventory §E.5 the
+/// Iterator HeapKind belongs to the Collection family (NOT the
+/// pure-discriminator family per ADR-006 §2.7.16 / Q17
+/// W13-iterator-state) — `HeapValue::Iterator(Arc<IteratorState>)`
+/// participates in the §2.3 typed-Arc payload pattern, the dispatch
+/// arm in `format_heap_kind` at `printing.rs:430` reads the bits as
+/// `*const IteratorState` and the Display rendering is the opaque
+/// tag.
+///
+/// SAFETY: `bits` must be `Arc::into_raw(Arc<IteratorState>) as u64`
+/// per the producer-site contract on every
+/// `KindedSlot::from_iterator`-shaped producer (VM-side iterator-pipeline
+/// factory builtins).
+/// ADR-006 §2.7.5.B 2026-05-16
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_print_iterator(
+    ctx_ptr: *const crate::context::JITContext,
+    bits: u64,
+) {
+    use shape_value::heap_value::HeapKind;
+    print_kinded_inner(
+        ctx_ptr,
+        bits,
+        shape_value::NativeKind::Ptr(HeapKind::Iterator),
+    );
+}
+
 /// Concatenate two NaN-boxed string values into a freshly boxed
 /// `UnifiedString`. Used by the MIR-lowering path for `BinOp::Add` when both
 /// operands have `NativeKind::String`.
@@ -1069,6 +1248,202 @@ mod heap_arm_print_tests {
 
         unsafe {
             let _ = Arc::<ChannelData>::from_raw(bits as *const ChannelData);
+        }
+    }
+
+    // ========================================================================
+    // Phase 3 cluster-2 Round 4 cw-D-fam3 tests: Collection family —
+    // HashMap / HashSet / Deque / PriorityQueue / Range / Iterator kinded
+    // jit_print FFI bodies (2026-05-16). Each test verifies the FFI body
+    // renders the same string as the canonical VM-side
+    // `ValueFormatter::format_kinded` for the matching §2.7.5 carrier,
+    // then drops the Arc<T> share without leaking.
+    // ADR-006 §2.7.5.B 2026-05-16
+    // ========================================================================
+
+    #[test]
+    fn print_hashmap_arc_carrier_empty_matches_vm() {
+        use shape_value::heap_value::{HashMapData, HashMapKindedRef};
+
+        // Producer mirrors VM-side `BuiltinFunction::HashMapCtor`'s
+        // per-V monomorphization: an empty `HashMapData<i64>` wrapped in
+        // the `HashMapKindedRef::I64` variant per ADR-006 §2.7.24 Q25.B
+        // SUPERSEDED + Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14).
+        // Slot bits are `Arc::into_raw(Arc<HashMapKindedRef>) as u64`.
+        let inner: HashMapData<i64> = HashMapData::new();
+        let kref = HashMapKindedRef::I64(Arc::new(inner));
+        let arc = Arc::new(kref);
+        let bits = Arc::into_raw(arc) as u64;
+
+        // VM-side rendering: empty map `{}` per `format_hashmap` —
+        // `printing.rs:787-...` with a 0-length keys buffer walks to
+        // a single `{}` output.
+        let vm_render = vm_format(bits, NativeKind::Ptr(HeapKind::HashMap));
+        assert_eq!(vm_render, "{}");
+
+        jit_print_hashmap(null_ctx(), bits);
+
+        unsafe {
+            let _ = Arc::<HashMapKindedRef>::from_raw(
+                bits as *const HashMapKindedRef,
+            );
+        }
+    }
+
+    #[test]
+    fn print_hashset_arc_carrier_matches_vm() {
+        use shape_value::heap_value::HashSetData;
+
+        // Producer mirrors VM-side `BuiltinFunction::HashSetCtor`:
+        // `Arc::into_raw(Arc<HashSetData>)` with kind
+        // `NativeKind::Ptr(HeapKind::HashSet)`. Build with two string
+        // keys to exercise the multi-element render path.
+        let keys = vec![Arc::new("a".to_string()), Arc::new("b".to_string())];
+        let arc = Arc::new(HashSetData::from_keys(keys));
+        let bits = Arc::into_raw(arc) as u64;
+
+        // VM-side rendering: `{"a", "b"}` per ADR-006 §2.7.15 +
+        // `printing.rs:745-757`. Insertion-order is preserved.
+        let vm_render = vm_format(bits, NativeKind::Ptr(HeapKind::HashSet));
+        assert_eq!(vm_render, "{\"a\", \"b\"}");
+
+        jit_print_hashset(null_ctx(), bits);
+
+        unsafe {
+            let _ = Arc::<HashSetData>::from_raw(bits as *const HashSetData);
+        }
+    }
+
+    #[test]
+    fn print_deque_arc_carrier_empty_matches_vm() {
+        use shape_value::heap_value::DequeData;
+
+        // Producer mirrors VM-side `BuiltinFunction::DequeCtor`:
+        // `Arc::into_raw(Arc<DequeData>)` with kind
+        // `NativeKind::Ptr(HeapKind::Deque)`. Empty deque exercises the
+        // zero-length render path without requiring HeapValue payload
+        // construction (which would entangle this test with the
+        // closure / heap-allocator pathways).
+        let arc = Arc::new(DequeData::new());
+        let bits = Arc::into_raw(arc) as u64;
+
+        // VM-side rendering: `Deque[]` per ADR-006 §2.7.19 +
+        // `printing.rs:763-775`.
+        let vm_render = vm_format(bits, NativeKind::Ptr(HeapKind::Deque));
+        assert_eq!(vm_render, "Deque[]");
+
+        jit_print_deque(null_ctx(), bits);
+
+        unsafe {
+            let _ = Arc::<DequeData>::from_raw(bits as *const DequeData);
+        }
+    }
+
+    #[test]
+    fn print_priority_queue_arc_carrier_matches_vm() {
+        use shape_value::heap_value::PriorityQueueData;
+
+        // Producer mirrors VM-side `BuiltinFunction::PriorityQueueCtor`:
+        // `Arc::into_raw(Arc<PriorityQueueData>)` with kind
+        // `NativeKind::Ptr(HeapKind::PriorityQueue)`. Push three values
+        // to exercise the heap-array render path (NOT sorted; the
+        // formatter walks the heap buffer in its physical order).
+        let mut pq = PriorityQueueData::new();
+        pq.push(3);
+        pq.push(1);
+        pq.push(2);
+        let arc = Arc::new(pq);
+        let bits = Arc::into_raw(arc) as u64;
+
+        // VM-side rendering: `PriorityQueue[1, 3, 2]` for the push order
+        // 3,1,2 (the min-heap rearranges to put `1` at the root; the
+        // remaining order depends on sift-up: heap_array = [1, 3, 2]).
+        // Per ADR-006 §2.7.18 + `printing.rs:725-740`.
+        let vm_render =
+            vm_format(bits, NativeKind::Ptr(HeapKind::PriorityQueue));
+        assert_eq!(vm_render, "PriorityQueue[1, 3, 2]");
+
+        jit_print_priority_queue(null_ctx(), bits);
+
+        unsafe {
+            let _ = Arc::<PriorityQueueData>::from_raw(
+                bits as *const PriorityQueueData,
+            );
+        }
+    }
+
+    #[test]
+    fn print_range_arc_carrier_exclusive_matches_vm() {
+        use shape_value::heap_value::RangeData;
+
+        // Producer mirrors VM-side `op_make_range` / range-literal
+        // lowering: `Arc::into_raw(Arc<RangeData>)` with kind
+        // `NativeKind::Ptr(HeapKind::Range)`. Use the exclusive form
+        // `0..10` (the most common surface-syntax shape).
+        let arc = Arc::new(RangeData::exclusive(0, 10));
+        let bits = Arc::into_raw(arc) as u64;
+
+        // VM-side rendering: `0..10` per ADR-006 §2.7.23 +
+        // `printing.rs:479-494`.
+        let vm_render = vm_format(bits, NativeKind::Ptr(HeapKind::Range));
+        assert_eq!(vm_render, "0..10");
+
+        jit_print_range(null_ctx(), bits);
+
+        unsafe {
+            let _ = Arc::<RangeData>::from_raw(bits as *const RangeData);
+        }
+    }
+
+    #[test]
+    fn print_range_arc_carrier_inclusive_matches_vm() {
+        use shape_value::heap_value::RangeData;
+
+        // Inclusive form `0..=5` — exercises the `inclusive=true` arm.
+        let arc = Arc::new(RangeData::inclusive(0, 5));
+        let bits = Arc::into_raw(arc) as u64;
+
+        let vm_render = vm_format(bits, NativeKind::Ptr(HeapKind::Range));
+        assert_eq!(vm_render, "0..=5");
+
+        jit_print_range(null_ctx(), bits);
+
+        unsafe {
+            let _ = Arc::<RangeData>::from_raw(bits as *const RangeData);
+        }
+    }
+
+    #[test]
+    fn print_iterator_arc_carrier_matches_vm() {
+        use shape_value::iterator_state::{IteratorSource, IteratorState};
+
+        // Producer mirrors VM-side iterator-pipeline factory:
+        // `Arc::into_raw(Arc<IteratorState>)` with kind
+        // `NativeKind::Ptr(HeapKind::Iterator)`. Use a Range source
+        // (no Arc payload — inline i64 bounds) to avoid entangling
+        // this test with the typed-array source carrier (currently
+        // deleted at V3-S5 ckpt-4 per the IteratorSource module
+        // header).
+        let src = IteratorSource::Range {
+            start: 0,
+            end: 10,
+            step: 1,
+        };
+        let arc = Arc::new(IteratorState::new(src));
+        let bits = Arc::into_raw(arc) as u64;
+
+        // VM-side rendering: opaque `<iterator>` tag per ADR-006 §2.7.16
+        // + `printing.rs:430-439`. Lazy iterators have no user-facing
+        // print form — terminals must materialize.
+        let vm_render = vm_format(bits, NativeKind::Ptr(HeapKind::Iterator));
+        assert_eq!(vm_render, "<iterator>");
+
+        jit_print_iterator(null_ctx(), bits);
+
+        unsafe {
+            let _ = Arc::<IteratorState>::from_raw(
+                bits as *const IteratorState,
+            );
         }
     }
 }
