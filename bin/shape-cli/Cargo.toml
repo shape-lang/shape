@@ -12,6 +12,17 @@ description = "CLI and REPL for the Shape programming language"
 [features]
 default = ["jit"]
 jit = ["shape-jit", "shape-vm/jit"]  # Enable JIT in both the JIT crate and VM tiered compilation
+# Cluster-2 closure-wave-F (2026-05-16): when enabled, the `--trace-jit`
+# CLI flag installs a tracing-subscriber filtering on `shape_jit` /
+# `shape_jit::*` targets. Feature-off builds compile away both the
+# subscriber init and the macros (via `release_max_level_off` on the
+# shape-jit / shape-vm side).
+jit-trace = [
+    "shape-jit/jit-trace",
+    "shape-vm/jit-trace",
+    "dep:tracing",
+    "dep:tracing-subscriber",
+]
 
 [dependencies]
 anyhow.workspace = true
@@ -43,6 +54,13 @@ rpassword = "5"
 tempfile = "3.24"
 flate2 = "1"
 tar = "0.4"
+
+# Cluster-2 closure-wave-F (2026-05-16): tracing-subscriber for the
+# `--trace-jit` CLI flag. Optional deps under the `jit-trace` feature; the
+# default build pulls in neither, keeping shape-cli's dependency surface
+# unchanged for users who don't opt into JIT diagnostics. See ADR-006 §2.7.5.
+tracing = { version = "0.1", default-features = false, features = ["std"], optional = true }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"], optional = true }
 
 # TUI REPL dependencies
 ratatui = "0.29"

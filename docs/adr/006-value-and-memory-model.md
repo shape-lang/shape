@@ -875,6 +875,98 @@ Forbidden under this amendment:
   refused per CLAUDE.md broader-family regex
   `(decode|tag|kind|dispatch|value.call|closure.callback|frame.setup|callee|capture) (bridge|probe|helper|hop|translator|adapter|shim)`.
 
+##### §2.7.5 amendment (cluster-2-closure-wave-F tracing-crate migration, 2026-05-16)
+
+`tracing` 0.1 dep added to `shape-jit` + `shape-vm` under the internal
+`jit-trace` Cargo feature (default OFF; the feature enables
+`tracing/release_max_level_debug`, so feature-OFF builds inherit
+`release_max_level_off` semantics and the macros compile to no-ops —
+**zero runtime cost** when off). The 28 `SHAPE_JIT_*` env-var-gated
+`eprintln!` diagnostic sites (21 SHAPE_JIT_DEBUG + 2 SHAPE_JIT_TRACE +
+1 SHAPE_JIT_MIR_TRACE + 1 SHAPE_JIT_ARC_COUNTERS + 1 SHAPE_JIT_METRICS
++ 1 SHAPE_JIT_METRICS_DETAIL + 1 SHAPE_JIT_PHASE_METRICS, recounted at
+HEAD `ca8300f0` matching cluster-2-inventory §H.3) migrate to
+`tracing::debug!` / `tracing::trace!` / `tracing::info!` against
+per-env-var targets:
+
+| Legacy env-var | tracing target | Level |
+|---|---|---|
+| `SHAPE_JIT_DEBUG` | `shape_jit` | DEBUG |
+| `SHAPE_JIT_TRACE` | `shape_jit` | TRACE |
+| `SHAPE_JIT_MIR_TRACE` | `shape_jit::mir` | TRACE |
+| `SHAPE_JIT_ARC_COUNTERS` | `shape_jit::arc_counters` | INFO |
+| `SHAPE_JIT_METRICS` | `shape_jit::metrics` | INFO |
+| `SHAPE_JIT_METRICS_DETAIL` | `shape_jit::metrics` | TRACE |
+| `SHAPE_JIT_PHASE_METRICS` | `shape_jit::metrics` | INFO |
+
+CLI gate is `--trace-jit[=FILTER]` on `shape` (bin/shape-cli) under the
+co-named `jit-trace` feature; the subscriber is `tracing-subscriber`
+0.3 with `fmt` + `env-filter` features, wired in `bin/shape-cli/src/
+main.rs` to install on parse-time when the flag is present. Bare
+`--trace-jit` defaults to `shape_jit=debug`; `--trace-jit=<directive>`
+takes any `EnvFilter` string for per-target composition (e.g.
+`shape_jit::mir=trace,shape_jit::arc_counters=info`).
+
+**Cross-crate ABI policy (the binding §2.7.5 fit):** the tracing dep is
+**internal Rust side only**. The extension contract at
+`crates/shape-runtime/src/module_exports.rs:21`
+(`unsafe fn(*mut c_void, &u64, &[u64]) -> Result<u64, String>`) is
+**untouched**. Extensions do not see the tracing dep; the raw-bits ABI
++ parallel `NativeKind` companion remains the stable cross-crate
+boundary. Per §2.7.5 general policy: "stable ABI surfaces (extension
+contracts, persisted formats, FFI handoffs to non-Rust callers) stay
+on raw bits + parallel `NativeKind`. Internal Rust dispatch (trait
+objects, function pointers, structs, enums) uses `KindedSlot`." The
+tracing migration is the latter — internal-only.
+
+**Hot-path zero-cost discipline.** The `arc_counters_enabled` /
+`emit_phase_metrics` / `if tracing::enabled!(…)` guards in
+`crates/shape-jit/src/executor.rs` + `compiler/program.rs` +
+`mir_compiler/{mod,blocks}.rs` + `ffi/{result,typed_object/allocation,
+object/property_access}.rs` are *not* engineering decoration —
+they ensure the diagnostic *work* (atomic loads, MIR walks,
+breakdown formatting, hex/debug formatting of opcode operands) is
+dead-code-eliminated when the feature is OFF, not merely the macro
+expansion itself. Without these guards the `arc_counters` snapshot
+would always execute three atomic loads even when the trace is
+disabled — preserved as functional but not zero-cost.
+
+**Forbidden under this migration (refused on sight):**
+
+- Introducing tracing across the extension contract (§2.7.5 violation:
+  changing `RawCallableInvoker.invoke`'s signature to take a
+  `tracing::Span` parameter, or adding a `tracing-core` dep to
+  `shape-abi-v1`, or replacing the `&[u64]` arg-bits slice with a
+  tracing-instrumented carrier).
+- Replacing `SHAPE_JIT_*` env-var-based control with a tracing-channel
+  that lacks a compile-time off path (e.g. `tracing` without
+  `default-features = false`, or `jit-trace` without
+  `release_max_level_debug` — both leave the macro expansion alive in
+  release builds, losing the zero-cost release property).
+- "tracing bridge" / "tracing probe" / "tracing helper" / "tracing
+  adapter" / "tracing shim" framings in trace message text or doc
+  comments (CLAUDE.md broader-family regex applies to trace message
+  content; use neutral descriptive content like "compiled function via
+  MirToIR" or "callee mislabeled" — name the operation, not a
+  hypothetical role).
+- Partial migration: leaving any `eprintln!` site behind a
+  `SHAPE_JIT_*` env-var check. The 28-site count is the binding
+  target; partial migration is the W-series walk-back shape (rename a
+  deletion to "mostly deleted" — refused on sight).
+- Removing `tracing::enabled!()` guards from the metrics / arc-counter
+  / debug-loop sites without measuring the zero-cost regression —
+  these guards are load-bearing for the release_max_level_off
+  property and are not stylistic.
+
+**Code touchpoints carry a `// ADR-006 §2.7.5 amendment 2026-05-16`
+marker** in the migration commit's edits (cluster-2-closure-wave-F
+discipline: trace migrations are unobtrusive but auditable). The
+`SHAPE_JIT_*` env-var name strings now appear only in historical doc
+comments (e.g. `ffi/arc.rs` JIT_ARC_RETAIN_CALLS docstring, the
+W11-jit-new-array supervisor reopen artifacts) where they continue to
+point readers at the CLI selector — no source code reads the env vars
+anymore.
+
 #### 2.7.5.1 Wire-format structs are post-proof shapes
 
 `FrameDescriptor` (`crates/shape-vm/src/type_tracking.rs`) is

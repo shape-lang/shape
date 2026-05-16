@@ -76,7 +76,14 @@ fn collect_numeric_opcode_stats(program: &BytecodeProgram) -> NumericOpcodeStats
 }
 
 fn maybe_emit_numeric_metrics(program: &BytecodeProgram) {
-    if std::env::var_os("SHAPE_JIT_METRICS").is_none() {
+    // Cluster-2 closure-wave-F tracing-crate migration (2026-05-16):
+    // `tracing::enabled!` collapses to `false` under feature-OFF builds
+    // (`release_max_level_off`), so the early return executes and the
+    // stat-collection work is skipped exactly as before. Replaces the
+    // legacy `SHAPE_JIT_METRICS` / `SHAPE_JIT_METRICS_DETAIL` env-var
+    // gating; CLI selector is `--trace-jit=shape_jit::metrics=info` (the
+    // `_DETAIL` suffix maps to trace level on the same target).
+    if !tracing::enabled!(target: "shape_jit::metrics", tracing::Level::INFO) {
         return;
     }
     let static_stats = collect_numeric_opcode_stats(program);
@@ -91,16 +98,17 @@ fn maybe_emit_numeric_metrics(program: &BytecodeProgram) {
     let effective_typed = static_stats.typed;
     let effective_generic = static_stats.generic;
     let effective_coverage_pct = static_coverage_pct;
-    eprintln!(
-        "[shape-jit-metrics] typed_numeric_ops={} generic_numeric_ops={} typed_numeric_coverage_pct={:.2} static_typed_numeric_ops={} static_generic_numeric_ops={} static_typed_numeric_coverage_pct={:.2}",
-        effective_typed,
-        effective_generic,
-        effective_coverage_pct,
-        static_stats.typed,
-        static_stats.generic,
-        static_coverage_pct
+    tracing::info!(
+        target: "shape_jit::metrics",
+        typed_numeric_ops = effective_typed,
+        generic_numeric_ops = effective_generic,
+        typed_numeric_coverage_pct = effective_coverage_pct,
+        static_typed_numeric_ops = static_stats.typed,
+        static_generic_numeric_ops = static_stats.generic,
+        static_typed_numeric_coverage_pct = static_coverage_pct,
+        "shape-jit-metrics numeric coverage",
     );
-    if std::env::var_os("SHAPE_JIT_METRICS_DETAIL").is_some() {
+    if tracing::enabled!(target: "shape_jit::metrics", tracing::Level::TRACE) {
         let fmt_breakdown = |breakdown: &BTreeMap<String, usize>| -> String {
             breakdown
                 .iter()
@@ -108,10 +116,11 @@ fn maybe_emit_numeric_metrics(program: &BytecodeProgram) {
                 .collect::<Vec<_>>()
                 .join(",")
         };
-        eprintln!(
-            "[shape-jit-metrics-detail] typed_breakdown={} generic_breakdown={}",
-            fmt_breakdown(&static_stats.typed_breakdown),
-            fmt_breakdown(&static_stats.generic_breakdown)
+        tracing::trace!(
+            target: "shape_jit::metrics",
+            typed_breakdown = %fmt_breakdown(&static_stats.typed_breakdown),
+            generic_breakdown = %fmt_breakdown(&static_stats.generic_breakdown),
+            "shape-jit-metrics-detail breakdown",
         );
     }
 }
@@ -508,9 +517,11 @@ impl JITCompiler {
                     }
                 }
                 mir_compiler.compile_body()?;
-                if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
-                    eprintln!("[jit-mir] Compiled function '{}' via MirToIR", func.name);
-                }
+                tracing::debug!(
+                    target: "shape_jit",
+                    func_name = %func.name,
+                    "jit-mir compiled function via MirToIR",
+                );
             }
             builder.finalize();
         }
@@ -709,20 +720,27 @@ impl JITCompiler {
         // Phase 4: Compile only JIT-compatible function bodies.
         // Functions that fail to compile are demoted to interpreted fallback.
         for (idx, func) in program.functions.iter().enumerate() {
-            if std::env::var_os("SHAPE_JIT_DEBUG").is_some()
-                && (jit_compatible[idx] || func.mir_data.is_some())
-            {
-                eprintln!(
-                    "[jit-mir] func[{}]='{}' jit_compat={} has_mir={}",
-                    idx, func.name, jit_compatible[idx], func.mir_data.is_some()
+            if jit_compatible[idx] || func.mir_data.is_some() {
+                tracing::debug!(
+                    target: "shape_jit",
+                    idx,
+                    func_name = %func.name,
+                    jit_compat = jit_compatible[idx],
+                    has_mir = func.mir_data.is_some(),
+                    "jit-mir per-function classification",
                 );
             }
             if !jit_compatible[idx] {
                 continue;
             }
             let func_name = format!("{}_f{}_{}", name, idx, func.name.replace("::", "__"));
-            if std::env::var_os("SHAPE_JIT_DEBUG").is_some() && func.mir_data.is_some() {
-                eprintln!("[jit-mir] compiling '{}' idx={}", func.name, idx);
+            if func.mir_data.is_some() {
+                tracing::debug!(
+                    target: "shape_jit",
+                    idx,
+                    func_name = %func.name,
+                    "jit-mir compiling function",
+                );
             }
             if let Err(e) = self.compile_function_with_user_funcs(
                 &func_name,
@@ -731,9 +749,12 @@ impl JITCompiler {
                 &user_func_ids,
                 &user_func_arities,
             ) {
-                if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
-                    eprintln!("[jit-mir] compile failed for '{}': {}", func.name, e);
-                }
+                tracing::debug!(
+                    target: "shape_jit",
+                    func_name = %func.name,
+                    error = %e,
+                    "jit-mir compile failed",
+                );
                 // Define a stub body so Cranelift doesn't panic on undefined symbol.
                 // The stub returns signal -1 (error), causing the caller to deopt.
                 //
@@ -778,12 +799,14 @@ impl JITCompiler {
                         b.finalize();
                     }
                     if let Err(stub_err) = self.module.define_function(fid, &mut stub_ctx) {
-                        if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
-                            eprintln!(
-                                "[jit-mir] stub define_function failed for '{}' (idx={}, fid={:?}): {:?}",
-                                func.name, idx, fid, stub_err
-                            );
-                        }
+                        tracing::debug!(
+                            target: "shape_jit",
+                            func_name = %func.name,
+                            idx,
+                            fid = ?fid,
+                            error = ?stub_err,
+                            "jit-mir stub define_function failed",
+                        );
                         // Surface-and-stop: a failed stub leaves the declared
                         // FuncId with no body, which propagates to
                         // `finalize_definitions` as a `can't resolve symbol`

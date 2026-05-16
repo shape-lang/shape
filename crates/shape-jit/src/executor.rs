@@ -32,7 +32,17 @@ impl ProgramExecutor for JITExecutor {
         program: &Program,
     ) -> Result<shape_runtime::engine::ProgramExecutorResult> {
         use shape_vm::BytecodeCompiler;
-        let emit_phase_metrics = std::env::var_os("SHAPE_JIT_PHASE_METRICS").is_some();
+        // Cluster-2 closure-wave-F tracing-crate migration (2026-05-16):
+        // `tracing::enabled!` compiles away under `release_max_level_off`
+        // (the default when the `jit-trace` Cargo feature is OFF), so this
+        // collapses to `false` and the phase-timing accounting below is
+        // dead-code-eliminated by the optimizer. Replaces the legacy
+        // `SHAPE_JIT_PHASE_METRICS` env-var; CLI selector is
+        // `--trace-jit=shape_jit::metrics=info`.
+        let emit_phase_metrics = tracing::enabled!(
+            target: "shape_jit::metrics",
+            tracing::Level::INFO,
+        );
 
         // Capture source text before getting runtime reference (for error messages)
         let source_for_compilation = engine.current_source().map(|s| s.to_string());
@@ -107,16 +117,25 @@ impl JITExecutor {
 
         // Use selective compilation: JIT-compatible functions get native code,
         // incompatible ones get Interpreted entries for VM fallback.
-        if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
-            eprintln!(
-                "[jit-debug] starting compile_program_selective with {} instructions, {} functions",
-                bytecode.instructions.len(),
-                bytecode.functions.len()
+        //
+        // Cluster-2 closure-wave-F tracing-crate migration (2026-05-16):
+        // `tracing::enabled!` collapses to `false` under feature-OFF builds
+        // so the per-instruction enumeration loop is dead-code-eliminated.
+        // Replaces SHAPE_JIT_DEBUG env-var gating.
+        if tracing::enabled!(target: "shape_jit", tracing::Level::DEBUG) {
+            tracing::debug!(
+                target: "shape_jit",
+                instruction_count = bytecode.instructions.len(),
+                function_count = bytecode.functions.len(),
+                "starting compile_program_selective",
             );
             for (i, instr) in bytecode.instructions.iter().enumerate() {
-                eprintln!(
-                    "[jit-debug] instr[{}]: {:?} {:?}",
-                    i, instr.opcode, instr.operand
+                tracing::debug!(
+                    target: "shape_jit",
+                    idx = i,
+                    opcode = ?instr.opcode,
+                    operand = ?instr.operand,
+                    "instruction",
                 );
             }
         }
@@ -260,37 +279,52 @@ impl JITExecutor {
         let _trampoline_guard = TrampolineGuard;
 
         // Execute the JIT-compiled function
-        if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
-            eprintln!("[jit-debug] compilation OK, about to execute...");
-        }
+        tracing::debug!(
+            target: "shape_jit",
+            "compilation OK, about to execute",
+        );
         // W11-jit-new-array (supervisor reopen Step 4): snapshot arc
         // retain/release counters before/after the JIT-emitted code runs
         // so the supervisor can verify refcount balance — silent leaks
         // here are the W-series defection-attractor shape we're refusing.
-        let retain_before =
-            crate::ffi::arc::JIT_ARC_RETAIN_CALLS.load(std::sync::atomic::Ordering::Relaxed);
-        let release_before =
-            crate::ffi::arc::JIT_ARC_RELEASE_CALLS.load(std::sync::atomic::Ordering::Relaxed);
-        let frees_before =
-            crate::ffi::arc::JIT_ARC_RELEASE_FREES.load(std::sync::atomic::Ordering::Relaxed);
-        // cluster-2-cw-E measurement (cluster-2-inventory §F): §2.7.5
-        // `Arc<String>` carrier counters. Independent track from the
-        // UnifiedValue<T> counters above per `ffi/arc.rs` STRING_*
-        // counter docstrings.
-        let str_allocs_before =
-            crate::ffi::arc::STRING_CONSTANT_ALLOCS.load(std::sync::atomic::Ordering::Relaxed);
-        let str_retain_before =
-            crate::ffi::arc::STRING_RETAIN_CALLS.load(std::sync::atomic::Ordering::Relaxed);
-        let str_release_before =
-            crate::ffi::arc::STRING_RELEASE_CALLS.load(std::sync::atomic::Ordering::Relaxed);
-        let str_frees_before =
-            crate::ffi::arc::STRING_RELEASE_FREES.load(std::sync::atomic::Ordering::Relaxed);
+        //
+        // Cluster-2 closure-wave-F tracing-crate migration (2026-05-16):
+        // gate the snapshot reads on `tracing::enabled!` so the atomic
+        // loads themselves are dead-code-eliminated under feature-OFF
+        // builds (`release_max_level_off` collapses the macro to `false`).
+        // Replaces SHAPE_JIT_ARC_COUNTERS env-var; CLI selector is
+        // `--trace-jit=shape_jit::arc_counters=info`.
+        //
+        // Cluster-2 closure-wave-E §F string-constant leak measurement
+        // (2026-05-16): STRING_* counters share the same arc_counters
+        // gate (Arc<UnifiedValue> + Arc<String> are both Arc-tier;
+        // single tracing target keeps CLI filter narrow). Take-both
+        // ceremony at Round 1 merge.
+        let arc_counters_enabled = tracing::enabled!(
+            target: "shape_jit::arc_counters",
+            tracing::Level::INFO,
+        );
+        let (retain_before, release_before, frees_before,
+             str_allocs_before, str_retain_before,
+             str_release_before, str_frees_before) = if arc_counters_enabled {
+            (
+                crate::ffi::arc::JIT_ARC_RETAIN_CALLS.load(std::sync::atomic::Ordering::Relaxed),
+                crate::ffi::arc::JIT_ARC_RELEASE_CALLS.load(std::sync::atomic::Ordering::Relaxed),
+                crate::ffi::arc::JIT_ARC_RELEASE_FREES.load(std::sync::atomic::Ordering::Relaxed),
+                crate::ffi::arc::STRING_CONSTANT_ALLOCS.load(std::sync::atomic::Ordering::Relaxed),
+                crate::ffi::arc::STRING_RETAIN_CALLS.load(std::sync::atomic::Ordering::Relaxed),
+                crate::ffi::arc::STRING_RELEASE_CALLS.load(std::sync::atomic::Ordering::Relaxed),
+                crate::ffi::arc::STRING_RELEASE_FREES.load(std::sync::atomic::Ordering::Relaxed),
+            )
+        } else {
+            (0, 0, 0, 0, 0, 0, 0)
+        };
 
         let jit_exec_start = Instant::now();
         let signal = unsafe { jit_fn(&mut jit_ctx) };
         let jit_exec_ms = jit_exec_start.elapsed().as_millis();
 
-        if std::env::var_os("SHAPE_JIT_ARC_COUNTERS").is_some() {
+        if arc_counters_enabled {
             let retain_after =
                 crate::ffi::arc::JIT_ARC_RETAIN_CALLS.load(std::sync::atomic::Ordering::Relaxed);
             let release_after =
@@ -309,39 +343,41 @@ impl JITExecutor {
             let str_frees_after =
                 crate::ffi::arc::STRING_RELEASE_FREES
                     .load(std::sync::atomic::Ordering::Relaxed);
-            eprintln!(
-                "[shape-jit-arc] retain_calls={} release_calls={} release_frees={}",
-                retain_after - retain_before,
-                release_after - release_before,
-                frees_after - frees_before
+            tracing::info!(
+                target: "shape_jit::arc_counters",
+                retain_calls = retain_after - retain_before,
+                release_calls = release_after - release_before,
+                release_frees = frees_after - frees_before,
+                "shape-jit-arc counter delta",
             );
             // cluster-2-cw-E §F measurement output: per-call-site
-            // §2.7.5 String carrier metrics. The leak quantification
+            // §2.7.5 String carrier metrics. Leak quantification
             // shape is `str_allocs - str_frees` = number of
             // permanently-leaked Arc<String> allocations for this
-            // execution. The "cumulative" line is the process-wide
-            // running total — surfaces compile-time allocations that
-            // happen before any jit_fn invocation (the dominant
-            // source for `MirConstant::Str` materialization).
-            eprintln!(
-                "[shape-jit-arc-str] str_allocs={} str_retain={} \
-                 str_release={} str_frees={} leaked={}",
-                str_allocs_after - str_allocs_before,
-                str_retain_after - str_retain_before,
-                str_release_after - str_release_before,
-                str_frees_after - str_frees_before,
-                (str_allocs_after - str_allocs_before)
-                    .saturating_sub(str_frees_after - str_frees_before)
+            // execution. The "_cum" event is process-wide running
+            // total — surfaces compile-time allocations that happen
+            // before any jit_fn invocation (the dominant source for
+            // `MirConstant::Str` materialization). Migrated to
+            // tracing::info! per cw-F mechanism at Round 1 merge
+            // take-both ceremony (2026-05-16).
+            tracing::info!(
+                target: "shape_jit::arc_counters",
+                str_allocs = str_allocs_after - str_allocs_before,
+                str_retain = str_retain_after - str_retain_before,
+                str_release = str_release_after - str_release_before,
+                str_frees = str_frees_after - str_frees_before,
+                leaked = (str_allocs_after - str_allocs_before)
+                    .saturating_sub(str_frees_after - str_frees_before),
+                "shape-jit-arc-str counter delta",
             );
-            eprintln!(
-                "[shape-jit-arc-str-cum] str_allocs_total={} \
-                 str_retain_total={} str_release_total={} \
-                 str_frees_total={} leaked_total={}",
-                str_allocs_after,
-                str_retain_after,
-                str_release_after,
-                str_frees_after,
-                str_allocs_after.saturating_sub(str_frees_after)
+            tracing::info!(
+                target: "shape_jit::arc_counters",
+                str_allocs_total = str_allocs_after,
+                str_retain_total = str_retain_after,
+                str_release_total = str_release_after,
+                str_frees_total = str_frees_after,
+                leaked_total = str_allocs_after.saturating_sub(str_frees_after),
+                "shape-jit-arc-str cumulative",
             );
         }
 
@@ -425,9 +461,13 @@ impl JITExecutor {
 
         if emit_phase_metrics {
             let total_ms = bytecode_compile_ms + jit_compile_ms + jit_exec_ms;
-            eprintln!(
-                "[shape-jit-phases] bytecode_compile_ms={} jit_compile_ms={} jit_exec_ms={} total_ms={}",
-                bytecode_compile_ms, jit_compile_ms, jit_exec_ms, total_ms
+            tracing::info!(
+                target: "shape_jit::metrics",
+                bytecode_compile_ms = bytecode_compile_ms,
+                jit_compile_ms = jit_compile_ms,
+                jit_exec_ms = jit_exec_ms,
+                total_ms = total_ms,
+                "shape-jit-phases timing",
             );
         }
 

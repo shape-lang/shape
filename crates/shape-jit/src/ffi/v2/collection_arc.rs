@@ -182,15 +182,15 @@ pub extern "C" fn jit_v2_make_mutex(bits: u64, kind: u8) -> u64 {
         // is the principled response to a JIT-emit-time kind-source
         // gap; the consumer that produced the null kind byte already
         // had its own surface point upstream.
-        if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
-            eprintln!(
-                "[jit_v2_make_mutex] SURFACE: kind code {} is sentinel/unknown. \
-                 ADR-006 §2.7.7 #9 — producer-site MIR kind classification \
-                 gap. Returning null bits; the inner share at bits={:#x} is \
-                 leaked rather than dropped with a fabricated Bool kind.",
-                kind, bits
-            );
-        }
+        tracing::debug!(
+            target: "shape_jit",
+            kind,
+            bits,
+            "jit_v2_make_mutex SURFACE: kind code is sentinel/unknown. \
+             ADR-006 \u{a7}2.7.7 #9 \u{2014} producer-site MIR kind \
+             classification gap. Returning null bits; the inner share is \
+             leaked rather than dropped with a fabricated Bool kind.",
+        );
         return 0;
     };
     let value_slot = ValueSlot::from_raw(bits);
