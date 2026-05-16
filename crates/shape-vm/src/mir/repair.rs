@@ -476,6 +476,7 @@ mod tests {
             span: span(),
             field_name_table: std::collections::HashMap::new(),
             local_struct_type_names: std::collections::HashMap::new(),
+            local_typed_array_element_types: std::collections::HashMap::new(),
         };
 
         let repairs = generate_repairs(&error, &mir, &[error.clone()]);
@@ -511,6 +512,7 @@ mod tests {
             span: span(),
             field_name_table: std::collections::HashMap::new(),
             local_struct_type_names: std::collections::HashMap::new(),
+            local_typed_array_element_types: std::collections::HashMap::new(),
         };
 
         let repairs = generate_repairs(&error, &mir, &[]);
@@ -539,6 +541,7 @@ mod tests {
             span: span(),
             field_name_table: std::collections::HashMap::new(),
             local_struct_type_names: std::collections::HashMap::new(),
+            local_typed_array_element_types: std::collections::HashMap::new(),
         };
 
         let repairs = generate_repairs(&error, &mir, &[]);
@@ -569,6 +572,7 @@ mod tests {
             span: span(),
             field_name_table: std::collections::HashMap::new(),
             local_struct_type_names: std::collections::HashMap::new(),
+            local_typed_array_element_types: std::collections::HashMap::new(),
         };
 
         assert!(analysis.errors[0].repairs.is_empty());

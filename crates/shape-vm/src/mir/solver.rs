@@ -1981,6 +1981,7 @@ mod tests {
             span: span(),
             field_name_table: std::collections::HashMap::new(),
             local_struct_type_names: std::collections::HashMap::new(),
+            local_typed_array_element_types: std::collections::HashMap::new(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -2032,6 +2033,7 @@ mod tests {
             span: span(),
             field_name_table: std::collections::HashMap::new(),
             local_struct_type_names: std::collections::HashMap::new(),
+            local_typed_array_element_types: std::collections::HashMap::new(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -2095,6 +2097,7 @@ mod tests {
             span: span(),
             field_name_table: std::collections::HashMap::new(),
             local_struct_type_names: std::collections::HashMap::new(),
+            local_typed_array_element_types: std::collections::HashMap::new(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -2147,6 +2150,7 @@ mod tests {
             span: span(),
             field_name_table: std::collections::HashMap::new(),
             local_struct_type_names: std::collections::HashMap::new(),
+            local_typed_array_element_types: std::collections::HashMap::new(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -2210,6 +2214,7 @@ mod tests {
             span: span(),
             field_name_table: std::collections::HashMap::new(),
             local_struct_type_names: std::collections::HashMap::new(),
+            local_typed_array_element_types: std::collections::HashMap::new(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -2265,6 +2270,7 @@ mod tests {
             span: span(),
             field_name_table: std::collections::HashMap::new(),
             local_struct_type_names: std::collections::HashMap::new(),
+            local_typed_array_element_types: std::collections::HashMap::new(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -2311,6 +2317,7 @@ mod tests {
             span: span(),
             field_name_table: std::collections::HashMap::new(),
             local_struct_type_names: std::collections::HashMap::new(),
+            local_typed_array_element_types: std::collections::HashMap::new(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -2386,6 +2393,7 @@ mod tests {
             span: span(),
             field_name_table: std::collections::HashMap::new(),
             local_struct_type_names: std::collections::HashMap::new(),
+            local_typed_array_element_types: std::collections::HashMap::new(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -2443,6 +2451,7 @@ mod tests {
             span: span(),
             field_name_table: std::collections::HashMap::new(),
             local_struct_type_names: std::collections::HashMap::new(),
+            local_typed_array_element_types: std::collections::HashMap::new(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -2493,6 +2502,7 @@ mod tests {
             span: span(),
             field_name_table: std::collections::HashMap::new(),
             local_struct_type_names: std::collections::HashMap::new(),
+            local_typed_array_element_types: std::collections::HashMap::new(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -2675,6 +2685,7 @@ mod tests {
             span: span(),
             field_name_table: std::collections::HashMap::new(),
             local_struct_type_names: std::collections::HashMap::new(),
+            local_typed_array_element_types: std::collections::HashMap::new(),
         };
 
         let mut callee_summaries = CalleeSummaries::new();
@@ -2753,6 +2764,7 @@ mod tests {
             span: span(),
             field_name_table: std::collections::HashMap::new(),
             local_struct_type_names: std::collections::HashMap::new(),
+            local_typed_array_element_types: std::collections::HashMap::new(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -2819,6 +2831,7 @@ mod tests {
             span: span(),
             field_name_table: std::collections::HashMap::new(),
             local_struct_type_names: std::collections::HashMap::new(),
+            local_typed_array_element_types: std::collections::HashMap::new(),
         };
 
         let mut callee_summaries = CalleeSummaries::new();
@@ -2918,6 +2931,7 @@ mod tests {
             span: span(),
             field_name_table: std::collections::HashMap::new(),
             local_struct_type_names: std::collections::HashMap::new(),
+            local_typed_array_element_types: std::collections::HashMap::new(),
         };
 
         let mut callee_summaries = CalleeSummaries::new();
@@ -2977,6 +2991,7 @@ mod tests {
             span: span(),
             field_name_table: std::collections::HashMap::new(),
             local_struct_type_names: std::collections::HashMap::new(),
+            local_typed_array_element_types: std::collections::HashMap::new(),
         }
     }
 

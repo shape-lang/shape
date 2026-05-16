@@ -924,8 +924,9 @@ impl BytecodeCompiler {
                 receiver,
                 method,
                 args,
+                span,
                 ..
-            } => self.compile_expr_method_call(receiver, method, args),
+            } => self.compile_expr_method_call(receiver, method, args, *span),
             Expr::Reference {
                 expr: inner,
                 is_mutable,
@@ -1055,8 +1056,9 @@ impl BytecodeCompiler {
                 receiver,
                 method,
                 args,
+                span,
                 ..
-            } => self.compile_expr_method_call(receiver, method, args),
+            } => self.compile_expr_method_call(receiver, method, args, *span),
             Expr::EnumConstructor {
                 enum_name,
                 variant,

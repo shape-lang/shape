@@ -462,7 +462,7 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_returns(
     mir: &crate::mir::MirFunction,
     callee_returns: Option<&dyn Fn(&str) -> Option<shape_value::v2::ConcreteType>>,
 ) -> Vec<shape_value::v2::ConcreteType> {
-    infer_top_level_concrete_types_from_mir_with_resolvers(mir, callee_returns, None)
+    infer_top_level_concrete_types_from_mir_with_resolvers(mir, callee_returns, None, None)
 }
 
 /// Trait-method-aware variant of the conduit producer.
@@ -496,6 +496,36 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_resolvers(
     callee_returns: Option<&dyn Fn(&str) -> Option<shape_value::v2::ConcreteType>>,
     method_returns: Option<
         &dyn Fn(&str, &str) -> Option<shape_value::v2::ConcreteType>,
+    >,
+    // ADR-006 §2.7.5 V3-S6b conduit consumer.
+    //
+    // `monomorph_method_returns(call_site_span) -> Option<ConcreteType>`
+    // consults the `monomorphized_method_call_sites: HashMap<(Span,
+    // Option<usize>), usize>` side-table populated by
+    // `try_monomorphize_method_call` /
+    // `try_monomorphize_method_call_with_closures` on specialization
+    // success, then chains the looked-up specialized FunctionId through
+    // `function_return_concrete_types[specialized_idx]` to recover the
+    // callee specialization's declared return type. The caller closes
+    // over the `current_function` half of the composite key — top-level
+    // conduits pass `None` for `current_function`; per-function conduits
+    // pass `Some(fn_idx)` matching the function being walked.
+    //
+    // When the side-table holds an entry for the `Terminator.span` of a
+    // `MirConstant::Method` Call-terminator (regardless of receiver
+    // type), the destination slot's ConcreteType is stamped from the
+    // resolver's return value. This is the V3-S6 chain checkpoint-final
+    // wiring: it carries the `.map()` chain's intermediate carrier shape
+    // through to the JIT-side `parametric_method_return_kind_from_receiver`
+    // arm, which then trivially classifies `.sum()` after `.map()` on
+    // `Vec<I64>` → `Int64` via the existing
+    // `("sum"|..., ConcreteType::Array(elem))` arm.
+    //
+    // PATH α per supervisor 2026-05-15 ratification (side-table consult
+    // at compile time; no runtime tag-byte read; §2.7.5 stamp-at-compile-
+    // time preserved).
+    monomorph_method_returns: Option<
+        &dyn Fn(shape_ast::ast::span::Span) -> Option<shape_value::v2::ConcreteType>,
     >,
 ) -> Vec<shape_value::v2::ConcreteType> {
     use crate::mir::types::{MirConstant, Operand, StatementKind};
@@ -551,6 +581,55 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_resolvers(
         let idx = slot.0 as usize;
         if idx < n {
             struct_names[idx] = Some(name.clone());
+        }
+    }
+
+    // ADR-006 §2.7.5 stamp-at-compile-time — V3-S6e-jit-specialized-vec-
+    // map-aggregate-classify (Phase 3 cluster-0+1 Wave 3, 2026-05-16;
+    // V3-S6 multi-session chain checkpoint-final).
+    //
+    // Empty-typed-array-literal slot stamping pass. The MIR lowering's
+    // `mir/lowering/helpers.rs::emit_container_store_if_needed` short-
+    // circuits for `ContainerStoreKind::Array` with empty operands (line
+    // 128-130), so the ArrayStore walker below (`StatementKind::ArrayStore`
+    // arm) has no operand source to infer the element kind for empty
+    // literal initializations like `let mut result = []`. Without this
+    // pass `concrete_types[result_slot]` stays `Void`, the JIT-MIR v2-
+    // fast-path at `mir_compiler/statements.rs::v2_typed_array_elem_kind`
+    // returns `None`, the kind-blind Aggregate fallback fires, and the
+    // function fails to JIT-compile per Route A `W11-jit-new-array`
+    // SURFACE.
+    //
+    // The producer at `mir/lowering/stmt.rs::lower_var_decl` populates
+    // `mir.local_typed_array_element_types` for `let mut <name>: Array<C>
+    // = []` bindings when `C` is a `concrete_type_from_annotation`-
+    // resolvable element ConcreteType. V3-S6a's
+    // `synthesize_empty_array_result_annotation` writes the `Array<C>`
+    // annotation onto the specialized `Vec.map<U>` / `Vec.filter<U>`
+    // body's `let mut result = []` after generic substitution
+    // concretizes the return type; this consumer reads that AST→MIR-
+    // threaded element type at the conduit producer layer.
+    //
+    // Runs BEFORE the slot-move propagation pass below so that subsequent
+    // `Use(Move|Copy)` chains from the var-binding slot to a user-visible
+    // slot propagate the Array(elem) stamp correctly.
+    //
+    // No tag-bit decode, no Bool-default, no fabricated default — when
+    // the binding has no `Array<C>` annotation (legacy `let mut result =
+    // []` without explicit type), no entry exists in the map and the
+    // slot stays `Void` per §2.7.5.1 / §2.7.7 #9 (the JIT surfaces-and-
+    // stops honestly at the Aggregate site, the original W11-jit-new-
+    // array architectural-gap signal).
+    for (slot, elem) in &mir.local_typed_array_element_types {
+        let idx = slot.0 as usize;
+        if idx < n
+            && matches!(
+                concrete_types[idx],
+                shape_value::v2::ConcreteType::Void
+            )
+        {
+            concrete_types[idx] =
+                shape_value::v2::ConcreteType::Array(Box::new(elem.clone()));
         }
     }
 
@@ -739,6 +818,105 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_resolvers(
         }
     }
 
+    // ADR-006 §2.7.5 — V3-S6b-jit-method-monomorph-conduit (Phase 3
+    // cluster-0 Wave 3 Stabilize Round 2, 2026-05-15; supervisor 2026-
+    // 05-15 PATH α RATIFIED). Monomorphized-method-call return-kind
+    // classification at `MirConstant::Method` Call-terminator destinations.
+    //
+    // For `arr.map(|x| x*2).sum()` chains, the bytecode compiler's
+    // `try_monomorphize_method_call` specializes `Vec.map<int, int>` (via
+    // V3-S6a's closure-return-typed generic resolver extension) and
+    // records the call-site → specialized FunctionId mapping in
+    // `BytecodeProgram.monomorphized_method_call_sites`. The MIR layer,
+    // however, still carries `MirConstant::Method("map")` (MIR is built
+    // before bytecode-level specialization), so the
+    // `MirConstant::Function(name)` resolver above does not fire on
+    // these call-terminators.
+    //
+    // This pass closes the gap: when the `Terminator.span` matches a
+    // side-table entry (composite key `(span, current_function)` keyed
+    // off the producer's closed-over `current_function` value), the
+    // destination slot's ConcreteType is lifted from
+    // `function_return_concrete_types[specialized_idx]`. Downstream
+    // method calls on the destination (e.g. `.sum()` on the
+    // `.map()` result) then read the stamped
+    // `concrete_types[receiver_slot] = Array(I64)` and the JIT-side
+    // `parametric_method_return_kind_from_receiver` arm
+    // `("sum"|..., ConcreteType::Array(elem))` fires trivially.
+    //
+    // No tag-bit decode, no Bool-default, no fabricated default — when
+    // the resolver returns `None` (no side-table entry, or callee return
+    // type is Void), the slot stays `Void` per §2.7.5.1. The
+    // monomorph-method resolver is consulted at COMPILE TIME (the
+    // §2.7.5 stamp-at-compile-time discipline; never runtime).
+    //
+    // Runs BEFORE the slot-move propagation pass so that subsequent
+    // `Assign(doubled, Use(Move(temp_map_result)))` propagation
+    // carries the stamped `Array(I64)` from the temp to the user-
+    // visible binding slot. Without this ordering the move-propagation
+    // would observe `concrete_types[temp_map_result] = Void` and leave
+    // `doubled` unstamped, defeating the V3-S6b conduit.
+    // ADR-006 §2.7.5 stamp-at-compile-time — V3-S6d-jit-method-monomorph-
+    // classify (supervisor 2026-05-15 PATH α-prime complementary-fix
+    // RATIFIED).
+    //
+    // COMPLEMENTARY to V3-S6c routing at terminators.rs:176. V3-S6c
+    // routing addresses the .map() EXECUTION-PATH consumer (direct
+    // FuncRef call to specialized Vec.map::* bypasses jit_call_method
+    // trampoline + handle_int_map ckpt3_surface SIGSEGV class). V3-S6d
+    // stamping addresses the .sum() DESTINATION-KIND CLASSIFICATION
+    // consumer (the v2-fast-path at terminators.rs:104-135 reads
+    // concrete_types[doubled_slot]; without classification, fast-path
+    // doesn't activate, downstream print operand kind is None, JIT
+    // SURFACE-graceful).
+    //
+    // V3-S6d stamping is SAFE post-V3-S6c routing: the V3-S6b dual-
+    // consumer SIGSEGV was a TEMPORAL problem (stamping fired before
+    // routing addressed malformed-bits root cause). V3-S6c eliminates
+    // the temporal dependency by emitting direct FuncRef calls that
+    // return correct raw `*const TypedArray<i64>` bits per V3-S5 strict-
+    // typing; V3-S6d stamping then classifies doubled_slot Array(I64);
+    // v2-fast-path consumer reads BOTH correct bits AND correct kind →
+    // jit_v2_array_sum_i64(arr_ptr) succeeds.
+    //
+    // For TerminatorKind::Call { func: MirConstant::Method(_), destination:
+    // Place::Local(dst), .. }, consult the monomorph_method_returns
+    // resolver (which queries monomorphized_method_call_sites side-table
+    // populated at try_monomorphize_method_call success). Stamp the
+    // destination slot's ConcreteType from the specialized function's
+    // return ConcreteType.
+    if let Some(monomorph_resolver) = monomorph_method_returns {
+        use crate::mir::types::TerminatorKind;
+        for block in mir.iter_blocks() {
+            if let TerminatorKind::Call {
+                func, destination, ..
+            } = &block.terminator.kind
+            {
+                if let Operand::Constant(MirConstant::Method(_)) = func {
+                    if let crate::mir::types::Place::Local(dst) = destination {
+                        let idx = dst.0 as usize;
+                        if idx < n
+                            && matches!(
+                                concrete_types[idx],
+                                shape_value::v2::ConcreteType::Void
+                            )
+                        {
+                            let span = block.terminator.span;
+                            if let Some(ct) = monomorph_resolver(span) {
+                                if !matches!(
+                                    ct,
+                                    shape_value::v2::ConcreteType::Void
+                                ) {
+                                    concrete_types[idx] = ct;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Second pass: propagate Struct/Enum/Array through simple slot moves.
     // The MIR lowering for `let p = Point{...}` first builds the
     // TypedObject in a scratch temp, then `Assign(p_slot, Use(Move temp))`
@@ -852,17 +1030,77 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_resolvers(
                             if receiver_slot >= n {
                                 continue;
                             }
-                            let type_name = match &struct_names[receiver_slot] {
-                                Some(n) => n.clone(),
-                                None => continue,
+                            if let Some(type_name) = struct_names[receiver_slot].clone() {
+                                if let Some(ct) =
+                                    method_resolver(&type_name, method_name.as_str())
+                                {
+                                    if !matches!(
+                                        ct,
+                                        shape_value::v2::ConcreteType::Void
+                                    ) {
+                                        concrete_types[idx] = ct;
+                                        continue;
+                                    }
+                                }
+                            }
+                            // V3-S6a resolver-extension follow-up:
+                            // parametric method classification on
+                            // parametric receivers. When the trait-impl
+                            // resolver doesn't apply (the receiver is a
+                            // parametric container like `Array<T>`, not a
+                            // user-defined struct), consult the
+                            // receiver's `ConcreteType` directly. This
+                            // mirrors `parametric_method_return_kind_from_
+                            // receiver` (in shape-jit's `mir_compiler/
+                            // types.rs`) but produces a `ConcreteType`
+                            // rather than just a `NativeKind` — feeding
+                            // the conduit's full kind-source side-table.
+                            //
+                            // Scope: methods on `Array<T>` whose return
+                            // shape is fully derivable from T at MIR
+                            // time. `.sum()` / `.mean()` / `.min()` /
+                            // `.max()` / `.get(i)` → T (element scalar).
+                            // `.map(...)` / `.filter(...)` are NOT
+                            // covered here — they go through the bytecode
+                            // compiler's specialization path
+                            // (`MirConstant::Function("Vec.map::*")` at
+                            // bytecode level), and the conduit's
+                            // `Function`-arm resolver consults
+                            // `function_return_concrete_types` for the
+                            // specialized return type.
+                            let receiver_ct = &concrete_types[receiver_slot];
+                            let inferred = match (
+                                method_name.as_str(),
+                                receiver_ct,
+                            ) {
+                                // V3-S6a resolver-extension follow-up:
+                                // Array element-typed accessors. The
+                                // VM-side `array_basic.rs` /
+                                // `typed_array_methods.rs` PHF entries
+                                // return `KindedSlot::from_<elem>(...)`
+                                // per receiver-element kind — same
+                                // shape as the JIT-side
+                                // `parametric_method_return_kind_from_receiver`
+                                // arm in `crates/shape-jit/src/mir_compiler/types.rs`.
+                                // Ported here so the conduit's
+                                // `concrete_types[]` side-table also
+                                // tracks element kind through
+                                // method-chain receivers (which the
+                                // pre-V3-S6a conduit only handled for
+                                // user-defined struct receivers via the
+                                // `struct_names` lookup above).
+                                (
+                                    "sum" | "mean" | "min" | "max",
+                                    shape_value::v2::ConcreteType::Array(elem),
+                                ) => Some((**elem).clone()),
+                                (
+                                    "get",
+                                    shape_value::v2::ConcreteType::Array(elem),
+                                ) => Some((**elem).clone()),
+                                _ => None,
                             };
-                            if let Some(ct) =
-                                method_resolver(&type_name, method_name.as_str())
-                            {
-                                if !matches!(
-                                    ct,
-                                    shape_value::v2::ConcreteType::Void
-                                ) {
+                            if let Some(ct) = inferred {
+                                if !matches!(ct, shape_value::v2::ConcreteType::Void) {
                                     concrete_types[idx] = ct;
                                 }
                             }
@@ -5497,6 +5735,7 @@ mod call_return_kind_tests {
             span,
             field_name_table: Default::default(),
             local_struct_type_names: Default::default(),
+            local_typed_array_element_types: Default::default(),
         }
     }
 
@@ -5608,6 +5847,7 @@ mod call_return_kind_tests {
             span,
             field_name_table: Default::default(),
             local_struct_type_names: Default::default(),
+            local_typed_array_element_types: Default::default(),
         };
         let resolver = |name: &str| -> Option<ConcreteType> {
             if name == "divide" {
@@ -5696,6 +5936,7 @@ mod call_return_kind_tests {
             span,
             field_name_table: Default::default(),
             local_struct_type_names: Default::default(),
+            local_typed_array_element_types: Default::default(),
         };
         let result = infer_top_level_concrete_types_from_mir(&mir);
         assert!(
@@ -5780,6 +6021,7 @@ mod call_return_kind_tests {
             span,
             field_name_table: Default::default(),
             local_struct_type_names,
+            local_typed_array_element_types: std::collections::HashMap::new(),
         };
         let method_returns =
             |type_name: &str, method_name: &str| -> Option<ConcreteType> {
@@ -5793,6 +6035,7 @@ mod call_return_kind_tests {
             &mir,
             None,
             Some(&method_returns),
+            None,
         );
         assert_eq!(
             result[3],
@@ -5876,6 +6119,7 @@ mod call_return_kind_tests {
             span,
             field_name_table: Default::default(),
             local_struct_type_names,
+            local_typed_array_element_types: std::collections::HashMap::new(),
         };
         let method_returns =
             |type_name: &str, method_name: &str| -> Option<ConcreteType> {
@@ -5889,6 +6133,7 @@ mod call_return_kind_tests {
             &mir,
             None,
             Some(&method_returns),
+            None,
         );
         assert_eq!(
             result[4],
@@ -5952,10 +6197,11 @@ mod call_return_kind_tests {
             span,
             field_name_table: Default::default(),
             local_struct_type_names,
+            local_typed_array_element_types: std::collections::HashMap::new(),
         };
         // No method_returns resolver — destination stays Void.
         let result =
-            infer_top_level_concrete_types_from_mir_with_resolvers(&mir, None, None);
+            infer_top_level_concrete_types_from_mir_with_resolvers(&mir, None, None, None);
         assert_eq!(
             result[3],
             ConcreteType::Void,
@@ -6008,6 +6254,7 @@ mod call_return_kind_tests {
             span,
             field_name_table: Default::default(),
             local_struct_type_names: std::collections::HashMap::new(),
+            local_typed_array_element_types: std::collections::HashMap::new(),
         };
         let method_returns = |_type_name: &str, _method_name: &str| -> Option<ConcreteType> {
             // Resolver would return String, but it's unreachable
@@ -6018,6 +6265,7 @@ mod call_return_kind_tests {
             &mir,
             None,
             Some(&method_returns),
+            None,
         );
         assert_eq!(
             result[3],

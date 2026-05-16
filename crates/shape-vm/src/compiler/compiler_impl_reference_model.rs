@@ -1598,19 +1598,47 @@ impl BytecodeCompiler {
                 }
             };
 
+        // ADR-006 §2.7.5 V3-S6b conduit consumer: monomorph-method
+        // resolver. Reads `BytecodeProgram.monomorphized_method_call_sites`
+        // populated by `try_monomorphize_method_call` /
+        // `_with_closures` at bytecode-compile time, then chains the
+        // looked-up specialized FunctionId through `returns_vec` (the
+        // local clone of `function_return_concrete_types`) to recover the
+        // callee specialization's declared return type. The closure
+        // closes over the `current_function` half of the composite key
+        // — top-level uses `None`; per-fn loop below uses
+        // `Some(fn_idx)`.
+        let monomorph_call_sites =
+            self.program.monomorphized_method_call_sites.clone();
+        let monomorph_method_returns_top = |span: shape_ast::ast::span::Span|
+            -> Option<shape_value::v2::ConcreteType>
+        {
+            let idx = *monomorph_call_sites.get(&(span, None))?;
+            let ct = returns_vec.get(idx)?;
+            if matches!(ct, shape_value::v2::ConcreteType::Void) {
+                None
+            } else {
+                Some(ct.clone())
+            }
+        };
+
         // Re-run top-level conduit with the callee-return resolver so the
         // `let r = divide(10, 2)` slot picks up `Result(I64, String)` from
         // the Call terminator. (The first run above stamped `Void` for
         // Call destinations since no resolver was available.) The
         // method-returns resolver is also threaded so `t.name()`-style
         // trait-method dispatch destinations pick up the trait's declared
-        // return ConcreteType.
+        // return ConcreteType. The V3-S6b monomorph-method resolver is
+        // threaded so `arr.map(...).sum()` chains have the `.map()`
+        // destination stamped with the specialized callee's return
+        // ConcreteType.
         if let Some(ref mir_data) = self.program.top_level_mir {
             let concrete_types =
                 crate::compiler::helpers::infer_top_level_concrete_types_from_mir_with_resolvers(
                     &mir_data.mir,
                     Some(&callee_returns),
                     Some(&method_returns),
+                    Some(&monomorph_method_returns_top),
                 );
             self.program.top_level_local_concrete_types = concrete_types;
         }
@@ -1639,13 +1667,33 @@ impl BytecodeCompiler {
         // NaN-boxed path naturally.
         let mut per_fn: Vec<Vec<shape_value::v2::ConcreteType>> =
             Vec::with_capacity(self.program.functions.len());
-        for func in &self.program.functions {
+        for (fn_idx, func) in self.program.functions.iter().enumerate() {
             if let Some(ref mir_data) = func.mir_data {
+                // ADR-006 §2.7.5 V3-S6b conduit consumer: per-fn variant
+                // of the monomorph-method resolver. Closes over the
+                // calling function's index for the composite-key lookup
+                // — must match the value `try_monomorphize_method_call`
+                // recorded in `self.current_function` at populate time
+                // (i.e. `Some(fn_idx)` here matches the populator's
+                // post-monomorphization specialized caller FunctionId).
+                let current_fn = Some(fn_idx);
+                let monomorph_method_returns_per_fn = |span: shape_ast::ast::span::Span|
+                    -> Option<shape_value::v2::ConcreteType>
+                {
+                    let idx = *monomorph_call_sites.get(&(span, current_fn))?;
+                    let ct = returns_vec.get(idx)?;
+                    if matches!(ct, shape_value::v2::ConcreteType::Void) {
+                        None
+                    } else {
+                        Some(ct.clone())
+                    }
+                };
                 per_fn.push(
                     crate::compiler::helpers::infer_top_level_concrete_types_from_mir_with_resolvers(
                         &mir_data.mir,
                         Some(&callee_returns),
                         Some(&method_returns),
+                        Some(&monomorph_method_returns_per_fn),
                     ),
                 );
             } else {

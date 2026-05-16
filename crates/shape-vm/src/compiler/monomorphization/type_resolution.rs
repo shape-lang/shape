@@ -846,8 +846,39 @@ pub fn resolve_call_site_type_args_with_closures(
     arg_types: &[Option<ConcreteType>],
     generic_params: &[String],
 ) -> Option<TypeArgResolution> {
-    // First run the existing type-only resolver to bind generic params.
-    let base = resolve_call_site_type_args(compiler, fn_name, arg_types, generic_params)?;
+    // Two-phase resolution:
+    //
+    //   Phase A — try the type-only resolver. It binds generics that appear
+    //   in non-closure parameter annotations (the `arr: Array<T>` slot in
+    //   `Vec.map<U>(f: (T) => U) -> Vec<U>` binds T from `xs: Array<Int64>`).
+    //   The resolver bails on generics that ONLY appear in closure-position
+    //   annotations (`U` mentioned only inside `f: (T) => U`).
+    //
+    //   Phase B — V3-S6a resolver extension. When Phase A bails, run a
+    //   permissive variant that allows generics to remain unbound iff they
+    //   appear only in closure-position annotations. Then for each closure
+    //   argument, do lightweight closure-body return-type inference and
+    //   unify against the callee's closure-param return annotation to bind
+    //   those remaining generics.
+    //
+    // Both phases produce identical bindings when Phase A succeeds — the
+    // permissive base resolver is a strict superset of the type-only
+    // resolver's binding set.
+    let resolution_args = match resolve_call_site_type_args(compiler, fn_name, arg_types, generic_params) {
+        Some(base) => base.type_args,
+        None => {
+            // Phase A bailed. Try Phase B: permissive resolution that lets
+            // closure-only generics remain unbound until closure-return
+            // inference fills them in.
+            resolve_with_closure_return_inference(
+                compiler,
+                fn_name,
+                args,
+                arg_types,
+                generic_params,
+            )?
+        }
+    };
 
     // Clone the fn def (we need to hold both a &mut compiler and an immutable
     // view of param annotations). The def is not hot — one clone per closure
@@ -858,7 +889,7 @@ pub fn resolve_call_site_type_args_with_closures(
     // closure-return-type inference can substitute through the closure's
     // annotation.
     let mut bindings: HashMap<String, ConcreteType> = HashMap::new();
-    for (name, ct) in generic_params.iter().zip(base.type_args.iter()) {
+    for (name, ct) in generic_params.iter().zip(resolution_args.iter()) {
         bindings.insert(name.clone(), ct.clone());
     }
 
@@ -914,14 +945,187 @@ pub fn resolve_call_site_type_args_with_closures(
     if closure_specs.is_empty() {
         // No closure args — return the type-only resolution unchanged so the
         // cache key stays byte-for-byte consistent with prior phases.
-        return Some(base);
+        return Some(TypeArgResolution::new(fn_name, resolution_args));
     }
 
     Some(TypeArgResolution::with_closure_specs(
-        base.fn_name,
-        base.type_args,
+        fn_name,
+        resolution_args,
         closure_specs,
     ))
+}
+
+/// V3-S6a resolver extension (Phase B of [`resolve_call_site_type_args_with_closures`]).
+///
+/// Permissive resolution path that binds closure-return-typed generics. Runs
+/// when the strict type-only resolver bails because a generic appears in a
+/// closure-parameter annotation but doesn't appear in any non-closure
+/// parameter (and so can't be bound from non-closure arg types alone).
+///
+/// Algorithm:
+///
+/// 1. Walk every `(param_annotation, arg_concrete_type)` pair, just like the
+///    strict resolver. Unification is identical EXCEPT: when a param's
+///    annotation is `TypeAnnotation::Function` AND the corresponding
+///    arg-type is None (closure literal), we don't bail on unbound
+///    generics — we mark them as "closure-bound, pending".
+/// 2. For each closure arg, infer the closure body's return-type name via
+///    `infer_closure_body_return_type_name`. Map the inferred name to a
+///    `ConcreteType` and unify against the callee's closure-param return
+///    annotation `(T) => U` — this binds U (and any further nested generics
+///    in the closure return position).
+/// 3. Bindings must be complete: every declared generic param has a
+///    `ConcreteType`. If any remain unbound after closure-return inference,
+///    bail.
+///
+/// Returns `None` when binding is incomplete OR when this call site doesn't
+/// fit the closure-return-typed-generic shape (caller falls back to the
+/// generic-template path).
+fn resolve_with_closure_return_inference(
+    compiler: &mut BytecodeCompiler,
+    fn_name: &str,
+    args: &[Expr],
+    arg_types: &[Option<ConcreteType>],
+    generic_params: &[String],
+) -> Option<Vec<ConcreteType>> {
+    if generic_params.is_empty() {
+        // Defensive: the caller already handled this in
+        // `resolve_call_site_type_args`. If we land here with no generics
+        // there's nothing to do.
+        return Some(Vec::new());
+    }
+
+    let func_def = compiler.function_defs.get(fn_name).cloned()?;
+    let mut bindings: HashMap<String, ConcreteType> = HashMap::new();
+    let generics: Vec<&str> = generic_params.iter().map(|s| s.as_str()).collect();
+
+    // Step 1: walk non-closure params, accumulate bindings the strict
+    // resolver would have accumulated.
+    for (param_idx, param) in func_def.params.iter().enumerate() {
+        let Some(param_annotation) = param.type_annotation.as_ref() else {
+            continue;
+        };
+
+        let Some(arg_slot) = arg_types.get(param_idx) else {
+            continue;
+        };
+        let Some(arg_ct) = arg_slot.as_ref() else {
+            // No concrete type for this arg. Bail if this param's
+            // annotation mentions an unbound generic AND the annotation is
+            // not a closure-position shape (closure-position unbound
+            // generics get bound by Step 2 below).
+            let mentions_unbound_outside_closure = generics.iter().any(|g| {
+                annotation_mentions_outside_closure_position(param_annotation, g)
+                    && !bindings.contains_key(*g)
+            });
+            if mentions_unbound_outside_closure {
+                return None;
+            }
+            continue;
+        };
+
+        if !unify_annotation_with_concrete(param_annotation, arg_ct, &generics, &mut bindings) {
+            return None;
+        }
+    }
+
+    // Step 2: closure-return inference. For each closure arg, infer the
+    // return-type name and unify against the callee's closure-param return
+    // annotation to bind closure-only generics.
+    for (param_idx, arg_expr) in args.iter().enumerate() {
+        let Expr::FunctionExpr { params: cparams, body: cbody, .. } = arg_expr else {
+            continue;
+        };
+
+        // Skip if the callee has no param at this index OR no annotation
+        // OR the annotation isn't a function shape.
+        let Some(param) = func_def.params.get(param_idx) else {
+            continue;
+        };
+        let Some(TypeAnnotation::Function { returns: ret_ann, .. }) = param.type_annotation.as_ref()
+        else {
+            continue;
+        };
+
+        // Short-circuit: if the closure-param's return annotation doesn't
+        // mention any generic, there's nothing to bind here.
+        if !generics.iter().any(|g| annotation_mentions_any(ret_ann, &[g])) {
+            continue;
+        }
+
+        // Lightweight closure body return-type inference. Returns a name
+        // like "int", "number", "bool", "string". The function exists
+        // primarily for `local_callable_return_types` — reuse it here.
+        let Some(return_type_name) =
+            crate::compiler::expressions::closures::infer_closure_body_return_type_name(
+                compiler, cparams, cbody, None,
+            )
+        else {
+            // Can't infer the closure's return type. Without it we can't
+            // bind closure-only generics; bail.
+            return None;
+        };
+
+        let Some(return_ct) = concrete_type_from_name(&return_type_name) else {
+            return None;
+        };
+
+        // Unify the closure-param return annotation against the inferred
+        // closure return ConcreteType to bind generics mentioned in the
+        // return position.
+        if !unify_annotation_with_concrete(ret_ann, &return_ct, &generics, &mut bindings) {
+            return None;
+        }
+    }
+
+    // Step 3: completeness check. Every declared generic must be bound.
+    let mut type_args: Vec<ConcreteType> = Vec::with_capacity(generic_params.len());
+    for name in generic_params {
+        let binding = bindings.get(name)?.clone();
+        type_args.push(binding);
+    }
+
+    Some(type_args)
+}
+
+/// V3-S6a resolver extension helper: returns true iff `annotation` mentions
+/// `generic` *somewhere other than* inside a `TypeAnnotation::Function`
+/// position. Used by `resolve_with_closure_return_inference` to detect
+/// generics that the type-only resolver could have bound from a non-closure
+/// arg — versus generics that ONLY appear in closure-param positions and
+/// must wait for closure-return inference.
+fn annotation_mentions_outside_closure_position(
+    annotation: &TypeAnnotation,
+    generic: &str,
+) -> bool {
+    match annotation {
+        TypeAnnotation::Basic(name) => name.as_str() == generic,
+        TypeAnnotation::Reference(path) => path.as_str() == generic,
+        TypeAnnotation::Array(inner) => {
+            annotation_mentions_outside_closure_position(inner, generic)
+        }
+        TypeAnnotation::Tuple(items) => items
+            .iter()
+            .any(|t| annotation_mentions_outside_closure_position(t, generic)),
+        TypeAnnotation::Generic { args, .. } => args
+            .iter()
+            .any(|a| annotation_mentions_outside_closure_position(a, generic)),
+        // The whole point of this helper: a Function annotation is a
+        // closure position, so mentions inside it are NOT outside-closure
+        // mentions. Skip recursion.
+        TypeAnnotation::Function { .. } => false,
+        TypeAnnotation::Object(fields) => fields
+            .iter()
+            .any(|f| annotation_mentions_outside_closure_position(&f.type_annotation, generic)),
+        TypeAnnotation::Union(items) | TypeAnnotation::Intersection(items) => items
+            .iter()
+            .any(|t| annotation_mentions_outside_closure_position(t, generic)),
+        TypeAnnotation::Void
+        | TypeAnnotation::Never
+        | TypeAnnotation::Null
+        | TypeAnnotation::Undefined
+        | TypeAnnotation::Dyn(_) => false,
+    }
 }
 
 /// Try to render a `TypeAnnotation` as a `ConcreteType`, substituting any

@@ -1491,6 +1491,16 @@ impl BytecodeCompiler {
         receiver: &Expr,
         method: &str,
         args: &[Expr],
+        // ADR-006 §2.7.5 V3-S6b conduit: AST span of the
+        // `Expr::MethodCall` site. Threaded through to
+        // `try_monomorphize_method_call` / `_with_closures` for the
+        // `(Span, current_function) → specialized_idx` side-table key.
+        // The conduit producer at
+        // `infer_top_level_concrete_types_from_mir_with_resolvers` reads
+        // the matching `Terminator.span` (set by `builder.emit_call(...,
+        // span)` in `mir/lowering/expr.rs` at the `Expr::MethodCall` arm)
+        // to look up the specialized callee.
+        call_site_span: Span,
     ) -> Result<()> {
         // Chained function calls: `f(a)(b)` is parsed as MethodCall with method "__call__".
         // Compile as: evaluate receiver (which produces a callable), compile args, CallValue.
@@ -2146,7 +2156,7 @@ impl BytecodeCompiler {
             //
             // Falls back to the generic function index on any failure.
             let call_func_idx = self
-                .try_monomorphize_method_call(&func_name, receiver, args)
+                .try_monomorphize_method_call(&func_name, receiver, args, call_site_span)
                 .unwrap_or(func_idx);
 
             let arg_count = self
@@ -2247,7 +2257,7 @@ impl BytecodeCompiler {
                 // try to monomorphize it for the receiver's concrete type.
                 // Falls back to the generic function index on any failure.
                 let call_func_idx = self
-                    .try_monomorphize_method_call(&func_name, receiver, args)
+                    .try_monomorphize_method_call(&func_name, receiver, args, call_site_span)
                     .unwrap_or(func_idx);
 
                 let arg_count = self
@@ -3163,6 +3173,15 @@ impl BytecodeCompiler {
         func_name: &str,
         receiver: &Expr,
         args: &[Expr],
+        // ADR-006 §2.7.5 V3-S6b conduit: the AST `Expr::MethodCall.span`
+        // of the call-site, threaded from `compile_expr_method_call`. On
+        // specialization success we stamp `(call_site_span,
+        // self.current_function) → specialized_idx` into
+        // `self.program.monomorphized_method_call_sites` so the conduit
+        // producer can lift `function_return_concrete_types[
+        // specialized_idx]` into the destination slot's ConcreteType at
+        // the matching `MirConstant::Method` Call-terminator site.
+        call_site_span: Span,
     ) -> Option<usize> {
         // 1. Check if the function has type parameters. Only type-kind
         //    generics participate in the call-site annotation-unification
@@ -3208,9 +3227,11 @@ impl BytecodeCompiler {
             .any(|a| matches!(a, Expr::FunctionExpr { .. }));
 
         if has_closure_arg {
-            if let Some(idx) =
-                self.try_monomorphize_method_call_with_closures(func_name, &combined_args)
-            {
+            if let Some(idx) = self.try_monomorphize_method_call_with_closures(
+                func_name,
+                &combined_args,
+                call_site_span,
+            ) {
                 return Some(idx);
             }
             // Fall-through: either resolution bailed, inlining failed, or the
@@ -3241,6 +3262,22 @@ impl BytecodeCompiler {
                 if self.current_function == Some(idx) {
                     return None;
                 }
+                // ADR-006 §2.7.5 V3-S6b conduit population: stamp the
+                // `(call_site_span, calling_function) → specialized_idx`
+                // mapping so the conduit producer at
+                // `infer_top_level_concrete_types_from_mir_with_resolvers`
+                // can lift `function_return_concrete_types[
+                // specialized_idx]` into the destination slot's
+                // ConcreteType at the matching `MirConstant::Method`
+                // Call-terminator site. `self.current_function` is the
+                // post-monomorphization specialized FunctionId of the
+                // CALLER (same value the conduit's per-fn loop uses for
+                // its `current_function` parameter), so the composite-
+                // key invariant holds across the conduit boundary.
+                self.program.monomorphized_method_call_sites.insert(
+                    (call_site_span, self.current_function),
+                    idx,
+                );
                 Some(idx)
             }
             Err(_) => None,
@@ -3262,6 +3299,12 @@ impl BytecodeCompiler {
         &mut self,
         func_name: &str,
         combined_args: &[Expr],
+        // ADR-006 §2.7.5 V3-S6b conduit: AST span of the parent
+        // `Expr::MethodCall`, threaded from `try_monomorphize_method_call`.
+        // Mirror site of the type-only path's population —
+        // populates `monomorphized_method_call_sites` on the closure-
+        // aware specialization's success branch with the same shape.
+        call_site_span: Span,
     ) -> Option<usize> {
         // Only type-kind generics participate in call-site annotation
         // unification. Const-kind generics (B.3) are bound separately via
@@ -3337,6 +3380,18 @@ impl BytecodeCompiler {
                 if self.current_function == Some(idx) {
                     return None;
                 }
+                // ADR-006 §2.7.5 V3-S6b conduit population (mirror of the
+                // type-only path). Stamps the `(call_site_span,
+                // current_function) → specialized_idx` mapping for the
+                // closure-aware specialization branch. Same composite-key
+                // invariant as the type-only mirror — `current_function`
+                // is the post-monomorphization specialized FunctionId of
+                // the caller, matching the conduit producer's per-fn
+                // loop's `current_function` parameter.
+                self.program.monomorphized_method_call_sites.insert(
+                    (call_site_span, self.current_function),
+                    idx,
+                );
                 Some(idx)
             }
             _ => None,

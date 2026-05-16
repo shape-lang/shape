@@ -118,6 +118,56 @@ pub(super) fn lower_var_decl(builder: &mut MirBuilder, decl: &ast::VariableDecl,
             builder.alloc_local(name.to_string(), type_info)
         };
 
+        // ADR-006 §2.7.5 stamp-at-compile-time — V3-S6e-jit-specialized-
+        // vec-map-aggregate-classify (Phase 3 cluster-0+1 Wave 3, 2026-
+        // 05-16; V3-S6 multi-session chain checkpoint-final).
+        //
+        // For `let mut <name>: Array<C> = []` bindings (where the
+        // annotation resolves to `ConcreteType::Array(elem)`), record the
+        // empty-typed-array element ConcreteType against the binding slot
+        // so the conduit producer at `compiler/helpers.rs::infer_top_
+        // level_concrete_types_from_mir_with_resolvers` can stamp
+        // `concrete_types[slot] = Array(elem)`. Empty array literals
+        // short-circuit at `mir/lowering/helpers.rs::emit_container_
+        // store_if_needed` (line 128-130) — no `StatementKind::ArrayStore`
+        // is emitted, so the conduit producer's ArrayStore walker at
+        // `compiler/helpers.rs:687` has no operand source to infer the
+        // element kind from. Without an explicit binding-slot stamp the
+        // slot's `concrete_types[slot]` stays `Void`, the JIT-MIR v2-
+        // fast-path at `mir_compiler/statements.rs::v2_typed_array_
+        // elem_kind` returns `None`, and the kind-blind Aggregate fall-
+        // back fires per Route A `W11-jit-new-array` SURFACE.
+        //
+        // V3-S6a's `synthesize_empty_array_result_annotation` writes the
+        // `Array<C>` annotation onto the specialized `Vec.map<U>` /
+        // `Vec.filter<U>` body's `let mut result = []` after generic
+        // substitution concretizes the return type. The conduit chain:
+        // V3-S6a annotation → MIR `local_typed_array_element_types` →
+        // conduit producer stamps `concrete_types[result_slot] =
+        // Array(elem)` → JIT-MIR v2-fast-path activates →
+        // `emit_v2_array_aggregate` succeeds → specialized body JIT-
+        // compiles → V3-S6c routing's direct FuncRef call returns
+        // correct raw `*const TypedArray<i64>` bits per V3-S5.
+        let empty_array_elem: Option<shape_value::v2::ConcreteType> =
+            if let (Some(annotation), Some(Expr::Array(items, _))) =
+                (decl.type_annotation.as_ref(), decl.value.as_ref())
+            {
+                if items.is_empty() {
+                    crate::compiler::v2_map_emission::concrete_type_from_annotation(annotation)
+                        .and_then(|ct| match ct {
+                            shape_value::v2::ConcreteType::Array(elem) => Some(*elem),
+                            _ => None,
+                        })
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+        if let Some(elem) = empty_array_elem.clone() {
+            builder.record_local_typed_array_element_type(slot, elem);
+        }
+
         if let Some(init_expr) = &decl.value {
             // ADR-006 §2.7.27 / W17-mutation-writeback: when the initializer
             // is a recognized COW-container ctor (`Set()` / `HashMap()` /
@@ -150,6 +200,34 @@ pub(super) fn lower_var_decl(builder: &mut MirBuilder, decl: &ast::VariableDecl,
                     lower_expr_to_operand(builder, init_expr, true)
                 }
             };
+            // ADR-006 §2.7.5 stamp-at-compile-time — V3-S6e classification
+            // chain (continued from the `empty_array_elem` capture above).
+            // When the initializer was an empty `Array<C>` literal,
+            // `lower_expr_to_operand` returned `Move(Local(temp))` where
+            // `temp` is the scratch slot the empty-Aggregate Assign was
+            // emitted against. Stamp the temp slot's element type so the
+            // conduit producer reaches BOTH the binding slot AND its
+            // source temp — the JIT v2-fast-path at
+            // `mir_compiler/statements.rs:24` consumes
+            // `concrete_types[place]` on the EMPTY-AGGREGATE `Assign(temp,
+            // Aggregate(vec![]))` site (the temp is the destination there;
+            // the binding slot only becomes the destination at the next
+            // `Assign(binding, Use(Move(temp)))` Move stmt).
+            //
+            // Scoped to the exact temp-slot operand shape (`Move|Copy|
+            // MoveExplicit of Place::Local(temp)`) so it does not over-
+            // stamp unrelated temps. This pattern is the canonical
+            // `lower_expr_to_operand` -> `lower_expr_to_temp` output for
+            // non-place expressions.
+            if let Some(elem) = empty_array_elem.clone() {
+                use crate::mir::types::{Place as MirPlace, Operand as MirOperand};
+                if let MirOperand::Move(MirPlace::Local(temp))
+                | MirOperand::Copy(MirPlace::Local(temp))
+                | MirOperand::MoveExplicit(MirPlace::Local(temp)) = &operand
+                {
+                    builder.record_local_typed_array_element_type(*temp, elem);
+                }
+            }
             let rvalue = match decl.ownership {
                 ast::OwnershipModifier::Clone => Rvalue::Clone(operand),
                 _ => Rvalue::Use(operand),

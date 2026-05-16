@@ -114,6 +114,16 @@ impl JITCompiler {
                     HashMap::new(),
                     closure_function_layouts,
                 );
+                // V3-S6c-jit-method-monomorph-routing: thread the V3-S6b
+                // side-table for top-level (`__main__`) code. Caller id is
+                // `None` per the bytecode compiler's convention
+                // (`self.current_function == None` when compiling
+                // top-level statements at
+                // `expressions/function_calls.rs:3278`).
+                mir_compiler.set_monomorph_routing_context(
+                    program.monomorphized_method_call_sites.clone(),
+                    None,
+                );
                 // Bounds-check elision: scan the MIR for trusted index
                 // accesses and install the plan before compile_body. The
                 // analyzer is conservative; an empty plan preserves the
@@ -239,6 +249,13 @@ impl JITCompiler {
                     user_func_refs.clone(),
                     user_func_arities.clone(),
                     closure_function_layouts,
+                );
+                // V3-S6c-jit-method-monomorph-routing: top-level path with
+                // user-funcs visible. Caller id = None per the same
+                // convention as the no-user-funcs path above.
+                mir_compiler.set_monomorph_routing_context(
+                    program.monomorphized_method_call_sites.clone(),
+                    None,
                 );
                 let elision_plan =
                     crate::mir_compiler::bounds_elision::analyze(&mir_data.mir);

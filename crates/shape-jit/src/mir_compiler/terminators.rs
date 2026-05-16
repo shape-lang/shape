@@ -167,6 +167,145 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     }
                 }
 
+                // ── V3-S6c MONOMORPHIZED METHOD-CALL ROUTING ─────────────
+                // PATH α-prime per supervisor 2026-05-15 ratification. If
+                // this Method-call site was specialized at bytecode-compile
+                // time (V3-S6b side-table populated by
+                // `try_monomorphize_method_call` success — both the
+                // type-only and closure-aware mirrors), bypass the
+                // `jit_call_method` trampoline + the `handle_int_map`
+                // ckpt3_surface path entirely. Emit a direct Cranelift
+                // FuncRef call to `user_func_refs[specialized_idx]`,
+                // mirroring the direct-Function-call codegen at lines
+                // ~807-867 below.
+                //
+                // ABI alignment is structurally guaranteed by
+                // `crates/shape-vm/src/compiler/monomorphization/substitution.rs:2247`
+                // (`inline_closure_body_into_specialization` doc-comment):
+                // the specialized function preserves the original
+                // parameter list verbatim — closure params are kept (the
+                // closure pointer sits unused after body inlining); no
+                // capture hoisting (Phase D/E territory). So Method-call
+                // args `[receiver, closure_obj, ...]` map 1:1 to the
+                // specialized function's `(self, closure_param, ...)`
+                // signature.
+                //
+                // ADR-006 §2.7.5 stamp-at-compile-time: the side-table
+                // lookup at JIT codegen is COMPILE TIME (this terminator
+                // pass), NEVER runtime — the routing decision is encoded
+                // into emitted Cranelift IR, not a runtime tag-byte read.
+                //
+                // Bypasses the V3-S6b dual-consumer SIGSEGV class
+                // (`concrete_types[slot] = Array(I64)` activates both
+                // `parametric_method_return_kind_from_receiver` AND
+                // `v2_typed_array_elem_kind` → handle_int_map ckpt3_surface)
+                // because no consume-via-stamp is performed; the routing
+                // is structural at the Call terminator.
+                if let Operand::Constant(MirConstant::Method(_)) = func {
+                    let key = (terminator.span, self.caller_function_id);
+                    if let Some(&specialized_idx) =
+                        self.monomorphized_method_call_sites.get(&key)
+                    {
+                        let func_ref_opt = self
+                            .user_func_refs
+                            .get(&(specialized_idx as u16))
+                            .copied();
+                        if let Some(func_ref) = func_ref_opt {
+                            // Mirror of the direct-Function-call codegen at
+                            // terminators.rs:807-867 below. ABI =
+                            // fn(ctx_ptr, arg0, ..., argN) -> i32 deopt
+                            // signal. Args widened to I64 uniformly per
+                            // R4.2E.
+                            let mut arg_vals = Vec::with_capacity(args.len() + 1);
+                            arg_vals.push(self.ctx_ptr);
+                            for arg in args.iter() {
+                                let val = self.compile_operand(arg)?;
+                                let val_ty = self.builder.func.dfg.value_type(val);
+                                let boxed = if val_ty == types::I64 {
+                                    val
+                                } else if val_ty == types::F64 {
+                                    self.builder.ins().bitcast(
+                                        types::I64,
+                                        MemFlags::new(),
+                                        val,
+                                    )
+                                } else if val_ty == types::I32 {
+                                    self.builder.ins().sextend(types::I64, val)
+                                } else if val_ty == types::I8 {
+                                    self.builder.ins().uextend(types::I64, val)
+                                } else if val_ty == types::I16 {
+                                    self.builder.ins().sextend(types::I64, val)
+                                } else {
+                                    val
+                                };
+                                arg_vals.push(boxed);
+                            }
+
+                            let inst =
+                                self.builder.ins().call(func_ref, &arg_vals);
+                            let signal = self.builder.inst_results(inst)[0];
+
+                            // Deopt: signal < 0 propagates by immediate
+                            // return of the negative signal.
+                            let zero =
+                                self.builder.ins().iconst(types::I32, 0);
+                            let is_error = self.builder.ins().icmp(
+                                IntCC::SignedLessThan,
+                                signal,
+                                zero,
+                            );
+                            let deopt_block = self.builder.create_block();
+                            let continue_block = self.builder.create_block();
+                            self.builder.ins().brif(
+                                is_error,
+                                deopt_block,
+                                &[],
+                                continue_block,
+                                &[],
+                            );
+
+                            self.builder.switch_to_block(deopt_block);
+                            self.builder.seal_block(deopt_block);
+                            self.builder.ins().return_(&[signal]);
+
+                            self.builder.switch_to_block(continue_block);
+                            self.builder.seal_block(continue_block);
+                            let stack_offset =
+                                crate::context::STACK_OFFSET as i32;
+                            let result = self.builder.ins().load(
+                                types::I64,
+                                MemFlags::new(),
+                                self.ctx_ptr,
+                                stack_offset,
+                            );
+
+                            self.release_old_value_if_heap(destination)?;
+                            self.write_place(destination, result)?;
+                            self.reload_referenced_locals();
+
+                            let next_block =
+                                self.block_map.get(next).ok_or_else(|| {
+                                    format!(
+                                        "MirToIR: unknown call continuation \
+                                         block {}",
+                                        next
+                                    )
+                                })?;
+                            self.builder.ins().jump(*next_block, &[]);
+                            return Ok(());
+                        }
+                        // FuncRef miss: side-table had specialized_idx but
+                        // user_func_refs lacks it (declaration race or
+                        // sub_program-rebased index space). Fall through to
+                        // the existing jit_call_method trampoline path
+                        // below — preserves V3-S6b baseline behaviour.
+                    }
+                    // Side-table miss (not a monomorphized site, or this
+                    // caller-function didn't specialize this call). Fall
+                    // through to the existing jit_call_method trampoline
+                    // path below.
+                }
+
                 // ── METHOD CALL PATH ─────────────────────────────────────
                 // Method calls use MirConstant::Method(name). The MIR args
                 // are [receiver, arg0, arg1, ...]. We need to push them to

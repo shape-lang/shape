@@ -1617,6 +1617,35 @@ impl BytecodeCompiler {
             _ => Vec::new(),
         };
 
+        // V3-S6a resolver-extension follow-up: merge method-level type
+        // params (`method map<U>(...)` — the `<U>`) with the extend-block
+        // type params (`extend Vec<T> { ... }` — the `<T>`). The previous
+        // shape silently dropped method-level generics, leaving the
+        // monomorphizer unable to resolve generics like `U` in
+        // `Vec.map<U>(f: (T) => U) -> Vec<U>` and forcing the call site
+        // to the generic-template (un-monomorphized) path. The Smoke 2
+        // regression `[1,2,3,4,5].map(|x|x*2).sum()` surfaced at the
+        // empty-array `let mut result = []` in the un-specialized
+        // Vec.map body.
+        //
+        // Order: extend params first (the receiver-positional generic
+        // `T` is conceptually the outer generic), then method-level
+        // params (`U` is inner / nested). The substitution pass walks
+        // bindings by name, so positional order matters only for the
+        // `mono_key`'s stable ordering — extend-first matches the
+        // user-visible declaration order `Vec<T>.map<U>`.
+        let mut merged_type_params: Vec<shape_ast::ast::TypeParam> = extend_type_params;
+        if let Some(method_tps) = method.type_params.as_ref() {
+            for tp in method_tps {
+                // Skip duplicates (defensive — if a method redeclares a
+                // type param of the extend block, prefer the outer).
+                let name = tp.name();
+                if !merged_type_params.iter().any(|m| m.name() == name) {
+                    merged_type_params.push(tp.clone());
+                }
+            }
+        }
+
         Ok(FunctionDef {
             name: format!("{}.{}", type_str, method.name),
             name_span: Span::DUMMY,
@@ -1625,7 +1654,7 @@ impl BytecodeCompiler {
             params,
             return_type: method.return_type.clone(),
             body,
-            type_params: Some(extend_type_params),
+            type_params: Some(merged_type_params),
             annotations: method.annotations.clone(),
             is_async: method.is_async,
             is_comptime: false,
@@ -1751,6 +1780,19 @@ impl BytecodeCompiler {
                 })
         });
 
+        // V3-S6a resolver-extension follow-up: merge method-level type
+        // params with impl-block type params (mirrors the parallel fix in
+        // `desugar_extend_method`). See that function for rationale.
+        let mut merged_impl_type_params: Vec<shape_ast::ast::TypeParam> = impl_type_params;
+        if let Some(method_tps) = method.type_params.as_ref() {
+            for tp in method_tps {
+                let name = tp.name();
+                if !merged_impl_type_params.iter().any(|m| m.name() == name) {
+                    merged_impl_type_params.push(tp.clone());
+                }
+            }
+        }
+
         Ok(FunctionDef {
             name: fn_name,
             name_span: Span::DUMMY,
@@ -1759,7 +1801,7 @@ impl BytecodeCompiler {
             params,
             return_type,
             body,
-            type_params: Some(impl_type_params),
+            type_params: Some(merged_impl_type_params),
             annotations: method.annotations.clone(),
             is_async: method.is_async,
             is_comptime: false,

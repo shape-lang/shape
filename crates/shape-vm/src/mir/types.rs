@@ -565,6 +565,46 @@ pub struct MirFunction {
     /// forbidden #9 (no fabricated default).
     pub local_struct_type_names:
         std::collections::HashMap<SlotId, String>,
+    /// Per-slot empty-typed-array element ConcreteType for slots produced by
+    /// `let mut <name>: Array<C> = []` lowering (where `C` is a
+    /// `concrete_type_from_annotation`-resolvable element type).
+    ///
+    /// ADR-006 §2.7.5 stamp-at-compile-time — V3-S6e-jit-specialized-vec-
+    /// map-aggregate-classify (Phase 3 cluster-0+1 Wave 3 Stabilize Round 2,
+    /// 2026-05-16; V3-S6 multi-session chain checkpoint-final).
+    ///
+    /// Closes the W11-jit-new-array gap inside monomorphized `Vec.map<U>` /
+    /// `Vec.filter<U>` specialization bodies. V3-S6a's
+    /// `synthesize_empty_array_result_annotation` writes
+    /// `Array<C>` onto the `let mut result = []` var-decl AST node for the
+    /// specialized function; this map captures that annotation at MIR
+    /// lowering so the conduit producer at
+    /// `crates/shape-vm/src/compiler/helpers.rs::infer_top_level_concrete_
+    /// types_from_mir_with_resolvers` can stamp `concrete_types[result_slot]
+    /// = Array(elem)`.
+    ///
+    /// Why MIR-level rather than just bytecode-side: the empty array literal
+    /// at MIR lowering goes through `lower_array_expr` →
+    /// `emit_container_store_if_needed` which short-circuits for
+    /// `ContainerStoreKind::Array` with empty operands (helpers.rs:128-130).
+    /// No `StatementKind::ArrayStore` is emitted, so the
+    /// `helpers.rs:687` ArrayStore walker never fires on empty literals.
+    /// The conduit producer has no other source for the element kind on
+    /// an empty Aggregate slot.
+    ///
+    /// Producer: `mir/lowering/stmt.rs::lower_var_decl` (var-decl with
+    /// annotation `Array<C>` AND value `Expr::Array(items)` with
+    /// `items.is_empty()`).
+    /// Consumer: `compiler/helpers.rs::infer_top_level_concrete_types_from_
+    /// mir_with_resolvers` (new pass before slot-move propagation).
+    ///
+    /// `None` (no entry) for slots that aren't empty-typed-array-literal
+    /// initializations — non-empty array literals flow through the existing
+    /// `ArrayStore` operand-kind inference path; absent annotation means
+    /// no proven element kind and the JIT surfaces-and-stops per §2.7.7 #9
+    /// forbidden Bool-default.
+    pub local_typed_array_element_types:
+        std::collections::HashMap<SlotId, shape_value::v2::ConcreteType>,
 }
 
 /// Type information for a local variable, used for Copy/Clone inference.

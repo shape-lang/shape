@@ -323,6 +323,23 @@ pub fn substitute_function_def(
         .map(|s| substitute_statement(s, subs))
         .collect();
 
+    // V3-S6a resolver-extension follow-up: empty-array terminal-result
+    // annotation synthesis. The generic source `let mut result = []` carries
+    // no annotation because `Array<U>` can't be spelled until U binds. After
+    // substitution rewrites the function's return type to a concrete
+    // `Array<C>`, the empty literal still lacks the kind hint the typed-
+    // array emission path needs (`pending_variable_typed_array_kind`).
+    //
+    // Synthesize the annotation for the shape that matches the
+    // `Vec.map<U>` / `Vec.filter` body pattern: terminal expression is an
+    // identifier referring to a `let mut <name> = []` declared earlier
+    // with no annotation, and the function returns `Array<C>` for some
+    // concrete C. This is structurally narrow (it only fires on the
+    // exact shape produced by collect-into-array stdlib bodies) and
+    // architecturally honest: monomorphization synthesizes annotations
+    // the generic source couldn't express.
+    synthesize_empty_array_result_annotation(&mut cloned);
+
     // Rename so the specialization cache can key on the new name.
     cloned.name = format!("{}::{}", def.name, mono_key_from_subs(subs));
 
@@ -331,6 +348,86 @@ pub fn substitute_function_def(
     cloned.type_params = None;
 
     cloned
+}
+
+/// V3-S6a resolver-extension follow-up: after monomorphization substitution
+/// concretizes the function's return type, walk the body for the canonical
+/// "collect-into-array" shape and annotate the empty-array initializer so
+/// the bytecode compiler's typed-array emission path picks up the right
+/// element kind via `pending_variable_typed_array_kind`.
+///
+/// Scope: the function's return type is `Array<C>` for some concrete C
+/// (post-substitution, no remaining type-parameter references), AND the
+/// body's terminal expression is `Identifier(name)`, AND there exists a
+/// `Statement::VariableDecl` with `pattern == Identifier(name)`,
+/// `type_annotation == None`, and `value == Some(Expr::Array(<empty>))`.
+/// In that case, write `Array<C>` onto that var-decl's annotation.
+///
+/// Out of scope (intentionally):
+/// - Non-Array return types (no typed-array kind to propagate).
+/// - Bodies whose terminal expression is not a bare identifier (a `Block`
+///   ending in `result`, an explicit `return result`, etc — those land in
+///   different ckpts if they regress, kept narrow here per cascade-ceiling
+///   discipline).
+/// - Var-decls whose `type_annotation` is already set (the user wrote it
+///   — trust it).
+fn synthesize_empty_array_result_annotation(def: &mut FunctionDef) {
+    // Step 1: read the concrete element type out of the return annotation,
+    // if it is `Array<C>`. Bail otherwise.
+    let elem_annotation: TypeAnnotation = match def.return_type.as_ref() {
+        Some(TypeAnnotation::Generic { name, args }) if name.as_str() == "Array" && args.len() == 1 => {
+            args[0].clone()
+        }
+        Some(TypeAnnotation::Generic { name, args }) if name.as_str() == "Vec" && args.len() == 1 => {
+            args[0].clone()
+        }
+        Some(TypeAnnotation::Array(inner)) => (**inner).clone(),
+        _ => return,
+    };
+
+    // Step 2: find the body's terminal expression. The Vec.map / Vec.filter
+    // pattern leaves `result` as the last `Statement::Expression`. Bail if
+    // the body's last statement isn't an `Expression(Identifier)`.
+    let Some(Statement::Expression(Expr::Identifier(terminal_name, _), _)) = def.body.last() else {
+        return;
+    };
+    let terminal_name = terminal_name.clone();
+
+    // Step 3: find the matching `let mut <name> = []` var-decl earlier in
+    // the body. Mutate in place when found.
+    for stmt in def.body.iter_mut() {
+        let Statement::VariableDecl(decl, _) = stmt else {
+            continue;
+        };
+        // Only rewrite the var-decl whose identifier matches the terminal.
+        let Some(decl_name) = decl.pattern.as_identifier() else {
+            continue;
+        };
+        if decl_name != terminal_name {
+            continue;
+        }
+        // Don't override a user-written annotation.
+        if decl.type_annotation.is_some() {
+            continue;
+        }
+        // Initializer must be an empty array literal.
+        let is_empty_array = matches!(
+            decl.value.as_ref(),
+            Some(Expr::Array(items, _)) if items.is_empty()
+        );
+        if !is_empty_array {
+            continue;
+        }
+        // Synthesize `Array<C>` annotation. The bytecode compiler's
+        // `pending_variable_typed_array_kind` path reads this annotation
+        // and routes the empty literal through the typed-array opcode
+        // selection in `compile_expr_array`.
+        decl.type_annotation = Some(TypeAnnotation::Generic {
+            name: TypePath::simple("Array"),
+            args: vec![elem_annotation.clone()],
+        });
+        return;
+    }
 }
 
 /// Const-generic-aware variant of [`substitute_function_def`].
@@ -401,6 +498,11 @@ pub fn substitute_function_def_with_consts(
             substitute_const_in_statement(&s, const_subs)
         })
         .collect();
+
+    // V3-S6a resolver-extension follow-up: lift the empty-array terminal-
+    // result annotation synthesis here too (same shape as in the non-const
+    // path). See `synthesize_empty_array_result_annotation`.
+    synthesize_empty_array_result_annotation(&mut cloned);
 
     // Use the caller-supplied mono_key directly so this stays in lock-step
     // with `build_mono_key_with_consts`.
