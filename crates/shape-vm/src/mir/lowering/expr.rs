@@ -1035,6 +1035,37 @@ fn lower_for_expr(
     } else {
         // Generic iterator path (non-range iterators).
         // This is a placeholder — full iterator protocol not yet implemented in MIR.
+        //
+        // cluster-2 V3-S6f empirical-verification trace (2026-05-16).
+        // Narrow SHAPE_JIT_DEBUG site at the architectural-source root
+        // cause of the Smoke 2 JIT runtime-execution gap: the generic
+        // (non-Range) iterator branch of MIR for-expr lowering emits a
+        // STUB iterator state machine — evaluates the iterable once
+        // into `iter_slot`, branches on `SwitchBool(Copy(iter_slot))`
+        // (truthy ≡ non-null pointer for v2-raw `TypedArray<i64>`
+        // receivers per ADR-006 §2.3), binds the pattern slot to
+        // `MirConstant::None`, and unconditionally `Goto(header)`s.
+        // No advance, no termination condition, no `IterNext`/`IterDone`
+        // (the bytecode-VM-side `compile_for_loop` at
+        // `crates/shape-vm/src/compiler/loops.rs:298-516` emits a real
+        // iterator state machine with `IterDone`/`IterNext` opcodes
+        // and an index counter — that path is the live VM-side
+        // execution path). For any function whose body the JIT MIR
+        // pipeline lowers and which contains a non-Range `for x in
+        // iter` loop, JIT execution loops forever. Matches existing
+        // SHAPE_JIT_DEBUG infrastructure pattern (e.g.
+        // `terminators.rs:621/712`, `closure.rs:261/269/438`).
+        if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
+            eprintln!(
+                "[mir-for-expr-generic-stub] lower_for_expr generic-\
+                 iterator STUB emitted: iter_slot SwitchBool, pattern \
+                 slot assigned MirConstant::None, body block, \
+                 unconditional Goto(header) — no iterator advance, no \
+                 termination condition. iter_kind={:?} span={:?}",
+                std::any::type_name_of_val(for_expr.iterable.as_ref()),
+                span,
+            );
+        }
         builder.push_scope();
 
         let iter_slot = lower_expr_to_temp(builder, &for_expr.iterable);
