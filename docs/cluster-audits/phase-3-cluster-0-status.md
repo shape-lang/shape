@@ -8255,3 +8255,75 @@ Per supervisor 2026-05-16: 3.5-5 sessions to v1 remaining (Round 4 + cluster-2 c
 ---
 
 *Next session: Round 4 parallel dispatch (3 candidates with territory non-overlap check) → respective merges + status doc subsection → cluster-2 close attempt → Phase 4 (trait Add/AddAssign for user types) → v1 close attempt → cluster-1.5 Q25.C TraitObject rebuild (post-v1 or absorbed at user reauthorization).*
+
+---
+
+## Wave 3 Round 11 cluster-2 close — ALL §A-§I CRITERION GATES MET; tag authorization pending (2026-05-16)
+
+Cluster-2 closure complete at canonical HEAD `938929de`. Round 4 sequenced merge: cw-char-literal-mir (Char MIR-lowering fix) → cw-shape-test-residuals-triage (§D 10 classes structured-defer) → cw-D-fam3-collection (§E Family 3 Collection 6 jit_print arms; take-both AGENTS.md). All §A-§I cluster-2-close-criterion gates assessed MET per supervisor 2026-05-16 ratification.
+
+### Round 4 sub-cluster close summary
+
+| Wave | Close commit | Diff | Disposition |
+|---|---|---|---|
+| cw-char-literal-mir | `98b5c15d` | +62/-1 (7 files; MirConstant::Char variant + 5 consumer arms + AGENTS.md) | Char fixture VM=A/JIT=A (closes cw-D-fam12 instance 57); Design Option A no ADR amendment needed |
+| cw-shape-test-residuals-triage | `0acc3fad` | +210/-0 (2 files; 207-line triage deliverable + AGENTS.md) | 10/10 classes structured-defer (1+10→cluster-1.5; 5+6+8→V3-S5 cluster-0; 2+3+4+6+7+8+9→cluster-3+); 4 new imprecisions surfaced; inventory §D.1 errors corrected (rows 4/5/10 mis-categorizations) |
+| cw-D-fam3-collection | `a6d4b042` | +721/-3 (7 files; 6 jit_print FFI bodies + 6 routing arms + ffi_symbols + ffi_refs + ffi_builder + ADR §2.7.5.B Family 3 extension + AGENTS.md) | 3/6 production-fixture MATCH (HashSet/Deque/PriorityQueue); 6/6 FFI bodies verified via unit tests; HashMap + Range + Iterator upstream kind-source/W11 gaps tracked Round 5+; Iterator clarified as Collection family |
+
+### Cluster-2 close-criterion gates assessment (ALL MET per supervisor 2026-05-16)
+
+| § | Inventory criterion | Status |
+|---|---|---|
+| §A | V3-S6f Smoke 2 JIT RESOLVED | ✓ (closure-wave-1 cc5ceb0e Round 1) |
+| §B | 8/8 user-fn-class coverage matrix complete | ✓ (Round 1 closure-wave-1 6 classes + Round 2 cw-B Class A + Round 3 cw-IB Class B + Round 3 cw-IC Class C) |
+| §C | hashmap-value-v-arm RESOLVED | ✓ (cw-C 3db69306 Round 1; HashMap V-arm + v2_group_by body) |
+| §D | 10 shape-test failure classes per-class disposition | ✓ (cw-shape-test-residuals-triage 0acc3fad Round 4; all 10 structured-defer with cluster-anchor cites) |
+| §E | per-HeapKind kinded jit_print coverage | ✓ (13/35 wired: Option/Result/TypedObject baseline + Char/Mutex/Atomic/Lazy/Channel cw-D-fam12 Round 3 + String + HashMap/HashSet/Deque/PriorityQueue/Range/Iterator cw-D-fam3 Round 4; 22 UNCOVERED structured-defer to Round 5+ / cluster-3+ per inventory §E.5 partition shape per supervisor authorization — print-formatting fidelity per family, NOT v1 blocker) |
+| §F | compile-time-boxed string-constant leak | ✓ (cw-E audit-only Round 1 + cw-E-fix dedup Round 2; full elimination Option B deferred cluster-1.5) |
+| §G | W12-collection-constructor-mir-lowering | ✓ (audit-CLOSED at inventory; ALL 8 named constructors COVERED at HEAD; no closure-wave dispatch needed) |
+| §H | Cluster-2 wave partition + tracing-crate migration | ✓ (cw-F Round 1 tracing migration + ADR §2.7.5 cross-crate amendment; remaining wave-D Families 4-10 cluster-3+ per inventory §H.2) |
+| §I | Q25.C TraitObject absorb-vs-separate | ✓ (PRESERVE cluster-1.5 separation per Surface A (c) split; supervisor RATIFIED 2026-05-16) |
+| Char-literal MIR | (Round 3 cw-D-fam12 surface; Round 4 fold) | ✓ (cw-char-literal-mir 98b5c15d Round 4) |
+| UAF correctness (string-const-in-loop) | (Round 1 cw-E surface; Round 2 follow-up) | ✓ (cluster-2-jit-string-const-loop-retain a8a3f50d Round 2; prog4 JIT 100x "loop" identical to VM) |
+| Smoke matrix 4/4 VM == JIT preserved | (load-bearing acceptance) | ✓ at canonical 938929de (s1 4950/4950; s2 30/30; s3 x/x; s4 2/2) |
+
+### V3-S6f hypothesis space FULLY RESOLVED (cluster-2 canonical fixture per β2 disposition 2026-05-16)
+
+- (a) For-loop iterator state-machine — CONFIRMED + FIXED at Round 1 closure-wave-1 (lower_for_expr per-iterable monomorphic state machine via existing MIR vocabulary)
+- (b) Closure-call indirect-call inside inlined specialization — PARTIAL latent + FIXED at Round 2 closure-wave-2 (Expr::For one-layer-outer gap in inline_closure_calls_in_expr; build_inlined_closure_block lift trailing Statement::Return)
+- (c) Receiver-self slot kind threading — REFUTED at Round 1 empirical-verification (V3-S6c routing + V3-S6e stamping remain correct)
+
+### Cluster-2 trajectory summary
+
+- **6 sub-cluster dispatches** total: 1 empirical-verification + 1 inventory audit-day + 1 closure-wave-1 + 4 closure-waves at Rounds 1-4 (cw-E + cw-F + cw-2 + cw-C in Round 1; cw-E-fix + cw-2 + cw-C cleanup in Round 2; cw-IB + cw-IC + cw-D-fam12 in Round 3; cw-char-literal-mir + cw-shape-test-residuals-triage + cw-D-fam3 in Round 4)
+- Canonical HEAD progression: bb5b2109 (Round 0 cluster-0+1 close) → cc5ceb0e (Round 1 closure-wave-1 V3-S6f fix) → 71007603 (inventory) → 553ac465 (Round 2) → 2a12929f (Round 2 close subsection) → 3e6cc39d (Round 3) → eca52df7 (Round 3 close subsection) → 938929de (Round 4 cluster-2 close)
+- **Cumulative discipline-pattern stats:** 76 imprecision instances across cluster-2 trajectory (instances 31-76; 46 new beyond cluster-0+1's 30); 0 bad-code merges into canonical preserved; 11 forbidden-pattern axes refused per dispatch + close report; 5 ADR amendments landed (Q25.B HashMap-row + §2.7.5 cross-crate tracing + §2.7.5.B per-HeapKind kinded jit_print + §2.7.5.B Family 3 extension); 4 successful multi-session-chains preserved from cluster-0+1 (D4 + Round 3b + V3-S5 + V3-S6)
+- **Reading 3 confirmed:** discipline-machinery cadence-tightening binding landed 2026-05-16 (max ~100 lines/relay; surfacings = facts + one ask)
+- **Reading 4 operational:** architectural-prediction-subclass-recovery pattern in-scope-recovery operational across 8+ cluster-2 sub-clusters (instances 31, 36, 37, 52, 56, 60, 61, 62-70, 71, 72)
+- **Reading 5 candidate:** parallel-sub-agent imprecision-numbering collision reconciliation via team-lead merge-order renumbering at status doc subsection (operational across Rounds 1-4)
+- **Reading 6 candidate:** team-lead territory-misdispatch class (instance 55 cw-B Round 2; bind sub-agents to empirical-verification-first for un-mapped territories)
+
+### Imprecision instance log (Round 4 cumulative 70 → 76)
+
+| # | Source | Shape |
+|---|---|---|
+| 71 | sub-agent execution (cw-char-literal-mir) | Companion gap at monomorphization/type_resolution.rs:1482 + concrete_conv.rs:280 (Literal::Char → ConcreteType::I8 not ConcreteType::Char); out-of-territory; cluster-3+ defer |
+| 72 | sub-agent execution (cw-D-fam3) | HashMap chained method-call return-kind upstream stamping gap (FFI body verified correct); same architectural-prediction-subclass family as cw-D-fam12 instance 57 Char |
+| 73 | sub-agent execution (cw-shape-test-residuals-triage) | NEW typed_object_property_assignment smoke test fails at HEAD with Q14 capture-kind drift on shape `let mut a = {x:10}; a.y = 2`; cluster-3+ defer |
+| 74 | audit (cw-shape-test-residuals-triage finding) | inventory §D.1 row 4 SMALL estimate empirically incorrect (Class 4 intersects 6(f)+8+9(a)) |
+| 75 | audit (cw-shape-test-residuals-triage finding) | inventory §D.1 row 5 mis-categorized Class 5 as cluster-2 (actually V3-S5 cluster-0 per ckpt-6 SURFACE) |
+| 76 | audit (cw-shape-test-residuals-triage finding) | inventory §D.1 row 10 fold-target wrong (residual SIGSEGV is Class 1 v2-raw-heap NOT cw-C V-arm) |
+
+Cumulative breakdown: 11 supervisor / 17 audit (+74, +75, +76) / 7 team-lead-prompt / 10 agent-execution-report (+71, +72, +73) / 31 candidate — total 76. All caught pre-merge. 0 bad-code merges into canonical preserved across cluster-0+1+cluster-2 trajectory.
+
+### Tag authorization request
+
+Tag candidate: `phase-3-cluster-2-close` on canonical HEAD `938929de`. Supervisor ratified cluster-2-close-criterion gates MET 2026-05-16. **User authorization pending per Decision authority pattern (tags = user authorizes after supervisor ratifies).**
+
+### Trajectory awareness (carry forward; not for re-surfacing)
+
+Per supervisor 2026-05-16: 2-3.5 sessions to v1 remaining (cluster-1.5 Q25.C TraitObject rebuild 0.5-1 + Phase 4 trait Add/AddAssign for user types 1-2 + v1 close attempt 0.5).
+
+---
+
+*Next session: user authorizes `phase-3-cluster-2-close` tag on canonical 938929de → cluster-1.5 Q25.C TraitObject rebuild dispatch (per Surface A (c) split user disposition; VTable + Self-arg runtime check + generic-method type-info + ETO-001/002 errors) → Phase 4 (trait Add/AddAssign for user types) → v1 close attempt.*
