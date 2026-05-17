@@ -102,13 +102,17 @@ fn test_ode_integrators() {
 }
 
 #[test]
-#[ignore = "v2 raw-ptr aliasing class (path-c2/v2-c-alias): SIGSEGV at VM Drop \
-            via 'free(): double free detected in tcache 2'. Hot loop in \
-            rk4_system pushes records into a results array while calling a \
-            closure that returns a fresh `[f64, f64]`; the resulting refcount \
-            imbalance only manifests when stack/locals are torn down. \
-            Tracked alongside the simulation/find_collisions failures — needs \
-            a dedicated v2-raw-heap-audit workstream (see worktree report)."]
+#[ignore = "V3-S5 ckpt-5/ckpt-6 SURFACE class: op_new_array trips the \
+            consumer-cascade tier 3 SURFACE-and-stop at object_creation.rs:353 \
+            (per V3-S5 ckpt-1..ckpt-5 TypedArrayData enum + Buf<T> wrapper + \
+            outer HeapValue::TypedArray arm + HeapKind::TypedArray=8 ordinal \
+            deletion per W12 audit §3.5+§3.6 + ADR-006 §2.7.24 Q25.A \
+            SUPERSEDED). Construction-site rebuild lands at V3-S5 ckpt-6 \
+            STRICT close per cluster-0 territory. NOT a v2-raw-heap aliasing \
+            class at HEAD (the original ignore reason cited a pre-V3-S5 \
+            failure shape; cluster-1.5-v2-raw-heap-audit re-classified \
+            2026-05-16 per docs/cluster-audits/cluster-1.5-v2-raw-heap-audit.md \
+            §1.A)."]
 fn test_harmonic_oscillator_rk4_system() {
     init_runtime();
 
@@ -177,11 +181,15 @@ fn test_rk45_uses_fewer_steps_on_smooth_ode() {
 }
 
 #[test]
-#[ignore = "v2 raw-ptr aliasing class (path-c2/v2-c-alias): SIGSEGV at VM Drop. \
-            Same pattern as test_harmonic_oscillator_rk4_system — adaptive \
-            integrator with a closure that returns a fresh `[f64, f64]` from \
-            inside a hot loop that also pushes records into the results \
-            array. Needs v2-raw-heap-audit workstream."]
+#[ignore = "V3-S5 ckpt-5/ckpt-6 SURFACE class: op_new_array trips the \
+            consumer-cascade tier 3 SURFACE-and-stop at object_creation.rs:353 \
+            (same V3-S5 ckpt-1..ckpt-5 deletion lineage as \
+            test_harmonic_oscillator_rk4_system). Construction-site rebuild \
+            lands at V3-S5 ckpt-6 STRICT close per cluster-0 territory. NOT \
+            a v2-raw-heap aliasing class at HEAD (the original ignore reason \
+            cited a pre-V3-S5 failure shape; cluster-1.5-v2-raw-heap-audit \
+            re-classified 2026-05-16 per docs/cluster-audits/cluster-1.5-v2-raw-heap-audit.md \
+            §1.A)."]
 fn test_rk45_system_harmonic_oscillator() {
     // Harmonic oscillator: y'' + y = 0, y(0) = 1, y'(0) = 0
     // Exact: y(t) = cos(t), y(2π) ≈ 1.0
@@ -449,13 +457,18 @@ fn test_aabb_centered_and_union() {
 }
 
 #[test]
-#[ignore = "v2 raw-ptr aliasing class (path-c2/v2-c-alias): heap corruption \
-            manifests as 'Cannot get property string on int (line 33)' — the \
-            AABB record value `a` gets read with a corrupted tag mid-loop. \
-            Pattern matches c-stdlib-d's repro: \
-            `for i in range(0, n) { let x = arr[i]; fn_call(x, ...) }` over \
-            an array of TypedObject records. Needs v2-raw-heap-audit \
-            workstream."]
+#[ignore = "V3-S5 ckpt-5/ckpt-6 SURFACE class: op_new_object + arr[i] for \
+            Array<TypedObject> trip the consumer-cascade tier 3 SURFACE-and- \
+            stop at object_creation.rs:228 + property_access.rs (per V3-S5 \
+            ckpt-1..ckpt-5 TypedArrayData enum + Buf<T> wrapper + outer \
+            HeapValue::TypedArray arm + HeapKind::TypedArray=8 ordinal \
+            deletion per W12 audit §3.5+§3.6 + ADR-006 §2.7.24 Q25.A \
+            SUPERSEDED). Construction-site rebuild + arr[i] \
+            RefTarget::TypedIndex rebuild lands at V3-S5 ckpt-6 STRICT close \
+            per cluster-0 territory. NOT a v2-raw-heap aliasing class at \
+            HEAD (the original ignore reason cited a pre-V3-S5 failure \
+            shape; cluster-1.5-v2-raw-heap-audit re-classified 2026-05-16 \
+            per docs/cluster-audits/cluster-1.5-v2-raw-heap-audit.md §1.A)."]
 fn test_find_collisions_brute() {
     init_runtime();
 
@@ -477,10 +490,15 @@ fn test_find_collisions_brute() {
 }
 
 #[test]
-#[ignore = "v2 raw-ptr aliasing class (path-c2/v2-c-alias): heap corruption \
-            in the same family as test_find_collisions_brute — both \
-            inner-loop record-iteration variants trip the same alias-window. \
-            Needs v2-raw-heap-audit workstream."]
+#[ignore = "V3-S5 ckpt-5/ckpt-6 SURFACE class: op_new_object + arr[i] for \
+            Array<TypedObject> trip the same consumer-cascade tier 3 \
+            SURFACE-and-stop as test_find_collisions_brute (per V3-S5 ckpt-1..ckpt-5 \
+            deletion lineage). Construction-site rebuild + arr[i] \
+            RefTarget::TypedIndex rebuild lands at V3-S5 ckpt-6 STRICT close \
+            per cluster-0 territory. NOT a v2-raw-heap aliasing class at \
+            HEAD (the original ignore reason cited a pre-V3-S5 failure \
+            shape; cluster-1.5-v2-raw-heap-audit re-classified 2026-05-16 \
+            per docs/cluster-audits/cluster-1.5-v2-raw-heap-audit.md §1.A)."]
 fn test_find_collisions_sweep() {
     init_runtime();
 
