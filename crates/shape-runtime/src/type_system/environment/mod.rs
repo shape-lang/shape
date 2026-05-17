@@ -15,9 +15,7 @@ pub use registry::{RecordField, RecordSchema, TraitImplEntry, TypeAliasEntry};
 use super::*;
 use evolution::EvolutionRegistry;
 use registry::TypeRegistry;
-use shape_ast::ast::{
-    EnumDef, Expr, InterfaceDef, ObjectTypeField, Span, TraitDef, TypeAnnotation,
-};
+use shape_ast::ast::{EnumDef, Expr, ObjectTypeField, Span, TraitDef, TypeAnnotation};
 use std::collections::{HashMap, HashSet};
 
 /// A field that was hoisted from a property assignment (e.g., `a.b = 2` hoists field `b` to variable `a`)
@@ -215,14 +213,14 @@ impl TypeEnvironment {
     /// Built-in types (string, number, int, decimal, bool, array, hashmap, Table, DataTable)
     /// get automatic Content implementations so they can be used in c-strings and content dispatch.
     fn register_content_trait(&mut self) {
-        use shape_ast::ast::{FunctionParam, InterfaceMember, TraitMember};
+        use shape_ast::ast::{FunctionParam, TraitMemberSignature, TraitMember};
 
         let content_trait = TraitDef {
             name: "Content".to_string(),
             doc_comment: None,
             type_params: None,
             super_traits: vec![],
-            members: vec![TraitMember::Required(InterfaceMember::Method {
+            members: vec![TraitMember::Required(TraitMemberSignature::Method {
                 name: "render".to_string(),
                 optional: false,
                 params: vec![FunctionParam {
@@ -271,7 +269,7 @@ impl TypeEnvironment {
                 trait_bounds: vec![],
             }]),
             super_traits: vec![],
-            members: vec![TraitMember::Required(InterfaceMember::Method {
+            members: vec![TraitMember::Required(TraitMemberSignature::Method {
                 name: "render".to_string(),
                 optional: false,
                 params: vec![
@@ -300,14 +298,14 @@ impl TypeEnvironment {
     /// Types implementing Drop have their `drop(self)` method called automatically
     /// when a binding goes out of scope.
     fn register_drop_trait(&mut self) {
-        use shape_ast::ast::{FunctionParam, InterfaceMember, TraitMember};
+        use shape_ast::ast::{FunctionParam, TraitMemberSignature, TraitMember};
 
         let drop_trait = TraitDef {
             name: "Drop".to_string(),
             doc_comment: None,
             type_params: None,
             super_traits: vec![],
-            members: vec![TraitMember::Required(InterfaceMember::Method {
+            members: vec![TraitMember::Required(TraitMemberSignature::Method {
                 name: "drop".to_string(),
                 optional: false,
                 params: vec![FunctionParam {
@@ -337,7 +335,7 @@ impl TypeEnvironment {
     /// Concrete conversions are provided by trait implementations (for example
     /// in `std::core::into`) and may be named selectors.
     fn register_into_trait(&mut self) {
-        use shape_ast::ast::{InterfaceMember, TraitMember, TypeParam};
+        use shape_ast::ast::{TraitMemberSignature, TraitMember, TypeParam};
 
         let into_trait = TraitDef {
             name: "Into".to_string(),
@@ -350,7 +348,7 @@ impl TypeEnvironment {
                 trait_bounds: vec![],
             }]),
             super_traits: vec![],
-            members: vec![TraitMember::Required(InterfaceMember::Method {
+            members: vec![TraitMember::Required(TraitMemberSignature::Method {
                 name: "into".to_string(),
                 optional: false,
                 params: vec![],
@@ -369,7 +367,7 @@ impl TypeEnvironment {
     /// Concrete conversions are provided by trait implementations (for example
     /// in `std::core::try_into`) and may be named selectors.
     fn register_try_into_trait(&mut self) {
-        use shape_ast::ast::{InterfaceMember, TraitMember, TypeParam};
+        use shape_ast::ast::{TraitMemberSignature, TraitMember, TypeParam};
 
         let try_into_trait = TraitDef {
             name: "TryInto".to_string(),
@@ -382,7 +380,7 @@ impl TypeEnvironment {
                 trait_bounds: vec![],
             }]),
             super_traits: vec![],
-            members: vec![TraitMember::Required(InterfaceMember::Method {
+            members: vec![TraitMember::Required(TraitMemberSignature::Method {
                 name: "tryInto".to_string(),
                 optional: false,
                 params: vec![],
@@ -407,7 +405,7 @@ impl TypeEnvironment {
     /// Types implementing Iterable have an `iter()` method that returns an `Iterator<T>`.
     /// Built-in impls: Array, String, Range, HashMap, DataTable.
     fn register_iterable_trait(&mut self) {
-        use shape_ast::ast::{FunctionParam, InterfaceMember, TraitMember, TypeParam};
+        use shape_ast::ast::{FunctionParam, TraitMemberSignature, TraitMember, TypeParam};
 
         let iterable_trait = TraitDef {
             name: "Iterable".to_string(),
@@ -420,7 +418,7 @@ impl TypeEnvironment {
                 trait_bounds: vec![],
             }]),
             super_traits: vec![],
-            members: vec![TraitMember::Required(InterfaceMember::Method {
+            members: vec![TraitMember::Required(TraitMemberSignature::Method {
                 name: "iter".to_string(),
                 optional: false,
                 params: vec![FunctionParam {
@@ -464,7 +462,7 @@ impl TypeEnvironment {
     /// Unary:  Neg(neg) — `fn neg(self) -> Self`
     /// Comparison: Eq(eq) — `fn eq(self, other) -> bool`, Ord(cmp) — `fn cmp(self, other) -> int`
     fn register_operator_traits(&mut self) {
-        use shape_ast::ast::{FunctionParam, InterfaceMember, TraitMember};
+        use shape_ast::ast::{FunctionParam, TraitMemberSignature, TraitMember};
 
         let self_param = FunctionParam {
             name: Some("self".to_string()),
@@ -489,7 +487,7 @@ impl TypeEnvironment {
                 doc_comment: None,
                 type_params: None,
                 super_traits: vec![],
-                members: vec![TraitMember::Required(InterfaceMember::Method {
+                members: vec![TraitMember::Required(TraitMemberSignature::Method {
                     name: method_name.to_string(),
                     optional: false,
                     params: vec![self_param.clone(), other_param.clone()],
@@ -509,7 +507,7 @@ impl TypeEnvironment {
             doc_comment: None,
             type_params: None,
             super_traits: vec![],
-            members: vec![TraitMember::Required(InterfaceMember::Method {
+            members: vec![TraitMember::Required(TraitMemberSignature::Method {
                 name: "neg".to_string(),
                 optional: false,
                 params: vec![self_param.clone()],
@@ -528,7 +526,7 @@ impl TypeEnvironment {
             doc_comment: None,
             type_params: None,
             super_traits: vec![],
-            members: vec![TraitMember::Required(InterfaceMember::Method {
+            members: vec![TraitMember::Required(TraitMemberSignature::Method {
                 name: "eq".to_string(),
                 optional: false,
                 params: vec![self_param.clone(), other_param.clone()],
@@ -547,7 +545,7 @@ impl TypeEnvironment {
             doc_comment: None,
             type_params: None,
             super_traits: vec![],
-            members: vec![TraitMember::Required(InterfaceMember::Method {
+            members: vec![TraitMember::Required(TraitMemberSignature::Method {
                 name: "cmp".to_string(),
                 optional: false,
                 params: vec![self_param, other_param],
@@ -847,16 +845,6 @@ impl TypeEnvironment {
     /// Get the meta parameter overrides for a type alias
     pub fn get_type_alias_meta_overrides(&self, name: &str) -> Option<&HashMap<String, Expr>> {
         self.type_registry.get_type_alias_meta_overrides(name)
-    }
-
-    /// Define an interface
-    pub fn define_interface(&mut self, interface: &InterfaceDef) {
-        self.type_registry.define_interface(interface);
-    }
-
-    /// Look up an interface
-    pub fn lookup_interface(&self, name: &str) -> Option<&InterfaceDef> {
-        self.type_registry.lookup_interface(name)
     }
 
     // =========================================================================
@@ -1464,7 +1452,7 @@ mod tests {
 
     #[test]
     fn test_trait_define_and_lookup() {
-        use shape_ast::ast::{InterfaceMember, TraitMember};
+        use shape_ast::ast::{TraitMemberSignature, TraitMember};
 
         let mut env = TypeEnvironment::new();
 
@@ -1474,7 +1462,7 @@ mod tests {
             type_params: None,
             super_traits: vec![],
             members: vec![
-                TraitMember::Required(InterfaceMember::Method {
+                TraitMember::Required(TraitMemberSignature::Method {
                     name: "filter".to_string(),
                     optional: false,
                     params: vec![],
@@ -1483,7 +1471,7 @@ mod tests {
                     span: Span::DUMMY,
                     doc_comment: None,
                 }),
-                TraitMember::Required(InterfaceMember::Method {
+                TraitMember::Required(TraitMemberSignature::Method {
                     name: "execute".to_string(),
                     optional: false,
                     params: vec![],
@@ -1508,7 +1496,7 @@ mod tests {
 
     #[test]
     fn test_trait_impl_registration() {
-        use shape_ast::ast::{InterfaceMember, TraitMember};
+        use shape_ast::ast::{TraitMemberSignature, TraitMember};
 
         let mut env = TypeEnvironment::new();
 
@@ -1519,7 +1507,7 @@ mod tests {
             type_params: None,
             super_traits: vec![],
             members: vec![
-                TraitMember::Required(InterfaceMember::Method {
+                TraitMember::Required(TraitMemberSignature::Method {
                     name: "filter".to_string(),
                     optional: false,
                     params: vec![],
@@ -1528,7 +1516,7 @@ mod tests {
                     span: Span::DUMMY,
                     doc_comment: None,
                 }),
-                TraitMember::Required(InterfaceMember::Method {
+                TraitMember::Required(TraitMemberSignature::Method {
                     name: "execute".to_string(),
                     optional: false,
                     params: vec![],
@@ -1555,7 +1543,7 @@ mod tests {
 
     #[test]
     fn test_trait_impl_missing_method() {
-        use shape_ast::ast::{InterfaceMember, TraitMember};
+        use shape_ast::ast::{TraitMemberSignature, TraitMember};
 
         let mut env = TypeEnvironment::new();
 
@@ -1565,7 +1553,7 @@ mod tests {
             type_params: None,
             super_traits: vec![],
             members: vec![
-                TraitMember::Required(InterfaceMember::Method {
+                TraitMember::Required(TraitMemberSignature::Method {
                     name: "filter".to_string(),
                     optional: false,
                     params: vec![],
@@ -1574,7 +1562,7 @@ mod tests {
                     span: Span::DUMMY,
                     doc_comment: None,
                 }),
-                TraitMember::Required(InterfaceMember::Method {
+                TraitMember::Required(TraitMemberSignature::Method {
                     name: "execute".to_string(),
                     optional: false,
                     params: vec![],
@@ -1663,7 +1651,7 @@ mod tests {
         // Verify the required method is named "drop"
         match &trait_def.members[0] {
             shape_ast::ast::TraitMember::Required(member) => match member {
-                shape_ast::ast::InterfaceMember::Method { name, .. } => {
+                shape_ast::ast::TraitMemberSignature::Method { name, .. } => {
                     assert_eq!(name, "drop");
                 }
                 other => panic!("expected Method member, got {:?}", other),
@@ -1698,7 +1686,7 @@ mod tests {
 
         match &trait_def.members[0] {
             shape_ast::ast::TraitMember::Required(member) => match member {
-                shape_ast::ast::InterfaceMember::Method { name, .. } => {
+                shape_ast::ast::TraitMemberSignature::Method { name, .. } => {
                     assert_eq!(name, "iter");
                 }
                 other => panic!("expected Method member, got {:?}", other),

@@ -31,12 +31,12 @@ function test() {
         category: FeatureCategory::TypeSystem,
         requires_data: false,
     },
-    // === Interface Definition ===
+    // === Trait Definition (body-less signatures) ===
     FeatureTest {
-        name: "interface_basic",
-        covers: &["interface_def", "interface_body", "interface_member"],
+        name: "trait_signature_basic",
+        covers: &["trait_def", "trait_body", "trait_member_signature"],
         code: r#"
-interface Shape {
+trait Shape {
     area: number;
 }
 function test() {
@@ -49,10 +49,10 @@ function test() {
         requires_data: false,
     },
     FeatureTest {
-        name: "interface_with_method_signature",
-        covers: &["interface_def", "interface_member"],
+        name: "trait_with_method_signature",
+        covers: &["trait_def", "trait_member_signature"],
         code: r#"
-interface Calculator {
+trait Calculator {
     add(a: number, b: number): number;
 }
 function test() {

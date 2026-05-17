@@ -1775,7 +1775,6 @@ impl BytecodeCompiler {
             || self.type_aliases.contains_key(name)
             || self.type_inference.env.lookup_type_alias(name).is_some()
             || self.type_inference.env.get_enum(name).is_some()
-            || self.type_inference.env.lookup_interface(name).is_some()
             || self.type_inference.env.lookup_trait(name).is_some()
             || self.type_tracker.schema_registry().get(name).is_some()
     }

@@ -913,47 +913,10 @@ fn parse_enum_member(pair: Pair<Rule>) -> Result<crate::ast::EnumMember> {
     }
 }
 
-/// Parse interface definition
-///
-/// Grammar: `"interface" ~ ident ~ type_params? ~ "{" ~ interface_body ~ "}"`
-pub fn parse_interface_def(pair: Pair<Rule>) -> Result<crate::ast::InterfaceDef> {
-    let pair_loc = pair_location(&pair);
-    let mut inner = pair.into_inner();
-
-    let name_pair = inner.next().ok_or_else(|| ShapeError::ParseError {
-        message: "Missing interface name".to_string(),
-        location: Some(pair_loc.clone()),
-    })?;
-    let name = name_pair.as_str().to_string();
-
-    let mut type_params = None;
-    let mut members = Vec::new();
-
-    for part in inner {
-        match part.as_rule() {
-            Rule::type_params => {
-                type_params = Some(parse_type_params(part)?);
-            }
-            Rule::interface_body => {
-                members = parse_interface_body(part)?;
-            }
-            _ => {}
-        }
-    }
-
-    Ok(crate::ast::InterfaceDef {
-        name,
-        doc_comment: None,
-        type_params,
-        members,
-    })
-}
-
 /// Parse trait definition
 ///
 /// Grammar: `annotations? ~ "trait" ~ ident ~ type_params? ~ (":" ~ type_annotation ~ ("+" ~ type_annotation)*)? ~ "{" ~ trait_body ~ "}"`
 ///
-/// Traits reuse the same body syntax as interfaces (method/property signatures).
 /// Supertrait bounds use `:` syntax: `trait Foo: Bar + Baz { ... }`
 pub fn parse_trait_def(pair: Pair<Rule>) -> Result<crate::ast::TraitDef> {
     let pair_loc = pair_location(&pair);
@@ -1058,10 +1021,10 @@ fn parse_trait_body(pair: Pair<Rule>) -> Result<Vec<crate::ast::TraitMember>> {
                 method.doc_comment = doc_comment;
                 members.push(crate::ast::TraitMember::Default(method));
             }
-            Rule::interface_member | Rule::documented_interface_member => {
-                let mut im = parse_interface_member(inner)?;
+            Rule::trait_member_signature => {
+                let mut im = parse_trait_member_signature(inner)?;
                 if let Some(doc_comment) = doc_comment {
-                    attach_interface_member_doc_comment(&mut im, doc_comment);
+                    attach_trait_member_signature_doc_comment(&mut im, doc_comment);
                 }
                 members.push(crate::ast::TraitMember::Required(im));
             }
@@ -1202,47 +1165,25 @@ pub(crate) fn parse_documented_method_def_shared(
     Ok(method)
 }
 
-fn parse_interface_body(pair: Pair<Rule>) -> Result<Vec<crate::ast::InterfaceMember>> {
-    let mut members = Vec::new();
-    for inner in pair.into_inner() {
-        if inner.as_rule() == Rule::interface_member_list {
-            for member in inner.into_inner() {
-                if matches!(
-                    member.as_rule(),
-                    Rule::documented_interface_member | Rule::interface_member
-                ) {
-                    members.push(parse_interface_member(member)?);
-                }
-            }
-        }
-    }
-    Ok(members)
-}
-
-fn parse_interface_member(pair: Pair<Rule>) -> Result<crate::ast::InterfaceMember> {
-    let (doc_comment, pair) = unwrap_documented_pair(
-        pair,
-        Rule::documented_interface_member,
-        Rule::interface_member,
-        "interface member",
-    )?;
+fn parse_trait_member_signature(pair: Pair<Rule>) -> Result<crate::ast::TraitMemberSignature> {
+    debug_assert_eq!(pair.as_rule(), Rule::trait_member_signature);
     let pair_loc = pair_location(&pair);
     let raw = pair.as_str();
     let trimmed = raw.trim_start();
     let span = pair_span(&pair);
 
     if trimmed.starts_with('[') {
-        return parse_interface_index_signature(pair, trimmed, doc_comment);
+        return parse_trait_index_signature(pair, trimmed);
     }
 
     let mut inner = pair.into_inner();
     let name_pair = inner.next().ok_or_else(|| ShapeError::ParseError {
-        message: "expected interface member name".to_string(),
+        message: "expected trait member name".to_string(),
         location: Some(pair_loc.clone()),
     })?;
     let name = name_pair.as_str().to_string();
 
-    let (optional, is_method) = parse_interface_member_kind(trimmed, &name);
+    let (optional, is_method) = parse_trait_member_kind(trimmed, &name);
 
     let mut params = Vec::new();
     let mut type_annotation = None;
@@ -1259,7 +1200,7 @@ fn parse_interface_member(pair: Pair<Rule>) -> Result<crate::ast::InterfaceMembe
     }
 
     if is_method {
-        // W6 imprecision 83 root cause fix: trait/interface method return type is
+        // W6 imprecision 83 root cause fix: trait method return type is
         // optional in the grammar (defaults to `void`/Unit when omitted). This
         // unblocks return-typeless trait method declarations like
         // `add_assign(other: Self)` without forcing a hand-written `: Self` /
@@ -1269,40 +1210,40 @@ fn parse_interface_member(pair: Pair<Rule>) -> Result<crate::ast::InterfaceMembe
         // failure, leaving the user's `xs.map(...)` to fall through to the
         // V3-S5 ckpt-2 `map` SURFACE (no Vec.map specialization available).
         let return_type = type_annotation.unwrap_or_else(|| {
-            // Default return type for trait/interface methods without an
-            // explicit annotation is `void`. Property-style members still
-            // require an explicit type (see below) since they describe a
-            // value, not a callable.
+            // Default return type for trait methods without an explicit
+            // annotation is `void`. Property-style members still require an
+            // explicit type (see below) since they describe a value, not a
+            // callable.
             crate::ast::TypeAnnotation::Basic("void".to_string())
         });
-        Ok(crate::ast::InterfaceMember::Method {
+        Ok(crate::ast::TraitMemberSignature::Method {
             name,
             optional,
             params,
             return_type,
             is_async: false,
             span,
-            doc_comment,
+            doc_comment: None,
         })
     } else {
         // Property members still require an explicit type annotation —
         // they describe a value, not a callable, so there's no sensible
         // "void" default.
         let type_annotation = type_annotation.ok_or_else(|| ShapeError::ParseError {
-            message: format!("interface property '{}' missing type annotation", name),
+            message: format!("trait property '{}' missing type annotation", name),
             location: Some(pair_loc),
         })?;
-        Ok(crate::ast::InterfaceMember::Property {
+        Ok(crate::ast::TraitMemberSignature::Property {
             name,
             optional,
             type_annotation,
             span,
-            doc_comment,
+            doc_comment: None,
         })
     }
 }
 
-fn parse_interface_member_kind(raw: &str, name: &str) -> (bool, bool) {
+fn parse_trait_member_kind(raw: &str, name: &str) -> (bool, bool) {
     let trimmed = raw.trim_start();
     let Some(mut rest) = trimmed.strip_prefix(name) else {
         return (false, false);
@@ -1317,11 +1258,10 @@ fn parse_interface_member_kind(raw: &str, name: &str) -> (bool, bool) {
     (optional, is_method)
 }
 
-fn parse_interface_index_signature(
+fn parse_trait_index_signature(
     pair: Pair<Rule>,
     raw: &str,
-    doc_comment: Option<crate::ast::DocComment>,
-) -> Result<crate::ast::InterfaceMember> {
+) -> Result<crate::ast::TraitMemberSignature> {
     let pair_loc = pair_location(&pair);
     let span = pair_span(&pair);
     let mut inner = pair.into_inner();
@@ -1349,27 +1289,27 @@ fn parse_interface_index_signature(
             location: Some(pair_loc),
         })?;
 
-    Ok(crate::ast::InterfaceMember::IndexSignature {
+    Ok(crate::ast::TraitMemberSignature::IndexSignature {
         param_name,
         param_type,
         return_type,
         span,
-        doc_comment,
+        doc_comment: None,
     })
 }
 
-fn attach_interface_member_doc_comment(
-    member: &mut crate::ast::InterfaceMember,
+fn attach_trait_member_signature_doc_comment(
+    member: &mut crate::ast::TraitMemberSignature,
     doc_comment: crate::ast::DocComment,
 ) {
     match member {
-        crate::ast::InterfaceMember::Property {
+        crate::ast::TraitMemberSignature::Property {
             doc_comment: slot, ..
         }
-        | crate::ast::InterfaceMember::Method {
+        | crate::ast::TraitMemberSignature::Method {
             doc_comment: slot, ..
         }
-        | crate::ast::InterfaceMember::IndexSignature {
+        | crate::ast::TraitMemberSignature::IndexSignature {
             doc_comment: slot, ..
         } => *slot = Some(doc_comment),
     }

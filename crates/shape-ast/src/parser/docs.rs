@@ -376,15 +376,6 @@ impl DocCollector {
                 let path = join_path(module_path, &enum_def.name);
                 self.collect_enum(&path, *span, enum_def.doc_comment.as_ref(), enum_def);
             }
-            Item::Interface(interface_def, span) => {
-                let path = join_path(module_path, &interface_def.name);
-                self.collect_interface(
-                    &path,
-                    *span,
-                    interface_def.doc_comment.as_ref(),
-                    interface_def,
-                );
-            }
             Item::Trait(trait_def, span) => {
                 let path = join_path(module_path, &trait_def.name);
                 self.collect_trait(&path, *span, trait_def.doc_comment.as_ref(), trait_def);
@@ -454,15 +445,6 @@ impl DocCollector {
                     let path = join_path(module_path, &enum_def.name);
                     self.collect_enum(&path, *span, enum_def.doc_comment.as_ref(), enum_def);
                 }
-                ExportItem::Interface(interface_def) => {
-                    let path = join_path(module_path, &interface_def.name);
-                    self.collect_interface(
-                        &path,
-                        *span,
-                        interface_def.doc_comment.as_ref(),
-                        interface_def,
-                    );
-                }
                 ExportItem::Trait(trait_def) => {
                     let path = join_path(module_path, &trait_def.name);
                     self.collect_trait(&path, *span, trait_def.doc_comment.as_ref(), trait_def);
@@ -520,46 +502,6 @@ impl DocCollector {
         }
     }
 
-    fn collect_interface(
-        &mut self,
-        path: &str,
-        span: Span,
-        doc_comment: Option<&DocComment>,
-        interface_def: &crate::ast::InterfaceDef,
-    ) {
-        self.attach_comment(
-            DocTargetKind::Interface,
-            path.to_string(),
-            span,
-            doc_comment,
-        );
-        self.collect_type_params(path, interface_def.type_params.as_deref());
-        for member in &interface_def.members {
-            let (kind, name) = match member {
-                crate::ast::InterfaceMember::Property { name, .. } => {
-                    (DocTargetKind::InterfaceProperty, name.as_str())
-                }
-                crate::ast::InterfaceMember::Method { name, .. } => {
-                    (DocTargetKind::InterfaceMethod, name.as_str())
-                }
-                crate::ast::InterfaceMember::IndexSignature { param_type, .. } => {
-                    (DocTargetKind::InterfaceIndexSignature, param_type.as_str())
-                }
-            };
-            let child_name = if matches!(kind, DocTargetKind::InterfaceIndexSignature) {
-                format!("[{}]", name)
-            } else {
-                name.to_string()
-            };
-            self.attach_comment(
-                kind,
-                join_child_path(path, &child_name),
-                member.span(),
-                member.doc_comment(),
-            );
-        }
-    }
-
     fn collect_trait(
         &mut self,
         path: &str,
@@ -571,18 +513,22 @@ impl DocCollector {
         self.collect_type_params(path, trait_def.type_params.as_deref());
         for member in &trait_def.members {
             let (kind, child_name, child_span) = match member {
-                TraitMember::Required(crate::ast::InterfaceMember::Property {
-                    name, span, ..
-                })
-                | TraitMember::Required(crate::ast::InterfaceMember::Method {
-                    name, span, ..
+                TraitMember::Required(crate::ast::TraitMemberSignature::Property {
+                    name,
+                    span,
+                    ..
+                }) => (DocTargetKind::TraitProperty, name.clone(), *span),
+                TraitMember::Required(crate::ast::TraitMemberSignature::Method {
+                    name,
+                    span,
+                    ..
                 }) => (DocTargetKind::TraitMethod, name.clone(), *span),
-                TraitMember::Required(crate::ast::InterfaceMember::IndexSignature {
+                TraitMember::Required(crate::ast::TraitMemberSignature::IndexSignature {
                     param_type,
                     span,
                     ..
                 }) => (
-                    DocTargetKind::TraitMethod,
+                    DocTargetKind::TraitIndexSignature,
                     format!("[{}]", param_type),
                     *span,
                 ),

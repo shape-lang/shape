@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 use shape_ast::ast::{
-    Expr, InterfaceMember, Item, Literal, ObjectEntry, ObjectTypeField, Pattern, Program,
+    Expr, TraitMemberSignature, Item, Literal, ObjectEntry, ObjectTypeField, Pattern, Program,
     Statement, TraitMember, TypeAnnotation, VariableDecl,
 };
 use shape_runtime::metadata::UnifiedMetadata;
@@ -1591,7 +1591,7 @@ pub fn extract_type_methods(program: &Program) -> HashMap<String, Vec<MethodComp
                 .iter()
                 .filter_map(|member| match member {
                     TraitMember::Required(
-                        im @ InterfaceMember::Method {
+                        im @ TraitMemberSignature::Method {
                             name,
                             params,
                             return_type,
@@ -1705,11 +1705,11 @@ pub fn extract_type_methods(program: &Program) -> HashMap<String, Vec<MethodComp
     result
 }
 
-fn interface_member_doc(member: &InterfaceMember) -> Option<String> {
+fn interface_member_doc(member: &TraitMemberSignature) -> Option<String> {
     match member {
-        InterfaceMember::Method { doc_comment, .. }
-        | InterfaceMember::Property { doc_comment, .. }
-        | InterfaceMember::IndexSignature { doc_comment, .. } => method_doc(doc_comment.as_ref()),
+        TraitMemberSignature::Method { doc_comment, .. }
+        | TraitMemberSignature::Property { doc_comment, .. }
+        | TraitMemberSignature::IndexSignature { doc_comment, .. } => method_doc(doc_comment.as_ref()),
     }
 }
 

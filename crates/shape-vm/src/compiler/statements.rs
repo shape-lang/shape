@@ -880,7 +880,6 @@ impl BytecodeCompiler {
                             )?;
                         }
                     }
-                    ExportItem::Interface(_) => {} // no-op for now
                     ExportItem::Trait(_) => {} // no-op for now (trait registration happens in type system)
                     ExportItem::ForeignFunction(def) => self.compile_foreign_function(def)?,
                     _ => {}
@@ -1737,7 +1736,7 @@ impl BytecodeCompiler {
         //
         // If the impl method omits its return type, look up the trait
         // declaration and substitute the trait's declared return type.
-        // The trait's required-method signature (`InterfaceMember::Method
+        // The trait's required-method signature (`TraitMemberSignature::Method
         // { return_type, .. }`) is the contract; if the impl chose not
         // to repeat it, the contract still applies.
         //
@@ -1753,14 +1752,14 @@ impl BytecodeCompiler {
                 .and_then(|trait_def| {
                     // Match on method name. Both Required and Default trait
                     // members carry the return type — Required via
-                    // `InterfaceMember::Method { return_type, .. }` (always
+                    // `TraitMemberSignature::Method { return_type, .. }` (always
                     // present), Default via `MethodDef.return_type:
                     // Option<TypeAnnotation>` (may itself be None — in which
                     // case there's nothing to backfill).
                     for member in &trait_def.members {
                         match member {
                             shape_ast::ast::types::TraitMember::Required(
-                                shape_ast::ast::InterfaceMember::Method {
+                                shape_ast::ast::TraitMemberSignature::Method {
                                     name,
                                     return_type,
                                     ..
@@ -3328,9 +3327,6 @@ impl BytecodeCompiler {
                     ExportItem::Trait(def) => {
                         def.name = Self::qualify_module_symbol(module_path, &def.name);
                     }
-                    ExportItem::Interface(def) => {
-                        def.name = Self::qualify_module_symbol(module_path, &def.name);
-                    }
                     _ => {}
                 }
                 Ok(Item::Export(qualified, *span))
@@ -3451,11 +3447,6 @@ impl BytecodeCompiler {
                 let mut q = def.clone();
                 q.name = Self::qualify_module_symbol(module_path, &def.name);
                 Ok(Item::Trait(q, *span))
-            }
-            Item::Interface(def, span) => {
-                let mut q = def.clone();
-                q.name = Self::qualify_module_symbol(module_path, &def.name);
-                Ok(Item::Interface(q, *span))
             }
             Item::Extend(extend, span) => {
                 let mut q = extend.clone();
@@ -6707,7 +6698,7 @@ mod tests {
         // default per §2.7.7 #9.
         //
         // (`Required` trait members always have a return_type per the
-        // AST — `InterfaceMember::Method { return_type: TypeAnnotation,
+        // AST — `TraitMemberSignature::Method { return_type: TypeAnnotation,
         // .. }` is non-optional. Default trait members carry
         // `Option<TypeAnnotation>`, which can be None for `method foo()
         // {}` default bodies that elide it. This test verifies the

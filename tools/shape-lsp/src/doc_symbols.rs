@@ -1,6 +1,6 @@
 use crate::module_cache::ModuleCache;
 use shape_ast::ast::{
-    DocTargetKind, ExportItem, FunctionParameter, InterfaceMember, Item, Program, Span,
+    DocTargetKind, ExportItem, FunctionParameter, TraitMemberSignature, Item, Program, Span,
     TraitMember, TypeAnnotation, TypeParam, extend_method_doc_path, impl_method_doc_path,
 };
 use std::collections::BTreeSet;
@@ -235,32 +235,6 @@ fn collect_doc_symbols_in_items(
                     );
                 }
             }
-            Item::Interface(interface, span) => {
-                let path = join_path(path_prefix, &interface.name);
-                push_symbol(
-                    out,
-                    DocTargetKind::Interface,
-                    module_prefix,
-                    path.clone(),
-                    *span,
-                );
-                push_type_params(
-                    out,
-                    module_prefix,
-                    path_prefix,
-                    &interface.name,
-                    interface.type_params.as_deref(),
-                );
-                for member in &interface.members {
-                    push_symbol(
-                        out,
-                        interface_member_kind(member),
-                        module_prefix,
-                        join_child_path(&path, &interface_member_name(member)),
-                        member.span(),
-                    );
-                }
-            }
             Item::Trait(trait_def, span) => {
                 let path = join_path(path_prefix, &trait_def.name);
                 push_symbol(
@@ -456,32 +430,6 @@ fn collect_export_symbols(
                 );
             }
         }
-        ExportItem::Interface(interface) => {
-            let path = join_path(path_prefix, &interface.name);
-            push_symbol(
-                out,
-                DocTargetKind::Interface,
-                module_prefix,
-                path.clone(),
-                span,
-            );
-            push_type_params(
-                out,
-                module_prefix,
-                path_prefix,
-                &interface.name,
-                interface.type_params.as_deref(),
-            );
-            for member in &interface.members {
-                push_symbol(
-                    out,
-                    interface_member_kind(member),
-                    module_prefix,
-                    join_child_path(&path, &interface_member_name(member)),
-                    member.span(),
-                );
-            }
-        }
         ExportItem::Trait(trait_def) => {
             let path = join_path(path_prefix, &trait_def.name);
             push_symbol(out, DocTargetKind::Trait, module_prefix, path.clone(), span);
@@ -549,33 +497,34 @@ fn push_symbol(
     });
 }
 
-fn interface_member_kind(member: &InterfaceMember) -> DocTargetKind {
+fn trait_member_signature_kind(member: &TraitMemberSignature) -> DocTargetKind {
     match member {
-        InterfaceMember::Property { .. } => DocTargetKind::InterfaceProperty,
-        InterfaceMember::Method { .. } => DocTargetKind::InterfaceMethod,
-        InterfaceMember::IndexSignature { .. } => DocTargetKind::InterfaceIndexSignature,
+        TraitMemberSignature::Property { .. } => DocTargetKind::TraitProperty,
+        TraitMemberSignature::Method { .. } => DocTargetKind::TraitMethod,
+        TraitMemberSignature::IndexSignature { .. } => DocTargetKind::TraitIndexSignature,
     }
 }
 
-fn interface_member_name(member: &InterfaceMember) -> String {
+fn trait_member_signature_name(member: &TraitMemberSignature) -> String {
     match member {
-        InterfaceMember::Property { name, .. } | InterfaceMember::Method { name, .. } => {
+        TraitMemberSignature::Property { name, .. } | TraitMemberSignature::Method { name, .. } => {
             name.clone()
         }
-        InterfaceMember::IndexSignature { param_type, .. } => format!("[{param_type}]"),
+        TraitMemberSignature::IndexSignature { param_type, .. } => format!("[{param_type}]"),
     }
 }
 
 fn trait_member_kind(member: &TraitMember) -> DocTargetKind {
     match member {
         TraitMember::AssociatedType { .. } => DocTargetKind::TraitAssociatedType,
-        TraitMember::Required(_) | TraitMember::Default(_) => DocTargetKind::TraitMethod,
+        TraitMember::Required(sig) => trait_member_signature_kind(sig),
+        TraitMember::Default(_) => DocTargetKind::TraitMethod,
     }
 }
 
 fn trait_member_name(member: &TraitMember) -> String {
     match member {
-        TraitMember::Required(member) => interface_member_name(member),
+        TraitMember::Required(member) => trait_member_signature_name(member),
         TraitMember::Default(method) => method.name.clone(),
         TraitMember::AssociatedType { name, .. } => name.clone(),
     }
@@ -633,50 +582,16 @@ fn find_doc_owner_in_item(item: &Item, target_span: Span) -> Option<DocOwner> {
             DocTargetKind::Enum,
             enum_def.type_params.as_deref(),
         )),
-        Item::Interface(interface, span) if *span == target_span => Some(type_owner(
-            DocTargetKind::Interface,
-            interface.type_params.as_deref(),
-        )),
         Item::Trait(trait_def, span) if *span == target_span => Some(type_owner(
             DocTargetKind::Trait,
             trait_def.type_params.as_deref(),
         )),
-        Item::Interface(interface, _) => find_doc_owner_in_interface(interface, target_span),
         Item::Trait(trait_def, _) => find_doc_owner_in_trait(trait_def, target_span),
         Item::Extend(extend, _) => find_doc_owner_in_extend(extend, target_span),
         Item::Impl(impl_block, _) => find_doc_owner_in_impl(impl_block, target_span),
         Item::Export(export, span) if *span == target_span => Some(export_owner(export)),
         _ => None,
     }
-}
-
-fn find_doc_owner_in_interface(
-    interface: &shape_ast::ast::InterfaceDef,
-    target_span: Span,
-) -> Option<DocOwner> {
-    for member in &interface.members {
-        if member.span() != target_span {
-            continue;
-        }
-        return Some(match member {
-            InterfaceMember::Method {
-                params,
-                return_type,
-                ..
-            } => DocOwner {
-                params: interface_method_param_names(params),
-                can_have_return_doc: !matches!(return_type, TypeAnnotation::Void),
-                ..Default::default()
-            },
-            InterfaceMember::Property { .. } => DocOwner {
-                ..Default::default()
-            },
-            InterfaceMember::IndexSignature { .. } => DocOwner {
-                ..Default::default()
-            },
-        });
-    }
-    None
 }
 
 fn find_doc_owner_in_trait(
@@ -694,17 +609,17 @@ fn find_doc_owner_in_trait(
                 None,
                 method.return_type.as_ref(),
             ),
-            TraitMember::Required(InterfaceMember::Method {
+            TraitMember::Required(TraitMemberSignature::Method {
                 params,
                 return_type,
                 ..
             }) => DocOwner {
-                params: interface_method_param_names(params),
+                params: trait_method_param_names(params),
                 can_have_return_doc: !matches!(return_type, TypeAnnotation::Void),
                 ..Default::default()
             },
-            TraitMember::Required(InterfaceMember::Property { .. })
-            | TraitMember::Required(InterfaceMember::IndexSignature { .. }) => DocOwner {
+            TraitMember::Required(TraitMemberSignature::Property { .. })
+            | TraitMember::Required(TraitMemberSignature::IndexSignature { .. }) => DocOwner {
                 ..Default::default()
             },
             TraitMember::AssociatedType { .. } => DocOwner {
@@ -779,9 +694,6 @@ fn export_owner(export: &shape_ast::ast::ExportStmt) -> DocOwner {
         ExportItem::Enum(enum_def) => {
             type_owner(DocTargetKind::Enum, enum_def.type_params.as_deref())
         }
-        ExportItem::Interface(interface) => {
-            type_owner(DocTargetKind::Interface, interface.type_params.as_deref())
-        }
         ExportItem::Trait(trait_def) => {
             type_owner(DocTargetKind::Trait, trait_def.type_params.as_deref())
         }
@@ -834,7 +746,7 @@ pub fn function_param_names(params: &[FunctionParameter]) -> Vec<String> {
     names
 }
 
-fn interface_method_param_names(params: &[shape_ast::ast::FunctionParam]) -> Vec<String> {
+fn trait_method_param_names(params: &[shape_ast::ast::FunctionParam]) -> Vec<String> {
     let mut names = params
         .iter()
         .filter_map(|param| param.name.clone())

@@ -50,7 +50,7 @@ pub enum SymbolKind {
     Pattern,
     Variable,
     TypeAlias,
-    Interface,
+    Trait,
     Enum,
     Annotation,
 }
@@ -401,7 +401,7 @@ fn map_module_export_kind(kind: shape_runtime::module_loader::ModuleExportKind) 
         RuntimeKind::BuiltinFunction => SymbolKind::Function,
         RuntimeKind::TypeAlias => SymbolKind::TypeAlias,
         RuntimeKind::BuiltinType => SymbolKind::TypeAlias,
-        RuntimeKind::Interface => SymbolKind::Interface,
+        RuntimeKind::Trait => SymbolKind::Trait,
         RuntimeKind::Enum => SymbolKind::Enum,
         RuntimeKind::Annotation => SymbolKind::Annotation,
         RuntimeKind::Value => SymbolKind::Variable,

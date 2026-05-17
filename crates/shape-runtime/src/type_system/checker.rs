@@ -408,11 +408,6 @@ impl TypeChecker {
                 }
             }
 
-            Item::Interface(interface, span) => {
-                // Validate interface definition
-                self.check_interface(interface, *span);
-            }
-
             _ => {}
         }
     }
@@ -478,34 +473,6 @@ impl TypeChecker {
                 args.iter().any(|arg| self.references_type(arg, name))
             }
             _ => false,
-        }
-    }
-
-    /// Check interface definition
-    fn check_interface(&mut self, interface: &shape_ast::ast::InterfaceDef, interface_span: Span) {
-        // Check for duplicate members
-        let mut seen_members = HashMap::new();
-
-        for (i, member) in interface.members.iter().enumerate() {
-            let member_name = match member {
-                shape_ast::ast::InterfaceMember::Property { name, .. } => name,
-                shape_ast::ast::InterfaceMember::Method { name, .. } => name,
-                shape_ast::ast::InterfaceMember::IndexSignature { .. } => continue,
-            };
-
-            if let Some(_prev_index) = seen_members.get(member_name) {
-                let (line, col) = self.item_span_to_line_col(interface_span);
-                self.add_error(
-                    TypeError::InterfaceError(
-                        interface.name.clone(),
-                        format!("Duplicate member '{}'", member_name),
-                    ),
-                    line,
-                    col,
-                );
-            } else {
-                seen_members.insert(member_name.clone(), i);
-            }
         }
     }
 

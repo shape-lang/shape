@@ -23,24 +23,10 @@
 ///
 /// `AddAssign::add_assign` is declared with an explicit `Self` return type
 /// by convention (the in-place op canonically returns `self` for
-/// chaining), but trait/interface methods may now omit the return type
-/// entirely — the grammar treats a trait method without `: ReturnType`
-/// as returning `void`. The Phase 4 close-out workaround that forced
-/// `: Self` here to sidestep a parse-failure-cascade bug is no longer
-/// required.
-///
-/// Original cascade (kept for archaeology): the grammar previously
-/// rejected return-typeless trait `interface_member` methods. Parsing
-/// `add_assign(other: Self)` HARD-ERRORED at the parser level;
-/// `collect_prelude_imports` then silently swallowed the failure and
-/// returned an empty prelude-imports list, so the user's program never
-/// saw `std::core::vec` etc. and `xs.map(...)` fell through to the
-/// V3-S5 ckpt-2 `map` SURFACE. The W6 fix relaxes the grammar so
-/// return-typeless trait methods parse to `return_type = void`, which
-/// unblocks the prelude load and restores correct Vec.map<U>
-/// monomorphization. See `crates/shape-ast/src/shape.pest`
-/// (`interface_member` rule) and `crates/shape-ast/src/parser/types.rs`
-/// (`parse_interface_member`).
+/// chaining), but trait methods may omit the return type entirely — the
+/// grammar treats a trait method without `: ReturnType` as returning
+/// `void`. The Phase 4 close-out workaround that forced `: Self` here to
+/// sidestep a parse-failure-cascade bug is no longer required.
 ///
 /// ## Known implementations
 ///

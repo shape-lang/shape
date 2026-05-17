@@ -148,11 +148,6 @@ pub fn keywords() -> Vec<KeywordInfo> {
             category: KeywordCategory::Type,
         },
         KeywordInfo {
-            keyword: "interface".to_string(),
-            description: "Define a structural type contract.\n\n`interface Printable { format(): string }`".to_string(),
-            category: KeywordCategory::Type,
-        },
-        KeywordInfo {
             keyword: "enum".to_string(),
             description: "Define an enum with variants.\n\n`enum Color { Red, Green, Blue(number) }`".to_string(),
             category: KeywordCategory::Type,

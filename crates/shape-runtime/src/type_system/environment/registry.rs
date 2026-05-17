@@ -1,10 +1,10 @@
 //! Type Registry
 //!
-//! Manages type aliases, interfaces, enum definitions, and record schemas
+//! Manages type aliases, traits, enum definitions, and record schemas
 //! for the type system.
 
 use serde::{Deserialize, Serialize};
-use shape_ast::ast::{EnumDef, Expr, InterfaceDef, TraitDef, TypeAnnotation};
+use shape_ast::ast::{EnumDef, Expr, TraitDef, TypeAnnotation};
 use std::collections::HashMap;
 
 const DEFAULT_IMPL_NAME: &str = "__default__";
@@ -100,13 +100,11 @@ pub struct BlanketImplEntry {
     pub method_names: Vec<String>,
 }
 
-/// Registry for type aliases, interfaces, enums, traits, and record schemas
+/// Registry for type aliases, enums, traits, and record schemas
 #[derive(Debug, Clone, Default)]
 pub struct TypeRegistry {
     /// Type aliases with optional meta parameter overrides
     type_aliases: HashMap<String, TypeAliasEntry>,
-    /// Interface definitions
-    interfaces: HashMap<String, InterfaceDef>,
     /// Trait definitions
     traits: HashMap<String, TraitDef>,
     /// Trait implementations: key = "TraitName::TargetType"
@@ -133,7 +131,6 @@ impl TypeRegistry {
     pub fn new() -> Self {
         let mut registry = Self {
             type_aliases: HashMap::new(),
-            interfaces: HashMap::new(),
             traits: HashMap::new(),
             trait_impls: HashMap::new(),
             blanket_impls: HashMap::new(),
@@ -186,17 +183,6 @@ impl TypeRegistry {
         self.type_aliases
             .get(name)
             .and_then(|entry| entry.meta_param_overrides.as_ref())
-    }
-
-    /// Define an interface
-    pub fn define_interface(&mut self, interface: &InterfaceDef) {
-        self.interfaces
-            .insert(interface.name.clone(), interface.clone());
-    }
-
-    /// Look up an interface
-    pub fn lookup_interface(&self, name: &str) -> Option<&InterfaceDef> {
-        self.interfaces.get(name)
     }
 
     /// Define a trait
@@ -279,12 +265,12 @@ impl TypeRegistry {
         // Validate against trait definition if it exists
         // Clone required data out to avoid holding a borrow on self.traits
         if let Some(trait_def) = self.traits.get(trait_name) {
-            use shape_ast::ast::{InterfaceMember, TraitMember};
+            use shape_ast::ast::{TraitMemberSignature, TraitMember};
             let required_methods: Vec<String> = trait_def
                 .members
                 .iter()
                 .filter_map(|m| match m {
-                    TraitMember::Required(InterfaceMember::Method { name, .. }) => {
+                    TraitMember::Required(TraitMemberSignature::Method { name, .. }) => {
                         Some(name.clone())
                     }
                     _ => None,
@@ -586,7 +572,7 @@ impl TypeRegistry {
 mod tests {
     use super::*;
     use shape_ast::ast::{
-        FunctionParam, InterfaceMember, Span, TraitDef, TraitMember, TypeAnnotation,
+        FunctionParam, TraitMemberSignature, Span, TraitDef, TraitMember, TypeAnnotation,
     };
 
     /// Helper: build a simple trait with one required method
@@ -599,7 +585,7 @@ mod tests {
             members: methods
                 .into_iter()
                 .map(|m| {
-                    TraitMember::Required(InterfaceMember::Method {
+                    TraitMember::Required(TraitMemberSignature::Method {
                         name: m.to_string(),
                         optional: false,
                         params: vec![FunctionParam {
@@ -800,7 +786,7 @@ mod tests {
         let mut members: Vec<TraitMember> = methods
             .into_iter()
             .map(|m| {
-                TraitMember::Required(InterfaceMember::Method {
+                TraitMember::Required(TraitMemberSignature::Method {
                     name: m.to_string(),
                     optional: false,
                     params: vec![FunctionParam {
@@ -1138,7 +1124,7 @@ mod tests {
             members: methods
                 .into_iter()
                 .map(|m| {
-                    TraitMember::Required(InterfaceMember::Method {
+                    TraitMember::Required(TraitMemberSignature::Method {
                         name: m.to_string(),
                         optional: false,
                         params: vec![FunctionParam {

@@ -60,8 +60,8 @@ pub use type_path::TypePath;
 // From types.rs
 pub use types::{
     EnumDef, EnumMember, EnumMemberKind, EnumValue, ExtendStatement, FunctionParam, ImplBlock,
-    InterfaceDef, InterfaceMember, MethodDef, NativeLayoutBinding, ObjectTypeField, StructField,
-    StructTypeDef, TraitDef, TraitMember, TypeAliasDef, TypeAnnotation, TypeName, TypeParam,
+    MethodDef, NativeLayoutBinding, ObjectTypeField, StructField, StructTypeDef, TraitDef,
+    TraitMember, TraitMemberSignature, TypeAliasDef, TypeAnnotation, TypeName, TypeParam,
 };
 
 // From patterns.rs

@@ -1247,7 +1247,7 @@ pub fn validate_trait_bounds(program: &Program, source: &str) -> Vec<Diagnostic>
                 .iter()
                 .filter_map(|m| match m {
                     shape_ast::ast::TraitMember::Required(
-                        shape_ast::ast::InterfaceMember::Method { name, .. },
+                        shape_ast::ast::TraitMemberSignature::Method { name, .. },
                     ) => Some(name.clone()),
                     _ => None,
                 })

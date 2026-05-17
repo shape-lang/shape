@@ -822,7 +822,7 @@ fn impl_block_completions(
     let mut completions = Vec::new();
     for member in &resolved_trait.trait_def.members {
         match member {
-            shape_ast::ast::TraitMember::Required(shape_ast::ast::InterfaceMember::Method {
+            shape_ast::ast::TraitMember::Required(shape_ast::ast::TraitMemberSignature::Method {
                 name,
                 params,
                 return_type,

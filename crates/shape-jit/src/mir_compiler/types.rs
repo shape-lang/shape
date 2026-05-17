@@ -904,7 +904,7 @@ fn well_known_function_return_kind(name: &str) -> Option<NativeKind> {
 /// 2. The trait registry (`TypeRegistry::traits: HashMap<String,
 ///    TraitDef>` in `crates/shape-runtime/src/type_system/environment/
 ///    registry.rs:111`) holds the trait's declared return type
-///    (`InterfaceMember::Method { return_type: TypeAnnotation, .. }`),
+///    (`TraitMemberSignature::Method { return_type: TypeAnnotation, .. }`),
 ///    but the `BytecodeProgram` (`crates/shape-vm/src/bytecode/
 ///    core_types.rs`) does NOT persist this — it only carries
 ///    `trait_method_symbols: HashMap<String, String>` (the resolved

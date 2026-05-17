@@ -163,38 +163,6 @@ fn find_doc_target(items: &[Item], text: &str, line: u32) -> Option<DocTemplateT
                     }
                 }
             }
-            Item::Interface(interface, span) => {
-                if starts_on_line(text, *span, line) {
-                    return Some(type_target(
-                        *span,
-                        interface.doc_comment.is_some(),
-                        interface.type_params.as_deref(),
-                    ));
-                }
-                for member in &interface.members {
-                    let span = member.span();
-                    if starts_on_line(text, span, line) {
-                        return Some(match member {
-                            shape_ast::ast::InterfaceMember::Method {
-                                params,
-                                return_type,
-                                doc_comment,
-                                ..
-                            } => callable_target(
-                                span,
-                                doc_comment.is_some(),
-                                None,
-                                params.iter().filter_map(|param| param.name.clone()),
-                                !matches!(return_type, TypeAnnotation::Void),
-                            ),
-                            shape_ast::ast::InterfaceMember::Property { doc_comment, .. }
-                            | shape_ast::ast::InterfaceMember::IndexSignature {
-                                doc_comment, ..
-                            } => leaf_target(span, doc_comment.is_some()),
-                        });
-                    }
-                }
-            }
             Item::Trait(trait_def, span) => {
                 if starts_on_line(text, *span, line) {
                     return Some(type_target(
@@ -220,7 +188,7 @@ fn find_doc_target(items: &[Item], text: &str, line: u32) -> Option<DocTemplateT
                                     .as_ref()
                                     .is_some_and(|ty| !matches!(ty, TypeAnnotation::Void)),
                             ),
-                            TraitMember::Required(shape_ast::ast::InterfaceMember::Method {
+                            TraitMember::Required(shape_ast::ast::TraitMemberSignature::Method {
                                 params,
                                 return_type,
                                 doc_comment,
@@ -232,12 +200,12 @@ fn find_doc_target(items: &[Item], text: &str, line: u32) -> Option<DocTemplateT
                                 params.iter().filter_map(|param| param.name.clone()),
                                 !matches!(return_type, TypeAnnotation::Void),
                             ),
-                            TraitMember::Required(shape_ast::ast::InterfaceMember::Property {
+                            TraitMember::Required(shape_ast::ast::TraitMemberSignature::Property {
                                 doc_comment,
                                 ..
                             })
                             | TraitMember::Required(
-                                shape_ast::ast::InterfaceMember::IndexSignature {
+                                shape_ast::ast::TraitMemberSignature::IndexSignature {
                                     doc_comment, ..
                                 },
                             )
@@ -341,11 +309,6 @@ fn find_doc_target(items: &[Item], text: &str, line: u32) -> Option<DocTemplateT
                         *span,
                         enum_def.doc_comment.is_some(),
                         enum_def.type_params.as_deref(),
-                    ),
-                    ExportItem::Interface(interface) => type_target(
-                        *span,
-                        interface.doc_comment.is_some(),
-                        interface.type_params.as_deref(),
                     ),
                     ExportItem::Trait(trait_def) => type_target(
                         *span,

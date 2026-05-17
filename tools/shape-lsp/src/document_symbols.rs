@@ -91,12 +91,6 @@ fn item_to_document_symbols(item: &Item, line: usize) -> Vec<DocumentSymbol> {
             "type alias",
             line,
         )],
-        Item::Interface(interface, _) => vec![create_symbol(
-            &interface.name,
-            SymbolKind::INTERFACE,
-            "interface",
-            line,
-        )],
         Item::Enum(enum_def, _) => vec![create_symbol(
             &enum_def.name,
             SymbolKind::ENUM,
@@ -301,14 +295,6 @@ fn item_to_symbol_information_from_span(
                 location,
             )]
         }
-        Item::Interface(iface, span) => {
-            let location = span_to_location(uri, span, text);
-            vec![create_symbol_info(
-                iface.name.clone(),
-                SymbolKind::INTERFACE,
-                location,
-            )]
-        }
         Item::Enum(enum_def, span) => {
             let location = span_to_location(uri, span, text);
             vec![create_symbol_info(
@@ -365,14 +351,6 @@ fn item_to_symbol_information_from_span(
                     vec![create_symbol_info(
                         struct_def.name.clone(),
                         SymbolKind::STRUCT,
-                        location,
-                    )]
-                }
-                ExportItem::Interface(iface_def) => {
-                    let location = span_to_location(uri, span, text);
-                    vec![create_symbol_info(
-                        iface_def.name.clone(),
-                        SymbolKind::INTERFACE,
                         location,
                     )]
                 }

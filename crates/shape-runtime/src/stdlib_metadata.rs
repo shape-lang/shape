@@ -134,7 +134,6 @@ impl StdlibMetadata {
                         shape_ast::ast::ExportItem::Named(_) => {}
                         shape_ast::ast::ExportItem::Enum(_) => {}
                         shape_ast::ast::ExportItem::Struct(_) => {}
-                        shape_ast::ast::ExportItem::Interface(_) => {}
                         shape_ast::ast::ExportItem::Trait(_) => {}
                         shape_ast::ast::ExportItem::Annotation(_) => {}
                         shape_ast::ast::ExportItem::ForeignFunction(_) => {

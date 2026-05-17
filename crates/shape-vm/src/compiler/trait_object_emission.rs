@@ -98,7 +98,7 @@ impl BytecodeCompiler {
         for member in &trait_def.members {
             let (mname, return_type, params, type_params) = match member {
                 TraitMember::Required(
-                    shape_ast::ast::types::InterfaceMember::Method {
+                    shape_ast::ast::types::TraitMemberSignature::Method {
                         name,
                         params,
                         return_type,

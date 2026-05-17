@@ -24,7 +24,7 @@ pub enum TypeAnnotation {
     /// Union type: T1 | T2 | T3 (discriminated union - value is ONE of the types)
     Union(Vec<TypeAnnotation>),
     /// Intersection type: T1 + T2 (structural merge - value has ALL fields from both types)
-    /// Only valid for object/interface types. Field collisions are compile-time errors.
+    /// Only valid for object/trait types. Field collisions are compile-time errors.
     Intersection(Vec<TypeAnnotation>),
     /// Generic type: Map<K, V>
     Generic {
@@ -351,17 +351,13 @@ pub struct TypeAliasDef {
     pub meta_param_overrides: Option<std::collections::HashMap<String, super::expressions::Expr>>,
 }
 
+/// A body-less trait member signature: property, method, or index signature.
+///
+/// Used inside `TraitMember::Required(..)` to express the obligation an impl
+/// must satisfy. Trait bodies that include a body (`method`) use
+/// `TraitMember::Default(MethodDef)` instead.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InterfaceDef {
-    pub name: String,
-    #[serde(default)]
-    pub doc_comment: Option<DocComment>,
-    pub type_params: Option<Vec<TypeParam>>,
-    pub members: Vec<InterfaceMember>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum InterfaceMember {
+pub enum TraitMemberSignature {
     /// Property signature
     Property {
         name: String,
@@ -397,20 +393,20 @@ pub enum InterfaceMember {
     },
 }
 
-impl InterfaceMember {
+impl TraitMemberSignature {
     pub fn span(&self) -> Span {
         match self {
-            InterfaceMember::Property { span, .. }
-            | InterfaceMember::Method { span, .. }
-            | InterfaceMember::IndexSignature { span, .. } => *span,
+            TraitMemberSignature::Property { span, .. }
+            | TraitMemberSignature::Method { span, .. }
+            | TraitMemberSignature::IndexSignature { span, .. } => *span,
         }
     }
 
     pub fn doc_comment(&self) -> Option<&DocComment> {
         match self {
-            InterfaceMember::Property { doc_comment, .. }
-            | InterfaceMember::Method { doc_comment, .. }
-            | InterfaceMember::IndexSignature { doc_comment, .. } => doc_comment.as_ref(),
+            TraitMemberSignature::Property { doc_comment, .. }
+            | TraitMemberSignature::Method { doc_comment, .. }
+            | TraitMemberSignature::IndexSignature { doc_comment, .. } => doc_comment.as_ref(),
         }
     }
 }
@@ -457,7 +453,7 @@ pub enum EnumValue {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TraitMember {
     /// Required method — implementors must provide this
-    Required(InterfaceMember),
+    Required(TraitMemberSignature),
     /// Default method — used if implementor does not override
     Default(MethodDef),
     /// Associated type declaration: `type Item;` or `type Item: Comparable;`
@@ -497,7 +493,7 @@ pub struct AssociatedTypeBinding {
     pub concrete_type: TypeAnnotation,
 }
 
-/// Trait definition — like interface but with `trait` keyword, supporting default methods
+/// Trait definition — supports required signatures and default methods.
 ///
 /// ```shape
 /// trait Queryable<T> {

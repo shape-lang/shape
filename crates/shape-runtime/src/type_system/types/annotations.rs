@@ -260,9 +260,7 @@ pub fn semantic_to_annotation(ty: &SemanticType) -> TypeAnnotation {
                 TypeAnnotation::Reference(name.as_str().into())
             }
         }
-        SemanticType::Enum { name, .. } | SemanticType::Interface { name, .. } => {
-            TypeAnnotation::Reference(name.as_str().into())
-        }
+        SemanticType::Enum { name, .. } => TypeAnnotation::Reference(name.as_str().into()),
         SemanticType::Ref(inner) => {
             // Map &T to the annotation for T — references don't have a distinct
             // TypeAnnotation variant yet; the compiler tracks ref-ness separately.

@@ -619,8 +619,7 @@ impl Runtime {
                         shape_ast::ast::ExportItem::Struct(struct_def) => {
                             ctx.register_struct_type(struct_def.clone());
                         }
-                        shape_ast::ast::ExportItem::Interface(_)
-                        | shape_ast::ast::ExportItem::Trait(_) => {
+                        shape_ast::ast::ExportItem::Trait(_) => {
                             // Type definitions handled at compile time
                         }
                         shape_ast::ast::ExportItem::ForeignFunction(_) => {
@@ -647,7 +646,6 @@ impl Runtime {
 
                     ctx.register_type_alias(&alias_def.name, &base_type, Some(overrides));
                 }
-                shape_ast::ast::Item::Interface(_, _) => {}
                 shape_ast::ast::Item::Trait(_, _) => {}
                 shape_ast::ast::Item::Impl(_, _) => {}
                 shape_ast::ast::Item::Enum(enum_def, _) => {

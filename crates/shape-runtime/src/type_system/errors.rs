@@ -78,10 +78,6 @@ pub enum TypeError {
         symbol: Option<String>,
     },
 
-    /// Interface implementation error
-    #[error("Interface '{0}' error: {1}")]
-    InterfaceError(String, String),
-
     /// Union type error
     #[error("Union type error: {0}")]
     UnionTypeError(String),
