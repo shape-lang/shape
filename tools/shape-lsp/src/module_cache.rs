@@ -443,6 +443,59 @@ impl ModuleCache {
 /// scope the LSP via `shape.toml` `[modules].paths`.
 pub const MAX_WORKSPACE_FILES: usize = 4096;
 
+/// W2.7 willRenameFiles helper — derive the canonical Shape `from` module
+/// path (`a::b::c`) for a `.shape` file relative to the workspace root.
+///
+/// Returns `None` when the file is outside the workspace root, has no
+/// `.shape` extension, or contains a path segment that is not a valid
+/// Shape identifier (e.g. starts with a digit, contains `-`). The latter
+/// is conservative — files that cannot be imported by any Shape `from`
+/// clause produce no rewrite edits.
+///
+/// Examples (workspace root = `/ws`):
+/// - `/ws/foo.shape` → `Some("foo")`
+/// - `/ws/lib/util.shape` → `Some("lib::util")`
+/// - `/ws/src/sub/mod.shape` → `Some("src::sub::mod")`
+/// - `/ws/2bad.shape` → `None` (leading digit)
+/// - `/other/foo.shape` → `None` (outside workspace)
+pub fn path_to_module_path(file: &Path, workspace_root: &Path) -> Option<String> {
+    let rel = file.strip_prefix(workspace_root).ok()?;
+    let stem = rel.file_stem().and_then(|s| s.to_str())?;
+    if rel.extension().and_then(|e| e.to_str()) != Some("shape") {
+        return None;
+    }
+    let mut segments: Vec<String> = Vec::new();
+    for component in rel.parent()?.components() {
+        let std::path::Component::Normal(seg) = component else {
+            continue;
+        };
+        let seg = seg.to_str()?;
+        if !is_valid_shape_identifier(seg) {
+            return None;
+        }
+        segments.push(seg.to_string());
+    }
+    if !is_valid_shape_identifier(stem) {
+        return None;
+    }
+    segments.push(stem.to_string());
+    if segments.is_empty() {
+        return None;
+    }
+    Some(segments.join("::"))
+}
+
+fn is_valid_shape_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 /// Child entry used for hierarchical module completion.
 #[derive(Debug, Clone)]
 pub struct ModuleChild {
@@ -682,6 +735,36 @@ mydep = { path = "deps/mydep" }
             !names.contains(&"e.txt".to_string()),
             "non-.shape file must be excluded, got {:?}",
             names
+        );
+    }
+
+    #[test]
+    fn test_path_to_module_path_w27() {
+        // W2.7 willRenameFiles — derive Shape module path from file path.
+        let root = PathBuf::from("/ws");
+        assert_eq!(
+            path_to_module_path(&root.join("foo.shape"), &root).as_deref(),
+            Some("foo")
+        );
+        assert_eq!(
+            path_to_module_path(&root.join("lib/util.shape"), &root).as_deref(),
+            Some("lib::util")
+        );
+        assert_eq!(
+            path_to_module_path(&root.join("src/sub/mod.shape"), &root).as_deref(),
+            Some("src::sub::mod")
+        );
+        // Non-.shape: rejected.
+        assert!(path_to_module_path(&root.join("foo.txt"), &root).is_none());
+        // Outside workspace: rejected.
+        assert!(path_to_module_path(&PathBuf::from("/other/x.shape"), &root).is_none());
+        // Invalid identifier in segment (leading digit): rejected.
+        assert!(path_to_module_path(&root.join("2bad.shape"), &root).is_none());
+        assert!(path_to_module_path(&root.join("a-b/x.shape"), &root).is_none());
+        // Underscore-only / leading-underscore: allowed (valid Shape ident).
+        assert_eq!(
+            path_to_module_path(&root.join("_priv/_x.shape"), &root).as_deref(),
+            Some("_priv::_x")
         );
     }
 
