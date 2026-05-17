@@ -384,7 +384,64 @@ impl ModuleCache {
             .join("__shape_lsp__.shape");
         self.find_exported_symbol_with_context(name, &current_file, None)
     }
+
+    /// Enumerate all `.shape` files under the workspace root.
+    ///
+    /// W2.6 workspace-indexing groundwork (consumed by W2.7 workspace/symbol
+    /// eager-index handler + this crate's cross-file references/rename
+    /// resolution). Walks the workspace tree once on demand; skips common
+    /// build/dependency directories. Returns absolute paths.
+    ///
+    /// Excludes:
+    /// - hidden directories (`.git`, `.cache`, etc.)
+    /// - `target/`, `node_modules/`, `dist/`, `build/`
+    /// - paths under `current_file`'s parent if it's the same as the file
+    ///   (no de-dup needed; caller handles).
+    ///
+    /// Bounded by [`MAX_WORKSPACE_FILES`] (4096) to avoid runaway on
+    /// monorepos; if the cap is hit the result is truncated and the caller
+    /// gets a best-effort subset.
+    pub fn enumerate_workspace_shape_files(&self, workspace_root: &Path) -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        let mut stack = vec![workspace_root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            if files.len() >= MAX_WORKSPACE_FILES {
+                break;
+            }
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+                // Skip hidden directories + well-known build/dep dirs
+                if name.starts_with('.')
+                    || matches!(name, "target" | "node_modules" | "dist" | "build")
+                {
+                    continue;
+                }
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().and_then(|e| e.to_str()) == Some("shape") {
+                    files.push(path);
+                    if files.len() >= MAX_WORKSPACE_FILES {
+                        break;
+                    }
+                }
+            }
+        }
+        files
+    }
 }
+
+/// Bound on workspace-file enumeration to keep the LSP responsive on
+/// monorepos. Mirrors rust-analyzer's per-crate file caps; if a workspace
+/// genuinely has more than this many `.shape` files, the user is editing in
+/// a context where eager indexing is the wrong default and they should
+/// scope the LSP via `shape.toml` `[modules].paths`.
+pub const MAX_WORKSPACE_FILES: usize = 4096;
 
 /// Child entry used for hierarchical module completion.
 #[derive(Debug, Clone)]
@@ -582,6 +639,49 @@ mydep = { path = "deps/mydep" }
             modules.iter().any(|m| m == "mydep::util"),
             "expected dependency submodule path, got: {:?}",
             modules
+        );
+    }
+
+    #[test]
+    fn test_enumerate_workspace_shape_files() {
+        // W2.6 groundwork — workspace-file enumeration for cross-file
+        // references / rename + W2.7 workspace symbol indexing consumer.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("a.shape"), "let x = 1").unwrap();
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("sub/b.shape"), "fn foo() { 2 }").unwrap();
+        // Excluded by hidden-dir filter
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join(".git/c.shape"), "ignored").unwrap();
+        // Excluded by build-dir filter
+        std::fs::create_dir_all(root.join("target")).unwrap();
+        std::fs::write(root.join("target/d.shape"), "ignored").unwrap();
+        // Non-shape file: excluded by extension filter
+        std::fs::write(root.join("e.txt"), "ignored").unwrap();
+
+        let cache = ModuleCache::new();
+        let files = cache.enumerate_workspace_shape_files(root);
+        let names: Vec<String> = files
+            .iter()
+            .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(String::from))
+            .collect();
+        assert!(names.contains(&"a.shape".to_string()), "expected a.shape, got {:?}", names);
+        assert!(names.contains(&"b.shape".to_string()), "expected b.shape, got {:?}", names);
+        assert!(
+            !names.contains(&"c.shape".to_string()),
+            "hidden dir .git must be excluded, got {:?}",
+            names
+        );
+        assert!(
+            !names.contains(&"d.shape".to_string()),
+            "build dir target must be excluded, got {:?}",
+            names
+        );
+        assert!(
+            !names.contains(&"e.txt".to_string()),
+            "non-.shape file must be excluded, got {:?}",
+            names
         );
     }
 

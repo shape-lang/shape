@@ -2,10 +2,13 @@
 //!
 //! Provides symbol renaming across the document using text-based searching.
 
+use crate::document::DocumentManager;
+use crate::module_cache::ModuleCache;
 use crate::util::{get_word_at_position, offset_to_line_col, position_to_offset};
-use shape_ast::ast::Program;
+use shape_ast::ast::{ImportItems, Item, Program, Statement};
 use shape_ast::parser::parse_program;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use tower_lsp_server::ls_types::{
     Position, PrepareRenameResponse, Range, TextEdit, Uri, WorkspaceEdit,
 };
@@ -105,6 +108,214 @@ pub fn rename(
         document_changes: None,
         change_annotations: None,
     })
+}
+
+/// W2.6 — Cross-file rename.
+///
+/// Performs the same scope-aware in-file rename as [`rename`], then for
+/// module-scope symbols extends edits to other open documents + workspace
+/// `.shape` files. Mirrors the cross-file find-references algorithm in
+/// `definition.rs::get_references_cross_file`: only top-level
+/// (module-scope-visible) symbols cascade; locally-shadowing inner bindings
+/// are excluded by `ScopeTree` semantics in each file.
+///
+/// Returns `None` if the symbol is not renameable or no edits were
+/// produced.
+#[allow(clippy::too_many_arguments)]
+pub fn rename_cross_file(
+    text: &str,
+    uri: &Uri,
+    position: Position,
+    new_name: &str,
+    cached_program: Option<&Program>,
+    documents: Option<&DocumentManager>,
+    module_cache: Option<&ModuleCache>,
+    workspace_root: Option<&Path>,
+) -> Option<WorkspaceEdit> {
+    // Same-file edits via the existing scope-aware path.
+    let mut workspace_edit = rename(text, uri, position, new_name, cached_program)?;
+
+    // Determine the symbol name for cross-file scan.
+    let Some(old_name) = get_word_at_position(text, position) else {
+        return Some(workspace_edit);
+    };
+
+    let program = match parse_program(text) {
+        Ok(p) => p,
+        Err(_) => match cached_program {
+            Some(p) => p.clone(),
+            None => return Some(workspace_edit),
+        },
+    };
+
+    if !is_module_scope_symbol_in_rename(&program, &old_name) {
+        // Local-scope binding — same-file rename is sufficient.
+        return Some(workspace_edit);
+    }
+
+    let changes_map = workspace_edit.changes.get_or_insert_with(HashMap::new);
+
+    let mut visited: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    if let Some(current_path) = uri.to_file_path() {
+        visited.insert(current_path.into_owned());
+    }
+
+    if let Some(docs) = documents {
+        for other_uri in docs.all_uris() {
+            if &other_uri == uri {
+                continue;
+            }
+            let Some(other_path_cow) = other_uri.to_file_path() else {
+                continue;
+            };
+            let other_path = other_path_cow.into_owned();
+            if !visited.insert(other_path.clone()) {
+                continue;
+            }
+            let Some(other_doc) = docs.get(&other_uri) else {
+                continue;
+            };
+            let other_text = other_doc.text();
+            let edits =
+                collect_module_scope_edits_in_file(&other_text, &old_name, new_name);
+            if !edits.is_empty() {
+                changes_map
+                    .entry(other_uri)
+                    .or_insert_with(Vec::new)
+                    .extend(edits);
+            }
+        }
+    }
+
+    if let (Some(cache), Some(root)) = (module_cache, workspace_root) {
+        let _ = cache;
+        for path in cache.enumerate_workspace_shape_files(root) {
+            if !visited.insert(path.clone()) {
+                continue;
+            }
+            let Some(other_uri) = Uri::from_file_path(&path) else {
+                continue;
+            };
+            let Ok(other_text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let edits =
+                collect_module_scope_edits_in_file(&other_text, &old_name, new_name);
+            if !edits.is_empty() {
+                changes_map
+                    .entry(other_uri)
+                    .or_insert_with(Vec::new)
+                    .extend(edits);
+            }
+        }
+    }
+
+    Some(workspace_edit)
+}
+
+/// Mirrors `definition::is_module_scope_symbol` — kept local to avoid a
+/// pub-cross-module dependency between sibling LSP modules.
+fn is_module_scope_symbol_in_rename(program: &Program, name: &str) -> bool {
+    for item in &program.items {
+        match item {
+            Item::Function(func, _) if func.name == name => return true,
+            Item::ForeignFunction(func, _) if func.name == name => return true,
+            Item::Trait(t, _) if t.name == name => return true,
+            Item::Enum(e, _) if e.name == name => return true,
+            Item::TypeAlias(ta, _) if ta.name == name => return true,
+            Item::StructType(s, _) if s.name == name => return true,
+            Item::VariableDecl(decl, _) => {
+                for (n, _) in crate::symbols::get_pattern_names(&decl.pattern) {
+                    if n == name {
+                        return true;
+                    }
+                }
+            }
+            Item::Statement(Statement::VariableDecl(decl, _), _) => {
+                for (n, _) in crate::symbols::get_pattern_names(&decl.pattern) {
+                    if n == name {
+                        return true;
+                    }
+                }
+            }
+            Item::Import(import_stmt, _) => match &import_stmt.items {
+                ImportItems::Named(specs) => {
+                    for spec in specs {
+                        let local = spec.alias.as_ref().unwrap_or(&spec.name);
+                        if local == name {
+                            return true;
+                        }
+                    }
+                }
+                ImportItems::Namespace { name: ns_name, alias } => {
+                    let local = alias.as_ref().unwrap_or(ns_name);
+                    if local == name {
+                        return true;
+                    }
+                }
+            },
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Collect TextEdits for module-scope occurrences of `old_name` in
+/// `text`, replacing each with `new_name`. Uses ScopeTree to skip
+/// locally-shadowing inner bindings.
+fn collect_module_scope_edits_in_file(
+    text: &str,
+    old_name: &str,
+    new_name: &str,
+) -> Vec<TextEdit> {
+    let program = match parse_program(text) {
+        Ok(p) => p,
+        Err(_) => {
+            let partial = shape_ast::parse_program_resilient(text);
+            if partial.items.is_empty() {
+                return Vec::new();
+            }
+            partial.into_program()
+        }
+    };
+
+    if !is_module_scope_symbol_in_rename(&program, old_name) {
+        return Vec::new();
+    }
+
+    let tree = crate::scope::ScopeTree::build(&program, text);
+    let Some(root) = tree.scopes.first() else {
+        return Vec::new();
+    };
+
+    let mut edits = Vec::new();
+    for binding in &root.bindings {
+        if binding.name != old_name {
+            continue;
+        }
+        let mut push = |span: (usize, usize)| {
+            let (sl, sc) = offset_to_line_col(text, span.0);
+            let (el, ec) = offset_to_line_col(text, span.1);
+            edits.push(TextEdit {
+                range: Range {
+                    start: Position {
+                        line: sl,
+                        character: sc,
+                    },
+                    end: Position {
+                        line: el,
+                        character: ec,
+                    },
+                },
+                new_text: new_name.to_string(),
+            });
+        };
+        push(binding.def_span);
+        for span in &binding.references {
+            push(*span);
+        }
+    }
+    edits
 }
 
 /// Find all occurrences of a symbol and create edits to rename them
@@ -313,6 +524,92 @@ mod tests {
             },
         );
         assert_eq!(word, Some("bar".to_string()));
+    }
+
+    #[test]
+    fn test_rename_cross_file_module_scope_fn() {
+        use crate::document::DocumentManager;
+        let docs = DocumentManager::new();
+        let main_text = "fn shared() { return 1 }\nlet a = shared()".to_string();
+        let other_text = "fn shared() { return 2 }\nlet b = shared() + shared()".to_string();
+        let main_uri = Uri::from_file_path("/main.shape").unwrap();
+        let other_uri = Uri::from_file_path("/other.shape").unwrap();
+        docs.open(main_uri.clone(), 1, main_text.clone());
+        docs.open(other_uri.clone(), 1, other_text);
+
+        let pos = Position {
+            line: 0,
+            character: 3,
+        };
+        let edit = rename_cross_file(
+            &main_text,
+            &main_uri,
+            pos,
+            "renamed",
+            None,
+            Some(&docs),
+            None,
+            None,
+        )
+        .expect("rename should produce a WorkspaceEdit");
+
+        let changes = edit.changes.expect("changes map");
+        assert!(
+            changes.contains_key(&main_uri),
+            "main uri must be in changes"
+        );
+        assert!(
+            changes.contains_key(&other_uri),
+            "other uri must be in changes for cross-file rename"
+        );
+        let other_edits = &changes[&other_uri];
+        // other.shape: def + 2 refs = 3 edits
+        assert!(
+            other_edits.len() >= 3,
+            "expected ≥3 edits in /other.shape (def + 2 refs), got {}",
+            other_edits.len()
+        );
+        for te in other_edits {
+            assert_eq!(te.new_text, "renamed");
+        }
+    }
+
+    #[test]
+    fn test_rename_cross_file_local_binding_no_crossover() {
+        use crate::document::DocumentManager;
+        let docs = DocumentManager::new();
+        let main_text =
+            "fn outer() {\n  let local = 1\n  return local + local\n}".to_string();
+        let other_text =
+            "fn other() {\n  let local = 5\n  return local\n}".to_string();
+        let main_uri = Uri::from_file_path("/main.shape").unwrap();
+        let other_uri = Uri::from_file_path("/other.shape").unwrap();
+        docs.open(main_uri.clone(), 1, main_text.clone());
+        docs.open(other_uri.clone(), 1, other_text);
+
+        let offset = main_text.find("local").unwrap();
+        let (line, col) = offset_to_line_col(&main_text, offset);
+        let edit = rename_cross_file(
+            &main_text,
+            &main_uri,
+            Position {
+                line,
+                character: col,
+            },
+            "new_local",
+            None,
+            Some(&docs),
+            None,
+            None,
+        )
+        .expect("rename should produce edits for local scope");
+
+        let changes = edit.changes.expect("changes");
+        assert!(changes.contains_key(&main_uri));
+        assert!(
+            !changes.contains_key(&other_uri),
+            "local-scope `local` rename must NOT touch /other.shape"
+        );
     }
 
     #[test]

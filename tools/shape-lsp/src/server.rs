@@ -12,7 +12,7 @@ use crate::code_lens::{get_code_lenses, resolve_code_lens};
 use crate::completion::get_completions_with_context;
 use crate::definition::{
     get_declaration, get_definition, get_document_highlights, get_implementations,
-    get_references_with_fallback, get_type_definition,
+    get_references_cross_file, get_references_with_fallback, get_type_definition,
 };
 use crate::diagnostics::error_to_diagnostic;
 use crate::document::DocumentManager;
@@ -21,7 +21,7 @@ use crate::folding::get_folding_ranges;
 use crate::formatting::{format_document, format_on_type, format_range};
 use crate::hover::get_hover;
 use crate::inlay_hints::{InlayHintConfig, get_inlay_hints_with_context};
-use crate::rename::{prepare_rename, rename};
+use crate::rename::{prepare_rename, rename_cross_file};
 use crate::semantic_tokens::{get_legend, get_semantic_tokens};
 use crate::signature_help::get_signature_help;
 use crate::util::{
@@ -1121,10 +1121,23 @@ impl LanguageServer for ShapeLanguageServer {
             }
         }
 
-        // Get references with cached program fallback
+        // W2.6 — cross-file references via ScopeTree-driven scan over open
+        // documents + workspace .shape files. Same-file path still uses
+        // ScopeTree::references_of (correctness preserved); cross-file
+        // restricted to module-scope-visible top-level symbols.
         let cached = self.last_good_programs.get(&uri);
         let cached_ref = cached.as_ref().map(|r| r.value());
-        let references = get_references_with_fallback(&text, position, &uri, cached_ref);
+        let module_cache = self.documents.get_module_cache();
+        let workspace_root = self.project_root.get().map(|p| p.as_path());
+        let references = get_references_cross_file(
+            &text,
+            position,
+            &uri,
+            cached_ref,
+            Some(&self.documents),
+            Some(&module_cache),
+            workspace_root,
+        );
 
         Ok(references)
     }
@@ -1600,9 +1613,24 @@ impl LanguageServer for ShapeLanguageServer {
 
         let text = doc.text();
 
+        // W2.6 — cross-file rename via ScopeTree-driven scan over open
+        // documents + workspace .shape files. Same-file path remains
+        // scope-aware; cross-file restricted to module-scope-visible
+        // top-level symbols.
         let cached = self.last_good_programs.get(&uri);
         let cached_ref = cached.as_ref().map(|r| r.value());
-        let edit = rename(&text, &uri, position, &new_name, cached_ref);
+        let module_cache = self.documents.get_module_cache();
+        let workspace_root = self.project_root.get().map(|p| p.as_path());
+        let edit = rename_cross_file(
+            &text,
+            &uri,
+            position,
+            &new_name,
+            cached_ref,
+            Some(&self.documents),
+            Some(&module_cache),
+            workspace_root,
+        );
 
         Ok(edit)
     }

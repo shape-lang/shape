@@ -3,11 +3,13 @@
 //! Enables navigation to symbol definitions and finding all references.
 
 use crate::annotation_discovery::AnnotationDiscovery;
+use crate::document::DocumentManager;
 use crate::module_cache::ModuleCache;
 use crate::type_inference::infer_variable_type;
 use crate::util::{get_word_at_position, offset_to_line_col, position_to_offset};
 use shape_ast::ast::{ImportItems, Item, Program, Span, Statement, TypeName};
 use shape_ast::parser::parse_program;
+use std::path::{Path, PathBuf};
 use tower_lsp_server::ls_types::{
     DocumentHighlight, DocumentHighlightKind, GotoDefinitionResponse, Location, Position, Range,
     Uri,
@@ -73,6 +75,243 @@ pub fn get_definition(
 /// variable shadowing and lexical scoping.
 pub fn get_references(text: &str, position: Position, uri: &Uri) -> Option<Vec<Location>> {
     get_references_with_fallback(text, position, uri, None)
+}
+
+/// W2.6 — Find all references to a symbol at the given position, including
+/// cross-file references from open documents and workspace `.shape` files.
+///
+/// Algorithm:
+///  1. Resolve the symbol locally via `ScopeTree::references_of` (same as
+///     `get_references_with_fallback`).
+///  2. If the local binding is module-scope-visible (top-level item — fn /
+///     type / trait / enum / pub var), enumerate other files (open docs +
+///     workspace `.shape` files via `ModuleCache::enumerate_workspace_shape_files`)
+///     and scan each one's `ScopeTree` for **module-scope** references to the
+///     same name. Lexical scoping within each file is preserved by
+///     `ScopeTree::references_of` — only top-level usages cross.
+///  3. Locally-scoped bindings (loop vars, closure params, block lets) do not
+///     produce cross-file results.
+///
+/// Returns `None` if no references are found anywhere.
+pub fn get_references_cross_file(
+    text: &str,
+    position: Position,
+    uri: &Uri,
+    cached_program: Option<&Program>,
+    documents: Option<&DocumentManager>,
+    module_cache: Option<&ModuleCache>,
+    workspace_root: Option<&Path>,
+) -> Option<Vec<Location>> {
+    // Local file references via ScopeTree (and text-search fallback).
+    let mut locations = get_references_with_fallback(text, position, uri, cached_program)
+        .unwrap_or_default();
+
+    // Determine the symbol name + whether it's module-scope-visible.
+    let Some(word) = get_word_at_position(text, position) else {
+        return if locations.is_empty() {
+            None
+        } else {
+            Some(locations)
+        };
+    };
+
+    // Parse to inspect the binding kind. If parse fails, skip cross-file.
+    let program = match parse_program(text) {
+        Ok(p) => p,
+        Err(_) => match cached_program {
+            Some(p) => p.clone(),
+            None => {
+                return if locations.is_empty() {
+                    None
+                } else {
+                    Some(locations)
+                };
+            }
+        },
+    };
+
+    if !is_module_scope_symbol(&program, &word) {
+        // Local-scope binding (loop var, closure param, block let) — no
+        // cross-file lookup. Return whatever local refs we found.
+        return if locations.is_empty() {
+            None
+        } else {
+            Some(locations)
+        };
+    }
+
+    // Cross-file scan: open documents (other than current uri) + workspace
+    // .shape files (de-duplicated).
+    let mut visited: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    if let Some(current_path) = uri.to_file_path() {
+        visited.insert(current_path.into_owned());
+    }
+
+    if let Some(docs) = documents {
+        for other_uri in docs.all_uris() {
+            if &other_uri == uri {
+                continue;
+            }
+            let Some(other_path_cow) = other_uri.to_file_path() else {
+                continue;
+            };
+            let other_path = other_path_cow.into_owned();
+            if !visited.insert(other_path.clone()) {
+                continue;
+            }
+            let Some(other_doc) = docs.get(&other_uri) else {
+                continue;
+            };
+            let other_text = other_doc.text();
+            collect_module_scope_refs_in_file(
+                &other_text,
+                &other_uri,
+                &word,
+                &mut locations,
+            );
+        }
+    }
+
+    if let (Some(cache), Some(root)) = (module_cache, workspace_root) {
+        let _ = cache; // Reserved for future symbol-identity refinement.
+        for path in cache.enumerate_workspace_shape_files(root) {
+            if !visited.insert(path.clone()) {
+                continue;
+            }
+            let Some(other_uri) = Uri::from_file_path(&path) else {
+                continue;
+            };
+            // Skip files already visited via open documents.
+            let Ok(other_text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            collect_module_scope_refs_in_file(
+                &other_text,
+                &other_uri,
+                &word,
+                &mut locations,
+            );
+        }
+    }
+
+    if locations.is_empty() {
+        None
+    } else {
+        Some(locations)
+    }
+}
+
+/// Return true when `name` is bound at module (top-level) scope in
+/// `program` — i.e. it is a candidate for cross-file references because
+/// other files could import or refer to it.
+///
+/// W2.6 conservative heuristic: top-level fn / type / trait / enum /
+/// struct / foreign-fn / module-level variable declarations are
+/// module-scope-visible. Statement-nested `let`, loop vars, closure
+/// params are not.
+fn is_module_scope_symbol(program: &Program, name: &str) -> bool {
+    for item in &program.items {
+        match item {
+            Item::Function(func, _) if func.name == name => return true,
+            Item::ForeignFunction(func, _) if func.name == name => return true,
+            Item::Trait(t, _) if t.name == name => return true,
+            Item::Enum(e, _) if e.name == name => return true,
+            Item::TypeAlias(ta, _) if ta.name == name => return true,
+            Item::StructType(s, _) if s.name == name => return true,
+            Item::VariableDecl(decl, _) => {
+                for (n, _) in crate::symbols::get_pattern_names(&decl.pattern) {
+                    if n == name {
+                        return true;
+                    }
+                }
+            }
+            Item::Statement(Statement::VariableDecl(decl, _), _) => {
+                for (n, _) in crate::symbols::get_pattern_names(&decl.pattern) {
+                    if n == name {
+                        return true;
+                    }
+                }
+            }
+            Item::Import(import_stmt, _) => match &import_stmt.items {
+                ImportItems::Named(specs) => {
+                    for spec in specs {
+                        let local = spec.alias.as_ref().unwrap_or(&spec.name);
+                        if local == name {
+                            return true;
+                        }
+                    }
+                }
+                ImportItems::Namespace { name: ns_name, alias } => {
+                    let local = alias.as_ref().unwrap_or(ns_name);
+                    if local == name {
+                        return true;
+                    }
+                }
+            },
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Collect ScopeTree references to a top-level `name` in `text`, appending
+/// `Location`s into `out`. Only the module-scope binding (and its
+/// references) is considered — locally-shadowing inner bindings are
+/// excluded by `ScopeTree::references_of` semantics.
+fn collect_module_scope_refs_in_file(
+    text: &str,
+    uri: &Uri,
+    name: &str,
+    out: &mut Vec<Location>,
+) {
+    let program = match parse_program(text) {
+        Ok(p) => p,
+        Err(_) => {
+            let partial = shape_ast::parse_program_resilient(text);
+            if partial.items.is_empty() {
+                return;
+            }
+            partial.into_program()
+        }
+    };
+
+    if !is_module_scope_symbol(&program, name) {
+        return;
+    }
+
+    let tree = crate::scope::ScopeTree::build(&program, text);
+    // Find any module-scope binding with this name. ScopeTree's first
+    // scope is the module (root) scope; its bindings are the top-level
+    // names.
+    let Some(root) = tree.scopes.first() else {
+        return;
+    };
+    for binding in &root.bindings {
+        if binding.name != name {
+            continue;
+        }
+        let push = |span: (usize, usize), out: &mut Vec<Location>| {
+            let (sl, sc) = offset_to_line_col(text, span.0);
+            let (el, ec) = offset_to_line_col(text, span.1);
+            out.push(Location {
+                uri: uri.clone(),
+                range: Range {
+                    start: Position {
+                        line: sl,
+                        character: sc,
+                    },
+                    end: Position {
+                        line: el,
+                        character: ec,
+                    },
+                },
+            });
+        };
+        push(binding.def_span, out);
+        for span in &binding.references {
+            push(*span, out);
+        }
+    }
 }
 
 /// Find all references to a symbol at the given position, with cached program fallback.
@@ -1144,6 +1383,110 @@ let y = myVar * 2;
         // ScopeTree won't bind at offset 0, fallback path needs a word — none here.
         // Result depends on the surrounding text; ensure the call doesn't panic.
         let _ = highlights;
+    }
+
+    #[test]
+    fn test_is_module_scope_symbol_top_level_fn() {
+        let code = "fn foo() { return 1 }\nlet x = foo()";
+        let program = parse_program(code).unwrap();
+        assert!(is_module_scope_symbol(&program, "foo"));
+        assert!(is_module_scope_symbol(&program, "x"));
+        // Inner locals are not module-scope-visible.
+        assert!(!is_module_scope_symbol(&program, "nope"));
+    }
+
+    #[test]
+    fn test_collect_module_scope_refs_finds_call_site() {
+        let text = "fn helper() { return 1 }\nlet x = helper() + helper()";
+        let uri = Uri::from_file_path("/other.shape").unwrap();
+        let mut out = Vec::new();
+        collect_module_scope_refs_in_file(text, &uri, "helper", &mut out);
+        // def + 2 references = 3 locations
+        assert!(
+            out.len() >= 3,
+            "expected def + at least 2 refs to `helper`, got {}",
+            out.len()
+        );
+    }
+
+    #[test]
+    fn test_get_references_cross_file_module_scope() {
+        // Simulate two open documents that both reference `shared`.
+        use crate::document::DocumentManager;
+        let docs = DocumentManager::new();
+        let main_text = "fn shared() { return 1 }\nlet a = shared()".to_string();
+        let other_text = "fn shared() { return 2 }\nlet b = shared() + shared()".to_string();
+        let main_uri = Uri::from_file_path("/main.shape").unwrap();
+        let other_uri = Uri::from_file_path("/other.shape").unwrap();
+        docs.open(main_uri.clone(), 1, main_text.clone());
+        docs.open(other_uri.clone(), 1, other_text);
+
+        // Click on `shared` in main.shape (col 3 of `fn shared()`)
+        let pos = Position {
+            line: 0,
+            character: 3,
+        };
+        let refs = get_references_cross_file(
+            &main_text,
+            pos,
+            &main_uri,
+            None,
+            Some(&docs),
+            None,
+            None,
+        )
+        .expect("should find cross-file references");
+        // Local def + local 1 use + other def + other 2 uses = 5
+        assert!(
+            refs.len() >= 4,
+            "expected cross-file refs, got {}: {:?}",
+            refs.len(),
+            refs
+        );
+        assert!(
+            refs.iter().any(|loc| &loc.uri == &other_uri),
+            "expected at least one reference from /other.shape"
+        );
+    }
+
+    #[test]
+    fn test_get_references_cross_file_local_binding_no_crossover() {
+        // Local `let` inside a function — should NOT cascade to other files.
+        use crate::document::DocumentManager;
+        let docs = DocumentManager::new();
+        let main_text =
+            "fn outer() {\n  let local = 1\n  return local + local\n}".to_string();
+        let other_text =
+            "fn other() {\n  let local = 5\n  return local\n}".to_string();
+        let main_uri = Uri::from_file_path("/main.shape").unwrap();
+        let other_uri = Uri::from_file_path("/other.shape").unwrap();
+        docs.open(main_uri.clone(), 1, main_text.clone());
+        docs.open(other_uri.clone(), 1, other_text);
+
+        // Click on `local` in main.shape at its definition site
+        let local_offset = main_text.find("local").unwrap();
+        let (line, col) = offset_to_line_col(&main_text, local_offset);
+        let pos = Position {
+            line,
+            character: col,
+        };
+        let refs = get_references_cross_file(
+            &main_text,
+            pos,
+            &main_uri,
+            None,
+            Some(&docs),
+            None,
+            None,
+        );
+        // Expect refs only in main.shape (local-scope binding)
+        if let Some(refs) = refs {
+            assert!(
+                refs.iter().all(|loc| &loc.uri == &main_uri),
+                "local-scope `local` should NOT cascade to other files, got: {:?}",
+                refs
+            );
+        }
     }
 
     #[test]
