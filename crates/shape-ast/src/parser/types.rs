@@ -1258,22 +1258,40 @@ fn parse_interface_member(pair: Pair<Rule>) -> Result<crate::ast::InterfaceMembe
         }
     }
 
-    let type_annotation = type_annotation.ok_or_else(|| ShapeError::ParseError {
-        message: format!("interface member '{}' missing type annotation", name),
-        location: Some(pair_loc),
-    })?;
-
     if is_method {
+        // W6 imprecision 83 root cause fix: trait/interface method return type is
+        // optional in the grammar (defaults to `void`/Unit when omitted). This
+        // unblocks return-typeless trait method declarations like
+        // `add_assign(other: Self)` without forcing a hand-written `: Self` /
+        // `: void` workaround. The Phase 4 close-out explicitly bisected this:
+        // when the trait declaration carried no return type, the parser HARD-
+        // ERRORED, then `collect_prelude_imports` silently swallowed the
+        // failure, leaving the user's `xs.map(...)` to fall through to the
+        // V3-S5 ckpt-2 `map` SURFACE (no Vec.map specialization available).
+        let return_type = type_annotation.unwrap_or_else(|| {
+            // Default return type for trait/interface methods without an
+            // explicit annotation is `void`. Property-style members still
+            // require an explicit type (see below) since they describe a
+            // value, not a callable.
+            crate::ast::TypeAnnotation::Basic("void".to_string())
+        });
         Ok(crate::ast::InterfaceMember::Method {
             name,
             optional,
             params,
-            return_type: type_annotation,
+            return_type,
             is_async: false,
             span,
             doc_comment,
         })
     } else {
+        // Property members still require an explicit type annotation —
+        // they describe a value, not a callable, so there's no sensible
+        // "void" default.
+        let type_annotation = type_annotation.ok_or_else(|| ShapeError::ParseError {
+            message: format!("interface property '{}' missing type annotation", name),
+            location: Some(pair_loc),
+        })?;
         Ok(crate::ast::InterfaceMember::Property {
             name,
             optional,

@@ -973,9 +973,23 @@ pub struct PreludeImport {
 pub fn collect_prelude_imports(
     loader: &mut shape_runtime::module_loader::ModuleLoader,
 ) -> Vec<PreludeImport> {
+    // W6 imprecision 83 follow-up: previously this swallowed prelude load
+    // failures silently, which turned a parse error in any prelude-dep
+    // (e.g. `std::core::add` with a return-typeless trait method) into a
+    // mystery Vec.map SURFACE at the user program. The W6 grammar fix
+    // (return-typeless trait methods now parse) removes the proximate
+    // trigger, but we still surface load failures here loud-but-recovery
+    // so the failure mode is debuggable. Returning an empty Vec keeps the
+    // caller signatures stable; future work may propagate the Result up.
     let prelude = match loader.load_module("std::core::prelude") {
         Ok(m) => m,
-        Err(_) => return Vec::new(),
+        Err(e) => {
+            eprintln!(
+                "warning: failed to load std::core::prelude — prelude items will be unavailable: {}",
+                e
+            );
+            return Vec::new();
+        }
     };
 
     let mut imports = Vec::new();
