@@ -28,10 +28,13 @@ fn operator_trait_for_op(op: &BinaryOp) -> Option<&'static str> {
         BinaryOp::Mul => Some("Mul"),
         BinaryOp::Div => Some("Div"),
         BinaryOp::Mod => Some("Mod"),
+        BinaryOp::BitAnd => Some("BitAnd"),
+        BinaryOp::BitOr => Some("BitOr"),
+        BinaryOp::BitXor => Some("BitXor"),
         BinaryOp::Greater | BinaryOp::Less | BinaryOp::GreaterEq | BinaryOp::LessEq => {
             Some("Ord")
         }
-        _ => None, // Pow has no operator trait
+        _ => None, // Pow / BitShl / BitShr have no operator trait (yet)
     }
 }
 
@@ -47,6 +50,9 @@ fn operator_trait_method_for_op(op: &BinaryOp) -> Option<&'static str> {
         BinaryOp::Mul => Some("mul"),
         BinaryOp::Div => Some("div"),
         BinaryOp::Mod => Some("mod"),
+        BinaryOp::BitAnd => Some("bitand"),
+        BinaryOp::BitOr => Some("bitor"),
+        BinaryOp::BitXor => Some("bitxor"),
         BinaryOp::Greater | BinaryOp::Less | BinaryOp::GreaterEq | BinaryOp::LessEq => {
             Some("cmp")
         }
@@ -1113,8 +1119,36 @@ impl BytecodeCompiler {
                 // is byte-identical to pre-R5.1C.
                 self.compile_expr(left)?;
                 let mut left_numeric = self.last_expr_numeric_type;
+                let left_schema = self.last_expr_schema;
                 self.compile_expr(right)?;
                 let mut right_numeric = self.last_expr_numeric_type;
+
+                // W1.9: user-defined `impl BitAnd / BitOr / BitXor for X`
+                // dispatch — if the left-operand's TypedObject schema
+                // implements the matching operator trait, emit a
+                // `CallMethod("bitand"/"bitor"/"bitxor")` and return.
+                // Both operands are already on the stack from the
+                // compile_expr calls above. Mirrors the Add arm's
+                // pattern at L756-790 and Sub/Mul/Div/Mod's trait
+                // dispatch at L1462-1475.
+                if matches!(op, BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor) {
+                    if let (Some(trait_name), Some(method_name)) = (
+                        operator_trait_for_op(op),
+                        operator_trait_method_for_op(op),
+                    ) {
+                        let left_implements = left_schema
+                            .and_then(|sid| self.type_tracker.schema_registry().get_by_id(sid))
+                            .is_some_and(|schema| {
+                                self.type_inference
+                                    .env
+                                    .type_implements_trait(&schema.name, trait_name)
+                            });
+                        if left_implements {
+                            emit_operator_trait_call(self, method_name);
+                            return Ok(());
+                        }
+                    }
+                }
 
                 // Don't trust inferred numeric types for untyped function
                 // parameters (same rationale as the `param_locals` guard
