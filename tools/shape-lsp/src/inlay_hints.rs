@@ -22,6 +22,7 @@ use crate::type_inference::{
 };
 
 /// Configuration for inlay hints
+#[derive(Debug, Clone)]
 pub struct InlayHintConfig {
     pub show_type_hints: bool,
     pub show_parameter_hints: bool,
@@ -29,6 +30,15 @@ pub struct InlayHintConfig {
     pub show_variable_type_hints: bool,
     /// Show `-> type` hints after function parameter lists without explicit return annotations
     pub show_return_type_hints: bool,
+    /// W2.4 / 1.27: render the inferred type after every intermediate `.method()`
+    /// call in a method chain (e.g. `xs.map(f).filter(g).sum()` → hint after
+    /// `.map(f)` and `.filter(g)`).
+    pub show_chain_hints: bool,
+    /// W2.4 / 1.25: render an approximate `BindingStorageClass` label after
+    /// `let`/`var` bindings (`[direct]` / `[heap]` / `[heap mut]` / `[&]` /
+    /// `[&mut]`). LSP-side heuristic — the authoritative classification lives
+    /// in the bytecode compiler (`crates/shape-vm/src/type_tracking.rs:286`).
+    pub show_binding_kind_hints: bool,
 }
 
 impl Default for InlayHintConfig {
@@ -38,7 +48,90 @@ impl Default for InlayHintConfig {
             show_parameter_hints: true,
             show_variable_type_hints: true,
             show_return_type_hints: true,
+            show_chain_hints: true,
+            show_binding_kind_hints: false,
         }
+    }
+}
+
+impl InlayHintConfig {
+    /// W2.4 / 1.70: parse an `InlayHintConfig` from a `workspace/configuration`
+    /// JSON value. Honors keys such as `shape.inlayHints.enable`,
+    /// `shape.inlayHints.typeHints`, `shape.inlayHints.parameterHints`,
+    /// `shape.inlayHints.variableTypeHints`, `shape.inlayHints.returnTypeHints`,
+    /// `shape.inlayHints.chainHints`, `shape.inlayHints.bindingKindHints`.
+    ///
+    /// snake_case aliases (e.g. `chain_hints`) are also accepted. Unknown keys
+    /// are ignored. Returns `Default::default()` when the input is `None` or
+    /// contains no recognized keys.
+    pub fn from_lsp_settings(value: Option<&serde_json::Value>) -> Self {
+        let mut cfg = Self::default();
+        let Some(root) = value else {
+            return cfg;
+        };
+
+        // Accept the nested `shape.inlayHints` shape, or a top-level
+        // `inlayHints` shape, or top-level direct keys.
+        let mut sources: Vec<&serde_json::Value> = Vec::new();
+        if let Some(shape) = root.get("shape") {
+            if let Some(ih) = shape.get("inlayHints").or_else(|| shape.get("inlay_hints")) {
+                sources.push(ih);
+            }
+        }
+        if let Some(ih) = root.get("inlayHints").or_else(|| root.get("inlay_hints")) {
+            sources.push(ih);
+        }
+        sources.push(root);
+
+        let mut master = None;
+        for src in &sources {
+            if let Some(v) = src.get("enable").and_then(serde_json::Value::as_bool) {
+                master = Some(v);
+                break;
+            }
+        }
+
+        let read_bool = |keys: &[&str]| -> Option<bool> {
+            for src in &sources {
+                for k in keys {
+                    if let Some(v) = src.get(*k).and_then(serde_json::Value::as_bool) {
+                        return Some(v);
+                    }
+                }
+            }
+            None
+        };
+
+        if let Some(v) = read_bool(&["typeHints", "type_hints"]) {
+            cfg.show_type_hints = v;
+        }
+        if let Some(v) = read_bool(&["parameterHints", "parameter_hints"]) {
+            cfg.show_parameter_hints = v;
+        }
+        if let Some(v) = read_bool(&["variableTypeHints", "variable_type_hints"]) {
+            cfg.show_variable_type_hints = v;
+        }
+        if let Some(v) = read_bool(&["returnTypeHints", "return_type_hints"]) {
+            cfg.show_return_type_hints = v;
+        }
+        if let Some(v) = read_bool(&["chainHints", "chain_hints"]) {
+            cfg.show_chain_hints = v;
+        }
+        if let Some(v) = read_bool(&["bindingKindHints", "binding_kind_hints"]) {
+            cfg.show_binding_kind_hints = v;
+        }
+
+        // Master enable: when explicitly set to false, suppress everything.
+        if master == Some(false) {
+            cfg.show_type_hints = false;
+            cfg.show_parameter_hints = false;
+            cfg.show_variable_type_hints = false;
+            cfg.show_return_type_hints = false;
+            cfg.show_chain_hints = false;
+            cfg.show_binding_kind_hints = false;
+        }
+
+        cfg
     }
 }
 
@@ -54,6 +147,10 @@ struct HintContext<'a> {
     type_map: HashMap<String, String>,
     /// Per-function inferred parameter and return types from TypeInferenceEngine
     function_types: HashMap<String, FunctionTypeInfo>,
+    /// Offsets at which a chain hint has already been emitted, used to dedupe
+    /// when the Visitor revisits inner MethodCall nodes of the chain spine
+    /// (W2.4 / 1.27).
+    chain_hint_offsets: std::collections::HashSet<usize>,
 }
 
 impl<'a> HintContext<'a> {
@@ -163,6 +260,7 @@ impl<'a> HintContext<'a> {
             hints: Vec::new(),
             type_map,
             function_types,
+            chain_hint_offsets: std::collections::HashSet::new(),
         }
     }
 
@@ -170,53 +268,201 @@ impl<'a> HintContext<'a> {
     /// Uses the program-level type_map (from TypeInferenceEngine) first,
     /// falls back to heuristic infer_expr_type for unresolved variables.
     fn collect_variable_type_hint(&mut self, decl: &VariableDecl) {
-        if !self.config.show_type_hints
-            || !self.config.show_variable_type_hints
-            || decl.type_annotation.is_some()
-        {
+        if !self.config.show_type_hints {
             return;
         }
 
+        let want_type_hint =
+            self.config.show_variable_type_hints && decl.type_annotation.is_none();
+        let want_binding_hint = self.config.show_binding_kind_hints;
+
+        if !want_type_hint && !want_binding_hint {
+            return;
+        }
+
+        // W2.4 / 1.04: when the RHS is a closure (`FunctionExpr`), prefer
+        // the LSP's `render_closure_signature` over the engine's
+        // `(unknown) -> _` format — the engine erases param types when
+        // unannotated; our renderer at least preserves source-annotated
+        // params and surfaces inferred return types.
+        let closure_signature: Option<String> = decl.value.as_ref().and_then(|v| {
+            if let Expr::FunctionExpr {
+                params,
+                return_type,
+                body,
+                ..
+            } = v
+            {
+                Some(crate::type_inference::render_closure_signature(
+                    params,
+                    return_type.as_ref(),
+                    body,
+                    &std::collections::HashMap::new(),
+                ))
+            } else {
+                None
+            }
+        });
+
         // Try engine-inferred type from type_map first, fall back to heuristic
         let var_name = decl.pattern.as_identifier();
-        let inferred_type = var_name
-            .and_then(|name| {
-                decl.pattern
-                    .as_identifier_span()
-                    .and_then(|span| {
-                        if span.is_dummy() {
-                            None
-                        } else {
-                            infer_variable_type_for_display(self.program, name, span.end)
-                        }
-                    })
-                    .or_else(|| self.type_map.get(name).cloned())
-            })
-            .or_else(|| {
-                decl.value
-                    .as_ref()
-                    .and_then(infer_expr_type_via_engine)
-                    .or_else(|| decl.value.as_ref().and_then(infer_expr_type))
-            });
+        let inferred_type = closure_signature.or_else(|| {
+            var_name
+                .and_then(|name| {
+                    decl.pattern
+                        .as_identifier_span()
+                        .and_then(|span| {
+                            if span.is_dummy() {
+                                None
+                            } else {
+                                infer_variable_type_for_display(self.program, name, span.end)
+                            }
+                        })
+                        .or_else(|| self.type_map.get(name).cloned())
+                })
+                .or_else(|| {
+                    decl.value
+                        .as_ref()
+                        .and_then(infer_expr_type_via_engine)
+                        .or_else(|| decl.value.as_ref().and_then(infer_expr_type))
+                })
+        });
 
-        if let Some(inferred_type) = inferred_type {
-            if let Some(span) = decl.pattern.as_identifier_span() {
-                if !span.is_dummy() {
-                    let position = offset_to_position(self.text, span.end);
-                    if is_in_range(position, self.range) {
-                        self.hints.push(InlayHint {
-                            position,
-                            label: InlayHintLabel::String(format!(": {}", inferred_type)),
-                            kind: Some(InlayHintKind::TYPE),
-                            text_edits: None,
-                            tooltip: None,
-                            padding_left: Some(false),
-                            padding_right: Some(true),
-                            data: None,
-                        });
-                    }
-                }
+        let Some(span) = decl.pattern.as_identifier_span() else {
+            return;
+        };
+        if span.is_dummy() {
+            return;
+        }
+        let position = offset_to_position(self.text, span.end);
+        if !is_in_range(position, self.range) {
+            return;
+        }
+
+        // 1.21 type hint (existing behavior, behind want_type_hint).
+        if want_type_hint {
+            if let Some(inferred_type) = inferred_type.as_ref() {
+                self.hints.push(InlayHint {
+                    position,
+                    label: InlayHintLabel::String(format!(": {}", inferred_type)),
+                    kind: Some(InlayHintKind::TYPE),
+                    text_edits: None,
+                    tooltip: None,
+                    padding_left: Some(false),
+                    padding_right: Some(true),
+                    data: None,
+                });
             }
+        }
+
+        // 1.25 binding-kind hint (LSP-side heuristic) — flagged on
+        // `show_binding_kind_hints`. The compiler's `BindingStorageClass`
+        // (`crates/shape-vm/src/type_tracking.rs:286`) is the authoritative
+        // classifier; this LSP heuristic uses the declared/inferred type +
+        // `is_mut` to render a plausible label without paying full bytecode
+        // compilation cost on every keystroke.
+        if want_binding_hint {
+            let label_type = decl
+                .type_annotation
+                .as_ref()
+                .and_then(crate::type_inference::type_annotation_to_string)
+                .or(inferred_type.clone());
+            let label = binding_kind_label_for(decl, label_type.as_deref());
+            self.hints.push(InlayHint {
+                position,
+                label: InlayHintLabel::String(label),
+                kind: Some(InlayHintKind::TYPE),
+                text_edits: None,
+                tooltip: Some(tower_lsp_server::ls_types::InlayHintTooltip::String(
+                    "LSP-side approximation of BindingStorageClass (ADR-006 §2). The compiler's bytecode pass at crates/shape-vm/src/type_tracking.rs:286 is authoritative.".to_string(),
+                )),
+                padding_left: Some(true),
+                padding_right: Some(true),
+                data: Some(serde_json::json!({
+                    "kind": "binding-kind",
+                    "name": decl.pattern.as_identifier().unwrap_or_default(),
+                })),
+            });
+        }
+    }
+
+    /// W2.4 / 1.27: emit a `: type` hint after an intermediate `.method()`
+    /// call in a method chain. Skips the chain's final call (its type is
+    /// already covered by `let x = chain` hints or by hover) and skips chains
+    /// whose receiver is not itself a method-call / property-access (single
+    /// `obj.method()` carries no chain).
+    fn collect_chain_hint(&mut self, expr: &Expr) {
+        if !self.config.show_type_hints || !self.config.show_chain_hints {
+            return;
+        }
+
+        let Expr::MethodCall { receiver, .. } = expr else {
+            return;
+        };
+
+        // Only emit hints for *intermediate* nodes — when this MethodCall is
+        // itself the receiver of an outer MethodCall, we handle it from the
+        // outer node so the chain renders once, in source order, top-down.
+        // To detect chain depth, walk down the receiver spine and emit hints
+        // for each intermediate node we find. Use a guard so we only handle
+        // the outermost call.
+        let outer_span = expr.span();
+        if outer_span.is_dummy() {
+            return;
+        }
+
+        // Walk receiver spine collecting intermediate method-call nodes whose
+        // result has an inferable type.
+        let mut spine: Vec<&Expr> = Vec::new();
+        let mut cur: &Expr = receiver.as_ref();
+        loop {
+            match cur {
+                Expr::MethodCall {
+                    receiver: inner, ..
+                } => {
+                    spine.push(cur);
+                    cur = inner.as_ref();
+                }
+                _ => break,
+            }
+        }
+
+        if spine.is_empty() {
+            return;
+        }
+
+        for node in spine {
+            let span = node.span();
+            if span.is_dummy() {
+                continue;
+            }
+            if !self.chain_hint_offsets.insert(span.end) {
+                continue;
+            }
+            let position = offset_to_position(self.text, span.end);
+            if !is_in_range(position, self.range) {
+                continue;
+            }
+            // Use the program-level type_map as env so an identifier receiver
+            // like `xs.filter(...)` can resolve `xs`'s type from the engine.
+            let inferred = infer_expr_type_via_engine(node)
+                .or_else(|| crate::type_inference::infer_expr_type_with_env_public(node, &self.type_map))
+                .or_else(|| infer_expr_type(node));
+            let Some(inferred) = inferred else {
+                continue;
+            };
+            self.hints.push(InlayHint {
+                position,
+                label: InlayHintLabel::String(format!(": {}", inferred)),
+                kind: Some(InlayHintKind::TYPE),
+                text_edits: None,
+                tooltip: None,
+                padding_left: Some(false),
+                padding_right: Some(false),
+                data: Some(serde_json::json!({
+                    "kind": "chain",
+                })),
+            });
         }
     }
 
@@ -521,6 +767,11 @@ impl<'a> Visitor for HintContext<'a> {
             }
         }
 
+        // Handle method-chain intermediate hints (W2.4 / 1.27)
+        if matches!(expr, Expr::MethodCall { .. }) {
+            self.collect_chain_hint(expr);
+        }
+
         // Handle comptime for — show unroll hint
         if let Expr::ComptimeFor(comptime_for, span) = expr {
             if self.config.show_type_hints {
@@ -684,6 +935,73 @@ fn format_comptime_value(expr: &Expr) -> String {
         },
         _ => "...".to_string(),
     }
+}
+
+/// W2.4 / 1.25: heuristic label approximating
+/// `BindingStorageClass` for an unannotated or simply-typed `let`/`var`
+/// binding. This is intentionally narrow — full classification requires the
+/// MIR storage planner. The output uses the enum's vocabulary (`[direct]`,
+/// `[heap]`, `[heap mut]`, `[ref]`, `[ref mut]`, `[var]`) with `mut`
+/// modifiers; an `(approx)` qualifier is appended so users see the result is
+/// not authoritative.
+fn binding_kind_label_for(decl: &VariableDecl, label_type: Option<&str>) -> String {
+    use shape_ast::ast::VarKind;
+
+    let base = if let Some(ty) = label_type {
+        let t = ty.trim();
+        if is_primitive_value_type(t) {
+            "direct"
+        } else if t.starts_with("&mut") {
+            return if decl.is_mut { "[ref mut]" } else { "[ref mut]" }.to_string();
+        } else if t.starts_with('&') {
+            return "[ref]".to_string();
+        } else {
+            "heap"
+        }
+    } else {
+        "?"
+    };
+
+    let mutability = match (decl.kind, decl.is_mut) {
+        (VarKind::Var, _) => " var",
+        (_, true) => " mut",
+        _ => "",
+    };
+
+    format!("[{}{} approx]", base, mutability)
+}
+
+/// Match the same primitive vocabulary `HintContext::is_primitive_value_type_name`
+/// uses but free-standing so the binding-kind label can share it. Keep the
+/// two sets aligned.
+fn is_primitive_value_type(name: &str) -> bool {
+    let normalized = name.trim().trim_end_matches('?');
+    matches!(
+        normalized,
+        "int"
+            | "integer"
+            | "i8"
+            | "i16"
+            | "i32"
+            | "i64"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "number"
+            | "float"
+            | "f32"
+            | "f64"
+            | "bool"
+            | "boolean"
+            | "()"
+            | "void"
+            | "unit"
+            | "none"
+            | "null"
+            | "undefined"
+            | "never"
+    )
 }
 
 /// Check if a position is within a range
@@ -1071,10 +1389,8 @@ let s = foo("hi")
     #[test]
     fn test_variable_type_hint_disabled() {
         let config = InlayHintConfig {
-            show_type_hints: true,
-            show_parameter_hints: true,
             show_variable_type_hints: false,
-            show_return_type_hints: true,
+            ..InlayHintConfig::default()
         };
         let hints = get_inlay_hints("let x = 42", full_range(), &config, None);
         let type_labels = type_hint_labels(&hints);
@@ -1088,10 +1404,8 @@ let s = foo("hi")
     #[test]
     fn test_return_type_hint_disabled() {
         let config = InlayHintConfig {
-            show_type_hints: true,
-            show_parameter_hints: true,
-            show_variable_type_hints: true,
             show_return_type_hints: false,
+            ..InlayHintConfig::default()
         };
         let code = "fn add(a: int, b: int) {\n  return a + b\n}";
         let hints = get_inlay_hints(code, full_range(), &config, None);
@@ -1192,6 +1506,199 @@ let t: Table<FinRecord> = [1, 100.0, 60.0, "jan"], [2, 120.0, 70.0, "feb"]
         // Second row repeats
         assert_eq!(param_hints[4], "month:");
         assert_eq!(param_hints[7], "note:");
+    }
+
+    // ---------- W2.4 / 1.04: closure type rendering ----------
+
+    #[test]
+    fn test_closure_type_hint_renders_signature() {
+        // A `let f = |y| y + 1` should render `fn(_) -> int` (or similar)
+        // rather than the bare "Function".
+        let code = "let f = |y| y + 1\n";
+        let hints = get_inlay_hints(code, full_range(), &InlayHintConfig::default(), None);
+        let labels = type_hint_labels(&hints);
+        let has_fn_sig = labels
+            .iter()
+            .any(|l| l.starts_with(": fn(") && l.contains("->"));
+        assert!(
+            has_fn_sig,
+            "Expected closure type hint like ': fn(_) -> int', got: {:?}",
+            labels
+        );
+    }
+
+    #[test]
+    fn test_closure_type_hint_no_param_annotation_still_renders_signature() {
+        let code = "let f = |x| 42\n";
+        let hints = get_inlay_hints(code, full_range(), &InlayHintConfig::default(), None);
+        let labels = type_hint_labels(&hints);
+        let has_fn_sig = labels.iter().any(|l| l.starts_with(": fn(") && l.contains("->"));
+        assert!(
+            has_fn_sig,
+            "Expected closure type hint with `_` for unannotated param, got: {:?}",
+            labels
+        );
+    }
+
+    // ---------- W2.4 / 1.27: chain hints ----------
+
+    #[test]
+    fn test_chain_hints_emit_for_intermediate_method_calls() {
+        // `xs.filter(...).reverse().sort()` should produce hints at each
+        // intermediate `.method()` call site (chain spine length == 3).
+        let code = r#"
+let xs = [1, 2, 3]
+let r = xs.filter(|x| x > 0).reverse().sort()
+"#;
+        let hints = get_inlay_hints(code, full_range(), &InlayHintConfig::default(), None);
+        let chain_hints: Vec<_> = hints
+            .iter()
+            .filter(|h| {
+                h.data
+                    .as_ref()
+                    .and_then(|d| d.get("kind"))
+                    .and_then(|v| v.as_str())
+                    == Some("chain")
+            })
+            .collect();
+        assert!(
+            !chain_hints.is_empty(),
+            "Expected at least one chain hint, got hints: {:?}",
+            hints.iter().map(|h| &h.label).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_chain_hints_disabled_emits_none() {
+        let code = r#"
+let xs = [1, 2, 3]
+let r = xs.filter(|x| x > 0).reverse().sort()
+"#;
+        let cfg = InlayHintConfig {
+            show_chain_hints: false,
+            ..InlayHintConfig::default()
+        };
+        let hints = get_inlay_hints(code, full_range(), &cfg, None);
+        let any_chain = hints.iter().any(|h| {
+            h.data
+                .as_ref()
+                .and_then(|d| d.get("kind"))
+                .and_then(|v| v.as_str())
+                == Some("chain")
+        });
+        assert!(
+            !any_chain,
+            "Expected no chain hints when disabled, got: {:?}",
+            hints.iter().map(|h| &h.label).collect::<Vec<_>>()
+        );
+    }
+
+    // ---------- W2.4 / 1.25: binding-kind hints ----------
+
+    #[test]
+    fn test_binding_kind_hint_emits_for_primitive_let() {
+        let code = "let x = 42\n";
+        let cfg = InlayHintConfig {
+            show_binding_kind_hints: true,
+            ..InlayHintConfig::default()
+        };
+        let hints = get_inlay_hints(code, full_range(), &cfg, None);
+        let any_kind = hints.iter().any(|h| {
+            h.data
+                .as_ref()
+                .and_then(|d| d.get("kind"))
+                .and_then(|v| v.as_str())
+                == Some("binding-kind")
+        });
+        assert!(
+            any_kind,
+            "Expected a binding-kind hint, got: {:?}",
+            hints
+                .iter()
+                .map(|h| (h.label.clone(), h.data.clone()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_binding_kind_hint_off_by_default() {
+        let code = "let x = 42\n";
+        let hints = get_inlay_hints(code, full_range(), &InlayHintConfig::default(), None);
+        let any_kind = hints.iter().any(|h| {
+            h.data
+                .as_ref()
+                .and_then(|d| d.get("kind"))
+                .and_then(|v| v.as_str())
+                == Some("binding-kind")
+        });
+        assert!(
+            !any_kind,
+            "Binding-kind hints should be opt-in (default off); got: {:?}",
+            hints.iter().map(|h| h.label.clone()).collect::<Vec<_>>()
+        );
+    }
+
+    // ---------- W2.4 / 1.70: client-respecting config ----------
+
+    #[test]
+    fn test_from_lsp_settings_master_disable() {
+        let json = serde_json::json!({
+            "shape": {
+                "inlayHints": {
+                    "enable": false
+                }
+            }
+        });
+        let cfg = InlayHintConfig::from_lsp_settings(Some(&json));
+        assert!(!cfg.show_type_hints);
+        assert!(!cfg.show_parameter_hints);
+        assert!(!cfg.show_variable_type_hints);
+        assert!(!cfg.show_return_type_hints);
+        assert!(!cfg.show_chain_hints);
+        assert!(!cfg.show_binding_kind_hints);
+    }
+
+    #[test]
+    fn test_from_lsp_settings_individual_toggles() {
+        let json = serde_json::json!({
+            "shape": {
+                "inlayHints": {
+                    "parameterHints": false,
+                    "chainHints": false,
+                    "bindingKindHints": true
+                }
+            }
+        });
+        let cfg = InlayHintConfig::from_lsp_settings(Some(&json));
+        assert!(cfg.show_type_hints);
+        assert!(!cfg.show_parameter_hints);
+        assert!(!cfg.show_chain_hints);
+        assert!(cfg.show_binding_kind_hints);
+    }
+
+    #[test]
+    fn test_from_lsp_settings_snake_case_alias_accepted() {
+        let json = serde_json::json!({
+            "inlay_hints": {
+                "binding_kind_hints": true,
+                "chain_hints": false
+            }
+        });
+        let cfg = InlayHintConfig::from_lsp_settings(Some(&json));
+        assert!(cfg.show_binding_kind_hints);
+        assert!(!cfg.show_chain_hints);
+    }
+
+    #[test]
+    fn test_from_lsp_settings_none_returns_defaults() {
+        let cfg = InlayHintConfig::from_lsp_settings(None);
+        let default_cfg = InlayHintConfig::default();
+        assert_eq!(cfg.show_type_hints, default_cfg.show_type_hints);
+        assert_eq!(cfg.show_chain_hints, default_cfg.show_chain_hints);
+        assert_eq!(
+            cfg.show_binding_kind_hints,
+            default_cfg.show_binding_kind_hints
+        );
     }
 
     #[test]

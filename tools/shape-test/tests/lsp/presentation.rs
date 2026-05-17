@@ -176,6 +176,8 @@ fn inlay_hints_disabled_by_config_returns_empty() {
         show_parameter_hints: false,
         show_variable_type_hints: false,
         show_return_type_hints: false,
+        show_chain_hints: false,
+        show_binding_kind_hints: false,
     };
     ShapeTest::new("let x = 42;\nlet y = 10;\n").expect_no_inlay_hints_with_config(&config);
 }
@@ -550,6 +552,8 @@ fn test_lsp_inlay_config_all_disabled() {
         show_parameter_hints: false,
         show_variable_type_hints: false,
         show_return_type_hints: false,
+        show_chain_hints: false,
+        show_binding_kind_hints: false,
     };
     ShapeTest::new("let x = 42\nfn add(a: int, b: int) { return a + b }\n")
         .expect_no_inlay_hints_with_config(&config);
@@ -562,6 +566,8 @@ fn test_lsp_inlay_config_only_return_disabled() {
         show_parameter_hints: true,
         show_variable_type_hints: true,
         show_return_type_hints: false,
+        show_chain_hints: false,
+        show_binding_kind_hints: false,
     };
     let code = "fn add(a: int, b: int) {\n  return a + b\n}\n";
     ShapeTest::new(code).expect_no_inlay_hints_with_config(&config);
@@ -575,6 +581,8 @@ fn test_lsp_inlay_config_only_variable_disabled() {
         show_parameter_hints: true,
         show_variable_type_hints: false,
         show_return_type_hints: false,
+        show_chain_hints: false,
+        show_binding_kind_hints: false,
     };
     ShapeTest::new(code).expect_no_inlay_hints_with_config(&config);
 }

@@ -82,6 +82,9 @@ pub struct ShapeLanguageServer {
     semantic_tokens_cache: DashMap<Uri, CachedSemanticTokens>,
     /// Monotonic counter for generating unique `result_id` strings.
     semantic_tokens_result_counter: std::sync::atomic::AtomicU64,
+    /// W2.4 / 1.70: inlay-hint configuration parsed from
+    /// `initializationOptions` and `workspace/didChangeConfiguration`.
+    inlay_hint_config: std::sync::RwLock<InlayHintConfig>,
 }
 
 /// Cached semantic tokens for one document; produced by `semantic_tokens_full`
@@ -110,6 +113,7 @@ impl ShapeLanguageServer {
             foreign_lsp: crate::foreign_lsp::ForeignLspManager::new(default_workspace),
             semantic_tokens_cache: DashMap::new(),
             semantic_tokens_result_counter: std::sync::atomic::AtomicU64::new(0),
+            inlay_hint_config: std::sync::RwLock::new(InlayHintConfig::default()),
         }
     }
 
@@ -483,6 +487,13 @@ impl LanguageServer for ShapeLanguageServer {
             .set_configured_extensions(configured_extensions)
             .await;
 
+        // W2.4 / 1.70: parse inlay-hint config from initialization options.
+        let initial_inlay_cfg =
+            InlayHintConfig::from_lsp_settings(params.initialization_options.as_ref());
+        if let Ok(mut guard) = self.inlay_hint_config.write() {
+            *guard = initial_inlay_cfg;
+        }
+
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
                 // Use full text document sync (incremental requires proper range handling)
@@ -573,13 +584,15 @@ impl LanguageServer for ShapeLanguageServer {
                     ),
                 ),
 
-                // Enable inlay hints (type hints, parameter hints)
+                // Enable inlay hints (type hints, parameter hints).
+                // W2.4 / 1.28: advertise the inlay-hint resolve provider so
+                // clients defer tooltip/edit synthesis to `inlayHint/resolve`.
                 inlay_hint_provider: Some(OneOf::Right(InlayHintServerCapabilities::Options(
                     InlayHintOptions {
                         work_done_progress_options: WorkDoneProgressOptions {
                             work_done_progress: None,
                         },
-                        resolve_provider: Some(false),
+                        resolve_provider: Some(true),
                     },
                 ))),
 
@@ -666,11 +679,19 @@ impl LanguageServer for ShapeLanguageServer {
         self.foreign_lsp
             .set_configured_extensions(configured_extensions.clone())
             .await;
+
+        // W2.4 / 1.70: refresh inlay-hint config from client preferences.
+        let new_inlay_cfg = InlayHintConfig::from_lsp_settings(Some(&params.settings));
+        if let Ok(mut guard) = self.inlay_hint_config.write() {
+            *guard = new_inlay_cfg;
+        }
+        let _ = self.client.inlay_hint_refresh().await;
+
         self.client
             .log_message(
                 MessageType::INFO,
                 format!(
-                    "Updated always-load extensions from configuration change ({} configured)",
+                    "Updated always-load extensions from configuration change ({} configured); inlay-hint config refreshed",
                     configured_extensions.len()
                 ),
             )
@@ -1381,8 +1402,13 @@ impl LanguageServer for ShapeLanguageServer {
 
         let text = doc.text();
 
-        // Get inlay hints with default config, using cached program as fallback
-        let config = InlayHintConfig::default();
+        // W2.4 / 1.70: use the live client-configured InlayHintConfig
+        // instead of an in-place `Default::default()` (Audit §5 item 4).
+        let config = self
+            .inlay_hint_config
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_default();
         let cached = self.last_good_programs.get(&uri);
         let cached_ref = cached.as_ref().map(|r| r.value());
         let file_path = uri.to_file_path();
@@ -1400,6 +1426,45 @@ impl LanguageServer for ShapeLanguageServer {
         } else {
             Ok(Some(hints))
         }
+    }
+
+    /// W2.4 / 1.28: resolve a previously-returned inlay hint with additional
+    /// detail. We currently fill the tooltip lazily based on the `data` field
+    /// (set in `inlay_hints.rs`), so a hint emitted without an eager tooltip
+    /// still surfaces context on hover.
+    async fn inlay_hint_resolve(&self, mut hint: InlayHint) -> Result<InlayHint> {
+        use tower_lsp_server::ls_types::InlayHintTooltip;
+
+        if hint.tooltip.is_some() {
+            return Ok(hint);
+        }
+
+        // The hint's `data` field carries the kind tag stamped in
+        // `inlay_hints.rs::collect_chain_hint` / `collect_variable_type_hint`.
+        let kind = hint
+            .data
+            .as_ref()
+            .and_then(|v| v.get("kind"))
+            .and_then(|v| v.as_str());
+
+        let tooltip = match kind {
+            Some("chain") => Some(
+                "Inferred type of the intermediate method-chain step (W2.4 / 1.27)."
+                    .to_string(),
+            ),
+            Some("binding-kind") => Some(
+                "LSP-side approximation of BindingStorageClass (ADR-006 §2). \
+                 The compiler at crates/shape-vm/src/type_tracking.rs:286 is authoritative."
+                    .to_string(),
+            ),
+            _ => None,
+        };
+
+        if let Some(text) = tooltip {
+            hint.tooltip = Some(InlayHintTooltip::String(text));
+        }
+
+        Ok(hint)
     }
 
     async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {

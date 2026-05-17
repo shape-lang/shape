@@ -70,6 +70,16 @@ pub fn infer_expr_type(expr: &Expr) -> Option<String> {
     infer_expr_type_with_env(expr, &env)
 }
 
+/// Public wrapper around `infer_expr_type_with_env` so call sites (e.g. inlay
+/// hints chain inference) can plug in a `name → type` map computed at the
+/// program level (`infer_program_types`) without re-running the engine.
+pub fn infer_expr_type_with_env_public(
+    expr: &Expr,
+    env: &HashMap<String, String>,
+) -> Option<String> {
+    infer_expr_type_with_env(expr, env)
+}
+
 fn infer_expr_type_with_env(expr: &Expr, env: &HashMap<String, String>) -> Option<String> {
     match expr {
         Expr::Literal(lit, _) => Some(infer_literal_type(lit)),
@@ -189,7 +199,12 @@ fn infer_expr_type_with_env(expr: &Expr, env: &HashMap<String, String>) -> Optio
             type_annotation, ..
         } => type_annotation_to_string(type_annotation),
         Expr::InstanceOf { .. } => Some("bool".to_string()),
-        Expr::FunctionExpr { .. } => Some("Function".to_string()),
+        Expr::FunctionExpr {
+            params,
+            return_type,
+            body,
+            ..
+        } => Some(render_closure_signature(params, return_type.as_ref(), body, env)),
         Expr::Duration(_, _) => Some("Duration".to_string()),
         Expr::Spread(_, _) => None,
         Expr::If(_, _) => None,
@@ -242,6 +257,62 @@ fn infer_expr_type_with_env(expr: &Expr, env: &HashMap<String, String>) -> Optio
         Expr::Reference { expr: inner, .. } => infer_expr_type_with_env(inner, env),
         Expr::TableRows(..) => Some("Table".to_string()),
     }
+}
+
+/// Render a closure / `FunctionExpr` signature as `fn(arg, ...) -> ret`.
+///
+/// Falls back to "Function" only when neither params nor body provide any
+/// inferable structure. Feature W2.4 / 1.04: closure type rendering. Used by
+/// `infer_expr_type_with_env`, hover, and inlay-hint type display.
+pub fn render_closure_signature(
+    params: &[shape_ast::ast::FunctionParameter],
+    return_annotation: Option<&TypeAnnotation>,
+    body: &[Statement],
+    env: &HashMap<String, String>,
+) -> String {
+    let param_strs: Vec<String> = params
+        .iter()
+        .map(|p| {
+            let prefix = if p.is_reference {
+                if p.is_mut_reference { "&mut " } else { "&" }
+            } else {
+                ""
+            };
+            let ty = p
+                .type_annotation
+                .as_ref()
+                .and_then(type_annotation_to_string)
+                .unwrap_or_else(|| "_".to_string());
+            format!("{}{}", prefix, ty)
+        })
+        .collect();
+
+    let ret = return_annotation
+        .and_then(type_annotation_to_string)
+        .or_else(|| infer_block_return_type(body, env))
+        .unwrap_or_else(|| "_".to_string());
+
+    format!("fn({}) -> {}", param_strs.join(", "), ret)
+}
+
+/// Best-effort inference of the return type of a block of statements.
+/// Used by `render_closure_signature`. Returns the type of the trailing
+/// expression statement or the operand of a `return`, whichever appears.
+pub fn infer_block_return_type(
+    body: &[Statement],
+    env: &HashMap<String, String>,
+) -> Option<String> {
+    // Walk for explicit `return expr;` first — typically the last one in source.
+    for stmt in body.iter().rev() {
+        if let Statement::Return(Some(expr), _) = stmt {
+            return infer_expr_type_with_env(expr, env);
+        }
+    }
+    // Otherwise use the trailing expression-statement (Shape's implicit return).
+    if let Some(Statement::Expression(expr, _)) = body.last() {
+        return infer_expr_type_with_env(expr, env);
+    }
+    None
 }
 
 /// Infer the type of a literal
