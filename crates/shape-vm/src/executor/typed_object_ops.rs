@@ -599,16 +599,33 @@ impl TypedObjectOps for super::VirtualMachine {
             ));
         }
 
-        // SAFETY: kind says `Ptr(HeapKind::TypedObject)`, so `recv_bits`
-        // is `Arc::into_raw::<TypedObjectStorage>` and the popped slot
-        // owns one strong-count share. Reconstruct, mutate in place,
-        // re-into_raw to transfer the same share onto the result stack
-        // slot (no refcount change).
-        let storage_arc: std::sync::Arc<shape_value::heap_value::TypedObjectStorage> =
-            unsafe { std::sync::Arc::from_raw(recv_bits as *const _) };
+        // ReceiverGuard mirror per Phase 4 `op_get_field_typed:341-353`
+        // (cluster-1.5-v2-raw-empirical-isolation-and-fix follow-up
+        // 2026-05-17): `recv_bits` is `_new`-allocated v2-raw
+        // `*const TypedObjectStorage` (NOT `Arc::into_raw`) so
+        // `Arc::from_raw` here was wrong-type recovery causing tcache
+        // double-free (Phase 4 imprecision 84 op_set_field_typed:608
+        // residual). Borrow via raw-deref + `ReceiverGuard` RAII; on
+        // success use `mem::forget` to transfer the share onto the
+        // result stack slot via `push_kinded`; on error the guard's
+        // `Drop` dispatches through `drop_with_kind` which routes to
+        // the v2-raw `release_elem` retire path.
+        struct ReceiverGuard {
+            bits: u64,
+            kind: NativeKind,
+        }
+        impl Drop for ReceiverGuard {
+            #[inline]
+            fn drop(&mut self) {
+                crate::executor::vm_impl::stack::drop_with_kind(self.bits, self.kind);
+            }
+        }
+        let guard = ReceiverGuard { bits: recv_bits, kind: recv_kind };
+        let storage: &shape_value::heap_value::TypedObjectStorage =
+            unsafe { &*(recv_bits as *const shape_value::heap_value::TypedObjectStorage) };
 
         let result = self.write_typed_object_field(
-            &storage_arc,
+            storage,
             *type_id,
             *field_idx,
             *field_type_tag,
@@ -616,15 +633,17 @@ impl TypedObjectOps for super::VirtualMachine {
             value_kind,
         );
 
-        // Re-into_raw before result handling so the stack push transfers
-        // the receiver share back regardless of which branch fired.
-        let recv_bits_back = std::sync::Arc::into_raw(storage_arc) as u64;
         match result {
-            Ok(()) => self.push_kinded(recv_bits_back, recv_kind),
+            Ok(()) => {
+                // Transfer receiver share onto result stack slot; suppress
+                // ReceiverGuard's drop so the share isn't released here.
+                std::mem::forget(guard);
+                self.push_kinded(recv_bits, recv_kind)
+            }
             Err(e) => {
-                // On error the value was already dropped inside
-                // write_typed_object_field; release the receiver share.
-                drop_with_kind(recv_bits_back, recv_kind);
+                // ReceiverGuard's drop releases the receiver share on
+                // scope exit. Value was already dropped inside
+                // `write_typed_object_field` on the error path.
                 Err(e)
             }
         }
@@ -643,7 +662,7 @@ impl super::VirtualMachine {
     /// `TypedObjectStorage::write_slot_in_place`.
     fn write_typed_object_field(
         &mut self,
-        storage: &std::sync::Arc<shape_value::heap_value::TypedObjectStorage>,
+        storage: &shape_value::heap_value::TypedObjectStorage,
         type_id: u16,
         field_idx: u16,
         field_type_tag: u16,
