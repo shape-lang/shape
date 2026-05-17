@@ -19,45 +19,28 @@
 /// instead of allocating a fresh value) and so generic bounds
 /// `fn f<T: AddAssign>(...)` can be authored today.
 ///
-/// ## Architectural note (Phase 4 close, 2026-05-16)
+/// ## Architectural note (W6 imprecision 83 fix, v0.3)
 ///
 /// `AddAssign::add_assign` is declared with an explicit `Self` return type
-/// (the in-place op canonically returns `self` for chaining) **rather than
-/// a return-typeless `add_assign(other: Self)` signature**, because the
-/// latter triggers a pre-existing compiler bug that manifests when a
-/// prelude-imported trait carries a method without an explicit return
-/// type. Empirically bisected at phase-4 close 2026-05-16:
+/// by convention (the in-place op canonically returns `self` for
+/// chaining), but trait/interface methods may now omit the return type
+/// entirely — the grammar treats a trait method without `: ReturnType`
+/// as returning `void`. The Phase 4 close-out workaround that forced
+/// `: Self` here to sidestep a parse-failure-cascade bug is no longer
+/// required.
 ///
-///   | Trait shape                                       | Smoke 2 / `+=` |
-///   |---------------------------------------------------|----------------|
-///   | `add_assign(other: Self)` (no return type)        | BROKEN         |
-///   | `add_assign()` (no args, no return type)          | BROKEN         |
-///   | `add_assign(other: Self): int`                    | OK             |
-///   | `add_assign(other: Self): Self`                   | OK             |
-///   | (only `trait Add` in prelude, no second trait)    | OK             |
-///   | (add.shape present but NOT imported by prelude)   | OK             |
-///
-/// Failure mode: when the return-typeless trait is prelude-imported,
-/// `Vec.map<U>` monomorphization for `[1,2,3,4,5].map(|x| x*2)` (Smoke 2)
-/// skips the `Vec.map::i64_…` PHF specialization and falls through to
-/// the generic `__main__` path that hits the V3-S5 ckpt-2 `map` SURFACE;
-/// independently, `+=` fixture exhibits non-deterministic
-/// `free(): double free detected in tcache 2` on cleanup (correct output
-/// produced first, then refcount-corrupted teardown).
-///
-/// Tracked as a follow-up sub-cluster
-/// `phase-4-followup-return-typeless-trait-method-monomorphization`:
-/// root cause is in the trait-registration → type-inference →
-/// monomorphization pipeline, where a trait method without an explicit
-/// return type leaves a `Type::Variable(TypeVar::fresh())` or
-/// `Type::Unit` placeholder in the trait def that the inferencer later
-/// picks up when resolving downstream call-site return-type positions,
-/// affecting both `Vec.map<U>` specialization-key mangling AND the
-/// refcount discipline on TypedObject heap returns. The genuine fix
-/// flips trait-def return-type propagation in
-/// `crates/shape-runtime/src/type_system/` (territory beyond Phase 4
-/// scope per supervisor "bounded to regression fix + framing-discipline
-/// recovery" disposition).
+/// Original cascade (kept for archaeology): the grammar previously
+/// rejected return-typeless trait `interface_member` methods. Parsing
+/// `add_assign(other: Self)` HARD-ERRORED at the parser level;
+/// `collect_prelude_imports` then silently swallowed the failure and
+/// returned an empty prelude-imports list, so the user's program never
+/// saw `std::core::vec` etc. and `xs.map(...)` fell through to the
+/// V3-S5 ckpt-2 `map` SURFACE. The W6 fix relaxes the grammar so
+/// return-typeless trait methods parse to `return_type = void`, which
+/// unblocks the prelude load and restores correct Vec.map<U>
+/// monomorphization. See `crates/shape-ast/src/shape.pest`
+/// (`interface_member` rule) and `crates/shape-ast/src/parser/types.rs`
+/// (`parse_interface_member`).
 ///
 /// ## Known implementations
 ///

@@ -202,8 +202,8 @@ documented_interface_member = {
 interface_member = {
     // Property signature
     (ident | keyword) ~ "?"? ~ ":" ~ type_annotation
-    // Method signature
-    | (ident | keyword) ~ "?"? ~ "(" ~ type_param_list? ~ ")" ~ ":" ~ type_annotation
+    // Method signature: return type optional (defaults to `void`/Unit when omitted)
+    | (ident | keyword) ~ "?"? ~ "(" ~ type_param_list? ~ ")" ~ (":" ~ type_annotation)?
     // Index signature
     | "[" ~ ident ~ ":" ~ ("string" | "number") ~ "]" ~ ":" ~ type_annotation
 }
