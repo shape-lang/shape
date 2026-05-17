@@ -228,7 +228,7 @@ fn is_keyword(name: &str) -> bool {
         "pub",
         "from",
         "type",
-        "interface",
+        "trait",
         "enum",
         "extend",
         "find",

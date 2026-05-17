@@ -15,8 +15,8 @@ use super::statements::Statement;
 use super::streams::StreamDef;
 use super::tests::TestDef;
 use super::types::{
-    EnumDef, ExtendStatement, ImplBlock, InterfaceDef, StructTypeDef, TraitDef, TypeAliasDef,
-    TypeAnnotation, TypeParam,
+    EnumDef, ExtendStatement, ImplBlock, StructTypeDef, TraitDef, TypeAliasDef, TypeAnnotation,
+    TypeParam,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,9 +36,7 @@ pub enum Item {
     Module(ModuleDecl, Span),
     /// Type alias definition
     TypeAlias(TypeAliasDef, Span),
-    /// Interface definition
-    Interface(InterfaceDef, Span),
-    /// Trait definition (like interface but with `trait` keyword)
+    /// Trait definition
     Trait(TraitDef, Span),
     /// Enum definition
     Enum(EnumDef, Span),

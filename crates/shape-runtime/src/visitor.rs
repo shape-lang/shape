@@ -270,7 +270,6 @@ pub fn walk_item<V: Visitor>(visitor: &mut V, item: &Item) {
             ExportItem::Named(_) => {}
             ExportItem::Enum(_) => {}
             ExportItem::Struct(_) => {}
-            ExportItem::Interface(_) => {}
             ExportItem::Trait(_) => {}
             ExportItem::Annotation(annotation_def) => {
                 for handler in &annotation_def.handlers {
@@ -280,7 +279,6 @@ pub fn walk_item<V: Visitor>(visitor: &mut V, item: &Item) {
             ExportItem::ForeignFunction(_) => {} // foreign bodies are opaque
         },
         Item::TypeAlias(_, _) => {}
-        Item::Interface(_, _) => {}
         Item::Trait(_, _) => {}
         Item::Enum(_, _) => {}
         Item::Extend(extend, _) => {

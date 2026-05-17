@@ -34,7 +34,6 @@ item_core = {
     | native_struct_type_def // type C Foo { ... }
     | struct_type_def
     | type_alias_def
-    | interface_def
     | trait_def
     | enum_def
     | impl_block
@@ -86,7 +85,6 @@ pub_item = {
     | "pub" ~ type_alias_def                                         // pub type X = Y;
     | "pub" ~ enum_def                                               // pub enum Foo { ... }
     | "pub" ~ struct_type_def                                        // pub type Foo { ... }
-    | "pub" ~ interface_def                                          // pub interface Foo { ... }
     | "pub" ~ trait_def                                              // pub trait Foo { ... }
     | "pub" ~ annotation_def                                         // pub annotation name() { ... }
     | "pub" ~ "{" ~ export_spec_list ~ "}" ~ ";"?                   // pub { a, b as c };
@@ -157,10 +155,6 @@ comptime_for_expr = { "comptime" ~ "for" ~ ident ~ "in" ~ postfix_expr ~ "{" ~ s
 // Wraps any expression with a compile-time annotation.
 annotated_expr = { annotation+ ~ postfix_expr }
 
-interface_def = {
-    "interface" ~ ident ~ type_params? ~ "{" ~ interface_body ~ "}"
-}
-
 type_params = {
     "<" ~ documented_type_param_name ~ ("," ~ documented_type_param_name)* ~ ">"
 }
@@ -185,21 +179,7 @@ trait_bound_list = {
     qualified_ident ~ ("+" ~ qualified_ident)*
 }
 
-interface_body = {
-    interface_member_list?
-}
-
-interface_member_list = {
-    documented_interface_member ~ (interface_member_separator ~ documented_interface_member)* ~ interface_member_separator?
-}
-
-interface_member_separator = { ";" | "," }
-
-documented_interface_member = {
-    doc_comment? ~ interface_member
-}
-
-interface_member = {
+trait_member_signature = {
     // Property signature
     (ident | keyword) ~ "?"? ~ ":" ~ type_annotation
     // Method signature: return type optional (defaults to `void`/Unit when omitted)
@@ -207,6 +187,8 @@ interface_member = {
     // Index signature
     | "[" ~ ident ~ ":" ~ ("string" | "number") ~ "]" ~ ":" ~ type_annotation
 }
+
+trait_member_signature_separator = { ";" | "," }
 
 // ===== Trait Definitions =====
 trait_def = { annotations? ~ "trait" ~ ident ~ type_params? ~ supertrait_list? ~ "{" ~ trait_body ~ "}" }
@@ -225,8 +207,8 @@ trait_member_core = {
     associated_type_decl
     // Default method: method keyword with body (must be tried first)
     | method_def
-    // Required method signature (interface-style)
-    | interface_member ~ interface_member_separator?
+    // Required method/property/index signature (body-less)
+    | trait_member_signature ~ trait_member_signature_separator?
 }
 
 associated_type_decl = {
@@ -833,7 +815,7 @@ union_type = {
     intersection_type ~ ("|" ~ intersection_type)*
 }
 
-// Intersection type: Type1 + Type2 (structural merge for objects/interfaces)
+// Intersection type: Type1 + Type2 (structural merge for objects)
 intersection_type = {
     optional_type ~ ("+" ~ optional_type)*
 }
@@ -1502,7 +1484,7 @@ keyword = {
     "let" | "var" | "const" | "mut" | "function" | "async" | "await" |
     "if" | "else" | "for" | "while" | "match" | "return" | "break" | "continue" |
     "true" | "false" | "null" | "None" | "Some" | "and" | "or" |
-    "type" | "interface" | "trait" | "impl" | "enum" |
+    "type" | "trait" | "impl" | "enum" |
     "extend" | "method" | "in" |
     "comptime" | "datasource"
 }

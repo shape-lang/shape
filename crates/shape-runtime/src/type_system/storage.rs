@@ -165,7 +165,6 @@ impl StorageType {
 
             // Special — truly unknown types
             SemanticType::Never | SemanticType::Void => StorageType::Dynamic,
-            SemanticType::Interface { .. } => StorageType::Dynamic,
         }
     }
 

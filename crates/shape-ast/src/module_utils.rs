@@ -18,7 +18,7 @@ pub enum ModuleExportKind {
     BuiltinFunction,
     TypeAlias,
     BuiltinType,
-    Interface,
+    Trait,
     Enum,
     Annotation,
     Value,
@@ -61,11 +61,8 @@ pub fn direct_export_target(export_item: &ExportItem) -> Option<(String, ModuleE
         ExportItem::Struct(struct_def) => {
             Some((struct_def.name.clone(), ModuleExportKind::TypeAlias))
         }
-        ExportItem::Interface(interface) => {
-            Some((interface.name.clone(), ModuleExportKind::Interface))
-        }
         ExportItem::Trait(trait_def) => {
-            Some((trait_def.name.clone(), ModuleExportKind::Interface))
+            Some((trait_def.name.clone(), ModuleExportKind::Trait))
         }
         ExportItem::Annotation(annotation) => {
             Some((annotation.name.clone(), ModuleExportKind::Annotation))
@@ -105,7 +102,7 @@ enum ScopeSymbolKind {
     BuiltinFunction,
     TypeAlias,
     BuiltinType,
-    Interface,
+    Trait,
     Enum,
     Annotation,
     Value,
@@ -117,7 +114,7 @@ fn scope_symbol_kind_to_export(kind: ScopeSymbolKind) -> ModuleExportKind {
         ScopeSymbolKind::BuiltinFunction => ModuleExportKind::BuiltinFunction,
         ScopeSymbolKind::TypeAlias => ModuleExportKind::TypeAlias,
         ScopeSymbolKind::BuiltinType => ModuleExportKind::BuiltinType,
-        ScopeSymbolKind::Interface => ModuleExportKind::Interface,
+        ScopeSymbolKind::Trait => ModuleExportKind::Trait,
         ScopeSymbolKind::Enum => ModuleExportKind::Enum,
         ScopeSymbolKind::Annotation => ModuleExportKind::Annotation,
         ScopeSymbolKind::Value => ModuleExportKind::Value,
@@ -152,11 +149,8 @@ impl ScopeTable {
                 Item::StructType(s, span) => {
                     symbols.insert(s.name.clone(), (ScopeSymbolKind::TypeAlias, *span));
                 }
-                Item::Interface(i, span) => {
-                    symbols.insert(i.name.clone(), (ScopeSymbolKind::Interface, *span));
-                }
                 Item::Trait(t, span) => {
-                    symbols.insert(t.name.clone(), (ScopeSymbolKind::Interface, *span));
+                    symbols.insert(t.name.clone(), (ScopeSymbolKind::Trait, *span));
                 }
                 Item::VariableDecl(decl, span) => {
                     if let Some(name) = decl.pattern.as_identifier() {
@@ -262,7 +256,7 @@ pub fn export_kind_description(kind: ModuleExportKind) -> &'static str {
         ModuleExportKind::BuiltinFunction => "a builtin function",
         ModuleExportKind::TypeAlias => "a type",
         ModuleExportKind::BuiltinType => "a builtin type",
-        ModuleExportKind::Interface => "an interface",
+        ModuleExportKind::Trait => "a trait",
         ModuleExportKind::Enum => "an enum",
         ModuleExportKind::Annotation => "an annotation",
         ModuleExportKind::Value => "a value",

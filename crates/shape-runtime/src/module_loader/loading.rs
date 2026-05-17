@@ -17,7 +17,7 @@ enum ScopeSymbolKind {
     BuiltinFunction,
     TypeAlias,
     BuiltinType,
-    Interface,
+    Trait,
     Enum,
     Annotation,
     Value,
@@ -178,23 +178,13 @@ fn collect_module_scope(ast: &Program) -> ModuleScope {
                     *span,
                 );
             }
-            Item::Interface(interface, span) => {
-                let alias =
-                    alias_for_named_type(interface.name.clone(), interface.type_params.clone());
-                module_scope.add_type_alias(
-                    interface.name.clone(),
-                    alias,
-                    ScopeSymbolKind::Interface,
-                    *span,
-                );
-            }
             Item::Trait(trait_def, span) => {
                 let alias =
                     alias_for_named_type(trait_def.name.clone(), trait_def.type_params.clone());
                 module_scope.add_type_alias(
                     trait_def.name.clone(),
                     alias,
-                    ScopeSymbolKind::Interface,
+                    ScopeSymbolKind::Trait,
                     *span,
                 );
             }
@@ -369,16 +359,6 @@ pub(super) fn process_export_with_scope(
                 meta_param_overrides: None,
             };
             exports.insert(struct_def.name.clone(), Export::TypeAlias(Arc::new(alias)));
-        }
-        ExportItem::Interface(iface_def) => {
-            let alias = shape_ast::ast::TypeAliasDef {
-                name: iface_def.name.clone(),
-                doc_comment: None,
-                type_params: iface_def.type_params.clone(),
-                type_annotation: shape_ast::ast::TypeAnnotation::Basic(iface_def.name.clone()),
-                meta_param_overrides: None,
-            };
-            exports.insert(iface_def.name.clone(), Export::TypeAlias(Arc::new(alias)));
         }
         ExportItem::Trait(trait_def) => {
             let alias = shape_ast::ast::TypeAliasDef {

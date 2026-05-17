@@ -47,7 +47,6 @@ fn desugar_item(item: &mut Item) {
             | crate::ast::ExportItem::Named(_)
             | crate::ast::ExportItem::Enum(_)
             | crate::ast::ExportItem::Struct(_)
-            | crate::ast::ExportItem::Interface(_)
             | crate::ast::ExportItem::Trait(_)
             | crate::ast::ExportItem::BuiltinFunction(_)
             | crate::ast::ExportItem::BuiltinType(_)

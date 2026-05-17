@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use shape_ast::ast::{
-    DocComment, ExportItem, FunctionDef, InterfaceMember, Item, Program, Span, TraitMember,
+    DocComment, ExportItem, FunctionDef, Item, Program, Span, TraitMember, TraitMemberSignature,
     TypeAnnotation,
 };
 use std::collections::HashMap;
@@ -9,7 +9,6 @@ use std::collections::HashMap;
 pub enum DocItemKind {
     Function,
     Type,
-    Interface,
     Enum,
     Trait,
     Field,
@@ -129,14 +128,6 @@ fn collect_items(
                     program,
                     join_path(module_path, &trait_def.name),
                     trait_def,
-                    *span,
-                ));
-            }
-            Item::Interface(interface_def, span) => {
-                docs.push(extract_interface_doc(
-                    program,
-                    join_path(module_path, &interface_def.name),
-                    interface_def,
                     *span,
                 ));
             }
@@ -284,14 +275,6 @@ fn collect_items(
                         program,
                         join_path(module_path, &trait_def.name),
                         trait_def,
-                        *span,
-                    ));
-                }
-                ExportItem::Interface(interface_def) => {
-                    docs.push(extract_interface_doc(
-                        program,
-                        join_path(module_path, &interface_def.name),
-                        interface_def,
                         *span,
                     ));
                 }
@@ -529,38 +512,14 @@ fn extract_trait_doc(
     }
 }
 
-fn extract_interface_doc(
-    program: &Program,
-    path: String,
-    interface: &shape_ast::ast::InterfaceDef,
-    span: Span,
-) -> DocItem {
-    let children = interface
-        .members
-        .iter()
-        .map(|member| extract_interface_member_doc(program, &path, member, DocItemKind::Method))
-        .collect();
-
-    DocItem {
-        kind: DocItemKind::Interface,
-        name: path,
-        doc: doc_text_from_span(program, span),
-        signature: None,
-        type_params: format_type_params(&interface.type_params),
-        params: Vec::new(),
-        return_type: None,
-        children,
-    }
-}
-
 fn extract_interface_member_doc(
     program: &Program,
     parent_path: &str,
-    member: &InterfaceMember,
+    member: &TraitMemberSignature,
     method_kind: DocItemKind,
 ) -> DocItem {
     match member {
-        InterfaceMember::Property {
+        TraitMemberSignature::Property {
             name,
             span,
             type_annotation,
@@ -579,7 +538,7 @@ fn extract_interface_member_doc(
             return_type: Some(format_type_annotation(type_annotation)),
             children: Vec::new(),
         },
-        InterfaceMember::Method {
+        TraitMemberSignature::Method {
             name,
             span,
             params,
@@ -622,7 +581,7 @@ fn extract_interface_member_doc(
             return_type: Some(format_type_annotation(return_type)),
             children: Vec::new(),
         },
-        InterfaceMember::IndexSignature {
+        TraitMemberSignature::IndexSignature {
             span,
             param_name,
             param_type,

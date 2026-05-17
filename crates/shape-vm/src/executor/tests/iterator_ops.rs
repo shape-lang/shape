@@ -42,14 +42,14 @@ fn test_iterable_trait_registered() {
 
 #[test]
 fn test_iterable_trait_has_iter_method() {
-    use shape_ast::ast::{InterfaceMember, TraitMember};
+    use shape_ast::ast::{TraitMemberSignature, TraitMember};
     use shape_runtime::type_system::environment::TypeEnvironment;
 
     let env = TypeEnvironment::new();
     let iterable = env.lookup_trait("Iterable").unwrap();
     let has_iter = iterable.members.iter().any(|m| {
         matches!(m,
-            TraitMember::Required(InterfaceMember::Method { name, .. }) if name == "iter"
+            TraitMember::Required(TraitMemberSignature::Method { name, .. }) if name == "iter"
         )
     });
     assert!(has_iter, "Iterable should have 'iter' required method");

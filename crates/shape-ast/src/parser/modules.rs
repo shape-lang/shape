@@ -181,9 +181,6 @@ pub fn parse_export_item(pair: Pair<Rule>) -> Result<ExportStmt> {
         Rule::native_struct_type_def => ExportItem::Struct(
             crate::parser::types::parse_native_struct_type_def(next_pair)?,
         ),
-        Rule::interface_def => {
-            ExportItem::Interface(crate::parser::types::parse_interface_def(next_pair)?)
-        }
         Rule::trait_def => ExportItem::Trait(crate::parser::types::parse_trait_def(next_pair)?),
         Rule::annotation_def => {
             ExportItem::Annotation(crate::parser::extensions::parse_annotation_def(next_pair)?)

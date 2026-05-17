@@ -566,9 +566,6 @@ fn collect_export_names(program: &shape_ast::ast::Program) -> Vec<String> {
                 shape_ast::ast::ExportItem::Struct(s) => {
                     names.push(s.name.clone());
                 }
-                shape_ast::ast::ExportItem::Interface(i) => {
-                    names.push(i.name.clone());
-                }
                 shape_ast::ast::ExportItem::Trait(t) => {
                     names.push(t.name.clone());
                 }

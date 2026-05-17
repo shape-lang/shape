@@ -276,18 +276,16 @@ fn completion_kind_for_doc_symbol(kind: DocTargetKind) -> CompletionItemKind {
         | DocTargetKind::BuiltinFunction
         | DocTargetKind::ExtensionMethod
         | DocTargetKind::ImplMethod
-        | DocTargetKind::TraitMethod
-        | DocTargetKind::InterfaceMethod => CompletionItemKind::FUNCTION,
+        | DocTargetKind::TraitMethod => CompletionItemKind::FUNCTION,
         DocTargetKind::Struct
         | DocTargetKind::Enum
         | DocTargetKind::Trait
-        | DocTargetKind::Interface
         | DocTargetKind::TypeAlias
         | DocTargetKind::BuiltinType => CompletionItemKind::CLASS,
         DocTargetKind::Module => CompletionItemKind::MODULE,
         DocTargetKind::TypeParam => CompletionItemKind::TYPE_PARAMETER,
         DocTargetKind::StructField | DocTargetKind::EnumVariant => CompletionItemKind::FIELD,
-        DocTargetKind::InterfaceProperty | DocTargetKind::InterfaceIndexSignature => {
+        DocTargetKind::TraitProperty | DocTargetKind::TraitIndexSignature => {
             CompletionItemKind::PROPERTY
         }
         DocTargetKind::TraitAssociatedType => CompletionItemKind::INTERFACE,

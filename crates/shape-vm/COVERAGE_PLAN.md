@@ -18,14 +18,14 @@ These rules are internal implementation details and don't need direct tests:
 | Rule | Test Code | Priority |
 |------|-----------|----------|
 | `type_alias_def` | `type Point = { x: number; y: number };` | High |
-| `interface_def` | `interface Shape { area(): number; }` | High |
-| `interface_body`, `interface_member` | (covered by interface_def) | - |
+| `trait_def` | `trait Shape { area(): number; }` | High |
+| `trait_body`, `trait_member_signature` | (covered by trait_def) | - |
 | `enum_def`, `enum_member`, `enum_members` | `enum Color { Red, Green, Blue }` | High |
 | `function_type` | `type Handler = (x: number) => string;` | Medium |
 | `union_type` | `type Result = Success \| Error;` | Medium |
 | `optional_type` | `let x: number?;` | Medium |
 | `type_param`, `type_param_name`, `type_params` | `function map<T, U>(arr: T[]): U[]` | Medium |
-| `extends_clause` | `interface Square extends Shape {}` | Medium |
+| `supertrait_list` | `trait Square: Shape {}` | Medium |
 | `non_array_type` | (internal helper) | Skip |
 
 ## Category 2: Module System (8 rules)
@@ -161,7 +161,7 @@ These rules are internal implementation details and don't need direct tests:
 ### Phase 1: High Priority (Estimated: 15 tests)
 Core language features that are commonly used:
 
-1. Type aliases, interfaces, enums
+1. Type aliases, traits, enums
 2. Import/export statements
 3. Pattern definitions with @pattern
 4. Pipe expressions

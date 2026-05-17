@@ -7,7 +7,7 @@ use super::functions::{Annotation, AnnotationDef, ForeignFunctionDef, FunctionDe
 use super::program::Item;
 use super::program::{BuiltinFunctionDecl, BuiltinTypeDecl};
 use super::span::Span;
-use super::types::{EnumDef, InterfaceDef, StructTypeDef, TraitDef};
+use super::types::{EnumDef, StructTypeDef, TraitDef};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImportStmt {
@@ -56,8 +56,6 @@ pub enum ExportItem {
     Enum(EnumDef),
     /// pub type Name { field: Type, ... }
     Struct(StructTypeDef),
-    /// pub interface Name { ... }
-    Interface(InterfaceDef),
     /// pub trait Name { ... }
     Trait(TraitDef),
     /// pub annotation name(...) { ... }

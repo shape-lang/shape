@@ -194,16 +194,6 @@ pub fn extract_symbols(program: &Program) -> Vec<SymbolInfo> {
                     annotations: vec![],
                 });
             }
-            Item::Interface(interface, span) => {
-                symbols.push(SymbolInfo {
-                    name: interface.name.clone(),
-                    kind: SymbolKind::Type,
-                    detail: Some("interface".to_string()),
-                    documentation: rendered_doc_for_span(program, *span),
-                    type_annotation: None,
-                    annotations: vec![],
-                });
-            }
             Item::Trait(trait_def, span) => {
                 symbols.push(SymbolInfo {
                     name: trait_def.name.clone(),
@@ -308,16 +298,6 @@ pub fn extract_symbols(program: &Program) -> Vec<SymbolInfo> {
                             name: struct_def.name.clone(),
                             kind: SymbolKind::Type,
                             detail: Some("struct".to_string()),
-                            documentation: rendered_doc_for_span(program, *span),
-                            type_annotation: None,
-                            annotations: vec![],
-                        });
-                    }
-                    ExportItem::Interface(interface_def) => {
-                        symbols.push(SymbolInfo {
-                            name: interface_def.name.clone(),
-                            kind: SymbolKind::Type,
-                            detail: Some("interface".to_string()),
                             documentation: rendered_doc_for_span(program, *span),
                             type_annotation: None,
                             annotations: vec![],

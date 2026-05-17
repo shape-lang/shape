@@ -250,9 +250,9 @@ fn generic_method_dispatches_as_direct() {
     // methods as type-erased at the impl's function-id, so dispatch
     // collapses to Direct. Verify the call completes.
     //
-    // Shape's `interface_member` grammar (shape.pest) does NOT support
-    // type-param syntax on required trait method signatures — only
-    // default `method`-keyword methods can be generic. So we test the
+    // Shape's `trait_member_signature` grammar (shape.pest) does NOT
+    // support type-param syntax on required trait method signatures —
+    // only default `method`-keyword methods can be generic. So we test the
     // dispatch by declaring the generic method as a trait default
     // (which carries `type_params` per `MethodDef::type_params`).
     let result = eval_result(

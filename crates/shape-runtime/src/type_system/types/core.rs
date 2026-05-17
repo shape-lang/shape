@@ -435,9 +435,6 @@ impl SemanticType {
             SemanticType::Enum { name, .. } => {
                 Type::Concrete(TypeAnnotation::Reference(name.as_str().into()))
             }
-            SemanticType::Interface { name, .. } => {
-                Type::Concrete(TypeAnnotation::Reference(name.as_str().into()))
-            }
             // References: convert to the inner type for inference purposes.
             // The reference wrapper is tracked separately by the compiler.
             SemanticType::Ref(inner) | SemanticType::RefMut(inner) => inner.to_inference_type(),

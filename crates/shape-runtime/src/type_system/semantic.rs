@@ -59,12 +59,6 @@ pub enum SemanticType {
         type_params: Vec<String>,
     },
 
-    /// Interface/trait type
-    Interface {
-        name: String,
-        methods: Vec<(String, FunctionSignature)>,
-    },
-
     // === Type System Internals ===
     /// Type variable for inference (α, β, γ)
     TypeVar(TypeVarId),
@@ -346,8 +340,6 @@ impl SemanticType {
                 }
             }
 
-            SemanticType::Interface { name, .. } => TypeInfo::primitive(name),
-
             SemanticType::TypeVar(id) => TypeInfo::primitive(format!("T{}", id.0)),
 
             SemanticType::Named(name) => TypeInfo::primitive(name),
@@ -413,7 +405,6 @@ impl fmt::Display for SemanticType {
             SemanticType::Array(elem) => write!(f, "Vec<{}>", elem),
             SemanticType::Struct { name, .. } => write!(f, "{}", name),
             SemanticType::Enum { name, .. } => write!(f, "{}", name),
-            SemanticType::Interface { name, .. } => write!(f, "{}", name),
             SemanticType::TypeVar(id) => write!(f, "T{}", id.0),
             SemanticType::Named(name) => write!(f, "{}", name),
             SemanticType::Generic { name, args } => {

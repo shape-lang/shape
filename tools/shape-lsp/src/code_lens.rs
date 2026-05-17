@@ -114,7 +114,7 @@ fn collect_lenses_for_item(item: &Item, text: &str, uri: &Uri, lenses: &mut Vec<
             for member in &trait_def.members {
                 let (method_name, is_default) = match member {
                     shape_ast::ast::TraitMember::Required(
-                        shape_ast::ast::InterfaceMember::Method { name, .. },
+                        shape_ast::ast::TraitMemberSignature::Method { name, .. },
                     ) => (name.as_str(), false),
                     shape_ast::ast::TraitMember::Default(method_def) => {
                         (method_def.name.as_str(), true)

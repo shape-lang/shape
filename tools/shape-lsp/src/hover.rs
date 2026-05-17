@@ -1198,7 +1198,7 @@ fn get_impl_method_hover(
         for member in &resolved_trait.trait_def.members {
             match member {
                 shape_ast::ast::TraitMember::Required(
-                    shape_ast::ast::InterfaceMember::Method {
+                    shape_ast::ast::TraitMemberSignature::Method {
                         name,
                         params,
                         return_type,
@@ -1761,7 +1761,7 @@ fn trait_member_signatures(trait_def: &shape_ast::ast::TraitDef) -> Vec<String> 
 
     for member in &trait_def.members {
         match member {
-            shape_ast::ast::TraitMember::Required(shape_ast::ast::InterfaceMember::Method {
+            shape_ast::ast::TraitMember::Required(shape_ast::ast::TraitMemberSignature::Method {
                 name,
                 params,
                 return_type,
@@ -2365,7 +2365,7 @@ fn get_imported_symbol_hover(
                             match export.kind {
                                 ModSymbolKind::Variable => "Variable",
                                 ModSymbolKind::TypeAlias => "Type",
-                                ModSymbolKind::Interface => "Interface",
+                                ModSymbolKind::Trait => "Trait",
                                 ModSymbolKind::Pattern => "Pattern",
                                 ModSymbolKind::Annotation => "Annotation",
                                 _ => "Symbol",

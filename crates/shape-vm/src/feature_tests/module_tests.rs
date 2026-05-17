@@ -162,10 +162,10 @@ function test() {
         requires_data: false,
     },
     FeatureTest {
-        name: "pub_interface",
-        covers: &["pub_item", "interface_def"],
+        name: "pub_trait",
+        covers: &["pub_item", "trait_def"],
         code: r#"
-pub interface Printable {
+pub trait Printable {
     fn toString(): string;
 }
 function test() {

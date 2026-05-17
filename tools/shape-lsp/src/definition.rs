@@ -175,9 +175,6 @@ fn find_definition_location(
             Item::TypeAlias(type_alias, item_span) if type_alias.name == symbol_name => {
                 return Some(create_location_from_span(uri, *item_span, text));
             }
-            Item::Interface(interface, item_span) if interface.name == symbol_name => {
-                return Some(create_location_from_span(uri, *item_span, text));
-            }
             Item::Enum(enum_def, item_span) if enum_def.name == symbol_name => {
                 return Some(create_location_from_span(uri, *item_span, text));
             }

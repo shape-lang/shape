@@ -173,8 +173,11 @@ fn test_function_param_typed_defaults_parse() {
 // =========================================================================
 
 #[test]
-fn test_interface_definition_is_accepted() {
-    // The grammar supports `interface` as a valid item keyword.
+fn test_interface_keyword_is_rejected() {
+    // W8: `interface` keyword has been stripped — `trait` is canonical.
+    // Source containing the stale `interface` keyword must fail to parse
+    // (the parser sees the identifier where a top-level item is expected
+    // and rejects it).
     let content = r#"
 interface CandleLike {
     timestamp: timestamp
@@ -182,14 +185,8 @@ interface CandleLike {
 "#;
     let result = parse_program_helper(content);
     assert!(
-        result.is_ok(),
-        "interface keyword should parse successfully: {:?}",
-        result.err()
-    );
-    let items = result.unwrap();
-    assert!(
-        !items.is_empty(),
-        "interface definition should produce at least one AST item"
+        result.is_err(),
+        "`interface` keyword should be rejected post-W8 strip"
     );
 }
 

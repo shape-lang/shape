@@ -685,10 +685,10 @@ impl<'a> TokenCollector<'a> {
 
                         // For declaration keywords, also highlight the following name
                         let name_token_type = match ident {
-                            "enum" => Some(3u32),            // ENUM
-                            "type" | "interface" => Some(1), // TYPE
-                            "trait" => Some(15),             // INTERFACE
-                            "fn" | "function" => Some(4),    // FUNCTION
+                            "enum" => Some(3u32),         // ENUM
+                            "type" => Some(1),            // TYPE
+                            "trait" => Some(15),          // INTERFACE
+                            "fn" | "function" => Some(4), // FUNCTION
                             _ => None,
                         };
                         if let Some(tt) = name_token_type {
@@ -1133,7 +1133,6 @@ fn is_fallback_keyword(word: &str) -> bool {
             | "not"
             | "in"
             | "type"
-            | "interface"
             | "enum"
             | "extend"
             | "trait"
@@ -1348,11 +1347,6 @@ impl<'a> Visitor for TokenCollector<'a> {
                     span.start,
                     span.end,
                 );
-            }
-            Item::Interface(interface_def, span) => {
-                self.add_keyword_token("interface", *span);
-                self.add_name_token_after_keyword("interface", &interface_def.name, *span, 15);
-                // INTERFACE
             }
             Item::Trait(trait_def, span) => {
                 self.add_keyword_token("trait", *span);
@@ -1607,10 +1601,10 @@ impl<'a> Visitor for TokenCollector<'a> {
                     // For declaration keywords, also highlight the following name
                     // using a scan-ahead in source text (mirrors fallback scanner).
                     let name_token_type = match name.as_str() {
-                        "enum" => Some(3u32),            // ENUM
-                        "type" | "interface" => Some(1), // TYPE
-                        "trait" => Some(15),             // INTERFACE
-                        "fn" | "function" => Some(4),    // FUNCTION
+                        "enum" => Some(3u32),         // ENUM
+                        "type" => Some(1),            // TYPE
+                        "trait" => Some(15),          // INTERFACE
+                        "fn" | "function" => Some(4), // FUNCTION
                         _ => None,
                     };
                     if let Some(tt) = name_token_type {

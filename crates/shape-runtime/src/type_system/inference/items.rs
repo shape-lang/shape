@@ -5,7 +5,7 @@
 use super::TypeInferenceEngine;
 use crate::type_system::*;
 use shape_ast::ast::{
-    DestructurePattern, ForeignFunctionDef, FunctionDef, InterfaceMember, Item, Statement,
+    DestructurePattern, ForeignFunctionDef, FunctionDef, TraitMemberSignature, Item, Statement,
     TraitMember, TypeAnnotation, TypeName, VarKind, VariableDecl,
 };
 use std::collections::HashMap;
@@ -192,10 +192,6 @@ impl TypeInferenceEngine {
                     .collect();
                 self.env
                     .define_type_alias(&struct_def.name, &TypeAnnotation::Object(fields), None);
-            }
-            Item::Interface(interface, _) => {
-                // Register interface in type environment
-                self.env.define_interface(interface);
             }
             Item::Enum(enum_def, _) => {
                 // Register enum for exhaustiveness checking
@@ -545,7 +541,7 @@ impl TypeInferenceEngine {
             let trait_def = trait_def.clone();
             for member in &trait_def.members {
                 let (trait_method_name, trait_arity) = match member {
-                    TraitMember::Required(InterfaceMember::Method { name, params, .. }) => {
+                    TraitMember::Required(TraitMemberSignature::Method { name, params, .. }) => {
                         (name.as_str(), params.len())
                     }
                     TraitMember::Default(method_def) => {
@@ -1200,7 +1196,7 @@ mod tests {
     fn test_trait_registration_during_inference() {
         use shape_ast::parser::parse_program;
 
-        // Trait members use interface syntax: name(params): ReturnType
+        // Trait members use signature syntax: name(params): ReturnType
         let code = r#"
             trait Displayable {
                 format(value: string): string

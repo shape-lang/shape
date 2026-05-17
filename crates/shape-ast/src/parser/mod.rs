@@ -177,7 +177,6 @@ pub fn parse_item(pair: pest::iterators::Pair<Rule>) -> Result<Item> {
             Item::BuiltinTypeDecl(types::parse_builtin_type_decl(inner)?, span)
         }
         Rule::type_alias_def => Item::TypeAlias(types::parse_type_alias_def(inner)?, span),
-        Rule::interface_def => Item::Interface(types::parse_interface_def(inner)?, span),
         Rule::trait_def => Item::Trait(types::parse_trait_def(inner)?, span),
         Rule::enum_def => Item::Enum(types::parse_enum_def(inner)?, span),
         Rule::extern_native_function_def => {
@@ -231,7 +230,6 @@ fn attach_item_doc_comment(item: &mut Item, doc_comment: DocComment) {
     match item {
         Item::Module(module, _) => module.doc_comment = Some(doc_comment),
         Item::TypeAlias(alias, _) => alias.doc_comment = Some(doc_comment),
-        Item::Interface(interface, _) => interface.doc_comment = Some(doc_comment),
         Item::Trait(trait_def, _) => trait_def.doc_comment = Some(doc_comment),
         Item::Enum(enum_def, _) => enum_def.doc_comment = Some(doc_comment),
         Item::Function(function, _) => function.doc_comment = Some(doc_comment),
@@ -253,7 +251,6 @@ fn attach_export_doc_comment(item: &mut ExportItem, doc_comment: DocComment) {
         ExportItem::TypeAlias(alias) => alias.doc_comment = Some(doc_comment),
         ExportItem::Enum(enum_def) => enum_def.doc_comment = Some(doc_comment),
         ExportItem::Struct(struct_def) => struct_def.doc_comment = Some(doc_comment),
-        ExportItem::Interface(interface) => interface.doc_comment = Some(doc_comment),
         ExportItem::Trait(trait_def) => trait_def.doc_comment = Some(doc_comment),
         ExportItem::Annotation(annotation_def) => annotation_def.doc_comment = Some(doc_comment),
         ExportItem::ForeignFunction(function) => function.doc_comment = Some(doc_comment),

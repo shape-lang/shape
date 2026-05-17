@@ -448,7 +448,7 @@ pub fn import_path_export_completions_with_context(
                 crate::module_cache::SymbolKind::Function => CompletionItemKind::FUNCTION,
                 crate::module_cache::SymbolKind::Enum => CompletionItemKind::ENUM,
                 crate::module_cache::SymbolKind::TypeAlias => CompletionItemKind::STRUCT,
-                crate::module_cache::SymbolKind::Interface => CompletionItemKind::INTERFACE,
+                crate::module_cache::SymbolKind::Trait => CompletionItemKind::INTERFACE,
                 _ => CompletionItemKind::VARIABLE,
             };
             CompletionItem {

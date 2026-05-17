@@ -17,7 +17,7 @@ pub enum KeywordCategory {
     ControlFlow, // if, else, while, for, return, break, continue
     Query,       // find, scan, analyze, simulate, alert
     Module,      // import, export, from, module
-    Type,        // type, interface, enum, extend
+    Type,        // type, trait, enum, extend
     Literal,     // true, false, None, Some
     Operator,    // and, or, not, in
     Temporal,    // on

@@ -607,7 +607,7 @@ fn test_module_export_pub_builtin_function() {
 
 #[test]
 fn test_module_export_pub_trait() {
-    // trait_member uses interface_member syntax for required methods: `name(params): ReturnType`
+    // trait_member uses trait_member_signature syntax for required methods: `name(params): ReturnType`
     let result = parse_program("pub trait Display { show(self): string }");
     assert!(result.is_ok(), "pub trait: {:?}", result.err());
     match &result.unwrap().items[0] {
@@ -851,7 +851,7 @@ fn test_module_decl_with_struct() {
 
 #[test]
 fn test_module_decl_with_trait() {
-    // trait_member uses interface_member syntax for required methods: `name(params): ReturnType`
+    // trait_member uses trait_member_signature syntax for required methods: `name(params): ReturnType`
     let result = parse_program("mod traits { trait Display { show(self): string } }");
     assert!(result.is_ok(), "module with trait: {:?}", result.err());
 }
@@ -1164,16 +1164,13 @@ fn test_module_import_from_without_use_keyword() {
 }
 
 #[test]
-fn test_module_export_pub_interface() {
-    // pub interface is not listed in pub_item grammar, but interface_def may or may not be allowed
-    // Check what actually happens
+fn test_module_export_pub_interface_rejected() {
+    // W8: `interface` keyword has been stripped. `pub interface ...` must fail to parse.
     let result = parse_program("pub interface Serializable { fn serialize(self) -> string; }");
-    // This may or may not parse — document behavior
-    if result.is_err() {
-        // BUG: `pub interface` is not supported even though pub_item lists other type definitions.
-        // Note: The grammar has no `pub ~ interface_def` alternative, only `pub ~ trait_def`.
-        // This is likely intentional since `trait` replaced `interface` for visibility.
-    }
+    assert!(
+        result.is_err(),
+        "`pub interface` should be rejected post-W8 strip"
+    );
 }
 
 #[test]
