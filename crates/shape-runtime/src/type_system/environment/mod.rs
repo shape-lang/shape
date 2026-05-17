@@ -475,12 +475,13 @@ impl TypeEnvironment {
             optional: false,
         };
 
-        // Binary operator traits: Add, Sub, Mul, Div
+        // Binary operator traits: Add, Sub, Mul, Div, Mod
         for (trait_name, method_name) in &[
             ("Add", "add"),
             ("Sub", "sub"),
             ("Mul", "mul"),
             ("Div", "div"),
+            ("Mod", "mod"),
         ] {
             let trait_def = TraitDef {
                 name: trait_name.to_string(),
@@ -619,6 +620,11 @@ impl TypeEnvironment {
                 "Div",
                 type_name,
                 vec!["div".to_string()],
+            );
+            let _ = self.type_registry.register_trait_impl(
+                "Mod",
+                type_name,
+                vec!["mod".to_string()],
             );
             let _ = self.type_registry.register_trait_impl(
                 "Neg",

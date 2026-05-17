@@ -27,10 +27,11 @@ fn operator_trait_for_op(op: &BinaryOp) -> Option<&'static str> {
         BinaryOp::Sub => Some("Sub"),
         BinaryOp::Mul => Some("Mul"),
         BinaryOp::Div => Some("Div"),
+        BinaryOp::Mod => Some("Mod"),
         BinaryOp::Greater | BinaryOp::Less | BinaryOp::GreaterEq | BinaryOp::LessEq => {
             Some("Ord")
         }
-        _ => None, // Mod, Pow have no operator trait
+        _ => None, // Pow has no operator trait
     }
 }
 
@@ -45,6 +46,7 @@ fn operator_trait_method_for_op(op: &BinaryOp) -> Option<&'static str> {
         BinaryOp::Sub => Some("sub"),
         BinaryOp::Mul => Some("mul"),
         BinaryOp::Div => Some("div"),
+        BinaryOp::Mod => Some("mod"),
         BinaryOp::Greater | BinaryOp::Less | BinaryOp::GreaterEq | BinaryOp::LessEq => {
             Some("cmp")
         }
