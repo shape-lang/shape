@@ -1,228 +1,140 @@
 // ============================================================================
 // Vector Intrinsics
 // ============================================================================
+//
+// Per ADR-006 §2.7.5, the JIT-FFI boundary carries raw `u64` plus a parallel
+// `NativeKind` companion stamped at JIT compile time from the call signature.
+// These extern "C" entry-points retain the raw `u64` ABI shape so the
+// Cranelift call sites in the JIT codegen don't need to change today.
+//
+// **Phase-2c surface (ADR-006 §2.7.4): vector intrinsics rebuild.** The
+// pre-bulldozer bodies decoded `&[ValueWord]` argument arrays via tag-bit
+// dispatch (`as_any_array()`, `as_f64_slice()`, etc.) and dispatched to
+// `shape_runtime::intrinsics::vector::intrinsic_vec_*` /
+// `intrinsics::matrix::intrinsic_*` free functions. Both pieces are deleted:
+// `ValueWord` is gone post-strict-typing, and the runtime now exposes vector
+// / matrix intrinsics only as `ModuleExports` (`__intrinsic_vec_abs`, etc.)
+// with kind-threaded `&[KindedSlot]` body shims that themselves return a
+// deferred error in Phase 1.B (mirroring `multi_table::functions::align_tables`
+// at `crates/shape-runtime/src/multi_table/functions.rs:30`).
+//
+// The kind-threaded rebuild (per-position `NativeKind` flowing from the
+// JIT-emitted call signature into a `KindedSlot` carrier the runtime
+// `__intrinsic_vec_*` body consumes) lands in Phase 2c. Until then every
+// entry-point surface-and-stops per W10 playbook §5.
 
 use super::super::context::JITContext;
-use super::super::ffi::object::conversion::{jit_bits_to_nanboxed_with_ctx, nanboxed_to_jit_bits};
-use crate::ffi::jit_kinds::*;
-use crate::ffi::value_ffi::*;
-use shape_value::ValueWord;
 
-fn jit_to_nb(bits: u64, ctx: *mut JITContext) -> ValueWord {
-    jit_bits_to_nanboxed_with_ctx(bits, ctx)
+#[inline]
+fn vector_intrinsic_phase_2c() -> ! {
+    todo!("phase-2c — see ADR-006 §2.7.4: vector intrinsics rebuild")
 }
 
-fn nb_to_bits(nb: ValueWord) -> u64 {
-    nanboxed_to_jit_bits(&nb)
+pub extern "C" fn jit_intrinsic_vec_abs(_ctx: *mut JITContext, _arg_bits: u64) -> u64 {
+    vector_intrinsic_phase_2c()
 }
 
-pub extern "C" fn jit_intrinsic_vec_abs(ctx: *mut JITContext, arg_bits: u64) -> u64 {
-    if ctx.is_null() {
-        return TAG_NULL;
-    }
-    let arg = jit_to_nb(arg_bits, ctx);
-    let mut exec_ctx = shape_runtime::context::ExecutionContext::new_empty();
-    match shape_runtime::intrinsics::vector::intrinsic_vec_abs(&[arg], &mut exec_ctx) {
-        Ok(res) => nb_to_bits(res),
-        Err(_) => TAG_NULL,
-    }
+pub extern "C" fn jit_intrinsic_vec_sqrt(_ctx: *mut JITContext, _arg_bits: u64) -> u64 {
+    vector_intrinsic_phase_2c()
 }
 
-pub extern "C" fn jit_intrinsic_vec_sqrt(ctx: *mut JITContext, arg_bits: u64) -> u64 {
-    if ctx.is_null() {
-        return TAG_NULL;
-    }
-    let arg = jit_to_nb(arg_bits, ctx);
-    let mut exec_ctx = shape_runtime::context::ExecutionContext::new_empty();
-    match shape_runtime::intrinsics::vector::intrinsic_vec_sqrt(&[arg], &mut exec_ctx) {
-        Ok(res) => nb_to_bits(res),
-        Err(_) => TAG_NULL,
-    }
+pub extern "C" fn jit_intrinsic_vec_ln(_ctx: *mut JITContext, _arg_bits: u64) -> u64 {
+    vector_intrinsic_phase_2c()
 }
 
-pub extern "C" fn jit_intrinsic_vec_ln(ctx: *mut JITContext, arg_bits: u64) -> u64 {
-    if ctx.is_null() {
-        return TAG_NULL;
-    }
-    let arg = jit_to_nb(arg_bits, ctx);
-    let mut exec_ctx = shape_runtime::context::ExecutionContext::new_empty();
-    match shape_runtime::intrinsics::vector::intrinsic_vec_ln(&[arg], &mut exec_ctx) {
-        Ok(res) => nb_to_bits(res),
-        Err(_) => TAG_NULL,
-    }
+pub extern "C" fn jit_intrinsic_vec_exp(_ctx: *mut JITContext, _arg_bits: u64) -> u64 {
+    vector_intrinsic_phase_2c()
 }
 
-pub extern "C" fn jit_intrinsic_vec_exp(ctx: *mut JITContext, arg_bits: u64) -> u64 {
-    if ctx.is_null() {
-        return TAG_NULL;
-    }
-    let arg = jit_to_nb(arg_bits, ctx);
-    let mut exec_ctx = shape_runtime::context::ExecutionContext::new_empty();
-    match shape_runtime::intrinsics::vector::intrinsic_vec_exp(&[arg], &mut exec_ctx) {
-        Ok(res) => nb_to_bits(res),
-        Err(_) => TAG_NULL,
-    }
+pub extern "C" fn jit_intrinsic_vec_add(
+    _ctx: *mut JITContext,
+    _a_bits: u64,
+    _b_bits: u64,
+) -> u64 {
+    vector_intrinsic_phase_2c()
 }
 
-pub extern "C" fn jit_intrinsic_vec_add(ctx: *mut JITContext, a_bits: u64, b_bits: u64) -> u64 {
-    if ctx.is_null() {
-        return TAG_NULL;
-    }
-    let a = jit_to_nb(a_bits, ctx);
-    let b = jit_to_nb(b_bits, ctx);
-    let mut exec_ctx = shape_runtime::context::ExecutionContext::new_empty();
-    match shape_runtime::intrinsics::vector::intrinsic_vec_add(&[a, b], &mut exec_ctx) {
-        Ok(res) => nb_to_bits(res),
-        Err(_) => TAG_NULL,
-    }
+pub extern "C" fn jit_intrinsic_vec_sub(
+    _ctx: *mut JITContext,
+    _a_bits: u64,
+    _b_bits: u64,
+) -> u64 {
+    vector_intrinsic_phase_2c()
 }
 
-pub extern "C" fn jit_intrinsic_vec_sub(ctx: *mut JITContext, a_bits: u64, b_bits: u64) -> u64 {
-    if ctx.is_null() {
-        return TAG_NULL;
-    }
-    let a = jit_to_nb(a_bits, ctx);
-    let b = jit_to_nb(b_bits, ctx);
-    let mut exec_ctx = shape_runtime::context::ExecutionContext::new_empty();
-    match shape_runtime::intrinsics::vector::intrinsic_vec_sub(&[a, b], &mut exec_ctx) {
-        Ok(res) => nb_to_bits(res),
-        Err(_) => TAG_NULL,
-    }
+pub extern "C" fn jit_intrinsic_vec_mul(
+    _ctx: *mut JITContext,
+    _a_bits: u64,
+    _b_bits: u64,
+) -> u64 {
+    vector_intrinsic_phase_2c()
 }
 
-pub extern "C" fn jit_intrinsic_vec_mul(ctx: *mut JITContext, a_bits: u64, b_bits: u64) -> u64 {
-    if ctx.is_null() {
-        return TAG_NULL;
-    }
-    let a = jit_to_nb(a_bits, ctx);
-    let b = jit_to_nb(b_bits, ctx);
-    let mut exec_ctx = shape_runtime::context::ExecutionContext::new_empty();
-    match shape_runtime::intrinsics::vector::intrinsic_vec_mul(&[a, b], &mut exec_ctx) {
-        Ok(res) => nb_to_bits(res),
-        Err(_) => TAG_NULL,
-    }
+pub extern "C" fn jit_intrinsic_vec_div(
+    _ctx: *mut JITContext,
+    _a_bits: u64,
+    _b_bits: u64,
+) -> u64 {
+    vector_intrinsic_phase_2c()
 }
 
-pub extern "C" fn jit_intrinsic_vec_div(ctx: *mut JITContext, a_bits: u64, b_bits: u64) -> u64 {
-    if ctx.is_null() {
-        return TAG_NULL;
-    }
-    let a = jit_to_nb(a_bits, ctx);
-    let b = jit_to_nb(b_bits, ctx);
-    let mut exec_ctx = shape_runtime::context::ExecutionContext::new_empty();
-    match shape_runtime::intrinsics::vector::intrinsic_vec_div(&[a, b], &mut exec_ctx) {
-        Ok(res) => nb_to_bits(res),
-        Err(_) => TAG_NULL,
-    }
+pub extern "C" fn jit_intrinsic_vec_max(
+    _ctx: *mut JITContext,
+    _a_bits: u64,
+    _b_bits: u64,
+) -> u64 {
+    vector_intrinsic_phase_2c()
 }
 
-pub extern "C" fn jit_intrinsic_vec_max(ctx: *mut JITContext, a_bits: u64, b_bits: u64) -> u64 {
-    if ctx.is_null() {
-        return TAG_NULL;
-    }
-    let a = jit_to_nb(a_bits, ctx);
-    let b = jit_to_nb(b_bits, ctx);
-    let mut exec_ctx = shape_runtime::context::ExecutionContext::new_empty();
-    match shape_runtime::intrinsics::vector::intrinsic_vec_max(&[a, b], &mut exec_ctx) {
-        Ok(res) => nb_to_bits(res),
-        Err(_) => TAG_NULL,
-    }
+pub extern "C" fn jit_intrinsic_vec_min(
+    _ctx: *mut JITContext,
+    _a_bits: u64,
+    _b_bits: u64,
+) -> u64 {
+    vector_intrinsic_phase_2c()
 }
 
-pub extern "C" fn jit_intrinsic_vec_min(ctx: *mut JITContext, a_bits: u64, b_bits: u64) -> u64 {
-    if ctx.is_null() {
-        return TAG_NULL;
-    }
-    let a = jit_to_nb(a_bits, ctx);
-    let b = jit_to_nb(b_bits, ctx);
-    let mut exec_ctx = shape_runtime::context::ExecutionContext::new_empty();
-    match shape_runtime::intrinsics::vector::intrinsic_vec_min(&[a, b], &mut exec_ctx) {
-        Ok(res) => nb_to_bits(res),
-        Err(_) => TAG_NULL,
-    }
+pub extern "C" fn jit_intrinsic_matmul_vec(
+    _ctx: *mut JITContext,
+    _a_bits: u64,
+    _b_bits: u64,
+) -> u64 {
+    vector_intrinsic_phase_2c()
 }
 
-pub extern "C" fn jit_intrinsic_matmul_vec(ctx: *mut JITContext, a_bits: u64, b_bits: u64) -> u64 {
-    if ctx.is_null() {
-        return TAG_NULL;
-    }
-    let a = jit_to_nb(a_bits, ctx);
-    let b = jit_to_nb(b_bits, ctx);
-    let mut exec_ctx = shape_runtime::context::ExecutionContext::new_empty();
-    match shape_runtime::intrinsics::matrix::intrinsic_matmul_vec(&[a, b], &mut exec_ctx) {
-        Ok(res) => nb_to_bits(res),
-        Err(_) => TAG_NULL,
-    }
-}
-
-pub extern "C" fn jit_intrinsic_matmul_mat(ctx: *mut JITContext, a_bits: u64, b_bits: u64) -> u64 {
-    if ctx.is_null() {
-        return TAG_NULL;
-    }
-    let a = jit_to_nb(a_bits, ctx);
-    let b = jit_to_nb(b_bits, ctx);
-    let mut exec_ctx = shape_runtime::context::ExecutionContext::new_empty();
-    match shape_runtime::intrinsics::matrix::intrinsic_matmul_mat(&[a, b], &mut exec_ctx) {
-        Ok(res) => nb_to_bits(res),
-        Err(_) => TAG_NULL,
-    }
+pub extern "C" fn jit_intrinsic_matmul_mat(
+    _ctx: *mut JITContext,
+    _a_bits: u64,
+    _b_bits: u64,
+) -> u64 {
+    vector_intrinsic_phase_2c()
 }
 
 // ===== R5.4D: Matrix/Vec arithmetic intrinsics (unwired) =====
 //
-// Mirrors the existing `jit_intrinsic_matmul_mat` shape. Exposed as
-// direct-call helpers — there is no Cranelift symbol registration for
-// this family today (see `ffi_symbols/mod.rs`), so these entry points
-// piggy-back on the same pattern. R5.4E owns the compiler emission that
-// makes these reachable; R7 owns the eventual FuncRef consolidation.
+// Same Phase-2c surface as the rest of the family; tracked under the same
+// rebuild ticket per ADR-006 §2.7.4.
 
 pub extern "C" fn jit_intrinsic_vec_add_i64(
-    ctx: *mut JITContext,
-    a_bits: u64,
-    b_bits: u64,
+    _ctx: *mut JITContext,
+    _a_bits: u64,
+    _b_bits: u64,
 ) -> u64 {
-    if ctx.is_null() {
-        return TAG_NULL;
-    }
-    let a = jit_to_nb(a_bits, ctx);
-    let b = jit_to_nb(b_bits, ctx);
-    let mut exec_ctx = shape_runtime::context::ExecutionContext::new_empty();
-    match shape_runtime::intrinsics::vector::intrinsic_vec_add_i64(&[a, b], &mut exec_ctx) {
-        Ok(res) => nb_to_bits(res),
-        Err(_) => TAG_NULL,
-    }
+    vector_intrinsic_phase_2c()
 }
 
 pub extern "C" fn jit_intrinsic_mat_add(
-    ctx: *mut JITContext,
-    a_bits: u64,
-    b_bits: u64,
+    _ctx: *mut JITContext,
+    _a_bits: u64,
+    _b_bits: u64,
 ) -> u64 {
-    if ctx.is_null() {
-        return TAG_NULL;
-    }
-    let a = jit_to_nb(a_bits, ctx);
-    let b = jit_to_nb(b_bits, ctx);
-    let mut exec_ctx = shape_runtime::context::ExecutionContext::new_empty();
-    match shape_runtime::intrinsics::matrix::intrinsic_mat_add(&[a, b], &mut exec_ctx) {
-        Ok(res) => nb_to_bits(res),
-        Err(_) => TAG_NULL,
-    }
+    vector_intrinsic_phase_2c()
 }
 
 pub extern "C" fn jit_intrinsic_mat_sub(
-    ctx: *mut JITContext,
-    a_bits: u64,
-    b_bits: u64,
+    _ctx: *mut JITContext,
+    _a_bits: u64,
+    _b_bits: u64,
 ) -> u64 {
-    if ctx.is_null() {
-        return TAG_NULL;
-    }
-    let a = jit_to_nb(a_bits, ctx);
-    let b = jit_to_nb(b_bits, ctx);
-    let mut exec_ctx = shape_runtime::context::ExecutionContext::new_empty();
-    match shape_runtime::intrinsics::matrix::intrinsic_mat_sub(&[a, b], &mut exec_ctx) {
-        Ok(res) => nb_to_bits(res),
-        Err(_) => TAG_NULL,
-    }
+    vector_intrinsic_phase_2c()
 }

@@ -1,14 +1,39 @@
-//! TypedObject operations for the VM
+//! TypedObject operations for the VM.
 //!
-//! This module handles type-specialized operations for TypedObject values,
-//! including fast field access using precomputed offsets and timeframe context management.
+//! ADR-006 §2.7.6 / §2.7.7 / §2.7.8 + Q7-Q10 — Wave 6.5 substep-2 cluster
+//! `D-typed-obj-ops`. Receiver kind is `NativeKind::Ptr(HeapKind::TypedObject)`;
+//! heap dispatch goes through `ValueSlot::as_heap_value()` +
+//! `HeapValue::TypedObject(arc)` match (Q8 — no per-heap-variant accessors on
+//! `KindedSlot`). Field-access opcodes carry per-field FieldType operands
+//! that supply the loaded value's `NativeKind` via the `field_type_tag` →
+//! `NativeKind` mapping in [`field_tag_to_heap_native_kind`] / inline
+//! match arms in [`push_field_value`].
+//!
+//! Forbidden patterns (CLAUDE.md "Forbidden Patterns" + playbook §4):
+//! the deleted dynamic-word runtime construction, the deleted raw-helper
+//! tag_bits dispatch, and the deleted Wave 6.0 transitional shim layer
+//! have all been migrated off this file.
+//!
+//! `op_set_field_typed` write-path was rebuilt by
+//! W17-typed-object-mutation (2026-05-11) on top of
+//! `TypedObjectStorage::write_slot_in_place` (the kinded in-place
+//! projection writer landed by W17-references-mutation `30b9ebf`,
+//! ADR-006 §2.7.13 / Q14). The legacy `clone_slots_with_update` shape
+//! is intentionally NOT resurrected — `Arc::make_mut` on a shared
+//! `Arc<TypedObjectStorage>` is fundamentally incompatible with the
+//! ref-projection invariant that prompted the kinded in-place writer
+//! (refcount > 1 by construction; the struct is intentionally not
+//! `Clone`). Remaining `NotImplemented(SURFACE)` sites in this file
+//! (`push_field_value` arms for impossible non-heap/heap-with-Any
+//! shapes; soundness gap when receiver kind says TypedObject but the
+//! HeapValue arm disagrees) are defensive surfaces for construction-
+//! side bugs, not migration cascades.
 
 use crate::bytecode::{Instruction, Operand};
-use crate::executor::objects::object_creation::clone_slots_with_update;
-use crate::executor::objects::raw_helpers;
+use crate::executor::vm_impl::stack::{clone_with_kind, drop_with_kind};
 use shape_runtime::type_schema::FieldType;
 use shape_value::heap_value::HeapValue;
-use shape_value::{VMError, ValueSlot, ValueWord, ValueWordExt};
+use shape_value::{HeapKind, NativeKind, VMError, ValueSlot};
 
 /// Compile-time field type tags for zero-cost field access.
 /// Stored in `Operand::TypedField::field_type_tag` so the executor
@@ -36,7 +61,7 @@ pub fn field_type_to_tag(ft: &FieldType) -> u16 {
         FieldType::Object(_) => FIELD_TAG_OBJECT,
         FieldType::Decimal => FIELD_TAG_DECIMAL,
         FieldType::Any => FIELD_TAG_ANY,
-        // Width integer types stored as I64 in NaN-boxed slots
+        // Width integer types stored as I64 in the slot bits.
         FieldType::I8
         | FieldType::U8
         | FieldType::I16
@@ -47,65 +72,9 @@ pub fn field_type_to_tag(ft: &FieldType) -> u16 {
     }
 }
 
-/// Read a ValueWord from a TypedObject slot using the precomputed field type tag.
-/// No schema lookup required — the tag was embedded at compile time.
-#[inline(always)]
-pub(in crate::executor) fn read_slot_fast(
-    slot: &ValueSlot,
-    is_heap: bool,
-    field_type_tag: u16,
-) -> ValueWord {
-    if is_heap {
-        return slot.as_heap_nb();
-    }
-
-    match field_type_tag {
-        FIELD_TAG_I64 | FIELD_TAG_TIMESTAMP => ValueWord::from_i64(slot.as_i64()),
-        FIELD_TAG_BOOL => ValueWord::from_bool(slot.as_bool()),
-        FIELD_TAG_DECIMAL => ValueWord::from_decimal(
-            rust_decimal::Decimal::from_f64_retain(slot.as_f64()).unwrap_or_default(),
-        ),
-        FIELD_TAG_F64 => ValueWord::from_f64(slot.as_f64()),
-        // Any and non-primitive types: use as_value_word(false) to preserve
-        // all inline inline tag variants (Function, ModuleFunction, I48, etc.)
-        _ => slot.as_value_word(false),
-    }
-}
-
-/// Push the field-load result onto the VM stack using the post-E+5 native
-/// transport for scalar field tags (I64/F64/Bool on non-heap slots).
-///
-/// This aligns the producer with post-E+5.4 typed comparison/arithmetic
-/// consumers (`EqInt`, `AddInt`, `JumpIfFalseTrusted`, …) which now
-/// `pop_native_*` raw bits instead of decoding a NaN-tagged ValueWord.
-/// Without this alignment, e.g. enum-match `__variant` compares would push
-/// a tagged i48 ValueWord and then `EqInt` would `pop_native_i64` raw
-/// transmuted bits — never equal to the native-bits constant pushed by
-/// post-Unit-B `PushConst(Int)`.
-///
-/// All other tags fall back to `read_slot_fast` + `push_raw_u64` (the
-/// pre-flip ValueWord-tagged transport), preserving downstream consumers
-/// that still expect a ValueWord (heap kinds, decimal, string, any).
-#[inline(always)]
-pub(in crate::executor) fn push_field_value(
-    vm: &mut super::VirtualMachine,
-    slot: &ValueSlot,
-    is_heap: bool,
-    field_type_tag: u16,
-) -> Result<(), VMError> {
-    if !is_heap {
-        match field_type_tag {
-            FIELD_TAG_I64 | FIELD_TAG_TIMESTAMP => return vm.push_native_i64(slot.as_i64()),
-            FIELD_TAG_F64 => return vm.push_raw_f64(slot.as_f64()),
-            FIELD_TAG_BOOL => return vm.push_native_bool(slot.as_bool()),
-            _ => {}
-        }
-    }
-    let nb = read_slot_fast(slot, is_heap, field_type_tag);
-    vm.push_raw_u64(nb)
-}
-
-/// Convert a field_type_tag back to a FieldType for set operations.
+/// Convert a `field_type_tag` back to a `FieldType` (used by write-path
+/// `clone_slots_with_update`, which is owned by sibling cluster
+/// `D-obj-create`). Pure schema-tag mapping — no runtime dynamic-word shape.
 pub(in crate::executor) fn tag_to_field_type(tag: u16) -> Option<FieldType> {
     match tag {
         FIELD_TAG_F64 => Some(FieldType::F64),
@@ -121,6 +90,151 @@ pub(in crate::executor) fn tag_to_field_type(tag: u16) -> Option<FieldType> {
     }
 }
 
+/// Map a heap-backed `field_type_tag` to its `NativeKind` (ADR-006 §2.7.7
+/// — kinded API receives the kind alongside the bits; the deleted
+/// tag_bits dispatch never runs at the consumer). For tags whose heap arm
+/// is unambiguous, returns `Some(kind)`; for `FIELD_TAG_ANY` /
+/// `FIELD_TAG_UNKNOWN` (dynamic), returns `None`.
+#[inline]
+fn field_tag_to_heap_native_kind(tag: u16) -> Option<NativeKind> {
+    match tag {
+        FIELD_TAG_STRING => Some(NativeKind::String),
+        FIELD_TAG_ARRAY => Some(NativeKind::Ptr(HeapKind::TypedArray)),
+        FIELD_TAG_OBJECT => Some(NativeKind::Ptr(HeapKind::TypedObject)),
+        FIELD_TAG_DECIMAL => Some(NativeKind::Ptr(HeapKind::Decimal)),
+        // FIELD_TAG_TIMESTAMP heap-backed → Temporal payload.
+        FIELD_TAG_TIMESTAMP => Some(NativeKind::Ptr(HeapKind::Temporal)),
+        // Tags below are non-heap (inline scalar); exposing them here is a
+        // construction-side bug — caller must check `is_heap` first.
+        FIELD_TAG_F64 | FIELD_TAG_I64 | FIELD_TAG_BOOL => None,
+        // Dynamic / unknown — ADR-006 §2.7.7: no statically-sourceable kind.
+        _ => None,
+    }
+}
+
+/// Map any `field_type_tag` (heap-backed or inline scalar) to its
+/// `NativeKind`. ADR-006 §2.7.13 / Q14 (Wave 8 W8-T26): the
+/// `MakeFieldRef` projection captures the projected slot's kind on the
+/// `RefTarget::TypedField` variant; the kind-source is the operand-
+/// encoded `field_type_tag`, and the `MakeFieldRef` path needs the
+/// inline-scalar arms too (a `&obj.bool_field` ref carries
+/// `kind = NativeKind::Bool`, etc.).
+///
+/// Returns `None` for `FIELD_TAG_ANY` / `FIELD_TAG_UNKNOWN` (no
+/// statically-sourceable kind — caller surfaces per playbook §7
+/// REVISED #4, no Bool-default fallback per §2.7.7 #9).
+#[inline]
+pub(in crate::executor) fn field_tag_to_native_kind(tag: u16) -> Option<NativeKind> {
+    match tag {
+        FIELD_TAG_F64 => Some(NativeKind::Float64),
+        FIELD_TAG_I64 => Some(NativeKind::Int64),
+        FIELD_TAG_BOOL => Some(NativeKind::Bool),
+        FIELD_TAG_STRING => Some(NativeKind::String),
+        FIELD_TAG_ARRAY => Some(NativeKind::Ptr(HeapKind::TypedArray)),
+        FIELD_TAG_OBJECT => Some(NativeKind::Ptr(HeapKind::TypedObject)),
+        FIELD_TAG_DECIMAL => Some(NativeKind::Ptr(HeapKind::Decimal)),
+        FIELD_TAG_TIMESTAMP => Some(NativeKind::Ptr(HeapKind::Temporal)),
+        // Dynamic / unknown — ADR-006 §2.7.7: no statically-sourceable kind.
+        _ => None,
+    }
+}
+
+/// Push a TypedObject field onto the kinded VM stack.
+///
+/// ADR-006 §2.7.7 — kind is sourced from the operand-encoded `field_type_tag`
+/// (per-field FieldType supplies the `NativeKind`); no dynamic-word
+/// construction, no NaN-tag decoding, no transitional-shim push/pop. Heap-
+/// backed slots have their `Arc<T>` strong-count bumped via
+/// `clone_with_kind` because the slot is borrowed (the underlying
+/// `TypedObjectStorage` retains the original share).
+///
+/// Cross-cluster note: the signature is preserved because cluster B
+/// (`variables/mod.rs:3476`) and cluster D-prop-access
+/// (`property_access.rs:463`) call this helper. Migrating those call sites
+/// is their own cluster's responsibility per playbook §10 — this body
+/// uses only kinded-API primitives.
+#[inline(always)]
+pub(in crate::executor) fn push_field_value(
+    vm: &mut super::VirtualMachine,
+    slot: &ValueSlot,
+    is_heap: bool,
+    field_type_tag: u16,
+) -> Result<(), VMError> {
+    if !is_heap {
+        // Inline scalar field. Kind sourced from the operand tag per
+        // playbook §10 D-typed-obj-ops row.
+        return match field_type_tag {
+            FIELD_TAG_I64 | FIELD_TAG_TIMESTAMP => {
+                vm.push_kinded(slot.as_i64() as u64, NativeKind::Int64)
+            }
+            FIELD_TAG_F64 => vm.push_kinded(slot.as_f64().to_bits(), NativeKind::Float64),
+            FIELD_TAG_BOOL => vm.push_kinded(slot.as_bool() as u64, NativeKind::Bool),
+            // Non-heap slot tagged ANY / UNKNOWN / STRING / OBJECT / ARRAY /
+            // DECIMAL: no statically-sourceable NativeKind in the §2.7.7
+            // model. Surface per playbook §7 REVISED #4 — the right shape
+            // is a NotImplemented(SURFACE) marker, never a Bool-default
+            // fallback (W-series defection-attractor §2.7.7).
+            _ => Err(VMError::NotImplemented(format!(
+                "push_field_value SURFACE: non-heap slot with field_type_tag {} \
+                 has no statically-sourceable NativeKind — \
+                 ADR-006 §2.7.7 / playbook §10 D-typed-obj-ops",
+                field_type_tag
+            ))),
+        };
+    }
+
+    // Heap-backed field: slot bits are an `Arc::into_raw`'d typed pointer
+    // (per ADR-006 §2.4 / TypedObjectStorage construction-side contract).
+    // Source the kind from the operand tag, then bump the underlying
+    // refcount via `clone_with_kind` because we are borrowing the slot
+    // — the enclosing `TypedObjectStorage` keeps the original share.
+    let Some(kind) = field_tag_to_heap_native_kind(field_type_tag) else {
+        return Err(VMError::NotImplemented(format!(
+            "push_field_value SURFACE: heap-backed slot with dynamic \
+             field_type_tag {} (FIELD_TAG_ANY / UNKNOWN) — \
+             ADR-006 §2.7.7 / playbook §10 D-typed-obj-ops",
+            field_type_tag
+        )));
+    };
+    let bits = slot.raw();
+    clone_with_kind(bits, kind);
+    vm.push_kinded(bits, kind)
+}
+
+/// Push a TypedObject field onto the kinded VM stack using the
+/// storage's parallel `field_kinds` track as the kind source.
+///
+/// **W17-comptime-vm-dispatch (ADR-006 §2.7.26, 2026-05-12).** Mirror
+/// of [`push_field_value`] but sources `NativeKind` from
+/// `TypedObjectStorage::field_kinds[i]` rather than the operand-encoded
+/// `field_type_tag`. Used at `FIELD_TAG_ANY` operand sites where the
+/// schema declares the field as `FieldType::Any` but the runtime
+/// storage carries a concrete kind in its parallel track (the
+/// hardening §(f) resolution path — "add a `Any → Dynamic` readback
+/// path that's bounded by `KindedSlot.kind` rather than the schema").
+///
+/// The original `push_field_value` path stays the fast/typed path for
+/// statically-known field types; this helper is the dynamic-typed
+/// fallback for `FIELD_TAG_ANY` slots whose payload kind is observed
+/// at storage construction time (e.g. `populate_module_objects`
+/// writing `Ptr(HeapKind::ModuleFn)` slots into the `__mod___comptime__`
+/// TypedObject).
+///
+/// The dispatched kind drives `clone_with_kind` retain semantics —
+/// inline-scalar kinds (Bool, Int*, Float*, ModuleFn, Future, Char)
+/// are no-op, heap-bearing kinds bump one `Arc<T>` strong-count
+/// share per ADR-006 §2.7.7.
+#[inline]
+pub(in crate::executor) fn push_field_value_with_kind(
+    vm: &mut super::VirtualMachine,
+    slot: &ValueSlot,
+    kind: NativeKind,
+) -> Result<(), VMError> {
+    let bits = slot.raw();
+    clone_with_kind(bits, kind);
+    vm.push_kinded(bits, kind)
+}
+
 /// TypedObject operations for VirtualMachine
 pub trait TypedObjectOps {
     /// Get field from typed object using precomputed offset (JIT optimization)
@@ -133,10 +247,12 @@ pub trait TypedObjectOps {
 impl TypedObjectOps for super::VirtualMachine {
     /// Get field from typed object using precomputed field type tag.
     ///
-    /// Zero-cost field access: the compiler embeds type_id, field_idx, and
-    /// field_type_tag into the operand. At runtime we just read
-    /// `slots[field_idx]` and use heap_mask + field_type_tag to interpret it.
-    /// No schema lookup required.
+    /// ADR-006 §2.7.7 / Wave 6.5 cluster `D-typed-obj-ops` — receiver pop
+    /// uses the kinded API; heap dispatch is `slot.as_heap_value()` +
+    /// `HeapValue::TypedObject(arc)` match (Q8 single-discriminator).
+    /// The receiver share is dropped via `drop_with_kind` after the field
+    /// load completes (the loaded value owns its own retained share via
+    /// `clone_with_kind` inside `push_field_value`).
     #[inline(always)]
     fn op_get_field_typed(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let operand = instruction
@@ -144,183 +260,692 @@ impl TypedObjectOps for super::VirtualMachine {
             .as_ref()
             .ok_or(VMError::InvalidOperand)?;
 
-        if let Operand::TypedField {
+        let Operand::TypedField {
             type_id,
             field_idx,
             field_type_tag,
         } = operand
-        {
-            let obj_nb = self.pop_raw_u64()?;
-            let obj_bits = raw_helpers::unwrap_annotated_bits(obj_nb);
+        else {
+            return Err(VMError::InvalidOperand);
+        };
 
-            // ValueWord fast path: HeapValue::TypedObject dispatch
-            if let Some((schema_id_val, slots, heap_mask_val)) =
-                raw_helpers::extract_typed_object(obj_bits)
+        // Pop receiver via kinded API. The §2.7.7 invariant: bits + kind
+        // come together — no transitional-shim pop, no the deleted tag_bits dispatch.
+        let (recv_bits, recv_kind) = self.pop_kinded()?;
+
+        // Validate receiver kind. Non-TypedObject receivers fall back to the
+        // post-§2.7.7 "Bool sentinel" None push (drop the receiver share so
+        // refcount stays balanced).
+        if recv_kind != NativeKind::Ptr(HeapKind::TypedObject) {
+            drop_with_kind(recv_bits, recv_kind);
+            return self.push_kinded(0u64, NativeKind::Bool);
+        }
+
+        // W17-comptime-vm-dispatch (ADR-006 §2.7.26 close, 2026-05-12):
+        // canonical 5-arm receiver-recovery soundness pattern per
+        // CLAUDE.md "Receiver-recovery soundness rule" — receiver bits
+        // are `Arc::into_raw(Arc<TypedObjectStorage>)` (the
+        // `ValueSlot::from_typed_object` convention), NOT
+        // `Arc::into_raw(Arc<HeapValue>)`. Casting to `*const HeapValue`
+        // is wrong-type recovery — reads `TypedObjectStorage`'s first
+        // 8 bytes (the `schema_id: u64`) as if they were a HeapValue
+        // enum discriminator. For schema ids that happen to match a
+        // small `HeapKind` ordinal (≤32) the match arm "succeeds" and
+        // we segfault when dereferencing the spurious Arc payload that
+        // follows; for larger ids we either crash on UB or return a
+        // bogus discriminator. Use the canonical Arc::<X>::from_raw +
+        // read + into_raw recovery pattern that `op_set_field_typed`
+        // (line 472) and the post-`3ac2f11` method-handler files
+        // already use.
+        if recv_bits == 0 {
+            return Err(VMError::RuntimeError(
+                "op_get_field_typed: null TypedObject receiver".to_string(),
+            ));
+        }
+        // Phase 4 fix (2026-05-16): receiver bits are produced by
+        // `op_new_typed_object` via `TypedObjectStorage::_new` which uses
+        // `Layout::new::<Self>()` raw allocation (NOT `Arc::new`). The
+        // previous `Arc::from_raw(recv_bits as *const _)` recovery was
+        // wrong-type recovery for v2-raw allocations: Arc::Drop reads
+        // the strong-count at `ptr - 16` (the ArcInner header layout),
+        // but v2-raw allocations have the refcount embedded in the
+        // `HeapHeader` at offset 0 of the struct itself, so Arc::Drop
+        // mutates memory BEFORE the allocation — undefined behavior
+        // that flakily manifests as `free(): double free detected in
+        // tcache 2` on cleanup (or worse, silent heap corruption).
+        // Bisected at phase-4 close 2026-05-16 by running
+        // `/tmp/money_no_method.shape` (`Money { cents: int }; print(a.cents + b.cents)`)
+        // 20x at canonical HEAD `3cb72c2d` — reproduces 1/20 flaky.
+        //
+        // Correct v2-raw recovery: borrow the struct via a raw-pointer
+        // deref (no Arc reconstruction), and retire the one strong-count
+        // share via `drop_with_kind(recv_bits, recv_kind)` after all
+        // borrows of `storage` end. The `ReceiverGuard` RAII wrapper
+        // below ensures retirement runs on every function-exit path
+        // (success, error, early-return) without manual scattering.
+        //
+        // SAFETY: per `from_typed_object_raw`'s construction-side
+        // contract (and `from_typed_object` for the legacy Arc carrier),
+        // `Ptr(HeapKind::TypedObject)` slot bits are a valid `*const
+        // TypedObjectStorage` and the popped slot owned one share.
+        // The borrow is bounded by `ReceiverGuard`'s lifetime; on the
+        // guard's `Drop` we dispatch through `drop_with_kind` which
+        // dispatches the v2-raw `release_elem` (HEAP_KIND_V2_TYPED_OBJECT
+        // arm in `vm_impl/stack.rs::drop_with_kind`) — the correct
+        // retire path for both Arc-allocated and Layout-allocated
+        // `TypedObjectStorage` carriers (drop_with_kind matches on
+        // `NativeKind::Ptr(HeapKind::TypedObject)` and calls
+        // `TypedObjectStorage::release_elem` which uses `v2_release`
+        // against the `HeapHeader` at offset 0 — sound for both
+        // allocator paths because both populate the header).
+        struct ReceiverGuard {
+            bits: u64,
+            kind: NativeKind,
+        }
+        impl Drop for ReceiverGuard {
+            #[inline]
+            fn drop(&mut self) {
+                crate::executor::vm_impl::stack::drop_with_kind(self.bits, self.kind);
+            }
+        }
+        let _guard = ReceiverGuard { bits: recv_bits, kind: recv_kind };
+        let storage: &shape_value::heap_value::TypedObjectStorage =
+            unsafe { &*(recv_bits as *const shape_value::heap_value::TypedObjectStorage) };
+
+        let schema_id = storage.schema_id;
+        let field_count = storage.slots.len();
+
+        // Schema mismatch: the operand's `type_id` doesn't match the
+        // receiver's `schema_id`. Falls back to name-based field lookup
+        // through the registry + property IC + megamorphic cache. Same
+        // shape as the pre-Wave-6.5 path; only the push/pop primitives
+        // change.
+        if schema_id != *type_id as u64 {
+            let ic_ip = self.ip;
+            let sid = schema_id;
+
+            // IC fast path: monomorphic per-schema cache hit.
+            if let Some(hit) =
+                crate::executor::ic_fast_paths::property_ic_check(self, ic_ip, sid)
             {
-                let schema_id = &schema_id_val;
-                let heap_mask = &heap_mask_val;
-                // Schema mismatch — fall back to name-based field lookup.
-                // This happens when e.g. `let u: User = { id: 1, name: "Alice" }`
-                // creates an anonymous TypedObject (schema X) then the compiler
-                // emits GetFieldTyped referencing the User schema (schema Y).
-                if *schema_id != *type_id as u64 {
-                    let ic_ip = self.ip;
-                    let sid = *schema_id;
-
-                    // IC fast path: if this site is monomorphic for this schema,
-                    // use cached field_idx to skip double schema lookup.
-                    if let Some(hit) =
-                        crate::executor::ic_fast_paths::property_ic_check(self, ic_ip, sid)
+                let src_idx = hit.field_idx as usize;
+                if src_idx < field_count {
+                    let is_heap = (storage.heap_mask & (1u64 << src_idx)) != 0;
+                    // W17-comptime-vm-dispatch (ADR-006 §2.7.26): FIELD_TAG_ANY
+                    // sources kind from the storage's parallel field_kinds track.
+                    let result = if hit.field_type_tag == FIELD_TAG_ANY
+                        && src_idx < storage.field_kinds.len()
                     {
-                        let src_idx = hit.field_idx as usize;
-                        if src_idx < slots.len() {
-                            let is_heap = (*heap_mask & (1u64 << src_idx)) != 0;
-                            return push_field_value(self, &slots[src_idx], is_heap, hit.field_type_tag);
-                        }
-                    }
-
-                    // Resolve target field name from schema registry (immutable borrow).
-                    // Extract all needed data before any mutable borrows.
-                    let resolved = {
-                        let target_schema =
-                            self.program.type_schema_registry.get_by_id(*type_id as u32);
-                        let source_schema = self
-                            .program
-                            .type_schema_registry
-                            .get_by_id(*schema_id as u32);
-                        match (target_schema, source_schema) {
-                            (Some(target), Some(source)) => {
-                                if let Some(target_field) = target.field_by_index(*field_idx) {
-                                    let field_name = target_field.name.clone();
-                                    if let Some(src_field_idx) = source.field_index(&field_name) {
-                                        let tag = source
-                                            .field_by_index(src_field_idx)
-                                            .map(|f| field_type_to_tag(&f.field_type))
-                                            .unwrap_or(0);
-                                        Some((field_name, src_field_idx, tag))
-                                    } else {
-                                        None
-                                    }
-                                } else {
-                                    None
-                                }
-                            }
-                            _ => None,
-                        }
+                        push_field_value_with_kind(
+                            self,
+                            &storage.slots[src_idx],
+                            storage.field_kinds[src_idx],
+                        )
+                    } else {
+                        push_field_value(self, &storage.slots[src_idx], is_heap, hit.field_type_tag)
                     };
-
-                    // Megamorphic cache fast path: when >4 schemas observed, check
-                    // the direct-mapped global cache before doing name-based lookup.
-                    if let Some((ref fname, _, _)) = resolved {
-                        if let Some(hit) =
-                            crate::executor::ic_fast_paths::megamorphic_property_check(
-                                self, ic_ip, sid, fname,
-                            )
-                        {
-                            let src_idx = hit.field_idx as usize;
-                            if src_idx < slots.len() {
-                                let is_heap = (*heap_mask & (1u64 << src_idx)) != 0;
-                                return push_field_value(self, &slots[src_idx], is_heap, hit.field_type_tag);
-                            }
-                        }
-                    }
-
-                    // Full name-based fallback: use pre-resolved field mapping.
-                    if let Some((field_name, src_field_idx, tag)) = resolved {
-                        let src_idx = src_field_idx as usize;
-                        if src_idx < slots.len() {
-                            let is_heap = (*heap_mask & (1u64 << src_idx)) != 0;
-                            // Record IC and megamorphic cache (mutable borrows are safe now).
-                            if let Some(fv) = self.current_feedback_vector() {
-                                fv.record_property(
-                                    ic_ip,
-                                    sid,
-                                    src_field_idx,
-                                    tag,
-                                    crate::feedback::RECEIVER_TYPED_OBJECT,
-                                );
-                            }
-                            crate::executor::ic_fast_paths::megamorphic_property_insert(
-                                self,
-                                sid,
-                                &field_name,
-                                src_field_idx,
-                                tag,
-                            );
-                            return push_field_value(self, &slots[src_idx], is_heap, tag);
-                        }
-                    }
-                    return self.push_raw_u64(ValueWord::none());
-                }
-
-                let field_index = *field_idx as usize;
-                debug_assert!(
-                    field_index < slots.len(),
-                    "GetFieldTyped field_idx {} out of bounds (slots.len() = {})",
-                    field_index,
-                    slots.len()
-                );
-
-                if field_index < slots.len() {
-                    let is_heap = (*heap_mask & (1u64 << field_index)) != 0;
-                    return push_field_value(self, &slots[field_index], is_heap, *field_type_tag);
-                } else {
-                    return self.push_raw_u64(ValueWord::none());
+                    return result;
                 }
             }
 
-            // Non-TypedObject: return None
-            self.push_raw_u64(ValueWord::none())?;
-            Ok(())
-        } else {
-            Err(VMError::InvalidOperand)
+            // Resolve target field name + source-side index from the
+            // registry (immutable borrow scope). Extract before any
+            // mutable borrows.
+            let resolved = {
+                let target_schema =
+                    self.program.type_schema_registry.get_by_id(*type_id as u32);
+                let source_schema = self
+                    .program
+                    .type_schema_registry
+                    .get_by_id(schema_id as u32);
+                match (target_schema, source_schema) {
+                    (Some(target), Some(source)) => {
+                        if let Some(target_field) = target.field_by_index(*field_idx) {
+                            let field_name = target_field.name.clone();
+                            if let Some(src_field_idx) = source.field_index(&field_name) {
+                                let tag = source
+                                    .field_by_index(src_field_idx)
+                                    .map(|f| field_type_to_tag(&f.field_type))
+                                    .unwrap_or(0);
+                                Some((field_name, src_field_idx, tag))
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                }
+            };
+
+            // Megamorphic cache fast path: when >4 schemas observed,
+            // check the direct-mapped global cache before name-based
+            // lookup.
+            if let Some((ref fname, _, _)) = resolved {
+                if let Some(hit) = crate::executor::ic_fast_paths::megamorphic_property_check(
+                    self, ic_ip, sid, fname,
+                ) {
+                    let src_idx = hit.field_idx as usize;
+                    if src_idx < field_count {
+                        let is_heap = (storage.heap_mask & (1u64 << src_idx)) != 0;
+                        // W17-comptime-vm-dispatch (ADR-006 §2.7.26): FIELD_TAG_ANY
+                        // sources kind from the storage's parallel field_kinds track.
+                        let result = if hit.field_type_tag == FIELD_TAG_ANY
+                            && src_idx < storage.field_kinds.len()
+                        {
+                            push_field_value_with_kind(
+                                self,
+                                &storage.slots[src_idx],
+                                storage.field_kinds[src_idx],
+                            )
+                        } else {
+                            push_field_value(
+                                self,
+                                &storage.slots[src_idx],
+                                is_heap,
+                                hit.field_type_tag,
+                            )
+                        };
+                        return result;
+                    }
+                }
+            }
+
+            // Full name-based fallback: use pre-resolved field mapping.
+            // NOTE: `storage` borrow ends before any `&mut self` call. We
+            // re-snapshot the needed bits from storage and let the borrow
+            // expire before invoking IC recording (which takes &mut self).
+            if let Some((field_name, src_field_idx, tag)) = resolved {
+                let src_idx = src_field_idx as usize;
+                if src_idx < field_count {
+                    let is_heap = (storage.heap_mask & (1u64 << src_idx)) != 0;
+                    // Record IC + megamorphic cache (mutable borrows safe
+                    // here — we already cloned the strings we need).
+                    if let Some(fv) = self.current_feedback_vector() {
+                        fv.record_property(
+                            ic_ip,
+                            sid,
+                            src_field_idx,
+                            tag,
+                            crate::feedback::RECEIVER_TYPED_OBJECT,
+                        );
+                    }
+                    crate::executor::ic_fast_paths::megamorphic_property_insert(
+                        self,
+                        sid,
+                        &field_name,
+                        src_field_idx,
+                        tag,
+                    );
+                    // W17-comptime-vm-dispatch (ADR-006 §2.7.26): FIELD_TAG_ANY
+                    // sources kind from the storage's parallel field_kinds track.
+                    let result = if tag == FIELD_TAG_ANY && src_idx < storage.field_kinds.len() {
+                        push_field_value_with_kind(
+                            self,
+                            &storage.slots[src_idx],
+                            storage.field_kinds[src_idx],
+                        )
+                    } else {
+                        push_field_value(self, &storage.slots[src_idx], is_heap, tag)
+                    };
+                    return result;
+                }
+            }
+
+            // Field not found on either side: push None sentinel.
+            return self.push_kinded(0u64, NativeKind::Bool);
         }
+
+        // Schema match: direct field index lookup using the operand's
+        // pre-baked offset.
+        let field_index = *field_idx as usize;
+        debug_assert!(
+            field_index < field_count,
+            "GetFieldTyped field_idx {} out of bounds (field_count = {})",
+            field_index,
+            field_count
+        );
+
+        if field_index < field_count {
+            let is_heap = (storage.heap_mask & (1u64 << field_index)) != 0;
+            // W17-comptime-vm-dispatch (ADR-006 §2.7.26, 2026-05-12):
+            // FIELD_TAG_ANY operand → source kind from the storage's
+            // parallel `field_kinds` track (the construction-side
+            // recorded the concrete kind at write time, even when the
+            // schema declares the field as `FieldType::Any`). Resolves
+            // hardening item (f) — `Any → Dynamic` readback bounded
+            // by `KindedSlot.kind`. Required for the
+            // `populate_module_objects` chain: `__comptime__` schema
+            // fields are `FieldType::Any` but storage carries
+            // `Ptr(HeapKind::ModuleFn)` kinds.
+            let result = if *field_type_tag == FIELD_TAG_ANY
+                && field_index < storage.field_kinds.len()
+            {
+                push_field_value_with_kind(
+                    self,
+                    &storage.slots[field_index],
+                    storage.field_kinds[field_index],
+                )
+            } else {
+                push_field_value(
+                    self,
+                    &storage.slots[field_index],
+                    is_heap,
+                    *field_type_tag,
+                )
+            };
+            return result;
+        }
+
+        // Out-of-bounds: push None sentinel.
+        self.push_kinded(0u64, NativeKind::Bool)
     }
 
     /// Set field on typed object using precomputed field type tag.
+    ///
+    /// W17-typed-object-mutation (2026-05-11) — write-path rebuild on
+    /// top of `TypedObjectStorage::write_slot_in_place` (the kinded
+    /// in-place projection writer added by W17-references-mutation close
+    /// `30b9ebf`, ADR-006 §2.7.13 / Q14). Mirror of the
+    /// `RefTarget::TypedField` arm in `write_ref_target`
+    /// (`variables/mod.rs:3100`) — same single-threaded VM contract,
+    /// same kind-invariance debug_assert, same heap_mask-driven
+    /// drop_with_kind on the prior occupant.
+    ///
+    /// Stack contract (per `assignment.rs:611-625` emit pattern):
+    /// pop value, pop receiver; mutate the receiver's slot in place;
+    /// push the (now-mutated) receiver back so `emit_nested_store_back`
+    /// can either store it back to a local/binding identifier or `Pop`
+    /// it for non-identifier roots. Schema-mismatch falls back through
+    /// the same name-based + IC lookup chain as `op_get_field_typed`.
     fn op_set_field_typed(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let operand = instruction
             .operand
             .as_ref()
             .ok_or(VMError::InvalidOperand)?;
 
-        if let Operand::TypedField {
-            type_id: _,
+        let Operand::TypedField {
+            type_id,
             field_idx,
             field_type_tag,
         } = operand
-        {
-            let value_nb = self.pop_raw_u64()?;
-            let object_nb = self.pop_raw_u64()?;
-            let object_bits = raw_helpers::unwrap_annotated_bits(object_nb);
-            let field_index = *field_idx as usize;
+        else {
+            return Err(VMError::InvalidOperand);
+        };
 
-            if let Some((schema_id_val, slots, heap_mask_val)) =
-                raw_helpers::extract_typed_object(object_bits)
-            {
-                if field_index < slots.len() {
-                    let field_type = tag_to_field_type(*field_type_tag);
-                    let (new_slots, new_mask) = clone_slots_with_update(
-                        // BARRIER: TypedObject field update (CoW)
-                        slots,
-                        heap_mask_val,
-                        field_index,
-                        &value_nb,
-                        field_type.as_ref(),
+        // Pop value then receiver (LIFO; the compiler pushes receiver
+        // first per `assignment.rs:566`).
+        let (value_bits, value_kind) = self.pop_kinded()?;
+        let (recv_bits, recv_kind) = self.pop_kinded()?;
+
+        // Validate receiver kind. Non-TypedObject receivers: drain shares
+        // and surface a TypeError. The Bool-sentinel fallback shape of
+        // `op_get_field_typed` is read-side only — write-side type
+        // confusion must error rather than silently no-op.
+        if recv_kind != NativeKind::Ptr(HeapKind::TypedObject) {
+            drop_with_kind(value_bits, value_kind);
+            drop_with_kind(recv_bits, recv_kind);
+            return Err(VMError::TypeError {
+                expected: "TypedObject receiver",
+                got: "non-TypedObject kind",
+            });
+        }
+
+        if recv_bits == 0 {
+            drop_with_kind(value_bits, value_kind);
+            return Err(VMError::RuntimeError(
+                "op_set_field_typed: null TypedObject receiver".to_string(),
+            ));
+        }
+
+        // ReceiverGuard mirror per Phase 4 `op_get_field_typed:341-353`
+        // (cluster-1.5-v2-raw-empirical-isolation-and-fix follow-up
+        // 2026-05-17): `recv_bits` is `_new`-allocated v2-raw
+        // `*const TypedObjectStorage` (NOT `Arc::into_raw`) so
+        // `Arc::from_raw` here was wrong-type recovery causing tcache
+        // double-free (Phase 4 imprecision 84 op_set_field_typed:608
+        // residual). Borrow via raw-deref + `ReceiverGuard` RAII; on
+        // success use `mem::forget` to transfer the share onto the
+        // result stack slot via `push_kinded`; on error the guard's
+        // `Drop` dispatches through `drop_with_kind` which routes to
+        // the v2-raw `release_elem` retire path.
+        struct ReceiverGuard {
+            bits: u64,
+            kind: NativeKind,
+        }
+        impl Drop for ReceiverGuard {
+            #[inline]
+            fn drop(&mut self) {
+                crate::executor::vm_impl::stack::drop_with_kind(self.bits, self.kind);
+            }
+        }
+        let guard = ReceiverGuard { bits: recv_bits, kind: recv_kind };
+        let storage: &shape_value::heap_value::TypedObjectStorage =
+            unsafe { &*(recv_bits as *const shape_value::heap_value::TypedObjectStorage) };
+
+        let result = self.write_typed_object_field(
+            storage,
+            *type_id,
+            *field_idx,
+            *field_type_tag,
+            value_bits,
+            value_kind,
+        );
+
+        match result {
+            Ok(()) => {
+                // Transfer receiver share onto result stack slot; suppress
+                // ReceiverGuard's drop so the share isn't released here.
+                std::mem::forget(guard);
+                self.push_kinded(recv_bits, recv_kind)
+            }
+            Err(e) => {
+                // ReceiverGuard's drop releases the receiver share on
+                // scope exit. Value was already dropped inside
+                // `write_typed_object_field` on the error path.
+                Err(e)
+            }
+        }
+    }
+}
+
+impl super::VirtualMachine {
+    /// Write `value_bits`/`value_kind` into `storage`'s field at the
+    /// operand-specified location. Mirrors the schema-match / IC /
+    /// name-fallback chain in `op_get_field_typed`. On success the
+    /// `value_bits` share is transferred to the storage's slot and the
+    /// prior occupant's share is released via `drop_with_kind`. On error
+    /// the `value_bits` share is dropped before return.
+    ///
+    /// ADR-006 §2.7.13 / Q14 in-place write via
+    /// `TypedObjectStorage::write_slot_in_place`.
+    fn write_typed_object_field(
+        &mut self,
+        storage: &shape_value::heap_value::TypedObjectStorage,
+        type_id: u16,
+        field_idx: u16,
+        field_type_tag: u16,
+        value_bits: u64,
+        value_kind: NativeKind,
+    ) -> Result<(), VMError> {
+        let schema_id = storage.schema_id;
+        let field_count = storage.slots.len();
+
+        // Schema-match path: direct field index from the operand's
+        // pre-baked offset.
+        if schema_id == type_id as u64 {
+            let idx = field_idx as usize;
+            if idx >= field_count {
+                drop_with_kind(value_bits, value_kind);
+                return Err(VMError::RuntimeError(format!(
+                    "op_set_field_typed: field_idx {} out of bounds \
+                     (slot count {})",
+                    idx, field_count
+                )));
+            }
+            return write_field_at_idx(storage, idx, field_type_tag, value_bits, value_kind);
+        }
+
+        // Schema-mismatch path: name-based lookup via IC + megamorphic
+        // cache + registry. Mirror of `op_get_field_typed`'s structure.
+        let ic_ip = self.ip;
+
+        // IC fast path: monomorphic per-schema cache hit.
+        if let Some(hit) =
+            crate::executor::ic_fast_paths::property_ic_check(self, ic_ip, schema_id)
+        {
+            let src_idx = hit.field_idx as usize;
+            if src_idx < field_count {
+                return write_field_at_idx(
+                    storage,
+                    src_idx,
+                    hit.field_type_tag,
+                    value_bits,
+                    value_kind,
+                );
+            }
+        }
+
+        // Resolve target field name + source-side index from the registry.
+        let resolved = {
+            let target_schema = self.program.type_schema_registry.get_by_id(type_id as u32);
+            let source_schema = self.program.type_schema_registry.get_by_id(schema_id as u32);
+            match (target_schema, source_schema) {
+                (Some(target), Some(source)) => {
+                    if let Some(target_field) = target.field_by_index(field_idx) {
+                        let field_name = target_field.name.clone();
+                        if let Some(src_field_idx) = source.field_index(&field_name) {
+                            let tag = source
+                                .field_by_index(src_field_idx)
+                                .map(|f| field_type_to_tag(&f.field_type))
+                                .unwrap_or(0);
+                            Some((field_name, src_field_idx, tag))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+        };
+
+        // Megamorphic cache fast path.
+        if let Some((ref fname, _, _)) = resolved {
+            if let Some(hit) = crate::executor::ic_fast_paths::megamorphic_property_check(
+                self, ic_ip, schema_id, fname,
+            ) {
+                let src_idx = hit.field_idx as usize;
+                if src_idx < field_count {
+                    return write_field_at_idx(
+                        storage,
+                        src_idx,
+                        hit.field_type_tag,
+                        value_bits,
+                        value_kind,
                     );
-                    return self.push_raw_u64(ValueWord::from_heap_value(HeapValue::TypedObject {
-                        schema_id: schema_id_val,
-                        slots: new_slots.into_boxed_slice(),
-                        heap_mask: new_mask,
-                    }));
                 }
             }
-
-            // Non-TypedObject or out-of-bounds index: preserve previous behavior.
-            self.push_raw_u64(object_bits)?;
-            Ok(())
-        } else {
-            Err(VMError::InvalidOperand)
         }
+
+        // Full name-based fallback.
+        if let Some((field_name, src_field_idx, tag)) = resolved {
+            let src_idx = src_field_idx as usize;
+            if src_idx < field_count {
+                if let Some(fv) = self.current_feedback_vector() {
+                    fv.record_property(
+                        ic_ip,
+                        schema_id,
+                        src_field_idx,
+                        tag,
+                        crate::feedback::RECEIVER_TYPED_OBJECT,
+                    );
+                }
+                crate::executor::ic_fast_paths::megamorphic_property_insert(
+                    self,
+                    schema_id,
+                    &field_name,
+                    src_field_idx,
+                    tag,
+                );
+                return write_field_at_idx(storage, src_idx, tag, value_bits, value_kind);
+            }
+        }
+
+        // Field not found on either side: drop the value share and
+        // surface UndefinedProperty rather than silently no-op'ing.
+        drop_with_kind(value_bits, value_kind);
+        Err(VMError::RuntimeError(format!(
+            "op_set_field_typed: field index {} on schema {} not found \
+             on receiver schema {}",
+            field_idx, type_id, schema_id,
+        )))
+    }
+}
+
+/// Common in-place writer: validate the field's kind matches the popped
+/// value's kind (post-proof §2.7.5.1 contract), write through
+/// `write_slot_in_place`, drop the prior occupant's share.
+fn write_field_at_idx(
+    storage: &shape_value::heap_value::TypedObjectStorage,
+    idx: usize,
+    field_type_tag: u16,
+    value_bits: u64,
+    value_kind: NativeKind,
+) -> Result<(), VMError> {
+    debug_assert!(idx < storage.slots.len());
+    debug_assert!(idx < storage.field_kinds.len());
+
+    let stored_kind = storage.field_kinds[idx];
+
+    // Kind invariance check (release form). The post-proof contract
+    // forbids mid-life kind changes for typed fields; if a divergent
+    // kind reaches here it's a compiler-emit bug worth surfacing.
+    // FIELD_TAG_ANY / UNKNOWN are the only operand tags that may
+    // legitimately carry a kind not statically resolvable in the
+    // operand — for those we accept the stored kind as canonical.
+    if value_kind != stored_kind
+        && field_type_tag != FIELD_TAG_ANY
+        && field_type_tag != FIELD_TAG_UNKNOWN
+    {
+        // Tag-based equivalence: width-integer fields all store as
+        // Int64; FIELD_TAG_TIMESTAMP also routes through Int64. Accept
+        // those equivalences without surfacing.
+        let kind_compatible_with_tag = match field_type_tag {
+            FIELD_TAG_I64 | FIELD_TAG_TIMESTAMP => matches!(
+                value_kind,
+                NativeKind::Int64
+                    | NativeKind::Int8
+                    | NativeKind::Int16
+                    | NativeKind::Int32
+                    | NativeKind::UInt8
+                    | NativeKind::UInt16
+                    | NativeKind::UInt32
+                    | NativeKind::UInt64
+            ),
+            FIELD_TAG_F64 => value_kind == NativeKind::Float64,
+            FIELD_TAG_BOOL => value_kind == NativeKind::Bool,
+            FIELD_TAG_STRING => matches!(
+                value_kind,
+                NativeKind::String | NativeKind::Ptr(HeapKind::String)
+            ),
+            _ => value_kind == stored_kind,
+        };
+        if !kind_compatible_with_tag {
+            drop_with_kind(value_bits, value_kind);
+            return Err(VMError::TypeError {
+                expected: "value kind matching field schema",
+                got: "mismatched kind",
+            });
+        }
+    }
+
+    // Pre-read prior bits for the write barrier; the in-place writer
+    // returns the same value so we record it before the call.
+    let prior_bits = storage.slots[idx].raw();
+    crate::memory::write_barrier_slot(prior_bits, value_bits);
+
+    // SAFETY: per `TypedObjectStorage::write_slot_in_place` contract —
+    // single-threaded VM, no aliased `&mut ValueSlot` outstanding (this
+    // function holds only `&storage`; the in-place writer reaches the
+    // slot through `*const ValueSlot` cast), kind invariance verified
+    // above against the storage's `field_kinds` track. `value_bits`
+    // ownership (one strong-count share for heap kinds) transfers to
+    // the slot; the returned `_returned_prior` is the same bits we
+    // pre-read.
+    let _returned_prior = unsafe { storage.write_slot_in_place(idx, value_bits) };
+    debug_assert_eq!(
+        _returned_prior, prior_bits,
+        "op_set_field_typed: write_slot_in_place prior_bits mismatch — \
+         concurrent write detected? ADR-006 §2.7.13 / Q14",
+    );
+
+    // Release the prior occupant's share via the kind-aware dispatch
+    // table (§2.7.7 WB2.4). For inline scalar fields this is a no-op.
+    drop_with_kind(prior_bits, stored_kind);
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bytecode::{Instruction, OpCode};
+    use crate::executor::{VMConfig, VirtualMachine};
+    use shape_runtime::type_schema::{FieldType, TypeSchema};
+    use shape_value::heap_value::TypedObjectStorage;
+    use std::sync::Arc;
+
+    /// `op_set_field_typed` on a schema-match path rotates the field's
+    /// slot through `write_slot_in_place` and pushes the (mutated)
+    /// receiver back. W17-typed-object-mutation fill (2026-05-11).
+    #[test]
+    fn set_field_typed_schema_match_writes_int_field() {
+        let mut vm = VirtualMachine::new(VMConfig::default());
+
+        let schema = TypeSchema::new(
+            "Probe".to_string(),
+            vec![
+                ("x".to_string(), FieldType::I64),
+                ("y".to_string(), FieldType::I64),
+            ],
+        );
+        let schema_id = schema.id;
+        vm.program.type_schema_registry.register(schema);
+
+        let slots = vec![ValueSlot::from_raw(1u64), ValueSlot::from_raw(2u64)];
+        let storage = TypedObjectStorage::new(
+            schema_id as u64,
+            slots.into_boxed_slice(),
+            0,
+            Arc::from(vec![NativeKind::Int64, NativeKind::Int64].into_boxed_slice()),
+        );
+        let storage_arc = Arc::new(storage);
+        let recv_bits = Arc::into_raw(storage_arc) as u64;
+
+        // Stack: [recv, value]; operand: TypedField { type_id = schema_id, field_idx = 1, tag = I64 }
+        vm.push_kinded(recv_bits, NativeKind::Ptr(HeapKind::TypedObject))
+            .unwrap();
+        vm.push_kinded(99u64, NativeKind::Int64).unwrap();
+
+        let operand = Operand::TypedField {
+            type_id: schema_id as u16,
+            field_idx: 1,
+            field_type_tag: FIELD_TAG_I64,
+        };
+        let instr = Instruction::new(OpCode::SetFieldTyped, Some(operand));
+        vm.op_set_field_typed(&instr).unwrap();
+
+        // op_set_field_typed pushes the (mutated) receiver back.
+        let (obj_bits_back, obj_kind_back) = vm.pop_kinded().unwrap();
+        assert_eq!(obj_kind_back, NativeKind::Ptr(HeapKind::TypedObject));
+        // Recover and verify field y now reads 99.
+        let storage_back: Arc<TypedObjectStorage> =
+            unsafe { Arc::from_raw(obj_bits_back as *const _) };
+        assert_eq!(storage_back.slots[0].raw(), 1u64);
+        assert_eq!(storage_back.slots[1].raw(), 99u64);
+        drop(storage_back);
+    }
+
+    /// `op_set_field_typed` on a non-TypedObject receiver returns a
+    /// TypeError after draining shares. W17-typed-object-mutation
+    /// (2026-05-11).
+    #[test]
+    fn set_field_typed_non_typed_object_receiver_errors() {
+        let mut vm = VirtualMachine::new(VMConfig::default());
+
+        // Push an Int64 "receiver" — wrong kind for SetFieldTyped.
+        vm.push_kinded(0u64, NativeKind::Int64).unwrap();
+        vm.push_kinded(1u64, NativeKind::Int64).unwrap();
+
+        let operand = Operand::TypedField {
+            type_id: 0,
+            field_idx: 0,
+            field_type_tag: FIELD_TAG_I64,
+        };
+        let instr = Instruction::new(OpCode::SetFieldTyped, Some(operand));
+        let err = vm.op_set_field_typed(&instr).unwrap_err();
+        assert!(matches!(err, VMError::TypeError { .. }));
     }
 }

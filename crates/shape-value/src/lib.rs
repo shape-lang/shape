@@ -1,8 +1,11 @@
 //! Core value types for Shape
 //!
 //! This crate contains the foundational value types and core data structures
-//! used throughout the Shape language implementation. The canonical runtime
-//! representation is `ValueWord` — an 8-byte NaN-boxed value.
+//! used throughout the Shape language implementation. After the strict-typing
+//! bulldozer, the runtime representation is per-slot raw native bits whose
+//! `NativeKind` is determined at compile time and carried in the
+//! `FunctionBlob`. There is no `ValueWord`, no NaN-boxing, no dynamic
+//! dispatch on value type.
 //!
 //! Dependency hierarchy:
 //! - shape-value → shape-ast (no circular dependencies)
@@ -11,77 +14,54 @@
 
 // Re-export core types
 pub mod aligned_vec;
-pub mod array_view;
-pub mod closure;
 pub mod content;
 pub mod context;
 pub mod datatable;
-pub mod enums;
-pub mod external_value;
-pub mod extraction;
 pub mod heap_header;
 #[macro_use]
 pub mod heap_variants;
 pub mod heap_value;
 pub mod ids;
+pub mod iterator_state;
+pub mod kinded_slot;
 pub mod method_id;
+pub mod native_kind;
+pub mod reference;
 pub mod scalar;
 pub mod string_intern;
-pub mod tag_bits;
-pub mod value_bits;
-pub mod value_word;
-pub mod value_word_drop;
-pub mod value_word_ext;
-/// Backward-compatibility alias for the renamed module.
-pub mod nanboxed {
-    pub use crate::value_word::*;
-}
-pub mod shape_array;
 pub mod shape_graph;
 pub mod shape_graph_current;
 pub mod slot;
-/// Backward-compatibility shim — tag constants / helpers live in `tag_bits`.
-pub mod tags {
-    pub use crate::tag_bits::*;
-}
-pub mod typed_buffer;
-pub mod unified_array;
-pub mod unified_matrix;
-pub mod unified_string;
-pub mod unified_wrapper;
+// Phase 3 cluster-0+1 V3-S5 ckpt-4 (2026-05-15): `pub mod typed_buffer;`
+// deleted. The `TypedBuffer<T>` + `AlignedTypedBuffer` wrapper layer is
+// retired wholesale per W12-typed-array-data-deletion-audit §B
+// (audit §1.1 deletion targets) + ADR-006 §2.7.24 Q25.A SUPERSEDED. The
+// canonical replacement is the v2-raw `TypedArray<T>` flat struct at
+// `crate::v2::typed_array::TypedArray<T>` (per `docs/runtime-v2-spec.md`).
+// Refusal #1 binding: do not resurrect under any rename/shim/bridge.
 pub mod v2;
 pub mod value;
 pub mod vm_closure_handle;
 
 pub use aligned_vec::AlignedVec;
-pub use closure::Closure;
 pub use content::{
     BorderStyle, ChartChannel, ChartSeries, ChartSpec, ChartType, Color, ContentNode, ContentTable,
     NamedColor, Style, StyledSpan, StyledText,
 };
-pub use context::{ErrorLocation, LocatedVMError, VMContext, VMError};
+pub use context::{ErrorLocation, LocatedVMError, VMError};
 pub use datatable::{ColumnPtrs, DataTable, DataTableBuilder};
-pub use enums::{EnumPayload, EnumValue};
-pub use external_value::{
-    ExternalValue, NoSchemaLookup, SchemaLookup, external_to_nb, nb_to_external,
-};
-pub use extraction::{
-    nb_to_display_string, require_arc_string, require_array, require_bool, require_datatable,
-    require_f64, require_int, require_number, require_string, require_typed_object,
-};
 pub use heap_header::{FLAG_MARKED, FLAG_PINNED, FLAG_READONLY, HeapHeader};
-pub use heap_value::{
-    ChannelData, ConcurrencyData, DataReferenceData, DequeData, HashMapData, HeapKind, HeapValue,
-    PriorityQueueData, ProjectedRefData, RareHeapData, RefProjection, SetData, SimulationCallData,
-    TableViewData, TemporalData, TypedArrayData,
-};
+// V3-S5 ckpt-4 (2026-05-15): `TypedArrayData` removed from re-exports.
+// The enum was deleted at ckpt-1 (heap_value.rs); this re-export was
+// cascade-broken at the same time. Remaining re-exports stay intact.
+pub use heap_value::{HeapKind, HeapValue, TableViewData, TemporalData, TypedObjectStorage};
 pub use ids::{FunctionId, SchemaId, StackSlotIdx, StringId};
+pub use iterator_state::{IteratorSource, IteratorState, IteratorTransform};
+pub use kinded_slot::KindedSlot;
 pub use method_id::MethodId;
-pub use scalar::{ScalarKind, TypedScalar, ValueWordScalarExt};
-pub use value_word::{ArrayView, ArrayViewMut, RefTarget, ValueBits, ValueWord, ValueWordDisplay};
-pub use value_word_drop::{ArgVec, ValueMap, vw_clone, vw_clone_slice, vw_drop, vw_drop_slice};
-pub use value_word_ext::ValueWordExt;
-pub use shape_array::ShapeArray;
+pub use native_kind::NativeKind;
+pub use reference::RefTarget;
+pub use scalar::{ScalarKind, TypedScalar};
 pub use shape_graph::{
     Shape, ShapeId, ShapeTransitionTable, drain_shape_transitions, hash_property_name,
     shape_for_hashmap_keys, shape_property_index, shape_transition,
@@ -91,11 +71,18 @@ pub use shape_graph_current::{
     with_async_shape_table_scope,
 };
 pub use slot::ValueSlot;
-pub use typed_buffer::{AlignedTypedBuffer, TypedBuffer};
+// V3-S5 ckpt-4 (2026-05-15): `pub use typed_buffer::{AlignedTypedBuffer,
+// TypedBuffer};` deleted alongside `typed_buffer.rs` itself per
+// W12-typed-array-data-deletion-audit §B + ADR-006 §2.7.24 Q25.A SUPERSEDED.
+// The wrapper layer is retired wholesale; remaining consumers (marshal.rs
+// FromSlot/ToSlot impls for `Arc<AlignedTypedBuffer>` / `Arc<TypedBuffer<i64>>`,
+// the ~10 intrinsic typed-fn registration sites in
+// `crates/shape-runtime/src/intrinsics/*.rs`) cascade-break for ckpt-5 +
+// downstream wave pickup. Refusal #1 binding: no re-introduction under
+// any rename/shim/bridge.
 pub use value::{
-    FilterLiteral, FilterNode, FilterOp, HostCallable, PrintResult, PrintSpan, Upvalue, VMArray,
-    VMArrayBuf, VMARRAY_INLINE_CAP, VTable, VTableEntry, vmarray_from_nanboxed,
-    vmarray_from_value_words, vmarray_from_vec,
+    ErasureError, ErasureType, FilterLiteral, FilterNode, FilterOp, RewriteResult, ThunkSignature,
+    TypeInfo, VTable, VTableEntry, VTableEntryFlags, WrapTarget,
 };
 pub use vm_closure_handle::VmClosureHandle;
 

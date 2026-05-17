@@ -8,7 +8,7 @@ use shape_ast::ast::{
 };
 use shape_ast::error::{Result, ShapeError};
 use shape_runtime::type_schema::FieldType;
-use shape_value::{ValueWord, ValueWordExt};
+use shape_value::KindedSlot;
 use std::collections::{HashMap, HashSet};
 
 use super::BytecodeCompiler;
@@ -179,7 +179,7 @@ impl BytecodeCompiler {
             }
         }
 
-        let ac = self.program.add_constant(Constant::Number(arity as f64));
+        let ac = self.program.add_constant(Constant::Int(arity as i64));
         self.emit(Instruction::new(
             OpCode::PushConst,
             Some(Operand::Const(ac)),
@@ -379,13 +379,19 @@ impl BytecodeCompiler {
             })
     }
 
+    // ABI flipped to `KindedSlot` per ADR-006 §2.7.10 / Q11 to align
+    // with `super::comptime::execute_comptime_with_annotation_handler`
+    // (compiler/comptime.rs:486) and the kinded replacement noted in
+    // the prior SURFACE comment. The `comptime_builtins::ComptimeDirective::
+    // SetParamValue { value: KindedSlot }` migration in
+    // `compiler/comptime_builtins.rs:33` is the precedent.
     pub(super) fn execute_comptime_annotation_handler(
         &mut self,
         annotation: &shape_ast::ast::Annotation,
         handler: &shape_ast::ast::AnnotationHandler,
-        target_value: ValueWord,
+        target_value: KindedSlot,
         annotation_def_param_names: &[String],
-        const_bindings: &[(String, shape_value::ValueWord)],
+        const_bindings: &[(String, KindedSlot)],
     ) -> Result<super::comptime::ComptimeExecutionResult> {
         let handler_span = handler.span;
         let extensions: Vec<_> = self
@@ -1018,10 +1024,24 @@ impl BytecodeCompiler {
                             param_name
                         ));
                     };
-                    // Convert the comptime ValueWord to an AST literal expression
+                    // Convert the comptime KindedSlot to an AST literal
+                    // expression. Per ADR-006 §2.7.6 / playbook §1, the
+                    // cross-kind int-or-float coercion lives at the body
+                    // site, NOT on the `KindedSlot` carrier (the deleted
+                    // `as_number_coerce` was a §2.7.6/Q8 carrier-bound
+                    // violation). The compiler crate cannot import
+                    // `executor::builtins::kind_coerce` (private module);
+                    // the body-site dispatch is inlined here per Q8.
+                    let coerce_to_f64 = |slot: &KindedSlot| -> Option<f64> {
+                        match slot.kind {
+                            shape_value::NativeKind::Int64 => slot.as_i64().map(|i| i as f64),
+                            shape_value::NativeKind::Float64 => slot.as_f64(),
+                            _ => None,
+                        }
+                    };
                     let default_expr = if let Some(i) = value.as_i64() {
                         Expr::Literal(Literal::Int(i), Span::DUMMY)
-                    } else if let Some(n) = value.as_number_coerce() {
+                    } else if let Some(n) = coerce_to_f64(&value) {
                         Expr::Literal(Literal::Number(n), Span::DUMMY)
                     } else if let Some(b) = value.as_bool() {
                         Expr::Literal(Literal::Bool(b), Span::DUMMY)
@@ -1462,7 +1482,7 @@ impl BytecodeCompiler {
             let before_arg_count = 1 + ann_arg_exprs.len() + 2;
             let before_ac = self
                 .program
-                .add_constant(Constant::Number(before_arg_count as f64));
+                .add_constant(Constant::Int(before_arg_count as i64));
             self.emit(Instruction::new(
                 OpCode::PushConst,
                 Some(Operand::Const(before_ac)),
@@ -1484,7 +1504,7 @@ impl BytecodeCompiler {
                 OpCode::LoadLocal,
                 Some(Operand::Local(before_result)),
             ));
-            let one_const = self.program.add_constant(Constant::Number(1.0));
+            let one_const = self.program.add_constant(Constant::Int(1));
             self.emit(Instruction::new(
                 OpCode::PushConst,
                 Some(Operand::Const(one_const)),
@@ -1513,7 +1533,7 @@ impl BytecodeCompiler {
                 OpCode::LoadLocal,
                 Some(Operand::Local(before_result)),
             ));
-            let one_const2 = self.program.add_constant(Constant::Number(1.0));
+            let one_const2 = self.program.add_constant(Constant::Int(1));
             self.emit(Instruction::new(
                 OpCode::PushConst,
                 Some(Operand::Const(one_const2)),
@@ -1703,7 +1723,7 @@ impl BytecodeCompiler {
         }
         let impl_ac = self
             .program
-            .add_constant(Constant::Number(func_def.params.len() as f64));
+            .add_constant(Constant::Int(func_def.params.len() as i64));
         self.emit(Instruction::new(
             OpCode::PushConst,
             Some(Operand::Const(impl_ac)),
@@ -1784,7 +1804,7 @@ impl BytecodeCompiler {
             let after_arg_count = 1 + ann_arg_exprs.len() + 3;
             let after_ac = self
                 .program
-                .add_constant(Constant::Number(after_arg_count as f64));
+                .add_constant(Constant::Int(after_arg_count as i64));
             self.emit(Instruction::new(
                 OpCode::PushConst,
                 Some(Operand::Const(after_ac)),

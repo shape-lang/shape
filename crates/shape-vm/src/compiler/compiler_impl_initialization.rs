@@ -40,7 +40,7 @@ impl BytecodeCompiler {
             type_tracker: TypeTracker::with_stdlib(),
             last_expr_schema: None,
             last_expr_numeric_type: None,
-            top_level_program_return_kind: crate::type_tracking::StorageHint::Unknown,
+            top_level_program_return_kind: None,
             current_expr_result_mode: ExprResultMode::Value,
             last_expr_reference_result: ExprReferenceResult::default(),
             local_callable_pass_modes: HashMap::new(),
@@ -51,6 +51,13 @@ impl BytecodeCompiler {
             module_binding_callable_return_types: HashMap::new(),
             local_array_callable_return_types: HashMap::new(),
             module_binding_array_callable_return_types: HashMap::new(),
+            // cluster-2-cw-IB-class-b: retained closure-literal AST for
+            // local `let f = |..| ..` bindings; consumed by value-call
+            // return-kind inference at `compile_expr_function_call`.
+            local_callable_closure_bodies: HashMap::new(),
+            module_binding_callable_closure_bodies: HashMap::new(),
+            dyn_locals: HashMap::new(),
+            dyn_module_bindings: HashMap::new(),
             function_return_reference_summaries: HashMap::new(),
             current_function_return_reference_summary: None,
             type_inference: shape_runtime::type_system::inference::TypeInferenceEngine::new(),
@@ -91,6 +98,11 @@ impl BytecodeCompiler {
             pending_variable_typed_map_kind: None,
             v2_typed_map_locals: HashMap::new(),
             v2_typed_map_module_bindings: HashMap::new(),
+            // ADR-006 §2.7.27 / Item 4 ruling: container-kind tracking for
+            // `&mut self` write-back emission.
+            mut_self_container_locals: HashMap::new(),
+            mut_self_container_bindings: HashMap::new(),
+            pending_variable_container_kind: None,
             map_key_value_types: HashMap::new(),
             local_map_key_value_types: HashMap::new(),
             module_binding_map_key_value_types: HashMap::new(),
@@ -473,6 +485,52 @@ impl BytecodeCompiler {
                 // forward it to `BytecodeProgram` and the VM host boundary
                 // synthesises a tagged ValueWord on `vm.execute()`.
                 top_level_frame: self.program.top_level_frame.clone(),
+                // ADR-006 §2.7.5 conduit: top-level concrete-types side-
+                // table propagated through the content-addressed path so
+                // the linker forwards it to `BytecodeProgram` for the JIT
+                // typed-array / TypedObject fast paths.
+                top_level_local_concrete_types: self
+                    .program
+                    .top_level_local_concrete_types
+                    .clone(),
+                // ADR-006 §2.7.5 conduit (W12-jit-aggregate-non-array,
+                // 2026-05-12): per-user-function concrete-types side-table
+                // propagated through the content-addressed path for the
+                // JIT's TypedObject Aggregate short-circuit inside user
+                // function bodies.
+                function_local_concrete_types: self
+                    .program
+                    .function_local_concrete_types
+                    .clone(),
+                // ADR-006 §2.7.5 conduit (W12-jit-call-return-kind,
+                // 2026-05-12): per-user-function declared return
+                // ConcreteType propagated through the content-addressed
+                // path so the conduit can stamp `TerminatorKind::Call`
+                // destination slots from the callee's return type.
+                function_return_concrete_types: self
+                    .program
+                    .function_return_concrete_types
+                    .clone(),
+                // ADR-006 §2.7.5 conduit (V3-S6b-jit-method-monomorph-
+                // conduit close, 2026-05-15): per-call-site monomorphized
+                // method-call FunctionId side-table propagated through
+                // the content-addressed path so the conduit producer can
+                // lift `function_return_concrete_types[specialized_idx]`
+                // at `MirConstant::Method` Call-terminator sites.
+                monomorphized_method_call_sites: self
+                    .program
+                    .monomorphized_method_call_sites
+                    .clone(),
+                // cluster-2-cw-IB-class-b: per-call-site value-call return
+                // ConcreteType side-table propagated through the content-
+                // addressed path so the conduit producer can stamp value-
+                // call `TerminatorKind::Call` destinations from the
+                // closure-bound callee's inferred return type. Same path
+                // shape as `monomorphized_method_call_sites`.
+                value_call_return_concrete_types: self
+                    .program
+                    .value_call_return_concrete_types
+                    .clone(),
                 // Closure spec §14.6 (H6.5): propagate layouts through the
                 // content-addressed path so `load_linked_program` → VM
                 // preserves enough metadata for the raw producer path.
@@ -494,6 +552,12 @@ impl BytecodeCompiler {
                     }
                     map
                 },
+                // ADR-006 §2.7.24 Q25.C: propagate trait-object vtables
+                // through the content-addressed path so the linker
+                // forwards them to `LinkedProgram.trait_vtables` and the
+                // VM `op_box_trait_object` handler can look them up at
+                // runtime.
+                trait_vtables: self.program.trait_vtables.clone(),
             });
         }
     }

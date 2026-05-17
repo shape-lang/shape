@@ -3,80 +3,100 @@
 //! These handlers execute FieldLoadXxx/FieldStoreXxx opcodes by reading/writing
 //! at compile-time-known byte offsets into typed structs. The byte offset is
 //! baked into the operand — no schema lookup at runtime.
+//!
+//! ADR-006 §2.7.7 / Wave 6.5 cluster C: kinded API. Receiver kind is the
+//! raw typed-struct pointer (allocated by `NewTypedStruct`), pushed as
+//! `NativeKind::UInt64` (NativeScalar shape — non-Arc, no refcount).
+//! Loaded scalar fields use the per-FieldKind native kind (Float64, Int64,
+//! Int32, Bool); pointer fields keep raw bits with `NativeKind::UInt64`.
 
 use crate::bytecode::{Instruction, OpCode};
+use crate::executor::vm_impl::stack::drop_with_kind;
 use crate::executor::VirtualMachine;
-use shape_value::VMError;
+use shape_value::{NativeKind, VMError};
 
 impl VirtualMachine {
     /// Execute a typed field opcode (FieldLoad/FieldStore/NewTypedStruct).
     pub(crate) fn exec_typed_field(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         match instruction.opcode {
             // Field load handlers: the struct pointer is stored as raw bits
-            // (a typed-struct allocation, NOT a heap-boxed ValueWord), so
-            // we use raw pop/push to skip ValueWord materialization.
+            // (a typed-struct allocation, NOT an Arc<HeapValue>), so the
+            // pop/push goes through the kinded API without refcount churn —
+            // UInt64 selects the no-op Drop arm.
             OpCode::FieldLoadF64 => {
                 let offset = instruction.operand_field_offset() as usize;
-                let struct_bits = self.pop_raw_u64()?;
+                let (struct_bits, struct_kind) = self.pop_kinded()?;
                 let struct_ptr = struct_bits as *const u8;
                 // Safety: compiler has proven the type and offset at compile time.
                 let val: f64 = unsafe { *(struct_ptr.add(offset) as *const f64) };
-                self.push_raw_f64(val)
+                drop_with_kind(struct_bits, struct_kind);
+                self.push_kinded(val.to_bits(), NativeKind::Float64)
             }
             OpCode::FieldLoadI64 => {
                 let offset = instruction.operand_field_offset() as usize;
-                let struct_bits = self.pop_raw_u64()?;
+                let (struct_bits, struct_kind) = self.pop_kinded()?;
                 let struct_ptr = struct_bits as *const u8;
                 let val: i64 = unsafe { *(struct_ptr.add(offset) as *const i64) };
-                self.push_tagged_i64(val)
+                drop_with_kind(struct_bits, struct_kind);
+                self.push_kinded(val as u64, NativeKind::Int64)
             }
             OpCode::FieldLoadI32 => {
                 let offset = instruction.operand_field_offset() as usize;
-                let struct_bits = self.pop_raw_u64()?;
+                let (struct_bits, struct_kind) = self.pop_kinded()?;
                 let struct_ptr = struct_bits as *const u8;
                 let val: i32 = unsafe { *(struct_ptr.add(offset) as *const i32) };
-                // Widen to i64 for the NaN-boxed stack
-                self.push_tagged_i64(val as i64)
+                drop_with_kind(struct_bits, struct_kind);
+                // Widen to i64 (sign-extended) — typed kind track distinguishes
+                // Int32 vs Int64 so the consumer can downcast cleanly.
+                self.push_kinded(val as i64 as u64, NativeKind::Int32)
             }
             OpCode::FieldLoadBool => {
                 let offset = instruction.operand_field_offset() as usize;
-                let struct_bits = self.pop_raw_u64()?;
+                let (struct_bits, struct_kind) = self.pop_kinded()?;
                 let struct_ptr = struct_bits as *const u8;
                 let val: u8 = unsafe { *struct_ptr.add(offset) };
-                self.push_tagged_bool(val != 0)
+                drop_with_kind(struct_bits, struct_kind);
+                self.push_kinded((val != 0) as u64, NativeKind::Bool)
             }
             OpCode::FieldLoadPtr => {
                 let offset = instruction.operand_field_offset() as usize;
-                let struct_bits = self.pop_raw_u64()?;
+                let (struct_bits, struct_kind) = self.pop_kinded()?;
                 let struct_ptr = struct_bits as *const u8;
                 // Load a raw pointer-sized value and push as raw bits.
-                // Downstream consumers handle the bit pattern (NaN-boxed
-                // ValueWord or raw typed pointer, depending on field type).
+                // Downstream consumers handle the bit pattern (raw typed
+                // pointer or NativeScalar — kind selects the no-op arm).
                 let val: u64 = unsafe { *(struct_ptr.add(offset) as *const u64) };
-                self.push_raw_u64(val)
+                drop_with_kind(struct_bits, struct_kind);
+                self.push_kinded(val, NativeKind::UInt64)
             }
             OpCode::FieldStoreF64 => {
                 let offset = instruction.operand_field_offset() as usize;
-                let f = self.pop_raw_f64()?;
-                let struct_bits = self.pop_raw_u64()?;
+                let (f_bits, _f_kind) = self.pop_kinded()?;
+                let f = f64::from_bits(f_bits);
+                let (struct_bits, struct_kind) = self.pop_kinded()?;
                 let struct_ptr = struct_bits as *mut u8;
                 unsafe { *(struct_ptr.add(offset) as *mut f64) = f };
+                drop_with_kind(struct_bits, struct_kind);
                 Ok(())
             }
             OpCode::FieldStoreI64 => {
                 let offset = instruction.operand_field_offset() as usize;
-                let i = self.pop_tagged_i64()?;
-                let struct_bits = self.pop_raw_u64()?;
+                let (i_bits, _i_kind) = self.pop_kinded()?;
+                let i = i_bits as i64;
+                let (struct_bits, struct_kind) = self.pop_kinded()?;
                 let struct_ptr = struct_bits as *mut u8;
                 unsafe { *(struct_ptr.add(offset) as *mut i64) = i };
+                drop_with_kind(struct_bits, struct_kind);
                 Ok(())
             }
             OpCode::FieldStoreI32 => {
                 let offset = instruction.operand_field_offset() as usize;
-                let i = self.pop_tagged_i64()? as i32;
-                let struct_bits = self.pop_raw_u64()?;
+                let (i_bits, _i_kind) = self.pop_kinded()?;
+                let i = i_bits as i64 as i32;
+                let (struct_bits, struct_kind) = self.pop_kinded()?;
                 let struct_ptr = struct_bits as *mut u8;
                 unsafe { *(struct_ptr.add(offset) as *mut i32) = i };
+                drop_with_kind(struct_bits, struct_kind);
                 Ok(())
             }
             OpCode::NewTypedStruct => {
@@ -107,11 +127,10 @@ impl VirtualMachine {
                     // kind at offset 4 (u16)
                     *(ptr.add(4) as *mut u16) = schema_id;
                 }
-                // Store the raw pointer directly as a u64 — this is a typed
-                // allocation, NOT a standard Arc<HeapValue>, so we bypass
-                // ValueWord materialization. The typed drop/refcount path must
-                // handle deallocation.
-                self.push_raw_u64(ptr as u64)
+                // Raw typed-struct pointer: NativeScalar shape, not Arc-backed.
+                // UInt64 kind selects the no-op Drop arm — the typed drop path
+                // (FieldStorePtr / object Drop op) handles deallocation.
+                self.push_kinded(ptr as u64, NativeKind::UInt64)
             }
             _ => Err(VMError::RuntimeError(format!(
                 "unhandled typed field opcode: {:?}",

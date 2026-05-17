@@ -32,7 +32,17 @@ impl ProgramExecutor for JITExecutor {
         program: &Program,
     ) -> Result<shape_runtime::engine::ProgramExecutorResult> {
         use shape_vm::BytecodeCompiler;
-        let emit_phase_metrics = std::env::var_os("SHAPE_JIT_PHASE_METRICS").is_some();
+        // Cluster-2 closure-wave-F tracing-crate migration (2026-05-16):
+        // `tracing::enabled!` compiles away under `release_max_level_off`
+        // (the default when the `jit-trace` Cargo feature is OFF), so this
+        // collapses to `false` and the phase-timing accounting below is
+        // dead-code-eliminated by the optimizer. Replaces the legacy
+        // `SHAPE_JIT_PHASE_METRICS` env-var; CLI selector is
+        // `--trace-jit=shape_jit::metrics=info`.
+        let emit_phase_metrics = tracing::enabled!(
+            target: "shape_jit::metrics",
+            tracing::Level::INFO,
+        );
 
         // Capture source text before getting runtime reference (for error messages)
         let source_for_compilation = engine.current_source().map(|s| s.to_string());
@@ -107,16 +117,25 @@ impl JITExecutor {
 
         // Use selective compilation: JIT-compatible functions get native code,
         // incompatible ones get Interpreted entries for VM fallback.
-        if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
-            eprintln!(
-                "[jit-debug] starting compile_program_selective with {} instructions, {} functions",
-                bytecode.instructions.len(),
-                bytecode.functions.len()
+        //
+        // Cluster-2 closure-wave-F tracing-crate migration (2026-05-16):
+        // `tracing::enabled!` collapses to `false` under feature-OFF builds
+        // so the per-instruction enumeration loop is dead-code-eliminated.
+        // Replaces SHAPE_JIT_DEBUG env-var gating.
+        if tracing::enabled!(target: "shape_jit", tracing::Level::DEBUG) {
+            tracing::debug!(
+                target: "shape_jit",
+                instruction_count = bytecode.instructions.len(),
+                function_count = bytecode.functions.len(),
+                "starting compile_program_selective",
             );
             for (i, instr) in bytecode.instructions.iter().enumerate() {
-                eprintln!(
-                    "[jit-debug] instr[{}]: {:?} {:?}",
-                    i, instr.opcode, instr.operand
+                tracing::debug!(
+                    target: "shape_jit",
+                    idx = i,
+                    opcode = ?instr.opcode,
+                    operand = ?instr.operand,
+                    "instruction",
                 );
             }
         }
@@ -187,6 +206,39 @@ impl JITExecutor {
             jit_ctx.function_table_len = table.len();
         }
 
+        // ADR-006 §2.7.10 / Q11 (Phase 3 cluster-0 Round 20 sub-cluster γ —
+        // W12-jit-trait-impl-method-registry, 2026-05-14): link the JIT
+        // function-name table into the context so `jit_call_method`'s
+        // user-method UFCS dispatch (`try_call_user_method` →
+        // `find_function_by_name("TypeName::method")`) can resolve user-
+        // defined trait/impl methods at runtime.
+        //
+        // The R15 W17-narrow sub-cluster fixed the upstream classification
+        // (`receiver_type_name`) to correctly return the schema's type
+        // name for `Ptr(HeapKind::TypedObject)` receivers. Without the
+        // function-name table linkage here, every UFCS lookup at
+        // `find_function_by_name` returned None (the early-return guard at
+        // `call_method/mod.rs:230` triggered because `function_names_ptr`
+        // was always the `JITContext::default()` null sentinel). That
+        // returned TAG_NULL from `try_call_user_method`, which surfaced as
+        // `None` at the print path (post-R19 C β filter; pre-β SIGSEGV).
+        //
+        // Cluster-0 close criterion for Smoke 3: `t.name()` on
+        // `let t = X{}` returns `"x"` under `--mode jit` matching VM.
+        //
+        // The names slice is built from `bytecode.functions` 1:1 by index
+        // so `function_table[idx]` and `function_names[idx]` describe the
+        // same function — the same invariant `compile_program_selective`
+        // upholds for the function-table itself (see
+        // `compiler/program.rs:800-823`). The `Vec<String>` lives in the
+        // local `function_names_storage` and is dropped after `jit_fn`
+        // executes — same lifetime discipline as the function-table
+        // borrow above and the trampoline VM below.
+        let function_names_storage: Vec<String> =
+            bytecode.functions.iter().map(|f| f.name.clone()).collect();
+        jit_ctx.function_names_ptr = function_names_storage.as_ptr();
+        jit_ctx.function_names_len = function_names_storage.len();
+
         // Set up the trampoline VM that JIT's `jit_call_value` falls back
         // to when a callee's function_table slot is null (i.e. the
         // function was not JIT-compiled, typically because its MIR
@@ -227,12 +279,107 @@ impl JITExecutor {
         let _trampoline_guard = TrampolineGuard;
 
         // Execute the JIT-compiled function
-        if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
-            eprintln!("[jit-debug] compilation OK, about to execute...");
-        }
+        tracing::debug!(
+            target: "shape_jit",
+            "compilation OK, about to execute",
+        );
+        // W11-jit-new-array (supervisor reopen Step 4): snapshot arc
+        // retain/release counters before/after the JIT-emitted code runs
+        // so the supervisor can verify refcount balance — silent leaks
+        // here are the W-series defection-attractor shape we're refusing.
+        //
+        // Cluster-2 closure-wave-F tracing-crate migration (2026-05-16):
+        // gate the snapshot reads on `tracing::enabled!` so the atomic
+        // loads themselves are dead-code-eliminated under feature-OFF
+        // builds (`release_max_level_off` collapses the macro to `false`).
+        // Replaces SHAPE_JIT_ARC_COUNTERS env-var; CLI selector is
+        // `--trace-jit=shape_jit::arc_counters=info`.
+        //
+        // Cluster-2 closure-wave-E §F string-constant leak measurement
+        // (2026-05-16): STRING_* counters share the same arc_counters
+        // gate (Arc<UnifiedValue> + Arc<String> are both Arc-tier;
+        // single tracing target keeps CLI filter narrow). Take-both
+        // ceremony at Round 1 merge.
+        let arc_counters_enabled = tracing::enabled!(
+            target: "shape_jit::arc_counters",
+            tracing::Level::INFO,
+        );
+        let (retain_before, release_before, frees_before,
+             str_allocs_before, str_retain_before,
+             str_release_before, str_frees_before) = if arc_counters_enabled {
+            (
+                crate::ffi::arc::JIT_ARC_RETAIN_CALLS.load(std::sync::atomic::Ordering::Relaxed),
+                crate::ffi::arc::JIT_ARC_RELEASE_CALLS.load(std::sync::atomic::Ordering::Relaxed),
+                crate::ffi::arc::JIT_ARC_RELEASE_FREES.load(std::sync::atomic::Ordering::Relaxed),
+                crate::ffi::arc::STRING_CONSTANT_ALLOCS.load(std::sync::atomic::Ordering::Relaxed),
+                crate::ffi::arc::STRING_RETAIN_CALLS.load(std::sync::atomic::Ordering::Relaxed),
+                crate::ffi::arc::STRING_RELEASE_CALLS.load(std::sync::atomic::Ordering::Relaxed),
+                crate::ffi::arc::STRING_RELEASE_FREES.load(std::sync::atomic::Ordering::Relaxed),
+            )
+        } else {
+            (0, 0, 0, 0, 0, 0, 0)
+        };
+
         let jit_exec_start = Instant::now();
         let signal = unsafe { jit_fn(&mut jit_ctx) };
         let jit_exec_ms = jit_exec_start.elapsed().as_millis();
+
+        if arc_counters_enabled {
+            let retain_after =
+                crate::ffi::arc::JIT_ARC_RETAIN_CALLS.load(std::sync::atomic::Ordering::Relaxed);
+            let release_after =
+                crate::ffi::arc::JIT_ARC_RELEASE_CALLS.load(std::sync::atomic::Ordering::Relaxed);
+            let frees_after =
+                crate::ffi::arc::JIT_ARC_RELEASE_FREES.load(std::sync::atomic::Ordering::Relaxed);
+            let str_allocs_after =
+                crate::ffi::arc::STRING_CONSTANT_ALLOCS
+                    .load(std::sync::atomic::Ordering::Relaxed);
+            let str_retain_after =
+                crate::ffi::arc::STRING_RETAIN_CALLS
+                    .load(std::sync::atomic::Ordering::Relaxed);
+            let str_release_after =
+                crate::ffi::arc::STRING_RELEASE_CALLS
+                    .load(std::sync::atomic::Ordering::Relaxed);
+            let str_frees_after =
+                crate::ffi::arc::STRING_RELEASE_FREES
+                    .load(std::sync::atomic::Ordering::Relaxed);
+            tracing::info!(
+                target: "shape_jit::arc_counters",
+                retain_calls = retain_after - retain_before,
+                release_calls = release_after - release_before,
+                release_frees = frees_after - frees_before,
+                "shape-jit-arc counter delta",
+            );
+            // cluster-2-cw-E §F measurement output: per-call-site
+            // §2.7.5 String carrier metrics. Leak quantification
+            // shape is `str_allocs - str_frees` = number of
+            // permanently-leaked Arc<String> allocations for this
+            // execution. The "_cum" event is process-wide running
+            // total — surfaces compile-time allocations that happen
+            // before any jit_fn invocation (the dominant source for
+            // `MirConstant::Str` materialization). Migrated to
+            // tracing::info! per cw-F mechanism at Round 1 merge
+            // take-both ceremony (2026-05-16).
+            tracing::info!(
+                target: "shape_jit::arc_counters",
+                str_allocs = str_allocs_after - str_allocs_before,
+                str_retain = str_retain_after - str_retain_before,
+                str_release = str_release_after - str_release_before,
+                str_frees = str_frees_after - str_frees_before,
+                leaked = (str_allocs_after - str_allocs_before)
+                    .saturating_sub(str_frees_after - str_frees_before),
+                "shape-jit-arc-str counter delta",
+            );
+            tracing::info!(
+                target: "shape_jit::arc_counters",
+                str_allocs_total = str_allocs_after,
+                str_retain_total = str_retain_after,
+                str_release_total = str_release_after,
+                str_frees_total = str_frees_after,
+                leaked_total = str_allocs_after.saturating_sub(str_frees_after),
+                "shape-jit-arc-str cumulative",
+            );
+        }
 
         // Get result from JIT context stack via TypedScalar boundary
         let raw_result = if jit_ctx.stack_ptr > 0 {
@@ -264,28 +411,63 @@ impl JITExecutor {
             crate::context::RETURN_TAG_BOOL => {
                 WireValue::Bool(raw_result != 0)
             }
+            crate::context::RETURN_TAG_UNIT => {
+                // W11-jit-new-array: `()`-typed return — the program's
+                // terminal expression produced no value. Map to Null
+                // (matches the VM's `wire_value` for `print(x)` at the
+                // top level).
+                WireValue::Null
+            }
             _ => {
-                // tag=0 (RETURN_TAG_NANBOXED) or unknown: legacy NaN-boxed path
-                // Use FrameDescriptor hint to preserve integer type identity.
-                // Prefer return_kind when populated; fall back to last slot.
-                let return_hint = bytecode.top_level_frame.as_ref().and_then(|fd| {
-                    if fd.return_kind != shape_vm::type_tracking::SlotKind::Unknown {
-                        Some(fd.return_kind)
-                    } else {
-                        fd.slots.last().copied()
-                    }
+                // tag=0 (RETURN_TAG_NANBOXED) or unknown: per ADR-006
+                // §2.7.5 / §2.7.5.1, the JIT-FFI return path must be
+                // kind-stamped at compile time from the call signature
+                // (`FrameDescriptor::return_kind: Option<NativeKind>`).
+                // The pre-strict-typing fallback decoded `tag_bits` from
+                // `raw_result` to recover a kind at runtime — that path
+                // is the W-series defection-attractor (deleted-runtime
+                // tag-bit dispatch + kind-blind classifier) and is
+                // forbidden per CLAUDE.md "Forbidden Patterns".
+                //
+                // The correct §2.7.5 surface stamps `return_kind` from
+                // the JIT-emitted call signature so the typed return
+                // path (RETURN_TAG_F64 / I64 / I32 / BOOL) handles every
+                // case statically. A `RETURN_TAG_NANBOXED` arrival here
+                // is a kind-source gap — surface-and-stop per W10
+                // jit-playbook §5.
+                //
+                // PHASE_2C / SURFACE: stamp `return_type_tag` to a
+                // typed variant from the FrameDescriptor at JIT-emit
+                // time (rvalue path — W10-mir-compiler territory) so
+                // this arm is unreachable in production bytecode.
+                let return_hint = bytecode
+                    .top_level_frame
+                    .as_ref()
+                    .and_then(|fd| fd.return_kind.or_else(|| fd.slots.last().copied()));
+                let _ = return_hint;
+                return Err(shape_runtime::error::ShapeError::RuntimeError {
+                    message: format!(
+                        "JIT-FFI return path: RETURN_TAG_NANBOXED reached the \
+                         host boundary without a stamped NativeKind (raw_bits={:#x}). \
+                         Per ADR-006 §2.7.5 / §2.7.5.1 the return tag must be a \
+                         typed variant; this is a kind-source gap (W10 jit-playbook \
+                         §5 surface-and-stop). See executor.rs:267 comment.",
+                        raw_result
+                    ),
+                    location: None,
                 });
-                let result_scalar =
-                    crate::ffi::object::conversion::jit_bits_to_typed_scalar(raw_result, return_hint);
-                self.typed_scalar_to_wire(&result_scalar, raw_result)
             }
         };
 
         if emit_phase_metrics {
             let total_ms = bytecode_compile_ms + jit_compile_ms + jit_exec_ms;
-            eprintln!(
-                "[shape-jit-phases] bytecode_compile_ms={} jit_compile_ms={} jit_exec_ms={} total_ms={}",
-                bytecode_compile_ms, jit_compile_ms, jit_exec_ms, total_ms
+            tracing::info!(
+                target: "shape_jit::metrics",
+                bytecode_compile_ms = bytecode_compile_ms,
+                jit_compile_ms = jit_compile_ms,
+                jit_exec_ms = jit_exec_ms,
+                total_ms = total_ms,
+                "shape-jit-phases timing",
             );
         }
 
@@ -299,76 +481,18 @@ impl JITExecutor {
         })
     }
 
-    /// Convert a TypedScalar result to WireValue.
-    ///
-    /// For scalar types, the TypedScalar carries enough information. For heap types
-    /// (strings, arrays) that TypedScalar can't represent, we fall back to raw bits.
-    fn typed_scalar_to_wire(&self, ts: &shape_value::TypedScalar, raw_bits: u64) -> WireValue {
-        use shape_value::ScalarKind;
-
-        match ts.kind {
-            ScalarKind::I8
-            | ScalarKind::I16
-            | ScalarKind::I32
-            | ScalarKind::I64
-            | ScalarKind::U8
-            | ScalarKind::U16
-            | ScalarKind::U32
-            | ScalarKind::U64
-            | ScalarKind::I128
-            | ScalarKind::U128 => {
-                // Integer result — preserve as exact integer in WireValue::Number
-                WireValue::Number(ts.payload_lo as i64 as f64)
-            }
-            ScalarKind::F64 | ScalarKind::F32 => WireValue::Number(f64::from_bits(ts.payload_lo)),
-            ScalarKind::Bool => WireValue::Bool(ts.payload_lo != 0),
-            ScalarKind::Unit => WireValue::Null,
-            ScalarKind::None => {
-                // None could also be a fallback for non-scalar heap types.
-                // Check if raw_bits is actually a heap value.
-                self.value_word_to_wire(raw_bits)
-            }
-        }
-    }
-
-    fn value_word_to_wire(&self, bits: u64) -> WireValue {
-        use crate::ffi::value_ffi::{
-            HK_STRING, TAG_BOOL_FALSE, TAG_BOOL_TRUE, TAG_NULL, is_heap_kind, is_number,
-            unbox_number, unbox_string,
-        };
-        use shape_value::tag_bits::{TAG_INT, get_payload, get_tag, is_tagged, sign_extend_i48};
-
-        if is_number(bits) {
-            WireValue::Number(unbox_number(bits))
-        } else if bits == TAG_NULL {
-            WireValue::Null
-        } else if bits == TAG_BOOL_TRUE {
-            WireValue::Bool(true)
-        } else if bits == TAG_BOOL_FALSE {
-            WireValue::Bool(false)
-        } else if is_tagged(bits) && get_tag(bits) == TAG_INT {
-            // Tagged i48 integer — sign-extend to i64 and return as integer
-            let int_val = sign_extend_i48(get_payload(bits));
-            WireValue::Integer(int_val)
-        } else if is_heap_kind(bits, HK_STRING) {
-            // `box_string` in the MIR-compile path routes string-literal
-            // constants through `UnifiedString` (unified-heap, bit-47 set),
-            // whereas legacy JIT heap strings use the `JitAlloc<String>`
-            // layout (bit-47 clear). The two have incompatible in-memory
-            // representations — `UnifiedString` carries `data: *const u8 +
-            // len: u64 + cap: u64` starting at offset 8, but
-            // `jit_unbox::<String>` would reinterpret those bytes as a Rust
-            // `String` (Vec<u8>, 3 words) and then `s.clone()` would read
-            // nonsense len/cap fields and segfault on alloc.
-            //
-            // `unbox_string` branches on `ValueBits::is_unified_heap()` and
-            // decodes either format correctly, returning a `&str` we clone
-            // into the WireValue.
-            let s = unsafe { unbox_string(bits) };
-            WireValue::String(s.to_owned())
-        } else {
-            // Default to interpreting as a number for unknown tags
-            WireValue::Number(f64::from_bits(bits))
-        }
-    }
+    // typed_scalar_to_wire and value_word_to_wire removed — both were
+    // kind-blind dispatch paths. The former dispatched on
+    // `ScalarKind::None` to `value_word_to_wire`; the latter decoded
+    // `tag_bits` from a raw u64 to recover a kind. Per ADR-006 §2.7.5
+    // / §2.7.5.1 the JIT-FFI return path stamps a typed `RETURN_TAG_*`
+    // from the JIT-emitted call signature, so the kind-blind fallback
+    // is unreachable in production bytecode (and the surface-and-stop
+    // path on the `_ =>` arm of the `return_type_tag` match documents
+    // any kind-source gap that does land here).
+    //
+    // CLAUDE.md "Forbidden Patterns" forbids `tag_bits` decode in JIT
+    // codegen; the W-series defection-attractor list forbids the
+    // "decode/tag/dispatch helper/bridge/probe" framing these helpers
+    // would need to come back under.
 }

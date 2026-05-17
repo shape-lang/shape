@@ -4,54 +4,49 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use crate::bytecode::{Instruction, OpCode};
-use shape_value::{VMError, ValueWord, ValueWordExt};
+use shape_value::{KindedSlot, NativeKind, VMError, ValueSlot};
 
 use super::debugger_integration::DebuggerIntegration;
 use super::{DebugVMState, ExecutionResult, VirtualMachine, async_ops};
 
 impl VirtualMachine {
-    /// Execute the loaded program
+    /// Execute the loaded program.
     ///
     /// # Arguments
     /// * `ctx` - Optional ExecutionContext for trading operations (rows, indicators, etc.)
     ///
-    /// Returns a `ValueWord` representing the program's final value. Wave E+4
-    /// flips top-level emission to typed opcodes that push raw native bits
-    /// (no NaN-box tag) onto the stack. To keep the host boundary stable,
-    /// `execute()` synthesises a tagged `ValueWord` from those raw bits per
-    /// the program's declared top-level return kind (read from
-    /// `BytecodeProgram::top_level_frame.return_kind` when present and not
-    /// `Unknown`). When the kind is unknown — the legacy / pre-E+4
-    /// situation — the raw bits are interpreted directly as a tagged
-    /// `ValueWord` (passthrough), preserving the historical behaviour.
-    ///
-    /// Hosts that want raw bits should call [`Self::execute_raw`] instead
-    /// and synthesize a `ValueWord` themselves (see
-    /// `crate::test_utils::eval_with_kind` for an example).
+    /// Returns a [`KindedSlot`] — the canonical post-`ValueWord`
+    /// runtime-value carrier (ADR-006 §2.7 / Q7). The slot's
+    /// `NativeKind` is sourced from `BytecodeProgram::top_level_frame.
+    /// return_kind` when present (the compiler-proven kind), with the
+    /// raw u64 bits taken from the top of the value stack. Hosts
+    /// dispatch on `result.kind()` and use the per-variant
+    /// `KindedSlot::as_*` accessors per §2.7.6.
     pub fn execute(
         &mut self,
         ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-    ) -> Result<ValueWord, VMError> {
-        let bits = self.execute_raw(ctx)?;
-        // Read the return kind AFTER execution so the runtime-observed
-        // `last_program_return_kind` (set by typed `op_return_value_<kind>`
-        // handlers landing at the top-level frame) is available.
-        let return_kind = self.program_top_level_return_kind();
-        Ok(synthesize_value_word_from_raw(bits, return_kind))
+    ) -> Result<KindedSlot, VMError> {
+        match self.execute_with_suspend(ctx)? {
+            ExecutionResult::Completed(slot) => Ok(slot),
+            ExecutionResult::Suspended { future_id, .. } => Err(VMError::Suspended {
+                future_id,
+                resume_ip: 0,
+            }),
+        }
     }
 
-    /// Execute the loaded program and return the raw u64 bits at the top of
-    /// stack. After Wave E+4 flips top-level emission, those bits may be
-    /// raw native values (e.g. `i64`, `f64::to_bits()`, `0u64`/`1u64` for
-    /// bool, raw heap pointer for ptr) rather than tagged `ValueWord` bits.
-    /// Use this when the host wants to control kind-hint synthesis itself,
-    /// or when interpreting the bits as a non-default kind.
+    /// Execute the loaded program and return the raw u64 bits at the top
+    /// of stack. Top-level emission pushes raw native values
+    /// (e.g. `i64`, `f64::to_bits()`, `0u64`/`1u64` for bool, raw heap
+    /// pointer for ptr); the kind is recovered from
+    /// `program_top_level_return_kind()`. Use this when the host wants
+    /// the raw bits without a `KindedSlot` wrapper.
     pub fn execute_raw(
         &mut self,
         ctx: Option<&mut shape_runtime::context::ExecutionContext>,
     ) -> Result<u64, VMError> {
         match self.execute_with_suspend(ctx)? {
-            ExecutionResult::Completed(value) => Ok(value.into_raw_bits()),
+            ExecutionResult::Completed(slot) => Ok(slot.raw()),
             ExecutionResult::Suspended { future_id, .. } => Err(VMError::Suspended {
                 future_id,
                 resume_ip: 0,
@@ -61,27 +56,20 @@ impl VirtualMachine {
 
     /// Read the program's declared top-level return kind, if present.
     ///
-    /// Returns `Some(kind)` when `top_level_frame.return_kind` is set to a
-    /// concrete `SlotKind` (i.e. the compiler proved a return type for the
-    /// top-level program). Returns `None` for the legacy / unproven case,
-    /// signalling that raw bits should be passed through as a
-    /// `ValueWord` directly.
+    /// Returns `Some(kind)` when `top_level_frame.return_kind` is set —
+    /// after the strict-typing bulldozer the compiler proves a kind for
+    /// every program at compile time, so this should always be `Some`
+    /// for a well-formed `BytecodeProgram`. Returns `None` only when no
+    /// `top_level_frame` is attached (legacy programs, partial linker
+    /// state). The deleted `NativeKind::Unknown` sentinel is no longer
+    /// observable here per ADR-006 §2.7.5.1 (wire-format is post-proof).
     #[inline]
-    pub(crate) fn program_top_level_return_kind(&self) -> Option<crate::type_tracking::SlotKind> {
-        // Prefer the runtime-observed kind from the most-recent typed
-        // `op_return_value_<kind>` that landed at the top-level boundary
-        // (see `last_program_return_kind` doc on `VirtualMachine`). This
-        // covers the polymorphic `let g = make(); g(arg)` case where the
-        // compiler can't statically prove the kind but the closure body's
-        // typed `ReturnValueI64`/`F64`/`Bool` did push native bits.
-        if let Some(kind) = self.last_program_return_kind {
-            return Some(kind);
-        }
-        let kind = self.program.top_level_frame.as_ref()?.return_kind;
-        match kind {
-            crate::type_tracking::SlotKind::Unknown => None,
-            _ => Some(kind),
-        }
+    pub(crate) fn program_top_level_return_kind(&self) -> Option<NativeKind> {
+        // `FrameDescriptor.return_kind` is `Option<NativeKind>` (single-slot
+        // §2.7.8 / Q10 cell-storage shape — `None` ≡ "kind not stamped").
+        // Flatten via `?` so callers see `None` for either "no frame
+        // descriptor" or "frame present but no proven return kind".
+        self.program.top_level_frame.as_ref()?.return_kind
     }
 
     /// Execute the loaded program, returning either a completed value or suspension info.
@@ -256,8 +244,24 @@ impl VirtualMachine {
                 }
 
                 if !self.exception_handlers.is_empty() {
-                    let error_nb = ValueWord::from_string(Arc::new(err.to_string()));
-                    self.handle_exception_nb(error_nb)?;
+                    // W8-EX: construct the exception payload as a
+                    // `KindedSlot` carrier per §2.7.6 / Q8. The
+                    // underlying `Arc<String>` strong-count share
+                    // transfers from `Arc::into_raw` into the carrier
+                    // via `KindedSlot::from_string_arc`.
+                    //
+                    // W13-anyerror (close, 2026-05-10): wrap the
+                    // String-kinded payload into an AnyError
+                    // TypedObject via `normalize_err_payload` per
+                    // playbook §10 E-exceptions row, so the catch
+                    // block sees `NativeKind::Ptr(HeapKind::TypedObject)`
+                    // and `e.message` reads back via the existing
+                    // `op_get_prop` TypedObject path. Ownership of
+                    // the String share transfers into the AnyError's
+                    // payload/message field slots.
+                    let raw_payload = KindedSlot::from_string_arc(Arc::new(err.to_string()));
+                    let payload = self.normalize_err_payload(raw_payload)?;
+                    self.handle_exception(payload)?;
                 } else {
                     // Enrich error with source location before returning
                     return Err(self.enrich_error_with_location(err, error_ip));
@@ -275,13 +279,17 @@ impl VirtualMachine {
             }
         }
 
-        // Return top of stack or none (only if sp is above top-level locals region)
+        // Return top of stack or sentinel `none` (only if sp is above
+        // top-level locals region). The slot transfers ownership: the
+        // returned `KindedSlot` owns the strong-count share previously
+        // held by the stack slot.
         let tl = self.program.top_level_locals_count as usize;
         Ok(ExecutionResult::Completed(if self.sp > tl {
             self.sp -= 1;
-            self.stack_take_raw(self.sp)
+            let (bits, kind) = self.stack_take_kinded(self.sp);
+            KindedSlot::new(ValueSlot::from_raw(bits), kind)
         } else {
-            ValueWord::none()
+            KindedSlot::new(ValueSlot::none(), NativeKind::Bool)
         }))
     }
 
@@ -383,8 +391,18 @@ impl VirtualMachine {
                 }
 
                 if !self.exception_handlers.is_empty() {
-                    let error_nb = ValueWord::from_string(Arc::new(err.to_string()));
-                    self.handle_exception_nb(error_nb)?;
+                    // W8-EX: see the matching call site above —
+                    // `Arc<String>` payload built into a `KindedSlot`
+                    // carrier per §2.7.6 / Q8.
+                    //
+                    // W13-anyerror (close, 2026-05-10): wrap into
+                    // AnyError TypedObject via `normalize_err_payload`
+                    // so the catch block sees the canonical
+                    // `Ptr(HeapKind::TypedObject)` payload kind per
+                    // playbook §10 E-exceptions row.
+                    let raw_payload = KindedSlot::from_string_arc(Arc::new(err.to_string()));
+                    let payload = self.normalize_err_payload(raw_payload)?;
+                    self.handle_exception(payload)?;
                 } else {
                     return Err(self.enrich_error_with_location(err, ip));
                 }
@@ -403,9 +421,10 @@ impl VirtualMachine {
         let tl = self.program.top_level_locals_count as usize;
         Ok(ExecutionResult::Completed(if self.sp > tl {
             self.sp -= 1;
-            self.stack_take_raw(self.sp)
+            let (bits, kind) = self.stack_take_kinded(self.sp);
+            KindedSlot::new(ValueSlot::from_raw(bits), kind)
         } else {
-            ValueWord::none()
+            KindedSlot::new(ValueSlot::none(), NativeKind::Bool)
         }))
     }
 
@@ -416,7 +435,7 @@ impl VirtualMachine {
     pub(crate) fn execute_fast(
         &mut self,
         mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-    ) -> Result<ValueWord, VMError> {
+    ) -> Result<KindedSlot, VMError> {
         while self.ip < self.program.instructions.len() {
             // Get index first, then increment
             let ip = self.ip;
@@ -457,9 +476,10 @@ impl VirtualMachine {
         let tl = self.program.top_level_locals_count as usize;
         Ok(if self.sp > tl {
             self.sp -= 1;
-            self.stack_take_raw(self.sp)
+            let (bits, kind) = self.stack_take_kinded(self.sp);
+            KindedSlot::new(ValueSlot::from_raw(bits), kind)
         } else {
-            ValueWord::none()
+            KindedSlot::new(ValueSlot::none(), NativeKind::Bool)
         })
     }
 
@@ -567,7 +587,7 @@ impl VirtualMachine {
             | ReturnValueI64 | ReturnValueU64 | ReturnValueF64 | ReturnValueI32
             | ReturnValueU32 | ReturnValueI16 | ReturnValueU16 | ReturnValueI8
             | ReturnValueU8 | ReturnValueBool | ReturnValuePtr => {
-                return self.exec_control_flow(instruction);
+                return self.exec_control_flow(instruction, ctx);
             }
 
             // Variables (including reference operations)
@@ -869,7 +889,57 @@ impl VirtualMachine {
             | TypedArrayPushI64
             | TypedArrayPushI32
             | TypedArrayPushBool
-            | TypedArrayLen => {
+            | TypedArrayLen
+            // W12 S1 — sized-integer typed array opcodes (2026-05-13)
+            | NewTypedArrayI8
+            | TypedArrayGetI8
+            | TypedArrayPushI8
+            | TypedArraySetI8
+            | NewTypedArrayU8
+            | TypedArrayGetU8
+            | TypedArrayPushU8
+            | TypedArraySetU8
+            | NewTypedArrayI16
+            | TypedArrayGetI16
+            | TypedArrayPushI16
+            | TypedArraySetI16
+            | NewTypedArrayU16
+            | TypedArrayGetU16
+            | TypedArrayPushU16
+            | TypedArraySetU16
+            | NewTypedArrayU32
+            | TypedArrayGetU32
+            | TypedArrayPushU32
+            | TypedArraySetU32
+            // Wave 2 Agent A1 (2026-05-14) — F32 + Char monomorphizations
+            // (drive-by routing fix: opcode handlers landed in array.rs at A1 close
+            // but were never added to the dispatch table — instructions fell
+            // through to the default branch).
+            | NewTypedArrayF32
+            | TypedArrayGetF32
+            | TypedArrayPushF32
+            | TypedArraySetF32
+            | NewTypedArrayChar
+            | TypedArrayGetChar
+            | TypedArrayPushChar
+            | TypedArraySetChar
+            // Wave 2 Agent A2 (2026-05-14) — String + Decimal heap-element monomorphizations.
+            | NewTypedArrayString
+            | TypedArrayGetString
+            | TypedArrayPushString
+            | TypedArraySetString
+            | NewTypedArrayDecimal
+            | TypedArrayGetDecimal
+            | TypedArrayPushDecimal
+            | TypedArraySetDecimal
+            // Wave 3 Stabilize Round 1 V3-A2-followup-producer-cascade (2026-05-15) —
+            // v2-raw String/Decimal literal constructors (closes the literal-element
+            // kind mismatch surfaced at Round 3a' gate-flip: `let xs: Array<string>
+            // = ["a","b"]` previously emitted `LoadConst` of Arc<String> with
+            // NativeKind::String, which `TypedArrayPushString` rejected at the
+            // strict-kind check in `v2_handlers/array.rs:687`).
+            | NewStringV2
+            | NewDecimalV2 => {
                 return self.exec_v2_typed_array(instruction);
             }
 
@@ -1040,210 +1110,4 @@ impl VirtualMachine {
     }
 
     // apply_pending_resume() and apply_pending_frame_resume() moved to resume.rs
-}
-
-/// Synthesize a tagged `ValueWord` from raw native bits per the
-/// supplied `SlotKind`. Used by [`VirtualMachine::execute`] to bridge the
-/// host boundary after Wave E+4 flips top-level emission to typed opcodes
-/// that leave raw bits on the stack.
-///
-/// When `kind` is `None`, the bits are returned unchanged — i.e. they are
-/// already a tagged `ValueWord`. This is the pre-E+4 / unproven-type path,
-/// matching the historical behaviour of `execute()`.
-///
-/// The encoding mirrors `unmarshal_jit_result` in `jit_abi.rs` (which
-/// targets the JIT call boundary). Both kinds of boundary need the same
-/// bits → `ValueWord` synthesis; we do not share the function only because
-/// `unmarshal_jit_result` is gated behind the `jit` feature today and
-/// shape-vm's host-side `execute()` must work without it.
-///
-/// **Pattern B defensive heap-pointer passthrough (Wave E+5.5 cluster
-/// R5)**: when `kind` declares Int64 / Bool / sub-int width and the
-/// bits are a `TAG_HEAP`-tagged ValueWord (heap pointer to a TypedObject
-/// / String / Array etc.), pass the bits through unchanged. This covers
-/// the polymorphic-body case where a function emits a typed
-/// `ReturnValue<Int64>` but a cross-arm path returns a heap-tagged
-/// value (e.g. the `Snapshot::Hash(id) => id` arm of the snapshot
-/// resume tests, which returns a heap-tagged string while the
-/// `Snapshot::Resumed => x + 1` arm returns native int). Without this
-/// guard, `from_i64(heap_ptr_bits as i64)` allocates a fresh BigInt
-/// heap value with the bit pattern as its int payload, corrupting the
-/// original heap reference. A real raw native i64 value with bits in
-/// `[0xFFF8_..._0000, 0xFFF8_FFFF_FFFF_FFFF]` (i.e. i64 in
-/// `[-2.25e15, -1.41e14]`) is the false-positive risk; that range is
-/// uncommon for the typed-int producers we currently emit.
-#[inline]
-pub(crate) fn synthesize_value_word_from_raw(
-    bits: u64,
-    kind: Option<crate::type_tracking::SlotKind>,
-) -> ValueWord {
-    use crate::type_tracking::SlotKind;
-    let Some(kind) = kind else {
-        return ValueWord::from_raw_bits(bits);
-    };
-    // Defensive: if the kind says Int / Bool / sub-int and the bits are
-    // a TAG_HEAP-tagged ValueWord (heap pointer pattern: top 16 bits =
-    // 0xFFF8, tag=0), pass through. Float64 / U64 / String / Dynamic
-    // are excluded because their raw transport bits can legitimately
-    // match this pattern (negative-NaN f64s, large u64, raw-bit
-    // string/dynamic passthrough already handled below).
-    if matches!(
-        kind,
-        SlotKind::Int8
-            | SlotKind::NullableInt8
-            | SlotKind::Int16
-            | SlotKind::NullableInt16
-            | SlotKind::Int32
-            | SlotKind::NullableInt32
-            | SlotKind::Int64
-            | SlotKind::NullableInt64
-            | SlotKind::IntSize
-            | SlotKind::NullableIntSize
-            | SlotKind::UInt8
-            | SlotKind::NullableUInt8
-            | SlotKind::UInt16
-            | SlotKind::NullableUInt16
-            | SlotKind::UInt32
-            | SlotKind::NullableUInt32
-            | SlotKind::Bool
-    ) && shape_value::tag_bits::is_tagged(bits)
-        && shape_value::tag_bits::get_tag(bits) == shape_value::tag_bits::TAG_HEAP
-    {
-        return ValueWord::from_raw_bits(bits);
-    }
-    match kind {
-        // Signed / sub-i64 ints all flow through the i48 inline path.
-        SlotKind::Int8
-        | SlotKind::NullableInt8
-        | SlotKind::Int16
-        | SlotKind::NullableInt16
-        | SlotKind::Int32
-        | SlotKind::NullableInt32
-        | SlotKind::Int64
-        | SlotKind::NullableInt64
-        | SlotKind::IntSize
-        | SlotKind::NullableIntSize => ValueWord::from_i64(bits as i64),
-
-        // Unsigned sub-i64 ints fit in i64.
-        SlotKind::UInt8
-        | SlotKind::NullableUInt8
-        | SlotKind::UInt16
-        | SlotKind::NullableUInt16
-        | SlotKind::UInt32
-        | SlotKind::NullableUInt32
-        | SlotKind::UIntSize
-        | SlotKind::NullableUIntSize => ValueWord::from_i64(bits as i64),
-
-        // U64 may exceed i64::MAX — promote to native u64 heap encoding.
-        SlotKind::UInt64 | SlotKind::NullableUInt64 => {
-            if bits <= i64::MAX as u64 {
-                ValueWord::from_i64(bits as i64)
-            } else {
-                ValueWord::from_native_u64(bits)
-            }
-        }
-
-        // Float64: NaN-boxed encoding (re-tag via from_f64 to ensure the
-        // result respects the canonical NaN-box representation; the bits
-        // arriving from a typed `ReturnValueF64` are an `f64::to_bits()`
-        // payload, which is exactly what `from_f64` expects after a round
-        // trip through `f64::from_bits`).
-        SlotKind::Float64 | SlotKind::NullableFloat64 => {
-            ValueWord::from_f64(f64::from_bits(bits))
-        }
-
-        // Bool: 0 → false, anything else → true.
-        SlotKind::Bool => ValueWord::from_bool(bits != 0),
-
-        // String / Dynamic / Unknown: passthrough — bits already encode
-        // a tagged ValueWord (heap pointer, NaN-box, etc.).
-        SlotKind::String | SlotKind::Dynamic | SlotKind::Unknown => {
-            ValueWord::from_raw_bits(bits)
-        }
-    }
-}
-
-#[cfg(test)]
-mod execute_raw_tests {
-    use super::*;
-    use crate::compiler::BytecodeCompiler;
-    use crate::executor::VMConfig;
-    use crate::type_tracking::SlotKind;
-
-    /// After Wave-E+5, `execute()` synthesises a tagged ValueWord from
-    /// the raw native bits per the program's declared (or runtime-
-    /// observed) return kind, so `tagged.into_raw_bits() != raw` for
-    /// any program whose top-level produces native-typed bits.
-    /// `execute_raw` returns the native bits as-is. Verify that the
-    /// tagged result decodes to the same value the raw bits encode
-    /// under the program's kind.
-    #[test]
-    fn execute_raw_matches_execute_for_legacy_program() {
-        let program = shape_ast::parser::parse_program("42").expect("parse");
-        let compiler = BytecodeCompiler::new();
-        let bytecode = compiler.compile(&program).expect("compile");
-
-        // First run: tagged ValueWord via execute()
-        let mut vm = VirtualMachine::new(VMConfig::default());
-        vm.load_program(bytecode.clone());
-        let tagged = vm.execute(None).expect("execute");
-
-        // Second run: raw bits via execute_raw()
-        let mut vm = VirtualMachine::new(VMConfig::default());
-        vm.load_program(bytecode);
-        let raw = vm.execute_raw(None).expect("execute_raw");
-
-        // After Wave-E+5, the int literal `42` produces native i64
-        // bits. `execute()` re-tags via the program's Int64 kind, so
-        // tagged.as_i64() == 42 and raw == 42 (as native i64).
-        assert_eq!(tagged.as_i64(), Some(42), "tagged ValueWord decodes to 42");
-        assert_eq!(raw as i64, 42, "raw bits encode 42 as native i64");
-    }
-
-    #[test]
-    fn synthesize_int64_from_raw_bits() {
-        let raw = 12345i64 as u64;
-        let vw = synthesize_value_word_from_raw(raw, Some(SlotKind::Int64));
-        assert_eq!(vw.as_i64(), Some(12345));
-    }
-
-    #[test]
-    fn synthesize_int64_negative() {
-        let raw = (-7i64) as u64;
-        let vw = synthesize_value_word_from_raw(raw, Some(SlotKind::Int64));
-        assert_eq!(vw.as_i64(), Some(-7));
-    }
-
-    #[test]
-    fn synthesize_float64_from_raw_bits() {
-        let raw = 3.14159f64.to_bits();
-        let vw = synthesize_value_word_from_raw(raw, Some(SlotKind::Float64));
-        assert_eq!(vw.as_f64(), Some(3.14159));
-    }
-
-    #[test]
-    fn synthesize_bool_true() {
-        let vw = synthesize_value_word_from_raw(1, Some(SlotKind::Bool));
-        assert_eq!(vw.as_bool(), Some(true));
-    }
-
-    #[test]
-    fn synthesize_bool_false() {
-        let vw = synthesize_value_word_from_raw(0, Some(SlotKind::Bool));
-        assert_eq!(vw.as_bool(), Some(false));
-    }
-
-    #[test]
-    fn synthesize_passthrough_when_kind_is_none() {
-        let original = ValueWord::from_f64(2.5);
-        let vw = synthesize_value_word_from_raw(original.into_raw_bits(), None);
-        assert_eq!(vw.as_f64(), Some(2.5));
-    }
-
-    #[test]
-    fn synthesize_passthrough_when_kind_is_unknown_via_dynamic() {
-        let original = ValueWord::from_bool(true);
-        let vw = synthesize_value_word_from_raw(original.into_raw_bits(), Some(SlotKind::Dynamic));
-        assert_eq!(vw.as_bool(), Some(true));
-    }
 }

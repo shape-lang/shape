@@ -1,27 +1,16 @@
 //! VM executor handlers for v2 string opcodes.
 //!
-//! These handlers operate on `StringObj` pointers stored as
-//! `ValueWord::from_native_ptr()` (heap-boxed `NativeScalar::Ptr`).
+//! These handlers operate on `StringObj` raw pointers (`*const StringObj`),
+//! NativeScalar-shaped (non-Arc). Pointer bits round-trip through the
+//! kinded API as `NativeKind::UInt64` (inline scalar — no refcount).
+//!
+//! ADR-006 §2.7.7 / Wave 6.5 cluster C.
 
 use crate::bytecode::{Instruction, OpCode, Operand};
-use shape_value::heap_value::NativeScalar;
 use shape_value::v2::string_obj::StringObj;
-use shape_value::{VMError, ValueWord, ValueWordExt};
+use shape_value::{NativeKind, VMError};
 
 use super::super::VirtualMachine;
-
-/// Extract a raw pointer (usize) from a ValueWord that was created with
-/// `ValueWord::from_native_ptr()`. Falls back to `raw_bits()` if the value
-/// is not a NativeScalar::Ptr.
-#[inline(always)]
-fn extract_ptr(vw: &ValueWord) -> usize {
-    if let Some(NativeScalar::Ptr(p)) = vw.as_native_scalar() {
-        p
-    } else {
-        // Fallback: treat raw bits as a pointer (for values stored differently).
-        vw.raw_bits() as usize
-    }
-}
 
 impl VirtualMachine {
     /// Execute a v2 string opcode.
@@ -49,44 +38,44 @@ impl VirtualMachine {
                     .cloned()
                     .unwrap_or_default();
                 let ptr = StringObj::new(&s);
-                self.push_raw_u64(ValueWord::from_native_ptr(ptr as usize))?;
+                self.push_kinded(ptr as usize as u64, NativeKind::UInt64)?;
                 Ok(())
             }
 
             // ── String length ──────────────────────────────────────────
 
             OpCode::StringLenV2 => {
-                let str_vw = self.pop_raw_u64()?;
-                let str_ptr = extract_ptr(&str_vw) as *const StringObj;
+                let (str_bits, _str_kind) = self.pop_kinded()?;
+                let str_ptr = str_bits as usize as *const StringObj;
                 // Safety: str_ptr was created by NewStringV2 or string FFI.
                 let len = unsafe { StringObj::len(str_ptr) };
-                self.push_tagged_i64(len as i64)?;
+                self.push_kinded(len as u64, NativeKind::Int64)?;
                 Ok(())
             }
 
             // ── String concatenation ───────────────────────────────────
 
             OpCode::StringConcatV2 => {
-                let b_vw = self.pop_raw_u64()?;
-                let a_vw = self.pop_raw_u64()?;
-                let a_ptr = extract_ptr(&a_vw) as *const StringObj;
-                let b_ptr = extract_ptr(&b_vw) as *const StringObj;
+                let (b_bits, _b_kind) = self.pop_kinded()?;
+                let (a_bits, _a_kind) = self.pop_kinded()?;
+                let a_ptr = a_bits as usize as *const StringObj;
+                let b_ptr = b_bits as usize as *const StringObj;
                 // Safety: both pointers were created by NewStringV2 or string FFI.
                 let result = unsafe { StringObj::concat(a_ptr, b_ptr) };
-                self.push_raw_u64(ValueWord::from_native_ptr(result as usize))?;
+                self.push_kinded(result as usize as u64, NativeKind::UInt64)?;
                 Ok(())
             }
 
             // ── String equality ────────────────────────────────────────
 
             OpCode::StringEqV2 => {
-                let b_vw = self.pop_raw_u64()?;
-                let a_vw = self.pop_raw_u64()?;
-                let a_ptr = extract_ptr(&a_vw) as *const StringObj;
-                let b_ptr = extract_ptr(&b_vw) as *const StringObj;
+                let (b_bits, _b_kind) = self.pop_kinded()?;
+                let (a_bits, _a_kind) = self.pop_kinded()?;
+                let a_ptr = a_bits as usize as *const StringObj;
+                let b_ptr = b_bits as usize as *const StringObj;
                 // Safety: both pointers were created by NewStringV2 or string FFI.
                 let eq = unsafe { StringObj::eq(a_ptr, b_ptr) };
-                self.push_tagged_bool(eq)?;
+                self.push_kinded(eq as u64, NativeKind::Bool)?;
                 Ok(())
             }
 

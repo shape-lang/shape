@@ -55,6 +55,15 @@ pub const TYPED_OBJECT_ALIGNMENT: usize = 64;
 ///
 /// This struct uses `#[repr(C)]` to ensure predictable memory layout.
 /// Fields are stored inline after the header, accessed by byte offset.
+//
+// ADR-005 §4 / Q9 forward pointer: VM↔JIT slot ABI uniformity is enforced
+// for the VM half of the boundary in cluster #1. The JIT FFI carrier
+// (this struct) is the JIT half; per the cluster #1 audit Q9 ruling, the
+// JIT-side migration to the per-FieldType / typed-pointer slot layout is
+// queued for a future cluster (cluster #N>7). Until that cluster lands,
+// reads/writes here MUST NOT introduce parallel discriminators (per
+// ADR-005 §1) — JIT codegen reads the schema's FieldType to interpret
+// each slot, same as the VM. See docs/adr/005-typed-slot-construction.md.
 #[repr(C)]
 pub struct TypedObject {
     /// Schema ID for runtime type checking

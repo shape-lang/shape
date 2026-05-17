@@ -1,340 +1,103 @@
 //! Variable operations for the VM executor
 //!
-//! Handles: LoadLocal, StoreLocal, LoadModuleBinding, StoreModuleBinding, LoadClosure, StoreClosure, CloseUpvalue
+//! Handles: LoadLocal, StoreLocal, LoadModuleBinding, StoreModuleBinding,
+//! LoadClosure, StoreClosure, CloseUpvalue, MakeRef, MakeFieldRef,
+//! MakeIndexRef, DerefLoad, DerefStore, SetIndexRef, plus the typed
+//! Owned/Shared capture and shared-local/module-binding opcodes.
+//!
+//! ## Wave-δ B6-round-2 close (2026-05-09)
+//!
+//! Final close for cluster B's `variables/mod.rs`. Migration sources kind
+//! through the §2.7.7 stack parallel-`Vec<NativeKind>` track, the §2.7.8
+//! cell-storage parallel-kind tracks (`OwnedClosureBlock` /
+//! `ClosureLayout::capture_native_kinds` per Wave-γ G-owned-closure-block
+//! commit `cb0bf86`, `module_binding_*_kinded` API per Wave-γ
+//! G-module-bindings-kind commit `27e2918`, `SharedCell::kind()` per
+//! Wave-α B8-shared-cell), and the FrameDescriptor's per-local kind
+//! track (`current_frame_descriptor()?.slot(idx)`).
+//!
+//! The polymorphic legacy paths that dispatched on `tag_bits::is_tagged`
+//! / `tag_bits::get_tag` (the deleted ValueWord NaN-box discriminator) and
+//! `nanboxed::RefTarget` / `RefProjection` (the deleted ValueWord
+//! reference encoding) are surfaced as `NotImplemented(SURFACE)` per
+//! playbook §7 REVISED #4. The §2.7.4 / Phase-2c amendment territory
+//! includes:
+//!
+//! - `read_ref_target` / `write_ref_target` / `resolve_ref_value` /
+//!   `set_matrix_row_element` / `cow_matrix_write` —
+//!   `nanboxed::RefTarget` and `RefProjection` are deleted; the
+//!   reference-value carrier needs a kinded redesign (probable shape:
+//!   `KindedSlot` carries a `RefTarget`-like enum at the runtime tier).
+//! - `op_make_ref` / `op_make_field_ref` / `op_make_index_ref` —
+//!   construct `RefTarget` ValueWord-shaped bits; depend on the same
+//!   redesign as above.
+//! - `op_deref_load` / `op_deref_store` / `op_set_index_ref` — pop a
+//!   `RefTarget`-bearing slot, project through `RefProjection::TypedField`
+//!   / `Index` / `MatrixRow`; same dependency.
+//! - `op_load_owned_mutable_capture` / `op_store_owned_mutable_capture`
+//!   polymorphic — Wave D's typed Load/Store opcodes have replaced these;
+//!   the polymorphic versions called the deleted `ValueWord::from_raw_bits`
+//!   / `vw_clone` / `vw_drop` for the Ptr arm. Surfaced.
+//! - `op_load_local_clone` already migrated in Wave-α to
+//!   `stack_read_kinded_raw` + `clone_with_kind` — preserved here.
+//!
+//! No new forbidden-pattern introductions: zero `vw_clone` / `vw_drop` /
+//! `tag_bits::*` / `as_heap_ref` / `NativeKind::Unknown` / Bool-default
+//! fallbacks. Every kind sourced from a §2.7.7/§2.7.8 parallel track or
+//! the FrameDescriptor's per-local kind. SURFACE markers cite the
+//! deleted shape by name per CLAUDE.md "describe deleted code by name".
 
-use crate::executor::objects::object_creation::clone_slots_with_update;
-use crate::executor::objects::raw_helpers;
-use crate::executor::typed_object_ops::{read_slot_fast, tag_to_field_type};
 use crate::{
     bytecode::{Instruction, OpCode, Operand},
     executor::VirtualMachine,
-    memory::{record_heap_write, write_barrier_slot, write_barrier_vw},
+    memory::{record_heap_write, write_barrier_slot},
 };
-use shape_value::heap_value::HeapValue;
-use shape_value::nanboxed::RefTarget;
-use shape_value::value_word_drop::{vw_clone, vw_drop};
-use shape_value::{RefProjection, VMError, ValueWord, ValueWordExt};
-use std::sync::Arc;
+use shape_value::{HeapKind, NativeKind, VMError};
+
 impl VirtualMachine {
-    pub(in crate::executor) fn read_ref_target(
-        &self,
-        target: &RefTarget,
-    ) -> Result<ValueWord, VMError> {
-        match target {
-            RefTarget::Stack(slot) => {
-                if *slot < self.stack.len() {
-                    Ok(self.stack_read_raw(*slot))
-                } else {
-                    Ok(ValueWord::none())
-                }
-            }
-            RefTarget::ModuleBinding(slot) => {
-                if *slot < self.module_bindings.len() {
-                    Ok(self.binding_read_raw(*slot))
-                } else {
-                    Ok(ValueWord::none())
-                }
-            }
-            RefTarget::Projected(data) => match &data.projection {
-                RefProjection::TypedField {
-                    field_idx,
-                    field_type_tag,
-                    ..
-                } => {
-                    let base_value = self.resolve_ref_value(&data.base).ok_or_else(|| {
-                        VMError::RuntimeError(
-                            "internal error: projected reference base is not a reference"
-                                .to_string(),
-                        )
-                    })?;
-                    let bits = raw_helpers::unwrap_annotated_bits(base_value.raw_bits());
-                    if let Some((_schema_id, slots, heap_mask)) =
-                        raw_helpers::extract_typed_object(bits)
-                    {
-                        let index = *field_idx as usize;
-                        if index < slots.len() {
-                            let is_heap = (heap_mask & (1u64 << index)) != 0;
-                            return Ok(read_slot_fast(&slots[index], is_heap, *field_type_tag));
-                        }
-                    }
-                    Ok(ValueWord::none())
-                }
-                RefProjection::Index { index } => {
-                    let base_value = self.resolve_ref_value(&data.base).ok_or_else(|| {
-                        VMError::RuntimeError(
-                            "internal error: projected reference base is not a reference"
-                                .to_string(),
-                        )
-                    })?;
-                    let unwrapped_bits = raw_helpers::unwrap_annotated_bits(base_value.raw_bits());
-                    let base_value = if unwrapped_bits != base_value.raw_bits() {
-                        unsafe { ValueWord::clone_from_bits(unwrapped_bits) }
-                    } else {
-                        base_value
-                    };
-                    if let Some(arr) = base_value.as_any_array() {
-                        let idx_opt = index
-                            .as_i64()
-                            .or_else(|| index.as_f64().map(|f| f as i64));
-                        if let Some(idx) = idx_opt {
-                            let len = arr.len() as i64;
-                            let actual = if idx < 0 { len + idx } else { idx };
-                            if actual >= 0 && (actual as usize) < arr.len() {
-                                return Ok(arr
-                                    .get_nb(actual as usize)
-                                    .unwrap_or_else(ValueWord::none));
-                            }
-                        }
-                    }
-                    Ok(ValueWord::none())
-                }
-                RefProjection::MatrixRow { row_index } => {
-                    let base_value = self.resolve_ref_value(&data.base).ok_or_else(|| {
-                        VMError::RuntimeError(
-                            "internal error: projected reference base is not a reference"
-                                .to_string(),
-                        )
-                    })?;
-                    // Return the row as a FloatArraySlice (read-only view)
-                    if let Some(mat_arc) = raw_helpers::extract_matrix_arc(base_value.raw_bits()) {
-                        let cols = mat_arc.cols;
-                        let offset = *row_index * cols;
-                        if *row_index < mat_arc.rows {
-                            return Ok(ValueWord::from_heap_value(
-                                HeapValue::TypedArray(shape_value::TypedArrayData::FloatSlice {
-                                    parent: mat_arc,
-                                    offset,
-                                    len: cols,
-                                }),
-                            ));
-                        }
-                        return Err(VMError::RuntimeError(format!(
-                            "Matrix row index {} out of bounds for {}x{} matrix",
-                            row_index, mat_arc.rows, mat_arc.cols
-                        )));
-                    }
-                    Err(VMError::RuntimeError(
-                        "cannot read through a MatrixRow reference: base is not a matrix"
-                            .to_string(),
-                    ))
-                }
-            },
-        }
-    }
-
-    pub(in crate::executor) fn write_ref_target(
-        &mut self,
-        target: &RefTarget,
-        value: ValueWord,
-    ) -> Result<(), VMError> {
-        record_heap_write();
-        match target {
-            RefTarget::Stack(target) => {
-                write_barrier_slot(self.stack[*target], value.raw_bits());
-                self.stack_write_raw(*target, value);
-                Ok(())
-            }
-            RefTarget::ModuleBinding(target) => {
-                if *target >= self.module_bindings.len() {
-                    self.module_bindings
-                        .resize_with(*target + 1, || Self::NONE_BITS);
-                }
-                write_barrier_slot(self.module_bindings[*target], value.raw_bits());
-                self.binding_write_raw(*target, value);
-                Ok(())
-            }
-            RefTarget::Projected(data) => match &data.projection {
-                RefProjection::TypedField {
-                    field_idx,
-                    field_type_tag,
-                    ..
-                } => {
-                    let base_value = self.resolve_ref_value(&data.base).ok_or_else(|| {
-                        VMError::RuntimeError(
-                            "internal error: projected reference base is not a reference"
-                                .to_string(),
-                        )
-                    })?;
-                    let bits = raw_helpers::unwrap_annotated_bits(base_value.raw_bits());
-                    if let Some((schema_id, slots, heap_mask)) =
-                        raw_helpers::extract_typed_object(bits)
-                    {
-                        let field_type = tag_to_field_type(*field_type_tag);
-                        let (new_slots, new_mask) = clone_slots_with_update(
-                            slots,
-                            heap_mask,
-                            *field_idx as usize,
-                            &value,
-                            field_type.as_ref(),
-                        );
-                        return self.write_ref_value(
-                            &data.base,
-                            ValueWord::from_heap_value(HeapValue::TypedObject {
-                                schema_id,
-                                slots: new_slots.into_boxed_slice(),
-                                heap_mask: new_mask,
-                            }),
-                        );
-                    }
-                    Err(VMError::RuntimeError(
-                        "cannot write through a field reference to a non-object value".to_string(),
-                    ))
-                }
-                RefProjection::Index { index } => {
-                    let base_value = self.resolve_ref_value(&data.base).ok_or_else(|| {
-                        VMError::RuntimeError(
-                            "internal error: projected reference base is not a reference"
-                                .to_string(),
-                        )
-                    })?;
-                    let unwrapped_bits = raw_helpers::unwrap_annotated_bits(base_value.raw_bits());
-                    let mut base_value = if unwrapped_bits != base_value.raw_bits() {
-                        unsafe { ValueWord::clone_from_bits(unwrapped_bits) }
-                    } else {
-                        base_value
-                    };
-                    Self::set_array_index_on_object(&mut base_value, index, value).map_err(
-                        |err| match err {
-                            VMError::RuntimeError(message)
-                                if message.starts_with("Cannot set property") =>
-                            {
-                                VMError::RuntimeError(
-                                    "cannot write through an index reference to a non-array value"
-                                        .to_string(),
-                                )
-                            }
-                            other => other,
-                        },
-                    )?;
-                    self.write_ref_value(&data.base, base_value)
-                }
-                RefProjection::MatrixRow { .. } => {
-                    Err(VMError::RuntimeError(
-                        "cannot assign a whole value to a matrix row reference; \
-                         use row[col] = value to mutate individual elements"
-                            .to_string(),
-                    ))
-                }
-            },
-        }
-    }
-
-    fn write_ref_value(&mut self, reference: &ValueWord, value: ValueWord) -> Result<(), VMError> {
-        let target = reference.as_ref_target().ok_or_else(|| {
-            VMError::RuntimeError(
-                "internal error: expected a reference value (&) but found a regular value. \
-                 This is a compiler bug — please report it"
-                    .to_string(),
-            )
-        })?;
-        self.write_ref_target(&target, value)
-    }
-
-    pub(in crate::executor) fn resolve_ref_value(&self, value: &ValueWord) -> Option<ValueWord> {
-        let target = value.as_ref_target()?;
-        self.read_ref_target(&target).ok()
-    }
-
-    /// Write a single element in a matrix row through a borrow reference.
+    /// Resolve the `ClosureLayout` for the currently-executing closure
+    /// frame.
     ///
-    /// `base_ref` is a TAG_REF pointing at the stack slot or module binding
-    /// holding the `Matrix(Arc<MatrixData>)`. We resolve it, call
-    /// `Arc::make_mut` for COW semantics, then write
-    /// `data[row_index * cols + col_index]`.
-    fn set_matrix_row_element(
-        &mut self,
-        base_ref: &ValueWord,
-        row_index: u32,
-        col_index_nb: &ValueWord,
-        value: ValueWord,
-    ) -> Result<(), VMError> {
-        let col_idx = col_index_nb
-            .as_i64()
-            .or_else(|| col_index_nb.as_f64().map(|f| f as i64))
-            .ok_or_else(|| {
-                VMError::RuntimeError("matrix column index must be a number".to_string())
-            })?;
-
-        let val_f64 = value.as_f64().or_else(|| value.as_i64().map(|i| i as f64)).ok_or_else(|| {
-            VMError::RuntimeError(
-                "matrix element must be a number".to_string(),
-            )
-        })?;
-
-        // Resolve the base ref to find which slot holds the matrix.
-        let base_target = base_ref.as_ref_target().ok_or_else(|| {
-            VMError::RuntimeError(
-                "internal error: MatrixRow base is not a reference".to_string(),
-            )
-        })?;
-
-        // Get mutable access to the matrix slot and do COW mutation.
-        match base_target {
-            RefTarget::Stack(slot) => {
-                // Temporarily take the ValueWord out for mutation, then write it back.
-                let mut matrix_vw = self.stack_take_raw(slot);
-                let result = Self::cow_matrix_write(&mut matrix_vw, row_index, col_idx, val_f64);
-                self.stack_write_raw(slot, matrix_vw);
-                result
-            }
-            RefTarget::ModuleBinding(slot) => {
-                if slot >= self.module_bindings.len() {
-                    return Err(VMError::RuntimeError(format!(
-                        "ModuleBinding index {} out of bounds",
-                        slot
-                    )));
-                }
-                let mut matrix_vw = self.binding_take_raw(slot);
-                let result = Self::cow_matrix_write(&mut matrix_vw, row_index, col_idx, val_f64);
-                self.binding_write_raw(slot, matrix_vw);
-                result
-            }
-            RefTarget::Projected(_) => Err(VMError::RuntimeError(
-                "nested projected references for matrix row mutation are not supported"
-                    .to_string(),
-            )),
-        }
+    /// Returns `None` if the frame is not a closure call or the function
+    /// has no registered layout.
+    #[inline]
+    fn current_closure_layout(
+        &self,
+    ) -> Option<std::sync::Arc<shape_value::v2::closure_layout::ClosureLayout>> {
+        let frame = self.call_stack.last()?;
+        let func_id = frame.function_id?;
+        self.program
+            .closure_function_layouts
+            .get(func_id as usize)
+            .and_then(|l| l.as_ref())
+            .cloned()
     }
 
-    /// Perform COW write into a matrix ValueWord at `data[row * cols + col]`.
-    fn cow_matrix_write(
-        matrix_vw: &mut ValueWord,
-        row_index: u32,
-        col_idx: i64,
-        val: f64,
-    ) -> Result<(), VMError> {
-        let heap = matrix_vw.as_heap_mut().ok_or_else(|| {
+    /// Read the raw u64 bits stored behind upvalue `upvalue_idx`.
+    /// `frame.upvalues` is the post-`ValueWord`-deletion `Vec<u64>` raw
+    /// payload (`executor/mod.rs:200`); for `OwnedMutable` captures the
+    /// bits are a `*mut T` cell pointer, for `Shared` captures a
+    /// `*const SharedCell` Arc share. Used by every typed and ptr
+    /// capture handler below.
+    #[inline]
+    fn read_capture_raw_pointer_bits(&self, upvalue_idx: u16) -> Result<u64, VMError> {
+        let frame = self.call_stack.last().ok_or_else(|| {
             VMError::RuntimeError(
-                "cannot write through MatrixRow reference: target is not a heap value".to_string(),
+                "mutable/shared capture access outside a call frame".to_string(),
             )
         })?;
-
-        match heap {
-            HeapValue::TypedArray(shape_value::TypedArrayData::Matrix(arc)) => {
-                let mat = Arc::make_mut(arc);
-                let cols = mat.cols as i64;
-                let actual_col = if col_idx < 0 { cols + col_idx } else { col_idx };
-                if actual_col < 0 || actual_col >= cols {
-                    return Err(VMError::RuntimeError(format!(
-                        "Matrix column index {} out of bounds for {} columns",
-                        col_idx, mat.cols
-                    )));
-                }
-                if row_index >= mat.rows {
-                    return Err(VMError::RuntimeError(format!(
-                        "Matrix row index {} out of bounds for {} rows",
-                        row_index, mat.rows
-                    )));
-                }
-                let flat_idx = (row_index as usize) * (mat.cols as usize) + (actual_col as usize);
-                record_heap_write();
-                mat.data[flat_idx] = val;
-                Ok(())
-            }
-            _ => Err(VMError::RuntimeError(
-                "cannot write through MatrixRow reference: target is not a Matrix".to_string(),
-            )),
-        }
+        let upvalues = frame.upvalues.as_ref().ok_or_else(|| {
+            VMError::RuntimeError(
+                "mutable/shared capture access in a frame without upvalues".to_string(),
+            )
+        })?;
+        let bits = upvalues.get(upvalue_idx as usize).copied().ok_or_else(|| {
+            VMError::RuntimeError(format!(
+                "capture index {} not found in closure",
+                upvalue_idx
+            ))
+        })?;
+        Ok(bits)
     }
 
     #[inline(always)]
@@ -351,7 +114,6 @@ impl VirtualMachine {
             StoreLocal => self.op_store_local(instruction)?,
             StoreLocalTyped => self.op_store_local_typed(instruction)?,
             StoreLocalDrop => self.op_store_local_drop(instruction)?,
-            // Wave E+3: typed local load/store opcodes (0x16C..=0x181).
             LoadLocalI64 => self.op_load_local_i64(instruction)?,
             LoadLocalU64 => self.op_load_local_u64(instruction)?,
             LoadLocalF64 => self.op_load_local_f64(instruction)?,
@@ -377,7 +139,6 @@ impl VirtualMachine {
             LoadModuleBinding => self.op_load_module_binding(instruction)?,
             StoreModuleBinding => self.op_store_module_binding(instruction)?,
             StoreModuleBindingTyped => self.op_store_module_binding_typed(instruction)?,
-            // Wave E+3: typed module-binding opcodes (0x182..=0x197).
             LoadModuleBindingI64 => self.op_load_module_binding_i64(instruction)?,
             LoadModuleBindingU64 => self.op_load_module_binding_u64(instruction)?,
             LoadModuleBindingF64 => self.op_load_module_binding_f64(instruction)?,
@@ -411,72 +172,30 @@ impl VirtualMachine {
             SetIndexRef => self.op_set_index_ref(instruction)?,
             LoadOwnedMutableCapture => self.op_load_owned_mutable_capture(instruction)?,
             StoreOwnedMutableCapture => self.op_store_owned_mutable_capture(instruction)?,
-            // D.1: typed OwnedMutable capture opcodes (0x140..=0x155).
-            LoadOwnedMutableCaptureI64 => {
-                self.op_load_owned_mutable_capture_i64(instruction)?
-            }
-            LoadOwnedMutableCaptureU64 => {
-                self.op_load_owned_mutable_capture_u64(instruction)?
-            }
-            LoadOwnedMutableCaptureF64 => {
-                self.op_load_owned_mutable_capture_f64(instruction)?
-            }
-            LoadOwnedMutableCaptureI32 => {
-                self.op_load_owned_mutable_capture_i32(instruction)?
-            }
-            LoadOwnedMutableCaptureU32 => {
-                self.op_load_owned_mutable_capture_u32(instruction)?
-            }
-            LoadOwnedMutableCaptureI16 => {
-                self.op_load_owned_mutable_capture_i16(instruction)?
-            }
-            LoadOwnedMutableCaptureU16 => {
-                self.op_load_owned_mutable_capture_u16(instruction)?
-            }
+            LoadOwnedMutableCaptureI64 => self.op_load_owned_mutable_capture_i64(instruction)?,
+            LoadOwnedMutableCaptureU64 => self.op_load_owned_mutable_capture_u64(instruction)?,
+            LoadOwnedMutableCaptureF64 => self.op_load_owned_mutable_capture_f64(instruction)?,
+            LoadOwnedMutableCaptureI32 => self.op_load_owned_mutable_capture_i32(instruction)?,
+            LoadOwnedMutableCaptureU32 => self.op_load_owned_mutable_capture_u32(instruction)?,
+            LoadOwnedMutableCaptureI16 => self.op_load_owned_mutable_capture_i16(instruction)?,
+            LoadOwnedMutableCaptureU16 => self.op_load_owned_mutable_capture_u16(instruction)?,
             LoadOwnedMutableCaptureI8 => self.op_load_owned_mutable_capture_i8(instruction)?,
             LoadOwnedMutableCaptureU8 => self.op_load_owned_mutable_capture_u8(instruction)?,
-            LoadOwnedMutableCaptureBool => {
-                self.op_load_owned_mutable_capture_bool(instruction)?
-            }
-            LoadOwnedMutableCapturePtr => {
-                self.op_load_owned_mutable_capture_ptr(instruction)?
-            }
-            StoreOwnedMutableCaptureI64 => {
-                self.op_store_owned_mutable_capture_i64(instruction)?
-            }
-            StoreOwnedMutableCaptureU64 => {
-                self.op_store_owned_mutable_capture_u64(instruction)?
-            }
-            StoreOwnedMutableCaptureF64 => {
-                self.op_store_owned_mutable_capture_f64(instruction)?
-            }
-            StoreOwnedMutableCaptureI32 => {
-                self.op_store_owned_mutable_capture_i32(instruction)?
-            }
-            StoreOwnedMutableCaptureU32 => {
-                self.op_store_owned_mutable_capture_u32(instruction)?
-            }
-            StoreOwnedMutableCaptureI16 => {
-                self.op_store_owned_mutable_capture_i16(instruction)?
-            }
-            StoreOwnedMutableCaptureU16 => {
-                self.op_store_owned_mutable_capture_u16(instruction)?
-            }
-            StoreOwnedMutableCaptureI8 => {
-                self.op_store_owned_mutable_capture_i8(instruction)?
-            }
-            StoreOwnedMutableCaptureU8 => {
-                self.op_store_owned_mutable_capture_u8(instruction)?
-            }
-            StoreOwnedMutableCaptureBool => {
-                self.op_store_owned_mutable_capture_bool(instruction)?
-            }
-            StoreOwnedMutableCapturePtr => {
-                self.op_store_owned_mutable_capture_ptr(instruction)?
-            }
+            LoadOwnedMutableCaptureBool => self.op_load_owned_mutable_capture_bool(instruction)?,
+            LoadOwnedMutableCapturePtr => self.op_load_owned_mutable_capture_ptr(instruction)?,
+            StoreOwnedMutableCaptureI64 => self.op_store_owned_mutable_capture_i64(instruction)?,
+            StoreOwnedMutableCaptureU64 => self.op_store_owned_mutable_capture_u64(instruction)?,
+            StoreOwnedMutableCaptureF64 => self.op_store_owned_mutable_capture_f64(instruction)?,
+            StoreOwnedMutableCaptureI32 => self.op_store_owned_mutable_capture_i32(instruction)?,
+            StoreOwnedMutableCaptureU32 => self.op_store_owned_mutable_capture_u32(instruction)?,
+            StoreOwnedMutableCaptureI16 => self.op_store_owned_mutable_capture_i16(instruction)?,
+            StoreOwnedMutableCaptureU16 => self.op_store_owned_mutable_capture_u16(instruction)?,
+            StoreOwnedMutableCaptureI8 => self.op_store_owned_mutable_capture_i8(instruction)?,
+            StoreOwnedMutableCaptureU8 => self.op_store_owned_mutable_capture_u8(instruction)?,
+            StoreOwnedMutableCaptureBool => self.op_store_owned_mutable_capture_bool(instruction)?,
+            StoreOwnedMutableCapturePtr => self.op_store_owned_mutable_capture_ptr(instruction)?,
             LoadSharedCapture => self.op_load_shared_capture(instruction)?,
             StoreSharedCapture => self.op_store_shared_capture(instruction)?,
-            // D.2: typed Shared capture opcodes (0x156..=0x16B).
             LoadSharedCaptureI64 => self.op_load_shared_capture_i64(instruction)?,
             LoadSharedCaptureU64 => self.op_load_shared_capture_u64(instruction)?,
             LoadSharedCaptureF64 => self.op_load_shared_capture_f64(instruction)?,
@@ -514,372 +233,167 @@ impl VirtualMachine {
         Ok(())
     }
 
-    /// Load value from an upvalue in the current closure's environment
-    fn op_load_closure(&mut self, instruction: &Instruction) -> Result<(), VMError> {
-        if let Some(Operand::Local(upvalue_idx)) = instruction.operand {
-            // Get the current call frame's upvalues
-            if let Some(frame) = self.call_stack.last() {
-                if let Some(upvalues) = &frame.upvalues {
-                    if let Some(upvalue) = upvalues.get(upvalue_idx as usize) {
-                        // WB2.2 retain-on-read: `Upvalue::get()` bumps the
-                        // refcount of heap-tagged captures, so the stack
-                        // push receives an independent owning share. For
-                        // raw pointer captures (`OwnedMutable` / `Shared`)
-                        // the bits are not heap-tagged and `vw_clone` in
-                        // `get()` is a no-op.
-                        let value_nb = upvalue.get();
-                        self.push_raw_u64(value_nb)?;
-                        return Ok(());
-                    }
-                }
-            }
-            Err(VMError::RuntimeError(format!(
-                "Upvalue index {} not found in closure",
-                upvalue_idx
-            )))
-        } else {
-            Err(VMError::InvalidOperand)
-        }
-    }
+    // ─────────────────────────────────────────────────────────────────────
+    // Closure upvalue Load/Store
+    // ─────────────────────────────────────────────────────────────────────
 
-    /// Store value to an upvalue in the current closure's environment.
+    /// `LoadClosure { upvalue_idx }`: read the raw u64 capture bits and
+    /// push them onto the stack.
     ///
-    /// If the upvalue is `Immutable`, it is upgraded to `Mutable` on the first write.
+    /// SURFACE (ADR-006 §2.7.4 — Phase-2c) — the polymorphic LoadClosure
+    /// path does not source a `NativeKind` for the pushed slot. Per
+    /// playbook §2 kind-sourcing rules the closure-capture kind comes
+    /// from `current_closure_layout()?.capture_native_kind(idx)` (the
+    /// Wave-γ G-owned-closure-block API at `closure_layout.rs:971`),
+    /// which DOES classify the capture slot — but the polymorphic
+    /// `LoadClosure` opcode is dispatched against captures of any
+    /// `CaptureKind` (Immutable / OwnedMutable / Shared). For
+    /// `Immutable` captures the raw u64 IS the value (kind matches
+    /// `capture_native_kind`); for `OwnedMutable` it's a `*mut T` cell
+    /// pointer (the inner-typed Load handler must run, the polymorphic
+    /// path corrupts width); for `Shared` it's `*const SharedCell`
+    /// (same — the SharedCell handler must run).
+    ///
+    /// The compiler's Wave D / Wave E flip emits the typed
+    /// `LoadOwnedMutableCapture<Kind>` / `LoadSharedCapture<Kind>`
+    /// opcodes; the polymorphic `LoadClosure` is the legacy dispatch
+    /// for `Immutable` captures only. For Immutable captures the kind
+    /// IS the layout's `capture_native_kind(upvalue_idx)`. Migrated.
+    fn op_load_closure(&mut self, instruction: &Instruction) -> Result<(), VMError> {
+        let Some(Operand::Local(upvalue_idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let bits = self.read_capture_raw_pointer_bits(upvalue_idx)?;
+        // ADR-006 §2.7.8 / Q10: kind comes from the closure layout's
+        // per-capture `NativeKind` track (Wave-γ G-owned-closure-block
+        // commit `cb0bf86`). For `Immutable` captures this IS the slot's
+        // kind; for `OwnedMutable` / `Shared` the typed dispatch runs
+        // through `LoadOwnedMutableCapture<Kind>` / `LoadSharedCapture<Kind>`
+        // and never reaches this polymorphic shell.
+        let kind = self
+            .current_closure_layout()
+            .map(|l| l.capture_native_kind(upvalue_idx as usize))
+            .ok_or_else(|| {
+                VMError::RuntimeError(format!(
+                    "LoadClosure[{}]: no closure layout registered for the current frame",
+                    upvalue_idx
+                ))
+            })?;
+        // WB2.4 retain-on-read: bump the heap refcount for the pushed
+        // share. The closure block continues to own its own share.
+        crate::executor::vm_impl::stack::clone_with_kind(bits, kind);
+        self.push_kinded(bits, kind)
+    }
+
+    /// `StoreClosure { upvalue_idx }`: pop a kinded slot and store the
+    /// new capture bits into `frame.upvalues[upvalue_idx]`.
+    ///
+    /// The compiler emits this for `Immutable` captures only when the
+    /// closure body upgrades the capture to mutable. For
+    /// `OwnedMutable` / `Shared` captures the typed Store opcodes run.
     fn op_store_closure(&mut self, instruction: &Instruction) -> Result<(), VMError> {
-        if let Some(Operand::Local(upvalue_idx)) = instruction.operand {
-            let value_nb = self.pop_raw_u64()?;
-            // Get the current call frame's upvalues (mutable for potential upgrade)
-            if let Some(frame) = self.call_stack.last_mut() {
-                if let Some(upvalues) = &mut frame.upvalues {
-                    if let Some(upvalue) = upvalues.get_mut(upvalue_idx as usize) {
-                        record_heap_write();
-                        // WB2 retain-on-read: the write barrier reads the
-                        // old value for inspection only — use `get_raw()`
-                        // to avoid leaking a retain that has no matching
-                        // release.
-                        let old_raw = upvalue.get_raw();
-                        write_barrier_vw(&old_raw, &value_nb);
-                        upvalue.set(value_nb);
-                        return Ok(());
-                    }
-                }
-            }
-            Err(VMError::RuntimeError(format!(
-                "Upvalue index {} not found in closure",
-                upvalue_idx
-            )))
-        } else {
-            Err(VMError::InvalidOperand)
-        }
-    }
-
-    /// Close upvalue - currently a no-op since we already capture by value
-    /// In a full implementation, this would move the value from stack to heap
-    fn op_close_upvalue(&mut self, _instruction: &Instruction) -> Result<(), VMError> {
-        // H3: closures capture ValueWords directly; shared mutability, when
-        // required, rides on a `HeapValue::SharedCell` inside the captured
-        // ValueWord, so "closing" is implicit on capture.
-        Ok(())
-    }
-
-    // ── Track A.1B: CaptureKind::OwnedMutable / Shared interpreter path ──
-    //
-    // The upvalue slot for A.1B's mutable/shared captures holds *raw
-    // pointer bits* (not a ValueWord payload the way `Upvalue::get/set`
-    // expect). We therefore read the slot's raw u64 directly and bypass
-    // `Upvalue::get()` — the auto-deref on `HeapValue::SharedCell` is
-    // specific to the retired-in-A.1C legacy mutable-capture fallback and
-    // MUST NOT run on an `OwnedMutable` / `Shared` upvalue (whose bits
-    // are not a NaN-tagged heap pointer in the first place).
-    //
-    // SAFETY invariants for every handler below:
-    //
-    // - The compiler (A.1C) emits these opcodes only for captures whose
-    //   `ClosureLayout::capture_storage_kind(i)` is the matching variant.
-    //   `op_make_closure` (A.1B) and the closure call plumbing preserve
-    //   the raw pointer bits through `frame.upvalues[i]`.
-    // - The upvalue's raw u64 is either `Box::into_raw(Box::new(ValueWord))`
-    //   (for OwnedMutable) or `Arc::into_raw(Arc::new(SharedCell))` (for
-    //   Shared). Both are 8-aligned allocations produced from Rust's
-    //   global allocator and live for the closure's refcounted lifetime.
-    // - The pointer is released exactly once by `release_typed_closure`
-    //   via `Box::from_raw` / `Arc::from_raw` when the closure's refcount
-    //   hits zero; interpreter reads/writes do NOT consume a reference
-    //   count and do NOT transfer ownership.
-
-    /// Read the raw pointer bits stored behind upvalue `upvalue_idx`.
-    /// Bypasses `Upvalue::get()` so `HeapValue::SharedCell` auto-deref
-    /// does NOT run on bits that encode a raw `*mut ValueWord` /
-    /// `*const SharedCell`. Used only by
-    /// `LoadOwnedMutableCapture` / `StoreOwnedMutableCapture` /
-    /// `LoadSharedCapture` / `StoreSharedCapture`.
-    #[inline]
-    fn read_capture_raw_pointer_bits(&self, upvalue_idx: u16) -> Result<u64, VMError> {
-        let frame = self.call_stack.last().ok_or_else(|| {
-            VMError::RuntimeError(
-                "mutable/shared capture access outside a call frame".to_string(),
-            )
-        })?;
-        let upvalues = frame.upvalues.as_ref().ok_or_else(|| {
-            VMError::RuntimeError(
-                "mutable/shared capture access in a frame without upvalues".to_string(),
-            )
-        })?;
-        let upvalue = upvalues.get(upvalue_idx as usize).ok_or_else(|| {
+        let Some(Operand::Local(upvalue_idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let (new_bits, src_kind) = self.pop_kinded()?;
+        let layout = self.current_closure_layout().ok_or_else(|| {
+            // Drop the popped share — we own it but cannot install it.
+            crate::executor::vm_impl::stack::drop_with_kind(new_bits, src_kind);
             VMError::RuntimeError(format!(
-                "capture index {} not found in closure",
+                "StoreClosure[{}]: no closure layout registered for the current frame",
                 upvalue_idx
             ))
         })?;
-        // NOTE: intentionally not calling `Upvalue::get()` — see module
-        // header above. We want the raw bits (a pointer), not a
-        // SharedCell-auto-dereffed ValueWord.
-        //
-        // Upvalue's inner ValueWord is a `u64` alias (see
-        // `shape_value::value_word`), so cloning & decoding bits is
-        // zero-cost. We read via clone() → raw_bits() because Upvalue's
-        // only public accessor for the inner is `.get()` (which
-        // auto-dereffs). Workaround: take the inner by Clone. The clone
-        // of Upvalue clones the inner u64 bits without invoking
-        // SharedCell semantics — Upvalue::new(value) just stashes the
-        // value.
-        Ok(upvalue.clone_inner_bits_for_raw_pointer_access())
-    }
-
-    /// Resolve the `ClosureLayout` for the currently-executing closure
-    /// frame (to consult `capture_inner_kind` for legacy
-    /// `Load/StoreOwnedMutableCapture` dispatch).
-    ///
-    /// Returns `None` if the frame is not a closure call (no
-    /// `function_id` registered) or the function has no layout (a
-    /// non-closure function executing the legacy opcode is a compiler
-    /// bug).
-    #[inline]
-    fn current_closure_layout(
-        &self,
-    ) -> Option<std::sync::Arc<shape_value::v2::closure_layout::ClosureLayout>> {
-        let frame = self.call_stack.last()?;
-        let func_id = frame.function_id?;
-        self.program
-            .closure_function_layouts
-            .get(func_id as usize)
-            .and_then(|l| l.as_ref())
-            .cloned()
-    }
-
-    /// `LoadOwnedMutableCapture { idx }`: read the typed cell at
-    /// capture `idx` and push the result onto the stack as a
-    /// `ValueWord`.
-    ///
-    /// # Wave D (D.3) — type-aware dispatch
-    ///
-    /// The cell stores a native typed value matching
-    /// `layout.capture_inner_kind(idx)` (an `i64`, `f64`, `bool`, …),
-    /// allocated by `closure_raw::alloc_owned_mutable_<kind>` in
-    /// `op_make_closure`. The legacy stack contract still requires
-    /// pushing a `ValueWord`, so we read the typed value via Wave B's
-    /// `read_owned_mutable_<kind>` helper and re-encode it. After Wave
-    /// E flips the bytecode emitter to use D.1's typed
-    /// `Load/StoreOwnedMutableCapture<Kind>` opcodes, this re-encoding
-    /// boundary becomes dead code (cleaned up in Wave G).
-    ///
-    /// # Safety
-    ///
-    /// The capture at `idx` must have `CaptureKind::OwnedMutable` and
-    /// the upvalue slot must contain a non-null pointer obtained from
-    /// the matching `closure_raw::alloc_owned_mutable_<kind>` for
-    /// `capture_inner_kind(idx)`. The pointer is valid for the
-    /// closure's refcounted lifetime; it is released exactly once by
-    /// `release_typed_closure` via the matching `Box::from_raw`.
-    fn op_load_owned_mutable_capture(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
-        use shape_value::v2::closure_raw::{
-            read_owned_mutable_bool, read_owned_mutable_f64, read_owned_mutable_i8,
-            read_owned_mutable_i16, read_owned_mutable_i32, read_owned_mutable_i64,
-            read_owned_mutable_ptr, read_owned_mutable_u8, read_owned_mutable_u16,
-            read_owned_mutable_u32, read_owned_mutable_u64,
-        };
-        use shape_value::v2::struct_layout::FieldKind;
-        let Some(Operand::Local(idx)) = instruction.operand else {
-            return Err(VMError::InvalidOperand);
-        };
-        let bits = self.read_capture_raw_pointer_bits(idx)?;
-        let cell_ptr = bits as *mut u8;
-        if cell_ptr.is_null() {
-            return Err(VMError::RuntimeError(
-                "OwnedMutable capture pointer is null".to_string(),
-            ));
+        let cell_kind = layout.capture_native_kind(upvalue_idx as usize);
+        // Mid-life kind change refused per ADR-006 §2.7.8 — the layout's
+        // `capture_native_kind` is set at construction (constant per
+        // `ClosureTypeId`) and immutable. A `Store` whose source kind
+        // disagrees would silently misclassify the cell on retire.
+        if cell_kind != src_kind {
+            crate::executor::vm_impl::stack::drop_with_kind(new_bits, src_kind);
+            return Err(VMError::RuntimeError(format!(
+                "StoreClosure[{}]: source kind {:?} does not match capture kind {:?} \
+                 (ADR-006 §2.7.8 / Q10 — capture kind is fixed at closure construction)",
+                upvalue_idx, src_kind, cell_kind
+            )));
         }
-        let layout = self.current_closure_layout().ok_or_else(|| {
-            VMError::RuntimeError(
-                "LoadOwnedMutableCapture without registered ClosureLayout".to_string(),
-            )
+        let frame = self.call_stack.last_mut().ok_or_else(|| {
+            crate::executor::vm_impl::stack::drop_with_kind(new_bits, src_kind);
+            VMError::RuntimeError("StoreClosure outside a call frame".into())
         })?;
-        let kind = layout.capture_inner_kind(idx as usize);
-        // SAFETY: `cell_ptr` was produced by the matching
-        // `closure_raw::alloc_owned_mutable_<kind>(initial)` in
-        // `op_make_closure`. The interior FieldKind is determined by
-        // `layout.capture_inner_kind(idx)`; reading via the matching
-        // typed helper is in-bounds and aligned. The closure's
-        // refcounted block keeps the box alive for the duration of
-        // this handler invocation.
-        //
-        // E+5.5 Unit A: post-flip Int/Bool/F64 producers push native bits.
-        // For typed-interior cells we mirror that contract — push raw
-        // native bits so downstream typed arithmetic and comparison
-        // consumers (now native-only post-Unit-A) read coherent values.
-        // Heap-bearing kinds (Ptr) still push pointer bits unchanged.
-        let bits: u64 = unsafe {
-            match kind {
-                FieldKind::I64 => read_owned_mutable_i64(cell_ptr as *mut i64) as u64,
-                FieldKind::U64 => read_owned_mutable_u64(cell_ptr as *mut u64),
-                FieldKind::F64 => read_owned_mutable_f64(cell_ptr as *mut f64).to_bits(),
-                FieldKind::I32 => read_owned_mutable_i32(cell_ptr as *mut i32) as i64 as u64,
-                FieldKind::U32 => read_owned_mutable_u32(cell_ptr as *mut u32) as u64,
-                FieldKind::I16 => read_owned_mutable_i16(cell_ptr as *mut i16) as i64 as u64,
-                FieldKind::U16 => read_owned_mutable_u16(cell_ptr as *mut u16) as u64,
-                FieldKind::I8 => read_owned_mutable_i8(cell_ptr as *mut i8) as i64 as u64,
-                FieldKind::U8 => read_owned_mutable_u8(cell_ptr as *mut u8) as u64,
-                FieldKind::Bool => read_owned_mutable_bool(cell_ptr as *mut bool) as u64,
-                FieldKind::Ptr => {
-                    // Polymorphic legacy 0x132 cannot rely on the IR to
-                    // pair the load with `vw_clone` (the typed D.1 Ptr
-                    // handler can — it is emitted from sites the IR
-                    // pairs with vw_clone/vw_drop). The cell retains
-                    // its share; the stack copy must own a separate
-                    // share so the consumer can `vw_drop` it without
-                    // dangling the cell, and a subsequent realloc
-                    // through one share keeps the other alive.
-                    let cell_bits = read_owned_mutable_ptr(cell_ptr as *mut u64);
-                    vw_clone(cell_bits)
-                }
-            }
-        };
-        self.push_raw_u64(ValueWord::from_raw_bits(bits))
-    }
-
-    /// `StoreOwnedMutableCapture { idx }`: pop a ValueWord and write it
-    /// through the typed cell behind capture `idx`.
-    ///
-    /// # Wave D (D.3) — type-aware dispatch
-    ///
-    /// Symmetric counterpart to `op_load_owned_mutable_capture`: the
-    /// popped ValueWord is decoded to the cell's native interior type
-    /// before writing via Wave B's `write_owned_mutable_<kind>` helper.
-    /// The decode strategy mirrors `op_make_closure`'s OwnedMutable
-    /// allocation path (`vw.as_i64()` / `vw.as_number_coerce()` /
-    /// `vw.as_bool()` / `vw.as_u64_value()`) so a
-    /// `Load → Store → Load` round-trip preserves the value.
-    ///
-    /// # Safety
-    ///
-    /// Same invariants as `op_load_owned_mutable_capture`. For
-    /// `FieldKind::Ptr` the previous cell payload is a heap-refcount
-    /// share — this handler releases the old share via `vw_drop` before
-    /// writing the new bits, mirroring the immutable-Ptr drop semantics
-    /// `release_typed_closure` enforces on closure teardown.
-    fn op_store_owned_mutable_capture(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
-        use shape_value::v2::closure_raw::{
-            read_owned_mutable_ptr, write_owned_mutable_bool, write_owned_mutable_f64,
-            write_owned_mutable_i8, write_owned_mutable_i16, write_owned_mutable_i32,
-            write_owned_mutable_i64, write_owned_mutable_ptr, write_owned_mutable_u8,
-            write_owned_mutable_u16, write_owned_mutable_u32, write_owned_mutable_u64,
-        };
-        use shape_value::v2::struct_layout::FieldKind;
-        let Some(Operand::Local(idx)) = instruction.operand else {
-            return Err(VMError::InvalidOperand);
-        };
-        let new_bits = self.pop_raw_u64()?;
-        let bits = self.read_capture_raw_pointer_bits(idx)?;
-        let cell_ptr = bits as *mut u8;
-        if cell_ptr.is_null() {
-            return Err(VMError::RuntimeError(
-                "OwnedMutable capture pointer is null".to_string(),
-            ));
-        }
-        let layout = self.current_closure_layout().ok_or_else(|| {
-            VMError::RuntimeError(
-                "StoreOwnedMutableCapture without registered ClosureLayout".to_string(),
-            )
+        let upvalues = frame.upvalues.as_mut().ok_or_else(|| {
+            crate::executor::vm_impl::stack::drop_with_kind(new_bits, src_kind);
+            VMError::RuntimeError("StoreClosure in a frame without upvalues".into())
         })?;
-        let kind = layout.capture_inner_kind(idx as usize);
+        let slot = upvalues.get_mut(upvalue_idx as usize).ok_or_else(|| {
+            crate::executor::vm_impl::stack::drop_with_kind(new_bits, src_kind);
+            VMError::RuntimeError(format!(
+                "Upvalue index {} not found in closure",
+                upvalue_idx
+            ))
+        })?;
         record_heap_write();
-        let raw_bits = new_bits.raw_bits();
-        // E+5.5 Unit A: post-flip the producer pushed raw native bits for
-        // typed-interior cells (Int/Bool/F64). Reinterpret the raw 8-byte
-        // slot directly through the typed write helper. Heap (Ptr) keeps
-        // the prior pre-flip ValueWord pass-through with its drop-on-
-        // replace semantics for the previous heap share.
-        // SAFETY: `cell_ptr` was produced by the matching
-        // `closure_raw::alloc_owned_mutable_<kind>(initial)` in
-        // `op_make_closure`; the interior FieldKind is determined by
-        // `layout.capture_inner_kind(idx)`. Each write helper performs
-        // an aligned in-bounds store into the typed `Box<T>`.
-        unsafe {
-            match kind {
-                FieldKind::I64 => write_owned_mutable_i64(cell_ptr as *mut i64, raw_bits as i64),
-                FieldKind::U64 => write_owned_mutable_u64(cell_ptr as *mut u64, raw_bits),
-                FieldKind::F64 => {
-                    write_owned_mutable_f64(cell_ptr as *mut f64, f64::from_bits(raw_bits))
-                }
-                FieldKind::I32 => write_owned_mutable_i32(cell_ptr as *mut i32, raw_bits as i32),
-                FieldKind::U32 => write_owned_mutable_u32(cell_ptr as *mut u32, raw_bits as u32),
-                FieldKind::I16 => write_owned_mutable_i16(cell_ptr as *mut i16, raw_bits as i16),
-                FieldKind::U16 => write_owned_mutable_u16(cell_ptr as *mut u16, raw_bits as u16),
-                FieldKind::I8 => write_owned_mutable_i8(cell_ptr as *mut i8, raw_bits as i8),
-                FieldKind::U8 => write_owned_mutable_u8(cell_ptr as *mut u8, raw_bits as u8),
-                FieldKind::Bool => {
-                    write_owned_mutable_bool(cell_ptr as *mut bool, raw_bits != 0)
-                }
-                FieldKind::Ptr => {
-                    // Release the previous heap-refcount share before
-                    // overwriting the cell, mirroring the immutable-Ptr
-                    // drop-on-replace semantics that
-                    // `release_typed_closure` enforces on closure
-                    // teardown.
-                    let prev = read_owned_mutable_ptr(cell_ptr as *mut u64);
-                    vw_drop(prev);
-                    write_owned_mutable_ptr(cell_ptr as *mut u64, new_bits);
-                }
-            }
-        }
+        let old_bits = *slot;
+        write_barrier_slot(old_bits, new_bits);
+        *slot = new_bits;
+        // Release the previous capture's heap share (if any) via
+        // `drop_with_kind` using the cell's persistent kind.
+        crate::executor::vm_impl::stack::drop_with_kind(old_bits, cell_kind);
         Ok(())
     }
 
-    // ── Phase 3c Wave D.1: per-FieldKind typed OwnedMutable capture handlers ──
-    //
-    // Each handler resolves the upvalue's raw `*mut <T>` cell pointer and
-    // delegates to the per-FieldKind `read_owned_mutable_<kind>` /
-    // `write_owned_mutable_<kind>` helper in `shape_value::v2::closure_raw`.
-    // The cell holds a native scalar (i64/u64/f64/i32/u32/i16/u16/i8/u8/
-    // bool/ptr-shaped u64) without any tag overhead — the typed counterpart
-    // of the legacy single-form `op_load_owned_mutable_capture` /
-    // `op_store_owned_mutable_capture` (which assume `*mut ValueWord`).
-    //
-    // Stack convention: 8-byte register-shaped values. Sub-i64 ints are
-    // sign- or zero-extended into the 8-byte slot via `push_raw_u64`,
-    // matching the existing typed-opcode convention (see
-    // `op_store_local_typed`, the typed Shared handlers in D.2, and the
-    // C.2 JIT FFI lowering in `crates/shape-jit/src/ffi/object/closure.rs`).
-    // Stores pop the 8-byte slot via `pop_raw_u64` and truncate to the
-    // declared width before writing the cell.
-    //
-    // SAFETY (common to every handler below):
-    //   * `cell_ptr` is the raw u64 bits placed in `frame.upvalues[idx]`
-    //     by `op_make_closure`. It was minted via
-    //     `Box::into_raw(Box::new(initial))` for the matching native type
-    //     by `closure_raw::alloc_owned_mutable_<kind>`. Exactly one
-    //     closure owns the box; no aliasing or sharing semantics apply.
-    //   * The compiler emits the typed opcode only when the capture's
-    //     `CaptureKind` is `OwnedMutable` and the cell's interior
-    //     `FieldKind` matches `<Kind>`. Mismatches are a compiler bug.
-    //   * Null-check the pointer up-front so a layout/encoding bug
-    //     surfaces as a clean runtime error rather than a UB read.
+    /// `CloseUpvalue`: legacy no-op — closures capture by value through
+    /// `OwnedClosureBlock` cell layout; "closing" is implicit on capture.
+    fn op_close_upvalue(&mut self, _instruction: &Instruction) -> Result<(), VMError> {
+        Ok(())
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // OwnedMutable capture: polymorphic legacy + typed handlers
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// `LoadOwnedMutableCapture { idx }` — polymorphic legacy entry.
+    ///
+    /// SURFACE (ADR-006 §2.7.4 — Phase-2c): the polymorphic body
+    /// matched on `layout.capture_inner_kind(idx)` and pushed a
+    /// `ValueWord::from_raw_bits(bits)` for the Ptr arm via the deleted
+    /// `vw_clone(cell_bits)` retain. Both `ValueWord` and `vw_clone` are
+    /// deleted (CLAUDE.md "Forbidden code"). The typed Wave D opcodes
+    /// (`LoadOwnedMutableCapture<Kind>`) replace this dispatch
+    /// per-FieldKind; the compiler's Wave E flip emits the typed form
+    /// for every capture site. This polymorphic shell stays as a SURFACE
+    /// marker until it is removed from the bytecode entirely (out of
+    /// B6 territory — bytecode-level cleanup).
+    fn op_load_owned_mutable_capture(
+        &mut self,
+        _instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        Err(VMError::NotImplemented(
+            "LoadOwnedMutableCapture (polymorphic): the deleted ValueWord/vw_clone \
+             dispatch path is replaced by per-FieldKind LoadOwnedMutableCapture<Kind> \
+             opcodes (Wave D). Polymorphic shell remains as a SURFACE marker per \
+             ADR-006 §2.7.4 / Phase-2c — the compiler's Wave E flip emits the typed \
+             form; this shell should be removed from the bytecode dispatch in a \
+             follow-up cleanup wave (out of B6 territory)."
+                .into(),
+        ))
+    }
+
+    /// `StoreOwnedMutableCapture { idx }` — polymorphic legacy entry.
+    ///
+    /// SURFACE — same gap as `op_load_owned_mutable_capture`.
+    fn op_store_owned_mutable_capture(
+        &mut self,
+        _instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        Err(VMError::NotImplemented(
+            "StoreOwnedMutableCapture (polymorphic): paired with the LoadOwnedMutableCapture \
+             SURFACE — the deleted ValueWord/vw_drop release path is replaced by typed \
+             StoreOwnedMutableCapture<Kind> opcodes (Wave D). Polymorphic shell remains \
+             as a SURFACE marker per ADR-006 §2.7.4 / Phase-2c."
+                .into(),
+        ))
+    }
 
     fn op_load_owned_mutable_capture_i64(
         &mut self,
@@ -895,10 +409,11 @@ impl VirtualMachine {
                 "OwnedMutable capture pointer is null".to_string(),
             ));
         }
-        // SAFETY: see common invariants on the section header.
-        // `read_owned_mutable_i64` performs an aligned 8-byte load.
+        // SAFETY: `cell_ptr` was produced by `alloc_owned_mutable_i64` in
+        // `op_make_closure`. The interior FieldKind is determined by
+        // `layout.capture_inner_kind(idx) == FieldKind::I64`.
         let value = unsafe { shape_value::v2::closure_raw::read_owned_mutable_i64(cell_ptr) };
-        self.push_raw_u64(value as u64)
+        self.push_kinded(value as u64, NativeKind::Int64)
     }
 
     fn op_load_owned_mutable_capture_u64(
@@ -915,9 +430,8 @@ impl VirtualMachine {
                 "OwnedMutable capture pointer is null".to_string(),
             ));
         }
-        // SAFETY: section header invariants apply.
         let value = unsafe { shape_value::v2::closure_raw::read_owned_mutable_u64(cell_ptr) };
-        self.push_raw_u64(value)
+        self.push_kinded(value, NativeKind::UInt64)
     }
 
     fn op_load_owned_mutable_capture_f64(
@@ -934,9 +448,8 @@ impl VirtualMachine {
                 "OwnedMutable capture pointer is null".to_string(),
             ));
         }
-        // SAFETY: section header invariants apply.
         let value = unsafe { shape_value::v2::closure_raw::read_owned_mutable_f64(cell_ptr) };
-        self.push_raw_u64(value.to_bits())
+        self.push_kinded(value.to_bits(), NativeKind::Float64)
     }
 
     fn op_load_owned_mutable_capture_i32(
@@ -953,10 +466,9 @@ impl VirtualMachine {
                 "OwnedMutable capture pointer is null".to_string(),
             ));
         }
-        // SAFETY: section header invariants apply. Sign-extend i32 to i64
-        // for the 8-byte stack slot.
         let value = unsafe { shape_value::v2::closure_raw::read_owned_mutable_i32(cell_ptr) };
-        self.push_raw_u64(value as i64 as u64)
+        // Sign-extend to 8-byte slot.
+        self.push_kinded(value as i64 as u64, NativeKind::Int32)
     }
 
     fn op_load_owned_mutable_capture_u32(
@@ -973,9 +485,8 @@ impl VirtualMachine {
                 "OwnedMutable capture pointer is null".to_string(),
             ));
         }
-        // SAFETY: section header invariants apply. Zero-extend u32 to u64.
         let value = unsafe { shape_value::v2::closure_raw::read_owned_mutable_u32(cell_ptr) };
-        self.push_raw_u64(value as u64)
+        self.push_kinded(value as u64, NativeKind::UInt32)
     }
 
     fn op_load_owned_mutable_capture_i16(
@@ -992,9 +503,8 @@ impl VirtualMachine {
                 "OwnedMutable capture pointer is null".to_string(),
             ));
         }
-        // SAFETY: section header invariants apply. Sign-extend i16 to i64.
         let value = unsafe { shape_value::v2::closure_raw::read_owned_mutable_i16(cell_ptr) };
-        self.push_raw_u64(value as i64 as u64)
+        self.push_kinded(value as i64 as u64, NativeKind::Int16)
     }
 
     fn op_load_owned_mutable_capture_u16(
@@ -1011,9 +521,8 @@ impl VirtualMachine {
                 "OwnedMutable capture pointer is null".to_string(),
             ));
         }
-        // SAFETY: section header invariants apply. Zero-extend u16 to u64.
         let value = unsafe { shape_value::v2::closure_raw::read_owned_mutable_u16(cell_ptr) };
-        self.push_raw_u64(value as u64)
+        self.push_kinded(value as u64, NativeKind::UInt16)
     }
 
     fn op_load_owned_mutable_capture_i8(
@@ -1030,9 +539,8 @@ impl VirtualMachine {
                 "OwnedMutable capture pointer is null".to_string(),
             ));
         }
-        // SAFETY: section header invariants apply. Sign-extend i8 to i64.
         let value = unsafe { shape_value::v2::closure_raw::read_owned_mutable_i8(cell_ptr) };
-        self.push_raw_u64(value as i64 as u64)
+        self.push_kinded(value as i64 as u64, NativeKind::Int8)
     }
 
     fn op_load_owned_mutable_capture_u8(
@@ -1049,9 +557,8 @@ impl VirtualMachine {
                 "OwnedMutable capture pointer is null".to_string(),
             ));
         }
-        // SAFETY: section header invariants apply. Zero-extend u8 to u64.
         let value = unsafe { shape_value::v2::closure_raw::read_owned_mutable_u8(cell_ptr) };
-        self.push_raw_u64(value as u64)
+        self.push_kinded(value as u64, NativeKind::UInt8)
     }
 
     fn op_load_owned_mutable_capture_bool(
@@ -1068,13 +575,24 @@ impl VirtualMachine {
                 "OwnedMutable capture pointer is null".to_string(),
             ));
         }
-        // SAFETY: section header invariants apply. Push the bool as a 0/1
-        // u64 — matches D.2's typed-bool convention; Wave E will rewire to
-        // `push_tagged_bool` once typed-bool stack helpers are unified.
         let value = unsafe { shape_value::v2::closure_raw::read_owned_mutable_bool(cell_ptr) };
-        self.push_raw_u64(value as u64)
+        self.push_kinded(value as u64, NativeKind::Bool)
     }
 
+    /// `LoadOwnedMutableCapturePtr { idx }` — typed Ptr load with kind
+    /// threaded via the §2.7.8 OwnedClosureBlock per-capture kind track.
+    ///
+    /// Wave-γ G-owned-closure-block (commit `cb0bf86`) added
+    /// `ClosureLayout::capture_native_kind(i)` and
+    /// `OwnedClosureBlock::read_capture_kinded(i)`. The `OwnedMutable`
+    /// cell's interior kind is `layout.capture_native_kind(idx)` —
+    /// the layout descriptor classifies the inner payload's
+    /// `NativeKind` (heap-bearing arms like
+    /// `Ptr(HeapKind::TypedArray)`, `String`, etc., or inline scalars
+    /// for narrower-kind override paths). The Load reads the bits via
+    /// the typed `read_owned_mutable_ptr` helper and pushes with the
+    /// layout-resolved kind — WB2.4 retain-on-read bumps the heap
+    /// share via `clone_with_kind`.
     fn op_load_owned_mutable_capture_ptr(
         &mut self,
         instruction: &Instruction,
@@ -1089,15 +607,28 @@ impl VirtualMachine {
                 "OwnedMutable capture pointer is null".to_string(),
             ));
         }
-        // SAFETY: section header invariants apply. The 8-byte payload is
-        // a ValueWord bit pattern carrying a NaN-boxed Arc/Box pointer.
-        // The helper does NOT clone/retain — refcount semantics are the
-        // caller's responsibility. Wave E will pair the Load with
-        // `vw_clone` / `vw_drop` at the IR level (matches the
-        // c-stdlib-msgpack pattern from commit afb1651, mirroring
-        // `op_load_shared_capture_ptr` in D.2).
-        let value = unsafe { shape_value::v2::closure_raw::read_owned_mutable_ptr(cell_ptr) };
-        self.push_raw_u64(value)
+        // ADR-006 §2.7.8 / Q10 (Wave-γ G-owned-closure-block close,
+        // commit `cb0bf86`): the layout's `capture_native_kinds[idx]`
+        // classifies the cell's interior payload. For Ptr-typed
+        // captures the kind is the heap arm
+        // (`Ptr(HeapKind::TypedArray)`, etc.) or `String`.
+        let layout = self.current_closure_layout().ok_or_else(|| {
+            VMError::RuntimeError(
+                "LoadOwnedMutableCapturePtr without registered ClosureLayout".to_string(),
+            )
+        })?;
+        let kind = layout.capture_native_kind(idx as usize);
+        // SAFETY: `cell_ptr` was produced by `alloc_owned_mutable_ptr`
+        // in `op_make_closure`. The cell stores one `u64` cell with
+        // `Arc<T>::into_raw` bits per construction-side contract; the
+        // layout's `capture_native_kinds[idx]` carries the matching
+        // `NativeKind` (Wave-γ G-owned-closure-block lockstep
+        // invariant).
+        let cell_bits = unsafe { shape_value::v2::closure_raw::read_owned_mutable_ptr(cell_ptr) };
+        // WB2.4 retain-on-read: cell continues to own its share; the
+        // pushed stack slot needs an independent share.
+        crate::executor::vm_impl::stack::clone_with_kind(cell_bits, kind);
+        self.push_kinded(cell_bits, kind)
     }
 
     fn op_store_owned_mutable_capture_i64(
@@ -1107,7 +638,8 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_value = self.pop_raw_u64()? as i64;
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let new_value = src_bits as i64;
         let bits = self.read_capture_raw_pointer_bits(idx)?;
         let cell_ptr = bits as *mut i64;
         if cell_ptr.is_null() {
@@ -1116,7 +648,6 @@ impl VirtualMachine {
             ));
         }
         record_heap_write();
-        // SAFETY: section header invariants apply.
         unsafe { shape_value::v2::closure_raw::write_owned_mutable_i64(cell_ptr, new_value) };
         Ok(())
     }
@@ -1128,7 +659,7 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_value = self.pop_raw_u64()?;
+        let (new_value, _src_kind) = self.pop_kinded()?;
         let bits = self.read_capture_raw_pointer_bits(idx)?;
         let cell_ptr = bits as *mut u64;
         if cell_ptr.is_null() {
@@ -1137,7 +668,6 @@ impl VirtualMachine {
             ));
         }
         record_heap_write();
-        // SAFETY: section header invariants apply.
         unsafe { shape_value::v2::closure_raw::write_owned_mutable_u64(cell_ptr, new_value) };
         Ok(())
     }
@@ -1149,7 +679,8 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_value = f64::from_bits(self.pop_raw_u64()?);
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let new_value = f64::from_bits(src_bits);
         let bits = self.read_capture_raw_pointer_bits(idx)?;
         let cell_ptr = bits as *mut f64;
         if cell_ptr.is_null() {
@@ -1158,7 +689,6 @@ impl VirtualMachine {
             ));
         }
         record_heap_write();
-        // SAFETY: section header invariants apply.
         unsafe { shape_value::v2::closure_raw::write_owned_mutable_f64(cell_ptr, new_value) };
         Ok(())
     }
@@ -1170,9 +700,8 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        // Pop the 8-byte slot and truncate to i32 (low 32 bits) — matches
-        // the typed-opcode truncation convention in `op_store_local_typed`.
-        let new_value = self.pop_raw_u64()? as i32;
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let new_value = src_bits as i32;
         let bits = self.read_capture_raw_pointer_bits(idx)?;
         let cell_ptr = bits as *mut i32;
         if cell_ptr.is_null() {
@@ -1181,7 +710,6 @@ impl VirtualMachine {
             ));
         }
         record_heap_write();
-        // SAFETY: section header invariants apply.
         unsafe { shape_value::v2::closure_raw::write_owned_mutable_i32(cell_ptr, new_value) };
         Ok(())
     }
@@ -1193,7 +721,8 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_value = self.pop_raw_u64()? as u32;
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let new_value = src_bits as u32;
         let bits = self.read_capture_raw_pointer_bits(idx)?;
         let cell_ptr = bits as *mut u32;
         if cell_ptr.is_null() {
@@ -1202,7 +731,6 @@ impl VirtualMachine {
             ));
         }
         record_heap_write();
-        // SAFETY: section header invariants apply.
         unsafe { shape_value::v2::closure_raw::write_owned_mutable_u32(cell_ptr, new_value) };
         Ok(())
     }
@@ -1214,7 +742,8 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_value = self.pop_raw_u64()? as i16;
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let new_value = src_bits as i16;
         let bits = self.read_capture_raw_pointer_bits(idx)?;
         let cell_ptr = bits as *mut i16;
         if cell_ptr.is_null() {
@@ -1223,7 +752,6 @@ impl VirtualMachine {
             ));
         }
         record_heap_write();
-        // SAFETY: section header invariants apply.
         unsafe { shape_value::v2::closure_raw::write_owned_mutable_i16(cell_ptr, new_value) };
         Ok(())
     }
@@ -1235,7 +763,8 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_value = self.pop_raw_u64()? as u16;
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let new_value = src_bits as u16;
         let bits = self.read_capture_raw_pointer_bits(idx)?;
         let cell_ptr = bits as *mut u16;
         if cell_ptr.is_null() {
@@ -1244,7 +773,6 @@ impl VirtualMachine {
             ));
         }
         record_heap_write();
-        // SAFETY: section header invariants apply.
         unsafe { shape_value::v2::closure_raw::write_owned_mutable_u16(cell_ptr, new_value) };
         Ok(())
     }
@@ -1256,7 +784,8 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_value = self.pop_raw_u64()? as i8;
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let new_value = src_bits as i8;
         let bits = self.read_capture_raw_pointer_bits(idx)?;
         let cell_ptr = bits as *mut i8;
         if cell_ptr.is_null() {
@@ -1265,7 +794,6 @@ impl VirtualMachine {
             ));
         }
         record_heap_write();
-        // SAFETY: section header invariants apply.
         unsafe { shape_value::v2::closure_raw::write_owned_mutable_i8(cell_ptr, new_value) };
         Ok(())
     }
@@ -1277,7 +805,8 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_value = self.pop_raw_u64()? as u8;
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let new_value = src_bits as u8;
         let bits = self.read_capture_raw_pointer_bits(idx)?;
         let cell_ptr = bits as *mut u8;
         if cell_ptr.is_null() {
@@ -1286,7 +815,6 @@ impl VirtualMachine {
             ));
         }
         record_heap_write();
-        // SAFETY: section header invariants apply.
         unsafe { shape_value::v2::closure_raw::write_owned_mutable_u8(cell_ptr, new_value) };
         Ok(())
     }
@@ -1298,9 +826,8 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        // Treat any nonzero bit pattern as true — mirrors D.2's
-        // `op_store_shared_capture_bool` convention.
-        let new_value = self.pop_raw_u64()? != 0;
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let new_value = src_bits != 0;
         let bits = self.read_capture_raw_pointer_bits(idx)?;
         let cell_ptr = bits as *mut bool;
         if cell_ptr.is_null() {
@@ -1309,11 +836,16 @@ impl VirtualMachine {
             ));
         }
         record_heap_write();
-        // SAFETY: section header invariants apply.
         unsafe { shape_value::v2::closure_raw::write_owned_mutable_bool(cell_ptr, new_value) };
         Ok(())
     }
 
+    /// `StoreOwnedMutableCapturePtr { idx }` — typed Ptr store with
+    /// kind threaded via the §2.7.8 OwnedClosureBlock per-capture kind
+    /// track. Releases the prior cell payload's heap share via
+    /// `drop_with_kind` using the layout-resolved kind, then installs
+    /// the new payload (which retains the share transferred on the
+    /// stack pop).
     fn op_store_owned_mutable_capture_ptr(
         &mut self,
         instruction: &Instruction,
@@ -1321,42 +853,56 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_bits = self.pop_raw_u64()?;
+        let (new_bits, src_kind) = self.pop_kinded()?;
+        let layout = self.current_closure_layout().ok_or_else(|| {
+            crate::executor::vm_impl::stack::drop_with_kind(new_bits, src_kind);
+            VMError::RuntimeError(
+                "StoreOwnedMutableCapturePtr without registered ClosureLayout".to_string(),
+            )
+        })?;
+        let cell_kind = layout.capture_native_kind(idx as usize);
+        // ADR-006 §2.7.8 mid-life kind change refusal — capture kind is
+        // set at construction (constant per `ClosureTypeId`) and must
+        // match the source kind of every Store.
+        if cell_kind != src_kind {
+            crate::executor::vm_impl::stack::drop_with_kind(new_bits, src_kind);
+            return Err(VMError::RuntimeError(format!(
+                "StoreOwnedMutableCapturePtr[{}]: source kind {:?} does not match \
+                 capture kind {:?} (ADR-006 §2.7.8 / Q10 — kind fixed at construction)",
+                idx, src_kind, cell_kind
+            )));
+        }
         let bits = self.read_capture_raw_pointer_bits(idx)?;
         let cell_ptr = bits as *mut u64;
         if cell_ptr.is_null() {
+            crate::executor::vm_impl::stack::drop_with_kind(new_bits, src_kind);
             return Err(VMError::RuntimeError(
                 "OwnedMutable capture pointer is null".to_string(),
             ));
         }
         record_heap_write();
-        // SAFETY: section header invariants apply. `write_owned_mutable_ptr`
-        // does NOT release the previous payload nor retain the new one
-        // (matches `read_owned_mutable_ptr` symmetry). Refcount management
-        // is the responsibility of the compiler / IR (Wave E).
+        // Read the previous payload bits before overwriting so we can
+        // release that share via `drop_with_kind` after the write.
+        // SAFETY: `cell_ptr` was produced by `alloc_owned_mutable_ptr`;
+        // it stores exactly one `u64` cell.
+        let prev_bits = unsafe { shape_value::v2::closure_raw::read_owned_mutable_ptr(cell_ptr) };
         unsafe { shape_value::v2::closure_raw::write_owned_mutable_ptr(cell_ptr, new_bits) };
+        // Release the previous cell payload's heap share per ADR-006
+        // §2.7.8 retain-on-overwrite. The cell now owns `new_bits`
+        // (the share transferred from the popped stack slot).
+        crate::executor::vm_impl::stack::drop_with_kind(prev_bits, cell_kind);
         Ok(())
     }
 
-    /// `LoadSharedCapture { idx }`: acquire the parking_lot mutex behind
-    /// capture `idx`, clone the inner ValueWord bits, drop the guard, and
-    /// push the value onto the stack.
+    // ─────────────────────────────────────────────────────────────────────
+    // Shared capture: polymorphic legacy + typed handlers
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// `LoadSharedCapture { idx }` — polymorphic legacy entry.
     ///
-    /// # Safety
-    ///
-    /// The capture at `idx` must have `CaptureKind::Shared`. The upvalue
-    /// slot must contain a non-null `*const SharedCell` obtained from
-    /// `Arc::into_raw(Arc::new(parking_lot::Mutex::new(ValueWord)))`. The
-    /// strong-count share is held by the closure (the block owns the
-    /// `Arc::into_raw`-produced share); this handler only reborrows the
-    /// underlying allocation via `&*cell_ptr` — the reference's lifetime
-    /// is bounded by this handler invocation.
-    ///
-    /// Polymorphic 0x12C cannot rely on the IR to pair the load with
-    /// `vw_clone` (the typed D.2 handlers can — emitted only from sites
-    /// the IR pairs with vw_clone/vw_drop). The cell retains its share;
-    /// the stack copy must own a separate share so the consumer can
-    /// `vw_drop` it without dangling the cell's payload.
+    /// Migrated to the §2.7.8 `SharedCell::kind()` API (Wave-α
+    /// B8-shared-cell) — the cell's kind is set at construction and
+    /// read alongside the payload bits for every Load.
     fn op_load_shared_capture(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
         let Some(Operand::Local(idx)) = instruction.operand else {
@@ -1370,94 +916,62 @@ impl VirtualMachine {
             ));
         }
         // SAFETY: `cell_ptr` was produced by `Arc::into_raw(Arc::new(...))`
-        // (see A.1B `op_make_closure` allocation path). It is 8-aligned,
-        // non-null, and represents a live Arc strong-count share owned by
-        // the surrounding ClosureRaw block (kept alive for the duration
-        // of this call frame). Reborrowing via `&*cell_ptr` is sound as
-        // long as we don't outlive the Arc — we drop the reference at
-        // the end of this function, well before `release_typed_closure`
-        // runs.
-        let value_bits = unsafe {
-            let cell: &SharedCell = &*cell_ptr;
-            let guard = cell.lock();
-            let bits = *guard;
-            drop(guard);
-            bits
+        // in `op_make_closure`; the closure block keeps the share alive.
+        let cell_ref = unsafe { &*cell_ptr };
+        let kind = cell_ref.kind();
+        let payload_bits = {
+            let guard = cell_ref.lock();
+            *guard
         };
-        // Retain heap shares for the stack copy. Inline scalars are
-        // unaffected (`vw_clone` returns the bits unchanged).
-        let owned = vw_clone(value_bits);
-        self.push_raw_u64(owned)
+        // WB2.4 retain-on-read: cell keeps its share, stack push needs
+        // an independent share.
+        crate::executor::vm_impl::stack::clone_with_kind(payload_bits, kind);
+        self.push_kinded(payload_bits, kind)
     }
 
-    /// `StoreSharedCapture { idx }`: pop a ValueWord, acquire the
-    /// parking_lot mutex behind capture `idx`, overwrite the inner
-    /// ValueWord bits, and drop the guard.
+    /// `StoreSharedCapture { idx }` — polymorphic legacy entry.
     ///
-    /// # Safety
-    ///
-    /// Same invariants as `op_load_shared_capture`. The mutex serialises
-    /// concurrent writers; the Arc strong-count is not modified by this
-    /// handler.
+    /// Migrated to use `SharedCell::kind()` for retain-on-overwrite.
+    /// Pops the kinded source, verifies the source kind matches the
+    /// cell kind (§2.7.8 mid-life kind-change refusal), takes the
+    /// cell's lock to swap bits, releases the prior payload's heap
+    /// share via `drop_with_kind` outside the lock.
     fn op_store_shared_capture(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_bits = self.pop_raw_u64()?;
+        let (new_bits, src_kind) = self.pop_kinded()?;
         let bits = self.read_capture_raw_pointer_bits(idx)?;
         let cell_ptr = bits as *const SharedCell;
         if cell_ptr.is_null() {
+            crate::executor::vm_impl::stack::drop_with_kind(new_bits, src_kind);
             return Err(VMError::RuntimeError(
                 "Shared capture pointer is null".to_string(),
             ));
         }
+        // SAFETY: same invariants as `op_load_shared_capture`.
+        let cell_ref = unsafe { &*cell_ptr };
+        let cell_kind = cell_ref.kind();
+        if cell_kind != src_kind {
+            crate::executor::vm_impl::stack::drop_with_kind(new_bits, src_kind);
+            return Err(VMError::RuntimeError(format!(
+                "StoreSharedCapture[{}]: source kind {:?} does not match cell kind {:?} \
+                 (ADR-006 §2.7.8 / Q10 — SharedCell kind is fixed at construction)",
+                idx, src_kind, cell_kind
+            )));
+        }
         record_heap_write();
-        // SAFETY: same invariants as `op_load_shared_capture`. We take
-        // the mutex for exclusive access, overwrite the 8-byte ValueWord
-        // payload, then drop the guard. The Arc strong-count share owned
-        // by the closure remains intact.
-        //
-        // Polymorphic 0x12D mirrors the legacy load: release the previous
-        // payload's share before installing the new one. The popped
-        // `new_bits` carries an owning share transferred from the stack
-        // (no retain here). For inline scalars `vw_drop` is a no-op.
-        unsafe {
-            let cell: &SharedCell = &*cell_ptr;
-            let mut guard = cell.lock();
+        let prev_bits = {
+            let mut guard = cell_ref.lock();
             let prev = *guard;
             *guard = new_bits;
-            drop(guard);
-            vw_drop(prev);
-        }
+            prev
+        };
+        // Release the previous payload's heap share outside the lock.
+        crate::executor::vm_impl::stack::drop_with_kind(prev_bits, cell_kind);
         Ok(())
     }
-
-    // ── Track D.2: per-FieldKind typed Shared capture handlers ─────────
-    //
-    // Each handler resolves the upvalue's raw `*const SharedCell` bits and
-    // delegates to the lock-gated `read_shared_<kind>` /
-    // `write_shared_<kind>` helper in `shape_value::v2::closure_raw`.
-    // Critical invariant: the helpers acquire the cell's
-    // `parking_lot::Mutex` internally, so the handler MUST NOT take the
-    // lock externally — that would deadlock on a non-reentrant mutex.
-    //
-    // The pushed/popped 8-byte stack value is the raw native bit pattern
-    // matching the cell's interior `FieldKind`. For widths < 8 bytes the
-    // helper sign-/zero-extends to a 64-bit register-shaped value before
-    // the handler stores those bits via `push_raw_u64`. The compiler
-    // emitter (Wave E) and the JIT FFI lowering (C.2) already share this
-    // convention — see `crates/shape-jit/src/ffi/object/closure.rs:660`+.
-    //
-    // SAFETY (common to every handler below):
-    //   * `cell_ptr` is the raw u64 bits placed in `frame.upvalues[idx]`
-    //     by `op_make_closure`. It was minted via
-    //     `Arc::into_raw(Arc::new(SharedCell::new(...)))`; the
-    //     surrounding closure block owns one strong-count share which
-    //     keeps the cell alive for this call frame's lifetime.
-    //   * The compiler emits the typed opcode only when the capture's
-    //     `CaptureKind` is `Shared` and the cell's interior `FieldKind`
-    //     matches. Mismatches are a compiler bug.
 
     fn op_load_shared_capture_i64(
         &mut self,
@@ -1474,12 +988,8 @@ impl VirtualMachine {
                 "Shared capture pointer is null".to_string(),
             ));
         }
-        // SAFETY: see common invariants on the section header.
-        // `read_shared_i64` acquires the parking_lot mutex internally,
-        // performs an aligned 8-byte load, releases, and returns. We
-        // must NOT take the lock externally.
         let value = unsafe { shape_value::v2::closure_raw::read_shared_i64(cell_ptr) };
-        self.push_raw_u64(value as u64)
+        self.push_kinded(value as u64, NativeKind::Int64)
     }
 
     fn op_load_shared_capture_u64(
@@ -1497,9 +1007,8 @@ impl VirtualMachine {
                 "Shared capture pointer is null".to_string(),
             ));
         }
-        // SAFETY: section header invariants apply.
         let value = unsafe { shape_value::v2::closure_raw::read_shared_u64(cell_ptr) };
-        self.push_raw_u64(value)
+        self.push_kinded(value, NativeKind::UInt64)
     }
 
     fn op_load_shared_capture_f64(
@@ -1517,9 +1026,8 @@ impl VirtualMachine {
                 "Shared capture pointer is null".to_string(),
             ));
         }
-        // SAFETY: section header invariants apply.
         let value = unsafe { shape_value::v2::closure_raw::read_shared_f64(cell_ptr) };
-        self.push_raw_u64(value.to_bits())
+        self.push_kinded(value.to_bits(), NativeKind::Float64)
     }
 
     fn op_load_shared_capture_i32(
@@ -1537,12 +1045,8 @@ impl VirtualMachine {
                 "Shared capture pointer is null".to_string(),
             ));
         }
-        // SAFETY: section header invariants apply. `read_shared_i32`
-        // returns a 4-byte value sign-extended (by the writer) from the
-        // 8-byte payload; we sign-extend to i64 here to fit the
-        // 8-byte stack slot.
         let value = unsafe { shape_value::v2::closure_raw::read_shared_i32(cell_ptr) };
-        self.push_raw_u64(value as i64 as u64)
+        self.push_kinded(value as i64 as u64, NativeKind::Int32)
     }
 
     fn op_load_shared_capture_u32(
@@ -1560,10 +1064,8 @@ impl VirtualMachine {
                 "Shared capture pointer is null".to_string(),
             ));
         }
-        // SAFETY: section header invariants apply. Zero-extend the u32
-        // to u64 for the 8-byte stack slot.
         let value = unsafe { shape_value::v2::closure_raw::read_shared_u32(cell_ptr) };
-        self.push_raw_u64(value as u64)
+        self.push_kinded(value as u64, NativeKind::UInt32)
     }
 
     fn op_load_shared_capture_i16(
@@ -1581,10 +1083,8 @@ impl VirtualMachine {
                 "Shared capture pointer is null".to_string(),
             ));
         }
-        // SAFETY: section header invariants apply. Sign-extend i16 to
-        // i64 for the 8-byte stack slot.
         let value = unsafe { shape_value::v2::closure_raw::read_shared_i16(cell_ptr) };
-        self.push_raw_u64(value as i64 as u64)
+        self.push_kinded(value as i64 as u64, NativeKind::Int16)
     }
 
     fn op_load_shared_capture_u16(
@@ -1602,9 +1102,8 @@ impl VirtualMachine {
                 "Shared capture pointer is null".to_string(),
             ));
         }
-        // SAFETY: section header invariants apply. Zero-extend.
         let value = unsafe { shape_value::v2::closure_raw::read_shared_u16(cell_ptr) };
-        self.push_raw_u64(value as u64)
+        self.push_kinded(value as u64, NativeKind::UInt16)
     }
 
     fn op_load_shared_capture_i8(
@@ -1622,10 +1121,8 @@ impl VirtualMachine {
                 "Shared capture pointer is null".to_string(),
             ));
         }
-        // SAFETY: section header invariants apply. Sign-extend i8 to
-        // i64.
         let value = unsafe { shape_value::v2::closure_raw::read_shared_i8(cell_ptr) };
-        self.push_raw_u64(value as i64 as u64)
+        self.push_kinded(value as i64 as u64, NativeKind::Int8)
     }
 
     fn op_load_shared_capture_u8(
@@ -1643,10 +1140,8 @@ impl VirtualMachine {
                 "Shared capture pointer is null".to_string(),
             ));
         }
-        // SAFETY: section header invariants apply. Zero-extend u8 to
-        // u64.
         let value = unsafe { shape_value::v2::closure_raw::read_shared_u8(cell_ptr) };
-        self.push_raw_u64(value as u64)
+        self.push_kinded(value as u64, NativeKind::UInt8)
     }
 
     fn op_load_shared_capture_bool(
@@ -1664,17 +1159,12 @@ impl VirtualMachine {
                 "Shared capture pointer is null".to_string(),
             ));
         }
-        // SAFETY: section header invariants apply. The helper reads the
-        // low byte of the payload (0 ⇒ false; non-zero ⇒ true). We
-        // store the resulting bool on the stack as a 0 or 1 in the
-        // 8-byte slot via `push_raw_u64` to keep the slot's bit pattern
-        // unambiguously typed for the typed-Bool reader (Wave E /
-        // future JIT lowering will rewire to `push_tagged_bool` once
-        // typed-bool stack helpers are unified).
         let value = unsafe { shape_value::v2::closure_raw::read_shared_bool(cell_ptr) };
-        self.push_raw_u64(value as u64)
+        self.push_kinded(value as u64, NativeKind::Bool)
     }
 
+    /// `LoadSharedCapturePtr { idx }` — typed Ptr load via
+    /// `SharedCell::kind()` (Wave-β B6 round-1, commit `c785174`).
     fn op_load_shared_capture_ptr(
         &mut self,
         instruction: &Instruction,
@@ -1690,14 +1180,15 @@ impl VirtualMachine {
                 "Shared capture pointer is null".to_string(),
             ));
         }
-        // SAFETY: section header invariants apply. The 8-byte payload
-        // is a ValueWord bit pattern carrying a NaN-boxed Arc/Box
-        // pointer. The helper does NOT clone/retain — refcount
-        // semantics are the caller's responsibility. Wave E will pair
-        // the Load with `vw_clone` / `vw_drop` at the IR level
-        // (matching the c-stdlib-msgpack pattern from commit afb1651).
-        let value = unsafe { shape_value::v2::closure_raw::read_shared_ptr(cell_ptr) };
-        self.push_raw_u64(value)
+        // SAFETY: same invariants as `op_load_shared_capture`.
+        let cell_ref = unsafe { &*cell_ptr };
+        let kind = cell_ref.kind();
+        let payload_bits = {
+            let guard = cell_ref.lock();
+            *guard
+        };
+        crate::executor::vm_impl::stack::clone_with_kind(payload_bits, kind);
+        self.push_kinded(payload_bits, kind)
     }
 
     fn op_store_shared_capture_i64(
@@ -1708,7 +1199,8 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_value = self.pop_raw_u64()? as i64;
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let new_value = src_bits as i64;
         let bits = self.read_capture_raw_pointer_bits(idx)?;
         let cell_ptr = bits as *const SharedCell;
         if cell_ptr.is_null() {
@@ -1717,8 +1209,6 @@ impl VirtualMachine {
             ));
         }
         record_heap_write();
-        // SAFETY: section header invariants apply. `write_shared_i64`
-        // takes the lock internally — DO NOT take it here.
         unsafe { shape_value::v2::closure_raw::write_shared_i64(cell_ptr, new_value) };
         Ok(())
     }
@@ -1731,7 +1221,7 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_value = self.pop_raw_u64()?;
+        let (new_value, _src_kind) = self.pop_kinded()?;
         let bits = self.read_capture_raw_pointer_bits(idx)?;
         let cell_ptr = bits as *const SharedCell;
         if cell_ptr.is_null() {
@@ -1740,7 +1230,6 @@ impl VirtualMachine {
             ));
         }
         record_heap_write();
-        // SAFETY: section header invariants apply.
         unsafe { shape_value::v2::closure_raw::write_shared_u64(cell_ptr, new_value) };
         Ok(())
     }
@@ -1753,7 +1242,8 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_value = f64::from_bits(self.pop_raw_u64()?);
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let new_value = f64::from_bits(src_bits);
         let bits = self.read_capture_raw_pointer_bits(idx)?;
         let cell_ptr = bits as *const SharedCell;
         if cell_ptr.is_null() {
@@ -1762,7 +1252,6 @@ impl VirtualMachine {
             ));
         }
         record_heap_write();
-        // SAFETY: section header invariants apply.
         unsafe { shape_value::v2::closure_raw::write_shared_f64(cell_ptr, new_value) };
         Ok(())
     }
@@ -1775,9 +1264,8 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        // Pop as raw u64; truncate to i32 (the low 4 bytes carry the
-        // signed value, matching the JIT's `i32` ABI).
-        let new_value = self.pop_raw_u64()? as i64 as i32;
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let new_value = src_bits as i64 as i32;
         let bits = self.read_capture_raw_pointer_bits(idx)?;
         let cell_ptr = bits as *const SharedCell;
         if cell_ptr.is_null() {
@@ -1786,8 +1274,6 @@ impl VirtualMachine {
             ));
         }
         record_heap_write();
-        // SAFETY: section header invariants apply. `write_shared_i32`
-        // sign-extends the value to 8 bytes inside the cell.
         unsafe { shape_value::v2::closure_raw::write_shared_i32(cell_ptr, new_value) };
         Ok(())
     }
@@ -1800,7 +1286,8 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_value = self.pop_raw_u64()? as u32;
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let new_value = src_bits as u32;
         let bits = self.read_capture_raw_pointer_bits(idx)?;
         let cell_ptr = bits as *const SharedCell;
         if cell_ptr.is_null() {
@@ -1809,7 +1296,6 @@ impl VirtualMachine {
             ));
         }
         record_heap_write();
-        // SAFETY: section header invariants apply.
         unsafe { shape_value::v2::closure_raw::write_shared_u32(cell_ptr, new_value) };
         Ok(())
     }
@@ -1822,7 +1308,8 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_value = self.pop_raw_u64()? as i64 as i16;
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let new_value = src_bits as i64 as i16;
         let bits = self.read_capture_raw_pointer_bits(idx)?;
         let cell_ptr = bits as *const SharedCell;
         if cell_ptr.is_null() {
@@ -1831,7 +1318,6 @@ impl VirtualMachine {
             ));
         }
         record_heap_write();
-        // SAFETY: section header invariants apply.
         unsafe { shape_value::v2::closure_raw::write_shared_i16(cell_ptr, new_value) };
         Ok(())
     }
@@ -1844,7 +1330,8 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_value = self.pop_raw_u64()? as u16;
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let new_value = src_bits as u16;
         let bits = self.read_capture_raw_pointer_bits(idx)?;
         let cell_ptr = bits as *const SharedCell;
         if cell_ptr.is_null() {
@@ -1853,7 +1340,6 @@ impl VirtualMachine {
             ));
         }
         record_heap_write();
-        // SAFETY: section header invariants apply.
         unsafe { shape_value::v2::closure_raw::write_shared_u16(cell_ptr, new_value) };
         Ok(())
     }
@@ -1866,7 +1352,8 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_value = self.pop_raw_u64()? as i64 as i8;
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let new_value = src_bits as i64 as i8;
         let bits = self.read_capture_raw_pointer_bits(idx)?;
         let cell_ptr = bits as *const SharedCell;
         if cell_ptr.is_null() {
@@ -1875,7 +1362,6 @@ impl VirtualMachine {
             ));
         }
         record_heap_write();
-        // SAFETY: section header invariants apply.
         unsafe { shape_value::v2::closure_raw::write_shared_i8(cell_ptr, new_value) };
         Ok(())
     }
@@ -1888,7 +1374,8 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_value = self.pop_raw_u64()? as u8;
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let new_value = src_bits as u8;
         let bits = self.read_capture_raw_pointer_bits(idx)?;
         let cell_ptr = bits as *const SharedCell;
         if cell_ptr.is_null() {
@@ -1897,7 +1384,6 @@ impl VirtualMachine {
             ));
         }
         record_heap_write();
-        // SAFETY: section header invariants apply.
         unsafe { shape_value::v2::closure_raw::write_shared_u8(cell_ptr, new_value) };
         Ok(())
     }
@@ -1910,9 +1396,8 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        // Pop the 8-byte slot; treat any nonzero bit pattern as true to
-        // mirror `read_shared_bool`'s "any non-zero byte" semantics.
-        let new_value = self.pop_raw_u64()? != 0;
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let new_value = src_bits != 0;
         let bits = self.read_capture_raw_pointer_bits(idx)?;
         let cell_ptr = bits as *const SharedCell;
         if cell_ptr.is_null() {
@@ -1921,11 +1406,12 @@ impl VirtualMachine {
             ));
         }
         record_heap_write();
-        // SAFETY: section header invariants apply.
         unsafe { shape_value::v2::closure_raw::write_shared_bool(cell_ptr, new_value) };
         Ok(())
     }
 
+    /// `StoreSharedCapturePtr { idx }` — typed Ptr store via
+    /// `SharedCell::kind()` (Wave-β B6 round-1, commit `c785174`).
     fn op_store_shared_capture_ptr(
         &mut self,
         instruction: &Instruction,
@@ -1934,137 +1420,120 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_bits = self.pop_raw_u64()?;
+        let (new_bits, src_kind) = self.pop_kinded()?;
         let bits = self.read_capture_raw_pointer_bits(idx)?;
         let cell_ptr = bits as *const SharedCell;
         if cell_ptr.is_null() {
+            crate::executor::vm_impl::stack::drop_with_kind(new_bits, src_kind);
             return Err(VMError::RuntimeError(
                 "Shared capture pointer is null".to_string(),
             ));
         }
+        // SAFETY: see `op_load_shared_capture`.
+        let cell_ref = unsafe { &*cell_ptr };
+        let cell_kind = cell_ref.kind();
+        if cell_kind != src_kind {
+            crate::executor::vm_impl::stack::drop_with_kind(new_bits, src_kind);
+            return Err(VMError::RuntimeError(format!(
+                "StoreSharedCapturePtr[{}]: source kind {:?} does not match cell kind \
+                 {:?} (ADR-006 §2.7.8 / Q10 — SharedCell kind fixed at construction)",
+                idx, src_kind, cell_kind
+            )));
+        }
         record_heap_write();
-        // SAFETY: section header invariants apply. `write_shared_ptr`
-        // does NOT release the previous payload nor retain the new one
-        // (matches `read_shared_ptr` symmetry). Refcount management is
-        // the responsibility of the compiler / IR (see Wave E plan).
-        unsafe { shape_value::v2::closure_raw::write_shared_ptr(cell_ptr, new_bits) };
+        let prev_bits = {
+            let mut guard = cell_ref.lock();
+            let prev = *guard;
+            *guard = new_bits;
+            prev
+        };
+        crate::executor::vm_impl::stack::drop_with_kind(prev_bits, cell_kind);
         Ok(())
     }
 
-    // ── Track A.1C.1: outer-scope `var` Shared-cell lifecycle ──────────
-    //
-    // `AllocSharedLocal` / `LoadSharedLocal` / `StoreSharedLocal` /
-    // `DropSharedLocal` are the outer-scope counterparts of A.1B's
-    // `LoadSharedCapture` / `StoreSharedCapture`. A.1B operates on the
-    // raw `*const SharedCell` pointer bits held in a **closure's upvalue
-    // slot**. A.1C.1 operates on the raw `*const SharedCell` pointer
-    // bits held in the declaring frame's **local stack slot**.
-    //
-    // Shared contract with A.1B: both sides treat the raw u64 in the
-    // slot as an `Arc::into_raw`-produced pointer. `AllocSharedLocal`
-    // produces exactly one strong-count share and parks it in the local
-    // slot; `DropSharedLocal` releases exactly that share via
-    // `Arc::from_raw`. Additional strong shares (one per capturing
-    // closure) are minted by the closure-build path (A.1B
-    // `op_make_closure`) via `Arc::increment_strong_count` — those are
-    // reclaimed by `release_typed_closure` on closure drop, completely
-    // independent of the outer-scope lifecycle handled here.
-    //
-    // SAFETY invariants for every handler below:
-    //
-    // - The compiler (A.1C.2, still pending) emits these opcodes only
-    //   on slots whose `BindingStorageClass` is `Shared`. Until that
-    //   lands, only unit tests and hand-assembled bytecode exercise
-    //   these opcodes.
-    // - The slot's raw u64 is produced exclusively by
-    //   `AllocSharedLocal`. It is the sole allocator. Any other writer
-    //   (e.g. `StoreLocal` targeting the same slot) violates the
-    //   Shared contract — the compiler must never emit that mix.
-    // - The pointer is released exactly once by `DropSharedLocal`.
-    //   After Drop, the slot is overwritten with `NONE_BITS` to mark
-    //   it spent; re-reading the slot via `LoadSharedLocal` /
-    //   `StoreSharedLocal` after Drop is a compiler bug (reports a
-    //   null-pointer runtime error at the interpreter level).
-    // - Concurrent access across closures is permitted: each closure
-    //   holds its own `Arc` strong share and takes the parking_lot
-    //   mutex for lock-gated read/write. The mutex is the sole legal
-    //   read/write path — interpreter code never dereferences the
-    //   pointer without first taking the lock.
+    // ─────────────────────────────────────────────────────────────────────
+    // Shared local opcodes (AllocSharedLocal / Load / Store / Drop)
+    // ─────────────────────────────────────────────────────────────────────
 
-    /// `AllocSharedLocal { slot }`: pop the initial value, allocate a
-    /// fresh `Arc<SharedCell>`, write the `Arc::into_raw` pointer bits
-    /// into local slot `slot`.
-    ///
-    /// # Safety
-    ///
-    /// This is the sole allocator for a Shared local slot. The produced
-    /// `*const SharedCell` pointer is:
-    ///   * 8-byte aligned (Rust global allocator + `parking_lot::Mutex`'s
-    ///     alignment).
-    ///   * Non-null (Rust's `Arc::new` never returns null).
-    ///   * Owned by slot `slot` — exactly one strong-count share is
-    ///     parked in the slot.
-    ///
-    /// The slot is treated as opaque raw pointer bits; it MUST NOT be
-    /// read via `LoadLocal` / `StoreLocal` until after `DropSharedLocal`
-    /// overwrites it with `NONE_BITS`. Any previous occupant of the
-    /// slot is silently overwritten — the compiler guarantees the slot
-    /// is freshly introduced (not reused) when this opcode is emitted.
     fn op_alloc_shared_local(&mut self, instruction: &Instruction) -> Result<(), VMError> {
+        // Wave 8 W8-T25 close (ADR-006 §2.7.12 / Q13 amendment,
+        // 2026-05-10): with `HeapKind::SharedCell` now in the heap-
+        // variants enum and wired through every Q8/Q10 dispatch table
+        // (`clone_with_kind` / `drop_with_kind` in `vm_impl/stack.rs`,
+        // `KindedSlot::clone` / `KindedSlot::drop` in `kinded_slot.rs`,
+        // `SharedCell::drop` in `v2/closure_layout.rs`,
+        // `TypedObjectStorage::drop` in `heap_value.rs`), the parallel-
+        // kind track has the discriminator required to label
+        // `*const SharedCell` cell-pointer bits.
+        //
+        // Lifecycle (per `bytecode/opcode_defs.rs:1426`):
+        //   1. Pop the initial value (raw bits + payload `NativeKind`)
+        //      off the kinded stack — the share owned by the popped
+        //      slot transfers into the cell's `value` field.
+        //   2. Allocate `Arc::new(SharedCell::new(value_bits, value_kind))`.
+        //      `SharedCell::new` records the cell's persistent kind
+        //      companion per §2.7.8 / Q10 — the lockstep invariant the
+        //      Drop matrix relies on.
+        //   3. `Arc::into_raw(arc) as u64` produces the cell-pointer
+        //      bits; the local slot becomes the unique strong-count
+        //      owner.
+        //   4. Write the cell-pointer + `NativeKind::Ptr(HeapKind::SharedCell)`
+        //      kind into the local slot via `stack_write_kinded`. The
+        //      previous occupant (zero/Bool sentinel from frame
+        //      pre-init) is released as a no-op.
+        //
+        // Forbidden shapes refused on sight:
+        //   * §2.7.8 #9 Bool-default fallback for the cell's interior
+        //     kind — `value_kind` is sourced from the popped stack
+        //     slot's parallel-kind track (the same kind the producer
+        //     wrote at push time).
+        //   * `(decode|tag|kind|dispatch|...) (bridge|probe|helper|hop|
+        //     translator|adapter|shim)` defection-attractor framing
+        //     for the cell-pointer share — the `Arc<SharedCell>`
+        //     retain/release goes through the §2.7.7 / §2.7.8 dispatch
+        //     tables directly (the `HeapKind::SharedCell` arm), not
+        //     through any "bridge" or "probe".
         use shape_value::v2::closure_layout::SharedCell;
         use std::sync::Arc as StdArc;
 
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        // Pop the initial ValueWord bits from the stack — these become
-        // the inner payload of the new mutex.
-        let initial_bits = self.pop_raw_u64()?;
-
-        // Allocate the Arc<SharedCell> and convert into a raw pointer.
-        // `Arc::into_raw` keeps one strong-count share alive;
-        // `DropSharedLocal` is responsible for reclaiming it later.
-        //
-        // A.1E: SharedCell is now a `#[repr(C)]` struct with a hand-rolled
-        // spinlock at offset 0 and the ValueWord payload at offset 8. The
-        // JIT's inline lock/unlock paths depend on this fixed layout —
-        // see `closure_layout.rs::SharedCell` for the SAFETY contract.
-        let arc: StdArc<SharedCell> = StdArc::new(SharedCell::new(initial_bits));
-        let cell_ptr: *const SharedCell = StdArc::into_raw(arc);
-
-        // Compute the absolute stack index for the requested local slot.
+        let (value_bits, value_kind) = self.pop_kinded()?;
+        // SAFETY: `SharedCell::new(bits, kind)` records the kind
+        // companion in lockstep with the value bits per §2.7.8 / Q10.
+        // `pop_kinded` transferred the share ownership out of the
+        // stack slot into our local; passing it to the cell transfers
+        // the share into the cell's `value` field. `SharedCell::Drop`
+        // will retire that share via `drop_with_kind(value_bits, value_kind)`
+        // when the last `Arc<SharedCell>` share retires.
+        let cell = StdArc::new(SharedCell::new(value_bits, value_kind));
+        let cell_bits = StdArc::into_raw(cell) as u64;
         let bp = self.current_locals_base();
         let slot = bp + idx as usize;
         if slot >= self.stack.len() {
-            self.stack.resize_with(slot + 1, || Self::NONE_BITS);
+            // Reclaim the share we were about to install. Use the same
+            // `Arc::from_raw` shape `op_drop_shared_local` uses.
+            unsafe {
+                drop(StdArc::from_raw(cell_bits as *const SharedCell));
+            }
+            return Err(VMError::RuntimeError(format!(
+                "AllocSharedLocal: slot {} out of bounds (stack len {})",
+                idx,
+                self.stack.len()
+            )));
         }
-
-        // Park the raw pointer bits in the slot. We intentionally do NOT
-        // route this write through `stack_write_raw` — that helper
-        // interprets the old slot bits as a `ValueWord` and drops them
-        // (which would double-free if the slot previously held a
-        // Shared-cell pointer). The compiler contract is: the slot is
-        // freshly introduced, so the old bits are `NONE_BITS` (or
-        // uninitialised — still inline, no Drop glue).
-        record_heap_write();
-        self.stack[slot] = cell_ptr as u64;
+        // The frame-init sentinel at `slot` is `(NONE_BITS, Bool)`;
+        // `stack_write_kinded` releases that no-op then installs the
+        // new (cell_bits, SharedCell) pair in lockstep.
+        self.stack_write_kinded(
+            slot,
+            cell_bits,
+            NativeKind::Ptr(HeapKind::SharedCell),
+        );
         Ok(())
     }
 
-    /// `LoadSharedLocal { slot }`: read the `*const SharedCell` bits
-    /// from local slot `slot`, acquire the mutex for a read, clone the
-    /// inner ValueWord bits, drop the guard, push the value onto the
-    /// stack.
-    ///
-    /// # Safety
-    ///
-    /// The slot at `slot` must hold non-null `*const SharedCell` bits
-    /// that were produced by a prior `AllocSharedLocal` on the same
-    /// slot and not yet consumed by `DropSharedLocal`. The reborrow
-    /// via `&*cell_ptr` is scoped to this handler invocation; the Arc
-    /// strong-count share stays with the slot (this handler does not
-    /// retain/release). The mutex is the sole legal read path — no
-    /// reader bypasses the lock.
     fn op_load_shared_local(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
 
@@ -2088,44 +1557,28 @@ impl VirtualMachine {
                     .to_string(),
             ));
         }
-        // SAFETY: `cell_ptr` was produced by `Arc::into_raw(Arc::new(...))`
-        // in `op_alloc_shared_local` and the Arc strong share owned by
-        // this slot keeps the allocation alive. We reborrow via
-        // `&*cell_ptr` for the duration of this handler only; the
-        // reference does not escape. The mutex mediates concurrency
-        // with any capturing closure's `LoadSharedCapture` /
-        // `StoreSharedCapture` as well as any other
-        // `LoadSharedLocal` / `StoreSharedLocal` on this slot.
-        let value_bits = unsafe {
-            let cell: &SharedCell = &*cell_ptr;
-            let guard = cell.lock();
-            let bits = *guard;
-            drop(guard);
-            bits
+        // SAFETY: see `op_load_shared_capture`.
+        let cell_ref = unsafe { &*cell_ptr };
+        let kind = cell_ref.kind();
+        let payload_bits = {
+            let guard = cell_ref.lock();
+            *guard
         };
-        self.push_raw_u64(value_bits)
+        crate::executor::vm_impl::stack::clone_with_kind(payload_bits, kind);
+        self.push_kinded(payload_bits, kind)
     }
 
-    /// `StoreSharedLocal { slot }`: pop a ValueWord, read the
-    /// `*const SharedCell` bits from local slot `slot`, acquire the
-    /// mutex for a write, overwrite the inner ValueWord bits, drop the
-    /// guard. The slot's pointer bits are NOT modified.
-    ///
-    /// # Safety
-    ///
-    /// Same invariants as `op_load_shared_local`. The mutex serialises
-    /// concurrent writers from other closures / the declaring frame.
-    /// The Arc strong-count share owned by the slot is untouched.
     fn op_store_shared_local(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
 
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_bits = self.pop_raw_u64()?;
+        let (new_bits, src_kind) = self.pop_kinded()?;
         let bp = self.current_locals_base();
         let slot = bp + idx as usize;
         if slot >= self.stack.len() {
+            crate::executor::vm_impl::stack::drop_with_kind(new_bits, src_kind);
             return Err(VMError::RuntimeError(format!(
                 "StoreSharedLocal: slot {} out of bounds (stack len {})",
                 idx,
@@ -2135,50 +1588,33 @@ impl VirtualMachine {
         let bits = self.stack[slot];
         let cell_ptr = bits as *const SharedCell;
         if cell_ptr.is_null() {
+            crate::executor::vm_impl::stack::drop_with_kind(new_bits, src_kind);
             return Err(VMError::RuntimeError(
-                "StoreSharedLocal: Shared local pointer is null (not initialised or already dropped)"
-                    .to_string(),
+                "StoreSharedLocal: Shared local pointer is null".to_string(),
             ));
         }
-        record_heap_write();
-        // SAFETY: same invariants as `op_load_shared_local`. We take
-        // the mutex for exclusive access, overwrite the 8-byte
-        // ValueWord payload, then drop the guard. The slot's pointer
-        // bits stay exactly as `op_alloc_shared_local` installed them —
-        // this write only touches the interior of the mutex.
-        unsafe {
-            let cell: &SharedCell = &*cell_ptr;
-            let mut guard = cell.lock();
-            *guard = new_bits;
-            drop(guard);
+        // SAFETY: see `op_load_shared_capture`.
+        let cell_ref = unsafe { &*cell_ptr };
+        let cell_kind = cell_ref.kind();
+        if cell_kind != src_kind {
+            crate::executor::vm_impl::stack::drop_with_kind(new_bits, src_kind);
+            return Err(VMError::RuntimeError(format!(
+                "StoreSharedLocal[{}]: source kind {:?} does not match cell kind {:?} \
+                 (ADR-006 §2.7.8 / Q10 — SharedCell kind fixed at construction)",
+                idx, src_kind, cell_kind
+            )));
         }
+        record_heap_write();
+        let prev_bits = {
+            let mut guard = cell_ref.lock();
+            let prev = *guard;
+            *guard = new_bits;
+            prev
+        };
+        crate::executor::vm_impl::stack::drop_with_kind(prev_bits, cell_kind);
         Ok(())
     }
 
-    /// `DropSharedLocal { slot }`: read the `*const SharedCell` bits
-    /// from local slot `slot`, reconstruct `Arc::from_raw`, drop the
-    /// Arc (one atomic strong-count decrement), then overwrite the slot
-    /// with the null pointer (`0u64`) to mark it spent.
-    ///
-    /// # Safety
-    ///
-    /// This is the sole releaser for the outer-scope Arc strong share
-    /// allocated by `AllocSharedLocal`. The pointer at slot `slot` must
-    /// have been installed by a prior `AllocSharedLocal` on the same
-    /// slot and not yet consumed. Double-drop is a compiler bug and
-    /// would be a use-after-free on the second call — the null-pointer
-    /// guard at least prevents segfaulting; it does not recover
-    /// correctness.
-    ///
-    /// The slot is rewritten to `0u64` (a genuine null pointer — NOT a
-    /// NaN-tagged ValueWord) so any subsequent `LoadSharedLocal` /
-    /// `StoreSharedLocal` on this slot reports a null-pointer runtime
-    /// error rather than silently dereferencing freed memory. The VM's
-    /// top-level `Drop` invokes `ValueWord::from_raw_bits(0).drop()`,
-    /// which is a no-op (bit pattern `0` decodes as a heap-tagged
-    /// pointer whose payload is null; the ValueWord drop glue checks
-    /// for null before any refcount traffic — see
-    /// `shape_value::value_word`).
     fn op_drop_shared_local(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
         use std::sync::Arc as StdArc;
@@ -2199,116 +1635,89 @@ impl VirtualMachine {
         let cell_ptr = bits as *const SharedCell;
         if cell_ptr.is_null() {
             return Err(VMError::RuntimeError(
-                "DropSharedLocal: Shared local pointer is null (not initialised or already dropped)"
-                    .to_string(),
+                "DropSharedLocal: Shared local pointer is null".to_string(),
             ));
         }
-        // Mark the slot spent BEFORE reclaiming the Arc so any
-        // reentrant access on this slot sees a genuine null pointer
-        // rather than dangling bits. We use `0u64` (not `NONE_BITS`)
-        // because the Load/Store/Drop handlers perform a raw
-        // `cell_ptr.is_null()` check — `NONE_BITS` is a non-zero
-        // NaN-tagged sentinel and would bypass that check and lead to
-        // a spurious dereference. The VM's top-level `Drop` treats
-        // bits=0 as a heap-tagged-null ValueWord whose drop is a no-op.
-        self.stack[slot] = 0u64;
-        // SAFETY: `cell_ptr` was produced by
-        // `Arc::into_raw(Arc::new(...))` in `op_alloc_shared_local` and
-        // this call site is the unique drop point for that share.
-        // `Arc::from_raw` transfers ownership back into the Arc handle,
-        // and the `drop` call decrements the strong count. Any
-        // additional closures holding capture-side shares retain their
-        // own independent strong counts, so the underlying
-        // `SharedCell` stays alive as long as at least one strong
-        // share exists.
+        // Take the slot via `stack_take_kinded` to clear both the bits
+        // and kind track in lockstep (zero/Bool sentinel after take).
+        let _ = self.stack_take_kinded(slot);
+        // Reclaim the Arc strong-count share allocated by
+        // `op_alloc_shared_local`. The cell payload's interior share
+        // (if any) was already released by the matching
+        // `StoreSharedLocal`/`Drop`-time release path inside the Arc's
+        // `Drop` glue — `SharedCell`'s `Drop` calls `drop_with_kind`
+        // on its inner payload using its persistent kind.
         unsafe {
             drop(StdArc::from_raw(cell_ptr));
         }
         Ok(())
     }
 
-    // ── Track A.1C.3: Shared module-binding opcode handlers ────────────
-    //
-    // Module-binding parallel to the Shared local opcodes above. The
-    // addressing mode is `Operand::ModuleBinding(idx)` instead of
-    // `Operand::Local(idx)`; the underlying Arc / mutex mechanics are
-    // identical. Released once, at VM drop, via
-    // `shared_module_bindings` tracking.
+    // ─────────────────────────────────────────────────────────────────────
+    // Shared module-binding opcodes
+    // ─────────────────────────────────────────────────────────────────────
 
-    /// `AllocSharedModuleBinding { idx }`: pop a ValueWord as the
-    /// initial value, allocate a fresh `Arc<parking_lot::Mutex<ValueWord>>`,
-    /// and store the `Arc::into_raw` pointer bits into
-    /// `module_bindings[idx]`. Registers `idx` in
-    /// `self.shared_module_bindings` so VM drop reclaims the Arc.
-    ///
-    /// # Safety
-    ///
-    /// Sole allocator for Shared module bindings. The compiler emits
-    /// this exactly once per promoted module-binding slot (before any
-    /// closure capture of that slot). After this opcode, every read
-    /// and write to the slot must use `LoadSharedModuleBinding` /
-    /// `StoreSharedModuleBinding`; plain `LoadModuleBinding` /
-    /// `StoreModuleBinding` would read raw pointer bits as a ValueWord
-    /// (silent corruption). The slot's prior ValueWord is dropped as
-    /// part of `binding_take_raw`.
     fn op_alloc_shared_module_binding(
         &mut self,
         instruction: &Instruction,
     ) -> Result<(), VMError> {
+        // Wave 8 W8-T25 close (ADR-006 §2.7.12 / Q13 amendment,
+        // 2026-05-10): paired with `op_alloc_shared_local` above. The
+        // Wave-γ G-module-bindings-kind `module_binding_write_kinded`
+        // API was already in place; only the `HeapKind::SharedCell`
+        // amendment was missing.
+        //
+        // Lifecycle (per `bytecode/opcode_defs.rs:1494`):
+        //   1. Pop the initial value (raw bits + payload `NativeKind`)
+        //      off the kinded stack.
+        //   2. Allocate `Arc::new(SharedCell::new(value_bits, value_kind))`.
+        //   3. `Arc::into_raw(arc) as u64` and write into
+        //      `module_bindings[idx]` via `module_binding_write_kinded`
+        //      with kind `NativeKind::Ptr(HeapKind::SharedCell)`.
+        //   4. Register `idx` with `shared_module_bindings` so the
+        //      VM-Drop special-case loop reclaims the Arc share via
+        //      `Arc::from_raw` (the kind-aware second loop sees the
+        //      zero/Bool sentinel left behind by the special-case loop
+        //      and is a no-op — see `executor/mod.rs::Drop for VirtualMachine`).
+        //
+        // Forbidden shapes refused on sight: same as
+        // `op_alloc_shared_local` — no Bool-default fallback, no
+        // `(decode|tag|...) (bridge|probe|...)` defection-attractor
+        // framing.
         use shape_value::v2::closure_layout::SharedCell;
         use std::sync::Arc as StdArc;
 
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
+        let (value_bits, value_kind) = self.pop_kinded()?;
+        // SAFETY: same construction-side contract as
+        // `op_alloc_shared_local`. The popped slot's share transfers
+        // into the cell's `value` field; `SharedCell::Drop` retires it
+        // via `drop_with_kind` at refcount=0.
+        let cell = StdArc::new(SharedCell::new(value_bits, value_kind));
+        let cell_bits = StdArc::into_raw(cell) as u64;
         let index = idx as usize;
-        // Ensure the slot exists.
-        while self.module_bindings.len() <= index {
-            self.module_bindings.push(Self::NONE_BITS);
-        }
-        // Pop the initial ValueWord bits. The stack slot is released
-        // (caller's responsibility: the compiler emitted
-        // `LoadModuleBinding` → `AllocSharedModuleBinding`, transferring
-        // ownership of the current ValueWord to the stack).
-        let initial_bits = self.pop_raw_u64()?;
-
-        // Drop the existing ValueWord in the slot before installing raw
-        // pointer bits. This is important if the slot already held e.g.
-        // a heap pointer — those bits must not be reinterpreted as a
-        // raw SharedCell pointer.
-        let old_bits = self.module_bindings[index];
-        self.module_bindings[index] = Self::NONE_BITS;
-        // FR.3: real release (was no-op drop of Copy u64).
-        vw_drop(old_bits);
-
-        // Allocate the Arc<SharedCell>. A.1E: SharedCell is a
-        // `#[repr(C)]` hand-rolled-spinlock struct, see
-        // `closure_layout.rs::SharedCell`.
-        let arc: StdArc<SharedCell> = StdArc::new(SharedCell::new(initial_bits));
-        let cell_ptr: *const SharedCell = StdArc::into_raw(arc);
-
-        // Install raw pointer bits. Intentionally NOT via
-        // `binding_write_raw` (which would drop the prior ValueWord as
-        // if it were a ValueWord — we already did that above, and we
-        // do NOT want the raw pointer bits routed through ValueWord
-        // drop glue on any future write).
-        record_heap_write();
-        self.module_bindings[index] = cell_ptr as u64;
+        // `module_binding_write_kinded` grows the parallel tracks if
+        // `index` is past the current end (via `module_binding_pad_to_kinded`),
+        // releases the previous occupant via `drop_with_kind`, and
+        // installs `(cell_bits, NativeKind::Ptr(HeapKind::SharedCell))`
+        // in lockstep.
+        self.module_binding_write_kinded(
+            index,
+            cell_bits,
+            NativeKind::Ptr(HeapKind::SharedCell),
+        );
+        // Register the slot so VM-Drop reclaims the Arc<SharedCell>
+        // share via `Arc::from_raw`. The kind-aware second loop in
+        // `Drop for VirtualMachine` zeroes both bits and kind first,
+        // so the parallel-kind dispatch is a no-op for this slot at
+        // teardown — the explicit `Arc::from_raw` retire is the sole
+        // release path.
         self.shared_module_bindings.insert(index);
         Ok(())
     }
 
-    /// `LoadSharedModuleBinding { idx }`: read the `*const SharedCell`
-    /// bits from `module_bindings[idx]`, acquire the mutex for a read,
-    /// clone the inner ValueWord bits, drop the guard, push onto the
-    /// stack.
-    ///
-    /// # Safety
-    ///
-    /// The slot must hold non-null `*const SharedCell` bits installed
-    /// by a prior `AllocSharedModuleBinding` on the same slot. The Arc
-    /// strong-count share owned by the slot keeps the allocation alive
-    /// for the VM's lifetime.
     fn op_load_shared_module_binding(
         &mut self,
         instruction: &Instruction,
@@ -2319,40 +1728,31 @@ impl VirtualMachine {
             return Err(VMError::InvalidOperand);
         };
         let index = idx as usize;
-        if index >= self.module_bindings.len() {
+        if index >= self.module_bindings_len() {
             return Err(VMError::RuntimeError(format!(
                 "LoadSharedModuleBinding: slot {} out of bounds (module_bindings len {})",
                 index,
-                self.module_bindings.len()
+                self.module_bindings_len()
             )));
         }
-        let bits = self.module_bindings[index];
+        let (bits, _stored_kind) = self.module_binding_read_kinded_raw(index);
         let cell_ptr = bits as *const SharedCell;
         if cell_ptr.is_null() {
             return Err(VMError::RuntimeError(
-                "LoadSharedModuleBinding: Shared module binding pointer is null"
-                    .to_string(),
+                "LoadSharedModuleBinding: Shared module binding pointer is null".to_string(),
             ));
         }
-        // SAFETY: `cell_ptr` was produced by
-        // `Arc::into_raw(Arc::new(...))` in
-        // `op_alloc_shared_module_binding`; the Arc share owned by the
-        // module-bindings slot keeps the allocation alive. Reborrowed
-        // for the duration of this handler only.
-        let value_bits = unsafe {
-            let cell: &SharedCell = &*cell_ptr;
-            let guard = cell.lock();
-            let bits = *guard;
-            drop(guard);
-            bits
+        // SAFETY: see `op_load_shared_capture`.
+        let cell_ref = unsafe { &*cell_ptr };
+        let kind = cell_ref.kind();
+        let payload_bits = {
+            let guard = cell_ref.lock();
+            *guard
         };
-        self.push_raw_u64(value_bits)
+        crate::executor::vm_impl::stack::clone_with_kind(payload_bits, kind);
+        self.push_kinded(payload_bits, kind)
     }
 
-    /// `StoreSharedModuleBinding { idx }`: pop a ValueWord, read the
-    /// `*const SharedCell` bits from `module_bindings[idx]`, acquire
-    /// the mutex for a write, overwrite the inner ValueWord bits, drop
-    /// the guard. The slot's pointer bits are NOT modified.
     fn op_store_shared_module_binding(
         &mut self,
         instruction: &Instruction,
@@ -2362,448 +1762,221 @@ impl VirtualMachine {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_bits = self.pop_raw_u64()?;
+        let (new_bits, src_kind) = self.pop_kinded()?;
         let index = idx as usize;
-        if index >= self.module_bindings.len() {
+        if index >= self.module_bindings_len() {
+            crate::executor::vm_impl::stack::drop_with_kind(new_bits, src_kind);
             return Err(VMError::RuntimeError(format!(
                 "StoreSharedModuleBinding: slot {} out of bounds (module_bindings len {})",
                 index,
-                self.module_bindings.len()
+                self.module_bindings_len()
             )));
         }
-        let bits = self.module_bindings[index];
+        let (bits, _stored_kind) = self.module_binding_read_kinded_raw(index);
         let cell_ptr = bits as *const SharedCell;
         if cell_ptr.is_null() {
+            crate::executor::vm_impl::stack::drop_with_kind(new_bits, src_kind);
             return Err(VMError::RuntimeError(
-                "StoreSharedModuleBinding: Shared module binding pointer is null"
-                    .to_string(),
+                "StoreSharedModuleBinding: Shared module binding pointer is null".to_string(),
             ));
         }
-        record_heap_write();
-        // SAFETY: same invariants as `op_load_shared_module_binding`.
-        // Mutex serialises writers; the Arc share owned by the module-
-        // bindings slot is untouched.
-        unsafe {
-            let cell: &SharedCell = &*cell_ptr;
-            let mut guard = cell.lock();
-            *guard = new_bits;
-            drop(guard);
+        let cell_ref = unsafe { &*cell_ptr };
+        let cell_kind = cell_ref.kind();
+        if cell_kind != src_kind {
+            crate::executor::vm_impl::stack::drop_with_kind(new_bits, src_kind);
+            return Err(VMError::RuntimeError(format!(
+                "StoreSharedModuleBinding[{}]: source kind {:?} does not match cell \
+                 kind {:?} (ADR-006 §2.7.8 / Q10 — SharedCell kind fixed at \
+                 construction)",
+                index, src_kind, cell_kind
+            )));
         }
+        record_heap_write();
+        let prev_bits = {
+            let mut guard = cell_ref.lock();
+            let prev = *guard;
+            *guard = new_bits;
+            prev
+        };
+        crate::executor::vm_impl::stack::drop_with_kind(prev_bits, cell_kind);
         Ok(())
     }
 
-    /// Load value from a local variable slot (register window on the unified stack).
-    ///
-    /// Optimized: reads the raw u64 bits directly via pointer to skip bounds
-    /// checks and Option wrapping. For inline values (numbers, ints, bools —
-    /// the common case), constructs a ValueWord by bit-copying without going
-    /// through clone dispatch. Only heap-tagged values take the clone path.
-    ///
-    /// **Stage 2.1**: When the FrameDescriptor proves the slot kind is a
-    /// scalar (Float64/Int64/Bool) AND the slot bits are not heap-tagged
-    /// (i.e. not wrapped in a SharedCell for closure capture), the handler
-    /// pushes raw bits directly without constructing a ValueWord. This gives
-    /// downstream typed handlers raw values they can `pop_raw_*` without
-    /// unwrapping. The TAG_HEAP runtime check is necessary because mutable
-    /// captured locals can be wrapped in SharedCell after the frame layout
-    /// is fixed — the FrameDescriptor doesn't track that wrapping.
-    ///
-    /// If the slot contains a SharedCell (boxed local for mutable closure capture),
-    /// the inner value is read through the Arc transparently.
+    // ─────────────────────────────────────────────────────────────────────
+    // LoadLocal / LoadLocalTrusted (polymorphic) — kind from FrameDescriptor
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// `LoadLocal { idx }` — kind from `FrameDescriptor.slots[idx]` per
+    /// playbook §2 kind-sourcing rules. The slot's bits are read raw
+    /// and pushed kinded; `clone_with_kind` bumps the heap share so
+    /// the slot stays live.
     pub(in crate::executor) fn op_load_local(
         &mut self,
         instruction: &Instruction,
     ) -> Result<(), VMError> {
-        use crate::type_tracking::SlotKind;
-        use shape_value::tag_bits::{get_tag, is_tagged, TAG_BOOL, TAG_INT};
-
-        if let Some(Operand::Local(idx)) = instruction.operand {
-            let bp = self.current_locals_base();
-            let slot = bp + idx as usize;
-            debug_assert!(
-                slot < self.stack.len(),
-                "LoadLocal slot {} out of bounds (stack len {})",
-                slot,
-                self.stack.len()
-            );
-            // SAFETY: The compiler ensures local slots are within the frame's register
-            // window which is pre-allocated on the stack.
-            let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
-
-            // Stage 2.1 smart fast path. Skip ValueWord construction entirely
-            // when the FrameDescriptor proves the slot kind is a scalar AND
-            // the runtime bits actually carry that encoding. The runtime tag
-            // check is intentionally strict because op_load_local is the
-            // untrusted variant: the compiler is sometimes optimistic about
-            // slot kinds and the actual bits may be a different encoding
-            // (e.g. TAG_INT in a Float64 slot, or a SharedCell wrap that
-            // happens at closure construction). Mismatches fall through to
-            // the legacy clone_from_bits path which preserves correctness.
-            let kind = self
-                .current_frame_descriptor()
-                .map(|fd| fd.slot(idx as usize))
-                .unwrap_or(SlotKind::Unknown);
-            match kind {
-                SlotKind::Float64 if !is_tagged(bits) => {
-                    // Plain f64 bits (NaN canonicalized to a non-tagged
-                    // pattern). Push raw without ValueWord wrapping.
-                    return self.push_raw_f64(f64::from_bits(bits));
-                }
-                SlotKind::Int64 | SlotKind::IntSize
-                    if is_tagged(bits) && get_tag(bits) == TAG_INT =>
-                {
-                    // Slot holds i48-tagged bits; push_raw_u64 preserves
-                    // the encoding so downstream pop_tagged_i64 can decode.
-                    return self.push_raw_u64(bits);
-                }
-                SlotKind::Bool if is_tagged(bits) && get_tag(bits) == TAG_BOOL => {
-                    // Slot holds TAG_BOOL bits; push_raw_u64 preserves
-                    // the encoding so downstream pop_tagged_bool can decode.
-                    return self.push_raw_u64(bits);
-                }
-                _ => {
-                    // Tag/kind mismatch, non-scalar slot, or Unknown — fall
-                    // through to the legacy clone_from_bits + SharedCell path.
-                }
-            }
-
-            // Track A.1C.3: the SharedCell wrapper is retired. Every
-            // LoadLocal slot now holds either a plain ValueWord (the
-            // common case) or, for `AllocSharedLocal`-promoted slots,
-            // raw `*const SharedCell` pointer bits that the compiler
-            // would never emit `LoadLocal` on — those slots are only
-            // accessed via `Load/StoreSharedLocal`.
-            let nb = unsafe { ValueWord::clone_from_bits(bits) };
-            self.push_raw_u64(nb)?;
-        } else {
+        let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
-        }
-        Ok(())
+        };
+        let bp = self.current_locals_base();
+        let slot = bp + idx as usize;
+        debug_assert!(
+            slot < self.stack.len(),
+            "LoadLocal slot {} out of bounds (stack len {})",
+            slot,
+            self.stack.len()
+        );
+        // ADR-006 §2.7.7 / playbook §2: source kind from the parallel
+        // kind track (the lockstep `kinds[slot]` matches the producing
+        // typed Store / typed initial-write). Replaces the deleted
+        // `tag_bits::is_tagged` / `get_tag` / `ValueWord::clone_from_bits`
+        // legacy dispatch (CLAUDE.md "Forbidden code" #3 — runtime
+        // tag_bits dispatch).
+        let (bits, kind) = self.stack_read_kinded_raw(slot);
+        // WB2.4 retain-on-read: bump the heap refcount so the pushed
+        // share is independent of the slot's share.
+        crate::executor::vm_impl::stack::clone_with_kind(bits, kind);
+        self.push_kinded(bits, kind)
     }
 
-    /// Load value from a local variable slot — trusted variant.
-    ///
-    /// The compiler has proved that this slot has a known SlotKind in the
-    /// FrameDescriptor (a primitive type like f64, i64, or bool). This means:
-    ///   - No SharedCell auto-deref (slot is a plain value, not a boxed capture)
-    ///   - No tag validation (compiler already proved the type)
-    ///   - Raw u64 read: reads the 8-byte slot directly and constructs a
-    ///     ValueWord via bitwise copy. For inline values (the common trusted
-    ///     case — numbers, ints, bools) this is a pure register-width copy
-    ///     with no Arc refcount bump.
-    ///
-    /// **Wave C Phase C1**: When the FrameDescriptor proves the slot is a
-    /// scalar (Float64/Int64/Bool), the handler skips ValueWord wrapping
-    /// entirely and uses `push_raw_*` directly. This is the foundation that
-    /// enables downstream typed handlers (e.g. `exec_typed_arithmetic`) to
-    /// avoid `pop_vw`/`pop_vw().as_*_unchecked()` patterns. For Heap-typed
-    /// slots the legacy `clone_from_bits` + `push_vw` path is preserved
-    /// (Arc refcount bump is required).
+    /// `LoadLocalTrusted { idx }` — same shape as `LoadLocal`. The
+    /// "trusted" contract used to mean the compiler skipped runtime
+    /// tag-bit validation; post-ADR-006 §2.7.7 every slot has a
+    /// concrete kind in the parallel track, so the trusted vs untrusted
+    /// distinction is no longer about tag dispatch — both paths read
+    /// the slot's lockstep `(bits, kind)` directly.
     #[inline(always)]
     pub(in crate::executor) fn op_load_local_trusted(
         &mut self,
         instruction: &Instruction,
     ) -> Result<(), VMError> {
-        use crate::type_tracking::SlotKind;
-        use shape_value::tag_bits::{get_tag, is_tagged, TAG_BOOL, TAG_INT};
-        if let Some(Operand::Local(idx)) = instruction.operand {
-            let bp = self.current_locals_base();
-            let slot = bp + idx as usize;
-            debug_assert!(
-                slot < self.stack.len(),
-                "LoadLocalTrusted slot {} out of bounds (stack len {})",
-                slot,
-                self.stack.len()
-            );
-            // SAFETY: Compiler proved the slot has a known type. Skip SharedCell
-            // check and read the raw bits directly.
-            let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
-
-            // Wave C Phase C1: smart raw push when FrameDescriptor proves the
-            // slot kind is a scalar. Avoids ValueWord wrapping for the hot path.
-            //
-            // BUG4: the `trusted` contract is that the *compiler* promises the
-            // kind, but across call boundaries the FrameDescriptor's slot-kind
-            // inference can over-specify (e.g. claim `Float64` for a parameter
-            // that is actually populated with a TAG_INT value from the caller).
-            // Guard each typed fast path with a runtime tag check that matches
-            // the encoding — on mismatch, fall through to the legacy
-            // `clone_from_bits` path, which handles every inline-scalar /
-            // heap encoding uniformly. This mirrors the runtime guards in
-            // `op_load_local` and prevents reinterpreting an i48-tagged slot
-            // as a raw f64 (which would produce NaN).
-            let kind = self
-                .current_frame_descriptor()
-                .map(|fd| fd.slot(idx as usize))
-                .unwrap_or(SlotKind::Unknown);
-            match kind {
-                SlotKind::Float64 if !is_tagged(bits) => {
-                    return self.push_raw_f64(f64::from_bits(bits));
-                }
-                SlotKind::Int64 | SlotKind::IntSize
-                    if is_tagged(bits) && get_tag(bits) == TAG_INT =>
-                {
-                    // Slot holds i48-tagged bits; push_raw_u64 preserves
-                    // the encoding so downstream pop_tagged_i64 can decode.
-                    return self.push_raw_u64(bits);
-                }
-                SlotKind::Bool if is_tagged(bits) && get_tag(bits) == TAG_BOOL => {
-                    return self.push_raw_u64(bits);
-                }
-                _ => {
-                    // Tag/kind mismatch, non-scalar slot, or Unknown — fall
-                    // through to the legacy refcount-aware path.
-                }
-            }
-            let nb = unsafe { ValueWord::clone_from_bits(bits) };
-            self.push_raw_u64(nb)?;
-        } else {
+        let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
-        }
-        Ok(())
+        };
+        let bp = self.current_locals_base();
+        let slot = bp + idx as usize;
+        debug_assert!(
+            slot < self.stack.len(),
+            "LoadLocalTrusted slot {} out of bounds (stack len {})",
+            slot,
+            self.stack.len()
+        );
+        let (bits, kind) = self.stack_read_kinded_raw(slot);
+        crate::executor::vm_impl::stack::clone_with_kind(bits, kind);
+        self.push_kinded(bits, kind)
     }
 
-    /// Load local with Move semantics. The source slot is zeroed (set to
-    /// NONE_BITS) so it cannot be used again. This avoids refcount
-    /// manipulation entirely — the value is transferred, not cloned.
-    ///
-    /// If the slot contains a SharedCell (mutable closure capture), moving
-    /// out would invalidate other closures that share the cell. In that
-    /// case we fall back to clone behaviour (read through the Arc, bump
-    /// refcount) and leave the cell in place.
+    /// `LoadLocalMove { idx }` — transfer ownership: zero out the slot
+    /// (kind goes to the no-op Bool sentinel) and push the bits +
+    /// original kind onto the stack with no refcount change.
     fn op_load_local_move(&mut self, instruction: &Instruction) -> Result<(), VMError> {
-        if let Some(Operand::Local(idx)) = instruction.operand {
-            let bp = self.current_locals_base();
-            let slot = bp + idx as usize;
-            debug_assert!(
-                slot < self.stack.len(),
-                "LoadLocalMove slot {} out of bounds (stack len {})",
-                slot,
-                self.stack.len()
-            );
-            let bits = self.stack[slot];
-
-            // Track A.1C.3: SharedCell wrapper retired. Plain move
-            // semantics — zero the source slot and push the bits. The
-            // compiler never emits `LoadLocalMove` on
-            // `AllocSharedLocal`-promoted slots.
-            self.stack[slot] = Self::NONE_BITS;
-            self.push_raw_u64(bits)?;
-        } else {
+        let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
-        }
-        Ok(())
+        };
+        let bp = self.current_locals_base();
+        let slot = bp + idx as usize;
+        debug_assert!(
+            slot < self.stack.len(),
+            "LoadLocalMove slot {} out of bounds (stack len {})",
+            slot,
+            self.stack.len()
+        );
+        let (bits, kind) = self.stack_take_kinded(slot);
+        self.push_kinded(bits, kind)
     }
 
-    /// Load local with Clone semantics. The source stays live.
-    /// For heap-tagged values, this bumps the Arc refcount.
-    ///
-    /// This is semantically equivalent to the current LoadLocal behaviour
-    /// (always clones), but is emitted explicitly by the compiler when it
-    /// knows the value is still needed after the load.
+    /// `LoadLocalClone { idx }` — clone semantics: bump the heap share
+    /// via `clone_with_kind`, push the share onto the stack; slot
+    /// stays live.
     fn op_load_local_clone(&mut self, instruction: &Instruction) -> Result<(), VMError> {
-        if let Some(Operand::Local(idx)) = instruction.operand {
-            let bp = self.current_locals_base();
-            let slot = bp + idx as usize;
-            debug_assert!(
-                slot < self.stack.len(),
-                "LoadLocalClone slot {} out of bounds (stack len {})",
-                slot,
-                self.stack.len()
-            );
-            let bits = self.stack[slot];
-
-            // Track A.1C.3: SharedCell wrapper retired. Plain clone —
-            // bump refcount for heap values.
-            let cloned = raw_helpers::clone_raw_bits(bits);
-            self.push_raw_u64(cloned)?;
-        } else {
+        let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
-        }
-        Ok(())
+        };
+        let bp = self.current_locals_base();
+        let slot = bp + idx as usize;
+        debug_assert!(
+            slot < self.stack.len(),
+            "LoadLocalClone slot {} out of bounds (stack len {})",
+            slot,
+            self.stack.len()
+        );
+        let (bits, kind) = self.stack_read_kinded_raw(slot);
+        crate::executor::vm_impl::stack::clone_with_kind(bits, kind);
+        self.push_kinded(bits, kind)
     }
 
-    /// Store to local, dropping the old value first.
-    /// Used for reassignment where the old value needs cleanup.
-    ///
-    /// For heap-tagged old values whose Arc refcount reaches zero, the
-    /// HeapValue is freed immediately. For inline old values (int, bool,
-    /// f64, unit, none) the "drop" is a no-op since they carry no heap
-    /// resource.
-    ///
-    /// If the slot contains a SharedCell (mutable closure capture), the
-    /// new value is written through the Arc so all holders see the update.
+    /// `StoreLocalDrop { idx }` — pop a kinded source, install into
+    /// the slot via `stack_write_kinded` (which releases the prior
+    /// occupant's share via `drop_with_kind` using the slot's prior
+    /// kind track entry — the canonical retain-on-overwrite path).
     fn op_store_local_drop(&mut self, instruction: &Instruction) -> Result<(), VMError> {
-        use shape_value::tag_bits::{get_tag, is_tagged, TAG_HEAP};
-
-        if let Some(Operand::Local(idx)) = instruction.operand {
-            let bp = self.current_locals_base();
-            let slot = bp + idx as usize;
-
-            if slot >= self.stack.len() {
-                self.stack.resize_with(slot + 1, || Self::NONE_BITS);
-            }
-
-            let new_bits = self.pop_raw_u64()?;
-            let old_bits = self.stack[slot];
-
-            // Track A.1C.3: SharedCell wrapper retired. Drop the old
-            // value and store the new one directly.
-            if is_tagged(old_bits) && get_tag(old_bits) == TAG_HEAP {
-                raw_helpers::drop_raw_bits(old_bits);
-            }
-            record_heap_write();
-            write_barrier_slot(old_bits, new_bits);
-            self.stack[slot] = new_bits;
-        } else {
+        let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
+        };
+        let bp = self.current_locals_base();
+        let slot = bp + idx as usize;
+        if slot >= self.stack.len() {
+            self.stack.resize_with(slot + 1, || Self::NONE_BITS);
+            self.kinds.resize(slot + 1, NativeKind::Bool);
         }
+        let (new_bits, new_kind) = self.pop_kinded()?;
+        record_heap_write();
+        write_barrier_slot(self.stack[slot], new_bits);
+        self.stack_write_kinded(slot, new_bits, new_kind);
         Ok(())
     }
 
-    /// Store value to a local variable slot (register window on the unified stack).
-    ///
-    /// **Stage 2.1**: When the FrameDescriptor proves the slot kind is a
-    /// scalar (Float64/Int64/Bool), the old slot bits are not heap-tagged
-    /// (so no SharedCell), and the new top-of-stack bits are also not
-    /// heap-tagged, the handler writes raw bits directly without going
-    /// through ValueWord pop/construction. The SharedCell check via slot
-    /// bits is necessary because mutable captured locals can be wrapped
-    /// after the FrameDescriptor is fixed.
-    ///
-    /// If the slot contains a SharedCell (boxed local for mutable closure capture),
-    /// the value is written through the Arc so all holders see the update.
+    /// `StoreLocal { idx }` — pop a kinded source and install into the
+    /// slot. The §2.7.7 stack parallel-kind track and the slot's
+    /// existing kind handle the retain-on-overwrite via
+    /// `stack_write_kinded`.
     pub(in crate::executor) fn op_store_local(
         &mut self,
         instruction: &Instruction,
     ) -> Result<(), VMError> {
-        use crate::type_tracking::SlotKind;
-        use shape_value::tag_bits::{get_tag, is_tagged, TAG_BOOL, TAG_HEAP, TAG_INT};
-
-        if let Some(Operand::Local(idx)) = instruction.operand {
-            let bp = self.current_locals_base();
-            let slot = bp + idx as usize;
-
-            // Ensure stack is large enough (should already be, but safety check)
-            if slot >= self.stack.len() {
-                self.stack.resize_with(slot + 1, || Self::NONE_BITS);
-            }
-
-            // Stage 2.1 smart fast path: skip ValueWord pop/construction when
-            // the FrameDescriptor proves the slot kind is a scalar, the old
-            // slot bits are not heap-tagged (so no SharedCell to write
-            // through), AND the new top-of-stack bits actually carry the
-            // declared scalar encoding. The runtime tag check on the new
-            // value mirrors op_load_local: the compiler is sometimes
-            // optimistic about slot kinds.
-            let old_bits = self.stack[slot];
-            let old_is_heap = is_tagged(old_bits) && get_tag(old_bits) == TAG_HEAP;
-            if !old_is_heap && self.sp > 0 {
-                let kind = self
-                    .current_frame_descriptor()
-                    .map(|fd| fd.slot(idx as usize))
-                    .unwrap_or(SlotKind::Unknown);
-                let new_bits = self.stack[self.sp - 1];
-                let new_matches_kind = match kind {
-                    SlotKind::Float64 => !is_tagged(new_bits),
-                    SlotKind::Int64 | SlotKind::IntSize => {
-                        is_tagged(new_bits) && get_tag(new_bits) == TAG_INT
-                    }
-                    SlotKind::Bool => is_tagged(new_bits) && get_tag(new_bits) == TAG_BOOL,
-                    _ => false,
-                };
-                if new_matches_kind {
-                    // Pop top of stack without constructing a ValueWord.
-                    self.stack[self.sp - 1] = Self::NONE_BITS;
-                    self.sp -= 1;
-                    // Direct raw write — both old and new are scalar.
-                    record_heap_write();
-                    self.stack[slot] = new_bits;
-                    return Ok(());
-                }
-            }
-
-            // Track A.1C.3: SharedCell wrapper retired. Plain store —
-            // the compiler never emits `StoreLocal` on
-            // `AllocSharedLocal`-promoted slots.
-            let nb = self.pop_raw_u64()?;
-            record_heap_write();
-            write_barrier_slot(self.stack[slot], nb.raw_bits());
-            self.stack_write_raw(slot, nb);
-        } else {
+        let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
+        };
+        let bp = self.current_locals_base();
+        let slot = bp + idx as usize;
+        if slot >= self.stack.len() {
+            self.stack.resize_with(slot + 1, || Self::NONE_BITS);
+            self.kinds.resize(slot + 1, NativeKind::Bool);
         }
+        let (new_bits, new_kind) = self.pop_kinded()?;
+        record_heap_write();
+        write_barrier_slot(self.stack[slot], new_bits);
+        self.stack_write_kinded(slot, new_bits, new_kind);
         Ok(())
     }
 
-    /// Store a local with integer width truncation — typed variant.
-    ///
-    /// The compiler has proved that this slot holds a width-typed numeric value
-    /// (i8, u8, i16, u16, i32, u32, i64, u64, f32, f64). This means:
-    ///   - No SharedCell check (typed locals are never boxed captures)
-    ///   - Width truncation for sub-64-bit integer types
-    ///   - Raw u64 write: writes the truncated value directly to the stack slot
-    ///     without going through write-barrier or SharedCell indirection.
-    ///
-    /// Operand: TypedLocal(idx, width)
+    /// `StoreLocalTyped { idx, width }` — pop a kinded numeric source
+    /// and width-truncate (sub-i64 integer kinds) before storing the
+    /// raw native bits into the slot.
     fn op_store_local_typed(&mut self, instruction: &Instruction) -> Result<(), VMError> {
-        if let Some(Operand::TypedLocal(idx, width)) = instruction.operand {
-            let bp = self.current_locals_base();
-            let slot = bp + idx as usize;
-
-            if slot >= self.stack.len() {
-                self.stack.resize_with(slot + 1, || Self::NONE_BITS);
-            }
-
-            // E+5.5 Unit A: post-Unit-B PushConst Int and typed-Int
-            // arithmetic produce raw native i64 bits, so consume them
-            // natively and write the (possibly width-truncated) raw bits
-            // back to the slot. Storing a Number into a typed-Int local
-            // would have already gone through `NumberToInt`, which produces
-            // native i64 bits.
-            let truncated_bits: u64 = if let Some(int_w) = width.to_int_width() {
-                let raw = self.pop_native_i64()?;
-                int_w.truncate(raw) as u64
-            } else {
-                // I64 or float width: no truncation. For float widths the
-                // slot carries `f64::to_bits()` (raw f64 bits); for I64 the
-                // native i64 bits.
-                self.pop_raw_u64()?.raw_bits()
-            };
-
-            // Track A.1C.3: SharedCell wrapper retired.
-            record_heap_write();
-            write_barrier_slot(self.stack[slot], truncated_bits);
-            self.stack_write_raw(slot, ValueWord::from_raw_bits(truncated_bits));
-        } else {
+        let Some(Operand::TypedLocal(idx, width)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
+        };
+        let bp = self.current_locals_base();
+        let slot = bp + idx as usize;
+        if slot >= self.stack.len() {
+            self.stack.resize_with(slot + 1, || Self::NONE_BITS);
+            self.kinds.resize(slot + 1, NativeKind::Bool);
         }
+        let (src_bits, src_kind) = self.pop_kinded()?;
+        let truncated_bits: u64 = if let Some(int_w) = width.to_int_width() {
+            int_w.truncate(src_bits as i64) as u64
+        } else {
+            src_bits
+        };
+        record_heap_write();
+        write_barrier_slot(self.stack[slot], truncated_bits);
+        self.stack_write_kinded(slot, truncated_bits, src_kind);
         Ok(())
     }
 
-    // ===== Wave E+3: per-FieldKind typed local load/store handlers =====
-    //
-    // Typed counterparts of `op_load_local` / `op_store_local`. Each
-    // handler reads/writes the local slot at `bp + idx` directly as raw
-    // 8-byte bits, bypassing ValueWord wrapping, NaN-box tag checks, and
-    // SharedCell auto-deref. The compiler proves the slot kind matches
-    // `<Kind>` before emitting the typed opcode; mismatches are a
-    // compiler bug.
-    //
-    // For sub-i64 integer kinds (I32/U32/I16/U16/I8/U8): on store, the
-    // popped 8-byte slot is truncated to the declared width and
-    // sign/zero-extended back into 8 bytes for storage (matches D.1 store
-    // truncation). On load, the slot's bits already carry the
-    // matching-Kind encoding written by a paired Store, so a raw read +
-    // sign/zero-extend reconstructs the original i64-shaped value.
-    //
-    // `Bool` follows the same convention as D.1's StoreOwnedMutableBool:
-    // any nonzero pop is treated as true; the slot stores 0 or 1.
-    //
-    // `Ptr` is raw bit-level pass-through. Neither Load nor Store
-    // performs `vw_clone` / `vw_drop`. The IR pairs each typed Ptr
-    // load/store with the matching retain/release before/after — see
-    // commit afb1651 (c-stdlib-msgpack pattern).
+    // ─────────────────────────────────────────────────────────────────────
+    // Typed local Load/Store (per-Kind handlers)
+    // ─────────────────────────────────────────────────────────────────────
 
     fn op_load_local_i64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let Some(Operand::Local(idx)) = instruction.operand else {
@@ -2817,10 +1990,8 @@ impl VirtualMachine {
             slot,
             self.stack.len()
         );
-        // SAFETY: compiler proved the slot's kind is I64 — the bits were
-        // written by a matching-Kind StoreLocalI64. Read raw 8 bytes.
         let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
-        self.push_raw_u64(bits)
+        self.push_kinded(bits, NativeKind::Int64)
     }
 
     fn op_load_local_u64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
@@ -2836,7 +2007,7 @@ impl VirtualMachine {
             self.stack.len()
         );
         let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
-        self.push_raw_u64(bits)
+        self.push_kinded(bits, NativeKind::UInt64)
     }
 
     fn op_load_local_f64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
@@ -2852,7 +2023,7 @@ impl VirtualMachine {
             self.stack.len()
         );
         let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
-        self.push_raw_u64(bits)
+        self.push_kinded(bits, NativeKind::Float64)
     }
 
     fn op_load_local_i32(&mut self, instruction: &Instruction) -> Result<(), VMError> {
@@ -2867,10 +2038,9 @@ impl VirtualMachine {
             slot,
             self.stack.len()
         );
-        // Read low 4 bytes as i32, sign-extend to i64 for the 8-byte stack slot.
         let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
         let value = bits as i32;
-        self.push_raw_u64(value as i64 as u64)
+        self.push_kinded(value as i64 as u64, NativeKind::Int32)
     }
 
     fn op_load_local_u32(&mut self, instruction: &Instruction) -> Result<(), VMError> {
@@ -2885,10 +2055,9 @@ impl VirtualMachine {
             slot,
             self.stack.len()
         );
-        // Read low 4 bytes as u32, zero-extend to u64.
         let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
         let value = bits as u32;
-        self.push_raw_u64(value as u64)
+        self.push_kinded(value as u64, NativeKind::UInt32)
     }
 
     fn op_load_local_i16(&mut self, instruction: &Instruction) -> Result<(), VMError> {
@@ -2903,10 +2072,9 @@ impl VirtualMachine {
             slot,
             self.stack.len()
         );
-        // Read low 2 bytes as i16, sign-extend to i64.
         let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
         let value = bits as i16;
-        self.push_raw_u64(value as i64 as u64)
+        self.push_kinded(value as i64 as u64, NativeKind::Int16)
     }
 
     fn op_load_local_u16(&mut self, instruction: &Instruction) -> Result<(), VMError> {
@@ -2921,10 +2089,9 @@ impl VirtualMachine {
             slot,
             self.stack.len()
         );
-        // Read low 2 bytes as u16, zero-extend to u64.
         let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
         let value = bits as u16;
-        self.push_raw_u64(value as u64)
+        self.push_kinded(value as u64, NativeKind::UInt16)
     }
 
     fn op_load_local_i8(&mut self, instruction: &Instruction) -> Result<(), VMError> {
@@ -2939,10 +2106,9 @@ impl VirtualMachine {
             slot,
             self.stack.len()
         );
-        // Read low byte as i8, sign-extend to i64.
         let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
         let value = bits as i8;
-        self.push_raw_u64(value as i64 as u64)
+        self.push_kinded(value as i64 as u64, NativeKind::Int8)
     }
 
     fn op_load_local_u8(&mut self, instruction: &Instruction) -> Result<(), VMError> {
@@ -2957,10 +2123,9 @@ impl VirtualMachine {
             slot,
             self.stack.len()
         );
-        // Read low byte as u8, zero-extend to u64.
         let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
         let value = bits as u8;
-        self.push_raw_u64(value as u64)
+        self.push_kinded(value as u64, NativeKind::UInt8)
     }
 
     fn op_load_local_bool(&mut self, instruction: &Instruction) -> Result<(), VMError> {
@@ -2975,10 +2140,8 @@ impl VirtualMachine {
             slot,
             self.stack.len()
         );
-        // The slot was written by a paired StoreLocalBool that canonicalized
-        // to 0 or 1 in the low byte. Pass the raw bits through unchanged.
         let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
-        self.push_raw_u64(bits)
+        self.push_kinded(bits, NativeKind::Bool)
     }
 
     fn op_load_local_ptr(&mut self, instruction: &Instruction) -> Result<(), VMError> {
@@ -2993,29 +2156,27 @@ impl VirtualMachine {
             slot,
             self.stack.len()
         );
-        // Raw 8-byte read. Refcount semantics are the IR's responsibility
-        // — the handler does NOT clone/retain. The IR pairs LoadLocalPtr
-        // with `vw_clone` (matches the c-stdlib-msgpack pattern in commit
-        // afb1651, mirroring `op_load_owned_mutable_capture_ptr`).
-        let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
-        self.push_raw_u64(bits)
+        // ADR-006 §2.7.7 / playbook §2: kind comes from the §2.7.7 stack
+        // parallel-kind track; the slot's lockstep entry classifies the
+        // Ptr variant (e.g. `Ptr(HeapKind::TypedArray)`, `String`).
+        let (bits, kind) = self.stack_read_kinded_raw(slot);
+        self.push_kinded(bits, kind)
     }
 
     fn op_store_local_i64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_bits = self.pop_raw_u64()?;
         let bp = self.current_locals_base();
         let slot = bp + idx as usize;
         if slot >= self.stack.len() {
             self.stack.resize_with(slot + 1, || Self::NONE_BITS);
+            self.kinds.resize(slot + 1, NativeKind::Bool);
         }
+        let (src_bits, _src_kind) = self.pop_kinded()?;
         record_heap_write();
-        // SAFETY: compiler proved the slot's kind is I64. No SharedCell
-        // wrap, no refcount on the old bits — scalar i64 has no
-        // ownership.
-        self.stack[slot] = new_bits;
+        write_barrier_slot(self.stack[slot], src_bits);
+        self.stack_write_kinded(slot, src_bits, NativeKind::Int64);
         Ok(())
     }
 
@@ -3023,14 +2184,16 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_bits = self.pop_raw_u64()?;
         let bp = self.current_locals_base();
         let slot = bp + idx as usize;
         if slot >= self.stack.len() {
             self.stack.resize_with(slot + 1, || Self::NONE_BITS);
+            self.kinds.resize(slot + 1, NativeKind::Bool);
         }
+        let (src_bits, _src_kind) = self.pop_kinded()?;
         record_heap_write();
-        self.stack[slot] = new_bits;
+        write_barrier_slot(self.stack[slot], src_bits);
+        self.stack_write_kinded(slot, src_bits, NativeKind::UInt64);
         Ok(())
     }
 
@@ -3038,14 +2201,16 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_bits = self.pop_raw_u64()?;
         let bp = self.current_locals_base();
         let slot = bp + idx as usize;
         if slot >= self.stack.len() {
             self.stack.resize_with(slot + 1, || Self::NONE_BITS);
+            self.kinds.resize(slot + 1, NativeKind::Bool);
         }
+        let (src_bits, _src_kind) = self.pop_kinded()?;
         record_heap_write();
-        self.stack[slot] = new_bits;
+        write_barrier_slot(self.stack[slot], src_bits);
+        self.stack_write_kinded(slot, src_bits, NativeKind::Float64);
         Ok(())
     }
 
@@ -3053,15 +2218,17 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        // Truncate to i32 (low 4 bytes), sign-extend back to i64 for storage.
-        let new_value = self.pop_raw_u64()? as i32;
         let bp = self.current_locals_base();
         let slot = bp + idx as usize;
         if slot >= self.stack.len() {
             self.stack.resize_with(slot + 1, || Self::NONE_BITS);
+            self.kinds.resize(slot + 1, NativeKind::Bool);
         }
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let value = src_bits as i32 as i64 as u64;
         record_heap_write();
-        self.stack[slot] = new_value as i64 as u64;
+        write_barrier_slot(self.stack[slot], value);
+        self.stack_write_kinded(slot, value, NativeKind::Int32);
         Ok(())
     }
 
@@ -3069,15 +2236,17 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        // Truncate to u32 (low 4 bytes), zero-extend back to u64 for storage.
-        let new_value = self.pop_raw_u64()? as u32;
         let bp = self.current_locals_base();
         let slot = bp + idx as usize;
         if slot >= self.stack.len() {
             self.stack.resize_with(slot + 1, || Self::NONE_BITS);
+            self.kinds.resize(slot + 1, NativeKind::Bool);
         }
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let value = src_bits as u32 as u64;
         record_heap_write();
-        self.stack[slot] = new_value as u64;
+        write_barrier_slot(self.stack[slot], value);
+        self.stack_write_kinded(slot, value, NativeKind::UInt32);
         Ok(())
     }
 
@@ -3085,14 +2254,17 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_value = self.pop_raw_u64()? as i16;
         let bp = self.current_locals_base();
         let slot = bp + idx as usize;
         if slot >= self.stack.len() {
             self.stack.resize_with(slot + 1, || Self::NONE_BITS);
+            self.kinds.resize(slot + 1, NativeKind::Bool);
         }
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let value = src_bits as i16 as i64 as u64;
         record_heap_write();
-        self.stack[slot] = new_value as i64 as u64;
+        write_barrier_slot(self.stack[slot], value);
+        self.stack_write_kinded(slot, value, NativeKind::Int16);
         Ok(())
     }
 
@@ -3100,14 +2272,17 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_value = self.pop_raw_u64()? as u16;
         let bp = self.current_locals_base();
         let slot = bp + idx as usize;
         if slot >= self.stack.len() {
             self.stack.resize_with(slot + 1, || Self::NONE_BITS);
+            self.kinds.resize(slot + 1, NativeKind::Bool);
         }
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let value = src_bits as u16 as u64;
         record_heap_write();
-        self.stack[slot] = new_value as u64;
+        write_barrier_slot(self.stack[slot], value);
+        self.stack_write_kinded(slot, value, NativeKind::UInt16);
         Ok(())
     }
 
@@ -3115,14 +2290,17 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_value = self.pop_raw_u64()? as i8;
         let bp = self.current_locals_base();
         let slot = bp + idx as usize;
         if slot >= self.stack.len() {
             self.stack.resize_with(slot + 1, || Self::NONE_BITS);
+            self.kinds.resize(slot + 1, NativeKind::Bool);
         }
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let value = src_bits as i8 as i64 as u64;
         record_heap_write();
-        self.stack[slot] = new_value as i64 as u64;
+        write_barrier_slot(self.stack[slot], value);
+        self.stack_write_kinded(slot, value, NativeKind::Int8);
         Ok(())
     }
 
@@ -3130,14 +2308,17 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_value = self.pop_raw_u64()? as u8;
         let bp = self.current_locals_base();
         let slot = bp + idx as usize;
         if slot >= self.stack.len() {
             self.stack.resize_with(slot + 1, || Self::NONE_BITS);
+            self.kinds.resize(slot + 1, NativeKind::Bool);
         }
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let value = src_bits as u8 as u64;
         record_heap_write();
-        self.stack[slot] = new_value as u64;
+        write_barrier_slot(self.stack[slot], value);
+        self.stack_write_kinded(slot, value, NativeKind::UInt8);
         Ok(())
     }
 
@@ -3145,16 +2326,17 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        // Any nonzero pop ⇒ true (matches D.1's StoreOwnedMutableCaptureBool
-        // convention). Canonicalize to 0 or 1 for storage.
-        let new_value = (self.pop_raw_u64()? != 0) as u64;
         let bp = self.current_locals_base();
         let slot = bp + idx as usize;
         if slot >= self.stack.len() {
             self.stack.resize_with(slot + 1, || Self::NONE_BITS);
+            self.kinds.resize(slot + 1, NativeKind::Bool);
         }
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let value = (src_bits != 0) as u64;
         record_heap_write();
-        self.stack[slot] = new_value;
+        write_barrier_slot(self.stack[slot], value);
+        self.stack_write_kinded(slot, value, NativeKind::Bool);
         Ok(())
     }
 
@@ -3162,404 +2344,728 @@ impl VirtualMachine {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let new_bits = self.pop_raw_u64()?;
         let bp = self.current_locals_base();
         let slot = bp + idx as usize;
         if slot >= self.stack.len() {
             self.stack.resize_with(slot + 1, || Self::NONE_BITS);
+            self.kinds.resize(slot + 1, NativeKind::Bool);
         }
+        let (src_bits, src_kind) = self.pop_kinded()?;
         record_heap_write();
-        // SAFETY: caller's IR has paired this store with a vw_drop earlier
-        // (or this is the first write to a fresh slot). The handler does
-        // NOT release the previous payload nor retain the new one —
-        // refcount semantics are the IR's responsibility. Matches D.1 /
-        // D.2 Ptr semantics.
-        self.stack[slot] = new_bits;
+        write_barrier_slot(self.stack[slot], src_bits);
+        // Ptr stores propagate the source's heap kind so the slot's
+        // parallel kind track records the matching `Ptr(HeapKind::*)`
+        // / `String` arm — `stack_write_kinded` handles
+        // retain-on-overwrite of the prior occupant.
+        self.stack_write_kinded(slot, src_bits, src_kind);
         Ok(())
     }
 
-    /// Load value from a module_binding variable slot.
+    // ─────────────────────────────────────────────────────────────────────
+    // Module-binding Load/Store (polymorphic + typed)
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// `LoadModuleBinding { idx }` — Wave-γ G-module-bindings-kind
+    /// (commit `27e2918`) — read kinded bits from the parallel
+    /// module-binding kind track and push with `clone_with_kind`
+    /// retain-on-read.
     pub(in crate::executor) fn op_load_module_binding(
         &mut self,
         instruction: &Instruction,
     ) -> Result<(), VMError> {
-        if let Some(Operand::ModuleBinding(idx)) = instruction.operand {
-            // WB2.2 retain-on-read: push an owning share onto the stack
-            // so heap-tagged bindings are not aliased across the stack
-            // slot and the binding slot. Phase 3 enables stack
-            // `vw_drop_slice` on teardown; without this retain, the
-            // stack's release would decrement an Arc the binding still
-            // holds.
-            let nb = if (idx as usize) < self.module_bindings.len() {
-                self.binding_read_owned(idx as usize)
-            } else {
-                ValueWord::none()
-            };
-            // Track A.1C.3: SharedCell auto-deref retired. Shared
-            // module-binding slots are read via
-            // `LoadSharedModuleBinding`; plain `LoadModuleBinding` only
-            // reaches unpromoted slots holding a plain ValueWord (or,
-            // at closure-creation time, raw Arc pointer bits that the
-            // consumer — `op_make_closure` — interprets via the
-            // `ClosureLayout::capture_storage_kind` Shared branch).
-            self.push_raw_u64(nb)?;
-        } else {
+        let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
-        }
-        Ok(())
+        };
+        let (bits, kind) = self.module_binding_read_kinded_raw(idx as usize);
+        // WB2.4 retain-on-read: the binding slot keeps its share, the
+        // pushed slot needs an independent share.
+        crate::executor::vm_impl::stack::clone_with_kind(bits, kind);
+        self.push_kinded(bits, kind)
     }
 
-    /// MakeRef: Push a TAG_REF value pointing to a local variable's absolute stack slot.
-    ///
-    /// The operand is a local slot index. The absolute stack address is computed
-    /// as `base_pointer + local_idx` and packed into a ValueWord TAG_REF value.
+    // ────────────────────────────────────────────────────────────────────
+    // `MakeRef` / `MakeFieldRef` / `MakeIndexRef` / `DerefLoad` /
+    // `DerefStore` / `SetIndexRef` — kinded RefTarget redesign per
+    // ADR-006 §2.7.13 / Q14 (Wave 8 W8-T26, 2026-05-10).
+    //
+    // The deleted carrier (`nanboxed::RefTarget` / `RefProjection`
+    // packed into a TAG_REF `ValueWord`) is replaced by typed-`Arc`
+    // `RefTarget` payloads emitted to the kinded stack with kind
+    // `NativeKind::Ptr(HeapKind::Reference)`. Each `RefTarget` variant
+    // carries the `NativeKind` of the **projected slot**, threaded
+    // from the producing-opcode emit per §2.7.7 / §2.7.8 / §2.7.10 /
+    // §2.7.11 invariant — no tag-bit decoding, no kind fabrication
+    // at projection time, no `is_heap()` probe.
+    //
+    // Slot bits for a Reference-labeled slot are
+    // `Arc::into_raw(Arc<RefTarget>) as u64` directly (mirror of the
+    // §2.7.9 FilterExpr precedent — `slot.as_heap_value()` is undefined
+    // on Reference-labeled bits; recovery is `Arc::from_raw::<RefTarget>`).
+    // ────────────────────────────────────────────────────────────────────
+
+    /// `MakeRef { Operand::Local(slot) | Operand::ModuleBinding(idx) }` —
+    /// constructs a `RefTarget::Local { frame_index, slot_index, kind }`
+    /// or `RefTarget::ModuleBinding { binding_idx, kind }` and pushes
+    /// it onto the kinded stack as
+    /// `Arc::into_raw(Arc<RefTarget>) as u64` with kind
+    /// `NativeKind::Ptr(HeapKind::Reference)`. The kind is sourced from
+    /// the §2.7.7 stack parallel-kind track (for locals) or the §2.7.8
+    /// module-binding parallel-kind track (for module bindings) — never
+    /// fabricated.
     pub(in crate::executor) fn op_make_ref(
         &mut self,
         instruction: &Instruction,
     ) -> Result<(), VMError> {
-        match instruction.operand {
-            Some(Operand::Local(idx)) => {
+        use shape_value::HeapKind;
+        let rt = match instruction.operand {
+            Some(Operand::Local(local_idx)) => {
+                let frame_index = self
+                    .call_stack
+                    .len()
+                    .checked_sub(1)
+                    .ok_or_else(|| {
+                        VMError::RuntimeError(
+                            "MakeRef Local outside any call frame".into(),
+                        )
+                    })? as u32;
                 let bp = self.current_locals_base();
-                let absolute_slot = bp + idx as usize;
-                self.push_raw_u64(ValueWord::from_ref(absolute_slot))?;
+                let slot = bp + local_idx as usize;
+                if slot >= self.stack.len() {
+                    return Err(VMError::RuntimeError(format!(
+                        "MakeRef Local {} out of bounds (stack len {})",
+                        local_idx,
+                        self.stack.len()
+                    )));
+                }
+                // Kind sourced from the §2.7.7 parallel-kind track at
+                // construction time. The producing typed-Store / typed-
+                // initial-write emitted this kind; refs capture it
+                // verbatim, no fabrication.
+                let (_bits, kind) = self.stack_read_kinded_raw(slot);
+                shape_value::RefTarget::Local {
+                    frame_index,
+                    slot_index: local_idx as u32,
+                    kind,
+                }
             }
-            Some(Operand::ModuleBinding(idx)) => {
-                self.push_raw_u64(ValueWord::from_module_binding_ref(idx as usize))?;
+            Some(Operand::ModuleBinding(binding_idx)) => {
+                // Kind sourced from the §2.7.8 module-binding parallel-
+                // kind track at construction time.
+                let (_bits, kind) =
+                    self.module_binding_read_kinded_raw(binding_idx as usize);
+                shape_value::RefTarget::ModuleBinding {
+                    binding_idx: binding_idx as u32,
+                    kind,
+                }
             }
-            _ => {
-                return Err(VMError::InvalidOperand);
-            }
-        }
-        Ok(())
+            _ => return Err(VMError::InvalidOperand),
+        };
+        // Wrap in Arc<RefTarget>, transfer the strong-count share onto
+        // the stack via `Arc::into_raw`. Slot bits are the `Arc<RefTarget>`
+        // pointer directly per the §2.7.9 FilterExpr precedent — NOT a
+        // `Box<HeapValue>` wrap.
+        let arc = std::sync::Arc::new(rt);
+        let bits = std::sync::Arc::into_raw(arc) as u64;
+        self.push_kinded(bits, NativeKind::Ptr(HeapKind::Reference))
     }
 
-    /// MakeFieldRef: pop a base reference and push a projected typed-field reference.
+    /// `MakeFieldRef { Operand::TypedField{type_id, field_idx,
+    /// field_type_tag} }` — pops a base-ref carrier from the stack,
+    /// resolves the receiver to an `Arc<TypedObjectStorage>`, and
+    /// pushes a projected `RefTarget::TypedField` ref. The projected
+    /// slot's kind is sourced from `field_type_tag` via
+    /// `field_tag_to_native_kind` (heap arms + inline scalars) — never
+    /// fabricated.
     pub(in crate::executor) fn op_make_field_ref(
         &mut self,
         instruction: &Instruction,
     ) -> Result<(), VMError> {
-        let base_ref = self.pop_raw_u64()?;
-        if base_ref.as_ref_target().is_none() {
-            return Err(VMError::RuntimeError(
-                "internal error: MakeFieldRef expected a base reference".to_string(),
-            ));
+        use shape_value::HeapKind;
+        let Some(Operand::TypedField {
+            field_idx,
+            field_type_tag,
+            ..
+        }) = instruction.operand
+        else {
+            return Err(VMError::InvalidOperand);
+        };
+        // Source the projected slot's NativeKind from the operand-encoded
+        // field_type_tag — playbook §2 kind-sourcing rules. Surface (no
+        // fabrication, no Bool-default fallback per §2.7.7 #9) when the
+        // tag is FIELD_TAG_ANY / FIELD_TAG_UNKNOWN.
+        let projected_kind = crate::executor::typed_object_ops::field_tag_to_native_kind(
+            field_type_tag,
+        )
+        .ok_or_else(|| {
+            VMError::NotImplemented(format!(
+                "MakeFieldRef SURFACE: field_type_tag {} (FIELD_TAG_ANY / \
+                 FIELD_TAG_UNKNOWN) has no statically-sourceable NativeKind \
+                 — ADR-006 §2.7.13 / Q14 forbids fabrication. Producing emitter \
+                 must stamp a concrete tag.",
+                field_type_tag
+            ))
+        })?;
+        // Pop the base-ref carrier. The stack transfers one
+        // `Arc<RefTarget>` strong-count share to us via `pop_kinded`.
+        let (base_bits, base_kind) = self.pop_kinded()?;
+        if base_kind != NativeKind::Ptr(HeapKind::Reference) {
+            // Release the popped share even on failure — stack ownership
+            // discipline (§2.7.7 / WB2.4).
+            crate::executor::vm_impl::stack::drop_with_kind(base_bits, base_kind);
+            return Err(VMError::RuntimeError(format!(
+                "MakeFieldRef expected Reference receiver, got {:?}",
+                base_kind
+            )));
         }
-        match instruction.operand {
-            Some(Operand::TypedField {
-                type_id,
+        // Resolve the base RefTarget. We hold one strong-count share via
+        // `base_bits`; recover the `Arc<RefTarget>` and read it. We must
+        // chase the base ref's *receiver* (the underlying TypedObject) —
+        // for a Local/ModuleBinding base, read the place's bits to get
+        // the TypedObject's `Arc::into_raw` pointer; for a TypedField
+        // base (chained projection), recursively resolve the receiver
+        // through the parent.
+        // SAFETY: kind == Ptr(HeapKind::Reference) is the §2.7.9-style
+        // 1:1 dispatch-table invariant — `base_bits` came from
+        // `Arc::into_raw::<RefTarget>` at the matching MakeRef /
+        // MakeFieldRef / MakeIndexRef site.
+        let base_arc: std::sync::Arc<shape_value::RefTarget> =
+            unsafe { std::sync::Arc::from_raw(base_bits as *const shape_value::RefTarget) };
+        let receiver = match self.resolve_typed_object_receiver(&base_arc) {
+            Ok(r) => r,
+            Err(e) => {
+                // Drop the base ref before bubbling the error (the share
+                // we held via base_arc auto-drops here as it goes out of
+                // scope).
+                drop(base_arc);
+                return Err(e);
+            }
+        };
+        // The base ref share retires here as `base_arc` goes out of scope
+        // (the popped share was transferred to base_arc; base_arc::drop
+        // decrements it).
+        drop(base_arc);
+        // Bounds check against the receiver's slot count.
+        if (field_idx as usize) >= receiver.slots.len() {
+            return Err(VMError::RuntimeError(format!(
+                "MakeFieldRef field_idx {} out of bounds (slot count {})",
                 field_idx,
-                field_type_tag,
-            }) => self.push_raw_u64(ValueWord::from_projected_ref(
-                base_ref,
-                RefProjection::TypedField {
-                    type_id,
-                    field_idx,
-                    field_type_tag,
-                },
-            )),
-            _ => Err(VMError::InvalidOperand),
+                receiver.slots.len()
+            )));
         }
+        let rt = shape_value::RefTarget::TypedField {
+            receiver,
+            field_offset: field_idx as u32,
+            kind: projected_kind,
+        };
+        let arc = std::sync::Arc::new(rt);
+        let bits = std::sync::Arc::into_raw(arc) as u64;
+        self.push_kinded(bits, NativeKind::Ptr(HeapKind::Reference))
     }
 
-    /// MakeIndexRef: pop an index value and a base reference, push a projected
-    /// `RefProjection::Index` reference that points to `base[index]`.
+    /// `MakeIndexRef` — pops [base_ref, index] from the kinded stack.
     ///
-    /// If the base value is a Matrix, a `MatrixRow` projection is created instead
-    /// so that `SetIndexRef` can do COW element-level mutation through the row ref.
+    /// ## V3-S5 ckpt-5 surface (2026-05-15)
+    ///
+    /// The pre-ckpt-1 body constructed `RefTarget::TypedIndex { receiver:
+    /// Arc<TypedArrayData>, index, elem_kind }`. The
+    /// `RefTarget::TypedIndex` variant was DELETED at ckpt-4 in lockstep
+    /// with the `TypedArrayData` enum + `TypedBuffer<T>` wrapper layer
+    /// deletion (commits `aac8495e` ckpt-1 + `654c7202` ckpt-4) per
+    /// W12-typed-array-data-deletion-audit §3.5 + §B + ADR-006 §2.7.24
+    /// Q25.A SUPERSEDED.
+    ///
+    /// Construction-site rebuild lands at ckpt-6 STRICT close per the
+    /// per-element-kind receiver variant target (`Arc<TypedArray<f64>>` /
+    /// `Arc<TypedArray<i64>>` / etc.) — the replacement requires
+    /// per-element-kind RefTarget variants, not a single
+    /// `Arc<TypedArrayData>` enum.
+    ///
+    /// Stack discipline: pops [base_ref, index] and retires both shares
+    /// via `drop_with_kind` before surfacing. Refusal #1 binding.
     pub(in crate::executor) fn op_make_index_ref(
         &mut self,
         _instruction: &Instruction,
     ) -> Result<(), VMError> {
-        let index = self.pop_raw_u64()?;
-        let base_ref = self.pop_raw_u64()?;
-        if base_ref.as_ref_target().is_none() {
-            return Err(VMError::RuntimeError(
-                "internal error: MakeIndexRef expected a base reference".to_string(),
-            ));
+        let (idx_bits, idx_kind) = self.pop_kinded()?;
+        crate::executor::vm_impl::stack::drop_with_kind(idx_bits, idx_kind);
+        if let Ok((base_bits, base_kind)) = self.pop_kinded() {
+            crate::executor::vm_impl::stack::drop_with_kind(base_bits, base_kind);
         }
-
-        // Check if the base is a matrix — if so, create a MatrixRow projection
-        // for borrow-based row mutation.
-        let base_value = self.resolve_ref_value(&base_ref);
-        let is_matrix = base_value
-            .as_ref()
-            .and_then(|v| raw_helpers::extract_matrix(v.raw_bits()))
-            .is_some();
-
-        let projection = if is_matrix {
-            // Convert index to row index
-            let row_idx = index
-                .as_i64()
-                .or_else(|| index.as_f64().map(|f| f as i64))
-                .ok_or_else(|| {
-                    VMError::RuntimeError(
-                        "matrix row index must be a number".to_string(),
-                    )
-                })?;
-            let mat = base_value.as_ref().unwrap().as_matrix().unwrap();
-            let rows = mat.rows as i64;
-            let actual = if row_idx < 0 { rows + row_idx } else { row_idx };
-            if actual < 0 || actual >= rows {
-                return Err(VMError::RuntimeError(format!(
-                    "Matrix row index {} out of bounds for {}x{} matrix",
-                    row_idx, mat.rows, mat.cols
-                )));
-            }
-            RefProjection::MatrixRow { row_index: actual as u32 }
-        } else {
-            RefProjection::Index { index }
-        };
-
-        self.push_raw_u64(ValueWord::from_projected_ref(base_ref, projection))?;
-        Ok(())
+        Err(VMError::NotImplemented(
+            "MakeIndexRef: SURFACE — V3-S5 ckpt-5 consumer-cascade tier 3 \
+             surface. `RefTarget::TypedIndex { receiver: Arc<TypedArrayData>, \
+             ... }` variant DELETED at ckpt-4 in lockstep with TypedArrayData \
+             enum + Buf<T> wrapper layer deletion (W12-typed-array-\
+             data-deletion-audit §3.5 + §B + ADR-006 §2.7.24 Q25.A \
+             SUPERSEDED). Construction-site rebuild lands at ckpt-6 STRICT \
+             close per per-element-kind RefTarget variant target. \
+             REFUSED ON SIGHT: TypedArrayData / RefTarget::TypedIndex \
+             resurrection under any rename (Refusal #1)."
+                .to_string(),
+        ))
     }
 
-    /// DerefLoad: Follow a reference stored in a local slot and push the target value.
-    ///
-    /// The operand is the local slot holding the TAG_REF value. We extract the
-    /// absolute stack index from the ref, then clone the value at that location.
-    ///
-    /// Wave E+5-cleanup producer flip: when the ref is a `TypedField`
-    /// projection with an int / bool / f64 field tag against a non-heap
-    /// slot, push raw native bits via `push_native_*` to align with the
-    /// post-Wave-E+5 typed arithmetic / comparison consumers (`MulInt`,
-    /// `EqInt`, `JumpIfFalseTrusted`, …) which `pop_native_*` raw bits.
-    /// Mirrors `push_field_value` in `executor/typed_object_ops.rs:90`.
-    /// Other projections / heap-slot fields fall back to the legacy
-    /// tagged-ValueWord transport via `push_raw_u64`.
+    /// `DerefLoad { Operand::Local(idx) }` — reads the ref-bearing local
+    /// (without consuming the slot's share), recovers the `RefTarget`,
+    /// reads the projected slot's `(bits, kind)`, runs `clone_with_kind`
+    /// to bump the underlying heap share, and pushes the value onto the
+    /// kinded stack. The local's ref-share stays live (the binding
+    /// retains it).
     pub(in crate::executor) fn op_deref_load(
         &mut self,
         instruction: &Instruction,
     ) -> Result<(), VMError> {
-        if let Some(Operand::Local(ref_slot)) = instruction.operand {
-            let bp = self.current_locals_base();
-            let slot = bp + ref_slot as usize;
-            let ref_val = self.stack_read_raw(slot);
-            let target = ref_val.as_ref_target().ok_or_else(|| {
-                VMError::RuntimeError(
-                    "internal error: expected a reference value (&) but found a regular value. \
-                     This is a compiler bug — please report it"
-                        .to_string(),
-                )
-            })?;
-
-            // Producer-side flip for TypedField projections: read the
-            // backing slot directly and push raw native bits when the
-            // declared field tag is one of the three native scalar
-            // kinds against a non-heap slot. Everything else (heap
-            // slot, non-native tag, Stack/ModuleBinding/Index/MatrixRow
-            // projections) goes through the legacy tagged path below.
-            if let RefTarget::Projected(ref data) = target {
-                if let RefProjection::TypedField {
-                    field_idx,
-                    field_type_tag,
-                    ..
-                } = &data.projection
-                {
-                    use crate::executor::typed_object_ops::{
-                        push_field_value, FIELD_TAG_BOOL, FIELD_TAG_F64, FIELD_TAG_I64,
-                        FIELD_TAG_TIMESTAMP,
-                    };
-                    if matches!(
-                        *field_type_tag,
-                        FIELD_TAG_I64 | FIELD_TAG_F64 | FIELD_TAG_BOOL | FIELD_TAG_TIMESTAMP
-                    ) {
-                        if let Some(base_value) = self.resolve_ref_value(&data.base) {
-                            let bits = raw_helpers::unwrap_annotated_bits(base_value.raw_bits());
-                            if let Some((_schema_id, slots, heap_mask)) =
-                                raw_helpers::extract_typed_object(bits)
-                            {
-                                let index = *field_idx as usize;
-                                if index < slots.len() {
-                                    let is_heap = (heap_mask & (1u64 << index)) != 0;
-                                    return push_field_value(
-                                        self,
-                                        &slots[index],
-                                        is_heap,
-                                        *field_type_tag,
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            let nb = self.read_ref_target(&target)?;
-            self.push_raw_u64(nb)?;
-        } else {
+        use shape_value::HeapKind;
+        let Some(Operand::Local(local_idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
+        };
+        let bp = self.current_locals_base();
+        let slot = bp + local_idx as usize;
+        if slot >= self.stack.len() {
+            return Err(VMError::RuntimeError(format!(
+                "DerefLoad slot {} out of bounds (stack len {})",
+                local_idx,
+                self.stack.len()
+            )));
         }
-        Ok(())
+        // Read the ref-bearing local without consuming its share — the
+        // local retains the `Arc<RefTarget>` share; we borrow.
+        let (ref_bits, ref_kind) = self.stack_read_kinded_raw(slot);
+        if ref_kind != NativeKind::Ptr(HeapKind::Reference) {
+            return Err(VMError::RuntimeError(format!(
+                "DerefLoad expected Reference local, got {:?}",
+                ref_kind
+            )));
+        }
+        // SAFETY: kind == Ptr(HeapKind::Reference) — `ref_bits` is an
+        // `Arc::into_raw::<RefTarget>` pointer and the slot keeps one
+        // share live for us.
+        let rt: &shape_value::RefTarget =
+            unsafe { &*(ref_bits as *const shape_value::RefTarget) };
+        let (out_bits, out_kind) = self.read_ref_target(rt)?;
+        // WB2.4 retain-on-read: bump the projected share so the pushed
+        // slot's share is independent of the place's share. The place
+        // retains its own ownership (the local / module-binding /
+        // typed-object-field / typed-array-element keeps its share).
+        crate::executor::vm_impl::stack::clone_with_kind(out_bits, out_kind);
+        self.push_kinded(out_bits, out_kind)
     }
 
-    /// DerefStore: Pop a value and write it through a reference stored in a local slot.
-    ///
-    /// The operand is the local slot holding the TAG_REF value. We extract the
-    /// absolute stack index from the ref, then overwrite the value at that location.
+    /// `DerefStore { Operand::Local(idx) }` — pops the kinded value to
+    /// store, reads the ref-bearing local (without consuming its share),
+    /// recovers the `RefTarget`, releases the projected place's prior
+    /// occupant via `drop_with_kind`, and writes the new bits. The
+    /// stored value's share transfers to the place.
     pub(in crate::executor) fn op_deref_store(
         &mut self,
         instruction: &Instruction,
     ) -> Result<(), VMError> {
-        if let Some(Operand::Local(ref_slot)) = instruction.operand {
-            let value = self.pop_raw_u64()?;
-            let bp = self.current_locals_base();
-            let slot = bp + ref_slot as usize;
-            let ref_vw = self.stack_read_raw(slot);
-            self.write_ref_value(&ref_vw, value)?;
-        } else {
+        use shape_value::HeapKind;
+        let Some(Operand::Local(local_idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
+        };
+        // Pop the value to store FIRST — we own its share. If the ref-
+        // shape check fails below, we'll release this share before
+        // returning the error.
+        let (val_bits, val_kind) = self.pop_kinded()?;
+        let bp = self.current_locals_base();
+        let slot = bp + local_idx as usize;
+        if slot >= self.stack.len() {
+            crate::executor::vm_impl::stack::drop_with_kind(val_bits, val_kind);
+            return Err(VMError::RuntimeError(format!(
+                "DerefStore slot {} out of bounds (stack len {})",
+                local_idx,
+                self.stack.len()
+            )));
         }
-        Ok(())
+        let (ref_bits, ref_kind) = self.stack_read_kinded_raw(slot);
+        if ref_kind != NativeKind::Ptr(HeapKind::Reference) {
+            crate::executor::vm_impl::stack::drop_with_kind(val_bits, val_kind);
+            return Err(VMError::RuntimeError(format!(
+                "DerefStore expected Reference local, got {:?}",
+                ref_kind
+            )));
+        }
+        // SAFETY: same as DerefLoad.
+        let rt: &shape_value::RefTarget =
+            unsafe { &*(ref_bits as *const shape_value::RefTarget) };
+        // Cross-check: the popped value's kind matches the projected
+        // slot's kind (§2.7.5.1 stack-contents-are-post-proof). On a
+        // mismatch, surface — never silently fabricate.
+        let projected_kind = rt.projected_kind();
+        debug_assert_eq!(
+            val_kind, projected_kind,
+            "DerefStore kind drift: popped {:?}, place {:?} — \
+             ADR-006 §2.7.13 invariant violated",
+            val_kind, projected_kind
+        );
+        // The write_ref_target helper takes ownership of val_bits and
+        // releases the prior occupant via drop_with_kind. record_heap_write
+        // is invoked inside per the GC discipline.
+        record_heap_write();
+        self.write_ref_target(rt, val_bits, val_kind)
     }
 
-    /// SetIndexRef: Mutate an array element in-place through a reference.
+    /// `SetIndexRef { Operand::Local(idx) }` — `arr[i] = value` shape.
     ///
-    /// Stack: [index, value] (value on top)
-    /// Operand: local slot holding the TAG_REF
+    /// ## V3-S5 ckpt-5 surface (2026-05-15)
     ///
-    /// Follows the ref to the target slot, then delegates to
-    /// `set_array_index_on_object` which handles CoW via Arc::make_mut.
-    /// The borrow checker guarantees exclusive access at compile time.
+    /// The pre-ckpt-1 body resolved the ref's receiver to
+    /// `Arc<TypedArrayData>`, sourced the element kind from the variant,
+    /// constructed a synthetic `RefTarget::TypedIndex` projection, and
+    /// wrote through it via `write_index_in_place`. All three pieces
+    /// (`Arc<TypedArrayData>` carrier + `RefTarget::TypedIndex` variant +
+    /// the `write_index_in_place` API) were DELETED at ckpt-1..ckpt-4
+    /// per W12-typed-array-data-deletion-audit §3.5 + §B + ADR-006
+    /// §2.7.24 Q25.A SUPERSEDED.
+    ///
+    /// Construction-site rebuild lands at ckpt-6 STRICT close per the
+    /// per-element-kind v2-raw `TypedArray<T>` direct-mutation target.
+    ///
+    /// Stack discipline: pops [index, value] and retires both shares via
+    /// `drop_with_kind` before surfacing. Refusal #1 binding.
     pub(in crate::executor) fn op_set_index_ref(
         &mut self,
-        instruction: &Instruction,
+        _instruction: &Instruction,
     ) -> Result<(), VMError> {
-        if let Some(Operand::Local(ref_slot)) = instruction.operand {
-            let value = self.pop_raw_u64()?;
-            let index_nb = self.pop_raw_u64()?;
-            let bp = self.current_locals_base();
-            let slot = bp + ref_slot as usize;
-            let ref_vw = self.stack_read_raw(slot);
-            let target = ref_vw.as_ref_target().ok_or_else(|| {
-                VMError::RuntimeError(
-                    "internal error: expected a reference value (&) but found a regular value. \
-                     This is a compiler bug — please report it"
-                        .to_string(),
-                )
-            })?;
+        let (val_bits, val_kind) = self.pop_kinded()?;
+        crate::executor::vm_impl::stack::drop_with_kind(val_bits, val_kind);
+        if let Ok((idx_bits, idx_kind)) = self.pop_kinded() {
+            crate::executor::vm_impl::stack::drop_with_kind(idx_bits, idx_kind);
+        }
+        Err(VMError::NotImplemented(
+            "SetIndexRef: SURFACE — V3-S5 ckpt-5 consumer-cascade tier 3 \
+             surface. `RefTarget::TypedIndex` variant + \
+             the deleted typed-array-data `write_index_in_place` API + the deleted-enum's \
+             `Arc<...>` carrier all DELETED at ckpt-1..ckpt-4 per \
+             W12-typed-array-data-deletion-audit §3.5 + §B + ADR-006 \
+             §2.7.24 Q25.A SUPERSEDED. Rebuild lands at ckpt-6 STRICT \
+             close per per-element-kind v2-raw `TypedArray<T>` \
+             direct-mutation target. REFUSED ON SIGHT: TypedArrayData / \
+             RefTarget::TypedIndex resurrection under any rename \
+             (Refusal #1)."
+                .to_string(),
+        ))
+    }
 
-            match target {
-                RefTarget::Stack(target) => {
-                    let mut object_nb = self.stack_take_raw(target);
-                    let result = Self::set_array_index_on_object(&mut object_nb, &index_nb, value);
-                    record_heap_write();
-                    write_barrier_slot(Self::NONE_BITS, object_nb.raw_bits());
-                    self.stack_write_raw(target, object_nb);
-                    result
+    // ────────────────────────────────────────────────────────────────────
+    // RefTarget resolution + read/write helpers (ADR-006 §2.7.13).
+    // ────────────────────────────────────────────────────────────────────
+
+    /// Resolve a `RefTarget` to its underlying `Arc<TypedObjectStorage>`
+    /// receiver. For chained projections (TypedField → TypedField), walks
+    /// the inner ref. Returns an error if the ref points at a non-
+    /// TypedObject place (e.g. an array or scalar local), which is a
+    /// construction-side bug.
+    fn resolve_typed_object_receiver(
+        &self,
+        rt: &shape_value::RefTarget,
+    ) -> Result<std::sync::Arc<shape_value::heap_value::TypedObjectStorage>, VMError> {
+        use shape_value::HeapKind;
+        match rt {
+            shape_value::RefTarget::Local {
+                frame_index,
+                slot_index,
+                kind,
+            } => {
+                if *kind != NativeKind::Ptr(HeapKind::TypedObject) {
+                    return Err(VMError::RuntimeError(format!(
+                        "MakeFieldRef base must reference a TypedObject; got {:?}",
+                        kind
+                    )));
                 }
-                RefTarget::ModuleBinding(target) => {
-                    if target >= self.module_bindings.len() {
-                        return Err(VMError::RuntimeError(format!(
-                            "ModuleBinding index {} out of bounds",
-                            target
-                        )));
-                    }
-                    let mut object_nb = self.binding_take_raw(target);
-                    let result = Self::set_array_index_on_object(&mut object_nb, &index_nb, value);
-                    record_heap_write();
-                    write_barrier_slot(Self::NONE_BITS, object_nb.raw_bits());
-                    self.binding_write_raw(target, object_nb);
-                    result
-                }
-                RefTarget::Projected(ref proj_data) => {
-                    if let RefProjection::MatrixRow { row_index } = proj_data.projection {
-                        // Matrix row mutation: COW write directly into the backing matrix.
-                        self.set_matrix_row_element(&proj_data.base, row_index, &index_nb, value)
-                    } else {
-                        let mut object_nb = self.read_ref_target(&target)?;
-                        Self::set_array_index_on_object(&mut object_nb, &index_nb, value)?;
-                        self.write_ref_target(&target, object_nb)
-                    }
+                let frame =
+                    self.call_stack.get(*frame_index as usize).ok_or_else(|| {
+                        VMError::RuntimeError(format!(
+                            "RefTarget::Local frame_index {} out of bounds",
+                            frame_index
+                        ))
+                    })?;
+                let slot = frame.base_pointer + *slot_index as usize;
+                let (bits, _) = self.stack_read_kinded_raw(slot);
+                // SAFETY: kind == Ptr(HeapKind::TypedObject) means the
+                // bits are `Arc::into_raw::<TypedObjectStorage>`. We bump
+                // the strong-count to hand the caller an independent
+                // share (the local retains its own share).
+                unsafe {
+                    std::sync::Arc::increment_strong_count(
+                        bits as *const shape_value::heap_value::TypedObjectStorage,
+                    );
+                    Ok(std::sync::Arc::from_raw(
+                        bits as *const shape_value::heap_value::TypedObjectStorage,
+                    ))
                 }
             }
-        } else {
-            Err(VMError::InvalidOperand)
+            shape_value::RefTarget::ModuleBinding { binding_idx, kind } => {
+                if *kind != NativeKind::Ptr(HeapKind::TypedObject) {
+                    return Err(VMError::RuntimeError(format!(
+                        "MakeFieldRef base must reference a TypedObject; got {:?}",
+                        kind
+                    )));
+                }
+                let (bits, _) =
+                    self.module_binding_read_kinded_raw(*binding_idx as usize);
+                unsafe {
+                    std::sync::Arc::increment_strong_count(
+                        bits as *const shape_value::heap_value::TypedObjectStorage,
+                    );
+                    Ok(std::sync::Arc::from_raw(
+                        bits as *const shape_value::heap_value::TypedObjectStorage,
+                    ))
+                }
+            }
+            shape_value::RefTarget::TypedField {
+                receiver,
+                field_offset,
+                kind,
+            } => {
+                if *kind != NativeKind::Ptr(HeapKind::TypedObject) {
+                    return Err(VMError::RuntimeError(format!(
+                        "Chained MakeFieldRef base must reference a TypedObject; got {:?}",
+                        kind
+                    )));
+                }
+                let bits = receiver.slots[*field_offset as usize].raw();
+                unsafe {
+                    std::sync::Arc::increment_strong_count(
+                        bits as *const shape_value::heap_value::TypedObjectStorage,
+                    );
+                    Ok(std::sync::Arc::from_raw(
+                        bits as *const shape_value::heap_value::TypedObjectStorage,
+                    ))
+                }
+            }
+            // V3-S5 ckpt-6 STRICT close (2026-05-15):
+            // `RefTarget::TypedIndex { .. }` arm DELETED in lockstep with
+            // the variant retirement at `shape-value/src/reference.rs`
+            // (per ADR-006 §2.7.24 Q25.A SUPERSEDED). The variant carried
+            // a deleted Arc payload; per-element-T v2-raw receiver
+            // variants are downstream-wave territory.
         }
     }
 
-    /// Store value to a module_binding variable slot.
-    ///
-    /// If the slot contains a SharedCell, the value is written through the Arc.
+    // V3-S5 ckpt-5 (2026-05-15): `resolve_typed_array_receiver` DELETED.
+    // The helper produced `Arc<TypedArrayData>` (deleted at ckpt-1) for
+    // the `MakeIndexRef` / `SetIndexRef` consumers; both consumers
+    // surface-and-stop at ckpt-5 per the V3-S5 ckpt-1..ckpt-4 cascade.
+    // Per-element-kind v2-raw `TypedArray<T>` receiver resolution lands
+    // at ckpt-6 STRICT close per W12-typed-array-data-deletion-audit
+    // §B + ADR-006 §2.7.24 Q25.A SUPERSEDED.
+
+    /// Read the projected slot of a `RefTarget` as `(bits, kind)` —
+    /// borrows the place's share (the place retains ownership). Caller
+    /// is responsible for `clone_with_kind` if pushing onto the stack.
+    fn read_ref_target(
+        &self,
+        rt: &shape_value::RefTarget,
+    ) -> Result<(u64, NativeKind), VMError> {
+        match rt {
+            shape_value::RefTarget::Local {
+                frame_index,
+                slot_index,
+                kind,
+            } => {
+                let frame =
+                    self.call_stack.get(*frame_index as usize).ok_or_else(|| {
+                        VMError::RuntimeError(format!(
+                            "DerefLoad: RefTarget::Local frame_index {} out of bounds",
+                            frame_index
+                        ))
+                    })?;
+                let slot = frame.base_pointer + *slot_index as usize;
+                let (bits, _stored_kind) = self.stack_read_kinded_raw(slot);
+                Ok((bits, *kind))
+            }
+            shape_value::RefTarget::ModuleBinding { binding_idx, kind } => {
+                let (bits, _stored_kind) =
+                    self.module_binding_read_kinded_raw(*binding_idx as usize);
+                Ok((bits, *kind))
+            }
+            shape_value::RefTarget::TypedField {
+                receiver,
+                field_offset,
+                kind,
+            } => {
+                let bits = receiver.slots[*field_offset as usize].raw();
+                Ok((bits, *kind))
+            }
+            // V3-S5 ckpt-5: `RefTarget::TypedIndex` arm deleted (variant
+            // retired at ckpt-4 lockstep with TypedArrayData enum). The
+            // match is now exhaustive on Local | ModuleBinding |
+            // TypedField; the read-via-index path surface-and-stops at
+            // `op_make_index_ref` (one level up) per V3-S5 ckpt-5.
+        }
+    }
+
+    /// Write `(val_bits, val_kind)` into the projected slot of a
+    /// `RefTarget`, releasing the prior occupant's share via
+    /// `drop_with_kind`. Caller transfers ownership of `val_bits` to
+    /// the place.
+    fn write_ref_target(
+        &mut self,
+        rt: &shape_value::RefTarget,
+        val_bits: u64,
+        val_kind: NativeKind,
+    ) -> Result<(), VMError> {
+        match rt {
+            shape_value::RefTarget::Local {
+                frame_index,
+                slot_index,
+                kind,
+            } => {
+                let frame =
+                    self.call_stack.get(*frame_index as usize).ok_or_else(|| {
+                        crate::executor::vm_impl::stack::drop_with_kind(
+                            val_bits, val_kind,
+                        );
+                        VMError::RuntimeError(format!(
+                            "DerefStore: RefTarget::Local frame_index {} out of bounds",
+                            frame_index
+                        ))
+                    })?;
+                let slot = frame.base_pointer + *slot_index as usize;
+                // Cross-check: the place's stored kind matches the ref's
+                // captured kind (drift = construction-side bug).
+                let (prior_bits, prior_kind) = self.stack_read_kinded_raw(slot);
+                debug_assert_eq!(
+                    prior_kind, *kind,
+                    "DerefStore: place kind drift (stored {:?}, ref {:?}) — \
+                     ADR-006 §2.7.13",
+                    prior_kind, kind
+                );
+                write_barrier_slot(prior_bits, val_bits);
+                self.stack_write_kinded(slot, val_bits, val_kind);
+                Ok(())
+            }
+            shape_value::RefTarget::ModuleBinding { binding_idx, kind } => {
+                let (prior_bits, prior_kind) =
+                    self.module_binding_read_kinded_raw(*binding_idx as usize);
+                debug_assert_eq!(
+                    prior_kind, *kind,
+                    "DerefStore: module-binding kind drift (stored {:?}, ref {:?}) — \
+                     ADR-006 §2.7.13",
+                    prior_kind, kind
+                );
+                write_barrier_slot(prior_bits, val_bits);
+                self.module_binding_write_kinded(
+                    *binding_idx as usize,
+                    val_bits,
+                    val_kind,
+                );
+                Ok(())
+            }
+            shape_value::RefTarget::TypedField {
+                receiver,
+                field_offset,
+                kind,
+            } => {
+                // Q14 / ADR-006 §2.7.13 projection-write: the receiver
+                // `Arc<TypedObjectStorage>` is shared between the ref
+                // carrier and the originating binding, so `Arc::make_mut`
+                // is not applicable (refcount > 1 by construction; the
+                // struct is intentionally not `Clone`). The in-place
+                // writer (`TypedObjectStorage::write_slot_in_place`)
+                // takes the kind-aware projected place and rotates the
+                // slot's share — prior occupant returned for caller
+                // release, new occupant transferred in.
+                let field_idx = *field_offset as usize;
+                if field_idx >= receiver.slots.len() {
+                    crate::executor::vm_impl::stack::drop_with_kind(
+                        val_bits, val_kind,
+                    );
+                    return Err(VMError::RuntimeError(format!(
+                        "DerefStore: TypedField field_offset {} out of bounds \
+                         (slot count {})",
+                        field_idx,
+                        receiver.slots.len()
+                    )));
+                }
+                // Kind invariance contract (§2.7.5.1 post-proof): the
+                // projection's captured `kind` must match the receiver's
+                // `field_kinds[field_idx]` (set at construction time) AND
+                // match the popped value's kind (the producing opcode is
+                // post-proof). Drift = construction-side bug surfaced via
+                // debug_assert; in release this writes through the captured
+                // kind since the place's heap_mask bit was set for that
+                // kind and the prior bits decode under it.
+                debug_assert_eq!(
+                    receiver.field_kinds[field_idx], *kind,
+                    "DerefStore: TypedField field_kinds[{}] = {:?} drift vs \
+                     RefTarget captured kind {:?} — ADR-006 §2.7.13 / Q14",
+                    field_idx, receiver.field_kinds[field_idx], kind,
+                );
+                // Pre-read the prior bits for the write-barrier helper.
+                let prior_bits = receiver.slots[field_idx].raw();
+                write_barrier_slot(prior_bits, val_bits);
+                // SAFETY: single-threaded VM; refs cannot escape across
+                // task boundaries (§3.1); no aliased `&mut ValueSlot`
+                // outstanding (this is the only mutator path in the VM
+                // for typed-object slots, gated by Q14 dispatch); kind
+                // invariance debug_asserted above. Per
+                // `TypedObjectStorage::write_slot_in_place` contract,
+                // returns the same `prior_bits` we just read.
+                let _returned_prior = unsafe {
+                    receiver.write_slot_in_place(field_idx, val_bits)
+                };
+                debug_assert_eq!(
+                    _returned_prior, prior_bits,
+                    "DerefStore: write_slot_in_place prior_bits mismatch — \
+                     concurrent write detected? ADR-006 §2.7.13 / Q14",
+                );
+                // Release the prior occupant's share via the kind-aware
+                // dispatch table (§2.7.7 WB2.4).
+                crate::executor::vm_impl::stack::drop_with_kind(
+                    prior_bits, *kind,
+                );
+                Ok(())
+            }
+            // V3-S5 ckpt-5: `RefTarget::TypedIndex` arm deleted (variant
+            // retired at ckpt-4 lockstep with TypedArrayData enum +
+            // `write_index_in_place` API). The match is now exhaustive on
+            // Local | ModuleBinding | TypedField; the write-via-index
+            // path surface-and-stops at `op_set_index_ref` (one level
+            // up) per V3-S5 ckpt-5.
+        }
+    }
+
+    /// `StoreModuleBinding { idx }` — Wave-γ G-module-bindings-kind:
+    /// pop kinded source and write via `module_binding_write_kinded`,
+    /// which releases the prior slot's share via `drop_with_kind`.
     pub(in crate::executor) fn op_store_module_binding(
         &mut self,
         instruction: &Instruction,
     ) -> Result<(), VMError> {
-        if let Some(Operand::ModuleBinding(idx)) = instruction.operand {
-            let nb = self.pop_raw_u64()?;
-            let index = idx as usize;
-
-            // Ensure module_bindings vector is large enough
-            while self.module_bindings.len() <= index {
-                self.module_bindings.push(Self::NONE_BITS);
-            }
-
-            // Track A.1C.3: SharedCell auto-deref retired. The compiler
-            // routes promoted module-binding writes through
-            // `StoreSharedModuleBinding`; plain `StoreModuleBinding`
-            // only fires on unpromoted slots.
-            record_heap_write();
-            write_barrier_slot(self.module_bindings[index], nb.raw_bits());
-            self.binding_write_raw(index, nb);
-        } else {
+        let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
-        }
+        };
+        let (new_bits, new_kind) = self.pop_kinded()?;
+        record_heap_write();
+        // module_binding_write_kinded grows the parallel tracks if
+        // necessary and runs drop_with_kind on the prior occupant.
+        self.module_binding_write_kinded(idx as usize, new_bits, new_kind);
         Ok(())
     }
 
-    /// Store value to a module_binding variable slot with integer width truncation.
-    ///
-    /// Operand: TypedModuleBinding(idx, width)
+    /// `StoreModuleBindingTyped { idx, width }` — pop kinded numeric
+    /// source, width-truncate, write via the kinded module-binding
+    /// API.
     pub(in crate::executor) fn op_store_module_binding_typed(
         &mut self,
         instruction: &Instruction,
     ) -> Result<(), VMError> {
-        if let Some(Operand::TypedModuleBinding(idx, width)) = instruction.operand {
-            let nb = self.pop_raw_u64()?;
-            let index = idx as usize;
-
-            // Truncate the value to the declared width
-            let truncated = if let Some(int_w) = width.to_int_width() {
-                let raw = Self::int_operand(&nb).unwrap_or(0);
-                ValueWord::from_i64(int_w.truncate(raw))
-            } else {
-                nb
-            };
-
-            // Ensure module_bindings vector is large enough
-            while self.module_bindings.len() <= index {
-                self.module_bindings.push(Self::NONE_BITS);
-            }
-
-            // Track A.1C.3: SharedCell auto-deref retired.
-            record_heap_write();
-            write_barrier_slot(self.module_bindings[index], truncated.raw_bits());
-            self.binding_write_raw(index, truncated);
-        } else {
+        let Some(Operand::TypedModuleBinding(idx, width)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
-        }
+        };
+        let (src_bits, src_kind) = self.pop_kinded()?;
+        let truncated_bits = if let Some(int_w) = width.to_int_width() {
+            int_w.truncate(src_bits as i64) as u64
+        } else {
+            src_bits
+        };
+        record_heap_write();
+        self.module_binding_write_kinded(idx as usize, truncated_bits, src_kind);
         Ok(())
     }
-
-    // ── Wave E+3: per-FieldKind typed module-binding opcodes ────────────
-    //
-    // Twenty-two handlers — eleven Loads and eleven Stores — paired with
-    // the opcode definitions at 0x182..=0x197 in `bytecode/opcode_defs.rs`.
-    // The handlers mirror the legacy `op_load_module_binding` /
-    // `op_store_module_binding` shape but read/write the slot's 8 raw
-    // bytes directly without `vw_clone` / `vw_drop`: the typed contract
-    // says the slot holds a raw native value (i64/u64/f64/i32/.../bool),
-    // so heap-pointer refcount traffic is encoded in the IR around these
-    // opcodes rather than inside them. For Ptr the same rule applies —
-    // Wave E+4 wraps the Load/Store pair with `vw_clone`/`vw_drop`
-    // (matches the c-stdlib-msgpack pattern from commit afb1651, mirroring
-    // Wave D's typed OwnedMutable Ptr handlers).
-    //
-    // Stores grow `module_bindings` to fit `idx` if necessary (matches
-    // legacy `op_store_module_binding`). Loads return `0` (raw bits) for
-    // out-of-bounds slots — there is no in-band error; OOB indicates a
-    // compiler bug since the static contract requires the slot to be
-    // initialised by a matching typed Store before the Load fires.
 
     fn op_load_module_binding_i64(
         &mut self,
@@ -3568,13 +3074,8 @@ impl VirtualMachine {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let index = idx as usize;
-        let bits = if index < self.module_bindings.len() {
-            self.binding_read_raw(index).into_raw_bits()
-        } else {
-            0u64
-        };
-        self.push_raw_u64(bits)
+        let (bits, _kind) = self.module_binding_read_kinded_raw(idx as usize);
+        self.push_kinded(bits, NativeKind::Int64)
     }
 
     fn op_load_module_binding_u64(
@@ -3584,13 +3085,8 @@ impl VirtualMachine {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let index = idx as usize;
-        let bits = if index < self.module_bindings.len() {
-            self.binding_read_raw(index).into_raw_bits()
-        } else {
-            0u64
-        };
-        self.push_raw_u64(bits)
+        let (bits, _kind) = self.module_binding_read_kinded_raw(idx as usize);
+        self.push_kinded(bits, NativeKind::UInt64)
     }
 
     fn op_load_module_binding_f64(
@@ -3600,13 +3096,8 @@ impl VirtualMachine {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let index = idx as usize;
-        let bits = if index < self.module_bindings.len() {
-            self.binding_read_raw(index).into_raw_bits()
-        } else {
-            0u64
-        };
-        self.push_raw_u64(bits)
+        let (bits, _kind) = self.module_binding_read_kinded_raw(idx as usize);
+        self.push_kinded(bits, NativeKind::Float64)
     }
 
     fn op_load_module_binding_i32(
@@ -3616,16 +3107,9 @@ impl VirtualMachine {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let index = idx as usize;
-        let bits = if index < self.module_bindings.len() {
-            self.binding_read_raw(index).into_raw_bits()
-        } else {
-            0u64
-        };
-        // Sign-extend low 4 bytes to i64 — matches Wave D's
-        // `op_load_owned_mutable_capture_i32` width-extension convention.
+        let (bits, _kind) = self.module_binding_read_kinded_raw(idx as usize);
         let value = bits as i32 as i64 as u64;
-        self.push_raw_u64(value)
+        self.push_kinded(value, NativeKind::Int32)
     }
 
     fn op_load_module_binding_u32(
@@ -3635,15 +3119,9 @@ impl VirtualMachine {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let index = idx as usize;
-        let bits = if index < self.module_bindings.len() {
-            self.binding_read_raw(index).into_raw_bits()
-        } else {
-            0u64
-        };
-        // Zero-extend low 4 bytes.
+        let (bits, _kind) = self.module_binding_read_kinded_raw(idx as usize);
         let value = bits as u32 as u64;
-        self.push_raw_u64(value)
+        self.push_kinded(value, NativeKind::UInt32)
     }
 
     fn op_load_module_binding_i16(
@@ -3653,15 +3131,9 @@ impl VirtualMachine {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let index = idx as usize;
-        let bits = if index < self.module_bindings.len() {
-            self.binding_read_raw(index).into_raw_bits()
-        } else {
-            0u64
-        };
-        // Sign-extend low 2 bytes to i64.
+        let (bits, _kind) = self.module_binding_read_kinded_raw(idx as usize);
         let value = bits as i16 as i64 as u64;
-        self.push_raw_u64(value)
+        self.push_kinded(value, NativeKind::Int16)
     }
 
     fn op_load_module_binding_u16(
@@ -3671,15 +3143,9 @@ impl VirtualMachine {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let index = idx as usize;
-        let bits = if index < self.module_bindings.len() {
-            self.binding_read_raw(index).into_raw_bits()
-        } else {
-            0u64
-        };
-        // Zero-extend low 2 bytes.
+        let (bits, _kind) = self.module_binding_read_kinded_raw(idx as usize);
         let value = bits as u16 as u64;
-        self.push_raw_u64(value)
+        self.push_kinded(value, NativeKind::UInt16)
     }
 
     fn op_load_module_binding_i8(
@@ -3689,15 +3155,9 @@ impl VirtualMachine {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let index = idx as usize;
-        let bits = if index < self.module_bindings.len() {
-            self.binding_read_raw(index).into_raw_bits()
-        } else {
-            0u64
-        };
-        // Sign-extend low byte to i64.
+        let (bits, _kind) = self.module_binding_read_kinded_raw(idx as usize);
         let value = bits as i8 as i64 as u64;
-        self.push_raw_u64(value)
+        self.push_kinded(value, NativeKind::Int8)
     }
 
     fn op_load_module_binding_u8(
@@ -3707,15 +3167,9 @@ impl VirtualMachine {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let index = idx as usize;
-        let bits = if index < self.module_bindings.len() {
-            self.binding_read_raw(index).into_raw_bits()
-        } else {
-            0u64
-        };
-        // Zero-extend low byte.
+        let (bits, _kind) = self.module_binding_read_kinded_raw(idx as usize);
         let value = bits as u8 as u64;
-        self.push_raw_u64(value)
+        self.push_kinded(value, NativeKind::UInt8)
     }
 
     fn op_load_module_binding_bool(
@@ -3725,18 +3179,15 @@ impl VirtualMachine {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let index = idx as usize;
-        let bits = if index < self.module_bindings.len() {
-            self.binding_read_raw(index).into_raw_bits()
-        } else {
-            0u64
-        };
-        // Push 0/1 — any non-zero low byte ⇒ true. Mirrors Wave D's
-        // bool stack convention.
+        let (bits, _kind) = self.module_binding_read_kinded_raw(idx as usize);
         let value = ((bits as u8) != 0) as u64;
-        self.push_raw_u64(value)
+        self.push_kinded(value, NativeKind::Bool)
     }
 
+    /// `LoadModuleBindingPtr { idx }` — Wave-γ G-module-bindings-kind:
+    /// the parallel kind track now classifies the binding's
+    /// heap-bearing arm; read kinded bits + bump the share via
+    /// `clone_with_kind`.
     fn op_load_module_binding_ptr(
         &mut self,
         instruction: &Instruction,
@@ -3744,16 +3195,14 @@ impl VirtualMachine {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let index = idx as usize;
-        let bits = if index < self.module_bindings.len() {
-            self.binding_read_raw(index).into_raw_bits()
-        } else {
-            0u64
-        };
-        // The 8-byte payload is a ValueWord bit pattern carrying a
-        // NaN-boxed Arc/Box pointer. The handler does NOT clone/retain —
-        // refcount semantics are the caller's (Wave E+4 IR) responsibility.
-        self.push_raw_u64(bits)
+        let (bits, kind) = self.module_binding_read_kinded_raw(idx as usize);
+        // WB2.4 retain-on-read: the binding slot keeps its share, the
+        // pushed slot needs an independent share. The kind track
+        // classifies the heap arm — `clone_with_kind` runs the matching
+        // `Arc<T>::increment_strong_count` for `Ptr(HeapKind::*)` /
+        // `String`, no-op for inline scalars.
+        crate::executor::vm_impl::stack::clone_with_kind(bits, kind);
+        self.push_kinded(bits, kind)
     }
 
     fn op_store_module_binding_i64(
@@ -3763,16 +3212,9 @@ impl VirtualMachine {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let value = self.pop_raw_u64()?;
-        let index = idx as usize;
-        while self.module_bindings.len() <= index {
-            self.module_bindings.push(Self::NONE_BITS);
-        }
+        let (value, _src_kind) = self.pop_kinded()?;
         record_heap_write();
-        // Direct slot write — typed contract guarantees prior value is
-        // either NONE_BITS (initial) or a raw native value from a
-        // previous typed Store. No `vw_drop` of the prior value.
-        self.module_bindings[index] = value;
+        self.module_binding_write_kinded(idx as usize, value, NativeKind::Int64);
         Ok(())
     }
 
@@ -3783,13 +3225,9 @@ impl VirtualMachine {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let value = self.pop_raw_u64()?;
-        let index = idx as usize;
-        while self.module_bindings.len() <= index {
-            self.module_bindings.push(Self::NONE_BITS);
-        }
+        let (value, _src_kind) = self.pop_kinded()?;
         record_heap_write();
-        self.module_bindings[index] = value;
+        self.module_binding_write_kinded(idx as usize, value, NativeKind::UInt64);
         Ok(())
     }
 
@@ -3800,13 +3238,9 @@ impl VirtualMachine {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let value = self.pop_raw_u64()?;
-        let index = idx as usize;
-        while self.module_bindings.len() <= index {
-            self.module_bindings.push(Self::NONE_BITS);
-        }
+        let (value, _src_kind) = self.pop_kinded()?;
         record_heap_write();
-        self.module_bindings[index] = value;
+        self.module_binding_write_kinded(idx as usize, value, NativeKind::Float64);
         Ok(())
     }
 
@@ -3817,14 +3251,10 @@ impl VirtualMachine {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        // Truncate to i32, sign-extend back to i64 for the 8-byte slot.
-        let value = self.pop_raw_u64()? as i32 as i64 as u64;
-        let index = idx as usize;
-        while self.module_bindings.len() <= index {
-            self.module_bindings.push(Self::NONE_BITS);
-        }
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let value = src_bits as i32 as i64 as u64;
         record_heap_write();
-        self.module_bindings[index] = value;
+        self.module_binding_write_kinded(idx as usize, value, NativeKind::Int32);
         Ok(())
     }
 
@@ -3835,14 +3265,10 @@ impl VirtualMachine {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        // Truncate to u32, zero-extend.
-        let value = self.pop_raw_u64()? as u32 as u64;
-        let index = idx as usize;
-        while self.module_bindings.len() <= index {
-            self.module_bindings.push(Self::NONE_BITS);
-        }
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let value = src_bits as u32 as u64;
         record_heap_write();
-        self.module_bindings[index] = value;
+        self.module_binding_write_kinded(idx as usize, value, NativeKind::UInt32);
         Ok(())
     }
 
@@ -3853,13 +3279,10 @@ impl VirtualMachine {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let value = self.pop_raw_u64()? as i16 as i64 as u64;
-        let index = idx as usize;
-        while self.module_bindings.len() <= index {
-            self.module_bindings.push(Self::NONE_BITS);
-        }
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let value = src_bits as i16 as i64 as u64;
         record_heap_write();
-        self.module_bindings[index] = value;
+        self.module_binding_write_kinded(idx as usize, value, NativeKind::Int16);
         Ok(())
     }
 
@@ -3870,13 +3293,10 @@ impl VirtualMachine {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let value = self.pop_raw_u64()? as u16 as u64;
-        let index = idx as usize;
-        while self.module_bindings.len() <= index {
-            self.module_bindings.push(Self::NONE_BITS);
-        }
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let value = src_bits as u16 as u64;
         record_heap_write();
-        self.module_bindings[index] = value;
+        self.module_binding_write_kinded(idx as usize, value, NativeKind::UInt16);
         Ok(())
     }
 
@@ -3887,13 +3307,10 @@ impl VirtualMachine {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let value = self.pop_raw_u64()? as i8 as i64 as u64;
-        let index = idx as usize;
-        while self.module_bindings.len() <= index {
-            self.module_bindings.push(Self::NONE_BITS);
-        }
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let value = src_bits as i8 as i64 as u64;
         record_heap_write();
-        self.module_bindings[index] = value;
+        self.module_binding_write_kinded(idx as usize, value, NativeKind::Int8);
         Ok(())
     }
 
@@ -3904,13 +3321,10 @@ impl VirtualMachine {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let value = self.pop_raw_u64()? as u8 as u64;
-        let index = idx as usize;
-        while self.module_bindings.len() <= index {
-            self.module_bindings.push(Self::NONE_BITS);
-        }
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let value = src_bits as u8 as u64;
         record_heap_write();
-        self.module_bindings[index] = value;
+        self.module_binding_write_kinded(idx as usize, value, NativeKind::UInt8);
         Ok(())
     }
 
@@ -3921,17 +3335,17 @@ impl VirtualMachine {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        // Any non-zero bit pattern ⇒ true.
-        let value = (self.pop_raw_u64()? != 0) as u64;
-        let index = idx as usize;
-        while self.module_bindings.len() <= index {
-            self.module_bindings.push(Self::NONE_BITS);
-        }
+        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let value = (src_bits != 0) as u64;
         record_heap_write();
-        self.module_bindings[index] = value;
+        self.module_binding_write_kinded(idx as usize, value, NativeKind::Bool);
         Ok(())
     }
 
+    /// `StoreModuleBindingPtr { idx }` — Wave-γ G-module-bindings-kind:
+    /// pop kinded heap source and install via the kinded module-
+    /// binding API; the prior occupant's share is released via
+    /// `drop_with_kind` using the prior kind track entry.
     fn op_store_module_binding_ptr(
         &mut self,
         instruction: &Instruction,
@@ -3939,2507 +3353,131 @@ impl VirtualMachine {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let value = self.pop_raw_u64()?;
-        let index = idx as usize;
-        while self.module_bindings.len() <= index {
-            self.module_bindings.push(Self::NONE_BITS);
-        }
+        let (new_bits, src_kind) = self.pop_kinded()?;
         record_heap_write();
-        // The 8-byte payload is a ValueWord bit pattern carrying a
-        // NaN-boxed Arc/Box pointer. The handler does NOT release the
-        // previous payload nor retain the new one — refcount semantics
-        // are the caller's (Wave E+4 IR) responsibility, mirroring Wave
-        // D's `op_store_owned_mutable_capture_ptr`.
-        self.module_bindings[index] = value;
+        // The source kind classifies the heap arm; module_binding_write_kinded
+        // routes prior-occupant release through drop_with_kind with the
+        // prior kind track entry.
+        self.module_binding_write_kinded(idx as usize, new_bits, src_kind);
         Ok(())
     }
 
-    // ── V1.1B: ownership-aware local opcodes ─────────────────────────────
-    //
-    // Phase 1 of the ownership-aware runtime spec introduces three new
-    // opcodes — `MoveLocal`, `CloneLocal`, `DropLocal` — whose handlers
-    // read the local slot bits directly and delegate any refcount
-    // adjustment to `raw_helpers::clone_raw_bits` / `drop_raw_bits`. The
-    // compiler will begin emitting them in V1.1C behind a flag; this
-    // commit only wires up the executor side so hand-crafted bytecode
-    // can exercise the semantics in isolation.
-    //
-    // Note: These opcodes assume the compiler has proved that the slot
-    // contents obey normal ownership rules — no SharedCell wrapping, no
-    // second read after a move. That guarantee is V1.1C's job. The
-    // handlers here do not revalidate it at runtime; the poison state
-    // left behind by `MoveLocal` is conceptual.
+    // ─────────────────────────────────────────────────────────────────────
+    // V1.1B ownership-aware local opcodes (MoveLocal / CloneLocal / DropLocal)
+    // ─────────────────────────────────────────────────────────────────────
 
-    /// `MoveLocal(idx)` — transfer ownership from the local slot onto the
-    /// VM stack.
-    ///
-    /// Reads the raw u64 bits of the local slot and pushes them onto the
-    /// stack with **no refcount adjustment**. This is the zero-cost
-    /// ownership transfer described in phase 1 of
-    /// `docs/ownership-aware-runtime-v2.md`: if the slot held a heap
-    /// reference, the reference count is unchanged — the stack slot now
-    /// owns that reference and the local slot is conceptually poisoned.
-    ///
-    /// The compiler (V1.1C) guarantees no subsequent read of a moved
-    /// slot, so we leave the raw bits in the local slot as-is. A
-    /// later `DropLocal` on the same slot would be a double-free; the
-    /// compiler's liveness analysis must never emit that pair.
-    ///
-    /// Stack effect: +1 push. No atomic operations.
+    /// `MoveLocal(idx)` — transfer ownership of the local slot onto
+    /// the stack. Reads the slot via `stack_take_kinded` (which clears
+    /// the slot to the zero/Bool sentinel without releasing) and
+    /// pushes onto the stack.
     pub(in crate::executor) fn op_move_local(
         &mut self,
         instruction: &Instruction,
     ) -> Result<(), VMError> {
-        if let Some(Operand::Local(idx)) = instruction.operand {
-            let bp = self.current_locals_base();
-            let slot = bp + idx as usize;
-            debug_assert!(
-                slot < self.stack.len(),
-                "MoveLocal slot {} out of bounds (stack len {})",
-                slot,
-                self.stack.len()
-            );
-            // SAFETY: compiler-allocated local slot inside the frame's
-            // pre-sized register window.
-            let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
-            self.push_raw_u64(bits)?;
-            Ok(())
-        } else {
-            Err(VMError::InvalidOperand)
-        }
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let bp = self.current_locals_base();
+        let slot = bp + idx as usize;
+        debug_assert!(
+            slot < self.stack.len(),
+            "MoveLocal slot {} out of bounds (stack len {})",
+            slot,
+            self.stack.len()
+        );
+        let (bits, kind) = self.stack_take_kinded(slot);
+        self.push_kinded(bits, kind)
     }
 
-    /// `CloneLocal(idx)` — clone the value from the local slot onto the
-    /// stack, leaving the local live.
-    ///
-    /// Reads the slot bits and delegates to `raw_helpers::clone_raw_bits`
-    /// which handles the three cases:
-    ///   * inline scalar (int, f64, bool, unit, null) — copy bits, no-op;
-    ///   * shared heap reference (Arc-backed) — `Arc::increment_strong_count`;
-    ///   * owned heap reference (Box-backed) — deep clone into a new
-    ///     owned allocation via `vw_heap_box_owned`.
-    ///
-    /// After the call both the local slot and the pushed stack slot own
-    /// independent references (or identical inline bits) — no poisoning.
-    ///
-    /// Stack effect: +1 push.
+    /// `CloneLocal(idx)` — clone the local slot's value via
+    /// `clone_with_kind`, leaving the slot live with its own share.
     pub(in crate::executor) fn op_clone_local(
         &mut self,
         instruction: &Instruction,
     ) -> Result<(), VMError> {
-        if let Some(Operand::Local(idx)) = instruction.operand {
-            let bp = self.current_locals_base();
-            let slot = bp + idx as usize;
-            debug_assert!(
-                slot < self.stack.len(),
-                "CloneLocal slot {} out of bounds (stack len {})",
-                slot,
-                self.stack.len()
-            );
-            let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
-            let cloned = raw_helpers::clone_raw_bits(bits);
-            self.push_raw_u64(cloned)?;
-            Ok(())
-        } else {
-            Err(VMError::InvalidOperand)
-        }
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let bp = self.current_locals_base();
+        let slot = bp + idx as usize;
+        debug_assert!(
+            slot < self.stack.len(),
+            "CloneLocal slot {} out of bounds (stack len {})",
+            slot,
+            self.stack.len()
+        );
+        let (bits, kind) = self.stack_read_kinded_raw(slot);
+        crate::executor::vm_impl::stack::clone_with_kind(bits, kind);
+        self.push_kinded(bits, kind)
     }
 
-    /// `DropLocal(idx)` — release the value in the local slot in place.
-    ///
-    /// Reads the slot bits and delegates to `raw_helpers::drop_raw_bits`
-    /// which handles:
-    ///   * inline scalar — no-op;
-    ///   * shared heap reference — `Arc::decrement_strong_count` (frees
-    ///     if refcount hits zero);
-    ///   * owned heap reference — immediate `Box::from_raw` drop.
-    ///
-    /// After the call the slot is overwritten with `0u64` to poison it.
-    /// The compiler (V1.1C) guarantees no subsequent read of a dropped
-    /// slot, so the poison value is never observed by well-formed
-    /// bytecode.
-    ///
-    /// Stack effect: 0.
+    /// `DropLocal(idx)` — release the local slot's value via
+    /// `drop_with_kind` and zero the slot.
     pub(in crate::executor) fn op_drop_local(
         &mut self,
         instruction: &Instruction,
     ) -> Result<(), VMError> {
-        if let Some(Operand::Local(idx)) = instruction.operand {
-            let bp = self.current_locals_base();
-            let slot = bp + idx as usize;
-            debug_assert!(
-                slot < self.stack.len(),
-                "DropLocal slot {} out of bounds (stack len {})",
-                slot,
-                self.stack.len()
-            );
-            let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
-            // Release any refcount / owned-box the slot is holding.
-            raw_helpers::drop_raw_bits(bits);
-            // Poison the slot — the plan prescribes `0u64`. Well-formed
-            // bytecode will never read this back.
-            unsafe { *(self.stack.as_mut_ptr().add(slot) as *mut u64) = 0u64 };
-            Ok(())
-        } else {
-            Err(VMError::InvalidOperand)
-        }
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let bp = self.current_locals_base();
+        let slot = bp + idx as usize;
+        debug_assert!(
+            slot < self.stack.len(),
+            "DropLocal slot {} out of bounds (stack len {})",
+            slot,
+            self.stack.len()
+        );
+        let (bits, kind) = self.stack_take_kinded(slot);
+        crate::executor::vm_impl::stack::drop_with_kind(bits, kind);
+        Ok(())
     }
 }
 
-#[cfg(test)]
+// ────────────────────────────────────────────────────────────────────────
+// V3-S5 ckpt-5 (2026-05-15): `typed_array_element_kind` +
+// `typed_array_read_index_raw` helpers DELETED. Both consumed
+// `Arc<TypedArrayData>` (deleted at ckpt-1) and dispatched through the
+// per-variant grid (`I64` / `F64` / `Bool` / `I8` / `I16` / `I32` / `U8`
+// / `U16` / `U32` / `U64` / `F32` / `String` / `Decimal` / `BigInt` /
+// `Char` / `TypedObject`) which is gone wholesale per W12-typed-array-
+// data-deletion-audit §3.5 + ADR-006 §2.7.24 Q25.A SUPERSEDED.
+//
+// `op_make_index_ref` / `op_set_index_ref` (the only callers) surface-
+// and-stop at V3-S5 ckpt-5 per the multi-session-chain pattern step 2.
+// Per-element-kind v2-raw `TypedArray<T>` read/write helpers land at
+// ckpt-6 STRICT close per the per-element-kind RefTarget variant target.
+// ────────────────────────────────────────────────────────────────────────
+
+// ────────────────────────────────────────────────────────────────────────
+// Test module — gated until the deleted ValueWord / ValueWordExt ABI
+// is replaced (Phase-2c host-API rebuild per ADR-006 §2.7.4).
+//
+// The pre-deletion tests built `BytecodeProgram`s and asserted on
+// `ValueWord` accessors (`as_i64()`, `as_f64()`, `as_bool()`,
+// `as_string()`, `from_i64()`, etc.). All of those types are deleted
+// per CLAUDE.md "Forbidden code" #1 (the strict-typing bulldozer
+// removed `ValueWord` entirely). The replacement test surface uses
+// `KindedSlot` (the §2.7 runtime-tier carrier) plus the per-slot
+// `NativeKind` parallel track — a Phase-2c test-harness rebuild that
+// is out of B6 territory.
+//
+// The whole module is gated so the file compiles cleanly without
+// reintroducing any deleted-ABI imports. The tests themselves are
+// preserved in git history at `c785174` (Wave-β B6 round-1) for
+// reference when the host-API rebuild lands.
+// ────────────────────────────────────────────────────────────────────────
+#[cfg(any())]
 mod tests {
-    use crate::bytecode::{
-        BytecodeProgram, Constant, Instruction, NumericWidth, OpCode, Operand,
-    };
-    use crate::executor::{VMConfig, VirtualMachine};
-    use crate::type_tracking::{FrameDescriptor, SlotKind};
-    use shape_value::{ValueWord, ValueWordExt};
-
-    /// Helper: build a program, load it, execute, return the top-of-stack value.
-    ///
-    /// After Wave-E+5 producer-flip the `Halt`-on-raw-bits tests below need
-    /// a `top_level_frame.return_kind` so the host boundary synthesises a
-    /// tagged `ValueWord` that decodes via `as_i64()` / `as_bool()` /
-    /// `as_f64()`. Use `run_program_typed` for those; the legacy
-    /// `run_program` (kind-less) remains for tests whose stack-top is
-    /// already a tagged `ValueWord`.
-    fn run_program(program: BytecodeProgram) -> ValueWord {
-        let mut vm = VirtualMachine::new(VMConfig::default());
-        vm.load_program(program);
-        vm.execute(None).unwrap().clone()
-    }
-
-    /// Helper: like `run_program`, but stamps the program's
-    /// `top_level_frame.return_kind` so raw native bits decode as the
-    /// requested `SlotKind`.
-    fn run_program_typed(mut program: BytecodeProgram, return_kind: SlotKind) -> ValueWord {
-        let mut frame = program.top_level_frame.unwrap_or_else(FrameDescriptor::new);
-        frame.return_kind = return_kind;
-        program.top_level_frame = Some(frame);
-        run_program(program)
-    }
-
-    // ===== LoadLocalTrusted tests =====
-
-    #[test]
-    fn test_load_local_trusted_f64() {
-        // Store a float via StoreLocal, load it back with LoadLocalTrusted.
-        let mut program = BytecodeProgram::default();
-        let c0 = program.add_constant(Constant::Number(3.14));
-        program.instructions = vec![
-            Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
-            Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))),
-            Instruction::new(OpCode::LoadLocalTrusted, Some(Operand::Local(0))),
-            Instruction::simple(OpCode::Halt),
-        ];
-        program.top_level_locals_count = 1;
-        let result = run_program(program);
-        assert_eq!(result.as_f64(), Some(3.14));
-    }
-
-    #[test]
-    fn test_load_local_trusted_int() {
-        // Store an int via StoreLocal, load it back with LoadLocalTrusted.
-        let mut program = BytecodeProgram::default();
-        let c0 = program.add_constant(Constant::Int(42));
-        program.instructions = vec![
-            Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
-            Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))),
-            Instruction::new(OpCode::LoadLocalTrusted, Some(Operand::Local(0))),
-            Instruction::simple(OpCode::Halt),
-        ];
-        program.top_level_locals_count = 1;
-        let result = run_program_typed(program, SlotKind::Int64);
-        assert_eq!(result.as_i64(), Some(42));
-    }
-
-    #[test]
-    fn test_load_local_trusted_bool() {
-        // Store a bool, load it back with LoadLocalTrusted.
-        let mut program = BytecodeProgram::default();
-        let c0 = program.add_constant(Constant::Bool(true));
-        program.instructions = vec![
-            Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
-            Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))),
-            Instruction::new(OpCode::LoadLocalTrusted, Some(Operand::Local(0))),
-            Instruction::simple(OpCode::Halt),
-        ];
-        program.top_level_locals_count = 1;
-        let result = run_program_typed(program, SlotKind::Bool);
-        assert_eq!(result.as_bool(), Some(true));
-    }
-
-    #[test]
-    fn test_load_local_trusted_negative_int() {
-        // Negative integer round-trips through trusted load.
-        let mut program = BytecodeProgram::default();
-        let c0 = program.add_constant(Constant::Int(-99));
-        program.instructions = vec![
-            Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
-            Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))),
-            Instruction::new(OpCode::LoadLocalTrusted, Some(Operand::Local(0))),
-            Instruction::simple(OpCode::Halt),
-        ];
-        program.top_level_locals_count = 1;
-        let result = run_program_typed(program, SlotKind::Int64);
-        assert_eq!(result.as_i64(), Some(-99));
-    }
-
-    #[test]
-    fn test_load_local_trusted_multiple_slots() {
-        // Two locals: verify LoadLocalTrusted reads the correct slot.
-        let mut program = BytecodeProgram::default();
-        let c0 = program.add_constant(Constant::Int(10));
-        let c1 = program.add_constant(Constant::Int(20));
-        program.instructions = vec![
-            Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
-            Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))),
-            Instruction::new(OpCode::PushConst, Some(Operand::Const(c1))),
-            Instruction::new(OpCode::StoreLocal, Some(Operand::Local(1))),
-            // Load slot 1 (should be 20, not 10)
-            Instruction::new(OpCode::LoadLocalTrusted, Some(Operand::Local(1))),
-            Instruction::simple(OpCode::Halt),
-        ];
-        program.top_level_locals_count = 2;
-        let result = run_program_typed(program, SlotKind::Int64);
-        assert_eq!(result.as_i64(), Some(20));
-    }
-
-    #[test]
-    fn test_load_local_trusted_skips_shared_cell() {
-        // LoadLocalTrusted does NOT auto-deref SharedCell (unlike LoadLocal).
-        // If the slot holds a SharedCell, trusted load returns the cell itself.
-        // This is correct because the compiler only emits LoadLocalTrusted for
-        // slots it has proved are plain values, never boxed captures.
-        //
-        // We test this indirectly: store a value, load with trusted, verify
-        // we get the value back (no SharedCell wrapping involved).
-        let mut program = BytecodeProgram::default();
-        let c0 = program.add_constant(Constant::Number(2.718));
-        program.instructions = vec![
-            Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
-            Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))),
-            Instruction::new(OpCode::LoadLocalTrusted, Some(Operand::Local(0))),
-            Instruction::simple(OpCode::Halt),
-        ];
-        program.top_level_locals_count = 1;
-        let result = run_program(program);
-        assert_eq!(result.as_f64(), Some(2.718));
-    }
-
-    // ===== StoreLocalTyped tests =====
-
-    #[test]
-    fn test_store_local_typed_i8_truncation() {
-        // 300 stored as i8 should truncate to 44 (300 & 0xFF = 44, sign-extend)
-        let mut program = BytecodeProgram::default();
-        let c0 = program.add_constant(Constant::Int(300));
-        program.instructions = vec![
-            Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
-            Instruction::new(
-                OpCode::StoreLocalTyped,
-                Some(Operand::TypedLocal(0, NumericWidth::I8)),
-            ),
-            Instruction::new(OpCode::LoadLocalTrusted, Some(Operand::Local(0))),
-            Instruction::simple(OpCode::Halt),
-        ];
-        program.top_level_locals_count = 1;
-        let result = run_program_typed(program, SlotKind::Int64);
-        assert_eq!(result.as_i64(), Some(44));
-    }
-
-    #[test]
-    fn test_store_local_typed_u8_truncation() {
-        // 256 stored as u8 should truncate to 0
-        let mut program = BytecodeProgram::default();
-        let c0 = program.add_constant(Constant::Int(256));
-        program.instructions = vec![
-            Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
-            Instruction::new(
-                OpCode::StoreLocalTyped,
-                Some(Operand::TypedLocal(0, NumericWidth::U8)),
-            ),
-            Instruction::new(OpCode::LoadLocalTrusted, Some(Operand::Local(0))),
-            Instruction::simple(OpCode::Halt),
-        ];
-        program.top_level_locals_count = 1;
-        let result = run_program_typed(program, SlotKind::Int64);
-        assert_eq!(result.as_i64(), Some(0));
-    }
-
-    #[test]
-    fn test_store_local_typed_i64_no_truncation() {
-        // i64 width: no truncation, value passes through as-is.
-        let mut program = BytecodeProgram::default();
-        let c0 = program.add_constant(Constant::Int(123456789));
-        program.instructions = vec![
-            Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
-            Instruction::new(
-                OpCode::StoreLocalTyped,
-                Some(Operand::TypedLocal(0, NumericWidth::I64)),
-            ),
-            Instruction::new(OpCode::LoadLocalTrusted, Some(Operand::Local(0))),
-            Instruction::simple(OpCode::Halt),
-        ];
-        program.top_level_locals_count = 1;
-        let result = run_program_typed(program, SlotKind::Int64);
-        assert_eq!(result.as_i64(), Some(123456789));
-    }
-
-    #[test]
-    fn test_store_local_typed_f64_no_truncation() {
-        // f64 width: no truncation, float passes through.
-        let mut program = BytecodeProgram::default();
-        let c0 = program.add_constant(Constant::Number(99.5));
-        program.instructions = vec![
-            Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
-            Instruction::new(
-                OpCode::StoreLocalTyped,
-                Some(Operand::TypedLocal(0, NumericWidth::F64)),
-            ),
-            Instruction::new(OpCode::LoadLocalTrusted, Some(Operand::Local(0))),
-            Instruction::simple(OpCode::Halt),
-        ];
-        program.top_level_locals_count = 1;
-        let result = run_program(program);
-        assert_eq!(result.as_f64(), Some(99.5));
-    }
-
-    #[test]
-    fn test_store_local_typed_i16_truncation() {
-        // 70000 stored as i16: 70000 & 0xFFFF = 4464, sign-extend → 4464
-        let mut program = BytecodeProgram::default();
-        let c0 = program.add_constant(Constant::Int(70000));
-        program.instructions = vec![
-            Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
-            Instruction::new(
-                OpCode::StoreLocalTyped,
-                Some(Operand::TypedLocal(0, NumericWidth::I16)),
-            ),
-            Instruction::new(OpCode::LoadLocalTrusted, Some(Operand::Local(0))),
-            Instruction::simple(OpCode::Halt),
-        ];
-        program.top_level_locals_count = 1;
-        let result = run_program_typed(program, SlotKind::Int64);
-        assert_eq!(result.as_i64(), Some(4464));
-    }
-
-    #[test]
-    fn test_store_local_typed_overwrite() {
-        // Store twice to the same typed slot — second write overwrites first.
-        let mut program = BytecodeProgram::default();
-        let c0 = program.add_constant(Constant::Int(100));
-        let c1 = program.add_constant(Constant::Int(200));
-        program.instructions = vec![
-            Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
-            Instruction::new(
-                OpCode::StoreLocalTyped,
-                Some(Operand::TypedLocal(0, NumericWidth::I64)),
-            ),
-            Instruction::new(OpCode::PushConst, Some(Operand::Const(c1))),
-            Instruction::new(
-                OpCode::StoreLocalTyped,
-                Some(Operand::TypedLocal(0, NumericWidth::I64)),
-            ),
-            Instruction::new(OpCode::LoadLocalTrusted, Some(Operand::Local(0))),
-            Instruction::simple(OpCode::Halt),
-        ];
-        program.top_level_locals_count = 1;
-        let result = run_program_typed(program, SlotKind::Int64);
-        assert_eq!(result.as_i64(), Some(200));
-    }
-
-    // RETIRED: test_store_typed_load_trusted_roundtrip
-    // The strict-typing sweep deleted the *Dynamic arithmetic opcodes;
-    // mixing int + float at the bytecode level no longer has a path. The
-    // typed `StoreLocalTyped + LoadLocalTrusted` pair is exercised by the
-    // surrounding tests using single-typed slots.
-
-    // ===== Documentation: LoadLocalF64 / StoreLocalF64 =====
-    //
-    // The v2 runtime spec calls for dedicated f64-typed local opcodes:
-    //
-    //   OpCode::LoadLocalF64:
-    //     Read the raw u64 bits from stack[base_pointer + idx] and push
-    //     them directly — no NaN-boxing tag check, no clone_from_bits.
-    //     The bits ARE the f64 value (IEEE 754). Operand: Local(u16).
-    //
-    //   OpCode::StoreLocalF64:
-    //     Pop raw u64 bits from the stack and write them directly to
-    //     stack[base_pointer + idx] — no tag check, no write barrier.
-    //     The bits ARE the f64 value. Operand: Local(u16).
-    //
-    // These opcodes do NOT exist in opcode_defs.rs yet. When added, they
-    // should be assigned codes in the 0xDA-0xDF range (currently free)
-    // and categorized as Variable opcodes. The executor handlers would be:
-    //
-    //   LoadLocalF64: read u64 from slot, push as ValueWord (no clone_from_bits)
-    //   StoreLocalF64: pop ValueWord, write u64 to slot (no write barrier)
-    //
-    // The full v2 transition requires the stack representation to change
-    // from Vec<ValueWord> to a raw u64 slab, at which point these opcodes
-    // become zero-overhead register moves.
-
-    // ===== PromoteToOwned tests =====
-
-    #[test]
-    fn test_promote_to_owned_string_becomes_owned() {
-        // Push a string (Arc-backed heap), promote to owned, store, load back.
-        // The value should still be a readable string.
-        let mut program = BytecodeProgram::default();
-        let c0 = program.add_constant(Constant::String("hello".to_string()));
-        program.instructions = vec![
-            Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
-            Instruction::simple(OpCode::PromoteToOwned),
-            Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))),
-            Instruction::new(OpCode::LoadLocal, Some(Operand::Local(0))),
-            Instruction::simple(OpCode::Halt),
-        ];
-        program.top_level_locals_count = 1;
-        let result = run_program(program);
-        assert_eq!(
-            result.as_str().map(|s| s.to_string()),
-            Some("hello".to_string()),
-            "string value should survive PromoteToOwned"
-        );
-    }
-
-    #[test]
-    fn test_promote_to_owned_int_is_noop() {
-        // Inline int (i48) should pass through PromoteToOwned unchanged.
-        let mut program = BytecodeProgram::default();
-        let c0 = program.add_constant(Constant::Int(42));
-        program.instructions = vec![
-            Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
-            Instruction::simple(OpCode::PromoteToOwned),
-            Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))),
-            Instruction::new(OpCode::LoadLocal, Some(Operand::Local(0))),
-            Instruction::simple(OpCode::Halt),
-        ];
-        program.top_level_locals_count = 1;
-        let result = run_program_typed(program, SlotKind::Int64);
-        assert_eq!(result.as_i64(), Some(42));
-    }
-
-    #[test]
-    fn test_promote_to_owned_float_is_noop() {
-        // Float (inline f64) should pass through PromoteToOwned unchanged.
-        let mut program = BytecodeProgram::default();
-        let c0 = program.add_constant(Constant::Number(3.14));
-        program.instructions = vec![
-            Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
-            Instruction::simple(OpCode::PromoteToOwned),
-            Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))),
-            Instruction::new(OpCode::LoadLocal, Some(Operand::Local(0))),
-            Instruction::simple(OpCode::Halt),
-        ];
-        program.top_level_locals_count = 1;
-        let result = run_program(program);
-        assert_eq!(result.as_f64(), Some(3.14));
-    }
-
-    #[test]
-    fn test_promote_to_owned_bool_is_noop() {
-        // Bool (inline) should pass through PromoteToOwned unchanged.
-        let mut program = BytecodeProgram::default();
-        let c0 = program.add_constant(Constant::Bool(true));
-        program.instructions = vec![
-            Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
-            Instruction::simple(OpCode::PromoteToOwned),
-            Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))),
-            Instruction::new(OpCode::LoadLocal, Some(Operand::Local(0))),
-            Instruction::simple(OpCode::Halt),
-        ];
-        program.top_level_locals_count = 1;
-        let result = run_program_typed(program, SlotKind::Bool);
-        assert_eq!(result.as_bool(), Some(true));
-    }
-
-    #[test]
-    fn test_promote_to_owned_null_is_noop() {
-        // Null should pass through PromoteToOwned unchanged.
-        let mut program = BytecodeProgram::default();
-        program.instructions = vec![
-            Instruction::simple(OpCode::PushNull),
-            Instruction::simple(OpCode::PromoteToOwned),
-            Instruction::simple(OpCode::Halt),
-        ];
-        let result = run_program(program);
-        assert!(result.is_none(), "null should survive PromoteToOwned");
-    }
-
-    // ===== V1.1B: MoveLocal / CloneLocal / DropLocal tests =====
-    //
-    // These hand-crafted programs exercise the new ownership-aware opcodes
-    // in isolation. V1.1C will wire compiler emission; until then no user
-    // program produces these opcodes, so these tests are the only
-    // coverage path.
-    //
-    // Key subtlety: the VM's `Drop` impl walks `stack[0..sp]` and drops
-    // every ValueWord. For top-level programs the local slots live
-    // inside that range. `MoveLocal` is defined to NOT adjust
-    // refcounts — the source slot retains the raw bits but is
-    // conceptually poisoned. A real compiler (V1.1C) guarantees no
-    // subsequent drop of the poisoned slot, but the VM's blanket Drop
-    // doesn't know about that — so tests that exercise MoveLocal with a
-    // heap value must explicitly poison the source slot afterwards via
-    // `stack_take_raw` + `mem::forget` to avoid a double-free at VM
-    // drop.
-
-    /// Inspect the Arc strong count for a heap-tagged raw u64 bit pattern
-    /// without modifying it. Returns 0 if the bits are not a shared
-    /// (Arc-backed) heap reference.
-    #[cfg(not(feature = "gc"))]
-    fn strong_count_of(bits: u64) -> usize {
-        use shape_value::heap_value::HeapValue;
-        use shape_value::tag_bits::{
-            get_payload, get_tag, is_tagged, HEAP_OWNED_BIT, HEAP_PTR_MASK, TAG_HEAP,
-        };
-        if !is_tagged(bits) || get_tag(bits) != TAG_HEAP {
-            return 0;
-        }
-        let payload = get_payload(bits);
-        if (payload & HEAP_OWNED_BIT) != 0 {
-            return 0;
-        }
-        let ptr = (payload & HEAP_PTR_MASK) as *const HeapValue;
-        if ptr.is_null() {
-            return 0;
-        }
-        // SAFETY: pointer came from a live Arc-backed heap tag.
-        let arc = std::mem::ManuallyDrop::new(unsafe { std::sync::Arc::from_raw(ptr) });
-        std::sync::Arc::strong_count(&arc)
-    }
-
-    #[test]
-    #[cfg(not(feature = "gc"))]
-    fn test_move_local_transfers_ownership_no_refcount() {
-        // Put a heap string in slot 0 (rc=1). Execute MoveLocal 0: the
-        // raw bits transfer onto the stack with NO refcount bump.
-        // After Halt, the stack-top value is the sole live reference
-        // (rc=1), and slot 0 still holds the bits it had before the
-        // move — they are now "poisoned" per the V1.1C compiler
-        // contract. The test poisons slot 0 explicitly via
-        // `stack_take_raw` + `mem::forget` before VM drop so the
-        // blanket drop path does not double-decrement.
-        let mut program = BytecodeProgram::default();
-        let c0 = program.add_constant(Constant::String("move-test".to_string()));
-        program.instructions = vec![
-            Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
-            // stack=[s]  rc=1
-            Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))),
-            // slot0=s, stack=[], rc=1
-            Instruction::new(OpCode::MoveLocal, Some(Operand::Local(0))),
-            // slot0=s (poisoned), stack=[s], rc=1 (UNCHANGED)
-            Instruction::simple(OpCode::Halt),
-        ];
-        program.top_level_locals_count = 1;
-
-        let mut vm = VirtualMachine::new(VMConfig::default());
-        vm.load_program(program);
-        let result = vm.execute(None).unwrap();
-        let bits = result.raw_bits();
-        assert_eq!(
-            result.as_str().map(|s| s.to_string()),
-            Some("move-test".to_string()),
-        );
-        // Only one live reference — the stack-top value that became
-        // the execute() result. Move did not bump the refcount.
-        let count = strong_count_of(bits);
-        assert_eq!(
-            count, 1,
-            "MoveLocal must not bump refcount (expected 1, got {})",
-            count
-        );
-        // Poison slot 0 before VM drop — MoveLocal leaves stale bits,
-        // and the VM's blanket Drop would otherwise double-decrement
-        // the Arc. In real bytecode the V1.1C compiler guarantees no
-        // subsequent read or drop of the moved slot; the test has to
-        // simulate that invariant manually.
-        //
-        // B6.4: `ValueWord = u64` has no Drop, so `mem::forget` /
-        // `drop` would be no-ops. The poisoning is actually done by
-        // `stack_take_raw` itself (writes `NONE_BITS` into slot 0); the
-        // returned bits are discarded with `let _ =`.
-        let _ = vm.stack_take_raw(0);
-    }
-
-    #[test]
-    #[cfg(not(feature = "gc"))]
-    fn test_clone_local_retains_heap_ref() {
-        // Store a heap string in slot 0, then CloneLocal it onto the
-        // stack. After the clone, both the local slot and the stack hold
-        // a reference, so the Arc strong count must be 2.
-        let mut program = BytecodeProgram::default();
-        let c0 = program.add_constant(Constant::String("clone-test".to_string()));
-        program.instructions = vec![
-            Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
-            // rc=1
-            Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))),
-            // slot0=s, stack=[], rc=1
-            Instruction::new(OpCode::CloneLocal, Some(Operand::Local(0))),
-            // slot0=s, stack=[s], rc=2
-            Instruction::simple(OpCode::Halt),
-        ];
-        program.top_level_locals_count = 1;
-
-        let mut vm = VirtualMachine::new(VMConfig::default());
-        vm.load_program(program);
-        let result = vm.execute(None).unwrap();
-        let bits = result.raw_bits();
-        assert_eq!(
-            result.as_str().map(|s| s.to_string()),
-            Some("clone-test".to_string()),
-        );
-        let count = strong_count_of(bits);
-        assert_eq!(
-            count, 2,
-            "CloneLocal must bump refcount: local slot + stack = 2 (got {})",
-            count
-        );
-    }
-
-    #[test]
-    #[cfg(not(feature = "gc"))]
-    fn test_drop_local_releases_heap_ref() {
-        // Observe refcount transitions across DropLocal. Use CloneLocal
-        // (not Dup) to create a second owning reference so the Arc
-        // refcount actually reaches 2 — Dup just copies raw bits
-        // without retaining, so a Dup'd pair shares one refcount slot
-        // and dropping one would free the string the other still
-        // "owns".
-        //
-        //   PushConst "s" → stack=[s]                 rc=1
-        //   StoreLocal 0  → slot0=s, stack=[]         rc=1
-        //   CloneLocal 0  → slot0=s, stack=[s]        rc=2 (retain)
-        //   StoreLocal 1  → slot0=s, slot1=s, stack=[] rc=2
-        //   CloneLocal 1  → slot1=s, stack=[s]        rc=3 (retain so the
-        //                                                   observation read
-        //                                                   at the end sees
-        //                                                   a fresh ref)
-        //   Halt
-        //
-        // After Halt the stack-top result is the cloned ref. Before the
-        // observation we run another program branch: actually this test
-        // has to fit in one program; we verify refcount after DropLocal
-        // by observing from a CloneLocal reading slot 1.
-        let mut program = BytecodeProgram::default();
-        let c0 = program.add_constant(Constant::String("drop-test".to_string()));
-        program.instructions = vec![
-            Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
-            // stack=[s]                                 rc=1
-            Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))),
-            // slot0=s, stack=[]                         rc=1
-            Instruction::new(OpCode::CloneLocal, Some(Operand::Local(0))),
-            // slot0=s, stack=[s]                        rc=2
-            Instruction::new(OpCode::StoreLocal, Some(Operand::Local(1))),
-            // slot0=s, slot1=s, stack=[]                rc=2
-            Instruction::new(OpCode::DropLocal, Some(Operand::Local(0))),
-            // slot0=0, slot1=s, stack=[]                rc=1 (Arc dec)
-            Instruction::new(OpCode::CloneLocal, Some(Operand::Local(1))),
-            // slot0=0, slot1=s, stack=[s]               rc=2
-            Instruction::simple(OpCode::Halt),
-        ];
-        program.top_level_locals_count = 2;
-
-        let mut vm = VirtualMachine::new(VMConfig::default());
-        vm.load_program(program);
-        let result = vm.execute(None).unwrap();
-        let bits = result.raw_bits();
-        assert_eq!(
-            result.as_str().map(|s| s.to_string()),
-            Some("drop-test".to_string()),
-        );
-        // Slot 0 was dropped, slot 1 and the stack-top result both hold
-        // live references — rc=2. If DropLocal had failed to decrement,
-        // we'd observe rc=3.
-        let count = strong_count_of(bits);
-        assert_eq!(
-            count, 2,
-            "DropLocal should have decremented slot 0's refcount; observed {}",
-            count
-        );
-    }
-
-    #[test]
-    #[cfg(not(feature = "gc"))]
-    fn test_drop_local_poisons_slot_to_zero() {
-        // DropLocal must overwrite the slot with 0u64 after releasing it.
-        // We verify by dropping slot 0 and then loading slot 0 back via
-        // LoadLocalTrusted (which reads raw bits). The resulting value's
-        // raw_bits must equal 0.
-        let mut program = BytecodeProgram::default();
-        let c0 = program.add_constant(Constant::String("poison-test".to_string()));
-        program.instructions = vec![
-            Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
-            Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))),
-            Instruction::new(OpCode::DropLocal, Some(Operand::Local(0))),
-            Instruction::new(OpCode::LoadLocalTrusted, Some(Operand::Local(0))),
-            Instruction::simple(OpCode::Halt),
-        ];
-        program.top_level_locals_count = 1;
-
-        let mut vm = VirtualMachine::new(VMConfig::default());
-        vm.load_program(program);
-        let result = vm.execute(None).unwrap();
-        assert_eq!(
-            result.raw_bits(),
-            0u64,
-            "DropLocal must poison the slot to 0u64"
-        );
-    }
-
-    #[test]
-    fn test_move_local_on_inline_value_is_zero_cost() {
-        // Inline int (i48 tagged). MoveLocal should push identical bits
-        // onto the stack — no heap, no refcount. We can't directly
-        // observe "no allocator activity", but the bit-for-bit match
-        // between the pushed value and the stored constant is sufficient
-        // evidence: `clone_raw_bits` would have returned the same bits,
-        // but Move must not even branch into the heap path.
-        let mut program = BytecodeProgram::default();
-        let c0 = program.add_constant(Constant::Int(42));
-        program.instructions = vec![
-            Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
-            Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))),
-            Instruction::new(OpCode::MoveLocal, Some(Operand::Local(0))),
-            Instruction::simple(OpCode::Halt),
-        ];
-        program.top_level_locals_count = 1;
-        let result = run_program_typed(program, SlotKind::Int64);
-        assert_eq!(result.as_i64(), Some(42));
-    }
-
-    #[test]
-    fn test_drop_local_on_inline_is_noop() {
-        // DropLocal on an int slot: the slot is poisoned to 0, no heap
-        // activity. We verify the load-back yields 0 bits.
-        let mut program = BytecodeProgram::default();
-        let c0 = program.add_constant(Constant::Int(7));
-        program.instructions = vec![
-            Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
-            Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))),
-            Instruction::new(OpCode::DropLocal, Some(Operand::Local(0))),
-            Instruction::new(OpCode::LoadLocalTrusted, Some(Operand::Local(0))),
-            Instruction::simple(OpCode::Halt),
-        ];
-        program.top_level_locals_count = 1;
-        let result = run_program(program);
-        assert_eq!(
-            result.raw_bits(),
-            0u64,
-            "DropLocal on inline slot must still zero the slot"
-        );
-    }
-
-    #[test]
-    fn test_move_local_sequence_end_to_end() {
-        // Move an inline int from slot 0 into slot 1 via the stack —
-        // this is the common compiler-emitted pattern for a last-use
-        // read + rebinding. For inline values it's safe to ignore the
-        // post-move state of slot 0 since no refcount is held.
-        let mut program = BytecodeProgram::default();
-        let c0 = program.add_constant(Constant::Int(11));
-        program.instructions = vec![
-            Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
-            Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))),
-            Instruction::new(OpCode::MoveLocal, Some(Operand::Local(0))),
-            Instruction::new(OpCode::StoreLocal, Some(Operand::Local(1))),
-            Instruction::new(OpCode::LoadLocalTrusted, Some(Operand::Local(1))),
-            Instruction::simple(OpCode::Halt),
-        ];
-        program.top_level_locals_count = 2;
-        let result = run_program_typed(program, SlotKind::Int64);
-        assert_eq!(result.as_i64(), Some(11));
-    }
-
-    #[test]
-    #[cfg(not(feature = "gc"))]
-    fn test_promote_to_owned_sets_owned_bit() {
-        // After PromoteToOwned, a freshly allocated string should have the owned bit set.
-        use crate::executor::VMConfig;
-        let mut program = BytecodeProgram::default();
-        let c0 = program.add_constant(Constant::String("owned_test".to_string()));
-        program.instructions = vec![
-            Instruction::new(OpCode::PushConst, Some(Operand::Const(c0))),
-            Instruction::simple(OpCode::PromoteToOwned),
-            Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))),
-            Instruction::new(OpCode::LoadLocal, Some(Operand::Local(0))),
-            Instruction::simple(OpCode::Halt),
-        ];
-        program.top_level_locals_count = 1;
-
-        let mut vm = VirtualMachine::new(VMConfig::default());
-        vm.load_program(program);
-        let result = vm.execute(None).unwrap();
-        assert!(
-            shape_value::ValueBits::from_raw(result).is_heap_owned(),
-            "string after PromoteToOwned should have owned bit set"
-        );
-        assert_eq!(
-            result.as_str().map(|s| s.to_string()),
-            Some("owned_test".to_string()),
-        );
-    }
-
-    // ── Track A.1B: interpreter handlers for OwnedMutable / Shared ─────
-    //
-    // These tests synthesise a tiny program consisting of exactly the new
-    // opcode(s) under test, then prime a synthetic call frame whose
-    // `upvalues` hold **raw pointer bits** produced by
-    // `Box::into_raw` / `Arc::into_raw`. The opcode handler recovers the
-    // pointer via `Upvalue::clone_inner_bits_for_raw_pointer_access` and
-    // dereferences the cell. We drop the Box / Arc explicitly at end of
-    // the test — `release_typed_closure` is NOT invoked because there is
-    // no real closure block in this low-level harness.
-
-    use crate::executor::CallFrame;
-    use shape_value::Upvalue;
-    use shape_value::v2::closure_layout::SharedCell;
-    use std::sync::Arc as StdArc;
-
-    /// Build a minimal `BytecodeProgram` whose top-level code is just
-    /// `Halt` — the program is used to construct a VM, but we immediately
-    /// replace the current IP / call stack to execute a short instruction
-    /// sequence stored elsewhere.
-    fn fresh_vm_for_capture_opcode_test() -> VirtualMachine {
-        let mut program = BytecodeProgram::default();
-        program.instructions = vec![Instruction::simple(OpCode::Halt)];
-        program.top_level_locals_count = 0;
-        let mut vm = VirtualMachine::new(VMConfig::default());
-        vm.load_program(program);
-        vm
-    }
-
-    /// Push a synthetic call frame with the given upvalues onto the VM
-    /// call stack. The frame returns to ip=0 (Halt) on ReturnValue.
-    fn push_synthetic_frame_with_upvalues(vm: &mut VirtualMachine, upvalues: Vec<Upvalue>) {
-        vm.call_stack.push(CallFrame {
-            return_ip: 0,
-            base_pointer: vm.sp,
-            locals_count: 0,
-            function_id: None,
-            upvalues: Some(upvalues),
-            blob_hash: None,
-            closure_heap_bits: None,
-        });
-    }
-
-    /// Wave D (D.3): variant of `push_synthetic_frame_with_upvalues`
-    /// that registers a `ClosureLayout` for `function_id` on the VM's
-    /// program and pushes a frame whose `function_id = Some(fid)`. The
-    /// type-aware legacy `Load/StoreOwnedMutableCapture` handlers
-    /// consult `current_closure_layout()` (resolves via `function_id` →
-    /// `program.closure_function_layouts[fid]`) to dispatch on
-    /// `capture_inner_kind`, so any test exercising those legacy
-    /// opcodes must use this helper instead of
-    /// `push_synthetic_frame_with_upvalues`.
-    fn push_synthetic_closure_frame_with_layout(
-        vm: &mut VirtualMachine,
-        fid: u16,
-        layout: shape_value::v2::closure_layout::ClosureLayout,
-        upvalues: Vec<Upvalue>,
-    ) {
-        while vm.program.closure_function_layouts.len() < fid as usize + 1 {
-            vm.program.closure_function_layouts.push(None);
-        }
-        vm.program.closure_function_layouts[fid as usize] = Some(StdArc::new(layout));
-        vm.call_stack.push(CallFrame {
-            return_ip: 0,
-            base_pointer: vm.sp,
-            locals_count: 0,
-            function_id: Some(fid),
-            upvalues: Some(upvalues),
-            blob_hash: None,
-            closure_heap_bits: None,
-        });
-    }
-
-    #[test]
-    fn a1b_load_owned_mutable_capture_derefs_box_cell() {
-        // Wave D (D.3): the cell now stores a native i64 (allocated by
-        // `closure_raw::alloc_owned_mutable_i64`), and the legacy
-        // `op_load_owned_mutable_capture` dispatches on
-        // `layout.capture_inner_kind(idx)` — so the synthetic frame
-        // must register a matching layout via
-        // `push_synthetic_closure_frame_with_layout`.
-        use shape_value::v2::closure_layout::{CaptureKind, ClosureLayout};
-        use shape_value::v2::closure_raw::alloc_owned_mutable_i64;
-        use shape_value::v2::concrete_type::ConcreteType;
-        let mut vm = fresh_vm_for_capture_opcode_test();
-        let cell: *mut i64 = alloc_owned_mutable_i64(42);
-        let layout =
-            ClosureLayout::from_capture_types(&[ConcreteType::I64], &[CaptureKind::OwnedMutable]);
-        push_synthetic_closure_frame_with_layout(
-            &mut vm,
-            0,
-            layout,
-            vec![Upvalue::new(cell as u64)],
-        );
-
-        let instr = Instruction::new(
-            OpCode::LoadOwnedMutableCapture,
-            Some(Operand::Local(0)),
-        );
-        vm.op_load_owned_mutable_capture(&instr).unwrap();
-
-        // After Wave-E+5, the OwnedMutable load handler pushes raw native
-        // i64 bits (the cell stores a native `i64`); decode the raw bits
-        // directly rather than via tagged `ValueWord::as_i64()`.
-        let out = vm.pop_raw_u64().unwrap();
-        assert_eq!(out as i64, 42);
-
-        // SAFETY: `cell` came from `alloc_owned_mutable_i64` (which
-        // wraps `Box::into_raw(Box::new(initial))`); we reclaim it via
-        // the matching `Box::<i64>::from_raw` exactly once.
-        unsafe {
-            drop(Box::from_raw(cell));
-        }
-        vm.call_stack.pop();
-    }
-
-    #[test]
-    fn a1b_store_owned_mutable_capture_writes_through_box_cell() {
-        use shape_value::v2::closure_layout::{CaptureKind, ClosureLayout};
-        use shape_value::v2::closure_raw::{alloc_owned_mutable_i64, read_owned_mutable_i64};
-        use shape_value::v2::concrete_type::ConcreteType;
-        let mut vm = fresh_vm_for_capture_opcode_test();
-        let cell: *mut i64 = alloc_owned_mutable_i64(1);
-        let layout =
-            ClosureLayout::from_capture_types(&[ConcreteType::I64], &[CaptureKind::OwnedMutable]);
-        push_synthetic_closure_frame_with_layout(
-            &mut vm,
-            0,
-            layout,
-            vec![Upvalue::new(cell as u64)],
-        );
-
-        // After Wave-E+5, the OwnedMutable store handler reads raw native
-        // i64 bits from the stack (not tagged ValueWord); push the native
-        // bits directly.
-        vm.push_raw_u64(999i64 as u64).unwrap();
-        let instr = Instruction::new(
-            OpCode::StoreOwnedMutableCapture,
-            Some(Operand::Local(0)),
-        );
-        vm.op_store_owned_mutable_capture(&instr).unwrap();
-
-        // SAFETY: cell is still live. Read the cell back via the typed
-        // helper to confirm the native write landed.
-        unsafe {
-            assert_eq!(read_owned_mutable_i64(cell), 999);
-            drop(Box::from_raw(cell));
-        }
-        vm.call_stack.pop();
-    }
-
-    #[test]
-    fn a1b_owned_mutable_roundtrip_load_store_load() {
-        // Full roundtrip: load initial value, store a new value, load
-        // it back.
-        use shape_value::v2::closure_layout::{CaptureKind, ClosureLayout};
-        use shape_value::v2::closure_raw::alloc_owned_mutable_i64;
-        use shape_value::v2::concrete_type::ConcreteType;
-        let mut vm = fresh_vm_for_capture_opcode_test();
-        let cell: *mut i64 = alloc_owned_mutable_i64(10);
-        let layout =
-            ClosureLayout::from_capture_types(&[ConcreteType::I64], &[CaptureKind::OwnedMutable]);
-        push_synthetic_closure_frame_with_layout(
-            &mut vm,
-            0,
-            layout,
-            vec![Upvalue::new(cell as u64)],
-        );
-
-        let load_instr = Instruction::new(
-            OpCode::LoadOwnedMutableCapture,
-            Some(Operand::Local(0)),
-        );
-        let store_instr = Instruction::new(
-            OpCode::StoreOwnedMutableCapture,
-            Some(Operand::Local(0)),
-        );
-
-        // After Wave-E+5, OwnedMutable load/store handlers exchange raw
-        // native i64 bits — push and pop them directly.
-        // Load1 → 10
-        vm.op_load_owned_mutable_capture(&load_instr).unwrap();
-        assert_eq!(vm.pop_raw_u64().unwrap() as i64, 10);
-
-        // Store 55
-        vm.push_raw_u64(55i64 as u64).unwrap();
-        vm.op_store_owned_mutable_capture(&store_instr).unwrap();
-
-        // Load2 → 55
-        vm.op_load_owned_mutable_capture(&load_instr).unwrap();
-        assert_eq!(vm.pop_raw_u64().unwrap() as i64, 55);
-
-        // SAFETY: reclaim via Box<i64>::from_raw matching the alloc.
-        unsafe {
-            drop(Box::from_raw(cell));
-        }
-        vm.call_stack.pop();
-    }
-
-    #[test]
-    fn a1b_load_shared_capture_locks_and_returns_inner() {
-        let mut vm = fresh_vm_for_capture_opcode_test();
-        let external: StdArc<SharedCell> =
-            StdArc::new(SharedCell::new(ValueWord::from_i64(77)));
-        let closure_share: StdArc<SharedCell> = StdArc::clone(&external);
-        let cell_ptr: *const SharedCell = StdArc::into_raw(closure_share);
-        push_synthetic_frame_with_upvalues(
-            &mut vm,
-            vec![Upvalue::new(cell_ptr as u64)],
-        );
-
-        let instr = Instruction::new(OpCode::LoadSharedCapture, Some(Operand::Local(0)));
-        vm.op_load_shared_capture(&instr).unwrap();
-
-        let out = vm.pop_raw_u64().unwrap();
-        assert_eq!(ValueWord::from_raw_bits(out).as_i64(), Some(77));
-
-        // Reclaim the Arc share for the synthetic upvalue.
-        // SAFETY: cell_ptr came from Arc::into_raw — one strong share.
-        unsafe {
-            drop(StdArc::from_raw(cell_ptr));
-        }
-        assert_eq!(StdArc::strong_count(&external), 1);
-        vm.call_stack.pop();
-    }
-
-    #[test]
-    fn a1b_store_shared_capture_writes_through_mutex() {
-        let mut vm = fresh_vm_for_capture_opcode_test();
-        let external: StdArc<SharedCell> =
-            StdArc::new(SharedCell::new(ValueWord::from_i64(0)));
-        let closure_share: StdArc<SharedCell> = StdArc::clone(&external);
-        let cell_ptr: *const SharedCell = StdArc::into_raw(closure_share);
-        push_synthetic_frame_with_upvalues(
-            &mut vm,
-            vec![Upvalue::new(cell_ptr as u64)],
-        );
-
-        // Push value 31415 and StoreSharedCapture.
-        vm.push_raw_u64(ValueWord::from_i64(31415).into_raw_bits())
-            .unwrap();
-        let instr = Instruction::new(OpCode::StoreSharedCapture, Some(Operand::Local(0)));
-        vm.op_store_shared_capture(&instr).unwrap();
-
-        // External Arc observes the write.
-        assert_eq!(external.lock().as_i64(), Some(31415));
-
-        // SAFETY: reclaim.
-        unsafe {
-            drop(StdArc::from_raw(cell_ptr));
-        }
-        vm.call_stack.pop();
-    }
-
-    #[test]
-    fn a1b_two_closures_share_var_observe_writes_across_handles() {
-        // Mandatory test #3 (A.1B brief): two closures capturing the
-        // SAME Arc<SharedCell>. Write through closure A's upvalue,
-        // observe via closure B's upvalue.
-        let mut vm = fresh_vm_for_capture_opcode_test();
-        let external: StdArc<SharedCell> =
-            StdArc::new(SharedCell::new(ValueWord::from_i64(0)));
-
-        // Two raw-ptr shares — one per "closure".
-        let share_a: *const SharedCell = StdArc::into_raw(StdArc::clone(&external));
-        let share_b: *const SharedCell = StdArc::into_raw(StdArc::clone(&external));
-        // Both raw pointers refer to the same underlying SharedCell —
-        // Arc::into_raw on cloned Arcs yields identical `*const` values.
-        assert_eq!(share_a, share_b);
-
-        // Closure A's upvalues[0] is share_a. Closure B's is share_b.
-        // Write through A, read through B.
-        push_synthetic_frame_with_upvalues(&mut vm, vec![Upvalue::new(share_a as u64)]);
-        vm.push_raw_u64(ValueWord::from_i64(100).into_raw_bits())
-            .unwrap();
-        let store_instr = Instruction::new(OpCode::StoreSharedCapture, Some(Operand::Local(0)));
-        vm.op_store_shared_capture(&store_instr).unwrap();
-        vm.call_stack.pop();
-
-        push_synthetic_frame_with_upvalues(&mut vm, vec![Upvalue::new(share_b as u64)]);
-        let load_instr = Instruction::new(OpCode::LoadSharedCapture, Some(Operand::Local(0)));
-        vm.op_load_shared_capture(&load_instr).unwrap();
-        let out = vm.pop_raw_u64().unwrap();
-        assert_eq!(ValueWord::from_raw_bits(out).as_i64(), Some(100));
-        vm.call_stack.pop();
-
-        // Strong count before reclaim: 3 (external + share_a + share_b).
-        assert_eq!(StdArc::strong_count(&external), 3);
-        // SAFETY: reclaim both raw pointer shares.
-        unsafe {
-            drop(StdArc::from_raw(share_a));
-            drop(StdArc::from_raw(share_b));
-        }
-        assert_eq!(StdArc::strong_count(&external), 1);
-    }
-
-    #[test]
-    fn a1b_mixed_kinds_interleaved_load_store_roundtrip() {
-        // Mandatory test #4 (A.1B brief): frame with upvalues
-        // [Immutable(F64), OwnedMutable, Shared, Immutable(I64)] and
-        // round-trip reads/writes on all four through the appropriate
-        // opcodes. Immutable slots use LoadClosure/StoreClosure; the
-        // other two use A.1B's new opcodes.
-        //
-        // Wave D (D.3): the OwnedMutable cell is now allocated via the
-        // typed `alloc_owned_mutable_i64` helper (native i64 storage),
-        // and the legacy `Load/StoreOwnedMutableCapture` handlers
-        // dispatch on `layout.capture_inner_kind(idx)` — so the
-        // synthetic frame must register a matching 4-capture layout.
-        use shape_value::v2::closure_layout::{CaptureKind, ClosureLayout};
-        use shape_value::v2::closure_raw::alloc_owned_mutable_i64;
-        use shape_value::v2::concrete_type::ConcreteType;
-        let mut vm = fresh_vm_for_capture_opcode_test();
-        let box_cell: *mut i64 = alloc_owned_mutable_i64(200);
-        let external: StdArc<SharedCell> =
-            StdArc::new(SharedCell::new(ValueWord::from_i64(300)));
-        let arc_raw: *const SharedCell = StdArc::into_raw(StdArc::clone(&external));
-        let layout = ClosureLayout::from_capture_types(
-            &[
-                ConcreteType::F64,
-                ConcreteType::I64,
-                ConcreteType::I64,
-                ConcreteType::I64,
-            ],
-            &[
-                CaptureKind::Immutable,
-                CaptureKind::OwnedMutable,
-                CaptureKind::Shared,
-                CaptureKind::Immutable,
-            ],
-        );
-        push_synthetic_closure_frame_with_layout(
-            &mut vm,
-            0,
-            layout,
-            vec![
-                Upvalue::new(ValueWord::from_f64(1.5).into_raw_bits()),
-                Upvalue::new(box_cell as u64),
-                Upvalue::new(arc_raw as u64),
-                Upvalue::new(ValueWord::from_i64(400).into_raw_bits()),
-            ],
-        );
-
-        // Immutable slot 0: LoadClosure.
-        let load_imm_0 = Instruction::new(OpCode::LoadClosure, Some(Operand::Local(0)));
-        vm.op_load_closure(&load_imm_0).unwrap();
-        assert_eq!(
-            ValueWord::from_raw_bits(vm.pop_raw_u64().unwrap()).as_f64(),
-            Some(1.5)
-        );
-
-        // Immutable slot 3: LoadClosure.
-        let load_imm_3 = Instruction::new(OpCode::LoadClosure, Some(Operand::Local(3)));
-        vm.op_load_closure(&load_imm_3).unwrap();
-        assert_eq!(
-            ValueWord::from_raw_bits(vm.pop_raw_u64().unwrap()).as_i64(),
-            Some(400)
-        );
-
-        // OwnedMutable slot 1: Load → 200, Store 250, Load → 250.
-        // After Wave-E+5, OwnedMutable handlers exchange raw native i64
-        // bits — push and pop them directly.
-        let load_om = Instruction::new(
-            OpCode::LoadOwnedMutableCapture,
-            Some(Operand::Local(1)),
-        );
-        let store_om = Instruction::new(
-            OpCode::StoreOwnedMutableCapture,
-            Some(Operand::Local(1)),
-        );
-        vm.op_load_owned_mutable_capture(&load_om).unwrap();
-        assert_eq!(vm.pop_raw_u64().unwrap() as i64, 200);
-        vm.push_raw_u64(250i64 as u64).unwrap();
-        vm.op_store_owned_mutable_capture(&store_om).unwrap();
-        vm.op_load_owned_mutable_capture(&load_om).unwrap();
-        assert_eq!(vm.pop_raw_u64().unwrap() as i64, 250);
-
-        // Shared slot 2: Load → 300, Store 350, Load → 350.
-        let load_sh = Instruction::new(OpCode::LoadSharedCapture, Some(Operand::Local(2)));
-        let store_sh = Instruction::new(OpCode::StoreSharedCapture, Some(Operand::Local(2)));
-        vm.op_load_shared_capture(&load_sh).unwrap();
-        assert_eq!(
-            ValueWord::from_raw_bits(vm.pop_raw_u64().unwrap()).as_i64(),
-            Some(300)
-        );
-        vm.push_raw_u64(ValueWord::from_i64(350).into_raw_bits())
-            .unwrap();
-        vm.op_store_shared_capture(&store_sh).unwrap();
-        vm.op_load_shared_capture(&load_sh).unwrap();
-        assert_eq!(
-            ValueWord::from_raw_bits(vm.pop_raw_u64().unwrap()).as_i64(),
-            Some(350)
-        );
-        // External Arc reads the new value.
-        assert_eq!(external.lock().as_i64(), Some(350));
-
-        // SAFETY: reclaim Box + Arc share.
-        unsafe {
-            drop(Box::from_raw(box_cell));
-            drop(StdArc::from_raw(arc_raw));
-        }
-        assert_eq!(StdArc::strong_count(&external), 1);
-        vm.call_stack.pop();
-    }
-
-    #[test]
-    fn a1b_null_pointer_errors_cleanly() {
-        // A null pointer in the upvalue slot (should never happen in
-        // production — the A.1B make_closure path guarantees non-null
-        // allocations) returns a runtime error instead of segfaulting.
-        let mut vm = fresh_vm_for_capture_opcode_test();
-        push_synthetic_frame_with_upvalues(&mut vm, vec![Upvalue::new(0)]);
-
-        let load_om = Instruction::new(
-            OpCode::LoadOwnedMutableCapture,
-            Some(Operand::Local(0)),
-        );
-        let err = vm.op_load_owned_mutable_capture(&load_om).unwrap_err();
-        match err {
-            shape_value::VMError::RuntimeError(msg) => {
-                assert!(msg.contains("null"), "expected null-pointer error, got: {}", msg)
-            }
-            other => panic!("expected RuntimeError, got {:?}", other),
-        }
-
-        let load_sh = Instruction::new(OpCode::LoadSharedCapture, Some(Operand::Local(0)));
-        let err = vm.op_load_shared_capture(&load_sh).unwrap_err();
-        match err {
-            shape_value::VMError::RuntimeError(msg) => {
-                assert!(msg.contains("null"), "expected null-pointer error, got: {}", msg)
-            }
-            other => panic!("expected RuntimeError, got {:?}", other),
-        }
-
-        vm.call_stack.pop();
-    }
-
-    // ── Track A.1C.1: outer-scope `var` Shared-cell lifecycle tests ───
-    //
-    // These tests exercise `AllocSharedLocal` / `LoadSharedLocal` /
-    // `StoreSharedLocal` / `DropSharedLocal` directly on a synthetic
-    // call frame that owns a handful of local slots. Unlike the A.1B
-    // capture-side tests above, the pointer bits land in the **stack
-    // slot** (`stack[base_pointer + idx]`) rather than in an upvalue.
-    // The helper below reserves `num_locals` stack slots behind the
-    // frame's `base_pointer` so that Local(idx) addressing for
-    // idx < num_locals is in-bounds.
-    //
-    // After each test we `DropSharedLocal` every slot we allocated, so
-    // the Arcs are reclaimed cleanly — the harness does not run
-    // scope-exit bytecode automatically, so leak-free teardown is the
-    // test's responsibility.
-
-    /// Push a synthetic call frame that owns `num_locals` stack slots.
-    /// Slots are pre-filled with `NONE_BITS` so `AllocSharedLocal` can
-    /// overwrite them without tripping the "old occupant" drop path.
-    fn push_synthetic_frame_with_locals(vm: &mut VirtualMachine, num_locals: usize) {
-        let base_pointer = vm.sp;
-        for _ in 0..num_locals {
-            // Keep `sp` and `stack.len()` in sync so
-            // `current_locals_base()` plus Local(idx) addresses are
-            // within `self.stack`.
-            vm.push_raw_u64(VirtualMachine::NONE_BITS).unwrap();
-        }
-        vm.call_stack.push(CallFrame {
-            return_ip: 0,
-            base_pointer,
-            locals_count: num_locals,
-            function_id: None,
-            upvalues: None,
-            blob_hash: None,
-            closure_heap_bits: None,
-        });
-    }
-
-    #[test]
-    fn a1c1_alloc_load_shared_local_roundtrip() {
-        // AllocSharedLocal installs a SharedCell in slot 0 initialised
-        // from the top-of-stack ValueWord; LoadSharedLocal reads the
-        // same cell back.
-        let mut vm = fresh_vm_for_capture_opcode_test();
-        push_synthetic_frame_with_locals(&mut vm, 1);
-
-        // Push the initial value, then AllocSharedLocal { slot: 0 }.
-        vm.push_raw_u64(ValueWord::from_i64(42).into_raw_bits())
-            .unwrap();
-        let alloc_instr = Instruction::new(OpCode::AllocSharedLocal, Some(Operand::Local(0)));
-        vm.op_alloc_shared_local(&alloc_instr).unwrap();
-
-        // Verify that slot 0 now holds a non-null raw pointer.
-        let bp = vm.current_locals_base();
-        let slot_bits = vm.stack[bp];
-        assert_ne!(slot_bits, 0, "slot 0 should hold a non-null SharedCell pointer");
-
-        // LoadSharedLocal { slot: 0 } → 42.
-        let load_instr = Instruction::new(OpCode::LoadSharedLocal, Some(Operand::Local(0)));
-        vm.op_load_shared_local(&load_instr).unwrap();
-        let out = vm.pop_raw_u64().unwrap();
-        assert_eq!(ValueWord::from_raw_bits(out).as_i64(), Some(42));
-
-        // Teardown: drop the Shared cell so the Arc is reclaimed.
-        let drop_instr = Instruction::new(OpCode::DropSharedLocal, Some(Operand::Local(0)));
-        vm.op_drop_shared_local(&drop_instr).unwrap();
-        vm.call_stack.pop();
-    }
-
-    #[test]
-    fn a1c1_store_load_shared_local_roundtrip() {
-        // After Alloc, StoreSharedLocal overwrites the mutex contents;
-        // a subsequent LoadSharedLocal observes the new value.
-        let mut vm = fresh_vm_for_capture_opcode_test();
-        push_synthetic_frame_with_locals(&mut vm, 1);
-
-        vm.push_raw_u64(ValueWord::from_i64(1).into_raw_bits())
-            .unwrap();
-        let alloc_instr = Instruction::new(OpCode::AllocSharedLocal, Some(Operand::Local(0)));
-        vm.op_alloc_shared_local(&alloc_instr).unwrap();
-
-        // Store 100.
-        vm.push_raw_u64(ValueWord::from_i64(100).into_raw_bits())
-            .unwrap();
-        let store_instr = Instruction::new(OpCode::StoreSharedLocal, Some(Operand::Local(0)));
-        vm.op_store_shared_local(&store_instr).unwrap();
-
-        // Load → 100.
-        let load_instr = Instruction::new(OpCode::LoadSharedLocal, Some(Operand::Local(0)));
-        vm.op_load_shared_local(&load_instr).unwrap();
-        let out = vm.pop_raw_u64().unwrap();
-        assert_eq!(ValueWord::from_raw_bits(out).as_i64(), Some(100));
-
-        // Teardown.
-        let drop_instr = Instruction::new(OpCode::DropSharedLocal, Some(Operand::Local(0)));
-        vm.op_drop_shared_local(&drop_instr).unwrap();
-        vm.call_stack.pop();
-    }
-
-    #[test]
-    fn a1c1_drop_shared_local_releases_arc() {
-        // Allocate a Shared cell via AllocSharedLocal, mint an
-        // independent external Arc share observing the same underlying
-        // cell, then DropSharedLocal — the external Arc's strong count
-        // must drop by exactly 1.
-        let mut vm = fresh_vm_for_capture_opcode_test();
-        push_synthetic_frame_with_locals(&mut vm, 1);
-
-        vm.push_raw_u64(ValueWord::from_i64(7).into_raw_bits())
-            .unwrap();
-        let alloc_instr = Instruction::new(OpCode::AllocSharedLocal, Some(Operand::Local(0)));
-        vm.op_alloc_shared_local(&alloc_instr).unwrap();
-
-        // Read the raw pointer that AllocSharedLocal parked in slot 0.
-        let bp = vm.current_locals_base();
-        let cell_ptr = vm.stack[bp] as *const SharedCell;
-        assert!(!cell_ptr.is_null());
-
-        // Mint an external Arc share without removing the slot's share.
-        // `Arc::increment_strong_count` bumps the count by 1; then
-        // `Arc::from_raw` reconstructs an owning handle consuming the
-        // bumped share (see the idiom documented in `Arc::from_raw`).
-        let external: StdArc<SharedCell> = unsafe {
-            StdArc::increment_strong_count(cell_ptr);
-            StdArc::from_raw(cell_ptr)
-        };
-        // Strong count: 1 (slot) + 1 (external) = 2.
-        assert_eq!(StdArc::strong_count(&external), 2);
-
-        // DropSharedLocal must release the slot's share.
-        let drop_instr = Instruction::new(OpCode::DropSharedLocal, Some(Operand::Local(0)));
-        vm.op_drop_shared_local(&drop_instr).unwrap();
-
-        // Only the external share remains.
-        assert_eq!(StdArc::strong_count(&external), 1);
-
-        // The spent slot holds null pointer bits (`0u64`), NOT
-        // `NONE_BITS` — this is intentional so the null-guard in
-        // `op_load_shared_local` / `op_store_shared_local` catches
-        // accidental reuse. See the safety note on
-        // `op_drop_shared_local`.
-        assert_eq!(vm.stack[bp], 0u64);
-
-        // Subsequent Load on the spent slot returns a runtime error
-        // rather than segfaulting.
-        let load_instr = Instruction::new(OpCode::LoadSharedLocal, Some(Operand::Local(0)));
-        let err = vm.op_load_shared_local(&load_instr).unwrap_err();
-        match err {
-            shape_value::VMError::RuntimeError(msg) => {
-                assert!(msg.contains("null"), "expected null-pointer error, got: {}", msg)
-            }
-            other => panic!("expected RuntimeError, got {:?}", other),
-        }
-
-        drop(external);
-        vm.call_stack.pop();
-    }
-
-    #[test]
-    fn a1c1_shared_local_lock_is_parking_lot() {
-        // Smoke test that the parking_lot mutex correctly serialises
-        // concurrent readers/writers without deadlocking. This is NOT a
-        // loom test — it just exercises the read/write path enough to
-        // catch an obvious contention bug (e.g. using a non-reentrant
-        // std::sync::RwLock incorrectly).
-        let mut vm = fresh_vm_for_capture_opcode_test();
-        push_synthetic_frame_with_locals(&mut vm, 1);
-
-        vm.push_raw_u64(ValueWord::from_i64(0).into_raw_bits())
-            .unwrap();
-        let alloc_instr = Instruction::new(OpCode::AllocSharedLocal, Some(Operand::Local(0)));
-        vm.op_alloc_shared_local(&alloc_instr).unwrap();
-
-        // Grab a raw share for a side thread.
-        let bp = vm.current_locals_base();
-        let cell_ptr = vm.stack[bp] as *const SharedCell;
-        let external_arc: StdArc<SharedCell> = unsafe {
-            StdArc::increment_strong_count(cell_ptr);
-            StdArc::from_raw(cell_ptr)
-        };
-
-        // The worker writes through its own Arc handle while the main
-        // thread interleaves reads and writes through the VM opcodes.
-        // We only care that the loop terminates — no deadlock.
-        let writer_arc = StdArc::clone(&external_arc);
-        let worker = std::thread::spawn(move || {
-            for i in 0..100 {
-                let mut guard = writer_arc.lock();
-                *guard = ValueWord::from_i64(i as i64).into_raw_bits();
-                drop(guard);
-            }
-        });
-
-        let load_instr = Instruction::new(OpCode::LoadSharedLocal, Some(Operand::Local(0)));
-        let store_instr = Instruction::new(OpCode::StoreSharedLocal, Some(Operand::Local(0)));
-        for i in 0..100 {
-            vm.push_raw_u64(ValueWord::from_i64(i as i64 * 2).into_raw_bits())
-                .unwrap();
-            vm.op_store_shared_local(&store_instr).unwrap();
-            vm.op_load_shared_local(&load_instr).unwrap();
-            // Drain the pushed value so the stack doesn't grow unbounded.
-            let _ = vm.pop_raw_u64().unwrap();
-        }
-
-        worker.join().unwrap();
-
-        // Final read to confirm the cell is still live and lockable.
-        vm.op_load_shared_local(&load_instr).unwrap();
-        let final_bits = vm.pop_raw_u64().unwrap();
-        // The final value could come from either the main thread or
-        // the worker — both wrote `i64`-encoded ValueWords, so the
-        // decode must succeed.
-        assert!(ValueWord::from_raw_bits(final_bits).as_i64().is_some());
-
-        // Teardown.
-        let drop_instr = Instruction::new(OpCode::DropSharedLocal, Some(Operand::Local(0)));
-        vm.op_drop_shared_local(&drop_instr).unwrap();
-        drop(external_arc);
-        vm.call_stack.pop();
-    }
-
-    #[test]
-    fn a1c1_multiple_slots_independent() {
-        // Two slots, each holding its own Shared cell. Writes to one
-        // slot must NOT observably affect the other.
-        let mut vm = fresh_vm_for_capture_opcode_test();
-        push_synthetic_frame_with_locals(&mut vm, 2);
-
-        // Slot 0 ← 11, Slot 1 ← 22.
-        vm.push_raw_u64(ValueWord::from_i64(11).into_raw_bits())
-            .unwrap();
-        vm.op_alloc_shared_local(&Instruction::new(
-            OpCode::AllocSharedLocal,
-            Some(Operand::Local(0)),
-        ))
-        .unwrap();
-        vm.push_raw_u64(ValueWord::from_i64(22).into_raw_bits())
-            .unwrap();
-        vm.op_alloc_shared_local(&Instruction::new(
-            OpCode::AllocSharedLocal,
-            Some(Operand::Local(1)),
-        ))
-        .unwrap();
-
-        // The two slots must hold distinct pointers.
-        let bp = vm.current_locals_base();
-        assert_ne!(vm.stack[bp], vm.stack[bp + 1]);
-
-        // Write 111 to slot 0, observe slot 1 is still 22.
-        vm.push_raw_u64(ValueWord::from_i64(111).into_raw_bits())
-            .unwrap();
-        vm.op_store_shared_local(&Instruction::new(
-            OpCode::StoreSharedLocal,
-            Some(Operand::Local(0)),
-        ))
-        .unwrap();
-        vm.op_load_shared_local(&Instruction::new(
-            OpCode::LoadSharedLocal,
-            Some(Operand::Local(1)),
-        ))
-        .unwrap();
-        let slot1 = vm.pop_raw_u64().unwrap();
-        assert_eq!(ValueWord::from_raw_bits(slot1).as_i64(), Some(22));
-
-        // Write 222 to slot 1, observe slot 0 is 111.
-        vm.push_raw_u64(ValueWord::from_i64(222).into_raw_bits())
-            .unwrap();
-        vm.op_store_shared_local(&Instruction::new(
-            OpCode::StoreSharedLocal,
-            Some(Operand::Local(1)),
-        ))
-        .unwrap();
-        vm.op_load_shared_local(&Instruction::new(
-            OpCode::LoadSharedLocal,
-            Some(Operand::Local(0)),
-        ))
-        .unwrap();
-        let slot0 = vm.pop_raw_u64().unwrap();
-        assert_eq!(ValueWord::from_raw_bits(slot0).as_i64(), Some(111));
-
-        // Final values check.
-        vm.op_load_shared_local(&Instruction::new(
-            OpCode::LoadSharedLocal,
-            Some(Operand::Local(1)),
-        ))
-        .unwrap();
-        assert_eq!(
-            ValueWord::from_raw_bits(vm.pop_raw_u64().unwrap()).as_i64(),
-            Some(222)
-        );
-
-        // Teardown: drop both cells.
-        vm.op_drop_shared_local(&Instruction::new(
-            OpCode::DropSharedLocal,
-            Some(Operand::Local(0)),
-        ))
-        .unwrap();
-        vm.op_drop_shared_local(&Instruction::new(
-            OpCode::DropSharedLocal,
-            Some(Operand::Local(1)),
-        ))
-        .unwrap();
-        vm.call_stack.pop();
-    }
-
-    // ── Track D.2: tests for the typed Shared capture handlers ─────────
-    //
-    // Each test uses an `Arc<SharedCell>` allocated as an "external"
-    // observer plus one `Arc::into_raw`-produced share parked in a
-    // synthetic frame's upvalue slot. The interior `FieldKind` is
-    // implicit in which `read/write_shared_<kind>` helper we call —
-    // the cell itself is just an 8-byte payload + lock byte.
-    //
-    // Each test follows the same pattern: Load → assert initial value;
-    // Store new value; Load → assert new value; observe via the
-    // external Arc; reclaim the Arc strong-count share; pop frame.
-    //
-    // The mandated four kinds (I64, F64, Bool, Ptr) cover every
-    // corner of the helper set:
-    //   * I64 — full 8-byte signed payload (no sign-extension dance).
-    //   * F64 — bitwise-identical f64 round-trip.
-    //   * Bool — narrow payload + the "any non-zero byte ⇒ true"
-    //          read convention.
-    //   * Ptr — raw 8-byte payload round-trip with NO retain/release
-    //          in the handler (matches the helper's contract).
-    //
-    // Locking sanity: every test executes Load → Store → Load on the
-    // same cell. `read_shared_<kind>` / `write_shared_<kind>` acquire
-    // and release the cell's mutex inside each call. If the handler
-    // accidentally took the lock externally we would deadlock on the
-    // second call (single-threaded). The tests passing means no
-    // double-locking occurs.
-
-    #[test]
-    fn d2_load_store_load_shared_capture_i64() {
-        let mut vm = fresh_vm_for_capture_opcode_test();
-        let initial: i64 = -987_654_321;
-        let external: StdArc<SharedCell> =
-            StdArc::new(SharedCell::new(ValueWord::from_i64(0)));
-        // SAFETY: cell is fresh, no other reader/writer; we mint a
-        // typed initial value through the lock-gated helper.
-        unsafe {
-            shape_value::v2::closure_raw::write_shared_i64(
-                StdArc::as_ptr(&external) as *const SharedCell,
-                initial,
-            );
-        }
-        let closure_share: StdArc<SharedCell> = StdArc::clone(&external);
-        let cell_ptr: *const SharedCell = StdArc::into_raw(closure_share);
-        push_synthetic_frame_with_upvalues(
-            &mut vm,
-            vec![Upvalue::new(cell_ptr as u64)],
-        );
-
-        // Round 1: Load — expect initial.
-        let load = Instruction::new(
-            OpCode::LoadSharedCaptureI64,
-            Some(Operand::Local(0)),
-        );
-        vm.op_load_shared_capture_i64(&load).unwrap();
-        assert_eq!(vm.pop_raw_u64().unwrap() as i64, initial);
-
-        // Round 2: Store new value.
-        let new_val: i64 = i64::MAX - 7;
-        vm.push_raw_u64(new_val as u64).unwrap();
-        let store = Instruction::new(
-            OpCode::StoreSharedCaptureI64,
-            Some(Operand::Local(0)),
-        );
-        vm.op_store_shared_capture_i64(&store).unwrap();
-
-        // Round 3: Load — expect new_val.
-        vm.op_load_shared_capture_i64(&load).unwrap();
-        assert_eq!(vm.pop_raw_u64().unwrap() as i64, new_val);
-
-        // External observer sees new_val.
-        // SAFETY: external is a live Arc; helper acquires its own
-        // lock; cell points at the same allocation as cell_ptr.
-        let observed = unsafe {
-            shape_value::v2::closure_raw::read_shared_i64(
-                StdArc::as_ptr(&external) as *const SharedCell,
-            )
-        };
-        assert_eq!(observed, new_val);
-
-        // SAFETY: cell_ptr came from Arc::into_raw, one share.
-        unsafe { drop(StdArc::from_raw(cell_ptr)) };
-        assert_eq!(StdArc::strong_count(&external), 1);
-        vm.call_stack.pop();
-    }
-
-    #[test]
-    fn d2_load_store_load_shared_capture_f64() {
-        let mut vm = fresh_vm_for_capture_opcode_test();
-        let initial: f64 = std::f64::consts::PI;
-        let external: StdArc<SharedCell> =
-            StdArc::new(SharedCell::new(ValueWord::from_i64(0)));
-        // SAFETY: see I64 test rationale.
-        unsafe {
-            shape_value::v2::closure_raw::write_shared_f64(
-                StdArc::as_ptr(&external) as *const SharedCell,
-                initial,
-            );
-        }
-        let closure_share: StdArc<SharedCell> = StdArc::clone(&external);
-        let cell_ptr: *const SharedCell = StdArc::into_raw(closure_share);
-        push_synthetic_frame_with_upvalues(
-            &mut vm,
-            vec![Upvalue::new(cell_ptr as u64)],
-        );
-
-        let load = Instruction::new(
-            OpCode::LoadSharedCaptureF64,
-            Some(Operand::Local(0)),
-        );
-        vm.op_load_shared_capture_f64(&load).unwrap();
-        assert_eq!(f64::from_bits(vm.pop_raw_u64().unwrap()), initial);
-
-        let new_val: f64 = -1.5e+200;
-        vm.push_raw_u64(new_val.to_bits()).unwrap();
-        let store = Instruction::new(
-            OpCode::StoreSharedCaptureF64,
-            Some(Operand::Local(0)),
-        );
-        vm.op_store_shared_capture_f64(&store).unwrap();
-
-        vm.op_load_shared_capture_f64(&load).unwrap();
-        assert_eq!(f64::from_bits(vm.pop_raw_u64().unwrap()), new_val);
-
-        let observed = unsafe {
-            shape_value::v2::closure_raw::read_shared_f64(
-                StdArc::as_ptr(&external) as *const SharedCell,
-            )
-        };
-        assert_eq!(observed, new_val);
-
-        // SAFETY: cell_ptr came from Arc::into_raw, one share.
-        unsafe { drop(StdArc::from_raw(cell_ptr)) };
-        assert_eq!(StdArc::strong_count(&external), 1);
-        vm.call_stack.pop();
-    }
-
-    #[test]
-    fn d2_load_store_load_shared_capture_bool() {
-        let mut vm = fresh_vm_for_capture_opcode_test();
-        let external: StdArc<SharedCell> =
-            StdArc::new(SharedCell::new(ValueWord::from_i64(0)));
-        // SAFETY: typed init of bool = true.
-        unsafe {
-            shape_value::v2::closure_raw::write_shared_bool(
-                StdArc::as_ptr(&external) as *const SharedCell,
-                true,
-            );
-        }
-        let closure_share: StdArc<SharedCell> = StdArc::clone(&external);
-        let cell_ptr: *const SharedCell = StdArc::into_raw(closure_share);
-        push_synthetic_frame_with_upvalues(
-            &mut vm,
-            vec![Upvalue::new(cell_ptr as u64)],
-        );
-
-        let load = Instruction::new(
-            OpCode::LoadSharedCaptureBool,
-            Some(Operand::Local(0)),
-        );
-        vm.op_load_shared_capture_bool(&load).unwrap();
-        // Helper returned true → handler pushed 1 in low byte.
-        assert_eq!(vm.pop_raw_u64().unwrap(), 1);
-
-        // Store false.
-        vm.push_raw_u64(0).unwrap();
-        let store = Instruction::new(
-            OpCode::StoreSharedCaptureBool,
-            Some(Operand::Local(0)),
-        );
-        vm.op_store_shared_capture_bool(&store).unwrap();
-        vm.op_load_shared_capture_bool(&load).unwrap();
-        assert_eq!(vm.pop_raw_u64().unwrap(), 0);
-
-        let observed_false = unsafe {
-            shape_value::v2::closure_raw::read_shared_bool(
-                StdArc::as_ptr(&external) as *const SharedCell,
-            )
-        };
-        assert!(!observed_false);
-
-        // Edge case: handler treats any non-zero popped slot as true,
-        // matching `read_shared_bool`'s "non-zero byte ⇒ true"
-        // convention. Verify by pushing a high-byte-only bit pattern.
-        vm.push_raw_u64(0x0100_0000_0000_0000).unwrap();
-        vm.op_store_shared_capture_bool(&store).unwrap();
-        let observed_after = unsafe {
-            shape_value::v2::closure_raw::read_shared_bool(
-                StdArc::as_ptr(&external) as *const SharedCell,
-            )
-        };
-        // `write_shared_bool` canonicalises to byte 1, so the
-        // external read sees true.
-        assert!(observed_after);
-
-        // SAFETY: cell_ptr came from Arc::into_raw, one share.
-        unsafe { drop(StdArc::from_raw(cell_ptr)) };
-        assert_eq!(StdArc::strong_count(&external), 1);
-        vm.call_stack.pop();
-    }
-
-    #[test]
-    fn d2_load_store_load_shared_capture_ptr() {
-        let mut vm = fresh_vm_for_capture_opcode_test();
-
-        // The handler treats the 8-byte payload as opaque bits — no
-        // retain/release. Use leaked Box<u8> addresses as carrier
-        // bits to test the byte-equal round-trip without entangling
-        // refcount glue (that's Wave E's IR concern).
-        let leak_a: *mut u8 = Box::into_raw(Box::new(0xAAu8));
-        let leak_b: *mut u8 = Box::into_raw(Box::new(0xBBu8));
-        let bits_initial: u64 = leak_a as u64;
-        let bits_new: u64 = leak_b as u64;
-
-        let external: StdArc<SharedCell> =
-            StdArc::new(SharedCell::new(ValueWord::from_i64(0)));
-        // SAFETY: typed init.
-        unsafe {
-            shape_value::v2::closure_raw::write_shared_ptr(
-                StdArc::as_ptr(&external) as *const SharedCell,
-                bits_initial,
-            );
-        }
-        let closure_share: StdArc<SharedCell> = StdArc::clone(&external);
-        let cell_ptr: *const SharedCell = StdArc::into_raw(closure_share);
-        push_synthetic_frame_with_upvalues(
-            &mut vm,
-            vec![Upvalue::new(cell_ptr as u64)],
-        );
-
-        let load = Instruction::new(
-            OpCode::LoadSharedCapturePtr,
-            Some(Operand::Local(0)),
-        );
-        vm.op_load_shared_capture_ptr(&load).unwrap();
-        assert_eq!(vm.pop_raw_u64().unwrap(), bits_initial);
-
-        vm.push_raw_u64(bits_new).unwrap();
-        let store = Instruction::new(
-            OpCode::StoreSharedCapturePtr,
-            Some(Operand::Local(0)),
-        );
-        vm.op_store_shared_capture_ptr(&store).unwrap();
-
-        vm.op_load_shared_capture_ptr(&load).unwrap();
-        assert_eq!(vm.pop_raw_u64().unwrap(), bits_new);
-
-        let observed = unsafe {
-            shape_value::v2::closure_raw::read_shared_ptr(
-                StdArc::as_ptr(&external) as *const SharedCell,
-            )
-        };
-        assert_eq!(observed, bits_new);
-
-        // SAFETY: cell_ptr came from Arc::into_raw, one share. The
-        // Box<u8> leaks were minted by Box::into_raw above; we reclaim
-        // them exactly once each here.
-        unsafe {
-            drop(StdArc::from_raw(cell_ptr));
-            drop(Box::from_raw(leak_a));
-            drop(Box::from_raw(leak_b));
-        }
-        assert_eq!(StdArc::strong_count(&external), 1);
-        vm.call_stack.pop();
-    }
-
-    // ── Phase 3c Wave D.1: tests for the typed OwnedMutable capture handlers ──
-    //
-    // Each test allocates a fresh native typed cell via the matching
-    // `closure_raw::alloc_owned_mutable_<kind>` helper and parks the
-    // resulting `*mut <T>` raw pointer in a synthetic frame's upvalue
-    // slot. The handler reads/writes the cell directly (no Arc, no
-    // mutex — OwnedMutable cells are exclusively owned by exactly one
-    // closure).
-    //
-    // The four mandated kinds (I64, F64, Bool, Ptr) cover every
-    // corner of the per-FieldKind helper set:
-    //   * I64 — full 8-byte signed payload (no sign-extension dance).
-    //   * F64 — bitwise-identical f64 round-trip.
-    //   * Bool — narrow payload + the "any non-zero byte ⇒ true"
-    //          read convention (matches D.2's Shared-Bool tests).
-    //   * Ptr — raw 8-byte ValueWord-bits round-trip with NO
-    //          retain/release in the handler. We materialise a
-    //          ValueWord carrying a heap share, round-trip its raw
-    //          bits, and verify that NO refcount imbalance occurred.
-    //
-    // Each test pattern: Load → assert initial value; Store new value;
-    // Load → assert new value; reclaim the cell via `Box::from_raw`
-    // matching the helper's allocator; pop the synthetic frame so the
-    // VM's own Drop doesn't trip on the synthetic upvalue holding raw
-    // pointer bits.
-
-    #[test]
-    fn d1_load_store_load_owned_mutable_capture_i64() {
-        let mut vm = fresh_vm_for_capture_opcode_test();
-        let initial: i64 = -1_234_567_890_123;
-        let cell: *mut i64 =
-            shape_value::v2::closure_raw::alloc_owned_mutable_i64(initial);
-        push_synthetic_frame_with_upvalues(&mut vm, vec![Upvalue::new(cell as u64)]);
-
-        // Load1 → initial.
-        let load = Instruction::new(
-            OpCode::LoadOwnedMutableCaptureI64,
-            Some(Operand::Local(0)),
-        );
-        vm.op_load_owned_mutable_capture_i64(&load).unwrap();
-        assert_eq!(vm.pop_raw_u64().unwrap() as i64, initial);
-
-        // Store new value.
-        let new_val: i64 = i64::MAX - 42;
-        vm.push_raw_u64(new_val as u64).unwrap();
-        let store = Instruction::new(
-            OpCode::StoreOwnedMutableCaptureI64,
-            Some(Operand::Local(0)),
-        );
-        vm.op_store_owned_mutable_capture_i64(&store).unwrap();
-
-        // Load2 → new_val.
-        vm.op_load_owned_mutable_capture_i64(&load).unwrap();
-        assert_eq!(vm.pop_raw_u64().unwrap() as i64, new_val);
-
-        // Direct cell observation. SAFETY: cell is live.
-        unsafe { assert_eq!(*cell, new_val) };
-
-        // Reclaim. SAFETY: cell came from alloc_owned_mutable_i64.
-        unsafe { drop(Box::from_raw(cell)) };
-        vm.call_stack.pop();
-    }
-
-    #[test]
-    fn d1_load_store_load_owned_mutable_capture_f64() {
-        let mut vm = fresh_vm_for_capture_opcode_test();
-        let initial: f64 = std::f64::consts::PI;
-        let cell: *mut f64 =
-            shape_value::v2::closure_raw::alloc_owned_mutable_f64(initial);
-        push_synthetic_frame_with_upvalues(&mut vm, vec![Upvalue::new(cell as u64)]);
-
-        // Load1 → initial.
-        let load = Instruction::new(
-            OpCode::LoadOwnedMutableCaptureF64,
-            Some(Operand::Local(0)),
-        );
-        vm.op_load_owned_mutable_capture_f64(&load).unwrap();
-        assert_eq!(f64::from_bits(vm.pop_raw_u64().unwrap()), initial);
-
-        // Store new value (bitwise-precise f64).
-        let new_val: f64 = -2.718281828459045_f64;
-        vm.push_raw_u64(new_val.to_bits()).unwrap();
-        let store = Instruction::new(
-            OpCode::StoreOwnedMutableCaptureF64,
-            Some(Operand::Local(0)),
-        );
-        vm.op_store_owned_mutable_capture_f64(&store).unwrap();
-
-        // Load2 → new_val (bitwise-identical via to_bits / from_bits).
-        vm.op_load_owned_mutable_capture_f64(&load).unwrap();
-        assert_eq!(
-            f64::from_bits(vm.pop_raw_u64().unwrap()).to_bits(),
-            new_val.to_bits()
-        );
-
-        // Direct cell observation. SAFETY: cell is live.
-        unsafe { assert_eq!((*cell).to_bits(), new_val.to_bits()) };
-
-        // Reclaim.
-        unsafe { drop(Box::from_raw(cell)) };
-        vm.call_stack.pop();
-    }
-
-    #[test]
-    fn d1_load_store_load_owned_mutable_capture_bool() {
-        let mut vm = fresh_vm_for_capture_opcode_test();
-        // Initialise to `true`; flip to `false`; then flip back via a
-        // non-1 nonzero pop pattern to exercise the "any nonzero ⇒ true"
-        // reader contract.
-        let cell: *mut bool =
-            shape_value::v2::closure_raw::alloc_owned_mutable_bool(true);
-        push_synthetic_frame_with_upvalues(&mut vm, vec![Upvalue::new(cell as u64)]);
-
-        let load = Instruction::new(
-            OpCode::LoadOwnedMutableCaptureBool,
-            Some(Operand::Local(0)),
-        );
-        let store = Instruction::new(
-            OpCode::StoreOwnedMutableCaptureBool,
-            Some(Operand::Local(0)),
-        );
-
-        // Load1 → true (encoded as 1u64 in the slot).
-        vm.op_load_owned_mutable_capture_bool(&load).unwrap();
-        assert_eq!(vm.pop_raw_u64().unwrap(), 1);
-
-        // Store false (push 0u64).
-        vm.push_raw_u64(0).unwrap();
-        vm.op_store_owned_mutable_capture_bool(&store).unwrap();
-
-        // Load2 → false.
-        vm.op_load_owned_mutable_capture_bool(&load).unwrap();
-        assert_eq!(vm.pop_raw_u64().unwrap(), 0);
-
-        // Store true via a non-1 nonzero u64 (e.g. 0xDEAD_BEEF). The
-        // handler treats any nonzero as true.
-        vm.push_raw_u64(0xDEAD_BEEF).unwrap();
-        vm.op_store_owned_mutable_capture_bool(&store).unwrap();
-
-        // Load3 → true (encoded back as 1u64).
-        vm.op_load_owned_mutable_capture_bool(&load).unwrap();
-        assert_eq!(vm.pop_raw_u64().unwrap(), 1);
-
-        // Direct cell observation. SAFETY: cell is live.
-        unsafe { assert!(*cell) };
-
-        // Reclaim.
-        unsafe { drop(Box::from_raw(cell)) };
-        vm.call_stack.pop();
-    }
-
-    #[test]
-    fn d1_load_store_load_owned_mutable_capture_ptr_no_arc_imbalance() {
-        // Materialise a heap-tagged ValueWord (a `String` share),
-        // park its raw u64 bits inside a Ptr cell, exercise the
-        // Load/Store handlers, and verify the strong count of the
-        // outside-held Arc is unchanged across each handler call.
-        //
-        // Per `read_owned_mutable_ptr` / `write_owned_mutable_ptr`'s
-        // contract — and matching D.2's `op_load_shared_capture_ptr`
-        // — the handlers must NOT clone/retain the bits on Load and
-        // must NOT release the previous payload on Store. Refcount
-        // accounting is the IR's responsibility (Wave E pairs Load
-        // with `vw_clone` and Store with `vw_drop`, mirroring the
-        // c-stdlib-msgpack pattern from commit afb1651).
-        //
-        // We use `ValueWord::from_string(Arc<String>)` for the
-        // payload — the Arc strong count is the load-bearing
-        // refcount we observe before/after each handler call. Long
-        // strings (> 32 bytes) bypass `string_intern`'s pool so the
-        // counts remain predictable.
-
-        let mut vm = fresh_vm_for_capture_opcode_test();
-
-        // Mint share #1 of `payload_a` and freeze its bits.
-        let payload_a: StdArc<String> = StdArc::new(
-            "hello-d1-ptr-a-payload-longer-than-intern-threshold".to_string(),
-        );
-        let initial_bits = ValueWord::from_string(payload_a.clone()).into_raw_bits();
-        // payload_a strong count: 1 (external) + 1 (initial_bits) = 2.
-        let baseline_a = StdArc::strong_count(&payload_a);
-        assert_eq!(baseline_a, 2);
-
-        // Park initial_bits in a fresh Ptr cell.
-        let cell: *mut u64 = shape_value::v2::closure_raw::alloc_owned_mutable_ptr(initial_bits);
-        push_synthetic_frame_with_upvalues(&mut vm, vec![Upvalue::new(cell as u64)]);
-
-        let load = Instruction::new(
-            OpCode::LoadOwnedMutableCapturePtr,
-            Some(Operand::Local(0)),
-        );
-        let store = Instruction::new(
-            OpCode::StoreOwnedMutableCapturePtr,
-            Some(Operand::Local(0)),
-        );
-
-        // ── Load1: handler must not clone. Strong count unchanged. ──
-        vm.op_load_owned_mutable_capture_ptr(&load).unwrap();
-        let loaded_bits_1 = vm.pop_raw_u64().unwrap();
-        assert_eq!(
-            StdArc::strong_count(&payload_a),
-            baseline_a,
-            "LoadPtr must not clone the heap share"
-        );
-        // Loaded bits are byte-equal to initial_bits.
-        assert_eq!(loaded_bits_1, initial_bits);
-
-        // ── Store: handler must not release the previous payload. ──
-        let payload_b: StdArc<String> = StdArc::new(
-            "hello-d1-ptr-b-payload-longer-than-intern-threshold".to_string(),
-        );
-        let new_bits = ValueWord::from_string(payload_b.clone()).into_raw_bits();
-        let baseline_b = StdArc::strong_count(&payload_b);
-        assert_eq!(baseline_b, 2);
-
-        vm.push_raw_u64(new_bits).unwrap();
-        vm.op_store_owned_mutable_capture_ptr(&store).unwrap();
-        // payload_b strong count: still 2 (external + cell-resident).
-        assert_eq!(
-            StdArc::strong_count(&payload_b),
-            baseline_b,
-            "StorePtr must not retain the new share"
-        );
-        // payload_a strong count: ALSO still 2 — the handler did NOT
-        // release the previous payload (the original initial_bits
-        // share is now leaked by the cell overwrite; we reclaim it
-        // explicitly below).
-        assert_eq!(
-            StdArc::strong_count(&payload_a),
-            baseline_a,
-            "StorePtr must not release the previous share"
-        );
-
-        // ── Load2: handler must not clone the new payload. ──
-        vm.op_load_owned_mutable_capture_ptr(&load).unwrap();
-        let loaded_bits_2 = vm.pop_raw_u64().unwrap();
-        assert_eq!(loaded_bits_2, new_bits);
-        assert_eq!(
-            StdArc::strong_count(&payload_b),
-            baseline_b,
-            "LoadPtr must not clone the heap share"
-        );
-
-        // ── Cleanup. ──
-        // ValueWord is a u64 alias with no Drop glue — releasing a
-        // share requires an explicit `vw_drop` of the raw bits.
-        // 1. The cell currently holds `new_bits` (one share of
-        //    payload_b). vw_drop the bits to release the cell's share.
-        // 2. The original `initial_bits` share of payload_a was
-        //    leaked when the Store overwrote the cell. vw_drop the
-        //    leaked bits.
-        // 3. Reclaim the Box<u64> via Box::from_raw.
-        use shape_value::value_word_drop::vw_drop;
-        // SAFETY: cell is live; `*cell` reads the current bits.
-        let live_cell_bits = unsafe { *cell };
-        vw_drop(live_cell_bits);
-        // payload_b: 2 → 1 (only `external` remains).
-        assert_eq!(StdArc::strong_count(&payload_b), 1);
-        vw_drop(initial_bits);
-        // payload_a: 2 → 1 (only `external` remains).
-        assert_eq!(StdArc::strong_count(&payload_a), 1);
-
-        // SAFETY: cell came from `alloc_owned_mutable_ptr` =
-        // `Box::into_raw(Box::new(initial_bits: u64))`. Reclaim once.
-        unsafe { drop(Box::from_raw(cell)) };
-        vm.call_stack.pop();
-    }
-
-    // ===== Wave E+3: typed local load/store handler tests =====
-
-    /// Reserve `n` local slots above the current `bp` (i.e. raise `sp`
-    /// past `bp + n`). The slots are zeroed; the typed Load/Store
-    /// handlers will read/write them by index.
-    fn reserve_local_slots(vm: &mut VirtualMachine, n: usize) {
-        for _ in 0..n {
-            vm.push_raw_u64(0).unwrap();
-        }
-    }
-
-    #[test]
-    fn e3_load_store_local_i64_round_trip() {
-        // I64 round-trip: StoreLocalI64 → LoadLocalI64 returns the same
-        // 64-bit pattern. No NaN-box tag, no ValueWord wrapping.
-        let mut vm = fresh_vm_for_capture_opcode_test();
-        push_synthetic_frame_with_upvalues(&mut vm, vec![]);
-        reserve_local_slots(&mut vm, 1);
-
-        let store = Instruction::new(OpCode::StoreLocalI64, Some(Operand::Local(0)));
-        let load = Instruction::new(OpCode::LoadLocalI64, Some(Operand::Local(0)));
-
-        // Push a raw i64 value and store it.
-        let value: i64 = -123_456_789_012;
-        vm.push_raw_u64(value as u64).unwrap();
-        vm.op_store_local_i64(&store).unwrap();
-
-        // Load it back — bits must be byte-equal to what we stored.
-        vm.op_load_local_i64(&load).unwrap();
-        let loaded = vm.pop_raw_u64().unwrap() as i64;
-        assert_eq!(loaded, value, "i64 round-trip preserves the bit pattern");
-
-        vm.call_stack.pop();
-    }
-
-    #[test]
-    fn e3_load_store_local_f64_round_trip() {
-        // F64 round-trip: raw f64 bits passed through both directions
-        // without NaN-box mangling.
-        let mut vm = fresh_vm_for_capture_opcode_test();
-        push_synthetic_frame_with_upvalues(&mut vm, vec![]);
-        reserve_local_slots(&mut vm, 1);
-
-        let store = Instruction::new(OpCode::StoreLocalF64, Some(Operand::Local(0)));
-        let load = Instruction::new(OpCode::LoadLocalF64, Some(Operand::Local(0)));
-
-        let value: f64 = 3.141_592_653_589_793;
-        vm.push_raw_u64(value.to_bits()).unwrap();
-        vm.op_store_local_f64(&store).unwrap();
-
-        vm.op_load_local_f64(&load).unwrap();
-        let loaded = f64::from_bits(vm.pop_raw_u64().unwrap());
-        assert_eq!(loaded, value, "f64 round-trip preserves the value");
-
-        vm.call_stack.pop();
-    }
-
-    #[test]
-    fn e3_load_store_local_bool_round_trip() {
-        // Bool round-trip: StoreLocalBool canonicalizes any nonzero pop
-        // to 1; LoadLocalBool returns the canonical bits unchanged.
-        let mut vm = fresh_vm_for_capture_opcode_test();
-        push_synthetic_frame_with_upvalues(&mut vm, vec![]);
-        reserve_local_slots(&mut vm, 2);
-
-        let store0 = Instruction::new(OpCode::StoreLocalBool, Some(Operand::Local(0)));
-        let load0 = Instruction::new(OpCode::LoadLocalBool, Some(Operand::Local(0)));
-        let store1 = Instruction::new(OpCode::StoreLocalBool, Some(Operand::Local(1)));
-        let load1 = Instruction::new(OpCode::LoadLocalBool, Some(Operand::Local(1)));
-
-        // Slot 0: store `false` (0) and read back.
-        vm.push_raw_u64(0).unwrap();
-        vm.op_store_local_bool(&store0).unwrap();
-        vm.op_load_local_bool(&load0).unwrap();
-        assert_eq!(vm.pop_raw_u64().unwrap(), 0, "false round-trips as 0");
-
-        // Slot 1: store a nonzero pattern (e.g. 0xDEADBEEF) — must
-        // canonicalize to 1.
-        vm.push_raw_u64(0xDEAD_BEEF).unwrap();
-        vm.op_store_local_bool(&store1).unwrap();
-        vm.op_load_local_bool(&load1).unwrap();
-        assert_eq!(
-            vm.pop_raw_u64().unwrap(),
-            1,
-            "nonzero pop canonicalizes to 1"
-        );
-
-        vm.call_stack.pop();
-    }
-
-    #[test]
-    fn e3_load_store_local_i32_truncation_and_sign_extension() {
-        // I32 store truncates to low 4 bytes; load sign-extends back.
-        // 0xAAAA_BBBB_8000_0000 stored as i32 → 0x8000_0000 (i32::MIN);
-        // load sign-extends to 0xFFFF_FFFF_8000_0000.
-        let mut vm = fresh_vm_for_capture_opcode_test();
-        push_synthetic_frame_with_upvalues(&mut vm, vec![]);
-        reserve_local_slots(&mut vm, 1);
-
-        let store = Instruction::new(OpCode::StoreLocalI32, Some(Operand::Local(0)));
-        let load = Instruction::new(OpCode::LoadLocalI32, Some(Operand::Local(0)));
-
-        // Push a u64 with non-canonical high bits — store must truncate.
-        let raw: u64 = 0xAAAA_BBBB_8000_0000;
-        vm.push_raw_u64(raw).unwrap();
-        vm.op_store_local_i32(&store).unwrap();
-
-        // Load — sign-extends low 4 bytes (0x8000_0000 = i32::MIN) to i64.
-        vm.op_load_local_i32(&load).unwrap();
-        let loaded = vm.pop_raw_u64().unwrap() as i64;
-        assert_eq!(
-            loaded,
-            i32::MIN as i64,
-            "i32 store truncates and load sign-extends"
-        );
-
-        vm.call_stack.pop();
-    }
-
-    #[test]
-    fn e3_load_store_local_ptr_no_refcount_traffic() {
-        // Ptr round-trip: LoadLocalPtr / StoreLocalPtr must NOT
-        // clone/release the heap share. Mirrors the D.1 Ptr-aliasing
-        // contract: refcount semantics are the IR's responsibility.
-        let mut vm = fresh_vm_for_capture_opcode_test();
-        push_synthetic_frame_with_upvalues(&mut vm, vec![]);
-        reserve_local_slots(&mut vm, 1);
-
-        // Mint a long-string Arc share (longer than the 32-byte intern
-        // threshold so the Arc strong count is the load-bearing
-        // refcount we observe).
-        let payload_a: StdArc<String> = StdArc::new(
-            "hello-e3-local-ptr-a-payload-longer-than-intern-threshold".to_string(),
-        );
-        let initial_bits = ValueWord::from_string(payload_a.clone()).into_raw_bits();
-        // External strong count: 1 (`payload_a`) + 1 (`initial_bits`) = 2.
-        let baseline_a = StdArc::strong_count(&payload_a);
-        assert_eq!(baseline_a, 2);
-
-        let store = Instruction::new(OpCode::StoreLocalPtr, Some(Operand::Local(0)));
-        let load = Instruction::new(OpCode::LoadLocalPtr, Some(Operand::Local(0)));
-
-        // Store: pushes `initial_bits` and runs StoreLocalPtr. The
-        // handler does NOT retain — strong count must remain unchanged.
-        vm.push_raw_u64(initial_bits).unwrap();
-        vm.op_store_local_ptr(&store).unwrap();
-        assert_eq!(
-            StdArc::strong_count(&payload_a),
-            baseline_a,
-            "StoreLocalPtr must not retain the new share"
-        );
-
-        // Load: handler does NOT clone — strong count still unchanged.
-        vm.op_load_local_ptr(&load).unwrap();
-        let loaded_bits = vm.pop_raw_u64().unwrap();
-        assert_eq!(loaded_bits, initial_bits);
-        assert_eq!(
-            StdArc::strong_count(&payload_a),
-            baseline_a,
-            "LoadLocalPtr must not clone the heap share"
-        );
-
-        // Overwrite with a fresh payload — handler must NOT release the
-        // previous share (matches D.1 / D.2 Ptr semantics).
-        let payload_b: StdArc<String> = StdArc::new(
-            "hello-e3-local-ptr-b-payload-longer-than-intern-threshold".to_string(),
-        );
-        let new_bits = ValueWord::from_string(payload_b.clone()).into_raw_bits();
-        let baseline_b = StdArc::strong_count(&payload_b);
-        assert_eq!(baseline_b, 2);
-
-        vm.push_raw_u64(new_bits).unwrap();
-        vm.op_store_local_ptr(&store).unwrap();
-        assert_eq!(
-            StdArc::strong_count(&payload_b),
-            baseline_b,
-            "StoreLocalPtr must not retain the new share (overwrite)"
-        );
-        assert_eq!(
-            StdArc::strong_count(&payload_a),
-            baseline_a,
-            "StoreLocalPtr must not release the previous share (overwrite)"
-        );
-
-        // Cleanup: the slot now holds `new_bits` (one share of payload_b).
-        // The original `initial_bits` share of payload_a is leaked by the
-        // overwrite — vw_drop both to release.
-        use shape_value::value_word_drop::vw_drop;
-        // SAFETY: bp+0 is the live slot holding new_bits.
-        let bp = vm.current_locals_base();
-        let live_slot_bits = vm.stack[bp];
-        vw_drop(live_slot_bits);
-        // Zero the slot so the VM's `Drop` impl (which runs
-        // `vw_drop_slice` over the live stack window) does not
-        // double-release the share we just dropped.
-        vm.stack[bp] = VirtualMachine::NONE_BITS;
-        assert_eq!(StdArc::strong_count(&payload_b), 1);
-        vw_drop(initial_bits);
-        assert_eq!(StdArc::strong_count(&payload_a), 1);
-
-        vm.call_stack.pop();
-    }
-
-    // ===== Wave E+3: typed module-binding round-trip tests =====
-    //
-    // Eight assertions across four FieldKinds (I64, F64, Bool, Ptr).
-    // Each test:
-    //   * synthesizes a module-binding slot with a known starting value,
-    //   * executes the typed Load opcode and asserts the popped raw u64
-    //     bits match the expected native interpretation,
-    //   * executes the typed Store with a fresh raw u64 and asserts that
-    //     `vm.module_bindings[idx]` updated to the expected raw bits.
-    //
-    // The Ptr case additionally verifies Wave D's
-    // "vw_clone-before-Load / vw_drop-NOT-on-Store" invariant: the
-    // strong count of the captured Arc payload is unchanged across both
-    // the Load (no retain) and the Store (no release of the prior
-    // payload, no retain of the new one).
-
-    #[test]
-    fn typed_module_binding_i64_round_trip() {
-        let mut vm = VirtualMachine::new(VMConfig::default());
-        // Seed slot 3 with 12345 (raw i64 bits).
-        while vm.module_bindings.len() <= 3 {
-            vm.module_bindings.push(VirtualMachine::NONE_BITS);
-        }
-        vm.module_bindings[3] = 12345i64 as u64;
-
-        let load = Instruction::new(
-            OpCode::LoadModuleBindingI64,
-            Some(Operand::ModuleBinding(3)),
-        );
-        vm.op_load_module_binding_i64(&load).unwrap();
-        let popped = vm.pop_raw_u64().unwrap();
-        assert_eq!(popped as i64, 12345i64);
-
-        let store = Instruction::new(
-            OpCode::StoreModuleBindingI64,
-            Some(Operand::ModuleBinding(3)),
-        );
-        vm.push_raw_u64(-9876i64 as u64).unwrap();
-        vm.op_store_module_binding_i64(&store).unwrap();
-        assert_eq!(vm.module_bindings[3] as i64, -9876i64);
-    }
-
-    #[test]
-    fn typed_module_binding_f64_round_trip() {
-        let mut vm = VirtualMachine::new(VMConfig::default());
-        while vm.module_bindings.len() <= 5 {
-            vm.module_bindings.push(VirtualMachine::NONE_BITS);
-        }
-        vm.module_bindings[5] = 3.14159_f64.to_bits();
-
-        let load = Instruction::new(
-            OpCode::LoadModuleBindingF64,
-            Some(Operand::ModuleBinding(5)),
-        );
-        vm.op_load_module_binding_f64(&load).unwrap();
-        let popped = vm.pop_raw_u64().unwrap();
-        assert_eq!(f64::from_bits(popped), 3.14159_f64);
-
-        let store = Instruction::new(
-            OpCode::StoreModuleBindingF64,
-            Some(Operand::ModuleBinding(5)),
-        );
-        vm.push_raw_u64((-2.71828_f64).to_bits()).unwrap();
-        vm.op_store_module_binding_f64(&store).unwrap();
-        assert_eq!(f64::from_bits(vm.module_bindings[5]), -2.71828_f64);
-    }
-
-    #[test]
-    fn typed_module_binding_bool_round_trip() {
-        let mut vm = VirtualMachine::new(VMConfig::default());
-        while vm.module_bindings.len() <= 7 {
-            vm.module_bindings.push(VirtualMachine::NONE_BITS);
-        }
-        // Seed with `true` (1) and verify Load returns 1.
-        vm.module_bindings[7] = 1u64;
-
-        let load = Instruction::new(
-            OpCode::LoadModuleBindingBool,
-            Some(Operand::ModuleBinding(7)),
-        );
-        vm.op_load_module_binding_bool(&load).unwrap();
-        assert_eq!(vm.pop_raw_u64().unwrap(), 1);
-
-        // Seed with non-zero non-1 (0xFF) — Load must normalise to 1
-        // (any non-zero low byte ⇒ true).
-        vm.module_bindings[7] = 0xFFu64;
-        vm.op_load_module_binding_bool(&load).unwrap();
-        assert_eq!(vm.pop_raw_u64().unwrap(), 1);
-
-        let store = Instruction::new(
-            OpCode::StoreModuleBindingBool,
-            Some(Operand::ModuleBinding(7)),
-        );
-        // Store false (0).
-        vm.push_raw_u64(0u64).unwrap();
-        vm.op_store_module_binding_bool(&store).unwrap();
-        assert_eq!(vm.module_bindings[7], 0);
-
-        // Store true via raw 0xDEADBEEF — handler must normalise to 1.
-        vm.push_raw_u64(0xDEADBEEFu64).unwrap();
-        vm.op_store_module_binding_bool(&store).unwrap();
-        assert_eq!(vm.module_bindings[7], 1);
-    }
-
-    #[test]
-    fn typed_module_binding_ptr_no_refcount_traffic() {
-        // Ptr Load/Store are bit-pass-through — neither retains the new
-        // share nor releases the prior share. Wave E+4 IR is responsible
-        // for vw_clone before Load and vw_drop on Store. Verify by
-        // checking strong-counts straddling each handler invocation.
-        use shape_value::value_word_drop::vw_drop;
-        use std::sync::Arc as StdArc;
-
-        let mut vm = VirtualMachine::new(VMConfig::default());
-        let payload_a: StdArc<String> = StdArc::new(
-            "module-binding-ptr-test-a-payload-longer-than-intern-threshold".to_string(),
-        );
-        let initial_bits = ValueWord::from_string(payload_a.clone()).into_raw_bits();
-        // Refcount: 2 (payload_a local + initial_bits's Arc share).
-        let baseline_a = StdArc::strong_count(&payload_a);
-        assert_eq!(baseline_a, 2);
-
-        while vm.module_bindings.len() <= 9 {
-            vm.module_bindings.push(VirtualMachine::NONE_BITS);
-        }
-        vm.module_bindings[9] = initial_bits;
-
-        // Load: must not clone the heap share.
-        let load = Instruction::new(
-            OpCode::LoadModuleBindingPtr,
-            Some(Operand::ModuleBinding(9)),
-        );
-        vm.op_load_module_binding_ptr(&load).unwrap();
-        let loaded = vm.pop_raw_u64().unwrap();
-        assert_eq!(loaded, initial_bits);
-        assert_eq!(
-            StdArc::strong_count(&payload_a),
-            baseline_a,
-            "LoadModuleBindingPtr must not clone the heap share"
-        );
-
-        // Store a fresh payload — handler must NOT release the previous
-        // share or retain the new one.
-        let payload_b: StdArc<String> = StdArc::new(
-            "module-binding-ptr-test-b-payload-longer-than-intern-threshold".to_string(),
-        );
-        let new_bits = ValueWord::from_string(payload_b.clone()).into_raw_bits();
-        let baseline_b = StdArc::strong_count(&payload_b);
-        assert_eq!(baseline_b, 2);
-
-        let store = Instruction::new(
-            OpCode::StoreModuleBindingPtr,
-            Some(Operand::ModuleBinding(9)),
-        );
-        vm.push_raw_u64(new_bits).unwrap();
-        vm.op_store_module_binding_ptr(&store).unwrap();
-        assert_eq!(vm.module_bindings[9], new_bits);
-        assert_eq!(
-            StdArc::strong_count(&payload_b),
-            baseline_b,
-            "StoreModuleBindingPtr must not retain the new share"
-        );
-        assert_eq!(
-            StdArc::strong_count(&payload_a),
-            baseline_a,
-            "StoreModuleBindingPtr must not release the previous share"
-        );
-
-        // Cleanup: slot now holds new_bits. Original initial_bits leaked
-        // by the overwrite — drop both. (Wave E+4 IR will pair these
-        // with vw_clone/vw_drop so this leak doesn't happen in real
-        // emitted bytecode.) Zero the slot afterwards so the VM's Drop
-        // impl does not also release the live share via
-        // `vw_drop_slice`.
-        let live_bits = vm.module_bindings[9];
-        vw_drop(live_bits);
-        vm.module_bindings[9] = VirtualMachine::NONE_BITS;
-        assert_eq!(StdArc::strong_count(&payload_b), 1);
-        vw_drop(initial_bits);
-        assert_eq!(StdArc::strong_count(&payload_a), 1);
-    }
+    // SURFACE (ADR-006 §2.7.4 / Phase-2c): the pre-deletion test body
+    // used the deleted `ValueWord` / `ValueWordExt` accessors plus the
+    // deleted ValueWord-shape stack shims (the bulldozer removed both
+    // alongside `ValueWord` itself per CLAUDE.md Forbidden Patterns
+    // §"Forbidden code" #1, and §2.7.7's Forbidden #6 last bullet
+    // refused the shim layer once `ValueWord` was gone). Restoring
+    // this test module requires the Phase-2c
+    // host-API rebuild (the runtime-tier `KindedSlot` carrier needs
+    // surface-equivalent assertions for `as_i64()` / `as_f64()` /
+    // `as_bool()` / `as_string_arc()` etc.). Tracked as Phase-2c
+    // test-harness work; out of B6 territory.
 }

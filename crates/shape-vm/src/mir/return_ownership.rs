@@ -146,6 +146,10 @@ fn classify_rvalue(
         // Binary/unary ops produce primitives (int/bool/float) — treat as NewlyOwned:
         // no Arc wrap is needed for primitives, so the caller can consume directly.
         Rvalue::BinaryOp(_, _, _) | Rvalue::UnaryOp(_, _) => ReturnOwnershipMode::NewlyOwned,
+        // EnumTest produces a fresh native Bool — NewlyOwned by construction.
+        // EnumPayload extracts an owned share from the wrapped Result/Option
+        // payload per §2.7.17 receiver-recovery soundness; also NewlyOwned.
+        Rvalue::EnumTest { .. } | Rvalue::EnumPayload { .. } => ReturnOwnershipMode::NewlyOwned,
     }
 }
 
@@ -196,9 +200,14 @@ fn classify_constant(c: &MirConstant) -> ReturnOwnershipMode {
         | MirConstant::StringId(_)
         | MirConstant::Function(_)
         | MirConstant::Method(_) => ReturnOwnershipMode::Static,
+        // `MirConstant::Char` is a 4-byte scalar codepoint (no Arc, no heap
+        // allocation) — same NewlyOwned discipline as Int/Bool/Float scalars
+        // per ADR-006 §2.7.5 amendment Round 19 S1.5 (Char is a
+        // non-nullable scalar `NativeKind` variant; Drop/Clone is no-op).
         MirConstant::Int(_)
         | MirConstant::Bool(_)
         | MirConstant::Float(_)
+        | MirConstant::Char(_)
         | MirConstant::None => ReturnOwnershipMode::NewlyOwned,
         MirConstant::ClosurePlaceholder => ReturnOwnershipMode::Unknown,
     }
@@ -293,6 +302,8 @@ fn classify_defining_rvalue(
     match rvalue {
         Rvalue::Aggregate(_) | Rvalue::Clone(_) => ReturnOwnershipMode::NewlyOwned,
         Rvalue::BinaryOp(_, _, _) | Rvalue::UnaryOp(_, _) => ReturnOwnershipMode::NewlyOwned,
+        // EnumTest emits a Bool; EnumPayload emits an owned-share payload.
+        Rvalue::EnumTest { .. } | Rvalue::EnumPayload { .. } => ReturnOwnershipMode::NewlyOwned,
         Rvalue::Borrow(kind, p) => classify_borrow_rvalue(*kind, p, mir),
         Rvalue::Use(op) => match op {
             Operand::Constant(c) => classify_constant(c),
@@ -328,6 +339,8 @@ mod tests {
             local_types: vec![LocalTypeInfo::Unknown],
             span: dummy_span(),
             field_name_table: StdHashMap::new(),
+            local_struct_type_names: StdHashMap::new(),
+            local_typed_array_element_types: StdHashMap::new(),
         }
     }
 

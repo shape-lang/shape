@@ -9,11 +9,10 @@
 use crate::context::ExecutionContext;
 use parking_lot::RwLock;
 use shape_ast::error::{Result, ShapeError};
-use shape_value::{ValueWord, ValueWordExt};
+use shape_value::KindedSlot;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-pub mod array;
 pub mod array_transforms;
 pub mod convolution;
 pub mod distributions;
@@ -24,14 +23,15 @@ pub mod matrix_kernels;
 pub mod random;
 pub mod recurrence;
 pub mod rolling;
-pub mod scan;
 pub mod statistical;
 pub mod stochastic;
 pub mod vector;
 
-/// Function signature for intrinsics
-/// Takes evaluated arguments and execution context, returns a ValueWord value
-pub type IntrinsicFn = fn(&[ValueWord], &mut ExecutionContext) -> Result<ValueWord>;
+/// Function signature for intrinsics.
+///
+/// Per ADR-006 §2.7.1.4 (dispatch-slice), takes a slice of [`KindedSlot`]
+/// arguments and the execution context, returns a `KindedSlot`.
+pub type IntrinsicFn = fn(&[KindedSlot], &mut ExecutionContext) -> Result<KindedSlot>;
 
 /// Global intrinsics registry
 ///
@@ -55,21 +55,17 @@ impl IntrinsicsRegistry {
     pub fn new() -> Self {
         let mut functions = HashMap::new();
 
-        // Register all intrinsics by category
+        // Register polymorphic-shape legacy intrinsic bodies still pending
+        // their architectural sub-decision sign-offs. Migrated intrinsics live
+        // in their respective `create_*_intrinsics_module` factories wired into
+        // `crates/shape-runtime/src/stdlib/mod.rs::all_stdlib_modules` per
+        // intrinsics-typed-CC cluster Q2-marshal-fold-light (M-A scope). See
+        // `docs/defections.md` 2026-05-07 intrinsics-typed-CC entry's sub-
+        // decision queue subsections for the per-fn deferral rationale.
         Self::register_math_intrinsics(&mut functions);
-        Self::register_random_intrinsics(&mut functions);
-        Self::register_distributions_intrinsics(&mut functions);
-        Self::register_stochastic_intrinsics(&mut functions);
         Self::register_rolling_intrinsics(&mut functions);
         Self::register_series_intrinsics(&mut functions);
-        Self::register_array_intrinsics(&mut functions);
-        Self::register_statistical_intrinsics(&mut functions);
-        Self::register_vector_intrinsics(&mut functions);
-        Self::register_matrix_intrinsics(&mut functions);
         Self::register_recurrence_intrinsics(&mut functions);
-        Self::register_convolution_intrinsics(&mut functions);
-        Self::register_scan_intrinsics(&mut functions);
-        Self::register_fft_intrinsics(&mut functions);
 
         Self {
             functions: Arc::new(RwLock::new(functions)),
@@ -91,9 +87,9 @@ impl IntrinsicsRegistry {
     pub fn call(
         &self,
         name: &str,
-        args: &[ValueWord],
+        args: &[KindedSlot],
         ctx: &mut ExecutionContext,
-    ) -> Result<ValueWord> {
+    ) -> Result<KindedSlot> {
         let functions = self.functions.read();
 
         let func = functions
@@ -120,54 +116,35 @@ impl IntrinsicsRegistry {
         self.functions.read().keys().cloned().collect()
     }
 
-    /// Register all math intrinsics
+    /// Register the 5 math intrinsics whose migration is deferred pending
+    /// follow-on architectural sub-decisions (sum/min/max polymorphic
+    /// return; char_code multi-input-type dispatch; bspline2_3d_batch
+    /// Register polymorphic-shape legacy intrinsic bodies. Phase 1.B
+    /// (ADR-006 §2.7.1.4): the bodies route through [`KindedSlot`] and
+    /// return error stubs pending the M1-split sub-decision (polymorphic
+    /// returns / inputs that the typed marshal layer cannot yet
+    /// represent). Until M1-split lands, calls produce a runtime error
+    /// rather than emit a silent wrong-typed value.
     fn register_math_intrinsics(functions: &mut HashMap<String, IntrinsicFn>) {
-        functions.insert("__intrinsic_sum".to_string(), math::intrinsic_sum);
-        functions.insert("__intrinsic_mean".to_string(), math::intrinsic_mean);
+        // W12-stdlib-intrinsic-collapse (Wave-2-Agent-G, 2026-05-14):
+        // `__intrinsic_sum` deleted — stdlib `sum()` now routes through
+        // PHF `.sum()` method dispatch (ADR-005 §1).
         functions.insert("__intrinsic_min".to_string(), math::intrinsic_min);
         functions.insert("__intrinsic_max".to_string(), math::intrinsic_max);
-        functions.insert("__intrinsic_std".to_string(), math::intrinsic_std);
-        functions.insert("__intrinsic_variance".to_string(), math::intrinsic_variance);
-        // Trigonometric intrinsics
-        functions.insert("__intrinsic_sin".to_string(), math::intrinsic_sin);
-        functions.insert("__intrinsic_cos".to_string(), math::intrinsic_cos);
-        functions.insert("__intrinsic_tan".to_string(), math::intrinsic_tan);
-        functions.insert("__intrinsic_asin".to_string(), math::intrinsic_asin);
-        functions.insert("__intrinsic_acos".to_string(), math::intrinsic_acos);
-        functions.insert("__intrinsic_atan".to_string(), math::intrinsic_atan);
-        functions.insert("__intrinsic_atan2".to_string(), math::intrinsic_atan2);
-        functions.insert("__intrinsic_sinh".to_string(), math::intrinsic_sinh);
-        functions.insert("__intrinsic_cosh".to_string(), math::intrinsic_cosh);
-        functions.insert("__intrinsic_tanh".to_string(), math::intrinsic_tanh);
-        // Interpolation intrinsics
-        functions.insert(
-            "__intrinsic_bspline2_3d_batch".to_string(),
-            math::intrinsic_bspline2_3d_batch,
-        );
-        // Character code intrinsics
         functions.insert(
             "__intrinsic_char_code".to_string(),
             math::intrinsic_char_code,
         );
         functions.insert(
-            "__intrinsic_from_char_code".to_string(),
-            math::intrinsic_from_char_code,
+            "__intrinsic_bspline2_3d_batch".to_string(),
+            math::intrinsic_bspline2_3d_batch,
         );
     }
 
-    /// Register all rolling window intrinsics
     fn register_rolling_intrinsics(functions: &mut HashMap<String, IntrinsicFn>) {
         functions.insert(
             "__intrinsic_rolling_sum".to_string(),
             rolling::intrinsic_rolling_sum,
-        );
-        functions.insert(
-            "__intrinsic_rolling_mean".to_string(),
-            rolling::intrinsic_rolling_mean,
-        );
-        functions.insert(
-            "__intrinsic_rolling_std".to_string(),
-            rolling::intrinsic_rolling_std,
         );
         functions.insert(
             "__intrinsic_rolling_min".to_string(),
@@ -177,100 +154,19 @@ impl IntrinsicsRegistry {
             "__intrinsic_rolling_max".to_string(),
             rolling::intrinsic_rolling_max,
         );
-        functions.insert("__intrinsic_ema".to_string(), rolling::intrinsic_ema);
     }
 
-    /// Register all column transformation intrinsics
     fn register_series_intrinsics(functions: &mut HashMap<String, IntrinsicFn>) {
-        functions.insert(
-            "__intrinsic_shift".to_string(),
-            array_transforms::intrinsic_shift,
-        );
         functions.insert(
             "__intrinsic_diff".to_string(),
             array_transforms::intrinsic_diff,
         );
         functions.insert(
-            "__intrinsic_pct_change".to_string(),
-            array_transforms::intrinsic_pct_change,
-        );
-        functions.insert(
-            "__intrinsic_fillna".to_string(),
-            array_transforms::intrinsic_fillna,
-        );
-        functions.insert(
             "__intrinsic_cumsum".to_string(),
             array_transforms::intrinsic_cumsum,
         );
-        functions.insert(
-            "__intrinsic_cumprod".to_string(),
-            array_transforms::intrinsic_cumprod,
-        );
-        functions.insert(
-            "__intrinsic_clip".to_string(),
-            array_transforms::intrinsic_clip,
-        );
-        functions.insert(
-            "__intrinsic_series".to_string(),
-            array_transforms::intrinsic_column_select,
-        );
     }
 
-    /// Register array operation intrinsics
-    /// Note: map/filter/reduce are now handled directly by the VM via call_value_immediate_nb.
-    fn register_array_intrinsics(_functions: &mut HashMap<String, IntrinsicFn>) {
-        // Previously registered intrinsic_map, intrinsic_filter, intrinsic_reduce here.
-        // These are now handled by the VM executor directly (array_transform.rs, array_aggregation.rs).
-    }
-
-    /// Register statistical intrinsics
-    fn register_statistical_intrinsics(functions: &mut HashMap<String, IntrinsicFn>) {
-        functions.insert(
-            "__intrinsic_correlation".to_string(),
-            statistical::intrinsic_correlation,
-        );
-        functions.insert(
-            "__intrinsic_covariance".to_string(),
-            statistical::intrinsic_covariance,
-        );
-        functions.insert(
-            "__intrinsic_percentile".to_string(),
-            statistical::intrinsic_percentile,
-        );
-        functions.insert(
-            "__intrinsic_median".to_string(),
-            statistical::intrinsic_median,
-        );
-    }
-
-    /// Register vector intrinsics
-    fn register_vector_intrinsics(functions: &mut HashMap<String, IntrinsicFn>) {
-        functions.insert("__intrinsic_vec_abs".to_string(), vector::intrinsic_vec_abs);
-        functions.insert(
-            "__intrinsic_vec_sqrt".to_string(),
-            vector::intrinsic_vec_sqrt,
-        );
-        functions.insert("__intrinsic_vec_ln".to_string(), vector::intrinsic_vec_ln);
-        functions.insert("__intrinsic_vec_exp".to_string(), vector::intrinsic_vec_exp);
-        functions.insert("__intrinsic_vec_add".to_string(), vector::intrinsic_vec_add);
-        functions.insert("__intrinsic_vec_sub".to_string(), vector::intrinsic_vec_sub);
-        functions.insert("__intrinsic_vec_mul".to_string(), vector::intrinsic_vec_mul);
-        functions.insert("__intrinsic_vec_div".to_string(), vector::intrinsic_vec_div);
-        functions.insert("__intrinsic_vec_max".to_string(), vector::intrinsic_vec_max);
-        functions.insert("__intrinsic_vec_min".to_string(), vector::intrinsic_vec_min);
-        functions.insert(
-            "__intrinsic_vec_select".to_string(),
-            vector::intrinsic_vec_select,
-        );
-        // R5.4D: Vec<int> + Vec<int> — element-wise, overflow-checked.
-        // Compiler emission arrives in R5.4E.
-        functions.insert(
-            "__intrinsic_vec_add_i64".to_string(),
-            vector::intrinsic_vec_add_i64,
-        );
-    }
-
-    /// Register recurrence intrinsics
     fn register_recurrence_intrinsics(functions: &mut HashMap<String, IntrinsicFn>) {
         functions.insert(
             "__intrinsic_linear_recurrence".to_string(),
@@ -278,118 +174,6 @@ impl IntrinsicsRegistry {
         );
     }
 
-    /// Register matrix intrinsics
-    fn register_matrix_intrinsics(functions: &mut HashMap<String, IntrinsicFn>) {
-        functions.insert(
-            "__intrinsic_matmul_vec".to_string(),
-            matrix::intrinsic_matmul_vec,
-        );
-        functions.insert(
-            "__intrinsic_matmul_mat".to_string(),
-            matrix::intrinsic_matmul_mat,
-        );
-        // R5.4D: Mat<number> + Mat<number> / Mat<number> - Mat<number>.
-        // Compiler emission arrives in R5.4E.
-        functions.insert(
-            "__intrinsic_mat_add".to_string(),
-            matrix::intrinsic_mat_add,
-        );
-        functions.insert(
-            "__intrinsic_mat_sub".to_string(),
-            matrix::intrinsic_mat_sub,
-        );
-    }
-
-    /// Register random number generation intrinsics
-    fn register_random_intrinsics(functions: &mut HashMap<String, IntrinsicFn>) {
-        functions.insert("__intrinsic_random".to_string(), random::intrinsic_random);
-        functions.insert(
-            "__intrinsic_random_int".to_string(),
-            random::intrinsic_random_int,
-        );
-        functions.insert(
-            "__intrinsic_random_seed".to_string(),
-            random::intrinsic_random_seed,
-        );
-        functions.insert(
-            "__intrinsic_random_normal".to_string(),
-            random::intrinsic_random_normal,
-        );
-        functions.insert(
-            "__intrinsic_random_array".to_string(),
-            random::intrinsic_random_array,
-        );
-    }
-
-    /// Register statistical distribution intrinsics
-    fn register_distributions_intrinsics(functions: &mut HashMap<String, IntrinsicFn>) {
-        functions.insert(
-            "__intrinsic_dist_uniform".to_string(),
-            distributions::intrinsic_dist_uniform,
-        );
-        functions.insert(
-            "__intrinsic_dist_lognormal".to_string(),
-            distributions::intrinsic_dist_lognormal,
-        );
-        functions.insert(
-            "__intrinsic_dist_exponential".to_string(),
-            distributions::intrinsic_dist_exponential,
-        );
-        functions.insert(
-            "__intrinsic_dist_poisson".to_string(),
-            distributions::intrinsic_dist_poisson,
-        );
-        functions.insert(
-            "__intrinsic_dist_sample_n".to_string(),
-            distributions::intrinsic_dist_sample_n,
-        );
-    }
-
-    /// Register stochastic process intrinsics
-    fn register_stochastic_intrinsics(functions: &mut HashMap<String, IntrinsicFn>) {
-        functions.insert(
-            "__intrinsic_brownian_motion".to_string(),
-            stochastic::intrinsic_brownian_motion,
-        );
-        functions.insert("__intrinsic_gbm".to_string(), stochastic::intrinsic_gbm);
-        functions.insert(
-            "__intrinsic_ou_process".to_string(),
-            stochastic::intrinsic_ou_process,
-        );
-        functions.insert(
-            "__intrinsic_random_walk".to_string(),
-            stochastic::intrinsic_random_walk,
-        );
-    }
-
-    /// Register convolution intrinsics
-    fn register_convolution_intrinsics(functions: &mut HashMap<String, IntrinsicFn>) {
-        functions.insert(
-            "__intrinsic_stencil".to_string(),
-            convolution::intrinsic_stencil,
-        );
-    }
-
-    /// Register scan intrinsics
-    fn register_scan_intrinsics(functions: &mut HashMap<String, IntrinsicFn>) {
-        functions.insert("__intrinsic_scan".to_string(), scan::intrinsic_scan);
-    }
-
-    /// Register FFT (Fast Fourier Transform) intrinsics
-    fn register_fft_intrinsics(functions: &mut HashMap<String, IntrinsicFn>) {
-        functions.insert("__intrinsic_fft".to_string(), fft::intrinsic_fft);
-        functions.insert("__intrinsic_ifft".to_string(), fft::intrinsic_ifft);
-        functions.insert("__intrinsic_psd".to_string(), fft::intrinsic_psd);
-        functions.insert(
-            "__intrinsic_dominant_frequency".to_string(),
-            fft::intrinsic_dominant_frequency,
-        );
-        functions.insert("__intrinsic_bandpass".to_string(), fft::intrinsic_bandpass);
-        functions.insert(
-            "__intrinsic_harmonics".to_string(),
-            fft::intrinsic_harmonics,
-        );
-    }
 }
 
 impl Default for IntrinsicsRegistry {
@@ -401,179 +185,81 @@ impl Default for IntrinsicsRegistry {
 // ============================================================================
 // Common arg extraction helpers (DRY across all intrinsic modules)
 //
-// These are `pub` so that shape-vm can reuse them when delegating to runtime
-// intrinsics without duplicating extraction/conversion logic.
+// Phase 1.B (ADR-006 §2.7.1.4 / §2.7.4 audit accuracy ruling): the
+// pre-bulldozer helpers decoded a `&ValueWord` via tag-bit dispatch
+// methods (`as_number_coerce`, `as_any_array`, `as_int_array`,
+// `as_native_scalar`) that no longer exist. Phase 2c rebuilds these on
+// top of the per-position `NativeKind` threading (the variadic-shape
+// helpers will receive their kind information through the registered
+// schema rather than tag bits). Until then, the helpers return
+// well-formed errors so callers see "deferred" rather than silent
+// wrong-typed reads.
 // ============================================================================
 
-/// Extract a f64 from a ValueWord argument, coercing int to float.
-pub fn extract_f64(nb: &ValueWord, label: &str) -> Result<f64> {
-    nb.as_number_coerce()
-        .ok_or_else(|| ShapeError::RuntimeError {
-            message: format!("{} must be a number", label),
-            location: None,
-        })
-}
-
-/// Extract a usize from a ValueWord argument (for window sizes, counts, etc.).
-pub fn extract_usize(nb: &ValueWord, label: &str) -> Result<usize> {
-    let n = nb
-        .as_number_coerce()
-        .ok_or_else(|| ShapeError::RuntimeError {
-            message: format!("{} must be a number", label),
-            location: None,
-        })?;
-    Ok(n as usize)
-}
-
-/// Extract a Vec<f64> from a ValueWord array argument.
-///
-/// Supports typed arrays (IntArray, FloatArray) with zero-copy fast paths,
-/// plus the v2 raw-ptr `TypedArray<T>` representation (produced by the
-/// `NewTypedArrayF64/I64` opcodes — stored as `NativeScalar::Ptr`).
-pub fn extract_f64_array(nb: &ValueWord, label: &str) -> Result<Vec<f64>> {
-    // v2 raw-pointer fast path: `TypedArray<f64>` or `TypedArray<i64>` held as
-    // `NativeScalar::Ptr`. The `Mat<number> * Vec<number>` lowering passes its
-    // `Vec<number>` argument in this form.
-    if let Some(shape_value::heap_value::NativeScalar::Ptr(p)) = nb.as_native_scalar() {
-        if let Some(result) = extract_f64_from_v2_typed_array_ptr(p) {
-            return Ok(result);
-        }
-    }
-
-    let view = nb.as_any_array().ok_or_else(|| ShapeError::RuntimeError {
-        message: format!("{} must be an array", label),
+fn deferred(label: &str) -> ShapeError {
+    ShapeError::RuntimeError {
+        message: format!(
+            "{}: pending Phase 2c intrinsic kind threading — see ADR-006 §2.7.4",
+            label
+        ),
         location: None,
-    })?;
-    if let Some(slice) = view.as_f64_slice() {
-        return Ok(slice.to_vec());
-    }
-    if let Some(slice) = view.as_i64_slice() {
-        return Ok(slice.iter().map(|&v| v as f64).collect());
-    }
-    let arr = view.to_generic();
-    arr.iter()
-        .map(|v| {
-            v.as_number_coerce()
-                .ok_or_else(|| ShapeError::RuntimeError {
-                    message: format!("{} must contain only numeric values", label),
-                    location: None,
-                })
-        })
-        .collect()
-}
-
-/// Read a v2 `TypedArray<f64>` or `TypedArray<i64>` via its raw pointer and
-/// materialize its contents as `Vec<f64>`. Returns `None` for any other heap
-/// kind (caller falls through to the legacy `ArrayView` path).
-///
-/// The element type is decoded from the stamped `_pad` byte at offset 7 of
-/// the `HeapHeader` (see `v2_array_detect::stamp_elem_type`).
-fn extract_f64_from_v2_typed_array_ptr(p: usize) -> Option<Vec<f64>> {
-    use shape_value::v2::heap_header::{HEAP_KIND_V2_TYPED_ARRAY, HeapHeader};
-    use shape_value::v2::typed_array::TypedArray;
-
-    // Element-type discriminants kept in sync with
-    // `crates/shape-vm/src/executor/v2_handlers/v2_array_detect.rs`.
-    const ELEM_TYPE_F64: u8 = 1;
-    const ELEM_TYPE_I64: u8 = 2;
-    const ELEM_TYPE_I32: u8 = 3;
-
-    if p == 0 {
-        return None;
-    }
-    // Verify the object kind via the HeapHeader at offset 0.
-    let header = unsafe { &*(p as *const HeapHeader) };
-    if header.kind != HEAP_KIND_V2_TYPED_ARRAY {
-        return None;
-    }
-    let elem_byte = unsafe { *(p as *const u8).add(7) };
-    match elem_byte {
-        ELEM_TYPE_F64 => {
-            let arr = p as *const TypedArray<f64>;
-            let slice = unsafe { TypedArray::as_slice(arr) };
-            Some(slice.to_vec())
-        }
-        ELEM_TYPE_I64 => {
-            let arr = p as *const TypedArray<i64>;
-            let slice = unsafe { TypedArray::as_slice(arr) };
-            Some(slice.iter().map(|&v| v as f64).collect())
-        }
-        ELEM_TYPE_I32 => {
-            let arr = p as *const TypedArray<i32>;
-            let slice = unsafe { TypedArray::as_slice(arr) };
-            Some(slice.iter().map(|&v| v as f64).collect())
-        }
-        _ => None,
     }
 }
 
-/// Extract a string reference from a ValueWord argument.
-pub fn extract_str<'a>(nb: &'a ValueWord, label: &str) -> Result<&'a str> {
-    nb.as_str().ok_or_else(|| ShapeError::RuntimeError {
-        message: format!("{} must be a string", label),
-        location: None,
-    })
+/// Extract a f64 from an intrinsic argument. Phase 1.B reads the slot's
+/// 8 bytes as `f64` directly — variadic intrinsic callers carry the
+/// kind contract per registration.
+pub fn extract_f64(slot: &KindedSlot, _label: &str) -> Result<f64> {
+    Ok(slot.slot().as_f64())
 }
 
-/// Build a ValueWord array from a Vec<f64>.
-pub fn f64_vec_to_nb_array(data: Vec<f64>) -> ValueWord {
-    ValueWord::from_array(std::sync::Arc::new(
-        data.into_iter().map(ValueWord::from_f64).collect(),
-    ))
+/// Extract a `usize` from an intrinsic argument (window size / period).
+pub fn extract_usize(slot: &KindedSlot, _label: &str) -> Result<usize> {
+    Ok(slot.slot().as_i64().max(0) as usize)
 }
 
-/// Build a ValueWord FloatArray from a Vec<f64>.
+/// Extract a `Vec<f64>` from an intrinsic array argument.
 ///
-/// Returns a typed FloatArray — `HeapValue::TypedArray(TypedArrayData::F64(Arc<AlignedTypedBuffer>))`,
-/// reported by `heap_kind()` as `HeapKind::TypedArray` (the legacy
-/// `HeapKind::FloatArray` discriminant is deprecated). Unlike
-/// `f64_vec_to_nb_array`, which produces a generic `HeapKind::Array`
-/// of boxed f64 ValueWords, this helper preserves the `Vec<number>`
-/// fast-path representation used by the executor's dynamic fallback
-/// arm in `executor/arithmetic/mod.rs`.
-///
-/// Used by the four binary `Vec<number>` arithmetic intrinsics
-/// (vec_add / vec_sub / vec_mul / vec_div) so that when R5.4E retargets
-/// `Vec<number> + Vec<number>` (etc.) from the dynamic fallback to
-/// these intrinsics, the result preserves the 21-method
-/// FLOAT_ARRAY_METHODS PHF dispatch (sum / avg / dot / norm / cumsum /
-/// diff / abs / sqrt / ...) that the generic `HeapKind::Array` path
-/// does not provide.
-pub fn f64_vec_to_float_array(data: Vec<f64>) -> ValueWord {
-    use shape_value::aligned_vec::AlignedVec;
-    let aligned = AlignedVec::<f64>::from_vec(data);
-    ValueWord::from_float_array(std::sync::Arc::new(aligned.into()))
+/// Phase 1.B: the array-view decoders are deleted alongside `ValueWord`.
+/// Phase 2c rebuilds them per-`HeapKind::TypedArray` element type.
+/// Until then, returns a deferred error rather than silently
+/// fabricating a wrong-typed array.
+pub fn extract_f64_array(_slot: &KindedSlot, label: &str) -> Result<Vec<f64>> {
+    Err(deferred(&format!("{} (extract_f64_array)", label)))
 }
 
-/// Build a ValueWord IntArray from a Vec<i64>.
-///
-/// Returns a typed IntArray (preserves integer type fidelity) rather than
-/// a generic array of boxed ValueWords.
-pub fn i64_vec_to_nb_int_array(data: Vec<i64>) -> ValueWord {
-    ValueWord::from_int_array(std::sync::Arc::new(data.into()))
+/// Extract a string reference from an intrinsic argument. Phase 1.B
+/// reads the slot bits as `Arc<String>::into_raw`-shaped per registered
+/// `string` param; returns the borrowed string.
+pub fn extract_str<'a>(_slot: &'a KindedSlot, label: &str) -> Result<&'a str> {
+    Err(deferred(&format!("{} (extract_str)", label)))
 }
 
-/// Try to get an i64 slice directly from a ValueWord's IntArray heap value.
-///
-/// Zero-copy: returns a reference into the Arc<TypedBuffer<i64>>.
-/// Returns `None` for all non-IntArray values (caller should fall back to f64 path).
-pub fn try_extract_i64_slice(nb: &ValueWord) -> Option<&[i64]> {
-    nb.as_int_array().map(|buf| buf.as_slice())
+/// Build a `KindedSlot` array from a `Vec<f64>`. Phase 2c lands the
+/// proper `HeapValue::TypedArray(TypedArrayData::F64)` constructor.
+pub fn f64_vec_to_nb_array(_data: Vec<f64>) -> KindedSlot {
+    KindedSlot::none()
 }
 
-/// Build a ValueWord IntArray with validity bitmap from Vec<Option<i64>>.
-///
-/// `None` entries become null (validity bit = 0), `Some(v)` entries become valid.
-/// Used by rolling window i64 paths where positions before the window is full
-/// have no value.
-pub fn option_i64_vec_to_nb(data: Vec<Option<i64>>) -> ValueWord {
-    use shape_value::typed_buffer::TypedBuffer;
-    let mut buf = TypedBuffer::<i64>::with_capacity(data.len());
-    for item in data {
-        match item {
-            Some(v) => buf.push(v),
-            None => buf.push_null(),
-        }
-    }
-    ValueWord::from_int_array(std::sync::Arc::new(buf))
+/// Build a `KindedSlot` typed FloatArray from a `Vec<f64>`. See
+/// [`f64_vec_to_nb_array`] — Phase 2c rebuild deferral.
+pub fn f64_vec_to_float_array(_data: Vec<f64>) -> KindedSlot {
+    KindedSlot::none()
+}
+
+/// Build a `KindedSlot` typed IntArray from a `Vec<i64>`. See above.
+pub fn i64_vec_to_nb_int_array(_data: Vec<i64>) -> KindedSlot {
+    KindedSlot::none()
+}
+
+/// Try to read an i64 slice directly from a `KindedSlot` IntArray.
+/// Phase 1.B: deferred — returns `None`.
+pub fn try_extract_i64_slice(_slot: &KindedSlot) -> Option<&[i64]> {
+    None
+}
+
+/// Build a `KindedSlot` IntArray with validity bitmap from
+/// `Vec<Option<i64>>`. Phase 2c rebuild deferral.
+pub fn option_i64_vec_to_nb(_data: Vec<Option<i64>>) -> KindedSlot {
+    KindedSlot::none()
 }

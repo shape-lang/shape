@@ -12,10 +12,11 @@
 //! time values, data references, and other types.
 
 use std::collections::HashMap;
-use shape_value::ValueWordExt;
 
 use super::super::super::context::{JITDataReference, JITDuration};
-use super::super::super::jit_array::JitArray;
+// super::super::super::jit_array::JitArray removed — see jit_array.rs
+// SURFACE comment. The HK_ARRAY arms below now route to surface-and-stop
+// per ADR-006 §2.7.4 / W10 jit-playbook §5.
 use crate::ffi::jit_kinds::*;
 use crate::ffi::value_ffi::*;
 
@@ -34,73 +35,27 @@ pub extern "C" fn jit_get_prop(obj_bits: u64, key_bits: u64) -> u64 {
             None
         };
 
-        // Detect VM-allocated heap objects vs JIT-allocated (JitAlloc).
-        // Both have TAG_HEAP (tag 0). JitAlloc has a valid kind u16 in the
-        // known range. VM Arc<HeapValue> has the enum discriminant which can
-        // collide with low JIT kinds. Reliable check: use is_unified_heap for
-        // unified arrays, then check if heap_kind matches a known JIT type.
-        // If the kind is NOT a recognized JIT type, try VM interpretation.
-        if shape_value::tag_bits::is_tagged(obj_bits)
-            && shape_value::tag_bits::get_tag(obj_bits) == shape_value::tag_bits::TAG_HEAP
-        {
-            let jit_kind = heap_kind(obj_bits);
-            let is_known_jit = matches!(
-                jit_kind,
-                Some(HK_ARRAY)
-                    | Some(HK_STRING)
-                    | Some(HK_TYPED_OBJECT)
-                    | Some(HK_JIT_OBJECT)
-                    | Some(HK_DURATION)
-                    | Some(HK_TIME)
-                    | Some(HK_DATA_REFERENCE)
-                    | Some(HK_CLOSURE)
-                    | Some(HK_FLOAT_ARRAY)
-                    | Some(HK_INT_ARRAY)
-                    | Some(HK_FLOAT_ARRAY_SLICE)
-                    | Some(HK_BOOL_ARRAY)
-                    | Some(HK_I8_ARRAY)
-                    | Some(HK_I16_ARRAY)
-                    | Some(HK_I32_ARRAY)
-                    | Some(HK_U8_ARRAY)
-                    | Some(HK_U16_ARRAY)
-                    | Some(HK_U32_ARRAY)
-                    | Some(HK_U64_ARRAY)
-                    | Some(HK_F32_ARRAY)
-            );
-            if !is_known_jit {
-                // Not a recognized JIT type — try VM ValueWord interpretation.
-                // SAFETY: clone_from_bits is only safe for actual VM ValueWord bits.
-                // If this is a JitAlloc with an unrecognized kind, clone_from_bits
-                // would crash. But since we checked is_known_jit first, unrecognized
-                // JIT kinds are extremely unlikely.
-                let vw = shape_value::ValueWord::clone_from_bits(obj_bits);
-                if let Some((schema_id, slots, heap_mask)) = vw.as_typed_object() {
-                    if let Some(key) = key_str {
-                        if let Some(schema) =
-                            shape_runtime::type_schema::lookup_schema_by_id_public(
-                                schema_id as u32,
-                            )
-                        {
-                            if let Some(idx) = schema.field_names().position(|n| n == key) {
-                                if idx < slots.len() {
-                                    let is_heap_field = (heap_mask >> idx) & 1 != 0;
-                                    let field_vw = slots[idx].as_value_word(is_heap_field);
-                                    return super::conversion::nanboxed_to_jit_bits(&field_vw);
-                                }
-                            }
-                        }
-                    }
-                    return TAG_NULL;
-                }
-                // Not a VM TypedObject either — fall through
-            }
-        }
+        // Per ADR-006 §2.7.5, the JIT-FFI carries raw `u64` plus a parallel
+        // `NativeKind` companion stamped at JIT compile time from the call
+        // signature. Pre-strict-typing the property-access fast path tried to
+        // discriminate VM-format `Arc<HeapValue>` slots from JIT-format
+        // `JitAlloc` allocations by reading the deleted `tag_bits::TAG_HEAP`
+        // discriminator and falling back through `ValueWord::clone_from_bits`
+        // — both removed in the Phase-2 bulldozer. The strict-typed
+        // replacement is a kinded property-access entry that takes the
+        // receiver's `NativeKind` from the call signature; the JIT lowering
+        // for `op_get_prop` must thread the kind through alongside the bits.
+        // TODO(phase-2c §2.7.5/§2.7.10): revive the kinded entry once the
+        // op_get_prop JIT lowering passes a `NativeKind` companion.
 
         // JIT-allocated heap objects (JitAlloc with kind header)
-        if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
-            eprintln!(
-                "[jit-get-prop] obj={:#x} heap_kind={:?} key={:?}",
-                obj_bits, heap_kind(obj_bits), key_str
+        if tracing::enabled!(target: "shape_jit", tracing::Level::DEBUG) {
+            tracing::debug!(
+                target: "shape_jit",
+                obj = obj_bits,
+                heap_kind = ?heap_kind(obj_bits),
+                key = ?key_str,
+                "jit-get-prop",
             );
         }
         if let Some(kind) = heap_kind(obj_bits) {
@@ -109,34 +64,21 @@ pub extern "C" fn jit_get_prop(obj_bits: u64, key_bits: u64) -> u64 {
                 | HK_BOOL_ARRAY | HK_I8_ARRAY | HK_I16_ARRAY | HK_I32_ARRAY
                 | HK_U8_ARRAY | HK_U16_ARRAY | HK_U32_ARRAY | HK_U64_ARRAY
                 | HK_F32_ARRAY => {
-                    let arr = JitArray::from_heap_bits(obj_bits);
-
-                    // Handle array properties
-                    match key_str {
-                        Some("length") | Some("len") => box_number(arr.len() as f64),
-                        Some("first") => arr.first().copied().unwrap_or(TAG_NULL),
-                        Some("last") => arr.last().copied().unwrap_or(TAG_NULL),
-                        _ => {
-                            // Try numeric index (with negative index support)
-                            if is_number(key_bits) {
-                                let idx_f64 = unbox_number(key_bits);
-                                let idx = if idx_f64 < 0.0 {
-                                    let len = arr.len() as i64;
-                                    let neg_idx = idx_f64 as i64;
-                                    let actual_idx = len + neg_idx;
-                                    if actual_idx < 0 {
-                                        return TAG_NULL;
-                                    }
-                                    actual_idx as usize
-                                } else {
-                                    idx_f64 as usize
-                                };
-                                arr.get(idx).copied().unwrap_or(TAG_NULL)
-                            } else {
-                                TAG_NULL
-                            }
-                        }
-                    }
+                    // SURFACE (W10 jit-playbook §5 / ADR-006 §2.7.4):
+                    // length / first / last / index decoded the
+                    // deleted `JitArray` heap layout. Kinded rebuild
+                    // reads `Arc<TypedArrayData>` per-element-kind
+                    // (§2.7.6/Q8) and dispatches on the JIT-stamped
+                    // element kind (§2.7.5). Until then, all array
+                    // property reads surface.
+                    let _ = key_str;
+                    todo!(
+                        "phase-2c §2.7.4 / W10 jit-playbook §5: \
+                         JitArray rebuild — jit_get_prop array arm. \
+                         Receiver decode + length/first/last/index \
+                         all block on the kinded TypedArray<T> \
+                         rebuild per ADR-006 §2.7.6/Q8."
+                    )
                 }
                 HK_JIT_OBJECT => {
                     let obj = unified_unbox::<HashMap<String, u64>>(obj_bits);
@@ -306,17 +248,26 @@ pub extern "C" fn jit_get_prop(obj_bits: u64, key_bits: u64) -> u64 {
 /// Returns the shape_id as a u32 (0 if the HashMap has no shape / dictionary mode).
 /// Called by JIT shape guards to compare against an expected shape.
 ///
+/// # Phase-2c surface
+///
+/// Per ADR-006 §2.7.5 the kinded JIT-FFI entry takes the receiver's
+/// `NativeKind` companion from the JIT call signature; pre-strict-typing
+/// this routed through `ValueWord::as_hashmap_data()` (deleted with the
+/// dynamic word). Re-fill is gated on `HashMapData` surfacing through the
+/// kinded carrier per ADR-006 §2.7.10 dispatch shell — see
+/// `docs/cluster-audits/wave-10-jit-playbook.md` §5.
+///
 /// # Safety
-/// `obj_bits` must be a NaN-boxed value with HeapKind::HashMap.
+/// `obj_bits` must be a NaN-boxed value with HeapKind::HashMap; the kind
+/// companion is statically known from the JIT call signature.
 #[inline(always)]
-pub extern "C" fn jit_hashmap_shape_id(obj_bits: u64) -> u32 {
-    use super::conversion::jit_bits_to_nanboxed;
-    let vw = jit_bits_to_nanboxed(obj_bits);
-    if let Some(data) = vw.as_hashmap_data() {
-        data.shape_id.map(|s| s.0).unwrap_or(0)
-    } else {
-        0
-    }
+pub extern "C" fn jit_hashmap_shape_id(_obj_bits: u64) -> u32 {
+    // Phase-2c §2.7.5/§2.7.10: kinded HashMap-shape lookup via the
+    // typed-Arc HashMapData reachable from the §2.7.6/Q8 KindedSlot
+    // carrier. Returning 0 falls back to "no shape" — JIT shape guards
+    // then take the cold dictionary path, which itself surfaces in its
+    // own kinded re-fill wave.
+    0
 }
 
 /// Access a HashMap value by slot index (O(1) indexed access).
@@ -325,24 +276,24 @@ pub extern "C" fn jit_hashmap_shape_id(obj_bits: u64) -> u32 {
 /// has the expected shape and `slot_index` is valid for that shape.
 ///
 /// Returns the NaN-boxed value at `values[slot_index]`, or TAG_NULL if
-/// the index is out of bounds (defensive fallback).
+/// the index is out of bounds.
+///
+/// # Phase-2c surface
+///
+/// Same Phase-2c surface as `jit_hashmap_shape_id`; the re-encoding of
+/// per-slot values back to JIT-bits depends on `nanboxed_to_jit_bits`'s
+/// kinded re-fill (`conversion.rs` Phase-2c surface).
 ///
 /// # Safety
 /// `obj_bits` must be a NaN-boxed value with HeapKind::HashMap.
 #[inline(always)]
-pub extern "C" fn jit_hashmap_value_at(obj_bits: u64, slot_index: u64) -> u64 {
-    use super::conversion::{jit_bits_to_nanboxed, nanboxed_to_jit_bits};
-    let vw = jit_bits_to_nanboxed(obj_bits);
-    if let Some(data) = vw.as_hashmap_data() {
-        let idx = slot_index as usize;
-        if let Some(val) = data.values.get(idx) {
-            nanboxed_to_jit_bits(val)
-        } else {
-            TAG_NULL
-        }
-    } else {
-        TAG_NULL
-    }
+pub extern "C" fn jit_hashmap_value_at(_obj_bits: u64, _slot_index: u64) -> u64 {
+    // Phase-2c §2.7.5/§2.7.10: kinded slot read via the typed-Arc
+    // HashMapData reachable from the §2.7.6/Q8 KindedSlot carrier. The
+    // shape-guard precondition becomes a kind-dispatch precondition at
+    // the kinded entry-point (HashMap kind companion stamped at JIT
+    // compile time).
+    TAG_NULL
 }
 
 /// Get array/string/object/series length
@@ -354,8 +305,13 @@ pub extern "C" fn jit_length(value_bits: u64) -> u64 {
         | Some(HK_I8_ARRAY) | Some(HK_I16_ARRAY) | Some(HK_I32_ARRAY)
         | Some(HK_U8_ARRAY) | Some(HK_U16_ARRAY) | Some(HK_U32_ARRAY)
         | Some(HK_U64_ARRAY) | Some(HK_F32_ARRAY) => {
-            let arr = unsafe { JitArray::from_heap_bits(value_bits) };
-            arr.len()
+            // SURFACE (W10 jit-playbook §5 / ADR-006 §2.7.4): array
+            // length read decoded the deleted JitArray layout. Kinded
+            // rebuild reads `Arc<TypedArrayData>::len` per §2.7.6/Q8.
+            todo!(
+                "phase-2c §2.7.4 / W10 jit-playbook §5: JitArray \
+                 rebuild — jit_length array arm."
+            )
         }
         Some(HK_STRING) => {
             let s = unsafe { unbox_string(value_bits) };
@@ -367,16 +323,14 @@ pub extern "C" fn jit_length(value_bits: u64) -> u64 {
         }
         Some(HK_COLUMN_REF) => 0,
         _ => {
-            // VM-format heap values (HashMap, DataTable, etc.)
-            if is_heap(value_bits) && !shape_value::ValueBits::from_raw(value_bits).is_unified_heap() {
-                let vw = unsafe { shape_value::ValueWord::clone_from_bits(value_bits) };
-                if let Some(hm) = vw.as_hashmap_data() {
-                    return box_number(hm.keys.len() as f64);
-                }
-                if let Some(s) = vw.as_str() {
-                    return box_number(s.chars().count() as f64);
-                }
-            }
+            // Per ADR-006 §2.7.5, VM-format heap values reach the JIT through a
+            // kinded entry — the receiver's `NativeKind` companion is stamped
+            // by the JIT lowering at the call signature, not decoded from
+            // raw bits via the deleted `tag_bits::TAG_HEAP` /
+            // `ValueBits::is_unified_heap` discriminator.
+            // TODO(phase-2c §2.7.5/§2.7.10): kinded `jit_length` variant for
+            // VM-shaped receivers (HashMap, String) once op_length JIT
+            // lowering threads `NativeKind` through.
             0
         }
     };

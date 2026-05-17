@@ -41,6 +41,9 @@ const _: () = {
     assert!(std::mem::size_of::<TypedArray<f64>>() == 24);
     assert!(std::mem::size_of::<TypedArray<i32>>() == 24);
     assert!(std::mem::size_of::<TypedArray<u8>>() == 24);
+    // Wave 2 Agent A1 (2026-05-14) — F32 + Char scalar monomorphizations.
+    assert!(std::mem::size_of::<TypedArray<f32>>() == 24);
+    assert!(std::mem::size_of::<TypedArray<char>>() == 24);
 };
 
 impl<T: Copy> TypedArray<T> {
@@ -273,6 +276,151 @@ impl<T: Copy> TypedArray<T> {
 
             arr.data = new_data;
             arr.cap = new_cap;
+        }
+    }
+}
+
+/// Heap-element-aware drop dispatch for `TypedArray<*const T>` where `T:
+/// HeapElement`.
+///
+/// Per ADR-006 §2.7.24 Q25.A SUPERSEDED + R20 S2-prime audit deliverable (b)
+/// §4.1.B decision: `drop_array_heap` walks the element buffer and calls
+/// `T::release_elem(elem_ptr)` for each stored pointer, then frees the data
+/// buffer + the TypedArray struct itself. Per-T dispatch is monomorphized at
+/// compile time via the `HeapElement` trait — no runtime `NativeKind` probe.
+///
+/// Pairs with the POD-element `drop_array` for `T: Copy` (above). Callers
+/// pick at compile time based on whether the element type is POD (plain
+/// scalar like f64/i64) or HeapHeader-equipped (`*const StringObj` /
+/// `*const DecimalObj` / ...).
+impl<T: super::heap_element::HeapElement> TypedArray<*const T> {
+    /// Deallocate the array, releasing per-element shares via
+    /// `T::release_elem`, then freeing the data buffer + the struct.
+    ///
+    /// # Safety
+    /// `ptr` must point to a `TypedArray<*const T>` that was allocated by
+    /// this module. Each stored `*const T` must be a valid pointer to a
+    /// live `T` allocation with at least one refcount share owned by this
+    /// array. After this call, `ptr` is invalid.
+    pub unsafe fn drop_array_heap(ptr: *mut Self) {
+        unsafe {
+            let arr = &*ptr;
+            if arr.cap > 0 && !arr.data.is_null() {
+                // Walk element buffer; release per-element shares.
+                for i in 0..arr.len {
+                    let elem_ptr = ptr::read(arr.data.add(i as usize));
+                    T::release_elem(elem_ptr);
+                }
+                // Free the data buffer.
+                let data_layout = Layout::array::<*const T>(arr.cap as usize)
+                    .expect("invalid array layout");
+                dealloc(arr.data as *mut u8, data_layout);
+            }
+            // Free the TypedArray struct itself.
+            let layout = Layout::new::<Self>();
+            dealloc(ptr as *mut u8, layout);
+        }
+    }
+}
+
+// Allocation + size-only operations available for non-Copy element types
+// (e.g. `TypedObjectPtr` with manual `Drop`). Per ADR-006 §2.7.24 Q25.B
+// SUPERSEDED + Wave 2 Round 3b C2-joint ckpt-1 — `HashMapData<V>` (in
+// `crates/shape-value/src/heap_value.rs`) instantiates `TypedArray<V>` for
+// `V = TypedObjectPtr` / `TraitObjectPtr` (transparent newtypes with manual
+// Drop), which are not `Copy`. The methods here are size/allocation only —
+// no `ptr::read` / `ptr::write` that would require `T: Copy` for soundness.
+//
+// Methods needing element copy semantics (`get_unchecked`, `set`, `push`,
+// `pop`, `from_slice`) remain bounded by `T: Copy` in the impl block above;
+// non-Copy element types use the per-element-Drop-aware paths in
+// `HashMapValueElem::release_typed_array`.
+impl<T> TypedArray<T> {
+    /// Allocate a new empty TypedArray with capacity 0 — non-Copy variant.
+    ///
+    /// Returns a raw pointer to the heap-allocated array. The caller is
+    /// responsible for eventually freeing it via `HashMapValueElem::
+    /// release_typed_array` (for `HashMapData<V>` value buffers) or the
+    /// equivalent per-T release path.
+    #[doc(alias = "new")]
+    pub fn new_generic() -> *mut Self {
+        Self::with_capacity_generic(0)
+    }
+
+    /// Allocate a new TypedArray with the given capacity — non-Copy variant.
+    ///
+    /// Returns a raw pointer to the heap-allocated array. No elements are
+    /// written; the data buffer is uninitialized memory of length `cap *
+    /// size_of::<T>()`.
+    #[doc(alias = "with_capacity")]
+    pub fn with_capacity_generic(cap: u32) -> *mut Self {
+        let layout = Layout::new::<Self>();
+        let ptr = unsafe { alloc(layout) as *mut Self };
+        assert!(!ptr.is_null(), "allocation failed for TypedArray");
+
+        let data = if cap > 0 {
+            let data_layout = Layout::array::<T>(cap as usize).expect("invalid array layout");
+            let data_ptr = unsafe { alloc(data_layout) as *mut T };
+            assert!(!data_ptr.is_null(), "allocation failed for TypedArray data");
+            data_ptr
+        } else {
+            ptr::null_mut()
+        };
+
+        unsafe {
+            ptr::write(
+                ptr,
+                Self {
+                    header: HeapHeader::new(HEAP_KIND_V2_TYPED_ARRAY),
+                    data,
+                    len: 0,
+                    cap,
+                },
+            );
+        }
+
+        ptr
+    }
+
+    /// Get the number of elements — non-Copy variant.
+    ///
+    /// # Safety
+    /// `this` must point to a valid, live `TypedArray<T>`.
+    #[inline]
+    pub unsafe fn len_generic(this: *const Self) -> u32 {
+        unsafe { (*this).len }
+    }
+
+    /// Get the allocated capacity — non-Copy variant.
+    ///
+    /// # Safety
+    /// `this` must point to a valid, live `TypedArray<T>`.
+    #[inline]
+    pub unsafe fn capacity_generic(this: *const Self) -> u32 {
+        unsafe { (*this).cap }
+    }
+
+    /// Check if the array is empty — non-Copy variant.
+    ///
+    /// # Safety
+    /// `this` must point to a valid, live `TypedArray<T>`.
+    #[inline]
+    pub unsafe fn is_empty_generic(this: *const Self) -> bool {
+        unsafe { (*this).len == 0 }
+    }
+
+    /// Get the elements as a slice — non-Copy variant.
+    ///
+    /// # Safety
+    /// `this` must point to a valid, live `TypedArray<T>`.
+    #[inline]
+    pub unsafe fn as_slice_generic<'a>(this: *const Self) -> &'a [T] {
+        unsafe {
+            if (*this).len == 0 {
+                &[]
+            } else {
+                std::slice::from_raw_parts((*this).data, (*this).len as usize)
+            }
         }
     }
 }
@@ -602,6 +750,149 @@ mod tests {
 
             // Don't call v2_release to 0 here since we use drop_array for cleanup
             TypedArray::drop_array(arr);
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // drop_array_heap tests per ADR-006 §2.7.24 Q25.A SUPERSEDED + R20
+    // S2-prime audit deliverable (b) §4.1.B.
+    // ──────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_drop_array_heap_string_obj() {
+        use crate::v2::string_obj::StringObj;
+        unsafe {
+            // Allocate a TypedArray<*const StringObj> with capacity 4.
+            let arr: *mut TypedArray<*const StringObj> = TypedArray::with_capacity(4);
+            // Push 3 StringObj pointers.
+            let s1 = StringObj::new("hello");
+            let s2 = StringObj::new("world");
+            let s3 = StringObj::new("!");
+            TypedArray::push(arr, s1 as *const StringObj);
+            TypedArray::push(arr, s2 as *const StringObj);
+            TypedArray::push(arr, s3 as *const StringObj);
+            assert_eq!(TypedArray::len(arr), 3);
+            // drop_array_heap releases per-element shares then dealloc the
+            // buffer + struct.
+            TypedArray::<*const StringObj>::drop_array_heap(arr);
+        }
+    }
+
+    #[test]
+    fn test_drop_array_heap_decimal_obj() {
+        use crate::v2::decimal_obj::DecimalObj;
+        use rust_decimal::Decimal;
+        use rust_decimal::prelude::FromPrimitive;
+        unsafe {
+            let arr: *mut TypedArray<*const DecimalObj> = TypedArray::with_capacity(4);
+            let d1 = DecimalObj::new(Decimal::from_f64(1.5).unwrap());
+            let d2 = DecimalObj::new(Decimal::from_f64(2.5).unwrap());
+            let d3 = DecimalObj::new(Decimal::ZERO);
+            TypedArray::push(arr, d1 as *const DecimalObj);
+            TypedArray::push(arr, d2 as *const DecimalObj);
+            TypedArray::push(arr, d3 as *const DecimalObj);
+            assert_eq!(TypedArray::len(arr), 3);
+            TypedArray::<*const DecimalObj>::drop_array_heap(arr);
+        }
+    }
+
+    #[test]
+    fn test_drop_array_heap_empty() {
+        use crate::v2::string_obj::StringObj;
+        unsafe {
+            // Empty TypedArray (no allocated buffer).
+            let arr: *mut TypedArray<*const StringObj> = TypedArray::new();
+            TypedArray::<*const StringObj>::drop_array_heap(arr);
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Wave 2 Agent A1 (2026-05-14) — F32 + Char monomorphization smokes.
+    // ──────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_size_of_typed_array_f32_char() {
+        assert_eq!(std::mem::size_of::<TypedArray<f32>>(), 24);
+        assert_eq!(std::mem::size_of::<TypedArray<char>>(), 24);
+    }
+
+    #[test]
+    fn test_push_and_get_f32() {
+        let arr = TypedArray::<f32>::new();
+        unsafe {
+            TypedArray::push(arr, 1.5_f32);
+            TypedArray::push(arr, 2.25_f32);
+            TypedArray::push(arr, std::f32::consts::PI);
+            assert_eq!(TypedArray::len(arr), 3);
+            assert_eq!(TypedArray::get(arr, 0), Some(1.5_f32));
+            assert_eq!(TypedArray::get(arr, 1), Some(2.25_f32));
+            assert_eq!(TypedArray::get(arr, 2), Some(std::f32::consts::PI));
+            assert_eq!(TypedArray::get(arr, 3), None);
+            TypedArray::drop_array(arr);
+        }
+    }
+
+    #[test]
+    fn test_push_and_get_char() {
+        let arr = TypedArray::<char>::new();
+        unsafe {
+            TypedArray::push(arr, 'a');
+            TypedArray::push(arr, '☃');
+            TypedArray::push(arr, '👋');
+            assert_eq!(TypedArray::len(arr), 3);
+            assert_eq!(TypedArray::get(arr, 0), Some('a'));
+            assert_eq!(TypedArray::get(arr, 1), Some('☃'));
+            assert_eq!(TypedArray::get(arr, 2), Some('👋'));
+            assert_eq!(TypedArray::get(arr, 3), None);
+            TypedArray::drop_array(arr);
+        }
+    }
+
+    #[test]
+    fn test_from_slice_f32() {
+        let data: [f32; 5] = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let arr = TypedArray::from_slice(&data);
+        unsafe {
+            assert_eq!(TypedArray::len(arr), 5);
+            for (i, &expected) in data.iter().enumerate() {
+                assert_eq!(TypedArray::get(arr, i as u32), Some(expected));
+            }
+            TypedArray::drop_array(arr);
+        }
+    }
+
+    #[test]
+    fn test_from_slice_char() {
+        let data = ['h', 'i', '!'];
+        let arr = TypedArray::from_slice(&data);
+        unsafe {
+            assert_eq!(TypedArray::len(arr), 3);
+            for (i, &expected) in data.iter().enumerate() {
+                assert_eq!(TypedArray::get(arr, i as u32), Some(expected));
+            }
+            TypedArray::drop_array(arr);
+        }
+    }
+
+    #[test]
+    fn test_drop_array_heap_with_held_share() {
+        use crate::v2::refcount::{v2_get_refcount, v2_retain};
+        use crate::v2::string_obj::StringObj;
+        unsafe {
+            // Allocate one StringObj with refcount 2 (one for the array, one held
+            // externally). drop_array_heap should decrement to 1, not deallocate.
+            let arr: *mut TypedArray<*const StringObj> = TypedArray::with_capacity(2);
+            let s = StringObj::new("shared");
+            v2_retain(&(*s).header); // refcount = 2
+            TypedArray::push(arr, s as *const StringObj);
+
+            TypedArray::<*const StringObj>::drop_array_heap(arr);
+
+            // External share still valid; refcount should be 1.
+            assert_eq!(v2_get_refcount(&(*s).header), 1);
+            assert_eq!(StringObj::as_str(s), "shared");
+            // Clean up.
+            StringObj::drop(s);
         }
     }
 }

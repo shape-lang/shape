@@ -34,9 +34,10 @@ clippy:
 
 # --- Test Tiers ---
 
-# Tier 0: Compile all tests without running them (~5-8s)
-test-check:
-	cargo check --workspace --tests --all-targets
+# Tier 0: Compile-check the canonical clean-gate target set (~5-8s).
+# Uses the `check-clean` recipe — see its doc-comment for the exact target list
+# and the rationale for excluding `--benches`.
+test-check: check-clean
 
 # Tier 1: Fast unit tests — no deep/soak, no integration
 test-fast:
@@ -83,7 +84,67 @@ test-integration:
 test-crate crate:
 	cargo test -p {{crate}} --features deep-tests 2>/dev/null || cargo test -p {{crate}}
 
-# CI: full suite
+# CI: full suite. Target set mirrors `check-clean`: `--all-targets` minus
+# `--benches` (the two shape-vm bench files reference deleted post-strict-typing
+# shapes; bench rebuild is Item 5's territory).
 ci-test:
-	cargo test --workspace --all-targets --features shape-vm/deep-tests --features shape-runtime/deep-tests --features shape-ast/deep-tests -- --include-ignored
+	cargo test --workspace --lib --bins --tests --examples --features shape-vm/deep-tests --features shape-runtime/deep-tests --features shape-ast/deep-tests -- --include-ignored
 	cargo run -p xtask -- workspace-smoke
+
+# --- Canonical clean-check gate ---
+
+# Canonical "workspace clean" verifier. `just check-clean` exit 0 means the
+# build gate is green; sub-cluster close gates and verify-merge.sh CHECK 1+2
+# anchor on this command's coverage.
+#
+# Target set: `--lib --bins --tests --examples`
+#   = `--all-targets` minus `--benches`.
+#
+# Why benches are excluded:
+#   `crates/shape-vm/benches/vm_benchmarks.rs` and
+#   `crates/shape-vm/benches/typed_access_bench.rs` reference deleted
+#   post-strict-typing shapes (`OpCode::Lt`, `ValueWord`, `ValueWordExt`,
+#   `Constant::Value`). Rewriting them against the current opcode / slot ABI
+#   is Item 5's territory (the bench-rebuild sub-cluster running in parallel).
+#   Until Item 5 lands, `--benches` is out of the gate.
+#
+# Crates covered: every workspace member (see top-level Cargo.toml `members`),
+# i.e. shape-macros, shape-ast, shape-value, shape-wire, shape-runtime,
+# shape-vm, shape-jit, shape-diagnostics, shape-viz-{core,native}, shape-cli,
+# shape-lsp, shape-test, xtask, shape-abi-v1, shape-gc, shape-ext-python,
+# shape-ext-typescript. (`shape-app` and `shape-server` live in a SEPARATE
+# workspace at `../shape-app/` and are not workspace members here.)
+check-clean:
+	cargo check --workspace --lib --bins --tests --examples
+
+# --- Strict-typing plan gates (~/.claude/plans/stop-native-vs-tagged-tax.md) ---
+
+# Defection guard: per-symbol monotonic-non-increasing check vs frozen baseline.
+# See scripts/check-no-dynamic.sh and docs/check-no-dynamic-baseline.txt.
+check-no-dynamic:
+	bash scripts/check-no-dynamic.sh
+
+# Phase 2d merge gate. Run before merging any sub-cluster branch into
+# bulldozer-strictly-typed. Exit-code-based (NOT grep -c) per handover §0.
+# See docs/cluster-audits/phase-2d-handover.md §0 + scripts/verify-merge.sh.
+verify-merge:
+	bash scripts/verify-merge.sh
+
+# Same as `just verify-merge` but skips the --tests pass (faster).
+verify-merge-fast:
+	bash scripts/verify-merge.sh --fast
+
+# Phase 2 gate: shape-runtime --lib compiles cleanly.
+# Reports the current error count; exits non-zero if > 0.
+verify-phase-2:
+	#!/usr/bin/env bash
+	set -uo pipefail
+	errors=$(cargo check -p shape-runtime --lib 2>&1 | rg -c '^error' || true)
+	echo "shape-runtime --lib errors: ${errors:-0}"
+	[[ "${errors:-0}" == "0" ]]
+
+# Phase 5 gate: defection guard clean + sentinel test passes.
+# (Sentinel test crates/shape-vm/src/executor/tests/no_dynamic.rs is not yet
+# wired up; see CLAUDE.md "Mechanical enforcement". When it lands, add it here.)
+verify-phase-5: check-no-dynamic
+	@echo "TODO: invoke sentinel test when crates/shape-vm/src/executor/tests/no_dynamic.rs lands"

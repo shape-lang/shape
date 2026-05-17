@@ -33,23 +33,21 @@ impl VirtualMachine {
         }
     }
 
-    /// Set a module_binding variable by name using ValueWord directly.
-    pub(crate) fn set_module_binding_by_name_nb(&mut self, name: &str, value: ValueWord) {
-        if let Some(idx) = self
-            .program
-            .module_binding_names
-            .iter()
-            .position(|n| n == name)
-        {
-            if idx < self.module_bindings.len() {
-                // BARRIER: heap write site — overwrites module binding by name
-                self.binding_write_raw(idx, value);
-            } else {
-                self.module_bindings.resize_with(idx + 1, || Self::NONE_BITS);
-                // BARRIER: heap write site — overwrites module binding by name (after resize)
-                self.binding_write_raw(idx, value);
-            }
-        }
+    /// Set a module_binding variable by name.
+    ///
+    /// Phase-1b-vm: the storage-tier parallel-kind track for module
+    /// bindings has landed (`module_binding_kinds` companion vec, ADR-
+    /// 006 §2.7.8 / Q10) and `module_binding_write_kinded` is the
+    /// kinded implementation backbone for any future host-API mutator.
+    /// The signature is now kinded per ADR-006 §2.7 / Q7 — the
+    /// `KindedSlot` carrier is the boundary shape.
+    pub(crate) fn set_module_binding_by_name_nb(&mut self, _name: &str, _value: KindedSlot) {
+        todo!(
+            "phase-2c — see ADR-006 §2.7.4: set_module_binding_by_name_nb \
+             dispatch through `module_binding_write_kinded` (§2.7.8 \
+             parallel track is live); host-API caller wiring lands in \
+             the Phase-2c host rebuild"
+        );
     }
 
     /// Get the line number of the last error (for LSP integration)
@@ -63,7 +61,9 @@ impl VirtualMachine {
     }
 
     /// Capture an uncaught exception payload for host-side rendering.
-    pub(crate) fn set_last_uncaught_exception(&mut self, value: ValueWord) {
+    ///
+    /// Per ADR-006 §2.7 / Q7 the boundary carrier is `KindedSlot`.
+    pub(crate) fn set_last_uncaught_exception(&mut self, value: KindedSlot) {
         self.last_uncaught_exception = Some(value);
     }
 
@@ -73,7 +73,7 @@ impl VirtualMachine {
     }
 
     /// Take the last uncaught exception payload if present.
-    pub fn take_last_uncaught_exception(&mut self) -> Option<ValueWord> {
+    pub fn take_last_uncaught_exception(&mut self) -> Option<KindedSlot> {
         self.last_uncaught_exception.take()
     }
 }

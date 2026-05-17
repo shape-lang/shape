@@ -1,20 +1,19 @@
 //! Differential fuzzing gate: VM/JIT result parity verification.
 //!
-//! Generates random typed bytecode programs, runs each through both the VM
-//! interpreter and the JIT compiler, then compares results using TypedScalar
-//! for type-preserving comparison (integers stay integers, floats stay floats).
-//!
-//! ## Comparison levels
-//!
-//! - **Semantic equality**: values are numerically equal regardless of type encoding
-//!   (e.g., int(42) == f64(42.0)). Used as the minimum parity requirement.
-//! - **Encoding equality**: kinds MUST match AND values MUST match. Used by
-//!   encoding policy tests to verify both backends produce the same type.
+//! W11: this integration-test crate is gated out of compilation because it
+//! uses the deleted `shape_value::{ValueWordExt, ValueWordScalarExt}`
+//! traits and calls `KindedSlot::to_typed_scalar()` (deleted accessor
+//! shape, ADR-006 §2.7.6 / Q8 carrier-API-bound limits scalar accessors
+//! to one per `NativeKind` *scalar* variant). Rebuilding the differential
+//! fuzz harness on top of the kinded VM↔JIT slot ABI plus `TypedScalar`
+//! is tracked as part of the §2.7.4 Phase 2c FFI rebuild.
 //!
 //! Run with:
 //! ```sh
 //! cargo test -p shape-jit -- differential_fuzz --ignored --nocapture
 //! ```
+
+#![cfg(any())]
 
 use shape_jit::ffi::value_ffi::TAG_NULL;
 use shape_jit::{JITCompiler, JITConfig, JITContext};

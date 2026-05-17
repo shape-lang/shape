@@ -1,28 +1,120 @@
+//! Builtin dispatch slice (ADR-006 §2.7.6 / Q8).
+//!
+//! Wave 5a (phase-1b-vm) flipped the dispatch SHAPE here: every arm now
+//! produces / consumes `Vec<KindedSlot>` (and `&[KindedSlot]`), aligned
+//! with the carrier-API bound spec'd at §2.7.6. The body interiors
+//! (math kernels, array kernels, content builders, type-introspection,
+//! stats, intrinsics, JSON helpers, table builders, content / DateTime /
+//! concurrency constructors) are deferred to Waves 5b-5e.
+//!
+//! - **Wave 5b (LANDED)**: math + array + utility bodies (`builtin_abs`,
+//!   `builtin_push`, `builtin_object_rest`, `builtin_snapshot`,
+//!   `builtin_exit`, etc.) are now `Fn(&[KindedSlot], ...) -> Result<KindedSlot, VMError>`
+//!   and the dispatch arms call them directly.
+//! - **Wave 5c**: type-introspection + conversion + native-interop bodies
+//!   (`builtin_is_*`, `builtin_to_*`, `dispatch_native_interop_builtin`).
+//! - **Wave 5d**: closure-driven array builtins (`map`, `filter`, `reduce`,
+//!   etc.) + intrinsic dispatch (`handle_intrinsic_builtin`,
+//!   `handle_vector_intrinsic`, `handle_matrix_intrinsic`).
+//! - **Wave 5e**: content + DateTime + concurrency constructors + window /
+//!   join / reflect / state-builtin bodies + `executor/printing.rs` formatter.
+//!
+//! The companion §2.7.6 / Q8 carrier-API bound: NO per-heap-variant
+//! accessors on `KindedSlot`; bodies that inspect heap payloads use
+//! `slot.as_heap_value()` + `HeapValue` match. NO cross-kind accessors
+//! (`as_number_coerce`, etc.) on the carrier; coercion lives at
+//! `executor/builtins/kind_coerce.rs` (free helper at the body site).
+//!
+//! # `pop_builtin_args` runtime semantics (Wave 6: kinded stack ABI)
+//!
+//! Wave 6 (ADR-006 §2.7.7 / Q9) added a parallel `Vec<NativeKind>` track
+//! to the VM stack. `pop_builtin_args` now reads the per-arg `NativeKind`
+//! directly from the parallel track via `pop_kinded()`. Wave 5b's
+//! transitional `NativeKind::Bool` sentinel is removed — every arg's kind
+//! is the kind that the producing opcode emitted into the parallel track
+//! at push time.
+//!
+//! **Ownership transfer**: `pop_kinded()` moves one strong-count share
+//! (for heap-bearing kinds) out of the stack slot into the returned
+//! tuple. Wrapping it in a `KindedSlot` transfers that share to the
+//! carrier; `KindedSlot::Drop` retires the share when the args `Vec` is
+//! dropped at the end of the builtin call. **No `clone_with_kind`
+//! needed** here — that's only for `read_owned_kinded` (which keeps the
+//! slot live on the stack while handing a share out).
+
 use super::super::*;
-use shape_value::ValueWordExt;
+use shape_value::{KindedSlot, VMError, ValueSlot};
 
 impl VirtualMachine {
-    pub(crate) fn pop_builtin_args(&mut self) -> Result<Vec<ValueWord>, VMError> {
-        // Pop arg count (top of stack)
-        let count_nb = self.pop_raw_u64()?;
-        let count = count_nb.as_number_coerce().ok_or_else(|| {
-            VMError::RuntimeError(format!(
-                "Expected numeric arg count, got {:?}",
-                count_nb.type_name()
-            ))
-        })? as usize;
+    /// Pop the builtin call's args off the typed VM stack into a
+    /// `Vec<KindedSlot>` (ADR-006 §2.7.7 / Q9).
+    ///
+    /// The topmost stack slot is the arg count (pushed as a numeric
+    /// constant by the compiler). Each subsequent pop hands back the raw
+    /// u64 bits **plus** the `NativeKind` recorded by the producing opcode
+    /// in the parallel kinds track.
+    ///
+    /// **Ownership**: `pop_kinded()` transfers the slot's strong-count
+    /// share into the returned tuple; wrapping it in a `KindedSlot`
+    /// transfers ownership to the carrier. `KindedSlot::Drop` retires the
+    /// share when the returned `Vec` goes out of scope.
+    pub(crate) fn pop_builtin_args(&mut self) -> Result<Vec<KindedSlot>, VMError> {
+        // Top of stack: the arg count, pushed as a typed integer constant
+        // by the compiler (`PushConst(Int(arg_count as i64))`). The count
+        // slot is an integer-family inline scalar; `int_operand` dispatches
+        // per the §2.7.6 heterogeneous-kind body pattern (same shape as
+        // `op_call` / `op_call_value` use).
+        //
+        // Historical note (W17-make-closure): prior to the arg-count emit
+        // migration the compiler emitted `Number(arg_count as f64)` and
+        // this body decoded `f64::from_bits(count_bits) as usize`. That
+        // shape made `op_call` (which uses `int_operand`) reject the same
+        // arg-count slot, surfacing as the smoke-2 "Expected integer for
+        // arg count" failure. The fix landed here together with the
+        // call-site emit changes in `compiler/expressions/function_calls.rs`.
+        let (count_bits, count_kind) = self.pop_kinded()?;
+        let count_slot = KindedSlot::new(ValueSlot::from_raw(count_bits), count_kind);
+        let count = crate::executor::builtins::kind_coerce::int_operand(&count_slot)
+            .map_err(|_| {
+                VMError::RuntimeError(format!(
+                    "pop_builtin_args: arg-count slot must be integer-family, got kind {:?}",
+                    count_kind
+                ))
+            })? as usize;
+        // Drop the arg-count's share (inline scalar — no-op for integer
+        // kinds, but the discipline lives at the §2.7.7 parallel-kind
+        // boundary).
+        crate::executor::vm_impl::stack::drop_with_kind(count_bits, count_kind);
 
-        // Pop args in reverse order (stack is LIFO) then reverse to get correct order
-        let mut args = Vec::with_capacity(count);
+        let mut args: Vec<KindedSlot> = Vec::with_capacity(count);
         for _ in 0..count {
-            args.push(self.pop_raw_u64()?);
+            let (bits, kind) = self.pop_kinded()?;
+            // The pop transferred the slot's share to us; wrap it in a
+            // KindedSlot which will Drop-retire the share when the
+            // builtin call's arg vec is dropped.
+            args.push(KindedSlot::new(ValueSlot::from_raw(bits), kind));
         }
         args.reverse();
         Ok(args)
     }
 
+    /// Push a `KindedSlot` result back onto the stack. The carrier's
+    /// share transfers into the slot; we `mem::forget` the carrier so its
+    /// `Drop` does not retire the share that the slot now owns.
+    #[inline]
+    pub(crate) fn push_kinded_slot(&mut self, slot: KindedSlot) -> Result<(), VMError> {
+        let bits = slot.slot().raw();
+        let kind = slot.kind();
+        std::mem::forget(slot);
+        self.push_kinded(bits, kind)
+    }
+
     // ========================================================================
     // Builtin Dispatch
+    //
+    // Wave 5a flipped the dispatch SHAPE: every arm produces /
+    // consumes `Vec<KindedSlot>`. Wave 5b lands the math/array/utility
+    // body migrations and wires the dispatch arms.
 
     pub fn op_builtin_call(
         &mut self,
@@ -30,273 +122,318 @@ impl VirtualMachine {
         ctx: Option<&mut shape_runtime::context::ExecutionContext>,
     ) -> Result<(), VMError> {
         if let Some(Operand::Builtin(builtin)) = instruction.operand {
-            let mut ctx = ctx;
+            let _ctx = ctx;
             match builtin {
-                // Math builtins (15)
+                // ── Wave 5b: math builtins ────────────────────────────────
                 BuiltinFunction::Abs => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_abs(args)?;
-                    self.push_raw_u64(result)?;
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_abs(&args)?;
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::Sqrt => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_sqrt(args)?;
-                    self.push_raw_u64(result)?;
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_sqrt(&args)?;
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::Ln => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_ln(args)?;
-                    self.push_raw_u64(result)?;
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_ln(&args)?;
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::Pow => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_pow(args)?;
-                    self.push_raw_u64(result)?;
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_pow(&args)?;
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::Exp => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_exp(args)?;
-                    self.push_raw_u64(result)?;
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_exp(&args)?;
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::Log => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_log(args)?;
-                    self.push_raw_u64(result)?;
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_log(&args)?;
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::Floor => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_floor(args)?;
-                    self.push_raw_u64(result)?;
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_floor(&args)?;
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::Ceil => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_ceil(args)?;
-                    self.push_raw_u64(result)?;
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_ceil(&args)?;
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::Round => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_round(args)?;
-                    self.push_raw_u64(result)?;
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_round(&args)?;
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::Sin => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_sin(args)?;
-                    self.push_raw_u64(result)?;
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_sin(&args)?;
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::Cos => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_cos(args)?;
-                    self.push_raw_u64(result)?;
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_cos(&args)?;
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::Tan => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_tan(args)?;
-                    self.push_raw_u64(result)?;
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_tan(&args)?;
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::Asin => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_asin(args)?;
-                    self.push_raw_u64(result)?;
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_asin(&args)?;
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::Acos => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_acos(args)?;
-                    self.push_raw_u64(result)?;
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_acos(&args)?;
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::Atan => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_atan(args)?;
-                    self.push_raw_u64(result)?;
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_atan(&args)?;
+                    self.push_kinded_slot(r)?;
                 }
-                // Stats builtins (3)
                 BuiltinFunction::Min => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_min(args)?;
-                    self.push_raw_u64(result)?;
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_min(&args)?;
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::Max => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_max(args)?;
-                    self.push_raw_u64(result)?;
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_max(&args)?;
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::StdDev => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_stddev(args)?;
-                    self.push_raw_u64(result)?;
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_stddev(&args)?;
+                    self.push_kinded_slot(r)?;
                 }
-                // Array builtins (6)
+                BuiltinFunction::Sign => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_sign(&args)?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::Gcd => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_gcd(&args)?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::Lcm => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_lcm(&args)?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::Hypot => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_hypot(&args)?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::Clamp => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_clamp(&args)?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::IsNaN => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_is_nan(&args)?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::IsFinite => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_is_finite(&args)?;
+                    self.push_kinded_slot(r)?;
+                }
+
+                // ── Wave 5b: array builtins ───────────────────────────────
                 BuiltinFunction::Push => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_push(args)?;
-                    self.push_raw_u64(result)?;
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::array_ops::builtin_push(&args)?;
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::Pop => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_pop(args)?;
-                    self.push_raw_u64(result)?;
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::array_ops::builtin_pop(&args)?;
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::First => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_first(args)?;
-                    self.push_raw_u64(result)?;
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::array_ops::builtin_first(&args)?;
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::Last => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_last(args)?;
-                    self.push_raw_u64(result)?;
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::array_ops::builtin_last(&args)?;
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::Zip => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_zip(args)?;
-                    self.push_raw_u64(result)?;
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::array_ops::builtin_zip(&args)?;
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::Filled => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_filled(args)?;
-                    self.push_raw_u64(result)?;
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::array_ops::builtin_filled(&args)?;
+                    self.push_kinded_slot(r)?;
                 }
-                // Utility builtins (2)
-                BuiltinFunction::Format => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_format(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                // BuiltinFunction::Throw removed: Shape uses Result types
                 BuiltinFunction::Range => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_range(args)?;
-                    self.push_raw_u64(result)?;
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::array_ops::builtin_range(&args)?;
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::Slice => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_slice(args)?;
-                    self.push_raw_u64(result)?;
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::array_ops::builtin_slice(&args)?;
+                    self.push_kinded_slot(r)?;
                 }
-                BuiltinFunction::Map => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_map(args, ctx)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::Filter => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_filter(args, ctx)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::Reduce => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_reduce(args, ctx)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::ForEach => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_for_each(args, ctx)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::Find => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_find(args, ctx)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::FindIndex => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_find_index(args, ctx)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::Some => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_some(args, ctx)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::Every => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_every(args, ctx)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::Print => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_print(args, ctx)?;
-                    self.push_raw_u64(result)?;
+
+                // ── Wave 5b: utility builtins ─────────────────────────────
+                BuiltinFunction::ObjectRest => {
+                    let args = self.pop_builtin_args()?;
+                    let r = self.builtin_object_rest(&args)?;
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::Snapshot => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_snapshot(args, ctx)?;
-                    self.push_raw_u64(result)?;
+                    // Snapshot suspends execution; never returns a value.
+                    let _args = self.pop_builtin_args()?;
+                    return Err(VMError::Suspended {
+                        future_id: SNAPSHOT_FUTURE_ID,
+                        resume_ip: self.ip,
+                    });
                 }
                 BuiltinFunction::Exit => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_exit(args)?;
-                    self.push_raw_u64(result)?;
+                    let args = self.pop_builtin_args()?;
+                    let code = if args.is_empty() {
+                        0
+                    } else {
+                        // Best-effort code extraction. The arg comes in as
+                        // Bool-kinded (Wave 6 stack-ABI gap); reinterpret the
+                        // raw bits as i64 since `exit(code)` is documented to
+                        // take an int.
+                        args[0].slot.raw() as i64 as i32
+                    };
+                    std::process::exit(code);
                 }
-                BuiltinFunction::ObjectRest => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_object_rest(args)?;
-                    self.push_raw_u64(result)?;
+                BuiltinFunction::Print => {
+                    // ADR-006 §2.7.4 — pop the kinded args, format each
+                    // through `ValueFormatter::format_kinded` (top-level
+                    // unquoted-string rendering, nested quotes inside
+                    // containers), join with spaces, surface to the
+                    // `OutputAdapter::print` of the active
+                    // `ExecutionContext`. Returns the unit/null sentinel
+                    // per the §2.7.4 GENERIC_CARRIER ABI.
+                    //
+                    // The pushed result is a `Ptr(HeapKind::String)`-kind
+                    // null slot rather than `KindedSlot::none()`'s
+                    // `Bool=0` shape: `wire_conversion::slot_to_wire`
+                    // projects `Ptr(_)` with bits=0 to `WireValue::Null`,
+                    // which the script runner suppresses when printing
+                    // the program's final value (`script_cmd.rs:1353`).
+                    // The `Bool=0` sentinel would otherwise surface as a
+                    // spurious `false` line after every `print()`.
+                    let args = self.pop_builtin_args()?;
+                    self.builtin_print(&args, _ctx)?;
+                    let null_slot = KindedSlot::new(
+                        ValueSlot::from_raw(0),
+                        shape_value::NativeKind::Ptr(
+                            shape_value::HeapKind::String,
+                        ),
+                    );
+                    self.push_kinded_slot(null_slot)?;
                 }
-                BuiltinFunction::IsNumber => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_is_number(args)?;
-                    self.push_raw_u64(result)?;
+                BuiltinFunction::Format
+                | BuiltinFunction::FormatValueWithMeta => {
+                    // Universal value-to-string. `Format` joins multiple
+                    // args without separator (Shape's `format("a", "b")`
+                    // → `"ab"` legacy semantics); `FormatValueWithMeta`
+                    // is the single-arg `expr.to_string()` /
+                    // `f"{expr}"` interpolation path.
+                    let args = self.pop_builtin_args()?;
+                    let r = self.builtin_format(&args)?;
+                    self.push_kinded_slot(r)?;
                 }
-                BuiltinFunction::IsString => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_is_string(args)?;
-                    self.push_raw_u64(result)?;
+                BuiltinFunction::FormatValueWithSpec => {
+                    // Args: [value, spec_tag, …spec-payload]. Currently
+                    // routes the basic FORMAT_SPEC_FIXED path; richer
+                    // spec arms (Table, ContentStyle) surface as
+                    // `NotImplemented` per W13 playbook §7.4 surface-and-stop.
+                    let args = self.pop_builtin_args()?;
+                    let r = self.builtin_format_with_spec(&args)?;
+                    self.push_kinded_slot(r)?;
                 }
-                BuiltinFunction::IsBool => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_is_bool(args)?;
-                    self.push_raw_u64(result)?;
+
+                // ── Wave 5c: type-introspection + conversion + native-interop ──
+                BuiltinFunction::IsNumber
+                | BuiltinFunction::IsString
+                | BuiltinFunction::IsBool
+                | BuiltinFunction::IsArray
+                | BuiltinFunction::IsObject
+                | BuiltinFunction::IsDataRow => {
+                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    todo!(
+                        "phase-1b-vm wave 5c — is_* type-check body migration \
+                         pending: {:?}",
+                        builtin
+                    );
                 }
-                BuiltinFunction::IsArray => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_is_array(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::IsObject => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_is_object(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::IsDataRow => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_is_data_row(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                b @ (BuiltinFunction::ToString
+                BuiltinFunction::ToString
                 | BuiltinFunction::ToNumber
-                | BuiltinFunction::ToBool) => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.dispatch_conversion_builtin(b, args)?;
-                    self.push_raw_u64(result)?;
+                | BuiltinFunction::ToBool => {
+                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    todo!(
+                        "phase-1b-vm wave 5c — conversion body migration \
+                         pending (dispatch_conversion_builtin): {:?}",
+                        builtin
+                    );
                 }
-                b @ (BuiltinFunction::NativePtrSize
+                BuiltinFunction::NativePtrSize
                 | BuiltinFunction::NativePtrNewCell
                 | BuiltinFunction::NativePtrFreeCell
                 | BuiltinFunction::NativePtrReadPtr
                 | BuiltinFunction::NativePtrWritePtr
                 | BuiltinFunction::NativeTableFromArrowC
                 | BuiltinFunction::NativeTableFromArrowCTyped
-                | BuiltinFunction::NativeTableBindType) => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.dispatch_native_interop_builtin(b, args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::FormatValueWithMeta => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_format_with_meta(args, ctx)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::FormatValueWithSpec => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_format_with_spec(args, ctx)?;
-                    self.push_raw_u64(result)?;
+                | BuiltinFunction::NativeTableBindType => {
+                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    todo!(
+                        "phase-1b-vm wave 5c — native-interop body migration \
+                         pending (dispatch_native_interop_builtin): {:?}",
+                        builtin
+                    );
                 }
                 BuiltinFunction::TypeOf => {
-                    let args: shape_value::ArgVec = shape_value::ArgVec::new(); // TypeOf uses self.pop_raw_u64() internally
-                    let result = self.builtin_type_of(args)?;
-                    self.push_raw_u64(result)?;
+                    todo!(
+                        "phase-1b-vm wave 5c — TypeOf body migration pending \
+                         (legacy body popped via the deleted raw-bits stack \
+                         shim; needs kinded-carrier rebuild — see ADR-006 \
+                         §2.7.6)"
+                    );
                 }
-                b @ (BuiltinFunction::IntrinsicVecAbs
+
+                // ── Wave 5d: closure-driven array builtins + intrinsics ──────
+                BuiltinFunction::Map
+                | BuiltinFunction::Filter
+                | BuiltinFunction::Reduce
+                | BuiltinFunction::ForEach
+                | BuiltinFunction::Find
+                | BuiltinFunction::FindIndex
+                | BuiltinFunction::Some
+                | BuiltinFunction::Every
+                | BuiltinFunction::ControlFold => {
+                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    todo!(
+                        "phase-1b-vm wave 5d — closure-driven array builtin \
+                         body migration pending: {:?}",
+                        builtin
+                    );
+                }
+                BuiltinFunction::IntrinsicVecAbs
                 | BuiltinFunction::IntrinsicVecSqrt
                 | BuiltinFunction::IntrinsicVecLn
                 | BuiltinFunction::IntrinsicVecExp
@@ -307,114 +444,40 @@ impl VirtualMachine {
                 | BuiltinFunction::IntrinsicVecMax
                 | BuiltinFunction::IntrinsicVecMin
                 | BuiltinFunction::IntrinsicVecSelect
-                | BuiltinFunction::IntrinsicVecAddI64) => {
-                    return self.handle_vector_intrinsic(b, ctx.as_deref_mut());
+                | BuiltinFunction::IntrinsicVecAddI64 => {
+                    todo!(
+                        "phase-1b-vm wave 5d — vector intrinsic body \
+                         migration pending (handle_vector_intrinsic): {:?}",
+                        builtin
+                    );
                 }
-                b @ (BuiltinFunction::IntrinsicMatMulVec
+                BuiltinFunction::IntrinsicMatMulVec
                 | BuiltinFunction::IntrinsicMatMulMat
                 | BuiltinFunction::IntrinsicMatAdd
-                | BuiltinFunction::IntrinsicMatSub) => {
-                    return self.handle_matrix_intrinsic(b, ctx.as_deref_mut());
-                }
-                BuiltinFunction::SomeCtor => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_some_ctor(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::OkCtor => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_ok_ctor(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::ErrCtor => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_err_ctor(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::HashMapCtor => {
-                    // Build an ArgVec so any heap-tagged args are released on
-                    // drop even though HashMapCtor ignores them today.
-                    let _args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    self.push_raw_u64(ValueWord::empty_hashmap())?;
-                }
-                BuiltinFunction::SetCtor => {
-                    let args = self.pop_builtin_args()?;
-                    if args.is_empty() {
-                        self.push_raw_u64(ValueWord::empty_set())?;
-                    } else if args.len() == 1 {
-                        let mut wrapper = shape_value::ArgVec::from_vec(args);
-                        let a0 = wrapper.pop().unwrap();
-                        if let Some(arr) = a0.as_any_array() {
-                            // Copy elements out of the source array. Each
-                            // `items[i]` is a bit-copy that needs its own
-                            // refcount bump so the Set owns a fresh ref.
-                            let items = arr.to_generic().to_vec();
-                            shape_value::vw_clone_slice(&items);
-                            self.push_raw_u64(ValueWord::from_set(items))?;
-                            shape_value::vw_drop(a0);
-                        } else {
-                            // Single non-array item — wrap in set; ownership
-                            // transfers from a0 into the Set.
-                            self.push_raw_u64(ValueWord::from_set(vec![a0]))?;
-                        }
-                    } else {
-                        // Set(a, b, c) — multiple args become set items.
-                        // Ownership of each arg's heap ref transfers into the
-                        // Set via the raw Vec.
-                        self.push_raw_u64(ValueWord::from_set(args))?;
-                    }
-                }
-                BuiltinFunction::DequeCtor => {
-                    let args = self.pop_builtin_args()?;
-                    if args.is_empty() {
-                        self.push_raw_u64(ValueWord::empty_deque())?;
-                    } else if args.len() == 1 {
-                        let mut wrapper = shape_value::ArgVec::from_vec(args);
-                        let a0 = wrapper.pop().unwrap();
-                        if let Some(arr) = a0.as_any_array() {
-                            let items = arr.to_generic().to_vec();
-                            shape_value::vw_clone_slice(&items);
-                            self.push_raw_u64(ValueWord::from_deque(items))?;
-                            shape_value::vw_drop(a0);
-                        } else {
-                            self.push_raw_u64(ValueWord::from_deque(vec![a0]))?;
-                        }
-                    } else {
-                        self.push_raw_u64(ValueWord::from_deque(args))?;
-                    }
-                }
-                BuiltinFunction::PriorityQueueCtor => {
-                    let args = self.pop_builtin_args()?;
-                    if args.is_empty() {
-                        self.push_raw_u64(ValueWord::empty_priority_queue())?;
-                    } else if args.len() == 1 {
-                        let mut wrapper = shape_value::ArgVec::from_vec(args);
-                        let a0 = wrapper.pop().unwrap();
-                        if let Some(arr) = a0.as_any_array() {
-                            let items = arr.to_generic().to_vec();
-                            shape_value::vw_clone_slice(&items);
-                            self.push_raw_u64(ValueWord::from_priority_queue(items))?;
-                            shape_value::vw_drop(a0);
-                        } else {
-                            self.push_raw_u64(ValueWord::from_priority_queue(vec![a0]))?;
-                        }
-                    } else {
-                        self.push_raw_u64(ValueWord::from_priority_queue(args))?;
-                    }
-                }
-                BuiltinFunction::ControlFold => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_control_fold(args, ctx)?;
-                    self.push_raw_u64(result)?;
+                | BuiltinFunction::IntrinsicMatSub => {
+                    todo!(
+                        "phase-1b-vm wave 5d — matrix intrinsic body \
+                         migration pending (handle_matrix_intrinsic): {:?}",
+                        builtin
+                    );
                 }
                 BuiltinFunction::IntrinsicMinimize => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_minimize(args, ctx)?;
-                    self.push_raw_u64(result)?;
+                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    todo!(
+                        "phase-1b-vm wave 5d — minimize intrinsic body \
+                         migration pending"
+                    );
                 }
-                // Delegate ALL intrinsics to helper method
-                b @ (BuiltinFunction::IntrinsicBspline2_3dBatch
-                | BuiltinFunction::IntrinsicSum
+                // W12-stdlib-intrinsic-collapse (Wave-2-Agent-G, 2026-05-14):
+                // `BuiltinFunction::IntrinsicSum` deleted as the canonical
+                // 7th defection-attractor instance (parallel-implementation
+                // across producer/consumer carrier-shape boundaries — the
+                // old handler body's own comment said "mirror of
+                // v2_int_sum/v2_float_sum exactly"). Stdlib
+                // `pub fn sum(series) { series.sum() }` now routes through
+                // the PHF `.sum()` method dispatch — single discriminator
+                // per ADR-005 §1, `MethodFnV2` ABI per ADR-006 §2.7.10/Q11.
+                BuiltinFunction::IntrinsicBspline2_3dBatch
                 | BuiltinFunction::IntrinsicMean
                 | BuiltinFunction::IntrinsicMin
                 | BuiltinFunction::IntrinsicMax
@@ -458,288 +521,434 @@ impl VirtualMachine {
                 | BuiltinFunction::IntrinsicTanh
                 | BuiltinFunction::IntrinsicCharCode
                 | BuiltinFunction::IntrinsicFromCharCode
-                | BuiltinFunction::IntrinsicSeries) => {
-                    return self.handle_intrinsic_builtin(b, ctx.as_deref_mut());
+                | BuiltinFunction::IntrinsicSeries => {
+                    todo!(
+                        "phase-1b-vm wave 5d — intrinsic body migration \
+                         pending (handle_intrinsic_builtin): {:?}",
+                        builtin
+                    );
                 }
+
+                // ── Wave 5e: constructors (Result/Option, Set, Deque,
+                // PriorityQueue, HashMap, Mutex/Atomic/Lazy/Channel),
+                // Content builders, DateTime constructors, Table from
+                // rows, JSON navigation helpers, Window functions, Join,
+                // Reflect, MatFromFlat, MakeContent*. ─────────────────────
+                BuiltinFunction::SomeCtor => {
+                    // Wave 14 W14-variant-codegen (ADR-006 §2.7.17 / Q18,
+                    // 2026-05-10): `Some(x)` builds a fresh
+                    // `Arc<OptionData>` carrier with `is_some=true` and
+                    // the popped argument as the typed payload share.
+                    // The `pop_builtin_args` carrier owns one strong-
+                    // count share per heap-bearing kind; ownership
+                    // transfers into the `OptionData::payload` slot
+                    // verbatim (the carrier is moved, not cloned).
+                    let mut args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    if args.len() != 1 {
+                        return Err(VMError::RuntimeError(format!(
+                            "Some() expects 1 argument, got {}",
+                            args.len()
+                        )));
+                    }
+                    let payload = args.remove(0);
+                    let opt = std::sync::Arc::new(
+                        shape_value::heap_value::OptionData::some(payload),
+                    );
+                    self.push_kinded_slot(KindedSlot::from_option(opt))?;
+                }
+                BuiltinFunction::OkCtor => {
+                    // Wave 14 W14-variant-codegen (ADR-006 §2.7.17 / Q18,
+                    // 2026-05-10): `Ok(x)` builds a fresh
+                    // `Arc<ResultData>` carrier with `is_ok=true` and
+                    // the popped argument as the typed payload share.
+                    let mut args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    if args.len() != 1 {
+                        return Err(VMError::RuntimeError(format!(
+                            "Ok() expects 1 argument, got {}",
+                            args.len()
+                        )));
+                    }
+                    let payload = args.remove(0);
+                    let res = std::sync::Arc::new(
+                        shape_value::heap_value::ResultData::ok(payload),
+                    );
+                    self.push_kinded_slot(KindedSlot::from_result(res))?;
+                }
+                BuiltinFunction::ErrCtor => {
+                    // Wave 14 W14-variant-codegen (ADR-006 §2.7.17 / Q18,
+                    // 2026-05-10): `Err(e)` builds a fresh
+                    // `Arc<ResultData>` carrier with `is_ok=false` and
+                    // the popped argument as the typed payload share.
+                    let mut args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    if args.len() != 1 {
+                        return Err(VMError::RuntimeError(format!(
+                            "Err() expects 1 argument, got {}",
+                            args.len()
+                        )));
+                    }
+                    let payload = args.remove(0);
+                    let res = std::sync::Arc::new(
+                        shape_value::heap_value::ResultData::err(payload),
+                    );
+                    self.push_kinded_slot(KindedSlot::from_result(res))?;
+                }
+                BuiltinFunction::HashMapCtor => {
+                    // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): per
+                    // ADR-006 §2.7.24 Q25.B SUPERSEDED, `let m = HashMap()`
+                    // produces a fresh empty `Arc<HashMapKindedRef>` slot.
+                    // Default empty variant chosen is `String` (the typical
+                    // initial element type in user code; the variant tag
+                    // gets specialized on first insert via clone-on-write
+                    // — ckpt-3 mutation-API rebuild). Reader contract: kind
+                    // == Ptr(HeapKind::HashMap), bits =
+                    // Arc::into_raw::<HashMapKindedRef>.
+                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    let empty_kref = shape_value::heap_value::HashMapKindedRef::String(
+                        std::sync::Arc::new(
+                            shape_value::heap_value::HashMapData::<
+                                *const shape_value::v2::string_obj::StringObj,
+                            >::new(),
+                        ),
+                    );
+                    let hm = std::sync::Arc::new(empty_kref);
+                    self.push_kinded_slot(KindedSlot::from_hashmap(hm))?;
+                }
+                BuiltinFunction::SetCtor => {
+                    // Wave 13 W13-hashset-rebuild (ADR-006 §2.7.15 / Q16,
+                    // 2026-05-10): empty Set ctor — `Set()` takes no
+                    // args at landing; `Set([elements])` initialization
+                    // is a follow-up. Build empty Arc<HashSetData> and
+                    // push via KindedSlot::from_hashset.
+                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    let empty = std::sync::Arc::new(
+                        shape_value::heap_value::HashSetData::new(),
+                    );
+                    let result = KindedSlot::from_hashset(empty);
+                    self.push_kinded_slot(result)?;
+                }
+                BuiltinFunction::DequeCtor => {
+                    // Wave 15 W15-deque (ADR-006 §2.7.19 / Q20,
+                    // 2026-05-10): empty Deque ctor — `Deque()` takes
+                    // no args at landing; `Deque([elements])`
+                    // initialization is a follow-up. Build empty
+                    // Arc<DequeData> and push via KindedSlot::from_deque.
+                    // Reader contract: kind == Ptr(HeapKind::Deque),
+                    // bits = Arc::into_raw::<DequeData>.
+                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    let empty = std::sync::Arc::new(
+                        shape_value::heap_value::DequeData::new(),
+                    );
+                    let result = KindedSlot::from_deque(empty);
+                    self.push_kinded_slot(result)?;
+                }
+                BuiltinFunction::PriorityQueueCtor => {
+                    // Wave 15 W15-priority-queue (ADR-006 §2.7.18 /
+                    // Q19, 2026-05-10): empty PriorityQueue ctor —
+                    // discard any args (the surface form
+                    // `PriorityQueue()` takes no args at landing;
+                    // `PriorityQueue([elements])` initialization is a
+                    // follow-up). Build an empty
+                    // `Arc::new(PriorityQueueData::new())` and push as
+                    // a `KindedSlot::from_priority_queue(...)`.
+                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    let empty = std::sync::Arc::new(
+                        shape_value::heap_value::PriorityQueueData::new(),
+                    );
+                    let result = KindedSlot::from_priority_queue(empty);
+                    self.push_kinded_slot(result)?;
+                }
+                BuiltinFunction::ChannelCtor => {
+                    // Wave 15 W15-channel-rebuild (ADR-006 §2.7.20 / Q21,
+                    // 2026-05-10): empty Channel ctor — `Channel()`
+                    // takes no args at landing; bounded-capacity
+                    // initialization is a follow-up. Build empty
+                    // `Arc<ChannelData>` (interior `Mutex<ChannelInner>`)
+                    // and push via `KindedSlot::from_channel`. Reader
+                    // contract: kind == Ptr(HeapKind::Channel),
+                    // bits = Arc::into_raw::<ChannelData>.
+                    //
+                    // Cross-task blocking `recv()` requires the §2.7.4
+                    // task-scheduler boundary and is SURFACE'd at the
+                    // method body — see
+                    // `executor/objects/channel_methods.rs`.
+                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    let empty = std::sync::Arc::new(
+                        shape_value::heap_value::ChannelData::new(),
+                    );
+                    let result = KindedSlot::from_channel(empty);
+                    self.push_kinded_slot(result)?;
+                }
+                BuiltinFunction::MutexCtor => {
+                    // W17-concurrency (ADR-006 §2.7.25, 2026-05-11):
+                    // `Mutex(initial_value)` builds an `Arc<MutexData>`
+                    // wrapping the initial value `KindedSlot` (any
+                    // kind). The initial-value share moves into the
+                    // MutexInner cell — `pop_builtin_args` already
+                    // consumed the arg's stack share, and
+                    // `MutexData::new` takes ownership of the slot.
+                    let mut args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    if args.len() != 1 {
+                        return Err(VMError::RuntimeError(format!(
+                            "Mutex() requires exactly 1 argument \
+                             (initial value), got {}",
+                            args.len()
+                        )));
+                    }
+                    let initial = args.remove(0);
+                    let m = std::sync::Arc::new(
+                        shape_value::heap_value::MutexData::new(initial),
+                    );
+                    let result = KindedSlot::from_mutex(m);
+                    self.push_kinded_slot(result)?;
+                }
+                BuiltinFunction::AtomicCtor => {
+                    // W17-concurrency (ADR-006 §2.7.25, 2026-05-11):
+                    // `Atomic(initial)` builds an `Arc<AtomicData>`
+                    // wrapping a `std::sync::atomic::AtomicI64`.
+                    // i64-only at landing — non-int args error.
+                    let args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    if args.len() != 1 {
+                        return Err(VMError::RuntimeError(format!(
+                            "Atomic() requires exactly 1 argument \
+                             (initial int value), got {}",
+                            args.len()
+                        )));
+                    }
+                    let initial = args[0].as_i64().ok_or_else(|| {
+                        VMError::RuntimeError(format!(
+                            "Atomic() argument must be an int (got \
+                             kind {:?}); typed-payload Atomic<T> is a \
+                             future amendment per ADR-006 §2.7.25",
+                            args[0].kind
+                        ))
+                    })?;
+                    let a = std::sync::Arc::new(
+                        shape_value::heap_value::AtomicData::new(initial),
+                    );
+                    let result = KindedSlot::from_atomic(a);
+                    self.push_kinded_slot(result)?;
+                }
+                BuiltinFunction::LazyCtor => {
+                    // W17-concurrency (ADR-006 §2.7.25, 2026-05-11):
+                    // `Lazy(|| ...)` builds an `Arc<LazyData>` wrapping
+                    // the initializer closure. The closure share moves
+                    // into the LazyInner cell — the handler tier's
+                    // `lazy.get()` takes the initializer back out via
+                    // `take_initializer()` for the
+                    // `vm.call_value_immediate_nb` invocation.
+                    let mut args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    if args.len() != 1 {
+                        return Err(VMError::RuntimeError(format!(
+                            "Lazy() requires exactly 1 argument \
+                             (initializer closure), got {}",
+                            args.len()
+                        )));
+                    }
+                    let initializer = args.remove(0);
+                    // Kind-validate: must be a Closure (closure-call
+                    // path goes through `call_value_immediate_nb` which
+                    // requires Ptr(HeapKind::Closure) callee kind).
+                    if !matches!(
+                        initializer.kind,
+                        shape_value::NativeKind::Ptr(
+                            shape_value::heap_value::HeapKind::Closure
+                        )
+                    ) {
+                        return Err(VMError::RuntimeError(format!(
+                            "Lazy() argument must be a closure (got \
+                             kind {:?})",
+                            initializer.kind
+                        )));
+                    }
+                    let l = std::sync::Arc::new(
+                        shape_value::heap_value::LazyData::new(initializer),
+                    );
+                    let result = KindedSlot::from_lazy(l);
+                    self.push_kinded_slot(result)?;
+                }
+                BuiltinFunction::MakeContentText
+                | BuiltinFunction::MakeContentFragment
+                | BuiltinFunction::ApplyContentStyle
+                | BuiltinFunction::MakeContentChartFromValue => {
+                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    todo!(
+                        "phase-1b-vm wave 5e — content builder body \
+                         migration pending: {:?}",
+                        builtin
+                    );
+                }
+                BuiltinFunction::ContentChart
+                | BuiltinFunction::ContentTextCtor
+                | BuiltinFunction::ContentTableCtor
+                | BuiltinFunction::ContentCodeCtor
+                | BuiltinFunction::ContentKvCtor
+                | BuiltinFunction::ContentFragmentCtor => {
+                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    todo!(
+                        "phase-1b-vm wave 5e — content namespace ctor body \
+                         migration pending (shape_runtime::content_builders): \
+                         {:?}",
+                        builtin
+                    );
+                }
+                BuiltinFunction::DateTimeNow
+                | BuiltinFunction::DateTimeUtc
+                | BuiltinFunction::DateTimeParse
+                | BuiltinFunction::DateTimeFromEpoch
+                | BuiltinFunction::DateTimeFromParts
+                | BuiltinFunction::DateTimeFromUnixSecs => {
+                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    todo!(
+                        "phase-1b-vm wave 5e — DateTime ctor body migration \
+                         pending: {:?}",
+                        builtin
+                    );
+                }
+                BuiltinFunction::MatFromFlat => {
+                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    todo!(
+                        "phase-1b-vm wave 5e — mat() ctor body migration \
+                         pending"
+                    );
+                }
+                BuiltinFunction::MakeTableFromRows => {
+                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    todo!(
+                        "phase-1b-vm wave 5e — make_table_from_rows body \
+                         migration pending"
+                    );
+                }
+                BuiltinFunction::JsonObjectGet
+                | BuiltinFunction::JsonArrayAt
+                | BuiltinFunction::JsonObjectKeys
+                | BuiltinFunction::JsonArrayLen
+                | BuiltinFunction::JsonObjectLen => {
+                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    todo!(
+                        "phase-1b-vm wave 5e — JSON navigation helper body \
+                         migration pending: {:?}",
+                        builtin
+                    );
+                }
+                // ── W8-WJ: window function dispatch (ADR-006 §2.7.10/Q11) ──
+                //
+                // Each handler is a free fn matching the MethodFnV2 body
+                // shape: `fn(&mut VM, &[KindedSlot], Option<&mut Ctx>) ->
+                // Result<KindedSlot, VMError>`. The dispatch shell pops
+                // builtin args via `pop_builtin_args` (which constructs
+                // `Vec<KindedSlot>` from the §2.7.7 stack parallel-kind
+                // track), borrows it as `&[KindedSlot]` to the handler,
+                // then re-pushes the kinded result via `push_kinded_slot`.
+                BuiltinFunction::WindowRowNumber
+                | BuiltinFunction::WindowRank
+                | BuiltinFunction::WindowDenseRank
+                | BuiltinFunction::WindowNtile => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::window_join::handle_window_row_number_v2(
+                        self, &args, _ctx,
+                    )?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::WindowLag | BuiltinFunction::WindowLead => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::window_join::handle_window_lag_v2(
+                        self, &args, _ctx,
+                    )?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::WindowFirstValue
+                | BuiltinFunction::WindowLastValue
+                | BuiltinFunction::WindowNthValue => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::window_join::handle_window_first_value_v2(
+                        self, &args, _ctx,
+                    )?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::WindowSum => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::window_join::handle_window_sum_v2(
+                        self, &args, _ctx,
+                    )?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::WindowAvg => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::window_join::handle_window_avg_v2(
+                        self, &args, _ctx,
+                    )?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::WindowMin => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::window_join::handle_window_min_v2(
+                        self, &args, _ctx,
+                    )?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::WindowMax => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::window_join::handle_window_max_v2(
+                        self, &args, _ctx,
+                    )?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::WindowCount => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::window_join::handle_window_count_v2(
+                        self, &args, _ctx,
+                    )?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::JoinExecute => {
+                    // SURFACE — cross-cluster cascade with
+                    // `datatable_methods::joins` ABI flip (W9 method-body
+                    // re-fill). Drains stack args to keep the parallel-
+                    // kind track balanced, then surfaces.
+                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    return self.handle_join_execute();
+                }
+                BuiltinFunction::Reflect => {
+                    todo!(
+                        "phase-1b-vm wave 5e — reflect builtin body \
+                         migration pending"
+                    );
+                }
+
+                // ── Eval-* removed-feature stubs (preserved as runtime
+                // errors per pre-Wave 5a behaviour). These do not need
+                // body migration; their semantics is already terminal. ──
                 BuiltinFunction::EvalTimeRef => {
                     return Err(VMError::NotImplemented(
                         "eval_time_ref() (VM-only mode)".to_string(),
                     ));
                 }
                 BuiltinFunction::EvalDateTimeExpr => {
-                    return self.handle_eval_datetime_expr(ctx);
+                    // C1-temporal-lowering (Phase 2d Wave 2): the
+                    // `compiler/expressions/temporal.rs::compile_expr_datetime`
+                    // emit sequence is PushConst(DateTimeExpr) +
+                    // BuiltinCall(EvalDateTimeExpr). The
+                    // `Constant::DateTimeExpr` arm in `op_push_const`
+                    // (`stack_ops/mod.rs`) now evaluates the AST via
+                    // `eval_datetime_expr_recursive` and pushes a
+                    // `NativeKind::Ptr(HeapKind::Temporal)` Temporal::DateTime
+                    // slot directly. There is therefore no work for this
+                    // builtin to do — the value the legacy semantics
+                    // produced ("pop DateTimeExpr Temporal, evaluate, push
+                    // DateTime Temporal") is already on the stack. Skip
+                    // arg-count pop: the compiler does not emit one, and
+                    // re-adding it would require changing the legacy emit
+                    // shape compiler-side without an upstream benefit.
+                    // ADR-006 §2.7.4.
                 }
-                BuiltinFunction::EvalDataDateTimeRef => {
-                    // DataReference type removed - this operation is no longer supported
+                BuiltinFunction::EvalDataDateTimeRef
+                | BuiltinFunction::EvalDataSet
+                | BuiltinFunction::EvalDataRelative
+                | BuiltinFunction::EvalDataRelativeRange => {
                     return Err(VMError::RuntimeError(
-                        "DataReference type has been removed".to_string(),
+                        "DataReference / DataRow type has been removed"
+                            .to_string(),
                     ));
-                }
-                BuiltinFunction::EvalDataSet => {
-                    // DataRow type removed - this operation is no longer supported
-                    return Err(VMError::RuntimeError(
-                        "DataRow type has been removed".to_string(),
-                    ));
-                }
-                BuiltinFunction::EvalDataRelative => {
-                    // DataReference type removed - this operation is no longer supported
-                    return Err(VMError::RuntimeError(
-                        "DataReference type has been removed".to_string(),
-                    ));
-                }
-                BuiltinFunction::EvalDataRelativeRange => {
-                    // DataReference type removed - this operation is no longer supported
-                    return Err(VMError::RuntimeError(
-                        "DataReference type has been removed".to_string(),
-                    ));
-                }
-
-                // Window functions - these delegate to the runtime WindowExecutor
-                // In VM mode, window functions are evaluated differently than in JIT
-                b @ (BuiltinFunction::WindowRowNumber
-                | BuiltinFunction::WindowRank
-                | BuiltinFunction::WindowDenseRank
-                | BuiltinFunction::WindowNtile
-                | BuiltinFunction::WindowLag
-                | BuiltinFunction::WindowLead
-                | BuiltinFunction::WindowFirstValue
-                | BuiltinFunction::WindowLastValue
-                | BuiltinFunction::WindowNthValue
-                | BuiltinFunction::WindowSum
-                | BuiltinFunction::WindowAvg
-                | BuiltinFunction::WindowMin
-                | BuiltinFunction::WindowMax
-                | BuiltinFunction::WindowCount) => {
-                    return self.handle_window_functions(b);
-                }
-
-                // JOIN operation
-                BuiltinFunction::JoinExecute => {
-                    return self.handle_join_execute();
-                }
-
-                // Reflection
-                BuiltinFunction::Reflect => {
-                    return self.builtin_reflect();
-                }
-
-                // Content string builtins
-                BuiltinFunction::MakeContentText => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_make_content_text(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::MakeContentFragment => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_make_content_fragment(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::ApplyContentStyle => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_apply_content_style(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::MakeContentChartFromValue => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_make_content_chart_from_value(args)?;
-                    self.push_raw_u64(result)?;
-                }
-
-                // Content namespace constructors
-                BuiltinFunction::ContentChart => {
-                    let args = self.pop_builtin_args()?;
-                    let result = shape_runtime::content_builders::content_chart(&args)
-                        .map_err(|e| VMError::RuntimeError(format!("{}", e)))?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::ContentTextCtor => {
-                    let args = self.pop_builtin_args()?;
-                    let result = shape_runtime::content_builders::content_text(&args)
-                        .map_err(|e| VMError::RuntimeError(format!("{}", e)))?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::ContentTableCtor => {
-                    let args = self.pop_builtin_args()?;
-                    let result = shape_runtime::content_builders::content_table(&args)
-                        .map_err(|e| VMError::RuntimeError(format!("{}", e)))?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::ContentCodeCtor => {
-                    let args = self.pop_builtin_args()?;
-                    let result = shape_runtime::content_builders::content_code(&args)
-                        .map_err(|e| VMError::RuntimeError(format!("{}", e)))?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::ContentKvCtor => {
-                    let args = self.pop_builtin_args()?;
-                    let result = shape_runtime::content_builders::content_kv(&args)
-                        .map_err(|e| VMError::RuntimeError(format!("{}", e)))?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::ContentFragmentCtor => {
-                    let args = self.pop_builtin_args()?;
-                    let result = shape_runtime::content_builders::content_fragment(&args)
-                        .map_err(|e| VMError::RuntimeError(format!("{}", e)))?;
-                    self.push_raw_u64(result)?;
-                }
-
-                // DateTime constructor builtins
-                BuiltinFunction::DateTimeNow => {
-                    let result = ValueWord::from_time(chrono::Local::now().fixed_offset());
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::DateTimeUtc => {
-                    let result = ValueWord::from_time_utc(chrono::Utc::now());
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::DateTimeParse => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_datetime_parse(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::DateTimeFromEpoch => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_datetime_from_epoch(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::DateTimeFromParts => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_datetime_from_parts(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::DateTimeFromUnixSecs => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_datetime_from_unix_secs(args)?;
-                    self.push_raw_u64(result)?;
-                }
-
-                // Concurrency primitive constructors
-                BuiltinFunction::MutexCtor => {
-                    let args = self.pop_builtin_args()?;
-                    let inner_value = args.into_iter().next().unwrap_or_else(ValueWord::none);
-                    self.push_raw_u64(ValueWord::from_mutex(inner_value))?;
-                }
-                BuiltinFunction::AtomicCtor => {
-                    let args = self.pop_builtin_args()?;
-                    let init_val = args.first().and_then(|nb| nb.as_i64()).unwrap_or(0);
-                    self.push_raw_u64(ValueWord::from_atomic(init_val))?;
-                }
-                BuiltinFunction::LazyCtor => {
-                    let args = self.pop_builtin_args()?;
-                    let initializer = args.into_iter().next().unwrap_or_else(ValueWord::none);
-                    self.push_raw_u64(ValueWord::from_lazy(initializer))?;
-                }
-                BuiltinFunction::ChannelCtor => {
-                    let _args = self.pop_builtin_args()?;
-                    let (sender, receiver) = shape_value::heap_value::ChannelData::new_pair();
-                    let arr = vec![
-                        ValueWord::from_channel(sender),
-                        ValueWord::from_channel(receiver),
-                    ];
-                    self.push_raw_u64(ValueWord::from_array(shape_value::vmarray_from_vec(arr)))?;
-                }
-
-                // Additional math builtins
-                BuiltinFunction::Sign => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_sign(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::Gcd => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_gcd(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::Lcm => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_lcm(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::Hypot => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_hypot(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::Clamp => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_clamp(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::IsNaN => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_is_nan(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::IsFinite => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_is_finite(args)?;
-                    self.push_raw_u64(result)?;
-                }
-
-                // Matrix construction (normally compiled to NewMatrix opcode)
-                BuiltinFunction::MatFromFlat => {
-                    let args = self.pop_builtin_args()?;
-                    if args.len() < 2 {
-                        return Err(VMError::RuntimeError(
-                            "mat() requires at least rows and cols arguments".to_string(),
-                        ));
-                    }
-                    let rows = args[0].as_i64().unwrap_or(0) as u32;
-                    let cols = args[1].as_i64().unwrap_or(0) as u32;
-                    let expected = (rows as usize) * (cols as usize);
-                    let mut data = shape_value::aligned_vec::AlignedVec::with_capacity(expected);
-                    // If the third argument is an array, extract its elements
-                    if args.len() == 3 {
-                        if let Some(arr) = args[2].as_any_array() {
-                            for i in 0..arr.len() {
-                                if let Some(v) = arr.get_nb(i) {
-                                    data.push(v.as_number_coerce().unwrap_or(0.0));
-                                }
-                            }
-                        } else {
-                            data.push(args[2].as_number_coerce().unwrap_or(0.0));
-                        }
-                    } else {
-                        for v in &args[2..] {
-                            data.push(v.as_number_coerce().unwrap_or(0.0));
-                        }
-                    }
-                    let mat = shape_value::heap_value::MatrixData::from_flat(data, rows, cols);
-                    self.push_raw_u64(ValueWord::from_matrix(std::sync::Arc::new(mat)))?;
-                }
-
-                // Table construction
-                BuiltinFunction::MakeTableFromRows => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_make_table_from_rows(args)?;
-                    self.push_raw_u64(result)?;
-                }
-
-                // Json navigation helpers
-                BuiltinFunction::JsonObjectGet => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_json_object_get(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::JsonArrayAt => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_json_array_at(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::JsonObjectKeys => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_json_object_keys(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::JsonArrayLen => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_json_array_len(args)?;
-                    self.push_raw_u64(result)?;
-                }
-                BuiltinFunction::JsonObjectLen => {
-                    let args = shape_value::ArgVec::from_vec(self.pop_builtin_args()?);
-                    let result = self.builtin_json_object_len(args)?;
-                    self.push_raw_u64(result)?;
                 }
             }
         } else {
@@ -748,16 +957,160 @@ impl VirtualMachine {
         Ok(())
     }
 
-    // Runtime bridge functions (pop_builtin_args, eval_runtime_*) moved to builtins/runtime_bridge.rs
-    // map_runtime_error and type_of_name moved to module_registry module
+    // ===== Print / Format helpers (ADR-006 §2.7.4) =====
 
-    // ===== Exception Handling Operations =====
-    // handle_exception moved to exceptions/mod.rs
+    /// Format every arg via `ValueFormatter::format_kinded`, join the
+    /// rendered fragments with a space, then route through the active
+    /// `ExecutionContext`'s [`OutputAdapter::print`] (or fall back to
+    /// stdout when no context is plumbed — e.g. the bytecode-level
+    /// `eval_*` helpers used by tests).
+    pub(crate) fn builtin_print(
+        &mut self,
+        args: &[KindedSlot],
+        ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+    ) -> Result<(), VMError> {
+        // The TypedObject schema names live on `self.program.type_schema_registry`
+        // (the BytecodeProgram-bound registry that `lookup_schema` reads).
+        // The ExecutionContext's registry is the runtime-tier copy populated
+        // via stdlib loading; both are searched so user-defined types and
+        // stdlib types both resolve.
+        let rendered = {
+            let formatter =
+                super::super::printing::ValueFormatter::new(&self.program.type_schema_registry);
+            args.iter()
+                .map(|a| formatter.format_kinded(a))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
 
-    // ===== Slice and Null Coalescing Operations =====
+        let result = shape_runtime::print_result::PrintResult {
+            rendered,
+            spans: Vec::new(),
+        };
+        if let Some(ctx_mut) = ctx {
+            // Drop the returned KindedSlot — `print()` always yields the
+            // GENERIC_CARRIER none-slot per §2.7.4. The dispatch shell
+            // re-pushes the null sentinel itself.
+            let _ = ctx_mut.output_adapter_mut().print(result);
+        } else {
+            // No execution context — write directly to stdout. Mirrors
+            // the `StdoutAdapter` default so REPL/test harnesses without
+            // explicit ctx setup still see output.
+            println!("{}", result.rendered);
+        }
+        Ok(())
+    }
 
-    // ===== Loop Control Operations =====
+    /// Format every arg via `ValueFormatter::format_kinded` and
+    /// concatenate (no separator). Returns the rendered text wrapped in
+    /// a `String`-kinded `KindedSlot`. Used by `format(…)` (multi-arg
+    /// concat) and by `FormatValueWithMeta` (single-arg
+    /// `expr.to_string()` / interpolation).
+    pub(crate) fn builtin_format(
+        &mut self,
+        args: &[KindedSlot],
+    ) -> Result<KindedSlot, VMError> {
+        let formatter =
+            super::super::printing::ValueFormatter::new(&self.program.type_schema_registry);
+        let mut out = String::new();
+        for a in args {
+            out.push_str(&formatter.format_kinded(a));
+        }
+        Ok(KindedSlot::from_string_arc(std::sync::Arc::new(out)))
+    }
+
+    /// `FormatValueWithSpec`: `[value, spec_tag, …spec-payload]`. Routes
+    /// the FORMAT_SPEC_FIXED arm (precision-controlled f64 rendering);
+    /// the Table and ContentStyle arms surface per W13 playbook §7.4
+    /// surface-and-stop.
+    pub(crate) fn builtin_format_with_spec(
+        &mut self,
+        args: &[KindedSlot],
+    ) -> Result<KindedSlot, VMError> {
+        const FORMAT_SPEC_FIXED: i64 = 1;
+        const FORMAT_SPEC_TABLE: i64 = 2;
+
+        if args.is_empty() {
+            return Err(VMError::RuntimeError(
+                "FormatValueWithSpec requires at least 1 argument".to_string(),
+            ));
+        }
+
+        // The spec_tag arrives as an `int` constant (`PushConst(Constant::Int(_))`)
+        // — kind `Int64` in the post-§2.7.7 stack ABI. Read defensively:
+        // kind-mismatch falls through to the meta path so a malformed
+        // dispatch still produces a string rather than crashing.
+        let spec_tag = args.get(1).and_then(|s| match s.kind {
+            shape_value::NativeKind::Int64
+            | shape_value::NativeKind::Int32
+            | shape_value::NativeKind::Int16
+            | shape_value::NativeKind::Int8
+            | shape_value::NativeKind::IntSize => Some(s.slot.as_i64()),
+            _ => None,
+        });
+
+        match spec_tag {
+            Some(tag) if tag == FORMAT_SPEC_FIXED => {
+                let precision = args.get(2).and_then(|s| match s.kind {
+                    shape_value::NativeKind::Int64
+                    | shape_value::NativeKind::Int32
+                    | shape_value::NativeKind::Int16
+                    | shape_value::NativeKind::Int8
+                    | shape_value::NativeKind::IntSize => Some(s.slot.as_i64()),
+                    _ => None,
+                });
+                let v = &args[0];
+                // Coerce numeric kinds; non-numeric fall back to default
+                // formatting so the spec is a no-op rather than an error.
+                let f = match v.kind {
+                    shape_value::NativeKind::Float64
+                    | shape_value::NativeKind::NullableFloat64 => Some(v.slot.as_f64()),
+                    shape_value::NativeKind::Int64
+                    | shape_value::NativeKind::Int32
+                    | shape_value::NativeKind::Int16
+                    | shape_value::NativeKind::Int8
+                    | shape_value::NativeKind::IntSize => Some(v.slot.as_i64() as f64),
+                    shape_value::NativeKind::UInt64
+                    | shape_value::NativeKind::UInt32
+                    | shape_value::NativeKind::UInt16
+                    | shape_value::NativeKind::UInt8
+                    | shape_value::NativeKind::UIntSize => Some(v.slot.as_u64() as f64),
+                    _ => None,
+                };
+                let rendered = match (f, precision) {
+                    (Some(f), Some(p)) if p >= 0 => {
+                        format!("{:.*}", p as usize, f)
+                    }
+                    _ => self.builtin_format(&args[..1])?.as_str().unwrap_or("").to_string(),
+                };
+                Ok(KindedSlot::from_string_arc(std::sync::Arc::new(rendered)))
+            }
+            Some(tag) if tag == FORMAT_SPEC_TABLE => {
+                Err(VMError::NotImplemented(
+                    "FormatValueWithSpec: FORMAT_SPEC_TABLE rendering deferred — \
+                     W13-print-formatter scope is the FORMAT_SPEC_FIXED + \
+                     no-spec path. Table rendering reuses the DataTable / \
+                     TableView Display impls; surface-and-stop pending the \
+                     next pass per W13 playbook §7.4."
+                        .to_string(),
+                ))
+            }
+            _ => self.builtin_format(&args[..1]),
+        }
+    }
+
+    // Runtime bridge functions (pop_builtin_args impl, eval_runtime_*)
+    // moved to builtins/runtime_bridge.rs.
+    // map_runtime_error and type_of_name moved to module_registry module.
 
     // ===== Helper Methods =====
-    // binary_arithmetic, eval_runtime_binary_op_value, binary_comparison moved to arithmetic/mod.rs
+    // binary_arithmetic, eval_runtime_binary_op_value, binary_comparison
+    // moved to arithmetic/mod.rs
 }
+
+// W12-stdlib-intrinsic-collapse (Wave-2-Agent-G, 2026-05-14): the
+// `intrinsic_sum_tests` module previously here exercised the deleted
+// `BuiltinFunction::IntrinsicSum` opcode body. Equivalent coverage lives
+// in the PHF method-dispatch handlers' own test surface
+// (`typed_array_methods` / `array_aggregation` / `typed_int_array_methods`
+// / `typed_number_array_methods`) — single discriminator per ADR-005 §1.

@@ -3,7 +3,9 @@
 // ============================================================================
 
 use crate::context::JITContext;
-use crate::jit_array::JitArray;
+// crate::jit_array::JitArray removed — see jit_array.rs SURFACE comment.
+// `jit_time_range` returned a `JitArray` of HK_TIME elements; it
+// surfaces per ADR-006 §2.7.4 / W10 jit-playbook §5.
 use crate::ffi::jit_kinds::*;
 use crate::ffi::value_ffi::*;
 
@@ -415,64 +417,17 @@ pub extern "C" fn jit_time_last_row(ctx: *mut JITContext) -> u64 {
     }
 }
 
-/// Generate a range of Time values
-/// time_range(start, end, step) -> Array of Time values
-pub extern "C" fn jit_time_range(start_bits: u64, end_bits: u64, step_bits: u64) -> u64 {
-    use crate::context::JITDuration;
-
-    // Extract start time
-    let start_ts = if is_heap_kind(start_bits, HK_TIME) {
-        unsafe { *unified_unbox::<i64>(start_bits) }
-    } else if is_number(start_bits) {
-        unbox_number(start_bits) as i64
-    } else {
-        return TAG_NULL;
-    };
-
-    // Extract end time
-    let end_ts = if is_heap_kind(end_bits, HK_TIME) {
-        unsafe { *unified_unbox::<i64>(end_bits) }
-    } else if is_number(end_bits) {
-        unbox_number(end_bits) as i64
-    } else {
-        return TAG_NULL;
-    };
-
-    // Extract step duration
-    let step_secs = if is_heap_kind(step_bits, HK_DURATION) {
-        unsafe {
-            let dur = unified_unbox::<JITDuration>(step_bits);
-            // Convert to seconds based on unit
-            let secs = match dur.unit {
-                0 => dur.value,            // seconds
-                1 => dur.value * 60.0,     // minutes
-                2 => dur.value * 3600.0,   // hours
-                3 => dur.value * 86400.0,  // days
-                4 => dur.value * 604800.0, // weeks
-                _ => dur.value,            // default to seconds
-            };
-            secs as i64
-        }
-    } else if is_number(step_bits) {
-        unbox_number(step_bits) as i64
-    } else {
-        return TAG_NULL;
-    };
-
-    if step_secs <= 0 {
-        return TAG_NULL;
-    }
-
-    // Generate time values
-    let mut times: Vec<u64> = Vec::new();
-    let mut current = start_ts;
-
-    while current < end_ts {
-        // Box each time value as heap-allocated
-        times.push(unified_box(HK_TIME, current));
-        current += step_secs;
-    }
-
-    // Return as boxed array
-    JitArray::from_vec(times).heap_box()
+/// Generate a range of Time values.
+///
+/// SURFACE (W10 jit-playbook §5 / ADR-006 §2.7.4): result allocation
+/// went through the deleted `JitArray::from_vec(...).heap_box()`
+/// wrapping HK_TIME elements. Kinded rebuild allocates a
+/// `TypedArray<HeapValue>` (with element kind
+/// `NativeKind::Ptr(HeapKind::Time)`) per ADR-006 §2.7.6/Q8.
+pub extern "C" fn jit_time_range(_start_bits: u64, _end_bits: u64, _step_bits: u64) -> u64 {
+    todo!(
+        "phase-2c §2.7.4 / W10 jit-playbook §5: JitArray rebuild — \
+         jit_time_range. Result allocation needs `TypedArray<...>` \
+         of HeapKind::Time elements per ADR-006 §2.7.6/Q8."
+    )
 }

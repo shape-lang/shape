@@ -1,5 +1,4 @@
 use super::*;
-use shape_value::ValueWordExt;
 use crate::bytecode::{OpCode, SourceMap};
 use shape_abi_v1::PermissionSet;
 
@@ -53,6 +52,11 @@ fn make_program(blobs: Vec<FunctionBlob>, entry: FunctionHash) -> Program {
         module_binding_storage_hints: vec![],
         function_local_storage_hints: vec![],
         top_level_frame: None,
+        top_level_local_concrete_types: vec![],
+        function_local_concrete_types: vec![],
+        function_return_concrete_types: vec![],
+        monomorphized_method_call_sites: HashMap::new(),
+        value_call_return_concrete_types: HashMap::new(),
         data_schema: None,
         type_schema_registry: Default::default(),
         trait_method_symbols: HashMap::new(),
@@ -68,6 +72,7 @@ fn make_program(blobs: Vec<FunctionBlob>, entry: FunctionHash) -> Program {
             source_text: String::new(),
         },
         closure_function_layouts_by_name: HashMap::new(),
+        trait_vtables: HashMap::new(),
     }
 }
 
@@ -489,8 +494,13 @@ fn test_vm_starts_linked_program_at_entry_function() {
     assert_eq!(linked.functions[1].name, "main");
     assert_eq!(linked.entry, main_hash);
 
-    let mut vm = crate::executor::VirtualMachine::new(crate::executor::VMConfig::default());
-    vm.load_linked_program(linked);
-    let result = vm.execute(None).expect("execution should succeed");
-    assert_eq!(result.as_number_coerce(), Some(42.0));
+    // Phase-2c surface: `execute(None)` returns the deleted host-tier
+    // dynamic-value carrier; the `as_number_coerce()` accessor lived on
+    // an extension trait that was deleted with the carrier. Once the
+    // host-tier kinded eval API lands in Phase-2c, use `execute_raw(None)`
+    // (returns raw u64 bits) and decode against the program's declared
+    // `top_level_frame.return_kind`. Per playbook §7 REVISED part 4 +
+    // ADR-006 §2.7.4 surface as todo!() until then.
+    let _linked_program = linked;
+    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
 }

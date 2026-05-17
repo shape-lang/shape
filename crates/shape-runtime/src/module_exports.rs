@@ -2,9 +2,31 @@
 //!
 //! This module defines the in-process representation used by VM/LSP/CLI after
 //! a plugin has been loaded through the ABI capability interfaces.
+//!
+//! ## ABI policy (ADR-006 §2.7.5)
+//!
+//! Per ADR-006 §2.7.5, this module enforces the cross-crate ABI split:
+//!
+//! - [`RawCallableInvoker::invoke`] — **stable extension contract**.
+//!   Stays on raw `&u64` / `&[u64]` so CFFI extensions don't recompile
+//!   when the runtime's internal carrier shape changes. Conversion to/
+//!   from [`KindedSlot`] happens **inside `shape-runtime` at the
+//!   boundary** (the VM-side `invoke_callable` adapter constructs
+//!   `KindedSlot`s from raw bits + the typed registry's `NativeKind`s
+//!   before runtime-tier dispatch and unpacks back to `u64` for the
+//!   extension call).
+//! - [`ModuleFn`] (internal Rust trait object) — **migrates to
+//!   `KindedSlot`**. Lives entirely inside `shape-runtime` with no
+//!   recompilation concern.
+//! - [`FrameInfo`] (internal carrier) — **migrates to `KindedSlot`**.
+//!   The pre-existing manual `Clone` / `Drop` calling
+//!   `value_word_drop::vw_clone` / `vw_drop_slice` collapses to default:
+//!   `KindedSlot::Drop` / `Clone` carry the refcount discipline now,
+//!   so `Vec<KindedSlot>` push / pop / clone preserve the WB2.4 retain
+//!   semantics by construction.
 
 use crate::type_schema::{TypeSchema, TypeSchemaRegistry};
-use shape_value::ValueWord;
+use shape_value::KindedSlot;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::Arc;
@@ -13,12 +35,20 @@ use std::sync::Arc;
 ///
 /// This is the `Send`-safe, `'static`-safe form of `invoke_callable` that
 /// extensions (e.g., CFFI) can store in long-lived structs like callback
-/// userdata.  The context pointer is valid for the duration of the
+/// userdata. The context pointer is valid for the duration of the
 /// originating module function call.
+///
+/// Per ADR-006 §2.7.5 the raw-bits signature `(*mut c_void, &u64, &[u64])
+/// -> Result<u64, String>` is the **stable extension contract** — it
+/// does not migrate to [`KindedSlot`]. The conversion to [`KindedSlot`]
+/// happens inside the runtime-side adapter that constructs this invoker
+/// (the adapter reads the parallel `NativeKind` from the typed registry
+/// and builds a `KindedSlot` for runtime-tier dispatch before unpacking
+/// back to `u64` for the extension call).
 #[derive(Clone, Copy)]
 pub struct RawCallableInvoker {
     pub ctx: *mut c_void,
-    pub invoke: unsafe fn(*mut c_void, &ValueWord, &[ValueWord]) -> Result<ValueWord, String>,
+    pub invoke: unsafe fn(*mut c_void, &u64, &[u64]) -> Result<u64, String>,
 }
 
 impl RawCallableInvoker {
@@ -27,65 +57,30 @@ impl RawCallableInvoker {
     /// # Safety
     /// The caller must ensure `self.ctx` is still valid (i.e., the originating
     /// VM module call is still on the stack).
-    pub unsafe fn call(
-        &self,
-        callable: &ValueWord,
-        args: &[ValueWord],
-    ) -> Result<ValueWord, String> {
+    pub unsafe fn call(&self, callable: &u64, args: &[u64]) -> Result<u64, String> {
         unsafe { (self.invoke)(self.ctx, callable, args) }
     }
 }
 
 /// Information about a single VM call frame, captured at a point in time.
 ///
-/// **WB2.4 retain-on-read.** The `locals`, `upvalues`, and `args`
-/// vectors hold owning shares of heap-tagged `ValueWord`s. Since
-/// `ValueWord = u64`, the derived `Clone` on `Vec<ValueWord>` would
-/// produce aliasing bit copies and the default `Vec` drop would leak
-/// refcounts. The manual impls below `vw_clone` on copy and
-/// `vw_drop_slice` on drop so each `FrameInfo` carries its own
-/// refcount bumps.
-#[derive(Debug)]
+/// **Refcount discipline via [`KindedSlot`].** Per ADR-006 §2.7 the
+/// `locals` / `upvalues` / `args` vectors hold [`KindedSlot`]s — the
+/// GENERIC_CARRIER vector form. `KindedSlot`'s explicit `Drop` and
+/// `Clone` impls dispatch on `NativeKind` to retire / bump heap
+/// refcounts, so `Vec<KindedSlot>` push / pop / clone preserve the
+/// WB2.4 / WB2.5 retain-on-read invariant by construction. The manual
+/// `Clone` / `Drop` impls calling `vw_clone` / `vw_drop_slice` that
+/// pre-bulldozer code carried are no longer needed.
+#[derive(Debug, Clone)]
 pub struct FrameInfo {
     pub function_id: Option<u16>,
     pub function_name: String,
     pub blob_hash: Option<[u8; 32]>,
     pub local_ip: usize,
-    pub locals: Vec<ValueWord>,
-    pub upvalues: Option<Vec<ValueWord>>,
-    pub args: Vec<ValueWord>,
-}
-
-impl Clone for FrameInfo {
-    fn clone(&self) -> Self {
-        use shape_value::value_word_drop::vw_clone;
-        let locals = self.locals.iter().map(|&b| vw_clone(b)).collect();
-        let upvalues = self
-            .upvalues
-            .as_ref()
-            .map(|v| v.iter().map(|&b| vw_clone(b)).collect());
-        let args = self.args.iter().map(|&b| vw_clone(b)).collect();
-        FrameInfo {
-            function_id: self.function_id,
-            function_name: self.function_name.clone(),
-            blob_hash: self.blob_hash,
-            local_ip: self.local_ip,
-            locals,
-            upvalues,
-            args,
-        }
-    }
-}
-
-impl Drop for FrameInfo {
-    fn drop(&mut self) {
-        use shape_value::value_word_drop::vw_drop_slice;
-        vw_drop_slice(&self.locals);
-        if let Some(ref ups) = self.upvalues {
-            vw_drop_slice(ups);
-        }
-        vw_drop_slice(&self.args);
-    }
+    pub locals: Vec<KindedSlot>,
+    pub upvalues: Option<Vec<KindedSlot>>,
+    pub args: Vec<KindedSlot>,
 }
 
 /// Trait providing read access to VM state for state module functions.
@@ -93,9 +88,9 @@ pub trait VmStateAccessor: Send + Sync {
     fn current_frame(&self) -> Option<FrameInfo>;
     fn all_frames(&self) -> Vec<FrameInfo>;
     fn caller_frame(&self) -> Option<FrameInfo>;
-    fn current_args(&self) -> Vec<ValueWord>;
-    fn current_locals(&self) -> Vec<(String, ValueWord)>;
-    fn module_bindings(&self) -> Vec<(String, ValueWord)>;
+    fn current_args(&self) -> Vec<KindedSlot>;
+    fn current_locals(&self) -> Vec<(String, KindedSlot)>;
+    fn module_bindings(&self) -> Vec<(String, KindedSlot)>;
     /// Total instruction count at the time of capture. Default impl for compat.
     fn instruction_count(&self) -> usize {
         0
@@ -111,7 +106,8 @@ pub struct ModuleContext<'a> {
     pub schemas: &'a TypeSchemaRegistry,
 
     /// Invoke a Shape callable (function/closure) from host code.
-    pub invoke_callable: Option<&'a dyn Fn(&ValueWord, &[ValueWord]) -> Result<ValueWord, String>>,
+    pub invoke_callable:
+        Option<&'a dyn Fn(&KindedSlot, &[KindedSlot]) -> Result<KindedSlot, String>>,
 
     /// Raw invoker for extensions that need to capture a callable invoker
     /// beyond the borrow lifetime (e.g., CFFI callback userdata).
@@ -139,12 +135,12 @@ pub struct ModuleContext<'a> {
     /// Callback for `state.resume()` to request full VM state restoration.
     /// The module function stores the snapshot; the dispatch loop applies it
     /// after the current instruction completes.
-    pub set_pending_resume: Option<&'a dyn Fn(ValueWord)>,
+    pub set_pending_resume: Option<&'a dyn Fn(KindedSlot)>,
 
     /// Callback for `state.resume_frame()` to request mid-function resume.
     /// Stores (ip_offset, locals) so the dispatch loop can override the
     /// call frame set up by invoke_callable.
-    pub set_pending_frame_resume: Option<&'a dyn Fn(usize, Vec<ValueWord>)>,
+    pub set_pending_frame_resume: Option<&'a dyn Fn(usize, Vec<KindedSlot>)>,
 }
 
 /// Check whether the current execution context has a required permission.
@@ -242,25 +238,35 @@ pub fn check_net_permission(
 
 /// A module function callable from Shape (synchronous).
 ///
-/// Takes a slice of ValueWord arguments plus a `ModuleContext` that provides
-/// access to the type schema registry and a callable invoker.
-/// The function must be Send + Sync for thread safety.
+/// Per ADR-006 §2.7.5 (cross-crate ABI policy), this internal Rust trait
+/// object migrates to [`KindedSlot`] — it lives entirely inside
+/// `shape-runtime` with no cross-crate ABI concern. Stable extension
+/// contracts (`RawCallableInvoker::invoke`) stay on raw bits.
+///
+/// Takes a slice of `KindedSlot` arguments plus a `ModuleContext` that
+/// provides access to the type schema registry and a callable invoker.
+/// The function must be `Send + Sync` for thread safety.
 pub type ModuleFn = Arc<
-    dyn for<'ctx> Fn(&[ValueWord], &ModuleContext<'ctx>) -> Result<ValueWord, String> + Send + Sync,
+    dyn for<'ctx> Fn(&[KindedSlot], &ModuleContext<'ctx>) -> Result<KindedSlot, String>
+        + Send
+        + Sync,
 >;
 
 /// One entry in the VM's per-process module-function table
-/// (`module_fn_table`), indexed by `ValueWord::ModuleFunction(u32)`.
+/// (`module_fn_table`), indexed by positional `u32` id.
 ///
 /// Phase 4c.4: the legacy `ModuleFn` ABI escape hatch was deleted. All
 /// stdlib and test fixtures route through the typed registry.
 ///
 /// - [`Self::Typed`]: synchronous typed-return native function. The
 ///   body returns [`crate::typed_module_exports::TypedReturn`] directly;
-///   marshalling to `ValueWord` happens at the dispatch boundary.
+///   the dispatch boundary projects the typed return into a kinded slot
+///   per ADR-006 §2.7 — no round-trip through a synthesized runtime
+///   value.
 /// - [`Self::TypedAsync`]: async typed-return native function. The body
 ///   returns a future of `TypedReturn`; the synchronous dispatch path
-///   blocks on the future and marshals at the boundary.
+///   blocks on the future and applies the same kind-threaded projection
+///   at the boundary.
 #[derive(Clone)]
 pub enum ModuleFnEntry {
     Typed(crate::typed_module_exports::TypedModuleFunction),
@@ -364,8 +370,9 @@ pub struct ModuleExports {
     /// Authoritative registry for native-module function bodies. Every
     /// export here declares its return type via
     /// [`crate::typed_module_exports::TypedReturn`] / [`crate::typed_module_exports::ConcreteType`];
-    /// marshalling to `ValueWord` happens at the dispatch boundary
-    /// inside the VM, not in the body. Phase 4c.4 deleted the legacy
+    /// the kind-threaded marshal layer projects the typed return into
+    /// a kinded slot at the dispatch boundary inside the VM, not in
+    /// the body (ADR-006 §2.7). Phase 4c.4 deleted the legacy
     /// `exports`/`async_exports` `ModuleFn` parallel registry — every
     /// callable function body lives here.
     pub typed_exports: crate::typed_module_exports::TypedModuleExports,
@@ -502,7 +509,7 @@ impl ModuleExports {
     /// Called before callable-property and UFCS fallback in handle_object_method().
     pub fn add_intrinsic<F>(&mut self, type_name: &str, method_name: &str, f: F) -> &mut Self
     where
-        F: for<'ctx> Fn(&[ValueWord], &ModuleContext<'ctx>) -> Result<ValueWord, String>
+        F: for<'ctx> Fn(&[KindedSlot], &ModuleContext<'ctx>) -> Result<KindedSlot, String>
             + Send
             + Sync
             + 'static,
@@ -528,24 +535,10 @@ impl ModuleExports {
             || self.typed_exports.async_functions.contains_key(name)
     }
 
-    /// Invoke a sync export by name through the typed registry, marshalling
-    /// the resulting `TypedReturn` to a `ValueWord` at the boundary.
-    ///
-    /// Returns `None` if the export doesn't exist (or is async). Used by
-    /// stdlib-internal tests that previously did
-    /// `module.get_export(name).unwrap()(&args, &ctx)` — the typed
-    /// migration removes the legacy `ModuleFn` accessor in favor of this
-    /// dispatch helper.
-    pub fn invoke_export(
-        &self,
-        name: &str,
-        args: &[ValueWord],
-        ctx: &ModuleContext,
-    ) -> Option<Result<ValueWord, String>> {
-        let typed = self.typed_exports.functions.get(name)?;
-        let typed_result = (typed.invoke)(args, ctx);
-        Some(typed_result.map(|t| t.into_value_word()))
-    }
+    // `invoke_export` and `TypedReturn::into_value_word()` are deleted.
+    // The replacement is the Phase 2b kind-threaded marshal layer that
+    // projects `TypedReturn` directly into a typed slot without round-
+    // tripping through a synthesized runtime value.
 
     /// Check if a function is async.
     pub fn is_async(&self, name: &str) -> bool {

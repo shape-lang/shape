@@ -179,6 +179,9 @@ fn collect_rvalue_field_reads(rvalue: &Rvalue, reads: &mut HashSet<FieldKey>) {
                 collect_operand_field_reads(op, reads);
             }
         }
+        Rvalue::EnumTest { operand, .. } | Rvalue::EnumPayload { operand, .. } => {
+            collect_operand_field_reads(operand, reads);
+        }
     }
 }
 
@@ -558,6 +561,8 @@ mod tests {
             local_types: vec![LocalTypeInfo::NonCopy],
             span: span(),
             field_name_table: std::collections::HashMap::new(),
+            local_struct_type_names: std::collections::HashMap::new(),
+            local_typed_array_element_types: std::collections::HashMap::new(),
         };
 
         let cfg = ControlFlowGraph::build(&mir);
@@ -635,6 +640,8 @@ mod tests {
             local_types: vec![LocalTypeInfo::NonCopy, LocalTypeInfo::Copy],
             span: span(),
             field_name_table: std::collections::HashMap::new(),
+            local_struct_type_names: std::collections::HashMap::new(),
+            local_typed_array_element_types: std::collections::HashMap::new(),
         };
 
         let cfg = ControlFlowGraph::build(&mir);
@@ -722,6 +729,8 @@ mod tests {
             local_types: vec![LocalTypeInfo::NonCopy, LocalTypeInfo::Copy],
             span: span(),
             field_name_table: std::collections::HashMap::new(),
+            local_struct_type_names: std::collections::HashMap::new(),
+            local_typed_array_element_types: std::collections::HashMap::new(),
         };
 
         let cfg = ControlFlowGraph::build(&mir);
@@ -793,6 +802,8 @@ mod tests {
             local_types: vec![LocalTypeInfo::NonCopy, LocalTypeInfo::Copy],
             span: span(),
             field_name_table: std::collections::HashMap::new(),
+            local_struct_type_names: std::collections::HashMap::new(),
+            local_typed_array_element_types: std::collections::HashMap::new(),
         };
 
         let cfg = ControlFlowGraph::build(&mir);
@@ -844,6 +855,8 @@ mod tests {
             local_types: vec![LocalTypeInfo::NonCopy, LocalTypeInfo::Copy],
             span: span(),
             field_name_table: std::collections::HashMap::new(),
+            local_struct_type_names: std::collections::HashMap::new(),
+            local_typed_array_element_types: std::collections::HashMap::new(),
         };
 
         let cfg = ControlFlowGraph::build(&mir);
@@ -935,6 +948,8 @@ mod tests {
             local_types: vec![LocalTypeInfo::NonCopy, LocalTypeInfo::Copy],
             span: span(),
             field_name_table: std::collections::HashMap::new(),
+            local_struct_type_names: std::collections::HashMap::new(),
+            local_typed_array_element_types: std::collections::HashMap::new(),
         };
 
         let cfg = ControlFlowGraph::build(&mir);
@@ -977,6 +992,8 @@ mod tests {
             local_types: vec![],
             span: span(),
             field_name_table: std::collections::HashMap::new(),
+            local_struct_type_names: std::collections::HashMap::new(),
+            local_typed_array_element_types: std::collections::HashMap::new(),
         };
 
         let cfg = ControlFlowGraph::build(&mir);
@@ -1035,6 +1052,8 @@ mod tests {
             ],
             span: span(),
             field_name_table: std::collections::HashMap::new(),
+            local_struct_type_names: std::collections::HashMap::new(),
+            local_typed_array_element_types: std::collections::HashMap::new(),
         };
 
         let cfg = ControlFlowGraph::build(&mir);

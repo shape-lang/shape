@@ -14,7 +14,7 @@ use crate::project::{DependencySpec, ProjectRoot, find_project_root, normalize_p
 use shape_ast::ast::{AnnotationDef, FunctionDef, ImportStmt, Program};
 use shape_ast::error::{Result, ShapeError};
 use shape_ast::parser::parse_program;
-use shape_value::ValueWord;
+use shape_value::KindedSlot;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -76,12 +76,17 @@ impl Module {
 }
 
 /// An exported item from a module
+///
+/// Per ADR-006 §2.7.1.2, `Export::Value` is a GENERIC_CARRIER single-
+/// value site: the kind of an exported value is not statically known
+/// at the module-loader layer (different exports from the same module
+/// can carry different `NativeKind`s), so the carrier is `KindedSlot`.
 #[derive(Debug, Clone)]
 pub enum Export {
     Function(Arc<FunctionDef>),
     TypeAlias(Arc<shape_ast::ast::TypeAliasDef>),
     Annotation(Arc<AnnotationDef>),
-    Value(ValueWord),
+    Value(KindedSlot),
 }
 
 // Re-export shared module resolution types from shape-ast so that existing

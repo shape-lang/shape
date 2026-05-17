@@ -1,13 +1,25 @@
 // Content-addressed VM state primitives (`std::state` module).
 //
-// Implements the Rust-backed builtins for the `state` module:
-// - Value hashing (`state.hash`, `state.fn_hash`, `state.schema_hash`)
-// - Serialization (`state.serialize`, `state.deserialize`)
-// - Diffing (`state.diff`, `state.patch`)
-// - Introspection stubs (`state.capture`, `state.capture_all`, etc.)
+// **W17-snapshot-resume surface — see ADR-006 §2.7.4 + §2.7.5.1.** The
+// body of every `state.*` builtin in this module depended on the
+// deleted `ValueWord` type, the deleted `state_diff` runtime module
+// (1486 LoC of ValueWord-typed value-diff/patch logic), and the deleted
+// `nanboxed_to_serializable` / `serializable_to_nanboxed` snapshot
+// helpers. Per ADR-006 §2.7.4, snapshot serialization is deferred to a
+// Phase-2c rebuild session that can design a kind-threaded
+// `slot_to_serializable(bits, kind, store)` / inverse pair. W17
+// converts the previous `todo!()`-driven VM-thread abort into a
+// structured `Err(String)` surface return so the broken capability
+// surfaces as a recoverable runtime error rather than crashing the VM.
+// Placeholder serializers stay forbidden per CLAUDE.md "Forbidden
+// rationalizations" (silent persisted-state corruption is the bug
+// §2.7.4 explicitly rules out).
 //
-// Each function follows the `ModuleFn` signature:
-// `fn(&[ValueWord], &ModuleContext) -> Result<ValueWord, String>`
+// The module-construction surface (`create_state_module`) stays so the
+// `std::core::state` module continues to register with the runtime —
+// the schema metadata is consumable by tooling/LSP. The function
+// bodies all return W17 surface errors until the Phase-2c rebuild
+// lands.
 
 use super::introspection::{
     state_args_stub, state_caller_stub, state_capture_all_stub, state_capture_call_stub,
@@ -15,38 +27,21 @@ use super::introspection::{
     state_resume_stub,
 };
 use shape_runtime::module_exports::{ModuleContext, ModuleExports, ModuleParam};
-use shape_runtime::state_diff;
 use shape_runtime::type_schema::{FieldType, TypeSchema};
-use shape_runtime::typed_module_exports::{ConcreteType, TypedReturn, register_typed_function};
-use shape_value::{ValueWord, ValueWordExt};
-use crate::executor::objects::raw_helpers;
-use std::sync::Arc;
-
-/// Wrap a legacy-shaped module function pointer
-/// `fn(&[ValueWord], &ModuleContext) -> Result<ValueWord, String>` into a
-/// typed body that round-trips the result through TypedReturn::ValueWord.
-/// Phase 4c.2: drives the registration call to register_typed_function while
-/// the body still produces ValueWord directly.
-fn wrap_legacy<F>(
-    f: F,
-) -> impl for<'ctx> Fn(&[ValueWord], &ModuleContext<'ctx>) -> Result<TypedReturn, String>
-       + Send
-       + Sync
-       + 'static
-where
-    F: for<'ctx> Fn(&[ValueWord], &ModuleContext<'ctx>) -> Result<ValueWord, String>
-        + Send
-        + Sync
-        + 'static,
-{
-    move |args, ctx| f(args, ctx).map(TypedReturn::ValueWord)
-}
+use shape_runtime::typed_module_exports::{ConcreteType, TypedReturn};
+use shape_runtime::marshal::register_typed_function;
+use shape_value::KindedSlot;
 
 // ---------------------------------------------------------------------------
 // Module constructor
 // ---------------------------------------------------------------------------
 
 /// Create the `state` extension module with all content-addressed builtins.
+///
+/// **W17-snapshot-resume surface — see ADR-006 §2.7.4 + §2.7.5.1.** The
+/// schemas and registration surface are intact so the module is
+/// discoverable; the per-function bodies return structured W17 surface
+/// errors until the snapshot/diff rebuild lands.
 pub fn create_state_module() -> ModuleExports {
     let mut module = ModuleExports::new("std::core::state");
     module.description = "Content-addressed VM state primitives".to_string();
@@ -109,7 +104,7 @@ pub fn create_state_module() -> ModuleExports {
             ..Default::default()
         }],
         ConcreteType::String,
-        wrap_legacy(state_hash),
+        state_hash,
     );
 
     register_typed_function(
@@ -124,7 +119,7 @@ pub fn create_state_module() -> ModuleExports {
             ..Default::default()
         }],
         ConcreteType::String,
-        wrap_legacy(state_fn_hash),
+        state_fn_hash,
     );
 
     register_typed_function(
@@ -139,7 +134,7 @@ pub fn create_state_module() -> ModuleExports {
             ..Default::default()
         }],
         ConcreteType::String,
-        wrap_legacy(state_schema_hash),
+        state_schema_hash,
     );
 
     // -- Serialization --
@@ -156,7 +151,7 @@ pub fn create_state_module() -> ModuleExports {
             ..Default::default()
         }],
         ConcreteType::ArrayInt,
-        wrap_legacy(state_serialize),
+        state_serialize,
     );
 
     register_typed_function(
@@ -171,7 +166,7 @@ pub fn create_state_module() -> ModuleExports {
             ..Default::default()
         }],
         ConcreteType::Any,
-        wrap_legacy(state_deserialize),
+        state_deserialize,
     );
 
     // -- Diffing --
@@ -197,7 +192,7 @@ pub fn create_state_module() -> ModuleExports {
             },
         ],
         ConcreteType::Named("Delta".into()),
-        wrap_legacy(state_diff),
+        state_diff,
     );
 
     register_typed_function(
@@ -221,7 +216,7 @@ pub fn create_state_module() -> ModuleExports {
             },
         ],
         ConcreteType::Any,
-        wrap_legacy(state_patch),
+        state_patch,
     );
 
     // -- Capture primitives (stubs — need live VM access) --
@@ -232,7 +227,7 @@ pub fn create_state_module() -> ModuleExports {
         "Capture current function's frame state",
         vec![],
         ConcreteType::Named("FrameState".into()),
-        wrap_legacy(state_capture_stub),
+        state_capture_stub,
     );
 
     register_typed_function(
@@ -241,7 +236,7 @@ pub fn create_state_module() -> ModuleExports {
         "Capture full VM execution state",
         vec![],
         ConcreteType::Named("VmState".into()),
-        wrap_legacy(state_capture_all_stub),
+        state_capture_all_stub,
     );
 
     register_typed_function(
@@ -250,7 +245,7 @@ pub fn create_state_module() -> ModuleExports {
         "Capture module-level bindings and type schemas",
         vec![],
         ConcreteType::Named("ModuleState".into()),
-        wrap_legacy(state_capture_module_stub),
+        state_capture_module_stub,
     );
 
     register_typed_function(
@@ -274,7 +269,7 @@ pub fn create_state_module() -> ModuleExports {
             },
         ],
         ConcreteType::Named("CallPayload".into()),
-        wrap_legacy(state_capture_call_stub),
+        state_capture_call_stub,
     );
 
     // -- Resume primitives (stubs) --
@@ -297,7 +292,7 @@ pub fn create_state_module() -> ModuleExports {
             ..Default::default()
         }],
         ConcreteType::Named("never".into()),
-        wrap_legacy(state_resume_stub),
+        state_resume_stub,
     );
 
     register_typed_function(
@@ -312,7 +307,7 @@ pub fn create_state_module() -> ModuleExports {
             ..Default::default()
         }],
         ConcreteType::Any,
-        wrap_legacy(state_resume_frame_stub),
+        state_resume_frame_stub,
     );
 
     // -- Introspection (stubs) --
@@ -323,7 +318,7 @@ pub fn create_state_module() -> ModuleExports {
         "Get a reference to the calling function",
         vec![],
         ConcreteType::Named("FunctionRef?".into()),
-        wrap_legacy(state_caller_stub),
+        state_caller_stub,
     );
 
     register_typed_function(
@@ -332,7 +327,7 @@ pub fn create_state_module() -> ModuleExports {
         "Get the current function's arguments as an array",
         vec![],
         ConcreteType::Named("Array<any>".into()),
-        wrap_legacy(state_args_stub),
+        state_args_stub,
     );
 
     register_typed_function(
@@ -341,7 +336,7 @@ pub fn create_state_module() -> ModuleExports {
         "Get the current scope's local variables as a map",
         vec![],
         ConcreteType::Named("Map<string, any>".into()),
-        wrap_legacy(state_locals_stub),
+        state_locals_stub,
     );
 
     register_typed_function(
@@ -350,7 +345,7 @@ pub fn create_state_module() -> ModuleExports {
         "Create a snapshot of the current execution state. This is a suspension point: the engine saves all state and returns Snapshot::Hash(id). When resumed from a snapshot, execution continues here and returns Snapshot::Resumed.",
         vec![],
         ConcreteType::Named("Snapshot".into()),
-        wrap_legacy(state_capture_all_stub),
+        state_capture_all_stub,
     );
 
     module
@@ -359,96 +354,235 @@ pub fn create_state_module() -> ModuleExports {
 // ===========================================================================
 // Content addressing implementations
 // ===========================================================================
+//
+// **W17-snapshot-resume surface-and-stop — see ADR-006 §2.7.4 + §2.7.5.1.**
+// Every body below depended on the deleted `ValueWord` type, `state_diff`
+// runtime module, or `nanboxed_to_serializable` / `serializable_to_nanboxed`
+// snapshot helpers. The replacement design — a kind-threaded slot
+// content-hash + slot diff/patch + slot serialization triple, all
+// taking `(bits, kind)` or `KindedSlot` directly and dispatching on
+// `HeapKind` payload variants — is Phase-2c scope. W17 converts the
+// previous `todo!()` panics to structured `Err(...)` returns so callers
+// observe a runtime error rather than a VM-thread abort.
+
+/// Common W17-snapshot-resume surface-and-stop message for the
+/// content-addressing / serialize / diff family. The `op` parameter
+/// names the specific stdlib function so the error message points the
+/// caller at the exact entry point.
+fn content_surface(op: &str) -> String {
+    format!(
+        "{op}: W17-snapshot-resume surface — kind-threaded \
+         slot_to_serializable / serializable_to_slot replacement for the \
+         deleted nanboxed_to_serializable / serializable_to_nanboxed \
+         pair has not landed; state.diff / state.patch additionally \
+         depend on the deleted 1486-LoC `state_diff` runtime module's \
+         kind-threaded rebuild. Tracked as W17-snapshot-resume per \
+         docs/cluster-audits/phase-2d-playbook.md §3. \
+         ADR-006 §2.7.4 (snapshot serialization deferral) + §2.7.5.1 \
+         (post-proof wire-format shape for new HeapKinds).",
+    )
+}
+
+/// In-memory `SnapshotStore` for content-addressing operations
+/// (`state.hash`, `state.serialize`) that don't need filesystem
+/// persistence. The store is required by the
+/// `slot_to_serializable(bits, kind, store)` signature but is unused for
+/// scalar / heap-light kinds; complex chunked-blob kinds (TypedArray
+/// sidecar, large DataTable) surface clean from the kind-threaded API
+/// when no store is available.
+///
+/// **W17-state-tier-roundtrip (Phase 2d Wave 3, 2026-05-12).** Falls
+/// back to a tempdir-backed store so chunked-blob arms work. If the
+/// tempdir creation itself fails, the body surfaces clean per the
+/// §2.7.4 invariant (no silent state-loss).
+fn ephemeral_store() -> Result<shape_runtime::snapshot::SnapshotStore, String> {
+    let tmp = tempfile::tempdir().map_err(|e| {
+        format!(
+            "W17-snapshot-resume surface — tempdir creation failed: {e}. \
+             ADR-006 §2.7.4."
+        )
+    })?;
+    let store = shape_runtime::snapshot::SnapshotStore::new(tmp.path()).map_err(|e| {
+        format!(
+            "W17-snapshot-resume surface — SnapshotStore::new failed: {e}. \
+             ADR-006 §2.7.4."
+        )
+    })?;
+    // Leak the tempdir so the store's blob files outlive the body's
+    // immediate frame. The bodies that call this are content-addressing
+    // /serialize paths — short-lived; the tempdir cleanup runs at
+    // process exit. For high-rate state.hash callers we'd want a
+    // per-VM store on ModuleContext, but that's beyond W17-state-tier-
+    // roundtrip's scope.
+    std::mem::forget(tmp);
+    Ok(store)
+}
+
+/// Compute the deterministic serialized-bytes representation of a
+/// `KindedSlot` argument. The bytes are bincode-encoded
+/// `SerializableVMValue` per ADR-006 §2.7.5.1 — identical to what
+/// `VmSnapshot` writes for each stack/binding slot.
+fn slot_to_serialized_bytes(slot: &KindedSlot) -> Result<Vec<u8>, String> {
+    use shape_runtime::snapshot::slot_to_serializable;
+    let store = ephemeral_store()?;
+    let sv = slot_to_serializable(slot.slot().raw(), slot.kind(), &store)?;
+    let bytes = bincode::serialize(&sv).map_err(|e| {
+        format!(
+            "state.serialize: W17-snapshot-resume surface — bincode \
+             serialization failed: {e}. ADR-006 §2.7.5.1."
+        )
+    })?;
+    Ok(bytes)
+}
 
 /// `state.hash(value) -> string`
 ///
-/// Compute SHA-256 content hash of any ValueWord value using the structural
-/// hashing from `shape_runtime::state_diff::content_hash_value`.
-pub(crate) fn state_hash(args: &[ValueWord], ctx: &ModuleContext) -> Result<ValueWord, String> {
-    let value = args.first().ok_or("state.hash requires 1 argument")?;
-    let digest = state_diff::content_hash_value(value, ctx.schemas);
-    Ok(ValueWord::from_string(Arc::new(digest.hex().to_string())))
+/// **W17-state-tier-roundtrip (Phase 2d Wave 3, 2026-05-12).** Wired
+/// end-to-end via the kind-threaded `slot_to_serializable` API: the
+/// arg slot is projected to `SerializableVMValue`, bincode-encoded,
+/// then SHA-256-hashed. Returns the hash as a hex string.
+pub(crate) fn state_hash(
+    args: &[KindedSlot],
+    _ctx: &ModuleContext,
+) -> Result<TypedReturn, String> {
+    let Some(arg) = args.first() else {
+        return Err(content_surface("state.hash"));
+    };
+    let bytes = slot_to_serialized_bytes(arg)?;
+    let digest = shape_runtime::hash_bytes(&bytes);
+    Ok(TypedReturn::Concrete(
+        shape_runtime::typed_module_exports::ConcreteReturn::String(digest.hex().to_string()),
+    ))
 }
 
 /// `state.fn_hash(f) -> string`
 ///
-/// Look up the content hash for function `f` from the VM-provided
-/// `ModuleContext.function_hashes` table.  Returns a 64-character hex
-/// string when the hash is available, or falls back to `"fn:<id>"` when
-/// content-addressed metadata has not been populated.
-pub(crate) fn state_fn_hash(args: &[ValueWord], ctx: &ModuleContext) -> Result<ValueWord, String> {
-    let f = args.first().ok_or("state.fn_hash requires 1 argument")?;
+/// **W17-state-tier-roundtrip (Phase 2d Wave 3, 2026-05-12).** Returns
+/// the content-hash of a function blob. The hash is sourced from the
+/// VM's content-addressed metadata table; functions without a
+/// content-hash entry (compiled without content-addressed metadata)
+/// surface a structured error.
+pub(crate) fn state_fn_hash(
+    args: &[KindedSlot],
+    ctx: &ModuleContext,
+) -> Result<TypedReturn, String> {
+    use shape_value::{HeapKind, NativeKind};
 
-    let func_id = if let Some(fid) = f.as_function_id() {
-        Some(fid as usize)
-    } else if let Some((fid, _)) = raw_helpers::extract_closure_info(f.raw_bits()) {
-        Some(fid as usize)
-    } else {
-        None
+    let Some(arg) = args.first() else {
+        return Err(content_surface("state.fn_hash"));
     };
-
-    let func_id = func_id.ok_or("state.fn_hash: argument is not a function")?;
-
-    // Look up the real content hash from the VM-provided table.
-    if let Some(hashes) = ctx.function_hashes {
-        if let Some(Some(hash_bytes)) = hashes.get(func_id) {
-            let hex: String = hash_bytes
-                .iter()
-                .fold(String::with_capacity(64), |mut acc, b| {
-                    use std::fmt::Write;
-                    let _ = write!(acc, "{:02x}", b);
-                    acc
-                });
-            return Ok(ValueWord::from_string(Arc::new(hex)));
+    // Function values flow as one of:
+    //  - NativeKind::Ptr(HeapKind::Closure) — raw OwnedClosureBlock bits
+    //  - NativeKind::Ptr(HeapKind::FunctionRef) — typed fn handle
+    //  - Inline function-id (Int64-kinded) for bare function references
+    let bits = arg.slot().raw();
+    let function_id = match arg.kind() {
+        NativeKind::Int64 | NativeKind::UInt64 => Some(bits as u16),
+        NativeKind::Ptr(HeapKind::Closure) => {
+            if bits == 0 {
+                None
+            } else {
+                // SAFETY: bits is OwnedClosureBlock::ptr per §2.7.8.
+                let ptr = bits as *const u8;
+                Some(unsafe {
+                    shape_value::v2::closure_raw::typed_closure_function_id(ptr)
+                })
+            }
         }
-    }
-
-    // Fallback: return function ID as placeholder when hashes are unavailable.
-    Ok(ValueWord::from_string(Arc::new(format!("fn:{}", func_id))))
+        _ => None,
+    };
+    let Some(fid) = function_id else {
+        return Err(format!(
+            "state.fn_hash: W17-snapshot-resume surface — argument is not a \
+             function value (kind={:?}); function-handle decoding for \
+             HeapKind::FunctionRef / TraitObject not yet wired. ADR-006 \
+             §2.7.4.",
+            arg.kind()
+        ));
+    };
+    // Look up the function's content hash via ctx.function_hashes.
+    let Some(hashes) = ctx.function_hashes else {
+        return Err(format!(
+            "state.fn_hash: W17-snapshot-resume surface — \
+             ctx.function_hashes is None at this dispatch surface; \
+             content-addressed metadata not propagated through \
+             invoke_module_fn_id_stub. ADR-006 §2.7.4."
+        ));
+    };
+    let Some(maybe_hash) = hashes.get(fid as usize) else {
+        return Err(format!(
+            "state.fn_hash: function_id {fid} out of range \
+             (program has {} functions). ADR-006 §2.7.4.",
+            hashes.len()
+        ));
+    };
+    let Some(hash_bytes) = maybe_hash else {
+        return Err(format!(
+            "state.fn_hash: W17-snapshot-resume surface — function_id {fid} \
+             has no content-addressed hash entry (compiled without \
+             content-addressed metadata). ADR-006 §2.7.4."
+        ));
+    };
+    Ok(TypedReturn::Concrete(
+        shape_runtime::typed_module_exports::ConcreteReturn::String(hex::encode(hash_bytes)),
+    ))
 }
 
 /// `state.schema_hash(type_name) -> string`
 ///
-/// Look up the type in the TypeSchemaRegistry and return its content hash
-/// as a hex string.
+/// **W17-state-tier-roundtrip (Phase 2d Wave 3, 2026-05-12).** Returns
+/// the content-hash of a type schema definition. Schema bytes are the
+/// bincode-encoded `TypeSchema` from `ctx.schemas`.
 pub(crate) fn state_schema_hash(
-    args: &[ValueWord],
+    args: &[KindedSlot],
     ctx: &ModuleContext,
-) -> Result<ValueWord, String> {
-    let name_nb = args
-        .first()
-        .ok_or("state.schema_hash requires 1 argument")?;
-    let type_name = name_nb
-        .as_str()
-        .ok_or("state.schema_hash: argument must be a string")?;
-
-    let schema = ctx.schemas.get(type_name).ok_or_else(|| {
-        format!(
-            "state.schema_hash: type '{}' not found in registry",
-            type_name
-        )
-    })?;
-
-    // content_hash is Option<[u8; 32]>. If not yet computed, compute it on a clone.
-    let hash_bytes = match schema.content_hash {
-        Some(hash) => hash,
-        None => {
-            // Schema doesn't have a cached hash. Compute it from a mutable clone.
-            let mut schema_clone = schema.clone();
-            schema_clone.content_hash()
+) -> Result<TypedReturn, String> {
+    let Some(arg) = args.first() else {
+        return Err(content_surface("state.schema_hash"));
+    };
+    // First arg is the type name (string-kinded). Recover the string
+    // payload via the canonical Arc<String> recovery pattern. The
+    // bits encode `Arc::into_raw(Arc<String>)` per §2.7.6 String-arm.
+    let type_name = match arg.kind() {
+        shape_value::NativeKind::String
+        | shape_value::NativeKind::Ptr(shape_value::HeapKind::String) => {
+            let bits = arg.slot().raw();
+            if bits == 0 {
+                return Err(format!(
+                    "state.schema_hash: W17-snapshot-resume surface — null \
+                     string bits. ADR-006 §2.7.6."
+                ));
+            }
+            // SAFETY: bits is Arc<String> share per §2.7.6 construction.
+            unsafe {
+                let arc = std::sync::Arc::<String>::from_raw(bits as *const String);
+                let s: String = (*arc).clone();
+                let _ = std::sync::Arc::into_raw(arc); // restore share
+                s
+            }
+        }
+        other => {
+            return Err(format!(
+                "state.schema_hash: W17-snapshot-resume surface — first \
+                 argument must be string (got kind={other:?}). ADR-006 §2.7.4."
+            ));
         }
     };
-
-    // Convert [u8; 32] to hex string
-    let hex = hash_bytes
-        .iter()
-        .fold(String::with_capacity(64), |mut acc, b| {
-            use std::fmt::Write;
-            let _ = write!(acc, "{:02x}", b);
-            acc
-        });
-
-    Ok(ValueWord::from_string(Arc::new(hex)))
+    let Some(schema) = ctx.schemas.get(&type_name) else {
+        return Err(format!(
+            "state.schema_hash: unknown type '{type_name}'. ADR-006 §2.7.4."
+        ));
+    };
+    let bytes = bincode::serialize(schema).map_err(|e| {
+        format!(
+            "state.schema_hash: W17-snapshot-resume surface — bincode \
+             serialization failed: {e}. ADR-006 §2.7.5.1."
+        )
+    })?;
+    let digest = shape_runtime::hash_bytes(&bytes);
+    Ok(TypedReturn::Concrete(
+        shape_runtime::typed_module_exports::ConcreteReturn::String(digest.hex().to_string()),
+    ))
 }
 
 // ===========================================================================
@@ -457,76 +591,38 @@ pub(crate) fn state_schema_hash(
 
 /// `state.serialize(value) -> Array<int>`
 ///
-/// Serialize a ValueWord value to MessagePack bytes, returned as an Array of ints.
-/// Uses rmp-serde via the snapshot SerializableVMValue representation.
+/// **W17-state-tier-roundtrip (Phase 2d Wave 3, 2026-05-12).** The body
+/// computes the bincode-encoded `SerializableVMValue` bytes via the
+/// kind-threaded `slot_to_serializable` API. The `Array<int>` return
+/// shape needs the marshal-return `Bytes` arm follow-up at
+/// `project_typed_return` — body succeeds, marshal surfaces clean.
 pub(crate) fn state_serialize(
-    args: &[ValueWord],
+    args: &[KindedSlot],
     _ctx: &ModuleContext,
-) -> Result<ValueWord, String> {
-    let value = args.first().ok_or("state.serialize requires 1 argument")?;
-
-    // Serialize the ValueWord using the snapshot mechanism.
-    // SnapshotStore is only needed for blob-backed heap values (DataTable etc.),
-    // but the API requires one. Use a temp directory.
-    let tmp = std::env::temp_dir().join("shape_state_serialize");
-    let store = shape_runtime::snapshot::SnapshotStore::new(&tmp)
-        .map_err(|e| format!("state.serialize: failed to create temp store: {}", e))?;
-    let serializable = shape_runtime::snapshot::nanboxed_to_serializable(value, &store)
-        .map_err(|e| format!("state.serialize: {}", e))?;
-
-    let bytes = rmp_serde::to_vec(&serializable)
-        .map_err(|e| format!("state.serialize: msgpack encoding failed: {}", e))?;
-
-    // Convert Vec<u8> to Array<ValueWord> of ints
-    let arr: Vec<ValueWord> = bytes
-        .iter()
-        .map(|&b| ValueWord::from_i64(b as i64))
-        .collect();
-    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(arr)))
+) -> Result<TypedReturn, String> {
+    let Some(arg) = args.first() else {
+        return Err(content_surface("state.serialize"));
+    };
+    let _bytes = slot_to_serialized_bytes(arg)?;
+    Err(format!(
+        "state.serialize: W17-snapshot-resume surface — body computed \
+         {} bytes via slot_to_serializable but the Array<int>/Bytes return \
+         arm needs the W17-marshal-return-arms follow-up at \
+         project_typed_return. ADR-006 §2.7.4 + §2.7.5.1.",
+        _bytes.len()
+    ))
 }
 
 /// `state.deserialize(bytes) -> Any`
 ///
-/// Deserialize MessagePack bytes (Array of ints) back to a ValueWord value.
+/// **W17-state-tier-roundtrip (Phase 2d Wave 3, 2026-05-12).** Mirror of
+/// `state_serialize`: requires the `Any` return arm (typed-Arc payload
+/// projection — same W17-marshal-return-arms follow-up).
 pub(crate) fn state_deserialize(
-    args: &[ValueWord],
+    _args: &[KindedSlot],
     _ctx: &ModuleContext,
-) -> Result<ValueWord, String> {
-    let bytes_nb = args
-        .first()
-        .ok_or("state.deserialize requires 1 argument")?;
-    let arr = bytes_nb
-        .as_any_array()
-        .ok_or("state.deserialize: argument must be an Array<int>")?
-        .to_generic();
-
-    // Convert Array<ValueWord> of ints to Vec<u8>
-    let mut bytes = Vec::with_capacity(arr.len());
-    for nb in arr.iter() {
-        let b = nb
-            .as_i64()
-            .or_else(|| nb.as_f64().map(|f| f as i64))
-            .ok_or("state.deserialize: array elements must be integers")?;
-        if !(0..=255).contains(&b) {
-            return Err(format!(
-                "state.deserialize: byte value {} out of range 0..255",
-                b
-            ));
-        }
-        bytes.push(b as u8);
-    }
-
-    // Deserialize via the snapshot mechanism
-    let serializable: shape_runtime::snapshot::SerializableVMValue = rmp_serde::from_slice(&bytes)
-        .map_err(|e| format!("state.deserialize: msgpack decoding failed: {}", e))?;
-
-    let tmp = std::env::temp_dir().join("shape_state_deserialize");
-    let store = shape_runtime::snapshot::SnapshotStore::new(&tmp)
-        .map_err(|e| format!("state.deserialize: failed to create temp store: {}", e))?;
-    let nb = shape_runtime::snapshot::serializable_to_nanboxed(&serializable, &store)
-        .map_err(|e| format!("state.deserialize: {}", e))?;
-
-    Ok(nb)
+) -> Result<TypedReturn, String> {
+    Err(content_surface("state.deserialize"))
 }
 
 // ===========================================================================
@@ -535,193 +631,28 @@ pub(crate) fn state_deserialize(
 
 /// `state.diff(old, new) -> Delta`
 ///
-/// Compute delta between two values using content-hash tree comparison.
-///
-/// Returns a proper `Delta` TypedObject matching the `state.shape` definition:
-/// - `changed`: `Map<string, Any>` (HashMap of path -> new value)
-/// - `removed`: `Array<string>` (array of removed paths)
-///
-/// Falls back to a plain two-element array `[changed_pairs, removed]` if the
-/// Delta schema is not found in the registry.
-pub(crate) fn state_diff(args: &[ValueWord], ctx: &ModuleContext) -> Result<ValueWord, String> {
-    let old = args.first().ok_or("state.diff requires 2 arguments")?;
-    let new = args.get(1).ok_or("state.diff requires 2 arguments")?;
-
-    let delta = state_diff::diff_values(old, new, ctx.schemas);
-
-    // Build changed: Map<string, Any> as a ValueWord HashMap
-    let mut keys = Vec::with_capacity(delta.changed.len());
-    let mut values = Vec::with_capacity(delta.changed.len());
-    for (path, value) in delta.changed.iter() {
-        keys.push(ValueWord::from_string(Arc::new(path.clone())));
-        values.push(value.clone());
-    }
-    let changed_map = ValueWord::from_hashmap_pairs(keys, values);
-
-    // Build removed: Array<string>
-    let removed_arr: Vec<ValueWord> = delta
-        .removed
-        .iter()
-        .map(|s| ValueWord::from_string(Arc::new(s.clone())))
-        .collect();
-    let removed = ValueWord::from_array(shape_value::vmarray_from_vec(removed_arr));
-
-    // Create a proper Delta TypedObject using the registered schema
-    if let Some(schema) = ctx.schemas.get("Delta") {
-        use shape_value::heap_value::HeapValue;
-        use shape_value::slot::ValueSlot;
-
-        let schema_id = schema.id as u64;
-        // Delta has two fields: changed (slot 0) and removed (slot 1)
-        // Both are complex heap types (HashMap and Array)
-        // Convert unified arrays to HeapValue for slot storage.
-        let changed_hv = if let Some(view) = changed_map.as_any_array() {
-            HeapValue::Array(view.to_generic())
-        } else {
-            // cold-path: as_heap_ref retained — fallback for non-array heap values
-            changed_map.as_heap_ref().unwrap().clone() // cold-path
-        };
-        let removed_hv = if let Some(view) = removed.as_any_array() {
-            HeapValue::Array(view.to_generic())
-        } else {
-            // cold-path: as_heap_ref retained — fallback for non-array heap values
-            removed.as_heap_ref().unwrap().clone() // cold-path
-        };
-        let slots = vec![
-            ValueSlot::from_heap(changed_hv),
-            ValueSlot::from_heap(removed_hv),
-        ];
-        let heap_mask: u64 = 0b11; // both slots are heap pointers
-
-        return Ok(ValueWord::from_heap_value(HeapValue::TypedObject {
-            schema_id,
-            slots: slots.into_boxed_slice(),
-            heap_mask,
-        }));
-    }
-
-    // Fallback: return as a typed_object_from_pairs via the predeclared schema path
-    Ok(shape_runtime::type_schema::typed_object_from_pairs(&[
-        ("changed", changed_map),
-        ("removed", removed),
-    ]))
+/// **W17-state-tier-roundtrip surface-and-stop — see ADR-006 §2.7.4.**
+/// `state_diff` depends on the deleted 1486-LoC `state_diff` runtime
+/// module (`crates/shape-runtime/src/state_diff.rs` pre-bulldozer) whose
+/// kind-threaded rebuild is its own substantial workstream — out of
+/// W17-state-tier-roundtrip's scope. Surfaces clean.
+pub(crate) fn state_diff(
+    _args: &[KindedSlot],
+    _ctx: &ModuleContext,
+) -> Result<TypedReturn, String> {
+    Err(content_surface("state.diff"))
 }
 
 /// `state.patch(base, delta) -> Any`
 ///
-/// Apply a delta (from `state.diff`) to a base value.
-///
-/// Accepts a Delta TypedObject (with `changed` and `removed` fields) or
-/// a legacy two-element array `[changed_pairs, removed_keys]` for backwards
-/// compatibility.
-pub(crate) fn state_patch(args: &[ValueWord], ctx: &ModuleContext) -> Result<ValueWord, String> {
-    let base = args.first().ok_or("state.patch requires 2 arguments")?;
-    let delta_nb = args.get(1).ok_or("state.patch requires 2 arguments")?;
-
-    let mut delta = state_diff::Delta::empty();
-
-    // Try TypedObject (Delta) first
-    if let Some((schema_id, slots, heap_mask)) = delta_nb.as_typed_object() {
-        let is_delta = ctx
-            .schemas
-            .get_by_id(schema_id as u32)
-            .map(|s| s.name == "Delta")
-            .unwrap_or(false);
-
-        if is_delta && slots.len() >= 2 {
-            // slot 0 = changed (Map<string, Any> / HashMap)
-            let changed_nb = if heap_mask & 1 != 0 {
-                slots[0].as_heap_nb()
-            } else {
-                return Err("state.patch: Delta.changed slot is not a heap value".to_string());
-            };
-
-            // slot 1 = removed (Array<string>)
-            let removed_nb = if heap_mask & 2 != 0 {
-                slots[1].as_heap_nb()
-            } else {
-                return Err("state.patch: Delta.removed slot is not a heap value".to_string());
-            };
-
-            // Extract changed from HashMap
-            if let Some((keys, values, _index)) = changed_nb.as_hashmap() {
-                for (k, v) in keys.iter().zip(values.iter()) {
-                    let key = k
-                        .as_str()
-                        .ok_or("state.patch: changed key must be a string")?
-                        .to_string();
-                    delta.changed.insert(key, v.clone());
-                }
-            } else {
-                return Err("state.patch: Delta.changed must be a Map".to_string());
-            }
-
-            // Extract removed from Array
-            if let Some(view) = removed_nb.as_any_array() {
-                let arr = view.to_generic();
-                for nb in arr.iter() {
-                    let key = nb
-                        .as_str()
-                        .ok_or("state.patch: removed entry must be a string")?
-                        .to_string();
-                    delta.removed.push(key);
-                }
-            } else {
-                return Err("state.patch: Delta.removed must be an Array".to_string());
-            }
-
-            let result = state_diff::patch_value(base, &delta, ctx.schemas);
-            return Ok(result);
-        }
-    }
-
-    // Fallback: legacy array format [changed_pairs, removed_keys]
-    let delta_arr = delta_nb
-        .as_any_array()
-        .ok_or("state.patch: delta must be a Delta TypedObject or [changed, removed] array")?
-        .to_generic();
-
-    if delta_arr.len() < 2 {
-        return Err(
-            "state.patch: delta must be a Delta TypedObject or [changed, removed] array"
-                .to_string(),
-        );
-    }
-
-    let changed_pairs = delta_arr[0]
-        .as_any_array()
-        .ok_or("state.patch: changed must be an array of [key, value] pairs")?
-        .to_generic();
-    let removed_arr = delta_arr[1]
-        .as_any_array()
-        .ok_or("state.patch: removed must be an array of strings")?
-        .to_generic();
-
-    for pair in changed_pairs.iter() {
-        let pair_arr = pair
-            .as_any_array()
-            .ok_or("state.patch: each changed entry must be a [key, value] pair")?
-            .to_generic();
-        if pair_arr.len() < 2 {
-            return Err("state.patch: each changed entry must be a [key, value] pair".to_string());
-        }
-        let key = pair_arr[0]
-            .as_str()
-            .ok_or("state.patch: changed key must be a string")?
-            .to_string();
-        delta.changed.insert(key, pair_arr[1].clone());
-    }
-
-    for nb in removed_arr.iter() {
-        let key = nb
-            .as_str()
-            .ok_or("state.patch: removed entry must be a string")?
-            .to_string();
-        delta.removed.push(key);
-    }
-
-    let result = state_diff::patch_value(base, &delta, ctx.schemas);
-    Ok(result)
+/// **W17-state-tier-roundtrip surface-and-stop — see ADR-006 §2.7.4.**
+/// Same dependency on the deleted `state_diff` module as
+/// `state_diff`. Surfaces clean.
+pub(crate) fn state_patch(
+    _args: &[KindedSlot],
+    _ctx: &ModuleContext,
+) -> Result<TypedReturn, String> {
+    Err(content_surface("state.patch"))
 }
 
 #[cfg(test)]
@@ -741,6 +672,10 @@ mod tests {
             .unwrap_or_else(|| panic!("schema '{}' not found", name))
     }
 
+    /// Schema metadata is exercisable independent of the Phase-2c
+    /// body rebuild — `create_state_module` registers the schemas in
+    /// the type registry and the per-function bodies are unreachable
+    /// from this assertion path.
     #[test]
     fn test_state_schemas_have_concrete_field_types() {
         let module = create_state_module();

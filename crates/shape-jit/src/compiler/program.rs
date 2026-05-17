@@ -76,7 +76,14 @@ fn collect_numeric_opcode_stats(program: &BytecodeProgram) -> NumericOpcodeStats
 }
 
 fn maybe_emit_numeric_metrics(program: &BytecodeProgram) {
-    if std::env::var_os("SHAPE_JIT_METRICS").is_none() {
+    // Cluster-2 closure-wave-F tracing-crate migration (2026-05-16):
+    // `tracing::enabled!` collapses to `false` under feature-OFF builds
+    // (`release_max_level_off`), so the early return executes and the
+    // stat-collection work is skipped exactly as before. Replaces the
+    // legacy `SHAPE_JIT_METRICS` / `SHAPE_JIT_METRICS_DETAIL` env-var
+    // gating; CLI selector is `--trace-jit=shape_jit::metrics=info` (the
+    // `_DETAIL` suffix maps to trace level on the same target).
+    if !tracing::enabled!(target: "shape_jit::metrics", tracing::Level::INFO) {
         return;
     }
     let static_stats = collect_numeric_opcode_stats(program);
@@ -91,16 +98,17 @@ fn maybe_emit_numeric_metrics(program: &BytecodeProgram) {
     let effective_typed = static_stats.typed;
     let effective_generic = static_stats.generic;
     let effective_coverage_pct = static_coverage_pct;
-    eprintln!(
-        "[shape-jit-metrics] typed_numeric_ops={} generic_numeric_ops={} typed_numeric_coverage_pct={:.2} static_typed_numeric_ops={} static_generic_numeric_ops={} static_typed_numeric_coverage_pct={:.2}",
-        effective_typed,
-        effective_generic,
-        effective_coverage_pct,
-        static_stats.typed,
-        static_stats.generic,
-        static_coverage_pct
+    tracing::info!(
+        target: "shape_jit::metrics",
+        typed_numeric_ops = effective_typed,
+        generic_numeric_ops = effective_generic,
+        typed_numeric_coverage_pct = effective_coverage_pct,
+        static_typed_numeric_ops = static_stats.typed,
+        static_generic_numeric_ops = static_stats.generic,
+        static_typed_numeric_coverage_pct = static_coverage_pct,
+        "shape-jit-metrics numeric coverage",
     );
-    if std::env::var_os("SHAPE_JIT_METRICS_DETAIL").is_some() {
+    if tracing::enabled!(target: "shape_jit::metrics", tracing::Level::TRACE) {
         let fmt_breakdown = |breakdown: &BTreeMap<String, usize>| -> String {
             breakdown
                 .iter()
@@ -108,10 +116,11 @@ fn maybe_emit_numeric_metrics(program: &BytecodeProgram) {
                 .collect::<Vec<_>>()
                 .join(",")
         };
-        eprintln!(
-            "[shape-jit-metrics-detail] typed_breakdown={} generic_breakdown={}",
-            fmt_breakdown(&static_stats.typed_breakdown),
-            fmt_breakdown(&static_stats.generic_breakdown)
+        tracing::trace!(
+            target: "shape_jit::metrics",
+            typed_breakdown = %fmt_breakdown(&static_stats.typed_breakdown),
+            generic_breakdown = %fmt_breakdown(&static_stats.generic_breakdown),
+            "shape-jit-metrics-detail breakdown",
         );
     }
 }
@@ -273,7 +282,7 @@ impl JITCompiler {
                 user_func_refs.insert(fn_idx, func_ref);
             }
 
-            let ffi = self.build_ffi_refs(&mut builder);
+            let ffi = self.build_ffi_refs(&mut builder)?;
 
             let func_end = func.entry_point + func.body_length;
             let sub_instructions = &program.instructions[func.entry_point..func_end];
@@ -299,6 +308,11 @@ impl JITCompiler {
                 module_binding_storage_hints: program.module_binding_storage_hints.clone(),
                 function_local_storage_hints: Vec::new(),
                 top_level_frame: None,
+                top_level_local_concrete_types: Vec::new(),
+                function_local_concrete_types: Vec::new(),
+                function_return_concrete_types: Vec::new(),
+                monomorphized_method_call_sites: Default::default(),
+                value_call_return_concrete_types: Default::default(),
                 top_level_mir: None,
                 compiled_annotations: program.compiled_annotations.clone(),
                 trait_method_symbols: program.trait_method_symbols.clone(),
@@ -310,6 +324,7 @@ impl JITCompiler {
                 function_blob_hashes: Vec::new(),
                 monomorphization_keys: Vec::new(),
                 closure_function_layouts: program.closure_function_layouts.clone(),
+                trait_vtables: program.trait_vtables.clone(),
             };
 
             // MirToIR is the ONLY JIT compilation path (Phase 4: BytecodeToIR removed).
@@ -327,18 +342,35 @@ impl JITCompiler {
             }
 
             {
-                let slot_kinds = func
+                let slot_kinds: Vec<Option<shape_vm::type_tracking::NativeKind>> = func
                     .frame_descriptor
                     .as_ref()
-                    .map(|fd| fd.slots.clone())
+                    .map(|fd| fd.slots.iter().copied().map(Some).collect())
                     .unwrap_or_default();
-                // v2: per-slot ConcreteTypes for the v2 typed-array fast path.
-                // The bytecode-program-level side-table is in flux upstream
-                // (other Phase 3.1 agents are refactoring it), so we pass an
-                // empty vec for now — MirToIR's v2 fast path falls through to
-                // the legacy NaN-boxed path on `None`. Wire-up will happen
-                // once Agent 1 lands the BytecodeProgram concrete-types vec.
-                let concrete_types: Vec<shape_value::v2::ConcreteType> = Vec::new();
+                // ADR-006 §2.7.5 conduit: thread the bytecode compiler's
+                // proven per-MIR-slot `ConcreteType` for THIS user function
+                // into MirToIR (W12-jit-aggregate-non-array close,
+                // 2026-05-12). The producer
+                // (`infer_top_level_concrete_types_from_mir`) was already
+                // landed for top-level code by Round 3; its body is generic
+                // over any MirFunction, and Round 5B extends the populate
+                // site to per-user-function MIR via
+                // `BytecodeProgram.function_local_concrete_types`. The
+                // top-level conduit's user-visible benefit (Smoke 3
+                // `Point{}` literal short-circuit) now extends to user
+                // function bodies (`Ok(v)`/`Err(e)`/`Some(x)` inside
+                // `divide` / `first_positive` / 28 stdlib helpers).
+                //
+                // Empty inner vec (function has no MIR data, or the conduit
+                // couldn't prove a particular slot) → MirToIR's v2 fast
+                // path falls through to the legacy NaN-boxed path / surfaces
+                // honestly per ADR-006 §2.7.5.1 (no Bool-default).
+                let concrete_types: Vec<shape_value::v2::ConcreteType> =
+                    program
+                        .function_local_concrete_types
+                        .get(func_idx)
+                        .cloned()
+                        .unwrap_or_default();
                 // Build function name → index map for Call terminator resolution.
                 // Use the original program's functions (sub_program has empty functions list).
                 let function_indices: std::collections::HashMap<String, u16> = program
@@ -373,6 +405,22 @@ impl JITCompiler {
                     user_func_refs.clone(),
                     user_func_arities.clone(),
                     closure_function_layouts,
+                );
+                // V3-S6c-jit-method-monomorph-routing (ADR-006 §2.7.5
+                // stamp-at-compile-time; supervisor 2026-05-15 PATH α-prime
+                // RATIFIED): thread the V3-S6b side-table from the ORIGINAL
+                // `program: &BytecodeProgram` (the `sub_program` above
+                // clears it at line ~305 to keep the per-function compile
+                // scope minimal) so the Call-terminator pass can re-route
+                // `MirConstant::Method` sites to direct FuncRef calls.
+                //
+                // Composite key `(call_site_span, caller_function_id)`:
+                // `caller_function_id = Some(func_idx)` matches the
+                // bytecode compiler's `self.current_function` at
+                // specialization time (`expressions/function_calls.rs:3278`).
+                mir_compiler.set_monomorph_routing_context(
+                    program.monomorphized_method_call_sites.clone(),
+                    Some(func_idx),
                 );
                 // Bounds-check elision: install the per-function plan
                 // before MIR codegen so `Place::Index` lowering can
@@ -446,21 +494,21 @@ impl JITCompiler {
                             );
                             let param_val = entry_params[native_idx];
                             let converted = match kind {
-                                shape_vm::type_tracking::SlotKind::Float64 => mir_compiler
+                                Some(shape_vm::type_tracking::NativeKind::Float64) => mir_compiler
                                     .builder
                                     .ins()
                                     .bitcast(types::F64, MemFlags::new(), param_val),
-                                shape_vm::type_tracking::SlotKind::Int32
-                                | shape_vm::type_tracking::SlotKind::UInt32 => {
+                                Some(shape_vm::type_tracking::NativeKind::Int32)
+                                | Some(shape_vm::type_tracking::NativeKind::UInt32) => {
                                     mir_compiler.builder.ins().ireduce(types::I32, param_val)
                                 }
-                                shape_vm::type_tracking::SlotKind::Bool
-                                | shape_vm::type_tracking::SlotKind::Int8
-                                | shape_vm::type_tracking::SlotKind::UInt8 => {
+                                Some(shape_vm::type_tracking::NativeKind::Bool)
+                                | Some(shape_vm::type_tracking::NativeKind::Int8)
+                                | Some(shape_vm::type_tracking::NativeKind::UInt8) => {
                                     mir_compiler.builder.ins().ireduce(types::I8, param_val)
                                 }
-                                shape_vm::type_tracking::SlotKind::Int16
-                                | shape_vm::type_tracking::SlotKind::UInt16 => {
+                                Some(shape_vm::type_tracking::NativeKind::Int16)
+                                | Some(shape_vm::type_tracking::NativeKind::UInt16) => {
                                     mir_compiler.builder.ins().ireduce(types::I16, param_val)
                                 }
                                 _ => param_val,
@@ -470,9 +518,11 @@ impl JITCompiler {
                     }
                 }
                 mir_compiler.compile_body()?;
-                if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
-                    eprintln!("[jit-mir] Compiled function '{}' via MirToIR", func.name);
-                }
+                tracing::debug!(
+                    target: "shape_jit",
+                    func_name = %func.name,
+                    "jit-mir compiled function via MirToIR",
+                );
             }
             builder.finalize();
         }
@@ -671,20 +721,27 @@ impl JITCompiler {
         // Phase 4: Compile only JIT-compatible function bodies.
         // Functions that fail to compile are demoted to interpreted fallback.
         for (idx, func) in program.functions.iter().enumerate() {
-            if std::env::var_os("SHAPE_JIT_DEBUG").is_some()
-                && (jit_compatible[idx] || func.mir_data.is_some())
-            {
-                eprintln!(
-                    "[jit-mir] func[{}]='{}' jit_compat={} has_mir={}",
-                    idx, func.name, jit_compatible[idx], func.mir_data.is_some()
+            if jit_compatible[idx] || func.mir_data.is_some() {
+                tracing::debug!(
+                    target: "shape_jit",
+                    idx,
+                    func_name = %func.name,
+                    jit_compat = jit_compatible[idx],
+                    has_mir = func.mir_data.is_some(),
+                    "jit-mir per-function classification",
                 );
             }
             if !jit_compatible[idx] {
                 continue;
             }
             let func_name = format!("{}_f{}_{}", name, idx, func.name.replace("::", "__"));
-            if std::env::var_os("SHAPE_JIT_DEBUG").is_some() && func.mir_data.is_some() {
-                eprintln!("[jit-mir] compiling '{}' idx={}", func.name, idx);
+            if func.mir_data.is_some() {
+                tracing::debug!(
+                    target: "shape_jit",
+                    idx,
+                    func_name = %func.name,
+                    "jit-mir compiling function",
+                );
             }
             if let Err(e) = self.compile_function_with_user_funcs(
                 &func_name,
@@ -693,11 +750,31 @@ impl JITCompiler {
                 &user_func_ids,
                 &user_func_arities,
             ) {
-                if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
-                    eprintln!("[jit-mir] compile failed for '{}': {}", func.name, e);
-                }
+                tracing::debug!(
+                    target: "shape_jit",
+                    func_name = %func.name,
+                    error = %e,
+                    "jit-mir compile failed",
+                );
                 // Define a stub body so Cranelift doesn't panic on undefined symbol.
                 // The stub returns signal -1 (error), causing the caller to deopt.
+                //
+                // W12-jit-linker-resolve (`docs/cluster-audits/w12-jit-linker-audit.md`):
+                // Cranelift's `iconst` immediate-bounds rule requires the I32
+                // immediate to be the unsigned bit-pattern, not the signed
+                // value. `iconst.i32 -1` is rejected by the verifier because
+                // `-1i64 as u64 = 0xFFFFFFFFFFFFFFFF` exceeds the I32 mask
+                // `u32::MAX = 0xFFFFFFFF`. Pass the two's-complement unsigned
+                // bit pattern instead — see `cranelift-codegen/src/verifier/
+                // mod.rs:1644-1665` for the documented invariant.
+                //
+                // Also: previously the stub `define_function` failure was
+                // silently swallowed via `let _ = ...`, which left the
+                // declared FuncId with no body and caused `finalize_definitions`
+                // to panic with `can't resolve symbol main_f{idx}_{name}` —
+                // the very surface this audit traced. Surface the stub
+                // failure under `SHAPE_JIT_DEBUG=1` so future regressions
+                // don't hide beneath the linker panic.
                 if let Some(&fid) = user_func_ids.get(&(idx as u16)) {
                     let mut stub_sig = self.module.make_signature();
                     stub_sig.params.push(AbiParam::new(types::I64));
@@ -715,11 +792,38 @@ impl JITCompiler {
                         b.append_block_params_for_function_params(block);
                         b.switch_to_block(block);
                         b.seal_block(block);
-                        let neg = b.ins().iconst(types::I32, -1);
+                        // Cranelift I32 iconst convention: pass the unsigned
+                        // bit-pattern, not the signed value. `-1i32` is
+                        // `0xFFFFFFFF` as a `u32`.
+                        let neg = b.ins().iconst(types::I32, (-1i32 as u32) as i64);
                         b.ins().return_(&[neg]);
                         b.finalize();
                     }
-                    let _ = self.module.define_function(fid, &mut stub_ctx);
+                    if let Err(stub_err) = self.module.define_function(fid, &mut stub_ctx) {
+                        tracing::debug!(
+                            target: "shape_jit",
+                            func_name = %func.name,
+                            idx,
+                            fid = ?fid,
+                            error = ?stub_err,
+                            "jit-mir stub define_function failed",
+                        );
+                        // Surface-and-stop: a failed stub leaves the declared
+                        // FuncId with no body, which propagates to
+                        // `finalize_definitions` as a `can't resolve symbol`
+                        // panic. Convert to a structured error here so the
+                        // caller sees a typed JIT-compilation failure, not a
+                        // panic through `catch_unwind`. The stub itself was
+                        // supposed to be a recovery path; if recovery fails,
+                        // the whole JIT compilation is unsound.
+                        return Err(format!(
+                            "JIT stub fallback failed for function '{}' (idx={}): {:?}. \
+                             The Cranelift module is in an inconsistent state — \
+                             this is a JIT-compiler bug, not a user-code error. \
+                             See docs/cluster-audits/w12-jit-linker-audit.md.",
+                            func.name, idx, stub_err
+                        ));
+                    }
                     self.module.clear_context(&mut stub_ctx);
                 }
                 jit_compatible[idx] = false;

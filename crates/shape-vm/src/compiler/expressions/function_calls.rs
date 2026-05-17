@@ -11,38 +11,36 @@ use std::collections::BTreeSet;
 use crate::compiler::string_interpolation::has_interpolation;
 use crate::executor::typed_object_ops::field_type_to_tag;
 use crate::type_tracking::{NumericType, VariableKind, VariableTypeInfo};
-use shape_ast::ast::{BinaryOp, Expr, InterpolationMode, Literal, Span, Spanned, UnaryOp};
+use shape_ast::ast::{Expr, InterpolationMode, Literal, Span, Spanned};
 use shape_ast::error::{Result, ShapeError};
 use shape_runtime::type_system::suggestions::suggest_function;
 use shape_runtime::type_system::{BuiltinTypes, Type};
 use shape_value::v2::ConcreteType;
-use shape_value::{ValueWord, ValueWordExt};
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use super::super::{BuiltinNameResolution, BytecodeCompiler, ModuleBuiltinFunction};
 
-/// Strict-typing-sweep (Cluster 3): map a `SlotKind` (the type-tracker's
+/// Strict-typing-sweep (Cluster 3): map a `NativeKind` (the type-tracker's
 /// per-slot storage hint) to an AST `TypeAnnotation`. Used by HOF dispatch
 /// to type closure user params from a bare `[1, 2, 3]`-literal receiver
 /// when no `local_array_element_types` entry exists yet.
 fn slot_kind_to_type_annotation(
-    kind: crate::type_tracking::SlotKind,
+    kind: crate::type_tracking::NativeKind,
 ) -> Option<shape_ast::ast::TypeAnnotation> {
-    use crate::type_tracking::SlotKind;
+    use crate::type_tracking::NativeKind;
     use shape_ast::ast::TypeAnnotation;
     Some(match kind {
-        SlotKind::Float64 => TypeAnnotation::Basic("number".to_string()),
-        SlotKind::Int64 => TypeAnnotation::Basic("int".to_string()),
-        SlotKind::Int32 => TypeAnnotation::Basic("i32".to_string()),
-        SlotKind::Int16 => TypeAnnotation::Basic("i16".to_string()),
-        SlotKind::Int8 => TypeAnnotation::Basic("i8".to_string()),
-        SlotKind::UInt64 => TypeAnnotation::Basic("u64".to_string()),
-        SlotKind::UInt32 => TypeAnnotation::Basic("u32".to_string()),
-        SlotKind::UInt16 => TypeAnnotation::Basic("u16".to_string()),
-        SlotKind::UInt8 => TypeAnnotation::Basic("u8".to_string()),
-        SlotKind::Bool => TypeAnnotation::Basic("bool".to_string()),
-        SlotKind::String => TypeAnnotation::Basic("string".to_string()),
+        NativeKind::Float64 => TypeAnnotation::Basic("number".to_string()),
+        NativeKind::Int64 => TypeAnnotation::Basic("int".to_string()),
+        NativeKind::Int32 => TypeAnnotation::Basic("i32".to_string()),
+        NativeKind::Int16 => TypeAnnotation::Basic("i16".to_string()),
+        NativeKind::Int8 => TypeAnnotation::Basic("i8".to_string()),
+        NativeKind::UInt64 => TypeAnnotation::Basic("u64".to_string()),
+        NativeKind::UInt32 => TypeAnnotation::Basic("u32".to_string()),
+        NativeKind::UInt16 => TypeAnnotation::Basic("u16".to_string()),
+        NativeKind::UInt8 => TypeAnnotation::Basic("u8".to_string()),
+        NativeKind::Bool => TypeAnnotation::Basic("bool".to_string()),
+        NativeKind::String => TypeAnnotation::Basic("string".to_string()),
         // Other kinds (Decimal, BigInt, DateTime, nullable variants,
         // pointers, etc.) are not productive for typed binary-op emission;
         // returning None lets the closure body compile with no annotation,
@@ -100,7 +98,10 @@ fn builtin_return_numeric_type(name: &str) -> Option<NumericType> {
         // such as `coefficient_of_variation` need return-type info too,
         // otherwise their `let std_val = __intrinsic_std(series)`
         // bindings stay typeless and `std_val / mean_val` fails strict-typing.
-        | "__intrinsic_sum" | "__intrinsic_mean" | "__intrinsic_min" | "__intrinsic_max"
+        // W12-stdlib-intrinsic-collapse (Wave-2-Agent-G, 2026-05-14):
+        // `__intrinsic_sum` deleted — stdlib `sum()` routes through PHF
+        // method dispatch (per ADR-005 §1).
+        | "__intrinsic_mean" | "__intrinsic_min" | "__intrinsic_max"
         | "__intrinsic_std" | "__intrinsic_variance" | "__intrinsic_correlation"
         | "__intrinsic_covariance" | "__intrinsic_percentile" | "__intrinsic_median" => {
             Some(NumericType::Number)
@@ -139,147 +140,50 @@ fn is_compile_time_const_expr(expr: &Expr) -> bool {
     }
 }
 
-fn literal_to_nanboxed(literal: &Literal) -> Option<ValueWord> {
-    match literal {
-        Literal::Int(i) => Some(ValueWord::from_i64(*i)),
-        Literal::UInt(u) => Some(ValueWord::from_native_u64(*u)),
-        Literal::TypedInt(v, _) => Some(ValueWord::from_i64(*v)),
-        Literal::Number(n) => Some(ValueWord::from_f64(*n)),
-        Literal::Decimal(d) => Some(ValueWord::from_decimal(*d)),
-        Literal::String(s) => Some(ValueWord::from_string(Arc::new(s.clone()))),
-        Literal::Char(c) => Some(ValueWord::from_char(*c)),
-        Literal::FormattedString { value, .. } => {
-            Some(ValueWord::from_string(Arc::new(value.clone())))
-        }
-        Literal::ContentString { value, .. } => {
-            Some(ValueWord::from_string(Arc::new(value.clone())))
-        }
-        Literal::Bool(b) => Some(ValueWord::from_bool(*b)),
-        Literal::None => Some(ValueWord::none()),
-        Literal::Unit => Some(ValueWord::unit()),
-        Literal::Timeframe(_) => None,
-    }
+/// Comptime const-folding produced a `ValueWord` carrier that is now
+/// deleted. The whole const-fold pipeline (literal → carrier, arith
+/// folding, fingerprint, specialization-key build) lives behind the
+/// `ConstFoldValue` placeholder until the phase-2c carrier shape lands
+/// (ADR-006 §2.4). Out-of-territory consumers in `compiler/statements.rs`
+/// (overflow-range check) and `compiler/expressions/function_calls.rs`
+/// (`ensure_const_specialization`) cascade off this stub.
+pub(crate) enum ConstFoldValue {}
+
+// Const-fold projections produce `Option<ConstFoldValue>`, where
+// `ConstFoldValue` is intentionally uninhabited until the phase-2c carrier
+// shape lands (ADR-006 §2.4 — the deleted `ValueWord` shape backed the
+// previous `Literal → Carrier → fingerprint → specialization-key`
+// pipeline). Returning `None` is the type-correct surface-and-stop
+// response: callers branch on `Some`/`None` and the matching arm on the
+// uninhabited type is statically unreachable, so no caller behaviour
+// changes when the kinded carrier lands and `Some(_)` becomes reachable.
+//
+// Returning `None` here is NOT a Bool-default fallback: `None` is a
+// well-defined arm of the function's `Option` return type, semantically
+// meaning "no foldable constant was projected", which is the correct
+// answer while the projection pipeline is dormant. Bool-default would be
+// fabricating a kind for a slot whose kind is unknown — different shape,
+// different rejection per §2.7.7 #4. The cite is preserved as a comment
+// for the phase-2c rebuild grep gate.
+
+#[allow(dead_code)]
+fn literal_to_nanboxed(literal: &Literal) -> Option<ConstFoldValue> {
+    // phase-2c — see ADR-006 §2.4 (kinded literal-to-carrier projection).
+    let _ = literal;
+    None
 }
 
-pub(crate) fn eval_const_expr_to_nanboxed(expr: &Expr) -> Option<ValueWord> {
-    match expr {
-        Expr::Literal(literal, _) => literal_to_nanboxed(literal),
-        Expr::Array(items, _) => {
-            let values: Vec<ValueWord> = items
-                .iter()
-                .map(eval_const_expr_to_nanboxed)
-                .collect::<Option<Vec<_>>>()?;
-            Some(ValueWord::from_array(shape_value::vmarray_from_vec(values)))
-        }
-        Expr::UnaryOp { op, operand, .. } => {
-            let value = eval_const_expr_to_nanboxed(operand)?;
-            match op {
-                UnaryOp::Neg => {
-                    if let Some(i) = value.as_i64() {
-                        Some(ValueWord::from_i64(-i))
-                    } else if let Some(n) = value.as_f64() {
-                        Some(ValueWord::from_f64(-n))
-                    } else {
-                        None
-                    }
-                }
-                UnaryOp::Not => value.as_bool().map(|b| ValueWord::from_bool(!b)),
-                UnaryOp::BitNot => value.as_i64().map(|i| ValueWord::from_i64(!i)),
-            }
-        }
-        Expr::BinaryOp {
-            left, op, right, ..
-        } => {
-            let lhs = eval_const_expr_to_nanboxed(left)?;
-            let rhs = eval_const_expr_to_nanboxed(right)?;
-            match op {
-                BinaryOp::Add => {
-                    if let (Some(a), Some(b)) = (lhs.as_i64(), rhs.as_i64()) {
-                        Some(ValueWord::from_i64(a + b))
-                    } else if let (Some(a), Some(b)) = (lhs.as_decimal(), rhs.as_decimal()) {
-                        Some(ValueWord::from_decimal(a + b))
-                    } else if let (Some(a), Some(b)) = (lhs.as_f64(), rhs.as_f64()) {
-                        Some(ValueWord::from_f64(a + b))
-                    } else if let (Some(a), Some(b)) = (lhs.as_str(), rhs.as_str()) {
-                        Some(ValueWord::from_string(Arc::new(format!("{}{}", a, b))))
-                    } else {
-                        None
-                    }
-                }
-                BinaryOp::Sub => {
-                    if let (Some(a), Some(b)) = (lhs.as_i64(), rhs.as_i64()) {
-                        Some(ValueWord::from_i64(a - b))
-                    } else if let (Some(a), Some(b)) = (lhs.as_decimal(), rhs.as_decimal()) {
-                        Some(ValueWord::from_decimal(a - b))
-                    } else if let (Some(a), Some(b)) = (lhs.as_f64(), rhs.as_f64()) {
-                        Some(ValueWord::from_f64(a - b))
-                    } else {
-                        None
-                    }
-                }
-                BinaryOp::Mul => {
-                    if let (Some(a), Some(b)) = (lhs.as_i64(), rhs.as_i64()) {
-                        Some(ValueWord::from_i64(a * b))
-                    } else if let (Some(a), Some(b)) = (lhs.as_decimal(), rhs.as_decimal()) {
-                        Some(ValueWord::from_decimal(a * b))
-                    } else if let (Some(a), Some(b)) = (lhs.as_f64(), rhs.as_f64()) {
-                        Some(ValueWord::from_f64(a * b))
-                    } else {
-                        None
-                    }
-                }
-                BinaryOp::Div => {
-                    if let (Some(a), Some(b)) = (lhs.as_f64(), rhs.as_f64()) {
-                        Some(ValueWord::from_f64(a / b))
-                    } else {
-                        None
-                    }
-                }
-                BinaryOp::Mod => {
-                    if let (Some(a), Some(b)) = (lhs.as_i64(), rhs.as_i64()) {
-                        Some(ValueWord::from_i64(a % b))
-                    } else if let (Some(a), Some(b)) = (lhs.as_f64(), rhs.as_f64()) {
-                        Some(ValueWord::from_f64(a % b))
-                    } else {
-                        None
-                    }
-                }
-                BinaryOp::Pow => {
-                    if let (Some(a), Some(b)) = (lhs.as_f64(), rhs.as_f64()) {
-                        Some(ValueWord::from_f64(a.powf(b)))
-                    } else {
-                        None
-                    }
-                }
-                BinaryOp::And => Some(ValueWord::from_bool(lhs.as_bool()? && rhs.as_bool()?)),
-                BinaryOp::Or => Some(ValueWord::from_bool(lhs.as_bool()? || rhs.as_bool()?)),
-                BinaryOp::Equal => Some(ValueWord::from_bool(lhs.clone() == rhs.clone())),
-                BinaryOp::NotEqual => Some(ValueWord::from_bool(lhs.clone() != rhs.clone())),
-                BinaryOp::BitAnd => Some(ValueWord::from_i64(lhs.as_i64()? & rhs.as_i64()?)),
-                BinaryOp::BitOr => Some(ValueWord::from_i64(lhs.as_i64()? | rhs.as_i64()?)),
-                BinaryOp::BitXor => Some(ValueWord::from_i64(lhs.as_i64()? ^ rhs.as_i64()?)),
-                BinaryOp::BitShl => Some(ValueWord::from_i64(lhs.as_i64()? << rhs.as_i64()?)),
-                BinaryOp::BitShr => Some(ValueWord::from_i64(lhs.as_i64()? >> rhs.as_i64()?)),
-                BinaryOp::NullCoalesce => {
-                    if lhs.is_none() {
-                        Some(rhs)
-                    } else {
-                        Some(lhs)
-                    }
-                }
-                _ => None,
-            }
-        }
-        // Object consts are intentionally rejected here until object const
-        // specialization values are represented without anonymous runtime schemas.
-        Expr::Object(_, _) => None,
-        _ => None,
-    }
+pub(crate) fn eval_const_expr_to_nanboxed(expr: &Expr) -> Option<ConstFoldValue> {
+    // phase-2c — see ADR-006 §2.4 (kinded const-fold evaluator).
+    let _ = expr;
+    None
 }
 
+#[allow(dead_code)]
 fn const_expr_fingerprint(expr: &Expr) -> Option<String> {
-    let value = eval_const_expr_to_nanboxed(expr)?;
-    Some(format!("{:?}", value.clone()))
+    // phase-2c — see ADR-006 §2.4 (kinded const-fold fingerprint key).
+    let _ = expr;
+    None
 }
 
 impl BytecodeCompiler {
@@ -535,150 +439,29 @@ impl BytecodeCompiler {
             return Ok(None);
         }
 
-        let template_def =
-            self.function_defs
-                .get(name)
-                .cloned()
-                .ok_or_else(|| ShapeError::SemanticError {
-                    message: format!(
-                        "Missing function template definition for const specialization: '{}'",
-                        name
-                    ),
-                    location: None,
-                })?;
-        // For module-scoped functions (e.g. myext::connect), temporarily push
-        // the module path so annotation name resolution can find annotations
-        // that were compiled within that module (e.g. myext::force_int).
-        let module_prefix = name
-            .rsplit_once("::")
-            .map(|(prefix, _)| prefix.to_string());
-        if let Some(ref prefix) = module_prefix {
-            self.module_scope_stack.push(prefix.clone());
-        }
-        let has_comptime_handlers = template_def.annotations.iter().any(|ann| {
-            self.lookup_compiled_annotation(ann)
-                .map(|(_, compiled)| {
-                    compiled.comptime_pre_handler.is_some()
-                        || compiled.comptime_post_handler.is_some()
-                })
-                .unwrap_or(false)
-        });
-        if module_prefix.is_some() {
-            self.module_scope_stack.pop();
-        }
-        if !has_comptime_handlers {
-            return Ok(None);
-        }
-
-        let mut key_parts: Vec<String> = Vec::new();
-        let mut const_bindings: Vec<(String, ValueWord)> = Vec::new();
-
-        for param_idx in const_param_indices {
-            let param =
-                template_def
-                    .params
-                    .get(param_idx)
-                    .ok_or_else(|| ShapeError::SemanticError {
-                        message: format!(
-                            "Invalid const parameter index {} for function '{}'",
-                            param_idx, name
-                        ),
-                        location: None,
-                    })?;
-            let param_name = param
-                .simple_name()
-                .ok_or_else(|| ShapeError::SemanticError {
-                    message: format!(
-                        "Const parameter #{} in '{}' must use an identifier pattern",
-                        param_idx + 1,
-                        name
-                    ),
-                    location: Some(self.span_to_source_location(param.span())),
-                })?;
-
-            let (expr, span) = if let Some(arg) = args.get(param_idx) {
-                (arg, arg.span())
-            } else if let Some(default_expr) = &param.default_value {
-                (default_expr, default_expr.span())
-            } else {
-                continue;
-            };
-
-            let value = eval_const_expr_to_nanboxed(expr).ok_or_else(|| ShapeError::SemanticError {
-                message: format!(
-                    "Function '{}' const parameter '{}' must be a literal-evaluable compile-time expression",
-                    name, param_name
-                ),
-                location: Some(self.span_to_source_location(span)),
-            })?;
-            let fingerprint =
-                const_expr_fingerprint(expr).ok_or_else(|| ShapeError::SemanticError {
-                    message: format!(
-                        "Function '{}' const parameter '{}' could not be fingerprinted",
-                        name, param_name
-                    ),
-                    location: Some(self.span_to_source_location(span)),
-                })?;
-            key_parts.push(format!("{}={}", param_name, fingerprint));
-            const_bindings.push((param_name.to_string(), value));
-        }
-
-        if key_parts.is_empty() {
-            return Ok(None);
-        }
-
-        let specialization_key = format!("{}::{}", name, key_parts.join("|"));
-        if let Some(existing_idx) = self.const_specializations.get(&specialization_key).copied() {
-            let existing_name = self.program.functions[existing_idx].name.clone();
-            return Ok(Some((existing_name, existing_idx)));
-        }
-
-        let specialization_name = format!("{}__const_{}", name, self.next_const_specialization_id);
-        self.next_const_specialization_id += 1;
-
-        let mut specialized_def = template_def;
-        specialized_def.name = specialization_name.clone();
-
-        self.specialization_const_bindings
-            .insert(specialization_name.clone(), const_bindings);
-        self.register_function(&specialized_def)?;
-        let specialization_idx =
-            self.find_function(&specialization_name)
-                .ok_or_else(|| ShapeError::SemanticError {
-                    message: format!(
-                        "Failed to register const specialization function '{}'",
-                        specialization_name
-                    ),
-                    location: None,
-                })?;
-        self.const_specializations
-            .insert(specialization_key, specialization_idx);
-
-        // Push module scope for the specialization so annotation resolution
-        // can find annotations defined in the original function's module.
-        if let Some(ref prefix) = module_prefix {
-            self.module_scope_stack.push(prefix.clone());
-        }
-        // F7: save/restore closure_function_ids across the recursive
-        // `compile_function` so the outer caller's MIR back-patcher does
-        // not see its list wiped by the specialized body's end-of-function
-        // `.clear()`.
-        let saved_closure_function_ids =
-            std::mem::take(&mut self.closure_function_ids);
-        let compile_result = self.compile_function(&specialized_def);
-        self.closure_function_ids = saved_closure_function_ids;
-        if module_prefix.is_some() {
-            self.module_scope_stack.pop();
-        }
-        if let Err(err) = compile_result {
-            self.specialization_const_bindings
-                .remove(&specialization_name);
-            return Err(err);
-        }
-
-        self.specialization_const_bindings
-            .remove(&specialization_name);
-        Ok(Some((specialization_name, specialization_idx)))
+        // The const-specialization machinery folds each call-site
+        // argument into a `ConstFoldValue` carrier, fingerprints it, and
+        // stores the resulting `Vec<(String, <carrier>)>` in
+        // `self.specialization_const_bindings` so comptime handlers can
+        // read it back as a typed module binding. The carrier shape
+        // lands in phase-2c (ADR-006 §2.4); the
+        // `specialization_const_bindings` field type itself is defined
+        // in `compiler/mod.rs` (out-of-territory), so this path stays
+        // surfaced rather than partially migrated. Const specialization
+        // is therefore a no-op until the carrier sweep reaches the
+        // out-of-territory storage shape.
+        //
+        // Returning `Ok(None)` here means "no specialization was produced
+        // at this call site": the caller (`compile_expr_function_call`)
+        // then keeps the base `call_name` / `call_func_idx` and emits a
+        // plain `Call` against the un-specialized symbol. The literal-
+        // const argument check at the caller (lines 670-686) still runs,
+        // so const-param invariants stay enforced; only the specialized-
+        // body rewrite is dormant. This preserves the public surface
+        // (`Result<Option<(String, usize)>>`) — no caller signature
+        // change is needed when phase-2c re-introduces the carrier.
+        let _ = (name, args, const_param_indices);
+        Ok(None)
     }
 
     /// Compile a function call expression
@@ -754,7 +537,7 @@ impl BytecodeCompiler {
             } else {
                 let arg_count = self
                     .program
-                    .add_constant(Constant::Number(args.len() as f64));
+                    .add_constant(Constant::Int(args.len() as i64));
                 self.emit(Instruction::new(
                     OpCode::PushConst,
                     Some(Operand::Const(arg_count)),
@@ -833,6 +616,330 @@ impl BytecodeCompiler {
             } else {
                 self.clear_last_expr_reference_result();
             }
+
+            // cluster-2-cw-IB-class-b (2026-05-16, supervisor R3 binding-
+            // ratified): value-call return-`ConcreteType` classification
+            // at the bytecode-emission layer. ADR-006 §2.7.5 stamp-at-
+            // compile-time discipline.
+            //
+            // When the callee resolves to a local closure binding with a
+            // retained body peek (populated at let-binding time by
+            // `update_callable_binding_from_expr`), re-run the closure-
+            // body return-type inference WITH the caller-context arg
+            // types injected as typed-array param hints. If the
+            // inference yields a recognised scalar/Array return name,
+            // convert it to a `ConcreteType` and stamp the side-table
+            // `value_call_return_concrete_types[(call_span,
+            // current_function)]`. The MIR conduit's value-call
+            // destination pass then projects this onto
+            // `top_level_local_concrete_types[dst_slot]` /
+            // `function_local_concrete_types[fn_idx][dst_slot]`, the
+            // JIT-MIR `slot_kinds` projection picks up the matching
+            // `NativeKind`, and downstream consumers (`print`,
+            // BinaryOp, etc.) reach their kinded dispatch paths.
+            //
+            // Class B fixture (inventory §B.2): `let xs: Array<int> =
+            // [..]; let f = |inner| inner.sum(); print(f(xs))`. Pre-fix:
+            // VM=15 / JIT=NotImplemented(SURFACE, print operand NK=None).
+            // Post-fix: VM=15 / JIT=15 (VM == JIT load-bearing).
+            //
+            // No tag-bit decode, no Bool-default fallback, no fabricated
+            // default — when:
+            //   • The callee is not a local closure binding, OR
+            //   • No retained body peek exists (closure was passed in
+            //     from elsewhere, e.g. function parameter), OR
+            //   • The closure body's terminal expression cannot be
+            //     classified against the caller-context-seeded
+            //     param_types (the inference returns None), OR
+            //   • The classified return name cannot be mapped back to a
+            //     ConcreteType,
+            // the side-table receives no entry and the destination slot
+            // stays `Void` per §2.7.5.1 / §2.7.7 #9 — the JIT then
+            // surfaces honestly at the print dispatch site rather than
+            // fabricating a kind.
+            // Resolve the closure body peek from either the local slot
+            // map or the module-binding slot map. Locals take priority
+            // (mirrors the `tracked_callable_rt` chain above).
+            let closure_peek: Option<crate::compiler::ClosureBodyPeek> =
+                if let Some(local_idx) = self.resolve_local(name) {
+                    self.local_callable_closure_bodies.get(&local_idx).cloned()
+                } else if let Some(scoped) =
+                    self.resolve_scoped_module_binding_name(name)
+                {
+                    self.module_bindings.get(&scoped).and_then(|idx| {
+                        self.module_binding_callable_closure_bodies
+                            .get(idx)
+                            .cloned()
+                    })
+                } else {
+                    self.module_bindings.get(name).and_then(|idx| {
+                        self.module_binding_callable_closure_bodies
+                            .get(idx)
+                            .cloned()
+                    })
+                };
+            if let Some(peek) = closure_peek {
+                {
+                    // Resolve the caller-context arg type names per
+                    // argument expression. `concrete_type_for_expr` is
+                    // the same resolver the rest of the bytecode-
+                    // emission layer uses (covers tracker-recorded
+                    // primitives + typed-array bindings via
+                    // `local_array_element_types` once Class C's
+                    // sibling populator lands; meanwhile annotated
+                    // typed-array bindings flow via the type-tracker's
+                    // `Vec<scalar>` name fallback at
+                    // `monomorphization/type_resolution.rs:1493`).
+                    let caller_arg_type_names: Vec<Option<String>> = args
+                        .iter()
+                        .map(|arg_expr| {
+                            crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(self, arg_expr)
+                                .and_then(|ct| {
+                                    crate::compiler::expressions::closures::concrete_type_to_type_annotation(&ct)
+                                })
+                                .and_then(|ann| {
+                                    crate::compiler::BytecodeCompiler::tracked_type_name_from_annotation(&ann)
+                                })
+                        })
+                        .collect();
+
+                    // Run the closure-body return-type inference with
+                    // the caller-context arg types. The inference is
+                    // cheap (AST walk over the closure body, no
+                    // bytecode emission); running unconditionally covers
+                    // both:
+                    //   (a) The Class B case: the closure param is
+                    //       inferred-typed at the call site (no
+                    //       annotation, no body-literal pairing), so
+                    //       the let-binding-time inference returned
+                    //       None and `tracked_callable_rt` is None.
+                    //   (b) The let-binding-time-already-resolved case:
+                    //       e.g. `let f = || 15` — the body's terminal
+                    //       Literal(Int) is enough at let-binding time,
+                    //       `tracked_callable_rt = Some("int")`. Even
+                    //       here, the side-table must be populated so
+                    //       the JIT-MIR conduit's value-call destination
+                    //       pass can stamp `concrete_types[dst]` (the
+                    //       let-binding-time tracker recorded only the
+                    //       bytecode-side `last_expr_*`, which doesn't
+                    //       reach the JIT). The two paths converge on
+                    //       the same `ConcreteType::I64` answer here.
+                    {
+                        // Prefer the let-binding-time result when
+                        // present (it consulted the closure body
+                        // without needing caller-context); fall through
+                        // to the caller-context inference when the
+                        // let-binding-time inference returned None.
+                        let inferred = tracked_callable_rt
+                            .as_ref()
+                            .cloned()
+                            .or_else(|| {
+                                crate::compiler::expressions::closures::infer_closure_body_return_type_name_with_caller_context(
+                                    self,
+                                    &peek.params,
+                                    &peek.body,
+                                    peek.return_type.as_ref(),
+                                    &[],
+                                    &caller_arg_type_names,
+                                )
+                            });
+                        if let Some(rt_name) = inferred {
+                            // Map the return name to a ConcreteType.
+                            // Mirrors the `tracked_type_name_from_
+                            // annotation` → ConcreteType chain used by
+                            // `concrete_type_for_expr`. Scalars are
+                            // handled directly; `Vec<T>` returns are
+                            // not supported here (the typed-array-
+                            // returning closure case is Class C's
+                            // sibling territory).
+                            let ct: Option<shape_value::v2::ConcreteType> = match rt_name.as_str() {
+                                "int" | "i64" => Some(shape_value::v2::ConcreteType::I64),
+                                "i32" => Some(shape_value::v2::ConcreteType::I32),
+                                "i16" => Some(shape_value::v2::ConcreteType::I16),
+                                "i8" => Some(shape_value::v2::ConcreteType::I8),
+                                "u64" => Some(shape_value::v2::ConcreteType::U64),
+                                "u32" => Some(shape_value::v2::ConcreteType::U32),
+                                "u16" => Some(shape_value::v2::ConcreteType::U16),
+                                "u8" => Some(shape_value::v2::ConcreteType::U8),
+                                "number" | "f64" => Some(shape_value::v2::ConcreteType::F64),
+                                "bool" => Some(shape_value::v2::ConcreteType::Bool),
+                                "string" => Some(shape_value::v2::ConcreteType::String),
+                                "decimal" => Some(shape_value::v2::ConcreteType::Decimal),
+                                "bigint" => Some(shape_value::v2::ConcreteType::BigInt),
+                                "DateTime" => Some(shape_value::v2::ConcreteType::DateTime),
+                                _ => None,
+                            };
+                            if let Some(ct) = ct {
+                                self.program.value_call_return_concrete_types.insert(
+                                    (span, self.current_function),
+                                    ct,
+                                );
+
+                                // cluster-2-cw-IB-class-b (closure-body
+                                // typed-array param seed): retroactively
+                                // populate `mir.local_typed_array_element_types`
+                                // for the closure body's MIR slot
+                                // corresponding to each typed-array
+                                // caller-context arg. The MIR-side
+                                // conduit's empty-typed-array-seed
+                                // pass at `helpers.rs:623` consumes
+                                // this map at
+                                // `propagate_concrete_types_through_mir`
+                                // time (which runs AFTER bytecode
+                                // emission completes) to stamp
+                                // `concrete_types[inner_slot] =
+                                // Array(elem)` for the closure body.
+                                // The JIT-MIR's `slot_kinds`
+                                // projection then picks up
+                                // `Ptr(TypedArray)` for `inner` and
+                                // dispatches `.len()` /
+                                // `.sum()` through the kinded fast
+                                // path, returning raw scalar bits
+                                // (Int64=15 for our fixture) instead
+                                // of TAG_NULL.
+                                //
+                                // Without this, the closure body's
+                                // JIT compilation has no type info
+                                // for `inner` and the method
+                                // dispatch returns TAG_NULL — the
+                                // outer print would then read
+                                // TAG_NULL bits and print garbage
+                                // even with the destination kind
+                                // correctly stamped Int64.
+                                if let Some(closure_fn_idx) = peek.function_index {
+                                    // Wrap in a block to allow early
+                                    // exit via `break` for skip cases
+                                    // (Arc shared / mir missing).
+                                    'seed_block: {
+                                        let Some(func) = self
+                                            .program
+                                            .functions
+                                            .get_mut(closure_fn_idx)
+                                        else {
+                                            break 'seed_block;
+                                        };
+                                        let Some(mir_data_arc) = func.mir_data.as_mut() else {
+                                            break 'seed_block;
+                                        };
+                                        // `Arc::get_mut` returns
+                                        // `Some(&mut T)` only when
+                                        // the strong-count is 1 —
+                                        // the bytecode-emission
+                                        // stage's invariant for
+                                        // closure-body MIR Arcs (no
+                                        // other clone exists yet
+                                        // since content-addressed
+                                        // program build runs later).
+                                        // When this invariant is
+                                        // broken (e.g. an upstream
+                                        // change clones the Arc
+                                        // before bytecode emission
+                                        // completes), the propagation
+                                        // is skipped; the side-table
+                                        // stamping above still
+                                        // applies, so the print
+                                        // dispatch routes to
+                                        // `jit_print_i64` — only
+                                        // the closure body's typed-
+                                        // array param seed is
+                                        // missed.
+                                        let Some(mir_data) = std::sync::Arc::get_mut(mir_data_arc) else {
+                                            break 'seed_block;
+                                        };
+                                        // Match closure-body param
+                                        // slots to caller-context arg
+                                        // types. The MIR's
+                                        // `param_slots` align 1:1
+                                        // with the closure literal's
+                                        // params list (no captures
+                                        // interleaved for value-call
+                                        // shape; the captures-as-
+                                        // leading-args ABI is for the
+                                        // trampoline closure-call
+                                        // path, which doesn't fire
+                                        // here per `vm_captures=false`
+                                        // in the FAST PATH).
+                                        for (param_idx, slot) in mir_data.mir.param_slots.clone().iter().enumerate() {
+                                            let Some(Some(caller_tn)) = caller_arg_type_names.get(param_idx) else {
+                                                continue;
+                                            };
+                                            // Parse "Vec<elem>" into
+                                            // Array(elem). Mirror of
+                                            // `concrete_type_to_type_annotation`'s
+                                            // Array arm inverse;
+                                            // bounded to scalar elem
+                                            // types per the same kind-
+                                            // classifier discipline.
+                                            let Some(inner_name) = caller_tn
+                                                .strip_prefix("Vec<")
+                                                .and_then(|s| s.strip_suffix('>'))
+                                            else {
+                                                continue;
+                                            };
+                                            let elem_ct: Option<shape_value::v2::ConcreteType> = match inner_name {
+                                                "int" | "i64" => Some(shape_value::v2::ConcreteType::I64),
+                                                "i32" => Some(shape_value::v2::ConcreteType::I32),
+                                                "i16" => Some(shape_value::v2::ConcreteType::I16),
+                                                "i8" => Some(shape_value::v2::ConcreteType::I8),
+                                                "u64" => Some(shape_value::v2::ConcreteType::U64),
+                                                "u32" => Some(shape_value::v2::ConcreteType::U32),
+                                                "u16" => Some(shape_value::v2::ConcreteType::U16),
+                                                "u8" => Some(shape_value::v2::ConcreteType::U8),
+                                                "number" | "f64" => Some(shape_value::v2::ConcreteType::F64),
+                                                "bool" => Some(shape_value::v2::ConcreteType::Bool),
+                                                "string" => Some(shape_value::v2::ConcreteType::String),
+                                                _ => None,
+                                            };
+                                            if let Some(elem_ct) = elem_ct {
+                                                mir_data
+                                                    .mir
+                                                    .local_typed_array_element_types
+                                                    .entry(*slot)
+                                                    .or_insert(elem_ct);
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Also bridge to last_expr_* for
+                                // downstream binop dispatch in the same
+                                // expression, parallel to the
+                                // tracked_callable_rt block above.
+                                use crate::type_tracking::NumericType;
+                                match rt_name.as_str() {
+                                    "int" => {
+                                        self.last_expr_numeric_type =
+                                            Some(NumericType::Int);
+                                    }
+                                    "number" => {
+                                        self.last_expr_numeric_type =
+                                            Some(NumericType::Number);
+                                    }
+                                    "decimal" => {
+                                        self.last_expr_numeric_type =
+                                            Some(NumericType::Decimal);
+                                    }
+                                    other if shape_runtime::type_system::BuiltinTypes::is_integer_type_name(other) => {
+                                        self.last_expr_type_info =
+                                            Some(crate::type_tracking::VariableTypeInfo::named(
+                                                other.to_string(),
+                                            ));
+                                    }
+                                    "string" | "bool" | "char" => {
+                                        self.last_expr_type_info = Some(
+                                            crate::type_tracking::VariableTypeInfo::named(
+                                                rt_name.clone(),
+                                            ),
+                                        );
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             return Ok(());
         }
 
@@ -1004,7 +1111,7 @@ impl BytecodeCompiler {
             }
             let arg_count = self
                 .program
-                .add_constant(Constant::Number(effective_total_arity as f64));
+                .add_constant(Constant::Int(effective_total_arity as i64));
             self.emit(Instruction::new(
                 OpCode::PushConst,
                 Some(Operand::Const(arg_count)),
@@ -1140,6 +1247,17 @@ impl BytecodeCompiler {
                         self.last_expr_schema = None;
                         self.last_expr_type_info = None;
                         self.clear_last_expr_reference_result();
+                        // ADR-006 §2.7.27 / Item 4: v2 typed-map fast-
+                        // path also produces a COW HashMap carrier. The
+                        // existing `v2_typed_map_locals` track will
+                        // carry the (k,v) pair; the parallel
+                        // `mut_self_container_locals` track records the
+                        // higher-level kind so method-call write-back
+                        // emission picks the right `MUT_SELF_HASHMAP`
+                        // set.
+                        self.pending_variable_container_kind = Some(
+                            crate::compiler::mutation_writeback::ContainerKind::HashMap,
+                        );
                         return Ok(());
                     }
                 }
@@ -1151,7 +1269,7 @@ impl BytecodeCompiler {
             if self.builtin_requires_arg_count(builtin) {
                 let arg_count = self
                     .program
-                    .add_constant(Constant::Number(args.len() as f64));
+                    .add_constant(Constant::Int(args.len() as i64));
                 self.emit(Instruction::new(
                     OpCode::PushConst,
                     Some(Operand::Const(arg_count)),
@@ -1166,6 +1284,17 @@ impl BytecodeCompiler {
             self.last_expr_schema = None;
             self.last_expr_type_info = None;
             self.clear_last_expr_reference_result();
+            // ADR-006 §2.7.27 / Item 4 ruling: signal a recognised COW
+            // container kind so the surrounding let-binding code path
+            // can transfer it to the receiver-local's
+            // `mut_self_container_locals` entry. The signal is consumed
+            // at `statements.rs` let-binding completion (mirror of
+            // `pending_variable_typed_array_kind`).
+            if let Some(kind) =
+                crate::compiler::mutation_writeback::ContainerKind::from_ctor_name(name)
+            {
+                self.pending_variable_container_kind = Some(kind);
+            }
             return Ok(());
         }
 
@@ -1336,7 +1465,7 @@ impl BytecodeCompiler {
         }
         let count = self
             .program
-            .add_constant(Constant::Number(args.len() as f64));
+            .add_constant(Constant::Int(args.len() as i64));
         self.emit(Instruction::new(
             OpCode::PushConst,
             Some(Operand::Const(count)),
@@ -1573,12 +1702,129 @@ impl BytecodeCompiler {
         self.pending_closure_param_types = Some(hints);
     }
 
+    /// ADR-006 §2.7.27 / Item 4 ruling (W17-mutation-writeback,
+    /// 2026-05-12): determine whether the method call needs a
+    /// post-`CallMethod` write-back to the receiver's binding slot.
+    ///
+    /// Returns `Some(target)` when ALL of:
+    /// - `receiver` is an `Identifier(name, _)` (resolvable to a
+    ///   local-slot index OR a module-binding index);
+    /// - the receiver binding is tracked as a recognised COW container
+    ///   kind in `mut_self_container_locals` /
+    ///   `mut_self_container_bindings`;
+    /// - `method` is in the kind's `MUT_SELF_*` set per
+    ///   `method_registry`.
+    ///
+    /// Returns `None` otherwise; the standard `CallMethod` path then
+    /// runs without write-back (the dispatch text's "silent drop"
+    /// decision-call for r-value receivers and for non-container
+    /// receivers).
+    fn resolve_mut_self_writeback_target(
+        &self,
+        receiver: &Expr,
+        method: &str,
+    ) -> Option<crate::compiler::mutation_writeback::MutSelfWriteBackTarget> {
+        use crate::compiler::mutation_writeback::MutSelfWriteBackTarget;
+        let Expr::Identifier(name, _) = receiver else {
+            return None;
+        };
+        if let Some(local_idx) = self.resolve_local(name) {
+            if let Some(&kind) = self.mut_self_container_locals.get(&local_idx) {
+                if kind.is_mut_self_method(method) {
+                    return Some(MutSelfWriteBackTarget::Local(local_idx));
+                }
+            }
+            return None;
+        }
+        let scoped = self
+            .resolve_scoped_module_binding_name(name)
+            .unwrap_or_else(|| name.to_string());
+        if let Some(&binding_idx) = self.module_bindings.get(&scoped) {
+            if let Some(&kind) = self.mut_self_container_bindings.get(&binding_idx) {
+                if kind.is_mut_self_method(method) {
+                    return Some(MutSelfWriteBackTarget::ModuleBinding(binding_idx));
+                }
+            }
+        }
+        None
+    }
+
+    /// Tuple-return resolver — ADR-006 §2.7.27 amendment (W17-pop-mutation).
+    ///
+    /// Returns `Some(target)` when:
+    /// - the binding's tracked container kind has `method` in its
+    ///   `MUT_SELF_TUPLE_RETURN_*` set;
+    /// - the receiver is an `Identifier` resolvable to a local-slot or
+    ///   module-binding index.
+    ///
+    /// Returns `None` for r-value receivers (the caller emits `Swap; Pop`
+    /// silent-drop in that case — mirror of the §2.7.27 self-returning
+    /// r-value silent-drop rule) and for non-pop method names.
+    ///
+    /// Separate from `resolve_mut_self_writeback_target` because the
+    /// post-CallMethod codegen differs (`Swap; Store*` vs `Dup; Store*`)
+    /// and the ABI categories are mutually exclusive at the registry
+    /// level — a method is either self-returning OR tuple-return, never
+    /// both. Both resolvers share the receiver-rooting machinery
+    /// (`mut_self_container_locals` / `mut_self_container_bindings`).
+    fn resolve_mut_self_tuple_return_target(
+        &self,
+        receiver: &Expr,
+        method: &str,
+    ) -> Option<crate::compiler::mutation_writeback::MutSelfWriteBackTarget> {
+        use crate::compiler::mutation_writeback::MutSelfWriteBackTarget;
+        let Expr::Identifier(name, _) = receiver else {
+            return None;
+        };
+        if let Some(local_idx) = self.resolve_local(name) {
+            if let Some(&kind) = self.mut_self_container_locals.get(&local_idx) {
+                if kind.is_mut_self_tuple_return_method(method) {
+                    return Some(MutSelfWriteBackTarget::Local(local_idx));
+                }
+            }
+            return None;
+        }
+        let scoped = self
+            .resolve_scoped_module_binding_name(name)
+            .unwrap_or_else(|| name.to_string());
+        if let Some(&binding_idx) = self.module_bindings.get(&scoped) {
+            if let Some(&kind) = self.mut_self_container_bindings.get(&binding_idx) {
+                if kind.is_mut_self_tuple_return_method(method) {
+                    return Some(MutSelfWriteBackTarget::ModuleBinding(binding_idx));
+                }
+            }
+        }
+        None
+    }
+
+    /// Returns `true` if `method` is registered for the tuple-return
+    /// ABI under SOME container kind (used to choose between `Swap; Pop`
+    /// silent-drop and the standard no-writeback path at r-value
+    /// receiver sites). The kind narrowing happens at
+    /// `resolve_mut_self_tuple_return_target`; this is just the
+    /// method-name lookup.
+    fn is_known_tuple_return_method(&self, method: &str) -> bool {
+        crate::executor::objects::method_registry::is_mut_self_tuple_return_method_name(
+            method,
+        )
+    }
+
     /// Compile a method call expression
     pub(super) fn compile_expr_method_call(
         &mut self,
         receiver: &Expr,
         method: &str,
         args: &[Expr],
+        // ADR-006 §2.7.5 V3-S6b conduit: AST span of the
+        // `Expr::MethodCall` site. Threaded through to
+        // `try_monomorphize_method_call` / `_with_closures` for the
+        // `(Span, current_function) → specialized_idx` side-table key.
+        // The conduit producer at
+        // `infer_top_level_concrete_types_from_mir_with_resolvers` reads
+        // the matching `Terminator.span` (set by `builder.emit_call(...,
+        // span)` in `mir/lowering/expr.rs` at the `Expr::MethodCall` arm)
+        // to look up the specialized callee.
+        call_site_span: Span,
     ) -> Result<()> {
         // Chained function calls: `f(a)(b)` is parsed as MethodCall with method "__call__".
         // Compile as: evaluate receiver (which produces a callable), compile args, CallValue.
@@ -1590,7 +1836,7 @@ impl BytecodeCompiler {
             let writebacks = self.compile_call_args(args, expected_param_modes.as_deref())?;
             let arg_count = self
                 .program
-                .add_constant(Constant::Number(args.len() as f64));
+                .add_constant(Constant::Int(args.len() as i64));
             self.emit(Instruction::new(
                 OpCode::PushConst,
                 Some(Operand::Const(arg_count)),
@@ -1631,7 +1877,43 @@ impl BytecodeCompiler {
         // In-place mutation: arr.push(val) → ArrayPushLocal + LoadLocal
         // This is the primary push path for method calls inside function bodies,
         // loops, and blocks (which are compiled as expressions, not statements).
-        if method == "push" && args.len() == 1 {
+        //
+        // ADR-006 §2.7.27 / Item 4 ruling (W17-mutation-writeback):
+        // gate this bespoke path so it does NOT fire when the receiver
+        // is a non-Array container (Deque / PriorityQueue / HashMap /
+        // HashSet). Those containers have their own `push` handlers in
+        // method_registry which the standard `CallMethod` path
+        // dispatches to; `ArrayPushLocal` would error on a
+        // non-Array slot kind (the runtime explicitly rejects
+        // `Ptr(PriorityQueue)` etc. with `NotImplemented`).
+        let bespoke_push_blocked = if let Expr::Identifier(recv_name, _) = receiver {
+            let local_kind = self
+                .resolve_local(recv_name)
+                .and_then(|idx| self.mut_self_container_locals.get(&idx).copied());
+            let module_kind = if local_kind.is_none() {
+                let scoped = self
+                    .resolve_scoped_module_binding_name(recv_name)
+                    .unwrap_or_else(|| recv_name.to_string());
+                self.module_bindings
+                    .get(&scoped)
+                    .copied()
+                    .and_then(|idx| self.mut_self_container_bindings.get(&idx).copied())
+            } else {
+                None
+            };
+            local_kind
+                .or(module_kind)
+                .map(|kind| {
+                    !matches!(
+                        kind,
+                        crate::compiler::mutation_writeback::ContainerKind::Array
+                    )
+                })
+                .unwrap_or(false)
+        } else {
+            false
+        };
+        if method == "push" && args.len() == 1 && !bespoke_push_blocked {
             if let Expr::Identifier(recv_name, _) = receiver {
                 // v2 Phase 3.1 (Agent 3): typed-array fast path for `arr.push(x)`.
                 // Resolved BEFORE arg compilation since compile_expr may
@@ -1837,7 +2119,7 @@ impl BytecodeCompiler {
 
             self.compile_expr(receiver)?;
 
-            let count = self.program.add_constant(Constant::Number(1.0));
+            let count = self.program.add_constant(Constant::Int(1));
             self.emit(Instruction::new(
                 OpCode::PushConst,
                 Some(Operand::Const(count)),
@@ -1922,6 +2204,105 @@ impl BytecodeCompiler {
             }
         }
 
+        // ADR-006 §2.7.24 Q25.C: detect dyn-typed receiver and emit
+        // `OpCode::DynMethodCall` (bypassing the standard CallMethod
+        // path). Detection runs BEFORE receiver compilation because
+        // `compile_expr` overwrites the compiler-state we'd otherwise
+        // need (the `last_expr_*` family), and the dispatch shape is
+        // determined by the receiver's compile-time `dyn T` annotation,
+        // not the runtime kind.
+        //
+        // Round-2 scope: only `Identifier`-shaped receivers are dyn-tracked
+        // (the locals registered in `dyn_locals` / `dyn_module_bindings`).
+        // Wider receiver shapes (`(foo()).method()` where `foo()`
+        // returns `dyn T`) need return-type propagation through
+        // `last_expr_type_info`; deferred to a follow-up sub-cluster
+        // per ADR-006 §2.7.24 Q25.C.6 (IC layer would consume this for
+        // devirtualization).
+        let dyn_trait_name: Option<String> = if let Expr::Identifier(name, _) = receiver {
+            if let Some(local_idx) = self.resolve_local(name) {
+                self.dyn_locals.get(&local_idx).cloned()
+            } else {
+                let scoped = self
+                    .resolve_scoped_module_binding_name(name)
+                    .unwrap_or_else(|| name.to_string());
+                self.module_bindings
+                    .get(&scoped)
+                    .copied()
+                    .and_then(|idx| self.dyn_module_bindings.get(&idx).cloned())
+            }
+        } else {
+            None
+        };
+
+        // ADR-006 §2.7.27 / Item 4 ruling (W17-mutation-writeback): detect
+        // whether this method call needs a `&mut self` write-back after
+        // the standard `CallMethod` dispatch. The decision is made BEFORE
+        // compiling the receiver because `compile_expr` overwrites
+        // `last_expr_*` state and we need the receiver-shape captured
+        // upfront. Three conditions: (1) receiver is an Identifier (so
+        // there's a binding location to write back to); (2) the binding
+        // is tracked as a recognised COW container kind (HashSet /
+        // HashMap / Deque / PriorityQueue / Array); (3) the method name
+        // matches the kind's `MUT_SELF_*` set in `method_registry`.
+        //
+        // Interior-mutability primitives (Mutex / Atomic / Lazy /
+        // Channel) deliberately do NOT register a container-kind in
+        // `mut_self_container_locals`, so their `set` / `store` / `send`
+        // / etc. methods do not trip this gate — the Arc identity is
+        // preserved through interior mutability and no writeback is
+        // required.
+        let mut_self_writeback_target: Option<
+            crate::compiler::mutation_writeback::MutSelfWriteBackTarget,
+        > = self.resolve_mut_self_writeback_target(receiver, method);
+
+        // ADR-006 §2.7.27 amendment (W17-pop-mutation): tuple-return
+        // pop-shape detection. Mutually exclusive with the self-return
+        // case above (a method is registered in at most one set).
+        let mut_self_tuple_return_target: Option<
+            crate::compiler::mutation_writeback::MutSelfWriteBackTarget,
+        > = if mut_self_writeback_target.is_some() {
+            // A method is never registered as both self-return and
+            // tuple-return — the registries are partitioned by ABI.
+            None
+        } else {
+            self.resolve_mut_self_tuple_return_target(receiver, method)
+        };
+
+        // R-value receivers calling a known tuple-return method need the
+        // dispatch shell's silent-drop emission (Swap; Pop) — the new
+        // container Arc is on the stack below the popped element with
+        // no owner, so we drop it to balance refcounts. Mirror of the
+        // §2.7.27 self-returning r-value silent-drop rule.
+        //
+        // `is_rvalue_tuple_return` triggers when (a) the method is in
+        // the tuple-return registry under SOME container kind, AND (b)
+        // the receiver is not identifier-rooted with a tracked
+        // container kind. This includes both genuine r-value receivers
+        // (e.g. `make_deque().popBack()`) and identifier receivers whose
+        // binding wasn't tracked as a container kind (e.g. a function
+        // parameter the compiler didn't see constructed) — in both
+        // cases the handler still side-channel-publishes NewSelf, so
+        // we must consume it.
+        let is_rvalue_tuple_return = mut_self_tuple_return_target.is_none()
+            && self.is_known_tuple_return_method(method);
+
+        if mut_self_writeback_target.is_some() || mut_self_tuple_return_target.is_some() {
+            // Enforce the let-vs-let-mut immutability check at the
+            // method-call site: a `&mut self` call on an immutable
+            // binding is the cleanest place to surface "method `add`
+            // mutates the receiver; bind `s` as `let mut s = ...`".
+            // The diagnostic flows through the existing
+            // `check_named_binding_write_allowed` which already handles
+            // both local-slot and module-binding cases. Applies to both
+            // ABI variants — pop-shaped mutating methods on `let`
+            // bindings are the same footgun as self-returning ones.
+            if let Expr::Identifier(name, span) = receiver {
+                let source_loc = self.span_to_source_location(*span);
+                self.check_named_binding_write_allowed(name, Some(source_loc))?;
+            }
+        }
+
         // Compile receiver (the object/series being called)
         self.compile_expr(receiver)?;
         let receiver_schema = self.last_expr_schema;
@@ -1989,7 +2370,7 @@ impl BytecodeCompiler {
 
             let arg_count = self
                 .program
-                .add_constant(Constant::Number(args.len() as f64));
+                .add_constant(Constant::Int(args.len() as i64));
             self.emit(Instruction::new(
                 OpCode::PushConst,
                 Some(Operand::Const(arg_count)),
@@ -2024,6 +2405,29 @@ impl BytecodeCompiler {
         self.closure_row_schema = None;
         // Clear closure-arg type hints in case the closure literal was never reached.
         self.pending_closure_param_types = None;
+
+        // ADR-006 §2.7.24 Q25.C: emit `DynMethodCall` for dyn-typed
+        // receivers. Stack at this point is `[receiver, arg1, ...,
+        // argN]`. The opcode consumes them plus a string id for the
+        // method name and an arg-count, and dispatches through the
+        // receiver's vtable per §Q25.C.5 `VTableEntry`.
+        if let Some(_trait_name) = dyn_trait_name.as_ref() {
+            let string_idx = self.program.add_string(method.to_string());
+            self.emit(Instruction::new(
+                OpCode::DynMethodCall,
+                Some(Operand::TypedMethodCall {
+                    method_id: shape_value::MethodId::from_name(method).0,
+                    arg_count: args.len() as u16,
+                    string_id: string_idx,
+                    receiver_type_tag: 0xFF,
+                }),
+            ));
+            self.last_expr_schema = None;
+            self.last_expr_type_info = None;
+            self.last_expr_numeric_type = None;
+            self.clear_last_expr_reference_result();
+            return Ok(());
+        }
 
         // UFCS: If a user-defined function exists with this name, prefer it over built-in methods.
         // This allows `extend` blocks to override built-in methods for specific types.
@@ -2076,12 +2480,12 @@ impl BytecodeCompiler {
             //
             // Falls back to the generic function index on any failure.
             let call_func_idx = self
-                .try_monomorphize_method_call(&func_name, receiver, args)
+                .try_monomorphize_method_call(&func_name, receiver, args, call_site_span)
                 .unwrap_or(func_idx);
 
             let arg_count = self
                 .program
-                .add_constant(Constant::Number(call_arity as f64));
+                .add_constant(Constant::Int(call_arity as i64));
             self.emit(Instruction::new(
                 OpCode::PushConst,
                 Some(Operand::Const(arg_count)),
@@ -2177,12 +2581,12 @@ impl BytecodeCompiler {
                 // try to monomorphize it for the receiver's concrete type.
                 // Falls back to the generic function index on any failure.
                 let call_func_idx = self
-                    .try_monomorphize_method_call(&func_name, receiver, args)
+                    .try_monomorphize_method_call(&func_name, receiver, args, call_site_span)
                     .unwrap_or(func_idx);
 
                 let arg_count = self
                     .program
-                    .add_constant(Constant::Number(call_arity as f64));
+                    .add_constant(Constant::Int(call_arity as i64));
                 self.emit(Instruction::new(
                     OpCode::PushConst,
                     Some(Operand::Const(arg_count)),
@@ -2231,7 +2635,7 @@ impl BytecodeCompiler {
                 // UFCS to builtin: receiver + args already on stack
                 let arg_count = self
                     .program
-                    .add_constant(Constant::Number((args.len() + 1) as f64));
+                    .add_constant(Constant::Int((args.len() + 1) as i64));
                 self.emit(Instruction::new(
                     OpCode::PushConst,
                     Some(Operand::Const(arg_count)),
@@ -2270,6 +2674,82 @@ impl BytecodeCompiler {
                 receiver_type_tag: rtt,
             }),
         ));
+
+        // ADR-006 §2.7.27 / Item 4 ruling: post-CallMethod write-back.
+        // The handler returned a fresh `Arc<HashSetData>` /
+        // `Arc<HashMapData>` / etc. (possibly cloned via
+        // `Arc::make_mut`). `Dup` bumps the heap refcount so we have
+        // two independent shares of the new Arc; `StoreLocal recv`
+        // pops one and writes it back to the receiver's binding slot
+        // (the existing `stack_write_kinded` drops the slot's prior
+        // share via `drop_with_kind`). The remaining share stays on
+        // the stack as the expression value of the method call.
+        //
+        // For interior-mutability primitives (Mutex / Atomic / Lazy /
+        // Channel), `resolve_mut_self_writeback_target` returns None
+        // because their container kinds are not registered in
+        // `mut_self_container_locals`. The Arc identity is preserved
+        // through interior mutability; no writeback is needed.
+        if let Some(target) = mut_self_writeback_target {
+            use crate::compiler::mutation_writeback::MutSelfWriteBackTarget;
+            self.emit(Instruction::simple(OpCode::Dup));
+            match target {
+                MutSelfWriteBackTarget::Local(local_idx) => {
+                    self.emit(Instruction::new(
+                        OpCode::StoreLocal,
+                        Some(Operand::Local(local_idx)),
+                    ));
+                }
+                MutSelfWriteBackTarget::ModuleBinding(binding_idx) => {
+                    self.emit(Instruction::new(
+                        OpCode::StoreModuleBinding,
+                        Some(Operand::ModuleBinding(binding_idx)),
+                    ));
+                }
+            }
+        } else if let Some(target) = mut_self_tuple_return_target {
+            // ADR-006 §2.7.27 amendment (W17-pop-mutation): tuple-return
+            // post-call codegen. Stack at this point is
+            // `[..., NewContainer, popped_element]` — the handler
+            // side-channel-pushed NewContainer via `vm.push_kinded`
+            // before returning the popped element, and the dispatch
+            // shell then pushed the returned popped element on top.
+            //
+            // `Swap` flips the top two: `[..., popped_element, NewContainer]`.
+            // `Store*(target)` pops NewContainer and writes it to the
+            // receiver binding (existing `stack_write_kinded` releases
+            // the prior occupant's share via `drop_with_kind`); the
+            // popped_element remains on the stack as the call's
+            // expression value.
+            use crate::compiler::mutation_writeback::MutSelfWriteBackTarget;
+            self.emit(Instruction::simple(OpCode::Swap));
+            match target {
+                MutSelfWriteBackTarget::Local(local_idx) => {
+                    self.emit(Instruction::new(
+                        OpCode::StoreLocal,
+                        Some(Operand::Local(local_idx)),
+                    ));
+                }
+                MutSelfWriteBackTarget::ModuleBinding(binding_idx) => {
+                    self.emit(Instruction::new(
+                        OpCode::StoreModuleBinding,
+                        Some(Operand::ModuleBinding(binding_idx)),
+                    ));
+                }
+            }
+        } else if is_rvalue_tuple_return {
+            // ADR-006 §2.7.27 amendment (W17-pop-mutation): r-value
+            // receiver silent-drop. The handler side-channel-pushed
+            // NewContainer before returning the popped element, so the
+            // stack is `[..., NewContainer, popped_element]`. With no
+            // receiver binding to write back to, `Swap; Pop` flips and
+            // drops NewContainer (the `Pop` opcode's drop_with_kind
+            // discipline releases the heap share cleanly). Mirror of
+            // the §2.7.27 self-returning r-value silent-drop rule.
+            self.emit(Instruction::simple(OpCode::Swap));
+            self.emit(Instruction::simple(OpCode::Pop));
+        }
+
         // Propagate known return type for standard method calls
         self.last_expr_schema = None;
         self.last_expr_numeric_type = method_return_numeric_type(method);
@@ -2666,7 +3146,7 @@ impl BytecodeCompiler {
 
         let arg_count = self
             .program
-            .add_constant(Constant::Number(args.len() as f64));
+            .add_constant(Constant::Int(args.len() as i64));
         self.emit(Instruction::new(
             OpCode::PushConst,
             Some(Operand::Const(arg_count)),
@@ -2762,7 +3242,7 @@ impl BytecodeCompiler {
         // Push arg count and call print
         let arg_count = self
             .program
-            .add_constant(Constant::Number(processed_args as f64));
+            .add_constant(Constant::Int(processed_args as i64));
         self.emit(Instruction::new(
             OpCode::PushConst,
             Some(Operand::Const(arg_count)),
@@ -3017,6 +3497,15 @@ impl BytecodeCompiler {
         func_name: &str,
         receiver: &Expr,
         args: &[Expr],
+        // ADR-006 §2.7.5 V3-S6b conduit: the AST `Expr::MethodCall.span`
+        // of the call-site, threaded from `compile_expr_method_call`. On
+        // specialization success we stamp `(call_site_span,
+        // self.current_function) → specialized_idx` into
+        // `self.program.monomorphized_method_call_sites` so the conduit
+        // producer can lift `function_return_concrete_types[
+        // specialized_idx]` into the destination slot's ConcreteType at
+        // the matching `MirConstant::Method` Call-terminator site.
+        call_site_span: Span,
     ) -> Option<usize> {
         // 1. Check if the function has type parameters. Only type-kind
         //    generics participate in the call-site annotation-unification
@@ -3062,9 +3551,11 @@ impl BytecodeCompiler {
             .any(|a| matches!(a, Expr::FunctionExpr { .. }));
 
         if has_closure_arg {
-            if let Some(idx) =
-                self.try_monomorphize_method_call_with_closures(func_name, &combined_args)
-            {
+            if let Some(idx) = self.try_monomorphize_method_call_with_closures(
+                func_name,
+                &combined_args,
+                call_site_span,
+            ) {
                 return Some(idx);
             }
             // Fall-through: either resolution bailed, inlining failed, or the
@@ -3095,6 +3586,22 @@ impl BytecodeCompiler {
                 if self.current_function == Some(idx) {
                     return None;
                 }
+                // ADR-006 §2.7.5 V3-S6b conduit population: stamp the
+                // `(call_site_span, calling_function) → specialized_idx`
+                // mapping so the conduit producer at
+                // `infer_top_level_concrete_types_from_mir_with_resolvers`
+                // can lift `function_return_concrete_types[
+                // specialized_idx]` into the destination slot's
+                // ConcreteType at the matching `MirConstant::Method`
+                // Call-terminator site. `self.current_function` is the
+                // post-monomorphization specialized FunctionId of the
+                // CALLER (same value the conduit's per-fn loop uses for
+                // its `current_function` parameter), so the composite-
+                // key invariant holds across the conduit boundary.
+                self.program.monomorphized_method_call_sites.insert(
+                    (call_site_span, self.current_function),
+                    idx,
+                );
                 Some(idx)
             }
             Err(_) => None,
@@ -3116,6 +3623,12 @@ impl BytecodeCompiler {
         &mut self,
         func_name: &str,
         combined_args: &[Expr],
+        // ADR-006 §2.7.5 V3-S6b conduit: AST span of the parent
+        // `Expr::MethodCall`, threaded from `try_monomorphize_method_call`.
+        // Mirror site of the type-only path's population —
+        // populates `monomorphized_method_call_sites` on the closure-
+        // aware specialization's success branch with the same shape.
+        call_site_span: Span,
     ) -> Option<usize> {
         // Only type-kind generics participate in call-site annotation
         // unification. Const-kind generics (B.3) are bound separately via
@@ -3191,6 +3704,18 @@ impl BytecodeCompiler {
                 if self.current_function == Some(idx) {
                     return None;
                 }
+                // ADR-006 §2.7.5 V3-S6b conduit population (mirror of the
+                // type-only path). Stamps the `(call_site_span,
+                // current_function) → specialized_idx` mapping for the
+                // closure-aware specialization branch. Same composite-key
+                // invariant as the type-only mirror — `current_function`
+                // is the post-monomorphization specialized FunctionId of
+                // the caller, matching the conduit producer's per-fn
+                // loop's `current_function` parameter.
+                self.program.monomorphized_method_call_sites.insert(
+                    (call_site_span, self.current_function),
+                    idx,
+                );
                 Some(idx)
             }
             _ => None,

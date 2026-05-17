@@ -3,7 +3,6 @@
 //! Without `gc` feature: stub using Arc reference counting (no-op GC).
 //! With `gc` feature: delegates to shape-gc's GcHeap for real collection.
 
-use shape_value::ValueWordExt;
 use std::cell::RefCell;
 use std::time::{Duration, Instant};
 
@@ -134,15 +133,13 @@ pub fn write_barrier_slot(_old: u64, _new: u64) {
     }
 }
 
-/// Write barrier for GC-tracked heap writes (ValueWord level).
-///
-/// Convenience wrapper that extracts raw bits from the old and new ValueWord
-/// values and forwards to `write_barrier_slot`. This is the primary entry
-/// point used by the VM executor for slot overwrites.
-#[inline(always)]
-pub fn write_barrier_vw(old: &shape_value::ValueWord, new: &shape_value::ValueWord) {
-    write_barrier_slot(old.raw_bits(), new.raw_bits());
-}
+// `write_barrier_vw(old: &ValueWord, new: &ValueWord)` was deleted with the
+// `ValueWord` carrier (ADR-006 §2.7.7 — `ValueWord` removed; the parallel
+// `Vec<NativeKind>` track is the post-strict-typing dispatch surface). The
+// raw-bits entry point `write_barrier_slot(old: u64, new: u64)` below is
+// the only barrier surface; callers that previously took `&ValueWord`
+// arguments must thread raw bits via `stack_read_kinded_raw` or the
+// equivalent kinded-slot API and call `write_barrier_slot` directly.
 
 /// Write barrier counter for debug coverage assertions.
 ///
@@ -202,13 +199,9 @@ mod tests {
         write_barrier_slot(0xFFF8_0000_0000_0000, 0xFFF8_0000_0000_0001);
     }
 
-    #[test]
-    fn write_barrier_vw_does_not_panic() {
-        let a = shape_value::ValueWord::none();
-        let b = shape_value::ValueWord::from_i64(42);
-        write_barrier_vw(&a, &b);
-        write_barrier_vw(&b, &a);
-    }
+    // `write_barrier_vw_does_not_panic` was deleted alongside the
+    // `write_barrier_vw` entry point (post-`ValueWord` carrier; barrier
+    // surface is now raw-bits only — `write_barrier_slot`).
 
     #[test]
     fn record_heap_write_does_not_panic() {

@@ -111,6 +111,29 @@ pub struct MirBuilder {
     /// Spans where lowering had to fall back to placeholder/Nop handling.
     /// Empty means clean lowering with no fallbacks.
     fallback_spans: Vec<Span>,
+    /// Per-local container-kind track mirroring the bytecode compiler's
+    /// `mut_self_container_locals` (ADR-006 §2.7.27 / W17-mutation-writeback).
+    /// Populated at let-binding time when the initializer is a recognised
+    /// COW-container ctor (`Set()` / `HashMap()` / `Deque()` /
+    /// `PriorityQueue()`); consumed at `Expr::MethodCall` lowering to decide
+    /// whether to emit the receiver write-back assignment after the call.
+    mut_self_container_locals:
+        HashMap<SlotId, crate::compiler::mutation_writeback::ContainerKind>,
+    /// Per-slot user-struct type name for slots produced by
+    /// `Expr::StructLiteral { type_name, .. }` lowering — ADR-006 §2.7.5
+    /// producing-site classification, Phase 3 cluster-0 Round 13 T1' gap 1
+    /// closure. Threaded into `MirFunction.local_struct_type_names` at
+    /// finalization; consumed at conduit-time by the trait-method
+    /// return-kind classifier to map receiver slot → struct type name →
+    /// trait method declared return ConcreteType.
+    local_struct_type_names: HashMap<SlotId, String>,
+    /// Per-slot empty-typed-array element ConcreteType — ADR-006 §2.7.5
+    /// stamp-at-compile-time, V3-S6e-jit-specialized-vec-map-aggregate-
+    /// classify (Phase 3 cluster-0+1 Wave 3, 2026-05-16). Populated at
+    /// `lower_var_decl` for `let mut name: Array<C> = []` bindings where
+    /// `C` is a `concrete_type_from_annotation`-resolvable element type.
+    /// Threaded into `MirFunction.local_typed_array_element_types`.
+    local_typed_array_element_types: HashMap<SlotId, shape_value::v2::ConcreteType>,
 }
 
 #[derive(Debug)]
@@ -163,7 +186,68 @@ impl MirBuilder {
             exit_block: None,
             span,
             fallback_spans: Vec::new(),
+            mut_self_container_locals: HashMap::new(),
+            local_struct_type_names: HashMap::new(),
+            local_typed_array_element_types: HashMap::new(),
         }
+    }
+
+    /// Record the user-struct type name for a slot produced by an
+    /// `Expr::StructLiteral { type_name, .. }` lowering. ADR-006 §2.7.5
+    /// producing-site classification, Phase 3 cluster-0 Round 13 T1' gap 1
+    /// closure.
+    ///
+    /// Read at conduit-time (compiler `infer_top_level_concrete_types_from_mir_with_returns`
+    /// and JIT `mir_compiler/types::infer_slot_kinds_with_concrete`) to map
+    /// the receiver slot of a trait-method dispatch call (e.g. `t.name()`
+    /// where `t = X {}`) to the struct type name `"X"`, which then resolves
+    /// the trait method declared return ConcreteType via the
+    /// `find_default_trait_impl_for_type_method` chain.
+    pub(super) fn record_local_struct_type_name(&mut self, slot: SlotId, type_name: String) {
+        self.local_struct_type_names.insert(slot, type_name);
+    }
+
+    /// Record the empty-typed-array element ConcreteType for a slot
+    /// produced by `let mut name: Array<C> = []` lowering. ADR-006
+    /// §2.7.5 stamp-at-compile-time — V3-S6e-jit-specialized-vec-map-
+    /// aggregate-classify (Phase 3 cluster-0+1 Wave 3, 2026-05-16).
+    ///
+    /// Read at conduit-time
+    /// (`compiler/helpers.rs::infer_top_level_concrete_types_from_mir_with_
+    /// resolvers`) to stamp `concrete_types[slot] = Array(elem)` so the
+    /// JIT-MIR consumer's v2-fast-path (`statements.rs::v2_typed_array_
+    /// elem_kind`) activates for the empty-Aggregate site that would
+    /// otherwise short-circuit through `emit_container_store_if_needed`
+    /// (helpers.rs:128-130) without producing an `ArrayStore` statement.
+    pub(super) fn record_local_typed_array_element_type(
+        &mut self,
+        slot: SlotId,
+        elem: shape_value::v2::ConcreteType,
+    ) {
+        self.local_typed_array_element_types.insert(slot, elem);
+    }
+
+    /// Record a recognized COW-container kind for a binding slot. Called
+    /// from let-binding lowering when the initializer is a known ctor
+    /// (`Set()` / `HashMap()` / `Deque()` / `PriorityQueue()`). Read at
+    /// `Expr::MethodCall` lowering to gate the mut-self write-back per
+    /// ADR-006 §2.7.27.
+    pub(super) fn record_mut_self_container_local(
+        &mut self,
+        slot: SlotId,
+        kind: crate::compiler::mutation_writeback::ContainerKind,
+    ) {
+        self.mut_self_container_locals.insert(slot, kind);
+    }
+
+    /// Look up a recognized COW-container kind for a binding slot. Returns
+    /// `None` when the binding is not a tracked container (the standard
+    /// no-writeback path).
+    pub(super) fn lookup_mut_self_container_local(
+        &self,
+        slot: SlotId,
+    ) -> Option<crate::compiler::mutation_writeback::ContainerKind> {
+        self.mut_self_container_locals.get(&slot).copied()
     }
 
     /// Allocate a new local variable slot.
@@ -490,6 +574,8 @@ impl MirBuilder {
                 local_types,
                 span: self.span,
                 field_name_table: field_names.clone(),
+                local_struct_type_names: self.local_struct_type_names,
+                local_typed_array_element_types: self.local_typed_array_element_types,
             },
             had_fallbacks,
             fallback_spans,
@@ -548,12 +634,50 @@ pub fn lower_function_detailed(
             None
         };
         if let Some(param_name) = param.simple_name() {
-            builder.add_param(
+            let slot = builder.add_param(
                 param_name.to_string(),
                 type_info,
                 reference_kind,
                 binding_metadata,
             );
+            // cluster-2-closure-wave-1-iter-statemachine (2026-05-16):
+            // seed `local_typed_array_element_types` from a typed-array
+            // param annotation (`self: Vec<C>` / `xs: Array<C>` / etc.).
+            // The conduit producer at `crates/shape-vm/src/compiler/
+            // helpers.rs::infer_top_level_concrete_types_from_mir_with_
+            // resolvers` stamps `concrete_types[slot] = Array(elem)` for
+            // the param from this map (reusing the V3-S6e empty-array
+            // stamping pass — `concrete_type_from_annotation` resolves
+            // `Vec<C>` and `Array<C>` annotations).
+            //
+            // Load-bearing for the index-counter iter state-machine
+            // emitted by `lower_for_expr` / `lower_for_loop`
+            // generic-iterator branches at this checkpoint: when the
+            // iter is a typed-array receiver (e.g. `for item in self`
+            // inside the post-monomorphization specialized `Vec.map<T,
+            // U>` body where `self: Vec<T>` substitutes to `self:
+            // Array<I64>`), the slot-move propagation pass in the
+            // conduit producer flows `Array(I64)` from the param slot to
+            // the iter_slot, and the JIT-MIR `v2_typed_array_elem_kind`
+            // fast path fires for the `len()` Call terminator and the
+            // `Place::Index` per-iteration read. Without this seed, the
+            // trampoline gets receiver_kind=UInt64 (the §2.7.5 carrier
+            // fallback) and the `len` dispatch returns 0 (the loop body
+            // executes zero times).
+            //
+            // ADR-006 §2.7.5 stamp-at-compile-time: the param annotation
+            // IS the proof of the receiver's ConcreteType at compile
+            // time. No tag-bit decode, no Bool-default — params without
+            // typed-array annotations leave no entry in the map and the
+            // conduit producer leaves `concrete_types[slot]` as `Void`
+            // per §2.7.5.1.
+            if let Some(annotation) = param.type_annotation.as_ref() {
+                if let Some(shape_value::v2::ConcreteType::Array(elem)) =
+                    crate::compiler::v2_map_emission::concrete_type_from_annotation(annotation)
+                {
+                    builder.record_local_typed_array_element_type(slot, *elem);
+                }
+            }
         } else {
             let slot = builder.add_param(
                 format!("__mir_param{}", builder.param_slots.len()),

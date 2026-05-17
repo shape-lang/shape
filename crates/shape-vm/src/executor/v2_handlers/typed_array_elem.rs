@@ -1,18 +1,27 @@
 //! Typed array element access opcodes (local-slot based).
 //!
 //! These opcodes skip the HeapValue enum dispatch when the compiler proves the
-//! element type. The array lives in a local slot (Operand::Local) in one of two
-//! representations:
+//! element type. The array lives in a local slot (Operand::Local) as a raw
+//! v2 pointer `*mut TypedArray<T>` — kind = `NativeKind::UInt64`
+//! (NativeScalar shape). Bits = raw pointer (no Arc).
 //!
-//! 1. Legacy heap-boxed `HeapValue::TypedArray(TypedArrayData::I64|F64|...)`
-//!    populated by older `NewArray` + coercion paths.
-//! 2. Raw v2 pointer `HeapValue::NativeScalar(NativeScalar::Ptr(p))` where `p`
-//!    is a `*mut TypedArray<T>` populated by the v2 `NewTypedArrayI64/F64`
-//!    opcodes (see `v2_handlers/array.rs`).
+//! ADR-006 §2.7.7 / Wave 6.5 cluster C: kinded API. Dispatch on the kind
+//! recorded in the parallel kind track for the local slot.
 //!
-//! Both representations are supported transparently — the compiler emits these
-//! opcodes whenever a local is tracked in `v2_typed_array_locals`, and that
-//! map covers both paths.
+//! ## V3-S5 ckpt-5 consumer-cascade tier 3 surface (2026-05-15)
+//!
+//! The pre-ckpt-1 file supported TWO carrier shapes:
+//!   1. Legacy heap-boxed `Arc<TypedArrayData>` (Ptr(HeapKind::TypedArray)) — DELETED
+//!   2. v2 raw-pointer `*mut TypedArray<T>` (NativeKind::UInt64) — PRESERVED
+//!
+//! Per V3-S5 ckpt-1..ckpt-4 cascade the `TypedArrayData` enum +
+//! `TypedBuffer<T>` / `AlignedTypedBuffer` wrapper layer +
+//! `HeapValue::TypedArray(Arc<TypedArrayData>)` outer arm +
+//! `HeapKind::TypedArray = 8` ordinal were DELETED wholesale per
+//! W12-typed-array-data-deletion audit §3.5 + §3.6 + §B + ADR-006
+//! §2.7.24 Q25.A SUPERSEDED. The Arc-boxed arms in all 7 opcode handlers
+//! are deleted; the UInt64 v2-raw path remains live and is the canonical
+//! post-ckpt-6 STRICT close target.
 //!
 //! ## Opcodes handled here
 //!
@@ -26,25 +35,32 @@
 //! | ArrayPushF64  | [value]          | []        | Local(slot)  |
 //! | ArrayLenTyped | []               | [len]     | Local(slot)  |
 
-use std::sync::Arc;
-
 use crate::bytecode::{Instruction, OpCode, Operand};
-use shape_value::heap_value::{NativeScalar, TypedArrayData};
 use shape_value::v2::typed_array::TypedArray;
-use shape_value::{HeapValue, VMError, ValueWord, ValueWordExt};
-
-/// If the ValueWord is a v2 raw `TypedArray<T>` pointer (stored as
-/// `NativeScalar::Ptr`), return the raw pointer. Otherwise return `None`.
-#[inline]
-fn as_v2_typed_array_ptr(vw: &ValueWord) -> Option<usize> {
-    if let Some(NativeScalar::Ptr(p)) = vw.as_native_scalar() {
-        Some(p)
-    } else {
-        None
-    }
-}
+use shape_value::{NativeKind, VMError};
 
 use super::super::VirtualMachine;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// V3-S5 ckpt-5 surface-and-stop builder (for the deleted Ptr(HeapKind::
+// TypedArray) Arc<TypedArrayData> receiver arm)
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[cold]
+#[inline(never)]
+fn ckpt5_typed_array_surface(op: &'static str, kind: NativeKind) -> VMError {
+    VMError::NotImplemented(format!(
+        "{op}: SURFACE — V3-S5 ckpt-5 consumer-cascade tier 3 surface. \
+         `Arc<TypedArrayData>` carrier + `HeapKind::TypedArray=8` ordinal \
+         DELETED at V3-S5 ckpt-1..ckpt-4 per W12-typed-array-data-deletion \
+         audit §3.5 + §3.6 + ADR-006 §2.7.24 Q25.A SUPERSEDED. UInt64 \
+         v2-raw `*mut TypedArray<T>` path remains live. Slot kind: \
+         {kind:?}. REFUSED ON SIGHT: TypedArrayData resurrection under \
+         any rename (Refusal #1).",
+        op = op,
+        kind = kind,
+    ))
+}
 
 impl VirtualMachine {
     /// Dispatch for the typed array element access opcodes.
@@ -63,10 +79,6 @@ impl VirtualMachine {
             _ => unreachable!("exec_typed_array_elem_ops called with {:?}", instruction.opcode),
         }
     }
-
-    // -----------------------------------------------------------------------
-    // Helpers
-    // -----------------------------------------------------------------------
 
     /// Resolve the absolute stack slot from the instruction's Local operand.
     #[inline(always)]
@@ -90,13 +102,10 @@ impl VirtualMachine {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // GetElemI64
-    // -----------------------------------------------------------------------
-
     fn op_get_elem_i64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let slot = self.resolve_local_slot(instruction)?;
-        let index = self.pop_tagged_i64()?;
+        let (idx_bits, _idx_kind) = self.pop_kinded()?;
+        let index = idx_bits as i64;
         if index < 0 {
             return Err(VMError::IndexOutOfBounds {
                 index: index as i32,
@@ -105,10 +114,10 @@ impl VirtualMachine {
         }
         let index = index as usize;
 
-        let result = self.stack_peek_raw(slot, |vw| -> Result<i64, VMError> {
-            // v2 raw-pointer fast path (NewTypedArrayI64 representation).
-            if let Some(p) = as_v2_typed_array_ptr(vw) {
-                let arr = p as *const TypedArray<i64>;
+        let (arr_bits, arr_kind) = self.stack_read_kinded_raw(slot);
+        let val: i64 = match arr_kind {
+            NativeKind::UInt64 => {
+                let arr = arr_bits as usize as *const TypedArray<i64>;
                 let len = unsafe { TypedArray::len(arr) } as usize;
                 if index >= len {
                     return Err(VMError::IndexOutOfBounds {
@@ -116,55 +125,18 @@ impl VirtualMachine {
                         length: len,
                     });
                 }
-                let val = unsafe { TypedArray::get_unchecked(arr, index as u32) };
-                return Ok(val);
+                unsafe { TypedArray::get_unchecked(arr, index as u32) }
             }
-            if let Some(hv) = vw.as_heap_ref() {
-                match hv {
-                    HeapValue::TypedArray(TypedArrayData::I64(buf)) => {
-                        if index >= buf.data.len() {
-                            return Err(VMError::IndexOutOfBounds {
-                                index: index as i32,
-                                length: buf.data.len(),
-                            });
-                        }
-                        Ok(buf.data[index])
-                    }
-                    HeapValue::Array(arr) => {
-                        if index >= arr.len() {
-                            return Err(VMError::IndexOutOfBounds {
-                                index: index as i32,
-                                length: arr.len(),
-                            });
-                        }
-                        arr[index].as_i64().ok_or(VMError::TypeError {
-                            expected: "int",
-                            got: "non-int element",
-                        })
-                    }
-                    _ => Err(VMError::TypeError {
-                        expected: "Array<int>",
-                        got: hv.type_name(),
-                    }),
-                }
-            } else {
-                Err(VMError::TypeError {
-                    expected: "Array<int>",
-                    got: "non-heap value",
-                })
-            }
-        })?;
+            _ => return Err(ckpt5_typed_array_surface("GetElemI64", arr_kind)),
+        };
 
-        self.push_raw_u64(ValueWord::from_i64(result))
+        self.push_kinded(val as u64, NativeKind::Int64)
     }
-
-    // -----------------------------------------------------------------------
-    // GetElemF64
-    // -----------------------------------------------------------------------
 
     fn op_get_elem_f64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let slot = self.resolve_local_slot(instruction)?;
-        let index = self.pop_tagged_i64()?;
+        let (idx_bits, _idx_kind) = self.pop_kinded()?;
+        let index = idx_bits as i64;
         if index < 0 {
             return Err(VMError::IndexOutOfBounds {
                 index: index as i32,
@@ -173,10 +145,10 @@ impl VirtualMachine {
         }
         let index = index as usize;
 
-        let result = self.stack_peek_raw(slot, |vw| -> Result<f64, VMError> {
-            // v2 raw-pointer fast path (NewTypedArrayF64 representation).
-            if let Some(p) = as_v2_typed_array_ptr(vw) {
-                let arr = p as *const TypedArray<f64>;
+        let (arr_bits, arr_kind) = self.stack_read_kinded_raw(slot);
+        let val: f64 = match arr_kind {
+            NativeKind::UInt64 => {
+                let arr = arr_bits as usize as *const TypedArray<f64>;
                 let len = unsafe { TypedArray::len(arr) } as usize;
                 if index >= len {
                     return Err(VMError::IndexOutOfBounds {
@@ -184,56 +156,20 @@ impl VirtualMachine {
                         length: len,
                     });
                 }
-                let val = unsafe { TypedArray::get_unchecked(arr, index as u32) };
-                return Ok(val);
+                unsafe { TypedArray::get_unchecked(arr, index as u32) }
             }
-            if let Some(hv) = vw.as_heap_ref() {
-                match hv {
-                    HeapValue::TypedArray(TypedArrayData::F64(buf)) => {
-                        if index >= buf.data.len() {
-                            return Err(VMError::IndexOutOfBounds {
-                                index: index as i32,
-                                length: buf.data.len(),
-                            });
-                        }
-                        Ok(buf.data[index])
-                    }
-                    HeapValue::Array(arr) => {
-                        if index >= arr.len() {
-                            return Err(VMError::IndexOutOfBounds {
-                                index: index as i32,
-                                length: arr.len(),
-                            });
-                        }
-                        arr[index].as_f64().ok_or(VMError::TypeError {
-                            expected: "number",
-                            got: "non-number element",
-                        })
-                    }
-                    _ => Err(VMError::TypeError {
-                        expected: "Array<number>",
-                        got: hv.type_name(),
-                    }),
-                }
-            } else {
-                Err(VMError::TypeError {
-                    expected: "Array<number>",
-                    got: "non-heap value",
-                })
-            }
-        })?;
+            _ => return Err(ckpt5_typed_array_surface("GetElemF64", arr_kind)),
+        };
 
-        self.push_raw_u64(ValueWord::from_f64(result))
+        self.push_kinded(val.to_bits(), NativeKind::Float64)
     }
-
-    // -----------------------------------------------------------------------
-    // SetElemI64
-    // -----------------------------------------------------------------------
 
     fn op_set_elem_i64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let slot = self.resolve_local_slot(instruction)?;
-        let value_bits = self.pop_raw_u64()?;
-        let index = self.pop_tagged_i64()?;
+        let (val_bits, _vk) = self.pop_kinded()?;
+        let val = val_bits as i64;
+        let (idx_bits, _ik) = self.pop_kinded()?;
+        let index = idx_bits as i64;
         if index < 0 {
             return Err(VMError::IndexOutOfBounds {
                 index: index as i32,
@@ -242,78 +178,34 @@ impl VirtualMachine {
         }
         let index = index as usize;
 
-        let value = ValueWord::from_raw_bits(value_bits);
-        let val = value.as_i64().ok_or(VMError::TypeError {
-            expected: "int",
-            got: "non-int value",
-        })?;
-        // FR.6: typed scalar — no heap share to release. The u64 is Copy.
-        let _ = value;
-
-        // Take-mutate-write pattern for the local slot.
-        let mut arr_vw = self.stack_take_raw(slot);
-        let result = if let Some(p) = as_v2_typed_array_ptr(&arr_vw) {
-            // v2 raw-pointer fast path.
-            let arr = p as *mut TypedArray<i64>;
-            let len = unsafe { TypedArray::len(arr) } as usize;
-            if index >= len {
-                Err(VMError::IndexOutOfBounds {
-                    index: index as i32,
-                    length: len,
-                })
-            } else {
-                unsafe { TypedArray::set(arr, index as u32, val) };
-                Ok(())
-            }
-        } else if let Some(hv) = arr_vw.as_heap_mut() {
-            match hv {
-                HeapValue::TypedArray(TypedArrayData::I64(buf)) => {
-                    let buf = Arc::make_mut(buf);
-                    if index >= buf.data.len() {
-                        Err(VMError::IndexOutOfBounds {
-                            index: index as i32,
-                            length: buf.data.len(),
-                        })
-                    } else {
-                        buf.data[index] = val;
-                        Ok(())
-                    }
+        let (arr_bits, arr_kind) = self.stack_take_kinded(slot);
+        let result = match arr_kind {
+            NativeKind::UInt64 => {
+                let arr = arr_bits as usize as *mut TypedArray<i64>;
+                let len = unsafe { TypedArray::len(arr) } as usize;
+                if index >= len {
+                    Err(VMError::IndexOutOfBounds {
+                        index: index as i32,
+                        length: len,
+                    })
+                } else {
+                    unsafe { TypedArray::set(arr, index as u32, val) };
+                    Ok(())
                 }
-                HeapValue::Array(arr) => {
-                    let arr = Arc::make_mut(arr);
-                    if index >= arr.len() {
-                        Err(VMError::IndexOutOfBounds {
-                            index: index as i32,
-                            length: arr.len(),
-                        })
-                    } else {
-                        arr[index] = ValueWord::from_i64(val);
-                        Ok(())
-                    }
-                }
-                _ => Err(VMError::TypeError {
-                    expected: "Array<int>",
-                    got: hv.type_name(),
-                }),
             }
-        } else {
-            Err(VMError::TypeError {
-                expected: "Array<int>",
-                got: "non-heap value",
-            })
+            _ => Err(ckpt5_typed_array_surface("SetElemI64", arr_kind)),
         };
-        self.stack_write_raw(slot, arr_vw);
+        self.stack[slot] = arr_bits;
+        self.kinds[slot] = arr_kind;
         result
     }
-
-    // -----------------------------------------------------------------------
-    // SetElemF64
-    // -----------------------------------------------------------------------
 
     fn op_set_elem_f64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let slot = self.resolve_local_slot(instruction)?;
-        let value_bits = self.pop_raw_u64()?;
-        let index = self.pop_tagged_i64()?;
+        let (val_bits, _vk) = self.pop_kinded()?;
+        let val = f64::from_bits(val_bits);
+        let (idx_bits, _ik) = self.pop_kinded()?;
+        let index = idx_bits as i64;
         if index < 0 {
             return Err(VMError::IndexOutOfBounds {
                 index: index as i32,
@@ -322,512 +214,78 @@ impl VirtualMachine {
         }
         let index = index as usize;
 
-        let value = ValueWord::from_raw_bits(value_bits);
-        let val = value.as_f64().ok_or(VMError::TypeError {
-            expected: "number",
-            got: "non-number value",
-        })?;
-        // FR.6: typed scalar — no heap share to release. The u64 is Copy.
-        let _ = value;
-
-        let mut arr_vw = self.stack_take_raw(slot);
-        let result = if let Some(p) = as_v2_typed_array_ptr(&arr_vw) {
-            // v2 raw-pointer fast path.
-            let arr = p as *mut TypedArray<f64>;
-            let len = unsafe { TypedArray::len(arr) } as usize;
-            if index >= len {
-                Err(VMError::IndexOutOfBounds {
-                    index: index as i32,
-                    length: len,
-                })
-            } else {
-                unsafe { TypedArray::set(arr, index as u32, val) };
-                Ok(())
-            }
-        } else if let Some(hv) = arr_vw.as_heap_mut() {
-            match hv {
-                HeapValue::TypedArray(TypedArrayData::F64(buf)) => {
-                    let buf = Arc::make_mut(buf);
-                    if index >= buf.data.len() {
-                        Err(VMError::IndexOutOfBounds {
-                            index: index as i32,
-                            length: buf.data.len(),
-                        })
-                    } else {
-                        buf.data[index] = val;
-                        Ok(())
-                    }
+        let (arr_bits, arr_kind) = self.stack_take_kinded(slot);
+        let result = match arr_kind {
+            NativeKind::UInt64 => {
+                let arr = arr_bits as usize as *mut TypedArray<f64>;
+                let len = unsafe { TypedArray::len(arr) } as usize;
+                if index >= len {
+                    Err(VMError::IndexOutOfBounds {
+                        index: index as i32,
+                        length: len,
+                    })
+                } else {
+                    unsafe { TypedArray::set(arr, index as u32, val) };
+                    Ok(())
                 }
-                HeapValue::Array(arr) => {
-                    let arr = Arc::make_mut(arr);
-                    if index >= arr.len() {
-                        Err(VMError::IndexOutOfBounds {
-                            index: index as i32,
-                            length: arr.len(),
-                        })
-                    } else {
-                        arr[index] = ValueWord::from_f64(val);
-                        Ok(())
-                    }
-                }
-                _ => Err(VMError::TypeError {
-                    expected: "Array<number>",
-                    got: hv.type_name(),
-                }),
             }
-        } else {
-            Err(VMError::TypeError {
-                expected: "Array<number>",
-                got: "non-heap value",
-            })
+            _ => Err(ckpt5_typed_array_surface("SetElemF64", arr_kind)),
         };
-        self.stack_write_raw(slot, arr_vw);
+        self.stack[slot] = arr_bits;
+        self.kinds[slot] = arr_kind;
         result
     }
-
-    // -----------------------------------------------------------------------
-    // ArrayPushI64
-    // -----------------------------------------------------------------------
 
     fn op_array_push_i64_elem(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let slot = self.resolve_local_slot(instruction)?;
-        let value_bits = self.pop_raw_u64()?;
+        let (val_bits, _vk) = self.pop_kinded()?;
+        let val = val_bits as i64;
 
-        let value = ValueWord::from_raw_bits(value_bits);
-        let val = value.as_i64().ok_or(VMError::TypeError {
-            expected: "int",
-            got: "non-int value",
-        })?;
-        // FR.6: typed scalar — no heap share to release. The u64 is Copy.
-        let _ = value;
-
-        let mut arr_vw = self.stack_take_raw(slot);
-        let result = if let Some(p) = as_v2_typed_array_ptr(&arr_vw) {
-            // v2 raw-pointer fast path.
-            let arr = p as *mut TypedArray<i64>;
-            unsafe { TypedArray::push(arr, val) };
-            Ok(())
-        } else if let Some(hv) = arr_vw.as_heap_mut() {
-            match hv {
-                HeapValue::TypedArray(TypedArrayData::I64(buf)) => {
-                    Arc::make_mut(buf).data.push(val);
-                    Ok(())
-                }
-                HeapValue::Array(arr) => {
-                    Arc::make_mut(arr).push(ValueWord::from_i64(val));
-                    Ok(())
-                }
-                _ => Err(VMError::TypeError {
-                    expected: "Array<int>",
-                    got: hv.type_name(),
-                }),
+        let (arr_bits, arr_kind) = self.stack_take_kinded(slot);
+        let result = match arr_kind {
+            NativeKind::UInt64 => {
+                let arr = arr_bits as usize as *mut TypedArray<i64>;
+                unsafe { TypedArray::push(arr, val) };
+                Ok(())
             }
-        } else {
-            Err(VMError::TypeError {
-                expected: "Array<int>",
-                got: "non-heap value",
-            })
+            _ => Err(ckpt5_typed_array_surface("ArrayPushI64", arr_kind)),
         };
-        self.stack_write_raw(slot, arr_vw);
+        self.stack[slot] = arr_bits;
+        self.kinds[slot] = arr_kind;
         result
     }
-
-    // -----------------------------------------------------------------------
-    // ArrayPushF64
-    // -----------------------------------------------------------------------
 
     fn op_array_push_f64_elem(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let slot = self.resolve_local_slot(instruction)?;
-        let value_bits = self.pop_raw_u64()?;
+        let (val_bits, _vk) = self.pop_kinded()?;
+        let val = f64::from_bits(val_bits);
 
-        let value = ValueWord::from_raw_bits(value_bits);
-        let val = value.as_f64().ok_or(VMError::TypeError {
-            expected: "number",
-            got: "non-number value",
-        })?;
-        // FR.6: typed scalar — no heap share to release. The u64 is Copy.
-        let _ = value;
-
-        let mut arr_vw = self.stack_take_raw(slot);
-        let result = if let Some(p) = as_v2_typed_array_ptr(&arr_vw) {
-            // v2 raw-pointer fast path.
-            let arr = p as *mut TypedArray<f64>;
-            unsafe { TypedArray::push(arr, val) };
-            Ok(())
-        } else if let Some(hv) = arr_vw.as_heap_mut() {
-            match hv {
-                HeapValue::TypedArray(TypedArrayData::F64(buf)) => {
-                    Arc::make_mut(buf).data.push(val);
-                    Ok(())
-                }
-                HeapValue::Array(arr) => {
-                    Arc::make_mut(arr).push(ValueWord::from_f64(val));
-                    Ok(())
-                }
-                _ => Err(VMError::TypeError {
-                    expected: "Array<number>",
-                    got: hv.type_name(),
-                }),
+        let (arr_bits, arr_kind) = self.stack_take_kinded(slot);
+        let result = match arr_kind {
+            NativeKind::UInt64 => {
+                let arr = arr_bits as usize as *mut TypedArray<f64>;
+                unsafe { TypedArray::push(arr, val) };
+                Ok(())
             }
-        } else {
-            Err(VMError::TypeError {
-                expected: "Array<number>",
-                got: "non-heap value",
-            })
+            _ => Err(ckpt5_typed_array_surface("ArrayPushF64", arr_kind)),
         };
-        self.stack_write_raw(slot, arr_vw);
+        self.stack[slot] = arr_bits;
+        self.kinds[slot] = arr_kind;
         result
     }
 
-    // -----------------------------------------------------------------------
-    // ArrayLenTyped
-    // -----------------------------------------------------------------------
-
     fn op_array_len_typed(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let slot = self.resolve_local_slot(instruction)?;
+        let (arr_bits, arr_kind) = self.stack_read_kinded_raw(slot);
 
-        let len = self.stack_peek_raw(slot, |vw| -> Result<usize, VMError> {
-            // v2 raw-pointer fast path. The `len` field sits at a fixed offset
-            // regardless of T — any TypedArray<T> instantiation reads it the
-            // same way, so we safely use `TypedArray<u8>` here.
-            if let Some(p) = as_v2_typed_array_ptr(vw) {
-                let arr = p as *const TypedArray<u8>;
-                let len = unsafe { TypedArray::len(arr) } as usize;
-                return Ok(len);
+        let len: usize = match arr_kind {
+            NativeKind::UInt64 => {
+                let arr = arr_bits as usize as *const TypedArray<u8>;
+                unsafe { TypedArray::len(arr) as usize }
             }
-            if let Some(hv) = vw.as_heap_ref() {
-                match hv {
-                    HeapValue::TypedArray(ta) => Ok(match ta {
-                        TypedArrayData::I64(buf) => buf.data.len(),
-                        TypedArrayData::F64(buf) => buf.data.len(),
-                        TypedArrayData::Bool(buf) => buf.data.len(),
-                        TypedArrayData::I8(buf) => buf.data.len(),
-                        TypedArrayData::I16(buf) => buf.data.len(),
-                        TypedArrayData::I32(buf) => buf.data.len(),
-                        TypedArrayData::U8(buf) => buf.data.len(),
-                        TypedArrayData::U16(buf) => buf.data.len(),
-                        TypedArrayData::U32(buf) => buf.data.len(),
-                        TypedArrayData::U64(buf) => buf.data.len(),
-                        TypedArrayData::F32(buf) => buf.data.len(),
-                        TypedArrayData::Matrix(m) => m.data.len(),
-                        TypedArrayData::FloatSlice { len, .. } => *len as usize,
-                    }),
-                    HeapValue::Array(arr) => Ok(arr.len()),
-                    _ => Err(VMError::TypeError {
-                        expected: "array",
-                        got: hv.type_name(),
-                    }),
-                }
-            } else {
-                Err(VMError::TypeError {
-                    expected: "array",
-                    got: "non-heap value",
-                })
-            }
-        })?;
+            _ => return Err(ckpt5_typed_array_surface("ArrayLenTyped", arr_kind)),
+        };
 
-        // Push raw native i64 bits to match the post-Wave-E+5 native
-        // transport advertised by `last_emitted_native_kind` for
-        // `ArrayLenTyped` (helpers.rs:1110). Downstream typed consumers
-        // (`AddInt`, `LtInt`, the host-boundary synthesizer with
-        // `return_kind = Int64`) pop via `pop_native_i64`, so a tagged
-        // `from_i64` push here would produce a tagged-i48 0xFFF9... bit
-        // pattern that consumers re-decode as raw i64, corrupting the
-        // result (observed as `Some(-1970324836974587)` for `len() == 5`).
-        self.push_native_i64(len as i64)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use crate::bytecode::{Instruction, OpCode, Operand};
-    use crate::executor::{VMConfig, VirtualMachine};
-    use shape_value::heap_value::TypedArrayData;
-    use shape_value::typed_buffer::TypedBuffer;
-    use shape_value::{VMError, ValueWord, ValueWordExt};
-
-    /// Create a minimal VM with enough stack space for testing.
-    fn make_test_vm() -> VirtualMachine {
-        let mut vm = VirtualMachine::new(VMConfig::default());
-        // We need at least one stack slot for the array local.
-        // Push a placeholder (will be overwritten by store).
-        vm.push_raw_u64(ValueWord::none()).unwrap();
-        vm.push_raw_u64(ValueWord::none()).unwrap();
-        vm
-    }
-
-    /// Store a ValueWord into local slot 0 (absolute slot 0, since no call frames).
-    fn store_local(vm: &mut VirtualMachine, slot: usize, value: ValueWord) {
-        vm.stack_write_raw(slot, value);
-    }
-
-    /// Build an `IntArray` (TypedArrayData::I64) from a slice of i64 values.
-    fn make_int_array(values: &[i64]) -> ValueWord {
-        let buf = TypedBuffer::from_vec(values.to_vec());
-        ValueWord::from_int_array(Arc::new(buf))
-    }
-
-    /// Build a `FloatArray` (TypedArrayData::F64) from a slice of f64 values.
-    fn make_float_array(values: &[f64]) -> ValueWord {
-        use shape_value::typed_buffer::AlignedTypedBuffer;
-        use shape_value::aligned_vec::AlignedVec;
-        let mut av = AlignedVec::with_capacity(values.len());
-        for &v in values {
-            av.push(v);
-        }
-        let buf = AlignedTypedBuffer::from_aligned(av);
-        ValueWord::from_float_array(Arc::new(buf))
-    }
-
-    // ---- GetElemI64 on IntArray ----
-
-    #[test]
-    fn test_get_elem_i64_typed_array() {
-        let mut vm = make_test_vm();
-        store_local(&mut vm, 0, make_int_array(&[10, 20, 30]));
-
-        // Push index 1 onto the stack, then execute GetElemI64.
-        vm.push_raw_u64(ValueWord::from_i64(1)).unwrap();
-        let instr = Instruction::new(OpCode::GetElemI64, Some(Operand::Local(0)));
-        vm.exec_typed_array_elem_ops(&instr).unwrap();
-
-        let result = vm.pop_raw_u64().unwrap();
-        let vw = ValueWord::from_raw_bits(result);
-        assert_eq!(vw.as_i64(), Some(20));
-    }
-
-    // ---- GetElemF64 on FloatArray ----
-
-    #[test]
-    fn test_get_elem_f64_typed_array() {
-        let mut vm = make_test_vm();
-        store_local(&mut vm, 0, make_float_array(&[1.5, 2.7, 3.14]));
-
-        vm.push_raw_u64(ValueWord::from_i64(2)).unwrap();
-        let instr = Instruction::new(OpCode::GetElemF64, Some(Operand::Local(0)));
-        vm.exec_typed_array_elem_ops(&instr).unwrap();
-
-        let result = vm.pop_raw_u64().unwrap();
-        let vw = ValueWord::from_raw_bits(result);
-        assert!((vw.as_f64().unwrap() - 3.14).abs() < 1e-12);
-    }
-
-    // ---- SetElemI64 mutation ----
-
-    #[test]
-    fn test_set_elem_i64() {
-        let mut vm = make_test_vm();
-        store_local(&mut vm, 0, make_int_array(&[10, 20, 30]));
-
-        // SetElemI64: pops [index, value] — push index first, then value.
-        vm.push_raw_u64(ValueWord::from_i64(1)).unwrap(); // index
-        vm.push_raw_u64(ValueWord::from_i64(999)).unwrap(); // value
-        let instr = Instruction::new(OpCode::SetElemI64, Some(Operand::Local(0)));
-        vm.exec_typed_array_elem_ops(&instr).unwrap();
-
-        // Verify by reading back.
-        vm.push_raw_u64(ValueWord::from_i64(1)).unwrap();
-        let get_instr = Instruction::new(OpCode::GetElemI64, Some(Operand::Local(0)));
-        vm.exec_typed_array_elem_ops(&get_instr).unwrap();
-        let result = vm.pop_raw_u64().unwrap();
-        assert_eq!(ValueWord::from_raw_bits(result).as_i64(), Some(999));
-    }
-
-    // ---- SetElemF64 mutation ----
-
-    #[test]
-    fn test_set_elem_f64() {
-        let mut vm = make_test_vm();
-        store_local(&mut vm, 0, make_float_array(&[1.0, 2.0, 3.0]));
-
-        vm.push_raw_u64(ValueWord::from_i64(0)).unwrap(); // index
-        vm.push_raw_u64(ValueWord::from_f64(42.5)).unwrap(); // value
-        let instr = Instruction::new(OpCode::SetElemF64, Some(Operand::Local(0)));
-        vm.exec_typed_array_elem_ops(&instr).unwrap();
-
-        // Verify.
-        vm.push_raw_u64(ValueWord::from_i64(0)).unwrap();
-        let get_instr = Instruction::new(OpCode::GetElemF64, Some(Operand::Local(0)));
-        vm.exec_typed_array_elem_ops(&get_instr).unwrap();
-        let result = vm.pop_raw_u64().unwrap();
-        assert!((ValueWord::from_raw_bits(result).as_f64().unwrap() - 42.5).abs() < 1e-12);
-    }
-
-    // ---- ArrayPushI64 append ----
-
-    #[test]
-    fn test_array_push_i64() {
-        let mut vm = make_test_vm();
-        store_local(&mut vm, 0, make_int_array(&[10, 20]));
-
-        // Push value 30.
-        vm.push_raw_u64(ValueWord::from_i64(30)).unwrap();
-        let instr = Instruction::new(OpCode::ArrayPushI64, Some(Operand::Local(0)));
-        vm.exec_typed_array_elem_ops(&instr).unwrap();
-
-        // Verify length is now 3. `op_array_len_typed` pushes raw native i64
-        // bits per the post-Wave-E+5 contract, so decode the bits directly
-        // as an i64.
-        let len_instr = Instruction::new(OpCode::ArrayLenTyped, Some(Operand::Local(0)));
-        vm.exec_typed_array_elem_ops(&len_instr).unwrap();
-        let len = vm.pop_raw_u64().unwrap();
-        assert_eq!(len as i64, 3);
-
-        // Verify element at index 2.
-        vm.push_raw_u64(ValueWord::from_i64(2)).unwrap();
-        let get_instr = Instruction::new(OpCode::GetElemI64, Some(Operand::Local(0)));
-        vm.exec_typed_array_elem_ops(&get_instr).unwrap();
-        let result = vm.pop_raw_u64().unwrap();
-        assert_eq!(ValueWord::from_raw_bits(result).as_i64(), Some(30));
-    }
-
-    // ---- ArrayPushF64 append ----
-
-    #[test]
-    fn test_array_push_f64() {
-        let mut vm = make_test_vm();
-        store_local(&mut vm, 0, make_float_array(&[1.0]));
-
-        vm.push_raw_u64(ValueWord::from_f64(2.5)).unwrap();
-        let instr = Instruction::new(OpCode::ArrayPushF64, Some(Operand::Local(0)));
-        vm.exec_typed_array_elem_ops(&instr).unwrap();
-
-        // Verify length is 2. Native i64 bits — see `test_array_push_i64`.
-        let len_instr = Instruction::new(OpCode::ArrayLenTyped, Some(Operand::Local(0)));
-        vm.exec_typed_array_elem_ops(&len_instr).unwrap();
-        let len = vm.pop_raw_u64().unwrap();
-        assert_eq!(len as i64, 2);
-
-        // Verify element at index 1.
-        vm.push_raw_u64(ValueWord::from_i64(1)).unwrap();
-        let get_instr = Instruction::new(OpCode::GetElemF64, Some(Operand::Local(0)));
-        vm.exec_typed_array_elem_ops(&get_instr).unwrap();
-        let result = vm.pop_raw_u64().unwrap();
-        assert!((ValueWord::from_raw_bits(result).as_f64().unwrap() - 2.5).abs() < 1e-12);
-    }
-
-    // ---- ArrayLenTyped ----
-
-    #[test]
-    fn test_array_len_typed() {
-        let mut vm = make_test_vm();
-        store_local(&mut vm, 0, make_int_array(&[1, 2, 3, 4, 5]));
-
-        let instr = Instruction::new(OpCode::ArrayLenTyped, Some(Operand::Local(0)));
-        vm.exec_typed_array_elem_ops(&instr).unwrap();
-        // `op_array_len_typed` pushes raw native i64 bits.
-        let len = vm.pop_raw_u64().unwrap();
-        assert_eq!(len as i64, 5);
-    }
-
-    #[test]
-    fn test_array_len_typed_float() {
-        let mut vm = make_test_vm();
-        store_local(&mut vm, 0, make_float_array(&[1.0, 2.0]));
-
-        let instr = Instruction::new(OpCode::ArrayLenTyped, Some(Operand::Local(0)));
-        vm.exec_typed_array_elem_ops(&instr).unwrap();
-        let len = vm.pop_raw_u64().unwrap();
-        assert_eq!(len as i64, 2);
-    }
-
-    // ---- Out-of-bounds error handling ----
-
-    #[test]
-    fn test_get_elem_i64_out_of_bounds() {
-        let mut vm = make_test_vm();
-        store_local(&mut vm, 0, make_int_array(&[10, 20]));
-
-        vm.push_raw_u64(ValueWord::from_i64(5)).unwrap();
-        let instr = Instruction::new(OpCode::GetElemI64, Some(Operand::Local(0)));
-        let err = vm.exec_typed_array_elem_ops(&instr);
-        assert!(err.is_err());
-        match err.unwrap_err() {
-            VMError::IndexOutOfBounds { index, length } => {
-                assert_eq!(index, 5);
-                assert_eq!(length, 2);
-            }
-            other => panic!("Expected IndexOutOfBounds, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn test_get_elem_i64_negative_index() {
-        let mut vm = make_test_vm();
-        store_local(&mut vm, 0, make_int_array(&[10, 20]));
-
-        vm.push_raw_u64(ValueWord::from_i64(-1)).unwrap();
-        let instr = Instruction::new(OpCode::GetElemI64, Some(Operand::Local(0)));
-        let err = vm.exec_typed_array_elem_ops(&instr);
-        assert!(err.is_err());
-    }
-
-    #[test]
-    fn test_set_elem_i64_out_of_bounds() {
-        let mut vm = make_test_vm();
-        store_local(&mut vm, 0, make_int_array(&[10]));
-
-        vm.push_raw_u64(ValueWord::from_i64(5)).unwrap(); // index
-        vm.push_raw_u64(ValueWord::from_i64(999)).unwrap(); // value
-        let instr = Instruction::new(OpCode::SetElemI64, Some(Operand::Local(0)));
-        let err = vm.exec_typed_array_elem_ops(&instr);
-        assert!(err.is_err());
-    }
-
-    #[test]
-    fn test_get_elem_f64_out_of_bounds() {
-        let mut vm = make_test_vm();
-        store_local(&mut vm, 0, make_float_array(&[1.0]));
-
-        vm.push_raw_u64(ValueWord::from_i64(10)).unwrap();
-        let instr = Instruction::new(OpCode::GetElemF64, Some(Operand::Local(0)));
-        let err = vm.exec_typed_array_elem_ops(&instr);
-        assert!(err.is_err());
-    }
-
-    // ---- Generic Array fallback ----
-
-    #[test]
-    fn test_get_elem_i64_generic_array_fallback() {
-        let mut vm = make_test_vm();
-        // Create a generic Array (not TypedArrayData).
-        let arr: shape_value::VMArray = shape_value::vmarray_from_vec(vec![
-            ValueWord::from_i64(100),
-            ValueWord::from_i64(200),
-        ]);
-        let vw = ValueWord::from_heap_value(shape_value::HeapValue::Array(arr));
-        store_local(&mut vm, 0, vw);
-
-        vm.push_raw_u64(ValueWord::from_i64(1)).unwrap();
-        let instr = Instruction::new(OpCode::GetElemI64, Some(Operand::Local(0)));
-        vm.exec_typed_array_elem_ops(&instr).unwrap();
-
-        let result = vm.pop_raw_u64().unwrap();
-        assert_eq!(ValueWord::from_raw_bits(result).as_i64(), Some(200));
-    }
-
-    #[test]
-    fn test_array_len_typed_generic_array() {
-        let mut vm = make_test_vm();
-        let arr: shape_value::VMArray = shape_value::vmarray_from_vec(vec![
-            ValueWord::from_i64(1),
-            ValueWord::from_i64(2),
-            ValueWord::from_i64(3),
-        ]);
-        let vw = ValueWord::from_heap_value(shape_value::HeapValue::Array(arr));
-        store_local(&mut vm, 0, vw);
-
-        let instr = Instruction::new(OpCode::ArrayLenTyped, Some(Operand::Local(0)));
-        vm.exec_typed_array_elem_ops(&instr).unwrap();
-        // `op_array_len_typed` pushes raw native i64 bits regardless of
-        // backing array kind (heap-boxed `HeapValue::Array` here).
-        let len = vm.pop_raw_u64().unwrap();
-        assert_eq!(len as i64, 3);
+        self.push_kinded(len as i64 as u64, NativeKind::Int64)
     }
 }

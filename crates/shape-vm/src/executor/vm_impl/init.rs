@@ -1,5 +1,5 @@
 use super::super::*;
-use shape_value::ValueWordExt;
+use shape_value::NativeKind;
 
 impl VirtualMachine {
     pub fn new(config: VMConfig) -> Self {
@@ -23,9 +23,19 @@ impl VirtualMachine {
             config,
             program,
             ip: 0,
-            stack: vec![ValueWord::none().into_raw_bits(); crate::constants::DEFAULT_STACK_CAPACITY],
+            // ADR-006 §2.7.7 / Q9: typed VM stack is `Vec<u64>` data plus
+            // parallel `Vec<NativeKind>` kind track. Slots above `sp` are
+            // pre-allocated dead space; their kind is `Bool` by convention
+            // (Drop is a no-op for Bool, so dead bits never leak refcount).
+            stack: vec![0u64; crate::constants::DEFAULT_STACK_CAPACITY],
+            kinds: vec![NativeKind::Bool; crate::constants::DEFAULT_STACK_CAPACITY],
             sp: 0,
+            // ADR-006 §2.7.8 / Q10: module-binding storage carries a
+            // parallel `NativeKind` track in lockstep with the raw bits.
+            // Both vecs start empty; the resize-pad helper grows them
+            // together (see `VirtualMachine::module_binding_pad_to_kinded`).
             module_bindings: Vec::new(),
+            module_binding_kinds: Vec::new(),
             shared_module_bindings: std::collections::HashSet::new(),
             call_stack: Vec::with_capacity(crate::constants::DEFAULT_CALL_STACK_CAPACITY),
             loop_stack: Vec::new(),
@@ -39,7 +49,6 @@ impl VirtualMachine {
             last_error_file: None,
             last_uncaught_exception: None,
             module_init_done: false,
-            last_program_return_kind: None,
             output_buffer: None,
             module_registry: shape_runtime::module_exports::ModuleExportRegistry::new(),
             module_fn_table: Vec::new(),

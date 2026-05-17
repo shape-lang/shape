@@ -3,7 +3,6 @@
 use std::alloc::{Layout, alloc_zeroed, dealloc};
 
 use super::{TYPED_OBJECT_ALIGNMENT, TYPED_OBJECT_HEADER_SIZE, TypedObject};
-use crate::ffi::jit_kinds::*;
 use crate::ffi::value_ffi::*;
 use shape_runtime::type_schema::{SchemaId, TypeSchema};
 
@@ -87,12 +86,22 @@ pub extern "C" fn jit_typed_object_alloc(schema_id: u32, data_size: u64) -> u64 
         TAG_NULL
     } else {
         let result = box_typed_object(ptr as *const u8);
-        if std::env::var_os("SHAPE_JIT_TRACE").is_some() {
-            let payload = (result & shape_value::tag_bits::PAYLOAD_MASK) as *const u8;
-            let first2 = unsafe { *(payload as *const u16) };
+        if tracing::enabled!(target: "shape_jit", tracing::Level::TRACE) {
+            // Per ADR-006 §2.7.5, the JIT-FFI carries raw `u64` plus a parallel
+            // `NativeKind` companion stamped at JIT compile time from the call
+            // signature; the trace site previously decoded the payload via the
+            // deleted `tag_bits::PAYLOAD_MASK` projection. The kind companion
+            // for a typed-object allocation is statically known
+            // (`HK_TYPED_OBJECT`) at the producing call signature.
             let kind = unsafe { crate::ffi::value_ffi::heap_kind(result) };
-            eprintln!("[alloc] schema={} result={:#x} payload={:?} first2={} kind={:?} HK_TYPED_OBJECT={}",
-                schema_id, result, payload, first2, kind, crate::ffi::value_ffi::HK_TYPED_OBJECT);
+            tracing::trace!(
+                target: "shape_jit",
+                schema = schema_id,
+                result = result,
+                kind = ?kind,
+                hk_typed_object = crate::ffi::value_ffi::HK_TYPED_OBJECT,
+                "typed-object alloc",
+            );
         }
         result
     }
@@ -149,10 +158,23 @@ pub extern "C" fn jit_new_typed_object(
 /// Increment reference count on a typed object.
 ///
 /// # Arguments
-/// * `obj_bits` - NaN-boxed typed object (TAG_TYPED_OBJECT)
+/// * `obj_bits` - raw `Box::into_raw(UnifiedValue<*const TypedObject>) as u64`
+///   per ADR-006 §2.7.5 stamp-at-compile-time. The companion `NativeKind` is
+///   `Ptr(HeapKind::TypedObject)` stamped at the JIT-emitted call signature.
+///
+/// W17-narrow (Phase 3 cluster-0 Round 15, 2026-05-13): removed the
+/// `is_typed_object(obj_bits)` precondition — same recipe as the W12-jit-
+/// binop-after-heap-read-kind-tracker close (2026-05-12) already applied
+/// to `jit_typed_object_get_field` / `_set_field`. Under §2.7.5 the JIT
+/// allocator (`unified_box` / `heap_box`) returns raw `Box::into_raw`
+/// pointers without NaN-box tag bits, so `is_typed_object` = `is_heap_kind
+/// (bits, HK_TYPED_OBJECT) -> is_heap(bits) && …` always returned false
+/// and every call to `_inc_ref` silently no-op'd — an unbalanced refcount
+/// bug. The kind is stamped at the call signature per the parallel-kind
+/// companion; null-pointer guards remain as defensive checks.
 #[unsafe(no_mangle)]
 pub extern "C" fn jit_typed_object_inc_ref(obj_bits: u64) {
-    if !is_typed_object(obj_bits) {
+    if obj_bits == 0 {
         return;
     }
 
@@ -168,11 +190,16 @@ pub extern "C" fn jit_typed_object_inc_ref(obj_bits: u64) {
 /// Frees the object if ref_count reaches 0.
 ///
 /// # Arguments
-/// * `obj_bits` - NaN-boxed typed object (TAG_TYPED_OBJECT)
+/// * `obj_bits` - raw `Box::into_raw(UnifiedValue<*const TypedObject>) as u64`
+///   per ADR-006 §2.7.5 stamp-at-compile-time. The companion `NativeKind` is
+///   `Ptr(HeapKind::TypedObject)` stamped at the JIT-emitted call signature.
 /// * `data_size` - Size of field data (needed for deallocation)
+///
+/// W17-narrow (Phase 3 cluster-0 Round 15, 2026-05-13): dropped
+/// `is_typed_object(obj_bits)` gate per `_inc_ref`'s commentary above.
 #[unsafe(no_mangle)]
 pub extern "C" fn jit_typed_object_dec_ref(obj_bits: u64, data_size: u64) {
-    if !is_typed_object(obj_bits) {
+    if obj_bits == 0 {
         return;
     }
 

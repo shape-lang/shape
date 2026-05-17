@@ -6,29 +6,243 @@
 //! - Faster than large match statements (O(1) vs O(n))
 //! - Self-documenting: all methods visible in one place
 //! - Easy to maintain: add method = one line in phf_map + implementation
+//!
+//! ## ABI: kinded `&[KindedSlot]` carrier slice (ADR-006 §2.7.9 / Q11)
+//!
+//! Handlers take an `args: &[KindedSlot]` carrier slice and return
+//! `Result<KindedSlot, VMError>`. `args[0]` is the receiver, `args[1..]`
+//! are the call arguments. The dispatch shell `op_call_method` in
+//! `crates/shape-vm/src/executor/objects/mod.rs` constructs the slice
+//! from popped stack args (kind sourced from the §2.7.7 stack
+//! parallel-`Vec<NativeKind>` track — no fabrication), and pushes the
+//! returned `KindedSlot` onto the stack via `push_kinded`.
+//!
+//! Bodies dispatch on `args[i].kind` per §2.7.6 / Q8 heterogeneous-kind
+//! body pattern, going through `args[i].slot.as_heap_value()` +
+//! `HeapValue` match for heap arms (preserves ADR-005 §1
+//! single-discriminator). The pre-§2.7.9 kind-blind ABI
+//! (`args: &mut [u64]` + `Result<u64, VMError>`) is deleted; see
+//! ADR-006 §2.7.9 for the architectural ruling and the W-series
+//! defection-attractor family that ABI sat in.
 
 use crate::executor::VirtualMachine;
-use phf::phf_map;
+use phf::{phf_map, phf_set};
 use shape_runtime::context::ExecutionContext;
-use shape_value::{VMError, ValueWord};
+use shape_value::{KindedSlot, VMError};
 
-/// Method handler: operates on raw u64 stack slots — no Vec, no ValueWord on the hot path.
+/// Method handler ABI — kinded carrier slice in, kinded result out
+/// (ADR-006 §2.7.9 / Q11).
 ///
-/// - `vm`: Mutable VM instance
-/// - `args`: `args[0]` = receiver, `args[1..]` = arguments, all raw u64 bits.
-///   **Mutable** so handlers can update pointers after in-place mutation
-///   (e.g. `as_heap_mut` → `Arc::make_mut` may reallocate).
-///   The dispatcher owns these bits and drops them after the handler returns.
-/// - `ctx`: Optional execution context
-/// - Returns: `Result<u64, VMError>` — raw result bits pushed onto the stack.
+/// - `vm`: Mutable VM instance.
+/// - `args`: `args[0]` = receiver, `args[1..]` = arguments, all
+///   `KindedSlot` carriers (per §2.7.1 case 4 dispatch-slice form).
+///   **Borrow-only** (`&[..]`, not `&mut [..]`): the dispatch shell
+///   owns each `KindedSlot`'s share for the call duration and
+///   releases it via the carrier's `Drop` (which dispatches to
+///   `drop_with_kind` keyed on `kind`). Handlers borrow each entry.
+/// - `ctx`: Optional execution context.
+/// - Returns: `Result<KindedSlot, VMError>` — the result carrier.
+///   The dispatch shell takes ownership of the returned `KindedSlot`'s
+///   share, pushes it onto the stack via `push_kinded`, and skips the
+///   carrier-drop via `mem::forget` to balance refcounts.
 pub type MethodFnV2 = fn(
     &mut VirtualMachine,
-    args: &mut [u64],
+    args: &[KindedSlot],
     ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError>;
+) -> Result<KindedSlot, VMError>;
 
 /// Method handler stored in PHF maps.
 pub type MethodHandler = MethodFnV2;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// `&mut self` opt-in registries (ADR-006 §2.7.27 / Item 4 ruling, 2026-05-12)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Methods that mutate the receiver Arc (i.e. call `Arc::make_mut` on the
+// receiver and return a possibly-new Arc) opt in by name in the per-kind
+// `MUT_SELF_*` `phf::Set` below. The compiler reads these to decide whether
+// to emit a write-back to the receiver's binding slot after `CallMethod`
+// (see `compile_expr_method_call`'s mutation-writeback path). The runtime
+// dispatch shell does NOT consult these — write-back is purely a compile-
+// time concern (the dispatch shell already pops the receiver, so the
+// source-binding identity is lost at the runtime layer).
+//
+// **Interior-mutability primitives (`Mutex` / `Atomic` / `Lazy` / `Channel`)
+// are NOT in these sets.** Their mutating methods (`Mutex.set`,
+// `Atomic.store`, `Lazy.get`, `Channel.send` / `close`, etc.) preserve the
+// receiver's Arc identity — the mutation happens through `RefCell` /
+// `AtomicI64` / `OnceCell` / channel-buffer inside the carrier. No
+// write-back is required and `let m = Mutex(0); m.set(5)` stays valid (the
+// binding itself is immutable; what changes is the shared interior).
+
+/// HashSet methods that opt into `&mut self` semantics.
+pub static MUT_SELF_HASHSET_METHODS: phf::Set<&'static str> = phf_set! {
+    "add",
+    "delete",
+};
+
+/// HashMap methods that opt into `&mut self` semantics.
+pub static MUT_SELF_HASHMAP_METHODS: phf::Set<&'static str> = phf_set! {
+    "set",
+    "delete",
+    "merge",
+};
+
+/// Array methods that opt into `&mut self` semantics.
+///
+/// `push` already writes back via the bespoke `ArrayPushLocal` /
+/// typed-array push opcodes for identifier receivers (see
+/// `compile_expr_method_call`); listed here so the generic fallback
+/// path also writes back when the bespoke path isn't taken.
+///
+/// **NOT listed:** `pop`. Pop's return value is the popped element
+/// (`Option<T>`), not the mutated array — generic-writeback semantics
+/// would corrupt the binding by writing the element bits into the
+/// array slot. The pre-ruling `pop` behaviour (mutation visible only
+/// when the user does `arr = arr.pop()` and discards the popped
+/// element) is preserved; a future amendment can add a tuple-return
+/// ABI for pop-shaped methods.
+pub static MUT_SELF_ARRAY_METHODS: phf::Set<&'static str> = phf_set! {
+    "push",
+};
+
+/// Deque methods that opt into `&mut self` semantics.
+///
+/// Same return-value rule as `MUT_SELF_ARRAY_METHODS`: only listed when
+/// the handler returns the (mutated) receiver Arc. `popBack` /
+/// `popFront` return the popped element, so they stay off the writeback
+/// set (deferred to a future tuple-return ABI).
+pub static MUT_SELF_DEQUE_METHODS: phf::Set<&'static str> = phf_set! {
+    "pushBack",
+    "pushFront",
+};
+
+/// PriorityQueue methods that opt into `&mut self` semantics.
+///
+/// `pop` returns the popped element, not the mutated queue — see
+/// `MUT_SELF_ARRAY_METHODS` for the return-value rule.
+pub static MUT_SELF_PRIORITY_QUEUE_METHODS: phf::Set<&'static str> = phf_set! {
+    "push",
+};
+
+/// TypedArray<i64> / TypedArray<f64> methods that opt into `&mut self`.
+///
+/// The shared set covers both `TYPED_INT_ARRAY_METHODS` and
+/// `TYPED_NUMBER_ARRAY_METHODS` PHF registries — `push` / `set` mutate
+/// the underlying TypedBuffer via Arc::make_mut and return the
+/// (mutated) array. `pop` is excluded per the same return-value rule
+/// as `MUT_SELF_ARRAY_METHODS`.
+pub static MUT_SELF_TYPED_ARRAY_METHODS: phf::Set<&'static str> = phf_set! {
+    "push",
+    "set",
+};
+
+/// Returns `true` if `method` is a name registered as `&mut self` for ANY
+/// container/collection receiver class.
+///
+/// This is the compiler-side liberal classifier: when the receiver type
+/// is unknown at compile time, the compiler may still emit a write-back
+/// for any name that's known to mutate on some container kind. The
+/// write-back is harmless when the actual receiver kind turns out to be
+/// pure (the handler returns the same Arc identity, the StoreLocal
+/// re-stores the same bits — net effect: no-op modulo refcount churn).
+///
+/// Used by `compile_expr_method_call`'s writeback emission gate.
+pub fn is_mut_self_method_name(method: &str) -> bool {
+    MUT_SELF_HASHSET_METHODS.contains(method)
+        || MUT_SELF_HASHMAP_METHODS.contains(method)
+        || MUT_SELF_ARRAY_METHODS.contains(method)
+        || MUT_SELF_DEQUE_METHODS.contains(method)
+        || MUT_SELF_PRIORITY_QUEUE_METHODS.contains(method)
+        || MUT_SELF_TYPED_ARRAY_METHODS.contains(method)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Tuple-return `&mut self` opt-in registries (ADR-006 §2.7.27 amendment,
+// W17-pop-mutation, 2026-05-12)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Pop-shaped methods extract an element from a collection AND mutate the
+// collection's structure. The conceptual dispatch signature is
+// `(&mut self) -> (Option<T>, Self)` — the user-facing return is the popped
+// element (`Option<T>`); the new container Arc is published as a side
+// effect on the VM stack and the compiler emits a post-CallMethod
+// `Swap; Store*(receiver)` to write it back to the binding slot (r-value
+// receivers get `Swap; Pop` for silent drop, mirroring §2.7.27's r-value
+// silent-drop rule for self-returning mutators).
+//
+// The runtime `MethodFnV2` ABI is unchanged — the handler still returns
+// `Result<KindedSlot, VMError>`. The convention is: a tuple-return handler
+// `vm.push_kinded(new_self_bits, new_self_kind)` before returning the
+// popped element. The dispatch shell pushes the returned popped element on
+// top, so the post-call stack is `[..., NewSelf, popped_element]`. The
+// compiler emits the post-CallMethod opcode pair that consumes `NewSelf`
+// per the receiver-rooting rule.
+//
+// Hard rule (binding, per W17-pop-mutation dispatch text §"Forbidden
+// patterns"): tuple-return is used ONLY for methods that satisfy BOTH
+// (a) canonical-extraction-from-collection AND (b) structural-mutation-
+// of-collection. Forbidden examples: `find` (no structural mutation),
+// `entry_or_default` (returns reference-into-collection — wrong shape),
+// `peek_first` (no mutation), `iter().next()` (iteration cursor mutation,
+// not container mutation).
+
+/// Array methods that opt into the tuple-return `&mut self` ABI variant.
+///
+/// `pop` extracts the last element and mutates the array — the handler
+/// returns `Option<T>` (the popped element) and side-channel-publishes
+/// the new `Arc<TypedArrayData>` to the VM stack before returning. The
+/// compiler emits `Swap; Store*(receiver)` after `CallMethod` to write
+/// back; r-value receivers get `Swap; Pop` (silent drop, mirror of
+/// §2.7.27 self-return r-value rule).
+pub static MUT_SELF_TUPLE_RETURN_ARRAY_METHODS: phf::Set<&'static str> = phf_set! {
+    "pop",
+};
+
+/// Deque methods that opt into the tuple-return `&mut self` ABI variant.
+///
+/// `popBack` / `popFront` extract an end element and mutate the deque.
+/// Same shape as `MUT_SELF_TUPLE_RETURN_ARRAY_METHODS`.
+pub static MUT_SELF_TUPLE_RETURN_DEQUE_METHODS: phf::Set<&'static str> = phf_set! {
+    "popBack",
+    "popFront",
+};
+
+/// PriorityQueue methods that opt into the tuple-return `&mut self` ABI
+/// variant.
+///
+/// `pop` extracts the minimum priority and mutates the heap. Same shape
+/// as `MUT_SELF_TUPLE_RETURN_ARRAY_METHODS`.
+pub static MUT_SELF_TUPLE_RETURN_PRIORITY_QUEUE_METHODS: phf::Set<&'static str> = phf_set! {
+    "pop",
+};
+
+/// HashMap methods that opt into the tuple-return `&mut self` ABI variant.
+///
+/// `remove(k)` returns the popped value (`Option<V>`) and mutates the map.
+/// The pre-existing `delete(k)` method keeps the self-returning shape used
+/// by `stdlib-src/core/set.shape::remove` (which wraps `s.delete(item)`
+/// and returns the new set) — adding `remove` as a parallel method
+/// preserves the self-return contract while exposing the canonical
+/// pop-shape ABI for callers that want `Option<V>`.
+pub static MUT_SELF_TUPLE_RETURN_HASHMAP_METHODS: phf::Set<&'static str> = phf_set! {
+    "remove",
+};
+
+/// Returns `true` if `method` is a name registered as tuple-return
+/// `&mut self` for ANY container/collection receiver class.
+///
+/// Mirror of `is_mut_self_method_name` for the tuple-return ABI variant.
+/// Used by `compile_expr_method_call`'s post-CallMethod writeback gate
+/// to choose between (a) self-return `Dup; Store*` shape (existing
+/// W17-mutation-writeback), (b) tuple-return `Swap; Store*` / `Swap; Pop`
+/// shape (this amendment).
+pub fn is_mut_self_tuple_return_method_name(method: &str) -> bool {
+    MUT_SELF_TUPLE_RETURN_ARRAY_METHODS.contains(method)
+        || MUT_SELF_TUPLE_RETURN_DEQUE_METHODS.contains(method)
+        || MUT_SELF_TUPLE_RETURN_PRIORITY_QUEUE_METHODS.contains(method)
+        || MUT_SELF_TUPLE_RETURN_HASHMAP_METHODS.contains(method)
+}
 
 /// PHF registry for Array methods (47 methods total)
 ///
@@ -194,24 +408,17 @@ pub static DATATABLE_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "forwardFill" => crate::executor::objects::datatable_methods::handle_forward_fill,
 };
 
-/// PHF registry for Column methods (10 methods)
-///
-/// **Aggregation:** len, sum, mean, min, max, std
-/// **Access:** first, last, toArray
-/// **Transform:** abs
-pub static COLUMN_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
-    "len" => crate::executor::objects::column_methods::v2_len,
-    "length" => crate::executor::objects::column_methods::v2_len,
-    "sum" => crate::executor::objects::column_methods::v2_sum,
-    "mean" => crate::executor::objects::column_methods::v2_mean,
-    "min" => crate::executor::objects::column_methods::v2_min,
-    "max" => crate::executor::objects::column_methods::v2_max,
-    "std" => crate::executor::objects::column_methods::v2_std,
-    "first" => crate::executor::objects::column_methods::v2_first,
-    "last" => crate::executor::objects::column_methods::v2_last,
-    "toArray" => crate::executor::objects::column_methods::v2_to_array,
-    "abs" => crate::executor::objects::column_methods::v2_abs,
-};
+// (W15-column, 2026-05-10) `COLUMN_METHODS` PHF deleted per ADR-006
+// §2.7.21 / Q22. There is no surviving `HeapKind::Column`: the kinded
+// equivalent of the deleted `HeapValue::ColumnRef` payload is a
+// `HeapKind::TableView` slot carrying a `TableViewData::ColumnRef
+// { schema_id, table, col_id }` projection (see
+// `crates/shape-value/src/heap_value.rs`). The PHF previously routed
+// to 11 `NotImplemented(SURFACE)` stubs and was unreachable in
+// practice — no dispatch shell classified a receiver kind into
+// `COLUMN_METHODS`. Column-shaped APIs (aggregation across a single
+// table column) belong on `TableView::ColumnRef` and live in
+// `crates/shape-vm/src/executor/objects/datatable_methods/`.
 
 /// PHF registry for HashMap methods (18 methods)
 ///
@@ -224,6 +431,10 @@ pub static HASHMAP_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "set" => crate::executor::objects::hashmap_methods::v2_set,
     "has" => crate::executor::objects::hashmap_methods::v2_has,
     "delete" => crate::executor::objects::hashmap_methods::v2_delete,
+    // ADR-006 §2.7.27 amendment (W17-pop-mutation, 2026-05-12):
+    // `remove(k)` is the canonical pop-shape sibling of `delete(k)` —
+    // returns `Option<V>` (the removed value) instead of the (new) map.
+    "remove" => crate::executor::objects::hashmap_methods::v2_remove,
     "keys" => crate::executor::objects::hashmap_methods::v2_keys,
     "values" => crate::executor::objects::hashmap_methods::v2_values,
     "entries" => crate::executor::objects::hashmap_methods::v2_entries,
@@ -540,13 +751,18 @@ pub static INT_ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
 /// and delegate to the typed element primitives in
 /// `executor::v2_handlers::v2_array_detect` (read/write/push/pop/sum).
 ///
-/// **Methods:** len, length, push, pop, sum, first, last, get, set.
+/// **Methods:** len, length, push, pop, sum, avg, min, max, first, last,
+/// get, set.
 pub static TYPED_INT_ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "len" => crate::executor::objects::typed_int_array_methods::len,
     "length" => crate::executor::objects::typed_int_array_methods::len,
     "push" => crate::executor::objects::typed_int_array_methods::push,
     "pop" => crate::executor::objects::typed_int_array_methods::pop,
     "sum" => crate::executor::objects::typed_int_array_methods::sum,
+    "avg" => crate::executor::objects::typed_int_array_methods::avg,
+    "mean" => crate::executor::objects::typed_int_array_methods::avg,
+    "min" => crate::executor::objects::typed_int_array_methods::min,
+    "max" => crate::executor::objects::typed_int_array_methods::max,
     "first" => crate::executor::objects::typed_int_array_methods::first,
     "last" => crate::executor::objects::typed_int_array_methods::last,
     "get" => crate::executor::objects::typed_int_array_methods::get,
@@ -560,13 +776,18 @@ pub static TYPED_INT_ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_
 /// [`TYPED_INT_ARRAY_METHODS`] for the dispatch contract; this map is the
 /// `f64` counterpart.
 ///
-/// **Methods:** len, length, push, pop, sum, first, last, get, set.
+/// **Methods:** len, length, push, pop, sum, avg, min, max, first, last,
+/// get, set.
 pub static TYPED_NUMBER_ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "len" => crate::executor::objects::typed_number_array_methods::len,
     "length" => crate::executor::objects::typed_number_array_methods::len,
     "push" => crate::executor::objects::typed_number_array_methods::push,
     "pop" => crate::executor::objects::typed_number_array_methods::pop,
     "sum" => crate::executor::objects::typed_number_array_methods::sum,
+    "avg" => crate::executor::objects::typed_number_array_methods::avg,
+    "mean" => crate::executor::objects::typed_number_array_methods::avg,
+    "min" => crate::executor::objects::typed_number_array_methods::min,
+    "max" => crate::executor::objects::typed_number_array_methods::max,
     "first" => crate::executor::objects::typed_number_array_methods::first,
     "last" => crate::executor::objects::typed_number_array_methods::last,
     "get" => crate::executor::objects::typed_number_array_methods::get,
@@ -592,11 +813,17 @@ pub static BOOL_ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! 
 // Concurrency primitives — compiler-builtin interior mutability types
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Mutex<T> methods: lock, try_lock, set
+/// Mutex<T> methods: lock, try_lock, set, get
+///
+/// `get` is the read-accessor for the wrapped value (the surface-level
+/// `m.value` property-access form requires GetProp dispatch on heap
+/// receivers — out of scope for W17-concurrency; the method form is the
+/// equivalent accessor user code calls). ADR-006 §2.7.25.
 pub static MUTEX_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "lock" => crate::executor::objects::concurrency_methods::v2_mutex_lock,
     "try_lock" => crate::executor::objects::concurrency_methods::v2_mutex_try_lock,
     "set" => crate::executor::objects::concurrency_methods::v2_mutex_set,
+    "get" => crate::executor::objects::concurrency_methods::v2_mutex_get,
 };
 
 /// Atomic<T> methods: load, store, fetch_add, fetch_sub, compare_exchange
@@ -631,9 +858,11 @@ pub static CHANNEL_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
 /// **Conversion:** toInt, to_int, toNumber, to_number
 /// **Predicates:** isNaN, is_nan, isFinite, is_finite
 ///
-/// Methods NOT in this map (they need Vec<ValueWord> for multi-arg or string
-/// return): toFixed, to_fixed, toString, to_string, clamp — handled by the
-/// inline `handle_number_method` fallback.
+/// Pre-§2.7.9 note: methods that historically lived outside this map
+/// because they needed multi-arg or string-return shapes are now
+/// uniform under the kinded `&[KindedSlot]` carrier ABI. `toFixed`,
+/// `to_fixed`, `toString`, `to_string`, `clamp` are entered alongside
+/// the rest.
 pub static NUMBER_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "floor" => crate::executor::objects::number_methods::number_floor_v2,
     "ceil" => crate::executor::objects::number_methods::number_ceil_v2,
@@ -800,7 +1029,20 @@ pub static CONTENT_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "yLabel" => crate::executor::objects::content_methods::v2_content_y_label_camel,
 };
 
-/// PHF registry for Range methods
+/// PHF registry for Range methods (W15-range, ADR-006 §2.7.23 / Q24).
+///
+/// **Conversion:** iter, toArray
+/// **Bound test:** contains
+/// **Accessors:** start, end, step, length, size, len, isEmpty
 pub static RANGE_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
-    "iter" => crate::executor::objects::iterator_methods::v2_range_iter,
+    "iter" => crate::executor::objects::range_methods::range_iter,
+    "toArray" => crate::executor::objects::range_methods::range_to_array,
+    "contains" => crate::executor::objects::range_methods::range_contains,
+    "start" => crate::executor::objects::range_methods::range_start,
+    "end" => crate::executor::objects::range_methods::range_end,
+    "step" => crate::executor::objects::range_methods::range_step,
+    "length" => crate::executor::objects::range_methods::range_length,
+    "size" => crate::executor::objects::range_methods::range_length,
+    "len" => crate::executor::objects::range_methods::range_length,
+    "isEmpty" => crate::executor::objects::range_methods::range_is_empty,
 };

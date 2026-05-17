@@ -192,6 +192,74 @@ pub struct Program {
     #[serde(default)]
     pub top_level_frame: Option<FrameDescriptor>,
 
+    /// Per-slot fully-resolved `ConcreteType` for top-level locals.
+    ///
+    /// ADR-006 §2.7.5 conduit (content-addressed mirror of
+    /// `BytecodeProgram.top_level_local_concrete_types`). Survives the
+    /// `Program` → `link()` → `LinkedProgram` → `BytecodeProgram`
+    /// round-trip so JIT compilation of in-memory-compiled programs can
+    /// use the typed-array / TypedObject fast paths. Not serialised —
+    /// `ConcreteType` carries opaque registry IDs that aren't a stable
+    /// wire shape; cached-program loads fall through to the legacy
+    /// NaN-boxed path.
+    #[serde(skip, default)]
+    pub top_level_local_concrete_types: Vec<shape_value::v2::ConcreteType>,
+
+    /// Per-user-function per-MIR-slot `ConcreteType` side-table.
+    ///
+    /// ADR-006 §2.7.5 conduit (W12-jit-aggregate-non-array, 2026-05-12):
+    /// content-addressed mirror of
+    /// `BytecodeProgram.function_local_concrete_types`. Survives the
+    /// `Program` → `link()` → `LinkedProgram` → `BytecodeProgram` round-
+    /// trip so JIT compilation of in-memory-compiled programs can use
+    /// the TypedObject Aggregate short-circuit inside user-function
+    /// bodies (Smoke 1.5 `divide`, Smoke 2 `first_positive`, 28 stdlib
+    /// helpers). Not serialised — same rationale as
+    /// `top_level_local_concrete_types`.
+    #[serde(skip, default)]
+    pub function_local_concrete_types: Vec<Vec<shape_value::v2::ConcreteType>>,
+
+    /// Per-user-function declared `ConcreteType` for the return value.
+    ///
+    /// ADR-006 §2.7.5 conduit (W12-jit-call-return-kind close, 2026-05-12):
+    /// content-addressed mirror of
+    /// `BytecodeProgram.function_return_concrete_types`. Survives the
+    /// `Program` → `link()` → `LinkedProgram` → `BytecodeProgram`
+    /// round-trip so the conduit can stamp Call-terminator destination
+    /// slots from the callee's declared return type. Not serialised —
+    /// same rationale as the sibling `*_concrete_types` side-tables.
+    #[serde(skip, default)]
+    pub function_return_concrete_types: Vec<shape_value::v2::ConcreteType>,
+
+    /// ADR-006 §2.7.5 conduit (V3-S6b-jit-method-monomorph-conduit
+    /// close, 2026-05-15): content-addressed mirror of
+    /// `BytecodeProgram.monomorphized_method_call_sites`. Survives the
+    /// `Program` → `link()` → `LinkedProgram` → `BytecodeProgram`
+    /// round-trip so the conduit producer can lift
+    /// `function_return_concrete_types[specialized_idx]` into the
+    /// destination slot's ConcreteType at `MirConstant::Method` Call-
+    /// terminator sites. Not serialised — opaque per-program FunctionId
+    /// indices aren't a stable wire shape.
+    #[serde(skip, default)]
+    pub monomorphized_method_call_sites:
+        HashMap<(shape_ast::ast::span::Span, Option<usize>), usize>,
+
+    /// ADR-006 §2.7.5 conduit (cluster-2-cw-IB-class-b close, 2026-05-16):
+    /// content-addressed mirror of
+    /// `BytecodeProgram.value_call_return_concrete_types`. Survives the
+    /// `Program` → `link()` → `LinkedProgram` → `BytecodeProgram`
+    /// round-trip so the conduit producer can stamp value-call
+    /// `TerminatorKind::Call` destination slots from the closure-bound
+    /// callee's inferred return `ConcreteType`. Not serialised —
+    /// `ConcreteType` carries opaque registry IDs that aren't a stable
+    /// wire shape.
+    #[serde(skip, default)]
+    pub value_call_return_concrete_types:
+        HashMap<
+            (shape_ast::ast::span::Span, Option<usize>),
+            shape_value::v2::ConcreteType,
+        >,
+
     /// DataFrame schema for column name resolution.
     pub data_schema: Option<DataFrameSchema>,
 
@@ -225,6 +293,19 @@ pub struct Program {
     pub closure_function_layouts_by_name: std::collections::HashMap<
         String,
         std::sync::Arc<shape_value::v2::closure_layout::ClosureLayout>,
+    >,
+
+    /// ADR-006 §2.7.24 Q25.C trait-object vtable registry. Keyed by
+    /// `"Trait::ConcreteType"` strings (matching the existing
+    /// `trait_method_symbols` key prefix). Built at impl-block
+    /// compilation; consumed at `op_box_trait_object` runtime to build
+    /// `Arc<TraitObjectStorage>`. Not serialised because `Arc<VTable>`
+    /// is not a stable wire shape; in cached-program-load mode the
+    /// vtables are rebuilt at link time from `trait_method_symbols`.
+    #[serde(skip, default)]
+    pub trait_vtables: std::collections::HashMap<
+        String,
+        std::sync::Arc<shape_value::value::VTable>,
     >,
 }
 
@@ -318,6 +399,64 @@ pub struct LinkedProgram {
     #[serde(default)]
     pub top_level_frame: Option<FrameDescriptor>,
 
+    /// Per-slot fully-resolved `ConcreteType` for top-level locals.
+    ///
+    /// ADR-006 §2.7.5 conduit (top-level concrete-types side-table):
+    /// propagated from `BytecodeProgram.top_level_local_concrete_types`
+    /// through the linker so JIT compilation of linked programs can use
+    /// the typed-array / TypedObject fast paths. Not serialised — the
+    /// embedded `StructLayoutId` / `EnumLayoutId` are compile-time-local
+    /// registry indices; cached-program loads fall through to the legacy
+    /// NaN-boxed path.
+    #[serde(skip, default)]
+    pub top_level_local_concrete_types: Vec<shape_value::v2::ConcreteType>,
+
+    /// Per-user-function per-MIR-slot `ConcreteType` side-table.
+    ///
+    /// ADR-006 §2.7.5 conduit (W12-jit-aggregate-non-array, 2026-05-12):
+    /// LinkedProgram mirror of `Program.function_local_concrete_types`
+    /// — propagated through the linker so JIT compilation of linked
+    /// programs can use the TypedObject Aggregate short-circuit inside
+    /// user-function bodies. Not serialised — same rationale as
+    /// `top_level_local_concrete_types`.
+    #[serde(skip, default)]
+    pub function_local_concrete_types: Vec<Vec<shape_value::v2::ConcreteType>>,
+
+    /// Per-user-function declared `ConcreteType` for the return value.
+    ///
+    /// ADR-006 §2.7.5 conduit (W12-jit-call-return-kind, 2026-05-12):
+    /// LinkedProgram mirror of
+    /// `Program.function_return_concrete_types` — propagated through
+    /// the linker so the conduit can stamp Call-terminator destination
+    /// slots from the callee's declared return type. Not serialised —
+    /// same rationale.
+    #[serde(skip, default)]
+    pub function_return_concrete_types: Vec<shape_value::v2::ConcreteType>,
+
+    /// ADR-006 §2.7.5 conduit (V3-S6b-jit-method-monomorph-conduit
+    /// close, 2026-05-15): LinkedProgram mirror of
+    /// `Program.monomorphized_method_call_sites` — propagated through
+    /// the linker so the conduit producer can lift
+    /// `function_return_concrete_types[specialized_idx]` into the
+    /// destination slot's ConcreteType at `MirConstant::Method` Call-
+    /// terminator sites. Not serialised — same rationale.
+    #[serde(skip, default)]
+    pub monomorphized_method_call_sites:
+        HashMap<(shape_ast::ast::span::Span, Option<usize>), usize>,
+
+    /// ADR-006 §2.7.5 conduit (cluster-2-cw-IB-class-b close, 2026-05-16):
+    /// LinkedProgram mirror of `Program.value_call_return_concrete_types`
+    /// — propagated through the linker so the conduit producer can stamp
+    /// value-call `TerminatorKind::Call` destination slots from the
+    /// closure-bound callee's inferred return `ConcreteType`. Not
+    /// serialised — same rationale.
+    #[serde(skip, default)]
+    pub value_call_return_concrete_types:
+        HashMap<
+            (shape_ast::ast::span::Span, Option<usize>),
+            shape_value::v2::ConcreteType,
+        >,
+
     /// Trait method dispatch registry.
     pub trait_method_symbols: HashMap<String, String>,
 
@@ -344,4 +483,15 @@ pub struct LinkedProgram {
     #[serde(skip, default)]
     pub closure_function_layouts:
         Vec<Option<std::sync::Arc<shape_value::v2::closure_layout::ClosureLayout>>>,
+
+    /// ADR-006 §2.7.24 Q25.C trait-object vtable registry. Keyed by
+    /// `"Trait::ConcreteType"`. Threaded through from the
+    /// content-addressed Program at link time so the VM `op_box_trait_object`
+    /// handler can look up the vtable to build `Arc<TraitObjectStorage>`.
+    /// Not serialised (Arc<VTable> is not a stable wire shape).
+    #[serde(skip, default)]
+    pub trait_vtables: std::collections::HashMap<
+        String,
+        std::sync::Arc<shape_value::value::VTable>,
+    >,
 }

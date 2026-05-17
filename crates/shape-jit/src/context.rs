@@ -25,10 +25,20 @@ pub const CURRENT_ROW_OFFSET: i32 = 56;
 // Locals and stack offsets
 pub const LOCALS_OFFSET: i32 = 64;
 pub const STACK_OFFSET: i32 = 2112; // 64 + (256 * 8)
-pub const STACK_PTR_OFFSET: i32 = 6208; // 2112 + (512 * 8)
+// Parallel `NativeKind` byte track on `JITContext.stack` per ADR-006 §2.7.7 /
+// Q9 (JIT-side analog of the VM `Vec<u64> + Vec<NativeKind>` lockstep
+// invariant). Every push into `stack[i]` writes the slot's kind code into
+// `stack_kinds[i]` in lockstep; every pop reads both. The kind sources from
+// the producing call signature at JIT-compile time (no tag-bit decode,
+// no `is_heap()` probe) per the §2.7.5 stamp-at-compile-time discipline.
+// 8-byte raw payload per stack slot is preserved; the kind track is a
+// parallel 1-byte-per-slot side array — same shape as the VM
+// `crates/shape-vm/src/executor/vm_impl/stack.rs::VmStack` design.
+pub const STACK_KINDS_OFFSET: i32 = 6208; // 2112 + (512 * 8)
+pub const STACK_PTR_OFFSET: i32 = 6720; // 6208 + 512
 
 // GC safepoint flag pointer offset (for inline safepoint check)
-pub const GC_SAFEPOINT_FLAG_PTR_OFFSET: i32 = 6328;
+pub const GC_SAFEPOINT_FLAG_PTR_OFFSET: i32 = 6840;
 
 // ============================================================================
 // Return Type Tags for stack[0]
@@ -47,6 +57,11 @@ pub const RETURN_TAG_I64: u8 = 2;
 pub const RETURN_TAG_I32: u8 = 3;
 /// Raw bool (0 or 1). Executor reads as `stack[0] != 0`.
 pub const RETURN_TAG_BOOL: u8 = 4;
+/// Unit / null / no-value return (W11-jit-new-array). Stamped when the
+/// program's terminal expression is a side-effecting call that
+/// produces no value (e.g. `print(x)` at top level). Executor maps
+/// this to `WireValue::Null`.
+pub const RETURN_TAG_UNIT: u8 = 5;
 /// Byte offset of `return_type_tag` in JITContext (for Cranelift codegen).
 pub const RETURN_TYPE_TAG_OFFSET: usize = std::mem::offset_of!(JITContext, return_type_tag);
 
@@ -84,6 +99,11 @@ const _: () = {
     assert!(
         std::mem::offset_of!(JITContext, stack) == STACK_OFFSET as usize,
         "STACK_OFFSET does not match JITContext layout"
+    );
+    assert!(
+        std::mem::offset_of!(JITContext, stack_kinds) == STACK_KINDS_OFFSET as usize,
+        "STACK_KINDS_OFFSET does not match JITContext layout (ADR-006 §2.7.7 \
+         parallel-kind track must follow `stack` in lockstep)"
     );
     assert!(
         std::mem::offset_of!(JITContext, stack_ptr) == STACK_PTR_OFFSET as usize,
@@ -428,47 +448,6 @@ impl JITRange {
     }
 }
 
-/// JIT-compatible SignalBuilder structure
-/// Represents a signal builder for method chaining (series.where().then().capture())
-#[repr(C)]
-pub struct JITSignalBuilder {
-    pub series: u64,                  // NaN-boxed TAG_TABLE
-    pub conditions: Vec<u64>,         // Array of (condition_type, condition_series) pairs
-    pub captures: Vec<(String, u64)>, // (name, value) pairs for captured values
-}
-
-impl JITSignalBuilder {
-    pub fn new(series: u64) -> Box<Self> {
-        Box::new(JITSignalBuilder {
-            series,
-            conditions: Vec::new(),
-            captures: Vec::new(),
-        })
-    }
-
-    pub fn add_where(&mut self, condition_series: u64) {
-        // 0 = WHERE condition
-        self.conditions.push(0);
-        self.conditions.push(condition_series);
-    }
-
-    pub fn add_then(&mut self, condition_series: u64, max_gap: u64) {
-        // 1 = THEN condition
-        self.conditions.push(1);
-        self.conditions.push(condition_series);
-        self.conditions.push(max_gap);
-    }
-
-    pub fn add_capture(&mut self, name: String, value: u64) {
-        self.captures.push((name, value));
-    }
-
-    pub fn box_builder(builder: Box<JITSignalBuilder>) -> u64 {
-        use crate::ffi::jit_kinds::{HK_JIT_SIGNAL_BUILDER, jit_box};
-        jit_box(HK_JIT_SIGNAL_BUILDER, *builder)
-    }
-}
-
 /// JIT-compatible data reference structure
 /// Represents a reference to a specific data row in time
 #[repr(C)]
@@ -525,6 +504,15 @@ pub struct JITContext {
 
     // NaN-boxed stack for JIT execution
     pub stack: [u64; 512],
+    // Parallel `NativeKind` byte track per ADR-006 §2.7.7 / Q9 — the JIT-side
+    // analog of the VM `Vec<u64> + Vec<NativeKind>` lockstep invariant.
+    // `stack_kinds[i]` carries the §2.7.5 stamp-at-compile-time kind code
+    // for the slot at `stack[i]`, written by the MIR emitter at every push
+    // site in lockstep with the data write and read at every pop site (no
+    // tag-bit decode, no `is_heap()` probe). See
+    // `crates/shape-jit/src/ffi/stack_kind_code.rs` for the encoding and
+    // `crates/shape-vm/src/executor/vm_impl/stack.rs` for the VM mirror.
+    pub stack_kinds: [u8; 512],
     pub stack_ptr: usize,
 
     // Heap object storage (owned by VM, JIT just holds pointers)
@@ -608,6 +596,13 @@ impl Default for JITContext {
             // Local variables and stack
             locals: [TAG_NULL; 256],
             stack: [TAG_NULL; 512],
+            // ADR-006 §2.7.7: parallel-kind track initialized to the
+            // SENTINEL kind code (`stack_kind_code::SENTINEL`). Live slots
+            // overwrite this with the producing-site kind in lockstep with
+            // the data write; the sentinel surfaces a kind-source gap if a
+            // pop reads an unwritten slot (forbidden #9 / W-series Bool-
+            // default rationalization).
+            stack_kinds: [crate::ffi::stack_kind_code::SENTINEL; 512],
             stack_ptr: 0,
             heap_ptr: std::ptr::null_mut(),
             function_table: std::ptr::null(),
@@ -992,15 +987,45 @@ mod tests {
         assert_eq!(closure.captures_count, 32); // count unchanged, ptr nulled
     }
 
+    /// `jit_box(HK_CLOSURE, JITClosure)` round-trip — strict-typed rewrite
+    /// (W12-deleted-valuewordshape-tests-rewrite, 2026-05-12).
+    ///
+    /// Pre-rewrite the test asserted `is_heap_kind(bits, HK_CLOSURE) ==
+    /// true` after `jit_box(HK_CLOSURE, *closure)`. Under ADR-006 §2.7.5
+    /// JIT-side producers return raw `Box::into_raw(...) as u64`; the
+    /// `is_heap_kind` consumer first checks `is_heap(bits)` which requires
+    /// `is_tagged(bits)` (negative-NaN tag bits). Raw pointers don't have
+    /// those tag bits, so `is_heap_kind` returns false — the consumer is
+    /// in the production-code migration gap surfaced separately.
+    ///
+    /// The strict-typed discriminator reads the `kind: u16` prefix at
+    /// offset 0 of the JIT allocation via `read_heap_kind(bits)`. Per
+    /// §2.7.5 "*not* tag-bit dispatch — it reads a field from a
+    /// heap-resident struct that the producing call placed there."
+    ///
+    /// Same round-trip semantics expressed through the strict-typed
+    /// predicate.
     #[test]
-    fn test_closure_jit_box_roundtrip() {
+    fn test_closure_jit_box_roundtrip_via_heap_kind_prefix() {
         // Verify JITClosure survives jit_box/jit_unbox roundtrip
         let captures = [box_number(42.0), TAG_BOOL_FALSE];
         let closure = JITClosure::new(10, &captures);
         let bits = jit_box(HK_CLOSURE, *closure);
 
-        assert!(is_heap_kind(bits, HK_CLOSURE));
+        // Construction-side contract: `jit_box` writes `HK_CLOSURE` into
+        // the `kind: u16` prefix at offset 0 of the `JitAlloc<JITClosure>`
+        // allocation. The strict-typed §2.7.5 discriminator reads the
+        // prefix directly — no tag-bit dispatch.
+        assert_ne!(bits, 0, "allocation pointer is non-null");
+        assert_eq!(
+            unsafe { crate::ffi::jit_kinds::read_heap_kind(bits) },
+            HK_CLOSURE,
+            "heap-kind prefix at offset 0 discriminates the JIT allocation"
+        );
 
+        // Round-trip via direct `jit_unbox`: reads the `data` field of
+        // the `JitAlloc<JITClosure>` without gating on tag bits, recovering
+        // the JITClosure the producer stored.
         let recovered = unsafe { jit_unbox::<JITClosure>(bits) };
         assert_eq!(recovered.function_id, 10);
         assert_eq!(recovered.captures_count, 2);
@@ -1008,6 +1033,12 @@ mod tests {
             assert_eq!(unbox_number(recovered.get_capture(0)), 42.0);
             assert_eq!(recovered.get_capture(1), TAG_BOOL_FALSE);
         }
+
+        // Clean up the JitAlloc allocation directly. The deleted
+        // ValueWord-shape clean-up went through the JIT-emitted `jit_drop`
+        // call; here we go straight to `jit_drop::<JITClosure>` which is
+        // the §2.7.5 direct-path cleanup.
+        unsafe { crate::ffi::jit_kinds::jit_drop::<JITClosure>(bits) };
     }
 
     #[test]

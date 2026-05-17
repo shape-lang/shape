@@ -819,6 +819,52 @@ impl BytecodeCompiler {
             }
             _ => None,
         };
+        // cluster-2-cw-IB-class-b: when the initializer is a FunctionExpr
+        // (closure literal), retain its body so the value-call site can
+        // re-run return-type inference with caller-context arg types.
+        // Cleared (set to None below) for non-FunctionExpr initializers
+        // so a same-slot reassignment with a non-closure RHS doesn't
+        // leak a stale closure peek.
+        let closure_body_peek: Option<super::ClosureBodyPeek> = match expr {
+            shape_ast::ast::Expr::FunctionExpr {
+                params,
+                body,
+                return_type,
+                ..
+            } => Some(super::ClosureBodyPeek {
+                params: params.clone(),
+                body: body.clone(),
+                return_type: return_type.clone(),
+                // The function index is assigned by
+                // `compile_expr_closure`. Look up the most-recently
+                // emitted closure name (`__closure_<n>`); the
+                // bytecode-emission order guarantees that the closure
+                // literal in the RHS of this let-binding was the last
+                // closure compiled (the binding RHS compiles before
+                // we reach this update_callable_binding_from_expr call).
+                //
+                // The lookup walks `program.functions` from the end;
+                // bounded to the last few entries since `__closure_*`
+                // names dominate the tail. `None` when the search
+                // fails (e.g. closure was inlined / specialized) —
+                // the propagation path then no-ops and falls back to
+                // the side-table-only stamping.
+                function_index: {
+                    let closure_count = self.closure_counter;
+                    if closure_count == 0 {
+                        None
+                    } else {
+                        let expected = format!("__closure_{}", closure_count - 1);
+                        self.program
+                            .functions
+                            .iter()
+                            .rposition(|f| f.name == expected)
+                    }
+                },
+            }),
+            _ => None,
+        };
+
         if is_local {
             if let Some(pass_modes) = pass_modes {
                 self.local_callable_pass_modes.insert(slot, pass_modes);
@@ -841,6 +887,14 @@ impl BytecodeCompiler {
                 self.local_array_callable_return_types.insert(slot, array_rt);
             } else {
                 self.local_array_callable_return_types.remove(&slot);
+            }
+            // cluster-2-cw-IB-class-b: install / clear the closure body
+            // peek on this local slot. Same write discipline as the
+            // sibling `local_callable_*` maps above.
+            if let Some(peek) = closure_body_peek {
+                self.local_callable_closure_bodies.insert(slot, peek);
+            } else {
+                self.local_callable_closure_bodies.remove(&slot);
             }
         } else {
             // Module binding branch.
@@ -876,6 +930,14 @@ impl BytecodeCompiler {
                 self.module_binding_array_callable_return_types
                     .remove(&slot);
             }
+            // cluster-2-cw-IB-class-b: install / clear the closure body
+            // peek on the module-binding side. Parallels the local-slot
+            // branch above.
+            if let Some(peek) = closure_body_peek {
+                self.module_binding_callable_closure_bodies.insert(slot, peek);
+            } else {
+                self.module_binding_callable_closure_bodies.remove(&slot);
+            }
         }
     }
 
@@ -885,12 +947,19 @@ impl BytecodeCompiler {
             self.local_callable_return_reference_summaries.remove(&slot);
             self.local_callable_return_types.remove(&slot);
             self.local_array_callable_return_types.remove(&slot);
+            // cluster-2-cw-IB-class-b: release retained closure body
+            // peek alongside the other callable-binding state.
+            self.local_callable_closure_bodies.remove(&slot);
         } else {
             self.module_binding_callable_pass_modes.remove(&slot);
             self.module_binding_callable_return_reference_summaries
                 .remove(&slot);
             self.module_binding_callable_return_types.remove(&slot);
             self.module_binding_array_callable_return_types.remove(&slot);
+            // cluster-2-cw-IB-class-b: release retained module-binding
+            // closure body peek alongside the other module-binding
+            // callable state.
+            self.module_binding_callable_closure_bodies.remove(&slot);
         }
     }
 

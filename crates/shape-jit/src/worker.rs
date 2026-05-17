@@ -316,8 +316,14 @@ fn build_sub_program(program: &BytecodeProgram, start: usize, end: usize) -> Byt
             top_level_mir: None,
         function_blob_hashes: vec![],
         top_level_frame: None,
+        top_level_local_concrete_types: vec![],
+        function_local_concrete_types: vec![],
+        function_return_concrete_types: vec![],
+        monomorphized_method_call_sites: Default::default(),
+        value_call_return_concrete_types: Default::default(),
         monomorphization_keys: vec![],
         closure_function_layouts: program.closure_function_layouts.clone(),
+        trait_vtables: program.trait_vtables.clone(),
     }
 }
 
@@ -325,7 +331,7 @@ fn build_sub_program(program: &BytecodeProgram, start: usize, end: usize) -> Byt
 mod tests {
     use super::*;
     use shape_vm::bytecode::*;
-    use shape_vm::type_tracking::{FrameDescriptor, SlotKind};
+    use shape_vm::type_tracking::{FrameDescriptor, NativeKind};
 
     fn make_instr(opcode: OpCode, operand: Option<Operand>) -> Instruction {
         Instruction { opcode, operand }
@@ -362,8 +368,8 @@ mod tests {
             ref_mutates: vec![],
             mutable_captures: vec![],
             frame_descriptor: Some(FrameDescriptor::from_slots(vec![
-                SlotKind::Int64, // arg0
-                SlotKind::Int64, // arg1
+                NativeKind::Int64, // arg0
+                NativeKind::Int64, // arg1
             ])),
             osr_entry_points: vec![],
         };
@@ -496,9 +502,9 @@ mod tests {
             ref_mutates: vec![],
             mutable_captures: vec![],
             frame_descriptor: Some(FrameDescriptor::from_slots(vec![
-                SlotKind::Int64, // i
-                SlotKind::Int64, // n
-                SlotKind::Int64, // sum
+                NativeKind::Int64, // i
+                NativeKind::Int64, // n
+                NativeKind::Int64, // sum
             ])),
             osr_entry_points: vec![],
         };
@@ -584,7 +590,9 @@ mod tests {
                     mir_data: None,
             ref_mutates: vec![],
             mutable_captures: vec![],
-            frame_descriptor: Some(FrameDescriptor::from_slots(vec![SlotKind::Unknown])),
+            // W11: `NativeKind::Unknown` deleted; `Bool` is a benign stand-in
+            // for this single-slot test descriptor (the slot is never read).
+            frame_descriptor: Some(FrameDescriptor::from_slots(vec![NativeKind::Bool])),
             osr_entry_points: vec![],
         };
 

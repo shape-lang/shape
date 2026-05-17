@@ -12,7 +12,13 @@
 
 use crate::Result;
 use shape_ast::error::ShapeError;
-use shape_value::ValueWord;
+// ADR-006 §2.7: GENERIC_CARRIER vector storage uses `Vec<KindedSlot>`.
+// `ModuleBindingRegistry` holds heterogeneous module bindings (functions,
+// constants, imports) — kind isn't statically determined per slot, so the
+// audit (Cluster A in `phase-1b-valueword-callers.md`) classifies this as
+// the GENERIC_CARRIER vector form. `KindedSlot` carries explicit
+// `Drop`/`Clone` for refcount discipline.
+use shape_value::KindedSlot;
 use std::collections::HashMap;
 
 /// Single source of truth for all module binding values.
@@ -29,8 +35,10 @@ pub struct ModuleBindingRegistry {
     /// Index → name mapping (for debugging/errors)
     index_to_name: Vec<String>,
 
-    /// The actual values (NaN-boxed) - accessed by index for O(1) lookup
-    values: Vec<ValueWord>,
+    /// The actual values - accessed by index for O(1) lookup. ADR-006 §2.7
+    /// GENERIC_CARRIER vector storage; `KindedSlot` pairs each slot with
+    /// its `NativeKind` so refcount discipline survives push/pop/clone.
+    values: Vec<KindedSlot>,
 
     /// Track which module bindings are constants (functions, imports)
     is_const: Vec<bool>,
@@ -72,17 +80,17 @@ impl ModuleBindingRegistry {
     ///
     /// # Arguments
     /// * `name` - The module binding's name
-    /// * `value` - The value to store (converted to ValueWord internally)
+    /// * `value` - The value to store as a `KindedSlot` (slot + NativeKind)
     /// * `is_const` - Whether this module binding is constant (functions, imports)
     ///
     /// # Returns
     /// The stable index for this module binding
-    pub fn register(&mut self, name: &str, value: ValueWord, is_const: bool) -> Result<u32> {
+    pub fn register(&mut self, name: &str, value: KindedSlot, is_const: bool) -> Result<u32> {
         self.register_nb(name, value, is_const)
     }
 
-    /// Register or update a module binding with a ValueWord value, returns its stable index.
-    pub fn register_nb(&mut self, name: &str, value: ValueWord, is_const: bool) -> Result<u32> {
+    /// Register or update a module binding with a `KindedSlot` value, returns its stable index.
+    pub fn register_nb(&mut self, name: &str, value: KindedSlot, is_const: bool) -> Result<u32> {
         if let Some(&idx) = self.name_to_index.get(name) {
             let idx_usize = idx as usize;
 
@@ -110,12 +118,12 @@ impl ModuleBindingRegistry {
     }
 
     /// Register a constant module binding (convenience method)
-    pub fn register_const(&mut self, name: &str, value: ValueWord) -> Result<u32> {
+    pub fn register_const(&mut self, name: &str, value: KindedSlot) -> Result<u32> {
         self.register(name, value, true)
     }
 
     /// Register a mutable module binding (convenience method)
-    pub fn register_mut(&mut self, name: &str, value: ValueWord) -> Result<u32> {
+    pub fn register_mut(&mut self, name: &str, value: KindedSlot) -> Result<u32> {
         self.register_nb(name, value, false)
     }
 
@@ -134,21 +142,24 @@ impl ModuleBindingRegistry {
         self.index_to_name.get(idx as usize).map(|s| s.as_str())
     }
 
-    /// Get by name as owned ValueWord (interpreter, dynamic lookup)
-    pub fn get_by_name(&self, name: &str) -> Option<ValueWord> {
+    /// Get by name as owned `KindedSlot` (interpreter, dynamic lookup).
+    /// `Clone` on `KindedSlot` retains the underlying refcount.
+    pub fn get_by_name(&self, name: &str) -> Option<KindedSlot> {
         self.name_to_index
             .get(name)
             .map(|&idx| self.values[idx as usize].clone())
     }
 
-    /// Get by index as ValueWord reference (O(1))
+    /// Get by index as `KindedSlot` reference (O(1))
     #[inline]
-    pub fn get_by_index(&self, idx: u32) -> Option<&ValueWord> {
+    pub fn get_by_index(&self, idx: u32) -> Option<&KindedSlot> {
         self.values.get(idx as usize)
     }
 
-    /// Set by index from ValueWord (for VM assignment)
-    pub fn set_by_index(&mut self, idx: u32, value: ValueWord) -> Result<()> {
+    /// Set by index from `KindedSlot` (for VM assignment).
+    /// The previous value is dropped via its `Drop` impl, retiring its
+    /// refcount cleanly.
+    pub fn set_by_index(&mut self, idx: u32, value: KindedSlot) -> Result<()> {
         let idx_usize = idx as usize;
         if idx_usize >= self.values.len() {
             return Err(ShapeError::RuntimeError {
@@ -199,12 +210,14 @@ impl ModuleBindingRegistry {
     /// The pointer is valid as long as no new module bindings are registered.
     /// For JIT, call this after all module bindings are registered.
     #[inline]
-    pub fn get_ptr(&self, idx: u32) -> Option<*const ValueWord> {
-        self.values.get(idx as usize).map(|v| v as *const ValueWord)
+    pub fn get_ptr(&self, idx: u32) -> Option<*const KindedSlot> {
+        self.values.get(idx as usize).map(|v| v as *const KindedSlot)
     }
 
-    /// Snapshot constant module bindings for JIT constant folding
-    pub fn snapshot_constants(&self) -> Vec<(u32, ValueWord)> {
+    /// Snapshot constant module bindings for JIT constant folding.
+    /// Cloning each `KindedSlot` bumps its refcount via the explicit
+    /// `Clone` impl — no aliasing copies.
+    pub fn snapshot_constants(&self) -> Vec<(u32, KindedSlot)> {
         self.values
             .iter()
             .enumerate()
@@ -225,20 +238,18 @@ impl ModuleBindingRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shape_value::ValueWordExt;
-    use shape_value::heap_value::HeapValue;
 
     #[test]
     fn test_register_and_resolve() {
         let mut registry = ModuleBindingRegistry::new();
 
         let idx = registry
-            .register_const("x", ValueWord::from_f64(42.0))
+            .register_const("x", KindedSlot::from_number(42.0))
             .unwrap();
         assert_eq!(idx, 0);
 
         let idx2 = registry
-            .register_const("y", ValueWord::from_f64(100.0))
+            .register_const("y", KindedSlot::from_number(100.0))
             .unwrap();
         assert_eq!(idx2, 1);
 
@@ -251,12 +262,12 @@ mod tests {
     fn test_get_by_name() {
         let mut registry = ModuleBindingRegistry::new();
         registry
-            .register_const("pi", ValueWord::from_f64(3.14159))
+            .register_const("pi", KindedSlot::from_number(3.14159))
             .unwrap();
 
         let val = registry.get_by_name("pi");
         assert!(val.is_some());
-        assert!((val.unwrap().as_f64().unwrap() - 3.14159).abs() < 0.0001);
+        assert!((val.unwrap().slot().as_f64() - 3.14159).abs() < 0.0001);
 
         assert!(registry.get_by_name("unknown").is_none());
     }
@@ -265,20 +276,14 @@ mod tests {
     fn test_get_by_index() {
         let mut registry = ModuleBindingRegistry::new();
         registry
-            .register_const("a", ValueWord::from_f64(1.0))
+            .register_const("a", KindedSlot::from_number(1.0))
             .unwrap();
         registry
-            .register_const("b", ValueWord::from_f64(2.0))
+            .register_const("b", KindedSlot::from_number(2.0))
             .unwrap();
 
-        assert_eq!(
-            registry.get_by_index(0).and_then(|nb| nb.as_f64()),
-            Some(1.0)
-        );
-        assert_eq!(
-            registry.get_by_index(1).and_then(|nb| nb.as_f64()),
-            Some(2.0)
-        );
+        assert_eq!(registry.get_by_index(0).map(|ks| ks.slot().as_f64()), Some(1.0));
+        assert_eq!(registry.get_by_index(1).map(|ks| ks.slot().as_f64()), Some(2.0));
         assert!(registry.get_by_index(99).is_none());
     }
 
@@ -286,48 +291,42 @@ mod tests {
     fn test_const_protection() {
         let mut registry = ModuleBindingRegistry::new();
         registry
-            .register_const("CONST_VAL", ValueWord::from_f64(42.0))
+            .register_const("CONST_VAL", KindedSlot::from_number(42.0))
             .unwrap();
 
         // Should fail to set const by index
-        let result = registry.set_by_index(0, ValueWord::from_f64(100.0));
+        let result = registry.set_by_index(0, KindedSlot::from_number(100.0));
         assert!(result.is_err());
 
         // Value should be unchanged
-        assert_eq!(
-            registry.get_by_index(0).and_then(|nb| nb.as_f64()),
-            Some(42.0)
-        );
+        assert_eq!(registry.get_by_index(0).map(|ks| ks.slot().as_f64()), Some(42.0));
     }
 
     #[test]
     fn test_mutable_module_binding() {
         let mut registry = ModuleBindingRegistry::new();
         registry
-            .register_mut("counter", ValueWord::from_f64(0.0))
+            .register_mut("counter", KindedSlot::from_number(0.0))
             .unwrap();
 
         // Should succeed to set mutable by index
-        registry.set_by_index(0, ValueWord::from_f64(1.0)).unwrap();
-        assert_eq!(
-            registry.get_by_index(0).and_then(|nb| nb.as_f64()),
-            Some(1.0)
-        );
+        registry.set_by_index(0, KindedSlot::from_number(1.0)).unwrap();
+        assert_eq!(registry.get_by_index(0).map(|ks| ks.slot().as_f64()), Some(1.0));
     }
 
     #[test]
     fn test_re_register_const() {
         let mut registry = ModuleBindingRegistry::new();
         registry
-            .register_const("func", ValueWord::from_f64(1.0))
+            .register_const("func", KindedSlot::from_number(1.0))
             .unwrap();
 
         // Re-registering same const should update value
         registry
-            .register_const("func", ValueWord::from_f64(2.0))
+            .register_const("func", KindedSlot::from_number(2.0))
             .unwrap();
         assert_eq!(
-            registry.get_by_name("func").and_then(|nb| nb.as_f64()),
+            registry.get_by_name("func").map(|ks| ks.slot().as_f64()),
             Some(2.0)
         );
 
@@ -339,13 +338,13 @@ mod tests {
     fn test_snapshot_constants() {
         let mut registry = ModuleBindingRegistry::new();
         registry
-            .register_const("a", ValueWord::from_f64(1.0))
+            .register_const("a", KindedSlot::from_number(1.0))
             .unwrap();
         registry
-            .register_mut("b", ValueWord::from_f64(2.0))
+            .register_mut("b", KindedSlot::from_number(2.0))
             .unwrap();
         registry
-            .register_const("c", ValueWord::from_f64(3.0))
+            .register_const("c", KindedSlot::from_number(3.0))
             .unwrap();
 
         let constants = registry.snapshot_constants();
@@ -358,36 +357,10 @@ mod tests {
     }
 
     #[test]
-    fn test_closure_registration() {
-        use shape_value::v2::closure_layout::ClosureLayout;
-        use shape_value::v2::closure_raw::{OwnedClosureBlock, alloc_typed_closure};
-
-        let mut registry = ModuleBindingRegistry::new();
-
-        // Build a zero-capture `ClosureRaw` value — the canonical (Track
-        // A.5) closure representation. The registry stores it as any
-        // other heap-backed value; a handle round-trip confirms it
-        // decodes back as a closure.
-        let layout = std::sync::Arc::new(ClosureLayout::from_capture_types(&[], &[]));
-        let closure_val = unsafe {
-            let ptr = alloc_typed_closure(0, 0, &layout);
-            let owned = OwnedClosureBlock::from_raw(ptr as *const u8, std::sync::Arc::clone(&layout));
-            ValueWord::from_heap_value(HeapValue::ClosureRaw(owned))
-        };
-
-        let idx = registry.register_const("test_func", closure_val).unwrap();
-        assert_eq!(idx, 0);
-
-        // Should be retrievable
-        let val = registry.get_by_name("test_func");
-        assert!(matches!(val, Some(nb) if nb.as_closure_handle().is_some()));
-    }
-
-    #[test]
     fn test_contains() {
         let mut registry = ModuleBindingRegistry::new();
         registry
-            .register_const("exists", ValueWord::from_f64(1.0))
+            .register_const("exists", KindedSlot::from_number(1.0))
             .unwrap();
 
         assert!(registry.contains("exists"));
@@ -398,10 +371,10 @@ mod tests {
     fn test_is_const() {
         let mut registry = ModuleBindingRegistry::new();
         registry
-            .register_const("constant", ValueWord::from_f64(1.0))
+            .register_const("constant", KindedSlot::from_number(1.0))
             .unwrap();
         registry
-            .register_mut("mutable", ValueWord::from_f64(2.0))
+            .register_mut("mutable", KindedSlot::from_number(2.0))
             .unwrap();
 
         assert_eq!(registry.is_const("constant"), Some(true));

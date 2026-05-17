@@ -1,4 +1,8 @@
-#[cfg(test)]
+// Tests gated `deep-tests` post-W11: bodies depend on the deleted
+// `ValueWord` / `ValueWordExt` ABI plus the deleted
+// `dispatch::synthesize_value_word_from_raw` helper. Restoration requires
+// migration to the kinded `KindedSlot` API per ADR-006 §2.7.4 Phase-2c.
+#[cfg(all(test, feature = "deep-tests"))]
 mod module_qualified_type_tests {
     use crate::compiler::BytecodeCompiler;
     use crate::executor::{VMConfig, VirtualMachine};
@@ -9,15 +13,15 @@ mod module_qualified_type_tests {
     }
 
     /// Like `eval`, but stamps `top_level_frame.return_kind` with the
-    /// supplied `SlotKind` so the host-boundary synthesizer re-tags
+    /// supplied `NativeKind` so the host-boundary synthesizer re-tags
     /// raw native bits the post-Wave-E+5 typed match arms produce.
-    fn eval_with_kind(code: &str, kind: crate::type_tracking::SlotKind) -> ValueWord {
+    fn eval_with_kind(code: &str, kind: crate::type_tracking::NativeKind) -> ValueWord {
         eval_with_kind_opt(code, Some(kind))
     }
 
     fn eval_with_kind_opt(
         code: &str,
-        kind: Option<crate::type_tracking::SlotKind>,
+        kind: Option<crate::type_tracking::NativeKind>,
     ) -> ValueWord {
         // Install a per-test TypeSchemaRegistry scope so compile-time
         // predeclared-schema registration and VM-side schema lookups
@@ -39,9 +43,7 @@ mod module_qualified_type_tests {
         vm.load_program(bytecode);
         vm.populate_module_objects();
         // When the caller supplies a kind, pull raw bits and synthesize
-        // ourselves. This bypasses the runtime-observed
-        // `last_program_return_kind` stamp which the trailing typed
-        // `match` arms may set incorrectly post-Wave-E+5.
+        // ourselves rather than rely on the program's own declared kind.
         if let Some(k) = kind {
             let raw = vm.execute_raw(None).expect("execution failed");
             return crate::executor::dispatch::synthesize_value_word_from_raw(raw, Some(k));
@@ -156,7 +158,7 @@ mod module_qualified_type_tests {
                 m::C::R => 1,
                 m::C::B => 2,
             }
-        "#, crate::type_tracking::SlotKind::Int64);
+        "#, crate::type_tracking::NativeKind::Int64);
         assert_eq!(result.as_i64(), Some(1));
     }
 
@@ -240,7 +242,7 @@ mod module_qualified_type_tests {
             match m::E::V { x: 1, y: 2 } {
                 m::E::V { x, y } => x + y,
             }
-        "#, crate::type_tracking::SlotKind::Int64);
+        "#, crate::type_tracking::NativeKind::Int64);
         assert_eq!(result.as_i64(), Some(3));
     }
 
@@ -270,7 +272,7 @@ mod module_qualified_type_tests {
                 m::Color::Red => 1,
                 m::Color::Blue => 2,
             }
-        "#, crate::type_tracking::SlotKind::Int64);
+        "#, crate::type_tracking::NativeKind::Int64);
         assert_eq!(result.as_i64(), Some(1));
     }
 
@@ -286,7 +288,7 @@ mod module_qualified_type_tests {
                 }
             }
             m::Counter { n: 0 }.inc().inc().inc().value()
-        "#, crate::type_tracking::SlotKind::Int64);
+        "#, crate::type_tracking::NativeKind::Int64);
         assert_eq!(result.as_i64(), Some(3));
     }
 

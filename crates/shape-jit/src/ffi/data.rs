@@ -12,7 +12,6 @@
 use super::super::context::JITContext;
 use super::jit_kinds::*;
 use super::value_ffi::*;
-use shape_value::ValueWordExt;
 
 // ============================================================================
 // Generic Field Access (by compile-time column index)
@@ -393,22 +392,30 @@ pub extern "C" fn jit_get_field_typed(obj: u64, type_id: u64, field_idx: u64, of
     }
 
     // Slow path: VM-allocated object (Arc<HeapValue>).
-    // The obj bits are a ValueWord (repr(transparent) u64) with TAG_HEAP
-    // pointing to Arc<HeapValue>. We can't use jit_bits_to_nanboxed because
-    // that assumes JitAlloc format. Instead, clone directly from raw bits
-    // to get a proper ValueWord with Arc refcount bump.
-    let vw = unsafe { shape_value::ValueWord::clone_from_bits(obj) };
-    if let Some((_schema_id, slots, heap_mask)) = vw.as_typed_object() {
-        let idx = field_idx as usize;
-        if idx < slots.len() {
-            let is_heap = (heap_mask >> idx) & 1 != 0;
-            let field_vw = slots[idx].as_value_word(is_heap);
-            // The field value is a VM ValueWord. Return its raw bits directly
-            // since the JIT and VM use the same NaN-boxing for inline values
-            // (numbers, bools, function refs) and the same Arc<HeapValue> pointers.
-            return field_vw.raw_bits();
-        }
-    }
+    //
+    // PHASE_2C / SURFACE (ADR-006 §2.7.4 / §2.7.5): pre-strict-typing
+    // the slow path called `ValueWord::clone_from_bits(obj)` and
+    // `vw.as_typed_object()` to decode an `Arc<HeapValue>` from raw
+    // bits, then routed through `slots[idx].as_value_word(is_heap)` to
+    // re-encode the field as a `ValueWord`. Both ends are the deleted
+    // kind-blind W-series helpers (`ValueWord::clone_from_bits` decodes
+    // a kind from `tag_bits`; `as_value_word(is_heap)` is the §2.7.7 #4
+    // is_heap-probe shape).
+    //
+    // The strict-typing rebuild target reads the field via
+    // `Arc<TypedObjectStorage>` (single-discriminator HeapValue per
+    // ADR-005 §1) directly from the JIT-stamped slot kind, returning a
+    // typed scalar where the JIT-emitted call signature carries the
+    // expected `NativeKind`. Until that lands, the slow path returns
+    // TAG_NULL — the fast path above handles JIT-allocated TypedObject
+    // (the production path for JIT-emitted typed field reads), so this
+    // surfaces only when VM-side construction crosses into JIT code.
+    //
+    // Forbidden under any rebuild: `tag_bits`-decode classification of
+    // `obj` (CLAUDE.md "Forbidden Patterns"); `as_value_word(is_heap)`
+    // re-encoding (deleted §2.7.7 #4 shape); Bool-default fallback when
+    // schema_id is unknown.
+    let _ = field_idx;
     TAG_NULL
 }
 
@@ -437,7 +444,7 @@ pub extern "C" fn jit_set_field_typed(
     obj: u64,
     value: u64,
     type_id: u64,
-    field_idx: u64,
+    _field_idx: u64,
     offset: u64,
 ) -> u64 {
     // Fast path: JIT-allocated TypedObject

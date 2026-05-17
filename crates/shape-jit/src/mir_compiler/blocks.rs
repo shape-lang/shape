@@ -3,7 +3,7 @@
 use cranelift::prelude::*;
 
 use super::MirToIR;
-use shape_vm::type_tracking::SlotKind;
+use shape_vm::type_tracking::NativeKind;
 
 // Alias to avoid conflict with cranelift::prelude::types
 use super::types as slot_types;
@@ -27,7 +27,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 
     /// Declare Cranelift variables for each MIR local slot.
     ///
-    /// Variables are declared with their native Cranelift type per SlotKind:
+    /// Variables are declared with their native Cranelift type per NativeKind:
     /// - Float64 → F64
     /// - Int32/UInt32 → I32
     /// - Bool/Int8/UInt8 → I8
@@ -38,7 +38,10 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     pub(crate) fn declare_locals(&mut self) {
         for slot_idx in 0..self.mir.num_locals {
             let slot_id = shape_vm::mir::types::SlotId(slot_idx);
-            let kind = slot_types::slot_kind_for_local(&self.slot_kinds, slot_idx);
+            // None falls through to I64 (uniform NaN-boxed slot width)
+            // — same Cranelift width as the legacy `_ => I64` arm.
+            let kind = slot_types::slot_kind_for_local(&self.slot_kinds, slot_idx)
+                .unwrap_or(shape_vm::type_tracking::NativeKind::Int64);
             let cl_type = slot_types::cranelift_type_for_slot(kind);
 
             let var = Variable::new(self.next_var);
@@ -53,7 +56,11 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     pub(crate) fn initialize_locals(&mut self) {
         for slot_idx in 0..self.mir.num_locals {
             let slot_id = shape_vm::mir::types::SlotId(slot_idx);
-            let kind = slot_types::slot_kind_for_local(&self.slot_kinds, slot_idx);
+            // None → I64 default, same as `declare_locals` above. The
+            // `default_value_for_kind` helper produces the matching
+            // zero/null for whatever Cranelift width the slot got.
+            let kind = slot_types::slot_kind_for_local(&self.slot_kinds, slot_idx)
+                .unwrap_or(shape_vm::type_tracking::NativeKind::Int64);
 
             if let Some(&var) = self.locals.get(&slot_id) {
                 let init_val = self.default_value_for_kind(kind);
@@ -62,17 +69,17 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         }
     }
 
-    /// Produce the default (zero/null) value for a given SlotKind.
-    fn default_value_for_kind(&mut self, kind: SlotKind) -> Value {
+    /// Produce the default (zero/null) value for a given NativeKind.
+    fn default_value_for_kind(&mut self, kind: NativeKind) -> Value {
         match kind {
-            SlotKind::Float64 => self.builder.ins().f64const(0.0),
-            SlotKind::Int32 | SlotKind::UInt32 => {
+            NativeKind::Float64 => self.builder.ins().f64const(0.0),
+            NativeKind::Int32 | NativeKind::UInt32 => {
                 self.builder.ins().iconst(types::I32, 0)
             }
-            SlotKind::Int8 | SlotKind::UInt8 | SlotKind::Bool => {
+            NativeKind::Int8 | NativeKind::UInt8 | NativeKind::Bool => {
                 self.builder.ins().iconst(types::I8, 0)
             }
-            SlotKind::Int16 | SlotKind::UInt16 => {
+            NativeKind::Int16 | NativeKind::UInt16 => {
                 self.builder.ins().iconst(types::I16, 0)
             }
             // v2-boundary: I64 NaN-boxed slots use TAG_NULL as default
@@ -111,11 +118,12 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         if self.shared_local_slots.is_empty() {
             return;
         }
-        if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
-            eprintln!(
-                "[jit-init-shared] shared_local_slots.len()={} slots={:?}",
-                self.shared_local_slots.len(),
-                self.shared_local_slots.iter().copied().collect::<Vec<_>>()
+        if tracing::enabled!(target: "shape_jit", tracing::Level::DEBUG) {
+            tracing::debug!(
+                target: "shape_jit",
+                shared_local_slots_len = self.shared_local_slots.len(),
+                slots = ?self.shared_local_slots.iter().copied().collect::<Vec<_>>(),
+                "jit-init-shared local slot inventory",
             );
         }
         // Collect into a Vec to avoid borrowing self across the loop.
@@ -124,12 +132,15 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             let Some(&var) = self.locals.get(&slot) else {
                 continue;
             };
-            // NONE_BITS — matches the interpreter's pre-AllocSharedLocal
-            // slot state (legacy NaN-boxed null sentinel). Using a
-            // well-known bit pattern avoids undefined bits in the cell.
-            let none_bits = shape_value::tag_bits::TAG_BASE
-                | (shape_value::tag_bits::TAG_NONE << shape_value::tag_bits::TAG_SHIFT);
-            let init = self.builder.ins().iconst(types::I64, none_bits as i64);
+            // NONE bits — matches the interpreter's pre-AllocSharedLocal
+            // slot state. Per ADR-006 §2.7.5 the JIT-FFI carrier flows the
+            // None kind on the companion; the raw bits come from the
+            // value-ffi `TAG_NULL` constant (the canonical None encoding
+            // at the FFI boundary).
+            let init = self
+                .builder
+                .ins()
+                .iconst(types::I64, crate::ffi::value_ffi::TAG_NULL as i64);
             let inst = self
                 .builder
                 .ins()

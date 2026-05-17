@@ -1,161 +1,189 @@
 //! Array sort operations
 //!
 //! Handles: order_by, then_by, join_str
+//!
+//! ## V3-S5 ckpt-3 consumer-cascade tier 2 surface (2026-05-15)
+//!
+//! Per V3-S5 ckpt-1 close (commit `aac8495e`, 2026-05-15), the
+//! `TypedArrayData` enum + impl blocks + `Display for TypedArrayData` +
+//! `typed_array_structural_eq` fn were DELETED at
+//! `crates/shape-value/src/heap_value.rs` per W12-typed-array-data-deletion
+//! audit §3.5 + ADR-006 §2.7.24 Q25.A SUPERSEDED. This file's previous
+//! consumer-shape (`Arc<TypedArrayData>` receiver recovery via `as_typed_array`
+//! + per-variant element-stringification dispatch through `element_to_string`
+//! + `array_len` over `TypedArrayData::I64 / F64 / Bool / I8 / I16 / I32 /
+//! U8 / U16 / U32 / U64 / F32 / String / Decimal / BigInt / Char / TypedObject`
+//! arms in `handle_join_str_v2`; and the key-fn sort path in
+//! `handle_order_by_v2` / `handle_then_by_v2` via `sort_by_key_fn` using
+//! deleted cross-module helpers `array_transform::typed_array_arc_from_kinded`
+//! / `element_kinded` / `project_indices` / `typed_array_len`) cascade-breaks
+//! here as the deletion's consumer cascade tier 2.
+//!
+//! The five-import-line E0432 cluster at original lines 41-45 (drive-by
+//! ckpt-2 import-cleanup pickup per dispatch enumeration) is resolved as a
+//! side effect of the wholesale rewrite: those imports are deleted entirely
+//! since the cross-module helpers they referenced were deleted in ckpt-2
+//! along with their owning bodies.
+//!
+//! Public handler bodies (`handle_order_by_v2 / handle_then_by_v2 /
+//! handle_join_str_v2`) are replaced with structured surface-and-stop
+//! returning `VMError::NotImplemented`. Local helpers (`as_typed_array /
+//! element_to_string / array_len / receiver_arc_clone / parse_direction /
+//! cmp_key_kinded / closure_arg / sort_by_key_fn / SortDirection enum /
+//! surface_and_stop_v2_raw_closure`) and the deleted cross-module imports
+//! (`array_transform::bump_closure_share / element_kinded / project_indices /
+//! typed_array_arc_from_kinded / typed_array_len`) are DELETED — every one
+//! took `&TypedArrayData` / produced `Arc<TypedArrayData>`; with the type
+//! gone they cannot exist. (`bump_closure_share` survives in
+//! `array_transform.rs` per ckpt-2 close enumeration, but ckpt-3 sort
+//! handlers do not need it post-surface-and-stop and the unused import
+//! would be a lint failure.)
+//!
+//! ## Cascade migration target (post-ckpt-6 STRICT close)
+//!
+//! Per W12-typed-array-data-deletion audit §A.3 + §2.1 scalar recipe +
+//! §2.2 heap-element variants, every previous `TypedArrayData::X(buf)`
+//! match arm in this file's `element_to_string` / `array_len` /
+//! `sort_by_key_fn` paths migrates to the v2-raw `TypedArray<T>`
+//! flat-struct carrier. The closure-callback ABI (ADR-006 §2.7.11 / Q12
+//! `vm.call_value_immediate_nb`) and the Round 3a' ε v2-raw
+//! String/Decimal `joinStr` fast-path (which already operates on
+//! `TypedArray<*const StringObj/DecimalObj>` without `TypedArrayData`
+//! dispatch — that path was the strict-typed precedent) re-instate as a
+//! single uniform body once the receiver-shape migration lands across
+//! all element kinds.
+//!
+//! Bodies REFUSED ON SIGHT under Refusal #1 (resurrection under rename
+//! per ckpt-1 close-marker at `heap_value.rs:3956`).
 
+use shape_runtime::context::ExecutionContext;
 use crate::executor::VirtualMachine;
-use crate::executor::utils::extraction_helpers::nb_to_string_coerce;
-use shape_value::{ArgVec, VMError, ValueWord, ValueWordExt};
-use std::mem::ManuallyDrop;
-use std::sync::Arc;
-
-use super::raw_helpers;
-
-/// Borrow a ValueWord from raw u64 bits without taking ownership.
-#[inline]
-fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
-    ManuallyDrop::new(ValueWord::from_raw_bits(raw))
-}
-
-/// Compare two ValueWord values for ordering
-fn compare_nb_values(a: &ValueWord, b: &ValueWord) -> std::cmp::Ordering {
-    if let (Some(na), Some(nb)) = (a.as_number_coerce(), b.as_number_coerce()) {
-        return na.partial_cmp(&nb).unwrap_or(std::cmp::Ordering::Equal);
-    }
-    if let (Some(sa), Some(sb)) = (a.as_str(), b.as_str()) {
-        return sa.cmp(sb);
-    }
-    a.type_name().cmp(b.type_name())
-}
+use shape_value::heap_value::HeapKind;
+use shape_value::{KindedSlot, NativeKind, VMError};
 
 // ═══════════════════════════════════════════════════════════════════════════
-// MethodFnV2 handlers — args are &[u64], result is returned as u64
+// V3-S5 ckpt-3 surface-and-stop builder
 // ═══════════════════════════════════════════════════════════════════════════
 
-pub(crate) fn handle_order_by_v2(
-    vm: &mut VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    if args.is_empty() || args.len() > 3 {
-        return Err(VMError::RuntimeError(
-            "order_by() requires 1-3 arguments (array, key_func, direction?)".to_string(),
-        ));
-    }
-
-    let receiver = borrow_vw(args[0]);
-    let array = receiver
-        .as_any_array()
-        .ok_or_else(|| {
-            VMError::RuntimeError("order_by() requires an array as receiver".to_string())
-        })?
-        .to_generic();
-
-    if args.len() < 2 {
-        return Err(VMError::RuntimeError(
-            "order_by() requires a key function".to_string(),
-        ));
-    }
-
-    if !raw_helpers::is_callable_raw(args[1]) {
-        return Err(VMError::RuntimeError(
-            "order_by() second argument must be a function".to_string(),
-        ));
-    }
-
-    let descending = if args.len() == 3 {
-        let dir_vw = borrow_vw(args[2]);
-        if let Some(s) = dir_vw.as_str() {
-            s.eq_ignore_ascii_case("desc")
-        } else if let Some(b) = dir_vw.as_bool() {
-            b
-        } else {
-            false
-        }
+/// Common surface-and-stop body for every public handler in this file.
+///
+/// Returns a structured `VMError::NotImplemented` citing the V3-S5 ckpt-3
+/// cascade-broken state. `orderBy` / `thenBy` preserve their
+/// `Ptr(HeapKind::Closure)` arity validation pre-surface so the
+/// closure-arg-shape contract gets a structured early-error rather than
+/// getting swallowed by the surface.
+#[cold]
+#[inline(never)]
+fn ckpt3_surface(op: &'static str, args: &[KindedSlot]) -> VMError {
+    let receiver_kind = if args.is_empty() {
+        "<no args>".to_string()
     } else {
-        false
+        format!("{:?}", args[0].kind)
     };
-
-    let mut keyed: Vec<(ValueWord, ValueWord)> = Vec::with_capacity(array.len());
-    for (index, nb) in array.iter().enumerate() {
-        let key_bits = vm.call_value_immediate_raw(
-            args[1],
-            &[nb.raw_bits(), ValueWord::from_f64(index as f64).into_raw_bits()],
-            ctx.as_deref_mut(),
-        )?;
-        keyed.push((ValueWord::from_raw_bits(key_bits), nb.clone()));
-    }
-
-    let len = keyed.len();
-    for i in 0..len {
-        for j in 0..len.saturating_sub(1).saturating_sub(i) {
-            let should_swap = {
-                let (key_a, _) = &keyed[j];
-                let (key_b, _) = &keyed[j + 1];
-                let cmp = compare_nb_values(key_a, key_b);
-                if descending {
-                    cmp == std::cmp::Ordering::Less
-                } else {
-                    cmp == std::cmp::Ordering::Greater
-                }
-            };
-            if should_swap {
-                keyed.swap(j, j + 1);
-            }
-        }
-    }
-
-    // `keyed` is only consumed on the success path (after the `?` points
-    // above). Moving its value-column into an ArgVec is defensive only; there
-    // are no further `?` before consumption. NOTE: `keyed: Vec<(ValueWord,
-    // ValueWord)>` itself still leaks on error paths above — the key column
-    // (call-return owned) and value column (bit-copy) both survive any error
-    // drop. Matching pre-Wave4 leak semantics.
-    let sorted: ArgVec = ArgVec::from_vec(keyed.into_iter().map(|(_, v)| v).collect());
-    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(sorted.into_inner())).into_raw_bits())
+    VMError::NotImplemented(format!(
+        "{op}: SURFACE — V3-S5 ckpt-3 consumer-cascade tier 2 surface. \
+         `TypedArrayData` enum DELETED at ckpt-1 (2026-05-15) per W12-\
+         typed-array-data-deletion audit §3.5 + ADR-006 §2.7.24 Q25.A \
+         SUPERSEDED. The previous `Arc<TypedArrayData>` receiver-recovery \
+         + per-variant element-stringification / key-fn-sort dispatch path \
+         (~35 references across 3 public handlers in this file plus the \
+         5-import E0432 cluster from ckpt-2 cross-module helper deletion) \
+         cascade-broke at the enum deletion site \
+         (`crates/shape-value/src/heap_value.rs:3944`) and the ckpt-2 \
+         `array_transform.rs` cross-module helper deletion. Post-deletion \
+         target is the v2-raw `TypedArray<T>` flat-struct carrier per \
+         audit §1.2 + §A.3 + §3.1 scalar recipe + §2.2 heap-element \
+         variants; per-T monomorphization landing across ckpt-3 (this \
+         file plus array_ops/typed_array_methods/iterator_methods/concat/\
+         property_access/array_query) + ckpt-4 (TypedBuffer<T> / \
+         HeapValue::TypedArray arm / HeapKind::TypedArray ordinal) + \
+         ckpt-5 (wire/json/marshal + 4-table lockstep) + ckpt-6 (JIT \
+         FFI). Closure-callback ABI (ADR-006 §2.7.11 / Q12 \
+         `vm.call_value_immediate_nb`) is unaffected and re-instates \
+         once receiver-shape migration lands. The Round 3a' ε v2-raw \
+         String/Decimal `joinStr` direct-read fast-path operates on \
+         `TypedArray<*const StringObj/DecimalObj>` without `TypedArrayData` \
+         dispatch and re-instates as part of the same uniform body. \
+         Receiver kind: {kind}. UNREACHABLE until ckpt-6 STRICT close. \
+         REFUSED ON SIGHT: TypedArrayData resurrection under any rename \
+         (Refusal #1, W12 audit §7).",
+        op = op,
+        kind = receiver_kind,
+    ))
 }
 
-pub(crate) fn handle_then_by_v2(
-    vm: &mut VirtualMachine,
-    args: &mut [u64],
-    ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    handle_order_by_v2(vm, args, ctx)
-}
-
-pub(crate) fn handle_join_str_v2(
-    _vm: &mut VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    if args.is_empty() || args.len() > 2 {
-        return Err(VMError::RuntimeError(
-            "join_str() requires 1-2 arguments (array, separator?)".to_string(),
-        ));
-    }
-
-    let receiver = borrow_vw(args[0]);
-    let array = receiver
-        .as_any_array()
-        .ok_or_else(|| {
-            VMError::RuntimeError("join_str() requires an array as receiver".to_string())
-        })?
-        .to_generic();
-
-    let sep_vw = if args.len() == 2 {
-        Some(borrow_vw(args[1]))
+/// Closure-arg validation for `orderBy` / `thenBy`. Returns `Some(err)`
+/// when the closure slot has the wrong shape so the surface body returns
+/// the structured shape-error rather than the generic ckpt-3 surface.
+#[inline]
+fn validate_closure_arg(op: &str, args: &[KindedSlot]) -> Option<VMError> {
+    if args.len() >= 2
+        && !matches!(args[1].kind, NativeKind::Ptr(HeapKind::Closure) | NativeKind::UInt64)
+    {
+        Some(VMError::RuntimeError(format!(
+            "{}: key function must be a closure or function ref, got kind {:?}",
+            op, args[1].kind
+        )))
     } else {
         None
-    };
+    }
+}
 
-    let separator = match &sep_vw {
-        Some(vw) => vw.as_str().ok_or_else(|| {
-            VMError::RuntimeError("join_str() separator must be a string".to_string())
-        })?,
-        None => ",",
-    };
+// ═══════════════════════════════════════════════════════════════════════════
+// MethodFnV2 handlers — surface-and-stop stubs
+// Signatures preserved for method_registry.rs PHF integrity.
+// ═══════════════════════════════════════════════════════════════════════════
 
-    let strings: Vec<String> = array.iter().map(|nb| nb_to_string_coerce(nb)).collect();
+/// v2 `orderBy` — sort an array by a key function (optionally with direction).
+pub(crate) fn handle_order_by_v2(
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "orderBy: expected (array, key_fn, direction?)".to_string(),
+        ));
+    }
+    if let Some(err) = validate_closure_arg("orderBy", args) {
+        return Err(err);
+    }
+    Err(ckpt3_surface("orderBy", args))
+}
 
-    let result = strings.join(separator);
-    Ok(ValueWord::from_string(Arc::new(result)).into_raw_bits())
+/// v2 `thenBy` — sort an already-ordered array by a secondary key.
+pub(crate) fn handle_then_by_v2(
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "thenBy: expected (array, key_fn, direction?)".to_string(),
+        ));
+    }
+    if let Some(err) = validate_closure_arg("thenBy", args) {
+        return Err(err);
+    }
+    Err(ckpt3_surface("thenBy", args))
+}
+
+/// v2 `joinStr` — join array elements into a single string with a separator.
+pub(crate) fn handle_join_str_v2(
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    if args.len() != 2 {
+        return Err(VMError::RuntimeError(
+            "joinStr() requires 2 arguments (array, separator)".to_string(),
+        ));
+    }
+    if args[1].kind != NativeKind::String {
+        return Err(VMError::RuntimeError(format!(
+            "joinStr(): separator must be a string, got {:?}",
+            args[1].kind
+        )));
+    }
+    Err(ckpt3_surface("joinStr", args))
 }

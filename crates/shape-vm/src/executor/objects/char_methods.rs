@@ -1,119 +1,113 @@
 //! Native method handlers for char values.
 //!
-//! Each handler operates on raw `u64` NaN-boxed bits:
-//! - `args[0]` is the receiver (a char)
-//! - Returns a raw `u64` result
+//! Phase 1.B-vm Wave-β cluster M-collection-tail: bodies surface
+//! `NotImplemented(SURFACE)` per playbook §7 REVISED + §10 D-objects-mod /
+//! D-obj-tail precedent (ADR-006 §2.7.6 / §2.7.7).
+//!
+//! The pre-Wave-6 implementation imported the deleted
+//! `shape_value::value_word::*` constructor surface (`vw_from_bool`,
+//! `vw_from_char`, `vw_from_string`) plus `ValueWordExt` (forbidden #1)
+//! and `objects::raw_helpers::{extract_char, type_error}` (deleted in
+//! cluster D-raw-helpers — only the FilterExpr extractor remains). Char
+//! payloads are still reachable via `HeapKind::Char` (codepoint inline,
+//! no Arc; see `stack_ops::op_push_const` Char arm + ADR-006 §2.3
+//! Char-as-inline-scalar shape), so a kind-correct rewrite is mechanical
+//! once the MethodHandler ABI lands the kinded `&mut [KindedSlot] ->
+//! Result<KindedSlot>` shape (cluster E-builtins-backlog, Wave 5b
+//! template, commit `fa2bafc`). Per playbook §4 #9 / ADR-006 §2.7.7 a
+//! Bool-default kinded shim preserving the call-pattern shape is
+//! forbidden.
 
-use crate::executor::objects::raw_helpers::{extract_char, type_error};
 use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
-use shape_value::value_word::*;
-use shape_value::ValueWordExt;
-use shape_value::VMError;
-use std::sync::Arc;
+use shape_value::{KindedSlot, VMError};
 
-/// Helper to extract char from raw u64
 #[inline]
-fn decode_char_receiver(raw: u64) -> Result<char, VMError> {
-    extract_char(raw).ok_or_else(|| type_error("char", raw))
+fn surface(method: &str) -> VMError {
+    VMError::NotImplemented(format!(
+        "phase-2c — char.{}(): MethodHandler ABI needs kinded migration \
+         (cluster E-builtins-backlog, Wave 5b template); receiver kind \
+         NativeKind::Ptr(HeapKind::Char), codepoint inline per ADR-006 §2.3 / §2.7.6",
+        method
+    ))
 }
 
 pub fn char_is_alphabetic(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    let c = decode_char_receiver(args[0])?;
-    Ok(vw_from_bool(c.is_alphabetic()).raw_bits())
+) -> Result<KindedSlot, VMError> {
+    Err(surface("isAlphabetic"))
 }
 
 pub fn char_is_numeric(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    let c = decode_char_receiver(args[0])?;
-    Ok(vw_from_bool(c.is_numeric()).raw_bits())
+) -> Result<KindedSlot, VMError> {
+    Err(surface("isNumeric"))
 }
 
 pub fn char_is_alphanumeric(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    let c = decode_char_receiver(args[0])?;
-    Ok(vw_from_bool(c.is_alphanumeric()).raw_bits())
+) -> Result<KindedSlot, VMError> {
+    Err(surface("isAlphanumeric"))
 }
 
 pub fn char_is_whitespace(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    let c = decode_char_receiver(args[0])?;
-    Ok(vw_from_bool(c.is_whitespace()).raw_bits())
+) -> Result<KindedSlot, VMError> {
+    Err(surface("isWhitespace"))
 }
 
 pub fn char_is_uppercase(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    let c = decode_char_receiver(args[0])?;
-    Ok(vw_from_bool(c.is_uppercase()).raw_bits())
+) -> Result<KindedSlot, VMError> {
+    Err(surface("isUppercase"))
 }
 
 pub fn char_is_lowercase(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    let c = decode_char_receiver(args[0])?;
-    Ok(vw_from_bool(c.is_lowercase()).raw_bits())
+) -> Result<KindedSlot, VMError> {
+    Err(surface("isLowercase"))
 }
 
 pub fn char_is_ascii(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    let c = decode_char_receiver(args[0])?;
-    Ok(vw_from_bool(c.is_ascii()).raw_bits())
+) -> Result<KindedSlot, VMError> {
+    Err(surface("isAscii"))
 }
 
 pub fn char_to_uppercase(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    let c = decode_char_receiver(args[0])?;
-    let upper: String = c.to_uppercase().collect();
-    if upper.len() == 1 {
-        Ok(vw_from_char(upper.chars().next().unwrap()).raw_bits())
-    } else {
-        Ok(vw_from_string(Arc::new(upper)).into_raw_bits())
-    }
+) -> Result<KindedSlot, VMError> {
+    Err(surface("toUppercase"))
 }
 
 pub fn char_to_lowercase(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    let c = decode_char_receiver(args[0])?;
-    let lower: String = c.to_lowercase().collect();
-    if lower.len() == 1 {
-        Ok(vw_from_char(lower.chars().next().unwrap()).raw_bits())
-    } else {
-        Ok(vw_from_string(Arc::new(lower)).into_raw_bits())
-    }
+) -> Result<KindedSlot, VMError> {
+    Err(surface("toLowercase"))
 }
 
 pub fn char_to_string(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
+    _args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
-) -> Result<u64, VMError> {
-    let c = decode_char_receiver(args[0])?;
-    Ok(vw_from_string(Arc::new(c.to_string())).into_raw_bits())
+) -> Result<KindedSlot, VMError> {
+    Err(surface("toString"))
 }

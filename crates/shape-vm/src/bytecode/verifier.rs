@@ -2,7 +2,7 @@
 //!
 //! Validates that trusted opcode invariants hold:
 //! - Every trusted opcode appears inside a function with a `FrameDescriptor`
-//! - The FrameDescriptor has no `SlotKind::Unknown` entries for the relevant operands
+//! - The FrameDescriptor has no `NativeKind::Unknown` entries for the relevant operands
 //!
 //! Also validates v2 typed opcode invariants:
 //! - Typed array ops require a FrameDescriptor with non-Unknown slots
@@ -10,7 +10,6 @@
 //! - Sized integer (i32) ops require a FrameDescriptor with non-Unknown slots
 
 use super::{BytecodeProgram, OpCode, Operand};
-use crate::type_tracking::SlotKind;
 
 /// Errors produced by the bytecode verifier.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,7 +20,7 @@ pub enum VerifyError {
         opcode: OpCode,
         instruction_offset: usize,
     },
-    /// A trusted opcode operand slot has `SlotKind::Unknown` in the FrameDescriptor.
+    /// A trusted opcode operand slot has `NativeKind::Unknown` in the FrameDescriptor.
     UnknownSlotKind {
         function_name: String,
         opcode: OpCode,
@@ -145,33 +144,24 @@ pub fn verify_trusted_opcodes(program: &BytecodeProgram) -> Result<(), Vec<Verif
                 continue;
             };
 
-            // Check that the descriptor has at least some non-Unknown slots.
-            // For trusted arithmetic, we don't know which specific stack slots
-            // feed the operands (they come from the stack, not named locals),
-            // so we verify the frame descriptor itself is populated (non-empty
-            // and not all Unknown).
-            if fd.is_empty() || fd.is_all_unknown() {
-                // All slots unknown — the compiler shouldn't have emitted trusted ops
-                for (idx, slot) in fd.slots.iter().enumerate() {
-                    if *slot == SlotKind::Unknown {
-                        errors.push(VerifyError::UnknownSlotKind {
-                            function_name: func.name.clone(),
-                            opcode: instruction.opcode,
-                            instruction_offset: offset,
-                            slot_index: idx,
-                        });
-                        break; // one error per instruction is sufficient
-                    }
-                }
-                // If fd is empty, emit a generic error
-                if fd.is_empty() {
-                    errors.push(VerifyError::UnknownSlotKind {
-                        function_name: func.name.clone(),
-                        opcode: instruction.opcode,
-                        instruction_offset: offset,
-                        slot_index: 0,
-                    });
-                }
+            // Check that the descriptor is populated. Per ADR-006 §2.7.5.1,
+            // `FrameDescriptor.slots: Vec<NativeKind>` is post-proof — the
+            // deleted `NativeKind::Unknown` variant cannot appear at this
+            // layer. An empty descriptor means the compiler couldn't
+            // prove every slot's kind (`Z-compiler-option-cascade` migrates
+            // `populate_program_storage_hints` /
+            // `capture_function_local_storage_hints` to short-circuit to
+            // `Vec::new()` in that case via
+            // `collect::<Option<Vec<_>>>()`), so the trusted-opcode contract
+            // is unmet and we error out the same way the deleted
+            // `is_all_unknown` path did.
+            if fd.is_empty() {
+                errors.push(VerifyError::UnknownSlotKind {
+                    function_name: func.name.clone(),
+                    opcode: instruction.opcode,
+                    instruction_offset: offset,
+                    slot_index: 0,
+                });
             }
         }
     }
@@ -276,7 +266,7 @@ pub fn verify_v2_typed_opcodes(program: &BytecodeProgram) -> Result<(), Vec<Veri
 mod tests {
     use super::*;
     use crate::bytecode::{Function, Instruction, OpCode};
-    use crate::type_tracking::FrameDescriptor;
+    use crate::type_tracking::{FrameDescriptor, NativeKind};
 
     fn make_program(functions: Vec<Function>, instructions: Vec<Instruction>) -> BytecodeProgram {
         let mut prog = BytecodeProgram::new();
@@ -362,8 +352,8 @@ mod tests {
             ref_mutates: vec![],
             mutable_captures: vec![],
             frame_descriptor: Some(FrameDescriptor::from_slots(vec![
-                SlotKind::Int64,
-                SlotKind::Int64,
+                NativeKind::Int64,
+                NativeKind::Int64,
             ])),
             osr_entry_points: vec![],
             mir_data: None,
@@ -474,7 +464,7 @@ mod tests {
             ref_params: vec![],
             ref_mutates: vec![],
             mutable_captures: vec![],
-            frame_descriptor: Some(FrameDescriptor::from_slots(vec![SlotKind::Int64])),
+            frame_descriptor: Some(FrameDescriptor::from_slots(vec![NativeKind::Int64])),
             osr_entry_points: vec![],
             mir_data: None,
         };
@@ -502,7 +492,7 @@ mod tests {
             ref_params: vec![],
             ref_mutates: vec![],
             mutable_captures: vec![],
-            frame_descriptor: Some(FrameDescriptor::from_slots(vec![SlotKind::Int64])),
+            frame_descriptor: Some(FrameDescriptor::from_slots(vec![NativeKind::Int64])),
             osr_entry_points: vec![],
             mir_data: None,
         };
@@ -530,7 +520,7 @@ mod tests {
             ref_params: vec![],
             ref_mutates: vec![],
             mutable_captures: vec![],
-            frame_descriptor: Some(FrameDescriptor::from_slots(vec![SlotKind::Int64])),
+            frame_descriptor: Some(FrameDescriptor::from_slots(vec![NativeKind::Int64])),
             osr_entry_points: vec![],
             mir_data: None,
         };
@@ -562,7 +552,7 @@ mod tests {
             ref_params: vec![],
             ref_mutates: vec![],
             mutable_captures: vec![],
-            frame_descriptor: Some(FrameDescriptor::from_slots(vec![SlotKind::Int64])),
+            frame_descriptor: Some(FrameDescriptor::from_slots(vec![NativeKind::Int64])),
             osr_entry_points: vec![],
             mir_data: None,
         };

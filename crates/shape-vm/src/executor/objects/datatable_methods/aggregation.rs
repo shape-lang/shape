@@ -1,264 +1,624 @@
-//! DataTable aggregation methods: sum, mean, min, max, sort, count, describe, aggregate.
+//! DataTable aggregation methods: sum, mean, min, max, sort, count,
+//! describe, aggregate.
+//!
+//! ADR-006 §2.7.10 / Q11 — Wave-δ MR-datatable body migration.
+//!
+//! Receiver: `args[0].kind ∈ { NativeKind::Ptr(HeapKind::DataTable),
+//! NativeKind::Ptr(HeapKind::TableView) }`. Borrowed via
+//! `borrow_data_table` (see `common.rs`) — typed-Arc dispatch, NOT
+//! `as_heap_value()` (unsound on typed-Arc slots per Wave-γ
+//! G-heap-filter-expr soundness amendment).
+//!
+//! Form coverage:
+//!   - Column-name forms (e.g. `dt.sum("price")`, `dt.mean("volume")`) —
+//!     real bodies. Per-column kind dispatch via Arrow `DataType` match.
+//!   - Closure forms (e.g. `dt.sum(|row| row.price * row.qty)`) — SURFACE.
+//!     Closure dispatch goes through `op_call_value`, which is itself at
+//!     SURFACE in `executor/control_flow/mod.rs::op_call_value` (the
+//!     PHASE_2C_CALL_REBUILD_SURFACE constant). Per playbook §8 the
+//!     correct shape is surface-and-stop until the closure rebuild
+//!     lands.
+//!   - Object-spec aggregate (e.g. `dt.aggregate({ total: "sum" })`) —
+//!     SURFACE. Spec parsing requires HashMap dispatch which is its own
+//!     cluster.
 
-use crate::executor::VirtualMachine;
-use arrow_array::{Array, Float64Array, Int64Array, StringArray};
-use arrow_ord::sort::sort_to_indices;
-use arrow_select::take::take;
-use shape_value::datatable::DataTable;
-use shape_value::{HeapKind, VMError, ValueWord, ValueWordExt};
-use std::collections::HashMap;
-use std::mem::ManuallyDrop;
+use arrow_array::{Array, BooleanArray, Float64Array, Int64Array};
+use shape_runtime::context::ExecutionContext;
+use shape_value::{
+    DataTable, KindedSlot, NativeKind, TableViewData, ValueSlot, VMError,
+    heap_value::HeapKind,
+};
 use std::sync::Arc;
 
-use super::common::{
-    collect_closure_numbers_nb, extract_array_value_nb, extract_dt_nb,
-    typed_object_to_hashmap_nb_vm, wrap_result_table_nb,
-};
+use crate::executor::VirtualMachine;
 
-#[inline]
-fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
-    ManuallyDrop::new(ValueWord::from_raw_bits(raw))
-}
+use super::common::borrow_data_table;
 
-fn is_callable_nb(nb: &ValueWord) -> bool {
-    nb.is_function() || nb.is_module_function() || (nb.is_heap() && matches!(nb.heap_kind(), Some(HeapKind::Closure | HeapKind::HostClosure)))
-}
-
-fn require_string_arg(args: &mut [u64], idx: usize, method_name: &str) -> Result<String, VMError> {
-    let vw = args.get(idx).map(|&r| borrow_vw(r));
-    vw.as_ref().and_then(|nb| nb.as_str().map(|s| s.to_string())).ok_or_else(|| {
-        VMError::RuntimeError(format!("{}() requires a string column name argument", method_name))
-    })
-}
-
-pub(crate) fn handle_sum(vm: &mut VirtualMachine, args: &mut [u64], mut ctx: Option<&mut shape_runtime::context::ExecutionContext>) -> Result<u64, VMError> {
-    let receiver = borrow_vw(args[0]);
-    let dt = extract_dt_nb(&receiver)?;
-    if let Some(&raw1) = args.get(1) {
-        let func_nb = borrow_vw(raw1);
-        if is_callable_nb(&func_nb) {
-            let dt_arc = Arc::new(dt.as_ref().clone());
-            let callee_bits = raw1;
-            let values = collect_closure_numbers_nb(vm, &dt_arc, callee_bits, &mut ctx)?;
-            let sum: f64 = values.iter().sum();
-            return Ok(ValueWord::from_f64(sum).into_raw_bits());
-        }
+/// Borrow `args[0]` as `Arc<DataTable>` for closure-driven handlers
+/// (mirrors `query.rs::borrow_dt_arc`; see §2.7.6 / Q8 contract).
+fn borrow_dt_arc(args: &[KindedSlot], method: &str) -> Result<Arc<DataTable>, VMError> {
+    if args.is_empty() {
+        return Err(VMError::RuntimeError(format!(
+            "datatable.{}: missing receiver",
+            method
+        )));
     }
-    let col_name = require_string_arg(args, 1, "sum")?;
-    if let Some(col) = dt.get_f64_column(&col_name) {
-        let sum = if col.null_count() == 0 { shape_runtime::columnar_aggregations::sum_f64_slice(col.values()) } else { col.iter().flatten().sum() };
-        Ok(ValueWord::from_f64(sum).into_raw_bits())
-    } else if let Some(col) = dt.get_i64_column(&col_name) {
-        let sum: i64 = col.iter().flatten().sum();
-        Ok(ValueWord::from_i64(sum).into_raw_bits())
-    } else { Err(VMError::RuntimeError(format!("sum() requires a numeric column, '{}' is not numeric", col_name))) }
-}
-
-pub(crate) fn handle_mean(vm: &mut VirtualMachine, args: &mut [u64], mut ctx: Option<&mut shape_runtime::context::ExecutionContext>) -> Result<u64, VMError> {
-    let receiver = borrow_vw(args[0]);
-    let dt = extract_dt_nb(&receiver)?;
-    if let Some(&raw1) = args.get(1) {
-        let func_nb = borrow_vw(raw1);
-        if is_callable_nb(&func_nb) {
-            let dt_arc = Arc::new(dt.as_ref().clone());
-            let callee_bits = raw1;
-            let values = collect_closure_numbers_nb(vm, &dt_arc, callee_bits, &mut ctx)?;
-            if values.is_empty() { return Ok(ValueWord::none().into_raw_bits()); }
-            let sum: f64 = values.iter().sum();
-            return Ok(ValueWord::from_f64(sum / values.len() as f64).into_raw_bits());
-        }
+    let recv = &args[0];
+    let bits = recv.slot.raw();
+    if bits == 0 {
+        return Err(VMError::RuntimeError(format!(
+            "datatable.{}: null receiver",
+            method
+        )));
     }
-    let col_name = require_string_arg(args, 1, "mean")?;
-    if let Some(col) = dt.get_f64_column(&col_name) {
-        let count = col.len() - col.null_count();
-        if count == 0 { return Ok(ValueWord::none().into_raw_bits()); }
-        let mean = if col.null_count() == 0 { shape_runtime::columnar_aggregations::mean_f64_slice(col.values()) } else { let sum: f64 = col.iter().flatten().sum(); sum / count as f64 };
-        Ok(ValueWord::from_f64(mean).into_raw_bits())
-    } else if let Some(col) = dt.get_i64_column(&col_name) {
-        let count = col.len() - col.null_count();
-        if count == 0 { return Ok(ValueWord::none().into_raw_bits()); }
-        let sum: i64 = col.iter().flatten().sum();
-        Ok(ValueWord::from_f64(sum as f64 / count as f64).into_raw_bits())
-    } else { Err(VMError::RuntimeError(format!("mean() requires a numeric column, '{}' is not numeric", col_name))) }
-}
-
-pub(crate) fn handle_min(vm: &mut VirtualMachine, args: &mut [u64], mut ctx: Option<&mut shape_runtime::context::ExecutionContext>) -> Result<u64, VMError> {
-    let receiver = borrow_vw(args[0]);
-    let dt = extract_dt_nb(&receiver)?;
-    if let Some(&raw1) = args.get(1) {
-        let func_nb = borrow_vw(raw1);
-        if is_callable_nb(&func_nb) {
-            let dt_arc = Arc::new(dt.as_ref().clone());
-            let callee_bits = raw1;
-            let values = collect_closure_numbers_nb(vm, &dt_arc, callee_bits, &mut ctx)?;
-            if values.is_empty() { return Ok(ValueWord::none().into_raw_bits()); }
-            let min = values.iter().cloned().fold(f64::INFINITY, f64::min);
-            return Ok(ValueWord::from_f64(min).into_raw_bits());
+    match recv.kind {
+        NativeKind::Ptr(HeapKind::DataTable) => unsafe {
+            Arc::increment_strong_count(bits as *const DataTable);
+            Ok(Arc::from_raw(bits as *const DataTable))
+        },
+        NativeKind::Ptr(HeapKind::TableView) => {
+            let tv: &TableViewData = unsafe { &*(bits as *const TableViewData) };
+            let inner = match tv {
+                TableViewData::TypedTable { table, .. }
+                | TableViewData::IndexedTable { table, .. }
+                | TableViewData::RowView { table, .. }
+                | TableViewData::ColumnRef { table, .. } => Arc::clone(table),
+            };
+            Ok(inner)
         }
+        other => Err(VMError::RuntimeError(format!(
+            "datatable.{}: expected DataTable/TableView receiver, got {:?}",
+            method, other
+        ))),
     }
-    let col_name = require_string_arg(args, 1, "min")?;
-    if let Some(col) = dt.get_f64_column(&col_name) {
-        let min = if col.null_count() == 0 { shape_runtime::columnar_aggregations::min_f64_slice(col.values()) } else { col.iter().flatten().fold(f64::INFINITY, f64::min) };
-        if min.is_infinite() { Ok(ValueWord::none().into_raw_bits()) } else { Ok(ValueWord::from_f64(min).into_raw_bits()) }
-    } else if let Some(col) = dt.get_i64_column(&col_name) {
-        match col.iter().flatten().min() { Some(min) => Ok(ValueWord::from_i64(min).into_raw_bits()), None => Ok(ValueWord::none().into_raw_bits()) }
-    } else { Err(VMError::RuntimeError(format!("min() requires a numeric column, '{}' is not numeric", col_name))) }
 }
 
-pub(crate) fn handle_max(vm: &mut VirtualMachine, args: &mut [u64], mut ctx: Option<&mut shape_runtime::context::ExecutionContext>) -> Result<u64, VMError> {
-    let receiver = borrow_vw(args[0]);
-    let dt = extract_dt_nb(&receiver)?;
-    if let Some(&raw1) = args.get(1) {
-        let func_nb = borrow_vw(raw1);
-        if is_callable_nb(&func_nb) {
-            let dt_arc = Arc::new(dt.as_ref().clone());
-            let callee_bits = raw1;
-            let values = collect_closure_numbers_nb(vm, &dt_arc, callee_bits, &mut ctx)?;
-            if values.is_empty() { return Ok(ValueWord::none().into_raw_bits()); }
-            let max = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-            return Ok(ValueWord::from_f64(max).into_raw_bits());
+/// Build a per-row `KindedSlot` carrying an `Arc<TableViewData::RowView>`
+/// (mirrors `query.rs::make_row_view_slot`).
+fn make_row_view_slot(table: Arc<DataTable>, row_idx: usize) -> KindedSlot {
+    let schema_id = table.schema_id().unwrap_or(0) as u64;
+    let tv = TableViewData::RowView {
+        schema_id,
+        table,
+        row_idx,
+    };
+    let bits = Arc::into_raw(Arc::new(tv)) as u64;
+    KindedSlot::new(
+        ValueSlot::from_raw(bits),
+        NativeKind::Ptr(HeapKind::TableView),
+    )
+}
+
+/// Per-column numeric aggregation, dispatched on Arrow `DataType` of the
+/// referenced column. Kept module-local so each handler can call it
+/// without re-implementing the column-kind cascade.
+fn col_numeric_agg(
+    dt: &DataTable,
+    col_name: &str,
+    method: &str,
+    op: AggOp,
+) -> Result<KindedSlot, VMError> {
+    let col = dt.column_by_name(col_name).ok_or_else(|| {
+        VMError::RuntimeError(format!("datatable.{}: unknown column: {}", method, col_name))
+    })?;
+    if let Some(f64a) = col.as_any().downcast_ref::<Float64Array>() {
+        let n = f64a.len();
+        if n == 0 {
+            return Err(VMError::RuntimeError(format!(
+                "datatable.{}: empty column",
+                method
+            )));
         }
+        // Treat nulls as skipped — track count of valid entries.
+        let mut count = 0usize;
+        let mut acc = 0.0f64;
+        let mut min = f64::INFINITY;
+        let mut max = f64::NEG_INFINITY;
+        for i in 0..n {
+            if f64a.is_null(i) {
+                continue;
+            }
+            let v = f64a.value(i);
+            acc += v;
+            if v < min {
+                min = v;
+            }
+            if v > max {
+                max = v;
+            }
+            count += 1;
+        }
+        if count == 0 {
+            return Err(VMError::RuntimeError(format!(
+                "datatable.{}: column is all-null",
+                method
+            )));
+        }
+        let result = match op {
+            AggOp::Sum => acc,
+            AggOp::Mean => acc / (count as f64),
+            AggOp::Min => min,
+            AggOp::Max => max,
+        };
+        Ok(KindedSlot::from_number(result))
+    } else if let Some(i64a) = col.as_any().downcast_ref::<Int64Array>() {
+        let n = i64a.len();
+        if n == 0 {
+            return Err(VMError::RuntimeError(format!(
+                "datatable.{}: empty column",
+                method
+            )));
+        }
+        let mut count = 0usize;
+        let mut acc: i128 = 0;
+        let mut min = i64::MAX;
+        let mut max = i64::MIN;
+        for i in 0..n {
+            if i64a.is_null(i) {
+                continue;
+            }
+            let v = i64a.value(i);
+            acc += v as i128;
+            if v < min {
+                min = v;
+            }
+            if v > max {
+                max = v;
+            }
+            count += 1;
+        }
+        if count == 0 {
+            return Err(VMError::RuntimeError(format!(
+                "datatable.{}: column is all-null",
+                method
+            )));
+        }
+        match op {
+            AggOp::Sum => {
+                // Sum of i64 may overflow i64 — surface as a runtime error
+                // rather than silently wrap. Callers needing a wider type
+                // can `mean` (returns f64) or pre-coerce to Float64.
+                if acc > i64::MAX as i128 || acc < i64::MIN as i128 {
+                    return Err(VMError::RuntimeError(format!(
+                        "datatable.{}: sum overflow on Int64 column",
+                        method
+                    )));
+                }
+                Ok(KindedSlot::from_int(acc as i64))
+            }
+            AggOp::Mean => Ok(KindedSlot::from_number((acc as f64) / (count as f64))),
+            AggOp::Min => Ok(KindedSlot::from_int(min)),
+            AggOp::Max => Ok(KindedSlot::from_int(max)),
+        }
+    } else if let Some(b) = col.as_any().downcast_ref::<BooleanArray>() {
+        // Count-true semantics for Bool columns. Sum/mean/min/max generalize:
+        //   sum = count_true; mean = count_true / count; min = false if any
+        //   false; max = true if any true.
+        let n = b.len();
+        let mut count = 0usize;
+        let mut count_true = 0usize;
+        for i in 0..n {
+            if b.is_null(i) {
+                continue;
+            }
+            count += 1;
+            if b.value(i) {
+                count_true += 1;
+            }
+        }
+        if count == 0 {
+            return Err(VMError::RuntimeError(format!(
+                "datatable.{}: column is all-null",
+                method
+            )));
+        }
+        match op {
+            AggOp::Sum => Ok(KindedSlot::from_int(count_true as i64)),
+            AggOp::Mean => Ok(KindedSlot::from_number((count_true as f64) / (count as f64))),
+            AggOp::Min => Ok(KindedSlot::from_bool(count_true == count)),
+            AggOp::Max => Ok(KindedSlot::from_bool(count_true > 0)),
+        }
+    } else {
+        Err(VMError::RuntimeError(format!(
+            "datatable.{}: column {} is non-numeric ({:?})",
+            method,
+            col_name,
+            col.data_type()
+        )))
     }
-    let col_name = require_string_arg(args, 1, "max")?;
-    if let Some(col) = dt.get_f64_column(&col_name) {
-        let max = if col.null_count() == 0 { shape_runtime::columnar_aggregations::max_f64_slice(col.values()) } else { col.iter().flatten().fold(f64::NEG_INFINITY, f64::max) };
-        if max.is_infinite() { Ok(ValueWord::none().into_raw_bits()) } else { Ok(ValueWord::from_f64(max).into_raw_bits()) }
-    } else if let Some(col) = dt.get_i64_column(&col_name) {
-        match col.iter().flatten().max() { Some(max) => Ok(ValueWord::from_i64(max).into_raw_bits()), None => Ok(ValueWord::none().into_raw_bits()) }
-    } else { Err(VMError::RuntimeError(format!("max() requires a numeric column, '{}' is not numeric", col_name))) }
 }
 
-pub(crate) fn handle_sort(_vm: &mut VirtualMachine, args: &mut [u64], _ctx: Option<&mut shape_runtime::context::ExecutionContext>) -> Result<u64, VMError> {
-    let receiver = borrow_vw(args[0]);
-    let dt = extract_dt_nb(&receiver)?;
-    let col_name = require_string_arg(args, 1, "sort")?;
-    let batch = dt.inner();
-    let col = dt.column_by_name(&col_name).ok_or_else(|| VMError::RuntimeError(format!("Column '{}' not found", col_name)))?;
-    let indices = sort_to_indices(col.as_ref(), None, None).map_err(|e| VMError::RuntimeError(format!("sort() failed: {}", e)))?;
-    let sorted_columns: Result<Vec<_>, _> = batch.columns().iter().map(|c| take(c.as_ref(), &indices, None)).collect();
-    let sorted_columns = sorted_columns.map_err(|e| VMError::RuntimeError(format!("sort() take failed: {}", e)))?;
-    let sorted_batch = arrow_array::RecordBatch::try_new(batch.schema(), sorted_columns).map_err(|e| VMError::RuntimeError(format!("sort() rebuild failed: {}", e)))?;
-    let mut new_dt = DataTable::new(sorted_batch);
-    if let Some(idx_name) = dt.index_col() { new_dt = new_dt.with_index_col(idx_name.to_string()); }
-    Ok(wrap_result_table_nb(&receiver, new_dt).into_raw_bits())
+#[derive(Debug, Clone, Copy)]
+enum AggOp {
+    Sum,
+    Mean,
+    Min,
+    Max,
 }
 
-pub(crate) fn handle_count(_vm: &mut VirtualMachine, args: &mut [u64], _ctx: Option<&mut shape_runtime::context::ExecutionContext>) -> Result<u64, VMError> {
-    let receiver = borrow_vw(args[0]);
-    let dt = extract_dt_nb(&receiver)?;
-    Ok(ValueWord::from_i64(dt.row_count() as i64).into_raw_bits())
+fn dispatch_agg(
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    method: &str,
+    op: AggOp,
+    ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(format!(
+            "datatable.{}: column name or closure required",
+            method
+        )));
+    }
+    let arg = &args[1];
+    if matches!(arg.kind, NativeKind::Ptr(HeapKind::Closure)) {
+        return closure_form_agg(vm, args, method, op, ctx);
+    }
+    if let Some(name) = arg.as_str() {
+        let dt = borrow_data_table(args, method)?;
+        return col_numeric_agg(dt, name, method, op);
+    }
+    Err(VMError::RuntimeError(format!(
+        "datatable.{}: arg 1 must be a column-name string or closure, got {:?}",
+        method, arg.kind
+    )))
 }
 
-pub(crate) fn handle_describe(_vm: &mut VirtualMachine, args: &mut [u64], _ctx: Option<&mut shape_runtime::context::ExecutionContext>) -> Result<u64, VMError> {
+/// Closure form of sum/mean/min/max: invoke the closure once per row,
+/// reduce the numeric results to a single scalar. ADR-006 §2.7.11/Q12
+/// closure-callback dispatch through `vm.call_value_immediate_nb`.
+fn closure_form_agg(
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    method: &str,
+    op: AggOp,
+    mut ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    let dt_arc = borrow_dt_arc(args, method)?;
+    let closure = &args[1];
+    let n = dt_arc.row_count();
+    if n == 0 {
+        return Err(VMError::RuntimeError(format!(
+            "datatable.{}: empty table",
+            method
+        )));
+    }
+    // Reduce in f64-domain (mirrors col_numeric_agg's Float64 arm). Int
+    // closure returns widen.
+    let mut count = 0usize;
+    let mut acc = 0.0f64;
+    let mut min = f64::INFINITY;
+    let mut max = f64::NEG_INFINITY;
+    for i in 0..n {
+        let row_slot = make_row_view_slot(Arc::clone(&dt_arc), i);
+        let result = vm.call_value_immediate_nb(
+            closure,
+            std::slice::from_ref(&row_slot),
+            ctx.as_deref_mut(),
+        )?;
+        let v = match result.kind {
+            NativeKind::Float64 => result.as_f64().unwrap(),
+            NativeKind::Int64 => result.as_i64().unwrap() as f64,
+            other => {
+                return Err(VMError::RuntimeError(format!(
+                    "datatable.{}: closure returned non-numeric kind {:?}",
+                    method, other
+                )));
+            }
+        };
+        acc += v;
+        if v < min {
+            min = v;
+        }
+        if v > max {
+            max = v;
+        }
+        count += 1;
+    }
+    let result = match op {
+        AggOp::Sum => acc,
+        AggOp::Mean => acc / (count as f64),
+        AggOp::Min => min,
+        AggOp::Max => max,
+    };
+    Ok(KindedSlot::from_number(result))
+}
+
+/// `dt.sum()` / `dt.sum(col)` / `dt.sum(closure)`.
+pub(crate) fn handle_sum(
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    dispatch_agg(vm, args, "sum", AggOp::Sum, ctx)
+}
+
+/// `dt.mean()` / `dt.mean(col)` / `dt.mean(closure)`.
+pub(crate) fn handle_mean(
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    dispatch_agg(vm, args, "mean", AggOp::Mean, ctx)
+}
+
+/// `dt.min()` / `dt.min(col)` / `dt.min(closure)`.
+pub(crate) fn handle_min(
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    dispatch_agg(vm, args, "min", AggOp::Min, ctx)
+}
+
+/// `dt.max()` / `dt.max(col)` / `dt.max(closure)`.
+pub(crate) fn handle_max(
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    dispatch_agg(vm, args, "max", AggOp::Max, ctx)
+}
+
+/// `dt.sort(col)` / `dt.sort(col, asc)` / `dt.sort(|row| key)` — sort
+/// rows by column or by closure-extracted key. Two-arg form is `(col,
+/// asc: bool)`; closure form sorts by the closure's per-row return
+/// (numeric / string / bool keys, heterogeneous-kind total order).
+pub(crate) fn handle_sort(
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    use arrow_array::StringArray;
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "datatable.sort: column name or closure required".to_string(),
+        ));
+    }
+    let arg1 = &args[1];
+    if matches!(arg1.kind, NativeKind::Ptr(HeapKind::Closure)) {
+        return super::query::sort_by_closure_form(vm, args, ctx);
+    }
+    let dt = borrow_data_table(args, "sort")?;
+    let col_name = arg1.as_str().ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "datatable.sort: arg 1 must be column-name string, got {:?}",
+            arg1.kind
+        ))
+    })?;
+    let ascending = if let Some(s) = args.get(2) {
+        s.as_bool().unwrap_or(true)
+    } else {
+        true
+    };
+
+    let col = dt.column_by_name(col_name).ok_or_else(|| {
+        VMError::RuntimeError(format!("datatable.sort: unknown column: {}", col_name))
+    })?;
+
+    // Build the index permutation by stable sort over the column values.
+    let n = col.len();
+    let mut indices: Vec<usize> = (0..n).collect();
+
+    if let Some(f64a) = col.as_any().downcast_ref::<Float64Array>() {
+        indices.sort_by(|&a, &b| {
+            let va = f64a.value(a);
+            let vb = f64a.value(b);
+            let ord = va
+                .partial_cmp(&vb)
+                .unwrap_or(std::cmp::Ordering::Equal);
+            if ascending { ord } else { ord.reverse() }
+        });
+    } else if let Some(i64a) = col.as_any().downcast_ref::<Int64Array>() {
+        indices.sort_by(|&a, &b| {
+            let ord = i64a.value(a).cmp(&i64a.value(b));
+            if ascending { ord } else { ord.reverse() }
+        });
+    } else if let Some(s) = col.as_any().downcast_ref::<StringArray>() {
+        indices.sort_by(|&a, &b| {
+            let ord = s.value(a).cmp(s.value(b));
+            if ascending { ord } else { ord.reverse() }
+        });
+    } else if let Some(b) = col.as_any().downcast_ref::<BooleanArray>() {
+        indices.sort_by(|&a, &c| {
+            let ord = b.value(a).cmp(&b.value(c));
+            if ascending { ord } else { ord.reverse() }
+        });
+    } else {
+        return Err(VMError::RuntimeError(format!(
+            "datatable.sort: column {} has unsupported type {:?}",
+            col_name,
+            col.data_type()
+        )));
+    }
+
+    let idx_array =
+        arrow_array::UInt32Array::from(indices.into_iter().map(|i| i as u32).collect::<Vec<_>>());
+    let inner = dt.inner();
+    let n_cols = inner.num_columns();
+    let mut new_cols = Vec::with_capacity(n_cols);
+    for c in 0..n_cols {
+        let taken = arrow_select::take::take(inner.column(c), &idx_array, None)
+            .map_err(|e| VMError::RuntimeError(format!("datatable.sort: take: {}", e)))?;
+        new_cols.push(taken);
+    }
+    let new_batch = arrow_array::RecordBatch::try_new(inner.schema(), new_cols)
+        .map_err(|e| VMError::RuntimeError(format!("datatable.sort: {}", e)))?;
+    let new_dt = DataTable::new(new_batch);
+    let bits = Arc::into_raw(Arc::new(new_dt)) as u64;
+    Ok(KindedSlot::new(
+        shape_value::ValueSlot::from_raw(bits),
+        NativeKind::Ptr(HeapKind::DataTable),
+    ))
+}
+
+/// `dt.count()` — row count.
+pub(crate) fn handle_count(
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    let dt = borrow_data_table(args, "count")?;
+    Ok(KindedSlot::from_int(dt.row_count() as i64))
+}
+
+/// `dt.describe()` — summary stats DataTable.
+///
+/// Builds a result table with one row per numeric column and columns:
+/// `column` (string), `count` (int), `mean` (number), `min` (number),
+/// `max` (number).
+pub(crate) fn handle_describe(
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
     use arrow_schema::{DataType, Field, Schema};
-    let receiver = borrow_vw(args[0]);
-    let dt = extract_dt_nb(&receiver)?;
-    let batch = dt.inner();
-    let schema = batch.schema();
-    let numeric_cols: Vec<String> = schema.fields().iter().filter(|f| matches!(f.data_type(), DataType::Float64 | DataType::Int64)).map(|f| f.name().clone()).collect();
-    if numeric_cols.is_empty() { return Err(VMError::RuntimeError("describe() requires at least one numeric column".to_string())); }
-    let stat_names = vec!["count", "mean", "min", "max", "sum"];
-    let mut fields = vec![Field::new("stat", DataType::Utf8, false)];
-    for col_name in &numeric_cols { fields.push(Field::new(col_name, DataType::Float64, true)); }
-    let result_schema = Schema::new(fields);
-    let stat_col = Arc::new(StringArray::from(stat_names.clone())) as arrow_array::ArrayRef;
-    let mut columns: Vec<arrow_array::ArrayRef> = vec![stat_col];
-    for col_name in &numeric_cols { let stats = compute_column_stats(dt, col_name); columns.push(Arc::new(Float64Array::from(stats)) as arrow_array::ArrayRef); }
-    let result_batch = arrow_array::RecordBatch::try_new(Arc::new(result_schema), columns).map_err(|e| VMError::RuntimeError(format!("describe() failed: {}", e)))?;
-    Ok(ValueWord::from_datatable(Arc::new(DataTable::new(result_batch))).into_raw_bits())
-}
+    use shape_value::DataTableBuilder;
 
-pub(crate) fn handle_aggregate(vm: &mut VirtualMachine, args: &mut [u64], _ctx: Option<&mut shape_runtime::context::ExecutionContext>) -> Result<u64, VMError> {
-    let receiver = borrow_vw(args[0]);
-    let dt = extract_dt_nb(&receiver)?;
-    let arg1 = args.get(1).map(|&r| borrow_vw(r)).ok_or_else(|| VMError::RuntimeError("aggregate() requires an object argument specifying aggregations".to_string()))?;
-    let spec = typed_object_to_hashmap_nb_vm(vm, &arg1)?;
-    let mut result_map = HashMap::new();
-    for (output_col, agg_spec) in spec.iter() {
-        let (agg_fn, source_col) = parse_agg_spec_nb(agg_spec, output_col)?;
-        let value = compute_aggregation(dt, &agg_fn, &source_col)?;
-        result_map.insert(output_col.clone(), value);
+    let dt = borrow_data_table(args, "describe")?;
+
+    let names = dt.column_names();
+    let mut col_names = Vec::new();
+    let mut counts = Vec::new();
+    let mut means = Vec::new();
+    let mut mins = Vec::new();
+    let mut maxs = Vec::new();
+
+    for name in &names {
+        let col = match dt.column_by_name(name) {
+            Some(c) => c,
+            None => continue,
+        };
+        let (count, mean, min, max) = if let Some(f) = col.as_any().downcast_ref::<Float64Array>() {
+            let n = f.len();
+            let mut c = 0usize;
+            let mut s = 0.0f64;
+            let mut mn = f64::INFINITY;
+            let mut mx = f64::NEG_INFINITY;
+            for i in 0..n {
+                if f.is_null(i) {
+                    continue;
+                }
+                let v = f.value(i);
+                s += v;
+                if v < mn { mn = v; }
+                if v > mx { mx = v; }
+                c += 1;
+            }
+            if c == 0 { continue; }
+            (c as i64, s / (c as f64), mn, mx)
+        } else if let Some(i) = col.as_any().downcast_ref::<Int64Array>() {
+            let n = i.len();
+            let mut c = 0usize;
+            let mut s: i128 = 0;
+            let mut mn = i64::MAX;
+            let mut mx = i64::MIN;
+            for k in 0..n {
+                if i.is_null(k) {
+                    continue;
+                }
+                let v = i.value(k);
+                s += v as i128;
+                if v < mn { mn = v; }
+                if v > mx { mx = v; }
+                c += 1;
+            }
+            if c == 0 { continue; }
+            (c as i64, (s as f64) / (c as f64), mn as f64, mx as f64)
+        } else {
+            // Skip non-numeric columns silently — `describe` output is
+            // numeric-only by convention.
+            continue;
+        };
+        col_names.push(name.as_str());
+        counts.push(count);
+        means.push(mean);
+        mins.push(min);
+        maxs.push(max);
     }
-    let result_dt = build_aggregation_result(&result_map)?;
-    Ok(ValueWord::from_datatable(Arc::new(result_dt)).into_raw_bits())
+
+    let schema = Schema::new(vec![
+        Field::new("column", DataType::Utf8, false),
+        Field::new("count", DataType::Int64, false),
+        Field::new("mean", DataType::Float64, false),
+        Field::new("min", DataType::Float64, false),
+        Field::new("max", DataType::Float64, false),
+    ]);
+    let mut b = DataTableBuilder::new(schema);
+    b.add_string_column(col_names);
+    b.add_i64_column(counts);
+    b.add_f64_column(means);
+    b.add_f64_column(mins);
+    b.add_f64_column(maxs);
+    let result = b
+        .finish()
+        .map_err(|e| VMError::RuntimeError(format!("datatable.describe: {}", e)))?;
+    let bits = Arc::into_raw(Arc::new(result)) as u64;
+    Ok(KindedSlot::new(
+        shape_value::ValueSlot::from_raw(bits),
+        NativeKind::Ptr(HeapKind::DataTable),
+    ))
 }
 
-pub(in crate::executor::objects) fn parse_agg_spec_nb(spec: &ValueWord, output_col: &str) -> Result<(String, String), VMError> {
-    if let Some(view) = spec.as_any_array() {
-        let arr = view.to_generic();
-        if arr.len() == 2 {
-            let agg_fn = arr[0].as_str().ok_or_else(|| VMError::RuntimeError("aggregate(): first element of spec must be a string (agg function)".to_string()))?.to_string();
-            let source_col = arr[1].as_str().ok_or_else(|| VMError::RuntimeError("aggregate(): second element of spec must be a string (source column)".to_string()))?.to_string();
-            return Ok((agg_fn, source_col));
-        }
-    }
-    if let Some(agg_fn) = spec.as_str() { return Ok((agg_fn.to_string(), output_col.to_string())); }
-    Err(VMError::RuntimeError("aggregate(): spec must be [\"fn\", \"col\"] or \"fn\"".to_string()))
+/// `dt.aggregate({ out_col: "fn" | ["fn", "col"] })` — multi-aggregation.
+///
+/// SURFACE: spec parsing depends on `HashMap` / `TypedObject` field
+/// inspection helpers that themselves cross into the
+/// `D-prop-access` / `D-typed-access` cluster territory; the agg-spec
+/// dispatch is best surfaced rather than partially wired.
+pub(crate) fn handle_aggregate(
+    _vm: &mut VirtualMachine,
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(VMError::NotImplemented(
+        "datatable.aggregate — SURFACE: agg-spec parsing (HashMap/TypedObject \
+         field walk) crosses into D-prop-access / D-typed-access cluster \
+         territory; the kinded property-access surface is itself at SURFACE \
+         (executor/objects/property_access.rs). Single-column aggregations \
+         (`dt.sum(col)`, etc.) are migrated; the multi-aggregation entry \
+         point waits on the property-access cluster's body migration."
+            .to_string(),
+    ))
 }
 
-pub(in crate::executor::objects) fn compute_aggregation(dt: &DataTable, agg_fn: &str, source_col: &str) -> Result<ValueWord, VMError> {
-    match agg_fn {
-        "count" => Ok(ValueWord::from_i64(dt.row_count() as i64)),
-        "sum" => {
-            if let Some(col) = dt.get_f64_column(source_col) { Ok(ValueWord::from_f64(col.iter().flatten().sum())) }
-            else if let Some(col) = dt.get_i64_column(source_col) { Ok(ValueWord::from_i64(col.iter().flatten().sum())) }
-            else { Err(VMError::RuntimeError(format!("aggregate(): column '{}' is not numeric", source_col))) }
-        }
-        "mean" => {
-            if let Some(col) = dt.get_f64_column(source_col) { let count = col.len() - col.null_count(); if count == 0 { return Ok(ValueWord::none()); } let sum: f64 = col.iter().flatten().sum(); Ok(ValueWord::from_f64(sum / count as f64)) }
-            else if let Some(col) = dt.get_i64_column(source_col) { let count = col.len() - col.null_count(); if count == 0 { return Ok(ValueWord::none()); } let sum: i64 = col.iter().flatten().sum(); Ok(ValueWord::from_f64(sum as f64 / count as f64)) }
-            else { Err(VMError::RuntimeError(format!("aggregate(): column '{}' is not numeric", source_col))) }
-        }
-        "min" => {
-            if let Some(col) = dt.get_f64_column(source_col) { match col.iter().flatten().reduce(f64::min) { Some(v) => Ok(ValueWord::from_f64(v)), None => Ok(ValueWord::none()) } }
-            else if let Some(col) = dt.get_i64_column(source_col) { match col.iter().flatten().min() { Some(v) => Ok(ValueWord::from_i64(v)), None => Ok(ValueWord::none()) } }
-            else { Err(VMError::RuntimeError(format!("aggregate(): column '{}' is not numeric", source_col))) }
-        }
-        "max" => {
-            if let Some(col) = dt.get_f64_column(source_col) { match col.iter().flatten().reduce(f64::max) { Some(v) => Ok(ValueWord::from_f64(v)), None => Ok(ValueWord::none()) } }
-            else if let Some(col) = dt.get_i64_column(source_col) { match col.iter().flatten().max() { Some(v) => Ok(ValueWord::from_i64(v)), None => Ok(ValueWord::none()) } }
-            else { Err(VMError::RuntimeError(format!("aggregate(): column '{}' is not numeric", source_col))) }
-        }
-        "first" => { let col = dt.column_by_name(source_col).ok_or_else(|| VMError::RuntimeError(format!("aggregate(): column '{}' not found", source_col)))?; if dt.is_empty() { Ok(ValueWord::none()) } else { extract_array_value_nb(col.as_ref(), 0) } }
-        "last" => { let col = dt.column_by_name(source_col).ok_or_else(|| VMError::RuntimeError(format!("aggregate(): column '{}' not found", source_col)))?; if dt.is_empty() { Ok(ValueWord::none()) } else { extract_array_value_nb(col.as_ref(), dt.row_count() - 1) } }
-        _ => Err(VMError::RuntimeError(format!("aggregate(): unsupported function '{}'. Use sum, mean, min, max, count, first, last", agg_fn)))
-    }
+/// SURFACE placeholder for the aggregation-spec parser keyed on the
+/// deleted `ValueWord` carrier.
+#[allow(dead_code)]
+pub(in crate::executor::objects) fn parse_agg_spec_kinded(
+    _spec: &KindedSlot,
+    _output_col: &str,
+) -> Result<(String, String), VMError> {
+    Err(VMError::NotImplemented(
+        "parse_agg_spec — SURFACE: depends on the property-access cluster \
+         (HashMap / TypedObject kinded field walk) per the handle_aggregate \
+         migration note."
+            .to_string(),
+    ))
 }
 
-fn build_aggregation_result(results: &HashMap<String, ValueWord>) -> Result<DataTable, VMError> {
-    use arrow_schema::{DataType, Field, Schema};
-    let mut fields = Vec::new();
-    let mut columns: Vec<arrow_array::ArrayRef> = Vec::new();
-    let mut keys: Vec<&String> = results.keys().collect();
-    keys.sort();
-    for key in keys {
-        let nb = &results[key];
-        if nb.is_f64() { fields.push(Field::new(key, DataType::Float64, true)); columns.push(Arc::new(Float64Array::from(vec![nb.as_f64().unwrap()])) as arrow_array::ArrayRef); }
-        else if nb.is_i64() { fields.push(Field::new(key, DataType::Int64, true)); columns.push(Arc::new(Int64Array::from(vec![nb.as_i64().unwrap()])) as arrow_array::ArrayRef); }
-        else if nb.is_none() { fields.push(Field::new(key, DataType::Float64, true)); columns.push(Arc::new(Float64Array::from(vec![None as Option<f64>])) as arrow_array::ArrayRef); }
-        else { if let Some(s) = nb.as_str() { fields.push(Field::new(key, DataType::Utf8, true)); columns.push(Arc::new(StringArray::from(vec![s])) as arrow_array::ArrayRef); } else { fields.push(Field::new(key, DataType::Utf8, true)); let s = format!("{:?}", nb); columns.push(Arc::new(StringArray::from(vec![s.as_str()])) as arrow_array::ArrayRef); } }
-    }
-    let schema = Schema::new(fields);
-    let batch = arrow_array::RecordBatch::try_new(Arc::new(schema), columns).map_err(|e| VMError::RuntimeError(format!("aggregate() result build failed: {}", e)))?;
-    Ok(DataTable::new(batch))
-}
-
-fn compute_column_stats(dt: &DataTable, col_name: &str) -> Vec<f64> {
-    if let Some(col) = dt.get_f64_column(col_name) {
-        let count = (col.len() - col.null_count()) as f64;
-        let sum: f64 = col.iter().flatten().sum();
-        let mean = if count > 0.0 { sum / count } else { f64::NAN };
-        let min = col.iter().flatten().fold(f64::INFINITY, f64::min);
-        let max = col.iter().flatten().fold(f64::NEG_INFINITY, f64::max);
-        let min = if min.is_infinite() { f64::NAN } else { min };
-        let max = if max.is_infinite() { f64::NAN } else { max };
-        vec![count, mean, min, max, sum]
-    } else if let Some(col) = dt.get_i64_column(col_name) {
-        let count = (col.len() - col.null_count()) as f64;
-        let sum: i64 = col.iter().flatten().sum();
-        let mean = if count > 0.0 { sum as f64 / count } else { f64::NAN };
-        let min = col.iter().flatten().min().map(|v| v as f64).unwrap_or(f64::NAN);
-        let max = col.iter().flatten().max().map(|v| v as f64).unwrap_or(f64::NAN);
-        vec![count, mean, min, max, sum as f64]
-    } else { vec![f64::NAN; 5] }
+/// Aggregation evaluator — kinded result. Wraps `col_numeric_agg` for
+/// callers (currently the unused `parse_agg_spec_kinded` follow-up;
+/// kept dead-code-allow until `handle_aggregate` lands).
+#[allow(dead_code)]
+pub(in crate::executor::objects) fn compute_aggregation_kinded(
+    dt: &DataTable,
+    agg_fn: &str,
+    source_col: &str,
+) -> Result<KindedSlot, VMError> {
+    let op = match agg_fn {
+        "sum" => AggOp::Sum,
+        "mean" | "avg" => AggOp::Mean,
+        "min" => AggOp::Min,
+        "max" => AggOp::Max,
+        "count" => {
+            return Ok(KindedSlot::from_int(dt.row_count() as i64));
+        }
+        other => {
+            return Err(VMError::RuntimeError(format!(
+                "compute_aggregation: unknown agg function: {}",
+                other
+            )));
+        }
+    };
+    col_numeric_agg(dt, source_col, agg_fn, op)
 }

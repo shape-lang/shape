@@ -29,7 +29,7 @@ The repo is a monorepo with several top-level projects:
 |-------|------|---------|
 | **shape-ast** | `crates/shape-ast/` | Pest grammar (`shape.pest`) + AST types |
 | **shape-value** | `crates/shape-value/` | Value representation (`ValueWord` in `value_word.rs`), HeapValue, TypedObject schemas |
-| **shape-types** | `crates/shape-types/` | Type system definitions, type inference types |
+| **shape-types** | `crates/shape-types/` | **Empty crate skeleton** (only `data/` subdir, no `src/`). Type-system code actually lives at `shape-runtime/src/type_system/` and `shape-runtime/src/type_schema/`. Crate is reserved for a planned move; do not look here for type code. |
 | **shape-common** | `crates/shape-common/` | Shared utilities across crates |
 | **shape-runtime** | `crates/shape-runtime/` | Bytecode compiler, builtin functions, method registry, type schemas, stdlib modules, capability tags |
 | **shape-vm** | `crates/shape-vm/` | Stack-based bytecode interpreter, typed opcodes, feedback vectors, resource limits, content-addressed bytecode, linker |
@@ -53,7 +53,7 @@ The repo is a monorepo with several top-level projects:
 ```bash
 cargo build                    # Debug build
 cargo build --release          # Release build
-cargo check --workspace        # Check compilation without building
+just check-clean               # Canonical workspace-clean gate (exit 0 = green)
 cargo fmt                      # Format code
 cargo clippy                   # Lint
 
@@ -62,6 +62,21 @@ cargo run --bin shape -- repl                # Start REPL
 cargo run --bin shape -- wire-serve          # Start wire protocol server
 cargo run --bin shape -- ext install <name>  # Install extension from source
 ```
+
+**Canonical build gate.** `just check-clean` runs `cargo check --workspace
+--lib --bins --tests --examples` — `--all-targets` minus `--benches`. Every
+workspace member (`shape-macros`, `shape-ast`, `shape-value`, `shape-wire`,
+`shape-runtime`, `shape-vm`, `shape-jit`, `shape-diagnostics`, the two
+`shape-viz` crates, `shape-cli`, `shape-lsp`, `shape-test`, `xtask`,
+`shape-abi-v1`, `shape-gc`, `shape-ext-python`, `shape-ext-typescript`) is
+covered. `shape-app` and `shape-server` are NOT workspace members (they live
+in a separate workspace at `../shape-app/`); they are not covered by this
+gate. `--benches` is excluded because `crates/shape-vm/benches/vm_benchmarks.rs`
+and `crates/shape-vm/benches/typed_access_bench.rs` reference deleted
+post-strict-typing shapes (`OpCode::Lt`, `ValueWord`, `ValueWordExt`,
+`Constant::Value`) — bench-rebuild is Item 5's territory. Both
+`scripts/verify-merge.sh` CHECK 2 and `just test-check` anchor on this
+command's coverage.
 
 ### Test Tiers (use `just`)
 
@@ -215,7 +230,7 @@ The strict-typing plan (`~/.claude/plans/stop-native-vs-tagged-tax.md`) deletes 
 
 - **`ValueWord` at runtime.** Deleted. Do not reintroduce as a "shim", "bridge", "compatibility layer", or "serialization helper". Snapshot/wire uses per-slot kind metadata.
 - **Generic opcodes** (`Add`, `Sub`, `Lt`, etc. without kind suffix). Deleted. Only typed variants exist.
-- **Runtime tag-decode hops.** Specifically forbidden: `synthesize_value_word_from_raw`, `is_tagged()` in handlers, `last_program_return_kind` runtime stamp, `normalize_persisted_for_slot`, per-`FieldKind` capture decode.
+- **Runtime `tag_bits` dispatch (deleted).** Specifically forbidden: `synthesize_value_word_from_raw`, `is_tagged()` in handlers, `last_program_return_kind` runtime stamp, `normalize_persisted_for_slot`, per-`FieldKind` capture decode.
 - **`Convert<X>To<Y>` opcodes** added to paper over a kind-tracker gap. The W4-δ `ConvertBoolToString` opcode is the canonical example of what not to do — the bool source's kind was statically knowable; the right fix was extending the compiler's kind tracker.
 - **`SlotKind::Dynamic` / `SlotKind::Unknown`** in compiled bytecode. Deleted from the enum.
 - **`exec_*_dynamic_fallback`** handlers. Deleted.
@@ -237,18 +252,31 @@ If you find yourself or another agent saying any of these, stop:
 
 ### Renames to refuse on sight
 
-These are specific phrases past sessions used to dress up dynamic dispatch and make it sound like engineering. None are acceptable:
+These phrases dress deleted dispatch up as engineering. None are acceptable:
 
-- "ValueBits shim"
-- "FFI-boundary bridge"
-- "boundary translation"
-- "host-boundary normalization"
-- "decode hop"
-- "tag normalization"
-- "compatibility layer"
-- "dynamic-fallback retained by design"
-- "documented FFI-boundary helper"
-- "class-(a)/(b) cases"
+- "ValueBits shim" / "FFI-boundary bridge" / "boundary translation" / "host-boundary normalization" / "decode hop" / "tag normalization" / "compatibility layer" / "dynamic-fallback retained by design" / "documented FFI-boundary helper" / "class-(a)/(b) cases"
+- "tag-decode bridge" / "tag-decode probe" / "tag-decode helper" / "tag-decode hop" / "tag-decode translator" / "tag-decode adapter"
+- "decoder pattern" / "decode bridge" / "decoder bridge" / "tag bridge" / "synthesis bridge"
+- "MethodFnV2 bridge" / "MethodFn translator" / "dispatch-slice probe" / "boundary adapter for handler ABI" / "kind-injection helper" — ADR-006 §2.7.9 / Q11 family (deleted kind-blind `args: &mut [u64]` MethodFnV2 ABI).
+- "value-call bridge" / "closure-callback translator" / "frame-setup probe" / "callee-kind helper" / "capture-injection adapter" / "value-call shim" / "call_value_legacy" / "call_value_raw_u64" — ADR-006 §2.7.11 / Q12 family (deleted kind-blind value-call ABI: pre-§2.7.11 raw-u64 `call_value_immediate_*` / `op_call_value`).
+
+**Broader-family regex** (2026-05-09 user ruling — refused on sight):
+
+```
+(decode|tag|kind|dispatch|value.call|closure.callback|frame.setup|callee|capture) (bridge|probe|helper|hop|translator|adapter|shim)
+```
+
+Tags don't exist post-strict-typing. Describe deleted code **by name** (`tag_bits::is_tagged`, `synthesize_value_word_from_raw`) or **by deletion-fate** (the deleted W-series pattern, the deleted kind-blind handler ABI, the deleted kind-blind value-call ABI), never by hypothetical role.
+
+#### Parallel-implementation across producer/consumer carrier-shape boundaries
+
+Defection-attractor framings refused on sight:
+
+- "Documented intentional duality" / "preserve both carriers, one for VM side and one for JIT side" / "two solutions for two different problems" — without an explicit ADR amendment naming the duality + a compile-time classification rule selecting between them, this is parallel-implementation dressed as a feature.
+- "Carrier unification via boundary deletion" (delete one entirely OR delete the conversion) applied as a one-off patch rather than as systematic producer migration.
+- "Per-variant unwrap-and-flatten" / "conversion at the FFI boundary" / any bridge/probe/helper/hop/translator/adapter/shim descriptor implying the carriers meet at a structural-equivalence layer — refused per the broader-family regex above.
+
+Cluster-0 instance log + cluster-close target: `docs/cluster-audits/phase-3-cluster-0-status.md` + `docs/cluster-audits/w12-typed-array-data-deletion-audit.md` (deletion target: `TypedArrayData` enum + `TypedBuffer<T>` wrapper; `TypedArray<T>` flat struct survives — strategic-owner authorization 2026-05-13).
 
 ### Why this matters
 
@@ -256,39 +284,93 @@ The `v2-nanbox-removal-plan.md` Step 6 ("delete `ValueWord`") was quietly downgr
 
 If you encounter a case that genuinely seems to need dynamic dispatch, surface it to the user. Don't rationalize. Log considered-but-rejected compromises in `docs/defections.md`.
 
+### Single-discriminator discipline (ADR-005)
+
+`HeapValue` is the canonical discriminator for heap-resident values. Layers above HeapValue (`ConcreteReturn`, `TypedFieldValue`, marshal helpers, JIT FFI carriers, snapshot serialization) take `Arc<HeapValue>` and dispatch on `HeapValue::kind()`. Do not introduce sum types whose variants project 1:1 to `HeapKind` — every parallel discriminator we have added has eventually drifted (the N9 close-out names this as a defection-attractor on a par with the W-series ValueWord renames).
+
+The single explicit exception is `TypedFieldValue::String(Arc<String>)`, named and bounded in ADR-005 (justified by measured allocation cost on the most common heap type). A second exception requires its own ADR-level justification with measurement.
+
+Slot storage is typed: `ValueSlot` stores typed pointers directly via per-FieldType constructors, never `Box<HeapValue>` wrappers. VM and JIT share the slot ABI — no conversion at the boundary.
+
+See `docs/adr/005-typed-slot-construction.md`. Code touchpoints carry a `// ADR-005` marker comment for grep visibility.
+
+### Value & memory model (ADR-006)
+
+ADR-006 supersedes ADR-005 §3 (typed-pointer constructors). ADR-005 §1 (single-discriminator), §2 (String exception), §4 (uniform slot ABI), and §Forbidden are preserved verbatim.
+
+Full text: `docs/adr/006-value-and-memory-model.md`. Key rules:
+
+- **Bindings.** `let` (immutable) / `let mut` (mutable) explicit and Rust-shaped; `var` smart-default infers storage class (Direct / UniqueHeap / SharedCow / SharedAtomic / SharedAtomicMut), surfaces via LSP inlay hint.
+- **Refcount on escape, not mutability.** `let mut x = 0` is a stack scalar; RC only when escape (closure capture, cross-task share, store-into-shared) requires it.
+- **HeapValue payloads carry typed `Arc<T>`** (§2.3). `HeapValue::TypedArray(Arc<TypedArrayData>)`, `HeapValue::TypedObject(Arc<TypedObjectStorage>)`, etc. `Box<HeapValue>` wrapping forbidden in new code.
+- **No `from_heap_arc(Arc<HeapValue>)` catch-all** (Q6). Per-FieldType constructors only.
+- **`KindedSlot { slot: ValueSlot, kind: NativeKind }`** (§2.7 / Q7) is the runtime-tier carrier for GENERIC_CARRIER sites (module bindings, frame info, suspension, intrinsic dispatch, output-adapter return). STATIC_KIND sites use `ValueSlot` directly. Must NOT leak into the typed VM↔JIT slot ABI (`docs/runtime-v2-spec.md`).
+- **`KindedSlot` API bounded by `NativeKind` cardinality** (§2.7.6 / Q8). One constructor + at most one scalar accessor per variant. **No per-heap-variant accessors** — heap dispatch via `kinded_slot.slot.as_heap_value()` + `HeapValue` match (preserves ADR-005 §1).
+- **VM stack: parallel `Vec<NativeKind>` track** alongside `Vec<u64>` data slots (§2.7.7 / Q9) drives `clone_with_kind` / `drop_with_kind` — no tag decode, no `is_heap()` probe. Forbidden: `Vec<KindedSlot>` for the stack; 16-byte slots; packed tag bits; `Option<NativeKind>` / `Unknown` placeholders; transitional shims with deleted ValueWord-shape names (`push_raw_u64`, `pop_raw_u64`, `push_native_i64`, `stack_read_owned`, `stack_peek_raw`) backed by Bool-default kinded primitives.
+- **Cell-storage parallel-kind extension** (§2.7.8 / Q10). Closure cells, `SharedCell`, module bindings, `CallFrame.closure_heap_bits` (`executor/mod.rs:188`) all grow parallel `Vec<NativeKind>` / `Option<NativeKind>`. Same dispatch; same forbidden shapes; no Bool-default for `Load*Ptr` (surface-and-stop with `NotImplemented(SURFACE)` instead).
+- **`HeapKind::FilterExpr` is a typed-Arc dispatch label** (§2.7.9 / §2.3 / Q8 amendment, Wave-γ G-heap-filter-expr 2026-05-09). Query-DSL And/Or/Not pushes `Arc::into_raw(Arc<FilterNode>)` payloads with `NativeKind::Ptr(HeapKind::FilterExpr)`; every Q8/Q10 dispatch table arm calls `Arc::increment/decrement_strong_count::<FilterNode>`. Pure-discriminator HeapKind variants (no `HeapValue` arm) are allowed; `as_heap_value()` is unsound on FilterExpr-labeled bits.
+- **Method-dispatch ABI: `MethodFnV2(&mut VirtualMachine, &[KindedSlot], Option<&mut ExecutionContext>) -> Result<KindedSlot, VMError>`** (§2.7.10 / Q11). Receiver = `args[0]`; kind from §2.7.7 stack parallel-kind track at the dispatch shell (no fabrication); heap dispatch via `args[i].slot.as_heap_value()`. Forbidden: kind from raw bits; `is_heap()` probe; parallel `&[NativeKind]` side-slice (Q8 carrier-API-bound); `&mut [KindedSlot]` / `Vec<KindedSlot>` by-move; result `(u64, NativeKind)`; transitional ABI shims (`MethodFn` / `MethodFnLegacy` / `dispatch_method_handler_raw` / `call_handler_with_u64_slice`).
+- **Value-call ABI: `(callee: KindedSlot, args: &[KindedSlot]) -> Result<KindedSlot, VMError>`** (§2.7.11 / Q12, Wave 7). `op_call_value` in `executor/control_flow/mod.rs` + `call_value_immediate_*` in `executor/call_convention.rs`. Frame setup via `OwnedClosureBlock::read_capture_kinded` (§2.7.8/Q10). `CallFrame.closure_heap_kind: Option<NativeKind>` preserves closure-self kind. Forbidden: kind from raw callee/arg bits; `is_heap()` probe; Bool-default for capture kinds at frame setup; transitional ABI shims (`call_value_legacy` / `call_value_raw_u64` / `dispatch_value_call_handler_raw` / `call_value_with_u64_slice`); defection-attractor descriptors per §Renames-to-refuse-on-sight.
+- **No new modal-types subsystem.** Existing borrow solver / MIR storage planner / `BindingStorageClass` (`type_tracking.rs:286`) extended with `SharedAtomic`, `SharedAtomicMut`.
+- **LSDS** is the primary diagnostic format.
+
+Code touchpoints carry a `// ADR-006` marker.
+
 ### Mechanical enforcement
 
 - `prove_native_kind() -> Result<NativeKind, ProofGap>` in `compiler/type_tracking.rs`. `ProofGap`'s constructor is private to the type-tracking module — emit code cannot fabricate "I proved it". The Rust type system enforces this.
 - `just check-no-dynamic` recipe greps for forbidden symbols on every CI run and pre-commit. Build fails on hit.
 - Sentinel test `crates/shape-vm/src/executor/tests/no_dynamic.rs` asserts forbidden symbols are absent.
+- `just verify-merge` / `bash scripts/verify-merge.sh` — Phase 2d merge gate (11 checks, exit-code-based, NOT grep -c). Required pre-merge for every Phase 2d sub-cluster branch. Catches the 4 take-both regex misses + HeapKind ordinal collisions + 4-table HeapKind lockstep + receiver-recovery suspicious patterns (3ac2f11 soundness rule heuristic).
+
+### Phase 2d entry points (binding for Phase 2d sub-cluster work)
+
+- **Handover doc:** `docs/cluster-audits/phase-2d-handover.md` — §0 rules (forbidden patterns, 4-table lockstep, 5-arm receiver-recovery, surface-and-stop discipline). Required reading for every agent.
+- **Inventory:** `docs/cluster-audits/phase-2d-stub-inventory.md` — source-of-truth for sites and sub-cluster grouping.
+- **Playbook:** `docs/cluster-audits/phase-2d-playbook.md` — per-sub-cluster agent prompts (territory / sites / smoke / required reading / close gate).
+- **ADR amendment:** `docs/adr/006-value-and-memory-model.md` §2.7.24 — typed-carrier monomorphization bundle (Q25.A/B/C). Binding for W17-typed-carrier-monomorphization + everything downstream.
+- **Roster:** `AGENTS.md` — live sub-cluster rows + HeapKind ordinal table.
 
 ### Known Constraints
-- **TypeVar loss in `Type::to_annotation()`**: `BuiltinTypes::function()` preserves `Type::Variable` correctly (regression test in `constraints.rs:1193`). The lossy step is `Type::Function`'s `to_annotation()` in `core.rs:218`: unresolved param/return vars are converted to `"unknown"`, losing type variable identity.
-- **`format()` name shadowing**: Bare `format()` resolves to the global builtin (defined in `intrinsics.shape:138`), not to `DateTime.format()`. The method form `dt.format(...)` works correctly via method dispatch. This is a name-resolution/documentation footgun, not a broken method call path.
-- **`Queryable<T>` generic impl syntax**: Parser/AST supports generic impl headers (`types.rs:379`, parser test in `advanced.rs:1132`), but the compiler/type-inference erases type args back to simple names (`statements.rs:788`, `items.rs:514`, `items.rs:677`). The shipped stdlib still uses concrete `impl Queryable for Table` in `table_queryable.shape:10`. Generic impls parse but are not first-class end-to-end.
-- **Annotation imports**: Annotations are NOT modeled as named exports/imports. `ExportItem` has no annotation variant (`modules.rs:40`), export processing ignores them (`loading.rs:209`), and named-import validation skips `Item::AnnotationDef` (`module_resolution.rs:17`, `:76`). Grammar only allows bare identifiers in named import lists (`shape.pest:64`). What works: namespace import (`use std::core::remote`) inlines the whole module AST (`module_resolution.rs:582`), making annotation defs available by bare name via the annotation registry (`annotation_context.rs:50`).
-- **shape-jit heavy-execution tests gated behind `deep-tests`**: The five test modules that call `JITExecutor::execute_program` (`mir_compiler::integration_tests`, `mir_compiler::v2_array_tests`, `compiler::a1d2_tests`, `compiler::a1e_tests`) each JIT-compile ~118 stdlib functions via MirToIR per test. Collectively they made the shape-jit test binary slow enough to miss the summary line under any reasonable timeout, and racy enough at default n-cpu parallelism to SIGILL in the JIT code cache. They now live behind `#[cfg(all(test, feature = "deep-tests"))]` and run via `just test` / `just test-all` / `just test-deep`. `cargo test -p shape-jit --lib` (Tier 1) completes in ~50s with 394 passing tests. Gating is behavioral — the gated tests themselves still pass individually, and the root-cause perf/codegen work is tracked as a follow-up (stdlib JIT-compilation caching).
-- **v2-raw-heap aliasing class — 4 simulation tests deferred**: `test_harmonic_oscillator_rk4_system`, `test_rk45_system_harmonic_oscillator`, `test_find_collisions_brute`, `test_find_collisions_sweep` are `#[ignore]`'d in `bin/shape-cli/tests/stdlib/simulation.rs` and skipped by name in `just test-all` (justfile line 51). All four crash at VM Drop teardown (`<VirtualMachine as Drop>::drop` → `tcache_double_free_verify`) due to a v2 raw-pointer TypedArray aliasing bug: `typed_array_push_f64`-class opcodes can realloc on capacity growth, raw pointers don't Arc-refcount, and aliased copies retained on stack/frame/binding/closure-capture slots from prior iterations become dangling after realloc. Same bug class as the FR./B6./WB2. ongoing refcount-audit waves. Per INV-SIGSEGV/C.ALIAS triage (path-c2), this is a 2–5 day architectural workstream that needs instrumented `vw_clone`/`vw_drop` counters to bisect the imbalanced opcode pair; out of scope for path-c2's stop-and-replan budget. Reproducible minimal forms: (1) hot-loop closure form `|t,y| [y[1], -y[0]]` invoked in an RK4-style integrator; (2) `for i in range(0, n) { let x = arr[i]; fn_call_that_reindexes_arr }` over `Array<TypedObject>`. The c-stdlib-msgpack pattern (`vw_clone` retain on push + `vw_drop` release on pop, see commit `afb1651`) is the precedent the audit specialist should generalize. Tracked as follow-up "v2-raw-heap-audit".
-- **`object_len_function` test ignored**: `tools/shape-test/tests/objects_arrays/objects.rs::object_len_function` is `#[ignore]`'d. The test calls `len(person)` on a plain object literal that lowers to `HeapValue::TypedObject`; after path-c2's design-B migration, the global `len()` is gone and TypedObject has no `.len()` PHF entry. Either wire a `len` method into the TypedObject method registry (small) or drop the test. Tracked as a sub-item of the `Len` trait follow-up.
-- **`just test-all` redefined to "everything that should currently pass"**: Path-c2's final-gate verification surfaced ~70+ pre-existing failures across multiple subsystems whose common feature is that they were never actually green at the original `jit-v2-phase1@53a06ce` baseline — the prior plan's "just test-all = 0" gate was based on a faulty baseline assumption. The recipe at `justfile:test-all` was restructured to: (1) drop `--include-ignored` (so `#[ignore]`'d tests stay ignored — applies to the 4 v2-raw-heap aliasing tests above + ~23 pre-existing shape-jit `#[ignore]`'d tests like `test_jit_width_aware_*`, `test_jit_inline_array_*`, `test_jit_*_kernel_compilation`, `test_backend_compiles_whole_function`); (2) drop the `shape-jit/deep-tests` feature flag (so the heavy execution tests c-jit gated stay gated — same SIGILL class CLAUDE.md previously documented); (3) split `shape-test` out and run it with `--test-threads=1` (to avoid annotations_comptime / annotations_runtime parallel-state contention and another flake class identified late in path-c2 verification). For inspection use `cargo test ... -- --ignored` or the per-tier recipes. The 48 deterministic shape-test failures (in `type_inference::stress_generics`, `arrays_vectors::*`, `window_functions::basic::*`, `complex_integration::*`, `strings::test_string_join_*`, `comptime::*`) are pre-existing and tracked as a separate workstream — verified by checking out the affected fixture from `jit-v2-phase1` and observing identical failures.
-- **Pre-existing shape-test failure clusters (out of path-c2 scope)**: ~48 tests fail on `cargo test -p shape-test` even on `jit-v2-phase1@53a06ce` baseline. Categories observed: (a) generic-function instantiation returning `Null` instead of the actual value (`stress_generics::generic_identity_*`, `multi_generic_*`, `generic_fn_*`); (b) inference-on-typed-closure regressions (`stress_inference_complex::typed_closure_in_array_*`); (c) array transformation chains failing under JIT or VM (`complex::test_complex_array_transformation_chain`, `test_complex_bubble_sort`); (d) string method failures (`strings::test_string_join_*`); (e) window-function basics (`window_functions::basic::window_*`); (f) array slicing/sorting/some (`collections::test_array_slice_*`, `test_array_sort_*`, `test_array_some_*`); (g) destructuring rest patterns (`destructuring::array_destructuring_rest`). These appear to be a mix of inference-loss / monomorphization gaps / v2 raw-heap interactions; needs a dedicated triage pass like INV-STDLIB ran for the 47-failure cluster. Recommended next workstream: "shape-test-residuals-audit".
+- **`Type::to_annotation()` TypeVar loss** at `core.rs:218` — `Type::Function` unresolved param/return vars become `"unknown"`. `BuiltinTypes::function()` preserves them (regression test `constraints.rs:1193`).
+- **`format()` name shadowing**: bare `format()` resolves to the global builtin (`intrinsics.shape:138`), not `DateTime.format()`. Method form `dt.format(...)` works.
+- **`Queryable<T>` generic impl**: parses (`types.rs:379`) but type-inference erases type args back to simple names (`statements.rs:788`, `items.rs:514`, `items.rs:677`). Shipped stdlib uses concrete `impl Queryable for Table` (`table_queryable.shape:10`).
+- **Annotation imports**: not modeled as named exports/imports (`ExportItem` has no annotation variant, `modules.rs:40`; named-import skips `Item::AnnotationDef`, `module_resolution.rs:17`/`:76`). Namespace import (`use std::core::remote`) inlines the whole module AST (`module_resolution.rs:582`), making annotations available by bare name via the registry (`annotation_context.rs:50`).
+- **shape-jit heavy-execution tests gated behind `deep-tests`**: 5 modules (`mir_compiler::integration_tests`, `v2_array_tests`, `compiler::a1d2_tests`, `a1e_tests`) JIT-compile ~118 stdlib functions per test → slow + SIGILL race at default parallelism. Gated via `#[cfg(all(test, feature = "deep-tests"))]`. Root cause = stdlib JIT-compilation caching (follow-up).
+- **v2-raw-heap-audit — RE-CLASSIFIED 2026-05-16 + PARTIALLY RESOLVED 2026-05-17** per `docs/cluster-audits/cluster-1.5-v2-raw-heap-audit.md` + `docs/cluster-audits/cluster-1.5-v2-raw-empirical-isolation-and-fix.md`: the 4 simulation tests at `bin/shape-cli/tests/stdlib/simulation.rs` (`test_harmonic_oscillator_rk4_system`, `test_rk45_system_harmonic_oscillator`, `test_find_collisions_brute`, `test_find_collisions_sweep`) are at HEAD blocked by V3-S5 ckpt-5/ckpt-6 SURFACE classes (`op_new_array` + `op_new_object` + `arr[i]` for `Array<TypedObject>`), NOT the historical v2-raw-heap aliasing repro. The cluster-2 §D Class 1 SIGABRT anchor at `hashmap_filter_all_match` RESOLVED 2026-05-17 via share-accounting double-release fix at `call_*_with_nb_args*` closure-call boundary (sibling of Round 13 T5 closure-self share fix at `call_value_immediate_nb:870`; root cause OUTSIDE the audit-enumerated HashMap-carrier hypothesis space — imprecision instance 85 audit-scope-expansion). Phase 4 imprecision 84 territory CLOSED: `op_get_field_typed:341-353` ReceiverGuard pattern (Phase 4) + `op_set_field_typed:608` ReceiverGuard mirror (cluster-1.5 2026-05-17 merge ceremony). Remaining live v2-raw class residuals (post-cluster-1.5-close territory; cluster-3+ candidates per empirical surface): `length_typed_object_empty` SIGABRT + `w17_comptime_*` SIGABRTs (territory not enumerated; needs empirical-isolation follow-up if pursued).
+- **`object_len_function` test `#[ignore]`'d** at `tools/shape-test/tests/objects_arrays/objects.rs`: `len(person)` on object literal; post-design-B `len()` global is gone and TypedObject has no `.len()` PHF entry. Wire into method registry or drop. (`Len` trait follow-up.)
+- **`just test-all` = "everything that should currently pass"** (not `--include-ignored`, no `deep-tests` flag, shape-test split with `--test-threads=1` to dodge annotations parallel-state contention). Pre-existing `#[ignore]`'s stay ignored — includes the 4 sim tests above + ~23 shape-jit `#[ignore]`'s (`test_jit_width_aware_*`, `test_jit_inline_array_*`, `test_jit_*_kernel_compilation`, `test_backend_compiles_whole_function`).
+- **Pre-existing shape-test failure clusters** (~48 tests, present on `jit-v2-phase1@53a06ce` baseline): (a) generic-fn instantiation returning `Null` (`stress_generics::generic_identity_*` etc.); (b) typed-closure inference regressions (`stress_inference_complex::typed_closure_in_array_*`); (c) array transformation chains (`complex::test_complex_array_transformation_chain`, `test_complex_bubble_sort`); (d) string `.join` (`strings::test_string_join_*`); (e) window functions (`window_functions::basic::window_*`); (f) array slice/sort/some (`collections::test_array_slice_*`, `_sort_*`, `_some_*`); (g) destructuring rest (`destructuring::array_destructuring_rest`). Mix of inference-loss / monomorphization / v2-raw-heap. Tracked as `shape-test-residuals-audit`.
 
 ## Key File Locations
+
+For comprehensive concept-to-location mapping see [`docs/codebase-index.md`](docs/codebase-index.md) and the per-domain files at `docs/codebase-index/0{1,2,3}-*.md`. The table below is a quick subset.
 
 | What | Where |
 |------|-------|
 | Pest grammar | `crates/shape-ast/src/shape.pest` |
-| Bytecode compiler | `crates/shape-runtime/src/compiler/` |
-| Type environment | `crates/shape-runtime/src/compiler/environment/mod.rs` |
-| Method registry (PHF) | `crates/shape-runtime/src/method_registry/` |
+| Bytecode compiler | `crates/shape-vm/src/compiler/` |
+| Type environment | `crates/shape-runtime/src/type_system/environment/` |
+| Type system / inference | `crates/shape-runtime/src/type_system/` |
+| Type schemas (`FieldType`, etc.) | `crates/shape-runtime/src/type_schema/` |
+| Method registry (PHF) | `crates/shape-vm/src/executor/objects/method_registry.rs` |
+| `BindingStorageClass` (lifetime lattice) | `crates/shape-vm/src/type_tracking.rs:286` |
+| MIR borrow solver | `crates/shape-vm/src/mir/solver.rs` |
+| MIR storage planning | `crates/shape-vm/src/mir/storage_planning.rs` |
 | Capability tags | `crates/shape-runtime/src/stdlib/capability_tags.rs` |
-| Permission enum | `crates/shape-abi-v1/src/lib.rs` |
+| Permission enum (16 perms) | `crates/shape-abi-v1/src/lib.rs:996` |
+| `LanguageRuntimeVTable` (polyglot) | `crates/shape-abi-v1/src/lib.rs:722` |
 | Resource limits | `crates/shape-vm/src/resource_limits.rs` |
 | Content-addressed blobs | `crates/shape-vm/src/bytecode/content_addressed.rs` |
 | Linker | `crates/shape-vm/src/linker.rs` |
 | VM executor | `crates/shape-vm/src/executor/` |
 | JIT compiler | `crates/shape-jit/src/` |
+| Tier thresholds (T1@100, T2@10k) | `crates/shape-vm/src/tier.rs:17-87` |
+| Inline cache state machine | `crates/shape-vm/src/feedback.rs:9-128` |
 | Ed25519 signing | `crates/shape-runtime/src/crypto/signing.rs` |
+| Wire protocol v1 | `crates/shape-wire/src/lib.rs:51` |
 | Runtime v2 spec | `docs/runtime-v2-spec.md` |
+| Value & memory model (canonical) | `docs/adr/006-value-and-memory-model.md` |
+| Codebase index | `docs/codebase-index.md` |
 | Landing page | `../shape-web/landing/index.html` |
 | Book (Astro) | `../shape-web/book/` |

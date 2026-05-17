@@ -33,8 +33,16 @@ pub extern "C" fn jit_typed_merge_object(
     left_obj: u64,
     right_obj: u64,
 ) -> u64 {
-    // Verify both inputs are TypedObjects
-    if !is_typed_object(left_obj) || !is_typed_object(right_obj) {
+    // W17-narrow (Phase 3 cluster-0 Round 15, 2026-05-13): dropped the
+    // `is_typed_object(left_obj) && is_typed_object(right_obj)` gate per
+    // the §2.7.5 stamp-at-compile-time discipline — under raw
+    // `Box::into_raw(UnifiedValue<*const u8>) as u64` carriers,
+    // `is_typed_object` (= `is_heap_kind(bits, HK_TYPED_OBJECT) ->
+    // is_heap(bits) && …`) always returned false, so every merge silently
+    // returned TAG_NULL. The receiver kind is the
+    // `Ptr(HeapKind::TypedObject)` parallel-kind companion on both args
+    // per the JIT-emitted call signature. Null-pointer guards remain.
+    if left_obj == 0 || right_obj == 0 {
         return TAG_NULL;
     }
 
@@ -92,8 +100,22 @@ pub extern "C" fn jit_typed_object_from_hashmap(
     data_size: u64,
     field_count: u64,
 ) -> u64 {
+    // W17-narrow (Phase 3 cluster-0 Round 15, 2026-05-13): the prior
+    // `is_typed_object(obj_bits)` + `is_heap_kind(obj_bits, HK_JIT_OBJECT)`
+    // tag-bit gates both return false on raw `Box::into_raw` carriers
+    // under §2.7.5 (W17-narrow audit §2 row #9). Discriminate via the
+    // direct `read_heap_kind` field-load on the JitAlloc / UnifiedValue
+    // prefix at offset 0 — that is the documented "*not* tag-bit dispatch
+    // — it reads a field from a heap-resident struct that the producing
+    // call placed there" path per ADR-006 §2.7.5. Null-pointer guard
+    // remains as defensive check.
+    if obj_bits == 0 {
+        return TAG_NULL;
+    }
+    let prefix_kind = unsafe { crate::ffi::jit_kinds::read_heap_kind(obj_bits) };
+
     // Already a typed object? Return as-is if schema matches
-    if is_typed_object(obj_bits) {
+    if prefix_kind == HK_TYPED_OBJECT {
         let ptr = unbox_typed_object(obj_bits) as *const TypedObject;
         if !ptr.is_null() {
             unsafe {
@@ -106,7 +128,7 @@ pub extern "C" fn jit_typed_object_from_hashmap(
     }
 
     // Must be a regular JIT object (HashMap-based)
-    if !is_heap_kind(obj_bits, HK_JIT_OBJECT) {
+    if prefix_kind != HK_JIT_OBJECT {
         return TAG_NULL;
     }
 

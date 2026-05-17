@@ -175,6 +175,9 @@ fn add_rvalue_uses(live: &mut HashSet<SlotId>, rvalue: &Rvalue) {
                 add_operand_uses(live, op);
             }
         }
+        Rvalue::EnumTest { operand, .. } | Rvalue::EnumPayload { operand, .. } => {
+            add_operand_uses(live, operand);
+        }
     }
 }
 
@@ -255,6 +258,8 @@ mod tests {
             local_types: vec![LocalTypeInfo::Copy, LocalTypeInfo::Copy],
             span: span(),
             field_name_table: std::collections::HashMap::new(),
+            local_struct_type_names: std::collections::HashMap::new(),
+            local_typed_array_element_types: std::collections::HashMap::new(),
         };
 
         let cfg = ControlFlowGraph::build(&mir);
@@ -322,6 +327,8 @@ mod tests {
             ],
             span: span(),
             field_name_table: std::collections::HashMap::new(),
+            local_struct_type_names: std::collections::HashMap::new(),
+            local_typed_array_element_types: std::collections::HashMap::new(),
         };
 
         let cfg = ControlFlowGraph::build(&mir);

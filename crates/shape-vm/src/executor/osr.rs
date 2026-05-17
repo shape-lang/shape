@@ -28,9 +28,9 @@ use crate::executor::control_flow::jit_abi;
 #[cfg(feature = "jit")]
 use crate::executor::VirtualMachine;
 #[cfg(feature = "jit")]
-use crate::type_tracking::SlotKind;
+use crate::type_tracking::NativeKind;
 #[cfg(feature = "jit")]
-use shape_value::{VMError, ValueWord, ValueWordExt};
+use shape_value::VMError;
 
 /// JIT context buffer size in u64 words.
 ///
@@ -112,16 +112,26 @@ impl VirtualMachine {
         // code can access locals by their original variable index.
         let mut ctx_buf = [0u64; CTX_U64_SIZE];
         for (i, &local_idx) in osr_entry.live_locals.iter().enumerate() {
-            let kind = osr_entry
-                .local_kinds
-                .get(i)
-                .copied()
-                .unwrap_or(SlotKind::Unknown);
+            // ADR-006 §2.7.5.1: OsrEntryPoint.local_kinds is post-proof
+            // wire-format. An out-of-range index here is a verifier bug.
+            let kind = osr_entry.local_kinds.get(i).copied().unwrap_or_else(|| {
+                panic!(
+                    "OsrEntryPoint.local_kinds[{}]: out of range (len={}). \
+                     Verifier should reject — ADR-006 §2.7.5.1.",
+                    i,
+                    osr_entry.local_kinds.len()
+                )
+            });
             let slot_idx = base + local_idx as usize;
             if slot_idx < self.stack.len() {
-                let vw_slice = self.stack_slice_raw(slot_idx..(slot_idx + 1));
+                // ADR-006 §2.7.7 borrow-read of the live stack slot — kind is
+                // sourced locally from `osr_entry.local_kinds` (post-proof
+                // wire-format per §2.7.5.1), so the parallel-track kind read
+                // here is discarded and only the raw bits cross the JIT
+                // boundary.
+                let (bits, _slot_kind) = self.stack_read_kinded_raw(slot_idx);
                 ctx_buf[LOCALS_U64_OFFSET + local_idx as usize] =
-                    jit_abi::marshal_arg_to_jit(&vw_slice[0], kind);
+                    jit_abi::marshal_arg_to_jit(bits, kind);
             }
         }
 
@@ -147,17 +157,29 @@ impl VirtualMachine {
                 "OSR local {} exceeds capacity after successful JIT execution",
                 local_idx
             );
-            let kind = osr_entry
-                .local_kinds
-                .get(i)
-                .copied()
-                .unwrap_or(SlotKind::Unknown);
+            // ADR-006 §2.7.5.1: OsrEntryPoint.local_kinds is post-proof
+            // wire-format. An out-of-range index here is a verifier bug.
+            let kind = osr_entry.local_kinds.get(i).copied().unwrap_or_else(|| {
+                panic!(
+                    "OsrEntryPoint.local_kinds[{}]: out of range (len={}). \
+                     Verifier should reject — ADR-006 §2.7.5.1.",
+                    i,
+                    osr_entry.local_kinds.len()
+                )
+            });
             let slot_idx = base + local_idx as usize;
             if slot_idx < self.stack.len() {
-                self.stack_write_raw(slot_idx, jit_abi::unmarshal_jit_result(
+                // ADR-006 §2.7.7 kinded write: re-materialize the local from
+                // the JIT context buffer with the kind sourced from
+                // `osr_entry.local_kinds` (post-proof per §2.7.5.1).
+                // `stack_write_kinded` retires the prior occupant via
+                // `drop_with_kind` and installs the new `(bits, kind)` pair
+                // in lockstep on the parallel-kind track.
+                let unmarshaled = jit_abi::unmarshal_jit_result(
                     ctx_buf[LOCALS_U64_OFFSET + local_idx as usize],
                     kind,
-                ));
+                );
+                self.stack_write_kinded(slot_idx, unmarshaled, kind);
             }
         }
 
@@ -187,17 +209,28 @@ impl VirtualMachine {
             if local_idx as usize >= 256 {
                 continue; // Defensive: should never happen (JIT rejects at compile time)
             }
-            let kind = osr_entry
-                .local_kinds
-                .get(i)
-                .copied()
-                .unwrap_or(SlotKind::Unknown);
+            // ADR-006 §2.7.5.1: OsrEntryPoint.local_kinds is post-proof
+            // wire-format. An out-of-range index here is a verifier bug.
+            let kind = osr_entry.local_kinds.get(i).copied().unwrap_or_else(|| {
+                panic!(
+                    "OsrEntryPoint.local_kinds[{}]: out of range (len={}). \
+                     Verifier should reject — ADR-006 §2.7.5.1.",
+                    i,
+                    osr_entry.local_kinds.len()
+                )
+            });
             let slot_idx = base + local_idx as usize;
             if slot_idx < self.stack.len() {
-                self.stack_write_raw(slot_idx, jit_abi::unmarshal_jit_result(
+                // ADR-006 §2.7.7 kinded write: deopt restore from the JIT
+                // context buffer. Kind comes from `osr_entry.local_kinds`
+                // (post-proof per §2.7.5.1); `stack_write_kinded` retires
+                // the prior occupant and installs the new `(bits, kind)`
+                // pair in lockstep on the parallel-kind track.
+                let unmarshaled = jit_abi::unmarshal_jit_result(
                     ctx_buf[LOCALS_U64_OFFSET + local_idx as usize],
                     kind,
-                ));
+                );
+                self.stack_write_kinded(slot_idx, unmarshaled, kind);
             }
         }
     }
@@ -234,15 +267,27 @@ impl VirtualMachine {
 
         // Restore locals using the JIT-to-bytecode index mapping
         for (i, &(jit_idx, bc_idx)) in deopt_info.local_mapping.iter().enumerate() {
-            let kind = deopt_info
-                .local_kinds
-                .get(i)
-                .copied()
-                .unwrap_or(SlotKind::Unknown);
+            // ADR-006 §2.7.5.1: DeoptInfo.local_kinds is post-proof; the
+            // length is asserted equal to local_mapping above. Out-of-range
+            // is a verifier bug.
+            let kind = deopt_info.local_kinds.get(i).copied().unwrap_or_else(|| {
+                panic!(
+                    "DeoptInfo.local_kinds[{}]: out of range (len={}). \
+                     Verifier should reject — ADR-006 §2.7.5.1.",
+                    i,
+                    deopt_info.local_kinds.len()
+                )
+            });
             let src_idx = LOCALS_U64_OFFSET + jit_idx as usize;
             let dst_idx = base + bc_idx as usize;
             if src_idx < CTX_U64_SIZE && dst_idx < self.stack.len() {
-                self.stack_write_raw(dst_idx, jit_abi::unmarshal_jit_result(ctx_buf[src_idx], kind));
+                // ADR-006 §2.7.7 kinded write: deopt re-materialization.
+                // Kind sourced from `deopt_info.local_kinds` (post-proof per
+                // §2.7.5.1). `stack_write_kinded` retires the prior occupant
+                // and installs the new `(bits, kind)` pair in lockstep on
+                // the parallel-kind track.
+                let unmarshaled = jit_abi::unmarshal_jit_result(ctx_buf[src_idx], kind);
+                self.stack_write_kinded(dst_idx, unmarshaled, kind);
             }
         }
 
@@ -299,24 +344,44 @@ impl VirtualMachine {
             let locals_count = func.locals_count as usize;
             let needed = current_bp + locals_count + iframe.stack_depth as usize;
             if needed > self.stack.len() {
+                // ADR-006 §2.7.7 / §2.7.8 lockstep growth: data + parallel
+                // kind track grow together. Sentinel pair is
+                // `(NONE_BITS, NativeKind::Bool)` per the §2.7.7 dead-slot
+                // convention — Drop/Clone are no-ops on this kind so the
+                // pre-population window is leak-free.
                 self.stack.resize_with(needed * 2 + 1, || Self::NONE_BITS);
+                self.kinds.resize(needed * 2 + 1, NativeKind::Bool);
             }
-            // Zero-init local slots
+            // Zero-init local slots — write the §2.7.7 dead-slot sentinel
+            // pair `(NONE_BITS, NativeKind::Bool)` through the kinded API so
+            // the parallel-kind track stays in lockstep with the data track.
+            // The slot's prior occupant is already the zero/Bool sentinel
+            // (from the resize_with above or from a prior frame teardown),
+            // so `drop_with_kind` short-circuits as a no-op.
             for j in 0..locals_count {
-                self.stack_write_raw(current_bp + j, ValueWord::none());
+                self.stack_write_kinded(current_bp + j, Self::NONE_BITS, NativeKind::Bool);
             }
 
             // Restore locals from ctx_buf using the frame's mapping
             for (j, &(ctx_pos, bc_idx)) in iframe.local_mapping.iter().enumerate() {
-                let kind = iframe
-                    .local_kinds
-                    .get(j)
-                    .copied()
-                    .unwrap_or(SlotKind::Dynamic);
+                // ADR-006 §2.7.5.1: InlineFrameInfo.local_kinds is post-proof;
+                // out-of-range is a verifier bug.
+                let kind = iframe.local_kinds.get(j).copied().unwrap_or_else(|| {
+                    panic!(
+                        "InlineFrameInfo.local_kinds[{}]: out of range (len={}). \
+                         Verifier should reject — ADR-006 §2.7.5.1.",
+                        j,
+                        iframe.local_kinds.len()
+                    )
+                });
                 let src_idx = LOCALS_U64_OFFSET + ctx_pos as usize;
                 let dst_idx = current_bp + bc_idx as usize;
                 if src_idx < CTX_U64_SIZE && dst_idx < self.stack.len() {
-                    self.stack_write_raw(dst_idx, jit_abi::unmarshal_jit_result(ctx_buf[src_idx], kind));
+                    // ADR-006 §2.7.7 kinded write: inline-frame deopt
+                    // re-materialization. Kind sourced from
+                    // `iframe.local_kinds` (post-proof per §2.7.5.1).
+                    let unmarshaled = jit_abi::unmarshal_jit_result(ctx_buf[src_idx], kind);
+                    self.stack_write_kinded(dst_idx, unmarshaled, kind);
                 }
             }
 
@@ -346,6 +411,10 @@ impl VirtualMachine {
                 upvalues: None,
                 blob_hash,
                 closure_heap_bits: None,
+                // ADR-006 §2.7.8 / Q10: lockstep with `closure_heap_bits`.
+                // Inlined caller frame reconstructed during deopt — no
+                // closure keep-alive share is owned here.
+                closure_heap_kind: None,
             });
 
             current_bp += locals_count + iframe.stack_depth as usize;
@@ -363,10 +432,16 @@ impl VirtualMachine {
         let innermost_locals = innermost_func.locals_count as usize;
         let needed = current_bp + innermost_locals + deopt_info.stack_depth as usize;
         if needed > self.stack.len() {
+            // ADR-006 §2.7.7 / §2.7.8 lockstep growth: data + parallel kind
+            // track grow together. Same dead-slot sentinel convention as the
+            // intermediate-frame growth loop above.
             self.stack.resize_with(needed * 2 + 1, || Self::NONE_BITS);
+            self.kinds.resize(needed * 2 + 1, NativeKind::Bool);
         }
+        // Zero-init innermost-frame locals through the kinded API for
+        // parallel-track lockstep (§2.7.7 dead-slot sentinel pattern).
         for i in 0..innermost_locals {
-            self.stack_write_raw(current_bp + i, ValueWord::none());
+            self.stack_write_kinded(current_bp + i, Self::NONE_BITS, NativeKind::Bool);
         }
 
         // return_ip for innermost: instruction after the last inline frame's call
@@ -381,6 +456,10 @@ impl VirtualMachine {
             upvalues: None,
             blob_hash,
             closure_heap_bits: None,
+            // ADR-006 §2.7.8 / Q10: lockstep with `closure_heap_bits`.
+            // Innermost deopt frame reconstruction — no closure
+            // keep-alive share owned at this construction site.
+            closure_heap_kind: None,
         });
 
         // Restore innermost frame's locals + operand stack via deopt_with_info.
@@ -608,12 +687,12 @@ mod tests {
     #[test]
     fn test_deopt_info_inline_frames_default_empty() {
         use crate::bytecode::DeoptInfo;
-        use crate::type_tracking::SlotKind;
+        use crate::type_tracking::NativeKind;
 
         let info = DeoptInfo {
             resume_ip: 10,
             local_mapping: vec![(0, 0)],
-            local_kinds: vec![SlotKind::Dynamic],
+            local_kinds: vec![NativeKind::Int64],
             stack_depth: 0,
             innermost_function_id: None,
             inline_frames: Vec::new(),
@@ -624,19 +703,19 @@ mod tests {
     #[test]
     fn test_deopt_info_with_inline_frames() {
         use crate::bytecode::{DeoptInfo, InlineFrameInfo};
-        use crate::type_tracking::SlotKind;
+        use crate::type_tracking::NativeKind;
 
         let info = DeoptInfo {
             resume_ip: 10,
             local_mapping: vec![(0, 0), (1, 1)],
-            local_kinds: vec![SlotKind::Dynamic, SlotKind::Int64],
+            local_kinds: vec![NativeKind::Int64, NativeKind::Int64],
             stack_depth: 1,
             innermost_function_id: Some(3),
             inline_frames: vec![InlineFrameInfo {
                 function_id: 2,
                 resume_ip: 30,
                 local_mapping: vec![(200, 0)],
-                local_kinds: vec![SlotKind::Float64],
+                local_kinds: vec![NativeKind::Float64],
                 stack_depth: 0,
             }],
         };
@@ -644,20 +723,20 @@ mod tests {
         assert_eq!(info.inline_frames.len(), 1);
         assert_eq!(info.inline_frames[0].function_id, 2);
         assert_eq!(info.inline_frames[0].resume_ip, 30);
-        assert_eq!(info.inline_frames[0].local_kinds[0], SlotKind::Float64);
+        assert_eq!(info.inline_frames[0].local_kinds[0], NativeKind::Float64);
         assert_eq!(info.innermost_function_id, Some(3));
     }
 
     #[test]
     fn test_deopt_with_info_debug_assert_length_parity() {
         use crate::bytecode::DeoptInfo;
-        use crate::type_tracking::SlotKind;
+        use crate::type_tracking::NativeKind;
 
         // Verify that local_mapping and local_kinds lengths match
         let info = DeoptInfo {
             resume_ip: 5,
             local_mapping: vec![(0, 0), (1, 1), (2, 2)],
-            local_kinds: vec![SlotKind::Dynamic, SlotKind::Int64, SlotKind::Float64],
+            local_kinds: vec![NativeKind::Int64, NativeKind::Int64, NativeKind::Float64],
             stack_depth: 0,
             innermost_function_id: None,
             inline_frames: Vec::new(),
@@ -678,13 +757,13 @@ mod tests {
     #[test]
     fn test_deopt_inline_frame_return_ip_calculation() {
         use crate::bytecode::{DeoptInfo, InlineFrameInfo};
-        use crate::type_tracking::SlotKind;
+        use crate::type_tracking::NativeKind;
 
         // Simulates A (func 0) → B (func 1) → C (func 2, innermost)
         let deopt_info = DeoptInfo {
             resume_ip: 45,
             local_mapping: vec![(20, 0), (21, 1)],
-            local_kinds: vec![SlotKind::Dynamic, SlotKind::Dynamic],
+            local_kinds: vec![NativeKind::Int64, NativeKind::Int64],
             stack_depth: 0,
             innermost_function_id: Some(2),
             inline_frames: vec![
@@ -692,14 +771,14 @@ mod tests {
                     function_id: 0,
                     resume_ip: 5, // A's CallValue(B) at IP=5
                     local_mapping: vec![(0, 0), (1, 1)],
-                    local_kinds: vec![SlotKind::Dynamic, SlotKind::Dynamic],
+                    local_kinds: vec![NativeKind::Int64, NativeKind::Int64],
                     stack_depth: 0,
                 },
                 InlineFrameInfo {
                     function_id: 1,
                     resume_ip: 25, // B's CallValue(C) at IP=25
                     local_mapping: vec![(10, 0)],
-                    local_kinds: vec![SlotKind::Dynamic],
+                    local_kinds: vec![NativeKind::Int64],
                     stack_depth: 0,
                 },
             ],
@@ -746,7 +825,7 @@ mod tests {
     #[test]
     fn test_return_ip_dispatch_loop_semantics() {
         use crate::bytecode::InlineFrameInfo;
-        use crate::type_tracking::SlotKind;
+        use crate::type_tracking::NativeKind;
 
         let iframe = InlineFrameInfo {
             function_id: 0,

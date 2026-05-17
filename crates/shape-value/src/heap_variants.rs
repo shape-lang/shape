@@ -9,6 +9,18 @@
 //!
 //! `equals()`, `structural_eq()`, and `Display` remain hand-written because
 //! they have complex per-variant logic (e.g. cross-type numeric comparison).
+//!
+//! Strict-typing bulldozer (Phase 2): every variant whose payload depended on
+//! the deleted `ValueWord` (the v1 dynamic-tag word) has been removed from
+//! `HeapValue`, along with the supporting `*Data` structs. The `HeapKind`
+//! discriminator preserves its ordinal numbering for ABI stability — gone
+//! variants now appear only in `HeapKind` (reserved). Heterogeneous-element
+//! collections (`HashMap`, `Set`, `Deque`, `PriorityQueue`), dynamic
+//! single-value wrappers (`Some`/`Ok`/`Err`/`Range`/`TraitObject`/
+//! `FunctionRef`), and dynamic capture/control-flow holders (`Iterator`,
+//! `Generator`, `Concurrency`, `Rare`, `Enum`, `Array`, `HostClosure`,
+//! `ProjectedRef`) are awaiting monomorphized typed replacements per
+//! `docs/runtime-v2-spec.md`.
 
 /// All HeapValue variant data lives here as a single source of truth.
 ///
@@ -26,197 +38,727 @@ macro_rules! define_heap_types {
     () => {
         /// Discriminator for HeapValue variants, usable without full pattern match.
         ///
-        /// The discriminant order is ABI-stable (checked by tests in tags.rs).
-        /// New variants MUST be appended at the end.
-        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        /// One variant per surviving `HeapValue` arm — no dead variants
+        /// expressible. Trimmed in Phase 2b alongside the
+        /// `NativeKind::Ptr(HeapKind)` extension; see
+        /// `docs/defections.md` 2026-05-06 (HeapKind trim +
+        /// NativeKind::Ptr extension) for the audit findings and rejected
+        /// alternatives.
+        ///
+        /// The previous 77-variant surface (with `(removed)` /
+        /// `(deprecated)` annotations) preserved ordinals "for ABI
+        /// stability"; the bulldozer deleted the `tags.rs`
+        /// ordinal-stability test that made that contract load-bearing,
+        /// so the dead variants no longer had a justification to
+        /// remain in the source.
+        ///
+        // ADR-005: HeapKind is the canonical heap-shape discriminator.
+        // Layers above HeapValue take Arc<HeapValue> and dispatch on
+        // HeapValue::kind() rather than introducing parallel discriminators.
+        // See docs/adr/005-typed-slot-construction.md.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ::serde::Serialize, ::serde::Deserialize)]
         #[repr(u8)]
         pub enum HeapKind {
-            String,             // 0
-            Array,              // 1
-            TypedObject,        // 2
-            Closure,            // 3
-            Decimal,            // 4
-            BigInt,             // 5
-            HostClosure,        // 6
-            DataTable,          // 7
-            TypedTable,         // 8  (deprecated — use TableView)
-            RowView,            // 9  (deprecated — use TableView)
-            ColumnRef,          // 10 (deprecated — use TableView)
-            IndexedTable,       // 11 (deprecated — use TableView)
-            Range,              // 12
-            Enum,               // 13
-            Some,               // 14
-            Ok,                 // 15
-            Err,                // 16
-            Future,             // 17
-            TaskGroup,          // 18
-            TraitObject,        // 19
-            ExprProxy,          // 20 (deprecated — use Rare)
-            FilterExpr,         // 21 (deprecated — use Rare)
-            Time,               // 22 (deprecated — use Temporal)
-            Duration,           // 23 (deprecated — use Temporal)
-            TimeSpan,           // 24 (deprecated — use Temporal)
-            Timeframe,          // 25 (deprecated — use Temporal)
-            TimeReference,      // 26 (deprecated — use Temporal)
-            DateTimeExpr,       // 27 (deprecated — use Temporal)
-            DataDateTimeRef,    // 28 (deprecated — use Temporal)
-            TypeAnnotation,     // 29 (deprecated — use Rare)
-            TypeAnnotatedValue, // 30 (deprecated — use Rare)
-            PrintResult,        // 31 (deprecated — use Rare)
-            SimulationCall,     // 32 (deprecated — use Rare)
-            FunctionRef,        // 33
-            DataReference,      // 34 (deprecated — use Rare)
-            Number,             // 35
-            Bool,               // 36
-            None,               // 37
-            Unit,               // 38
-            Function,           // 39
-            ModuleFunction,     // 40
-            HashMap,            // 41
-            Content,            // 42
-            Instant,            // 43
-            IoHandle,           // 44
-            SharedCell,         // 45 (deprecated — retired in Track A.1C.3; ordinal reserved for ABI stability)
-            NativeScalar,       // 46
-            NativeView,         // 47
-            IntArray,           // 48 (deprecated — use TypedArray)
-            FloatArray,         // 49 (deprecated — use TypedArray)
-            BoolArray,          // 50 (deprecated — use TypedArray)
-            Matrix,             // 51 (deprecated — use TypedArray)
-            Iterator,           // 52
-            Generator,          // 53
-            Mutex,              // 54 (deprecated — use Concurrency)
-            Atomic,             // 55 (deprecated — use Concurrency)
-            Lazy,               // 56 (deprecated — use Concurrency)
-            I8Array,            // 57 (deprecated — use TypedArray)
-            I16Array,           // 58 (deprecated — use TypedArray)
-            I32Array,           // 59 (deprecated — use TypedArray)
-            U8Array,            // 60 (deprecated — use TypedArray)
-            U16Array,           // 61 (deprecated — use TypedArray)
-            U32Array,           // 62 (deprecated — use TypedArray)
-            U64Array,           // 63 (deprecated — use TypedArray)
-            F32Array,           // 64 (deprecated — use TypedArray)
-            Set,                // 65
-            Deque,              // 66
-            PriorityQueue,      // 67
-            Channel,            // 68 (deprecated — use Concurrency)
-            Char,               // 69
-            ProjectedRef,       // 70
-            FloatArraySlice,    // 71 (deprecated — use TypedArray)
-            // ===== New consolidated ordinals =====
-            TypedArray,         // 72
-            Temporal,           // 73
-            Rare,               // 74
-            Concurrency,        // 75
-            TableView,          // 76
+            String,        // 0
+            TypedObject,   // 1
+            Closure,       // 2  (matches HeapValue::ClosureRaw via the Closure ordinal)
+            Decimal,       // 3
+            BigInt,        // 4
+            DataTable,     // 5
+            Future,        // 6
+            TaskGroup,     // 7
+            TypedArray,    // 8  (VACATED: V3-S5 ckpt-1..ckpt-4 (2026-05-15)
+                           //      retired the `TypedArrayData` enum + outer
+                           //      `HeapValue::TypedArray(Arc<TypedArrayData>)`
+                           //      arm + `TypedBuffer<T>` / `AlignedTypedBuffer`
+                           //      wrapper layer per W12-typed-array-data-
+                           //      deletion-audit §3.5/§3.6/§B + ADR-006
+                           //      §2.7.24 Q25.A SUPERSEDED. Ordinal 8 is
+                           //      vacated; per audit §3.6 deprecation cadence
+                           //      + handover §0 ordinal-collision rule, the
+                           //      ordinal MUST NOT be reassigned to a new
+                           //      HeapKind variant — avoids grep-history
+                           //      confusion across future agent dispatch.
+                           //      The variant identifier itself stays in the
+                           //      enum until V3-S5 ckpt-5 deletes the
+                           //      4-table-lockstep dispatch arms (clone_with_kind
+                           //      / drop_with_kind / SharedCell::drop /
+                           //      TypedObjectStorage::drop_fields) and the
+                           //      identifier finally retires. Refusal #1
+                           //      binding: do not reintroduce under any
+                           //      rename/shim/bridge.
+            Temporal,      // 9
+            TableView,     // 10
+            Content,       // 11
+            Instant,       // 12
+            IoHandle,      // 13
+            NativeScalar,  // 14
+            NativeView,    // 15
+            Char,          // 16
+            HashMap,       // 17  (Stage C P1(b), 2026-05-07)
+            // Pure-discriminator variant — no corresponding `HeapValue` arm
+            // (FilterExpr payloads live as `Arc<FilterNode>` directly in slot
+            // bits, never wrapped in `HeapValue`). Added to fix the
+            // type-confusion soundness gap surfaced by Wave-α D-raw-helpers
+            // (commit `a27c0e4`): the filter-expression branch of
+            // `executor/logical/mod.rs` previously reused
+            // `HeapKind::NativeView` to label `Arc<FilterNode>` payloads,
+            // and the runtime `clone_with_kind` / `drop_with_kind` tables
+            // dispatched the same label as `Arc<NativeViewData>` —
+            // wrong-type retain/release. ADR-006 §2.3 / §2.7.6 / Q8
+            // amendment (Wave-γ G-heap-filter-expr).
+            FilterExpr,    // 18  (Wave-γ G-heap-filter-expr, 2026-05-09)
+            // ADR-006 §2.7.13 / Q14 (Wave 8 W8-T26, 2026-05-10):
+            // Reference-value carrier — replaces the deleted
+            // `nanboxed::RefTarget` / `RefProjection` `ValueWord`-shaped
+            // enum. Slot bits are `Arc::into_raw(Arc<RefTarget>) as u64`
+            // directly (mirror of FilterExpr's pure-discriminator-style
+            // dispatch — `as_heap_value()` is undefined on
+            // Reference-labeled bits; recovery is `Arc::from_raw::
+            // <RefTarget>(bits)`). The `clone_with_kind` /
+            // `drop_with_kind` dispatch tables retain/release
+            // `Arc<RefTarget>` directly, NOT through `HeapValue`. The
+            // `HeapValue::Reference` arm below exists ONLY to preserve
+            // the ADR-005 §1 / ADR-006 §2.3 `HeapKind`↔`HeapValue`
+            // symmetry property; no caller materializes a `Reference`
+            // through `HeapValue` pattern matching.
+            Reference,     // 19  (Wave 8 W8-T26, 2026-05-10)
+            // Pure-discriminator variant — no corresponding `HeapValue` arm
+            // (`Arc<SharedCell>` cell-pointer slots live as
+            // `Arc::into_raw(Arc<SharedCell>) as u64` directly in the
+            // kinded stack / module-binding store / cell-storage slots,
+            // never wrapped in `HeapValue`). Added so the §2.7.7 / §2.7.8
+            // parallel-kind tracks can label `*const SharedCell` slots
+            // distinctly — the precondition for unblocking
+            // `op_alloc_shared_local` / `op_alloc_shared_module_binding`.
+            // Same pure-discriminator role as `HeapKind::FilterExpr`:
+            // `as_heap_value()` is unsound on `SharedCell`-labeled bits;
+            // heap dispatch goes through the kind label, not through
+            // `HeapValue` materialisation. ADR-006 §2.7.12 / Q13 amendment
+            // (Wave 8 W8-T25, mirror of §2.7.9 FilterExpr precedent).
+            // NOTE: ordinal 20 (not the originally drafted 19) — T26 took
+            // 19 first at merge time.
+            SharedCell,    // 20  (Wave 8 W8-T25, 2026-05-10)
+            // ADR-006 §2.7.15 / Q16 amendment (Wave 13 W13-hashset-rebuild,
+            // 2026-05-10): one-keyspace Set carrier, structurally a mirror
+            // of the Stage C P1(b) `HeapKind::HashMap(Arc<HashMapData>)`
+            // shape with the values buffer dropped. Full HeapValue arm
+            // (NOT pure-discriminator like FilterExpr / SharedCell): Set
+            // values flow through `slot.as_heap_value()` for receiver
+            // classification at method dispatch (`set.add(...)` /
+            // `set.has(...)` / `set.union(other)`), can be stored in
+            // TypedObject slots and `the-deleted-heterogeneous-element-carrier` buffers.
+            // See §2.7.15 for the full justification + the rejected Path
+            // B (`TypedSet<T>` per element kind) alternative.
+            HashSet,       // 21  (Wave 13 W13-hashset-rebuild, 2026-05-10)
+            // ADR-006 §2.7.16 / Q17 (W13-iterator-state, 2026-05-10):
+            // Lazy-iterator carrier — replaces the deleted
+            // `heap_value::IteratorState` / `IteratorTransform`
+            // `ValueWord`-shaped enums. Slot bits are
+            // `Arc::into_raw(Arc<IteratorState>) as u64`; unlike
+            // FilterExpr / Reference / SharedCell, the matching
+            // `HeapValue::Iterator(Arc<IteratorState>)` arm IS used at
+            // runtime — iterator method handlers recover the typed Arc
+            // via `slot.as_heap_value()` per ADR-005 §1
+            // single-discriminator. The `clone_with_kind` /
+            // `drop_with_kind` dispatch tables retain/release
+            // `Arc<IteratorState>` directly, NOT through the
+            // `HeapValue` arm (mirror of other typed-Arc
+            // refcount-dispatch arms — refcount discipline goes
+            // through the kind label).
+            Iterator,      // 22  (W13-iterator-state, 2026-05-10)
+            // ADR-006 §2.7.19 / Q20 amendment (Wave 15 W15-deque,
+            // 2026-05-10): heterogeneous-element double-ended queue
+            // carrier, structurally a mirror of the §2.7.15 HashSet
+            // shape with the dedup keyspace replaced by a
+            // VecDeque<Arc<HeapValue>>. Full HeapValue arm (NOT
+            // pure-discriminator like FilterExpr / SharedCell): Deque
+            // values flow through `slot.as_heap_value()` for receiver
+            // classification at method dispatch (`d.pushBack(...)` /
+            // `d.popFront()` / `d.size()`). Ordinal 23 (not the
+            // originally drafted 26) — W14 / W15-priority-queue have
+            // not landed at this branch's parent (`bb0ccc3`); per
+            // playbook §0 ordinal-bump rule, the next free slot
+            // after Iterator=22 is taken. Merge ordering at
+            // integration time per playbook §4 (W14 → PriorityQueue
+            // → Deque) restores the documented 26 spec layout.
+            Deque,         // 23  (Wave 15 W15-deque, 2026-05-10)
+            // ADR-006 §2.7.20 / Q21 amendment (Wave 15 W15-channel-rebuild,
+            // 2026-05-10): MPSC-style synchronous channel concurrency
+            // primitive. Unlike HashMap/HashSet/Iterator (which are
+            // immutable-on-clone with `Arc::make_mut` clone-on-write),
+            // `ChannelData` carries interior mutability via
+            // `Mutex<ChannelInner>` so two `Arc<ChannelData>` shares of
+            // the same channel observe each other's `send` / `recv`
+            // mutations (the producer/consumer-endpoints shape).
+            // Sync same-thread `send` / `try_recv` / `close` / `is_closed`
+            // land here; blocking `recv()` (cross-task await-style) is
+            // the §2.7.4 task-scheduler boundary and is SURFACE'd at
+            // the method body — see `executor/objects/channel_methods.rs`.
+            // Full HeapValue arm (NOT pure-discriminator) — Channel
+            // values flow through `slot.as_heap_value()` for receiver
+            // classification at method dispatch (`c.send(...)` / `c.recv()`),
+            // can be stored in TypedObject slots and `the-deleted-heterogeneous-element-carrier`
+            // buffers.
+            Channel,       // 24  (Wave 15 W15-channel-rebuild, 2026-05-10; bumped from drafted 23 at merge — Deque already took 23)
+            // ADR-006 §2.7.18 / Q19 amendment (Wave 15 W15-priority-queue,
+            // 2026-05-10): i64-priority min-heap carrier, structurally
+            // a mirror of the §2.7.15 HashSet shape with the keys
+            // buffer carrying i64 priorities instead of `Arc<String>`.
+            // Full HeapValue arm (NOT pure-discriminator like FilterExpr
+            // / SharedCell): PriorityQueue values flow through
+            // `slot.as_heap_value()` for receiver classification at
+            // method dispatch (`pq.push(...)` / `pq.pop()` /
+            // `pq.peek()`). See `$crate::heap_value::PriorityQueueData`
+            // for the storage shape and §2.7.18 for the full
+            // justification + the rejected typed-payload alternative.
+            // Pre-assigned ordinal 25 per the wave-14-15-16 playbook
+            // (no bump needed at landing).
+            PriorityQueue, // 25  (Wave 15 W15-priority-queue, 2026-05-10)
+            // W15-range (ADR-006 §2.7.23 / Q24, 2026-05-10): Range value
+            // carrier — `start..end` and `start..=end` surface syntax build
+            // `Arc<RangeData>` slots. Distinct from `HeapKind::Iterator`
+            // (which models the post-`.iter()` stateful pipeline): Range is
+            // a value with identity (`r.start`, `r.contains(x)`, prints as
+            // `0..10`), Iterator is a cursor-bearing pipeline. The
+            // `Range.iter()` receiver method converts `RangeData` to
+            // `IteratorState { source: IteratorSource::Range { start, end,
+            // step } }`, where `IteratorSource::Range` was already provided
+            // by W13-iterator-state for forward compatibility. Full
+            // HeapValue arm (NOT pure-discriminator like FilterExpr /
+            // SharedCell): Range values flow through `slot.as_heap_value()`
+            // for receiver classification at method dispatch.
+            //
+            // Ordinal 30 chosen at W14-15-16 fan-out per the playbook
+            // §0 "Pre-assigned HeapKind ordinals" table. Slots 23 (Result),
+            // 24 (Option), 25 (PriorityQueue), 26 (Deque), 27 (Channel),
+            // 28 (Column), 29 (Matrix) reserved for W14/W15 sibling agents.
+            Range,         // 26  (W15-range, 2026-05-10; renumbered from drafted 30 at merge — Result/Option/Column/Matrix slots dissolved or audit-pivoted)
+            // ADR-006 §2.7.17 / Q18 amendment (Wave 14 W14-variant-codegen,
+            // 2026-05-10): Result<T,E> carrier — replaces the deleted
+            // pre-bulldozer `Some/Ok/Err` `ValueWord`-shaped HeapValue
+            // arms. Slot bits are `Arc::into_raw(Arc<ResultData>)`. Full
+            // `HeapValue::Result(Arc<ResultData>)` arm: variant
+            // discriminators (`op_is_ok` / `op_is_err`) and unwrap
+            // operations (`op_unwrap_ok` / `op_unwrap_err` /
+            // `op_try_unwrap`) recover the typed Arc via
+            // `slot.as_heap_value()` per ADR-005 §1 single-discriminator.
+            // Mirror of §2.7.16 Iterator typed-Arc shape (full
+            // HeapValue arm, NOT pure-discriminator like §2.7.9
+            // FilterExpr / §2.7.12 SharedCell).
+            Result,        // 27  (Wave 14 W14-variant-codegen, 2026-05-10; renumbered from drafted 23 at merge — Deque already took 23)
+            // ADR-006 §2.7.17 / Q18 amendment (Wave 14 W14-variant-codegen,
+            // 2026-05-10): Option<T> carrier — sibling of Result with
+            // `is_some` discriminator instead of `is_ok`. The dual-shape
+            // representation (vs null-coding `Some(x) ≡ x`, `None ≡ null
+            // sentinel`) is required because `SomeCtor` may take a
+            // null-bearing `T?` payload, which cannot be distinguished
+            // from None under null-coding. Slot bits are
+            // `Arc::into_raw(Arc<OptionData>)`; full HeapValue arm.
+            Option,        // 28  (Wave 14 W14-variant-codegen, 2026-05-10; renumbered from drafted 24 at merge — Channel already took 24)
+            // ADR-006 §2.7.24 / Q25.C amendment (Wave 17
+            // W17-trait-object-storage, 2026-05-11): re-introduces the
+            // strict-typing-bulldozer-deleted `HeapKind::TraitObject` /
+            // `HeapValue::TraitObject` carrier as a typed-Arc pair
+            // (`Arc<TraitObjectStorage>`) replacing the legacy
+            // `HeapValue::TraitObject { value: Box<u64>, vtable: Arc<VTable> }`
+            // shape. The new carrier is a fat-pointer over an
+            // `Arc<TypedObjectStorage>` data half + an `Arc<VTable>`
+            // vtable half — universal-dyn auto-boxing (§Q25.C.1) makes
+            // the boxed value always a TypedObject, so the `Box<u64>`
+            // kind-blind raw-bits shape is refused under §Q25.E #3.
+            //
+            // Full HeapValue arm (NOT pure-discriminator like
+            // FilterExpr / SharedCell / Reference): TraitObject values
+            // flow through `slot.as_heap_value()` for receiver
+            // classification at method dispatch (`a.name()` /
+            // `a.clone_me()` etc. — the universe of `dyn T` method
+            // calls). Same dispatch shape as the §2.7.20 Channel
+            // precedent for refcount discipline; `clone_with_kind` /
+            // `drop_with_kind` retain/release
+            // `Arc<TraitObjectStorage>` directly via the kind label,
+            // NOT through `HeapValue`.
+            //
+            // Pre-assigned ordinal 29 per the wave-2.5 W17-trait-object
+            // dispatch contract (the original W17-typed-carrier-mono
+            // playbook reserved 29 for TraitObject; rescope kept that
+            // assignment). Ordinal 29 was free between Option=28 and
+            // the W17-concurrency block Mutex=30 / Atomic=31 / Lazy=32.
+            TraitObject,   // 29  (Wave 17 W17-trait-object-storage, 2026-05-11)
+            // ADR-006 §2.7.25 amendment (Wave 17 W17-concurrency,
+            // 2026-05-11): Mutex<T> concurrency primitive — a single
+            // typed payload protected by a `Mutex<MutexInner>` for
+            // interior-mutability sharing (mirror of §2.7.20 Channel's
+            // `Mutex<ChannelInner>` shape — two `Arc<MutexData>` shares
+            // observe each other's `set` mutations). Distinct from
+            // §2.7.12 `HeapKind::SharedCell` (which is binding-storage
+            // interior-mutability for `var` binding-form values) —
+            // `MutexData` is a runtime synchronization primitive user
+            // code asks for explicitly. Full HeapValue arm (NOT
+            // pure-discriminator like FilterExpr / SharedCell): Mutex
+            // values flow through `slot.as_heap_value()` for receiver
+            // classification at method dispatch (`m.lock()` / `m.set(...)`),
+            // can be stored in TypedObject slots. Pre-assigned ordinal
+            // 30 per the wave-2.5 W17-concurrency dispatch contract.
+            Mutex,         // 30  (Wave 17 W17-concurrency, 2026-05-11)
+            // ADR-006 §2.7.25 amendment (Wave 17 W17-concurrency,
+            // 2026-05-11): Atomic<i64> concurrency primitive — wraps
+            // `std::sync::atomic::AtomicI64` for atomic load / store /
+            // fetch_add / fetch_sub / compare_exchange operations.
+            // i64-only at landing per the playbook's "typed-payload
+            // deferral" precedent (W15-priority-queue i64-priority-only,
+            // W13-hashset string-only); typed-payload `Atomic<T>` is a
+            // future Phase-2c amendment with measurement. Full HeapValue
+            // arm — Atomic values flow through `slot.as_heap_value()`
+            // for receiver classification at method dispatch.
+            // Pre-assigned ordinal 31 per the wave-2.5 W17-concurrency
+            // dispatch contract.
+            Atomic,        // 31  (Wave 17 W17-concurrency, 2026-05-11)
+            // ADR-006 §2.7.25 amendment (Wave 17 W17-concurrency,
+            // 2026-05-11): Lazy<T> initialize-once carrier — wraps an
+            // initializer closure (`KindedSlot` of kind
+            // `Ptr(HeapKind::Closure)`) and a cached value slot.
+            // Closure-call path unlocked by W17-make-closure (merged
+            // at `aa47364`). Mirror of §2.7.20 Channel's
+            // `Mutex<inner>` shape so concurrent `get()` calls
+            // serialize cleanly when the runtime grows real
+            // concurrency. Full HeapValue arm — Lazy values flow
+            // through `slot.as_heap_value()` for receiver
+            // classification at method dispatch (`l.get()` /
+            // `l.is_initialized()`). Pre-assigned ordinal 32 per the
+            // wave-2.5 W17-concurrency dispatch contract.
+            Lazy,          // 32  (Wave 17 W17-concurrency, 2026-05-11)
+            // ADR-006 §2.7.26 amendment (Wave 17 W17-comptime-vm-dispatch,
+            // 2026-05-12): module-function reference carrier — labels a
+            // slot whose `bits` are a `module_fn_id: usize` cast to `u64`.
+            // Pure-discriminator variant (no corresponding `HeapValue`
+            // arm); inline-scalar payload (no `Arc<T>`, no heap state) —
+            // same shape as `HeapKind::Future` and `HeapKind::Char`.
+            // `clone_with_kind` / `drop_with_kind` are no-ops on this
+            // arm. Used by `populate_module_objects` to encode the
+            // `__comptime__` (and any other extension) module's typed-
+            // object field references that the compiled bytecode chain
+            // `LoadModuleBinding + GetFieldTyped + CallValue` dispatches
+            // through to `invoke_module_fn_id_stub`. See
+            // `executor/vm_impl/modules.rs::populate_module_objects` for
+            // the construction-side contract and
+            // `executor/call_convention.rs::call_value_immediate_nb`
+            // (`NativeKind::Ptr(HeapKind::ModuleFn)` arm) for the
+            // dispatch-side contract. `as_heap_value()` is unsound on
+            // `ModuleFn`-labeled bits (mirror of FilterExpr /
+            // SharedCell / Reference's pure-discriminator-style
+            // dispatch).
+            ModuleFn,      // 33  (Wave 17 W17-comptime-vm-dispatch, 2026-05-12)
+            // ADR-006 §2.7.22 amendment (Round 18 S3
+            // W12-matrix-floatslice-heapkind-exit, 2026-05-13): Matrix exits
+            // the `TypedArrayData` carrier hierarchy. The pre-amendment
+            // Q23 ruling (Matrix lives under `HeapKind::TypedArray` via
+            // `TypedArrayData::Matrix(Arc<MatrixData>)`) is superseded by
+            // the Round 17 deletion-audit + cluster-0-transition
+            // strategic-owner authorization (2026-05-13): Matrix is a
+            // single-Matrix value (category-correctness), not a
+            // buffer-of-Matrix.
+            //
+            // Full `HeapValue::Matrix(Arc<MatrixData>)` arm exists for the
+            // ADR-005 §1 / ADR-006 §2.3 `HeapKind`↔`HeapValue` symmetry,
+            // but Matrix slot bits are
+            // `Arc::into_raw(Arc<MatrixData>) as u64` directly (typed-Arc
+            // shape, mirror of FilterExpr / Reference's pure-discriminator
+            // dispatch — NOT a `Box<HeapValue>` wrap); calling
+            // `slot.as_heap_value()` on a Matrix-labeled slot is
+            // undefined behavior. `clone_with_kind` / `drop_with_kind`
+            // dispatch the matching `Arc::increment/decrement_strong_count
+            // ::<MatrixData>` retain/release directly via the kind label.
+            //
+            // The §2.7.9 / §2.7.12 / §Q23 single-discriminator concern
+            // that motivated Q23's parallel-HeapKind-refusal is addressed
+            // by ADR-005 §1's exception clause: `HeapKind::Matrix` is NOT
+            // parallel to `HeapKind::TypedArray` (which is the
+            // array-buffer carrier with element-typed payload); Matrix is
+            // a separate value category (a structured numeric matrix
+            // value, not an array of anything).
+            Matrix,        // 34  (Round 18 S3 W12-matrix-floatslice-heapkind-exit, 2026-05-13)
+            // ADR-006 §2.7.22 amendment (Round 18 S3
+            // W12-matrix-floatslice-heapkind-exit, 2026-05-13): the
+            // `FloatSlice { parent, offset, len }` projection (returned by
+            // `Matrix.row(i)` / `Matrix.col(i)`) exits the
+            // `TypedArrayData` carrier hierarchy for the same
+            // category-correctness reason as `HeapKind::Matrix` — it is a
+            // projection-into-a-Matrix, not a buffer of floats. The new
+            // payload struct is `MatrixSliceData { parent: Arc<MatrixData>,
+            // offset: u32, len: u32 }` preserving the
+            // alias-into-parent-buffer semantics from the pre-amendment
+            // shape.
+            //
+            // Same dispatch shape as `HeapKind::Matrix`: typed-Arc
+            // pure-discriminator (slot bits =
+            // `Arc::into_raw(Arc<MatrixSliceData>)`, retain/release through
+            // the kind label, `as_heap_value()` unsound, full
+            // `HeapValue::MatrixSlice(Arc<MatrixSliceData>)` arm for the
+            // ADR-005 §1 / ADR-006 §2.3 symmetry property).
+            MatrixSlice,   // 35  (Round 18 S3 W12-matrix-floatslice-heapkind-exit, 2026-05-13)
         }
 
-        /// Compact heap-allocated value for ValueWord TAG_HEAP.
+        /// Compact heap-allocated value. Strict-typed variants only — every
+        /// payload is either a typed primitive (`i64`, `char`, `f64` via
+        /// `TypedArray`), a typed structure (`TypedObject` slots, typed FFI
+        /// pointers, typed temporal data), or a typed handle.
         ///
-        /// Every type that cannot be inlined in ValueWord has a dedicated variant here.
-        /// Inline ValueWord types (f64, i48, bool, None, Unit, Function, ModuleFunction)
-        /// are never stored in HeapValue.
+        /// Variants whose payloads depended on the deleted `ValueWord`
+        /// dynamic word were removed in the strict-typing Phase-2 bulldozer.
+        /// See the corresponding `HeapKind` ordinals (annotated "(removed)")
+        /// for the migration target.
         ///
-        /// `Clone` / `Drop` are implemented manually (not `#[derive]`) in
-        /// `heap_value.rs` so the `Some` / `Ok` / `Err` variants, which hold
-        /// `Box<ValueWord>` bits that may carry a heap tag, can pair
-        /// `vw_clone` with `vw_drop`. All other variants delegate to their
-        /// inner type's own `Clone` / `Drop` exactly as the auto-derive
-        /// would have.
+        // ADR-005: HeapValue is the single discriminator for heap-resident
+        // values. New variants are added here when a new heap shape is
+        // genuinely required; layers above (ConcreteReturn, TypedFieldValue,
+        // marshal helpers, JIT FFI carriers) must NOT introduce parallel
+        // sum types whose variants project 1:1 to HeapKind. The single
+        // explicit exception is `TypedFieldValue::String(Arc<String>)`, named
+        // and bounded in ADR-005. See docs/adr/005-typed-slot-construction.md.
+        // ADR-006 §2.3: each heap-resident variant carries a typed
+        // `Arc<T>` payload (single atomic refcount bump on clone, single
+        // decrement on drop, no `Box<HeapValue>` wrapping). Inline scalars
+        // (`Future(u64)`, `Char(char)`, `NativeScalar`) stay inline because
+        // their payloads fit in a register and have no heap state.
+        // `ClosureRaw` continues to use `OwnedClosureBlock` because that
+        // type already manages its own refcount via the v2 typed-closure
+        // header. See docs/adr/006-value-and-memory-model.md §2.3.
         #[derive(Debug)]
         pub enum HeapValue {
-            // ===== Tuple variants =====
+            // ===== Typed primitives =====
             String(std::sync::Arc<String>),
-            Array($crate::value::VMArray),
-            Decimal(rust_decimal::Decimal),
-            BigInt(i64),
-            HostClosure($crate::value::HostCallable),
-            DataTable(std::sync::Arc<$crate::datatable::DataTable>),
-            HashMap(Box<$crate::heap_value::HashMapData>),
-            Set(Box<$crate::heap_value::SetData>),
-            Deque(Box<$crate::heap_value::DequeData>),
-            PriorityQueue(Box<$crate::heap_value::PriorityQueueData>),
-            Content(Box<$crate::content::ContentNode>),
-            Instant(Box<std::time::Instant>),
-            IoHandle(Box<$crate::heap_value::IoHandleData>),
-            Enum(Box<$crate::enums::EnumValue>),
-            Some(Box<$crate::value_word::ValueWord>),
-            Ok(Box<$crate::value_word::ValueWord>),
-            Err(Box<$crate::value_word::ValueWord>),
+            // ADR-006 §2.3: `Decimal` is 16 bytes inline; wrapping in `Arc`
+            // shrinks the enum payload to a pointer so the slot's clone is
+            // a single atomic increment.
+            Decimal(std::sync::Arc<rust_decimal::Decimal>),
+            // ADR-006 §2.3: `BigInt`'s inner `i64` is the v2 placeholder
+            // for an arbitrary-precision integer. Wrapping in `Arc` keeps
+            // the variant cheap to clone today and gives the Drop discipline
+            // a single typed `Arc::decrement_strong_count::<i64>` site for
+            // when the payload widens to a real big-int representation.
+            BigInt(std::sync::Arc<i64>),
+            // Future-id is an inline scalar — no heap state.
             Future(u64),
-            // NOTE: Number(f64), Bool(bool), Function(u16), ModuleFunction(usize) — REMOVED.
-            // These were shadow variants duplicating inline ValueWord tags.
-            // HeapKind ordinals 35-40 are reserved (ABI stability).
-            NativeScalar($crate::heap_value::NativeScalar),
-            NativeView(Box<$crate::heap_value::NativeViewData>),
-            Iterator(Box<$crate::heap_value::IteratorState>),
-            Generator(Box<$crate::heap_value::GeneratorState>),
+            // Char is an inline scalar — no heap state.
             Char(char),
-            ProjectedRef(Box<$crate::heap_value::ProjectedRefData>),
+            // ===== Typed handles / data stores =====
+            DataTable(std::sync::Arc<$crate::datatable::DataTable>),
+            // ADR-006 §2.3: `Box<ContentNode>` migrated to `Arc<ContentNode>`
+            // so clones are an atomic refcount bump rather than a deep copy.
+            Content(std::sync::Arc<$crate::content::ContentNode>),
+            // ADR-006 §2.3: `Box<Instant>` migrated to `Arc<Instant>`. The
+            // inner `Instant` is `Copy` but the boxing cost was paid at
+            // every clone; the Arc bump replaces it.
+            Instant(std::sync::Arc<std::time::Instant>),
+            IoHandle(std::sync::Arc<$crate::heap_value::IoHandleData>),
+            // NativeScalar is `Copy` and ≤ 16 bytes — kept inline.
+            NativeScalar($crate::heap_value::NativeScalar),
+            // ADR-006 §2.3: `Box<NativeViewData>` migrated to
+            // `Arc<NativeViewData>` to match `from_native_view(Arc<…>)`.
+            NativeView(std::sync::Arc<$crate::heap_value::NativeViewData>),
             // ===== Struct variants =====
-            TypedObject {
-                schema_id: u64,
-                slots: Box<[$crate::slot::ValueSlot]>,
-                heap_mask: u64,
-            },
-            // NOTE: the former `Closure { function_id, upvalues }` variant
-            // was retired in Track A.5. All four producer sites (VM
-            // `op_make_closure`, trait-object vtable dispatch, snapshot
-            // replay, cross-node remote builtins) migrated to the
-            // `ClosureRaw` pipeline via Tracks A.1C.3 / A.2A / A.3 / A.4.
-            // The `HeapKind::Closure` ordinal (in the discriminator enum
-            // above) is preserved for ABI stability and now refers to
-            // `ClosureRaw`.
+            /// Object value with schema-defined typed slots.
+            ///
+            // ADR-006 §2.3: payload was `Arc<TypedObjectStorage>` post the
+            // first §2.3 amendment. Wave 2 Round 4 D4 ckpt-final-prime²
+            // (2026-05-14): payload flipped to `TypedObjectPtr`
+            // (`#[repr(transparent)]` newtype around
+            // `*const TypedObjectStorage`) per the §2.3 amendment + Path B
+            // ratification. The newtype owns one v2-raw HeapHeader-at-offset-0
+            // refcount share; Clone bumps via `v2_retain`, Drop retires via
+            // `TypedObjectStorage::release_elem`. Auto-derived Drop/Clone/
+            // Send/Sync on `HeapValue` chain through the wrapper's manual
+            // discipline. See docs/adr/006-value-and-memory-model.md §2.3.
+            TypedObject($crate::heap_value::TypedObjectPtr),
             /// Track A.5 — the canonical closure representation.
             ///
-            /// Raw `TypedClosureHeader`-backed closure. Captures live in
-            /// a typed C-laid-out block allocated by
-            /// `closure_raw::alloc_typed_closure` and owned by the
-            /// embedded [`OwnedClosureBlock`]. Cloning / dropping this
-            /// variant manages the block's refcount in lockstep with the
-            /// enclosing `Arc<HeapValue>` so the existing dispatch
-            /// plumbing (`TAG_HEAP → as_heap_ref → …`) keeps working
-            /// unchanged; readers go through `VmClosureHandle` for the
-            /// stable read API.
-            ///
-            /// There is no legacy fallback — every closure that reaches
-            /// the heap path is backed by a `TypedClosureHeader` block.
+            /// Raw `TypedClosureHeader`-backed closure. Captures live in a
+            /// typed C-laid-out block allocated by
+            /// `closure_raw::alloc_typed_closure` and owned by the embedded
+            /// [`OwnedClosureBlock`]. Cloning / dropping this variant
+            /// manages the block's refcount in lockstep with the enclosing
+            /// `Arc<HeapValue>`. Readers go through `VmClosureHandle` for
+            /// the stable read API. There is no legacy fallback.
             ClosureRaw($crate::v2::closure_raw::OwnedClosureBlock),
-            Range {
-                start: Option<Box<$crate::value_word::ValueWord>>,
-                end: Option<Box<$crate::value_word::ValueWord>>,
-                inclusive: bool,
-            },
-            TaskGroup {
-                kind: u8,
-                task_ids: Vec<u64>,
-            },
-            TraitObject {
-                value: Box<$crate::value_word::ValueWord>,
-                vtable: std::sync::Arc<$crate::value::VTable>,
-            },
-            FunctionRef {
-                name: String,
-                closure: Option<Box<$crate::value_word::ValueWord>>,
-            },
-            // NOTE: The former `SharedCell` variant was retired in Track
-            // A.1C.3. The outer-scope shared-cell machinery for closure
-            // capture now lives in `v2::closure_layout::SharedCell`
-            // (`Arc<parking_lot::Mutex<ValueWord>>`) and is addressed
-            // via raw pointer bits in `module_bindings` / local stack
-            // slots, not via a `HeapValue` tag. `HeapKind::SharedCell`
-            // (ordinal 45) is reserved — existing serialised data with
-            // this discriminant must come from pre-A.1C.3 byte streams
-            // and is not supported.
-            // NOTE: None and Unit unit variants — REMOVED.
-            // These were shadow variants duplicating inline ValueWord tags.
-            // HeapKind ordinals 37-38 are reserved (ABI stability).
+            // ADR-006 §2.3: `TaskGroup { kind, task_ids }` struct variant
+            // collapsed to a single-tuple `Arc<TaskGroupData>` payload so
+            // every heap variant follows the typed-Arc shape. Field reads
+            // are now `tg.kind` / `tg.task_ids` (Phase 1.B caller migration).
+            TaskGroup(std::sync::Arc<$crate::heap_value::TaskGroupData>),
             // ===== Consolidated wrapper variants =====
-            TypedArray($crate::heap_value::TypedArrayData),
-            Temporal($crate::heap_value::TemporalData),
-            Rare($crate::heap_value::RareHeapData),
-            Concurrency($crate::heap_value::ConcurrencyData),
-            TableView($crate::heap_value::TableViewData),
+            // V3-S5 ckpt-4 (2026-05-15): `TypedArray(Arc<TypedArrayData>)`
+            // arm DELETED. The inner `TypedArrayData` enum was retired at
+            // V3-S5 ckpt-1 (heap_value.rs:2877-3052 wholesale deletion per
+            // W12-typed-array-data-deletion-audit §3.5 / §B + ADR-006
+            // §2.7.24 Q25.A SUPERSEDED). With no inner payload to wrap,
+            // the outer `HeapValue::TypedArray(...)` arm is now orphan and
+            // is deleted in lockstep. The `HeapKind::TypedArray = 8`
+            // ordinal becomes a "vacated ordinal" comment marker (see the
+            // HeapKind table earlier in this file). 4-table-lockstep
+            // dispatch arms for `HeapKind::TypedArray` (clone_with_kind /
+            // drop_with_kind / SharedCell::drop /
+            // TypedObjectStorage::drop_fields) are deleted at V3-S5 ckpt-5
+            // territory per supervisor 2026-05-15 partition.
+            //
+            // Refusal #1 binding: do not resurrect this arm under any
+            // rename/shim/bridge — see CLAUDE.md "Forbidden code" +
+            // "Renames to refuse on sight" broader-family regex.
+            // ADR-006 §2.3: `TemporalData` enum was inline (size = largest
+            // variant ≈ 32 bytes including `Box`'s overhead). `Arc` reduces
+            // the slot payload to a single pointer.
+            Temporal(std::sync::Arc<$crate::heap_value::TemporalData>),
+            // ADR-006 §2.3: `TableViewData` enum migrated to `Arc<…>` to
+            // match the canonical typed-Arc shape; its arms already carry
+            // `Arc<DataTable>` internally.
+            TableView(std::sync::Arc<$crate::heap_value::TableViewData>),
+            // ===== Stage C HashMap-marshal P1(b) =====
+            /// HashMap with string keys + per-V monomorphized values.
+            ///
+            /// **Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14):** payload flipped
+            /// from `Arc<HashMapData>` (non-generic) to `HashMapKindedRef`
+            /// (per-V enum carrier) per ADR-006 §2.7.24 Q25.B SUPERSEDED +
+            /// audit §C.4 option (a.2). The variant tag IS the per-V
+            /// `NativeKind` discriminator; per-V dispatch at consumer sites
+            /// goes through the `HashMapKindedRef::{I64, F64, Bool, Char,
+            /// String, Decimal, TypedObject, TraitObject}` arms.
+            ///
+            /// See `$crate::heap_value::HashMapData<V>` + `HashMapKindedRef`
+            /// for the storage shape. Stage C P1(b), 2026-05-07.
+            HashMap($crate::heap_value::HashMapKindedRef),
+            // ===== Wave-γ G-heap-filter-expr (2026-05-09) =====
+            /// Filter-expression tree (`Arc<FilterNode>`) used by the query
+            /// DSL's `And` / `Or` / `Not` opcodes (`executor/logical/mod.rs`).
+            /// In current code FilterExpr payloads are emitted directly to
+            /// the kinded stack as `Arc::into_raw(Arc<FilterNode>) as u64`
+            /// with kind `NativeKind::Ptr(HeapKind::FilterExpr)` and never
+            /// wrapped in `HeapValue`. The arm exists to preserve the
+            /// ADR-005 §1 invariant that every `HeapKind` discriminator has
+            /// a `HeapValue` arm of the same shape — kind() / is_truthy() /
+            /// type_name() / drop_with_kind() / clone_with_kind() must
+            /// dispatch a `HeapKind::FilterExpr` slot as `Arc<FilterNode>`,
+            /// not `Arc<NativeViewData>` (the pre-Wave-γ type-confusion gap
+            /// surfaced by Wave-α D-raw-helpers, commit `a27c0e4`).
+            FilterExpr(std::sync::Arc<$crate::value::FilterNode>),
+            // ===== Wave 13 W13-hashset-rebuild (ADR-006 §2.7.15 / Q16,
+            // 2026-05-10) =====
+            /// One-keyspace Set carrier. Mirror of
+            /// `HeapValue::HashMap(Arc<HashMapData>)` with the values
+            /// buffer dropped: insertion-ordered `Arc<TypedBuffer<Arc<
+            /// String>>>` keys + eager FNV-1a bucket index for O(1)
+            /// `set.has(key)`. See `$crate::heap_value::HashSetData` for
+            /// the storage shape.
+            ///
+            /// Full HeapValue arm (NOT pure-discriminator like FilterExpr
+            /// / SharedCell): Set values flow through `as_heap_value()`
+            /// for method-receiver classification per the §2.7.15 amendment.
+            HashSet(std::sync::Arc<$crate::heap_value::HashSetData>),
+            // ===== Wave 8 W8-T26 (ADR-006 §2.7.13 / Q14, 2026-05-10) =====
+            /// Reference-value carrier (`Arc<RefTarget>`) used by the
+            /// `MakeRef` / `MakeFieldRef` / `MakeIndexRef` /
+            /// `DerefLoad` / `DerefStore` / `SetIndexRef` opcode family
+            /// (`executor/variables/mod.rs`). In current code Reference
+            /// payloads are emitted directly to the kinded stack as
+            /// `Arc::into_raw(Arc<RefTarget>) as u64` with kind
+            /// `NativeKind::Ptr(HeapKind::Reference)` and never wrapped
+            /// in `HeapValue`. The arm exists to preserve the ADR-005
+            /// §1 / ADR-006 §2.3 `HeapKind`↔`HeapValue` symmetry — same
+            /// pattern as `HeapValue::FilterExpr` (§2.7.9). Calling
+            /// `slot.as_heap_value()` on a Reference-labeled slot is
+            /// undefined behavior; the canonical recovery is
+            /// `Arc::from_raw::<RefTarget>(bits)`.
+            Reference(std::sync::Arc<$crate::reference::RefTarget>),
+            // ===== W13-iterator-state (ADR-006 §2.7.16 / Q17, 2026-05-10) =====
+            /// Lazy iterator pipeline carrier (`Arc<IteratorState>`).
+            /// Used by `Array.iter` / `String.iter` / `HashMap.iter` /
+            /// `Range.iter` factories and the `ITERATOR_METHODS` PHF
+            /// (`map` / `filter` / `take` / `skip` / `flatMap` /
+            /// `enumerate` / `chain` / `collect` / `forEach` /
+            /// `reduce` / `count` / `any` / `all` / `find`). Slot bits
+            /// are `Arc::into_raw(Arc<IteratorState>) as u64`; recovery
+            /// goes through `slot.as_heap_value()` →
+            /// `HeapValue::Iterator(arc)` per ADR-005 §1
+            /// single-discriminator (the lazy-transforms / source /
+            /// cursor triple is opaque at the dispatch shell —
+            /// terminals walk `arc.transforms` and dispatch per stage).
+            Iterator(std::sync::Arc<$crate::iterator_state::IteratorState>),
+            // ===== Wave 15 W15-deque (ADR-006 §2.7.19 / Q20, 2026-05-10) =====
+            /// Double-ended queue carrier. Structurally a mirror of
+            /// `HeapValue::HashSet(Arc<HashSetData>)` with the dedup
+            /// keyspace replaced by a `VecDeque<Arc<HeapValue>>`
+            /// (heterogeneous-element, order-preserving, no
+            /// deduplication). See `$crate::heap_value::DequeData` for
+            /// the storage shape.
+            ///
+            /// Full HeapValue arm (NOT pure-discriminator like
+            /// FilterExpr / SharedCell): Deque values flow through
+            /// `as_heap_value()` for receiver classification per the
+            /// §2.7.19 amendment.
+            Deque(std::sync::Arc<$crate::heap_value::DequeData>),
+            // ===== Wave 15 W15-channel-rebuild (ADR-006 §2.7.20 / Q21,
+            // 2026-05-10) =====
+            /// MPSC-style synchronous channel carrier (`Arc<ChannelData>`).
+            /// Unlike HashMap/HashSet (immutable-on-clone with
+            /// `Arc::make_mut` clone-on-write), `ChannelData` wraps a
+            /// `Mutex<ChannelInner>` so two `Arc<ChannelData>` shares
+            /// of the same channel observe each other's `send` /
+            /// `recv` mutations — the producer/consumer-endpoints
+            /// shape. See `$crate::heap_value::ChannelData` for the
+            /// storage shape and the §2.7.20 amendment for the design
+            /// rationale.
+            ///
+            /// Full HeapValue arm (NOT pure-discriminator like FilterExpr
+            /// / SharedCell): Channel values flow through
+            /// `slot.as_heap_value()` for receiver classification at
+            /// method dispatch — same shape as `HashSet` / `Iterator`.
+            Channel(std::sync::Arc<$crate::heap_value::ChannelData>),
+            // ===== Wave 15 W15-priority-queue (ADR-006 §2.7.18 / Q19,
+            // 2026-05-10) =====
+            /// Min-heap-backed PriorityQueue carrier. Mirror of
+            /// `HeapValue::HashSet(Arc<HashSetData>)` with the keys
+            /// buffer carrying i64 priorities instead of `Arc<String>`:
+            /// `Arc<TypedBuffer<i64>>` heap-ordered values (root = min).
+            /// See `$crate::heap_value::PriorityQueueData` for the
+            /// storage shape.
+            ///
+            /// Full HeapValue arm (NOT pure-discriminator like FilterExpr
+            /// / SharedCell): PriorityQueue values flow through
+            /// `as_heap_value()` for method-receiver classification per
+            /// the §2.7.18 amendment.
+            ///
+            /// **i64-priority-only at landing** per the §2.7.18 Q19
+            /// ruling (typed-payload `PriorityQueue<T, K>` with
+            /// key-extractor is a future Phase-2c amendment with
+            /// measurement; the smoke target is exercised on this
+            /// shape).
+            PriorityQueue(std::sync::Arc<$crate::heap_value::PriorityQueueData>),
+            // ===== W15-range (ADR-006 §2.7.23 / Q24, 2026-05-10) =====
+            /// Range value carrier (`Arc<RangeData>`). Built by
+            /// `MakeRange` from the `start..end` / `start..=end` surface
+            /// syntax. Slot bits are `Arc::into_raw(Arc<RangeData>) as
+            /// u64` (typed-Arc shape, mirror of HashMap / HashSet /
+            /// Iterator). Recovery goes through `slot.as_heap_value()`
+            /// → `HeapValue::Range(arc)` for receiver classification at
+            /// method dispatch (`r.contains(x)` / `r.toArray()` /
+            /// `r.iter()`). Same dispatch shape as the FilterExpr §2.7.9
+            /// amendment for refcount discipline (clone_with_kind /
+            /// drop_with_kind retain/release `Arc<RangeData>` directly,
+            /// NOT through `HeapValue`).
+            Range(std::sync::Arc<$crate::heap_value::RangeData>),
+            // ===== Wave 14 W14-variant-codegen (ADR-006 §2.7.17 / Q18,
+            // 2026-05-10) =====
+            /// Result<T, E> carrier (`Arc<ResultData>`). Used by the
+            /// `OkCtor` / `ErrCtor` builtin producers and the
+            /// `op_is_ok` / `op_is_err` / `op_unwrap_ok` /
+            /// `op_unwrap_err` / `op_try_unwrap` discriminators.
+            /// Slot bits are `Arc::into_raw(Arc<ResultData>) as u64`;
+            /// recovery goes through `slot.as_heap_value()` →
+            /// `HeapValue::Result(arc)` per ADR-005 §1
+            /// single-discriminator. The inner `payload: KindedSlot`
+            /// owns one strong-count share for the wrapped value;
+            /// `ResultData::Drop` (auto-derived from `KindedSlot`'s
+            /// explicit Drop) retires the share at refcount=0.
+            Result(std::sync::Arc<$crate::heap_value::ResultData>),
+            /// Option<T> carrier (`Arc<OptionData>`). Used by the
+            /// `SomeCtor` builtin producer and the `op_unwrap_option`
+            /// discriminator (the `None` half is also constructed as
+            /// `OptionData::none()` at compiler emission sites). Same
+            /// kinded-payload discipline as `Result` per §2.7.17.
+            Option(std::sync::Arc<$crate::heap_value::OptionData>),
+            // ===== W17-trait-object-storage (ADR-006 §2.7.24 / Q25.C,
+            // 2026-05-11) =====
+            /// `dyn Trait` carrier (`Arc<TraitObjectStorage>`).
+            /// Re-introduces the bulldozer-deleted `HeapValue::TraitObject`
+            /// arm as a typed-Arc pair — `TraitObjectStorage` holds an
+            /// `Arc<TypedObjectStorage>` data half + an `Arc<VTable>`
+            /// vtable half. Slot bits are
+            /// `Arc::into_raw(Arc<TraitObjectStorage>) as u64`;
+            /// recovery goes through `slot.as_heap_value()` →
+            /// `HeapValue::TraitObject(arc)` per ADR-005 §1
+            /// single-discriminator. The compiler-emission tier
+            /// (W17-trait-object-emission round) populates the slot
+            /// via `OpCode::BoxTraitObject` and dispatches method
+            /// calls via `OpCode::DynMethodCall` against the recovered
+            /// trait-object carrier. See ADR-006 §2.7.24 Q25.C.1
+            /// (universal-dyn auto-boxing), Q25.C.2 (Self-arg runtime
+            /// vtable-identity check), Q25.C.3 (generic-method
+            /// TypeInfo dispatch), Q25.C.5 (`VTableEntry` 6-variant
+            /// shape).
+            ///
+            /// **Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): payload
+            /// flipped from `Arc<TraitObjectStorage>` to `TraitObjectPtr`**
+            /// (`#[repr(transparent)]` newtype around
+            /// `*const TraitObjectStorage`) per the §Q25.C.5 amendment +
+            /// Path B ratification. Mirror of the TypedObject flip in the
+            /// same commit — the newtype owns one v2-raw HeapHeader-at-
+            /// offset-0 refcount share; Clone via `v2_retain`, Drop via
+            /// `TraitObjectStorage::release_elem`.
+            TraitObject($crate::heap_value::TraitObjectPtr),
+            // ===== W17-concurrency (ADR-006 §2.7.25, 2026-05-11) =====
+            /// `Mutex<T>` concurrency-primitive carrier
+            /// (`Arc<MutexData>`). The inner `MutexData` wraps a
+            /// `Mutex<MutexInner>` so two `Arc<MutexData>` shares of
+            /// the same mutex observe each other's `set` mutations —
+            /// the same interior-mutability shape as
+            /// `HeapValue::Channel`. Full HeapValue arm — Mutex values
+            /// flow through `slot.as_heap_value()` for receiver
+            /// classification at method dispatch.
+            Mutex(std::sync::Arc<$crate::heap_value::MutexData>),
+            /// `Atomic<i64>` concurrency-primitive carrier
+            /// (`Arc<AtomicData>`). The inner `AtomicData` wraps a
+            /// `std::sync::atomic::AtomicI64` for atomic load / store /
+            /// fetch_add / fetch_sub / compare_exchange. i64-only at
+            /// landing per ADR-006 §2.7.25 — typed-payload `Atomic<T>`
+            /// is a future Phase-2c amendment with measurement.
+            Atomic(std::sync::Arc<$crate::heap_value::AtomicData>),
+            /// `Lazy<T>` initialize-once carrier (`Arc<LazyData>`).
+            /// Wraps an initializer closure and cached value slot.
+            /// Closure-call path is unlocked by W17-make-closure
+            /// (merged at `aa47364`). Full HeapValue arm.
+            Lazy(std::sync::Arc<$crate::heap_value::LazyData>),
+            // ===== W17-comptime-vm-dispatch (ADR-006 §2.7.26, 2026-05-12) =====
+            /// Module-function reference inline-scalar carrier — labels
+            /// a slot whose bits decode to a `module_fn_id: u64` indexing
+            /// `VirtualMachine.module_fn_table`. Inline-scalar payload
+            /// (no `Arc<T>`, no heap state) — same shape as
+            /// `HeapValue::Future(u64)` / `HeapValue::Char(char)`.
+            ///
+            /// Pure-discriminator pattern: in current code ModuleFn
+            /// payloads are emitted directly to the kinded stack /
+            /// TypedObject slot as `module_fn_id as u64` with kind
+            /// `NativeKind::Ptr(HeapKind::ModuleFn)` and never wrapped
+            /// in `HeapValue`. The arm exists to preserve the ADR-005
+            /// §1 / ADR-006 §2.3 `HeapKind`↔`HeapValue` symmetry — same
+            /// pattern as `HeapValue::FilterExpr` (§2.7.9) /
+            /// `HeapValue::Reference` (§2.7.13). Calling
+            /// `slot.as_heap_value()` on a ModuleFn-labeled slot is
+            /// undefined behavior; the canonical recovery is reading
+            /// the raw `u64` bits as the `module_fn_id`.
+            ModuleFn(u64),
+            // ===== Round 18 S3 W12-matrix-floatslice-heapkind-exit
+            // (ADR-006 §2.7.22 amendment, 2026-05-13) =====
+            /// Matrix value carrier (`Arc<MatrixData>`). Built by
+            /// `op_new_matrix` from the `matrix(rows, cols, [data...])`
+            /// surface form. In current code Matrix payloads are emitted
+            /// directly to the kinded stack / TypedObject slot as
+            /// `Arc::into_raw(Arc<MatrixData>) as u64` with kind
+            /// `NativeKind::Ptr(HeapKind::Matrix)` and never wrapped in
+            /// `HeapValue`. The arm exists to preserve the ADR-005 §1 /
+            /// ADR-006 §2.3 `HeapKind`↔`HeapValue` symmetry — same
+            /// pattern as `HeapValue::FilterExpr` (§2.7.9) /
+            /// `HeapValue::Reference` (§2.7.13). Calling
+            /// `slot.as_heap_value()` on a Matrix-labeled slot is
+            /// undefined behavior; the canonical recovery is
+            /// `Arc::<MatrixData>::from_raw(bits)`.
+            Matrix(std::sync::Arc<$crate::heap_value::MatrixData>),
+            /// Matrix-projection carrier (`Arc<MatrixSliceData>`). Built
+            /// by `Matrix.row(i)` / `Matrix.col(i)` from a parent matrix.
+            /// `MatrixSliceData { parent: Arc<MatrixData>, offset, len }`
+            /// preserves the aliasing-into-parent semantics from the
+            /// pre-amendment `TypedArrayData::FloatSlice` shape. Same
+            /// typed-Arc pure-discriminator dispatch shape as
+            /// `HeapValue::Matrix`.
+            MatrixSlice(std::sync::Arc<$crate::heap_value::MatrixSliceData>),
         }
 
         impl HeapValue {
@@ -224,44 +766,46 @@ macro_rules! define_heap_types {
             #[inline]
             pub fn kind(&self) -> HeapKind {
                 match self {
-                    // Tuple
                     HeapValue::String(..) => HeapKind::String,
-                    HeapValue::Array(..) => HeapKind::Array,
                     HeapValue::Decimal(..) => HeapKind::Decimal,
                     HeapValue::BigInt(..) => HeapKind::BigInt,
-                    HeapValue::HostClosure(..) => HeapKind::HostClosure,
+                    HeapValue::Future(..) => HeapKind::Future,
+                    HeapValue::Char(..) => HeapKind::Char,
                     HeapValue::DataTable(..) => HeapKind::DataTable,
-                    HeapValue::HashMap(..) => HeapKind::HashMap,
-                    HeapValue::Set(..) => HeapKind::Set,
-                    HeapValue::Deque(..) => HeapKind::Deque,
-                    HeapValue::PriorityQueue(..) => HeapKind::PriorityQueue,
                     HeapValue::Content(..) => HeapKind::Content,
                     HeapValue::Instant(..) => HeapKind::Instant,
                     HeapValue::IoHandle(..) => HeapKind::IoHandle,
                     HeapValue::NativeScalar(..) => HeapKind::NativeScalar,
                     HeapValue::NativeView(..) => HeapKind::NativeView,
-                    HeapValue::Iterator(..) => HeapKind::Iterator,
-                    HeapValue::Generator(..) => HeapKind::Generator,
-                    HeapValue::Char(..) => HeapKind::Char,
-                    HeapValue::ProjectedRef(..) => HeapKind::ProjectedRef,
-                    HeapValue::Enum(..) => HeapKind::Enum,
-                    HeapValue::Some(..) => HeapKind::Some,
-                    HeapValue::Ok(..) => HeapKind::Ok,
-                    HeapValue::Err(..) => HeapKind::Err,
-                    HeapValue::Future(..) => HeapKind::Future,
-                    // Struct
-                    HeapValue::TypedObject { .. } => HeapKind::TypedObject,
+                    HeapValue::TypedObject(..) => HeapKind::TypedObject,
                     HeapValue::ClosureRaw(..) => HeapKind::Closure,
-                    HeapValue::Range { .. } => HeapKind::Range,
-                    HeapValue::TaskGroup { .. } => HeapKind::TaskGroup,
-                    HeapValue::TraitObject { .. } => HeapKind::TraitObject,
-                    HeapValue::FunctionRef { .. } => HeapKind::FunctionRef,
-                    // Consolidated
-                    HeapValue::TypedArray(..) => HeapKind::TypedArray,
+                    HeapValue::TaskGroup(..) => HeapKind::TaskGroup,
+                    // V3-S5 ckpt-4: `HeapValue::TypedArray(..)` kind arm
+                    // deleted in lockstep with the variant + the
+                    // TypedArrayData enum (ckpt-1) + wrapper layer (ckpt-4).
+                    // `HeapKind::TypedArray = 8` ordinal is vacated (see
+                    // ordinal table above) but the identifier stays until
+                    // ckpt-5 4-table-lockstep deletion.
                     HeapValue::Temporal(..) => HeapKind::Temporal,
-                    HeapValue::Rare(..) => HeapKind::Rare,
-                    HeapValue::Concurrency(..) => HeapKind::Concurrency,
                     HeapValue::TableView(..) => HeapKind::TableView,
+                    HeapValue::HashMap(..) => HeapKind::HashMap,
+                    HeapValue::HashSet(..) => HeapKind::HashSet,
+                    HeapValue::FilterExpr(..) => HeapKind::FilterExpr,
+                    HeapValue::Reference(..) => HeapKind::Reference,
+                    HeapValue::Iterator(..) => HeapKind::Iterator,
+                    HeapValue::Deque(..) => HeapKind::Deque,
+                    HeapValue::Channel(..) => HeapKind::Channel,
+                    HeapValue::PriorityQueue(..) => HeapKind::PriorityQueue,
+                    HeapValue::Range(..) => HeapKind::Range,
+                    HeapValue::Result(..) => HeapKind::Result,
+                    HeapValue::Option(..) => HeapKind::Option,
+                    HeapValue::TraitObject(..) => HeapKind::TraitObject,
+                    HeapValue::Mutex(..) => HeapKind::Mutex,
+                    HeapValue::Atomic(..) => HeapKind::Atomic,
+                    HeapValue::Lazy(..) => HeapKind::Lazy,
+                    HeapValue::ModuleFn(..) => HeapKind::ModuleFn,
+                    HeapValue::Matrix(..) => HeapKind::Matrix,
+                    HeapValue::MatrixSlice(..) => HeapKind::MatrixSlice,
                 }
             }
 
@@ -270,42 +814,83 @@ macro_rules! define_heap_types {
             pub fn is_truthy(&self) -> bool {
                 match self {
                     HeapValue::String(_v) => !_v.is_empty(),
-                    HeapValue::Array(_v) => !_v.is_empty(),
                     HeapValue::Decimal(_v) => !_v.is_zero(),
-                    HeapValue::BigInt(_v) => *_v != 0,
-                    HeapValue::HostClosure(_) => true,
+                    HeapValue::BigInt(_v) => **_v != 0,
+                    HeapValue::Future(_) => true,
+                    HeapValue::Char(_) => true,
                     HeapValue::DataTable(_v) => _v.row_count() > 0,
-                    HeapValue::HashMap(_v) => !_v.keys.is_empty(),
-                    HeapValue::Set(_v) => !_v.items.is_empty(),
-                    HeapValue::Deque(_v) => !_v.items.is_empty(),
-                    HeapValue::PriorityQueue(_v) => !_v.items.is_empty(),
                     HeapValue::Content(_) => true,
                     HeapValue::Instant(_) => true,
                     HeapValue::IoHandle(_v) => _v.is_open(),
                     HeapValue::NativeScalar(_v) => _v.is_truthy(),
                     HeapValue::NativeView(_v) => _v.ptr != 0,
-                    HeapValue::Iterator(_v) => !_v.done,
-                    HeapValue::Generator(_v) => _v.state != u16::MAX,
-                    HeapValue::Char(_) => true,
-                    HeapValue::ProjectedRef(_) => true,
-                    HeapValue::Enum(_) => true,
-                    HeapValue::Some(_) => true,
-                    HeapValue::Ok(_) => true,
-                    HeapValue::Err(_) => false,
-                    HeapValue::Future(_) => true,
-                    // Struct
-                    HeapValue::TypedObject { slots, .. } => !slots.is_empty(),
+                    HeapValue::TypedObject(s) => !s.slots.is_empty(),
                     HeapValue::ClosureRaw(..) => true,
-                    HeapValue::Range { .. } => true,
-                    HeapValue::TaskGroup { .. } => true,
-                    HeapValue::TraitObject { value, .. } => value.is_truthy(),
-                    HeapValue::FunctionRef { .. } => true,
-                    // Consolidated — delegate to inner enum
-                    HeapValue::TypedArray(ta) => ta.is_truthy(),
+                    HeapValue::TaskGroup(..) => true,
+                    // V3-S5 ckpt-4: `HeapValue::TypedArray(ta) => ta.is_truthy()`
+                    // arm deleted in lockstep with the variant + the
+                    // `TypedArrayData::is_truthy` impl (ckpt-1 wholesale deletion).
                     HeapValue::Temporal(td) => td.is_truthy(),
-                    HeapValue::Rare(rd) => rd.is_truthy(),
-                    HeapValue::Concurrency(cd) => cd.is_truthy(),
                     HeapValue::TableView(tv) => tv.is_truthy(),
+                    HeapValue::HashMap(d) => !d.is_empty(),
+                    HeapValue::HashSet(d) => !d.is_empty(),
+                    // Filter-expression trees are always truthy when present.
+                    HeapValue::FilterExpr(_) => true,
+                    // Reference values are always truthy when present
+                    // (a live ref points at a reachable place).
+                    HeapValue::Reference(_) => true,
+                    // Iterator values are always truthy when present
+                    // (a live iterator is a usable pipeline value, even
+                    // if its terminal evaluation will yield zero
+                    // elements after filter / take 0 etc.).
+                    HeapValue::Iterator(_) => true,
+                    // Wave 15 W15-deque (ADR-006 §2.7.19 / Q20):
+                    // truthy iff the deque has at least one element.
+                    HeapValue::Deque(d) => !d.is_empty(),
+                    // Channel values are always truthy when present
+                    // (a live channel is a usable endpoint regardless of
+                    // queued-element count or closed state).
+                    HeapValue::Channel(_) => true,
+                    // Wave 15 W15-priority-queue (ADR-006 §2.7.18 / Q19,
+                    // 2026-05-10): empty PQ is falsy, non-empty is
+                    // truthy — mirror of the HashSet / HashMap shape.
+                    HeapValue::PriorityQueue(d) => !d.is_empty(),
+                    // Empty range (zero elements) is falsy; non-empty is
+                    // truthy. Mirrors the HashSet/HashMap "empty is
+                    // falsy" pattern at §2.7.15. Cheap O(1) check via
+                    // `RangeData::is_empty()`.
+                    HeapValue::Range(r) => !r.is_empty(),
+                    // Result and Option are always truthy when present
+                    // (a wrapper's variant tag is a runtime contract;
+                    // truthiness reflects "carrier exists" not the
+                    // inner success/none state). Inner-aware boolean
+                    // tests go through `op_is_ok` / `op_is_err`.
+                    HeapValue::Result(_) => true,
+                    HeapValue::Option(_) => true,
+                    // W17-trait-object-storage (ADR-006 §2.7.24 / Q25.C,
+                    // 2026-05-11): a `dyn Trait` carrier is always
+                    // truthy when present — a boxed trait object is a
+                    // live receiver regardless of its inner value.
+                    // Same shape as Reference / Iterator / Channel.
+                    HeapValue::TraitObject(_) => true,
+                    // W17-concurrency (ADR-006 §2.7.25, 2026-05-11):
+                    // concurrency primitives are always truthy when
+                    // present — a live mutex/atomic/lazy is a usable
+                    // synchronisation handle regardless of inner state.
+                    // Same shape as Channel / Iterator / Reference.
+                    HeapValue::Mutex(_) => true,
+                    HeapValue::Atomic(_) => true,
+                    HeapValue::Lazy(_) => true,
+                    // ModuleFn references are always truthy when present
+                    // (a live module-fn-id is a usable callable handle).
+                    HeapValue::ModuleFn(_) => true,
+                    // ADR-006 §2.7.22 amendment (Round 18 S3, 2026-05-13):
+                    // truthy iff the underlying flat buffer / projection
+                    // length is non-empty, mirroring the pre-amendment
+                    // `TypedArrayData::Matrix` / `FloatSlice` is_truthy
+                    // shape.
+                    HeapValue::Matrix(m) => m.data.len() > 0,
+                    HeapValue::MatrixSlice(s) => s.len > 0,
                 }
             }
 
@@ -314,15 +899,11 @@ macro_rules! define_heap_types {
             pub fn type_name(&self) -> &'static str {
                 match self {
                     HeapValue::String(_) => "string",
-                    HeapValue::Array(_) => "array",
                     HeapValue::Decimal(_) => "decimal",
                     HeapValue::BigInt(_) => "int",
-                    HeapValue::HostClosure(_) => "host_closure",
+                    HeapValue::Future(_) => "future",
+                    HeapValue::Char(_) => "char",
                     HeapValue::DataTable(_) => "datatable",
-                    HeapValue::HashMap(_) => "hashmap",
-                    HeapValue::Set(_) => "set",
-                    HeapValue::Deque(_) => "deque",
-                    HeapValue::PriorityQueue(_) => "priority_queue",
                     HeapValue::Content(_) => "content",
                     HeapValue::Instant(_) => "instant",
                     HeapValue::IoHandle(_) => "io_handle",
@@ -334,28 +915,33 @@ macro_rules! define_heap_types {
                             "cview"
                         }
                     }
-                    HeapValue::Iterator(_) => "iterator",
-                    HeapValue::Generator(_) => "generator",
-                    HeapValue::Char(_) => "char",
-                    HeapValue::ProjectedRef(_) => "reference",
-                    HeapValue::Enum(_) => "enum",
-                    HeapValue::Some(_) => "option",
-                    HeapValue::Ok(_) => "result",
-                    HeapValue::Err(_) => "result",
-                    HeapValue::Future(_) => "future",
-                    // Struct
-                    HeapValue::TypedObject { .. } => "object",
+                    HeapValue::TypedObject(..) => "object",
                     HeapValue::ClosureRaw(..) => "closure",
-                    HeapValue::Range { .. } => "range",
-                    HeapValue::TaskGroup { .. } => "task_group",
-                    HeapValue::TraitObject { .. } => "trait_object",
-                    HeapValue::FunctionRef { .. } => "function",
-                    // Consolidated — delegate to inner enum
-                    HeapValue::TypedArray(ta) => ta.type_name(),
+                    HeapValue::TaskGroup(..) => "task_group",
+                    // V3-S5 ckpt-4: `HeapValue::TypedArray(ta) => ta.type_name()`
+                    // arm deleted in lockstep with the variant + the
+                    // `TypedArrayData::type_name` impl (ckpt-1 wholesale deletion).
                     HeapValue::Temporal(td) => td.type_name(),
-                    HeapValue::Rare(rd) => rd.type_name(),
-                    HeapValue::Concurrency(cd) => cd.type_name(),
                     HeapValue::TableView(tv) => tv.type_name(),
+                    HeapValue::HashMap(_) => "hashmap",
+                    HeapValue::HashSet(_) => "hashset",
+                    HeapValue::FilterExpr(_) => "filter_expr",
+                    HeapValue::Reference(_) => "ref",
+                    HeapValue::Iterator(_) => "iterator",
+                    HeapValue::Deque(_) => "deque",
+                    HeapValue::Channel(_) => "channel",
+                    HeapValue::PriorityQueue(_) => "priority_queue",
+                    HeapValue::Range(_) => "range",
+                    HeapValue::Result(_) => "result",
+                    HeapValue::Option(_) => "option",
+                    HeapValue::TraitObject(_) => "trait_object",
+                    HeapValue::Mutex(_) => "mutex",
+                    HeapValue::Atomic(_) => "atomic",
+                    HeapValue::Lazy(_) => "lazy",
+                    HeapValue::ModuleFn(_) => "module_fn",
+                    // ADR-006 §2.7.22 amendment (Round 18 S3, 2026-05-13).
+                    HeapValue::Matrix(_) => "matrix",
+                    HeapValue::MatrixSlice(_) => "matrix_slice",
                 }
             }
         }

@@ -46,6 +46,24 @@ pub struct Cli {
     /// Load extension modules from this directory at startup
     #[arg(long, value_name = "DIR")]
     pub extension_dir: Option<PathBuf>,
+
+    /// Enable structured JIT diagnostic tracing (requires the `jit-trace`
+    /// feature). Accepts an `EnvFilter` directive: empty string enables
+    /// `shape_jit=debug`; an explicit directive overrides the default
+    /// (e.g. `--trace-jit=shape_jit::mir=trace,shape_jit::arc_counters=info`).
+    /// Replaces the legacy `SHAPE_JIT_DEBUG` / `SHAPE_JIT_TRACE` /
+    /// `SHAPE_JIT_MIR_TRACE` / `SHAPE_JIT_ARC_COUNTERS` / `SHAPE_JIT_METRICS` /
+    /// `SHAPE_JIT_PHASE_METRICS` env-var gating per cluster-2 closure-wave-F
+    /// (ADR-006 §2.7.5 amendment 2026-05-16).
+    #[cfg(feature = "jit-trace")]
+    #[arg(
+        long,
+        value_name = "FILTER",
+        num_args = 0..=1,
+        default_missing_value = "",
+        require_equals = true,
+    )]
+    pub trace_jit: Option<String>,
 }
 
 /// Execution mode for running Shape code

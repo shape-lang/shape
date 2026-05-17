@@ -1,5 +1,5 @@
 use super::super::*;
-use shape_value::ValueWordExt;
+use shape_value::VMError;
 
 impl VirtualMachine {
     // ========================================================================
@@ -7,56 +7,28 @@ impl VirtualMachine {
 
     /// Create a TypedObject from field name-value pairs.
     ///
-    /// Create a TypedObject from predeclared compile-time schemas.
-    pub(crate) fn create_typed_object_from_pairs(
-        &mut self,
-        fields: &[(&str, ValueWord)],
-    ) -> Result<ValueWord, VMError> {
-        // Build field names for schema lookup
-        let field_names: Vec<&str> = fields.iter().map(|(k, _)| *k).collect();
-        let key: String = field_names.join(",");
-        let schema_name = format!("__native_{}", key);
-
-        // Runtime schema synthesis is retired: these object layouts must be
-        // predeclared in compile-time registries.
-        let schema_id = self
-            .lookup_schema_by_name(&schema_name)
-            .map(|s| s.id)
-            .ok_or_else(|| {
-                VMError::RuntimeError(format!(
-                    "Missing predeclared schema '{}'. Runtime schema generation is disabled.",
-                    schema_name
-                ))
-            })?;
-
-        let field_types = self.lookup_schema(schema_id).map(|schema| {
-            schema
-                .fields
-                .iter()
-                .map(|f| f.field_type.clone())
-                .collect::<Vec<_>>()
-        });
-
-        // Build slots and heap_mask.
-        let mut slots = Vec::with_capacity(fields.len());
-        let mut heap_mask: u64 = 0;
-        for (i, (_name, nb)) in fields.iter().enumerate() {
-            let field_type = field_types.as_ref().and_then(|types| types.get(i));
-            let (slot, is_heap) =
-                crate::executor::objects::object_creation::nb_to_slot_with_field_type(
-                    nb, field_type,
-                );
-            slots.push(slot);
-            if is_heap {
-                heap_mask |= 1u64 << i;
-            }
-        }
-
-        Ok(ValueWord::from_heap_value(HeapValue::TypedObject {
-            schema_id: schema_id as u64,
-            slots: slots.into_boxed_slice(),
-            heap_mask,
-        }))
+    /// Phase-2c surface (ADR-006 §2.7.4): the legacy `(field_name, ValueWord)`
+    /// pair carrier and `ValueWord::from_heap_value(HeapValue::TypedObject{..})`
+    /// return shape both depend on the deleted `ValueWord` runtime
+    /// representation. The kinded rebuild takes `&[(&str, KindedSlot)]` /
+    /// `&[(&str, u64, NativeKind)]` and returns
+    /// `Arc<TypedObjectStorage>` directly (parallel-kind track + Arc
+    /// payload per ADR-006 §2.7 / Q7).
+    ///
+    /// Until the host-API rebuild lands, the lone caller
+    /// (`op_new_object` in `objects/object_creation.rs:168`) drains the
+    /// popped key/value pairs and surfaces `VMError::NotImplemented`. The
+    /// signature here is removed entirely so reintroducing a ValueWord-
+    /// shaped pairs API requires re-adding the function (review-visible).
+    pub(crate) fn create_typed_object_from_pairs_stub(&mut self) -> Result<(), VMError> {
+        Err(VMError::NotImplemented(
+            "create_typed_object_from_pairs: ad-hoc TypedObject construction \
+             from `(field_name, ValueWord)` pairs depends on the deleted \
+             ValueWord carrier and the deleted `from_heap_value` constructor. \
+             The kinded rebuild (Arc<TypedObjectStorage> + parallel-kind \
+             track) is Phase-2c — see ADR-006 §2.7.4."
+                .to_string(),
+        ))
     }
 
     /// Look up a schema by ID in the compiled program registry.

@@ -259,6 +259,9 @@ fn rvalue_uses_slot(rvalue: &Rvalue, slot: SlotId) -> bool {
             operand_uses_slot(lhs, slot) || operand_uses_slot(rhs, slot)
         }
         Rvalue::Aggregate(ops) => ops.iter().any(|op| operand_uses_slot(op, slot)),
+        Rvalue::EnumTest { operand, .. } | Rvalue::EnumPayload { operand, .. } => {
+            operand_uses_slot(operand, slot)
+        }
     }
 }
 
@@ -844,6 +847,9 @@ fn rvalue_uses_any_slot(rvalue: &Rvalue, slots: &HashSet<SlotId>) -> bool {
             operand_uses_any_slot(lhs, slots) || operand_uses_any_slot(rhs, slots)
         }
         Rvalue::Aggregate(ops) => ops.iter().any(|op| operand_uses_any_slot(op, slots)),
+        Rvalue::EnumTest { operand, .. } | Rvalue::EnumPayload { operand, .. } => {
+            operand_uses_any_slot(operand, slots)
+        }
     }
 }
 
@@ -1104,6 +1110,8 @@ mod tests {
             local_types: (0..num_locals).map(|_| LocalTypeInfo::Unknown).collect(),
             span: span(),
             field_name_table: std::collections::HashMap::new(),
+            local_struct_type_names: std::collections::HashMap::new(),
+            local_typed_array_element_types: std::collections::HashMap::new(),
         }
     }
 
@@ -3135,6 +3143,7 @@ mod tests {
                     StatementKind::EnumStore {
                         container_slot: SlotId(2),
                         operands: vec![Operand::Copy(Place::Local(SlotId(1)))],
+                        variant_name: None,
                     },
                     2,
                 ),
@@ -3176,6 +3185,7 @@ mod tests {
                         container_slot: SlotId(2),
                         operands: vec![Operand::Copy(Place::Local(SlotId(1)))],
                         field_names: vec!["f".to_string()],
+                        schema_id: None,
                     },
                     2,
                 ),

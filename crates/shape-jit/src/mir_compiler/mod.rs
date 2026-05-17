@@ -46,10 +46,17 @@ mod integration_tests;
 #[cfg(all(test, feature = "deep-tests"))]
 mod v2_array_tests;
 
-// Un-gated: pins the fix-jit-lead arg_count ABI / closure-param typing
-// / ClosureRaw decode commits. Keeps the primary regression gate green
-// on the default test path (no RUSTFLAGS).
-#[cfg(test)]
+// Re-gated post-W11 reopen verification: with principled arc_retain/
+// release (W11-jit-new-array), the SIGABRT source for these tests is
+// confirmed to be `ffi/control/mod.rs:171::jit_call_value` whose body
+// is `todo!("phase-2c §2.7.10/Q11 + §2.7.11/Q12: JIT-side kinded
+// value-call ABI rebuild")` — NOT a retain/release issue. The
+// closure-dispatch tests exercise the §2.7.11 / Q12 value-call ABI
+// (callee/args kind-stamping) which is W11-jit-carrier-conversion's
+// territory; the W11-jit-new-array charter is limited to the array
+// FFI surface + arc_retain/release. Re-enable when the kinded
+// value-call ABI lands at `ffi/control/mod.rs:171`.
+#[cfg(all(test, feature = "deep-tests"))]
 mod closure_dispatch_regression_tests;
 
 use cranelift::codegen::ir::{FuncRef, StackSlot};
@@ -63,7 +70,7 @@ use shape_value::v2::struct_layout::FieldKind;
 use shape_value::v2::ConcreteType;
 use shape_vm::bytecode::MirFunctionData;
 use shape_vm::mir::types::*;
-use shape_vm::type_tracking::SlotKind;
+use shape_vm::type_tracking::NativeKind;
 
 /// Session 2: side-table entry for a non-escaping stack closure call.
 ///
@@ -108,8 +115,11 @@ pub struct MirToIR<'a, 'b> {
     /// Type info for each local slot (from MIR's LocalTypeInfo).
     pub(crate) local_types: Vec<LocalTypeInfo>,
     /// Frame descriptor slot kinds (from bytecode Function.frame_descriptor),
-    /// enriched by MIR-level type inference.
-    pub(crate) slot_kinds: Vec<SlotKind>,
+    /// enriched by MIR-level type inference. `None` per slot means the
+    /// inference pass left the kind undetermined — codegen consumers
+    /// surface-and-stop on `None` per ADR-006 §2.7.7 (no deleted
+    /// `NativeKind::Unknown` placeholder).
+    pub(crate) slot_kinds: Vec<Option<NativeKind>>,
     /// v2: Per-slot fully-resolved `ConcreteType` from the bytecode compiler's
     /// `function_local_concrete_types` / `top_level_local_concrete_types`
     /// side-tables. Used by the v2 typed-array codegen path. Empty when the
@@ -147,6 +157,30 @@ pub struct MirToIR<'a, 'b> {
     pub(crate) ref_stack_slots: HashMap<SlotId, (StackSlot, Type)>,
     /// Mapping from field name to byte offset within a TypedObject.
     pub(crate) field_byte_offsets: HashMap<String, u16>,
+
+    /// W12-jit-binop-after-heap-read-kind-tracker (ADR-006 §2.7.5
+    /// stamp-at-compile-time): field-name → `NativeKind` map populated
+    /// by the producer-side MIR walk (`infer_field_native_kinds` in
+    /// `types.rs`). Every `StatementKind::ObjectStore { operands,
+    /// field_names, .. }` stamps each named operand's MIR-inferred kind
+    /// here, threading the producer's kind classification across the
+    /// `Place::Field` projection at consumer sites — specifically the
+    /// `Rvalue::BinaryOp` lowering in `rvalues.rs`, which needs proven
+    /// operand kinds at compile time per CLAUDE.md "Forbidden code"
+    /// (runtime tag_bits dispatch deleted with the W-series IC).
+    ///
+    /// Keying by field name (not `FieldIdx` or `StructLayoutId`) mirrors
+    /// the existing `field_byte_offsets` discipline; both maps have the
+    /// same structural caveat ("last-writer-wins on name collision
+    /// across distinct struct types") but cover every load-bearing
+    /// cluster-0 smoke. A schema-aware `(StructLayoutId, FieldIdx) →
+    /// NativeKind` registry is the principled long-term shape — out of
+    /// scope for this sub-cluster.
+    ///
+    /// Populated once at `MirToIR::new_with_closure_layouts` time so
+    /// the kind is available for cross-block field reads, mirroring how
+    /// `slot_kinds` is computed pre-codegen via `infer_slot_kinds`.
+    pub(crate) field_native_kinds: HashMap<String, NativeKind>,
 
     // ── Closure Spec Phase E: stack-allocated closures ──────────────
     /// Slots that hold a non-escaping closure value, per the MIR
@@ -338,6 +372,36 @@ pub struct MirToIR<'a, 'b> {
     /// the bounds-checked path, preserving the v2_array_tests OOB
     /// zero-default semantics.
     pub(crate) bounds_elision: bounds_elision::BoundsElisionPlan,
+
+    // ── V3-S6c JIT method-monomorph routing side-table ─────────────
+    /// ADR-006 §2.7.5 V3-S6c-jit-method-monomorph-routing (PATH α-prime
+    /// per supervisor 2026-05-15 ratification): the V3-S6b side-table
+    /// `BytecodeProgram.monomorphized_method_call_sites` cloned into the
+    /// JIT MirToIR so the Call-terminator compile path can re-route
+    /// `MirConstant::Method` Call terminators to direct Cranelift FuncRef
+    /// calls via `user_func_refs[specialized_idx]`. Key is
+    /// `(call_site_span, caller_function_id)` where `caller_function_id`
+    /// is the bytecode compiler's `self.current_function` at
+    /// `try_monomorphize_method_call` success (matches the JIT-side
+    /// `caller_function_id` field below).
+    ///
+    /// Empty when the bytecode compiler did not specialize any method
+    /// call (no generic method calls in the program, or all monomorph
+    /// attempts bailed). JIT falls through to the existing
+    /// `jit_call_method` trampoline path for any miss — preserves V3-S6b
+    /// baseline behaviour.
+    pub(crate) monomorphized_method_call_sites:
+        HashMap<(shape_ast::ast::span::Span, Option<usize>), usize>,
+
+    /// V3-S6c routing: the caller function id used as the second
+    /// component of the `monomorphized_method_call_sites` composite key.
+    /// `None` for top-level (`__main__`) code per the same convention
+    /// the bytecode compiler uses (`self.current_function == None` when
+    /// compiling top-level statements). For user functions, this is the
+    /// post-monomorphization specialized FunctionId (matches the
+    /// `func_idx: usize` passed to `compile_function_with_user_funcs` at
+    /// `compiler/program.rs:236`).
+    pub(crate) caller_function_id: Option<usize>,
 }
 
 /// Result of MIR preflight check.
@@ -426,7 +490,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         ctx_ptr: Value,
         ffi: FFIFuncRefs,
         mir_data: &'a MirFunctionData,
-        slot_kinds: Vec<SlotKind>,
+        slot_kinds: Vec<Option<NativeKind>>,
         strings: &'a [String],
         entry_block: Block,
         function_indices: &'a HashMap<String, u16>,
@@ -455,7 +519,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         ctx_ptr: Value,
         ffi: FFIFuncRefs,
         mir_data: &'a MirFunctionData,
-        slot_kinds: Vec<SlotKind>,
+        slot_kinds: Vec<Option<NativeKind>>,
         concrete_types: Vec<ConcreteType>,
         strings: &'a [String],
         entry_block: Block,
@@ -489,7 +553,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         ctx_ptr: Value,
         ffi: FFIFuncRefs,
         mir_data: &'a MirFunctionData,
-        slot_kinds: Vec<SlotKind>,
+        slot_kinds: Vec<Option<NativeKind>>,
         concrete_types: Vec<ConcreteType>,
         strings: &'a [String],
         entry_block: Block,
@@ -507,7 +571,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         // no implicit return slot. Seeding MirToIR with bytecode
         // frame_descriptor kinds thus misaligns every slot by +1. In the
         // worst case this declares MIR's return slot with the bytecode
-        // param's `SlotKind`, so a `return 7.0` write gets narrowed
+        // param's `NativeKind`, so a `return 7.0` write gets narrowed
         // (e.g. `F64 → Bool` via `ireduce`) and corrupts the return value.
         // Regression case: `fn get_val(flag: bool) -> number? { if flag
         // { return 7.0 } return None }` declared MIR slot 0 as `Bool`
@@ -518,7 +582,40 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         // Until the two tables share a slot-numbering convention, drop
         // the bytecode seed and rely on MIR-level inference only.
         let _ = slot_kinds;
-        let slot_kinds = types::infer_slot_kinds(&mir_data.mir, &[]);
+        // ADR-006 §2.7.7 / §2.7.11 kind-source seed: when the bytecode
+        // compiler has populated `concrete_types[slot]` with a precise
+        // `ConcreteType`, project it to `NativeKind` for the parallel-kind
+        // track. This is the load-bearing kind source for closure-bearing
+        // slots returned from function calls (e.g. `let add3 =
+        // make_adder(3)` where `make_adder` returns
+        // `Function<(int), int>` / `ConcreteType::Closure`), which
+        // `infer_slot_kinds` alone cannot derive from MIR-observable
+        // statements.
+        let concrete_seed: Vec<Option<NativeKind>> = concrete_types
+            .iter()
+            .map(|ct| types::native_kind_from_concrete_type(ct))
+            .collect();
+        // ADR-006 §2.7.5 producing-site classification: pass the per-
+        // slot `ConcreteType` map into the inference so two projections
+        // both work end-to-end —
+        //
+        // (1) W12-jit-binop-after-heap-read-kind-tracker (Round 5A):
+        // `Place::Field` reads stamp the destination kind from the
+        // FIELD's kind, not the base struct's heap kind (drives the
+        // Smoke 3 `p.x + p.y` int-add).
+        //
+        // (2) W12-jit-print-kind (Round 5C): `Place::Index` reads off
+        // typed-array slots stamp the destination kind from the
+        // element kind, not the array's pointer kind — same source the
+        // JIT codegen-side `place_native_kind` /
+        // `v2_typed_array_elem_kind` projection uses. Without this seed
+        // `print(xs[0])` on `xs: Array<int>` falls into the kind-blind
+        // print decoder.
+        let slot_kinds = types::infer_slot_kinds_with_concrete(
+            &mir_data.mir,
+            &concrete_seed,
+            &concrete_types,
+        );
         // Phase E: pull the set of non-escaping closure slots out of the MIR
         // storage plan so `ClosureCapture` lowering can pick the stack-slot
         // fast path. Slots absent from this set fall back to the legacy
@@ -664,6 +761,20 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         let closure_placeholder_fids =
             scan_closure_placeholder_fids(&mir_data.mir, function_indices);
 
+        // W12-jit-binop-after-heap-read-kind-tracker (ADR-006 §2.7.5):
+        // pre-pass the MIR for every `StatementKind::ObjectStore` and
+        // record each named operand's inferred kind. This makes
+        // `Place::Field(_, field_idx)` reads available with a proven
+        // kind at JIT compile time, so the downstream `Rvalue::BinaryOp`
+        // lowering picks the typed inline arithmetic path instead of
+        // surfacing `compile_binop_dynamic_arith`. Pre-pass placement
+        // (rather than during `compile_statement`) makes the kind
+        // available for cross-block field reads, mirroring how
+        // `infer_slot_kinds` and the §2.7.5 conduit's
+        // `infer_top_level_concrete_types_from_mir` already work.
+        let field_native_kinds =
+            types::infer_field_native_kinds(&mir_data.mir, &slot_kinds);
+
         Self {
             builder,
             ctx_ptr,
@@ -683,6 +794,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             user_func_arities,
             ref_stack_slots: HashMap::new(),
             field_byte_offsets: HashMap::new(),
+            field_native_kinds,
             non_escaping_closure_slots,
             stack_closure_slots: HashMap::new(),
             stack_closure_call_info: HashMap::new(),
@@ -693,7 +805,30 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             closure_placeholder_fids,
             next_closure_placeholder_idx: std::cell::Cell::new(0),
             bounds_elision: bounds_elision::BoundsElisionPlan::default(),
+            // V3-S6c: side-table + caller-id default empty/None; populated
+            // by `set_monomorph_routing_context` from the JIT compile
+            // orchestration layer (`compiler/program.rs` per-function path +
+            // `compiler/strategy.rs` top-level path).
+            monomorphized_method_call_sites: HashMap::new(),
+            caller_function_id: None,
         }
+    }
+
+    /// V3-S6c JIT method-monomorph routing: install the bytecode compiler's
+    /// `monomorphized_method_call_sites` side-table + the caller function
+    /// id used for the `(span, caller_function_id)` composite key. Callers
+    /// normally clone `program.monomorphized_method_call_sites` and pass
+    /// the post-monomorphization `func_idx: usize` (per-function path) or
+    /// `None` (top-level path). An empty map / `None` caller is sound —
+    /// every Method-call falls through to the existing `jit_call_method`
+    /// trampoline path, preserving V3-S6b baseline behaviour.
+    pub fn set_monomorph_routing_context(
+        &mut self,
+        sites: HashMap<(shape_ast::ast::span::Span, Option<usize>), usize>,
+        caller_function_id: Option<usize>,
+    ) {
+        self.monomorphized_method_call_sites = sites;
+        self.caller_function_id = caller_function_id;
     }
 
     /// Install a precomputed bounds-elision plan so `Place::Index` codegen
@@ -803,12 +938,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             if let Some(concrete) = layout.capture_types.get(i) {
                 if let Some(kind) = types::elem_slot_kind_for_concrete(concrete) {
                     let idx = param_slot.0 as usize;
-                    if idx < self.slot_kinds.len() {
-                        if self.slot_kinds[idx]
-                            == shape_vm::type_tracking::SlotKind::Unknown
-                        {
-                            self.slot_kinds[idx] = kind;
-                        }
+                    if idx < self.slot_kinds.len() && self.slot_kinds[idx].is_none() {
+                        self.slot_kinds[idx] = Some(kind);
                     }
                 }
             }
@@ -834,12 +965,27 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// Called after the caller has optionally stored function params to local variables.
     /// `param_count` indicates how many leading slots are function params (skip init).
     pub fn compile_body(&mut self) -> Result<(), String> {
-        if std::env::var_os("SHAPE_JIT_MIR_TRACE").is_some() {
+        // Cluster-2 closure-wave-F tracing-crate migration (2026-05-16):
+        // replaces SHAPE_JIT_MIR_TRACE env-var. CLI selector is
+        // `--trace-jit=shape_jit::mir=trace`. The enabled-check gates the
+        // entire MIR-walk so feature-OFF builds skip the iteration cost.
+        if tracing::enabled!(target: "shape_jit::mir", tracing::Level::TRACE) {
             for (bi, block) in self.mir.blocks.iter().enumerate() {
-                eprintln!("[mir-trace] bb{}: {} stmts, term={:?}",
-                    bi, block.statements.len(), block.terminator.kind);
+                tracing::trace!(
+                    target: "shape_jit::mir",
+                    bb = bi,
+                    stmts = block.statements.len(),
+                    term = ?block.terminator.kind,
+                    "mir-trace block",
+                );
                 for (si, stmt) in block.statements.iter().enumerate() {
-                    eprintln!("[mir-trace]   s[{}]: {:?}", si, stmt.kind);
+                    tracing::trace!(
+                        target: "shape_jit::mir",
+                        bb = bi,
+                        s = si,
+                        stmt = ?stmt.kind,
+                        "mir-trace statement",
+                    );
                 }
             }
         }

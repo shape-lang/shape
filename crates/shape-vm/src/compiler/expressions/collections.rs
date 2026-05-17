@@ -178,7 +178,7 @@ impl BytecodeCompiler {
         // bits produces a value that can't be decoded downstream (see
         // `intrinsic_matmul_mat`'s `as_any_array()` failure). Also, the
         // inner arrays themselves must be forced off the typed path so
-        // they round-trip as heap-ref ValueWords through the outer
+        // they round-trip as heap-ref pointers through the outer
         // generic `NewArray`; `nested_array_literal_depth` propagates
         // that signal into the recursive `compile_expr_array` call.
         let has_nested_array_elem = elements
@@ -220,10 +220,67 @@ impl BytecodeCompiler {
             // Stack: [arr]
             // For each element: [arr] -> [arr, arr] -> [arr, arr, val]
             //                   -> [arr] (TypedArrayPush* pops arr+val).
+            //
+            // Wave 3 Stabilize Round 1 V3-A2-followup-producer-cascade
+            // (2026-05-15): for String/Decimal element kinds, the element
+            // must be produced with `NativeKind::StringV2` / `NativeKind::DecimalV2`
+            // to round-trip through `TypedArrayPushString` /
+            // `TypedArrayPushDecimal`'s strict-kind check (v2_handlers/array.rs:
+            // 687/703). The legacy `LoadConst` path produces Arc<String> /
+            // Arc<Decimal> with NativeKind::String / NativeKind::Decimal, which
+            // the strict-kind check rejects. For string/decimal literal
+            // elements, emit `NewStringV2` / `NewDecimalV2` directly (reads
+            // from the string / constant pool, allocates a fresh `StringObj`
+            // / `DecimalObj` with refcount = 1, push as the v2-raw kind). The
+            // caller's share transfers to the array via the `TypedArrayPush*`
+            // refcount discipline (per v2_handlers/array.rs:696/762 comment).
+            //
+            // Non-literal element expressions (`f(x)`, `x` identifier, etc.)
+            // are deferred to V3-S5 Round 2 consumer cascade: the call sites
+            // that produce string/decimal values (function returns, identifier
+            // loads) must themselves migrate to StringV2/DecimalV2 carriers
+            // before non-literal Array<string>/Array<decimal> literals can
+            // round-trip without surfacing the kind-mismatch RuntimeError.
+            // Until then, non-literal elements emit through the legacy path
+            // and surface the same structured kind-mismatch RuntimeError at
+            // push time that Round 3a' gate-flip introduced — NOT a SIGSEGV.
             for elem in elements {
                 self.plan_flexible_binding_escape_from_expr(elem);
                 self.emit(Instruction::simple(OpCode::Dup));
-                self.compile_expr_as_value_or_placeholder(elem)?;
+                match (kind, elem) {
+                    (
+                        super::super::v2_typed_emission::TypedArrayKind::String,
+                        Expr::Literal(Literal::String(s), _),
+                    ) => {
+                        // String literal → v2-raw StringObj with NativeKind::StringV2.
+                        let str_id = self.program.add_string(s.clone());
+                        self.emit(Instruction::new(
+                            OpCode::NewStringV2,
+                            Some(Operand::Property(str_id)),
+                        ));
+                    }
+                    (
+                        super::super::v2_typed_emission::TypedArrayKind::Decimal,
+                        Expr::Literal(Literal::Decimal(d), _),
+                    ) => {
+                        // Decimal literal → v2-raw DecimalObj with NativeKind::DecimalV2.
+                        let const_idx = self.program.add_constant(Constant::Decimal(*d));
+                        self.emit(Instruction::new(
+                            OpCode::NewDecimalV2,
+                            Some(Operand::Const(const_idx)),
+                        ));
+                    }
+                    _ => {
+                        // Legacy element path (numeric / bool scalar kinds OR
+                        // non-literal string/decimal expressions). For
+                        // string/decimal non-literals this still produces the
+                        // legacy Arc-wrapped carrier; the typed array push
+                        // handler will surface a structured RuntimeError at
+                        // runtime per the Round 3a' gate-flip note. Consumer-
+                        // side migration is V3-S5 Round 2 territory.
+                        self.compile_expr_as_value_or_placeholder(elem)?;
+                    }
+                }
                 self.emit(Instruction::simple(kind.push_opcode()));
             }
         } else if elements.iter().any(|elem| matches!(elem, Expr::Spread(..))) {

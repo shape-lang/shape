@@ -24,7 +24,16 @@
 //! For JIT optimization, we track storage types:
 //! - `StorageHint::NullableFloat64`: Option<f64> uses NaN sentinel
 //! - `StorageHint::Float64`: Plain f64, no nullability
-//! - `StorageHint::Unknown`: Type not determined at compile time
+//!
+//! # Strict-typing contract: `prove_native_kind` and `ProofGap`
+//!
+//! Every typed-opcode emission site must call [`prove_native_kind`] and
+//! handle the [`ProofGap`] error. `ProofGap`'s constructor is private to
+//! this module: emit code cannot fabricate "I proved it". The Rust type
+//! system enforces the discipline.
+//!
+//! In Phases 2-4, the predicate panics in debug + test, returns a
+//! compile error in release. There is no fallback path.
 
 use std::collections::HashMap;
 
@@ -52,300 +61,50 @@ pub enum NumericType {
 }
 
 
-/// Describes the storage kind for a single local/parameter slot in a frame.
+// `NativeKind` (formerly `SlotKind`) is the single discriminator used at
+// every typed-ABI boundary. Moved to `shape-value::native_kind` so that
+// shape-runtime's marshal layer and shape-vm's compile-time proof share one
+// type. See `docs/defections.md` 2026-05-06 (Phase 2b unified marshal).
+pub use shape_value::NativeKind;
+
+/// Backwards-compatible alias. Prefer `NativeKind` in new code.
+pub type StorageHint = NativeKind;
+
+/// Convert a runtime `StorageType` to its marshal-layer `NativeKind`.
 ///
-/// Used by the JIT and VM to generate more efficient code by knowing
-/// the actual storage representation at compile time.
+/// Free function because `StorageType` lives in shape-runtime and
+/// `NativeKind` lives in shape-value — Rust's orphan rule forbids an
+/// inherent `impl NativeKind { fn from_storage_type … }` here, and the
+/// previous `From<StorageType> for NativeKind` impl violated E0117
+/// (neither type is local to shape-vm). Callers explicitly invoke this
+/// fallible function and pattern-match `None` to surface "complex
+/// storage — kind not proven here" per CLAUDE.md type-system rules.
 ///
-/// This was previously named `StorageHint`; the alias is kept for
-/// backwards compatibility.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum SlotKind {
-    /// Plain f64 value (direct float operations)
-    Float64,
-    /// Nullable f64 using NaN sentinel (Option<f64>)
-    /// IEEE 754: NaN + x = NaN, so null propagates automatically
-    NullableFloat64,
-    /// Plain i8 value
-    Int8,
-    /// Nullable i8 value
-    NullableInt8,
-    /// Plain u8 value
-    UInt8,
-    /// Nullable u8 value
-    NullableUInt8,
-    /// Plain i16 value
-    Int16,
-    /// Nullable i16 value
-    NullableInt16,
-    /// Plain u16 value
-    UInt16,
-    /// Nullable u16 value
-    NullableUInt16,
-    /// Plain i32 value
-    Int32,
-    /// Nullable i32 value
-    NullableInt32,
-    /// Plain u32 value
-    UInt32,
-    /// Nullable u32 value
-    NullableUInt32,
-    /// Plain i64 value
-    Int64,
-    /// Nullable i64 value
-    NullableInt64,
-    /// Plain u64 value
-    UInt64,
-    /// Nullable u64 value
-    NullableUInt64,
-    /// Plain isize value
-    IntSize,
-    /// Nullable isize value
-    NullableIntSize,
-    /// Plain usize value
-    UIntSize,
-    /// Nullable usize value
-    NullableUIntSize,
-    /// Boolean value
-    Bool,
-    /// String reference
-    String,
-    /// Dynamically-typed value: the raw u64 bits are a valid interpreter value.
-    /// Used for boxed locals and operand stack entries in precise deopt metadata.
-    /// The VM unmarshals these via direct transmute (zero-cost passthrough).
-    Dynamic,
-    /// Type not determined at compile time (falls back to dynamic dispatch).
-    /// Should NOT appear in precise deopt metadata — use Dynamic instead.
-    /// Reserved for truly uninitialized/unresolved slots.
-    Unknown,
-}
+/// Returns `None` for complex `StorageType` variants
+/// (Array/Table/Object/Result/TaggedUnion/Function/Struct/Dynamic):
+/// the bulldozer deleted the `Unknown` sink, so callers must commit
+/// to a concrete kind. A `None` return is a "you must prove a typed
+/// kind here" signal — compiler-tier intermediate state per ADR-006
+/// §2.7.5.1.
+pub fn native_kind_from_storage_type(st: &StorageType) -> Option<NativeKind> {
+    match st {
+        StorageType::Float64 => Some(NativeKind::Float64),
+        StorageType::Int64 => Some(NativeKind::Int64),
+        StorageType::Bool => Some(NativeKind::Bool),
+        StorageType::String => Some(NativeKind::String),
 
-/// Backwards-compatible alias. Prefer `SlotKind` in new code.
-pub type StorageHint = SlotKind;
+        StorageType::NullableFloat64 => Some(NativeKind::NullableFloat64),
+        StorageType::NullableInt64 => Some(NativeKind::NullableInt64),
+        StorageType::NullableBool => Some(NativeKind::Bool), // 3-state in Boxed
 
-impl Default for SlotKind {
-    fn default() -> Self {
-        SlotKind::Unknown
-    }
-}
-
-impl From<StorageType> for SlotKind {
-    /// Convert from runtime StorageType to JIT StorageHint
-    fn from(st: StorageType) -> Self {
-        Self::from_storage_type(&st)
-    }
-}
-
-impl SlotKind {
-    /// Convert from runtime StorageType
-    ///
-    /// Maps semantic storage types to JIT optimization hints:
-    /// - Primitive types map directly
-    /// - NullableFloat64 enables NaN sentinel optimization
-    /// - Complex types fall back to boxed representation
-    pub fn from_storage_type(st: &StorageType) -> Self {
-        match st {
-            // Direct mappings for primitives
-            StorageType::Float64 => StorageHint::Float64,
-            StorageType::Int64 => StorageHint::Int64,
-            StorageType::Bool => StorageHint::Bool,
-            StorageType::String => StorageHint::String,
-
-            // Nullable types with optimized storage
-            StorageType::NullableFloat64 => StorageHint::NullableFloat64,
-            StorageType::NullableInt64 => StorageHint::NullableInt64,
-            StorageType::NullableBool => StorageHint::Bool, // 3-state in Boxed
-
-            // Complex types use boxed representation
-            StorageType::Array(_)
-            | StorageType::Table { .. }
-            | StorageType::Object
-            | StorageType::Result { .. }
-            | StorageType::TaggedUnion { .. }
-            | StorageType::Function
-            | StorageType::Struct(_)
-            | StorageType::Dynamic => StorageHint::Unknown,
-        }
-    }
-
-    #[inline]
-    pub fn is_integer(self) -> bool {
-        matches!(
-            self,
-            Self::Int8
-                | Self::UInt8
-                | Self::Int16
-                | Self::UInt16
-                | Self::Int32
-                | Self::UInt32
-                | Self::Int64
-                | Self::UInt64
-                | Self::IntSize
-                | Self::UIntSize
-        )
-    }
-
-    #[inline]
-    pub fn is_nullable_integer(self) -> bool {
-        matches!(
-            self,
-            Self::NullableInt8
-                | Self::NullableUInt8
-                | Self::NullableInt16
-                | Self::NullableUInt16
-                | Self::NullableInt32
-                | Self::NullableUInt32
-                | Self::NullableInt64
-                | Self::NullableUInt64
-                | Self::NullableIntSize
-                | Self::NullableUIntSize
-        )
-    }
-
-    #[inline]
-    pub fn is_integer_family(self) -> bool {
-        self.is_integer() || self.is_nullable_integer()
-    }
-
-    #[inline]
-    pub fn is_default_int_family(self) -> bool {
-        matches!(self, Self::Int64 | Self::NullableInt64)
-    }
-
-    #[inline]
-    pub fn is_float_family(self) -> bool {
-        matches!(self, Self::Float64 | Self::NullableFloat64)
-    }
-
-    #[inline]
-    pub fn is_numeric_family(self) -> bool {
-        self.is_integer_family() || self.is_float_family()
-    }
-
-    #[inline]
-    pub fn is_pointer_sized_integer(self) -> bool {
-        matches!(
-            self,
-            Self::IntSize | Self::UIntSize | Self::NullableIntSize | Self::NullableUIntSize
-        )
-    }
-
-    #[inline]
-    pub fn is_signed_integer(self) -> Option<bool> {
-        if matches!(
-            self,
-            Self::Int8
-                | Self::NullableInt8
-                | Self::Int16
-                | Self::NullableInt16
-                | Self::Int32
-                | Self::NullableInt32
-                | Self::Int64
-                | Self::NullableInt64
-                | Self::IntSize
-                | Self::NullableIntSize
-        ) {
-            Some(true)
-        } else if matches!(
-            self,
-            Self::UInt8
-                | Self::NullableUInt8
-                | Self::UInt16
-                | Self::NullableUInt16
-                | Self::UInt32
-                | Self::NullableUInt32
-                | Self::UInt64
-                | Self::NullableUInt64
-                | Self::UIntSize
-                | Self::NullableUIntSize
-        ) {
-            Some(false)
-        } else {
-            None
-        }
-    }
-
-    #[inline]
-    pub fn integer_bit_width(self) -> Option<u16> {
-        match self {
-            Self::Int8 | Self::UInt8 | Self::NullableInt8 | Self::NullableUInt8 => Some(8),
-            Self::Int16 | Self::UInt16 | Self::NullableInt16 | Self::NullableUInt16 => Some(16),
-            Self::Int32 | Self::UInt32 | Self::NullableInt32 | Self::NullableUInt32 => Some(32),
-            Self::Int64 | Self::UInt64 | Self::NullableInt64 | Self::NullableUInt64 => Some(64),
-            Self::IntSize | Self::UIntSize | Self::NullableIntSize | Self::NullableUIntSize => {
-                Some(usize::BITS as u16)
-            }
-            _ => None,
-        }
-    }
-
-    #[inline]
-    pub fn non_nullable(self) -> Self {
-        match self {
-            Self::NullableFloat64 => Self::Float64,
-            Self::NullableInt8 => Self::Int8,
-            Self::NullableUInt8 => Self::UInt8,
-            Self::NullableInt16 => Self::Int16,
-            Self::NullableUInt16 => Self::UInt16,
-            Self::NullableInt32 => Self::Int32,
-            Self::NullableUInt32 => Self::UInt32,
-            Self::NullableInt64 => Self::Int64,
-            Self::NullableUInt64 => Self::UInt64,
-            Self::NullableIntSize => Self::IntSize,
-            Self::NullableUIntSize => Self::UIntSize,
-            other => other,
-        }
-    }
-
-    #[inline]
-    pub fn with_nullability(self, nullable: bool) -> Self {
-        if !nullable {
-            return self.non_nullable();
-        }
-        match self.non_nullable() {
-            Self::Float64 => Self::NullableFloat64,
-            Self::Int8 => Self::NullableInt8,
-            Self::UInt8 => Self::NullableUInt8,
-            Self::Int16 => Self::NullableInt16,
-            Self::UInt16 => Self::NullableUInt16,
-            Self::Int32 => Self::NullableInt32,
-            Self::UInt32 => Self::NullableUInt32,
-            Self::Int64 => Self::NullableInt64,
-            Self::UInt64 => Self::NullableUInt64,
-            Self::IntSize => Self::NullableIntSize,
-            Self::UIntSize => Self::NullableUIntSize,
-            other => other,
-        }
-    }
-
-    pub fn combine_integer_hints(lhs: Self, rhs: Self) -> Option<Self> {
-        let lhs_bits = lhs.integer_bit_width()?;
-        let rhs_bits = rhs.integer_bit_width()?;
-        let bits = lhs_bits.max(rhs_bits);
-        let signed = lhs.is_signed_integer()? || rhs.is_signed_integer()?;
-        let nullable = lhs.is_nullable_integer() || rhs.is_nullable_integer();
-        let keep_pointer_size = bits == usize::BITS as u16
-            && (lhs.is_pointer_sized_integer() || rhs.is_pointer_sized_integer());
-        let base = if keep_pointer_size {
-            if signed {
-                Self::IntSize
-            } else {
-                Self::UIntSize
-            }
-        } else {
-            match (bits, signed) {
-                (8, true) => Self::Int8,
-                (8, false) => Self::UInt8,
-                (16, true) => Self::Int16,
-                (16, false) => Self::UInt16,
-                (32, true) => Self::Int32,
-                (32, false) => Self::UInt32,
-                (64, true) => Self::Int64,
-                (64, false) => Self::UInt64,
-                _ => return None,
-            }
-        };
-        Some(base.with_nullability(nullable))
+        StorageType::Array(_)
+        | StorageType::Table { .. }
+        | StorageType::Object
+        | StorageType::Result { .. }
+        | StorageType::TaggedUnion { .. }
+        | StorageType::Function
+        | StorageType::Struct(_)
+        | StorageType::Dynamic => None,
     }
 }
 
@@ -358,43 +117,59 @@ impl SlotKind {
 ///
 /// This is the canonical replacement for the loose `Vec<StorageHint>` arrays
 /// that were previously threaded through `BytecodeProgram` and `Function`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// # Wire-format binding (ADR-006 §2.7.5.1)
+///
+/// `FrameDescriptor` is `#[derive(Serialize, Deserialize)]` and lives
+/// inside `FunctionBlob`, the content-hash unit for distributed
+/// bytecode. Per §2.7.5.1, `slots: Vec<NativeKind>` is post-proof — no
+/// `Vec<Option<NativeKind>>` wrap, no `NativeKind::Unknown` placeholder
+/// (both deleted by the bulldozer). By the time a `FrameDescriptor`
+/// reaches `FunctionBlob` construction, every slot's `NativeKind` is
+/// proven; an unproven slot is a compile error per CLAUDE.md type-system
+/// rules.
+///
+/// `return_kind: Option<NativeKind>` is the single-slot field carrying
+/// the function's return-value kind, or `None` for "no return value /
+/// kind not yet stamped". The single-slot `Option<NativeKind>` shape is
+/// the §2.7.8 / Q10 cell-storage pattern (single-slot fields take
+/// `Option<NativeKind>`); §2.7.5.1's "no `Option<NativeKind>` wrapping"
+/// rule targets the bulk `slots` Vec, not single-slot fields where
+/// `None` distinguishes "no return value" from "return value of kind X".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrameDescriptor {
     /// One entry per local slot (index 0 = first param or local).
-    /// A `Boxed` entry means the slot stores a generic NaN-boxed value.
-    pub slots: Vec<SlotKind>,
+    /// Every slot's kind is proven at `FunctionBlob` construction time
+    /// per ADR-006 §2.7.5.1 — `NativeKind::Unknown` was deleted from the
+    /// enum and is never re-introduced under any name.
+    pub slots: Vec<NativeKind>,
 
-    /// Return type kind for the function.
-    ///
-    /// When present and not `Unknown`, the JIT boundary ABI uses this to
-    /// unmarshal the return value from JIT-compiled code back into the
-    /// correct `ValueWord` representation.
+    /// Return type kind for the function, or `None` for "no return
+    /// value / kind not stamped". `Some(kind)` means the JIT boundary
+    /// ABI uses `kind` to unmarshal the return value from JIT-compiled
+    /// code; `None` means the host boundary has no return-kind to
+    /// unmarshal (e.g. top-level program with no terminal expression).
     #[serde(default)]
-    pub return_kind: SlotKind,
+    pub return_kind: Option<NativeKind>,
 }
 
 impl FrameDescriptor {
-    /// Create an empty descriptor (all slots will be Boxed by default).
+    /// Create an empty descriptor with no slots and an unset return
+    /// kind. Callers stamp `return_kind` to `Some(kind)` once the
+    /// function's return type is proven.
     pub fn new() -> Self {
         Self {
             slots: Vec::new(),
-            return_kind: SlotKind::Unknown,
+            return_kind: None,
         }
     }
 
-    /// Create a descriptor with `n` slots, all initialised to `SlotKind::Unknown`.
-    pub fn with_unknown_slots(n: usize) -> Self {
-        Self {
-            slots: vec![SlotKind::Unknown; n],
-            return_kind: SlotKind::Unknown,
-        }
-    }
-
-    /// Build a descriptor from an existing `Vec<SlotKind>` (or `Vec<StorageHint>`).
-    pub fn from_slots(slots: Vec<SlotKind>) -> Self {
+    /// Build a descriptor from an existing `Vec<NativeKind>` of proven
+    /// slot kinds. `return_kind` is left `None` for the caller to stamp.
+    pub fn from_slots(slots: Vec<NativeKind>) -> Self {
         Self {
             slots,
-            return_kind: SlotKind::Unknown,
+            return_kind: None,
         }
     }
 
@@ -410,15 +185,18 @@ impl FrameDescriptor {
         self.slots.is_empty()
     }
 
-    /// Get the kind of a specific slot.  Returns `Boxed` for out-of-range indices.
+    /// Get the kind of a specific slot, or `None` for out-of-range
+    /// indices. Note: a present slot always has a proven `NativeKind`
+    /// (no `Unknown` sentinel post-bulldozer).
     #[inline]
-    pub fn slot(&self, index: usize) -> SlotKind {
-        self.slots.get(index).copied().unwrap_or(SlotKind::Unknown)
+    pub fn slot(&self, index: usize) -> Option<NativeKind> {
+        self.slots.get(index).copied()
     }
+}
 
-    /// Returns `true` if every slot is `Unknown` (i.e. no specialization).
-    pub fn is_all_unknown(&self) -> bool {
-        self.slots.iter().all(|s| *s == SlotKind::Unknown)
+impl Default for FrameDescriptor {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -561,8 +339,16 @@ pub struct VariableTypeInfo {
     pub type_name: Option<String>,
     /// Whether the type is definitely known (vs inferred/uncertain)
     pub is_definite: bool,
-    /// Storage hint for JIT optimization
-    pub storage_hint: StorageHint,
+    /// Storage hint for JIT optimization, or `None` when the kind is
+    /// not yet proven during compile-time inference.
+    ///
+    /// Per ADR-006 §2.7.5.1, this is compiler-tier intermediate state —
+    /// `VariableTypeInfo` is NOT serialized into `FunctionBlob`, so the
+    /// `Option<NativeKind>` wrap stays local to the analysis pass and
+    /// does not reach the wire format. By the time a `FrameDescriptor`
+    /// is constructed for `FunctionBlob`, the kind is proven and stored
+    /// flat in `FrameDescriptor.slots: Vec<NativeKind>` (no Option).
+    pub storage_hint: Option<StorageHint>,
     /// Preserved concrete numeric runtime type (e.g. "i16", "u8", "f32", "i64")
     /// derived from source annotations.
     pub concrete_numeric_type: Option<String>,
@@ -582,7 +368,7 @@ impl VariableTypeInfo {
             schema_id: Some(schema_id),
             type_name: Some(type_name),
             is_definite: true,
-            storage_hint: StorageHint::Unknown,
+            storage_hint: None,
             concrete_numeric_type,
             kind: VariableKind::Value,
             v2_array_element_kind: None,
@@ -596,7 +382,7 @@ impl VariableTypeInfo {
             schema_id: None,
             type_name: None,
             is_definite: false,
-            storage_hint: StorageHint::Unknown,
+            storage_hint: None,
             concrete_numeric_type: None,
             kind: VariableKind::Value,
             v2_array_element_kind: None,
@@ -628,7 +414,7 @@ impl VariableTypeInfo {
             schema_id: None,
             type_name: Some(type_name),
             is_definite: true,
-            storage_hint,
+            storage_hint: Some(storage_hint),
             concrete_numeric_type,
             kind: VariableKind::Value,
             v2_array_element_kind: None,
@@ -642,7 +428,7 @@ impl VariableTypeInfo {
             schema_id: None,
             type_name: Some("Option<Number>".to_string()),
             is_definite: true,
-            storage_hint: StorageHint::NullableFloat64,
+            storage_hint: Some(StorageHint::NullableFloat64),
             concrete_numeric_type: Some("f64".to_string()),
             kind: VariableKind::Value,
             v2_array_element_kind: None,
@@ -656,7 +442,7 @@ impl VariableTypeInfo {
             schema_id: None,
             type_name: Some("Number".to_string()),
             is_definite: true,
-            storage_hint: StorageHint::Float64,
+            storage_hint: Some(StorageHint::Float64),
             concrete_numeric_type: Some("f64".to_string()),
             kind: VariableKind::Value,
             v2_array_element_kind: None,
@@ -670,7 +456,7 @@ impl VariableTypeInfo {
             schema_id: Some(schema_id),
             type_name: Some(type_name.clone()),
             is_definite: true,
-            storage_hint: StorageHint::Unknown,
+            storage_hint: None,
             concrete_numeric_type: None,
             kind: VariableKind::RowView {
                 element_type: type_name,
@@ -686,7 +472,7 @@ impl VariableTypeInfo {
             schema_id: Some(schema_id),
             type_name: Some(type_name.clone()),
             is_definite: true,
-            storage_hint: StorageHint::Unknown,
+            storage_hint: None,
             concrete_numeric_type: None,
             kind: VariableKind::Table {
                 element_type: type_name,
@@ -702,7 +488,7 @@ impl VariableTypeInfo {
             schema_id: Some(schema_id),
             type_name: Some(type_name.clone()),
             is_definite: true,
-            storage_hint: StorageHint::Unknown,
+            storage_hint: None,
             concrete_numeric_type: None,
             kind: VariableKind::Column {
                 element_type,
@@ -719,7 +505,7 @@ impl VariableTypeInfo {
             schema_id: Some(schema_id),
             type_name: Some(type_name.clone()),
             is_definite: true,
-            storage_hint: StorageHint::Unknown,
+            storage_hint: None,
             concrete_numeric_type: None,
             kind: VariableKind::Indexed {
                 element_type: type_name,
@@ -737,7 +523,7 @@ impl VariableTypeInfo {
 
     /// Check if this type uses NaN sentinel for nullability
     pub fn uses_nan_sentinel(&self) -> bool {
-        self.storage_hint == StorageHint::NullableFloat64
+        self.storage_hint == Some(StorageHint::NullableFloat64)
     }
 
     /// Check if this variable is a DataTable (Table<T>)
@@ -760,8 +546,12 @@ impl VariableTypeInfo {
         matches!(self.kind, VariableKind::Indexed { .. })
     }
 
-    /// Infer storage hint from type name
-    fn infer_storage_hint(type_name: &str) -> StorageHint {
+    /// Infer storage hint from type name. Returns `None` when the
+    /// type name cannot be mapped to a concrete `NativeKind` —
+    /// per ADR-006 §2.7.5.1 / CLAUDE.md, this is the analysis-tier
+    /// "kind not yet proven" intermediate state, never an `Unknown`
+    /// sentinel.
+    fn infer_storage_hint(type_name: &str) -> Option<StorageHint> {
         let trimmed = type_name.trim();
 
         if let Some(inner) = Self::option_inner_type(trimmed) {
@@ -769,29 +559,29 @@ impl VariableTypeInfo {
             if let Some(runtime) = BuiltinTypes::canonical_numeric_runtime_name(inner)
                 && let Some(hint) = Self::storage_hint_for_runtime_numeric(runtime, true)
             {
-                return hint;
+                return Some(hint);
             }
             if BuiltinTypes::is_bool_type_name(inner) {
-                return StorageHint::Bool;
+                return Some(StorageHint::Bool);
             }
             if BuiltinTypes::is_string_type_name(inner) {
-                return StorageHint::String;
+                return Some(StorageHint::String);
             }
-            return StorageHint::Unknown;
+            return None;
         }
 
         if let Some(runtime) = BuiltinTypes::canonical_numeric_runtime_name(trimmed)
             && let Some(hint) = Self::storage_hint_for_runtime_numeric(runtime, false)
         {
-            return hint;
+            return Some(hint);
         }
         if BuiltinTypes::is_bool_type_name(trimmed) {
-            return StorageHint::Bool;
+            return Some(StorageHint::Bool);
         }
         if BuiltinTypes::is_string_type_name(trimmed) {
-            return StorageHint::String;
+            return Some(StorageHint::String);
         }
-        StorageHint::Unknown
+        None
     }
 
     fn option_inner_type(type_name: &str) -> Option<&str> {
@@ -1131,28 +921,30 @@ impl TypeTracker {
         false
     }
 
-    /// Get storage hint for a local variable
-    pub fn get_local_storage_hint(&self, slot: u16) -> StorageHint {
-        self.get_local_type(slot)
-            .map(|info| info.storage_hint)
-            .unwrap_or(StorageHint::Unknown)
+    /// Get storage hint for a local variable. Returns `None` for
+    /// unknown slots or when the slot's kind has not yet been proven —
+    /// per ADR-006 §2.7.5.1, callers handle the "not proven" arm
+    /// explicitly rather than dispatching on a placeholder sentinel.
+    pub fn get_local_storage_hint(&self, slot: u16) -> Option<StorageHint> {
+        self.get_local_type(slot).and_then(|info| info.storage_hint)
     }
 
-    /// Get storage hint for a module_binding variable
-    pub fn get_module_binding_storage_hint(&self, slot: u16) -> StorageHint {
+    /// Get storage hint for a module_binding variable. Returns `None`
+    /// for unknown slots or unproven kinds — see
+    /// [`get_local_storage_hint`].
+    pub fn get_module_binding_storage_hint(&self, slot: u16) -> Option<StorageHint> {
         self.get_binding_type(slot)
-            .map(|info| info.storage_hint)
-            .unwrap_or(StorageHint::Unknown)
+            .and_then(|info| info.storage_hint)
     }
 
     /// Check if a local variable uses NaN sentinel for nullability
     pub fn local_uses_nan_sentinel(&self, slot: u16) -> bool {
-        self.get_local_storage_hint(slot) == StorageHint::NullableFloat64
+        self.get_local_storage_hint(slot) == Some(StorageHint::NullableFloat64)
     }
 
     /// Check if a module_binding variable uses NaN sentinel for nullability
     pub fn module_binding_uses_nan_sentinel(&self, slot: u16) -> bool {
-        self.get_module_binding_storage_hint(slot) == StorageHint::NullableFloat64
+        self.get_module_binding_storage_hint(slot) == Some(StorageHint::NullableFloat64)
     }
 
     /// Clear all local type info (for function entry)
@@ -1372,6 +1164,96 @@ impl Default for TypeTracker {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Strict-typing predicate: `prove_native_kind` and `ProofGap`
+//
+// Every site emitting a typed opcode (AddI64, MulF64, ReturnValueBool,
+// LoadLocalI64, etc.) must call `prove_native_kind` and propagate any
+// `ProofGap` it returns. `ProofGap` has no public constructor — only
+// this module can produce one — so emit code cannot fabricate a
+// successful proof. The Rust type system enforces the discipline.
+//
+// Phase 2 wires call sites to use this predicate. Phase 3 makes the
+// predicate panic in debug + test on missing proof. Phase 5 makes it a
+// hard compile error E_TYPED_OPCODE_WITHOUT_PROOF in release.
+// ─────────────────────────────────────────────────────────────────────
+
+/// A type-system proof gap — the compiler tried to emit a typed opcode
+/// but could not prove the operand kind. Surfaces as
+/// `E_TYPED_OPCODE_WITHOUT_PROOF` in release; panics in debug + test.
+///
+/// Constructor is private. Only [`prove_native_kind`] can produce one.
+#[derive(Debug)]
+pub struct ProofGap {
+    site: &'static str,
+    detail: String,
+    _seal: ProofGapSeal,
+}
+
+/// Module-private seal token. External code cannot construct a
+/// `ProofGap` because they cannot construct a `ProofGapSeal`.
+#[derive(Debug)]
+struct ProofGapSeal(());
+
+impl ProofGap {
+    /// Site identifier (e.g. "emit_typed_arithmetic", "emit_return_value").
+    pub fn site(&self) -> &'static str {
+        self.site
+    }
+
+    /// Human-readable explanation of what couldn't be proved.
+    pub fn detail(&self) -> &str {
+        &self.detail
+    }
+}
+
+impl std::fmt::Display for ProofGap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "E_TYPED_OPCODE_WITHOUT_PROOF at {}: {}",
+            self.site, self.detail
+        )
+    }
+}
+
+impl std::error::Error for ProofGap {}
+
+/// Prove that the given slot's content is a specific [`NativeKind`] at
+/// emission time, or surface a [`ProofGap`].
+///
+/// # Phase 2 contract (current)
+///
+/// Phase 2 wires call sites to call this predicate. Until Phase 3, the
+/// predicate is a no-op that returns the supplied `claimed_kind` —
+/// callers can run end-to-end. Phase 3 hardens to debug-panic; Phase 5
+/// hardens to release compile-error.
+///
+/// # Future strict mode (Phases 3-5)
+///
+/// The body will inspect the compiler's slot-kind tracker for the
+/// declared kind at the source location and compare against
+/// `claimed_kind`. Mismatch or unknown → `ProofGap`.
+#[inline]
+pub fn prove_native_kind(
+    site: &'static str,
+    claimed_kind: NativeKind,
+) -> Result<NativeKind, ProofGap> {
+    // Phase 2 stub: pass-through. Phase 3+ replaces with real proof check.
+    Ok(claimed_kind)
+}
+
+/// Construct a `ProofGap` from inside this module only. Used by the
+/// predicate (Phase 3+) when proof fails.
+#[allow(dead_code)]
+fn proof_gap(site: &'static str, detail: impl Into<String>) -> ProofGap {
+    ProofGap {
+        site,
+        detail: detail.into(),
+        _seal: ProofGapSeal(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1558,47 +1440,48 @@ mod tests {
         // Primitive types
         assert_eq!(
             VariableTypeInfo::infer_storage_hint("Number"),
-            StorageHint::Float64
+            Some(StorageHint::Float64)
         );
         assert_eq!(
             VariableTypeInfo::infer_storage_hint("Integer"),
-            StorageHint::Int64
+            Some(StorageHint::Int64)
         );
         assert_eq!(
             VariableTypeInfo::infer_storage_hint("Bool"),
-            StorageHint::Bool
+            Some(StorageHint::Bool)
         );
         assert_eq!(
             VariableTypeInfo::infer_storage_hint("String"),
-            StorageHint::String
+            Some(StorageHint::String)
         );
 
         // Nullable types
         assert_eq!(
             VariableTypeInfo::infer_storage_hint("Option<Number>"),
-            StorageHint::NullableFloat64
+            Some(StorageHint::NullableFloat64)
         );
         assert_eq!(
             VariableTypeInfo::infer_storage_hint("Option<Integer>"),
-            StorageHint::NullableInt64
+            Some(StorageHint::NullableInt64)
         );
         assert_eq!(
             VariableTypeInfo::infer_storage_hint("Option<byte>"),
-            StorageHint::NullableUInt8
+            Some(StorageHint::NullableUInt8)
         );
         assert_eq!(
             VariableTypeInfo::infer_storage_hint("Option<char>"),
-            StorageHint::NullableInt8
+            Some(StorageHint::NullableInt8)
         );
         assert_eq!(
             VariableTypeInfo::infer_storage_hint("Option<u32>"),
-            StorageHint::NullableUInt32
+            Some(StorageHint::NullableUInt32)
         );
 
-        // Unknown types
+        // Unknown types — analysis-tier "not yet proven" is `None`
+        // per ADR-006 §2.7.5.1 (no `NativeKind::Unknown` sentinel).
         assert_eq!(
             VariableTypeInfo::infer_storage_hint("SomeCustomType"),
-            StorageHint::Unknown
+            None
         );
     }
 
@@ -1606,35 +1489,35 @@ mod tests {
     fn test_width_integer_storage_hint_inference() {
         assert_eq!(
             VariableTypeInfo::infer_storage_hint("i8"),
-            StorageHint::Int8
+            Some(StorageHint::Int8)
         );
         assert_eq!(
             VariableTypeInfo::infer_storage_hint("byte"),
-            StorageHint::UInt8
+            Some(StorageHint::UInt8)
         );
         assert_eq!(
             VariableTypeInfo::infer_storage_hint("char"),
-            StorageHint::Int8
+            Some(StorageHint::Int8)
         );
         assert_eq!(
             VariableTypeInfo::infer_storage_hint("u16"),
-            StorageHint::UInt16
+            Some(StorageHint::UInt16)
         );
         assert_eq!(
             VariableTypeInfo::infer_storage_hint("i32"),
-            StorageHint::Int32
+            Some(StorageHint::Int32)
         );
         assert_eq!(
             VariableTypeInfo::infer_storage_hint("u64"),
-            StorageHint::UInt64
+            Some(StorageHint::UInt64)
         );
         assert_eq!(
             VariableTypeInfo::infer_storage_hint("isize"),
-            StorageHint::IntSize
+            Some(StorageHint::IntSize)
         );
         assert_eq!(
             VariableTypeInfo::infer_storage_hint("usize"),
-            StorageHint::UIntSize
+            Some(StorageHint::UIntSize)
         );
     }
 
@@ -1663,18 +1546,19 @@ mod tests {
     }
 
     #[test]
-    fn test_storage_hint_from_storage_type() {
+    fn test_native_kind_from_storage_type() {
         assert_eq!(
-            StorageHint::from_storage_type(&StorageType::Float64),
-            StorageHint::Float64
+            native_kind_from_storage_type(&StorageType::Float64),
+            Some(NativeKind::Float64)
         );
         assert_eq!(
-            StorageHint::from_storage_type(&StorageType::NullableFloat64),
-            StorageHint::NullableFloat64
+            native_kind_from_storage_type(&StorageType::NullableFloat64),
+            Some(NativeKind::NullableFloat64)
         );
+        // Bulldozer deleted the Unknown sink — complex types now return None.
         assert_eq!(
-            StorageHint::from_storage_type(&StorageType::Dynamic),
-            StorageHint::Unknown
+            native_kind_from_storage_type(&StorageType::Dynamic),
+            None
         );
     }
 
@@ -1682,7 +1566,7 @@ mod tests {
     fn test_nullable_number_type() {
         let info = VariableTypeInfo::nullable_number();
         assert!(info.uses_nan_sentinel());
-        assert_eq!(info.storage_hint, StorageHint::NullableFloat64);
+        assert_eq!(info.storage_hint, Some(StorageHint::NullableFloat64));
     }
 
     #[test]

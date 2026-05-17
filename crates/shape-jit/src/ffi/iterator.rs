@@ -9,7 +9,9 @@
 //! Functions for iterator operations (done check, next element) in JIT-compiled code.
 
 use super::super::context::JITRange;
-use super::super::jit_array::JitArray;
+// super::super::jit_array::JitArray removed — see jit_array.rs SURFACE
+// comment. The HK_ARRAY arms surface per ADR-006 §2.7.4 / W10
+// jit-playbook §5.
 use super::jit_kinds::*;
 use super::value_ffi::*;
 use std::collections::HashMap;
@@ -35,8 +37,13 @@ pub extern "C" fn jit_iter_done(iter_bits: u64, idx_bits: u64) -> u64 {
 
         let done = match heap_kind(iter_bits) {
             Some(HK_ARRAY) => {
-                let arr = JitArray::from_heap_bits(iter_bits);
-                idx as usize >= arr.len()
+                // SURFACE (W10 jit-playbook §5 / ADR-006 §2.7.4):
+                // length read decoded the deleted JitArray layout.
+                // Kinded rebuild reads `Arc<TypedArrayData>::len`.
+                todo!(
+                    "phase-2c §2.7.4 / W10 jit-playbook §5: \
+                     JitArray rebuild — jit_iter_done HK_ARRAY arm."
+                )
             }
             Some(HK_STRING) => {
                 let s = unbox_string(iter_bits);
@@ -93,8 +100,14 @@ pub extern "C" fn jit_iter_next(iter_bits: u64, idx_bits: u64) -> u64 {
 
         match heap_kind(iter_bits) {
             Some(HK_ARRAY) => {
-                let arr = JitArray::from_heap_bits(iter_bits);
-                arr.get(idx as usize).copied().unwrap_or(TAG_NULL)
+                // SURFACE (W10 jit-playbook §5 / ADR-006 §2.7.4):
+                // index read decoded the deleted JitArray layout.
+                // Kinded rebuild reads Arc<TypedArrayData> per
+                // ADR-006 §2.7.6/Q8.
+                todo!(
+                    "phase-2c §2.7.4 / W10 jit-playbook §5: \
+                     JitArray rebuild — jit_iter_next HK_ARRAY arm."
+                )
             }
             Some(HK_STRING) => {
                 let s = unbox_string(iter_bits);

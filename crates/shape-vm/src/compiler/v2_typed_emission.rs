@@ -40,6 +40,48 @@ pub enum TypedArrayKind {
     I32,
     /// `TypedArray<bool>` — backing for `Array<bool>`.
     Bool,
+    /// `TypedArray<i8>` — backing for `Array<i8>` (W12 S1, 2026-05-13).
+    I8,
+    /// `TypedArray<u8>` — backing for `Array<u8>` (W12 S1, 2026-05-13).
+    /// Distinct from `Bool` at the runtime element-type-tag layer
+    /// (`ELEM_TYPE_U8` vs `ELEM_TYPE_BOOL`) — same byte storage, different
+    /// user-facing semantics.
+    U8,
+    /// `TypedArray<i16>` — backing for `Array<i16>` (W12 S1, 2026-05-13).
+    I16,
+    /// `TypedArray<u16>` — backing for `Array<u16>` (W12 S1, 2026-05-13).
+    U16,
+    /// `TypedArray<u32>` — backing for `Array<u32>` (W12 S1, 2026-05-13).
+    U32,
+    // U64 deliberately omitted. Per S1 reopen (2026-05-13), `Array<u64>`
+    // migration is deferred to S1.5: `NativeKind::UInt64` at HEAD is
+    // ambiguous between scalar u64 and v2-typed-array-pointer carrier,
+    // and the §2.7.7 / Q9 parallel-kind track has no discriminating
+    // variant. The defensive low-address-pointer guard the pre-reopen
+    // commit `4bcae991` added at `as_v2_typed_array` was an `is_heap()`
+    // probe in different framing — refused on sight per CLAUDE.md
+    // §"Parallel-implementation across producer/consumer carrier-shape
+    // boundaries".
+    /// `TypedArray<f32>` — backing for `Array<f32>` (Wave 2 A1, 2026-05-14).
+    F32,
+    /// `TypedArray<char>` — backing for `Array<char>` (Wave 2 A1, 2026-05-14).
+    /// Per R19 S1.5 amendment to ADR-006 §2.7.5, `Char` is a scalar bucket
+    /// carrier (4-byte `Copy`, no heap indirection) — same recipe as F32.
+    Char,
+    /// `TypedArray<*const StringObj>` — backing for `Array<string>` (Wave 2
+    /// A2, 2026-05-14). Per ADR-006 §2.7.24 Q25.A SUPERSEDED + audit §3.2
+    /// sub-cluster S2-prime, the v2-raw String element carrier. Element-read
+    /// pushes `NativeKind::StringV2` (Agent B Round 1 carrier-shape variant);
+    /// distinct from the legacy `NativeKind::String` (Phase-2c `Arc<String>`
+    /// carrier; ADR-005 §2 String exception). Per-element retain via
+    /// `v2_retain(&(*elem_ptr).header)` at element-read time before pushing
+    /// the slot per audit §4.1.B.4 migration recipe.
+    String,
+    /// `TypedArray<*const DecimalObj>` — backing for `Array<decimal>` (Wave 2
+    /// A2, 2026-05-14). Per ADR-006 §2.7.24 Q25.A SUPERSEDED + audit §3.2
+    /// sub-cluster S2-prime, the v2-raw Decimal element carrier. Element-read
+    /// pushes `NativeKind::DecimalV2`; per-element retain at element-read time.
+    Decimal,
 }
 
 impl TypedArrayKind {
@@ -51,6 +93,16 @@ impl TypedArrayKind {
             TypedArrayKind::I64 => OpCode::NewTypedArrayI64,
             TypedArrayKind::I32 => OpCode::NewTypedArrayI32,
             TypedArrayKind::Bool => OpCode::NewTypedArrayBool,
+            TypedArrayKind::I8 => OpCode::NewTypedArrayI8,
+            TypedArrayKind::U8 => OpCode::NewTypedArrayU8,
+            TypedArrayKind::I16 => OpCode::NewTypedArrayI16,
+            TypedArrayKind::U16 => OpCode::NewTypedArrayU16,
+            TypedArrayKind::U32 => OpCode::NewTypedArrayU32,
+            TypedArrayKind::F32 => OpCode::NewTypedArrayF32,
+            TypedArrayKind::Char => OpCode::NewTypedArrayChar,
+            // Wave 2 Agent A2 (2026-05-14) — String + Decimal heap-element monomorphizations.
+            TypedArrayKind::String => OpCode::NewTypedArrayString,
+            TypedArrayKind::Decimal => OpCode::NewTypedArrayDecimal,
         }
     }
 
@@ -62,6 +114,16 @@ impl TypedArrayKind {
             TypedArrayKind::I64 => OpCode::TypedArrayGetI64,
             TypedArrayKind::I32 => OpCode::TypedArrayGetI32,
             TypedArrayKind::Bool => OpCode::TypedArrayGetBool,
+            TypedArrayKind::I8 => OpCode::TypedArrayGetI8,
+            TypedArrayKind::U8 => OpCode::TypedArrayGetU8,
+            TypedArrayKind::I16 => OpCode::TypedArrayGetI16,
+            TypedArrayKind::U16 => OpCode::TypedArrayGetU16,
+            TypedArrayKind::U32 => OpCode::TypedArrayGetU32,
+            TypedArrayKind::F32 => OpCode::TypedArrayGetF32,
+            TypedArrayKind::Char => OpCode::TypedArrayGetChar,
+            // Wave 2 Agent A2 (2026-05-14) — String + Decimal heap-element monomorphizations.
+            TypedArrayKind::String => OpCode::TypedArrayGetString,
+            TypedArrayKind::Decimal => OpCode::TypedArrayGetDecimal,
         }
     }
 
@@ -73,6 +135,16 @@ impl TypedArrayKind {
             TypedArrayKind::I64 => OpCode::TypedArrayPushI64,
             TypedArrayKind::I32 => OpCode::TypedArrayPushI32,
             TypedArrayKind::Bool => OpCode::TypedArrayPushBool,
+            TypedArrayKind::I8 => OpCode::TypedArrayPushI8,
+            TypedArrayKind::U8 => OpCode::TypedArrayPushU8,
+            TypedArrayKind::I16 => OpCode::TypedArrayPushI16,
+            TypedArrayKind::U16 => OpCode::TypedArrayPushU16,
+            TypedArrayKind::U32 => OpCode::TypedArrayPushU32,
+            TypedArrayKind::F32 => OpCode::TypedArrayPushF32,
+            TypedArrayKind::Char => OpCode::TypedArrayPushChar,
+            // Wave 2 Agent A2 (2026-05-14) — String + Decimal heap-element monomorphizations.
+            TypedArrayKind::String => OpCode::TypedArrayPushString,
+            TypedArrayKind::Decimal => OpCode::TypedArrayPushDecimal,
         }
     }
 
@@ -84,6 +156,16 @@ impl TypedArrayKind {
             TypedArrayKind::I64 => OpCode::TypedArraySetI64,
             TypedArrayKind::I32 => OpCode::TypedArraySetI32,
             TypedArrayKind::Bool => OpCode::TypedArraySetBool,
+            TypedArrayKind::I8 => OpCode::TypedArraySetI8,
+            TypedArrayKind::U8 => OpCode::TypedArraySetU8,
+            TypedArrayKind::I16 => OpCode::TypedArraySetI16,
+            TypedArrayKind::U16 => OpCode::TypedArraySetU16,
+            TypedArrayKind::U32 => OpCode::TypedArraySetU32,
+            TypedArrayKind::F32 => OpCode::TypedArraySetF32,
+            TypedArrayKind::Char => OpCode::TypedArraySetChar,
+            // Wave 2 Agent A2 (2026-05-14) — String + Decimal heap-element monomorphizations.
+            TypedArrayKind::String => OpCode::TypedArraySetString,
+            TypedArrayKind::Decimal => OpCode::TypedArraySetDecimal,
         }
     }
 }
@@ -105,16 +187,45 @@ pub fn should_use_typed_array(elem_type: &ConcreteType) -> Option<TypedArrayKind
         ConcreteType::I64 => Some(TypedArrayKind::I64),
         ConcreteType::I32 => Some(TypedArrayKind::I32),
         ConcreteType::Bool => Some(TypedArrayKind::Bool),
+        // W12 S1 (2026-05-13) — sized integer monomorphizations.
+        ConcreteType::I8 => Some(TypedArrayKind::I8),
+        ConcreteType::U8 => Some(TypedArrayKind::U8),
+        ConcreteType::I16 => Some(TypedArrayKind::I16),
+        ConcreteType::U16 => Some(TypedArrayKind::U16),
+        ConcreteType::U32 => Some(TypedArrayKind::U32),
+        // ConcreteType::U64 intentionally falls through to the legacy
+        // NaN-boxed path. Per S1 reopen (2026-05-13), `TypedArray<u64>`
+        // migration is deferred to S1.5 — the §2.7.7/Q9 parallel-kind-
+        // track invariant requires a discriminator between scalar u64
+        // and v2-typed-array-pointer before the U64 carrier can dispatch
+        // without runtime `is_heap()` probes.
+        // Wave 2 Agent A1 (2026-05-14) — F32 + Char scalar monomorphizations
+        // per R19 S1.5 amendment to ADR-006 §2.7.5.
+        ConcreteType::F32 => Some(TypedArrayKind::F32),
+        ConcreteType::Char => Some(TypedArrayKind::Char),
+        // Wave 2 Round 3a' A2-followup-gate-flip (2026-05-14) — String +
+        // Decimal heap-element gate FLIPPED to v2-raw `TypedArray<*const
+        // StringObj>` / `TypedArray<*const DecimalObj>` shape, in lockstep
+        // with the Round 3a' α/β/γ/δ/ε/ζ/η v2-raw consumer arms landed in
+        // the array_{transform,aggregation,query,sets,sort,basic,joins}.rs
+        // executor handlers. Per ADR-006 §2.7.24 Q25.A SUPERSEDED + audit
+        // §3.2 sub-cluster S2-prime + §4.1.B per-element retain/release ABI:
+        // `Array<string>` / `Array<decimal>` literals now route through the
+        // NewTypedArrayString / NewTypedArrayDecimal opcodes; element-read
+        // pushes `NativeKind::StringV2` / `NativeKind::DecimalV2`; per-element
+        // retain via `v2_retain(&(*elem_ptr).header)` at element-read time.
+        ConcreteType::String => Some(TypedArrayKind::String),
+        ConcreteType::Decimal => Some(TypedArrayKind::Decimal),
         _ => None,
     }
 }
 
-/// `SlotKind` analogue.
+/// `NativeKind` analogue.
 ///
 /// Provided as a bridge for compiler call sites that haven't yet been
 /// converted to use `ConcreteType`. The current Phase 1.2 element-type
 /// inference (`v2_array_emission::infer_array_element_type`) returns
-/// `SlotKind`, so `compile_expr_array` calls this variant to look up a
+/// `NativeKind`, so `compile_expr_array` calls this variant to look up a
 /// typed array kind directly.
 ///
 /// The mapping mirrors [`should_use_typed_array`]: only the four element
@@ -124,14 +235,58 @@ pub fn should_use_typed_array(elem_type: &ConcreteType) -> Option<TypedArrayKind
 /// legacy NaN-boxed `NewArray` path.
 #[inline]
 pub fn should_use_typed_array_from_slot_kind(
-    slot: crate::type_tracking::SlotKind,
+    slot: crate::type_tracking::NativeKind,
 ) -> Option<TypedArrayKind> {
-    use crate::type_tracking::SlotKind;
+    use crate::type_tracking::NativeKind;
     match slot {
-        SlotKind::Float64 => Some(TypedArrayKind::F64),
-        SlotKind::Int64 => Some(TypedArrayKind::I64),
-        SlotKind::Int32 => Some(TypedArrayKind::I32),
-        SlotKind::Bool => Some(TypedArrayKind::Bool),
+        NativeKind::Float64 => Some(TypedArrayKind::F64),
+        NativeKind::Int64 => Some(TypedArrayKind::I64),
+        NativeKind::Int32 => Some(TypedArrayKind::I32),
+        NativeKind::Bool => Some(TypedArrayKind::Bool),
+        // W12 S1 (2026-05-13) — sized integer monomorphizations.
+        NativeKind::Int8 => Some(TypedArrayKind::I8),
+        NativeKind::UInt8 => Some(TypedArrayKind::U8),
+        NativeKind::Int16 => Some(TypedArrayKind::I16),
+        NativeKind::UInt16 => Some(TypedArrayKind::U16),
+        NativeKind::UInt32 => Some(TypedArrayKind::U32),
+        // NativeKind::UInt64 deliberately falls through. The slot kind
+        // is shared with v2-typed-array pointers (every `*mut TypedArray<T>`
+        // flows through `NativeKind::UInt64`), so a `Some(TypedArrayKind::U64)`
+        // dispatch here would route producer-emission and consumer-classification
+        // through the same overloaded discriminator — the §2.7.7/Q9 parallel-
+        // kind-track invariant the S1.5 sub-cluster must resolve before this
+        // arm can light up.
+        // Wave 2 Agent A1 (2026-05-14) — F32 + Char scalar monomorphizations.
+        NativeKind::Float32 => Some(TypedArrayKind::F32),
+        NativeKind::Char => Some(TypedArrayKind::Char),
+        // Wave 2 Round 3a' A2-followup-gate-flip (2026-05-14) — String +
+        // Decimal heap-element slot-kind mirror flipped in lockstep with
+        // the `should_use_typed_array(ConcreteType)` gate above. Two routing
+        // shapes light up:
+        //
+        //   - `NativeKind::String` (legacy Phase-2c `Arc<String>` carrier
+        //     label) routes here from `typed_array_from_annotation("string")`
+        //     when an `Array<string>` annotation drives binding initialization
+        //     (`statements.rs:681` flow). Post-flip, the literal-elements'
+        //     legacy `Arc<String>` bits + `NativeKind::String` source label
+        //     no longer match the `TypedArrayPushString` consumer invariant
+        //     (which strictly requires `NativeKind::StringV2`). The literal-
+        //     upgrade transition (string literal `LoadConst` → `NewStringV2`)
+        //     is the downstream A2-followup-producer-cascade territory; until
+        //     that lands, `let xs: Array<string> = [...]` literals will
+        //     surface a structured RuntimeError at push time, NOT a SIGSEGV.
+        //   - `NativeKind::StringV2` / `NativeKind::DecimalV2` are the v2-raw
+        //     carrier labels that match the typed opcode runtime invariants;
+        //     these flow from `TypedArrayGetString` / `TypedArrayGetDecimal`
+        //     element reads (per `v2_handlers/array.rs:682`).
+        //
+        // Per ADR-006 §2.7.24 Q25.A SUPERSEDED + audit §3.2 sub-cluster
+        // S2-prime + §4.1.B per-element retain/release ABI. Aligned with the
+        // Round 3a' α/β/γ/δ/ε/ζ/η consumer arms that landed as UNREACHABLE
+        // code with the gate closed; this flip makes them reachable atomically.
+        NativeKind::String => Some(TypedArrayKind::String),
+        NativeKind::StringV2 => Some(TypedArrayKind::String),
+        NativeKind::DecimalV2 => Some(TypedArrayKind::Decimal),
         _ => None,
     }
 }
@@ -150,6 +305,17 @@ pub fn typed_array_kind_from_type_name(type_name: &str) -> Option<TypedArrayKind
         "int" | "i64" => Some(TypedArrayKind::I64),
         "i32" => Some(TypedArrayKind::I32),
         "bool" => Some(TypedArrayKind::Bool),
+        // W12 S1 (2026-05-13) — sized integer monomorphizations.
+        "i8" => Some(TypedArrayKind::I8),
+        "u8" => Some(TypedArrayKind::U8),
+        "i16" => Some(TypedArrayKind::I16),
+        "u16" => Some(TypedArrayKind::U16),
+        "u32" => Some(TypedArrayKind::U32),
+        // "u64" intentionally falls through — `Array<u64>` migration
+        // deferred to S1.5 per the supervisor's S1 reopen.
+        // Wave 2 Agent A1 (2026-05-14) — F32 + Char.
+        "f32" => Some(TypedArrayKind::F32),
+        "char" => Some(TypedArrayKind::Char),
         _ => None,
     }
 }
@@ -248,8 +414,22 @@ mod tests {
     }
 
     #[test]
-    fn test_string_falls_back_to_legacy() {
-        assert_eq!(should_use_typed_array(&ConcreteType::String), None);
+    fn test_string_maps_to_typed_array_string() {
+        // Wave 2 Round 3a' A2-followup-gate-flip (2026-05-14) — gate flipped
+        // in lockstep with the Round 3a' v2-raw consumer arms.
+        assert_eq!(
+            should_use_typed_array(&ConcreteType::String),
+            Some(TypedArrayKind::String)
+        );
+    }
+
+    #[test]
+    fn test_decimal_maps_to_typed_array_decimal() {
+        // Wave 2 Round 3a' A2-followup-gate-flip (2026-05-14).
+        assert_eq!(
+            should_use_typed_array(&ConcreteType::Decimal),
+            Some(TypedArrayKind::Decimal)
+        );
     }
 
     #[test]
@@ -277,9 +457,115 @@ mod tests {
     }
 
     #[test]
-    fn test_u8_falls_back_to_legacy() {
-        // Sized ints other than i32/i64 don't yet have typed opcodes.
-        assert_eq!(should_use_typed_array(&ConcreteType::U8), None);
+    fn test_u8_maps_to_typed_array_u8() {
+        // W12 S1 (2026-05-13) — U8 now has a typed array opcode kind.
+        assert_eq!(
+            should_use_typed_array(&ConcreteType::U8),
+            Some(TypedArrayKind::U8)
+        );
+    }
+
+    #[test]
+    fn test_i8_maps_to_typed_array_i8() {
+        assert_eq!(
+            should_use_typed_array(&ConcreteType::I8),
+            Some(TypedArrayKind::I8)
+        );
+    }
+
+    #[test]
+    fn test_i16_maps_to_typed_array_i16() {
+        assert_eq!(
+            should_use_typed_array(&ConcreteType::I16),
+            Some(TypedArrayKind::I16)
+        );
+    }
+
+    #[test]
+    fn test_u16_maps_to_typed_array_u16() {
+        assert_eq!(
+            should_use_typed_array(&ConcreteType::U16),
+            Some(TypedArrayKind::U16)
+        );
+    }
+
+    #[test]
+    fn test_u32_maps_to_typed_array_u32() {
+        assert_eq!(
+            should_use_typed_array(&ConcreteType::U32),
+            Some(TypedArrayKind::U32)
+        );
+    }
+
+    #[test]
+    fn test_f32_maps_to_typed_array_f32() {
+        // Wave 2 Agent A1 (2026-05-14) — F32 scalar monomorphization.
+        assert_eq!(
+            should_use_typed_array(&ConcreteType::F32),
+            Some(TypedArrayKind::F32)
+        );
+    }
+
+    #[test]
+    fn test_char_maps_to_typed_array_char() {
+        // Wave 2 Agent A1 (2026-05-14) — Char scalar monomorphization.
+        assert_eq!(
+            should_use_typed_array(&ConcreteType::Char),
+            Some(TypedArrayKind::Char)
+        );
+    }
+
+    #[test]
+    fn test_slot_kind_float32_maps_to_f32() {
+        use crate::type_tracking::NativeKind;
+        assert_eq!(
+            should_use_typed_array_from_slot_kind(NativeKind::Float32),
+            Some(TypedArrayKind::F32)
+        );
+    }
+
+    #[test]
+    fn test_slot_kind_char_maps_to_char() {
+        use crate::type_tracking::NativeKind;
+        assert_eq!(
+            should_use_typed_array_from_slot_kind(NativeKind::Char),
+            Some(TypedArrayKind::Char)
+        );
+    }
+
+    #[test]
+    fn test_type_name_vec_f32_maps_to_f32() {
+        assert_eq!(
+            typed_array_kind_from_type_name("Vec<f32>"),
+            Some(TypedArrayKind::F32)
+        );
+        assert_eq!(
+            typed_array_kind_from_type_name("Array<f32>"),
+            Some(TypedArrayKind::F32)
+        );
+    }
+
+    #[test]
+    fn test_type_name_vec_char_maps_to_char() {
+        assert_eq!(
+            typed_array_kind_from_type_name("Vec<char>"),
+            Some(TypedArrayKind::Char)
+        );
+        assert_eq!(
+            typed_array_kind_from_type_name("Array<char>"),
+            Some(TypedArrayKind::Char)
+        );
+    }
+
+    #[test]
+    fn test_u64_falls_back_to_legacy() {
+        // Per S1 reopen (2026-05-13), `Array<u64>` deliberately falls
+        // back to the legacy NaN-boxed `NewArray` path: `NativeKind::UInt64`
+        // is overloaded between scalar u64 and v2-typed-array-pointer
+        // carrier at HEAD, so a typed-array fast path would route both
+        // through the same overloaded discriminator. Deferred to S1.5
+        // pending §2.7.7/Q9 parallel-kind-track extension.
+        assert_eq!(should_use_typed_array(&ConcreteType::U64), None);
     }
 
     #[test]
@@ -290,12 +576,21 @@ mod tests {
 
     #[test]
     fn test_opcode_lookup_round_trip() {
-        // Sanity check that all four kinds expose all four opcodes.
+        // Sanity check that all eleven kinds expose all four opcodes.
+        // U64 deliberately omitted — deferred to S1.5 per S1 reopen.
+        // Wave 2 Agent A1 (2026-05-14) — F32 + Char added.
         for kind in [
             TypedArrayKind::F64,
             TypedArrayKind::I64,
             TypedArrayKind::I32,
             TypedArrayKind::Bool,
+            TypedArrayKind::I8,
+            TypedArrayKind::U8,
+            TypedArrayKind::I16,
+            TypedArrayKind::U16,
+            TypedArrayKind::U32,
+            TypedArrayKind::F32,
+            TypedArrayKind::Char,
         ] {
             let _ = kind.new_opcode();
             let _ = kind.get_opcode();
@@ -304,76 +599,144 @@ mod tests {
         }
     }
 
-    // ---- SlotKind variant ----
+    // ---- NativeKind variant ----
 
     #[test]
     fn test_slot_kind_float64_maps_to_f64() {
-        use crate::type_tracking::SlotKind;
+        use crate::type_tracking::NativeKind;
         assert_eq!(
-            should_use_typed_array_from_slot_kind(SlotKind::Float64),
+            should_use_typed_array_from_slot_kind(NativeKind::Float64),
             Some(TypedArrayKind::F64)
         );
     }
 
     #[test]
     fn test_slot_kind_int64_maps_to_i64() {
-        use crate::type_tracking::SlotKind;
+        use crate::type_tracking::NativeKind;
         assert_eq!(
-            should_use_typed_array_from_slot_kind(SlotKind::Int64),
+            should_use_typed_array_from_slot_kind(NativeKind::Int64),
             Some(TypedArrayKind::I64)
         );
     }
 
     #[test]
     fn test_slot_kind_int32_maps_to_i32() {
-        use crate::type_tracking::SlotKind;
+        use crate::type_tracking::NativeKind;
         assert_eq!(
-            should_use_typed_array_from_slot_kind(SlotKind::Int32),
+            should_use_typed_array_from_slot_kind(NativeKind::Int32),
             Some(TypedArrayKind::I32)
         );
     }
 
     #[test]
     fn test_slot_kind_bool_maps_to_bool() {
-        use crate::type_tracking::SlotKind;
+        use crate::type_tracking::NativeKind;
         assert_eq!(
-            should_use_typed_array_from_slot_kind(SlotKind::Bool),
+            should_use_typed_array_from_slot_kind(NativeKind::Bool),
             Some(TypedArrayKind::Bool)
         );
     }
 
     #[test]
-    fn test_slot_kind_string_falls_back() {
-        use crate::type_tracking::SlotKind;
+    fn test_slot_kind_string_maps_to_string() {
+        // Wave 2 Round 3a' A2-followup-gate-flip (2026-05-14) — legacy
+        // `NativeKind::String` (Arc<String> carrier label) routes here from
+        // `typed_array_from_annotation("string")`; literal-upgrade transition
+        // to `StringV2` is downstream A2-followup-producer-cascade territory.
+        use crate::type_tracking::NativeKind;
         assert_eq!(
-            should_use_typed_array_from_slot_kind(SlotKind::String),
-            None
+            should_use_typed_array_from_slot_kind(NativeKind::String),
+            Some(TypedArrayKind::String)
         );
     }
 
     #[test]
-    fn test_slot_kind_unknown_falls_back() {
-        use crate::type_tracking::SlotKind;
+    fn test_slot_kind_stringv2_maps_to_string() {
+        // Wave 2 Round 3a' A2-followup-gate-flip — v2-raw `StringV2` label
+        // (matches `TypedArrayPushString` consumer kind invariant).
+        use crate::type_tracking::NativeKind;
         assert_eq!(
-            should_use_typed_array_from_slot_kind(SlotKind::Unknown),
-            None
+            should_use_typed_array_from_slot_kind(NativeKind::StringV2),
+            Some(TypedArrayKind::String)
         );
     }
 
     #[test]
-    fn test_slot_kind_dynamic_falls_back() {
-        use crate::type_tracking::SlotKind;
+    fn test_slot_kind_decimalv2_maps_to_decimal() {
+        // Wave 2 Round 3a' A2-followup-gate-flip — v2-raw `DecimalV2` label
+        // (matches `TypedArrayPushDecimal` consumer kind invariant).
+        use crate::type_tracking::NativeKind;
         assert_eq!(
-            should_use_typed_array_from_slot_kind(SlotKind::Dynamic),
-            None
+            should_use_typed_array_from_slot_kind(NativeKind::DecimalV2),
+            Some(TypedArrayKind::Decimal)
+        );
+    }
+
+    // `NativeKind::Unknown` and `NativeKind::Dynamic` were deleted per
+    // ADR-006 §2.7.5.1 — every NativeKind in compiled bytecode must be
+    // proven. The "falls back to None" tests for those variants were
+    // removed (the variants no longer exist; nothing to fall back from).
+
+    #[test]
+    fn test_slot_kind_int8_maps_to_i8() {
+        // W12 S1 (2026-05-13) — sized integer kinds now have typed opcode
+        // monomorphizations.
+        use crate::type_tracking::NativeKind;
+        assert_eq!(
+            should_use_typed_array_from_slot_kind(NativeKind::Int8),
+            Some(TypedArrayKind::I8)
         );
     }
 
     #[test]
-    fn test_slot_kind_int8_falls_back() {
-        // Sized ints we don't have typed opcodes for fall back to legacy.
-        use crate::type_tracking::SlotKind;
-        assert_eq!(should_use_typed_array_from_slot_kind(SlotKind::Int8), None);
+    fn test_slot_kind_uint8_maps_to_u8() {
+        use crate::type_tracking::NativeKind;
+        assert_eq!(
+            should_use_typed_array_from_slot_kind(NativeKind::UInt8),
+            Some(TypedArrayKind::U8)
+        );
+    }
+
+    #[test]
+    fn test_slot_kind_int16_maps_to_i16() {
+        use crate::type_tracking::NativeKind;
+        assert_eq!(
+            should_use_typed_array_from_slot_kind(NativeKind::Int16),
+            Some(TypedArrayKind::I16)
+        );
+    }
+
+    #[test]
+    fn test_slot_kind_uint16_maps_to_u16() {
+        use crate::type_tracking::NativeKind;
+        assert_eq!(
+            should_use_typed_array_from_slot_kind(NativeKind::UInt16),
+            Some(TypedArrayKind::U16)
+        );
+    }
+
+    #[test]
+    fn test_slot_kind_uint32_maps_to_u32() {
+        use crate::type_tracking::NativeKind;
+        assert_eq!(
+            should_use_typed_array_from_slot_kind(NativeKind::UInt32),
+            Some(TypedArrayKind::U32)
+        );
+    }
+
+    #[test]
+    fn test_slot_kind_uint64_falls_back_to_legacy() {
+        // Per S1 reopen (2026-05-13): `NativeKind::UInt64` is overloaded
+        // between scalar u64 and v2-typed-array-pointer carrier at HEAD
+        // (every `*mut TypedArray<T>` flows through `UInt64`). Routing
+        // through a typed-array fast path here would conflate the two
+        // shapes. Deferred to S1.5 pending §2.7.7/Q9 parallel-kind-track
+        // extension that adds a discriminating variant.
+        use crate::type_tracking::NativeKind;
+        assert_eq!(
+            should_use_typed_array_from_slot_kind(NativeKind::UInt64),
+            None
+        );
     }
 
     // ---- typed_array_kind_from_type_name ----
@@ -931,5 +1294,143 @@ mod compile_integration_tests {
             !has_opcode(&prog, OpCode::TypedArrayLen),
             "untyped array must not emit TypedArrayLen"
         );
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Wave 3 Stabilize Round 1 V3-A2-followup-producer-cascade (2026-05-15)
+    //
+    // Per ADR-006 §2.7.5 stamp-at-compile-time + §2.7.24 Q25.A SUPERSEDED:
+    // `Array<string>` / `Array<decimal>` literals must emit
+    // `NewStringV2` / `NewDecimalV2` for the per-element literal-upgrade
+    // path (the Round 3a' gate-flip's downstream pre-req). The element
+    // value rides through the kinded stack with `NativeKind::StringV2` /
+    // `NativeKind::DecimalV2`, satisfying the strict-kind check at
+    // `v2_handlers/array.rs:687/703` (`TypedArrayPushString` /
+    // `TypedArrayPushDecimal`).
+    // ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_string_literal_array_emits_new_string_v2_per_element() {
+        // `let arr: Array<string> = ["a", "b"]` →
+        //   NewTypedArrayString, Dup, NewStringV2("a"), TypedArrayPushString,
+        //                        Dup, NewStringV2("b"), TypedArrayPushString.
+        let prog = compile(
+            r#"
+            let arr: Array<string> = ["a", "b"]
+            arr
+            "#,
+        );
+        assert!(
+            has_opcode(&prog, OpCode::NewTypedArrayString),
+            "expected NewTypedArrayString for Array<string> literal"
+        );
+        assert!(
+            has_opcode(&prog, OpCode::TypedArrayPushString),
+            "expected TypedArrayPushString for per-element push"
+        );
+        assert!(
+            has_opcode(&prog, OpCode::NewStringV2),
+            "expected NewStringV2 for per-element v2-raw String literal \
+             upgrade (Wave 3 producer-cascade)"
+        );
+        // The legacy LoadConst(String) path MUST NOT carry the element
+        // for the typed-array push: kind would be NativeKind::String
+        // (Arc<String>), which the strict-kind check at
+        // `v2_handlers/array.rs:687` rejects.
+        let new_string_v2_count = prog
+            .instructions
+            .iter()
+            .filter(|i| i.opcode == OpCode::NewStringV2)
+            .count();
+        assert_eq!(
+            new_string_v2_count, 2,
+            "expected one NewStringV2 per string literal element (got {})",
+            new_string_v2_count
+        );
+    }
+
+    #[test]
+    fn test_decimal_literal_array_emits_new_decimal_v2_per_element() {
+        // `let arr: Array<decimal> = [1.5D, 2.5D]` →
+        //   NewTypedArrayDecimal, Dup, NewDecimalV2(1.5), TypedArrayPushDecimal,
+        //                         Dup, NewDecimalV2(2.5), TypedArrayPushDecimal.
+        let prog = compile(
+            r#"
+            let arr: Array<decimal> = [1.5D, 2.5D]
+            arr
+            "#,
+        );
+        assert!(
+            has_opcode(&prog, OpCode::NewTypedArrayDecimal),
+            "expected NewTypedArrayDecimal for Array<decimal> literal"
+        );
+        assert!(
+            has_opcode(&prog, OpCode::TypedArrayPushDecimal),
+            "expected TypedArrayPushDecimal for per-element push"
+        );
+        assert!(
+            has_opcode(&prog, OpCode::NewDecimalV2),
+            "expected NewDecimalV2 for per-element v2-raw Decimal \
+             literal upgrade (Wave 3 producer-cascade)"
+        );
+        let new_decimal_v2_count = prog
+            .instructions
+            .iter()
+            .filter(|i| i.opcode == OpCode::NewDecimalV2)
+            .count();
+        assert_eq!(
+            new_decimal_v2_count, 2,
+            "expected one NewDecimalV2 per decimal literal element (got {})",
+            new_decimal_v2_count
+        );
+    }
+
+    #[test]
+    fn test_single_element_string_literal_array_emits_new_string_v2() {
+        // Minimal Array<string> literal — one element. Verifies the per-
+        // element opcode wiring for a single-element capacity.
+        let prog = compile(
+            r#"
+            let arr: Array<string> = ["only"]
+            arr
+            "#,
+        );
+        assert!(has_opcode(&prog, OpCode::NewTypedArrayString));
+        assert!(has_opcode(&prog, OpCode::NewStringV2));
+        assert!(has_opcode(&prog, OpCode::TypedArrayPushString));
+    }
+
+    #[test]
+    fn test_single_element_decimal_literal_array_emits_new_decimal_v2() {
+        let prog = compile(
+            r#"
+            let arr: Array<decimal> = [3.14D]
+            arr
+            "#,
+        );
+        assert!(has_opcode(&prog, OpCode::NewTypedArrayDecimal));
+        assert!(has_opcode(&prog, OpCode::NewDecimalV2));
+        assert!(has_opcode(&prog, OpCode::TypedArrayPushDecimal));
+    }
+
+    #[test]
+    #[ignore]  // diagnostic-only — enable to trace opcode emission for decimal
+    fn debug_decimal_opcodes() {
+        let prog = compile(r#"
+            let arr: Array<decimal> = [1.5D, 2.5D]
+            arr
+            "#);
+        for (i, instr) in prog.instructions.iter().enumerate() {
+            eprintln!("[{i}] {:?} {:?}", instr.opcode, instr.operand);
+        }
+        eprintln!("--- constants ---");
+        for (i, c) in prog.constants.iter().enumerate() {
+            eprintln!("[{i}] {:?}", c);
+        }
+        eprintln!("--- strings ---");
+        for (i, s) in prog.strings.iter().enumerate() {
+            eprintln!("[{i}] {:?}", s);
+        }
+        panic!("DEBUG");
     }
 }

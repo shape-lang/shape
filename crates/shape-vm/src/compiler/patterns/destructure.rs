@@ -105,8 +105,19 @@ impl BytecodeCompiler {
                 // arithmetic result) round-trips through the slot
                 // without NaN-tag injection. Polymorphic fallback for
                 // unproven hints.
-                let hint = self.let_decl_storage_hint();
-                self.emit_store_local_for_hint(local_idx, hint);
+                //
+                // Per ADR-006 §2.7.5.1, `let_decl_storage_hint` returns
+                // `Option<StorageHint>` (no `Unknown` sentinel). On `None`
+                // emit the polymorphic legacy `StoreLocal`.
+                match self.let_decl_storage_hint() {
+                    Some(hint) => self.emit_store_local_for_hint(local_idx, hint),
+                    None => {
+                        self.emit(Instruction::new(
+                            OpCode::StoreLocal,
+                            Some(Operand::Local(local_idx)),
+                        ));
+                    }
+                }
                 // Track schema for typed merge optimization
                 if let Some(schema_id) = self.last_expr_schema {
                     self.type_tracker.set_local_type(

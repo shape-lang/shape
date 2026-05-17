@@ -97,7 +97,3 @@ parallel = []
 
 [dev-dependencies]
 criterion = { workspace = true }
-
-[[bench]]
-name = "simulation_bench"
-harness = false

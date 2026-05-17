@@ -76,6 +76,10 @@ pub fn concrete_to_annotation(ct: &ConcreteType) -> TypeAnnotation {
         // Primitive scalar mapping. Width-specific integers use the spelling
         // accepted by the parser (see `shape.pest` and `BuiltinTypes`).
         ConcreteType::F64 => TypeAnnotation::Basic("number".into()),
+        // Round 19 S1.5 W12-nativekind-scalar-additions (2026-05-14):
+        // ADR-006 §2.7.5 amendment.
+        ConcreteType::F32 => TypeAnnotation::Basic("f32".into()),
+        ConcreteType::Char => TypeAnnotation::Basic("char".into()),
         ConcreteType::I64 => TypeAnnotation::Basic("int".into()),
         ConcreteType::I32 => TypeAnnotation::Basic("i32".into()),
         ConcreteType::I16 => TypeAnnotation::Basic("i16".into()),
@@ -134,6 +138,39 @@ pub fn concrete_to_annotation(ct: &ConcreteType) -> TypeAnnotation {
         ConcreteType::Function(id) => {
             TypeAnnotation::Reference(TypePath::simple(format!("__mono_fn_{}", id.0)))
         }
+
+        // ── Phase 3 cluster-0 Round 11-trinity 11E (2026-05-13) ─────────
+        // Collection / concurrency carriers from ADR-006 §2.7.15 /
+        // §2.7.17 / §2.7.18 / §2.7.20 / §2.7.25 round-trip back to the
+        // user-written `Generic { name, args }` form for downstream type
+        // inference. Parametric arms unwrap their inner ConcreteType
+        // recursively; nullary arms (`PriorityQueue`, `Atomic`) map to
+        // the no-args reference form — same shape as a user-written
+        // `PriorityQueue` / `Atomic` identifier in source.
+        ConcreteType::HashSet(elem) => TypeAnnotation::Generic {
+            name: TypePath::simple("HashSet"),
+            args: vec![concrete_to_annotation(elem)],
+        },
+        ConcreteType::Deque(elem) => TypeAnnotation::Generic {
+            name: TypePath::simple("Deque"),
+            args: vec![concrete_to_annotation(elem)],
+        },
+        ConcreteType::PriorityQueue => {
+            TypeAnnotation::Reference(TypePath::simple("PriorityQueue"))
+        }
+        ConcreteType::Channel(elem) => TypeAnnotation::Generic {
+            name: TypePath::simple("Channel"),
+            args: vec![concrete_to_annotation(elem)],
+        },
+        ConcreteType::Mutex(inner) => TypeAnnotation::Generic {
+            name: TypePath::simple("Mutex"),
+            args: vec![concrete_to_annotation(inner)],
+        },
+        ConcreteType::Atomic => TypeAnnotation::Reference(TypePath::simple("Atomic")),
+        ConcreteType::Lazy(inner) => TypeAnnotation::Generic {
+            name: TypePath::simple("Lazy"),
+            args: vec![concrete_to_annotation(inner)],
+        },
 
         ConcreteType::Void => TypeAnnotation::Void,
     }
@@ -286,6 +323,23 @@ pub fn substitute_function_def(
         .map(|s| substitute_statement(s, subs))
         .collect();
 
+    // V3-S6a resolver-extension follow-up: empty-array terminal-result
+    // annotation synthesis. The generic source `let mut result = []` carries
+    // no annotation because `Array<U>` can't be spelled until U binds. After
+    // substitution rewrites the function's return type to a concrete
+    // `Array<C>`, the empty literal still lacks the kind hint the typed-
+    // array emission path needs (`pending_variable_typed_array_kind`).
+    //
+    // Synthesize the annotation for the shape that matches the
+    // `Vec.map<U>` / `Vec.filter` body pattern: terminal expression is an
+    // identifier referring to a `let mut <name> = []` declared earlier
+    // with no annotation, and the function returns `Array<C>` for some
+    // concrete C. This is structurally narrow (it only fires on the
+    // exact shape produced by collect-into-array stdlib bodies) and
+    // architecturally honest: monomorphization synthesizes annotations
+    // the generic source couldn't express.
+    synthesize_empty_array_result_annotation(&mut cloned);
+
     // Rename so the specialization cache can key on the new name.
     cloned.name = format!("{}::{}", def.name, mono_key_from_subs(subs));
 
@@ -294,6 +348,86 @@ pub fn substitute_function_def(
     cloned.type_params = None;
 
     cloned
+}
+
+/// V3-S6a resolver-extension follow-up: after monomorphization substitution
+/// concretizes the function's return type, walk the body for the canonical
+/// "collect-into-array" shape and annotate the empty-array initializer so
+/// the bytecode compiler's typed-array emission path picks up the right
+/// element kind via `pending_variable_typed_array_kind`.
+///
+/// Scope: the function's return type is `Array<C>` for some concrete C
+/// (post-substitution, no remaining type-parameter references), AND the
+/// body's terminal expression is `Identifier(name)`, AND there exists a
+/// `Statement::VariableDecl` with `pattern == Identifier(name)`,
+/// `type_annotation == None`, and `value == Some(Expr::Array(<empty>))`.
+/// In that case, write `Array<C>` onto that var-decl's annotation.
+///
+/// Out of scope (intentionally):
+/// - Non-Array return types (no typed-array kind to propagate).
+/// - Bodies whose terminal expression is not a bare identifier (a `Block`
+///   ending in `result`, an explicit `return result`, etc — those land in
+///   different ckpts if they regress, kept narrow here per cascade-ceiling
+///   discipline).
+/// - Var-decls whose `type_annotation` is already set (the user wrote it
+///   — trust it).
+fn synthesize_empty_array_result_annotation(def: &mut FunctionDef) {
+    // Step 1: read the concrete element type out of the return annotation,
+    // if it is `Array<C>`. Bail otherwise.
+    let elem_annotation: TypeAnnotation = match def.return_type.as_ref() {
+        Some(TypeAnnotation::Generic { name, args }) if name.as_str() == "Array" && args.len() == 1 => {
+            args[0].clone()
+        }
+        Some(TypeAnnotation::Generic { name, args }) if name.as_str() == "Vec" && args.len() == 1 => {
+            args[0].clone()
+        }
+        Some(TypeAnnotation::Array(inner)) => (**inner).clone(),
+        _ => return,
+    };
+
+    // Step 2: find the body's terminal expression. The Vec.map / Vec.filter
+    // pattern leaves `result` as the last `Statement::Expression`. Bail if
+    // the body's last statement isn't an `Expression(Identifier)`.
+    let Some(Statement::Expression(Expr::Identifier(terminal_name, _), _)) = def.body.last() else {
+        return;
+    };
+    let terminal_name = terminal_name.clone();
+
+    // Step 3: find the matching `let mut <name> = []` var-decl earlier in
+    // the body. Mutate in place when found.
+    for stmt in def.body.iter_mut() {
+        let Statement::VariableDecl(decl, _) = stmt else {
+            continue;
+        };
+        // Only rewrite the var-decl whose identifier matches the terminal.
+        let Some(decl_name) = decl.pattern.as_identifier() else {
+            continue;
+        };
+        if decl_name != terminal_name {
+            continue;
+        }
+        // Don't override a user-written annotation.
+        if decl.type_annotation.is_some() {
+            continue;
+        }
+        // Initializer must be an empty array literal.
+        let is_empty_array = matches!(
+            decl.value.as_ref(),
+            Some(Expr::Array(items, _)) if items.is_empty()
+        );
+        if !is_empty_array {
+            continue;
+        }
+        // Synthesize `Array<C>` annotation. The bytecode compiler's
+        // `pending_variable_typed_array_kind` path reads this annotation
+        // and routes the empty literal through the typed-array opcode
+        // selection in `compile_expr_array`.
+        decl.type_annotation = Some(TypeAnnotation::Generic {
+            name: TypePath::simple("Array"),
+            args: vec![elem_annotation.clone()],
+        });
+        return;
+    }
 }
 
 /// Const-generic-aware variant of [`substitute_function_def`].
@@ -364,6 +498,11 @@ pub fn substitute_function_def_with_consts(
             substitute_const_in_statement(&s, const_subs)
         })
         .collect();
+
+    // V3-S6a resolver-extension follow-up: lift the empty-array terminal-
+    // result annotation synthesis here too (same shape as in the non-const
+    // path). See `synthesize_empty_array_result_annotation`.
+    synthesize_empty_array_result_annotation(&mut cloned);
 
     // Use the caller-supplied mono_key directly so this stays in lock-step
     // with `build_mono_key_with_consts`.
@@ -2137,6 +2276,39 @@ pub fn inline_closure_body_into_specialization(
     // — it becomes live once Phase D/E wires up capture hoisting.
     let _ = capture_names;
 
+    // cluster-2-cw-2-phaseC-inlining empirical-verification trace
+    // (2026-05-16). Per cluster-2-v3s6f-empirical-verification.md §3.4,
+    // disposition between the 4 explanations (AST-vs-MIR retention,
+    // name mismatch, recursion descent gap, post-Phase-C re-introduction)
+    // requires SHAPE_JIT_DEBUG-gated visibility into the AST visit
+    // pattern inside `inline_closure_calls_in_expr`. The thread-local
+    // counter below is the smallest empirical instrument: it counts
+    // every FunctionCall visit AND its name vs `closure_param_name`
+    // comparison outcome. Surface name MISMATCHES (explanation 2) +
+    // MethodCall/MethodCall.args recursion (explanation 3) + AST shape
+    // dump of the specialized body before and after Phase-C (explanation
+    // 1) are recorded simultaneously per single empirical pass.
+    if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
+        PHASEC_TRACE_FN_CALL_TOTAL.with(|c| c.set(0));
+        PHASEC_TRACE_FN_CALL_MATCH.with(|c| c.set(0));
+        PHASEC_TRACE_METHOD_CALL.with(|c| c.set(0));
+        PHASEC_TRACE_FOR_STMT.with(|c| c.set(0));
+        eprintln!(
+            "[phaseC-empirical] specialization fn={} body stmt count BEFORE inline = {}",
+            specialized.name,
+            specialized.body.len(),
+        );
+        // Dump every top-level statement discriminant so we can confirm
+        // the for-loop carrying f(item) is present.
+        for (i, s) in specialized.body.iter().enumerate() {
+            eprintln!(
+                "[phaseC-empirical]   pre-body[{}] discriminant={}",
+                i,
+                statement_discriminant(s),
+            );
+        }
+    }
+
     specialized.body = specialized
         .body
         .iter()
@@ -2150,7 +2322,56 @@ pub fn inline_closure_body_into_specialization(
         })
         .collect();
 
+    if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
+        eprintln!(
+            "[phaseC-empirical] specialization fn={} body stmt count AFTER inline = {} \
+             fn_call_total={} fn_call_match={} method_call={} for_stmt={}",
+            specialized.name,
+            specialized.body.len(),
+            PHASEC_TRACE_FN_CALL_TOTAL.with(|c| c.get()),
+            PHASEC_TRACE_FN_CALL_MATCH.with(|c| c.get()),
+            PHASEC_TRACE_METHOD_CALL.with(|c| c.get()),
+            PHASEC_TRACE_FOR_STMT.with(|c| c.get()),
+        );
+        for (i, s) in specialized.body.iter().enumerate() {
+            eprintln!(
+                "[phaseC-empirical]   post-body[{}] discriminant={}",
+                i,
+                statement_discriminant(s),
+            );
+        }
+    }
+
     Ok(())
+}
+
+// cluster-2-cw-2-phaseC-inlining empirical trace counters (2026-05-16).
+// SHAPE_JIT_DEBUG-gated; reset per Phase-C invocation. See
+// inline_closure_body_into_specialization for the instrumentation
+// rationale (§3.4 of cluster-2-v3s6f-empirical-verification.md, 4
+// explanations dispositionable per single empirical pass).
+thread_local! {
+    static PHASEC_TRACE_FN_CALL_TOTAL: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static PHASEC_TRACE_FN_CALL_MATCH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static PHASEC_TRACE_METHOD_CALL: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static PHASEC_TRACE_FOR_STMT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn statement_discriminant(s: &shape_ast::ast::Statement) -> &'static str {
+    use shape_ast::ast::Statement;
+    match s {
+        Statement::Return(..) => "Return",
+        Statement::Expression(..) => "Expression",
+        Statement::VariableDecl(..) => "VariableDecl",
+        Statement::Assignment(..) => "Assignment",
+        Statement::For(..) => "For",
+        Statement::While(..) => "While",
+        Statement::If(..) => "If",
+        Statement::Break(..) => "Break",
+        Statement::Continue(..) => "Continue",
+        Statement::Extend(..) => "Extend",
+        _ => "Other",
+    }
 }
 
 /// Recursively walk a statement and rewrite any `Expr::FunctionCall` whose
@@ -2191,6 +2412,14 @@ fn inline_closure_calls_in_statement(
             Statement::Assignment(new_assign, *span)
         }
         Statement::For(for_loop, span) => {
+            // cluster-2-cw-2-phaseC-inlining empirical trace (2026-05-16).
+            if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
+                PHASEC_TRACE_FOR_STMT.with(|c| c.set(c.get() + 1));
+                eprintln!(
+                    "[phaseC-empirical]   For statement encountered (body_stmts={})",
+                    for_loop.body.len(),
+                );
+            }
             let new_init = match &for_loop.init {
                 ForInit::ForIn { pattern, iter } => ForInit::ForIn {
                     pattern: pattern.clone(),
@@ -2322,6 +2551,18 @@ fn inline_closure_calls_in_expr(
     // (they could contain nested calls), but swapping with the inlined body
     // happens here.
     if let Expr::FunctionCall { name, args, .. } = expr {
+        // cluster-2-cw-2-phaseC-inlining empirical trace (2026-05-16).
+        if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
+            PHASEC_TRACE_FN_CALL_TOTAL.with(|c| c.set(c.get() + 1));
+            let matched = name == closure_param_name;
+            if matched {
+                PHASEC_TRACE_FN_CALL_MATCH.with(|c| c.set(c.get() + 1));
+            }
+            eprintln!(
+                "[phaseC-empirical]   FunctionCall name={:?} closure_param={:?} matched={}",
+                name, closure_param_name, matched,
+            );
+        }
         if name == closure_param_name {
             // Recursively walk each arg first so any nested closure-param
             // calls get replaced too.
@@ -2371,6 +2612,14 @@ fn inline_closure_calls_in_expr(
             span: *span,
         },
         Expr::MethodCall { receiver, method, args, named_args, optional, span } => {
+            // cluster-2-cw-2-phaseC-inlining empirical trace (2026-05-16).
+            if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
+                PHASEC_TRACE_METHOD_CALL.with(|c| c.set(c.get() + 1));
+                eprintln!(
+                    "[phaseC-empirical]   MethodCall method={:?} args_count={}",
+                    method, args.len(),
+                );
+            }
             Expr::MethodCall {
                 receiver: rec_box(receiver),
                 method: method.clone(),
@@ -2447,6 +2696,86 @@ fn inline_closure_calls_in_expr(
                 .collect();
             Expr::Block(BlockExpr { items }, *span)
         }
+        // cluster-2-cw-2-phaseC-inlining (2026-05-16): missing arms that
+        // wrap sub-expressions where a closure-parameter call may live.
+        // Empirical verification at HEAD ca8300f0 confirmed (a)'s fix did
+        // NOT make hypothesis (b) latent — the Vec.map body's
+        // `for item in self { result.push(f(item)) }` was wrapped as
+        // `Expr::For(...)` and silently passed through `other =>
+        // other.clone()` below, so the inliner NEVER descended to the
+        // `f(item)` call. Per cluster-2-v3s6f-empirical-verification.md
+        // §3.4 explanation 3 (recursion-descent gap, now CONFIRMED at the
+        // Expr layer rather than the MethodCall.args layer the original
+        // §3.4 hypothesized): add explicit arms for every Expr variant
+        // that can contain sub-expressions which can carry the formal
+        // closure parameter call.
+        Expr::For(for_expr, span) => {
+            use shape_ast::ast::expr_helpers::ForExpr;
+            Expr::For(
+                Box::new(ForExpr {
+                    pattern: for_expr.pattern.clone(),
+                    iterable: rec_box(&for_expr.iterable),
+                    body: rec_box(&for_expr.body),
+                    is_async: for_expr.is_async,
+                }),
+                *span,
+            )
+        }
+        Expr::While(while_expr, span) => {
+            use shape_ast::ast::expr_helpers::WhileExpr;
+            Expr::While(
+                Box::new(WhileExpr {
+                    condition: rec_box(&while_expr.condition),
+                    body: rec_box(&while_expr.body),
+                }),
+                *span,
+            )
+        }
+        Expr::Loop(loop_expr, span) => {
+            use shape_ast::ast::expr_helpers::LoopExpr;
+            Expr::Loop(
+                Box::new(LoopExpr {
+                    body: rec_box(&loop_expr.body),
+                }),
+                *span,
+            )
+        }
+        Expr::Let(let_expr, span) => {
+            use shape_ast::ast::expr_helpers::LetExpr;
+            Expr::Let(
+                Box::new(LetExpr {
+                    pattern: let_expr.pattern.clone(),
+                    type_annotation: let_expr.type_annotation.clone(),
+                    value: let_expr.value.as_ref().map(|v| rec_box(v)),
+                    body: rec_box(&let_expr.body),
+                }),
+                *span,
+            )
+        }
+        Expr::Match(match_expr, span) => {
+            use shape_ast::ast::expr_helpers::{MatchArm, MatchExpr};
+            Expr::Match(
+                Box::new(MatchExpr {
+                    scrutinee: rec_box(&match_expr.scrutinee),
+                    arms: match_expr
+                        .arms
+                        .iter()
+                        .map(|arm| MatchArm {
+                            pattern: arm.pattern.clone(),
+                            guard: arm.guard.as_ref().map(|g| rec_box(g)),
+                            body: rec_box(&arm.body),
+                            pattern_span: arm.pattern_span,
+                        })
+                        .collect(),
+                }),
+                *span,
+            )
+        }
+        Expr::Break(value, span) => Expr::Break(value.as_ref().map(|e| rec_box(e)), *span),
+        Expr::TryOperator(inner, span) => Expr::TryOperator(rec_box(inner), *span),
+        Expr::Await(inner, span) => Expr::Await(rec_box(inner), *span),
+        Expr::AsyncScope(inner, span) => Expr::AsyncScope(rec_box(inner), *span),
+        Expr::Spread(inner, span) => Expr::Spread(rec_box(inner), *span),
         // Everything else passes through verbatim — call expressions of the
         // closure parameter cannot appear in AST positions we don't traverse
         // here. Extend this match if additional shapes appear in stdlib
@@ -2482,8 +2811,44 @@ fn build_inlined_closure_block(
         };
         items.push(BlockItem::Statement(Statement::VariableDecl(decl, span)));
     }
-    // Append the closure body statements.
-    for stmt in closure_body {
+    // cluster-2-cw-2-phaseC-inlining (2026-05-16): preserve the closure
+    // body's tail-expression value semantics AND prevent in-body
+    // `Statement::Return(...)` from becoming a function-level return of
+    // the OUTER (monomorphized stdlib template) function.
+    //
+    // The arrow-function / pipe-lambda parser at
+    // `crates/shape-ast/src/parser/expressions/functions.rs:62-64` /
+    // `:134-135` wraps an expression-form closure body
+    // (`|x| x * 2` / `x => x + 1`) as `vec![Statement::Return(Some(expr),
+    // Span::DUMMY)]`. Inlining that statement verbatim into the
+    // specialized body via `BlockItem::Statement(stmt.clone())` would
+    // emit a MIR `lower_return_control_flow` → `Assign(SlotId(0),
+    // body_value) + TerminatorKind::Return` inside the for-loop body of
+    // the specialized fn, returning the FIRST iteration's mapped value
+    // instead of pushing it.
+    //
+    // Fix: rewrite a trailing `Statement::Return(Some(expr), _)` AND
+    // `Statement::Expression(expr, _)` as `BlockItem::Expression(expr)`
+    // so the block evaluates to the expression's value and the OUTER
+    // method-call arg receives that value, without emitting a
+    // function-level return. Empirically dispositioned at HEAD
+    // ca8300f0 via the `[phaseC-empirical]` trace + smoke-2 VM
+    // observation of `no method 'sum' on receiver kind Int64`.
+    let last_idx = closure_body.len().saturating_sub(1);
+    for (i, stmt) in closure_body.iter().enumerate() {
+        if i == last_idx {
+            match stmt {
+                shape_ast::ast::Statement::Expression(expr, _) => {
+                    items.push(BlockItem::Expression(expr.clone()));
+                    continue;
+                }
+                shape_ast::ast::Statement::Return(Some(expr), _) => {
+                    items.push(BlockItem::Expression(expr.clone()));
+                    continue;
+                }
+                _ => {}
+            }
+        }
         items.push(BlockItem::Statement(stmt.clone()));
     }
 

@@ -3,518 +3,45 @@
 //! Contains the VM execution loop, module_binding variable synchronization,
 //! snapshot resume, compilation pipeline, and trait implementations
 //! for `ProgramExecutor` and `ExpressionEvaluator`.
+//!
+//! W12-host-boundary (ADR-006 §2.7.4 / §2.7.5): the program-completion
+//! host boundary now flows the VM's `KindedSlot` completion value
+//! through the kind-threaded `wire_conversion::slot_to_envelope` /
+//! `slot_to_wire` / `slot_extract_content` helpers. The deleted
+//! `nb_to_wire` / `nb_to_envelope` / `nb_extract_content` /
+//! `synthesize_value_word_from_raw` ValueWord-shape host-API surface
+//! does not return; the kinded helpers take `(bits, kind)` directly per
+//! ADR-006 §2.7.5 and the slot's kind is sourced from `KindedSlot::kind`
+//! (compiler-proven via `BytecodeProgram::top_level_frame.return_kind`).
+//!
+//! Snapshot resume / `eval_statements` remain Phase-2c stubs — the
+//! suspend/resume marker rebuild (kinded `Snapshot::Resumed`
+//! constructor + push) and the REPL-binding round-trip
+//! (`save_module_bindings_to_context` / `load_module_bindings_from_context`)
+//! are independent host-boundary workstreams.
 
 use std::sync::Arc;
 
-use crate::VMExecutionResult;
 use crate::bytecode::BytecodeProgram;
 use crate::compiler::BytecodeCompiler;
 use crate::configuration::BytecodeExecutor;
-use crate::executor::SNAPSHOT_FUTURE_ID;
-use crate::executor::debugger_integration::DebuggerIntegration;
 use crate::executor::{ForeignFunctionHandle, VMConfig, VirtualMachine};
-use crate::executor::objects::raw_helpers;
-use shape_value::{ValueWord, ValueWordExt};
 
 use shape_ast::Program;
 use shape_runtime::context::ExecutionContext;
 use shape_runtime::engine::{ExecutionType, ProgramExecutor, ShapeEngine};
 use shape_runtime::error::Result;
-use shape_runtime::event_queue::{SuspensionState, WaitCondition};
-use shape_value::{EnumPayload, EnumValue};
-use shape_wire::{AnyError as WireAnyError, WireValue, render_any_error_plain};
+use shape_runtime::wire_conversion;
+use shape_value::KindedSlot;
 
 impl BytecodeExecutor {
-    /// Load variables from ExecutionContext and ModuleBindingRegistry into VM module_bindings
-    fn load_module_bindings_from_context(
-        vm: &mut VirtualMachine,
-        ctx: &ExecutionContext,
-        module_binding_registry: &Arc<std::sync::RwLock<shape_runtime::ModuleBindingRegistry>>,
-        module_binding_names: &[String],
-    ) {
-        let storage_hints = vm.program.module_binding_storage_hints.clone();
-        for (idx, name) in module_binding_names.iter().enumerate() {
-            if name.is_empty() {
-                continue;
-            }
-
-            // Check ModuleBindingRegistry first
-            if let Some(value) = module_binding_registry.read().unwrap().get_by_name(name) {
-                // Skip functions - they're already compiled into the bytecode
-                if raw_helpers::extract_closure_info(value.raw_bits()).is_some()
-                {
-                    continue;
-                }
-                let normalized = Self::normalize_persisted_for_slot(
-                    value,
-                    storage_hints.get(idx).copied(),
-                );
-                vm.set_module_binding(idx, normalized);
-                continue;
-            }
-
-            // Fall back to ExecutionContext
-            if let Ok(Some(value)) = ctx.get_variable(name) {
-                // Skip functions - they're already compiled
-                if raw_helpers::extract_closure_info(value.raw_bits()).is_some()
-                {
-                    continue;
-                }
-                let normalized = Self::normalize_persisted_for_slot(
-                    value,
-                    storage_hints.get(idx).copied(),
-                );
-                vm.set_module_binding(idx, normalized);
-            }
-        }
-    }
-
-    /// Wave E+5.5 host-boundary load-side decode: when the binding's
-    /// declared `StorageHint` is a typed native primitive
-    /// (Int64/Float64/Bool/sub-int width) and the persisted bits are a
-    /// tagged ValueWord (the normal save path produced via
-    /// `save_module_bindings_to_context`'s `synthesize_value_word_from_raw`),
-    /// strip the tag and reconstruct the raw native bits. The typed
-    /// `LoadModuleBinding<Kind>` opcodes (`op_load_module_binding_i64`,
-    /// `_f64`, `_bool`, …) raw-transmute the slot's u64 directly onto
-    /// the stack with no tag-decode (`variables/mod.rs:3572`), so the
-    /// slot must hold raw native bits to feed the post-Wave-E+5 native
-    /// arithmetic path. Polymorphic / unknown slots pass through
-    /// unchanged.
-    fn normalize_persisted_for_slot(
-        value: ValueWord,
-        hint: Option<crate::type_tracking::StorageHint>,
-    ) -> ValueWord {
-        use crate::type_tracking::StorageHint;
-        let Some(hint) = hint else { return value };
-        match hint {
-            StorageHint::Int8
-            | StorageHint::UInt8
-            | StorageHint::Int16
-            | StorageHint::UInt16
-            | StorageHint::Int32
-            | StorageHint::UInt32
-            | StorageHint::Int64
-            | StorageHint::UInt64
-            | StorageHint::IntSize
-            | StorageHint::UIntSize => {
-                if let Some(i) = value.as_i64() {
-                    ValueWord::from_raw_bits(i as u64)
-                } else {
-                    value
-                }
-            }
-            StorageHint::Float64 => {
-                if let Some(f) = value.as_f64() {
-                    ValueWord::from_raw_bits(f.to_bits())
-                } else {
-                    value
-                }
-            }
-            StorageHint::Bool => {
-                if let Some(b) = value.as_bool() {
-                    ValueWord::from_raw_bits(b as u64)
-                } else {
-                    value
-                }
-            }
-            // Nullable widths, String, Dynamic, Unknown: keep tagged
-            // bits — the polymorphic LoadModuleBinding handler reads
-            // them as ValueWord and decodes via tag bits.
-            _ => value,
-        }
-    }
-
-    /// Wave E+5.5: propagate known-binding type info from a persistent
-    /// REPL `ExecutionContext` into the compiler's type tracker, so the
-    /// next REPL command's expressions referencing previously-defined
-    /// variables (e.g. `a + b` where `a, b` were `let a = 1; let b = 2`
-    /// in earlier cells) compile through the strict-typing arithmetic
-    /// path. Without this hop, the compiler sees `a` as a known binding
-    /// name with unknown type and `a + b` errors out as
-    /// `unknown + unknown` under strict typing.
-    ///
-    /// Type names use the canonical strings from
-    /// `ValueWord::type_name()` (`"int"`, `"number"`, `"bool"`,
-    /// `"string"`, etc.) — same vocabulary the compiler's
-    /// `set_module_binding_type_info` recognises via
-    /// `register_extension_module_schema` / type-tracker schema lookup.
-    fn register_known_binding_types(
-        compiler: &mut BytecodeCompiler,
-        names: &[String],
-        ctx: Option<&ExecutionContext>,
-    ) {
-        let Some(ctx) = ctx else { return };
-        for name in names {
-            if name.is_empty() {
-                continue;
-            }
-            if let Ok(Some(value)) = ctx.get_variable(name) {
-                let type_name = value.type_name();
-                // Skip unhelpful labels — Unknown/option/unit/function carry
-                // no useful info for the strict-typing arithmetic gate, and
-                // setting a `"function"` / `"unit"` type-info entry on a
-                // module binding can confuse downstream type lookups.
-                if matches!(
-                    type_name,
-                    "unknown" | "option" | "unit" | "function" | "module_function" | "reference"
-                ) {
-                    continue;
-                }
-                compiler.register_known_binding_type(name, type_name);
-            }
-        }
-    }
-
-    /// Save VM module_bindings back to ExecutionContext
-    fn save_module_bindings_to_context(
-        vm: &VirtualMachine,
-        ctx: &mut ExecutionContext,
-        module_binding_names: &[String],
-    ) {
-        let module_bindings = vm.module_binding_values();
-        let storage_hints = &vm.program.module_binding_storage_hints;
-        for (idx, name) in module_binding_names.iter().enumerate() {
-            if name.is_empty() {
-                continue;
-            }
-            if idx < module_bindings.len() {
-                // Wave E+5.5 host-boundary persistence: tag-normalize the
-                // module-binding bits before storing them in the
-                // ExecutionContext's variables map.
-                //
-                // After Wave E+5.5, module bindings can hold either raw
-                // native bits (StorageHint Int64/Float64/Bool — typed
-                // `StoreModuleBinding<Kind>` writes the producer's raw
-                // u64 directly) or tagged ValueWord bits (polymorphic
-                // `StoreModuleBinding`). The persistent context expects
-                // tagged ValueWord per its wire-conversion / display /
-                // type-name contract (`ValueWord::type_name()` walks
-                // tag bits, and a raw native i64 like `42u64` would
-                // alias TAG_HEAP and crash when the heap-pointer
-                // dereference is attempted). Re-tag native-kinded slots
-                // via `synthesize_value_word_from_raw`; passthrough
-                // others (already tagged or polymorphic Unknown).
-                let raw_value = module_bindings[idx].clone();
-                let kind = storage_hints
-                    .get(idx)
-                    .copied()
-                    .unwrap_or(crate::type_tracking::StorageHint::Unknown);
-                let kind_opt = match kind {
-                    crate::type_tracking::StorageHint::Unknown
-                    | crate::type_tracking::StorageHint::Dynamic
-                    | crate::type_tracking::StorageHint::String => None,
-                    other => Some(other),
-                };
-                let value = crate::executor::dispatch::synthesize_value_word_from_raw(
-                    raw_value.into_raw_bits(),
-                    kind_opt,
-                );
-                // Use set_variable which creates or updates the variable
-                // Note: This preserves existing format hints since set_variable
-                // only updates the value, not the metadata
-                let _ = ctx.set_variable(name, value);
-            }
-        }
-    }
-
-    /// Extract format hints from AST and store in ExecutionContext
-    ///
-    /// Format hints are now handled via the meta system with type aliases.
-    /// This function is kept for API compatibility but is a no-op.
-    fn extract_and_store_format_hints(_program: &Program, _ctx: Option<&mut ExecutionContext>) {
-        // No-op: legacy @ format hints removed, use type aliases with meta instead
-    }
-
-    /// Shared execution loop for both execute_program and resume_snapshot.
-    ///
-    /// Runs the VM in a suspend/resume loop, handling snapshot suspension,
-    /// Ctrl+C interrupts, and errors. If `initial_push` is Some, pushes
-    /// that value onto the VM stack before the first execution cycle.
-    fn run_vm_loop(
-        &self,
-        vm: &mut VirtualMachine,
-        engine: &mut ShapeEngine,
-        module_binding_names: &[String],
-        bytecode_for_snapshot: &BytecodeProgram,
-        initial_push: Option<ValueWord>,
-    ) -> Result<ValueWord> {
-        engine.get_runtime_mut().clear_last_runtime_error();
-
-        let mut first_run = initial_push.is_some();
-        let initial_value = initial_push;
-
-        let result = loop {
-            let runtime = engine.get_runtime_mut();
-            let mut ctx = runtime.persistent_context_mut();
-
-            if first_run {
-                if let Some(ref val) = initial_value {
-                    let _ = vm.push_raw_u64(val.clone());
-                }
-                first_run = false;
-            }
-
-            match vm.execute_with_suspend(ctx.as_deref_mut()) {
-                Ok(VMExecutionResult::Completed(value)) => {
-                    // Wave E+5.5 host-boundary synthesis: when the
-                    // top-level program ends in a typed native producer
-                    // (PushConst Int / typed arithmetic / typed Load* /
-                    // typed `op_return_value_<kind>`), the bits on top of
-                    // stack are RAW native (e.g. `42u64` for an int, not
-                    // tagged ValueWord 0xFFF8000_0000_002A). Re-tag them
-                    // here so REPL persistence / wire serialization /
-                    // host APIs see a properly-tagged ValueWord. Mirrors
-                    // the synthesis in `vm.execute()` (dispatch.rs:31).
-                    let return_kind = vm.program_top_level_return_kind();
-                    let raw_bits = value.into_raw_bits();
-                    break crate::executor::dispatch::synthesize_value_word_from_raw(
-                        raw_bits,
-                        return_kind,
-                    );
-                }
-                Ok(VMExecutionResult::Suspended {
-                    future_id,
-                    resume_ip,
-                }) => {
-                    let wait = if future_id == SNAPSHOT_FUTURE_ID {
-                        WaitCondition::Snapshot
-                    } else {
-                        WaitCondition::Future { id: future_id }
-                    };
-
-                    if let Some(ctx) = ctx.as_mut() {
-                        Self::save_module_bindings_to_context(vm, ctx, module_binding_names);
-                        ctx.set_suspension_state(SuspensionState::new(wait, resume_ip));
-                    }
-
-                    drop(ctx);
-
-                    if future_id == SNAPSHOT_FUTURE_ID {
-                        let store = engine.snapshot_store().ok_or_else(|| {
-                            shape_runtime::error::ShapeError::RuntimeError {
-                                message: "Snapshot store not configured".to_string(),
-                                location: None,
-                            }
-                        })?;
-                        let vm_snapshot = vm.snapshot(store).map_err(|e| {
-                            shape_runtime::error::ShapeError::RuntimeError {
-                                message: e.to_string(),
-                                location: None,
-                            }
-                        })?;
-                        let vm_hash = engine.store_snapshot_blob(&vm_snapshot)?;
-                        let bytecode_hash = engine.store_snapshot_blob(bytecode_for_snapshot)?;
-                        let snapshot_hash =
-                            engine.snapshot_with_hashes(Some(vm_hash), Some(bytecode_hash))?;
-
-                        let hash_str_nb =
-                            ValueWord::from_string(Arc::new(snapshot_hash.hex().to_string()));
-                        let hash_nb = vm
-                            .create_typed_enum_nb("Snapshot", "Hash", vec![hash_str_nb.clone()])
-                            .unwrap_or_else(|| {
-                                let hash_nb = ValueWord::from_string(Arc::new(
-                                    snapshot_hash.hex().to_string(),
-                                ));
-                                ValueWord::from_enum(EnumValue {
-                                    enum_name: "Snapshot".to_string(),
-                                    variant: "Hash".to_string(),
-                                    payload: EnumPayload::Tuple(vec![hash_nb]),
-                                })
-                            });
-                        let _ = vm.push_raw_u64(hash_nb);
-                        continue;
-                    }
-
-                    break ValueWord::none();
-                }
-                Err(shape_value::VMError::Interrupted) => {
-                    drop(ctx);
-                    let snapshot_hash = if let Some(store) = engine.snapshot_store() {
-                        match vm.snapshot(store) {
-                            Ok(vm_snapshot) => {
-                                let vm_hash = engine.store_snapshot_blob(&vm_snapshot).ok();
-                                let bc_hash =
-                                    engine.store_snapshot_blob(bytecode_for_snapshot).ok();
-                                if let (Some(vh), Some(bh)) = (vm_hash, bc_hash) {
-                                    engine
-                                        .snapshot_with_hashes(Some(vh), Some(bh))
-                                        .ok()
-                                        .map(|h| h.hex().to_string())
-                                } else {
-                                    None
-                                }
-                            }
-                            Err(_) => None,
-                        }
-                    } else {
-                        None
-                    };
-                    return Err(shape_runtime::error::ShapeError::Interrupted { snapshot_hash });
-                }
-                Err(e) => {
-                    let mut location = vm.last_error_line().map(|line| {
-                        let mut loc = shape_ast::error::SourceLocation::new(line as usize, 1);
-                        if let Some(file) = vm.last_error_file() {
-                            loc = loc.with_file(file.to_string());
-                        }
-                        loc
-                    });
-                    let mut message = e.to_string();
-                    let mut runtime_error_payload = None;
-
-                    if let Some(any_error_nb) = vm.take_last_uncaught_exception() {
-                        let any_error_wire = if let Some(exec_ctx) = ctx.as_deref() {
-                            shape_runtime::wire_conversion::nb_to_wire(&any_error_nb, exec_ctx)
-                        } else {
-                            let fallback_ctx =
-                                shape_runtime::context::ExecutionContext::new_empty();
-                            shape_runtime::wire_conversion::nb_to_wire(&any_error_nb, &fallback_ctx)
-                        };
-                        runtime_error_payload = Some(any_error_wire.clone());
-
-                        if let Some(rendered) = render_any_error_plain(&any_error_wire) {
-                            message = rendered;
-                        }
-
-                        if let Some(parsed) = WireAnyError::from_wire(&any_error_wire)
-                            && let Some(frame) = parsed.primary_location()
-                            && let Some(line) = frame.line
-                        {
-                            let mut loc = shape_ast::error::SourceLocation::new(
-                                line,
-                                frame.column.unwrap_or(1),
-                            );
-                            if let Some(file) = frame.file {
-                                loc = loc.with_file(file);
-                            }
-                            location = Some(loc);
-                        }
-                    }
-
-                    drop(ctx);
-                    engine
-                        .get_runtime_mut()
-                        .set_last_runtime_error(runtime_error_payload);
-
-                    return Err(shape_runtime::error::ShapeError::RuntimeError {
-                        message,
-                        location,
-                    });
-                }
-            }
-        };
-
-        Ok(result)
-    }
-
-    /// Finalize execution: save module_bindings back to context and convert result to wire format.
-    fn finalize_result(
-        vm: &VirtualMachine,
-        engine: &mut ShapeEngine,
-        module_binding_names: &[String],
-        result_nb: &ValueWord,
-    ) -> (
-        WireValue,
-        Option<shape_wire::metadata::TypeInfo>,
-        Option<serde_json::Value>,
-        Option<String>,
-        Option<String>,
-    ) {
-        let (content_json, content_html, content_terminal) =
-            shape_runtime::wire_conversion::nb_extract_content(result_nb);
-
-        let runtime = engine.get_runtime_mut();
-        let mut ctx = runtime.persistent_context_mut();
-        let mut type_info = None;
-        let wire_value = if let Some(ctx) = ctx.as_mut() {
-            Self::save_module_bindings_to_context(vm, ctx, module_binding_names);
-            let type_name = result_nb.type_name();
-            type_info = Some(
-                shape_runtime::wire_conversion::nb_to_envelope(result_nb, type_name, ctx).type_info,
-            );
-            shape_runtime::wire_conversion::nb_to_wire(result_nb, ctx)
-        } else {
-            WireValue::Null
-        };
-        (
-            wire_value,
-            type_info,
-            content_json,
-            content_html,
-            content_terminal,
-        )
-    }
-
-    /// Resume execution from a snapshot
-    pub fn resume_snapshot(
-        &self,
-        engine: &mut ShapeEngine,
-        vm_snapshot: shape_runtime::snapshot::VmSnapshot,
-        bytecode: BytecodeProgram,
-    ) -> Result<shape_runtime::engine::ProgramExecutorResult> {
-        let store = engine.snapshot_store().ok_or_else(|| {
-            shape_runtime::error::ShapeError::RuntimeError {
-                message: "Snapshot store not configured".to_string(),
-                location: None,
-            }
-        })?;
-
-        // Reconstruct VM from snapshot
-        let mut vm =
-            VirtualMachine::from_snapshot(bytecode.clone(), &vm_snapshot, store).map_err(|e| {
-                shape_runtime::error::ShapeError::RuntimeError {
-                    message: e.to_string(),
-                    location: None,
-                }
-            })?;
-        vm.set_interrupt(self.interrupt.clone());
-
-        // Register extensions and built-in module_bindings
-        for ext in &self.extensions {
-            vm.register_extension(ext.clone());
-        }
-        vm.populate_module_objects();
-
-        let module_binding_names = bytecode.module_binding_names.clone();
-        let bytecode_for_snapshot = bytecode;
-
-        // Build the Snapshot::Resumed marker to push before first execution cycle
-        let resumed = vm
-            .create_typed_enum_nb("Snapshot", "Resumed", vec![])
-            .unwrap_or_else(|| {
-                ValueWord::from_enum(EnumValue {
-                    enum_name: "Snapshot".to_string(),
-                    variant: "Resumed".to_string(),
-                    payload: EnumPayload::Unit,
-                })
-            });
-
-        let result = self.run_vm_loop(
-            &mut vm,
-            engine,
-            &module_binding_names,
-            &bytecode_for_snapshot,
-            Some(resumed),
-        )?;
-        let (wire_value, type_info, content_json, content_html, content_terminal) =
-            Self::finalize_result(&vm, engine, &module_binding_names, &result);
-
-        Ok(shape_runtime::engine::ProgramExecutorResult {
-            wire_value,
-            type_info,
-            execution_type: ExecutionType::Script,
-            content_json,
-            content_html,
-            content_terminal,
-        })
-    }
-
     /// Compile a program to bytecode without executing it.
     ///
     /// This performs the same compilation pipeline as `execute_program`
     /// (merging core stdlib, extensions, virtual modules) but stops
-    /// before creating a VM or executing.
+    /// before creating a VM or executing. Compilation does not depend on
+    /// the deleted `ValueWord` carrier — it returns `BytecodeProgram`
+    /// directly.
     pub(crate) fn compile_program_impl(
         &mut self,
         engine: &mut ShapeEngine,
@@ -530,13 +57,7 @@ impl BytecodeExecutor {
         }
 
         // Install this engine's runtime-scoped TypeSchemaRegistry as the
-        // ambient handle for the duration of compilation. Compile-time
-        // paths that consult `current_registry()` — predeclared schema
-        // registration, comptime-synthesized TypedObject layouts,
-        // extension module schema merge — otherwise fall back to the
-        // process-global `FALLBACK_PREDECLARED_REGISTRY`, which under
-        // parallel test execution causes schema-ID drift between
-        // concurrent compiles.
+        // ambient handle for the duration of compilation.
         let _schema_scope = engine.runtime.enter_schema_scope();
 
         let runtime = engine.get_runtime_mut();
@@ -546,8 +67,6 @@ impl BytecodeExecutor {
         } else {
             Vec::new()
         };
-
-        Self::extract_and_store_format_hints(program, runtime.persistent_context_mut());
 
         let mut root_program = program.clone();
         crate::module_resolution::annotate_program_native_abi_package_key(
@@ -569,11 +88,6 @@ impl BytecodeExecutor {
         let mut compiler = BytecodeCompiler::new();
         compiler.stdlib_function_names = stdlib_names;
         compiler.register_known_bindings(&known_bindings);
-        Self::register_known_binding_types(
-            &mut compiler,
-            &known_bindings,
-            runtime.persistent_context(),
-        );
 
         if !self.extensions.is_empty() {
             compiler.extension_registry = Some(Arc::new(self.extensions.clone()));
@@ -601,9 +115,6 @@ impl BytecodeExecutor {
     }
 
     /// Compile a program with the same pipeline as execution, but do not run it.
-    ///
-    /// The returned bytecode includes tooling artifacts such as
-    /// `expanded_function_defs` for comptime inspection.
     pub fn compile_program_for_inspection(
         &mut self,
         engine: &mut ShapeEngine,
@@ -612,180 +123,76 @@ impl BytecodeExecutor {
         self.compile_program_impl(engine, program)
     }
 
-    /// Recompile source and resume from a snapshot.
+    /// Resume execution from a snapshot — Phase-2c stub.
     ///
-    /// Compiles the new program to bytecode, finds the snapshot() call
-    /// position in both old and new bytecodes, adjusts the VM snapshot's
-    /// instruction pointer, then resumes execution from the snapshot point
-    /// using the new bytecode.
+    /// The legacy body built a `Snapshot::Resumed` marker via the deleted
+    /// `create_typed_enum_nb` returning a `ValueWord`, pushed it via the
+    /// deleted raw-bits stack push, then ran the suspend/resume loop —
+    /// every step of which depended on `ValueWord` / `EnumValue` /
+    /// `nb_to_wire`. Phase-2c (ADR-006 §2.7.4) rebuilds the marker as a
+    /// kinded `Arc<TypedObjectStorage>` payload + parallel-kind track,
+    /// pushed via `push_kinded(bits, NativeKind::Ptr(HeapKind::TypedObject))`.
+    pub fn resume_snapshot(
+        &self,
+        _engine: &mut ShapeEngine,
+        _vm_snapshot: shape_runtime::snapshot::VmSnapshot,
+        _bytecode: BytecodeProgram,
+    ) -> Result<shape_runtime::engine::ProgramExecutorResult> {
+        Err(shape_runtime::error::ShapeError::RuntimeError {
+            message: "resume_snapshot: snapshot rebuild depends on the deleted \
+                      ValueWord carrier and the deleted `create_typed_enum_nb` / \
+                      `nb_to_wire` host-API surface — Phase-2c, see ADR-006 §2.7.4."
+                .to_string(),
+            location: None,
+        })
+    }
+
+    /// Recompile source and resume from a snapshot — Phase-2c stub.
+    ///
+    /// Same surface as `resume_snapshot`: the snapshot-to-host marker
+    /// hop depends on the deleted `ValueWord` carrier (ADR-006 §2.7.4).
     pub fn recompile_and_resume(
         &mut self,
-        engine: &mut ShapeEngine,
-        mut vm_snapshot: shape_runtime::snapshot::VmSnapshot,
-        old_bytecode: BytecodeProgram,
-        program: &Program,
+        _engine: &mut ShapeEngine,
+        _vm_snapshot: shape_runtime::snapshot::VmSnapshot,
+        _old_bytecode: BytecodeProgram,
+        _program: &Program,
     ) -> Result<shape_runtime::engine::ProgramExecutorResult> {
-        use crate::bytecode::{BuiltinFunction, OpCode, Operand};
-
-        let new_bytecode = self.compile_program_impl(engine, program)?;
-
-        // Find snapshot() call positions (BuiltinCall with Snapshot operand) in old bytecode
-        let old_snapshot_ips: Vec<usize> = old_bytecode
-            .instructions
-            .iter()
-            .enumerate()
-            .filter(|(_, instr)| {
-                instr.opcode == OpCode::BuiltinCall
-                    && matches!(
-                        &instr.operand,
-                        Some(Operand::Builtin(BuiltinFunction::Snapshot))
-                    )
-            })
-            .map(|(i, _)| i)
-            .collect();
-
-        // Same for new bytecode
-        let new_snapshot_ips: Vec<usize> = new_bytecode
-            .instructions
-            .iter()
-            .enumerate()
-            .filter(|(_, instr)| {
-                instr.opcode == OpCode::BuiltinCall
-                    && matches!(
-                        &instr.operand,
-                        Some(Operand::Builtin(BuiltinFunction::Snapshot))
-                    )
-            })
-            .map(|(i, _)| i)
-            .collect();
-
-        // VmSnapshot.ip points to the instruction AFTER the BuiltinCall(Snapshot).
-        // Find which snapshot() in the old bytecode corresponds to the saved IP.
-        let old_snapshot_idx = old_snapshot_ips
-            .iter()
-            .position(|&ip| ip + 1 == vm_snapshot.ip)
-            .ok_or_else(|| shape_runtime::error::ShapeError::RuntimeError {
-                message: format!(
-                    "Could not find snapshot() call in original bytecode at IP {} \
-                     (snapshot calls found at: {:?})",
-                    vm_snapshot.ip, old_snapshot_ips
-                ),
-                location: None,
-            })?;
-
-        // Map to the corresponding snapshot() in the new bytecode (by ordinal)
-        let &new_snapshot_ip = new_snapshot_ips.get(old_snapshot_idx).ok_or_else(|| {
-            shape_runtime::error::ShapeError::RuntimeError {
-                message: format!(
-                    "Recompiled source has {} snapshot() call(s) but resuming from \
-                     snapshot #{} (0-indexed)",
-                    new_snapshot_ips.len(),
-                    old_snapshot_idx
-                ),
-                location: None,
-            }
-        })?;
-
-        // Check for non-empty call stack — recompile mode can only adjust the
-        // top-level IP; return addresses inside function frames would be stale.
-        if !vm_snapshot.call_stack.is_empty() {
-            return Err(shape_runtime::error::ShapeError::RuntimeError {
-                message: "Recompile-and-resume is only supported when snapshot() is called \
-                          at the top level (call stack is non-empty)"
-                    .to_string(),
-                location: None,
-            });
-        }
-
-        // Adjust the snapshot's IP to point after the snapshot() call in new bytecode
-        vm_snapshot.ip = new_snapshot_ip + 1;
-
-        eprintln!(
-            "Remapped snapshot IP: {} -> {} (snapshot #{})",
-            old_snapshot_ips[old_snapshot_idx] + 1,
-            vm_snapshot.ip,
-            old_snapshot_idx
-        );
-
-        self.resume_snapshot(engine, vm_snapshot, new_bytecode)
+        Err(shape_runtime::error::ShapeError::RuntimeError {
+            message: "recompile_and_resume: snapshot resume depends on the \
+                      deleted ValueWord carrier and the kinded suspend/resume \
+                      marker rebuild is Phase-2c (ADR-006 §2.7.4)."
+                .to_string(),
+            location: None,
+        })
     }
 }
 
 impl shape_runtime::engine::ExpressionEvaluator for BytecodeExecutor {
     fn eval_statements(
         &self,
-        stmts: &[shape_ast::Statement],
-        ctx: &mut ExecutionContext,
-    ) -> Result<ValueWord> {
-        // Wrap statements as a program
-        let items: Vec<shape_ast::Item> = stmts
-            .iter()
-            .map(|s| shape_ast::Item::Statement(s.clone(), shape_ast::Span::DUMMY))
-            .collect();
-        let mut program = Program {
-            items,
-            docs: shape_ast::ast::ProgramDocs::default(),
-        };
-        crate::module_resolution::annotate_program_native_abi_package_key(
-            &mut program,
-            self.root_package_key.as_deref(),
-        );
-
-        // Build graph and compile via graph pipeline
-        let mut loader = shape_runtime::module_loader::ModuleLoader::new();
-        let (graph, stdlib_names, prelude_imports) =
-            crate::module_resolution::build_graph_and_stdlib_names(
-                &program,
-                &mut loader,
-                &self.extensions,
-            )?;
-
-        let mut compiler = BytecodeCompiler::new();
-        compiler.stdlib_function_names = stdlib_names;
-        compiler.native_resolution_context = self.native_resolution_context.clone();
-        let bytecode =
-            compiler.compile_with_graph_and_prelude(&program, graph, &prelude_imports)?;
-
-        let module_binding_names = bytecode.module_binding_names.clone();
-        let mut vm = VirtualMachine::new(VMConfig::default());
-        vm.load_program(bytecode);
-        // Register extensions before built-in module_bindings so extensions are also available
-        for ext in &self.extensions {
-            vm.register_extension(ext.clone());
-        }
-        vm.populate_module_objects();
-
-        // Sync inline schemas so wire serialization can resolve TypedObject fields
-        ctx.merge_type_schemas(vm.program.type_schema_registry.clone());
-
-        // Load variables from context
-        for (idx, name) in module_binding_names.iter().enumerate() {
-            if name.is_empty() {
-                continue;
-            }
-            if let Ok(Some(value)) = ctx.get_variable(name) {
-                let is_closure = raw_helpers::extract_closure_info(value.raw_bits()).is_some();
-                if !is_closure {
-                    vm.set_module_binding(idx, value);
-                }
-            }
-        }
-
-        let result_nb =
-            vm.execute(Some(ctx))
-                .map_err(|e| shape_runtime::error::ShapeError::RuntimeError {
-                    message: e.to_string(),
-                    location: None,
-                })?;
-
-        // Save back modified module_bindings
-        Self::save_module_bindings_to_context(&vm, ctx, &module_binding_names);
-
-        Ok(result_nb.clone())
+        _stmts: &[shape_ast::Statement],
+        _ctx: &mut ExecutionContext,
+    ) -> Result<KindedSlot> {
+        // Phase-2c surface (ADR-006 §2.7.4): the legacy implementation
+        // round-tripped the result through `vm.execute()` (which returned
+        // `ValueWord`) and persisted module bindings via
+        // `save_module_bindings_to_context` (which called the deleted
+        // `synthesize_value_word_from_raw`). The kinded rebuild returns
+        // `KindedSlot` directly from a `vm.execute_kinded()` shape and
+        // persists bindings via per-slot `(bits, NativeKind)` writes —
+        // both Phase-2c.
+        Err(shape_runtime::error::ShapeError::RuntimeError {
+            message: "eval_statements: depends on `vm.execute() -> ValueWord` \
+                      and the deleted `synthesize_value_word_from_raw` \
+                      host-boundary path; the kinded `vm.execute_kinded() \
+                      -> KindedSlot` rebuild is Phase-2c (ADR-006 §2.7.4)."
+                .to_string(),
+            location: None,
+        })
     }
 
-    fn eval_expr(&self, expr: &shape_ast::Expr, ctx: &mut ExecutionContext) -> Result<ValueWord> {
-        // Wrap expression as an expression statement
+    fn eval_expr(&self, expr: &shape_ast::Expr, ctx: &mut ExecutionContext) -> Result<KindedSlot> {
         let stmt = shape_ast::Statement::Expression(expr.clone(), shape_ast::Span::DUMMY);
         self.eval_statements(&[stmt], ctx)
     }
@@ -797,246 +204,104 @@ impl ProgramExecutor for BytecodeExecutor {
         engine: &mut ShapeEngine,
         program: &Program,
     ) -> Result<shape_runtime::engine::ProgramExecutorResult> {
-        // Install this engine's per-runtime TypeSchemaRegistry as the
-        // ambient handle for compile + execution. Without a scope,
-        // compile-time predeclared-schema registration falls back to
-        // the process-global FALLBACK_PREDECLARED_REGISTRY, and under
-        // parallel test execution concurrent compiles observe each
-        // other's SchemaIds via that shared cache — producing ID drift
-        // that the VM observes as GetFieldTyped mismatches or stale
-        // slot reads.
+        // Phase 1 — compile (does not depend on the deleted ValueWord).
         let _schema_scope = engine.runtime.enter_schema_scope();
+        let bytecode = self.compile_program_impl(engine, program)?;
 
-        // Capture source text before getting runtime reference (for error messages)
-        let source_for_compilation = engine.current_source().map(|s| s.to_string());
-
-        // Phase 1: Compile and prepare bytecode (borrows runtime, then drops it)
-        let (mut vm, module_binding_names, bytecode_for_snapshot) = {
-            let runtime = engine.get_runtime_mut();
-
-            // Get known module_binding variables from previous REPL sessions
-            let known_bindings: Vec<String> = if let Some(ctx) = runtime.persistent_context() {
-                ctx.root_scope_binding_names()
-            } else {
-                Vec::new()
-            };
-
-            // Extract format hints from variable declarations BEFORE compilation
-            // This preserves metadata that bytecode doesn't carry
-            Self::extract_and_store_format_hints(program, runtime.persistent_context_mut());
-
-            let mut root_program = program.clone();
-            crate::module_resolution::annotate_program_native_abi_package_key(
-                &mut root_program,
-                self.root_package_key.as_deref(),
-            );
-
-            // Inject persisted struct type definitions from previous REPL sessions
-            // so the compiler can see types defined in earlier commands.
-            if let Some(ctx) = runtime.persistent_context() {
-                let current_struct_names: std::collections::HashSet<String> = root_program
-                    .items
-                    .iter()
-                    .filter_map(|item| {
-                        if let shape_ast::ast::Item::StructType(def, _) = item {
-                            Some(def.name.clone())
-                        } else {
-                            None
+        // Build a VM and prime extensions / foreign-function links.
+        // These steps don't reach into the deleted ValueWord carrier
+        // themselves; the host-boundary persistence + completion-value
+        // synthesis is what's deferred to Phase-2c.
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        vm.set_interrupt(self.interrupt.clone());
+        vm.load_program(bytecode);
+        for ext in &self.extensions {
+            vm.register_extension(ext.clone());
+        }
+        // populate_module_objects is itself a Phase-2c stub (see
+        // vm_impl/modules.rs) — calling it is a no-op until the kinded
+        // module-binding cell-storage rebuild lands per ADR-006 §2.7.8 / Q10.
+        vm.populate_module_objects();
+        vm.foreign_fn_handles.clear();
+        if !vm.program.foreign_functions.is_empty() {
+            let entries = vm.program.foreign_functions.clone();
+            let mut handles: Vec<Option<ForeignFunctionHandle>> = Vec::with_capacity(entries.len());
+            let mut native_library_cache: std::collections::HashMap<
+                String,
+                std::sync::Arc<libloading::Library>,
+            > = std::collections::HashMap::new();
+            for (idx, entry) in entries.iter().enumerate() {
+                if let Some(native_spec) = &entry.native_abi {
+                    let linked = crate::executor::native_abi::link_native_function(
+                        native_spec,
+                        &vm.program.native_struct_layouts,
+                        &mut native_library_cache,
+                    )
+                    .map_err(|e| {
+                        shape_runtime::error::ShapeError::RuntimeError {
+                            message: format!(
+                                "Failed to link native function '{}': {}",
+                                entry.name, e
+                            ),
+                            location: None,
                         }
-                    })
-                    .collect();
-                for (name, struct_def) in ctx.struct_type_defs() {
-                    if !current_struct_names.contains(name) {
-                        root_program.items.insert(
-                            0,
-                            shape_ast::ast::Item::StructType(
-                                struct_def.clone(),
-                                shape_ast::ast::Span::DUMMY,
-                            ),
-                        );
-                    }
+                    })?;
+                    vm.program.foreign_functions[idx].dynamic_errors = false;
+                    handles.push(Some(ForeignFunctionHandle::Native(std::sync::Arc::new(
+                        linked,
+                    ))));
+                    continue;
                 }
+                handles.push(None);
             }
+            vm.foreign_fn_handles = handles;
+        }
 
-            // Build module graph and compile via graph pipeline
-            let mut loader = self.module_loader.take().unwrap_or_else(
-                shape_runtime::module_loader::ModuleLoader::new,
-            );
-            let (graph, stdlib_names, prelude_imports) =
-                crate::module_resolution::build_graph_and_stdlib_names(
-                    &root_program,
-                    &mut loader,
-                    &self.extensions,
-                )?;
-            self.module_loader = Some(loader);
-
-            let mut compiler = BytecodeCompiler::new();
-            compiler.stdlib_function_names = stdlib_names;
-            compiler.register_known_bindings(&known_bindings);
-            Self::register_known_binding_types(
-                &mut compiler,
-                &known_bindings,
-                runtime.persistent_context(),
-            );
-            if self.allow_internal_builtins {
-                compiler.allow_internal_builtins = true;
+        // Phase 2 — execute. `vm.execute(ctx)` returns
+        // `Result<KindedSlot, VMError>` (dispatch.rs:25). The slot's
+        // kind is sourced from `BytecodeProgram::top_level_frame.
+        // return_kind` for typed-producer programs and from the
+        // §2.7.7 stack parallel-kind track when the producer pushed a
+        // post-resolution kind directly. No tag-bit decode, no
+        // ValueWord round-trip.
+        let runtime = engine.get_runtime_mut();
+        let mut owned_ctx_fallback;
+        let ctx_borrow: &mut ExecutionContext = match runtime.persistent_context_mut() {
+            Some(ctx) => ctx,
+            None => {
+                // Programs without a persistent ExecutionContext (the
+                // non-REPL `shape run` path) still need a live context
+                // for stdlib I/O dispatch + wire-conversion lookups.
+                // An empty context exposes no host data but satisfies
+                // the borrow.
+                owned_ctx_fallback = ExecutionContext::new_empty();
+                &mut owned_ctx_fallback
             }
+        };
 
-            // Wire extension registry into compiler for comptime execution
-            if !self.extensions.is_empty() {
-                compiler.extension_registry = Some(Arc::new(self.extensions.clone()));
+        let completion: KindedSlot = vm.execute(Some(ctx_borrow)).map_err(|e| {
+            shape_runtime::error::ShapeError::RuntimeError {
+                message: e.to_string(),
+                location: None,
             }
+        })?;
 
-            // Set source directory for compile-time schema validation in data-source calls
-            if let Ok(cwd) = std::env::current_dir() {
-                compiler.set_source_dir(cwd);
-            }
+        // Phase 3 — host-boundary projection. Pull `(bits, kind)` off
+        // the `KindedSlot` once and feed the kinded
+        // `wire_conversion::slot_*` helpers (ADR-006 §2.7.5). The
+        // KindedSlot owns the strong-count share for the duration of
+        // this scope; the helpers read by-pointer and do not consume
+        // the share.
+        let bits = completion.raw();
+        let kind = completion.kind();
 
-            compiler.native_resolution_context = self.native_resolution_context.clone();
-
-            // Wire permission set for compile-time capability checking
-            if let Some(pset) = &self.permission_set {
-                compiler.set_permission_set(Some(pset.clone()));
-            }
-
-            if let Some(source) = &source_for_compilation {
-                compiler.set_source(source);
-            }
-
-            let bytecode = compiler.compile_with_graph_and_prelude(
-                &root_program,
-                graph,
-                &prelude_imports,
-            )?;
-
-            // Save the module_binding names for syncing (includes both new and existing)
-            let module_binding_names = bytecode.module_binding_names.clone();
-
-            // Execute Bytecode
-            let mut vm = VirtualMachine::new(VMConfig::default());
-            vm.set_interrupt(self.interrupt.clone());
-            let bytecode_for_snapshot = bytecode.clone();
-            vm.load_program(bytecode);
-            for ext in &self.extensions {
-                vm.register_extension(ext.clone());
-            }
-            vm.populate_module_objects();
-
-            // Drop stale links from previous runs before relinking this program's foreign table.
-            vm.foreign_fn_handles.clear();
-
-            // Link foreign functions: compile foreign function bodies via language runtime extensions
-            if !vm.program.foreign_functions.is_empty() {
-                let entries = vm.program.foreign_functions.clone();
-                let mut handles = Vec::with_capacity(entries.len());
-                let mut native_library_cache: std::collections::HashMap<
-                    String,
-                    std::sync::Arc<libloading::Library>,
-                > = std::collections::HashMap::new();
-                let runtime_ctx = runtime.persistent_context();
-
-                for (idx, entry) in entries.iter().enumerate() {
-                    if let Some(native_spec) = &entry.native_abi {
-                        let linked = crate::executor::native_abi::link_native_function(
-                            native_spec,
-                            &vm.program.native_struct_layouts,
-                            &mut native_library_cache,
-                        )
-                        .map_err(|e| {
-                            shape_runtime::error::ShapeError::RuntimeError {
-                                message: format!(
-                                    "Failed to link native function '{}': {}",
-                                    entry.name, e
-                                ),
-                                location: None,
-                            }
-                        })?;
-
-                        // Native ABI path is static by contract.
-                        vm.program.foreign_functions[idx].dynamic_errors = false;
-                        handles.push(Some(ForeignFunctionHandle::Native(std::sync::Arc::new(
-                            linked,
-                        ))));
-                        continue;
-                    }
-
-                    let Some(ctx) = runtime_ctx.as_ref() else {
-                        return Err(shape_runtime::error::ShapeError::RuntimeError {
-                            message: format!(
-                                "No runtime context available to link foreign function '{}'",
-                                entry.name
-                            ),
-                            location: None,
-                        });
-                    };
-
-                    if let Some(lang_runtime) = ctx.get_language_runtime(&entry.language) {
-                        // Override the compile-time default with the actual
-                        // runtime's error model now that we have the extension.
-                        vm.program.foreign_functions[idx].dynamic_errors =
-                            lang_runtime.has_dynamic_errors();
-
-                        let compiled = lang_runtime.compile(
-                            &entry.name,
-                            &entry.body_text,
-                            &entry.param_names,
-                            &entry.param_types,
-                            entry.return_type.as_deref(),
-                            entry.is_async,
-                        )?;
-                        handles.push(Some(ForeignFunctionHandle::Runtime {
-                            runtime: lang_runtime,
-                            compiled,
-                        }));
-                    } else {
-                        return Err(shape_runtime::error::ShapeError::RuntimeError {
-                            message: format!(
-                                "No language runtime registered for '{}'. \
-                                 Install the {} extension to use `fn {} ...` blocks.",
-                                entry.language, entry.language, entry.language
-                            ),
-                            location: None,
-                        });
-                    }
-                }
-                vm.foreign_fn_handles = handles;
-            }
-
-            let module_binding_registry = runtime.module_binding_registry();
-            let mut ctx = runtime.persistent_context_mut();
-
-            // Load existing variables from context and module_binding registry into VM before execution
-            if let Some(ctx) = ctx.as_mut() {
-                // Sync inline schemas so wire serialization can resolve TypedObject fields
-                ctx.merge_type_schemas(vm.program.type_schema_registry.clone());
-
-                Self::load_module_bindings_from_context(
-                    &mut vm,
-                    ctx,
-                    &module_binding_registry,
-                    &module_binding_names,
-                );
-            }
-
-            (vm, module_binding_names, bytecode_for_snapshot)
-        }; // runtime borrow ends here
-
-        // Phase 2: Execute bytecode (re-borrows runtime for ctx)
-        let result = self.run_vm_loop(
-            &mut vm,
-            engine,
-            &module_binding_names,
-            &bytecode_for_snapshot,
-            None,
-        )?;
-
-        // Phase 3: Save VM module_bindings back to context after execution
-        let (wire_value, type_info, content_json, content_html, content_terminal) =
-            Self::finalize_result(&vm, engine, &module_binding_names, &result);
+        let envelope = wire_conversion::slot_to_envelope(bits, kind, "", ctx_borrow);
+        let (content_json, content_html, content_terminal) =
+            wire_conversion::slot_extract_content(bits, kind);
 
         Ok(shape_runtime::engine::ProgramExecutorResult {
-            wire_value,
-            type_info,
+            wire_value: envelope.value,
+            type_info: Some(envelope.type_info),
             execution_type: ExecutionType::Script,
             content_json,
             content_html,
@@ -1047,251 +312,18 @@ impl ProgramExecutor for BytecodeExecutor {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::bytecode::OpCode;
-    use crate::bytecode::Operand;
-    use crate::executor::VirtualMachine;
-    use shape_runtime::snapshot::{SnapshotStore, VmSnapshot};
-
-    #[test]
-    fn snapshot_resume_keeps_snapshot_enum_matching_after_bytecode_roundtrip() {
-        let source = r#"
-from std::core::snapshot use { Snapshot }
-
-function checkpointed(x) {
-  let snap = snapshot()
-  match snap {
-    Snapshot::Hash(id) => id,
-    Snapshot::Resumed => x + 1
-  }
-}
-
-checkpointed(41)
-"#;
-
-        let temp = tempfile::tempdir().expect("tempdir");
-        let store = SnapshotStore::new(temp.path()).expect("snapshot store");
-
-        let mut engine = ShapeEngine::new().expect("engine");
-        engine.load_stdlib().expect("load stdlib");
-        engine.enable_snapshot_store(store.clone());
-
-        let mut executor_first = BytecodeExecutor::new();
-        let first_result = engine
-            .execute(&mut executor_first, source)
-            .expect("first execute should succeed");
-        assert!(
-            first_result.value.as_str().is_some(),
-            "first run should return snapshot hash string from Snapshot::Hash arm, got {:?}",
-            first_result.value
-        );
-
-        let snapshot_id = engine
-            .last_snapshot()
-            .cloned()
-            .expect("snapshot id should be recorded");
-        let (semantic, context, vm_hash, bytecode_hash) = engine
-            .load_snapshot(&snapshot_id)
-            .expect("load snapshot metadata");
-        engine
-            .apply_snapshot(semantic, context)
-            .expect("apply snapshot context");
-
-        let vm_hash = vm_hash.expect("vm hash should be present");
-        let bytecode_hash = bytecode_hash.expect("bytecode hash should be present");
-        let vm_snapshot: VmSnapshot = store.get_struct(&vm_hash).expect("deserialize vm snapshot");
-        let bytecode: BytecodeProgram = store
-            .get_struct(&bytecode_hash)
-            .expect("deserialize bytecode");
-        let resume_ip = vm_snapshot.ip;
-        assert!(
-            resume_ip < bytecode.instructions.len(),
-            "snapshot resume ip should be within instruction stream"
-        );
-        assert_eq!(
-            bytecode.instructions[resume_ip].opcode,
-            OpCode::StoreLocal,
-            "snapshot resume ip should point to StoreLocal consuming snapshot() value"
-        );
-
-        let snapshot_schema = bytecode
-            .type_schema_registry
-            .get("Snapshot")
-            .expect("bytecode should contain Snapshot schema");
-        let snapshot_schema_id = snapshot_schema.id as u16;
-        let snapshot_by_id = bytecode
-            .type_schema_registry
-            .get_by_id(snapshot_schema.id)
-            .expect("Snapshot schema id should resolve");
-        assert_eq!(
-            snapshot_by_id.name, "Snapshot",
-            "schema id mapping should resolve back to Snapshot"
-        );
-        let resumed_variant_id = snapshot_schema
-            .get_enum_info()
-            .and_then(|info| info.variant_id("Resumed"))
-            .expect("Snapshot::Resumed variant should exist");
-
-        let typed_field_type_ids: Vec<u16> = bytecode
-            .instructions
-            .iter()
-            .filter_map(|instruction| match instruction.operand {
-                Some(Operand::TypedField {
-                    type_id, field_idx, ..
-                }) if field_idx == 0 => Some(type_id),
-                _ => None,
-            })
-            .collect();
-        assert!(
-            typed_field_type_ids.contains(&snapshot_schema_id),
-            "match bytecode should reference Snapshot schema id {} (found typed field ids {:?})",
-            snapshot_schema_id,
-            typed_field_type_ids
-        );
-
-        let vm_probe = VirtualMachine::from_snapshot(bytecode.clone(), &vm_snapshot, &store)
-            .expect("vm probe");
-        let resumed_probe = vm_probe
-            .create_typed_enum_nb("Snapshot", "Resumed", vec![])
-            .expect("create typed Snapshot::Resumed");
-        let (probe_schema_id, probe_slots, _) = resumed_probe
-            .as_typed_object()
-            .expect("resumed marker should be typed object");
-        assert_eq!(
-            probe_schema_id as u16, snapshot_schema_id,
-            "resume marker schema should match compiled Snapshot schema"
-        );
-        assert!(
-            !probe_slots.is_empty(),
-            "typed enum marker should include variant discriminator slot"
-        );
-        assert_eq!(
-            probe_slots[0].as_i64() as u16,
-            resumed_variant_id,
-            "resume marker variant id should be Snapshot::Resumed"
-        );
-
-        // Intentionally use a fresh executor to mimic a new process / session
-        // where stdlib schema IDs may differ.
-        let executor_resume = BytecodeExecutor::new();
-        let resumed_result = executor_resume
-            .resume_snapshot(&mut engine, vm_snapshot, bytecode)
-            .expect("resume should succeed");
-
-        assert_eq!(
-            resumed_result.wire_value.as_number(),
-            Some(42.0),
-            "resume should take Snapshot::Resumed arm"
-        );
-    }
-
-    #[test]
-    fn snapshot_resumed_variant_matches_without_resume_flow() {
-        let source = r#"
-from std::core::snapshot use { Snapshot }
-
-let marker = Snapshot::Resumed
-match marker {
-  Snapshot::Hash(id) => 0,
-  Snapshot::Resumed => 1
-}
-"#;
-
-        let mut engine = ShapeEngine::new().expect("engine");
-        engine.load_stdlib().expect("load stdlib");
-        let mut executor = BytecodeExecutor::new();
-        let result = engine.execute(&mut executor, source).expect("execute");
-        assert_eq!(
-            result.value.as_number(),
-            Some(1.0),
-            "Snapshot::Resumed pattern should match direct enum constructor value"
-        );
-    }
-
-    #[test]
-    fn stdlib_json_value_methods_can_use_internal_json_builtins() {
-        let source = r#"
-use std::core::json_value
-
-let value = Json::Null
-value.is_null()
-"#;
-
-        let mut engine = ShapeEngine::new().expect("engine");
-        engine.load_stdlib().expect("load stdlib");
-        let mut executor = BytecodeExecutor::new();
-        let result = engine
-            .execute(&mut executor, source)
-            .expect("json_value module should execute successfully");
-        assert_eq!(result.value.as_bool(), Some(true));
-    }
-
-    #[test]
-    fn snapshot_resume_direct_vm_from_snapshot_with_marker() {
-        let source = r#"
-from std::core::snapshot use { Snapshot }
-
-function checkpointed(x) {
-  let snap = snapshot()
-  match snap {
-    Snapshot::Hash(id) => id,
-    Snapshot::Resumed => x + 1
-  }
-}
-
-checkpointed(41)
-"#;
-
-        let temp = tempfile::tempdir().expect("tempdir");
-        let store = SnapshotStore::new(temp.path()).expect("snapshot store");
-
-        let mut engine = ShapeEngine::new().expect("engine");
-        engine.load_stdlib().expect("load stdlib");
-        engine.enable_snapshot_store(store.clone());
-
-        let mut executor = BytecodeExecutor::new();
-        let _ = engine
-            .execute(&mut executor, source)
-            .expect("first execute");
-
-        let snapshot_id = engine
-            .last_snapshot()
-            .cloned()
-            .expect("snapshot id should be recorded");
-        let (_semantic, _context, vm_hash, bytecode_hash) = engine
-            .load_snapshot(&snapshot_id)
-            .expect("load snapshot metadata");
-        let vm_hash = vm_hash.expect("vm hash");
-        let bytecode_hash = bytecode_hash.expect("bytecode hash");
-        let vm_snapshot: VmSnapshot = store.get_struct(&vm_hash).expect("vm snapshot");
-        let bytecode: BytecodeProgram = store.get_struct(&bytecode_hash).expect("bytecode");
-
-        let mut vm = VirtualMachine::from_snapshot(bytecode, &vm_snapshot, &store).expect("vm");
-        let resumed = vm
-            .create_typed_enum_nb("Snapshot", "Resumed", vec![])
-            .expect("typed resumed marker");
-        vm.push_raw_u64(resumed).expect("push marker");
-
-        let result = vm.execute_with_suspend(None).expect("vm execute");
-        let value = match result {
-            crate::VMExecutionResult::Completed(v) => v,
-            crate::VMExecutionResult::Suspended { .. } => panic!("unexpected suspension"),
-        };
-        // Wave E+5.5: `execute_with_suspend` returns raw native bits in
-        // its `Completed` arm; the host boundary applies
-        // `synthesize_value_word_from_raw` per the program's typed
-        // return kind to recover a tagged ValueWord. Mirrors the same
-        // synthesis hop in `vm.execute()` (dispatch.rs:31) and
-        // `run_vm_loop`'s Completed arm (execution.rs:259).
-        let return_kind = vm.program_top_level_return_kind();
-        let synthesized = crate::executor::dispatch::synthesize_value_word_from_raw(
-            value.into_raw_bits(),
-            return_kind,
-        );
-        assert_eq!(
-            synthesized.as_i64(),
-            Some(42),
-            "direct VM resume should return 42"
-        );
-    }
+    // The snapshot-resume integration tests (snapshot_resume_keeps_…,
+    // snapshot_resumed_variant_matches_without_resume_flow,
+    // stdlib_json_value_methods_can_use_internal_json_builtins,
+    // snapshot_resume_direct_vm_from_snapshot_with_marker) all asserted
+    // on `WireValue::as_number()` / `as_str()` / `as_bool()` round-trips
+    // through the deleted ValueWord host boundary, plus called the
+    // deleted `vm.create_typed_enum_nb` / `synthesize_value_word_from_raw`
+    // helpers directly. They land in the Phase-2c snapshot rebuild
+    // session along with their host-API counterparts (ADR-006 §2.7.4).
+    //
+    // No tests are kept in this module for the duration of the surface;
+    // the integration coverage lives in
+    // `crates/shape-vm/src/lib_tests_parts/` once the kinded host-API
+    // returns.
 }

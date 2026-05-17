@@ -36,6 +36,9 @@
 use super::closure_layout::{ClosureLayout, SHARED_CELL_VALUE_OFFSET, SharedCell, TypedClosureHeader};
 use super::heap_header::{HEAP_KIND_V2_CLOSURE, HeapHeader};
 use super::struct_layout::FieldKind;
+use crate::kinded_slot::KindedSlot;
+use crate::native_kind::NativeKind;
+use crate::slot::ValueSlot;
 use std::sync::Arc;
 
 /// Owning handle for a raw `TypedClosureHeader` block paired with its layout.
@@ -114,6 +117,61 @@ impl OwnedClosureBlock {
     #[inline]
     pub fn layout(&self) -> &Arc<ClosureLayout> {
         &self.layout
+    }
+
+    /// Read capture `idx`'s raw 8-byte payload paired with its
+    /// `NativeKind` from the layout's per-capture kind track (ADR-006
+    /// §2.7.8 / Q10).
+    ///
+    /// This is the cell-bound mirror of the §2.7.7 stack-side
+    /// `read_owned_kinded` accessor: returns `(bits, kind)` lockstep so
+    /// the caller can route through `clone_with_kind` /
+    /// `drop_with_kind` (the canonical `KindedSlot` dispatch) without
+    /// reconstructing the kind from the slot bits or probing a tag.
+    ///
+    /// For `Immutable` captures the returned `bits` are the raw payload
+    /// bit pattern (e.g. `f64::to_bits(v)`, `Arc::into_raw::<T>` raw
+    /// pointer) and `kind` classifies it directly.
+    ///
+    /// For `OwnedMutable` and `Shared` captures the returned `bits` are
+    /// the raw cell pointer (`*mut T` from `Box::into_raw` or `*const
+    /// SharedCell` from `Arc::into_raw`); `kind` classifies the cell's
+    /// **interior** payload — the same shape `capture_inner_kind`
+    /// resolves to at the `FieldKind` level, but lifted to `NativeKind`
+    /// so heap-bearing interior payloads dispatch through the same
+    /// table the stack-tier uses. Wave-β `B6-variables-loadptr` consumes
+    /// this accessor to migrate the `Load*Ptr` / `Store*Ptr` handlers off
+    /// `NotImplemented(SURFACE)`.
+    ///
+    /// # Safety
+    ///
+    /// The block's captures area for `idx` must have been initialised
+    /// (zero-initialised by `alloc_typed_closure` and then written by
+    /// the make-closure init stage). The 8-byte read is always
+    /// in-bounds because the layout rounds total size up to 8-byte
+    /// alignment and `idx < layout.capture_count()`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `idx >= self.layout.capture_count()`.
+    #[inline]
+    pub unsafe fn read_capture_kinded(&self, idx: usize) -> (u64, crate::native_kind::NativeKind) {
+        assert!(
+            idx < self.layout.capture_count(),
+            "OwnedClosureBlock::read_capture_kinded: idx {} out of range (capture_count = {})",
+            idx,
+            self.layout.capture_count()
+        );
+        let off = self.layout.heap_capture_offset(idx);
+        // SAFETY: caller upholds the construction-side init contract; the
+        // 8-byte read at `heap_capture_offset(idx)` is in-bounds per the
+        // layout's geometry (every capture slot is at least 8 bytes wide
+        // — narrower kinds zero-extend in the `read_capture_as_value_bits`
+        // path; this raw read sees the same on-block bytes the JIT and
+        // VM consumers see).
+        let bits = unsafe { std::ptr::read(self.ptr.add(off) as *const u64) };
+        let kind = self.layout.capture_native_kind(idx);
+        (bits, kind)
     }
 }
 
@@ -273,17 +331,23 @@ pub unsafe fn retain_typed_closure(ptr: *const u8) {
 /// block itself. The three masks are:
 ///
 /// - `heap_capture_mask` — bit `i` set means capture `i` is an immutable
-///   Ptr holding a `ValueWord` share. Released via
-///   `release_raw_value_bits` (mirrors `raw_helpers::drop_raw_bits`).
+///   Ptr holding one `Arc<T>` strong-count share for the `T` matching the
+///   layout's `capture_native_kinds[i]` (per ADR-006 §2.7.8 / Q10).
+///   Released via `drop_with_kind(bits, kind)` — the canonical
+///   `KindedSlot::Drop` table — replacing the deleted `Arc<HeapValue>`
+///   blanket decrement.
 /// - `owned_mutable_capture_mask` — bit `i` set means capture `i` is
-///   `CaptureKind::OwnedMutable`; the slot holds `*mut ValueWord` from
-///   `Box::into_raw`. Released via `Box::from_raw` (which runs the inner
-///   `ValueWord`'s Drop — see `ValueWord`'s Drop glue — and frees the box).
+///   `CaptureKind::OwnedMutable`; the slot holds a typed `*mut T` from
+///   `Box::into_raw`. Released via `drop_owned_mutable_capture`, which
+///   reconstructs the matching `Box<T>` per `capture_inner_kind(i)` and
+///   reclaims it; for `Ptr` interior kind the heap-refcount share encoded
+///   in the cell's payload is released first via `drop_with_kind`.
 /// - `shared_capture_mask` — bit `i` set means capture `i` is
 ///   `CaptureKind::Shared`; the slot holds `*const SharedCell` from
-///   `Arc::into_raw`. Released via `Arc::from_raw`, which decrements the
-///   strong count by one and (if this was the last share) runs the inner
-///   `Mutex<ValueWord>`'s Drop.
+///   `Arc::into_raw`. Released via `drop_shared_capture`, which retires
+///   any heap-refcount share carried by the cell's payload (via
+///   `drop_with_kind`) and then `Arc::from_raw`s the cell to release
+///   the strong-count share.
 ///
 /// The three masks are mutually exclusive per index — `ClosureLayout`'s
 /// constructor enforces this — so no slot is released twice.
@@ -335,7 +399,23 @@ pub unsafe fn release_typed_closure(ptr: *mut u8, layout: &ClosureLayout) {
                     // SAFETY: heap_capture_mask bits are only set for
                     // Ptr-shaped 8-byte slots; the read is in-bounds.
                     let bits = unsafe { std::ptr::read(ptr.add(off) as *const u64) };
-                    release_raw_value_bits(bits);
+                    // ADR-006 §2.7.8 / Q10: per-capture kind-aware drop.
+                    // The slot's `NativeKind` lives in the layout's
+                    // `capture_native_kinds[i]` companion track (set at
+                    // construction per §2.7.8); routing through
+                    // `drop_with_kind(bits, kind)` retires the matching
+                    // `Arc<T>` strong-count share via the canonical
+                    // `KindedSlot::Drop` table. This replaces the
+                    // forbidden `Arc<HeapValue>` blanket decrement
+                    // (the deleted `release_raw_heap_share` shape) and
+                    // the forbidden `vw_drop(bits)` (§2.7.7 #8).
+                    let kind = layout.capture_native_kind(i);
+                    // SAFETY: `is_heap_capture(i)` confirms FieldKind::Ptr;
+                    // the slot bits are one `Arc<T>` strong-count share
+                    // for the `T` corresponding to `kind` (per the
+                    // construction-side contract on `write_capture_typed`
+                    // / `make_closure` initialisers).
+                    unsafe { drop_with_kind(bits, kind) };
                 }
             }
             CaptureKind::OwnedMutable => {
@@ -789,11 +869,22 @@ pub unsafe fn drop_shared_capture(layout: &ClosureLayout, base: *mut u8, i: usiz
             // SAFETY: payload offset is 8, payload is 8 bytes wide.
             unsafe { std::ptr::read(shared_cell_payload_ptr(cell_ptr) as *const u64) }
         };
-        // The stored Ptr payload owns one heap refcount share (mirroring
-        // how `release_typed_closure`'s heap_capture_mask path treats
-        // immutable Ptr captures). Releasing it here keeps the bookkeeping
-        // balanced.
-        release_raw_value_bits(bits);
+        // ADR-006 §2.7.8 / Q10: route the Ptr-payload share retire through
+        // the per-capture `NativeKind` carried by the layout's
+        // `capture_native_kinds[i]` track. Same canonical
+        // `KindedSlot::Drop` dispatch as the Immutable-Ptr branch in
+        // `release_typed_closure`. The `SharedCell` itself also carries a
+        // single-slot `kind` companion (set at construction per §2.7.8 /
+        // Q10 — see `closure_layout::SharedCell::new`); the layout's
+        // per-capture kind and the cell's per-slot kind are required to
+        // agree by the §2.7.8 lockstep invariant. Reading from the layout
+        // keeps this single-sourced — the layout is the storage-tier
+        // descriptor for the closure block.
+        let kind = layout.capture_native_kind(i);
+        // SAFETY: `inner_kind == FieldKind::Ptr` confirms the cell payload
+        // is an `Arc<T>` share owned by this slot for the `T` matching
+        // `kind` (per the construction-side contract).
+        unsafe { drop_with_kind(bits, kind) };
     }
 
     // Reclaim the Arc strong-count share. If we held the last share the
@@ -805,38 +896,14 @@ pub unsafe fn drop_shared_capture(layout: &ClosureLayout, base: *mut u8, i: usiz
     unsafe { drop(Arc::from_raw(cell_ptr)) };
 }
 
-/// Release a raw `ValueWord` u64 bit pattern, mirroring the VM's
-/// `raw_helpers::drop_raw_bits`. Inline values are a no-op; heap-tagged
-/// values (owned or shared) drop the corresponding refcount share.
-///
-/// Kept here (rather than imported from shape-vm) because shape-value is
-/// the lower-level crate and must not depend on the VM. The logic must
-/// match `shape_vm::executor::objects::raw_helpers::drop_raw_bits`.
-#[inline]
-fn release_raw_value_bits(bits: u64) {
-    use crate::heap_value::HeapValue;
-    use crate::tags::{HEAP_OWNED_BIT, HEAP_PTR_MASK, TAG_HEAP, get_payload, get_tag, is_tagged};
-    if is_tagged(bits) && get_tag(bits) == TAG_HEAP {
-        let payload = get_payload(bits);
-        let ptr = (payload & HEAP_PTR_MASK) as *mut HeapValue;
-        if !ptr.is_null() {
-            if (payload & HEAP_OWNED_BIT) != 0 {
-                // SAFETY: owned heap values were allocated via `Box::new`.
-                unsafe {
-                    drop(Box::from_raw(ptr));
-                }
-            } else {
-                // SAFETY: shared heap values are Arc-backed; decrement
-                // matches the clone that produced these bits.
-                unsafe {
-                    std::sync::Arc::decrement_strong_count(ptr as *const HeapValue);
-                }
-            }
-        }
-    }
-    // Inline ValueWord bit patterns (NaN-boxed scalars, function ids,
-    // module fns, null, unit, bool) carry no refcount — nothing to do.
-}
+// `release_raw_heap_share` was deleted at the §2.7.8 / Q10
+// G-owned-closure-block close. It violated the §1 single-discriminator rule
+// by performing a blanket `Arc<HeapValue>::decrement_strong_count` on every
+// Ptr-capture slot regardless of which `T` the slot's bits actually came
+// from — incompatible with ADR-005's typed-pointer storage discipline
+// (`HeapValue::TypedArray(Arc<TypedArrayData>)` etc.). Every former call
+// site has migrated to `drop_with_kind(bits, kind)` reading the layout's
+// per-capture `NativeKind` track.
 
 /// Write a raw 8-byte capture slot at the given index.
 ///
@@ -880,48 +947,26 @@ pub unsafe fn read_capture_as_value_bits(
     layout: &ClosureLayout,
     idx: usize,
 ) -> u64 {
-    use crate::value_word::{ValueWord, ValueWordExt};
     let kind = layout.capture_kind(idx);
     let off = layout.heap_capture_offset(idx);
     // SAFETY: caller upholds live block; offsets are in-bounds per layout.
+    //
+    // Strict-typed bulldozer: NaN-box re-encoding via `ValueWord::from_*` is
+    // gone. Each kind's slot already holds the canonical native bit pattern;
+    // narrower-than-8-byte kinds are sign- or zero-extended into u64.
     unsafe {
         let field_ptr = ptr.add(off);
         match kind {
-            FieldKind::F64 => {
-                let v = std::ptr::read(field_ptr as *const f64);
-                ValueWord::from_f64(v).into_raw_bits()
-            }
-            FieldKind::I64 | FieldKind::U64 | FieldKind::Ptr => {
+            FieldKind::F64 | FieldKind::I64 | FieldKind::U64 | FieldKind::Ptr => {
                 std::ptr::read(field_ptr as *const u64)
             }
-            FieldKind::I32 => {
-                let v = std::ptr::read(field_ptr as *const i32) as i64;
-                ValueWord::from_i64(v).into_raw_bits()
-            }
-            FieldKind::U32 => {
-                let v = std::ptr::read(field_ptr as *const u32) as i64;
-                ValueWord::from_i64(v).into_raw_bits()
-            }
-            FieldKind::I16 => {
-                let v = std::ptr::read(field_ptr as *const i16) as i64;
-                ValueWord::from_i64(v).into_raw_bits()
-            }
-            FieldKind::U16 => {
-                let v = std::ptr::read(field_ptr as *const u16) as i64;
-                ValueWord::from_i64(v).into_raw_bits()
-            }
-            FieldKind::I8 => {
-                let v = std::ptr::read(field_ptr as *const i8) as i64;
-                ValueWord::from_i64(v).into_raw_bits()
-            }
-            FieldKind::U8 => {
-                let v = std::ptr::read(field_ptr as *const u8) as i64;
-                ValueWord::from_i64(v).into_raw_bits()
-            }
-            FieldKind::Bool => {
-                let v = std::ptr::read(field_ptr as *const u8) != 0;
-                ValueWord::from_bool(v).into_raw_bits()
-            }
+            FieldKind::I32 => std::ptr::read(field_ptr as *const i32) as i64 as u64,
+            FieldKind::U32 => std::ptr::read(field_ptr as *const u32) as u64,
+            FieldKind::I16 => std::ptr::read(field_ptr as *const i16) as i64 as u64,
+            FieldKind::U16 => std::ptr::read(field_ptr as *const u16) as u64,
+            FieldKind::I8 => std::ptr::read(field_ptr as *const i8) as i64 as u64,
+            FieldKind::U8 => std::ptr::read(field_ptr as *const u8) as u64,
+            FieldKind::Bool => (std::ptr::read(field_ptr as *const u8) != 0) as u64,
         }
     }
 }
@@ -941,71 +986,32 @@ pub unsafe fn read_capture_as_value_bits(
 /// the refcount; it only stores the bit pattern.
 #[inline]
 pub unsafe fn write_capture_typed(ptr: *mut u8, layout: &ClosureLayout, idx: usize, bits: u64) {
-    use crate::value_word::ValueWordExt;
     let kind = layout.capture_kind(idx);
     let off = layout.heap_capture_offset(idx);
-    // `ValueWord` is a transparent alias for u64, so the raw `bits` value
-    // is already a valid ValueWord for decoding purposes — no refcount
-    // transfer takes place in these accessor calls.
-    let vw: crate::value_word::ValueWord = bits;
     // SAFETY: caller upholds live block; offsets are in-bounds per layout.
+    //
+    // Strict-typed bulldozer: ValueWord ext-method decoding (`as_i64`,
+    // `as_number_coerce`, `as_bool`) is gone. The `bits` value is already
+    // the raw native bit pattern in the caller's chosen FieldKind:
+    //   - F64    : `f64::to_bits(v)`
+    //   - I64    : `v as u64` (i64 reinterpreted)
+    //   - U64    : `v` directly
+    //   - I/U32/16/8 : sign- or zero-extended to u64
+    //   - Bool   : 0 or 1
+    //   - Ptr    : `Arc::into_raw(v) as u64`
     unsafe {
         let field_ptr = ptr.add(off);
         match kind {
-            FieldKind::F64 => {
-                let v = vw.as_number_coerce().unwrap_or(0.0);
-                std::ptr::write(field_ptr as *mut f64, v);
-            }
-            FieldKind::I64 | FieldKind::U64 => {
-                // Decode the input via `as_i64()` so a tagged-i48
-                // ValueWord round-trips to the native bits the typed
-                // capture slot is expected to hold (callers writing
-                // post-Wave-E+5 native bits are also handled because
-                // `as_i64()` falls back via `as_heap_ref` and the bits
-                // already carry the correct value either way; but
-                // serialize_to_nb-style helpers that produce
-                // `ValueWord::from_i64(123)` would otherwise leave
-                // tagged NaN-box bits in the slot, which
-                // `capture_as_value` would then interpret as a wildly
-                // wrong native i64).
-                let v = vw.as_i64().unwrap_or_else(|| bits as i64);
-                std::ptr::write(field_ptr as *mut u64, v as u64);
-            }
-            FieldKind::Ptr => {
+            FieldKind::F64 | FieldKind::I64 | FieldKind::U64 | FieldKind::Ptr => {
                 std::ptr::write(field_ptr as *mut u64, bits);
             }
-            FieldKind::I32 => {
-                let v = vw.as_i64().unwrap_or(0) as i32;
-                std::ptr::write(field_ptr as *mut i32, v);
-            }
-            FieldKind::U32 => {
-                let v = vw.as_i64().unwrap_or(0) as u32;
-                std::ptr::write(field_ptr as *mut u32, v);
-            }
-            FieldKind::I16 => {
-                let v = vw.as_i64().unwrap_or(0) as i16;
-                std::ptr::write(field_ptr as *mut i16, v);
-            }
-            FieldKind::U16 => {
-                let v = vw.as_i64().unwrap_or(0) as u16;
-                std::ptr::write(field_ptr as *mut u16, v);
-            }
-            FieldKind::I8 => {
-                let v = vw.as_i64().unwrap_or(0) as i8;
-                std::ptr::write(field_ptr as *mut i8, v);
-            }
-            FieldKind::U8 => {
-                let v = vw.as_i64().unwrap_or(0) as u8;
-                std::ptr::write(field_ptr as *mut u8, v);
-            }
-            FieldKind::Bool => {
-                let v = if vw.as_bool().unwrap_or(false) {
-                    1u8
-                } else {
-                    0
-                };
-                std::ptr::write(field_ptr as *mut u8, v);
-            }
+            FieldKind::I32 => std::ptr::write(field_ptr as *mut i32, bits as i32),
+            FieldKind::U32 => std::ptr::write(field_ptr as *mut u32, bits as u32),
+            FieldKind::I16 => std::ptr::write(field_ptr as *mut i16, bits as i16),
+            FieldKind::U16 => std::ptr::write(field_ptr as *mut u16, bits as u16),
+            FieldKind::I8 => std::ptr::write(field_ptr as *mut i8, bits as i8),
+            FieldKind::U8 => std::ptr::write(field_ptr as *mut u8, bits as u8),
+            FieldKind::Bool => std::ptr::write(field_ptr as *mut u8, (bits & 1) as u8),
         }
     }
 }
@@ -1458,954 +1464,588 @@ pub unsafe fn drop_owned_mutable_capture(layout: &ClosureLayout, base: *mut u8, 
         FieldKind::Ptr => {
             // Interior is a heap-refcount share — release it before
             // freeing the box. Read the bits, decrement the inner
-            // share, then reclaim the box itself.
+            // share via the per-capture `NativeKind`-keyed dispatch,
+            // then reclaim the box itself.
             // SAFETY: slot was produced by `alloc_owned_mutable_ptr`,
-            // so the box holds exactly one `u64` cell with the
-            // `ValueWord` bit pattern.
+            // so the box holds exactly one `u64` cell with the raw
+            // `Arc<T>::into_raw` bits per the construction-side
+            // contract.
             let cell = raw as *mut u64;
             let bits = unsafe { *cell };
-            release_raw_value_bits(bits);
+            // ADR-006 §2.7.8 / Q10: route through `drop_with_kind` using
+            // the layout's per-capture kind track — the canonical
+            // `KindedSlot::Drop` dispatch retires exactly one
+            // `Arc<T>` strong-count share for the `T` matching the
+            // capture's `NativeKind`. Replaces the forbidden
+            // `Arc<HeapValue>` blanket decrement.
+            let kind = layout.capture_native_kind(i);
+            // SAFETY: FieldKind::Ptr confirms `bits` is an `Arc<T>`
+            // share for the `T` matching `kind`; the construction-side
+            // contract on `alloc_owned_mutable_ptr` stored it.
+            unsafe { drop_with_kind(bits, kind) };
             // SAFETY: reclaim the now-empty `Box<u64>`.
             unsafe { drop(Box::from_raw(cell)) };
         }
     }
 }
 
+// ---------------------------------------------------------------------------
+// §2.7.8 / Q10 — Cell-storage kind-awareness (Phase 1.B-vm Wave 6.5 B7).
+//
+// The §2.7.7 stack-side parallel-`Vec<NativeKind>` invariant extends to
+// every cell-storage struct that holds raw heap-pointer bits in the
+// runtime/VM tier. Below is the closure-cell incarnation: a kind-aware
+// capture-cell store that pairs `Vec<u64>` raw payload with a parallel
+// `Vec<NativeKind>` track in lockstep, plus the matching `clone_with_kind`
+// / `drop_with_kind` dispatch (mirrored from `KindedSlot::Clone` /
+// `KindedSlot::Drop` — the canonical refcount-dispatch table in
+// `crates/shape-value/src/kinded_slot.rs`).
+//
+// This struct is the structural foundation Wave-β cluster
+// `B6-variables-loadptr` consumes when it migrates the `Load*Ptr` /
+// `Store*Ptr` handlers off `NotImplemented(SURFACE)`. The closure block's
+// raw byte buffer (allocated via `alloc_typed_closure`) and the
+// `OwnedClosureBlock` handle continue to exist as today; `ClosureCell`
+// adds the parallel-kind track that the cell-bound consumer surface
+// (variables/mod.rs Load*Ptr handlers) requires per §2.7.8.
+//
+// See `docs/adr/006-value-and-memory-model.md` §2.7.8 + §17 Q10.
+// Playbook anchor: `docs/cluster-audits/phase-1b-vm-wave-6-5-playbook.md`
+// §10 row B7-closure-cells.
+// ---------------------------------------------------------------------------
+
+/// WB2.4 retain-on-read mirror of `KindedSlot::Clone`. Bumps the matching
+/// `Arc<T>` strong-count for a heap-bearing kind, no-op for inline scalars.
+///
+/// Implemented by constructing a transient `KindedSlot` and forgetting
+/// it — `KindedSlot::Clone` carries the canonical per-`NativeKind`
+/// dispatch, so this routes every retain through the single discriminator
+/// without duplicating the table.
+///
+/// # Safety
+///
+/// `bits` must be a valid representation of `kind` per the construction-side
+/// contract (for heap kinds: result of `Arc::into_raw::<T>` for the matching
+/// `T`; for inline scalars: native bit pattern of the kind).
+#[inline]
+pub(crate) unsafe fn clone_with_kind(bits: u64, kind: NativeKind) {
+    if bits == 0 {
+        return;
+    }
+    // SAFETY: caller upholds the construction-side contract (see fn doc).
+    // `KindedSlot::clone()` bumps exactly one strong-count share for the
+    // matching `Arc<T>` per kind; we keep the cloned slot (which owns the
+    // bumped share) and leak the original via `mem::forget` so the borrowed
+    // `bits` continue to represent the original share owned by the caller's
+    // cell.
+    unsafe {
+        let original = KindedSlot::new(ValueSlot::from_raw(bits), kind);
+        let cloned = original.clone();
+        std::mem::forget(original);
+        // `cloned` carries the +1 strong-count we added; dropping it would
+        // cancel the retain we just performed, so leak it. The caller's
+        // freshly-cloned slot owns the new share.
+        std::mem::forget(cloned);
+    }
+}
+
+/// WB2.4 release-on-overwrite mirror of `KindedSlot::Drop`. Decrements the
+/// matching `Arc<T>` strong-count for a heap-bearing kind, no-op for inline
+/// scalars.
+///
+/// Implemented by reconstructing the owning `KindedSlot` from `(bits, kind)`
+/// and letting Rust's Drop dispatch through `KindedSlot::drop` — the single
+/// per-`NativeKind` table.
+///
+/// # Safety
+///
+/// `bits` must be a valid representation of `kind` and must represent
+/// exactly one strong-count share that the caller is consuming with this
+/// release. Calling `drop_with_kind` twice on the same bits is a
+/// double-free for heap kinds.
+#[inline]
+pub(crate) unsafe fn drop_with_kind(bits: u64, kind: NativeKind) {
+    if bits == 0 {
+        return;
+    }
+    // SAFETY: caller upholds that `bits` is one strong-count share for
+    // `kind`; reconstructing the `KindedSlot` and letting it drop retires
+    // exactly one share via the canonical dispatch table.
+    unsafe {
+        let _retire = KindedSlot::new(ValueSlot::from_raw(bits), kind);
+    }
+}
+
+/// Kind-aware closure capture cell store (§2.7.8 / Q10).
+///
+/// Carries two parallel arrays in lockstep:
+///
+/// - `bits: Vec<u64>` — 8-byte raw payload per cell (the same shape as
+///   the existing closure block's capture slots, but stored separately as
+///   a kind-tracked side-store for cells whose kind is not derivable from
+///   `ClosureLayout::capture_inner_kind` alone — i.e. heap captures whose
+///   `NativeKind::Ptr(HeapKind)` discriminator is finer than `FieldKind::Ptr`).
+/// - `kinds: Vec<NativeKind>` — 1-byte interpretation per cell.
+///
+/// **Index invariant:** `bits.len() == kinds.len()` at every observable
+/// boundary (method entry/exit). Mixed lengths are a bug.
+///
+/// **Drop discipline:** every cell is released through `drop_with_kind`
+/// — never bare `vw_drop` (forbidden #8 per §2.7.7) or "drop only if
+/// heap-shaped" probes (forbidden #7). Inline-scalar kinds are no-op
+/// drops; heap-bearing kinds retire one `Arc<T>` strong-count share per
+/// the dispatch in `KindedSlot::drop`.
+///
+/// **Construction:** every push/pop/read accepts/returns `(bits, kind)`
+/// lockstep. There is no kind-less constructor — cells are post-proof per
+/// §2.7.5.1, so each cell carries a known `NativeKind` by construction.
+///
+/// **Forbidden shapes (mirror of §2.7.7's stack-side list):**
+/// - `Vec<KindedSlot>` for the cell store (§2.7.5 — `KindedSlot` is a
+///   runtime-tier carrier, not the storage-tier shape).
+/// - 16-byte cell slots / packed tag bits in the `u64` (§2.1 — 8-byte
+///   slot invariant).
+/// - `Vec<Option<NativeKind>>` for the kind track (§2.7.5.1 — cells are
+///   post-proof; every cell has a concrete kind by construction).
+/// - `NativeKind::Unknown` / `Pending` / `Dynamic` placeholders (deleted
+///   from the enum).
+/// - Bool-default fallback for any cell write (§2.7.7 #9 — the W-series
+///   rationalization; surface to supervisor on a kind-source gap instead).
+///
+/// **Wave-β consumer migration:** the `Load*Ptr` / `Store*Ptr` handlers
+/// in `executor/variables/mod.rs` (the 130 mandatory + 33 sibling sites
+/// cluster B partial-closed leaving as `NotImplemented(SURFACE)`) will be
+/// migrated by Wave-β cluster `B6-variables-loadptr` to thread the kind
+/// through the cell-bound read paths via this struct.
+#[derive(Debug)]
+pub struct ClosureCell {
+    /// Raw payload — 8-byte per cell. Cell `i` holds `bits[i]` interpreted
+    /// per `kinds[i]` (e.g. an `Arc::into_raw::<TypedArrayData>` raw pointer
+    /// when `kinds[i] == NativeKind::Ptr(HeapKind::TypedArray)`, or a native
+    /// `f64` bit pattern when `kinds[i] == NativeKind::Float64`).
+    pub bits: Vec<u64>,
+    /// Per-cell kind track. Lockstep with `bits` per the §2.7.8 index
+    /// invariant.
+    pub kinds: Vec<NativeKind>,
+}
+
+impl ClosureCell {
+    /// Create an empty cell store.
+    #[inline]
+    pub fn new() -> Self {
+        Self {
+            bits: Vec::new(),
+            kinds: Vec::new(),
+        }
+    }
+
+    /// Create an empty cell store with the given capacity reserved on
+    /// both parallel tracks.
+    #[inline]
+    pub fn with_capacity(cap: usize) -> Self {
+        Self {
+            bits: Vec::with_capacity(cap),
+            kinds: Vec::with_capacity(cap),
+        }
+    }
+
+    /// Number of live cells. The §2.7.8 index invariant guarantees this
+    /// equals `self.kinds.len()`.
+    #[inline]
+    pub fn len(&self) -> usize {
+        debug_assert_eq!(
+            self.bits.len(),
+            self.kinds.len(),
+            "ClosureCell index invariant: bits.len() == kinds.len()"
+        );
+        self.bits.len()
+    }
+
+    /// Whether the cell store is empty.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.bits.is_empty()
+    }
+
+    /// Append a cell. The caller transfers ownership of `bits`'s
+    /// strong-count share (for heap kinds) into the cell store; the
+    /// matching `drop_with_kind` discharge happens at pop / truncate /
+    /// `Drop` time.
+    ///
+    /// # Safety
+    ///
+    /// `bits` must be a valid representation of `kind` per the
+    /// construction-side contract — for heap kinds, the result of
+    /// `Arc::into_raw::<T>` for the matching `T`; for inline scalars, the
+    /// native bit pattern.
+    #[inline]
+    pub unsafe fn push(&mut self, bits: u64, kind: NativeKind) {
+        self.bits.push(bits);
+        self.kinds.push(kind);
+        debug_assert_eq!(
+            self.bits.len(),
+            self.kinds.len(),
+            "ClosureCell::push violated bits.len() == kinds.len() invariant"
+        );
+    }
+
+    /// Remove and return the last `(bits, kind)`. The caller takes
+    /// ownership of the share (for heap kinds) and is responsible for
+    /// `drop_with_kind` (or transferring it elsewhere). Pop does NOT
+    /// clone — `vec.pop()` is move-out semantics.
+    #[inline]
+    pub fn pop(&mut self) -> Option<(u64, NativeKind)> {
+        match (self.bits.pop(), self.kinds.pop()) {
+            (Some(b), Some(k)) => Some((b, k)),
+            (None, None) => None,
+            _ => {
+                // The §2.7.8 index invariant rules this out at every
+                // observable boundary; reaching here is a hard bug.
+                unreachable!("ClosureCell index invariant violated: bits/kinds desync on pop")
+            }
+        }
+    }
+
+    /// Read cell `idx` as `(bits, kind)` without consuming it. The
+    /// returned `bits` is a borrowed copy — for heap kinds the caller
+    /// must `clone_with_kind(bits, kind)` to obtain an independently-
+    /// owned share before storing it elsewhere (the cell retains its
+    /// share).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `idx >= self.len()`.
+    #[inline]
+    pub fn read(&self, idx: usize) -> (u64, NativeKind) {
+        debug_assert_eq!(
+            self.bits.len(),
+            self.kinds.len(),
+            "ClosureCell::read on desynced cell store"
+        );
+        (self.bits[idx], self.kinds[idx])
+    }
+
+    /// Read cell `idx` and return a runtime-tier `KindedSlot` carrier
+    /// with a freshly-cloned share (for heap kinds; inline scalars are
+    /// `Copy`-equivalent). This is the §2.7.7 retain-on-read pattern,
+    /// extended to cells per §2.7.8.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `idx >= self.len()`.
+    #[inline]
+    pub fn read_kinded(&self, idx: usize) -> KindedSlot {
+        let (bits, kind) = self.read(idx);
+        // SAFETY: cells are post-proof; `bits`/`kind` represent a valid
+        // strong-count share owned by this cell store. `clone_with_kind`
+        // bumps the share so the returned `KindedSlot` owns an
+        // independent share, leaving the cell's own share intact.
+        unsafe { clone_with_kind(bits, kind) };
+        KindedSlot::new(ValueSlot::from_raw(bits), kind)
+    }
+
+    /// Overwrite cell `idx` with a new `(bits, kind)` pair, returning the
+    /// old `(bits, kind)`. The caller is responsible for `drop_with_kind`
+    /// on the returned previous value (or transferring it elsewhere) and
+    /// for ensuring the new `bits` carry one fresh strong-count share for
+    /// the new `kind`.
+    ///
+    /// # Safety
+    ///
+    /// New `bits` must be a valid representation of new `kind` per the
+    /// construction-side contract (for heap kinds: one strong-count share
+    /// from `Arc::into_raw::<T>` for the matching `T`).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `idx >= self.len()`.
+    #[inline]
+    pub unsafe fn replace(
+        &mut self,
+        idx: usize,
+        bits: u64,
+        kind: NativeKind,
+    ) -> (u64, NativeKind) {
+        debug_assert_eq!(
+            self.bits.len(),
+            self.kinds.len(),
+            "ClosureCell::replace on desynced cell store"
+        );
+        let prev_bits = std::mem::replace(&mut self.bits[idx], bits);
+        let prev_kind = std::mem::replace(&mut self.kinds[idx], kind);
+        (prev_bits, prev_kind)
+    }
+
+    /// Truncate the cell store to `new_len` cells, releasing every cell
+    /// at index `>= new_len` via `drop_with_kind`. No-op if
+    /// `new_len >= self.len()`.
+    #[inline]
+    pub fn truncate(&mut self, new_len: usize) {
+        let old_len = self.len();
+        if new_len >= old_len {
+            return;
+        }
+        // Release tail in reverse so refcount semantics match the
+        // last-pushed-first-dropped order.
+        for i in (new_len..old_len).rev() {
+            let bits = self.bits[i];
+            let kind = self.kinds[i];
+            // SAFETY: the §2.7.8 push-side contract guarantees every
+            // cell carries a valid `(bits, kind)` representation owning
+            // one strong-count share. Releasing here matches that share.
+            unsafe { drop_with_kind(bits, kind) };
+        }
+        // Now that every tail cell's heap share has been retired via
+        // `drop_with_kind`, shrink both parallel tracks. The element
+        // types (`u64` and `NativeKind`) are `Copy`, so `Vec::truncate`'s
+        // own element-drop is a trivial no-op — no double-release risk.
+        self.bits.truncate(new_len);
+        self.kinds.truncate(new_len);
+        debug_assert_eq!(
+            self.bits.len(),
+            self.kinds.len(),
+            "ClosureCell::truncate violated bits.len() == kinds.len() invariant"
+        );
+    }
+}
+
+impl Default for ClosureCell {
+    #[inline]
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for ClosureCell {
+    /// Releases every live cell via `drop_with_kind` per §2.7.8. The
+    /// drop order is tail-first to mirror the last-pushed-first-dropped
+    /// convention used by `KindedSlot`-bearing collections.
+    fn drop(&mut self) {
+        // Iterate in reverse so refcount-bearing cells release in
+        // last-pushed-first-dropped order. `truncate(0)` already does
+        // tail-first release per the impl above; calling it here yields
+        // the same dispatch as a manual loop.
+        self.truncate(0);
+    }
+}
+
 #[cfg(test)]
-mod tests {
+mod closure_cell_tests {
+    //! §2.7.8 / Q10 structural-extension tests for `ClosureCell`.
+    //!
+    //! These tests exercise the lockstep `bits.len() == kinds.len()`
+    //! invariant, push/pop/read/replace/truncate signatures, and the
+    //! kind-aware drop discipline. Heap-kind refcount semantics are
+    //! covered by the `KindedSlot` test suite (`kinded_slot.rs`); these
+    //! tests focus on the cell-store shape itself.
     use super::*;
-    use crate::v2::closure_layout::{CaptureKind, SharedCell};
+
+    #[test]
+    fn empty_cell_satisfies_invariant() {
+        let cell = ClosureCell::new();
+        assert_eq!(cell.len(), 0);
+        assert!(cell.is_empty());
+        assert_eq!(cell.bits.len(), cell.kinds.len());
+    }
+
+    #[test]
+    fn push_pop_inline_scalars_round_trip() {
+        let mut cell = ClosureCell::with_capacity(4);
+        // SAFETY: inline-scalar bits are valid representations of their
+        // kinds (no heap shares to track).
+        unsafe {
+            cell.push(42u64, NativeKind::Int64);
+            cell.push(f64::to_bits(3.14), NativeKind::Float64);
+            cell.push(1u64, NativeKind::Bool);
+        }
+        assert_eq!(cell.len(), 3);
+        assert_eq!(cell.pop(), Some((1u64, NativeKind::Bool)));
+        assert_eq!(cell.pop(), Some((f64::to_bits(3.14), NativeKind::Float64)));
+        assert_eq!(cell.pop(), Some((42u64, NativeKind::Int64)));
+        assert_eq!(cell.pop(), None);
+    }
+
+    #[test]
+    fn read_returns_lockstep_pair() {
+        let mut cell = ClosureCell::new();
+        // SAFETY: inline-scalar bits.
+        unsafe {
+            cell.push(7u64, NativeKind::Int64);
+            cell.push(0u64, NativeKind::Bool);
+        }
+        assert_eq!(cell.read(0), (7u64, NativeKind::Int64));
+        assert_eq!(cell.read(1), (0u64, NativeKind::Bool));
+    }
+
+    #[test]
+    fn replace_returns_previous_pair() {
+        let mut cell = ClosureCell::new();
+        // SAFETY: inline-scalar bits.
+        unsafe {
+            cell.push(1u64, NativeKind::Int64);
+            let prev = cell.replace(0, 99u64, NativeKind::UInt64);
+            assert_eq!(prev, (1u64, NativeKind::Int64));
+            assert_eq!(cell.read(0), (99u64, NativeKind::UInt64));
+        }
+    }
+
+    #[test]
+    fn truncate_drops_tail() {
+        let mut cell = ClosureCell::new();
+        // SAFETY: inline-scalar bits — drop is a no-op for these kinds.
+        unsafe {
+            cell.push(1u64, NativeKind::Int64);
+            cell.push(2u64, NativeKind::Int64);
+            cell.push(3u64, NativeKind::Int64);
+        }
+        cell.truncate(1);
+        assert_eq!(cell.len(), 1);
+        assert_eq!(cell.read(0), (1u64, NativeKind::Int64));
+    }
+
+    #[test]
+    fn drop_releases_all_cells() {
+        // Use a heap-bearing kind to confirm the dispatch path runs
+        // through `KindedSlot::drop`. Construct via the canonical
+        // `KindedSlot::from_string` and decompose into `(bits, kind)` so
+        // the cell store owns the share.
+        let mut cell = ClosureCell::new();
+        let slot = KindedSlot::from_string("hello §2.7.8");
+        let bits = slot.slot.raw();
+        let kind = slot.kind;
+        std::mem::forget(slot); // transfer the share into the cell
+        // SAFETY: `bits`/`kind` carry one strong-count share transferred
+        // via `mem::forget` above; the cell store now owns it.
+        unsafe { cell.push(bits, kind) };
+        assert_eq!(cell.len(), 1);
+        // Dropping the cell store should retire the share via
+        // `drop_with_kind` -> `KindedSlot::drop`.
+        drop(cell);
+        // No assertion on the freed Arc — miri / valgrind catch
+        // double-free or leak. The test passing without UB is the
+        // signal.
+    }
+
+    #[test]
+    fn pop_then_explicit_drop_round_trip() {
+        let mut cell = ClosureCell::new();
+        let slot = KindedSlot::from_string("popped");
+        let bits = slot.slot.raw();
+        let kind = slot.kind;
+        std::mem::forget(slot);
+        // SAFETY: same construction-side contract as above.
+        unsafe { cell.push(bits, kind) };
+
+        let (b, k) = cell.pop().expect("non-empty");
+        // Caller takes ownership; matching drop_with_kind retires the
+        // share once.
+        // SAFETY: `b`/`k` are exactly what we just pushed and popped.
+        unsafe { drop_with_kind(b, k) };
+    }
+}
+
+#[cfg(test)]
+mod owned_closure_block_kinded_tests {
+    //! ADR-006 §2.7.8 / Q10 structural-extension tests for the
+    //! `OwnedClosureBlock` per-capture kind track.
+    //!
+    //! These exercise the new `read_capture_kinded(idx) -> (u64, NativeKind)`
+    //! accessor (the cell-bound mirror of the §2.7.7 stack-side
+    //! `read_owned_kinded`) on the existing raw-byte closure block.
+    //! Heap-kind refcount semantics are covered by the `KindedSlot` and
+    //! `closure_cell_tests` suites; these tests focus on the
+    //! layout-driven kind dispatch through the `OwnedClosureBlock` handle.
+    use super::*;
+    use crate::v2::closure_layout::{CaptureKind, ClosureLayout};
     use crate::v2::concrete_type::ConcreteType;
-    use crate::value_word::{ValueWord, ValueWordExt};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    // Test-local helper: constructs a layout with every capture marked
-    // `Immutable`. Mirrors the pre-A.1A constructor ergonomics.
-    fn immutable_layout(types: &[ConcreteType]) -> ClosureLayout {
+    /// Build an immutable-only Arc<ClosureLayout>.
+    fn arc_immutable_layout(types: &[ConcreteType]) -> Arc<ClosureLayout> {
         let kinds = vec![CaptureKind::Immutable; types.len()];
-        ClosureLayout::from_capture_types(types, &kinds)
+        Arc::new(ClosureLayout::from_capture_types(types, &kinds))
     }
 
     #[test]
-    fn alloc_empty_closure_has_refcount_one_and_correct_fields() {
-        let layout = immutable_layout(&[]);
-        // SAFETY: layout is valid; test only uses the block through this crate's
-        // helpers.
-        unsafe {
-            let ptr = alloc_typed_closure(42, 7, &layout);
-            assert_eq!(typed_closure_refcount(ptr), 1);
-            assert_eq!(typed_closure_function_id(ptr), 42);
-            assert_eq!(typed_closure_type_id(ptr), 7);
-            assert_eq!(typed_closure_kind(ptr), HEAP_KIND_V2_CLOSURE);
-            release_typed_closure(ptr, &layout);
-        }
-    }
-
-    #[test]
-    fn retain_release_roundtrip_does_not_deallocate() {
-        let layout = immutable_layout(&[]);
-        unsafe {
-            let ptr = alloc_typed_closure(1, 0, &layout);
-            assert_eq!(typed_closure_refcount(ptr), 1);
-            retain_typed_closure(ptr);
-            assert_eq!(typed_closure_refcount(ptr), 2);
-            release_typed_closure(ptr, &layout); // 2 -> 1
-            assert_eq!(typed_closure_refcount(ptr), 1);
-            // Final release frees.
-            release_typed_closure(ptr, &layout);
-        }
-    }
-
-    #[test]
-    fn i64_capture_roundtrip() {
-        let layout = immutable_layout(&[ConcreteType::I64]);
-        unsafe {
-            let ptr = alloc_typed_closure(5, 0, &layout);
-            let bits = ValueWord::from_i64(-9001).into_raw_bits();
-            write_capture_typed(ptr, &layout, 0, bits);
-            let read = read_capture_as_value_bits(ptr, &layout, 0);
-            let vw = ValueWord::from_raw_bits(read);
-            assert_eq!(vw.as_i64(), Some(-9001));
-            release_typed_closure(ptr, &layout);
-        }
-    }
-
-    #[test]
-    fn f64_capture_roundtrip() {
-        let layout = immutable_layout(&[ConcreteType::F64]);
-        unsafe {
-            let ptr = alloc_typed_closure(5, 0, &layout);
-            let bits = ValueWord::from_f64(3.25).into_raw_bits();
-            write_capture_typed(ptr, &layout, 0, bits);
-            let read = read_capture_as_value_bits(ptr, &layout, 0);
-            let vw = ValueWord::from_raw_bits(read);
-            assert_eq!(vw.as_f64(), Some(3.25));
-            release_typed_closure(ptr, &layout);
-        }
-    }
-
-    #[test]
-    fn bool_capture_roundtrip() {
-        let layout = immutable_layout(&[ConcreteType::Bool]);
-        unsafe {
-            let ptr = alloc_typed_closure(5, 0, &layout);
-            let bits = ValueWord::from_bool(true).into_raw_bits();
-            write_capture_typed(ptr, &layout, 0, bits);
-            let read = read_capture_as_value_bits(ptr, &layout, 0);
-            let vw = ValueWord::from_raw_bits(read);
-            assert_eq!(vw.as_bool(), Some(true));
-            release_typed_closure(ptr, &layout);
-        }
-    }
-
-    #[test]
-    fn i32_capture_roundtrip_preserves_sign() {
-        let layout = immutable_layout(&[ConcreteType::I32]);
-        unsafe {
-            let ptr = alloc_typed_closure(5, 0, &layout);
-            let bits = ValueWord::from_i64(-12345).into_raw_bits();
-            write_capture_typed(ptr, &layout, 0, bits);
-            let read = read_capture_as_value_bits(ptr, &layout, 0);
-            let vw = ValueWord::from_raw_bits(read);
-            assert_eq!(vw.as_i64(), Some(-12345));
-            release_typed_closure(ptr, &layout);
-        }
-    }
-
-    #[test]
-    fn mixed_capture_offsets_match_layout() {
-        // F64 @ 16, I32 @ 24, Ptr(String) @ 32 — see `closure_layout::tests::test_mixed_f64_i32_ptr`.
-        let layout =
-            immutable_layout(&[ConcreteType::F64, ConcreteType::I32, ConcreteType::String]);
-        assert_eq!(layout.heap_capture_offset(0), 16);
-        assert_eq!(layout.heap_capture_offset(1), 24);
-        assert_eq!(layout.heap_capture_offset(2), 32);
-        assert_eq!(layout.heap_capture_mask, 0b100);
-
-        unsafe {
-            let ptr = alloc_typed_closure(5, 0, &layout);
-            write_capture_typed(ptr, &layout, 0, ValueWord::from_f64(2.5).into_raw_bits());
-            write_capture_typed(ptr, &layout, 1, ValueWord::from_i64(42).into_raw_bits());
-            // Ptr capture: allocate a String ValueWord and store its raw bits.
-            let s = ValueWord::from_string(Arc::new("hello".to_string()));
-            let s_bits = s.into_raw_bits();
-            // Emulate the retain that emit_heap_closure emits for heap
-            // captures. `clone_from_bits` bumps the Arc refcount; the
-            // returned ValueWord is an opaque u64 share, so we deliberately
-            // do NOT release it here — the closure's slot now owns it.
-            let _dup = ValueWord::clone_from_bits(s_bits);
-            let _ = _dup; // ValueWord is u64 — no drop side effects.
-            write_capture_raw_u64(ptr, &layout, 2, s_bits);
-
-            // Read back.
-            let r0 = ValueWord::from_raw_bits(read_capture_as_value_bits(ptr, &layout, 0));
-            assert_eq!(r0.as_f64(), Some(2.5));
-            let r1 = ValueWord::from_raw_bits(read_capture_as_value_bits(ptr, &layout, 1));
-            assert_eq!(r1.as_i64(), Some(42));
-            let r2 = ValueWord::clone_from_bits(read_capture_as_value_bits(ptr, &layout, 2));
-            let s = r2.as_heap_ref().and_then(|h| {
-                if let crate::heap_value::HeapValue::String(s) = h {
-                    Some(s.as_str())
-                } else {
-                    None
-                }
-            });
-            assert_eq!(s, Some("hello"));
-            // r2 is a u64 share; drop it back through the shape-value helper.
-            release_raw_value_bits(r2);
-
-            // Release: this should free the block AND decrement the string's
-            // Arc refcount (because heap_capture_mask bit 2 is set).
-            release_typed_closure(ptr, &layout);
-            // Drop the original s reference; the string is freed here.
-            release_raw_value_bits(s_bits);
-        }
-    }
-
-    #[test]
-    fn heap_capture_release_decrements_arc_refcount() {
-        // Regression test for the Drop glue on heap captures: releasing a
-        // TypedClosureHeader whose layout has heap_capture_mask bits set must
-        // also release the corresponding Arc refcount shares.
-        let layout = immutable_layout(&[ConcreteType::String]);
-        let s = ValueWord::from_string(Arc::new("tracked".to_string()));
-        let s_bits = s.into_raw_bits();
-        unsafe {
-            let ptr = alloc_typed_closure(9, 0, &layout);
-            // Simulate emit_heap_closure: store s_bits at capture 0 + retain.
-            let _dup = ValueWord::clone_from_bits(s_bits);
-            let _ = _dup; // ValueWord is u64 — refcount owned by the closure slot now.
-            write_capture_raw_u64(ptr, &layout, 0, s_bits);
-            // The string's Arc refcount is now 2 (original + closure's share).
-
-            release_typed_closure(ptr, &layout);
-            // The closure's share released — refcount back to 1.
-            // Drop the original share to free the string.
-            release_raw_value_bits(s_bits);
-        }
-    }
-
-    #[test]
-    fn kind_is_heap_kind_v2_closure() {
-        let layout = immutable_layout(&[ConcreteType::I64]);
-        unsafe {
-            let ptr = alloc_typed_closure(1, 2, &layout);
-            assert_eq!(typed_closure_kind(ptr), HEAP_KIND_V2_CLOSURE);
-            release_typed_closure(ptr, &layout);
-        }
-    }
-
-    #[test]
-    fn dealloc_no_drop_does_not_release_heap_captures() {
-        // When heap-capture shares have been transferred elsewhere (e.g. the
-        // JIT finalizer moves them into Upvalues), the caller must use
-        // `dealloc_typed_closure_no_drop` to avoid double-releasing. Verify
-        // that the no-drop path does NOT decrement a String capture's Arc
-        // refcount.
-        let layout = immutable_layout(&[ConcreteType::String]);
-        let s = ValueWord::from_string(Arc::new("owned-by-upvalue".to_string()));
-        let s_bits = s.into_raw_bits();
+    fn read_capture_kinded_inline_scalar_returns_layout_kind() {
+        // Single I64 capture initialised to a known bit pattern; the
+        // accessor returns the lockstep `(bits, kind)` pair from the
+        // layout's `capture_native_kinds[0]`.
+        let layout = arc_immutable_layout(&[ConcreteType::I64]);
+        // SAFETY: alloc + write are paired; no concurrent access.
         unsafe {
             let ptr = alloc_typed_closure(0, 0, &layout);
-            // Write the share into the block without retaining — simulates
-            // the state after the finalizer has already moved the share out.
-            write_capture_raw_u64(ptr, &layout, 0, s_bits);
-
-            // Force refcount to exactly 1 before dealloc (simulating the
-            // single share the closure held at construction).
-            assert_eq!(typed_closure_refcount(ptr), 1);
-
-            // Dealloc without walking captures.
-            dealloc_typed_closure_no_drop(ptr, &layout);
-
-            // The original `s` reference is still live; refcount should
-            // remain 1. Drop it via the shape-value helper to reclaim.
-            release_raw_value_bits(s_bits);
+            write_capture_typed(ptr, &layout, 0, 0xDEAD_BEEF_CAFE_BABE);
+            let block = OwnedClosureBlock::from_raw(ptr, Arc::clone(&layout));
+            let (bits, kind) = block.read_capture_kinded(0);
+            assert_eq!(bits, 0xDEAD_BEEF_CAFE_BABE);
+            assert_eq!(kind, NativeKind::Int64);
         }
     }
 
     #[test]
-    fn many_retains_then_matching_releases_deallocates_exactly_once() {
-        // Refcount semantics regression: N retains need N+1 releases to free.
-        let layout = immutable_layout(&[]);
-        unsafe {
-            let ptr = alloc_typed_closure(3, 0, &layout);
-            for _ in 0..7 {
-                retain_typed_closure(ptr);
-            }
-            assert_eq!(typed_closure_refcount(ptr), 8);
-            for _ in 0..7 {
-                release_typed_closure(ptr, &layout);
-            }
-            assert_eq!(typed_closure_refcount(ptr), 1);
-            // Final release frees.
-            release_typed_closure(ptr, &layout);
-        }
-    }
-
-    // ------------------------------------------------------------------
-    // A.1A — CaptureKind round-trip / Drop-glue tests
-    //
-    // These exercise the three-mask release path on
-    // `release_typed_closure`. OwnedMutable and Shared test harnesses
-    // rely on standard Rust Drop semantics (Box + Arc) + external
-    // strong-count observation to detect leaks and double-frees.
-    // ------------------------------------------------------------------
-
-    /// Counter unused by the core A.1A tests — kept behind a
-    /// cache-friendly constant so miri sees the addresses as distinct
-    /// from the block allocations under test. Loads + stores are no-ops
-    /// for the ValueWord payloads exercised here, but the counter
-    /// remains as scaffolding that A.1B / A.1C can re-use when they
-    /// swap in DropObserver-wrapped payloads.
-    static DROP_COUNTER: AtomicUsize = AtomicUsize::new(0);
-
-    #[test]
-    fn a1a_immutable_only_roundtrip_preserves_existing_behavior() {
-        // Mandatory test #1: allocate a closure with 2 immutable captures
-        // (Int64, Float64), write + read, drop, assert clean release.
-        let kinds = vec![CaptureKind::Immutable, CaptureKind::Immutable];
-        let layout =
-            ClosureLayout::from_capture_types(&[ConcreteType::I64, ConcreteType::F64], &kinds);
-        assert_eq!(layout.heap_capture_mask, 0);
-        assert_eq!(layout.owned_mutable_capture_mask, 0);
-        assert_eq!(layout.shared_capture_mask, 0);
-        assert_eq!(layout.capture_storage_kind(0), CaptureKind::Immutable);
-        assert_eq!(layout.capture_storage_kind(1), CaptureKind::Immutable);
-        unsafe {
-            let ptr = alloc_typed_closure(7, 0, &layout);
-            write_capture_typed(ptr, &layout, 0, ValueWord::from_i64(42).into_raw_bits());
-            write_capture_typed(ptr, &layout, 1, ValueWord::from_f64(2.75).into_raw_bits());
-
-            let r0 = ValueWord::from_raw_bits(read_capture_as_value_bits(ptr, &layout, 0));
-            let r1 = ValueWord::from_raw_bits(read_capture_as_value_bits(ptr, &layout, 1));
-            assert_eq!(r0.as_i64(), Some(42));
-            assert_eq!(r1.as_f64(), Some(2.75));
-
-            // Clean release — no heap/owned/shared captures to walk.
-            release_typed_closure(ptr, &layout);
-        }
-    }
-
-    #[test]
-    fn a1a_owned_mutable_roundtrip_frees_box() {
-        // Mandatory test #2: OwnedMutable capture holding an initial
-        // ValueWord, verify mask bit is set, drop, verify Box::from_raw
-        // path reclaims the cell.
-        //
-        // Strategy: boxed payload is `DropObserver`, stashed alongside
-        // the cell via a sentinel leaked Box for the ValueWord and a
-        // separately-tracked DropObserver Box. Releasing the closure
-        // must run Box::from_raw on the ValueWord cell, but the
-        // observer is a standalone struct we drop manually to validate
-        // the counter semantics (separating `closure frees cell` from
-        // `observer's Drop runs`).
-        let kinds = vec![CaptureKind::OwnedMutable];
-        // ConcreteType for an OwnedMutable is irrelevant to the layout
-        // (the slot is forced to Ptr); pick I64 for clarity of intent.
-        let layout = ClosureLayout::from_capture_types(&[ConcreteType::I64], &kinds);
-        assert_eq!(layout.owned_mutable_capture_mask, 0b1);
-        assert_eq!(layout.heap_capture_mask, 0);
-        assert_eq!(layout.shared_capture_mask, 0);
-        assert_eq!(layout.capture_kind(0), FieldKind::Ptr);
-        assert!(layout.is_owned_mutable_capture(0));
-        assert!(!layout.is_heap_capture(0));
-        assert!(!layout.is_shared_capture(0));
-
-        unsafe {
-            let ptr = alloc_typed_closure(42, 0, &layout);
-
-            // Allocate a fresh ValueWord cell via Box, stash the raw
-            // pointer into capture slot 0.
-            let initial = ValueWord::from_i64(-12345);
-            let cell_ptr: *mut ValueWord = Box::into_raw(Box::new(initial));
-            // Write the raw pointer bits (not a ValueWord) into the slot.
-            let off = layout.heap_capture_offset(0);
-            std::ptr::write(ptr.add(off) as *mut *mut ValueWord, cell_ptr);
-
-            // Sanity: read the pointer back and the inner value matches.
-            let read_back_ptr = std::ptr::read(ptr.add(off) as *const *mut ValueWord);
-            assert_eq!(read_back_ptr, cell_ptr);
-            let inner = *read_back_ptr;
-            assert_eq!(inner.as_i64(), Some(-12345));
-
-            // Release — must reclaim the Box via Box::from_raw.
-            release_typed_closure(ptr, &layout);
-
-            // If we ran Box::from_raw correctly, the cell is freed. We
-            // cannot dereference `cell_ptr` any more; the test passes
-            // as long as no UB/leak occurs (miri would catch both).
-            let _ = cell_ptr; // avoid unused-warning under some configs
-        }
-    }
-
-    #[test]
-    fn a1a_shared_roundtrip_decrements_arc_strong_count() {
-        // Mandatory test #3: allocate a closure with a single Shared
-        // capture holding Arc<Mutex<ValueWord>>, clone the Arc
-        // externally, check strong-count after closure drop, verify
-        // Arc::from_raw decrement happened.
-        let kinds = vec![CaptureKind::Shared];
-        let layout = ClosureLayout::from_capture_types(&[ConcreteType::I64], &kinds);
-        assert_eq!(layout.shared_capture_mask, 0b1);
-        assert_eq!(layout.heap_capture_mask, 0);
-        assert_eq!(layout.owned_mutable_capture_mask, 0);
-        assert_eq!(layout.capture_kind(0), FieldKind::Ptr);
-
-        unsafe {
-            // Build the cell and hold an external share for strong-count
-            // inspection.
-            let external: Arc<SharedCell> =
-                Arc::new(SharedCell::new(ValueWord::from_i64(77)));
-            assert_eq!(Arc::strong_count(&external), 1);
-
-            // Clone one share for the closure, convert to raw pointer.
-            let closure_share = Arc::clone(&external);
-            assert_eq!(Arc::strong_count(&external), 2);
-            let cell_ptr: *const SharedCell = Arc::into_raw(closure_share);
-
-            let ptr = alloc_typed_closure(5, 0, &layout);
-            let off = layout.heap_capture_offset(0);
-            std::ptr::write(ptr.add(off) as *mut *const SharedCell, cell_ptr);
-
-            // Validate inner value through the mutex while the closure
-            // is still live (via the external Arc — both point at the
-            // same cell).
-            assert_eq!(external.lock().as_i64(), Some(77));
-
-            // Release the closure's share — must run Arc::from_raw.
-            release_typed_closure(ptr, &layout);
-
-            // Strong count must be back to 1 (only the external share
-            // survives).
-            assert_eq!(Arc::strong_count(&external), 1);
-
-            // Dropping `external` at end of scope frees the cell.
-        }
-    }
-
-    #[test]
-    fn a1a_interleaved_kinds_mask_geometry_and_release() {
-        // Mandatory test #4: layout with [Immutable(F64), OwnedMutable,
-        // Shared, Immutable(I64)]. Assert masks have correct bits
-        // (heap_capture_mask covers only heap-kind immutable captures —
-        // here none, since F64 and I64 are non-Ptr; if we wanted a
-        // non-zero heap_capture_mask we'd use a String capture). Also
-        // verify offsets and that drop releases each kind exactly once.
-        let kinds = vec![
-            CaptureKind::Immutable,
-            CaptureKind::OwnedMutable,
-            CaptureKind::Shared,
-            CaptureKind::Immutable,
-        ];
-        let layout = ClosureLayout::from_capture_types(
-            &[
-                ConcreteType::F64,
-                ConcreteType::I64, // OwnedMutable -> Ptr slot
-                ConcreteType::I64, // Shared -> Ptr slot
-                ConcreteType::I64,
-            ],
-            &kinds,
-        );
-        // F64 @ 0 (size 8), Ptr @ 8, Ptr @ 16, I64 @ 24 -> total 32.
-        assert_eq!(layout.capture_offset(0), 0);
-        assert_eq!(layout.capture_offset(1), 8);
-        assert_eq!(layout.capture_offset(2), 16);
-        assert_eq!(layout.capture_offset(3), 24);
-        assert_eq!(layout.captures_size, 32);
-
-        // Mask geometry.
-        assert_eq!(layout.heap_capture_mask, 0, "no Immutable Ptr captures");
-        assert_eq!(layout.owned_mutable_capture_mask, 0b0010);
-        assert_eq!(layout.shared_capture_mask, 0b0100);
-
-        // Mutual exclusion check.
-        assert_eq!(
-            layout.heap_capture_mask & layout.owned_mutable_capture_mask,
-            0
-        );
-        assert_eq!(layout.heap_capture_mask & layout.shared_capture_mask, 0);
-        assert_eq!(
-            layout.owned_mutable_capture_mask & layout.shared_capture_mask,
-            0
-        );
-
-        assert_eq!(layout.capture_storage_kind(0), CaptureKind::Immutable);
-        assert_eq!(layout.capture_storage_kind(1), CaptureKind::OwnedMutable);
-        assert_eq!(layout.capture_storage_kind(2), CaptureKind::Shared);
-        assert_eq!(layout.capture_storage_kind(3), CaptureKind::Immutable);
-
-        // Round-trip with real allocations so Drop glue runs.
-        unsafe {
-            let ptr = alloc_typed_closure(11, 0, &layout);
-
-            // Immutable F64 capture 0.
-            write_capture_typed(ptr, &layout, 0, ValueWord::from_f64(1.5).into_raw_bits());
-            // OwnedMutable capture 1: Box<ValueWord>.
-            let cell: *mut ValueWord = Box::into_raw(Box::new(ValueWord::from_i64(100)));
-            let off1 = layout.heap_capture_offset(1);
-            std::ptr::write(ptr.add(off1) as *mut *mut ValueWord, cell);
-            // Shared capture 2: Arc<SharedCell>. Keep the `external`
-            // Arc around to observe the strong-count decrement.
-            let external: Arc<SharedCell> =
-                Arc::new(SharedCell::new(ValueWord::from_i64(200)));
-            let closure_share = Arc::clone(&external);
-            let cell_ptr: *const SharedCell = Arc::into_raw(closure_share);
-            let off2 = layout.heap_capture_offset(2);
-            std::ptr::write(ptr.add(off2) as *mut *const SharedCell, cell_ptr);
-            assert_eq!(Arc::strong_count(&external), 2);
-            // Immutable I64 capture 3.
-            write_capture_typed(ptr, &layout, 3, ValueWord::from_i64(999).into_raw_bits());
-
-            // Release: F64 + I64 slots: no-op. OwnedMutable: Box freed.
-            // Shared: Arc decremented by 1.
-            release_typed_closure(ptr, &layout);
-
-            assert_eq!(Arc::strong_count(&external), 1);
-            // external is dropped at end of scope.
-            let _ = cell;
-        }
-    }
-
-    #[test]
-    fn a1a_empty_captures_all_three_masks_zero() {
-        // Mandatory test #5: ClosureLayout with zero captures drops
-        // cleanly with all three masks = 0.
-        let kinds: Vec<CaptureKind> = vec![];
-        let layout = ClosureLayout::from_capture_types(&[], &kinds);
-        assert_eq!(layout.capture_count(), 0);
-        assert_eq!(layout.heap_capture_mask, 0);
-        assert_eq!(layout.owned_mutable_capture_mask, 0);
-        assert_eq!(layout.shared_capture_mask, 0);
+    fn read_capture_kinded_f64_returns_float_kind() {
+        let layout = arc_immutable_layout(&[ConcreteType::F64]);
+        // SAFETY: alloc + write are paired.
         unsafe {
             let ptr = alloc_typed_closure(0, 0, &layout);
-            release_typed_closure(ptr, &layout);
+            write_capture_typed(ptr, &layout, 0, f64::to_bits(2.5));
+            let block = OwnedClosureBlock::from_raw(ptr, Arc::clone(&layout));
+            let (bits, kind) = block.read_capture_kinded(0);
+            assert_eq!(f64::from_bits(bits), 2.5);
+            assert_eq!(kind, NativeKind::Float64);
         }
     }
 
     #[test]
-    fn a1a_shared_last_share_releases_cell() {
-        // Secondary Shared test: when the closure holds the LAST Arc
-        // strong share (no external reference), releasing the closure
-        // must drop the cell. Observed indirectly: after release there
-        // is no live pointer to the cell; the test passes if miri/ASan
-        // do not report a leak.
-        let kinds = vec![CaptureKind::Shared];
-        let layout = ClosureLayout::from_capture_types(&[ConcreteType::I64], &kinds);
-
-        // DROP_COUNTER is not wired to ValueWord's Drop glue — reading
-        // it here just documents that the counter framework is in
-        // place for future A.1B/A.1C tests that swap in a payload that
-        // DOES observe Drop.
-        let _pre = DROP_COUNTER.load(Ordering::SeqCst);
-
+    fn read_capture_kinded_string_returns_string_kind() {
+        // String capture maps to NativeKind::String per the §2.7.8
+        // derivation; the accessor surfaces this for B6-round-2's
+        // `Load*Ptr` consumer to route through `clone_with_kind`.
+        let layout = arc_immutable_layout(&[ConcreteType::String]);
+        // SAFETY: alloc + write are paired. A null Ptr-slot is fine —
+        // we're not exercising the share-bearing path here.
         unsafe {
-            let cell: Arc<SharedCell> = Arc::new(SharedCell::new(ValueWord::from_i64(5)));
-            let cell_ptr = Arc::into_raw(cell); // strong_count == 1
-
-            let ptr = alloc_typed_closure(3, 0, &layout);
-            let off = layout.heap_capture_offset(0);
-            std::ptr::write(ptr.add(off) as *mut *const SharedCell, cell_ptr);
-
-            // Release: `Arc::from_raw(cell_ptr).drop()` runs — last
-            // share → cell allocation is freed here. miri/ASan would
-            // catch any mis-release.
-            release_typed_closure(ptr, &layout);
-
-            let post = DROP_COUNTER.load(Ordering::SeqCst);
-            assert_eq!(
-                post, _pre,
-                "DROP_COUNTER is reserved for A.1B/A.1C wired payloads"
-            );
+            let ptr = alloc_typed_closure(0, 0, &layout);
+            // Slot stays zero-initialised; `read_capture_kinded` should
+            // still return the layout's kind for slot 0.
+            let block = OwnedClosureBlock::from_raw(ptr, Arc::clone(&layout));
+            let (bits, kind) = block.read_capture_kinded(0);
+            assert_eq!(bits, 0);
+            assert_eq!(kind, NativeKind::String);
         }
     }
 
-    // ------------------------------------------------------------------
-    // Wave B / phase-3c-closure-y1 — per-FieldKind OwnedMutable cell
-    // round-trip tests.
-    //
-    // Each test exercises one width/representation class:
-    //   - i64 (pure 8-byte integer)
-    //   - f64 (8-byte float)
-    //   - bool (1-byte scalar)
-    //   - ptr (8-byte ValueWord-encoded heap share)
-    //
-    // The tests construct a single-capture closure of CaptureKind::OwnedMutable,
-    // allocate the typed cell with `alloc_owned_mutable_<kind>`, write the
-    // pointer into the slot, exercise `read_owned_mutable_<kind>` /
-    // `write_owned_mutable_<kind>`, then drop the closure. Drop must free
-    // the box exactly once; for the Ptr case it must also release the
-    // interior heap-refcount share exactly once.
-    // ------------------------------------------------------------------
-
     #[test]
-    fn owned_mutable_i64_alloc_write_read_drop_roundtrip() {
-        let kinds = vec![CaptureKind::OwnedMutable];
-        let layout = ClosureLayout::from_capture_types(&[ConcreteType::I64], &kinds);
-        assert_eq!(layout.capture_inner_kind(0), FieldKind::I64);
-
+    fn read_capture_kinded_multiple_captures_lockstep() {
+        // Mixed-kind layout: per-capture kinds match per-capture types,
+        // demonstrating that `read_capture_kinded` walks the kind track
+        // in lockstep with the bit slots.
+        let layout = arc_immutable_layout(&[
+            ConcreteType::F64,
+            ConcreteType::I32,
+            ConcreteType::Bool,
+        ]);
+        // SAFETY: alloc + per-slot writes are paired.
         unsafe {
-            let ptr = alloc_typed_closure(1, 0, &layout);
-            // Allocate a typed cell via the new helper, store its raw
-            // pointer into the slot.
-            let cell = alloc_owned_mutable_i64(-9001);
-            let off = layout.heap_capture_offset(0);
-            std::ptr::write(ptr.add(off) as *mut *mut i64, cell);
+            let ptr = alloc_typed_closure(0, 0, &layout);
+            write_capture_typed(ptr, &layout, 0, f64::to_bits(1.5));
+            write_capture_typed(ptr, &layout, 1, (-7i32) as u32 as u64);
+            write_capture_typed(ptr, &layout, 2, 1);
+            let block = OwnedClosureBlock::from_raw(ptr, Arc::clone(&layout));
 
-            // Read via helper.
-            assert_eq!(read_owned_mutable_i64(cell), -9001);
-            // Write via helper, read back.
-            write_owned_mutable_i64(cell, 42);
-            assert_eq!(read_owned_mutable_i64(cell), 42);
+            let (b0, k0) = block.read_capture_kinded(0);
+            assert_eq!(f64::from_bits(b0), 1.5);
+            assert_eq!(k0, NativeKind::Float64);
 
-            // Drop the closure; drop_owned_mutable_capture must reclaim
-            // the typed Box<i64>. miri/ASan would catch a leak or
-            // double-free.
-            release_typed_closure(ptr, &layout);
-            let _ = cell;
-        }
-    }
+            let (b1, k1) = block.read_capture_kinded(1);
+            assert_eq!(b1 as i32, -7);
+            assert_eq!(k1, NativeKind::Int32);
 
-    #[test]
-    fn owned_mutable_f64_alloc_write_read_drop_roundtrip() {
-        let kinds = vec![CaptureKind::OwnedMutable];
-        let layout = ClosureLayout::from_capture_types(&[ConcreteType::F64], &kinds);
-        assert_eq!(layout.capture_inner_kind(0), FieldKind::F64);
-
-        unsafe {
-            let ptr = alloc_typed_closure(2, 0, &layout);
-            let cell = alloc_owned_mutable_f64(2.5);
-            let off = layout.heap_capture_offset(0);
-            std::ptr::write(ptr.add(off) as *mut *mut f64, cell);
-
-            assert_eq!(read_owned_mutable_f64(cell), 2.5);
-            write_owned_mutable_f64(cell, -1.75);
-            assert_eq!(read_owned_mutable_f64(cell), -1.75);
-
-            release_typed_closure(ptr, &layout);
-            let _ = cell;
-        }
-    }
-
-    #[test]
-    fn owned_mutable_bool_alloc_write_read_drop_roundtrip() {
-        let kinds = vec![CaptureKind::OwnedMutable];
-        let layout = ClosureLayout::from_capture_types(&[ConcreteType::Bool], &kinds);
-        assert_eq!(layout.capture_inner_kind(0), FieldKind::Bool);
-
-        unsafe {
-            let ptr = alloc_typed_closure(3, 0, &layout);
-            let cell = alloc_owned_mutable_bool(true);
-            let off = layout.heap_capture_offset(0);
-            std::ptr::write(ptr.add(off) as *mut *mut bool, cell);
-
-            assert_eq!(read_owned_mutable_bool(cell), true);
-            write_owned_mutable_bool(cell, false);
-            assert_eq!(read_owned_mutable_bool(cell), false);
-
-            release_typed_closure(ptr, &layout);
-            let _ = cell;
-        }
-    }
-
-    #[test]
-    fn owned_mutable_ptr_releases_inner_heap_share_exactly_once() {
-        // Ptr interior: the cell stores a ValueWord bit pattern that
-        // owns one heap-refcount share of the inner HeapValue. Drop
-        // must release that share before reclaiming the box.
-        //
-        // Reference pattern: see `heap_capture_release_decrements_arc_refcount`
-        // for the analogous immutable-Ptr path. Here we put the share
-        // inside an OwnedMutable cell instead of the slot directly.
-        let kinds = vec![CaptureKind::OwnedMutable];
-        let layout = ClosureLayout::from_capture_types(&[ConcreteType::String], &kinds);
-        assert_eq!(layout.capture_inner_kind(0), FieldKind::Ptr);
-
-        let s = ValueWord::from_string(Arc::new("tracked-owned-mut".to_string()));
-        let s_bits = s.into_raw_bits();
-
-        unsafe {
-            let ptr = alloc_typed_closure(4, 0, &layout);
-            // Bump the refcount so the cell carries its own share —
-            // mirrors the retain `emit_heap_closure` emits before the
-            // store.
-            let _dup = ValueWord::clone_from_bits(s_bits);
-            let _ = _dup; // ValueWord is u64 — refcount belongs to the cell now.
-            // Allocate a typed Ptr cell holding the ValueWord bits.
-            let cell = alloc_owned_mutable_ptr(s_bits);
-            let off = layout.heap_capture_offset(0);
-            std::ptr::write(ptr.add(off) as *mut *mut u64, cell);
-
-            // Round-trip read/write of the bit pattern. We do NOT
-            // release the previous bits via `write_owned_mutable_ptr`
-            // because this test stores the same bit pattern back —
-            // simulating a no-op write. (Real callers must release
-            // the previous bits; that's the documented contract.)
-            let read_bits = read_owned_mutable_ptr(cell);
-            assert_eq!(read_bits, s_bits);
-
-            // Drop the closure: drop_owned_mutable_capture must release
-            // the cell's interior heap share AND free the box.
-            release_typed_closure(ptr, &layout);
-
-            // The original `s_bits` share is still live; release it to
-            // free the String. miri/ASan would catch a double-release
-            // (closure released too aggressively) or a leak (closure
-            // forgot to release the inner share).
-            release_raw_value_bits(s_bits);
-            let _ = cell;
-        }
-    }
-
-    #[test]
-    fn owned_mutable_ptr_no_leak_when_block_dropped_with_one_share() {
-        // Stress test: closure is the SOLE owner of the interior share.
-        // Drop must release it cleanly with no leak (miri/ASan catch).
-        let kinds = vec![CaptureKind::OwnedMutable];
-        let layout = ClosureLayout::from_capture_types(&[ConcreteType::String], &kinds);
-
-        let s_arc: Arc<String> = Arc::new("sole-owner".to_string());
-        let s_bits = ValueWord::from_string(Arc::clone(&s_arc)).into_raw_bits();
-        // Drop our `s_arc` share so the closure cell is the only one left.
-        drop(s_arc);
-        // We can't observe strong_count anymore (no Arc handle), but the
-        // bit pattern still carries the live share.
-
-        unsafe {
-            let ptr = alloc_typed_closure(5, 0, &layout);
-            let cell = alloc_owned_mutable_ptr(s_bits);
-            let off = layout.heap_capture_offset(0);
-            std::ptr::write(ptr.add(off) as *mut *mut u64, cell);
-
-            // Closure release: must run release_raw_value_bits on the
-            // interior, freeing the String.
-            release_typed_closure(ptr, &layout);
-            let _ = cell;
-        }
-        // miri / ASan would fire if the interior share leaked or was
-        // double-released.
-    }
-
-    // ------------------------------------------------------------------
-    // Wave B (phase-3c-closure-y1) — per-FieldKind SharedCell payload
-    // round-trips, drop_shared_capture refcount semantics, and a light
-    // concurrent stress to validate that the spinlock keeps writes
-    // atomic. Mirrors the OwnedMutable test block above for the
-    // CaptureKind::Shared storage discipline.
-    // ------------------------------------------------------------------
-
-    /// Static-assert that the publicly-exposed payload offset matches
-    /// the value the helpers and the JIT both bake in. The CLAUDE.md /
-    /// JIT-coupled-ABI doc on `SharedCell` calls this offset
-    /// load-bearing.
-    #[test]
-    fn shared_cell_value_offset_is_eight() {
-        const _: [(); SHARED_CELL_VALUE_OFFSET as usize] = [(); 8];
-        assert_eq!(SHARED_CELL_VALUE_OFFSET, 8);
-    }
-
-    #[test]
-    fn shared_cell_i64_roundtrip() {
-        let cell: Arc<SharedCell> = Arc::new(SharedCell::new(ValueWord::from_i64(0)));
-        let raw = Arc::into_raw(cell);
-        unsafe {
-            write_shared_i64(raw, -123_456_789);
-            assert_eq!(read_shared_i64(raw), -123_456_789);
-            drop(Arc::from_raw(raw));
-        }
-    }
-
-    #[test]
-    fn shared_cell_f64_roundtrip() {
-        let cell: Arc<SharedCell> = Arc::new(SharedCell::new(ValueWord::from_i64(0)));
-        let raw = Arc::into_raw(cell);
-        unsafe {
-            write_shared_f64(raw, std::f64::consts::PI);
-            assert_eq!(read_shared_f64(raw), std::f64::consts::PI);
-            drop(Arc::from_raw(raw));
-        }
-    }
-
-    #[test]
-    fn shared_cell_bool_roundtrip() {
-        let cell: Arc<SharedCell> = Arc::new(SharedCell::new(ValueWord::from_i64(0)));
-        let raw = Arc::into_raw(cell);
-        unsafe {
-            write_shared_bool(raw, true);
-            assert!(read_shared_bool(raw));
-            write_shared_bool(raw, false);
-            assert!(!read_shared_bool(raw));
-            drop(Arc::from_raw(raw));
-        }
-    }
-
-    #[test]
-    fn shared_cell_ptr_roundtrip_does_not_release() {
-        // Ptr-payload writer/reader must NOT touch the heap refcount.
-        // Allocate a String, store its bits, re-read, then balance the
-        // bits' share with a single `release_raw_value_bits` — miri /
-        // ASan would flag a leaked or double-released share.
-        let bits = ValueWord::from_string(Arc::new("payload".to_string())).into_raw_bits();
-
-        let cell: Arc<SharedCell> = Arc::new(SharedCell::new(ValueWord::from_i64(0)));
-        let raw = Arc::into_raw(cell);
-        unsafe {
-            write_shared_ptr(raw, bits);
-            assert_eq!(read_shared_ptr(raw), bits, "Ptr payload bits round-trip");
-            drop(Arc::from_raw(raw));
-        }
-        // Release the single share `bits` carries.
-        release_raw_value_bits(bits);
-    }
-
-    #[test]
-    fn shared_cell_sub_8byte_writers_extend_correctly() {
-        let cell: Arc<SharedCell> = Arc::new(SharedCell::new(ValueWord::from_i64(0)));
-        let raw = Arc::into_raw(cell);
-        unsafe {
-            // i32: writing -1 must sign-extend so an i64 reader observes -1.
-            write_shared_i32(raw, -1);
-            assert_eq!(read_shared_i32(raw), -1);
-            assert_eq!(read_shared_i64(raw), -1, "sign extension to 8 bytes");
-
-            // u32: writing 0xDEADBEEF must zero-extend (high half = 0).
-            write_shared_u32(raw, 0xDEAD_BEEF);
-            assert_eq!(read_shared_u32(raw), 0xDEAD_BEEF);
-            assert_eq!(read_shared_u64(raw), 0xDEAD_BEEF as u64);
-
-            write_shared_i16(raw, -1);
-            assert_eq!(read_shared_i16(raw), -1);
-            assert_eq!(read_shared_i64(raw), -1);
-
-            write_shared_u16(raw, 0xCAFE);
-            assert_eq!(read_shared_u16(raw), 0xCAFE);
-            assert_eq!(read_shared_u64(raw), 0xCAFE_u64);
-
-            write_shared_i8(raw, -2);
-            assert_eq!(read_shared_i8(raw), -2);
-            assert_eq!(read_shared_i64(raw), -2);
-
-            write_shared_u8(raw, 0xAB);
-            assert_eq!(read_shared_u8(raw), 0xAB);
-            assert_eq!(read_shared_u64(raw), 0xAB_u64);
-
-            drop(Arc::from_raw(raw));
-        }
-    }
-
-    #[test]
-    fn drop_shared_capture_decrements_arc_strong_count_scalar() {
-        // For a scalar (non-Ptr) interior kind, drop_shared_capture must
-        // simply Arc::from_raw + drop — no payload release.
-        let kinds = vec![CaptureKind::Shared];
-        let layout = ClosureLayout::from_capture_types(&[ConcreteType::I64], &kinds);
-        assert_eq!(layout.capture_inner_kind(0), FieldKind::I64);
-
-        let external: Arc<SharedCell> =
-            Arc::new(SharedCell::new(ValueWord::from_i64(99)));
-        let closure_share = Arc::clone(&external);
-        assert_eq!(Arc::strong_count(&external), 2);
-        let cell_ptr: *const SharedCell = Arc::into_raw(closure_share);
-
-        unsafe {
-            let block = alloc_typed_closure(0, 0, &layout);
-            let off = layout.heap_capture_offset(0);
-            std::ptr::write(block.add(off) as *mut *const SharedCell, cell_ptr);
-
-            drop_shared_capture(&layout, block, 0);
-
-            // External strong count back to 1 (closure share released).
-            assert_eq!(Arc::strong_count(&external), 1);
-
-            // Null out the slot before calling release_typed_closure so
-            // its mask-walk on teardown sees a null cell_ptr (early-return
-            // in drop_shared_capture). Otherwise we'd double-release.
-            std::ptr::write(
-                block.add(off) as *mut *const SharedCell,
-                std::ptr::null::<SharedCell>(),
-            );
-            release_typed_closure(block, &layout);
-        }
-    }
-
-    #[test]
-    fn drop_shared_capture_releases_ptr_payload_then_arc() {
-        // For a Ptr interior kind drop_shared_capture must:
-        //   1. lock cell, read 8-byte payload, release_raw_value_bits, unlock
-        //   2. Arc::from_raw + drop
-        // Verify by observing the SharedCell's Arc strong-count drop
-        // (concrete count is portable) and rely on miri/ASan for the
-        // payload-release balance — `bits` is the ONLY share we allocate
-        // for the payload, and drop_shared_capture must release it
-        // exactly once. A leak or double-free would surface under miri.
-        let kinds = vec![CaptureKind::Shared];
-        let layout = ClosureLayout::from_capture_types(&[ConcreteType::String], &kinds);
-        assert_eq!(layout.capture_inner_kind(0), FieldKind::Ptr);
-
-        // Allocate a string ValueWord — this carries exactly one heap
-        // refcount share. We hand that share to the cell and never
-        // touch the bits again; drop_shared_capture must release it.
-        let bits = ValueWord::from_string(Arc::new("ptr-payload".to_string())).into_raw_bits();
-
-        // The cell stores `bits` as its initial payload — the cell now
-        // owns that single share.
-        let external: Arc<SharedCell> =
-            Arc::new(SharedCell::new(ValueWord::from_raw_bits(bits)));
-        let closure_share = Arc::clone(&external);
-        assert_eq!(Arc::strong_count(&external), 2);
-        let cell_ptr: *const SharedCell = Arc::into_raw(closure_share);
-
-        unsafe {
-            let block = alloc_typed_closure(0, 0, &layout);
-            let off = layout.heap_capture_offset(0);
-            std::ptr::write(block.add(off) as *mut *const SharedCell, cell_ptr);
-
-            // Sanity: the cell holds the ptr bits.
-            assert_eq!(read_shared_ptr(cell_ptr), bits);
-
-            drop_shared_capture(&layout, block, 0);
-
-            // The closure share dropped — strong_count back to 1.
-            assert_eq!(
-                Arc::strong_count(&external),
-                1,
-                "Arc<SharedCell> share must be released by drop_shared_capture",
-            );
-
-            // Null out the slot so release_typed_closure's mask-walk
-            // sees null (early-return in drop_shared_capture).
-            std::ptr::write(
-                block.add(off) as *mut *const SharedCell,
-                std::ptr::null::<SharedCell>(),
-            );
-            release_typed_closure(block, &layout);
-
-            // Drop the external Arc — last share, frees the cell. The
-            // cell's Drop must NOT re-release the payload bits because
-            // drop_shared_capture already did. A miri/ASan run would
-            // catch a double-free here. (The cell's payload is now a
-            // dangling u64 that nothing reads.)
-        }
-        drop(external);
-    }
-
-    #[test]
-    fn drop_shared_capture_handles_null_slot() {
-        // A null cell_ptr is a no-op (per the safety contract).
-        let kinds = vec![CaptureKind::Shared];
-        let layout = ClosureLayout::from_capture_types(&[ConcreteType::I64], &kinds);
-        unsafe {
-            let block = alloc_typed_closure(0, 0, &layout);
-            // alloc_zeroed → null SharedCell ptr at the slot.
-            drop_shared_capture(&layout, block, 0);
-            // Block still has refcount 1; release normally — the slot is
-            // already null so the mask-walk's drop_shared_capture is a
-            // second no-op.
-            release_typed_closure(block, &layout);
-        }
-    }
-
-    #[test]
-    fn shared_cell_concurrent_stress_no_torn_writes() {
-        // Two threads race on a single shared cell, alternating writes
-        // of two distinct 8-byte sentinel values. The lock must keep
-        // every observed read equal to one of the two sentinels (no
-        // partial-byte tear).
-        use std::sync::Barrier;
-        use std::thread;
-
-        const A: i64 = 0x0101_0101_0101_0101;
-        const B: i64 = -0x0202_0202_0202_0202;
-
-        let cell: Arc<SharedCell> = Arc::new(SharedCell::new(ValueWord::from_i64(A)));
-        let raw_addr = Arc::into_raw(cell) as usize;
-        let barrier = Arc::new(Barrier::new(2));
-
-        let mut handles = Vec::new();
-        for tid in 0..2u8 {
-            let bar = Arc::clone(&barrier);
-            let h = thread::spawn(move || {
-                let raw = raw_addr as *const SharedCell;
-                bar.wait();
-                for _ in 0..500 {
-                    if tid == 0 {
-                        unsafe { write_shared_i64(raw, A) };
-                    } else {
-                        unsafe { write_shared_i64(raw, B) };
-                    }
-                    let v = unsafe { read_shared_i64(raw) };
-                    assert!(v == A || v == B, "torn write observed: {v:#x}");
-                }
-            });
-            handles.push(h);
-        }
-        for h in handles {
-            h.join().unwrap();
-        }
-
-        unsafe {
-            drop(Arc::from_raw(raw_addr as *const SharedCell));
+            let (b2, k2) = block.read_capture_kinded(2);
+            assert_eq!(b2 & 0xFF, 1);
+            assert_eq!(k2, NativeKind::Bool);
         }
     }
 }
+

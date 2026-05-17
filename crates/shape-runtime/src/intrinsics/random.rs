@@ -1,14 +1,24 @@
-//! Random number generation intrinsics
+//! Random number generation intrinsics — full migration to typed marshal layer.
+//!
+//! Per the intrinsics-typed-CC migration's per-file table, all 5 random
+//! intrinsics (`random`, `random_int`, `random_seed`, `random_normal`,
+//! `random_array`) migrate to `register_typed_fn_N` typed entries via
+//! [`create_random_intrinsics_module`].
+//!
+//! Thread-local `ChaCha8Rng` state is observably-stateful FFI behavior at
+//! the runtime layer; the marshal-API surface treats each intrinsic as
+//! pure-from-thread-local (each call mutates RNG, returns f64/Unit/array).
+//! `with_rng` stays `pub` for shape-vm to share the same RNG state when
+//! delegating random/distribution/stochastic intrinsics to the runtime.
 //!
 //! Provides high-quality PRNG using ChaCha8 for reproducibility and performance.
 //! Thread-local state ensures zero contention in parallel contexts.
 
-use super::{extract_f64, extract_usize, f64_vec_to_nb_array};
-use crate::context::ExecutionContext;
+use crate::marshal::{register_typed_fn_0, register_typed_fn_1, register_typed_fn_2};
+use crate::module_exports::ModuleExports;
+use crate::typed_module_exports::{ConcreteReturn, ConcreteType, TypedReturn};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
-use shape_ast::error::{Result, ShapeError};
-use shape_value::{ValueWord, ValueWordExt};
 use std::cell::RefCell;
 
 thread_local! {
@@ -26,111 +36,97 @@ where
     RNG.with(|rng| f(&mut *rng.borrow_mut()))
 }
 
-/// Intrinsic: Generate random f64 in [0, 1)
-pub fn intrinsic_random(args: &[ValueWord], _ctx: &mut ExecutionContext) -> Result<ValueWord> {
-    if !args.is_empty() {
-        return Err(ShapeError::RuntimeError {
-            message: "__intrinsic_random takes no arguments".to_string(),
-            location: None,
-        });
-    }
+// ───────────────────── Module factory (5 typed entries) ─────────────────────
 
-    let value = RNG.with(|rng| rng.borrow_mut().r#gen::<f64>());
-    Ok(ValueWord::from_f64(value))
-}
+/// Create the random intrinsics module with all 5 typed-marshal entry points.
+pub fn create_random_intrinsics_module() -> ModuleExports {
+    let mut module = ModuleExports::new("std::core::intrinsics::random");
+    module.description =
+        "Random number generation intrinsics (ChaCha8 thread-local PRNG)".to_string();
 
-/// Intrinsic: Generate random integer in [lo, hi] (inclusive)
-pub fn intrinsic_random_int(args: &[ValueWord], _ctx: &mut ExecutionContext) -> Result<ValueWord> {
-    if args.len() != 2 {
-        return Err(ShapeError::RuntimeError {
-            message: "__intrinsic_random_int requires 2 arguments (lo, hi)".to_string(),
-            location: None,
-        });
-    }
+    register_typed_fn_0::<_>(
+        &mut module,
+        "__intrinsic_random",
+        "Generate random f64 in [0, 1)",
+        ConcreteType::Number,
+        |_ctx| {
+            let value = with_rng(|rng| rng.r#gen::<f64>());
+            Ok(TypedReturn::Concrete(ConcreteReturn::F64(value)))
+        },
+    );
 
-    let lo = extract_f64(&args[0], "__intrinsic_random_int: lo")? as i64;
-    let hi = extract_f64(&args[1], "__intrinsic_random_int: hi")? as i64;
+    register_typed_fn_2::<_, f64, f64>(
+        &mut module,
+        "__intrinsic_random_int",
+        "Generate random integer in [lo, hi] (inclusive); returns as number",
+        [("lo", "number"), ("hi", "number")],
+        ConcreteType::Number,
+        |lo, hi, _ctx| {
+            let lo = lo as i64;
+            let hi = hi as i64;
+            if lo > hi {
+                return Err(format!(
+                    "__intrinsic_random_int: lo ({}) must be <= hi ({})",
+                    lo, hi
+                ));
+            }
+            let value = with_rng(|rng| rng.gen_range(lo..=hi));
+            Ok(TypedReturn::Concrete(ConcreteReturn::F64(value as f64)))
+        },
+    );
 
-    if lo > hi {
-        return Err(ShapeError::RuntimeError {
-            message: format!("__intrinsic_random_int: lo ({}) must be <= hi ({})", lo, hi),
-            location: None,
-        });
-    }
+    register_typed_fn_1::<_, f64>(
+        &mut module,
+        "__intrinsic_random_seed",
+        "Seed the thread-local RNG for reproducibility",
+        "seed",
+        "number",
+        ConcreteType::Unit,
+        |seed, _ctx| {
+            let seed = seed as u64;
+            with_rng(|rng| {
+                *rng = ChaCha8Rng::seed_from_u64(seed);
+            });
+            Ok(TypedReturn::Concrete(ConcreteReturn::Unit))
+        },
+    );
 
-    let value = RNG.with(|rng| rng.borrow_mut().gen_range(lo..=hi));
-    Ok(ValueWord::from_f64(value as f64))
-}
+    register_typed_fn_2::<_, f64, f64>(
+        &mut module,
+        "__intrinsic_random_normal",
+        "Generate random number from a normal distribution (Box-Muller)",
+        [("mean", "number"), ("std", "number")],
+        ConcreteType::Number,
+        |mean, std, _ctx| {
+            if std < 0.0 {
+                return Err("__intrinsic_random_normal: std must be non-negative".to_string());
+            }
+            let value = with_rng(|rng| {
+                let u1: f64 = rng.r#gen();
+                let u2: f64 = rng.r#gen();
+                let z = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
+                mean + std * z
+            });
+            Ok(TypedReturn::Concrete(ConcreteReturn::F64(value)))
+        },
+    );
 
-/// Intrinsic: Seed the RNG for reproducibility
-pub fn intrinsic_random_seed(args: &[ValueWord], _ctx: &mut ExecutionContext) -> Result<ValueWord> {
-    if args.len() != 1 {
-        return Err(ShapeError::RuntimeError {
-            message: "__intrinsic_random_seed requires 1 argument (seed)".to_string(),
-            location: None,
-        });
-    }
+    register_typed_fn_1::<_, i64>(
+        &mut module,
+        "__intrinsic_random_array",
+        "Generate array of n random numbers in [0, 1)",
+        "n",
+        "int",
+        ConcreteType::ArrayNumber,
+        |n, _ctx| {
+            if n < 0 {
+                return Err("__intrinsic_random_array: n must be non-negative".to_string());
+            }
+            let n = n as usize;
+            let values: Vec<f64> = with_rng(|rng| (0..n).map(|_| rng.r#gen::<f64>()).collect());
+            Ok(TypedReturn::Concrete(ConcreteReturn::ArrayF64(values)))
+        },
+    );
 
-    let seed = extract_f64(&args[0], "__intrinsic_random_seed: seed")? as u64;
-
-    RNG.with(|rng| {
-        *rng.borrow_mut() = ChaCha8Rng::seed_from_u64(seed);
-    });
-
-    Ok(ValueWord::unit())
-}
-
-/// Intrinsic: Generate random number from normal distribution
-pub fn intrinsic_random_normal(
-    args: &[ValueWord],
-    _ctx: &mut ExecutionContext,
-) -> Result<ValueWord> {
-    if args.len() != 2 {
-        return Err(ShapeError::RuntimeError {
-            message: "__intrinsic_random_normal requires 2 arguments (mean, std)".to_string(),
-            location: None,
-        });
-    }
-
-    let mean = extract_f64(&args[0], "__intrinsic_random_normal: mean")?;
-    let std = extract_f64(&args[1], "__intrinsic_random_normal: std")?;
-
-    if std < 0.0 {
-        return Err(ShapeError::RuntimeError {
-            message: "__intrinsic_random_normal: std must be non-negative".to_string(),
-            location: None,
-        });
-    }
-
-    let value = RNG.with(|rng| {
-        let mut rng = rng.borrow_mut();
-        let u1: f64 = rng.r#gen();
-        let u2: f64 = rng.r#gen();
-        let z = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
-        mean + std * z
-    });
-
-    Ok(ValueWord::from_f64(value))
-}
-
-/// Intrinsic: Generate array of n random numbers in [0, 1)
-pub fn intrinsic_random_array(
-    args: &[ValueWord],
-    _ctx: &mut ExecutionContext,
-) -> Result<ValueWord> {
-    if args.len() != 1 {
-        return Err(ShapeError::RuntimeError {
-            message: "__intrinsic_random_array requires 1 argument (n)".to_string(),
-            location: None,
-        });
-    }
-
-    let n = extract_usize(&args[0], "__intrinsic_random_array: n")?;
-
-    let values: Vec<f64> = RNG.with(|rng| {
-        let mut rng = rng.borrow_mut();
-        (0..n).map(|_| rng.r#gen::<f64>()).collect()
-    });
-
-    Ok(f64_vec_to_nb_array(values))
+    module
 }

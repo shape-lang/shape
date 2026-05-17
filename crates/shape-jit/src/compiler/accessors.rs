@@ -288,6 +288,47 @@ const ALL_OPCODES: &[OpCode] = &[
     OpCode::TypedArrayPushI32,
     OpCode::TypedArrayPushBool,
     OpCode::TypedArrayLen,
+    // W12 S1 (2026-05-13) — sized-integer typed array opcodes (I8/U8/I16/U16/U32/U64).
+    // The opcodes themselves are VM-dispatched today (`exec_v2_typed_array`);
+    // the JIT registers them here to mark the parity matrix as supported
+    // and to keep `build_full_opcode_parity_matrix` exhaustive.
+    OpCode::NewTypedArrayI8,
+    OpCode::TypedArrayGetI8,
+    OpCode::TypedArrayPushI8,
+    OpCode::TypedArraySetI8,
+    OpCode::NewTypedArrayU8,
+    OpCode::TypedArrayGetU8,
+    OpCode::TypedArrayPushU8,
+    OpCode::TypedArraySetU8,
+    OpCode::NewTypedArrayI16,
+    OpCode::TypedArrayGetI16,
+    OpCode::TypedArrayPushI16,
+    OpCode::TypedArraySetI16,
+    OpCode::NewTypedArrayU16,
+    OpCode::TypedArrayGetU16,
+    OpCode::TypedArrayPushU16,
+    OpCode::TypedArraySetU16,
+    OpCode::NewTypedArrayU32,
+    OpCode::TypedArrayGetU32,
+    OpCode::TypedArrayPushU32,
+    OpCode::TypedArraySetU32,
+    // U64 typed-array opcodes intentionally NOT minted — deferred to
+    // S1.5 per supervisor's S1 reopen (2026-05-13). See
+    // crates/shape-vm/src/bytecode/opcode_defs.rs comment block.
+    // Wave 2 Agent A1 (2026-05-14) — F32 + Char monomorphizations.
+    // VM-dispatched today via `exec_v2_typed_array`; JIT registers them
+    // in the parity matrix to keep `build_full_opcode_parity_matrix`
+    // exhaustive. The JIT v2_array_new_func / v2_array_push_elem_size
+    // helpers return None for these element kinds, so the JIT codegen
+    // falls back to the legacy NaN-boxed path or the VM dispatcher.
+    OpCode::NewTypedArrayF32,
+    OpCode::TypedArrayGetF32,
+    OpCode::TypedArrayPushF32,
+    OpCode::TypedArraySetF32,
+    OpCode::NewTypedArrayChar,
+    OpCode::TypedArrayGetChar,
+    OpCode::TypedArrayPushChar,
+    OpCode::TypedArraySetChar,
 ];
 
 const ALL_BUILTINS: &[BuiltinFunction] = &[
@@ -361,8 +402,9 @@ const ALL_BUILTINS: &[BuiltinFunction] = &[
     // Format (2)
     BuiltinFunction::FormatValueWithMeta,
     BuiltinFunction::FormatValueWithSpec,
-    // Math intrinsics (6)
-    BuiltinFunction::IntrinsicSum,
+    // Math intrinsics (5)
+    // W12-stdlib-intrinsic-collapse (Wave-2-Agent-G, 2026-05-14):
+    // `IntrinsicSum` deleted — PHF `.sum()` is canonical (ADR-005 §1).
     BuiltinFunction::IntrinsicMean,
     BuiltinFunction::IntrinsicMin,
     BuiltinFunction::IntrinsicMax,

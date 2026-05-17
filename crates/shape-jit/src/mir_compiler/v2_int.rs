@@ -1,8 +1,12 @@
 //! Sized integer (i32) codegen for MirToIR.
 //!
 //! Native 32-bit Cranelift instructions for i32 arithmetic and comparisons.
-//! Input values are i64 (from NaN-boxed stack slots); we narrow to i32,
-//! operate at native width, and widen back to i64 for storage.
+//! Per ADR-006 §2.7.5 the JIT emits raw native results; the slot's
+//! `NativeKind::Int32` is stamped at JIT compile time from the MIR static
+//! type info, not encoded in the bits. Input values are i64 raw payloads
+//! (callers widened them into the I64 ABI slot); we narrow to i32, operate
+//! at native width, and sign-extend back to i64 for storage. No NaN-box,
+//! no `tag_bits` dispatch, no payload masking.
 
 use cranelift::prelude::*;
 
@@ -12,9 +16,11 @@ use shape_vm::mir::types::BinOp;
 impl<'a, 'b> MirToIR<'a, 'b> {
     /// Compile i32 binary arithmetic — native 32-bit Cranelift instructions.
     ///
-    /// Input values are i64 (from NaN-boxed stack slots), narrowed to i32 via
-    /// `ireduce`, operated on natively, then sign-extended back to i64.
-    /// v2-boundary: input/output are NaN-boxed I64; operates on extracted i32 payload
+    /// Input values are i64 raw payloads (callers widened them into the I64
+    /// ABI slot), narrowed to i32 via `ireduce`, operated on natively, then
+    /// sign-extended back to i64. Per ADR-006 §2.7.5 the result is raw
+    /// native bits — `NativeKind::Int32` is stamped at the JIT-FFI carrier
+    /// from the MIR static type info, not encoded in the bits.
     pub(crate) fn compile_binop_i32(
         &mut self,
         op: &BinOp,
@@ -43,23 +49,16 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             _ => return Err(format!("unsupported i32 binop: {:?}", op)),
         };
 
-        // Sign-extend back to i64, then NaN-box as integer.
-        // NaN-boxed int = TAG_BASE | (TAG_INT << TAG_SHIFT) | (val & PAYLOAD_MASK)
-        let extended = self.builder.ins().sextend(types::I64, result);
-        let payload_mask = self.builder.ins().iconst(types::I64, shape_value::tag_bits::PAYLOAD_MASK as i64);
-        let payload = self.builder.ins().band(extended, payload_mask);
-        let int_tag = self.builder.ins().iconst(
-            types::I64,
-            (shape_value::tag_bits::TAG_BASE | (shape_value::tag_bits::TAG_INT << shape_value::tag_bits::TAG_SHIFT)) as i64,
-        );
-        Ok(self.builder.ins().bor(int_tag, payload))
+        // Sign-extend the raw i32 payload back into the I64 ABI slot. No
+        // NaN-box: kind flows on the parallel JitFfiCarrier companion.
+        Ok(self.builder.ins().sextend(types::I64, result))
     }
 
-    /// Compile i32 comparison — returns NaN-boxed boolean.
+    /// Compile i32 comparison — returns a raw bool payload in the I64 ABI slot.
     ///
     /// Narrows both operands to i32, performs signed integer comparison,
-    /// and returns TAG_BOOL_TRUE or TAG_BOOL_FALSE.
-    /// v2-boundary: returns NaN-boxed bool because callers expect I64 result
+    /// and selects 1u64 / 0u64. Per ADR-006 §2.7.5 the result is raw bits;
+    /// `NativeKind::Bool` is stamped on the parallel JitFfiCarrier.
     pub(crate) fn compile_cmp_i32(
         &mut self,
         op: &BinOp,

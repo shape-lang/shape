@@ -25,7 +25,7 @@
 use cranelift::prelude::*;
 use shape_value::v2::ConcreteType;
 use shape_vm::mir::types::{Operand, Place};
-use shape_vm::type_tracking::SlotKind;
+use shape_vm::type_tracking::NativeKind;
 
 use super::MirToIR;
 
@@ -34,7 +34,7 @@ use super::MirToIR;
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct TypedMapKinds {
     /// The concrete value type stored in the map (e.g. `I64`, `F64`).
-    pub value: SlotKind,
+    pub value: NativeKind,
 }
 
 impl<'a, 'b> MirToIR<'a, 'b> {
@@ -57,8 +57,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             return None;
         }
         let value_kind = match v {
-            ConcreteType::I64 => SlotKind::Int64,
-            ConcreteType::F64 => SlotKind::Float64,
+            ConcreteType::I64 => NativeKind::Int64,
+            ConcreteType::F64 => NativeKind::Float64,
             _ => return None,
         };
         Some(TypedMapKinds { value: value_kind })
@@ -67,119 +67,43 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// Try to emit an inline v2 typed-HashMap method call. Returns `Some(())`
     /// when the method was handled; `None` means the caller should fall back
     /// to the generic method-dispatch trampoline.
+    ///
+    /// ## Route A surface-and-stop (ADR-006 §2.7.14 Q15 / W11-jit-carrier-conversion)
+    ///
+    /// The kind-blind `jit_v2_map_*` FFI symbols (deleted ValueWord-shape map
+    /// FFI: `jit_v2_map_get_str_i64` / `get_str_f64` / `has_str` /
+    /// `set_str_i64` / `len`) are gated on the kinded `Arc<HashMapData>` +
+    /// `KindedSlot` rebuild. The deleted bodies treated the map handle and
+    /// key as `u64` bit-patterns whose kind was recovered by tag-bit decode
+    /// — the §2.7.7 #4 / #7 forbidden pattern. Route A's resolution is the
+    /// W11-jit-carrier-conversion sub-cluster.
+    ///
+    /// Until that lands, every typed-map method call surfaces-and-stops at
+    /// JIT compile time. The receiver-side trampoline path in the VM is
+    /// the runtime fallback when the JIT bails.
     pub(crate) fn try_emit_v2_typed_map_method(
         &mut self,
         method_name: &str,
-        receiver: &Place,
-        rest_args: &[Operand],
-        destination: &Place,
-        kinds: TypedMapKinds,
+        _receiver: &Place,
+        _rest_args: &[Operand],
+        _destination: &Place,
+        _kinds: TypedMapKinds,
     ) -> Result<Option<()>, String> {
-        match method_name {
-            // ── length / len / size ─────────────────────────────────────
-            "length" | "len" | "size" => {
-                if !rest_args.is_empty() {
-                    return Ok(None);
-                }
-                // R4.2C: v2_map_* FFIs take plain u64 bit-patterns — the map
-                // handle reaches here as an already-ValueWord-encoded I64 slot.
-                let map_bits = self.read_place(receiver)?;
-                let inst = self.builder.ins().call(self.ffi.v2_map_len, &[map_bits]);
-                let len_i64 = self.builder.inst_results(inst)[0];
-                self.release_old_value_if_heap(destination)?;
-                self.write_place(destination, len_i64)?;
-                Ok(Some(()))
-            }
-
-            // ── has ────────────────────────────────────────────────────
-            "has" => {
-                if rest_args.len() != 1 {
-                    return Ok(None);
-                }
-                // R4.2C: v2_map_* FFIs take plain u64 bit-patterns — map and
-                // key reach here as already-ValueWord-encoded I64 slots.
-                let map_bits = self.read_place(receiver)?;
-                let key_bits = self.compile_operand_raw(&rest_args[0])?;
-                let inst = self
-                    .builder
-                    .ins()
-                    .call(self.ffi.v2_map_has_str, &[map_bits, key_bits]);
-                let result_i64 = self.builder.inst_results(inst)[0];
-                // destination is typically a Bool-kinded place; write the i64
-                // and let the slot-kind plumbing narrow it as needed.
-                self.release_old_value_if_heap(destination)?;
-                self.write_place(destination, result_i64)?;
-                Ok(Some(()))
-            }
-
-            // ── get ────────────────────────────────────────────────────
-            "get" => {
-                if rest_args.len() != 1 {
-                    return Ok(None);
-                }
-                // R4.2C: v2_map_* FFIs take plain u64 bit-patterns — map and
-                // key reach here as already-ValueWord-encoded I64 slots.
-                let map_bits = self.read_place(receiver)?;
-                let key_bits = self.compile_operand_raw(&rest_args[0])?;
-                let result = match kinds.value {
-                    SlotKind::Int64 | SlotKind::UInt64 => {
-                        let inst = self.builder.ins().call(
-                            self.ffi.v2_map_get_str_i64,
-                            &[map_bits, key_bits],
-                        );
-                        self.builder.inst_results(inst)[0]
-                    }
-                    SlotKind::Float64 => {
-                        let inst = self.builder.ins().call(
-                            self.ffi.v2_map_get_str_f64,
-                            &[map_bits, key_bits],
-                        );
-                        self.builder.inst_results(inst)[0]
-                    }
-                    _ => return Ok(None),
-                };
-                self.release_old_value_if_heap(destination)?;
-                self.write_place(destination, result)?;
-                Ok(Some(()))
-            }
-
-            // ── set ────────────────────────────────────────────────────
-            // set(key, value) — only the int-valued variant has a dedicated
-            // helper today; other value types fall back to the generic
-            // trampoline.
-            "set" => {
-                if rest_args.len() != 2 {
-                    return Ok(None);
-                }
-                if !matches!(kinds.value, SlotKind::Int64 | SlotKind::UInt64) {
-                    return Ok(None);
-                }
-                // R4.2C: v2_map_* FFIs take plain u64 bit-patterns — map,
-                // key, and value reach here as already-ValueWord-encoded
-                // I64 slots.
-                let map_bits = self.read_place(receiver)?;
-                let key_bits = self.compile_operand_raw(&rest_args[0])?;
-                let val_bits = self.compile_operand_raw(&rest_args[1])?;
-                let inst = self.builder.ins().call(
-                    self.ffi.v2_map_set_str_i64,
-                    &[map_bits, key_bits, val_bits],
-                );
-                let new_map_bits = self.builder.inst_results(inst)[0];
-                // Write the (possibly CoW-cloned) map handle back to the
-                // receiver slot so subsequent reads see the update.
-                if let Place::Local(_) = receiver {
-                    self.write_place(receiver, new_map_bits)?;
-                }
-                // The destination of a `.set()` call is conventionally unit
-                // / none — write a zero sentinel so the caller's slot gets
-                // a defined value.
-                let none_val = self.builder.ins().iconst(types::I64, 0i64);
-                self.release_old_value_if_heap(destination)?;
-                self.write_place(destination, none_val)?;
-                Ok(Some(()))
-            }
-
-            _ => Ok(None),
-        }
+        Err(format!(
+            "Route A surface-and-stop: SURFACE — typed-HashMap method `{}` \
+             depends on the kinded `Arc<HashMapData>` + `KindedSlot` map FFI \
+             rebuild. The kind-blind `jit_v2_map_*` symbols (deleted \
+             ValueWord-shape ABI) are gated on W11-jit-carrier-conversion \
+             per ADR-006 §2.7.14 Q15. ADR-006 §2.7.14 / §2.7.5.",
+            method_name
+        ))
     }
 }
+
+// Silence unused-import warnings — these are still re-exported by the
+// module but the surface-and-stop body has dropped its uses.
+#[allow(dead_code)]
+const _: fn() = || {
+    let _ = NativeKind::Int64;
+    let _ = types::I64;
+};

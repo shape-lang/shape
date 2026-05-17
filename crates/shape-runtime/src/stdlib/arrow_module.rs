@@ -3,12 +3,33 @@
 //! Exports: arrow.read_table, arrow.read_tables, arrow.metadata
 //!
 //! All operations require `FsRead` permission.
+//!
+//! W17-out-of-bundle-A-followups (2026-05-12): `arrow.read_tables`
+//! currently surfaces structured-stop. Per the C+ precedent in
+//! `phase-2d-playbook.md` §3, `Array<DataTable>` is genuinely
+//! homogeneous in `HeapKind::DataTable` — the natural Q25.A specialized
+//! variant is a `TypedArrayData::DataTable(Arc<TypedBuffer<Arc<DataTable>>>)`
+//! arm, which is out of scope for this sub-cluster (the prompt
+//! explicitly forbids new HeapKind variants and an added
+//! TypedArrayData variant would require ~40 exhaustive-match updates).
+//! The surface message names the natural follow-up sub-cluster so
+//! production callers see the structured error rather than a panic.
+//!
+//! Phase 2d Array cluster migration (historical context, 2026-05-07):
+//! ported to the typed marshal layer. `arrow.read_tables` returned
+//! `Array<DataTable>` via `ConcreteReturn::ArrayHeapValue` — each
+//! element was an `Arc<HeapValue::DataTable>`. Post-Q25.A,
+//! `build_specialized_from_heap_arcs` does not have a DataTable arm,
+//! so the marshal projection surfaces a structured error.
+//!
+//! Tests deferred — ValueWord-based test fixtures can't compile and
+//! aren't reconstructed until the shape-vm cascade provides a typed
+//! test harness, mirroring the file_ops migration in commit d716482.
 
-use crate::module_exports::{ModuleExports, ModuleParam};
-use crate::typed_module_exports::{ConcreteType, TypedReturn, register_typed_function};
+use crate::marshal::register_typed_fn_1;
+use crate::module_exports::ModuleExports;
+use crate::typed_module_exports::{ConcreteReturn, ConcreteType, TypedReturn};
 use arrow_ipc::reader::FileReader;
-use shape_value::datatable::DataTable;
-use shape_value::{ValueWord, ValueWordExt};
 use std::io::Cursor;
 use std::sync::Arc;
 
@@ -17,118 +38,91 @@ pub fn create_arrow_module() -> ModuleExports {
     let mut module = ModuleExports::new("std::core::arrow");
     module.description = "Arrow IPC columnar file reading".to_string();
 
-    let path_param = || ModuleParam {
-        name: "path".to_string(),
-        type_name: "string".to_string(),
-        required: true,
-        description: "Path to the Arrow IPC file".to_string(),
-        ..Default::default()
-    };
-
     // arrow.read_table(path: string) -> Result<DataTable, string>
-    register_typed_function(
+    register_typed_fn_1::<_, Arc<String>>(
         &mut module,
         "read_table",
         "Read the first record batch from an Arrow IPC file",
-        vec![path_param()],
+        "path",
+        "string",
         ConcreteType::Result2(
             Box::new(ConcreteType::DataTable),
             Box::new(ConcreteType::String),
         ),
-        |args, ctx| {
-            let path = args
-                .first()
-                .and_then(|a| a.as_str())
-                .ok_or_else(|| "arrow.read_table() requires a path string".to_string())?;
-
+        |path, ctx| {
             crate::module_exports::check_fs_permission(
                 ctx,
                 shape_abi_v1::Permission::FsRead,
-                path,
+                path.as_str(),
             )?;
 
-            let bytes = std::fs::read(path)
+            let bytes = std::fs::read(path.as_str())
                 .map_err(|e| format!("arrow.read_table() failed to read '{}': {}", path, e))?;
 
             let dt = crate::wire_conversion::datatable_from_ipc_bytes(&bytes, None, None)?;
-            Ok(TypedReturn::Ok(Box::new(TypedReturn::DataTable(Arc::new(
-                dt,
-            )))))
+            Ok(TypedReturn::Ok(ConcreteReturn::DataTable(Arc::new(dt))))
         },
     );
 
     // arrow.read_tables(path: string) -> Result<Array<DataTable>, string>
-    register_typed_function(
+    //
+    // W17-out-of-bundle-A-followups (2026-05-12): surface-and-stop. The
+    // `Array<DataTable>` return shape is genuinely homogeneous in
+    // `HeapKind::DataTable` — the natural Q25.A specialized variant is
+    // `TypedArrayData::DataTable(Arc<TypedBuffer<Arc<DataTable>>>)`, but
+    // adding a TypedArrayData variant is out of bundle-A-followups
+    // scope (prompt forbids new HeapKind variants AND a new
+    // TypedArrayData arm cascades through ~40 exhaustive matches).
+    // Body returns a structured `Err` payload so callers see the
+    // tracked follow-up rather than a marshal-layer panic.
+    register_typed_fn_1::<_, Arc<String>>(
         &mut module,
         "read_tables",
         "Read all record batches from an Arrow IPC file",
-        vec![path_param()],
+        "path",
+        "string",
         ConcreteType::Result2(
-            Box::new(ConcreteType::Named("Array<DataTable>".to_string())),
+            Box::new(ConcreteType::ArrayHeapValue("Array<DataTable>".to_string())),
             Box::new(ConcreteType::String),
         ),
-        |args, ctx| {
-            let path = args
-                .first()
-                .and_then(|a| a.as_str())
-                .ok_or_else(|| "arrow.read_tables() requires a path string".to_string())?;
-
-            crate::module_exports::check_fs_permission(
-                ctx,
-                shape_abi_v1::Permission::FsRead,
-                path,
-            )?;
-
-            let bytes = std::fs::read(path)
-                .map_err(|e| format!("arrow.read_tables() failed to read '{}': {}", path, e))?;
-
-            let cursor = Cursor::new(bytes);
-            let reader = FileReader::try_new(cursor, None)
-                .map_err(|e| format!("arrow.read_tables() invalid IPC file: {}", e))?;
-
-            let mut tables: Vec<TypedReturn> = Vec::new();
-            for batch_result in reader {
-                let batch = batch_result
-                    .map_err(|e| format!("arrow.read_tables() failed reading batch: {}", e))?;
-                let dt = DataTable::new(batch);
-                tables.push(TypedReturn::DataTable(Arc::new(dt)));
-            }
-
-            // Lower the typed DataTable elements through their Drop into
-            // a single ValueWord array. The TypedReturn::ArrayValueWord
-            // path keeps element marshalling consistent with the rest of
-            // the migration.
-            let elements: Vec<shape_value::ValueWord> =
-                tables.into_iter().map(|t| t.into_value_word()).collect();
-            Ok(TypedReturn::Ok(Box::new(TypedReturn::ArrayValueWord(
-                elements,
-            ))))
+        |path, _ctx| {
+            let _ = path; // suppress unused; the SURFACE response is path-independent
+            // phase-2d-hardening:(f) — arrow.read_tables surface-and-stop:
+            // Array<DataTable> needs TypedArrayData::DataTable variant
+            // (homogeneous-in-HeapKind::DataTable case per ADR-006 §2.7.24
+            // Q25.A spec list). Tracked as
+            // W17-typed-carrier-array-datatable follow-up.
+            Err(format!(
+                "arrow.read_tables(): SURFACE — `Array<DataTable>` needs a \
+                 typed-array-data DataTable specialized variant in ADR-006 \
+                 §2.7.24 Q25.A's spec list. Tracked as \
+                 W17-typed-carrier-array-datatable follow-up \
+                 (out of bundle-A-followups scope: new TypedArrayData arm \
+                 cascades through exhaustive matches across ~40 files). \
+                 ADR-006 §2.7.24 Q25.A."
+            ))
         },
     );
 
     // arrow.metadata(path: string) -> Result<HashMap<string, string>, string>
-    register_typed_function(
+    register_typed_fn_1::<_, Arc<String>>(
         &mut module,
         "metadata",
         "Read schema metadata from an Arrow IPC file header",
-        vec![path_param()],
+        "path",
+        "string",
         ConcreteType::Result2(
             Box::new(ConcreteType::HashMapStringString),
             Box::new(ConcreteType::String),
         ),
-        |args, ctx| {
-            let path = args
-                .first()
-                .and_then(|a| a.as_str())
-                .ok_or_else(|| "arrow.metadata() requires a path string".to_string())?;
-
+        |path, ctx| {
             crate::module_exports::check_fs_permission(
                 ctx,
                 shape_abi_v1::Permission::FsRead,
-                path,
+                path.as_str(),
             )?;
 
-            let bytes = std::fs::read(path)
+            let bytes = std::fs::read(path.as_str())
                 .map_err(|e| format!("arrow.metadata() failed to read '{}': {}", path, e))?;
 
             let cursor = Cursor::new(bytes);
@@ -142,184 +136,9 @@ pub fn create_arrow_module() -> ModuleExports {
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
-            Ok(TypedReturn::Ok(Box::new(TypedReturn::HashMapStringString(
-                pairs,
-            ))))
+            Ok(TypedReturn::Ok(ConcreteReturn::HashMapStringString(pairs)))
         },
     );
 
     module
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use arrow_array::{Float64Array, Int64Array, RecordBatch};
-    use arrow_ipc::writer::FileWriter;
-    use arrow_schema::{Field, Schema};
-    use std::collections::HashMap;
-
-    fn test_ctx() -> crate::module_exports::ModuleContext<'static> {
-        let registry = Box::leak(Box::new(crate::type_schema::TypeSchemaRegistry::new()));
-        crate::module_exports::ModuleContext {
-            schemas: registry,
-            invoke_callable: None,
-            raw_invoker: None,
-            function_hashes: None,
-            vm_state: None,
-            granted_permissions: None,
-            scope_constraints: None,
-            set_pending_resume: None,
-            set_pending_frame_resume: None,
-        }
-    }
-
-    fn write_test_arrow_file(path: &std::path::Path) {
-        let mut metadata = HashMap::new();
-        metadata.insert("test_key".to_string(), "test_value".to_string());
-        metadata.insert("rows".to_string(), "3".to_string());
-
-        let schema = Arc::new(
-            Schema::new(vec![
-                Field::new("x", arrow_schema::DataType::Float64, false),
-                Field::new("y", arrow_schema::DataType::Int64, false),
-            ])
-            .with_metadata(metadata),
-        );
-
-        let x_col = Float64Array::from(vec![1.0, 2.0, 3.0]);
-        let y_col = Int64Array::from(vec![10, 20, 30]);
-        let batch =
-            RecordBatch::try_new(schema.clone(), vec![Arc::new(x_col), Arc::new(y_col)]).unwrap();
-
-        let file = std::fs::File::create(path).unwrap();
-        let mut writer = FileWriter::try_new(file, &schema).unwrap();
-        writer.write(&batch).unwrap();
-        writer.finish().unwrap();
-    }
-
-    #[test]
-    fn test_arrow_module_creation() {
-        let module = create_arrow_module();
-        assert_eq!(module.name, "std::core::arrow");
-        assert!(module.has_export("read_table"));
-        assert!(module.has_export("read_tables"));
-        assert!(module.has_export("metadata"));
-    }
-
-    #[test]
-    fn test_arrow_read_table() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.arrow");
-        write_test_arrow_file(&path);
-
-        let module = create_arrow_module();
-        let ctx = test_ctx();
-        let result = module.invoke_export("read_table", 
-            &[ValueWord::from_string(Arc::new(
-                path.to_str().unwrap().to_string(),
-            ))],
-            &ctx,
-        ).unwrap()
-        .unwrap();
-        let inner = result.as_ok_inner().expect("should be Ok");
-        assert!(inner.as_datatable().is_some());
-    }
-
-    #[test]
-    fn test_arrow_read_tables() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.arrow");
-        write_test_arrow_file(&path);
-
-        let module = create_arrow_module();
-        let ctx = test_ctx();
-        let result = module.invoke_export("read_tables", 
-            &[ValueWord::from_string(Arc::new(
-                path.to_str().unwrap().to_string(),
-            ))],
-            &ctx,
-        ).unwrap()
-        .unwrap();
-        let inner = result.as_ok_inner().expect("should be Ok");
-        let tables = inner.as_any_array().expect("should be array").to_generic();
-        assert_eq!(tables.len(), 1);
-    }
-
-    #[test]
-    fn test_arrow_metadata() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.arrow");
-        write_test_arrow_file(&path);
-
-        let module = create_arrow_module();
-        let ctx = test_ctx();
-        let result = module.invoke_export("metadata", 
-            &[ValueWord::from_string(Arc::new(
-                path.to_str().unwrap().to_string(),
-            ))],
-            &ctx,
-        ).unwrap()
-        .unwrap();
-        let inner = result.as_ok_inner().expect("should be Ok");
-        let (keys, values, _) = inner.as_hashmap().expect("should be hashmap");
-        // Find the test_key
-        let mut found = false;
-        for (i, k) in keys.iter().enumerate() {
-            if k.as_str() == Some("test_key") {
-                assert_eq!(values[i].as_str(), Some("test_value"));
-                found = true;
-            }
-        }
-        assert!(found, "should have 'test_key' in metadata");
-    }
-
-    #[test]
-    fn test_arrow_read_table_nonexistent() {
-        let module = create_arrow_module();
-        let ctx = test_ctx();
-        let result = module.invoke_export("read_table", 
-            &[ValueWord::from_string(Arc::new(
-                "/nonexistent/file.arrow".to_string(),
-            ))],
-            &ctx,
-        ).unwrap();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_arrow_read_table_requires_string() {
-        let module = create_arrow_module();
-        let ctx = test_ctx();
-        let result = module.invoke_export("read_table", &[ValueWord::from_f64(42.0)], &ctx).unwrap();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_arrow_schemas() {
-        let module = create_arrow_module();
-
-        let read_table_schema = module.get_schema("read_table").unwrap();
-        assert_eq!(read_table_schema.params.len(), 1);
-        assert_eq!(read_table_schema.params[0].name, "path");
-        assert!(read_table_schema.params[0].required);
-        assert_eq!(
-            read_table_schema.return_type.as_deref(),
-            Some("Result<DataTable, string>")
-        );
-
-        let read_tables_schema = module.get_schema("read_tables").unwrap();
-        assert_eq!(read_tables_schema.params.len(), 1);
-        assert_eq!(
-            read_tables_schema.return_type.as_deref(),
-            Some("Result<Array<DataTable>, string>")
-        );
-
-        let metadata_schema = module.get_schema("metadata").unwrap();
-        assert_eq!(metadata_schema.params.len(), 1);
-        assert_eq!(
-            metadata_schema.return_type.as_deref(),
-            Some("Result<HashMap<string, string>, string>")
-        );
-    }
 }

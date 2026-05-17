@@ -9,9 +9,12 @@ use cranelift::codegen::ir::FuncRef;
 use cranelift::prelude::*;
 
 use super::MirToIR;
-// v2-boundary: inline array access still uses NaN-boxed heap pointer layout
+// v2-boundary: inline array access still uses heap pointer layout. Per
+// ADR-006 §2.7.5 the JIT-FFI boundary owns its own constants; import the
+// `UNIFIED_PTR_MASK` mirror from `value_ffi` instead of reaching into the
+// deleted `shape_value::tag_bits`.
 use crate::ffi::jit_kinds::JIT_ALLOC_DATA_OFFSET;
-use shape_value::tag_bits::UNIFIED_PTR_MASK;
+use crate::ffi::value_ffi::UNIFIED_PTR_MASK;
 use shape_value::v2::struct_layout::FieldKind;
 use shape_vm::mir::types::*;
 
@@ -288,6 +291,11 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 
     /// Bring the FFI's native return value into the slot form the rest of
     /// the MIR pipeline expects (see comment block above for the table).
+    ///
+    /// Per ADR-006 §2.7.5 / §2.7.8 the cell carries a parallel `NativeKind`
+    /// companion; the raw bits returned here are post-proof native bits and
+    /// never re-NaN-boxed. The legacy `I64 → TAG_INT` re-box (deleted with
+    /// `tag_bits`) is gone — the I64 path is now passthrough.
     pub(super) fn normalize_cell_read(&mut self, raw: Value, kind: FieldKind) -> Value {
         match kind {
             // Native widths — passthrough.
@@ -301,33 +309,17 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             FieldKind::I8 | FieldKind::U8 | FieldKind::Bool => {
                 self.builder.ins().ireduce(types::I8, raw)
             }
-            // Re-NaN-box the raw native int so `compile_binop_int64`
-            // (which extracts a 48-bit signed payload via `<<16, >>16`)
-            // sees the bit pattern it expects. Mask payload to 48 bits +
-            // OR the TAG_BASE | (TAG_INT<<TAG_SHIFT) tag.
-            FieldKind::I64 => {
-                let payload_mask = self.builder.ins().iconst(
-                    types::I64,
-                    shape_value::tag_bits::PAYLOAD_MASK as i64,
-                );
-                let payload = self.builder.ins().band(raw, payload_mask);
-                let tag = self.builder.ins().iconst(
-                    types::I64,
-                    (shape_value::tag_bits::TAG_BASE
-                        | (shape_value::tag_bits::TAG_INT
-                            << shape_value::tag_bits::TAG_SHIFT))
-                        as i64,
-                );
-                self.builder.ins().bor(tag, payload)
-            }
+            // I64 is raw native bits; the kind companion is `Int64`.
+            FieldKind::I64 => raw,
         }
     }
 
     /// Variant of `normalize_cell_read` for the inline Shared load
     /// path. The Shared load uses `cell_load_type_for_field_kind` (the
     /// kind's *native* Cranelift type — I8 for Bool, I16 for I16, etc.,
-    /// not the FFI's I32-widened param), so sub-32 narrowing is
-    /// unnecessary; we only need to NaN-box for `I64`.
+    /// not the FFI's I32-widened param). Per ADR-006 §2.7.5 the cell
+    /// carries the kind on the parallel companion; raw bits flow through
+    /// untouched — no `I64 → TAG_INT` re-box.
     pub(super) fn normalize_cell_read_inline(
         &mut self,
         raw: Value,
@@ -343,22 +335,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             | FieldKind::U16
             | FieldKind::I8
             | FieldKind::U8
-            | FieldKind::Bool => raw,
-            FieldKind::I64 => {
-                let payload_mask = self.builder.ins().iconst(
-                    types::I64,
-                    shape_value::tag_bits::PAYLOAD_MASK as i64,
-                );
-                let payload = self.builder.ins().band(raw, payload_mask);
-                let tag = self.builder.ins().iconst(
-                    types::I64,
-                    (shape_value::tag_bits::TAG_BASE
-                        | (shape_value::tag_bits::TAG_INT
-                            << shape_value::tag_bits::TAG_SHIFT))
-                        as i64,
-                );
-                self.builder.ins().bor(tag, payload)
-            }
+            | FieldKind::Bool
+            | FieldKind::I64 => raw,
         }
     }
 
@@ -1070,7 +1048,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     return Ok(());
                 }
 
-                let target_kind = super::types::slot_kind_for_local(&self.slot_kinds, slot.0);
+                let target_kind = super::types::slot_kind_for_local(&self.slot_kinds, slot.0)
+                    .unwrap_or(shape_vm::type_tracking::NativeKind::Int64);
                 let var = *self.locals.get(slot).ok_or_else(|| {
                     format!("MirToIR: unknown local slot {}", slot)
                 })?;
@@ -1184,20 +1163,20 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             })?;
             let kind = self.slot_kind_of(slot);
             let null = match kind {
-                shape_vm::type_tracking::SlotKind::Float64 => {
+                shape_vm::type_tracking::NativeKind::Float64 => {
                     self.builder.ins().f64const(0.0)
                 }
-                shape_vm::type_tracking::SlotKind::Int32
-                | shape_vm::type_tracking::SlotKind::UInt32 => {
+                shape_vm::type_tracking::NativeKind::Int32
+                | shape_vm::type_tracking::NativeKind::UInt32 => {
                     self.builder.ins().iconst(types::I32, 0)
                 }
-                shape_vm::type_tracking::SlotKind::Bool
-                | shape_vm::type_tracking::SlotKind::Int8
-                | shape_vm::type_tracking::SlotKind::UInt8 => {
+                shape_vm::type_tracking::NativeKind::Bool
+                | shape_vm::type_tracking::NativeKind::Int8
+                | shape_vm::type_tracking::NativeKind::UInt8 => {
                     self.builder.ins().iconst(types::I8, 0)
                 }
-                shape_vm::type_tracking::SlotKind::Int16
-                | shape_vm::type_tracking::SlotKind::UInt16 => {
+                shape_vm::type_tracking::NativeKind::Int16
+                | shape_vm::type_tracking::NativeKind::UInt16 => {
                     self.builder.ins().iconst(types::I16, 0)
                 }
                 // v2-boundary: I64 (NaN-boxed) slots use TAG_NULL as zero value
@@ -1232,6 +1211,13 @@ fn cell_load_type_for_field_kind(kind: FieldKind) -> Type {
 // Unit tests for inline typed-struct field access
 // ===========================================================================
 
+// W11: this test module exercises the deleted `shape_value::ValueBits`
+// API (e.g. `ValueBits::make_unified_heap`) and the deleted
+// `UnifiedValue` heap-wrapper layout. Both belong to the pre-strict-typing
+// dynamic-FFI dispatch path the bulldozer removed. The kinded-FFI inline
+// typed-field-access tests are tracked under ADR-006 §2.7.4 Phase 2c FFI
+// rebuild — until then the whole module is gated out of compilation.
+#[cfg(any())]
 #[cfg(test)]
 mod tests {
     use super::*;

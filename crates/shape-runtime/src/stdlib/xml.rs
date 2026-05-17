@@ -2,27 +2,244 @@
 //!
 //! Exports: xml.parse(text), xml.stringify(value)
 //!
-//! XML nodes are represented as Shape HashMaps with structure:
-//! `{ name: string, attributes: HashMap, children: Array, text?: string }`
+//! XML nodes are represented as Shape TypedObjects with the `XmlNode`
+//! schema: `{ name: string, attributes: HashMap<string, string>,
+//!            children: Array<XmlNode>, text: string }`
+//!
+//! W17-out-of-bundle-A-followups (2026-05-12): children rewire per the
+//! C+ precedent recorded in `phase-2d-playbook.md` §3
+//! ("Bundle-A checkpoint-2 amendment"). Pre-rewire, each child was an
+//! `Arc<HeapValue::HashMap>` carried inside the deleted
+//! `TypedArrayData::HeapValue` arm. Post-rewire, each child is an
+//! `Arc<HeapValue::TypedObject>` with the registered `XmlNode` schema,
+//! and the outer children array lowers to `TypedArrayData::TypedObject`
+//! per ADR-006 §2.7.24 Q25.A's specialized list.
+//!
+//! User-visible API: `node.children[i].name` / `.attributes` / `.text`
+//! continue to work via TypedObject field access (same shape as the
+//! prior HashMap dispatch). The `text` field is now always present
+//! (empty string when absent); the prior optional-field shape was
+//! already flattened.
+//!
+//! Stage C HashMap-marshal P1(b) historical context (2026-05-07):
+//! - `xml.parse` returns the root element as `TypedReturn::OkObjectPairs`
+//!   per Cluster #4 β shape (mirrors `arrow.metadata` / http.rs precedents).
+//! - `xml.stringify` takes `value: HashMap<string, *>` typed input via
+//!   `Vec<(Arc<String>, Arc<HeapValue>)>` FromSlot from Step 1 P1(b)
+//!   infrastructure (commit `36519f6`). Walks the recursive HeapValue
+//!   tree using direct pattern matching — no marshal-boundary
+//!   re-entry per element. The reader now dispatches the `children`
+//!   field through `TypedArrayData::TypedObject` per the post-rewire
+//!   construction shape.
+//! - Attributes (`HashMap<string, string>`) carried via
+//!   `ConcreteReturn::HashMapStringString` on output and read directly
+//!   from `HeapValue::HashMap(d)` on input.
+//!
+//! Tests deleted along with the legacy ValueWord-based fixtures, mirroring
+//! the csv_module migration (commit `9f6b1d3`). New typed-marshal test
+//! harness arrives with the shape-vm cleanup workstream.
 
+use crate::marshal::{register_typed_fn_1, register_typed_fn_1_full};
 use crate::module_exports::{ModuleExports, ModuleParam};
-use crate::typed_module_exports::{ConcreteType, TypedReturn, register_typed_function};
+use crate::type_schema::register_predeclared_any_schema;
+use crate::typed_module_exports::{ConcreteReturn, ConcreteType, TypedReturn};
 use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::{Reader, Writer};
-use shape_value::{ValueWord, ValueWordExt};
+use shape_value::heap_value::{HashMapData, HeapValue, TypedObjectStorage};
+use shape_value::v2::typed_array::TypedArray;
+use shape_value::{HeapKind, NativeKind, ValueSlot};
 use std::io::Cursor;
 use std::sync::Arc;
 
+/// XmlNode schema field order: matches `into_typed_object_arc` field-pair
+/// order. The schema is auto-registered via
+/// `register_predeclared_any_schema` on first use so the field list is the
+/// single source of truth.
+const XML_NODE_FIELDS: &[&str] = &["name", "attributes", "children", "text"];
+
+/// Parsed XML element data: a recursive structure where each element has
+/// a name, attribute pairs, child elements, and optional text content.
+struct ElementData {
+    name: String,
+    attributes: Vec<(String, String)>,
+    children: Vec<ElementData>,
+    text: Option<String>,
+}
+
+impl ElementData {
+    /// Project this element into a `HeapValue::TypedObject(...)` with
+    /// the `XmlNode` schema (W17-out-of-bundle-A-followups, 2026-05-12).
+    /// Children are recursively projected through this method and form
+    /// a `TypedArrayData::TypedObject` array — no polymorphic
+    /// `Array<HashMap>` carrier. Per C+ precedent the schema is
+    /// auto-registered via `register_predeclared_any_schema`.
+    ///
+    /// Field order matches `XML_NODE_FIELDS` (name, attributes,
+    /// children, text). `text` is always present at the slot level
+    /// (empty string when the source XML had no text node) so the
+    /// schema is fixed-arity and the type is exhaustive — no Option
+    /// indirection at the storage layer.
+    fn into_typed_object_arc(self) -> Arc<HeapValue> {
+        // Wave 2 Round 3b C2-joint ckpt-4 (2026-05-14): build the XML
+        // attributes HashMap via the per-V mutation API on
+        // `HashMapData<*const StringObj>` (V = string). Each (k, v) pair
+        // becomes one fresh StringObj insert; the wrapper carries one
+        // refcount share per element. ADR-006 §2.7.24 Q25.B SUPERSEDED.
+        let mut attrs_data: HashMapData<*const shape_value::v2::string_obj::StringObj> =
+            HashMapData::new();
+        for (k, v) in &self.attributes {
+            let v_obj = shape_value::v2::string_obj::StringObj::new(v.as_str())
+                as *const shape_value::v2::string_obj::StringObj;
+            unsafe { attrs_data.insert(k.as_str(), v_obj) };
+        }
+        let attrs_data: shape_value::heap_value::HashMapKindedRef =
+            shape_value::heap_value::HashMapKindedRef::String(Arc::new(attrs_data));
+        // Recurse: each child becomes its own TypedObject. The child raw
+        // `*const TypedObjectStorage` pointers are packed into a
+        // `*mut TypedArray<*const TypedObjectStorage>` flat-struct carrier
+        // per V3-S5 ckpt-5-prime²c Migration shape (a) (the deleted
+        // `TypedArrayData::TypedObject` enum-arm shape). The
+        // `TypedObjectStorage` type impls `v2::heap_element::HeapElement`
+        // (`heap_value.rs:3971`), so per-element retain/release dispatches
+        // through `v2_retain` / `v2_release` on the on-header refcount.
+        //
+        // Each child `into_typed_object_arc()` returns an `Arc<HeapValue>`
+        // wrapping `HeapValue::TypedObject(TypedObjectPtr)` — we extract
+        // the inner raw pointer via `into_raw()` (transferring the
+        // wrapper's one refcount share to the raw pointer, which the
+        // `TypedArray` takes ownership of as an element).
+        let child_ptrs: Vec<*const TypedObjectStorage> = self
+            .children
+            .into_iter()
+            .map(|c| {
+                let child_hv = c.into_typed_object_arc();
+                // Extract inner TypedObjectPtr by cloning out and consuming.
+                let to_ptr = match &*child_hv {
+                    HeapValue::TypedObject(s) => s.clone(),
+                    _ => unreachable!(
+                        "into_typed_object_arc must return HeapValue::TypedObject"
+                    ),
+                };
+                to_ptr.into_raw()
+            })
+            .collect();
+        let children_arr: *mut TypedArray<*const TypedObjectStorage> =
+            TypedArray::<*const TypedObjectStorage>::from_slice(&child_ptrs);
+        // `from_slice` copies each `*const TypedObjectStorage` bit-for-bit
+        // (raw pointers are Copy). The refcount shares were transferred
+        // from the source `TypedObjectPtr` wrappers into raw pointers
+        // already; the source `Vec<*const _>` doesn't own any share, so
+        // ordinary Drop suffices for the source Vec's heap allocation.
+        // Element-share ownership now lives with the array.
+
+        let schema_id = ensure_xml_node_schema();
+        // Field-order: name(0), attributes(1), children(2), text(3).
+        // Heap mask: name(String), attributes(HashMap), children(TypedArray),
+        // text(String) — all 4 fields are heap-resident.
+        let name_arc = Arc::new(self.name);
+        let attrs_arc = Arc::new(attrs_data);
+        let text_arc = Arc::new(self.text.unwrap_or_default());
+
+        let slots: Box<[ValueSlot]> = Box::new([
+            ValueSlot::from_string_arc(name_arc),
+            ValueSlot::from_hashmap(attrs_arc),
+            // V3-S5 ckpt-5-prime²c (2026-05-15) Migration shape (a): the
+            // `ValueSlot::from_typed_array(Arc<TypedArrayData>)` constructor
+            // is deleted; per-element-kind constructors aren't landed yet
+            // (Round 2 follow-up). Store the raw `*mut TypedArray<T>`
+            // pointer directly via `ValueSlot::from_u64` — this is the
+            // canonical slot-bit shape for `NativeKind::Ptr(HeapKind::
+            // TypedArray)` per `docs/runtime-v2-spec.md`. The schema's
+            // field_kinds[2] = `Ptr(HeapKind::TypedArray)` controls
+            // drop dispatch at slot release time.
+            ValueSlot::from_u64(children_arr as u64),
+            ValueSlot::from_string_arc(text_arc),
+        ]);
+        let field_kinds: Arc<[NativeKind]> = Arc::from(
+            vec![
+                NativeKind::String,
+                NativeKind::Ptr(HeapKind::HashMap),
+                NativeKind::Ptr(HeapKind::TypedArray),
+                NativeKind::String,
+            ]
+            .into_boxed_slice(),
+        );
+        let heap_mask: u64 = 0b1111; // all 4 fields heap-resident
+        // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): variant signature
+        // flipped to `HeapValue::TypedObject(TypedObjectPtr)`. The
+        // `_new`-returned raw pointer (refcount=1) is wrapped in
+        // `TypedObjectPtr`, transferring the share to the wrapper.
+        let storage = TypedObjectStorage::_new(
+            schema_id as u64,
+            slots,
+            heap_mask,
+            field_kinds,
+        );
+        Arc::new(HeapValue::TypedObject(
+            shape_value::heap_value::TypedObjectPtr::new(storage),
+        ))
+    }
+
+    /// Project this element's TOP-LEVEL form as a `Vec<(String,
+    /// ConcreteReturn)>` pair-list, suitable for `TypedReturn::OkObjectPairs`.
+    /// Used only for the root element of `xml.parse`'s return value;
+    /// nested elements go through `into_typed_object_arc` instead.
+    fn into_root_pairs(self) -> Vec<(String, ConcreteReturn)> {
+        let attrs_pairs: Vec<(String, String)> = self.attributes;
+        // Each child is now an `Arc<HeapValue::TypedObject>`. The marshal
+        // boundary's `ConcreteReturn::ArrayHeapValue` consumer routes
+        // through `TypedArrayData::build_specialized_from_heap_arcs`,
+        // which already dispatches the `HeapValue::TypedObject` arm to
+        // `TypedArrayData::TypedObject` per ADR-006 §2.7.24 Q25.A. No
+        // out-of-territory follow-up: the rewire is structurally
+        // resolved by C+ precedent.
+        let children_arc: Vec<Arc<HeapValue>> = self
+            .children
+            .into_iter()
+            .map(ElementData::into_typed_object_arc)
+            .collect();
+
+        let mut pairs = vec![
+            ("name".to_string(), ConcreteReturn::String(self.name)),
+            (
+                "attributes".to_string(),
+                ConcreteReturn::HashMapStringString(attrs_pairs),
+            ),
+            (
+                "children".to_string(),
+                ConcreteReturn::ArrayHeapValue(children_arc),
+            ),
+        ];
+        // `text?` follows the regex.rs precedent: emit empty string when
+        // absent. Keeps the schema fixed at 4 fields when text is present
+        // and 3 fields when absent — variable-length pair list per the
+        // ObjectPairs contract.
+        if let Some(text) = self.text {
+            pairs.push(("text".to_string(), ConcreteReturn::String(text)));
+        }
+        pairs
+    }
+}
+
+/// Register the `XmlNode` predeclared schema (auto-registered on first
+/// use; subsequent calls return the cached SchemaId via the registry's
+/// own deduplication). Returns the raw `u32` schema id used by
+/// `TypedObjectStorage::schema_id`.
+fn ensure_xml_node_schema() -> u32 {
+    let owned: Vec<String> = XML_NODE_FIELDS.iter().map(|s| s.to_string()).collect();
+    register_predeclared_any_schema(&owned)
+}
+
 /// Parse an XML element recursively from a quick-xml reader.
-/// Returns a ValueWord HashMap: { name, attributes, children, text? }
-fn parse_element(reader: &mut Reader<&[u8]>, start: &BytesStart) -> Result<ValueWord, String> {
+fn parse_element(
+    reader: &mut Reader<&[u8]>,
+    start: &BytesStart,
+) -> Result<ElementData, String> {
     let name = std::str::from_utf8(start.name().as_ref())
         .map_err(|e| format!("Invalid UTF-8 in element name: {}", e))?
         .to_string();
 
-    // Parse attributes
-    let mut attr_keys = Vec::new();
-    let mut attr_values = Vec::new();
+    let mut attributes = Vec::new();
     for attr in start.attributes() {
         let attr = attr.map_err(|e| format!("Invalid attribute: {}", e))?;
         let key = std::str::from_utf8(attr.key.as_ref())
@@ -32,12 +249,9 @@ fn parse_element(reader: &mut Reader<&[u8]>, start: &BytesStart) -> Result<Value
             .unescape_value()
             .map_err(|e| format!("Invalid attribute value: {}", e))?
             .to_string();
-        attr_keys.push(ValueWord::from_string(Arc::new(key)));
-        attr_values.push(ValueWord::from_string(Arc::new(value)));
+        attributes.push((key, value));
     }
-    let attributes = ValueWord::from_hashmap_pairs(attr_keys, attr_values);
 
-    // Parse children and text
     let mut children = Vec::new();
     let mut text_parts = Vec::new();
     let mut buf = Vec::new();
@@ -49,7 +263,6 @@ fn parse_element(reader: &mut Reader<&[u8]>, start: &BytesStart) -> Result<Value
                 children.push(child);
             }
             Ok(Event::Empty(ref e)) => {
-                // Self-closing element — treated as element with no children
                 let child = parse_empty_element(e)?;
                 children.push(child);
             }
@@ -81,34 +294,25 @@ fn parse_element(reader: &mut Reader<&[u8]>, start: &BytesStart) -> Result<Value
         buf.clear();
     }
 
-    // Build the node HashMap: { name, attributes, children, text? }
-    let mut node_keys = vec![
-        ValueWord::from_string(Arc::new("name".to_string())),
-        ValueWord::from_string(Arc::new("attributes".to_string())),
-        ValueWord::from_string(Arc::new("children".to_string())),
-    ];
-    let mut node_values = vec![
-        ValueWord::from_string(Arc::new(name)),
+    Ok(ElementData {
+        name,
         attributes,
-        ValueWord::from_array(shape_value::vmarray_from_vec(children)),
-    ];
-
-    if !text_parts.is_empty() {
-        node_keys.push(ValueWord::from_string(Arc::new("text".to_string())));
-        node_values.push(ValueWord::from_string(Arc::new(text_parts.join(""))));
-    }
-
-    Ok(ValueWord::from_hashmap_pairs(node_keys, node_values))
+        children,
+        text: if text_parts.is_empty() {
+            None
+        } else {
+            Some(text_parts.join(""))
+        },
+    })
 }
 
 /// Parse a self-closing XML element (e.g. `<br/>`).
-fn parse_empty_element(start: &BytesStart) -> Result<ValueWord, String> {
+fn parse_empty_element(start: &BytesStart) -> Result<ElementData, String> {
     let name = std::str::from_utf8(start.name().as_ref())
         .map_err(|e| format!("Invalid UTF-8 in element name: {}", e))?
         .to_string();
 
-    let mut attr_keys = Vec::new();
-    let mut attr_values = Vec::new();
+    let mut attributes = Vec::new();
     for attr in start.attributes() {
         let attr = attr.map_err(|e| format!("Invalid attribute: {}", e))?;
         let key = std::str::from_utf8(attr.key.as_ref())
@@ -118,73 +322,226 @@ fn parse_empty_element(start: &BytesStart) -> Result<ValueWord, String> {
             .unescape_value()
             .map_err(|e| format!("Invalid attribute value: {}", e))?
             .to_string();
-        attr_keys.push(ValueWord::from_string(Arc::new(key)));
-        attr_values.push(ValueWord::from_string(Arc::new(value)));
+        attributes.push((key, value));
     }
-    let attributes = ValueWord::from_hashmap_pairs(attr_keys, attr_values);
 
-    let node_keys = vec![
-        ValueWord::from_string(Arc::new("name".to_string())),
-        ValueWord::from_string(Arc::new("attributes".to_string())),
-        ValueWord::from_string(Arc::new("children".to_string())),
-    ];
-    let node_values = vec![
-        ValueWord::from_string(Arc::new(name)),
+    Ok(ElementData {
+        name,
         attributes,
-        ValueWord::from_array(shape_value::vmarray_from_vec(Vec::new())),
-    ];
-
-    Ok(ValueWord::from_hashmap_pairs(node_keys, node_values))
+        children: Vec::new(),
+        text: None,
+    })
 }
 
-/// Write a Shape node HashMap to XML using quick-xml Writer.
-fn write_node(writer: &mut Writer<Cursor<Vec<u8>>>, node: &ValueWord) -> Result<(), String> {
-    let (keys, values, _) = node
-        .as_hashmap()
-        .ok_or_else(|| "xml.stringify(): node must be a HashMap".to_string())?;
+/// Walk a top-level node — represented as a `(keys, values)` pair-list
+/// from the marshal boundary — and emit the corresponding XML via the
+/// writer. The top-level input from `xml.stringify` is still keyed by
+/// field name (the `Vec<(Arc<String>, Arc<HeapValue>)>` FromSlot
+/// shape); children recurse through `write_typed_object_node` against
+/// `HeapValue::TypedObject` arms now that `into_typed_object_arc`
+/// produces TypedObject per child (W17-out-of-bundle-A-followups,
+/// 2026-05-12).
+fn write_node_pairs(
+    writer: &mut Writer<Cursor<Vec<u8>>>,
+    pairs: &[(Arc<String>, Arc<HeapValue>)],
+) -> Result<(), String> {
+    // V3-S5 ckpt-5-prime²c (2026-05-15) SURFACE: the top-level pair-list
+    // shape carries `Arc<HeapValue>` values, but the `HeapValue::TypedArray`
+    // outer arm is deleted (V3-S5 ckpt-5). The `children` field now arrives
+    // as a `*mut TypedArray<TypedObjectPtr>` raw pointer, which has no
+    // `HeapValue::*` wrapper — `Vec<(Arc<String>, Arc<HeapValue>)>` cannot
+    // express it. xml.stringify's top-level reader thus requires the Round 2
+    // `Vec<Arc<HeapValue>>` rewire follow-up to add a per-element-T marshal
+    // path (pairs with `from_typed_array_<T>` constructor wave at
+    // `crates/shape-value/src/slot.rs:142`).
+    let _ = (writer, pairs);
+    let _ = write_xml_element; // keep helper reachable
+    Err(
+        "xml.stringify(): V3-S5 ckpt-5-prime²c SURFACE — top-level \
+         pair-list reader needs Vec<Arc<HeapValue>> rewire for the deleted \
+         outer-array-arm. Round 2 follow-up (pairs with per-element-kind \
+         constructor wave). ADR-006 §2.7.24 Q25.A SUPERSEDED."
+            .to_string(),
+    )
+}
 
-    // Extract fields by key
-    let mut name_val = None;
-    let mut attrs_val = None;
-    let mut children_val = None;
-    let mut text_val = None;
-
-    for (k, v) in keys.iter().zip(values.iter()) {
-        match k.as_str() {
-            Some("name") => name_val = Some(v),
-            Some("attributes") => attrs_val = Some(v),
-            Some("children") => children_val = Some(v),
-            Some("text") => text_val = Some(v),
-            _ => {}
-        }
+/// Walk a child node — represented as an `Arc<TypedObjectStorage>` with
+/// the `XmlNode` schema. Reads each field via `field_index_in_schema`
+/// since the schema is auto-registered and field-order is locked to
+/// `XML_NODE_FIELDS`.
+///
+/// W17-out-of-bundle-A-followups (2026-05-12): replaces the previous
+/// `write_node_heap` HashMap-element reader. The construction side
+/// (`ElementData::into_typed_object_arc`) builds TypedObjects per
+/// child, so the array's elements arrive here as TypedObjects, not
+/// HashMaps.
+fn write_typed_object_node(
+    writer: &mut Writer<Cursor<Vec<u8>>>,
+    storage: &TypedObjectStorage,
+) -> Result<(), String> {
+    // Match field order from `XML_NODE_FIELDS`. The construction side
+    // writes slots in this exact order; the schema registration uses
+    // the same field list, so positional access is sound.
+    if storage.slots.len() != XML_NODE_FIELDS.len() {
+        return Err(format!(
+            "xml.stringify(): child TypedObject has {} slots, expected {}",
+            storage.slots.len(),
+            XML_NODE_FIELDS.len()
+        ));
     }
+    let name_slot = &storage.slots[0];
+    let attrs_slot = &storage.slots[1];
+    let children_slot = &storage.slots[2];
+    let text_slot = &storage.slots[3];
 
-    let name = name_val
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "xml.stringify(): node missing 'name' field".to_string())?;
+    // SAFETY for each slot: the construction-side contract in
+    // `ElementData::into_typed_object_arc` writes each slot as
+    // `ValueSlot::from_string_arc` / `from_hashmap` / `from_typed_array`
+    // — the bits are `Arc::into_raw::<T>` for the matching `T`. We
+    // bump the strong count, recover via `Arc::from_raw`, then drop the
+    // bumped share after extracting a clone of the payload (the
+    // storage's own share remains intact; this is the canonical
+    // 5-arm receiver-recovery shape from `3ac2f11`).
+    let name: String = unsafe {
+        let bits = name_slot.raw();
+        if bits == 0 {
+            return Err("xml.stringify(): TypedObject name slot is null".to_string());
+        }
+        let arc_ptr = bits as *const String;
+        Arc::increment_strong_count(arc_ptr);
+        let arc = Arc::from_raw(arc_ptr);
+        let owned = (*arc).clone();
+        // `arc` Drop here releases our bumped share; storage's share
+        // is untouched.
+        owned
+    };
+    let attrs_kref: Option<shape_value::heap_value::HashMapKindedRef> = unsafe {
+        let bits = attrs_slot.raw();
+        if bits == 0 {
+            None
+        } else {
+            // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): the
+            // `ValueSlot::from_hashmap` shape stores
+            // `Arc::into_raw(Arc<HashMapKindedRef>)` per ADR-006
+            // §2.7.24 Q25.B SUPERSEDED. Bump and clone-out the
+            // kinded ref (single Arc share); the storage's share
+            // is untouched (`5-arm receiver-recovery` shape from
+            // `3ac2f11`).
+            let arc_ptr = bits as *const shape_value::heap_value::HashMapKindedRef;
+            Arc::increment_strong_count(arc_ptr);
+            let arc = Arc::from_raw(arc_ptr);
+            let cloned = (*arc).clone();
+            // `arc` Drop here releases our bumped outer Arc share.
+            Some(cloned)
+        }
+    };
+    // V3-S5 ckpt-5-prime²c (2026-05-15): the children slot now holds a
+    // raw `*mut TypedArray<*const TypedObjectStorage>` per Migration
+    // shape (a) — no outer Arc/wrapper. Element-kind enforcement is by
+    // the storage's `field_kinds[2] = Ptr(HeapKind::TypedArray)` +
+    // body-side element-`T` choice. `TypedObjectStorage` impls
+    // `v2::heap_element::HeapElement` (`heap_value.rs:3971`), so the
+    // element pointers carry on-header refcount shares.
+    let children_ptr: *const TypedArray<*const TypedObjectStorage> = {
+        let bits = children_slot.raw();
+        if bits == 0 {
+            std::ptr::null()
+        } else {
+            bits as usize as *const TypedArray<*const TypedObjectStorage>
+        }
+    };
+    let text: Option<String> = unsafe {
+        let bits = text_slot.raw();
+        if bits == 0 {
+            None
+        } else {
+            let arc_ptr = bits as *const String;
+            Arc::increment_strong_count(arc_ptr);
+            let arc = Arc::from_raw(arc_ptr);
+            let owned = (*arc).clone();
+            if owned.is_empty() {
+                None
+            } else {
+                Some(owned)
+            }
+        }
+    };
 
-    let mut elem = BytesStart::new(name.to_string());
+    write_xml_element(
+        writer,
+        Some(name),
+        attrs_kref.as_ref(),
+        children_ptr,
+        text.as_deref(),
+    )
+}
 
-    // Add attributes
-    if let Some(attrs) = attrs_val {
-        if let Some((attr_keys, attr_values, _)) = attrs.as_hashmap() {
-            for (ak, av) in attr_keys.iter().zip(attr_values.iter()) {
-                if let (Some(key), Some(val)) = (ak.as_str(), av.as_str()) {
-                    elem.push_attribute((key, val));
+/// Shared element-writer body — emits the XML representation of a node
+/// given the four parsed XmlNode fields. Pulled out so the top-level
+/// `write_node_pairs` path and the recursive
+/// `write_typed_object_node` path share the same output discipline.
+///
+/// V3-S5 ckpt-5-prime²c (2026-05-15): `children` is the raw
+/// `*const TypedArray<TypedObjectPtr>` carrier per Migration shape (a).
+/// Null pointer means "no children".
+fn write_xml_element(
+    writer: &mut Writer<Cursor<Vec<u8>>>,
+    name: Option<String>,
+    attrs: Option<&shape_value::heap_value::HashMapKindedRef>,
+    children: *const TypedArray<*const TypedObjectStorage>,
+    text: Option<&str>,
+) -> Result<(), String> {
+    let name = name.ok_or_else(|| "xml.stringify(): node missing 'name' field".to_string())?;
+
+    let mut elem = BytesStart::new(name.clone());
+
+    if let Some(attrs) = attrs {
+        // Wave 2 Round 3b C2-joint ckpt-4 (2026-05-14): per-V walk —
+        // attributes are always `HashMap<string, string>` (V = String).
+        // Other V variants are a producer-side type error (xml.stringify
+        // declares the attribute slot type at the marshal boundary).
+        use shape_value::heap_value::HashMapKindedRef;
+        match attrs {
+            HashMapKindedRef::String(arc) => {
+                let n = arc.len();
+                for i in 0..n {
+                    let key: String = unsafe {
+                        let ptr = shape_value::v2::typed_array::TypedArray::get_unchecked(
+                            arc.keys, i as u32,
+                        );
+                        shape_value::v2::string_obj::StringObj::as_str(ptr).to_owned()
+                    };
+                    let val: String = unsafe {
+                        let v_ptr: *const shape_value::v2::string_obj::StringObj =
+                            *(*arc.values).data.add(i);
+                        shape_value::v2::string_obj::StringObj::as_str(v_ptr).to_owned()
+                    };
+                    elem.push_attribute((key.as_bytes(), val.as_bytes()));
                 }
+            }
+            other => {
+                return Err(format!(
+                    "xml.stringify(): attributes HashMap must be HashMap<string, string>, \
+                     got V={:?}",
+                    other.values_kind()
+                ));
             }
         }
     }
 
-    // Check if there are children or text
-    let has_children = children_val
-        .and_then(|v| v.as_any_array())
-        .map(|a| !a.to_generic().is_empty())
-        .unwrap_or(false);
-    let has_text = text_val.and_then(|v| v.as_str()).is_some();
+    // V3-S5 ckpt-5-prime²c (2026-05-15) Migration shape (a): children
+    // carrier is `*const TypedArray<TypedObjectPtr>`. Null means "no
+    // children". Element discriminator is the body-side `T` choice +
+    // schema's `field_kinds[2] = Ptr(HeapKind::TypedArray)`.
+    let child_count: u32 = if children.is_null() {
+        0
+    } else {
+        unsafe { TypedArray::<*const TypedObjectStorage>::len(children) }
+    };
+    let has_children = child_count > 0;
+    let has_text = text.is_some();
 
     if !has_children && !has_text {
-        // Self-closing
         writer
             .write_event(Event::Empty(elem))
             .map_err(|e| format!("xml.stringify() write error: {}", e))?;
@@ -193,24 +550,31 @@ fn write_node(writer: &mut Writer<Cursor<Vec<u8>>>, node: &ValueWord) -> Result<
             .write_event(Event::Start(elem.clone()))
             .map_err(|e| format!("xml.stringify() write error: {}", e))?;
 
-        // Write text
-        if let Some(text) = text_val.and_then(|v| v.as_str()) {
+        if let Some(text) = text {
             writer
                 .write_event(Event::Text(BytesText::new(text)))
                 .map_err(|e| format!("xml.stringify() write error: {}", e))?;
         }
 
-        // Write children
-        if let Some(children) = children_val {
-            if let Some(arr) = children.as_any_array() {
-                for child in arr.to_generic().iter() {
-                    write_node(writer, child)?;
+        if has_children {
+            // SAFETY: `children` is non-null (checked above) and points to
+            // a live `TypedArray<*const TypedObjectStorage>` per the
+            // construction contract in `ElementData::into_typed_object_arc`.
+            let slice = unsafe {
+                TypedArray::<*const TypedObjectStorage>::as_slice(children)
+            };
+            for &child_ptr in slice.iter() {
+                // SAFETY: per the construction contract each element is a
+                // live `*const TypedObjectStorage` with refcount >= 1 owed
+                // to the array's element slot.
+                unsafe {
+                    write_typed_object_node(writer, &*child_ptr)?;
                 }
             }
         }
 
         writer
-            .write_event(Event::End(BytesEnd::new(name.to_string())))
+            .write_event(Event::End(BytesEnd::new(name)))
             .map_err(|e| format!("xml.stringify() write error: {}", e))?;
     }
 
@@ -223,40 +587,27 @@ pub fn create_xml_module() -> ModuleExports {
     module.description = "XML parsing and serialization".to_string();
 
     // xml.parse(text: string) -> Result<HashMap>
-    register_typed_function(
+    register_typed_fn_1::<_, Arc<String>>(
         &mut module,
         "parse",
         "Parse an XML string into a Shape HashMap node",
-        vec![ModuleParam {
-            name: "text".to_string(),
-            type_name: "string".to_string(),
-            required: true,
-            description: "XML string to parse".to_string(),
-            ..Default::default()
-        }],
+        "text",
+        "string",
         ConcreteType::Result(Box::new(ConcreteType::HashMap)),
-        |args, _ctx| {
-            let text = args
-                .first()
-                .and_then(|a| a.as_str())
-                .ok_or_else(|| "xml.parse() requires a string argument".to_string())?;
-
-            let mut reader = Reader::from_str(text);
+        |text, _ctx| {
+            let mut reader = Reader::from_str(text.as_str());
             reader.config_mut().trim_text(true);
             let mut buf = Vec::new();
 
-            // Find the root element. The recursive parser produces a
-            // ValueWord (HashMap with name/attributes/children/text); the
-            // outer Result wrapping happens at the registry boundary.
             loop {
                 match reader.read_event_into(&mut buf) {
                     Ok(Event::Start(ref e)) => {
                         let inner = parse_element(&mut reader, e)?;
-                        return Ok(TypedReturn::Ok(Box::new(TypedReturn::ValueWord(inner))));
+                        return Ok(TypedReturn::OkObjectPairs(inner.into_root_pairs()));
                     }
                     Ok(Event::Empty(ref e)) => {
                         let inner = parse_empty_element(e)?;
-                        return Ok(TypedReturn::Ok(Box::new(TypedReturn::ValueWord(inner))));
+                        return Ok(TypedReturn::OkObjectPairs(inner.into_root_pairs()));
                     }
                     Ok(Event::Eof) => {
                         return Err("xml.parse(): no root element found".to_string());
@@ -271,14 +622,14 @@ pub fn create_xml_module() -> ModuleExports {
         },
     );
 
-    // xml.stringify(value: HashMap) -> Result<string>
-    register_typed_function(
+    // xml.stringify(value: HashMap<string, any>) -> Result<string>
+    register_typed_fn_1_full::<_, Vec<(Arc<String>, Arc<HeapValue>)>>(
         &mut module,
         "stringify",
         "Serialize a Shape HashMap node to an XML string",
-        vec![ModuleParam {
+        [ModuleParam {
             name: "value".to_string(),
-            type_name: "HashMap".to_string(),
+            type_name: "HashMap<string, any>".to_string(),
             required: true,
             description:
                 "Node value to serialize (with name, attributes, children, text? fields)"
@@ -286,280 +637,16 @@ pub fn create_xml_module() -> ModuleExports {
             ..Default::default()
         }],
         ConcreteType::Result(Box::new(ConcreteType::String)),
-        |args, _ctx| {
-            let value = args
-                .first()
-                .ok_or_else(|| "xml.stringify() requires a value argument".to_string())?;
-
+        |pairs: Vec<(Arc<String>, Arc<HeapValue>)>, _ctx| {
             let mut writer = Writer::new(Cursor::new(Vec::new()));
-            write_node(&mut writer, value)?;
+            write_node_pairs(&mut writer, &pairs)?;
 
             let output = String::from_utf8(writer.into_inner().into_inner())
                 .map_err(|e| format!("xml.stringify(): invalid UTF-8 output: {}", e))?;
 
-            Ok(TypedReturn::Ok(Box::new(TypedReturn::String(output))))
+            Ok(TypedReturn::Ok(ConcreteReturn::String(output)))
         },
     );
 
     module
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn test_ctx() -> crate::module_exports::ModuleContext<'static> {
-        let registry = Box::leak(Box::new(crate::type_schema::TypeSchemaRegistry::new()));
-        crate::module_exports::ModuleContext {
-            schemas: registry,
-            invoke_callable: None,
-            raw_invoker: None,
-            function_hashes: None,
-            vm_state: None,
-            granted_permissions: None,
-            scope_constraints: None,
-            set_pending_resume: None,
-            set_pending_frame_resume: None,
-        }
-    }
-
-    #[test]
-    fn test_xml_module_creation() {
-        let module = create_xml_module();
-        assert_eq!(module.name, "std::core::xml");
-        assert!(module.has_export("parse"));
-        assert!(module.has_export("stringify"));
-    }
-
-    #[test]
-    fn test_xml_parse_simple() {
-        let module = create_xml_module();
-        let ctx = test_ctx();
-        let input =
-            ValueWord::from_string(Arc::new("<root><child>hello</child></root>".to_string()));
-        let result = module.invoke_export("parse", &[input], &ctx).unwrap().unwrap();
-        let inner = result.as_ok_inner().expect("should be Ok");
-        let (keys, values, _) = inner.as_hashmap().expect("should be hashmap");
-        // Find the "name" field
-        let mut found_name = false;
-        for (k, v) in keys.iter().zip(values.iter()) {
-            if k.as_str() == Some("name") {
-                assert_eq!(v.as_str(), Some("root"));
-                found_name = true;
-            }
-        }
-        assert!(found_name, "should have a 'name' field");
-    }
-
-    #[test]
-    fn test_xml_parse_with_attributes() {
-        let module = create_xml_module();
-        let ctx = test_ctx();
-        let input = ValueWord::from_string(Arc::new(
-            r#"<person name="Alice" age="30">text</person>"#.to_string(),
-        ));
-        let result = module.invoke_export("parse", &[input], &ctx).unwrap().unwrap();
-        let inner = result.as_ok_inner().expect("should be Ok");
-        let (keys, values, _) = inner.as_hashmap().expect("should be hashmap");
-
-        // Find attributes
-        for (k, v) in keys.iter().zip(values.iter()) {
-            if k.as_str() == Some("attributes") {
-                let (attr_keys, _attr_values, _) = v.as_hashmap().expect("attrs should be hashmap");
-                assert_eq!(attr_keys.len(), 2);
-            }
-            if k.as_str() == Some("text") {
-                assert_eq!(v.as_str(), Some("text"));
-            }
-        }
-    }
-
-    #[test]
-    fn test_xml_parse_nested() {
-        let module = create_xml_module();
-        let ctx = test_ctx();
-        let input = ValueWord::from_string(Arc::new(
-            "<config><db><host>localhost</host><port>5432</port></db></config>".to_string(),
-        ));
-        let result = module.invoke_export("parse", &[input], &ctx).unwrap().unwrap();
-        let inner = result.as_ok_inner().expect("should be Ok");
-        let (keys, values, _) = inner.as_hashmap().expect("should be hashmap");
-
-        // Find children
-        for (k, v) in keys.iter().zip(values.iter()) {
-            if k.as_str() == Some("children") {
-                let arr = v.as_any_array().expect("should be array").to_generic();
-                assert_eq!(arr.len(), 1); // <db>
-            }
-        }
-    }
-
-    #[test]
-    fn test_xml_parse_self_closing() {
-        let module = create_xml_module();
-        let ctx = test_ctx();
-        let input = ValueWord::from_string(Arc::new(r#"<br class="spacer"/>"#.to_string()));
-        let result = module.invoke_export("parse", &[input], &ctx).unwrap().unwrap();
-        let inner = result.as_ok_inner().expect("should be Ok");
-        let (keys, values, _) = inner.as_hashmap().expect("should be hashmap");
-
-        let mut found_name = false;
-        for (k, v) in keys.iter().zip(values.iter()) {
-            if k.as_str() == Some("name") {
-                assert_eq!(v.as_str(), Some("br"));
-                found_name = true;
-            }
-        }
-        assert!(found_name);
-    }
-
-    #[test]
-    fn test_xml_parse_no_root() {
-        let module = create_xml_module();
-        let ctx = test_ctx();
-        let input = ValueWord::from_string(Arc::new("".to_string()));
-        let result = module.invoke_export("parse", &[input], &ctx).unwrap();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_xml_parse_requires_string() {
-        let module = create_xml_module();
-        let ctx = test_ctx();
-        let result = module.invoke_export("parse", &[ValueWord::from_f64(42.0)], &ctx).unwrap();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_xml_stringify_simple() {
-        let module = create_xml_module();
-        let ctx = test_ctx();
-
-        // Build a node: { name: "root", attributes: {}, children: [], text: "hello" }
-        let node_keys = vec![
-            ValueWord::from_string(Arc::new("name".to_string())),
-            ValueWord::from_string(Arc::new("attributes".to_string())),
-            ValueWord::from_string(Arc::new("children".to_string())),
-            ValueWord::from_string(Arc::new("text".to_string())),
-        ];
-        let node_values = vec![
-            ValueWord::from_string(Arc::new("root".to_string())),
-            ValueWord::from_hashmap_pairs(vec![], vec![]),
-            ValueWord::from_array(shape_value::vmarray_from_vec(vec![])),
-            ValueWord::from_string(Arc::new("hello".to_string())),
-        ];
-        let node = ValueWord::from_hashmap_pairs(node_keys, node_values);
-
-        let result = module.invoke_export("stringify", &[node], &ctx).unwrap().unwrap();
-        let inner = result.as_ok_inner().expect("should be Ok");
-        let s = inner.as_str().expect("should be string");
-        assert!(s.contains("<root>"));
-        assert!(s.contains("hello"));
-        assert!(s.contains("</root>"));
-    }
-
-    #[test]
-    fn test_xml_stringify_with_attributes() {
-        let module = create_xml_module();
-        let ctx = test_ctx();
-
-        let attr_keys = vec![ValueWord::from_string(Arc::new("id".to_string()))];
-        let attr_values = vec![ValueWord::from_string(Arc::new("42".to_string()))];
-        let attrs = ValueWord::from_hashmap_pairs(attr_keys, attr_values);
-
-        let node_keys = vec![
-            ValueWord::from_string(Arc::new("name".to_string())),
-            ValueWord::from_string(Arc::new("attributes".to_string())),
-            ValueWord::from_string(Arc::new("children".to_string())),
-        ];
-        let node_values = vec![
-            ValueWord::from_string(Arc::new("item".to_string())),
-            attrs,
-            ValueWord::from_array(shape_value::vmarray_from_vec(vec![])),
-        ];
-        let node = ValueWord::from_hashmap_pairs(node_keys, node_values);
-
-        let result = module.invoke_export("stringify", &[node], &ctx).unwrap().unwrap();
-        let inner = result.as_ok_inner().expect("should be Ok");
-        let s = inner.as_str().expect("should be string");
-        assert!(s.contains("id=\"42\""));
-    }
-
-    #[test]
-    fn test_xml_stringify_self_closing() {
-        let module = create_xml_module();
-        let ctx = test_ctx();
-
-        let node_keys = vec![
-            ValueWord::from_string(Arc::new("name".to_string())),
-            ValueWord::from_string(Arc::new("attributes".to_string())),
-            ValueWord::from_string(Arc::new("children".to_string())),
-        ];
-        let node_values = vec![
-            ValueWord::from_string(Arc::new("br".to_string())),
-            ValueWord::from_hashmap_pairs(vec![], vec![]),
-            ValueWord::from_array(shape_value::vmarray_from_vec(vec![])),
-        ];
-        let node = ValueWord::from_hashmap_pairs(node_keys, node_values);
-
-        let result = module.invoke_export("stringify", &[node], &ctx).unwrap().unwrap();
-        let inner = result.as_ok_inner().expect("should be Ok");
-        let s = inner.as_str().expect("should be string");
-        assert!(s.contains("<br/>") || s.contains("<br />"));
-    }
-
-    #[test]
-    fn test_xml_roundtrip() {
-        let module = create_xml_module();
-        let ctx = test_ctx();
-
-        let xml_str = r#"<root><child attr="val">text</child></root>"#;
-        let parsed = module.invoke_export("parse", 
-            &[ValueWord::from_string(Arc::new(xml_str.to_string()))],
-            &ctx,
-        ).unwrap()
-        .unwrap();
-        let inner = parsed.as_ok_inner().expect("should be Ok");
-        let re_stringified = module.invoke_export("stringify", &[inner.clone()], &ctx).unwrap().unwrap();
-        let re_str = re_stringified.as_ok_inner().expect("should be Ok");
-        let s = re_str.as_str().expect("should be string");
-        assert!(s.contains("root"));
-        assert!(s.contains("child"));
-        assert!(s.contains("text"));
-    }
-
-    #[test]
-    fn test_xml_schemas() {
-        let module = create_xml_module();
-
-        let parse_schema = module.get_schema("parse").unwrap();
-        assert_eq!(parse_schema.params.len(), 1);
-        assert_eq!(parse_schema.params[0].name, "text");
-        assert!(parse_schema.params[0].required);
-        assert_eq!(parse_schema.return_type.as_deref(), Some("Result<HashMap>"));
-
-        let stringify_schema = module.get_schema("stringify").unwrap();
-        assert_eq!(stringify_schema.params.len(), 1);
-        assert!(stringify_schema.params[0].required);
-    }
-
-    #[test]
-    fn test_xml_parse_with_declaration() {
-        let module = create_xml_module();
-        let ctx = test_ctx();
-        let input = ValueWord::from_string(Arc::new(
-            r#"<?xml version="1.0" encoding="UTF-8"?><root>hello</root>"#.to_string(),
-        ));
-        let result = module.invoke_export("parse", &[input], &ctx).unwrap().unwrap();
-        let inner = result.as_ok_inner().expect("should be Ok");
-        let (keys, values, _) = inner.as_hashmap().expect("should be hashmap");
-        let mut found_name = false;
-        for (k, v) in keys.iter().zip(values.iter()) {
-            if k.as_str() == Some("name") {
-                assert_eq!(v.as_str(), Some("root"));
-                found_name = true;
-            }
-        }
-        assert!(found_name);
-    }
 }

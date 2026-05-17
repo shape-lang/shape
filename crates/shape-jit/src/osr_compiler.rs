@@ -23,7 +23,7 @@ use cranelift::prelude::*;
 use cranelift_module::{Linkage, Module};
 
 use shape_vm::bytecode::{DeoptInfo, Instruction, OpCode, Operand, OsrEntryPoint};
-use shape_vm::type_tracking::{FrameDescriptor, SlotKind};
+use shape_vm::type_tracking::{FrameDescriptor, NativeKind};
 
 use crate::loop_analysis::LoopInfo;
 
@@ -201,15 +201,20 @@ pub fn compile_osr_loop(
         }
     }
 
-    // Map each live local to its SlotKind from the frame descriptor.
-    let local_kinds: Vec<SlotKind> = live_locals
+    // Map each live local to its NativeKind from the frame descriptor.
+    // Per ADR-006 §2.7.7 the deleted `NativeKind::Unknown` placeholder
+    // is gone — slots whose kind is missing from the frame descriptor
+    // fall back to `Int64` (legacy I64-NaN-box ABI width). OSR entry
+    // is a re-entry into a hot loop; if the descriptor is incomplete
+    // here the caller is in pre-§2.7.7 legacy territory.
+    let local_kinds: Vec<NativeKind> = live_locals
         .iter()
         .map(|&slot| {
             frame_descriptor
                 .slots
                 .get(slot as usize)
                 .copied()
-                .unwrap_or(SlotKind::Unknown)
+                .unwrap_or(NativeKind::Int64)
         })
         .collect();
 

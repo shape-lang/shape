@@ -1,162 +1,302 @@
 //! Snapshot of live VM state for read-only introspection by module functions.
 //!
-//! `VmStateSnapshot` captures the call stack, locals, and module bindings at a
-//! point during execution and implements `VmStateAccessor` so that extension
-//! modules (e.g., `std::state`) can inspect the VM without holding a mutable
-//! borrow on it.
+//! `VmStateSnapshot` captures the call stack, locals, args, and module bindings
+//! at a point during execution and implements `VmStateAccessor` so that
+//! extension modules (e.g., `std::state`) can inspect the VM without holding a
+//! mutable borrow on it.
+//!
+//! # W17-state-tier-roundtrip (Phase 2d Wave 3, 2026-05-12)
+//!
+//! Built on top of W17-snapshot-roundtrip's kind-threaded serializer API
+//! (`slot_to_serializable` / `serializable_to_slot` at
+//! `shape-runtime::snapshot`). The pre-bulldozer implementation collected raw
+//! bit patterns from the live VM via the deleted Wave-6.5-substep-1 shims and
+//! the deleted hand-rolled retain-on-read discipline. The post-§2.7.7
+//! replacement threads `NativeKind` from the parallel kind track at every read
+//! site and exposes `KindedSlot` carriers through `FrameInfo`.
+//!
+//! The snapshot is filled lazily — captured via [`VirtualMachine::capture_vm_state`]
+//! before each module-function dispatch by [`super::vm_impl::modules`]. Bodies in
+//! `state_builtins/*` receive the snapshot via `ModuleContext.vm_state` and
+//! project its `KindedSlot` carriers through `slot_to_serializable` to build
+//! their `TypedReturn` payloads.
 
 use shape_runtime::module_exports::{FrameInfo, VmStateAccessor};
-use shape_value::ValueWord;
+use shape_value::{KindedSlot, NativeKind, ValueSlot};
 
 use super::VirtualMachine;
 
 /// Snapshot of VM state captured at a point during execution.
-/// Implements `VmStateAccessor` for use in `ModuleContext`.
 ///
-/// **WB2.4 retain-on-read.** Every `ValueWord` collected from the
-/// live VM (stack slots, module bindings, upvalues) is cloned via
-/// `vw_clone` so the snapshot holds an independent owning share per
-/// heap-tagged value. The `Drop` impl releases those shares via
-/// `vw_drop_slice` / `vw_drop`, keeping the snapshot refcount-neutral.
+/// The snapshot owns kinded copies of the relevant VM state — `KindedSlot`'s
+/// `Clone` / `Drop` impls dispatch on `NativeKind` to retire / bump heap
+/// refcounts, so by the time the snapshot is constructed every slot owns its
+/// own share. The live VM keeps its own shares; teardown is independent.
 pub(crate) struct VmStateSnapshot {
-    frames: Vec<FrameInfo>,
-    current_args: Vec<ValueWord>,
-    current_locals: Vec<(String, ValueWord)>,
-    module_binding_names: Vec<String>,
-    module_binding_values: Vec<ValueWord>,
-    instruction_count: usize,
+    /// All call frames from oldest (bottom) to newest (top).
+    /// The "current frame" is the last entry; `caller` is the second-to-last.
+    pub(crate) frames: Vec<FrameInfo>,
+
+    /// Captured args for the currently-executing function (or empty if at
+    /// top-level / no frames).
+    pub(crate) current_args: Vec<KindedSlot>,
+
+    /// Locals for the currently-executing function (name + KindedSlot).
+    /// Names come from `Function::param_names` when available; otherwise
+    /// they're "local_<idx>".
+    pub(crate) current_locals: Vec<(String, KindedSlot)>,
+
+    /// Module bindings (binding name + KindedSlot).
+    pub(crate) module_bindings: Vec<(String, KindedSlot)>,
+
+    /// Total instructions executed up to capture point.
+    pub(crate) instruction_count: usize,
 }
 
-impl Drop for VmStateSnapshot {
-    fn drop(&mut self) {
-        use shape_value::value_word_drop::{vw_drop, vw_drop_slice};
-        // `frames: Vec<FrameInfo>` auto-drops — FrameInfo has its own
-        // retain-on-read Drop (shape-runtime/module_exports.rs).
-        vw_drop_slice(&self.current_args);
-        for (_, bits) in &self.current_locals {
-            vw_drop(*bits);
-        }
-        vw_drop_slice(&self.module_binding_values);
-    }
-}
-
-/// Construction via `VirtualMachine::capture_vm_state()`.
 impl VirtualMachine {
     /// Capture a read-only snapshot of the current VM state.
     ///
-    /// Iterates the call stack to build `FrameInfo` entries and copies the
-    /// current module bindings. The snapshot is entirely owned data so it can
-    /// be passed to `ModuleContext` without borrowing the VM.
+    /// **W17-state-tier-roundtrip (Phase 2d Wave 3, 2026-05-12).** Threads
+    /// `NativeKind` from the parallel stack/module-binding kind tracks
+    /// (§2.7.7 / §2.7.8) so every captured slot owns a typed Arc share
+    /// (where heap-bearing). The snapshot lives in `ModuleContext.vm_state`
+    /// for the duration of one module-function dispatch.
     pub(crate) fn capture_vm_state(&self) -> VmStateSnapshot {
-        let mut frames = Vec::with_capacity(self.call_stack.len());
+        let frames = self.snapshot_frames_for_accessor();
+        let (current_args, current_locals) = self.snapshot_current_args_locals();
+        let module_bindings = self.snapshot_module_bindings_for_accessor();
+        VmStateSnapshot {
+            frames,
+            current_args,
+            current_locals,
+            module_bindings,
+            instruction_count: self.snapshot_instruction_count(),
+        }
+    }
 
-        for frame in &self.call_stack {
+    /// Build the FrameInfo vector from the live `call_stack`.
+    ///
+    /// Per-frame upvalues are recovered from `closure_heap_bits` /
+    /// `closure_heap_kind` via `OwnedClosureBlock::read_capture_kinded`
+    /// (§2.7.8 / Q10 — captures carry their parallel kind track on the
+    /// ClosureLayout side-table, not on the CallFrame raw u64 vec).
+    fn snapshot_frames_for_accessor(&self) -> Vec<FrameInfo> {
+        let mut out = Vec::with_capacity(self.call_stack.len());
+        for frame in self.call_stack.iter() {
             let function_name = frame
                 .function_id
                 .and_then(|fid| self.program.functions.get(fid as usize))
                 .map(|f| f.name.clone())
                 .unwrap_or_default();
 
-            let blob_hash = frame.blob_hash.map(|fh| fh.0);
-
-            // Compute local_ip relative to the function's entry point.
-            let local_ip = if let Some(fid) = frame.function_id {
-                let entry = self
-                    .function_entry_points
-                    .get(fid as usize)
+            // Locals window: stack[base_pointer .. base_pointer+locals_count]
+            // with parallel kinds. The kinds track is lockstep with the
+            // stack data track per §2.7.7 invariant.
+            let base = frame.base_pointer;
+            let end = base.saturating_add(frame.locals_count).min(self.stack.len());
+            let mut locals: Vec<KindedSlot> = Vec::with_capacity(end - base);
+            for i in base..end {
+                let bits = self.stack[i];
+                let kind = self
+                    .kinds
+                    .get(i)
                     .copied()
-                    .unwrap_or(0);
-                frame.return_ip.saturating_sub(entry)
-            } else {
-                frame.return_ip
-            };
+                    .unwrap_or(NativeKind::Bool);
+                // Clone-on-read via clone_with_kind discipline: snapshot
+                // owns its own share.
+                let cloned = clone_slot_kinded(bits, kind);
+                locals.push(cloned);
+            }
 
-            // Extract locals from the unified stack for this frame.
-            // WB2.4 retain-on-read: use the owning read so each
-            // snapshot slot holds its own refcount bump.
-            let locals: Vec<ValueWord> = if frame.locals_count > 0 {
-                let start = frame.base_pointer;
-                let end = (start + frame.locals_count).min(self.sp);
-                (start..end).map(|i| self.stack_read_owned(i)).collect()
-            } else {
-                Vec::new()
-            };
+            // Upvalues: dispatch through OwnedClosureBlock when the frame
+            // is a closure call.
+            let upvalues = self.snapshot_frame_upvalues(frame);
 
-            // Extract upvalue values if present. `Upvalue::get` already
-            // returns an owning share (WB2.2) — each collected bit
-            // pattern is an independent retain.
-            let upvalues = frame
-                .upvalues
-                .as_ref()
-                .map(|ups| ups.iter().map(|u| u.get()).collect());
-
-            // Extract args: the first `arity` locals in the frame's register
-            // window are the arguments. Owning reads, same rationale as
-            // `locals` above.
-            let args: Vec<ValueWord> = frame
-                .function_id
-                .and_then(|fid| self.program.functions.get(fid as usize))
-                .map(|func| {
-                    let arity = func.arity as usize;
-                    let start = frame.base_pointer;
-                    let end = start
-                        .saturating_add(arity)
-                        .min(frame.base_pointer + frame.locals_count)
-                        .min(self.sp);
-                    (start..end).map(|i| self.stack_read_owned(i)).collect()
-                })
-                .unwrap_or_default();
-
-            frames.push(FrameInfo {
+            out.push(FrameInfo {
                 function_id: frame.function_id,
                 function_name,
-                blob_hash,
-                local_ip,
+                blob_hash: frame.blob_hash.map(|h| h.0),
+                local_ip: 0, // Per-frame local IP recovery is the
+                             // W17-snapshot-callstack-localip follow-up.
                 locals,
                 upvalues,
-                args,
+                args: Vec::new(), // The per-frame args are at the lower stack
+                                  // window (base_pointer - arity..base_pointer);
+                                  // recovery requires the per-call arity which
+                                  // is not stored on CallFrame today —
+                                  // W17-snapshot-frame-args follow-up.
             });
         }
-
-        // Extract current args and locals from the topmost frame.
-        // WB2.4: `Vec<ValueWord>::clone()` is a plain `u64` bit-copy
-        // that aliases refcounts; explicit `vw_clone` per slot keeps
-        // the refcount invariant.
-        use shape_value::value_word_drop::vw_clone;
-        let current_args = frames
-            .last()
-            .map(|f| f.args.iter().map(|&b| vw_clone(b)).collect())
-            .unwrap_or_default();
-
-        let current_locals = frames
-            .last()
-            .and_then(|f| {
-                f.function_id
-                    .and_then(|fid| self.program.functions.get(fid as usize))
-                    .map(|func| {
-                        func.param_names
-                            .iter()
-                            .enumerate()
-                            .filter_map(|(i, name)| {
-                                f.locals.get(i).map(|val| (name.clone(), vw_clone(*val)))
-                            })
-                            .collect::<Vec<_>>()
-                    })
-            })
-            .unwrap_or_default();
-
-        VmStateSnapshot {
-            frames,
-            current_args,
-            current_locals,
-            module_binding_names: self.program.module_binding_names.clone(),
-            // WB2.4: module binding values need owning shares.
-            module_binding_values: (0..self.module_bindings.len())
-                .map(|i| self.binding_read_owned(i))
-                .collect(),
-            instruction_count: self.instruction_count,
-        }
+        out
     }
+
+    /// Recover per-frame upvalues as `Vec<KindedSlot>` from
+    /// `closure_heap_bits` / `closure_heap_kind`.
+    ///
+    /// Returns `None` for non-closure frames (`closure_heap_bits == None`).
+    /// For closure frames, walks the `OwnedClosureBlock` via
+    /// `read_capture_kinded(idx)` per ADR-006 §2.7.8 / Q10 — the
+    /// ClosureLayout side-table carries the parallel kind track.
+    fn snapshot_frame_upvalues(&self, frame: &super::CallFrame) -> Option<Vec<KindedSlot>> {
+        let bits = frame.closure_heap_bits?;
+        let _kind = frame.closure_heap_kind?;
+        if bits == 0 {
+            return None;
+        }
+        // SAFETY: per the §2.7.8 / Q10 construction contract, when
+        // closure_heap_bits is Some(bits), the bits are
+        // `OwnedClosureBlock::into_raw(...)` (an Arc-like share). The
+        // OwnedClosureBlock recovery is the same 5-arm receiver-recovery
+        // pattern as elsewhere — recover, clone, restore the original
+        // share. `read_capture_kinded` then walks the ClosureLayout
+        // side-table to source per-capture NativeKind.
+        let ptr = bits as *mut u8;
+        // The block layout exposes capture-count via the layout Arc which
+        // we can't access from here without re-deriving it. The closure
+        // block bytes themselves carry their `type_id`; we recover the
+        // layout via the executor's closure-layout cache.
+        let block = match self.try_borrow_closure_block(ptr) {
+            Some(b) => b,
+            None => return None,
+        };
+        let count = block.layout().capture_count();
+        let mut out: Vec<KindedSlot> = Vec::with_capacity(count);
+        for idx in 0..count {
+            // SAFETY: idx < capture_count; the block is borrowed live.
+            let (bits, kind) = unsafe { block.read_capture_kinded(idx) };
+            let cloned = clone_slot_kinded(bits, kind);
+            out.push(cloned);
+        }
+        Some(out)
+    }
+
+    /// Args + locals for the currently-executing (topmost) frame.
+    /// For a top-level VM with no frames, returns (empty, empty).
+    fn snapshot_current_args_locals(&self) -> (Vec<KindedSlot>, Vec<(String, KindedSlot)>) {
+        let Some(top) = self.call_stack.last() else {
+            return (Vec::new(), Vec::new());
+        };
+
+        // Locals window: same as frames-side recovery.
+        let base = top.base_pointer;
+        let end = base.saturating_add(top.locals_count).min(self.stack.len());
+        let func_opt = top
+            .function_id
+            .and_then(|fid| self.program.functions.get(fid as usize));
+        let mut locals: Vec<(String, KindedSlot)> = Vec::with_capacity(end - base);
+        for i in base..end {
+            let local_idx = i - base;
+            let name = func_opt
+                .and_then(|f| f.param_names.get(local_idx).cloned())
+                .unwrap_or_else(|| format!("local_{local_idx}"));
+            let bits = self.stack[i];
+            let kind = self.kinds.get(i).copied().unwrap_or(NativeKind::Bool);
+            let cloned = clone_slot_kinded(bits, kind);
+            locals.push((name, cloned));
+        }
+
+        // Args: the call-frame ABI stores args contiguously in the
+        // locals window for typed call shape — the first `arity` slots
+        // are args, the rest are body locals. Surface them as a separate
+        // vector for `state.args()` consumers.
+        let args: Vec<KindedSlot> = if let Some(func) = func_opt {
+            let arity = (func.arity as usize).min(top.locals_count);
+            let mut out = Vec::with_capacity(arity);
+            for i in 0..arity {
+                let slot_idx = base + i;
+                if slot_idx >= self.stack.len() {
+                    break;
+                }
+                let bits = self.stack[slot_idx];
+                let kind = self.kinds.get(slot_idx).copied().unwrap_or(NativeKind::Bool);
+                out.push(clone_slot_kinded(bits, kind));
+            }
+            out
+        } else {
+            Vec::new()
+        };
+
+        (args, locals)
+    }
+
+    /// Module bindings captured at snapshot time.
+    ///
+    /// Binding names come from the program's `module_binding_names` when
+    /// available; otherwise indexed names are used.
+    fn snapshot_module_bindings_for_accessor(&self) -> Vec<(String, KindedSlot)> {
+        let n = self
+            .module_bindings
+            .len()
+            .min(self.module_binding_kinds.len());
+        let mut out: Vec<(String, KindedSlot)> = Vec::with_capacity(n);
+        for i in 0..n {
+            let name = self
+                .program
+                .module_binding_names
+                .get(i)
+                .cloned()
+                .unwrap_or_else(|| format!("binding_{i}"));
+            let bits = self.module_bindings[i];
+            let kind = self.module_binding_kinds[i];
+            let cloned = clone_slot_kinded(bits, kind);
+            out.push((name, cloned));
+        }
+        out
+    }
+
+    fn snapshot_instruction_count(&self) -> usize {
+        self.instruction_count
+    }
+
+    /// Try to borrow the `OwnedClosureBlock` whose `ptr` matches a
+    /// `closure_heap_bits` payload. Returns `None` if no closure
+    /// layout is registered for the block's type_id.
+    ///
+    /// This routes through the program's `closure_function_layouts`
+    /// table populated at load time per the §2.7.8 / Q10 layout-side-
+    /// table protocol.
+    fn try_borrow_closure_block(
+        &self,
+        ptr: *mut u8,
+    ) -> Option<shape_value::v2::closure_raw::OwnedClosureBlock> {
+        use shape_value::v2::closure_raw::{
+            OwnedClosureBlock, retain_typed_closure, typed_closure_function_id,
+        };
+        if ptr.is_null() {
+            return None;
+        }
+        // SAFETY: the block's `function_id` is stored in the
+        // TypedClosureHeader at the top of the block. The closure-layout
+        // side-table is keyed by `func_id` (Vec<Option<Arc<ClosureLayout>>>
+        // per program.closure_function_layouts), so we index that table
+        // with the recovered function_id to recover the layout.
+        let fn_id = unsafe { typed_closure_function_id(ptr) };
+        let layout = self
+            .program
+            .closure_function_layouts
+            .get(fn_id as usize)
+            .and_then(|opt| opt.clone())?;
+        // SAFETY: ptr is a live OwnedClosureBlock allocation (per the
+        // §2.7.8 / Q10 construction contract on `closure_heap_bits`).
+        // We bump the strong-count share via `retain_typed_closure` so the
+        // resulting `OwnedClosureBlock`'s `Drop` doesn't free the share
+        // the live frame still owns. `from_raw` then takes a new share.
+        unsafe {
+            retain_typed_closure(ptr);
+        }
+        let block = unsafe { OwnedClosureBlock::from_raw(ptr as *const u8, layout) };
+        Some(block)
+    }
+}
+
+/// Clone a `(bits, kind)` pair through the §2.7.7 `clone_with_kind`
+/// dispatch — bumping the strong-count share for heap-bearing kinds.
+/// Wraps the result in a `KindedSlot` carrier.
+fn clone_slot_kinded(bits: u64, kind: NativeKind) -> KindedSlot {
+    // Re-use the public clone_with_kind via KindedSlot::Clone shape: build
+    // the carrier first, then the Clone impl handles refcount bumps.
+    let carrier = KindedSlot::new(ValueSlot::from_raw(bits), kind);
+    carrier.clone()
 }
 
 impl VmStateAccessor for VmStateSnapshot {
@@ -169,35 +309,26 @@ impl VmStateAccessor for VmStateSnapshot {
     }
 
     fn caller_frame(&self) -> Option<FrameInfo> {
-        if self.frames.len() >= 2 {
-            Some(self.frames[self.frames.len() - 2].clone())
-        } else {
+        // Caller is the second-to-last frame (the last is the currently-
+        // executing frame).
+        let len = self.frames.len();
+        if len < 2 {
             None
+        } else {
+            Some(self.frames[len - 2].clone())
         }
     }
 
-    fn current_args(&self) -> Vec<ValueWord> {
-        // WB2.4: return owning shares so the caller can drop them
-        // independently of our `current_args` storage.
-        use shape_value::value_word_drop::vw_clone;
-        self.current_args.iter().map(|&b| vw_clone(b)).collect()
+    fn current_args(&self) -> Vec<KindedSlot> {
+        self.current_args.clone()
     }
 
-    fn current_locals(&self) -> Vec<(String, ValueWord)> {
-        use shape_value::value_word_drop::vw_clone;
-        self.current_locals
-            .iter()
-            .map(|(name, bits)| (name.clone(), vw_clone(*bits)))
-            .collect()
+    fn current_locals(&self) -> Vec<(String, KindedSlot)> {
+        self.current_locals.clone()
     }
 
-    fn module_bindings(&self) -> Vec<(String, ValueWord)> {
-        use shape_value::value_word_drop::vw_clone;
-        self.module_binding_names
-            .iter()
-            .zip(self.module_binding_values.iter())
-            .map(|(name, val)| (name.clone(), vw_clone(*val)))
-            .collect()
+    fn module_bindings(&self) -> Vec<(String, KindedSlot)> {
+        self.module_bindings.clone()
     }
 
     fn instruction_count(&self) -> usize {

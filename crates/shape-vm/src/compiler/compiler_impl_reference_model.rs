@@ -1283,12 +1283,14 @@ impl BytecodeCompiler {
             // `top_level_frame.return_kind` for the host-boundary
             // ValueWord synthesis.
             if is_last && self.errors.is_empty() {
-                let kind_from_state = self.infer_top_level_return_kind();
-                let kind = if kind_from_state != crate::type_tracking::StorageHint::Unknown {
-                    kind_from_state
-                } else {
-                    self.infer_top_level_return_kind_from_item(item)
-                };
+                // Per ADR-006 §2.7.5.1, `infer_top_level_return_kind` /
+                // `infer_top_level_return_kind_from_item` carry "kind not
+                // yet proven" as `Option::None` — `.or_else(...)` falls
+                // back to the AST-driven path when the state-driven one
+                // produced no kind.
+                let kind = self
+                    .infer_top_level_return_kind()
+                    .or_else(|| self.infer_top_level_return_kind_from_item(item));
                 self.top_level_program_return_kind = kind;
             }
             self.release_unused_module_reference_borrows_for_remaining_items(
@@ -1418,6 +1420,22 @@ impl BytecodeCompiler {
                     callee_summaries: Some(&self.function_borrow_summaries),
                 };
                 let storage_plan = crate::mir::storage_planning::plan_storage(&planner_input);
+
+                // ADR-006 §2.7.5 stamp-at-compile-time, Phase 3
+                // cluster-0 Round 16 W17-narrow-follow-up-A: thread
+                // schema ids on top-level MIR `ObjectStore`
+                // statements (canonical Smoke 3 site — `let t = X {}`
+                // is top-level). Same back-patch as the per-function
+                // path at `compiler/functions.rs` post-closure-id
+                // patching; reads `mir.local_struct_type_names` +
+                // `type_tracker.schema_registry()` to align with the
+                // parallel bytecode-side `OpCode::NewTypedObject`
+                // operand.
+                crate::compiler::mir_schema_threading::back_patch_schema_ids(
+                    &mut mir,
+                    &mut self.type_tracker,
+                );
+
                 self.program.top_level_mir =
                     Some(std::sync::Arc::new(crate::bytecode::MirFunctionData {
                         mir,
@@ -1426,6 +1444,300 @@ impl BytecodeCompiler {
                     }));
             }
         }
+
+        // ADR-006 §2.7.5 conduit: stamp per-MIR-slot `ConcreteType` for
+        // top-level code by walking the cached top-level MIR. The JIT
+        // MirToIR reads this side-table (`BytecodeProgram.
+        // top_level_local_concrete_types`) to drive the v2 typed-array
+        // fast path (avoiding `Rvalue::Aggregate` surface-and-stop) and
+        // the TypedObject `ObjectStore` short-circuit.
+        //
+        // Why MIR-walk rather than bytecode-compiler slot mapping: top-
+        // level code allocates the user's bindings as module_bindings
+        // (NOT bytecode locals — `self.next_local` is 0 at top level),
+        // so the bytecode-compiler's per-local side-tables do not
+        // carry top-level `let p = Point{...}` slots. The cached top-
+        // level MIR already encodes the structural type information
+        // through `StatementKind::{ObjectStore, ArrayStore, EnumStore}`
+        // — the MIR-level kind-source statements emitted for
+        // struct/enum/array construction. The walk is purely from the
+        // proven MIR shape; no runtime decode, no Bool-default fallback.
+        //
+        // The result is indexed by MIR `SlotId` (matching MirToIR's
+        // `concrete_type_for_slot` / `is_v2_typed_array_slot` indexing
+        // exactly). `ConcreteType::Void` per slot means "no
+        // information inferred" — a real enum variant per §2.7.5.1, not
+        // a Bool-default fallback per forbidden #9.
+        //
+        // The top-level conduit walk is deferred a few lines down — it
+        // runs AFTER the per-function return-type side-table is built,
+        // so the Call-terminator destination stamping in the walk has
+        // access to callee return types via the resolver. See the
+        // W12-jit-call-return-kind block below.
+
+        // ADR-006 §2.7.5 conduit (W12-jit-call-return-kind close, 2026-05-12):
+        // Per-user-function declared return ConcreteType, built first so the
+        // per-function and top-level conduit passes can consume it via the
+        // callee-return resolver. Returns are classified from the AST
+        // `FunctionDef.return_type` (preserved via `expanded_function_defs`)
+        // through `concrete_type_from_annotation` (already used for HashMap
+        // key/value extraction). When the function has no annotation or the
+        // annotation doesn't reduce to a known shape, the entry stays
+        // `ConcreteType::Void` per §2.7.5.1 — NOT a Bool-default fallback.
+        let mut per_fn_ret: Vec<shape_value::v2::ConcreteType> =
+            Vec::with_capacity(self.program.functions.len());
+        for func in &self.program.functions {
+            let ct = self
+                .program
+                .expanded_function_defs
+                .get(&func.name)
+                .and_then(|fd| fd.return_type.as_ref())
+                .and_then(|ann| {
+                    crate::compiler::v2_map_emission::concrete_type_from_annotation(
+                        ann,
+                    )
+                })
+                .unwrap_or(shape_value::v2::ConcreteType::Void);
+            per_fn_ret.push(ct);
+        }
+        self.program.function_return_concrete_types = per_fn_ret;
+
+        // Build the callee-return resolver: maps `MirConstant::Function(name)`
+        // to the callee's declared return ConcreteType via the side-table
+        // just populated. Used by the conduit passes below to stamp
+        // `TerminatorKind::Call` destination slots. `None` for unknown /
+        // unannotated / void-returning functions — the destination slot
+        // stays `Void` (no fabrication).
+        let name_to_idx: std::collections::HashMap<String, usize> = self
+            .program
+            .functions
+            .iter()
+            .enumerate()
+            .map(|(i, f)| (f.name.clone(), i))
+            .collect();
+        let returns_vec = self.program.function_return_concrete_types.clone();
+        let callee_returns = |name: &str| -> Option<shape_value::v2::ConcreteType> {
+            let idx = *name_to_idx.get(name)?;
+            let ct = returns_vec.get(idx)?;
+            if matches!(ct, shape_value::v2::ConcreteType::Void) {
+                None
+            } else {
+                Some(ct.clone())
+            }
+        };
+
+        // ADR-006 §2.7.5 — Phase 3 cluster-0 Round 13 T1' commit 2:
+        // method-returns resolver for trait-method dispatch return-kind
+        // classification. Chains:
+        //   `find_default_trait_impl_for_type_method(type_name, method_name)
+        //    → trait impl function name (e.g. "X::name")
+        //    → function_return_concrete_types[function_index]
+        //    → declared return ConcreteType (e.g. ConcreteType::String)`
+        //
+        // Used by the conduit producer to stamp `TerminatorKind::Call`
+        // destination slots for `MirConstant::Method(_)` arms with a
+        // receiver slot whose struct type name was recorded in MIR
+        // (`mir.local_struct_type_names`, T1' gap 1 closure). `None` at
+        // any link in the chain means "no information" — the destination
+        // slot stays `Void` per §2.7.5.1 (no fabricated default).
+        //
+        // Gap 3 closure (commit 1, `desugar_impl_method` trait
+        // declaration return-type substitution) ensures
+        // `function_return_concrete_types["X::name"]` carries the trait's
+        // declared `ConcreteType::String` even when the impl source
+        // doesn't repeat the `: string` annotation.
+        let trait_method_symbols = self.program.trait_method_symbols.clone();
+        let find_trait_impl_default_suffix =
+            |type_name: &str, method_name: &str| -> Option<String> {
+                // Mirror BytecodeProgram::find_default_trait_impl_for_type_method
+                // semantics (the canonical helper at
+                // `crates/shape-vm/src/bytecode/program_impl.rs:151`)
+                // without borrowing `self.program` — the closure must be
+                // passable by reference to the conduit producer
+                // alongside `callee_returns`. The "__default__" selector
+                // string is `DEFAULT_TRAIT_IMPL_SELECTOR` at
+                // `crates/shape-vm/src/bytecode.rs:15`; inlined here to
+                // avoid the borrow.
+                let default_suffix = format!(
+                    "::{}::__default__::{}",
+                    type_name, method_name
+                );
+                for (key, func_name) in &trait_method_symbols {
+                    if key.ends_with(&default_suffix) {
+                        return Some(func_name.clone());
+                    }
+                }
+                let type_segment = format!("::{}::", type_name);
+                let suffix = format!("::{}", method_name);
+                let mut matches: Vec<String> = Vec::new();
+                for (key, func_name) in &trait_method_symbols {
+                    if key.contains(&type_segment) && key.ends_with(&suffix) {
+                        matches.push(func_name.clone());
+                    }
+                }
+                // Multi-trait method-name disambiguation (audit §5):
+                // when multiple traits declare `method()` for the same
+                // receiver type, we cannot determine the return
+                // ConcreteType uniquely from name alone — return None so
+                // the downstream classifier surfaces unstamped.
+                if matches.len() == 1 {
+                    Some(matches.pop().unwrap())
+                } else {
+                    None
+                }
+            };
+        let method_returns =
+            |type_name: &str, method_name: &str| -> Option<shape_value::v2::ConcreteType> {
+                let func_name = find_trait_impl_default_suffix(type_name, method_name)?;
+                let idx = *name_to_idx.get(&func_name)?;
+                let ct = returns_vec.get(idx)?;
+                if matches!(ct, shape_value::v2::ConcreteType::Void) {
+                    None
+                } else {
+                    Some(ct.clone())
+                }
+            };
+
+        // ADR-006 §2.7.5 V3-S6b conduit consumer: monomorph-method
+        // resolver. Reads `BytecodeProgram.monomorphized_method_call_sites`
+        // populated by `try_monomorphize_method_call` /
+        // `_with_closures` at bytecode-compile time, then chains the
+        // looked-up specialized FunctionId through `returns_vec` (the
+        // local clone of `function_return_concrete_types`) to recover the
+        // callee specialization's declared return type. The closure
+        // closes over the `current_function` half of the composite key
+        // — top-level uses `None`; per-fn loop below uses
+        // `Some(fn_idx)`.
+        let monomorph_call_sites =
+            self.program.monomorphized_method_call_sites.clone();
+        let monomorph_method_returns_top = |span: shape_ast::ast::span::Span|
+            -> Option<shape_value::v2::ConcreteType>
+        {
+            let idx = *monomorph_call_sites.get(&(span, None))?;
+            let ct = returns_vec.get(idx)?;
+            if matches!(ct, shape_value::v2::ConcreteType::Void) {
+                None
+            } else {
+                Some(ct.clone())
+            }
+        };
+
+        // cluster-2-cw-IB-class-b (2026-05-16, supervisor R3 binding-
+        // ratified): value-call return-ConcreteType resolver. Consumes
+        // the side-table populated at `compile_expr_function_call`'s
+        // value-call branch and returns the inferred ConcreteType
+        // result for closure-bound calls. Top-level conduit closes
+        // over `None` for the caller half of the composite key — same
+        // convention as `monomorph_method_returns_top`.
+        let value_call_sites =
+            self.program.value_call_return_concrete_types.clone();
+        let value_call_returns_top = |span: shape_ast::ast::span::Span|
+            -> Option<shape_value::v2::ConcreteType>
+        {
+            let ct = value_call_sites.get(&(span, None))?.clone();
+            if matches!(ct, shape_value::v2::ConcreteType::Void) {
+                None
+            } else {
+                Some(ct)
+            }
+        };
+
+        // Re-run top-level conduit with the callee-return resolver so the
+        // `let r = divide(10, 2)` slot picks up `Result(I64, String)` from
+        // the Call terminator. (The first run above stamped `Void` for
+        // Call destinations since no resolver was available.) The
+        // method-returns resolver is also threaded so `t.name()`-style
+        // trait-method dispatch destinations pick up the trait's declared
+        // return ConcreteType. The V3-S6b monomorph-method resolver is
+        // threaded so `arr.map(...).sum()` chains have the `.map()`
+        // destination stamped with the specialized callee's return
+        // ConcreteType.
+        if let Some(ref mir_data) = self.program.top_level_mir {
+            let concrete_types =
+                crate::compiler::helpers::infer_top_level_concrete_types_from_mir_with_resolvers(
+                    &mir_data.mir,
+                    Some(&callee_returns),
+                    Some(&method_returns),
+                    Some(&monomorph_method_returns_top),
+                    Some(&value_call_returns_top),
+                );
+            self.program.top_level_local_concrete_types = concrete_types;
+        }
+
+        // ADR-006 §2.7.5 conduit (W12-jit-aggregate-non-array close,
+        // 2026-05-12): same MIR-walk inference applied per user function.
+        // The producer (`infer_top_level_concrete_types_from_mir`) is
+        // generic over any MirFunction — its name is historical from the
+        // earlier top-level-only landing (Round 3). User-function bodies
+        // hit the JIT consumer at
+        // `crates/shape-jit/src/compiler/program.rs::compile_function_with_user_funcs`,
+        // which currently passes `concrete_types: Vec::new()` and therefore
+        // surfaces `Rvalue::Aggregate` for every `Ok(v)` / `Err(e)` /
+        // `Some(x)` / struct-literal construction inside a user function
+        // body (Smoke 1.5 `divide`, Smoke 2 `first_positive`, 28 stdlib
+        // helpers verified at audit time).
+        //
+        // The callee-return resolver is also threaded here so user-function
+        // bodies that call other user functions (e.g. `divide` calls a
+        // helper) propagate the helper's return ConcreteType into their
+        // own slot, recursing through the conduit.
+        //
+        // `ConcreteType::Void` per slot per §2.7.5.1 — NOT a Bool-default
+        // fallback per forbidden #9. Functions without `mir_data` get an
+        // empty inner vec; downstream consumers fall back to the legacy
+        // NaN-boxed path naturally.
+        let mut per_fn: Vec<Vec<shape_value::v2::ConcreteType>> =
+            Vec::with_capacity(self.program.functions.len());
+        for (fn_idx, func) in self.program.functions.iter().enumerate() {
+            if let Some(ref mir_data) = func.mir_data {
+                // ADR-006 §2.7.5 V3-S6b conduit consumer: per-fn variant
+                // of the monomorph-method resolver. Closes over the
+                // calling function's index for the composite-key lookup
+                // — must match the value `try_monomorphize_method_call`
+                // recorded in `self.current_function` at populate time
+                // (i.e. `Some(fn_idx)` here matches the populator's
+                // post-monomorphization specialized caller FunctionId).
+                let current_fn = Some(fn_idx);
+                let monomorph_method_returns_per_fn = |span: shape_ast::ast::span::Span|
+                    -> Option<shape_value::v2::ConcreteType>
+                {
+                    let idx = *monomorph_call_sites.get(&(span, current_fn))?;
+                    let ct = returns_vec.get(idx)?;
+                    if matches!(ct, shape_value::v2::ConcreteType::Void) {
+                        None
+                    } else {
+                        Some(ct.clone())
+                    }
+                };
+                // cluster-2-cw-IB-class-b: per-fn variant of the value-call
+                // return-ConcreteType resolver. Same composite-key
+                // discipline as monomorph_method_returns_per_fn above —
+                // closes over `Some(fn_idx)` so calls inside user-function
+                // bodies pick up their own caller-context entries.
+                let value_call_returns_per_fn = |span: shape_ast::ast::span::Span|
+                    -> Option<shape_value::v2::ConcreteType>
+                {
+                    let ct = value_call_sites.get(&(span, current_fn))?.clone();
+                    if matches!(ct, shape_value::v2::ConcreteType::Void) {
+                        None
+                    } else {
+                        Some(ct)
+                    }
+                };
+                per_fn.push(
+                    crate::compiler::helpers::infer_top_level_concrete_types_from_mir_with_resolvers(
+                        &mir_data.mir,
+                        Some(&callee_returns),
+                        Some(&method_returns),
+                        Some(&monomorph_method_returns_per_fn),
+                        Some(&value_call_returns_per_fn),
+                    ),
+                );
+            } else {
+                per_fn.push(Vec::new());
+            }
+        }
+        self.program.function_local_concrete_types = per_fn;
 
         // Closure-spec Phase H1: build a `function_id → ClosureLayout` side
         // table for the JIT worker. `emit_heap_closure` consumes this to lay

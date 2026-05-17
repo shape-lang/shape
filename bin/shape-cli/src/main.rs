@@ -32,9 +32,51 @@ use commands::{
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    env_logger::init();
-
     let cli = Cli::parse();
+
+    // Cluster-2 closure-wave-F (2026-05-16) — install the tracing subscriber
+    // BEFORE env_logger so the `--trace-jit` flag wins the global logger /
+    // dispatcher slot. Per ADR-006 §2.7.5 amendment: tracing is internal-
+    // Rust-side only; the extension contract is unaffected. The subscriber
+    // filter mirrors the legacy SHAPE_JIT_* env-var gating but with per-
+    // target composability (`shape_jit::mir=trace,shape_jit::arc_counters=
+    // info`). When the flag is absent the default env_logger path runs
+    // unchanged below; the tracing macros at the emission sites still
+    // compile away to no-ops under feature-OFF.
+    #[cfg(feature = "jit-trace")]
+    let trace_jit_installed = if let Some(filter_directive) = cli.trace_jit.as_ref() {
+        use tracing_subscriber::{EnvFilter, fmt};
+        let directive: String = if filter_directive.is_empty() {
+            "shape_jit=debug".to_string()
+        } else {
+            filter_directive.clone()
+        };
+        let env_filter = EnvFilter::try_new(&directive)
+            .with_context(|| format!("invalid --trace-jit filter directive: {directive}"))?;
+        fmt()
+            .with_env_filter(env_filter)
+            .with_writer(std::io::stderr)
+            .with_target(true)
+            .compact()
+            .try_init()
+            .map_err(|e| anyhow::anyhow!("failed to install JIT tracing subscriber: {e}"))?;
+        true
+    } else {
+        false
+    };
+
+    // env_logger initializes the `log` facade. Skip when tracing-subscriber
+    // is installed so the two don't fight for the global logger slot.
+    #[cfg(feature = "jit-trace")]
+    {
+        if !trace_jit_installed {
+            env_logger::init();
+        }
+    }
+    #[cfg(not(feature = "jit-trace"))]
+    {
+        env_logger::init();
+    }
 
     initialize_shared_runtime().context("failed to initialize shared runtime")?;
 
@@ -58,6 +100,8 @@ async fn main() -> Result<()> {
         resume,
         providers_config,
         extension_dir,
+        #[cfg(feature = "jit-trace")]
+            trace_jit: _,
     } = cli;
 
     // Build provider options from top-level CLI args

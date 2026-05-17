@@ -15,7 +15,6 @@
 
 use shape_ast::ast::{Expr, Literal, ObjectEntry, Span, TypeAnnotation};
 use shape_value::native::ConcreteType;
-use shape_value::ValueWordExt;
 
 use super::BytecodeCompiler;
 

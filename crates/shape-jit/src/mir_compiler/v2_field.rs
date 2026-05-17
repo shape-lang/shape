@@ -22,7 +22,7 @@
 
 use cranelift::codegen::ir::FuncRef;
 use cranelift::prelude::*;
-use shape_vm::type_tracking::SlotKind;
+use shape_vm::type_tracking::NativeKind;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -43,67 +43,89 @@ pub const V2_HEADER_KIND_OFFSET: u32 = 4;
 pub const V2_HEADER_FLAGS_OFFSET: u32 = 6;
 
 // ---------------------------------------------------------------------------
-// SlotKind -> Cranelift type mapping
+// NativeKind -> Cranelift type mapping
 // ---------------------------------------------------------------------------
 
-/// Map a `SlotKind` to the corresponding Cranelift IR type.
+/// Map a `NativeKind` to the corresponding Cranelift IR type.
 ///
 /// This determines the load/store width for a given field type.
-pub fn cranelift_type_for_slot(kind: SlotKind) -> types::Type {
+pub fn cranelift_type_for_slot(kind: NativeKind) -> types::Type {
     match kind {
-        SlotKind::Float64 | SlotKind::NullableFloat64 => types::F64,
+        NativeKind::Float64 | NativeKind::NullableFloat64 => types::F64,
 
-        SlotKind::Int64 | SlotKind::NullableInt64 | SlotKind::UInt64 | SlotKind::NullableUInt64 => {
+        NativeKind::Int64 | NativeKind::NullableInt64 | NativeKind::UInt64 | NativeKind::NullableUInt64 => {
             types::I64
         }
 
-        SlotKind::Int32 | SlotKind::NullableInt32 | SlotKind::UInt32 | SlotKind::NullableUInt32 => {
+        NativeKind::Int32 | NativeKind::NullableInt32 | NativeKind::UInt32 | NativeKind::NullableUInt32 => {
             types::I32
         }
 
-        SlotKind::Int16 | SlotKind::NullableInt16 | SlotKind::UInt16 | SlotKind::NullableUInt16 => {
+        NativeKind::Int16 | NativeKind::NullableInt16 | NativeKind::UInt16 | NativeKind::NullableUInt16 => {
             types::I16
         }
 
-        SlotKind::Int8
-        | SlotKind::NullableInt8
-        | SlotKind::UInt8
-        | SlotKind::NullableUInt8
-        | SlotKind::Bool => types::I8,
+        NativeKind::Int8
+        | NativeKind::NullableInt8
+        | NativeKind::UInt8
+        | NativeKind::NullableUInt8
+        | NativeKind::Bool => types::I8,
 
-        SlotKind::IntSize
-        | SlotKind::NullableIntSize
-        | SlotKind::UIntSize
-        | SlotKind::NullableUIntSize => types::I64, // pointer-width
+        NativeKind::IntSize
+        | NativeKind::NullableIntSize
+        | NativeKind::UIntSize
+        | NativeKind::NullableUIntSize => types::I64, // pointer-width
 
-        // Boxed/pointer-sized values
-        SlotKind::String | SlotKind::Dynamic | SlotKind::Unknown => types::I64,
+        // Round 19 S1.5 W12-nativekind-scalar-additions (2026-05-14):
+        // ADR-006 §2.7.5 amendment — F32 is 4-byte IEEE-754 single-
+        // precision (Cranelift `F32`); Char is 4-byte UTF-32 codepoint
+        // stored as a u32 bit pattern (Cranelift `I32` — read/store
+        // width matches; `char::from_u32` recovers the semantic type
+        // at the consumer boundary).
+        NativeKind::Float32 => types::F32,
+        NativeKind::Char => types::I32,
+
+        // Wave 2 Agent B W12-StringV2-DecimalV2-NativeKind-additions
+        // (2026-05-14): v2-raw `*const StringObj` / `*const DecimalObj`
+        // pointers — pointer-width I64 load/store (same as the
+        // Arc-wrapped sibling row below).
+        NativeKind::StringV2 | NativeKind::DecimalV2 => types::I64,
+
+        // Boxed/pointer-sized values: String (Arc<String> raw ptr) and
+        // every `Ptr(_)` heap arm.
+        NativeKind::String | NativeKind::Ptr(_) => types::I64,
     }
 }
 
-/// Return the byte width of a `SlotKind` for layout computation.
-pub fn slot_byte_width(kind: SlotKind) -> u32 {
+/// Return the byte width of a `NativeKind` for layout computation.
+pub fn slot_byte_width(kind: NativeKind) -> u32 {
     match kind {
-        SlotKind::Float64 | SlotKind::NullableFloat64 => 8,
-        SlotKind::Int64 | SlotKind::NullableInt64 | SlotKind::UInt64 | SlotKind::NullableUInt64 => {
+        NativeKind::Float64 | NativeKind::NullableFloat64 => 8,
+        NativeKind::Int64 | NativeKind::NullableInt64 | NativeKind::UInt64 | NativeKind::NullableUInt64 => {
             8
         }
-        SlotKind::Int32 | SlotKind::NullableInt32 | SlotKind::UInt32 | SlotKind::NullableUInt32 => {
+        NativeKind::Int32 | NativeKind::NullableInt32 | NativeKind::UInt32 | NativeKind::NullableUInt32 => {
             4
         }
-        SlotKind::Int16 | SlotKind::NullableInt16 | SlotKind::UInt16 | SlotKind::NullableUInt16 => {
+        NativeKind::Int16 | NativeKind::NullableInt16 | NativeKind::UInt16 | NativeKind::NullableUInt16 => {
             2
         }
-        SlotKind::Int8
-        | SlotKind::NullableInt8
-        | SlotKind::UInt8
-        | SlotKind::NullableUInt8
-        | SlotKind::Bool => 1,
-        SlotKind::IntSize
-        | SlotKind::NullableIntSize
-        | SlotKind::UIntSize
-        | SlotKind::NullableUIntSize => 8,
-        SlotKind::String | SlotKind::Dynamic | SlotKind::Unknown => 8,
+        NativeKind::Int8
+        | NativeKind::NullableInt8
+        | NativeKind::UInt8
+        | NativeKind::NullableUInt8
+        | NativeKind::Bool => 1,
+        NativeKind::IntSize
+        | NativeKind::NullableIntSize
+        | NativeKind::UIntSize
+        | NativeKind::NullableUIntSize => 8,
+        // Round 19 S1.5 W12-nativekind-scalar-additions (2026-05-14):
+        // ADR-006 §2.7.5 amendment — F32 + Char are 4 bytes.
+        NativeKind::Float32 | NativeKind::Char => 4,
+        // Wave 2 Agent B W12-StringV2-DecimalV2-NativeKind-additions
+        // (2026-05-14): v2-raw heap-pointer carriers — pointer-width 8 bytes.
+        NativeKind::StringV2 | NativeKind::DecimalV2 => 8,
+        NativeKind::String | NativeKind::Ptr(_) => 8,
     }
 }
 
@@ -119,7 +141,7 @@ pub struct FieldLayout {
     /// Byte offset from the struct base pointer (includes HeapHeader).
     pub offset: u32,
     /// The slot kind that determines Cranelift load/store type.
-    pub kind: SlotKind,
+    pub kind: NativeKind,
 }
 
 /// Compute the layout of a v2 typed struct given its fields in declaration order.
@@ -129,7 +151,7 @@ pub struct FieldLayout {
 ///
 /// Returns a vector of `FieldLayout` descriptors and the total struct size
 /// (including any trailing padding to align the whole struct to 8 bytes).
-pub fn compute_struct_layout(fields: &[(String, SlotKind)]) -> (Vec<FieldLayout>, u32) {
+pub fn compute_struct_layout(fields: &[(String, NativeKind)]) -> (Vec<FieldLayout>, u32) {
     let mut layouts = Vec::with_capacity(fields.len());
     let mut cursor = V2_HEAP_HEADER_SIZE; // start after header
 
@@ -196,7 +218,7 @@ impl<'a, 'b: 'a> MirToIR<'a, 'b> {
         &mut self,
         struct_ptr: Value,
         field_offset: u32,
-        field_type: SlotKind,
+        field_type: NativeKind,
     ) -> Value {
         let cl_type = cranelift_type_for_slot(field_type);
         self.builder
@@ -216,7 +238,7 @@ impl<'a, 'b: 'a> MirToIR<'a, 'b> {
         struct_ptr: Value,
         field_offset: u32,
         val: Value,
-        _field_type: SlotKind,
+        _field_type: NativeKind,
     ) {
         self.builder
             .ins()
@@ -300,19 +322,19 @@ mod tests {
     fn v2_field_layout_point_all_f64() {
         // type Point { x: number, y: number }
         let fields = vec![
-            ("x".to_string(), SlotKind::Float64),
-            ("y".to_string(), SlotKind::Float64),
+            ("x".to_string(), NativeKind::Float64),
+            ("y".to_string(), NativeKind::Float64),
         ];
         let (layout, total) = compute_struct_layout(&fields);
 
         assert_eq!(layout.len(), 2);
         assert_eq!(layout[0].name, "x");
         assert_eq!(layout[0].offset, 8); // right after 8-byte header
-        assert_eq!(layout[0].kind, SlotKind::Float64);
+        assert_eq!(layout[0].kind, NativeKind::Float64);
 
         assert_eq!(layout[1].name, "y");
         assert_eq!(layout[1].offset, 16); // 8 (header) + 8 (x)
-        assert_eq!(layout[1].kind, SlotKind::Float64);
+        assert_eq!(layout[1].kind, NativeKind::Float64);
 
         assert_eq!(total, 24); // 8 header + 8 x + 8 y
     }
@@ -321,9 +343,9 @@ mod tests {
     fn v2_field_layout_mixed_types() {
         // type Mixed { flag: bool, count: i32, value: number }
         let fields = vec![
-            ("flag".to_string(), SlotKind::Bool),
-            ("count".to_string(), SlotKind::Int32),
-            ("value".to_string(), SlotKind::Float64),
+            ("flag".to_string(), NativeKind::Bool),
+            ("count".to_string(), NativeKind::Int32),
+            ("value".to_string(), NativeKind::Float64),
         ];
         let (layout, total) = compute_struct_layout(&fields);
 
@@ -332,17 +354,17 @@ mod tests {
         // flag: i8, at offset 8 (right after header, 1-byte aligned)
         assert_eq!(layout[0].name, "flag");
         assert_eq!(layout[0].offset, 8);
-        assert_eq!(layout[0].kind, SlotKind::Bool);
+        assert_eq!(layout[0].kind, NativeKind::Bool);
 
         // count: i32, needs 4-byte alignment. cursor was at 9, aligns to 12.
         assert_eq!(layout[1].name, "count");
         assert_eq!(layout[1].offset, 12);
-        assert_eq!(layout[1].kind, SlotKind::Int32);
+        assert_eq!(layout[1].kind, NativeKind::Int32);
 
         // value: f64, needs 8-byte alignment. cursor was at 16, already aligned.
         assert_eq!(layout[2].name, "value");
         assert_eq!(layout[2].offset, 16);
-        assert_eq!(layout[2].kind, SlotKind::Float64);
+        assert_eq!(layout[2].kind, NativeKind::Float64);
 
         // total = 16 + 8 = 24, already 8-byte aligned
         assert_eq!(total, 24);
@@ -352,9 +374,9 @@ mod tests {
     fn v2_field_layout_i16_alignment() {
         // type Shorts { a: i16, b: i16, c: i64 }
         let fields = vec![
-            ("a".to_string(), SlotKind::Int16),
-            ("b".to_string(), SlotKind::Int16),
-            ("c".to_string(), SlotKind::Int64),
+            ("a".to_string(), NativeKind::Int16),
+            ("b".to_string(), NativeKind::Int16),
+            ("c".to_string(), NativeKind::Int64),
         ];
         let (layout, total) = compute_struct_layout(&fields);
 
@@ -372,7 +394,7 @@ mod tests {
     #[test]
     fn v2_field_layout_single_bool() {
         // type Flag { active: bool }
-        let fields = vec![("active".to_string(), SlotKind::Bool)];
+        let fields = vec![("active".to_string(), NativeKind::Bool)];
         let (layout, total) = compute_struct_layout(&fields);
 
         assert_eq!(layout[0].offset, 8);
@@ -382,7 +404,7 @@ mod tests {
 
     #[test]
     fn v2_field_layout_empty_struct() {
-        let fields: Vec<(String, SlotKind)> = vec![];
+        let fields: Vec<(String, NativeKind)> = vec![];
         let (layout, total) = compute_struct_layout(&fields);
 
         assert_eq!(layout.len(), 0);
@@ -394,8 +416,8 @@ mod tests {
         // type Padded { a: bool, b: i64 }
         // a is 1 byte at offset 8, then padding to align b at offset 16.
         let fields = vec![
-            ("a".to_string(), SlotKind::Bool),
-            ("b".to_string(), SlotKind::Int64),
+            ("a".to_string(), NativeKind::Bool),
+            ("b".to_string(), NativeKind::Int64),
         ];
         let (layout, total) = compute_struct_layout(&fields);
 
@@ -408,9 +430,9 @@ mod tests {
     fn v2_field_layout_all_i32() {
         // type Vec3i { x: i32, y: i32, z: i32 }
         let fields = vec![
-            ("x".to_string(), SlotKind::Int32),
-            ("y".to_string(), SlotKind::Int32),
-            ("z".to_string(), SlotKind::Int32),
+            ("x".to_string(), NativeKind::Int32),
+            ("y".to_string(), NativeKind::Int32),
+            ("z".to_string(), NativeKind::Int32),
         ];
         let (layout, total) = compute_struct_layout(&fields);
 
@@ -427,15 +449,22 @@ mod tests {
 
     #[test]
     fn v2_field_slot_to_cranelift_type() {
-        assert_eq!(cranelift_type_for_slot(SlotKind::Float64), types::F64);
-        assert_eq!(cranelift_type_for_slot(SlotKind::NullableFloat64), types::F64);
-        assert_eq!(cranelift_type_for_slot(SlotKind::Int64), types::I64);
-        assert_eq!(cranelift_type_for_slot(SlotKind::Int32), types::I32);
-        assert_eq!(cranelift_type_for_slot(SlotKind::Int16), types::I16);
-        assert_eq!(cranelift_type_for_slot(SlotKind::Bool), types::I8);
-        assert_eq!(cranelift_type_for_slot(SlotKind::Int8), types::I8);
-        assert_eq!(cranelift_type_for_slot(SlotKind::Dynamic), types::I64);
-        assert_eq!(cranelift_type_for_slot(SlotKind::String), types::I64);
+        assert_eq!(cranelift_type_for_slot(NativeKind::Float64), types::F64);
+        assert_eq!(cranelift_type_for_slot(NativeKind::NullableFloat64), types::F64);
+        assert_eq!(cranelift_type_for_slot(NativeKind::Int64), types::I64);
+        assert_eq!(cranelift_type_for_slot(NativeKind::Int32), types::I32);
+        assert_eq!(cranelift_type_for_slot(NativeKind::Int16), types::I16);
+        assert_eq!(cranelift_type_for_slot(NativeKind::Bool), types::I8);
+        assert_eq!(cranelift_type_for_slot(NativeKind::Int8), types::I8);
+        // W11: `NativeKind::Dynamic` deleted by the strict-typing bulldozer
+        // (see `crates/shape-value/src/native_kind.rs:103-107`). The
+        // ex-`Dynamic` slot mapping (raw u64 storage) is now covered by
+        // any heap-pointer kind — `Ptr(HeapKind::TypedArray)` stands in.
+        assert_eq!(
+            cranelift_type_for_slot(NativeKind::Ptr(shape_value::heap_value::HeapKind::TypedArray)),
+            types::I64
+        );
+        assert_eq!(cranelift_type_for_slot(NativeKind::String), types::I64);
     }
 
     // -----------------------------------------------------------------------
@@ -444,13 +473,13 @@ mod tests {
 
     #[test]
     fn v2_field_slot_byte_widths() {
-        assert_eq!(slot_byte_width(SlotKind::Float64), 8);
-        assert_eq!(slot_byte_width(SlotKind::Int64), 8);
-        assert_eq!(slot_byte_width(SlotKind::Int32), 4);
-        assert_eq!(slot_byte_width(SlotKind::Int16), 2);
-        assert_eq!(slot_byte_width(SlotKind::Bool), 1);
-        assert_eq!(slot_byte_width(SlotKind::Int8), 1);
-        assert_eq!(slot_byte_width(SlotKind::String), 8);
+        assert_eq!(slot_byte_width(NativeKind::Float64), 8);
+        assert_eq!(slot_byte_width(NativeKind::Int64), 8);
+        assert_eq!(slot_byte_width(NativeKind::Int32), 4);
+        assert_eq!(slot_byte_width(NativeKind::Int16), 2);
+        assert_eq!(slot_byte_width(NativeKind::Bool), 1);
+        assert_eq!(slot_byte_width(NativeKind::Int8), 1);
+        assert_eq!(slot_byte_width(NativeKind::String), 8);
     }
 
     // -----------------------------------------------------------------------
@@ -518,7 +547,7 @@ mod tests {
 
             let result = {
                 let mut mir = MirToIR::new(&mut builder);
-                mir.v2_field_get(struct_ptr, 8, SlotKind::Float64)
+                mir.v2_field_get(struct_ptr, 8, NativeKind::Float64)
             };
             builder.ins().return_(&[result]);
             builder.finalize();
@@ -571,7 +600,7 @@ mod tests {
 
             {
                 let mut mir = MirToIR::new(&mut builder);
-                mir.v2_field_set(struct_ptr, 16, val, SlotKind::Float64);
+                mir.v2_field_set(struct_ptr, 16, val, NativeKind::Float64);
             }
             builder.ins().return_(&[]);
             builder.finalize();
@@ -623,7 +652,7 @@ mod tests {
 
             let result = {
                 let mut mir = MirToIR::new(&mut builder);
-                mir.v2_field_get(struct_ptr, 12, SlotKind::Int32)
+                mir.v2_field_get(struct_ptr, 12, NativeKind::Int32)
             };
             builder.ins().return_(&[result]);
             builder.finalize();
@@ -675,7 +704,7 @@ mod tests {
 
             let result = {
                 let mut mir = MirToIR::new(&mut builder);
-                mir.v2_field_get(struct_ptr, 8, SlotKind::Bool)
+                mir.v2_field_get(struct_ptr, 8, NativeKind::Bool)
             };
             builder.ins().return_(&[result]);
             builder.finalize();
@@ -718,8 +747,8 @@ mod tests {
             .unwrap();
 
         let fields = vec![
-            ("x".to_string(), SlotKind::Float64),
-            ("y".to_string(), SlotKind::Float64),
+            ("x".to_string(), NativeKind::Float64),
+            ("y".to_string(), NativeKind::Float64),
         ];
         let (layout, total) = compute_struct_layout(&fields);
         assert_eq!(layout[0].offset, 8);
@@ -786,9 +815,9 @@ mod tests {
             .unwrap();
 
         let fields = vec![
-            ("flag".to_string(), SlotKind::Bool),
-            ("count".to_string(), SlotKind::Int32),
-            ("value".to_string(), SlotKind::Float64),
+            ("flag".to_string(), NativeKind::Bool),
+            ("count".to_string(), NativeKind::Int32),
+            ("value".to_string(), NativeKind::Float64),
         ];
         let (layout, total) = compute_struct_layout(&fields);
 
@@ -865,7 +894,7 @@ mod tests {
 
             {
                 let mut mir = MirToIR::new(&mut builder);
-                mir.v2_field_set(sp, 8, val, SlotKind::Float64);
+                mir.v2_field_set(sp, 8, val, NativeKind::Float64);
             }
             builder.ins().return_(&[]);
             builder.finalize();
@@ -898,7 +927,7 @@ mod tests {
 
             let result = {
                 let mut mir = MirToIR::new(&mut builder);
-                mir.v2_field_get(sp, 8, SlotKind::Float64)
+                mir.v2_field_get(sp, 8, NativeKind::Float64)
             };
             builder.ins().return_(&[result]);
             builder.finalize();

@@ -717,6 +717,21 @@ impl BytecodeCompiler {
         // Inline each closure body in turn.
         for (i, spec_info) in closure_defs.iter().enumerate() {
             let closure_param_name = &callee_closure_param_names[i];
+            // cluster-2 V3-S6f empirical-verification trace (2026-05-16);
+            // cluster-2 closure-wave-F tracing-crate migration (2026-05-16):
+            // ADR-006 §2.7.5 amendment — `tracing::debug!` is compile-out
+            // when the `jit-trace` Cargo feature is OFF (default), so this
+            // site costs zero in release builds. Replaces the legacy
+            // `SHAPE_JIT_DEBUG` env-var gating; CLI selector is
+            // `--trace-jit=shape_jit=debug`.
+            tracing::debug!(
+                target: "shape_jit",
+                mono_key = %mono_key,
+                closure_param = %closure_param_name,
+                closure_param_count = spec_info.param_names.len(),
+                closure_body_stmts = spec_info.body.len(),
+                "mono-phaseC inline_closure_body_into_specialization",
+            );
             if substitution::inline_closure_body_into_specialization(
                 &mut specialized_def,
                 closure_param_name,
@@ -726,6 +741,11 @@ impl BytecodeCompiler {
             )
             .is_err()
             {
+                tracing::debug!(
+                    target: "shape_jit",
+                    mono_key = %mono_key,
+                    "mono-phaseC inline FAILED",
+                );
                 // Inlining bailed — fall back to generic path.
                 return Ok(None);
             }

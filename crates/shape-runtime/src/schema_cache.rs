@@ -4,16 +4,13 @@
 //! external schema state in the shared lockfile model.
 
 use crate::package_lock::{ArtifactDeterminism, LockedArtifact, PackageLock};
-use crate::type_schema::{
-    TypeSchema, TypeSchemaBuilder, typed_object_from_nb_pairs, typed_object_to_hashmap_nb,
-};
+use crate::type_schema::{TypeSchema, TypeSchemaBuilder};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use shape_value::{ValueWord, ValueWordExt};
+use shape_value::KindedSlot;
 use shape_wire::WireValue;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::RwLock;
 
 /// Top-level cache file path. Kept for call-site compatibility.
@@ -74,140 +71,30 @@ pub struct FieldSchema {
     pub nullable: bool,
 }
 
-/// Convert a `SourceSchema` into a typed-object ValueWord payload.
+/// Convert a `SourceSchema` into a [`KindedSlot`] typed-object payload.
 ///
-/// This is used by module-capability extensions to return rich schema
-/// metadata through the shared module invocation path.
-pub fn source_schema_to_nb(schema: &SourceSchema) -> ValueWord {
-    let mut table_pairs: Vec<(String, ValueWord)> = schema
-        .tables
-        .iter()
-        .map(|(table_name, entity)| {
-            let columns = entity
-                .columns
-                .iter()
-                .map(|column| {
-                    typed_object_from_nb_pairs(&[
-                        (
-                            "name",
-                            ValueWord::from_string(Arc::new(column.name.clone())),
-                        ),
-                        (
-                            "type",
-                            ValueWord::from_string(Arc::new(column.shape_type.clone())),
-                        ),
-                        ("nullable", ValueWord::from_bool(column.nullable)),
-                    ])
-                })
-                .collect::<Vec<_>>();
-
-            let entity_nb = typed_object_from_nb_pairs(&[
-                (
-                    "name",
-                    ValueWord::from_string(Arc::new(entity.name.clone())),
-                ),
-                ("columns", ValueWord::from_array(shape_value::vmarray_from_vec(columns))),
-            ]);
-
-            (table_name.clone(), entity_nb)
-        })
-        .collect();
-    table_pairs.sort_by(|left, right| left.0.cmp(&right.0));
-
-    let table_refs: Vec<(&str, ValueWord)> = table_pairs
-        .iter()
-        .map(|(name, value)| (name.as_str(), value.clone()))
-        .collect();
-    let tables_nb = typed_object_from_nb_pairs(&table_refs);
-
-    typed_object_from_nb_pairs(&[
-        ("uri", ValueWord::from_string(Arc::new(schema.uri.clone()))),
-        ("tables", tables_nb),
-        (
-            "cached_at",
-            ValueWord::from_string(Arc::new(schema.cached_at.clone())),
-        ),
-    ])
+/// Phase 1.B (ADR-006 §2.7.4 audit-accuracy ruling): the runtime-side
+/// SourceSchema↔KindedSlot path goes through nested
+/// `typed_object_from_pairs`. The current `typed_object_from_pairs`
+/// expects the schema to already be registered for the `(uri, tables,
+/// cached_at)` and per-table-entity field shapes — those schemas are
+/// not currently registered (they were synthesized at runtime under
+/// the deleted ValueWord path). The Phase 2c rebuild registers the
+/// schemas as predeclared and rebuilds this helper. Until then, this
+/// function returns an empty `KindedSlot` placeholder.
+///
+/// The wire-format path (`source_schema_to_wire`) is unaffected and
+/// remains the canonical persisted-format converter.
+pub fn source_schema_to_nb(_schema: &SourceSchema) -> KindedSlot {
+    KindedSlot::none()
 }
 
-/// Decode a `SourceSchema` from a typed-object ValueWord payload.
-pub fn source_schema_from_nb(value: &ValueWord) -> Result<SourceSchema, String> {
-    let object = typed_object_to_hashmap_nb(value)
-        .ok_or_else(|| "schema payload must be a typed object".to_string())?;
-
-    let uri = object
-        .get("uri")
-        .and_then(|v| v.as_str().map(|s| s.to_string()))
-        .ok_or_else(|| "schema payload missing string field 'uri'".to_string())?;
-
-    let cached_at = object
-        .get("cached_at")
-        .and_then(|v| v.as_str().map(|s| s.to_string()))
-        .unwrap_or_default();
-
-    let tables_nb = object
-        .get("tables")
-        .ok_or_else(|| "schema payload missing object field 'tables'".to_string())?;
-    let tables_obj = typed_object_to_hashmap_nb(tables_nb)
-        .ok_or_else(|| "schema payload field 'tables' must be an object".to_string())?;
-
-    let mut tables = HashMap::new();
-    for (table_name, entity_nb) in tables_obj {
-        let entity_obj = typed_object_to_hashmap_nb(&entity_nb)
-            .ok_or_else(|| format!("table '{table_name}' schema must be an object"))?;
-
-        let entity_name = entity_obj
-            .get("name")
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .unwrap_or_else(|| table_name.clone());
-
-        let columns_nb = entity_obj
-            .get("columns")
-            .ok_or_else(|| format!("table '{table_name}' missing 'columns' array"))?;
-        let columns_arr = columns_nb
-            .as_any_array()
-            .ok_or_else(|| format!("table '{table_name}' field 'columns' must be an array"))?
-            .to_generic();
-
-        let mut columns = Vec::new();
-        for column_nb in columns_arr.iter() {
-            let column_obj = typed_object_to_hashmap_nb(column_nb)
-                .ok_or_else(|| format!("table '{table_name}' contains non-object column entry"))?;
-            let name = column_obj
-                .get("name")
-                .and_then(|v| v.as_str().map(|s| s.to_string()))
-                .ok_or_else(|| format!("table '{table_name}' column missing string 'name'"))?;
-            let shape_type = column_obj
-                .get("type")
-                .or_else(|| column_obj.get("shape_type"))
-                .and_then(|v| v.as_str().map(|s| s.to_string()))
-                .ok_or_else(|| format!("table '{table_name}' column '{name}' missing type"))?;
-            let nullable = column_obj
-                .get("nullable")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-
-            columns.push(FieldSchema {
-                name,
-                shape_type,
-                nullable,
-            });
-        }
-
-        tables.insert(
-            table_name.clone(),
-            EntitySchema {
-                name: entity_name,
-                columns,
-            },
-        );
-    }
-
-    Ok(SourceSchema {
-        uri,
-        tables,
-        cached_at,
-    })
+/// Decode a `SourceSchema` from a typed-object [`KindedSlot`] payload.
+///
+/// See [`source_schema_to_nb`] — Phase 2c rebuild deferral. The wire-
+/// format path (`source_schema_from_wire`) handles the persisted case.
+pub fn source_schema_from_nb(_value: &KindedSlot) -> Result<SourceSchema, String> {
+    Err("source_schema_from_nb: pending Phase 2c kind-threaded TypedObject decode — see ADR-006 §2.7.4".to_string())
 }
 
 /// Decode a `SourceSchema` from a shape-wire object payload.

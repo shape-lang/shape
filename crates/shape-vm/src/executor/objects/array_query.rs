@@ -1,587 +1,277 @@
 //! Array query operations
 //!
-//! Handles: where, select, find, find_index, index_of, includes, some, every, any, all, single, take_while, skip_while, for_each
+//! Handles: where, select, find, find_index, index_of, includes, some, every,
+//! any, all, single, take_while, skip_while, for_each
+//!
+//! ## V3-S5 ckpt-3 consumer-cascade tier 2 surface (2026-05-15) — drive-by
+//!
+//! This file's pickup is a drive-by from ckpt-2's `array_transform.rs`
+//! cross-module helper deletion: the imports at original lines 49-52
+//! (`typed_array_arc_from_kinded / element_kinded / project_indices /
+//! collect_homogeneous_results / bump_closure_share`) reference helpers
+//! that were deleted in ckpt-2 — every one of the first four took
+//! `&TypedArrayData` or produced `Arc<TypedArrayData>`. Plus the file's
+//! own 24 in-file `TypedArrayData::` references (value-search handlers
+//! `handle_index_of_v2` / `handle_includes_v2` dispatching on
+//! `TypedArrayData` arms via `typed_array_ref` and `read_element_at`)
+//! cascade-broke at ckpt-1 enum deletion.
+//!
+//! Per V3-S5 ckpt-1 close (commit `aac8495e`, 2026-05-15), the
+//! `TypedArrayData` enum + impl blocks + `Display for TypedArrayData` +
+//! `typed_array_structural_eq` fn were DELETED at
+//! `crates/shape-value/src/heap_value.rs` per W12-typed-array-data-deletion
+//! audit §3.5 + ADR-006 §2.7.24 Q25.A SUPERSEDED.
+//!
+//! Public handler bodies (`handle_where_v2 / handle_select_v2 /
+//! handle_find_v2 / handle_find_index_v2 / handle_index_of_v2 /
+//! handle_includes_v2 / handle_some_v2 / handle_every_v2 / handle_any_v2 /
+//! handle_all_v2 / handle_single_v2 / handle_take_while_v2 /
+//! handle_skip_while_v2 / handle_for_each_v2`) are replaced with
+//! structured surface-and-stop returning `VMError::NotImplemented`. Local
+//! helpers (`typed_array_arc / typed_array_ref / read_element_at` and
+//! every per-`TypedArrayData::X` value-comparison body) and the deleted
+//! cross-module imports are DELETED.
+//!
+//! ## Cascade migration target (post-ckpt-6 STRICT close)
+//!
+//! Per W12-typed-array-data-deletion audit §A.3 + §2.1 scalar recipe +
+//! §2.2 heap-element variants, every previous `TypedArrayData::X(buf)`
+//! match arm in `handle_index_of_v2` / `handle_includes_v2` /
+//! `read_element_at` migrates to the v2-raw `TypedArray<T>` flat-struct
+//! carrier — per-T direct comparison via `*buf.data.add(idx)`. The
+//! closure-callback ABI (ADR-006 §2.7.11 / Q12 `vm.call_value_immediate_nb`)
+//! is unaffected; predicate handlers re-instate against the v2-raw
+//! receiver-shape once the per-T element-read path lands. The
+//! result-builder handlers (`handle_where_v2` / `handle_select_v2` /
+//! `handle_take_while_v2` / `handle_skip_while_v2`) re-route through the
+//! sibling W9-array-transform cluster's per-T builder once the
+//! `array_transform.rs` v2-raw rewrite lands.
+//!
+//! Bodies REFUSED ON SIGHT under Refusal #1 (resurrection under rename
+//! per ckpt-1 close-marker at `heap_value.rs:3956`).
 
 use crate::executor::VirtualMachine;
-
-use shape_value::{ArgVec, VMError, ValueWord, ValueWordExt};
-use std::mem::ManuallyDrop;
-use std::sync::Arc;
-
-use super::raw_helpers;
-
-/// Borrow a `ValueWord` from raw u64 bits without taking ownership.
-#[inline]
-fn borrow_vw(raw: u64) -> ManuallyDrop<ValueWord> {
-    ManuallyDrop::new(ValueWord::from_raw_bits(raw))
-}
-
-/// Helper function to check if two ValueWord values are equal
-fn nb_equal(a: &ValueWord, b: &ValueWord) -> bool {
-    a.vw_equals(b)
-}
-
-/// Check that a call result is a boolean true.
-///
-/// Post-Wave-E+5/Unit B, typed boolean producers (`EqInt`, `LtNumber`,
-/// `Not`, `LoadLocalBool`, `op_push_const Bool`, …) push raw native 0/1 bits
-/// — `as_bool()` only recognizes the legacy `TAG_BOOL` form and returns
-/// `None` for native bits, falsely signalling a non-boolean predicate.
-/// Detect the native form (0 or 1, untagged) up front; tagged bits keep the
-/// legacy decode path so heap-boxed bool variants stay supported.
-#[inline]
-fn is_bool_true_raw(bits: u64) -> Result<bool, VMError> {
-    if !shape_value::tag_bits::is_tagged(bits) && bits <= 1 {
-        return Ok(bits == 1);
-    }
-    let vw = ManuallyDrop::new(ValueWord::from_raw_bits(bits));
-    match vw.as_bool() {
-        Some(b) => Ok(b),
-        None => Err(VMError::RuntimeError(
-            "predicate must return a boolean".to_string(),
-        )),
-    }
-}
-
-/// Filter array with predicate (alias for filter)
+use shape_runtime::context::ExecutionContext;
+use shape_value::heap_value::HeapKind;
+use shape_value::{KindedSlot, NativeKind, VMError};
 
 // ═══════════════════════════════════════════════════════════════════════════
-// MethodFnV2 handlers — args are &[u64], result is returned as u64
+// V3-S5 ckpt-3 surface-and-stop builder
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Common surface-and-stop body for every public handler in this file.
+#[cold]
+#[inline(never)]
+fn ckpt3_surface(op: &'static str, args: &[KindedSlot]) -> VMError {
+    let receiver_kind = if args.is_empty() {
+        "<no args>".to_string()
+    } else {
+        format!("{:?}", args[0].kind)
+    };
+    VMError::NotImplemented(format!(
+        "{op}: SURFACE — V3-S5 ckpt-3 consumer-cascade tier 2 surface \
+         (drive-by from ckpt-2 cross-module helper deletion). \
+         `TypedArrayData` enum DELETED at ckpt-1 (2026-05-15) per W12-\
+         typed-array-data-deletion audit §3.5 + ADR-006 §2.7.24 Q25.A \
+         SUPERSEDED. The previous `Arc<TypedArrayData>` receiver-recovery \
+         + per-variant value-search / closure-callback dispatch path (~24 \
+         references across 14 public handlers in this file plus the \
+         5-import E0432 cluster from ckpt-2 cross-module helper deletion \
+         at array_transform.rs) cascade-broke at the enum deletion site \
+         (`crates/shape-value/src/heap_value.rs:3944`). Post-deletion \
+         target is the v2-raw `TypedArray<T>` flat-struct carrier per \
+         audit §1.2 + §A.3 + §3.1 scalar recipe; per-T monomorphization \
+         landing across ckpt-3 (this file plus array_ops/typed_array_methods/\
+         iterator_methods/array_sort/concat/property_access) + ckpt-4 \
+         (Buf<T> / HeapValue::TypedArray arm / HeapKind::TypedArray \
+         ordinal) + ckpt-5 (wire/json/marshal + 4-table lockstep) + \
+         ckpt-6 (JIT FFI). Closure-callback ABI (ADR-006 §2.7.11 / Q12 \
+         `vm.call_value_immediate_nb`) is unaffected and re-instates \
+         once receiver-shape migration lands. Receiver kind: {kind}. \
+         UNREACHABLE until ckpt-6 STRICT close. REFUSED ON SIGHT: \
+         TypedArrayData resurrection under any rename (Refusal #1, W12 \
+         audit §7).",
+        op = op,
+        kind = receiver_kind,
+    ))
+}
+
+/// Closure-arg validation for closure-callback handlers.
+#[inline]
+fn validate_closure_arg(op: &str, args: &[KindedSlot]) -> Option<VMError> {
+    if args.len() >= 2 && args[1].kind != NativeKind::Ptr(HeapKind::Closure) {
+        Some(VMError::RuntimeError(format!(
+            "{}: second argument must be a closure, got kind {:?}",
+            op, args[1].kind
+        )))
+    } else {
+        None
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MethodFnV2 handlers — surface-and-stop stubs
+// Signatures preserved for method_registry.rs PHF integrity.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// `arr.where(|x| ...)` — predicate-filter projection.
 pub(crate) fn handle_where_v2(
-    vm: &mut VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    if args.len() < 2 {
-        return Err(VMError::RuntimeError(
-            "where() requires 2 arguments: receiver and predicate".to_string(),
-        ));
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    if let Some(err) = validate_closure_arg("where", args) {
+        return Err(err);
     }
-
-    let receiver = borrow_vw(args[0]);
-
-    let array = receiver
-        .as_any_array()
-        .ok_or_else(|| VMError::TypeError {
-            expected: "array",
-            got: "other",
-        })?
-        .to_generic();
-
-    if !raw_helpers::is_callable_raw(args[1]) {
-        return Err(VMError::RuntimeError(
-            "where() second argument must be a function".to_string(),
-        ));
-    }
-
-    let predicate_arity = raw_helpers::callable_arity_raw(&vm.program, args[1]).unwrap_or(1);
-
-    let mut filtered: ArgVec = ArgVec::new();
-    for (i, nb) in array.iter().enumerate() {
-        let result_bits = if predicate_arity >= 2 {
-            vm.call_value_immediate_raw(
-                args[1],
-                &[nb.raw_bits(), ValueWord::from_i64(i as i64).into_raw_bits()],
-                ctx.as_deref_mut(),
-            )?
-        } else {
-            vm.call_value_immediate_raw(args[1], &[nb.raw_bits()], ctx.as_deref_mut())?
-        };
-        if is_bool_true_raw(result_bits)? {
-            // Retain `nb` before transferring into `filtered` so ArgVec::drop
-            // on error releases refs we actually own.
-            filtered.push(shape_value::vw_clone(nb.raw_bits()));
-        }
-    }
-
-    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(filtered.into_inner())).into_raw_bits())
+    Err(ckpt3_surface("where", args))
 }
 
+/// `arr.select(|x| ...)` — per-element transform.
 pub(crate) fn handle_select_v2(
-    vm: &mut VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    if args.len() < 2 {
-        return Err(VMError::RuntimeError(
-            "select() requires 2 arguments: receiver and mapper".to_string(),
-        ));
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    if let Some(err) = validate_closure_arg("select", args) {
+        return Err(err);
     }
-
-    let receiver = borrow_vw(args[0]);
-
-    let array = receiver
-        .as_any_array()
-        .ok_or_else(|| VMError::TypeError {
-            expected: "array",
-            got: "other",
-        })?
-        .to_generic();
-
-    if !raw_helpers::is_callable_raw(args[1]) {
-        return Err(VMError::RuntimeError(
-            "select() second argument must be a function".to_string(),
-        ));
-    }
-
-    let mapper_arity = raw_helpers::callable_arity_raw(&vm.program, args[1]).unwrap_or(1);
-
-    let mut results: ArgVec = ArgVec::with_capacity(array.len());
-    for (i, nb) in array.iter().enumerate() {
-        let result_bits = if mapper_arity >= 2 {
-            vm.call_value_immediate_raw(
-                args[1],
-                &[nb.raw_bits(), ValueWord::from_i64(i as i64).into_raw_bits()],
-                ctx.as_deref_mut(),
-            )?
-        } else {
-            vm.call_value_immediate_raw(args[1], &[nb.raw_bits()], ctx.as_deref_mut())?
-        };
-        // Call return is already owned; transfer ownership to ArgVec.
-        results.push(result_bits);
-    }
-
-    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(results.into_inner())).into_raw_bits())
+    Err(ckpt3_surface("select", args))
 }
 
+/// `arr.find(|x| ...)`.
 pub(crate) fn handle_find_v2(
-    vm: &mut VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    if args.len() < 2 {
-        return Err(VMError::RuntimeError(
-            "find() requires 2 arguments: receiver and predicate".to_string(),
-        ));
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    if let Some(err) = validate_closure_arg("find", args) {
+        return Err(err);
     }
-
-    let receiver = borrow_vw(args[0]);
-
-    let array = receiver
-        .as_any_array()
-        .ok_or_else(|| VMError::TypeError {
-            expected: "array",
-            got: "other",
-        })?
-        .to_generic();
-
-    if !raw_helpers::is_callable_raw(args[1]) {
-        return Err(VMError::RuntimeError(
-            "find() second argument must be a function".to_string(),
-        ));
-    }
-
-    let predicate_arity = raw_helpers::callable_arity_raw(&vm.program, args[1]).unwrap_or(1);
-
-    for (i, nb) in array.iter().enumerate() {
-        let result_bits = if predicate_arity >= 2 {
-            vm.call_value_immediate_raw(
-                args[1],
-                &[nb.raw_bits(), ValueWord::from_i64(i as i64).into_raw_bits()],
-                ctx.as_deref_mut(),
-            )?
-        } else {
-            vm.call_value_immediate_raw(args[1], &[nb.raw_bits()], ctx.as_deref_mut())?
-        };
-        if is_bool_true_raw(result_bits)? {
-            return Ok(nb.clone().into_raw_bits());
-        }
-    }
-
-    Ok(ValueWord::none().into_raw_bits())
+    Err(ckpt3_surface("find", args))
 }
 
+/// `arr.findIndex(|x| ...)`.
 pub(crate) fn handle_find_index_v2(
-    vm: &mut VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    if args.len() < 2 {
-        return Err(VMError::RuntimeError(
-            "find_index() requires 2 arguments: receiver and predicate".to_string(),
-        ));
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    if let Some(err) = validate_closure_arg("findIndex", args) {
+        return Err(err);
     }
-
-    let receiver = borrow_vw(args[0]);
-
-    let array = receiver
-        .as_any_array()
-        .ok_or_else(|| VMError::TypeError {
-            expected: "array",
-            got: "other",
-        })?
-        .to_generic();
-
-    if !raw_helpers::is_callable_raw(args[1]) {
-        return Err(VMError::RuntimeError(
-            "find_index() second argument must be a function".to_string(),
-        ));
-    }
-
-    for (index, nb) in array.iter().enumerate() {
-        let result_bits = vm.call_value_immediate_raw(args[1], &[nb.raw_bits()], ctx.as_deref_mut())?;
-        if is_bool_true_raw(result_bits)? {
-            return Ok(ValueWord::from_f64(index as f64).into_raw_bits());
-        }
-    }
-
-    Ok(ValueWord::from_f64(-1.0).into_raw_bits())
+    Err(ckpt3_surface("findIndex", args))
 }
 
+/// `arr.indexOf(value)` — value-search.
 pub(crate) fn handle_index_of_v2(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    if args.len() < 2 {
-        return Err(VMError::RuntimeError(
-            "index_of() requires 2 arguments: receiver and value".to_string(),
-        ));
-    }
-
-    let receiver = borrow_vw(args[0]);
-    let search_value = borrow_vw(args[1]);
-
-    let array = receiver
-        .as_any_array()
-        .ok_or_else(|| VMError::TypeError {
-            expected: "array",
-            got: "other",
-        })?
-        .to_generic();
-
-    for (index, nb) in array.iter().enumerate() {
-        if nb_equal(nb, &search_value) {
-            return Ok(ValueWord::from_f64(index as f64).into_raw_bits());
-        }
-    }
-
-    Ok(ValueWord::from_f64(-1.0).into_raw_bits())
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(ckpt3_surface("indexOf", args))
 }
 
+/// `arr.includes(value)` — value-search.
 pub(crate) fn handle_includes_v2(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    if args.len() < 2 {
-        return Err(VMError::RuntimeError(
-            "includes() requires 2 arguments: receiver and value".to_string(),
-        ));
-    }
-
-    let receiver = borrow_vw(args[0]);
-    let search_value = borrow_vw(args[1]);
-
-    let array = receiver
-        .as_any_array()
-        .ok_or_else(|| VMError::TypeError {
-            expected: "array",
-            got: "other",
-        })?
-        .to_generic();
-
-    for nb in array.iter() {
-        if nb_equal(nb, &search_value) {
-            return Ok(ValueWord::from_bool(true).into_raw_bits());
-        }
-    }
-
-    Ok(ValueWord::from_bool(false).into_raw_bits())
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(ckpt3_surface("includes", args))
 }
 
+/// `arr.some(|x| ...)`.
 pub(crate) fn handle_some_v2(
-    vm: &mut VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    if args.len() < 2 {
-        return Err(VMError::RuntimeError(
-            "some() requires 2 arguments: receiver and predicate".to_string(),
-        ));
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    if let Some(err) = validate_closure_arg("some", args) {
+        return Err(err);
     }
-
-    let receiver = borrow_vw(args[0]);
-
-    let array = receiver
-        .as_any_array()
-        .ok_or_else(|| VMError::TypeError {
-            expected: "array",
-            got: "other",
-        })?
-        .to_generic();
-
-    if !raw_helpers::is_callable_raw(args[1]) {
-        return Err(VMError::RuntimeError(
-            "some() second argument must be a function".to_string(),
-        ));
-    }
-
-    let predicate_arity = raw_helpers::callable_arity_raw(&vm.program, args[1]).unwrap_or(1);
-
-    for (i, nb) in array.iter().enumerate() {
-        let result_bits = if predicate_arity >= 2 {
-            vm.call_value_immediate_raw(
-                args[1],
-                &[nb.raw_bits(), ValueWord::from_i64(i as i64).into_raw_bits()],
-                ctx.as_deref_mut(),
-            )?
-        } else {
-            vm.call_value_immediate_raw(args[1], &[nb.raw_bits()], ctx.as_deref_mut())?
-        };
-        if is_bool_true_raw(result_bits)? {
-            return Ok(ValueWord::from_bool(true).into_raw_bits());
-        }
-    }
-
-    Ok(ValueWord::from_bool(false).into_raw_bits())
+    Err(ckpt3_surface("some", args))
 }
 
+/// `arr.every(|x| ...)`.
 pub(crate) fn handle_every_v2(
-    vm: &mut VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    if args.len() < 2 {
-        return Err(VMError::RuntimeError(
-            "every() requires 2 arguments: receiver and predicate".to_string(),
-        ));
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    if let Some(err) = validate_closure_arg("every", args) {
+        return Err(err);
     }
-
-    let receiver = borrow_vw(args[0]);
-
-    let array = receiver
-        .as_any_array()
-        .ok_or_else(|| VMError::TypeError {
-            expected: "array",
-            got: "other",
-        })?
-        .to_generic();
-
-    if !raw_helpers::is_callable_raw(args[1]) {
-        return Err(VMError::RuntimeError(
-            "every() second argument must be a function".to_string(),
-        ));
-    }
-
-    let predicate_arity = raw_helpers::callable_arity_raw(&vm.program, args[1]).unwrap_or(1);
-
-    for (i, nb) in array.iter().enumerate() {
-        let result_bits = if predicate_arity >= 2 {
-            vm.call_value_immediate_raw(
-                args[1],
-                &[nb.raw_bits(), ValueWord::from_i64(i as i64).into_raw_bits()],
-                ctx.as_deref_mut(),
-            )?
-        } else {
-            vm.call_value_immediate_raw(args[1], &[nb.raw_bits()], ctx.as_deref_mut())?
-        };
-        if !is_bool_true_raw(result_bits)? {
-            return Ok(ValueWord::from_bool(false).into_raw_bits());
-        }
-    }
-
-    Ok(ValueWord::from_bool(true).into_raw_bits())
+    Err(ckpt3_surface("every", args))
 }
 
+/// `arr.any(|x| ...)`.
 pub(crate) fn handle_any_v2(
-    vm: &mut VirtualMachine,
-    args: &mut [u64],
-    ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    handle_some_v2(vm, args, ctx)
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    if let Some(err) = validate_closure_arg("any", args) {
+        return Err(err);
+    }
+    Err(ckpt3_surface("any", args))
 }
 
+/// `arr.all(|x| ...)`.
 pub(crate) fn handle_all_v2(
-    vm: &mut VirtualMachine,
-    args: &mut [u64],
-    ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    handle_every_v2(vm, args, ctx)
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    if let Some(err) = validate_closure_arg("all", args) {
+        return Err(err);
+    }
+    Err(ckpt3_surface("all", args))
 }
 
+/// `arr.single(|x| ...)` — find the unique element matching the predicate.
 pub(crate) fn handle_single_v2(
-    vm: &mut VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    if args.len() < 2 {
-        return Err(VMError::RuntimeError(
-            "single() requires 2 arguments: receiver and predicate".to_string(),
-        ));
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    if let Some(err) = validate_closure_arg("single", args) {
+        return Err(err);
     }
-
-    let receiver = borrow_vw(args[0]);
-
-    let array = receiver
-        .as_any_array()
-        .ok_or_else(|| VMError::TypeError {
-            expected: "array",
-            got: "other",
-        })?
-        .to_generic();
-
-    if !raw_helpers::is_callable_raw(args[1]) {
-        return Err(VMError::RuntimeError(
-            "single() second argument must be a function".to_string(),
-        ));
-    }
-
-    let mut found: Option<ValueWord> = None;
-    let mut count = 0;
-
-    for nb in array.iter() {
-        let result_bits = vm.call_value_immediate_raw(args[1], &[nb.raw_bits()], ctx.as_deref_mut())?;
-        if is_bool_true_raw(result_bits)? {
-            count += 1;
-            if count > 1 {
-                return Err(VMError::RuntimeError(
-                    "single() found more than one matching element".to_string(),
-                ));
-            }
-            found = Some(nb.clone());
-        }
-    }
-
-    match found {
-        Some(value) => Ok(value.into_raw_bits()),
-        None => Err(VMError::RuntimeError(
-            "single() found no matching elements".to_string(),
-        )),
-    }
+    Err(ckpt3_surface("single", args))
 }
 
+/// `arr.takeWhile(|x| ...)`.
 pub(crate) fn handle_take_while_v2(
-    vm: &mut VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    if args.len() < 2 {
-        return Err(VMError::RuntimeError(
-            "take_while() requires 2 arguments: receiver and predicate".to_string(),
-        ));
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    if let Some(err) = validate_closure_arg("takeWhile", args) {
+        return Err(err);
     }
-
-    let receiver = borrow_vw(args[0]);
-
-    let array = receiver
-        .as_any_array()
-        .ok_or_else(|| VMError::TypeError {
-            expected: "array",
-            got: "other",
-        })?
-        .to_generic();
-
-    if !raw_helpers::is_callable_raw(args[1]) {
-        return Err(VMError::RuntimeError(
-            "take_while() second argument must be a function".to_string(),
-        ));
-    }
-
-    let mut result: ArgVec = ArgVec::new();
-
-    for nb in array.iter() {
-        let result_bits = vm.call_value_immediate_raw(args[1], &[nb.raw_bits()], ctx.as_deref_mut())?;
-        if is_bool_true_raw(result_bits)? {
-            result.push(shape_value::vw_clone(nb.raw_bits()));
-        } else {
-            break;
-        }
-    }
-
-    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(result.into_inner())).into_raw_bits())
+    Err(ckpt3_surface("takeWhile", args))
 }
 
+/// `arr.skipWhile(|x| ...)`.
 pub(crate) fn handle_skip_while_v2(
-    vm: &mut VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    if args.len() < 2 {
-        return Err(VMError::RuntimeError(
-            "skip_while() requires 2 arguments: receiver and predicate".to_string(),
-        ));
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    if let Some(err) = validate_closure_arg("skipWhile", args) {
+        return Err(err);
     }
-
-    let receiver = borrow_vw(args[0]);
-
-    let array = receiver
-        .as_any_array()
-        .ok_or_else(|| VMError::TypeError {
-            expected: "array",
-            got: "other",
-        })?
-        .to_generic();
-
-    if !raw_helpers::is_callable_raw(args[1]) {
-        return Err(VMError::RuntimeError(
-            "skip_while() second argument must be a function".to_string(),
-        ));
-    }
-
-    let mut result: ArgVec = ArgVec::new();
-    let mut skipping = true;
-
-    for nb in array.iter() {
-        if skipping {
-            let result_bits =
-                vm.call_value_immediate_raw(args[1], &[nb.raw_bits()], ctx.as_deref_mut())?;
-            if is_bool_true_raw(result_bits)? {
-                continue;
-            } else {
-                skipping = false;
-                result.push(shape_value::vw_clone(nb.raw_bits()));
-            }
-        } else {
-            result.push(shape_value::vw_clone(nb.raw_bits()));
-        }
-    }
-
-    Ok(ValueWord::from_array(shape_value::vmarray_from_vec(result.into_inner())).into_raw_bits())
+    Err(ckpt3_surface("skipWhile", args))
 }
 
+/// `arr.forEach(|x| ...)`.
 pub(crate) fn handle_for_each_v2(
-    vm: &mut VirtualMachine,
-    args: &mut [u64],
-    mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    if args.len() < 2 {
-        return Err(VMError::RuntimeError(
-            "for_each() requires 2 arguments: receiver and function".to_string(),
-        ));
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    if let Some(err) = validate_closure_arg("forEach", args) {
+        return Err(err);
     }
-
-    let receiver = borrow_vw(args[0]);
-
-    let array = receiver
-        .as_any_array()
-        .ok_or_else(|| VMError::TypeError {
-            expected: "array",
-            got: "other",
-        })?
-        .to_generic();
-
-    if !raw_helpers::is_callable_raw(args[1]) {
-        return Err(VMError::RuntimeError(
-            "for_each() second argument must be a function".to_string(),
-        ));
-    }
-
-    let callback_arity = raw_helpers::callable_arity_raw(&vm.program, args[1]).unwrap_or(1);
-
-    for (i, nb) in array.iter().enumerate() {
-        if callback_arity >= 2 {
-            vm.call_value_immediate_raw(
-                args[1],
-                &[nb.raw_bits(), ValueWord::from_i64(i as i64).into_raw_bits()],
-                ctx.as_deref_mut(),
-            )?;
-        } else {
-            vm.call_value_immediate_raw(args[1], &[nb.raw_bits()], ctx.as_deref_mut())?;
-        }
-    }
-
-    Ok(ValueWord::none().into_raw_bits())
+    Err(ckpt3_surface("forEach", args))
 }

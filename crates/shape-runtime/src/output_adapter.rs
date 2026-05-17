@@ -1,26 +1,38 @@
-//! Output adapter trait for handling print() results
+//! Output adapter trait for handling print() results.
 //!
-//! This allows different execution modes (script vs REPL) to control
-//! how print() output is handled without heuristics.
+//! Different execution modes (script vs REPL vs notebook) control how
+//! print() output is surfaced.
+//!
+//! Per ADR-006 §2.7.4 (output adapter ruling), [`PrintResult`] and
+//! [`PrintSpan`] live in `shape-runtime` (see [`crate::print_result`])
+//! and `OutputAdapter::print` returns a [`KindedSlot`] — the
+//! GENERIC_CARRIER single-value shape (§2.7.1.2). Adapters that have no
+//! sensible heap value to return (script mode) return
+//! `KindedSlot::none()`; adapters that surface the structured output
+//! (REPL) attach the `PrintResult` to a typed-object heap value before
+//! returning. In Phase 1.B the `from_print_result` heap-construction is
+//! deferred — REPL mode currently returns `none()` and a follow-up wires
+//! `PrintResult` through a typed schema.
 
-use shape_value::{PrintResult, ValueWord, ValueWordExt};
+use crate::print_result::PrintResult;
+use shape_value::KindedSlot;
 use std::sync::{Arc, Mutex};
 
-/// Trait for handling print() output
+/// Trait for handling print() output.
 ///
 /// Different execution modes can provide different adapters:
-/// - Scripts: StdoutAdapter (print and discard spans)
-/// - REPL: ReplAdapter (print and preserve spans for reformatting)
-/// - Tests: MockAdapter (capture output)
+/// - Scripts: [`StdoutAdapter`] (print and discard spans)
+/// - REPL: [`ReplAdapter`] (preserve spans for reformatting)
+/// - Tests: [`MockAdapter`] (capture output)
+/// - Hosts (server / notebook): [`SharedCaptureAdapter`]
 pub trait OutputAdapter: Send + Sync {
-    /// Handle print() output
+    /// Handle print() output.
     ///
-    /// # Arguments
-    /// * `result` - The PrintResult with rendered string and spans
-    ///
-    /// # Returns
-    /// The value to return from print() (Unit for scripts, PrintResult for REPL)
-    fn print(&mut self, result: PrintResult) -> ValueWord;
+    /// Returns the value that print() yields. Scripts return
+    /// [`KindedSlot::none()`]; REPL adapters MAY surface the
+    /// `PrintResult` via a future typed-schema heap value but currently
+    /// also return `none()` until that schema lands.
+    fn print(&mut self, result: PrintResult) -> KindedSlot;
 
     /// Handle Content HTML from printing a Content value.
     /// Default implementation does nothing (terminal adapters don't need HTML).
@@ -37,19 +49,16 @@ impl Clone for Box<dyn OutputAdapter> {
     }
 }
 
-/// Standard output adapter - prints to stdout and discards spans
+/// Standard output adapter — prints to stdout and discards spans.
 ///
 /// Used for script execution where spans aren't needed.
 #[derive(Debug, Clone)]
 pub struct StdoutAdapter;
 
 impl OutputAdapter for StdoutAdapter {
-    fn print(&mut self, result: PrintResult) -> ValueWord {
-        // Print the rendered output
+    fn print(&mut self, result: PrintResult) -> KindedSlot {
         println!("{}", result.rendered);
-
-        // Return None (traditional print() behavior)
-        ValueWord::none()
+        KindedSlot::none()
     }
 
     fn clone_box(&self) -> Box<dyn OutputAdapter> {
@@ -57,17 +66,21 @@ impl OutputAdapter for StdoutAdapter {
     }
 }
 
-/// REPL output adapter - prints to stdout and preserves spans
+/// REPL output adapter — preserves spans for reformatting.
 ///
-/// Used in REPL mode to enable post-execution reformatting with :reformat
+/// Pre-bulldozer this returned a `ValueWord::from_print_result(..)`
+/// pointing at a `RareHeapData::PrintResult` heap arm. Post-ADR-006 that
+/// path is gone; the typed-schema replacement (`PrintResult` as a
+/// `HeapValue::TypedObject` with a runtime-registered schema) is a
+/// follow-up. For now the REPL adapter consumes the rendered text and
+/// returns `none()`; the structured `PrintResult` is dropped until the
+/// schema lands.
 #[derive(Debug, Clone)]
 pub struct ReplAdapter;
 
 impl OutputAdapter for ReplAdapter {
-    fn print(&mut self, result: PrintResult) -> ValueWord {
-        // Do NOT print to stdout in REPL mode (let the REPL UI handle display)
-        // Return PrintResult with spans for REPL inspection
-        ValueWord::from_print_result(result)
+    fn print(&mut self, _result: PrintResult) -> KindedSlot {
+        KindedSlot::none()
     }
 
     fn clone_box(&self) -> Box<dyn OutputAdapter> {
@@ -75,7 +88,7 @@ impl OutputAdapter for ReplAdapter {
     }
 }
 
-/// Mock adapter for testing - captures output without printing
+/// Mock adapter for testing — captures output without printing.
 #[derive(Debug, Clone, Default)]
 pub struct MockAdapter {
     /// Captured print outputs
@@ -101,12 +114,9 @@ impl MockAdapter {
 }
 
 impl OutputAdapter for MockAdapter {
-    fn print(&mut self, result: PrintResult) -> ValueWord {
-        // Capture instead of printing
+    fn print(&mut self, result: PrintResult) -> KindedSlot {
         self.captured.push(result.rendered.clone());
-
-        // Return None (traditional behavior)
-        ValueWord::none()
+        KindedSlot::none()
     }
 
     fn clone_box(&self) -> Box<dyn OutputAdapter> {
@@ -114,7 +124,7 @@ impl OutputAdapter for MockAdapter {
     }
 }
 
-/// Shared capture adapter for host integrations (server/notebook)
+/// Shared capture adapter for host integrations (server/notebook).
 ///
 /// Captures rendered print output into shared state so the host can
 /// surface it in API responses without scraping stdout.
@@ -171,14 +181,14 @@ impl SharedCaptureAdapter {
 }
 
 impl OutputAdapter for SharedCaptureAdapter {
-    fn print(&mut self, result: PrintResult) -> ValueWord {
+    fn print(&mut self, result: PrintResult) -> KindedSlot {
         if let Ok(mut v) = self.captured.lock() {
             v.push(result.rendered.clone());
         }
         if let Ok(mut v) = self.captured_full.lock() {
             v.push(result);
         }
-        ValueWord::none()
+        KindedSlot::none()
     }
 
     fn print_content_html(&mut self, html: String) {
@@ -193,8 +203,7 @@ impl OutputAdapter for SharedCaptureAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shape_value::PrintSpan;
-    use shape_value::heap_value::HeapValue;
+    use crate::print_result::PrintSpan;
 
     fn make_test_result() -> PrintResult {
         PrintResult {
@@ -214,23 +223,18 @@ mod tests {
         let result = make_test_result();
         let returned = adapter.print(result);
 
-        assert!(returned.is_none());
+        assert_eq!(returned.slot().raw(), 0, "script-mode print returns none");
     }
 
     #[test]
-    fn test_repl_adapter_preserves_spans() {
+    fn test_repl_adapter_returns_none_phase1b() {
+        // Pre-ADR-006 this returned `ValueWord::from_print_result(..)`. The
+        // typed-schema replacement is deferred; current behaviour is to
+        // drop the structured payload and return `none()`.
         let mut adapter = ReplAdapter;
         let result = make_test_result();
         let returned = adapter.print(result);
-
-        // cold-path: as_heap_ref retained — test assertion
-        match returned.as_heap_ref().expect("Expected heap value") { // cold-path
-            HeapValue::Rare(shape_value::RareHeapData::PrintResult(pr)) => {
-                assert_eq!(pr.rendered, "Test output");
-                assert_eq!(pr.spans.len(), 1);
-            }
-            other => panic!("Expected PrintResult, got {:?}", other),
-        }
+        assert_eq!(returned.slot().raw(), 0);
     }
 
     #[test]

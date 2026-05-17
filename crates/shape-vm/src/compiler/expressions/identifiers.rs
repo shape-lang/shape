@@ -141,8 +141,9 @@ impl BytecodeCompiler {
                 // `shared_closure_captures` at closure-construction
                 // time). Each typed opcode acquires the cell's mutex,
                 // reads the matching native payload via
-                // `read_shared_<kind>`, and pushes raw native bytes via
-                // `push_raw_u64`. Falls back to the legacy
+                // `read_shared_<kind>`, and pushes raw native bytes onto
+                // the kinded VM stack via `push_kinded(bits, kind)`.
+                // Falls back to the legacy
                 // `LoadSharedCapture` (0x134) for unresolved capture
                 // types — Wave G removes the legacy opcode after every
                 // resolved emit path is type-aware.
@@ -164,9 +165,10 @@ impl BytecodeCompiler {
             // `concrete_type_for_expr → ConcreteType::to_field_kind`.
             // Each typed opcode reads the matching native cell
             // (`*mut i64` / `*mut f64` / `*mut bool` / `*mut u64` for
-            // Ptr) and pushes raw native bytes onto the stack via
-            // `push_raw_u64` (sub-i64 ints sign- or zero-extended into
-            // the i64 path). Dynamic / unresolved capture types fall
+            // Ptr) and pushes raw native bytes onto the kinded VM stack
+            // via `push_kinded(bits, kind)` (sub-i64 ints sign- or
+            // zero-extended into the i64 path). Dynamic / unresolved
+            // capture types fall
             // back to the legacy `LoadOwnedMutableCapture` (0x132),
             // which handles the runtime dispatch on
             // `layout.capture_inner_kind(idx)` and re-encodes to a
@@ -294,9 +296,17 @@ impl BytecodeCompiler {
                             .type_tracker
                             .get_local_type(local_idx)
                             .map(|info| {
+                                // Post-§2.7.5.1: `info.storage_hint` is
+                                // `Option<StorageHint>`; the `Some(...)` arm
+                                // gates on a proven primitive kind, `None`
+                                // means "kind not yet proven" so no upgrade.
                                 matches!(
                                     info.storage_hint,
-                                    StorageHint::Int64 | StorageHint::Float64 | StorageHint::Bool
+                                    Some(
+                                        StorageHint::Int64
+                                            | StorageHint::Float64
+                                            | StorageHint::Bool
+                                    )
                                 )
                             })
                             .unwrap_or(false)
@@ -324,11 +334,15 @@ impl BytecodeCompiler {
                 }
             });
             self.last_expr_type_info = local_type;
-            // Track numeric type for typed opcode emission
+            // Track numeric type for typed opcode emission. Post-§2.7.5.1:
+            // `info.storage_hint` is `Option<StorageHint>`, so we
+            // `.and_then` through both layers — `None` propagates "kind not
+            // yet proven" so no numeric type is recorded.
             self.last_expr_numeric_type = self
                 .type_tracker
                 .get_local_type(local_idx)
-                .and_then(|info| Self::storage_hint_to_numeric_type(info.storage_hint));
+                .and_then(|info| info.storage_hint)
+                .and_then(Self::storage_hint_to_numeric_type);
         } else if let Some(scoped_name) = self.resolve_scoped_module_binding_name(name) {
             let binding_idx = *self.module_bindings.get(&scoped_name).ok_or_else(|| {
                 ShapeError::RuntimeError {
@@ -397,11 +411,15 @@ impl BytecodeCompiler {
                 }
             });
             self.last_expr_type_info = binding_type;
-            // Track numeric type for typed opcode emission
+            // Track numeric type for typed opcode emission. Post-§2.7.5.1:
+            // `info.storage_hint` is `Option<StorageHint>`, so we
+            // `.and_then` through both layers — `None` propagates "kind not
+            // yet proven" so no numeric type is recorded.
             self.last_expr_numeric_type = self
                 .type_tracker
                 .get_binding_type(binding_idx)
-                .and_then(|info| Self::storage_hint_to_numeric_type(info.storage_hint));
+                .and_then(|info| info.storage_hint)
+                .and_then(Self::storage_hint_to_numeric_type);
         } else if let Some(func_idx) = self.find_function(name) {
             let resolved_name = self.program.functions[func_idx].name.clone();
 

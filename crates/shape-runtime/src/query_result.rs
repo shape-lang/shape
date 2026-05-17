@@ -19,9 +19,6 @@ pub struct QueryResult {
     /// Alert results
     pub alert: Option<AlertResult>,
 
-    /// Raw value result
-    pub value: Option<shape_value::ValueWord>,
-
     /// Combined summary metrics
     pub summary: Option<SummaryMetrics>,
 
@@ -198,7 +195,6 @@ impl QueryResult {
             matches: None,
             statistics: None,
             alert: None,
-            value: None,
             summary: None,
             data: None,
             metadata: QueryMetadata {
@@ -222,12 +218,6 @@ impl QueryResult {
     /// Add alert results
     pub fn with_alert(mut self, alert: AlertResult) -> Self {
         self.alert = Some(alert);
-        self
-    }
-
-    /// Add value result
-    pub fn with_value(mut self, value: shape_value::ValueWord) -> Self {
-        self.value = Some(value);
         self
     }
 

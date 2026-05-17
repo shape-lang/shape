@@ -1,189 +1,178 @@
-//! Content method dispatch for ContentNode values (v2 native).
+//! Content method dispatch for ContentNode values.
 //!
-//! All methods are MethodFnV2 handlers dispatched via the CONTENT_METHODS PHF map.
+//! Phase 1.B-vm Wave-β cluster M-collection-tail: bodies surface
+//! `NotImplemented(SURFACE)` per playbook §7 REVISED + §10 D-objects-mod /
+//! D-obj-tail precedent (ADR-006 §2.7.6 / §2.7.7).
 //!
-//! Supports style methods: `.fg()`, `.bg()`, `.bold()`, `.italic()`, `.underline()`, `.dim()`
-//! Table methods: `.border()`, `.max_rows()`
-//! Chart methods: `.series()`, `.title()`, `.x_label()`, `.y_label()`
+//! `Content` *is* a surviving `HeapKind` variant
+//! (`Content(Arc<ContentNode>)` per ADR-006 §2.3 +
+//! `crates/shape-value/src/heap_variants.rs`), so a kind-correct rewrite
+//! of these handlers is mechanical: receiver is
+//! `NativeKind::Ptr(HeapKind::Content)`, dispatch via
+//! `slot.as_heap_value()` + `HeapValue::Content(arc)` match per Q8, push
+//! the result as `Arc::into_raw(Arc<ContentNode>) as u64` with kind
+//! `NativeKind::Ptr(HeapKind::Content)` (string return arms push
+//! `NativeKind::String`).
+//!
+//! Migration is blocked on the MethodHandler ABI rewrite to
+//! `&mut [KindedSlot] -> Result<KindedSlot>` (cluster
+//! E-builtins-backlog, Wave 5b template, commit `fa2bafc`). The
+//! pre-Wave-6 implementation imported the deleted
+//! `shape_value::{ValueWord, ValueWordExt, ValueWordDisplay}` surface,
+//! the deleted `ValueWord::from_content` / `from_string` /
+//! `from_raw_bits` / `clone_from_bits` constructors, and the
+//! `objects::raw_helpers::{extract_content, extract_number_coerce,
+//! extract_str}` helpers (deleted in cluster D-raw-helpers — only the
+//! FilterExpr extractor remains). The macro-generated runtime delegators
+//! (`v2_content_border`, `v2_content_series`, etc.) call into
+//! `shape_runtime::content_methods::call_content_method` which itself
+//! takes `ValueWord` arguments — that crate-boundary signature is also
+//! awaiting the kinded redesign per playbook §8 cross-cluster cascade.
+//! Per playbook §4 #1 / #9 a Bool-default kinded shim is forbidden; per
+//! §7.4 the correct response is `NotImplemented(SURFACE)`.
 
 use crate::executor::VirtualMachine;
-use shape_value::content::{Color, ContentNode, NamedColor};
-use shape_value::{VMError, ValueWord, ValueWordExt};
+use shape_runtime::context::ExecutionContext;
+use shape_value::{KindedSlot, VMError};
 
-use super::raw_helpers::{extract_content, extract_number_coerce, extract_str};
-
-// ═══════════════════════════════════════════════════════════════════════════
-// V2 (MethodFnV2) Content handlers
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Get a ContentNode from raw bits, falling back to a plain text node.
 #[inline]
-fn content_or_plain(bits: u64) -> ContentNode {
-    if let Some(node) = extract_content(bits) {
-        node.clone()
-    } else {
-        // Fall back to Display formatting of the value
-        let vw = std::mem::ManuallyDrop::new(ValueWord::from_raw_bits(bits));
-        ContentNode::plain(format!("{}", shape_value::ValueWordDisplay(*vw)))
-    }
+fn surface(method: &str) -> VMError {
+    VMError::NotImplemented(format!(
+        "phase-2c — Content.{}(): MethodHandler ABI needs kinded migration \
+         (cluster E-builtins-backlog, Wave 5b template); receiver kind \
+         NativeKind::Ptr(HeapKind::Content), dispatch via \
+         slot.as_heap_value() + HeapValue::Content match per ADR-006 \
+         §2.7.6 / Q8. Runtime delegators (border/series/title/etc.) also \
+         depend on the shape-runtime crate-boundary kinded redesign per \
+         playbook §8 cross-cluster cascade.",
+        method
+    ))
 }
 
 pub fn v2_content_bold(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    let node = content_or_plain(args[0]);
-    Ok(ValueWord::from_content(node.with_bold()).into_raw_bits())
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(surface("bold"))
 }
 
 pub fn v2_content_italic(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    let node = content_or_plain(args[0]);
-    Ok(ValueWord::from_content(node.with_italic()).into_raw_bits())
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(surface("italic"))
 }
 
 pub fn v2_content_underline(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    let node = content_or_plain(args[0]);
-    Ok(ValueWord::from_content(node.with_underline()).into_raw_bits())
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(surface("underline"))
 }
 
 pub fn v2_content_dim(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    let node = content_or_plain(args[0]);
-    Ok(ValueWord::from_content(node.with_dim()).into_raw_bits())
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(surface("dim"))
 }
 
 pub fn v2_content_fg(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    let node = content_or_plain(args[0]);
-    let color = parse_color_arg_v2(args, 1, "fg")?;
-    Ok(ValueWord::from_content(node.with_fg(color)).into_raw_bits())
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(surface("fg"))
 }
 
 pub fn v2_content_bg(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    let node = content_or_plain(args[0]);
-    let color = parse_color_arg_v2(args, 1, "bg")?;
-    Ok(ValueWord::from_content(node.with_bg(color)).into_raw_bits())
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(surface("bg"))
 }
 
 pub fn v2_content_to_string(
     _vm: &mut VirtualMachine,
-    args: &mut [u64],
-    _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-) -> Result<u64, VMError> {
-    let node = content_or_plain(args[0]);
-    let text = format!("{}", node);
-    Ok(ValueWord::from_string(std::sync::Arc::new(text)).into_raw_bits())
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(surface("toString"))
 }
 
-/// Generic v2 handler for Content methods that delegate to `shape_runtime::content_methods`.
-/// The method name must be passed via the PHF dispatch since v2 handlers don't receive it.
-/// We solve this by creating a separate handler per method.
-macro_rules! content_runtime_method {
-    ($fn_name:ident, $method_name:expr) => {
-        pub fn $fn_name(
-            _vm: &mut VirtualMachine,
-            args: &mut [u64],
-            _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-        ) -> Result<u64, VMError> {
-            let receiver = unsafe { ValueWord::clone_from_bits(args[0]) };
-            let method_args: Vec<ValueWord> = args[1..]
-                .iter()
-                .map(|&r| unsafe { ValueWord::clone_from_bits(r) })
-                .collect();
-            match shape_runtime::content_methods::call_content_method(
-                $method_name,
-                receiver,
-                method_args,
-            ) {
-                Some(Ok(result_nb)) => Ok(result_nb.into_raw_bits()),
-                Some(Err(e)) => Err(VMError::RuntimeError(format!("{}", e))),
-                None => Err(VMError::RuntimeError(format!(
-                    "Unknown method '{}' on Content type",
-                    $method_name
-                ))),
-            }
-        }
-    };
+pub fn v2_content_border(
+    _vm: &mut VirtualMachine,
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(surface("border"))
 }
 
-content_runtime_method!(v2_content_border, "border");
-content_runtime_method!(v2_content_max_rows, "max_rows");
-content_runtime_method!(v2_content_max_rows_camel, "maxRows");
-content_runtime_method!(v2_content_series, "series");
-content_runtime_method!(v2_content_title, "title");
-content_runtime_method!(v2_content_x_label, "x_label");
-content_runtime_method!(v2_content_x_label_camel, "xLabel");
-content_runtime_method!(v2_content_y_label, "y_label");
-content_runtime_method!(v2_content_y_label_camel, "yLabel");
+pub fn v2_content_max_rows(
+    _vm: &mut VirtualMachine,
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(surface("max_rows"))
+}
 
-/// Parse a color argument from raw u64 args for v2 handlers
-fn parse_color_arg_v2(
-    args: &mut [u64],
-    start_idx: usize,
-    method_name: &str,
-) -> Result<Color, VMError> {
-    if args.len() <= start_idx {
-        return Err(VMError::RuntimeError(format!(
-            "Content.{}() requires a color argument",
-            method_name
-        )));
-    }
+pub fn v2_content_max_rows_camel(
+    _vm: &mut VirtualMachine,
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(surface("maxRows"))
+}
 
-    // String color name
-    if let Some(name) = extract_str(args[start_idx]) {
-        return match name.to_lowercase().as_str() {
-            "red" => Ok(Color::Named(NamedColor::Red)),
-            "green" => Ok(Color::Named(NamedColor::Green)),
-            "blue" => Ok(Color::Named(NamedColor::Blue)),
-            "yellow" => Ok(Color::Named(NamedColor::Yellow)),
-            "magenta" => Ok(Color::Named(NamedColor::Magenta)),
-            "cyan" => Ok(Color::Named(NamedColor::Cyan)),
-            "white" => Ok(Color::Named(NamedColor::White)),
-            "default" => Ok(Color::Named(NamedColor::Default)),
-            _ => Err(VMError::RuntimeError(format!(
-                "Unknown color name '{}'. Available: red, green, blue, yellow, magenta, cyan, white, default",
-                name
-            ))),
-        };
-    }
+pub fn v2_content_series(
+    _vm: &mut VirtualMachine,
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(surface("series"))
+}
 
-    // RGB as three numeric args
-    if args.len() >= start_idx + 3 {
-        let r = extract_number_coerce(args[start_idx])
-            .ok_or_else(|| VMError::RuntimeError("RGB red component must be numeric".to_string()))?
-            as u8;
-        let g = extract_number_coerce(args[start_idx + 1])
-            .ok_or_else(|| {
-                VMError::RuntimeError("RGB green component must be numeric".to_string())
-            })? as u8;
-        let b = extract_number_coerce(args[start_idx + 2])
-            .ok_or_else(|| {
-                VMError::RuntimeError("RGB blue component must be numeric".to_string())
-            })? as u8;
-        return Ok(Color::Rgb(r, g, b));
-    }
+pub fn v2_content_title(
+    _vm: &mut VirtualMachine,
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(surface("title"))
+}
 
-    Err(VMError::RuntimeError(format!(
-        "Content.{}() requires a color name string or three RGB components",
-        method_name
-    )))
+pub fn v2_content_x_label(
+    _vm: &mut VirtualMachine,
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(surface("x_label"))
+}
+
+pub fn v2_content_x_label_camel(
+    _vm: &mut VirtualMachine,
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(surface("xLabel"))
+}
+
+pub fn v2_content_y_label(
+    _vm: &mut VirtualMachine,
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(surface("y_label"))
+}
+
+pub fn v2_content_y_label_camel(
+    _vm: &mut VirtualMachine,
+    _args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    Err(surface("yLabel"))
 }

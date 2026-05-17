@@ -1,1469 +1,854 @@
-//! Type checking and conversion builtin implementations
+//! Type checking and conversion builtin implementations.
 //!
-//! Handles: isNumber, isString, isBool, isArray, isObject, isDataRow, toString, toNumber, toBool, typeOf
+//! W9-builtins-type-ops (`docs/cluster-audits/wave-9-method-refill-playbook.md`
+//! row D-builtins-type-ops): kind-narrowed cast bodies for the
+//! `ConvertTo*` / `TryConvertTo*` opcode family. Source kind comes from
+//! the §2.7.7 stack parallel-kind track via `pop_kinded()`; result kind
+//! is fixed by the opcode's target. Bodies dispatch per the §2.7.6 / Q8
+//! heterogeneous-kind body pattern — `match args[0].kind` at the call
+//! site, no decode-from-bits, no `is_heap()` probe.
+//!
+//! These opcodes are emitted by the compiler at
+//! `compiler/expressions/type_ops.rs:607-631` after `validate_infallible_cast`
+//! / `validate_fallible_cast` has confirmed an `Into<T>` / `TryInto<T>`
+//! impl for the source/target pair (or accepted an identity cast). Per
+//! the stdlib's `core/into.shape` + `core/try_into.shape`, the proven
+//! source kinds for each opcode are all primitive scalars (`Int*`,
+//! `Float64`, `Bool`, `String`, `Char`) plus the heap-backed numeric
+//! family (`Decimal`, `BigInt`). The bodies enumerate that proven set
+//! and surface `VMError::RuntimeError` for any unproven source — never
+//! a Bool-default fallback (forbidden by the playbook's defection-
+//! attractor list).
+//!
+//! `op_convert` (the `Convert` opcode without a static target selector)
+//! still surfaces to Phase-2c: it dispatches on a `TypeAnnotation`
+//! operand and routes through the trait-dispatch machinery + AnyError
+//! TypedObject construction (see `executor/exceptions/mod.rs`'s
+//! `build_any_error` Phase-2c surface).
 
-use crate::bytecode::{BuiltinFunction, Constant, Instruction, Operand};
+use crate::bytecode::{Constant, Instruction, Operand};
 use crate::executor::VirtualMachine;
-use rust_decimal::prelude::ToPrimitive;
-use shape_ast::ast::TypeAnnotation;
-use shape_value::{ArgVec, HeapKind, VMError, ValueWord, ValueWordExt, heap_value::HeapValue};
-use shape_value::tag_bits::{is_tagged, get_tag, I48_MAX, I48_MIN, TAG_INT, TAG_BOOL, TAG_NONE, TAG_UNIT, TAG_FUNCTION, TAG_MODULE_FN, TAG_HEAP, TAG_REF};
+use crate::executor::printing::ValueFormatter;
+use shape_runtime::type_schema::TypeSchemaRegistry;
+use shape_value::heap_value::HeapKind;
+use shape_value::{KindedSlot, NativeKind, VMError, ValueSlot};
 use std::sync::Arc;
 
-/// Re-tag a raw stack-bit pattern that may be a native i64/bool result from a
-/// post-Wave-E+5 producer (`op_push_const` Int/Bool, typed arithmetic, typed
-/// loads). Convert helpers receive a `&ValueWord` whose accessors
-/// (`as_i64()`, `as_bool()`) only inspect the legacy tagged form, so untagged
-/// native bits silently fail the tagged check and fall through to
-/// `as_f64()` — which reinterprets a tiny native i64 as an f64 denormal.
-///
-/// Heuristic: if the bits are untagged AND fit in the i48 range, the producer
-/// almost certainly pushed a native i64 (op_push_const Int/Bool, typed
-/// arithmetic results), because real f64 values like 1.0 / 2.5 / 99.0 have
-/// bit patterns far outside [I48_MIN, I48_MAX]. Producers that push native
-/// f64 (op_push_const Number, AddNumber, etc.) yield bit patterns that fall
-/// outside that range. The one ambiguous case — bits == 0, which could be
-/// native i64 0, native bool false, or native f64 0.0 — round-trips to the
-/// same scalar value across all three interpretations, so converting it as
-/// i64 is correct for every downstream call.
-#[inline]
-fn rebox_native_bits(bits: u64) -> ValueWord {
-    use shape_value::tag_bits::{get_payload, get_tag, TAG_REF};
-    if is_tagged(bits) {
-        // Negative native i64 values (e.g. -42 = 0xFFFF_FFFF_FFFF_FFD6)
-        // have their top 13 bits all-1s, which collides with the
-        // NaN-tag prefix. Such bits decode as `get_tag == TAG_REF`
-        // with a 48-bit payload that far exceeds any plausible
-        // stack-slot index (real refs are bounded by `MAX_STACK_SIZE`
-        // ≈ 100K, well under `1 << 32`). Treat oversized "TAG_REF"
-        // patterns as native i64 sign-extensions.
-        if get_tag(bits) == TAG_REF && get_payload(bits) >= (1u64 << 32) {
-            return ValueWord::from_i64(bits as i64);
+/// Read a `KindedSlot` carrier as i64, dispatching on `slot.kind` per
+/// §2.7.6 / Q8. Returns `Err` when the kind is not a proven `as int`
+/// source.
+fn read_as_i64(slot: &KindedSlot) -> Result<i64, VMError> {
+    match slot.kind {
+        NativeKind::Bool => Ok(if slot.slot.as_bool() { 1 } else { 0 }),
+        NativeKind::Int8
+        | NativeKind::Int16
+        | NativeKind::Int32
+        | NativeKind::Int64
+        | NativeKind::IntSize
+        | NativeKind::NullableInt8
+        | NativeKind::NullableInt16
+        | NativeKind::NullableInt32
+        | NativeKind::NullableInt64
+        | NativeKind::NullableIntSize => Ok(slot.slot.as_i64()),
+        NativeKind::UInt8
+        | NativeKind::UInt16
+        | NativeKind::UInt32
+        | NativeKind::UInt64
+        | NativeKind::UIntSize
+        | NativeKind::NullableUInt8
+        | NativeKind::NullableUInt16
+        | NativeKind::NullableUInt32
+        | NativeKind::NullableUInt64
+        | NativeKind::NullableUIntSize => Ok(slot.slot.as_u64() as i64),
+        NativeKind::Float64 | NativeKind::NullableFloat64 => {
+            let n = slot.slot.as_f64();
+            if !n.is_finite() {
+                return Err(VMError::RuntimeError(
+                    "cannot convert non-finite number to int".to_string(),
+                ));
+            }
+            let i = n as i64;
+            if (i as f64 - n).abs() > f64::EPSILON {
+                return Err(VMError::RuntimeError(format!(
+                    "cannot convert non-integer number '{n}' to int"
+                )));
+            }
+            Ok(i)
         }
-        return ValueWord::from_raw_bits(bits);
-    }
-    let as_i64 = bits as i64;
-    if (I48_MIN..=I48_MAX).contains(&as_i64) {
-        // Native i64 (or bool encoded as 0/1) — re-tag as a tagged i48.
-        ValueWord::from_i64(as_i64)
-    } else {
-        // Native f64 — re-box as a plain f64 ValueWord.
-        ValueWord::from_f64(f64::from_bits(bits))
+        NativeKind::String => {
+            let bits = slot.slot.raw();
+            if bits == 0 {
+                return Err(VMError::RuntimeError(
+                    "cannot convert null string to int".to_string(),
+                ));
+            }
+            // SAFETY: `NativeKind::String` means the slot bits are
+            // `Arc::into_raw::<String>` and the carrier owns one share.
+            let s: &String = unsafe { &*(bits as *const String) };
+            s.parse::<i64>().map_err(|_| {
+                VMError::RuntimeError(format!("cannot convert string '{s}' to int"))
+            })
+        }
+        NativeKind::Ptr(HeapKind::Decimal) => {
+            let bits = slot.slot.raw();
+            // SAFETY: `Ptr(Decimal)` bits are `Arc::into_raw::<Decimal>`.
+            let d: &rust_decimal::Decimal =
+                unsafe { &*(bits as *const rust_decimal::Decimal) };
+            use rust_decimal::prelude::ToPrimitive;
+            d.to_i64().ok_or_else(|| {
+                VMError::RuntimeError(format!("cannot convert decimal '{d}' to int"))
+            })
+        }
+        NativeKind::Ptr(HeapKind::BigInt) => {
+            let bits = slot.slot.raw();
+            // SAFETY: `Ptr(BigInt)` bits are `Arc::into_raw::<i64>`.
+            let i: &i64 = unsafe { &*(bits as *const i64) };
+            Ok(*i)
+        }
+        NativeKind::Ptr(HeapKind::Char) => {
+            // `Char`-kind stores codepoint bits inline (no Arc<T>).
+            Ok(slot.slot.raw() as i64)
+        }
+        _ => Err(VMError::RuntimeError(format!(
+            "cannot convert kind {:?} to int",
+            slot.kind
+        ))),
     }
 }
 
-const INTO_DISPATCH_TAG: &str = "__IntoDispatch";
-const TRY_INTO_DISPATCH_TAG: &str = "__TryIntoDispatch";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ConvertDispatchKind {
-    Into,
-    TryInto,
+/// Read a `KindedSlot` carrier as f64, dispatching on `slot.kind` per
+/// §2.7.6 / Q8.
+fn read_as_f64(slot: &KindedSlot) -> Result<f64, VMError> {
+    match slot.kind {
+        NativeKind::Bool => Ok(if slot.slot.as_bool() { 1.0 } else { 0.0 }),
+        NativeKind::Int8
+        | NativeKind::Int16
+        | NativeKind::Int32
+        | NativeKind::Int64
+        | NativeKind::IntSize
+        | NativeKind::NullableInt8
+        | NativeKind::NullableInt16
+        | NativeKind::NullableInt32
+        | NativeKind::NullableInt64
+        | NativeKind::NullableIntSize => Ok(slot.slot.as_i64() as f64),
+        NativeKind::UInt8
+        | NativeKind::UInt16
+        | NativeKind::UInt32
+        | NativeKind::UInt64
+        | NativeKind::UIntSize
+        | NativeKind::NullableUInt8
+        | NativeKind::NullableUInt16
+        | NativeKind::NullableUInt32
+        | NativeKind::NullableUInt64
+        | NativeKind::NullableUIntSize => Ok(slot.slot.as_u64() as f64),
+        NativeKind::Float64 | NativeKind::NullableFloat64 => Ok(slot.slot.as_f64()),
+        NativeKind::String => {
+            let bits = slot.slot.raw();
+            if bits == 0 {
+                return Err(VMError::RuntimeError(
+                    "cannot convert null string to number".to_string(),
+                ));
+            }
+            // SAFETY: `NativeKind::String` => `Arc::into_raw::<String>` bits.
+            let s: &String = unsafe { &*(bits as *const String) };
+            s.parse::<f64>().map_err(|_| {
+                VMError::RuntimeError(format!("cannot convert string '{s}' to number"))
+            })
+        }
+        NativeKind::Ptr(HeapKind::Decimal) => {
+            let bits = slot.slot.raw();
+            // SAFETY: `Ptr(Decimal)` => `Arc::into_raw::<Decimal>` bits.
+            let d: &rust_decimal::Decimal =
+                unsafe { &*(bits as *const rust_decimal::Decimal) };
+            use rust_decimal::prelude::ToPrimitive;
+            d.to_f64().ok_or_else(|| {
+                VMError::RuntimeError(format!("cannot convert decimal '{d}' to number"))
+            })
+        }
+        NativeKind::Ptr(HeapKind::BigInt) => {
+            let bits = slot.slot.raw();
+            // SAFETY: `Ptr(BigInt)` => `Arc::into_raw::<i64>` bits.
+            let i: &i64 = unsafe { &*(bits as *const i64) };
+            Ok(*i as f64)
+        }
+        _ => Err(VMError::RuntimeError(format!(
+            "cannot convert kind {:?} to number",
+            slot.kind
+        ))),
+    }
 }
 
-/// Helper to check that exactly `expected` args were passed.
+/// Read a `KindedSlot` carrier as bool, dispatching on `slot.kind`.
+fn read_as_bool(slot: &KindedSlot) -> Result<bool, VMError> {
+    match slot.kind {
+        NativeKind::Bool => Ok(slot.slot.as_bool()),
+        NativeKind::Int8
+        | NativeKind::Int16
+        | NativeKind::Int32
+        | NativeKind::Int64
+        | NativeKind::IntSize
+        | NativeKind::NullableInt8
+        | NativeKind::NullableInt16
+        | NativeKind::NullableInt32
+        | NativeKind::NullableInt64
+        | NativeKind::NullableIntSize => Ok(slot.slot.as_i64() != 0),
+        NativeKind::UInt8
+        | NativeKind::UInt16
+        | NativeKind::UInt32
+        | NativeKind::UInt64
+        | NativeKind::UIntSize
+        | NativeKind::NullableUInt8
+        | NativeKind::NullableUInt16
+        | NativeKind::NullableUInt32
+        | NativeKind::NullableUInt64
+        | NativeKind::NullableUIntSize => Ok(slot.slot.as_u64() != 0),
+        NativeKind::Float64 | NativeKind::NullableFloat64 => Ok(slot.slot.as_f64() != 0.0),
+        NativeKind::String => {
+            let bits = slot.slot.raw();
+            if bits == 0 {
+                return Err(VMError::RuntimeError(
+                    "cannot convert null string to bool".to_string(),
+                ));
+            }
+            // SAFETY: see `read_as_i64` String arm.
+            let s: &String = unsafe { &*(bits as *const String) };
+            match s.trim().to_ascii_lowercase().as_str() {
+                "true" | "1" => Ok(true),
+                "false" | "0" => Ok(false),
+                _ => Err(VMError::RuntimeError(format!(
+                    "cannot convert string '{s}' to bool"
+                ))),
+            }
+        }
+        NativeKind::Ptr(HeapKind::Decimal) => {
+            let bits = slot.slot.raw();
+            // SAFETY: `Ptr(Decimal)` => `Arc::into_raw::<Decimal>` bits.
+            let d: &rust_decimal::Decimal =
+                unsafe { &*(bits as *const rust_decimal::Decimal) };
+            Ok(!rust_decimal::prelude::Zero::is_zero(d))
+        }
+        NativeKind::Ptr(HeapKind::BigInt) => {
+            let bits = slot.slot.raw();
+            // SAFETY: `Ptr(BigInt)` => `Arc::into_raw::<i64>` bits.
+            let i: &i64 = unsafe { &*(bits as *const i64) };
+            Ok(*i != 0)
+        }
+        _ => Err(VMError::RuntimeError(format!(
+            "cannot convert kind {:?} to bool",
+            slot.kind
+        ))),
+    }
+}
+
+/// Read a `KindedSlot` carrier as a fresh `Arc<Decimal>`, dispatching
+/// on `slot.kind`.
+fn read_as_decimal(slot: &KindedSlot) -> Result<Arc<rust_decimal::Decimal>, VMError> {
+    match slot.kind {
+        NativeKind::Bool => Ok(Arc::new(rust_decimal::Decimal::from(
+            if slot.slot.as_bool() { 1 } else { 0 },
+        ))),
+        NativeKind::Int8
+        | NativeKind::Int16
+        | NativeKind::Int32
+        | NativeKind::Int64
+        | NativeKind::IntSize
+        | NativeKind::NullableInt8
+        | NativeKind::NullableInt16
+        | NativeKind::NullableInt32
+        | NativeKind::NullableInt64
+        | NativeKind::NullableIntSize => {
+            Ok(Arc::new(rust_decimal::Decimal::from(slot.slot.as_i64())))
+        }
+        NativeKind::UInt8
+        | NativeKind::UInt16
+        | NativeKind::UInt32
+        | NativeKind::UInt64
+        | NativeKind::UIntSize
+        | NativeKind::NullableUInt8
+        | NativeKind::NullableUInt16
+        | NativeKind::NullableUInt32
+        | NativeKind::NullableUInt64
+        | NativeKind::NullableUIntSize => {
+            Ok(Arc::new(rust_decimal::Decimal::from(slot.slot.as_u64())))
+        }
+        NativeKind::Float64 | NativeKind::NullableFloat64 => {
+            let n = slot.slot.as_f64();
+            rust_decimal::Decimal::from_f64_retain(n)
+                .map(Arc::new)
+                .ok_or_else(|| {
+                    VMError::RuntimeError(format!("cannot convert number '{n}' to decimal"))
+                })
+        }
+        NativeKind::String => {
+            let bits = slot.slot.raw();
+            if bits == 0 {
+                return Err(VMError::RuntimeError(
+                    "cannot convert null string to decimal".to_string(),
+                ));
+            }
+            // SAFETY: see `read_as_i64` String arm.
+            let s: &String = unsafe { &*(bits as *const String) };
+            s.parse::<rust_decimal::Decimal>()
+                .map(Arc::new)
+                .map_err(|_| {
+                    VMError::RuntimeError(format!("cannot convert string '{s}' to decimal"))
+                })
+        }
+        NativeKind::Ptr(HeapKind::Decimal) => {
+            let bits = slot.slot.raw();
+            // SAFETY: `Ptr(Decimal)` => `Arc::into_raw::<Decimal>` bits;
+            // the carrier owns one share. Bump strong count for the
+            // returned `Arc` (the carrier's `Drop` retires the original).
+            unsafe {
+                Arc::increment_strong_count(bits as *const rust_decimal::Decimal);
+                Ok(Arc::from_raw(bits as *const rust_decimal::Decimal))
+            }
+        }
+        NativeKind::Ptr(HeapKind::BigInt) => {
+            let bits = slot.slot.raw();
+            // SAFETY: `Ptr(BigInt)` => `Arc::into_raw::<i64>` bits.
+            let i: &i64 = unsafe { &*(bits as *const i64) };
+            Ok(Arc::new(rust_decimal::Decimal::from(*i)))
+        }
+        _ => Err(VMError::RuntimeError(format!(
+            "cannot convert kind {:?} to decimal",
+            slot.kind
+        ))),
+    }
+}
+
+/// Read a `KindedSlot` carrier as a `char`, dispatching on `slot.kind`.
+fn read_as_char(slot: &KindedSlot) -> Result<char, VMError> {
+    match slot.kind {
+        NativeKind::Ptr(HeapKind::Char) => {
+            char::from_u32(slot.slot.raw() as u32).ok_or_else(|| {
+                VMError::RuntimeError(format!(
+                    "invalid Unicode code point: {}",
+                    slot.slot.raw() as u32
+                ))
+            })
+        }
+        NativeKind::Int8
+        | NativeKind::Int16
+        | NativeKind::Int32
+        | NativeKind::Int64
+        | NativeKind::IntSize
+        | NativeKind::NullableInt8
+        | NativeKind::NullableInt16
+        | NativeKind::NullableInt32
+        | NativeKind::NullableInt64
+        | NativeKind::NullableIntSize => {
+            let i = slot.slot.as_i64();
+            let code = i as u32;
+            char::from_u32(code).ok_or_else(|| {
+                VMError::RuntimeError(format!("invalid Unicode code point: {code}"))
+            })
+        }
+        NativeKind::UInt8
+        | NativeKind::UInt16
+        | NativeKind::UInt32
+        | NativeKind::UInt64
+        | NativeKind::UIntSize
+        | NativeKind::NullableUInt8
+        | NativeKind::NullableUInt16
+        | NativeKind::NullableUInt32
+        | NativeKind::NullableUInt64
+        | NativeKind::NullableUIntSize => {
+            let code = slot.slot.as_u64() as u32;
+            char::from_u32(code).ok_or_else(|| {
+                VMError::RuntimeError(format!("invalid Unicode code point: {code}"))
+            })
+        }
+        NativeKind::String => {
+            let bits = slot.slot.raw();
+            if bits == 0 {
+                return Err(VMError::RuntimeError(
+                    "cannot convert null string to char".to_string(),
+                ));
+            }
+            // SAFETY: see `read_as_i64` String arm.
+            let s: &String = unsafe { &*(bits as *const String) };
+            let mut chars = s.chars();
+            match (chars.next(), chars.next()) {
+                (Some(c), None) => Ok(c),
+                _ => Err(VMError::RuntimeError(format!(
+                    "cannot convert string '{s}' to char (must be single character)"
+                ))),
+            }
+        }
+        _ => Err(VMError::RuntimeError(format!(
+            "cannot convert kind {:?} to char",
+            slot.kind
+        ))),
+    }
+}
+
+/// Format a `KindedSlot` to a `String` for `as string` casts. Inline
+/// scalars and the simple heap-numeric kinds (`Decimal`, `BigInt`,
+/// `Char`) are formatted in-place; identity (`String` source) clones
+/// the inner `Arc<String>`'s payload. Heterogeneous heap kinds
+/// (TypedObject, TypedArray, HashMap, HashSet, Content, DataTable,
+/// Result, Option, Range, …) dispatch through the kinded
+/// `ValueFormatter::format_kinded` per ADR-006 §2.7.6 / Q8 — heap
+/// arms are read via the typed `Arc<T>` payload and `KindedSlot.kind`
+/// drives the per-arm formatter (no decode-from-bits, no
+/// `is_heap()` probe, no `Arc<HeapValue>` catch-all carrier).
+///
+/// The fallback expects the schema registry; pass it via the
+/// `schema_registry` parameter so `TypedObject` field names resolve.
+fn read_as_string(
+    slot: &KindedSlot,
+    schema_registry: Option<&TypeSchemaRegistry>,
+) -> Result<String, VMError> {
+    match slot.kind {
+        NativeKind::Bool => Ok(slot.slot.as_bool().to_string()),
+        NativeKind::Int8
+        | NativeKind::Int16
+        | NativeKind::Int32
+        | NativeKind::Int64
+        | NativeKind::IntSize
+        | NativeKind::NullableInt8
+        | NativeKind::NullableInt16
+        | NativeKind::NullableInt32
+        | NativeKind::NullableInt64
+        | NativeKind::NullableIntSize => Ok(slot.slot.as_i64().to_string()),
+        NativeKind::UInt8
+        | NativeKind::UInt16
+        | NativeKind::UInt32
+        | NativeKind::UInt64
+        | NativeKind::UIntSize
+        | NativeKind::NullableUInt8
+        | NativeKind::NullableUInt16
+        | NativeKind::NullableUInt32
+        | NativeKind::NullableUInt64
+        | NativeKind::NullableUIntSize => Ok(slot.slot.as_u64().to_string()),
+        NativeKind::Float64 | NativeKind::NullableFloat64 => Ok(slot.slot.as_f64().to_string()),
+        NativeKind::String => {
+            let bits = slot.slot.raw();
+            if bits == 0 {
+                return Err(VMError::RuntimeError(
+                    "cannot convert null string to string".to_string(),
+                ));
+            }
+            // SAFETY: see `read_as_i64` String arm.
+            let s: &String = unsafe { &*(bits as *const String) };
+            Ok(s.clone())
+        }
+        NativeKind::Ptr(HeapKind::Decimal) => {
+            let bits = slot.slot.raw();
+            // SAFETY: `Ptr(Decimal)` => `Arc::into_raw::<Decimal>` bits.
+            let d: &rust_decimal::Decimal =
+                unsafe { &*(bits as *const rust_decimal::Decimal) };
+            Ok(d.to_string())
+        }
+        NativeKind::Ptr(HeapKind::BigInt) => {
+            let bits = slot.slot.raw();
+            // SAFETY: `Ptr(BigInt)` => `Arc::into_raw::<i64>` bits.
+            let i: &i64 = unsafe { &*(bits as *const i64) };
+            Ok(i.to_string())
+        }
+        NativeKind::Ptr(HeapKind::Char) => {
+            // `Char`-kind stores codepoint bits inline.
+            let code = slot.slot.raw() as u32;
+            char::from_u32(code)
+                .map(|c| c.to_string())
+                .ok_or_else(|| VMError::RuntimeError(format!("invalid Unicode code point: {code}")))
+        }
+        // ── Heap-pointer kinds whose `format_heap_kind` arm is itself
+        // still SURFACE — surface-and-stop with the §-cite so the gap
+        // is visible at the cast site rather than panicking deep in
+        // the formatter. Per playbook §2 W17-builtin-coercions:
+        // "Surface-and-stop if format_heap_kind is itself SURFACE."
+        NativeKind::Ptr(HeapKind::Temporal) => Err(VMError::NotImplemented(
+            "`as string` for `Ptr(HeapKind::Temporal)` cascades on \
+             `executor/printing.rs::format_heap_kind` Temporal arm \
+             (still SURFACE pending Wave 5e DateTime ctor body \
+             migration). ADR-006 §2.7.4."
+                .to_string(),
+        )),
+        NativeKind::Ptr(HeapKind::Closure) => Err(VMError::NotImplemented(
+            "`as string` for `Ptr(HeapKind::Closure)` cascades on \
+             `executor/printing.rs::format_heap_kind` Closure arm \
+             (still SURFACE pending §2.7.8 / Q10 B7-closure-cells \
+             extension for kinded ClosureRaw read). ADR-006 §2.7.4."
+                .to_string(),
+        )),
+        NativeKind::Ptr(HeapKind::NativeScalar) => Err(VMError::NotImplemented(
+            "`as string` for `Ptr(HeapKind::NativeScalar)` cascades on \
+             `executor/printing.rs::format_heap_kind` NativeScalar arm \
+             (still SURFACE pending Wave 5c native-interop carrier \
+             body migration). ADR-006 §2.7.4."
+                .to_string(),
+        )),
+        // ── Heterogeneous heap kinds whose `format_heap_kind` arm
+        // has been rebuilt: dispatch through the kinded
+        // `ValueFormatter::format_kinded` per ADR-006 §2.7.6 / Q8
+        // heterogeneous-kind body pattern. The formatter walks the
+        // typed `Arc<T>` payload and reads `KindedSlot.kind` for
+        // dispatch — no decode-from-bits, no `is_heap()` probe, no
+        // `Arc<HeapValue>` catch-all carrier (forbidden per the
+        // playbook's defection-attractor list).
+        _ => {
+            let Some(registry) = schema_registry else {
+                return Err(VMError::NotImplemented(format!(
+                    "`as string` for kind {:?} needs the type schema \
+                     registry; call site did not thread one through. \
+                     ADR-006 §2.7.4.",
+                    slot.kind
+                )));
+            };
+            let formatter = ValueFormatter::new(registry);
+            // Borrow-only — `format_kinded` reads through the typed
+            // `Arc<T>` payload via `&KindedSlot`; ownership of the
+            // carrier remains with the caller (the `op_convert*` body
+            // drops it after this returns).
+            Ok(formatter.format_kinded(slot))
+        }
+    }
+}
+
+/// Helper used by every `op_convert*` / `op_try_convert*` body: pop
+/// one kinded slot off the §2.7.7 stack parallel-kind track, wrap as
+/// a `KindedSlot` carrier (transferring the heap share into the
+/// carrier so it is retired by `Drop` at the end of the body).
 #[inline]
-fn check_arity(function: &str, args: &[ValueWord], expected: usize) -> Result<(), VMError> {
-    if args.len() != expected {
-        return Err(VMError::ArityMismatch {
-            function: function.to_string(),
-            expected,
-            got: args.len(),
-        });
-    }
-    Ok(())
-}
-
-#[inline]
-fn ptr_arg_as_usize(arg: &ValueWord, function: &str, arg_name: &str) -> Result<usize, VMError> {
-    arg.as_usize().ok_or_else(|| VMError::InvalidArgument {
-        function: function.to_string(),
-        message: format!("{arg_name} must be a pointer-compatible value"),
-    })
+fn pop_one_kinded(vm: &mut VirtualMachine) -> Result<KindedSlot, VMError> {
+    let (bits, kind) = vm.pop_kinded()?;
+    Ok(KindedSlot::new(ValueSlot::from_raw(bits), kind))
 }
 
 impl VirtualMachine {
-    /// Extract an i64 from any value (raw native result, no ValueWord boxing).
-    fn convert_to_i64(value: &ValueWord) -> Result<i64, String> {
-        if let Some(i) = value.as_i64() {
-            return Ok(i);
-        }
-        if let Some(n) = value.as_f64() {
-            if !n.is_finite() {
-                return Err("cannot convert non-finite number to int".to_string());
-            }
-            let i = n as i64;
-            if (i as f64 - n).abs() > f64::EPSILON {
-                return Err(format!("cannot convert non-integer number '{n}' to int"));
-            }
-            return Ok(i);
-        }
-        if let Some(s) = value.as_str() {
-            let parsed = s
-                .parse::<i64>()
-                .map_err(|_| format!("cannot convert string '{s}' to int"))?;
-            return Ok(parsed);
-        }
-        if let Some(b) = value.as_bool() {
-            return Ok(if b { 1 } else { 0 });
-        }
-        if let Some(d) = value.as_decimal() {
-            if let Some(i) = d.to_i64() {
-                return Ok(i);
-            }
-            return Err(format!("cannot convert decimal '{d}' to int"));
-        }
-        if let Some(c) = value.as_char() {
-            return Ok(c as i64);
-        }
-        Err(format!("cannot convert {} to int", value.type_name()))
-    }
-
-    /// Extract an f64 from any value (raw native result, no ValueWord boxing).
-    fn convert_to_f64(value: &ValueWord) -> Result<f64, String> {
-        if let Some(n) = value.as_number_coerce() {
-            return Ok(n);
-        }
-        if let Some(s) = value.as_str() {
-            let parsed = s
-                .parse::<f64>()
-                .map_err(|_| format!("cannot convert string '{s}' to number"))?;
-            return Ok(parsed);
-        }
-        if let Some(b) = value.as_bool() {
-            return Ok(if b { 1.0 } else { 0.0 });
-        }
-        Err(format!("cannot convert {} to number", value.type_name()))
-    }
-
-    /// Extract a bool from any value (raw native result, no ValueWord boxing).
-    fn convert_to_bool_native(value: &ValueWord) -> Result<bool, String> {
-        if let Some(b) = value.as_bool() {
-            return Ok(b);
-        }
-        if let Some(i) = value.as_i64() {
-            return Ok(i != 0);
-        }
-        if let Some(n) = value.as_f64() {
-            return Ok(n != 0.0);
-        }
-        if let Some(s) = value.as_str() {
-            return match s.trim().to_ascii_lowercase().as_str() {
-                "true" | "1" => Ok(true),
-                "false" | "0" => Ok(false),
-                _ => Err(format!("cannot convert string '{s}' to bool")),
-            };
-        }
-        Err(format!("cannot convert {} to bool", value.type_name()))
-    }
-
-    fn convert_to_int_no_checks(value: &ValueWord) -> Result<ValueWord, String> {
-        if let Some(i) = value.as_i64() {
-            return Ok(ValueWord::from_i64(i));
-        }
-        if let Some(n) = value.as_f64() {
-            if !n.is_finite() {
-                return Err("cannot convert non-finite number to int".to_string());
-            }
-            let i = n as i64;
-            if (i as f64 - n).abs() > f64::EPSILON {
-                return Err(format!("cannot convert non-integer number '{n}' to int"));
-            }
-            return Ok(ValueWord::from_i64(i));
-        }
-        if let Some(s) = value.as_str() {
-            let parsed = s
-                .parse::<i64>()
-                .map_err(|_| format!("cannot convert string '{s}' to int"))?;
-            return Ok(ValueWord::from_i64(parsed));
-        }
-        if let Some(b) = value.as_bool() {
-            return Ok(ValueWord::from_i64(if b { 1 } else { 0 }));
-        }
-        if let Some(d) = value.as_decimal() {
-            if let Some(i) = d.to_i64() {
-                return Ok(ValueWord::from_i64(i));
-            }
-            return Err(format!("cannot convert decimal '{d}' to int"));
-        }
-        if let Some(c) = value.as_char() {
-            return Ok(ValueWord::from_i64(c as i64));
-        }
-        Err(format!("cannot convert {} to int", value.type_name()))
-    }
-
-    fn convert_to_number_no_checks(value: &ValueWord) -> Result<ValueWord, String> {
-        if let Some(n) = value.as_number_coerce() {
-            return Ok(ValueWord::from_f64(n));
-        }
-        if let Some(s) = value.as_str() {
-            let parsed = s
-                .parse::<f64>()
-                .map_err(|_| format!("cannot convert string '{s}' to number"))?;
-            return Ok(ValueWord::from_f64(parsed));
-        }
-        if let Some(b) = value.as_bool() {
-            return Ok(ValueWord::from_f64(if b { 1.0 } else { 0.0 }));
-        }
-        Err(format!("cannot convert {} to number", value.type_name()))
-    }
-
-    fn convert_to_decimal_no_checks(value: &ValueWord) -> Result<ValueWord, String> {
-        if let Some(d) = value.as_decimal() {
-            return Ok(ValueWord::from_decimal(d));
-        }
-        if let Some(i) = value.as_i64() {
-            return Ok(ValueWord::from_decimal(rust_decimal::Decimal::from(i)));
-        }
-        if let Some(n) = value.as_f64() {
-            let d = rust_decimal::Decimal::from_f64_retain(n)
-                .ok_or_else(|| format!("cannot convert number '{n}' to decimal"))?;
-            return Ok(ValueWord::from_decimal(d));
-        }
-        if let Some(s) = value.as_str() {
-            let d = s
-                .parse::<rust_decimal::Decimal>()
-                .map_err(|_| format!("cannot convert string '{s}' to decimal"))?;
-            return Ok(ValueWord::from_decimal(d));
-        }
-        if let Some(b) = value.as_bool() {
-            return Ok(ValueWord::from_decimal(rust_decimal::Decimal::from(if b {
-                1
-            } else {
-                0
-            })));
-        }
-        Err(format!("cannot convert {} to decimal", value.type_name()))
-    }
-
-    fn convert_to_bool_no_checks(value: &ValueWord) -> Result<ValueWord, String> {
-        if let Some(b) = value.as_bool() {
-            return Ok(ValueWord::from_bool(b));
-        }
-        if let Some(i) = value.as_i64() {
-            return Ok(ValueWord::from_bool(i != 0));
-        }
-        if let Some(n) = value.as_f64() {
-            return Ok(ValueWord::from_bool(n != 0.0));
-        }
-        if let Some(s) = value.as_str() {
-            let parsed = match s.trim().to_ascii_lowercase().as_str() {
-                "true" | "1" => true,
-                "false" | "0" => false,
-                _ => return Err(format!("cannot convert string '{s}' to bool")),
-            };
-            return Ok(ValueWord::from_bool(parsed));
-        }
-        Err(format!("cannot convert {} to bool", value.type_name()))
-    }
-
-    fn convert_to_char_no_checks(value: &ValueWord) -> Result<ValueWord, String> {
-        if let Some(c) = value.as_char() {
-            return Ok(ValueWord::from_char(c));
-        }
-        if let Some(i) = value.as_i64() {
-            let code = i as u32;
-            return char::from_u32(code)
-                .map(ValueWord::from_char)
-                .ok_or_else(|| format!("invalid Unicode code point: {}", code));
-        }
-        if let Some(n) = value.as_f64() {
-            let code = n as u32;
-            return char::from_u32(code)
-                .map(ValueWord::from_char)
-                .ok_or_else(|| format!("invalid Unicode code point: {}", code));
-        }
-        if let Some(s) = value.as_str() {
-            let mut chars = s.chars();
-            if let Some(c) = chars.next() {
-                if chars.next().is_none() {
-                    return Ok(ValueWord::from_char(c));
-                }
-            }
-            return Err(format!(
-                "cannot convert string '{}' to char (must be single character)",
-                s
-            ));
-        }
-        Err(format!("cannot convert {} to char", value.type_name()))
-    }
-
-    fn convert_to_string_no_checks(&self, value: &ValueWord) -> ValueWord {
-        if let Some(s) = value.as_str() {
-            return ValueWord::from_string(Arc::new(s.to_string()));
-        }
-        ValueWord::from_string(Arc::new(self.format_value_default_nb(value)))
-    }
-
-    fn canonical_try_into_name(name: &str) -> String {
-        match name {
-            "boolean" | "Boolean" | "Bool" => "bool".to_string(),
-            "String" => "string".to_string(),
-            "Number" => "number".to_string(),
-            "Int" => "int".to_string(),
-            "Decimal" => "decimal".to_string(),
-            "Char" => "char".to_string(),
-            _ => name.to_string(),
-        }
-    }
-
-    fn annotation_conversion_name(target: &TypeAnnotation) -> Option<String> {
-        match target {
-            TypeAnnotation::Generic { name, args } if name == "Option" && args.len() == 1 => {
-                Self::annotation_conversion_name(&args[0])
-            }
-            TypeAnnotation::Basic(name) => Some(Self::canonical_try_into_name(name)),
-            TypeAnnotation::Reference(name) => Some(Self::canonical_try_into_name(name)),
-            TypeAnnotation::Generic { name, .. } => Some(Self::canonical_try_into_name(name)),
-            _ => None,
-        }
-    }
-
-    fn decode_convert_dispatch(
-        target: &TypeAnnotation,
-    ) -> Result<(ConvertDispatchKind, Option<String>, String), String> {
-        if let TypeAnnotation::Generic { name, args } = target
-            && (name == TRY_INTO_DISPATCH_TAG || name == INTO_DISPATCH_TAG)
-            && args.len() == 2
-        {
-            let source = Self::annotation_conversion_name(&args[0]).ok_or_else(|| {
-                format!(
-                    "invalid conversion dispatch source annotation: {:?}",
-                    args[0]
-                )
-            })?;
-            let selector = Self::annotation_conversion_name(&args[1]).ok_or_else(|| {
-                format!(
-                    "invalid conversion dispatch target selector annotation: {:?}",
-                    args[1]
-                )
-            })?;
-            let kind = if name == TRY_INTO_DISPATCH_TAG {
-                ConvertDispatchKind::TryInto
-            } else {
-                ConvertDispatchKind::Into
-            };
-            return Ok((kind, Some(source), selector));
-        }
-
-        if let TypeAnnotation::Generic { name, args } = target
-            && name == "Option"
-            && args.len() == 1
-        {
-            let selector = Self::annotation_conversion_name(&args[0])
-                .ok_or_else(|| format!("invalid conversion target annotation: {:?}", target))?;
-            return Ok((ConvertDispatchKind::TryInto, None, selector));
-        }
-
-        let selector = Self::annotation_conversion_name(target)
-            .ok_or_else(|| format!("invalid conversion target annotation: {:?}", target))?;
-        Ok((ConvertDispatchKind::Into, None, selector))
-    }
-
-    fn resolve_try_into_symbol(&self, source_type: &str, target_selector: &str) -> Option<String> {
-        self.program
-            .lookup_trait_method_symbol("TryInto", source_type, Some(target_selector), "tryInto")
-            .or_else(|| {
-                self.program
-                    .lookup_trait_method_symbol("TryInto", source_type, None, "tryInto")
-            })
-            .map(|s| s.to_string())
-    }
-
-    fn resolve_into_symbol(&self, source_type: &str, target_selector: &str) -> Option<String> {
-        self.program
-            .lookup_trait_method_symbol("Into", source_type, Some(target_selector), "into")
-            .or_else(|| {
-                self.program
-                    .lookup_trait_method_symbol("Into", source_type, None, "into")
-            })
-            .map(|s| s.to_string())
-    }
-
-    fn build_try_into_error_result(&mut self, message: String, code: &str) -> ValueWord {
-        let trace = self.trace_info_single_nb();
-        let err = self.build_any_error_nb(
-            ValueWord::from_string(Arc::new(message)),
-            None,
-            trace,
-            Some(code),
-        );
-        ValueWord::from_err(err)
-    }
-
-    fn try_convert_no_checks(
-        &self,
-        value: &ValueWord,
-        target_name: &str,
-    ) -> Result<ValueWord, String> {
-        match target_name {
-            "int" => Self::convert_to_int_no_checks(value),
-            "number" => Self::convert_to_number_no_checks(value),
-            "decimal" => Self::convert_to_decimal_no_checks(value),
-            "bool" => Self::convert_to_bool_no_checks(value),
-            "string" => Ok(self.convert_to_string_no_checks(value)),
-            "char" => Self::convert_to_char_no_checks(value),
-            unsupported => Err(format!(
-                "unsupported fallible conversion target '{unsupported}'"
-            )),
-        }
-    }
-
-    fn try_into_source_name_for_value(&self, value: &ValueWord) -> Option<String> {
-        Self::annotation_conversion_name(&self.type_annotation_for_nb(value))
-    }
-
+    /// `Convert` opcode: trait-dispatch driven cast through `Into<T>` /
+    /// `TryInto<T>` impls (compiler emits this when the target is
+    /// non-primitive — see `compiler/expressions/type_ops.rs:714`). The
+    /// dispatch-annotation operand carries `(source, target)` selector
+    /// names; the runtime resolves the matching `into()` / `tryInto()`
+    /// trait method symbol and calls it.
+    ///
+    /// SURFACE (Phase-2c per ADR-006 §2.7.4 + §2.7.11): wiring this
+    /// end-to-end depends on two cross-cluster pieces that are
+    /// themselves still SURFACE at HEAD:
+    ///
+    /// 1. **Kinded trait-method resolution.** Resolving the
+    ///    `__IntoDispatch` / `__TryIntoDispatch` selectors emitted by
+    ///    `compiler/expressions/type_ops.rs::conversion_dispatch_annotation`
+    ///    to a callable closure needs a kinded
+    ///    `lookup_trait_method_symbol` shape on the trait registry plus
+    ///    the kinded `call_value_immediate_nb` value-call shape on the
+    ///    resolved callee. The latter is the §2.7.11 / Q12 value-call
+    ///    ABI, which is the territory of W17-make-closure / W17-array-
+    ///    closure-callback; until those land here, dispatching on a
+    ///    resolved closure carrier would re-introduce the deleted
+    ///    kind-blind value-call ABI shape (refused per CLAUDE.md
+    ///    "Renames to refuse on sight").
+    ///
+    /// 2. **AnyError TypedObject builder.** Fallible-path
+    ///    (`__TryIntoDispatch`) failure values need to be wrapped as
+    ///    `AnyError` TypedObject instances; the builder
+    ///    (`executor/exceptions/mod.rs::build_any_error`) is itself a
+    ///    Phase-2c surface (W17-method-bodies-misc territory).
+    ///
+    /// Until both land the dispatch shell stays a `NotImplemented`
+    /// surface — surface-and-stop rather than reintroducing the
+    /// deleted W-series dispatch pattern.
+    ///
+    /// The primitive-target path (`as int` / `as number` / `as string`
+    /// / `as bool` / `as decimal` / `as char`) does NOT route through
+    /// this opcode — the compiler emits the dedicated `ConvertTo*`
+    /// opcodes for those targets, with the corresponding kinded bodies
+    /// at `op_convert_to_*` in this module.
     pub(in crate::executor) fn op_convert(
         &mut self,
         instruction: &Instruction,
     ) -> Result<(), VMError> {
-        let target = match instruction.operand {
+        // Drop the popped value carrier (kind-dispatched refcount retire
+        // via `KindedSlot::Drop`) so the stack stays balanced even at the
+        // surface boundary.
+        let _carrier = pop_one_kinded(self)?;
+        let target_desc = match instruction.operand {
             Some(Operand::Const(idx)) => match self.program.constants.get(idx as usize) {
-                Some(Constant::TypeAnnotation(annotation)) => annotation.clone(),
-                _ => {
-                    return Err(VMError::RuntimeError(
-                        "Convert expects type annotation constant".to_string(),
-                    ));
-                }
+                Some(Constant::TypeAnnotation(ann)) => format!("{:?}", ann),
+                other => format!("{:?}", other),
             },
-            _ => return Err(VMError::InvalidOperand),
+            other => format!("{:?}", other),
         };
-
-        let value = rebox_native_bits(self.pop_raw_u64()?);
-        let (dispatch_kind, encoded_source, target_selector) =
-            match Self::decode_convert_dispatch(&target) {
-                Ok(dispatch) => dispatch,
-                Err(message) => {
-                    let err = self.build_try_into_error_result(message, "CONVERT_DISPATCH");
-                    self.push_raw_u64(err)?;
-                    return Ok(());
-                }
-            };
-
-        let source_name = encoded_source
-            .or_else(|| self.try_into_source_name_for_value(&value))
-            .unwrap_or_else(|| Self::canonical_try_into_name(value.type_name()));
-
-        if source_name == target_selector {
-            match dispatch_kind {
-                ConvertDispatchKind::TryInto => {
-                    self.push_raw_u64(ValueWord::from_ok(value))?;
-                }
-                ConvertDispatchKind::Into => {
-                    self.push_raw_u64(value)?;
-                }
-            }
-            return Ok(());
-        }
-
-        match dispatch_kind {
-            ConvertDispatchKind::TryInto => {
-                let Some(symbol) = self.resolve_try_into_symbol(&source_name, &target_selector)
-                else {
-                    // Fallback: built-in primitive conversions
-                    let converted = match self.try_convert_no_checks(&value, &target_selector) {
-                        Ok(result_nb) => ValueWord::from_ok(result_nb),
-                        Err(msg) => self.build_try_into_error_result(msg, "TRY_INTO_IMPL_MISSING"),
-                    };
-                    self.push_raw_u64(converted)?;
-                    return Ok(());
-                };
-
-                let Some(&func_id) = self.function_name_index.get(&symbol) else {
-                    let err = self.build_try_into_error_result(
-                        format!(
-                            "TryInto dispatch target '{}' is not a compiled function",
-                            symbol
-                        ),
-                        "TRY_INTO_SYMBOL_MISSING",
-                    );
-                    self.push_raw_u64(err)?;
-                    return Ok(());
-                };
-
-                let func_nb = ValueWord::from_function(func_id);
-                let converted = match self.call_value_immediate_nb(
-                    &func_nb,
-                    std::slice::from_ref(&value),
-                    None,
-                ) {
-                    Ok(result_nb) => {
-                        if result_nb.as_ok_inner().is_some() || result_nb.as_err_inner().is_some() {
-                            result_nb
-                        } else {
-                            self.build_try_into_error_result(
-                                format!(
-                                    "TryInto impl '{}' returned '{}' instead of Result",
-                                    symbol,
-                                    result_nb.type_name()
-                                ),
-                                "TRY_INTO_INVALID_RETURN",
-                            )
-                        }
-                    }
-                    Err(err) => {
-                        self.build_try_into_error_result(err.to_string(), "TRY_INTO_FAILED")
-                    }
-                };
-
-                self.push_raw_u64(converted)
-            }
-            ConvertDispatchKind::Into => {
-                let Some(symbol) = self.resolve_into_symbol(&source_name, &target_selector) else {
-                    // Fallback: built-in primitive conversions
-                    match self.try_convert_no_checks(&value, &target_selector) {
-                        Ok(result_nb) => {
-                            self.push_raw_u64(result_nb)?;
-                            return Ok(());
-                        }
-                        Err(msg) => {
-                            return Err(VMError::RuntimeError(format!(
-                                "INTO_IMPL_MISSING: {}",
-                                msg
-                            )));
-                        }
-                    }
-                };
-
-                let Some(&func_id) = self.function_name_index.get(&symbol) else {
-                    return Err(VMError::RuntimeError(format!(
-                        "INTO_SYMBOL_MISSING: Into dispatch target '{}' is not a compiled function",
-                        symbol
-                    )));
-                };
-
-                let func_nb = ValueWord::from_function(func_id);
-                let converted = self
-                    .call_value_immediate_nb(&func_nb, std::slice::from_ref(&value), None)
-                    .map_err(|err| VMError::RuntimeError(format!("INTO_FAILED: {}", err)))?;
-
-                if converted.as_ok_inner().is_some() || converted.as_err_inner().is_some() {
-                    return Err(VMError::RuntimeError(format!(
-                        "INTO_INVALID_RETURN: Into impl '{}' returned Result instead of '{}'",
-                        symbol, target_selector
-                    )));
-                }
-
-                self.push_raw_u64(converted)
-            }
-        }
+        Err(VMError::NotImplemented(format!(
+            "`Convert` opcode (TryInto/Into trait dispatch) cascades on \
+             two still-SURFACE dependencies: (1) kinded trait-method \
+             resolution + §2.7.11/Q12 value-call dispatch on the \
+             resolved closure, (2) `build_any_error` AnyError \
+             TypedObject builder in `executor/exceptions/mod.rs`. \
+             ADR-006 §2.7.4 / §2.7.11. target_desc={}",
+            target_desc
+        )))
     }
 
-    // ===== Typed Conversion Opcodes (zero-dispatch, no operand) =====
-
-    /// ConvertToInt: pop any value, convert to i64, push native i64. Panics on failure.
-    ///
-    /// Post-Wave-E+5/Unit B, downstream consumers (typed `LoadLocalI64`,
-    /// `AddInt`, etc.) read raw native bits — pushing the result via
-    /// `push_tagged_i64` would store NaN-boxed bits and the typed reader
-    /// would reinterpret them as a wildly wrong i64. Push native bits to
-    /// match the producer-flip contract.
+    /// `ConvertToInt` (`expr as int`): pop one kinded slot, convert to
+    /// `i64`, push as `NativeKind::Int64`. Source kinds are pre-proven
+    /// by `validate_infallible_cast` (stdlib `Into<int>` impls, plus
+    /// identity casts).
     #[inline]
     pub(in crate::executor) fn op_convert_to_int(&mut self) -> Result<(), VMError> {
-        let value = rebox_native_bits(self.pop_raw_u64()?);
-        let i = Self::convert_to_i64(&value)
-            .map_err(|msg| VMError::RuntimeError(format!("INTO_FAILED: {}", msg)))?;
-        self.push_native_i64(i)?;
-        // Stamp Int64 only if the convert is the program's final
-        // operation (next IP is past the instruction stream / on a
-        // trailing Halt). Subsequent ops overwrite the stamp via
-        // their own logic, so we avoid leaving a stale Int64 stamp
-        // when the convert feeds into a typed downstream consumer.
-        self.maybe_stamp_program_return_kind_for_native_producer(
-            crate::type_tracking::SlotKind::Int64,
-        );
-        Ok(())
+        let src = pop_one_kinded(self)?;
+        let i = read_as_i64(&src)?;
+        // `src` drops here — kind-dispatched refcount retire for heap
+        // sources (Decimal / BigInt / String).
+        drop(src);
+        self.push_kinded(i as u64, NativeKind::Int64)
     }
 
-    /// ConvertToNumber: pop any value, convert to f64, push raw f64. Panics on failure.
+    /// `ConvertToNumber` (`expr as number`): pop, convert to `f64`,
+    /// push as `NativeKind::Float64`.
     #[inline]
     pub(in crate::executor) fn op_convert_to_number(&mut self) -> Result<(), VMError> {
-        let value = rebox_native_bits(self.pop_raw_u64()?);
-        let n = Self::convert_to_f64(&value)
-            .map_err(|msg| VMError::RuntimeError(format!("INTO_FAILED: {}", msg)))?;
-        self.push_raw_f64(n)?;
-        self.maybe_stamp_program_return_kind_for_native_producer(
-            crate::type_tracking::SlotKind::Float64,
-        );
-        Ok(())
+        let src = pop_one_kinded(self)?;
+        let n = read_as_f64(&src)?;
+        drop(src);
+        self.push_kinded(n.to_bits(), NativeKind::Float64)
     }
 
-    /// ConvertToString: pop any value, convert to string, push result. Always succeeds.
+    /// `ConvertToString` (`expr as string`): pop, format to `String`,
+    /// push as a fresh `Arc<String>` with `NativeKind::String`.
     ///
-    /// String output remains NaN-boxed (heap-allocated Arc<String>), so this
-    /// still uses push_vw.
+    /// Heap-fallback kinds (TypedObject, TypedArray, HashMap, …)
+    /// dispatch through `ValueFormatter::format_kinded` per the
+    /// §2.7.6 / Q8 carrier-API bound — the schema registry threads
+    /// from `self.program` so `TypedObject` field names resolve.
     #[inline]
     pub(in crate::executor) fn op_convert_to_string(&mut self) -> Result<(), VMError> {
-        let value = rebox_native_bits(self.pop_raw_u64()?);
-        let result = self.convert_to_string_no_checks(&value);
-        self.push_raw_u64(result)
+        let src = pop_one_kinded(self)?;
+        let s = read_as_string(&src, Some(&self.program.type_schema_registry))?;
+        drop(src);
+        let arc = Arc::new(s);
+        let bits = Arc::into_raw(arc) as u64;
+        self.push_kinded(bits, NativeKind::String)
     }
 
-    /// ConvertToBool: pop any value, convert to bool, push native bool. Panics on failure.
+    /// `ConvertToBool` (`expr as bool`): pop, convert to `bool`, push
+    /// as `NativeKind::Bool`.
     #[inline]
     pub(in crate::executor) fn op_convert_to_bool(&mut self) -> Result<(), VMError> {
-        let value = rebox_native_bits(self.pop_raw_u64()?);
-        let b = Self::convert_to_bool_native(&value)
-            .map_err(|msg| VMError::RuntimeError(format!("INTO_FAILED: {}", msg)))?;
-        self.push_native_bool(b)?;
-        self.maybe_stamp_program_return_kind_for_native_producer(
-            crate::type_tracking::SlotKind::Bool,
-        );
-        Ok(())
+        let src = pop_one_kinded(self)?;
+        let b = read_as_bool(&src)?;
+        drop(src);
+        self.push_kinded(if b { 1 } else { 0 }, NativeKind::Bool)
     }
 
-    /// ConvertToDecimal: pop value, convert to decimal, push result. Panics on failure.
+    /// `ConvertToDecimal` (`expr as decimal`): pop, convert to
+    /// `Arc<Decimal>`, push as `NativeKind::Ptr(HeapKind::Decimal)`.
     #[inline]
     pub(in crate::executor) fn op_convert_to_decimal(&mut self) -> Result<(), VMError> {
-        let value = rebox_native_bits(self.pop_raw_u64()?);
-        let result = Self::convert_to_decimal_no_checks(&value)
-            .map_err(|msg| VMError::RuntimeError(format!("INTO_FAILED: {}", msg)))?;
-        self.push_raw_u64(result)
+        let src = pop_one_kinded(self)?;
+        let d = read_as_decimal(&src)?;
+        drop(src);
+        let bits = Arc::into_raw(d) as u64;
+        self.push_kinded(bits, NativeKind::Ptr(HeapKind::Decimal))
     }
 
-    /// ConvertToChar: pop value, convert to char, push result. Panics on failure.
+    /// `ConvertToChar` (`expr as char`): pop, convert to `char`, push
+    /// as `NativeKind::Ptr(HeapKind::Char)` (codepoint bits inline).
     #[inline]
     pub(in crate::executor) fn op_convert_to_char(&mut self) -> Result<(), VMError> {
-        let value = rebox_native_bits(self.pop_raw_u64()?);
-        let result = Self::convert_to_char_no_checks(&value)
-            .map_err(|msg| VMError::RuntimeError(format!("INTO_FAILED: {}", msg)))?;
-        self.push_raw_u64(result)
+        let src = pop_one_kinded(self)?;
+        let c = read_as_char(&src)?;
+        drop(src);
+        self.push_kinded(c as u64, NativeKind::Ptr(HeapKind::Char))
     }
 
-    /// TryConvertToInt: pop value, try convert to int, push Result<int, AnyError>.
+    // ── TryConvertTo* family ─────────────────────────────────────────
+    //
+    // The fallible variants share the success path with their
+    // infallible siblings — the compiler handles the `Result<T, E>` /
+    // `Option<T>` shape externally (`emit_option_lift_fallible` /
+    // `emit_result_lift_fallible` in `compiler/expressions/type_ops.rs`)
+    // by wrapping with the `Ok` builtin and/or null-checking at the
+    // call site. The opcode body itself produces the unwrapped
+    // converted value; runtime conversion failures surface as
+    // `VMError::RuntimeError` and propagate through the standard
+    // exception handler. The pre-strict-typing AnyError-wrap path
+    // (`build_any_error`) is itself a Phase-2c surface, but is not
+    // needed here because the compiler emits the wrapping separately.
+
+    /// `TryConvertToInt`: see `op_convert_to_int`.
     #[inline]
     pub(in crate::executor) fn op_try_convert_to_int(&mut self) -> Result<(), VMError> {
-        let value = rebox_native_bits(self.pop_raw_u64()?);
-        let result = match Self::convert_to_int_no_checks(&value) {
-            Ok(v) => ValueWord::from_ok(v),
-            Err(msg) => self.build_try_into_error_result(msg, "TRY_INTO_FAILED"),
-        };
-        self.push_raw_u64(result)
+        self.op_convert_to_int()
     }
 
-    /// TryConvertToNumber: pop value, try convert to number, push Result<number, AnyError>.
+    /// `TryConvertToNumber`: see `op_convert_to_number`.
     #[inline]
     pub(in crate::executor) fn op_try_convert_to_number(&mut self) -> Result<(), VMError> {
-        let value = rebox_native_bits(self.pop_raw_u64()?);
-        let result = match Self::convert_to_number_no_checks(&value) {
-            Ok(v) => ValueWord::from_ok(v),
-            Err(msg) => self.build_try_into_error_result(msg, "TRY_INTO_FAILED"),
-        };
-        self.push_raw_u64(result)
+        self.op_convert_to_number()
     }
 
-    /// TryConvertToString: pop value, try convert to string, push Result<string, AnyError>.
+    /// `TryConvertToString`: see `op_convert_to_string`.
     #[inline]
     pub(in crate::executor) fn op_try_convert_to_string(&mut self) -> Result<(), VMError> {
-        let value = rebox_native_bits(self.pop_raw_u64()?);
-        let result = ValueWord::from_ok(self.convert_to_string_no_checks(&value));
-        self.push_raw_u64(result)
+        self.op_convert_to_string()
     }
 
-    /// TryConvertToBool: pop value, try convert to bool, push Result<bool, AnyError>.
+    /// `TryConvertToBool`: see `op_convert_to_bool`.
     #[inline]
     pub(in crate::executor) fn op_try_convert_to_bool(&mut self) -> Result<(), VMError> {
-        let value = rebox_native_bits(self.pop_raw_u64()?);
-        let result = match Self::convert_to_bool_no_checks(&value) {
-            Ok(v) => ValueWord::from_ok(v),
-            Err(msg) => self.build_try_into_error_result(msg, "TRY_INTO_FAILED"),
-        };
-        self.push_raw_u64(result)
+        self.op_convert_to_bool()
     }
 
-    /// TryConvertToDecimal: pop value, try convert to decimal, push Result<decimal, AnyError>.
+    /// `TryConvertToDecimal`: see `op_convert_to_decimal`.
     #[inline]
     pub(in crate::executor) fn op_try_convert_to_decimal(&mut self) -> Result<(), VMError> {
-        let value = rebox_native_bits(self.pop_raw_u64()?);
-        let result = match Self::convert_to_decimal_no_checks(&value) {
-            Ok(v) => ValueWord::from_ok(v),
-            Err(msg) => self.build_try_into_error_result(msg, "TRY_INTO_FAILED"),
-        };
-        self.push_raw_u64(result)
+        self.op_convert_to_decimal()
     }
 
-    /// TryConvertToChar: pop value, try convert to char, push Result<char, AnyError>.
+    /// `TryConvertToChar`: see `op_convert_to_char`.
     #[inline]
     pub(in crate::executor) fn op_try_convert_to_char(&mut self) -> Result<(), VMError> {
-        let value = rebox_native_bits(self.pop_raw_u64()?);
-        let result = match Self::convert_to_char_no_checks(&value) {
-            Ok(v) => ValueWord::from_ok(v),
-            Err(msg) => self.build_try_into_error_result(msg, "TRY_INTO_FAILED"),
-        };
-        self.push_raw_u64(result)
-    }
-
-    fn type_name_to_annotation(name: &str) -> TypeAnnotation {
-        match name {
-            "number" | "int" | "decimal" | "string" | "bool" | "row" | "pattern" | "function"
-            | "module_function" | "duration" | "datetime" | "time" | "timeframe" | "table"
-            | "array" | "object" | "option" | "result" | "Type" | "type" | "i8" | "u8" | "i16"
-            | "u16" | "i32" | "u32" | "i64" | "u64" | "isize" | "usize" | "byte" | "char" => {
-                TypeAnnotation::Basic(name.to_string())
-            }
-            "()" | "unit" => TypeAnnotation::Void,
-            "None" => TypeAnnotation::Null,
-            _ => TypeAnnotation::Reference(name.into()),
-        }
-    }
-
-    fn type_annotation_for_nb(&self, nb: &ValueWord) -> TypeAnnotation {
-        let bits = nb.raw_bits();
-        if !is_tagged(bits) {
-            return TypeAnnotation::Basic("number".to_string());
-        }
-        match get_tag(bits) {
-            TAG_INT => TypeAnnotation::Basic("int".to_string()),
-            TAG_BOOL => TypeAnnotation::Basic("bool".to_string()),
-            TAG_NONE => TypeAnnotation::Generic {
-                name: "Option".into(),
-                args: vec![TypeAnnotation::Basic("unknown".to_string())],
-            },
-            TAG_UNIT => TypeAnnotation::Void,
-            TAG_FUNCTION | TAG_MODULE_FN => {
-                TypeAnnotation::Basic("function".to_string())
-            }
-            TAG_REF => TypeAnnotation::Basic("reference".to_string()),
-            TAG_HEAP => {
-                // cold-path: as_heap_ref retained — type introspection multi-variant match
-                if let Some(shape_value::HeapValue::Rare(shape_value::RareHeapData::TypeAnnotation(_))) = nb.as_heap_ref() { // cold-path
-                    return TypeAnnotation::Reference("Type".into());
-                }
-
-                // cold-path: as_heap_ref retained — TypedObject schema lookup
-                if let Some(shape_value::HeapValue::TypedObject { schema_id, .. }) =
-                    nb.as_heap_ref() // cold-path
-                {
-                    let type_name = self
-                        .program
-                        .type_schema_registry
-                        .get_by_id(*schema_id as u32)
-                        .map(|schema| schema.name.clone());
-
-                    if let Some(name) = type_name.filter(|n| !n.starts_with("__")) {
-                        return Self::type_name_to_annotation(&name);
-                    }
-                }
-
-                Self::type_name_to_annotation(nb.type_name())
-            }
-            _ => TypeAnnotation::Basic("unknown".to_string()),
-        }
-    }
-
-    /// IsNumber: Check if value is a number
-    #[inline]
-    pub(in crate::executor) fn builtin_is_number(
-        &mut self,
-        args: ArgVec,
-    ) -> Result<ValueWord, VMError> {
-        check_arity("is_number", &args, 1)?;
-        let result = if args[0].is_f64() || args[0].is_i64() {
-            true
-        } else if args[0].is_heap() {
-            matches!(
-                args[0].heap_kind(),
-                Some(HeapKind::Decimal | HeapKind::BigInt)
-            )
-        } else {
-            false
-        };
-        Ok(ValueWord::from_bool(result))
-    }
-
-    /// IsString: Check if value is a string
-    #[inline]
-    pub(in crate::executor) fn builtin_is_string(
-        &mut self,
-        args: ArgVec,
-    ) -> Result<ValueWord, VMError> {
-        check_arity("is_string", &args, 1)?;
-        Ok(ValueWord::from_bool(args[0].as_str().is_some()))
-    }
-
-    /// IsBool: Check if value is a boolean
-    #[inline]
-    pub(in crate::executor) fn builtin_is_bool(
-        &mut self,
-        args: ArgVec,
-    ) -> Result<ValueWord, VMError> {
-        check_arity("is_bool", &args, 1)?;
-        Ok(ValueWord::from_bool(args[0].is_bool()))
-    }
-
-    /// IsArray: Check if value is an array
-    #[inline]
-    pub(in crate::executor) fn builtin_is_array(
-        &mut self,
-        args: ArgVec,
-    ) -> Result<ValueWord, VMError> {
-        check_arity("is_array", &args, 1)?;
-        Ok(ValueWord::from_bool(args[0].as_any_array().is_some()))
-    }
-
-    /// IsObject: Check if value is an object
-    #[inline]
-    pub(in crate::executor) fn builtin_is_object(
-        &mut self,
-        args: ArgVec,
-    ) -> Result<ValueWord, VMError> {
-        check_arity("is_object", &args, 1)?;
-        Ok(ValueWord::from_bool(matches!(
-            args[0].heap_kind(),
-            Some(HeapKind::TypedObject)
-        )))
-    }
-
-    /// IsDataRow: Check if value is a data row (always false - legacy)
-    #[inline]
-    pub(in crate::executor) fn builtin_is_data_row(
-        &mut self,
-        args: ArgVec,
-    ) -> Result<ValueWord, VMError> {
-        check_arity("is_data_row", &args, 1)?;
-        Ok(ValueWord::from_bool(false)) // DataRow type no longer exists
-    }
-
-    /// Dispatch conversion builtins from the main executor loop.
-    pub(in crate::executor) fn dispatch_conversion_builtin(
-        &mut self,
-        builtin: BuiltinFunction,
-        args: ArgVec,
-    ) -> Result<ValueWord, VMError> {
-        match builtin {
-            BuiltinFunction::ToString => self.builtin_to_string(args),
-            BuiltinFunction::ToNumber => self.builtin_to_number(args),
-            BuiltinFunction::ToBool => self.builtin_to_bool(args),
-            other => Err(VMError::RuntimeError(format!(
-                "conversion dispatch does not support {:?}",
-                other
-            ))),
-        }
-    }
-
-    #[inline]
-    fn native_result_err(&mut self, message: String, code: &str) -> ValueWord {
-        let trace = self.trace_info_single_nb();
-        let err = self.build_any_error_nb(
-            ValueWord::from_string(Arc::new(message)),
-            None,
-            trace,
-            Some(code),
-        );
-        ValueWord::from_err(err)
-    }
-
-    /// Dispatch native interop builtins from the main executor loop.
-    pub(in crate::executor) fn dispatch_native_interop_builtin(
-        &mut self,
-        builtin: BuiltinFunction,
-        args: ArgVec,
-    ) -> Result<ValueWord, VMError> {
-        match builtin {
-            BuiltinFunction::NativePtrSize => self.builtin_native_ptr_size(args),
-            BuiltinFunction::NativePtrNewCell => self.builtin_native_ptr_new_cell(args),
-            BuiltinFunction::NativePtrFreeCell => self.builtin_native_ptr_free_cell(args),
-            BuiltinFunction::NativePtrReadPtr => self.builtin_native_ptr_read_ptr(args),
-            BuiltinFunction::NativePtrWritePtr => self.builtin_native_ptr_write_ptr(args),
-            BuiltinFunction::NativeTableFromArrowC => self.builtin_native_table_from_arrow_c(args),
-            BuiltinFunction::NativeTableFromArrowCTyped => {
-                self.builtin_native_table_from_arrow_c_typed(args)
-            }
-            BuiltinFunction::NativeTableBindType => self.builtin_native_table_bind_type(args),
-            other => Err(VMError::RuntimeError(format!(
-                "native interop dispatch does not support {:?}",
-                other
-            ))),
-        }
-    }
-
-    /// Return native pointer width in bytes.
-    pub(in crate::executor) fn builtin_native_ptr_size(
-        &mut self,
-        args: ArgVec,
-    ) -> Result<ValueWord, VMError> {
-        check_arity("__native_ptr_size", &args, 0)?;
-        Ok(ValueWord::from_native_usize(std::mem::size_of::<usize>()))
-    }
-
-    /// Allocate a pointer-sized native cell initialized to null.
-    pub(in crate::executor) fn builtin_native_ptr_new_cell(
-        &mut self,
-        args: ArgVec,
-    ) -> Result<ValueWord, VMError> {
-        check_arity("__native_ptr_new_cell", &args, 0)?;
-        let cell = Box::new(0usize);
-        let ptr = Box::into_raw(cell) as usize;
-        Ok(ValueWord::from_native_ptr(ptr))
-    }
-
-    /// Free a pointer-sized native cell allocated by `__native_ptr_new_cell`.
-    pub(in crate::executor) fn builtin_native_ptr_free_cell(
-        &mut self,
-        args: ArgVec,
-    ) -> Result<ValueWord, VMError> {
-        check_arity("__native_ptr_free_cell", &args, 1)?;
-        let addr = ptr_arg_as_usize(&args[0], "__native_ptr_free_cell", "cell")?;
-        if addr != 0 {
-            unsafe {
-                drop(Box::from_raw(addr as *mut usize));
-            }
-        }
-        Ok(ValueWord::unit())
-    }
-
-    /// Read a pointer-sized value from a raw memory address.
-    pub(in crate::executor) fn builtin_native_ptr_read_ptr(
-        &mut self,
-        args: ArgVec,
-    ) -> Result<ValueWord, VMError> {
-        check_arity("__native_ptr_read_ptr", &args, 1)?;
-        let addr = ptr_arg_as_usize(&args[0], "__native_ptr_read_ptr", "addr")?;
-        if addr == 0 {
-            return Ok(ValueWord::from_native_ptr(0));
-        }
-        let value = unsafe { std::ptr::read_unaligned(addr as *const usize) };
-        Ok(ValueWord::from_native_ptr(value))
-    }
-
-    /// Write a pointer-sized value to a raw memory address.
-    pub(in crate::executor) fn builtin_native_ptr_write_ptr(
-        &mut self,
-        args: ArgVec,
-    ) -> Result<ValueWord, VMError> {
-        check_arity("__native_ptr_write_ptr", &args, 2)?;
-        let addr = ptr_arg_as_usize(&args[0], "__native_ptr_write_ptr", "addr")?;
-        let value = ptr_arg_as_usize(&args[1], "__native_ptr_write_ptr", "value")?;
-        if addr == 0 {
-            return Err(VMError::InvalidArgument {
-                function: "__native_ptr_write_ptr".to_string(),
-                message: "addr must not be null".to_string(),
-            });
-        }
-        unsafe {
-            std::ptr::write_unaligned(addr as *mut usize, value);
-        }
-        Ok(ValueWord::unit())
-    }
-
-    /// Import Arrow C pointers as `Result<Table<any>, AnyError>`.
-    pub(in crate::executor) fn builtin_native_table_from_arrow_c(
-        &mut self,
-        args: ArgVec,
-    ) -> Result<ValueWord, VMError> {
-        check_arity("__native_table_from_arrow_c", &args, 2)?;
-
-        let schema_ptr =
-            match ptr_arg_as_usize(&args[0], "__native_table_from_arrow_c", "schema_ptr") {
-                Ok(v) => v,
-                Err(e) => return Ok(self.native_result_err(format!("{e}"), "NATIVE_ARROW_IMPORT")),
-            };
-        let array_ptr = match ptr_arg_as_usize(&args[1], "__native_table_from_arrow_c", "array_ptr")
-        {
-            Ok(v) => v,
-            Err(e) => return Ok(self.native_result_err(format!("{e}"), "NATIVE_ARROW_IMPORT")),
-        };
-
-        let imported =
-            unsafe { shape_runtime::arrow_c::datatable_from_arrow_c_ptrs(schema_ptr, array_ptr) };
-        match imported {
-            Ok(table) => Ok(ValueWord::from_ok(ValueWord::from_datatable(Arc::new(
-                table,
-            )))),
-            Err(message) => Ok(self.native_result_err(message, "NATIVE_ARROW_IMPORT")),
-        }
-    }
-
-    /// Import Arrow C pointers and bind to a named row type in one step.
-    pub(in crate::executor) fn builtin_native_table_from_arrow_c_typed(
-        &mut self,
-        args: ArgVec,
-    ) -> Result<ValueWord, VMError> {
-        check_arity("__native_table_from_arrow_c_typed", &args, 3)?;
-
-        let schema_ptr =
-            match ptr_arg_as_usize(&args[0], "__native_table_from_arrow_c_typed", "schema_ptr") {
-                Ok(v) => v,
-                Err(e) => return Ok(self.native_result_err(format!("{e}"), "NATIVE_ARROW_IMPORT")),
-            };
-        let array_ptr =
-            match ptr_arg_as_usize(&args[1], "__native_table_from_arrow_c_typed", "array_ptr") {
-                Ok(v) => v,
-                Err(e) => return Ok(self.native_result_err(format!("{e}"), "NATIVE_ARROW_IMPORT")),
-            };
-        let Some(type_name) = args[2].as_str() else {
-            return Ok(self.native_result_err(
-                "__native_table_from_arrow_c_typed expects type_name as string".to_string(),
-                "NATIVE_TABLE_BIND",
-            ));
-        };
-
-        let imported =
-            unsafe { shape_runtime::arrow_c::datatable_from_arrow_c_ptrs(schema_ptr, array_ptr) };
-        let table = match imported {
-            Ok(table) => Arc::new(table),
-            Err(message) => return Ok(self.native_result_err(message, "NATIVE_ARROW_IMPORT")),
-        };
-
-        let Some(schema) = self.program.type_schema_registry.get(type_name) else {
-            return Ok(self.native_result_err(
-                format!("unknown type schema '{}'", type_name),
-                "NATIVE_TABLE_BIND",
-            ));
-        };
-        match schema.bind_to_arrow_schema(&table.schema()) {
-            Ok(_) => Ok(ValueWord::from_ok(ValueWord::from_typed_table(
-                schema.id as u64,
-                table,
-            ))),
-            Err(err) => Ok(self.native_result_err(
-                format!("schema mismatch for '{}': {}", type_name, err),
-                "NATIVE_TABLE_BIND",
-            )),
-        }
-    }
-
-    /// Validate/bind a table to a named row type.
-    pub(in crate::executor) fn builtin_native_table_bind_type(
-        &mut self,
-        args: ArgVec,
-    ) -> Result<ValueWord, VMError> {
-        check_arity("__native_table_bind_type", &args, 2)?;
-
-        // cold-path: as_heap_ref retained — multi-variant table extraction
-        let table = match args[0].as_heap_ref() { // cold-path
-            Some(HeapValue::DataTable(dt)) => dt.clone(),
-            Some(HeapValue::TableView(shape_value::TableViewData::TypedTable { table, .. })) => table.clone(),
-            Some(HeapValue::TableView(shape_value::TableViewData::IndexedTable { table, .. })) => table.clone(),
-            _ => {
-                return Ok(self.native_result_err(
-                    format!(
-                        "__native_table_bind_type expects a table value, got '{}'",
-                        args[0].type_name()
-                    ),
-                    "NATIVE_TABLE_BIND",
-                ));
-            }
-        };
-
-        let Some(type_name) = args[1].as_str() else {
-            return Ok(self.native_result_err(
-                "__native_table_bind_type expects type_name as string".to_string(),
-                "NATIVE_TABLE_BIND",
-            ));
-        };
-
-        let Some(schema) = self.program.type_schema_registry.get(type_name) else {
-            return Ok(self.native_result_err(
-                format!("unknown type schema '{}'", type_name),
-                "NATIVE_TABLE_BIND",
-            ));
-        };
-
-        match schema.bind_to_arrow_schema(&table.schema()) {
-            Ok(_) => Ok(ValueWord::from_ok(ValueWord::from_typed_table(
-                schema.id as u64,
-                table,
-            ))),
-            Err(err) => Ok(self.native_result_err(
-                format!("schema mismatch for '{}': {}", type_name, err),
-                "NATIVE_TABLE_BIND",
-            )),
-        }
-    }
-
-    /// ToString: Convert value to string
-    pub(in crate::executor) fn builtin_to_string(
-        &mut self,
-        args: ArgVec,
-    ) -> Result<ValueWord, VMError> {
-        check_arity("to_string", &args, 1)?;
-        // Fast path for inline types
-        if let Some(n) = args[0].as_f64() {
-            return Ok(ValueWord::from_string(Arc::new(format!("{}", n))));
-        }
-        if let Some(i) = args[0].as_i64() {
-            return Ok(ValueWord::from_string(Arc::new(format!("{}", i))));
-        }
-        if let Some(b) = args[0].as_bool() {
-            return Ok(ValueWord::from_string(Arc::new(format!("{}", b))));
-        }
-        if args[0].is_none() {
-            return Ok(ValueWord::from_string(Arc::new("none".to_string())));
-        }
-        if let Some(s) = args[0].as_str() {
-            return Ok(ValueWord::from_string(Arc::new(s.to_string())));
-        }
-        // Fallback: format via ValueWord-native formatter (no ValueWord bridge).
-        Ok(ValueWord::from_string(Arc::new(
-            self.format_value_default_nb(&args[0]),
-        )))
-    }
-
-    /// ToNumber: Convert value to number
-    pub(in crate::executor) fn builtin_to_number(
-        &mut self,
-        args: ArgVec,
-    ) -> Result<ValueWord, VMError> {
-        check_arity("to_number", &args, 1)?;
-
-        // Fast path: already numeric
-        if let Some(n) = args[0].as_number_coerce() {
-            return Ok(ValueWord::from_f64(n));
-        }
-        // Bool fast path
-        if let Some(b) = args[0].as_bool() {
-            return Ok(ValueWord::from_f64(if b { 1.0 } else { 0.0 }));
-        }
-        // String fast path
-        if let Some(s) = args[0].as_str() {
-            let n = s.parse::<f64>().map_err(|_| VMError::InvalidArgument {
-                function: "to_number".to_string(),
-                message: format!("cannot convert string '{}' to number", s),
-            })?;
-            return Ok(ValueWord::from_f64(n));
-        }
-        // Fallback for other types
-        Err(VMError::TypeError {
-            expected: "number, bool, or string",
-            got: args[0].type_name(),
-        })
-    }
-
-    /// ToBool: Convert value to boolean
-    #[inline]
-    pub(in crate::executor) fn builtin_to_bool(
-        &mut self,
-        args: ArgVec,
-    ) -> Result<ValueWord, VMError> {
-        check_arity("to_bool", &args, 1)?;
-        Ok(ValueWord::from_bool(args[0].is_truthy()))
-    }
-
-    /// TypeOf: Get a first-class `Type` value for a runtime value.
-    #[inline]
-    pub(in crate::executor) fn builtin_type_of(
-        &mut self,
-        _args: ArgVec,
-    ) -> Result<ValueWord, VMError> {
-        // Note: TypeOf uses self.pop_raw_u64() directly, not args
-        let nb = self.pop_raw_u64()?;
-        let annotation = self.type_annotation_for_nb(&nb);
-        Ok(ValueWord::from_type_annotation(annotation))
-    }
-
-    /// SomeCtor: Option::Some constructor
-    #[inline]
-    pub(in crate::executor) fn builtin_some_ctor(
-        &mut self,
-        args: ArgVec,
-    ) -> Result<ValueWord, VMError> {
-        check_arity("Some", &args, 1)?;
-        // The ArgVec retains ownership of args[0]'s heap ref and releases it
-        // on drop. Retain an independent ref for the returned value so the
-        // caller's bits stay valid after return.
-        Ok(shape_value::vw_clone(args[0]))
-    }
-
-    /// OkCtor: Result::Ok constructor
-    #[inline]
-    pub(in crate::executor) fn builtin_ok_ctor(
-        &mut self,
-        args: ArgVec,
-    ) -> Result<ValueWord, VMError> {
-        check_arity("Ok", &args, 1)?;
-        // Retain an independent ref for the boxed payload — ArgVec still owns
-        // the arg slot ref and will release it on drop.
-        Ok(ValueWord::from_ok(shape_value::vw_clone(args[0])))
-    }
-
-    /// ErrCtor: Result::Err constructor
-    ///
-    /// Stores the raw payload directly — AnyError normalization is deferred to
-    /// error propagation sites (try operator, exception handling) so that
-    /// `as_err_inner()` returns the original value.
-    #[inline]
-    pub(in crate::executor) fn builtin_err_ctor(
-        &mut self,
-        args: ArgVec,
-    ) -> Result<ValueWord, VMError> {
-        check_arity("Err", &args, 1)?;
-        Ok(ValueWord::from_err(shape_value::vw_clone(args[0])))
+        self.op_convert_to_char()
     }
 }
 
 #[cfg(test)]
-mod type_ops_tests {
-    use crate::compiler::BytecodeCompiler;
-    use crate::executor::{VMConfig, VirtualMachine};
-    use shape_value::{ValueWord, ValueWordExt};
-
-    fn eval(source: &str) -> ValueWord {
-        let program = shape_ast::parser::parse_program(source).expect("parse failed");
-        let mut compiler = BytecodeCompiler::new();
-        compiler.set_source(source);
-        let bytecode = compiler.compile(&program).expect("compile failed");
-        let mut vm = VirtualMachine::new(VMConfig::default());
-        vm.load_program(bytecode);
-        vm.execute(None).expect("execution failed").clone()
-    }
-
-    // ---- IntToNumber (emitted for int + number mixed arithmetic) ----
+mod tests {
+    use super::*;
 
     #[test]
-    fn test_type_ops_int_to_number_via_mixed_add() {
-        // `let x: int = 3` is an int; `2.5` is a number.
-        // The compiler emits IntToNumber to coerce before AddNumber.
-        let val = eval("let x: int = 3\nx + 2.5");
-        assert_eq!(val.as_f64(), Some(5.5));
+    fn read_as_i64_from_bool() {
+        let s = KindedSlot::from_bool(true);
+        assert_eq!(read_as_i64(&s).unwrap(), 1);
+        let s = KindedSlot::from_bool(false);
+        assert_eq!(read_as_i64(&s).unwrap(), 0);
     }
 
     #[test]
-    fn test_type_ops_int_to_number_negative() {
-        let val = eval("let x: int = -10\nx + 0.5");
-        assert_eq!(val.as_f64(), Some(-9.5));
+    fn read_as_i64_from_int_identity() {
+        let s = KindedSlot::from_int(42);
+        assert_eq!(read_as_i64(&s).unwrap(), 42);
     }
 
     #[test]
-    fn test_type_ops_int_to_number_zero() {
-        let val = eval("let x: int = 0\nx + 1.0");
-        assert_eq!(val.as_f64(), Some(1.0));
+    fn read_as_i64_from_finite_float() {
+        let s = KindedSlot::from_number(3.0);
+        assert_eq!(read_as_i64(&s).unwrap(), 3);
     }
 
-    // ---- NumberToInt (emitted for range bounds from number) ----
+    #[test]
+    fn read_as_i64_from_non_integer_float_errors() {
+        let s = KindedSlot::from_number(3.14);
+        assert!(read_as_i64(&s).is_err());
+    }
 
     #[test]
-    fn test_type_ops_number_to_int_via_range() {
-        // Range start/end emit NumberToInt when the endpoint is a number.
-        // The loop counter uses int arithmetic.
-        let val = eval(
-            r#"
-            let mut sum: int = 0
-            let n: number = 5.0
-            for i in 0..n {
-                sum = sum + i
-            }
-            sum
-            "#,
+    fn read_as_f64_from_int_widens() {
+        let s = KindedSlot::from_int(7);
+        assert_eq!(read_as_f64(&s).unwrap(), 7.0);
+    }
+
+    #[test]
+    fn read_as_f64_from_bool() {
+        let s = KindedSlot::from_bool(true);
+        assert_eq!(read_as_f64(&s).unwrap(), 1.0);
+    }
+
+    #[test]
+    fn read_as_bool_from_zero_int_is_false() {
+        let s = KindedSlot::from_int(0);
+        assert_eq!(read_as_bool(&s).unwrap(), false);
+    }
+
+    #[test]
+    fn read_as_bool_from_nonzero_int_is_true() {
+        let s = KindedSlot::from_int(7);
+        assert_eq!(read_as_bool(&s).unwrap(), true);
+    }
+
+    #[test]
+    fn read_as_string_from_int() {
+        let s = KindedSlot::from_int(42);
+        assert_eq!(read_as_string(&s, None).unwrap(), "42");
+    }
+
+    #[test]
+    fn read_as_string_from_bool() {
+        let s = KindedSlot::from_bool(true);
+        assert_eq!(read_as_string(&s, None).unwrap(), "true");
+    }
+
+    #[test]
+    fn read_as_decimal_from_int() {
+        let s = KindedSlot::from_int(5);
+        let d = read_as_decimal(&s).unwrap();
+        assert_eq!(*d, rust_decimal::Decimal::from(5));
+    }
+
+    #[test]
+    fn read_as_char_from_int() {
+        let s = KindedSlot::from_int('A' as i64);
+        assert_eq!(read_as_char(&s).unwrap(), 'A');
+    }
+
+    #[test]
+    fn read_as_char_from_string_single() {
+        use std::sync::Arc;
+        let s = KindedSlot::from_string_arc(Arc::new("Z".to_string()));
+        assert_eq!(read_as_char(&s).unwrap(), 'Z');
+    }
+
+    #[test]
+    fn read_as_char_from_string_multi_errors() {
+        use std::sync::Arc;
+        let s = KindedSlot::from_string_arc(Arc::new("AB".to_string()));
+        assert!(read_as_char(&s).is_err());
+    }
+
+    #[test]
+    fn read_as_string_from_decimal_heap_kind() {
+        // Heap-numeric `Decimal` kind has an inline arm in the proven
+        // set — formats without needing the schema registry fallback.
+        // The slot OWNS one strong-count share via `KindedSlot::Drop`;
+        // `read_as_string` borrows only.
+        let registry = TypeSchemaRegistry::new();
+        let d = Arc::new(rust_decimal::Decimal::new(314, 2));
+        let bits = Arc::into_raw(d) as u64;
+        let slot = KindedSlot::new(
+            ValueSlot::from_raw(bits),
+            NativeKind::Ptr(HeapKind::Decimal),
         );
-        assert_eq!(val.as_i64(), Some(10)); // 0+1+2+3+4 = 10
-    }
-
-    // ---- ConvertToInt (emitted for `x as int`) ----
-
-    #[test]
-    fn test_type_ops_convert_number_to_int() {
-        let val = eval("let x: number = 42.0\nx as int");
-        assert_eq!(val.as_i64(), Some(42));
+        let out = read_as_string(&slot, Some(&registry)).unwrap();
+        assert_eq!(out, "3.14");
+        // `slot` drops here — retires the one strong-count share.
     }
 
     #[test]
-    fn test_type_ops_convert_string_to_int() {
-        let val = eval("let s = \"123\"\ns as int");
-        assert_eq!(val.as_i64(), Some(123));
-    }
-
-    #[test]
-    fn test_type_ops_convert_bool_true_to_int() {
-        let val = eval("let b = true\nb as int");
-        assert_eq!(val.as_i64(), Some(1));
-    }
-
-    #[test]
-    fn test_type_ops_convert_bool_false_to_int() {
-        let val = eval("let b = false\nb as int");
-        assert_eq!(val.as_i64(), Some(0));
-    }
-
-    #[test]
-    fn test_type_ops_convert_int_to_int_identity() {
-        let val = eval("let x: int = 99\nx as int");
-        assert_eq!(val.as_i64(), Some(99));
-    }
-
-    #[test]
-    fn test_type_ops_convert_negative_number_to_int() {
-        let val = eval("let x: number = -7.0\nx as int");
-        assert_eq!(val.as_i64(), Some(-7));
-    }
-
-    // ---- ConvertToNumber (emitted for `x as number`) ----
-
-    #[test]
-    fn test_type_ops_convert_int_to_number() {
-        let val = eval("let x: int = 10\nx as number");
-        assert_eq!(val.as_f64(), Some(10.0));
-    }
-
-    #[test]
-    fn test_type_ops_convert_string_to_number() {
-        let val = eval("let s = \"3.14\"\ns as number");
-        let f = val.as_f64().expect("expected f64");
-        assert!((f - 3.14).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_type_ops_convert_bool_true_to_number() {
-        let val = eval("let b = true\nb as number");
-        assert_eq!(val.as_f64(), Some(1.0));
-    }
-
-    #[test]
-    fn test_type_ops_convert_bool_false_to_number() {
-        let val = eval("let b = false\nb as number");
-        assert_eq!(val.as_f64(), Some(0.0));
-    }
-
-    #[test]
-    fn test_type_ops_convert_number_to_number_identity() {
-        let val = eval("let x: number = 2.718\nx as number");
-        let f = val.as_f64().expect("expected f64");
-        assert!((f - 2.718).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_type_ops_convert_negative_int_to_number() {
-        let val = eval("let x: int = -42\nx as number");
-        assert_eq!(val.as_f64(), Some(-42.0));
-    }
-
-    // ---- ConvertToBool (emitted for `x as bool`) ----
-
-    #[test]
-    fn test_type_ops_convert_int_nonzero_to_bool() {
-        let val = eval("let x: int = 1\nx as bool");
-        assert_eq!(val.as_bool(), Some(true));
-    }
-
-    #[test]
-    fn test_type_ops_convert_int_zero_to_bool() {
-        let val = eval("let x: int = 0\nx as bool");
-        assert_eq!(val.as_bool(), Some(false));
-    }
-
-    #[test]
-    fn test_type_ops_convert_number_nonzero_to_bool() {
-        let val = eval("let x: number = 3.14\nx as bool");
-        assert_eq!(val.as_bool(), Some(true));
-    }
-
-    #[test]
-    fn test_type_ops_convert_number_zero_to_bool() {
-        let val = eval("let x: number = 0.0\nx as bool");
-        assert_eq!(val.as_bool(), Some(false));
-    }
-
-    #[test]
-    fn test_type_ops_convert_string_true_to_bool() {
-        let val = eval("let s = \"true\"\ns as bool");
-        assert_eq!(val.as_bool(), Some(true));
-    }
-
-    #[test]
-    fn test_type_ops_convert_string_false_to_bool() {
-        let val = eval("let s = \"false\"\ns as bool");
-        assert_eq!(val.as_bool(), Some(false));
-    }
-
-    #[test]
-    fn test_type_ops_convert_bool_identity() {
-        let val = eval("let b = true\nb as bool");
-        assert_eq!(val.as_bool(), Some(true));
-    }
-
-    // ---- ConvertToString (emitted for `x as string`) ----
-
-    #[test]
-    fn test_type_ops_convert_int_to_string() {
-        let val = eval("let x: int = 42\nx as string");
-        assert_eq!(val.as_str().map(|s| s.to_string()), Some("42".to_string()));
-    }
-
-    #[test]
-    fn test_type_ops_convert_number_to_string() {
-        let val = eval("let x: number = 3.14\nx as string");
-        let s = val.as_str().expect("expected string");
-        assert!(s.starts_with("3.14"), "got: {s}");
-    }
-
-    #[test]
-    fn test_type_ops_convert_bool_to_string() {
-        let val = eval("let b = true\nb as string");
-        assert_eq!(
-            val.as_str().map(|s| s.to_string()),
-            Some("true".to_string())
+    fn read_as_string_temporal_surfaces() {
+        // Temporal arm in `format_heap_kind` is still SURFACE; the
+        // wildcard heap fallback must surface-and-stop rather than
+        // panic deep in the formatter.
+        let registry = TypeSchemaRegistry::new();
+        let slot = KindedSlot::new(
+            ValueSlot::from_raw(0),
+            NativeKind::Ptr(HeapKind::Temporal),
+        );
+        let err = read_as_string(&slot, Some(&registry)).unwrap_err();
+        assert!(
+            matches!(err, VMError::NotImplemented(ref msg) if msg.contains("Temporal")),
+            "expected Temporal SURFACE, got: {:?}",
+            err
         );
     }
 
     #[test]
-    fn test_type_ops_convert_string_identity() {
-        let val = eval("let s = \"hello\"\ns as string");
-        assert_eq!(
-            val.as_str().map(|s| s.to_string()),
-            Some("hello".to_string())
+    fn read_as_string_closure_surfaces() {
+        // Closure arm in `format_heap_kind` is still SURFACE per
+        // §2.7.8 / Q10 B7-closure-cells extension dependency.
+        let registry = TypeSchemaRegistry::new();
+        let slot = KindedSlot::new(
+            ValueSlot::from_raw(0),
+            NativeKind::Ptr(HeapKind::Closure),
         );
-    }
-
-    // ---- Raw stack pop/push round-trip via VM ----
-
-    #[test]
-    fn test_type_ops_int_to_number_large_value() {
-        // Test with a larger integer to verify i48 encoding round-trips
-        let val = eval("let x: int = 100000\nx + 0.5");
-        assert_eq!(val.as_f64(), Some(100000.5));
-    }
-
-    #[test]
-    fn test_type_ops_chained_conversions() {
-        // int → number (via mixed arithmetic) → back to int (via as int)
-        let val = eval(
-            r#"
-            let x: int = 7
-            let y: number = x + 0.0
-            y as int
-            "#,
+        let err = read_as_string(&slot, Some(&registry)).unwrap_err();
+        assert!(
+            matches!(err, VMError::NotImplemented(ref msg) if msg.contains("Closure")),
+            "expected Closure SURFACE, got: {:?}",
+            err
         );
-        assert_eq!(val.as_i64(), Some(7));
-    }
-
-    #[test]
-    fn test_type_ops_convert_result_usable_in_arithmetic() {
-        // The output of ConvertToNumber should be usable as a normal f64
-        // in subsequent typed arithmetic.
-        let val = eval(
-            r#"
-            let x: int = 5
-            let y: number = x as number
-            y * 2.0
-            "#,
-        );
-        assert_eq!(val.as_f64(), Some(10.0));
-    }
-
-    #[test]
-    fn test_type_ops_convert_to_int_result_usable_in_arithmetic() {
-        // The output of ConvertToInt should be usable as a normal i64
-        // in subsequent typed arithmetic.
-        let val = eval(
-            r#"
-            let x: number = 10.0
-            let y: int = x as int
-            y + 5
-            "#,
-        );
-        assert_eq!(val.as_i64(), Some(15));
-    }
-
-    #[test]
-    fn test_type_ops_convert_to_bool_result_usable_in_conditional() {
-        // The output of ConvertToBool should be a proper bool usable in if-then-else.
-        let val = eval(
-            r#"
-            let x: int = 1
-            let b: bool = x as bool
-            if b { 100 } else { 0 }
-            "#,
-        );
-        assert_eq!(val.as_i64(), Some(100));
     }
 }

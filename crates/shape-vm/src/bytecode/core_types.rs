@@ -1,5 +1,5 @@
 use super::*;
-use crate::type_tracking::{FrameDescriptor, SlotKind, StorageHint};
+use crate::type_tracking::{FrameDescriptor, NativeKind, StorageHint};
 use std::sync::Arc;
 
 /// Cached MIR analysis data for JIT v2 (MirToIR compilation).
@@ -141,8 +141,8 @@ pub struct OsrEntryPoint {
     pub bytecode_ip: usize,
     /// Which local slots are live at the entry point.
     pub live_locals: Vec<u16>,
-    /// SlotKind for each live local (parallel to `live_locals`, used for marshaling).
-    pub local_kinds: Vec<SlotKind>,
+    /// NativeKind for each live local (parallel to `live_locals`, used for marshaling).
+    pub local_kinds: Vec<NativeKind>,
     /// The bytecode IP of the loop exit (LoopEnd + 1).
     pub exit_ip: usize,
 }
@@ -160,9 +160,9 @@ pub struct DeoptInfo {
     /// Map from JIT local index to bytecode local index.
     /// Each pair is `(jit_local_idx, bytecode_local_idx)`.
     pub local_mapping: Vec<(u16, u16)>,
-    /// SlotKind for each mapped local (parallel to `local_mapping`, used for
+    /// NativeKind for each mapped local (parallel to `local_mapping`, used for
     /// unmarshaling JIT values back to interpreter `ValueWord` representation).
-    pub local_kinds: Vec<SlotKind>,
+    pub local_kinds: Vec<NativeKind>,
     /// Stack depth at this deopt point (number of values on the operand stack).
     pub stack_depth: u16,
     /// Function ID of the innermost frame (where the guard fired).
@@ -188,8 +188,8 @@ pub struct InlineFrameInfo {
     pub resume_ip: usize,
     /// Map from ctx_buf position to bytecode local index for this frame.
     pub local_mapping: Vec<(u16, u16)>,
-    /// SlotKind for each mapped local.
-    pub local_kinds: Vec<SlotKind>,
+    /// NativeKind for each mapped local.
+    pub local_kinds: Vec<NativeKind>,
     /// Stack depth for this frame.
     pub stack_depth: u16,
 }
@@ -285,6 +285,159 @@ pub struct BytecodeProgram {
     #[serde(default)]
     pub top_level_frame: Option<FrameDescriptor>,
 
+    /// Per-slot fully-resolved `ConcreteType` for top-level locals.
+    ///
+    /// ADR-006 §2.7.5 conduit: stamped at bytecode-compile time from the
+    /// compiler's proven type information (the typed-array kind chosen by
+    /// `compile_expr_array`, schema name from the type-tracker for struct
+    /// slots, etc.). The JIT `MirToIR` reads this side-table to drive the
+    /// v2 typed-array fast path (`Rvalue::Aggregate` short-circuit) and
+    /// the TypedObject ObjectStore short-circuit.
+    ///
+    /// `ConcreteType::Void` per slot means "no information available" —
+    /// downstream consumers fall back to the legacy NaN-boxed path. This
+    /// is NOT a Bool-default fallback per §2.7.5.1 / forbidden #9; `Void`
+    /// is the explicit "no concrete type" sentinel value in the
+    /// `ConcreteType` enum, distinct from a fabricated scalar kind.
+    ///
+    /// Not serialized — `ConcreteType` carries opaque `StructLayoutId` /
+    /// `EnumLayoutId` IDs that index into compile-time registries; the
+    /// cached-program path rebuilds them from the program's other
+    /// metadata or falls through to the legacy path.
+    #[serde(skip, default)]
+    pub top_level_local_concrete_types: Vec<shape_value::v2::ConcreteType>,
+
+    /// Per-user-function per-MIR-slot `ConcreteType` side-table.
+    ///
+    /// `function_local_concrete_types[f][slot]` is the proven
+    /// `ConcreteType` for MIR slot `slot` in function index `f`. Empty
+    /// inner vec when the function has no MIR data or the conduit
+    /// couldn't prove anything for the slot.
+    ///
+    /// Producer: `infer_top_level_concrete_types_from_mir` (name is
+    /// historical — its body is generic over any MIR function) called
+    /// per `Function::mir_data` in
+    /// `compiler_impl_reference_model::compile_post_assembly`.
+    ///
+    /// Consumer: `compile_function_with_user_funcs` at
+    /// `crates/shape-jit/src/compiler/program.rs`, which threads the
+    /// per-function entry into `MirToIR::concrete_types`.
+    ///
+    /// ADR-006 §2.7.5 — W12-jit-aggregate-non-array close, 2026-05-12.
+    /// Same NOT-serialized rationale as `top_level_local_concrete_types`.
+    #[serde(skip, default)]
+    pub function_local_concrete_types: Vec<Vec<shape_value::v2::ConcreteType>>,
+
+    /// Per-user-function declared `ConcreteType` for the function's return value.
+    ///
+    /// `function_return_concrete_types[f]` is the `ConcreteType` derived
+    /// from `FunctionDef.return_type` via
+    /// `compiler::v2_map_emission::concrete_type_from_annotation`. Used
+    /// by the conduit producer
+    /// (`infer_top_level_concrete_types_from_mir`) to stamp Call-
+    /// terminator destination slots: when the caller writes
+    /// `let r = divide(10, 2)`, the `r` slot's ConcreteType is the
+    /// callee's return type (here, `Result(I64, String)`).
+    ///
+    /// `ConcreteType::Void` per entry means "no annotation" or
+    /// "annotation didn't reduce to a known shape" — the conduit and
+    /// JIT consumers treat Void as the no-information sentinel per
+    /// §2.7.5.1. NOT a Bool-default fallback per forbidden #9.
+    ///
+    /// Producer: `compile_post_assembly` — per-function walk after the
+    /// per-function MIR conduit populate.
+    /// Consumer: `infer_top_level_concrete_types_from_mir` extended
+    /// with the callee-return resolver parameter.
+    ///
+    /// ADR-006 §2.7.5 — W12-jit-call-return-kind close, 2026-05-12.
+    /// Same NOT-serialized rationale as the sibling `*_concrete_types`
+    /// side-tables; ConcreteType isn't wire-stable.
+    #[serde(skip, default)]
+    pub function_return_concrete_types: Vec<shape_value::v2::ConcreteType>,
+
+    /// ADR-006 §2.7.5 conduit — per-call-site monomorphized-method
+    /// FunctionId side-table (V3-S6b-jit-method-monomorph-conduit close,
+    /// 2026-05-15; supervisor 2026-05-15 PATH α RATIFIED).
+    ///
+    /// Populated at bytecode-compile time by
+    /// `try_monomorphize_method_call` /
+    /// `try_monomorphize_method_call_with_closures` on specialization
+    /// success: the AST `Expr::MethodCall.span` together with the
+    /// currently-compiling caller function index keys the specialized
+    /// FunctionId of the callee. The composite `(Span, calling_function)`
+    /// key disambiguates specialization-within-generic-function cases
+    /// where the same source-level Span gets monomorphized multiple
+    /// times under different caller specialization contexts.
+    ///
+    /// Consumed at the conduit producer
+    /// (`infer_top_level_concrete_types_from_mir_with_resolvers`'s
+    /// `MirConstant::Method` Call-terminator pass) — when the side-table
+    /// has an entry for `(terminator.span, current_function)`, the
+    /// destination slot's `ConcreteType` is lifted from
+    /// `function_return_concrete_types[specialized_idx]` (i.e. the
+    /// callee specialization's declared return type). This carries the
+    /// `.map()` chain's intermediate carrier shape through to the JIT-
+    /// side `parametric_method_return_kind_from_receiver` arm at
+    /// `crates/shape-jit/src/mir_compiler/types.rs:946`, which then
+    /// trivially classifies `.sum()` after `.map()` on `Vec<I64>` →
+    /// `Int64` via the existing
+    /// `("sum"|"mean"|..., ConcreteType::Array(elem))` arm.
+    ///
+    /// PATH α per supervisor 2026-05-15 ratification (side-table on
+    /// BytecodeProgram + Program + LinkedProgram; PATH β MIR back-patching
+    /// is FALLBACK ONLY; PATH γ runtime conduit-extension REFUSED per
+    /// V3-S6a sub-agent SIGSEGV finding — carrier-shape mismatch
+    /// soundness violation).
+    ///
+    /// `#[serde(skip, default)]` per the same wire-format rationale as
+    /// `function_return_concrete_types` — opaque FunctionId indices into
+    /// the per-program function table aren't a stable wire shape.
+    #[serde(skip, default)]
+    pub monomorphized_method_call_sites:
+        std::collections::HashMap<(shape_ast::ast::span::Span, Option<usize>), usize>,
+
+    /// ADR-006 §2.7.5 conduit — per-call-site value-call return
+    /// `ConcreteType` side-table (cluster-2-cw-IB-class-b close,
+    /// 2026-05-16; supervisor R3 binding-ratified).
+    ///
+    /// Populated at bytecode-compile time by
+    /// `compile_expr_function_call`'s value-call branch
+    /// (`crates/shape-vm/src/compiler/expressions/function_calls.rs:498-619`)
+    /// when the callee resolves to a local closure binding whose body's
+    /// return `ConcreteType` is recoverable via caller-context inference
+    /// (i.e. caller-supplied typed-array args reveal the closure's
+    /// otherwise-inferred typed-array param). The composite key
+    /// `(call-site Span, calling_function)` mirrors the
+    /// `monomorphized_method_call_sites` shape so identical Spans inside
+    /// different specialization contexts can carry distinct entries.
+    ///
+    /// Consumed at the conduit producer
+    /// (`infer_top_level_concrete_types_from_mir_with_resolvers`'s
+    /// value-call Call-terminator pass) — when the side-table has an
+    /// entry for `(terminator.span, current_function)` AND the
+    /// terminator's `func` operand reads from a local slot (the
+    /// closure-bound slot), the destination slot's `ConcreteType` is
+    /// stamped from the side-table value. The downstream JIT consumer's
+    /// `place_native_kind` projection then picks up the destination's
+    /// `NativeKind`, and the `print` Call-terminator's kinded dispatch
+    /// at `terminators.rs:447-744` reaches its matching scalar arm
+    /// (e.g. `Some(NativeKind::Int64) => print_i64`).
+    ///
+    /// Class B coverage per inventory §B.2: closure body with INFERRED
+    /// typed-array param (the `let f = |inner| inner.sum(); print(f(xs))`
+    /// fixture). Pre-fix: VM=15 / JIT=NotImplemented(SURFACE,
+    /// `print` operand NativeKind=None). Post-fix: VM=15 / JIT=15.
+    ///
+    /// `#[serde(skip, default)]` per the same wire-format rationale as
+    /// `function_return_concrete_types` — `ConcreteType` carries opaque
+    /// per-program registry IDs that aren't a stable wire shape.
+    #[serde(skip, default)]
+    pub value_call_return_concrete_types:
+        std::collections::HashMap<
+            (shape_ast::ast::span::Span, Option<usize>),
+            shape_value::v2::ConcreteType,
+        >,
+
     /// Type schema registry for TypedObject field resolution
     /// Used to convert TypedObject back to Object when needed
     #[serde(default)]
@@ -362,6 +515,21 @@ pub struct BytecodeProgram {
     #[serde(skip, default)]
     pub closure_function_layouts:
         Vec<Option<Arc<shape_value::v2::closure_layout::ClosureLayout>>>,
+
+    /// ADR-006 §2.7.24 Q25.C trait-object vtable registry.
+    ///
+    /// Keyed by `"Trait::ConcreteType"` (matching the existing
+    /// `trait_method_symbols` key prefix). Built at impl-block
+    /// compilation per `(impl Trait for Type)` pair; consumed at runtime
+    /// by `op_box_trait_object` to allocate `Arc<TraitObjectStorage>`.
+    /// Not serialised because `Arc<VTable>` is not a stable wire shape;
+    /// vtables are rebuilt on cached-program reload from
+    /// `trait_method_symbols`.
+    #[serde(skip, default)]
+    pub trait_vtables: std::collections::HashMap<
+        String,
+        Arc<shape_value::value::VTable>,
+    >,
 }
 
 /// Constants in the constant pool
@@ -385,9 +553,17 @@ pub enum Constant {
     DateTimeExpr(DateTimeExpr),
     DataDateTimeRef(DataDateTimeRef),
     TypeAnnotation(TypeAnnotation),
-    /// Opaque runtime value (not serializable — used for host-injected constants like RowView, DataTable, etc.)
+    /// Opaque runtime value (not serializable — used for host-injected
+    /// constants like RowView, DataTable, etc.).
+    ///
+    /// SURFACE (playbook §8 — `Constant::*` arm pending kinded heap
+    /// alignment): the prior `Value(ValueWord)` shape was deleted by the
+    /// strict-typing bulldozer; the kinded rebuild lives in phase-2c per
+    /// ADR-006 §2.7.4. The placeholder unit shape keeps the variant
+    /// reachable so dispatch sites in `op_push_const` continue to compile,
+    /// without re-introducing a dynamic-tag carrier.
     #[serde(skip)]
-    Value(ValueWord),
+    Value,
 }
 
 /// Function definition in bytecode

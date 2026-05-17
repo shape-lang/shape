@@ -89,6 +89,47 @@ pub(super) fn lower_expr_to_explicit_move_operand(
     }
 }
 
+/// ADR-006 §2.7.27 / W17-mutation-writeback: emit a receiver write-back
+/// after a mutating method call so the JIT (which compiles from MIR) sees
+/// the new Arc in the receiver slot on subsequent reads. Mirrors the
+/// bytecode compiler's `Dup; StoreLocal recv` pattern at
+/// `compiler/expressions/function_calls.rs:2356` — there the result also
+/// stays on the stack as the call's expression value; here the call's
+/// destination temp is already populated, so the writeback is the
+/// secondary `Assign(receiver_slot, Use(Move(temp)))`.
+///
+/// Gate: receiver must be `Expr::Identifier` resolving to a slot tracked
+/// in `mut_self_container_locals`, AND `method` must be in that kind's
+/// `MUT_SELF_*` set. Interior-mutability primitives (Mutex / Atomic /
+/// Lazy / Channel) are not registered, so this returns without emitting.
+pub(super) fn emit_mut_self_writeback_if_needed(
+    builder: &mut MirBuilder,
+    receiver: &Expr,
+    method: &str,
+    temp: SlotId,
+    span: Span,
+) {
+    let Expr::Identifier(name, _) = receiver else {
+        return;
+    };
+    let Some(slot) = builder.lookup_local(name) else {
+        return;
+    };
+    let Some(kind) = builder.lookup_mut_self_container_local(slot) else {
+        return;
+    };
+    if !kind.is_mut_self_method(method) {
+        return;
+    }
+    builder.push_stmt(
+        StatementKind::Assign(
+            Place::Local(slot),
+            Rvalue::Use(Operand::Move(Place::Local(temp))),
+        ),
+        span,
+    );
+}
+
 pub(super) fn lower_expr_as_moved_operand(builder: &mut MirBuilder, expr: &Expr) -> Operand {
     if let Some(place) = lower_expr_to_place(builder, expr) {
         // Use Copy for named variables (identifiers, property accesses, index accesses)
@@ -992,16 +1033,100 @@ fn lower_for_expr(
         builder.start_block(after);
         builder.pop_scope();
     } else {
-        // Generic iterator path (non-range iterators).
-        // This is a placeholder — full iterator protocol not yet implemented in MIR.
+        // Generic (non-Range) iterator path. Lowered as an index-counter
+        // state machine over the iterable's length: pre-compute
+        // `__len = iter.len()`, then loop `idx in 0..__len` reading
+        // `iter[idx]` per iteration.
+        //
+        // cluster-2-closure-wave-1-iter-statemachine (2026-05-16):
+        // replaces the prior placeholder stub
+        // (`iter_slot SwitchBool` truthiness + unconditional Goto(header),
+        // no advance, no termination) that caused Smoke 2 JIT
+        // (`xs.map(|x|x*2).sum()`) to infinite-loop inside the
+        // specialized `Vec.map::i64_i64_closure_*` body at runtime
+        // (rc=124 TIMEOUT) — empirically dispositioned at
+        // `docs/cluster-audits/cluster-2-v3s6f-empirical-verification.md`
+        // §2 hypothesis (a) CONFIRMED. Bytecode-VM-side reference
+        // implementation: `crates/shape-vm/src/compiler/loops.rs:298-518`
+        // (`compile_for_loop` ForIn arm, which uses bytecode-level
+        // `IterDone`/`IterNext` opcodes; the MIR layer does not have
+        // those opcodes available so we use the `len()` / `[idx]`
+        // shape per the empirical-verification deliverable §2.5
+        // recommendation, "Approach (ii) — reuses existing MIR
+        // vocabulary, no new StatementKind variants").
+        //
+        // ADR-006 §2.7.5 stamp-at-compile-time: the iterable's
+        // ConcreteType drives method dispatch at runtime via the JIT's
+        // existing v2 typed-array `len`/index fast paths (e.g.
+        // `crates/shape-jit/src/mir_compiler/v2_array.rs::try_emit_v2_array_method`
+        // for `len`, `places.rs:909-918` for `Place::Index` over a
+        // v2 typed-array slot). Non-typed-array iterables fall through
+        // to the trampoline `jit_call_method("len")` + generic
+        // `inline_array_get` paths, which already handle Array /
+        // HashMap-keys / etc. uniformly.
+        //
+        // ADR-006 §2.7.7 #4 / #7 NOT violated: there is no runtime tag
+        // dispatch in the emitted MIR — the JIT compiler picks the
+        // correct codegen per iterable's compile-time ConcreteType at
+        // its consumer site. The MIR shape is uniform across iterable
+        // types (Call+Index+Add+Lt), and the per-iterable
+        // monomorphization happens downstream of MIR.
+        //
+        // Lowering shape (mirrors the bytecode-VM-side state machine):
+        //
+        //   bb_pre:
+        //     iter_slot = <iterable expr>
+        //     __idx = 0
+        //     __len = iter_slot.len()   ; Call terminator (next=bb_header)
+        //     temp = none                ; for-expr produces unit/None
+        //     goto bb_header
+        //   bb_header:
+        //     __cond = __idx < __len     ; BinaryOp::Lt
+        //     switchbool __cond -> bb_body, bb_after
+        //   bb_body:
+        //     __elem = iter_slot[__idx]  ; via Place::Index
+        //     <destructure pattern from __elem>
+        //     <body, may break / continue>
+        //     __idx = __idx + 1
+        //     goto bb_header
+        //   bb_after:
         builder.push_scope();
 
         let iter_slot = lower_expr_to_temp(builder, &for_expr.iterable);
-        let elem_slot = builder.alloc_temp(LocalTypeInfo::Unknown);
-        let header = builder.new_block();
-        let body_block = builder.new_block();
-        let after = builder.new_block();
 
+        // Counter slot and length slot are pure internal MIR temps.
+        // Both hold integer values (LocalTypeInfo::Copy → JIT will
+        // stamp Int64 via slot-kind inference).
+        let idx_slot = builder.alloc_temp(LocalTypeInfo::Copy);
+        let len_slot = builder.alloc_temp(LocalTypeInfo::Copy);
+
+        // __idx = 0
+        builder.push_stmt(
+            StatementKind::Assign(
+                Place::Local(idx_slot),
+                Rvalue::Use(Operand::Constant(MirConstant::Int(0))),
+            ),
+            span,
+        );
+
+        // __len = iter_slot.len()  — emit as a Call terminator with
+        // MirConstant::Method("len"). The JIT's v2 typed-array fast
+        // path intercepts this at `terminators.rs:108-135` for
+        // typed-array receivers; non-typed-array iterables fall
+        // through to `jit_call_method("len", [iter_slot])`. Either
+        // way, the destination slot receives an i64 length.
+        let len_call_func = Operand::Constant(MirConstant::Method("len".to_string()));
+        builder.emit_call(
+            len_call_func,
+            vec![Operand::Copy(Place::Local(iter_slot))],
+            Place::Local(len_slot),
+            span,
+        );
+
+        // The for-expr's result value defaults to None; the body's
+        // last expression overwrites it per iteration (matching the
+        // Range-case behaviour above and the bytecode-VM-side break-
+        // with-value semantics).
         builder.push_stmt(
             StatementKind::Assign(
                 Place::Local(temp),
@@ -1009,33 +1134,88 @@ fn lower_for_expr(
             ),
             span,
         );
+
+        let header = builder.new_block();
+        let body_block = builder.new_block();
+        let after = builder.new_block();
+
         builder.finish_block(TerminatorKind::Goto(header), span);
 
+        // Loop header: __cond = __idx < __len; switchbool __cond.
         builder.start_block(header);
+        let cond_slot = builder.alloc_temp(LocalTypeInfo::Copy);
+        builder.push_stmt(
+            StatementKind::Assign(
+                Place::Local(cond_slot),
+                Rvalue::BinaryOp(
+                    BinOp::Lt,
+                    Operand::Copy(Place::Local(idx_slot)),
+                    Operand::Copy(Place::Local(len_slot)),
+                ),
+            ),
+            span,
+        );
         builder.finish_block(
             TerminatorKind::SwitchBool {
-                operand: Operand::Copy(Place::Local(iter_slot)),
+                operand: Operand::Copy(Place::Local(cond_slot)),
                 true_bb: body_block,
                 false_bb: after,
             },
             span,
         );
 
+        // Loop body: read iter_slot[__idx] into a fresh element slot,
+        // destructure pattern bindings, lower the user body, increment
+        // counter, goto header.
         builder.start_block(body_block);
+
+        // Allocate the destructure-source slot as either the pattern's
+        // own named slot (single-identifier patterns: avoids one
+        // intermediate copy and matches the bytecode-VM-side path) or
+        // an anonymous temp (compound patterns: destructured downstream).
+        let elem_slot = match &for_expr.pattern {
+            ast::Pattern::Identifier(name) | ast::Pattern::Typed { name, .. } => {
+                builder.alloc_local(name.clone(), LocalTypeInfo::Unknown)
+            }
+            _ => builder.alloc_temp(LocalTypeInfo::Unknown),
+        };
+
+        // __elem = iter_slot[__idx]  — Place::Index lowering. JIT v2
+        // typed-array fast path at `places.rs:909-918` emits an
+        // inline `v2_array_get(arr_ptr, idx_i32, elem_kind)` for
+        // typed-array bases; generic arrays fall back to
+        // `inline_array_get`. Both produce an i64-shaped element
+        // value in the destination slot.
+        let index_place = Place::Index(
+            Box::new(Place::Local(iter_slot)),
+            Box::new(Operand::Copy(Place::Local(idx_slot))),
+        );
         builder.push_stmt(
             StatementKind::Assign(
                 Place::Local(elem_slot),
-                Rvalue::Use(Operand::Constant(MirConstant::None)),
+                Rvalue::Use(Operand::Copy(index_place)),
             ),
             span,
         );
-        super::stmt::lower_pattern_bindings_from_place(
-            builder,
+
+        // Bind compound patterns from the element slot; single-
+        // identifier patterns already have `elem_slot` aliased to
+        // the pattern name above (the destructure walker no-ops for
+        // matching identifier patterns since `lookup_local(name)`
+        // resolves to the slot we just allocated).
+        if !matches!(
             &for_expr.pattern,
-            &Place::Local(elem_slot),
-            span,
-            None,
-        );
+            ast::Pattern::Identifier(_) | ast::Pattern::Typed { .. }
+        ) {
+            super::stmt::lower_pattern_bindings_from_place(
+                builder,
+                &for_expr.pattern,
+                &Place::Local(elem_slot),
+                span,
+                None,
+            );
+        }
+
         builder.push_loop(after, header, Some(temp));
         let body_slot = lower_expr_to_temp(builder, &for_expr.body);
         builder.push_stmt(
@@ -1046,8 +1226,23 @@ fn lower_for_expr(
             for_expr.body.span(),
         );
         builder.pop_loop();
+
+        // __idx = __idx + 1
+        builder.push_stmt(
+            StatementKind::Assign(
+                Place::Local(idx_slot),
+                Rvalue::BinaryOp(
+                    BinOp::Add,
+                    Operand::Copy(Place::Local(idx_slot)),
+                    Operand::Constant(MirConstant::Int(1)),
+                ),
+            ),
+            span,
+        );
+
         builder.finish_block(TerminatorKind::Goto(header), span);
 
+        // After loop
         builder.start_block(after);
         builder.pop_scope();
     }
@@ -1239,7 +1434,44 @@ fn lower_match_pattern_condition_operand(
             );
             Some(Operand::Copy(Place::Local(matches_slot)))
         }
-        ast::Pattern::Array(_) | ast::Pattern::Object(_) | ast::Pattern::Constructor { .. } => {
+        ast::Pattern::Constructor { variant, .. } => {
+            // W12-jit-result-option-trinity (Phase 3 cluster-0 Round 7A,
+            // 2026-05-12). For `Ok(v)` / `Err(e)` / `Some(x)` / `None`
+            // patterns (per ADR-006 §2.7.17 / Q18 — kinded
+            // `Arc<ResultData>` / `Arc<OptionData>` carrier), the
+            // SwitchBool operand is NOT `Copy(scrutinee)` — that would
+            // be a kind-blind I64 truthy check on the Arc<...> pointer
+            // (always truthy → every arm takes the first branch). The
+            // correct lowering emits an explicit `Rvalue::EnumTest {
+            // operand, variant: <tag> }` into a fresh Bool slot, then
+            // returns that slot as the SwitchBool operand. The JIT
+            // consumer calls `jit_arc_result_is_ok` etc., reading the
+            // discriminator field directly from the `*const ResultData`/
+            // `*const OptionData` borrow per §2.7.17.
+            //
+            // Producer-site classification per §2.7.5; consumer dispatch
+            // on `VariantTag` (no runtime tag-bit decode, §2.7.7 #4 / #7
+            // forbidden).
+            if let Some(tag) = VariantTag::from_name(variant) {
+                let bool_slot = builder.alloc_temp(LocalTypeInfo::Copy);
+                builder.push_stmt(
+                    StatementKind::Assign(
+                        Place::Local(bool_slot),
+                        Rvalue::EnumTest {
+                            operand: Operand::Copy(Place::Local(scrutinee_slot)),
+                            variant: tag,
+                        },
+                    ),
+                    pattern_span,
+                );
+                return Some(Operand::Copy(Place::Local(bool_slot)));
+            }
+            // Non-trinity constructor (user-defined enum variant) — fall
+            // back to the legacy kind-blind operand. JIT codegen will
+            // surface-and-stop downstream until user-enum codegen lands.
+            Some(Operand::Copy(Place::Local(scrutinee_slot)))
+        }
+        ast::Pattern::Array(_) | ast::Pattern::Object(_) => {
             Some(Operand::Copy(Place::Local(scrutinee_slot)))
         }
     }
@@ -1270,7 +1502,16 @@ pub(crate) fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotI
                 Literal::Number(v) => MirConstant::Float(f64::to_bits(*v)),
                 Literal::Decimal(_) => MirConstant::Float(0), // decimal not yet modeled
                 Literal::String(s) => MirConstant::Str(s.clone()),
-                Literal::Char(c) => MirConstant::Int(*c as i64),
+                // Phase 3 cluster-2 Round 4 cw-D-fam12 follow-up (instance 57,
+                // 2026-05-16). ADR-006 §2.7.5 amendment Round 19 S1.5: preserve
+                // the Char kind through MIR lowering so the JIT's
+                // `operand_slot_kind` / `infer_constant_kind` classifiers stamp
+                // `NativeKind::Char` and the `print` dispatch routes to
+                // `print_char(codepoint)` instead of `print_i64(codepoint)`.
+                // Pre-fix divergence: `print('A')` → JIT prints "65", VM prints
+                // "A". The pre-fix `MirConstant::Int(*c as i64)` was a
+                // §2.7.5-violating producer-site kind-source loss.
+                Literal::Char(c) => MirConstant::Char(*c),
                 Literal::FormattedString { .. } => unreachable!("handled above"),
                 Literal::ContentString { .. } => MirConstant::Str(String::new()),
                 Literal::Bool(v) => MirConstant::Bool(*v),
@@ -1515,6 +1756,117 @@ pub(crate) fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotI
             named_args,
             ..
         } => {
+            // W12-enum-constructor-mir-lowering (Phase 3 cluster-0 Round 4,
+            // 2026-05-12 audit `588fba2c`): bare-form enum-variant
+            // constructors (`Ok(x)` / `Err(x)` / `Some(x)`) parse as
+            // `Expr::FunctionCall { name: "Ok", ... }` but are NOT
+            // function calls — the VM dispatches them via
+            // `OpCode::BuiltinCall(OkCtor)` etc., not via the function
+            // table. The pre-fix MIR shape emitted
+            // `Call { func: Constant(Function("Ok")), ... }`, which the
+            // JIT's `compile_constant` could not resolve (no entry in
+            // `function_indices`); it fell back to `iconst(I64, 0)`,
+            // the indirect-call dispatched with `callee_bits=0`, and
+            // downstream code segfaulted on TAG_NULL.
+            //
+            // Per ADR-006 §2.7.5 producing-site classification, the
+            // constructor's kind is known here at MIR-emit time: the
+            // name resolves through the same classifier the bytecode
+            // compiler uses (`classify_builtin_function` at
+            // `compiler/helpers.rs:3194-3209`). The rewrite lowers
+            // the bare form to the same `Aggregate` + `EnumStore` MIR
+            // shape the qualified `Result::Ok(x)` path already uses
+            // (see `Expr::EnumConstructor` arm below) — preserving
+            // ADR-006 §2.7.27 mutation-writeback's container-kind
+            // classification at the producing site, and matching the
+            // VM-side bytecode compiler's interception of these names
+            // at `compile_expr_function_call`
+            // (`compiler/expressions/function_calls.rs:870-971`).
+            //
+            // The intercept happens AFTER local-shadow resolution
+            // (`builder.lookup_local(name)`) so user code that
+            // rebinds `let Ok = ...; Ok(5)` still calls the local.
+            if builder.lookup_local(name).is_none()
+                && is_bare_enum_variant_ctor(name)
+                && named_args.is_empty()
+            {
+                let operands: Vec<_> = args
+                    .iter()
+                    .map(|arg| lower_expr_as_moved_operand(builder, arg))
+                    .collect();
+                builder.push_stmt(
+                    StatementKind::Assign(
+                        Place::Local(temp),
+                        Rvalue::Aggregate(operands.clone()),
+                    ),
+                    span,
+                );
+                // ADR-006 §2.7.5 — thread the variant name into EnumStore
+                // so the JIT consumer (`crates/shape-jit/src/mir_compiler/
+                // statements.rs::EnumStore`) can dispatch to
+                // `jit_v2_make_result_ok` / `_err` / `jit_v2_make_option_some`.
+                // The W12-jit-aggregate-non-array fix.
+                emit_container_store_full(
+                    builder,
+                    ContainerStoreKind::Enum,
+                    temp,
+                    operands,
+                    Vec::new(),
+                    Some(name.clone()),
+                    span,
+                );
+                return temp;
+            }
+
+            // W12-collection-constructor-mir-lowering (Phase 3 cluster-0
+            // Round 6C, 2026-05-12): bare-form primitive-collection
+            // constructors (`Set()` / `HashMap()` / `Deque()` /
+            // `PriorityQueue()` / `Channel()` / `Mutex(x)` / `Atomic(x)`
+            // / `Lazy(x)`) parse as `Expr::FunctionCall { name: "Set",
+            // ... }` but are NOT function calls — the VM dispatches them
+            // via `OpCode::BuiltinCall(SetCtor / HashMapCtor / ...)`,
+            // not via the function table. Pre-fix MIR emitted
+            // `Call { func: Constant(Function("Set")), ... }`, the JIT's
+            // `compile_constant` could not resolve the name through
+            // `function_indices`, fell back to `iconst(I64, 0)`, and
+            // downstream code received `callee_bits = 0` → garbage
+            // values silently propagated through `.add()` / `.size()`
+            // method dispatch (the §2.1 enum-variant family produced a
+            // segfault chain at this point; here it's a silent-wrong-
+            // answer because the PHF method dispatch reads null bits as
+            // a valid Arc rather than crashing).
+            //
+            // Per ADR-006 §2.7.5 producing-site classification, the
+            // constructor's kind is known here at MIR-emit time. The
+            // rewrite reuses the same `Aggregate` + `EnumStore` MIR
+            // shape as the bare-form enum-variant family (the audit's
+            // §5.3 "simpler alternative — reuse `EnumStore` with
+            // `kind`-on-the-slot threading" recommendation), with the
+            // collection name threaded via `variant_name`. The JIT
+            // EnumStore consumer disambiguates enum-ctor from
+            // collection-ctor by name and surfaces a collection-ctor-
+            // specific §-cited message (no garbage propagation,
+            // honest surface-and-stop equivalence ratchet per the
+            // W12-enum-constructor close pattern).
+            //
+            // The intercept happens AFTER local-shadow resolution so
+            // user code that rebinds `let Set = ...; Set(5)` still
+            // calls the local. `named_args.is_empty()` preserves the
+            // legacy named-args error path.
+            //
+            // Site 1 of 3: `Expr::FunctionCall` direct call.
+            if builder.lookup_local(name).is_none()
+                && is_bare_collection_ctor(name)
+                && named_args.is_empty()
+            {
+                let operands: Vec<_> = args
+                    .iter()
+                    .map(|arg| lower_expr_as_moved_operand(builder, arg))
+                    .collect();
+                emit_collection_ctor_store(builder, temp, operands, name.clone(), span);
+                return temp;
+            }
+
             let mut arg_ops = Vec::with_capacity(args.len() + named_args.len());
             arg_ops.extend(
                 args.iter()
@@ -1555,7 +1907,7 @@ pub(crate) fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotI
             )));
             builder.emit_call(func_op, arg_ops, Place::Local(temp), span);
         }
-        Expr::EnumConstructor { payload, .. } => match payload {
+        Expr::EnumConstructor { variant, payload, .. } => match payload {
             ast::EnumConstructorPayload::Unit => {
                 assign_none(builder, temp, span);
             }
@@ -1568,11 +1920,16 @@ pub(crate) fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotI
                     StatementKind::Assign(Place::Local(temp), Rvalue::Aggregate(operands.clone())),
                     span,
                 );
-                emit_container_store_if_needed(
+                // ADR-006 §2.7.5 — thread the variant name into EnumStore
+                // so the JIT EnumStore consumer can dispatch to the right
+                // typed-Arc producer (W12-jit-aggregate-non-array).
+                emit_container_store_full(
                     builder,
                     ContainerStoreKind::Enum,
                     temp,
                     operands,
+                    Vec::new(),
+                    Some(variant.clone()),
                     span,
                 );
             }
@@ -1585,11 +1942,13 @@ pub(crate) fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotI
                     StatementKind::Assign(Place::Local(temp), Rvalue::Aggregate(operands.clone())),
                     span,
                 );
-                emit_container_store_if_needed(
+                emit_container_store_full(
                     builder,
                     ContainerStoreKind::Enum,
                     temp,
                     operands,
+                    Vec::new(),
+                    Some(variant.clone()),
                     span,
                 );
             }
@@ -1669,6 +2028,7 @@ pub(crate) fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotI
             );
             let func_op = Operand::Constant(MirConstant::Method(method.clone()));
             builder.emit_call(func_op, arg_ops, Place::Local(temp), span);
+            emit_mut_self_writeback_if_needed(builder, receiver, method, temp, span);
         }
         Expr::Range { start, end, .. } => {
             let mut operands = Vec::new();
@@ -1692,7 +2052,9 @@ pub(crate) fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotI
         Expr::SimulationCall { params, .. } => {
             lower_exprs_to_aggregate(builder, temp, params.iter().map(|(_, expr)| expr), span);
         }
-        Expr::StructLiteral { fields, .. } => {
+        Expr::StructLiteral {
+            type_name, fields, ..
+        } => {
             let operands: Vec<_> = fields
                 .iter()
                 .map(|(_, expr)| lower_expr_as_moved_operand(builder, expr))
@@ -1713,6 +2075,14 @@ pub(crate) fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotI
                 field_names,
                 span,
             );
+            // ADR-006 §2.7.5 producing-site classification — Phase 3
+            // cluster-0 Round 13 T1' gap 1 closure. Record the struct
+            // type name on the destination slot so the conduit
+            // producer (and downstream JIT trait-method return-kind
+            // classifier) can map receiver-slot → struct-type-name →
+            // trait method declared return ConcreteType for
+            // `t.method()`-style call terminators.
+            builder.record_local_struct_type_name(temp, type_name.name().to_string());
         }
         Expr::Annotated {
             annotation, target, ..
@@ -1805,6 +2175,62 @@ fn lower_pipe_expr(
             named_args,
             ..
         } => {
+            // W12-enum-constructor-mir-lowering: same producer-side
+            // classification as the non-piped path above. `expr |> Ok`
+            // is a constructor expression, not a function call.
+            if builder.lookup_local(name).is_none()
+                && is_bare_enum_variant_ctor(name)
+                && named_args.is_empty()
+            {
+                let left_op = lower_expr_as_moved_operand(builder, left);
+                let mut operands = Vec::with_capacity(1 + args.len());
+                operands.push(left_op);
+                operands.extend(
+                    args.iter()
+                        .map(|arg| lower_expr_as_moved_operand(builder, arg)),
+                );
+                builder.push_stmt(
+                    StatementKind::Assign(
+                        Place::Local(temp),
+                        Rvalue::Aggregate(operands.clone()),
+                    ),
+                    span,
+                );
+                emit_container_store_full(
+                    builder,
+                    ContainerStoreKind::Enum,
+                    temp,
+                    operands,
+                    Vec::new(),
+                    Some(name.clone()),
+                    span,
+                );
+                return;
+            }
+
+            // W12-collection-constructor-mir-lowering: Site 2 of 3 —
+            // pipe-operator `FunctionCall` form (`x |> Mutex(...)`).
+            // Only meaningful for the with-arg subset
+            // (`Mutex`/`Atomic`/`Lazy`); zero-arg ctors via pipe
+            // (`x |> Set()`) fall through to the legacy `Call` path
+            // since `Set` rejects positional args at the VM-side
+            // ctor body — matching the bytecode-compile-time error
+            // shape rather than silently discarding the piped value.
+            if builder.lookup_local(name).is_none()
+                && is_bare_collection_ctor_with_arg(name)
+                && named_args.is_empty()
+            {
+                let left_op = lower_expr_as_moved_operand(builder, left);
+                let mut operands = Vec::with_capacity(1 + args.len());
+                operands.push(left_op);
+                operands.extend(
+                    args.iter()
+                        .map(|arg| lower_expr_as_moved_operand(builder, arg)),
+                );
+                emit_collection_ctor_store(builder, temp, operands, name.clone(), span);
+                return;
+            }
+
             let left_op = lower_expr_as_moved_operand(builder, left);
             let mut arg_ops = Vec::with_capacity(1 + args.len() + named_args.len());
             arg_ops.push(left_op);
@@ -1829,8 +2255,52 @@ fn lower_pipe_expr(
             arg_ops.extend(named_args.iter().map(|(_, expr)| lower_expr_as_moved_operand(builder, expr)));
             let func_op = Operand::Constant(MirConstant::Method(method.clone()));
             builder.emit_call(func_op, arg_ops, Place::Local(temp), span);
+            emit_mut_self_writeback_if_needed(builder, receiver, method, temp, span);
         }
         Expr::Identifier(name, _) => {
+            // W12-collection-constructor-mir-lowering: Site 3 of 3 —
+            // pipe-operator `Identifier` form (`x |> Mutex`). Only
+            // meaningful for the with-arg subset (Mutex/Atomic/Lazy);
+            // for zero-arg ctors (`x |> Set`) the piped value has
+            // nowhere to go — fall through to the legacy `Call` path,
+            // which surfaces the existing function-table lookup miss
+            // (the bare-Identifier-callee form is rare enough that
+            // CLAUDE.md doesn't track it as a load-bearing failure
+            // mode). Apply intercept BEFORE the enum-variant intercept
+            // since `Mutex`/`Atomic`/`Lazy` and `Ok`/`Err`/`Some` are
+            // disjoint sets.
+            if builder.lookup_local(name).is_none()
+                && is_bare_collection_ctor_with_arg(name)
+            {
+                let left_op = lower_expr_as_moved_operand(builder, left);
+                let operands = vec![left_op];
+                emit_collection_ctor_store(builder, temp, operands, name.clone(), span);
+                return;
+            }
+            // W12-enum-constructor-mir-lowering: `expr |> Ok` form —
+            // pipe into a bare-form constructor ident. Same producer-
+            // side classification.
+            if builder.lookup_local(name).is_none() && is_bare_enum_variant_ctor(name) {
+                let left_op = lower_expr_as_moved_operand(builder, left);
+                let operands = vec![left_op];
+                builder.push_stmt(
+                    StatementKind::Assign(
+                        Place::Local(temp),
+                        Rvalue::Aggregate(operands.clone()),
+                    ),
+                    span,
+                );
+                emit_container_store_full(
+                    builder,
+                    ContainerStoreKind::Enum,
+                    temp,
+                    operands,
+                    Vec::new(),
+                    Some(name.clone()),
+                    span,
+                );
+                return;
+            }
             let left_op = lower_expr_as_moved_operand(builder, left);
             let func_op = Operand::Constant(MirConstant::Function(name.clone()));
             builder.emit_call(func_op, vec![left_op], Place::Local(temp), span);

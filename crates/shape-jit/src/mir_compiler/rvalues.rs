@@ -32,7 +32,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 let r_type = self.builder.func.dfg.value_type(r);
 
                 // F5.a/F5.b: string `+` — concat via FFI. Either operand being a
-                // `SlotKind::String` is enough; the FFI handles `str + <any>` by
+                // `NativeKind::String` is enough; the FFI handles `str + <any>` by
                 // falling back to `format_value_word` on non-string operands,
                 // which matches the lowering emitted by f-string interpolation.
                 if matches!(op, BinOp::Add) && self.either_string(lhs_kind, rhs_kind) {
@@ -73,14 +73,40 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             }
 
             Rvalue::Clone(operand) => {
-                // Explicit clone: get the value and retain.
+                // Explicit clone: get the value and (if heap-kinded) retain.
                 //
-                // R4.2D: `jit_arc_retain` takes a plain `u64` bit-pattern
-                // (implicitly ValueWord-encoded), so no width-extension
-                // wrap is needed. Clones are only emitted for heap types,
-                // which already live in I64 slots at this site.
+                // W11-jit-new-array (ADR-006 §2.7.5 / §2.7.6 / Q8): the
+                // pre-W11 unconditional retain here was the symmetric
+                // version of the `compile_operand` Copy bug — fired on
+                // every Clone regardless of kind, which segfaulted on
+                // `NativeKind::Int64` slots whose bits are a raw int
+                // (the `MIR-emits-Clone-on-non-heap` case the W-series
+                // ABI tolerated via tag-bit decode). The principled
+                // response is to use the same kind-aware disposition
+                // path as Copy. When the operand has no `Place::Local`
+                // (e.g. `Operand::Constant`), there's no slot to
+                // discriminate by — and the bytecode compiler does not
+                // emit `Rvalue::Clone(Constant(...))` (Clone is by
+                // construction a place-rooted operation), so the
+                // fallback arm surface-and-stops with a clear marker.
                 let val = self.compile_operand_raw(operand)?;
-                self.builder.ins().call(self.ffi.arc_retain, &[val]);
+                let place = match operand {
+                    shape_vm::mir::types::Operand::Copy(p)
+                    | shape_vm::mir::types::Operand::Move(p)
+                    | shape_vm::mir::types::Operand::MoveExplicit(p) => p,
+                    shape_vm::mir::types::Operand::Constant(_) => {
+                        return Err(
+                            "MirToIR: Rvalue::Clone(Constant) — Clone is \
+                             defined on place-rooted operands per ADR-006 \
+                             §2.7.5; emitter contract violated. SURFACE."
+                                .to_string(),
+                        );
+                    }
+                };
+                if self.refcount_disposition_for_place(place)? {
+                    let retain_func = self.retain_func_for_place(place);
+                    self.builder.ins().call(retain_func, &[val]);
+                }
                 Ok(val)
             }
 
@@ -96,7 +122,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // legacy 8-byte cell with no behavioural change.
                 let raw_val = self.read_place(place)?;
                 let root = place.root_local();
-                let kind = super::types::slot_kind_for_local(&self.slot_kinds, root.0);
+                let kind = super::types::slot_kind_for_local(&self.slot_kinds, root.0)
+                    .unwrap_or(shape_vm::type_tracking::NativeKind::Int64);
                 let cl_ty = super::types::cranelift_type_for_slot(kind);
                 let size = cl_ty.bytes();
                 // `create_sized_stack_slot` takes the log2 of the alignment;
@@ -115,90 +142,289 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 Ok(self.builder.ins().stack_addr(types::I64, slot, 0))
             }
 
-            Rvalue::Aggregate(operands) => {
-                // Create an empty array via jit_new_array(ctx, 0), then push elements.
-                let zero = self.builder.ins().iconst(types::I64, 0i64);
-                let inst = self.builder.ins().call(
-                    self.ffi.new_array,
-                    &[self.ctx_ptr, zero],
-                );
-                let mut arr = self.builder.inst_results(inst)[0];
+            Rvalue::Aggregate(_operands) => {
+                // Route A (ADR-006 §2.7.14 / W11-jit-new-array close):
+                // typed-array allocation is kind-monomorphized on the
+                // destination slot's element kind. The kind-blind
+                // `jit_new_array` + `jit_array_push_elem` ABI was the
+                // deleted ValueWord-shape path.
+                //
+                // statements.rs's `StatementKind::Assign` handler short-
+                // circuits to `emit_v2_array_aggregate` (which calls
+                // `jit_v2_array_new_<kind>` directly) when the destination
+                // place has a proven scalar element kind via
+                // `v2_typed_array_elem_kind`. Reaching this fallback means
+                // the destination place could not be resolved to a typed-
+                // array slot — either the destination isn't a local, or
+                // the local's `ConcreteType` lacks the `Array<T>` shape
+                // the v2 fast path requires.
+                //
+                // Per §2.7.14 forbidden list ("Bool-default fallback for
+                // unknown element kinds") the correct response is
+                // surface-and-stop; falling back to a kind-blind allocator
+                // would resurrect the deleted UnifiedArray heap layout.
+                Err(
+                    "Route A surface-and-stop: SURFACE — Rvalue::Aggregate \
+                     reached the kind-blind fallback. The v2 typed-array \
+                     fast path in statements.rs requires the destination \
+                     `Place::Local` to carry a `ConcreteType::Array<scalar>`; \
+                     reaching here means the element kind is not threaded \
+                     from the producing call signature. Tracked as \
+                     W11-jit-new-array per phase-3-kickoff-prompt.md. \
+                     ADR-006 §2.7.14 / §2.7.5."
+                        .to_string(),
+                )
+            }
 
-                // R4.2B: FFI signatures accept plain u64 bit-patterns — no
-                // box wrap needed at call site. Operands reaching
-                // `jit_array_push_elem` are ValueWord-encoded I64 slots. Native
-                // F64/I32/I8 constants flowing in from `compile_operand_raw`
-                // must be NaN-boxed (not raw-widened) so that the legacy
-                // array-read path decodes the element's original type rather
-                // than treating raw bits as a denormal `Number`.
-                for operand in operands {
-                    let hint = self.operand_slot_kind(operand);
-                    let elem_raw = self.compile_operand_raw(operand)?;
-                    let elem = self.nan_box_for_value_word(elem_raw, hint);
-                    let inst = self.builder
-                        .ins()
-                        .call(self.ffi.array_push_elem, &[arr, elem]);
-                    arr = self.builder.inst_results(inst)[0];
-                }
+            Rvalue::EnumTest { operand, variant } => {
+                // ADR-006 §2.7.17 / Q18 (W12-jit-result-option-trinity,
+                // Phase 3 cluster-0 Round 7A, 2026-05-12). The operand is
+                // an `Arc::into_raw(Arc<ResultData>) as u64` or
+                // `Arc::into_raw(Arc<OptionData>) as u64` slot per the
+                // §2.7.7 stack-tier kind label; the FFI accessor reads
+                // `is_ok` / `is_some` from the `*const T` directly. NOT a
+                // NaN-box tag decode (§2.7.7 #4 / #7 forbidden), NOT a
+                // generic SwitchBool fallthrough — kind-aware codegen per
+                // the audit blueprint at
+                // `docs/cluster-audits/w12-jit-match-enum-inline-audit.md`
+                // §6.1.
+                let bits = self.compile_operand_raw(operand)?;
+                let bits_i64 = self.to_i64_bits(bits);
+                let func_ref = match variant {
+                    VariantTag::Ok => self.ffi.arc_result_is_ok,
+                    VariantTag::Err => self.ffi.arc_result_is_err,
+                    VariantTag::Some_ => self.ffi.arc_option_is_some,
+                    VariantTag::None_ => self.ffi.arc_option_is_none,
+                };
+                let inst = self.builder.ins().call(func_ref, &[bits_i64]);
+                // FFI returns I8 (native bool). Caller's destination slot
+                // kind is `Bool` per `infer_rvalue_kind`'s EnumTest arm.
+                Ok(self.builder.inst_results(inst)[0])
+            }
 
-                Ok(arr)
+            Rvalue::EnumPayload { operand, variant } => {
+                // ADR-006 §2.7.17 / Q18 (W12-jit-result-option-trinity).
+                // Caller has proven the variant matches via `EnumTest` and
+                // control-flow only enters this arm in the matching branch.
+                // The FFI clones the inner KindedSlot's share (per §2.7.17
+                // receiver-recovery soundness) and returns the raw bits as
+                // an owned slot at the caller's destination. Payload kind
+                // flows via the EnumStore producer's compile-time stamp +
+                // 6A's call-return-kind track (the destination slot's kind
+                // is set at MIR-inference time, not at this codegen site).
+                //
+                // `VariantTag::None_` here is a producer-side bug — the
+                // None arm has no payload to extract. Surface-and-stop.
+                let func_ref = match variant {
+                    VariantTag::Ok | VariantTag::Err => self.ffi.arc_result_payload,
+                    VariantTag::Some_ => self.ffi.arc_option_payload,
+                    VariantTag::None_ => {
+                        return Err(
+                            "EnumPayload: SURFACE — VariantTag::None_ has no \
+                             payload to extract per ADR-006 §2.7.17 \
+                             `OptionData::none()` (placeholder Bool slot). \
+                             The MIR producer in \
+                             `lower_constructor_bindings_from_place_opt` \
+                             must not emit `EnumPayload { variant: None_ }`. \
+                             Producer-site contract violated."
+                                .to_string(),
+                        );
+                    }
+                };
+                let bits = self.compile_operand_raw(operand)?;
+                let bits_i64 = self.to_i64_bits(bits);
+                let inst = self.builder.ins().call(func_ref, &[bits_i64]);
+                Ok(self.builder.inst_results(inst)[0])
             }
         }
     }
 
     // ── Operand kind helpers ───────────────────────────────────────
 
-    /// Get the SlotKind of an operand's source (before compilation).
-    pub(crate) fn operand_slot_kind(&self, operand: &Operand) -> Option<shape_vm::type_tracking::SlotKind> {
+    /// Get the NativeKind of an operand's source, falling back to the
+    /// documented §2.7.5 stable-FFI carrier kind `NativeKind::UInt64` when
+    /// the producing-site inference left the slot kind undetermined.
+    ///
+    /// ADR-006 §2.7.5 designates `UInt64` as the "I64-wide raw bits without
+    /// further classification" carrier kind — the same kind
+    /// `dispatch_call_via_trampoline_vm` stamps for function-id-class
+    /// callees and for I64-widened args at the JIT-FFI boundary. It is
+    /// NOT a Bool-default rationalization (§2.7.7 #9 / CLAUDE.md
+    /// "Forbidden rationalizations"); `UInt64` is the documented carrier
+    /// kind for the bit-pattern the JIT actually pushes onto the stack
+    /// (every operand widens to I64 before the push per terminators.rs
+    /// R4.2E inline-widening discipline).
+    ///
+    /// Precise kinds — `Ptr(HeapKind::Closure)` for closure slots seeded by
+    /// `infer_slot_kinds::ClosureCapture`, `Float64` / `Bool` / etc. for
+    /// inferred scalar slots — flow through unchanged. The fallback only
+    /// applies to slots whose producing-site is opaque to MIR inference
+    /// (field reads through heap projections, opaque-source calls, etc.)
+    /// — in those cases the value IS I64-wide raw bits by construction,
+    /// and `UInt64` is the structurally-correct §2.7.5 carrier kind.
+    ///
+    /// For the load-bearing closure-callee classification at
+    /// `jit_call_value`'s indirect-call entry, the §2.7.11/Q12 dispatch
+    /// requires precise `Ptr(HeapKind::Closure)` kinds — seeded via
+    /// `infer_slot_kinds`'s ClosureCapture arm. The `UInt64` fallback at
+    /// other push sites preserves the existing JIT-internal NaN-box
+    /// bit-shape dispatch path inside `jit_call_value` (cases 1 / 2 —
+    /// inline `TAG_FUNCTION` function refs and legacy `HK_CLOSURE`
+    /// unified-heap callees).
+    #[allow(dead_code)]
+    pub(crate) fn operand_slot_kind_or_carrier(
+        &self,
+        operand: &Operand,
+    ) -> shape_value::NativeKind {
+        self.operand_slot_kind(operand)
+            .unwrap_or(shape_value::NativeKind::UInt64)
+    }
+
+    /// Get the NativeKind of an operand's source (before compilation).
+    ///
+    /// ADR-006 §2.7.5 / §2.7.11: the producing site classifies the operand
+    /// kind at JIT-compile time. Function refs widen to the documented
+    /// `NativeKind::UInt64` carrier kind (the §2.7.11/Q12 function-id-class
+    /// callee-classification kind, also used as the "I64-wide raw bits
+    /// carrier" sentinel at the §2.7.5 stable-FFI boundary). Method-name
+    /// constants are heap String pointers (kind = `NativeKind::String`).
+    /// String and StringId constants are likewise heap String pointers.
+    pub(crate) fn operand_slot_kind(&self, operand: &Operand) -> Option<shape_vm::type_tracking::NativeKind> {
+        use shape_vm::type_tracking::NativeKind;
         match operand {
-            Operand::Constant(MirConstant::Int(_)) => {
-                Some(shape_vm::type_tracking::SlotKind::Int64)
-            }
-            Operand::Constant(MirConstant::Float(_)) => {
-                Some(shape_vm::type_tracking::SlotKind::Float64)
-            }
-            Operand::Constant(MirConstant::Bool(_)) => {
-                Some(shape_vm::type_tracking::SlotKind::Bool)
-            }
+            Operand::Constant(MirConstant::Int(_)) => Some(NativeKind::Int64),
+            Operand::Constant(MirConstant::Float(_)) => Some(NativeKind::Float64),
+            Operand::Constant(MirConstant::Bool(_)) => Some(NativeKind::Bool),
+            // Phase 3 cluster-2 Round 4 cw-D-fam12 follow-up (instance 57,
+            // 2026-05-16). ADR-006 §2.7.5 amendment Round 19 S1.5: Char is a
+            // 4-byte scalar `NativeKind` variant (codepoint inline in low 32
+            // bits of `ValueSlot`, no Arc wrapping). Producer-site
+            // classification at the MIR constant operand mirrors the
+            // `infer_constant_kind` arm in `types.rs` — both feed the same
+            // §2.7.5 stamp-at-compile-time discipline for the print dispatch
+            // at `terminators.rs` ~679 `NativeKind::Char` arm.
+            Operand::Constant(MirConstant::Char(_)) => Some(NativeKind::Char),
+            // ADR-006 §2.7.11/Q12 function-id-class callee-classification
+            // kind: a `MirConstant::Function(name)` lowers to the JIT-
+            // internal `box_function(fn_id)` shape (TAG_FUNCTION NaN-box),
+            // whose carrier kind across the §2.7.5 stable-FFI boundary is
+            // `NativeKind::UInt64`. The trampoline VM consumer
+            // (`dispatch_call_via_trampoline_vm`) classifies this same
+            // kind as the function-id callee per `call_convention.rs`
+            // UInt64 arm.
+            Operand::Constant(MirConstant::Function(_)) => Some(NativeKind::UInt64),
+            // Method-name string constant. The JIT emits a heap String
+            // pointer via `box_string`; carrier kind is `String` (the
+            // §2.7.5 String arm — `Arc<String>` raw pointer carrier).
+            Operand::Constant(MirConstant::Method(_)) => Some(NativeKind::String),
+            // String constants and string-id constants both materialize
+            // as heap `Arc<String>` raw pointers; carrier kind is String.
+            Operand::Constant(MirConstant::Str(_)) => Some(NativeKind::String),
+            Operand::Constant(MirConstant::StringId(_)) => Some(NativeKind::String),
+            // ClosurePlaceholder is the producing-site forward-reference
+            // for closures whose function_id is patched later. The slot
+            // it lowers to carries `Arc<HeapValue::ClosureRaw>` bits per
+            // §2.7.11/Q12.
+            Operand::Constant(MirConstant::ClosurePlaceholder) => Some(NativeKind::Ptr(
+                shape_value::heap_value::HeapKind::Closure,
+            )),
+            Operand::Constant(MirConstant::None) => None,
             Operand::Copy(p) | Operand::Move(p) | Operand::MoveExplicit(p) => {
-                let slot = p.root_local();
-                let kind = super::types::slot_kind_for_local(&self.slot_kinds, slot.0);
-                if kind != shape_vm::type_tracking::SlotKind::Unknown {
-                    Some(kind)
-                } else {
-                    None
-                }
+                // Centralized projection: `place_native_kind` handles
+                // both Round 5A's Field projection (via
+                // `field_native_kinds`) AND Round 5C's Index projection
+                // (via `v2_typed_array_elem_kind` → `concrete_types`'s
+                // `Array<scalar>` shape) in a single helper that
+                // `ownership::refcount_disposition` also shares.
+                self.place_native_kind(p)
             }
-            _ => None,
+        }
+    }
+
+    /// Project a `Place` to the `NativeKind` of the value it produces at
+    /// the consumer site, per ADR-006 §2.7.5 stamp-at-compile-time
+    /// discipline (W12-jit-binop-after-heap-read-kind-tracker close).
+    ///
+    /// - `Place::Local(slot)`: read the slot's MIR-inferred kind from
+    ///   `slot_kinds`.
+    /// - `Place::Field(base, field_idx)`: look up the field name via
+    ///   `field_name_table`, then the per-field kind in
+    ///   `field_native_kinds` — populated by the producer-side
+    ///   `StatementKind::ObjectStore` walk at MirToIR construction time.
+    ///   This threads the producer's kind classification across the
+    ///   TypedObject field-read projection without runtime tag-bit
+    ///   decode (§2.7.7 #4 / #7 forbidden).
+    /// - `Place::Index(base, _)`: when the base local's `ConcreteType`
+    ///   is `Array<scalar>` (per the W12-top-level-concrete-types-
+    ///   conduit close), project to the element's `NativeKind` via
+    ///   `v2_typed_array_elem_kind`. This is the same kind the v2
+    ///   `read_place` fast path uses to load the element at its native
+    ///   width. Same projection the W12-jit-print-kind (Round 5C) sub-
+    ///   cluster needs at the `print(xs[0])` dispatch site.
+    /// - `Place::Deref(_)`: not stamped — references are heap-tier
+    ///   indirection and the type-of-pointed-to-value is not threaded
+    ///   into the JIT-side projection map yet. Returns `None` so the
+    ///   BinaryOp lowering surfaces honestly rather than papering.
+    ///
+    /// Returns `None` when no proof exists at this consumer site;
+    /// callers in `compile_rvalue` then choose between surface-and-stop
+    /// (the dynamic-arith / dynamic-cmp arms) and continuing through the
+    /// `UInt64` carrier fallback in `operand_slot_kind_or_carrier`.
+    ///
+    /// `pub(crate)` so `ownership::refcount_disposition` can project
+    /// through `Field` / `Index` to decide retain/release on the value
+    /// being copied — the value's kind is the field's / element's kind,
+    /// not the base struct/array's heap kind. This closes the segfault
+    /// where `Copy(Field(p_TypedObject, x_Int64))` previously routed
+    /// through the base's heap retain and called `arc_retain(i64_3)`.
+    pub(crate) fn place_native_kind(&self, place: &Place) -> Option<shape_vm::type_tracking::NativeKind> {
+        match place {
+            Place::Local(slot) => {
+                super::types::slot_kind_for_local(&self.slot_kinds, slot.0)
+            }
+            Place::Field(_, field_idx) => {
+                let name = self.mir.field_name_table.get(field_idx)?;
+                self.field_native_kinds.get(name).copied()
+            }
+            Place::Index(base, _) => {
+                // The v2 typed-array element-kind helper takes a Place
+                // and reads `concrete_types[base.root_local()]`. It is
+                // the same source the `read_place` fast path uses to
+                // pick the native-width load width for the element —
+                // pairing the producer-side kind classification with the
+                // consumer-side BinaryOp picker.
+                self.v2_typed_array_elem_kind(base)
+            }
+            Place::Deref(_) => None,
         }
     }
 
     /// Check if both operand kinds are Int64 (NaN-boxed integers suitable for inline i64 ops).
     fn both_int64(
         &self,
-        lhs: Option<shape_vm::type_tracking::SlotKind>,
-        rhs: Option<shape_vm::type_tracking::SlotKind>,
+        lhs: Option<shape_vm::type_tracking::NativeKind>,
+        rhs: Option<shape_vm::type_tracking::NativeKind>,
     ) -> bool {
         matches!(
             (lhs, rhs),
             (
-                Some(shape_vm::type_tracking::SlotKind::Int64),
-                Some(shape_vm::type_tracking::SlotKind::Int64)
+                Some(shape_vm::type_tracking::NativeKind::Int64),
+                Some(shape_vm::type_tracking::NativeKind::Int64)
             )
         )
     }
 
-    /// F5.a/F5.b: true if either operand kind is `SlotKind::String`. The MIR
+    /// F5.a/F5.b: true if either operand kind is `NativeKind::String`. The MIR
     /// emits `BinOp::Add` on heterogeneous operand types for f-string
     /// interpolation (e.g. `str + number + str`) — the FFI's non-string
     /// fallback (`format_value_word`) does the rest.
     fn either_string(
         &self,
-        lhs: Option<shape_vm::type_tracking::SlotKind>,
-        rhs: Option<shape_vm::type_tracking::SlotKind>,
+        lhs: Option<shape_vm::type_tracking::NativeKind>,
+        rhs: Option<shape_vm::type_tracking::NativeKind>,
     ) -> bool {
-        matches!(lhs, Some(shape_vm::type_tracking::SlotKind::String))
-            || matches!(rhs, Some(shape_vm::type_tracking::SlotKind::String))
+        matches!(lhs, Some(shape_vm::type_tracking::NativeKind::String))
+            || matches!(rhs, Some(shape_vm::type_tracking::NativeKind::String))
     }
 
     /// F5.a/F5.b: emit a call to `jit_string_concat(a_bits, b_bits) -> bits`.
@@ -206,7 +432,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// Both operand `Value`s must be widened to I64 bit-patterns (the FFI
     /// signature expects two `i64` params). This handles the cases where the
     /// MIR lowering produced a native-typed constant for one side — e.g.
-    /// `f"x={n}"` where `n: int` is `SlotKind::Int64` (I64 bits already) or
+    /// `f"x={n}"` where `n: int` is `NativeKind::Int64` (I64 bits already) or
     /// a plain number constant (F64, must bitcast to I64).
     fn compile_string_concat(
         &mut self,
@@ -325,55 +551,41 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         Ok(self.builder.ins().icmp(cc, lhs, rhs))
     }
 
-    // ── Inline Int64 arithmetic (NaN-boxed ints) ──────────────────
+    // ── Inline Int64 arithmetic (raw native i64) ──────────────────
 
-    /// Compile a binary op on proven Int64 operands — extract payload, operate, re-box.
-    /// Eliminates FFI call overhead (~50-100ns → ~5ns per operation).
+    /// Compile a binary op on proven `NativeKind::Int64` operands.
+    ///
+    /// Per ADR-006 §2.7.5 the JIT slots are raw native bits with the kind
+    /// stamped on the parallel JitFfiCarrier companion — Int64 slots hold
+    /// raw i64 values, not `tag_bits` payloads. Inputs and the output flow
+    /// through unchanged: no payload extraction, no re-box.
     fn compile_binop_int64(
         &mut self,
         op: &BinOp,
         lhs: Value,
         rhs: Value,
     ) -> Result<Value, String> {
-        // Extract 48-bit signed int payload: shift left 16, arithmetic shift right 16
-        let l = self.builder.ins().ishl_imm(lhs, 16);
-        let l = self.builder.ins().sshr_imm(l, 16);
-        let r = self.builder.ins().ishl_imm(rhs, 16);
-        let r = self.builder.ins().sshr_imm(r, 16);
-
         match op {
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
                 let result = match op {
-                    BinOp::Add => self.builder.ins().iadd(l, r),
-                    BinOp::Sub => self.builder.ins().isub(l, r),
-                    BinOp::Mul => self.builder.ins().imul(l, r),
+                    BinOp::Add => self.builder.ins().iadd(lhs, rhs),
+                    BinOp::Sub => self.builder.ins().isub(lhs, rhs),
+                    BinOp::Mul => self.builder.ins().imul(lhs, rhs),
                     BinOp::Div => {
                         let zero = self.builder.ins().iconst(types::I64, 0);
-                        let is_zero = self.builder.ins().icmp(IntCC::Equal, r, zero);
+                        let is_zero = self.builder.ins().icmp(IntCC::Equal, rhs, zero);
                         self.builder.ins().trapnz(is_zero, TrapCode::User(0));
-                        self.builder.ins().sdiv(l, r)
+                        self.builder.ins().sdiv(lhs, rhs)
                     }
                     BinOp::Mod => {
                         let zero = self.builder.ins().iconst(types::I64, 0);
-                        let is_zero = self.builder.ins().icmp(IntCC::Equal, r, zero);
+                        let is_zero = self.builder.ins().icmp(IntCC::Equal, rhs, zero);
                         self.builder.ins().trapnz(is_zero, TrapCode::User(0));
-                        self.builder.ins().srem(l, r)
+                        self.builder.ins().srem(lhs, rhs)
                     }
                     _ => unreachable!(),
                 };
-                // Re-box: mask to 48-bit payload, apply INT tag
-                let payload_mask = self
-                    .builder
-                    .ins()
-                    .iconst(types::I64, shape_value::tag_bits::PAYLOAD_MASK as i64);
-                let payload = self.builder.ins().band(result, payload_mask);
-                let int_tag = self.builder.ins().iconst(
-                    types::I64,
-                    (shape_value::tag_bits::TAG_BASE
-                        | (shape_value::tag_bits::TAG_INT << shape_value::tag_bits::TAG_SHIFT))
-                        as i64,
-                );
-                Ok(self.builder.ins().bor(int_tag, payload))
+                Ok(result)
             }
             BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
                 let cc = match op {
@@ -385,7 +597,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     BinOp::Ge => IntCC::SignedGreaterThanOrEqual,
                     _ => unreachable!(),
                 };
-                let cmp = self.builder.ins().icmp(cc, l, r);
+                let cmp = self.builder.ins().icmp(cc, lhs, rhs);
                 // icmp returns I8 (native bool)
                 Ok(cmp)
             }
@@ -534,163 +746,48 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 
     /// Compile a dynamic-operand arithmetic binop (Add/Sub/Mul/Div/Mod).
     ///
-    /// Both operands arrive as NaN-boxed `I64` bit-patterns. The emitted
-    /// IR branches on the tag bits:
-    ///
-    /// - Both numbers (`sign==0` ⇒ `!is_tagged`): `bitcast→fadd→bitcast`
-    ///   to stay in the f64 domain.
-    /// - Both i48-tagged ints: sign-extend 48-bit payload, native i64 op,
-    ///   re-box with `TAG_INT`.
-    /// - Otherwise: trap (caller's deopt path converts to an error).
-    ///
-    /// This is the JIT analogue of the VM's `AddDynamic` IC fast path —
-    /// in practice the operands come from closure calls whose return
-    /// value the MIR couldn't type-prove, and are always `Number` or
-    /// `Int` at runtime for the tests in the closure test set.
+    /// Per ADR-006 §2.7.5 + CLAUDE.md "Forbidden code" (`tag_bits` runtime
+    /// dispatch deleted): every operand has a proven `NativeKind` at MIR
+    /// compile time. The pre-strict-typing W-series IC body branched on
+    /// `tag_bits` to discriminate `Number` vs `TAG_INT` operand bits at
+    /// runtime — that path no longer exists. Reaching this site indicates
+    /// a producing-MIR kind-tracker gap; surface-and-stop per W10
+    /// playbook §5 so the gap is fixed at the producing opcode rather
+    /// than papered over with the deleted W-series tag-bit IC.
     fn compile_binop_dynamic_arith(
         &mut self,
         op: &BinOp,
-        lhs: Value,
-        rhs: Value,
+        _lhs: Value,
+        _rhs: Value,
     ) -> Result<Value, String> {
-        // Tagged-test masks.
-        let tag_base = self.builder.ins().iconst(
-            types::I64,
-            shape_value::tag_bits::TAG_BASE as i64,
-        );
-        let l_masked = self.builder.ins().band(lhs, tag_base);
-        let r_masked = self.builder.ins().band(rhs, tag_base);
-
-        // Is each operand a plain f64 (sign bit zero ⇒ NaN-box prefix absent)?
-        let l_is_num = self.builder.ins().icmp(IntCC::NotEqual, l_masked, tag_base);
-        let r_is_num = self.builder.ins().icmp(IntCC::NotEqual, r_masked, tag_base);
-        let both_num = self.builder.ins().band(l_is_num, r_is_num);
-
-        // Is each operand a TAG_INT tagged value?
-        let int_prefix = self.builder.ins().iconst(
-            types::I64,
-            (shape_value::tag_bits::TAG_BASE
-                | (shape_value::tag_bits::TAG_INT << shape_value::tag_bits::TAG_SHIFT))
-                as i64,
-        );
-        let tag_mask_full = self.builder.ins().iconst(
-            types::I64,
-            (shape_value::tag_bits::TAG_BASE | shape_value::tag_bits::TAG_MASK) as i64,
-        );
-        let l_tag_only = self.builder.ins().band(lhs, tag_mask_full);
-        let r_tag_only = self.builder.ins().band(rhs, tag_mask_full);
-        let l_is_int = self.builder.ins().icmp(IntCC::Equal, l_tag_only, int_prefix);
-        let r_is_int = self.builder.ins().icmp(IntCC::Equal, r_tag_only, int_prefix);
-        let both_int = self.builder.ins().band(l_is_int, r_is_int);
-
-        // Block layout:
-        //   current    -> brif both_num, num_block, maybe_int_block
-        //   num_block  -> fadd etc.; jump merge(f_result_as_i64)
-        //   maybe_int_block -> brif both_int, int_block, trap_block
-        //   int_block  -> i48 math; jump merge(int_result)
-        //   trap_block -> trap
-        //   merge      -> block-param result
-        let num_block = self.builder.create_block();
-        let maybe_int_block = self.builder.create_block();
-        let int_block = self.builder.create_block();
-        let trap_block = self.builder.create_block();
-        let merge_block = self.builder.create_block();
-        self.builder.append_block_param(merge_block, types::I64);
-
-        self.builder
-            .ins()
-            .brif(both_num, num_block, &[], maybe_int_block, &[]);
-
-        // ── Both-number path ──────────────────────────────────────────
-        self.builder.switch_to_block(num_block);
-        self.builder.seal_block(num_block);
-        let lf = self.builder.ins().bitcast(types::F64, MemFlags::new(), lhs);
-        let rf = self.builder.ins().bitcast(types::F64, MemFlags::new(), rhs);
-        let nres = match op {
-            BinOp::Add => self.builder.ins().fadd(lf, rf),
-            BinOp::Sub => self.builder.ins().fsub(lf, rf),
-            BinOp::Mul => self.builder.ins().fmul(lf, rf),
-            BinOp::Div => self.builder.ins().fdiv(lf, rf),
-            BinOp::Mod => {
-                let div = self.builder.ins().fdiv(lf, rf);
-                let truncated = self.builder.ins().trunc(div);
-                let product = self.builder.ins().fmul(truncated, rf);
-                self.builder.ins().fsub(lf, product)
-            }
-            _ => unreachable!("compile_binop_dynamic_arith: non-arith op {:?}", op),
-        };
-        let nres_bits = self.builder.ins().bitcast(types::I64, MemFlags::new(), nres);
-        self.builder.ins().jump(merge_block, &[nres_bits]);
-
-        // ── Both-int path ─────────────────────────────────────────────
-        self.builder.switch_to_block(maybe_int_block);
-        self.builder.seal_block(maybe_int_block);
-        self.builder
-            .ins()
-            .brif(both_int, int_block, &[], trap_block, &[]);
-
-        self.builder.switch_to_block(int_block);
-        self.builder.seal_block(int_block);
-        // Extract 48-bit signed int payload: shift left 16, asr 16.
-        let li = self.builder.ins().ishl_imm(lhs, 16);
-        let li = self.builder.ins().sshr_imm(li, 16);
-        let ri = self.builder.ins().ishl_imm(rhs, 16);
-        let ri = self.builder.ins().sshr_imm(ri, 16);
-        let ires = match op {
-            BinOp::Add => self.builder.ins().iadd(li, ri),
-            BinOp::Sub => self.builder.ins().isub(li, ri),
-            BinOp::Mul => self.builder.ins().imul(li, ri),
-            BinOp::Div => {
-                let zero = self.builder.ins().iconst(types::I64, 0);
-                let is_zero = self.builder.ins().icmp(IntCC::Equal, ri, zero);
-                self.builder.ins().trapnz(is_zero, TrapCode::User(0));
-                self.builder.ins().sdiv(li, ri)
-            }
-            BinOp::Mod => {
-                let zero = self.builder.ins().iconst(types::I64, 0);
-                let is_zero = self.builder.ins().icmp(IntCC::Equal, ri, zero);
-                self.builder.ins().trapnz(is_zero, TrapCode::User(0));
-                self.builder.ins().srem(li, ri)
-            }
-            _ => unreachable!("compile_binop_dynamic_arith: non-arith op {:?}", op),
-        };
-        let payload_mask = self.builder.ins().iconst(
-            types::I64,
-            shape_value::tag_bits::PAYLOAD_MASK as i64,
-        );
-        let ipayload = self.builder.ins().band(ires, payload_mask);
-        let iboxed = self.builder.ins().bor(int_prefix, ipayload);
-        self.builder.ins().jump(merge_block, &[iboxed]);
-
-        // ── Trap path ─────────────────────────────────────────────────
-        // Emit a negative error signal return so the caller observes a JIT
-        // deopt rather than an illegal-instruction trap. This matches the
-        // error-signal convention used by direct-call terminators.
-        self.builder.switch_to_block(trap_block);
-        self.builder.seal_block(trap_block);
-        let signal = self.builder.ins().iconst(types::I32, 0xFFFF_FFFFu64 as i64);
-        self.builder.ins().return_(&[signal]);
-
-        // ── Merge ─────────────────────────────────────────────────────
-        self.builder.switch_to_block(merge_block);
-        self.builder.seal_block(merge_block);
-        Ok(self.builder.block_params(merge_block)[0])
+        Err(format!(
+            "compile_binop_dynamic_arith: kind-untyped arith {:?} reached the JIT — \
+             SURFACE per W10 playbook §5: producing-MIR kind-tracker gap; \
+             every JIT operand must have a proven NativeKind at compile time \
+             (ADR-006 §2.7.5 / CLAUDE.md \"Forbidden code\" — runtime tag_bits \
+             dispatch deleted with the W-series IC).",
+            op
+        ))
     }
 
     /// Compile a dynamic-operand comparison binop (Eq/Ne/Lt/Le/Gt/Ge).
     ///
-    /// Branches by tag exactly like `compile_binop_dynamic_arith`, with
-    /// result type `I8` (native bool). Eq/Ne on mixed-tag operands are
-    /// routed through the `icmp.Equal` on the raw bits — two values with
-    /// different tags are never equal so the bitwise compare is correct.
-    /// Lt/Le/Gt/Ge on mixed-tag operands trap.
+    /// Per ADR-006 §2.7.5 + CLAUDE.md "Forbidden code" (`tag_bits` runtime
+    /// dispatch deleted): every operand has a proven `NativeKind` at MIR
+    /// compile time. The pre-strict-typing W-series body branched on
+    /// `tag_bits` to discriminate `Number` / `TAG_INT` / mixed operand
+    /// bits at runtime — that path no longer exists. Eq/Ne is preserved
+    /// as raw bitwise compare (kind-mismatched bits are unequal by
+    /// construction); Lt/Le/Gt/Ge surface-and-stop per W10 playbook §5
+    /// because they require a kind-direction the producing-MIR
+    /// kind-tracker must supply.
     fn compile_binop_dynamic_cmp(
         &mut self,
         op: &BinOp,
         lhs: Value,
         rhs: Value,
     ) -> Result<Value, String> {
-        // Bitwise Eq/Ne: any mismatched tag also means values are not equal.
+        // Bitwise Eq/Ne: any mismatched kind also means values are not equal.
         if matches!(op, BinOp::Eq | BinOp::Ne) {
             let cc = if matches!(op, BinOp::Eq) {
                 IntCC::Equal
@@ -700,147 +797,14 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             return Ok(self.builder.ins().icmp(cc, lhs, rhs));
         }
 
-        // Tagged-test masks (same as arith).
-        let tag_base = self.builder.ins().iconst(
-            types::I64,
-            shape_value::tag_bits::TAG_BASE as i64,
-        );
-        let l_masked = self.builder.ins().band(lhs, tag_base);
-        let r_masked = self.builder.ins().band(rhs, tag_base);
-        let l_is_num = self.builder.ins().icmp(IntCC::NotEqual, l_masked, tag_base);
-        let r_is_num = self.builder.ins().icmp(IntCC::NotEqual, r_masked, tag_base);
-        let both_num = self.builder.ins().band(l_is_num, r_is_num);
-
-        let int_prefix = self.builder.ins().iconst(
-            types::I64,
-            (shape_value::tag_bits::TAG_BASE
-                | (shape_value::tag_bits::TAG_INT << shape_value::tag_bits::TAG_SHIFT))
-                as i64,
-        );
-        let tag_mask_full = self.builder.ins().iconst(
-            types::I64,
-            (shape_value::tag_bits::TAG_BASE | shape_value::tag_bits::TAG_MASK) as i64,
-        );
-        let l_tag_only = self.builder.ins().band(lhs, tag_mask_full);
-        let r_tag_only = self.builder.ins().band(rhs, tag_mask_full);
-        let l_is_int = self.builder.ins().icmp(IntCC::Equal, l_tag_only, int_prefix);
-        let r_is_int = self.builder.ins().icmp(IntCC::Equal, r_tag_only, int_prefix);
-        let both_int = self.builder.ins().band(l_is_int, r_is_int);
-
-        let num_block = self.builder.create_block();
-        let maybe_int_block = self.builder.create_block();
-        let int_block = self.builder.create_block();
-        // F7.c — mixed num/int path: one operand is a NaN-boxed f64, the
-        // other is a NaN-boxed TAG_INT. This arises from comparisons like
-        // `i < arr.length` where `arr.length` reads `box_number(len as f64)`
-        // via the legacy FFI get-prop path but the loop counter is a
-        // TAG_INT NaN-boxed int. Promote the TAG_INT payload to f64 and
-        // compare as float.
-        let mixed_l_num_block = self.builder.create_block();
-        let mixed_r_num_block = self.builder.create_block();
-        let trap_block = self.builder.create_block();
-        let merge_block = self.builder.create_block();
-        self.builder.append_block_param(merge_block, types::I8);
-
-        self.builder
-            .ins()
-            .brif(both_num, num_block, &[], maybe_int_block, &[]);
-
-        // Both-number path.
-        self.builder.switch_to_block(num_block);
-        self.builder.seal_block(num_block);
-        let lf = self.builder.ins().bitcast(types::F64, MemFlags::new(), lhs);
-        let rf = self.builder.ins().bitcast(types::F64, MemFlags::new(), rhs);
-        let fcc = match op {
-            BinOp::Lt => FloatCC::LessThan,
-            BinOp::Le => FloatCC::LessThanOrEqual,
-            BinOp::Gt => FloatCC::GreaterThan,
-            BinOp::Ge => FloatCC::GreaterThanOrEqual,
-            _ => unreachable!("compile_binop_dynamic_cmp: non-cmp op {:?}", op),
-        };
-        let ncmp = self.builder.ins().fcmp(fcc, lf, rf);
-        self.builder.ins().jump(merge_block, &[ncmp]);
-
-        // Both-int path (first, since it's the most common mixed case).
-        self.builder.switch_to_block(maybe_int_block);
-        self.builder.seal_block(maybe_int_block);
-        // If both are TAG_INT, go to int_block.
-        // Otherwise, if one is num + one is int, try the mixed paths.
-        let not_both_int = self.builder.ins().bxor_imm(both_int, 1);
-        // both-int: go int_block; else: check mixed.
-        let mixed_check_block = self.builder.create_block();
-        self.builder
-            .ins()
-            .brif(both_int, int_block, &[], mixed_check_block, &[]);
-        self.builder.switch_to_block(mixed_check_block);
-        self.builder.seal_block(mixed_check_block);
-        // l is num, r is int → promote r to f64.
-        let l_num_r_int = self.builder.ins().band(l_is_num, r_is_int);
-        // l is int, r is num → promote l to f64.
-        let l_int_r_num = self.builder.ins().band(l_is_int, r_is_num);
-        let dispatch_mixed_r_block = self.builder.create_block();
-        self.builder.ins().brif(
-            l_num_r_int,
-            mixed_r_num_block,
-            &[],
-            dispatch_mixed_r_block,
-            &[],
-        );
-        self.builder.switch_to_block(dispatch_mixed_r_block);
-        self.builder.seal_block(dispatch_mixed_r_block);
-        self.builder
-            .ins()
-            .brif(l_int_r_num, mixed_l_num_block, &[], trap_block, &[]);
-        // suppress unused warning for the helper
-        let _ = not_both_int;
-
-        self.builder.switch_to_block(int_block);
-        self.builder.seal_block(int_block);
-        let li = self.builder.ins().ishl_imm(lhs, 16);
-        let li = self.builder.ins().sshr_imm(li, 16);
-        let ri = self.builder.ins().ishl_imm(rhs, 16);
-        let ri = self.builder.ins().sshr_imm(ri, 16);
-        let icc = match op {
-            BinOp::Lt => IntCC::SignedLessThan,
-            BinOp::Le => IntCC::SignedLessThanOrEqual,
-            BinOp::Gt => IntCC::SignedGreaterThan,
-            BinOp::Ge => IntCC::SignedGreaterThanOrEqual,
-            _ => unreachable!("compile_binop_dynamic_cmp: non-cmp op {:?}", op),
-        };
-        let icmp = self.builder.ins().icmp(icc, li, ri);
-        self.builder.ins().jump(merge_block, &[icmp]);
-
-        // Mixed l:num, r:int — sign-extend r's i48 payload and convert to f64.
-        self.builder.switch_to_block(mixed_r_num_block);
-        self.builder.seal_block(mixed_r_num_block);
-        let lf_a = self.builder.ins().bitcast(types::F64, MemFlags::new(), lhs);
-        let ri_a = self.builder.ins().ishl_imm(rhs, 16);
-        let ri_a = self.builder.ins().sshr_imm(ri_a, 16);
-        let rf_a = self.builder.ins().fcvt_from_sint(types::F64, ri_a);
-        let cmp_a = self.builder.ins().fcmp(fcc, lf_a, rf_a);
-        self.builder.ins().jump(merge_block, &[cmp_a]);
-
-        // Mixed l:int, r:num — sign-extend l's i48 payload and convert to f64.
-        self.builder.switch_to_block(mixed_l_num_block);
-        self.builder.seal_block(mixed_l_num_block);
-        let li_b = self.builder.ins().ishl_imm(lhs, 16);
-        let li_b = self.builder.ins().sshr_imm(li_b, 16);
-        let lf_b = self.builder.ins().fcvt_from_sint(types::F64, li_b);
-        let rf_b = self.builder.ins().bitcast(types::F64, MemFlags::new(), rhs);
-        let cmp_b = self.builder.ins().fcmp(fcc, lf_b, rf_b);
-        self.builder.ins().jump(merge_block, &[cmp_b]);
-
-        // Trap path: emit a negative error signal return (same convention as
-        // the arith helper) so deopt is observed as a JIT compile/run error
-        // rather than an illegal instruction.
-        self.builder.switch_to_block(trap_block);
-        self.builder.seal_block(trap_block);
-        let signal = self.builder.ins().iconst(types::I32, 0xFFFF_FFFFu64 as i64);
-        self.builder.ins().return_(&[signal]);
-
-        self.builder.switch_to_block(merge_block);
-        self.builder.seal_block(merge_block);
-        Ok(self.builder.block_params(merge_block)[0])
+        Err(format!(
+            "compile_binop_dynamic_cmp: kind-untyped ordered cmp {:?} reached the JIT — \
+             SURFACE per W10 playbook §5: producing-MIR kind-tracker gap; \
+             every JIT operand must have a proven NativeKind at compile time \
+             (ADR-006 §2.7.5 / CLAUDE.md \"Forbidden code\" — runtime tag_bits \
+             dispatch deleted with the W-series IC).",
+            op
+        ))
     }
 
     /// Compile a unary operation.

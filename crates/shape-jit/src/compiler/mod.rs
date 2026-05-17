@@ -32,4 +32,7 @@ pub use accessors::{
     preflight_instructions, preflight_jit_compatibility,
 };
 pub use setup::JITCompiler;
-pub use setup::JITKernelCompiler;
+// JITKernelCompiler removed — see setup.rs comment block.
+// Underlying `shape_runtime::simulation` module bulldozed in 2601ba7;
+// re-introduction owned by the simulation-kernel-extension-rebuild
+// workstream.

@@ -13,7 +13,7 @@ mod types;
 // Re-export public types
 pub use crate::query_result::QueryType;
 pub use builder::ShapeEngineBuilder;
-use shape_value::{ValueWord, ValueWordExt};
+use shape_value::KindedSlot;
 pub use types::{
     EngineBootstrapState, ExecutionMetrics, ExecutionResult, ExecutionType, Message, MessageLevel,
 };
@@ -33,23 +33,27 @@ use shape_wire::WireValue;
 
 /// Trait for evaluating individual expressions and statement blocks.
 ///
-/// This is used by StreamExecutor, WindowExecutor, and JoinExecutor
-/// to evaluate expressions without needing full program compilation.
-/// shape-vm implements this for BytecodeExecutor.
+/// shape-vm implements this for BytecodeExecutor. The previous AST-walking
+/// executor consumers (StreamExecutor, WindowExecutor, JoinExecutor) were
+/// deleted by the strict-typing bulldozer (see `docs/defections.md`
+/// 2026-05-06: AST-evaluation runtime executors deletion). The
+/// `ast-walking-interpreter-strict-rebuild` workstream will reintroduce
+/// streaming/windowed/joined analytics on top of compiled bytecode + typed
+/// VM slots.
 pub trait ExpressionEvaluator: Send + Sync {
     /// Evaluate a slice of statements and return the result.
     fn eval_statements(
         &self,
         stmts: &[shape_ast::Statement],
         ctx: &mut crate::context::ExecutionContext,
-    ) -> Result<ValueWord>;
+    ) -> Result<KindedSlot>;
 
     /// Evaluate a single expression and return the result.
     fn eval_expr(
         &self,
         expr: &shape_ast::Expr,
         ctx: &mut crate::context::ExecutionContext,
-    ) -> Result<ValueWord>;
+    ) -> Result<KindedSlot>;
 }
 
 /// Result from ProgramExecutor::execute_program
@@ -526,30 +530,31 @@ impl ShapeEngine {
         format_name: Option<&str>,
         params: &std::collections::HashMap<String, serde_json::Value>,
     ) -> Result<String> {
-        use std::sync::Arc;
-
         // Resolve type aliases and merge meta parameter overrides
         let (resolved_type_name, merged_params) =
             self.resolve_type_alias_for_formatting(type_name, params)?;
 
-        // Convert merged JSON params to runtime ValueWord values
-        let param_values: std::collections::HashMap<String, ValueWord> = merged_params
+        // Convert merged JSON params to wire-format values for the
+        // runtime's `format_value` placeholder. The placeholder ignores
+        // the value/params today and returns `<formatted T>`; per
+        // ADR-006 §2.7.4 the kind-threaded format integration lands in
+        // Phase 2c when the format-specs are wired through `KindedSlot`
+        // bindings rather than ad-hoc `WireValue::Number`.
+        let param_values: std::collections::HashMap<String, WireValue> = merged_params
             .iter()
             .map(|(k, v)| {
                 let runtime_val = match v {
-                    serde_json::Value::Number(n) => ValueWord::from_f64(n.as_f64().unwrap_or(0.0)),
-                    serde_json::Value::String(s) => ValueWord::from_string(Arc::new(s.clone())),
-                    serde_json::Value::Bool(b) => ValueWord::from_bool(*b),
-                    _ => ValueWord::none(),
+                    serde_json::Value::Number(n) => WireValue::Number(n.as_f64().unwrap_or(0.0)),
+                    serde_json::Value::String(s) => WireValue::String(s.clone()),
+                    serde_json::Value::Bool(b) => WireValue::Bool(*b),
+                    _ => WireValue::Null,
                 };
                 (k.clone(), runtime_val)
             })
             .collect();
 
-        // Convert value to runtime ValueWord
-        let runtime_value = ValueWord::from_f64(value);
+        let runtime_value = WireValue::Number(value);
 
-        // Call format with resolved type name and merged parameters
         self.runtime.format_value(
             runtime_value,
             resolved_type_name.as_str(),
@@ -573,29 +578,16 @@ impl ShapeEngine {
             .persistent_context()
             .map(|ctx| ctx.resolve_type_for_format(type_name));
 
-        if let Some((base_type, Some(overrides))) = resolved {
+        if let Some((base_type, Some(_overrides))) = resolved {
             if base_type != type_name {
-                let mut merged = std::collections::HashMap::new();
-
-                // First, add stored overrides from the alias (convert ValueWord to JSON)
-                for (key, val) in overrides {
-                    let json_val = if let Some(n) = val.as_f64() {
-                        serde_json::json!(n)
-                    } else if val.is_bool() {
-                        serde_json::json!(val.as_bool())
-                    } else {
-                        // Skip non-primitive override values
-                        continue;
-                    };
-                    merged.insert(key, json_val);
-                }
-
-                // Then, overlay with passed params (these take precedence)
-                for (key, val) in params {
-                    merged.insert(key.clone(), val.clone());
-                }
-
-                return Ok((base_type, merged));
+                // Phase 1.B (ADR-006 §2.7.4): per-alias overrides are
+                // stored as `KindedSlot`s; converting to `serde_json::Value`
+                // requires the kind-threaded slot decoder that lands in
+                // Phase 2c. Until then, the alias's stored overrides are
+                // ignored and only the caller-supplied `params` are
+                // forwarded. Type aliases without overrides still
+                // resolve correctly.
+                return Ok((base_type, params.clone()));
             }
         }
 
@@ -753,23 +745,6 @@ impl ShapeEngine {
             ctx.language_runtimes()
         } else {
             std::collections::HashMap::new()
-        }
-    }
-
-    /// Invoke one loaded module export via module namespace.
-    pub fn invoke_extension_module_nb(
-        &self,
-        module_name: &str,
-        function: &str,
-        args: &[shape_value::ValueWord],
-    ) -> Result<shape_value::ValueWord> {
-        if let Some(ctx) = self.runtime.persistent_context() {
-            ctx.invoke_extension_module_nb(module_name, function, args)
-        } else {
-            Err(shape_ast::error::ShapeError::RuntimeError {
-                message: "No runtime context available".to_string(),
-                location: None,
-            })
         }
     }
 

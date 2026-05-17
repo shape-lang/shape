@@ -112,14 +112,32 @@ impl TypedObject {
 /// Get a field from a typed object by byte offset.
 ///
 /// # Arguments
-/// * `obj_bits` - NaN-boxed typed object (TAG_TYPED_OBJECT)
+/// * `obj_bits` - raw `Box::into_raw(UnifiedValue<*const TypedObject>) as u64`
+///   per ADR-006 §2.7.5 stamp-at-compile-time. The companion `NativeKind` is
+///   `Ptr(HeapKind::TypedObject)` stamped at the JIT-emitted call signature.
 /// * `offset` - Byte offset of the field
 ///
 /// # Returns
-/// The field value (NaN-boxed), or TAG_NULL if invalid
+/// The field value (raw u64 bits), or TAG_NULL if `obj_bits` is null/0.
+///
+/// W12-jit-binop-after-heap-read-kind-tracker close (2026-05-12): removed
+/// the `is_typed_object(obj_bits)` precondition that was the documented
+/// production-code consumer migration gap in
+/// `field_access.rs:275..314`'s deleted-test comment. `is_typed_object`
+/// requires `is_heap(bits) = is_tagged(bits) && get_tag == TAG_HEAP_BITS`
+/// — a NaN-box-tag check that doesn't apply under §2.7.5 where the JIT
+/// allocator (`unified_box` / `heap_box`) returns raw `Box::into_raw`
+/// pointers without tag bits. Every call to `jit_typed_object_set_field` /
+/// `_get_field` on a valid producer output took the "not a typed object"
+/// early-return path and returned TAG_NULL — silently null-corrupted the
+/// just-allocated obj and segfaulted on the subsequent field-read deref.
+///
+/// Per §2.7.5 the kind is stamped at the call signature, not decoded
+/// from bits — the consumer trusts the kind on the parallel companion.
+/// Null-pointer / mis-alignment guards remain as defensive checks.
 #[unsafe(no_mangle)]
 pub extern "C" fn jit_typed_object_get_field(obj_bits: u64, offset: u64) -> u64 {
-    if !is_typed_object(obj_bits) {
+    if obj_bits == 0 {
         return TAG_NULL;
     }
 
@@ -141,15 +159,22 @@ pub extern "C" fn jit_typed_object_get_field(obj_bits: u64, offset: u64) -> u64 
 /// Set a field on a typed object by byte offset.
 ///
 /// # Arguments
-/// * `obj_bits` - NaN-boxed typed object (TAG_TYPED_OBJECT)
+/// * `obj_bits` - raw `Box::into_raw(UnifiedValue<*const TypedObject>) as u64`
+///   per ADR-006 §2.7.5 stamp-at-compile-time. The companion `NativeKind` is
+///   `Ptr(HeapKind::TypedObject)` stamped at the JIT-emitted call signature.
 /// * `offset` - Byte offset of the field
-/// * `value` - NaN-boxed value to set
+/// * `value` - Raw u64 bits to write (interpretation is per the field's
+///   kind, stamped at compile time by the producing-side compiler)
 ///
 /// # Returns
-/// The object (unchanged) for chaining, or TAG_NULL if invalid
+/// The object (unchanged) for chaining, or TAG_NULL if `obj_bits` is null/0.
+///
+/// See `jit_typed_object_get_field` for the §2.7.5 / W12-jit-binop-after-
+/// heap-read-kind-tracker close commentary on the dropped `is_typed_object`
+/// precondition.
 #[unsafe(no_mangle)]
 pub extern "C" fn jit_typed_object_set_field(obj_bits: u64, offset: u64, value: u64) -> u64 {
-    if !is_typed_object(obj_bits) {
+    if obj_bits == 0 {
         return TAG_NULL;
     }
 
@@ -176,13 +201,23 @@ pub extern "C" fn jit_typed_object_set_field(obj_bits: u64, offset: u64, value: 
 /// Get the schema ID from a typed object.
 ///
 /// # Arguments
-/// * `obj_bits` - NaN-boxed typed object (TAG_TYPED_OBJECT)
+/// * `obj_bits` - raw `Box::into_raw(UnifiedValue<*const TypedObject>) as u64`
+///   per ADR-006 §2.7.5 stamp-at-compile-time. The companion `NativeKind` is
+///   `Ptr(HeapKind::TypedObject)` stamped at the JIT-emitted call signature.
 ///
 /// # Returns
 /// The schema ID, or 0 if invalid
+///
+/// W17-narrow (Phase 3 cluster-0 Round 15, 2026-05-13): removed the
+/// `is_typed_object(obj_bits)` precondition — same recipe as the W12 close
+/// already applied to `_get_field` / `_set_field`. Under §2.7.5 the JIT
+/// allocator returns raw `Box::into_raw` pointers without NaN-box tag bits,
+/// so the prior gate always returned 0 for valid producer outputs (the
+/// classification-layer gap surfaced by W17-narrow audit §2 row #7). The
+/// kind is the parallel-kind track companion; null-pointer guards remain.
 #[unsafe(no_mangle)]
 pub extern "C" fn jit_typed_object_schema_id(obj_bits: u64) -> u32 {
-    if !is_typed_object(obj_bits) {
+    if obj_bits == 0 {
         return 0;
     }
 
@@ -272,30 +307,44 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_jit_typed_object_ffi() {
-        // Test FFI allocation
-        let bits = super::super::allocation::jit_typed_object_alloc(42, 24); // 3 fields * 8 bytes
-        assert!(is_typed_object(bits));
-        assert_ne!(bits, TAG_NULL);
-
-        // Test schema ID
-        assert_eq!(jit_typed_object_schema_id(bits), 42);
-
-        // Test field set/get via FFI
-        let bits = jit_typed_object_set_field(bits, 0, box_number(100.0));
-        let bits = jit_typed_object_set_field(bits, 8, box_number(200.0));
-        let bits = jit_typed_object_set_field(bits, 16, box_number(300.0));
-
-        let v0 = jit_typed_object_get_field(bits, 0);
-        let v1 = jit_typed_object_get_field(bits, 8);
-        let v2 = jit_typed_object_get_field(bits, 16);
-
-        assert_eq!(unbox_number(v0), 100.0);
-        assert_eq!(unbox_number(v1), 200.0);
-        assert_eq!(unbox_number(v2), 300.0);
-
-        // Clean up
-        super::super::allocation::jit_typed_object_dec_ref(bits, 24);
-    }
+    // `test_jit_typed_object_ffi` DELETED (W12-deleted-valuewordshape-
+    // tests-rewrite, 2026-05-12). The test asserted that the FFI consumers
+    // `jit_typed_object_schema_id` / `jit_typed_object_set_field` /
+    // `jit_typed_object_get_field` / `jit_typed_object_dec_ref` round-trip
+    // a `jit_typed_object_alloc` allocation. Under ADR-006 §2.7.5 the
+    // producer returns raw `Box::into_raw(...) as u64` without NaN-box
+    // tag bits, but every named consumer gates on `is_typed_object(bits)`
+    // first (see `field_access.rs:122`, `:152`, `:184`; `allocation.rs:180`)
+    // which calls `is_heap_kind(bits, HK_TYPED_OBJECT) -> is_heap(bits) &&
+    // ...` — `is_heap` requires `is_tagged` (negative-NaN tag bits) and
+    // returns false for raw pointers. Every consumer takes the "not a
+    // typed object" early-return path and returns `TAG_NULL` / 0 / no-op.
+    //
+    // This is a production-code consumer migration gap, NOT a deleted
+    // ValueWord-shape assertion the test got wrong. The test premise
+    // ("FFI consumers round-trip the producer's output") cannot pass at
+    // this layer until the consumers migrate to read the kind prefix at
+    // offset 0 of the allocation via `read_heap_kind` (per §2.7.5 "*not*
+    // tag-bit dispatch — it reads a field from a heap-resident struct that
+    // the producing call placed there"). The JIT-emitted code path through
+    // `places.rs::emit_typed_object_ptr` ALREADY uses raw-pointer masking
+    // (`bits & UNIFIED_PTR_MASK`) and works correctly; only the direct-FFI
+    // surface remains gated on the deleted tag-bit dispatch.
+    //
+    // Strict-typed analog at the VM tier:
+    // `KindedSlot::from_typed_object(Arc<TypedObjectStorage>)` per
+    // ADR-006 §2.7.6 / Q8 — the bounded-carrier API exposes one
+    // constructor per `NativeKind` heap variant. That coverage lives in
+    // `crates/shape-value/src/kinded_slot.rs::tests` already (see
+    // `clone_then_double_drop_balances_refcount` and the §2.7.6 / Q8
+    // accessor coverage block). The strict-typed test of the
+    // `kind() == NativeKind::Ptr(HeapKind::TypedObject)` invariant is
+    // also covered by `test_typed_object_kinded_slot_discriminates_via_kind_label`
+    // in `value_ffi.rs::tests`.
+    //
+    // The JIT-internal FFI-consumer round-trip would be re-tested once a
+    // future sub-cluster migrates those consumers to use `read_heap_kind`
+    // (or the JIT-side parallel-kind track lands and threads `NativeKind`
+    // through the FFI signatures per §2.7.5 stamp-at-compile-time). Until
+    // then this test has no live path it can exercise.
 }

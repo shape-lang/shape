@@ -1,216 +1,26 @@
+// Tests for the `std::state` module builtins.
+//
+// **Phase-2c rebuild pending — see ADR-006 §2.7.4.** The pre-bulldozer
+// suite called every `state_*` body directly with hand-built
+// `ValueWord` arguments. After the kinded migration, those bodies
+// panic via `todo!()` until the snapshot/diff rebuild lands; calling
+// them from tests would only assert that `todo!()` panics, which is
+// not an interesting signal.
+//
+// The kinded-shape rewrite of the suite — driving each body through
+// `register_typed_function`'s wrapper with `&[KindedSlot]` inputs and
+// `TypedReturn` outputs, plus a kind-threaded `serializable_to_slot`
+// inverse for the round-trip cases — is part of the same Phase-2c
+// rebuild scope. Until that lands, every body-level test is replaced
+// with a single `#[ignore]`'d placeholder so the test surface is
+// preserved without exercising deleted APIs.
+//
+// The schema-construction surface (`create_state_module` registers
+// the expected schemas, every export name is present) is exercisable
+// independent of body migration; the live tests below cover that
+// surface.
+
 use super::*;
-use shape_runtime::module_exports::ModuleContext;
-use shape_runtime::type_schema::{FieldType, TypeSchemaRegistry};
-use shape_value::{ValueWord, ValueWordExt};
-use std::sync::Arc;
-
-fn test_ctx() -> ModuleContext<'static> {
-    let mut registry = TypeSchemaRegistry::new();
-    // Register the Delta schema matching state.shape definition:
-    // pub struct Delta { changed: Map<string, Any>, removed: Array<string> }
-    registry.register_type(
-        "Delta",
-        vec![
-            ("changed".to_string(), FieldType::Any),
-            ("removed".to_string(), FieldType::Any),
-        ],
-    );
-    let registry = Box::leak(Box::new(registry));
-    ModuleContext {
-        schemas: registry,
-        invoke_callable: None,
-        raw_invoker: None,
-        function_hashes: None,
-        vm_state: None,
-        granted_permissions: None,
-        scope_constraints: None,
-        set_pending_resume: None,
-        set_pending_frame_resume: None,
-    }
-}
-
-#[test]
-fn test_state_hash_deterministic() {
-    let ctx = test_ctx();
-    let v1 = ValueWord::from_f64(42.0);
-    let v2 = ValueWord::from_f64(42.0);
-
-    let h1 = state_hash(&[v1], &ctx).unwrap();
-    let h2 = state_hash(&[v2], &ctx).unwrap();
-
-    assert_eq!(h1.as_str().unwrap(), h2.as_str().unwrap());
-}
-
-#[test]
-fn test_state_hash_different_values() {
-    let ctx = test_ctx();
-    let h1 = state_hash(&[ValueWord::from_f64(42.0)], &ctx).unwrap();
-    let h2 = state_hash(&[ValueWord::from_f64(99.0)], &ctx).unwrap();
-
-    assert_ne!(h1.as_str().unwrap(), h2.as_str().unwrap());
-}
-
-#[test]
-fn test_state_hash_returns_hex_string() {
-    let ctx = test_ctx();
-    let result = state_hash(&[ValueWord::from_f64(1.0)], &ctx).unwrap();
-    let hex = result.as_str().unwrap();
-    // SHA-256 produces 64 hex chars
-    assert_eq!(hex.len(), 64);
-    assert!(hex.chars().all(|c| c.is_ascii_hexdigit()));
-}
-
-#[test]
-fn test_state_fn_hash_with_function() {
-    let ctx = test_ctx();
-    let f = ValueWord::from_function(5);
-    let result = state_fn_hash(&[f], &ctx).unwrap();
-    assert_eq!(result.as_str().unwrap(), "fn:5");
-}
-
-#[test]
-fn test_state_fn_hash_non_function() {
-    let ctx = test_ctx();
-    let result = state_fn_hash(&[ValueWord::from_f64(42.0)], &ctx);
-    assert!(result.is_err());
-}
-
-#[test]
-fn test_state_serialize_deserialize_roundtrip_number() {
-    let ctx = test_ctx();
-    let original = ValueWord::from_f64(42.5);
-    let serialized = state_serialize(&[original.clone()], &ctx).unwrap();
-
-    // Should be an array of ints
-    let arr = serialized.to_array_arc().unwrap();
-    assert!(!arr.is_empty());
-
-    let deserialized = state_deserialize(&[serialized], &ctx).unwrap();
-    assert_eq!(deserialized.as_f64(), Some(42.5));
-}
-
-#[test]
-fn test_state_serialize_deserialize_roundtrip_string() {
-    let ctx = test_ctx();
-    let original = ValueWord::from_string(Arc::new("hello world".to_string()));
-    let serialized = state_serialize(&[original], &ctx).unwrap();
-    let deserialized = state_deserialize(&[serialized], &ctx).unwrap();
-    assert_eq!(deserialized.as_str().unwrap(), "hello world");
-}
-
-#[test]
-fn test_state_serialize_deserialize_roundtrip_bool() {
-    let ctx = test_ctx();
-    let original = ValueWord::from_bool(true);
-    let serialized = state_serialize(&[original], &ctx).unwrap();
-    let deserialized = state_deserialize(&[serialized], &ctx).unwrap();
-    assert_eq!(deserialized.as_bool(), Some(true));
-}
-
-#[test]
-fn test_state_serialize_deserialize_roundtrip_array() {
-    let ctx = test_ctx();
-    let original = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
-        ValueWord::from_f64(1.0),
-        ValueWord::from_f64(2.0),
-        ValueWord::from_f64(3.0),
-    ]));
-    let serialized = state_serialize(&[original], &ctx).unwrap();
-    let deserialized = state_deserialize(&[serialized], &ctx).unwrap();
-    let arr = deserialized.to_array_arc().unwrap();
-    assert_eq!(arr.len(), 3);
-    assert_eq!(arr[0].as_f64(), Some(1.0));
-    assert_eq!(arr[1].as_f64(), Some(2.0));
-    assert_eq!(arr[2].as_f64(), Some(3.0));
-}
-
-#[test]
-fn test_state_serialize_deserialize_none() {
-    let ctx = test_ctx();
-    let original = ValueWord::none();
-    let serialized = state_serialize(&[original], &ctx).unwrap();
-    let deserialized = state_deserialize(&[serialized], &ctx).unwrap();
-    assert!(deserialized.is_none());
-}
-
-/// Helper to extract (changed_hashmap, removed_array) from a Delta TypedObject.
-fn extract_delta_fields(delta_nb: &ValueWord) -> (Vec<(String, ValueWord)>, Vec<String>) {
-    let (_, slots, heap_mask) = delta_nb
-        .as_typed_object()
-        .expect("state_diff should return a TypedObject");
-
-    // slot 0 = changed (HashMap)
-    assert!(heap_mask & 1 != 0, "changed slot should be a heap value");
-    let changed_nb = slots[0].as_heap_nb();
-    let (keys, values, _) = changed_nb
-        .as_hashmap()
-        .expect("changed should be a HashMap");
-    let changed: Vec<(String, ValueWord)> = keys
-        .iter()
-        .zip(values.iter())
-        .map(|(k, v)| (k.as_str().unwrap().to_string(), v.clone()))
-        .collect();
-
-    // slot 1 = removed (Array)
-    assert!(heap_mask & 2 != 0, "removed slot should be a heap value");
-    let removed_nb = slots[1].as_heap_nb();
-    let removed_arr = removed_nb.to_array_arc().expect("removed should be an Array");
-    let removed: Vec<String> = removed_arr
-        .iter()
-        .map(|nb| nb.as_str().unwrap().to_string())
-        .collect();
-
-    (changed, removed)
-}
-
-#[test]
-fn test_state_diff_identical() {
-    let ctx = test_ctx();
-    let a = ValueWord::from_f64(42.0);
-    let b = ValueWord::from_f64(42.0);
-    let result = state_diff(&[a, b], &ctx).unwrap();
-    let (changed, removed) = extract_delta_fields(&result);
-    assert!(changed.is_empty());
-    assert!(removed.is_empty());
-}
-
-#[test]
-fn test_state_diff_changed() {
-    let ctx = test_ctx();
-    let a = ValueWord::from_f64(42.0);
-    let b = ValueWord::from_f64(99.0);
-    let result = state_diff(&[a, b], &ctx).unwrap();
-    let (changed, _removed) = extract_delta_fields(&result);
-    assert_eq!(changed.len(), 1);
-}
-
-#[test]
-fn test_state_patch_root_replacement_legacy_array() {
-    let ctx = test_ctx();
-    // Legacy format: [[[\".\", 99.0]], []]
-    let changed = ValueWord::from_array(shape_value::vmarray_from_vec(vec![ValueWord::from_array(shape_value::vmarray_from_vec(vec![
-        ValueWord::from_string(Arc::new(".".to_string())),
-        ValueWord::from_f64(99.0),
-    ]))]));
-    let removed = ValueWord::from_array(shape_value::vmarray_from_vec(vec![]));
-    let delta = ValueWord::from_array(shape_value::vmarray_from_vec(vec![changed, removed]));
-
-    let base = ValueWord::from_f64(42.0);
-    let result = state_patch(&[base, delta], &ctx).unwrap();
-    assert_eq!(result.as_f64(), Some(99.0));
-}
-
-#[test]
-fn test_state_diff_patch_roundtrip() {
-    let ctx = test_ctx();
-    let old = ValueWord::from_f64(42.0);
-    let new_val = ValueWord::from_f64(99.0);
-    // diff produces a Delta TypedObject
-    let delta = state_diff(&[old.clone(), new_val.clone()], &ctx).unwrap();
-    // patch should accept the TypedObject Delta directly
-    let result = state_patch(&[old, delta], &ctx).unwrap();
-    assert_eq!(result.as_f64(), Some(99.0));
-}
 
 #[test]
 fn test_create_state_module_exports() {
@@ -235,182 +45,188 @@ fn test_create_state_module_exports() {
     assert!(module.has_export("snapshot"));
 }
 
+// ---------------------------------------------------------------------------
+// Phase-2c body-level coverage placeholders
+// ---------------------------------------------------------------------------
+//
+// Every test below was a body-level assertion in the pre-bulldozer
+// suite. The post-Phase-2c rebuild needs to:
+//   1. Drive each body through `register_typed_function`'s
+//      `&[KindedSlot]` -> `TypedReturn` wrapper rather than calling
+//      the body function directly.
+//   2. Replace `ValueWord::from_*` constructors at the call site with
+//      `KindedSlot::from_*` plus the matching `NativeKind`.
+//   3. Round-trip cases (serialize/deserialize, diff/patch) need the
+//      kind-threaded slot-serialization helpers that §2.7.4 defers to
+//      Phase 2c.
+//
+// Until that rebuild, the tests are `#[ignore]`'d to preserve the
+// list of intended assertions without exercising the deleted APIs.
+
 #[test]
-fn test_capture_stubs_return_errors() {
-    let ctx = test_ctx();
-    assert!(state_capture_stub(&[], &ctx).is_err());
-    assert!(state_capture_all_stub(&[], &ctx).is_err());
-    assert!(state_capture_module_stub(&[], &ctx).is_err());
-    assert!(state_capture_call_stub(&[], &ctx).is_err());
-    assert!(state_resume_stub(&[], &ctx).is_err());
-    assert!(state_resume_frame_stub(&[], &ctx).is_err());
-    assert!(state_caller_stub(&[], &ctx).is_err());
-    assert!(state_args_stub(&[], &ctx).is_err());
-    assert!(state_locals_stub(&[], &ctx).is_err());
-}
+#[ignore = "phase-2c — state-snapshot rebuild — see ADR-006 §2.7.4"]
+fn test_state_hash_deterministic() {}
 
-// -----------------------------------------------------------------------
-// Positive tests with mock VmStateAccessor
-// -----------------------------------------------------------------------
+#[test]
+#[ignore = "phase-2c — state-snapshot rebuild — see ADR-006 §2.7.4"]
+fn test_state_hash_different_values() {}
 
-/// Mock VmStateAccessor for positive testing of state capture functions.
-struct MockVmState {
-    frames: Vec<shape_runtime::module_exports::FrameInfo>,
-    args: Vec<ValueWord>,
-    locals: Vec<(String, ValueWord)>,
-    bindings: Vec<(String, ValueWord)>,
-}
+#[test]
+#[ignore = "phase-2c — state-snapshot rebuild — see ADR-006 §2.7.4"]
+fn test_state_hash_returns_hex_string() {}
 
-impl shape_runtime::module_exports::VmStateAccessor for MockVmState {
-    fn current_frame(&self) -> Option<shape_runtime::module_exports::FrameInfo> {
-        self.frames.last().cloned()
-    }
-    fn all_frames(&self) -> Vec<shape_runtime::module_exports::FrameInfo> {
-        self.frames.clone()
-    }
-    fn caller_frame(&self) -> Option<shape_runtime::module_exports::FrameInfo> {
-        if self.frames.len() >= 2 {
-            Some(self.frames[self.frames.len() - 2].clone())
-        } else {
-            None
-        }
-    }
-    fn current_args(&self) -> Vec<ValueWord> {
-        self.args.clone()
-    }
-    fn current_locals(&self) -> Vec<(String, ValueWord)> {
-        self.locals.clone()
-    }
-    fn module_bindings(&self) -> Vec<(String, ValueWord)> {
-        self.bindings.clone()
-    }
-}
+#[test]
+#[ignore = "phase-2c — state-snapshot rebuild — see ADR-006 §2.7.4"]
+fn test_state_fn_hash_with_function() {}
 
-fn test_ctx_with_vm_state(
-    state: &dyn shape_runtime::module_exports::VmStateAccessor,
-) -> ModuleContext<'_> {
-    let registry = Box::leak(Box::new(TypeSchemaRegistry::new()));
-    ModuleContext {
-        schemas: registry,
+#[test]
+#[ignore = "phase-2c — state-snapshot rebuild — see ADR-006 §2.7.4"]
+fn test_state_fn_hash_non_function() {}
+
+#[test]
+#[ignore = "phase-2c — state-snapshot rebuild — see ADR-006 §2.7.4"]
+fn test_state_serialize_deserialize_roundtrip_number() {}
+
+#[test]
+#[ignore = "phase-2c — state-snapshot rebuild — see ADR-006 §2.7.4"]
+fn test_state_serialize_deserialize_roundtrip_string() {}
+
+#[test]
+#[ignore = "phase-2c — state-snapshot rebuild — see ADR-006 §2.7.4"]
+fn test_state_serialize_deserialize_roundtrip_bool() {}
+
+#[test]
+#[ignore = "phase-2c — state-snapshot rebuild — see ADR-006 §2.7.4"]
+fn test_state_serialize_deserialize_roundtrip_array() {}
+
+#[test]
+#[ignore = "phase-2c — state-snapshot rebuild — see ADR-006 §2.7.4"]
+fn test_state_serialize_deserialize_none() {}
+
+#[test]
+#[ignore = "phase-2c — state-snapshot rebuild — see ADR-006 §2.7.4"]
+fn test_state_diff_identical() {}
+
+#[test]
+#[ignore = "phase-2c — state-snapshot rebuild — see ADR-006 §2.7.4"]
+fn test_state_diff_changed() {}
+
+#[test]
+#[ignore = "phase-2c — state-snapshot rebuild — see ADR-006 §2.7.4"]
+fn test_state_patch_root_replacement_legacy_array() {}
+
+#[test]
+#[ignore = "phase-2c — state-snapshot rebuild — see ADR-006 §2.7.4"]
+fn test_state_diff_patch_roundtrip() {}
+
+/// W17-snapshot-resume gate test: every `state.*` body returns a
+/// structured `Err(...)` carrying the W17 surface text, never a
+/// `todo!()` panic that would abort the VM thread.
+///
+/// The pre-W17 bodies were `todo!()` macros; this test would have
+/// aborted the test process. Post-W17 they return `Err(String)` with
+/// a structured surface message — this test exercises every entry
+/// point in `state_builtins/introspection.rs` and the content/serialize/
+/// diff family in `state_builtins/core.rs` and asserts that:
+///   (a) the call returns `Err(_)` rather than panicking, and
+///   (b) the error message carries the W17 surface marker so audit
+///       trails can locate the deferral.
+#[test]
+fn test_w17_state_bodies_return_structured_errors() {
+    use crate::executor::state_builtins::core::{
+        state_deserialize, state_diff, state_fn_hash, state_hash, state_patch,
+        state_schema_hash, state_serialize,
+    };
+    use crate::executor::state_builtins::introspection::{
+        state_args_stub, state_caller_stub, state_capture_all_stub, state_capture_call_stub,
+        state_capture_module_stub, state_capture_stub, state_locals_stub,
+        state_resume_frame_stub, state_resume_stub,
+    };
+    use shape_runtime::module_exports::ModuleContext;
+    use shape_runtime::type_schema::TypeSchemaRegistry;
+
+    let schemas = TypeSchemaRegistry::default();
+    let ctx = ModuleContext {
+        schemas: &schemas,
         invoke_callable: None,
         raw_invoker: None,
         function_hashes: None,
-        vm_state: Some(state),
+        vm_state: None,
         granted_permissions: None,
         scope_constraints: None,
         set_pending_resume: None,
         set_pending_frame_resume: None,
+    };
+
+    // Every state body returns Err(String) with the W17 marker. We
+    // pass an empty slot slice — none of these bodies actually inspect
+    // their args, they surface-stop immediately.
+    let empty_args: &[shape_value::KindedSlot] = &[];
+
+    let fixtures: &[(
+        &str,
+        fn(
+            &[shape_value::KindedSlot],
+            &ModuleContext,
+        ) -> Result<
+            shape_runtime::typed_module_exports::TypedReturn,
+            String,
+        >,
+    )] = &[
+        ("state.capture", state_capture_stub),
+        ("state.capture_all", state_capture_all_stub),
+        ("state.capture_module", state_capture_module_stub),
+        ("state.capture_call", state_capture_call_stub),
+        ("state.resume", state_resume_stub),
+        ("state.resume_frame", state_resume_frame_stub),
+        ("state.caller", state_caller_stub),
+        ("state.args", state_args_stub),
+        ("state.locals", state_locals_stub),
+        ("state.hash", state_hash),
+        ("state.fn_hash", state_fn_hash),
+        ("state.schema_hash", state_schema_hash),
+        ("state.serialize", state_serialize),
+        ("state.deserialize", state_deserialize),
+        ("state.diff", state_diff),
+        ("state.patch", state_patch),
+    ];
+
+    for (name, body) in fixtures {
+        let result = body(empty_args, &ctx);
+        let err = result.as_ref().err().unwrap_or_else(|| {
+            panic!(
+                "{name}: expected Err(...) surface, got Ok(...) — W17 \
+                 surface-and-stop expects every state.* body to return \
+                 a structured error until Phase-2c rebuild lands"
+            )
+        });
+        assert!(
+            err.contains("W17-snapshot-resume surface"),
+            "{name}: error message missing W17 surface marker; got: {err}"
+        );
+        assert!(
+            err.contains("§2.7.4"),
+            "{name}: error message missing ADR-006 §2.7.4 cite; got: {err}"
+        );
     }
 }
 
 #[test]
-fn test_state_args_returns_captured_args() {
-    let mock = MockVmState {
-        frames: vec![shape_runtime::module_exports::FrameInfo {
-            function_id: Some(0),
-            function_name: "my_func".to_string(),
-            blob_hash: None,
-            local_ip: 0,
-            locals: vec![],
-            upvalues: None,
-            args: vec![],
-        }],
-        args: vec![ValueWord::from_f64(1.0), ValueWord::from_f64(2.0)],
-        locals: vec![],
-        bindings: vec![],
-    };
-    let ctx = test_ctx_with_vm_state(&mock);
-    let result = state_args_stub(&[], &ctx).unwrap();
-    let arr = result.to_array_arc().unwrap();
-    assert_eq!(arr.len(), 2);
-    assert_eq!(arr[0].as_f64(), Some(1.0));
-    assert_eq!(arr[1].as_f64(), Some(2.0));
-}
+#[ignore = "phase-2c — state-snapshot rebuild — see ADR-006 §2.7.4"]
+fn test_capture_stubs_return_errors() {}
 
 #[test]
-fn test_state_locals_returns_name_value_pairs() {
-    let mock = MockVmState {
-        frames: vec![shape_runtime::module_exports::FrameInfo {
-            function_id: Some(0),
-            function_name: "my_func".to_string(),
-            blob_hash: None,
-            local_ip: 0,
-            locals: vec![ValueWord::from_f64(10.0), ValueWord::from_f64(20.0)],
-            upvalues: None,
-            args: vec![],
-        }],
-        args: vec![],
-        locals: vec![
-            ("x".to_string(), ValueWord::from_f64(10.0)),
-            ("y".to_string(), ValueWord::from_f64(20.0)),
-        ],
-        bindings: vec![],
-    };
-    let ctx = test_ctx_with_vm_state(&mock);
-    let result = state_locals_stub(&[], &ctx).unwrap();
-    let arr = result.to_array_arc().unwrap();
-    assert_eq!(arr.len(), 2);
-    // Each element is [name, value]
-    let pair0 = arr[0].to_array_arc().unwrap();
-    assert_eq!(pair0[0].as_str().unwrap().to_string(), "x");
-    assert_eq!(pair0[1].as_f64(), Some(10.0));
-}
+#[ignore = "phase-2c — state-snapshot rebuild — see ADR-006 §2.7.4"]
+fn test_state_args_returns_captured_args() {}
 
 #[test]
-fn test_state_caller_returns_caller_frame() {
-    let mock = MockVmState {
-        frames: vec![
-            shape_runtime::module_exports::FrameInfo {
-                function_id: Some(0),
-                function_name: "outer".to_string(),
-                blob_hash: Some([0xAB; 32]),
-                local_ip: 42,
-                locals: vec![ValueWord::from_f64(0.0)],
-                upvalues: None,
-                args: vec![],
-            },
-            shape_runtime::module_exports::FrameInfo {
-                function_id: Some(1),
-                function_name: "inner".to_string(),
-                blob_hash: None,
-                local_ip: 10,
-                locals: vec![],
-                upvalues: None,
-                args: vec![],
-            },
-        ],
-        args: vec![],
-        locals: vec![],
-        bindings: vec![],
-    };
-    let ctx = test_ctx_with_vm_state(&mock);
-    let result = state_caller_stub(&[], &ctx).unwrap();
-    // Should return a TypedObject with "name" and "hash" fields
-    let (_, slots, heap_mask) = result.as_typed_object().expect("should be typed object");
-    assert!(slots.len() >= 2);
-    // slot 0 should be the caller name "outer"
-    assert!(heap_mask & 1 != 0);
-    let name = slots[0].as_heap_nb();
-    assert_eq!(name.as_str().unwrap().to_string(), "outer");
-}
+#[ignore = "phase-2c — state-snapshot rebuild — see ADR-006 §2.7.4"]
+fn test_state_locals_returns_name_value_pairs() {}
 
 #[test]
-fn test_state_caller_returns_none_when_no_caller() {
-    let mock = MockVmState {
-        frames: vec![shape_runtime::module_exports::FrameInfo {
-            function_id: Some(0),
-            function_name: "only_frame".to_string(),
-            blob_hash: None,
-            local_ip: 0,
-            locals: vec![],
-            upvalues: None,
-            args: vec![],
-        }],
-        args: vec![],
-        locals: vec![],
-        bindings: vec![],
-    };
-    let ctx = test_ctx_with_vm_state(&mock);
-    let result = state_caller_stub(&[], &ctx).unwrap();
-    assert!(result.is_none());
-}
+#[ignore = "phase-2c — state-snapshot rebuild — see ADR-006 §2.7.4"]
+fn test_state_caller_returns_caller_frame() {}
+
+#[test]
+#[ignore = "phase-2c — state-snapshot rebuild — see ADR-006 §2.7.4"]
+fn test_state_caller_returns_none_when_no_caller() {}

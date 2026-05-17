@@ -17,7 +17,7 @@
 //!
 //! ## Element sizes
 //!
-//! | SlotKind  | Cranelift type | Size (bytes) |
+//! | NativeKind  | Cranelift type | Size (bytes) |
 //! |-----------|---------------|--------------|
 //! | Float64   | F64           | 8            |
 //! | Int64     | I64           | 8            |
@@ -28,7 +28,7 @@
 use cranelift::prelude::*;
 use shape_value::v2::ConcreteType;
 use shape_vm::mir::types::{Operand, Place, SlotId};
-use shape_vm::type_tracking::SlotKind;
+use shape_vm::type_tracking::NativeKind;
 
 use super::MirToIR;
 use super::types::is_v2_typed_array_slot;
@@ -43,38 +43,38 @@ const LEN_OFFSET: i32 = 16;
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-/// Return the (Cranelift IR type, element byte size) for a given `SlotKind`.
+/// Return the (Cranelift IR type, element byte size) for a given `NativeKind`.
 ///
 /// Panics on slot kinds that do not map to a scalar element type (e.g.
 /// `String`, `Dynamic`, `Unknown`).
-fn elem_type_info(kind: SlotKind) -> (types::Type, i64) {
+fn elem_type_info(kind: NativeKind) -> (types::Type, i64) {
     match kind {
-        SlotKind::Float64 | SlotKind::NullableFloat64 => (types::F64, 8),
-        SlotKind::Int64 | SlotKind::NullableInt64 | SlotKind::UInt64 | SlotKind::NullableUInt64 => {
+        NativeKind::Float64 | NativeKind::NullableFloat64 => (types::F64, 8),
+        NativeKind::Int64 | NativeKind::NullableInt64 | NativeKind::UInt64 | NativeKind::NullableUInt64 => {
             (types::I64, 8)
         }
-        SlotKind::IntSize | SlotKind::NullableIntSize | SlotKind::UIntSize | SlotKind::NullableUIntSize => {
+        NativeKind::IntSize | NativeKind::NullableIntSize | NativeKind::UIntSize | NativeKind::NullableUIntSize => {
             // Pointer-sized — 8 bytes on 64-bit targets.
             (types::I64, 8)
         }
-        SlotKind::Int32 | SlotKind::NullableInt32 | SlotKind::UInt32 | SlotKind::NullableUInt32 => {
+        NativeKind::Int32 | NativeKind::NullableInt32 | NativeKind::UInt32 | NativeKind::NullableUInt32 => {
             (types::I32, 4)
         }
-        SlotKind::Int16 | SlotKind::NullableInt16 | SlotKind::UInt16 | SlotKind::NullableUInt16 => {
+        NativeKind::Int16 | NativeKind::NullableInt16 | NativeKind::UInt16 | NativeKind::NullableUInt16 => {
             (types::I16, 2)
         }
-        SlotKind::Int8 | SlotKind::NullableInt8 | SlotKind::UInt8 | SlotKind::NullableUInt8 => {
+        NativeKind::Int8 | NativeKind::NullableInt8 | NativeKind::UInt8 | NativeKind::NullableUInt8 => {
             (types::I8, 1)
         }
-        SlotKind::Bool => (types::I8, 1),
-        other => panic!("v2_array: unsupported element SlotKind: {:?}", other),
+        NativeKind::Bool => (types::I8, 1),
+        other => panic!("v2_array: unsupported element NativeKind: {:?}", other),
     }
 }
 
-/// Return the zero/default Cranelift constant for a given `SlotKind`.
+/// Return the zero/default Cranelift constant for a given `NativeKind`.
 ///
 /// Used as the out-of-bounds fallback value in `v2_array_get`.
-fn emit_default(builder: &mut FunctionBuilder, kind: SlotKind) -> Value {
+fn emit_default(builder: &mut FunctionBuilder, kind: NativeKind) -> Value {
     let (ty, _) = elem_type_info(kind);
     match ty {
         types::F64 => builder.ins().f64const(0.0),
@@ -103,14 +103,13 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 
     /// If the place's root local is known to hold a v2 `Array<T>` whose
     /// element type is a scalar primitive, return the matching element
-    /// `SlotKind`. Returns `None` for non-array slots, arrays of non-scalar
+    /// `NativeKind`. Returns `None` for non-array slots, arrays of non-scalar
     /// elements, or unresolved types — caller falls back to legacy path.
     ///
-    /// Note: today only the per-MirToIR `concrete_types` vector is consulted.
-    /// The bytecode compiler / MIR-level slot concrete types are still in
-    /// flux upstream (other Phase 3.1 agents are refactoring them), so the
-    /// MirFunction-side fallback is intentionally not used here.
-    pub(crate) fn v2_typed_array_elem_kind(&self, place: &Place) -> Option<SlotKind> {
+    /// Source: the per-MirToIR `concrete_types` vector, threaded from
+    /// `BytecodeProgram.top_level_local_concrete_types` per ADR-006
+    /// §2.7.5 (W12-top-level-concrete-types-conduit close, 2026-05-12).
+    pub(crate) fn v2_typed_array_elem_kind(&self, place: &Place) -> Option<NativeKind> {
         let slot = match place {
             Place::Local(s) => *s,
             _ => return None,
@@ -118,27 +117,80 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         is_v2_typed_array_slot(&self.concrete_types, slot.0)
     }
 
+    /// True when the place's root local is known to hold a TypedObject
+    /// (`ConcreteType::Struct(_)` / `ConcreteType::Enum(_)` /
+    /// `ConcreteType::Option(_)` / `ConcreteType::Result(_, _)` /
+    /// `ConcreteType::Tuple(_)`). These all share the `HeapKind::TypedObject`
+    /// carrier and are materialised by the subsequent
+    /// `StatementKind::ObjectStore` / `EnumStore`.
+    ///
+    /// Used by the `Assign(Aggregate)` short-circuit in `statements.rs`:
+    /// when the bytecode compiler proved the destination slot is a
+    /// TypedObject, the preceding `Rvalue::Aggregate` is a MIR scratch step
+    /// — the real allocation happens in the following `ObjectStore`.
+    /// Skipping the Aggregate avoids the `Route A surface-and-stop`
+    /// previously hit at compile time for `Point { x, y }`-style literals.
+    ///
+    /// Source: the per-MirToIR `concrete_types` vector, threaded from
+    /// `BytecodeProgram.top_level_local_concrete_types` per ADR-006
+    /// §2.7.5 (W12-top-level-concrete-types-conduit close, 2026-05-12).
+    pub(crate) fn is_typed_object_slot(&self, place: &Place) -> bool {
+        let slot = match place {
+            Place::Local(s) => *s,
+            _ => return false,
+        };
+        let Some(ct) = self.concrete_types.get(slot.0 as usize) else {
+            return false;
+        };
+        matches!(
+            ct,
+            ConcreteType::Struct(_)
+                | ConcreteType::Enum(_)
+                | ConcreteType::Option(_)
+                | ConcreteType::Result(_, _)
+                | ConcreteType::Tuple(_)
+        )
+    }
+
     /// Return the FFI `FuncRef` for `jit_v2_array_new_<elem>`.
-    pub(crate) fn v2_array_new_func(&self, elem: SlotKind) -> Option<cranelift::codegen::ir::FuncRef> {
+    ///
+    /// ckpt-6-prime Group X JIT FFI String/Decimal BUILD (2026-05-15):
+    /// extended with `StringV2` / `DecimalV2` arms routing to
+    /// `jit_new_typed_array_string` / `jit_new_typed_array_decimal`. These
+    /// allocate `TypedArray<*const StringObj>` / `TypedArray<*const
+    /// DecimalObj>` carriers per ADR-006 §2.7.5 + §2.7.24 Q25.A SUPERSEDED +
+    /// audit deliverable (b) §4.1.B. Per-element pointer payload is the
+    /// v2-raw heap-element shape produced by VM-side `NewStringV2` /
+    /// `NewDecimalV2` opcodes at
+    /// `crates/shape-vm/src/executor/v2_handlers/array.rs:803-858`.
+    pub(crate) fn v2_array_new_func(&self, elem: NativeKind) -> Option<cranelift::codegen::ir::FuncRef> {
         match elem {
-            SlotKind::Float64 => Some(self.ffi.v2_array_new_f64),
-            SlotKind::Int64 | SlotKind::UInt64 => Some(self.ffi.v2_array_new_i64),
-            SlotKind::Int32 | SlotKind::UInt32 => Some(self.ffi.v2_array_new_i32),
-            SlotKind::Bool | SlotKind::Int8 | SlotKind::UInt8 => Some(self.ffi.v2_array_new_bool),
+            NativeKind::Float64 => Some(self.ffi.v2_array_new_f64),
+            NativeKind::Int64 | NativeKind::UInt64 => Some(self.ffi.v2_array_new_i64),
+            NativeKind::Int32 | NativeKind::UInt32 => Some(self.ffi.v2_array_new_i32),
+            NativeKind::Bool | NativeKind::Int8 | NativeKind::UInt8 => Some(self.ffi.v2_array_new_bool),
+            NativeKind::StringV2 => Some(self.ffi.v2_array_new_string),
+            NativeKind::DecimalV2 => Some(self.ffi.v2_array_new_decimal),
             _ => None,
         }
     }
 
-    /// Return the element byte size for `SlotKind`s backed by the generic
+    /// Return the element byte size for `NativeKind`s backed by the generic
     /// `jit_v2_array_push` dispatcher, or `None` for unsupported kinds. The
     /// caller uses the returned size as the `elem_size` I8 immediate passed
     /// to the dispatcher.
-    pub(crate) fn v2_array_push_elem_size(&self, elem: SlotKind) -> Option<i64> {
+    ///
+    /// ckpt-6-prime Group X JIT FFI String/Decimal BUILD (2026-05-15):
+    /// `StringV2` / `DecimalV2` are 8-byte pointer carriers — the element
+    /// payload is a `*const StringObj` / `*const DecimalObj` raw pointer,
+    /// pushed via the generic `jit_v2_array_push` I64-shaped dispatcher.
+    pub(crate) fn v2_array_push_elem_size(&self, elem: NativeKind) -> Option<i64> {
         match elem {
-            SlotKind::Float64 => Some(8),
-            SlotKind::Int64 | SlotKind::UInt64 => Some(8),
-            SlotKind::Int32 | SlotKind::UInt32 => Some(4),
-            SlotKind::Bool | SlotKind::Int8 | SlotKind::UInt8 => Some(1),
+            NativeKind::Float64 => Some(8),
+            NativeKind::Int64 | NativeKind::UInt64 => Some(8),
+            NativeKind::Int32 | NativeKind::UInt32 => Some(4),
+            NativeKind::Bool | NativeKind::Int8 | NativeKind::UInt8 => Some(1),
+            NativeKind::StringV2 | NativeKind::DecimalV2 => Some(8),
             _ => None,
         }
     }
@@ -152,7 +204,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         &mut self,
         arr_ptr: Value,
         val: Value,
-        elem: SlotKind,
+        elem: NativeKind,
     ) -> Result<(), String> {
         let elem_size = match self.v2_array_push_elem_size(elem) {
             Some(s) => s,
@@ -188,10 +240,10 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 
     /// Convert a Cranelift value into the native type expected by the v2
     /// element store/push helpers for `elem`.
-    pub(crate) fn coerce_to_v2_elem(&mut self, val: Value, elem: SlotKind) -> Value {
+    pub(crate) fn coerce_to_v2_elem(&mut self, val: Value, elem: NativeKind) -> Value {
         let val_type = self.builder.func.dfg.value_type(val);
         match elem {
-            SlotKind::Float64 => {
+            NativeKind::Float64 => {
                 if val_type == types::F64 {
                     val
                 } else if val_type == types::I64 {
@@ -207,7 +259,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     self.builder.ins().fcvt_from_sint(types::F64, i64_val)
                 }
             }
-            SlotKind::Int64 | SlotKind::UInt64 => {
+            NativeKind::Int64 | NativeKind::UInt64 => {
                 if val_type == types::I64 {
                     let shifted = self.builder.ins().ishl_imm(val, 16);
                     self.builder.ins().sshr_imm(shifted, 16)
@@ -219,7 +271,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     val
                 }
             }
-            SlotKind::Int32 | SlotKind::UInt32 => {
+            NativeKind::Int32 | NativeKind::UInt32 => {
                 if val_type == types::I32 {
                     val
                 } else if val_type == types::I64 {
@@ -232,7 +284,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     val
                 }
             }
-            SlotKind::Bool | SlotKind::Int8 | SlotKind::UInt8 => {
+            NativeKind::Bool | NativeKind::Int8 | NativeKind::UInt8 => {
                 if val_type == types::I8 {
                     val
                 } else if val_type == types::I64 {
@@ -243,6 +295,13 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     val
                 }
             }
+            // ckpt-6-prime Group X JIT FFI String/Decimal BUILD (2026-05-15):
+            // StringV2 / DecimalV2 elements are 8-byte raw pointers — the
+            // operand value is already an I64-shaped `*const StringObj` /
+            // `*const DecimalObj` produced by the per-element constant
+            // materializer in `emit_v2_array_aggregate`'s StringV2/DecimalV2
+            // arm. No coercion needed.
+            NativeKind::StringV2 | NativeKind::DecimalV2 => val,
             _ => val,
         }
     }
@@ -270,10 +329,30 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// Allocate a v2 typed array of the given element kind via FFI, then push
     /// each operand value into it. Returns the raw `*mut TypedArray<T>` as an
     /// `i64` Cranelift value, or `None` when no v2 helper exists.
+    ///
+    /// ckpt-6-prime Group X JIT FFI String/Decimal BUILD (2026-05-15):
+    /// `StringV2` element kind takes a kind-specific per-element path —
+    /// each `MirConstant::Str` / `MirConstant::StringId` operand is
+    /// materialized at JIT-compile time as a `*const StringObj` constant
+    /// via `crate::ffi::v2::string_obj_constant` (refcount-boosted permanent
+    /// share, mirroring `crate::ffi::string::arc_string_constant` for the
+    /// legacy `Arc<String>` carrier). The constant pointer is embedded as
+    /// an `iconst I64` and pushed via the generic `jit_v2_array_push`
+    /// dispatcher with elem_size=8. This is the JIT-side equivalent of the
+    /// VM's `NewStringV2` opcode + `TypedArrayPushString` per-element
+    /// transfer at `crates/shape-vm/src/executor/v2_handlers/array.rs:803`.
+    ///
+    /// `DecimalV2` element kind currently surfaces-and-stops at the MIR
+    /// producer site — `MirConstant` has no `Decimal` variant, so Array
+    /// <decimal> literals can't currently flow through MIR. Wiring the
+    /// per-element NewDecimalV2 equivalent requires MIR-side producer
+    /// support (`MirConstant::Decimal` variant or equivalent constant-pool
+    /// reference), which is downstream territory beyond Group X's JIT FFI
+    /// build scope.
     pub(crate) fn emit_v2_array_aggregate(
         &mut self,
         operands: &[Operand],
-        elem: SlotKind,
+        elem: NativeKind,
     ) -> Result<Option<Value>, String> {
         let alloc_func = match self.v2_array_new_func(elem) {
             Some(f) => f,
@@ -287,10 +366,92 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         let inst = self.builder.ins().call(alloc_func, &[cap]);
         let arr_ptr = self.builder.inst_results(inst)[0];
 
-        for op in operands {
-            let raw = self.compile_operand_raw(op)?;
-            let val = self.coerce_to_v2_elem(raw, elem);
-            self.emit_v2_array_push_call(arr_ptr, val, elem)?;
+        match elem {
+            // ckpt-6-prime Group X JIT FFI String/Decimal BUILD: per-element
+            // NewStringV2 equivalent at the JIT mir_compiler dispatch site.
+            // Each operand must be a `MirConstant::Str` / `MirConstant::
+            // StringId` — the only producer sites for `NativeKind::StringV2`
+            // Array<string> literals per ADR-006 §2.7.5 + audit deliverable
+            // (b) §4.1.B. Other operand shapes structurally cannot produce
+            // a StringV2-kind value and surface-and-stop here (no Bool-
+            // default per §2.7.7 #9 / CLAUDE.md "Forbidden rationalizations").
+            NativeKind::StringV2 => {
+                use shape_vm::mir::types::MirConstant;
+                for op in operands {
+                    let s: String = match op {
+                        Operand::Constant(MirConstant::Str(s)) => s.clone(),
+                        Operand::Constant(MirConstant::StringId(id)) => {
+                            let idx = *id as usize;
+                            if idx >= self.strings.len() {
+                                return Err(format!(
+                                    "emit_v2_array_aggregate: StringV2 elem StringId({}) \
+                                     out of bounds (pool len = {}) — string-pool conduit \
+                                     mismatch at JIT compile time. ADR-006 §2.7.5 / Group X \
+                                     JIT FFI String/Decimal BUILD.",
+                                    id, self.strings.len()
+                                ));
+                            }
+                            self.strings[idx].clone()
+                        }
+                        other => {
+                            return Err(format!(
+                                "emit_v2_array_aggregate: SURFACE — StringV2 elem kind \
+                                 requires `MirConstant::Str` / `MirConstant::StringId` \
+                                 operand per Group X NewStringV2-equivalent dispatch \
+                                 (ADR-006 §2.7.5 + §2.7.24 Q25.A SUPERSEDED + audit \
+                                 deliverable (b) §4.1.B). Got: {:?}. No Bool-default \
+                                 fallback per §2.7.7 #9 / CLAUDE.md Forbidden \
+                                 rationalizations.",
+                                other
+                            ));
+                        }
+                    };
+                    // Compile-time materialize a `*const StringObj` permanent-
+                    // share constant (refcount=2; one share is the active
+                    // share transferred to the array, the other is the
+                    // constant's permanent share that survives JIT-function
+                    // Drop chains).
+                    let string_obj_ptr = crate::ffi::v2::string_obj_constant(&s);
+                    let val = self
+                        .builder
+                        .ins()
+                        .iconst(types::I64, string_obj_ptr as usize as i64);
+                    self.emit_v2_array_push_call(arr_ptr, val, elem)?;
+                }
+            }
+            // ckpt-6-prime Group X JIT FFI String/Decimal BUILD: per-element
+            // NewDecimalV2 equivalent surface-and-stop. `MirConstant` has no
+            // `Decimal` variant so Array<decimal> literals can't currently
+            // flow through MIR — the FFI allocator + carrier-routing is
+            // wired (above) but the per-element producer requires MIR-side
+            // support that's beyond Group X's JIT FFI build scope.
+            NativeKind::DecimalV2 => {
+                return Err(format!(
+                    "emit_v2_array_aggregate: SURFACE — DecimalV2 elem-kind \
+                     per-element materialization requires MIR-side producer \
+                     support (`MirConstant::Decimal` variant or equivalent \
+                     constant-pool reference) which is not yet wired. Group X \
+                     scope covers the JIT FFI allocator + carrier-routing \
+                     (jit_new_typed_array_decimal + v2_array_new_func \
+                     DecimalV2 arm); per-element materializer awaits the MIR \
+                     producer's wiring. ADR-006 §2.7.5 + §2.7.24 Q25.A \
+                     SUPERSEDED + audit deliverable (b) §4.1.B. {} operands \
+                     received; no Bool-default per §2.7.7 #9.",
+                    operands.len()
+                ));
+            }
+            _ => {
+                // Scalar element kinds (Float64/Int64/Int32/Bool/etc.) —
+                // existing inline path. compile_operand_raw produces a
+                // Cranelift SSA value already in the native element type;
+                // coerce_to_v2_elem normalizes and emit_v2_array_push_call
+                // routes through the generic dispatcher.
+                for op in operands {
+                    let raw = self.compile_operand_raw(op)?;
+                    let val = self.coerce_to_v2_elem(raw, elem);
+                    self.emit_v2_array_push_call(arr_ptr, val, elem)?;
+                }
+            }
         }
 
         Ok(Some(arr_ptr))
@@ -303,7 +464,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         receiver: &Place,
         rest_args: &[Operand],
         destination: &Place,
-        elem: SlotKind,
+        elem: NativeKind,
     ) -> Result<Option<()>, String> {
         match method_name {
             "length" | "len" => {
@@ -340,8 +501,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     return Ok(None);
                 }
                 let sum_func = match elem {
-                    SlotKind::Float64 => self.ffi.v2_array_sum_f64,
-                    SlotKind::Int64 | SlotKind::UInt64 => self.ffi.v2_array_sum_i64,
+                    NativeKind::Float64 => self.ffi.v2_array_sum_f64,
+                    NativeKind::Int64 | NativeKind::UInt64 => self.ffi.v2_array_sum_i64,
                     _ => return Ok(None),
                 };
                 let arr_ptr = self.read_place(receiver)?;
@@ -356,7 +517,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 if !rest_args.is_empty() {
                     return Ok(None);
                 }
-                if !matches!(elem, SlotKind::Float64) {
+                if !matches!(elem, NativeKind::Float64) {
                     return Ok(None);
                 }
                 let func = match method_name {
@@ -378,7 +539,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 if rest_args.len() != 1 {
                     return Ok(None);
                 }
-                if !matches!(elem, SlotKind::Float64) {
+                if !matches!(elem, NativeKind::Float64) {
                     return Ok(None);
                 }
                 let func = match method_name {
@@ -388,7 +549,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 };
                 let arr_ptr = self.read_place(receiver)?;
                 let raw = self.compile_operand_raw(&rest_args[0])?;
-                let scalar = self.coerce_to_v2_elem(raw, SlotKind::Float64);
+                let scalar = self.coerce_to_v2_elem(raw, NativeKind::Float64);
                 let inst = self.builder.ins().call(func, &[arr_ptr, scalar]);
                 let new_arr = self.builder.inst_results(inst)[0];
                 self.release_old_value_if_heap(destination)?;
@@ -401,7 +562,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 if rest_args.len() != 1 {
                     return Ok(None);
                 }
-                if !matches!(elem, SlotKind::Float64) {
+                if !matches!(elem, NativeKind::Float64) {
                     return Ok(None);
                 }
                 let func = match method_name {
@@ -449,7 +610,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         &mut self,
         arr_ptr: Value,
         index: Value,
-        elem_type: SlotKind,
+        elem_type: NativeKind,
     ) -> Value {
         let (cl_type, elem_size) = elem_type_info(elem_type);
 
@@ -542,7 +703,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         arr_ptr: Value,
         index: Value,
         val: Value,
-        elem_type: SlotKind,
+        elem_type: NativeKind,
     ) {
         let (_cl_type, elem_size) = elem_type_info(elem_type);
 

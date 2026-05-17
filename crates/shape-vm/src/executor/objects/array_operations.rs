@@ -1,536 +1,521 @@
 //! Array operations (ArrayPush, ArrayPushLocal, ArrayPop, SliceAccess)
 //!
-//! Handles array manipulation and slicing for arrays, series, and strings.
+//! Handles array manipulation and slicing for v2-raw typed arrays.
+//!
+//! ## V3-S5 ckpt-5 consumer-cascade tier 3 surface (2026-05-15)
+//!
+//! Per V3-S5 ckpt-1..ckpt-4 cascade the `TypedArrayData` enum +
+//! `TypedBuffer<T>` / `AlignedTypedBuffer` wrapper layer +
+//! `HeapValue::TypedArray(Arc<TypedArrayData>)` outer arm +
+//! `HeapKind::TypedArray = 8` ordinal were DELETED wholesale per
+//! W12-typed-array-data-deletion audit §3.5 + §3.6 + §B + ADR-006
+//! §2.7.24 Q25.A SUPERSEDED. The `NativeKind::Ptr(HeapKind::TypedArray)`
+//! receiver shape is gone.
+//!
+//! The pre-ckpt-1 file had two carrier paths:
+//!   - `Ptr(HeapKind::TypedArray)` Arc-boxed `Arc<TypedArrayData>` (DELETED)
+//!   - `NativeKind::UInt64` v2-raw `*mut TypedArray<T>` (PRESERVED)
+//!
+//! The Arc-boxed path's helpers (`element_kind_of`, `push_into_typed_array`,
+//! `pop_from_typed_array`, `slice_typed_array`) are DELETED. The
+//! UInt64 v2-raw path is the canonical pattern per W12 audit §A.3 +
+//! §3.1 scalar recipe and stays live.
+//!
+//! Refusal #1 binding: TypedArrayData resurrection under any rename
+//! refused on sight.
 
+use crate::bytecode::{Instruction, Operand};
+use crate::executor::v2_handlers::v2_array_detect::{
+    self, ELEM_TYPE_BOOL, ELEM_TYPE_CHAR, ELEM_TYPE_DECIMAL, ELEM_TYPE_F32, ELEM_TYPE_F64,
+    ELEM_TYPE_I16, ELEM_TYPE_I32, ELEM_TYPE_I64, ELEM_TYPE_I8, ELEM_TYPE_STRING, ELEM_TYPE_U16,
+    ELEM_TYPE_U32, ELEM_TYPE_U8,
+    V2ElemType,
+    V2TypedArrayView,
+};
+use crate::executor::vm_impl::stack::drop_with_kind;
 use crate::executor::VirtualMachine;
-use shape_value::nanboxed::RefTarget;
-use shape_value::{HeapValue, TypedArrayData, VMError, ValueWord, ValueWordExt};
-use std::sync::Arc;
+use shape_value::v2::typed_array::TypedArray;
+use shape_value::{NativeKind, VMError};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// V3-S5 ckpt-5 surface-and-stop builder (for the deleted Ptr(HeapKind::
+// TypedArray) Arc<TypedArrayData> receiver arm)
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[cold]
+#[inline(never)]
+fn ckpt5_typed_array_surface(op: &'static str, kind: NativeKind) -> VMError {
+    VMError::NotImplemented(format!(
+        "{op}: SURFACE — V3-S5 ckpt-5 consumer-cascade tier 3 surface. \
+         `Arc<TypedArrayData>` carrier + `HeapKind::TypedArray=8` ordinal \
+         DELETED at V3-S5 ckpt-1..ckpt-4 per W12-typed-array-data-deletion \
+         audit §3.5 + §3.6 + ADR-006 §2.7.24 Q25.A SUPERSEDED. UInt64 \
+         v2-raw `*mut TypedArray<T>` receiver path remains live. Receiver \
+         kind: {kind:?}. REFUSED ON SIGHT: TypedArrayData resurrection \
+         under any rename (Refusal #1).",
+        op = op,
+        kind = kind,
+    ))
+}
 
 impl VirtualMachine {
     pub(in crate::executor) fn op_array_push(&mut self) -> Result<(), VMError> {
-        let value_nb = ValueWord::from_raw_bits(self.pop_raw_u64()?);
-        let mut array_nb = ValueWord::from_raw_bits(self.pop_raw_u64()?);
+        // Stack discipline: ArrayPush expects [array, value] with `value` at top.
+        let (value_bits, value_kind) = self.pop_kinded()?;
+        let (array_bits, array_kind) = self.pop_kinded()?;
 
-        // v2 typed array fast path: mutate the typed buffer in place via the
-        // stamped header. Push the (unchanged) array pointer back as the
-        // expression result, matching the legacy ArrayPush stack discipline.
-        if let Some(view) =
-            crate::executor::v2_handlers::v2_array_detect::as_v2_typed_array(&array_nb)
-        {
-            crate::executor::v2_handlers::v2_array_detect::push_element(&view, &value_nb)
-                .map_err(|e| VMError::RuntimeError(e.to_string()))?;
-            self.push_raw_u64(array_nb)?;
-            return Ok(());
-        }
-
-        // Handle unified arrays (bit-47 tagged) for push.
-        let vb = shape_value::ValueBits::from_raw(array_nb.raw_bits());
-        if vb.is_unified_heap() {
-            let kind = unsafe { vb.unified_heap_kind() };
-            if kind == shape_value::tag_bits::HEAP_KIND_ARRAY as u16 {
-                let arr = unsafe {
-                    shape_value::unified_array::UnifiedArray::from_heap_bits_mut(array_nb.raw_bits())
-                };
-                let new_bits = value_nb.raw_bits();
-                // FR.4: ownership of value_nb's heap share transfers into
-                // `arr.push(...)`; the u64 is Copy — nothing to do locally.
-                let _ = value_nb;
-                arr.push(new_bits);
-                self.push_raw_u64(array_nb)?;
-                return Ok(());
-            }
-        }
-
-        // Try mutable access for any array variant
-        if let Some(mut view) = array_nb.as_any_array_mut() {
-            match &mut view {
-                shape_value::ArrayViewMut::Generic(arc_vec) => {
-                    Arc::make_mut(arc_vec).push(value_nb);
-                    self.push_raw_u64(array_nb)?;
-                    return Ok(());
-                }
-                shape_value::ArrayViewMut::Int(arc_vec) => {
-                    if let Some(i) = value_nb.as_i64() {
-                        Arc::make_mut(arc_vec).push(i);
-                        self.push_raw_u64(array_nb)?;
-                        return Ok(());
+        match array_kind {
+            NativeKind::UInt64 => {
+                // v2 typed-array carrier (raw `*mut TypedArray<T>` with
+                // UInt64 kind). Detect → push_element → re-stash.
+                match v2_array_detect::as_v2_typed_array(array_bits, array_kind) {
+                    Some(view) => {
+                        match v2_array_detect::push_element(
+                            &view, value_bits, value_kind,
+                        ) {
+                            Ok(()) => {
+                                self.push_kinded(array_bits, NativeKind::UInt64)
+                            }
+                            Err(msg) => {
+                                drop_with_kind(value_bits, value_kind);
+                                Err(VMError::TypeError {
+                                    expected: "v2 typed-array element",
+                                    got: msg,
+                                })
+                            }
+                        }
                     }
-                    let generic = array_nb.as_any_array().unwrap().to_generic();
-                    let mut vec = (*generic).clone();
-                    vec.push(value_nb);
-                    self.push_raw_u64(ValueWord::from_array(shape_value::vmarray_from_vec(vec)))?;
-                    return Ok(());
-                }
-                shape_value::ArrayViewMut::Float(arc_vec) => {
-                    if let Some(f) = value_nb.as_f64() {
-                        Arc::make_mut(arc_vec).push(f);
-                        self.push_raw_u64(array_nb)?;
-                        return Ok(());
+                    None => {
+                        drop_with_kind(value_bits, value_kind);
+                        Err(VMError::NotImplemented(
+                            "ArrayPush: UInt64 receiver did not resolve to a \
+                             v2 typed-array pointer (HEAP_KIND_V2_TYPED_ARRAY \
+                             header missing). ADR-006 §2.7.6 / §2.7.7."
+                                .to_string(),
+                        ))
                     }
-                    let generic = array_nb.as_any_array().unwrap().to_generic();
-                    let mut vec = (*generic).clone();
-                    vec.push(value_nb);
-                    self.push_raw_u64(ValueWord::from_array(shape_value::vmarray_from_vec(vec)))?;
-                    return Ok(());
-                }
-                shape_value::ArrayViewMut::Bool(arc_vec) => {
-                    if let Some(b) = value_nb.as_bool() {
-                        Arc::make_mut(arc_vec).push(if b { 1 } else { 0 });
-                        self.push_raw_u64(array_nb)?;
-                        return Ok(());
-                    }
-                    let generic = array_nb.as_any_array().unwrap().to_generic();
-                    let mut vec = (*generic).clone();
-                    vec.push(value_nb);
-                    self.push_raw_u64(ValueWord::from_array(shape_value::vmarray_from_vec(vec)))?;
-                    return Ok(());
                 }
             }
+            _ => {
+                drop_with_kind(value_bits, value_kind);
+                drop_with_kind(array_bits, array_kind);
+                Err(ckpt5_typed_array_surface("ArrayPush", array_kind))
+            }
         }
-
-        Err(VMError::TypeError {
-            expected: "array",
-            got: array_nb.type_name(),
-        })
     }
 
-    /// Push a value into an array stored in a local or module_binding variable slot,
-    /// mutating in-place. Bypasses Arc reconstruction overhead by directly
-    /// accessing the heap pointer from the ValueWord bits.
-    ///
-    /// This turns O(n^2) array construction (from repeated clone+push) into O(n).
+    /// Push a value into an array stored in a local or module_binding
+    /// variable slot, mutating in-place.
     pub(in crate::executor) fn op_array_push_local(
         &mut self,
-        instruction: &crate::bytecode::Instruction,
+        instruction: &Instruction,
     ) -> Result<(), VMError> {
-        use crate::bytecode::Operand;
-        let value_nb = ValueWord::from_raw_bits(self.pop_raw_u64()?);
+        let (value_bits, value_kind) = self.pop_kinded()?;
 
-        match instruction.operand {
-            Some(Operand::Local(idx)) => {
-                let bp = self.current_locals_base();
-                let slot = bp + idx as usize;
-                let ref_target = self.stack_peek_raw(slot, |vw| vw.as_ref_target());
-                match ref_target {
-                    Some(RefTarget::Stack(target)) => {
-                        let mut arr = self.stack_take_raw(target);
-                        let r = Self::push_to_array_slot(&mut arr, value_nb);
-                        self.stack_write_raw(target, arr);
-                        r
-                    }
-                    Some(RefTarget::ModuleBinding(target)) => {
-                        if target >= self.module_bindings.len() {
-                            return Err(VMError::RuntimeError(format!(
-                                "ModuleBinding index {} out of bounds",
-                                target
-                            )));
+        let receiver_loc = match instruction.operand {
+            Some(Operand::Local(idx)) => ReceiverLoc::Local(idx as usize),
+            Some(Operand::ModuleBinding(idx)) => ReceiverLoc::ModuleBinding(idx as usize),
+            _ => {
+                drop_with_kind(value_bits, value_kind);
+                return Err(VMError::InvalidOperand);
+            }
+        };
+
+        let (_peek_bits, array_kind) = self.read_receiver_loc(&receiver_loc);
+
+        match array_kind {
+            NativeKind::UInt64 => {
+                let (array_bits, _) = self.read_receiver_loc(&receiver_loc);
+                match v2_array_detect::as_v2_typed_array(array_bits, array_kind) {
+                    Some(view) => {
+                        match v2_array_detect::push_element(
+                            &view, value_bits, value_kind,
+                        ) {
+                            Ok(()) => Ok(()),
+                            Err(msg) => {
+                                drop_with_kind(value_bits, value_kind);
+                                Err(VMError::TypeError {
+                                    expected: "v2 typed-array element",
+                                    got: msg,
+                                })
+                            }
                         }
-                        let mut arr = self.binding_take_raw(target);
-                        let r = Self::push_to_array_slot(&mut arr, value_nb);
-                        self.binding_write_raw(target, arr);
-                        r
-                    }
-                    Some(target) => {
-                        let mut array_nb = self.read_ref_target(&target)?;
-                        Self::push_to_array_slot(&mut array_nb, value_nb)?;
-                        self.write_ref_target(&target, array_nb)
                     }
                     None => {
-                        let mut arr = self.stack_take_raw(slot);
-                        let r = Self::push_to_array_slot(&mut arr, value_nb);
-                        self.stack_write_raw(slot, arr);
-                        r
+                        drop_with_kind(value_bits, value_kind);
+                        Err(VMError::NotImplemented(
+                            "ArrayPushLocal: UInt64 slot did not resolve to a \
+                             v2 typed-array pointer (HEAP_KIND_V2_TYPED_ARRAY \
+                             header missing). ADR-006 §2.7.6 / §2.7.7."
+                                .to_string(),
+                        ))
                     }
                 }
             }
-            Some(Operand::ModuleBinding(idx)) => {
-                let slot = idx as usize;
-                if slot >= self.module_bindings.len() {
-                    return Err(VMError::RuntimeError(format!(
-                        "ModuleBinding index {} out of bounds",
-                        slot
-                    )));
-                }
-                let ref_target = {
-                    let bits = self.module_bindings[slot];
-                    let tmp = ValueWord::from_raw_bits(bits);
-                    let r = tmp.as_ref_target();
-                    // FR.4: borrow-only peek — u64 is Copy, no release
-                    // needed; slot still owns the share.
-                    let _ = tmp;
-                    r
-                };
-                match ref_target {
-                    Some(RefTarget::Stack(target)) => {
-                        let mut arr = self.stack_take_raw(target);
-                        let r = Self::push_to_array_slot(&mut arr, value_nb);
-                        self.stack_write_raw(target, arr);
-                        r
-                    }
-                    Some(RefTarget::ModuleBinding(target)) => {
-                        if target >= self.module_bindings.len() {
-                            return Err(VMError::RuntimeError(format!(
-                                "ModuleBinding index {} out of bounds",
-                                target
-                            )));
-                        }
-                        let mut arr = self.binding_take_raw(target);
-                        let r = Self::push_to_array_slot(&mut arr, value_nb);
-                        self.binding_write_raw(target, arr);
-                        r
-                    }
-                    Some(target) => {
-                        let mut array_nb = self.read_ref_target(&target)?;
-                        Self::push_to_array_slot(&mut array_nb, value_nb)?;
-                        self.write_ref_target(&target, array_nb)
-                    }
-                    None => {
-                        let mut arr = self.binding_take_raw(slot);
-                        let r = Self::push_to_array_slot(&mut arr, value_nb);
-                        self.binding_write_raw(slot, arr);
-                        r
-                    }
-                }
+            _ => {
+                drop_with_kind(value_bits, value_kind);
+                Err(ckpt5_typed_array_surface("ArrayPushLocal", array_kind))
             }
-            _ => Err(VMError::RuntimeError(
-                "ArrayPushLocal requires Local or ModuleBinding operand".into(),
-            )),
         }
     }
 
-    /// Push a value to an array stored at a ValueWord slot, mutating in-place.
-    /// Directly accesses the heap pointer to avoid Arc reconstruction overhead.
-    #[inline(always)]
-    fn push_to_array_slot(slot: &mut ValueWord, value: ValueWord) -> Result<(), VMError> {
-        const TAG_BASE: u64 = 0xFFF8_0000_0000_0000;
-        const PAYLOAD_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
-
-        // v2 typed array fast path: mutate the typed buffer in place via the
-        // stamped header.
-        if let Some(view) =
-            crate::executor::v2_handlers::v2_array_detect::as_v2_typed_array(slot)
-        {
-            return crate::executor::v2_handlers::v2_array_detect::push_element(&view, &value)
-                .map_err(|e| VMError::RuntimeError(e.to_string()));
-        }
-
-        let bits = slot.raw_bits();
-        let is_tagged = (bits & TAG_BASE) == TAG_BASE;
-        let tag = (bits >> 48) & 0x7;
-
-        // Handle unified arrays (bit-47 tagged).
-        let vb_bits = shape_value::ValueBits::from_raw(bits);
-        if is_tagged && tag == 0 && vb_bits.is_unified_heap() {
-            let kind = unsafe { vb_bits.unified_heap_kind() };
-            if kind == shape_value::tag_bits::HEAP_KIND_ARRAY as u16 {
-                let arr = unsafe {
-                    shape_value::unified_array::UnifiedArray::from_heap_bits_mut(bits)
-                };
-                let new_bits = value.raw_bits();
-                // FR.4: ownership of value's heap share transfers into
-                // `arr.push(...)`; the u64 is Copy — nothing to do locally.
-                let _ = value;
-                arr.push(new_bits);
-                return Ok(());
+    /// Borrow the receiver `(bits, kind)` from the slot — no refcount
+    /// change, slot retains ownership.
+    fn read_receiver_loc(&self, loc: &ReceiverLoc) -> (u64, NativeKind) {
+        match loc {
+            ReceiverLoc::Local(idx) => {
+                let bp = self.current_locals_base();
+                self.stack_read_kinded_raw(bp + *idx)
             }
+            ReceiverLoc::ModuleBinding(idx) => self.module_binding_read_kinded_raw(*idx),
         }
-
-        if is_tagged && tag == 0 {
-            // Mask off the ownership bit (bit 0) before casting to pointer.
-            // Owned values (Box-backed) have bit 0 set; using the raw payload
-            // as a pointer causes misaligned dereference (UB).
-            let ptr = (bits & PAYLOAD_MASK & shape_value::tag_bits::HEAP_PTR_MASK) as *mut HeapValue;
-            if !ptr.is_null() {
-                let heap_val = unsafe { &mut *ptr };
-                match heap_val {
-                    HeapValue::Array(arc_vec) => {
-                        // BARRIER: heap write site — appends value to generic array (may contain heap pointer)
-                        if let Some(vec) = Arc::get_mut(arc_vec) {
-                            vec.push(value);
-                            return Ok(());
-                        }
-                        Arc::make_mut(arc_vec).push(value);
-                        return Ok(());
-                    }
-                    HeapValue::TypedArray(TypedArrayData::I64(arc_vec)) => {
-                        if let Some(i) = value.as_i64() {
-                            Arc::make_mut(arc_vec).push(i);
-                            return Ok(());
-                        }
-                        let len = arc_vec.len();
-                        let mut generic: Vec<ValueWord> = Vec::with_capacity(len + 1);
-                        for &v in arc_vec.iter() {
-                            generic.push(ValueWord::from_i64(v));
-                        }
-                        generic.push(value);
-                        *heap_val = HeapValue::Array(shape_value::vmarray_from_vec(generic));
-                        return Ok(());
-                    }
-                    HeapValue::TypedArray(TypedArrayData::F64(arc_vec)) => {
-                        if let Some(f) = value.as_f64() {
-                            Arc::make_mut(arc_vec).push(f);
-                            return Ok(());
-                        }
-                        let len = arc_vec.len();
-                        let mut generic: Vec<ValueWord> = Vec::with_capacity(len + 1);
-                        for &v in arc_vec.iter() {
-                            generic.push(ValueWord::from_f64(v));
-                        }
-                        generic.push(value);
-                        *heap_val = HeapValue::Array(shape_value::vmarray_from_vec(generic));
-                        return Ok(());
-                    }
-                    HeapValue::TypedArray(TypedArrayData::Bool(arc_vec)) => {
-                        if let Some(b) = value.as_bool() {
-                            Arc::make_mut(arc_vec).push(if b { 1 } else { 0 });
-                            return Ok(());
-                        }
-                        let len = arc_vec.len();
-                        let mut generic: Vec<ValueWord> = Vec::with_capacity(len + 1);
-                        for &v in arc_vec.iter() {
-                            generic.push(ValueWord::from_bool(v != 0));
-                        }
-                        generic.push(value);
-                        *heap_val = HeapValue::Array(shape_value::vmarray_from_vec(generic));
-                        return Ok(());
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        Err(VMError::TypeError {
-            expected: "array",
-            got: "unknown",
-        })
     }
 
     pub(in crate::executor) fn op_array_pop(&mut self) -> Result<(), VMError> {
-        let array_nb = ValueWord::from_raw_bits(self.pop_raw_u64()?);
+        let (array_bits, array_kind) = self.pop_kinded()?;
 
-        // v2 typed array fast path: pop directly from the typed buffer.
-        if let Some(view) =
-            crate::executor::v2_handlers::v2_array_detect::as_v2_typed_array(&array_nb)
-        {
-            let val = crate::executor::v2_handlers::v2_array_detect::pop_element(&view)
-                .unwrap_or_else(ValueWord::none);
-            self.push_raw_u64(val)?;
-            return Ok(());
+        match array_kind {
+            NativeKind::UInt64 => {
+                match v2_array_detect::as_v2_typed_array(array_bits, array_kind) {
+                    Some(view) => {
+                        let result = v2_array_detect::pop_element(&view);
+                        let _ = array_bits;
+                        match result {
+                            Some((val_bits, val_kind)) => {
+                                self.push_kinded(val_bits, val_kind)
+                            }
+                            None => self.push_kinded(0u64, NativeKind::Bool),
+                        }
+                    }
+                    None => Err(VMError::NotImplemented(
+                        "ArrayPop: UInt64 receiver did not resolve to a v2 \
+                         typed-array pointer (HEAP_KIND_V2_TYPED_ARRAY \
+                         header missing). ADR-006 §2.7.6 / §2.7.7."
+                            .to_string(),
+                    )),
+                }
+            }
+            _ => {
+                drop_with_kind(array_bits, array_kind);
+                Err(ckpt5_typed_array_surface("ArrayPop", array_kind))
+            }
         }
-
-        let arr = array_nb.as_any_array().ok_or_else(|| VMError::TypeError {
-            expected: "array",
-            got: array_nb.type_name(),
-        })?;
-
-        let value = arr.last_nb().unwrap_or_else(ValueWord::none);
-        self.push_raw_u64(value)?;
-        Ok(())
     }
 
     pub(in crate::executor) fn op_slice_access(&mut self) -> Result<(), VMError> {
-        let end_nb = ValueWord::from_raw_bits(self.pop_raw_u64()?);
-        let start_nb = ValueWord::from_raw_bits(self.pop_raw_u64()?);
-        let array_nb = ValueWord::from_raw_bits(self.pop_raw_u64()?);
+        // SliceAccess: [array, start, end] -> [slice]
+        let (end_bits, end_kind) = self.pop_kinded()?;
+        let (start_bits, start_kind) = self.pop_kinded()?;
+        let (array_bits, array_kind) = self.pop_kinded()?;
 
-        let end = end_nb.as_number_coerce().ok_or(VMError::TypeError {
-            expected: "number",
-            got: "unknown",
-        })? as i32;
-        let start = start_nb.as_number_coerce().ok_or(VMError::TypeError {
-            expected: "number",
-            got: "unknown",
-        })? as i32;
-
-        // Handle unified arrays (bit-47 tagged) for slice access.
-        let vb = shape_value::ValueBits::from_raw(array_nb.raw_bits());
-        if vb.is_unified_heap() {
-            let kind = unsafe { vb.unified_heap_kind() };
-            if kind == shape_value::tag_bits::HEAP_KIND_ARRAY as u16 {
-                let arr = unsafe {
-                    shape_value::unified_array::UnifiedArray::from_heap_bits(array_nb.raw_bits())
-                };
-                let len = arr.len() as i32;
-                let actual_start = if start < 0 {
-                    (len + start).max(0) as usize
-                } else {
-                    start as usize
-                };
-                let actual_end = if end < 0 {
-                    (len + end).max(0) as usize
-                } else {
-                    (end as usize).min(arr.len())
-                };
-                let slice: Vec<ValueWord> = if actual_start < actual_end && actual_start < arr.len()
-                {
-                    (actual_start..actual_end)
-                        .map(|i| unsafe { ValueWord::clone_from_bits(*arr.get(i).unwrap()) })
-                        .collect()
-                } else {
-                    Vec::new()
-                };
-                self.push_raw_u64(ValueWord::from_array(shape_value::vmarray_from_vec(slice)))?;
-                return Ok(());
+        let start = match index_from_kinded(start_bits, start_kind) {
+            Ok(i) => i,
+            Err(e) => {
+                drop_with_kind(end_bits, end_kind);
+                drop_with_kind(start_bits, start_kind);
+                drop_with_kind(array_bits, array_kind);
+                return Err(e);
             }
-        }
-
-        use shape_value::heap_value::HeapValue;
-        // cold-path: as_heap_ref retained — multi-variant array slice operation
-        match array_nb.as_heap_ref() { // cold-path
-            Some(HeapValue::Array(arr)) => {
-                let len = arr.len() as i32;
-                let actual_start = if start < 0 {
-                    (len + start).max(0) as usize
-                } else {
-                    start as usize
-                };
-                let actual_end = if end < 0 {
-                    (len + end).max(0) as usize
-                } else {
-                    (end as usize).min(arr.len())
-                };
-
-                let slice: Vec<ValueWord> = if actual_start < actual_end && actual_start < arr.len()
-                {
-                    arr[actual_start..actual_end].to_vec()
-                } else {
-                    Vec::new()
-                };
-
-                self.push_raw_u64(ValueWord::from_array(shape_value::vmarray_from_vec(slice)))?;
+        };
+        let end = match index_from_kinded(end_bits, end_kind) {
+            Ok(i) => i,
+            Err(e) => {
+                drop_with_kind(end_bits, end_kind);
+                drop_with_kind(array_bits, array_kind);
+                return Err(e);
             }
-            Some(HeapValue::TypedArray(TypedArrayData::I64(arr))) => {
-                let len = arr.len() as i32;
-                let actual_start = if start < 0 {
-                    (len + start).max(0) as usize
-                } else {
-                    start as usize
-                };
-                let actual_end = if end < 0 {
-                    (len + end).max(0) as usize
-                } else {
-                    (end as usize).min(arr.len())
-                };
+        };
+        let _ = (start_bits, end_bits);
 
-                let slice: Vec<ValueWord> = if actual_start < actual_end && actual_start < arr.len()
-                {
-                    arr[actual_start..actual_end]
-                        .iter()
-                        .map(|&v| ValueWord::from_i64(v))
-                        .collect()
-                } else {
-                    Vec::new()
-                };
-
-                self.push_raw_u64(ValueWord::from_array(shape_value::vmarray_from_vec(slice)))?;
+        match array_kind {
+            NativeKind::UInt64 => {
+                match v2_array_detect::as_v2_typed_array(array_bits, array_kind) {
+                    Some(view) => {
+                        let (s, e) = clamp_range(start, end, view.len as i64);
+                        let new_ptr = slice_v2_typed_array(&view, s, e);
+                        let _ = array_bits;
+                        self.push_kinded(new_ptr as u64, NativeKind::UInt64)
+                    }
+                    None => Err(VMError::NotImplemented(
+                        "SliceAccess: UInt64 receiver did not resolve to a \
+                         v2 typed-array pointer (HEAP_KIND_V2_TYPED_ARRAY \
+                         header missing). ADR-006 §2.7.6 / §2.7.7."
+                            .to_string(),
+                    )),
+                }
             }
-            Some(HeapValue::TypedArray(TypedArrayData::F64(arr))) => {
-                let len = arr.len() as i32;
-                let actual_start = if start < 0 {
-                    (len + start).max(0) as usize
-                } else {
-                    start as usize
-                };
-                let actual_end = if end < 0 {
-                    (len + end).max(0) as usize
-                } else {
-                    (end as usize).min(arr.len())
-                };
-
-                let slice: Vec<ValueWord> = if actual_start < actual_end && actual_start < arr.len()
-                {
-                    arr[actual_start..actual_end]
-                        .iter()
-                        .map(|&v| ValueWord::from_f64(v))
-                        .collect()
-                } else {
-                    Vec::new()
-                };
-
-                self.push_raw_u64(ValueWord::from_array(shape_value::vmarray_from_vec(slice)))?;
-            }
-            Some(HeapValue::TypedArray(TypedArrayData::FloatSlice { parent, offset, len: slice_len })) => {
-                let total = *slice_len as usize;
-                let off = *offset as usize;
-                let data = &parent.data[off..off + total];
-                let len_i32 = total as i32;
-                let actual_start = if start < 0 {
-                    (len_i32 + start).max(0) as usize
-                } else {
-                    start as usize
-                };
-                let actual_end = if end < 0 {
-                    (len_i32 + end).max(0) as usize
-                } else {
-                    (end as usize).min(total)
-                };
-
-                let slice: Vec<ValueWord> = if actual_start < actual_end && actual_start < total
-                {
-                    data[actual_start..actual_end]
-                        .iter()
-                        .map(|&v| ValueWord::from_f64(v))
-                        .collect()
-                } else {
-                    Vec::new()
-                };
-
-                self.push_raw_u64(ValueWord::from_array(shape_value::vmarray_from_vec(slice)))?;
-            }
-            Some(HeapValue::TypedArray(TypedArrayData::Bool(arr))) => {
-                let len = arr.len() as i32;
-                let actual_start = if start < 0 {
-                    (len + start).max(0) as usize
-                } else {
-                    start as usize
-                };
-                let actual_end = if end < 0 {
-                    (len + end).max(0) as usize
-                } else {
-                    (end as usize).min(arr.len())
-                };
-
-                let slice: Vec<ValueWord> = if actual_start < actual_end && actual_start < arr.len()
-                {
-                    arr[actual_start..actual_end]
-                        .iter()
-                        .map(|&v| ValueWord::from_bool(v != 0))
-                        .collect()
-                } else {
-                    Vec::new()
-                };
-
-                self.push_raw_u64(ValueWord::from_array(shape_value::vmarray_from_vec(slice)))?;
-            }
-            Some(HeapValue::String(s)) => {
-                let len = s.len() as i32;
-                let actual_start = if start < 0 {
-                    (len + start).max(0) as usize
-                } else {
-                    start as usize
-                };
-                let actual_end = if end < 0 {
-                    (len + end).max(0) as usize
-                } else {
-                    (end as usize).min(s.len())
-                };
-
-                let slice_str = if actual_start < actual_end && actual_start < s.len() {
-                    s[actual_start..actual_end].to_string()
-                } else {
-                    String::new()
-                };
-
-                self.push_raw_u64(ValueWord::from_string(Arc::new(slice_str)))?;
+            NativeKind::String => {
+                // String slicing — out of W17-array-typed-receiver
+                // territory; surface (legacy `as_heap_ref` + `HeapValue::
+                // String` dispatch was forbidden-pattern).
+                drop_with_kind(array_bits, array_kind);
+                Err(VMError::NotImplemented(
+                    "SliceAccess: string receiver — needs dedicated op. \
+                     ADR-006 §2.7.6 / §2.7.7."
+                        .to_string(),
+                ))
             }
             _ => {
-                return Err(VMError::TypeError {
-                    expected: "array or string",
-                    got: array_nb.type_name(),
-                });
+                drop_with_kind(array_bits, array_kind);
+                Err(ckpt5_typed_array_surface("SliceAccess", array_kind))
             }
         }
-        Ok(())
+    }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Receiver-location descriptor for `ArrayPushLocal`
+// ───────────────────────────────────────────────────────────────────────────
+
+enum ReceiverLoc {
+    Local(usize),
+    ModuleBinding(usize),
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// V3-S5 ckpt-5 (2026-05-15): TypedArrayData-dependent helpers DELETED.
+// `element_kind_of` / `push_into_typed_array` / `pop_from_typed_array` /
+// `slice_typed_array` consumed `Arc<TypedArrayData>` (deleted at
+// ckpt-1..ckpt-4); the four `op_array_*` consumers above surface-and-stop
+// for the deleted Ptr(HeapKind::TypedArray) arm.
+// ───────────────────────────────────────────────────────────────────────────
+
+/// Clamp Python-style negative indices and bound them to `[0, len]`.
+fn clamp_range(start: i64, end: i64, len: i64) -> (usize, usize) {
+    let s = if start < 0 {
+        (len + start).max(0)
+    } else {
+        start.min(len)
+    };
+    let e = if end < 0 {
+        (len + end).max(0)
+    } else {
+        end.min(len)
+    };
+    (s as usize, e as usize)
+}
+
+/// Slice a v2 typed array `[s, e)` into a freshly-allocated
+/// `TypedArray<T>` of the same element type. Returns the raw pointer
+/// (slot carrier shape — `NativeKind::UInt64`).
+fn slice_v2_typed_array(
+    view: &V2TypedArrayView,
+    s: usize,
+    e: usize,
+) -> *mut u8 {
+    use crate::executor::v2_handlers::v2_array_detect::stamp_elem_type;
+    let (s, e) = if s <= e { (s, e) } else { (s, s) };
+    match view.elem_type {
+        V2ElemType::F64 => unsafe {
+            let src = view.ptr as *const TypedArray<f64>;
+            let slice: &[f64] = if s < e {
+                let data = (*src).data as *const f64;
+                std::slice::from_raw_parts(data.add(s), e - s)
+            } else {
+                &[]
+            };
+            let new_ptr = TypedArray::<f64>::from_slice(slice);
+            stamp_elem_type(new_ptr as *mut u8, ELEM_TYPE_F64);
+            new_ptr as *mut u8
+        },
+        V2ElemType::I64 => unsafe {
+            let src = view.ptr as *const TypedArray<i64>;
+            let slice: &[i64] = if s < e {
+                let data = (*src).data as *const i64;
+                std::slice::from_raw_parts(data.add(s), e - s)
+            } else {
+                &[]
+            };
+            let new_ptr = TypedArray::<i64>::from_slice(slice);
+            stamp_elem_type(new_ptr as *mut u8, ELEM_TYPE_I64);
+            new_ptr as *mut u8
+        },
+        V2ElemType::I32 => unsafe {
+            let src = view.ptr as *const TypedArray<i32>;
+            let slice: &[i32] = if s < e {
+                let data = (*src).data as *const i32;
+                std::slice::from_raw_parts(data.add(s), e - s)
+            } else {
+                &[]
+            };
+            let new_ptr = TypedArray::<i32>::from_slice(slice);
+            stamp_elem_type(new_ptr as *mut u8, ELEM_TYPE_I32);
+            new_ptr as *mut u8
+        },
+        V2ElemType::Bool => unsafe {
+            let src = view.ptr as *const TypedArray<u8>;
+            let slice: &[u8] = if s < e {
+                let data = (*src).data as *const u8;
+                std::slice::from_raw_parts(data.add(s), e - s)
+            } else {
+                &[]
+            };
+            let new_ptr = TypedArray::<u8>::from_slice(slice);
+            stamp_elem_type(new_ptr as *mut u8, ELEM_TYPE_BOOL);
+            new_ptr as *mut u8
+        },
+        V2ElemType::I8 => unsafe {
+            let src = view.ptr as *const TypedArray<i8>;
+            let slice: &[i8] = if s < e {
+                let data = (*src).data as *const i8;
+                std::slice::from_raw_parts(data.add(s), e - s)
+            } else {
+                &[]
+            };
+            let new_ptr = TypedArray::<i8>::from_slice(slice);
+            stamp_elem_type(new_ptr as *mut u8, ELEM_TYPE_I8);
+            new_ptr as *mut u8
+        },
+        V2ElemType::U8 => unsafe {
+            let src = view.ptr as *const TypedArray<u8>;
+            let slice: &[u8] = if s < e {
+                let data = (*src).data as *const u8;
+                std::slice::from_raw_parts(data.add(s), e - s)
+            } else {
+                &[]
+            };
+            let new_ptr = TypedArray::<u8>::from_slice(slice);
+            stamp_elem_type(new_ptr as *mut u8, ELEM_TYPE_U8);
+            new_ptr as *mut u8
+        },
+        V2ElemType::I16 => unsafe {
+            let src = view.ptr as *const TypedArray<i16>;
+            let slice: &[i16] = if s < e {
+                let data = (*src).data as *const i16;
+                std::slice::from_raw_parts(data.add(s), e - s)
+            } else {
+                &[]
+            };
+            let new_ptr = TypedArray::<i16>::from_slice(slice);
+            stamp_elem_type(new_ptr as *mut u8, ELEM_TYPE_I16);
+            new_ptr as *mut u8
+        },
+        V2ElemType::U16 => unsafe {
+            let src = view.ptr as *const TypedArray<u16>;
+            let slice: &[u16] = if s < e {
+                let data = (*src).data as *const u16;
+                std::slice::from_raw_parts(data.add(s), e - s)
+            } else {
+                &[]
+            };
+            let new_ptr = TypedArray::<u16>::from_slice(slice);
+            stamp_elem_type(new_ptr as *mut u8, ELEM_TYPE_U16);
+            new_ptr as *mut u8
+        },
+        V2ElemType::U32 => unsafe {
+            let src = view.ptr as *const TypedArray<u32>;
+            let slice: &[u32] = if s < e {
+                let data = (*src).data as *const u32;
+                std::slice::from_raw_parts(data.add(s), e - s)
+            } else {
+                &[]
+            };
+            let new_ptr = TypedArray::<u32>::from_slice(slice);
+            stamp_elem_type(new_ptr as *mut u8, ELEM_TYPE_U32);
+            new_ptr as *mut u8
+        },
+        V2ElemType::F32 => unsafe {
+            let src = view.ptr as *const TypedArray<f32>;
+            let slice: &[f32] = if s < e {
+                let data = (*src).data as *const f32;
+                std::slice::from_raw_parts(data.add(s), e - s)
+            } else {
+                &[]
+            };
+            let new_ptr = TypedArray::<f32>::from_slice(slice);
+            stamp_elem_type(new_ptr as *mut u8, ELEM_TYPE_F32);
+            new_ptr as *mut u8
+        },
+        V2ElemType::Char => unsafe {
+            let src = view.ptr as *const TypedArray<char>;
+            let slice: &[char] = if s < e {
+                let data = (*src).data as *const char;
+                std::slice::from_raw_parts(data.add(s), e - s)
+            } else {
+                &[]
+            };
+            let new_ptr = TypedArray::<char>::from_slice(slice);
+            stamp_elem_type(new_ptr as *mut u8, ELEM_TYPE_CHAR);
+            new_ptr as *mut u8
+        },
+        V2ElemType::String => unsafe {
+            use shape_value::v2::refcount::v2_retain;
+            use shape_value::v2::string_obj::StringObj;
+            let src = view.ptr as *const TypedArray<*const StringObj>;
+            let count = e.saturating_sub(s);
+            let new_ptr = TypedArray::<*const StringObj>::with_capacity(count as u32);
+            if count > 0 {
+                let src_data = (*src).data;
+                let dst_data = (*new_ptr).data;
+                for i in 0..count {
+                    let elem = *src_data.add(s + i);
+                    v2_retain(&(*elem).header);
+                    *dst_data.add(i) = elem;
+                }
+                (*new_ptr).len = count as u32;
+            }
+            stamp_elem_type(new_ptr as *mut u8, ELEM_TYPE_STRING);
+            new_ptr as *mut u8
+        },
+        V2ElemType::Decimal => unsafe {
+            use shape_value::v2::decimal_obj::DecimalObj;
+            use shape_value::v2::refcount::v2_retain;
+            let src = view.ptr as *const TypedArray<*const DecimalObj>;
+            let count = e.saturating_sub(s);
+            let new_ptr = TypedArray::<*const DecimalObj>::with_capacity(count as u32);
+            if count > 0 {
+                let src_data = (*src).data;
+                let dst_data = (*new_ptr).data;
+                for i in 0..count {
+                    let elem = *src_data.add(s + i);
+                    v2_retain(&(*elem).header);
+                    *dst_data.add(i) = elem;
+                }
+                (*new_ptr).len = count as u32;
+            }
+            stamp_elem_type(new_ptr as *mut u8, ELEM_TYPE_DECIMAL);
+            new_ptr as *mut u8
+        },
+    }
+}
+
+/// True if `kind` is one of the integer-family `NativeKind`s.
+#[inline]
+fn is_int_kind(kind: NativeKind) -> bool {
+    matches!(
+        kind,
+        NativeKind::Int8
+            | NativeKind::Int16
+            | NativeKind::Int32
+            | NativeKind::Int64
+            | NativeKind::IntSize
+            | NativeKind::UInt8
+            | NativeKind::UInt16
+            | NativeKind::UInt32
+            | NativeKind::UInt64
+            | NativeKind::UIntSize
+            | NativeKind::NullableInt8
+            | NativeKind::NullableInt16
+            | NativeKind::NullableInt32
+            | NativeKind::NullableInt64
+            | NativeKind::NullableIntSize
+            | NativeKind::NullableUInt8
+            | NativeKind::NullableUInt16
+            | NativeKind::NullableUInt32
+            | NativeKind::NullableUInt64
+            | NativeKind::NullableUIntSize
+    )
+}
+
+/// Read a slice index from a kinded slot.
+#[inline]
+fn index_from_kinded(bits: u64, kind: NativeKind) -> Result<i64, VMError> {
+    if is_int_kind(kind) {
+        Ok(bits as i64)
+    } else {
+        Err(VMError::TypeError {
+            expected: "integer index",
+            got: "non-integer kind",
+        })
     }
 }

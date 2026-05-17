@@ -17,14 +17,11 @@ pub mod csv_module;
 pub mod deterministic;
 pub mod env;
 pub mod file;
-pub mod helpers;
 pub mod http;
 pub mod json;
 pub mod msgpack_module;
-pub mod parallel;
 pub mod regex;
 pub mod runtime_policy;
-pub mod set_module;
 pub mod toml_module;
 pub mod unicode;
 pub mod virtual_fs;
@@ -49,14 +46,24 @@ pub fn all_stdlib_modules() -> Vec<crate::module_exports::ModuleExports> {
         xml::create_xml_module(),
         compress::create_compress_module(),
         archive::create_archive_module(),
-        parallel::create_parallel_module(),
         unicode::create_unicode_module(),
         csv_module::create_csv_module(),
         msgpack_module::create_msgpack_module(),
-        set_module::create_set_module(),
         file::create_file_module(),
         arrow_module::create_arrow_module(),
         crate::stdlib_time::create_time_module(),
         crate::stdlib_io::create_io_module(),
+        crate::intrinsics::vector::create_vector_intrinsics_module(),
+        crate::intrinsics::math::create_math_intrinsics_module(),
+        crate::intrinsics::array_transforms::create_array_transforms_module(),
+        crate::intrinsics::rolling::create_rolling_intrinsics_module(),
+        crate::intrinsics::statistical::create_statistical_intrinsics_module(),
+        crate::intrinsics::random::create_random_intrinsics_module(),
+        crate::intrinsics::distributions::create_distributions_intrinsics_module(),
+        crate::intrinsics::convolution::create_convolution_intrinsics_module(),
+        crate::intrinsics::stochastic::create_stochastic_intrinsics_module(),
+        crate::intrinsics::matrix::create_matrix_intrinsics_module(),
+        crate::intrinsics::fft::create_fft_intrinsics_module(),
+        crate::intrinsics::recurrence::create_recurrence_intrinsics_module(),
     ]
 }

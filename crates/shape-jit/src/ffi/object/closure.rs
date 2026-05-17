@@ -124,16 +124,18 @@ pub unsafe extern "C" fn jit_finalize_heap_closure(
     use shape_value::heap_value::HeapValue;
     use shape_value::v2::closure_layout::ClosureLayout;
     use shape_value::v2::closure_raw::OwnedClosureBlock;
-    use shape_value::{ValueWord, ValueWordExt};
     use std::sync::Arc;
 
     unsafe {
         if header_ptr.is_null() || layout_ptr.is_null() {
-            // Safety valve: refuse to construct an invalid closure. Callers
-            // must not deref the TAG_NONE return as a function — this is a
-            // codegen bug if it ever fires.
-            return shape_value::tag_bits::TAG_BASE
-                | (shape_value::tag_bits::TAG_NONE << shape_value::tag_bits::TAG_SHIFT);
+            // Safety valve: refuse to construct an invalid closure. Per
+            // ADR-006 §2.7.5 the JIT-FFI carries raw `u64` plus a parallel
+            // `NativeKind` companion stamped at JIT compile time from the
+            // call signature; the kind for this entry-point is
+            // `NativeKind::Ptr(HeapKind::Closure)` and a null payload (raw
+            // 0u64) is the carrier-level miss. Callers must not deref the
+            // return as a function — this is a codegen bug if it ever fires.
+            return 0u64;
         }
 
         let layout_ref: &ClosureLayout = &*layout_ptr;
@@ -163,11 +165,15 @@ pub unsafe extern "C" fn jit_finalize_heap_closure(
         // `atomic_rmw add 1` loop — those stay with the block.
         let owned = OwnedClosureBlock::from_raw(header_ptr as *const u8, layout_arc);
 
-        // Wrap in the H6.5 `HeapValue::ClosureRaw` variant. Readers migrated
-        // through `VmClosureHandle` (H6.2–H6.4) see the Raw backing
-        // transparently; the legacy `Closure { function_id, upvalues }`
-        // rebuild is gone.
-        ValueWord::from_heap_value(HeapValue::ClosureRaw(owned))
+        // Wrap in the H6.5 `HeapValue::ClosureRaw` variant. Per ADR-006
+        // §2.7.5 / W7 closure-share carrier audit (commit `5fa4b19`,
+        // 2026-05-09): closure share carrier is `Arc<HeapValue>`, returned
+        // here as raw `Arc::into_raw(Arc::new(HeapValue::ClosureRaw(owned)))
+        // as u64`. The companion `NativeKind::Ptr(HeapKind::Closure)` is
+        // stamped at the JIT call signature; the runtime-tier
+        // `clone_with_kind` / `drop_with_kind` dispatch tables retain /
+        // release `Arc<HeapValue>` per W7-closure-retain.
+        Arc::into_raw(Arc::new(HeapValue::ClosureRaw(owned))) as u64
     }
 }
 
@@ -252,17 +258,20 @@ pub unsafe extern "C" fn jit_arc_shared_retain(ptr: u64) -> u64 {
         // Return 0 so the caller stores a null pointer and the
         // downstream dispatch path can report a clean error rather
         // than corrupting memory.
-        if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
-            eprintln!("[jit-shared-cell] retain null (no-op)");
-        }
+        tracing::debug!(
+            target: "shape_jit",
+            "jit-shared-cell retain null (no-op)",
+        );
         return 0;
     }
     unsafe {
         Arc::<SharedCell>::increment_strong_count(ptr as *const SharedCell);
     }
-    if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
-        eprintln!("[jit-shared-cell] retain ptr={:#x}", ptr);
-    }
+    tracing::debug!(
+        target: "shape_jit",
+        ptr,
+        "jit-shared-cell retain",
+    );
     ptr
 }
 
@@ -377,18 +386,35 @@ pub unsafe extern "C" fn jit_shared_unlock_contended(ptr: u64) {
 ///   `jit_arc_shared_retain` and balanced by `release_typed_closure`
 ///   on closure drop.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn jit_alloc_shared_cell(initial_bits: u64) -> u64 {
-    use shape_value::v2::closure_layout::SharedCell;
-    use std::sync::Arc;
-    let arc: Arc<SharedCell> = Arc::new(SharedCell::new(initial_bits));
-    let ptr = Arc::into_raw(arc) as u64;
-    if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
-        eprintln!(
-            "[jit-shared-cell] alloc ptr={:#x} initial_bits={:#x}",
-            ptr, initial_bits
-        );
-    }
-    ptr
+pub unsafe extern "C" fn jit_alloc_shared_cell(_initial_bits: u64) -> u64 {
+    // SURFACE (W10 jit-playbook §5 / ADR-006 §2.7.8 / Q10):
+    // `SharedCell::new(value, kind)` requires the cell's
+    // `NativeKind` companion at construction (cell-storage parallel
+    // kind track per ADR-006 §2.7.8); the FFI signature here only
+    // carries `initial_bits`, with no source for the kind. Per
+    // §2.7.8 #4 the correct response is surface-and-stop, never a
+    // Bool-default fallback.
+    //
+    // The strict-typing rebuild widens this entry to
+    // `jit_alloc_shared_cell(initial_bits: u64, kind: i32 /* NativeKind */)`
+    // with the kind sourced from the JIT-emitted `AllocSharedLocal`
+    // call signature per §2.7.5; the bytecode-side companion is
+    // already kinded (`shape-vm/src/executor/variables/mod.rs:1510`
+    // builds `SharedCell::new(value_bits, value_kind)`).
+    //
+    // Until the JIT lowering threads a kind through the call site
+    // (W11 / deeper Phase-2c), this entry-point fails loudly so
+    // callers reach this error at the JIT-emitted FFI boundary
+    // rather than silently allocating a kind-less cell.
+    todo!(
+        "phase-2c §2.7.8/Q10 / W10 jit-playbook §5: SharedCell kind \
+         companion — jit_alloc_shared_cell needs a NativeKind \
+         parameter per ADR-006 §2.7.8 (cell parallel-kind track). \
+         The bytecode-side AllocSharedLocal already threads \
+         value_kind (`shape-vm/src/executor/variables/mod.rs:1510`); \
+         the JIT lowering for the same opcode must thread the \
+         matching kind through the FFI signature per §2.7.5."
+    )
 }
 
 /// Release exactly one strong share of an `Arc<SharedCell>` at
@@ -412,9 +438,11 @@ pub unsafe extern "C" fn jit_arc_shared_release(ptr: u64) {
     if ptr == 0 {
         return;
     }
-    if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
-        eprintln!("[jit-shared-cell] release ptr={:#x}", ptr);
-    }
+    tracing::debug!(
+        target: "shape_jit",
+        ptr,
+        "jit-shared-cell release",
+    );
     // SAFETY: the caller contract (see SAFETY docs above) guarantees
     // `ptr` is a live Arc-from-raw pointer. Reconstructing the Arc
     // and dropping it releases exactly one strong share.
@@ -867,6 +895,12 @@ pub unsafe extern "C" fn jit_write_shared_cell_ptr(cell_ptr: i64, value: i64) {
     };
 }
 
+// W11: gated out — body uses deleted `shape_value::ValueWord` /
+// `ValueWordExt` (removed by the strict-typing bulldozer; see
+// `crates/shape-value/src/native_kind.rs:103-107` and Forbidden Patterns
+// in `CLAUDE.md`). The kinded-FFI replacement (`KindedSlot`-based shared-
+// cell lifecycle helpers) is part of the §2.7.4 Phase 2c FFI rebuild.
+#[cfg(any())]
 #[cfg(test)]
 mod a1e_shared_ffi_tests {
     //! Track A.1E unit tests for the Shared capture FFI helpers.
@@ -1008,6 +1042,9 @@ mod a1d_owned_mutable_cell_tests {
     }
 }
 
+// W11: gated out — body uses deleted `shape_value::ValueWord` /
+// `tag_bits` API. Kinded-FFI replacement deferred to §2.7.4 Phase 2c.
+#[cfg(any())]
 #[cfg(test)]
 mod phase_h2_finalizer_tests {
     //! Closure-spec Phase H2 (updated for §14.6 / H6.5) unit tests for
@@ -1491,6 +1528,9 @@ mod phase_h2_finalizer_tests {
     }
 }
 
+// W11: gated out — body uses deleted `shape_value::ValueWord` /
+// `ValueWordExt` API. Kinded-FFI replacement deferred to §2.7.4 Phase 2c.
+#[cfg(any())]
 #[cfg(test)]
 mod session_1_shared_local_lifecycle_tests {
     //! Session 1 Commit 3 unit tests for

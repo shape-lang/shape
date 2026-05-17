@@ -118,12 +118,10 @@ impl BytecodeCompiler {
                 // operands, so `number` is the type-system-consistent
                 // default. This is a principled compile-time default, NOT
                 // runtime coercion: the choice is made during bytecode
-                // emission, before the program runs. `NegNumber`'s
-                // executor has a tagged-ValueWord slow path (see
-                // executor/arithmetic/mod.rs:857) that handles
-                // dynamically-typed operands correctly — coercing a tagged
-                // `int` through `number_operand` without silent precision
-                // loss for i48 values.
+                // emission, before the program runs. The executor's
+                // `NegNumber` handler coerces an `int` operand through
+                // `number_operand` without silent precision loss for
+                // i48 values.
                 use shape_runtime::type_system::Type;
                 match self.infer_expr_type(operand) {
                     Ok(inferred) => {

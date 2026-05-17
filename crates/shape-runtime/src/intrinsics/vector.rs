@@ -1,346 +1,301 @@
-//! Vector intrinsics - Element-wise vector operations
+//! Vector intrinsics — element-wise SIMD operations on f64 / i64 typed arrays.
 //!
-//! These functions provide element-wise operations on arrays and series,
-//! critical for implementing custom indicators and math in Shape.
-//! Optimized using SIMD via the `wide` crate.
+//! Twelve typed-marshal entry points (`__intrinsic_vec_*`) are registered via
+//! `register_typed_fn_N` into the module returned by
+//! [`create_vector_intrinsics_module`]. Inputs are zero-copy
+//! `Arc<Vec<f64>>` (f64) / `Arc<Vec<i64>>` (i64) per the
+//! per-storage-variant body-type map in `docs/defections.md` 2026-05-07
+//! zero-copy entry. Outputs project through `ConcreteReturn::ArrayF64(Vec<f64>)`
+//! / `ConcreteReturn::ArrayI64(Vec<i64>)` (output owned-clone — full output-
+//! zero-copy is deferred follow-on per the same entry's α-`ToSlot`-dead-at-
+//! marshal-layer subsection).
+//!
+//! Q2-marshal-fold-light migration of the vector cluster (intrinsics-typed-CC
+//! cluster, M-A scope per the entry's three-stage Q2 lifecycle subsection).
+//! shape-vm dispatcher routing in `vector_intrinsics.rs:25-39` is part of
+//! shape-vm cleanup workstream's natural scope; not migrated here.
+//!
+//! SIMD via the `wide` crate's `f64x4`. Kernel SIMD helpers
+//! (`simd_vec_*_f64`, `simd_vec_*_i64`, `i64_slice_to_f64`) below are also
+//! used by shape-vm's executor arithmetic dispatch; kept `pub` for that
+//! consumer.
 
-use super::{extract_f64_array, f64_vec_to_float_array, f64_vec_to_nb_array};
-use crate::context::ExecutionContext;
-use shape_ast::error::{Result, ShapeError};
-use shape_value::{ValueWord, ValueWordExt};
+use crate::marshal::{register_typed_fn_1, register_typed_fn_2, register_typed_fn_3};
+use crate::module_exports::ModuleExports;
+use crate::typed_module_exports::{ConcreteReturn, ConcreteType, TypedReturn};
+use shape_value::aligned_vec::AlignedVec;
 use std::sync::Arc;
 use wide::f64x4;
 
-// Threshold for SIMD: arrays smaller than this use scalar fallback
 const SIMD_THRESHOLD: usize = 16;
 
-/// Core Vector Absolute Value: |x|
-pub fn intrinsic_vec_abs(args: &[ValueWord], _ctx: &mut ExecutionContext) -> Result<ValueWord> {
-    if args.len() != 1 {
-        return Err(ShapeError::RuntimeError {
-            message: "vec_abs requires 1 argument".into(),
-            location: None,
-        });
-    }
-    let data = extract_f64_array(&args[0], "Argument")?;
-    let mut result = vec![0.0; data.len()];
+// ───────────────────── Module factory ─────────────────────
 
-    if data.len() >= SIMD_THRESHOLD {
-        let chunks = data.len() / 4;
+/// Create the vector intrinsics module with all 12 typed-marshal entry points.
+pub fn create_vector_intrinsics_module() -> ModuleExports {
+    let mut module = ModuleExports::new("std::core::intrinsics::vector");
+    module.description = "SIMD vector element-wise intrinsics".to_string();
+
+    register_typed_fn_1::<_, Arc<Vec<f64>>>(
+        &mut module,
+        "__intrinsic_vec_abs",
+        "Element-wise absolute value of a Vec<number>",
+        "input",
+        "Array<number>",
+        ConcreteType::ArrayNumber,
+        |input, _ctx| {
+            let result = unary_apply(input.as_slice(), |v| v.abs(), f64::abs);
+            Ok(TypedReturn::Concrete(ConcreteReturn::ArrayF64(result)))
+        },
+    );
+
+    register_typed_fn_1::<_, Arc<Vec<f64>>>(
+        &mut module,
+        "__intrinsic_vec_sqrt",
+        "Element-wise square root of a Vec<number>",
+        "input",
+        "Array<number>",
+        ConcreteType::ArrayNumber,
+        |input, _ctx| {
+            let result = unary_apply(input.as_slice(), |v| v.sqrt(), f64::sqrt);
+            Ok(TypedReturn::Concrete(ConcreteReturn::ArrayF64(result)))
+        },
+    );
+
+    // ln/exp: `wide::f64x4` does not vectorize transcendentals; scalar fallback.
+    register_typed_fn_1::<_, Arc<Vec<f64>>>(
+        &mut module,
+        "__intrinsic_vec_ln",
+        "Element-wise natural logarithm of a Vec<number>",
+        "input",
+        "Array<number>",
+        ConcreteType::ArrayNumber,
+        |input, _ctx| {
+            let result: Vec<f64> = input.as_slice().iter().map(|x| x.ln()).collect();
+            Ok(TypedReturn::Concrete(ConcreteReturn::ArrayF64(result)))
+        },
+    );
+
+    register_typed_fn_1::<_, Arc<Vec<f64>>>(
+        &mut module,
+        "__intrinsic_vec_exp",
+        "Element-wise exponential of a Vec<number>",
+        "input",
+        "Array<number>",
+        ConcreteType::ArrayNumber,
+        |input, _ctx| {
+            let result: Vec<f64> = input.as_slice().iter().map(|x| x.exp()).collect();
+            Ok(TypedReturn::Concrete(ConcreteReturn::ArrayF64(result)))
+        },
+    );
+
+    register_typed_fn_2::<_, Arc<Vec<f64>>, Arc<Vec<f64>>>(
+        &mut module,
+        "__intrinsic_vec_add",
+        "Element-wise addition of two Vec<number>",
+        [("a", "Array<number>"), ("b", "Array<number>")],
+        ConcreteType::ArrayNumber,
+        |a, b, _ctx| {
+            check_lens(a.len(), b.len(), "vec_add")?;
+            let result = binary_apply(a.as_slice(), b.as_slice(), |va, vb| va + vb, |x, y| x + y);
+            Ok(TypedReturn::Concrete(ConcreteReturn::ArrayF64(result)))
+        },
+    );
+
+    register_typed_fn_2::<_, Arc<Vec<f64>>, Arc<Vec<f64>>>(
+        &mut module,
+        "__intrinsic_vec_sub",
+        "Element-wise subtraction of two Vec<number>",
+        [("a", "Array<number>"), ("b", "Array<number>")],
+        ConcreteType::ArrayNumber,
+        |a, b, _ctx| {
+            check_lens(a.len(), b.len(), "vec_sub")?;
+            let result = binary_apply(a.as_slice(), b.as_slice(), |va, vb| va - vb, |x, y| x - y);
+            Ok(TypedReturn::Concrete(ConcreteReturn::ArrayF64(result)))
+        },
+    );
+
+    register_typed_fn_2::<_, Arc<Vec<f64>>, Arc<Vec<f64>>>(
+        &mut module,
+        "__intrinsic_vec_mul",
+        "Element-wise multiplication of two Vec<number>",
+        [("a", "Array<number>"), ("b", "Array<number>")],
+        ConcreteType::ArrayNumber,
+        |a, b, _ctx| {
+            check_lens(a.len(), b.len(), "vec_mul")?;
+            let result = binary_apply(a.as_slice(), b.as_slice(), |va, vb| va * vb, |x, y| x * y);
+            Ok(TypedReturn::Concrete(ConcreteReturn::ArrayF64(result)))
+        },
+    );
+
+    register_typed_fn_2::<_, Arc<Vec<f64>>, Arc<Vec<f64>>>(
+        &mut module,
+        "__intrinsic_vec_div",
+        "Element-wise division of two Vec<number>",
+        [("a", "Array<number>"), ("b", "Array<number>")],
+        ConcreteType::ArrayNumber,
+        |a, b, _ctx| {
+            check_lens(a.len(), b.len(), "vec_div")?;
+            let result = binary_apply(a.as_slice(), b.as_slice(), |va, vb| va / vb, |x, y| x / y);
+            Ok(TypedReturn::Concrete(ConcreteReturn::ArrayF64(result)))
+        },
+    );
+
+    register_typed_fn_2::<_, Arc<Vec<f64>>, Arc<Vec<f64>>>(
+        &mut module,
+        "__intrinsic_vec_max",
+        "Element-wise max of two Vec<number>",
+        [("a", "Array<number>"), ("b", "Array<number>")],
+        ConcreteType::ArrayNumber,
+        |a, b, _ctx| {
+            check_lens(a.len(), b.len(), "vec_max")?;
+            let result = binary_apply(a.as_slice(), b.as_slice(), |va, vb| va.max(vb), f64::max);
+            Ok(TypedReturn::Concrete(ConcreteReturn::ArrayF64(result)))
+        },
+    );
+
+    register_typed_fn_2::<_, Arc<Vec<f64>>, Arc<Vec<f64>>>(
+        &mut module,
+        "__intrinsic_vec_min",
+        "Element-wise min of two Vec<number>",
+        [("a", "Array<number>"), ("b", "Array<number>")],
+        ConcreteType::ArrayNumber,
+        |a, b, _ctx| {
+            check_lens(a.len(), b.len(), "vec_min")?;
+            let result = binary_apply(a.as_slice(), b.as_slice(), |va, vb| va.min(vb), f64::min);
+            Ok(TypedReturn::Concrete(ConcreteReturn::ArrayF64(result)))
+        },
+    );
+
+    register_typed_fn_3::<_, Arc<Vec<f64>>, Arc<Vec<f64>>, Arc<Vec<f64>>>(
+        &mut module,
+        "__intrinsic_vec_select",
+        "Element-wise select: cond[i] != 0 ? t[i] : f[i]",
+        [
+            ("cond", "Array<number>"),
+            ("t", "Array<number>"),
+            ("f", "Array<number>"),
+        ],
+        ConcreteType::ArrayNumber,
+        |cond, t, f, _ctx| {
+            let n = cond.len();
+            if t.len() != n || f.len() != n {
+                return Err(format!(
+                    "vec_select: length mismatch cond={}, t={}, f={}",
+                    n,
+                    t.len(),
+                    f.len()
+                ));
+            }
+            let cond_data = cond.as_slice();
+            let t_data = t.as_slice();
+            let f_data = f.as_slice();
+            let mut result = Vec::with_capacity(n);
+            for i in 0..n {
+                result.push(if cond_data[i] != 0.0 {
+                    t_data[i]
+                } else {
+                    f_data[i]
+                });
+            }
+            Ok(TypedReturn::Concrete(ConcreteReturn::ArrayF64(result)))
+        },
+    );
+
+    register_typed_fn_2::<_, Arc<Vec<i64>>, Arc<Vec<i64>>>(
+        &mut module,
+        "__intrinsic_vec_add_i64",
+        "Element-wise addition of two Vec<int>, overflow-checked",
+        [("a", "Array<int>"), ("b", "Array<int>")],
+        ConcreteType::ArrayInt,
+        |a, b, _ctx| {
+            check_lens(a.len(), b.len(), "vec_add_i64")?;
+            simd_vec_add_i64(a.as_slice(), b.as_slice())
+                .map(|r| TypedReturn::Concrete(ConcreteReturn::ArrayI64(r)))
+                .map_err(|()| "Integer overflow in Vec<int> element-wise addition".to_string())
+        },
+    );
+
+    module
+}
+
+// ───────────────────── helpers ─────────────────────
+
+#[inline]
+fn check_lens(a: usize, b: usize, name: &str) -> Result<(), String> {
+    if a != b {
+        Err(format!("Vector length mismatch in {}: {} vs {}", name, a, b))
+    } else {
+        Ok(())
+    }
+}
+
+/// Apply a unary SIMD-or-scalar op element-wise; produces an owned `Vec<f64>`.
+fn unary_apply(
+    data: &[f64],
+    simd_op: impl Fn(f64x4) -> f64x4,
+    scalar_op: impl Fn(f64) -> f64,
+) -> Vec<f64> {
+    let len = data.len();
+    let mut result = vec![0.0; len];
+    if len >= SIMD_THRESHOLD {
+        let chunks = len / 4;
         for i in 0..chunks {
             let idx = i * 4;
             let v = f64x4::from(&data[idx..idx + 4]);
-            let res = v.abs();
+            let res = simd_op(v);
             result[idx..idx + 4].copy_from_slice(&res.to_array());
         }
-        for i in (chunks * 4)..data.len() {
-            result[i] = data[i].abs();
+        for i in (chunks * 4)..len {
+            result[i] = scalar_op(data[i]);
         }
     } else {
-        for i in 0..data.len() {
-            result[i] = data[i].abs();
+        for i in 0..len {
+            result[i] = scalar_op(data[i]);
         }
     }
-
-    Ok(f64_vec_to_nb_array(result))
+    result
 }
 
-/// Core Vector Square Root: sqrt(x)
-pub fn intrinsic_vec_sqrt(args: &[ValueWord], _ctx: &mut ExecutionContext) -> Result<ValueWord> {
-    if args.len() != 1 {
-        return Err(ShapeError::RuntimeError {
-            message: "vec_sqrt requires 1 argument".into(),
-            location: None,
-        });
-    }
-    let data = extract_f64_array(&args[0], "Argument")?;
-    let mut result = vec![0.0; data.len()];
-
-    if data.len() >= SIMD_THRESHOLD {
-        let chunks = data.len() / 4;
+/// Apply a binary SIMD-or-scalar op element-wise; produces an owned `Vec<f64>`.
+/// Caller must verify `a.len() == b.len()`.
+fn binary_apply(
+    a: &[f64],
+    b: &[f64],
+    simd_op: impl Fn(f64x4, f64x4) -> f64x4,
+    scalar_op: impl Fn(f64, f64) -> f64,
+) -> Vec<f64> {
+    let len = a.len();
+    let mut result = vec![0.0; len];
+    if len >= SIMD_THRESHOLD {
+        let chunks = len / 4;
         for i in 0..chunks {
             let idx = i * 4;
-            let v = f64x4::from(&data[idx..idx + 4]);
-            let res = v.sqrt();
+            let va = f64x4::from(&a[idx..idx + 4]);
+            let vb = f64x4::from(&b[idx..idx + 4]);
+            let res = simd_op(va, vb);
             result[idx..idx + 4].copy_from_slice(&res.to_array());
         }
-        for i in (chunks * 4)..data.len() {
-            result[i] = data[i].sqrt();
-        }
-    } else {
-        for i in 0..data.len() {
-            result[i] = data[i].sqrt();
-        }
-    }
-
-    Ok(f64_vec_to_nb_array(result))
-}
-
-/// Core Vector Logarithm: ln(x)
-pub fn intrinsic_vec_ln(args: &[ValueWord], _ctx: &mut ExecutionContext) -> Result<ValueWord> {
-    if args.len() != 1 {
-        return Err(ShapeError::RuntimeError {
-            message: "vec_ln requires 1 argument".into(),
-            location: None,
-        });
-    }
-    let data = extract_f64_array(&args[0], "Argument")?;
-    let result: Vec<f64> = data.iter().map(|x| x.ln()).collect();
-    Ok(f64_vec_to_nb_array(result))
-}
-
-/// Core Vector Exponent: exp(x)
-pub fn intrinsic_vec_exp(args: &[ValueWord], _ctx: &mut ExecutionContext) -> Result<ValueWord> {
-    if args.len() != 1 {
-        return Err(ShapeError::RuntimeError {
-            message: "vec_exp requires 1 argument".into(),
-            location: None,
-        });
-    }
-    let data = extract_f64_array(&args[0], "Argument")?;
-    let result: Vec<f64> = data.iter().map(|x| x.exp()).collect();
-    Ok(f64_vec_to_nb_array(result))
-}
-
-/// Helper for binary vector ops that also accept a scalar right-hand side.
-///
-/// `build_result` wraps the final `Vec<f64>` into the caller-preferred
-/// ValueWord representation. The four `Vec<number>` arithmetic
-/// intrinsics pass `f64_vec_to_float_array` (HeapKind::FloatArray) so
-/// the result retains the 21-method FLOAT_ARRAY_METHODS PHF dispatch
-/// that the executor's dynamic fallback arm produces. Other callers
-/// (vec_max / vec_min) stay on `f64_vec_to_nb_array` (HeapKind::Array).
-fn binary_vec_op(
-    args: &[ValueWord],
-    name: &str,
-    simd_op: fn(f64x4, f64x4) -> f64x4,
-    scalar_op: fn(f64, f64) -> f64,
-    build_result: fn(Vec<f64>) -> ValueWord,
-) -> Result<ValueWord> {
-    if args.len() != 2 {
-        return Err(ShapeError::RuntimeError {
-            message: format!("{} requires 2 arguments", name),
-            location: None,
-        });
-    }
-
-    // Check if right is a scalar number
-    if let Some(scalar) = args[1].as_number_coerce() {
-        let a = extract_f64_array(&args[0], "Left argument")?;
-        let mut result = vec![0.0; a.len()];
-        if a.len() >= SIMD_THRESHOLD {
-            let s_vec = f64x4::splat(scalar);
-            let chunks = a.len() / 4;
-            for i in 0..chunks {
-                let idx = i * 4;
-                let v = f64x4::from(&a[idx..idx + 4]);
-                let res = simd_op(v, s_vec);
-                result[idx..idx + 4].copy_from_slice(&res.to_array());
-            }
-            for i in (chunks * 4)..a.len() {
-                result[i] = scalar_op(a[i], scalar);
-            }
-        } else {
-            for i in 0..a.len() {
-                result[i] = scalar_op(a[i], scalar);
-            }
-        }
-        // If it was a scalar, it might not have an array — skip length check
-        if args[0].as_any_array().is_some() {
-            return Ok(build_result(result));
-        }
-    }
-
-    let a = extract_f64_array(&args[0], "Left argument")?;
-    let b = extract_f64_array(&args[1], "Right argument")?;
-
-    if a.len() != b.len() {
-        return Err(ShapeError::RuntimeError {
-            message: format!("Vector length mismatch: {} vs {}", a.len(), b.len()),
-            location: None,
-        });
-    }
-
-    let mut result = vec![0.0; a.len()];
-    if a.len() >= SIMD_THRESHOLD {
-        let chunks = a.len() / 4;
-        for i in 0..chunks {
-            let idx = i * 4;
-            let v1 = f64x4::from(&a[idx..idx + 4]);
-            let v2 = f64x4::from(&b[idx..idx + 4]);
-            let res = simd_op(v1, v2);
-            result[idx..idx + 4].copy_from_slice(&res.to_array());
-        }
-        for i in (chunks * 4)..a.len() {
+        for i in (chunks * 4)..len {
             result[i] = scalar_op(a[i], b[i]);
         }
     } else {
-        for i in 0..a.len() {
+        for i in 0..len {
             result[i] = scalar_op(a[i], b[i]);
         }
     }
-    Ok(build_result(result))
+    result
 }
 
-/// Core Vector Addition: a + b
-pub fn intrinsic_vec_add(args: &[ValueWord], _ctx: &mut ExecutionContext) -> Result<ValueWord> {
-    binary_vec_op(
-        args,
-        "vec_add",
-        |a, b| a + b,
-        |a, b| a + b,
-        f64_vec_to_float_array,
-    )
-}
-
-/// Core Vector Subtraction: a - b
-pub fn intrinsic_vec_sub(args: &[ValueWord], _ctx: &mut ExecutionContext) -> Result<ValueWord> {
-    binary_vec_op(
-        args,
-        "vec_sub",
-        |a, b| a - b,
-        |a, b| a - b,
-        f64_vec_to_float_array,
-    )
-}
-
-/// Core Vector Multiplication: a * b
-pub fn intrinsic_vec_mul(args: &[ValueWord], _ctx: &mut ExecutionContext) -> Result<ValueWord> {
-    binary_vec_op(
-        args,
-        "vec_mul",
-        |a, b| a * b,
-        |a, b| a * b,
-        f64_vec_to_float_array,
-    )
-}
-
-/// Core Vector Division: a / b
-pub fn intrinsic_vec_div(args: &[ValueWord], _ctx: &mut ExecutionContext) -> Result<ValueWord> {
-    binary_vec_op(
-        args,
-        "vec_div",
-        |a, b| a / b,
-        |a, b| a / b,
-        f64_vec_to_float_array,
-    )
-}
-
-/// Core Vector Max: max(a, b)
-pub fn intrinsic_vec_max(args: &[ValueWord], _ctx: &mut ExecutionContext) -> Result<ValueWord> {
-    binary_vec_op(
-        args,
-        "vec_max",
-        |a, b| a.max(b),
-        f64::max,
-        f64_vec_to_nb_array,
-    )
-}
-
-/// Core Vector Min: min(a, b)
-pub fn intrinsic_vec_min(args: &[ValueWord], _ctx: &mut ExecutionContext) -> Result<ValueWord> {
-    binary_vec_op(
-        args,
-        "vec_min",
-        |a, b| a.min(b),
-        f64::min,
-        f64_vec_to_nb_array,
-    )
-}
-
-/// Core Vector Select: condition ? true_val : false_val
-pub fn intrinsic_vec_select(args: &[ValueWord], _ctx: &mut ExecutionContext) -> Result<ValueWord> {
-    if args.len() != 3 {
-        return Err(ShapeError::RuntimeError {
-            message: "vec_select requires 3 arguments".into(),
-            location: None,
-        });
-    }
-    let cond = extract_f64_array(&args[0], "Condition")?;
-
-    let t_vec = if let Some(n) = args[1].as_number_coerce() {
-        vec![n; cond.len()]
-    } else {
-        extract_f64_array(&args[1], "True value")?
-    };
-
-    let f_vec = if let Some(n) = args[2].as_number_coerce() {
-        vec![n; cond.len()]
-    } else {
-        extract_f64_array(&args[2], "False value")?
-    };
-
-    if t_vec.len() != cond.len() || f_vec.len() != cond.len() {
-        return Err(ShapeError::RuntimeError {
-            message: format!(
-                "Vector length mismatch in select: cond={}, true={}, false={}",
-                cond.len(),
-                t_vec.len(),
-                f_vec.len()
-            ),
-            location: None,
-        });
-    }
-
-    let mut result = vec![0.0; cond.len()];
-    for i in 0..cond.len() {
-        result[i] = if cond[i] != 0.0 { t_vec[i] } else { f_vec[i] };
-    }
-
-    Ok(f64_vec_to_nb_array(result))
-}
-
-/// Core `Vec<int> + Vec<int>` — element-wise, overflow-checked (R5.4D).
-///
-/// Mirrors the dynamic-fallback arm at
-/// `shape-vm/executor/arithmetic/mod.rs::try_heap_arithmetic` (the
-/// `HeapValue::TypedArray(TypedArrayData::I64) + I64` case): the result
-/// is an `IntArray` (`ValueWord::from_int_array`) and any overflow
-/// surfaces as a runtime error rather than saturating. Used by
-/// R5.4E when retargeting `Vec<int> + Vec<int>` off
-/// `exec_arithmetic_dynamic_fallback`.
-pub fn intrinsic_vec_add_i64(
-    args: &[ValueWord],
-    _ctx: &mut ExecutionContext,
-) -> Result<ValueWord> {
-    if args.len() != 2 {
-        return Err(ShapeError::RuntimeError {
-            message: "vec_add_i64 requires 2 arguments".into(),
-            location: None,
-        });
-    }
-    let a = args[0].as_int_array().ok_or_else(|| ShapeError::RuntimeError {
-        message: "Left argument of vec_add_i64 must be a Vec<int>".into(),
-        location: None,
-    })?;
-    let b = args[1].as_int_array().ok_or_else(|| ShapeError::RuntimeError {
-        message: "Right argument of vec_add_i64 must be a Vec<int>".into(),
-        location: None,
-    })?;
-    if a.len() != b.len() {
-        return Err(ShapeError::RuntimeError {
-            message: format!("Vec<int> length mismatch: {} vs {}", a.len(), b.len()),
-            location: None,
-        });
-    }
-    match simd_vec_add_i64(a.as_slice(), b.as_slice()) {
-        Ok(r) => Ok(ValueWord::from_int_array(Arc::new(r.into()))),
-        Err(()) => Err(ShapeError::RuntimeError {
-            message: "Integer overflow in Vec<int> element-wise addition".into(),
-            location: None,
-        }),
-    }
-}
-
-// ===== Typed Vec<T> SIMD Kernels =====
+// ───────────────────── Typed Vec<T> SIMD Kernels ─────────────────────
 //
-// These operate directly on raw slices from IntArray/FloatArray HeapValue variants,
-// avoiding ValueWord materialization. Used by the executor's arithmetic dispatch.
-
-use shape_value::aligned_vec::AlignedVec;
+// These operate directly on raw slices from IntArray/FloatArray HeapValue
+// variants, avoiding ValueWord materialization. Used by shape-vm's executor
+// arithmetic dispatch (separate consumer from the typed-marshal entry points
+// above).
 
 /// Element-wise addition of two f64 slices using SIMD (f64x4).
-/// Returns an AlignedVec<f64>. Panics if lengths differ.
+/// Returns an `AlignedVec<f64>`. Panics if lengths differ (debug only).
 pub fn simd_vec_add_f64(a: &[f64], b: &[f64]) -> AlignedVec<f64> {
     debug_assert_eq!(a.len(), b.len());
     let len = a.len();
@@ -546,141 +501,15 @@ pub fn i64_slice_to_f64(data: &[i64]) -> AlignedVec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::context::ExecutionContext;
-    use shape_value::{ValueWord, ValueWordExt};
 
-    fn make_array(vals: &[f64]) -> ValueWord {
-        f64_vec_to_nb_array(vals.to_vec())
-    }
-
-    fn unwrap_array(nb: ValueWord) -> Vec<f64> {
-        let arr = nb.as_any_array().expect("Expected array").to_generic();
-        arr.iter()
-            .map(|v| v.as_number_coerce().expect("Expected number"))
-            .collect()
-    }
-
-    #[test]
-    fn test_vec_abs() {
-        let input = make_array(&[-1.0, 2.0, -3.5]);
-        let mut ctx = ExecutionContext::new_empty();
-        let result = intrinsic_vec_abs(&[input], &mut ctx).unwrap();
-        let arr = unwrap_array(result);
-        assert_eq!(arr, vec![1.0, 2.0, 3.5]);
-    }
-
-    #[test]
-    fn test_vec_add_vector() {
-        let a = make_array(&[1.0, 2.0]);
-        let b = make_array(&[3.0, 4.0]);
-        let mut ctx = ExecutionContext::new_empty();
-        let result = intrinsic_vec_add(&[a, b], &mut ctx).unwrap();
-        let arr = unwrap_array(result);
-        assert_eq!(arr, vec![4.0, 6.0]);
-    }
-
-    // ===== R5.4C: Vec<number> arithmetic intrinsics return FloatArray =====
-    //
-    // After R5.4E retargets `Vec<number> + Vec<number>` (etc.) from the
-    // dynamic fallback arm to these intrinsics, the result must match
-    // the fallback's output — a `HeapValue::TypedArray(TypedArrayData::F64)`
-    // (reported as `HeapKind::TypedArray`, probed here via
-    // `as_float_array()` which narrows to the F64 inner variant). This
-    // representation enables the 21 FLOAT_ARRAY_METHODS PHF entries
-    // (sum / avg / dot / norm / cumsum / diff / abs / sqrt / ...) that
-    // the generic `HeapKind::Array` path does not.
-
-    #[test]
-    fn test_r5_4c_vec_add_returns_float_array_kind() {
-        use shape_value::HeapKind;
-        let a = make_array(&[1.0, 2.0, 3.0]);
-        let b = make_array(&[10.0, 20.0, 30.0]);
-        let mut ctx = ExecutionContext::new_empty();
-        let result = intrinsic_vec_add(&[a, b], &mut ctx).unwrap();
-        assert_eq!(result.heap_kind(), Some(HeapKind::TypedArray));
-        assert!(
-            result.as_float_array().is_some(),
-            "vec_add result must be a FloatArray (TypedArrayData::F64)"
-        );
-        assert_eq!(unwrap_array(result), vec![11.0, 22.0, 33.0]);
-    }
-
-    #[test]
-    fn test_r5_4c_vec_sub_returns_float_array_kind() {
-        use shape_value::HeapKind;
-        let a = make_array(&[10.0, 20.0, 30.0]);
-        let b = make_array(&[1.0, 2.0, 3.0]);
-        let mut ctx = ExecutionContext::new_empty();
-        let result = intrinsic_vec_sub(&[a, b], &mut ctx).unwrap();
-        assert_eq!(result.heap_kind(), Some(HeapKind::TypedArray));
-        assert!(
-            result.as_float_array().is_some(),
-            "vec_sub result must be a FloatArray (TypedArrayData::F64)"
-        );
-        assert_eq!(unwrap_array(result), vec![9.0, 18.0, 27.0]);
-    }
-
-    #[test]
-    fn test_r5_4c_vec_mul_returns_float_array_kind() {
-        use shape_value::HeapKind;
-        let a = make_array(&[2.0, 3.0, 4.0]);
-        let b = make_array(&[5.0, 6.0, 7.0]);
-        let mut ctx = ExecutionContext::new_empty();
-        let result = intrinsic_vec_mul(&[a, b], &mut ctx).unwrap();
-        assert_eq!(result.heap_kind(), Some(HeapKind::TypedArray));
-        assert!(
-            result.as_float_array().is_some(),
-            "vec_mul result must be a FloatArray (TypedArrayData::F64)"
-        );
-        assert_eq!(unwrap_array(result), vec![10.0, 18.0, 28.0]);
-    }
-
-    #[test]
-    fn test_r5_4c_vec_div_returns_float_array_kind() {
-        use shape_value::HeapKind;
-        let a = make_array(&[10.0, 20.0, 30.0]);
-        let b = make_array(&[2.0, 5.0, 6.0]);
-        let mut ctx = ExecutionContext::new_empty();
-        let result = intrinsic_vec_div(&[a, b], &mut ctx).unwrap();
-        assert_eq!(result.heap_kind(), Some(HeapKind::TypedArray));
-        assert!(
-            result.as_float_array().is_some(),
-            "vec_div result must be a FloatArray (TypedArrayData::F64)"
-        );
-        assert_eq!(unwrap_array(result), vec![5.0, 4.0, 5.0]);
-    }
-
-    #[test]
-    fn test_vec_add_scalar() {
-        let a = make_array(&[1.0, 2.0]);
-        let b = ValueWord::from_f64(5.0);
-        let mut ctx = ExecutionContext::new_empty();
-        let result = intrinsic_vec_add(&[a, b], &mut ctx).unwrap();
-        let arr = unwrap_array(result);
-        assert_eq!(arr, vec![6.0, 7.0]);
-    }
-
-    #[test]
-    fn test_vec_sqrt_simd() {
-        // Large enough to trigger SIMD (threshold 16)
-        let data: Vec<f64> = (0..20).map(|i| (i * i) as f64).collect();
-        let input = f64_vec_to_nb_array(data);
-        let mut ctx = ExecutionContext::new_empty();
-        let result = intrinsic_vec_sqrt(&[input], &mut ctx).unwrap();
-        let arr = unwrap_array(result);
-        assert_eq!(arr.len(), 20);
-        for i in 0..20 {
-            assert_eq!(arr[i], i as f64);
-        }
-    }
-
-    // ===== SIMD kernel tests =====
+    // ===== Typed Vec<T> SIMD kernel tests (preserved across the
+    // intrinsics-typed-CC migration; do not rely on ValueWord) =====
 
     #[test]
     fn test_simd_vec_add_f64_small() {
         let a = [1.0, 2.0, 3.0];
         let b = [4.0, 5.0, 6.0];
-        let result = super::simd_vec_add_f64(&a, &b);
+        let result = simd_vec_add_f64(&a, &b);
         assert_eq!(&*result, &[5.0, 7.0, 9.0]);
     }
 
@@ -688,7 +517,7 @@ mod tests {
     fn test_simd_vec_add_f64_large() {
         let a: Vec<f64> = (0..20).map(|i| i as f64).collect();
         let b: Vec<f64> = (0..20).map(|i| (i * 2) as f64).collect();
-        let result = super::simd_vec_add_f64(&a, &b);
+        let result = simd_vec_add_f64(&a, &b);
         for i in 0..20 {
             assert_eq!(result[i], (i * 3) as f64);
         }
@@ -698,7 +527,7 @@ mod tests {
     fn test_simd_vec_sub_f64() {
         let a = [10.0, 20.0, 30.0];
         let b = [3.0, 5.0, 7.0];
-        let result = super::simd_vec_sub_f64(&a, &b);
+        let result = simd_vec_sub_f64(&a, &b);
         assert_eq!(&*result, &[7.0, 15.0, 23.0]);
     }
 
@@ -706,7 +535,7 @@ mod tests {
     fn test_simd_vec_mul_f64() {
         let a = [2.0, 3.0, 4.0];
         let b = [5.0, 6.0, 7.0];
-        let result = super::simd_vec_mul_f64(&a, &b);
+        let result = simd_vec_mul_f64(&a, &b);
         assert_eq!(&*result, &[10.0, 18.0, 28.0]);
     }
 
@@ -714,14 +543,14 @@ mod tests {
     fn test_simd_vec_div_f64() {
         let a = [10.0, 20.0, 30.0];
         let b = [2.0, 5.0, 6.0];
-        let result = super::simd_vec_div_f64(&a, &b);
+        let result = simd_vec_div_f64(&a, &b);
         assert_eq!(&*result, &[5.0, 4.0, 5.0]);
     }
 
     #[test]
     fn test_simd_vec_scale_f64() {
         let a = [1.0, 2.0, 3.0];
-        let result = super::simd_vec_scale_f64(&a, 10.0);
+        let result = simd_vec_scale_f64(&a, 10.0);
         assert_eq!(&*result, &[10.0, 20.0, 30.0]);
     }
 
@@ -729,7 +558,7 @@ mod tests {
     fn test_simd_vec_add_i64_ok() {
         let a = [1i64, 2, 3];
         let b = [4i64, 5, 6];
-        let result = super::simd_vec_add_i64(&a, &b).unwrap();
+        let result = simd_vec_add_i64(&a, &b).unwrap();
         assert_eq!(result, vec![5, 7, 9]);
     }
 
@@ -737,88 +566,41 @@ mod tests {
     fn test_simd_vec_add_i64_overflow() {
         let a = [i64::MAX];
         let b = [1i64];
-        assert!(super::simd_vec_add_i64(&a, &b).is_err());
+        assert!(simd_vec_add_i64(&a, &b).is_err());
     }
 
     #[test]
     fn test_simd_vec_div_i64_zero() {
         let a = [10i64];
         let b = [0i64];
-        assert!(super::simd_vec_div_i64(&a, &b).is_err());
+        assert!(simd_vec_div_i64(&a, &b).is_err());
     }
 
     #[test]
     fn test_i64_slice_to_f64() {
         let data = [1i64, -2, 100];
-        let result = super::i64_slice_to_f64(&data);
+        let result = i64_slice_to_f64(&data);
         assert_eq!(&*result, &[1.0, -2.0, 100.0]);
     }
 
-    // ===== R5.4D: intrinsic_vec_add_i64 =====
+    // ===== Typed-marshal helper tests =====
 
-    fn make_int_array(vals: &[i64]) -> ValueWord {
-        ValueWord::from_int_array(std::sync::Arc::new(vals.to_vec().into()))
-    }
-
-    fn unwrap_int_array(nb: ValueWord) -> Vec<i64> {
-        nb.as_int_array()
-            .expect("Expected int array")
-            .as_slice()
-            .to_vec()
+    #[test]
+    fn test_unary_apply_abs_simd() {
+        let data: Vec<f64> = (0..20).map(|i| -(i as f64)).collect();
+        let result = unary_apply(&data, |v| v.abs(), f64::abs);
+        for i in 0..20 {
+            assert_eq!(result[i], i as f64);
+        }
     }
 
     #[test]
-    fn test_r5_4d_intrinsic_vec_add_i64_happy_path() {
-        let a = make_int_array(&[1, 2, 3, 4]);
-        let b = make_int_array(&[10, 20, 30, 40]);
-        let mut ctx = ExecutionContext::new_empty();
-        let result = intrinsic_vec_add_i64(&[a, b], &mut ctx).unwrap();
-        assert_eq!(unwrap_int_array(result), vec![11, 22, 33, 44]);
-    }
-
-    #[test]
-    fn test_r5_4d_intrinsic_vec_add_i64_length_mismatch() {
-        let a = make_int_array(&[1, 2, 3]);
-        let b = make_int_array(&[10, 20]);
-        let mut ctx = ExecutionContext::new_empty();
-        let err = intrinsic_vec_add_i64(&[a, b], &mut ctx).unwrap_err();
-        let msg = format!("{:?}", err);
-        assert!(msg.contains("length mismatch"), "got: {}", msg);
-    }
-
-    #[test]
-    fn test_r5_4d_intrinsic_vec_add_i64_overflow() {
-        let a = make_int_array(&[i64::MAX]);
-        let b = make_int_array(&[1]);
-        let mut ctx = ExecutionContext::new_empty();
-        let err = intrinsic_vec_add_i64(&[a, b], &mut ctx).unwrap_err();
-        let msg = format!("{:?}", err);
-        assert!(msg.contains("overflow"), "got: {}", msg);
-    }
-
-    #[test]
-    fn test_r5_4d_intrinsic_vec_add_i64_arity_error() {
-        let a = make_int_array(&[1, 2, 3]);
-        let mut ctx = ExecutionContext::new_empty();
-        let err = intrinsic_vec_add_i64(&[a], &mut ctx).unwrap_err();
-        let msg = format!("{:?}", err);
-        assert!(msg.contains("2 arguments"), "got: {}", msg);
-    }
-
-    #[test]
-    fn test_r5_4d_intrinsic_vec_add_i64_non_int_array_rejected() {
-        // A float array should not be accepted — the intrinsic is strictly
-        // `Vec<int> + Vec<int>`; the compiler will emit
-        // `IntrinsicVecAdd` (f64) for the float case in R5.4E.
-        let a = f64_vec_to_float_array(vec![1.0, 2.0]);
-        let b = make_int_array(&[1, 2]);
-        let mut ctx = ExecutionContext::new_empty();
-        let err = intrinsic_vec_add_i64(&[a, b], &mut ctx).unwrap_err();
-        let msg = format!("{:?}", err);
-        assert!(
-            msg.contains("Vec<int>"),
-            "expected Vec<int>-typed error, got: {}",
-            msg
-        );
+    fn test_binary_apply_add_simd() {
+        let a: Vec<f64> = (0..20).map(|i| i as f64).collect();
+        let b: Vec<f64> = (0..20).map(|i| (i * 2) as f64).collect();
+        let result = binary_apply(&a, &b, |va, vb| va + vb, |x, y| x + y);
+        for i in 0..20 {
+            assert_eq!(result[i], (i * 3) as f64);
+        }
     }
 }

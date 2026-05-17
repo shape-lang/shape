@@ -13,7 +13,6 @@ use crate::plugins::{
     PluginDataSource, PluginLoader, PluginModule,
 };
 use shape_ast::error::{Result, ShapeError};
-use shape_value::ValueWord;
 use shape_wire::WireValue;
 use std::collections::HashMap;
 use std::path::Path;
@@ -426,27 +425,13 @@ impl ProviderRegistry {
     }
 
     /// Build runtime extension modules from all loaded extension module capabilities.
+    ///
+    /// Strict-typing follow-up `plugin-typed-abi`: the `ValueWord`-typed
+    /// dispatch shim was removed with the bulldozer; plugins are inert
+    /// until they declare typed signatures at registration. See the
+    /// 2026-05-06 entry in `docs/defections.md`.
     pub fn module_exports_from_extensions(&self) -> Vec<crate::module_exports::ModuleExports> {
-        let modules = self.extension_modules.read().unwrap();
-        modules.values().map(|m| m.to_module_exports()).collect()
-    }
-
-    /// Invoke a module-capability export by module namespace and function name.
-    pub fn invoke_extension_module_nb(
-        &self,
-        module_name: &str,
-        function: &str,
-        args: &[ValueWord],
-    ) -> Result<ValueWord> {
-        let modules = self.extension_modules.read().unwrap();
-        let module = modules
-            .values()
-            .find(|m| m.schema().module_name == module_name)
-            .ok_or_else(|| ShapeError::RuntimeError {
-                message: format!("Module namespace '{}' is not loaded", module_name),
-                location: None,
-            })?;
-        module.invoke_nb(function, args)
+        Vec::new()
     }
 
     /// Invoke a module-capability export by module namespace and function name.

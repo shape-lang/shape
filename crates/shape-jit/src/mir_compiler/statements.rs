@@ -8,7 +8,7 @@ use cranelift::prelude::*;
 
 use super::MirToIR;
 use shape_vm::mir::types::*;
-use shape_vm::type_tracking::SlotKind;
+use shape_vm::type_tracking::NativeKind;
 
 impl<'a, 'b> MirToIR<'a, 'b> {
     /// Compile a single MIR statement.
@@ -32,6 +32,36 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         self.write_place(place, arr_val)?;
                         return Ok(());
                     }
+                }
+
+                // v2 fast path: when the destination is a TypedObject slot
+                // (`ConcreteType::Struct(_)` / `Enum(_)` / `Option(_)` /
+                // `Result(_, _)` / `Tuple(_)`), the bytecode/MIR lowering
+                // emits a redundant `Assign(Aggregate)` (a scratch step
+                // mirroring the AST shape) followed by a real
+                // `StatementKind::ObjectStore` (or `EnumStore`) that does
+                // the actual `typed_object_alloc` + per-field set. Skip
+                // the kind-blind Aggregate compilation here — the real
+                // allocation arrives at the ObjectStore site. This is
+                // the §2.7.5 conduit's user-visible benefit: with the
+                // top-level slot's `ConcreteType` threaded from the
+                // bytecode compiler, the JIT no longer surfaces-and-stops
+                // on `Point { x, y }`-style struct literals (W12-top-level-
+                // concrete-types-conduit close, 2026-05-12).
+                //
+                // ADR-006 §2.7.5 forbidden list — this is NOT a Bool-
+                // default fallback. The condition is "the bytecode
+                // compiler proved this slot's `ConcreteType`"; when
+                // unproven the slot's `concrete_types[slot]` is
+                // `ConcreteType::Void` and `is_typed_object_slot`
+                // returns `false` — codegen surfaces-and-stops at the
+                // Aggregate site, not silently leaks. Per §2.7.5 the
+                // kind is stamped at compile time from the proven
+                // type information, never decoded from runtime bits.
+                if matches!(rvalue, Rvalue::Aggregate(_))
+                    && self.is_typed_object_slot(place)
+                {
+                    return Ok(());
                 }
 
                 // Session 2: propagate stack-closure call metadata on simple
@@ -76,67 +106,85 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 
             StatementKind::ArrayStore {
                 container_slot,
-                operands,
+                operands: _,
             } => {
                 // v2 fast path: when the container slot is a v2 `Array<scalar>`,
                 // the preceding `Assign(Aggregate)` has already allocated a real
-                // `*mut TypedArray<T>` and populated it. The legacy `ArrayStore`
-                // shape here would overwrite that pointer with a NaN-boxed
-                // `JitArray` built from `Move`d (and thus now-nulled) source
-                // slots — corrupting both the container and the element values.
-                // Skip the legacy build entirely in that case. The MIR ownership
-                // transfer has already been observed by the preceding Aggregate.
+                // `*mut TypedArray<T>` and populated it. Skip the redundant
+                // re-build — the MIR ownership transfer has already been
+                // observed by the preceding Aggregate.
                 let container_place = Place::Local(*container_slot);
                 if self.v2_typed_array_elem_kind(&container_place).is_some() {
                     return Ok(());
                 }
 
-                let zero = self.builder.ins().iconst(
-                    cranelift::prelude::types::I64,
-                    0i64,
-                );
-                let inst = self.builder.ins().call(
-                    self.ffi.new_array,
-                    &[self.ctx_ptr, zero],
-                );
-                let mut arr = self.builder.inst_results(inst)[0];
-
-                // R4.2B: FFI signatures accept plain u64 bit-patterns — no
-                // box wrap needed at call site. Array elements reach
-                // `array_push_elem` as ValueWord-encoded I64 slots. Native
-                // F64/I32/I8 operands from `compile_operand` must be
-                // NaN-boxed (not raw-widened) so that the legacy array-read
-                // path decodes each element's original type rather than
-                // treating raw bool/int bits as a denormal `Number`.
-                for op in operands {
-                    let hint = self.operand_slot_kind(op);
-                    let val_raw = self.compile_operand(op)?;
-                    let val = self.nan_box_for_value_word(val_raw, hint);
-                    let inst = self.builder
-                        .ins()
-                        .call(self.ffi.array_push_elem, &[arr, val]);
-                    arr = self.builder.inst_results(inst)[0];
-                }
-
-                self.release_old_value_if_heap(&container_place)?;
-                self.write_place(&container_place, arr)?;
-                Ok(())
+                // Route A (ADR-006 §2.7.14 / W11-jit-new-array close):
+                // reaching here means the container slot has no proven
+                // `Array<scalar>` element kind. The kind-blind
+                // `jit_new_array` + `jit_array_push_elem` path was the
+                // deleted ValueWord-shape ABI. Per §2.7.14 forbidden list
+                // ("Bool-default fallback for unknown element kinds")
+                // surface-and-stop instead of fabricating a kind.
+                Err(
+                    "Route A surface-and-stop: SURFACE — \
+                     StatementKind::ArrayStore reached the kind-blind \
+                     fallback. The v2 typed-array fast path requires the \
+                     container `Place::Local` to carry a \
+                     `ConcreteType::Array<scalar>`; reaching here means the \
+                     element kind is not threaded from the producing call \
+                     signature. Tracked as W11-jit-new-array per \
+                     phase-3-kickoff-prompt.md. ADR-006 §2.7.14 / §2.7.5."
+                        .to_string(),
+                )
             }
 
             StatementKind::ObjectStore {
                 container_slot,
                 operands,
                 field_names,
+                schema_id: stmt_schema_id,
             } => {
-                // Register a schema for cross-boundary compatibility.
-                let real_field_names: Vec<String> = field_names
-                    .iter()
-                    .filter(|n| !n.is_empty())
-                    .cloned()
-                    .collect();
-                let sid = shape_runtime::type_schema::register_predeclared_any_schema(
-                    &real_field_names,
-                );
+                // ADR-006 §2.7.5 stamp-at-compile-time — Phase 3 cluster-0
+                // Round 16 W17-narrow-follow-up-A: use the user-declared
+                // (or anonymous-inline) schema id threaded through the
+                // MIR `ObjectStore` carrier. The bytecode-side
+                // `OpCode::NewTypedObject` operand
+                // (`Operand::TypedObjectAlloc { schema_id, .. }`) carries
+                // the same id; the bytecode compiler's
+                // `crate::compiler::mir_schema_threading::
+                // back_patch_schema_ids` post-MIR-lowering pass aligns the
+                // two so the JIT-side `typed_object_alloc(schema_id, ...)`
+                // writes the user-declared schema id into
+                // `(*ptr).schema_id`. The W17-narrow classification-layer
+                // `receiver_type_name` then resolves `schema_id` →
+                // `vm.program().type_schema_registry.get_by_id(...)` →
+                // user type name (e.g. `"X"` for Smoke 3 schema = 53).
+                //
+                // Refuse-on-sight (§2.7.5 forbidden list): no
+                // `register_predeclared_any_schema` fallback when the
+                // back-patch could not resolve the schema. The correct
+                // surface-and-stop response is a structured error citing
+                // the producer-side gap.
+                let sid = match stmt_schema_id {
+                    Some(id) => *id,
+                    None => {
+                        return Err(format!(
+                            "ObjectStore: SURFACE — schema_id not threaded from \
+                             producer (bytecode-side `OpCode::NewTypedObject` \
+                             operand). Container slot SlotId({}) has no schema \
+                             id on the MIR `StatementKind::ObjectStore` carrier; \
+                             the bytecode compiler's \
+                             `mir_schema_threading::back_patch_schema_ids` pass \
+                             did not resolve it (struct type name missing from \
+                             `mir.local_struct_type_names` and no inline \
+                             schema match for the field set). Tracked as \
+                             W17-narrow-follow-up-A per \
+                             docs/cluster-audits/phase-3-cluster-0-status.md \
+                             §\"Round 15 — W17-narrow close\". ADR-006 §2.7.5.",
+                            container_slot.0,
+                        ));
+                    }
+                };
 
                 let schema_id = self.builder.ins().iconst(
                     cranelift::prelude::types::I32,
@@ -188,49 +236,192 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             StatementKind::EnumStore {
                 container_slot,
                 operands,
+                variant_name,
             } => {
                 // Enum variant construction.
                 //
-                // In the bytecode path, enums are compiled as TypedObjects with a
-                // schema_id and variant discriminant. The MIR doesn't carry schema
-                // information, so we represent enum payloads as arrays — the
-                // preceding Assign(Aggregate) already creates an array with the
-                // payload values.
+                // W12-collection-constructor-mir-lowering (Phase 3
+                // cluster-0 Round 6C → Round 10, 2026-05-13): the
+                // `EnumStore` MIR shape is also used by the primitive-
+                // collection ctor family (`Set` / `HashMap` / `Deque` /
+                // `PriorityQueue` / `Channel` / `Mutex` / `Atomic` /
+                // `Lazy`) per the W12-enum-constructor audit's §5.3
+                // "reuse `EnumStore` with `kind`-on-the-slot threading"
+                // recommendation. The `variant_name` disambiguates
+                // enum-variant from collection-ctor. Round 10 wires
+                // each collection-ctor name to the Round 9 typed-Arc
+                // allocator FuncRef.
                 //
-                // For non-empty payloads, rebuild the array from operands to ensure
-                // correct ownership semantics (Move/Copy). For unit variants (empty
-                // operands), the slot already holds the value from the Assign.
-                if !operands.is_empty() {
-                    // Create empty array, then push each element.
-                    let zero = self.builder.ins().iconst(
-                        cranelift::prelude::types::I64,
-                        0i64,
-                    );
-                    let inst = self.builder.ins().call(
-                        self.ffi.new_array,
-                        &[self.ctx_ptr, zero],
-                    );
-                    let mut arr = self.builder.inst_results(inst)[0];
-
-                    // R4.2B: FFI signatures accept plain u64 bit-patterns —
-                    // no box wrap needed at call site. Enum payload values
-                    // reach `array_push_elem` as ValueWord-encoded I64 slots.
-                    // Native F64/I32/I8 operands from `compile_operand` must
-                    // be widened to I64 before the FFI call so the Cranelift
-                    // verifier accepts the parameter types.
-                    for op in operands {
-                        let val_raw = self.compile_operand(op)?;
-                        let val = self.widen_to_i64(val_raw);
-                        let inst = self.builder
-                            .ins()
-                            .call(self.ffi.array_push_elem, &[arr, val]);
-                        arr = self.builder.inst_results(inst)[0];
+                // ADR-006 §2.7.5 producer-side classification: the ctor
+                // kind is known here at MIR-emission time, threaded
+                // through `variant_name`, and dispatched to the
+                // matching `jit_v2_make_*` FFI body.
+                //
+                // Carrier shape (audit §4.1 + Round 9 binding): all
+                // entries return `Arc::into_raw(Arc<XData>) as u64`
+                // with the standard Rust Arc layout (refcount at
+                // offset -16). Retain/release on the receiver / result
+                // slots dispatches through Round 9's
+                // `retain_func_for_place` / `release_func_for_place`
+                // 8-arm extension keyed on the slot's proven
+                // `NativeKind::Ptr(HeapKind::*)`.
+                if let Some(name) = variant_name.as_deref() {
+                    if is_collection_ctor_name(name) {
+                        return self.emit_collection_ctor(
+                            name,
+                            *container_slot,
+                            operands,
+                        );
                     }
+                }
+                // For unit variants (empty operands), the preceding
+                // `Assign(Aggregate)` short-circuit already left the slot
+                // initialized.
+                if operands.is_empty() {
+                    return Ok(());
+                }
 
+                // W12-jit-result-option-trinity (Phase 3 cluster-0
+                // Round 7A, 2026-05-12). EnumStore non-empty payload
+                // consumer per item (iii) of the trinity. The
+                // `variant_name` was producer-stamped at MIR-emission
+                // time (§2.7.5) by the bare-form enum-variant intercept
+                // in `mir/lowering/expr.rs:1556-1577` + the qualified
+                // `Expr::EnumConstructor` arm at `expr.rs:1669-1693`.
+                //
+                // Dispatches to the Arc-shape producers at
+                // `crates/shape-jit/src/ffi/result.rs::jit_v2_make_*`
+                // (committed as item (ii) of the trinity), which return
+                // `Arc::into_raw(Arc<ResultData>) as u64` /
+                // `Arc::into_raw(Arc<OptionData>) as u64` matching the
+                // VM-side `BuiltinFunction::OkCtor` / `ErrCtor` /
+                // `SomeCtor` / `NoneCtor` output shape per ADR-006
+                // §2.7.17.
+                //
+                // Payload kind is stamped from the operand's MIR-inferred
+                // kind via `operand_slot_kind(op)` → `stack_kind_code::
+                // encode(kind)` at call-site time per §2.7.5. NOT a
+                // Bool-default fallback: when the operand's kind isn't
+                // proven (the `None` arm of `operand_slot_kind`), surface-
+                // and-stop with the structured cite per §2.7.7 #9.
+                //
+                // Unsupported variant names (user-defined enum variants
+                // that aren't Ok / Err / Some / None) surface-and-stop —
+                // user-defined enum codegen is a separate workstream per
+                // the trinity audit §7 row 5.
+                let Some(name) = variant_name.as_deref() else {
+                    return Err(
+                        "EnumStore: SURFACE — variant_name is None on a \
+                         non-empty payload. The MIR producer sites in \
+                         `mir/lowering/{expr,stmt}.rs` MUST thread \
+                         `variant_name` per ADR-006 §2.7.5 producer-site \
+                         classification; reaching here means a producer \
+                         site emitted EnumStore without classification \
+                         (forbidden #9). \
+                         W12-jit-result-option-trinity (Phase 3 cluster-0 \
+                         Round 7A) / ADR-006 §2.7.17."
+                            .to_string(),
+                    );
+                };
+
+                let Some(variant_tag) = shape_vm::mir::types::VariantTag::from_name(name) else {
+                    return Err(format!(
+                        "EnumStore: SURFACE — variant '{}' (operands.len()={}) \
+                         is not in the trinity-supported set \
+                         (Ok / Err / Some / None). User-defined enum \
+                         variant codegen via EnumStore is a separate \
+                         workstream per `docs/cluster-audits/\
+                         w12-jit-match-enum-inline-audit.md` §7 row 5 — \
+                         needs `VariantTag::User(EnumLayoutId, variant_id)` \
+                         extension + parallel `jit_v2_make_user_enum_*` \
+                         FFI family. \
+                         W12-jit-result-option-trinity (Phase 3 cluster-0 \
+                         Round 7A) / ADR-006 §2.7.17.",
+                        name,
+                        operands.len()
+                    ));
+                };
+
+                // None has no payload — handled separately (empty operands
+                // already returned above, but `MirConstant::None` lowers
+                // to `MirConstant::None` operand which still gets here
+                // with operands.len()==1 in some paths). For safety:
+                if matches!(variant_tag, shape_vm::mir::types::VariantTag::None_) {
+                    // None construction via the Arc-shape producer —
+                    // no payload, no kind code. The producer always
+                    // builds the same `Arc<OptionData>` with
+                    // `is_some=false` + the §2.7.17 placeholder.
+                    let inst = self.builder.ins().call(
+                        self.ffi.v2_make_option_none,
+                        &[],
+                    );
+                    let arc_bits = self.builder.inst_results(inst)[0];
                     let place = Place::Local(*container_slot);
                     self.release_old_value_if_heap(&place)?;
-                    self.write_place(&place, arr)?;
+                    self.write_place(&place, arc_bits)?;
+                    return Ok(());
                 }
+
+                // Ok / Err / Some — single-payload producers. The MIR
+                // enforces exactly one operand for these via the producer-
+                // side intercepts (`is_bare_enum_variant_ctor` + the
+                // `Expr::EnumConstructor` tuple-payload arm). If we ever
+                // see operands.len() != 1, that's a producer-site bug.
+                if operands.len() != 1 {
+                    return Err(format!(
+                        "EnumStore: SURFACE — variant '{}' expects 1 \
+                         operand, got {}. Producer-site contract \
+                         violated. W12-jit-result-option-trinity / \
+                         ADR-006 §2.7.17.",
+                        name,
+                        operands.len()
+                    ));
+                }
+                let operand = &operands[0];
+
+                // Producer-site kind classification per §2.7.5: the
+                // operand's MIR-inferred kind IS the payload kind.
+                // `operand_slot_kind` projects through Field / Index /
+                // Local with the §2.7.5 conduit's `concrete_types` map +
+                // the constant arms — every operand the trinity supports
+                // has a proven kind by construction (the bare-form
+                // intercept's operand is a typed local; the qualified
+                // EnumConstructor's operand is a typed expression). When
+                // the kind is genuinely unprovable, the carrier fallback
+                // (NativeKind::UInt64) is the §2.7.5 stable-FFI carrier
+                // kind for raw I64-wide bits — NOT a Bool-default
+                // rationalization per §2.7.7 #9.
+                let payload_kind = self
+                    .operand_slot_kind_or_carrier(operand);
+                let kind_code = super::super::ffi::stack_kind_code::encode(payload_kind);
+
+                // Compile the operand to its raw payload bits (the call
+                // signature is I64-wide per the §2.7.5 stable-FFI
+                // convention; widen narrow native values to I64).
+                let payload_val = self.compile_operand_raw(operand)?;
+                let payload_i64 = self.widen_to_i64(payload_val);
+
+                let kind_code_val = self
+                    .builder
+                    .ins()
+                    .iconst(types::I8, kind_code as i64);
+
+                let func_ref = match variant_tag {
+                    shape_vm::mir::types::VariantTag::Ok => self.ffi.v2_make_result_ok,
+                    shape_vm::mir::types::VariantTag::Err => self.ffi.v2_make_result_err,
+                    shape_vm::mir::types::VariantTag::Some_ => self.ffi.v2_make_option_some,
+                    shape_vm::mir::types::VariantTag::None_ => unreachable!("handled above"),
+                };
+
+                let inst = self
+                    .builder
+                    .ins()
+                    .call(func_ref, &[payload_i64, kind_code_val]);
+                let arc_bits = self.builder.inst_results(inst)[0];
+
+                let place = Place::Local(*container_slot);
+                self.release_old_value_if_heap(&place)?;
+                self.write_place(&place, arc_bits)?;
                 Ok(())
             }
 
@@ -347,7 +538,13 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // once the compile-time registration is universal and the
                 // `MakeClosure` opcode is merged into `MakeClosureHeap`.
 
-                // Push each capture operand to ctx.stack[stack_ptr + i]
+                // Push each capture operand to ctx.stack[stack_ptr + i].
+                // ADR-006 §2.7.7 / Q9: lockstep parallel-kind write at every
+                // push site. `jit_make_closure` (the legacy FFI consuming
+                // these slots) doesn't currently read the kinds — but the
+                // invariant requires the writes so future FFI consumers can
+                // route through `stack_kind_code::decode` rather than
+                // synthesizing kinds at the read site.
                 let stack_base = crate::context::STACK_OFFSET as i32;
                 let sp_offset = crate::context::STACK_PTR_OFFSET as i32;
                 let old_sp = self.builder.ins().load(
@@ -362,6 +559,13 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // types inline (sextend / uextend / bitcast) — no NaN-box
                 // tagging.
                 for (i, op) in operands.iter().enumerate() {
+                    // Source the capture kind from the producing site,
+                    // falling back to the §2.7.5 carrier kind (`UInt64`)
+                    // for opaque-source operands — NOT a Bool-default
+                    // fallback.
+                    let _ = i;
+                    let op_kind = self.operand_slot_kind_or_carrier(op);
+
                     let raw = self.compile_operand(op)?;
                     let raw_ty = self.builder.func.dfg.value_type(raw);
                     let val = if raw_ty == cranelift::prelude::types::I64 {
@@ -384,6 +588,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     let abs_off = self.builder.ins().iadd_imm(byte_off, stack_base as i64);
                     let addr = self.builder.ins().iadd(self.ctx_ptr, abs_off);
                     self.builder.ins().store(MemFlags::new(), val, addr, 0);
+                    // §2.7.7 / Q9 lockstep parallel-kind write.
+                    self.emit_kind_track_write(slot_idx, op_kind);
                 }
 
                 // Update ctx.stack_ptr += captures_count
@@ -445,18 +651,20 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 
         // Determine per-capture Cranelift types + byte offsets.
         // The MIR operand's root slot kind dictates the native storage
-        // width. Unknown / Dynamic captures fall back to I64.
+        // width. Slots with no inferred kind fall back to I64 (same
+        // Cranelift width as the legacy `Unknown`/`Dynamic` arm).
         let mut capture_types: Vec<Type> = Vec::with_capacity(operands.len());
         for op in operands.iter() {
             let kind = match op {
                 Operand::Copy(p) | Operand::Move(p) | Operand::MoveExplicit(p) => {
                     let slot = p.root_local();
                     super::types::slot_kind_for_local(&self.slot_kinds, slot.0)
+                        .unwrap_or(NativeKind::Int64)
                 }
-                Operand::Constant(MirConstant::Float(_)) => SlotKind::Float64,
-                Operand::Constant(MirConstant::Int(_)) => SlotKind::Int64,
-                Operand::Constant(MirConstant::Bool(_)) => SlotKind::Bool,
-                _ => SlotKind::Unknown,
+                Operand::Constant(MirConstant::Float(_)) => NativeKind::Float64,
+                Operand::Constant(MirConstant::Int(_)) => NativeKind::Int64,
+                Operand::Constant(MirConstant::Bool(_)) => NativeKind::Bool,
+                _ => NativeKind::Int64,
             };
             capture_types.push(super::types::cranelift_type_for_slot(kind));
         }
@@ -915,6 +1123,173 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         }
         // Last-resort: already an I64 bit-pattern; pass through.
         val
+    }
+}
+
+/// W12-collection-constructor-mir-lowering (Phase 3 cluster-0 Round 6C,
+/// 2026-05-12): identify a primitive-collection constructor name on the
+/// JIT consumer side. The MIR-lowering pass at
+/// `crates/shape-vm/src/mir/lowering/helpers.rs::is_bare_collection_ctor`
+/// is the authoritative producer-side classifier; this is its mirror
+/// for the `StatementKind::EnumStore` consumer.
+///
+/// Mirrors the bytecode compiler's `classify_builtin_function` collection-
+/// ctor subset (`crates/shape-vm/src/compiler/helpers.rs:3433-3440`). Any
+/// future addition to that list (e.g. a new HeapKind ctor) needs the
+/// same name added here, plus the corresponding lowering-side
+/// `is_bare_collection_ctor` arm. The CHECK-12-style merge gate doesn't
+/// cover this drift; add to the verify-merge script if it becomes
+/// load-bearing.
+fn is_collection_ctor_name(name: &str) -> bool {
+    matches!(
+        name,
+        "HashMap" | "Set" | "Deque" | "PriorityQueue" | "Channel" | "Mutex" | "Atomic" | "Lazy"
+    )
+}
+
+impl<'a, 'b> super::MirToIR<'a, 'b> {
+    /// W12-jit-call-method-shell-rebuild Part 3 (Phase 3 cluster-0 Round
+    /// 10 / 8B.2, 2026-05-13): dispatch an `EnumStore` collection-ctor
+    /// arm to Round 9's typed-Arc allocator FuncRef.
+    ///
+    /// `name` is one of the 8 names in `is_collection_ctor_name`. The
+    /// allocator FuncRef shape:
+    ///
+    /// - Zero-arg: `Set` / `HashSet` / `HashMap` / `Deque` /
+    ///   `PriorityQueue` / `Channel` — call with `&[]`, store the
+    ///   resulting `Arc::into_raw(Arc<XData>) as u64` bits.
+    /// - Single-int: `Atomic(i64)` — compile the inner operand to its
+    ///   I64-widened raw payload bits, call with `&[bits]`.
+    /// - Single-closure: `Lazy(closure_bits)` — same shape as Atomic
+    ///   but the operand is a closure-kinded slot. The producer-side
+    ///   MIR classifier (`mir/lowering/expr.rs::is_bare_collection_ctor_with_arg`)
+    ///   validated the kind at emit time; the FFI body accepts raw
+    ///   u64 closure-Arc bits.
+    /// - Carrier-pair: `Mutex(bits, kind_code)` — compile the inner
+    ///   operand to its I64-widened raw payload bits, encode the
+    ///   operand's MIR-inferred kind into a `kind_code: u8` per
+    ///   §2.7.5 stamp-at-compile-time, call with `&[bits, kind_code]`.
+    ///
+    /// The container slot's old value is released via
+    /// `release_old_value_if_heap` (which dispatches through
+    /// `release_func_for_place` — Round 9's 8-arm extension already
+    /// fires the correct typed-Arc release for the destination slot).
+    /// The new Arc bits are written via `write_place`.
+    pub(crate) fn emit_collection_ctor(
+        &mut self,
+        name: &str,
+        container_slot: SlotId,
+        operands: &[Operand],
+    ) -> Result<(), String> {
+        // Zero-arg ctor dispatch: pick the FuncRef and call with no args.
+        let zero_arg_func_ref = match name {
+            "Set" => Some(self.ffi.v2_make_hashset),
+            "HashMap" => Some(self.ffi.v2_make_hashmap),
+            "Deque" => Some(self.ffi.v2_make_deque),
+            "PriorityQueue" => Some(self.ffi.v2_make_priorityqueue),
+            "Channel" => Some(self.ffi.v2_make_channel),
+            _ => None,
+        };
+        if let Some(func_ref) = zero_arg_func_ref {
+            if !operands.is_empty() {
+                return Err(format!(
+                    "EnumStore collection_ctor: SURFACE — '{}' is a \
+                     zero-arg ctor but operands.len()={}. Producer-site \
+                     contract violated (`mir/lowering/helpers.rs::\
+                     is_bare_collection_ctor`). ADR-006 §2.7.5 / \
+                     W12-jit-call-method-shell-rebuild.",
+                    name,
+                    operands.len(),
+                ));
+            }
+            let inst = self.builder.ins().call(func_ref, &[]);
+            let arc_bits = self.builder.inst_results(inst)[0];
+            let place = Place::Local(container_slot);
+            self.release_old_value_if_heap(&place)?;
+            self.write_place(&place, arc_bits)?;
+            return Ok(());
+        }
+
+        // Single-arg ctor dispatch (Atomic / Lazy): one inner operand,
+        // I64-widened raw payload bits. Per §2.7.25, inner-kind
+        // constraints (Atomic→Int64, Lazy→Ptr(HeapKind::Closure)) are
+        // validated by the producer-side classifier at MIR-emission
+        // time; the JIT consumer here accepts the raw bits as-is.
+        let single_arg_func_ref = match name {
+            "Atomic" => Some(self.ffi.v2_make_atomic),
+            "Lazy" => Some(self.ffi.v2_make_lazy),
+            _ => None,
+        };
+        if let Some(func_ref) = single_arg_func_ref {
+            if operands.len() != 1 {
+                return Err(format!(
+                    "EnumStore collection_ctor: SURFACE — '{}' expects \
+                     1 operand, got {}. Producer-site contract violated \
+                     (`mir/lowering/helpers.rs::is_bare_collection_ctor_with_arg`). \
+                     ADR-006 §2.7.5 / W12-jit-call-method-shell-rebuild.",
+                    name,
+                    operands.len(),
+                ));
+            }
+            let payload_val = self.compile_operand_raw(&operands[0])?;
+            let payload_i64 = self.widen_to_i64(payload_val);
+            let inst = self.builder.ins().call(func_ref, &[payload_i64]);
+            let arc_bits = self.builder.inst_results(inst)[0];
+            let place = Place::Local(container_slot);
+            self.release_old_value_if_heap(&place)?;
+            self.write_place(&place, arc_bits)?;
+            return Ok(());
+        }
+
+        // Carrier-pair ctor: Mutex(bits, kind_code). The kind is
+        // sourced from the operand's MIR-inferred kind via §2.7.5
+        // producing-site classification. NOT a Bool-default fallback:
+        // when `operand_slot_kind`'s `None` arm fires (the operand's
+        // kind cannot be proven at MIR-emission time), the call falls
+        // through to the carrier kind `UInt64` per the §2.7.5 stable-
+        // FFI raw-bits carrier convention (the same convention Round 7A
+        // / §2.7.5 conduit uses for Ok/Err/Some/None inner payloads).
+        // The Mutex FFI body itself surface-and-stops on a SENTINEL
+        // kind ord, leaking the inner share rather than fabricating
+        // Bool (`ffi/v2/collection_arc.rs::jit_v2_make_mutex`).
+        if name == "Mutex" {
+            if operands.len() != 1 {
+                return Err(format!(
+                    "EnumStore collection_ctor: SURFACE — 'Mutex' \
+                     expects 1 operand, got {}. Producer-site contract \
+                     violated. ADR-006 §2.7.5 / W12-jit-call-method-\
+                     shell-rebuild.",
+                    operands.len(),
+                ));
+            }
+            let payload_val = self.compile_operand_raw(&operands[0])?;
+            let payload_i64 = self.widen_to_i64(payload_val);
+            let payload_kind = self.operand_slot_kind_or_carrier(&operands[0]);
+            let kind_code =
+                super::super::ffi::stack_kind_code::encode(payload_kind);
+            let kind_code_val = self
+                .builder
+                .ins()
+                .iconst(types::I8, kind_code as i64);
+            let inst = self
+                .builder
+                .ins()
+                .call(self.ffi.v2_make_mutex, &[payload_i64, kind_code_val]);
+            let arc_bits = self.builder.inst_results(inst)[0];
+            let place = Place::Local(container_slot);
+            self.release_old_value_if_heap(&place)?;
+            self.write_place(&place, arc_bits)?;
+            return Ok(());
+        }
+
+        Err(format!(
+            "EnumStore collection_ctor: SURFACE — unrecognized \
+             collection-ctor name '{}'. `is_collection_ctor_name` and \
+             `emit_collection_ctor` must stay in lockstep; adding a \
+             new name requires extending both. ADR-006 §2.7.5 / \
+             W12-jit-call-method-shell-rebuild.",
+            name,
+        ))
     }
 }
 

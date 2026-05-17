@@ -99,6 +99,11 @@ fn test_hashmap_entries_are_pairs() {
 }
 
 /// Verifies entry pair contents.
+///
+/// W17-typed-carrier-bundle-A (2026-05-11): `HashMap.entries()` returns
+/// `Array<Entry<K,V>>` where Entry is a TypedObject `{key, value}` per
+/// ADR-006 §2.7.24 Q25.A's C+ resolution. Previously `entry[0]` /
+/// `entry[1]`; now `entry.key` / `entry.value`. Breaking change.
 #[test]
 fn test_hashmap_entries_pair_values() {
     ShapeTest::new(
@@ -106,8 +111,8 @@ fn test_hashmap_entries_pair_values() {
         let m = HashMap().set("only", 42)
         let e = m.entries()
         let pair = e[0]
-        print(pair[0])
-        print(pair[1])
+        print(pair.key)
+        print(pair.value)
     }"#,
     )
     .expect_run_ok()
@@ -592,6 +597,11 @@ fn test_hashmap_to_array_produces_pairs() {
 }
 
 /// Verifies toArray pair content.
+///
+/// W17-typed-carrier-bundle-A (2026-05-11): `HashMap.toArray()` is an
+/// alias for `entries()` — returns `Array<Entry<K,V>>` (TypedObject
+/// `{key, value}`) per the C+ resolution. Was `pair[0]` / `pair[1]`,
+/// now `pair.key` / `pair.value`.
 #[test]
 fn test_hashmap_to_array_pair_content() {
     ShapeTest::new(
@@ -599,8 +609,8 @@ fn test_hashmap_to_array_pair_content() {
         let m = HashMap().set("key", 99)
         let arr = m.toArray()
         let pair = arr[0]
-        print(pair[0])
-        print(pair[1])
+        print(pair.key)
+        print(pair.value)
     }"#,
     )
     .expect_run_ok()
@@ -612,12 +622,20 @@ fn test_hashmap_to_array_pair_content() {
 // =========================================================================
 
 /// Verifies groupBy basic.
+///
+/// Wave N hashmap-value-v-arm follow-up (cluster-2 closure-wave-C,
+/// 2026-05-16): the closure must return a `string` group key (the new
+/// `HashMapData` invariant constrains keys to `Arc<String>` per
+/// ADR-006 §2.7.24 Q25.B SUPERSEDED). Previously this test was
+/// SURFACE-and-stop'd (the HashMap-value V arm in HashMapKindedRef
+/// was not landed). Now passes via `f"{v}"` stringification of the
+/// int value.
 #[test]
 fn test_hashmap_group_by_basic() {
     ShapeTest::new(
         r#"{
         let m = HashMap().set("a", 1).set("b", 2).set("c", 1)
-        let grouped = m.groupBy(|k, v| v)
+        let grouped = m.groupBy(|k, v| f"{v}")
         grouped.len()
     }"#,
     )
@@ -630,7 +648,7 @@ fn test_hashmap_group_by_single_group() {
     ShapeTest::new(
         r#"{
         let m = HashMap().set("a", 1).set("b", 1).set("c", 1)
-        m.groupBy(|k, v| v).len()
+        m.groupBy(|k, v| f"{v}").len()
     }"#,
     )
     .expect_number(1.0);
@@ -639,7 +657,7 @@ fn test_hashmap_group_by_single_group() {
 /// Verifies groupBy on empty.
 #[test]
 fn test_hashmap_group_by_empty() {
-    ShapeTest::new(r#"HashMap().groupBy(|k, v| v).len()"#).expect_number(0.0);
+    ShapeTest::new(r#"HashMap().groupBy(|k, v| f"{v}").len()"#).expect_number(0.0);
 }
 
 /// Verifies groupBy all different.
@@ -648,7 +666,7 @@ fn test_hashmap_group_by_all_different() {
     ShapeTest::new(
         r#"{
         let m = HashMap().set("a", 1).set("b", 2).set("c", 3)
-        m.groupBy(|k, v| v).len()
+        m.groupBy(|k, v| f"{v}").len()
     }"#,
     )
     .expect_number(3.0);

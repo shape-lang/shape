@@ -1,39 +1,191 @@
 //! ARC reference counting FFI for JIT-compiled code.
 //!
-//! When JIT code operates on heap-allocated values (String, Array, HashMap, etc.),
-//! it needs to increment/decrement reference counts at ownership boundaries.
-//! These functions provide the FFI entry points for that.
+//! ## Route A close (ADR-006 §2.7.14 / W11-jit-new-array)
 //!
-//! The implementation uses ValueWord's Clone/Drop to manage refcounts correctly.
+//! Both entry points operate on a JIT-emitted `UnifiedValue<T>` allocation
+//! pointer (or, equivalently, a v2 `*mut HeapHeader`-prefixed allocation —
+//! BOTH layouts carry a `kind: u16` at offset 0 and a refcount at a
+//! layout-fixed offset). The caller contract (post-W11) is that the MIR
+//! emitter only emits these calls for slots whose `NativeKind` satisfies
+//! [`NativeKind::is_refcounted`] — `String` (Arc<String> raw pointer) or
+//! `Ptr(HeapKind::*)` (Arc<HeapValue> raw pointer wrapped in
+//! `UnifiedValue`). Raw scalar slots (`Int64`, `Float64`, `Bool`, etc.)
+//! never reach this FFI; the discrimination lives at the emitter side
+//! in [`crate::mir_compiler::ownership::refcount_disposition`].
+//!
+//! ## Refcount layout
+//!
+//! Two `#[repr(C)]` shapes flow through this FFI today:
+//!
+//! 1. **JIT-emitted `UnifiedValue<T>`** (`ffi/jit_kinds.rs`):
+//!    ```text
+//!    offset  0: kind: u16
+//!    offset  2: flags: u8
+//!    offset  3: _reserved: u8
+//!    offset  4: refcount: AtomicU32  ← retain/release target
+//!    offset  8: data: T
+//!    ```
+//!    Used by `box_string`, `box_typed_object`, `unified_box`-family.
+//!
+//! 2. **v2 `HeapHeader`-prefixed allocations** (`shape_value::v2::heap_header`):
+//!    ```text
+//!    offset  0: refcount: AtomicU32  ← retain/release target
+//!    offset  4: kind: u16
+//!    offset  6: flags: u8
+//!    offset  7: _pad: u8
+//!    ```
+//!    Used by `TypedArray<T>`, `TypedClosureHeader`, `v2_alloc_struct`.
+//!    These have their OWN dedicated FFI (`jit_v2_retain` / `jit_v2_release`)
+//!    and the MIR emitter routes them via `Skip_TypedCellCarrier`
+//!    (`v2_typed_array_elem_kind`-guarded), so they do NOT reach this
+//!    function in production. Disambiguating the two shapes from
+//!    `ptr` alone would require a tag-bit probe (CLAUDE.md "Forbidden
+//!    Patterns" #4); the contract is "MIR emitter routes by kind".
+//!
+//! ## Discriminator on release
+//!
+//! When refcount reaches zero, the underlying `Box::from_raw` reclaim
+//! needs to know the inner `T` of the `UnifiedValue<T>` (or the
+//! `HeapValue` discriminant for the `Ptr(HeapKind::*)` arms). The
+//! `kind: u16` field at offset 0 of `UnifiedValue` IS the canonical
+//! discriminator (§2.7.6 / Q8 single-discriminator — same field, same
+//! semantics as `HeapValue::kind()`); reading it is NOT a tag-bit probe
+//! because it's a structural field on the heap object, not a bit-pack
+//! on an inline value. The free path dispatches on this `kind` via
+//! [`shape_value::release::release_v2_heap_by_kind`].
+//!
+//! ## Forbidden
+//!
+//! - Bool-default fallback for unknown kind (CLAUDE.md "Forbidden rationalizations").
+//! - `tag_bits` decode on the `ptr` value (CLAUDE.md "Forbidden Patterns" #4).
+//! - Silent no-op'ing the body (the supervisor explicitly refused this
+//!   shape during the W11 reopen — "Soft-fail counter for now" pattern).
+//! - "ARC bridge" / "retain helper" / "kind-injection adapter" framing
+//!   (CLAUDE.md "Renames to refuse on sight" — broader family rule).
 
-/// Increment the reference count of a NaN-boxed heap value.
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+
+/// Refcount call counters for W11-jit-new-array leak-balance verification.
+/// Surfaced via `--trace-jit=shape_jit::arc_counters=info` (cluster-2
+/// closure-wave-F tracing-crate migration 2026-05-16; supersedes
+/// `SHAPE_JIT_ARC_COUNTERS=1`). The atomic writes still happen
+/// unconditionally (the counters are pub(crate) accessible from tests); the
+/// tracing macros at the reader site collapse to no-ops when the `jit-trace`
+/// feature is OFF, so the read-of-counters work is skipped in release
+/// builds. Per the supervisor's reopen Step 4: in addition to stdout
+/// matching, confirm the retain/release sequence is balanced via these
+/// counters.
+pub(crate) static JIT_ARC_RETAIN_CALLS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static JIT_ARC_RELEASE_CALLS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static JIT_ARC_RELEASE_FREES: AtomicU64 = AtomicU64::new(0);
+
+/// String-carrier-specific counters for the cluster-2-closure-wave-E
+/// measurement protocol (cluster-2-inventory §F). These track the §2.7.5
+/// `Arc::into_raw(Arc<String>) as u64` carrier path independently from the
+/// `UnifiedValue<T>` counters above — `arc_string_constant` allocates an
+/// `Arc<String>` and bumps the strong count to 2 (the "permanent share"
+/// + "active share" discipline at `ffi/string.rs:111-143`), while the
+/// JIT-emitted retain/release pairs operate on the active share via
+/// `jit_arc_string_retain` / `jit_arc_string_release`.
 ///
-/// For inline values (int, number, bool, none), this is a no-op (Clone is free).
-/// For heap values, Clone increments the Arc refcount.
+/// The leak shape per the inventory §F.3 estimate is one permanent share
+/// per distinct `arc_string_constant` allocation never released; these
+/// counters quantify it directly:
 ///
-/// Returns the same bits (pass-through for convenience in JIT call sequences).
+/// - `STRING_CONSTANT_ALLOCS` = number of `arc_string_constant` calls
+///   (one per JIT-compile-time `MirConstant::Str` / `MirConstant::StringId`
+///   / `MirConstant::Method` materialization)
+/// - `STRING_RETAIN_CALLS` = `jit_arc_string_retain` invocations (per
+///   runtime active-share copy)
+/// - `STRING_RELEASE_CALLS` = `jit_arc_string_release` invocations (per
+///   runtime active-share drop)
+/// - `STRING_RELEASE_FREES` = times the release reached refcount 0 (the
+///   §2.7.5 `Arc<String>` was actually deallocated). With the permanent-
+///   share discipline this should equal 0 for every constant produced by
+///   `arc_string_constant` (the leak surface).
+///
+/// Leak quantification: `STRING_CONSTANT_ALLOCS - STRING_RELEASE_FREES` =
+/// number of permanently-leaked `Arc<String>` allocations at program end.
+pub(crate) static STRING_CONSTANT_ALLOCS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static STRING_RETAIN_CALLS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static STRING_RELEASE_CALLS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static STRING_RELEASE_FREES: AtomicU64 = AtomicU64::new(0);
+
+/// Offset of the `refcount: AtomicU32` field within a JIT-emitted
+/// `UnifiedValue<T>` allocation. Must match `#[repr(C)]` layout of
+/// `crate::ffi::jit_kinds::UnifiedValue`.
+const UNIFIED_VALUE_REFCOUNT_OFFSET: usize = 4;
+
+/// Retain a JIT-emitted refcounted heap value.
+///
+/// `ptr` is a non-null pointer to a `UnifiedValue<T>` allocation produced
+/// by `unified_box` / `box_string` / `box_typed_object`. Atomically bumps
+/// the `refcount: AtomicU32` field at offset 4 by 1 (Relaxed ordering,
+/// matching the typed-Arc retain contract).
+///
+/// Caller contract (W11-jit-new-array): the MIR emitter only emits this
+/// call for slots whose `NativeKind` satisfies
+/// `NativeKind::is_refcounted` (i.e. `String` or `Ptr(HeapKind::*)`).
+/// Scalar slots are filtered out at the emitter side per ADR-006 §2.7.5
+/// stamp-at-compile-time.
+///
+/// # Safety
+///
+/// `ptr` must be a non-null `*const UnifiedValue<T>` from a live
+/// JIT-emitted heap allocation, or null. Passing a dangling, mistyped,
+/// or non-`UnifiedValue` pointer is undefined behavior. Null is
+/// silently no-op'd (the MIR emitter MAY route a null-initialized slot
+/// here on a dead-store path that the borrow-checker proves never
+/// reads).
 #[unsafe(no_mangle)]
-pub extern "C" fn jit_arc_retain(bits: u64) -> u64 {
-    // FR.6: `ValueWord = u64` is Copy — `vw.clone()` is a bit copy, not
-    // a refcount bump, and `std::mem::forget` on a Copy u64 is a no-op.
-    // Call the real retain helper which bumps the Arc/unified refcount
-    // for heap-tagged bits (no-op for scalars). Returns the same bits
-    // for non-owned heap values; returns a new bit pattern for owned
-    // Box-backed values (deep-cloned). JIT callers must use the
-    // returned value — historically always a pass-through, still
-    // correct for the Arc-backed hot path.
-    shape_value::value_word_drop::vw_clone(bits)
+pub extern "C" fn jit_arc_retain(ptr: *const u8) {
+    if ptr.is_null() {
+        return;
+    }
+    JIT_ARC_RETAIN_CALLS.fetch_add(1, Ordering::Relaxed);
+    // SAFETY: see fn docs. ptr is a *const UnifiedValue<_> with a
+    // valid AtomicU32 at offset 4 per the #[repr(C)] layout.
+    unsafe {
+        let refcount_ptr = ptr.add(UNIFIED_VALUE_REFCOUNT_OFFSET) as *const AtomicU32;
+        (*refcount_ptr).fetch_add(1, Ordering::Relaxed);
+    }
 }
 
-/// Decrement the reference count of a NaN-boxed heap value and free if last reference.
+/// Release a JIT-emitted refcounted heap value.
 ///
-/// For inline values (int, number, bool, none), this is a no-op (Drop is free).
-/// For heap values, Drop decrements the Arc refcount and frees if zero.
+/// Atomically decrements the `refcount: AtomicU32` field at offset 4 of
+/// a `UnifiedValue<T>` allocation. When the count reaches zero,
+/// dispatches the kinded free via the `kind: u16` field at offset 0
+/// (the §2.7.6 / Q8 single-discriminator).
+///
+/// The kinded reclaim is delegated to
+/// [`crate::ffi::jit_release::release_unified_value_by_kind`] so the
+/// per-kind `Box::from_raw` arms stay colocated with the
+/// `UnifiedValue<T>` constructors in `jit_kinds.rs` / `value_ffi.rs`.
+///
+/// # Safety
+///
+/// `ptr` must be a non-null `*const UnifiedValue<T>` from a live
+/// JIT-emitted heap allocation, or null. Passing a dangling, mistyped,
+/// or non-`UnifiedValue` pointer is undefined behavior.
 #[unsafe(no_mangle)]
-pub extern "C" fn jit_arc_release(bits: u64) {
-    // FR.6: `ValueWord = u64` is Copy — the prior `let _vw = transmute(...)`
-    // Drop was a silent no-op (refcount never decremented). Call the
-    // real release helper, which decrements Arc/unified refcount for
-    // heap-tagged bits and is a no-op for scalars.
-    shape_value::value_word_drop::vw_drop(bits);
+pub extern "C" fn jit_arc_release(ptr: *const u8) {
+    if ptr.is_null() {
+        return;
+    }
+    JIT_ARC_RELEASE_CALLS.fetch_add(1, Ordering::Relaxed);
+    // SAFETY: see fn docs.
+    unsafe {
+        let refcount_ptr = ptr.add(UNIFIED_VALUE_REFCOUNT_OFFSET) as *const AtomicU32;
+        let prev = (*refcount_ptr).fetch_sub(1, Ordering::Release);
+        if prev == 1 {
+            JIT_ARC_RELEASE_FREES.fetch_add(1, Ordering::Relaxed);
+            // Last reference. Synchronize with all prior fetch_sub
+            // releases (matches the v2 `HeapHeader::release` contract;
+            // necessary so the kinded reclaim sees a consistent view of
+            // the allocation's interior fields).
+            std::sync::atomic::fence(Ordering::Acquire);
+            super::jit_release::release_unified_value_by_kind(ptr);
+        }
+    }
 }

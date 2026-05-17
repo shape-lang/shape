@@ -206,6 +206,19 @@ pub enum MirConstant {
     Str(String),
     /// Float (stored as bits for Eq/Hash)
     Float(u64),
+    /// Character literal (scalar codepoint).
+    ///
+    /// Phase 3 cluster-2 Round 4 cw-D-fam12 follow-up (instance 57, 2026-05-16).
+    /// ADR-006 §2.7.5 amendment Round 19 S1.5 W12-nativekind-scalar-additions
+    /// (2026-05-14): `Char` is a 4-byte scalar `NativeKind` variant (codepoint
+    /// in low 32 bits of `ValueSlot`, no Arc wrapping). Producing-site
+    /// stamp-at-compile-time discipline requires the MIR layer to preserve the
+    /// Char kind through to the JIT's `operand_slot_kind` / `infer_constant_kind`
+    /// classifiers — otherwise `Literal::Char('A')` is lost as `MirConstant::Int(65)`
+    /// at MIR lowering, the JIT stamps `NativeKind::Int64`, and the `print`
+    /// dispatch matches `print_i64(65)` instead of `print_char(65)` → JIT prints
+    /// "65" while VM prints "A" (cw-D-fam12 Char production-fixture divergence).
+    Char(char),
     /// Function reference by name
     Function(String),
     /// Method name for dispatch
@@ -224,6 +237,7 @@ impl fmt::Display for MirConstant {
             MirConstant::StringId(id) => write!(f, "str#{}", id),
             MirConstant::Str(s) => write!(f, "\"{}\"", s),
             MirConstant::Float(bits) => write!(f, "{}", f64::from_bits(*bits)),
+            MirConstant::Char(c) => write!(f, "'{}'", c.escape_default()),
             MirConstant::Function(name) => write!(f, "fn:{}", name),
             MirConstant::Method(name) => write!(f, "method:{}", name),
             MirConstant::ClosurePlaceholder => write!(f, "closure_placeholder"),
@@ -251,6 +265,46 @@ impl fmt::Display for BorrowKind {
     }
 }
 
+/// Result/Option variant tag — classification is producer-side per
+/// ADR-006 §2.7.5 stamp-at-compile-time. Carried by `Rvalue::EnumTest`
+/// and `Rvalue::EnumPayload`; the JIT consumer dispatches on this enum
+/// directly, never decodes from bits (§2.7.7 #4 / #7 forbidden).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VariantTag {
+    Ok,
+    Err,
+    Some_,
+    None_,
+}
+
+impl fmt::Display for VariantTag {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            VariantTag::Ok => write!(f, "Ok"),
+            VariantTag::Err => write!(f, "Err"),
+            VariantTag::Some_ => write!(f, "Some"),
+            VariantTag::None_ => write!(f, "None"),
+        }
+    }
+}
+
+impl VariantTag {
+    /// Map a constructor name to a VariantTag. Returns `None` for non-
+    /// builtin (`Ok`/`Err`/`Some`/`None`) names so the producer site can
+    /// fall back to the generic `Aggregate` / `EnumStore` path for user-
+    /// defined enum variants.
+    #[inline]
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "Ok" => Some(VariantTag::Ok),
+            "Err" => Some(VariantTag::Err),
+            "Some" => Some(VariantTag::Some_),
+            "None" => Some(VariantTag::None_),
+            _ => None,
+        }
+    }
+}
+
 /// Right-hand side of an assignment.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Rvalue {
@@ -267,6 +321,51 @@ pub enum Rvalue {
     Aggregate(Vec<Operand>),
     /// Clone of a value (explicit or auto-inferred).
     Clone(Operand),
+    /// Test whether a Result/Option scrutinee matches a specific variant
+    /// (per ADR-006 §2.7.17 / Q18 — kinded `Arc<ResultData>` /
+    /// `Arc<OptionData>` carrier). Result: native Bool (`I8`).
+    ///
+    /// Emitted by `lower_match_pattern_condition_operand` when the scrutinee
+    /// is a `Pattern::Constructor` with a recognised `VariantTag::Ok` /
+    /// `Err` / `Some_` / `None_`. JIT consumer dispatches to the
+    /// `jit_arc_result_is_ok` / `_is_err` / `jit_arc_option_is_some` /
+    /// `_is_none` FFI which reads `is_ok` / `is_some` from the
+    /// `*const ResultData` / `*const OptionData` directly per §2.7.17
+    /// — no NaN-box tag decode, no `is_heap_kind` probe (§2.7.7 #4 / #7
+    /// forbidden).
+    ///
+    /// Producer-side classification per W12-jit-result-option-trinity
+    /// audit (`docs/cluster-audits/w12-jit-match-enum-inline-audit.md` §6.1).
+    EnumTest {
+        operand: Operand,
+        variant: VariantTag,
+    },
+    /// Extract the inner payload bits from a Result/Option scrutinee.
+    /// Caller must have already proven the variant via `EnumTest`
+    /// (control flow guarantees the matching arm is entered only when
+    /// the variant matches; the `variant` tag here is the producer-side
+    /// classification for kind sourcing, NOT a runtime check).
+    ///
+    /// Result: raw `u64` payload bits — the payload's kind flows out of
+    /// band via 6A's Call-return-kind track + the EnumStore producer's
+    /// kind stamp.
+    ///
+    /// JIT consumer dispatches to `jit_arc_result_payload` /
+    /// `jit_arc_option_payload` which read the inner `KindedSlot.raw()`
+    /// from the `*const ResultData` / `*const OptionData` and bump the
+    /// inner refcount per the receiver-recovery soundness rule —
+    /// the returned bits are an owned slot.
+    ///
+    /// `VariantTag::None_` is rejected at consumer time (no payload to
+    /// extract — None's payload field is a zero-bits Bool placeholder
+    /// per ADR-006 §2.7.17 `OptionData::none()`).
+    ///
+    /// Producer-side classification per W12-jit-result-option-trinity
+    /// audit §6.2.
+    EnumPayload {
+        operand: Operand,
+        variant: VariantTag,
+    },
 }
 
 /// Binary operations in MIR.
@@ -345,16 +444,44 @@ pub enum StatementKind {
     /// Operands are the fields/spreads being stored.
     /// `field_names` carries the string key for each operand (from the AST).
     /// When present, JIT codegen can construct a proper object with named fields.
+    ///
+    /// `schema_id` carries the user-declared (or anonymous-inline) schema id
+    /// from the bytecode-side `OpCode::NewTypedObject` operand
+    /// (`Operand::TypedObjectAlloc { schema_id, field_count }`). MIR lowering
+    /// emits `None`; the bytecode compiler back-patches the resolved
+    /// `SchemaId` via `crate::compiler::mir_schema_threading::
+    /// back_patch_schema_ids` (Phase 3 cluster-0 Round 16 W17-narrow-
+    /// follow-up-A, ADR-006 §2.7.5 stamp-at-compile-time). The JIT MIR
+    /// consumer at `crates/shape-jit/src/mir_compiler/statements.rs::
+    /// StatementKind::ObjectStore` uses this id directly for
+    /// `typed_object_alloc`, preserving the user-declared schema identity
+    /// (e.g. `X` schema = 53 in Smoke 3) instead of the prior
+    /// `register_predeclared_any_schema` `__predecl_*`-named id (54).
+    ///
+    /// `None` when the back-patch could not resolve the schema (the
+    /// downstream JIT consumer surfaces-and-stops per §2.7.5 — no
+    /// `register_predeclared_any_schema` fallback, no Bool-default).
     ObjectStore {
         container_slot: SlotId,
         operands: Vec<Operand>,
         field_names: Vec<String>,
+        schema_id: Option<u32>,
     },
     /// Store values into an enum payload.
     /// Operands are the tuple/struct payload values being stored.
+    ///
+    /// `variant_name` carries the constructor name (Ok / Err / Some /
+    /// user-defined variant) — known at MIR-lowering time and threaded
+    /// through so the JIT EnumStore consumer can dispatch to the right
+    /// typed-Arc producer (`jit_v2_make_result_ok` / `_err` /
+    /// `jit_v2_make_option_some`). `None` is permitted for paths that
+    /// haven't been migrated to thread the variant; downstream JIT
+    /// consumers surface-and-stop on `None` for non-empty payloads per
+    /// ADR-006 §2.7.5 / §2.7.7 #9 (no Bool-default fallback).
     EnumStore {
         container_slot: SlotId,
         operands: Vec<Operand>,
+        variant_name: Option<String>,
     },
     /// No-op (placeholder, padding).
     Nop,
@@ -424,6 +551,74 @@ pub struct MirFunction {
     pub span: Span,
     /// Mapping from FieldIdx to field name, for JIT field access resolution.
     pub field_name_table: std::collections::HashMap<FieldIdx, String>,
+    /// Per-slot user-struct type name for slots produced by
+    /// `Expr::StructLiteral { name, .. }` lowering.
+    ///
+    /// ADR-006 §2.7.5 producing-site classification — Phase 3 cluster-0
+    /// Round 13 T1' gap 1 closure. The bytecode compiler's
+    /// `concrete_type_from_annotation`
+    /// (`crates/shape-vm/src/compiler/v2_map_emission.rs:357`) does
+    /// NOT resolve user-struct names to a per-struct `StructLayoutId`
+    /// (the `_ => None` arm at line 378), and the conduit producer at
+    /// `compiler/helpers.rs:508` stamps `Struct(StructLayoutId(0))`
+    /// for every `ObjectStore` regardless of struct identity. Neither
+    /// path makes user-struct type name observable at conduit-time.
+    ///
+    /// This map is populated at MIR lowering for
+    /// `Expr::StructLiteral { name, .. }` sites (the canonical
+    /// user-struct construction shape — `let t = X {}`,
+    /// `let p = Point { x: 1, y: 2 }`). The conduit producer reads
+    /// the map at Call-terminator destination-stamp time for
+    /// `MirConstant::Method(_)` terminators to look up the trait method
+    /// declared return ConcreteType via the
+    /// `find_default_trait_impl_for_type_method` chain.
+    ///
+    /// `None` (no entry) for slots that aren't user-struct constructions
+    /// — primitives, collections, plain object literals, function returns,
+    /// etc. The downstream classifier surfaces unstamped per §2.7.7 #9 /
+    /// forbidden #9 (no fabricated default).
+    pub local_struct_type_names:
+        std::collections::HashMap<SlotId, String>,
+    /// Per-slot empty-typed-array element ConcreteType for slots produced by
+    /// `let mut <name>: Array<C> = []` lowering (where `C` is a
+    /// `concrete_type_from_annotation`-resolvable element type).
+    ///
+    /// ADR-006 §2.7.5 stamp-at-compile-time — V3-S6e-jit-specialized-vec-
+    /// map-aggregate-classify (Phase 3 cluster-0+1 Wave 3 Stabilize Round 2,
+    /// 2026-05-16; V3-S6 multi-session chain checkpoint-final).
+    ///
+    /// Closes the W11-jit-new-array gap inside monomorphized `Vec.map<U>` /
+    /// `Vec.filter<U>` specialization bodies. V3-S6a's
+    /// `synthesize_empty_array_result_annotation` writes
+    /// `Array<C>` onto the `let mut result = []` var-decl AST node for the
+    /// specialized function; this map captures that annotation at MIR
+    /// lowering so the conduit producer at
+    /// `crates/shape-vm/src/compiler/helpers.rs::infer_top_level_concrete_
+    /// types_from_mir_with_resolvers` can stamp `concrete_types[result_slot]
+    /// = Array(elem)`.
+    ///
+    /// Why MIR-level rather than just bytecode-side: the empty array literal
+    /// at MIR lowering goes through `lower_array_expr` →
+    /// `emit_container_store_if_needed` which short-circuits for
+    /// `ContainerStoreKind::Array` with empty operands (helpers.rs:128-130).
+    /// No `StatementKind::ArrayStore` is emitted, so the
+    /// `helpers.rs:687` ArrayStore walker never fires on empty literals.
+    /// The conduit producer has no other source for the element kind on
+    /// an empty Aggregate slot.
+    ///
+    /// Producer: `mir/lowering/stmt.rs::lower_var_decl` (var-decl with
+    /// annotation `Array<C>` AND value `Expr::Array(items)` with
+    /// `items.is_empty()`).
+    /// Consumer: `compiler/helpers.rs::infer_top_level_concrete_types_from_
+    /// mir_with_resolvers` (new pass before slot-move propagation).
+    ///
+    /// `None` (no entry) for slots that aren't empty-typed-array-literal
+    /// initializations — non-empty array literals flow through the existing
+    /// `ArrayStore` operand-kind inference path; absent annotation means
+    /// no proven element kind and the JIT surfaces-and-stops per §2.7.7 #9
+    /// forbidden Bool-default.
+    pub local_typed_array_element_types:
+        std::collections::HashMap<SlotId, shape_value::v2::ConcreteType>,
 }
 
 /// Type information for a local variable, used for Copy/Clone inference.

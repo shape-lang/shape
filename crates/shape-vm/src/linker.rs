@@ -472,6 +472,17 @@ pub fn link(program: &Program) -> Result<LinkedProgram, LinkError> {
             module_binding_storage_hints: program.module_binding_storage_hints.clone(),
             function_local_storage_hints: program.function_local_storage_hints.clone(),
             top_level_frame: program.top_level_frame.clone(),
+            top_level_local_concrete_types: program.top_level_local_concrete_types.clone(),
+            function_local_concrete_types: program.function_local_concrete_types.clone(),
+            function_return_concrete_types: program.function_return_concrete_types.clone(),
+            monomorphized_method_call_sites:
+                program.monomorphized_method_call_sites.clone(),
+            // cluster-2-cw-IB-class-b: propagate the value-call return-
+            // ConcreteType side-table through the parallel-link path so
+            // the conduit producer can stamp value-call destinations
+            // identically to the sequential path below.
+            value_call_return_concrete_types:
+                program.value_call_return_concrete_types.clone(),
             trait_method_symbols: program.trait_method_symbols.clone(),
             foreign_functions: program.foreign_functions.clone(),
             native_struct_layouts: program.native_struct_layouts.clone(),
@@ -480,6 +491,7 @@ pub fn link(program: &Program) -> Result<LinkedProgram, LinkError> {
                 program,
                 &blobs,
             ),
+            trait_vtables: program.trait_vtables.clone(),
         });
     }
 
@@ -579,11 +591,23 @@ pub fn link(program: &Program) -> Result<LinkedProgram, LinkError> {
         module_binding_storage_hints: program.module_binding_storage_hints.clone(),
         function_local_storage_hints: program.function_local_storage_hints.clone(),
         top_level_frame: program.top_level_frame.clone(),
+        top_level_local_concrete_types: program.top_level_local_concrete_types.clone(),
+        function_local_concrete_types: program.function_local_concrete_types.clone(),
+        function_return_concrete_types: program.function_return_concrete_types.clone(),
+        monomorphized_method_call_sites:
+            program.monomorphized_method_call_sites.clone(),
+        // cluster-2-cw-IB-class-b: propagate the value-call return-
+        // ConcreteType side-table through the sequential-link path so
+        // the conduit producer's value-call destination stamping fires
+        // on linked programs.
+        value_call_return_concrete_types:
+            program.value_call_return_concrete_types.clone(),
         trait_method_symbols: program.trait_method_symbols.clone(),
         foreign_functions: program.foreign_functions.clone(),
         native_struct_layouts: program.native_struct_layouts.clone(),
         total_required_permissions,
         closure_function_layouts: remap_closure_function_layouts(program, &blobs),
+        trait_vtables: program.trait_vtables.clone(),
     })
 }
 
@@ -653,6 +677,17 @@ pub fn linked_to_bytecode_program(linked: &LinkedProgram) -> BytecodeProgram {
         module_binding_storage_hints: linked.module_binding_storage_hints.clone(),
         function_local_storage_hints: linked.function_local_storage_hints.clone(),
         top_level_frame: linked.top_level_frame.clone(),
+        top_level_local_concrete_types: linked.top_level_local_concrete_types.clone(),
+        function_local_concrete_types: linked.function_local_concrete_types.clone(),
+        function_return_concrete_types: linked.function_return_concrete_types.clone(),
+        monomorphized_method_call_sites:
+            linked.monomorphized_method_call_sites.clone(),
+        // cluster-2-cw-IB-class-b: propagate the value-call return-
+        // ConcreteType side-table through the LinkedProgram →
+        // BytecodeProgram round-trip; the conduit producer consumes
+        // this on the post-link BytecodeProgram surface.
+        value_call_return_concrete_types:
+            linked.value_call_return_concrete_types.clone(),
         top_level_mir: None,
         compiled_annotations: HashMap::new(),
         trait_method_symbols: linked.trait_method_symbols.clone(),
@@ -674,6 +709,7 @@ pub fn linked_to_bytecode_program(linked: &LinkedProgram) -> BytecodeProgram {
             .collect(),
         monomorphization_keys: Vec::new(),
         closure_function_layouts: linked.closure_function_layouts.clone(),
+        trait_vtables: linked.trait_vtables.clone(),
     }
 }
 

@@ -2,7 +2,6 @@
 //!
 //! This module contains the main expression compilation logic, organized by expression type.
 
-use shape_value::ValueWordExt;
 use shape_ast::ast::{Expr, Span};
 use shape_ast::error::{Result, ShapeError};
 
@@ -269,7 +268,7 @@ impl BytecodeCompiler {
             OpCode::LoadLocal,
             Some(Operand::Local(before_result_local)),
         ));
-        let one_const = self.program.add_constant(Constant::Number(1.0));
+        let one_const = self.program.add_constant(Constant::Int(1));
         self.emit(Instruction::new(
             OpCode::PushConst,
             Some(Operand::Const(one_const)),
@@ -294,7 +293,7 @@ impl BytecodeCompiler {
             OpCode::LoadLocal,
             Some(Operand::Local(before_result_local)),
         ));
-        let one_const2 = self.program.add_constant(Constant::Number(1.0));
+        let one_const2 = self.program.add_constant(Constant::Int(1));
         self.emit(Instruction::new(
             OpCode::PushConst,
             Some(Operand::Const(one_const2)),
@@ -523,7 +522,7 @@ impl BytecodeCompiler {
                     let before_arg_count = 1 + annotation.args.len() + 2;
                     let count_const = self
                         .program
-                        .add_constant(Constant::Number(before_arg_count as f64));
+                        .add_constant(Constant::Int(before_arg_count as i64));
                     self.emit(Instruction::new(
                         OpCode::PushConst,
                         Some(Operand::Const(count_const)),
@@ -591,7 +590,7 @@ impl BytecodeCompiler {
                     let after_arg_count = 1 + annotation.args.len() + 3;
                     let count_const = self
                         .program
-                        .add_constant(Constant::Number(after_arg_count as f64));
+                        .add_constant(Constant::Int(after_arg_count as i64));
                     self.emit(Instruction::new(
                         OpCode::PushConst,
                         Some(Operand::Const(count_const)),
@@ -711,7 +710,7 @@ impl BytecodeCompiler {
                     let before_arg_count = 1 + annotation.args.len() + 2;
                     let count_const = self
                         .program
-                        .add_constant(Constant::Number(before_arg_count as f64));
+                        .add_constant(Constant::Int(before_arg_count as i64));
                     self.emit(Instruction::new(
                         OpCode::PushConst,
                         Some(Operand::Const(count_const)),
@@ -791,7 +790,7 @@ impl BytecodeCompiler {
                     let after_arg_count = 1 + annotation.args.len() + 3;
                     let count_const = self
                         .program
-                        .add_constant(Constant::Number(after_arg_count as f64));
+                        .add_constant(Constant::Int(after_arg_count as i64));
                     self.emit(Instruction::new(
                         OpCode::PushConst,
                         Some(Operand::Const(count_const)),
@@ -925,8 +924,9 @@ impl BytecodeCompiler {
                 receiver,
                 method,
                 args,
+                span,
                 ..
-            } => self.compile_expr_method_call(receiver, method, args),
+            } => self.compile_expr_method_call(receiver, method, args, *span),
             Expr::Reference {
                 expr: inner,
                 is_mutable,
@@ -1056,40 +1056,43 @@ impl BytecodeCompiler {
                 receiver,
                 method,
                 args,
+                span,
                 ..
-            } => self.compile_expr_method_call(receiver, method, args),
+            } => self.compile_expr_method_call(receiver, method, args, *span),
             Expr::EnumConstructor {
                 enum_name,
                 variant,
                 payload,
+                span,
                 ..
             } => {
                 // Check if this is a Type::comptime_field access (looks like enum syntax)
                 if matches!(payload, shape_ast::ast::EnumConstructorPayload::Unit) {
-                    if let Some(comptime_value) = self
+                    if self
                         .comptime_fields
                         .get(enum_name.as_str())
                         .and_then(|m| m.get(variant))
-                        .cloned()
+                        .is_some()
                     {
-                        let const_idx =
-                            if let Some(i) = comptime_value.as_i64() {
-                                self.program.add_constant(Constant::Int(i))
-                            } else if let Some(n) = comptime_value.as_number_coerce() {
-                                self.program.add_constant(Constant::Number(n))
-                            } else if let Some(b) = comptime_value.as_bool() {
-                                self.program.add_constant(Constant::Bool(b))
-                            } else if let Some(s) = comptime_value.as_str() {
-                                self.program
-                                    .add_constant(Constant::String(s.to_string()))
-                            } else {
-                                self.program.add_constant(Constant::Null)
-                            };
-                        self.emit(Instruction::new(
-                            OpCode::PushConst,
-                            Some(Operand::Const(const_idx)),
-                        ));
-                        return Ok(());
+                        // SURFACE: the kinded `KindedSlot → Constant`
+                        // projection used by comptime field extraction
+                        // (treated here as the enum-constructor-shaped
+                        // dotted path `Currency.symbol` → `Currency::symbol`)
+                        // lives in phase-2c (ADR-006 §2.4 / §2.7.4). The
+                        // producer side that populates `comptime_fields`
+                        // (`statements.rs:2450-2512`) is dormant, so this
+                        // branch is currently unreachable in real
+                        // programs. Tracked as `c3-expr-lowering-misc`
+                        // per playbook §3.
+                        return Err(ShapeError::SemanticError {
+                            message: format!(
+                                "comptime field access '{}.{}' (via enum-constructor path) \
+                                 is dormant pending the phase-2c KindedSlot-to-Constant \
+                                 projection rebuild (ADR-006 §2.4 / §2.7.4)",
+                                enum_name, variant
+                            ),
+                            location: Some(self.span_to_source_location(*span)),
+                        });
                     }
                 }
                 self.compile_expr_enum_constructor(enum_name, variant, payload)

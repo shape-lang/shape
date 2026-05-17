@@ -1,17 +1,26 @@
 //! Native `file` module for high-level filesystem operations.
 //!
-//! Exports: file.read_text, file.write_text, file.read_lines, file.append,
-//!          file.read_bytes, file.write_bytes
+//! Exports: file.read_text, file.write_text, file.read_lines, file.append
 //!
 //! All operations go through [`FileSystemProvider`] so that sandbox/VFS modes
 //! work transparently. The default provider is [`RealFileSystem`].
 //!
 //! Policy gated: read ops require FsRead, write ops require FsWrite.
+//!
+//! Phase 2c migration: ported to the typed marshal layer.
+//! `file.read_bytes` / `file.write_bytes` are deferred until the
+//! `Array<number>` marshal extension (FromSlot/ToSlot for typed-array
+//! heap pointers) lands. Tracked alongside the parser-module deferral
+//! list. The functions previously here read/wrote byte arrays via
+//! the deleted `as_any_array().to_generic()` tag_bits dispatch —
+//! strict-typed answer is `Arc<TypedBuffer<f64>>` typed args + ToSlot
+//! projection of `ConcreteReturn::ArrayF64` to a heap-allocated
+//! TypedArray slot.
 
-use crate::module_exports::{ModuleExports, ModuleParam};
+use crate::marshal::{register_typed_fn_1, register_typed_fn_2};
+use crate::module_exports::ModuleExports;
 use crate::stdlib::runtime_policy::{FileSystemProvider, RealFileSystem};
-use crate::typed_module_exports::{ConcreteType, TypedReturn, register_typed_function};
-use shape_value::{ValueWord, ValueWordExt};
+use crate::typed_module_exports::{ConcreteReturn, ConcreteType, TypedReturn};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -22,43 +31,28 @@ pub fn create_file_module_with_provider(fs: Arc<dyn FileSystemProvider>) -> Modu
     let mut module = ModuleExports::new("std::core::file");
     module.description = "High-level filesystem operations".to_string();
 
-    let path_param = || ModuleParam {
-        name: "path".to_string(),
-        type_name: "string".to_string(),
-        required: true,
-        description: "Path to the file".to_string(),
-        ..Default::default()
-    };
-
     // file.read_text(path: string) -> Result<string>
     {
         let fs = Arc::clone(&fs);
-        register_typed_function(
+        register_typed_fn_1::<_, Arc<String>>(
             &mut module,
             "read_text",
             "Read the entire contents of a file as a UTF-8 string",
-            vec![path_param()],
+            "path",
+            "string",
             ConcreteType::Result(Box::new(ConcreteType::String)),
-            move |args, ctx| {
-                let path_str = args
-                    .first()
-                    .and_then(|a| a.as_str())
-                    .ok_or_else(|| "file.read_text() requires a path string".to_string())?;
-
+            move |path_str, ctx| {
                 crate::module_exports::check_fs_permission(
                     ctx,
                     shape_abi_v1::Permission::FsRead,
-                    path_str,
+                    path_str.as_str(),
                 )?;
-
                 let bytes = fs
-                    .read(Path::new(path_str))
+                    .read(Path::new(path_str.as_str()))
                     .map_err(|e| format!("file.read_text() failed: {}", e))?;
-
                 let text = String::from_utf8(bytes)
                     .map_err(|e| format!("file.read_text() invalid UTF-8: {}", e))?;
-
-                Ok(TypedReturn::Ok(Box::new(TypedReturn::String(text))))
+                Ok(TypedReturn::Ok(ConcreteReturn::String(text)))
             },
         );
     }
@@ -66,42 +60,21 @@ pub fn create_file_module_with_provider(fs: Arc<dyn FileSystemProvider>) -> Modu
     // file.write_text(path: string, content: string) -> Result<unit>
     {
         let fs = Arc::clone(&fs);
-        register_typed_function(
+        register_typed_fn_2::<_, Arc<String>, Arc<String>>(
             &mut module,
             "write_text",
             "Write a string to a file, creating or truncating it",
-            vec![
-                path_param(),
-                ModuleParam {
-                    name: "content".to_string(),
-                    type_name: "string".to_string(),
-                    required: true,
-                    description: "Text content to write".to_string(),
-                    ..Default::default()
-                },
-            ],
+            [("path", "string"), ("content", "string")],
             ConcreteType::Result(Box::new(ConcreteType::Unit)),
-            move |args, ctx| {
-                let path_str = args
-                    .first()
-                    .and_then(|a| a.as_str())
-                    .ok_or_else(|| "file.write_text() requires a path string".to_string())?;
-
+            move |path_str, content, ctx| {
                 crate::module_exports::check_fs_permission(
                     ctx,
                     shape_abi_v1::Permission::FsWrite,
-                    path_str,
+                    path_str.as_str(),
                 )?;
-
-                let content = args
-                    .get(1)
-                    .and_then(|a| a.as_str())
-                    .ok_or_else(|| "file.write_text() requires a content string".to_string())?;
-
-                fs.write(Path::new(path_str), content.as_bytes())
+                fs.write(Path::new(path_str.as_str()), content.as_bytes())
                     .map_err(|e| format!("file.write_text() failed: {}", e))?;
-
-                Ok(TypedReturn::Ok(Box::new(TypedReturn::Unit)))
+                Ok(TypedReturn::Ok(ConcreteReturn::Unit))
             },
         );
     }
@@ -109,33 +82,26 @@ pub fn create_file_module_with_provider(fs: Arc<dyn FileSystemProvider>) -> Modu
     // file.read_lines(path: string) -> Result<Array<string>>
     {
         let fs = Arc::clone(&fs);
-        register_typed_function(
+        register_typed_fn_1::<_, Arc<String>>(
             &mut module,
             "read_lines",
             "Read a file and return its lines as an array of strings",
-            vec![path_param()],
+            "path",
+            "string",
             ConcreteType::Result(Box::new(ConcreteType::ArrayString)),
-            move |args, ctx| {
-                let path_str = args
-                    .first()
-                    .and_then(|a| a.as_str())
-                    .ok_or_else(|| "file.read_lines() requires a path string".to_string())?;
-
+            move |path_str, ctx| {
                 crate::module_exports::check_fs_permission(
                     ctx,
                     shape_abi_v1::Permission::FsRead,
-                    path_str,
+                    path_str.as_str(),
                 )?;
-
                 let bytes = fs
-                    .read(Path::new(path_str))
+                    .read(Path::new(path_str.as_str()))
                     .map_err(|e| format!("file.read_lines() failed: {}", e))?;
-
                 let text = String::from_utf8(bytes)
                     .map_err(|e| format!("file.read_lines() invalid UTF-8: {}", e))?;
-
                 let lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();
-                Ok(TypedReturn::Ok(Box::new(TypedReturn::ArrayString(lines))))
+                Ok(TypedReturn::Ok(ConcreteReturn::ArrayString(lines)))
             },
         );
     }
@@ -143,134 +109,21 @@ pub fn create_file_module_with_provider(fs: Arc<dyn FileSystemProvider>) -> Modu
     // file.append(path: string, content: string) -> Result<unit>
     {
         let fs = Arc::clone(&fs);
-        register_typed_function(
+        register_typed_fn_2::<_, Arc<String>, Arc<String>>(
             &mut module,
             "append",
             "Append a string to a file, creating it if it does not exist",
-            vec![
-                path_param(),
-                ModuleParam {
-                    name: "content".to_string(),
-                    type_name: "string".to_string(),
-                    required: true,
-                    description: "Text content to append".to_string(),
-                    ..Default::default()
-                },
-            ],
+            [("path", "string"), ("content", "string")],
             ConcreteType::Result(Box::new(ConcreteType::Unit)),
-            move |args, ctx| {
-                let path_str = args
-                    .first()
-                    .and_then(|a| a.as_str())
-                    .ok_or_else(|| "file.append() requires a path string".to_string())?;
-
+            move |path_str, content, ctx| {
                 crate::module_exports::check_fs_permission(
                     ctx,
                     shape_abi_v1::Permission::FsWrite,
-                    path_str,
+                    path_str.as_str(),
                 )?;
-
-                let content = args
-                    .get(1)
-                    .and_then(|a| a.as_str())
-                    .ok_or_else(|| "file.append() requires a content string".to_string())?;
-
-                fs.append(Path::new(path_str), content.as_bytes())
+                fs.append(Path::new(path_str.as_str()), content.as_bytes())
                     .map_err(|e| format!("file.append() failed: {}", e))?;
-
-                Ok(TypedReturn::Ok(Box::new(TypedReturn::Unit)))
-            },
-        );
-    }
-
-    // file.read_bytes(path: string) -> Result<Array<number>>
-    {
-        let fs = Arc::clone(&fs);
-        register_typed_function(
-            &mut module,
-            "read_bytes",
-            "Read the entire contents of a file as an array of byte values",
-            vec![path_param()],
-            ConcreteType::Result(Box::new(ConcreteType::ArrayNumber)),
-            move |args, ctx| {
-                let path_str = args
-                    .first()
-                    .and_then(|a| a.as_str())
-                    .ok_or_else(|| "file.read_bytes() requires a path string".to_string())?;
-
-                crate::module_exports::check_fs_permission(
-                    ctx,
-                    shape_abi_v1::Permission::FsRead,
-                    path_str,
-                )?;
-
-                let bytes = fs
-                    .read(Path::new(path_str))
-                    .map_err(|e| format!("file.read_bytes() failed: {}", e))?;
-
-                let arr: Vec<f64> = bytes.iter().map(|&b| b as f64).collect();
-                Ok(TypedReturn::Ok(Box::new(TypedReturn::ArrayF64(arr))))
-            },
-        );
-    }
-
-    // file.write_bytes(path: string, data: Array<number>) -> Result<unit>
-    {
-        let fs = Arc::clone(&fs);
-        register_typed_function(
-            &mut module,
-            "write_bytes",
-            "Write an array of byte values to a file",
-            vec![
-                path_param(),
-                ModuleParam {
-                    name: "data".to_string(),
-                    type_name: "Array<number>".to_string(),
-                    required: true,
-                    description: "Array of byte values (0-255)".to_string(),
-                    ..Default::default()
-                },
-            ],
-            ConcreteType::Result(Box::new(ConcreteType::Unit)),
-            move |args, ctx| {
-                let path_str = args
-                    .first()
-                    .and_then(|a| a.as_str())
-                    .ok_or_else(|| "file.write_bytes() requires a path string".to_string())?;
-
-                crate::module_exports::check_fs_permission(
-                    ctx,
-                    shape_abi_v1::Permission::FsWrite,
-                    path_str,
-                )?;
-
-                let arr = args
-                    .get(1)
-                    .and_then(|a| a.as_any_array())
-                    .ok_or_else(|| "file.write_bytes() requires a data array".to_string())?
-                    .to_generic();
-
-                let bytes: Vec<u8> = arr
-                    .iter()
-                    .enumerate()
-                    .map(|(i, nb)| {
-                        let n = nb.as_number_coerce().ok_or_else(|| {
-                            format!("file.write_bytes() element {} is not a number", i)
-                        })?;
-                        if n < 0.0 || n > 255.0 || n.fract() != 0.0 {
-                            return Err(format!(
-                                "file.write_bytes() element {} is not a valid byte (0-255): {}",
-                                i, n
-                            ));
-                        }
-                        Ok(n as u8)
-                    })
-                    .collect::<Result<Vec<u8>, String>>()?;
-
-                fs.write(Path::new(path_str), &bytes)
-                    .map_err(|e| format!("file.write_bytes() failed: {}", e))?;
-
-                Ok(TypedReturn::Ok(Box::new(TypedReturn::Unit)))
+                Ok(TypedReturn::Ok(ConcreteReturn::Unit))
             },
         );
     }
@@ -287,21 +140,6 @@ pub fn create_file_module() -> ModuleExports {
 mod tests {
     use super::*;
 
-    fn test_ctx() -> crate::module_exports::ModuleContext<'static> {
-        let registry = Box::leak(Box::new(crate::type_schema::TypeSchemaRegistry::new()));
-        crate::module_exports::ModuleContext {
-            schemas: registry,
-            invoke_callable: None,
-            raw_invoker: None,
-            function_hashes: None,
-            vm_state: None,
-            granted_permissions: None,
-            scope_constraints: None,
-            set_pending_resume: None,
-            set_pending_frame_resume: None,
-        }
-    }
-
     #[test]
     fn test_file_module_creation() {
         let module = create_file_module();
@@ -310,207 +148,21 @@ mod tests {
         assert!(module.has_export("write_text"));
         assert!(module.has_export("read_lines"));
         assert!(module.has_export("append"));
-        assert!(module.has_export("read_bytes"));
-        assert!(module.has_export("write_bytes"));
-    }
-
-    #[test]
-    fn test_file_read_write_roundtrip() {
-        let module = create_file_module();
-        let ctx = test_ctx();
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.txt");
-        let path_str = path.to_str().unwrap();
-
-        // Write
-        let result = module.invoke_export("write_text", 
-            &[
-                ValueWord::from_string(Arc::new(path_str.to_string())),
-                ValueWord::from_string(Arc::new("hello world".to_string())),
-            ],
-            &ctx,
-        ).unwrap()
-        .unwrap();
-        assert!(result.as_ok_inner().is_some());
-
-        // Read back
-        let result = module.invoke_export("read_text", 
-            &[ValueWord::from_string(Arc::new(path_str.to_string()))],
-            &ctx,
-        ).unwrap()
-        .unwrap();
-        let inner = result.as_ok_inner().expect("should be Ok");
-        assert_eq!(inner.as_str(), Some("hello world"));
-    }
-
-    #[test]
-    fn test_file_read_lines() {
-        let module = create_file_module();
-        let ctx = test_ctx();
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("lines.txt");
-        let path_str = path.to_str().unwrap();
-
-        module.invoke_export("write_text", 
-            &[
-                ValueWord::from_string(Arc::new(path_str.to_string())),
-                ValueWord::from_string(Arc::new("line1\nline2\nline3".to_string())),
-            ],
-            &ctx,
-        ).unwrap()
-        .unwrap();
-
-        let result = module.invoke_export("read_lines", 
-            &[ValueWord::from_string(Arc::new(path_str.to_string()))],
-            &ctx,
-        ).unwrap()
-        .unwrap();
-        let inner = result.as_ok_inner().expect("should be Ok");
-        let arr = inner.as_any_array().expect("should be array").to_generic();
-        assert_eq!(arr.len(), 3);
-        assert_eq!(arr[0].as_str(), Some("line1"));
-        assert_eq!(arr[1].as_str(), Some("line2"));
-        assert_eq!(arr[2].as_str(), Some("line3"));
-    }
-
-    #[test]
-    fn test_file_append() {
-        let module = create_file_module();
-        let ctx = test_ctx();
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("append.txt");
-        let path_str = path.to_str().unwrap();
-
-        module.invoke_export("write_text", 
-            &[
-                ValueWord::from_string(Arc::new(path_str.to_string())),
-                ValueWord::from_string(Arc::new("hello".to_string())),
-            ],
-            &ctx,
-        ).unwrap()
-        .unwrap();
-
-        module.invoke_export("append", 
-            &[
-                ValueWord::from_string(Arc::new(path_str.to_string())),
-                ValueWord::from_string(Arc::new(" world".to_string())),
-            ],
-            &ctx,
-        ).unwrap()
-        .unwrap();
-
-        let result = module.invoke_export("read_text", 
-            &[ValueWord::from_string(Arc::new(path_str.to_string()))],
-            &ctx,
-        ).unwrap()
-        .unwrap();
-        let inner = result.as_ok_inner().expect("should be Ok");
-        assert_eq!(inner.as_str(), Some("hello world"));
-    }
-
-    #[test]
-    fn test_file_read_bytes_write_bytes_roundtrip() {
-        let module = create_file_module();
-        let ctx = test_ctx();
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("bytes.bin");
-        let path_str = path.to_str().unwrap();
-
-        let data = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
-            ValueWord::from_f64(0.0),
-            ValueWord::from_f64(127.0),
-            ValueWord::from_f64(255.0),
-        ]));
-
-        module.invoke_export("write_bytes", 
-            &[ValueWord::from_string(Arc::new(path_str.to_string())), data],
-            &ctx,
-        ).unwrap()
-        .unwrap();
-
-        let result = module.invoke_export("read_bytes", 
-            &[ValueWord::from_string(Arc::new(path_str.to_string()))],
-            &ctx,
-        ).unwrap()
-        .unwrap();
-        let inner = result.as_ok_inner().expect("should be Ok");
-        let arr = inner.as_any_array().expect("should be array").to_generic();
-        assert_eq!(arr.len(), 3);
-        assert_eq!(arr[0].as_f64(), Some(0.0));
-        assert_eq!(arr[1].as_f64(), Some(127.0));
-        assert_eq!(arr[2].as_f64(), Some(255.0));
-    }
-
-    #[test]
-    fn test_file_write_bytes_validates_range() {
-        let module = create_file_module();
-        let ctx = test_ctx();
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("bad.bin");
-        let path_str = path.to_str().unwrap();
-
-        // 256 is out of range
-        let data = ValueWord::from_array(shape_value::vmarray_from_vec(vec![ValueWord::from_f64(256.0)]));
-        let result = module.invoke_export("write_bytes", 
-            &[ValueWord::from_string(Arc::new(path_str.to_string())), data],
-            &ctx,
-        ).unwrap();
-        assert!(result.is_err());
-
-        // Negative is out of range
-        let data = ValueWord::from_array(shape_value::vmarray_from_vec(vec![ValueWord::from_f64(-1.0)]));
-        let result = module.invoke_export("write_bytes", 
-            &[ValueWord::from_string(Arc::new(path_str.to_string())), data],
-            &ctx,
-        ).unwrap();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_file_read_nonexistent() {
-        let module = create_file_module();
-        let ctx = test_ctx();
-        let result = module.invoke_export("read_text", 
-            &[ValueWord::from_string(Arc::new(
-                "/nonexistent/path/file.txt".to_string(),
-            ))],
-            &ctx,
-        ).unwrap();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_file_requires_string_args() {
-        let module = create_file_module();
-        let ctx = test_ctx();
-        assert!(module.invoke_export("read_text", &[ValueWord::from_f64(42.0)], &ctx).unwrap().is_err());
-        assert!(module.invoke_export("read_text", &[], &ctx).unwrap().is_err());
     }
 
     #[test]
     fn test_file_schemas() {
         let module = create_file_module();
-
         let read_schema = module.get_schema("read_text").unwrap();
         assert_eq!(read_schema.params.len(), 1);
         assert_eq!(read_schema.return_type.as_deref(), Some("Result<string>"));
 
         let write_schema = module.get_schema("write_text").unwrap();
         assert_eq!(write_schema.params.len(), 2);
-
-        let read_bytes_schema = module.get_schema("read_bytes").unwrap();
-        assert_eq!(
-            read_bytes_schema.return_type.as_deref(),
-            Some("Result<Array<number>>")
-        );
-
-        let write_bytes_schema = module.get_schema("write_bytes").unwrap();
-        assert_eq!(write_bytes_schema.params.len(), 2);
-        assert_eq!(write_bytes_schema.params[1].type_name, "Array<number>");
     }
+
+    // Behavioural roundtrip tests removed — they used `module.invoke_export`
+    // with `ValueWord` arrays (deleted dynamic dispatch entry point).
+    // End-to-end coverage through typed-slot dispatch belongs in
+    // `shape-test`'s integration suite.
 }

@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use shape_ast::ast::{FunctionDef, VarKind};
-use shape_value::{ValueWord, ValueWordExt};
+use shape_value::KindedSlot;
 
 /// A closure captures a function definition along with its environment
 #[derive(Debug, Clone)]
@@ -32,22 +32,34 @@ pub struct CapturedEnvironment {
     pub parent: Option<Box<CapturedEnvironment>>,
 }
 
-/// A captured variable binding
+/// A captured variable binding.
+///
+/// Per ADR-006 §2.7.1.2 (GENERIC_CARRIER single value), the captured
+/// `value` is a [`KindedSlot`] — the kind is not statically known at
+/// the closure-analyzer layer (a closure can capture variables of any
+/// type the enclosing scope binds).
 #[derive(Debug, Clone)]
 pub struct CapturedBinding {
-    /// The captured value
-    pub value: ValueWord,
-    /// The kind of variable (let, var, const)
+    /// The captured value.
+    pub value: KindedSlot,
+    /// The kind of variable (let, var, const).
     pub kind: VarKind,
-    /// Whether this binding is mutable (for 'var' declarations)
+    /// Whether this binding is mutable (for 'var' declarations).
     pub is_mutable: bool,
 }
 
 impl PartialEq for CapturedBinding {
     fn eq(&self, other: &Self) -> bool {
+        // Phase 1.B (ADR-006 §2.7.4): value-equality on `KindedSlot` is
+        // the kind-threaded slot-equals utility deferred to Phase 2c.
+        // Until then, two `CapturedBinding`s match on metadata
+        // (`kind` / `is_mutable`) and the raw slot bits — sufficient for
+        // closure-environment dedup which compares pointer identity for
+        // heap arms (each `KindedSlot::clone` retains the same Arc).
         self.kind == other.kind
             && self.is_mutable == other.is_mutable
-            && self.value.vw_equals(&other.value)
+            && self.value.slot().raw() == other.value.slot().raw()
+            && self.value.kind() == other.value.kind()
     }
 }
 
@@ -81,7 +93,7 @@ impl CapturedEnvironment {
     }
 
     /// Capture a variable from the current scope
-    pub fn capture(&mut self, name: String, value: ValueWord, kind: VarKind) {
+    pub fn capture(&mut self, name: String, value: KindedSlot, kind: VarKind) {
         let is_mutable = matches!(kind, VarKind::Var);
         self.bindings.insert(
             name,

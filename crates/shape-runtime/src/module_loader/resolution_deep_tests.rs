@@ -11,7 +11,6 @@
 #[cfg(test)]
 mod tests {
     use crate::module_loader::resolution::resolve_module_path_with_context;
-use shape_value::ValueWordExt;
     use crate::module_loader::{ModuleCode, ModuleLoader};
     use std::collections::HashMap;
     use std::io::Write;

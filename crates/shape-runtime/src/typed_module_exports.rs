@@ -26,30 +26,31 @@
 //! `Fn(...) -> Result<ValueWord, String>` body into a
 //! `TypedReturn::ValueWord` passthrough.
 
-use crate::module_exports::{
-    ModuleContext, ModuleExports, ModuleFunction, ModuleParam,
-};
+use crate::module_exports::ModuleContext;
 use shape_value::datatable::DataTable;
-use shape_value::{ArgVec, ValueWord, ValueWordExt};
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-/// Typed return value from a native module function.
+/// Strictly-typed leaf value returned by a native function body.
 ///
-/// Each variant maps deterministically to a `ValueWord` representation via
-/// [`TypedReturn::into_value_word`]. The function body produces a
-/// `TypedReturn` directly; marshalling happens at the registry boundary.
+/// Two-tier split (`docs/defections.md` 2026-05-06): the leaf variants
+/// live here, and the wrapper variants (`Ok`/`Err`/`Some`, `ObjectPairs`,
+/// etc.) on [`TypedReturn`] take `ConcreteReturn` rather than a recursive
+/// `Box<TypedReturn>`. The Rust type system enforces that no
+/// `TypedReturn::Ok(TypedReturn::Ok(...))` and (post-Phase-2a) no
+/// `TypedReturn::Ok(TypedReturn::ValueWord(...))`-shaped patterns are
+/// constructible — the forbidden state is unrepresentable, not just
+/// unreachable. Mirrors the `ProofGap` discipline.
 ///
-/// Phase 4b covers static-typed return shapes only. Phase 4c grows the
-/// enum to cover sum-typed shapes (`Result<T,E>`, `Option<T>`) and the
-/// `Opaque` heap-handle variant used by arrow/wire (DataTable) — see
-/// [`TypedReturn::Ok`], [`TypedReturn::Err`], [`TypedReturn::Some`],
-/// [`TypedReturn::None`], [`TypedReturn::DataTable`],
-/// [`TypedReturn::ArrayObjectPairs`].
+// ADR-005: do not add per-HeapKind variants here. HeapValue is the canonical
+// discriminator; the existing heap-arm variants (`ArrayHeapValue`,
+// `HashMapStringHeapValue`, `JsonValue`, `OpaqueTypedObject`) are scheduled
+// for cluster #7 cleanup — fold into a single `Heap(Arc<HeapValue>)` arm.
+// See docs/adr/005-typed-slot-construction.md before extending this enum.
 #[derive(Debug, Clone)]
-pub enum TypedReturn {
+pub enum ConcreteReturn {
     /// 64-bit signed integer.
     I64(i64),
     /// 64-bit floating-point number (the `number` type in Shape).
@@ -68,159 +69,177 @@ pub enum TypedReturn {
     ArrayF64(Vec<f64>),
     /// Array of strings (compiles to `Array<string>`).
     ArrayString(Vec<String>),
+    /// Array whose elements are heap-allocated typed values (Phase 2d
+    /// Array cluster, 2026-05-07). Each element is an opaque
+    /// `Arc<HeapValue>`; the body is responsible for ensuring all
+    /// elements share the same statically-declared element type.
+    /// Used for `Array<DataTable>`, `Array<Array<string>>`,
+    /// `Array<TypedObject>`, etc. — anywhere the element shape is
+    /// itself a heap-resident typed value.
+    ///
+    /// Discriminator-level homogeneity: there is **one**
+    /// `ConcreteReturn::ArrayHeapValue` (matching one
+    /// `the-deleted-heterogeneous-element-carrier` storage variant). Per-element-kind
+    /// variants (`ArrayDataTable` / `ArrayIoHandle` / etc.) are
+    /// rejected on the same grounds as the parametric-NativeKind
+    /// pattern — see `docs/defections.md` Phase 2d Array cluster
+    /// entry.
+    ArrayHeapValue(Vec<Arc<shape_value::heap_value::HeapValue>>),
     /// Byte array, surfaced as `Array<int>` to user code (each byte
     /// widened to i64 in 0..=255).
     Bytes(Vec<u8>),
     /// HashMap with string keys and string values.
     HashMapStringString(Vec<(String, String)>),
-    /// Object built from string→TypedReturn pairs, materialized as a
-    /// `HashMap` ValueWord (same shape as `from_hashmap_pairs`). Used by
-    /// e.g. `crypto.ed25519_generate_keypair` and the legacy `archive`
-    /// entry shape. Insertion order is preserved.
-    ObjectPairs(Vec<(String, TypedReturn)>),
-    /// Anonymous typed object — looked up via
-    /// [`crate::type_schema::typed_object_from_pairs`] using the field
-    /// names as the schema discriminator. Panics at marshal time if no
-    /// matching predeclared schema is registered (matches the existing
-    /// helper's contract). Used by `time.benchmark` whose return shape is
-    /// `{ elapsed_ms, iterations, avg_ms }`.
-    TypedObject(Vec<(String, TypedReturn)>),
-    /// Generic ValueWord-typed array (used for archive entry arrays where
-    /// each element is itself a heap object). The function builds the
-    /// elements as ValueWords directly. Phase 4b uses this for the
-    /// `archive.zip_extract` / `tar_extract` returns whose element shape
-    /// is `{name: string, data: string}` — once Phase 4c adds nested
-    /// `TypedReturn::ObjectPairs` array support this can shrink.
-    ArrayValueWord(Vec<ValueWord>),
-    /// Generic HashMap with ValueWord keys and values. Used by `set_module`
-    /// where set elements pass through as-is (they may be any user type).
-    /// The typed return shape is `HashMap` but the elements aren't
-    /// necessarily strings.
-    HashMapValueWord {
-        keys: Vec<ValueWord>,
-        values: Vec<ValueWord>,
-    },
-    /// `Ok(payload)` — `Result<T,E>` success constructor. The payload type
-    /// follows the function's declared `Result<T,…>` shape; mismatched
-    /// payload variants are a registration-time bug.
-    Ok(Box<TypedReturn>),
-    /// `Err(payload)` — `Result<T,E>` error constructor. For functions
-    /// declared `Result<T, string>`, `payload` is `TypedReturn::String(…)`.
-    Err(Box<TypedReturn>),
-    /// `Some(payload)` — `Option<T>` present constructor.
-    Some(Box<TypedReturn>),
-    /// `None` — `Option<T>` absent constructor.
-    None,
+    /// HashMap with string keys and heap-allocated values (Stage C
+    /// HashMap-marshal P1(b), 2026-05-07). Polymorphic-value form
+    /// covering 8 of 9 stdlib body consumers (json/yaml/toml/msgpack/
+    /// xml-attributes/http-headers/http-options + xml-node-attributes).
+    /// Each element is an opaque `Arc<HeapValue>`; the body is
+    /// responsible for ensuring all values share the same statically-
+    /// declared element type.
+    ///
+    /// Discriminator-level homogeneity per option ε pattern: there is
+    /// **one** `ConcreteReturn::HashMapStringHeapValue` matching the
+    /// `HeapValue::HashMap(HashMapData)` storage variant.
+    /// Per-element-kind variants (`HashMapStringDataTable` etc.) are
+    /// rejected on the same grounds as the parametric-NativeKind
+    /// pattern — see `docs/defections.md` HashMap-marshal entry's
+    /// audit-grounded correction subsection.
+    HashMapStringHeapValue(Vec<(String, Arc<shape_value::heap_value::HeapValue>)>),
+    /// Strict-typed parsed-data tree (Stage D N6 sub-shape (b),
+    /// 2026-05-07). Replaces the deleted
+    /// `TypedReturn::Ok(Box::new(TypedReturn::ValueWord(arc)))` body
+    /// pattern that pre-bulldozer JSON parsing used. The payload is the
+    /// recursive [`crate::json_value::JsonValue`] sum
+    /// (`Null/Bool/Int/Number/String/Bytes/Array/Object`); recursion is
+    /// at the `JsonValue` payload layer, NOT at `ConcreteReturn`.
+    /// `ConcreteReturn::JsonValue` itself is a leaf variant — its
+    /// payload is independently recursive in the same way that
+    /// `ConcreteReturn::HashMapStringHeapValue`'s payload is recursive
+    /// at the `HeapValue` layer. The leaf-only invariant of
+    /// `ConcreteReturn` is preserved.
+    ///
+    /// Used by `json.parse(text) -> Result<Json>` and
+    /// `json.__parse_typed(text, schema) -> Result<any>` body
+    /// projection. Cross-cluster precedent at the user-facing Shape
+    /// API: `crates/shape-runtime/stdlib-src/core/json_value.shape`
+    /// already declares the `Json` enum with matching variants.
+    /// See `docs/defections.md` HashMap-marshal cluster N6
+    /// consumer-expansion subsection (2026-05-07) for the
+    /// sub-shape (b) categorization.
+    JsonValue(crate::json_value::JsonValue),
+    /// Opaque `Arc<HeapValue::TypedObject>` handle for dynamic-schema
+    /// returns (Stage B+D close-out, N8 sign-off, 2026-05-07).
+    ///
+    /// Used by stdlib bodies that take a runtime `schema_id` parameter
+    /// and produce a `HeapValue::TypedObject{schema_id, slots,
+    /// heap_mask}` conforming to that schema. The dispatcher projects
+    /// the `Arc<HeapValue>` directly into a slot via
+    /// `NativeKind::Ptr(HeapKind::TypedObject)` — `TypedObject` is a
+    /// **specific** `HeapKind`, NOT wildcard. Schema is data carried
+    /// by the heap value's existing `schema_id` field; NOT
+    /// architectural metadata at the dispatcher layer.
+    ///
+    /// Leaf in `ConcreteReturn`-recursion sense (`Arc<HeapValue>` is
+    /// the leaf payload); recursive at `HeapValue` layer (consistent
+    /// with `ConcreteReturn::HashMapStringHeapValue` precedent).
+    /// Naming: "Opaque" reflects supervisor-side does not decompose
+    /// the TypedObject's slots; "TypedObject" reflects the known
+    /// `HeapKind` discriminant.
+    ///
+    /// Distinct from `TypedReturn::TypedObject(Vec<(String,
+    /// ConcreteReturn)>)` which is schemaful at REGISTRATION time and
+    /// requires per-field decomposition. `OpaqueTypedObject` is for
+    /// bodies that have already produced a fully-built
+    /// `Arc<HeapValue::TypedObject>` keyed by a runtime `schema_id`.
+    ///
+    /// Confirmed consumer (current): `json.__parse_typed(text,
+    /// schema_id) -> Result<any>` at
+    /// `crates/shape-runtime/src/stdlib/json.rs`.
+    ///
+    /// See `docs/defections.md` Stage B+D close-out batch dispositions
+    /// (2026-05-07) for the N8 sign-off framing + refused alternatives
+    /// (`TypedObjectHandle`, `TypedObjectByRef`, `OpaqueAnyHeapValue`).
+    OpaqueTypedObject(Arc<shape_value::heap_value::HeapValue>),
     /// `DataTable` heap handle — opaque columnar table from
     /// `arrow_module` / wire conversion. Surfaces to Shape as the
     /// built-in `DataTable` type.
     DataTable(Arc<DataTable>),
-    /// Array of typed object pairs. Each element is a
-    /// `Vec<(String, TypedReturn)>` (same shape as
-    /// `TypedReturn::ObjectPairs`), materialized as a `HashMap`
-    /// ValueWord. Used by xml/regex/csv where the function returns
-    /// `Array<{...}>`.
-    ArrayObjectPairs(Vec<Vec<(String, TypedReturn)>>),
-    /// Pass-through: hand-rolled ValueWord. Escape hatch for borderline
-    /// cases where the function body still needs the legacy
-    /// `ValueWord::from_*` API (e.g., set operations that construct from
-    /// other set inputs, msgpack's `Result<any>` where the inner shape is
-    /// `serde_json::Value`-derived). Narrowed module-by-module across
-    /// the migration.
-    ValueWord(ValueWord),
+    /// `IoHandle` heap handle — opaque OS resource (file, socket,
+    /// process) from `stdlib_io`. Surfaces to Shape as the
+    /// built-in `IoHandle` type. Cluster #2 option γ per
+    /// `docs/defections.md` 2026-05-06.
+    IoHandle(Arc<shape_value::heap_value::IoHandleData>),
 }
 
-impl TypedReturn {
-    /// Marshal this typed return into the runtime `ValueWord` representation.
-    pub fn into_value_word(self) -> ValueWord {
-        match self {
-            TypedReturn::I64(i) => ValueWord::from_i64(i),
-            TypedReturn::F64(f) => ValueWord::from_f64(f),
-            TypedReturn::Bool(b) => ValueWord::from_bool(b),
-            TypedReturn::Unit => ValueWord::unit(),
-            TypedReturn::String(s) => ValueWord::from_string(Arc::new(s)),
-            TypedReturn::Instant(t) => ValueWord::from_instant(t),
-            TypedReturn::ArrayI64(items) => {
-                let vs: ArgVec = ArgVec::from_vec(
-                    items.into_iter().map(ValueWord::from_i64).collect(),
-                );
-                ValueWord::from_array(shape_value::vmarray_from_vec(vs.into_inner()))
-            }
-            TypedReturn::ArrayF64(items) => {
-                let vs: ArgVec = ArgVec::from_vec(
-                    items.into_iter().map(ValueWord::from_f64).collect(),
-                );
-                ValueWord::from_array(shape_value::vmarray_from_vec(vs.into_inner()))
-            }
-            TypedReturn::ArrayString(items) => {
-                let vs: ArgVec = ArgVec::from_vec(
-                    items
-                        .into_iter()
-                        .map(|s| ValueWord::from_string(Arc::new(s)))
-                        .collect(),
-                );
-                ValueWord::from_array(shape_value::vmarray_from_vec(vs.into_inner()))
-            }
-            TypedReturn::Bytes(bytes) => {
-                let vs: ArgVec = ArgVec::from_vec(
-                    bytes
-                        .into_iter()
-                        .map(|b| ValueWord::from_i64(b as i64))
-                        .collect(),
-                );
-                ValueWord::from_array(shape_value::vmarray_from_vec(vs.into_inner()))
-            }
-            TypedReturn::HashMapStringString(pairs) => {
-                let mut keys = Vec::with_capacity(pairs.len());
-                let mut values = Vec::with_capacity(pairs.len());
-                for (k, v) in pairs {
-                    keys.push(ValueWord::from_string(Arc::new(k)));
-                    values.push(ValueWord::from_string(Arc::new(v)));
-                }
-                ValueWord::from_hashmap_pairs(keys, values)
-            }
-            TypedReturn::ObjectPairs(pairs) => {
-                let mut keys = Vec::with_capacity(pairs.len());
-                let mut values = Vec::with_capacity(pairs.len());
-                for (k, v) in pairs {
-                    keys.push(ValueWord::from_string(Arc::new(k)));
-                    values.push(v.into_value_word());
-                }
-                ValueWord::from_hashmap_pairs(keys, values)
-            }
-            TypedReturn::TypedObject(pairs) => {
-                let owned: Vec<(String, ValueWord)> = pairs
-                    .into_iter()
-                    .map(|(k, v)| (k, v.into_value_word()))
-                    .collect();
-                let view: Vec<(&str, ValueWord)> = owned
-                    .iter()
-                    .map(|(k, v)| (k.as_str(), v.clone()))
-                    .collect();
-                crate::type_schema::typed_object_from_pairs(&view)
-            }
-            TypedReturn::ArrayValueWord(items) => {
-                ValueWord::from_array(shape_value::vmarray_from_vec(items))
-            }
-            TypedReturn::HashMapValueWord { keys, values } => {
-                ValueWord::from_hashmap_pairs(keys, values)
-            }
-            TypedReturn::Ok(inner) => ValueWord::from_ok(inner.into_value_word()),
-            TypedReturn::Err(inner) => ValueWord::from_err(inner.into_value_word()),
-            TypedReturn::Some(inner) => ValueWord::from_some(inner.into_value_word()),
-            TypedReturn::None => ValueWord::none(),
-            TypedReturn::DataTable(dt) => ValueWord::from_datatable(dt),
-            TypedReturn::ArrayObjectPairs(rows) => {
-                let elements: Vec<ValueWord> = rows
-                    .into_iter()
-                    .map(|pairs| TypedReturn::ObjectPairs(pairs).into_value_word())
-                    .collect();
-                ValueWord::from_array(shape_value::vmarray_from_vec(elements))
-            }
-            TypedReturn::ValueWord(v) => v,
-        }
+/// Typed return value from a native module function.
+///
+/// Two-tier with [`ConcreteReturn`]: every wrapper variant
+/// (`Ok`/`Err`/`Some`/`ObjectPairs`/etc.) takes a `ConcreteReturn` payload.
+/// Nesting `TypedReturn` inside `TypedReturn` is unrepresentable, which
+/// also makes the long-deleted `TypedReturn::ValueWord` escape hatch
+/// unreachable from any container variant.
+///
+/// The Phase 2b kind-threaded marshal layer projects each variant
+/// directly into a typed VM slot using the function's registered
+/// [`ConcreteType`] return descriptor.
+#[derive(Debug, Clone)]
+pub enum TypedReturn {
+    /// Direct leaf-typed return.
+    Concrete(ConcreteReturn),
+    /// Object built from string→leaf pairs, materialized as a
+    /// `HashMap`-shaped TypedObject. Insertion order preserved.
+    ObjectPairs(Vec<(String, ConcreteReturn)>),
+    /// Anonymous typed object — looked up via
+    /// [`crate::type_schema::typed_object_from_pairs`] using the field
+    /// names as the schema discriminator. Panics at marshal time if no
+    /// matching predeclared schema is registered. Used by
+    /// `time.benchmark` whose return shape is
+    /// `{ elapsed_ms, iterations, avg_ms }`.
+    TypedObject(Vec<(String, ConcreteReturn)>),
+    /// `Ok(payload)` — `Result<T,E>` success constructor.
+    Ok(ConcreteReturn),
+    /// `Err(payload)` — `Result<T,E>` error constructor.
+    Err(ConcreteReturn),
+    /// `Some(payload)` — `Option<T>` present constructor.
+    Some(ConcreteReturn),
+    /// `None` — `Option<T>` absent constructor.
+    None,
+    /// Array of typed-object rows. Used by xml/regex/csv where the
+    /// function returns `Array<{...}>`.
+    ArrayObjectPairs(Vec<Vec<(String, ConcreteReturn)>>),
+    /// `Some(typed_object)` — `Option<{...}>` present constructor whose
+    /// payload is a typed-object pair-list. Phase 2d Cluster #4 (option β,
+    /// 2026-05-07): flat per-wrapper variant rather than recursive
+    /// `ConcreteReturn::TypedObject` (option α), preserving the leaf-only
+    /// invariant of `ConcreteReturn` as unrepresentably-violated by
+    /// Rust's type system. Mirrors the existing `ObjectPairs` /
+    /// `ArrayObjectPairs` variant shape — pattern continuation, not
+    /// pattern invention. Used by `regex.match` / `regex.find`.
+    SomeObjectPairs(Vec<(String, ConcreteReturn)>),
+    /// `Ok(typed_object)` — `Result<{...}, E>` success constructor whose
+    /// payload is a typed-object pair-list. Same Cluster #4 option β
+    /// shape as `SomeObjectPairs`. Used by future stdlib returns whose
+    /// success case is a typed object (e.g. `arrow.metadata` after a
+    /// HashMap-marshal landing rewrites it as a typed object).
+    OkObjectPairs(Vec<(String, ConcreteReturn)>),
+    /// `Err(typed_object)` — `Result<T, {...}>` error constructor whose
+    /// payload is a typed-object pair-list. Same Cluster #4 option β
+    /// shape as `SomeObjectPairs`. Used by future stdlib returns whose
+    /// error case is a structured error object.
+    ErrObjectPairs(Vec<(String, ConcreteReturn)>),
+}
+
+impl From<ConcreteReturn> for TypedReturn {
+    fn from(c: ConcreteReturn) -> Self {
+        TypedReturn::Concrete(c)
     }
 }
+
+// `TypedReturn::into_value_word()` is removed. The strict-typed marshal
+// boundary projects each variant directly into a typed slot via the
+// per-function `NativeKind` declared at registration. That boundary
+// landing is Phase 2b — see `docs/defections.md`.
 
 /// Concrete return-type discriminant for a typed module function.
 ///
@@ -239,9 +258,38 @@ pub enum ConcreteType {
     ArrayInt,
     ArrayNumber,
     ArrayString,
+    /// Array of heap-allocated typed values. The displayed type-name is
+    /// caller-provided to keep the LSP surface readable
+    /// (`Array<DataTable>`, `Array<Array<string>>`, etc.); element-kind
+    /// homogeneity is a body-side type contract per the Phase 2d Array
+    /// cluster decision.
+    ArrayHeapValue(String),
     /// `Array<int>` semantically (each element a u8 widened to i64).
     Bytes,
     HashMapStringString,
+    /// `HashMap<string, *>` with heap-allocated values (Stage C
+    /// HashMap-marshal P1(b), 2026-05-07). The displayed type-name is
+    /// caller-provided to keep the LSP surface readable
+    /// (`HashMap<string, Json>`, `HashMap<string, any>`, etc.);
+    /// element-kind homogeneity is a body-side type contract per the
+    /// option ε pattern.
+    HashMapStringHeapValue(String),
+    /// Strict-typed parsed-data tree (Stage D N6 sub-shape (b),
+    /// 2026-05-07). Mirror for `ConcreteReturn::JsonValue`. The displayed
+    /// type-name is caller-provided so the LSP can surface either
+    /// `Json` (for `json.parse`'s typed return) or `any` (for
+    /// `json.__parse_typed`'s polymorphic return). The actual payload
+    /// shape is identical (recursive `JsonValue` sum); the visible
+    /// type-name carries the user-API distinction.
+    JsonValue(String),
+    /// Opaque `Arc<HeapValue::TypedObject>` for dynamic-schema returns
+    /// (Stage B+D close-out, N8 sign-off, 2026-05-07). Mirror for
+    /// `ConcreteReturn::OpaqueTypedObject`. The displayed type-name is
+    /// caller-provided to keep the LSP surface readable
+    /// (`any` for `json.__parse_typed`'s polymorphic return; in future
+    /// could be a specific Shape type-name when the schema's name is
+    /// statically known).
+    OpaqueTypedObject(String),
     /// Heterogeneous object built from string→typed pairs (materialized
     /// as a `HashMap`).
     Object,
@@ -266,6 +314,9 @@ pub enum ConcreteType {
     Option(Box<ConcreteType>),
     /// `DataTable` opaque heap handle (arrow / wire).
     DataTable,
+    /// `IoHandle` opaque OS-resource heap handle (file/socket/process)
+    /// from `stdlib_io`. Cluster #2 option γ.
+    IoHandle,
     /// `HashMap<string, string>` — alias for `HashMapStringString`. New
     /// callers should prefer this name; kept distinct for clarity.
     /// Free-form generic type name. Escape hatch for `Result<any>`,
@@ -292,8 +343,12 @@ impl ConcreteType {
             ConcreteType::ArrayInt => "Array<int>".to_string(),
             ConcreteType::ArrayNumber => "Array<number>".to_string(),
             ConcreteType::ArrayString => "Array<string>".to_string(),
+            ConcreteType::ArrayHeapValue(s) => s.clone(),
             ConcreteType::Bytes => "Array<int>".to_string(),
             ConcreteType::HashMapStringString => "HashMap<string, string>".to_string(),
+            ConcreteType::HashMapStringHeapValue(s) => s.clone(),
+            ConcreteType::JsonValue(s) => s.clone(),
+            ConcreteType::OpaqueTypedObject(s) => s.clone(),
             ConcreteType::Object => "object".to_string(),
             ConcreteType::TypedObject => "object".to_string(),
             ConcreteType::ArrayObject(s) => s.clone(),
@@ -305,6 +360,7 @@ impl ConcreteType {
             }
             ConcreteType::Option(inner) => format!("Option<{}>", inner.shape_type_name()),
             ConcreteType::DataTable => "DataTable".to_string(),
+            ConcreteType::IoHandle => "IoHandle".to_string(),
             ConcreteType::Named(s) => s.clone(),
             ConcreteType::Any => "any".to_string(),
         }
@@ -313,23 +369,33 @@ impl ConcreteType {
 
 /// One typed-return native module function entry.
 ///
-/// Stores the typed body alongside the declared return type and parameter
-/// types. The legacy `ModuleFn` wrapper is built at registration time from
-/// these — see [`register_typed_function`].
+/// Stores the typed body alongside the declared return type, parameter
+/// types, and the per-arg [`shape_value::NativeKind`] table that the
+/// dispatcher uses to read each slot's bits. Built only by the typed
+/// `register_typed_fn_N` helpers in [`crate::marshal`] — those helpers
+/// derive `arg_kinds` from each parameter's `FromSlot::NATIVE_KIND`
+/// associated constant, so the kinds cannot drift from the body's
+/// actual Rust signature.
 #[derive(Clone)]
 pub struct TypedModuleFunction {
-    /// The typed function body. Receives the raw `&[ValueWord]` arg slice
-    /// and the existing `ModuleContext`; returns a `TypedReturn`.
+    /// The typed function body. Receives a raw `&[u64]` slot-bits slice
+    /// (the dispatcher has guaranteed each slot's kind matches
+    /// [`Self::arg_kinds`]) plus the `ModuleContext`; returns a
+    /// `TypedReturn`.
     pub invoke: Arc<
-        dyn for<'ctx> Fn(&[ValueWord], &ModuleContext<'ctx>) -> Result<TypedReturn, String>
+        dyn for<'ctx> Fn(&[u64], &ModuleContext<'ctx>) -> Result<TypedReturn, String>
             + Send
             + Sync,
     >,
     /// Declared return type (used for LSP and consistency checks).
     pub return_type: ConcreteType,
     /// Parameter type names (mirrors `ModuleParam::type_name` for LSP
-    /// hover/completions). Phase 4c will tighten these to a typed enum.
+    /// hover/completions).
     pub arg_types: Vec<String>,
+    /// Per-arg `NativeKind` derived from `FromSlot::NATIVE_KIND` at
+    /// registration. The dispatcher uses this to decode each slot's
+    /// bits with the correct kind. Length matches `arg_types`.
+    pub arg_kinds: Vec<shape_value::NativeKind>,
 }
 
 /// One typed-return native module *async* function entry.
@@ -342,10 +408,11 @@ pub struct TypedModuleFunction {
 #[derive(Clone)]
 pub struct TypedModuleAsyncFunction {
     /// The typed async function body. Owns its arg vec to satisfy
-    /// `'static` future bounds.
+    /// `'static` future bounds. Receives raw `Vec<u64>` slot bits
+    /// whose kinds match `Self::arg_kinds`.
     pub invoke: Arc<
         dyn Fn(
-                Vec<ValueWord>,
+                Vec<u64>,
             ) -> Pin<Box<dyn Future<Output = Result<TypedReturn, String>> + Send>>
             + Send
             + Sync,
@@ -354,6 +421,8 @@ pub struct TypedModuleAsyncFunction {
     pub return_type: ConcreteType,
     /// Parameter type names (mirrors `ModuleParam::type_name`).
     pub arg_types: Vec<String>,
+    /// Per-arg `NativeKind`. See [`TypedModuleFunction::arg_kinds`].
+    pub arg_kinds: Vec<shape_value::NativeKind>,
 }
 
 /// Per-module registry of typed exports.
@@ -403,465 +472,22 @@ impl TypedModuleExports {
     }
 }
 
-/// Register a typed-return function on a `ModuleExports`.
-///
-/// Adds:
-/// 1. A `TypedModuleFunction` entry to the typed registry on the module
-///    (created lazily via `ModuleExports::typed_exports_mut`).
-/// 2. A `ModuleFunction` schema (description + params + return type
-///    string from `ConcreteType::shape_type_name`) on
-///    `ModuleExports::schemas`, plus a default-Public visibility entry.
-///
-/// Phase 4c.4: the legacy `ModuleFn` auto-wrap was deleted. The VM's
-/// runtime dispatch path goes through `typed_exports.functions` directly
-/// via `ModuleFnEntry::Typed` — no `ValueWord` round-trip in the body.
-/// Tests that previously invoked through `module.get_export(name)` use
-/// `module.invoke_export(name, ...)` instead.
-pub fn register_typed_function<F>(
-    module: &mut ModuleExports,
-    name: impl Into<String>,
-    description: impl Into<String>,
-    params: Vec<ModuleParam>,
-    return_type: ConcreteType,
-    body: F,
-) where
-    F: for<'ctx> Fn(&[ValueWord], &ModuleContext<'ctx>) -> Result<TypedReturn, String>
-        + Send
-        + Sync
-        + 'static,
-{
-    let name = name.into();
-    let body_arc: Arc<
-        dyn for<'ctx> Fn(&[ValueWord], &ModuleContext<'ctx>) -> Result<TypedReturn, String>
-            + Send
-            + Sync,
-    > = Arc::new(body);
+// `register_typed_function` and `register_typed_async_function` are
+// re-introduced at the [`shape_value::KindedSlot`] shape per ADR-006
+// §2.7.4 ruling. Per-arity helpers (`register_typed_fn_N`) remain the
+// preferred path when the function arity is fixed; the variadic
+// helpers below cover the genuine §2.7.1.4 dispatch-slice case
+// (functions with optional arguments — json/msgpack/toml/yaml/
+// stdlib_time bodies that take `pretty?: bool` / `iterations?: int` /
+// etc.). Both registration paths are valid; pick by arity contract.
+pub use crate::marshal::{register_typed_async_function, register_typed_function};
 
-    let arg_types = params.iter().map(|p| p.type_name.clone()).collect();
-    let return_type_str = return_type.shape_type_name();
+// `register_test_function` / `_with_schema` / `register_test_async_function`
+// were thin wrappers that fed a `Fn(&[ValueWord]) -> Result<ValueWord, ..>`
+// body into the typed registry as a `TypedReturn::ValueWord` passthrough.
+// Deleted alongside the three explicit ValueWord variants — the marshal
+// boundary they fed is being rebuilt in Phase 2b.
 
-    module.add_schema_only(
-        name.clone(),
-        ModuleFunction {
-            description: description.into(),
-            params,
-            return_type: Some(return_type_str),
-        },
-    );
-
-    module.typed_exports_mut().functions.insert(
-        name,
-        TypedModuleFunction {
-            invoke: body_arc,
-            return_type,
-            arg_types,
-        },
-    );
-}
-
-/// Register a typed-return *async* function on a `ModuleExports`.
-///
-/// Mirrors [`register_typed_function`] but installs an entry in
-/// `typed_exports.async_functions`. The async body returns
-/// `Result<TypedReturn, String>` and the boundary marshalling
-/// (`TypedReturn` → `ValueWord`) happens after the future resolves.
-///
-/// Phase 4c.4: the legacy `AsyncModuleFn` auto-wrap was deleted. The VM
-/// dispatches through `typed_exports.async_functions` directly via
-/// `ModuleFnEntry::TypedAsync`.
-///
-/// Note: async functions don't get a `ModuleContext` (the context borrows
-/// from the VM and can't cross await points). Permission checks must be
-/// performed before the await — typically by inspecting the args and
-/// short-circuiting in the body. The HTTP module relies on a
-/// host-supplied `NetConnect` permission gate around the dispatch site.
-pub fn register_typed_async_function<F, Fut>(
-    module: &mut ModuleExports,
-    name: impl Into<String>,
-    description: impl Into<String>,
-    params: Vec<ModuleParam>,
-    return_type: ConcreteType,
-    body: F,
-) where
-    F: Fn(Vec<ValueWord>) -> Fut + Send + Sync + Clone + 'static,
-    Fut: std::future::Future<Output = Result<TypedReturn, String>> + Send + 'static,
-{
-    let name = name.into();
-    let arg_types: Vec<String> = params.iter().map(|p| p.type_name.clone()).collect();
-    let return_type_str = return_type.shape_type_name();
-
-    module.add_schema_only(
-        name.clone(),
-        ModuleFunction {
-            description: description.into(),
-            params,
-            return_type: Some(return_type_str),
-        },
-    );
-
-    // Typed-registry entry — sibling to the sync `functions` map.
-    // The typed body is wrapped to box+pin its future so all async
-    // exports share a uniform `Pin<Box<dyn Future<...>>>` invocation
-    // shape regardless of the concrete `Fut` type.
-    let typed_invoke: Arc<
-        dyn Fn(
-                Vec<ValueWord>,
-            ) -> Pin<Box<dyn Future<Output = Result<TypedReturn, String>> + Send>>
-            + Send
-            + Sync,
-    > = Arc::new(move |args: Vec<ValueWord>| {
-        let fut = body(args);
-        Box::pin(fut)
-            as Pin<Box<dyn Future<Output = Result<TypedReturn, String>> + Send>>
-    });
-
-    module
-        .typed_exports_mut()
-        .async_functions
-        .insert(
-            name,
-            TypedModuleAsyncFunction {
-                invoke: typed_invoke,
-                return_type,
-                arg_types,
-            },
-        );
-}
-
-/// Test-only helper that registers a legacy-style sync function body
-/// (`Fn(&[ValueWord], &ModuleContext) -> Result<ValueWord, String>`)
-/// through the typed registry as a `TypedReturn::ValueWord` passthrough.
-///
-/// Replaces the deleted `ModuleExports::add_function` for test fixtures
-/// that don't care about typed dispatch — the surrounding code being
-/// tested is what's interesting, not the typed-return marshalling.
-///
-/// Use [`register_typed_function`] for production code that has a
-/// concrete return type.
-pub fn register_test_function<F>(
-    module: &mut ModuleExports,
-    name: impl Into<String>,
-    body: F,
-) where
-    F: for<'ctx> Fn(&[ValueWord], &ModuleContext<'ctx>) -> Result<ValueWord, String>
-        + Send
-        + Sync
-        + 'static,
-{
-    let name = name.into();
-    let body_arc: Arc<
-        dyn for<'ctx> Fn(&[ValueWord], &ModuleContext<'ctx>) -> Result<TypedReturn, String>
-            + Send
-            + Sync,
-    > = Arc::new(move |args, ctx| body(args, ctx).map(TypedReturn::ValueWord));
-
-    // Register schema-only so LSP/visibility tracking works.
-    module.add_schema_only(
-        name.clone(),
-        ModuleFunction {
-            description: String::new(),
-            params: vec![],
-            return_type: None,
-        },
-    );
-
-    module.typed_exports_mut().functions.insert(
-        name,
-        TypedModuleFunction {
-            invoke: body_arc,
-            return_type: ConcreteType::Object,
-            arg_types: vec![],
-        },
-    );
-}
-
-/// Test-only helper that registers a legacy-style sync function body
-/// with an explicit `ModuleFunction` schema. See [`register_test_function`].
-pub fn register_test_function_with_schema<F>(
-    module: &mut ModuleExports,
-    name: impl Into<String>,
-    body: F,
-    schema: ModuleFunction,
-) where
-    F: for<'ctx> Fn(&[ValueWord], &ModuleContext<'ctx>) -> Result<ValueWord, String>
-        + Send
-        + Sync
-        + 'static,
-{
-    let name = name.into();
-    let body_arc: Arc<
-        dyn for<'ctx> Fn(&[ValueWord], &ModuleContext<'ctx>) -> Result<TypedReturn, String>
-            + Send
-            + Sync,
-    > = Arc::new(move |args, ctx| body(args, ctx).map(TypedReturn::ValueWord));
-
-    let arg_types: Vec<String> =
-        schema.params.iter().map(|p| p.type_name.clone()).collect();
-    module.add_schema_only(name.clone(), schema);
-
-    module.typed_exports_mut().functions.insert(
-        name,
-        TypedModuleFunction {
-            invoke: body_arc,
-            return_type: ConcreteType::Object,
-            arg_types,
-        },
-    );
-}
-
-/// Test-only helper that registers a legacy-style async function body
-/// (`Fn(Vec<ValueWord>) -> impl Future<Output = Result<ValueWord, String>>`)
-/// through the typed async registry as a `TypedReturn::ValueWord` passthrough.
-///
-/// Mirrors [`register_test_function`] for async fixtures.
-pub fn register_test_async_function<F, Fut>(
-    module: &mut ModuleExports,
-    name: impl Into<String>,
-    body: F,
-) where
-    F: Fn(Vec<ValueWord>) -> Fut + Send + Sync + Clone + 'static,
-    Fut: Future<Output = Result<ValueWord, String>> + Send + 'static,
-{
-    let name = name.into();
-    module.add_schema_only(
-        name.clone(),
-        ModuleFunction {
-            description: String::new(),
-            params: vec![],
-            return_type: None,
-        },
-    );
-
-    let body_for_typed = body;
-    let typed_invoke: Arc<
-        dyn Fn(
-                Vec<ValueWord>,
-            ) -> Pin<Box<dyn Future<Output = Result<TypedReturn, String>> + Send>>
-            + Send
-            + Sync,
-    > = Arc::new(move |args: Vec<ValueWord>| {
-        let fut = body_for_typed(args);
-        Box::pin(async move { fut.await.map(TypedReturn::ValueWord) })
-            as Pin<Box<dyn Future<Output = Result<TypedReturn, String>> + Send>>
-    });
-
-    module.typed_exports_mut().async_functions.insert(
-        name,
-        TypedModuleAsyncFunction {
-            invoke: typed_invoke,
-            return_type: ConcreteType::Object,
-            arg_types: vec![],
-        },
-    );
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn empty_ctx() -> ModuleContext<'static> {
-        let registry = Box::leak(Box::new(crate::type_schema::TypeSchemaRegistry::new()));
-        ModuleContext {
-            schemas: registry,
-            invoke_callable: None,
-            raw_invoker: None,
-            function_hashes: None,
-            vm_state: None,
-            granted_permissions: None,
-            scope_constraints: None,
-            set_pending_resume: None,
-            set_pending_frame_resume: None,
-        }
-    }
-
-    #[test]
-    fn typed_return_string_marshal() {
-        let v = TypedReturn::String("hello".to_string()).into_value_word();
-        assert_eq!(v.as_str(), Some("hello"));
-    }
-
-    #[test]
-    fn typed_return_bool_marshal() {
-        let v = TypedReturn::Bool(true).into_value_word();
-        assert_eq!(v.as_bool(), Some(true));
-    }
-
-    #[test]
-    fn typed_return_unit_marshal() {
-        let v = TypedReturn::Unit.into_value_word();
-        assert!(v.is_unit());
-    }
-
-    #[test]
-    fn typed_return_array_string_marshal() {
-        let v = TypedReturn::ArrayString(vec!["a".to_string(), "b".to_string()])
-            .into_value_word();
-        let arr = v.as_any_array().unwrap().to_generic();
-        assert_eq!(arr.len(), 2);
-        assert_eq!(arr[0].as_str(), Some("a"));
-    }
-
-    #[test]
-    fn typed_return_bytes_marshal() {
-        let v = TypedReturn::Bytes(vec![1, 2, 255]).into_value_word();
-        let arr = v.as_any_array().unwrap().to_generic();
-        assert_eq!(arr.len(), 3);
-        assert_eq!(arr[2].as_i64(), Some(255));
-    }
-
-    #[test]
-    fn typed_return_hashmap_marshal() {
-        let v = TypedReturn::HashMapStringString(vec![("k".to_string(), "v".to_string())])
-            .into_value_word();
-        let (keys, values, _) = v.as_hashmap().unwrap();
-        assert_eq!(keys.len(), 1);
-        assert_eq!(keys[0].as_str(), Some("k"));
-        assert_eq!(values[0].as_str(), Some("v"));
-    }
-
-    #[test]
-    fn typed_return_ok_marshal() {
-        let v = TypedReturn::Ok(Box::new(TypedReturn::String("yay".to_string())))
-            .into_value_word();
-        let inner = v.as_ok_inner().expect("Ok wrapped");
-        assert_eq!(inner.as_str(), Some("yay"));
-    }
-
-    #[test]
-    fn typed_return_err_marshal() {
-        let v = TypedReturn::Err(Box::new(TypedReturn::String("oops".to_string())))
-            .into_value_word();
-        let inner = v.as_err_inner().expect("Err wrapped");
-        assert_eq!(inner.as_str(), Some("oops"));
-    }
-
-    #[test]
-    fn typed_return_some_none_marshal() {
-        let some = TypedReturn::Some(Box::new(TypedReturn::I64(42))).into_value_word();
-        assert_eq!(some.as_some_inner().and_then(|v| v.as_i64()), Some(42));
-
-        let none = TypedReturn::None.into_value_word();
-        assert!(none.is_none());
-    }
-
-    #[test]
-    fn typed_return_array_object_pairs_marshal() {
-        let v = TypedReturn::ArrayObjectPairs(vec![
-            vec![("k".to_string(), TypedReturn::I64(1))],
-            vec![("k".to_string(), TypedReturn::I64(2))],
-        ])
-        .into_value_word();
-        let arr = v.as_any_array().unwrap().to_generic();
-        assert_eq!(arr.len(), 2);
-        let (_, values, _) = arr[1].as_hashmap().unwrap();
-        assert_eq!(values[0].as_i64(), Some(2));
-    }
-
-    #[test]
-    fn concrete_type_result_option_names() {
-        assert_eq!(
-            ConcreteType::Result(Box::new(ConcreteType::String)).shape_type_name(),
-            "Result<string>"
-        );
-        assert_eq!(
-            ConcreteType::Result2(
-                Box::new(ConcreteType::DataTable),
-                Box::new(ConcreteType::String),
-            )
-            .shape_type_name(),
-            "Result<DataTable, string>"
-        );
-        assert_eq!(
-            ConcreteType::Option(Box::new(ConcreteType::Int)).shape_type_name(),
-            "Option<int>"
-        );
-    }
-
-    #[test]
-    fn typed_return_object_pairs_marshal() {
-        let v = TypedReturn::ObjectPairs(vec![
-            ("count".to_string(), TypedReturn::I64(42)),
-            ("ok".to_string(), TypedReturn::Bool(true)),
-        ])
-        .into_value_word();
-        let (keys, values, _) = v.as_hashmap().unwrap();
-        assert_eq!(keys.len(), 2);
-        assert_eq!(values[0].as_i64(), Some(42));
-        assert_eq!(values[1].as_bool(), Some(true));
-    }
-
-    #[test]
-    fn register_typed_async_function_populates_typed_registry() {
-        let mut module = ModuleExports::new("std::core::test_typed_async");
-        register_typed_async_function(
-            &mut module,
-            "get_n",
-            "Return a constant int via async path",
-            vec![],
-            ConcreteType::Int,
-            |_args: Vec<ValueWord>| async move { Ok(TypedReturn::I64(7)) },
-        );
-
-        // Legacy async surface still works (auto-wrapping).
-        assert!(module.is_async("get_n"));
-
-        // Typed async registry has the entry with the declared return type.
-        let typed_entry = module
-            .typed_exports()
-            .get_async("get_n")
-            .expect("typed async registry should hold the entry");
-        assert_eq!(typed_entry.return_type, ConcreteType::Int);
-    }
-
-    #[test]
-    fn register_typed_function_round_trip() {
-        let mut module = ModuleExports::new("std::core::test_typed");
-        register_typed_function(
-            &mut module,
-            "echo",
-            "Echo a string",
-            vec![ModuleParam {
-                name: "s".to_string(),
-                type_name: "string".to_string(),
-                required: true,
-                description: "input".to_string(),
-                ..Default::default()
-            }],
-            ConcreteType::String,
-            |args, _ctx| {
-                let s = args
-                    .first()
-                    .and_then(|a| a.as_str())
-                    .ok_or_else(|| "echo() requires a string".to_string())?
-                    .to_string();
-                Ok(TypedReturn::String(s))
-            },
-        );
-
-        // Convenience invoke surface (used by stdlib unit tests).
-        let arg = ValueWord::from_string(Arc::new("hi".to_string()));
-        let ctx = empty_ctx();
-        let result = module
-            .invoke_export("echo", &[arg.clone()], &ctx)
-            .expect("invoke_export should find typed export")
-            .expect("echo should succeed");
-        assert_eq!(result.as_str(), Some("hi"));
-
-        // Typed invoke surface (the runtime dispatch path).
-        let typed_entry = module.typed_exports().get("echo").unwrap();
-        let typed_result = (typed_entry.invoke)(&[arg], &ctx).unwrap();
-        match typed_result {
-            TypedReturn::String(s) => assert_eq!(s, "hi"),
-            other => panic!("expected TypedReturn::String, got {:?}", other),
-        }
-
-        // Schema is populated.
-        let schema = module.get_schema("echo").unwrap();
-        assert_eq!(schema.return_type.as_deref(), Some("string"));
-        assert_eq!(schema.params.len(), 1);
-
-        // Typed registry has the entry with the declared return type.
-        let typed_entry = module.typed_exports().get("echo").unwrap();
-        assert_eq!(typed_entry.return_type, ConcreteType::String);
-    }
-}
+// Marshal-layer round-trip tests removed alongside `into_value_word()`.
+// The Phase 2b marshal layer rebuilds them as kind-threaded slot-write
+// tests on top of the new (NativeKind, u64) projection.

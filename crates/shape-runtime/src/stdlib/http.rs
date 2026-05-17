@@ -1,71 +1,140 @@
 //! Native `http` module for making HTTP requests.
 //!
-//! Exports: http.get, http.post, http.put, http.delete
+//! Exports: http.get, http.delete (Stage C); http.post_text,
+//! http.post_bytes, http.put_text, http.put_bytes (Stage D).
 //!
 //! All functions are async. Uses reqwest under the hood.
 //! Policy gated: requires NetConnect permission.
+//!
+//! Stage C HashMap-marshal P1(b) migration (2026-05-07):
+//! - Outer response shape `{status, headers, body, ok}` returns via
+//!   `TypedReturn::OkObjectPairs` (Cluster #4 β shape, mirrors
+//!   `arrow.metadata` precedent at `arrow_module.rs:127`).
+//! - Inner `headers` field carries `HashMap<string, string>` payload via
+//!   `ConcreteReturn::HashMapStringString` (insertion-order preserved).
+//! - Options arg parsing uses `Vec<(Arc<String>, Arc<HeapValue>)>`
+//!   FromSlot impl from Step 1 P1(b) infrastructure
+//!   (`crates/shape-runtime/src/marshal.rs`, Stage C commit `36519f6`).
+//!
+//! Stage D N4 partial sign-off (2026-05-07; supervisor relay):
+//! - `http.post`/`http.put` legacy shape (single fn with `body: any`)
+//!   replaced by typed overloads via Shape API split
+//!   (`stdlib-src/core/http.shape`):
+//!     - `post_text(url, body: string, options)` — sets
+//!       `Content-Type: text/plain; charset=utf-8`
+//!     - `post_bytes(url, body: Array<int>, options)` — sets
+//!       `Content-Type: application/octet-stream`
+//!     - `put_text(url, body: string, options)` — same content-type as
+//!       post_text
+//!     - `put_bytes(url, body: Array<int>, options)` — same as post_bytes
+//! - Body types map directly to existing `FromSlot` impls
+//!   (`Arc<String>` at `marshal.rs:129`, `Vec<u8>` at `marshal.rs:330`)
+//!   per supervisor's "mechanical typed marshal" framing.
+//! - `http.post_json(url, body: object, options)` and `http.put_json`
+//!   remain DEFERRED pending architectural sub-decision **N7 —
+//!   HeapValue→JSON serializer for HTTP / object-output marshal
+//!   contexts.** The `body: object` shape requires walking the
+//!   polymorphic `Vec<(Arc<String>, Arc<HeapValue>)>` tree and producing
+//!   a JSON string; per-variant serialization choices for Decimal,
+//!   DataTable, Content, Temporal, TableView each represent a
+//!   user-visible behavioral commitment that needs supervisor sign-off
+//!   (architectural-adjacent helper, refused as bundled with Step 2 per
+//!   the "no bundling architectural decisions" watchlist refusal).
+//!   Surfaced via team-lead's relay batch.
+//!
+//! Tests deleted along with the legacy ValueWord-based fixtures, mirroring
+//! the csv_module migration (commit `9f6b1d3`). New typed-marshal test
+//! harness arrives with the shape-vm cleanup workstream.
 
+use crate::marshal::register_typed_async_fn_3_full;
+use crate::marshal::register_typed_async_fn_2_full;
 use crate::module_exports::{ModuleExports, ModuleParam};
-use crate::typed_module_exports::{ConcreteType, TypedReturn, register_typed_async_function};
-use shape_value::{ValueWord, ValueWordExt};
+use crate::typed_module_exports::{ConcreteReturn, ConcreteType, TypedReturn};
+use shape_value::heap_value::HeapValue;
 use std::sync::Arc;
 
-/// Build an HttpResponse ValueWord HashMap from the response parts.
-/// Fields: status (number), headers (HashMap), body (string), ok (bool)
-fn build_response(status: u16, headers: Vec<(String, String)>, body: String) -> ValueWord {
-    // headers as HashMap
-    let mut h_keys = Vec::with_capacity(headers.len());
-    let mut h_values = Vec::with_capacity(headers.len());
-    for (hk, hv) in headers.iter() {
-        h_keys.push(ValueWord::from_string(Arc::new(hk.clone())));
-        h_values.push(ValueWord::from_string(Arc::new(hv.clone())));
-    }
-
-    let keys = vec![
-        ValueWord::from_string(Arc::new("status".to_string())),
-        ValueWord::from_string(Arc::new("headers".to_string())),
-        ValueWord::from_string(Arc::new("body".to_string())),
-        ValueWord::from_string(Arc::new("ok".to_string())),
-    ];
-    let values = vec![
-        ValueWord::from_f64(status as f64),
-        ValueWord::from_hashmap_pairs(h_keys, h_values),
-        ValueWord::from_string(Arc::new(body)),
-        ValueWord::from_bool((200..300).contains(&status)),
-    ];
-    ValueWord::from_hashmap_pairs(keys, values)
+/// Build the schemaful HttpResponse pair-list returned by every http.*
+/// function. Schema: `{status: int, headers: HashMap<string, string>,
+/// body: string, ok: bool}`. Insertion order preserved per `ObjectPairs`
+/// contract (`crates/shape-runtime/src/typed_module_exports.rs:117`).
+fn build_response_pairs(
+    status: u16,
+    headers: Vec<(String, String)>,
+    body: String,
+) -> Vec<(String, ConcreteReturn)> {
+    vec![
+        ("status".to_string(), ConcreteReturn::I64(status as i64)),
+        (
+            "headers".to_string(),
+            ConcreteReturn::HashMapStringString(headers),
+        ),
+        ("body".to_string(), ConcreteReturn::String(body)),
+        (
+            "ok".to_string(),
+            ConcreteReturn::Bool((200..300).contains(&status)),
+        ),
+    ]
 }
 
-/// Extract optional headers from an options HashMap argument.
-fn extract_headers(options: &ValueWord) -> Vec<(String, String)> {
-    if let Some((keys, values, _)) = options.as_hashmap() {
-        // Look for a "headers" key
-        for (i, k) in keys.iter().enumerate() {
-            if k.as_str() == Some("headers") {
-                if let Some((hk, hv, _)) = values[i].as_hashmap() {
-                    return hk
-                        .iter()
-                        .zip(hv.iter())
-                        .filter_map(|(k, v)| {
-                            Some((k.as_str()?.to_string(), v.as_str()?.to_string()))
-                        })
-                        .collect();
+/// Extract optional headers from an `options: HashMap<string, *>` arg.
+/// The options HashMap may contain a `"headers"` key whose value is itself
+/// a `HashMap<string, string>` (`HeapValue::HashMap` variant). Walks the
+/// outer pair list linearly looking for `"headers"`, then reads the
+/// nested HashMap's keys/values buffers.
+fn extract_headers(options: &[(Arc<String>, Arc<HeapValue>)]) -> Vec<(String, String)> {
+    for (k, v) in options.iter() {
+        if k.as_str() == "headers" {
+            if let HeapValue::HashMap(kref) = &**v {
+                // Wave 2 Round 3b C2-joint ckpt-4 (2026-05-14): per-V walk
+                // for HashMap<string, string> (the canonical headers shape).
+                // Other V variants return empty (caller's contract is
+                // string headers; non-string Vs are a producer-side bug).
+                use shape_value::heap_value::HashMapKindedRef;
+                if let HashMapKindedRef::String(arc) = kref {
+                    let n = arc.len();
+                    let mut out = Vec::with_capacity(n);
+                    for i in 0..n {
+                        let key: String = unsafe {
+                            let ptr = shape_value::v2::typed_array::TypedArray::get_unchecked(
+                                arc.keys, i as u32,
+                            );
+                            shape_value::v2::string_obj::StringObj::as_str(ptr).to_owned()
+                        };
+                        let val: String = unsafe {
+                            let v_ptr: *const shape_value::v2::string_obj::StringObj =
+                                *(*arc.values).data.add(i);
+                            shape_value::v2::string_obj::StringObj::as_str(v_ptr).to_owned()
+                        };
+                        out.push((key, val));
+                    }
+                    return out;
                 }
+                return Vec::new();
             }
         }
     }
     Vec::new()
 }
 
-/// Extract optional timeout from an options HashMap argument (in milliseconds).
-fn extract_timeout(options: &ValueWord) -> Option<std::time::Duration> {
-    if let Some((keys, values, _)) = options.as_hashmap() {
-        for (i, k) in keys.iter().enumerate() {
-            if k.as_str() == Some("timeout") {
-                if let Some(ms) = values[i].as_number_coerce() {
-                    if ms > 0.0 {
-                        return Some(std::time::Duration::from_millis(ms as u64));
-                    }
+/// Extract optional `timeout` (milliseconds) from the options HashMap.
+/// Walks linearly for `"timeout"`; if present and integer, converts to a
+/// `Duration`.
+///
+/// Currently accepts `HeapValue::BigInt` (i64-typed integer) values only.
+/// `number`-typed (f64) timeout values surface as raw scalar slots in
+/// post-bulldozer Shape and don't reach `HeapValue` — supporting them
+/// would require either Shape user code passing an int (`5000` not
+/// `5000.0`) OR a future `HeapValue::NativeScalar`-aware branch here.
+/// Documented for follow-on if a consumer surfaces.
+fn extract_timeout(
+    options: &[(Arc<String>, Arc<HeapValue>)],
+) -> Option<std::time::Duration> {
+    for (k, v) in options.iter() {
+        if k.as_str() == "timeout" {
+            if let HeapValue::BigInt(ms) = &**v {
+                let n = **ms;
+                if n > 0 {
+                    return Some(std::time::Duration::from_millis(n as u64));
                 }
             }
         }
@@ -88,46 +157,32 @@ pub fn create_http_module() -> ModuleExports {
 
     let options_param = ModuleParam {
         name: "options".to_string(),
-        type_name: "object".to_string(),
+        type_name: "HashMap<string, any>".to_string(),
         required: false,
-        description: "Request options: { headers?: HashMap, timeout?: number }".to_string(),
-        ..Default::default()
-    };
-
-    let body_param = ModuleParam {
-        name: "body".to_string(),
-        type_name: "any".to_string(),
-        required: false,
-        description: "Request body (string or value to serialize as JSON)".to_string(),
+        description: "Request options: { headers?: HashMap, timeout?: int }"
+            .to_string(),
+        default_snippet: Some("{}".to_string()),
         ..Default::default()
     };
 
     let response_ty =
         ConcreteType::Result(Box::new(ConcreteType::Named("HttpResponse".to_string())));
 
-    // http.get(url: string, options?: object) -> Result<HttpResponse>
-    register_typed_async_function(
+    // http.get(url: string, options?: HashMap) -> Result<HttpResponse>
+    register_typed_async_fn_2_full::<_, _, Arc<String>, Vec<(Arc<String>, Arc<HeapValue>)>>(
         &mut module,
         "get",
         "Perform an HTTP GET request",
-        vec![url_param.clone(), options_param.clone()],
+        [url_param.clone(), options_param.clone()],
         response_ty.clone(),
-        |args: Vec<ValueWord>| async move {
-            let url = args
-                .first()
-                .and_then(|a| a.as_str())
-                .map(|s| s.to_string())
-                .ok_or_else(|| "http.get() requires a URL string".to_string())?;
+        |url: Arc<String>, options: Vec<(Arc<String>, Arc<HeapValue>)>| async move {
+            let mut builder = reqwest::Client::new().get(url.as_str());
 
-            let mut builder = reqwest::Client::new().get(&url);
-
-            if let Some(options) = args.get(1) {
-                for (k, v) in extract_headers(options) {
-                    builder = builder.header(&k, &v);
-                }
-                if let Some(timeout) = extract_timeout(options) {
-                    builder = builder.timeout(timeout);
-                }
+            for (k, v) in extract_headers(&options) {
+                builder = builder.header(&k, &v);
+            }
+            if let Some(timeout) = extract_timeout(&options) {
+                builder = builder.timeout(timeout);
             }
 
             let resp = builder
@@ -146,157 +201,27 @@ pub fn create_http_module() -> ModuleExports {
                 .await
                 .map_err(|e| format!("http.get() body read failed: {}", e))?;
 
-            Ok(TypedReturn::Ok(Box::new(TypedReturn::ValueWord(
-                build_response(status, headers, body),
-            ))))
+            Ok(TypedReturn::OkObjectPairs(build_response_pairs(
+                status, headers, body,
+            )))
         },
     );
 
-    // http.post(url: string, body?: any, options?: object) -> Result<HttpResponse>
-    register_typed_async_function(
-        &mut module,
-        "post",
-        "Perform an HTTP POST request",
-        vec![url_param.clone(), body_param.clone(), options_param.clone()],
-        response_ty.clone(),
-        |args: Vec<ValueWord>| async move {
-            let url = args
-                .first()
-                .and_then(|a| a.as_str())
-                .map(|s| s.to_string())
-                .ok_or_else(|| "http.post() requires a URL string".to_string())?;
-
-            let mut builder = reqwest::Client::new().post(&url);
-
-            // Body
-            if let Some(body_arg) = args.get(1) {
-                if !body_arg.is_none() && !body_arg.is_unit() {
-                    if let Some(s) = body_arg.as_str() {
-                        builder = builder.body(s.to_string());
-                    } else {
-                        let json = body_arg.to_json_value();
-                        builder = builder
-                            .header("Content-Type", "application/json")
-                            .body(serde_json::to_string(&json).unwrap_or_default());
-                    }
-                }
-            }
-
-            // Options
-            if let Some(options) = args.get(2) {
-                for (k, v) in extract_headers(options) {
-                    builder = builder.header(&k, &v);
-                }
-                if let Some(timeout) = extract_timeout(options) {
-                    builder = builder.timeout(timeout);
-                }
-            }
-
-            let resp = builder
-                .send()
-                .await
-                .map_err(|e| format!("http.post() failed: {}", e))?;
-
-            let status = resp.status().as_u16();
-            let headers: Vec<(String, String)> = resp
-                .headers()
-                .iter()
-                .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
-                .collect();
-            let body = resp
-                .text()
-                .await
-                .map_err(|e| format!("http.post() body read failed: {}", e))?;
-
-            Ok(TypedReturn::Ok(Box::new(TypedReturn::ValueWord(
-                build_response(status, headers, body),
-            ))))
-        },
-    );
-
-    // http.put(url: string, body?: any, options?: object) -> Result<HttpResponse>
-    register_typed_async_function(
-        &mut module,
-        "put",
-        "Perform an HTTP PUT request",
-        vec![url_param.clone(), body_param, options_param.clone()],
-        response_ty.clone(),
-        |args: Vec<ValueWord>| async move {
-            let url = args
-                .first()
-                .and_then(|a| a.as_str())
-                .map(|s| s.to_string())
-                .ok_or_else(|| "http.put() requires a URL string".to_string())?;
-
-            let mut builder = reqwest::Client::new().put(&url);
-
-            if let Some(body_arg) = args.get(1) {
-                if !body_arg.is_none() && !body_arg.is_unit() {
-                    if let Some(s) = body_arg.as_str() {
-                        builder = builder.body(s.to_string());
-                    } else {
-                        let json = body_arg.to_json_value();
-                        builder = builder
-                            .header("Content-Type", "application/json")
-                            .body(serde_json::to_string(&json).unwrap_or_default());
-                    }
-                }
-            }
-
-            if let Some(options) = args.get(2) {
-                for (k, v) in extract_headers(options) {
-                    builder = builder.header(&k, &v);
-                }
-                if let Some(timeout) = extract_timeout(options) {
-                    builder = builder.timeout(timeout);
-                }
-            }
-
-            let resp = builder
-                .send()
-                .await
-                .map_err(|e| format!("http.put() failed: {}", e))?;
-
-            let status = resp.status().as_u16();
-            let headers: Vec<(String, String)> = resp
-                .headers()
-                .iter()
-                .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
-                .collect();
-            let body = resp
-                .text()
-                .await
-                .map_err(|e| format!("http.put() body read failed: {}", e))?;
-
-            Ok(TypedReturn::Ok(Box::new(TypedReturn::ValueWord(
-                build_response(status, headers, body),
-            ))))
-        },
-    );
-
-    // http.delete(url: string, options?: object) -> Result<HttpResponse>
-    register_typed_async_function(
+    // http.delete(url: string, options?: HashMap) -> Result<HttpResponse>
+    register_typed_async_fn_2_full::<_, _, Arc<String>, Vec<(Arc<String>, Arc<HeapValue>)>>(
         &mut module,
         "delete",
         "Perform an HTTP DELETE request",
-        vec![url_param, options_param],
+        [url_param, options_param],
         response_ty,
-        |args: Vec<ValueWord>| async move {
-            let url = args
-                .first()
-                .and_then(|a| a.as_str())
-                .map(|s| s.to_string())
-                .ok_or_else(|| "http.delete() requires a URL string".to_string())?;
+        |url: Arc<String>, options: Vec<(Arc<String>, Arc<HeapValue>)>| async move {
+            let mut builder = reqwest::Client::new().delete(url.as_str());
 
-            let mut builder = reqwest::Client::new().delete(&url);
-
-            if let Some(options) = args.get(1) {
-                for (k, v) in extract_headers(options) {
-                    builder = builder.header(&k, &v);
-                }
-                if let Some(timeout) = extract_timeout(options) {
-                    builder = builder.timeout(timeout);
-                }
+            for (k, v) in extract_headers(&options) {
+                builder = builder.header(&k, &v);
+            }
+            if let Some(timeout) = extract_timeout(&options) {
+                builder = builder.timeout(timeout);
             }
 
             let resp = builder
@@ -315,137 +240,447 @@ pub fn create_http_module() -> ModuleExports {
                 .await
                 .map_err(|e| format!("http.delete() body read failed: {}", e))?;
 
-            Ok(TypedReturn::Ok(Box::new(TypedReturn::ValueWord(
-                build_response(status, headers, body),
-            ))))
+            Ok(TypedReturn::OkObjectPairs(build_response_pairs(
+                status, headers, body,
+            )))
+        },
+    );
+
+    // Stage D N4 partial sign-off: 4 typed overloads via Shape API
+    // split. Each body type is a fixed-arity register_typed_async_fn_3
+    // with one specific body type per overload, per supervisor's
+    // "mechanical typed marshal" framing. Reuses build_response_pairs +
+    // extract_headers + extract_timeout from the get/delete path.
+
+    let url_param_3 = ModuleParam {
+        name: "url".to_string(),
+        type_name: "string".to_string(),
+        required: true,
+        description: "URL to request".to_string(),
+        ..Default::default()
+    };
+    let options_param_3 = ModuleParam {
+        name: "options".to_string(),
+        type_name: "HashMap<string, any>".to_string(),
+        required: false,
+        description: "Request options: { headers?: HashMap, timeout?: int }"
+            .to_string(),
+        default_snippet: Some("{}".to_string()),
+        ..Default::default()
+    };
+    let body_text_param = ModuleParam {
+        name: "body".to_string(),
+        type_name: "string".to_string(),
+        required: true,
+        description: "Request body as a string (sent verbatim)".to_string(),
+        ..Default::default()
+    };
+    let body_bytes_param = ModuleParam {
+        name: "body".to_string(),
+        type_name: "Array<int>".to_string(),
+        required: true,
+        description: "Request body as a byte array".to_string(),
+        ..Default::default()
+    };
+    let response_ty_3 =
+        ConcreteType::Result(Box::new(ConcreteType::Named("HttpResponse".to_string())));
+
+    // http.post_text(url: string, body: string, options?: HashMap) -> Result<HttpResponse>
+    register_typed_async_fn_3_full::<
+        _,
+        _,
+        Arc<String>,
+        Arc<String>,
+        Vec<(Arc<String>, Arc<HeapValue>)>,
+    >(
+        &mut module,
+        "post_text",
+        "Perform an HTTP POST request with a text body",
+        [
+            url_param_3.clone(),
+            body_text_param.clone(),
+            options_param_3.clone(),
+        ],
+        response_ty_3.clone(),
+        |url: Arc<String>,
+         body: Arc<String>,
+         options: Vec<(Arc<String>, Arc<HeapValue>)>| async move {
+            let mut builder = reqwest::Client::new()
+                .post(url.as_str())
+                .header(
+                    reqwest::header::CONTENT_TYPE,
+                    "text/plain; charset=utf-8",
+                )
+                .body(body.as_str().to_string());
+
+            for (k, v) in extract_headers(&options) {
+                builder = builder.header(&k, &v);
+            }
+            if let Some(timeout) = extract_timeout(&options) {
+                builder = builder.timeout(timeout);
+            }
+
+            let resp = builder
+                .send()
+                .await
+                .map_err(|e| format!("http.post_text() failed: {}", e))?;
+
+            let status = resp.status().as_u16();
+            let headers: Vec<(String, String)> = resp
+                .headers()
+                .iter()
+                .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+                .collect();
+            let body_out = resp
+                .text()
+                .await
+                .map_err(|e| format!("http.post_text() body read failed: {}", e))?;
+
+            Ok(TypedReturn::OkObjectPairs(build_response_pairs(
+                status, headers, body_out,
+            )))
+        },
+    );
+
+    // http.post_bytes(url: string, body: Array<int>, options?: HashMap) -> Result<HttpResponse>
+    register_typed_async_fn_3_full::<
+        _,
+        _,
+        Arc<String>,
+        Vec<u8>,
+        Vec<(Arc<String>, Arc<HeapValue>)>,
+    >(
+        &mut module,
+        "post_bytes",
+        "Perform an HTTP POST request with a binary body",
+        [
+            url_param_3.clone(),
+            body_bytes_param.clone(),
+            options_param_3.clone(),
+        ],
+        response_ty_3.clone(),
+        |url: Arc<String>,
+         body: Vec<u8>,
+         options: Vec<(Arc<String>, Arc<HeapValue>)>| async move {
+            let mut builder = reqwest::Client::new()
+                .post(url.as_str())
+                .header(
+                    reqwest::header::CONTENT_TYPE,
+                    "application/octet-stream",
+                )
+                .body(body);
+
+            for (k, v) in extract_headers(&options) {
+                builder = builder.header(&k, &v);
+            }
+            if let Some(timeout) = extract_timeout(&options) {
+                builder = builder.timeout(timeout);
+            }
+
+            let resp = builder
+                .send()
+                .await
+                .map_err(|e| format!("http.post_bytes() failed: {}", e))?;
+
+            let status = resp.status().as_u16();
+            let headers: Vec<(String, String)> = resp
+                .headers()
+                .iter()
+                .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+                .collect();
+            let body_out = resp
+                .text()
+                .await
+                .map_err(|e| format!("http.post_bytes() body read failed: {}", e))?;
+
+            Ok(TypedReturn::OkObjectPairs(build_response_pairs(
+                status, headers, body_out,
+            )))
+        },
+    );
+
+    // http.put_text(url: string, body: string, options?: HashMap) -> Result<HttpResponse>
+    register_typed_async_fn_3_full::<
+        _,
+        _,
+        Arc<String>,
+        Arc<String>,
+        Vec<(Arc<String>, Arc<HeapValue>)>,
+    >(
+        &mut module,
+        "put_text",
+        "Perform an HTTP PUT request with a text body",
+        [
+            url_param_3.clone(),
+            body_text_param,
+            options_param_3.clone(),
+        ],
+        response_ty_3.clone(),
+        |url: Arc<String>,
+         body: Arc<String>,
+         options: Vec<(Arc<String>, Arc<HeapValue>)>| async move {
+            let mut builder = reqwest::Client::new()
+                .put(url.as_str())
+                .header(
+                    reqwest::header::CONTENT_TYPE,
+                    "text/plain; charset=utf-8",
+                )
+                .body(body.as_str().to_string());
+
+            for (k, v) in extract_headers(&options) {
+                builder = builder.header(&k, &v);
+            }
+            if let Some(timeout) = extract_timeout(&options) {
+                builder = builder.timeout(timeout);
+            }
+
+            let resp = builder
+                .send()
+                .await
+                .map_err(|e| format!("http.put_text() failed: {}", e))?;
+
+            let status = resp.status().as_u16();
+            let headers: Vec<(String, String)> = resp
+                .headers()
+                .iter()
+                .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+                .collect();
+            let body_out = resp
+                .text()
+                .await
+                .map_err(|e| format!("http.put_text() body read failed: {}", e))?;
+
+            Ok(TypedReturn::OkObjectPairs(build_response_pairs(
+                status, headers, body_out,
+            )))
+        },
+    );
+
+    // http.put_bytes(url: string, body: Array<int>, options?: HashMap) -> Result<HttpResponse>
+    register_typed_async_fn_3_full::<
+        _,
+        _,
+        Arc<String>,
+        Vec<u8>,
+        Vec<(Arc<String>, Arc<HeapValue>)>,
+    >(
+        &mut module,
+        "put_bytes",
+        "Perform an HTTP PUT request with a binary body",
+        [url_param_3, body_bytes_param, options_param_3],
+        response_ty_3,
+        |url: Arc<String>,
+         body: Vec<u8>,
+         options: Vec<(Arc<String>, Arc<HeapValue>)>| async move {
+            let mut builder = reqwest::Client::new()
+                .put(url.as_str())
+                .header(
+                    reqwest::header::CONTENT_TYPE,
+                    "application/octet-stream",
+                )
+                .body(body);
+
+            for (k, v) in extract_headers(&options) {
+                builder = builder.header(&k, &v);
+            }
+            if let Some(timeout) = extract_timeout(&options) {
+                builder = builder.timeout(timeout);
+            }
+
+            let resp = builder
+                .send()
+                .await
+                .map_err(|e| format!("http.put_bytes() failed: {}", e))?;
+
+            let status = resp.status().as_u16();
+            let headers: Vec<(String, String)> = resp
+                .headers()
+                .iter()
+                .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+                .collect();
+            let body_out = resp
+                .text()
+                .await
+                .map_err(|e| format!("http.put_bytes() body read failed: {}", e))?;
+
+            Ok(TypedReturn::OkObjectPairs(build_response_pairs(
+                status, headers, body_out,
+            )))
+        },
+    );
+
+    // N7 ε disposition (REFINEMENT-3A γ + a, 2026-05-07): post_json /
+    // put_json take `body: object` which lands in this body as
+    // `Vec<(Arc<String>, Arc<HeapValue>)>` via the existing FromSlot
+    // impl at `crates/shape-runtime/src/marshal.rs:624`
+    // (`NATIVE_KIND = NativeKind::Ptr(HeapKind::HashMap)` — supervisor's
+    // load-bearing finding: the HashMap container anchors the slot kind
+    // structurally, side-stepping the N4-α single-any wildcard refusal
+    // that blocks the 5 single-any consumers C7/C10-C13 deferred to the
+    // n7-single-any-input-resolution follow-on workstream).
+    //
+    // Body algorithm: build `JsonValue::Object` by walking each HashMap
+    // pair via `heap_to_json_value(&v)?` (C2) → `json_value_to_serde_json`
+    // (C3) → `serde_json::to_string(&serde_json_v)?` → reqwest body with
+    // `Content-Type: application/json`. Insertion order preserved per
+    // ObjectPairs contract.
+
+    let url_param_post_json = ModuleParam {
+        name: "url".to_string(),
+        type_name: "string".to_string(),
+        required: true,
+        description: "URL to request".to_string(),
+        ..Default::default()
+    };
+    let body_object_param_post = ModuleParam {
+        name: "body".to_string(),
+        type_name: "object".to_string(),
+        required: true,
+        description: "Request body as an object (sent as JSON)".to_string(),
+        ..Default::default()
+    };
+    let options_param_post_json = ModuleParam {
+        name: "options".to_string(),
+        type_name: "HashMap<string, any>".to_string(),
+        required: false,
+        description: "Request options: { headers?: HashMap, timeout?: int }"
+            .to_string(),
+        default_snippet: Some("{}".to_string()),
+        ..Default::default()
+    };
+    let response_ty_post_json =
+        ConcreteType::Result(Box::new(ConcreteType::Named("HttpResponse".to_string())));
+
+    // http.post_json(url: string, body: object, options?: HashMap) -> Result<HttpResponse>
+    register_typed_async_fn_3_full::<
+        _,
+        _,
+        Arc<String>,
+        Vec<(Arc<String>, Arc<HeapValue>)>,
+        Vec<(Arc<String>, Arc<HeapValue>)>,
+    >(
+        &mut module,
+        "post_json",
+        "Perform an HTTP POST request with a JSON body",
+        [
+            url_param_post_json.clone(),
+            body_object_param_post,
+            options_param_post_json.clone(),
+        ],
+        response_ty_post_json.clone(),
+        |url: Arc<String>,
+         body: Vec<(Arc<String>, Arc<HeapValue>)>,
+         options: Vec<(Arc<String>, Arc<HeapValue>)>| async move {
+            let mut json_pairs: Vec<(String, crate::json_value::JsonValue)> =
+                Vec::with_capacity(body.len());
+            for (k, v) in body.iter() {
+                json_pairs.push(((**k).clone(), crate::json_value::heap_to_json_value(v)?));
+            }
+            let json_value = crate::json_value::JsonValue::Object(json_pairs);
+            let serde_json_v = crate::json_value::json_value_to_serde_json(&json_value);
+            let body_str = serde_json::to_string(&serde_json_v)
+                .map_err(|e| format!("http.post_json() body serialization failed: {}", e))?;
+
+            let mut builder = reqwest::Client::new()
+                .post(url.as_str())
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(body_str);
+
+            for (k, v) in extract_headers(&options) {
+                builder = builder.header(&k, &v);
+            }
+            if let Some(timeout) = extract_timeout(&options) {
+                builder = builder.timeout(timeout);
+            }
+
+            let resp = builder
+                .send()
+                .await
+                .map_err(|e| format!("http.post_json() failed: {}", e))?;
+
+            let status = resp.status().as_u16();
+            let headers: Vec<(String, String)> = resp
+                .headers()
+                .iter()
+                .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+                .collect();
+            let body_out = resp
+                .text()
+                .await
+                .map_err(|e| format!("http.post_json() body read failed: {}", e))?;
+
+            Ok(TypedReturn::OkObjectPairs(build_response_pairs(
+                status, headers, body_out,
+            )))
+        },
+    );
+
+    // http.put_json(url: string, body: object, options?: HashMap) -> Result<HttpResponse>
+    let body_object_param_put = ModuleParam {
+        name: "body".to_string(),
+        type_name: "object".to_string(),
+        required: true,
+        description: "Request body as an object (sent as JSON)".to_string(),
+        ..Default::default()
+    };
+    register_typed_async_fn_3_full::<
+        _,
+        _,
+        Arc<String>,
+        Vec<(Arc<String>, Arc<HeapValue>)>,
+        Vec<(Arc<String>, Arc<HeapValue>)>,
+    >(
+        &mut module,
+        "put_json",
+        "Perform an HTTP PUT request with a JSON body",
+        [url_param_post_json, body_object_param_put, options_param_post_json],
+        response_ty_post_json,
+        |url: Arc<String>,
+         body: Vec<(Arc<String>, Arc<HeapValue>)>,
+         options: Vec<(Arc<String>, Arc<HeapValue>)>| async move {
+            let mut json_pairs: Vec<(String, crate::json_value::JsonValue)> =
+                Vec::with_capacity(body.len());
+            for (k, v) in body.iter() {
+                json_pairs.push(((**k).clone(), crate::json_value::heap_to_json_value(v)?));
+            }
+            let json_value = crate::json_value::JsonValue::Object(json_pairs);
+            let serde_json_v = crate::json_value::json_value_to_serde_json(&json_value);
+            let body_str = serde_json::to_string(&serde_json_v)
+                .map_err(|e| format!("http.put_json() body serialization failed: {}", e))?;
+
+            let mut builder = reqwest::Client::new()
+                .put(url.as_str())
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(body_str);
+
+            for (k, v) in extract_headers(&options) {
+                builder = builder.header(&k, &v);
+            }
+            if let Some(timeout) = extract_timeout(&options) {
+                builder = builder.timeout(timeout);
+            }
+
+            let resp = builder
+                .send()
+                .await
+                .map_err(|e| format!("http.put_json() failed: {}", e))?;
+
+            let status = resp.status().as_u16();
+            let headers: Vec<(String, String)> = resp
+                .headers()
+                .iter()
+                .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+                .collect();
+            let body_out = resp
+                .text()
+                .await
+                .map_err(|e| format!("http.put_json() body read failed: {}", e))?;
+
+            Ok(TypedReturn::OkObjectPairs(build_response_pairs(
+                status, headers, body_out,
+            )))
         },
     );
 
     module
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_http_module_creation() {
-        let module = create_http_module();
-        assert_eq!(module.name, "std::core::http");
-        assert!(module.has_export("get"));
-        assert!(module.has_export("post"));
-        assert!(module.has_export("put"));
-        assert!(module.has_export("delete"));
-    }
-
-    #[test]
-    fn test_http_all_async() {
-        let module = create_http_module();
-        assert!(module.is_async("get"));
-        assert!(module.is_async("post"));
-        assert!(module.is_async("put"));
-        assert!(module.is_async("delete"));
-    }
-
-    #[test]
-    fn test_http_schemas() {
-        let module = create_http_module();
-
-        let get_schema = module.get_schema("get").unwrap();
-        assert_eq!(get_schema.params.len(), 2);
-        assert_eq!(get_schema.params[0].name, "url");
-        assert!(get_schema.params[0].required);
-        assert!(!get_schema.params[1].required);
-        assert_eq!(
-            get_schema.return_type.as_deref(),
-            Some("Result<HttpResponse>")
-        );
-
-        let post_schema = module.get_schema("post").unwrap();
-        assert_eq!(post_schema.params.len(), 3);
-        assert_eq!(post_schema.params[1].name, "body");
-
-        let delete_schema = module.get_schema("delete").unwrap();
-        assert_eq!(delete_schema.params.len(), 2);
-    }
-
-    #[test]
-    fn test_build_response() {
-        let resp = build_response(
-            200,
-            vec![("content-type".to_string(), "text/html".to_string())],
-            "hello".to_string(),
-        );
-        let (keys, values, _) = resp.as_hashmap().expect("should be hashmap");
-
-        // Find status
-        let status_idx = keys
-            .iter()
-            .position(|k| k.as_str() == Some("status"))
-            .unwrap();
-        assert_eq!(values[status_idx].as_f64(), Some(200.0));
-
-        // Find ok
-        let ok_idx = keys.iter().position(|k| k.as_str() == Some("ok")).unwrap();
-        assert_eq!(values[ok_idx].as_bool(), Some(true));
-
-        // Find body
-        let body_idx = keys
-            .iter()
-            .position(|k| k.as_str() == Some("body"))
-            .unwrap();
-        assert_eq!(values[body_idx].as_str(), Some("hello"));
-
-        // Find headers
-        let headers_idx = keys
-            .iter()
-            .position(|k| k.as_str() == Some("headers"))
-            .unwrap();
-        assert!(values[headers_idx].as_hashmap().is_some());
-    }
-
-    #[test]
-    fn test_build_response_error_status() {
-        let resp = build_response(404, vec![], "not found".to_string());
-        let (keys, values, _) = resp.as_hashmap().expect("should be hashmap");
-
-        let ok_idx = keys.iter().position(|k| k.as_str() == Some("ok")).unwrap();
-        assert_eq!(values[ok_idx].as_bool(), Some(false));
-    }
-
-    #[test]
-    fn test_extract_headers_from_options() {
-        let hk = vec![ValueWord::from_string(Arc::new(
-            "Authorization".to_string(),
-        ))];
-        let hv = vec![ValueWord::from_string(Arc::new(
-            "Bearer token123".to_string(),
-        ))];
-        let headers_map = ValueWord::from_hashmap_pairs(hk, hv);
-
-        let ok = vec![ValueWord::from_string(Arc::new("headers".to_string()))];
-        let ov = vec![headers_map];
-        let options = ValueWord::from_hashmap_pairs(ok, ov);
-
-        let extracted = extract_headers(&options);
-        assert_eq!(extracted.len(), 1);
-        assert_eq!(extracted[0].0, "Authorization");
-        assert_eq!(extracted[0].1, "Bearer token123");
-    }
-
-    #[test]
-    fn test_extract_timeout_from_options() {
-        let ok = vec![ValueWord::from_string(Arc::new("timeout".to_string()))];
-        let ov = vec![ValueWord::from_f64(5000.0)];
-        let options = ValueWord::from_hashmap_pairs(ok, ov);
-
-        let timeout = extract_timeout(&options);
-        assert_eq!(timeout, Some(std::time::Duration::from_millis(5000)));
-    }
-
-    #[test]
-    fn test_extract_timeout_none() {
-        let options = ValueWord::empty_hashmap();
-        assert_eq!(extract_timeout(&options), None);
-    }
 }

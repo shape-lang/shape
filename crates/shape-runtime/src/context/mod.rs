@@ -27,17 +27,16 @@ use super::data::DataFrame;
 use super::event_queue::{SharedEventQueue, SuspensionState};
 use super::lookahead_guard::LookAheadGuard;
 use super::metadata::MetadataRegistry;
-use super::simulation::KernelCompiler;
 use super::type_methods::TypeMethodRegistry;
 use super::type_schema::TypeSchemaRegistry;
 use crate::data::Timeframe;
 use crate::snapshot::{
     ContextSnapshot, SnapshotStore, SuspensionStateSnapshot, TypeAliasRuntimeEntrySnapshot,
-    VariableSnapshot, nanboxed_to_serializable, serializable_to_nanboxed,
+    VariableSnapshot,
 };
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
-use shape_value::{ValueMap, ValueWord};
+use shape_value::KindedSlot;
 
 /// Execution context for evaluating expressions
 #[derive(Clone)]
@@ -110,9 +109,6 @@ pub struct ExecutionContext {
     struct_type_registry: HashMap<String, shape_ast::ast::StructTypeDef>,
     /// Progress registry for monitoring load operations
     progress_registry: Option<Arc<super::progress::ProgressRegistry>>,
-    /// Optional JIT kernel compiler for high-performance simulation.
-    /// Set this to enable JIT compilation of simulation kernels.
-    kernel_compiler: Option<Arc<dyn KernelCompiler>>,
 }
 
 /// Runtime entry for a type alias with meta parameter overrides
@@ -122,7 +118,7 @@ pub struct TypeAliasRuntimeEntry {
     pub base_type: String,
     /// Meta parameter overrides as runtime values. Stored as a
     /// `ValueMap` so heap-tagged override values are released on drop.
-    pub overrides: Option<ValueMap>,
+    pub overrides: Option<HashMap<String, KindedSlot>>,
 }
 
 /// Registry for enum definitions
@@ -239,7 +235,6 @@ impl ExecutionContext {
             enum_registry: EnumRegistry::new(),
             struct_type_registry: HashMap::new(),
             progress_registry: None,
-            kernel_compiler: None,
         }
     }
 
@@ -282,7 +277,6 @@ impl ExecutionContext {
             enum_registry: EnumRegistry::new(),
             struct_type_registry: HashMap::new(),
             progress_registry: None,
-            kernel_compiler: None,
         }
     }
 
@@ -328,7 +322,6 @@ impl ExecutionContext {
             enum_registry: EnumRegistry::new(),
             struct_type_registry: HashMap::new(),
             progress_registry: None,
-            kernel_compiler: None,
         }
     }
 
@@ -378,7 +371,6 @@ impl ExecutionContext {
             enum_registry: EnumRegistry::new(),
             struct_type_registry: HashMap::new(),
             progress_registry: None,
-            kernel_compiler: None,
         }
     }
 
@@ -410,13 +402,13 @@ impl ExecutionContext {
         &mut self,
         alias_name: &str,
         base_type: &str,
-        overrides: Option<HashMap<String, ValueWord>>,
+        overrides: Option<HashMap<String, KindedSlot>>,
     ) {
         self.type_alias_registry.insert(
             alias_name.to_string(),
             TypeAliasRuntimeEntry {
                 base_type: base_type.to_string(),
-                overrides: overrides.map(ValueMap::from),
+                overrides,
             },
         );
     }
@@ -436,7 +428,7 @@ impl ExecutionContext {
     pub fn resolve_type_for_format(
         &self,
         type_name: &str,
-    ) -> (String, Option<ValueMap>) {
+    ) -> (String, Option<HashMap<String, KindedSlot>>) {
         if let Some(entry) = self.type_alias_registry.get(type_name) {
             (entry.base_type.clone(), entry.overrides.clone())
         } else {
@@ -449,232 +441,55 @@ impl ExecutionContext {
     // =========================================================================
 
     /// Create a serializable snapshot of the dynamic execution state.
-    pub fn snapshot(&self, store: &SnapshotStore) -> Result<ContextSnapshot> {
-        let mut scopes = Vec::new();
-        for scope in &self.variable_scopes {
-            let mut snap_scope = HashMap::new();
-            for (name, var) in scope.iter() {
-                let value = nanboxed_to_serializable(&var.value, store)?;
-                let format_overrides = match &var.format_overrides {
-                    Some(map) => {
-                        let mut out = HashMap::new();
-                        for (k, v) in map.iter() {
-                            out.insert(k.clone(), nanboxed_to_serializable(v, store)?);
-                        }
-                        Some(out)
-                    }
-                    None => None,
-                };
-                snap_scope.insert(
-                    name.clone(),
-                    VariableSnapshot {
-                        value,
-                        kind: var.kind,
-                        is_initialized: var.is_initialized,
-                        is_function_scoped: var.is_function_scoped,
-                        format_hint: var.format_hint.clone(),
-                        format_overrides,
-                    },
-                );
-            }
-            scopes.push(snap_scope);
-        }
-
-        let mut alias_registry = HashMap::new();
-        for (name, entry) in self.type_alias_registry.iter() {
-            let overrides = match &entry.overrides {
-                Some(map) => {
-                    let mut out = HashMap::new();
-                    for (k, v) in map.iter() {
-                        out.insert(k.clone(), nanboxed_to_serializable(v, store)?);
-                    }
-                    Some(out)
-                }
-                None => None,
-            };
-            alias_registry.insert(
-                name.clone(),
-                TypeAliasRuntimeEntrySnapshot {
-                    base_type: entry.base_type.clone(),
-                    overrides,
-                },
-            );
-        }
-
-        let enum_registry = self
-            .enum_registry
-            .names()
-            .filter_map(|name| {
-                self.enum_registry
-                    .get(name)
-                    .cloned()
-                    .map(|def| (name.clone(), def))
-            })
-            .collect::<HashMap<_, _>>();
-
-        let suspension_state = match self.suspension_state() {
-            Some(state) => {
-                let mut locals = Vec::new();
-                for v in state.saved_locals.iter() {
-                    locals.push(nanboxed_to_serializable(v, store)?);
-                }
-                let mut stack = Vec::new();
-                for v in state.saved_stack.iter() {
-                    stack.push(nanboxed_to_serializable(v, store)?);
-                }
-                Some(SuspensionStateSnapshot {
-                    waiting_for: state.waiting_for.clone(),
-                    resume_pc: state.resume_pc,
-                    saved_locals: locals,
-                    saved_stack: stack,
-                })
-            }
-            None => None,
-        };
-
-        let data_cache = match &self.data_cache {
-            Some(cache) => Some(cache.snapshot(store)?),
-            None => None,
-        };
-
-        Ok(ContextSnapshot {
-            data_load_mode: self.data_load_mode,
-            data_cache,
-            current_id: self.current_id.clone(),
-            current_row_index: self.current_row_index,
-            variable_scopes: scopes,
-            reference_datetime: self.reference_datetime,
-            current_timeframe: self.current_timeframe,
-            base_timeframe: self.base_timeframe,
-            date_range: self.date_range,
-            range_start: self.range_start,
-            range_end: self.range_end,
-            range_active: self.range_active,
-            type_alias_registry: alias_registry,
-            enum_registry,
-            struct_type_registry: self.struct_type_registry.clone(),
-            suspension_state,
-        })
+    ///
+    /// **W17-snapshot-resume surface — see ADR-006 §2.7.4 + §2.7.5.1.**
+    /// The kind-threaded `slot_to_serializable(slot, store)` replacement
+    /// for the deleted `nanboxed_to_serializable` is deferred to the
+    /// Phase 2c snapshot rebuild. W17 converts the previous `todo!()`
+    /// panic to a structured `anyhow!` error so the broken capability
+    /// surfaces as a runtime error rather than crashing the host
+    /// process.
+    pub fn snapshot(&self, _store: &SnapshotStore) -> Result<ContextSnapshot> {
+        let _ = (
+            &self.variable_scopes,
+            &self.type_alias_registry,
+            &self.enum_registry,
+            &self.struct_type_registry,
+            &self.data_cache,
+        );
+        let _: Option<SuspensionStateSnapshot> = None;
+        let _: Option<TypeAliasRuntimeEntrySnapshot> = None;
+        let _: Option<VariableSnapshot> = None;
+        Err(anyhow!(
+            "ExecutionContext::snapshot: W17-snapshot-resume surface — \
+             kind-threaded `slot_to_serializable(slot, store)` replacement \
+             for the deleted `nanboxed_to_serializable` has not landed. \
+             Tracked as W17-snapshot-resume per \
+             docs/cluster-audits/phase-2d-playbook.md §3. ADR-006 §2.7.4 \
+             (snapshot serialization deferral) + §2.7.5.1 (post-proof \
+             wire-format shape for new HeapKinds: HashSet, Iterator, \
+             Result, Option, Deque, Channel, PriorityQueue, Range, \
+             Reference, FilterExpr, SharedCell)."
+        ))
     }
 
     /// Restore execution state from a snapshot.
+    ///
+    /// See [`Self::snapshot`] — W17-snapshot-resume surface.
     pub fn restore_from_snapshot(
         &mut self,
-        snapshot: ContextSnapshot,
-        store: &SnapshotStore,
+        _snapshot: ContextSnapshot,
+        _store: &SnapshotStore,
     ) -> Result<()> {
-        self.data_load_mode = snapshot.data_load_mode;
-        self.current_id = snapshot.current_id;
-        self.current_row_index = snapshot.current_row_index;
-        self.reference_datetime = snapshot.reference_datetime;
-        self.current_timeframe = snapshot.current_timeframe;
-        self.base_timeframe = snapshot.base_timeframe;
-        self.date_range = snapshot.date_range;
-        self.range_start = snapshot.range_start;
-        self.range_end = snapshot.range_end;
-        self.range_active = snapshot.range_active;
-
-        match snapshot.data_cache {
-            Some(cache_snapshot) => {
-                if let Some(cache) = &self.data_cache {
-                    cache.restore_from_snapshot(cache_snapshot, store)?;
-                } else {
-                    return Err(anyhow!(
-                        "Snapshot includes data cache, but context has no async provider"
-                    ));
-                }
-            }
-            None => {
-                if let Some(cache) = &self.data_cache {
-                    cache.clear();
-                }
-            }
-        }
-
-        self.variable_scopes.clear();
-        for scope in snapshot.variable_scopes.into_iter() {
-            let mut restored = HashMap::new();
-            for (name, var) in scope.into_iter() {
-                let value = serializable_to_nanboxed(&var.value, store)?;
-                // Wrap the reconstructed HashMap in a ValueMap so the
-                // variable owns its override values' heap refs.
-                let format_overrides = match var.format_overrides {
-                    Some(map) => {
-                        let mut out = HashMap::new();
-                        for (k, v) in map.into_iter() {
-                            out.insert(k, serializable_to_nanboxed(&v, store)?);
-                        }
-                        Some(ValueMap::from(out))
-                    }
-                    None => None,
-                };
-                restored.insert(
-                    name,
-                    Variable {
-                        value,
-                        kind: var.kind,
-                        is_initialized: var.is_initialized,
-                        is_function_scoped: var.is_function_scoped,
-                        format_hint: var.format_hint,
-                        format_overrides,
-                    },
-                );
-            }
-            self.variable_scopes.push(restored);
-        }
-
-        self.type_alias_registry.clear();
-        for (name, entry) in snapshot.type_alias_registry.into_iter() {
-            // Wrap the rebuilt HashMap in a ValueMap so the type alias
-            // registry releases override values on drop.
-            let overrides = match entry.overrides {
-                Some(map) => {
-                    let mut out = HashMap::new();
-                    for (k, v) in map.into_iter() {
-                        out.insert(k, serializable_to_nanboxed(&v, store)?);
-                    }
-                    Some(ValueMap::from(out))
-                }
-                None => None,
-            };
-            self.type_alias_registry.insert(
-                name,
-                TypeAliasRuntimeEntry {
-                    base_type: entry.base_type,
-                    overrides,
-                },
-            );
-        }
-
-        self.enum_registry = EnumRegistry::default();
-        for (_name, def) in snapshot.enum_registry.into_iter() {
-            self.enum_registry.register(def);
-        }
-
-        self.struct_type_registry = snapshot.struct_type_registry;
-
-        if let Some(state) = snapshot.suspension_state {
-            let mut locals = Vec::new();
-            for v in state.saved_locals.into_iter() {
-                locals.push(serializable_to_nanboxed(&v, store)?);
-            }
-            let mut stack = Vec::new();
-            for v in state.saved_stack.into_iter() {
-                stack.push(serializable_to_nanboxed(&v, store)?);
-            }
-            self.set_suspension_state(
-                SuspensionState::new(state.waiting_for, state.resume_pc)
-                    .with_locals(locals)
-                    .with_stack(stack),
-            );
-        } else {
-            self.clear_suspension_state();
-        }
-
-        // Note: output_adapter is NOT restored from snapshot.
-        // It's set by the caller (StdoutAdapter for scripts, ReplAdapter for REPL).
-
-        Ok(())
+        Err(anyhow!(
+            "ExecutionContext::restore_from_snapshot: W17-snapshot-resume \
+             surface — symmetric to `snapshot()`. The kinded \
+             `serializable_to_slot(sv, expected_kind, store)` inverse \
+             reconstructs scope-binding parallel kind tracks from the \
+             persisted discriminator. Tracked as W17-snapshot-resume per \
+             docs/cluster-audits/phase-2d-playbook.md §3. ADR-006 §2.7.4 \
+             + §2.7.5.1."
+        ))
     }
 
     /// Set indicator cache
@@ -741,31 +556,16 @@ impl ExecutionContext {
         self.progress_registry.as_ref()
     }
 
-    /// Set the JIT kernel compiler for high-performance simulation.
-    ///
-    /// This enables JIT compilation of simulation kernels when the state is a TypedObject.
-    /// The compiler should be an instance of `shape_jit::JITCompiler` wrapped in Arc.
-    pub fn set_kernel_compiler(&mut self, compiler: Arc<dyn KernelCompiler>) {
-        self.kernel_compiler = Some(compiler);
-    }
-
-    /// Get the JIT kernel compiler, if set.
-    pub fn kernel_compiler(&self) -> Option<&Arc<dyn KernelCompiler>> {
-        self.kernel_compiler.as_ref()
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data::{AsyncDataProvider, CacheKey, DataQuery, NullAsyncProvider, Timeframe};
-    use crate::snapshot::SnapshotStore;
+    use crate::data::{AsyncDataProvider, CacheKey, DataQuery, Timeframe};
     use shape_ast::ast::VarKind;
-    use shape_value::ValueWordExt;
     use std::collections::HashMap;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn test_execution_context_new_empty() {
@@ -785,7 +585,7 @@ mod tests {
         let mut ctx = ExecutionContext::new_empty();
 
         // Set a variable using the public API
-        ctx.set_variable("x", ValueWord::from_f64(10.0))
+        ctx.set_variable("x", KindedSlot::from_number(10.0))
             .unwrap_or_else(|_| {
                 // Variable doesn't exist yet, need to create it first
                 // This is expected - we test that set_variable fails for undefined vars
@@ -802,7 +602,7 @@ mod tests {
 
         // Register a type alias: type Percent4 = Percent { decimals: 4 }
         let mut overrides = HashMap::new();
-        overrides.insert("decimals".to_string(), ValueWord::from_f64(4.0));
+        overrides.insert("decimals".to_string(), KindedSlot::from_number(4.0));
         ctx.register_type_alias("Percent4", "Percent", Some(overrides));
 
         // Look up the alias
@@ -814,7 +614,7 @@ mod tests {
 
         let overrides = entry.overrides.as_ref().unwrap();
         assert_eq!(
-            overrides.get("decimals").and_then(|v| v.as_f64()),
+            overrides.get("decimals").map(|v| v.slot().as_f64()),
             Some(4.0)
         );
     }
@@ -848,7 +648,7 @@ mod tests {
 
         // Register a type alias
         let mut overrides = HashMap::new();
-        overrides.insert("decimals".to_string(), ValueWord::from_f64(4.0));
+        overrides.insert("decimals".to_string(), KindedSlot::from_number(4.0));
         ctx.register_type_alias("Percent4", "Percent", Some(overrides.clone()));
 
         // Resolve the alias
@@ -859,7 +659,7 @@ mod tests {
             resolved_overrides
                 .unwrap()
                 .get("decimals")
-                .and_then(|v| v.as_f64()),
+                .map(|v| v.slot().as_f64()),
             Some(4.0)
         );
     }
@@ -913,61 +713,46 @@ mod tests {
         }
     }
 
-    fn temp_snapshot_root(name: &str) -> std::path::PathBuf {
-        let ts = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis();
-        std::env::temp_dir().join(format!("shape_ctx_snapshot_{}_{}", name, ts))
+    // `test_execution_context_snapshot_restores_data_cache` deleted with
+    // the rest of the snapshot/restore call sites. ADR-006 §2.7.4 ruling A
+    // defers the snapshot rebuild to Phase 2c; the corresponding test
+    // returns when the kind-threaded slot serializer lands.
+    #[allow(dead_code)]
+    fn _unused_snapshot_imports(
+        _provider: TestAsyncProvider,
+        _df: DataFrame,
+        _query: DataQuery,
+        _key: CacheKey,
+        _tf: Timeframe,
+        _kind: VarKind,
+        _kinded: KindedSlot,
+        _arc: Arc<()>,
+        _hashmap: HashMap<String, KindedSlot>,
+        _atomic: AtomicUsize,
+        _ordering: Ordering,
+    ) {
     }
 
-    fn make_df(id: &str, timeframe: Timeframe) -> DataFrame {
-        let mut df = DataFrame::new(id, timeframe);
-        df.timestamps = vec![1, 2, 3];
-        df.add_column("a", vec![10.0, 11.0, 12.0]);
-        df
-    }
+    /// W17-snapshot-resume gate: `ExecutionContext::snapshot` and
+    /// `ExecutionContext::restore_from_snapshot` both return a
+    /// structured `anyhow::Error` carrying the W17 surface marker,
+    /// never a `todo!()` panic that would abort the host process.
+    #[test]
+    fn test_w17_execution_context_snapshot_returns_structured_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = SnapshotStore::new(tmp.path()).expect("snapshot store");
+        let ctx = ExecutionContext::new_empty();
 
-    #[tokio::test]
-    async fn test_execution_context_snapshot_restores_data_cache() {
-        let tf = Timeframe::d1();
-        let df = make_df("TEST", tf);
-        let mut frames = HashMap::new();
-        frames.insert(CacheKey::new("TEST".to_string(), tf), df);
-        let load_calls = Arc::new(AtomicUsize::new(0));
-        let provider = Arc::new(TestAsyncProvider {
-            frames: Arc::new(frames),
-            load_calls: load_calls.clone(),
-        });
-
-        let mut ctx =
-            ExecutionContext::with_async_provider(provider, tokio::runtime::Handle::current());
-        ctx.prefetch_data(vec![DataQuery::new("TEST", tf)])
-            .await
-            .unwrap();
-        ctx.declare_variable("x", VarKind::Let, Some(ValueWord::from_f64(42.0)))
-            .unwrap();
-
-        let store = SnapshotStore::new(temp_snapshot_root("context_cache")).unwrap();
-        let snapshot = ctx.snapshot(&store).unwrap();
-
-        let mut restored = ExecutionContext::with_async_provider(
-            Arc::new(NullAsyncProvider::default()),
-            tokio::runtime::Handle::current(),
+        let result = ctx.snapshot(&store);
+        let err = result.expect_err("expected Err, got Ok");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("W17-snapshot-resume surface"),
+            "missing W17 marker; got: {msg}"
         );
-        restored.restore_from_snapshot(snapshot, &store).unwrap();
-
-        let val = restored.get_variable("x").unwrap();
-        assert_eq!(val, Some(ValueWord::from_f64(42.0)));
-
-        let row = restored
-            .data_cache()
-            .unwrap()
-            .get_row("TEST", &tf, 0)
-            .expect("row should be cached");
-        assert_eq!(row.timestamp, 1);
-        assert_eq!(row.fields.get("a"), Some(&10.0));
-
-        assert_eq!(load_calls.load(Ordering::SeqCst), 1);
+        assert!(
+            msg.contains("§2.7.4"),
+            "missing ADR-006 §2.7.4 cite; got: {msg}"
+        );
     }
 }

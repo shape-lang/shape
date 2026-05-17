@@ -10,6 +10,7 @@ use cranelift_module::{FuncId, Linkage, Module};
 use std::collections::HashMap;
 
 use super::super::ffi::v2;
+use super::super::ffi::v2::collection_arc;
 
 /// Register all v2 FFI symbols with the JIT builder.
 pub fn register_v2_symbols(builder: &mut JITBuilder) {
@@ -36,6 +37,24 @@ pub fn register_v2_symbols(builder: &mut JITBuilder) {
     builder.symbol("jit_v2_array_get_bool", v2::jit_v2_array_get_bool as *const u8);
     builder.symbol("jit_v2_array_set_bool", v2::jit_v2_array_set_bool as *const u8);
     builder.symbol("jit_v2_array_len_bool", v2::jit_v2_array_len_bool as *const u8);
+
+    // ADR-006 §2.7.5 + §2.7.24 Q25.A SUPERSEDED + audit deliverable (b)
+    // §4.1.B — v2-raw `TypedArray<*const StringObj>` / `TypedArray<*const
+    // DecimalObj>` heap-element allocators. Phase 3 cluster-0+1 Wave 3
+    // Stabilize Round 2 V3-S5 ckpt-6-prime Group X JIT FFI String/Decimal
+    // BUILD (2026-05-15). Bodies live in `ffi/v2/mod.rs` mirroring
+    // `jit_v2_array_new_<scalar>`'s shape; per-element refcount discipline
+    // is the caller's responsibility per the VM-side
+    // `NewStringV2` / `TypedArrayPushString` per-element transfer convention
+    // at `crates/shape-vm/src/executor/v2_handlers/array.rs:803-858`.
+    builder.symbol(
+        "jit_new_typed_array_string",
+        v2::jit_new_typed_array_string as *const u8,
+    );
+    builder.symbol(
+        "jit_new_typed_array_decimal",
+        v2::jit_new_typed_array_decimal as *const u8,
+    );
 
     // Generic typed-array push dispatcher (R7.2 consolidation)
     builder.symbol("jit_v2_array_push", v2::jit_v2_array_push as *const u8);
@@ -84,21 +103,107 @@ pub fn register_v2_symbols(builder: &mut JITBuilder) {
     builder.symbol("jit_v2_array_add_f64", v2::jit_v2_array_add_f64 as *const u8);
     builder.symbol("jit_v2_array_mul_f64", v2::jit_v2_array_mul_f64 as *const u8);
 
-    // Typed HashMap<string, ...> access
+    // ADR-006 §2.7.5 / §2.7.25 — Typed-Arc collection allocators
+    // (W12-jit-collection-arc-ffi-ctors-and-refcount, Phase 3 cluster-0
+    // Round 9 / 8B.1, 2026-05-13). Bodies live in
+    // `ffi/v2/collection_arc.rs`. Each ctor returns
+    // `Arc::into_raw(Arc<XData>) as u64` — the carrier-shape rule
+    // (audit §5) bans mixing this layout with W11's `Box<UnifiedValue<T>>`
+    // HeapHeader carriers; the per-HeapKind retain/release entries
+    // registered below operate on the Arc control block at offset -16,
+    // never the offset-4 UnifiedValue path.
+    builder.symbol("jit_v2_make_hashset", collection_arc::jit_v2_make_hashset as *const u8);
+    builder.symbol("jit_v2_make_hashmap", collection_arc::jit_v2_make_hashmap as *const u8);
+    builder.symbol("jit_v2_make_deque", collection_arc::jit_v2_make_deque as *const u8);
     builder.symbol(
-        "jit_v2_map_get_str_i64",
-        v2::jit_v2_map_get_str_i64 as *const u8,
+        "jit_v2_make_priorityqueue",
+        collection_arc::jit_v2_make_priorityqueue as *const u8,
+    );
+    builder.symbol("jit_v2_make_channel", collection_arc::jit_v2_make_channel as *const u8);
+    builder.symbol("jit_v2_make_atomic", collection_arc::jit_v2_make_atomic as *const u8);
+    builder.symbol("jit_v2_make_lazy", collection_arc::jit_v2_make_lazy as *const u8);
+    builder.symbol("jit_v2_make_mutex", collection_arc::jit_v2_make_mutex as *const u8);
+
+    // Per-HeapKind kinded retain/release. Refcount discipline at slots
+    // whose `NativeKind` is `Ptr(HeapKind::HashSet|HashMap|Deque|
+    // PriorityQueue|Channel|Mutex|Atomic|Lazy)` dispatches HERE instead
+    // of the legacy `jit_arc_retain` / `jit_arc_release` — see
+    // `mir_compiler/ownership.rs::retain_func_for_place` /
+    // `release_func_for_place` for the dispatch arms.
+    builder.symbol(
+        "jit_arc_hashset_retain",
+        collection_arc::jit_arc_hashset_retain as *const u8,
     );
     builder.symbol(
-        "jit_v2_map_get_str_f64",
-        v2::jit_v2_map_get_str_f64 as *const u8,
+        "jit_arc_hashset_release",
+        collection_arc::jit_arc_hashset_release as *const u8,
     );
-    builder.symbol("jit_v2_map_has_str", v2::jit_v2_map_has_str as *const u8);
     builder.symbol(
-        "jit_v2_map_set_str_i64",
-        v2::jit_v2_map_set_str_i64 as *const u8,
+        "jit_arc_hashmap_retain",
+        collection_arc::jit_arc_hashmap_retain as *const u8,
     );
-    builder.symbol("jit_v2_map_len", v2::jit_v2_map_len as *const u8);
+    builder.symbol(
+        "jit_arc_hashmap_release",
+        collection_arc::jit_arc_hashmap_release as *const u8,
+    );
+    builder.symbol(
+        "jit_arc_deque_retain",
+        collection_arc::jit_arc_deque_retain as *const u8,
+    );
+    builder.symbol(
+        "jit_arc_deque_release",
+        collection_arc::jit_arc_deque_release as *const u8,
+    );
+    builder.symbol(
+        "jit_arc_priorityqueue_retain",
+        collection_arc::jit_arc_priorityqueue_retain as *const u8,
+    );
+    builder.symbol(
+        "jit_arc_priorityqueue_release",
+        collection_arc::jit_arc_priorityqueue_release as *const u8,
+    );
+    builder.symbol(
+        "jit_arc_channel_retain",
+        collection_arc::jit_arc_channel_retain as *const u8,
+    );
+    builder.symbol(
+        "jit_arc_channel_release",
+        collection_arc::jit_arc_channel_release as *const u8,
+    );
+    builder.symbol(
+        "jit_arc_mutex_retain",
+        collection_arc::jit_arc_mutex_retain as *const u8,
+    );
+    builder.symbol(
+        "jit_arc_mutex_release",
+        collection_arc::jit_arc_mutex_release as *const u8,
+    );
+    builder.symbol(
+        "jit_arc_atomic_retain",
+        collection_arc::jit_arc_atomic_retain as *const u8,
+    );
+    builder.symbol(
+        "jit_arc_atomic_release",
+        collection_arc::jit_arc_atomic_release as *const u8,
+    );
+    builder.symbol(
+        "jit_arc_lazy_retain",
+        collection_arc::jit_arc_lazy_retain as *const u8,
+    );
+    builder.symbol(
+        "jit_arc_lazy_release",
+        collection_arc::jit_arc_lazy_release as *const u8,
+    );
+
+    // Typed HashMap<string, ...> access — SURFACE per ADR-006 §2.7.4 /
+    // W10 jit-playbook §5. The deleted ValueWord-shape map FFI
+    // (jit_v2_map_get_str_i64 / get_str_f64 / has_str / set_str_i64 /
+    // len) is gone; the strict-typing rebuild routes through
+    // `Arc<HashMapData>` + `KindedSlot` per ADR-006 §2.7.5 / §2.7.6 /
+    // Q8 — see `ffi/v2/typed_map.rs` SURFACE comment. Symbol
+    // registration is a no-op until the kinded entries land; the
+    // declarations in `declare_v2_functions` below are also a no-op
+    // for the same set so unresolved symbols never reach the JIT.
 }
 
 /// Helper: declare a function and insert into the map.
@@ -278,6 +383,34 @@ pub fn declare_v2_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<Stri
         sig.params.push(AbiParam::new(types::I64));
         sig.returns.push(AbiParam::new(types::I32));
         declare(module, ffi_funcs, "jit_v2_array_len_bool", &sig);
+    }
+
+    // ========================================================================
+    // Array — *const StringObj / *const DecimalObj (v2-raw heap-element)
+    // ========================================================================
+    //
+    // ADR-006 §2.7.5 + §2.7.24 Q25.A SUPERSEDED + audit deliverable (b)
+    // §4.1.B — v2-raw `TypedArray<*const StringObj>` / `TypedArray<*const
+    // DecimalObj>` heap-element allocators. Phase 3 cluster-0+1 Wave 3
+    // Stabilize Round 2 V3-S5 ckpt-6-prime Group X JIT FFI String/Decimal
+    // BUILD (2026-05-15). Mirrors `jit_v2_array_new_<scalar>` ABI:
+    // `(capacity: u32) -> *mut TypedArray<*const T>` (carrier returned as
+    // I64 raw bits).
+
+    // jit_new_typed_array_string(capacity: u32) -> ptr
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I32)); // capacity
+        sig.returns.push(AbiParam::new(types::I64)); // *mut TypedArray<*const StringObj>
+        declare(module, ffi_funcs, "jit_new_typed_array_string", &sig);
+    }
+
+    // jit_new_typed_array_decimal(capacity: u32) -> ptr
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I32)); // capacity
+        sig.returns.push(AbiParam::new(types::I64)); // *mut TypedArray<*const DecimalObj>
+        declare(module, ffi_funcs, "jit_new_typed_array_decimal", &sig);
     }
 
     // ========================================================================
@@ -489,56 +622,85 @@ pub fn declare_v2_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<Stri
     }
 
     // ========================================================================
-    // Typed HashMap<string, ...> access
+    // Typed-Arc collection allocators (Round 9 / 8B.1, ADR-006 §2.7.5 / §2.7.25)
     // ========================================================================
     //
-    // These helpers operate on `ValueWord`-encoded `u64` bits whose heap
-    // variant is `HeapValue::HashMap`. The JIT emits direct calls when the
-    // receiver's ConcreteType is `HashMap<String, V>` with a proven value
-    // type — eliminating the generic method-dispatch trampoline.
-
-    // jit_v2_map_get_str_i64(map_bits: u64, key_bits: u64) -> u64 (ValueWord)
-    {
+    // 5 zero-arg ctors: `() -> i64` (returns the raw u64 Arc::into_raw bits).
+    for name in [
+        "jit_v2_make_hashset",
+        "jit_v2_make_hashmap",
+        "jit_v2_make_deque",
+        "jit_v2_make_priorityqueue",
+        "jit_v2_make_channel",
+    ] {
         let mut sig = module.make_signature();
-        sig.params.push(AbiParam::new(types::I64)); // map bits
-        sig.params.push(AbiParam::new(types::I64)); // key bits
-        sig.returns.push(AbiParam::new(types::I64)); // ValueWord result
-        declare(module, ffi_funcs, "jit_v2_map_get_str_i64", &sig);
-    }
-
-    // jit_v2_map_get_str_f64(map_bits: u64, key_bits: u64) -> f64
-    {
-        let mut sig = module.make_signature();
-        sig.params.push(AbiParam::new(types::I64));
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::F64)); // NATIVE F64
-        declare(module, ffi_funcs, "jit_v2_map_get_str_f64", &sig);
-    }
-
-    // jit_v2_map_has_str(map_bits: u64, key_bits: u64) -> u64 (0/1)
-    {
-        let mut sig = module.make_signature();
-        sig.params.push(AbiParam::new(types::I64));
-        sig.params.push(AbiParam::new(types::I64));
         sig.returns.push(AbiParam::new(types::I64));
-        declare(module, ffi_funcs, "jit_v2_map_has_str", &sig);
+        declare(module, ffi_funcs, name, &sig);
     }
 
-    // jit_v2_map_set_str_i64(map_bits: u64, key_bits: u64, value_bits: u64) -> u64
-    {
-        let mut sig = module.make_signature();
-        sig.params.push(AbiParam::new(types::I64));
-        sig.params.push(AbiParam::new(types::I64));
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I64)); // updated map bits
-        declare(module, ffi_funcs, "jit_v2_map_set_str_i64", &sig);
-    }
-
-    // jit_v2_map_len(map_bits: u64) -> i64
+    // Single-kind ctors:
+    // jit_v2_make_atomic(i: i64) -> i64
     {
         let mut sig = module.make_signature();
         sig.params.push(AbiParam::new(types::I64));
         sig.returns.push(AbiParam::new(types::I64));
-        declare(module, ffi_funcs, "jit_v2_map_len", &sig);
+        declare(module, ffi_funcs, "jit_v2_make_atomic", &sig);
     }
+    // jit_v2_make_lazy(closure_bits: i64) -> i64
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        declare(module, ffi_funcs, "jit_v2_make_lazy", &sig);
+    }
+
+    // Carrier-pair ctor:
+    // jit_v2_make_mutex(bits: i64, kind: i8) -> i64
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // bits
+        sig.params.push(AbiParam::new(types::I8));  // kind code
+        sig.returns.push(AbiParam::new(types::I64));
+        declare(module, ffi_funcs, "jit_v2_make_mutex", &sig);
+    }
+
+    // Per-HeapKind kinded retain (each takes `bits: i64` and returns void)
+    // — operates on the Arc control block refcount at offset -16 per
+    // Rust Arc contract, NOT the W11 UnifiedValue<T> HeapHeader at offset 4.
+    for name in [
+        "jit_arc_hashset_retain",
+        "jit_arc_hashset_release",
+        "jit_arc_hashmap_retain",
+        "jit_arc_hashmap_release",
+        "jit_arc_deque_retain",
+        "jit_arc_deque_release",
+        "jit_arc_priorityqueue_retain",
+        "jit_arc_priorityqueue_release",
+        "jit_arc_channel_retain",
+        "jit_arc_channel_release",
+        "jit_arc_mutex_retain",
+        "jit_arc_mutex_release",
+        "jit_arc_atomic_retain",
+        "jit_arc_atomic_release",
+        "jit_arc_lazy_retain",
+        "jit_arc_lazy_release",
+    ] {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        declare(module, ffi_funcs, name, &sig);
+    }
+
+    // ========================================================================
+    // Typed HashMap<string, ...> access — SURFACE
+    // ========================================================================
+    //
+    // SURFACE (W10 jit-playbook §5 / ADR-006 §2.7.4): the deleted
+    // ValueWord-shape map FFI (jit_v2_map_get_str_i64 / get_str_f64 /
+    // has_str / set_str_i64 / len) is gone — see `ffi/v2/typed_map.rs`
+    // SURFACE comment. The declarations are dropped to keep the JIT
+    // module link step clean; consumers that try to call these
+    // symbols will fail at the Cranelift `call` lookup, which is the
+    // deletion-fate signal §5 calls for. Kinded rebuild lands the
+    // declarations alongside the kinded `Arc<HashMapData>` +
+    // `KindedSlot` entry-points per ADR-006 §2.7.5 / §2.7.6 / Q8.
 }

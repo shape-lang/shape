@@ -54,10 +54,12 @@ mod helpers_binding;
 mod helpers_reference;
 mod literals;
 mod loops;
+pub(crate) mod mir_schema_threading;
 pub(crate) mod monomorphization;
 mod patterns;
 mod statements;
 pub mod string_interpolation;
+mod trait_object_emission;
 
 /// Loop compilation context
 pub(crate) struct LoopContext {
@@ -497,6 +499,33 @@ pub enum CompileDiagnosticMode {
     RecoverAll,
 }
 
+/// cluster-2-cw-IB-class-b (2026-05-16, supervisor R3 binding-ratified):
+/// retained closure-literal peek used to re-run body return-type
+/// inference at the value-call site with caller-context arg type hints.
+/// Stored per-local-slot in `BytecodeCompiler.local_callable_closure_bodies`
+/// at let-binding time (`update_callable_binding_from_expr` /
+/// `FunctionExpr` arm). The body is the AST `Vec<Statement>` clone — no
+/// bytecode-lowering happens at lookup time; the inference walker only
+/// inspects AST shape.
+#[derive(Debug, Clone)]
+pub struct ClosureBodyPeek {
+    /// Formal parameters of the closure literal (`|inner|` →
+    /// `[FunctionParameter { pattern: Identifier("inner"), .. }]`).
+    pub params: Vec<shape_ast::ast::FunctionParameter>,
+    /// Closure literal body statements.
+    pub body: Vec<shape_ast::ast::Statement>,
+    /// Explicit `-> T` return annotation, if any.
+    pub return_type: Option<shape_ast::ast::TypeAnnotation>,
+    /// Compiled-function index assigned to the closure body by
+    /// `compile_expr_closure`. `None` until the closure literal is
+    /// actually lowered (the peek is built from the AST; the function
+    /// index is assigned at compile-emission time). Used by the value-
+    /// call propagation path to retroactively patch
+    /// `mir.local_typed_array_element_types` for the closure body's
+    /// MIR-side typed-array param seed.
+    pub function_index: Option<usize>,
+}
+
 /// Compiler state
 pub struct BytecodeCompiler {
     /// The program being built
@@ -620,8 +649,15 @@ pub struct BytecodeCompiler {
     /// right after the last item compiles (before drop-scope emission and
     /// Halt overwrite `last_expr_*`). Consumed by
     /// `populate_program_storage_hints` to populate
-    /// `top_level_frame.return_kind` for host-boundary ValueWord synthesis.
-    pub(crate) top_level_program_return_kind: crate::type_tracking::StorageHint,
+    /// `top_level_frame.return_kind` so the host boundary reads the kind
+    /// off the parallel-kind track (per ADR-006 §2.7.7 — the deleted
+    /// ValueWord-tagged synthesis is gone).
+    ///
+    /// Per ADR-006 §2.7.5.1 (compiler-tier intermediate state policy),
+    /// "kind not yet stamped" is carried as `Option<StorageHint>` —
+    /// `None` is the post-bulldozer replacement for the deleted
+    /// `StorageHint::Unknown` sentinel.
+    pub(crate) top_level_program_return_kind: Option<crate::type_tracking::StorageHint>,
 
     /// Result mode for the expression currently being compiled.
     pub(crate) current_expr_result_mode: ExprResultMode,
@@ -670,6 +706,52 @@ pub struct BytecodeCompiler {
     /// Sweep phase 3c.x: inferred return-type names for arrays of closures
     /// stored in module-binding slots (top-level `let arr = [|x| ..., ...]`).
     pub(crate) module_binding_array_callable_return_types: HashMap<u16, String>,
+
+    /// cluster-2-cw-IB-class-b (2026-05-16, supervisor R3 binding-
+    /// ratified): retained closure-literal body for local `let f = |..|
+    /// ..` bindings. Populated at let-binding time by
+    /// `update_callable_binding_from_expr`'s `FunctionExpr` arm;
+    /// consumed at `compile_expr_function_call`'s value-call branch when
+    /// re-running closure-body return-type inference with caller-context
+    /// arg types.
+    ///
+    /// The retained body is the AST `Vec<Statement>` clone (no lowering
+    /// occurs at lookup time — the inference walker only inspects AST
+    /// shape, never emits bytecode for the body). Released on
+    /// `clear_callable_binding` and on per-function compilation
+    /// snapshot/restore alongside the existing `local_callable_*`
+    /// maps (`functions.rs:1148-1151` / `:1496-1499` / `:1607-1608`).
+    ///
+    /// Memory cost: bounded by the number of local closure bindings in
+    /// the active function frame; the body is the same AST already held
+    /// by the parent `Statement::VariableDecl` initializer, just held
+    /// for the lifetime of the enclosing function-compile pass to avoid
+    /// re-walking the AST at every value-call site. Released when the
+    /// enclosing function compile completes.
+    pub(crate) local_callable_closure_bodies:
+        HashMap<u16, ClosureBodyPeek>,
+
+    /// cluster-2-cw-IB-class-b: module-binding variant of the closure
+    /// body peek. Covers top-level / REPL `let f = |..|` bindings whose
+    /// slots live in the module-binding space (not the local-slot
+    /// space). Populated/cleared alongside the existing
+    /// `module_binding_callable_return_types` map at the
+    /// `update_callable_binding_from_expr` `FunctionExpr` arm.
+    pub(crate) module_binding_callable_closure_bodies:
+        HashMap<u16, ClosureBodyPeek>,
+
+    /// ADR-006 §2.7.24 Q25.C trait-object emission (Wave 2.6 round-2):
+    /// per-local-slot trait name for `let a: dyn Animal = ...` bindings.
+    /// Consumed by `compile_expr_method_call` (`expressions/function_calls.rs`)
+    /// to route method dispatch through `OpCode::DynMethodCall` instead
+    /// of the standard `OpCode::CallMethod` path. Empty for non-dyn
+    /// locals.
+    pub(crate) dyn_locals: HashMap<u16, String>,
+
+    /// ADR-006 §2.7.24 Q25.C trait-object emission: per-module-binding
+    /// trait name for top-level `let a: dyn Animal = ...` declarations.
+    /// Same role as `dyn_locals` but for the module-binding slot space.
+    pub(crate) dyn_module_bindings: HashMap<u16, String>,
 
     /// Named functions that safely return one reference parameter unchanged.
     pub(crate) function_return_reference_summaries: HashMap<String, FunctionReturnReferenceSummary>,
@@ -744,8 +826,13 @@ pub struct BytecodeCompiler {
     pub(crate) next_const_specialization_id: u64,
     /// Const-parameter bindings for specialized function symbols.
     /// These bindings are exposed to comptime handlers as typed module_bindings.
+    /// Kinded carrier per ADR-006 §2.7 / Q7 (`KindedSlot`); the prior
+    /// `shape_value::ValueWord` shape was deleted by the strict-typing
+    /// bulldozer and the comptime ABI in
+    /// `compiler/comptime.rs:execute_comptime_with_annotation_handler`
+    /// already migrated to `(String, KindedSlot)` pairs.
     pub(crate) specialization_const_bindings:
-        HashMap<String, Vec<(String, shape_value::ValueWord)>>,
+        HashMap<String, Vec<(String, shape_value::KindedSlot)>>,
 
     /// Struct type definitions: type_name -> (field_names in order, definition span)
     pub(crate) struct_types: HashMap<String, (Vec<String>, shape_ast::ast::Span)>,
@@ -807,15 +894,18 @@ pub struct BytecodeCompiler {
     /// inference.
     ///
     /// Why: the v2 typed-array opcodes store the allocation as a raw
-    /// `NativeScalar::Ptr` ValueWord on the stack, not as a `HeapValue`
-    /// reference. Downstream consumers that unwrap the outer generic
-    /// `Array` via `as_any_array()` / `as_heap_ref()` cannot decode a
-    /// native-pointer ValueWord back into a typed array, so e.g.
-    /// `intrinsic_matmul_mat` fails with
-    /// "row 0 must be an array of numeric values". Refusing typed
-    /// emission for inner rows forces them onto the legacy `NewArray`
-    /// path, which produces heap-ref ValueWords that round-trip
-    /// correctly through a generic outer `Array`.
+    /// native pointer on the kinded VM stack with
+    /// `NativeKind::Ptr(HeapKind::TypedArray)` declared on the parallel-
+    /// kind track (ADR-006 §2.7.7), not as a generic heap-tagged value.
+    /// Downstream consumers that expect a generic `Array` via
+    /// `slot.as_heap_value()` cannot decode a typed-array native pointer
+    /// back into a generic Array (the deleted `as_heap_ref()` /
+    /// `as_any_array()` carrier accessors are gone), so e.g.
+    /// `intrinsic_matmul_mat` fails with "row 0 must be an array of
+    /// numeric values". Refusing typed emission for inner rows forces
+    /// them onto the legacy `NewArray` path, which produces a generic
+    /// `HeapValue::Array` that round-trips correctly through a generic
+    /// outer `Array`.
     pub(crate) nested_array_literal_depth: u32,
 
     /// v2 Phase 3.1: per-local-slot record of which locals hold a v2
@@ -856,6 +946,37 @@ pub struct BytecodeCompiler {
     /// [`v2_typed_map_locals`] for top-level bindings.
     pub(crate) v2_typed_map_module_bindings:
         HashMap<u16, crate::compiler::v2_typed_map_emission::TypedMapKind>,
+
+    /// ADR-006 §2.7.27 / Item 4 ruling (W17-mutation-writeback, 2026-05-12):
+    /// per-local-slot record of locals known to hold a Copy-on-Write
+    /// collection (HashSet / HashMap / Deque / PriorityQueue / Array of
+    /// generic carrier). Populated at let-binding time when the initializer
+    /// is one of `Set()` / `HashMap()` / `Deque()` / `PriorityQueue()` /
+    /// `[…]`, or when the binding has an explicit type annotation that
+    /// names the container kind.
+    ///
+    /// Consumed by `compile_expr_method_call`'s `&mut self` writeback
+    /// emission gate: for an identifier-receiver method call where
+    /// `(container_kind, method_name)` matches a `MUT_SELF_*` entry, the
+    /// compiler emits `Dup; StoreLocal recv` after `CallMethod` so the
+    /// new (possibly Arc-cloned) receiver Arc updates the binding slot.
+    pub(crate) mut_self_container_locals:
+        HashMap<u16, crate::compiler::mutation_writeback::ContainerKind>,
+
+    /// ADR-006 §2.7.27 / Item 4 ruling: per-module-binding record of
+    /// mutating-container module bindings. Mirrors
+    /// [`mut_self_container_locals`] for top-level bindings.
+    pub(crate) mut_self_container_bindings:
+        HashMap<u16, crate::compiler::mutation_writeback::ContainerKind>,
+
+    /// ADR-006 §2.7.27 / Item 4 ruling: signal raised by container-ctor
+    /// builtin call emitters (`SetCtor`, `DequeCtor`,
+    /// `PriorityQueueCtor`, `HashMapCtor`) so the surrounding statement-
+    /// binding code path can transfer the kind onto the target local
+    /// / module binding. Mirrors the existing
+    /// [`pending_variable_typed_array_kind`] convention.
+    pub(crate) pending_variable_container_kind:
+        Option<crate::compiler::mutation_writeback::ContainerKind>,
 
     /// v2 Phase 3.2: per-AST-node side table mapping a HashMap-shaped
     /// expression to its key/value `ConcreteType` pair. Populated by the
@@ -898,12 +1019,20 @@ pub struct BytecodeCompiler {
     /// Extension registry for comptime execution
     pub(crate) extension_registry: Option<Arc<Vec<shape_runtime::module_exports::ModuleExports>>>,
 
-    /// Comptime field values per type: type_name -> (field_name -> ValueWord).
-    /// These are type-level constants baked at compile time with zero
-    /// runtime cost. Inner map is a `ValueMap` so heap-tagged comptime
-    /// values (strings via `Arc<String>`, etc.) are released when a type's
-    /// entry is removed or the compiler is dropped.
-    pub(crate) comptime_fields: HashMap<String, shape_value::ValueMap>,
+    /// Comptime field values per type: type_name -> (field_name -> bake-time
+    /// constant). These are type-level constants baked at compile time
+    /// with zero runtime cost. Inner map releases heap-backed comptime
+    /// values (strings via `Arc<String>`, etc.) when a type's entry is
+    /// removed or the compiler is dropped.
+    ///
+    /// Kinded carrier per ADR-006 §2.7 / Q7 (`KindedSlot`); the prior
+    /// `shape_value::ValueMap` shape was deleted by the strict-typing
+    /// bulldozer along with `ValueWord`. Mirrors the
+    /// `comptime_builtins::ComptimeDirective::SetParamValue { value:
+    /// KindedSlot }` migration already landed in
+    /// `compiler/comptime_builtins.rs`.
+    pub(crate) comptime_fields:
+        HashMap<String, HashMap<String, shape_value::KindedSlot>>,
     /// Type diagnostic mode for shared analyzer diagnostics.
     pub(crate) type_diagnostic_mode: TypeDiagnosticMode,
     /// Expression compilation diagnostic mode.
@@ -1013,8 +1142,9 @@ pub struct BytecodeCompiler {
     /// at the point of closure construction. The closure body uses
     /// this map to dispatch to the typed Wave D.1 opcodes
     /// (`LoadOwnedMutableCapture<Kind>` / `StoreOwnedMutableCapture<Kind>`,
-    /// codes 0x140-0x155) instead of the legacy `0x132`/`0x133` ValueWord
-    /// opcodes. Populated alongside `owned_mutable_closure_captures`,
+    /// codes 0x140-0x155) instead of the legacy untyped `0x132`/`0x133`
+    /// opcodes (kind-erased pre-strict-typing — ADR-006 §2.7.7).
+    /// Populated alongside `owned_mutable_closure_captures`,
     /// saved/restored across nested closure-body compilations.
     pub(crate) owned_mutable_capture_inner_kinds:
         HashMap<String, shape_value::v2::struct_layout::FieldKind>,
@@ -1026,8 +1156,9 @@ pub struct BytecodeCompiler {
     /// `owned_mutable_capture_inner_kinds`. The closure body uses this
     /// map to dispatch to the typed Wave D.2 opcodes
     /// (`LoadSharedCapture<Kind>` / `StoreSharedCapture<Kind>`, codes
-    /// 0x156-0x16B) instead of the legacy `0x134`/`0x135` ValueWord
-    /// opcodes. Saved/restored across nested closure-body compilations.
+    /// 0x156-0x16B) instead of the legacy untyped `0x134`/`0x135`
+    /// opcodes (kind-erased pre-strict-typing — ADR-006 §2.7.7).
+    /// Saved/restored across nested closure-body compilations.
     pub(crate) shared_capture_inner_kinds:
         HashMap<String, shape_value::v2::struct_layout::FieldKind>,
 
@@ -1038,8 +1169,10 @@ pub struct BytecodeCompiler {
     pub(crate) boxed_locals: HashSet<String>,
 
     /// Track A.1C.2: local slots that have been promoted to
-    /// `Arc<parking_lot::Mutex<ValueWord>>` via the `AllocSharedLocal`
-    /// opcode. After promotion, every outer-scope read/write of the slot
+    /// `Arc<parking_lot::Mutex<u64>>` via the `AllocSharedLocal`
+    /// opcode (with the matching `NativeKind` declared on the cell's
+    /// parallel-kind track per ADR-006 §2.7.8). After promotion, every
+    /// outer-scope read/write of the slot
     /// must go through `LoadSharedLocal` / `StoreSharedLocal` (never plain
     /// `LoadLocal` / `StoreLocal`), and scope exit must emit
     /// `DropSharedLocal` so the Arc strong count is released exactly once
@@ -1078,7 +1211,9 @@ pub struct BytecodeCompiler {
     pub(crate) captured_let_mut_moved: HashMap<String, Span>,
 
     /// Track A.1C.3: module-binding slots that have been promoted to
-    /// `Arc<parking_lot::Mutex<ValueWord>>` via `AllocSharedModuleBinding`.
+    /// `Arc<parking_lot::Mutex<u64>>` via `AllocSharedModuleBinding`
+    /// (with the matching `NativeKind` declared on the cell's
+    /// parallel-kind track per ADR-006 §2.7.8).
     /// After promotion, every outer-scope read/write of the binding must
     /// go through `LoadSharedModuleBinding` / `StoreSharedModuleBinding`
     /// (never plain `LoadModuleBinding` / `StoreModuleBinding`). Keyed
@@ -1246,10 +1381,24 @@ pub fn infer_param_pass_modes(program: &Program) -> HashMap<String, Vec<ParamPas
     )
 }
 
-#[cfg(all(test, feature = "deep-tests"))]
+// ADR-006 §2.7.4 / §2.7.7 — Phase 2c deferral.
+//
+// `compiler_tests.rs` is a deep test harness that uses `eval()`-style
+// helpers returning the deleted `shape_value::ValueWord`. Per playbook
+// §7 REVISED #4, the correct surface for a non-migratable test site is
+// `cfg(any())`-gating rather than reintroducing the §2.7.7 forbidden
+// carrier. Re-enabling is Phase 2c work tracked in playbook §10's
+// Wave-β B12 deferral pattern.
+#[cfg(any())]
 #[path = "compiler_tests.rs"]
 mod compiler_deep;
 pub(crate) mod v2_array_emission;
 pub(crate) mod v2_map_emission;
 pub(crate) mod v2_typed_emission;
 pub(crate) mod v2_typed_map_emission;
+
+// ADR-006 §2.7.27 / Item 4 ruling (W17-mutation-writeback, 2026-05-12):
+// compile-time write-back emission for `&mut self` opt-in methods on
+// COW container receivers (HashSet / HashMap / Array / Deque /
+// PriorityQueue / TypedArray).
+pub(crate) mod mutation_writeback;

@@ -28,6 +28,35 @@ pub const HEAP_KIND_V2_STRUCT: u16 = 83;
 /// releases each pointer capture. See `docs/v2-closure-specialization.md` §1.3
 /// and §5.3 for the full ABI.
 pub const HEAP_KIND_V2_CLOSURE: u16 = 84;
+/// R20 S2-prime-production: v2-raw `DecimalObj` carrier kind. The 24-byte
+/// `#[repr(C)]` struct (HeapHeader at offset 0 + inline `rust_decimal::Decimal`
+/// at offset 8) lives in `decimal_obj.rs`. Per ADR-006 §2.7.24 Q25.A SUPERSEDED
+/// + audit §4.1.D.1 — the on-header `kind` byte tags the v2-raw carrier; the
+/// `NativeKind::Ptr(HeapKind::Decimal)` label is unchanged at the slot ABI.
+pub const HEAP_KIND_V2_DECIMAL: u16 = 85;
+/// Wave 2 Agent D1 (2026-05-14): v2-raw `TypedObjectStorage` carrier kind.
+/// `TypedObjectStorage` grows a `HeapHeader` at offset 0 (per ADR-006 §2.3
+/// amendment and audit §4.3 Obstacle O-3.a resolution). The struct is
+/// `#[repr(C)]`; allocation goes through `TypedObjectStorage::_new` which
+/// returns `*mut TypedObjectStorage` with the header initialized via
+/// `HeapHeader::new(HEAP_KIND_V2_TYPED_OBJECT)`. Refcount discipline on the
+/// raw-pointer path goes through `v2_retain` / `v2_release` per the
+/// `HeapElement` trait. The `NativeKind::Ptr(HeapKind::TypedObject)` label
+/// is unchanged at the slot ABI. Next free post-`HEAP_KIND_V2_DECIMAL=85`.
+pub const HEAP_KIND_V2_TYPED_OBJECT: u16 = 86;
+/// Wave 2 Agent E (2026-05-14): v2-raw `TraitObjectStorage` carrier kind.
+/// `TraitObjectStorage` grows a `HeapHeader` at offset 0 (per ADR-006
+/// §Q25.C.5 amendment and audit §4.3 Obstacle O-3.a resolution). The struct
+/// is `#[repr(C)]`; allocation goes through `TraitObjectStorage::_new` which
+/// returns `*mut TraitObjectStorage` with the header initialized via
+/// `HeapHeader::new(HEAP_KIND_V2_TRAIT_OBJECT)`. Refcount discipline on the
+/// raw-pointer path goes through `v2_retain` / `v2_release` per the
+/// `HeapElement` trait. The `NativeKind::Ptr(HeapKind::TraitObject)` label
+/// is unchanged at the slot ABI. The struct continues to carry an inner
+/// `Arc<TypedObjectStorage>` value half + `Arc<VTable>` vtable half during
+/// Wave 2 Round 2 transition; D2's parallel close evaporates the inner
+/// `Arc<TypedObjectStorage>` wrapping. Next free post-`HEAP_KIND_V2_TYPED_OBJECT=86`.
+pub const HEAP_KIND_V2_TRAIT_OBJECT: u16 = 87;
 
 // Flag bits
 pub const FLAG_MARKED: u8 = 0x01;
@@ -37,6 +66,7 @@ pub const FLAG_READONLY: u8 = 0x04;
 /// 8-byte header for all v2 heap-allocated objects.
 /// Refcount at offset 0 for fastest access.
 #[repr(C)]
+#[derive(Debug)]
 pub struct HeapHeader {
     /// Atomic reference count (offset 0, 4 bytes).
     pub refcount: AtomicU32,
@@ -224,6 +254,9 @@ mod tests {
             HEAP_KIND_V2_TYPED_MAP,
             HEAP_KIND_V2_STRUCT,
             HEAP_KIND_V2_CLOSURE,
+            HEAP_KIND_V2_DECIMAL,
+            HEAP_KIND_V2_TYPED_OBJECT,
+            HEAP_KIND_V2_TRAIT_OBJECT,
         ];
         for i in 0..kinds.len() {
             for j in (i + 1)..kinds.len() {

@@ -24,6 +24,10 @@ chrono = { workspace = true }
 sha2 = "0.10"
 libloading = "0.8"
 wide = "0.7"
+# ckpt-6-prime Group X JIT FFI String/Decimal BUILD (2026-05-15) —
+# `decimal_obj_constant` materializer needs `rust_decimal::Decimal` to
+# construct `DecimalObj` heap objects from MIR-time Decimal literals.
+rust_decimal = { workspace = true }
 
 # Cranelift is required for JIT
 cranelift = "0.110"
@@ -33,8 +37,20 @@ cranelift-native = "0.110"
 target-lexicon = "0.12"
 shape-gc = { workspace = true, optional = true }
 
+# Cluster-2 closure-wave-F tracing-crate migration (2026-05-16): structured
+# tracing for SHAPE_JIT_* diagnostic surfaces. Default-features = false plus
+# the `jit-trace` opt-in feature below produce zero runtime cost in release
+# builds — `release_max_level_off` compiles all tracing macros to no-ops.
+# Per ADR-006 §2.7.5 cross-crate ABI policy: tracing is internal-Rust-side
+# only; the extension contract at `module_exports.rs:21` stays on raw bits.
+tracing = { version = "0.1", default-features = false }
+
 [features]
 default = []
+# `jit-trace` enables the tracing macros at debug/trace levels. Without it,
+# `release_max_level_off` ensures shape-jit's diagnostic call sites compile
+# away to no-ops. The CLI's `--trace-jit` flag is also gated on this feature.
+jit-trace = ["tracing/std", "tracing/release_max_level_debug"]
 gc = ["shape-gc"]
 # Gate heavy JIT execution-path tests (integration_tests, a1d2_tests, a1e_tests,
 # v2_array_tests) behind this feature. Each heavy test invokes

@@ -236,7 +236,11 @@ impl BytecodeCompiler {
         if let Expr::Identifier(name, _) = expr {
             if let Some(local_idx) = self.resolve_local(name) {
                 if let Some(info) = self.type_tracker.get_local_type(local_idx) {
-                    if info.storage_hint == crate::type_tracking::StorageHint::Int64 {
+                    // Post-§2.7.5.1: `info.storage_hint` is
+                    // `Option<StorageHint>`; `Some(Int64)` is the proven-Int
+                    // case, anything else (including `None` for
+                    // not-yet-proven) falls through to the safe Number path.
+                    if info.storage_hint == Some(crate::type_tracking::StorageHint::Int64) {
                         return NumericType::Int;
                     }
                 }
@@ -280,11 +284,12 @@ impl BytecodeCompiler {
                     return None;
                 }
                 let info = self.type_tracker.get_local_type(local_idx)?;
-                if info.storage_hint != crate::type_tracking::StorageHint::Unknown {
-                    Some(info.storage_hint)
-                } else {
-                    None
-                }
+                // Per ADR-006 §2.7.5.1, `NativeKind::Unknown` was deleted —
+                // the in-memory analysis state for "not yet known" is held
+                // as `Option<StorageHint>` on `info.storage_hint` itself.
+                // Returning that field flat propagates `None` (not yet
+                // proven) through this getter's `Option` return type.
+                info.storage_hint
             }
             Expr::Literal(Literal::Int(_), _) => Some(crate::type_tracking::StorageHint::Int64),
             Expr::Literal(Literal::Number(_), _) => {
@@ -854,14 +859,14 @@ impl BytecodeCompiler {
                     //      info came from an annotation rather than
                     //      full inference).
                     //   2. `storage_hint_for_expr` fallback, which reads
-                    //      the tracker's `SlotKind` hint (set by
+                    //      the tracker's `NativeKind` hint (set by
                     //      `let x: string = ...` annotations and by
                     //      literals). This is the same helper the numeric
                     //      path uses via `storage_hint_for_expr` below.
                     let lhs_is_string = matches!(lhs_name.as_deref(), Some("string"))
                         || matches!(
                             self.storage_hint_for_expr(left),
-                            Some(crate::type_tracking::SlotKind::String)
+                            Some(crate::type_tracking::NativeKind::String)
                         );
                     if lhs_is_string
                         && crate::compiler::helpers::typed_string_coerce_concat_enabled()
@@ -872,13 +877,13 @@ impl BytecodeCompiler {
                             Some("number") => Some(OpCode::StringConcatNumber),
                             Some("bool") => Some(OpCode::StringConcatBool),
                             _ => match rhs_hint {
-                                Some(crate::type_tracking::SlotKind::Int64) => {
+                                Some(crate::type_tracking::NativeKind::Int64) => {
                                     Some(OpCode::StringConcatInt)
                                 }
-                                Some(crate::type_tracking::SlotKind::Float64) => {
+                                Some(crate::type_tracking::NativeKind::Float64) => {
                                     Some(OpCode::StringConcatNumber)
                                 }
-                                Some(crate::type_tracking::SlotKind::Bool) => {
+                                Some(crate::type_tracking::NativeKind::Bool) => {
                                     Some(OpCode::StringConcatBool)
                                 }
                                 _ => None,

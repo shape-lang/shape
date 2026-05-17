@@ -5,7 +5,7 @@
 
 use crate::type_system::annotation_to_string;
 use shape_ast::ast::{MethodDef, TypeName};
-use shape_value::{ValueWord, ValueWordExt};
+use shape_value::KindedSlot;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -65,9 +65,13 @@ impl TypeMethodRegistry {
             .cloned()
     }
 
-    /// Get the type name for a value
-    pub fn get_value_type_name(value: &ValueWord) -> String {
-        value.type_name().to_string()
+    /// Get the type name for a value.
+    ///
+    /// Per ADR-006 §2.7.1.2 the value carrier is `KindedSlot`; the
+    /// type-name comes from the carried `NativeKind` rather than from
+    /// tag-bit dispatch on a raw `ValueWord`.
+    pub fn get_value_type_name(value: &KindedSlot) -> String {
+        format!("{:?}", value.kind())
     }
 
     /// Get all methods for a type

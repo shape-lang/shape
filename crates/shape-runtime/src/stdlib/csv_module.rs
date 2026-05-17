@@ -1,12 +1,60 @@
 //! Native `csv` module for CSV parsing and serialization.
 //!
-//! Exports: csv.parse, csv.parse_records, csv.stringify, csv.stringify_records,
-//!          csv.read_file, csv.is_valid
+//! Phase 2d Array cluster migration: `parse`, `stringify`, `read_file`,
+//! and `is_valid` ported to the typed marshal layer using
+//! `TypedArrayData::String` (rows of strings) inside
+//! `the-deleted-heterogeneous-element-carrier` (array of rows).
+//!
+//! Stage C HashMap-marshal P1(b) activation (2026-05-07): `parse_records`
+//! and `stringify_records` activated using `HeapValue::HashMap(HashMapData)`
+//! variant. Each record is `Arc<HeapValue::HashMap>` carrying string keys
+//! (header row) → string values (record fields). Insertion order
+//! preserved via the eager-bucket-only HashMapData buffer pair.
+//!
+//! Tests deferred — ValueWord-based test fixtures can't compile and
+//! aren't reconstructed until the shape-vm cascade provides a typed
+//! test harness, mirroring the file_ops migration in commit d716482.
 
+use crate::marshal::{register_typed_fn_1, register_typed_fn_2_full};
 use crate::module_exports::{ModuleExports, ModuleParam};
-use crate::typed_module_exports::{ConcreteType, TypedReturn, register_typed_function};
-use shape_value::{ArgVec, ValueWord, ValueWordExt};
+use crate::type_schema::register_predeclared_any_schema;
+use crate::typed_module_exports::{ConcreteReturn, ConcreteType, TypedReturn};
+use shape_value::heap_value::{HeapValue, TypedObjectStorage};
+use shape_value::{NativeKind, ValueSlot};
 use std::sync::Arc;
+
+// W17-out-of-bundle-A-followups (2026-05-12): `row_to_heap` was the
+// per-row `Arc<HeapValue::TypedArray(TypedArrayData::String)>` builder
+// for the pre-rewire `csv.parse` / `csv.read_file` `Array<Array<string>>`
+// shape. Both now surface-and-stop pending the
+// W17-typed-carrier-array-typedarray follow-up; the helper is removed
+// alongside its construction call sites.
+
+/// Read a `Vec<Vec<String>>` from a `Vec<Arc<HeapValue>>` whose elements
+/// are each the deleted outer typed-array arm.
+///
+/// V3-S5 ckpt-5-prime²c (2026-05-15) SURFACE-AND-STOP: this consumer
+/// pattern-matched `HeapValue::TypedArray(Arc<TypedArrayData>)` to extract
+/// the per-row `Vec<String>`. Both the outer arm and the inner
+/// `TypedArrayData::String` shape are deleted (V3-S5 ckpt-1/ckpt-4/ckpt-5)
+/// — the per-row carrier is now a `*mut TypedArray<*const StringObj>` raw
+/// pointer with no `HeapValue::*` wrapper, so `Vec<Arc<HeapValue>>` cannot
+/// express it. Pairs with the Round 2 `Vec<Arc<HeapValue>>` rewire
+/// follow-up at `marshal.rs:FromSlot<Vec<Arc<HeapValue>>>` and the
+/// `from_typed_array_<T>` constructor wave at `slot.rs:142`.
+fn rows_from_heap_array(
+    rows: &[Arc<HeapValue>],
+    fn_name: &str,
+) -> Result<Vec<Vec<String>>, String> {
+    let _ = rows;
+    Err(format!(
+        "{}: V3-S5 ckpt-5-prime²c SURFACE — per-row outer-array-arm \
+         consumer needs Vec<Arc<HeapValue>> rewire for the deleted \
+         outer-array-arm. Round 2 follow-up. ADR-006 §2.7.24 Q25.A \
+         SUPERSEDED.",
+        fn_name
+    ))
+}
 
 /// Create the `csv` module with CSV parsing and serialization functions.
 pub fn create_csv_module() -> ModuleExports {
@@ -14,103 +62,47 @@ pub fn create_csv_module() -> ModuleExports {
     module.description = "CSV parsing and serialization".to_string();
 
     // csv.parse(text: string) -> Array<Array<string>>
-    register_typed_function(
+    //
+    // W17-out-of-bundle-A-followups (2026-05-12): surface-and-stop.
+    // `Array<Array<string>>` is homogeneous in
+    // `HeapKind::TypedArray (TypedArrayData::String)` — the natural
+    // Q25.A specialized variant is
+    // `TypedArrayData::TypedArray(Arc<TypedBuffer<Arc<TypedArrayData>>>)`,
+    // but adding a nested-TypedArray variant is out of bundle-A-followups
+    // scope (the prompt forbids new HeapKind variants and an added
+    // TypedArrayData variant cascades through ~40 exhaustive matches).
+    // Users wanting per-record dispatch should use `csv.parse_records`
+    // which lowers to `Array<TypedObject>` via the C+ precedent.
+    register_typed_fn_1::<_, Arc<String>>(
         &mut module,
         "parse",
         "Parse CSV text into an array of rows (each row is an array of strings)",
-        vec![ModuleParam {
-            name: "text".to_string(),
-            type_name: "string".to_string(),
-            required: true,
-            description: "CSV text to parse".to_string(),
-            ..Default::default()
-        }],
-        ConcreteType::Named("Array<Array<string>>".to_string()),
-        |args, _ctx| {
-            let text = args
-                .first()
-                .and_then(|a| a.as_str())
-                .ok_or_else(|| "csv.parse() requires a string argument".to_string())?;
-
-            let mut reader = csv::ReaderBuilder::new()
-                .has_headers(false)
-                .from_reader(text.as_bytes());
-
-            let mut rows: Vec<ValueWord> = Vec::new();
-            for result in reader.records() {
-                let record = result.map_err(|e| format!("csv.parse() failed: {}", e))?;
-                let row: ArgVec = ArgVec::from_vec(
-                    record
-                        .iter()
-                        .map(|field| ValueWord::from_string(Arc::new(field.to_string())))
-                        .collect(),
-                );
-                rows.push(ValueWord::from_array(shape_value::vmarray_from_vec(
-                    row.into_inner(),
-                )));
-            }
-
-            Ok(TypedReturn::ArrayValueWord(rows))
-        },
-    );
-
-    // csv.parse_records(text: string) -> Array<HashMap<string, string>>
-    register_typed_function(
-        &mut module,
-        "parse_records",
-        "Parse CSV text using the header row as keys, returning an array of hashmaps",
-        vec![ModuleParam {
-            name: "text".to_string(),
-            type_name: "string".to_string(),
-            required: true,
-            description: "CSV text to parse (first row is headers)".to_string(),
-            ..Default::default()
-        }],
-        ConcreteType::Named("Array<HashMap<string, string>>".to_string()),
-        |args, _ctx| {
-            let text = args
-                .first()
-                .and_then(|a| a.as_str())
-                .ok_or_else(|| "csv.parse_records() requires a string argument".to_string())?;
-
-            let mut reader = csv::ReaderBuilder::new()
-                .has_headers(true)
-                .from_reader(text.as_bytes());
-
-            let headers: Vec<String> = reader
-                .headers()
-                .map_err(|e| format!("csv.parse_records() failed to read headers: {}", e))?
-                .iter()
-                .map(|h| h.to_string())
-                .collect();
-
-            let mut records: Vec<ValueWord> = Vec::new();
-            for result in reader.records() {
-                let record = result.map_err(|e| format!("csv.parse_records() failed: {}", e))?;
-                let mut keys: ArgVec = ArgVec::with_capacity(headers.len());
-                let mut values: ArgVec = ArgVec::with_capacity(headers.len());
-                for (i, field) in record.iter().enumerate() {
-                    if i < headers.len() {
-                        keys.push(ValueWord::from_string(Arc::new(headers[i].clone())));
-                        values.push(ValueWord::from_string(Arc::new(field.to_string())));
-                    }
-                }
-                records.push(ValueWord::from_hashmap_pairs(
-                    keys.into_inner(),
-                    values.into_inner(),
-                ));
-            }
-
-            Ok(TypedReturn::ArrayValueWord(records))
+        "text",
+        "string",
+        ConcreteType::ArrayHeapValue("Array<Array<string>>".to_string()),
+        |text, _ctx| {
+            let _ = text;
+            // phase-2d-hardening:(f) — csv.parse surface-and-stop:
+            // Array<Array<string>> needs TypedArrayData::TypedArray
+            // (nested-TypedArray) variant. Use csv.parse_records for
+            // per-record TypedObject dispatch in the meantime.
+            Err(format!(
+                "csv.parse(): SURFACE — `Array<Array<string>>` needs a \
+                 nested-array variant in ADR-006 \
+                 §2.7.24 Q25.A's spec list. Tracked as \
+                 W17-typed-carrier-array-typedarray follow-up (out of \
+                 bundle-A-followups scope). Use `csv.parse_records` for \
+                 per-record TypedObject access. ADR-006 §2.7.24 Q25.A."
+            ))
         },
     );
 
     // csv.stringify(data: Array<Array<string>>, delimiter?: string) -> string
-    register_typed_function(
+    register_typed_fn_2_full::<_, Vec<Arc<HeapValue>>, Arc<String>>(
         &mut module,
         "stringify",
         "Convert an array of rows to a CSV string",
-        vec![
+        [
             ModuleParam {
                 name: "data".to_string(),
                 type_name: "Array<Array<string>>".to_string(),
@@ -128,40 +120,22 @@ pub fn create_csv_module() -> ModuleExports {
             },
         ],
         ConcreteType::String,
-        |args, _ctx| {
-            let data = args
-                .first()
-                .and_then(|a| a.as_any_array())
-                .ok_or_else(|| {
-                    "csv.stringify() requires an Array<Array<string>> argument".to_string()
-                })?
-                .to_generic();
+        |data, delimiter, _ctx| {
+            let rows = rows_from_heap_array(&data, "csv.stringify()")?;
 
-            let delimiter = args
-                .get(1)
-                .and_then(|a| a.as_str())
-                .and_then(|s| s.as_bytes().first().copied())
+            let delim_byte = delimiter
+                .as_bytes()
+                .first()
+                .copied()
                 .unwrap_or(b',');
 
             let mut writer = csv::WriterBuilder::new()
-                .delimiter(delimiter)
+                .delimiter(delim_byte)
                 .from_writer(Vec::new());
 
-            for row_val in data.iter() {
-                let row_arr = row_val.as_any_array().ok_or_else(|| {
-                    "csv.stringify() each row must be an Array<string>".to_string()
-                })?;
-                let row = row_arr.to_generic();
-                let fields: Vec<String> = row
-                    .iter()
-                    .map(|f| {
-                        f.as_str()
-                            .map(|s| s.to_string())
-                            .unwrap_or_else(|| f.to_string())
-                    })
-                    .collect();
+            for row in &rows {
                 writer
-                    .write_record(&fields)
+                    .write_record(row)
                     .map_err(|e| format!("csv.stringify() failed: {}", e))?;
             }
 
@@ -171,586 +145,356 @@ pub fn create_csv_module() -> ModuleExports {
             let output = String::from_utf8(bytes)
                 .map_err(|e| format!("csv.stringify() UTF-8 error: {}", e))?;
 
-            Ok(TypedReturn::String(output))
+            Ok(TypedReturn::Concrete(ConcreteReturn::String(output)))
+        },
+    );
+
+    // csv.read_file(path: string) -> Result<Array<Array<string>>>
+    //
+    // W17-out-of-bundle-A-followups (2026-05-12): surface-and-stop, same
+    // shape as csv.parse above — `Array<Array<string>>` needs the
+    // nested-TypedArray variant in Q25.A's spec list. Tracked as
+    // W17-typed-carrier-array-typedarray follow-up.
+    register_typed_fn_1::<_, Arc<String>>(
+        &mut module,
+        "read_file",
+        "Read and parse a CSV file into an array of rows",
+        "path",
+        "string",
+        ConcreteType::Result(Box::new(ConcreteType::ArrayHeapValue(
+            "Array<Array<string>>".to_string(),
+        ))),
+        |path, _ctx| {
+            let _ = path;
+            // phase-2d-hardening:(f) — csv.read_file surface-and-stop:
+            // same nested-TypedArray gap as csv.parse.
+            Err(format!(
+                "csv.read_file(): SURFACE — `Array<Array<string>>` needs a \
+                 nested-array variant in ADR-006 \
+                 §2.7.24 Q25.A's spec list. Tracked as \
+                 W17-typed-carrier-array-typedarray follow-up. ADR-006 §2.7.24 Q25.A."
+            ))
+        },
+    );
+
+    // csv.is_valid(text: string) -> bool
+    register_typed_fn_1::<_, Arc<String>>(
+        &mut module,
+        "is_valid",
+        "Check if a string is valid CSV",
+        "text",
+        "string",
+        ConcreteType::Bool,
+        |text, _ctx| {
+            let mut reader = csv::ReaderBuilder::new()
+                .has_headers(false)
+                .from_reader(text.as_bytes());
+
+            let valid = reader.records().all(|r| r.is_ok());
+            Ok(TypedReturn::Concrete(ConcreteReturn::Bool(valid)))
+        },
+    );
+
+    // csv.parse_records(text: string) -> Array<{header→string}>
+    //
+    // Parses CSV text using the first row as header keys; each subsequent
+    // row becomes a TypedObject keyed by header column names. Header
+    // order = field order = column order.
+    //
+    // W17-out-of-bundle-A-followups (2026-05-12): per the C+ precedent
+    // recorded in `phase-2d-playbook.md` §3, each record is constructed
+    // as `Arc<HeapValue::TypedObject>` with a schema derived from the
+    // CSV header row. The outer array lowers to
+    // `TypedArrayData::TypedObject` via the marshal-boundary
+    // `build_specialized_from_heap_arcs` dispatch. The pre-rewire
+    // `HashMap<string, string>` shape — which routed through the
+    // deleted `TypedArrayData::HeapValue` carrier — is replaced by the
+    // per-header field schema, which is what user code naturally
+    // addresses (`record.column_name` rather than `record["column_name"]`).
+    //
+    // Schema is auto-registered per unique header set on first
+    // invocation via `register_predeclared_any_schema`. Field types are
+    // all string (csv records carry string-shaped cells); the schema's
+    // `FieldType::Any` annotation is fine because the marshal-boundary
+    // reader does its own kind validation when consumers downstream
+    // read the slots.
+    register_typed_fn_1::<_, Arc<String>>(
+        &mut module,
+        "parse_records",
+        "Parse CSV text using the header row as keys, returning an array of typed records",
+        "text",
+        "string",
+        ConcreteType::ArrayHeapValue("Array<object>".to_string()),
+        |text, _ctx| {
+            let mut reader = csv::ReaderBuilder::new()
+                .has_headers(true)
+                .from_reader(text.as_bytes());
+
+            let headers: Vec<String> = reader
+                .headers()
+                .map_err(|e| format!("csv.parse_records() failed to read headers: {}", e))?
+                .iter()
+                .map(|h| h.to_string())
+                .collect();
+
+            // Auto-register the schema for this header set. The registry
+            // dedupes by field-name list; subsequent CSV files with the
+            // same header columns reuse the same SchemaId.
+            let schema_id = register_predeclared_any_schema(&headers);
+            let field_kinds: Arc<[NativeKind]> = Arc::from(
+                vec![NativeKind::String; headers.len()].into_boxed_slice(),
+            );
+            // Heap mask: every field is a string (heap-resident).
+            let heap_mask: u64 = if headers.len() >= 64 {
+                u64::MAX
+            } else {
+                (1u64 << headers.len()) - 1
+            };
+
+            let mut records: Vec<Arc<HeapValue>> = Vec::new();
+            for result in reader.records() {
+                let record =
+                    result.map_err(|e| format!("csv.parse_records() failed: {}", e))?;
+                let n = headers.len().min(record.len());
+                let mut slots: Vec<ValueSlot> = Vec::with_capacity(headers.len());
+                // Use min(headers, record) length plus pad with empty
+                // string for short rows so the slot count matches the
+                // schema (TypedObjectStorage::new enforces this).
+                for i in 0..headers.len() {
+                    let cell = if i < n {
+                        record.get(i).unwrap_or("").to_string()
+                    } else {
+                        String::new()
+                    };
+                    slots.push(ValueSlot::from_string_arc(Arc::new(cell)));
+                }
+                // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): variant
+                // signature flipped to `HeapValue::TypedObject(TypedObjectPtr)`.
+                // `_new` returns `*mut TypedObjectStorage` with refcount=1; we
+                // wrap it in `TypedObjectPtr` (transferring the share to the
+                // wrapper).
+                let storage = TypedObjectStorage::_new(
+                    schema_id as u64,
+                    slots.into_boxed_slice(),
+                    heap_mask,
+                    Arc::clone(&field_kinds),
+                );
+                records.push(Arc::new(HeapValue::TypedObject(
+                    shape_value::heap_value::TypedObjectPtr::new(storage),
+                )));
+            }
+
+            Ok(TypedReturn::Concrete(ConcreteReturn::ArrayHeapValue(
+                records,
+            )))
         },
     );
 
     // csv.stringify_records(data: Array<HashMap<string, string>>, headers?: Array<string>) -> string
-    register_typed_function(
+    //
+    // Serializes an array of HashMap records to CSV. Header order is
+    // either the explicit `headers` argument OR the keys from the first
+    // record (using its HashMapData insertion order — same semantics as
+    // the legacy `from_hashmap_pairs(keys, values)` shape).
+    register_typed_fn_2_full::<_, Vec<Arc<HeapValue>>, Vec<Arc<String>>>(
         &mut module,
         "stringify_records",
         "Convert an array of hashmaps to a CSV string with headers",
-        vec![
+        [
             ModuleParam {
                 name: "data".to_string(),
                 type_name: "Array<HashMap<string, string>>".to_string(),
                 required: true,
-                description: "Array of records (hashmaps with string keys and values)".to_string(),
+                description: "Array of records (hashmaps with string keys and values)"
+                    .to_string(),
                 ..Default::default()
             },
             ModuleParam {
                 name: "headers".to_string(),
                 type_name: "Array<string>".to_string(),
                 required: false,
-                description: "Explicit header order (default: keys from first record)".to_string(),
+                description: "Explicit header order (default: keys from first record)"
+                    .to_string(),
+                default_snippet: Some("[]".to_string()),
                 ..Default::default()
             },
         ],
         ConcreteType::String,
-        |args, _ctx| {
-            let data = args
-                .first()
-                .and_then(|a| a.as_any_array())
-                .ok_or_else(|| {
-                    "csv.stringify_records() requires an Array<HashMap<string, string>> argument"
-                        .to_string()
-                })?
-                .to_generic();
-
-            // Determine headers: explicit argument or from first record's keys.
-            let explicit_headers: Option<Vec<String>> = args.get(1).and_then(|a| {
-                let arr = a.as_any_array()?.to_generic();
-                let headers: Vec<String> = arr
-                    .iter()
-                    .filter_map(|h| h.as_str().map(|s| s.to_string()))
-                    .collect();
-                if headers.is_empty() {
-                    None
-                } else {
-                    Some(headers)
-                }
-            });
-
-            let headers = if let Some(h) = explicit_headers {
-                h
+        |data, explicit_headers, _ctx| {
+            // W17-out-of-bundle-A-followups (2026-05-12): accept TypedObject
+            // records in addition to legacy HashMap records. parse_records
+            // now emits TypedObjects; round-trip via stringify_records must
+            // therefore read the TypedObject shape. HashMap input remains
+            // supported for users still passing legacy HashMap records.
+            //
+            // Determine header order: explicit argument (if non-empty) or
+            // the first record's keys (TypedObject schema field-order, or
+            // HashMap insertion order).
+            let headers: Vec<String> = if !explicit_headers.is_empty() {
+                explicit_headers.iter().map(|s| (**s).clone()).collect()
             } else if let Some(first) = data.first() {
-                let (keys, _, _) = first.as_hashmap().ok_or_else(|| {
-                    "csv.stringify_records() each element must be a HashMap".to_string()
-                })?;
-                keys.iter()
-                    .filter_map(|k| k.as_str().map(|s| s.to_string()))
-                    .collect()
+                match &**first {
+                    HeapValue::HashMap(kref) => {
+                        // Wave 2 Round 3b C2-joint ckpt-4 (2026-05-14):
+                        // per-V walk of `*mut TypedArray<*const StringObj>`
+                        // keys. V-agnostic (keys are always string-typed).
+                        let keys_ptr = match kref {
+                            shape_value::heap_value::HashMapKindedRef::I64(arc) => arc.keys,
+                            shape_value::heap_value::HashMapKindedRef::F64(arc) => arc.keys,
+                            shape_value::heap_value::HashMapKindedRef::Bool(arc) => arc.keys,
+                            shape_value::heap_value::HashMapKindedRef::Char(arc) => arc.keys,
+                            shape_value::heap_value::HashMapKindedRef::String(arc) => arc.keys,
+                            shape_value::heap_value::HashMapKindedRef::Decimal(arc) => arc.keys,
+                            shape_value::heap_value::HashMapKindedRef::TypedObject(arc) => arc.keys,
+                            shape_value::heap_value::HashMapKindedRef::TraitObject(arc) => arc.keys,
+                            shape_value::heap_value::HashMapKindedRef::HashMap(arc) => arc.keys,
+                        };
+                        let n = unsafe { shape_value::v2::typed_array::TypedArray::len(keys_ptr) as usize };
+                        (0..n)
+                            .map(|i| unsafe {
+                                let ptr = shape_value::v2::typed_array::TypedArray::get_unchecked(keys_ptr, i as u32);
+                                shape_value::v2::string_obj::StringObj::as_str(ptr).to_owned()
+                            })
+                            .collect()
+                    }
+                    HeapValue::TypedObject(s) => {
+                        let schema = crate::type_schema::lookup_schema_by_id_public(
+                            s.schema_id as u32,
+                        )
+                        .ok_or_else(|| {
+                            format!(
+                                "csv.stringify_records(): TypedObject schema id {} \
+                                 not registered",
+                                s.schema_id
+                            )
+                        })?;
+                        schema.fields.iter().map(|f| f.name.clone()).collect()
+                    }
+                    other => {
+                        return Err(format!(
+                            "csv.stringify_records(): each element must be a record \
+                             (HashMap or TypedObject), got {}",
+                            other.type_name()
+                        ));
+                    }
+                }
             } else {
-                return Ok(TypedReturn::String(String::new()));
+                return Ok(TypedReturn::Concrete(ConcreteReturn::String(
+                    String::new(),
+                )));
             };
 
             let mut writer = csv::WriterBuilder::new().from_writer(Vec::new());
-
-            // Write header row
             writer
                 .write_record(&headers)
-                .map_err(|e| format!("csv.stringify_records() failed: {}", e))?;
+                .map_err(|e| format!("csv.stringify_records() header write failed: {}", e))?;
 
-            // Write data rows
-            for record_val in data.iter() {
-                let (keys, values, _) = record_val.as_hashmap().ok_or_else(|| {
-                    "csv.stringify_records() each element must be a HashMap".to_string()
-                })?;
-
-                let mut row = Vec::with_capacity(headers.len());
-                for header in &headers {
-                    // Find the value for this header key
-                    let mut found = String::new();
-                    for (i, k) in keys.iter().enumerate() {
-                        if let Some(key_str) = k.as_str() {
-                            if key_str == header {
-                                found = values[i]
-                                    .as_str()
-                                    .map(|s| s.to_string())
-                                    .unwrap_or_else(|| values[i].to_string());
-                                break;
+            for record_arc in data.iter() {
+                let row: Vec<String> = match &**record_arc {
+                    HeapValue::HashMap(kref) => {
+                        // Wave 2 Round 3b C2-joint ckpt-4 (2026-05-14):
+                        // per-V get(header) → cell extraction. CSV records
+                        // are conventionally HashMap<string, string>
+                        // (V=String); other V variants surface as a
+                        // structured error.
+                        use shape_value::heap_value::HashMapKindedRef;
+                        match kref {
+                            HashMapKindedRef::String(arc) => headers
+                                .iter()
+                                .map(|h| {
+                                    arc.get_index(h.as_str())
+                                        .map(|idx| {
+                                            let ptr: *const shape_value::v2::string_obj::StringObj =
+                                                unsafe { *(*arc.values).data.add(idx) };
+                                            unsafe {
+                                                shape_value::v2::string_obj::StringObj::as_str(ptr).to_owned()
+                                            }
+                                        })
+                                        .unwrap_or_default()
+                                })
+                                .collect(),
+                            other => {
+                                return Err(format!(
+                                    "csv.stringify_records(): HashMap records must be \
+                                     HashMap<string, string>, got V={:?}",
+                                    other.values_kind()
+                                ));
                             }
                         }
                     }
-                    row.push(found);
-                }
-
+                    HeapValue::TypedObject(storage) => {
+                        let schema = crate::type_schema::lookup_schema_by_id_public(
+                            storage.schema_id as u32,
+                        )
+                        .ok_or_else(|| {
+                            format!(
+                                "csv.stringify_records(): TypedObject schema id {} \
+                                 not registered",
+                                storage.schema_id
+                            )
+                        })?;
+                        let mut r = Vec::with_capacity(headers.len());
+                        for header in &headers {
+                            // Resolve header → slot index via the schema's
+                            // field list. Empty cell when the record's
+                            // schema doesn't have the requested header.
+                            let cell = match schema
+                                .fields
+                                .iter()
+                                .position(|f| f.name == *header)
+                            {
+                                Some(idx) if idx < storage.slots.len() => {
+                                    // Slot is a string per parse_records'
+                                    // construction; read via the kind table.
+                                    let bits = storage.slots[idx].raw();
+                                    if bits == 0 {
+                                        String::new()
+                                    } else {
+                                        // SAFETY: parse_records writes each
+                                        // slot via `ValueSlot::from_string_arc`
+                                        // — slot bits = `Arc::into_raw::<String>`.
+                                        // Borrow without releasing the storage's
+                                        // share (which owns the Arc).
+                                        unsafe {
+                                            let arc_ptr = bits as *const String;
+                                            Arc::increment_strong_count(arc_ptr);
+                                            let arc = Arc::from_raw(arc_ptr);
+                                            let owned = (*arc).clone();
+                                            // arc Drop here releases our
+                                            // bumped share; the storage's
+                                            // share is untouched.
+                                            owned
+                                        }
+                                    }
+                                }
+                                _ => String::new(),
+                            };
+                            r.push(cell);
+                        }
+                        r
+                    }
+                    other => {
+                        return Err(format!(
+                            "csv.stringify_records(): each element must be a record \
+                             (HashMap or TypedObject), got {}",
+                            other.type_name()
+                        ));
+                    }
+                };
                 writer
                     .write_record(&row)
-                    .map_err(|e| format!("csv.stringify_records() failed: {}", e))?;
+                    .map_err(|e| format!("csv.stringify_records() row write failed: {}", e))?;
             }
 
             let bytes = writer
                 .into_inner()
-                .map_err(|e| format!("csv.stringify_records() failed to flush: {}", e))?;
+                .map_err(|e| format!("csv.stringify_records() flush failed: {}", e))?;
             let output = String::from_utf8(bytes)
                 .map_err(|e| format!("csv.stringify_records() UTF-8 error: {}", e))?;
 
-            Ok(TypedReturn::String(output))
-        },
-    );
-
-    // csv.read_file(path: string) -> Result<Array<Array<string>>>
-    register_typed_function(
-        &mut module,
-        "read_file",
-        "Read and parse a CSV file into an array of rows",
-        vec![ModuleParam {
-            name: "path".to_string(),
-            type_name: "string".to_string(),
-            required: true,
-            description: "Path to the CSV file".to_string(),
-            ..Default::default()
-        }],
-        ConcreteType::Result(Box::new(ConcreteType::Named(
-            "Array<Array<string>>".to_string(),
-        ))),
-        |args, _ctx| {
-            let path = args
-                .first()
-                .and_then(|a| a.as_str())
-                .ok_or_else(|| "csv.read_file() requires a path string".to_string())?;
-
-            let text = std::fs::read_to_string(path)
-                .map_err(|e| format!("csv.read_file() failed to read '{}': {}", path, e))?;
-
-            let mut reader = csv::ReaderBuilder::new()
-                .has_headers(false)
-                .from_reader(text.as_bytes());
-
-            let mut rows: Vec<ValueWord> = Vec::new();
-            for result in reader.records() {
-                let record = result.map_err(|e| format!("csv.read_file() parse error: {}", e))?;
-                let row: ArgVec = ArgVec::from_vec(
-                    record
-                        .iter()
-                        .map(|field| ValueWord::from_string(Arc::new(field.to_string())))
-                        .collect(),
-                );
-                rows.push(ValueWord::from_array(shape_value::vmarray_from_vec(
-                    row.into_inner(),
-                )));
-            }
-
-            Ok(TypedReturn::Ok(Box::new(TypedReturn::ArrayValueWord(rows))))
-        },
-    );
-
-    // csv.is_valid(text: string) -> bool
-    register_typed_function(
-        &mut module,
-        "is_valid",
-        "Check if a string is valid CSV",
-        vec![ModuleParam {
-            name: "text".to_string(),
-            type_name: "string".to_string(),
-            required: true,
-            description: "String to validate as CSV".to_string(),
-            ..Default::default()
-        }],
-        ConcreteType::Bool,
-        |args, _ctx| {
-            let text = args
-                .first()
-                .and_then(|a| a.as_str())
-                .ok_or_else(|| "csv.is_valid() requires a string argument".to_string())?;
-
-            let mut reader = csv::ReaderBuilder::new()
-                .has_headers(false)
-                .from_reader(text.as_bytes());
-
-            let valid = reader.records().all(|r| r.is_ok());
-            Ok(TypedReturn::Bool(valid))
+            Ok(TypedReturn::Concrete(ConcreteReturn::String(output)))
         },
     );
 
     module
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn test_ctx() -> crate::module_exports::ModuleContext<'static> {
-        let registry = Box::leak(Box::new(crate::type_schema::TypeSchemaRegistry::new()));
-        crate::module_exports::ModuleContext {
-            schemas: registry,
-            invoke_callable: None,
-            raw_invoker: None,
-            function_hashes: None,
-            vm_state: None,
-            granted_permissions: None,
-            scope_constraints: None,
-            set_pending_resume: None,
-            set_pending_frame_resume: None,
-        }
-    }
-
-    #[test]
-    fn test_csv_module_creation() {
-        let module = create_csv_module();
-        assert_eq!(module.name, "std::core::csv");
-        assert!(module.has_export("parse"));
-        assert!(module.has_export("parse_records"));
-        assert!(module.has_export("stringify"));
-        assert!(module.has_export("stringify_records"));
-        assert!(module.has_export("read_file"));
-        assert!(module.has_export("is_valid"));
-    }
-
-    #[test]
-    fn test_csv_parse_simple() {
-        let module = create_csv_module();
-        let ctx = test_ctx();
-        let input = ValueWord::from_string(Arc::new("a,b,c\n1,2,3\n4,5,6".to_string()));
-        let result = module.invoke_export("parse", &[input], &ctx).unwrap().unwrap();
-        let rows = result.as_any_array().expect("should be array").to_generic();
-        assert_eq!(rows.len(), 3);
-        // First row
-        let row0 = rows[0]
-            .as_any_array()
-            .expect("row should be array")
-            .to_generic();
-        assert_eq!(row0.len(), 3);
-        assert_eq!(row0[0].as_str(), Some("a"));
-        assert_eq!(row0[1].as_str(), Some("b"));
-        assert_eq!(row0[2].as_str(), Some("c"));
-        // Second row
-        let row1 = rows[1]
-            .as_any_array()
-            .expect("row should be array")
-            .to_generic();
-        assert_eq!(row1[0].as_str(), Some("1"));
-        assert_eq!(row1[1].as_str(), Some("2"));
-        assert_eq!(row1[2].as_str(), Some("3"));
-    }
-
-    #[test]
-    fn test_csv_parse_quoted_fields() {
-        let module = create_csv_module();
-        let ctx = test_ctx();
-        let input =
-            ValueWord::from_string(Arc::new("\"hello, world\",\"foo\"\"bar\"\n".to_string()));
-        let result = module.invoke_export("parse", &[input], &ctx).unwrap().unwrap();
-        let rows = result.as_any_array().expect("should be array").to_generic();
-        assert_eq!(rows.len(), 1);
-        let row0 = rows[0]
-            .as_any_array()
-            .expect("row should be array")
-            .to_generic();
-        assert_eq!(row0[0].as_str(), Some("hello, world"));
-        assert_eq!(row0[1].as_str(), Some("foo\"bar"));
-    }
-
-    #[test]
-    fn test_csv_parse_empty() {
-        let module = create_csv_module();
-        let ctx = test_ctx();
-        let input = ValueWord::from_string(Arc::new("".to_string()));
-        let result = module.invoke_export("parse", &[input], &ctx).unwrap().unwrap();
-        let rows = result.as_any_array().expect("should be array").to_generic();
-        assert_eq!(rows.len(), 0);
-    }
-
-    #[test]
-    fn test_csv_parse_requires_string() {
-        let module = create_csv_module();
-        let ctx = test_ctx();
-        let result = module.invoke_export("parse", &[ValueWord::from_f64(42.0)], &ctx).unwrap();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_csv_parse_records() {
-        let module = create_csv_module();
-        let ctx = test_ctx();
-        let input = ValueWord::from_string(Arc::new("name,age\nAlice,30\nBob,25".to_string()));
-        let result = module.invoke_export("parse_records", &[input], &ctx).unwrap().unwrap();
-        let records = result.as_any_array().expect("should be array").to_generic();
-        assert_eq!(records.len(), 2);
-
-        // First record: {name: "Alice", age: "30"}
-        let (keys0, values0, _) = records[0].as_hashmap().expect("should be hashmap");
-        assert_eq!(keys0.len(), 2);
-        // Find "name" key
-        let mut found_name = false;
-        let mut found_age = false;
-        for (i, k) in keys0.iter().enumerate() {
-            if k.as_str() == Some("name") {
-                assert_eq!(values0[i].as_str(), Some("Alice"));
-                found_name = true;
-            }
-            if k.as_str() == Some("age") {
-                assert_eq!(values0[i].as_str(), Some("30"));
-                found_age = true;
-            }
-        }
-        assert!(found_name, "should have 'name' key");
-        assert!(found_age, "should have 'age' key");
-    }
-
-    #[test]
-    fn test_csv_parse_records_requires_string() {
-        let module = create_csv_module();
-        let ctx = test_ctx();
-        let result = module.invoke_export("parse_records", &[ValueWord::from_f64(42.0)], &ctx).unwrap();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_csv_stringify_simple() {
-        let module = create_csv_module();
-        let ctx = test_ctx();
-        let data = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
-            ValueWord::from_array(shape_value::vmarray_from_vec(vec![
-                ValueWord::from_string(Arc::new("a".to_string())),
-                ValueWord::from_string(Arc::new("b".to_string())),
-            ])),
-            ValueWord::from_array(shape_value::vmarray_from_vec(vec![
-                ValueWord::from_string(Arc::new("1".to_string())),
-                ValueWord::from_string(Arc::new("2".to_string())),
-            ])),
-        ]));
-        let result = module.invoke_export("stringify", &[data], &ctx).unwrap().unwrap();
-        let output = result.as_str().expect("should be string");
-        assert_eq!(output, "a,b\n1,2\n");
-    }
-
-    #[test]
-    fn test_csv_stringify_with_delimiter() {
-        let module = create_csv_module();
-        let ctx = test_ctx();
-        let data = ValueWord::from_array(shape_value::vmarray_from_vec(vec![ValueWord::from_array(shape_value::vmarray_from_vec(vec![
-            ValueWord::from_string(Arc::new("a".to_string())),
-            ValueWord::from_string(Arc::new("b".to_string())),
-        ]))]));
-        let delimiter = ValueWord::from_string(Arc::new("\t".to_string()));
-        let result = module.invoke_export("stringify", &[data, delimiter], &ctx).unwrap().unwrap();
-        let output = result.as_str().expect("should be string");
-        assert_eq!(output, "a\tb\n");
-    }
-
-    #[test]
-    fn test_csv_stringify_requires_array() {
-        let module = create_csv_module();
-        let ctx = test_ctx();
-        let result = module.invoke_export("stringify", &[ValueWord::from_f64(42.0)], &ctx).unwrap();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_csv_stringify_records() {
-        let module = create_csv_module();
-        let ctx = test_ctx();
-        let record1 = ValueWord::from_hashmap_pairs(
-            vec![
-                ValueWord::from_string(Arc::new("name".to_string())),
-                ValueWord::from_string(Arc::new("age".to_string())),
-            ],
-            vec![
-                ValueWord::from_string(Arc::new("Alice".to_string())),
-                ValueWord::from_string(Arc::new("30".to_string())),
-            ],
-        );
-        let record2 = ValueWord::from_hashmap_pairs(
-            vec![
-                ValueWord::from_string(Arc::new("name".to_string())),
-                ValueWord::from_string(Arc::new("age".to_string())),
-            ],
-            vec![
-                ValueWord::from_string(Arc::new("Bob".to_string())),
-                ValueWord::from_string(Arc::new("25".to_string())),
-            ],
-        );
-        let data = ValueWord::from_array(shape_value::vmarray_from_vec(vec![record1, record2]));
-        let result = module.invoke_export("stringify_records", &[data], &ctx).unwrap().unwrap();
-        let output = result.as_str().expect("should be string");
-        // Should contain header row and two data rows
-        let lines: Vec<&str> = output.trim().lines().collect();
-        assert_eq!(lines.len(), 3);
-        // Header should be name,age (order from first record's keys)
-        assert!(lines[0].contains("name"));
-        assert!(lines[0].contains("age"));
-    }
-
-    #[test]
-    fn test_csv_stringify_records_with_explicit_headers() {
-        let module = create_csv_module();
-        let ctx = test_ctx();
-        let record = ValueWord::from_hashmap_pairs(
-            vec![
-                ValueWord::from_string(Arc::new("name".to_string())),
-                ValueWord::from_string(Arc::new("age".to_string())),
-            ],
-            vec![
-                ValueWord::from_string(Arc::new("Alice".to_string())),
-                ValueWord::from_string(Arc::new("30".to_string())),
-            ],
-        );
-        let data = ValueWord::from_array(shape_value::vmarray_from_vec(vec![record]));
-        let headers = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
-            ValueWord::from_string(Arc::new("age".to_string())),
-            ValueWord::from_string(Arc::new("name".to_string())),
-        ]));
-        let result = module.invoke_export("stringify_records", &[data, headers], &ctx).unwrap().unwrap();
-        let output = result.as_str().expect("should be string");
-        let lines: Vec<&str> = output.trim().lines().collect();
-        assert_eq!(lines[0], "age,name");
-        assert_eq!(lines[1], "30,Alice");
-    }
-
-    #[test]
-    fn test_csv_stringify_records_empty() {
-        let module = create_csv_module();
-        let ctx = test_ctx();
-        let data = ValueWord::from_array(shape_value::vmarray_from_vec(vec![]));
-        let result = module.invoke_export("stringify_records", &[data], &ctx).unwrap().unwrap();
-        let output = result.as_str().expect("should be string");
-        assert_eq!(output, "");
-    }
-
-    #[test]
-    fn test_csv_is_valid_true() {
-        let module = create_csv_module();
-        let ctx = test_ctx();
-        let input = ValueWord::from_string(Arc::new("a,b,c\n1,2,3".to_string()));
-        let result = module.invoke_export("is_valid", &[input], &ctx).unwrap().unwrap();
-        assert_eq!(result.as_bool(), Some(true));
-    }
-
-    #[test]
-    fn test_csv_is_valid_empty() {
-        let module = create_csv_module();
-        let ctx = test_ctx();
-        let input = ValueWord::from_string(Arc::new("".to_string()));
-        let result = module.invoke_export("is_valid", &[input], &ctx).unwrap().unwrap();
-        assert_eq!(result.as_bool(), Some(true));
-    }
-
-    #[test]
-    fn test_csv_is_valid_requires_string() {
-        let module = create_csv_module();
-        let ctx = test_ctx();
-        let result = module.invoke_export("is_valid", &[ValueWord::from_f64(42.0)], &ctx).unwrap();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_csv_read_file() {
-        let module = create_csv_module();
-        let ctx = test_ctx();
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.csv");
-        std::fs::write(&path, "a,b\n1,2\n3,4").unwrap();
-
-        let result = module.invoke_export("read_file", 
-            &[ValueWord::from_string(Arc::new(
-                path.to_str().unwrap().to_string(),
-            ))],
-            &ctx,
-        ).unwrap()
-        .unwrap();
-        let inner = result.as_ok_inner().expect("should be Ok");
-        let rows = inner.as_any_array().expect("should be array").to_generic();
-        assert_eq!(rows.len(), 3);
-        let row0 = rows[0]
-            .as_any_array()
-            .expect("row should be array")
-            .to_generic();
-        assert_eq!(row0[0].as_str(), Some("a"));
-        assert_eq!(row0[1].as_str(), Some("b"));
-    }
-
-    #[test]
-    fn test_csv_read_file_nonexistent() {
-        let module = create_csv_module();
-        let ctx = test_ctx();
-        let result = module.invoke_export("read_file", 
-            &[ValueWord::from_string(Arc::new(
-                "/nonexistent/path/file.csv".to_string(),
-            ))],
-            &ctx,
-        ).unwrap();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_csv_read_file_requires_string() {
-        let module = create_csv_module();
-        let ctx = test_ctx();
-        let result = module.invoke_export("read_file", &[ValueWord::from_f64(42.0)], &ctx).unwrap();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_csv_schemas() {
-        let module = create_csv_module();
-
-        let parse_schema = module.get_schema("parse").unwrap();
-        assert_eq!(parse_schema.params.len(), 1);
-        assert_eq!(parse_schema.params[0].name, "text");
-        assert!(parse_schema.params[0].required);
-        assert_eq!(
-            parse_schema.return_type.as_deref(),
-            Some("Array<Array<string>>")
-        );
-
-        let parse_records_schema = module.get_schema("parse_records").unwrap();
-        assert_eq!(parse_records_schema.params.len(), 1);
-        assert_eq!(
-            parse_records_schema.return_type.as_deref(),
-            Some("Array<HashMap<string, string>>")
-        );
-
-        let stringify_schema = module.get_schema("stringify").unwrap();
-        assert_eq!(stringify_schema.params.len(), 2);
-        assert!(stringify_schema.params[0].required);
-        assert!(!stringify_schema.params[1].required);
-        assert_eq!(stringify_schema.return_type.as_deref(), Some("string"));
-
-        let stringify_records_schema = module.get_schema("stringify_records").unwrap();
-        assert_eq!(stringify_records_schema.params.len(), 2);
-        assert!(stringify_records_schema.params[0].required);
-        assert!(!stringify_records_schema.params[1].required);
-
-        let read_file_schema = module.get_schema("read_file").unwrap();
-        assert_eq!(read_file_schema.params.len(), 1);
-        assert_eq!(
-            read_file_schema.return_type.as_deref(),
-            Some("Result<Array<Array<string>>>")
-        );
-
-        let is_valid_schema = module.get_schema("is_valid").unwrap();
-        assert_eq!(is_valid_schema.params.len(), 1);
-        assert_eq!(is_valid_schema.return_type.as_deref(), Some("bool"));
-    }
-
-    #[test]
-    fn test_csv_roundtrip() {
-        let module = create_csv_module();
-        let ctx = test_ctx();
-
-        let csv_text = "name,age,city\nAlice,30,NYC\nBob,25,LA\n";
-        let parsed = module.invoke_export("parse", 
-            &[ValueWord::from_string(Arc::new(csv_text.to_string()))],
-            &ctx,
-        ).unwrap()
-        .unwrap();
-
-        let re_stringified = module.invoke_export("stringify", &[parsed], &ctx).unwrap().unwrap();
-        let output = re_stringified.as_str().expect("should be string");
-        assert_eq!(output, csv_text);
-    }
-
-    #[test]
-    fn test_csv_records_roundtrip() {
-        let module = create_csv_module();
-        let ctx = test_ctx();
-
-        let csv_text = "name,age\nAlice,30\nBob,25\n";
-        let parsed = module.invoke_export("parse_records", 
-            &[ValueWord::from_string(Arc::new(csv_text.to_string()))],
-            &ctx,
-        ).unwrap()
-        .unwrap();
-
-        let headers = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
-            ValueWord::from_string(Arc::new("name".to_string())),
-            ValueWord::from_string(Arc::new("age".to_string())),
-        ]));
-        let re_stringified = module.invoke_export("stringify_records", &[parsed, headers], &ctx).unwrap().unwrap();
-        let output = re_stringified.as_str().expect("should be string");
-        assert_eq!(output, csv_text);
-    }
 }

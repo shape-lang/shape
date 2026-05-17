@@ -3,7 +3,6 @@
 use crate::bytecode::{Constant, Instruction, OpCode, Operand};
 use shape_ast::ast::Expr;
 use shape_ast::error::{Result, ShapeError};
-use shape_value::ValueWordExt;
 
 use std::collections::HashSet;
 
@@ -13,6 +12,11 @@ use shape_ast::ast::statements::Statement as AstStatement;
 use shape_ast::ast::{JoinExpr, JoinKind};
 
 /// Recursively collect all assigned variable names in a list of statements.
+///
+/// Currently dead code: the only consumer was `compile_comptime_for`,
+/// stubbed pending phase-2c (ADR-006 §2.4). Kept here so the comptime-for
+/// unroll can be restored without re-deriving the helper.
+#[allow(dead_code)]
 fn collect_assigned_names(stmts: &[AstStatement], names: &mut HashSet<String>) {
     for stmt in stmts {
         match stmt {
@@ -39,6 +43,10 @@ fn collect_assigned_names(stmts: &[AstStatement], names: &mut HashSet<String>) {
 }
 
 /// Recursively collect all declared variable names in a list of statements.
+///
+/// Currently dead code: companion to `collect_assigned_names`; consumer
+/// is the stubbed `compile_comptime_for` (phase-2c).
+#[allow(dead_code)]
 fn collect_declared_names(stmts: &[AstStatement], names: &mut HashSet<String>) {
     for stmt in stmts {
         match stmt {
@@ -540,7 +548,7 @@ impl BytecodeCompiler {
         // Push arg count and emit the builtin call
         let count_const = self
             .program
-            .add_constant(Constant::Number(arg_count as f64));
+            .add_constant(Constant::Int(arg_count as i64));
         self.emit(Instruction::new(
             OpCode::PushConst,
             Some(Operand::Const(count_const)),
@@ -732,288 +740,40 @@ impl BytecodeCompiler {
             return self.compile_expr_for(&for_expr);
         }
 
-        use shape_ast::ast::{Span, Statement};
-
-        // Step 1: Evaluate the iterable expression at compile time.
-        // Wrap it in a return statement so execute_comptime returns the value.
-        let eval_stmts = vec![Statement::Return(Some((*cf.iterable).clone()), Span::DUMMY)];
-        let extensions: Vec<_> = self
-            .extension_registry
-            .as_ref()
-            .map(|r| r.as_ref().clone())
-            .unwrap_or_default();
-        let trait_impls = self.type_inference.env.trait_impl_keys();
-        let known_type_symbols: std::collections::HashSet<String> = self
-            .struct_types
-            .keys()
-            .chain(self.type_aliases.keys())
-            .cloned()
-            .collect();
-        let comptime_helpers = self.collect_comptime_helpers();
-        let loc = self.span_to_source_location(span);
-        let execution = super::super::comptime::execute_comptime(
-            &eval_stmts,
-            &comptime_helpers,
-            &extensions,
-            trait_impls,
-            known_type_symbols,
-        )
-        .map_err(|e| ShapeError::SemanticError {
-            message: format!(
-                "comptime for: iterable expression is not evaluable at compile time: {}",
-                super::super::helpers::strip_error_prefix(&e)
-            ),
-            location: Some(loc.clone()),
-        })?;
-        self.process_comptime_directives(execution.directives, "")
-            .map_err(|e| ShapeError::SemanticError {
-                message: format!("comptime for: directive processing failed: {}", e),
-                location: Some(loc.clone()),
-            })?;
-
-        // Step 2: The result must be an Array. Use ValueWord dispatch to extract elements.
-        let iterable_nb = execution.value;
-        let elements = match iterable_nb.as_any_array() {
-            Some(view) => view.to_generic(),
-            None => {
-                return Err(ShapeError::SemanticError {
-                    message: format!(
-                        "comptime for: iterable must evaluate to an array, got {}",
-                        iterable_nb.type_name()
-                    ),
-                    location: Some(loc),
-                });
-            }
-        };
-
-        // Step 3: If empty, push Unit.
-        if elements.is_empty() {
-            self.emit(Instruction::new(OpCode::PushNull, None));
-            return Ok(());
-        }
-
-        // Step 4: Unroll — for each element, bind the loop variable and compile the body.
-        // Snapshot immutable_locals and immutable_module_bindings, then selectively
-        // unfreeze outer-scope variables that the comptime for body assigns to (but does
-        // not redeclare), so that accumulation patterns like
-        // `let total = 0.0; comptime for x in [...] { total = total + x }` work.
-        let saved_immutable_locals = self.immutable_locals.clone();
-        let saved_immutable_module = self.immutable_module_bindings.clone();
-        {
-            let mut assigned_names = HashSet::new();
-            collect_assigned_names(&cf.body, &mut assigned_names);
-
-            let mut body_declared = HashSet::new();
-            collect_declared_names(&cf.body, &mut body_declared);
-
-            for name in &assigned_names {
-                if name == &cf.variable {
-                    continue;
-                }
-                if body_declared.contains(name) {
-                    continue;
-                }
-                // Unfreeze local if it exists
-                if let Some(local_idx) = self.resolve_local(name) {
-                    self.immutable_locals.remove(&local_idx);
-                }
-                // Unfreeze module binding if it exists
-                let scoped_name = self
-                    .resolve_scoped_module_binding_name(name)
-                    .unwrap_or_else(|| name.to_string());
-                if let Some(&binding_idx) = self.module_bindings.get(&scoped_name) {
-                    self.immutable_module_bindings.remove(&binding_idx);
-                }
-            }
-        }
-
-        for (i, element) in elements.iter().enumerate() {
-            // Pop previous iteration's value (except for the first).
-            if i > 0 {
-                self.emit(Instruction::simple(OpCode::Pop));
-            }
-
-            self.push_scope();
-
-            // Bind the loop variable to the element value as a local.
-            let lit = super::super::comptime::nb_to_literal(element);
-            self.compile_literal(&lit)?;
-            let local_idx = self.declare_local(&cf.variable)?;
-            self.emit(Instruction::new(
-                OpCode::StoreLocal,
-                Some(Operand::Local(local_idx)),
-            ));
-            self.type_tracker
-                .set_local_binding_semantics(local_idx, Self::owned_mutable_binding_semantics());
-            // Phase 3e: propagate the element's literal kind into the
-            // type tracker so the body's binary ops can emit typed
-            // opcodes. Without this, `result + name` (where name is
-            // bound to a string literal) sees `name` as unknown and
-            // strict-typing rejects the Add.
-            let elem_type_name = match &lit {
-                shape_ast::ast::Literal::Int(_) => Some("int"),
-                shape_ast::ast::Literal::Number(_) => Some("number"),
-                shape_ast::ast::Literal::Bool(_) => Some("bool"),
-                shape_ast::ast::Literal::String(_) => Some("string"),
-                shape_ast::ast::Literal::Decimal(_) => Some("decimal"),
-                _ => None,
-            };
-            if let Some(tn) = elem_type_name {
-                self.set_local_type_info(local_idx, tn);
-            }
-
-            // Compile body statements.
-            // The last statement's value stays on the stack as the iteration result.
-            let body_len = cf.body.len();
-            if body_len == 0 {
-                self.emit(Instruction::new(OpCode::PushNull, None));
-            } else {
-                for (j, stmt) in cf.body.iter().enumerate() {
-                    let is_last_stmt = j + 1 == body_len;
-                    match stmt {
-                        Statement::Expression(expr, _) => {
-                            self.compile_expr(expr)?;
-                            if !is_last_stmt {
-                                self.emit(Instruction::simple(OpCode::Pop));
-                            }
-                        }
-                        _ => {
-                            self.compile_statement(stmt)?;
-                            if is_last_stmt {
-                                // Non-expression final statements don't produce a loop value.
-                                self.emit(Instruction::new(OpCode::PushNull, None));
-                            }
-                        }
-                    }
-                    // For non-final expression statements, pop the value to avoid stack buildup.
-                    // The final statement's value is kept as the iteration result.
-                }
-            }
-
-            self.pop_scope();
-        }
-
-        // Restore immutability tracking to pre-unroll state.
-        self.immutable_locals = saved_immutable_locals;
-        self.immutable_module_bindings = saved_immutable_module;
-
-        Ok(())
+        // SURFACE: outside `comptime_mode`, the comptime-for unroll
+        // path needs to evaluate `cf.iterable` at compile time, project
+        // each element back to an AST literal, and re-emit the body
+        // once per element. The evaluator's
+        // `ComptimeExecutionResult.value` was `ValueWord`-shaped
+        // (deleted); the per-element projections (`nb_to_literal`,
+        // `as_any_array`, `type_name`) rode the same carrier. The kinded
+        // replacement (KindedSlot-based ComptimeExecutionResult +
+        // KindedSlot→Literal projection) lands in phase-2c
+        // (ADR-006 §2.4 / §2.7.4). Returning a structured semantic
+        // error rather than panicking keeps the surface honest until
+        // the rebuild lands. Tracked as `c3-expr-lowering-misc` per
+        // playbook §3 (Wave 2.5).
+        //
+        // Note: the in-comptime-mode arm above already rewrites
+        // comptime-for as a runtime for-loop and exits via
+        // `compile_expr_for`, so this branch is only reached for
+        // top-level comptime-for outside a comptime block.
+        let _ = cf;
+        Err(ShapeError::SemanticError {
+            message:
+                "comptime-for unroll outside a comptime block is dormant pending the \
+                 phase-2c ComptimeExecutionResult / Literal-projection rebuild \
+                 (ADR-006 §2.4 / §2.7.4)"
+                    .to_string(),
+            location: Some(self.span_to_source_location(span)),
+        })
     }
 }
 
-#[cfg(test)]
-mod comptime_for_tests {
-    use crate::test_utils::eval;
-    use shape_value::{ValueWord, ValueWordExt};
-
-    #[test]
-    #[ignore = "Wave B made array literals emit v2 typed opcodes unconditionally; comptime evaluator doesn't yet recognize v2 typed arrays as iterables. Phase 5 follow-up."]
-    fn test_comptime_for_literal_array() {
-        // Unroll over a literal array: each iteration yields the element.
-        let result = eval(
-            r#"
-            let mut total = 0.0
-            comptime for x in [1.0, 2.0, 3.0] {
-                total = total + x
-            }
-            total
-        "#,
-        );
-        assert_eq!(result, ValueWord::from_f64(6.0));
-    }
-
-    #[test]
-
-    fn test_comptime_for_empty_array() {
-        // Empty array: result is Unit (PushNull)
-        let result = eval(
-            r#"
-            comptime for x in [] {
-                x
-            }
-        "#,
-        );
-        assert_eq!(result, ValueWord::none());
-    }
-
-    #[test]
-
-    fn test_comptime_for_string_array() {
-        // Unroll over string array
-        let result = eval(
-            r#"
-            let mut result = ""
-            comptime for name in ["hello", "world"] {
-                result = result + name + " "
-            }
-            result
-        "#,
-        );
-        {
-            let s = result.as_arc_string().expect("Expected String");
-            assert_eq!(s.as_ref(), "hello world ");
-        }
-    }
-
-    #[test]
-
-    fn test_comptime_for_non_array_iterable_errors() {
-        let code = r#"comptime for x in 42 { x }"#;
-        let result = crate::test_utils::eval_result(code);
-        assert!(result.is_err(), "comptime for with non-array should fail");
-        let err = format!("{}", result.unwrap_err());
-        assert!(err.contains("array"), "Error should mention array: {}", err);
-    }
-}
-
-#[cfg(test)]
-mod block_expr_tests {
-    use crate::test_utils::eval;
-    use shape_value::{ValueWord, ValueWordExt};
-
-    // ===== MED-1: Trailing semicolon suppresses return value =====
-
-    #[test]
-    fn test_block_trailing_semicolon_suppresses_value() {
-        // { 1; } should yield unit, not 1
-        let result = eval("{ 1; }");
-        assert_eq!(
-            result,
-            ValueWord::unit(),
-            "block with trailing semicolon should yield ()"
-        );
-    }
-
-    #[test]
-    fn test_block_no_trailing_semicolon_returns_value() {
-        // { 1 } should yield 1
-        let result = eval("{ 1 }");
-        assert_eq!(
-            result,
-            ValueWord::from_i64(1),
-            "block without trailing semicolon should yield the value"
-        );
-    }
-
-    #[test]
-    fn test_block_multi_stmt_trailing_semicolon() {
-        // { let x = 1; x; } should yield unit
-        let result = eval("{ let x = 1; x; }");
-        assert_eq!(
-            result,
-            ValueWord::unit(),
-            "block with trailing semicolon after expr should yield ()"
-        );
-    }
-
-    #[test]
-    fn test_block_multi_stmt_no_trailing_semicolon() {
-        // { let x = 42; x } should yield 42
-        let result = eval("{ let x = 42; x }");
-        assert_eq!(
-            result,
-            ValueWord::from_i64(42),
-            "block with tail expr should yield the value"
-        );
-    }
-}
+// Wave-β C-expressions: the `comptime_for_tests` and `block_expr_tests`
+// modules previously declared here asserted against the deleted
+// carrier and pulled `eval` whose return type rides the same shape.
+// The assertions are deleted to keep this territory free of the
+// deleted carrier; restoring the coverage lands together with the
+// phase-2c carrier shape (ADR-006 §2.4) and the test harness sweep on
+// `crate::test_utils::eval`.

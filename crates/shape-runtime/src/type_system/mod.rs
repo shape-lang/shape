@@ -32,7 +32,6 @@ pub mod inference;
 pub mod semantic;
 pub mod storage;
 pub mod suggestions;
-pub mod typed_value;
 pub mod types;
 pub mod unification;
 pub mod universal_error;
@@ -53,7 +52,6 @@ pub use errors::{TypeError, TypeErrorWithLocation, TypeResult};
 pub use inference::{PropertyAssignment, PropertyAssignmentCollector, TypeInferenceEngine};
 pub use semantic::{EnumVariant, FunctionParam, FunctionSignature, SemanticType, TypeVarId};
 pub use storage::StorageType;
-pub use typed_value::TypedValue;
 pub use universal_error::{ErrorDetails, ErrorLocation, UniversalError};
 
 #[cfg(test)]

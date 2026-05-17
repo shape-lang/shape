@@ -10,7 +10,12 @@ use cranelift_module::{FuncId, Linkage, Module};
 use std::collections::HashMap;
 
 use super::super::ffi::conversion::{
-    jit_print, jit_string_concat, jit_to_number, jit_to_string, jit_type_check, jit_typeof,
+    jit_print_atomic, jit_print_bool, jit_print_channel, jit_print_char,
+    jit_print_deque, jit_print_f64, jit_print_hashmap, jit_print_hashset,
+    jit_print_i64, jit_print_iterator, jit_print_lazy, jit_print_mutex,
+    jit_print_option, jit_print_priority_queue, jit_print_range,
+    jit_print_result, jit_print_str, jit_print_typed_object, jit_string_concat,
+    jit_to_number, jit_to_string, jit_type_check, jit_typeof,
 };
 #[allow(deprecated)]
 use super::super::ffi::object::{
@@ -39,8 +44,6 @@ use super::super::ffi::object::{
     jit_write_shared_cell_u32, jit_write_shared_cell_u64,
 };
 use super::super::ffi::typed_object::{jit_typed_merge_object, jit_typed_object_alloc};
-use super::super::ffi::typed_object::jit_typed_object_get_field;
-use super::super::ffi::typed_object::jit_typed_object_set_field;
 use super::helpers::jit_format_error;
 
 /// Register object FFI symbols with the JIT builder
@@ -56,7 +59,150 @@ pub fn register_object_symbols(builder: &mut JITBuilder) {
     builder.symbol("jit_to_number", jit_to_number as *const u8);
     // F5.a/F5.b: string `+` for `"a" + "b"` and `f"..."`-desugared concat chains.
     builder.symbol("jit_string_concat", jit_string_concat as *const u8);
-    builder.symbol("jit_print", jit_print as *const u8);
+    // ADR-006 §2.7.5 — kinded EnumStore producers (W12-jit-aggregate-non-array)
+    builder.symbol(
+        "jit_make_ok",
+        super::super::ffi::result::jit_make_ok as *const u8,
+    );
+    builder.symbol(
+        "jit_make_err",
+        super::super::ffi::result::jit_make_err as *const u8,
+    );
+    builder.symbol(
+        "jit_make_some",
+        super::super::ffi::result::jit_make_some as *const u8,
+    );
+    // ADR-006 §2.7.17 / Q18 — Arc-shape Result/Option producers + accessors
+    // (W12-jit-result-option-trinity, Phase 3 cluster-0 Round 7A, 2026-05-12).
+    // Match the VM-side `BuiltinFunction::OkCtor` / `ErrCtor` / `SomeCtor` /
+    // `NoneCtor` output shape — `Arc::into_raw(Arc<ResultData>) as u64` /
+    // `Arc::into_raw(Arc<OptionData>) as u64` with kind labels
+    // `NativeKind::Ptr(HeapKind::Result)` / `NativeKind::Ptr(HeapKind::Option)`.
+    // Replaces the legacy `jit_make_ok` etc. NaN-box producer family at the
+    // JIT EnumStore consumer (the production-code consumer migration gap the
+    // pre-trinity result.rs:178-200 deletion comment documented).
+    builder.symbol(
+        "jit_v2_make_result_ok",
+        super::super::ffi::result::jit_v2_make_result_ok as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_make_result_err",
+        super::super::ffi::result::jit_v2_make_result_err as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_make_option_some",
+        super::super::ffi::result::jit_v2_make_option_some as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_make_option_none",
+        super::super::ffi::result::jit_v2_make_option_none as *const u8,
+    );
+    builder.symbol(
+        "jit_arc_result_is_ok",
+        super::super::ffi::result::jit_arc_result_is_ok as *const u8,
+    );
+    builder.symbol(
+        "jit_arc_result_is_err",
+        super::super::ffi::result::jit_arc_result_is_err as *const u8,
+    );
+    builder.symbol(
+        "jit_arc_result_payload",
+        super::super::ffi::result::jit_arc_result_payload as *const u8,
+    );
+    builder.symbol(
+        "jit_arc_option_is_some",
+        super::super::ffi::result::jit_arc_option_is_some as *const u8,
+    );
+    builder.symbol(
+        "jit_arc_option_is_none",
+        super::super::ffi::result::jit_arc_option_is_none as *const u8,
+    );
+    builder.symbol(
+        "jit_arc_option_payload",
+        super::super::ffi::result::jit_arc_option_payload as *const u8,
+    );
+    // Arc-shape kinded retain/release per ADR-006 §2.7.17 / Q18.
+    // Required because the legacy `jit_arc_retain`/`jit_arc_release`
+    // operate on the `UnifiedValue<T>` refcount layout at offset 4,
+    // which would corrupt `Arc<ResultData>`/`Arc<OptionData>` allocations
+    // (whose refcount lives at offset -16 per Rust Arc contract).
+    builder.symbol(
+        "jit_arc_result_retain",
+        super::super::ffi::result::jit_arc_result_retain as *const u8,
+    );
+    builder.symbol(
+        "jit_arc_result_release",
+        super::super::ffi::result::jit_arc_result_release as *const u8,
+    );
+    builder.symbol(
+        "jit_arc_option_retain",
+        super::super::ffi::result::jit_arc_option_retain as *const u8,
+    );
+    builder.symbol(
+        "jit_arc_option_release",
+        super::super::ffi::result::jit_arc_option_release as *const u8,
+    );
+    // `jit_print` (kind-blind) symbol DELETED — see ffi/conversion.rs
+    // header comment. The MIR-side Call-terminator dispatch surfaces-
+    // and-stops on `_` arm rather than routing through the deleted
+    // W-series shape (W12-jit-print-heap-arm-classification reopen,
+    // 2026-05-13).
+    //
+    // W11-jit-new-array (ADR-006 §2.7.5 stamp-at-compile-time): per-kind
+    // print entry points dispatched by the MIR-side print emitter when
+    // the operand's `NativeKind` is statically known. Replaces the
+    // deleted kind-blind tag-decode in `format_value_word` for scalar
+    // operands.
+    builder.symbol("jit_print_i64", jit_print_i64 as *const u8);
+    builder.symbol("jit_print_f64", jit_print_f64 as *const u8);
+    builder.symbol("jit_print_bool", jit_print_bool as *const u8);
+    // W12-jit-print-heap-arm-classification (Phase 3 cluster-0 Round 8A,
+    // 2026-05-13): per-HeapKind kinded print entries. ADR-006 §2.7.5
+    // stamp-at-compile-time — the MIR-side Call-terminator print dispatch
+    // routes to these when the operand `NativeKind` is a heap arm
+    // (`String` / `Ptr(HeapKind::TypedObject)` / `Ptr(HeapKind::Option)` /
+    // `Ptr(HeapKind::Result)`). Each reads typed `*const T` field
+    // projections, no NaN-box tag decode, no `is_heap_kind` probe
+    // (§2.7.7 #4 / #7 forbidden). Routes through `ValueFormatter::
+    // format_kinded` so VM == JIT identical output.
+    builder.symbol("jit_print_str", jit_print_str as *const u8);
+    builder.symbol(
+        "jit_print_typed_object",
+        jit_print_typed_object as *const u8,
+    );
+    builder.symbol("jit_print_option", jit_print_option as *const u8);
+    builder.symbol("jit_print_result", jit_print_result as *const u8);
+    // Phase 3 cluster-2 Round 3 cw-D-fam12 (2026-05-16): Scalar Char +
+    // Concurrency Mutex/Atomic/Lazy/Channel kinded print entries
+    // (ADR-006 §2.7.5 stamp-at-compile-time + §2.7.25 concurrency-
+    // primitive printing convention per `printing.rs:451-464` Channel +
+    // `:534-551` Mutex/Atomic/Lazy). The Char entry handles both the
+    // scalar `NativeKind::Char` carrier (post-§2.7.5 amendment 4-byte
+    // codepoint scalar) and the pre-amendment
+    // `NativeKind::Ptr(HeapKind::Char)` heap arm — both labels store
+    // the codepoint inline per `ValueSlot::from_char`.
+    builder.symbol("jit_print_char", jit_print_char as *const u8);
+    builder.symbol("jit_print_mutex", jit_print_mutex as *const u8);
+    builder.symbol("jit_print_atomic", jit_print_atomic as *const u8);
+    builder.symbol("jit_print_lazy", jit_print_lazy as *const u8);
+    builder.symbol("jit_print_channel", jit_print_channel as *const u8);
+    // Phase 3 cluster-2 Round 4 cw-D-fam3 (2026-05-16): Collection
+    // family kinded print entries (HashMap/HashSet/Deque/PriorityQueue/
+    // Range/Iterator). Each takes `(ctx_ptr, bits)` mirror of the
+    // cw-D-fam12 Concurrency-family heap-arm shape — bits are
+    // `Arc::into_raw(Arc<XData>) as u64` per the producer-side contract
+    // on the matching `KindedSlot::from_X` constructor (HashMap is
+    // `Arc<HashMapKindedRef>` per Wave 2 Round 3b C2-joint ckpt-2 Q25.B
+    // SUPERSEDED). ADR-006 §2.7.5.B 2026-05-16
+    builder.symbol("jit_print_hashmap", jit_print_hashmap as *const u8);
+    builder.symbol("jit_print_hashset", jit_print_hashset as *const u8);
+    builder.symbol("jit_print_deque", jit_print_deque as *const u8);
+    builder.symbol(
+        "jit_print_priority_queue",
+        jit_print_priority_queue as *const u8,
+    );
+    builder.symbol("jit_print_range", jit_print_range as *const u8);
+    builder.symbol("jit_print_iterator", jit_print_iterator as *const u8);
     builder.symbol("jit_make_closure", jit_make_closure as *const u8);
     // Closure-spec Phase H2: TypedClosureHeader finalizer used by
     // `MirToIR::emit_heap_closure` to convert the raw typed block into a
@@ -475,14 +621,313 @@ pub fn declare_object_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<
         ffi_funcs.insert("jit_string_concat".to_string(), func_id);
     }
 
-    // jit_print(value_bits: u64) -> void
+    // ADR-006 §2.7.5 — kinded EnumStore producers
+    // (W12-jit-aggregate-non-array, 2026-05-12). Signature:
+    // `(inner_bits: u64) -> u64`. The JIT EnumStore consumer widens
+    // every operand to I64 bits (via `widen_to_i64`) per the §2.7.5
+    // stable-FFI carrier convention before calling. Return is the
+    // heap-pointer bits with HK_OK / HK_ERR / HK_SOME prefix tag —
+    // `jit_bits_to_nanboxed` at the JIT↔VM boundary converts to
+    // `Arc<ResultData>` / `Arc<OptionData>` (`crates/shape-jit/src/
+    // ffi/conversion.rs:246-258`).
+    for name in ["jit_make_ok", "jit_make_err", "jit_make_some"] {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // inner_bits
+        sig.returns.push(AbiParam::new(types::I64));
+        let func_id = module
+            .declare_function(name, Linkage::Import, &sig)
+            .unwrap_or_else(|e| panic!("Failed to declare {}: {:?}", name, e));
+        ffi_funcs.insert(name.to_string(), func_id);
+    }
+
+    // ADR-006 §2.7.17 / Q18 — Arc-shape Result/Option producers
+    // (W12-jit-result-option-trinity, Phase 3 cluster-0 Round 7A,
+    // 2026-05-12). Signature:
+    // `(payload_bits: u64, payload_kind_code: i8) -> u64`.
+    // The payload_kind_code is the §2.7.7 / Q9 parallel-track byte encoding
+    // (`crates/shape-jit/src/ffi/stack_kind_code.rs`) stamped at JIT-compile
+    // time from the EnumStore operand's MIR-inferred kind per §2.7.5.
+    // Return is `Arc::into_raw(Arc<ResultData>) as u64` /
+    // `Arc::into_raw(Arc<OptionData>) as u64` with kind labels
+    // `Ptr(HeapKind::Result)` / `Ptr(HeapKind::Option)`.
+    for name in [
+        "jit_v2_make_result_ok",
+        "jit_v2_make_result_err",
+        "jit_v2_make_option_some",
+    ] {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // payload_bits
+        sig.params.push(AbiParam::new(types::I8));  // payload_kind_code
+        sig.returns.push(AbiParam::new(types::I64));
+        let func_id = module
+            .declare_function(name, Linkage::Import, &sig)
+            .unwrap_or_else(|e| panic!("Failed to declare {}: {:?}", name, e));
+        ffi_funcs.insert(name.to_string(), func_id);
+    }
+    // jit_v2_make_option_none takes no payload (None has no payload).
     {
         let mut sig = module.make_signature();
-        sig.params.push(AbiParam::new(types::I64)); // value_bits
+        sig.returns.push(AbiParam::new(types::I64));
         let func_id = module
-            .declare_function("jit_print", Linkage::Import, &sig)
-            .expect("Failed to declare jit_print");
-        ffi_funcs.insert("jit_print".to_string(), func_id);
+            .declare_function("jit_v2_make_option_none", Linkage::Import, &sig)
+            .expect("Failed to declare jit_v2_make_option_none");
+        ffi_funcs.insert("jit_v2_make_option_none".to_string(), func_id);
+    }
+    // ADR-006 §2.7.17 — Arc-shape predicates: read is_ok / is_err / is_some /
+    // is_none from `*const ResultData` / `*const OptionData` directly.
+    // Signature: `(bits: u64) -> u8` (native bool).
+    for name in [
+        "jit_arc_result_is_ok",
+        "jit_arc_result_is_err",
+        "jit_arc_option_is_some",
+        "jit_arc_option_is_none",
+    ] {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I8));
+        let func_id = module
+            .declare_function(name, Linkage::Import, &sig)
+            .unwrap_or_else(|e| panic!("Failed to declare {}: {:?}", name, e));
+        ffi_funcs.insert(name.to_string(), func_id);
+    }
+    // Arc-shape payload extractors: clone the inner KindedSlot's share +
+    // return its raw bits. Signature: `(bits: u64) -> u64`.
+    for name in ["jit_arc_result_payload", "jit_arc_option_payload"] {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        let func_id = module
+            .declare_function(name, Linkage::Import, &sig)
+            .unwrap_or_else(|e| panic!("Failed to declare {}: {:?}", name, e));
+        ffi_funcs.insert(name.to_string(), func_id);
+    }
+    // Arc-shape retain/release: bump/decrement the standard Rust Arc
+    // refcount at offset -16 per Arc contract. Signature: `(bits: u64)`.
+    // Required by `refcount_disposition` when the slot kind is
+    // `Ptr(HeapKind::Result)` or `Ptr(HeapKind::Option)` — the legacy
+    // `jit_arc_retain`/`jit_arc_release` for `UnifiedValue<T>` corrupt
+    // these allocations.
+    for name in [
+        "jit_arc_result_retain",
+        "jit_arc_result_release",
+        "jit_arc_option_retain",
+        "jit_arc_option_release",
+    ] {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        let func_id = module
+            .declare_function(name, Linkage::Import, &sig)
+            .unwrap_or_else(|e| panic!("Failed to declare {}: {:?}", name, e));
+        ffi_funcs.insert(name.to_string(), func_id);
+    }
+
+    // `jit_print` (kind-blind) declare_function DELETED in
+    // W12-jit-print-heap-arm-classification reopen (2026-05-13). See
+    // `ffi/conversion.rs` header comment + the MIR-side Call-terminator
+    // dispatch's `_`-arm surface-and-stop.
+
+
+    // W11-jit-new-array kinded print entries (ADR-006 §2.7.5).
+    // jit_print_i64(value: i64) -> void
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        let func_id = module
+            .declare_function("jit_print_i64", Linkage::Import, &sig)
+            .expect("Failed to declare jit_print_i64");
+        ffi_funcs.insert("jit_print_i64".to_string(), func_id);
+    }
+    // jit_print_f64(value: f64) -> void
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::F64));
+        let func_id = module
+            .declare_function("jit_print_f64", Linkage::Import, &sig)
+            .expect("Failed to declare jit_print_f64");
+        ffi_funcs.insert("jit_print_f64".to_string(), func_id);
+    }
+    // jit_print_bool(value: u8) -> void
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I8));
+        let func_id = module
+            .declare_function("jit_print_bool", Linkage::Import, &sig)
+            .expect("Failed to declare jit_print_bool");
+        ffi_funcs.insert("jit_print_bool".to_string(), func_id);
+    }
+
+    // W12-jit-print-heap-arm-classification (Phase 3 cluster-0 Round 8A,
+    // 2026-05-13): heap-arm kinded print entries (ADR-006 §2.7.5).
+    //
+    // Each takes `(ctx_ptr: *const JITContext, bits: u64)` — `ctx_ptr` is
+    // I64 carrying the JIT context pointer so the FFI body can resolve
+    // the type schema registry for TypedObject field-name rendering, and
+    // `bits` is the typed-Arc raw pointer (`Arc::into_raw(Arc<T>) as u64`).
+    // The kind is implicit in the chosen entry by §2.7.5 stamp-at-compile-
+    // time discipline; no kind-code parameter, no Bool-default fallback.
+    //
+    // jit_print_str(ctx_ptr: *const JITContext, bits: u64) -> void
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // ctx_ptr
+        sig.params.push(AbiParam::new(types::I64)); // bits (Arc<String>)
+        let func_id = module
+            .declare_function("jit_print_str", Linkage::Import, &sig)
+            .expect("Failed to declare jit_print_str");
+        ffi_funcs.insert("jit_print_str".to_string(), func_id);
+    }
+    // jit_print_typed_object(ctx_ptr: *const JITContext, bits: u64) -> void
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // ctx_ptr
+        sig.params.push(AbiParam::new(types::I64)); // bits (Arc<TypedObjectStorage>)
+        let func_id = module
+            .declare_function("jit_print_typed_object", Linkage::Import, &sig)
+            .expect("Failed to declare jit_print_typed_object");
+        ffi_funcs.insert("jit_print_typed_object".to_string(), func_id);
+    }
+    // jit_print_option(ctx_ptr: *const JITContext, bits: u64) -> void
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // ctx_ptr
+        sig.params.push(AbiParam::new(types::I64)); // bits (Arc<OptionData>)
+        let func_id = module
+            .declare_function("jit_print_option", Linkage::Import, &sig)
+            .expect("Failed to declare jit_print_option");
+        ffi_funcs.insert("jit_print_option".to_string(), func_id);
+    }
+    // jit_print_result(ctx_ptr: *const JITContext, bits: u64) -> void
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // ctx_ptr
+        sig.params.push(AbiParam::new(types::I64)); // bits (Arc<ResultData>)
+        let func_id = module
+            .declare_function("jit_print_result", Linkage::Import, &sig)
+            .expect("Failed to declare jit_print_result");
+        ffi_funcs.insert("jit_print_result".to_string(), func_id);
+    }
+
+    // Phase 3 cluster-2 Round 3 cw-D-fam12 (2026-05-16): Scalar Char +
+    // Concurrency Mutex/Atomic/Lazy/Channel kinded print entries
+    // (ADR-006 §2.7.5 stamp-at-compile-time + §2.7.25 concurrency-
+    // primitive printing convention). The Char entry mirrors the scalar
+    // print signature (single I32 codepoint), Mutex/Atomic/Lazy/Channel
+    // mirror the heap-arm `(ctx_ptr, bits)` signature.
+    //
+    // jit_print_char(value: u32) -> void
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I32)); // codepoint
+        let func_id = module
+            .declare_function("jit_print_char", Linkage::Import, &sig)
+            .expect("Failed to declare jit_print_char");
+        ffi_funcs.insert("jit_print_char".to_string(), func_id);
+    }
+    // jit_print_mutex(ctx_ptr: *const JITContext, bits: u64) -> void
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // ctx_ptr
+        sig.params.push(AbiParam::new(types::I64)); // bits (Arc<MutexData>)
+        let func_id = module
+            .declare_function("jit_print_mutex", Linkage::Import, &sig)
+            .expect("Failed to declare jit_print_mutex");
+        ffi_funcs.insert("jit_print_mutex".to_string(), func_id);
+    }
+    // jit_print_atomic(ctx_ptr: *const JITContext, bits: u64) -> void
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // ctx_ptr
+        sig.params.push(AbiParam::new(types::I64)); // bits (Arc<AtomicData>)
+        let func_id = module
+            .declare_function("jit_print_atomic", Linkage::Import, &sig)
+            .expect("Failed to declare jit_print_atomic");
+        ffi_funcs.insert("jit_print_atomic".to_string(), func_id);
+    }
+    // jit_print_lazy(ctx_ptr: *const JITContext, bits: u64) -> void
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // ctx_ptr
+        sig.params.push(AbiParam::new(types::I64)); // bits (Arc<LazyData>)
+        let func_id = module
+            .declare_function("jit_print_lazy", Linkage::Import, &sig)
+            .expect("Failed to declare jit_print_lazy");
+        ffi_funcs.insert("jit_print_lazy".to_string(), func_id);
+    }
+    // jit_print_channel(ctx_ptr: *const JITContext, bits: u64) -> void
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // ctx_ptr
+        sig.params.push(AbiParam::new(types::I64)); // bits (Arc<ChannelData>)
+        let func_id = module
+            .declare_function("jit_print_channel", Linkage::Import, &sig)
+            .expect("Failed to declare jit_print_channel");
+        ffi_funcs.insert("jit_print_channel".to_string(), func_id);
+    }
+
+    // Phase 3 cluster-2 Round 4 cw-D-fam3 (2026-05-16): Collection family
+    // kinded print entries (ADR-006 §2.7.5 stamp-at-compile-time +
+    // §2.7.5.B Family 3 amendment extension). Each mirrors the cw-D-fam12
+    // Concurrency-family heap-arm `(ctx_ptr, bits)` signature.
+    //
+    // jit_print_hashmap(ctx_ptr: *const JITContext, bits: u64) -> void
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // ctx_ptr
+        sig.params.push(AbiParam::new(types::I64)); // bits (Arc<HashMapKindedRef>)
+        let func_id = module
+            .declare_function("jit_print_hashmap", Linkage::Import, &sig)
+            .expect("Failed to declare jit_print_hashmap");
+        ffi_funcs.insert("jit_print_hashmap".to_string(), func_id);
+    }
+    // jit_print_hashset(ctx_ptr: *const JITContext, bits: u64) -> void
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // ctx_ptr
+        sig.params.push(AbiParam::new(types::I64)); // bits (Arc<HashSetData>)
+        let func_id = module
+            .declare_function("jit_print_hashset", Linkage::Import, &sig)
+            .expect("Failed to declare jit_print_hashset");
+        ffi_funcs.insert("jit_print_hashset".to_string(), func_id);
+    }
+    // jit_print_deque(ctx_ptr: *const JITContext, bits: u64) -> void
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // ctx_ptr
+        sig.params.push(AbiParam::new(types::I64)); // bits (Arc<DequeData>)
+        let func_id = module
+            .declare_function("jit_print_deque", Linkage::Import, &sig)
+            .expect("Failed to declare jit_print_deque");
+        ffi_funcs.insert("jit_print_deque".to_string(), func_id);
+    }
+    // jit_print_priority_queue(ctx_ptr: *const JITContext, bits: u64) -> void
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // ctx_ptr
+        sig.params.push(AbiParam::new(types::I64)); // bits (Arc<PriorityQueueData>)
+        let func_id = module
+            .declare_function("jit_print_priority_queue", Linkage::Import, &sig)
+            .expect("Failed to declare jit_print_priority_queue");
+        ffi_funcs.insert("jit_print_priority_queue".to_string(), func_id);
+    }
+    // jit_print_range(ctx_ptr: *const JITContext, bits: u64) -> void
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // ctx_ptr
+        sig.params.push(AbiParam::new(types::I64)); // bits (Arc<RangeData>)
+        let func_id = module
+            .declare_function("jit_print_range", Linkage::Import, &sig)
+            .expect("Failed to declare jit_print_range");
+        ffi_funcs.insert("jit_print_range".to_string(), func_id);
+    }
+    // jit_print_iterator(ctx_ptr: *const JITContext, bits: u64) -> void
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // ctx_ptr
+        sig.params.push(AbiParam::new(types::I64)); // bits (Arc<IteratorState>)
+        let func_id = module
+            .declare_function("jit_print_iterator", Linkage::Import, &sig)
+            .expect("Failed to declare jit_print_iterator");
+        ffi_funcs.insert("jit_print_iterator".to_string(), func_id);
     }
 
     // jit_make_closure(ctx, func_idx, capture_count) -> u64

@@ -1,39 +1,66 @@
-//! VM-native value formatting
+//! VM-native value formatting (ADR-006 §2.7.4 — output adapter).
 //!
-//! This module provides native formatting for ValueWord values without converting to
-//! runtime values. It respects TypeSchema for TypedObjects with their field names.
+//! Formats runtime values held in a [`KindedSlot`] for `print()` /
+//! `format()` / REPL display. The pre-bulldozer implementation keyed off
+//! the deleted `ValueWord` carrier and `tag_bits::*` decode helpers; per
+//! ADR-006 §2.7.4 the formatter moves to a kinded carrier — `NativeKind`
+//! drives inline-scalar dispatch, and heap arms are read via
+//! `slot.as_heap_value()` + `HeapValue` match (Q8 ruling, preserves
+//! ADR-005 §1 single-discriminator).
 //!
-//! The primary entry point is `format_nb()` which formats ValueWord values directly
-//! using tag/HeapValue dispatch.
+//! [`PrintResult`] and [`PrintSpan`] live in `shape_runtime::print_result`
+//! per §2.7.4; consumers of this formatter pair its output with those
+//! span-metadata carriers when feeding the output adapter.
+//!
+//! # Phase-1b-vm migration scope (E-printing close)
+//!
+//! Wave 6.5 / Wave-α `E-printing` ports the formatter SHAPE off the
+//! deleted `ValueWord` API: the public surface now takes `&KindedSlot`,
+//! dispatches on `NativeKind` for the inline-scalar arms (Int*, UInt*,
+//! IntSize, UIntSize, Bool, Float64), and reads heap-bearing kinds via
+//! the typed `Arc<T>` payload reconstruction shared with
+//! `KindedSlot::Drop` / `clone_with_kind`. Heap arms whose payload
+//! formatting depends on Phase-2c surfaces (TypedObject schema lookup,
+//! Content rendering, Temporal/DateTime formatting, TableView, Iterator
+//! / Generator state) surface as `todo!("phase-2c — see ADR-006
+//! §2.7.4")` placeholders rather than papering over with ValueWord-shape
+//! recovery, per the playbook's surface-and-stop discipline.
 
 use shape_runtime::type_schema::TypeSchemaRegistry;
-use shape_runtime::type_schema::field_types::FieldType;
-use shape_runtime::type_system::annotation_to_string;
-use shape_value::heap_value::HeapValue;
-use shape_value::tag_bits::{is_tagged, get_tag, I48_MAX, I48_MIN, TAG_INT, TAG_BOOL, TAG_NONE, TAG_UNIT, TAG_FUNCTION, TAG_MODULE_FN, TAG_HEAP, TAG_REF};
-use shape_value::{TypedArrayData, TemporalData, RareHeapData, ConcurrencyData, TableViewData};
-use shape_value::{ValueWord, ValueWordExt};
+use shape_value::heap_value::{
+    HeapKind, HeapValue, TypedObjectStorage,
+};
+use shape_value::{KindedSlot, NativeKind, ValueSlot};
+use std::sync::Arc;
 
-/// Formatter for ValueWord values
+// Re-export the runtime-tier `PrintResult`/`PrintSpan` carriers for
+// formatter consumers — keeps the post-§2.7.4 import path coherent for
+// callers that still reach into `shape_vm::executor::printing` for the
+// output-adapter types.
+pub use shape_runtime::print_result::{PrintResult, PrintSpan};
+
+/// Formatter for runtime values represented as [`KindedSlot`].
 ///
-/// Uses TypeSchemaRegistry to format TypedObjects with their field names.
-/// Optionally accepts a reference resolver to dereference `&ref` values
-/// (requires VM stack access, so only available during execution).
+/// Uses [`TypeSchemaRegistry`] to format `TypedObject` payloads with
+/// their schema-declared field names. Optionally accepts a reference
+/// resolver (Phase-2c) that dereferences ref-kind slots to their target
+/// values; absent the resolver, refs print as `<ref>`.
+///
+/// ADR-005 §1 single-discriminator preserved: heap arms are read via
+/// the slot's typed pointer + `HeapValue` match (Q8 ruling). No
+/// per-heap-variant accessors on `KindedSlot`; no parallel sum types.
 pub struct ValueFormatter<'a> {
-    /// Type schema registry for TypedObject field resolution
+    /// Type schema registry for `TypedObject` field resolution.
     schema_registry: &'a TypeSchemaRegistry,
-    /// Optional callback to resolve reference values to their targets.
-    /// When provided, refs are dereferenced and their underlying values printed.
-    /// When absent, refs display as `<ref>`.
-    deref_fn: Option<&'a dyn Fn(&ValueWord) -> Option<ValueWord>>,
+    /// Optional reference-resolver hook. Phase-2c wire-up: when present,
+    /// `Ref`-kind slots are dereferenced and the target formatted in
+    /// their place; when absent, refs print as `<ref>`.
+    deref_fn: Option<&'a dyn Fn(&KindedSlot) -> Option<KindedSlot>>,
 }
 
-/// Backward-compat alias used by test code.
-#[cfg(test)]
-pub type VMValueFormatter<'a> = ValueFormatter<'a>;
-
 impl<'a> ValueFormatter<'a> {
-    /// Create a new formatter
+    /// Create a formatter without a reference resolver — `Ref`-kind
+    /// slots will print as `<ref>`.
     pub fn new(schema_registry: &'a TypeSchemaRegistry) -> Self {
         Self {
             schema_registry,
@@ -41,14 +68,13 @@ impl<'a> ValueFormatter<'a> {
         }
     }
 
-    /// Create a formatter with a reference resolver.
-    ///
-    /// The resolver is called when a `tag::Ref` or `HeapValue::ProjectedRef`
-    /// is encountered, allowing the formatter to print the underlying value
-    /// instead of `<ref>`.
+    /// Create a formatter with a reference resolver. The resolver is
+    /// invoked when a ref-kind slot is encountered; if it returns
+    /// `Some(target)` the target is formatted in place, otherwise the
+    /// ref prints as `<ref>`.
     pub fn with_deref(
         schema_registry: &'a TypeSchemaRegistry,
-        deref_fn: &'a dyn Fn(&ValueWord) -> Option<ValueWord>,
+        deref_fn: &'a dyn Fn(&KindedSlot) -> Option<KindedSlot>,
     ) -> Self {
         Self {
             schema_registry,
@@ -56,573 +82,987 @@ impl<'a> ValueFormatter<'a> {
         }
     }
 
-    /// Format a ValueWord to string (test-only, delegates to ValueWord path)
-    #[cfg(test)]
-    pub fn format(&self, value: &ValueWord) -> String {
-        let nb = value.clone();
-        self.format_nb_with_depth(&nb, 0)
-    }
-
-    /// Format a ValueWord value to string — primary entry point.
+    /// Primary entry point: format a runtime value to a string.
     ///
-    /// Uses tag/HeapValue dispatch for inline types (f64, i48, bool, None,
-    /// Unit) and heap types (String, Array, TypedObject, Decimal, etc.).
-    pub fn format_nb(&self, value: &ValueWord) -> String {
-        self.format_nb_with_depth(value, 0)
+    /// At the top level, raw strings render unquoted (so `print("hi")`
+    /// prints `hi`, not `"hi"`). Inside containers (TypedObject fields,
+    /// HashMap values, heap-array elements) strings are quoted via
+    /// [`Self::format_kinded_nested`].
+    pub fn format_kinded(&self, slot: &KindedSlot) -> String {
+        self.format_kinded_inner(slot, 0, false)
     }
 
-    /// Format a ValueWord value with depth tracking.
-    fn format_nb_with_depth(&self, value: &ValueWord, depth: usize) -> String {
+    /// Format a runtime value as it appears nested inside another
+    /// container — quotes string values to disambiguate `{name: "alice"}`
+    /// vs `{name: alice}`.
+    pub fn format_kinded_nested(&self, slot: &KindedSlot) -> String {
+        self.format_kinded_inner(slot, 0, true)
+    }
+
+    /// Recursive helper with depth tracking. Caps recursion at depth 50
+    /// to bound output for cyclic / deeply nested values.
+    ///
+    /// `quote_strings` controls whether `String`-kind slots render as
+    /// `"hello"` (true, nested) or `hello` (false, top-level).
+    fn format_kinded_inner(&self, slot: &KindedSlot, depth: usize, quote_strings: bool) -> String {
         if depth > 50 {
             return "[max depth reached]".to_string();
         }
 
-        // Fast path: inline types (no heap access needed)
-        let bits = value.raw_bits();
-        if !is_tagged(bits) {
-            // Post-Wave-E+5/Unit B, typed integer producers (`op_push_const
-            // Int`, `AddInt`, `LoadLocalI64`, …) push raw native i64 bits.
-            // Those bits collide with the f64 bit pattern of denormal
-            // sub-normals (e.g. native i64 `34` ≈ f64 `1.68e-322`), so a
-            // pure `as_f64()` fallback formats them as long denormal
-            // strings. Disambiguate by treating bits whose i64
-            // interpretation falls in the i48 range as native i64; real
-            // f64 values like `1.0` / `2.5` / `34.0` have bit patterns
-            // far outside that range. Native bool 0/1 also fits the i48
-            // path and round-trips correctly through `i64::to_string()`
-            // (the predicate path stays bool-specific via `as_bool`).
-            let as_i64 = bits as i64;
-            if (I48_MIN..=I48_MAX).contains(&as_i64) {
-                return as_i64.to_string();
+        let bits = slot.slot.raw();
+        match slot.kind {
+            // ── Inline scalars ──────────────────────────────────────────
+            NativeKind::Bool => slot.slot.as_bool().to_string(),
+            NativeKind::Int8
+            | NativeKind::NullableInt8
+            | NativeKind::Int16
+            | NativeKind::NullableInt16
+            | NativeKind::Int32
+            | NativeKind::NullableInt32
+            | NativeKind::Int64
+            | NativeKind::NullableInt64
+            | NativeKind::IntSize
+            | NativeKind::NullableIntSize => slot.slot.as_i64().to_string(),
+            NativeKind::UInt64 | NativeKind::NullableUInt64 => {
+                // ADR-006 §2.7.7 / Wave 6.5 D-v2-array-detect — v2 typed
+                // arrays flow through the kinded API as raw `*mut TypedArray<T>`
+                // bits stamped with `NativeKind::UInt64` (no Arc, no
+                // refcount). Probe the heap-header `_pad` byte to recognize
+                // a v2 typed array pointer; fall back to integer rendering
+                // for plain UInt64 scalars.
+                if let Some(view) = crate::executor::v2_handlers::v2_array_detect::as_v2_typed_array(
+                    bits,
+                    slot.kind,
+                ) {
+                    self.format_v2_typed_array(&view)
+                } else {
+                    slot.slot.as_u64().to_string()
+                }
             }
-            if let Some(n) = value.as_f64() {
-                return format_number(n);
+            NativeKind::UInt8
+            | NativeKind::NullableUInt8
+            | NativeKind::UInt16
+            | NativeKind::NullableUInt16
+            | NativeKind::UInt32
+            | NativeKind::NullableUInt32
+            | NativeKind::UIntSize
+            | NativeKind::NullableUIntSize => slot.slot.as_u64().to_string(),
+            NativeKind::Float64 | NativeKind::NullableFloat64 => {
+                format_number(slot.slot.as_f64())
             }
-            return "NaN".to_string();
+            // Round 19 S1.5 W12-nativekind-scalar-additions (2026-05-14):
+            // ADR-006 §2.7.5 amendment adds F32 + Char as 4-byte scalar
+            // variants. F32 prints via `format_number(f64::from(f32))`
+            // (lossless widening, same numeric formatting as F64); Char
+            // prints its codepoint as a single character (mirror of the
+            // pre-amendment `HeapKind::Char` printing arm).
+            NativeKind::Float32 => format_number(f64::from(f32::from_bits(bits as u32))),
+            NativeKind::Char => match char::from_u32(bits as u32) {
+                Some(c) if quote_strings => format!("'{}'", c),
+                Some(c) => c.to_string(),
+                None => format!("<invalid-char:0x{:x}>", bits),
+            },
+            // ── String (top-level NativeKind::String) ───────────────────
+            NativeKind::String => {
+                if bits == 0 {
+                    return "None".to_string();
+                }
+                // SAFETY: per the construction-side contract on every
+                // `KindedSlot::from_string_arc`-shaped producer, `String`
+                // kind means the slot stores `Arc::into_raw::<String>`
+                // bits and the slot owns one strong-count share. Read
+                // the inner `&str` for the lifetime of `&self`.
+                let s: &String = unsafe { &*(bits as *const String) };
+                if quote_strings {
+                    format!("\"{}\"", s)
+                } else {
+                    s.clone()
+                }
+            }
+            // ── Wave 2 Agent B v2-raw carriers ───────────────────────────
+            // W12-StringV2-DecimalV2-NativeKind-additions (2026-05-14): the
+            // v2-raw `*const StringObj` / `*const DecimalObj` carriers print
+            // with the same surface as their Arc-wrapped siblings. The
+            // carrier shape (HeapHeader-equipped 24-byte `repr(C)` struct
+            // per `v2/string_obj.rs` / `v2/decimal_obj.rs`) is invisible to
+            // the print output — only the inner payload (UTF-8 bytes /
+            // Decimal value) is rendered.
+            NativeKind::StringV2 => {
+                if bits == 0 {
+                    return "None".to_string();
+                }
+                // SAFETY: per the §2.7.5 amendment construction contract,
+                // kind=StringV2 means bits = `ptr as u64` pointing to a live
+                // `StringObj` with bumped refcount.
+                let ptr = bits as *const shape_value::v2::string_obj::StringObj;
+                let s: &str = unsafe { shape_value::v2::string_obj::StringObj::as_str(ptr) };
+                if quote_strings {
+                    format!("\"{}\"", s)
+                } else {
+                    s.to_string()
+                }
+            }
+            NativeKind::DecimalV2 => {
+                if bits == 0 {
+                    return "None".to_string();
+                }
+                // SAFETY: per the §2.7.5 amendment construction contract,
+                // kind=DecimalV2 means bits = `ptr as u64` pointing to a live
+                // `DecimalObj` with bumped refcount.
+                let ptr = bits as *const shape_value::v2::decimal_obj::DecimalObj;
+                let value = unsafe { shape_value::v2::decimal_obj::DecimalObj::value(ptr) };
+                value.to_string()
+            }
+            // ── Heap-pointer kinds: dispatch via HeapKind ───────────────
+            NativeKind::Ptr(hk) => self.format_heap_kind(bits, hk, depth, quote_strings),
         }
-        match get_tag(bits) {
-            TAG_INT => {
-                if let Some(i) = value.as_i64() {
-                    return i.to_string();
-                }
-                return "0".to_string();
-            }
-            TAG_BOOL => {
-                if let Some(b) = value.as_bool() {
-                    return b.to_string();
-                }
-                return "false".to_string();
-            }
-            TAG_NONE => return "None".to_string(),
-            TAG_UNIT => return "()".to_string(),
-            TAG_FUNCTION => {
-                if let Some(id) = value.as_function_id() {
-                    return format!("[Function:{}]", id);
-                }
-                return "[Function]".to_string();
-            }
-            TAG_MODULE_FN => return "[ModuleFunction]".to_string(),
-            TAG_REF => {
-                if let Some(deref) = &self.deref_fn {
-                    if let Some(resolved) = deref(value) {
-                        return self.format_nb_with_depth(&resolved, depth + 1);
-                    }
-                }
-                return "<ref>".to_string();
-            }
-            TAG_HEAP => {}
-            _ => return format!("[Unknown tag]"),
-        }
+    }
 
-        // Handle unified arrays (bit-47 tagged) before HeapValue dispatch.
-        let vb = shape_value::ValueBits::from_raw(value.raw_bits());
-        if vb.is_unified_heap() {
-            let kind = unsafe { vb.unified_heap_kind() };
-            if kind == shape_value::tag_bits::HEAP_KIND_ARRAY as u16 {
-                let arr = unsafe {
-                    shape_value::unified_array::UnifiedArray::from_heap_bits(value.raw_bits())
-                };
-                let elems: Vec<ValueWord> = (0..arr.len())
-                    .map(|i| unsafe { ValueWord::clone_from_bits(*arr.get(i).unwrap()) })
-                    .collect();
-                return self.format_nanboxed_array(&elems, depth);
-            }
-            return format!("<unified:{}>", kind);
+    /// Heap-arm formatter: dispatches on `HeapKind` directly to read the
+    /// matching typed `Arc<T>` payload (Q8 — no per-heap-variant accessor
+    /// on the carrier; the kind discriminant is local).
+    ///
+    /// `quote_strings` propagates from the entry point — when this heap
+    /// arm is itself a child of a TypedObject/HashMap/array and the parent
+    /// asked for nested formatting, the leaf string render quotes.
+    fn format_heap_kind(
+        &self,
+        bits: u64,
+        hk: HeapKind,
+        depth: usize,
+        quote_strings: bool,
+    ) -> String {
+        if bits == 0 {
+            return "None".to_string();
         }
-
-        // cold-path: as_heap_ref retained — display formatting multi-variant match
-        match value.as_heap_ref() { // cold-path
-            Some(HeapValue::String(s)) => s.as_ref().clone(),
-            Some(HeapValue::Array(arr)) => self.format_nanboxed_array(arr.as_ref(), depth),
-            Some(HeapValue::ProjectedRef(_)) => {
-                if let Some(deref) = &self.deref_fn {
-                    if let Some(resolved) = deref(value) {
-                        return self.format_nb_with_depth(&resolved, depth + 1);
-                    }
+        match hk {
+            HeapKind::String => {
+                // SAFETY: typed-Arc payload per §2.4.
+                let s: &String = unsafe { &*(bits as *const String) };
+                if quote_strings {
+                    format!("\"{}\"", s)
+                } else {
+                    s.clone()
                 }
-                "<ref>".to_string()
             }
-            Some(HeapValue::TypedObject {
-                schema_id,
-                slots,
-                heap_mask,
-            }) => self.format_typed_object(*schema_id as u32, slots, *heap_mask, depth),
-            Some(HeapValue::Decimal(d)) => format!("{}D", d),
-            Some(HeapValue::BigInt(i)) => i.to_string(),
-            Some(HeapValue::ClosureRaw(..)) => {
-                // Track A.5: `ClosureRaw` is the sole closure representation.
-                // `function_id` is read via `VmClosureHandle`.
-                let handle = value
-                    .as_closure_handle()
-                    .expect("closure arm implies a closure handle");
-                format!("[Closure:{}]", handle.function_id())
+            HeapKind::Decimal => {
+                let d: &rust_decimal::Decimal =
+                    unsafe { &*(bits as *const rust_decimal::Decimal) };
+                format!("{}D", d)
             }
-            Some(HeapValue::HostClosure(_)) => "<HostClosure>".to_string(),
-            Some(HeapValue::DataTable(dt)) => format!("{}", dt),
-            Some(HeapValue::TableView(TableViewData::TypedTable { table, .. })) => format!("{}", table),
-            Some(HeapValue::TableView(TableViewData::RowView { table, row_idx, .. })) => {
-                format!("[Row {} of {} rows]", row_idx, table.row_count())
+            HeapKind::BigInt => {
+                let i: &i64 = unsafe { &*(bits as *const i64) };
+                i.to_string()
             }
-            Some(HeapValue::TableView(TableViewData::ColumnRef { table, col_id, .. })) => {
-                let col = table.inner().column(*col_id as usize);
-                let dtype = col.data_type();
-                let type_str = match dtype {
-                    arrow_schema::DataType::Float64 => "f64",
-                    arrow_schema::DataType::Int64 => "i64",
-                    arrow_schema::DataType::Boolean => "bool",
-                    arrow_schema::DataType::Utf8 | arrow_schema::DataType::LargeUtf8 => "string",
-                    _ => "unknown",
-                };
-                let name = table
-                    .column_names()
-                    .get(*col_id as usize)
-                    .cloned()
-                    .unwrap_or_else(|| format!("col_{}", col_id));
-                format!("Column<{}>({}, {} rows)", type_str, name, col.len())
+            HeapKind::Char => {
+                // `Char`-kind stores codepoint bits inline (no Arc<T>).
+                match char::from_u32(bits as u32) {
+                    Some(c) => c.to_string(),
+                    None => "[Invalid char]".to_string(),
+                }
             }
-            Some(HeapValue::TableView(TableViewData::IndexedTable {
-                table, index_col, ..
-            })) => {
-                let col_name = table
-                    .column_names()
-                    .get(*index_col as usize)
-                    .cloned()
-                    .unwrap_or_else(|| format!("col_{}", index_col));
+            HeapKind::TypedArray => {
+                // V3-S5 ckpt-5: TypedArrayData enum + HeapKind::TypedArray
+                // ordinal DELETED at ckpt-1..ckpt-4. Format placeholder.
+                let _ = depth;
+                "[TypedArray:ckpt5-surface]".to_string()
+            }
+            HeapKind::TypedObject => {
+                // ADR-006 §2.7.4 / §2.7.6 / Q8 — walk the per-field slots,
+                // dispatch each on `field_kinds[i]` (the per-schema
+                // `Arc<[NativeKind]>` co-located with the storage), and
+                // resolve field names via the schema registry. SAFETY:
+                // construction-side contract on `KindedSlot::from_typed_object`
+                // — `TypedObject`-kind bits are `Arc::into_raw(Arc<TypedObjectStorage>)`.
+                let storage: &TypedObjectStorage =
+                    unsafe { &*(bits as *const TypedObjectStorage) };
+                self.format_typed_object(storage, depth)
+            }
+            HeapKind::HashMap => {
+                // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): bits are
+                // `Arc::into_raw(Arc<HashMapKindedRef>)` per ADR-006
+                // §2.7.24 Q25.B SUPERSEDED. Cast through the kinded ref
+                // wrapper; per-V Display dispatch lives at
+                // `format_hashmap(kref, depth)`.
+                let kref: &shape_value::heap_value::HashMapKindedRef =
+                    unsafe { &*(bits as *const shape_value::heap_value::HashMapKindedRef) };
+                self.format_hashmap(kref, depth)
+            }
+            HeapKind::HashSet => {
+                // Wave 13 W13-hashset-rebuild (ADR-006 §2.7.15 / Q16,
+                // 2026-05-10): HashSetData stores a single
+                // `Vec<Arc<String>>` keys buffer (mirror of HashMapData
+                // with the values buffer dropped). Render as
+                // `{"a", "b", ...}`. SAFETY: construction-side contract
+                // on `KindedSlot::from_hashset`.
+                let _ = depth;
+                let set: &shape_value::heap_value::HashSetData =
+                    unsafe { &*(bits as *const shape_value::heap_value::HashSetData) };
+                self.format_hashset(set)
+            }
+            HeapKind::DataTable => {
+                let dt: &shape_value::DataTable =
+                    unsafe { &*(bits as *const shape_value::DataTable) };
+                format!("{}", dt)
+            }
+            HeapKind::Content => {
+                let node: &shape_value::content::ContentNode =
+                    unsafe { &*(bits as *const shape_value::content::ContentNode) };
+                format!("{}", node)
+            }
+            HeapKind::Instant => {
+                let t: &std::time::Instant =
+                    unsafe { &*(bits as *const std::time::Instant) };
+                format!("<instant:{:?}>", t.elapsed())
+            }
+            HeapKind::IoHandle => {
+                let data: &shape_value::heap_value::IoHandleData =
+                    unsafe { &*(bits as *const shape_value::heap_value::IoHandleData) };
+                let status = if data.is_open() { "open" } else { "closed" };
+                format!("<io_handle:{}:{}>", data.path, status)
+            }
+            HeapKind::NativeView => {
+                let v: &shape_value::heap_value::NativeViewData =
+                    unsafe { &*(bits as *const shape_value::heap_value::NativeViewData) };
                 format!(
-                    "IndexedTable({} rows, index: {})",
-                    table.row_count(),
-                    col_name
+                    "<{}:{}@0x{:x}>",
+                    if v.mutable { "cmut" } else { "cview" },
+                    v.layout.name,
+                    v.ptr
                 )
             }
-            Some(HeapValue::Range {
-                start,
-                end,
-                inclusive,
-            }) => {
-                let start_str = start
-                    .as_ref()
-                    .map(|s| self.format_nb_with_depth(s, depth + 1))
-                    .unwrap_or_default();
-                let end_str = end
-                    .as_ref()
-                    .map(|e| self.format_nb_with_depth(e, depth + 1))
-                    .unwrap_or_default();
-                let op = if *inclusive { "..=" } else { ".." };
-                format!("{}{}{}", start_str, op, end_str)
+            HeapKind::Temporal => {
+                // C1-temporal-lowering (Phase 2d Wave 2): Temporal carrier
+                // dispatch per ADR-006 §2.7.4. Slot bits are
+                // `Arc::into_raw::<TemporalData>` (set by
+                // `compiler/expressions/temporal.rs::compile_expr_duration`
+                // + `op_push_const`'s Duration arm in `stack_ops/mod.rs`
+                // and by the `TIMESPAN_METHODS` / `DATETIME_METHODS`
+                // PHF result construction in
+                // `objects/datetime_methods.rs::temporal_result`).
+                // `TemporalData`'s own `Display` impl already handles
+                // every arm (DateTime / Duration / TimeSpan / Timeframe /
+                // TimeReference / DateTimeExpr / DataDateTimeRef); we
+                // dispatch through it preserving ADR-005 §1's
+                // single-discriminator discipline (no per-arm peek at
+                // the `TemporalData` payload here).
+                let td: &shape_value::heap_value::TemporalData =
+                    unsafe { &*(bits as *const shape_value::heap_value::TemporalData) };
+                format!("{}", td)
             }
-            Some(HeapValue::Enum(e)) => {
-                use shape_value::enums::EnumPayload;
-                match &e.payload {
-                    EnumPayload::Unit => e.variant.clone(),
-                    EnumPayload::Tuple(values) => {
-                        let parts: Vec<String> = values
-                            .iter()
-                            .map(|v| self.format_nb_with_depth(v, depth + 1))
-                            .collect();
-                        format!("{}({})", e.variant, parts.join(", "))
-                    }
-                    EnumPayload::Struct(fields) => {
-                        let mut parts: Vec<String> = fields
-                            .iter()
-                            .map(|(k, v)| {
-                                format!("{}: {}", k, self.format_nb_with_depth(v, depth + 1))
-                            })
-                            .collect();
-                        parts.sort();
-                        format!("{} {{ {} }}", e.variant, parts.join(", "))
-                    }
-                }
+            HeapKind::TableView => {
+                let tv: &shape_value::heap_value::TableViewData =
+                    unsafe { &*(bits as *const shape_value::heap_value::TableViewData) };
+                format!("{}", tv)
             }
-            Some(HeapValue::Some(inner)) => {
-                format!("Some({})", self.format_nb_with_depth(inner, depth + 1))
-            }
-            Some(HeapValue::Ok(inner)) => {
-                format!("Ok({})", self.format_nb_with_depth(inner, depth + 1))
-            }
-            Some(HeapValue::Err(inner)) => {
-                format!("Err({})", self.format_nb_with_depth(inner, depth + 1))
-            }
-            Some(HeapValue::Future(id)) => format!("[Future:{}]", id),
-            Some(HeapValue::TaskGroup { kind, task_ids }) => {
-                let kind_str = match kind {
+            HeapKind::TaskGroup => {
+                let tg: &shape_value::heap_value::TaskGroupData =
+                    unsafe { &*(bits as *const shape_value::heap_value::TaskGroupData) };
+                let kind_str = match tg.kind {
                     0 => "All",
                     1 => "Race",
                     2 => "Any",
                     3 => "Settle",
                     _ => "Unknown",
                 };
-                format!("[TaskGroup:{}({})]", kind_str, task_ids.len())
+                format!("[TaskGroup:{}({})]", kind_str, tg.task_ids.len())
             }
-            Some(HeapValue::TraitObject { value, .. }) => {
-                self.format_nb_with_depth(value, depth + 1)
+            HeapKind::Closure => {
+                // ClosureRaw payload uses `OwnedClosureBlock` rather than
+                // `Arc<HeapValue>`; the formatter walked the legacy
+                // `HeapValue::ClosureRaw` arm via `as_closure_handle()`.
+                // The kinded read needs the §2.7.8 cell-storage rebuild
+                // (`B7-closure-cells`) before the closure's `function_id`
+                // can be reached without going through ValueWord.
+                todo!(
+                    "phase-2c — see ADR-006 §2.7.4 / §2.7.8: closure \
+                     formatting needs kinded ClosureRaw read (§2.7.8 / Q10 \
+                     B7-closure-cells extension)"
+                );
             }
-            Some(HeapValue::Rare(RareHeapData::ExprProxy(col))) => format!("<ExprProxy:{}>", col),
-            Some(HeapValue::Rare(RareHeapData::FilterExpr(node))) => format!("<FilterExpr:{:?}>", node),
-            Some(HeapValue::Temporal(TemporalData::DateTime(t))) => t.to_rfc3339(),
-            Some(HeapValue::Temporal(TemporalData::Duration(duration))) => format!("{}{:?}", duration.value, duration.unit),
-            Some(HeapValue::Temporal(TemporalData::TimeSpan(ts))) => format!("{:?}", ts),
-            Some(HeapValue::Temporal(TemporalData::Timeframe(tf))) => format!("{:?}", tf),
-            Some(HeapValue::Temporal(TemporalData::TimeReference(value))) => format!("{:?}", value),
-            Some(HeapValue::Temporal(TemporalData::DateTimeExpr(value))) => format!("{:?}", value),
-            Some(HeapValue::Temporal(TemporalData::DataDateTimeRef(value))) => format!("{:?}", value),
-            Some(HeapValue::Rare(RareHeapData::TypeAnnotation(value))) => annotation_to_string(value),
-            Some(HeapValue::Rare(RareHeapData::TypeAnnotatedValue { value, .. })) => {
-                self.format_nb_with_depth(value, depth + 1)
+            HeapKind::Future => {
+                // Future-id is an inline scalar payload on its `HeapKind`;
+                // a `KindedSlot` flagged `Ptr(HeapKind::Future)` carries
+                // the future id directly in `bits`.
+                format!("[Future:{}]", bits)
             }
-            Some(HeapValue::Rare(RareHeapData::PrintResult(p))) => p.rendered.clone(),
-            Some(HeapValue::Rare(RareHeapData::SimulationCall(_))) => "[SimulationCall]".to_string(),
-            Some(HeapValue::FunctionRef { .. }) => "[FunctionRef]".to_string(),
-            Some(HeapValue::Rare(RareHeapData::DataReference(_))) => "[DataReference]".to_string(),
-            Some(HeapValue::NativeScalar(v)) => v.to_string(),
-            Some(HeapValue::NativeView(v)) => format!(
-                "<{}:{}@0x{:x}>",
-                if v.mutable { "cmut" } else { "cview" },
-                v.layout.name,
-                v.ptr
-            ),
-            Some(HeapValue::HashMap(d)) => {
-                let mut parts = Vec::new();
-                for (k, v) in d.keys.iter().zip(d.values.iter()) {
-                    parts.push(format!(
-                        "{}: {}",
-                        self.format_nb_with_depth(k, depth + 1),
-                        self.format_nb_with_depth(v, depth + 1)
-                    ));
+            HeapKind::NativeScalar => {
+                // NativeScalar is `Copy`/inline (≤ 16 bytes); the kinded
+                // surface for the `repr(C)` packed payload lands with
+                // Wave 5c native-interop body migration.
+                let _ = bits;
+                todo!(
+                    "phase-2c — see ADR-006 §2.7.4: NativeScalar formatting \
+                     needs the kinded native-interop carrier (Wave 5c \
+                     dispatch_native_interop_builtin)"
+                );
+            }
+            HeapKind::FilterExpr => {
+                // Wave-γ G-heap-filter-expr (ADR-006 §2.3 / §2.7.6 / Q8
+                // amendment): FilterExpr trees are a transient query-DSL
+                // value; they don't have a user-facing print form. Render
+                // as an opaque tag for diagnostics.
+                let _ = bits;
+                "<filter_expr>".to_string()
+            }
+            HeapKind::Reference => {
+                // ADR-006 §2.7.13 / Q14 (Wave 8 W8-T26, 2026-05-10):
+                // Reference values are within-program data emitted by the
+                // `MakeRef` family and consumed locally by `DerefLoad` /
+                // `DerefStore` / `SetIndexRef`. They don't have a
+                // user-facing print form; render as an opaque tag.
+                let _ = bits;
+                "<ref>".to_string()
+            }
+            HeapKind::SharedCell => {
+                // Wave 8 W8-T25 (ADR-006 §2.7.12 / Q13 amendment,
+                // 2026-05-10): `SharedCell` cell-pointer slots are an
+                // interior-only cell-pointer shape; user-facing prints
+                // go through `op_load_shared_local` /
+                // `op_load_shared_capture` which strip the SharedCell
+                // outer label and dispatch on the cell's interior kind.
+                // Reaching this arm with a SharedCell-labeled slot at
+                // a print surface is a kind-source bug. Render as an
+                // opaque tag for diagnostics.
+                let _ = bits;
+                "<shared_cell>".to_string()
+            }
+            HeapKind::Iterator => {
+                // W13-iterator-state (ADR-006 §2.7.16 / Q17,
+                // 2026-05-10): iterator pipelines have no user-facing
+                // print form — terminals materialise their elements;
+                // an Iterator slot reaching the Display surface is
+                // "still lazy" by construction. Render as an opaque
+                // tag.
+                let _ = bits;
+                "<iterator>".to_string()
+            }
+            HeapKind::Deque => {
+                // Wave 15 W15-deque (ADR-006 §2.7.19 / Q20,
+                // 2026-05-10): DequeData stores a single
+                // `VecDeque<Arc<HeapValue>>` items buffer. Render as
+                // `Deque[elem1, elem2, ...]` front-to-back. SAFETY:
+                // construction-side contract on `KindedSlot::from_deque`
+                // — slot bits are `Arc::into_raw(Arc<DequeData>)`.
+                let deque: &shape_value::heap_value::DequeData =
+                    unsafe { &*(bits as *const shape_value::heap_value::DequeData) };
+                self.format_deque(deque, depth)
+            }
+            HeapKind::Channel => {
+                // Wave 15 W15-channel-rebuild (ADR-006 §2.7.20 / Q21,
+                // 2026-05-10): channels are concurrency primitives
+                // with no user-facing literal; render as an opaque
+                // tag annotated with current queue length and closed
+                // flag for diagnostics. SAFETY: construction-side
+                // contract on `KindedSlot::from_channel` —
+                // `Channel`-kind bits are
+                // `Arc::into_raw(Arc<ChannelData>)`.
+                let ch: &shape_value::heap_value::ChannelData =
+                    unsafe { &*(bits as *const shape_value::heap_value::ChannelData) };
+                let state = if ch.is_closed() { "closed" } else { "open" };
+                format!("<channel:{}:{}>", state, ch.len())
+            }
+            HeapKind::PriorityQueue => {
+                // Wave 15 W15-priority-queue (ADR-006 §2.7.18 / Q19,
+                // 2026-05-10): PriorityQueueData stores i64
+                // priorities heap-ordered in `Arc<TypedBuffer<i64>>`
+                // (mirror of HashSetData with the keys buffer carrying
+                // i64 instead of `Arc<String>`). Render as
+                // `PriorityQueue[1, 3, 2, ...]` in heap-array order
+                // (NOT sorted; for sorted output the user must call
+                // `pq.toSortedArray()`). SAFETY: construction-side
+                // contract on `KindedSlot::from_priority_queue`.
+                let pq: &shape_value::heap_value::PriorityQueueData =
+                    unsafe { &*(bits as *const shape_value::heap_value::PriorityQueueData) };
+                self.format_priority_queue(pq)
+            }
+            HeapKind::Range => {
+                // W15-range (ADR-006 §2.7.23 / Q24, 2026-05-10):
+                // user-visible literal form `start..end` (exclusive)
+                // or `start..=end` (inclusive). Matches the surface
+                // syntax round-trip and the `HeapValue::Range` Display
+                // impl in `heap_value.rs`. SAFETY: construction-side
+                // contract on `KindedSlot::from_range` — Range-kind
+                // bits are `Arc::into_raw(Arc<RangeData>)`.
+                let r: &shape_value::heap_value::RangeData =
+                    unsafe { &*(bits as *const shape_value::heap_value::RangeData) };
+                if r.inclusive {
+                    format!("{}..={}", r.start, r.end)
+                } else {
+                    format!("{}..{}", r.start, r.end)
                 }
-                format!("HashMap{{{}}}", parts.join(", "))
             }
-            Some(HeapValue::Set(d)) => {
-                let parts: Vec<String> = d
-                    .items
-                    .iter()
-                    .map(|v| self.format_nb_with_depth(v, depth + 1))
-                    .collect();
-                format!("Set{{{}}}", parts.join(", "))
+            HeapKind::Result => {
+                // Wave 14 W14-variant-codegen (ADR-006 §2.7.17 / Q18,
+                // 2026-05-10): render as `Ok(<inner>)` /
+                // `Err(<inner>)`. The inner-value formatter recurses
+                // through the kinded value-formatter on the payload's
+                // `KindedSlot`. SAFETY: construction-side contract on
+                // `KindedSlot::from_result` — Result-kind bits are
+                // `Arc::into_raw(Arc<ResultData>)`.
+                let r: &shape_value::heap_value::ResultData =
+                    unsafe { &*(bits as *const shape_value::heap_value::ResultData) };
+                let inner = self.format_kinded_inner(&r.payload, depth + 1, true);
+                if r.is_ok {
+                    format!("Ok({})", inner)
+                } else {
+                    format!("Err({})", inner)
+                }
             }
-            Some(HeapValue::Deque(d)) => {
-                let parts: Vec<String> = d
-                    .items
-                    .iter()
-                    .map(|v| self.format_nb_with_depth(v, depth + 1))
-                    .collect();
-                format!("Deque[{}]", parts.join(", "))
+            HeapKind::Option => {
+                // Wave 14 W14-variant-codegen (ADR-006 §2.7.17 / Q18,
+                // 2026-05-10): render as `Some(<inner>)` / `None`.
+                // SAFETY: construction-side contract on
+                // `KindedSlot::from_option`.
+                let o: &shape_value::heap_value::OptionData =
+                    unsafe { &*(bits as *const shape_value::heap_value::OptionData) };
+                if o.is_some {
+                    let inner = self.format_kinded_inner(&o.payload, depth + 1, true);
+                    format!("Some({})", inner)
+                } else {
+                    "None".to_string()
+                }
             }
-            Some(HeapValue::PriorityQueue(d)) => {
-                let parts: Vec<String> = d
-                    .items
-                    .iter()
-                    .map(|v| self.format_nb_with_depth(v, depth + 1))
-                    .collect();
-                format!("PriorityQueue[{}]", parts.join(", "))
+            // W17-concurrency (ADR-006 §2.7.25, 2026-05-11):
+            // concurrency primitives have no user-facing literal —
+            // render as opaque tags annotated with diagnostic state.
+            // Mirror of Channel's `<channel:state:len>` shape.
+            // SAFETY: construction-side contract on
+            // `KindedSlot::from_mutex / from_atomic / from_lazy` —
+            // bits are `Arc::into_raw(Arc<MutexData / AtomicData /
+            // LazyData>)`.
+            HeapKind::Mutex => {
+                let _ = bits;
+                "<mutex>".to_string()
             }
-            Some(HeapValue::Content(node)) => format!("{}", node),
-            Some(HeapValue::Instant(t)) => format!("<instant:{:?}>", t.elapsed()),
-            Some(HeapValue::IoHandle(data)) => {
-                let status = if data.is_open() { "open" } else { "closed" };
-                format!("<io_handle:{}:{}>", data.path, status)
+            HeapKind::Atomic => {
+                let a: &shape_value::heap_value::AtomicData =
+                    unsafe { &*(bits as *const shape_value::heap_value::AtomicData) };
+                format!("<atomic:{}>", a.load())
             }
-            Some(HeapValue::TypedArray(TypedArrayData::I64(a))) => {
-                let elems: Vec<String> = a.iter().map(|v| v.to_string()).collect();
-                format!("[{}]", elems.join(", "))
-            }
-            Some(HeapValue::TypedArray(TypedArrayData::F64(a))) => {
-                let elems: Vec<String> = a
-                    .iter()
-                    .map(|v| {
-                        if *v == v.trunc() && v.abs() < 1e15 {
-                            format!("{}.0", *v as i64)
-                        } else {
-                            format!("{}", v)
-                        }
-                    })
-                    .collect();
-                format!("[{}]", elems.join(", "))
-            }
-            Some(HeapValue::TypedArray(TypedArrayData::FloatSlice { parent, offset, len })) => {
-                let off = *offset as usize;
-                let slice_len = *len as usize;
-                let data = &parent.data[off..off + slice_len];
-                let elems: Vec<String> = data
-                    .iter()
-                    .map(|v| {
-                        if *v == v.trunc() && v.abs() < 1e15 {
-                            format!("{}.0", *v as i64)
-                        } else {
-                            format!("{}", v)
-                        }
-                    })
-                    .collect();
-                format!("[{}]", elems.join(", "))
-            }
-            Some(HeapValue::TypedArray(TypedArrayData::Bool(a))) => {
-                let elems: Vec<String> = a
-                    .iter()
-                    .map(|v| if *v != 0 { "true" } else { "false" }.to_string())
-                    .collect();
-                format!("[{}]", elems.join(", "))
-            }
-            Some(HeapValue::TypedArray(TypedArrayData::I8(a))) => {
-                let elems: Vec<String> = a.data.iter().map(|v| v.to_string()).collect();
-                format!("[{}]", elems.join(", "))
-            }
-            Some(HeapValue::TypedArray(TypedArrayData::I16(a))) => {
-                let elems: Vec<String> = a.data.iter().map(|v| v.to_string()).collect();
-                format!("[{}]", elems.join(", "))
-            }
-            Some(HeapValue::TypedArray(TypedArrayData::I32(a))) => {
-                let elems: Vec<String> = a.data.iter().map(|v| v.to_string()).collect();
-                format!("[{}]", elems.join(", "))
-            }
-            Some(HeapValue::TypedArray(TypedArrayData::U8(a))) => {
-                let elems: Vec<String> = a.data.iter().map(|v| v.to_string()).collect();
-                format!("[{}]", elems.join(", "))
-            }
-            Some(HeapValue::TypedArray(TypedArrayData::U16(a))) => {
-                let elems: Vec<String> = a.data.iter().map(|v| v.to_string()).collect();
-                format!("[{}]", elems.join(", "))
-            }
-            Some(HeapValue::TypedArray(TypedArrayData::U32(a))) => {
-                let elems: Vec<String> = a.data.iter().map(|v| v.to_string()).collect();
-                format!("[{}]", elems.join(", "))
-            }
-            Some(HeapValue::TypedArray(TypedArrayData::U64(a))) => {
-                let elems: Vec<String> = a.data.iter().map(|v| v.to_string()).collect();
-                format!("[{}]", elems.join(", "))
-            }
-            Some(HeapValue::TypedArray(TypedArrayData::F32(a))) => {
-                let elems: Vec<String> = a
-                    .data
-                    .iter()
-                    .map(|v| {
-                        if *v == v.trunc() && v.abs() < 1e15 {
-                            format!("{}.0", *v as i64)
-                        } else {
-                            format!("{}", v)
-                        }
-                    })
-                    .collect();
-                format!("[{}]", elems.join(", "))
-            }
-            Some(HeapValue::TypedArray(TypedArrayData::Matrix(m))) => {
-                format!("<Mat<number>:{}x{}>", m.rows, m.cols)
-            }
-            Some(HeapValue::Iterator(it)) => {
-                format!("<iterator:pos={}>", it.position)
-            }
-            Some(HeapValue::Generator(g)) => {
-                format!("<generator:state={}>", g.state)
-            }
-            Some(HeapValue::Concurrency(ConcurrencyData::Mutex(_))) => "<mutex>".to_string(),
-            Some(HeapValue::Concurrency(ConcurrencyData::Atomic(a))) => {
-                format!(
-                    "<atomic:{}>",
-                    a.inner.load(std::sync::atomic::Ordering::Relaxed)
-                )
-            }
-            Some(HeapValue::Concurrency(ConcurrencyData::Lazy(l))) => {
-                let initialized = l.value.lock().map(|g| g.is_some()).unwrap_or(false);
-                if initialized {
+            HeapKind::Lazy => {
+                let l: &shape_value::heap_value::LazyData =
+                    unsafe { &*(bits as *const shape_value::heap_value::LazyData) };
+                if l.is_initialized() {
                     "<lazy:initialized>".to_string()
                 } else {
                     "<lazy:pending>".to_string()
                 }
             }
-            Some(HeapValue::Concurrency(ConcurrencyData::Channel(c))) => {
-                if c.is_sender() {
-                    "<channel:sender>".to_string()
+            // W17-trait-object-storage (ADR-006 §2.7.24 / Q25.C,
+            // 2026-05-11): a `dyn Trait` carrier renders as
+            // `<dyn TraitName #schema>` for diagnostics. Pretty-print
+            // via the boxed receiver's user-defined `Display`-style
+            // method is the compiler-emission tier's concern (call
+            // the trait's display method through the vtable); the
+            // storage-tier formatter is diagnostic-only. SAFETY:
+            // construction-side contract on
+            // `KindedSlot::from_trait_object` — TraitObject-kind
+            // bits are `Arc::into_raw(Arc<TraitObjectStorage>)`.
+            HeapKind::TraitObject => {
+                let t: &shape_value::heap_value::TraitObjectStorage = unsafe {
+                    &*(bits as *const shape_value::heap_value::TraitObjectStorage)
+                };
+                let trait_name = t
+                    .vtable
+                    .trait_names
+                    .first()
+                    .map(|s| s.as_str())
+                    .unwrap_or("?");
+                // Wave 2 Round 4 D4 ckpt-3 (2026-05-14): t.value is now
+                // `*const TypedObjectStorage` (raw); deref to read
+                // schema_id. SAFETY: t holds one v2-raw refcount share so
+                // t.value points to a live storage.
+                let schema_id = unsafe { (*t.value).schema_id };
+                format!("<dyn {} #{}>", trait_name, schema_id)
+            }
+            // W17-comptime-vm-dispatch (ADR-006 §2.7.26, 2026-05-12):
+            // ModuleFn references render as `<module_fn:id>`. Same
+            // inline-scalar pattern as Future — bits are the
+            // module_fn_id directly, no heap dispatch.
+            HeapKind::ModuleFn => {
+                format!("<module_fn:{}>", bits)
+            }
+            // ADR-006 §2.7.22 amendment (Round 18 S3, 2026-05-13):
+            // Matrix renders as `<Mat<number>:rows x cols>`; MatrixSlice
+            // renders as a flat `Vec<number>[...]` over the projection
+            // slice — preserves the pre-amendment user-facing print
+            // shape. SAFETY: construction-side contract on
+            // `KindedSlot::from_matrix` / `from_matrix_slice` — bits are
+            // `Arc::into_raw(Arc<MatrixData>) as u64` /
+            // `Arc::into_raw(Arc<MatrixSliceData>) as u64`.
+            HeapKind::Matrix => {
+                let m: &shape_value::heap_value::MatrixData =
+                    unsafe { &*(bits as *const shape_value::heap_value::MatrixData) };
+                format!("<Mat<number>:{}x{}>", m.rows, m.cols)
+            }
+            HeapKind::MatrixSlice => {
+                let s: &shape_value::heap_value::MatrixSliceData =
+                    unsafe { &*(bits as *const shape_value::heap_value::MatrixSliceData) };
+                let slice = s.as_slice();
+                let elems: Vec<String> =
+                    slice.iter().map(|v| format_array_float(*v)).collect();
+                format!("[{}]", elems.join(", "))
+            }
+        }
+    }
+
+    /// Format a v2 typed array (raw `*mut TypedArray<T>` pointer) as
+    /// `[1, 2, 3]`. Element type comes from the heap-header `_pad` byte
+    /// stamped at allocation time; element bits / kind come from the
+    /// canonical kinded read helper
+    /// (`v2_array_detect::read_element`).
+    fn format_v2_typed_array(
+        &self,
+        view: &crate::executor::v2_handlers::v2_array_detect::V2TypedArrayView,
+    ) -> String {
+        use crate::executor::v2_handlers::v2_array_detect::read_element;
+        let mut out = String::with_capacity(2 + view.len as usize * 4);
+        out.push('[');
+        for i in 0..view.len {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            // Per-element rendering — the element kind is one of
+            // Float64 / Int64 / Int32 / Bool per the v2 typed-array
+            // contract. Format each through the canonical scalar arms.
+            if let Some((bits, kind)) = read_element(view, i) {
+                let elem_slot =
+                    KindedSlot::new(ValueSlot::from_raw(bits), kind);
+                out.push_str(&self.format_kinded_inner(&elem_slot, 0, true));
+                std::mem::forget(elem_slot);
+            } else {
+                out.push_str("?");
+            }
+        }
+        out.push(']');
+        out
+    }
+
+    // V3-S5 ckpt-5 (2026-05-15): `format_typed_array` DELETED. The
+    // function dispatched on `TypedArrayData::*` variants (deleted at
+    // ckpt-1) per W12-typed-array-data-deletion audit §3.5 + §3.6. The
+    // two callers (HeapKind::TypedArray arm in `format_kinded_inner` +
+    // HeapValue::TypedArray arm in `format_heap_value`) are both updated
+    // to a structured placeholder. Rebuild lands at ckpt-6 STRICT close
+    // per the per-T v2-raw `TypedArray<T>` direct-access target.
+
+    /// Apply a reference-resolver if configured, formatting the
+    /// dereferenced target. Returns `<ref>` when no resolver is wired up.
+    ///
+    /// Reserved for the Phase-2c ref-kind landing — until refs gain
+    /// their own NativeKind variant (or the kinded-ref ABI lands), this
+    /// helper is unused by the dispatch path above and stays here so the
+    /// resolver hook on `with_deref` keeps a coherent signature.
+    #[allow(dead_code)]
+    fn format_ref(&self, slot: &KindedSlot, depth: usize) -> String {
+        if let Some(deref) = &self.deref_fn {
+            if let Some(resolved) = deref(slot) {
+                return self.format_kinded_inner(&resolved, depth + 1, true);
+            }
+        }
+        "<ref>".to_string()
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // TypedObject + HashMap helpers (ADR-006 §2.7.4 / §2.7.6 / Q8)
+    // ──────────────────────────────────────────────────────────────────────
+
+    /// Format a `TypedObjectStorage` as `{field1: val1, field2: val2}`.
+    ///
+    /// Field names come from the schema registry when the storage's
+    /// `schema_id` resolves; otherwise positional `_0`, `_1` placeholders
+    /// are used so the formatter degrades gracefully when the registry is
+    /// not populated for a runtime-built object (e.g. anonymous record
+    /// literals before schema registration).
+    ///
+    /// Each slot is reified as a `KindedSlot { slot, kind: field_kinds[i] }`
+    /// and recursed through `format_kinded_inner` with `quote_strings = true`
+    /// so nested string fields render `"…"`. Slots are *borrowed*: we do
+    /// NOT clone the slot bits or transfer ownership; the parent
+    /// `TypedObjectStorage` keeps holding all heap shares for the
+    /// lifetime of `&self`.
+    fn format_typed_object(&self, storage: &TypedObjectStorage, depth: usize) -> String {
+        let schema = self.schema_registry.get_by_id(storage.schema_id as u32);
+        let n = storage.slots.len().min(storage.field_kinds.len());
+        let mut out = String::with_capacity(2 + n * 8);
+        out.push('{');
+        for i in 0..n {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            // Field name: prefer the schema-resolved name; fall back to
+            // a positional placeholder so the formatter still produces
+            // human-readable output for schema-less objects.
+            let name: &str = schema
+                .and_then(|s| s.fields.get(i).map(|f| f.name.as_str()))
+                .unwrap_or("_");
+            if name == "_" {
+                out.push_str(&format!("_{}", i));
+            } else {
+                out.push_str(name);
+            }
+            out.push_str(": ");
+            // Reify the slot as a borrowed `KindedSlot` for the recursive
+            // formatter call. This carrier never owns a strong-count share
+            // — it is dropped via `mem::forget` at the end of the loop
+            // iteration so the parent storage retains every payload.
+            let slot = ValueSlot::from_raw(storage.slots[i].raw());
+            let kinded = KindedSlot::new(slot, storage.field_kinds[i]);
+            let rendered = self.format_kinded_inner(&kinded, depth + 1, true);
+            out.push_str(&rendered);
+            std::mem::forget(kinded);
+        }
+        out.push('}');
+        out
+    }
+
+    /// Format a `PriorityQueueData` as `PriorityQueue[v1, v2, ...]` in
+    /// heap-array order. Wave 15 W15-priority-queue (ADR-006 §2.7.18 /
+    /// Q19) — i64-priority min-heap render shape (mirror of HashSet's
+    /// render shape with the values column carrying i64 instead of
+    /// quoted strings).
+    fn format_priority_queue(
+        &self,
+        pq: &shape_value::heap_value::PriorityQueueData,
+    ) -> String {
+        let n = pq.heap.len();
+        let mut out = String::with_capacity(16 + n * 4);
+        out.push_str("PriorityQueue[");
+        for (i, v) in pq.heap.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            out.push_str(&format!("{}", v));
+        }
+        out.push(']');
+        out
+    }
+
+    /// Format a `HashSetData` as `{"a", "b", ...}`. Wave 13
+    /// W13-hashset-rebuild (ADR-006 §2.7.15) — one-keyspace mirror of
+    /// HashMap's render shape with the values column dropped.
+    fn format_hashset(&self, set: &shape_value::heap_value::HashSetData) -> String {
+        let n = set.keys.len();
+        let mut out = String::with_capacity(2 + n * 6);
+        out.push('{');
+        for (i, k) in set.keys.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            out.push_str(&format!("\"{}\"", k));
+        }
+        out.push('}');
+        out
+    }
+
+    /// Format a `DequeData` as `Deque[elem1, elem2, ...]` front-to-back.
+    /// Wave 15 W15-deque (ADR-006 §2.7.19) — heterogeneous-element mirror
+    /// of HashSet's render shape, dispatching per element through the
+    /// canonical ADR-005 §1 single-discriminator `HeapValue` Display.
+    fn format_deque(&self, deque: &shape_value::heap_value::DequeData, depth: usize) -> String {
+        let n = deque.items.len();
+        let mut out = String::with_capacity(8 + n * 4);
+        out.push_str("Deque[");
+        for (i, v) in deque.items.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            out.push_str(&self.format_heap_value(v, depth + 1));
+        }
+        out.push(']');
+        out
+    }
+
+    /// Format a `HashMapKindedRef` as `{"key1": val1, "key2": val2}`.
+    ///
+    /// **Wave 2 Round 3b C2-joint ckpt-3 (2026-05-14):** full per-V
+    /// keys/values walk. The keys buffer is `*mut TypedArray<*const StringObj>`;
+    /// the values buffer is per-V (`*mut TypedArray<V>`). Each entry's
+    /// value is rendered via the per-V Display shape (matching the
+    /// HeapValue::HashMap Display impl at `heap_value.rs:hashmap_kref_display`).
+    /// For TypedObject / TraitObject value variants we recurse through the
+    /// canonical `format_typed_object` / opaque tag path. ADR-006 §2.7.24
+    /// Q25.B SUPERSEDED + audit §C.4.
+    fn format_hashmap(
+        &self,
+        map: &shape_value::heap_value::HashMapKindedRef,
+        depth: usize,
+    ) -> String {
+        use shape_value::heap_value::HashMapKindedRef;
+        let mut out = String::with_capacity(2 + map.len() * 8);
+        out.push('{');
+
+        // Walk keys buffer; per-V dispatch the value rendering.
+        unsafe {
+            // The keys buffer + values buffer come from each variant's inner Arc.
+            // SAFETY: HashMapData<V>'s contract — keys is a live
+            // *mut TypedArray<*const StringObj>; *(arc.values) is a live
+            // TypedArray<V>.
+            let render_key = |out: &mut String, i: usize, k: &str| {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                out.push('"');
+                out.push_str(k);
+                out.push_str("\": ");
+            };
+
+            // Read all keys generically.
+            let read_keys = |keys_ptr: *const shape_value::v2::typed_array::TypedArray<
+                *const shape_value::v2::string_obj::StringObj,
+            >|
+             -> Vec<&'static str> {
+                let n = shape_value::v2::typed_array::TypedArray::len(keys_ptr) as usize;
+                let mut ks = Vec::with_capacity(n);
+                for i in 0..n {
+                    let ptr =
+                        shape_value::v2::typed_array::TypedArray::get_unchecked(keys_ptr, i as u32);
+                    ks.push(shape_value::v2::string_obj::StringObj::as_str(ptr));
+                }
+                ks
+            };
+
+            match map {
+                HashMapKindedRef::I64(arc) => {
+                    let keys = read_keys(arc.keys);
+                    for (i, k) in keys.iter().enumerate() {
+                        render_key(&mut out, i, k);
+                        let v = *(*arc.values).data.add(i);
+                        out.push_str(&v.to_string());
+                    }
+                }
+                HashMapKindedRef::F64(arc) => {
+                    let keys = read_keys(arc.keys);
+                    for (i, k) in keys.iter().enumerate() {
+                        render_key(&mut out, i, k);
+                        let v: f64 = *(*arc.values).data.add(i);
+                        out.push_str(&v.to_string());
+                    }
+                }
+                HashMapKindedRef::Bool(arc) => {
+                    let keys = read_keys(arc.keys);
+                    for (i, k) in keys.iter().enumerate() {
+                        render_key(&mut out, i, k);
+                        let v: u8 = *(*arc.values).data.add(i);
+                        out.push_str(if v != 0 { "true" } else { "false" });
+                    }
+                }
+                HashMapKindedRef::Char(arc) => {
+                    let keys = read_keys(arc.keys);
+                    for (i, k) in keys.iter().enumerate() {
+                        render_key(&mut out, i, k);
+                        let v: char = *(*arc.values).data.add(i);
+                        out.push('\'');
+                        out.push(v);
+                        out.push('\'');
+                    }
+                }
+                HashMapKindedRef::String(arc) => {
+                    let keys = read_keys(arc.keys);
+                    for (i, k) in keys.iter().enumerate() {
+                        render_key(&mut out, i, k);
+                        let v_ptr: *const shape_value::v2::string_obj::StringObj =
+                            *(*arc.values).data.add(i);
+                        let s = shape_value::v2::string_obj::StringObj::as_str(v_ptr);
+                        out.push('"');
+                        out.push_str(s);
+                        out.push('"');
+                    }
+                }
+                HashMapKindedRef::Decimal(arc) => {
+                    let keys = read_keys(arc.keys);
+                    for (i, k) in keys.iter().enumerate() {
+                        render_key(&mut out, i, k);
+                        let v_ptr: *const shape_value::v2::decimal_obj::DecimalObj =
+                            *(*arc.values).data.add(i);
+                        let d = (*v_ptr).value;
+                        out.push_str(&format!("{}D", d));
+                    }
+                }
+                HashMapKindedRef::TypedObject(arc) => {
+                    let keys = read_keys(arc.keys);
+                    for (i, k) in keys.iter().enumerate() {
+                        render_key(&mut out, i, k);
+                        let v_ref: &shape_value::heap_value::TypedObjectPtr =
+                            &*(*arc.values).data.add(i);
+                        if v_ref.is_null() {
+                            out.push_str("null");
+                        } else {
+                            let storage = &**v_ref;
+                            out.push_str(&self.format_typed_object(storage, depth + 1));
+                        }
+                    }
+                }
+                HashMapKindedRef::TraitObject(arc) => {
+                    let keys = read_keys(arc.keys);
+                    for (i, k) in keys.iter().enumerate() {
+                        render_key(&mut out, i, k);
+                        let v_ref: &shape_value::heap_value::TraitObjectPtr =
+                            &*(*arc.values).data.add(i);
+                        out.push_str(&format!("<trait_object:{:p}>", v_ref.as_ptr()));
+                    }
+                }
+                HashMapKindedRef::HashMap(arc) => {
+                    // Recursive carrier (Wave N hashmap-value-v-arm
+                    // follow-up, cluster-2 closure-wave-C, 2026-05-16).
+                    // Each inner element is itself a HashMapKindedRef;
+                    // recurse through format_hashmap.
+                    let keys = read_keys(arc.keys);
+                    for (i, k) in keys.iter().enumerate() {
+                        render_key(&mut out, i, k);
+                        let inner_ref: &shape_value::heap_value::HashMapKindedRef =
+                            &*(*arc.values).data.add(i);
+                        out.push_str(&self.format_hashmap(inner_ref, depth + 1));
+                    }
+                }
+            }
+        }
+        out.push('}');
+        out
+    }
+
+    /// Format a `HeapValue` reference (the value side of `HashMapData`'s
+    /// `TypedBuffer<Arc<HeapValue>>` and the heterogeneous element arm of
+    /// `the-deleted-heterogeneous-element-carrier`). Dispatches via the ADR-005 §1
+    /// single-discriminator `HeapValue` match.
+    fn format_heap_value(&self, hv: &HeapValue, depth: usize) -> String {
+        if depth > 50 {
+            return "[max depth reached]".to_string();
+        }
+        match hv {
+            HeapValue::String(s) => format!("\"{}\"", s),
+            HeapValue::Decimal(d) => format!("{}D", d),
+            HeapValue::BigInt(b) => b.as_ref().to_string(),
+            HeapValue::Char(c) => format!("'{}'", c),
+            HeapValue::Future(id) => format!("[Future:{}]", id),
+            // V3-S5 ckpt-5: HeapValue::TypedArray outer arm DELETED at
+            // ckpt-4 in lockstep with `TypedArrayData` enum + `TypedBuffer<T>`
+            // wrapper layer per W12 audit §3.6. The arm is gone from the
+            // exhaustive `match hv` (match remains exhaustive on remaining
+            // HeapValue variants).
+            //   HeapValue::TypedArray(arr) => self.format_typed_array(arr.as_ref(), depth),
+            // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): TypedObjectPtr
+            // derefs to &TypedObjectStorage; use `&**o` to bridge through the
+            // outer `&` and the wrapper's Deref impl.
+            HeapValue::TypedObject(o) => self.format_typed_object(&**o, depth),
+            // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): payload flipped
+            // to `HashMapKindedRef`; pass the borrowed kinded ref directly.
+            HeapValue::HashMap(m) => self.format_hashmap(m, depth),
+            HeapValue::HashSet(s) => self.format_hashset(s.as_ref()),
+            HeapValue::Deque(d) => self.format_deque(d.as_ref(), depth),
+            HeapValue::DataTable(t) => format!("{}", t),
+            HeapValue::Content(n) => format!("{}", n),
+            HeapValue::Instant(t) => format!("<instant:{:?}>", t.elapsed()),
+            HeapValue::IoHandle(h) => {
+                let status = if h.is_open() { "open" } else { "closed" };
+                format!("<io_handle:{}:{}>", h.path, status)
+            }
+            HeapValue::NativeView(v) => format!(
+                "<{}:{}@0x{:x}>",
+                if v.mutable { "cmut" } else { "cview" },
+                v.layout.name,
+                v.ptr
+            ),
+            HeapValue::TableView(tv) => format!("{}", tv),
+            HeapValue::TaskGroup(tg) => {
+                let kind_str = match tg.kind {
+                    0 => "All",
+                    1 => "Race",
+                    2 => "Any",
+                    3 => "Settle",
+                    _ => "Unknown",
+                };
+                format!("[TaskGroup:{}({})]", kind_str, tg.task_ids.len())
+            }
+            HeapValue::NativeScalar(_) => "<native_scalar>".to_string(),
+            HeapValue::Temporal(_) => "<temporal>".to_string(),
+            HeapValue::ClosureRaw(_) => "<closure>".to_string(),
+            HeapValue::FilterExpr(_) => "<filter_expr>".to_string(),
+            HeapValue::Reference(_) => "<ref>".to_string(),
+            HeapValue::Iterator(_) => "<iterator>".to_string(),
+            HeapValue::Channel(c) => {
+                let state = if c.is_closed() { "closed" } else { "open" };
+                format!("<channel:{}:{}>", state, c.len())
+            }
+            HeapValue::PriorityQueue(p) => self.format_priority_queue(p.as_ref()),
+            // W15-range (ADR-006 §2.7.23 / Q24, 2026-05-10): user-visible
+            // literal form `start..end` / `start..=end` matching the
+            // surface syntax round-trip.
+            HeapValue::Range(r) => {
+                if r.inclusive {
+                    format!("{}..={}", r.start, r.end)
                 } else {
-                    "<channel:receiver>".to_string()
+                    format!("{}..{}", r.start, r.end)
                 }
             }
-            Some(HeapValue::Char(c)) => c.to_string(),
-            None => format!("<unknown:{}>", value.type_name()),
-        }
-    }
-
-    /// Format an array of ValueWord values
-    fn format_nanboxed_array(&self, arr: &[ValueWord], depth: usize) -> String {
-        let elements: Vec<String> = arr
-            .iter()
-            .map(|nb| self.format_nb_with_depth(nb, depth + 1))
-            .collect();
-        format!("[{}]", elements.join(", "))
-    }
-
-    /// Format a TypedObject using its schema
-    fn format_typed_object(
-        &self,
-        schema_id: u32,
-        slots: &[shape_value::ValueSlot],
-        heap_mask: u64,
-        depth: usize,
-    ) -> String {
-        let schema_ref = self.schema_registry.get_by_id(schema_id);
-        let schema = if let Some(s) = schema_ref {
-            s
-        } else {
-            let nb = ValueWord::from_heap_value(HeapValue::TypedObject {
-                schema_id: schema_id as u64,
-                slots: slots.to_vec().into_boxed_slice(),
-                heap_mask,
-            });
-            if let Some(map) = shape_runtime::type_schema::typed_object_to_hashmap_nb(&nb) {
-                let mut fields: Vec<(String, String)> = map
-                    .into_iter()
-                    .map(|(k, v)| (k, self.format_nb_with_depth(&v, depth + 1)))
-                    .collect();
-                fields.sort_by(|a, b| a.0.cmp(&b.0));
-                return format!(
-                    "{{ {} }}",
-                    fields
-                        .into_iter()
-                        .map(|(k, v)| format!("{}: {}", k, v))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                );
-            }
-            return format!("[TypedObject:{}]", schema_id);
-        };
-
-        // Check if this is an enum type - format specially
-        if let Some(enum_info) = schema.get_enum_info() {
-            return self.format_enum(&schema.name, enum_info, slots, heap_mask, depth);
-        }
-
-        // Default format: { field1: val1, field2: val2, ... }
-        let mut fields = Vec::new();
-
-        for field in &schema.fields {
-            let field_index = field.index as usize;
-            if field_index < slots.len() {
-                let formatted = self.format_slot_value(
-                    slots,
-                    heap_mask,
-                    field_index,
-                    &field.field_type,
-                    depth + 1,
-                );
-                fields.push(format!("{}: {}", field.name, formatted));
-            }
-        }
-
-        if fields.is_empty() {
-            "{}".to_string()
-        } else {
-            format!("{{ {} }}", fields.join(", "))
-        }
-    }
-
-    /// Format an enum value using its variant info.
-    /// Shows only the variant name (not the full `Enum::Variant` path).
-    fn format_enum(
-        &self,
-        _enum_name: &str,
-        enum_info: &shape_runtime::type_schema::EnumInfo,
-        slots: &[shape_value::ValueSlot],
-        heap_mask: u64,
-        depth: usize,
-    ) -> String {
-        // Read variant ID from slot 0
-        if slots.is_empty() {
-            return "?".to_string();
-        }
-
-        let variant_id = slots[0].as_i64() as u16;
-
-        // Look up variant by ID
-        let variant = match enum_info.variant_by_id(variant_id) {
-            Some(v) => v,
-            None => return format!("?[{}]", variant_id),
-        };
-
-        // Unit variant (no payload)
-        if variant.payload_fields == 0 {
-            return variant.name.clone();
-        }
-
-        // Variant with payload - read payload values from slots 1+
-        let mut payload_values = Vec::new();
-        for i in 0..variant.payload_fields {
-            let slot_idx = 1 + i as usize;
-            if slot_idx < slots.len() {
-                payload_values.push(self.format_slot_value(
-                    slots,
-                    heap_mask,
-                    slot_idx,
-                    &FieldType::Any,
-                    depth + 1,
-                ));
-            }
-        }
-
-        if payload_values.is_empty() {
-            variant.name.clone()
-        } else if payload_values.len() == 1 {
-            // Single payload - use parentheses style
-            format!("{}({})", variant.name, payload_values[0])
-        } else {
-            // Multiple payloads - use tuple style with variant name
-            format!("{}({})", variant.name, payload_values.join(", "))
-        }
-    }
-
-    /// Format a TypedObject slot value directly from its ValueSlot.
-    /// Heap slots are converted via `as_heap_nb()` and formatted with `format_nb_with_depth`.
-    /// Non-heap slots are dispatched by field type to read the correct representation.
-    fn format_slot_value(
-        &self,
-        slots: &[shape_value::ValueSlot],
-        heap_mask: u64,
-        index: usize,
-        field_type: &FieldType,
-        depth: usize,
-    ) -> String {
-        if index >= slots.len() {
-            return "None".to_string();
-        }
-        let slot = &slots[index];
-        if heap_mask & (1u64 << index) != 0 {
-            // Heap slot: read as HeapValue, wrap in ValueWord, format directly
-            let nb = slot.as_heap_nb();
-            self.format_nb_with_depth(&nb, depth)
-        } else {
-            // Non-heap: dispatch on field type to read raw bits correctly
-            match field_type {
-                FieldType::I64 | FieldType::Timestamp => slot.as_i64().to_string(),
-                FieldType::Bool => slot.as_bool().to_string(),
-                FieldType::F64 | FieldType::Decimal => format_number(slot.as_f64()),
-                // Any other non-heap type: reconstruct via as_value_word to
-                // preserve inline tag variants for correct Display formatting
-                _ => {
-                    let vw = slot.as_value_word(false);
-                    self.format_nb_with_depth(&vw, depth)
+            // Wave 14 W14-variant-codegen (ADR-006 §2.7.17 / Q18,
+            // 2026-05-10): Result/Option carriers — render as
+            // Ok/Err/Some/None tags. Inner is opaque at this fallback
+            // path (the kinded formatter at the format_heap_kind site
+            // handles full pretty-print).
+            HeapValue::Result(r) => {
+                if r.is_ok {
+                    "Ok(<...>)".to_string()
+                } else {
+                    "Err(<...>)".to_string()
                 }
+            }
+            HeapValue::Option(o) => {
+                if o.is_some {
+                    "Some(<...>)".to_string()
+                } else {
+                    "None".to_string()
+                }
+            }
+            // W17-concurrency (ADR-006 §2.7.25, 2026-05-11):
+            // concurrency-primitive carriers — render as opaque tags.
+            HeapValue::Mutex(_) => "<mutex>".to_string(),
+            HeapValue::Atomic(a) => format!("<atomic:{}>", a.load()),
+            HeapValue::Lazy(l) => {
+                if l.is_initialized() {
+                    "<lazy:initialized>".to_string()
+                } else {
+                    "<lazy:pending>".to_string()
+                }
+            }
+            // W17-trait-object-storage (ADR-006 §2.7.24 / Q25.C,
+            // 2026-05-11): `dyn Trait` carrier — render as
+            // `<dyn TraitName #schema>` for diagnostics. Pretty-print
+            // via the boxed receiver's user-defined `Display`-style
+            // method is the compiler-emission tier's concern.
+            HeapValue::TraitObject(t) => {
+                let trait_name = t
+                    .vtable
+                    .trait_names
+                    .first()
+                    .map(|s| s.as_str())
+                    .unwrap_or("?");
+                // Wave 2 Round 4 D4 ckpt-3 (2026-05-14): t.value is now
+                // `*const TypedObjectStorage` (raw); deref to read
+                // schema_id. SAFETY: t holds one v2-raw refcount share so
+                // t.value points to a live storage.
+                let schema_id = unsafe { (*t.value).schema_id };
+                format!("<dyn {} #{}>", trait_name, schema_id)
+            }
+            // W17-comptime-vm-dispatch (ADR-006 §2.7.26, 2026-05-12).
+            HeapValue::ModuleFn(id) => format!("<module_fn:{}>", id),
+            // ADR-006 §2.7.22 amendment (Round 18 S3, 2026-05-13):
+            // Matrix renders as `<Mat<number>:rows x cols>`. MatrixSlice
+            // renders as a flat `[v1, v2, ...]` over the projection slice
+            // — preserves the pre-amendment FloatSlice Display shape.
+            HeapValue::Matrix(m) => format!("<Mat<number>:{}x{}>", m.rows, m.cols),
+            HeapValue::MatrixSlice(s) => {
+                let slice = s.as_slice();
+                let elems: Vec<String> =
+                    slice.iter().map(|v| format_array_float(*v)).collect();
+                format!("[{}]", elems.join(", "))
             }
         }
     }
 }
 
-/// Format a number, removing unnecessary decimal places
+/// Format a number, removing unnecessary decimal places.
 fn format_number(n: f64) -> String {
     if n.is_nan() {
         "NaN".to_string()
@@ -633,11 +1073,21 @@ fn format_number(n: f64) -> String {
             "-Infinity".to_string()
         }
     } else if n.fract() == 0.0 && n.abs() < 1e15 {
-        // Integer-like floats: always show .0 to distinguish from int
+        // Integer-like floats: always show .0 to distinguish from int.
         format!("{}.0", n as i64)
     } else {
-        // Use default formatting
         n.to_string()
+    }
+}
+
+/// Format a single float for inclusion in a typed-array element list.
+/// Mirrors `format_number` but returns the integer-shape (`{n}.0`) for
+/// whole-number floats that fit comfortably in `i64`.
+fn format_array_float(v: f64) -> String {
+    if v == v.trunc() && v.abs() < 1e15 {
+        format!("{}.0", v as i64)
+    } else {
+        format!("{}", v)
     }
 }
 
@@ -650,329 +1100,97 @@ mod tests {
         TypeSchemaRegistry::new()
     }
 
-    fn predeclared_object(fields: &[(&str, ValueWord)]) -> ValueWord {
-        let field_names: Vec<String> = fields.iter().map(|(name, _)| (*name).to_string()).collect();
-        let _ = shape_runtime::type_schema::register_predeclared_any_schema(&field_names);
-        shape_runtime::type_schema::typed_object_from_pairs(fields)
-    }
-
     #[test]
-    fn test_format_primitives() {
-        let schema_reg = create_test_registry();
-        let formatter = VMValueFormatter::new(&schema_reg);
+    fn test_format_inline_scalars() {
+        let reg = create_test_registry();
+        let formatter = ValueFormatter::new(&reg);
 
-        assert_eq!(formatter.format(&ValueWord::from_f64(42.0)), "42.0");
-        assert_eq!(formatter.format(&ValueWord::from_f64(3.14)), "3.14");
         assert_eq!(
-            formatter.format(&ValueWord::from_string(Arc::new("hello".to_string()))),
-            "hello"
+            formatter.format_kinded(&KindedSlot::from_int(42)),
+            "42"
         );
-        assert_eq!(formatter.format(&ValueWord::from_bool(true)), "true");
-        assert_eq!(formatter.format(&ValueWord::none()), "None");
-        assert_eq!(formatter.format(&ValueWord::unit()), "()");
+        assert_eq!(
+            formatter.format_kinded(&KindedSlot::from_int(-100)),
+            "-100"
+        );
+        assert_eq!(
+            formatter.format_kinded(&KindedSlot::from_bool(true)),
+            "true"
+        );
+        assert_eq!(
+            formatter.format_kinded(&KindedSlot::from_bool(false)),
+            "false"
+        );
+        assert_eq!(
+            formatter.format_kinded(&KindedSlot::from_number(3.14)),
+            "3.14"
+        );
     }
 
     #[test]
-    fn test_format_array() {
-        let schema_reg = create_test_registry();
-        let formatter = VMValueFormatter::new(&schema_reg);
-
-        let arr = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
-            ValueWord::from_f64(1.0),
-            ValueWord::from_f64(2.0),
-            ValueWord::from_f64(3.0),
-        ]));
-        assert_eq!(formatter.format(&arr), "[1.0, 2.0, 3.0]");
+    fn test_format_integer_like_float_shows_decimal_point() {
+        let reg = create_test_registry();
+        let formatter = ValueFormatter::new(&reg);
+        assert_eq!(
+            formatter.format_kinded(&KindedSlot::from_number(1.0)),
+            "1.0"
+        );
+        assert_eq!(
+            formatter.format_kinded(&KindedSlot::from_number(-5.0)),
+            "-5.0"
+        );
+        assert_eq!(
+            formatter.format_kinded(&KindedSlot::from_number(100.0)),
+            "100.0"
+        );
     }
 
     #[test]
-    fn test_format_object() {
-        let schema_reg = create_test_registry();
-        let formatter = VMValueFormatter::new(&schema_reg);
-
-        let value = predeclared_object(&[
-            ("x", ValueWord::from_f64(1.0)),
-            ("y", ValueWord::from_f64(2.0)),
-        ]);
-
-        let formatted = formatter.format(&value);
-        // TypedObject fields come from schema order
-        assert!(formatted.contains("x: 1.0"));
-        assert!(formatted.contains("y: 2.0"));
-    }
-
-    #[test]
-    fn test_format_number_integers() {
-        assert_eq!(format_number(42.0), "42.0");
-        assert_eq!(format_number(-100.0), "-100.0");
-        assert_eq!(format_number(0.0), "0.0");
-    }
-
-    #[test]
-    fn test_format_number_decimals() {
-        assert_eq!(format_number(3.14), "3.14");
-        assert_eq!(format_number(-2.5), "-2.5");
-    }
-
-    #[test]
-    fn test_format_number_special() {
+    fn test_format_special_floats() {
         assert_eq!(format_number(f64::NAN), "NaN");
         assert_eq!(format_number(f64::INFINITY), "Infinity");
         assert_eq!(format_number(f64::NEG_INFINITY), "-Infinity");
     }
 
     #[test]
+    fn test_format_string() {
+        let reg = create_test_registry();
+        let formatter = ValueFormatter::new(&reg);
+
+        let s = KindedSlot::from_string_arc(Arc::new("hello".to_string()));
+        assert_eq!(formatter.format_kinded(&s), "hello");
+    }
+
+    #[test]
     fn test_format_decimal() {
-        let schema_reg = create_test_registry();
-        let formatter = VMValueFormatter::new(&schema_reg);
+        let reg = create_test_registry();
+        let formatter = ValueFormatter::new(&reg);
 
-        let d = ValueWord::from_decimal(rust_decimal::Decimal::from(42));
-        assert_eq!(formatter.format(&d), "42D");
+        let d = KindedSlot::from_decimal(Arc::new(rust_decimal::Decimal::from(42)));
+        assert_eq!(formatter.format_kinded(&d), "42D");
 
-        let d2 = ValueWord::from_decimal(rust_decimal::Decimal::new(314, 2)); // 3.14 exactly
-        assert_eq!(formatter.format(&d2), "3.14D");
+        let d2 = KindedSlot::from_decimal(Arc::new(rust_decimal::Decimal::new(314, 2)));
+        assert_eq!(formatter.format_kinded(&d2), "3.14D");
     }
 
     #[test]
-    fn test_format_int() {
-        let schema_reg = create_test_registry();
-        let formatter = VMValueFormatter::new(&schema_reg);
+    fn test_format_bigint() {
+        let reg = create_test_registry();
+        let formatter = ValueFormatter::new(&reg);
 
-        assert_eq!(formatter.format(&ValueWord::from_i64(42)), "42");
-        assert_eq!(formatter.format(&ValueWord::from_i64(-100)), "-100");
-        assert_eq!(formatter.format(&ValueWord::from_i64(0)), "0");
-    }
-
-    // ===== ValueWord format_nb tests =====
-
-    #[test]
-    fn test_format_nb_primitives() {
-        let schema_reg = create_test_registry();
-        let formatter = VMValueFormatter::new(&schema_reg);
-
-        assert_eq!(formatter.format_nb(&ValueWord::from_f64(42.0)), "42.0");
-        assert_eq!(formatter.format_nb(&ValueWord::from_f64(3.14)), "3.14");
-        assert_eq!(
-            formatter.format_nb(&ValueWord::from_string(Arc::new("hello".to_string()))),
-            "hello"
-        );
-        assert_eq!(formatter.format_nb(&ValueWord::from_bool(true)), "true");
-        assert_eq!(formatter.format_nb(&ValueWord::from_bool(false)), "false");
-        assert_eq!(formatter.format_nb(&ValueWord::none()), "None");
-        assert_eq!(formatter.format_nb(&ValueWord::unit()), "()");
+        let b = KindedSlot::from_bigint(Arc::new(123_i64));
+        assert_eq!(formatter.format_kinded(&b), "123");
     }
 
     #[test]
-    fn test_format_nb_integers() {
-        let schema_reg = create_test_registry();
-        let formatter = VMValueFormatter::new(&schema_reg);
+    fn test_format_char() {
+        let reg = create_test_registry();
+        let formatter = ValueFormatter::new(&reg);
 
-        assert_eq!(formatter.format_nb(&ValueWord::from_i64(42)), "42");
-        assert_eq!(formatter.format_nb(&ValueWord::from_i64(-100)), "-100");
-        assert_eq!(formatter.format_nb(&ValueWord::from_i64(0)), "0");
+        let c = KindedSlot::from_char('A');
+        assert_eq!(formatter.format_kinded(&c), "A");
+
+        let c2 = KindedSlot::from_char('λ');
+        assert_eq!(formatter.format_kinded(&c2), "λ");
     }
-
-    #[test]
-    fn test_format_nb_decimal() {
-        let schema_reg = create_test_registry();
-        let formatter = VMValueFormatter::new(&schema_reg);
-
-        assert_eq!(
-            formatter.format_nb(&ValueWord::from_decimal(rust_decimal::Decimal::from(42))),
-            "42D"
-        );
-        assert_eq!(
-            formatter.format_nb(&ValueWord::from_decimal(rust_decimal::Decimal::new(314, 2))),
-            "3.14D"
-        );
-    }
-
-    #[test]
-    fn test_format_nb_array() {
-        let schema_reg = create_test_registry();
-        let formatter = VMValueFormatter::new(&schema_reg);
-
-        let arr = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
-            ValueWord::from_f64(1.0),
-            ValueWord::from_f64(2.0),
-            ValueWord::from_f64(3.0),
-        ]));
-        assert_eq!(formatter.format_nb(&arr), "[1.0, 2.0, 3.0]");
-    }
-
-    #[test]
-    fn test_format_nb_mixed_array() {
-        let schema_reg = create_test_registry();
-        let formatter = VMValueFormatter::new(&schema_reg);
-
-        let arr = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
-            ValueWord::from_i64(1),
-            ValueWord::from_string(Arc::new("two".to_string())),
-            ValueWord::from_bool(true),
-        ]));
-        assert_eq!(formatter.format_nb(&arr), "[1, two, true]");
-    }
-
-    #[test]
-    fn test_format_nb_object() {
-        let schema_reg = create_test_registry();
-        let formatter = VMValueFormatter::new(&schema_reg);
-
-        let value = predeclared_object(&[
-            ("x", ValueWord::from_f64(1.0)),
-            ("y", ValueWord::from_f64(2.0)),
-        ]);
-        let nb = value;
-
-        let formatted = formatter.format_nb(&nb);
-        assert!(formatted.contains("x: 1.0"));
-        assert!(formatted.contains("y: 2.0"));
-    }
-
-    #[test]
-    fn test_format_nb_special_numbers() {
-        let schema_reg = create_test_registry();
-        let formatter = VMValueFormatter::new(&schema_reg);
-
-        assert_eq!(formatter.format_nb(&ValueWord::from_f64(f64::NAN)), "NaN");
-        assert_eq!(
-            formatter.format_nb(&ValueWord::from_f64(f64::INFINITY)),
-            "Infinity"
-        );
-        assert_eq!(
-            formatter.format_nb(&ValueWord::from_f64(f64::NEG_INFINITY)),
-            "-Infinity"
-        );
-    }
-
-    #[test]
-    fn test_format_nb_result_types() {
-        let schema_reg = create_test_registry();
-        let formatter = VMValueFormatter::new(&schema_reg);
-
-        assert_eq!(
-            formatter.format_nb(&ValueWord::from_ok(ValueWord::from_i64(42))),
-            "Ok(42)"
-        );
-        assert_eq!(
-            formatter.format_nb(&ValueWord::from_err(ValueWord::from_string(Arc::new(
-                "fail".to_string()
-            )))),
-            "Err(fail)"
-        );
-        assert_eq!(
-            formatter.format_nb(&ValueWord::from_some(ValueWord::from_f64(3.14))),
-            "Some(3.14)"
-        );
-    }
-
-    #[test]
-    fn test_format_nb_consistency_with_vmvalue() {
-        // Verify that format_nb produces the same output as format for common types
-        let schema_reg = create_test_registry();
-        let formatter = VMValueFormatter::new(&schema_reg);
-
-        let test_cases: Vec<ValueWord> = vec![
-            ValueWord::from_f64(42.0),
-            ValueWord::from_f64(3.14),
-            ValueWord::from_i64(99),
-            ValueWord::from_bool(true),
-            ValueWord::none(),
-            ValueWord::unit(),
-            ValueWord::from_string(Arc::new("test".to_string())),
-        ];
-
-        for val in &test_cases {
-            assert_eq!(
-                formatter.format(val),
-                formatter.format_nb(val),
-                "Mismatch for ValueWord: {:?}",
-                val
-            );
-        }
-    }
-
-    // ===== LOW-1: Float display always shows .0 =====
-
-    #[test]
-    fn test_float_display_shows_decimal_point() {
-        let schema_reg = create_test_registry();
-        let formatter = VMValueFormatter::new(&schema_reg);
-
-        // Integer-like floats must show .0 — except `0.0`, whose f64 bit
-        // pattern (0x0) is identical to native i64 `0`. Post-Wave-E+5
-        // the formatter cannot disambiguate kind from bits alone for
-        // small whole-number values that fall in the i48 range, and
-        // chooses the int interpretation (see `format_nb_with_depth`'s
-        // untagged path). Real callers stamp `top_level_frame.return_kind`
-        // to disambiguate; this fixture-level test passes a bare
-        // ValueWord with no kind context, so `0.0` correctly formats as
-        // `0` here. The other integer-like floats below have f64 bit
-        // patterns far outside the i48 range and disambiguate correctly.
-        assert_eq!(formatter.format_nb(&ValueWord::from_f64(1.0)), "1.0");
-        assert_eq!(formatter.format_nb(&ValueWord::from_f64(0.0)), "0");
-        assert_eq!(formatter.format_nb(&ValueWord::from_f64(-5.0)), "-5.0");
-        assert_eq!(formatter.format_nb(&ValueWord::from_f64(100.0)), "100.0");
-
-        // Non-integer floats show normally
-        assert_eq!(formatter.format_nb(&ValueWord::from_f64(1.5)), "1.5");
-        assert_eq!(formatter.format_nb(&ValueWord::from_f64(0.1)), "0.1");
-
-        // Integers (i48) should NOT show .0
-        assert_eq!(formatter.format_nb(&ValueWord::from_i64(1)), "1");
-        assert_eq!(formatter.format_nb(&ValueWord::from_i64(0)), "0");
-        assert_eq!(formatter.format_nb(&ValueWord::from_i64(-5)), "-5");
-    }
-
-    // ===== LOW-5: Enum display shows variant name only =====
-
-    #[test]
-    fn test_enum_display_variant_only() {
-        let schema_reg = create_test_registry();
-        let formatter = VMValueFormatter::new(&schema_reg);
-
-        // Unit variant
-        let e = ValueWord::from_enum(shape_value::EnumValue {
-            enum_name: "Direction".to_string(),
-            variant: "North".to_string(),
-            payload: shape_value::enums::EnumPayload::Unit,
-        });
-        assert_eq!(formatter.format_nb(&e), "North");
-
-        // Tuple variant
-        let e = ValueWord::from_enum(shape_value::EnumValue {
-            enum_name: "Shape".to_string(),
-            variant: "Circle".to_string(),
-            payload: shape_value::enums::EnumPayload::Tuple(vec![ValueWord::from_f64(5.0)]),
-        });
-        assert_eq!(formatter.format_nb(&e), "Circle(5.0)");
-    }
-
-    // ===== LOW-9: References show <ref> (or dereferenced value via VM) =====
-
-    #[test]
-    fn test_ref_display_without_resolver() {
-        let schema_reg = create_test_registry();
-        let formatter = VMValueFormatter::new(&schema_reg);
-
-        // Without a resolver, inline stack refs show <ref>
-        let ref_val = ValueWord::from_ref(42);
-        let formatted = formatter.format_nb(&ref_val);
-        assert_eq!(formatted, "<ref>");
-    }
-
-    #[test]
-    fn test_ref_display_with_resolver() {
-        let schema_reg = create_test_registry();
-        // Resolver that returns a concrete value for any ref
-        let resolver = |_v: &ValueWord| -> Option<ValueWord> {
-            Some(ValueWord::from_i64(99))
-        };
-        let formatter = ValueFormatter::with_deref(&schema_reg, &resolver);
-
-        let ref_val = ValueWord::from_ref(42);
-        let formatted = formatter.format_nb(&ref_val);
-        assert_eq!(formatted, "99");
-    }
-
 }
