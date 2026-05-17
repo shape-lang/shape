@@ -31,10 +31,12 @@ fn operator_trait_for_op(op: &BinaryOp) -> Option<&'static str> {
         BinaryOp::BitAnd => Some("BitAnd"),
         BinaryOp::BitOr => Some("BitOr"),
         BinaryOp::BitXor => Some("BitXor"),
+        BinaryOp::BitShl => Some("Shl"),
+        BinaryOp::BitShr => Some("Shr"),
         BinaryOp::Greater | BinaryOp::Less | BinaryOp::GreaterEq | BinaryOp::LessEq => {
             Some("Ord")
         }
-        _ => None, // Pow / BitShl / BitShr have no operator trait (yet)
+        _ => None, // Pow has no operator trait (yet)
     }
 }
 
@@ -53,6 +55,8 @@ fn operator_trait_method_for_op(op: &BinaryOp) -> Option<&'static str> {
         BinaryOp::BitAnd => Some("bitand"),
         BinaryOp::BitOr => Some("bitor"),
         BinaryOp::BitXor => Some("bitxor"),
+        BinaryOp::BitShl => Some("shl"),
+        BinaryOp::BitShr => Some("shr"),
         BinaryOp::Greater | BinaryOp::Less | BinaryOp::GreaterEq | BinaryOp::LessEq => {
             Some("cmp")
         }
@@ -1188,6 +1192,51 @@ impl BytecodeCompiler {
                     && matches!(right_numeric, Some(NumericType::Int));
                 let emit_typed = both_int
                     && crate::compiler::helpers::typed_bitwise_enabled();
+
+                // W1.10 (v0.3 R2): user-type operator trait dispatch for
+                // `<<` / `>>`. When the left operand has a TypedObject
+                // schema implementing `Shl` / `Shr`, emit a `CallMethod`
+                // dispatch via the shared `emit_operator_trait_call`
+                // path (mirrors the Phase 2.5 dispatch in the generic
+                // `_ =>` arithmetic arm at L1456-1475 + Add's dedicated
+                // arm at L775-794). Runs only when typed-int emission
+                // is not eligible — the typed bitwise path takes
+                // precedence for `int << int` to preserve the existing
+                // zero-dispatch behavior. BitAnd/BitOr/BitXor handled
+                // by sibling W1.9 dispatch.
+                if !emit_typed
+                    && matches!(op, BinaryOp::BitShl | BinaryOp::BitShr)
+                {
+                    let trait_name = operator_trait_for_op(op);
+                    let method_name = operator_trait_method_for_op(op);
+                    if let (Some(trait_name), Some(method_name)) =
+                        (trait_name, method_name)
+                    {
+                        let has_trait_via_schema = left_schema
+                            .and_then(|sid| {
+                                self.type_tracker.schema_registry().get_by_id(sid)
+                            })
+                            .is_some_and(|schema| {
+                                self.type_inference
+                                    .env
+                                    .type_implements_trait(&schema.name, trait_name)
+                            });
+                        let has_trait = has_trait_via_schema
+                            || self
+                                .infer_expr_type(left)
+                                .ok()
+                                .is_some_and(|ty| {
+                                    let name = type_display_name(&ty);
+                                    self.type_inference
+                                        .env
+                                        .type_implements_trait(&name, trait_name)
+                                });
+                        if has_trait {
+                            emit_operator_trait_call(self, method_name);
+                            return Ok(());
+                        }
+                    }
+                }
 
                 if emit_typed {
                     let typed_opcode = match op {

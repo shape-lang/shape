@@ -475,7 +475,8 @@ impl TypeEnvironment {
             optional: false,
         };
 
-        // Binary operator traits: Add, Sub, Mul, Div, Mod, BitAnd, BitOr, BitXor
+        // Binary operator traits: Add, Sub, Mul, Div, Mod, BitAnd, BitOr, BitXor, Shl, Shr
+        // (W1.9 BitAnd/BitOr/BitXor; W1.10 Shl/Shr — v0.3 W1 operator coverage)
         for (trait_name, method_name) in &[
             ("Add", "add"),
             ("Sub", "sub"),
@@ -485,6 +486,8 @@ impl TypeEnvironment {
             ("BitAnd", "bitand"),
             ("BitOr", "bitor"),
             ("BitXor", "bitxor"),
+            ("Shl", "shl"),
+            ("Shr", "shr"),
         ] {
             let trait_def = TraitDef {
                 name: trait_name.to_string(),
@@ -786,6 +789,30 @@ impl TypeEnvironment {
             annotations: vec![],
         };
         self.define_trait(&index_mut_trait);
+
+        // W1.10 (v0.3 W1 operator coverage): register `Shl` / `Shr`
+        // impls for primitive integer types only. Shifts are defined
+        // on integers — there is no `BitShlNumber` opcode, and
+        // floating-point shifts are not a meaningful operation. The
+        // typed `BitShlInt` / `BitShrInt` opcodes service the actual
+        // operation for primitives; these registrations are
+        // bookkeeping so `<T: Shl>` / `<T: Shr>` bound checking
+        // succeeds when T resolves to an integer type. Sibling of
+        // the Add/Sub/Mul/Div/Mod registrations above.
+        let shift_types = ["int", "i8", "i16", "i32", "i64",
+                           "u8", "u16", "u32", "u64"];
+        for type_name in &shift_types {
+            let _ = self.type_registry.register_trait_impl(
+                "Shl",
+                type_name,
+                vec!["shl".to_string()],
+            );
+            let _ = self.type_registry.register_trait_impl(
+                "Shr",
+                type_name,
+                vec!["shr".to_string()],
+            );
+        }
     }
 
     /// Register the Numeric marker trait and built-in implementations.
