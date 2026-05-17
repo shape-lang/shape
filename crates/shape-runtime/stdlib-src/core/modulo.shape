@@ -1,0 +1,62 @@
+/// @module std::core::modulo
+/// `Mod` and `ModAssign` — operator traits for `%` and `%=`.
+///
+/// Shape's strict-typing arithmetic dispatch for built-in scalar types
+/// (`int`, `number`) emits typed opcodes (`ModInt`, `ModNumber`) at
+/// compile time and never routes through this trait. User-defined types
+/// (`type X { ... }`) that want to participate in `%` / `%=` opt in by
+/// providing an `impl Mod for X { method mod(other: X) -> X { ... } }`
+/// block; the compiler then desugars `a % b` to `Mod::mod(a, b)` via the
+/// operator trait dispatch path at `compiler/expressions/binary_ops.rs`
+/// (mirrors `BinaryOp::Add` arm).
+///
+/// `ModAssign` is the in-place counterpart. `a %= b` is grammar-desugared
+/// at parse time to `a = a % b`, so authoring `impl Mod for X` already
+/// covers `%=` for user-defined types without a separate `ModAssign`
+/// body. `ModAssign` is declared here for symmetry with `AddAssign` /
+/// `SubAssign` / ... and so generic bounds `fn f<T: ModAssign>(...)`
+/// can be authored today.
+///
+/// ## Filename note
+///
+/// The source file is `modulo.shape` (not `mod.shape`) to avoid visual
+/// collision with Rust's `mod.rs` convention in the stdlib-src tree. The
+/// trait name `Mod` and method name `mod` are preserved verbatim — Shape
+/// does not reserve `mod` as a parse-time keyword (`shape.pest` `keyword`
+/// rule at line 1481-1490 does not include `mod`; the `item_sync_keyword`
+/// listing at line 22 is only for error-recovery sync points and does
+/// not constrain identifier resolution).
+///
+/// ## Known implementations
+///
+/// | Type        | Dispatch source                                  |
+/// |-------------|--------------------------------------------------|
+/// | int         | typed `ModInt` opcode (no trait dispatch)        |
+/// | number      | typed `ModNumber` opcode (no trait dispatch)     |
+/// | user type X | `impl Mod for X { method mod(other: X) -> X }`   |
+
+/// Operator trait for `%`. Implementing `Mod` for a user-defined type
+/// enables the binary `%` operator on values of that type. The compiler
+/// calls `Mod::mod(lhs, rhs)` via UFCS dispatch through the
+/// `function_name_index` for `X::mod`.
+trait Mod {
+    /// Return `self % other`. By convention the result is a fresh value;
+    /// in-place mutation belongs to `ModAssign::mod_assign`.
+    mod(other: Self): Self
+}
+
+/// Operator trait for `%=`. The grammar desugars `a %= b` to `a = a % b`,
+/// so providing `impl Mod for X` already covers `%=` for user-defined
+/// types — `ModAssign` is declared here for generic bounds and for the
+/// future in-place specialization opt-in.
+///
+/// The return type is `Self` (the in-place op returns `self` for
+/// chaining) to mirror the `AddAssign` / `SubAssign` / `MulAssign` /
+/// `DivAssign` shape. Implementations may mutate `self` in place and
+/// `return self` from the method body; the desugar at parse time means
+/// the return value is unused under current semantics.
+trait ModAssign {
+    /// Mutate `self` in place by computing `self % other`. Return `self`
+    /// for chaining.
+    mod_assign(other: Self): Self
+}
