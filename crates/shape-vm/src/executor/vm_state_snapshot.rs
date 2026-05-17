@@ -293,10 +293,34 @@ impl VirtualMachine {
 /// dispatch — bumping the strong-count share for heap-bearing kinds.
 /// Wraps the result in a `KindedSlot` carrier.
 fn clone_slot_kinded(bits: u64, kind: NativeKind) -> KindedSlot {
-    // Re-use the public clone_with_kind via KindedSlot::Clone shape: build
-    // the carrier first, then the Clone impl handles refcount bumps.
-    let carrier = KindedSlot::new(ValueSlot::from_raw(bits), kind);
-    carrier.clone()
+    // W5 v0.3 fix (2026-05-17): bump the underlying refcount via
+    // `clone_with_kind` BEFORE wrapping in a `KindedSlot` carrier.
+    //
+    // The previous shape (`KindedSlot::new(...)` then `carrier.clone()`)
+    // was a share-accounting double-release: `KindedSlot::new` claims
+    // ownership without bumping the refcount, so the carrier and the
+    // live VM both claim the same share. The `carrier.clone()` bump and
+    // `carrier`'s Drop release exactly cancel each other, leaving the
+    // refcount unchanged — but the returned `cloned` KindedSlot owns a
+    // share that doesn't exist. When the snapshot drops later, the
+    // cloned's Drop decrements the refcount to 0 while the live VM
+    // binding/stack still holds an owning reference. The next access
+    // through the VM-side reference is a use-after-free.
+    //
+    // The correct shape mirrors `module_binding_read_owned_kinded` in
+    // `executor/mod.rs:792-796` and `OwnedClosureBlock::read_capture_kinded`'s
+    // call site discipline: explicit `clone_with_kind` retain followed
+    // by `KindedSlot::new` claim of the freshly minted share. The live
+    // VM keeps its own share unchanged.
+    //
+    // Empirically isolated via `eprintln` instrumentation in
+    // `docs/cluster-audits/v0.3-w5-v2-raw-residuals.md` §1; root cause
+    // identical to the cluster-1.5 share-accounting double-release class
+    // (Round 13 T5 closure-self / cluster-1.5 args/captures), surfaced
+    // at the snapshot-clone boundary rather than the closure-call
+    // boundary.
+    crate::executor::vm_impl::stack::clone_with_kind(bits, kind);
+    KindedSlot::new(ValueSlot::from_raw(bits), kind)
 }
 
 impl VmStateAccessor for VmStateSnapshot {

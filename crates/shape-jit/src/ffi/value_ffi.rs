@@ -702,25 +702,33 @@ mod tests {
         use shape_value::{HeapKind, KindedSlot, NativeKind, TypedObjectStorage, ValueSlot};
         use std::sync::Arc;
 
-        // Build a minimal `Arc<TypedObjectStorage>` — the strict-typed
-        // analog of the JIT-internal `box_typed_object(*const TypedObject)`
-        // wrapping. The VM-tier carrier is the canonical receiver-recovery
-        // shape per ADR-005 §1 single-discriminator.
-        let storage = TypedObjectStorage::new(
+        // W5 v0.3 fix (2026-05-17): migrated to the v2-raw `_new` carrier
+        // per `executor/objects/property_access.rs::length_typed_object_empty`
+        // rationale. The post-Wave-2-D1 `KindedSlot::Drop` for
+        // `Ptr(HeapKind::TypedObject)` uses `release_elem` →
+        // `std::alloc::dealloc(ptr, Layout::new::<TypedObjectStorage>())`
+        // — incompatible with `Arc::new` allocator provenance.
+        //
+        // Build a minimal `TypedObjectStorage` via the v2-raw allocator —
+        // the canonical production carrier shape per ADR-006 §2.3 +
+        // §2.7.24. The slot's Drop now runs through `release_elem` →
+        // `v2_release` → `_drop` cleanly when the test's `slot` falls out
+        // of scope at the closing brace.
+        let ptr = TypedObjectStorage::_new(
             0,
             Vec::<ValueSlot>::new().into_boxed_slice(),
             0,
             Arc::from(Vec::<NativeKind>::new().into_boxed_slice()),
         );
-        let slot = KindedSlot::from_typed_object(Arc::new(storage));
+        let slot = KindedSlot::from_typed_object_raw(ptr);
 
         // §2.7.6 / Q8: the kind label discriminates the slot — no tag-bit
         // probe required (and tag-bit probes don't exist post-strict-
         // typing). Construction-side contract holds.
         assert_eq!(slot.kind(), NativeKind::Ptr(HeapKind::TypedObject));
-        // The matching heap discriminator for an `Arc<TypedObjectStorage>`
-        // slot is `HeapKind::TypedObject` — the §2.7.5/Q8 bounded-carrier
-        // API exposes one constructor per kind variant, mirror-matching
-        // the heap arm.
+        // The matching heap discriminator for a v2-raw
+        // `*const TypedObjectStorage` slot is `HeapKind::TypedObject` —
+        // the §2.7.5/Q8 bounded-carrier API exposes one constructor per
+        // kind variant, mirror-matching the heap arm.
     }
 }

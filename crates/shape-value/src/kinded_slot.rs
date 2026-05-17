@@ -1367,24 +1367,53 @@ mod tests {
 
     /// ADR-006 §2.7: cloning a `KindedSlot` bumps the underlying refcount;
     /// dropping both clones retires it cleanly.
+    ///
+    /// W5 v0.3 fix (2026-05-17): migrated to the v2-raw `_new` carrier per
+    /// the same rationale as `executor/objects/property_access.rs::
+    /// length_typed_object_empty`. The post-Wave-2-D1 `KindedSlot::Clone`
+    /// / `Drop` dispatch for `Ptr(HeapKind::TypedObject)` uses
+    /// `v2_retain` / `release_elem` (HeapElement trait) against the
+    /// embedded `HeapHeader`, NOT `Arc::increment/decrement_strong_count`.
+    /// Pushing Arc-allocated bits through the v2-raw dispatch attempts
+    /// `std::alloc::dealloc` with `Layout::new::<TypedObjectStorage>` on
+    /// an `Arc::into_raw`'d pointer at refcount=0 — a wrong-allocator-pair
+    /// free that surfaces as `free(): invalid size` SIGABRT.
+    ///
+    /// The test now observes the v2-raw refcount through
+    /// `(*ptr).header.refcount` directly — the canonical way to inspect
+    /// a `_new`-allocated TypedObject's share count. The Arc-based
+    /// `weak.strong_count()` probe is incompatible with v2-raw memory
+    /// (no `ArcInner` header) so the migration replaces it.
     #[test]
     fn clone_then_double_drop_balances_refcount() {
-        let storage = TypedObjectStorage::new(
-            0,
-            Vec::<ValueSlot>::new().into_boxed_slice(),
-            0,
-            Arc::from(Vec::<NativeKind>::new().into_boxed_slice()),
-        );
-        let arc = Arc::new(storage);
-        let weak = Arc::downgrade(&arc);
-        let slot1 = KindedSlot::from_typed_object(arc);
-        assert_eq!(weak.strong_count(), 1);
-        let slot2 = slot1.clone();
-        assert_eq!(weak.strong_count(), 2, "Clone bumped refcount");
-        drop(slot1);
-        assert_eq!(weak.strong_count(), 1, "first Drop retired one share");
-        drop(slot2);
-        assert_eq!(weak.strong_count(), 0, "second Drop retired the last");
+        use std::sync::atomic::Ordering;
+        // SAFETY block: the entire test sequences raw-pointer
+        // allocations, refcount inspections, and drop dispatch through
+        // the v2-raw HeapElement trait. The pointer is allocated via
+        // `_new` (refcount=1), borrowed transiently for refcount reads,
+        // and finally retired by the second Drop reaching refcount=0
+        // (which runs `_drop` to dealloc).
+        unsafe {
+            let ptr = TypedObjectStorage::_new(
+                0,
+                Vec::<ValueSlot>::new().into_boxed_slice(),
+                0,
+                Arc::from(Vec::<NativeKind>::new().into_boxed_slice()),
+            );
+            let header_refcount =
+                |p: *const TypedObjectStorage| (*p).header.refcount.load(Ordering::SeqCst);
+
+            assert_eq!(header_refcount(ptr), 1, "_new starts at refcount 1");
+            let slot1 = KindedSlot::from_typed_object_raw(ptr);
+            assert_eq!(header_refcount(ptr), 1, "from_typed_object_raw transfers existing share");
+            let slot2 = slot1.clone();
+            assert_eq!(header_refcount(ptr), 2, "Clone bumped refcount");
+            drop(slot1);
+            assert_eq!(header_refcount(ptr), 1, "first Drop retired one share");
+            // slot2's Drop retires the final share and runs _drop; the
+            // pointer is dangling after this line (no further reads).
+            drop(slot2);
+        }
     }
 
     /// `Vec<KindedSlot>` push + pop + clone must preserve refcount
