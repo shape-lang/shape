@@ -7,7 +7,7 @@ use shape_ast::ast::{
     DestructurePattern, ExportItem, Item, Program, Span, TypeAnnotation, VarKind,
 };
 use tower_lsp_server::ls_types::{
-    CompletionItem, CompletionItemKind, Documentation, MarkupContent, MarkupKind,
+    CompletionItem, CompletionItemKind, CompletionItemTag, Documentation, MarkupContent, MarkupKind,
 };
 
 /// Convert a TypeAnnotation to a readable string
@@ -69,6 +69,9 @@ pub struct SymbolInfo {
     pub type_annotation: Option<String>,
     /// All annotations applied to this symbol
     pub annotations: Vec<String>,
+    /// Whether the symbol's doc-comment carries a `@deprecated` tag.
+    /// Surfaces in completions via `CompletionItemTag::DEPRECATED`.
+    pub deprecated: bool,
 }
 
 /// Type of symbol
@@ -85,6 +88,15 @@ fn rendered_doc_for_span(program: &Program, span: Span) -> Option<String> {
         .docs
         .comment_for_span(span)
         .map(|comment| render_doc_comment(program, comment, None, None, None))
+}
+
+/// Returns true when the doc-comment attached to `span` carries a `@deprecated`
+/// tag. Used to emit `CompletionItemTag::DEPRECATED` (LSP feature 1.12).
+fn deprecated_for_span(program: &Program, span: Span) -> bool {
+    program
+        .docs
+        .comment_for_span(span)
+        .is_some_and(|comment| comment.deprecated_doc().is_some())
 }
 
 /// Extract all symbols from a parsed program
@@ -115,6 +127,7 @@ pub fn extract_symbols(program: &Program) -> Vec<SymbolInfo> {
                             documentation: None,
                             type_annotation: type_str.clone(),
                             annotations: vec![],
+                            deprecated: false,
                         });
                     }
                 }
@@ -139,6 +152,7 @@ pub fn extract_symbols(program: &Program) -> Vec<SymbolInfo> {
                         documentation: None,
                         type_annotation: type_str.clone(),
                         annotations: vec![],
+                        deprecated: false,
                     });
                 }
             }
@@ -172,6 +186,7 @@ pub fn extract_symbols(program: &Program) -> Vec<SymbolInfo> {
                     documentation: doc,
                     type_annotation: None,
                     annotations,
+                    deprecated: deprecated_for_span(program, *span),
                 });
             }
             Item::TypeAlias(type_alias, span) => {
@@ -182,6 +197,7 @@ pub fn extract_symbols(program: &Program) -> Vec<SymbolInfo> {
                     documentation: rendered_doc_for_span(program, *span),
                     type_annotation: None,
                     annotations: vec![],
+                    deprecated: deprecated_for_span(program, *span),
                 });
             }
             Item::StructType(struct_def, span) => {
@@ -192,6 +208,7 @@ pub fn extract_symbols(program: &Program) -> Vec<SymbolInfo> {
                     documentation: rendered_doc_for_span(program, *span),
                     type_annotation: None,
                     annotations: vec![],
+                    deprecated: deprecated_for_span(program, *span),
                 });
             }
             Item::Trait(trait_def, span) => {
@@ -202,6 +219,7 @@ pub fn extract_symbols(program: &Program) -> Vec<SymbolInfo> {
                     documentation: rendered_doc_for_span(program, *span),
                     type_annotation: None,
                     annotations: vec![],
+                    deprecated: deprecated_for_span(program, *span),
                 });
             }
             Item::Enum(enum_def, span) => {
@@ -212,6 +230,7 @@ pub fn extract_symbols(program: &Program) -> Vec<SymbolInfo> {
                     documentation: rendered_doc_for_span(program, *span),
                     type_annotation: None,
                     annotations: vec![],
+                    deprecated: deprecated_for_span(program, *span),
                 });
             }
             Item::ForeignFunction(foreign_fn, span) => {
@@ -253,6 +272,7 @@ pub fn extract_symbols(program: &Program) -> Vec<SymbolInfo> {
                     documentation: rendered_doc_for_span(program, *span),
                     type_annotation: None,
                     annotations,
+                    deprecated: deprecated_for_span(program, *span),
                 });
             }
             Item::Export(export_stmt, span) => {
@@ -281,6 +301,7 @@ pub fn extract_symbols(program: &Program) -> Vec<SymbolInfo> {
                             documentation: doc,
                             type_annotation: None,
                             annotations,
+                            deprecated: deprecated_for_span(program, *span),
                         });
                     }
                     ExportItem::Enum(enum_def) => {
@@ -291,6 +312,7 @@ pub fn extract_symbols(program: &Program) -> Vec<SymbolInfo> {
                             documentation: rendered_doc_for_span(program, *span),
                             type_annotation: None,
                             annotations: vec![],
+                            deprecated: deprecated_for_span(program, *span),
                         });
                     }
                     ExportItem::Struct(struct_def) => {
@@ -301,6 +323,7 @@ pub fn extract_symbols(program: &Program) -> Vec<SymbolInfo> {
                             documentation: rendered_doc_for_span(program, *span),
                             type_annotation: None,
                             annotations: vec![],
+                            deprecated: deprecated_for_span(program, *span),
                         });
                     }
                     _ => {
@@ -351,11 +374,20 @@ pub fn symbols_to_completions(symbols: &[SymbolInfo]) -> Vec<CompletionItem> {
                 })
             });
 
+            // LSP feature 1.12 — surface `@deprecated` doc-tag as
+            // CompletionItemTag::DEPRECATED so editors render the item struck-through.
+            let tags = if symbol.deprecated {
+                Some(vec![CompletionItemTag::DEPRECATED])
+            } else {
+                None
+            };
+
             CompletionItem {
                 label: symbol.name.clone(),
                 kind: Some(kind),
                 detail: symbol.detail.clone(),
                 documentation,
+                tags,
                 ..CompletionItem::default()
             }
         })
@@ -476,6 +508,7 @@ function doji(candle) {
                 documentation: None,
                 type_annotation: Some("Number".to_string()),
                 annotations: vec![],
+                deprecated: false,
             },
             SymbolInfo {
                 name: "myFunc".to_string(),
@@ -484,6 +517,7 @@ function doji(candle) {
                 documentation: Some("A test function".to_string()),
                 type_annotation: None,
                 annotations: vec![],
+                deprecated: false,
             },
         ];
 
@@ -505,6 +539,7 @@ function doji(candle) {
             documentation: None,
             type_annotation: None,
             annotations: vec!["strategy".to_string()],
+            deprecated: false,
         }];
 
         let completions = symbols_to_completions(&symbols);
@@ -524,6 +559,7 @@ function doji(candle) {
                 documentation: None,
                 type_annotation: None,
                 annotations: vec![],
+                deprecated: false,
             },
             SymbolInfo {
                 name: "my_strategy".to_string(),
@@ -532,6 +568,7 @@ function doji(candle) {
                 documentation: None,
                 type_annotation: None,
                 annotations: vec!["strategy".to_string()],
+                deprecated: false,
             },
         ];
 
@@ -541,5 +578,81 @@ function doji(candle) {
             .collect();
         assert_eq!(strategies.len(), 1);
         assert_eq!(strategies[0].name, "my_strategy");
+    }
+
+    /// W2.2 (LSP feature 1.12): a `@deprecated` doc-tag on a user-defined
+    /// function should be captured on `SymbolInfo::deprecated`.
+    #[test]
+    fn test_deprecated_doc_tag_flag_extraction() {
+        let code = r#"
+/// Old computation kept for back-compat.
+///
+/// @deprecated Use `new_compute` instead.
+fn old_compute(x: int) -> int {
+    return x * 2;
+}
+
+fn new_compute(x: int) -> int {
+    return x * 3;
+}
+"#;
+
+        let program = parse_program(code).expect("parse failed");
+        let symbols = extract_symbols(&program);
+        let old = symbols
+            .iter()
+            .find(|s| s.name == "old_compute")
+            .expect("old_compute symbol present");
+        let new = symbols
+            .iter()
+            .find(|s| s.name == "new_compute")
+            .expect("new_compute symbol present");
+
+        assert!(
+            old.deprecated,
+            "old_compute carries @deprecated doc-tag → SymbolInfo.deprecated should be true"
+        );
+        assert!(
+            !new.deprecated,
+            "new_compute has no @deprecated → SymbolInfo.deprecated should be false"
+        );
+    }
+
+    /// W2.2 (LSP feature 1.12): `symbols_to_completions` should emit
+    /// `CompletionItemTag::DEPRECATED` for symbols flagged deprecated.
+    #[test]
+    fn test_symbols_to_completions_emits_deprecated_tag() {
+        let symbols = vec![
+            SymbolInfo {
+                name: "fresh".to_string(),
+                kind: SymbolKind::Function,
+                detail: None,
+                documentation: None,
+                type_annotation: None,
+                annotations: vec![],
+                deprecated: false,
+            },
+            SymbolInfo {
+                name: "stale".to_string(),
+                kind: SymbolKind::Function,
+                detail: None,
+                documentation: None,
+                type_annotation: None,
+                annotations: vec![],
+                deprecated: true,
+            },
+        ];
+
+        let completions = symbols_to_completions(&symbols);
+        let fresh = completions.iter().find(|c| c.label == "fresh").unwrap();
+        let stale = completions.iter().find(|c| c.label == "stale").unwrap();
+
+        assert!(fresh.tags.is_none(), "fresh symbol should carry no tags");
+        let tags = stale.tags.as_ref().expect("stale symbol should carry tags");
+        assert!(
+            tags.contains(&CompletionItemTag::DEPRECATED),
+            "stale symbol should carry CompletionItemTag::DEPRECATED, got {:?}",
+            tags
+        );
     }
 }
