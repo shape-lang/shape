@@ -369,7 +369,40 @@ fn lower_list_comprehension_expr(
 ) {
     builder.push_scope();
     for clause in &comp.clauses {
-        let _ = lower_expr_to_temp(builder, &clause.iterable);
+        // W11-jit-new-array (2026-05-17): mirror `lower_for_expr`'s
+        // `Expr::Range { start: Some, end: Some }` special-case. The
+        // bytecode compiler's `compile_comprehension_clauses` runs
+        // `try_begin_range_counter_loop` first (`compiler/loops.rs`),
+        // emitting a counter-incremented loop directly without
+        // constructing a `RangeData` heap value. The MIR mirror was
+        // missing — `lower_expr_to_temp(builder, &clause.iterable)`
+        // unconditionally fell into the generic `Expr::Range` arm
+        // (`expr.rs:2033`), which lowers `0..N` as
+        // `Assign(temp, Aggregate(start, end))` whose destination temp
+        // has no `ConcreteType` source. The JIT-MIR consumer at
+        // `mir_compiler/statements.rs:24-65` then surface-and-stops
+        // on the unstamped Aggregate (Route A `W11-jit-new-array`).
+        //
+        // Lower the start/end sub-expressions to temps without the
+        // wrapping `Aggregate`: the borrow tracker observes the
+        // sub-expression reads through the normal `lower_expr_to_temp`
+        // path, and the comprehension's element / filter sub-expressions
+        // are lowered exactly as before. The `RangeData` value itself
+        // is never observed (the bytecode loops by counter); skipping
+        // the Aggregate matches the bytecode-side semantic per ADR-006
+        // §2.7.5 stamp-at-compile-time (the MIR shape no longer
+        // produces an unclassifiable carrier).
+        if let Expr::Range {
+            start: Some(start_expr),
+            end: Some(end_expr),
+            ..
+        } = clause.iterable.as_ref()
+        {
+            let _ = lower_expr_to_temp(builder, start_expr);
+            let _ = lower_expr_to_temp(builder, end_expr);
+        } else {
+            let _ = lower_expr_to_temp(builder, &clause.iterable);
+        }
         let element_slot = builder.alloc_temp(LocalTypeInfo::Unknown);
         assign_none(builder, element_slot, clause.iterable.span());
         super::stmt::lower_destructure_bindings_from_place(

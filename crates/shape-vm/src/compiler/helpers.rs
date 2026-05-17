@@ -667,6 +667,44 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_resolvers(
         }
     }
 
+    // W11-jit-new-array (2026-05-17): build a slot-copy-source map from
+    // `Assign(dst, Use(Move|Copy|MoveExplicit(Place::Local(src))))`
+    // statements. Used by `infer_array_elem_from_operands` below to
+    // chase the ultimate source of a `Move(temp)` operand back to a
+    // user-visible slot whose `ConcreteType` was stamped by its own
+    // `ArrayStore`. The single-pass producer order classifies `a`'s
+    // ArrayStore before `b`'s spread `ArrayStore` consumes a Move(temp)
+    // operand where the temp received `Copy(a)`; without this chain
+    // walk the spread operand's element type is `None` and the result
+    // slot stays `Void`. The slot-move propagation pass at line ~1070
+    // runs *after* the ArrayStore-stamping pass, so it cannot help
+    // here — we have to chase the chain in the first pass directly.
+    //
+    // Per ADR-006 §2.7.5 stamp-at-compile-time, the chain walk is
+    // structural (MIR-shape only); no runtime tag-bit decode, no
+    // fabricated default. When the chain terminates at a non-Array
+    // slot the helper returns `None` and the caller falls through to
+    // the normal heterogeneous-operand path.
+    let mut copy_source: Vec<Option<u16>> = vec![None; n];
+    for block in mir.iter_blocks() {
+        for stmt in &block.statements {
+            if let StatementKind::Assign(
+                crate::mir::types::Place::Local(dst),
+                crate::mir::types::Rvalue::Use(
+                    Operand::Move(crate::mir::types::Place::Local(src))
+                    | Operand::Copy(crate::mir::types::Place::Local(src))
+                    | Operand::MoveExplicit(crate::mir::types::Place::Local(src)),
+                ),
+            ) = &stmt.kind
+            {
+                let di = dst.0 as usize;
+                if di < n {
+                    copy_source[di] = Some(src.0);
+                }
+            }
+        }
+    }
+
     // First pass: stamp slots from container-store statements. These are
     // the kind-source statements emitted by the MIR lowering for
     // struct/enum/array literal construction.
@@ -781,9 +819,24 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_resolvers(
                         // the temp. We resolve through the per-slot scalar
                         // map (`slot_scalar_kind`) built in the pre-pass to
                         // recover the underlying kind across that temp hop.
+                        //
+                        // W11-jit-new-array (2026-05-17): also probe the
+                        // partially-stamped `concrete_types` vector (via the
+                        // `copy_source` chain) so that operand slots already
+                        // classified as `Array<T>` (e.g. the `...a` spread
+                        // source in `[0, ...a, 4]`) contribute their element
+                        // type T. The bytecode pipeline lowers spreads
+                        // through `compile_array_with_spread`; the MIR
+                        // mirrors that by inlining the spread source as a
+                        // single Move operand to a scratch temp before the
+                        // ArrayStore consumes it. Per ADR-006 §2.7.5 the
+                        // source slot's `ConcreteType` IS the proof of
+                        // element kind; no fabrication, no decode.
                         if let Some(elem) = infer_array_elem_from_operands(
                             operands,
                             &slot_scalar_kind,
+                            &concrete_types,
+                            &copy_source,
                         ) {
                             concrete_types[idx] =
                                 shape_value::v2::ConcreteType::Array(Box::new(elem));
@@ -1266,9 +1319,44 @@ fn operand_concrete_type(
     }
 }
 
+/// W11-jit-new-array (2026-05-17): walk the `Use(Move|Copy|MoveExplicit)`
+/// chain starting at `slot` and return the deepest source whose
+/// `concrete_types` entry is non-Void. Used by
+/// `infer_array_elem_from_operands` to recover the spread source's
+/// `Array<T>` classification across the `Spread` expression's
+/// intervening copy temp. Bounded by `copy_source.len()` to defend
+/// against pathological chains.
+fn resolve_copy_chain(
+    slot: u16,
+    copy_source: &[Option<u16>],
+    concrete_types: &[shape_value::v2::ConcreteType],
+) -> Option<shape_value::v2::ConcreteType> {
+    let mut cur = slot as usize;
+    let mut budget = copy_source.len();
+    loop {
+        if cur >= concrete_types.len() {
+            return None;
+        }
+        let ct = &concrete_types[cur];
+        if !matches!(ct, shape_value::v2::ConcreteType::Void) {
+            return Some(ct.clone());
+        }
+        let next = copy_source.get(cur).copied().flatten();
+        match next {
+            Some(n) if (n as usize) != cur && budget > 0 => {
+                cur = n as usize;
+                budget -= 1;
+            }
+            _ => return None,
+        }
+    }
+}
+
 fn infer_array_elem_from_operands(
     operands: &[crate::mir::types::Operand],
     slot_scalar_kind: &[Option<shape_value::v2::ConcreteType>],
+    concrete_types: &[shape_value::v2::ConcreteType],
+    copy_source: &[Option<u16>],
 ) -> Option<shape_value::v2::ConcreteType> {
     use crate::mir::types::{MirConstant, Operand, Place};
     if operands.is_empty() {
@@ -1286,15 +1374,39 @@ fn infer_array_elem_from_operands(
             Operand::Constant(MirConstant::Bool(_)) => {
                 Some(shape_value::v2::ConcreteType::Bool)
             }
-            // Move/Copy of a local slot — consult the pre-pass scalar
-            // map. If the source slot was filled by an `Assign(s,
-            // Use(Constant(k)))` then we can recover the kind across
-            // the temp hop. Non-scalar source slots return None.
+            // Move/Copy of a local slot — consult two kind sources in
+            // order:
+            //
+            //   1. The pre-pass scalar map (`slot_scalar_kind`). If the
+            //      source slot was filled by an `Assign(s, Use(Constant(
+            //      k)))` then we can recover the scalar kind across the
+            //      `lower_expr_as_moved_operand` temp hop. This covers
+            //      the canonical `[1, 2, 3]` literal-element shape.
+            //
+            //   2. W11-jit-new-array (2026-05-17): the partially-stamped
+            //      `concrete_types` vector reached via `resolve_copy_
+            //      chain`. When the operand IS (or copy-chains back to)
+            //      an `Array<T>` slot — e.g. the `...a` spread source
+            //      in `[0, ...a, 4]` — we project its element type T
+            //      and treat the spread operand as contributing T per
+            //      the bytecode pipeline's `compile_array_with_spread`
+            //      semantic. Per ADR-006 §2.7.5 the source slot's
+            //      `ConcreteType` IS the proof of element kind; no
+            //      fabrication.
             Operand::Move(Place::Local(s))
             | Operand::Copy(Place::Local(s))
             | Operand::MoveExplicit(Place::Local(s)) => {
                 let idx = s.0 as usize;
-                slot_scalar_kind.get(idx).and_then(|k| k.clone())
+                let scalar_kind = slot_scalar_kind.get(idx).and_then(|k| k.clone());
+                if scalar_kind.is_some() {
+                    scalar_kind
+                } else if let Some(shape_value::v2::ConcreteType::Array(inner)) =
+                    resolve_copy_chain(s.0, copy_source, concrete_types).as_ref()
+                {
+                    Some((**inner).clone())
+                } else {
+                    None
+                }
             }
             // Other operand shapes (Constants we don't handle, projections,
             // etc.) → surface-and-stop (no fast-path fabrication).
