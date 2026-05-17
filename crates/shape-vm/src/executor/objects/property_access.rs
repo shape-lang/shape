@@ -615,17 +615,27 @@ mod tests {
 
     /// A standalone `op_length` call on a TypedObject built with empty
     /// slots returns 0 + `NativeKind::Int64`.
+    ///
+    /// W5 v0.3 fix (2026-05-17): constructed via `TypedObjectStorage::_new`
+    /// to match production carrier shape. The previous shape used the
+    /// legacy `Arc::new(...)` + `Arc::into_raw` pattern whose bits flowed
+    /// into the v2-raw `drop_with_kind(Ptr(HeapKind::TypedObject))`
+    /// dispatch — which calls `release_elem` → `_drop` → `std::alloc::
+    /// dealloc(ptr, Layout::new::<Self>())`. Arc-allocated memory has
+    /// the `ArcInner` header before `T` and a different layout, so the
+    /// dealloc with `Layout::new::<TypedObjectStorage>` on an
+    /// `Arc::into_raw`'d pointer is a wrong-allocator-pair free →
+    /// `free(): invalid size` SIGABRT.
     #[test]
     fn length_typed_object_empty() {
         let mut vm = VirtualMachine::new(VMConfig::default());
-        let storage = TypedObjectStorage::new(
+        let ptr = TypedObjectStorage::_new(
             0,
             Vec::<ValueSlot>::new().into_boxed_slice(),
             0,
             Arc::from(Vec::<NativeKind>::new().into_boxed_slice()),
         );
-        let arc = Arc::new(storage);
-        let bits = Arc::into_raw(arc) as u64;
+        let bits = ptr as u64;
         vm.push_kinded(bits, NativeKind::Ptr(HeapKind::TypedObject))
             .unwrap();
         vm.op_length().unwrap();
@@ -651,6 +661,9 @@ mod tests {
     /// `op_set_prop` on a TypedObject with a string key writes the
     /// matching field in place. W17-typed-object-mutation fill
     /// (2026-05-11).
+    ///
+    /// W5 v0.3 fix (2026-05-17): migrated to `_new` carrier per
+    /// `length_typed_object_empty` rationale.
     #[test]
     fn set_prop_typed_object_int_field() {
         use shape_runtime::type_schema::{FieldType, TypeSchema};
@@ -666,14 +679,13 @@ mod tests {
 
         // Construct a storage with x = 7.
         let slot = ValueSlot::from_raw(7u64);
-        let storage = TypedObjectStorage::new(
+        let ptr = TypedObjectStorage::_new(
             schema_id as u64,
             vec![slot].into_boxed_slice(),
             0, // heap_mask: no heap fields
             Arc::from(vec![NativeKind::Int64].into_boxed_slice()),
         );
-        let storage_arc = Arc::new(storage);
-        let recv_bits = Arc::into_raw(storage_arc) as u64;
+        let recv_bits = ptr as u64;
 
         // Push (recv, key, val) to match `op_set_prop`'s pop order.
         vm.push_kinded(recv_bits, NativeKind::Ptr(HeapKind::TypedObject))
@@ -688,27 +700,34 @@ mod tests {
         // op_set_prop pushes the (mutated) receiver back.
         let (obj_bits_back, obj_kind_back) = vm.pop_kinded().unwrap();
         assert_eq!(obj_kind_back, NativeKind::Ptr(HeapKind::TypedObject));
-        // Recover and assert the slot's new value.
-        let storage_arc_back: Arc<TypedObjectStorage> =
-            unsafe { Arc::from_raw(obj_bits_back as *const _) };
-        assert_eq!(storage_arc_back.slots[0].raw(), 42u64);
-        // Release the share.
-        drop(storage_arc_back);
+        // Recover via raw-pointer borrow (matches v2-raw carrier shape);
+        // assert the slot's new value, then retire the popped share via
+        // drop_with_kind.
+        // SAFETY: `obj_bits_back` came from the v2-raw `_new` allocator
+        // and op_set_prop pushed the (mutated) receiver back without
+        // changing its allocator provenance.
+        let storage_back: &TypedObjectStorage =
+            unsafe { &*(obj_bits_back as *const TypedObjectStorage) };
+        assert_eq!(storage_back.slots[0].raw(), 42u64);
+        // Release the popped share through the v2-raw drop dispatch.
+        crate::executor::vm_impl::stack::drop_with_kind(obj_bits_back, obj_kind_back);
     }
 
     /// `op_set_prop` on a TypedObject with a non-string key returns a
     /// TypeError and balances the kind track via the drain branch.
+    ///
+    /// W5 v0.3 fix (2026-05-17): migrated to `_new` carrier per
+    /// `length_typed_object_empty` rationale.
     #[test]
     fn set_prop_typed_object_non_string_key_errors() {
         let mut vm = VirtualMachine::new(VMConfig::default());
-        let storage = TypedObjectStorage::new(
+        let ptr = TypedObjectStorage::_new(
             0,
             Vec::<ValueSlot>::new().into_boxed_slice(),
             0,
             Arc::from(Vec::<NativeKind>::new().into_boxed_slice()),
         );
-        let storage_arc = Arc::new(storage);
-        let recv_bits = Arc::into_raw(storage_arc) as u64;
+        let recv_bits = ptr as u64;
 
         vm.push_kinded(recv_bits, NativeKind::Ptr(HeapKind::TypedObject))
             .unwrap();

@@ -894,15 +894,18 @@ mod tests {
         let schema_id = schema.id;
         vm.program.type_schema_registry.register(schema);
 
+        // W5 v0.3 fix (2026-05-17): migrated to `_new` carrier per
+        // `length_typed_object_empty` rationale — the v2-raw drop dispatch
+        // on Ptr(HeapKind::TypedObject) bits expects `_new`-allocated
+        // memory.
         let slots = vec![ValueSlot::from_raw(1u64), ValueSlot::from_raw(2u64)];
-        let storage = TypedObjectStorage::new(
+        let ptr = TypedObjectStorage::_new(
             schema_id as u64,
             slots.into_boxed_slice(),
             0,
             Arc::from(vec![NativeKind::Int64, NativeKind::Int64].into_boxed_slice()),
         );
-        let storage_arc = Arc::new(storage);
-        let recv_bits = Arc::into_raw(storage_arc) as u64;
+        let recv_bits = ptr as u64;
 
         // Stack: [recv, value]; operand: TypedField { type_id = schema_id, field_idx = 1, tag = I64 }
         vm.push_kinded(recv_bits, NativeKind::Ptr(HeapKind::TypedObject))
@@ -920,12 +923,17 @@ mod tests {
         // op_set_field_typed pushes the (mutated) receiver back.
         let (obj_bits_back, obj_kind_back) = vm.pop_kinded().unwrap();
         assert_eq!(obj_kind_back, NativeKind::Ptr(HeapKind::TypedObject));
-        // Recover and verify field y now reads 99.
-        let storage_back: Arc<TypedObjectStorage> =
-            unsafe { Arc::from_raw(obj_bits_back as *const _) };
+        // Recover via raw-pointer borrow (matches v2-raw carrier shape)
+        // and verify field y now reads 99.
+        // SAFETY: `obj_bits_back` came from the v2-raw `_new` allocator
+        // and op_set_field_typed pushed the (mutated) receiver back
+        // without changing its allocator provenance.
+        let storage_back: &TypedObjectStorage =
+            unsafe { &*(obj_bits_back as *const TypedObjectStorage) };
         assert_eq!(storage_back.slots[0].raw(), 1u64);
         assert_eq!(storage_back.slots[1].raw(), 99u64);
-        drop(storage_back);
+        // Retire the popped share through the v2-raw drop dispatch.
+        crate::executor::vm_impl::stack::drop_with_kind(obj_bits_back, obj_kind_back);
     }
 
     /// `op_set_field_typed` on a non-TypedObject receiver returns a

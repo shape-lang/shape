@@ -5008,29 +5008,61 @@ mod typed_object_storage_drop {
 
     #[test]
     fn drop_decrements_arc_typed_object_for_heap_pointer_slot() {
-        // Nested TypedObject: outer storage holds an Arc<TypedObjectStorage>
-        // in slot 0 via NativeKind::Ptr(HeapKind::TypedObject).
+        // Nested TypedObject: outer storage holds a v2-raw
+        // `*const TypedObjectStorage` in slot 0 via
+        // `NativeKind::Ptr(HeapKind::TypedObject)`.
+        //
+        // W5 v0.3 fix (2026-05-17): migrated the inner construction to
+        // the v2-raw `_new` allocator per
+        // `executor/objects/property_access.rs::length_typed_object_empty`
+        // rationale. The previous shape stored `ValueSlot::from_typed_object(
+        // Arc<TypedObjectStorage>)` bits in a slot whose field_kinds entry
+        // was `Ptr(HeapKind::TypedObject)`. The outer storage's
+        // `drop_fields` dispatch on that entry calls
+        // `TypedObjectStorage::release_elem` → `v2_release` → `_drop` →
+        // `std::alloc::dealloc(ptr, Layout::new::<TypedObjectStorage>)`
+        // on the Arc-allocated inner. That's a wrong-allocator-pair
+        // free (Arc layout has `ArcInner` header before `T`) → SIGABRT.
+        //
+        // The witness probe is rewritten to the v2-raw equivalent: peek
+        // the header refcount via raw pointer borrow.
+        use std::sync::atomic::Ordering;
+
         let inner_kinds: Arc<[NativeKind]> = Arc::from(vec![NativeKind::Int64]);
-        let inner = Arc::new(TypedObjectStorage::new(
-            100,
-            vec![ValueSlot::from_int(7)].into_boxed_slice(),
-            0,
-            inner_kinds,
-        ));
-        let inner_witness = Arc::clone(&inner);
-        assert_eq!(Arc::strong_count(&inner_witness), 2);
+        // SAFETY: `_new` returns a refcount=1 raw pointer; the outer
+        // storage takes that share, and `drop(outer)` runs drop_fields
+        // which releases it via release_elem → _drop.
+        unsafe {
+            let inner_ptr = TypedObjectStorage::_new(
+                100,
+                vec![ValueSlot::from_int(7)].into_boxed_slice(),
+                0,
+                inner_kinds,
+            );
+            // Bump the inner refcount once so we have a witness share
+            // that observes the outer's release. After outer drop the
+            // refcount should be back to 1 (our witness only).
+            crate::v2::refcount::v2_retain(&(*inner_ptr).header);
+            assert_eq!((*inner_ptr).header.refcount.load(Ordering::SeqCst), 2);
 
-        let outer_kinds: Arc<[NativeKind]> =
-            Arc::from(vec![NativeKind::Ptr(HeapKind::TypedObject)]);
-        let outer = TypedObjectStorage::new(
-            101,
-            vec![ValueSlot::from_typed_object(inner)].into_boxed_slice(),
-            0b1,
-            outer_kinds,
-        );
+            let outer_kinds: Arc<[NativeKind]> =
+                Arc::from(vec![NativeKind::Ptr(HeapKind::TypedObject)]);
+            let outer = TypedObjectStorage::new(
+                101,
+                vec![ValueSlot::from_typed_object_raw(inner_ptr)].into_boxed_slice(),
+                0b1,
+                outer_kinds,
+            );
 
-        drop(outer);
-        assert_eq!(Arc::strong_count(&inner_witness), 1);
+            drop(outer);
+            assert_eq!((*inner_ptr).header.refcount.load(Ordering::SeqCst), 1);
+
+            // Witness cleanup: retire the share we minted above via
+            // `release_elem` (refcount=1→0 → `_drop` runs internally) so
+            // the inner allocation is freed and Miri reports no leak.
+            use crate::v2::heap_element::HeapElement;
+            TypedObjectStorage::release_elem(inner_ptr);
+        }
     }
 
     // ── Wave 2 Agent D1 v2-raw HeapHeader-equipped shape change tests ──────────
