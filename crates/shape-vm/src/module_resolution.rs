@@ -10,18 +10,6 @@ use shape_ast::ast::{ExportItem, Item};
 use shape_ast::parser::parse_program;
 use shape_runtime::module_loader::ModuleCode;
 
-pub(crate) fn hidden_annotation_import_module_name(module_path: &str) -> String {
-    use std::hash::{Hash, Hasher};
-
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    module_path.hash(&mut hasher);
-    format!("__annimport__{:016x}", hasher.finish())
-}
-
-pub(crate) fn is_hidden_annotation_import_module_name(name: &str) -> bool {
-    name.starts_with("__annimport__")
-}
-
 /// Build a module graph and compute stdlib names from the prelude modules.
 ///
 /// This is the canonical entry point for graph-based compilation. It:

@@ -62,13 +62,20 @@ impl ProgramExecutor for JITExecutor {
             shape_vm::stdlib::core_binding_names(runtime)
         };
 
-        // Build module graph and compile via graph pipeline
+        // Build module graph and compile via graph pipeline.
+        //
+        // W9: pass `self.bytecode_executor.extensions()` so the graph build
+        // can hybridize native extension modules with their Shape overlay
+        // (e.g. `std::core::remote`'s `pub annotation remote(addr)`). Without
+        // the extensions list, the graph would skip the hybridization probe
+        // and the namespace import path would lose annotation visibility.
+        let extensions = self.bytecode_executor.extensions().to_vec();
         let mut loader = shape_runtime::module_loader::ModuleLoader::new();
         let (graph, stdlib_names, prelude_imports) =
             shape_vm::module_resolution::build_graph_and_stdlib_names(
                 program,
                 &mut loader,
-                &[],
+                &extensions,
             )
             .map_err(|e| shape_runtime::error::ShapeError::RuntimeError {
                 message: format!("Module graph construction failed: {}", e),
@@ -76,7 +83,11 @@ impl ProgramExecutor for JITExecutor {
             })?;
 
         let bytecode_compile_start = Instant::now();
-        let mut compiler = BytecodeCompiler::new();
+        let mut compiler = if extensions.is_empty() {
+            BytecodeCompiler::new()
+        } else {
+            BytecodeCompiler::new().with_extensions(extensions.clone())
+        };
         compiler.stdlib_function_names = stdlib_names;
         compiler.register_known_bindings(&known_bindings);
         if let Some(source) = &source_for_compilation {
