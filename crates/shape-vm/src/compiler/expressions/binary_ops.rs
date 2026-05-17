@@ -1489,9 +1489,15 @@ impl BytecodeCompiler {
 
                 // ── Phase 2.5: operator trait dispatch via CallMethod ──
                 // If the left operand is a typed object whose schema implements
-                // the operator trait (Sub/Mul/Div), emit a method call instead
-                // of falling through to a generic arithmetic opcode. The receiver
-                // and the right-hand-side operand are already on the stack.
+                // the operator trait (Sub/Mul/Div/Ord/...), emit a method call
+                // instead of falling through to a generic arithmetic opcode. The
+                // receiver and the right-hand-side operand are already on the stack.
+                //
+                // W1.8 (v0.3 R2): for ordered comparison ops (`<`, `<=`, `>`, `>=`)
+                // the trait method is `Ord::cmp(other: Self) -> int`; lower the
+                // returned int via `emit_cmp_result_comparison` to produce the
+                // per-op boolean result. Mirrors the post-call step in
+                // `try_emit_trait_dispatch` at L83.
                 if let Some(trait_name) = operator_trait_for_op(op) {
                     let dispatches_via_trait = left_schema
                         .and_then(|sid| self.type_tracker.schema_registry().get_by_id(sid))
@@ -1503,6 +1509,9 @@ impl BytecodeCompiler {
                     if dispatches_via_trait {
                         if let Some(method_name) = operator_trait_method_for_op(op) {
                             emit_operator_trait_call(self, method_name);
+                            if is_ordered_comparison(op) {
+                                emit_cmp_result_comparison(self, op);
+                            }
                             return Ok(());
                         }
                     }

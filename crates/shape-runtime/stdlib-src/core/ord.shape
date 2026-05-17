@@ -1,0 +1,79 @@
+/// @module std::core::ord
+/// `Ord` — operator trait for ordered comparison (`<`, `<=`, `>`, `>=`).
+///
+/// Shape's strict-typing dispatch for ordered comparison on built-in
+/// scalar types (`int`, `number`, `decimal`, `bigint`, `string`) emits
+/// typed comparison opcodes (`LtInt`, `GtNumber`, `LtString`, ...) at
+/// compile time and never routes through this trait. User-defined types
+/// (`type X { ... }`) that want to participate in ordered comparison opt
+/// in by providing an `impl Ord for X { method cmp(other: X) -> int { ... } }`
+/// block; the compiler then desugars `a < b` (and `<=`, `>`, `>=`) to
+/// `Ord::cmp(a, b)` followed by an integer comparison against `0` via the
+/// operator trait dispatch path at
+/// `compiler/expressions/binary_ops.rs:24-85` (the `operator_trait_for_op`
+/// map at L24-36 returns `"Ord"` for all four ordered ops, the
+/// `operator_trait_method_for_op` map at L43-55 returns `"cmp"` for all
+/// four, and `try_emit_trait_dispatch` at L71-85 calls
+/// `emit_cmp_result_comparison` at L57-69 to lower the `cmp` result into
+/// the per-op integer comparison opcode).
+///
+/// ## Single-method `cmp` returning `int` (Rust convention)
+///
+/// `Ord` declares one method, `cmp(other: Self) -> int`, returning a
+/// signed integer with the standard `Ordering` contract:
+///
+/// - negative when `self <  other`
+/// - zero     when `self == other`
+/// - positive when `self >  other`
+///
+/// The compiler reduces all four ordered operators to one trait method
+/// call followed by a typed integer comparison against `0`. This is the
+/// shape pre-wired in `register_operator_traits` at
+/// `type_system/environment/mod.rs:563-580` and in the binary-op dispatch
+/// tables cited above; W1.8 lands the user-facing trait declaration so
+/// `impl Ord for X { ... }` can name the trait in source.
+///
+/// ## Relationship to `Eq` (W1.7, parallel sub-cluster)
+///
+/// `Ord` and `Eq` are independent traits in Shape — implementing `Ord`
+/// does NOT automatically derive `Eq`. A user-defined type that wants to
+/// participate in both `==` and `<` must provide both `impl Eq for X`
+/// (single method `eq(other: Self) -> bool`) and `impl Ord for X` (single
+/// method `cmp(other: Self) -> int`). The two trait dispatch paths are
+/// disjoint at `binary_ops.rs`: `Eq` routes through `compile_typed_equality`
+/// for `BinaryOp::Equal`/`NotEqual`, `Ord` routes through the four
+/// ordered-comparison arms via `operator_trait_for_op` returning `"Ord"`.
+///
+/// ## Known implementations
+///
+/// | Type        | Dispatch source                                  |
+/// |-------------|--------------------------------------------------|
+/// | int         | typed `LtInt`/`GtInt`/`LteInt`/`GteInt` opcodes  |
+/// | number      | typed `LtNumber`/`GtNumber`/... opcodes          |
+/// | decimal     | typed decimal-compare opcodes (no trait dispatch)|
+/// | bigint      | typed bigint-compare opcodes (no trait dispatch) |
+/// | string      | typed `LtString`/`GtString`/... opcodes          |
+/// | DateTime    | typed temporal compare path (no trait dispatch)  |
+/// | user type X | `impl Ord for X { method cmp(other: X) -> int }` |
+
+/// Operator trait for ordered comparison (`<`, `<=`, `>`, `>=`).
+/// Implementing `Ord` for a user-defined type enables all four ordered
+/// comparison operators on values of that type. The compiler calls
+/// `Ord::cmp(lhs, rhs)` via UFCS dispatch through the
+/// `function_name_index` for `X::cmp`, then lowers the resulting `int`
+/// into a typed integer comparison against `0` to produce the boolean
+/// result the operator demands.
+trait Ord {
+    /// Return a signed integer representing the ordering of `self`
+    /// relative to `other`:
+    ///
+    /// - negative when `self <  other`
+    /// - zero     when `self == other`
+    /// - positive when `self >  other`
+    ///
+    /// The exact magnitude is unused — only the sign drives the operator
+    /// dispatch. Implementations commonly return `-1`/`0`/`1`, but
+    /// computing the difference directly (e.g. `self.value - other.value`
+    /// for an `int` field) is equally valid.
+    cmp(other: Self): int
+}
