@@ -8,7 +8,7 @@ use crate::doc_render::render_doc_comment;
 use crate::module_cache::ModuleCache;
 use crate::scope::ScopeTree;
 use crate::symbols::{SymbolKind, extract_symbols};
-use crate::trait_lookup::resolve_trait_definition;
+use crate::trait_lookup::{ImplSummary, collect_impls_for_type, resolve_trait_definition};
 use crate::type_inference::{
     FunctionTypeInfo, ParamReferenceMode, extract_struct_fields,
     infer_block_return_type_via_engine, infer_function_signatures, infer_program_types,
@@ -227,7 +227,8 @@ fn get_hover_for_word(
         return Some(hover);
     }
 
-    if let Some(hover) = get_user_symbol_hover_at(text, word, position) {
+    if let Some(hover) = get_user_symbol_hover_at(text, word, position, module_cache, current_file)
+    {
         return Some(hover);
     }
 
@@ -1810,6 +1811,30 @@ fn trait_member_signatures(trait_def: &shape_ast::ast::TraitDef) -> Vec<String> 
     signatures
 }
 
+/// Render an "Implementations" section listing every `impl Trait for Type`
+/// block discovered for `type_name`. Returns `None` when no impls are present
+/// so the caller can skip emitting a trailing newline.
+fn render_impls_section(type_name: &str, impls: &[ImplSummary]) -> Option<String> {
+    if impls.is_empty() {
+        return None;
+    }
+    let mut section = format!("**Implementations for `{}`**", type_name);
+    for entry in impls {
+        let mut line = format!("- `impl {}", entry.trait_name);
+        if let Some(impl_name) = &entry.impl_name {
+            line.push_str(&format!(" for {} as {}`", type_name, impl_name));
+        } else {
+            line.push_str(&format!(" for {}`", type_name));
+        }
+        if let Some(source) = &entry.source_module {
+            line.push_str(&format!(" — _from_ `{}`", source));
+        }
+        section.push('\n');
+        section.push_str(&line);
+    }
+    Some(section)
+}
+
 /// Find the 0-based line number where a symbol is defined in the source text.
 fn type_name_base_name(type_name: &TypeName) -> String {
     match type_name {
@@ -1824,11 +1849,17 @@ fn get_user_symbol_hover(text: &str, word: &str) -> Option<Hover> {
     let mut program = parse_with_fallback(text)?;
     // Desugar query syntax before analysis
     shape_ast::transform::desugar_program(&mut program);
-    get_user_symbol_hover_from_program(text, &program, word, None)
+    get_user_symbol_hover_from_program(text, &program, word, None, None, None)
 }
 
 /// Get hover for user-defined symbols with scope-aware resolution at cursor position.
-fn get_user_symbol_hover_at(text: &str, word: &str, position: Position) -> Option<Hover> {
+fn get_user_symbol_hover_at(
+    text: &str,
+    word: &str,
+    position: Position,
+    module_cache: Option<&ModuleCache>,
+    current_file: Option<&Path>,
+) -> Option<Hover> {
     let mut program = parse_with_fallback(text)?;
     // Desugar query syntax before analysis
     shape_ast::transform::desugar_program(&mut program);
@@ -1838,7 +1869,14 @@ fn get_user_symbol_hover_at(text: &str, word: &str, position: Position) -> Optio
         return Some(hover);
     }
 
-    get_user_symbol_hover_from_program(text, &program, word, Some(offset))
+    get_user_symbol_hover_from_program(
+        text,
+        &program,
+        word,
+        Some(offset),
+        module_cache,
+        current_file,
+    )
 }
 
 fn get_scoped_binding_hover(
@@ -1924,6 +1962,8 @@ fn get_user_symbol_hover_from_program(
     program: &Program,
     word: &str,
     cursor_offset: Option<usize>,
+    module_cache: Option<&ModuleCache>,
+    current_file: Option<&Path>,
 ) -> Option<Hover> {
     // Parse the document to extract symbols
     let symbols = extract_symbols(program);
@@ -1981,6 +2021,12 @@ fn get_user_symbol_hover_from_program(
                     .join(", ");
                 content.push_str(&format!("\n\n**Shape:** `{{ {} }}`", shape));
             }
+        }
+
+        let impls = collect_impls_for_type(program, word, module_cache, current_file, None);
+        if let Some(section) = render_impls_section(word, &impls) {
+            content.push_str("\n\n");
+            content.push_str(&section);
         }
     }
 

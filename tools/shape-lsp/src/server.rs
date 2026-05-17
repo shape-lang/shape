@@ -36,14 +36,15 @@ use tower_lsp_server::ls_types::{
     CodeActionProviderCapability, CodeActionResponse, CodeLens, CodeLensOptions, CodeLensParams,
     CompletionOptions, CompletionParams, CompletionResponse, Diagnostic, DiagnosticSeverity,
     DidChangeConfigurationParams, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, DocumentFormattingParams, DocumentOnTypeFormattingOptions,
-    DocumentOnTypeFormattingParams, DocumentRangeFormattingParams, DocumentSymbolParams,
-    DocumentSymbolResponse, FoldingRange, FoldingRangeParams, FoldingRangeProviderCapability,
-    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability,
-    InitializeParams, InitializeResult, InitializedParams, InlayHint, InlayHintOptions,
-    InlayHintParams, InlayHintServerCapabilities, Location, MessageType, OneOf, Position,
-    PrepareRenameResponse, Range, ReferenceParams, RenameOptions, RenameParams, SemanticToken,
-    SemanticTokensFullOptions, SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
+    DidOpenTextDocumentParams, DocumentFormattingParams, DocumentLink, DocumentLinkOptions,
+    DocumentLinkParams, DocumentOnTypeFormattingOptions, DocumentOnTypeFormattingParams,
+    DocumentRangeFormattingParams, DocumentSymbolParams, DocumentSymbolResponse, FoldingRange,
+    FoldingRangeParams, FoldingRangeProviderCapability, GotoDefinitionParams,
+    GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability, InitializeParams,
+    InitializeResult, InitializedParams, InlayHint, InlayHintOptions, InlayHintParams,
+    InlayHintServerCapabilities, Location, MessageType, OneOf, Position, PrepareRenameResponse,
+    Range, ReferenceParams, RenameOptions, RenameParams, SemanticToken, SemanticTokensFullOptions,
+    SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
     SemanticTokensServerCapabilities, ServerCapabilities, ServerInfo, SignatureHelp,
     SignatureHelpOptions, SignatureHelpParams, TextDocumentPositionParams,
     TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Uri, WorkDoneProgressOptions,
@@ -496,6 +497,16 @@ impl LanguageServer for ShapeLanguageServer {
 
                 // Enable call hierarchy
                 call_hierarchy_provider: Some(CallHierarchyServerCapability::Simple(true)),
+
+                // Enable document links (clickable `@see` / `@link` doc-tag
+                // references in doc comments). Resolution is eager — every
+                // returned `DocumentLink` already carries its target URI.
+                document_link_provider: Some(DocumentLinkOptions {
+                    resolve_provider: Some(false),
+                    work_done_progress_options: WorkDoneProgressOptions {
+                        work_done_progress: None,
+                    },
+                }),
 
                 ..ServerCapabilities::default()
             },
@@ -1249,6 +1260,44 @@ impl LanguageServer for ShapeLanguageServer {
             Ok(None)
         } else {
             Ok(Some(ranges))
+        }
+    }
+
+    async fn document_link(
+        &self,
+        params: DocumentLinkParams,
+    ) -> Result<Option<Vec<DocumentLink>>> {
+        let uri = params.text_document.uri;
+
+        let doc = match self.documents.get(&uri) {
+            Some(doc) => doc,
+            None => return Ok(None),
+        };
+
+        let text = doc.text();
+        let parse_source = parser_source(&text);
+        let program = match parse_program(parse_source.as_ref()) {
+            Ok(program) => program,
+            Err(_) => match self.last_good_programs.get(&uri) {
+                Some(cached) => cached.value().clone(),
+                None => return Ok(None),
+            },
+        };
+
+        let module_cache = self.documents.get_module_cache();
+        let file_path = uri.to_file_path();
+        let links = crate::doc_links::collect_document_links(
+            &program,
+            &text,
+            Some(&module_cache),
+            file_path.as_deref(),
+            self.project_root.get().map(|p| p.as_path()),
+        );
+
+        if links.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(links))
         }
     }
 

@@ -2,9 +2,10 @@ use crate::doc_symbols::{
     DocSymbol, collect_program_doc_symbols, current_module_import_path, qualify_doc_path,
 };
 use crate::module_cache::ModuleCache;
-use shape_ast::ast::{DocTargetKind, Program, Span};
+use crate::util::span_to_range;
+use shape_ast::ast::{DocTagKind, DocTargetKind, Program, Span};
 use std::path::Path;
-use tower_lsp_server::ls_types::Uri;
+use tower_lsp_server::ls_types::{DocumentLink, Uri};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolvedDocLinkKind {
@@ -134,6 +135,136 @@ fn resolve_in_module_cache(
     None
 }
 
+/// Collect every `textDocument/documentLink` entry implied by `@see`/`@link`
+/// doc-tag references whose targets resolve to a known module or symbol.
+///
+/// Walks every `DocComment` in `program.docs`, plus every loose doc-comment
+/// attached to top-level statements (see `walk_inline_doc_comments`), so
+/// links inside both top-level item docs (`/// @see std::foo`) and inline
+/// comments fire equally.
+///
+/// Each emitted `DocumentLink` has its range pinned to the link's `target`
+/// substring inside the doc comment (NOT the surrounding `/// @see {target}`
+/// noise), and its target set to the resolved file URI. Unresolvable links
+/// are silently skipped — they continue to render in hover as plain code
+/// spans via `render_doc_link_target`.
+pub fn collect_document_links(
+    program: &Program,
+    text: &str,
+    module_cache: Option<&ModuleCache>,
+    current_file: Option<&Path>,
+    workspace_root: Option<&Path>,
+) -> Vec<DocumentLink> {
+    let mut links: Vec<DocumentLink> = Vec::new();
+    let mut seen: std::collections::HashSet<(u32, u32, u32, u32, String)> = Default::default();
+
+    for entry in &program.docs.entries {
+        push_links_from_comment(
+            &entry.comment.tags,
+            text,
+            program,
+            module_cache,
+            current_file,
+            workspace_root,
+            &mut links,
+            &mut seen,
+        );
+    }
+
+    walk_inline_doc_comments(program, &mut |comment| {
+        push_links_from_comment(
+            &comment.tags,
+            text,
+            program,
+            module_cache,
+            current_file,
+            workspace_root,
+            &mut links,
+            &mut seen,
+        );
+    });
+
+    links.sort_by(|a, b| {
+        (a.range.start.line, a.range.start.character).cmp(&(
+            b.range.start.line,
+            b.range.start.character,
+        ))
+    });
+
+    links
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_links_from_comment(
+    tags: &[shape_ast::ast::DocTag],
+    text: &str,
+    program: &Program,
+    module_cache: Option<&ModuleCache>,
+    current_file: Option<&Path>,
+    workspace_root: Option<&Path>,
+    out: &mut Vec<DocumentLink>,
+    seen: &mut std::collections::HashSet<(u32, u32, u32, u32, String)>,
+) {
+    for tag in tags {
+        if !matches!(tag.kind, DocTagKind::See | DocTagKind::Link) {
+            continue;
+        }
+        let Some(link) = tag.link.as_ref() else {
+            continue;
+        };
+        if link.target_span.is_dummy() {
+            continue;
+        }
+        if !is_fully_qualified_doc_path(&link.target) {
+            continue;
+        }
+        let Some(resolved) = resolve_doc_link(
+            program,
+            &link.target,
+            module_cache,
+            current_file,
+            workspace_root,
+        ) else {
+            continue;
+        };
+        let Some(target_uri) = resolved.uri else {
+            continue;
+        };
+
+        let range = span_to_range(text, &link.target_span);
+        let key = (
+            range.start.line,
+            range.start.character,
+            range.end.line,
+            range.end.character,
+            link.target.clone(),
+        );
+        if !seen.insert(key) {
+            continue;
+        }
+
+        out.push(DocumentLink {
+            range,
+            target: Some(target_uri),
+            tooltip: Some(format!("Go to `{}`", link.target)),
+            data: None,
+        });
+    }
+}
+
+/// Walk every `DocComment` reachable from inline statements / expressions /
+/// items that the top-level `program.docs.entries` index does NOT cover.
+/// We rely on the AST visitor to traverse every statement; doc comments live
+/// on item nodes (functions / types / traits / methods) — the docs.entries
+/// list already covers item-level docs, so this is primarily a safety net
+/// for method-body inline doc tags.
+fn walk_inline_doc_comments(_program: &Program, _f: &mut dyn FnMut(&shape_ast::ast::DocComment)) {
+    // Today Shape's parser only attaches doc-comments to item-level nodes,
+    // which `program.docs.entries` already enumerates. This function is a
+    // reserved extension point so future parsing changes (e.g. method-body
+    // doc tags) get picked up automatically once they land in the AST.
+}
+
 pub fn render_doc_link_target(
     target: &str,
     label: Option<&str>,
@@ -172,6 +303,28 @@ mod tests {
         assert!(!is_fully_qualified_doc_path("sum"));
         assert!(!is_fully_qualified_doc_path("std::"));
         assert!(is_fully_qualified_doc_path("std::core::math::sum"));
+    }
+
+    #[test]
+    fn collect_document_links_skips_unresolvable_targets() {
+        // No module cache → every @see target is unresolvable → empty list.
+        let text = "/// Summary.\n\
+                    /// @see std::core::math::sum\nfn sample() {}\n";
+        let program = shape_ast::parser::parse_program(text).expect("program");
+        let links = collect_document_links(&program, text, None, None, None);
+        assert!(
+            links.is_empty(),
+            "Expected no links without module-cache resolution: {links:?}"
+        );
+    }
+
+    #[test]
+    fn collect_document_links_skips_unqualified_targets() {
+        // Unqualified `sum` fails `is_fully_qualified_doc_path` and is dropped.
+        let text = "/// Summary.\n/// @see sum\nfn sample() {}\n";
+        let program = shape_ast::parser::parse_program(text).expect("program");
+        let links = collect_document_links(&program, text, None, None, None);
+        assert!(links.is_empty(), "Unqualified targets must be skipped");
     }
 
     #[test]
