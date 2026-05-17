@@ -2,7 +2,7 @@
 //!
 //! Provides actionable code lenses for functions, patterns, and tests.
 
-use shape_ast::ast::Item;
+use shape_ast::ast::{Item, Program};
 use shape_ast::parser::parse_program;
 use tower_lsp_server::ls_types::{CodeLens, Command, Position, Range, Uri};
 
@@ -22,8 +22,13 @@ pub fn get_code_lenses(text: &str, uri: &Uri) -> Vec<CodeLens> {
         }
     };
 
+    // W2.6 1.55 — build ScopeTree once per document so per-function ref
+    // counts use scope-aware resolution (not text-search) — same ref count
+    // as `references_provider` produces for the same symbol in-file.
+    let tree = crate::scope::ScopeTree::build(&program, text);
+
     for item in &program.items {
-        collect_lenses_for_item(item, text, uri, &mut lenses);
+        collect_lenses_for_item(item, &program, &tree, text, uri, &mut lenses);
     }
 
     lenses
@@ -36,13 +41,24 @@ pub fn resolve_code_lens(lens: CodeLens) -> CodeLens {
 }
 
 /// Collect code lenses for an item
-fn collect_lenses_for_item(item: &Item, text: &str, uri: &Uri, lenses: &mut Vec<CodeLens>) {
+fn collect_lenses_for_item(
+    item: &Item,
+    _program: &Program,
+    tree: &crate::scope::ScopeTree,
+    text: &str,
+    uri: &Uri,
+    lenses: &mut Vec<CodeLens>,
+) {
     match item {
         Item::Function(func, _) => {
             // Find the line where the function is defined
             if let Some((line, keyword_end_col)) = find_function_line(text, &func.name) {
-                // Reference count lens
-                let ref_count = count_references(text, &func.name);
+                // W2.6 1.55 — scope-aware ref count from module scope
+                // (top-level fn bindings live there). Falls back to
+                // text-search if ScopeTree didn't record this binding
+                // (e.g. resilient-parse partial AST).
+                let ref_count = count_references_scope_aware(tree, &func.name)
+                    .unwrap_or_else(|| count_references(text, &func.name));
                 lenses.push(CodeLens {
                     range: Range {
                         start: Position { line, character: 0 },
@@ -289,6 +305,28 @@ fn find_method_in_trait(text: &str, trait_name: &str, method_name: &str) -> Opti
     None
 }
 
+/// W2.6 1.55 — scope-aware reference count for the module-scope binding
+/// `name` in `tree`. Returns `None` when no module-scope binding with this
+/// name exists (caller falls back to text-search for robustness on
+/// resilient-parse partials).
+fn count_references_scope_aware(
+    tree: &crate::scope::ScopeTree,
+    name: &str,
+) -> Option<usize> {
+    let root = tree.scopes.first()?;
+    let mut total: Option<usize> = None;
+    for binding in &root.bindings {
+        if binding.name == name {
+            // ScopeTree::Binding::references excludes the def site itself,
+            // matching the legacy text-search semantics (which counted
+            // def+uses then subtracted 1).
+            let count = binding.references.len();
+            total = Some(total.map_or(count, |t| t + count));
+        }
+    }
+    total
+}
+
 /// Count references to a symbol in the text
 fn count_references(text: &str, name: &str) -> usize {
     let mut count = 0;
@@ -371,6 +409,50 @@ mod tests {
                 .iter()
                 .map(|l| l.command.as_ref().map(|c| c.title.clone()))
                 .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_count_references_scope_aware_excludes_shadowing() {
+        // W2.6 1.55 — ScopeTree-based count must NOT include shadowing inner
+        // bindings as references to the outer one. This is the bug the
+        // text-search count had: a shadowed inner `let foo` was counted.
+        let text = "fn foo() { return 1 }\nfn other() {\n  let foo = 2\n  return foo + foo\n}\nlet x = foo()";
+        let program = parse_program(text).unwrap();
+        let tree = crate::scope::ScopeTree::build(&program, text);
+
+        let scope_count = count_references_scope_aware(&tree, "foo");
+        // Top-level `foo` (the fn) is referenced exactly once: `foo()` at the
+        // end. The `let foo = 2` and `foo + foo` inside `other` shadow.
+        assert_eq!(
+            scope_count,
+            Some(1),
+            "expected scope-aware count to exclude shadowing inner foo, got {:?}",
+            scope_count
+        );
+    }
+
+    #[test]
+    fn test_count_references_scope_aware_lens_integration() {
+        // End-to-end: get_code_lenses must produce a "N references" lens
+        // whose count matches the scope-aware count.
+        let text = "fn helper() { return 1 }\nlet a = helper()\nlet b = helper() + helper()";
+        let uri = Uri::from_file_path("/tmp/test.shape").unwrap();
+        let lenses = get_code_lenses(text, &uri);
+        let helper_lens = lenses
+            .iter()
+            .find(|l| {
+                l.command
+                    .as_ref()
+                    .is_some_and(|c| c.title.contains("reference"))
+            })
+            .expect("should have reference-count lens for helper");
+        let title = &helper_lens.command.as_ref().unwrap().title;
+        // 3 references: a = helper(), b = helper() + helper()
+        assert!(
+            title.starts_with("3 references"),
+            "expected '3 references' from scope-aware count, got '{}'",
+            title
         );
     }
 
