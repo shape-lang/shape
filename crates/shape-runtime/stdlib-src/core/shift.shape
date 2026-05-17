@@ -1,0 +1,110 @@
+/// @module std::core::shift
+/// `Shl`, `Shr`, `ShlAssign`, `ShrAssign` — operator traits for `<<`,
+/// `>>`, `<<=`, `>>=`.
+///
+/// Shape's strict-typing bitwise dispatch for built-in integer types
+/// (`int`, `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`) emits
+/// typed opcodes (`BitShlInt`, `BitShrInt`) at compile time and never
+/// routes through these traits. User-defined types (`type X { ... }`)
+/// that want to participate in `<<` / `>>` / `<<=` / `>>=` opt in by
+/// providing an `impl Shl for X { method shl(other: X) -> X { ... } }`
+/// block (and analogously for `Shr`); the compiler then desugars
+/// `a << b` to `Shl::shl(a, b)` via the operator trait dispatch path at
+/// `compiler/expressions/binary_ops.rs` (bitwise arm shared with
+/// BitAnd/BitOr/BitXor/BitShl/BitShr — trait dispatch fires when the
+/// left operand has a TypedObject schema implementing the trait).
+///
+/// `ShlAssign` / `ShrAssign` are the in-place counterparts. `a <<= b`
+/// and `a >>= b` are grammar-desugared at parse time
+/// (`shape-ast/parser/expressions/binary_ops.rs:243-244`) to
+/// `a = a << b` and `a = a >> b`, so authoring an `impl Shl for X` /
+/// `impl Shr for X` already covers the assign forms for user-defined
+/// types without a separate `ShlAssign` / `ShrAssign` body.
+/// `ShlAssign` / `ShrAssign` are declared here for symmetry with future
+/// in-place optimizations (e.g. `Buffer.shl_assign(other)` that mutates
+/// in-place instead of allocating a fresh value) and so generic bounds
+/// `fn f<T: ShlAssign>(...)` can be authored today.
+///
+/// ## Architectural note (mirrors `std::core::add`)
+///
+/// `ShlAssign::shl_assign` / `ShrAssign::shr_assign` are declared with
+/// an explicit `Self` return type by convention (the in-place op
+/// canonically returns `self` for chaining). See the parallel
+/// `add.shape` note for the W6 imprecision 83 background that previously
+/// forced `: Self` on the AddAssign trait method as a parse-failure-
+/// cascade workaround; for `ShlAssign`/`ShrAssign` we follow the same
+/// shape for symmetry, not because the workaround is required.
+///
+/// ## Filename note
+///
+/// The source file is `shift.shape` (combined across Shl/Shr/ShlAssign/
+/// ShrAssign) per the W1.9 bitwise.shape Option B precedent — bitwise
+/// shifts conceptually pair Shl with Shr the same way bitand/bitor/
+/// bitxor share a single bitwise.shape. Per-trait files (one trait per
+/// .shape file) is the W1.1-W1.5 convention; the shift family deviates
+/// only because Shl and Shr are inseparable as an operator pair.
+///
+/// ## Known implementations
+///
+/// | Type              | Dispatch source                                    |
+/// |-------------------|----------------------------------------------------|
+/// | int               | typed `BitShlInt` / `BitShrInt` opcodes (no trait) |
+/// | i8/i16/i32/i64    | typed `BitShlInt` / `BitShrInt` opcodes (no trait) |
+/// | u8/u16/u32/u64    | typed `BitShlInt` / `BitShrInt` opcodes (no trait) |
+/// | user type X       | `impl Shl for X { method shl(other: X) -> X }`     |
+/// | user type X       | `impl Shr for X { method shr(other: X) -> X }`     |
+///
+/// Note: shifts are defined on integer types only. `number` / `f32` /
+/// `f64` do not implement `Shl` or `Shr` — there is no typed
+/// `BitShlNumber` opcode, and floating-point shifts are not a
+/// meaningful operation. Attempting `1.0 << 2` produces a compile error.
+
+/// Operator trait for `<<`. Implementing `Shl` for a user-defined type
+/// enables the binary `<<` operator on values of that type. The compiler
+/// calls `Shl::shl(lhs, rhs)` via UFCS dispatch through the
+/// `function_name_index` for `X::shl`.
+trait Shl {
+    /// Return `self << other`. By convention the result is a fresh
+    /// value; in-place mutation belongs to `ShlAssign::shl_assign`.
+    shl(other: Self): Self
+}
+
+/// Operator trait for `>>`. Implementing `Shr` for a user-defined type
+/// enables the binary `>>` operator on values of that type. The compiler
+/// calls `Shr::shr(lhs, rhs)` via UFCS dispatch through the
+/// `function_name_index` for `X::shr`.
+trait Shr {
+    /// Return `self >> other`. By convention the result is a fresh
+    /// value; in-place mutation belongs to `ShrAssign::shr_assign`.
+    shr(other: Self): Self
+}
+
+/// Operator trait for `<<=`. The grammar desugars `a <<= b` to
+/// `a = a << b`, so providing `impl Shl for X` already covers `<<=`
+/// for user-defined types — `ShlAssign` is declared here for generic
+/// bounds and for the future in-place specialization opt-in.
+///
+/// The return type is `Self` for symmetry with `AddAssign` (see the
+/// module-level architectural note); implementations may mutate `self`
+/// in place and `return self` from the method body. The parse-time
+/// desugar means the return value is unused under current semantics.
+trait ShlAssign {
+    /// Mutate `self` in place by computing `self << other`. Return
+    /// `self` for chaining.
+    shl_assign(other: Self): Self
+}
+
+/// Operator trait for `>>=`. The grammar desugars `a >>= b` to
+/// `a = a >> b`, so providing `impl Shr for X` already covers `>>=`
+/// for user-defined types — `ShrAssign` is declared here for generic
+/// bounds and for the future in-place specialization opt-in.
+///
+/// The return type is `Self` for symmetry with `AddAssign` (see the
+/// module-level architectural note); implementations may mutate `self`
+/// in place and `return self` from the method body. The parse-time
+/// desugar means the return value is unused under current semantics.
+trait ShrAssign {
+    /// Mutate `self` in place by computing `self >> other`. Return
+    /// `self` for chaining.
+    shr_assign(other: Self): Self
+}
