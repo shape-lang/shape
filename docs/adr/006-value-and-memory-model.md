@@ -70,10 +70,6 @@ Shape's runtime:
 9. **Permission-aware JIT speculation (PES) post-JIT, behind feature flag.**
    Tier-2 JIT may specialize on observed permission state; deopt on
    change. Gated until ≥3× measured speedup on permission-heavy I/O loops.
-10. **Compile-Time AI Optimization Notes (CT-AION) as v2 capability.**
-    Opt-in per package; advisor outputs hashed into content addresses for
-    reproducibility. Off by default.
-
 The combination targets best-in-class ergonomics (Python-easy-entry via
 `var`; precise control via `let`/`let mut`), best-in-class perf (tag-free
 slots, RC-only-on-escape, Cranelift JIT, uniform ABI), and best-in-class
@@ -3834,18 +3830,6 @@ on observed permission state and prune dead permission branches. Feature
 flag default off; promote to default when ≥3× speedup demonstrated on
 permission-heavy I/O loops with deopt rate <1%.
 
-## 11. CT-AION — v2 capability
-
-`@ai`-tagged optimization advisor consultation at compile time, for
-decisions where heuristics are weak (layout choice, tile size, region
-merge). Reproducibility:
-
-- Advisor prompt + model + seed are part of the content hash.
-- Two builds with the same advisor pin produce byte-identical output.
-- Off by default; opt-in per package via `shape.toml` flag.
-
-Not required for v1. Phase 6 of migration; can be deferred indefinitely
-without affecting the rest of the design.
 
 ## 12. Migration roadmap
 
@@ -3858,7 +3842,6 @@ without affecting the rest of the design.
 | **3** | Cranelift JIT modernization against new slot ABI. Tier-1 baseline + tier-2 optimizing. Uniform frame format. | 3-4 months | 1.A-C complete |
 | **4** | PVL audit (~2 weeks) + (conditional) PVL implementation (~6-8 weeks). | 2 weeks audit + maybe 6-8 weeks impl | parallel with 3 |
 | **5** | PES — permission-aware JIT speculation, behind feature flag. | 6 weeks | 3 complete |
-| **6** | CT-AION — opt-in compile-time AI advisor. | 4 weeks | any time after 1 |
 
 **Total: ~10-14 months wall-clock at 2 FTE, or ~7-10 months at 3 FTE.**
 
@@ -6032,7 +6015,7 @@ Both functions take/return raw `(u64, NativeKind)` — the §2.7.5 cross-crate A
 - **W17-snapshot-lazy-closure** — Lazy initializer closure + cached value (shares the W17-snapshot-closure follow-up's ClosureLayout reconstruction).
 - **W17-snapshot-callstack-upvalues** — non-empty call-stack frames (deep upvalue restoration).
 - **W17-snapshot-nullable** — nullable-scalar kind wire-format with explicit sentinel-rule amendment.
-- **W17-snapshot-callback-invoker** — `ModuleContext.invoke_callable` / `raw_invoker` hooks for `@ai`-annotation callbacks back into the VM during module-fn dispatch.
+- **W17-snapshot-callback-invoker** — `ModuleContext.invoke_callable` / `raw_invoker` hooks for annotation callbacks back into the VM during module-fn dispatch.
 
 Each follow-up extends `SerializableVMValue` in lockstep with its target arm, lands the per-kind serializer / deserializer body, and updates this table.
 
@@ -6706,19 +6689,6 @@ typically batched at scope-end (one HashMap probe per object) — amortized
 cost favors the id+lookup approach. Switch only if profiling justifies
 moving the cost from the (frequent) alloc path to the (less frequent)
 drop path.
-
-### Q3 — `@ai` × `var` inference ordering
-
-**Decision:** `@ai` annotation rewriting runs first at comptime. `var`
-inference runs on the rewritten body. No special-casing in the inference
-layer.
-
-**Rationale:** `@ai` expands `@ai fn name(args) -> ReturnType {}` into a
-function body that constructs an LLM prompt and parses the structured
-response. By the time type-inference + storage-planning passes run, the
-AST is fully expanded — the generated body uses regular `let` /
-`let mut` / `var` internally. Add a Phase 1.C test for an `@ai` body that
-uses `var` to validate.
 
 ### Q4 — JIT introspection drop strategy
 

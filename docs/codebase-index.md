@@ -137,7 +137,7 @@ Rules in this index that reference ADRs:
 - **ADR-006** (`docs/adr/006-value-and-memory-model.md`): canonical value &
   memory model. `let` / `let mut` / `var`, refcount-on-escape,
   `HeapValue::TypedArray(Arc<TypedArrayData>)`, LSDS error system, PVL audit,
-  PES, CT-AION. **All Phase 1 implementation work derives from ADR-006.**
+  PES. **All Phase 1 implementation work derives from ADR-006.**
 
 When an entry's "Key rules" cite an ADR section, the ADR text is binding;
 the index summary is for orientation.

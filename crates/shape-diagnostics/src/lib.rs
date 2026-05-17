@@ -57,7 +57,7 @@ pub enum Severity {
     /// (ADR-006 §1.3) and similar non-actionable feedback.
     Info,
     /// Hint — soft suggestions, e.g. style nits or refactor proposals
-    /// surfaced by `@ai`-tuned consumers.
+    /// surfaced by tooling consumers.
     Hint,
 }
 

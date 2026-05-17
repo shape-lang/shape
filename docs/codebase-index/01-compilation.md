@@ -593,14 +593,3 @@ Not found — possibly: there is no AST→source unparser in this scope. `Displa
 
 ---
 
-### @ai annotation + LLM prompt expansion
-
-**Path**: Defined in stdlib — no dedicated Rust handler in this scope. Per CLAUDE.md "AI-First Implementation": the `packages/ai/` directory is the intended home for the Shape-side definitions; the Rust side exposes only the generic annotation-lifecycle infrastructure (`AnnotationContext`, `AnnotationRegistry`, `ComptimeTarget`).
-**Role**: An `@ai` annotation rewrites the function body to a typed LLM call (return type → JSON Schema for structured output).
-**Key rules / invariants**:
-- The annotation behaviour lives in stdlib, NOT in Rust — same architectural rule as all other annotations.
-- `packages/ai/` directory is empty in the working tree at the time of indexing (only `packages/xgboost/` exists). The implementation may live elsewhere or not be checked in.
-
-**Related**: `Annotation registry`, `AnnotationContext`, `ComptimeTarget`.
-
----
