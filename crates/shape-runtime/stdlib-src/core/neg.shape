@@ -1,0 +1,37 @@
+/// @module std::core::neg
+/// `Neg` — operator trait for unary `-`.
+///
+/// Shape's strict-typing arithmetic dispatch for built-in scalar types
+/// (`int`, `number`, `decimal`, `bigint`) emits typed opcodes (`NegInt`,
+/// `NegNumber`, `NegDecimal`, ...) at compile time and never routes
+/// through this trait. User-defined types (`type X { ... }`) that want
+/// to participate in unary `-` opt in by providing an
+/// `impl Neg for X { method neg() -> X { ... } }` block; the compiler
+/// then desugars `-x` to `Neg::neg(x)` via the operator trait dispatch
+/// path at `compiler/expressions/unary_ops.rs:65-104`.
+///
+/// Unlike the binary arithmetic traits (`Add`, `Sub`, `Mul`, `Div`),
+/// `Neg::neg` is a single-argument method (no `other` param) — it
+/// negates `self` and returns a fresh `Self`. There is no in-place
+/// counterpart (no `NegAssign`) because unary `-` has no compound-
+/// assign syntax in Shape.
+///
+/// ## Known implementations
+///
+/// | Type        | Dispatch source                                  |
+/// |-------------|--------------------------------------------------|
+/// | int         | typed `NegInt` opcode (no trait dispatch)        |
+/// | number      | typed `NegNumber` opcode (no trait dispatch)     |
+/// | decimal     | typed `NegDecimal` opcode (no trait dispatch)    |
+/// | bigint      | typed bigint-neg opcode (no trait dispatch)      |
+/// | user type X | `impl Neg for X { method neg() -> X }`           |
+
+/// Operator trait for unary `-`. Implementing `Neg` for a user-defined
+/// type enables the unary `-` operator on values of that type. The
+/// compiler calls `Neg::neg(x)` via UFCS dispatch through the
+/// `function_name_index` for `X::neg`.
+trait Neg {
+    /// Return `-self`. By convention the result is a fresh value;
+    /// there is no in-place counterpart for unary negation in Shape.
+    neg(): Self
+}
