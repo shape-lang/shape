@@ -28,7 +28,7 @@ The repo is a monorepo with several top-level projects:
 | Crate | Path | Purpose |
 |-------|------|---------|
 | **shape-ast** | `crates/shape-ast/` | Pest grammar (`shape.pest`) + AST types |
-| **shape-value** | `crates/shape-value/` | Value representation (`ValueWord` in `value_word.rs`), HeapValue, TypedObject schemas |
+| **shape-value** | `crates/shape-value/` | HeapValue, TypedObject schemas, typed-slot carriers (NativeKind / KindedSlot per ADR-006 §2.3) |
 | **shape-types** | `crates/shape-types/` | **Empty crate skeleton** (only `data/` subdir, no `src/`). Type-system code actually lives at `shape-runtime/src/type_system/` and `shape-runtime/src/type_schema/`. Crate is reserved for a planned move; do not look here for type code. |
 | **shape-common** | `crates/shape-common/` | Shared utilities across crates |
 | **shape-runtime** | `crates/shape-runtime/` | Bytecode compiler, builtin functions, method registry, type schemas, stdlib modules, capability tags |
@@ -141,7 +141,7 @@ Shape supports:
 
 ## Architecture
 
-> **v2 Runtime**: The runtime uses typed, zero-tag native values for proven types and `ValueWord` (8-byte tagged word) as the dynamic fallback. See `docs/runtime-v2-spec.md` for the authoritative spec. All new code should target the v2 architecture.
+> **v2 Runtime**: The runtime uses typed, zero-tag native values for proven types (raw `f64`/`i64`/`i32`/`i8`/`bool`/`*const T` in 8-byte stack slots; opcodes encode type via per-slot `NativeKind` metadata). See `docs/runtime-v2-spec.md` for the authoritative spec.
 
 ### Compilation Pipeline
 1. **Parser** (shape-ast): Pest grammar → AST
@@ -179,7 +179,6 @@ Shape supports:
 ### Performance Features
 - **Typed opcodes**: `AddInt`, `MulNumber`, `EqInt`, etc. — skip runtime type checks when compiler proves types
 - **String interning**: `StringId(u32)` in opcodes, O(1) reverse lookup via `HashMap<String, u32>`
-- **Immutable closures**: `Upvalue::Immutable(ValueWord)` — no Arc, no lock for non-mutated captures
 - **Feedback-guided JIT**: IC state machine (Uninitialized → Monomorphic → Polymorphic → Megamorphic) drives speculative optimization
 - **Zero-cost typed field access**: `field_type_tag` encoded in operand at compile time; executor reads slots directly without schema lookup
 - **Cold-path marking**: `#[cold]` on error/underflow paths for branch prediction
