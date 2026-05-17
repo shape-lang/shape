@@ -124,6 +124,12 @@ impl JITCompiler {
                     program.monomorphized_method_call_sites.clone(),
                     None,
                 );
+                // W10 jit-call-method-user-trait-fix (2026-05-17): top-
+                // level mirror of the per-user-function threading at
+                // `compiler/program.rs::compile_function_with_user_funcs`.
+                mir_compiler.set_operator_trait_dispatch_sites(
+                    program.operator_trait_dispatch_sites.clone(),
+                );
                 // Bounds-check elision: scan the MIR for trusted index
                 // accesses and install the plan before compile_body. The
                 // analyzer is conservative; an empty plan preserves the
@@ -256,6 +262,11 @@ impl JITCompiler {
                 mir_compiler.set_monomorph_routing_context(
                     program.monomorphized_method_call_sites.clone(),
                     None,
+                );
+                // W10 jit-call-method-user-trait-fix (2026-05-17): same
+                // top-level mirror as the no-user-funcs branch above.
+                mir_compiler.set_operator_trait_dispatch_sites(
+                    program.operator_trait_dispatch_sites.clone(),
                 );
                 let elision_plan =
                     crate::mir_compiler::bounds_elision::analyze(&mir_data.mir);

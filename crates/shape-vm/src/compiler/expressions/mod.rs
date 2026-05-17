@@ -995,9 +995,16 @@ impl BytecodeCompiler {
             Expr::Identifier(name, span) => self.compile_expr_identifier(name, *span),
 
             // Binary operations
+            // W10 jit-call-method-user-trait-fix (2026-05-17): thread the
+            // outer Expr::BinaryOp.span (parser pair span — matches the
+            // MIR lowering's `lower_expr_to_temp` `expr.span()` for the
+            // `Rvalue::BinaryOp` statement at `crates/shape-vm/src/mir/
+            // lowering/expr.rs:1716`) so the operator-trait-dispatch
+            // side-table keys align across the bytecode / MIR / JIT
+            // surfaces.
             Expr::BinaryOp {
-                left, op, right, ..
-            } => self.compile_expr_binary_op(left, op, right),
+                left, op, right, span,
+            } => self.compile_expr_binary_op(left, op, right, *span),
 
             // Fuzzy comparison (compile left and right, then apply fuzzy comparison)
             Expr::FuzzyComparison {
@@ -1008,8 +1015,11 @@ impl BytecodeCompiler {
                 ..
             } => self.compile_expr_fuzzy_comparison(left, op, right, tolerance),
 
-            // Unary operations
-            Expr::UnaryOp { op, operand, .. } => self.compile_expr_unary_op(op, operand),
+            // Unary operations — sibling of the BinaryOp span threading
+            // above (W10 jit-call-method-user-trait-fix).
+            Expr::UnaryOp { op, operand, span } => {
+                self.compile_expr_unary_op(op, operand, *span)
+            }
 
             // Type operations
             Expr::TypeAssertion {

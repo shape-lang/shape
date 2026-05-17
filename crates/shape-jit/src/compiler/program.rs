@@ -313,6 +313,7 @@ impl JITCompiler {
                 function_return_concrete_types: Vec::new(),
                 monomorphized_method_call_sites: Default::default(),
                 value_call_return_concrete_types: Default::default(),
+                operator_trait_dispatch_sites: Default::default(),
                 top_level_mir: None,
                 compiled_annotations: program.compiled_annotations.clone(),
                 trait_method_symbols: program.trait_method_symbols.clone(),
@@ -421,6 +422,14 @@ impl JITCompiler {
                 mir_compiler.set_monomorph_routing_context(
                     program.monomorphized_method_call_sites.clone(),
                     Some(func_idx),
+                );
+                // W10 jit-call-method-user-trait-fix (2026-05-17): install
+                // the bytecode compiler's operator-trait-dispatch side-
+                // table so the per-user-function MirToIR consumer can
+                // re-emit `Rvalue::BinaryOp` / `Rvalue::UnaryOp` at
+                // trait-dispatch spans as method-call IR.
+                mir_compiler.set_operator_trait_dispatch_sites(
+                    program.operator_trait_dispatch_sites.clone(),
                 );
                 // Bounds-check elision: install the per-function plan
                 // before MIR codegen so `Place::Index` lowering can

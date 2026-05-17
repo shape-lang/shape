@@ -402,6 +402,18 @@ pub struct MirToIR<'a, 'b> {
     /// `func_idx: usize` passed to `compile_function_with_user_funcs` at
     /// `compiler/program.rs:236`).
     pub(crate) caller_function_id: Option<usize>,
+
+    /// ADR-006 §2.7.5 W10 jit-call-method-user-trait-fix (2026-05-17):
+    /// per-binop/unop-site operator-trait-dispatch side-table cloned from
+    /// `BytecodeProgram.operator_trait_dispatch_sites`. Consumed by
+    /// `compile_rvalue`'s `Rvalue::BinaryOp` / `Rvalue::UnaryOp` arms to
+    /// re-emit the bytecode-time trait-dispatch as a method-call
+    /// equivalent. Keyed by the statement span (matches MIR lowering's
+    /// `expr.span()`). Empty when the program has no user-type operator
+    /// overloading — JIT falls through to the existing typed-arith /
+    /// typed-cmp / unop lowering paths.
+    pub(crate) operator_trait_dispatch_sites:
+        HashMap<shape_ast::ast::span::Span, (String, u16)>,
 }
 
 /// Result of MIR preflight check.
@@ -811,7 +823,25 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             // `compiler/strategy.rs` top-level path).
             monomorphized_method_call_sites: HashMap::new(),
             caller_function_id: None,
+            // W10 jit-call-method-user-trait-fix: operator-trait-dispatch
+            // side-table default empty; populated by
+            // `set_operator_trait_dispatch_sites` from the JIT orchestration
+            // layer. Empty is sound — JIT falls through to typed-arith/cmp
+            // lowering identically to pre-W10 behaviour.
+            operator_trait_dispatch_sites: HashMap::new(),
         }
+    }
+
+    /// W10 jit-call-method-user-trait-fix (2026-05-17): install the
+    /// bytecode compiler's `operator_trait_dispatch_sites` side-table so
+    /// `compile_rvalue`'s `Rvalue::BinaryOp` / `Rvalue::UnaryOp` arms can
+    /// re-emit user-type operator overloading as a method call. Sibling
+    /// of `set_monomorph_routing_context` — same threading pattern.
+    pub fn set_operator_trait_dispatch_sites(
+        &mut self,
+        sites: HashMap<shape_ast::ast::span::Span, (String, u16)>,
+    ) {
+        self.operator_trait_dispatch_sites = sites;
     }
 
     /// V3-S6c JIT method-monomorph routing: install the bytecode compiler's

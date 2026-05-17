@@ -531,6 +531,16 @@ impl BytecodeCompiler {
                     .program
                     .value_call_return_concrete_types
                     .clone(),
+                // ADR-006 §2.7.5 conduit (W10 jit-call-method-user-trait-
+                // fix close, 2026-05-17): per-binop/unop-site operator
+                // trait dispatch side-table propagated through the
+                // content-addressed path so the JIT consumer (rvalues.rs
+                // BinaryOp / UnaryOp arms) can lift the bytecode-time
+                // trait-dispatch decision to method-call IR.
+                operator_trait_dispatch_sites: self
+                    .program
+                    .operator_trait_dispatch_sites
+                    .clone(),
                 // Closure spec §14.6 (H6.5): propagate layouts through the
                 // content-addressed path so `load_linked_program` → VM
                 // preserves enough metadata for the raw producer path.

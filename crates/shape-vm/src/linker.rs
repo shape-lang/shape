@@ -483,6 +483,12 @@ pub fn link(program: &Program) -> Result<LinkedProgram, LinkError> {
             // identically to the sequential path below.
             value_call_return_concrete_types:
                 program.value_call_return_concrete_types.clone(),
+            // W10 jit-call-method-user-trait-fix (2026-05-17): propagate
+            // the operator-trait-dispatch side-table through the
+            // parallel-link path so the JIT consumer can re-emit
+            // user-type binary/unary operators as method-call IR.
+            operator_trait_dispatch_sites:
+                program.operator_trait_dispatch_sites.clone(),
             trait_method_symbols: program.trait_method_symbols.clone(),
             foreign_functions: program.foreign_functions.clone(),
             native_struct_layouts: program.native_struct_layouts.clone(),
@@ -602,6 +608,12 @@ pub fn link(program: &Program) -> Result<LinkedProgram, LinkError> {
         // on linked programs.
         value_call_return_concrete_types:
             program.value_call_return_concrete_types.clone(),
+        // W10 jit-call-method-user-trait-fix (2026-05-17): propagate
+        // the operator-trait-dispatch side-table through the
+        // sequential-link path so the JIT consumer's user-type operator
+        // dispatch fires on linked programs.
+        operator_trait_dispatch_sites:
+            program.operator_trait_dispatch_sites.clone(),
         trait_method_symbols: program.trait_method_symbols.clone(),
         foreign_functions: program.foreign_functions.clone(),
         native_struct_layouts: program.native_struct_layouts.clone(),
@@ -688,6 +700,12 @@ pub fn linked_to_bytecode_program(linked: &LinkedProgram) -> BytecodeProgram {
         // this on the post-link BytecodeProgram surface.
         value_call_return_concrete_types:
             linked.value_call_return_concrete_types.clone(),
+        // W10 jit-call-method-user-trait-fix (2026-05-17): propagate
+        // the operator-trait-dispatch side-table through the
+        // LinkedProgram → BytecodeProgram round-trip; the JIT consumer
+        // reads this on the post-link BytecodeProgram surface.
+        operator_trait_dispatch_sites:
+            linked.operator_trait_dispatch_sites.clone(),
         top_level_mir: None,
         compiled_annotations: HashMap::new(),
         trait_method_symbols: linked.trait_method_symbols.clone(),
