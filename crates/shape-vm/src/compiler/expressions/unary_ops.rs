@@ -167,7 +167,44 @@ impl BytecodeCompiler {
                     location: None,
                 });
             }
-            _ => {
+            UnaryOp::Not => {
+                // W1.6: operator trait dispatch via CallMethod for `!x`
+                // when `x` is a typed object that implements `Not`. The
+                // operand (receiver) is already on the stack from
+                // compile_expr above. Sibling of the Neg dispatch above —
+                // both unary traits route through a single-arg CallMethod.
+                //
+                // The built-in `OpCode::Not` handles the bool case (the
+                // strict-typing compiler proves `bool` ahead of this path
+                // for the typed bool form). User-type dispatch is the
+                // exception that mirrors W1.5 Neg.
+                let dispatches_via_not_trait = self
+                    .last_expr_schema
+                    .and_then(|sid| self.type_tracker.schema_registry().get_by_id(sid))
+                    .is_some_and(|schema| {
+                        self.type_inference
+                            .env
+                            .type_implements_trait(&schema.name, "Not")
+                    });
+                if dispatches_via_not_trait {
+                    let method_id = shape_value::MethodId::from_name("not");
+                    let string_id = self.program.add_string("not".to_string());
+                    self.emit(Instruction::new(
+                        OpCode::CallMethod,
+                        Some(Operand::TypedMethodCall {
+                            method_id: method_id.0,
+                            arg_count: 0,
+                            string_id,
+                            receiver_type_tag: 0xFF,
+                        }),
+                    ));
+                    self.last_expr_schema = None;
+                    self.last_expr_type_info = None;
+                    self.last_expr_numeric_type = None;
+                    return Ok(());
+                }
+
+                // Fall through to the built-in `OpCode::Not` (boolean).
                 self.compile_unary_op(op)?;
             }
         }
