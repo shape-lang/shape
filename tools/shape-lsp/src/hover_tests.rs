@@ -1525,3 +1525,66 @@ fn test_hover_namespace_unknown() {
     assert!(get_namespace_member_hover("io", "nonexistent").is_none());
     assert!(get_namespace_member_hover("DateTime", "nonexistent").is_none());
 }
+
+#[test]
+fn test_hover_type_lists_local_trait_impls() {
+    // Hovering on the type name `User` should surface every local impl block.
+    let code = "type User { name: string }\n\
+                impl Display for User { method display() { \"u\" } }\n\
+                impl Debug for User as Json { method debug() { \"d\" } }\n";
+    let hover = get_hover(
+        code,
+        Position {
+            line: 0,
+            character: 6,
+        },
+        None,
+        None,
+        None,
+    );
+    assert!(hover.is_some(), "Should get hover for type name 'User'");
+    let Some(h) = hover else { unreachable!() };
+    let HoverContents::Markup(markup) = h.contents else {
+        panic!("Expected markup hover");
+    };
+    assert!(
+        markup.value.contains("**Implementations for `User`**"),
+        "Hover should include impl section, got: {}",
+        markup.value
+    );
+    assert!(
+        markup.value.contains("impl Display for User"),
+        "Hover should list Display impl, got: {}",
+        markup.value
+    );
+    assert!(
+        markup.value.contains("impl Debug for User as Json"),
+        "Hover should list named Debug impl, got: {}",
+        markup.value
+    );
+}
+
+#[test]
+fn test_hover_type_omits_impls_section_when_none_present() {
+    let code = "type Lonely { x: int }\n";
+    let hover = get_hover(
+        code,
+        Position {
+            line: 0,
+            character: 6,
+        },
+        None,
+        None,
+        None,
+    )
+    .expect("hover");
+    if let HoverContents::Markup(markup) = hover.contents {
+        assert!(
+            !markup.value.contains("Implementations for"),
+            "Hover should omit empty impl section, got: {}",
+            markup.value
+        );
+    } else {
+        panic!("expected markup hover");
+    }
+}
