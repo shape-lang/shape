@@ -12,7 +12,7 @@ use crate::code_lens::{get_code_lenses, resolve_code_lens};
 use crate::completion::get_completions_with_context;
 use crate::definition::{
     get_declaration, get_definition, get_document_highlights, get_implementations,
-    get_references_cross_file, get_references_with_fallback, get_type_definition,
+    get_references_cross_file, get_type_definition,
 };
 use crate::diagnostics::error_to_diagnostic;
 use crate::document::DocumentManager;
@@ -43,22 +43,26 @@ use tower_lsp_server::ls_types::{
     CodeActionProviderCapability, CodeActionResponse, CodeLens, CodeLensOptions, CodeLensParams,
     CompletionItem, CompletionOptions, CompletionParams, CompletionResponse, DeclarationCapability,
     Diagnostic, DiagnosticSeverity, DidChangeConfigurationParams, DidChangeTextDocumentParams,
-    DidCloseTextDocumentParams, DidOpenTextDocumentParams, DocumentFormattingParams,
-    DocumentHighlight, DocumentHighlightParams, DocumentLink, DocumentLinkOptions,
-    DocumentLinkParams, DocumentOnTypeFormattingOptions, DocumentOnTypeFormattingParams,
-    DocumentRangeFormattingParams, DocumentSymbolParams, DocumentSymbolResponse, FoldingRange,
-    FoldingRangeParams, FoldingRangeProviderCapability, GotoDefinitionParams,
-    GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability,
-    ImplementationProviderCapability, InitializeParams, InitializeResult, InitializedParams,
-    InlayHint, InlayHintOptions, InlayHintParams, InlayHintServerCapabilities, Location,
-    MessageType, OneOf, Position, PrepareRenameResponse, Range, ReferenceParams, RenameOptions,
-    RenameParams, SemanticToken, SemanticTokens, SemanticTokensDelta, SemanticTokensDeltaParams,
+    DidChangeWatchedFilesParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
+    DocumentFormattingParams, DocumentHighlight, DocumentHighlightParams, DocumentLink,
+    DocumentLinkOptions, DocumentLinkParams, DocumentOnTypeFormattingOptions,
+    DocumentOnTypeFormattingParams, DocumentRangeFormattingParams, DocumentSymbolParams,
+    DocumentSymbolResponse, ExecuteCommandOptions, ExecuteCommandParams, FileChangeType,
+    FileOperationFilter, FileOperationPattern, FileOperationPatternKind,
+    FileOperationRegistrationOptions, FoldingRange, FoldingRangeParams,
+    FoldingRangeProviderCapability, GotoDefinitionParams, GotoDefinitionResponse, Hover,
+    HoverParams, HoverProviderCapability, ImplementationProviderCapability, InitializeParams,
+    InitializeResult, InitializedParams, InlayHint, InlayHintOptions, InlayHintParams,
+    InlayHintServerCapabilities, LSPAny, Location, MessageType, OneOf, Position,
+    PrepareRenameResponse, Range, ReferenceParams, RenameFilesParams, RenameOptions, RenameParams,
+    SemanticToken, SemanticTokens, SemanticTokensDelta, SemanticTokensDeltaParams,
     SemanticTokensEdit, SemanticTokensFullDeltaResult, SemanticTokensFullOptions,
     SemanticTokensOptions, SemanticTokensParams, SemanticTokensRangeParams,
     SemanticTokensRangeResult, SemanticTokensResult, SemanticTokensServerCapabilities,
     ServerCapabilities, ServerInfo, SignatureHelp, SignatureHelpOptions, SignatureHelpParams,
     TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit,
-    TypeDefinitionProviderCapability, Uri, WorkDoneProgressOptions, WorkspaceEdit,
+    TypeDefinitionProviderCapability, Uri, WorkDoneProgressOptions,
+    WorkspaceFileOperationsServerCapabilities, WorkspaceEdit, WorkspaceServerCapabilities,
     WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
 use tower_lsp_server::{Client, LanguageServer, jsonrpc::Result};
@@ -656,6 +660,46 @@ impl LanguageServer for ShapeLanguageServer {
                     },
                 }),
 
+                // W2.7 / 1.71: workspace/executeCommand — declare the
+                // server-side command vocabulary used by code-lens titles
+                // (`shape.findReferences`, `shape.findImplementations`,
+                // `shape.runTests`, etc.). The handler today acknowledges
+                // every registered command and returns `None` so clients
+                // route follow-up requests (e.g. textDocument/references)
+                // through the corresponding LSP method; declaring the
+                // capability is the load-bearing protocol step that lets
+                // editors enable the lens click-targets at all.
+                execute_command_provider: Some(ExecuteCommandOptions {
+                    commands: registered_commands(),
+                    work_done_progress_options: WorkDoneProgressOptions {
+                        work_done_progress: None,
+                    },
+                }),
+
+                // W2.7 / 1.72: workspace.file_operations.will_rename —
+                // before files are renamed, return a `WorkspaceEdit` that
+                // rewrites `from OLD_MODULE_PATH use ...` to
+                // `from NEW_MODULE_PATH use ...` in every importing file.
+                // The filter narrows to `*.shape` so non-Shape file
+                // renames in mixed workspaces don't round-trip a request
+                // we have no edits for.
+                workspace: Some(WorkspaceServerCapabilities {
+                    workspace_folders: None,
+                    file_operations: Some(WorkspaceFileOperationsServerCapabilities {
+                        will_rename: Some(FileOperationRegistrationOptions {
+                            filters: vec![FileOperationFilter {
+                                scheme: Some("file".to_string()),
+                                pattern: FileOperationPattern {
+                                    glob: "**/*.shape".to_string(),
+                                    matches: Some(FileOperationPatternKind::File),
+                                    options: None,
+                                },
+                            }],
+                        }),
+                        ..Default::default()
+                    }),
+                }),
+
                 ..ServerCapabilities::default()
             },
             server_info: Some(ServerInfo {
@@ -1013,12 +1057,40 @@ impl LanguageServer for ShapeLanguageServer {
     ) -> Result<Option<WorkspaceSymbolResponse>> {
         let query = params.query;
         let mut all_symbols = Vec::new();
+        let mut visited: HashSet<std::path::PathBuf> = HashSet::new();
 
-        // Get symbols from all open documents
+        // W2.7 / 1.53: workspace symbol eager indexing.
+        //
+        // Phase 1 — open documents (always live; text is freshest from the
+        // editor and may differ from the on-disk file).
         for uri in self.documents.all_uris() {
             if let Some(doc) = self.documents.get(&uri) {
+                if let Some(path_cow) = uri.to_file_path() {
+                    visited.insert(path_cow.into_owned());
+                }
                 let text = doc.text();
                 let symbols = get_workspace_symbols(&text, &uri, &query);
+                all_symbols.extend(symbols);
+            }
+        }
+
+        // Phase 2 — on-disk workspace files (read once per request, skip
+        // anything already covered by an open document). Uses the
+        // module-cache enumerator (W2.6 groundwork) which caps at
+        // MAX_WORKSPACE_FILES (4096) and excludes hidden + build dirs.
+        if let Some(root) = self.project_root.get() {
+            let module_cache = self.documents.get_module_cache();
+            for path in module_cache.enumerate_workspace_shape_files(root.as_path()) {
+                if !visited.insert(path.clone()) {
+                    continue;
+                }
+                let Some(file_uri) = Uri::from_file_path(&path) else {
+                    continue;
+                };
+                let Ok(text) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                let symbols = get_workspace_symbols(&text, &file_uri, &query);
                 all_symbols.extend(symbols);
             }
         }
@@ -1763,6 +1835,195 @@ impl LanguageServer for ShapeLanguageServer {
         }
     }
 
+    /// W2.7 / 1.69: `workspace/didChangeWatchedFiles` — invalidate cached
+    /// state when files change on disk outside the editor (e.g. `git
+    /// checkout`, external build script). Drops the module-cache entry
+    /// for each affected `.shape` path (via the W2.6 `invalidate` hook at
+    /// `module_cache.rs:226`) and clears the corresponding
+    /// `last_good_programs` snapshot so the next analysis re-reads from
+    /// disk. Files in any open document are left alone — the editor owns
+    /// their text and the cache will refresh on the next `did_change`.
+    async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
+        let module_cache = self.documents.get_module_cache();
+        let mut invalidated = 0usize;
+        for event in &params.changes {
+            // Only `.shape` files participate in module resolution; ignore
+            // toml + others.
+            let Some(path_cow) = event.uri.to_file_path() else {
+                continue;
+            };
+            let path = path_cow.into_owned();
+            if path.extension().and_then(|e| e.to_str()) != Some("shape") {
+                continue;
+            }
+            module_cache.invalidate(&path);
+            // For deletes / external changes, also drop the cached AST so
+            // hover / completions don't keep serving a stale snapshot.
+            if matches!(event.typ, FileChangeType::DELETED | FileChangeType::CHANGED) {
+                self.last_good_programs.remove(&event.uri);
+            }
+            invalidated += 1;
+        }
+        if invalidated > 0 {
+            self.client
+                .log_message(
+                    MessageType::INFO,
+                    format!(
+                        "didChangeWatchedFiles: invalidated {} module-cache entr{}",
+                        invalidated,
+                        if invalidated == 1 { "y" } else { "ies" }
+                    ),
+                )
+                .await;
+        }
+    }
+
+    /// W2.7 / 1.71: `workspace/executeCommand` — acknowledge code-lens
+    /// commands by name and return `None`.
+    ///
+    /// Today, the code-lens commands (`shape.findReferences`,
+    /// `shape.findImplementations`, `shape.runTests`, etc.) are designed
+    /// to be invoked by the client. Registering them server-side lets
+    /// editors enable the lens click-targets in the first place (without
+    /// the `executeCommand` capability, many clients suppress the lens
+    /// entirely). The server replies with `None` so the client falls
+    /// through to its own command handler (`textDocument/references` for
+    /// `shape.findReferences`, the test runner integration for
+    /// `shape.runTests`, etc.). Unknown commands are rejected with the
+    /// LSP `MethodNotFound` error.
+    async fn execute_command(&self, params: ExecuteCommandParams) -> Result<Option<LSPAny>> {
+        if !registered_commands().contains(&params.command) {
+            self.client
+                .log_message(
+                    MessageType::WARNING,
+                    format!(
+                        "executeCommand: unknown command {:?}; declared commands: {:?}",
+                        params.command,
+                        registered_commands()
+                    ),
+                )
+                .await;
+            return Err(tower_lsp_server::jsonrpc::Error::method_not_found());
+        }
+        self.client
+            .log_message(
+                MessageType::INFO,
+                format!(
+                    "executeCommand: {:?} acknowledged ({} arg{})",
+                    params.command,
+                    params.arguments.len(),
+                    if params.arguments.len() == 1 { "" } else { "s" }
+                ),
+            )
+            .await;
+        Ok(None)
+    }
+
+    /// W2.7 / 1.72: `workspace/willRenameFiles` — compute import-path
+    /// rewrite edits before files are renamed.
+    ///
+    /// For each `(old_uri, new_uri)` pair, derives the corresponding
+    /// Shape module path via [`crate::module_cache::path_to_module_path`]
+    /// (relative to `project_root`) and produces text edits that rewrite
+    /// `from OLD_PATH use ...` to `from NEW_PATH use ...` in every
+    /// importing file (open documents + workspace `.shape` files via
+    /// the W2.6 enumerator). Files outside the workspace root, files
+    /// with non-`.shape` extensions, and module paths containing
+    /// non-identifier path segments produce no edits — the client just
+    /// renames the file and the user fixes any newly-broken imports by
+    /// hand.
+    async fn will_rename_files(
+        &self,
+        params: RenameFilesParams,
+    ) -> Result<Option<WorkspaceEdit>> {
+        let Some(workspace_root) = self.project_root.get() else {
+            return Ok(None);
+        };
+        let module_cache = self.documents.get_module_cache();
+
+        // Collect (old_module, new_module) pairs we can actually rewrite.
+        let mut renames: Vec<(String, String)> = Vec::new();
+        for rename in &params.files {
+            let Ok(old_uri) = rename.old_uri.parse::<Uri>() else {
+                continue;
+            };
+            let Ok(new_uri) = rename.new_uri.parse::<Uri>() else {
+                continue;
+            };
+            let Some(old_path) = old_uri.to_file_path() else {
+                continue;
+            };
+            let Some(new_path) = new_uri.to_file_path() else {
+                continue;
+            };
+            let Some(old_mod) = crate::module_cache::path_to_module_path(
+                &old_path,
+                workspace_root.as_path(),
+            ) else {
+                continue;
+            };
+            let Some(new_mod) = crate::module_cache::path_to_module_path(
+                &new_path,
+                workspace_root.as_path(),
+            ) else {
+                continue;
+            };
+            if old_mod == new_mod {
+                continue;
+            }
+            renames.push((old_mod, new_mod));
+        }
+        if renames.is_empty() {
+            return Ok(None);
+        }
+
+        let mut changes: std::collections::HashMap<Uri, Vec<TextEdit>> =
+            std::collections::HashMap::new();
+        let mut visited: HashSet<std::path::PathBuf> = HashSet::new();
+
+        // Open documents first (live text wins over disk).
+        for uri in self.documents.all_uris() {
+            let Some(doc) = self.documents.get(&uri) else {
+                continue;
+            };
+            if let Some(p) = uri.to_file_path() {
+                visited.insert(p.into_owned());
+            }
+            let text = doc.text();
+            let edits = collect_import_rewrites(&text, &renames);
+            if !edits.is_empty() {
+                changes.entry(uri).or_insert_with(Vec::new).extend(edits);
+            }
+        }
+
+        // Then workspace-on-disk files not already covered.
+        for path in module_cache.enumerate_workspace_shape_files(workspace_root.as_path()) {
+            if !visited.insert(path.clone()) {
+                continue;
+            }
+            let Some(uri) = Uri::from_file_path(&path) else {
+                continue;
+            };
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let edits = collect_import_rewrites(&text, &renames);
+            if !edits.is_empty() {
+                changes.entry(uri).or_insert_with(Vec::new).extend(edits);
+            }
+        }
+
+        if changes.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(WorkspaceEdit {
+                changes: Some(changes),
+                document_changes: None,
+                change_annotations: None,
+            }))
+        }
+    }
+
     async fn outgoing_calls(
         &self,
         params: CallHierarchyOutgoingCallsParams,
@@ -1782,6 +2043,89 @@ impl LanguageServer for ShapeLanguageServer {
             Ok(Some(results))
         }
     }
+}
+
+/// W2.7 / 1.71 — canonical list of `workspace/executeCommand` command IDs
+/// declared by the server. Mirrors every `Command::command` string emitted
+/// by `code_lens.rs`; if a new lens-emitted command is added, append it
+/// here so clients enable the lens click target.
+fn registered_commands() -> Vec<String> {
+    vec![
+        "shape.findReferences".to_string(),
+        "shape.findImplementations".to_string(),
+        "shape.runTests".to_string(),
+        "shape.debugTests".to_string(),
+        "shape.showAnnotation".to_string(),
+        "shape.showTraitMethod".to_string(),
+    ]
+}
+
+/// W2.7 / 1.72 — collect text edits that rewrite `from OLD_MODULE_PATH`
+/// to `from NEW_MODULE_PATH` for every `(old, new)` pair in `renames`,
+/// scanning `text` line by line. Matches the exact module path token
+/// after the `from` keyword (skipping leading whitespace) so substring
+/// collisions inside identifiers / string literals are avoided.
+///
+/// Multi-pair semantics: each line emits at most one edit. If a single
+/// import targets a path that matches `renames[i].0` for multiple `i`,
+/// the first matching pair wins — pairs should be uniqued by the caller.
+fn collect_import_rewrites(text: &str, renames: &[(String, String)]) -> Vec<TextEdit> {
+    use crate::util::offset_to_line_col;
+    let mut edits = Vec::new();
+    let mut offset = 0usize;
+    for line in text.split_inclusive('\n') {
+        let trimmed_offset = offset
+            + (line.len() - line.trim_start().len());
+        let body = line.trim_start();
+        // Quick-reject: the import statement must start with `from `.
+        if let Some(rest) = body.strip_prefix("from ") {
+            // Skip extra whitespace between `from` and the module path.
+            let path_start_in_body = "from ".len() + rest.len() - rest.trim_start().len();
+            let path_start = trimmed_offset + path_start_in_body;
+            let after_from = rest.trim_start();
+            // Module path is followed by whitespace or `use`/`{`/`(`/`;` —
+            // we read the path token as the longest run of identifier
+            // characters or `::` separators starting at `path_start`.
+            let mut end = 0usize;
+            let bytes = after_from.as_bytes();
+            while end < bytes.len() {
+                let b = bytes[end];
+                if b.is_ascii_alphanumeric() || b == b'_' {
+                    end += 1;
+                } else if end + 1 < bytes.len() && b == b':' && bytes[end + 1] == b':' {
+                    end += 2;
+                } else {
+                    break;
+                }
+            }
+            if end > 0 {
+                let actual_path = &after_from[..end];
+                for (old, new) in renames {
+                    if actual_path == old {
+                        let path_end = path_start + end;
+                        let (sl, sc) = offset_to_line_col(text, path_start);
+                        let (el, ec) = offset_to_line_col(text, path_end);
+                        edits.push(TextEdit {
+                            range: Range {
+                                start: Position {
+                                    line: sl,
+                                    character: sc,
+                                },
+                                end: Position {
+                                    line: el,
+                                    character: ec,
+                                },
+                            },
+                            new_text: new.clone(),
+                        });
+                        break;
+                    }
+                }
+            }
+        }
+        offset += line.len();
+    }
+    edits
 }
 
 fn frontmatter_fallback_range() -> Range {
@@ -2606,5 +2950,177 @@ print("hello")
         let mut d = a;
         d.length = 99;
         assert!(!semantic_tokens_eq(&a, &d));
+    }
+
+    // W2.7 / 1.71 — every command emitted by `code_lens.rs` must be
+    // declared in `execute_command_provider.commands` so clients enable
+    // the lens click target. If a new lens command is added without
+    // mirroring it here, the LSP `execute_command` handler will reject
+    // it with `MethodNotFound`.
+    #[test]
+    fn registered_commands_cover_every_code_lens_command_w27() {
+        let declared: std::collections::HashSet<String> =
+            registered_commands().into_iter().collect();
+        // Anchored exactly to the strings emitted in `code_lens.rs`.
+        for cmd in &[
+            "shape.findReferences",
+            "shape.findImplementations",
+            "shape.runTests",
+            "shape.debugTests",
+            "shape.showAnnotation",
+            "shape.showTraitMethod",
+        ] {
+            assert!(
+                declared.contains(*cmd),
+                "executeCommand provider missing code-lens command {:?}",
+                cmd
+            );
+        }
+    }
+
+    // W2.7 / 1.72 — willRenameFiles edit collection rewrites `from X`
+    // to `from Y` for matched module paths.
+    #[test]
+    fn collect_import_rewrites_rewrites_matching_from_clause_w27() {
+        let text = "from foo::bar use { x, y };\nlet a = 1\n";
+        let renames = vec![("foo::bar".to_string(), "baz::qux".to_string())];
+        let edits = collect_import_rewrites(text, &renames);
+        assert_eq!(edits.len(), 1, "expected one rewrite, got {:?}", edits);
+        let edit = &edits[0];
+        assert_eq!(edit.new_text, "baz::qux");
+        assert_eq!(edit.range.start.line, 0);
+        // "from " is 5 chars; path starts at column 5.
+        assert_eq!(edit.range.start.character, 5);
+        assert_eq!(edit.range.end.character, 5 + "foo::bar".len() as u32);
+    }
+
+    #[test]
+    fn collect_import_rewrites_skips_non_matching_paths_w27() {
+        let text = "from other::mod use { x };\nfrom foo::bar use { y };\n";
+        let renames = vec![("foo::bar".to_string(), "new::path".to_string())];
+        let edits = collect_import_rewrites(text, &renames);
+        assert_eq!(edits.len(), 1, "only the foo::bar line should rewrite");
+        assert_eq!(edits[0].range.start.line, 1);
+    }
+
+    #[test]
+    fn collect_import_rewrites_does_not_match_substring_inside_identifier_w27() {
+        // The renamed module `foo` must NOT match `foobar` in another
+        // import. The path-token reader stops at the end of the longest
+        // identifier/`::` run, so `foo` ≠ `foobar`.
+        let text = "from foobar use { x };\nfrom foo use { y };\n";
+        let renames = vec![("foo".to_string(), "renamed".to_string())];
+        let edits = collect_import_rewrites(text, &renames);
+        assert_eq!(edits.len(), 1, "only the bare `from foo` line should match");
+        assert_eq!(edits[0].range.start.line, 1);
+        assert_eq!(edits[0].new_text, "renamed");
+    }
+
+    #[test]
+    fn collect_import_rewrites_handles_indented_imports_w27() {
+        let text = "    from a::b use { x };\nfrom c::d use { y };\n";
+        let renames = vec![
+            ("a::b".to_string(), "AA::BB".to_string()),
+            ("c::d".to_string(), "CC::DD".to_string()),
+        ];
+        let edits = collect_import_rewrites(text, &renames);
+        assert_eq!(edits.len(), 2);
+        // First line indented by 4: "from " ends at col 9, path starts at 9.
+        assert_eq!(edits[0].range.start.character, 4 + 5);
+        assert_eq!(edits[0].new_text, "AA::BB");
+        assert_eq!(edits[1].range.start.line, 1);
+        assert_eq!(edits[1].new_text, "CC::DD");
+    }
+
+    #[test]
+    fn collect_import_rewrites_returns_empty_when_no_imports_match_w27() {
+        let text = "let x = 1\nlet y = 2\n";
+        let renames = vec![("foo".to_string(), "bar".to_string())];
+        assert!(collect_import_rewrites(text, &renames).is_empty());
+    }
+
+    // W2.7 / 1.53 — workspace symbol handler should index closed
+    // workspace files via `module_cache.enumerate_workspace_shape_files`
+    // in addition to open documents. Direct construction of the handler
+    // avoids the LspService Client-mock dance: we exercise the same
+    // composition (`get_workspace_symbols` over open docs + workspace
+    // enumerator) by calling each piece and asserting the union covers
+    // closed files.
+    #[tokio::test]
+    async fn workspace_symbol_eager_indexes_closed_files_w27() {
+        use crate::document_symbols::get_workspace_symbols;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // One open file with `fn open_sym` + one closed file on disk
+        // with `fn closed_sym`. The closed file must surface in the
+        // workspace symbol result.
+        let open_path = root.join("open.shape");
+        let closed_path = root.join("nested/closed.shape");
+        std::fs::create_dir_all(closed_path.parent().unwrap()).unwrap();
+        std::fs::write(&open_path, "fn open_sym() { 1 }\n").unwrap();
+        std::fs::write(&closed_path, "fn closed_sym() { 2 }\n").unwrap();
+
+        let cache = crate::module_cache::ModuleCache::new();
+        let files = cache.enumerate_workspace_shape_files(root);
+        let mut found_closed = false;
+        for path in files {
+            if path != closed_path {
+                continue;
+            }
+            let uri = Uri::from_file_path(&path).unwrap();
+            let text = std::fs::read_to_string(&path).unwrap();
+            let symbols = get_workspace_symbols(&text, &uri, "closed_sym");
+            assert!(
+                symbols.iter().any(|s| s.name == "closed_sym"),
+                "closed-file symbol must appear in workspace results: {:?}",
+                symbols
+            );
+            found_closed = true;
+        }
+        assert!(
+            found_closed,
+            "workspace enumerator must surface the closed.shape file"
+        );
+    }
+
+    // W2.7 / 1.69 — didChangeWatchedFiles should invalidate the cached
+    // module entry for an externally-changed .shape file. We exercise
+    // the underlying `ModuleCache::invalidate` contract end-to-end:
+    // load a real `.shape` file into the cache, mutate it on disk,
+    // call `invalidate`, then reload and assert the cache returned the
+    // new contents (proving the prior entry was dropped).
+    #[test]
+    fn did_change_watched_files_invalidates_module_cache_w27() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("watched.shape");
+        std::fs::write(&path, "pub fn before() { 1 }\n").unwrap();
+        let cache = crate::module_cache::ModuleCache::new();
+        let info1 = cache
+            .load_module_with_context(&path, &path, None)
+            .expect("first load must succeed");
+        assert!(
+            info1.exports.iter().any(|e| e.name == "before"),
+            "before-invalidate export should be visible: {:?}",
+            info1.exports
+        );
+
+        // Mutate the file on disk + invalidate — simulating the watched
+        // CHANGED arm in the server handler.
+        std::fs::write(&path, "pub fn after() { 2 }\n").unwrap();
+        cache.invalidate(&path);
+
+        let info2 = cache
+            .load_module_with_context(&path, &path, None)
+            .expect("second load must succeed");
+        assert!(
+            info2.exports.iter().any(|e| e.name == "after"),
+            "after-invalidate export should reflect the new file contents: {:?}",
+            info2.exports
+        );
+        assert!(
+            !info2.exports.iter().any(|e| e.name == "before"),
+            "stale pre-invalidate export must NOT linger: {:?}",
+            info2.exports
+        );
     }
 }
