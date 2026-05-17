@@ -1,9 +1,109 @@
-# Phase 3 cluster-0+1 — Team-lead handover (cluster-0+1-close seam; tag authorization pending)
+# Phase 3 — Team-lead handover (v1-close seam; v1 close-summary audit dispatch pending)
 
-**Generated:** 2026-05-14 (cadence-shift rotation); updated 2026-05-15 (V3-S5-complete + V3-S6 surface rotation); updated 2026-05-16 (cluster-0+1-close seam — V3-S6 5-checkpoint chain MERGED at `50e5c024`; cluster-0+1-close-criterion gates ALL MET under β2 disposition; tag authorization pending supervisor ratification + user authorization).
-**Successor handoff point:** V3-S6 retroactive 5-checkpoint multi-session chain (V3-S6a 43ac9b7a + V3-S6b 48e05f3f + V3-S6c 2544f89f + V3-S6d 2f011e93 + V3-S6e d4d5454c) MERGED into `bulldozer-strictly-typed` canonical at `50e5c024`. Smoke matrix 3/4 VM == JIT at canonical fixture (Smoke 2 JIT TIMEOUT rc=124 in V3-S6f territory folds to cluster-2 per β2 supervisor disposition 2026-05-16). All cluster-0+1-close-criterion gates MET. Reading 2 empirically confirmed at V3-S6e: V3-S6 chain produced real architectural work (V3-S5 conduit completion at compile-time layer) + V3-S6f is the next architectural layer (runtime-execution within specialized body) belonging to cluster-2's broader §2.7.5 JIT-side conduit completion. New team-lead's first execute action: receive supervisor's tag authorization relay + apply `phase-3-cluster-0-close` + `phase-3-cluster-1-close` tags on canonical at `50e5c024` + dispatch cluster-2 audit-day per supervisor's next-phase disposition.
-**Predecessor team-lead session:** rotated at the cluster-0+1-close-seam after V3-S6 chain merge + status doc cluster-0+1 close subsection landing.
-**Supervisor session:** see `docs/cluster-audits/phase-3-supervisor-handover.md` for supervisor-side state.
+**Generated:** 2026-05-14 (cadence-shift rotation); updated 2026-05-15 (V3-S5-complete + V3-S6 surface rotation); updated 2026-05-16 (cluster-0+1-close seam); updated 2026-05-17 (cluster-2-close-seam + cluster-1.5-close-seam + v1-close-seam — ALL 4 cluster tags annotated; v1 close-summary audit dispatch the only remaining work-item before v1 tag).
+**Successor handoff point (2026-05-17 v1-close seam):** all 4 cluster tags annotated on canonical (`phase-3-cluster-0-close` + `phase-3-cluster-1-close` → bb5b2109; `phase-3-cluster-2-close` → 938929de; `phase-3-cluster-1.5-close` → 4368bc60). Canonical HEAD at this rotation: `bulldozer-strictly-typed @ e2941ef3` (cluster-1.5 close subsection commit; the cluster-1.5-close-criterion-MET commit is at 4368bc60). Smoke matrix **5/5 VM == JIT preserved** at canonical (s1 4950 + s2 30 + s3 x + s4 2 + s5 x). Cumulative discipline state: **85 imprecision instances all caught pre-merge; 0 bad-code merges into canonical preserved**; 4 successful multi-session chains; 9 parallel-implementation defection refusals; 5 ADR-006 amendments landed; 4 user-authorized CLAUDE.md modifications. **Fresh team-lead's first execute action:** read 8 mandatory docs + post 1-line confirmation + dispatch v1 close-summary audit sub-agent per supervisor (b) disposition 2026-05-17 (single audit-style agent; deliverable `docs/cluster-audits/v1-close-summary.md` per §0-§7 shape detailed in §"Immediate next actions"; ceiling-c bounded; audit-only close). After close + supervisor ratification + user authorizes `v1` tag → v1 LANDED.
+**Predecessor team-lead session:** rotated at the v1-close-seam after cluster-1.5 close tag landed + status doc + handover doc update.
+**Supervisor session:** continuous from cluster-2 close trajectory; see `docs/cluster-audits/phase-3-supervisor-handover.md` for supervisor-side state (last updated cluster-2-close seam; may need refresh on rotation).
+
+## v1-close seam state at handover (2026-05-17)
+
+| Cluster | Status | Canonical-MET commit | Tag |
+|---|---|---|---|
+| Cluster-0+1 | CLOSED 2026-05-16 (V3-S5 architectural sunset + V3-S6 5-checkpoint chain + 4 multi-session chains; bulldozer cadence operational) | bb5b2109 | `phase-3-cluster-0-close` + `phase-3-cluster-1-close` |
+| Cluster-2 | CLOSED 2026-05-16 (V3-S6f RESOLVED + 8/8 user-fn coverage + Char-literal MIR + UAF correctness + tracing migration + 13/35 jit_print arms + ALL §A-§I gates MET; 6 sub-cluster dispatches across 4 closure-wave rounds + 1 inventory + 1 empirical) | 938929de | `phase-3-cluster-2-close` |
+| Cluster-1.5 | CLOSED 2026-05-17 (Smoke 5 dyn T LANDED + Q25.C.1+.2+.5 + v2-raw-heap-audit PARTIALLY RESOLVED + hashmap_filter SIGABRT FIXED via call_*_with_nb_args* closure-call boundary share-accounting; ReceiverGuard mirrors at op_get/op_set_field_typed) | 4368bc60 | `phase-3-cluster-1.5-close` |
+| Phase 4 | CLOSED 2026-05-16 (Add/AddAssign user-type support + UFCS dispatch fallback + bonus ReceiverGuard UB partial fix; landed in cluster-2 trajectory not separate phase tag) | 726d6a6a | (merged inside cluster-1.5 trajectory; no separate phase tag) |
+| v1 close | PENDING (v1 close-summary audit + v1 tag authorization remaining) | (TBD; likely e2941ef3 or v1-close-summary-merge commit) | `v1` (TBD; user authorizes) |
+
+## Cumulative discipline-pattern state at v1-close seam
+
+- **85 imprecision instances** cumulative (11 supervisor / 17 audit / 8 team-lead-prompt / 12 agent-execution-report / 37 candidate); ALL caught pre-merge; 0 bad-code merges into canonical preserved
+- **4 successful multi-session chains**: D4 6-sub-agent + Round 3b 4-sub-agent + V3-S5 10-checkpoint + V3-S6 5-checkpoint
+- **9 parallel-implementation defection refusals**: 8 cluster-0+1 + 1 cluster-1.5 audit-scope-expansion class (instance 85)
+- **5 ADR-006 amendments landed**: Q25.A SUPERSEDED + Q25.B SUPERSEDED + Path B §2.3 (D4) + §2.7.5.B per-HeapKind kinded jit_print (cw-D-fam12 + Family 3 extension) + §Q25.C.5 producer-side cascade addendum (cluster-1.5)
+- **4 user-authorized CLAUDE.md modifications**: 2026-05-14 compaction + Renames-to-refuse-on-sight broader-family regex (R17) + Known Constraints v2-raw-heap-audit RE-CLASSIFIED 2026-05-16 + PARTIALLY RESOLVED 2026-05-17
+
+## Reading observations operational at v1-close seam
+
+- **Reading 3** (cadence-tightening, 2026-05-16): max ~100 lines / relay; one refinement pass / dispatch prompt; surfacings = facts + one ask; no taxonomy ceremony. OPERATIONAL.
+- **Reading 4** (architectural-prediction-subclass-recovery, 2026-05-16): in-scope-recovery pattern operational across 8+ cluster-2 sub-clusters + cluster-1.5-q25c + cluster-1.5-empirical-isolation. When a sub-agent surfaces a consumer-side gap mid-execution, in-scope fix preferable to surface-and-stop-then-dispatch-separately.
+- **Reading 5 candidate** (parallel-sub-agent imprecision-numbering reconciliation): team-lead renumbers in merge order at status doc subsection. OPERATIONAL across Round 1+2+3+4 (cluster-2) + Phase 4 + cluster-1.5.
+- **Reading 6 candidate** (territory-misdispatch class): prefer empirical-verification-first for un-mapped or partially-known territories. Operational at cw-B (team-lead territory misdispatch) + cluster-1.5-empirical-isolation (audit-territory misdispatch). **v1-close audit dispatch should use empirical-verification-first per Reading 6.**
+
+## Cadence binding (carry forward; load-bearing for v1-close audit dispatch)
+
+- Refuse #10 anti-deferral framings ("preserve X for cluster-3+" / "defer to post-v1" as scope-avoidance — distinct from explicit-cite structured-defer)
+- Refuse #11 Ptr-newtype-shim defection (TypedObjectPtr / TraitObjectPtr per D4 canonical, not transitional shims)
+- "Pre-existing" framing FORBIDDEN if sub-agent introduces a regression (per CLAUDE.md "Own all code quality"; instance 82 CRITICAL recovery precedent)
+- All standard refuse-on-sight items + cluster-2 canonical refusal set carries forward to v1-close-audit dispatch
+
+## Decision authority pattern (carry forward)
+
+- **Supervisor authorizes:** cluster scope, ADR amendments, sub-cluster dispatch shape, defection-pattern refusals at meta-architectural layer
+- **User authorizes:** CLAUDE.md modifications, cluster-close tags (incl. `v1` tag), language-design semantics, project-scope decisions
+- **Team-lead authorizes:** wave-agent dispatch within supervisor-ratified scope, close-gate verification, merge ceremony, take-both resolution, status doc updates, AGENTS.md updates, reopen via SendMessage for small recoverable fixes (per S1-R18 precedent)
+
+## Smoke matrix at v1-close seam (canonical e2941ef3)
+
+| Smoke | VM | JIT |
+|---|---|---|
+| s1 (scalar loop) | ✅ 4950 | ✅ 4950 |
+| s2 (`xs.map(\|x\|x*2).sum()`) | ✅ 30 | ✅ 30 |
+| s3 (canonical UFCS) | ✅ x | ✅ x |
+| s4 (Set + .add + .size) | ✅ 2 | ✅ 2 |
+| s5 (dyn T trait dispatch) | ✅ x | ✅ x |
+
+**5/5 VM == JIT preserved at canonical fixture.** Original kickoff prompt smokes 1-4 + new Smoke 5 added at cluster-1.5-q25c-trait-object-rebuild close 2026-05-16.
+
+## Immediate next actions (in order; fresh team-lead reads handover + posts 1-line confirmation + executes)
+
+### Action 1: dispatch v1 close-summary audit sub-agent (per supervisor (b) 2026-05-17)
+
+Single audit-style sub-agent producing `docs/cluster-audits/v1-close-summary.md` with sections:
+
+- **§0** v1 acceptance criteria (Smoke matrix 5/5; all 4 cluster tags landed; cumulative discipline state; all close-criterion gates verified at canonical)
+- **§1** Cluster-by-cluster close trajectory (cluster-0+1 + cluster-2 + cluster-1.5 + Phase 4; per-cluster close commit + tag + key architectural deliverables + multi-session-chain summary)
+- **§2** ADR-006 amendment landings inventory (5 amendments: Q25.A SUPERSEDED + Q25.B SUPERSEDED + Path B §2.3 + §2.7.5.B per-HeapKind kinded jit_print + §Q25.C.5 producer-side cascade addendum)
+- **§3** CLAUDE.md modifications landings inventory (4 modifications: 2026-05-14 compaction + Renames-to-refuse-on-sight broader-family regex + Known Constraints v2-raw-heap-audit RE-CLASSIFIED 2026-05-16 + PARTIALLY RESOLVED 2026-05-17)
+- **§4** Cumulative discipline-pattern statistics (85 imprecisions caught pre-merge; 0 bad-code merges; 9 parallel-impl refusals; 4 multi-session chains; Reading 3-6 patterns operational)
+- **§5** Outstanding post-v1 territory (Q25.C.3/.4/.6/.7 follow-ups + 22/35 remaining kinded jit_print arms + length_typed_object_empty + w17_comptime_* SIGABRTs + ~48 pre-existing shape-test failures + Phase 4 imprecision 83 follow-up + AGENTS.md V3-S6 chain rows annotation deferred at cluster-2-Round-3 budget overrun)
+- **§6** Draft `v1` tag annotation message (paste-ready for user authorization; mirrors cluster-2 + cluster-1.5 tag annotation shape but at v1 scope)
+- **§7** Carry-forward post-v1 roadmap candidate (cluster-3+ territory candidates; NOT v1 scope; for next-cycle planning)
+
+Audit-only close (no source changes); standard gates (cargo check workspace + verify-merge.sh 12/12 + check-no-dynamic + smoke matrix 5/5 preserved); AGENTS.md row appended. Worktree from canonical HEAD.
+
+Dispatch prompt mirrors Wave 1 audit-day + cluster-2-inventory-audit-day + cluster-1.5-v2-raw-heap-audit shape. Empirical-verification-first discipline (Reading 6).
+
+### Action 2: ratify v1 close-summary close + surface to supervisor + user
+
+After sub-agent close:
+- Team-lead verifies close gate (cargo check workspace EXIT=0 + verify-merge.sh 12/12 + check-no-dynamic EXIT=0 + smoke matrix 5/5 preserved at worktree)
+- Surface v1 close-summary close report + v1 tag annotation draft to supervisor per cadence binding (facts + one ask)
+- Supervisor ratifies v1 close-criterion gates MET + tag annotation shape → relays to user for `v1` tag authorization
+- User authorizes `v1` tag → team-lead lands tag on canonical at supervisor-+-user-authorized commit
+
+### Action 3: v1 LANDED
+
+Final commit: `v1` tag annotated on canonical (likely e2941ef3 OR v1-close-summary-audit-merge commit per supervisor disposition at close time). Status doc final subsection records v1 close ceremony. Worktree+branch cleanup. v1 trajectory complete.
+
+## Pending items archived at v1-close seam
+
+All 4 cluster tags annotated; status doc + AGENTS.md + ADR-006 + CLAUDE.md all in canonical-correct state for v1 tag landing.
+
+## Pending items beyond v1 (post-v1 polish/perf/tooling workstreams)
+
+- Q25.C.3 generic method TypeInfo threading + Q25.C.4 #[static_only] opt-out + Q25.C.6 IC devirtualization + Q25.C.7 LSP cost-class inlay hints (cluster-1.5-fast-path / cluster-1.5-lsp / cluster-1.5-tooling-adjacent candidates)
+- 22/35 remaining kinded jit_print arms (per inventory §E.5 7 remaining families; cluster-3+)
+- length_typed_object_empty + w17_comptime_* SIGABRTs (post-v1 v2-raw class residuals; cluster-3+)
+- Phase 4 imprecision 83 follow-up (return-typeless prelude-imported trait method poisons Vec.map<U> monomorphization; phase-4-followup-return-typeless-trait-method-monomorphization)
+- AGENTS.md V3-S6 chain rows annotation (~15+ edits deferred at cluster-2 Round 3 budget overrun; doc-discipline sub-cluster candidate)
+- ~48 pre-existing shape-test failures (10 failure classes per V3-baseline-classification; structured-deferred at cluster-2-cw-shape-test-residuals-triage; cluster-3+ per-class scope)
+
+---
+
+**Historical content below preserved for archaeology** (cluster-0+1 + cluster-2 + cluster-1.5 trajectory dispositions; reference only for fresh team-lead context; do NOT re-execute):
+
+---
 
 ## Your role this session
 
