@@ -1540,4 +1540,156 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             }
         }
     }
+
+    /// W10 jit-call-method-user-trait-fix (2026-05-17): emit a user-type
+    /// operator-trait dispatch as a method-call equivalent, writing the
+    /// result into `destination`.
+    ///
+    /// Mirror of the `MirConstant::Method` `TerminatorKind::Call` path at
+    /// `compile_terminator` (this file, lines ~315-431), reused for the
+    /// MIR `Rvalue::BinaryOp` / `Rvalue::UnaryOp` sites whose source span
+    /// is recorded in `operator_trait_dispatch_sites` (populated at
+    /// bytecode-compile time at `crates/shape-vm/src/compiler/expressions/
+    /// binary_ops.rs::emit_operator_trait_call` and the parallel Neg/Not
+    /// sites at `crates/shape-vm/src/compiler/expressions/unary_ops.rs`).
+    ///
+    /// `receiver_operands` is a single-element slice with the receiver
+    /// (lhs for binary, operand for unary). `extra_args` is the remainder
+    /// (rhs for binary; empty for unary). The split shape mirrors the
+    /// bytecode-side `OpCode::CallMethod` ABI where the receiver is
+    /// `args[0]` and any explicit method arguments follow.
+    ///
+    /// Does NOT emit a continuation jump (the caller is inside a
+    /// `StatementKind::Assign` handler, not a Call terminator).
+    pub(crate) fn emit_user_trait_method_call(
+        &mut self,
+        method_name: &str,
+        receiver_operands: &[shape_vm::mir::types::Operand],
+        extra_args: &[shape_vm::mir::types::Operand],
+        destination: &shape_vm::mir::types::Place,
+    ) -> Result<(), String> {
+        let stack_base_offset = crate::context::STACK_OFFSET as i32;
+        let sp_offset = crate::context::STACK_PTR_OFFSET as i32;
+
+        let old_sp = self.builder.ins().load(
+            types::I64,
+            MemFlags::new(),
+            self.ctx_ptr,
+            sp_offset,
+        );
+
+        // ADR-006 §2.7.7 / Q9 lockstep: every data push stamps the parallel-
+        // kind track in the same slot. Mirrors `compile_terminator`'s
+        // `MirConstant::Method` arm: args[0] = receiver, args[1..] =
+        // explicit method arguments. Each operand is widened to 8-byte I64
+        // per the JIT-stack ABI; no NaN-box tagging.
+        let combined: Vec<&shape_vm::mir::types::Operand> = receiver_operands
+            .iter()
+            .chain(extra_args.iter())
+            .collect();
+        for (i, arg) in combined.iter().enumerate() {
+            let arg_kind = self.operand_slot_kind_or_carrier(arg);
+            let val = self.compile_operand(arg)?;
+            let val_ty = self.builder.func.dfg.value_type(val);
+            let boxed = if val_ty == types::I64 {
+                val
+            } else if val_ty == types::F64 {
+                self.builder
+                    .ins()
+                    .bitcast(types::I64, MemFlags::new(), val)
+            } else if val_ty == types::I32 {
+                self.builder.ins().sextend(types::I64, val)
+            } else if val_ty == types::I8 {
+                self.builder.ins().uextend(types::I64, val)
+            } else if val_ty == types::I16 {
+                self.builder.ins().sextend(types::I64, val)
+            } else {
+                val
+            };
+            let slot_idx = self.builder.ins().iadd_imm(old_sp, i as i64);
+            let byte_off = self.builder.ins().ishl_imm(slot_idx, 3);
+            let abs_off = self
+                .builder
+                .ins()
+                .iadd_imm(byte_off, stack_base_offset as i64);
+            let store_addr = self.builder.ins().iadd(self.ctx_ptr, abs_off);
+            self.builder
+                .ins()
+                .store(MemFlags::new(), boxed, store_addr, 0);
+            self.emit_kind_track_write(slot_idx, arg_kind);
+        }
+
+        // Push method name (heap String) — kind = NativeKind::String.
+        let method_str_bits =
+            crate::ffi::value_ffi::box_string(method_name.to_string());
+        let method_val = self
+            .builder
+            .ins()
+            .iconst(types::I64, method_str_bits as i64);
+        let method_slot_idx = self
+            .builder
+            .ins()
+            .iadd_imm(old_sp, combined.len() as i64);
+        let method_byte_off = self.builder.ins().ishl_imm(method_slot_idx, 3);
+        let method_abs_off = self
+            .builder
+            .ins()
+            .iadd_imm(method_byte_off, stack_base_offset as i64);
+        let method_addr = self.builder.ins().iadd(self.ctx_ptr, method_abs_off);
+        self.builder
+            .ins()
+            .store(MemFlags::new(), method_val, method_addr, 0);
+        self.emit_kind_track_write(
+            method_slot_idx,
+            shape_value::NativeKind::String,
+        );
+
+        // Push arg_count = explicit args (excludes receiver) — UInt64 carrier.
+        let actual_arg_count = extra_args.len() as i64;
+        let argc_val = self.builder.ins().iconst(types::I64, actual_arg_count);
+        let argc_slot_idx = self
+            .builder
+            .ins()
+            .iadd_imm(old_sp, (combined.len() + 1) as i64);
+        let argc_byte_off = self.builder.ins().ishl_imm(argc_slot_idx, 3);
+        let argc_abs_off = self
+            .builder
+            .ins()
+            .iadd_imm(argc_byte_off, stack_base_offset as i64);
+        let argc_addr = self.builder.ins().iadd(self.ctx_ptr, argc_abs_off);
+        self.builder
+            .ins()
+            .store(MemFlags::new(), argc_val, argc_addr, 0);
+        self.emit_kind_track_write(
+            argc_slot_idx,
+            shape_value::NativeKind::UInt64,
+        );
+
+        // Update stack_ptr: receiver(s) + extra_args + method_name + arg_count.
+        let total_items = combined.len() + 2;
+        let new_sp = self.builder.ins().iadd_imm(old_sp, total_items as i64);
+        self.builder
+            .ins()
+            .store(MemFlags::new(), new_sp, self.ctx_ptr, sp_offset);
+
+        // Call jit_call_method(ctx, total_count).
+        let count_val = self.builder.ins().iconst(types::I64, total_items as i64);
+        let inst = self.builder.ins().call(
+            self.ffi.call_method,
+            &[self.ctx_ptr, count_val],
+        );
+        let result = self.builder.inst_results(inst)[0];
+
+        // Restore stack_ptr to old value.
+        self.builder
+            .ins()
+            .store(MemFlags::new(), old_sp, self.ctx_ptr, sp_offset);
+
+        // Write result to destination + reload referenced locals (per
+        // the standard Call-terminator wind-down).
+        self.write_place(destination, result)?;
+        self.reload_referenced_locals();
+
+        Ok(())
+    }
 }

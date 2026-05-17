@@ -89,7 +89,7 @@ fn emit_cmp_result_comparison(compiler: &mut BytecodeCompiler, op: &BinaryOp) {
     compiler.emit(Instruction::simple(cmp_op));
 }
 
-fn try_emit_trait_dispatch(compiler: &mut BytecodeCompiler, op: &BinaryOp, left_schema: Option<SchemaId>, left_expr: &Expr) -> bool {
+fn try_emit_trait_dispatch(compiler: &mut BytecodeCompiler, op: &BinaryOp, left_schema: Option<SchemaId>, left_expr: &Expr, op_span: Span) -> bool {
     let trait_name = match operator_trait_for_op(op) { Some(t) => t, None => return false };
     let method_name = match operator_trait_method_for_op(op) { Some(m) => m, None => return false };
     let has_trait_via_schema = left_schema
@@ -100,7 +100,7 @@ fn try_emit_trait_dispatch(compiler: &mut BytecodeCompiler, op: &BinaryOp, left_
         compiler.type_inference.env.type_implements_trait(&name, trait_name)
     });
     if !has_trait { return false; }
-    emit_operator_trait_call(compiler, method_name);
+    emit_operator_trait_call(compiler, method_name, op_span);
     if is_ordered_comparison(op) { emit_cmp_result_comparison(compiler, op); }
     true
 }
@@ -108,7 +108,16 @@ fn try_emit_trait_dispatch(compiler: &mut BytecodeCompiler, op: &BinaryOp, left_
 /// Emit a `CallMethod` instruction targeting an operator trait method
 /// (e.g. `Vec2::add`). Both operands must already be on the stack: receiver
 /// first, then the right-hand-side argument.
-fn emit_operator_trait_call(compiler: &mut BytecodeCompiler, method_name: &'static str) {
+///
+/// `op_span` is the source span of the parent `Expr::BinaryOp` /
+/// `Expr::UnaryOp` node. W10 jit-call-method-user-trait-fix (2026-05-17):
+/// records the dispatch in `BytecodeProgram.operator_trait_dispatch_sites`
+/// so the JIT MIR consumer at `crates/shape-jit/src/mir_compiler/rvalues.
+/// rs::compile_rvalue` can re-emit the same dispatch at the matching
+/// `Rvalue::BinaryOp` / `Rvalue::UnaryOp` site (keyed by the same span
+/// the MIR lowering at `crates/shape-vm/src/mir/lowering/expr.rs::
+/// lower_expr_to_temp` stamps on the statement via `expr.span()`).
+fn emit_operator_trait_call(compiler: &mut BytecodeCompiler, method_name: &'static str, op_span: Span) {
     let method_id = shape_value::MethodId::from_name(method_name);
     let string_id = compiler.program.add_string(method_name.to_string());
     compiler.emit(Instruction::new(
@@ -119,6 +128,14 @@ fn emit_operator_trait_call(compiler: &mut BytecodeCompiler, method_name: &'stat
             string_id,
          receiver_type_tag: 0xFF, }),
     ));
+    // ADR-006 §2.7.5 W10 conduit: persist the bytecode-time trait-dispatch
+    // decision so the JIT MIR consumer can lift `Rvalue::BinaryOp` at the
+    // same source span to a method-call equivalent. arg_count = 1 (binary
+    // ops dispatch a single explicit RHS argument; receiver is implicit).
+    compiler
+        .program
+        .operator_trait_dispatch_sites
+        .insert(op_span, (method_name.to_string(), 1));
     compiler.last_expr_schema = None;
     compiler.last_expr_type_info = None;
     compiler.last_expr_numeric_type = None;
@@ -449,6 +466,7 @@ impl BytecodeCompiler {
         op: &BinaryOp,
         left: &Expr,
         right: &Expr,
+        op_span: Span,
     ) -> Result<bool> {
         if !matches!(op, BinaryOp::Equal | BinaryOp::NotEqual) {
             return Ok(false);
@@ -628,7 +646,7 @@ impl BytecodeCompiler {
         if has_eq_impl {
             self.compile_expr(left)?;
             self.compile_expr(right)?;
-            emit_operator_trait_call(self, "eq");
+            emit_operator_trait_call(self, "eq", op_span);
             if is_neq {
                 self.emit(Instruction::simple(OpCode::Not));
             }
@@ -687,12 +705,19 @@ impl BytecodeCompiler {
         }
     }
 
-    /// Compile a binary operation expression
+    /// Compile a binary operation expression.
+    ///
+    /// `op_span` is the source span of the parent `Expr::BinaryOp` node
+    /// (W10 jit-call-method-user-trait-fix, 2026-05-17). Threaded into
+    /// `emit_operator_trait_call` / `try_emit_trait_dispatch` so the
+    /// operator-trait-dispatch side-table keys match the MIR lowering's
+    /// statement span (see `crates/shape-vm/src/mir/lowering/expr.rs:1716`).
     pub(super) fn compile_expr_binary_op(
         &mut self,
         left: &Expr,
         op: &BinaryOp,
         right: &Expr,
+        op_span: Span,
     ) -> Result<()> {
         match op {
             BinaryOp::And => {
@@ -870,7 +895,7 @@ impl BytecodeCompiler {
                         // Phase 2.5: operator trait dispatch via CallMethod.
                         // The left operand (receiver) and right operand (arg)
                         // are already on the stack from compile_expr above.
-                        emit_operator_trait_call(self, "add");
+                        emit_operator_trait_call(self, "add", op_span);
                     } else {
                         self.compile_typed_merge(left_id, right_id)?;
                         self.last_expr_numeric_type = None;
@@ -1164,7 +1189,7 @@ impl BytecodeCompiler {
                             // mixed string, polyglot value). Strict-typing
                             // sweep (Phase 1): that dynamic-fallback emission
                             // is now a hard compile error.
-                            if !try_emit_trait_dispatch(self, &BinaryOp::Add, left_schema, left) {
+                            if !try_emit_trait_dispatch(self, &BinaryOp::Add, left_schema, left, op_span) {
                                 return Err(strict_typing_binop_error(
                                     self,
                                     &BinaryOp::Add,
@@ -1222,7 +1247,7 @@ impl BytecodeCompiler {
                                     .type_implements_trait(&schema.name, trait_name)
                             });
                         if left_implements {
-                            emit_operator_trait_call(self, method_name);
+                            emit_operator_trait_call(self, method_name, op_span);
                             return Ok(());
                         }
                     }
@@ -1306,7 +1331,7 @@ impl BytecodeCompiler {
                                         .type_implements_trait(&name, trait_name)
                                 });
                         if has_trait {
-                            emit_operator_trait_call(self, method_name);
+                            emit_operator_trait_call(self, method_name, op_span);
                             return Ok(());
                         }
                     }
@@ -1387,7 +1412,7 @@ impl BytecodeCompiler {
                 // the PRIMARY path for Equal/NotEqual; the legacy slot-tracker
                 // dispatch below is the secondary fallback for cases inference
                 // can't resolve.
-                if self.compile_typed_equality(op, left, right)? {
+                if self.compile_typed_equality(op, left, right, op_span)? {
                     return Ok(());
                 }
 
@@ -1631,7 +1656,7 @@ impl BytecodeCompiler {
                         });
                     if dispatches_via_trait {
                         if let Some(method_name) = operator_trait_method_for_op(op) {
-                            emit_operator_trait_call(self, method_name);
+                            emit_operator_trait_call(self, method_name, op_span);
                             if is_ordered_comparison(op) {
                                 emit_cmp_result_comparison(self, op);
                             }
@@ -1656,7 +1681,7 @@ impl BytecodeCompiler {
                         // Op has no typed variant for this type combination.
                         // Strict-typing sweep (Phase 1): the historical
                         // dynamic-opcode fallback is now a hard compile error.
-                        if !try_emit_trait_dispatch(self, op, left_schema, left) {
+                        if !try_emit_trait_dispatch(self, op, left_schema, left, op_span) {
                             return Err(strict_typing_binop_error(self, op, left, right));
                         }
                     }
@@ -1675,7 +1700,7 @@ impl BytecodeCompiler {
                             _ => {
                                 // Strict-typing sweep (Phase 1): the historical
                                 // dynamic-opcode fallback is now a hard compile error.
-                                if !try_emit_trait_dispatch(self, op, left_schema, left) {
+                                if !try_emit_trait_dispatch(self, op, left_schema, left, op_span) {
                                     return Err(strict_typing_binop_error(
                                         self, op, left, right,
                                     ));

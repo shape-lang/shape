@@ -1193,7 +1193,31 @@ fn infer_rvalue_kind_with_projections(
             field_name_table,
             concrete_types,
         ),
-        Rvalue::UnaryOp(UnOp::Not, _) => Some(NativeKind::Bool),
+        // W10 jit-call-method-user-trait-fix (2026-05-17): when the
+        // operand is a user-struct receiver (`Ptr(HeapKind::TypedObject)`),
+        // the `!x` lowering routes through the `Not::not(self) -> Self`
+        // trait method, returning the same user-struct kind. The legacy
+        // `Bool` arm only fires for the built-in `!bool` form (where
+        // the operand's kind is `Bool` already).
+        Rvalue::UnaryOp(UnOp::Not, operand) => {
+            let op_kind = infer_operand_kind_with_projections(
+                operand,
+                kinds,
+                field_kinds,
+                field_name_table,
+                concrete_types,
+            );
+            // User-struct receiver → trait dispatch returns Self (same
+            // pointer kind). Any other operand kind → built-in `!bool`
+            // (Bool result by construction). `None` operand kind →
+            // surface unstamped per §2.7.7 #9 / forbidden #9 (no
+            // fabricated default).
+            match op_kind {
+                Some(shape_value::NativeKind::Ptr(_)) => op_kind,
+                Some(_) => Some(NativeKind::Bool),
+                None => None,
+            }
+        }
         Rvalue::Clone(operand) => infer_operand_kind_with_projections(
             operand,
             kinds,

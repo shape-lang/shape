@@ -2,15 +2,27 @@
 
 use crate::bytecode::{Instruction, OpCode, Operand};
 use crate::type_tracking::NumericType;
-use shape_ast::ast::{Expr, UnaryOp};
+use shape_ast::ast::{Expr, Span, UnaryOp};
 use shape_ast::error::Result;
 
 use super::super::BytecodeCompiler;
 use super::numeric_ops::inferred_type_to_numeric;
 
 impl BytecodeCompiler {
-    /// Compile a unary operation expression
-    pub(super) fn compile_expr_unary_op(&mut self, op: &UnaryOp, operand: &Expr) -> Result<()> {
+    /// Compile a unary operation expression.
+    ///
+    /// `op_span` is the source span of the parent `Expr::UnaryOp` node
+    /// (W10 jit-call-method-user-trait-fix, 2026-05-17). Recorded in
+    /// `BytecodeProgram.operator_trait_dispatch_sites` at the Neg/Not
+    /// trait-dispatch branches so the JIT MIR consumer can re-emit the
+    /// dispatch at the matching `Rvalue::UnaryOp` site (keyed by the
+    /// same span the MIR lowering stamps via `expr.span()`).
+    pub(super) fn compile_expr_unary_op(
+        &mut self,
+        op: &UnaryOp,
+        operand: &Expr,
+        op_span: Span,
+    ) -> Result<()> {
         self.compile_expr(operand)?;
         match op {
             UnaryOp::BitNot => {
@@ -97,6 +109,14 @@ impl BytecodeCompiler {
                             string_id,
                          receiver_type_tag: 0xFF, }),
                     ));
+                    // ADR-006 §2.7.5 W10 conduit: persist the bytecode-time
+                    // unary-trait-dispatch decision so the JIT MIR consumer
+                    // can lift `Rvalue::UnaryOp(Neg, _)` at the same source
+                    // span to a method-call equivalent. arg_count = 0 for
+                    // unary ops (only the receiver, no explicit args).
+                    self.program
+                        .operator_trait_dispatch_sites
+                        .insert(op_span, ("neg".to_string(), 0));
                     self.last_expr_schema = None;
                     self.last_expr_type_info = None;
                     self.last_expr_numeric_type = None;
@@ -198,6 +218,11 @@ impl BytecodeCompiler {
                             receiver_type_tag: 0xFF,
                         }),
                     ));
+                    // ADR-006 §2.7.5 W10 conduit: persist the bytecode-time
+                    // unary-trait-dispatch decision (Not sibling of Neg above).
+                    self.program
+                        .operator_trait_dispatch_sites
+                        .insert(op_span, ("not".to_string(), 0));
                     self.last_expr_schema = None;
                     self.last_expr_type_info = None;
                     self.last_expr_numeric_type = None;

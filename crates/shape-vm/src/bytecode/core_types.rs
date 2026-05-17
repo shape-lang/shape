@@ -438,6 +438,58 @@ pub struct BytecodeProgram {
             shape_value::v2::ConcreteType,
         >,
 
+    /// ADR-006 §2.7.5 conduit — per-binop-or-unop-site operator trait
+    /// dispatch side-table (W10 jit-call-method-user-trait-fix close,
+    /// 2026-05-17).
+    ///
+    /// Populated at bytecode-compile time by
+    /// `compile_expr_binary_op` / `compile_expr_unary_op` whenever the
+    /// bytecode emits an `OpCode::CallMethod` for user-type operator
+    /// overloading (the trait-dispatch branches in
+    /// `crates/shape-vm/src/compiler/expressions/binary_ops.rs:1469-1474`,
+    /// `binary_ops.rs::try_emit_trait_dispatch`, and
+    /// `crates/shape-vm/src/compiler/expressions/unary_ops.rs:89-103`
+    /// (Neg) / `:189-203` (Not)). Keyed by the AST `Span` of the
+    /// `Expr::BinaryOp` / `Expr::UnaryOp` node — the same span the MIR
+    /// lowering at `crates/shape-vm/src/mir/lowering/expr.rs::
+    /// lower_expr_to_temp` stamps on the produced
+    /// `Rvalue::BinaryOp` / `Rvalue::UnaryOp` statement via `expr.span()`.
+    ///
+    /// Consumed at the JIT MIR codegen
+    /// (`crates/shape-jit/src/mir_compiler/rvalues.rs::compile_rvalue`'s
+    /// `Rvalue::BinaryOp` / `Rvalue::UnaryOp` arms) — when the side-table
+    /// has an entry for the producing statement's span, the JIT emits
+    /// a method-call equivalent (mirror of the
+    /// `MirConstant::Method` Call-terminator path at
+    /// `mir_compiler/terminators.rs:315`) instead of the native
+    /// arithmetic / unary lowering. Result kind flows via the existing
+    /// concrete-types conduit (see the trait-method-return chain at
+    /// `crates/shape-vm/src/compiler/helpers.rs::
+    /// infer_top_level_concrete_types_from_mir_with_resolvers`).
+    ///
+    /// Why this side-table rather than rewriting MIR at lowering: MIR
+    /// lowering has no access to the trait registry / type tracker (it's
+    /// a pure AST→MIR transform; `lower_function_detailed` takes only
+    /// `name, params, body, span`). The bytecode compiler is the load-
+    /// bearing tier that already proves operator-trait dispatch via
+    /// `type_implements_trait`; persisting that decision via this side-
+    /// table threads the same proof to the JIT consumer without
+    /// duplicating type analysis or routing a trait registry through
+    /// MIR lowering (which would be an ADR-level architectural change).
+    /// Mirrors the established `value_call_return_concrete_types` /
+    /// `monomorphized_method_call_sites` side-table pattern.
+    ///
+    /// `#[serde(skip, default)]` per the same wire-format rationale as
+    /// `function_return_concrete_types` — `Span` carries source-position
+    /// offsets that aren't a stable wire shape.
+    ///
+    /// Value `arg_count` is `1` for binary operator dispatch (Add/Sub/
+    /// Mul/Div/Mod + Ord-family Greater/Less/GreaterEq/LessEq), `0` for
+    /// unary (Neg/Not).
+    #[serde(skip, default)]
+    pub operator_trait_dispatch_sites:
+        std::collections::HashMap<shape_ast::ast::span::Span, (String, u16)>,
+
     /// Type schema registry for TypedObject field resolution
     /// Used to convert TypedObject back to Object when needed
     #[serde(default)]

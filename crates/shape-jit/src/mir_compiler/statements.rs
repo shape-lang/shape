@@ -93,6 +93,43 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // Release old value if overwriting a heap local.
                 self.release_old_value_if_heap(place)?;
                 // Compile the rvalue.
+                //
+                // W10 jit-call-method-user-trait-fix (2026-05-17): if the
+                // rvalue is a `BinaryOp` / `UnaryOp` whose source span is
+                // recorded in `operator_trait_dispatch_sites`, lower it as
+                // a method-call equivalent (writing the destination place
+                // directly) and return early. Otherwise fall through to
+                // the standard `compile_rvalue` path.
+                if let Rvalue::BinaryOp(_, lhs, rhs) = rvalue {
+                    if let Some((method_name, _arg_count)) = self
+                        .operator_trait_dispatch_sites
+                        .get(&stmt.span)
+                        .cloned()
+                    {
+                        self.emit_user_trait_method_call(
+                            &method_name,
+                            std::slice::from_ref(lhs),
+                            std::slice::from_ref(rhs),
+                            place,
+                        )?;
+                        return Ok(());
+                    }
+                }
+                if let Rvalue::UnaryOp(_, operand) = rvalue {
+                    if let Some((method_name, _arg_count)) = self
+                        .operator_trait_dispatch_sites
+                        .get(&stmt.span)
+                        .cloned()
+                    {
+                        self.emit_user_trait_method_call(
+                            &method_name,
+                            std::slice::from_ref(operand),
+                            &[],
+                            place,
+                        )?;
+                        return Ok(());
+                    }
+                }
                 let val = self.compile_rvalue(rvalue)?;
                 // Write the new value.
                 self.write_place(place, val)?;

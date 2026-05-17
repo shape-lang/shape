@@ -541,6 +541,8 @@ pub fn program_from_blobs_by_hash(
         monomorphized_method_call_sites: source.monomorphized_method_call_sites.clone(),
         value_call_return_concrete_types:
             source.value_call_return_concrete_types.clone(),
+        operator_trait_dispatch_sites:
+            source.operator_trait_dispatch_sites.clone(),
         data_schema: source.data_schema.clone(),
         type_schema_registry: source.type_schema_registry.clone(),
         trait_method_symbols: source.trait_method_symbols.clone(),
@@ -703,6 +705,8 @@ fn create_stub_program(program: &BytecodeProgram) -> BytecodeProgram {
             monomorphized_method_call_sites: ca.monomorphized_method_call_sites.clone(),
             value_call_return_concrete_types:
                 ca.value_call_return_concrete_types.clone(),
+            operator_trait_dispatch_sites:
+                ca.operator_trait_dispatch_sites.clone(),
             data_schema: ca.data_schema.clone(),
             type_schema_registry: ca.type_schema_registry.clone(),
             trait_method_symbols: ca.trait_method_symbols.clone(),
@@ -1619,6 +1623,7 @@ mod tests {
             function_return_concrete_types: Vec::new(),
             monomorphized_method_call_sites: HashMap::new(),
             value_call_return_concrete_types: HashMap::new(),
+            operator_trait_dispatch_sites: HashMap::new(),
             data_schema: None,
             type_schema_registry: shape_runtime::type_schema::TypeSchemaRegistry::new(),
             trait_method_symbols: HashMap::new(),
@@ -1770,6 +1775,7 @@ mod tests {
             function_return_concrete_types: Vec::new(),
             monomorphized_method_call_sites: HashMap::new(),
             value_call_return_concrete_types: HashMap::new(),
+            operator_trait_dispatch_sites: HashMap::new(),
             data_schema: None,
             type_schema_registry: shape_runtime::type_schema::TypeSchemaRegistry::new(),
             trait_method_symbols: HashMap::new(),
@@ -2127,6 +2133,7 @@ mod tests {
             function_return_concrete_types: Vec::new(),
             monomorphized_method_call_sites: HashMap::new(),
             value_call_return_concrete_types: HashMap::new(),
+            operator_trait_dispatch_sites: HashMap::new(),
             data_schema: None,
             type_schema_registry: shape_runtime::type_schema::TypeSchemaRegistry::new(),
             trait_method_symbols: HashMap::new(),
@@ -2188,6 +2195,7 @@ mod tests {
             function_return_concrete_types: Vec::new(),
             monomorphized_method_call_sites: HashMap::new(),
             value_call_return_concrete_types: HashMap::new(),
+            operator_trait_dispatch_sites: HashMap::new(),
             data_schema: None,
             type_schema_registry: shape_runtime::type_schema::TypeSchemaRegistry::new(),
             trait_method_symbols: HashMap::new(),

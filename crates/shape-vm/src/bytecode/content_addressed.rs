@@ -260,6 +260,17 @@ pub struct Program {
             shape_value::v2::ConcreteType,
         >,
 
+    /// ADR-006 §2.7.5 conduit (W10 jit-call-method-user-trait-fix close,
+    /// 2026-05-17): content-addressed mirror of
+    /// `BytecodeProgram.operator_trait_dispatch_sites`. Survives the
+    /// `Program` → `link()` → `LinkedProgram` → `BytecodeProgram`
+    /// round-trip so the JIT consumer can re-emit user-type binary/unary
+    /// trait-dispatch as method-call IR. Not serialised — Spans carry
+    /// source-position offsets that aren't a stable wire shape.
+    #[serde(skip, default)]
+    pub operator_trait_dispatch_sites:
+        HashMap<shape_ast::ast::span::Span, (String, u16)>,
+
     /// DataFrame schema for column name resolution.
     pub data_schema: Option<DataFrameSchema>,
 
@@ -456,6 +467,15 @@ pub struct LinkedProgram {
             (shape_ast::ast::span::Span, Option<usize>),
             shape_value::v2::ConcreteType,
         >,
+
+    /// ADR-006 §2.7.5 conduit (W10 jit-call-method-user-trait-fix close,
+    /// 2026-05-17): LinkedProgram mirror of
+    /// `Program.operator_trait_dispatch_sites` — propagated through the
+    /// linker so the JIT consumer can re-emit user-type binary/unary
+    /// trait-dispatch as method-call IR. Not serialised — same rationale.
+    #[serde(skip, default)]
+    pub operator_trait_dispatch_sites:
+        HashMap<shape_ast::ast::span::Span, (String, u16)>,
 
     /// Trait method dispatch registry.
     pub trait_method_symbols: HashMap<String, String>,
