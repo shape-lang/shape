@@ -43,9 +43,11 @@ use tower_lsp_server::ls_types::{
     InitializeParams, InitializeResult, InitializedParams, InlayHint, InlayHintOptions,
     InlayHintParams, InlayHintServerCapabilities, Location, MessageType, OneOf, Position,
     PrepareRenameResponse, Range, ReferenceParams, RenameOptions, RenameParams, SemanticToken,
-    SemanticTokensFullOptions, SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
-    SemanticTokensServerCapabilities, ServerCapabilities, ServerInfo, SignatureHelp,
-    SignatureHelpOptions, SignatureHelpParams, TextDocumentPositionParams,
+    SemanticTokens, SemanticTokensDelta, SemanticTokensDeltaParams, SemanticTokensEdit,
+    SemanticTokensFullDeltaResult, SemanticTokensFullOptions, SemanticTokensOptions,
+    SemanticTokensParams, SemanticTokensRangeParams, SemanticTokensRangeResult,
+    SemanticTokensResult, SemanticTokensServerCapabilities, ServerCapabilities, ServerInfo,
+    SignatureHelp, SignatureHelpOptions, SignatureHelpParams, TextDocumentPositionParams,
     TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Uri, WorkDoneProgressOptions,
     WorkspaceEdit, WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
@@ -64,6 +66,24 @@ pub struct ShapeLanguageServer {
     last_good_programs: DashMap<Uri, Program>,
     /// Manager for child language servers handling foreign function blocks.
     foreign_lsp: crate::foreign_lsp::ForeignLspManager,
+    /// Cache of last-returned semantic tokens per URI, keyed by `result_id`.
+    /// Used by `textDocument/semanticTokens/full/delta` (W2.8 feature 1.48) to
+    /// compute edit deltas instead of re-sending the full token list.
+    semantic_tokens_cache: DashMap<Uri, CachedSemanticTokens>,
+    /// Monotonic counter for generating unique `result_id` strings.
+    semantic_tokens_result_counter: std::sync::atomic::AtomicU64,
+}
+
+/// Cached semantic tokens for one document; produced by `semantic_tokens_full`
+/// and consumed by `semantic_tokens_full_delta` to compute edits.
+#[derive(Clone)]
+struct CachedSemanticTokens {
+    /// `result_id` returned alongside `data`; the client echoes this as
+    /// `previous_result_id` on subsequent delta requests.
+    result_id: String,
+    /// The token sequence in LSP delta-encoded form (the same vector that was
+    /// shipped to the client).
+    data: Vec<SemanticToken>,
 }
 
 impl ShapeLanguageServer {
@@ -78,7 +98,85 @@ impl ShapeLanguageServer {
             project_root: std::sync::OnceLock::new(),
             last_good_programs: DashMap::new(),
             foreign_lsp: crate::foreign_lsp::ForeignLspManager::new(default_workspace),
+            semantic_tokens_cache: DashMap::new(),
+            semantic_tokens_result_counter: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+
+    /// Mint a fresh `result_id` for a semantic-tokens response.
+    /// The counter is process-local; sufficient because clients only ever
+    /// echo the most-recent id (per LSP §textDocument_semanticTokens).
+    fn next_semantic_tokens_result_id(&self) -> String {
+        let n = self
+            .semantic_tokens_result_counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        format!("st-{}", n)
+    }
+
+    /// Build the full delta-encoded semantic-token list for a document,
+    /// merging base Shape tokens, frontmatter (toml) tokens, and foreign-LSP
+    /// (Python/TypeScript embedded-block) tokens. Shared by
+    /// `semantic_tokens_full`, `semantic_tokens_range`, and
+    /// `semantic_tokens_full_delta` so all three deliveries return identical
+    /// token data for identical inputs.
+    ///
+    /// Returns `None` when the document is not open.
+    async fn collect_full_semantic_tokens(&self, uri: &Uri) -> Option<SemanticTokens> {
+        let doc = self.documents.get(uri)?;
+        let text = doc.text();
+
+        let mut tokens = get_semantic_tokens(&text)?;
+        let mut absolute = decode_semantic_tokens(&tokens.data);
+
+        let frontmatter_tokens =
+            crate::toml_support::semantic_tokens::collect_frontmatter_semantic_tokens(&text);
+        absolute.extend(
+            frontmatter_tokens
+                .into_iter()
+                .map(|token| AbsoluteSemanticToken {
+                    line: token.line,
+                    start_char: token.start_char,
+                    length: token.length,
+                    token_type: token.token_type,
+                    modifiers: token.modifiers,
+                }),
+        );
+
+        if self.last_good_programs.contains_key(uri) {
+            let foreign_tokens = self.foreign_lsp.collect_semantic_tokens(uri.as_str()).await;
+            absolute.extend(
+                foreign_tokens
+                    .into_iter()
+                    .map(|token| AbsoluteSemanticToken {
+                        line: token.line,
+                        start_char: token.start_char,
+                        length: token.length,
+                        token_type: token.token_type,
+                        modifiers: token.token_modifiers_bitset,
+                    }),
+            );
+        }
+
+        absolute.sort_by_key(|token| {
+            (
+                token.line,
+                token.start_char,
+                token.length,
+                token.token_type,
+                token.modifiers,
+            )
+        });
+        absolute.dedup_by_key(|token| {
+            (
+                token.line,
+                token.start_char,
+                token.length,
+                token.token_type,
+                token.modifiers,
+            )
+        });
+        tokens.data = encode_semantic_tokens(&absolute);
+        Some(tokens)
     }
 
     /// Check if a URI points to a shape.toml file.
@@ -423,7 +521,9 @@ impl LanguageServer for ShapeLanguageServer {
                 // Enable find references
                 references_provider: Some(OneOf::Left(true)),
 
-                // Enable semantic tokens for syntax highlighting
+                // Enable semantic tokens for syntax highlighting.
+                // W2.8 / feature 1.47: range delivery for fast editor scrolling.
+                // W2.8 / feature 1.48: delta delivery for small-edit wire savings.
                 semantic_tokens_provider: Some(
                     SemanticTokensServerCapabilities::SemanticTokensOptions(
                         SemanticTokensOptions {
@@ -431,8 +531,8 @@ impl LanguageServer for ShapeLanguageServer {
                                 work_done_progress: None,
                             },
                             legend: get_legend(),
-                            range: Some(false),
-                            full: Some(SemanticTokensFullOptions::Bool(true)),
+                            range: Some(true),
+                            full: Some(SemanticTokensFullOptions::Delta { delta: Some(true) }),
                         },
                     ),
                 ),
@@ -610,6 +710,10 @@ impl LanguageServer for ShapeLanguageServer {
 
         // Remove cached program for closed document
         self.last_good_programs.remove(&uri);
+
+        // Drop the semantic-tokens cache entry so closed files don't pin
+        // their last token snapshot in memory (W2.8 feature 1.48 hygiene).
+        self.semantic_tokens_cache.remove(&uri);
 
         self.documents.close(&uri);
     }
@@ -958,71 +1062,129 @@ impl LanguageServer for ShapeLanguageServer {
             )
             .await;
 
-        // Get the document
-        let doc = match self.documents.get(&uri) {
-            Some(doc) => doc,
-            None => return Ok(None),
+        let Some(mut tokens) = self.collect_full_semantic_tokens(&uri).await else {
+            return Ok(None);
         };
 
-        let text = doc.text();
+        // Stamp a fresh result_id + cache for subsequent /delta requests
+        // (W2.8 feature 1.48). Clients that don't support deltas simply
+        // ignore the result_id; the cache entry then ages out next call.
+        let result_id = self.next_semantic_tokens_result_id();
+        tokens.result_id = Some(result_id.clone());
+        self.semantic_tokens_cache.insert(
+            uri,
+            CachedSemanticTokens {
+                result_id,
+                data: tokens.data.clone(),
+            },
+        );
 
-        // Base Shape semantic tokens
-        let mut tokens = get_semantic_tokens(&text);
+        Ok(Some(SemanticTokensResult::Tokens(tokens)))
+    }
 
-        if let Some(ref mut base_tokens) = tokens {
-            let mut absolute = decode_semantic_tokens(&base_tokens.data);
+    async fn semantic_tokens_range(
+        &self,
+        params: SemanticTokensRangeParams,
+    ) -> Result<Option<SemanticTokensRangeResult>> {
+        let uri = params.text_document.uri;
+        let range = params.range;
 
-            let frontmatter_tokens =
-                crate::toml_support::semantic_tokens::collect_frontmatter_semantic_tokens(&text);
-            absolute.extend(
-                frontmatter_tokens
-                    .into_iter()
-                    .map(|token| AbsoluteSemanticToken {
-                        line: token.line,
-                        start_char: token.start_char,
-                        length: token.length,
-                        token_type: token.token_type,
-                        modifiers: token.modifiers,
-                    }),
-            );
+        self.client
+            .log_message(
+                MessageType::INFO,
+                format!(
+                    "Semantic tokens (range) requested for {} [{}:{} - {}:{}]",
+                    uri.as_str(),
+                    range.start.line,
+                    range.start.character,
+                    range.end.line,
+                    range.end.character,
+                ),
+            )
+            .await;
 
-            if self.last_good_programs.contains_key(&uri) {
-                let foreign_tokens = self.foreign_lsp.collect_semantic_tokens(uri.as_str()).await;
-                absolute.extend(
-                    foreign_tokens
-                        .into_iter()
-                        .map(|token| AbsoluteSemanticToken {
-                            line: token.line,
-                            start_char: token.start_char,
-                            length: token.length,
-                            token_type: token.token_type,
-                            modifiers: token.token_modifiers_bitset,
-                        }),
-                );
+        let Some(tokens) = self.collect_full_semantic_tokens(&uri).await else {
+            return Ok(None);
+        };
+
+        // Decode the full document tokens to absolute coords, filter to those
+        // whose START position falls within `range`, then re-encode. We do not
+        // currently re-cache range results — `semantic_tokens_full_delta`
+        // operates on the full-document cache alone (LSP §3.17 permits this).
+        let absolute = decode_semantic_tokens(&tokens.data);
+        let filtered: Vec<AbsoluteSemanticToken> = absolute
+            .into_iter()
+            .filter(|token| position_in_range(token.line, token.start_char, &range))
+            .collect();
+
+        let result = SemanticTokens {
+            // Range results have no result_id; per LSP they are not eligible
+            // as the base for a subsequent /delta request.
+            result_id: None,
+            data: encode_semantic_tokens(&filtered),
+        };
+        Ok(Some(SemanticTokensRangeResult::Tokens(result)))
+    }
+
+    async fn semantic_tokens_full_delta(
+        &self,
+        params: SemanticTokensDeltaParams,
+    ) -> Result<Option<SemanticTokensFullDeltaResult>> {
+        let uri = params.text_document.uri;
+        let previous_result_id = params.previous_result_id;
+
+        self.client
+            .log_message(
+                MessageType::INFO,
+                format!(
+                    "Semantic tokens (delta) requested for {} (previous_result_id={})",
+                    uri.as_str(),
+                    previous_result_id,
+                ),
+            )
+            .await;
+
+        let Some(mut tokens) = self.collect_full_semantic_tokens(&uri).await else {
+            return Ok(None);
+        };
+
+        let new_result_id = self.next_semantic_tokens_result_id();
+
+        // Fast path: cache miss / stale id → return the full token set
+        // (LSP permits returning `SemanticTokens` from a /delta request).
+        let cached = self
+            .semantic_tokens_cache
+            .get(&uri)
+            .map(|entry| entry.clone());
+        let edits = match cached {
+            Some(cached) if cached.result_id == previous_result_id => {
+                Some(compute_semantic_token_edits(&cached.data, &tokens.data))
             }
+            _ => None,
+        };
 
-            absolute.sort_by_key(|token| {
-                (
-                    token.line,
-                    token.start_char,
-                    token.length,
-                    token.token_type,
-                    token.modifiers,
-                )
-            });
-            absolute.dedup_by_key(|token| {
-                (
-                    token.line,
-                    token.start_char,
-                    token.length,
-                    token.token_type,
-                    token.modifiers,
-                )
-            });
-            base_tokens.data = encode_semantic_tokens(&absolute);
+        // Always refresh the cache to the latest token set so the next
+        // delta request has a valid base.
+        self.semantic_tokens_cache.insert(
+            uri,
+            CachedSemanticTokens {
+                result_id: new_result_id.clone(),
+                data: tokens.data.clone(),
+            },
+        );
+
+        match edits {
+            Some(edits) => Ok(Some(SemanticTokensFullDeltaResult::TokensDelta(
+                SemanticTokensDelta {
+                    result_id: Some(new_result_id),
+                    edits,
+                },
+            ))),
+            None => {
+                tokens.result_id = Some(new_result_id);
+                Ok(Some(SemanticTokensFullDeltaResult::Tokens(tokens)))
+            }
         }
-
-        Ok(tokens.map(SemanticTokensResult::Tokens))
     }
 
     async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
@@ -1379,6 +1541,89 @@ fn encode_semantic_tokens(tokens: &[AbsoluteSemanticToken]) -> Vec<SemanticToken
     }
 
     encoded
+}
+
+/// True if the position `(line, character)` is within `range`, inclusive at
+/// the start, exclusive at the end (LSP semantic-tokens-range convention).
+/// We compare on the token's START position only; an oversized token that
+/// straddles the range still appears in the result, which matches what
+/// rust-analyzer does — clients render the whole token.
+fn position_in_range(line: u32, character: u32, range: &Range) -> bool {
+    let start = (range.start.line, range.start.character);
+    let end = (range.end.line, range.end.character);
+    let pos = (line, character);
+    pos >= start && pos < end
+}
+
+/// Compute the minimal `SemanticTokensEdit` sequence to transform `old` into
+/// `new`. Uses common-prefix / common-suffix trimming around a single
+/// replacement span — sufficient for the typical edit-locality pattern of
+/// LSP semantic tokens (a single user edit only invalidates a contiguous
+/// window of tokens). Both sequences are LSP-encoded `SemanticToken`s
+/// (5 numbers per token); the returned edit indices are into the FLAT
+/// `data` array (i.e. `index = token_index * 5 + field_offset`, where field
+/// offsets 0..5 are deltaLine/deltaStart/length/tokenType/tokenModifiers).
+///
+/// Returning a single-edit slot is always-correct: clients apply edits
+/// in-order against the previous flat array, and one replacement is the
+/// shortest possible representation of any difference.
+fn compute_semantic_token_edits(
+    old: &[SemanticToken],
+    new: &[SemanticToken],
+) -> Vec<SemanticTokensEdit> {
+    // Common prefix length, counted in tokens.
+    let mut prefix = 0usize;
+    let max_prefix = old.len().min(new.len());
+    while prefix < max_prefix && semantic_tokens_eq(&old[prefix], &new[prefix]) {
+        prefix += 1;
+    }
+
+    // Common suffix length, counted in tokens, that does not overlap the prefix.
+    let mut suffix = 0usize;
+    let max_suffix = old.len().min(new.len()) - prefix;
+    while suffix < max_suffix
+        && semantic_tokens_eq(
+            &old[old.len() - 1 - suffix],
+            &new[new.len() - 1 - suffix],
+        )
+    {
+        suffix += 1;
+    }
+
+    let old_replace_start = prefix;
+    let old_replace_end = old.len() - suffix;
+    let new_replace_start = prefix;
+    let new_replace_end = new.len() - suffix;
+
+    if old_replace_start == old_replace_end && new_replace_start == new_replace_end {
+        // Sequences are identical → no edits.
+        return Vec::new();
+    }
+
+    // Convert token-index range to flat-u32-index range.
+    let start = (old_replace_start * 5) as u32;
+    let delete_count = ((old_replace_end - old_replace_start) * 5) as u32;
+    let replacement: Vec<SemanticToken> =
+        new[new_replace_start..new_replace_end].to_vec();
+    let data = if replacement.is_empty() {
+        None
+    } else {
+        Some(replacement)
+    };
+
+    vec![SemanticTokensEdit {
+        start,
+        delete_count,
+        data,
+    }]
+}
+
+fn semantic_tokens_eq(a: &SemanticToken, b: &SemanticToken) -> bool {
+    a.delta_line == b.delta_line
+        && a.delta_start == b.delta_start
+        && a.length == b.length
+        && a.token_type == b.token_type
+        && a.token_modifiers_bitset == b.token_modifiers_bitset
 }
 
 fn frontmatter_extension_path_ranges(source: &str) -> Vec<Range> {
@@ -1870,5 +2115,183 @@ print("hello")
             std::path::PathBuf::from("/tmp/libshape_ext_python.so")
         );
         assert_eq!(specs[0].name, "libshape_ext_python");
+    }
+
+    // ------- W2.8 semantic-tokens delivery (range + delta) -------
+
+    fn mk_token(
+        delta_line: u32,
+        delta_start: u32,
+        length: u32,
+        token_type: u32,
+    ) -> SemanticToken {
+        SemanticToken {
+            delta_line,
+            delta_start,
+            length,
+            token_type,
+            token_modifiers_bitset: 0,
+        }
+    }
+
+    #[test]
+    fn position_in_range_inclusive_start_exclusive_end() {
+        let range = Range {
+            start: Position { line: 1, character: 0 },
+            end: Position { line: 3, character: 0 },
+        };
+        // Inside
+        assert!(position_in_range(1, 0, &range));
+        assert!(position_in_range(2, 5, &range));
+        // Exactly at end (exclusive)
+        assert!(!position_in_range(3, 0, &range));
+        // Before start
+        assert!(!position_in_range(0, 99, &range));
+        // After end
+        assert!(!position_in_range(3, 1, &range));
+    }
+
+    #[test]
+    fn position_in_range_single_line() {
+        let range = Range {
+            start: Position { line: 5, character: 2 },
+            end: Position { line: 5, character: 8 },
+        };
+        assert!(position_in_range(5, 2, &range));
+        assert!(position_in_range(5, 7, &range));
+        assert!(!position_in_range(5, 8, &range));
+        assert!(!position_in_range(5, 1, &range));
+        assert!(!position_in_range(4, 5, &range));
+        assert!(!position_in_range(6, 0, &range));
+    }
+
+    #[test]
+    fn compute_semantic_token_edits_empty_when_identical() {
+        let tokens = vec![mk_token(0, 0, 3, 8), mk_token(0, 4, 5, 5)];
+        let edits = compute_semantic_token_edits(&tokens, &tokens);
+        assert!(edits.is_empty(), "identical sequences must produce zero edits");
+    }
+
+    #[test]
+    fn compute_semantic_token_edits_full_replacement_when_no_overlap() {
+        let old = vec![mk_token(0, 0, 3, 8)];
+        let new = vec![mk_token(0, 0, 5, 5), mk_token(1, 2, 4, 8)];
+        let edits = compute_semantic_token_edits(&old, &new);
+        assert_eq!(edits.len(), 1);
+        let edit = &edits[0];
+        // Old token is fully replaced from index 0 with delete_count = 5 (1 token × 5 fields)
+        assert_eq!(edit.start, 0);
+        assert_eq!(edit.delete_count, 5);
+        assert_eq!(
+            edit.data.as_ref().map(|d| d.len()),
+            Some(2),
+            "new tokens carried verbatim"
+        );
+    }
+
+    #[test]
+    fn compute_semantic_token_edits_preserves_common_prefix() {
+        let old = vec![mk_token(0, 0, 3, 8), mk_token(0, 4, 5, 5)];
+        let new = vec![mk_token(0, 0, 3, 8), mk_token(0, 4, 7, 1)];
+        let edits = compute_semantic_token_edits(&old, &new);
+        assert_eq!(edits.len(), 1);
+        let edit = &edits[0];
+        // Token 0 is common prefix → start = 5; old has one trailing token → delete_count = 5;
+        // new has one trailing token in the replacement → data.len() == 1.
+        assert_eq!(edit.start, 5);
+        assert_eq!(edit.delete_count, 5);
+        let data = edit.data.as_ref().expect("replacement data present");
+        assert_eq!(data.len(), 1);
+        assert_eq!(data[0].length, 7);
+        assert_eq!(data[0].token_type, 1);
+    }
+
+    #[test]
+    fn compute_semantic_token_edits_preserves_common_suffix() {
+        let old = vec![mk_token(0, 0, 3, 8), mk_token(0, 4, 5, 5)];
+        let new = vec![mk_token(0, 0, 4, 1), mk_token(0, 4, 5, 5)];
+        let edits = compute_semantic_token_edits(&old, &new);
+        assert_eq!(edits.len(), 1);
+        let edit = &edits[0];
+        // Token 1 is common suffix → start = 0, delete_count = 5, replacement = 1 token.
+        assert_eq!(edit.start, 0);
+        assert_eq!(edit.delete_count, 5);
+        let data = edit.data.as_ref().expect("replacement data present");
+        assert_eq!(data.len(), 1);
+        assert_eq!(data[0].length, 4);
+    }
+
+    #[test]
+    fn compute_semantic_token_edits_pure_insertion_emits_zero_delete() {
+        let old = vec![mk_token(0, 0, 3, 8)];
+        let new = vec![mk_token(0, 0, 3, 8), mk_token(1, 0, 4, 5)];
+        let edits = compute_semantic_token_edits(&old, &new);
+        assert_eq!(edits.len(), 1);
+        let edit = &edits[0];
+        // Insert one token after the existing prefix.
+        assert_eq!(edit.start, 5);
+        assert_eq!(edit.delete_count, 0);
+        let data = edit.data.as_ref().expect("inserted tokens present");
+        assert_eq!(data.len(), 1);
+        assert_eq!(data[0].length, 4);
+    }
+
+    #[test]
+    fn compute_semantic_token_edits_pure_deletion_emits_none_data() {
+        let old = vec![mk_token(0, 0, 3, 8), mk_token(1, 0, 4, 5)];
+        let new = vec![mk_token(0, 0, 3, 8)];
+        let edits = compute_semantic_token_edits(&old, &new);
+        assert_eq!(edits.len(), 1);
+        let edit = &edits[0];
+        assert_eq!(edit.start, 5);
+        assert_eq!(edit.delete_count, 5);
+        // Pure deletion → data should be None (omitted in the wire payload).
+        assert!(
+            edit.data.is_none(),
+            "pure deletion serializes as `data: null` (None)"
+        );
+    }
+
+    #[test]
+    fn compute_semantic_token_edits_empty_to_empty_is_noop() {
+        let edits = compute_semantic_token_edits(&[], &[]);
+        assert!(edits.is_empty());
+    }
+
+    #[test]
+    fn compute_semantic_token_edits_empty_to_nonempty_is_insert() {
+        let new = vec![mk_token(0, 0, 3, 8)];
+        let edits = compute_semantic_token_edits(&[], &new);
+        assert_eq!(edits.len(), 1);
+        let edit = &edits[0];
+        assert_eq!(edit.start, 0);
+        assert_eq!(edit.delete_count, 0);
+        assert_eq!(edit.data.as_ref().map(|d| d.len()), Some(1));
+    }
+
+    #[test]
+    fn compute_semantic_token_edits_nonempty_to_empty_is_delete() {
+        let old = vec![mk_token(0, 0, 3, 8), mk_token(1, 0, 4, 5)];
+        let edits = compute_semantic_token_edits(&old, &[]);
+        assert_eq!(edits.len(), 1);
+        let edit = &edits[0];
+        assert_eq!(edit.start, 0);
+        assert_eq!(edit.delete_count, 10);
+        assert!(edit.data.is_none());
+    }
+
+    #[test]
+    fn semantic_tokens_eq_compares_all_fields() {
+        let a = mk_token(0, 0, 3, 8);
+        let b = mk_token(0, 0, 3, 8);
+        assert!(semantic_tokens_eq(&a, &b));
+
+        let mut c = a;
+        c.token_modifiers_bitset = 4;
+        assert!(!semantic_tokens_eq(&a, &c));
+
+        let mut d = a;
+        d.length = 99;
+        assert!(!semantic_tokens_eq(&a, &d));
     }
 }
