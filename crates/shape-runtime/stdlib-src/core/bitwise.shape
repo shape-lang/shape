@@ -1,0 +1,118 @@
+/// @module std::core::bitwise
+/// `BitAnd`, `BitOr`, `BitXor` and their `*Assign` counterparts —
+/// operator traits for `&`, `|`, `^`, `&=`, `|=`, `^=` on user types.
+///
+/// Shape's strict-typing dispatch for built-in integer types emits typed
+/// bitwise opcodes (`BitAndInt`, `BitOrInt`, `BitXorInt`, ...) at compile
+/// time and never routes through these traits. User-defined types
+/// (`type X { ... }`) that want to participate in bitwise operations opt
+/// in by providing an `impl BitAnd for X { method bitand(other: X) -> X }`
+/// (and analogously for `BitOr` / `BitXor`); the compiler then desugars
+/// `a & b` to `BitAnd::bitand(a, b)` via the operator trait dispatch
+/// path at `compiler/expressions/binary_ops.rs` — the bitwise arm
+/// (BinaryOp::BitAnd | BitOr | BitXor) checks `left_schema` for an
+/// `impl Bit{And,Or,Xor} for X` before falling back to typed-int
+/// emission.
+///
+/// `BitAndAssign` / `BitOrAssign` / `BitXorAssign` are the in-place
+/// counterparts. `a &= b` is grammar-desugared at parse time
+/// (`shape-ast/parser/expressions/binary_ops.rs:240-242`) to
+/// `a = a & b`, so authoring an `impl BitAnd for X` already covers `&=`
+/// for user-defined types without a separate `BitAndAssign::bitand_assign`
+/// body. The `*Assign` traits are declared here for symmetry with
+/// `AddAssign` / `SubAssign` / ... and so generic bounds
+/// `fn f<T: BitAndAssign>(...)` can be authored today.
+///
+/// ## Why combined into one file (W1.9 Option B)
+///
+/// Unlike `Add` / `Sub` / `Mul` / `Div` / `Mod` (each in their own
+/// `*.shape` file because each has overload specializations — string
+/// concat for Add, matrix kernels for Mul, etc.), the three bitwise
+/// binary traits form a single cohesive group with identical dispatch
+/// shape, no per-op specialization, and the same primitive-int
+/// bookkeeping. Combining them into one `bitwise.shape` reduces file
+/// churn without losing any trait-isolation property — each trait is
+/// still its own declaration, importable by name from the prelude.
+///
+/// ## Bitwise operators apply only to integers
+///
+/// `BitAnd` / `BitOr` / `BitXor` impls are registered for primitive
+/// integer types only (`int`, `i8..i64`, `u8..u64`). Floating-point
+/// types (`number`, `f32`, `f64`) and other scalar types (`bool`,
+/// `string`, `decimal`, `bigint`) are not registered because the
+/// underlying typed bitwise opcodes operate on `Int` width only and
+/// the grammar's bitwise-operator productions reject floats.
+///
+/// ## Known implementations
+///
+/// | Type        | Dispatch source                                       |
+/// |-------------|-------------------------------------------------------|
+/// | int         | typed `BitAndInt` / `BitOrInt` / `BitXorInt` opcode   |
+/// | i8..i64     | typed bitwise-int opcode (no trait dispatch)          |
+/// | u8..u64     | typed bitwise-int opcode (no trait dispatch)          |
+/// | user type X | `impl BitAnd for X { method bitand(other: X) -> X }`  |
+
+/// Operator trait for `&`. Implementing `BitAnd` for a user-defined
+/// type enables the binary `&` operator on values of that type. The
+/// compiler calls `BitAnd::bitand(lhs, rhs)` via UFCS dispatch through
+/// the `function_name_index` for `X::bitand`.
+trait BitAnd {
+    /// Return `self & other`. By convention the result is a fresh
+    /// value; in-place mutation belongs to `BitAndAssign::bitand_assign`.
+    bitand(other: Self): Self
+}
+
+/// Operator trait for `&=`. The grammar desugars `a &= b` to
+/// `a = a & b`, so providing `impl BitAnd for X` already covers `&=`
+/// for user-defined types — `BitAndAssign` is declared here for
+/// generic bounds and for the future in-place specialization opt-in.
+///
+/// The return type is `Self` for symmetry with `AddAssign` / `SubAssign`
+/// / ... — implementations may mutate `self` in place and `return self`
+/// from the method body; the desugar at parse time means the return
+/// value is unused under current semantics.
+trait BitAndAssign {
+    /// Mutate `self` in place by bitwise-AND with `other`. Return
+    /// `self` for chaining.
+    bitand_assign(other: Self): Self
+}
+
+/// Operator trait for `|`. Implementing `BitOr` for a user-defined
+/// type enables the binary `|` operator on values of that type. The
+/// compiler calls `BitOr::bitor(lhs, rhs)` via UFCS dispatch through
+/// the `function_name_index` for `X::bitor`.
+trait BitOr {
+    /// Return `self | other`. By convention the result is a fresh
+    /// value; in-place mutation belongs to `BitOrAssign::bitor_assign`.
+    bitor(other: Self): Self
+}
+
+/// Operator trait for `|=`. The grammar desugars `a |= b` to
+/// `a = a | b`, so providing `impl BitOr for X` already covers `|=`
+/// for user-defined types — `BitOrAssign` is declared here for
+/// generic bounds and for the future in-place specialization opt-in.
+trait BitOrAssign {
+    /// Mutate `self` in place by bitwise-OR with `other`. Return
+    /// `self` for chaining.
+    bitor_assign(other: Self): Self
+}
+
+/// Operator trait for `^`. Implementing `BitXor` for a user-defined
+/// type enables the binary `^` operator on values of that type. The
+/// compiler calls `BitXor::bitxor(lhs, rhs)` via UFCS dispatch through
+/// the `function_name_index` for `X::bitxor`.
+trait BitXor {
+    /// Return `self ^ other`. By convention the result is a fresh
+    /// value; in-place mutation belongs to `BitXorAssign::bitxor_assign`.
+    bitxor(other: Self): Self
+}
+
+/// Operator trait for `^=`. The grammar desugars `a ^= b` to
+/// `a = a ^ b`, so providing `impl BitXor for X` already covers `^=`
+/// for user-defined types — `BitXorAssign` is declared here for
+/// generic bounds and for the future in-place specialization opt-in.
+trait BitXorAssign {
+    /// Mutate `self` in place by bitwise-XOR with `other`. Return
+    /// `self` for chaining.
+    bitxor_assign(other: Self): Self
+}

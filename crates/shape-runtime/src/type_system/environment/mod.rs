@@ -475,13 +475,16 @@ impl TypeEnvironment {
             optional: false,
         };
 
-        // Binary operator traits: Add, Sub, Mul, Div, Mod
+        // Binary operator traits: Add, Sub, Mul, Div, Mod, BitAnd, BitOr, BitXor
         for (trait_name, method_name) in &[
             ("Add", "add"),
             ("Sub", "sub"),
             ("Mul", "mul"),
             ("Div", "div"),
             ("Mod", "mod"),
+            ("BitAnd", "bitand"),
+            ("BitOr", "bitor"),
+            ("BitXor", "bitxor"),
         ] {
             let trait_def = TraitDef {
                 name: trait_name.to_string(),
@@ -663,6 +666,34 @@ impl TypeEnvironment {
             "bool",
             vec!["not".to_string()],
         );
+
+        // W1.9: register `BitAnd` / `BitOr` / `BitXor` impls for
+        // primitive integer types. Bitwise operators apply to integers
+        // only — `f32`, `f64`, `number`, `bool`, `string` and other
+        // non-integer types are excluded. The typed `BitAndInt` /
+        // `BitOrInt` / `BitXorInt` opcodes service the actual
+        // operations — these registrations are bookkeeping-only so
+        // call-site bound checking on `<T: BitAnd>` etc. succeeds
+        // when `T` resolves to a primitive integer type.
+        let bitwise_types = ["int", "i8", "i16", "i32", "i64",
+                             "u8", "u16", "u32", "u64"];
+        for type_name in &bitwise_types {
+            let _ = self.type_registry.register_trait_impl(
+                "BitAnd",
+                type_name,
+                vec!["bitand".to_string()],
+            );
+            let _ = self.type_registry.register_trait_impl(
+                "BitOr",
+                type_name,
+                vec!["bitor".to_string()],
+            );
+            let _ = self.type_registry.register_trait_impl(
+                "BitXor",
+                type_name,
+                vec!["bitxor".to_string()],
+            );
+        }
     }
 
     /// Register the Numeric marker trait and built-in implementations.
