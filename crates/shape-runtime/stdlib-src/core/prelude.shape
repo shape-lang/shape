@@ -22,6 +22,7 @@ from std::core::div use { Div, DivAssign }
 from std::core::neg use { Neg }
 from std::core::modulo use { Mod, ModAssign }
 from std::core::not use { Not }
+from std::core::eq use { Eq }
 
 // Method definition modules — extend blocks register methods on builtin types.
 // Namespace imports ensure extend/impl blocks are processed during compilation.

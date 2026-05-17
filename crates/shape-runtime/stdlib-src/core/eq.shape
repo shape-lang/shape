@@ -1,0 +1,56 @@
+/// @module std::core::eq
+/// `Eq` — operator trait for `==` and `!=`.
+///
+/// Shape's strict-typing dispatch for built-in scalar types
+/// (`int`, `number`, `decimal`, `bigint`, `string`, `bool`) emits typed
+/// opcodes (`EqInt`, `EqNumber`, `EqString`, `NeqInt`, `NeqNumber`, ...)
+/// at compile time and never routes through this trait. User-defined
+/// types (`type X { ... }`) that want to participate in `==` / `!=` opt
+/// in by providing an `impl Eq for X { method eq(other: X) -> bool { ... } }`
+/// block; the compiler then desugars `a == b` to `Eq::eq(a, b)` (and
+/// `a != b` to `!Eq::eq(a, b)`) via the operator trait dispatch path at
+/// `compiler/expressions/binary_ops.rs::compile_typed_equality`.
+///
+/// Unlike the arithmetic operator traits (`Add`, `Sub`, `Mul`, `Div`),
+/// `Eq::eq` returns `bool` (not `Self`) — equality is a comparison, not
+/// an arithmetic combination. There is no `EqAssign` sibling because
+/// `==` has no compound-assign syntax in Shape.
+///
+/// `!=` is desugared by the compiler to `!(a.eq(b))` at the dispatch
+/// site, so user implementations only need to provide `eq`; the
+/// negation is emitted automatically.
+///
+/// ## Reflexivity / symmetry / transitivity
+///
+/// Implementations of `Eq` are expected to satisfy the standard
+/// equivalence relation laws:
+/// - reflexive: `a.eq(a) == true`
+/// - symmetric: `a.eq(b) == b.eq(a)`
+/// - transitive: `a.eq(b) && b.eq(c) => a.eq(c)`
+///
+/// The trait itself does not enforce these properties — they are
+/// authoring conventions. Violating them produces surprising behaviour
+/// in collections, pattern-matching, and any code that relies on `==`
+/// behaving as mathematical equality.
+///
+/// ## Known implementations
+///
+/// | Type        | Dispatch source                                  |
+/// |-------------|--------------------------------------------------|
+/// | int         | typed `EqInt` / `NeqInt` opcodes (no dispatch)   |
+/// | number      | typed `EqNumber` / `NeqNumber` opcodes (no dispatch) |
+/// | decimal     | typed `EqDecimal` opcode (no trait dispatch)     |
+/// | string      | typed `EqString` opcode (no trait dispatch)      |
+/// | bool        | typed equality opcode (no trait dispatch)        |
+/// | user type X | `impl Eq for X { method eq(other: X) -> bool }`  |
+
+/// Operator trait for `==` (and `!=` via desugar). Implementing `Eq`
+/// for a user-defined type enables both binary operators on values of
+/// that type. The compiler calls `Eq::eq(lhs, rhs)` via UFCS dispatch
+/// through the `function_name_index` for `X::eq`; `!=` is implemented
+/// by emitting an additional `Not` opcode after the dispatch.
+trait Eq {
+    /// Return `true` when `self` and `other` are equal. By convention
+    /// the relation should be reflexive, symmetric, and transitive.
+    eq(other: Self): bool
+}

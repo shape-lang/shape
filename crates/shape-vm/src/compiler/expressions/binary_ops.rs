@@ -31,6 +31,13 @@ fn operator_trait_for_op(op: &BinaryOp) -> Option<&'static str> {
         BinaryOp::Greater | BinaryOp::Less | BinaryOp::GreaterEq | BinaryOp::LessEq => {
             Some("Ord")
         }
+        // W1.7: Eq/Neq dispatch for user-defined types. Built-in
+        // scalar types take typed `EqInt`/`EqString`/... before this
+        // mapping is consulted (`compile_typed_equality` resolves
+        // operand types via `resolve_eq_type` and emits typed opcodes
+        // first; only when both operands lack a recognised primitive
+        // shape does the user-type Eq dispatch fire).
+        BinaryOp::Equal | BinaryOp::NotEqual => Some("Eq"),
         _ => None, // Pow has no operator trait
     }
 }
@@ -50,6 +57,10 @@ fn operator_trait_method_for_op(op: &BinaryOp) -> Option<&'static str> {
         BinaryOp::Greater | BinaryOp::Less | BinaryOp::GreaterEq | BinaryOp::LessEq => {
             Some("cmp")
         }
+        // W1.7: `Eq::eq(self, other) -> bool`. Both `==` and `!=` map
+        // to the same method; the negation for `!=` is emitted by the
+        // caller (`compile_typed_equality`) after the dispatch.
+        BinaryOp::Equal | BinaryOp::NotEqual => Some("eq"),
         _ => None,
     }
 }
@@ -553,6 +564,69 @@ impl BytecodeCompiler {
             // Result is bool — record so the implicit-return path
             // emits `ReturnValueBool` and the host-boundary synthesizer
             // re-tags the raw native bool bits.
+            self.last_expr_type_info = Some(
+                crate::type_tracking::VariableTypeInfo::with_storage(
+                    "bool".to_string(),
+                    crate::type_tracking::StorageHint::Bool,
+                ),
+            );
+            self.last_expr_numeric_type = None;
+            return Ok(true);
+        }
+
+        // W1.7: user-defined `impl Eq for X` dispatch. Mirrors the
+        // arithmetic-trait retargets at L1461-1475 / L1493 / L1512.
+        // `compile_typed_equality` runs BEFORE either operand has been
+        // compiled, so `last_expr_schema` reflects whatever the previous
+        // expression left behind — not the left operand's schema. We
+        // therefore consult three sources in order of decreasing
+        // certainty: the slot tracker's `local_types` schema-id for an
+        // identifier, the slot tracker's `binding_types` for a module
+        // binding, and finally the inference engine (mirrors the second
+        // half of `try_emit_trait_dispatch` at L88).
+        //
+        // For `!=` an extra `Not` opcode follows so user code only
+        // authors `eq`. No separate `Neq` trait — Shape mirrors Rust's
+        // single-method shape (`PartialEq::eq` + auto-derived `!=`).
+        let trait_name = "Eq";
+        let slot_type_name: Option<String> = if let Expr::Identifier(name, _) = left {
+            if let Some(slot) = self.resolve_local(name) {
+                self.type_tracker
+                    .get_local_type(slot)
+                    .and_then(|info| info.type_name.clone())
+            } else if let Some(slot) = self.module_bindings.get(name).copied() {
+                self.type_tracker
+                    .get_binding_type(slot)
+                    .and_then(|info| info.type_name.clone())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let mut has_eq_impl = slot_type_name
+            .as_ref()
+            .is_some_and(|name| self.type_inference.env.type_implements_trait(name, trait_name));
+        if !has_eq_impl {
+            has_eq_impl = self.infer_expr_type(left).ok().is_some_and(|ty| {
+                let name = type_display_name(&ty);
+                self.type_inference
+                    .env
+                    .type_implements_trait(&name, trait_name)
+            });
+        }
+        if has_eq_impl {
+            self.compile_expr(left)?;
+            self.compile_expr(right)?;
+            emit_operator_trait_call(self, "eq");
+            if is_neq {
+                self.emit(Instruction::simple(OpCode::Not));
+            }
+            // Eq::eq returns bool — match the typed-equality path's
+            // type_info bookkeeping so the implicit-return path emits
+            // `ReturnValueBool` and the host-boundary synthesizer
+            // re-tags the raw native bool bits.
+            self.last_expr_schema = None;
             self.last_expr_type_info = Some(
                 crate::type_tracking::VariableTypeInfo::with_storage(
                     "bool".to_string(),
