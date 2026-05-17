@@ -8411,3 +8411,69 @@ Q25.C.3/.4/.6/.7 explicitly DEFER post-v1 polish/perf/tooling workstream per tea
 ---
 
 *Next session: parallel dispatch v2-raw-heap-audit (cluster-1.5 deliverable; vw_clone/vw_drop precedent per commit afb1651) + Phase 4 trait Add/AddAssign for user types (language feature) → respective merges → cluster-1.5 close attempt + tag authorization request → v1 close attempt.*
+
+---
+
+## Wave 3 Round 15 cluster-1.5 close — ALL CRITERION GATES MET; tag authorization pending (2026-05-17)
+
+Cluster-1.5 closure complete at canonical HEAD `4368bc60`. Bundled merge ceremony per supervisor 2026-05-17 hybrid (a') disposition: sub-agent share-accounting fix `17117577` + op_set_field_typed:608 ReceiverGuard mirror `fe61d29c` (Phase 4 imprecision 84 residual) + CLAUDE.md Known Constraints PARTIALLY RESOLVED `5c42790f` per user authorization 2026-05-17. Smoke matrix **5/5 VM == JIT preserved** at canonical post-merge.
+
+### Trajectory (cluster-1.5 sequence)
+
+| Stage | Close commit | Disposition |
+|---|---|---|
+| cluster-1.5 Q25.C TraitObject rebuild | `c421d30a` → merge `0f347fa4` | Smoke 5 LANDED (`let t: dyn T = X{}` VM=x/JIT=x); 3 producer-site flips per §Q25.C.5 amendment Wave 2 Agent E lockstep |
+| ADR-006 §Q25.C.5 addendum | `86ad6676` | Producer-side cascade completion + discipline lesson instances 77+78 (per supervisor authorization 2026-05-16) |
+| v2-raw-heap-audit Phase 1 | `783919d0` → merge `6bc80014` | Audit-only deliverable + §3.A bonus (4 #[ignore] reason-string updates) + CLAUDE.md RE-CLASSIFIED (per user authorization 2026-05-16). 4 sim tests re-classified as V3-S5 ckpt-5/ckpt-6 SURFACE (NOT v2-raw aliasing) |
+| Consolidated empirical-isolation-and-fix | `17117577` + `fe61d29c` + `5c42790f` → merge `4368bc60` | hashmap_filter_all_match SIGABRT RESOLVED (5/5 → 5/5 pass); root cause = share-accounting double-release in `call_*_with_nb_args*` at closure-call boundary (OUTSIDE audit-enumerated HashMap-carrier territory; imprecision 85 audit-scope-expansion); op_set_field_typed:608 ReceiverGuard mirror (Phase 4 imprecision 84 residual CLOSED); CLAUDE.md PARTIALLY RESOLVED |
+
+### Cluster-1.5 close-criterion gates assessment (ALL MET per supervisor 2026-05-17)
+
+| Criterion | Status |
+|---|---|
+| Smoke 5 dyn T VM == JIT | ✓ (cluster-1.5-q25c at 0f347fa4) |
+| Q25.C.1 universal-dyn for TypedObject | ✓ (LANDED) |
+| Q25.C.2 Self-arg vtable-identity check | ✓ (LANDED at invoke_dyn_unified) |
+| Q25.C.5 VTable + 6-variant + thunk emission | ✓ (LANDED; producer/consumer lockstep flip COMPLETE per cluster-1.5-q25c + ADR addendum at 86ad6676) |
+| Q25.C.3 generic TypeInfo threading | DEFER post-v1 (PARTIAL; VTableEntry::Generic dispatch treats as Direct; TypeInfo struct never constructed; not load-bearing for Smoke 5) |
+| Q25.C.4 #[static_only] | DEFER post-v1 (UNCOVERED at HEAD; zero parser/AST refs; not load-bearing for any current Shape program) |
+| Q25.C.6 IC devirtualization | DEFER post-v1 polish/perf workstream (optimization tier) |
+| Q25.C.7 LSP cost-class inlay hints | DEFER post-v1 polish/tooling workstream |
+| v2-raw-heap-audit Phase 1 | ✓ (audit at 6bc80014; CLAUDE.md RE-CLASSIFIED per user auth 2026-05-16) |
+| Consolidated empirical-isolation-and-fix | ✓ (4368bc60; hashmap_filter_all_match RESOLVED; op_set_field_typed:608 ReceiverGuard mirror; CLAUDE.md PARTIALLY RESOLVED per user auth 2026-05-17) |
+| Smoke matrix 5/5 VM == JIT preserved | ✓ at canonical 4368bc60 |
+
+### Cluster-1.5 trajectory summary
+
+- **4 sub-cluster dispatches** total: 1 Q25.C TraitObject rebuild + 1 v2-raw-heap-audit Phase 1 + 1 consolidated empirical-isolation-and-fix (which itself bundled audit Phase 2 territory + Phase 4 imprecision 84 territory per supervisor consolidation 2026-05-17)
+- Canonical HEAD progression: bb5b2109 (cluster-2 close target) → cc5ceb0e... → 938929de (cluster-2 close + phase-3-cluster-2-close tag) → 0f347fa4 (Q25.C merge) → 86ad6676 (ADR addendum) → 3cb72c2d (Q25.C status doc) → 726d6a6a (Phase 4 merge) → 6bc80014 (v2-raw-heap-audit merge + CLAUDE.md RE-CLASSIFIED) → 4368bc60 (cluster-1.5 close target; consolidated empirical-isolation-and-fix + CLAUDE.md PARTIALLY RESOLVED)
+- **Cumulative discipline-pattern stats:** 85 imprecision instances across cluster-0+1+cluster-2+cluster-1.5 trajectory (instances 77-85 added during cluster-1.5; 9 new beyond cluster-2's 76); 0 bad-code merges into canonical preserved; 7 forbidden-pattern axes refused during cluster-1.5; 1 ADR amendment landed (§Q25.C.5 addendum; producer-side cascade completion + discipline lesson 77+78); 2 user-authorized CLAUDE.md modifications (Known Constraints v2-raw-heap-audit RE-CLASSIFIED 2026-05-16 + PARTIALLY RESOLVED 2026-05-17)
+- **Reading 6 candidate confirmed via empirical isolation surprise:** cluster-1.5-v2-raw-empirical-isolation-and-fix sub-agent's empirical isolation REFUTED all 3 audit hypotheses A/B/D (HashMap-carrier territory); actual root cause in `call_*_with_nb_args*` closure-call boundary (Round 13 T5 sibling). Imprecision 85 = audit-scope-expansion class (sub-agent caught + landed outside audit-enumerated territory); validates Reading 6 "team-lead territory-misdispatch class" extension to audit-territory-bound-misdispatch class
+
+### Imprecision instance log (cluster-1.5 cumulative 76 → 85)
+
+| # | Source | Shape |
+|---|---|---|
+| 77 | sub-agent execution (cluster-1.5-q25c) | §Q25.C.5 amendment Wave 2 Agent E text describes cascade-flip lockstep but doesn't specify producer/consumer owner attribution; consumer flipped Wave 3 stabilize without producer follow-up → mixed-dispatch state ~2-3 weeks |
+| 78 | sub-agent execution (cluster-1.5-q25c) | §Q25.C.5 amendment text conflates struct-new (POD constructor) with Arc::new(struct-new(...)) (forbidden post-cascade) when naming deletion targets |
+| 79 | sub-agent execution (cluster-1.5-v2-raw-heap-audit) | CLAUDE.md "Known Constraints" v2-raw-heap-audit entry stale-text vs current-HEAD-reality drift (4 sim tests framed as v2-raw-aliasing-class; HEAD reality is V3-S5 class) |
+| 80 | team-lead-prompt (Phase 4) | dispatch cited `compiler/expressions/operators.rs` — file doesn't exist; actual at `compiler/expressions/binary_ops.rs` + `assignment.rs` |
+| 81 | team-lead-prompt (Phase 4) | dispatch implied += needs separate AddAssign desugar; actually grammar desugars at parse time |
+| 82 | sub-agent-execution CRITICAL recovered (Phase 4) | pre-existing-framing dressed up sub-agent-introduced Smoke 2 regression as inherited; recovered via 3-step empirical bisect + fix |
+| 83 | sub-agent execution (Phase 4) | return-typeless prelude-imported trait method poisons Vec.map<U> monomorphization; architectural compiler gap; tracked phase-4-followup-return-typeless-trait-method-monomorphization |
+| 84 | sub-agent execution (Phase 4) | Arc::from_raw on v2-raw TypedObjectStorage wrong-type recovery flake; bonus ReceiverGuard at op_get_field_typed:341-353 (Phase 4) + op_set_field_typed:608 mirror (cluster-1.5 2026-05-17) close territory; remaining residuals tracked post-v1 |
+| 85 | sub-agent execution (consolidated empirical-isolation-and-fix) | audit §1.B/§1.D bound candidate hypothesis space to A/B/C/D in HashMap-carrier territory; EMPIRICAL root cause OUTSIDE that territory (closure-call boundary); same shape as W6.5 substep-2 cluster-A scope-expansion pattern |
+
+Cumulative breakdown: 11 supervisor / 17 audit / 8 team-lead-prompt (+80, +81) / 12 agent-execution-report (+82) / 37 candidate (+77, +78, +79, +83, +84, +85) — total 85. All caught pre-merge. 0 bad-code merges into canonical preserved across cluster-0+1+cluster-2+cluster-1.5 trajectory.
+
+### Tag authorization request (PENDING USER)
+
+Tag candidate: `phase-3-cluster-1.5-close` on canonical HEAD `4368bc60`. Supervisor ratified cluster-1.5-close-criterion gates MET 2026-05-17. **User authorization pending** per Decision authority pattern (tags = user authorizes after supervisor ratifies).
+
+### Trajectory awareness (carry forward; not for re-surfacing)
+
+Per supervisor 2026-05-17: ~0.5-1 session to v1 remaining (v1 close attempt 0.5 + buffer).
+
+---
+
+*Next session: user authorizes `phase-3-cluster-1.5-close` tag on canonical 4368bc60 → v1 close attempt + tag authorization request to user.*
