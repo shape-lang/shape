@@ -10,7 +10,10 @@ use crate::call_hierarchy::{
 use crate::code_actions::get_code_actions;
 use crate::code_lens::{get_code_lenses, resolve_code_lens};
 use crate::completion::get_completions_with_context;
-use crate::definition::{get_definition, get_references_with_fallback};
+use crate::definition::{
+    get_declaration, get_definition, get_document_highlights, get_implementations,
+    get_references_with_fallback, get_type_definition,
+};
 use crate::diagnostics::error_to_diagnostic;
 use crate::document::DocumentManager;
 use crate::document_symbols::{get_document_symbols, get_workspace_symbols};
@@ -29,29 +32,34 @@ use shape_ast::ParseErrorKind;
 use shape_ast::ast::Program;
 use shape_ast::parser::parse_program;
 use std::collections::HashSet;
+use tower_lsp_server::ls_types::request::{
+    GotoDeclarationParams, GotoDeclarationResponse, GotoImplementationParams,
+    GotoImplementationResponse, GotoTypeDefinitionParams, GotoTypeDefinitionResponse,
+};
 use tower_lsp_server::ls_types::{
     CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams, CallHierarchyItem,
     CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams, CallHierarchyPrepareParams,
     CallHierarchyServerCapability, CodeActionKind, CodeActionOptions, CodeActionParams,
     CodeActionProviderCapability, CodeActionResponse, CodeLens, CodeLensOptions, CodeLensParams,
-    CompletionItem, CompletionOptions, CompletionParams, CompletionResponse, Diagnostic,
-    DiagnosticSeverity,
-    DidChangeConfigurationParams, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, DocumentFormattingParams, DocumentLink, DocumentLinkOptions,
+    CompletionItem, CompletionOptions, CompletionParams, CompletionResponse, DeclarationCapability,
+    Diagnostic, DiagnosticSeverity, DidChangeConfigurationParams, DidChangeTextDocumentParams,
+    DidCloseTextDocumentParams, DidOpenTextDocumentParams, DocumentFormattingParams,
+    DocumentHighlight, DocumentHighlightParams, DocumentLink, DocumentLinkOptions,
     DocumentLinkParams, DocumentOnTypeFormattingOptions, DocumentOnTypeFormattingParams,
     DocumentRangeFormattingParams, DocumentSymbolParams, DocumentSymbolResponse, FoldingRange,
     FoldingRangeParams, FoldingRangeProviderCapability, GotoDefinitionParams,
-    GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability, InitializeParams,
-    InitializeResult, InitializedParams, InlayHint, InlayHintOptions, InlayHintParams,
-    InlayHintServerCapabilities, Location, MessageType, OneOf, Position, PrepareRenameResponse,
-    Range, ReferenceParams, RenameOptions, RenameParams, SemanticToken, SemanticTokens,
-    SemanticTokensDelta, SemanticTokensDeltaParams, SemanticTokensEdit,
-    SemanticTokensFullDeltaResult, SemanticTokensFullOptions, SemanticTokensOptions,
-    SemanticTokensParams, SemanticTokensRangeParams, SemanticTokensRangeResult,
-    SemanticTokensResult, SemanticTokensServerCapabilities, ServerCapabilities, ServerInfo,
-    SignatureHelp, SignatureHelpOptions, SignatureHelpParams, TextDocumentPositionParams,
-    TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Uri, WorkDoneProgressOptions,
-    WorkspaceEdit, WorkspaceSymbolParams, WorkspaceSymbolResponse,
+    GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability,
+    ImplementationProviderCapability, InitializeParams, InitializeResult, InitializedParams,
+    InlayHint, InlayHintOptions, InlayHintParams, InlayHintServerCapabilities, Location,
+    MessageType, OneOf, Position, PrepareRenameResponse, Range, ReferenceParams, RenameOptions,
+    RenameParams, SemanticToken, SemanticTokens, SemanticTokensDelta, SemanticTokensDeltaParams,
+    SemanticTokensEdit, SemanticTokensFullDeltaResult, SemanticTokensFullOptions,
+    SemanticTokensOptions, SemanticTokensParams, SemanticTokensRangeParams,
+    SemanticTokensRangeResult, SemanticTokensResult, SemanticTokensServerCapabilities,
+    ServerCapabilities, ServerInfo, SignatureHelp, SignatureHelpOptions, SignatureHelpParams,
+    TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit,
+    TypeDefinitionProviderCapability, Uri, WorkDoneProgressOptions, WorkspaceEdit,
+    WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
 use tower_lsp_server::{Client, LanguageServer, jsonrpc::Result};
 
@@ -529,6 +537,22 @@ impl LanguageServer for ShapeLanguageServer {
 
                 // Enable go-to-definition
                 definition_provider: Some(OneOf::Left(true)),
+
+                // W2.5 / feature 1.35: declaration alias (no decl/def split in
+                // Shape; behaves identically to `textDocument/definition`).
+                declaration_provider: Some(DeclarationCapability::Simple(true)),
+
+                // W2.5 / feature 1.33: jump to the *type* of the expression at
+                // the cursor (vs jump to the symbol's own definition site).
+                type_definition_provider: Some(TypeDefinitionProviderCapability::Simple(true)),
+
+                // W2.5 / feature 1.34: enumerate impl blocks for a trait or
+                // type at the cursor (current-file scope).
+                implementation_provider: Some(ImplementationProviderCapability::Simple(true)),
+
+                // W2.5 / feature 1.60: highlight every occurrence of the
+                // symbol at the cursor within the active file (scope-aware).
+                document_highlight_provider: Some(OneOf::Left(true)),
 
                 // Enable find references
                 references_provider: Some(OneOf::Left(true)),
@@ -1082,6 +1106,129 @@ impl LanguageServer for ShapeLanguageServer {
         let references = get_references_with_fallback(&text, position, &uri, cached_ref);
 
         Ok(references)
+    }
+
+    /// W2.5 / feature 1.33 (`textDocument/typeDefinition`): jump from an
+    /// expression to the definition site of its *type*. Delegates to
+    /// `definition::get_type_definition`, which infers the type via
+    /// `type_inference::infer_variable_type`, strips generic wrappers, and
+    /// re-uses the existing definition lookup for the resulting type name.
+    async fn goto_type_definition(
+        &self,
+        params: GotoTypeDefinitionParams,
+    ) -> Result<Option<GotoTypeDefinitionResponse>> {
+        let uri = params.text_document_position_params.text_document.uri;
+        let position = params.text_document_position_params.position;
+
+        let doc = match self.documents.get(&uri) {
+            Some(doc) => doc,
+            None => return Ok(None),
+        };
+        let text = doc.text();
+
+        let module_cache = self.documents.get_module_cache();
+        let cached = self.last_good_programs.get(&uri);
+        let cached_ref = cached.as_ref().map(|r| r.value());
+        let response = get_type_definition(&text, position, &uri, Some(&module_cache), cached_ref);
+
+        Ok(response)
+    }
+
+    /// W2.5 / feature 1.34 (`textDocument/implementation`): enumerate
+    /// `impl Trait for Type` / `extend Type` blocks for the trait or type
+    /// at the cursor. Current-file scope only — cross-workspace impl
+    /// discovery requires the W2.6 / W2.7 workspace indexing work.
+    async fn goto_implementation(
+        &self,
+        params: GotoImplementationParams,
+    ) -> Result<Option<GotoImplementationResponse>> {
+        let uri = params.text_document_position_params.text_document.uri;
+        let position = params.text_document_position_params.position;
+
+        let doc = match self.documents.get(&uri) {
+            Some(doc) => doc,
+            None => return Ok(None),
+        };
+        let text = doc.text();
+
+        let cached = self.last_good_programs.get(&uri);
+        let cached_ref = cached.as_ref().map(|r| r.value());
+        let locations = get_implementations(&text, position, &uri, cached_ref);
+
+        Ok(locations.map(GotoImplementationResponse::Array))
+    }
+
+    /// W2.5 / feature 1.35 (`textDocument/declaration`): alias of
+    /// `textDocument/definition` — Shape has no declaration/definition split.
+    /// VS Code's `Go to Declaration` command dispatches here.
+    async fn goto_declaration(
+        &self,
+        params: GotoDeclarationParams,
+    ) -> Result<Option<GotoDeclarationResponse>> {
+        let uri = params.text_document_position_params.text_document.uri;
+        let position = params.text_document_position_params.position;
+
+        let doc = match self.documents.get(&uri) {
+            Some(doc) => doc,
+            None => return Ok(None),
+        };
+        let text = doc.text();
+
+        let module_cache = self.documents.get_module_cache();
+
+        // Reuse the goto_definition annotation-discovery dance so that
+        // declaration on an annotation name navigates to the @annotation def.
+        let mut annotation_discovery = AnnotationDiscovery::new();
+        let parse_source = parser_source(&text);
+        if let Ok(program) = parse_program(parse_source.as_ref()) {
+            annotation_discovery.discover_from_program(&program);
+            if let Some(file_path) = uri.to_file_path() {
+                annotation_discovery.discover_from_imports_with_cache(
+                    &program,
+                    &file_path,
+                    &module_cache,
+                    self.project_root.get().map(|p| p.as_path()),
+                );
+            }
+        }
+
+        let cached = self.last_good_programs.get(&uri);
+        let cached_ref = cached.as_ref().map(|r| r.value());
+        let response = get_declaration(
+            &text,
+            position,
+            &uri,
+            Some(&module_cache),
+            Some(&annotation_discovery),
+            cached_ref,
+        );
+
+        Ok(response)
+    }
+
+    /// W2.5 / feature 1.60 (`textDocument/documentHighlight`): highlight
+    /// every occurrence of the symbol at the cursor within the current
+    /// file. Reuses the scope-aware `ScopeTree::references_of` path that
+    /// powers `rename.rs`, so highlights respect lexical scope and
+    /// variable shadowing.
+    async fn document_highlight(
+        &self,
+        params: DocumentHighlightParams,
+    ) -> Result<Option<Vec<DocumentHighlight>>> {
+        let uri = params.text_document_position_params.text_document.uri;
+        let position = params.text_document_position_params.position;
+
+        let doc = match self.documents.get(&uri) {
+            Some(doc) => doc,
+            None => return Ok(None),
+        };
+        let text = doc.text();
+
+        let cached = self.last_good_programs.get(&uri);
+        let cached_ref = cached.as_ref().map(|r| r.value());
+        let highlights = get_document_highlights(&text, position, cached_ref);
+
+        Ok(highlights)
     }
 
     async fn semantic_tokens_full(

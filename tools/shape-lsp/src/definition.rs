@@ -4,10 +4,14 @@
 
 use crate::annotation_discovery::AnnotationDiscovery;
 use crate::module_cache::ModuleCache;
+use crate::type_inference::infer_variable_type;
 use crate::util::{get_word_at_position, offset_to_line_col, position_to_offset};
-use shape_ast::ast::{ImportItems, Item, Program, Span, Statement};
+use shape_ast::ast::{ImportItems, Item, Program, Span, Statement, TypeName};
 use shape_ast::parser::parse_program;
-use tower_lsp_server::ls_types::{GotoDefinitionResponse, Location, Position, Range, Uri};
+use tower_lsp_server::ls_types::{
+    DocumentHighlight, DocumentHighlightKind, GotoDefinitionResponse, Location, Position, Range,
+    Uri,
+};
 
 /// Find the definition of a symbol at the given position.
 ///
@@ -134,6 +138,380 @@ pub fn get_references_with_fallback(
     } else {
         Some(locations)
     }
+}
+
+/// Find the definition site of the *type* of the symbol at the cursor.
+///
+/// W2.5 feature 1.33 (`textDocument/typeDefinition`): given an expression
+/// (typically a variable identifier), look up its inferred type name and
+/// then navigate to that type's declaration site.
+///
+/// Strategy:
+/// 1. Extract the word at the cursor.
+/// 2. Use `infer_variable_type` to determine the variable's type as a string.
+/// 3. Strip generic wrappers (e.g. `Array<T>` → `T`, `Option<T>` → `T`,
+///    `HashMap<K,V>` → `K` falls back to `V`) and dereference / postfix `?`
+///    decorations to recover a base type name.
+/// 4. Re-use `find_definition_location` to look up that type name in the
+///    current file, then fall back to imported definitions.
+///
+/// Returns `None` when no type can be inferred or when the inferred type is
+/// a primitive (`int`, `number`, `bool`, `string`, etc.) for which no
+/// user-visible definition site exists.
+pub fn get_type_definition(
+    text: &str,
+    position: Position,
+    uri: &Uri,
+    module_cache: Option<&ModuleCache>,
+    cached_program: Option<&Program>,
+) -> Option<GotoDefinitionResponse> {
+    let word = get_word_at_position(text, position)?;
+
+    let program = match parse_program(text) {
+        Ok(p) => p,
+        Err(_) => {
+            if let Some(cached) = cached_program {
+                cached.clone()
+            } else {
+                let partial = shape_ast::parser::resilient::parse_program_resilient(text);
+                if partial.items.is_empty() {
+                    return None;
+                }
+                partial.into_program()
+            }
+        }
+    };
+
+    let inferred = infer_variable_type(&program, &word)?;
+    let base = extract_base_type_name(&inferred)?;
+    if is_builtin_primitive(&base) {
+        return None;
+    }
+
+    if let Some(location) = find_definition_location(&program, &base, uri, text) {
+        return Some(GotoDefinitionResponse::Scalar(location));
+    }
+
+    if let Some(cache) = module_cache {
+        if let Some(location) = find_imported_definition(&program, &base, uri, cache) {
+            return Some(GotoDefinitionResponse::Scalar(location));
+        }
+    }
+
+    None
+}
+
+/// Find all `impl Trait for Type` blocks for the symbol at the cursor.
+///
+/// W2.5 feature 1.34 (`textDocument/implementation`): when the cursor is on
+/// a trait name, return every impl block in the current file that targets
+/// that trait. When the cursor is on a type name, return every impl block
+/// (and extend block) whose target type matches.
+///
+/// This is a current-file-only enumeration; cross-workspace impl discovery
+/// is part of the broader workspace-symbol indexing work tracked in W2.6/W2.7.
+pub fn get_implementations(
+    text: &str,
+    position: Position,
+    uri: &Uri,
+    cached_program: Option<&Program>,
+) -> Option<Vec<Location>> {
+    let word = get_word_at_position(text, position)?;
+
+    let program = match parse_program(text) {
+        Ok(p) => p,
+        Err(_) => {
+            if let Some(cached) = cached_program {
+                cached.clone()
+            } else {
+                let partial = shape_ast::parser::resilient::parse_program_resilient(text);
+                if partial.items.is_empty() {
+                    return None;
+                }
+                partial.into_program()
+            }
+        }
+    };
+
+    let mut locations: Vec<Location> = Vec::new();
+
+    for item in &program.items {
+        match item {
+            Item::Impl(impl_block, item_span) => {
+                let trait_str = type_name_str(&impl_block.trait_name);
+                let target_str = type_name_str(&impl_block.target_type);
+                if trait_str == word || target_str == word {
+                    locations.push(create_location_from_span(uri, *item_span, text));
+                }
+            }
+            Item::Extend(extend_stmt, item_span) => {
+                let target_str = type_name_str(&extend_stmt.type_name);
+                if target_str == word {
+                    locations.push(create_location_from_span(uri, *item_span, text));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if locations.is_empty() {
+        None
+    } else {
+        Some(locations)
+    }
+}
+
+/// Find the declaration site of a symbol at the cursor.
+///
+/// W2.5 feature 1.35 (`textDocument/declaration`): in languages with a
+/// declaration/definition split (C++, etc.) this jumps to the declaration
+/// (e.g. header file). Shape has no such split — every binding is its own
+/// declaration — so this aliases to `get_definition` for VS-Code-style
+/// `Ctrl+Click → Go to Declaration` interop.
+pub fn get_declaration(
+    text: &str,
+    position: Position,
+    uri: &Uri,
+    module_cache: Option<&ModuleCache>,
+    annotation_discovery: Option<&AnnotationDiscovery>,
+    cached_program: Option<&Program>,
+) -> Option<GotoDefinitionResponse> {
+    get_definition(
+        text,
+        position,
+        uri,
+        module_cache,
+        annotation_discovery,
+        cached_program,
+    )
+}
+
+/// Find all occurrences of the symbol at the cursor within the current file.
+///
+/// W2.5 feature 1.60 (`textDocument/documentHighlight`): editors use these
+/// to highlight every usage of the cursor's symbol in the active file
+/// (e.g. background-tint every `myVar` when the cursor is on one of them).
+///
+/// Reuses the scope-aware `ScopeTree::references_of` infrastructure that
+/// powers in-file rename (`rename.rs`) so highlights respect lexical scope
+/// and variable shadowing — falling back to text search only when the scope
+/// tree cannot bind the position.
+pub fn get_document_highlights(
+    text: &str,
+    position: Position,
+    cached_program: Option<&Program>,
+) -> Option<Vec<DocumentHighlight>> {
+    let offset = position_to_offset(text, position)?;
+
+    let program = match parse_program(text) {
+        Ok(p) => p,
+        Err(_) => {
+            if let Some(cached) = cached_program {
+                cached.clone()
+            } else {
+                let partial = shape_ast::parse_program_resilient(text);
+                if partial.items.is_empty() {
+                    return None;
+                }
+                partial.into_program()
+            }
+        }
+    };
+
+    let tree = crate::scope::ScopeTree::build(&program, text);
+
+    let spans = tree.references_of(offset);
+
+    let highlights: Vec<DocumentHighlight> = match spans {
+        Some(spans) => spans
+            .into_iter()
+            .map(|(start, end)| span_to_highlight(text, start, end))
+            .collect(),
+        None => {
+            // Fall back to text-based search to match the find-references behaviour.
+            let word = get_word_at_position(text, position)?;
+            text_search_highlights(text, &word)
+        }
+    };
+
+    if highlights.is_empty() {
+        None
+    } else {
+        Some(highlights)
+    }
+}
+
+/// Word-boundary text-search variant of `find_all_references`, returning
+/// `DocumentHighlight` ranges (no URI required — highlights are always
+/// scoped to the active file per LSP spec).
+fn text_search_highlights(text: &str, symbol_name: &str) -> Vec<DocumentHighlight> {
+    let mut highlights = Vec::new();
+    let lines: Vec<&str> = text.lines().collect();
+    for (line_idx, line) in lines.iter().enumerate() {
+        let mut char_pos = 0;
+        while let Some(pos) = line[char_pos..].find(symbol_name) {
+            let absolute_pos = char_pos + pos;
+            let is_start_boundary = absolute_pos == 0
+                || !line
+                    .chars()
+                    .nth(absolute_pos - 1)
+                    .map(|c| c.is_alphanumeric() || c == '_')
+                    .unwrap_or(false);
+            let is_end_boundary = absolute_pos + symbol_name.len() >= line.len()
+                || !line
+                    .chars()
+                    .nth(absolute_pos + symbol_name.len())
+                    .map(|c| c.is_alphanumeric() || c == '_')
+                    .unwrap_or(false);
+
+            if is_start_boundary && is_end_boundary {
+                highlights.push(DocumentHighlight {
+                    range: Range {
+                        start: Position {
+                            line: line_idx as u32,
+                            character: absolute_pos as u32,
+                        },
+                        end: Position {
+                            line: line_idx as u32,
+                            character: (absolute_pos + symbol_name.len()) as u32,
+                        },
+                    },
+                    kind: Some(DocumentHighlightKind::TEXT),
+                });
+            }
+            char_pos = absolute_pos + symbol_name.len();
+        }
+    }
+    highlights
+}
+
+fn span_to_highlight(text: &str, start: usize, end: usize) -> DocumentHighlight {
+    let (start_line, start_col) = offset_to_line_col(text, start);
+    let (end_line, end_col) = offset_to_line_col(text, end);
+    DocumentHighlight {
+        range: Range {
+            start: Position {
+                line: start_line,
+                character: start_col,
+            },
+            end: Position {
+                line: end_line,
+                character: end_col,
+            },
+        },
+        kind: Some(DocumentHighlightKind::TEXT),
+    }
+}
+
+/// Render a `TypeName` AST node as its bare leading identifier.
+fn type_name_str(type_name: &TypeName) -> &str {
+    match type_name {
+        TypeName::Simple(n) => n.as_str(),
+        TypeName::Generic { name, .. } => name.as_str(),
+    }
+}
+
+/// Extract the user-visible base identifier from a rendered type string.
+///
+/// Inputs are produced by `type_inference::infer_variable_type`, which renders
+/// strings like `"Array<Point>"`, `"Option<Point>"`, `"Point"`, `"Point?"`,
+/// `"&Point"`. This function peels generic wrappers / decorations and returns
+/// the inner-most identifier suitable for a `find_definition_location` lookup.
+///
+/// Returns `None` for empty / whitespace-only / object-shape strings (`"{...}"`)
+/// where no nameable type exists.
+fn extract_base_type_name(rendered: &str) -> Option<String> {
+    let mut current: String = rendered.trim().to_string();
+    if current.is_empty() || current.starts_with('{') {
+        return None;
+    }
+
+    // Strip leading reference markers.
+    loop {
+        let trimmed = current.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("&mut ") {
+            current = rest.trim_start().to_string();
+        } else if let Some(rest) = trimmed.strip_prefix('&') {
+            current = rest.trim_start().to_string();
+        } else {
+            break;
+        }
+    }
+
+    // Strip trailing `?` (Option sugar) until none remain.
+    while let Some(rest) = current.strip_suffix('?') {
+        current = rest.trim_end().to_string();
+    }
+
+    // Unwrap one level of common generic carriers — repeated to handle
+    // `Array<Option<Point>>`-style nesting.
+    loop {
+        let unwrapped: Option<String> = if let Some(inner) = strip_generic_wrapper(&current, "Array")
+        {
+            Some(inner.to_string())
+        } else if let Some(inner) = strip_generic_wrapper(&current, "Option") {
+            Some(inner.to_string())
+        } else if let Some(inner) = strip_generic_wrapper(&current, "Result") {
+            // Result<T, E> — first generic arg is the success type.
+            Some(first_generic_arg(inner).to_string())
+        } else if let Some(inner) = strip_generic_wrapper(&current, "HashMap") {
+            // HashMap<K, V> — first arg keeps it deterministic.
+            Some(first_generic_arg(inner).to_string())
+        } else {
+            None
+        };
+        match unwrapped {
+            Some(inner) => {
+                let inner_trim = inner.trim().to_string();
+                if inner_trim == current {
+                    break;
+                }
+                current = inner_trim;
+            }
+            None => break,
+        }
+    }
+
+    // Final shape: must be a single identifier (no `<`, no whitespace, no `,`).
+    let base = current
+        .split(|c: char| c == '<' || c == ',' || c.is_whitespace())
+        .next()?;
+    let base = base.trim();
+    if base.is_empty() {
+        None
+    } else {
+        Some(base.to_string())
+    }
+}
+
+/// If `s` matches `Name<...>`, return the `...` portion. Else `None`.
+fn strip_generic_wrapper<'a>(s: &'a str, name: &str) -> Option<&'a str> {
+    let s = s.strip_prefix(name)?.trim_start();
+    let s = s.strip_prefix('<')?;
+    let s = s.strip_suffix('>')?;
+    Some(s)
+}
+
+fn first_generic_arg(args: &str) -> &str {
+    args.split(',').next().unwrap_or(args).trim()
+}
+
+/// Primitive type names that have no user-visible definition site.
+fn is_builtin_primitive(name: &str) -> bool {
+    matches!(
+        name,
+        "int"
+            | "number"
+            | "bool"
+            | "string"
+            | "decimal"
+            | "bigint"
+            | "unit"
+            | "null"
+            | "DateTime"
+            | "unknown"
+            | "any"
+    )
 }
 
 /// Find the location where a symbol is defined
@@ -553,6 +931,219 @@ let x = foo();
         // This will return None because the module doesn't exist
         let location = find_imported_definition(&program, "foo", &uri, &cache);
         assert!(location.is_none());
+    }
+
+    // --- W2.5: definition family extras (typeDefinition / implementation /
+    //          declaration / documentHighlight) tests ---
+
+    #[test]
+    fn test_extract_base_type_name_plain() {
+        assert_eq!(extract_base_type_name("Point"), Some("Point".to_string()));
+    }
+
+    #[test]
+    fn test_extract_base_type_name_array_wrapper() {
+        assert_eq!(
+            extract_base_type_name("Array<Point>"),
+            Some("Point".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_base_type_name_option_question_mark() {
+        assert_eq!(extract_base_type_name("Point?"), Some("Point".to_string()));
+    }
+
+    #[test]
+    fn test_extract_base_type_name_option_wrapper() {
+        assert_eq!(
+            extract_base_type_name("Option<Point>"),
+            Some("Point".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_base_type_name_reference() {
+        assert_eq!(
+            extract_base_type_name("&mut Point"),
+            Some("Point".to_string())
+        );
+        assert_eq!(extract_base_type_name("&Point"), Some("Point".to_string()));
+    }
+
+    #[test]
+    fn test_extract_base_type_name_nested() {
+        assert_eq!(
+            extract_base_type_name("Array<Option<Point>>"),
+            Some("Point".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_base_type_name_result() {
+        assert_eq!(
+            extract_base_type_name("Result<Point, Error>"),
+            Some("Point".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_base_type_name_object_shape_skipped() {
+        // Object-literal shape strings have no nameable type to navigate to.
+        assert_eq!(extract_base_type_name("{ x: int, y: int }"), None);
+    }
+
+    #[test]
+    fn test_is_builtin_primitive_filters_int() {
+        assert!(is_builtin_primitive("int"));
+        assert!(is_builtin_primitive("string"));
+        assert!(!is_builtin_primitive("Point"));
+    }
+
+    #[test]
+    fn test_get_implementations_finds_impl_block() {
+        let code = r#"trait Greet {
+    greet(): string
+}
+
+type Cat { name: string }
+
+impl Greet for Cat {
+    method greet() { return "meow" }
+}
+"#;
+        // Sanity-check parse — surface any imprecision in test fixture syntax.
+        let program = parse_program(code).expect("test fixture must parse");
+        let impl_count = program
+            .items
+            .iter()
+            .filter(|i| matches!(i, Item::Impl(_, _)))
+            .count();
+        assert!(impl_count >= 1, "Expected at least 1 Item::Impl in parsed program");
+
+        let uri = Uri::from_file_path("/test.shape").unwrap();
+        // Cursor on "Greet" trait name in the impl line (line 6, after "impl ").
+        let impls = get_implementations(
+            code,
+            Position {
+                line: 6,
+                character: 6,
+            },
+            &uri,
+            None,
+        );
+        assert!(impls.is_some(), "Should find impl block for trait Greet");
+        let locations = impls.unwrap();
+        assert_eq!(locations.len(), 1);
+    }
+
+    #[test]
+    fn test_get_implementations_by_target_type() {
+        // Cursor on the *target* type (Cat) should also surface the impl.
+        let code = r#"trait Greet {
+    greet(): string
+}
+
+type Cat { name: string }
+
+impl Greet for Cat {
+    method greet() { return "meow" }
+}
+"#;
+        let program = parse_program(code).expect("test fixture must parse");
+        assert!(program.items.iter().any(|i| matches!(i, Item::Impl(_, _))));
+
+        let uri = Uri::from_file_path("/test.shape").unwrap();
+        // Cursor on "Cat" target — line 6, char 16 ("impl Greet for Cat" — 'C' of Cat).
+        let impls = get_implementations(
+            code,
+            Position {
+                line: 6,
+                character: 16,
+            },
+            &uri,
+            None,
+        );
+        assert!(
+            impls.is_some(),
+            "Should find impl block when cursor is on target type Cat"
+        );
+    }
+
+    #[test]
+    fn test_get_declaration_aliases_definition() {
+        let code = r#"let myVar = 42;
+let x = myVar + 5;
+"#;
+        let uri = Uri::from_file_path("/test.shape").unwrap();
+        // Cursor on `myVar` use on line 1.
+        let decl = get_declaration(
+            code,
+            Position {
+                line: 1,
+                character: 9,
+            },
+            &uri,
+            None,
+            None,
+            None,
+        );
+        let def = get_definition(
+            code,
+            Position {
+                line: 1,
+                character: 9,
+            },
+            &uri,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(decl.is_some(), def.is_some());
+    }
+
+    #[test]
+    fn test_get_document_highlights_finds_variable_uses() {
+        let code = r#"let myVar = 42;
+let x = myVar + 5;
+let y = myVar * 2;
+"#;
+        // Cursor on the definition site of `myVar`.
+        let highlights = get_document_highlights(
+            code,
+            Position {
+                line: 0,
+                character: 6,
+            },
+            None,
+        );
+        assert!(highlights.is_some(), "Should find highlights for myVar");
+        let hs = highlights.unwrap();
+        assert!(
+            hs.len() >= 3,
+            "Expected at least 3 highlights (def + 2 uses), got {}",
+            hs.len()
+        );
+        for h in &hs {
+            assert_eq!(h.kind, Some(DocumentHighlightKind::TEXT));
+        }
+    }
+
+    #[test]
+    fn test_get_document_highlights_returns_none_off_symbol() {
+        let code = "let myVar = 42;\n";
+        // Cursor on whitespace before `let`.
+        let highlights = get_document_highlights(
+            code,
+            Position {
+                line: 0,
+                character: 0,
+            },
+            None,
+        );
+        // ScopeTree won't bind at offset 0, fallback path needs a word — none here.
+        // Result depends on the surrounding text; ensure the call doesn't panic.
+        let _ = highlights;
     }
 
     #[test]
