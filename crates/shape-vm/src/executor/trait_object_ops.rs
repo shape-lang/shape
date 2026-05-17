@@ -596,10 +596,14 @@ impl VirtualMachine {
 
         let saved_depth = self.call_stack.len();
         self.call_function_with_nb_args(function_id, &args)?;
-        for slot in args {
-            std::mem::forget(slot);
-        }
+        // cluster-1.5 v2-raw-empirical-isolation-and-fix (2026-05-17):
+        // post-fix `call_function_with_nb_args` clones each arg into
+        // the new frame so the legacy per-slot `mem::forget` is no
+        // longer needed (it was a load-bearing leak compensating for
+        // the missing clone). Let `args` drop normally after the call
+        // completes so the caller-owned shares retire.
         self.execute_until_call_depth(saved_depth, ctx)?;
+        drop(args);
 
         // Step 4: pop the result, then walk wrap_targets to re-box
         // every Self-named site.
@@ -774,10 +778,11 @@ impl VirtualMachine {
         let args = vec![self_arg];
         let saved_depth = self.call_stack.len();
         self.call_function_with_nb_args(function_id, &args)?;
-        for slot in args {
-            std::mem::forget(slot);
-        }
+        // cluster-1.5 v2-raw-empirical-isolation-and-fix (2026-05-17):
+        // post-fix the helper clones each arg into the new frame; let
+        // `args` drop normally to retire the caller-owned share.
         self.execute_until_call_depth(saved_depth, ctx)?;
+        drop(args);
         // Pop and discard the drop fn's return value (Drop::drop
         // returns Unit; the kind dispatch on pop releases any
         // refcount it carried).

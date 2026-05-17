@@ -120,10 +120,17 @@ impl VirtualMachine {
     /// dispatch shape).
     ///
     /// **Ownership.** Each `KindedSlot` in `args` holds a strong-count
-    /// share. `call_function_with_nb_args` transfers shares into local
-    /// slots via `stack_write_kinded`; we then `mem::forget` the source
-    /// vec to release the per-slot carriers without dropping the shares
-    /// — same pattern as the §2.7.10 `op_call_method` dispatch shell.
+    /// share. cluster-1.5 v2-raw-empirical-isolation-and-fix
+    /// (2026-05-17): post-fix `call_function_with_nb_args` is share-
+    /// neutral (clones each arg before frame-write so the frame's
+    /// teardown `truncate_stack` retire balances the in-helper clone;
+    /// caller's carrier shares are preserved by the borrow-only
+    /// `&[KindedSlot]` signature). We let `args` drop normally at
+    /// scope exit — the per-slot `KindedSlot::Drop` retires each
+    /// caller-owned share. The legacy `mem::forget` pre-fix was a
+    /// load-bearing leak that compensated for the missing clone in
+    /// the helper; with the helper now share-neutral, the forget would
+    /// LEAK one share per heap-bearing arg.
     pub fn execute_function_by_id(
         &mut self,
         func_id: u16,
@@ -132,11 +139,13 @@ impl VirtualMachine {
     ) -> Result<KindedSlot, VMError> {
         let saved_call_depth = self.call_stack.len();
         self.call_function_with_nb_args(func_id, &args)?;
-        // Shares transferred into the new frame's locals; release the
-        // source-side carriers without dropping the shares.
-        std::mem::forget(args);
         self.execute_until_call_depth(saved_call_depth, ctx)?;
         let (bits, kind) = self.pop_kinded()?;
+        // `args` drops here; per-slot `KindedSlot::Drop` retires each
+        // caller-owned share. The helper's internal `clone_with_kind`
+        // before frame-write ensures the new frame owns an independent
+        // share retired at `truncate_stack` teardown.
+        drop(args);
         Ok(KindedSlot::new(ValueSlot::from_raw(bits), kind))
     }
 
@@ -169,10 +178,19 @@ impl VirtualMachine {
         // lifetime is guaranteed by the borrow held across this call,
         // so `closure_heap_bits` / `closure_heap_kind` are both `None`
         // (B9 lockstep `Some(..)` ↔ `Some(..)`).
+        //
+        // cluster-1.5 v2-raw-empirical-isolation-and-fix (2026-05-17):
+        // post-fix `call_closure_with_nb_args_keepalive` is share-
+        // neutral (clones each arg + capture before frame-write); we
+        // let `args` drop normally at scope exit to retire the caller-
+        // owned shares. The legacy `mem::forget` was a load-bearing
+        // leak compensating for the missing clone — see
+        // `execute_function_by_id` for the matching ownership-comment
+        // rewrite.
         self.call_closure_with_nb_args_keepalive(function_id, closure_block, &args, None, None)?;
-        std::mem::forget(args);
         self.execute_until_call_depth(saved_call_depth, ctx)?;
         let (bits, kind) = self.pop_kinded()?;
+        drop(args);
         Ok(KindedSlot::new(ValueSlot::from_raw(bits), kind))
     }
 
@@ -601,7 +619,21 @@ impl VirtualMachine {
         // `stack_write_kinded` write transfers the share into the
         // local slot (drops the sentinel from the resize above —
         // a no-op).
+        //
+        // cluster-1.5 v2-raw-empirical-isolation-and-fix (2026-05-17):
+        // `slot.slot.raw()` is a raw bit read — does NOT bump the arg's
+        // refcount. Each caller-side `KindedSlot` carrier still owns
+        // its share (the call path may receive args by borrow, e.g.
+        // via `call_value_immediate_nb`'s callsites that pass
+        // `&[KindedSlot]` from a locally-constructed array). The frame
+        // teardown `truncate_stack(bp)` at `op_return_value` releases
+        // each arg's share via `drop_with_kind`. Without the
+        // `clone_with_kind` below, the two releases retire one share
+        // more than was acquired — for heap-bearing kinds this
+        // surfaces as a use-after-free. Mirror precedent: see the
+        // matching fix in `call_closure_with_nb_args_keepalive` below.
         for (i, slot) in args.iter().enumerate() {
+            crate::executor::vm_impl::stack::clone_with_kind(slot.slot.raw(), slot.kind);
             self.stack_write_kinded(base_pointer + i, slot.slot.raw(), slot.kind);
         }
 
@@ -722,19 +754,58 @@ impl VirtualMachine {
         // a misalignment between layout and stored bits is a
         // construction-side bug that surfaces as a panic from
         // `read_capture_kinded` itself (W7 playbook §8 surface-and-stop).
+        //
+        // cluster-1.5 v2-raw-empirical-isolation-and-fix (2026-05-17):
+        // `read_capture_kinded` is a raw bit read — does NOT bump the
+        // capture's refcount. The frame's `truncate_stack(bp)` at
+        // `op_return_value` teardown WILL release each capture's share
+        // via `drop_with_kind`. The closure block itself ALSO owns one
+        // share per capture (released at `OwnedClosureBlock::Drop` via
+        // the capture-mask walk). Without the `clone_with_kind` below,
+        // both releases retire one share more than was acquired — same
+        // pattern as the Round 13 T5 `closure_heap_bits` companion fix
+        // for the closure-self share. Mirror precedent: the explicit
+        // `clone_with_kind` at `call_value_immediate_nb` line 870 for
+        // the callee carrier.
         for capture_idx in 0..capture_count {
             // SAFETY: the block was constructed by the producing
             // `MakeClosure` opcode with `capture_count` initialised
             // capture slots; the borrow from the dispatch shell holds
             // the block live for the duration of this call.
             let (bits, kind) = unsafe { closure_block.read_capture_kinded(capture_idx) };
+            crate::executor::vm_impl::stack::clone_with_kind(bits, kind);
             self.stack_write_kinded(base_pointer + capture_idx, bits, kind);
         }
 
         // Walk args and thread each into the local slot following the
         // captures.
+        //
+        // cluster-1.5 v2-raw-empirical-isolation-and-fix (2026-05-17):
+        // `slot.slot.raw()` is a raw bit read — does NOT bump the arg's
+        // refcount. The caller (e.g. `v2_filter` at
+        // `hashmap_methods.rs:1640`) constructs each `KindedSlot` arg
+        // locally; those carriers own one share each, released at
+        // scope exit via `KindedSlot::Drop`. The frame's
+        // `truncate_stack(bp)` at `op_return_value` teardown WILL
+        // ALSO release each arg's share via `drop_with_kind`. Without
+        // the `clone_with_kind` below, the two releases retire one
+        // share more than was acquired — for heap-bearing arg kinds
+        // (`String`, `Ptr(...)`, `StringV2`, `DecimalV2`) this is a
+        // use-after-free on the underlying allocation. SIGABRT chain
+        // surfaces at `crates/shape-value/src/v2/typed_array.rs:317`
+        // (`drop_array_heap` element walk) when the freed Arc<String>
+        // data is later re-read via `kept_keys[i].as_str()` in
+        // `build_filtered_kref` — the str data ptr aliases freshly
+        // alloc'd memory and the next StringObj alloc reuses the same
+        // slot, corrupting refcount metadata.
+        //
+        // Mirror precedent: the explicit `clone_with_kind` at
+        // `call_value_immediate_nb` line 870 for the callee carrier
+        // (Round 13 T5 share-accounting fix, audit doc
+        // `docs/cluster-audits/w17-vm-call-value-closure-kind-mismatch-audit.md`).
         let arg_base = base_pointer + capture_count;
         for (i, slot) in args.iter().enumerate() {
+            crate::executor::vm_impl::stack::clone_with_kind(slot.slot.raw(), slot.kind);
             self.stack_write_kinded(arg_base + i, slot.slot.raw(), slot.kind);
         }
 
