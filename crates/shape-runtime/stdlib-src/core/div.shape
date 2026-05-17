@@ -1,0 +1,73 @@
+/// @module std::core::div
+/// `Div` and `DivAssign` — operator traits for `/` and `/=`.
+///
+/// Shape's strict-typing arithmetic dispatch for built-in scalar types
+/// (`int`, `number`, `decimal`, `bigint`) emits typed opcodes
+/// (`DivInt`, `DivNumber`, ...) at compile time and never routes through
+/// this trait. User-defined types (`type X { ... }`) that want to
+/// participate in `/` / `/=` opt in by providing an
+/// `impl Div for X { method div(other: X) -> X { ... } }` block; the
+/// compiler then desugars `a / b` to `Div::div(a, b)` via the operator
+/// trait dispatch path at `compiler/expressions/binary_ops.rs:1459-1473`.
+///
+/// `DivAssign` is the in-place counterpart. `a /= b` is grammar-desugared
+/// at parse time (`shape-ast/parser/expressions/binary_ops.rs`) to
+/// `a = a / b`, so authoring an `impl Div for X` already covers `/=` for
+/// user-defined types without a separate `DivAssign::div_assign` body.
+/// `DivAssign` is declared here for symmetry with future in-place
+/// optimizations (e.g. `Matrix.div_assign(other)` that mutates in-place
+/// instead of allocating a fresh value) and so generic bounds
+/// `fn f<T: DivAssign>(...)` can be authored today.
+///
+/// ## Architectural note (mirrors `add.shape` post-W6 imprecision 83 fix)
+///
+/// `DivAssign::div_assign` is declared with an explicit `Self` return type
+/// by convention (the in-place op canonically returns `self` for
+/// chaining), but trait methods may omit the return type entirely — the
+/// grammar treats a trait method without `: ReturnType` as returning
+/// `void`. The W6 close-out unblocks return-typeless trait methods; the
+/// `: Self` here is convention, not a parse-failure workaround.
+///
+/// ## Division-by-zero semantics
+///
+/// User implementations of `div` are responsible for their own
+/// division-by-zero policy. The trait makes no guarantees — an
+/// implementation may panic, return a sentinel value, return a `Result`-
+/// wrapped error via a separate method, or rely on IEEE-754 infinity /
+/// NaN semantics for `number`-backed fields. The built-in `DivInt` opcode
+/// raises a runtime error on integer divide-by-zero; user types may
+/// choose to mirror that or not.
+///
+/// ## Known implementations
+///
+/// | Type        | Dispatch source                                  |
+/// |-------------|--------------------------------------------------|
+/// | int         | typed `DivInt` opcode (no trait dispatch)        |
+/// | number      | typed `DivNumber` opcode (no trait dispatch)     |
+/// | decimal     | typed decimal-div opcode (no trait dispatch)     |
+/// | bigint      | typed bigint-div opcode (no trait dispatch)      |
+/// | user type X | `impl Div for X { method div(other: X) -> X }`   |
+
+/// Operator trait for `/`. Implementing `Div` for a user-defined type
+/// enables the binary `/` operator on values of that type. The compiler
+/// calls `Div::div(lhs, rhs)` via UFCS dispatch through the
+/// `function_name_index` for `X::div`.
+trait Div {
+    /// Return `self / other`. By convention the result is a fresh value;
+    /// in-place mutation belongs to `DivAssign::div_assign`.
+    div(other: Self): Self
+}
+
+/// Operator trait for `/=`. The grammar desugars `a /= b` to `a = a / b`,
+/// so providing `impl Div for X` already covers `/=` for user-defined
+/// types — `DivAssign` is declared here for generic bounds and for the
+/// future in-place specialization opt-in.
+///
+/// The return type is `Self` (the in-place op returns `self` for
+/// chaining) by convention; implementations may mutate `self` in place
+/// and `return self` from the method body. The desugar at parse time
+/// means the return value is unused under current semantics.
+trait DivAssign {
+    /// Mutate `self` in place by dividing by `other`. Return `self` for chaining.
+    div_assign(other: Self): Self
+}
