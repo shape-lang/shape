@@ -34,7 +34,8 @@ use tower_lsp_server::ls_types::{
     CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams, CallHierarchyPrepareParams,
     CallHierarchyServerCapability, CodeActionKind, CodeActionOptions, CodeActionParams,
     CodeActionProviderCapability, CodeActionResponse, CodeLens, CodeLensOptions, CodeLensParams,
-    CompletionOptions, CompletionParams, CompletionResponse, Diagnostic, DiagnosticSeverity,
+    CompletionItem, CompletionOptions, CompletionParams, CompletionResponse, Diagnostic,
+    DiagnosticSeverity,
     DidChangeConfigurationParams, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
     DidOpenTextDocumentParams, DocumentFormattingParams, DocumentOnTypeFormattingOptions,
     DocumentOnTypeFormattingParams, DocumentRangeFormattingParams, DocumentSymbolParams,
@@ -481,8 +482,13 @@ impl LanguageServer for ShapeLanguageServer {
                 )),
 
                 // Enable completion support
+                //
+                // W2.2 (LSP feature 1.10 / 1.11): `resolve_provider` enables
+                // `completionItem/resolve` for lazy detail expansion; the
+                // `all_commit_characters` list lets clients auto-commit completion
+                // on common Shape punctuation when per-item commit chars are absent.
                 completion_provider: Some(CompletionOptions {
-                    resolve_provider: Some(false),
+                    resolve_provider: Some(true),
                     trigger_characters: Some(vec![
                         ".".to_string(),
                         "(".to_string(),
@@ -493,7 +499,12 @@ impl LanguageServer for ShapeLanguageServer {
                     work_done_progress_options: WorkDoneProgressOptions {
                         work_done_progress: None,
                     },
-                    all_commit_characters: None,
+                    all_commit_characters: Some(vec![
+                        ".".to_string(),
+                        "(".to_string(),
+                        ",".to_string(),
+                        ";".to_string(),
+                    ]),
                     completion_item: None,
                 }),
 
@@ -803,6 +814,19 @@ impl LanguageServer for ShapeLanguageServer {
         }
 
         Ok(Some(CompletionResponse::Array(completions)))
+    }
+
+    /// `completionItem/resolve` — lazy detail expansion (LSP feature 1.10).
+    ///
+    /// Today every completion item ships its full payload (label, detail,
+    /// documentation, snippet) inline from the `completion` handler. The
+    /// resolver therefore behaves as an identity pass-through so the round-
+    /// trip is cheap and clients that route through resolve still get the
+    /// full item back. W2.2 lays the protocol foundation; downstream waves
+    /// can swap in genuinely-deferred metadata producers without changing
+    /// the registered capability.
+    async fn completion_resolve(&self, item: CompletionItem) -> Result<CompletionItem> {
+        Ok(item)
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
