@@ -569,7 +569,7 @@ impl TypeEnvironment {
             members: vec![TraitMember::Required(TraitMemberSignature::Method {
                 name: "cmp".to_string(),
                 optional: false,
-                params: vec![self_param, other_param],
+                params: vec![self_param.clone(), other_param],
                 return_type: TypeAnnotation::Basic("int".to_string()),
                 is_async: false,
                 span: Span::DUMMY,
@@ -663,6 +663,98 @@ impl TypeEnvironment {
             "bool",
             vec!["not".to_string()],
         );
+
+        // W1.11 (v0.3 R2): `Index` + `IndexMut` operator traits for
+        // `c[k]` (read) and `c[k] = v` (write). Distinct from the binary-op
+        // dispatch path — `Index`/`IndexMut` route through the
+        // index-access pipeline at
+        // `compiler/expressions/property_access.rs:compile_expr_index_access`
+        // (read) and `compiler/expressions/assignment.rs` (write), NOT
+        // through `binary_ops.rs` BinaryOp dispatch.
+        //
+        // Generic params `Index<Key, Value>` / `IndexMut<Key, Value>`
+        // mirror the `Iterable<T>` precedent (`register_iterable_trait`
+        // above). The trait dispatch path strips generic args at trait
+        // registration (`type_system/inference/items.rs:574` via
+        // `type_name_str` at `:948`), so the `type_implements_trait` check
+        // matches by name only — `impl Index<string, int> for Cache`
+        // registers as ("Index", "Cache") and dispatch on `c["foo"]`
+        // resolves via `type_implements_trait("Cache", "Index")`.
+        let key_param = FunctionParam {
+            name: Some("key".to_string()),
+            type_annotation: TypeAnnotation::Reference("Key".into()),
+            optional: false,
+        };
+        let value_param = FunctionParam {
+            name: Some("value".to_string()),
+            type_annotation: TypeAnnotation::Reference("Value".into()),
+            optional: false,
+        };
+        let index_trait = TraitDef {
+            name: "Index".to_string(),
+            doc_comment: None,
+            type_params: Some(vec![
+                shape_ast::ast::TypeParam::Type {
+                    name: "Key".to_string(),
+                    span: Span::DUMMY,
+                    doc_comment: None,
+                    default_type: None,
+                    trait_bounds: vec![],
+                },
+                shape_ast::ast::TypeParam::Type {
+                    name: "Value".to_string(),
+                    span: Span::DUMMY,
+                    doc_comment: None,
+                    default_type: None,
+                    trait_bounds: vec![],
+                },
+            ]),
+            super_traits: vec![],
+            members: vec![TraitMember::Required(TraitMemberSignature::Method {
+                name: "index".to_string(),
+                optional: false,
+                params: vec![self_param.clone(), key_param.clone()],
+                return_type: TypeAnnotation::Reference("Value".into()),
+                is_async: false,
+                span: Span::DUMMY,
+                doc_comment: None,
+            })],
+            annotations: vec![],
+        };
+        self.define_trait(&index_trait);
+
+        let index_mut_trait = TraitDef {
+            name: "IndexMut".to_string(),
+            doc_comment: None,
+            type_params: Some(vec![
+                shape_ast::ast::TypeParam::Type {
+                    name: "Key".to_string(),
+                    span: Span::DUMMY,
+                    doc_comment: None,
+                    default_type: None,
+                    trait_bounds: vec![],
+                },
+                shape_ast::ast::TypeParam::Type {
+                    name: "Value".to_string(),
+                    span: Span::DUMMY,
+                    doc_comment: None,
+                    default_type: None,
+                    trait_bounds: vec![],
+                },
+            ]),
+            super_traits: vec![],
+            members: vec![TraitMember::Required(TraitMemberSignature::Method {
+                name: "index_set".to_string(),
+                optional: false,
+                params: vec![self_param.clone(), key_param, value_param],
+                return_type: TypeAnnotation::Basic("void".to_string()),
+                is_async: false,
+                span: Span::DUMMY,
+                doc_comment: None,
+            })],
+            annotations: vec![],
+        };
+        self.define_trait(&index_mut_trait);
     }
 
     /// Register the Numeric marker trait and built-in implementations.

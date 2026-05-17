@@ -1523,7 +1523,7 @@ impl BytecodeCompiler {
     /// identifier, searching local slots first and falling back to module
     /// bindings. Returns `None` if the identifier is neither a local nor a
     /// module binding, or if the tracker has no type_name on that slot.
-    fn tracker_type_name_for_identifier(&self, name: &str) -> Option<String> {
+    pub(super) fn tracker_type_name_for_identifier(&self, name: &str) -> Option<String> {
         if let Some(local_idx) = self.resolve_local(name) {
             if let Some(info) = self.type_tracker.get_local_type(local_idx) {
                 if let Some(ref tn) = info.type_name {

@@ -586,6 +586,30 @@ impl BytecodeCompiler {
             }
         }
 
+        // W1.11 (v0.3 R2): user-type `Index` trait dispatch for `c[k]`.
+        //
+        // After the built-in typed-array fast paths fail (typed_kind is
+        // None and try_resolve_typed_elem_get returned None), check if the
+        // receiver's type implements the `Index` trait. If so, emit
+        // `CallMethod("index", arg_count=1)` instead of falling through to
+        // the generic `GetProp` path. This is the index-access analog of
+        // the binary-op trait dispatch at `binary_ops.rs:71-85`. Sibling
+        // of `IndexMut` dispatch in `assignment.rs` for `c[k] = v`.
+        //
+        // Resolve the trait BEFORE compiling the object — `compile_expr`
+        // may overwrite tracker state used by `infer_expr_type`.
+        if end_index.is_none() && typed_kind.is_none() {
+            if self.receiver_type_implements_trait(object, "Index") {
+                self.compile_expr(object)?;
+                self.compile_expr(index)?;
+                emit_index_trait_call(self, "index", 1);
+                self.last_expr_schema = None;
+                self.last_expr_type_info = None;
+                self.last_expr_numeric_type = None;
+                return Ok(());
+            }
+        }
+
         self.compile_expr(object)?;
         self.compile_expr(index)?;
         if let Some(end) = end_index {
@@ -657,4 +681,70 @@ impl BytecodeCompiler {
             _ => None,
         }
     }
+
+    /// W1.11: Check whether the receiver `object` has a type that implements
+    /// `trait_name` (e.g. `"Index"` or `"IndexMut"`).
+    ///
+    /// Schema-first lookup uses the tracker's last-expr schema if the
+    /// receiver is an identifier; falls back to `infer_expr_type` +
+    /// `type_display_name`. Mirrors `try_emit_trait_dispatch` at
+    /// `binary_ops.rs:71-85` for the index-access dispatch path.
+    pub(super) fn receiver_type_implements_trait(
+        &mut self,
+        object: &Expr,
+        trait_name: &str,
+    ) -> bool {
+        // Schema-based check: if the receiver is a known identifier with a
+        // recorded TypedObject schema, look up by schema name.
+        let schema_type_name = if let Expr::Identifier(name, _) = object {
+            self.tracker_type_name_for_identifier(name)
+        } else {
+            None
+        };
+        if let Some(type_name) = schema_type_name {
+            if self
+                .type_inference
+                .env
+                .type_implements_trait(&type_name, trait_name)
+            {
+                return true;
+            }
+        }
+        // Inference-based fallback for non-Identifier receivers or
+        // receivers without a tracker entry.
+        if let Ok(ty) = self.infer_expr_type(object) {
+            let name = super::numeric_ops::type_display_name(&ty);
+            if self
+                .type_inference
+                .env
+                .type_implements_trait(&name, trait_name)
+            {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// W1.11: Emit a `CallMethod` instruction targeting an `Index`/`IndexMut`
+/// trait method (e.g. `Cache::index`, `Cache::index_set`). All operands
+/// must already be on the stack: receiver first, then the key (and
+/// optionally the value for `index_set`). Mirrors
+/// `emit_operator_trait_call` at `binary_ops.rs:90-104`.
+pub(super) fn emit_index_trait_call(
+    compiler: &mut BytecodeCompiler,
+    method_name: &str,
+    arg_count: u16,
+) {
+    let method_id = shape_value::MethodId::from_name(method_name);
+    let string_id = compiler.program.add_string(method_name.to_string());
+    compiler.emit(Instruction::new(
+        OpCode::CallMethod,
+        Some(Operand::TypedMethodCall {
+            method_id: method_id.0,
+            arg_count,
+            string_id,
+            receiver_type_tag: 0xFF,
+        }),
+    ));
 }

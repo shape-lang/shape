@@ -636,6 +636,49 @@ impl BytecodeCompiler {
                 // Resolve BEFORE compiling the value (compile_expr may
                 // overwrite tracker state).
                 let typed_kind = self.resolve_receiver_typed_array_kind(object);
+
+                // W1.11 (v0.3 R2): user-type `IndexMut` trait dispatch for
+                // `c[k] = v`. Fires when the receiver's type implements
+                // `IndexMut` and the built-in typed-array fast path
+                // doesn't apply (typed_kind is None). The dispatch emits
+                // `CallMethod("index_set", arg_count=2)` after pushing
+                // (receiver, key, value) onto the stack, then preserves
+                // the value as the assignment-expression result. Sibling
+                // of the `Index` dispatch in `property_access.rs:compile_expr_index_access`.
+                if typed_kind.is_none()
+                    && self.receiver_type_implements_trait(object, "IndexMut")
+                {
+                    self.reject_direct_reference_storage(
+                        &assign_expr.value,
+                        ARRAY_REF_STORAGE_ERROR,
+                    )?;
+                    self.compile_expr(object)?;
+                    self.compile_expr(index)?;
+                    self.compile_expr(&assign_expr.value)?;
+                    // Stash the value for the assignment-expression result
+                    // before `index_set` consumes it.
+                    let value_local = self.declare_temp_local("__assign_value_")?;
+                    self.emit(Instruction::new(
+                        OpCode::StoreLocal,
+                        Some(Operand::Local(value_local)),
+                    ));
+                    // Re-push value as the third argument so `index_set`
+                    // sees (receiver, key, value) on the stack.
+                    self.emit(Instruction::new(
+                        OpCode::LoadLocal,
+                        Some(Operand::Local(value_local)),
+                    ));
+                    super::property_access::emit_index_trait_call(self, "index_set", 2);
+                    // `index_set` returns `void` — drop the unit result so
+                    // the assignment-expression result is the stashed value.
+                    self.emit(Instruction::simple(OpCode::Pop));
+                    self.emit(Instruction::new(
+                        OpCode::LoadLocal,
+                        Some(Operand::Local(value_local)),
+                    ));
+                    return Ok(());
+                }
+
                 if let Expr::Identifier(name, _) = object.as_ref() {
                     // Local-slot-based SetElem fast path: `SetElemI64`/
                     // `SetElemF64` take the array slot as operand and

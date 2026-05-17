@@ -1,0 +1,73 @@
+/// @module std::core::index
+/// `Index` and `IndexMut` — operator traits for `c[k]` and `c[k] = v`.
+///
+/// Shape's strict-typing dispatch for the built-in indexable types
+/// (`Array<T>`, `HashMap<K,V>`, `string`) emits typed opcodes
+/// (`GetElemI64`, `GetElemF64`, `TypedArrayGet*`, `SetElemI64`,
+/// `SetElemF64`, `TypedArraySet*`, etc.) at compile time and never
+/// routes through these traits. User-defined types (`type X { ... }`)
+/// that want to participate in `c[k]` / `c[k] = v` opt in by providing
+/// `impl Index<Key, Value> for X { method index(key: Key): Value { ... } }`
+/// and (for write access)
+/// `impl IndexMut<Key, Value> for X { method index_set(key: Key, value: Value) { ... } }`
+/// blocks; the compiler then desugars `c[k]` to `Index::index(c, k)` and
+/// `c[k] = v` to `IndexMut::index_set(c, k, v)` via the index-access
+/// dispatch path at
+/// `compiler/expressions/property_access.rs:compile_expr_index_access`
+/// (read) and `compiler/expressions/assignment.rs` (write).
+///
+/// DISTINCT from binary-op trait dispatch (Add/Sub/Mul/...): Index and
+/// IndexMut route through the index-access pipeline (`Expr::IndexAccess` →
+/// `OpCode::GetProp` / `OpCode::SetProp` fallback), NOT through
+/// `binary_ops.rs` BinaryOp dispatch.
+///
+/// ## Architectural note — generic params vs associated types
+///
+/// Rust convention is `trait Index<Idx> { type Output; fn index(&self, idx:
+/// Idx) -> &Self::Output }` (one generic param + associated type for the
+/// result). Shape's trait dispatch path resolves a trait by name only —
+/// generic args on `impl Index<string, int> for Cache` are stripped at
+/// `register_trait_impl_with_assoc_types_named` (`type_system/inference/items.rs:574`
+/// via `type_name_str` at `:948`), so a generic-param formulation
+/// `Index<Key, Value>` registers identically to a bare `Index` for the
+/// runtime `type_implements_trait("Cache", "Index")` check. Generic
+/// params are preferred over associated types here because they mirror
+/// the existing `Iterable<T>` precedent (`std::core::iterable`) and
+/// keep impl-block authoring uniform with other parametric traits in the
+/// stdlib (no `type Output = int;` line required in each impl).
+///
+/// `IndexMut::index_set` returns `void` (the in-place op has no return
+/// value under current semantics; the assignment expression's result is
+/// the RHS value, captured at the desugar site).
+///
+/// ## Known implementations
+///
+/// | Type             | Dispatch source                                       |
+/// |------------------|-------------------------------------------------------|
+/// | Array<T>         | typed `GetElemI64`/`GetElemF64`/`TypedArrayGet*` etc. |
+/// | HashMap<K,V>     | builtin `HASHMAP_METHODS::get`/`set` PHF entries      |
+/// | string           | typed string-index opcode (no trait dispatch)         |
+/// | user type X      | `impl Index<K,V> for X { method index(key: K): V }`   |
+
+/// Operator trait for `c[k]` (read). Implementing `Index<Key, Value>` for
+/// a user-defined type enables the binary index-access syntax on values
+/// of that type. The compiler calls `Index::index(c, k)` via UFCS
+/// dispatch through the `function_name_index` for `X::index`.
+trait Index<Key, Value> {
+    /// Return the value associated with `key`. By convention the result is
+    /// a fresh value or a copy; reference semantics belong to a future
+    /// `IndexRef` variant.
+    index(key: Key): Value
+}
+
+/// Operator trait for `c[k] = v` (write). Implementing `IndexMut<Key, Value>`
+/// for a user-defined type enables the index-assignment syntax. The
+/// compiler calls `IndexMut::index_set(c, k, v)` via UFCS dispatch through
+/// the `function_name_index` for `X::index_set`. The return value is
+/// unused (the assignment expression's result is the RHS value, captured
+/// at the desugar site by the compiler).
+trait IndexMut<Key, Value> {
+    /// Set the value associated with `key` to `value`. Implementations
+    /// typically mutate `self` in place.
+    index_set(key: Key, value: Value)
+}
