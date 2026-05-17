@@ -450,6 +450,17 @@ impl TypeInferenceEngine {
 
         match op {
             UnaryOp::Not => {
+                // Operator trait fallback (W1.6): if operand type implements
+                // Not, return that type (unary `!` on user types is a UFCS
+                // call to `Not::not(self) -> Self`). Sibling of the Neg
+                // fallback below.
+                if let Some(result_type) = self.check_operator_trait(&effective_operand, "Not") {
+                    return if is_optional {
+                        Ok(Self::wrap_in_option(result_type))
+                    } else {
+                        Ok(result_type)
+                    };
+                }
                 self.constraints
                     .push((effective_operand, BuiltinTypes::boolean()));
                 if is_optional {

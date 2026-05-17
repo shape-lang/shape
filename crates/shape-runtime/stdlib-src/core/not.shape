@@ -1,0 +1,31 @@
+/// @module std::core::not
+/// `Not` — operator trait for unary `!`.
+///
+/// Shape's strict-typing dispatch for the built-in boolean negation
+/// (`!bool`) emits the typed `Not` opcode at compile time and never
+/// routes through this trait. User-defined types (`type X { ... }`)
+/// that want to participate in unary `!` opt in by providing an
+/// `impl Not for X { method not() -> X { ... } }` block; the compiler
+/// then desugars `!x` to `Not::not(x)` via the operator trait dispatch
+/// path at `compiler/expressions/unary_ops.rs` (the unary sibling of
+/// the binary operator dispatch at `compiler/expressions/binary_ops.rs`).
+///
+/// Sibling of `Neg` (unary `-`) — both unary operator traits share
+/// the same single-method shape (`method op() -> Self`).
+///
+/// ## Known implementations
+///
+/// | Type        | Dispatch source                                  |
+/// |-------------|--------------------------------------------------|
+/// | bool        | typed `Not` opcode (no trait dispatch)           |
+/// | user type X | `impl Not for X { method not() -> X }`           |
+
+/// Operator trait for unary `!`. Implementing `Not` for a user-defined
+/// type enables the unary `!` operator on values of that type. The
+/// compiler calls `Not::not(x)` via UFCS dispatch through the
+/// `function_name_index` for `X::not`.
+trait Not {
+    /// Return the negation of `self`. By convention the result is a
+    /// fresh value of the same type.
+    not(): Self
+}

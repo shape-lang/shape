@@ -521,6 +521,26 @@ impl TypeEnvironment {
         };
         self.define_trait(&neg_trait);
 
+        // Unary operator trait: Not (W1.6 — v0.3 W1 operator coverage)
+        // Sibling of Neg; single-arg `method not() -> Self`.
+        let not_trait = TraitDef {
+            name: "Not".to_string(),
+            doc_comment: None,
+            type_params: None,
+            super_traits: vec![],
+            members: vec![TraitMember::Required(TraitMemberSignature::Method {
+                name: "not".to_string(),
+                optional: false,
+                params: vec![self_param.clone()],
+                return_type: TypeAnnotation::Basic("Self".to_string()),
+                is_async: false,
+                span: Span::DUMMY,
+                doc_comment: None,
+            })],
+            annotations: vec![],
+        };
+        self.define_trait(&not_trait);
+
         // Eq trait: eq(self, other) -> bool
         let eq_trait = TraitDef {
             name: "Eq".to_string(),
@@ -632,6 +652,17 @@ impl TypeEnvironment {
                 vec!["neg".to_string()],
             );
         }
+
+        // W1.6: register `Not` impl for `bool` so `<T: Not>` bound
+        // checking succeeds when T resolves to `bool`. The typed
+        // `OpCode::Not` services the actual operation — this is a
+        // bookkeeping-only registration, sibling of the Neg arithmetic
+        // registrations above.
+        let _ = self.type_registry.register_trait_impl(
+            "Not",
+            "bool",
+            vec!["not".to_string()],
+        );
     }
 
     /// Register the Numeric marker trait and built-in implementations.
