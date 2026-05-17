@@ -468,8 +468,134 @@ impl VirtualMachine {
         method_name: &str,
         ctx: Option<&mut shape_runtime::context::ExecutionContext>,
     ) -> Result<KindedSlot, VMError> {
+        // Phase 4 (trait Add/AddAssign for user types, 2026-05-16):
+        // Before falling into the PHF-based handler resolution, give
+        // user-defined methods (`impl Trait for X { method m(...) }` and
+        // `impl X { method m(...) }`) a chance to dispatch via UFCS on
+        // the receiver's concrete type name. The compiler registers each
+        // such method under the function name `"{TypeName}::{method}"`
+        // (see `compiler/statements.rs::desugar_impl_method`); we look
+        // that name up in `function_name_index` and, if found, call the
+        // function directly. This makes `a + b` work for `impl Add for
+        // Money` (binary_ops.rs emits `CallMethod("add")` after the
+        // operator-trait check fires), and likewise for any other user-
+        // authored method on a TypedObject.
+        //
+        // The PHF-based fallback below still handles built-in methods on
+        // TypedObject receivers (the `DATATABLE_METHODS` PHF covers the
+        // generic table-shaped methods) — UFCS takes precedence so users
+        // can shadow / extend the built-in surface with their own impls.
+        //
+        // We resolve the candidate function_id WITHOUT consuming `ctx`
+        // first, so we can re-thread `ctx` into the PHF handler when
+        // UFCS declines. The call path takes `ctx` only after the
+        // function_id resolves.
+        if let NativeKind::Ptr(HeapKind::TypedObject) = args[0].kind {
+            if let Some(function_id) = self.resolve_typed_object_ufcs(args, method_name) {
+                return self.invoke_typed_object_ufcs(args, function_id, ctx);
+            }
+        }
         let handler = self.resolve_method_handler(args, method_name)?;
         handler(self, args, ctx)
+    }
+
+    /// Resolve a `TypedObject`-receiver method name to a UFCS function id
+    /// (Phase 4 trait Add/AddAssign work, 2026-05-16).
+    ///
+    /// Reads the receiver's `schema_id` (which the v2-raw
+    /// `TypedObjectStorage` exposes at field offset, per
+    /// `heap_value.rs:3497`), looks up the concrete type name in
+    /// `program.type_schema_registry`, and checks
+    /// `function_name_index["{TypeName}::{method}"]`. Returns the
+    /// post-link function id if registered, `None` otherwise.
+    ///
+    /// `compiler/statements.rs::desugar_impl_method` is the producer that
+    /// registers `impl Add for Money { method add(other) ... }` as the
+    /// function `Money::add` in `function_name_index`.
+    ///
+    /// Caller invariant: `args[0].kind == NativeKind::Ptr(HeapKind::TypedObject)`.
+    /// SAFETY: dereferences `args[0].slot.raw()` as `*const TypedObjectStorage`
+    /// per §2.3 typed-Arc invariant + Wave 2 Round 4 D4 ckpt-3 v2-raw
+    /// migration; the borrowed `KindedSlot` in `args[0]` owns one share
+    /// so the pointee stays live for this scope.
+    fn resolve_typed_object_ufcs(
+        &self,
+        args: &[KindedSlot],
+        method_name: &str,
+    ) -> Option<u16> {
+        let receiver_bits = args[0].slot.raw();
+        if receiver_bits == 0 {
+            return None;
+        }
+        // SAFETY: per the caller's invariant the receiver is a
+        // `Ptr(HeapKind::TypedObject)` slot. Slot bits are
+        // `*const TypedObjectStorage` (v2-raw migration per
+        // `heap_value.rs:3497`); the borrowed `KindedSlot` carrier in
+        // `args[0]` owns one share so the pointee stays live for this
+        // scope. Transient borrow — no Arc reconstruction.
+        let schema_id = unsafe {
+            (*(receiver_bits as *const shape_value::TypedObjectStorage)).schema_id
+        };
+        let concrete_type_name = self
+            .program
+            .type_schema_registry
+            .get_by_id(schema_id as u32)
+            .map(|schema| schema.name.clone())?;
+        let function_name = format!("{}::{}", concrete_type_name, method_name);
+        self.function_name_index.get(&function_name).copied()
+    }
+
+    /// Invoke a UFCS-resolved Shape function on a TypedObject receiver +
+    /// args (Phase 4 trait Add/AddAssign work, 2026-05-16).
+    ///
+    /// Pushes receiver + args back onto the kinded stack (cloning shares
+    /// since the borrowed `args` carriers retain ownership of the
+    /// originals — the caller's `KindedSlot::Drop` will release those),
+    /// then sets up a fresh call frame via `call_function_with_nb_args`
+    /// + `execute_until_call_depth`, pops the function's return value
+    /// from the kinded stack, and returns it as a `KindedSlot` whose
+    /// carrier owns the result share.
+    ///
+    /// Mirrors `trait_object_ops.rs::invoke_dyn_unified` for the
+    /// non-Self-arg, non-BoxedReturn case (the typical user-defined
+    /// `impl Add for X { method add(other: X) -> X }` shape).
+    fn invoke_typed_object_ufcs(
+        &mut self,
+        args: &[KindedSlot],
+        function_id: u16,
+        ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+    ) -> Result<KindedSlot, VMError> {
+        // Phase 4 fix (2026-05-16): route through the canonical
+        // `execute_function_by_id` public entry-point — the same pattern
+        // `execute_function_with_named_args` uses for borrowed-args call
+        // sites (`call_convention.rs:211-256`). The earlier hand-rolled
+        // `call_function_with_nb_args + execute_until_call_depth` path
+        // had a non-deterministic double-free that surfaced on `+=`
+        // desugar fixtures (`m = m + Money{...}`); bisect attributed it
+        // to subtle interactions between the manual `self.sp =
+        // base_pointer` adjustment and downstream frame setup. Routing
+        // through the established public entry-point eliminates the
+        // surface — that helper is the §2.7.10/Q11 canonical shape for
+        // "borrowed args, owned-share-per-call invocation".
+        //
+        // Build an owned `Vec<KindedSlot>` for the new frame by bumping
+        // one share per arg via `clone_with_kind` (§2.7.7 WB2.4) — the
+        // borrowed `args` slice's carriers retain ownership of the
+        // originals (op_call_method's `args` carriers drop those at end
+        // of scope), so we mint independent shares for the called
+        // function's locals. `execute_function_by_id` then runs the
+        // standard call protocol: `call_function_with_nb_args` transfers
+        // shares into the new frame, `mem::forget(args)` balances, the
+        // function runs to completion, the return value is popped and
+        // returned as a `KindedSlot` whose carrier owns the result share.
+        let mut call_args: Vec<KindedSlot> = Vec::with_capacity(args.len());
+        for slot in args.iter() {
+            let bits = slot.slot.raw();
+            let kind = slot.kind;
+            crate::executor::vm_impl::stack::clone_with_kind(bits, kind);
+            call_args.push(KindedSlot::new(ValueSlot::from_raw(bits), kind));
+        }
+        self.execute_function_by_id(function_id, call_args, ctx)
     }
 
     /// Resolve a method handler from `(receiver_kind, method_name)`.
