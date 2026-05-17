@@ -61,8 +61,16 @@ fn scoped_contract_namespace_function_calls_use_double_colon() {
     .expect_output("3");
 }
 
+// W9 (v0.3 R2): cross-module annotation imports work end-to-end.
+// Previously these tests were `#[should_panic]` because the namespace +
+// qualified + named-import paths all failed at runtime with
+// `Unknown annotation '@remote'` / `'@remote::remote'`. After W9 wires
+// namespace-import annotation registration in
+// `register_graph_imports_for_module` (statements.rs) and qualified-form
+// resolution in `resolve_compiled_annotation_name_str`
+// (compiler_impl_reference_model.rs), all three forms resolve and the
+// `@remote` `before` handler runs successfully.
 #[test]
-#[should_panic]
 fn scoped_contract_namespace_annotation_refs_use_double_colon() {
     ShapeTest::new(
         r#"
@@ -79,7 +87,6 @@ fn scoped_contract_namespace_annotation_refs_use_double_colon() {
 }
 
 #[test]
-#[should_panic]
 fn scoped_contract_named_annotation_import_enables_bare_annotation() {
     ShapeTest::new(
         r#"
@@ -107,8 +114,14 @@ fn scoped_contract_namespace_import_does_not_bind_bare_regular_names() {
     .expect_run_err_contains("new");
 }
 
+// W9 (v0.3 R2): renamed from
+// `scoped_contract_namespace_import_does_not_bind_bare_annotations`. The
+// negative-contract intent ("namespace import must NOT expose the
+// annotation as a bare `@remote`") is reversed by W9 per supervisor
+// disposition path (i): the namespace-import path now registers
+// annotation defs from the imported module so bare `@remote` resolves.
 #[test]
-fn scoped_contract_namespace_import_does_not_bind_bare_annotations() {
+fn scoped_contract_namespace_import_binds_bare_annotations() {
     ShapeTest::new(
         r#"
         use std::core::remote
@@ -120,7 +133,7 @@ fn scoped_contract_namespace_import_does_not_bind_bare_annotations() {
     "#,
     )
     .with_stdlib()
-    .expect_run_err_contains("remote");
+    .expect_output("ok");
 }
 
 // These tests document the *desired* clean-break contract: builtins should

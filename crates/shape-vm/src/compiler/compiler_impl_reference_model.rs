@@ -928,7 +928,24 @@ impl BytecodeCompiler {
             return Some(name.to_string());
         }
 
-        if name.contains("::") {
+        // W9: handle qualified `@local::name` form by resolving the local
+        // namespace prefix to its canonical module path, then looking up
+        // `canonical::name` in compiled_annotations.
+        if let Some((local_prefix, rest)) = name.split_once("::") {
+            // First try graph-driven namespace map (canonical for graph compile).
+            if let Some(canonical) = self.graph_namespace_map.get(local_prefix) {
+                let qualified = Self::qualify_module_symbol(canonical, rest);
+                if self.program.compiled_annotations.contains_key(&qualified) {
+                    return Some(qualified);
+                }
+            }
+            // Fall back to module_scope_sources (legacy / non-graph compile).
+            if let Some(canonical) = self.module_scope_sources.get(local_prefix) {
+                let qualified = Self::qualify_module_symbol(canonical, rest);
+                if self.program.compiled_annotations.contains_key(&qualified) {
+                    return Some(qualified);
+                }
+            }
             return None;
         }
 
@@ -1085,13 +1102,13 @@ impl BytecodeCompiler {
                             .or_insert_with(|| import_stmt.from.clone());
                     }
                     shape_ast::ast::ImportItems::Named(specs) => {
+                        // W9: register annotation-import scope source against
+                        // the canonical module path. The synthetic hidden-module
+                        // name is no longer used; use-site annotation resolution
+                        // looks up `canonical_path::name` directly.
                         if specs.iter().any(|spec| spec.is_annotation) {
-                            let hidden_module_name =
-                                crate::module_resolution::hidden_annotation_import_module_name(
-                                    &import_stmt.from,
-                                );
                             self.module_scope_sources
-                                .entry(hidden_module_name)
+                                .entry(import_stmt.from.clone())
                                 .or_insert_with(|| import_stmt.from.clone());
                         }
                     }

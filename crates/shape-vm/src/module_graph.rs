@@ -623,29 +623,27 @@ fn build_module_graph_with_prelude_structure(
         node.interface = build_native_interface(ext);
         builder.visited.insert(ext.name.clone());
 
-        // Also check if the extension provides Shape source overlays
-        // (module_artifacts or shape_sources), making it Hybrid.
-        let has_shape_source = ext
-            .module_artifacts
-            .iter()
-            .any(|a| a.source.is_some() && a.module_path == ext.name)
-            || !ext.shape_sources.is_empty();
-
-        if has_shape_source {
-            // Try to load the Shape overlay AST
-            if let Ok(module) = loader.load_module(&ext.name) {
-                let shape_interface = build_shape_interface(&module.ast);
-                // Merge: Shape exports take priority over native
-                let node = &mut builder.nodes[ext_id.0 as usize];
-                node.source_kind = ModuleSourceKind::Hybrid;
-                node.ast = Some(module.ast.clone());
-                // Merge interfaces: Shape exports override native ones
-                for (name, sym) in shape_interface.exports {
-                    node.interface.exports.insert(name, sym);
-                }
-                // Hybrid modules need their Shape source dependencies walked
-                builder.visited.remove(&ext.name);
+        // W9: Probe the loader for a Shape overlay. The loader may carry the
+        // overlay from any of:
+        //   (a) the extension's own `module_artifacts` / `shape_sources`,
+        //   (b) the embedded `stdlib-src/` tree (`EMBEDDED_STDLIB_MODULES`),
+        //   (c) a registered extension module / on-disk file.
+        // Source (b) does NOT show up on the `ext.module_artifacts` /
+        // `ext.shape_sources` fields, so the prior heuristic missed shape
+        // overlays for the embedded stdlib (e.g. `pub annotation remote(addr)`
+        // in `std::core::remote`). Always probing the loader picks those up.
+        if let Ok(module) = loader.load_module(&ext.name) {
+            let shape_interface = build_shape_interface(&module.ast);
+            // Merge: Shape exports take priority over native
+            let node = &mut builder.nodes[ext_id.0 as usize];
+            node.source_kind = ModuleSourceKind::Hybrid;
+            node.ast = Some(module.ast.clone());
+            // Merge interfaces: Shape exports override native ones
+            for (name, sym) in shape_interface.exports {
+                node.interface.exports.insert(name, sym);
             }
+            // Hybrid modules need their Shape source dependencies walked
+            builder.visited.remove(&ext.name);
         }
     }
 

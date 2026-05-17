@@ -1102,19 +1102,18 @@ impl BytecodeCompiler {
             ImportItems::Named(specs) => {
                 for spec in specs {
                     if spec.is_annotation {
-                        let hidden_module_name =
-                            crate::module_resolution::hidden_annotation_import_module_name(
-                                &import_stmt.from,
-                            );
+                        // W9: register against the canonical module path so the
+                        // use-site lookup matches `compiled_annotations`'s
+                        // qualified key produced by the dep module's qualify pass.
                         self.module_scope_sources
-                            .entry(hidden_module_name.clone())
+                            .entry(import_stmt.from.clone())
                             .or_insert_with(|| import_stmt.from.clone());
                         self.imported_annotations.insert(
                             spec.name.clone(),
                             ImportedAnnotationSymbol {
                                 original_name: spec.name.clone(),
                                 _module_path: import_stmt.from.clone(),
-                                hidden_module_name,
+                                hidden_module_name: import_stmt.from.clone(),
                             },
                         );
                         continue;
@@ -1305,6 +1304,26 @@ impl BytecodeCompiler {
                     self.module_namespace_bindings.insert(local_name.clone());
                     self.graph_namespace_map
                         .insert(local_name.clone(), canonical_path.clone());
+
+                    // 4. W9: Register annotation defs from imported module so
+                    // bare `@ann` and qualified `@local::ann` resolve at use-site.
+                    // The compiled annotation lives in `compiled_annotations` under
+                    // its qualified name `canonical_path::ann_name` (set during the
+                    // dep module's own compile via `qualify_module_item`).
+                    for (export_name, exp) in &dep_node.interface.exports {
+                        if matches!(
+                            exp.kind,
+                            shape_ast::module_utils::ModuleExportKind::Annotation
+                        ) {
+                            self.imported_annotations
+                                .entry(export_name.clone())
+                                .or_insert_with(|| ImportedAnnotationSymbol {
+                                    original_name: export_name.clone(),
+                                    _module_path: canonical_path.clone(),
+                                    hidden_module_name: canonical_path.clone(),
+                                });
+                        }
+                    }
                 }
                 ResolvedImport::Named {
                     canonical_path,
@@ -1315,12 +1334,14 @@ impl BytecodeCompiler {
 
                     for sym in symbols {
                         if sym.is_annotation {
-                            let hidden_module_name =
-                                crate::module_resolution::hidden_annotation_import_module_name(
-                                    canonical_path,
-                                );
+                            // W9: register annotation symbol against the canonical
+                            // module path. The compiled annotation is stored in
+                            // `compiled_annotations` under `canonical_path::name`
+                            // (the dep module's own qualify_module_item pass
+                            // produces that qualified key), so use-site resolution
+                            // just looks up `canonical_path::original_name`.
                             self.module_scope_sources
-                                .entry(hidden_module_name.clone())
+                                .entry(canonical_path.clone())
                                 .or_insert_with(|| canonical_path.clone());
                             // Vacant-only: explicit imports win over prelude
                             self.imported_annotations
@@ -1328,7 +1349,7 @@ impl BytecodeCompiler {
                                 .or_insert_with(|| ImportedAnnotationSymbol {
                                     original_name: sym.original_name.clone(),
                                     _module_path: canonical_path.clone(),
-                                    hidden_module_name,
+                                    hidden_module_name: canonical_path.clone(),
                                 });
                             continue;
                         }
@@ -3519,13 +3540,14 @@ impl BytecodeCompiler {
                             ));
                         }
                     }
-                    // H4: Include exported annotations as named exports
-                    ExportItem::Annotation(ann_def) => {
-                        exports.push((
-                            ann_def.name.clone(),
-                            Self::qualify_module_symbol(module_path, &ann_def.name),
-                        ));
-                    }
+                    // W9: Annotations are compile-time only — they live in
+                    // `compiled_annotations`, not as runtime values. Including
+                    // them as runtime exports would synthesize a module-object
+                    // entry like `{ remote: std::core::remote::remote }` whose
+                    // RHS has no runtime variable binding. Annotation imports
+                    // are resolved through `imported_annotations` + use-site
+                    // lookup; the module object only carries runtime values.
+                    ExportItem::Annotation(_) => {}
                     _ => {}
                 }
             }
@@ -3578,13 +3600,9 @@ impl BytecodeCompiler {
                         Self::qualify_module_symbol(module_path, &module.name),
                     ));
                 }
-                // H4: Include annotation definitions as exported names
-                Item::AnnotationDef(ann_def, _) => {
-                    exports.push((
-                        ann_def.name.clone(),
-                        Self::qualify_module_symbol(module_path, &ann_def.name),
-                    ));
-                }
+                // W9: Annotations are compile-time only — see the explicit-
+                // export arm above. Skipped here for the same reason.
+                Item::AnnotationDef(_, _) => {}
                 // Note: Type items (StructType, Enum, TypeAlias, Trait, Interface) are NOT
                 // included as runtime exports. They are resolved through the type system
                 // (struct_types, schema_registry, type_aliases) via resolve_type_name(),
@@ -4119,9 +4137,7 @@ impl BytecodeCompiler {
         ));
         self.propagate_initializer_type_to_slot(binding_idx, false, false);
 
-        if self.module_scope_stack.len() == 1
-            && !crate::module_resolution::is_hidden_annotation_import_module_name(&module_def.name)
-        {
+        if self.module_scope_stack.len() == 1 {
             self.module_namespace_bindings
                 .insert(module_def.name.clone());
         }

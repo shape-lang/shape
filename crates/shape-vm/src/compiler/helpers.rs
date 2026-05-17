@@ -3812,9 +3812,6 @@ impl BytecodeCompiler {
     }
 
     pub(super) fn resolve_scoped_module_binding_name(&self, name: &str) -> Option<String> {
-        if crate::module_resolution::is_hidden_annotation_import_module_name(name) {
-            return None;
-        }
         if self.module_bindings.contains_key(name) {
             return Some(name.to_string());
         }
