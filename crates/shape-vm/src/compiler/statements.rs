@@ -1052,12 +1052,20 @@ impl BytecodeCompiler {
                     .cloned()
                     .collect();
                 let comptime_helpers = self.collect_comptime_helpers();
+                // W7 (2026-05-17): build the TypeReflectionSnapshot for
+                // `type_info(T)` resolution. Top-level comptime block has
+                // no enclosing generic-type-param scope.
+                let type_snapshot = super::comptime_builtins::build_type_reflection_snapshot(
+                    self,
+                    &[],
+                );
                 let execution = super::comptime::execute_comptime(
                     stmts,
                     &comptime_helpers,
                     &extensions,
                     trait_impls,
                     known_type_symbols,
+                    type_snapshot,
                 )
                 .map_err(|e| ShapeError::RuntimeError {
                     message: format!(
@@ -3806,12 +3814,19 @@ impl BytecodeCompiler {
             let mut comptime_helpers = self.collect_comptime_helpers();
             self.inject_module_local_comptime_helper_aliases(module_path, &mut comptime_helpers);
 
+            // W7 (2026-05-17): TypeReflectionSnapshot for `type_info(T)`
+            // resolution from a module-scoped comptime block.
+            let type_snapshot = super::comptime_builtins::build_type_reflection_snapshot(
+                self,
+                &[],
+            );
             let execution = super::comptime::execute_comptime(
                 &stmts,
                 &comptime_helpers,
                 &extensions,
                 trait_impls,
                 known_type_symbols,
+                type_snapshot,
             )
             .map_err(|e| ShapeError::RuntimeError {
                 message: format!(

@@ -1,0 +1,100 @@
+/// @module std::core::types
+/// Compile-time type reflection — `TypeInfo`, `FieldInfo`, `TypeKind`.
+///
+/// Returned by the `type_info(T)` comptime builtin. `TypeInfo` carries a
+/// canonical type name and a `TypeKind` discriminator. `FieldInfo` describes
+/// a single struct field; the `fields` slice on `TypeInfo` is populated for
+/// `TypedObject` kinds. `TypeKind` is a flat enum discriminator (audit-doc
+/// §4.6 recommended shape); parametric type information lives on `TypeInfo`
+/// via the optional `fields` slice (struct fields) — recursive descent into
+/// generic parameters lands as a follow-up once an Array-of-TypedObject
+/// schema carrier is wired (W7-followup, see ADR-006 §2.7.24 / Q25.A
+/// TypedArrayData deletion territory and shape-runtime field-kind
+/// monomorphization status).
+///
+/// `TypeVar` distinguishes generic type parameters still in their parametric
+/// form at the call site (Q2 parametric-supported disposition); `TypeInfo.name`
+/// carries the parameter name in that case (e.g. `"T"`).
+///
+/// Wire-format symmetry: `shape_wire::metadata::TypeInfo`
+/// (`crates/shape-wire/src/metadata.rs:35`) is the snapshot/IO carrier;
+/// this Shape-side mirror preserves the canonical `kind` discriminator names.
+
+/// Discriminator for `TypeInfo.kind`.
+pub enum TypeKind {
+    /// Integer primitive (`int`, `i64`, `i32`, `i8`, ...).
+    Int,
+    /// Floating-point primitive (`number`, `f64`).
+    Float,
+    /// Boolean primitive (`bool`).
+    Bool,
+    /// String primitive (`string`).
+    String,
+    /// Decimal primitive (`decimal`).
+    Decimal,
+    /// BigInt primitive (`bigint`).
+    BigInt,
+    /// Array type — element type currently not threaded (W7-followup).
+    Array,
+    /// HashMap type — key/value types currently not threaded (W7-followup).
+    HashMap,
+    /// Option type — payload type currently not threaded (W7-followup).
+    Option,
+    /// Result type — ok/err types currently not threaded (W7-followup).
+    Result,
+    /// User-defined struct type — `fields` populated in declaration order.
+    TypedObject,
+    /// `dyn Trait` — trait name in `TypeInfo.name`.
+    TraitObject,
+    /// Generic type parameter in parametric form (e.g. `T`).
+    TypeVar,
+    /// Function type — parameter / return types currently not threaded (W7-followup).
+    Function,
+    /// Tuple type — element types currently not threaded (W7-followup).
+    Tuple,
+    /// Unit / void type.
+    Unit,
+    /// Unknown / unresolved type — used as a safe fallback when a
+    /// type cannot be projected (e.g. inference variables that didn't
+    /// unify before comptime evaluation, or unregistered type names).
+    Unknown,
+}
+
+/// Per-field metadata for `TypeInfo.fields`.
+///
+/// Declaration-order entry (Q3 disposition): the order of `fields` matches
+/// the user's `type Foo { ... }` declaration, mirroring `TypedObjectStorage`'s
+/// on-storage layout and the user's mental model.
+///
+/// `type_info` is the bare string name of the field's declared type (matches
+/// `TypeInfo.name` when the field is reflected directly). Recursive
+/// `TypeInfo` payloads land as a follow-up once Array<TypedObject> field
+/// carriers are wired (W7-followup).
+pub type FieldInfo {
+    /// Field name (e.g. `"x"`, `"y"`, `"created_at"`).
+    name: string,
+    /// Bare type name of the field's declared type.
+    type_name: string,
+}
+
+/// Compile-time reflection of a Shape type.
+///
+/// Returned by `type_info(T)` inside `comptime { }` blocks.
+///
+/// `kind` is a string-encoded `TypeKind` variant name (e.g. `"Int"`,
+/// `"TypedObject"`, `"TypeVar"`). Comptime user code can compare via
+/// equality (`if ti.kind == "TypedObject" { ... }`). The variant-name
+/// strings are stable and match `TypeKind` variant declarations 1:1.
+///
+/// **W7-followup**: once the comptime VM can resolve user-defined
+/// enum schemas from the outer compilation's `current_registry()`
+/// (current state: comptime VM gets a fresh per-program registry per
+/// `compile_and_execute_comptime_program` in `comptime.rs`), `kind`
+/// will project to a `TypeKind` enum-variant value directly. The
+/// string encoding here is the cross-registry-boundary stable form.
+pub type TypeInfo {
+    /// Canonical type name (e.g. `"Point"`, `"int"`, `"T"`).
+    name: string,
+    /// `TypeKind` variant name as a string (e.g. `"Int"`, `"TypedObject"`).
+    kind: string,
+}

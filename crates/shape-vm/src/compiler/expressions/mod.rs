@@ -1235,12 +1235,19 @@ impl BytecodeCompiler {
                     .cloned()
                     .collect();
                 let comptime_helpers = self.collect_comptime_helpers();
+                // W7 (2026-05-17): TypeReflectionSnapshot for `type_info(T)`
+                // resolution from a comptime expression.
+                let type_snapshot = super::comptime_builtins::build_type_reflection_snapshot(
+                    self,
+                    &[],
+                );
                 let execution = super::comptime::execute_comptime(
                     stmts,
                     &comptime_helpers,
                     &extensions,
                     trait_impls,
                     known_type_symbols,
+                    type_snapshot,
                 )
                 .map_err(|e| shape_ast::error::ShapeError::RuntimeError {
                     message: format!(

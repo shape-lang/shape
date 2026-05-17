@@ -23,6 +23,12 @@ from std::core::neg use { Neg }
 from std::core::modulo use { Mod, ModAssign }
 from std::core::not use { Not }
 
+// W7 (2026-05-17) — `type_info(T)` comptime builtin returns `TypeInfo`;
+// the struct + `FieldInfo` + `TypeKind` enum live in `std::core::types`
+// and are auto-imported here per Q4 disposition so comptime user code
+// can name them without an explicit `use`.
+from std::core::types use { TypeInfo, FieldInfo, TypeKind }
+
 // Method definition modules — extend blocks register methods on builtin types.
 // Namespace imports ensure extend/impl blocks are processed during compilation.
 use std::core::vec

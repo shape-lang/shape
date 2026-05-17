@@ -28,6 +28,15 @@ const COMPTIME_BUILTIN_FORWARDERS: &[(&str, usize, &str, Option<&[&str]>)] = &[
         "build_config",
         Some(&["debug", "target_arch", "target_os", "version"]),
     ),
+    // W7 (2026-05-17) — `type_info(T)` comptime builtin per
+    // `docs/cluster-audits/v0.3-w7-type_info-comptime-typed-return.md`
+    // §4 (b) recommendation. Bare type-identifier arguments are
+    // rewritten to string literals by `rewrite_type_info_ident_args`
+    // before this forwarder dispatches into `__comptime__.type_info`.
+    // Return-fields hint matches the `types.shape` TypeInfo declaration
+    // so the comptime compiler can resolve field access on the result
+    // (`ti.name` / `ti.kind`).
+    ("type_info", 1, "type_info", Some(&["kind", "name"])),
 ];
 
 /// Comptime execution result.
@@ -236,6 +245,48 @@ fn rewrite_implements_in_expr(expr: &mut Expr) {
     }
 }
 
+/// Rewrite bare identifier arguments to `type_info()` calls as string
+/// literals. W7 (2026-05-17) — mirror of `rewrite_implements_ident_args`
+/// so `type_info(Point)` works inside comptime blocks where `Point` is a
+/// type symbol that doesn't exist as a value. The comptime function
+/// receives the type name as a string and reflects against the snapshot
+/// passed into `create_comptime_builtins_module`.
+fn rewrite_type_info_ident_args(stmt: &mut Statement) {
+    match stmt {
+        Statement::Expression(expr, _) | Statement::Return(Some(expr), _) => {
+            rewrite_type_info_in_expr(expr);
+        }
+        Statement::VariableDecl(decl, _) => {
+            if let Some(init) = &mut decl.value {
+                rewrite_type_info_in_expr(init);
+            }
+        }
+        Statement::If(if_stmt, _) => {
+            for s in &mut if_stmt.then_body {
+                rewrite_type_info_ident_args(s);
+            }
+            if let Some(else_body) = &mut if_stmt.else_body {
+                for s in else_body {
+                    rewrite_type_info_ident_args(s);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn rewrite_type_info_in_expr(expr: &mut Expr) {
+    if let Expr::FunctionCall { name, args, .. } = expr {
+        if name == "type_info" {
+            for arg in args.iter_mut() {
+                if let Expr::Identifier(ident, span) = arg {
+                    *arg = Expr::Literal(shape_ast::ast::Literal::String(ident.clone()), *span);
+                }
+            }
+        }
+    }
+}
+
 /// Execute statements at compile time (comptime) and return the result.
 ///
 /// Used for meta function methods with statement bodies. The statements are
@@ -252,14 +303,17 @@ pub(crate) fn execute_comptime(
     extensions: &[shape_runtime::module_exports::ModuleExports],
     trait_impl_keys: std::collections::HashSet<String>,
     known_type_symbols: std::collections::HashSet<String>,
+    type_snapshot: super::comptime_builtins::TypeReflectionSnapshot,
 ) -> Result<ComptimeExecutionResult> {
     // Wrap statements in a function so the compiler produces a callable entry point.
     // Ensure the last statement is a tail return so if/else values aren't discarded.
     let mut body = statements.to_vec();
-    // Transform bare identifiers in implements() calls to string literals,
-    // since type/trait names aren't variables in the comptime scope.
+    // Transform bare identifiers in implements() / type_info() calls to
+    // string literals, since type/trait names aren't variables in the
+    // comptime scope.
     for stmt in &mut body {
         rewrite_implements_ident_args(stmt);
+        rewrite_type_info_ident_args(stmt);
     }
     ensure_tail_return(&mut body);
 
@@ -308,6 +362,7 @@ pub(crate) fn execute_comptime(
         extensions,
         trait_impl_keys,
         known_type_symbols,
+        type_snapshot,
     )
 }
 
@@ -318,11 +373,12 @@ fn compile_and_execute_comptime_program(
     extensions: &[shape_runtime::module_exports::ModuleExports],
     trait_impl_keys: std::collections::HashSet<String>,
     known_type_symbols: std::collections::HashSet<String>,
+    type_snapshot: super::comptime_builtins::TypeReflectionSnapshot,
 ) -> Result<ComptimeExecutionResult> {
     // Build the full extension list first so module namespace bindings
     // (e.g. `__comptime__`) are typed during compilation.
     let comptime_builtins =
-        super::comptime_builtins::create_comptime_builtins_module(trait_impl_keys);
+        super::comptime_builtins::create_comptime_builtins_module(trait_impl_keys, type_snapshot);
     let mut all_extensions: Vec<shape_runtime::module_exports::ModuleExports> = extensions.to_vec();
     all_extensions.push(comptime_builtins);
 
@@ -682,6 +738,11 @@ pub(crate) fn execute_comptime_with_annotation_handler(
         extensions,
         trait_impl_keys,
         known_type_symbols,
+        // Annotation-handler comptime execution does not yet snapshot
+        // user type definitions; `type_info(T)` from an annotation body
+        // resolves only built-in primitives until the handler-context
+        // type snapshot lands as a follow-up.
+        super::comptime_builtins::TypeReflectionSnapshot::default(),
     )
 }
 
@@ -1110,6 +1171,7 @@ mod tests {
             &[],
             Default::default(),
             Default::default(),
+            Default::default(),
         );
         assert!(
             result.is_ok(),
@@ -1147,6 +1209,7 @@ mod tests {
                 &stmts,
                 &[],
                 &[],
+                Default::default(),
                 Default::default(),
                 Default::default(),
             )
@@ -1199,6 +1262,7 @@ mod tests {
             &[],
             Default::default(),
             Default::default(),
+            Default::default(),
         );
         assert!(
             result.is_ok(),
@@ -1228,6 +1292,7 @@ mod tests {
             &stmts,
             &[],
             &[],
+            Default::default(),
             Default::default(),
             Default::default(),
         );
@@ -1262,6 +1327,7 @@ mod tests {
             &[],
             Default::default(),
             Default::default(),
+            Default::default(),
         );
         assert!(
             result.is_err(),
@@ -1284,23 +1350,26 @@ mod tests {
         );
     }
 
-    /// `type_info` is intentionally removed by C2-comptime-rebuild
-    /// (commit `a5df165`); its structured-error gate test must continue
-    /// to surface "type_info has been removed" — this sub-cluster does
-    /// NOT restore it.
+    /// W7 (2026-05-17) — `type_info` is restored as a comptime-only
+    /// builtin per `docs/cluster-audits/v0.3-w7-type_info-comptime-typed-return.md`
+    /// §4 recommendation (b) + §8 user dispositions Q1-Q5. Calling
+    /// `type_info()` outside a `comptime { }` block must now fail with
+    /// the standard comptime-only-builtin error message (the previous
+    /// "type_info has been removed" gate is retired).
     #[test]
-    fn w17_type_info_removal_contract_preserved() {
+    fn w7_type_info_comptime_only_contract() {
         let code = r#"let x = type_info("Point")"#;
         let program = shape_ast::parser::parse_program(code).expect("parse");
         let result = crate::compiler::BytecodeCompiler::new().compile(&program);
         assert!(
             result.is_err(),
-            "type_info() outside comptime should fail (removal contract)"
+            "type_info() outside comptime should fail (comptime-only gate)"
         );
         let err_msg = format!("{}", result.unwrap_err());
         assert!(
-            err_msg.contains("type_info has been removed"),
-            "Error should mention removal (C2-comptime-rebuild gate): {}",
+            err_msg.contains("comptime-only builtin")
+                || err_msg.contains("comptime { }"),
+            "Error should surface the comptime-only-builtin gate (W7): {}",
             err_msg
         );
     }
@@ -1321,7 +1390,7 @@ mod tests_deferred {
             Span::DUMMY,
         )];
 
-        let result = execute_comptime(&stmts, &[], &[], Default::default(), Default::default());
+        let result = execute_comptime(&stmts, &[], &[], Default::default(), Default::default(), Default::default());
         assert!(
             result.is_ok(),
             "Comptime should succeed: {:?}",
@@ -1340,7 +1409,7 @@ mod tests_deferred {
             Span::DUMMY,
         )];
 
-        let result = execute_comptime(&stmts, &[], &[], Default::default(), Default::default());
+        let result = execute_comptime(&stmts, &[], &[], Default::default(), Default::default(), Default::default());
         assert!(
             result.is_ok(),
             "Comptime should succeed: {:?}",
@@ -1366,7 +1435,7 @@ mod tests_deferred {
             Span::DUMMY,
         )];
 
-        let result = execute_comptime(&stmts, &[], &[], Default::default(), Default::default());
+        let result = execute_comptime(&stmts, &[], &[], Default::default(), Default::default(), Default::default());
         assert!(
             result.is_ok(),
             "Comptime arithmetic should succeed: {:?}",
@@ -1509,7 +1578,7 @@ mod tests_deferred {
             Span::DUMMY,
         )];
 
-        let result = execute_comptime(&stmts, &[], &[], Default::default(), Default::default());
+        let result = execute_comptime(&stmts, &[], &[], Default::default(), Default::default(), Default::default());
         assert!(
             result.is_ok(),
             "Comptime multiplication should succeed: {:?}",
@@ -1538,7 +1607,7 @@ mod tests_deferred {
             }),
             Span::DUMMY,
         )];
-        let result = execute_comptime(&stmts, &[], &[], Default::default(), Default::default())
+        let result = execute_comptime(&stmts, &[], &[], Default::default(), Default::default(), Default::default())
             .map(|r| r.value);
         assert!(
             result.is_ok(),
@@ -1577,7 +1646,7 @@ mod tests_deferred {
             Span::DUMMY,
         )];
 
-        let result = execute_comptime(&stmts, &[], &[], Default::default(), Default::default());
+        let result = execute_comptime(&stmts, &[], &[], Default::default(), Default::default(), Default::default());
         assert!(
             result.is_ok(),
             "print(build_config()) should execute in comptime: {:?}",
