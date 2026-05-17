@@ -26,6 +26,7 @@ from std::core::bitwise use { BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, 
 from std::core::index use { Index, IndexMut }
 from std::core::ord use { Ord }
 from std::core::shift use { Shl, Shr, ShlAssign, ShrAssign }
+from std::core::eq use { Eq }
 
 // Method definition modules — extend blocks register methods on builtin types.
 // Namespace imports ensure extend/impl blocks are processed during compilation.
