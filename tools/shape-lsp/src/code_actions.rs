@@ -84,7 +84,7 @@ pub fn get_code_actions(
 /// frontmatter / foreign-LSP diagnostics) or that originated from
 /// renamings that haven't been wired through the code table yet. The
 /// code-keyed path is the canonical trigger; message matching is the
-/// compatibility layer.
+/// fallback for the un-coded subset.
 fn get_quick_fixes(
     text: &str,
     uri: &Uri,
