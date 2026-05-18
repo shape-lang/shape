@@ -325,6 +325,54 @@ impl TypeInferenceEngine {
             } => {
                 let receiver_type = self.infer_expr(receiver)?;
 
+                // IIFE / chained-call (`(|y| body)(args)`, `f(a)(b)`) — the parser
+                // models these as `MethodCall { method: "__call__", receiver: <callable-expr> }`
+                // per `crates/shape-ast/src/parser/expressions/primary.rs:167`. When
+                // the receiver type resolves to a `Function`, the call site's
+                // result type is the function's declared return type. Producer-side
+                // stamp (ADR-006 §2.7.5): the closure's return type is computed
+                // at the `Expr::FunctionExpr` arm below (line 713) and propagated
+                // here so the IIFE result has a concrete kind instead of an
+                // unresolved type variable. Without this, downstream uses of the
+                // result (e.g. `total + (|y| y + base)(x)` inside a for-loop)
+                // see `unknown` and either fail strict-typing at compile time
+                // or surface as JIT garbage at runtime (Phase 4b Round 3
+                // Surface-1A LANG-W13-3-iife-closure-capture).
+                if method == "__call__" {
+                    let func_shape = match &receiver_type {
+                        Type::Function { params, returns } => {
+                            Some((params.clone(), returns.as_ref().clone()))
+                        }
+                        Type::Concrete(TypeAnnotation::Function {
+                            params: concrete_params,
+                            returns: concrete_returns,
+                        }) => {
+                            let params: Vec<Type> = concrete_params
+                                .iter()
+                                .map(|p| Type::Concrete(p.type_annotation.clone()))
+                                .collect();
+                            let returns = Type::Concrete(*concrete_returns.clone());
+                            Some((params, returns))
+                        }
+                        _ => None,
+                    };
+                    if let Some((params, returns)) = func_shape {
+                        let arg_types: Vec<Type> = args
+                            .iter()
+                            .map(|arg| self.infer_expr(arg))
+                            .collect::<Result<_, _>>()?;
+                        if params.len() == arg_types.len() {
+                            for (arg_ty, param_ty) in arg_types.iter().zip(params.iter()) {
+                                self.constraints.push((arg_ty.clone(), param_ty.clone()));
+                            }
+                            return Ok(returns);
+                        }
+                        // Arity mismatch — fall through to the generic dispatch
+                        // path which produces a clearer diagnostic via
+                        // `HasMethod`/property-access. Don't fabricate.
+                    }
+                }
+
                 // Look up expected parameter types BEFORE inferring arguments
                 // so closures get their param types from the method signature.
                 let (type_name, receiver_params) =

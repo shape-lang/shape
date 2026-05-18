@@ -1394,6 +1394,36 @@ pub fn concrete_type_for_expr(compiler: &BytecodeCompiler, expr: &Expr) -> Optio
             concrete_type_for_expr(compiler, operand)
         }
 
+        // Phase 4b Round 3 Surface-1B LANG-W13-3-double-filter-chain:
+        // Chained method-call receivers like `v.filter(|x|...).filter(|y|...)`
+        // need the inner `.filter(...)`'s return ConcreteType to resolve at
+        // the outer call site for monomorphization to succeed. The
+        // `specialized_call_return_concrete_type` helper above already
+        // chains through `monomorphized_method_call_sites[(span,
+        // current_function)] → specialized_idx → function_defs[
+        // specialized_name].return_type` for exactly this purpose — but
+        // until now it was wired only at the `let intermediate = recv.map(
+        // ...)` let-binding site (cluster-2-cw-IC-class-c), missing the
+        // inline-chain receiver shape.
+        //
+        // Without this arm `try_monomorphize_method_call` at the outer
+        // `.filter` call site receives `receiver_ct = None` from
+        // `concrete_type_for_expr(receiver)` (since `receiver` is an
+        // `Expr::MethodCall`, not an Identifier or Array literal), then
+        // bails to the generic-template fall-through path. The VM-side
+        // generic dispatch enters an infinite loop on the chained
+        // call shape (single-timeout / hang at the c08 seed); the JIT
+        // emits an untyped `print` Call-terminator and reads raw bits
+        // as garbage.
+        //
+        // Per ADR-006 §2.7.5 stamp-at-compile-time: the inner call's
+        // specialized callee's substituted return-type annotation IS the
+        // proof — same chain as the let-binding site at statements.rs:4931.
+        // No tag-bit decode, no runtime probe, no fabricated default.
+        Expr::MethodCall { .. } => {
+            specialized_call_return_concrete_type(compiler, expr)
+        }
+
         // Anything else (calls, member accesses, closures, …) is opaque
         // until we have richer side-tables. Returning None lets the resolver
         // fall back to the generic template.

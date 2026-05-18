@@ -230,7 +230,7 @@ pub(crate) fn concrete_type_to_type_annotation(ct: &ConcreteType) -> Option<Type
 /// Sweep phase 3c.1: extract a primitive scalar type-name from a
 /// runtime `Type`. Mirrors the subset of `numeric_ops::type_display_name`
 /// the closure return-type inference cares about.
-fn type_display_name_for_closure_inference(
+pub(crate) fn type_display_name_for_closure_inference(
     ty: &shape_runtime::type_system::Type,
 ) -> String {
     use shape_runtime::type_system::Type;
