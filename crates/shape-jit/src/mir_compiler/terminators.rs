@@ -3,6 +3,7 @@
 //! Terminators end basic blocks: Goto (jump), SwitchBool (branch),
 //! Call (function call), Return, Unreachable (trap).
 
+use cranelift::codegen::ir::FuncRef;
 use cranelift::prelude::*;
 
 use super::MirToIR;
@@ -1056,6 +1057,152 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         })?;
                         self.builder.ins().jump(*next_block, &[]);
                         return Ok(());
+                    }
+                }
+
+                // ── W15.2-LANG-6 MATH-BUILTIN PATH ───────────────────────
+                // Per `docs/cluster-audits/v0.3-w15-book-truth-reaudit.md`
+                // §6.6: bare-name math builtins (`sqrt`, `abs`, `sin`,
+                // `cos`, etc.) parse as `Expr::FunctionCall { name, ... }`
+                // and the bytecode VM dispatches them via
+                // `OpCode::BuiltinCall(Sqrt|Abs|...)`
+                // (`crates/shape-vm/src/compiler/helpers.rs:4263`). MIR
+                // lowering at `crates/shape-vm/src/mir/lowering/expr.rs:2003`
+                // does NOT perform the equivalent producer-side
+                // classification: it leaks `MirConstant::Function("sqrt")`
+                // into MIR, which the JIT cannot resolve through
+                // `function_indices` (the math builtin is not a user
+                // function). Pre-fix the indirect-call path fell through:
+                // `compile_constant` returned `iconst(I64, 0)` callee bits,
+                // `jit_call_value` surface-and-stopped, returning
+                // `TAG_NULL` which the F64 caller-side bitcast decoded as
+                // `NaN` — the W15.1 §6.6 reproducer.
+                //
+                // Symmetric defect to W12-enum-constructor-mir-lowering
+                // (Ok/Err/Some) and W12-collection-constructor-mir-lowering
+                // (HashMap/Set/...) — both already fixed at MIR-lowering
+                // time. The math-builtin family routes here instead because
+                // the kinded FFI bodies (`jit_sqrt_f64`, ...) take native
+                // f64 and have a much smaller signature surface than the
+                // EnumStore / collection-ctor MIR shapes — the W15.1 §6.6
+                // close-wave scope is the bug-class minimum (book §6.6
+                // reproducer + the math-builtin family the same MIR shape
+                // misses), not an extra MIR statement.
+                //
+                // ADR-006 §2.7.5 stamp-at-compile-time: the arg's
+                // `NativeKind::Float64` (or `Int64` widened via
+                // `fcvt_from_sint`) is the producing-site discriminator.
+                // No NaN-box decode at the FFI boundary, no Bool-default
+                // fallback per §2.7.7 #9. Result is native f64; the
+                // `write_place` consumer's `ensure_kind` rebuilds the
+                // destination slot's typed carrier.
+                if let Operand::Constant(MirConstant::Function(name)) = func {
+                    if self.function_indices.get(name.as_str()).is_none()
+                        && args.len() == 1
+                    {
+                        use shape_vm::type_tracking::NativeKind;
+                        let math_fn: Option<FuncRef> = match name.as_str() {
+                            "sqrt" => Some(self.ffi.sqrt_f64),
+                            "abs" => Some(self.ffi.abs_f64),
+                            "floor" => Some(self.ffi.floor_f64),
+                            "ceil" => Some(self.ffi.ceil_f64),
+                            "round" => Some(self.ffi.round_f64),
+                            "sin" => Some(self.ffi.sin_f64),
+                            "cos" => Some(self.ffi.cos_f64),
+                            "tan" => Some(self.ffi.tan_f64),
+                            "asin" => Some(self.ffi.asin_f64),
+                            "acos" => Some(self.ffi.acos_f64),
+                            "atan" => Some(self.ffi.atan_f64),
+                            "exp" => Some(self.ffi.exp_f64),
+                            "ln" => Some(self.ffi.ln_f64),
+                            _ => None,
+                        };
+                        if let Some(ffi_ref) = math_fn {
+                            // Resolve arg to a native f64 Cranelift value.
+                            // `Float64` arms widen via `compile_operand`'s
+                            // F64 SSA; `Int64` arms convert via
+                            // `fcvt_from_sint`. Other kinds surface (no
+                            // Bool-default per §2.7.7 #9).
+                            let arg_kind = self.operand_slot_kind(&args[0]);
+                            let arg_val = self.compile_operand(&args[0])?;
+                            let arg_ty = self.builder.func.dfg.value_type(arg_val);
+                            let f64_arg = match arg_kind {
+                                Some(NativeKind::Float64)
+                                | Some(NativeKind::NullableFloat64) => {
+                                    if arg_ty == types::F64 {
+                                        arg_val
+                                    } else if arg_ty == types::I64 {
+                                        // Native bit-pattern carrier
+                                        // (§2.7.5 widened in
+                                        // `compile_operand`'s carrier
+                                        // path).
+                                        self.builder
+                                            .ins()
+                                            .bitcast(types::F64, MemFlags::new(), arg_val)
+                                    } else {
+                                        arg_val
+                                    }
+                                }
+                                Some(NativeKind::Int64)
+                                | Some(NativeKind::UInt64)
+                                | Some(NativeKind::IntSize)
+                                | Some(NativeKind::UIntSize) => {
+                                    let i64_val = if arg_ty == types::I64 {
+                                        arg_val
+                                    } else if arg_ty == types::I32 {
+                                        self.builder.ins().sextend(types::I64, arg_val)
+                                    } else if arg_ty == types::I8 {
+                                        self.builder.ins().sextend(types::I64, arg_val)
+                                    } else {
+                                        arg_val
+                                    };
+                                    self.builder.ins().fcvt_from_sint(types::F64, i64_val)
+                                }
+                                Some(NativeKind::Int32)
+                                | Some(NativeKind::UInt32) => {
+                                    let i32_val = if arg_ty == types::I32 {
+                                        arg_val
+                                    } else if arg_ty == types::I64 {
+                                        self.builder.ins().ireduce(types::I32, arg_val)
+                                    } else {
+                                        arg_val
+                                    };
+                                    self.builder.ins().fcvt_from_sint(types::F64, i32_val)
+                                }
+                                other => {
+                                    return Err(format!(
+                                        "Route A surface-and-stop: \
+                                         NotImplemented(SURFACE) — math \
+                                         builtin `{}` arg NativeKind is \
+                                         {:?}; the §2.7.5 producer-site \
+                                         classification conduit does not \
+                                         stamp this kind at the upstream \
+                                         MIR shape. No Bool-default \
+                                         fallback per ADR-006 §2.7.7 #9 \
+                                         / CLAUDE.md \"Forbidden \
+                                         rationalizations\". W15.2-LANG-6 \
+                                         jit-math-nan-poisoning.",
+                                        name, other,
+                                    ));
+                                }
+                            };
+
+                            let inst = self.builder.ins().call(ffi_ref, &[f64_arg]);
+                            let result_f64 = self.builder.inst_results(inst)[0];
+
+                            self.release_old_value_if_heap(destination)?;
+                            self.write_place(destination, result_f64)?;
+                            self.reload_referenced_locals();
+
+                            let next_block = self.block_map.get(next).ok_or_else(|| {
+                                format!(
+                                    "MirToIR: unknown call continuation block {}",
+                                    next
+                                )
+                            })?;
+                            self.builder.ins().jump(*next_block, &[]);
+                            return Ok(());
+                        }
                     }
                 }
 

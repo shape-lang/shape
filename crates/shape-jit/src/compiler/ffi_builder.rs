@@ -259,6 +259,26 @@ impl JITCompiler {
             pow_f64: r!("jit_pow_f64"),
             pow_i64: r!("jit_pow_i64"),
 
+            // W15.2-LANG-6 jit-math-nan-poisoning (Phase 4b Round 2,
+            // 2026-05-18): typed-f64 math FuncRefs for the JIT Call-
+            // terminator interception of bare-name math builtins
+            // (`MirConstant::Function("sqrt"|...)` leaked into MIR by
+            // `crates/shape-vm/src/mir/lowering/expr.rs:2003`). Symbols
+            // registered + declared in `ffi_symbols/math_symbols.rs`.
+            sqrt_f64: r!("jit_sqrt_f64"),
+            abs_f64: r!("jit_abs_f64"),
+            floor_f64: r!("jit_floor_f64"),
+            ceil_f64: r!("jit_ceil_f64"),
+            round_f64: r!("jit_round_f64"),
+            sin_f64: r!("jit_sin_f64"),
+            cos_f64: r!("jit_cos_f64"),
+            tan_f64: r!("jit_tan_f64"),
+            asin_f64: r!("jit_asin_f64"),
+            acos_f64: r!("jit_acos_f64"),
+            atan_f64: r!("jit_atan_f64"),
+            exp_f64: r!("jit_exp_f64"),
+            ln_f64: r!("jit_ln_f64"),
+
             // ADR-006 §2.7.5 — kinded EnumStore producers
             // (W12-jit-aggregate-non-array, 2026-05-12). Dispatched from
             // the EnumStore consumer based on the MIR statement's
