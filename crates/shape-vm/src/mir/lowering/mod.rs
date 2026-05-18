@@ -1737,6 +1737,77 @@ mod tests {
         );
     }
 
+    /// W15.2-LANG-1 (Phase 4b, 2026-05-18) regression test. Pre-fix the
+    /// MIR lowering of `Pattern::Constructor` for non-trinity (user-defined)
+    /// enum variants returned `Some(Operand::Copy(Place::Local(scrutinee)))`
+    /// — the raw `Arc<TypedObjectStorage>` pointer bits — as the SwitchBool
+    /// condition. The JIT consumer's generic I64-truthy path then evaluated
+    /// the non-zero pointer non-deterministically (silently empty output for
+    /// `match Color::Red { Color::Red => print("red"), Color::Green => ...
+    /// , Color::Blue => ... }`, book snippet `enums.mdx:113`).
+    ///
+    /// Post-fix the lowering emits `Rvalue::EnumDiscriminantTest` per arm
+    /// with the producer-side stamped (enum_name, variant_name) pair, then
+    /// a `SwitchBool` on the resulting Bool slot. This test pins the
+    /// producer-side classification by scanning the lowered MIR for the
+    /// new Rvalue.
+    #[test]
+    fn test_lowered_user_enum_constructor_pattern_match_emits_enum_discriminant_test() {
+        use crate::mir::types::{Rvalue, StatementKind};
+        let lowering = lower_parsed_function(
+            r#"
+                function show(c) {
+                    match c {
+                        Color::Red => 1
+                        Color::Green => 2
+                        Color::Blue => 3
+                    }
+                }
+            "#,
+        );
+        assert!(!lowering.had_fallbacks);
+        let discriminant_tests: Vec<&Rvalue> = lowering
+            .mir
+            .blocks
+            .iter()
+            .flat_map(|b| b.statements.iter())
+            .filter_map(|stmt| match &stmt.kind {
+                StatementKind::Assign(_, rv @ Rvalue::EnumDiscriminantTest { .. }) => Some(rv),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            discriminant_tests.len(),
+            3,
+            "expected one EnumDiscriminantTest per Color::* arm (Red + Green + Blue); \
+             got {} -- MIR: {:#?}",
+            discriminant_tests.len(),
+            lowering.mir.blocks,
+        );
+        // Verify each carries the expected (enum_name, variant_name) pair
+        // verbatim per ADR-006 §2.7.5 stamp-at-compile-time.
+        let mut variant_names: Vec<&str> = discriminant_tests
+            .iter()
+            .filter_map(|rv| match rv {
+                Rvalue::EnumDiscriminantTest {
+                    enum_name,
+                    variant_name,
+                    ..
+                } => {
+                    assert_eq!(
+                        enum_name.as_deref(),
+                        Some("Color"),
+                        "enum_name should be stamped verbatim from `Color::...`",
+                    );
+                    Some(variant_name.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        variant_names.sort();
+        assert_eq!(variant_names, vec!["Blue", "Green", "Red"]);
+    }
+
     #[test]
     fn test_lowered_destructure_var_decl_write_while_borrowed_is_visible_to_solver() {
         let lowering = lower_parsed_function(

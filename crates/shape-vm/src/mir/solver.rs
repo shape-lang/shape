@@ -610,7 +610,8 @@ fn statement_read_places(kind: &StatementKind) -> Vec<Place> {
             }
             Rvalue::EnumTest { operand, .. }
             | Rvalue::EnumPayload { operand, .. }
-            | Rvalue::TypePatternTest { operand, .. } => {
+            | Rvalue::TypePatternTest { operand, .. }
+            | Rvalue::EnumDiscriminantTest { operand, .. } => {
                 operand_read_places(operand, &mut reads);
             }
         },
@@ -1518,7 +1519,8 @@ fn rvalue_uses_any(rvalue: &Rvalue, slots: &HashSet<SlotId>) -> bool {
         Rvalue::Aggregate(ops) => ops.iter().any(|op| operand_uses_any(op, slots)),
         Rvalue::EnumTest { operand, .. }
         | Rvalue::EnumPayload { operand, .. }
-        | Rvalue::TypePatternTest { operand, .. } => operand_uses_any(operand, slots),
+        | Rvalue::TypePatternTest { operand, .. }
+        | Rvalue::EnumDiscriminantTest { operand, .. } => operand_uses_any(operand, slots),
     }
 }
 
@@ -1556,7 +1558,8 @@ fn rvalue_uses_param(rvalue: &Rvalue, param_slot: SlotId) -> bool {
         Rvalue::Aggregate(ops) => ops.iter().any(|op| operand_uses_param(op, param_slot)),
         Rvalue::EnumTest { operand, .. }
         | Rvalue::EnumPayload { operand, .. }
-        | Rvalue::TypePatternTest { operand, .. } => operand_uses_param(operand, param_slot),
+        | Rvalue::TypePatternTest { operand, .. }
+        | Rvalue::EnumDiscriminantTest { operand, .. } => operand_uses_param(operand, param_slot),
     }
 }
 

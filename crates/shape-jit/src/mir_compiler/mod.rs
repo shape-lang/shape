@@ -461,6 +461,35 @@ pub fn preflight(mir_data: &MirFunctionData) -> MirPreflightResult {
                                 type_annotation, stmt.span
                             ));
                         }
+                        // W15.2-LANG-1 (Phase 4b, 2026-05-18). MIR-level
+                        // marker for non-trinity (user-defined) `Pattern::
+                        // Constructor` arms in `match` expressions
+                        // (e.g. `match Color::Red { Color::Red => ..., ...
+                        // }`). JIT codegen is not yet wired (`compile_rvalue`
+                        // surfaces-and-stops on this variant); preflight
+                        // rejects so the W12 fall-through routes the program
+                        // to the bytecode interpreter, which compiles user-
+                        // defined enum patterns via the typed-object
+                        // discriminant check at `compile_typed_enum_pattern_
+                        // check` in `compiler/patterns/checking.rs`
+                        // (emits `GetFieldTyped(__variant, I64)` +
+                        // `PushConst(variant_id)` + `EqInt`). ADR-006
+                        // §2.7.5 producer-side classification: the
+                        // (enum_name, variant_name) pair is carried verbatim
+                        // from `ast::Pattern::Constructor`. Mirrors the
+                        // LANG-5 `TypePatternTest` precedent.
+                        Rvalue::EnumDiscriminantTest {
+                            enum_name,
+                            variant_name,
+                            ..
+                        } => {
+                            blockers.push(format!(
+                                "EnumDiscriminantTest (W15.2-LANG-1): \
+                                 user-defined `Pattern::Constructor` codegen \
+                                 pending, enum = {:?}, variant = {:?} at {:?}",
+                                enum_name, variant_name, stmt.span
+                            ));
+                        }
                         // BinaryOp, UnaryOp, Use, Clone, Borrow, Aggregate,
                         // EnumTest, EnumPayload are supported
                         _ => {}
