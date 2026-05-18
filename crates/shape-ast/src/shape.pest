@@ -1484,7 +1484,7 @@ keyword = {
     "let" | "var" | "const" | "mut" | "function" | "async" | "await" |
     "if" | "else" | "for" | "while" | "match" | "return" | "break" | "continue" |
     "true" | "false" | "null" | "None" | "Some" | "and" | "or" |
-    "type" | "trait" | "impl" | "enum" |
+    "type" | "trait" | "interface" | "impl" | "enum" |
     "extend" | "method" | "in" |
     "comptime" | "datasource"
 }
