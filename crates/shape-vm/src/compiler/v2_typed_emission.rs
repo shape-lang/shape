@@ -220,6 +220,42 @@ pub fn should_use_typed_array(elem_type: &ConcreteType) -> Option<TypedArrayKind
     }
 }
 
+/// Reverse mapping: derive the `ConcreteType` element type a
+/// [`TypedArrayKind`] was minted for.
+///
+/// Mirror of [`should_use_typed_array`]: every variant produced by that
+/// function round-trips back to its source `ConcreteType` here.
+///
+/// LANG-9 fix (Phase 4b round 2, 2026-05-18): inline array literals
+/// (`[1,2,3].map(...)`) failed to monomorphize the method call because
+/// `concrete_type_for_expr(Expr::Array)` reads
+/// `compiler.array_element_types[span]`, which `compile_expr_array` did
+/// not populate at typed-literal lowering time. Per ADR-006 §2.7.5
+/// stamp-at-compile-time, the literal's chosen `TypedArrayKind` IS the
+/// proof of element-type at construction time; this helper lets the
+/// producer record that proof in the side-table so subsequent
+/// `Expr::MethodCall` monomorphization on the inline receiver succeeds
+/// — same code path the bound form (`let xs = [1,2,3]; xs.map(...)`)
+/// reaches via the `identifier_concrete_type` side-table arm.
+#[inline]
+pub fn concrete_type_for_typed_array_kind(kind: TypedArrayKind) -> ConcreteType {
+    match kind {
+        TypedArrayKind::F64 => ConcreteType::F64,
+        TypedArrayKind::I64 => ConcreteType::I64,
+        TypedArrayKind::I32 => ConcreteType::I32,
+        TypedArrayKind::Bool => ConcreteType::Bool,
+        TypedArrayKind::I8 => ConcreteType::I8,
+        TypedArrayKind::U8 => ConcreteType::U8,
+        TypedArrayKind::I16 => ConcreteType::I16,
+        TypedArrayKind::U16 => ConcreteType::U16,
+        TypedArrayKind::U32 => ConcreteType::U32,
+        TypedArrayKind::F32 => ConcreteType::F32,
+        TypedArrayKind::Char => ConcreteType::Char,
+        TypedArrayKind::String => ConcreteType::String,
+        TypedArrayKind::Decimal => ConcreteType::Decimal,
+    }
+}
+
 /// `NativeKind` analogue.
 ///
 /// Provided as a bridge for compiler call sites that haven't yet been

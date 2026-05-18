@@ -1034,7 +1034,7 @@ impl BytecodeCompiler {
             } => self.compile_expr_instanceof(expr, type_annotation),
 
             // Collections
-            Expr::Array(elements, _) => self.compile_expr_array(elements),
+            Expr::Array(elements, span) => self.compile_expr_array(elements, *span),
             Expr::Object(fields, _) => self.compile_expr_object(fields),
 
             // Property and index access
