@@ -1,0 +1,2 @@
+// W13 arithmetic seed a07 — bitwise AND.
+print(0b1010 & 0b1100)

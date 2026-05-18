@@ -1,0 +1,7 @@
+// W13 fallthrough seed w02 — module var read after assignment.
+// Per audit §3.7: SharedModuleBinding store opcode also triggers preflight
+// rejection; JIT falls through, stdout MATCHES VM.
+var n = 5
+fn get_n() { n }
+n = n + 10
+print(get_n())

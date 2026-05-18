@@ -1,0 +1,4 @@
+// W13 arithmetic seed a09 — s1 canonical: scalar-loop sum 0..100 = 4950.
+let mut sum = 0
+for i in 0..100 { sum += i }
+print(sum)

@@ -1,0 +1,13 @@
+// CLASS: LANG-W13-3-iife-closure-capture
+// Negative-corpus seed f06 — NEW divergence class surfaced by W13.3 corpus run.
+// Immediately-invoked closure expression `(|y| y + base)(x)` inside a for-loop:
+//   VM exits 1 with empty stdout (runtime error on the IIFE form).
+//   JIT exits 0 with garbage (`-1407374883553280` — raw pointer leak).
+// CLASSIFICATION: runtime-error-asymmetry (HIGH-signal per audit §2 row 3).
+// SURFACE-AND-STOP for follow-up sub-cluster (LANG-W13-3-iife-closure-capture).
+// Flips (n) -> (g) when the IIFE-closure-capture closure-wave lands.
+let base = 7
+let v: Vec<int> = [1, 2, 3]
+let mut total = 0
+for x in v { total += (|y| y + base)(x) }
+print(total)

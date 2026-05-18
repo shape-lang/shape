@@ -1,0 +1,5 @@
+// W13 collections seed c07 — for-each accumulation over Vec.
+let v: Vec<int> = [2, 4, 6, 8]
+let mut total = 0
+for x in v { total += x }
+print(total)

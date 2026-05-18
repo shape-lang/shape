@@ -1,0 +1,9 @@
+// CLASS: W12-followup-jit-cond-int-negation
+// Negative-corpus seed a10 — known §5.1 residual class #6 (per W13 audit §4.1).
+// Expected at HEAD: VM `-62500` vs JIT `9223372036854775558` (500-iter
+// `if-else-negation` loop). Flips (n) -> (g) when the closure-wave for
+// W12-followup-jit-cond-int-negation lands.
+fn f(x: int) -> int { if x > 0 { -x } else { x } }
+let mut t = 0
+for i in 0..500 { t += f(i - 250) }
+print(t)

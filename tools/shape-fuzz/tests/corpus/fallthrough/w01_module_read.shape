@@ -1,0 +1,7 @@
+// W13 fallthrough seed w01 — W12 canonical SharedModuleBinding preflight.
+// Per audit §3.7: JIT preflight rejects, falls through to interpreter, stdout
+// MATCHES VM. Verifies the W12 binding shape — fall-through is NOT a divergence.
+var counter = 100
+fn read() { counter }
+let val = read()
+print(val)

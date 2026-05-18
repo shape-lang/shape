@@ -1,0 +1,4 @@
+// W13 patterns seed m04 — Option<int> default-branch via None.
+let x: Option<int> = None
+let r = match x { Some(n) => n, None => -1 }
+print(r)

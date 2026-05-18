@@ -1,0 +1,5 @@
+// W13 generics seed g05 — generic fn unwrap on generic struct.
+type Box<T> { value: T }
+fn unwrap<T>(b: Box<T>) -> T { b.value }
+let b: Box<int> = Box { value: 7 }
+print(unwrap(b))

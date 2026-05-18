@@ -1,0 +1,2 @@
+// W13 arithmetic seed a04 — int division (truncating).
+print(10 / 3)

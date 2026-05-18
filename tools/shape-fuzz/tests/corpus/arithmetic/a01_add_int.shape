@@ -1,0 +1,2 @@
+// W13 arithmetic seed a01 — int addition.
+print(2 + 3)

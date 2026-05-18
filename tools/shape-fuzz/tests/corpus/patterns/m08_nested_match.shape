@@ -1,0 +1,7 @@
+// W13 patterns seed m08 — nested-match over a 2-deep Option.
+let x: Option<Option<int>> = Some(Some(5))
+let v = match x {
+  Some(inner) => match inner { Some(n) => n, None => -1 },
+  None => -2,
+}
+print(v)

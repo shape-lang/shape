@@ -1,0 +1,4 @@
+// W13 closures seed f04 — capture an immutable outer let by value.
+let n = 100
+let add_n = |x| x + n
+print(add_n(5))

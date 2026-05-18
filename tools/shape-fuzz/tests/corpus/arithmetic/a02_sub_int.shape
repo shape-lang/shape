@@ -1,0 +1,2 @@
+// W13 arithmetic seed a02 — int subtraction.
+print(100 - 42)

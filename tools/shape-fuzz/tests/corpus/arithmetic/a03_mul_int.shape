@@ -1,0 +1,2 @@
+// W13 arithmetic seed a03 — int multiplication.
+print(7 * 6)

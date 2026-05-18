@@ -1,0 +1,5 @@
+// W13 patterns seed m01 — enum tuple variant pattern.
+enum E { A, B(int), C { x: int, y: int } }
+let e = E::B(42)
+let r = match e { E::A => 0, E::B(n) => n, E::C{x,y} => x+y }
+print(r)

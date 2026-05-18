@@ -1,0 +1,4 @@
+// W13 generics seed g06 — generic Pair struct, project first.
+type Pair<A, B> { first: A, second: B }
+let p: Pair<int, int> = Pair { first: 1, second: 99 }
+print(p.first)
