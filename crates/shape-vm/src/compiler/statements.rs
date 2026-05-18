@@ -669,17 +669,16 @@ impl BytecodeCompiler {
                     // maps to a typed-array kind, signal it to
                     // `compile_expr_array` so the literal is lowered to
                     // the v2 typed-array path.
+                    //
+                    // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element
+                    // (2026-05-18): route through the compiler-aware
+                    // `resolve_typed_array_kind_from_annotation` so `Array<B>`
+                    // for a registered user struct B also maps to
+                    // `TypedArrayKind::TypedObject` per audit §2.1 + §3.A row 1.
                     self.pending_variable_typed_array_kind = var_decl
                         .type_annotation
                         .as_ref()
-                        .and_then(|ann| {
-                            crate::compiler::v2_array_emission::typed_array_from_annotation(
-                                ann,
-                            )
-                        })
-                        .and_then(
-                            crate::compiler::v2_typed_emission::should_use_typed_array_from_slot_kind,
-                        );
+                        .and_then(|ann| self.resolve_typed_array_kind_from_annotation(ann));
                     match self.compile_expr_for_reference_binding(init_expr) {
                         Ok(tracked_borrow) => {
                             ref_borrow = tracked_borrow;
@@ -817,17 +816,12 @@ impl BytecodeCompiler {
                             .as_identifier()
                             .map(|name| name.to_string());
                         // v2 Phase 3.1 (Agent 3): see ModuleBinding case above.
+                        // Phase 4b Round 4 W16.2-A (2026-05-18): user-struct
+                        // annotation support via `resolve_typed_array_kind_from_annotation`.
                         self.pending_variable_typed_array_kind = var_decl
                             .type_annotation
                             .as_ref()
-                            .and_then(|ann| {
-                                crate::compiler::v2_array_emission::typed_array_from_annotation(
-                                    ann,
-                                )
-                            })
-                            .and_then(
-                                crate::compiler::v2_typed_emission::should_use_typed_array_from_slot_kind,
-                            );
+                            .and_then(|ann| self.resolve_typed_array_kind_from_annotation(ann));
                         let compile_result = self.compile_expr_for_reference_binding(init_expr);
                         self.pending_variable_name = saved_pending_variable_name;
                         self.pending_variable_typed_array_kind =
@@ -4319,15 +4313,16 @@ impl BytecodeCompiler {
                 // `Array<T>` annotation whose element type maps to a
                 // typed-array kind, signal it to `compile_expr_array` so
                 // the literal lowers to the v2 typed-array path.
+                //
+                // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element
+                // (2026-05-18): route through the compiler-aware
+                // `resolve_typed_array_kind_from_annotation` so `Array<B>`
+                // for a registered user struct B also maps to
+                // `TypedArrayKind::TypedObject` per audit §2.1 + §3.A row 1.
                 self.pending_variable_typed_array_kind = var_decl
                     .type_annotation
                     .as_ref()
-                    .and_then(|ann| {
-                        crate::compiler::v2_array_emission::typed_array_from_annotation(ann)
-                    })
-                    .and_then(
-                        crate::compiler::v2_typed_emission::should_use_typed_array_from_slot_kind,
-                    );
+                    .and_then(|ann| self.resolve_typed_array_kind_from_annotation(ann));
                 // v2 Phase 3.2: when the binding has an explicit
                 // `HashMap<K, V>` annotation whose key/value pair maps to a
                 // typed-map kind, signal it to `compile_expr_function_call`

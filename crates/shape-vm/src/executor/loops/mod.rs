@@ -450,6 +450,22 @@ impl VirtualMachine {
                     unsafe { v2_retain(&(*elem_ptr).header) };
                     self.push_kinded(elem_ptr as u64, NativeKind::DecimalV2)
                 }
+                // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18) —
+                // mirror of the String/Decimal iter arms above. Retain per-element so
+                // the iterating loop body owns a valid share until it's released.
+                V2ElemType::TypedObject => {
+                    use shape_value::heap_value::TypedObjectStorage;
+                    use shape_value::v2::refcount::v2_retain;
+                    let arr = view.ptr as *const TypedArray<*const TypedObjectStorage>;
+                    let elem_ptr = unsafe {
+                        TypedArray::<*const TypedObjectStorage>::get_unchecked(arr, i)
+                    };
+                    unsafe { v2_retain(&(*elem_ptr).header) };
+                    self.push_kinded(
+                        elem_ptr as u64,
+                        NativeKind::Ptr(HeapKind::TypedObject),
+                    )
+                }
             };
             drop_with_kind(idx_bits, idx_kind);
             drop_with_kind(iter_bits, iter_kind);

@@ -932,6 +932,14 @@ impl VirtualMachine {
             | TypedArrayGetDecimal
             | TypedArrayPushDecimal
             | TypedArraySetDecimal
+            // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18) —
+            // v2-raw TypedArray<*const TypedObjectStorage> heap-element carrier per
+            // ADR-006 §2.7.5 + audit `v0.3-w16-v3s5-ckpt56-strict-close-audit.md`
+            // §2.1 + §3.A row 1. Mirror of the Wave 2 A2 String/Decimal arms above.
+            | NewTypedArrayTypedObject
+            | TypedArrayGetTypedObject
+            | TypedArrayPushTypedObject
+            | TypedArraySetTypedObject
             // Wave 3 Stabilize Round 1 V3-A2-followup-producer-cascade (2026-05-15) —
             // v2-raw String/Decimal literal constructors (closes the literal-element
             // kind mismatch surfaced at Round 3a' gate-flip: `let xs: Array<string>

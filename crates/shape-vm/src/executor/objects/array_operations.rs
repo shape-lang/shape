@@ -476,6 +476,30 @@ fn slice_v2_typed_array(
             stamp_elem_type(new_ptr as *mut u8, ELEM_TYPE_DECIMAL);
             new_ptr as *mut u8
         },
+        // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18) —
+        // mirror of the String/Decimal slice arms above. Retain per-element so
+        // both source and slice arrays own valid shares of each TypedObjectStorage.
+        V2ElemType::TypedObject => unsafe {
+            use shape_value::heap_value::TypedObjectStorage;
+            use shape_value::v2::refcount::v2_retain;
+            use crate::executor::v2_handlers::v2_array_detect::ELEM_TYPE_TYPED_OBJECT;
+            let src = view.ptr as *const TypedArray<*const TypedObjectStorage>;
+            let count = e.saturating_sub(s);
+            let new_ptr =
+                TypedArray::<*const TypedObjectStorage>::with_capacity(count as u32);
+            if count > 0 {
+                let src_data = (*src).data;
+                let dst_data = (*new_ptr).data;
+                for i in 0..count {
+                    let elem = *src_data.add(s + i);
+                    v2_retain(&(*elem).header);
+                    *dst_data.add(i) = elem;
+                }
+                (*new_ptr).len = count as u32;
+            }
+            stamp_elem_type(new_ptr as *mut u8, ELEM_TYPE_TYPED_OBJECT);
+            new_ptr as *mut u8
+        },
     }
 }
 

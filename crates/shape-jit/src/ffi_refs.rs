@@ -255,6 +255,12 @@ pub struct FFIFuncRefs {
     // `crates/shape-vm/src/executor/v2_handlers/array.rs:803-858`.
     pub(crate) v2_array_new_string: FuncRef,
     pub(crate) v2_array_new_decimal: FuncRef,
+    // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18).
+    // v2-raw `TypedArray<*const TypedObjectStorage>` heap-element allocator
+    // per ADR-006 §2.7.5 + §2.7.24 Q25.A SUPERSEDED + audit
+    // `v0.3-w16-v3s5-ckpt56-strict-close-audit.md` §2.1 + §3.A row 1. Routed
+    // by `v2_array_new_func` for `NativeKind::Ptr(HeapKind::TypedObject)`.
+    pub(crate) v2_array_new_typed_object: FuncRef,
 
     // v2 typed-array element push — single generic helper that dispatches
     // on the `elem_size` byte immediate. Callers zero/sign-extend the native

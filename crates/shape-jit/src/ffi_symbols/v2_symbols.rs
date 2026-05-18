@@ -55,6 +55,11 @@ pub fn register_v2_symbols(builder: &mut JITBuilder) {
         "jit_new_typed_array_decimal",
         v2::jit_new_typed_array_decimal as *const u8,
     );
+    // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18).
+    builder.symbol(
+        "jit_new_typed_array_typed_object",
+        v2::jit_new_typed_array_typed_object as *const u8,
+    );
 
     // Generic typed-array push dispatcher (R7.2 consolidation)
     builder.symbol("jit_v2_array_push", v2::jit_v2_array_push as *const u8);
@@ -411,6 +416,20 @@ pub fn declare_v2_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<Stri
         sig.params.push(AbiParam::new(types::I32)); // capacity
         sig.returns.push(AbiParam::new(types::I64)); // *mut TypedArray<*const DecimalObj>
         declare(module, ffi_funcs, "jit_new_typed_array_decimal", &sig);
+    }
+
+    // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18).
+    // jit_new_typed_array_typed_object(capacity: u32) -> ptr
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I32)); // capacity
+        sig.returns.push(AbiParam::new(types::I64)); // *mut TypedArray<*const TypedObjectStorage>
+        declare(
+            module,
+            ffi_funcs,
+            "jit_new_typed_array_typed_object",
+            &sig,
+        );
     }
 
     // ========================================================================

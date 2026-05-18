@@ -82,6 +82,22 @@ pub enum TypedArrayKind {
     /// sub-cluster S2-prime, the v2-raw Decimal element carrier. Element-read
     /// pushes `NativeKind::DecimalV2`; per-element retain at element-read time.
     Decimal,
+    /// `TypedArray<*const TypedObjectStorage>` — backing for
+    /// `Array<UserStruct>` (Phase 4b Round 4 W16.2-A
+    /// op_new_array-typed-object-element, 2026-05-18). Per ADR-006 §2.7.5
+    /// stamp-at-compile-time + §2.7.24 Q25.A SUPERSEDED + audit
+    /// `v0.3-w16-v3s5-ckpt56-strict-close-audit.md` §2.1 + §3.A row 1, the
+    /// v2-raw TypedObject element carrier. Element-read pushes
+    /// `NativeKind::Ptr(HeapKind::TypedObject)` (the existing
+    /// kind-discriminator for `*const TypedObjectStorage` slot bits per
+    /// `vm_impl/stack.rs:115` clone_with_kind + drop_with_kind dispatch);
+    /// per-element retain via `v2_retain(&(*elem_ptr).header)` at element-read
+    /// time. The `HeapElement` impl + `_new`/`_drop` raw-pointer allocators
+    /// are RESOLVED at HEAD per W12 audit §2.2 Obstacle O-3 (verified at
+    /// `crates/shape-value/src/heap_value.rs:3584` `_new` returning
+    /// `*mut Self` with `HeapHeader` + `:4058` `unsafe impl HeapElement for
+    /// TypedObjectStorage`).
+    TypedObject,
 }
 
 impl TypedArrayKind {
@@ -103,6 +119,8 @@ impl TypedArrayKind {
             // Wave 2 Agent A2 (2026-05-14) — String + Decimal heap-element monomorphizations.
             TypedArrayKind::String => OpCode::NewTypedArrayString,
             TypedArrayKind::Decimal => OpCode::NewTypedArrayDecimal,
+            // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18).
+            TypedArrayKind::TypedObject => OpCode::NewTypedArrayTypedObject,
         }
     }
 
@@ -124,6 +142,8 @@ impl TypedArrayKind {
             // Wave 2 Agent A2 (2026-05-14) — String + Decimal heap-element monomorphizations.
             TypedArrayKind::String => OpCode::TypedArrayGetString,
             TypedArrayKind::Decimal => OpCode::TypedArrayGetDecimal,
+            // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18).
+            TypedArrayKind::TypedObject => OpCode::TypedArrayGetTypedObject,
         }
     }
 
@@ -145,6 +165,8 @@ impl TypedArrayKind {
             // Wave 2 Agent A2 (2026-05-14) — String + Decimal heap-element monomorphizations.
             TypedArrayKind::String => OpCode::TypedArrayPushString,
             TypedArrayKind::Decimal => OpCode::TypedArrayPushDecimal,
+            // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18).
+            TypedArrayKind::TypedObject => OpCode::TypedArrayPushTypedObject,
         }
     }
 
@@ -166,6 +188,8 @@ impl TypedArrayKind {
             // Wave 2 Agent A2 (2026-05-14) — String + Decimal heap-element monomorphizations.
             TypedArrayKind::String => OpCode::TypedArraySetString,
             TypedArrayKind::Decimal => OpCode::TypedArraySetDecimal,
+            // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18).
+            TypedArrayKind::TypedObject => OpCode::TypedArraySetTypedObject,
         }
     }
 }
@@ -216,6 +240,19 @@ pub fn should_use_typed_array(elem_type: &ConcreteType) -> Option<TypedArrayKind
         // retain via `v2_retain(&(*elem_ptr).header)` at element-read time.
         ConcreteType::String => Some(TypedArrayKind::String),
         ConcreteType::Decimal => Some(TypedArrayKind::Decimal),
+        // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18)
+        // per ADR-006 §2.7.5 stamp-at-compile-time + §2.7.24 Q25.A SUPERSEDED +
+        // audit `v0.3-w16-v3s5-ckpt56-strict-close-audit.md` §2.1 + §3.A row 1.
+        // `Array<UserStruct>` routes to v2-raw `TypedArray<*const
+        // TypedObjectStorage>` carrier. The producer-site proof is the bytecode
+        // compiler's `ConcreteType::Struct(StructLayoutId)` for the element
+        // type — recorded on every literal at compile time. NO ConcreteType
+        // round-trip needed: the slot-bits at runtime carry
+        // `NativeKind::Ptr(HeapKind::TypedObject)`, the same kind label the
+        // existing single-TypedObject path already uses, so the 4-table
+        // HeapKind dispatch (clone_with_kind / drop_with_kind / ...) handles
+        // the carrier uniformly without per-instantiation discriminator.
+        ConcreteType::Struct(_) => Some(TypedArrayKind::TypedObject),
         _ => None,
     }
 }
@@ -253,6 +290,21 @@ pub fn concrete_type_for_typed_array_kind(kind: TypedArrayKind) -> ConcreteType 
         TypedArrayKind::Char => ConcreteType::Char,
         TypedArrayKind::String => ConcreteType::String,
         TypedArrayKind::Decimal => ConcreteType::Decimal,
+        // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18).
+        // Returns `ConcreteType::Struct(StructLayoutId(0))` as a placeholder —
+        // every typed-object struct schema collapses to the same TypedArrayKind
+        // (the slot-bits kind is uniformly `Ptr(HeapKind::TypedObject)`), so
+        // the kind→ConcreteType round-trip cannot recover the specific
+        // StructLayoutId without an additional side-table lookup. This mirrors
+        // the `helpers.rs:719` shape `ConcreteType::Struct(StructLayoutId(0))`
+        // used by `StatementKind::ObjectStore` slot-stamping. Downstream
+        // consumers that need the precise schema must read from the bytecode
+        // compiler's `array_element_types[span]` side-table populated at the
+        // literal site (which records the resolved struct schema, NOT this
+        // round-trip placeholder).
+        TypedArrayKind::TypedObject => ConcreteType::Struct(
+            shape_value::v2::concrete_type::StructLayoutId(0),
+        ),
     }
 }
 
@@ -323,6 +375,17 @@ pub fn should_use_typed_array_from_slot_kind(
         NativeKind::String => Some(TypedArrayKind::String),
         NativeKind::StringV2 => Some(TypedArrayKind::String),
         NativeKind::DecimalV2 => Some(TypedArrayKind::Decimal),
+        // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18).
+        // `NativeKind::Ptr(HeapKind::TypedObject)` is the existing slot-bits
+        // kind label for `*const TypedObjectStorage` carriers. When an array
+        // literal's elements are typed-object scalars (`B { v: 1 }` shape),
+        // the type-tracker hint reports `Ptr(TypedObject)` per existing
+        // single-TypedObject carrier flow; this arm routes the literal to the
+        // typed-array fast path (`NewTypedArrayTypedObject` + per-element
+        // `TypedArrayPushTypedObject`). Per ADR-006 §2.7.5 the kind is
+        // statically proven at the producer site, never decoded from runtime
+        // bits.
+        NativeKind::Ptr(shape_value::HeapKind::TypedObject) => Some(TypedArrayKind::TypedObject),
         _ => None,
     }
 }
@@ -357,6 +420,120 @@ pub fn typed_array_kind_from_type_name(type_name: &str) -> Option<TypedArrayKind
 }
 
 impl super::BytecodeCompiler {
+    /// Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18).
+    ///
+    /// Compiler-aware homogeneous-element-kind inference over an array literal's
+    /// elements. Wraps the AST-only `v2_array_emission::infer_array_element_type`
+    /// (which handles bare literals + `Expr::StructLiteral`/`Expr::Object`
+    /// per the W16.2-A new arms) with compiler-state-aware function-call
+    /// return-type lookup: when every element is a `FunctionCall { name, .. }`
+    /// whose return type the type tracker reports as a registered struct,
+    /// the array kind is TypedObject.
+    ///
+    /// This is the producer-side proof for `let boxes = [aabb(...),
+    /// aabb(...), ...]` per ADR-006 §2.7.5: `aabb` is statically known to
+    /// return a struct (`type AABB { ... }` + `fn aabb(...) -> AABB`), so
+    /// the literal's element kind is proven at compile time without runtime
+    /// inference. NO fabrication, NO Bool-default.
+    pub(crate) fn array_elements_all_typed_object(
+        &self,
+        elements: &[shape_ast::ast::Expr],
+    ) -> bool {
+        use shape_ast::ast::Expr;
+        if elements.is_empty() {
+            return false;
+        }
+        for elem in elements {
+            let returned_type_name: Option<String> = match elem {
+                Expr::FunctionCall { name, .. } => {
+                    self.type_tracker.get_function_return_type(name).cloned()
+                }
+                Expr::QualifiedFunctionCall {
+                    namespace, function, ..
+                } => {
+                    let qualified = format!("{}::{}", namespace, function);
+                    self.type_tracker
+                        .get_function_return_type(&qualified)
+                        .cloned()
+                }
+                _ => return false,
+            };
+            let Some(name) = returned_type_name else {
+                return false;
+            };
+            let resolved = self
+                .type_aliases
+                .get(&name)
+                .map(|s| s.as_str())
+                .unwrap_or(name.as_str());
+            if !self.struct_types.contains_key(resolved)
+                && !self.struct_types.contains_key(&name)
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Compiler-aware resolution of a `let arr: Array<T> = [...]` binding's
+    /// element annotation to a [`TypedArrayKind`]. Wraps the
+    /// `v2_array_emission::typed_array_from_annotation` →
+    /// `should_use_typed_array_from_slot_kind` chain but ALSO recognizes the
+    /// `Array<UserStruct>` shape: when the inner annotation is
+    /// `TypeAnnotation::Basic(name)` and `name` is a registered struct type
+    /// (or resolves through `type_aliases` to one), maps to
+    /// [`TypedArrayKind::TypedObject`].
+    ///
+    /// Per ADR-006 §2.7.5 stamp-at-compile-time + audit
+    /// `v0.3-w16-v3s5-ckpt56-strict-close-audit.md` §2.1: the producer-site
+    /// proof is the explicit annotation; no runtime inference. The bytecode
+    /// compiler's `struct_types` map is the authoritative source of "is this
+    /// a registered struct?", populated by the type-definition pass.
+    pub(crate) fn resolve_typed_array_kind_from_annotation(
+        &self,
+        annotation: &shape_ast::ast::TypeAnnotation,
+    ) -> Option<TypedArrayKind> {
+        // Existing scalar / decimal / string mapping.
+        if let Some(scalar_kind) =
+            crate::compiler::v2_array_emission::typed_array_from_annotation(annotation)
+        {
+            if let Some(kind) = should_use_typed_array_from_slot_kind(scalar_kind) {
+                return Some(kind);
+            }
+        }
+        // User-struct annotation: `Array<B>` / `B[]` where B is a registered
+        // struct type. Map to TypedArrayKind::TypedObject per §2.1 + §3.A row 1.
+        use shape_ast::ast::TypeAnnotation;
+        let inner_name = match annotation {
+            TypeAnnotation::Generic { name, args }
+                if name.as_str() == "Array" && args.len() == 1 =>
+            {
+                match &args[0] {
+                    TypeAnnotation::Basic(n) => Some(n.as_str()),
+                    _ => None,
+                }
+            }
+            TypeAnnotation::Array(inner) => match inner.as_ref() {
+                TypeAnnotation::Basic(n) => Some(n.as_str()),
+                _ => None,
+            },
+            _ => None,
+        }?;
+        // Resolve through type aliases (`type P = Point` → check Point).
+        let resolved = self
+            .type_aliases
+            .get(inner_name)
+            .map(|s| s.as_str())
+            .unwrap_or(inner_name);
+        if self.struct_types.contains_key(resolved)
+            || self.struct_types.contains_key(inner_name)
+        {
+            Some(TypedArrayKind::TypedObject)
+        } else {
+            None
+        }
+    }
+
     /// Resolve an array receiver expression (`Identifier(name)`) to a
     /// [`TypedArrayKind`], if the receiver is a tracked array whose element
     /// type has a typed-array fast path.
@@ -469,10 +646,17 @@ mod tests {
     }
 
     #[test]
-    fn test_struct_falls_back_to_legacy() {
+    fn test_struct_maps_to_typed_array_typed_object() {
+        // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18).
+        // ConcreteType::Struct(_) now routes to the v2-raw TypedArray<*const
+        // TypedObjectStorage> fast path per ADR-006 §2.7.5 + audit §2.1.
         assert_eq!(
             should_use_typed_array(&ConcreteType::Struct(StructLayoutId(0))),
-            None
+            Some(TypedArrayKind::TypedObject)
+        );
+        assert_eq!(
+            should_use_typed_array(&ConcreteType::Struct(StructLayoutId(42))),
+            Some(TypedArrayKind::TypedObject)
         );
     }
 
@@ -612,9 +796,11 @@ mod tests {
 
     #[test]
     fn test_opcode_lookup_round_trip() {
-        // Sanity check that all eleven kinds expose all four opcodes.
+        // Sanity check that all kinds expose all four opcodes.
         // U64 deliberately omitted — deferred to S1.5 per S1 reopen.
         // Wave 2 Agent A1 (2026-05-14) — F32 + Char added.
+        // Wave 2 Agent A2 (2026-05-14) — String + Decimal added.
+        // Phase 4b Round 4 W16.2-A (2026-05-18) — TypedObject added.
         for kind in [
             TypedArrayKind::F64,
             TypedArrayKind::I64,
@@ -627,6 +813,9 @@ mod tests {
             TypedArrayKind::U32,
             TypedArrayKind::F32,
             TypedArrayKind::Char,
+            TypedArrayKind::String,
+            TypedArrayKind::Decimal,
+            TypedArrayKind::TypedObject,
         ] {
             let _ = kind.new_opcode();
             let _ = kind.get_opcode();
@@ -955,14 +1144,13 @@ mod compile_integration_tests {
     }
 
     #[test]
-    fn test_struct_array_falls_back_to_legacy_new_array() {
-        // `let arr: Array<MyStruct> = [...]` — element type is a heap
-        // (struct) type with no typed opcode kind. Must fall back to the
-        // legacy NaN-boxed `NewArray` path.
-        //
-        // Note: `infer_array_element_type` already returns `None` for
-        // object literals, so this exercises the fallback purely on the
-        // shape of the elements (object literals → no typed kind).
+    fn test_struct_array_emits_typed_object_array() {
+        // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18).
+        // Pre-W16.2-A: `let arr = [Point{...}, Point{...}]` fell back to
+        // legacy `NewArray` (no typed opcode for struct elements).
+        // Post-W16.2-A: routes through the v2-raw `TypedArray<*const
+        // TypedObjectStorage>` carrier via the new
+        // `TypedArrayKind::TypedObject` arm + new opcodes.
         let prog = compile(
             r#"
             type Point { x: int, y: int }
@@ -971,16 +1159,24 @@ mod compile_integration_tests {
             "#,
         );
         assert!(
-            has_opcode(&prog, OpCode::NewArray),
-            "heap-typed array must emit legacy NewArray"
+            has_opcode(&prog, OpCode::NewTypedArrayTypedObject),
+            "struct-element array must emit NewTypedArrayTypedObject per W16.2-A"
+        );
+        assert!(
+            has_opcode(&prog, OpCode::TypedArrayPushTypedObject),
+            "struct-element array must emit per-element TypedArrayPushTypedObject"
+        );
+        assert!(
+            !has_opcode(&prog, OpCode::NewArray),
+            "struct-element array must NOT fall back to legacy NewArray"
         );
         assert!(
             !has_opcode(&prog, OpCode::NewTypedArrayF64),
-            "heap-typed array must not emit NewTypedArrayF64"
+            "struct-element array must not emit NewTypedArrayF64"
         );
         assert!(
             !has_opcode(&prog, OpCode::NewTypedArrayI64),
-            "heap-typed array must not emit NewTypedArrayI64"
+            "struct-element array must not emit NewTypedArrayI64"
         );
     }
 

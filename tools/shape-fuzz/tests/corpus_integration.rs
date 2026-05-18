@@ -90,7 +90,10 @@ fn corpus_inventory_matches_audit_5_3_expected_layout() {
 
     let expected_domains = [
         ("arithmetic", 10),
-        ("collections", 10),
+        // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18):
+        // c11_array_typed_object.shape added per audit §4.C (Array<TypedObject>
+        // construction + index access).
+        ("collections", 11),
         ("closures", 7),
         ("patterns", 8),
         ("async", 5),
@@ -109,7 +112,9 @@ fn corpus_inventory_matches_audit_5_3_expected_layout() {
         );
         total += seeds.len();
     }
-    assert_eq!(total, 50, "audit §3 requires 50 hand-seeded total");
+    // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18):
+    // total grows by 1 (c11_array_typed_object) → 51.
+    assert_eq!(total, 51, "audit §3 requires 51 hand-seeded total");
 
     // Audit §4.1 baseline negative-corpus inventory: a10 + c09 + c10 = 3
     // entries. W13.3 corpus surfaced 2 NEW divergence classes during the

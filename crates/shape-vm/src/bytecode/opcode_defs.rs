@@ -731,6 +731,38 @@ define_opcodes! {
     /// Create a v2-raw DecimalObj from a constant decimal. Operand: Const(constant_id). Pushes (*const DecimalObj) bits with NativeKind::DecimalV2 (refcount = 1, owned by caller).
     NewDecimalV2 = 0x1B4, Object, pops: 0, pushes: 1;
 
+    // ── Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18) ──
+    //
+    // Per ADR-006 §2.7.5 stamp-at-compile-time + §2.7.24 Q25.A SUPERSEDED +
+    // audit `v0.3-w16-v3s5-ckpt56-strict-close-audit.md` §2.1 + §3.A row 1:
+    // `Array<UserStruct>` literals route through the v2-raw
+    // `TypedArray<*const TypedObjectStorage>` element carrier. Mirror of the
+    // Wave 2 Agent A2 String + Decimal opcodes (0x1AB..0x1B2 above), swapping
+    // `StringObj`/`DecimalObj` → `TypedObjectStorage` and `NativeKind::StringV2`/
+    // `NativeKind::DecimalV2` → `NativeKind::Ptr(HeapKind::TypedObject)`.
+    //
+    // The TypedObjectStorage HeapElement impl is wired at
+    // `crates/shape-value/src/heap_value.rs:4058`; `TypedObjectStorage::_new`
+    // / `_drop` raw-pointer allocators at `:3584`/`:3637`. Generic
+    // `impl<T: HeapElement> TypedArray<*const T>::drop_array_heap` at
+    // `crates/shape-value/src/v2/typed_array.rs:296` provides the per-element
+    // release walk at array drop time (W12 audit §2.2 Obstacle O-3 RESOLVED
+    // at HEAD).
+
+    /// Create a new TypedArray<*const TypedObjectStorage> with given capacity.
+    /// Operand: Count(capacity). Pushes ptr.
+    NewTypedArrayTypedObject = 0x1B5, Object, pops: 0, pushes: 1;
+    /// Get element from TypedArray<*const TypedObjectStorage>: pops (arr_ptr, index),
+    /// pushes (*const TypedObjectStorage) bits with
+    /// NativeKind::Ptr(HeapKind::TypedObject) (retains element).
+    TypedArrayGetTypedObject = 0x1B6, Object, pops: 2, pushes: 1;
+    /// Push element to TypedArray<*const TypedObjectStorage>: pops (arr_ptr, value),
+    /// pushes nothing. Caller transfers their refcount share to the array.
+    TypedArrayPushTypedObject = 0x1B7, Object, pops: 2, pushes: 0;
+    /// Set element in TypedArray<*const TypedObjectStorage>: pops (arr_ptr, index, value),
+    /// pushes nothing. Releases prior element, transfers new value's refcount share.
+    TypedArraySetTypedObject = 0x1B8, Object, pops: 3, pushes: 0;
+
     // ===== v2 Typed Map Operations =====
     /// Allocate a new TypedMap<*const StringObj, f64>. Pushes ptr.
     NewTypedMapStringF64 = 0xCD, Object, pops: 0, pushes: 1;
@@ -2001,6 +2033,11 @@ impl OpCode {
             | OpCode::TypedArrayGetDecimal
             | OpCode::TypedArrayPushDecimal
             | OpCode::TypedArraySetDecimal
+            // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18).
+            | OpCode::NewTypedArrayTypedObject
+            | OpCode::TypedArrayGetTypedObject
+            | OpCode::TypedArrayPushTypedObject
+            | OpCode::TypedArraySetTypedObject
             // Local-slot-based typed array element access
             | OpCode::GetElemI64
             | OpCode::GetElemF64

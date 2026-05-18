@@ -736,6 +736,16 @@ impl VirtualMachine {
                         // registries in a single lockstep commit. For now: fall
                         // back to ARRAY_METHODS (length / first / last / etc).
                         V2ElemType::String | V2ElemType::Decimal => None,
+                        // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element
+                        // (2026-05-18). No dedicated TYPED_OBJECT_ARRAY_METHODS
+                        // PHF registry at HEAD — `arr[i].field` access lowers to
+                        // `TypedArrayGetTypedObject` then field-access on the
+                        // recovered TypedObject; no `.method()` dispatch is needed
+                        // for the W16.2-A smoke-fixture target. Fall back to the
+                        // generic `ARRAY_METHODS` PHF for `.length` / `.first` /
+                        // etc. Per-method consumer-cascade for TypedObject element
+                        // arrays is downstream W16.2-J §1.B territory.
+                        V2ElemType::TypedObject => None,
                     };
                     typed.or_else(|| method_registry::ARRAY_METHODS.get(method_name).copied())
                 } else {

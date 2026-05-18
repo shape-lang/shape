@@ -328,3 +328,81 @@ fn test_double_filter_chain_into_let() {
     assert_eq!(result.as_i64(), Some(3));
 }
 
+
+// ──────────────────────────────────────────────────────────────────────
+// Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18)
+//
+// Per ADR-006 §2.7.5 stamp-at-compile-time + §2.7.24 Q25.A SUPERSEDED +
+// audit `v0.3-w16-v3s5-ckpt56-strict-close-audit.md` §2.1 + §3.A row 1.
+// Verifies that `Array<UserStruct>` literals now route through the v2-raw
+// `TypedArray<*const TypedObjectStorage>` carrier (`NewTypedArrayTypedObject`
+// + per-element `TypedArrayPushTypedObject` + `TypedArrayGetTypedObject`
+// for index access). Pre-fix: every shape SURFACEd at `op_new_array(N)`
+// per the deleted `TypedArrayData` enum + `Buf<T>` wrapper layer.
+// ──────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_typed_object_array_bare_literal_indexed_field() {
+    // Bare-literal form: elements are struct literals.
+    // `[B{v:1}, B{v:2}]` → `infer_array_element_type` returns
+    // `Ptr(HeapKind::TypedObject)` per W16.2-A new arms.
+    let result = eval(
+        "type B { v: int }\n\
+         let arr = [B { v: 1 }, B { v: 2 }]\n\
+         arr[1].v",
+    );
+    assert_eq!(result.as_i64(), Some(2));
+}
+
+#[test]
+fn test_typed_object_array_annotated_literal_indexed_field() {
+    // Annotated form: `let arr: Array<B> = [...]`.
+    // The annotation routes through `resolve_typed_array_kind_from_annotation`
+    // → `TypedArrayKind::TypedObject` per W16.2-A new annotation arm.
+    let result = eval(
+        "type B { v: int }\n\
+         let arr: Array<B> = [B { v: 10 }, B { v: 20 }, B { v: 30 }]\n\
+         arr[2].v",
+    );
+    assert_eq!(result.as_i64(), Some(30));
+}
+
+#[test]
+fn test_typed_object_array_index_zero() {
+    // Verify index 0 round-trip (the smoke-fixture target shape).
+    let result = eval(
+        "type Pt { x: int, y: int }\n\
+         let arr = [Pt { x: 7, y: 11 }, Pt { x: 13, y: 17 }]\n\
+         arr[0].y",
+    );
+    assert_eq!(result.as_i64(), Some(11));
+}
+
+#[test]
+fn test_typed_object_array_function_call_result_elements() {
+    // Function-call-result element form: elements are `f(...)` calls
+    // returning a registered struct. `array_elements_all_typed_object`
+    // resolves through `type_tracker.function_return_types`.
+    // This is the sim-test shape from `bin/shape-cli/tests/stdlib/
+    // simulation.rs:472` (`let boxes = [aabb(...), aabb(...), ...]`).
+    let result = eval(
+        "type Box { v: int }\n\
+         fn make(v: int) -> Box { Box { v: v } }\n\
+         let arr = [make(100), make(200), make(300)]\n\
+         arr[2].v",
+    );
+    assert_eq!(result.as_i64(), Some(300));
+}
+
+#[test]
+fn test_typed_object_array_struct_with_number_field() {
+    // Mixed-field struct: number field round-trip through the v2-raw
+    // TypedObject carrier. Validates that field access on indexed elements
+    // works for non-int field types (the `aabb` shape from the sim tests).
+    let result = eval(
+        "type V { x: number, y: number }\n\
+         let arr = [V { x: 1.5, y: 2.5 }, V { x: 3.5, y: 4.5 }]\n\
+         arr[1].x",
+    );
+    assert_eq!(result.as_f64(), Some(3.5));
+}

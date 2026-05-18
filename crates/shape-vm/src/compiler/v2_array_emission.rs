@@ -134,6 +134,24 @@ fn infer_from_literals(elements: &[Expr]) -> Option<NativeKind> {
             // S2-prime consumer arms.
             Expr::Literal(Literal::Decimal(_), _) => NativeKind::DecimalV2,
             Expr::Literal(Literal::TypedInt(_, w), _) => typed_int_width_to_slot(*w),
+            // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18) —
+            // bare `[B{v:1}, B{v:2}]` literal inference: every element is a
+            // struct literal (parses as `Expr::StructLiteral` for `T { ... }`
+            // syntax). The compile path lowers struct literals to
+            // `NewTypedObject` which leaves `NativeKind::Ptr(HeapKind::TypedObject)`
+            // on the stack — the matching producer-side slot kind that
+            // `should_use_typed_array_from_slot_kind` routes to
+            // `TypedArrayKind::TypedObject`. Per ADR-006 §2.7.5 the kind is
+            // proven at the literal-element parse site (struct-literal shape
+            // is structurally a `TypedObject`); no runtime inference.
+            //
+            // Object literal (`{k: v}` shape, no type tag) also lowers to
+            // `NewTypedObject` per `compile_typed_object_literal`. Treat the
+            // same way for homogeneous-object-literal arrays.
+            Expr::StructLiteral { .. }
+            | Expr::Object(..) => {
+                NativeKind::Ptr(shape_value::HeapKind::TypedObject)
+            }
             // Non-literal or unsupported literal -- can't infer from literals alone.
             _ => return None,
         };
