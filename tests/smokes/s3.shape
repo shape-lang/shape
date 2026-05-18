@@ -1,0 +1,5 @@
+trait HasX { method x_str() -> string; }
+type Foo { v: int }
+impl HasX for Foo { method x_str() -> string { "x" } }
+let f = Foo { v: 1 }
+print(f.x_str())

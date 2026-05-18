@@ -1,0 +1,4 @@
+trait T { fn name(&self) -> String }
+impl T for X { fn name(&self) -> String { "x" } }
+let t: dyn T = box(X{})
+print(t.name())

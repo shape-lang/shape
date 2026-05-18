@@ -1,0 +1,5 @@
+trait HasX { method x_str() -> string; }
+type Bar { v: int }
+impl HasX for Bar { method x_str() -> string { "x" } }
+let arr: Array<dyn HasX> = [Bar { v: 1 }, Bar { v: 2 }]
+print(arr[0].x_str())
