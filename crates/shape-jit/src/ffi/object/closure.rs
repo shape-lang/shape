@@ -178,6 +178,116 @@ pub unsafe extern "C" fn jit_finalize_heap_closure(
 }
 
 // ============================================================================
+// Per-NativeKind::Ptr(HeapKind::Closure) kinded retain / release
+// ============================================================================
+//
+// W15.2-LANG-4 jit-filter-predicate close (2026-05-18). The closure
+// callee slot's strict-typed carrier is `Arc::into_raw(Arc<HeapValue::
+// ClosureRaw>) as u64` per `jit_finalize_heap_closure` above and per
+// ADR-006 §2.7.11 / Q12. Refcount discipline mirrors the VM-side
+// `clone_with_kind` / `drop_with_kind` `HeapKind::Closure` arms in
+// `crates/shape-vm/src/executor/vm_impl/stack.rs:351 / :697` —
+// `Arc::increment_strong_count::<HeapValue>` retain,
+// `Arc::decrement_strong_count::<HeapValue>` release.
+//
+// The legacy `jit_arc_retain` / `jit_arc_release` operate on the W11
+// `UnifiedValue<T>` HeapHeader refcount at offset 4, which would
+// scribble on the inner `HeapValue` payload of an
+// `Arc::into_raw(Arc<HeapValue>)` carrier (whose refcount lives at
+// offset -16 per Rust Arc contract). Same defection-shape Round 7A's
+// `arc_result_retain` / `arc_option_retain` resolved at the
+// Result/Option Arc-carrier site, and Round 12 T2/T3's
+// `arc_string_retain` resolved at the String Arc-carrier site.
+
+/// Retain (clone) an `Arc<HeapValue>` strong-count share for a
+/// `NativeKind::Ptr(HeapKind::Closure)` slot. Bumps the standard Rust
+/// Arc refcount at offset -16 of the `Arc::into_raw` pointer.
+///
+/// SAFETY: `bits` must be `Arc::into_raw(Arc<HeapValue>) as u64` whose
+/// payload is the `HeapValue::ClosureRaw(OwnedClosureBlock)` variant
+/// (the `jit_finalize_heap_closure` return shape and the runtime-tier
+/// `KindedSlot { kind: Ptr(HeapKind::Closure), .. }` carrier). Null
+/// (raw 0u64) is silently no-op'd (mirror of the `String` / `Result` /
+/// `Option` Arc-carrier null-bits safety convention).
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_arc_closure_retain(bits: u64) {
+    use shape_value::heap_value::HeapValue;
+    use std::sync::Arc;
+
+    if bits == 0 {
+        return;
+    }
+    // W15.2-LANG-4 dual-carrier dispatch (2026-05-18). The
+    // `NativeKind::Ptr(HeapKind::Closure)` slot's bit-shape is dual at
+    // the JIT carrier tier per the §2.7.5 closure-zero-captures
+    // optimization paths in the bytecode/JIT closure emit:
+    //
+    //   (a) `Arc::into_raw(Arc<HeapValue::ClosureRaw(block)>)` — the
+    //       canonical §2.7.11/Q12 heap-closure shape returned by
+    //       `jit_finalize_heap_closure` (escaping closure with or
+    //       without captures via `emit_heap_closure`).
+    //
+    //   (b) `box_function(fn_id)` — the JIT-internal NaN-box
+    //       function-ref shape emitted when the closure compiler
+    //       optimizes a no-capture, non-escaping closure to a bare
+    //       function reference. Tag bits in the high half of the u64
+    //       mark this shape per `value_ffi.rs::TAG_FUNCTION_BITS`.
+    //
+    // The slot's declared type is `(args) -> ret` / `Function(_)` per
+    // `concrete_type_from_annotation`; both runtime shapes share the
+    // same semantic type. Refcount discipline differs: (a) bumps the
+    // `Arc<HeapValue>` strong count at offset -16; (b) is a no-op (a
+    // bare function reference has no heap state). Mirror of the
+    // §2.7.11/Q12 `jit_call_value` dispatch shell which already
+    // discriminates on the same bit-shape predicate before any deref.
+    if crate::ffi::value_ffi::is_inline_function(bits) {
+        // No-op: bare function reference has no heap state to retain.
+        return;
+    }
+    // SAFETY: per the §2.7.11/Q12 Closure carrier contract the
+    // remaining bits shape is `Arc::into_raw(Arc<HeapValue>) as u64`
+    // (post-`jit_finalize_heap_closure`); `Arc::increment_strong_count
+    // ::<HeapValue>` operates on the Arc control block at offset -16
+    // — identical to the runtime-tier `HeapKind::Closure` arm in
+    // `executor/vm_impl/stack.rs:352`.
+    unsafe {
+        Arc::increment_strong_count(bits as *const HeapValue);
+    }
+}
+
+/// Release an `Arc<HeapValue>` strong-count share for a
+/// `NativeKind::Ptr(HeapKind::Closure)` slot. Mirror of
+/// `jit_arc_closure_retain` — uses
+/// `Arc::decrement_strong_count::<HeapValue>` per Rust Arc contract.
+/// Reaching refcount zero runs `HeapValue::Drop` (which dispatches the
+/// `ClosureRaw` arm and retires the `OwnedClosureBlock`'s typed-closure
+/// header refcount via the block's own `Drop`).
+///
+/// SAFETY: same as `jit_arc_closure_retain`. Null is silently no-op'd.
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_arc_closure_release(bits: u64) {
+    use shape_value::heap_value::HeapValue;
+    use std::sync::Arc;
+
+    if bits == 0 {
+        return;
+    }
+    // W15.2-LANG-4 dual-carrier dispatch (2026-05-18). Mirror of
+    // `jit_arc_closure_retain` — see that fn's docstring for the
+    // dual-shape (Arc<HeapValue> vs `box_function(fn_id)` NaN-box)
+    // rationale. Bare function reference has no heap state; only the
+    // Arc-shape requires decrement.
+    if crate::ffi::value_ffi::is_inline_function(bits) {
+        return;
+    }
+    // SAFETY: see fn docs. Mirror of `executor/vm_impl/stack.rs:697`
+    // `HeapKind::Closure` arm in `drop_with_kind`.
+    unsafe {
+        Arc::decrement_strong_count(bits as *const HeapValue);
+    }
+}
+
+// ============================================================================
 // Track A.1D: OwnedMutable capture cell allocator
 // ============================================================================
 

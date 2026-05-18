@@ -489,6 +489,68 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
                     );
                     return TAG_NULL;
                 }
+                // W15.2-LANG-4 jit-filter-predicate close (2026-05-18).
+                // Function-typed parameter slots (e.g. `apply(p: (int)=>bool,
+                // ...)`'s `p`) are stamped `Ptr(HeapKind::Closure)` per
+                // the declared `ConcreteType::Function` mapping in
+                // `native_kind_from_concrete_type`. The producing call
+                // signature `apply(pred, ...)` may deliver either runtime
+                // carrier shape per the closure-zero-captures
+                // optimization in the bytecode compiler:
+                //
+                //   (a) `Arc::into_raw(Arc<HeapValue::ClosureRaw(block)>)`
+                //       — the §2.7.11/Q12 canonical heap-closure carrier
+                //       (escaping closure with captures OR escaping
+                //       closure without captures routed through
+                //       `emit_heap_closure` + `jit_finalize_heap_closure`).
+                //
+                //   (b) `box_function(fn_id)` — the §2.7.11 NaN-box
+                //       function-ref carrier (the bytecode compiler can
+                //       emit `Operand::Function(fid)` for a `let pred =
+                //       |x| x > 24` shape where `x > 24` has no captures
+                //       AND the binding storage class permits the
+                //       fn-ref-as-callable optimization).
+                //
+                // The carrier shape is determined at producing-site
+                // codegen time but the declared-type-based kind
+                // classification (`ConcreteType::Function` →
+                // `Ptr(HeapKind::Closure)`) can't statically project the
+                // carrier — the kind is the slot's *semantic* type, not
+                // the runtime carrier discriminator. Dispatch on the
+                // bit-shape predicate before falling through to the
+                // `Arc::from_raw` deref to avoid UB on the NaN-box
+                // carrier (which would deref random memory).
+                if is_inline_function(callee_bits) {
+                    function_id = unbox_function_id(callee_bits);
+                    // No captures — bare function ref path.
+                    let args: Vec<u64> = arg_pairs.iter().map(|(b, _)| *b).collect();
+                    if !ctx_ref.function_table.is_null()
+                        && (function_id as usize) < ctx_ref.function_table_len
+                    {
+                        let raw_fn_ptr =
+                            *(ctx_ref.function_table as *const *const u8)
+                                .add(function_id as usize);
+                        if !raw_fn_ptr.is_null() {
+                            ctx_ref.stack_ptr = 0;
+                            let _signal = call_jit_fn_with_args(raw_fn_ptr, ctx, &args);
+                            if ctx_ref.stack_ptr > 0 {
+                                ctx_ref.stack_ptr -= 1;
+                                let ret_bits = ctx_ref.stack[ctx_ref.stack_ptr];
+                                ctx_ref.stack_kinds[ctx_ref.stack_ptr] =
+                                    stack_kind_code::SENTINEL;
+                                return ret_bits;
+                            }
+                            return TAG_NULL;
+                        }
+                    }
+                    // Fall through to trampoline VM for the bare-fn case.
+                    return dispatch_call_via_trampoline_vm(
+                        function_id as u32,
+                        None,
+                        &args,
+                        ctx as *const JITContext,
+                    );
+                }
                 // Borrow the `Arc<HeapValue>` (use `from_raw` + `into_raw`
                 // to avoid taking the share — the share stays in the
                 // stack slot per §2.7.11 / Q12 the dispatch shell borrow
