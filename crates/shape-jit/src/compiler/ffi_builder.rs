@@ -344,6 +344,16 @@ impl JITCompiler {
             arc_string_retain: r!("jit_arc_string_retain"),
             arc_string_release: r!("jit_arc_string_release"),
 
+            // W15.2-LANG-4 jit-filter-predicate close (2026-05-18).
+            // ADR-006 §2.7.11/Q12 `Arc<HeapValue::ClosureRaw>` strict-
+            // typed closure carrier retain/release. Bodies in
+            // `ffi/object/closure.rs`. Refcount discipline at slots
+            // whose `NativeKind` is `Ptr(HeapKind::Closure)` dispatches
+            // here per the `ownership::retain_func_for_place` /
+            // `release_func_for_place` Closure arm.
+            arc_closure_retain: r!("jit_arc_closure_retain"),
+            arc_closure_release: r!("jit_arc_closure_release"),
+
             // v2 typed HashMap<string, ...>
             //
             // SURFACE (ADR-006 §2.7.14 Q15 / W11-jit-carrier-conversion):

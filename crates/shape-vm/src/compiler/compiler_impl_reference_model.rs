@@ -1741,15 +1741,65 @@ impl BytecodeCompiler {
                         Some(ct)
                     }
                 };
-                per_fn.push(
+                let mut concrete_types =
                     crate::compiler::helpers::infer_top_level_concrete_types_from_mir_with_resolvers(
                         &mir_data.mir,
                         Some(&callee_returns),
                         Some(&method_returns),
                         Some(&monomorph_method_returns_per_fn),
                         Some(&value_call_returns_per_fn),
-                    ),
-                );
+                    );
+                // W15.2-LANG-4 jit-filter-predicate fix (2026-05-18). Seed
+                // parameter slots from the function definition's parameter
+                // type annotations. ADR-006 §2.7.5 producer-side
+                // classification — the parameter's declared type IS the
+                // proof source for the slot's ConcreteType. Without this
+                // pass parameter slots stay `ConcreteType::Void`, the JIT
+                // side's `infer_slot_kinds_with_concrete` projects `None`,
+                // and `operand_slot_kind_or_carrier` falls back to the
+                // §2.7.5 carrier `UInt64`. For closure-typed parameters
+                // (e.g. `Vec.filter::i64`'s `predicate: (int) -> bool`)
+                // that fallback drives `jit_call_value` into the UInt64
+                // arm where `is_inline_function` / `is_heap_kind(_,
+                // HK_CLOSURE)` both fail on the raw-Arc
+                // `HeapValue::ClosureRaw` callee bits, surfacing the
+                // §2.7.5 `callee_bits stamped UInt64 but is neither
+                // inline function nor unified-heap HK_CLOSURE` diagnostic
+                // and returning TAG_NULL — visible in the wild as
+                // `samples.filter(|v| v > threshold)` returning the
+                // unfiltered receiver under JIT (book-truth
+                // `getting-started/first-query.mdx:41` snippet).
+                //
+                // Only seed slots whose current classification is `Void`
+                // (the §2.7.5.1 "no kind proven" placeholder); the
+                // MIR-walk inference's classifications dominate when both
+                // sources are present.
+                if let Some(def) = self.function_defs.get(&func.name) {
+                    for (i, &param_slot) in mir_data.mir.param_slots.iter().enumerate() {
+                        let idx = param_slot.0 as usize;
+                        if idx >= concrete_types.len() {
+                            continue;
+                        }
+                        if !matches!(
+                            concrete_types[idx],
+                            shape_value::v2::ConcreteType::Void
+                        ) {
+                            continue;
+                        }
+                        let Some(param) = def.params.get(i) else {
+                            continue;
+                        };
+                        let Some(ref ann) = param.type_annotation else {
+                            continue;
+                        };
+                        if let Some(ct) =
+                            crate::compiler::v2_map_emission::concrete_type_from_annotation(ann)
+                        {
+                            concrete_types[idx] = ct;
+                        }
+                    }
+                }
+                per_fn.push(concrete_types);
             } else {
                 per_fn.push(Vec::new());
             }

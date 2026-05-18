@@ -413,6 +413,21 @@ pub fn concrete_type_from_annotation(annotation: &TypeAnnotation) -> Option<Conc
             }
             _ => None,
         },
+        // W15.2-LANG-4 jit-filter-predicate fix (2026-05-18). Function
+        // and Closure parameters resolve to the opaque
+        // `ConcreteType::Function(FunctionTypeId(0))` shape, mirroring
+        // the convention used by `resolve_call_site_type_args*` for
+        // closure-shaped argument types
+        // (`monomorphization/type_resolution.rs:1758/1788`). The JIT-side
+        // `native_kind_from_concrete_type` maps this to
+        // `Ptr(HeapKind::Closure)` per ADR-006 §2.7.11 / Q12 closure-
+        // callee carrier kind; downstream `jit_call_value`'s closure
+        // dispatch arm consumes the raw-Arc
+        // `Arc<HeapValue::ClosureRaw>` callee bits without falling
+        // through to the UInt64 carrier-kind path.
+        TypeAnnotation::Function { .. } => Some(ConcreteType::Function(
+            shape_value::v2::concrete_type::FunctionTypeId(0),
+        )),
         _ => None,
     }
 }

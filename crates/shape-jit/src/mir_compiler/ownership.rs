@@ -287,6 +287,15 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             // `arc_retain` would write a `fetch_add` at offset +4 — inside
             // the `String` payload, scribbling on `ptr/cap/len`.
             Some(NativeKind::String) => self.ffi.arc_string_retain,
+            // W15.2-LANG-4 jit-filter-predicate close (2026-05-18).
+            // ADR-006 §2.7.11/Q12 `Ptr(HeapKind::Closure)` slots carry
+            // `Arc::into_raw(Arc<HeapValue>) as u64` per
+            // `jit_finalize_heap_closure`; retain dispatch goes through
+            // the typed-Arc-shape `jit_arc_closure_retain`
+            // (`Arc::increment_strong_count::<HeapValue>`). The legacy
+            // `arc_retain` would write a `fetch_add` at offset +4 of
+            // the HeapValue payload — corrupting the discriminant.
+            Some(NativeKind::Ptr(HeapKind::Closure)) => self.ffi.arc_closure_retain,
             _ => self.ffi.arc_retain,
         }
     }
@@ -313,6 +322,9 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             // W12-jit-string-carrier-unification: mirror of the
             // `retain_func_for_place` String arm.
             Some(NativeKind::String) => self.ffi.arc_string_release,
+            // W15.2-LANG-4 jit-filter-predicate close (2026-05-18).
+            // Mirror of the `Ptr(HeapKind::Closure)` retain arm above.
+            Some(NativeKind::Ptr(HeapKind::Closure)) => self.ffi.arc_closure_release,
             _ => self.ffi.arc_release,
         }
     }

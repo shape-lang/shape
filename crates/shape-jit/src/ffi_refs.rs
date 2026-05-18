@@ -434,6 +434,22 @@ pub struct FFIFuncRefs {
     pub(crate) arc_string_retain: FuncRef,
     pub(crate) arc_string_release: FuncRef,
 
+    // ADR-006 §2.7.5 / §2.7.11 / Q12 — `Arc<HeapValue::ClosureRaw>`
+    // strict-typed closure carrier retain/release (W15.2-LANG-4
+    // jit-filter-predicate close, 2026-05-18). The §2.7.11/Q12
+    // `NativeKind::Ptr(HeapKind::Closure)` slot carries
+    // `Arc::into_raw(Arc<HeapValue>) as u64` per `jit_finalize_heap_closure`;
+    // refcount at offset -16 per the standard Rust Arc layout. The
+    // legacy `arc_retain` / `arc_release` (UnifiedValue<T> HeapHeader
+    // at offset 4) would scribble on the inner `HeapValue` payload's
+    // discriminant + variant data.
+    //
+    // Bodies in `ffi/object/closure.rs::jit_arc_closure_retain` /
+    // `_release`. Mirror of Round 12 T2/T3's `arc_string_retain` /
+    // `_release` and Round 7A's `arc_result_retain` / `_release` pairs.
+    pub(crate) arc_closure_retain: FuncRef,
+    pub(crate) arc_closure_release: FuncRef,
+
     // v2 typed HashMap<string, ...> access.
     //
     // SURFACE (ADR-006 §2.7.14 Q15 / W11-jit-carrier-conversion sub-cluster):
