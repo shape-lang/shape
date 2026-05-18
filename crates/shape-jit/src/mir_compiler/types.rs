@@ -1277,6 +1277,12 @@ fn infer_rvalue_kind_with_projections(
         // SwitchBool operand classification) see the same Bool stamp
         // whether or not the JIT reaches codegen for the body. W15.2-LANG-5.
         Rvalue::TypePatternTest { .. } => Some(NativeKind::Bool),
+        // EnumDiscriminantTest emits a native Bool — kind is Bool by
+        // construction (mirror of the TypePatternTest arm above). The JIT
+        // consumer surfaces-and-stops on this Rvalue today (preflight
+        // rejects it); the destination slot's kind is still well-defined
+        // per ADR-006 §2.7.5 producer-side classification. W15.2-LANG-1.
+        Rvalue::EnumDiscriminantTest { .. } => Some(NativeKind::Bool),
     }
 }
 

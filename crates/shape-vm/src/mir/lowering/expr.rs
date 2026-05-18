@@ -1577,7 +1577,11 @@ fn lower_match_pattern_condition_operand(
             );
             Some(Operand::Copy(Place::Local(matches_slot)))
         }
-        ast::Pattern::Constructor { variant, .. } => {
+        ast::Pattern::Constructor {
+            enum_name,
+            variant,
+            ..
+        } => {
             // W12-jit-result-option-trinity (Phase 3 cluster-0 Round 7A,
             // 2026-05-12). For `Ok(v)` / `Err(e)` / `Some(x)` / `None`
             // patterns (per ADR-006 §2.7.17 / Q18 — kinded
@@ -1609,10 +1613,45 @@ fn lower_match_pattern_condition_operand(
                 );
                 return Some(Operand::Copy(Place::Local(bool_slot)));
             }
-            // Non-trinity constructor (user-defined enum variant) — fall
-            // back to the legacy kind-blind operand. JIT codegen will
-            // surface-and-stop downstream until user-enum codegen lands.
-            Some(Operand::Copy(Place::Local(scrutinee_slot)))
+            // W15.2-LANG-1 (Phase 4b, 2026-05-18). Non-trinity
+            // constructor (user-defined enum variant — e.g. `Color::Red`).
+            // Pre-fix this arm returned `Some(Operand::Copy(Place::Local(
+            // scrutinee_slot)))` — the raw `Arc<TypedObjectStorage>`
+            // pointer bits — as the SwitchBool condition. The JIT
+            // consumer's generic I64-truthy path then evaluated the non-
+            // zero pointer non-deterministically (silently empty output
+            // for `match Color::Red { Color::Red => ..., Color::Green
+            // => ..., Color::Blue => ... }`, book snippet
+            // `enums.mdx:113`).
+            //
+            // Producer-side stamp-at-compile-time per ADR-006 §2.7.5:
+            // the (enum_name, variant_name) pair is captured verbatim
+            // into `Rvalue::EnumDiscriminantTest` so the consumer
+            // dispatches on a known pair (not on raw bits, not on a
+            // Bool-default fabrication). The JIT consumer's preflight
+            // rejects this Rvalue today, routing the program through
+            // the W12 fall-through to the bytecode interpreter (which
+            // compiles `Pattern::Constructor` for user-defined enums
+            // via the `compile_typed_enum_pattern_check` path in
+            // `compiler/patterns/checking.rs` — emits
+            // `GetFieldTyped(__variant, I64)` + `PushConst(variant_id)`
+            // + `EqInt`).
+            //
+            // Mirrors the LANG-5 `TypePatternTest` precedent
+            // (W15.2-LANG-5 close 2026-05-18).
+            let bool_slot = builder.alloc_temp(LocalTypeInfo::Copy);
+            builder.push_stmt(
+                StatementKind::Assign(
+                    Place::Local(bool_slot),
+                    Rvalue::EnumDiscriminantTest {
+                        operand: Operand::Copy(Place::Local(scrutinee_slot)),
+                        enum_name: enum_name.as_ref().map(|p| p.as_str().to_string()),
+                        variant_name: variant.clone(),
+                    },
+                ),
+                pattern_span,
+            );
+            Some(Operand::Copy(Place::Local(bool_slot)))
         }
         ast::Pattern::Array(_) | ast::Pattern::Object(_) => {
             Some(Operand::Copy(Place::Local(scrutinee_slot)))

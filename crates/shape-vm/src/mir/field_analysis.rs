@@ -181,7 +181,8 @@ fn collect_rvalue_field_reads(rvalue: &Rvalue, reads: &mut HashSet<FieldKey>) {
         }
         Rvalue::EnumTest { operand, .. }
         | Rvalue::EnumPayload { operand, .. }
-        | Rvalue::TypePatternTest { operand, .. } => {
+        | Rvalue::TypePatternTest { operand, .. }
+        | Rvalue::EnumDiscriminantTest { operand, .. } => {
             collect_operand_field_reads(operand, reads);
         }
     }

@@ -283,6 +283,62 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     type_annotation
                 ))
             }
+
+            Rvalue::EnumDiscriminantTest {
+                enum_name,
+                variant_name,
+                ..
+            } => {
+                // W15.2-LANG-1 (Phase 4b, 2026-05-18). The MIR producer
+                // emits `Rvalue::EnumDiscriminantTest` for every non-
+                // trinity (user-defined) `Pattern::Constructor` arm in a
+                // match expression (e.g. `match Color::Red { Color::Red
+                // => ..., Color::Green => ..., Color::Blue => ... }`,
+                // book snippet `enums.mdx:113`). The JIT consumer would
+                // need to resolve the (enum_name, variant_name) pair to
+                // the schema's `(schema_id, variant_id)` at the
+                // bytecode-compiler conduit (the MIR layer has no
+                // `type_tracker.schema_registry` access — see
+                // `mir/lowering/helpers.rs:130-150` comment block), then
+                // emit a typed-object discriminant read + EqInt sequence
+                // matching the bytecode-VM's `compile_typed_enum_pattern_
+                // check` shape (`compiler/patterns/checking.rs:344` —
+                // `GetFieldTyped(__variant, I64)` + `PushConst(variant_
+                // id)` + `EqInt`).
+                //
+                // Until that codegen lands, surface-and-stop. The JIT
+                // preflight at `mir_compiler::preflight` rejects this
+                // Rvalue at the program-level gate, so under normal
+                // dispatch the W12 fall-through at
+                // `crates/shape-jit/src/executor.rs::execute_program`
+                // routes the program to the bytecode interpreter (which
+                // compiles user-defined `Pattern::Constructor` via the
+                // typed-object discriminant path cited above). This arm
+                // remains as defense in depth: if a future caller invokes
+                // `compile_rvalue` without running preflight first, the
+                // surface-and-stop here preserves the §2.7.5 producer-
+                // site classification discipline rather than silently
+                // emitting a kind-blind Bool default (CLAUDE.md
+                // "Forbidden rationalizations" — "just a small fallback
+                // for this one edge case" refused on sight). Mirrors the
+                // LANG-5 `TypePatternTest` precedent immediately above.
+                Err(format!(
+                    "Route A surface-and-stop: NotImplemented(SURFACE) — \
+                     `Rvalue::EnumDiscriminantTest` codegen not yet wired \
+                     (enum: {:?}, variant: {:?}). W15.2-LANG-1 fall-\
+                     through to interpreter is the canonical path today; \
+                     preflight should have already rejected this MIR \
+                     before reaching `compile_rvalue`. Native codegen \
+                     lands as a follow-up: schema-registry conduit + \
+                     typed-object discriminant read (mirror of bytecode-\
+                     VM `compile_typed_enum_pattern_check` at \
+                     `compiler/patterns/checking.rs:344`). NOT a Bool-\
+                     default rationalization — the (enum_name, variant_\
+                     name) pair IS the producer-side classification (ADR-\
+                     006 §2.7.5 stamp-at-compile-time).",
+                    enum_name, variant_name
+                ))
+            }
         }
     }
 

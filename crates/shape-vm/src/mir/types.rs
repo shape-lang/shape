@@ -399,6 +399,49 @@ pub enum Rvalue {
         operand: Operand,
         type_annotation: TypeAnnotation,
     },
+    /// Test whether the scrutinee's enum discriminant matches a specific
+    /// user-defined `Pattern::Constructor` variant (e.g. `match c {
+    /// Color::Red => ..., Color::Green => ... }`). Result: native Bool
+    /// (`I8`).
+    ///
+    /// W15.2-LANG-1 (Phase 4b, 2026-05-18). Pre-fix the MIR lowering of
+    /// `Pattern::Constructor` for non-trinity (non-`Ok`/`Err`/`Some`/`None`)
+    /// variants returned `Some(Operand::Copy(Place::Local(scrutinee_slot)))`
+    /// — the raw `Arc<TypedObjectStorage>` pointer bits — as the
+    /// `SwitchBool` condition. The JIT consumer's generic I64-truthy
+    /// check at `terminators.rs::SwitchBool` then evaluated the non-zero
+    /// pointer as `true` for the first arm OR fell to false-branch when
+    /// the multi-arm dispatch chain looped past the first arm, producing
+    /// silent-empty-output for the user's `match Color::Red { Color::Red
+    /// => print("red"), ... }` case (book snippet `enums.mdx:113`).
+    ///
+    /// Producer-side classification per ADR-006 §2.7.5 stamp-at-compile-
+    /// time: the enum name + variant name are carried verbatim from
+    /// `ast::Pattern::Constructor` so the consumer dispatches on a known
+    /// (`enum_name`, `variant_name`) pair, NEVER on raw scrutinee bits.
+    ///
+    /// Consumer status:
+    /// - JIT MIR preflight (`shape-jit::mir_compiler::preflight`) REJECTS
+    ///   on this Rvalue → W12 fall-through routes the program to the
+    ///   bytecode interpreter, which compiles the same scrutinee via the
+    ///   `compile_typed_enum_pattern_check` path in
+    ///   `compiler/patterns/checking.rs` (emits `GetFieldTyped(__variant,
+    ///   I64)` + `PushConst(expected_variant_id)` + `EqInt`).
+    /// - VM never consumes MIR; `compile_match_expr` in
+    ///   `compiler/expressions/advanced.rs` calls `compile_pattern_check`
+    ///   directly on the AST and emits the typed-object discriminant
+    ///   check itself.
+    ///
+    /// The (enum_name, variant_name) pair IS the producer-side
+    /// classification — neither a Bool-default fabrication nor any of
+    /// the deleted dispatch families enumerated under CLAUDE.md
+    /// Forbidden Patterns. Mirrors the LANG-5 `TypePatternTest`
+    /// precedent (W15.2-LANG-5 close 2026-05-18) for `Pattern::Typed`.
+    EnumDiscriminantTest {
+        operand: Operand,
+        enum_name: Option<String>,
+        variant_name: String,
+    },
 }
 
 /// Binary operations in MIR.

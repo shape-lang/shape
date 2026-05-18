@@ -151,9 +151,12 @@ fn classify_rvalue(
         // payload per §2.7.17 receiver-recovery soundness; also NewlyOwned.
         // TypePatternTest produces a fresh native Bool — NewlyOwned by
         // construction (W15.2-LANG-5).
+        // EnumDiscriminantTest produces a fresh native Bool — NewlyOwned by
+        // construction (W15.2-LANG-1).
         Rvalue::EnumTest { .. }
         | Rvalue::EnumPayload { .. }
-        | Rvalue::TypePatternTest { .. } => ReturnOwnershipMode::NewlyOwned,
+        | Rvalue::TypePatternTest { .. }
+        | Rvalue::EnumDiscriminantTest { .. } => ReturnOwnershipMode::NewlyOwned,
     }
 }
 
@@ -308,9 +311,11 @@ fn classify_defining_rvalue(
         Rvalue::BinaryOp(_, _, _) | Rvalue::UnaryOp(_, _) => ReturnOwnershipMode::NewlyOwned,
         // EnumTest emits a Bool; EnumPayload emits an owned-share payload.
         // TypePatternTest emits a fresh native Bool (W15.2-LANG-5).
+        // EnumDiscriminantTest emits a fresh native Bool (W15.2-LANG-1).
         Rvalue::EnumTest { .. }
         | Rvalue::EnumPayload { .. }
-        | Rvalue::TypePatternTest { .. } => ReturnOwnershipMode::NewlyOwned,
+        | Rvalue::TypePatternTest { .. }
+        | Rvalue::EnumDiscriminantTest { .. } => ReturnOwnershipMode::NewlyOwned,
         Rvalue::Borrow(kind, p) => classify_borrow_rvalue(*kind, p, mir),
         Rvalue::Use(op) => match op {
             Operand::Constant(c) => classify_constant(c),
