@@ -49,7 +49,7 @@ discipline catches *I/O* lies (a function tagged as pure but calling
 plane. This is the largest semantic-correctness gap in the current
 specification.
 
-The framing inversion is the AI-native angle. The 1970s–2010s critique of
+The framing inversion is the LLM-author angle. The 1970s–2010s critique of
 contract systems (Eiffel, Spec#, Code Contracts, Idris1 `Verified*`) is that
 **humans don't read the law tags**. Verified-typeclass hierarchies in Idris1
 were so unergonomic that the entire `contrib/Interfaces/Verified*` module set

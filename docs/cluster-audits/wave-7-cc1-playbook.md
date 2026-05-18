@@ -523,7 +523,7 @@ Explicit out-of-scope list:
 - **IteratorState rebuild** — **W9 / IT.**
 - **DataTable methods** — **W9 / DT.**
 - **Trait-object dispatch** — **W9 / TR.**
-- **comptime / @ai paths** — **W9 / CT.**
+- **comptime paths** — **W9 / CT.**
 - **Async / transport / remote** — **W9 / AS.**
 - **shape-jit consumer-side migration** (213 errors) — **W10 by design.**
 - **Test stubs** (~131) — **W11.**
