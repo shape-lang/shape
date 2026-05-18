@@ -1867,6 +1867,82 @@ impl BytecodeCompiler {
             self.last_expr_schema = None;
             self.last_expr_type_info = None;
             self.last_expr_numeric_type = None;
+            // Phase 4b Round 3 Surface-1A LANG-W13-3-iife-closure-capture:
+            // IIFE `(|y| body)(args)` parses as
+            // `MethodCall { method: "__call__", receiver: FunctionExpr {..} }`
+            // (parser site: `crates/shape-ast/src/parser/expressions/primary.rs:167`).
+            // The closure's return type is statically inferable via
+            // `infer_closure_body_return_type_name`, but until this stamp the
+            // post-`CallValue` `last_expr_*` were cleared unconditionally,
+            // so `let r = (|y| y + base)(x)` recorded `r` as Unknown and
+            // downstream binops failed strict-typing as `unknown + int`. Per
+            // ADR-006 §2.7.5 producer-side stamp-at-compile-time: the
+            // closure-body inference IS the proof — no runtime decode, no
+            // fabricated Bool-default. Mirrors the by-name `let f = |...|`
+            // tracker hop above (line 593) and the `update_callable_binding_
+            // from_expr` recording at the `let f = <FunctionExpr>` site
+            // (`helpers_reference.rs:685`).
+            if let Expr::FunctionExpr {
+                params,
+                body,
+                return_type,
+                ..
+            } = receiver
+            {
+                // Seed caller-context arg type names from the IIFE's
+                // argument expressions. The inference engine uses these
+                // to type unannotated closure params at the call site
+                // (cluster-2-cw-IB-class-b pattern). Per ADR-006 §2.7.5
+                // stamp-at-compile-time: the call-site arg type IS the
+                // proof of the closure param's type at this invocation.
+                let caller_arg_type_names: Vec<Option<String>> = args
+                    .iter()
+                    .map(|arg| {
+                        self.infer_expr_type(arg).ok().and_then(|ty| {
+                            let display = crate::compiler::expressions::closures::type_display_name_for_closure_inference(&ty);
+                            if BytecodeCompiler::tracker_type_name_is_primitive(&display) {
+                                Some(display)
+                            } else {
+                                None
+                            }
+                        })
+                    })
+                    .collect();
+                if let Some(rt_name) =
+                    crate::compiler::expressions::closures::infer_closure_body_return_type_name_with_caller_context(
+                        self,
+                        params,
+                        body,
+                        return_type.as_ref(),
+                        &[],
+                        &caller_arg_type_names,
+                    )
+                {
+                    use crate::type_tracking::NumericType;
+                    match rt_name.as_str() {
+                        "int" => self.last_expr_numeric_type = Some(NumericType::Int),
+                        "number" => self.last_expr_numeric_type = Some(NumericType::Number),
+                        "decimal" => self.last_expr_numeric_type = Some(NumericType::Decimal),
+                        other
+                            if shape_runtime::type_system::BuiltinTypes::is_integer_type_name(
+                                other,
+                            ) =>
+                        {
+                            self.last_expr_type_info =
+                                Some(crate::type_tracking::VariableTypeInfo::named(
+                                    other.to_string(),
+                                ));
+                        }
+                        "string" | "bool" | "char" => {
+                            self.last_expr_type_info = Some(
+                                crate::type_tracking::VariableTypeInfo::named(rt_name.clone()),
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+                let _ = call_site_span; // reserved for JIT-conduit extension
+            }
             if let Some(return_reference_summary) = return_reference_summary {
                 self.set_last_expr_reference_result(return_reference_summary.mode, true);
             } else {
