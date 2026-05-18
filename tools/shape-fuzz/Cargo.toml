@@ -1,0 +1,18 @@
+[package]
+name = "shape-fuzz"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "shape-fuzz"
+path = "src/main.rs"
+
+[lib]
+name = "shape_fuzz"
+path = "src/lib.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }

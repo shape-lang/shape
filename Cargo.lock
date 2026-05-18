@@ -5443,6 +5443,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "shape-fuzz"
+version = "0.2.0"
+dependencies = [
+ "clap",
+]
+
+[[package]]
 name = "shape-gc"
 version = "0.2.0"
 dependencies = [
