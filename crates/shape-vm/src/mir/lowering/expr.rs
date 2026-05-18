@@ -369,51 +369,106 @@ fn lower_list_comprehension_expr(
 ) {
     builder.push_scope();
     for clause in &comp.clauses {
-        // W11-jit-new-array (2026-05-17): mirror `lower_for_expr`'s
-        // `Expr::Range { start: Some, end: Some }` special-case. The
-        // bytecode compiler's `compile_comprehension_clauses` runs
-        // `try_begin_range_counter_loop` first (`compiler/loops.rs`),
-        // emitting a counter-incremented loop directly without
-        // constructing a `RangeData` heap value. The MIR mirror was
-        // missing — `lower_expr_to_temp(builder, &clause.iterable)`
-        // unconditionally fell into the generic `Expr::Range` arm
-        // (`expr.rs:2033`), which lowers `0..N` as
-        // `Assign(temp, Aggregate(start, end))` whose destination temp
-        // has no `ConcreteType` source. The JIT-MIR consumer at
-        // `mir_compiler/statements.rs:24-65` then surface-and-stops
-        // on the unstamped Aggregate (Route A `W11-jit-new-array`).
+        // W11-followup-comprehension-kindtracker (2026-05-18):
+        // mirror `lower_for_expr`'s `Expr::Range { start: Some, end: Some }`
+        // counter-binding shape for the comprehension iteration variable.
+        // The bytecode compiler's `compile_comprehension_clauses` runs
+        // `try_begin_range_counter_loop` (`compiler/loops.rs:34`), which
+        // declares the user-visible loop variable AS the counter slot
+        // and initializes it from `compile_expr(start_expr)` (an int
+        // literal in the common case). The MIR side previously evaluated
+        // start/end into discarded temps (W11-jit-new-array's narrow
+        // Range carrier deletion, 836a77f5) and then bound the
+        // iteration variable via `lower_destructure_bindings_from_place`
+        // against an `assign_none` element slot — that erased the
+        // iteration variable's `NativeKind` (None constant → kind None)
+        // and downstream `x * x` in the comprehension body reached the
+        // JIT with kind-untyped operands, surfacing at
+        // `compile_binop_dynamic_arith` (`crates/shape-jit/src/mir_compiler/
+        // rvalues.rs:757`).
         //
-        // Lower the start/end sub-expressions to temps without the
-        // wrapping `Aggregate`: the borrow tracker observes the
-        // sub-expression reads through the normal `lower_expr_to_temp`
-        // path, and the comprehension's element / filter sub-expressions
-        // are lowered exactly as before. The `RangeData` value itself
-        // is never observed (the bytecode loops by counter); skipping
-        // the Aggregate matches the bytecode-side semantic per ADR-006
-        // §2.7.5 stamp-at-compile-time (the MIR shape no longer
-        // produces an unclassifiable carrier).
-        if let Expr::Range {
-            start: Some(start_expr),
-            end: Some(end_expr),
-            ..
-        } = clause.iterable.as_ref()
-        {
-            let _ = lower_expr_to_temp(builder, start_expr);
+        // The new shape (when the pattern is a simple identifier and the
+        // iterable is a closed `Expr::Range`): allocate the iteration
+        // variable as a named local and seed it via `Use(Copy(start_slot))`.
+        // The JIT's `infer_slot_kinds_with_concrete`
+        // (`crates/shape-jit/src/mir_compiler/types.rs:289`) forward
+        // pass already propagates `Int64` from the start expression's
+        // literal-stamped slot through the `Use(Copy(_))` chain to the
+        // iteration variable, satisfying ADR-006 §2.7.5 stamp-at-
+        // compile-time for the `x * x` operand binop. No runtime tag
+        // dispatch is reintroduced; the kind source IS the start
+        // expression's literal.
+        //
+        // For non-identifier patterns (tuple / object destructure of a
+        // range — currently unreachable since ranges yield scalars, but
+        // future-proofing) or non-Range iterables, fall through to the
+        // existing path: W11-jit-new-array's Range carrier deletion is
+        // preserved (no `Aggregate` wrapper) and the broader iterable-
+        // element-kind threading remains a follow-up scope (generic
+        // `Iterable<T>` element kind not statically known at the MIR
+        // emission site without a deeper signature classifier).
+        let iv_counter_simple_range = match (
+            clause.pattern.as_identifier(),
+            clause.iterable.as_ref(),
+        ) {
+            (
+                Some(iv_name),
+                Expr::Range {
+                    start: Some(start_expr),
+                    end: Some(end_expr),
+                    ..
+                },
+            ) => Some((iv_name.to_string(), start_expr, end_expr)),
+            _ => None,
+        };
+
+        if let Some((iv_name, start_expr, end_expr)) = iv_counter_simple_range {
+            let start_slot = lower_expr_to_temp(builder, start_expr);
             let _ = lower_expr_to_temp(builder, end_expr);
+            // Allocate the user-visible iteration variable as a named
+            // local (mirror `lower_for_expr` counter-binding) and seed
+            // its value from `start_slot`. The forward kind-inference
+            // pass propagates `Int64` (from the int literal) through
+            // this `Use(Copy(start_slot))` write.
+            let iv_slot = builder.alloc_local(iv_name, LocalTypeInfo::Copy);
+            assign_copy_from_slot(builder, iv_slot, start_slot, clause.iterable.span());
+            if let Some(filter) = &clause.filter {
+                let _ = lower_expr_to_temp(builder, filter);
+            }
         } else {
-            let _ = lower_expr_to_temp(builder, &clause.iterable);
-        }
-        let element_slot = builder.alloc_temp(LocalTypeInfo::Unknown);
-        assign_none(builder, element_slot, clause.iterable.span());
-        super::stmt::lower_destructure_bindings_from_place(
-            builder,
-            &clause.pattern,
-            &Place::Local(element_slot),
-            clause.iterable.span(),
-            None,
-        );
-        if let Some(filter) = &clause.filter {
-            let _ = lower_expr_to_temp(builder, filter);
+            // Fallback path — preserves W11-jit-new-array Range carrier
+            // deletion when the iterable is a closed range (no Aggregate
+            // wrapper) for borrow-tracker compatibility. For non-
+            // identifier patterns the iteration-variable kind is not
+            // threaded — comprehension body arith on the iteration
+            // variable will surface at `compile_binop_dynamic_arith`
+            // (the W11-followup-comprehension-kindtracker scope is
+            // bounded to the simple-identifier-on-closed-Range case;
+            // broader pattern / iterable shapes are out of scope per
+            // the cluster-1.5 W11-fup-B narrow charter).
+            if let Expr::Range {
+                start: Some(start_expr),
+                end: Some(end_expr),
+                ..
+            } = clause.iterable.as_ref()
+            {
+                let _ = lower_expr_to_temp(builder, start_expr);
+                let _ = lower_expr_to_temp(builder, end_expr);
+            } else {
+                let _ = lower_expr_to_temp(builder, &clause.iterable);
+            }
+            let element_slot = builder.alloc_temp(LocalTypeInfo::Unknown);
+            assign_none(builder, element_slot, clause.iterable.span());
+            super::stmt::lower_destructure_bindings_from_place(
+                builder,
+                &clause.pattern,
+                &Place::Local(element_slot),
+                clause.iterable.span(),
+                None,
+            );
+            if let Some(filter) = &clause.filter {
+                let _ = lower_expr_to_temp(builder, filter);
+            }
         }
     }
     let element_slot = lower_expr_to_temp(builder, &comp.element);
