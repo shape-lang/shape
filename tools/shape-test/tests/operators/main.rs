@@ -1,5 +1,6 @@
 mod arithmetic;
 mod comparison;
+mod edge_coverage;
 mod logical;
 mod special;
 mod stress_add_sub;

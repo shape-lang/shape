@@ -926,11 +926,19 @@ impl TypeInferenceEngine {
             // Annotated expression - infer the type of the target
             Expr::Annotated { target, .. } => self.infer_expr(target),
 
-            // Async let - spawns a task, the expression type is a future handle
-            Expr::AsyncLet(async_let, _) => {
-                self.infer_expr(&async_let.expr)?;
-                Ok(self.fresh_type_var())
-            }
+            // Async let - spawns a task and binds a future handle. Without a
+            // surface `Future<T>` type in the inference lattice, the binding's
+            // type unifies with the inner expression's type — `await x` then
+            // re-uses the same `infer_expr(inner)` shape and returns the
+            // inner kind cleanly. The sync-resolution + op_spawn_task
+            // non-callable path (async_ops/mod.rs::op_spawn_task) preserves
+            // the inner value's kind end-to-end at runtime, so the inference
+            // shape matches the runtime behavior. Without this, multi-binding
+            // patterns like `let va = await a; let vb = await b; print(va + vb)`
+            // surface "Cannot infer types for binary operation Add: operand
+            // types are unknown and unknown" because both va and vb were
+            // typed as fresh type vars.
+            Expr::AsyncLet(async_let, _) => self.infer_expr(&async_let.expr),
 
             // Async scope - cancellation boundary, type is the body's type
             Expr::AsyncScope(inner, _) => self.infer_expr(inner),

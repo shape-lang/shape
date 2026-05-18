@@ -992,6 +992,37 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     Ok(self.builder.ins().select(is_true, false_val, tag_true))
                 }
             }
+            // W14.2-A1 (Phase 4b, 2026-05-18): `BitNot` (`~x`) lowers to
+            // Cranelift `bnot` on native Int64 (or NaN-boxed `Int64` via
+            // the same instruction, since the bits are i64-shaped either
+            // way). Matches the bytecode VM's `BitNotInt` typed opcode at
+            // `arithmetic/mod.rs:229` which executes `(!a) as u64` on
+            // the popped i64 bits. Mirrors the W11-fup-A BinOp
+            // Pow/BitAnd/etc. JIT consumer pattern at line 564+ of this
+            // file. The `infer_rvalue_kind` arm at `types.rs` for
+            // `Rvalue::UnaryOp(UnOp::BitNot, _)` propagates the operand
+            // kind (Int64 in / Int64 out) so the producer-MIR §2.7.5
+            // stamp-at-compile-time discipline holds. Per Shape's
+            // strict-typing semantic at `opcode_defs.rs:1860-1873`,
+            // BitNot is `int`-only — float operands are a producer-side
+            // kind-tracker gap and surface honestly.
+            UnOp::BitNot => {
+                if val_type == types::I64 {
+                    Ok(self.builder.ins().bnot(val))
+                } else if val_type == types::I32 {
+                    Ok(self.builder.ins().bnot(val))
+                } else {
+                    Err(format!(
+                        "compile_unop: SURFACE — BitNot on {:?} operand has no \
+                         semantic in Shape (`int`-only per `BitNotInt` at \
+                         arithmetic/mod.rs:229). Reaching here means the §2.7.5 \
+                         producing-MIR kind-tracker stamped a non-Int64 kind where \
+                         Int64 was expected. Producer-site gap; surface per W10 \
+                         playbook §5.",
+                        val_type
+                    ))
+                }
+            }
         }
     }
 }
