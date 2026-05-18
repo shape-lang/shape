@@ -106,6 +106,71 @@ print(r)"#,
     .expect_output("30");
 }
 
+// Phase 4b Round 4 LANG-9-spin-1-identity-closure regression: closure
+// bodies that reduce to a bare `Expr::Identifier(param)` — i.e. an
+// identity-shaped closure like `|x| x` — must monomorphize the surrounding
+// `.map`/`.filter`/`.reduce` HOF the same way arithmetic-body closures
+// (`|x| x*2`) do. Pre-fix, F1 (inline), F1' (bound), and F1'' (block-body
+// identity) all hung indefinitely (exit 124) because
+// `infer_closure_body_return_type_name` was called WITHOUT caller-context
+// arg-type seeding from `resolve_with_closure_return_inference`. The
+// closure's bare-identifier body could not be classified
+// (`param_types["x"]` was never seeded from the caller-side substitution
+// of bindings into the callee's `f: (T) => U` annotation), so the
+// permissive closure-return-typed resolver bailed and the call fell back
+// to the generic `Vec.map` stub (entry_point=0), surfacing as a silent
+// hang.
+//
+// Per ADR-006 §2.7.5 stamp-at-compile-time, the producer-side proof is
+// the substituted callee-annotation: at `arr.map(|x|x)`, the receiver-
+// resolved binding `T = I64` substituted into `f: (T) => U`'s param list
+// yields the closure's expected param-type name `"int"`. Pass that as
+// `caller_arg_type_names` to
+// `infer_closure_body_return_type_name_with_caller_context`. No runtime
+// probe, no fabrication.
+#[test]
+fn inline_array_literal_map_identity_closure_sum() {
+    // F1 — inline receiver, identity closure
+    ShapeTest::new(r#"print([1,2,3,4,5].map(|x|x).sum())"#)
+        .expect_run_ok()
+        .expect_output("15");
+}
+
+#[test]
+fn bound_array_map_identity_closure_sum() {
+    // F1' — bound receiver, identity closure (LANG-9 close assertion
+    // that the bound form "works already" was empirically FALSE for
+    // identity-body closures; this pins the bound form too).
+    ShapeTest::new(
+        r#"let xs = [1,2,3,4,5]
+print(xs.map(|x|x).sum())"#,
+    )
+    .expect_run_ok()
+    .expect_output("15");
+}
+
+#[test]
+fn inline_array_literal_map_identity_block_body_sum() {
+    // F1'' — block-body identity closure `|x|{x}`. The body's terminal
+    // expression is still a bare `Expr::Identifier(param)` (wrapped in a
+    // `Block` with a single statement), so the same caller-context seed
+    // must flow through.
+    ShapeTest::new(r#"print([1,2,3,4,5].map(|x|{x}).sum())"#)
+        .expect_run_ok()
+        .expect_output("15");
+}
+
+#[test]
+fn array_filter_identity_predicate_workaround_remains() {
+    // Boundary check: arithmetic-body closure `|x|x*1` was the pre-fix
+    // working path — it must remain working post-fix. (Regression guard
+    // against the producer-side seed accidentally clobbering the
+    // pre-fix `param_types` resolution chain.)
+    ShapeTest::new(r#"print([1,2,3,4,5].map(|x|x*1).sum())"#)
+        .expect_run_ok()
+        .expect_output("15");
+}
+
 #[test]
 fn array_filter_evens() {
     ShapeTest::new(
