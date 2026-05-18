@@ -6982,9 +6982,6 @@ landing the corrected layout in one architectural decision.
 ### References
 
 - `docs/adr/006-value-and-memory-model.md` — full ADR.
-- `docs/adr/006-DRAFT-alternative-B.md` /
-  `006-DRAFT-alternative-C.md` — design alternatives that informed
-  the decision (preserved as historical context).
 - `docs/research/01-ownership-gc.md` /
   `02-layout-runtime.md` /
   `03-strings-arrays.md` — research base.

@@ -25,9 +25,7 @@ than patch the symptom, the supervisor paused all migration and ordered a
 top-down redesign of the value/memory/lifetime/GC/runtime model.
 
 Three parallel research surveys (`docs/research/01-ownership-gc.md`,
-`02-layout-runtime.md`, `03-strings-arrays.md`) and two design alternatives
-(`docs/adr/006-DRAFT-alternative-B.md`, `006-DRAFT-alternative-C.md`) were
-produced to inform this ADR.
+`02-layout-runtime.md`, `03-strings-arrays.md`) informed this ADR.
 
 This ADR is the architectural anchor for all subsequent runtime work. It
 supersedes the open clusters #1 / #5 / #6 / #7 that derived from ADR-005
@@ -6626,10 +6624,6 @@ Binding for Phase 2d onward.
 - `docs/research/01-ownership-gc.md`
 - `docs/research/02-layout-runtime.md`
 - `docs/research/03-strings-arrays.md`
-
-### Design alternatives
-- `docs/adr/006-DRAFT-alternative-B.md`
-- `docs/adr/006-DRAFT-alternative-C.md`
 
 ### Cluster audits
 - `docs/cluster-audits/cluster-1-type-schema.md` (now superseded by §1, §2 of this ADR)
