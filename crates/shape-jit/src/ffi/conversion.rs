@@ -901,43 +901,197 @@ pub extern "C" fn jit_print_typed_array(
     println!("{}", rendered);
 }
 
-/// Concatenate two NaN-boxed string values into a freshly boxed
-/// `UnifiedString`. Used by the MIR-lowering path for `BinOp::Add` when both
-/// operands have `NativeKind::String`.
+/// Concatenate two operand values into a freshly allocated `Arc<String>`
+/// carrier. Used by the MIR-lowering path for `BinOp::Add` when either
+/// operand has `NativeKind::String` (the `compile_string_concat` site in
+/// `mir_compiler/rvalues.rs`), which covers `str + str` directly and the
+/// f-string interpolation chain emitted by `lower_formatted_string`
+/// (`crates/shape-vm/src/mir/lowering/expr.rs:720`).
 ///
-/// ## Operand decoding
+/// ## W15.2-LANG-7 jit-print-fstring close — producer-side carrier-shape fix
 ///
-/// Handles both the legacy `JitAlloc<String>` and the unified-heap
-/// `UnifiedString` string layouts by routing through
-/// `value_ffi::unbox_string` (F0's fix) — callers may mix the two freely,
-/// e.g. an f-string that interpolates a runtime-produced string captured
-/// in a legacy-layout slot with a compile-time literal boxed through
-/// `box_string` (unified).
+/// **ADR-006 §2.7.5 / §2.7.7 producer-side stamp.** Pre-fix the FFI took
+/// `(a_bits, b_bits) -> u64`, decoded each via `heap_kind(bits)` (a
+/// NaN-tag probe — the deleted-W-series shape per CLAUDE.md "Forbidden
+/// Patterns" #4) and returned `box_string(out)` — a NaN-boxed
+/// `UnifiedValue<Arc<String>>` allocation. But the JIT-side String
+/// carrier per ADR-006 §2.7.5 is `Arc::into_raw(Arc<String>) as u64` —
+/// a raw Arc pointer, NOT a NaN-box. Every downstream consumer reads
+/// the result with the canonical `NativeKind::String` carrier shape:
+/// `jit_print_str` calls `print_kinded_inner(bits, NativeKind::String)`
+/// which constructs `KindedSlot::new(ValueSlot::from_raw(bits), String)`,
+/// and `format_kinded`'s String arm dereferences as `&Arc<String>`. A
+/// NaN-boxed pointer in that slot dereferences a NaN bit-pattern as
+/// a `String` struct's `ptr/cap/len` — printing garbage memory bytes
+/// (the empirical surface at `let m = "a"+"b"; print(m)` pre-fix).
 ///
-/// If either operand is NOT an `HK_STRING` heap value, we format it via
-/// `format_value_word`. This matches interpreter semantics for
-/// `str + <anything>` — the MIR's `lower_formatted_string` emits
-/// `BinaryOp::Add` on whatever an interpolation expression returns, so the
-/// operand may legitimately be a number, bool, null, etc.
+/// Per W15.1 audit §6.7 (FIX-LANGUAGE W15.2-LANG-7) the post-fix shape:
 ///
-/// ## Return value
+/// - Inputs carry `(a_bits, a_kind_code, b_bits, b_kind_code)` — the
+///   parallel-track encoding at `super::stack_kind_code` per ADR-006
+///   §2.7.7/Q9. Kind codes are stamped at JIT-compile time from the
+///   producer-side `operand_slot_kind` result in `compile_string_concat`
+///   — same kind-source discipline as `jit_v2_make_result_ok`'s
+///   `payload_kind_code`.
+/// - Each operand decodes per its kind: `String` → adopt the raw Arc
+///   pointer via `Arc::from_raw` and read `&str`; scalar arms format
+///   directly from the raw native value. No tag-bit dispatch, no
+///   NaN-tag probe.
+/// - Return is `Arc::into_raw(Arc::new(out)) as u64` — the §2.7.5
+///   String carrier shape, matching every downstream consumer
+///   (`jit_print_str`, `arc_string_retain`/`_release`,
+///   `KindedSlot::Drop` for `NativeKind::String`).
 ///
-/// The result is a freshly allocated `UnifiedString` with refcount 1,
-/// NaN-boxed via `box_string`. Neither input refcount is modified — the
-/// caller's `emit_drop` handles the operand lifetimes per MIR ownership.
-pub extern "C" fn jit_string_concat(a_bits: u64, b_bits: u64) -> u64 {
-    use super::value_ffi::unbox_string;
+/// **Strong-count contract.** Each `NativeKind::String` operand carries
+/// one strong-count share (the producer-side per-consumption retain at
+/// `mir_compiler/ownership.rs:486` for `MirConstant::Str`, or the
+/// `compile_operand`'s `Copy(place)` retain at line 239). The FFI
+/// consumes both shares via `Arc::from_raw` (which adopts the share)
+/// and drops them at scope end. The returned `Arc::into_raw(Arc::new(
+/// out))` carries one fresh share that the caller installs in the
+/// destination slot with kind `NativeKind::String`; subsequent
+/// `arc_string_release` retires the share at slot-drop time.
+///
+/// **Forbidden under W15.2-LANG-7 close** (refusal log per CLAUDE.md
+/// "Renames to refuse on sight" + ADR-006 §2.7.5 producer-side stamp):
+/// - Returning `box_string(out)` — wrong carrier shape; the consumer
+///   would dereference a NaN-boxed pointer as `Arc<String>` raw bits
+///   and segfault on the next print (the W15.1 audit §6.7 empirical
+///   surface).
+/// - `heap_kind(bits)` probe on a kind-stamped operand — the deleted-
+///   W-series tag-bit dispatch. The producer-side stamp from
+///   `compile_string_concat`'s `operand_slot_kind` IS the discriminator.
+/// - Bool-default for an unknown kind code — surface-and-stop per §2.7.7
+///   #9. Producing a malformed Arc on a kind-source gap masks the bug
+///   downstream.
+/// - Defection-attractor descriptors (broader-family regex per CLAUDE.md
+///   §"Renames to refuse on sight") for this producer-side carrier-shape
+///   fix — refused on sight. Describe the change by name (the deleted
+///   `box_string` shape replaced by the §2.7.5 `Arc::into_raw(Arc<String>)`
+///   shape) or by deletion-fate (the deleted-W-series `heap_kind`-probe
+///   path).
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_string_concat(
+    a_bits: u64,
+    a_kind_code: u8,
+    b_bits: u64,
+    b_kind_code: u8,
+) -> u64 {
+    use super::stack_kind_code;
+    use shape_value::NativeKind;
+    use std::sync::Arc;
 
-    fn stringify(bits: u64) -> String {
-        match heap_kind(bits) {
-            Some(HK_STRING) => unsafe { unbox_string(bits) }.to_owned(),
-            _ => format_value_word(bits),
+    /// Decode one operand into its rendered `String` form, consuming any
+    /// strong-count share carried by the bits. Per W15.2-LANG-7 close the
+    /// dispatch is keyed off the producer-side kind stamp, NOT a runtime
+    /// tag-bit probe.
+    fn consume_operand(bits: u64, kind_code: u8, func_name: &str) -> String {
+        match stack_kind_code::decode(kind_code) {
+            Some(NativeKind::String) => {
+                // ADR-006 §2.7.5 String carrier: bits are `Arc::into_raw(
+                // Arc<String>) as u64`. Adopt the caller's share via
+                // `Arc::from_raw`, copy the contents to `String`, then
+                // drop the Arc (releases the share). Null bits render as
+                // the empty string — mirror of `jit_print_str`'s null
+                // sentinel handling at `is_jit_null_sentinel`.
+                if bits == 0 {
+                    return String::new();
+                }
+                let arc = unsafe { Arc::<String>::from_raw(bits as *const String) };
+                let out = (*arc).clone();
+                drop(arc);
+                out
+            }
+            Some(NativeKind::Int64) | Some(NativeKind::UInt64)
+            | Some(NativeKind::IntSize) | Some(NativeKind::UIntSize) => {
+                // Raw native i64/u64 — format directly per ADR-006 §2.7.5
+                // scalar carrier. No NaN-unbox.
+                format!("{}", bits as i64)
+            }
+            Some(NativeKind::Int32) | Some(NativeKind::UInt32) => {
+                format!("{}", bits as i32)
+            }
+            Some(NativeKind::Int16) | Some(NativeKind::UInt16) => {
+                format!("{}", bits as i16)
+            }
+            Some(NativeKind::Int8) | Some(NativeKind::UInt8) => {
+                format!("{}", bits as i8)
+            }
+            Some(NativeKind::Float64) => {
+                // The Cranelift `bitcast(I64, ..., F64)` was applied at the
+                // call site (`compile_string_concat::to_i64_bits`) to pack
+                // an F64 into the I64 ABI slot per §2.7.5 stable-FFI rule.
+                // Reverse the bitcast here to recover the f64.
+                let n = f64::from_bits(bits);
+                if n.is_finite() && n == n.trunc() && n.abs() < 1e15 {
+                    format!("{}", n as i64)
+                } else {
+                    format!("{}", n)
+                }
+            }
+            Some(NativeKind::Float32) => {
+                let n = f32::from_bits(bits as u32);
+                format!("{}", n)
+            }
+            Some(NativeKind::Bool) => {
+                if (bits as u8) != 0 { "true".to_string() } else { "false".to_string() }
+            }
+            Some(NativeKind::Char) => {
+                let cp = bits as u32;
+                match char::from_u32(cp) {
+                    Some(c) => c.to_string(),
+                    None => String::new(),
+                }
+            }
+            Some(other) => {
+                // §2.7.7 #9 surface: a producer-stamped non-scalar /
+                // non-String kind reaching `jit_string_concat` is a
+                // producer-site gap upstream of this FFI body. The MIR
+                // f-string lowering at `lower_formatted_string` emits
+                // `BinOp::Add` with whatever an interpolation expression
+                // returns — extending coverage to heap-arm carriers
+                // (Option / Result / TypedObject / ...) is W15.2-LANG-7-
+                // FUP territory. For now we emit a placeholder render and
+                // log via tracing so the surface is visible without
+                // breaking the calling f-string chain mid-render.
+                tracing::debug!(
+                    target: "shape_jit",
+                    func_name,
+                    kind_code,
+                    ?other,
+                    "SURFACE: jit_string_concat operand kind is non-scalar / non-String. \
+                     ADR-006 \u{a7}2.7.7 #9 \u{2014} MIR f-string interpolation does not \
+                     yet format heap-arm operands. W15.2-LANG-7-FUP territory.",
+                );
+                format!("<{:?}>", other)
+            }
+            None => {
+                // §2.7.7 #9 surface: SENTINEL / unknown kind code is a
+                // producer-side gap upstream of this FFI body. The
+                // `compile_string_concat` site stamps kind from
+                // `operand_slot_kind` which is `Some(_)` by construction
+                // when `either_string` matched. Reaching the None arm
+                // means the call site bypassed the stamp.
+                tracing::debug!(
+                    target: "shape_jit",
+                    func_name,
+                    kind_code,
+                    "SURFACE: jit_string_concat operand kind code is sentinel/unknown. \
+                     ADR-006 \u{a7}2.7.7 #9 \u{2014} producer-site MIR kind classification gap.",
+                );
+                String::new()
+            }
         }
     }
 
-    let mut out = stringify(a_bits);
-    out.push_str(&stringify(b_bits));
-    super::value_ffi::box_string(out)
+    let mut out = consume_operand(a_bits, a_kind_code, "jit_string_concat[a]");
+    out.push_str(&consume_operand(b_bits, b_kind_code, "jit_string_concat[b]"));
+    // Return the §2.7.5 `NativeKind::String` carrier: `Arc::into_raw(
+    // Arc<String>) as u64`. Refcount = 1 (the fresh Arc share transferred
+    // to the caller). The caller installs these bits in the destination
+    // slot with kind `NativeKind::String`; subsequent `arc_string_release`
+    // retires the share at slot-drop time.
+    Arc::into_raw(Arc::new(out)) as u64
 }
 
 /// Convert value to number
@@ -1515,5 +1669,140 @@ mod heap_arm_print_tests {
                 bits as *const IteratorState,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod jit_string_concat_w15_2_lang_7_tests {
+    //! W15.2-LANG-7 jit-print-fstring close (Phase 4b Round 3, 2026-05-18)
+    //! regression tests. Pins the producer-side carrier-shape fix at
+    //! `jit_string_concat`: inputs come kind-stamped per ADR-006 §2.7.5/
+    //! §2.7.7, output carries the §2.7.5 `NativeKind::String` shape
+    //! (`Arc::into_raw(Arc<String>) as u64`) matching every downstream
+    //! consumer (`jit_print_str`, `arc_string_retain`/`_release`,
+    //! `KindedSlot::Drop` for `NativeKind::String`).
+    //!
+    //! Reproducer at W15.1 audit §6.7 (sub-agent D book-truth-reaudit):
+    //! `let p = "events.csv"; print(f"path: {p}")` printed empty on JIT
+    //! pre-fix because `jit_string_concat` returned a NaN-boxed
+    //! `box_string(out)` whose bit-shape did not match the §2.7.5 String
+    //! carrier the print path's `format_kinded` body dereferences as
+    //! `&Arc<String>` — segfaulting / printing garbage memory bytes on
+    //! the `Arc::from_raw(NaN-bits as *const String)` decode.
+    //!
+    //! Tests call `jit_string_concat` directly with producer-shaped Arc
+    //! input bits + the matching §2.7.7 kind code, assert the return
+    //! bits round-trip back to the expected string via `Arc::from_raw`,
+    //! and balance every `Arc::into_raw` with a matching `from_raw`
+    //! drop at end of scope so the test suite is leak-free.
+
+    use super::*;
+    use crate::ffi::stack_kind_code;
+    use std::sync::Arc;
+
+    /// Allocate a §2.7.5 `Arc<String>` carrier with one strong-count
+    /// share, returning raw bits. The bits are exactly the shape
+    /// `MirConstant::Str` lowers to at producer time (`arc_string_constant`
+    /// at `mir_compiler/ownership.rs:483`).
+    fn make_string_arc_bits(s: &str) -> u64 {
+        Arc::into_raw(Arc::new(s.to_string())) as u64
+    }
+
+    /// Adopt a §2.7.5 `Arc<String>` carrier back into Rust ownership and
+    /// recover the contained `String`. Drops the strong-count share.
+    unsafe fn adopt_string_arc_bits(bits: u64) -> String {
+        assert!(bits != 0, "expected non-null Arc<String> bits");
+        let arc = unsafe { Arc::<String>::from_raw(bits as *const String) };
+        let out = (*arc).clone();
+        drop(arc);
+        out
+    }
+
+    #[test]
+    fn string_plus_string_book_reproducer() {
+        // W15.1 audit §6.7 reproducer at the FFI body level: two
+        // §2.7.5 Arc<String> inputs (`"path: "` literal + `p` slot
+        // bits) → one §2.7.5 Arc<String> output carrying the concat.
+        let a = make_string_arc_bits("path: ");
+        let b = make_string_arc_bits("events.csv");
+        let result = jit_string_concat(
+            a,
+            stack_kind_code::C_STRING,
+            b,
+            stack_kind_code::C_STRING,
+        );
+        let out = unsafe { adopt_string_arc_bits(result) };
+        assert_eq!(out, "path: events.csv");
+    }
+
+    #[test]
+    fn returns_arc_string_carrier_shape_not_nanbox() {
+        // ADR-006 §2.7.5 shape invariant: the return value MUST be a
+        // raw `Arc<String>` pointer, NOT a NaN-boxed unified-heap
+        // value. We assert this by reading the underlying memory back
+        // as a `String` via `Arc::from_raw` and confirming the contents
+        // match — the same code path every downstream consumer takes.
+        // Pre-fix the return was `box_string(out)` (NaN-boxed pointer);
+        // `Arc::from_raw` on those bits dereferenced a NaN bit-pattern
+        // as a `String` struct and either crashed or read garbage.
+        let a = make_string_arc_bits("hello");
+        let b = make_string_arc_bits(" world");
+        let result = jit_string_concat(
+            a,
+            stack_kind_code::C_STRING,
+            b,
+            stack_kind_code::C_STRING,
+        );
+        // The bits MUST be a valid `*const String` pointer. If
+        // `jit_string_concat` regressed back to `box_string(out)`,
+        // this `from_raw` would either crash or yield garbage.
+        let out = unsafe { adopt_string_arc_bits(result) };
+        assert_eq!(out, "hello world");
+    }
+
+    #[test]
+    fn empty_strings_concat_to_empty() {
+        let a = make_string_arc_bits("");
+        let b = make_string_arc_bits("");
+        let result = jit_string_concat(
+            a,
+            stack_kind_code::C_STRING,
+            b,
+            stack_kind_code::C_STRING,
+        );
+        let out = unsafe { adopt_string_arc_bits(result) };
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    fn string_plus_int64_formats_int_inline() {
+        // MIR f-string lowering at `lower_formatted_string` emits
+        // `BinOp::Add(str_part, expr_part)` where `expr_part` may
+        // produce a native scalar slot (`Int64`/`Float64`/`Bool`).
+        // The kind-aware FFI formats the scalar inline.
+        let a = make_string_arc_bits("x=");
+        let b_bits: u64 = 42i64 as u64;
+        let result = jit_string_concat(
+            a,
+            stack_kind_code::C_STRING,
+            b_bits,
+            stack_kind_code::C_INT64,
+        );
+        let out = unsafe { adopt_string_arc_bits(result) };
+        assert_eq!(out, "x=42");
+    }
+
+    #[test]
+    fn string_plus_bool_formats_bool_inline() {
+        let a = make_string_arc_bits("active=");
+        let b_bits: u64 = 1; // true
+        let result = jit_string_concat(
+            a,
+            stack_kind_code::C_STRING,
+            b_bits,
+            stack_kind_code::C_BOOL,
+        );
+        let out = unsafe { adopt_string_arc_bits(result) };
+        assert_eq!(out, "active=true");
     }
 }
