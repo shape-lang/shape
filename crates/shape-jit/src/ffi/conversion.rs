@@ -831,6 +831,76 @@ pub extern "C" fn jit_print_iterator(
     );
 }
 
+// ============================================================================
+// v2-raw TypedArray<T> print entry (W11-fup-C, Phase 3d, 2026-05-18)
+// ============================================================================
+//
+// `print(Array<T>)` JIT-side close. The MIR-time kind label is
+// `NativeKind::Ptr(HeapKind::TypedArray)` per
+// `crates/shape-jit/src/mir_compiler/types.rs:175`
+// (`ConcreteType::Array(_) => NativeKind::Ptr(HeapKind::TypedArray)`),
+// but the runtime slot bits are the v2-raw `*mut TypedArray<T>` pointer
+// produced by the per-T allocators in
+// `crates/shape-jit/src/ffi/v2/mod.rs::jit_v2_array_new_<kind>` —
+// `HeapKind::TypedArray = 8` is the vacated-ordinal type LABEL, not a live
+// `Arc<TypedArrayData>` carrier (the enum + outer `HeapValue::TypedArray`
+// arm + `TypedBuffer<T>` wrapper layer were retired across V3-S5 ckpt-1..
+// ckpt-4 per W12-typed-array-data-deletion audit §3.5 / §3.6 + ADR-006
+// §2.7.24 Q25.A SUPERSEDED).
+//
+// The canonical VM-side formatter recognizes the v2-raw carrier via the
+// `NativeKind::UInt64` arm at `crates/shape-vm/src/executor/printing.rs:126`
+// (per Wave 6.5 D-v2-array-detect: `as_v2_typed_array(bits, kind)` accepts
+// `kind == NativeKind::UInt64` and reads the `*mut TypedArray<T>` pointer
+// directly). This FFI body reifies the slot with that label and delegates
+// to `ValueFormatter::format_kinded` for VM == JIT byte-identical output.
+//
+// Per-element kinds are read from the v2-raw HeapHeader's `_pad` byte
+// (`v2_array_detect::read_element` arms at lines 304-365) per ADR-006
+// §2.7.7 stamp-at-compile-time — no Bool-default fabrication for the
+// element kind; the array's element-type byte at allocation time is the
+// authoritative kind source.
+
+/// Print a `*mut TypedArray<T>`-shaped slot as `[v1, v2, ...]`. Dispatched
+/// when the operand kind is proven `NativeKind::Ptr(HeapKind::TypedArray)`
+/// by the MIR-time `concrete_type_to_native_kind` arm for `ConcreteType::
+/// Array(_)`.
+///
+/// SAFETY: `bits` must be a `*mut TypedArray<T>` raw pointer produced by
+/// `crate::ffi::v2::jit_v2_array_new_<kind>` (or
+/// `jit_new_typed_array_<string|decimal>`), with the element-type byte
+/// stamped at HeapHeader offset 7 per `v2_array_detect::stamp_elem_type`.
+/// Null bits render as `None` (mirror of the other heap-arm bodies'
+/// null-sentinel handling). The pointer is borrowed for the duration of
+/// the call — no refcount work, no Drop (v2-raw arrays own their backing
+/// storage directly; the caller's slot keeps the active share).
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_print_typed_array(
+    ctx_ptr: *const crate::context::JITContext,
+    bits: u64,
+) {
+    if bits == 0 {
+        println!("None");
+        return;
+    }
+    let registry = registry_from_ctx(ctx_ptr);
+    let formatter = shape_vm::executor::printing::ValueFormatter::new(&registry);
+    // Reify with `NativeKind::UInt64` — the carrier-recognition label the
+    // canonical formatter uses to route v2-raw `*mut TypedArray<T>`
+    // pointers to its `format_v2_typed_array` per-element walker at
+    // `printing.rs:133-137`. The `Ptr(HeapKind::TypedArray)` label routes
+    // to the vacated-ordinal `[TypedArray:ckpt5-surface]` placeholder
+    // arm at `printing.rs:264-269`, which is wrong for the v2-raw shape.
+    let slot = shape_value::ValueSlot::from_raw(bits);
+    let kinded = shape_value::KindedSlot::new(slot, shape_value::NativeKind::UInt64);
+    let rendered = formatter.format_kinded(&kinded);
+    // `UInt64`-kind Drop is a no-op (`kinded_slot.rs:1008` / scalar arm),
+    // so this `mem::forget` is structural-symmetry with the other
+    // `jit_print_<heap_kind>` bodies rather than required for soundness.
+    std::mem::forget(kinded);
+    println!("{}", rendered);
+}
+
 /// Concatenate two NaN-boxed string values into a freshly boxed
 /// `UnifiedString`. Used by the MIR-lowering path for `BinOp::Add` when both
 /// operands have `NativeKind::String`.

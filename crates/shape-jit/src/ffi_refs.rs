@@ -112,6 +112,21 @@ pub struct FFIFuncRefs {
     pub(crate) print_priority_queue: FuncRef,
     pub(crate) print_range: FuncRef,
     pub(crate) print_iterator: FuncRef,
+    // W11-fup-C (Phase 3d, 2026-05-18): v2-raw TypedArray<T> kinded
+    // print entry (ADR-006 §2.7.5 stamp-at-compile-time). Dispatched by
+    // the MIR-side Call-terminator print emitter when the operand
+    // `NativeKind` is `Ptr(HeapKind::TypedArray)` — the MIR-time TYPE
+    // label for `ConcreteType::Array(_)` (per
+    // `mir_compiler/types.rs:175`). The runtime carrier is the v2-raw
+    // `*mut TypedArray<T>` pointer (NOT `Arc<TypedArrayData>` — that
+    // enum + outer arm were deleted across V3-S5 ckpt-1..ckpt-4).
+    // Takes `(ctx_ptr, bits)`; delegates to the canonical VM-side
+    // `ValueFormatter::format_kinded` via the `NativeKind::UInt64`
+    // carrier-recognition label at `printing.rs:126` so VM == JIT
+    // identical output is preserved (per-element walker at
+    // `printing.rs:610-640` reads element kind from the v2-raw
+    // HeapHeader `_pad` byte).
+    pub(crate) print_typed_array: FuncRef,
 
     // Closure construction (Phase H2: typed closure block → Arc<Closure>).
     pub(crate) make_closure: FuncRef,

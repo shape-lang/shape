@@ -14,8 +14,9 @@ use super::super::ffi::conversion::{
     jit_print_deque, jit_print_f64, jit_print_hashmap, jit_print_hashset,
     jit_print_i64, jit_print_iterator, jit_print_lazy, jit_print_mutex,
     jit_print_option, jit_print_priority_queue, jit_print_range,
-    jit_print_result, jit_print_str, jit_print_typed_object, jit_string_concat,
-    jit_to_number, jit_to_string, jit_type_check, jit_typeof,
+    jit_print_result, jit_print_str, jit_print_typed_array,
+    jit_print_typed_object, jit_string_concat, jit_to_number, jit_to_string,
+    jit_type_check, jit_typeof,
 };
 #[allow(deprecated)]
 use super::super::ffi::object::{
@@ -203,6 +204,17 @@ pub fn register_object_symbols(builder: &mut JITBuilder) {
     );
     builder.symbol("jit_print_range", jit_print_range as *const u8);
     builder.symbol("jit_print_iterator", jit_print_iterator as *const u8);
+    // W11-fup-C (Phase 3d, 2026-05-18): v2-raw TypedArray<T> kinded
+    // print entry. The MIR-side Call-terminator dispatch routes
+    // `NativeKind::Ptr(HeapKind::TypedArray)`-stamped operands here.
+    // Carrier shape is `*mut TypedArray<T>` per Wave 6.5 D-v2-array-detect
+    // (NOT `Arc<TypedArrayData>` — that enum was retired across V3-S5
+    // ckpt-1..ckpt-4). Body delegates to the canonical VM-side
+    // `ValueFormatter::format_kinded` via the UInt64 carrier label.
+    builder.symbol(
+        "jit_print_typed_array",
+        jit_print_typed_array as *const u8,
+    );
     builder.symbol("jit_make_closure", jit_make_closure as *const u8);
     // Closure-spec Phase H2: TypedClosureHeader finalizer used by
     // `MirToIR::emit_heap_closure` to convert the raw typed block into a
@@ -928,6 +940,28 @@ pub fn declare_object_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<
             .declare_function("jit_print_iterator", Linkage::Import, &sig)
             .expect("Failed to declare jit_print_iterator");
         ffi_funcs.insert("jit_print_iterator".to_string(), func_id);
+    }
+
+    // W11-fup-C (Phase 3d, 2026-05-18): v2-raw TypedArray<T> kinded print
+    // entry (ADR-006 §2.7.5). Dispatched by the MIR-side print emitter
+    // when the operand `NativeKind` is `Ptr(HeapKind::TypedArray)` — the
+    // MIR-time TYPE label for `ConcreteType::Array(_)` at
+    // `mir_compiler/types.rs:175`. Signature mirrors the other heap-arm
+    // `jit_print_<heap_kind>` entries: `(ctx_ptr, bits)` with bits as a
+    // `*mut TypedArray<T>` raw pointer (per Wave 6.5 D-v2-array-detect
+    // v2-raw carrier shape — NOT `Arc<TypedArrayData>`, that enum was
+    // retired across V3-S5 ckpt-1..ckpt-4 per W12 audit §3.5/§3.6 +
+    // ADR-006 §2.7.24 Q25.A SUPERSEDED).
+    //
+    // jit_print_typed_array(ctx_ptr: *const JITContext, bits: u64) -> void
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // ctx_ptr
+        sig.params.push(AbiParam::new(types::I64)); // bits (*mut TypedArray<T>)
+        let func_id = module
+            .declare_function("jit_print_typed_array", Linkage::Import, &sig)
+            .expect("Failed to declare jit_print_typed_array");
+        ffi_funcs.insert("jit_print_typed_array".to_string(), func_id);
     }
 
     // jit_make_closure(ctx, func_idx, capture_count) -> u64

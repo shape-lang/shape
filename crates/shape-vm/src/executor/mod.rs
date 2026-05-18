@@ -22,7 +22,18 @@ mod stack_ops;
 pub mod state_builtins;
 pub mod time_travel;
 mod trait_object_ops;
-mod v2_handlers;
+// W11-fup-C (Phase 3d, 2026-05-18): exposed `pub` so the JIT-side
+// `crates/shape-jit/src/ffi/v2/mod.rs` allocators can call
+// `v2_handlers::v2_array_detect::stamp_elem_type` + the
+// `ELEM_TYPE_*` constants at allocation time — mirror of the VM-side
+// `op_new_typed_array_*` stamp pattern (`v2_handlers/array.rs:40-81`).
+// Without the stamp the canonical `as_v2_typed_array` carrier-
+// recognition path (`v2_array_detect.rs:181-216`) reads
+// `_pad = 0 = ELEM_TYPE_UNKNOWN` and the print / method-dispatch
+// arms silently fall back to the non-typed scalar render (the
+// pre-fix empirical surface — `print(arr)` JIT output was the raw
+// pointer printed as a u64 scalar).
+pub mod v2_handlers;
 mod variables;
 pub(crate) mod vm_state_snapshot;
 mod window_join;

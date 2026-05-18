@@ -915,6 +915,49 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                                     &[self.ctx_ptr, widened],
                                 );
                             }
+                            // ── W11-fup-C (Phase 3d, 2026-05-18): v2-raw
+                            //    TypedArray<T> arm ────────────────────────
+                            //
+                            // ADR-006 §2.7.5 stamp-at-compile-time. The
+                            // MIR-time `concrete_type_to_native_kind` arm at
+                            // `mir_compiler/types.rs:175` stamps
+                            // `Ptr(HeapKind::TypedArray)` for every
+                            // `ConcreteType::Array(_)` slot. The runtime
+                            // carrier is the v2-raw `*mut TypedArray<T>`
+                            // pointer produced by
+                            // `crate::ffi::v2::jit_v2_array_new_<kind>` —
+                            // NOT `Arc<TypedArrayData>` (that enum + outer
+                            // `HeapValue::TypedArray(Arc<_>)` arm + the
+                            // `TypedBuffer<T>` wrapper layer were retired
+                            // across V3-S5 ckpt-1..ckpt-4 per W12 audit
+                            // §3.5 / §3.6 + ADR-006 §2.7.24 Q25.A
+                            // SUPERSEDED).
+                            //
+                            // `jit_print_typed_array` reads the v2-raw
+                            // HeapHeader `_pad` byte for the element kind
+                            // (per `v2_array_detect::as_v2_typed_array` at
+                            // `printing.rs:133`) — no Bool-default
+                            // fabrication, no kind from raw bits; the
+                            // element type stamped at allocation time is
+                            // the authoritative source. VM == JIT
+                            // identical output via the canonical
+                            // `ValueFormatter::format_kinded` path.
+                            Some(NativeKind::Ptr(HeapKind::TypedArray)) => {
+                                let val_ty = self.builder.func.dfg.value_type(val);
+                                let widened = if val_ty == types::I64 {
+                                    val
+                                } else if val_ty == types::F64 {
+                                    self.builder
+                                        .ins()
+                                        .bitcast(types::I64, MemFlags::new(), val)
+                                } else {
+                                    val
+                                };
+                                self.builder.ins().call(
+                                    self.ffi.print_typed_array,
+                                    &[self.ctx_ptr, widened],
+                                );
+                            }
                             // ── NotImplemented(SURFACE): unproven kind /
                             //    unwired heap arm ─────────────────────
                             //
