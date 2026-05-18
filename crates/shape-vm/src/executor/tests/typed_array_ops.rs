@@ -328,3 +328,101 @@ fn test_double_filter_chain_into_let() {
     assert_eq!(result.as_i64(), Some(3));
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Phase 4b Round 4 LANG-9-spin-2c-reduce-2param-closure-inference
+// regression coverage: pins the §4.3 territory's CURRENT compile-success
+// at HEAD `5d842283` after Surface-1B merge `f37476f7` (close commit
+// `05eb1d6d`) added the `Expr::MethodCall` arm to `concrete_type_for_expr`
+// at `crates/shape-vm/src/compiler/monomorphization/type_resolution.rs:1423-1425`.
+//
+// The 2-param closure-arg-type seeding for `reduce`-shaped HOFs is already
+// in place via `install_pending_closure_param_types_for_hof`'s `is_reduce`
+// branch at `crates/shape-vm/src/compiler/expressions/function_calls.rs:1591-1597`
+// (`vec![Some(elem_ann.clone()), Some(elem_ann)]` — homogeneous-fold
+// seeding for `acc` + `x`). Pre-Surface-1B the receiver-type resolution
+// for chained `.map().reduce(...)` failed (no MethodCall arm in
+// `concrete_type_for_expr`), so hints were never installed and the
+// closure's `a + b` failed strict-typing as
+// "Cannot infer types for binary operation Add: operand types are
+// `unknown` and `unknown`".
+//
+// These tests use `compile_with_prelude` (NOT `eval_*`) because the
+// runtime SURFACE'es at V3-S5 ckpt-2 (`Vec<int>.reduce` handler
+// `handle_int_reduce` returns `ckpt2_surface("Vec<int>.reduce", args)`
+// at `crates/shape-vm/src/executor/objects/typed_array_methods.rs:488-493`
+// — explicitly UNREACHABLE until V3-S5 ckpt-6 STRICT close per
+// `docs/cluster-audits/v0.3-w15-lang-9-spinoffs-audit.md` §2.4 / §4.4).
+// Compile-success is the bounded contract the §4.3 territory owns; runtime
+// is W16.2-N partition territory per `docs/cluster-audits/v0.3-w16-v3s5-
+// ckpt56-strict-close-audit.md`.
+
+#[test]
+fn test_lang9_spin_2c_reduce_chained_map_compiles() {
+    // Phase 4b Round 4 §7.4 reproducer row 1: pins F2c compile-success
+    // at HEAD. The closure `|a, b| a + b` resolves both params to `int`
+    // via `install_pending_closure_param_types_for_hof`'s is_reduce
+    // branch; the receiver `[1,2,3,4,5].map(|x|x*2)` resolves to
+    // `Array<int>` via the Surface-1B `Expr::MethodCall` arm.
+    use super::test_utils::compile_with_prelude;
+    let result = compile_with_prelude(
+        "let _ = [1,2,3,4,5].map(|x| x * 2).reduce(0, |a, b| a + b)",
+    );
+    assert!(
+        result.is_ok(),
+        "F2c chained map.reduce(init,closure) must compile (Surface-1B fix in place at HEAD); got: {:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn test_lang9_spin_2c_reduce_callback_first_compiles() {
+    // Sibling shape: callback-first form `.reduce(|a,b|a+b, 0)` exercises
+    // the same 2-param closure-arg-type seeding path with the closure as
+    // the FIRST positional arg. Hints are per-closure-param positional,
+    // so hint indexing is identical regardless of the closure's index in
+    // the call's arg list.
+    use super::test_utils::compile_with_prelude;
+    let result = compile_with_prelude(
+        "let _ = [1,2,3,4,5].map(|x| x * 2).reduce(|a, b| a + b, 0)",
+    );
+    assert!(
+        result.is_ok(),
+        "callback-first reduce must compile; got: {:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn test_lang9_spin_2c_reduce_chained_map_f64_compiles() {
+    // Sibling shape: f64 element + accumulator. The receiver's element
+    // type drives both `a` and `b` hint via the homogeneous-fold branch
+    // — `vec![Some(number_ann), Some(number_ann)]` — so the closure
+    // body `a + b` resolves to AddNumber.
+    use super::test_utils::compile_with_prelude;
+    let result = compile_with_prelude(
+        "let _ = [1.0, 2.0, 3.0, 4.0, 5.0].map(|x| x * 2.0).reduce(0.0, |a, b| a + b)",
+    );
+    assert!(
+        result.is_ok(),
+        "f64 chained map.reduce must compile; got: {:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn test_lang9_spin_2c_reduce_direct_array_compiles() {
+    // Sibling shape: non-chained receiver `[1,2,3]` (no intermediate
+    // `.map`). The receiver-type resolution goes through the `Expr::Array`
+    // arm of `concrete_type_for_expr` (populated by LANG-9 close at
+    // `compile_expr_array`), then `install_pending_closure_param_types_
+    // for_hof`'s is_reduce branch seeds both `acc` and `x` as `int`.
+    use super::test_utils::compile_with_prelude;
+    let result = compile_with_prelude(
+        "let _ = [1, 2, 3].reduce(|acc, x| acc + x, 0)",
+    );
+    assert!(
+        result.is_ok(),
+        "direct array.reduce must compile; got: {:?}",
+        result.err()
+    );
+}
