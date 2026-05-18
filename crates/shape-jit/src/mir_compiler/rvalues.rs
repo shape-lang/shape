@@ -962,15 +962,54 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     fn compile_unop(&mut self, op: &UnOp, val: Value) -> Result<Value, String> {
         let val_type = self.builder.func.dfg.value_type(val);
         match op {
+            // W11-followup-jit-unary-neg-int64 (Phase 4b round 2, 2026-05-18).
+            // The Neg arm must dispatch on the operand's Cranelift native
+            // width — per ADR-006 §2.7.5 stamp-at-compile-time, a
+            // `NativeKind::Int64` slot holds RAW i64 bits (Cranelift
+            // `types::I64`), NOT a NaN-boxed f64. `declare_locals` in
+            // `blocks.rs:38-52` uses `cranelift_type_for_slot(Int64) ==
+            // I64` (verified at `v2_field.rs:454`), so an Int64 operand
+            // arrives here as a native I64 SSA value.
+            //
+            // Pre-fix: the `else` branch unconditionally bitcast the bits
+            // to F64, fneg'd, and bitcast back — for `let a = 10; print(-a)`
+            // that turned `0xFFFFFFFFFFFFFFF6` (-10 i64) into
+            // `0x800000000000000A` (-9223372036854775798), which is the
+            // f64 unary-neg of the int bits reinterpreted as i64.
+            //
+            // Post-fix: dispatch on the operand's native width — Cranelift
+            // `ineg` on raw I64 (also I32 for completeness mirroring
+            // `compile_binop_int64`'s I32 native path), `fneg` on F64.
+            // Other widths surface honestly per W10 playbook §5: reaching
+            // here with a non-{F64,I64,I32} operand means the producing
+            // MIR `infer_rvalue_kind(UnaryOp(Neg, _))` stamped a kind the
+            // VM's `NegInt`/`NegNumber` typed opcodes don't accept
+            // (`opcode_defs.rs` only has those two negate variants).
+            //
+            // Mirrors the W11-fup-A BinOp coverage extension pattern
+            // (`compile_binop_int64::{BitAnd,BitOr,BitXor,BitShl,BitShr}`
+            // at line 702-708) — native-width dispatch + honest
+            // surface-and-stop on producer-side kind-tracker gaps.
             UnOp::Neg => {
                 if val_type == types::F64 {
                     // Native F64: direct fneg
                     Ok(self.builder.ins().fneg(val))
+                } else if val_type == types::I64 || val_type == types::I32 {
+                    // Native integer: direct ineg (matches the VM's
+                    // `NegInt` typed opcode at `arithmetic/mod.rs` and
+                    // the OSR compiler's `NegInt` arm at
+                    // `osr_compiler.rs:572`).
+                    Ok(self.builder.ins().ineg(val))
                 } else {
-                    // NaN-boxed: bitcast to F64, negate, bitcast back
-                    let f64_val = self.builder.ins().bitcast(types::F64, MemFlags::new(), val);
-                    let neg = self.builder.ins().fneg(f64_val);
-                    Ok(self.builder.ins().bitcast(types::I64, MemFlags::new(), neg))
+                    Err(format!(
+                        "compile_unop: SURFACE — Neg on {:?} operand has no \
+                         typed opcode in Shape (VM has only `NegInt`/`NegNumber` \
+                         per `opcode_defs.rs`). Reaching here means the §2.7.5 \
+                         producing-MIR kind-tracker stamped a non-{{F64,I64,I32}} \
+                         kind where a numeric kind was expected. Producer-site \
+                         gap; surface per W10 playbook §5.",
+                        val_type
+                    ))
                 }
             }
             UnOp::Not => {
