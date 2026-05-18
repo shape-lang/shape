@@ -478,7 +478,7 @@ fn test_cumulative_sum_array() {
 /// Verifies count equal adjacent.
 #[test]
 fn test_count_equal_adjacent() {
-    ShapeTest::new("fn run() {\n    let arr = [1, 1, 2, 3, 3, 3, 4, 4]\n    let mut pairs = 0\n    let mut i = 0\n    while i < 7 {\n        if arr[i] == arr[i + 1] {\n            pairs = pairs + 1\n        }\n        i = i + 1\n    }\n    pairs\n}\nrun()").expect_number(4.0);
+    ShapeTest::new("fn run() -> int {\n    let arr: Array<int> = [1, 1, 2, 3, 3, 3, 4, 4]\n    let mut pairs: int = 0\n    let mut i: int = 0\n    while i < 7 {\n        let a: int = arr[i]\n        let b: int = arr[i + 1]\n        if a == b {\n            pairs = pairs + 1\n        }\n        i = i + 1\n    }\n    pairs\n}\nrun()").expect_number(4.0);
 }
 
 // =========================================================================

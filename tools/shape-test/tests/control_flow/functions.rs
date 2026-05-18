@@ -203,7 +203,7 @@ fn function_keyword_both_fn_and_function() {
 fn recursive_function_factorial() {
     ShapeTest::new(
         r#"
-        fn factorial(n) {
+        fn factorial(n: int) -> int {
             if n <= 1 { return 1 }
             return n * factorial(n - 1)
         }
@@ -217,7 +217,7 @@ fn recursive_function_factorial() {
 fn recursive_function_fibonacci() {
     ShapeTest::new(
         r#"
-        fn fib(n) {
+        fn fib(n: int) -> int {
             if n < 2 { return n }
             return fib(n - 1) + fib(n - 2)
         }
@@ -249,8 +249,8 @@ fn nested_function_definitions() {
 fn mutual_recursion_is_even_is_odd() {
     ShapeTest::new(
         r#"
-        fn is_even(n) { if n == 0 { true } else { is_odd(n - 1) } }
-        fn is_odd(n) { if n == 0 { false } else { is_even(n - 1) } }
+        fn is_even(n: int) -> bool { if n == 0 { true } else { is_odd(n - 1) } }
+        fn is_odd(n: int) -> bool { if n == 0 { false } else { is_even(n - 1) } }
         print(is_even(4))
         print(is_odd(3))
     "#,

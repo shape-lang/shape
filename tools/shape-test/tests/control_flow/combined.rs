@@ -75,15 +75,16 @@ fn function_with_for_loop_and_match() {
 fn while_loop_with_match_inside() {
     ShapeTest::new(
         r#"
-        let mut i = 0
-        let mut result = ""
+        let mut i: int = 0
+        let mut result: string = ""
         while i < 5 {
-            result = result + match i {
+            let piece: string = match i {
                 0 => "a",
                 1 => "b",
                 2 => "c",
                 _ => "x"
             }
+            result = result + piece
             i = i + 1
         }
         result

@@ -462,13 +462,13 @@ fn test_if_with_modulo_odd() {
 /// Verifies recursive fibonacci.
 #[test]
 fn test_recursive_if_fibonacci() {
-    ShapeTest::new("function fib(n) {\n  if n <= 1 { return n; }\n  return fib(n - 1) + fib(n - 2);\n}\nfunction test() {\n  return fib(10);\n}\ntest()").expect_number(55.0);
+    ShapeTest::new("function fib(n: int) -> int {\n  if n <= 1 { return n; }\n  return fib(n - 1) + fib(n - 2);\n}\nfunction test() -> int {\n  return fib(10);\n}\ntest()").expect_number(55.0);
 }
 
 /// Verifies recursive factorial.
 #[test]
 fn test_recursive_if_factorial() {
-    ShapeTest::new("function factorial(n) {\n  if n <= 1 { return 1; }\n  return n * factorial(n - 1);\n}\nfunction test() {\n  return factorial(6);\n}\ntest()").expect_number(720.0);
+    ShapeTest::new("function factorial(n: int) -> int {\n  if n <= 1 { return 1; }\n  return n * factorial(n - 1);\n}\nfunction test() -> int {\n  return factorial(6);\n}\ntest()").expect_number(720.0);
 }
 
 // ===========================================================================
