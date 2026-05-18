@@ -144,7 +144,7 @@ fn test_ref_sequential_borrows_of_same_var() {
 fn test_ref_in_recursive_function() {
     ShapeTest::new(
         r#"
-        fn count_up(&counter, n) {
+        fn count_up(&counter: int, n: int) {
             if n <= 0 { return }
             counter = counter + 1
             count_up(&counter, n - 1)
@@ -383,7 +383,7 @@ fn test_ref_return_auto_derefs_for_property_access() {
     ShapeTest::new(
         r#"
         type Pt { x: int, y: int }
-        fn borrow_id(&x) { x }
+        fn borrow_id(&x: Pt) -> Pt { x }
         let p = Pt { x: 4, y: 9 }
         borrow_id(&p).x + borrow_id(&p).y
     "#,
