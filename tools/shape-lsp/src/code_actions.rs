@@ -9,9 +9,21 @@ use shape_ast::ast::{ImportItems, Item};
 use shape_ast::parser::parse_program;
 use std::collections::{HashMap, HashSet};
 use tower_lsp_server::ls_types::{
-    CodeAction, CodeActionKind, CodeActionOrCommand, Diagnostic, Position, Range, TextEdit, Uri,
-    WorkspaceEdit,
+    CodeAction, CodeActionKind, CodeActionOrCommand, Diagnostic, NumberOrString, Position, Range,
+    TextEdit, Uri, WorkspaceEdit,
 };
+
+/// W2.3 / 1.40 — extract the canonical error code string from a diagnostic.
+///
+/// Returns `None` for diagnostics without a code (e.g. frontmatter
+/// diagnostics that intentionally omit codes). The string form is the
+/// canonical Shape error code (e.g. `"E0100"`, `"W0102"`, `"B0001"`).
+fn diagnostic_code(diagnostic: &Diagnostic) -> Option<&str> {
+    match &diagnostic.code {
+        Some(NumberOrString::String(s)) => Some(s.as_str()),
+        _ => None,
+    }
+}
 
 /// Get code actions for a document at a given range
 pub fn get_code_actions(
@@ -63,7 +75,16 @@ pub fn get_code_actions(
     dedupe_actions(actions)
 }
 
-/// Get quick fixes for a diagnostic
+/// Get quick fixes for a diagnostic.
+///
+/// W2.3 / 1.40 — fixes are dispatched primarily off `diagnostic.code`
+/// (e.g. `E0101` undefined, `E0001` unexpected-token, `W0102` unused
+/// import) with `diagnostic.message` substring matching retained as a
+/// fallback for diagnostics that don't carry a code (e.g. some
+/// frontmatter / foreign-LSP diagnostics) or that originated from
+/// renamings that haven't been wired through the code table yet. The
+/// code-keyed path is the canonical trigger; message matching is the
+/// compatibility layer.
 fn get_quick_fixes(
     text: &str,
     uri: &Uri,
@@ -72,9 +93,14 @@ fn get_quick_fixes(
 ) -> Option<Vec<CodeActionOrCommand>> {
     let mut fixes = Vec::new();
     let message = &diagnostic.message;
+    let code = diagnostic_code(diagnostic);
 
-    // Fix for undefined variable - suggest declaration
-    if message.contains("undefined") || message.contains("not defined") {
+    // W2.3 / 1.40 — code-keyed dispatch.
+    //
+    // Undefined identifier (E0101) — declare variable.
+    let is_undefined = matches!(code, Some("E0101"))
+        || (code.is_none() && (message.contains("undefined") || message.contains("not defined")));
+    if is_undefined {
         if let Some(var_name) = extract_undefined_name(message) {
             fixes.push(create_quick_fix(
                 format!("Declare variable '{}'", var_name),
@@ -97,8 +123,13 @@ fn get_quick_fixes(
         }
     }
 
-    // Fix for missing semicolon
-    if message.contains("expected ';'") || message.contains("missing semicolon") {
+    // E0004 = missing-semicolon (matches `determine_error_code` in
+    // crates/shape-ast/src/error/pest_converter.rs). Message fallback
+    // covers other paths that synthesize the same diagnostic shape.
+    let is_missing_semi = matches!(code, Some("E0004"))
+        || message.contains("expected ';'")
+        || message.contains("missing semicolon");
+    if is_missing_semi {
         fixes.push(create_quick_fix(
             "Add missing semicolon".to_string(),
             uri.clone(),
@@ -113,8 +144,14 @@ fn get_quick_fixes(
         ));
     }
 
-    // Fix for missing closing brace
-    if message.contains("expected '}'") || message.contains("unclosed") {
+    // E0005 = unbalanced delimiter (unclosed brace). E0001 / E0002 are
+    // close cousins for unterminated structures; message fallback
+    // remains the trigger for diagnostics that don't reach the
+    // structured-error path.
+    let is_unclosed = matches!(code, Some("E0005") | Some("E0002"))
+        || message.contains("expected '}'")
+        || message.contains("unclosed");
+    if is_unclosed {
         fixes.push(create_quick_fix(
             "Add missing closing brace".to_string(),
             uri.clone(),
@@ -129,7 +166,9 @@ fn get_quick_fixes(
         ));
     }
 
-    // Fix for var to let conversion suggestion
+    // Prefer-let lint — no current canonical code; keep message-keyed
+    // until the lint's emitter is wired through the structured-error
+    // path. Tracked as a follow-up under shape-lsp-quality-residuals.
     if message.contains("prefer 'let'") || message.contains("use 'let' instead of 'var'") {
         let line = get_line(text, diagnostic.range.start.line as usize);
         if let Some(line_text) = line {
@@ -156,7 +195,10 @@ fn get_quick_fixes(
         }
     }
 
-    // Auto-import for unknown enum/type
+    // Auto-import for unknown enum/type — message-keyed; the compiler
+    // emits these via the general TypeError / SemanticError paths that
+    // don't carry a stable narrow code. Fallback retained until the
+    // type-error pipeline gains its own code family.
     if message.contains("Unknown enum type") || message.contains("Unknown variant") {
         if let Some(cache) = module_cache {
             if let Some(name) = extract_quoted_name(message) {
@@ -261,8 +303,12 @@ fn get_quick_fixes(
         }
     }
 
-    // Fix for unused variable - add underscore prefix
-    if message.contains("unused") {
+    // W0102 = unused-import lint (W2.3 / 1.19). W0103 reserved for
+    // unused-variable. Both trigger the underscore-prefix fix; message
+    // fallback covers any future compiler-emitted "unused" diagnostics.
+    let is_unused =
+        matches!(code, Some("W0102") | Some("W0103")) || message.contains("unused");
+    if is_unused {
         if let Some(var_name) = extract_unused_name(message) {
             if !var_name.starts_with('_') {
                 let line = get_line(text, diagnostic.range.start.line as usize);

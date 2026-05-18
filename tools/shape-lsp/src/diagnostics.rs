@@ -9,9 +9,96 @@ use shape_ast::error::{
     StructuredParseError,
 };
 use tower_lsp_server::ls_types::{
-    Diagnostic, DiagnosticRelatedInformation, DiagnosticSeverity, Location, NumberOrString,
-    Position, Range, Uri,
+    CodeDescription, Diagnostic, DiagnosticRelatedInformation, DiagnosticSeverity, DiagnosticTag,
+    Location, NumberOrString, Position, Range, Uri,
 };
+
+/// W2.3 / 1.17 — book URL base for diagnostic `codeDescription` targets.
+///
+/// Per audit `docs/cluster-audits/v0.3-lsp-feature-spec.md` row 1.17, the
+/// LSP `codeDescription.href` field points at the book page documenting
+/// the error code. The book's stable public hostname is
+/// `book.shape-lang.dev` (used throughout `../shape-web/landing/index.html`,
+/// e.g. `https://book.shape-lang.dev/getting-started/installation/`).
+///
+/// URL pattern: `{BASE}#{code}` — anchors per-code within a single
+/// appendix page. Once the dedicated error-code reference page lands in
+/// the book (W3 follow-up; the audit row notes "depends on W3 Shape Book
+/// deliverable" but defers schema design to this wave), the anchor
+/// pattern stays valid. Minimal-viable landing target today is the
+/// appendix index — clients that follow the link land on the appendix
+/// page even before the per-code section exists, matching the
+/// rust-analyzer rendering of `--explain` for unknown codes.
+const BOOK_CODE_DESCRIPTION_BASE: &str = "https://book.shape-lang.dev/appendix/error-codes/";
+
+/// W2.3 / 1.17 — build a `CodeDescription` for a Shape error code string.
+///
+/// Returns `None` if `code` is empty (defensive; every Shape error code
+/// is non-empty in practice). URL fragment is the code — e.g. `E0100` →
+/// `https://book.shape-lang.dev/appendix/error-codes/#E0100`.
+///
+/// Exposed via the module's public surface so the borrow/MIR diagnostic
+/// path and the per-validator diagnostics share one URL builder.
+pub fn code_description_for(code: &str) -> Option<CodeDescription> {
+    if code.is_empty() {
+        return None;
+    }
+    use std::str::FromStr;
+    let href_str = format!("{}#{}", BOOK_CODE_DESCRIPTION_BASE, code);
+    Uri::from_str(&href_str)
+        .ok()
+        .map(|href| CodeDescription { href })
+}
+
+/// W2.3 / 1.19 — derive LSP `DiagnosticTag`s from a shape diagnostic.
+///
+/// Currently surfaces `UNNECESSARY` for "unused" lints. Invoked at
+/// diagnostic-construction time so the tag travels with every diagnostic
+/// that has a matching code/source, regardless of which validator
+/// produced it. Empty tag vector returns `None` to keep wire format
+/// compact.
+pub fn diagnostic_tags_for(code: Option<&str>, message: &str) -> Option<Vec<DiagnosticTag>> {
+    let mut tags = Vec::new();
+    // W0102 = unused-import lint (registered in `validate_unused_imports`).
+    // W0103 reserved for future unused-variable lint. Message-based
+    // fallback catches any future compiler-emitted "unused" diagnostics
+    // without requiring per-code wiring — the tag is semantic (faded-out
+    // rendering), not behavioral, so over-tagging is acceptable.
+    let is_unused = matches!(code, Some("W0102") | Some("W0103"))
+        || message.contains("unused import")
+        || message.contains("unused variable");
+    if is_unused {
+        tags.push(DiagnosticTag::UNNECESSARY);
+    }
+    if tags.is_empty() { None } else { Some(tags) }
+}
+
+/// W2.3 — backfill `code_description` (1.17) + `tags` (1.19) on a
+/// diagnostic batch produced by the per-validator pipeline.
+///
+/// Validators in this module historically construct `Diagnostic` literals
+/// with `code_description: None` and `tags: None`. Rather than touch
+/// every literal site, this enricher runs once at the end of the
+/// semantic-diagnostics pipeline (`analysis::analyze_program_semantics`).
+/// Diagnostics with an existing `code_description` (e.g. already set by
+/// the structured-error renderer) are left untouched — this is a
+/// backfill, not an overwrite.
+pub fn enrich_diagnostics_with_code_metadata(diagnostics: &mut [Diagnostic]) {
+    for diag in diagnostics.iter_mut() {
+        if diag.code_description.is_none() {
+            if let Some(NumberOrString::String(code)) = &diag.code {
+                diag.code_description = code_description_for(code);
+            }
+        }
+        if diag.tags.is_none() {
+            let code_str = match &diag.code {
+                Some(NumberOrString::String(c)) => Some(c.as_str()),
+                _ => None,
+            };
+            diag.tags = diagnostic_tags_for(code_str, &diag.message);
+        }
+    }
+}
 
 /// LSP Error Renderer - converts structured errors to LSP Diagnostics
 pub struct LspErrorRenderer {
@@ -58,15 +145,21 @@ impl LspErrorRenderer {
             None
         };
 
+        let code_str = error.code.as_str().to_string();
+        // W2.3 / 1.17 + 1.19 — structured errors get the same metadata
+        // backfill as validator-emitted diagnostics.
+        let code_description = code_description_for(&code_str);
+        let tags = diagnostic_tags_for(Some(&code_str), &message);
+
         Diagnostic {
             range,
             severity: Some(severity),
-            code: Some(NumberOrString::String(error.code.as_str().to_string())),
-            code_description: None,
+            code: Some(NumberOrString::String(code_str)),
+            code_description,
             source: Some("shape".to_string()),
             message,
             related_information,
-            tags: None,
+            tags,
             data: None,
         }
     }
@@ -396,7 +489,11 @@ fn create_diagnostic_with_code(
     let mut diag = create_diagnostic(message, location, severity, source);
     if let Some(code) = error_code {
         diag.code = Some(NumberOrString::String(code.to_string()));
+        // W2.3 / 1.17 — attach clickable book URL for the error code.
+        diag.code_description = code_description_for(code);
     }
+    // W2.3 / 1.19 — derive UNNECESSARY tag from code/message at construction.
+    diag.tags = diagnostic_tags_for(error_code, &diag.message);
     diag
 }
 
@@ -1718,6 +1815,157 @@ fn borrow_origin_note(kind: &shape_vm::mir::analysis::BorrowErrorKind) -> String
             "non-sendable value originates here".to_string()
         }
     }
+}
+
+// ─── W2.3 / 1.19 — unused-import lint ──────────────────────────────────────
+
+/// W2.3 / 1.19 — detect unused imports and emit `W0102` diagnostics
+/// tagged with `DiagnosticTag::UNNECESSARY` (via the metadata enricher).
+///
+/// A named import (`from path use { Foo, Bar as B }`) is "unused" when
+/// the local binding (`Foo` or alias `B`) never appears as an identifier
+/// in the rest of the program. Namespace imports (`use path` /
+/// `use path as alias`) are skipped — namespace use detection requires
+/// qualified-name resolution that lives in the compiler proper and is
+/// too noisy for an LSP-side scan.
+///
+/// Annotation imports (`is_annotation`) are skipped — their use sites
+/// are `@name`-prefixed and the simple identifier scan would miss them.
+///
+/// Identifiers prefixed with `_` are intentionally-unused per convention
+/// and never flagged.
+///
+/// The detection uses both:
+/// 1. An AST visitor for `Expr::Identifier` / `Expr::FunctionCall` /
+///    `Expr::MethodCall` / `Expr::PropertyAccess` references.
+/// 2. A whole-word text-search fallback over the source outside the
+///    import statements for occurrences (type annotations, impl-block
+///    trait names, generic args) the Expr visitor doesn't reach.
+///
+/// Over-counting (false-negatives — failing to flag a truly unused
+/// import) is preferred over false-positives — flagging an actually-used
+/// import is a worse user experience than a missing diagnostic.
+pub fn validate_unused_imports(program: &Program, source: &str) -> Vec<Diagnostic> {
+    use shape_runtime::visitor::{Visitor, walk_program};
+    use std::collections::HashSet;
+
+    struct ImportInfo {
+        local_name: String,
+        span: Span,
+    }
+
+    let mut imports: Vec<ImportInfo> = Vec::new();
+    for item in &program.items {
+        if let Item::Import(import_stmt, span) = item {
+            if let shape_ast::ast::ImportItems::Named(specs) = &import_stmt.items {
+                for spec in specs {
+                    if spec.is_annotation {
+                        continue;
+                    }
+                    let local = spec.alias.clone().unwrap_or_else(|| spec.name.clone());
+                    if local.starts_with('_') {
+                        continue;
+                    }
+                    imports.push(ImportInfo {
+                        local_name: local,
+                        span: *span,
+                    });
+                }
+            }
+        }
+    }
+
+    if imports.is_empty() {
+        return Vec::new();
+    }
+
+    struct IdentCollector {
+        names: HashSet<String>,
+    }
+    impl Visitor for IdentCollector {
+        fn visit_expr(&mut self, expr: &Expr) -> bool {
+            match expr {
+                Expr::Identifier(name, _) => {
+                    self.names.insert(name.clone());
+                }
+                Expr::FunctionCall { name, .. } => {
+                    self.names.insert(name.clone());
+                }
+                Expr::MethodCall { method, .. } => {
+                    self.names.insert(method.clone());
+                }
+                Expr::PropertyAccess { property, .. } => {
+                    self.names.insert(property.clone());
+                }
+                _ => {}
+            }
+            true
+        }
+    }
+
+    let mut collector = IdentCollector {
+        names: HashSet::new(),
+    };
+    walk_program(&mut collector, program);
+
+    let mut diagnostics = Vec::new();
+    for info in &imports {
+        if collector.names.contains(&info.local_name) {
+            continue;
+        }
+        if source_references_name_outside_span(source, &info.local_name, info.span) {
+            continue;
+        }
+        let range = span_to_range(source, &info.span);
+        let diag = Diagnostic {
+            range,
+            severity: Some(DiagnosticSeverity::WARNING),
+            code: Some(NumberOrString::String("W0102".to_string())),
+            code_description: code_description_for("W0102"),
+            source: Some("shape".to_string()),
+            message: format!(
+                "unused import '{}': the imported symbol is never referenced in this file",
+                info.local_name
+            ),
+            related_information: None,
+            tags: Some(vec![DiagnosticTag::UNNECESSARY]),
+            data: None,
+        };
+        diagnostics.push(diag);
+    }
+    diagnostics
+}
+
+/// Whole-word text search for `name` in `source`, excluding bytes
+/// covered by `exclude_span` (the import statement itself). Used as a
+/// fallback by `validate_unused_imports` for occurrences (type
+/// annotations, impl-block trait names, generic args) the Expr visitor
+/// doesn't reach.
+fn source_references_name_outside_span(source: &str, name: &str, exclude_span: Span) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    let bytes = source.as_bytes();
+    let name_bytes = name.as_bytes();
+    let mut i = 0usize;
+    while i + name_bytes.len() <= bytes.len() {
+        if i >= exclude_span.start && i < exclude_span.end {
+            i = exclude_span.end;
+            continue;
+        }
+        let prev_is_word = i > 0 && is_ident_byte(bytes[i - 1]);
+        let next_idx = i + name_bytes.len();
+        let next_is_word = next_idx < bytes.len() && is_ident_byte(bytes[next_idx]);
+        if !prev_is_word && !next_is_word && &bytes[i..next_idx] == name_bytes {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
 }
 
 #[cfg(test)]
