@@ -5,10 +5,11 @@
 
 use crate::annotation_discovery::AnnotationDiscovery;
 use crate::diagnostics::{
-    error_to_diagnostic, validate_annotations, validate_async_join,
-    validate_async_structured_concurrency, validate_comptime_builtins_context,
-    validate_comptime_overrides, validate_comptime_side_effects, validate_content_strings,
-    validate_foreign_function_types, validate_interpolation_format_specs, validate_trait_bounds,
+    enrich_diagnostics_with_code_metadata, error_to_diagnostic, validate_annotations,
+    validate_async_join, validate_async_structured_concurrency,
+    validate_comptime_builtins_context, validate_comptime_overrides,
+    validate_comptime_side_effects, validate_content_strings, validate_foreign_function_types,
+    validate_interpolation_format_specs, validate_trait_bounds, validate_unused_imports,
 };
 use crate::module_cache::ModuleCache;
 use crate::scope::ScopeTree;
@@ -49,6 +50,8 @@ pub fn analyze_program_semantics(
     diagnostics.extend(validate_trait_bounds(program, text));
     diagnostics.extend(validate_content_strings(program, text));
     diagnostics.extend(validate_foreign_function_types(program, text));
+    // W2.3 / 1.19 — unused-import lint emits W0102 with DiagnosticTag::UNNECESSARY.
+    diagnostics.extend(validate_unused_imports(program, text));
 
     let mut compiler = shape_vm::BytecodeCompiler::new();
     compiler.set_type_diagnostic_mode(shape_vm::compiler::TypeDiagnosticMode::RecoverAll);
@@ -72,6 +75,12 @@ pub fn analyze_program_semantics(
     }
 
     dedupe_and_cap_diagnostics(&mut diagnostics);
+    // W2.3 / 1.17 + 1.19 — backfill code_description (book URL) + tags
+    // (UNNECESSARY for unused) on every diagnostic emitted by validators
+    // that construct `Diagnostic { code_description: None, tags: None, .. }`
+    // literals. Single backfill at pipeline exit avoids touching ~19
+    // per-validator construction sites.
+    enrich_diagnostics_with_code_metadata(&mut diagnostics);
     diagnostics
 }
 

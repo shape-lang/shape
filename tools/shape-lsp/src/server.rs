@@ -42,28 +42,31 @@ use tower_lsp_server::ls_types::{
     CallHierarchyServerCapability, CodeActionKind, CodeActionOptions, CodeActionParams,
     CodeActionProviderCapability, CodeActionResponse, CodeLens, CodeLensOptions, CodeLensParams,
     CompletionItem, CompletionOptions, CompletionParams, CompletionResponse, DeclarationCapability,
-    Diagnostic, DiagnosticSeverity, DidChangeConfigurationParams, DidChangeTextDocumentParams,
-    DidChangeWatchedFilesParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    DocumentFormattingParams, DocumentHighlight, DocumentHighlightParams, DocumentLink,
-    DocumentLinkOptions, DocumentLinkParams, DocumentOnTypeFormattingOptions,
-    DocumentOnTypeFormattingParams, DocumentRangeFormattingParams, DocumentSymbolParams,
-    DocumentSymbolResponse, ExecuteCommandOptions, ExecuteCommandParams, FileChangeType,
-    FileOperationFilter, FileOperationPattern, FileOperationPatternKind,
-    FileOperationRegistrationOptions, FoldingRange, FoldingRangeParams,
-    FoldingRangeProviderCapability, GotoDefinitionParams, GotoDefinitionResponse, Hover,
-    HoverParams, HoverProviderCapability, ImplementationProviderCapability, InitializeParams,
-    InitializeResult, InitializedParams, InlayHint, InlayHintOptions, InlayHintParams,
-    InlayHintServerCapabilities, LSPAny, Location, MessageType, OneOf, Position,
-    PrepareRenameResponse, Range, ReferenceParams, RenameFilesParams, RenameOptions, RenameParams,
+    Diagnostic, DiagnosticOptions, DiagnosticServerCapabilities, DiagnosticSeverity,
+    DidChangeConfigurationParams, DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
+    DidCloseTextDocumentParams, DidOpenTextDocumentParams, DocumentDiagnosticParams,
+    DocumentDiagnosticReport, DocumentDiagnosticReportResult, DocumentFormattingParams,
+    DocumentHighlight, DocumentHighlightParams, DocumentLink, DocumentLinkOptions,
+    DocumentLinkParams, DocumentOnTypeFormattingOptions, DocumentOnTypeFormattingParams,
+    DocumentRangeFormattingParams, DocumentSymbolParams, DocumentSymbolResponse,
+    ExecuteCommandOptions, ExecuteCommandParams, FileChangeType, FileOperationFilter,
+    FileOperationPattern, FileOperationPatternKind, FileOperationRegistrationOptions,
+    FoldingRange, FoldingRangeParams, FoldingRangeProviderCapability, FullDocumentDiagnosticReport,
+    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability,
+    ImplementationProviderCapability, InitializeParams, InitializeResult, InitializedParams,
+    InlayHint, InlayHintOptions, InlayHintParams, InlayHintServerCapabilities, LSPAny, Location,
+    MessageType, OneOf, Position, PrepareRenameResponse, Range, ReferenceParams,
+    RelatedFullDocumentDiagnosticReport, RenameFilesParams, RenameOptions, RenameParams,
     SemanticToken, SemanticTokens, SemanticTokensDelta, SemanticTokensDeltaParams,
     SemanticTokensEdit, SemanticTokensFullDeltaResult, SemanticTokensFullOptions,
     SemanticTokensOptions, SemanticTokensParams, SemanticTokensRangeParams,
     SemanticTokensRangeResult, SemanticTokensResult, SemanticTokensServerCapabilities,
     ServerCapabilities, ServerInfo, SignatureHelp, SignatureHelpOptions, SignatureHelpParams,
     TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit,
-    TypeDefinitionProviderCapability, Uri, WorkDoneProgressOptions,
-    WorkspaceFileOperationsServerCapabilities, WorkspaceEdit, WorkspaceServerCapabilities,
-    WorkspaceSymbolParams, WorkspaceSymbolResponse,
+    TypeDefinitionProviderCapability, Uri, WorkDoneProgressOptions, WorkspaceDiagnosticParams,
+    WorkspaceDiagnosticReport, WorkspaceDiagnosticReportResult, WorkspaceDocumentDiagnosticReport,
+    WorkspaceFileOperationsServerCapabilities, WorkspaceEdit, WorkspaceFullDocumentDiagnosticReport,
+    WorkspaceServerCapabilities, WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
 use tower_lsp_server::{Client, LanguageServer, jsonrpc::Result};
 
@@ -215,6 +218,48 @@ impl ShapeLanguageServer {
         self.client
             .publish_diagnostics(uri.clone(), diagnostics, None)
             .await;
+    }
+
+    /// W2.3 / 1.73 + 1.74 — compute the diagnostic list for a URI on
+    /// demand (without publishing). Used by the
+    /// `textDocument/diagnostic` + `workspace/diagnostic` pull handlers.
+    ///
+    /// Runs the same parse + semantic-analysis pipeline as the push
+    /// path (`analyze_document`) so push-mode and pull-mode produce
+    /// identical reports for the same source. This bypasses the
+    /// `publish_diagnostics` send and the parse-result caching side
+    /// effects so the pull handler is a true read-only operation
+    /// against the currently-tracked document text.
+    async fn compute_pull_diagnostics(&self, uri: &Uri) -> Vec<Diagnostic> {
+        let Some(doc) = self.documents.get(uri) else {
+            return Vec::new();
+        };
+        let text = doc.text();
+
+        // Parse (resilient — we only need diagnostics, not cache).
+        let parse_source = mask_leading_prefix_for_parse(&text, 0);
+        match parse_program(parse_source.as_ref()) {
+            Ok(program) => {
+                let module_cache = self.documents.get_module_cache();
+                let mut diagnostics = crate::analysis::analyze_program_semantics(
+                    &program,
+                    &text,
+                    uri.to_file_path().as_deref(),
+                    Some(&module_cache),
+                    self.project_root.get().map(|p| p.as_path()),
+                );
+                diagnostics.extend(crate::doc_diagnostics::validate_program_docs(
+                    &program,
+                    &text,
+                    Some(&module_cache),
+                    uri.to_file_path().as_deref(),
+                    self.project_root.get().map(|p| p.as_path()),
+                ));
+                diagnostics.extend(self.foreign_lsp.get_diagnostics(uri.as_str()).await);
+                diagnostics
+            }
+            Err(error) => error_to_diagnostic(&error),
+        }
     }
 
     /// Analyze a document and publish diagnostics
@@ -675,6 +720,32 @@ impl LanguageServer for ShapeLanguageServer {
                         work_done_progress: None,
                     },
                 }),
+
+                // W2.3 / 1.73 + 1.74: pull-based diagnostics —
+                // `textDocument/diagnostic` + `workspace/diagnostic`.
+                //
+                // Shape's primary delivery is still push-based
+                // `publishDiagnostics` (LSP 3.0; preserved at
+                // `analyze_document::publish_diagnostics`). This
+                // capability declares the LSP 3.17 pull surface
+                // alongside it so power editors (Helix, Zed, recent
+                // Neovim) can opt into pull-mode. `inter_file_dependencies:
+                // true` because Shape's module imports mean editing one
+                // file can change diagnostics in another (matches
+                // rust-analyzer's setting). `workspace_diagnostics:
+                // true` advertises the `workspace/diagnostic` companion
+                // pull. `identifier: "shape"` tags the result so clients
+                // multiplexing reports across servers can route them.
+                diagnostic_provider: Some(DiagnosticServerCapabilities::Options(
+                    DiagnosticOptions {
+                        identifier: Some("shape".to_string()),
+                        inter_file_dependencies: true,
+                        workspace_diagnostics: true,
+                        work_done_progress_options: WorkDoneProgressOptions {
+                            work_done_progress: None,
+                        },
+                    },
+                )),
 
                 // W2.7 / 1.72: workspace.file_operations.will_rename —
                 // before files are renamed, return a `WorkspaceEdit` that
@@ -1581,6 +1652,69 @@ impl LanguageServer for ShapeLanguageServer {
         } else {
             Ok(Some(actions))
         }
+    }
+
+    /// W2.3 / 1.73 — pull-based diagnostics
+    /// (`textDocument/diagnostic`).
+    ///
+    /// Computes diagnostics for a single document on demand. Mirrors the
+    /// existing push-based `analyze_document` pipeline (parse + semantic
+    /// analyze + frontmatter + foreign-LSP merge) so push and pull
+    /// produce identical reports for the same source. Returns a
+    /// `RelatedFullDocumentDiagnosticReport`; we don't currently support
+    /// `Unchanged` reports (would require diagnostic result-id caching
+    /// per document version — follow-up tier, not parity-blocking).
+    async fn diagnostic(
+        &self,
+        params: DocumentDiagnosticParams,
+    ) -> Result<DocumentDiagnosticReportResult> {
+        let uri = params.text_document.uri;
+
+        let items = self.compute_pull_diagnostics(&uri).await;
+
+        Ok(DocumentDiagnosticReportResult::Report(
+            DocumentDiagnosticReport::Full(RelatedFullDocumentDiagnosticReport {
+                related_documents: None,
+                full_document_diagnostic_report: FullDocumentDiagnosticReport {
+                    result_id: None,
+                    items,
+                },
+            }),
+        ))
+    }
+
+    /// W2.3 / 1.74 — workspace-wide pull diagnostics
+    /// (`workspace/diagnostic`).
+    ///
+    /// Returns full diagnostic reports for every open document. Closed
+    /// workspace files are NOT walked from disk here — the LSP spec
+    /// allows servers to scope workspace pull to documents the server
+    /// already has materialized analyses for, which keeps cost bounded
+    /// and avoids re-parsing the whole workspace on every refresh
+    /// request. The W2.6/W2.7 workspace-enumeration infra
+    /// (`ModuleCache::enumerate_workspace_shape_files`) is reserved for
+    /// the eager-indexing follow-up.
+    async fn workspace_diagnostic(
+        &self,
+        _params: WorkspaceDiagnosticParams,
+    ) -> Result<WorkspaceDiagnosticReportResult> {
+        let mut items: Vec<WorkspaceDocumentDiagnosticReport> = Vec::new();
+        for uri in self.documents.all_uris() {
+            let diags = self.compute_pull_diagnostics(&uri).await;
+            items.push(WorkspaceDocumentDiagnosticReport::Full(
+                WorkspaceFullDocumentDiagnosticReport {
+                    uri,
+                    version: None,
+                    full_document_diagnostic_report: FullDocumentDiagnosticReport {
+                        result_id: None,
+                        items: diags,
+                    },
+                },
+            ));
+        }
+        Ok(WorkspaceDiagnosticReportResult::Report(
+            WorkspaceDiagnosticReport { items },
+        ))
     }
 
     async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
