@@ -1023,8 +1023,8 @@ fn test_extend_generic_type() {
 fn test_trait_basic() {
     let content = r#"
         trait Queryable {
-            filter(predicate: (T) => bool): Self,
-            execute(): Result<Table>
+            method filter(predicate: (T) => bool) -> Self;
+            method execute() -> Result<Table>;
         }
     "#;
     let result = parse_program_helper(content);
@@ -1049,8 +1049,8 @@ fn test_trait_basic() {
 fn test_trait_with_type_params() {
     let content = r#"
         trait Queryable<T> {
-            filter(predicate: (T) => bool): Self,
-            execute(): Result<Table<T>>
+            method filter(predicate: (T) => bool) -> Self;
+            method execute() -> Result<Table<T>>;
         }
     "#;
     let result = parse_program_helper(content);
@@ -1073,7 +1073,7 @@ fn test_trait_with_type_params() {
 fn test_trait_with_supertrait_colon_syntax() {
     let content = r#"
         trait AdvancedQueryable<T>: Queryable<T> {
-            groupBy(column: string): Self
+            method groupBy(column: string) -> Self;
         }
     "#;
     let result = parse_program_helper(content);
@@ -1103,7 +1103,7 @@ fn test_trait_with_supertrait_colon_syntax() {
 fn test_trait_with_multiple_supertraits() {
     let content = r#"
         trait Foo: Bar + Baz {
-            method(self): int
+            method method() -> int
         }
     "#;
     let result = parse_program_helper(content);

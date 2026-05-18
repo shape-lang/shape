@@ -27,5 +27,5 @@
 trait Not {
     /// Return the negation of `self`. By convention the result is a
     /// fresh value of the same type.
-    not(): Self
+    method not() -> Self;
 }

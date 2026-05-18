@@ -66,7 +66,7 @@
 trait Shl {
     /// Return `self << other`. By convention the result is a fresh
     /// value; in-place mutation belongs to `ShlAssign::shl_assign`.
-    shl(other: Self): Self
+    method shl(other: Self) -> Self;
 }
 
 /// Operator trait for `>>`. Implementing `Shr` for a user-defined type
@@ -76,7 +76,7 @@ trait Shl {
 trait Shr {
     /// Return `self >> other`. By convention the result is a fresh
     /// value; in-place mutation belongs to `ShrAssign::shr_assign`.
-    shr(other: Self): Self
+    method shr(other: Self) -> Self;
 }
 
 /// Operator trait for `<<=`. The grammar desugars `a <<= b` to
@@ -91,7 +91,7 @@ trait Shr {
 trait ShlAssign {
     /// Mutate `self` in place by computing `self << other`. Return
     /// `self` for chaining.
-    shl_assign(other: Self): Self
+    method shl_assign(other: Self) -> Self;
 }
 
 /// Operator trait for `>>=`. The grammar desugars `a >>= b` to
@@ -106,5 +106,5 @@ trait ShlAssign {
 trait ShrAssign {
     /// Mutate `self` in place by computing `self >> other`. Return
     /// `self` for chaining.
-    shr_assign(other: Self): Self
+    method shr_assign(other: Self) -> Self;
 }

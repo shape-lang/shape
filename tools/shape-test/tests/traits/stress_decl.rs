@@ -14,7 +14,7 @@ fn trait_single_required_method() {
     ShapeTest::new(
         r#"
         trait Printable {
-            display(self): string
+            method display() -> string;
         }
         42
     "#,
@@ -28,9 +28,9 @@ fn trait_multiple_required_methods() {
     ShapeTest::new(
         r#"
         trait Shape {
-            area(self): number,
-            perimeter(self): number,
-            name(self): string
+            method area() -> number;
+            method perimeter() -> number;
+            method name() -> string;
         }
         1
     "#,
@@ -56,7 +56,7 @@ fn trait_method_with_params() {
     ShapeTest::new(
         r#"
         trait Transformer {
-            transform(self, x: number): number
+            method transform(x: number) -> number;
         }
         1
     "#,
@@ -70,7 +70,7 @@ fn trait_method_returns_bool() {
     ShapeTest::new(
         r#"
         trait Validator {
-            is_valid(self): bool
+            method is_valid() -> bool;
         }
         true
     "#,
@@ -84,7 +84,7 @@ fn trait_method_returns_int() {
     ShapeTest::new(
         r#"
         trait Countable {
-            count(self): int
+            method count() -> int;
         }
         7
     "#,
@@ -102,8 +102,8 @@ fn trait_members_separated_by_semicolons() {
     ShapeTest::new(
         r#"
         trait Shape {
-            area(self): number;
-            name(self): string;
+            method area() -> number;
+            method name() -> string;
         }
         1
     "#,
@@ -117,8 +117,8 @@ fn trait_members_separated_by_commas() {
     ShapeTest::new(
         r#"
         trait Shape {
-            area(self): number,
-            name(self): string
+            method area() -> number;
+            method name() -> string;
         }
         1
     "#,
@@ -135,8 +135,8 @@ fn trait_members_separated_by_commas() {
 fn trait_extends_is_rejected() {
     ShapeTest::new(
         r#"
-        trait Base { base_method(self): string }
-        trait Derived extends Base { derived_method(self): string }
+        trait Base { method base_method() -> string }
+        trait Derived extends Base { method derived_method() -> string }
         1
     "#,
     )
@@ -154,7 +154,7 @@ fn trait_with_type_param() {
     ShapeTest::new(
         r#"
         trait Boxed<T> {
-            contents(self): T
+            method contents() -> T;
         }
         impl Boxed<number> for number {
             method contents() { self }
@@ -172,8 +172,8 @@ fn trait_with_type_param_compiles() {
     ShapeTest::new(
         r#"
         trait Queryable<T> {
-            filter(predicate): any,
-            execute(): any
+            method filter(predicate) -> any;
+            method execute() -> any;
         }
         1
     "#,
@@ -191,7 +191,7 @@ fn trait_no_self_param() {
     ShapeTest::new(
         r#"
         trait Factory {
-            create(): any
+            method create() -> any;
         }
         1
     "#,
@@ -205,7 +205,7 @@ fn trait_method_no_return_type() {
     ShapeTest::new(
         r#"
         trait Processor {
-            process(self, data: string): any
+            method process(data: string) -> any;
         }
         1
     "#,
@@ -223,8 +223,8 @@ fn trait_declaration_only() {
     ShapeTest::new(
         r#"
         trait Serializable {
-            serialize(self): string,
-            deserialize(data: string): any
+            method serialize() -> string;
+            method deserialize(data: string) -> any;
         }
         "ok"
     "#,
@@ -241,10 +241,10 @@ fn trait_declaration_only() {
 fn multiple_trait_declarations() {
     ShapeTest::new(
         r#"
-        trait A { a_method(self): int }
-        trait B { b_method(self): int }
-        trait C { c_method(self): string }
-        trait D { d_method(self): bool }
+        trait A { method a_method() -> int }
+        trait B { method b_method() -> int }
+        trait C { method c_method() -> string }
+        trait D { method d_method() -> bool }
         "all declared"
     "#,
     )
@@ -260,7 +260,7 @@ fn multiple_trait_declarations() {
 fn impl_with_where_clause_compiles() {
     ShapeTest::new(
         r#"
-        trait Printable { show(self): string }
+        trait Printable { method show() -> string }
         type Container { val: int }
         impl Printable for Container where Container: Printable {
             method show() { "container" }

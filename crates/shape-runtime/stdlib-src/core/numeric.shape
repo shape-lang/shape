@@ -4,8 +4,8 @@
 /// `int` is an alias for i64, `number` is an alias for f64.
 
 trait Numeric {
-    zero(): Self
-    one(): Self
+    method zero() -> Self;
+    method one() -> Self;
 }
 
 impl Numeric for i8 {

@@ -12,7 +12,7 @@ fn call_trait_method_on_instance() {
         r#"
         type Animal { kind: string, sound: string }
         trait Speak {
-            speak(self): string
+            method speak() -> string;
         }
         impl Speak for Animal {
             method speak() { self.kind + " says " + self.sound }
@@ -30,7 +30,7 @@ fn call_trait_method_print_output() {
         r#"
         type Product { name: string, price: number }
         trait Labelable {
-            label(self): string
+            method label() -> string;
         }
         impl Labelable for Product {
             method label() { self.name + " $" + self.price }
@@ -51,7 +51,7 @@ fn same_trait_different_types_dispatch() {
     ShapeTest::new(
         r#"
         trait Summarize {
-            summary(self): string
+            method summary() -> string;
         }
         type Book { title: string }
         type Movie { title: string }
@@ -79,7 +79,7 @@ fn bounded_function_dispatches_trait_method() {
     ShapeTest::new(
         r#"
         trait Describable {
-            describe(self): string
+            method describe() -> string;
         }
         type Color { name: string }
         impl Describable for Color {
@@ -104,7 +104,7 @@ fn trait_method_result_used_in_expression() {
         r#"
         type Score { value: int }
         trait Evaluable {
-            evaluate(self): int
+            method evaluate() -> int;
         }
         impl Evaluable for Score {
             method evaluate() { self.value * 2 }
@@ -122,7 +122,7 @@ fn trait_method_bool_check() {
         r#"
         type Container { items: int }
         trait Emptyable {
-            empty(self): bool
+            method empty() -> bool;
         }
         impl Emptyable for Container {
             method empty() { self.items == 0 }
@@ -144,8 +144,8 @@ fn impl_with_multiple_methods_dispatch() {
         r#"
         type Vec2 { x: number, y: number }
         trait Geometry {
-            mag_sq(self): number;
-            is_zero(self): bool
+            method mag_sq() -> number;
+            method is_zero() -> bool;
         }
         impl Geometry for Vec2 {
             method mag_sq() { self.x * self.x + self.y * self.y }

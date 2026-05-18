@@ -180,10 +180,11 @@ trait_bound_list = {
 }
 
 trait_member_signature = {
-    // Property signature
+    // Property signature (colon = type annotation, Rust-shaped: binds name to type)
     (ident | keyword) ~ "?"? ~ ":" ~ type_annotation
-    // Method signature: return type optional (defaults to `void`/Unit when omitted)
-    | (ident | keyword) ~ "?"? ~ "(" ~ type_param_list? ~ ")" ~ (":" ~ type_annotation)?
+    // Method signature: `fn` keyword required + arrow return type (Rust-shaped).
+    // Colon-as-return-type (TypeScript-shaped) is intentionally unsupported.
+    | "async"? ~ ("method" | "fn") ~ (ident | keyword) ~ "?"? ~ type_params? ~ "(" ~ function_params? ~ ")" ~ when_clause? ~ return_type?
     // Index signature
     | "[" ~ ident ~ ":" ~ ("string" | "number") ~ "]" ~ ":" ~ type_annotation
 }

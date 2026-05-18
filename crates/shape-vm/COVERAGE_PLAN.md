@@ -24,7 +24,7 @@ These rules are internal implementation details and don't need direct tests:
 | `function_type` | `type Handler = (x: number) => string;` | Medium |
 | `union_type` | `type Result = Success \| Error;` | Medium |
 | `optional_type` | `let x: number?;` | Medium |
-| `type_param`, `type_param_name`, `type_params` | `function map<T, U>(arr: T[]): U[]` | Medium |
+| `type_param`, `type_param_name`, `type_params` | `fn map<T, U>(arr: Array<T>) -> Array<U>` | Medium |
 | `supertrait_list` | `trait Square: Shape {}` | Medium |
 | `non_array_type` | (internal helper) | Skip |
 

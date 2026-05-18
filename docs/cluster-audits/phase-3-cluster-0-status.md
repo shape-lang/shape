@@ -4945,7 +4945,7 @@ shell wrapper per `reference_phase2d_devenv.md`).
 | 1 (scalar loop) | `for i in 0..100 { sum += i }; print(sum)` | ✅ `4950` | ✅ `4950` |
 | 2 canonical (kickoff) | `[1,2,3,4,5].map(\|x\|x*2).sum()` | ✅ `30` | ❌ `Route A surface-and-stop: NotImplemented(SURFACE) — print Call-terminator operand NativeKind is None` |
 | 2 simplified | `[1,2,3,4,5].sum()` | ❌ runtime error `__intrinsic_sum: HeapKind::TypedArray, got UInt64` | ✅ `15` (per S1-reopen agent verification at baseline) |
-| 3 (trait dispatch) | `trait T { name(self): string } ... t.name()` | ✅ `x` | ❌ Segfault per W17-narrow-follow-up-B null-handling gap. **γ.3 disproven** (R16 dispatch hypothesis: "follow-up-A's schema-id fix renders TAG_NULL fallthrough unreachable for Smoke 3" did NOT hold post-A-merge); per R18 close supervisor disposition, **C dispatches in R19 as cluster-0 scope** (NOT cluster-1 deferral — that framing is the W-series declare-victory pattern at the sub-cluster-disposition layer, refused on sight per CLAUDE.md). |
+| 3 (trait dispatch) | `trait T { fn name(self) -> string; } ... t.name()` | ✅ `x` | ❌ Segfault per W17-narrow-follow-up-B null-handling gap. **γ.3 disproven** (R16 dispatch hypothesis: "follow-up-A's schema-id fix renders TAG_NULL fallthrough unreachable for Smoke 3" did NOT hold post-A-merge); per R18 close supervisor disposition, **C dispatches in R19 as cluster-0 scope** (NOT cluster-1 deferral — that framing is the W-series declare-victory pattern at the sub-cluster-disposition layer, refused on sight per CLAUDE.md). |
 | 4 (HashSet/Set) | `Set(); .add("a"); .add("b"); .size()` | (kickoff-prompt syntax discrepancy — see below) | (same) |
 
 ### Supervisor's canonical Smoke 2 verification: PASSES

@@ -24,7 +24,7 @@ fn bounded_generic_calls_trait_method() {
     ShapeTest::new(
         r#"
         trait Describable {
-            describe(self): string
+            method describe() -> string;
         }
 
         type Item { name: string }

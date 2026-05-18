@@ -52,5 +52,5 @@
 trait Eq {
     /// Return `true` when `self` and `other` are equal. By convention
     /// the relation should be reflexive, symmetric, and transitive.
-    eq(other: Self): bool
+    method eq(other: Self) -> bool;
 }

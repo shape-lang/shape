@@ -182,7 +182,7 @@ fn type_with_both_custom_trait_and_operator_trait() {
     ShapeTest::new(
         r#"
         type Money { cents: int }
-        trait Printable { label(self): string }
+        trait Printable { method label() -> string }
         impl Printable for Money {
             method label() { "Money" }
         }
@@ -206,7 +206,7 @@ fn type_with_display_and_operator() {
     ShapeTest::new(
         r#"
         type Vec2 { x: number, y: number }
-        trait Display { display(self): string }
+        trait Display { method display() -> string }
         impl Display for Vec2 {
             method display() {
                 "Vec2(" + self.x.to_string() + ", " + self.y.to_string() + ")"
@@ -356,7 +356,7 @@ fn display_trait_basic() {
     ShapeTest::new(
         r#"
         type User { name: string }
-        trait Display { display(self): string }
+        trait Display { method display() -> string }
         impl Display for User {
             method display() { "User:" + self.name }
         }
@@ -373,7 +373,7 @@ fn display_trait_with_multiple_fields() {
     ShapeTest::new(
         r#"
         type Point { x: number, y: number }
-        trait Display { display(self): string }
+        trait Display { method display() -> string }
         impl Display for Point {
             method display() {
                 "(" + self.x.to_string() + ", " + self.y.to_string() + ")"
@@ -396,7 +396,7 @@ fn named_impl_basic() {
     ShapeTest::new(
         r#"
         type User { name: string }
-        trait Display { display(self): string }
+        trait Display { method display() -> string }
         impl Display for User {
             method display() { "default:" + self.name }
         }
@@ -420,7 +420,7 @@ fn display_trait_to_string_numeric() {
     ShapeTest::new(
         r#"
         type Counter { count: int }
-        trait Display { display(self): string }
+        trait Display { method display() -> string }
         impl Display for Counter {
             method display() { "Count: " + self.count.to_string() }
         }
@@ -441,7 +441,7 @@ fn display_trait_with_formatting() {
     ShapeTest::new(
         r#"
         type Coord { lat: number, lon: number }
-        trait Display { display(self): string }
+        trait Display { method display() -> string }
         impl Display for Coord {
             method display() {
                 "(" + self.lat.to_string() + ", " + self.lon.to_string() + ")"
@@ -464,7 +464,7 @@ fn generic_function_with_trait_bound() {
     ShapeTest::new(
         r#"
         trait NumericLike {
-            to_number(): number
+            method to_number() -> number;
         }
         impl NumericLike for number {
             method to_number() { self }
@@ -485,7 +485,7 @@ fn trait_bound_with_custom_type() {
         r#"
         type Wrapper { val: number }
         trait HasValue {
-            value(self): number
+            method value() -> number;
         }
         impl HasValue for Wrapper {
             method value() { self.val }
@@ -572,7 +572,7 @@ fn operator_and_display_on_same_type() {
     ShapeTest::new(
         r#"
         type Fraction { num: int, den: int }
-        trait Display { display(self): string }
+        trait Display { method display() -> string }
         impl Display for Fraction {
             method display() {
                 self.num.to_string() + "/" + self.den.to_string()

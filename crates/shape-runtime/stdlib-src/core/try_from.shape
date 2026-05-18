@@ -9,5 +9,5 @@
 /// @see std::core::try_into::TryInto
 trait TryFrom<Source> {
     /// Attempt to convert `value` into `Self`.
-    tryFrom(value: Source): Result<Self, AnyError>
+    method tryFrom(value: Source) -> Result<Self, AnyError>;
 }

@@ -11,7 +11,7 @@ fn trait_default_method_parses() {
     ShapeTest::new(
         r#"
         trait Queryable {
-            filter(pred): any;
+            method filter(pred) -> any;
             method execute() {
                 return self
             }
@@ -72,7 +72,7 @@ fn trait_mixed_required_and_default_parses() {
     ShapeTest::new(
         r#"
         trait Serializable {
-            serialize(self): string;
+            method serialize() -> string;
             method content_type() {
                 return "application/json"
             }
@@ -105,7 +105,7 @@ fn trait_default_method_with_conditional_parses() {
     ShapeTest::new(
         r#"
         trait Validator {
-            validate(self): bool;
+            method validate() -> bool;
             method is_valid() {
                 if self.validate() { return "valid" } else { return "invalid" }
             }

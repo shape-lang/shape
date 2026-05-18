@@ -2287,7 +2287,7 @@ impl Queryable for MyQ {
     #[test]
     fn test_extract_type_methods_trait_only() {
         // A trait definition alone should NOT pollute any type
-        let code = "trait Foo {\n  bar(): any\n}\n";
+        let code = "trait Foo {\n  method bar() -> any\n}\n";
         let program = parse_program(code).unwrap();
         let methods = extract_type_methods(&program);
         assert!(
@@ -2299,8 +2299,8 @@ impl Queryable for MyQ {
     #[test]
     fn test_extract_type_methods_multiple_impls() {
         let code = r#"
-trait A { a1(): any }
-trait B { b1(): any }
+trait A { method a1() -> any }
+trait B { method b1() -> any }
 impl A for X { method a1() { self } }
 impl B for X { method b1() { self } }
 "#;

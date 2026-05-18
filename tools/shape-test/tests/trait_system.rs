@@ -9,18 +9,18 @@ use shape_test::shape_test::{ShapeTest, pos};
 
 #[test]
 fn trait_definition_parses() {
-    ShapeTest::new("trait Printable {\n    display(self): string\n}").expect_parse_ok();
+    ShapeTest::new("trait Printable {\n    method display() -> string\n}").expect_parse_ok();
 }
 
 #[test]
 fn trait_with_multiple_methods_parses() {
-    let code = "trait Collection {\n    size(self): int;\n    is_empty(self): bool;\n    first(self): any\n}";
+    let code = "trait Collection {\n    method size() -> int;\n    method is_empty() -> bool;\n    method first() -> any\n}";
     ShapeTest::new(code).expect_parse_ok();
 }
 
 #[test]
 fn trait_with_type_param_bounds_parses() {
-    ShapeTest::new("trait Distributable<T: Serializable> {\n    wire_size(self): int\n}")
+    ShapeTest::new("trait Distributable<T: Serializable> {\n    method wire_size() -> int\n}")
         .expect_parse_ok();
 }
 
@@ -34,13 +34,13 @@ fn trait_with_default_method_parses() {
 
 #[test]
 fn impl_block_parses() {
-    let code = "trait Foo {\n    bar(self): number\n}\n\nimpl Foo for MyType {\n    method bar() { return 42; }\n}";
+    let code = "trait Foo {\n    method bar() -> number\n}\n\nimpl Foo for MyType {\n    method bar() { return 42; }\n}";
     ShapeTest::new(code).expect_parse_ok();
 }
 
 #[test]
 fn impl_block_with_multiple_methods_parses() {
-    let code = "trait Collection {\n    size(self): int;\n    is_empty(self): bool\n}\nimpl Collection for MyList {\n    method size() { return 0; }\n    method is_empty() { return true; }\n}";
+    let code = "trait Collection {\n    method size() -> int;\n    method is_empty() -> bool\n}\nimpl Collection for MyList {\n    method size() { return 0; }\n    method is_empty() { return true; }\n}";
     ShapeTest::new(code).expect_parse_ok();
 }
 
@@ -68,21 +68,21 @@ fn where_clause_multiple_bounds_parses() {
 fn associated_type_parses() {
     // Associated type declarations parse; Self.Item syntax is not yet supported,
     // so we test the type declaration itself with a simple return type.
-    ShapeTest::new("trait Iterator {\n    type Item;\n    next(self): any\n}").expect_parse_ok();
+    ShapeTest::new("trait Iterator {\n    type Item;\n    method next() -> any\n}").expect_parse_ok();
 }
 
 // -- Trait semantic tokens --------------------------------------------------
 
 #[test]
 fn semantic_tokens_for_trait_keyword() {
-    ShapeTest::new("trait Printable {\n    display(self): string\n}")
+    ShapeTest::new("trait Printable {\n    method display() -> string\n}")
         .expect_semantic_tokens()
         .expect_semantic_tokens_min(2); // trait keyword + trait name
 }
 
 #[test]
 fn semantic_tokens_for_impl_keyword() {
-    let code = "trait Foo {\n    bar(self): number\n}\nimpl Foo for MyType {\n    method bar() { return 42; }\n}";
+    let code = "trait Foo {\n    method bar() -> number\n}\nimpl Foo for MyType {\n    method bar() { return 42; }\n}";
     ShapeTest::new(code)
         .expect_semantic_tokens()
         .expect_semantic_tokens_min(6); // trait, Foo, impl, Foo, for, MyType, ...
@@ -94,7 +94,7 @@ fn semantic_tokens_for_impl_keyword() {
 fn hover_on_trait_name_shows_trait_info() {
     // Hover on "display" method inside trait should produce hover info.
     // Note: hovering on the trait name itself is not yet supported.
-    ShapeTest::new("trait Printable {\n    display(self): string\n}\nlet x = \"hello\"")
+    ShapeTest::new("trait Printable {\n    method display() -> string\n}\nlet x = \"hello\"")
         .at(pos(3, 4))
         .expect_hover_contains("string");
 }
@@ -155,7 +155,7 @@ fn code_lens_on_trait_definition() {
 
 #[test]
 fn trait_bound_completion_suggests_traits() {
-    let code = "trait Comparable {\n    compare(other): number\n}\ntrait Displayable {\n    display(): string\n}\nfn foo<T: >(x: T) {\n    x\n}";
+    let code = "trait Comparable {\n    compare(other): number\n}\ntrait Displayable {\n    method display() -> string\n}\nfn foo<T: >(x: T) {\n    x\n}";
     ShapeTest::new(code)
         .at(pos(6, 10))
         .expect_completion("Comparable")

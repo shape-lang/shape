@@ -194,7 +194,7 @@ interface CandleLike {
 fn test_trait_extends_syntax_is_rejected() {
     let content = r#"
 trait Distributable extends Serializable {
-    wire_size(self): int
+    method wire_size() -> int;
 }
 "#;
     let result = parse_program_helper(content);
@@ -1213,7 +1213,7 @@ fn test_trait_with_associated_type() {
     let content = r#"
         trait Iterator {
             type Item;
-            next(self): Item
+            method next() -> Item;
         }
     "#;
     let items = parse_program_helper(content).expect("should parse trait with associated type");
@@ -1238,7 +1238,7 @@ fn test_trait_with_bounded_associated_type() {
     let content = r#"
         trait Container {
             type Item: Comparable + Display;
-            get(self, idx: int): Item
+            method get(idx: int) -> Item;
         }
     "#;
     let items = parse_program_helper(content).expect("should parse bounded associated type");

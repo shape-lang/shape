@@ -10,7 +10,7 @@
 /// @see std::core::try_into::TryInto
 trait Into<Target> {
     /// Convert `self` into `Target` without failure.
-    into(): Target
+    method into() -> Target;
 }
 
 impl Into<number> for int as number {

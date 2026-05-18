@@ -63,7 +63,7 @@ pub fn create_transport(kind: TransportKind) -> Result<Arc<dyn Transport>, Strin
         #[cfg(feature = "quic")]
         TransportKind::Quic => {
             let cfg = get_quic_config().ok_or_else(|| {
-                "transport.quic(): QUIC transport is not configured. \
+                "transport.method quic() -> QUIC transport is not configured. \
 Call shape_vm::configure_quic_transport(server_name, root_certs_der, connect_timeout) \
 before requesting a QUIC transport."
                     .to_string()
@@ -71,7 +71,7 @@ before requesting a QUIC transport."
 
             let mut quic =
                 super::quic::QuicTransport::with_trust_anchors(cfg.root_certs_der, cfg.server_name)
-                    .map_err(|e| format!("transport.quic(): QUIC init: {}", e))?;
+                    .map_err(|e| format!("transport.method quic() -> QUIC init: {}", e))?;
             if let Some(timeout) = cfg.connect_timeout {
                 quic.connect_timeout = timeout;
             }

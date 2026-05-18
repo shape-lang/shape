@@ -15,7 +15,7 @@ fn impl_single_method_for_type() {
         r#"
         type Point { x: number, y: number }
         trait Printable {
-            display(self): string
+            method display() -> string;
         }
         impl Printable for Point {
             method display() {
@@ -36,7 +36,7 @@ fn impl_method_accesses_self_fields() {
         r#"
         type Point { x: number, y: number }
         trait Describable {
-            describe(self): string
+            method describe() -> string;
         }
         impl Describable for Point {
             method describe() {
@@ -57,7 +57,7 @@ fn impl_method_returns_number() {
         r#"
         type Rectangle { w: number, h: number }
         trait Area {
-            area(self): number
+            method area() -> number;
         }
         impl Area for Rectangle {
             method area() {
@@ -78,7 +78,7 @@ fn impl_method_returns_bool() {
         r#"
         type Box { weight: number }
         trait Heavy {
-            is_heavy(self): bool
+            method is_heavy() -> bool;
         }
         impl Heavy for Box {
             method is_heavy() {
@@ -99,7 +99,7 @@ fn impl_method_with_parameter() {
         r#"
         type Counter { value: int }
         trait Scalable {
-            scale(self, factor: int): int
+            method scale(factor: int) -> int;
         }
         impl Scalable for Counter {
             method scale(factor: int) {
@@ -123,7 +123,7 @@ fn impl_trait_for_number() {
     ShapeTest::new(
         r#"
         trait NumericLike {
-            to_number(): number
+            method to_number() -> number;
         }
         impl NumericLike for number {
             method to_number() { self }
@@ -146,8 +146,8 @@ fn impl_block_with_two_methods() {
         r#"
         type Rectangle { w: number, h: number }
         trait Shape {
-            area(self): number,
-            perimeter(self): number
+            method area() -> number;
+            method perimeter() -> number;
         }
         impl Shape for Rectangle {
             method area() { self.w * self.h }
@@ -167,9 +167,9 @@ fn impl_block_with_three_methods() {
         r#"
         type Circle { radius: number }
         trait ShapeInfo {
-            area(self): number,
-            circumference(self): number,
-            diameter(self): number
+            method area() -> number;
+            method circumference() -> number;
+            method diameter() -> number;
         }
         impl ShapeInfo for Circle {
             method area() { 3.14159 * self.radius * self.radius }
@@ -193,7 +193,7 @@ fn impl_using_fn_keyword() {
     ShapeTest::new(
         r#"
         type Pair { a: int, b: int }
-        trait Summable { total(self): int }
+        trait Summable { method total() -> int }
         impl Summable for Pair {
             fn total() { self.a + self.b }
         }
@@ -214,8 +214,8 @@ fn queryable_pattern_compiles() {
     ShapeTest::new(
         r#"
         trait Queryable {
-            filter(predicate): any,
-            execute(): any
+            method filter(predicate) -> any;
+            method execute() -> any;
         }
         type MyQuery { data: int }
         impl Queryable for MyQuery {
@@ -239,7 +239,7 @@ fn impl_method_with_return_type_annotation() {
     ShapeTest::new(
         r#"
         type Num { val: number }
-        trait Doubler { double(self): number }
+        trait Doubler { method double() -> number }
         impl Doubler for Num {
             method double() -> number {
                 self.val * 2.0
@@ -263,8 +263,8 @@ fn trait_method_on_int_fields() {
         r#"
         type IntPair { a: int, b: int }
         trait Arithmetic {
-            sum(self): int,
-            product(self): int
+            method sum() -> int;
+            method product() -> int;
         }
         impl Arithmetic for IntPair {
             method sum() { self.a + self.b }
@@ -287,7 +287,7 @@ fn trait_method_concatenates_string_fields() {
     ShapeTest::new(
         r#"
         type Name { first: string, last: string }
-        trait Fullname { full(self): string }
+        trait Fullname { method full() -> string }
         impl Fullname for Name {
             method full() { self.first + " " + self.last }
         }
@@ -308,7 +308,7 @@ fn minimal_trait_one_method() {
     ShapeTest::new(
         r#"
         type Wrapped { inner: int }
-        trait Unwrappable { unwrap(self): int }
+        trait Unwrappable { method unwrap() -> int }
         impl Unwrappable for Wrapped {
             method unwrap() { self.inner }
         }
@@ -329,7 +329,7 @@ fn trait_defined_after_type() {
     ShapeTest::new(
         r#"
         type Config { debug: bool }
-        trait Togglable { is_on(self): bool }
+        trait Togglable { method is_on() -> bool }
         impl Togglable for Config {
             method is_on() { self.debug }
         }
@@ -351,7 +351,7 @@ fn banking_domain_trait() {
         r#"
         type Account { id: int, balance: number }
         trait Depositable {
-            deposit(self, amount: number): any
+            method deposit(amount: number) -> any;
         }
         impl Depositable for Account {
             method deposit(amount: number) {
@@ -373,7 +373,7 @@ fn banking_domain_withdrawal() {
         r#"
         type Account { id: int, balance: number }
         trait Withdrawable {
-            withdraw(self, amount: number): any
+            method withdraw(amount: number) -> any;
         }
         impl Withdrawable for Account {
             method withdraw(amount: number) {
@@ -399,7 +399,7 @@ fn impl_with_associated_type_compiles() {
         r#"
         trait Container {
             type Item;
-            get(self): any
+            method get() -> any;
         }
         type IntBox { val: int }
         impl Container for IntBox {
@@ -423,8 +423,8 @@ fn impl_generic_trait_for_concrete_type() {
     ShapeTest::new(
         r#"
         trait Queryable<T> {
-            filter(predicate): any,
-            execute(): any
+            method filter(predicate) -> any;
+            method execute() -> any;
         }
         type IntList { data: int }
         impl Queryable<int> for IntList {
@@ -448,10 +448,10 @@ fn four_traits_on_one_type() {
     ShapeTest::new(
         r#"
         type Obj { val: int }
-        trait A { a_val(self): int }
-        trait B { b_val(self): int }
-        trait C { c_val(self): int }
-        trait D { d_val(self): int }
+        trait A { method a_val() -> int }
+        trait B { method b_val() -> int }
+        trait C { method c_val() -> int }
+        trait D { method d_val() -> int }
         impl A for Obj { method a_val() { self.val + 1 } }
         impl B for Obj { method b_val() { self.val + 2 } }
         impl C for Obj { method c_val() { self.val + 3 } }
@@ -473,7 +473,7 @@ fn trait_on_fieldless_type() {
     ShapeTest::new(
         r#"
         type Unit {}
-        trait Identity { id(self): string }
+        trait Identity { method id() -> string }
         impl Identity for Unit {
             method id() { "unit" }
         }
@@ -496,7 +496,7 @@ fn trait_on_type_with_many_fields() {
         type Record {
             a: int, b: int, c: int, d: int, e: int
         }
-        trait Summable { total(self): int }
+        trait Summable { method total() -> int }
         impl Summable for Record {
             method total() { self.a + self.b + self.c + self.d + self.e }
         }
@@ -517,7 +517,7 @@ fn trait_on_single_field_type() {
     ShapeTest::new(
         r#"
         type Wrapper { inner: string }
-        trait Unwrap { unwrap_str(self): string }
+        trait Unwrap { method unwrap_str() -> string }
         impl Unwrap for Wrapper {
             method unwrap_str() { self.inner }
         }
@@ -538,7 +538,7 @@ fn trait_method_multi_string_concat() {
     ShapeTest::new(
         r#"
         type Address { street: string, city: string, state: string }
-        trait Formattable { format(self): string }
+        trait Formattable { method format() -> string }
         impl Formattable for Address {
             method format() {
                 self.street + ", " + self.city + ", " + self.state
@@ -561,7 +561,7 @@ fn trait_method_uses_to_string() {
     ShapeTest::new(
         r#"
         type Age { years: int }
-        trait Describable { describe(self): string }
+        trait Describable { method describe() -> string }
         impl Describable for Age {
             method describe() { self.years.to_string() + " years old" }
         }
@@ -582,7 +582,7 @@ fn trait_method_decimal_computation() {
     ShapeTest::new(
         r#"
         type Price { amount: number, tax_rate: number }
-        trait Taxable { total(self): number }
+        trait Taxable { method total() -> number }
         impl Taxable for Price {
             method total() { self.amount * (1.0 + self.tax_rate) }
         }
@@ -603,7 +603,7 @@ fn trait_method_variable_shadowing() {
     ShapeTest::new(
         r#"
         type Num { val: int }
-        trait Transformer { transform(self): int }
+        trait Transformer { method transform() -> int }
         impl Transformer for Num {
             method transform() {
                 let val = self.val * 2
@@ -628,7 +628,7 @@ fn trait_method_calls_builtin_range() {
     ShapeTest::new(
         r#"
         type Ranger { max: int }
-        trait Rangeable { make_range(self): any }
+        trait Rangeable { method make_range() -> any }
         impl Rangeable for Ranger {
             method make_range() { range(0, self.max) }
         }
@@ -650,7 +650,7 @@ fn trait_on_mixed_field_types() {
     ShapeTest::new(
         r#"
         type Entry { name: string, value: number, active: bool }
-        trait Summarizable { summary(self): string }
+        trait Summarizable { method summary() -> string }
         impl Summarizable for Entry {
             method summary() {
                 self.name + "=" + self.value.to_string()
@@ -673,7 +673,7 @@ fn trait_method_name_same_as_field() {
     ShapeTest::new(
         r#"
         type Thing { value: int }
-        trait HasValue { value(self): int }
+        trait HasValue { method value() -> int }
         impl HasValue for Thing {
             method value() { self.value * 2 }
         }
@@ -694,7 +694,7 @@ fn trait_on_number_only_type() {
     ShapeTest::new(
         r#"
         type Weight { kg: number }
-        trait Convertible { to_pounds(self): number }
+        trait Convertible { method to_pounds() -> number }
         impl Convertible for Weight {
             method to_pounds() { self.kg * 2.20462 }
         }
@@ -715,7 +715,7 @@ fn trait_method_arithmetic_chain() {
     ShapeTest::new(
         r#"
         type Quad { a: int, b: int, c: int, d: int }
-        trait Math { formula(self): int }
+        trait Math { method formula() -> int }
         impl Math for Quad {
             method formula() { (self.a + self.b) * (self.c - self.d) }
         }

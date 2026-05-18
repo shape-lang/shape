@@ -807,10 +807,10 @@ fn impl_block_completions(
                 documentation: Some(tower_lsp_server::ls_types::Documentation::MarkupContent(
                     tower_lsp_server::ls_types::MarkupContent {
                         kind: tower_lsp_server::ls_types::MarkupKind::Markdown,
-                        value: "Implement `render` from trait `Content`\n\n```\nrender(self): ContentNode\n```\n\nReturn a `ContentNode` representing this value's rich content.".to_string(),
+                        value: "Implement `render` from trait `Content`\n\n```\nmethod render() -> ContentNode;\n```\n\nReturn a `ContentNode` representing this value's rich content.".to_string(),
                     },
                 )),
-                insert_text: Some("method render(self): ContentNode {\n    Content.text(f\"${1:self}\")\n}".to_string()),
+                insert_text: Some("method render() -> ContentNode {\n    Content.text(f\"${1:self}\")\n}".to_string()),
                 insert_text_format: Some(InsertTextFormat::SNIPPET),
                 ..CompletionItem::default()
             }];
@@ -1771,7 +1771,7 @@ let x = 1
 
     #[test]
     fn test_using_impl_selector_completions() {
-        let code = "trait Display { display(self): string }\n\
+        let code = "trait Display { method display() -> string }\n\
                     type User { name: string }\n\
                     impl Display for User as JsonDisplay {\n\
                         method display() { \"json\" }\n\
@@ -2152,7 +2152,7 @@ let x = 1
 
     #[test]
     fn test_impl_block_completions_empty_when_all_implemented() {
-        let code = "trait Simple {\n    foo(): any\n}\nimpl Simple for Bar {\n    method foo() { self }\n}\n";
+        let code = "trait Simple {\n    method foo() -> any\n}\nimpl Simple for Bar {\n    method foo() { self }\n}\n";
         let completions =
             impl_block_completions(code, "Simple", &["foo".to_string()], None, None, None);
         assert!(

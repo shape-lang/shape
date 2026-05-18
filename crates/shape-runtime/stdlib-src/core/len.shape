@@ -30,5 +30,5 @@
 /// `MapLenTyped`).
 trait Len {
     /// Return the number of elements (or bytes, for strings).
-    len(): int
+    method len() -> int;
 }

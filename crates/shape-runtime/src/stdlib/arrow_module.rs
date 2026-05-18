@@ -93,7 +93,7 @@ pub fn create_arrow_module() -> ModuleExports {
             // Q25.A spec list). Tracked as
             // W17-typed-carrier-array-datatable follow-up.
             Err(format!(
-                "arrow.read_tables(): SURFACE — `Array<DataTable>` needs a \
+                "arrow.method read_tables() -> SURFACE — `Array<DataTable>` needs a \
                  typed-array-data DataTable specialized variant in ADR-006 \
                  §2.7.24 Q25.A's spec list. Tracked as \
                  W17-typed-carrier-array-datatable follow-up \

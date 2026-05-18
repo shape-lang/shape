@@ -23,27 +23,27 @@
 /// @see std::core::queryable::Queryable
 trait Iterable<T> {
     /// Return the index of the first element that satisfies `predicate`.
-    findIndex(predicate: (T) => bool): int,
+    method findIndex(predicate: (T) => bool) -> int;
     /// Return whether the collection contains `value`.
-    includes(value: T): bool,
+    method includes(value: T) -> bool;
     /// Pair each element with the corresponding element from `other`.
-    zip(other): Self,
+    method zip(other) -> Self;
     /// Split the collection into fixed-size chunks.
-    chunk(size: int): Array<Array<T>>,
+    method chunk(size: int) -> Array<Array<T>>;
     /// Remove duplicate values while preserving order.
-    unique(): Self,
+    method unique() -> Self;
     /// Flatten one level of nested iterables.
-    flatten(): Self,
+    method flatten() -> Self;
     /// Return the slice in `[start, end)`.
-    slice(start: int, end: int): Self,
+    method slice(start: int, end: int) -> Self;
     /// Join elements into a string with `separator`.
-    join(separator: string): string,
+    method join(separator: string) -> string;
     /// Return a new collection sorted by `key_fn`.
-    sortBy(key_fn: (T) => number): Self,
+    method sortBy(key_fn: (T) => number) -> Self;
     /// Return the first `n` elements.
-    take(n: int): Self,
+    method take(n: int) -> Self;
     /// Skip the first `n` elements.
-    skip(n: int): Self,
+    method skip(n: int) -> Self;
     /// Pair each element with its index.
-    enumerate(): Array<[int, T]>
+    method enumerate() -> Array<[int, T]>;
 }

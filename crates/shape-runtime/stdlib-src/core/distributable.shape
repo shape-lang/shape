@@ -6,9 +6,9 @@
 /// boundaries and how expensive that transfer is expected to be.
 trait Distributable {
     /// Estimated wire size in bytes for transfer cost estimation
-    wire_size(self): int
+    method wire_size() -> int;
 
     /// Whether self value produces deterministic results
     /// (enables caching and result deduplication across nodes)
-    is_deterministic(self): bool
+    method is_deterministic() -> bool;
 }

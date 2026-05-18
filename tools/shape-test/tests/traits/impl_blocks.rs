@@ -12,7 +12,7 @@ fn impl_trait_method_returns_string() {
         r#"
         type User { name: string }
         trait Greetable {
-            greet(self): string
+            method greet() -> string;
         }
         impl Greetable for User {
             method greet() { "Hello, " + self.name }
@@ -30,7 +30,7 @@ fn impl_trait_method_returns_number() {
         r#"
         type Rect { width: number, height: number }
         trait Area {
-            area(self): number
+            method area() -> number;
         }
         impl Area for Rect {
             method area() { self.width * self.height }
@@ -48,7 +48,7 @@ fn impl_trait_method_returns_bool() {
         r#"
         type Wallet { balance: number }
         trait Checkable {
-            is_empty(self): bool
+            method is_empty() -> bool;
         }
         impl Checkable for Wallet {
             method is_empty() { self.balance == 0 }
@@ -69,7 +69,7 @@ fn impl_same_trait_for_two_types() {
     ShapeTest::new(
         r#"
         trait Describable {
-            describe(self): string
+            method describe() -> string;
         }
         type Cat { name: string }
         type Dog { name: string }
@@ -98,10 +98,10 @@ fn two_traits_on_same_type() {
         r#"
         type Person { name: string, age: int }
         trait Named {
-            get_name(self): string
+            method get_name() -> string;
         }
         trait Aged {
-            get_age(self): int
+            method get_age() -> int;
         }
         impl Named for Person {
             method get_name() { self.name }
@@ -127,7 +127,7 @@ fn impl_method_with_extra_param() {
         r#"
         type Counter { count: int }
         trait Addable {
-            add(self, n: int): int
+            method add(n: int) -> int;
         }
         impl Addable for Counter {
             method add(n) { self.count + n }
@@ -148,7 +148,7 @@ fn named_impl_parses() {
     ShapeTest::new(
         r#"
         trait Display {
-            display(self): string
+            method display() -> string;
         }
         type User { name: string }
         impl Display for User as JsonDisplay {

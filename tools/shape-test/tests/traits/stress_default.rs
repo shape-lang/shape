@@ -15,7 +15,7 @@ fn trait_default_method_used_when_not_overridden() {
         r#"
         type Widget { label: string }
         trait Describable {
-            name(self): string
+            method name() -> string;
             method describe() {
                 "Object: " + self.name()
             }
@@ -37,7 +37,7 @@ fn trait_default_method_overridden() {
         r#"
         type Widget { label: string }
         trait Describable {
-            name(self): string
+            method name() -> string;
             method describe() {
                 "Object: " + self.name()
             }
@@ -60,8 +60,8 @@ fn trait_default_method_calls_required_method() {
         r#"
         type Person { first: string, last: string }
         trait Named {
-            first_name(self): string
-            last_name(self): string
+            method first_name() -> string;
+            method last_name() -> string;
             method full_name() {
                 self.first_name() + " " + self.last_name()
             }
@@ -191,7 +191,7 @@ fn mixed_override_and_default() {
         r#"
         type Item { name: string }
         trait Descriptive {
-            get_name(self): string
+            method get_name() -> string;
             method description() { "An item named: " + self.get_name() }
             method category() { "general" }
         }
@@ -212,7 +212,7 @@ fn mixed_override_and_default_category() {
         r#"
         type Item { name: string }
         trait Descriptive {
-            get_name(self): string
+            method get_name() -> string;
             method description() { "An item named: " + self.get_name() }
             method category() { "general" }
         }

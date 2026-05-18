@@ -887,7 +887,7 @@ fn well_known_function_return_kind(name: &str) -> Option<NativeKind> {
 ///
 /// `ConcreteType::Struct(_)` receivers (user-defined `type X {}` values)
 /// fall into the `_ => None` arm by design. Smoke 3
-/// (`trait T { name(): string } type X {} impl T for X { method name()
+/// (`trait T { method name() -> string } type X {} impl T for X { method name()
 /// { "x" } } let t = X {} print(t.name())`) requires `t.name()` to be
 /// classified as `NativeKind::String` from the trait's declared return
 /// type. The classifier cannot do this because the receiver kind-source
@@ -2061,7 +2061,7 @@ mod tests {
     //   → `find_default_trait_impl_for_type_method(type_name, method)`
     //   → `function_return_concrete_types[fn_idx]` (post gap 3 backfill)
     //
-    // So Smoke 3 (`trait T { name(): string } type X {} impl T for X {
+    // So Smoke 3 (`trait T { method name() -> string } type X {} impl T for X {
     // method name() { "x" } } let t = X {} print(t.name())` → `x`)
     // closes via the upstream `concrete_types[t_name_slot]
     // = ConcreteType::String` stamp; the JIT consumer at
@@ -2097,7 +2097,7 @@ mod tests {
         // struct-name information to disambiguate `X` from any other
         // user struct, and the trait registry is not threaded into
         // the JIT MIR builder layer — so the trait method's declared
-        // return type (`string` from `trait T { name(): string }`) is
+        // return type (`string` from `trait T { method name() -> string }`) is
         // unreachable from this classifier.
         //
         // The classifier must return `None` (surface-and-stop posture),
@@ -2188,7 +2188,7 @@ mod tests {
             "`name` must not be a well-known method name — that would \
              be a soundness violation (different traits could declare \
              `name` with different return types, e.g. `trait T \
-             {{ name(): string }}` vs `trait U {{ name(): int }}`)."
+             {{ method name() -> string }}` vs `trait U {{ method name() -> int }}`)."
         );
     }
 
@@ -2262,7 +2262,7 @@ mod tests {
         // conduit producer has stamped the Call destination slot's
         // ConcreteType to the trait's declared return type
         // (`ConcreteType::String` for Smoke 3's `t.name()` where
-        // `trait T { name(): string }`). The caller threads this
+        // `trait T { method name() -> string }`). The caller threads this
         // through `concrete_seed` so `existing[result_slot] =
         // Some(NativeKind::String)` when `infer_slot_kinds_with_concrete`
         // is invoked.

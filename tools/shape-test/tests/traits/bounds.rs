@@ -11,7 +11,7 @@ fn function_with_trait_bound_parses() {
     ShapeTest::new(
         r#"
         trait Displayable {
-            display(self): string
+            method display() -> string;
         }
         fn show<T: Displayable>(x: T) -> string {
             return x.display()
@@ -26,7 +26,7 @@ fn function_with_trait_bound_dispatches() {
     ShapeTest::new(
         r#"
         trait Displayable {
-            display(self): string
+            method display() -> string;
         }
         type Item { label: string }
         impl Displayable for Item {
@@ -63,10 +63,10 @@ fn supertrait_extends_parses() {
     ShapeTest::new(
         r#"
         trait Printable {
-            to_string(self): string
+            method to_string() -> string;
         }
         trait DebugPrintable {
-            debug_string(self): string
+            method debug_string() -> string;
         }
     "#,
     )
@@ -79,13 +79,13 @@ fn supertrait_extends_multiple_parses() {
     ShapeTest::new(
         r#"
         trait Readable {
-            read(self): string
+            method read() -> string;
         }
         trait Writable {
-            write(self, data: string): bool
+            method write(data: string) -> bool;
         }
         trait ReadWrite {
-            flush(self): bool
+            method flush() -> bool;
         }
     "#,
     )

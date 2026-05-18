@@ -5,8 +5,8 @@
 
 /// A data source that supports extending its data range
 trait Extendable {
-    can_extend_back(): bool;
-    can_extend_forward(): bool;
+    method can_extend_back() -> bool;
+    method can_extend_forward() -> bool;
 }
 
 /// A time-series data source with a known timeframe
@@ -14,5 +14,5 @@ trait Extendable {
 /// Any time-series source that knows its timeframe can potentially be
 /// extended by adjusting from/to parameters.
 trait TimeSeriesSource {
-    timeframe(): duration;
+    method timeframe() -> duration;
 }

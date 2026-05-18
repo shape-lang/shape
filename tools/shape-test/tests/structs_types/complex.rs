@@ -51,7 +51,7 @@ fn complex_struct_with_trait_and_extend() {
         type Circle { radius: number }
 
         trait Shape {
-            area_approx(self): number
+            method area_approx() -> number;
         }
 
         impl Shape for Circle {

@@ -5,10 +5,10 @@
 /// Convert values to and from a stable byte representation.
 trait Serializable {
     /// Serialize self value to a byte array
-    to_bytes(self): Vec<byte>
+    method to_bytes() -> Vec<byte>;
 
     /// Deserialize a value from a byte array
-    from_bytes(bytes: Vec<byte>): Self
+    method from_bytes(bytes: Vec<byte>) -> Self;
 }
 
 // Builtin implementations are registered in Rust (registry.rs)

@@ -357,7 +357,7 @@ fn write_node_pairs(
     let _ = (writer, pairs);
     let _ = write_xml_element; // keep helper reachable
     Err(
-        "xml.stringify(): V3-S5 ckpt-5-prime²c SURFACE — top-level \
+        "xml.method stringify() -> V3-S5 ckpt-5-prime²c SURFACE — top-level \
          pair-list reader needs Vec<Arc<HeapValue>> rewire for the deleted \
          outer-array-arm. Round 2 follow-up (pairs with per-element-kind \
          constructor wave). ADR-006 §2.7.24 Q25.A SUPERSEDED."
@@ -405,7 +405,7 @@ fn write_typed_object_node(
     let name: String = unsafe {
         let bits = name_slot.raw();
         if bits == 0 {
-            return Err("xml.stringify(): TypedObject name slot is null".to_string());
+            return Err("xml.method stringify() -> TypedObject name slot is null".to_string());
         }
         let arc_ptr = bits as *const String;
         Arc::increment_strong_count(arc_ptr);

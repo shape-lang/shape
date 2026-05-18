@@ -29,7 +29,7 @@ fn direct_dispatch_returns_concrete_field() {
     let result = eval(
         r#"
         trait Speaker {
-            name(self): string;
+            method name() -> string;
         }
         type Cat {
             name: string
@@ -51,8 +51,8 @@ fn boxed_return_top_level_self_rewraps_concrete_typed_object() {
     let result = eval(
         r#"
         trait Cloneable {
-            name(self): string;
-            clone_me(self): Self;
+            method name() -> string;
+            method clone_me() -> Self;
         }
         type Dog {
             name: string
@@ -77,8 +77,8 @@ fn self_arg_identity_check_accepts_same_concrete_type() {
     let result = eval_result(
         r#"
         trait Mergeable {
-            name(self): string;
-            merge(self, other: Self): Self;
+            method name() -> string;
+            method merge(other: Self) -> Self;
         }
         type Pair {
             name: string
@@ -122,8 +122,8 @@ fn self_arg_identity_check_rejects_cross_impl_arg() {
     let result = eval_result(
         r#"
         trait Mergeable2 {
-            name(self): string;
-            merge(self, other: Self): Self;
+            method name() -> string;
+            method merge(other: Self) -> Self;
         }
         type X {
             name: string
@@ -164,8 +164,8 @@ fn boxed_return_option_self_rewraps_some_payload() {
     let result = eval_result(
         r#"
         trait Optional {
-            name(self): string;
-            maybe(self): Option<Self>;
+            method name() -> string;
+            method maybe() -> Option<Self>;
         }
         type Item {
             name: string
@@ -207,8 +207,8 @@ fn boxed_return_result_self_rewraps_ok_payload() {
     let result = eval_result(
         r#"
         trait FallibleClone {
-            name(self): string;
-            try_clone(self): Result<Self, string>;
+            method name() -> string;
+            method try_clone() -> Result<Self, string>;
         }
         type Box1 {
             name: string
@@ -258,7 +258,7 @@ fn generic_method_dispatches_as_direct() {
     let result = eval_result(
         r#"
         trait Mappable {
-            name(self): string;
+            method name() -> string;
             method describe<G>(g: G) -> string { return self.name() }
         }
         type Tag {
@@ -317,7 +317,7 @@ fn closure_variant_surfaces_with_cite() {
     let result = eval(
         r#"
         trait Plain {
-            v(self): int;
+            method v() -> int;
         }
         type P {
             v: int
@@ -340,8 +340,8 @@ fn nested_wrap_target_path_is_walked_correctly() {
     let result = eval_result(
         r#"
         trait DualSelf {
-            name(self): string;
-            split(self): Result<Self, Self>;
+            method name() -> string;
+            method split() -> Result<Self, Self>;
         }
         type Two {
             name: string
@@ -387,8 +387,8 @@ fn typed_array_self_elements_are_rewrapped_into_trait_object_buffer() {
     let result = eval_result(
         r#"
         trait Listable {
-            name(self): string;
-            siblings(self): Array<Self>;
+            method name() -> string;
+            method siblings() -> Array<Self>;
         }
         type Node {
             name: string
@@ -431,7 +431,7 @@ fn trait_object_dispatch_preserves_receiver_share_lifecycle() {
     let result = eval(
         r#"
         trait Speaker2 {
-            speak(self): string;
+            method speak() -> string;
         }
         type Cow {
             sound: string
@@ -455,7 +455,7 @@ fn dispatch_kind_is_trait_object_after_boxing() {
     let result = eval(
         r#"
         trait Tagged {
-            v(self): int;
+            method v() -> int;
         }
         type T1 {
             v: int

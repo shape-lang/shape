@@ -50,7 +50,7 @@
 trait Sub {
     /// Return `self - other`. By convention the result is a fresh value;
     /// in-place mutation belongs to `SubAssign::sub_assign`.
-    sub(other: Self): Self
+    method sub(other: Self) -> Self;
 }
 
 /// Operator trait for `-=`. The grammar desugars `a -= b` to `a = a - b`,
@@ -64,5 +64,5 @@ trait Sub {
 /// desugar means the return value is unused under current semantics.
 trait SubAssign {
     /// Mutate `self` in place by subtracting `other`. Return `self` for chaining.
-    sub_assign(other: Self): Self
+    method sub_assign(other: Self) -> Self;
 }

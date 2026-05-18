@@ -42,7 +42,7 @@
 trait Mod {
     /// Return `self % other`. By convention the result is a fresh value;
     /// in-place mutation belongs to `ModAssign::mod_assign`.
-    mod(other: Self): Self
+    method mod(other: Self) -> Self;
 }
 
 /// Operator trait for `%=`. The grammar desugars `a %= b` to `a = a % b`,
@@ -58,5 +58,5 @@ trait Mod {
 trait ModAssign {
     /// Mutate `self` in place by computing `self % other`. Return `self`
     /// for chaining.
-    mod_assign(other: Self): Self
+    method mod_assign(other: Self) -> Self;
 }

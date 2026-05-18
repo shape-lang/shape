@@ -119,7 +119,7 @@ Shape supports:
 - **Types**: `int` (i64), `number` (f64), `bool`, `string`, `decimal`, `bigint`, plus `Array<T>`, `HashMap<K,V>`, `Option<T>`, `Result<T,E>`, `DateTime`, tuples, enums, TypedObjects
 - **Type definitions**: `type Name { field: Type, ... }` with comptime fields and field annotations (`@description`, `@range`, `@example`)
 - **Enums**: `enum Name { Variant, Variant(T), Variant { field: T } }` — unit, tuple, and struct payloads
-- **Traits**: `trait Name { method(self): ReturnType }` with `extends` for supertraits, `impl Trait for Type { ... }`
+- **Traits**: `trait Name { fn method(self) -> ReturnType; }` with `extends` for supertraits, `impl Trait for Type { ... }`
 - **Generics**: `fn name<T: Bound>(x: T) -> T`, generic type params on types and traits
 - **Functions**: `fn name(params) { body }`, closures `|x| x + 1`, `async fn`, `comptime fn`
 - **Polyglot functions**: `fn python name(params) -> Type { ... }`, `fn typescript name(params) -> Type { ... }`, `extern C fn name(params) -> Type`

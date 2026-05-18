@@ -36,11 +36,11 @@ trait Queryable<T> {
     /// Return a query filtered by `predicate`.
     filter(predicate: (T) => bool): Self,
     /// Project each row with `transform`.
-    map(transform): Self,
+    method map(transform) -> Self;
     /// Apply backend ordering by `column` and `direction`.
-    orderBy(column: string, direction: string): Self,
+    method orderBy(column: string, direction: string) -> Self;
     /// Restrict the result set to at most `n` rows.
-    limit(n: int): Self,
+    method limit(n: int) -> Self;
     /// Execute the query and materialize the result.
-    execute(): Array<T>
+    method execute() -> Array<T>;
 }

@@ -812,7 +812,7 @@ fn set_kinded(
         HashMapKindedRef::I64(arc) => {
             let v = match value_slot.kind {
                 NativeKind::Int64 => value_slot.as_i64().ok_or_else(|| {
-                    type_error("HashMap.set(): Int64 slot bits not a valid integer")
+                    type_error("HashMap.method set() -> Int64 slot bits not a valid integer")
                 })?,
                 other => {
                     return Err(type_error(format!(
@@ -828,7 +828,7 @@ fn set_kinded(
         HashMapKindedRef::F64(arc) => {
             let v = match value_slot.kind {
                 NativeKind::Float64 => value_slot.as_f64().ok_or_else(|| {
-                    type_error("HashMap.set(): Float64 slot bits not a valid f64")
+                    type_error("HashMap.method set() -> Float64 slot bits not a valid f64")
                 })?,
                 other => {
                     return Err(type_error(format!(
@@ -845,7 +845,7 @@ fn set_kinded(
             let v: u8 = match value_slot.kind {
                 NativeKind::Bool => {
                     let b = value_slot.as_bool().ok_or_else(|| {
-                        type_error("HashMap.set(): Bool slot bits not a valid bool")
+                        type_error("HashMap.method set() -> Bool slot bits not a valid bool")
                     })?;
                     if b {
                         1
@@ -867,7 +867,7 @@ fn set_kinded(
         HashMapKindedRef::Char(arc) => {
             let v: char = match value_slot.kind {
                 NativeKind::Char => value_slot.as_char().ok_or_else(|| {
-                    type_error("HashMap.set(): Char slot bits not a valid char")
+                    type_error("HashMap.method set() -> Char slot bits not a valid char")
                 })?,
                 other => {
                     return Err(type_error(format!(
@@ -906,7 +906,7 @@ fn set_kinded(
                         let bits = value_slot.slot.raw();
                         if bits == 0 {
                             return Err(type_error(
-                                "HashMap.set(): DecimalV2 slot bits null",
+                                "HashMap.method set() -> DecimalV2 slot bits null",
                             ));
                         }
                         // Bump v2_retain so the inserted share is fresh and
@@ -926,7 +926,7 @@ fn set_kinded(
                             }
                             _ => {
                                 return Err(type_error(
-                                    "HashMap.set(): Ptr(Decimal) slot heap arm mismatched",
+                                    "HashMap.method set() -> Ptr(Decimal) slot heap arm mismatched",
                                 ))
                             }
                         }
@@ -956,7 +956,7 @@ fn set_kinded(
                     let bits = value_slot.slot.raw();
                     if bits == 0 {
                         return Err(type_error(
-                            "HashMap.set(): TypedObject slot bits null",
+                            "HashMap.method set() -> TypedObject slot bits null",
                         ));
                     }
                     let ptr = bits as *const TypedObjectStorage;
@@ -983,7 +983,7 @@ fn set_kinded(
                     let bits = value_slot.slot.raw();
                     if bits == 0 {
                         return Err(type_error(
-                            "HashMap.set(): TraitObject slot bits null",
+                            "HashMap.method set() -> TraitObject slot bits null",
                         ));
                     }
                     let ptr = bits as *const shape_value::heap_value::TraitObjectStorage;
@@ -1015,7 +1015,7 @@ fn set_kinded(
                     let bits = value_slot.slot.raw();
                     if bits == 0 {
                         return Err(type_error(
-                            "HashMap.set(): HashMap slot bits null",
+                            "HashMap.method set() -> HashMap slot bits null",
                         ));
                     }
                     // SAFETY: per the construction-side contract on
@@ -1072,7 +1072,7 @@ fn empty_set_with_promotion(
         NativeKind::Int64 => {
             let v = value_slot
                 .as_i64()
-                .ok_or_else(|| type_error("HashMap.set(): Int64 slot bits not a valid integer"))?;
+                .ok_or_else(|| type_error("HashMap.method set() -> Int64 slot bits not a valid integer"))?;
             let mut data: HashMapData<i64> = HashMapData::new();
             unsafe { data.insert(key, v) };
             Ok(Some(HashMapKindedRef::I64(Arc::new(data))))
@@ -1080,7 +1080,7 @@ fn empty_set_with_promotion(
         NativeKind::Float64 => {
             let v = value_slot
                 .as_f64()
-                .ok_or_else(|| type_error("HashMap.set(): Float64 slot bits not a valid f64"))?;
+                .ok_or_else(|| type_error("HashMap.method set() -> Float64 slot bits not a valid f64"))?;
             let mut data: HashMapData<f64> = HashMapData::new();
             unsafe { data.insert(key, v) };
             Ok(Some(HashMapKindedRef::F64(Arc::new(data))))
@@ -1088,7 +1088,7 @@ fn empty_set_with_promotion(
         NativeKind::Bool => {
             let b = value_slot
                 .as_bool()
-                .ok_or_else(|| type_error("HashMap.set(): Bool slot bits not a valid bool"))?;
+                .ok_or_else(|| type_error("HashMap.method set() -> Bool slot bits not a valid bool"))?;
             let mut data: HashMapData<u8> = HashMapData::new();
             unsafe { data.insert(key, if b { 1 } else { 0 }) };
             Ok(Some(HashMapKindedRef::Bool(Arc::new(data))))
@@ -1096,14 +1096,14 @@ fn empty_set_with_promotion(
         NativeKind::Char => {
             let c = value_slot
                 .as_char()
-                .ok_or_else(|| type_error("HashMap.set(): Char slot bits not a valid char"))?;
+                .ok_or_else(|| type_error("HashMap.method set() -> Char slot bits not a valid char"))?;
             let mut data: HashMapData<char> = HashMapData::new();
             unsafe { data.insert(key, c) };
             Ok(Some(HashMapKindedRef::Char(Arc::new(data))))
         }
         NativeKind::String | NativeKind::Ptr(HeapKind::String) => {
             let v_ptr = string_slot_to_v2_ptr(value_slot).ok_or_else(|| {
-                type_error("HashMap.set(): string slot bits could not be projected to *const StringObj")
+                type_error("HashMap.method set() -> string slot bits could not be projected to *const StringObj")
             })?;
             let mut data: HashMapData<*const shape_value::v2::string_obj::StringObj> =
                 HashMapData::new();
@@ -1113,7 +1113,7 @@ fn empty_set_with_promotion(
         NativeKind::DecimalV2 => {
             let bits = value_slot.slot.raw();
             if bits == 0 {
-                return Err(type_error("HashMap.set(): DecimalV2 slot bits null"));
+                return Err(type_error("HashMap.method set() -> DecimalV2 slot bits null"));
             }
             let ptr = bits as *const shape_value::v2::decimal_obj::DecimalObj;
             unsafe { shape_value::v2::refcount::v2_retain(&(*ptr).header); }
@@ -1138,7 +1138,7 @@ fn empty_set_with_promotion(
         NativeKind::Ptr(HeapKind::TypedObject) => {
             let bits = value_slot.slot.raw();
             if bits == 0 {
-                return Err(type_error("HashMap.set(): TypedObject slot bits null"));
+                return Err(type_error("HashMap.method set() -> TypedObject slot bits null"));
             }
             let ptr = bits as *const TypedObjectStorage;
             unsafe { shape_value::v2::refcount::v2_retain(&(*ptr).header); }
@@ -1150,7 +1150,7 @@ fn empty_set_with_promotion(
         NativeKind::Ptr(HeapKind::TraitObject) => {
             let bits = value_slot.slot.raw();
             if bits == 0 {
-                return Err(type_error("HashMap.set(): TraitObject slot bits null"));
+                return Err(type_error("HashMap.method set() -> TraitObject slot bits null"));
             }
             let ptr = bits as *const shape_value::heap_value::TraitObjectStorage;
             unsafe { shape_value::v2::refcount::v2_retain(&(*ptr).header); }
@@ -1167,7 +1167,7 @@ fn empty_set_with_promotion(
             // HashMapData<HashMapKindedRef>.
             let bits = value_slot.slot.raw();
             if bits == 0 {
-                return Err(type_error("HashMap.set(): HashMap slot bits null"));
+                return Err(type_error("HashMap.method set() -> HashMap slot bits null"));
             }
             let v_kref: HashMapKindedRef = unsafe {
                 Arc::increment_strong_count(bits as *const HashMapKindedRef);
@@ -1740,7 +1740,7 @@ fn build_kref_from_kinded_results(
             let mut data: HashMapData<i64> = HashMapData::new();
             for (key, slot) in results.iter() {
                 let v = slot.as_i64().ok_or_else(|| {
-                    type_error("HashMap.map(): Int64 slot bits invalid")
+                    type_error("HashMap.method map() -> Int64 slot bits invalid")
                 })?;
                 unsafe { data.insert(key.as_str(), v) };
             }
@@ -1752,7 +1752,7 @@ fn build_kref_from_kinded_results(
             let mut data: HashMapData<f64> = HashMapData::new();
             for (key, slot) in results.iter() {
                 let v = slot.as_f64().ok_or_else(|| {
-                    type_error("HashMap.map(): Float64 slot bits invalid")
+                    type_error("HashMap.method map() -> Float64 slot bits invalid")
                 })?;
                 unsafe { data.insert(key.as_str(), v) };
             }
@@ -1763,7 +1763,7 @@ fn build_kref_from_kinded_results(
             let mut data: HashMapData<u8> = HashMapData::new();
             for (key, slot) in results.iter() {
                 let b = slot.as_bool().ok_or_else(|| {
-                    type_error("HashMap.map(): Bool slot bits invalid")
+                    type_error("HashMap.method map() -> Bool slot bits invalid")
                 })?;
                 unsafe { data.insert(key.as_str(), if b { 1 } else { 0 }) };
             }
@@ -1774,7 +1774,7 @@ fn build_kref_from_kinded_results(
             let mut data: HashMapData<char> = HashMapData::new();
             for (key, slot) in results.iter() {
                 let c = slot.as_char().ok_or_else(|| {
-                    type_error("HashMap.map(): Char slot bits invalid")
+                    type_error("HashMap.method map() -> Char slot bits invalid")
                 })?;
                 unsafe { data.insert(key.as_str(), c) };
             }
@@ -1792,7 +1792,7 @@ fn build_kref_from_kinded_results(
                 let s_arc: Arc<String> = {
                     let bits = slot.slot.raw();
                     if bits == 0 {
-                        return Err(type_error("HashMap.map(): String slot bits null"));
+                        return Err(type_error("HashMap.method map() -> String slot bits null"));
                     }
                     // Bump the source share so the local clone is independent.
                     unsafe {
@@ -1812,7 +1812,7 @@ fn build_kref_from_kinded_results(
             for (key, slot) in results.iter() {
                 let bits = slot.slot.raw();
                 if bits == 0 {
-                    return Err(type_error("HashMap.map(): TypedObject slot bits null"));
+                    return Err(type_error("HashMap.method map() -> TypedObject slot bits null"));
                 }
                 // Bump v2_retain on the inner storage; build a fresh
                 // TypedObjectPtr owning the new share.
@@ -1836,7 +1836,7 @@ fn build_kref_from_kinded_results(
             for (key, slot) in results.iter() {
                 let bits = slot.slot.raw();
                 if bits == 0 {
-                    return Err(type_error("HashMap.map(): HashMap slot bits null"));
+                    return Err(type_error("HashMap.method map() -> HashMap slot bits null"));
                 }
                 let cloned_kref: HashMapKindedRef = unsafe {
                     Arc::increment_strong_count(bits as *const HashMapKindedRef);
@@ -1970,14 +1970,14 @@ pub fn v2_group_by(
             NativeKind::String => result
                 .as_str()
                 .ok_or_else(|| {
-                    type_error("HashMap.groupBy(): String slot bits null")
+                    type_error("HashMap.method groupBy() -> String slot bits null")
                 })?
                 .to_owned(),
             NativeKind::Ptr(HeapKind::String) => match result.slot.as_heap_value() {
                 HeapValue::String(s) => (**s).clone(),
                 _ => {
                     return Err(type_error(
-                        "HashMap.groupBy(): Ptr(String) slot heap arm mismatched",
+                        "HashMap.method groupBy() -> Ptr(String) slot heap arm mismatched",
                     ))
                 }
             },
@@ -2025,15 +2025,15 @@ fn result_slot_to_heap_value_arc(result: &KindedSlot) -> Result<Arc<HeapValue>, 
     match result.kind {
         NativeKind::Int64 => {
             let i = result.as_i64().ok_or_else(|| {
-                type_error("HashMap.map(): Int64 slot bits not a valid integer")
+                type_error("HashMap.method map() -> Int64 slot bits not a valid integer")
             })?;
             Ok(Arc::new(HeapValue::BigInt(Arc::new(i))))
         }
         NativeKind::Float64 => Err(type_error(
-            "HashMap.map(): Float64 result cannot be heap-wrapped (no HeapValue::Number arm)",
+            "HashMap.method map() -> Float64 result cannot be heap-wrapped (no HeapValue::Number arm)",
         )),
         NativeKind::Bool => Err(type_error(
-            "HashMap.map(): Bool result cannot be heap-wrapped (no HeapValue::Bool arm)",
+            "HashMap.method map() -> Bool result cannot be heap-wrapped (no HeapValue::Bool arm)",
         )),
         NativeKind::String | NativeKind::Ptr(HeapKind::String) => {
             // Both string kinds store `Arc::into_raw::<String>` (no
@@ -2043,7 +2043,7 @@ fn result_slot_to_heap_value_arc(result: &KindedSlot) -> Result<Arc<HeapValue>, 
             // `result_slot_to_string_arc` below.
             let bits = result.slot.raw();
             if bits == 0 {
-                return Err(type_error("HashMap.map(): String slot bits null"));
+                return Err(type_error("HashMap.method map() -> String slot bits null"));
             }
             // SAFETY: see `result_slot_to_string_arc` — bits are
             // `Arc::into_raw::<String>`, carrier owns one share.

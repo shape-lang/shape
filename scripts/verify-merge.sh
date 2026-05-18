@@ -382,6 +382,42 @@ fi
 echo
 
 # -----------------------------------------------------------------------------
+# CHECK 13 — colon-return-type doc-drift guard (Rust-shaped syntax discipline)
+# -----------------------------------------------------------------------------
+# Per user disposition 2026-05-18: Shape uses arrow `->` for return types,
+# colon `:` only for type annotations (param types, field types, let-bindings,
+# generic bounds). The TypeScript-shaped `name(...): RetType` form was never
+# authorized and has been deleted from the grammar (shape.pest:186 trait_member_signature
+# Form A removed; new Form B requires `fn` keyword + arrow return).
+#
+# This check catches re-introduction in living docs + stdlib + LSP hover/completion
+# text. Source trees (crates/, tools/, bin/) are independently gated by parser
+# tests in shape-ast — if a test fixture uses Form A, it fails to parse.
+echo "=== CHECK 13: colon-return-type doc-drift guard ==="
+colon_return_scope=(CLAUDE.md README.md docs crates/shape-runtime/stdlib-src tools/shape-lsp/src/hover.rs tools/shape-lsp/src/completion)
+# Pattern: trait method signature shape `name(...): TypeIdent[;]?` at line start.
+# Requires the post-colon text to be a single type identifier (PascalCase + optional
+# generic OR known primitive) followed by end-of-line / `;` / `,`. This excludes
+# natural-language false positives like `free(): invalid pointer` (C error text)
+# and `precedent (survey 03 §1.12): functional-style ...` (citation continuation)
+# which have multi-word sentence text after the colon.
+colon_return_hits=$(rg --no-heading -n -P '^\s*[a-z_][a-zA-Z0-9_]*\s*\([^)]*\)\s*:\s*([A-Z][a-zA-Z0-9_]*(?:<[^>]*>)?|bool|int|string|number|byte|unit|any|void|Self|float|i32|i64|f32|f64|u8|u16|u32|u64|usize|isize|duration|datetime|decimal|bigint)\s*[;,]?\s*$' "${colon_return_scope[@]}" 2>/dev/null \
+  | rg -v ':\s*//' \
+  | rg -v '\bfn\s+[a-z_]' \
+  | rg -v '\bmethod\s+[a-z_]' \
+  || true)
+
+if [[ -z "$colon_return_hits" ]]; then
+  record_pass "colon-return-type doc-drift guard"
+  echo "  -> clean (no Form A trait method signatures in living docs scope)"
+else
+  record_fail "colon-return-type doc-drift guard" "Form A re-introduced"
+  echo "  -> FAILED — colon-return-type sites found (use arrow \`-> RetType\` instead):"
+  echo "$colon_return_hits" | head -20
+fi
+echo
+
+# -----------------------------------------------------------------------------
 # REPORT
 # -----------------------------------------------------------------------------
 echo "=== SUMMARY ==="

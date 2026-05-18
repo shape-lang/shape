@@ -14,7 +14,7 @@ fn call_trait_method_on_concrete_type() {
     ShapeTest::new(
         r#"
         type Dog { name: string }
-        trait Animal { speak(self): string }
+        trait Animal { method speak() -> string }
         impl Animal for Dog { method speak() { "Woof!" } }
         let d = Dog { name: "Rex" }
         d.speak()
@@ -30,8 +30,8 @@ fn call_multiple_trait_methods_on_same_instance() {
         r#"
         type Circle { radius: number }
         trait Shape {
-            area(self): number,
-            name(self): string
+            method area() -> number;
+            method name() -> string;
         }
         impl Shape for Circle {
             method area() { 3.14159 * self.radius * self.radius }
@@ -50,7 +50,7 @@ fn call_trait_method_returns_computed_value() {
     ShapeTest::new(
         r#"
         type Circle { radius: number }
-        trait Shape { area(self): number }
+        trait Shape { method area() -> number }
         impl Shape for Circle {
             method area() { 3.14159 * self.radius * self.radius }
         }
@@ -71,8 +71,8 @@ fn type_implements_two_traits() {
     ShapeTest::new(
         r#"
         type Item { name: string, price: number }
-        trait Nameable { get_name(self): string }
-        trait Priceable { get_price(self): number }
+        trait Nameable { method get_name() -> string }
+        trait Priceable { method get_price() -> number }
         impl Nameable for Item { method get_name() { self.name } }
         impl Priceable for Item { method get_price() { self.price } }
         let i = Item { name: "Widget", price: 9.99 }
@@ -88,8 +88,8 @@ fn type_implements_two_traits_use_second() {
     ShapeTest::new(
         r#"
         type Item { name: string, price: number }
-        trait Nameable { get_name(self): string }
-        trait Priceable { get_price(self): number }
+        trait Nameable { method get_name() -> string }
+        trait Priceable { method get_price() -> number }
         impl Nameable for Item { method get_name() { self.name } }
         impl Priceable for Item { method get_price() { self.price } }
         let i = Item { name: "Widget", price: 9.99 }
@@ -105,9 +105,9 @@ fn type_implements_three_traits() {
     ShapeTest::new(
         r#"
         type Product { name: string, price: number, weight: number }
-        trait Nameable { get_name(self): string }
-        trait Priceable { get_price(self): number }
-        trait Weighable { get_weight(self): number }
+        trait Nameable { method get_name() -> string }
+        trait Priceable { method get_price() -> number }
+        trait Weighable { method get_weight() -> number }
         impl Nameable for Product { method get_name() { self.name } }
         impl Priceable for Product { method get_price() { self.price } }
         impl Weighable for Product { method get_weight() { self.weight } }
@@ -129,7 +129,7 @@ fn two_types_implement_same_trait() {
         r#"
         type Dog { name: string }
         type Cat { name: string }
-        trait Animal { speak(self): string }
+        trait Animal { method speak() -> string }
         impl Animal for Dog { method speak() { "Woof" } }
         impl Animal for Cat { method speak() { "Meow" } }
         let d = Dog { name: "Rex" }
@@ -146,7 +146,7 @@ fn two_types_implement_same_trait_second_type() {
         r#"
         type Dog { name: string }
         type Cat { name: string }
-        trait Animal { speak(self): string }
+        trait Animal { method speak() -> string }
         impl Animal for Dog { method speak() { "Woof" } }
         impl Animal for Cat { method speak() { "Meow" } }
         let c = Cat { name: "Whiskers" }
@@ -164,7 +164,7 @@ fn three_types_implement_same_trait() {
         type Circle { radius: number }
         type Square { side: number }
         type Triangle { base: number, height: number }
-        trait Shape { area(self): number }
+        trait Shape { method area() -> number }
         impl Shape for Circle { method area() { 3.14159 * self.radius * self.radius } }
         impl Shape for Square { method area() { self.side * self.side } }
         impl Shape for Triangle { method area() { 0.5 * self.base * self.height } }
@@ -186,7 +186,7 @@ fn same_trait_different_implementations() {
         r#"
         type Square { side: number }
         type Circle { radius: number }
-        trait Shape { area(self): number }
+        trait Shape { method area() -> number }
         impl Shape for Square { method area() { self.side * self.side } }
         impl Shape for Circle { method area() { 3.14159 * self.radius * self.radius } }
         let s = Square { side: 4.0 }
@@ -203,7 +203,7 @@ fn same_trait_different_implementations_circle() {
         r#"
         type Square { side: number }
         type Circle { radius: number }
-        trait Shape { area(self): number }
+        trait Shape { method area() -> number }
         impl Shape for Square { method area() { self.side * self.side } }
         impl Shape for Circle { method area() { 3.14159 * self.radius * self.radius } }
         let c = Circle { radius: 3.0 }
@@ -223,7 +223,7 @@ fn trait_method_returns_string() {
     ShapeTest::new(
         r#"
         type Color { r: int, g: int, b: int }
-        trait Stringifiable { to_hex(self): string }
+        trait Stringifiable { method to_hex() -> string }
         impl Stringifiable for Color { method to_hex() { "rgb" } }
         let c = Color { r: 255, g: 128, b: 0 }
         c.to_hex()
@@ -238,7 +238,7 @@ fn trait_method_returns_int_summable() {
     ShapeTest::new(
         r#"
         type Pair { a: int, b: int }
-        trait Summable { total(self): int }
+        trait Summable { method total() -> int }
         impl Summable for Pair { method total() { self.a + self.b } }
         let p = Pair { a: 15, b: 25 }
         p.total()
@@ -253,7 +253,7 @@ fn trait_method_returns_bool_checkable() {
     ShapeTest::new(
         r#"
         type Range { min: number, max: number }
-        trait Checkable { is_valid(self): bool }
+        trait Checkable { method is_valid() -> bool }
         impl Checkable for Range { method is_valid() { self.min < self.max } }
         let r = Range { min: 0.0, max: 100.0 }
         r.is_valid()
@@ -268,7 +268,7 @@ fn trait_method_returns_bool_false() {
     ShapeTest::new(
         r#"
         type Range { min: number, max: number }
-        trait Checkable { is_valid(self): bool }
+        trait Checkable { method is_valid() -> bool }
         impl Checkable for Range { method is_valid() { self.min < self.max } }
         let r = Range { min: 100.0, max: 0.0 }
         r.is_valid()

@@ -10,5 +10,5 @@
 /// @see std::core::try_into::TryInto
 trait From<Source> {
     /// Convert `value` into `Self` without failure.
-    from(value: Source): Self
+    method from(value: Source) -> Self;
 }

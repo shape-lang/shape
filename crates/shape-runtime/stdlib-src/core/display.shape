@@ -8,7 +8,7 @@
 /// printing, interpolation, and diagnostics.
 trait Display {
     /// Render `self` as a human-readable string.
-    display(): string
+    method display() -> string;
 }
 
 // User types implement Display via:

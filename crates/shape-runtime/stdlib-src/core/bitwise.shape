@@ -59,7 +59,7 @@
 trait BitAnd {
     /// Return `self & other`. By convention the result is a fresh
     /// value; in-place mutation belongs to `BitAndAssign::bitand_assign`.
-    bitand(other: Self): Self
+    method bitand(other: Self) -> Self;
 }
 
 /// Operator trait for `&=`. The grammar desugars `a &= b` to
@@ -74,7 +74,7 @@ trait BitAnd {
 trait BitAndAssign {
     /// Mutate `self` in place by bitwise-AND with `other`. Return
     /// `self` for chaining.
-    bitand_assign(other: Self): Self
+    method bitand_assign(other: Self) -> Self;
 }
 
 /// Operator trait for `|`. Implementing `BitOr` for a user-defined
@@ -84,7 +84,7 @@ trait BitAndAssign {
 trait BitOr {
     /// Return `self | other`. By convention the result is a fresh
     /// value; in-place mutation belongs to `BitOrAssign::bitor_assign`.
-    bitor(other: Self): Self
+    method bitor(other: Self) -> Self;
 }
 
 /// Operator trait for `|=`. The grammar desugars `a |= b` to
@@ -94,7 +94,7 @@ trait BitOr {
 trait BitOrAssign {
     /// Mutate `self` in place by bitwise-OR with `other`. Return
     /// `self` for chaining.
-    bitor_assign(other: Self): Self
+    method bitor_assign(other: Self) -> Self;
 }
 
 /// Operator trait for `^`. Implementing `BitXor` for a user-defined
@@ -104,7 +104,7 @@ trait BitOrAssign {
 trait BitXor {
     /// Return `self ^ other`. By convention the result is a fresh
     /// value; in-place mutation belongs to `BitXorAssign::bitxor_assign`.
-    bitxor(other: Self): Self
+    method bitxor(other: Self) -> Self;
 }
 
 /// Operator trait for `^=`. The grammar desugars `a ^= b` to
@@ -114,5 +114,5 @@ trait BitXor {
 trait BitXorAssign {
     /// Mutate `self` in place by bitwise-XOR with `other`. Return
     /// `self` for chaining.
-    bitxor_assign(other: Self): Self
+    method bitxor_assign(other: Self) -> Self;
 }

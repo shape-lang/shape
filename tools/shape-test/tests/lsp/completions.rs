@@ -146,7 +146,7 @@ fn completion_impl_block_excludes_already_implemented() {
 
 #[test]
 fn trait_bound_completions_suggest_trait_names() {
-    let code = "trait Comparable {\n    compare(other): number\n}\ntrait Displayable {\n    display(): string\n}\nfn foo<T: >(x: T) {\n    x\n}\n";
+    let code = "trait Comparable {\n    compare(other): number\n}\ntrait Displayable {\n    method display() -> string\n}\nfn foo<T: >(x: T) {\n    x\n}\n";
     ShapeTest::new(code)
         .at(pos(6, 10))
         .expect_completion("Comparable");
@@ -154,7 +154,7 @@ fn trait_bound_completions_suggest_trait_names() {
 
 #[test]
 fn trait_bound_completions_include_all_traits() {
-    let code = "trait Comparable {\n    compare(other): number\n}\ntrait Displayable {\n    display(): string\n}\nfn foo<T: >(x: T) {\n    x\n}\n";
+    let code = "trait Comparable {\n    compare(other): number\n}\ntrait Displayable {\n    method display() -> string\n}\nfn foo<T: >(x: T) {\n    x\n}\n";
     ShapeTest::new(code)
         .at(pos(6, 10))
         .expect_completion("Displayable");
@@ -337,7 +337,7 @@ fn test_lsp_completion_fstring_variable() {
 
 #[test]
 fn test_lsp_completion_trait_method_in_impl() {
-    let code = "trait Greet {\n  greet(): string;\n  farewell(): string\n}\nimpl Greet for Person {\n  method greet() { \"hi\" }\n  \n}\n";
+    let code = "trait Greet {\n  method greet() -> string;\n  method farewell() -> string\n}\nimpl Greet for Person {\n  method greet() { \"hi\" }\n  \n}\n";
     ShapeTest::new(code)
         .at(pos(6, 2))
         .expect_completion("farewell");
@@ -345,7 +345,7 @@ fn test_lsp_completion_trait_method_in_impl() {
 
 #[test]
 fn test_lsp_completion_excludes_implemented_trait_method() {
-    let code = "trait Greet {\n  greet(): string;\n  farewell(): string\n}\nimpl Greet for Person {\n  method greet() { \"hi\" }\n  \n}\n";
+    let code = "trait Greet {\n  method greet() -> string;\n  method farewell() -> string\n}\nimpl Greet for Person {\n  method greet() { \"hi\" }\n  \n}\n";
     ShapeTest::new(code)
         .at(pos(6, 2))
         .expect_no_completion("greet");
@@ -376,7 +376,7 @@ fn test_lsp_completion_struct_type_name() {
 
 #[test]
 fn test_lsp_completion_trait_bound_suggests_trait() {
-    let code = "trait Sortable {\n  sort(): any\n}\nfn process<T: >(items: T) { items }\n";
+    let code = "trait Sortable {\n  method sort() -> any\n}\nfn process<T: >(items: T) { items }\n";
     ShapeTest::new(code)
         .at(pos(3, 14))
         .expect_completion("Sortable");

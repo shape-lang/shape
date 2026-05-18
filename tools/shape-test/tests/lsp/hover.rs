@@ -622,7 +622,7 @@ fn test_lsp_hover_type_definition_shows_fields() {
 
 #[test]
 fn test_lsp_hover_trait_definition() {
-    let code = "trait Printable {\n  display(): string\n}\n";
+    let code = "trait Printable {\n  method display() -> string\n}\n";
     ShapeTest::new(code)
         .at(pos(0, 6))
         .expect_hover_contains("Printable");
@@ -630,7 +630,7 @@ fn test_lsp_hover_trait_definition() {
 
 #[test]
 fn test_lsp_hover_impl_method_shows_trait() {
-    let code = "trait Renderable {\n  render(): string\n}\nimpl Renderable for Item {\n  method render() { \"item\" }\n}\n";
+    let code = "trait Renderable {\n  method render() -> string\n}\nimpl Renderable for Item {\n  method render() { \"item\" }\n}\n";
     ShapeTest::new(code)
         .at(pos(4, 9))
         .expect_hover_contains("Trait Method");

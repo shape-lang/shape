@@ -11,7 +11,7 @@ fn trait_single_method_parses() {
     ShapeTest::new(
         r#"
         trait Printable {
-            to_string(self): string
+            method to_string() -> string;
         }
     "#,
     )
@@ -23,7 +23,7 @@ fn trait_single_method_no_return_type_parses() {
     ShapeTest::new(
         r#"
         trait Runnable {
-            run(self): any
+            method run() -> any;
         }
     "#,
     )
@@ -39,8 +39,8 @@ fn trait_two_methods_parses() {
     ShapeTest::new(
         r#"
         trait Container {
-            size(self): int;
-            is_empty(self): bool
+            method size() -> int;
+            method is_empty() -> bool;
         }
     "#,
     )
@@ -52,9 +52,9 @@ fn trait_three_methods_parses() {
     ShapeTest::new(
         r#"
         trait Collection {
-            length(self): int;
-            first(self): any;
-            last(self): any
+            method length() -> int;
+            method first() -> any;
+            method last() -> any;
         }
     "#,
     )
@@ -66,8 +66,8 @@ fn trait_methods_with_parameters_parses() {
     ShapeTest::new(
         r#"
         trait Searchable {
-            find(self, query: string): any;
-            contains(self, item: any): bool
+            method find(query: string) -> any;
+            method contains(item: any) -> bool;
         }
     "#,
     )
@@ -99,7 +99,7 @@ fn trait_with_type_param_parses() {
     ShapeTest::new(
         r#"
         trait Convertible<T> {
-            convert(self): T
+            method convert() -> T;
         }
     "#,
     )
@@ -112,7 +112,7 @@ fn trait_with_associated_type_parses() {
         r#"
         trait Iterator {
             type Item;
-            next(self): any
+            method next() -> any;
         }
     "#,
     )

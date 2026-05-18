@@ -53,7 +53,7 @@ function test() {
         covers: &["trait_def", "trait_member_signature"],
         code: r#"
 trait Calculator {
-    add(a: number, b: number): number;
+    method add(a: number, b: number) -> number;
 }
 function test() {
     let c = { add: (a, b) => a + b };
@@ -222,7 +222,7 @@ function test() {
         covers: &["trait_def", "type_param_name"],
         code: r#"
 trait NumericLike {
-    to_number(): number
+    method to_number() -> number;
 }
 impl NumericLike for number {
     method to_number() { self }
@@ -301,7 +301,7 @@ function test() {
         covers: &["trait_def", "type_params"],
         code: r#"
 trait Boxed<T> {
-    contents(self): T
+    method contents() -> T;
 }
 impl Boxed<number> for number {
     method contents() { self }

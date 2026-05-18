@@ -1242,7 +1242,7 @@ let x = foo();
     #[test]
     fn test_get_implementations_finds_impl_block() {
         let code = r#"trait Greet {
-    greet(): string
+    method greet() -> string
 }
 
 type Cat { name: string }
@@ -1280,7 +1280,7 @@ impl Greet for Cat {
     fn test_get_implementations_by_target_type() {
         // Cursor on the *target* type (Cat) should also surface the impl.
         let code = r#"trait Greet {
-    greet(): string
+    method greet() -> string
 }
 
 type Cat { name: string }

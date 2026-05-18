@@ -17,7 +17,7 @@ fn trait_method_with_if_expression() {
     ShapeTest::new(
         r#"
         type Score { value: int }
-        trait Graded { grade(self): string }
+        trait Graded { method grade() -> string }
         impl Graded for Score {
             method grade() {
                 if self.value >= 90 { "A" }
@@ -39,7 +39,7 @@ fn trait_method_conditional_a() {
     ShapeTest::new(
         r#"
         type Score { value: int }
-        trait Graded { grade(self): string }
+        trait Graded { method grade() -> string }
         impl Graded for Score {
             method grade() {
                 if self.value >= 90 { "A" }
@@ -60,7 +60,7 @@ fn trait_method_with_local_variables() {
     ShapeTest::new(
         r#"
         type Triangle { a: number, b: number, c: number }
-        trait Perimeterable { perimeter(self): number }
+        trait Perimeterable { method perimeter() -> number }
         impl Perimeterable for Triangle {
             method perimeter() {
                 let sum = self.a + self.b + self.c
@@ -80,7 +80,7 @@ fn trait_method_with_f_string() {
     ShapeTest::new(
         r#"
         type User { name: string, age: int }
-        trait Bio { bio(self): string }
+        trait Bio { method bio() -> string }
         impl Bio for User {
             method bio() {
                 self.name + " is " + self.age.to_string() + " years old"
@@ -103,7 +103,7 @@ fn trait_number_method_call_chain() {
     ShapeTest::new(
         r#"
         type Stats { sum: number, count: int }
-        trait Aggregatable { avg(self): number }
+        trait Aggregatable { method avg() -> number }
         impl Aggregatable for Stats {
             method avg() { self.sum / self.count.to_number() }
         }
@@ -124,7 +124,7 @@ fn chained_trait_method_calls() {
     ShapeTest::new(
         r#"
         type Builder { parts: int }
-        trait Buildable { add_part(self): any }
+        trait Buildable { method add_part() -> any }
         impl Buildable for Builder {
             method add_part() { Builder { parts: self.parts + 1 } }
         }
@@ -148,7 +148,7 @@ fn trait_method_alongside_extend_method() {
     ShapeTest::new(
         r#"
         type Point { x: number, y: number }
-        trait Printable { label(self): string }
+        trait Printable { method label() -> string }
         impl Printable for Point { method label() { "Point" } }
         extend Point { method magnitude() { self.x * self.x + self.y * self.y } }
         let p = Point { x: 3.0, y: 4.0 }
@@ -164,7 +164,7 @@ fn trait_method_and_extend_method_both_callable() {
     ShapeTest::new(
         r#"
         type Point { x: number, y: number }
-        trait Printable { label(self): string }
+        trait Printable { method label() -> string }
         impl Printable for Point { method label() { "Point" } }
         extend Point { method magnitude() { self.x * self.x + self.y * self.y } }
         let p = Point { x: 3.0, y: 4.0 }
@@ -184,7 +184,7 @@ fn trait_method_returning_null() {
     ShapeTest::new(
         r#"
         type Maybe { has_value: bool }
-        trait Optional { get_or_null(self): any }
+        trait Optional { method get_or_null() -> any }
         impl Optional for Maybe {
             method get_or_null() { if self.has_value { 42 } else { None } }
         }
@@ -201,7 +201,7 @@ fn trait_method_returning_value_when_present() {
     ShapeTest::new(
         r#"
         type Maybe { has_value: bool }
-        trait Optional { get_or_null(self): any }
+        trait Optional { method get_or_null() -> any }
         impl Optional for Maybe {
             method get_or_null() { if self.has_value { 42 } else { None } }
         }
@@ -218,7 +218,7 @@ fn function_calls_trait_method() {
     ShapeTest::new(
         r#"
         type Dog { name: string }
-        trait Speaker { speak(self): string }
+        trait Speaker { method speak() -> string }
         impl Speaker for Dog { method speak() { self.name + " says woof" } }
         function make_speak(d: Dog) -> string { d.speak() }
         let d = Dog { name: "Rex" }
@@ -234,7 +234,7 @@ fn function_returns_trait_method_result() {
     ShapeTest::new(
         r#"
         type Adder { base: int }
-        trait Addable { plus(self, n: int): int }
+        trait Addable { method plus(n: int) -> int }
         impl Addable for Adder { method plus(n: int) { self.base + n } }
         function add_ten(a: Adder) -> int { a.plus(10) }
         let a = Adder { base: 32 }
@@ -250,7 +250,7 @@ fn trait_method_on_bool_field() {
     ShapeTest::new(
         r#"
         type Flag { active: bool }
-        trait Toggleable { status(self): string }
+        trait Toggleable { method status() -> string }
         impl Toggleable for Flag {
             method status() { if self.active { "on" } else { "off" } }
         }
@@ -267,7 +267,7 @@ fn trait_method_on_bool_field_false() {
     ShapeTest::new(
         r#"
         type Flag { active: bool }
-        trait Toggleable { status(self): string }
+        trait Toggleable { method status() -> string }
         impl Toggleable for Flag {
             method status() { if self.active { "on" } else { "off" } }
         }
@@ -284,7 +284,7 @@ fn trait_method_pythagorean() {
     ShapeTest::new(
         r#"
         type RightTriangle { a: number, b: number }
-        trait Hypotenuse { hyp_squared(self): number }
+        trait Hypotenuse { method hyp_squared() -> number }
         impl Hypotenuse for RightTriangle {
             method hyp_squared() { self.a * self.a + self.b * self.b }
         }
@@ -302,7 +302,7 @@ fn trait_method_nested_field_access() {
         r#"
         type Inner { val: int }
         type Outer { inner: any }
-        trait Extractable { extract(self): int }
+        trait Extractable { method extract() -> int }
         impl Extractable for Outer {
             method extract() {
                 let i = self.inner
@@ -323,7 +323,7 @@ fn trait_method_with_early_return() {
     ShapeTest::new(
         r#"
         type Guard { level: int }
-        trait Checkable { check(self): string }
+        trait Checkable { method check() -> string }
         impl Checkable for Guard {
             method check() {
                 if self.level > 5 { return "high" }
@@ -343,7 +343,7 @@ fn trait_method_with_early_return_low() {
     ShapeTest::new(
         r#"
         type Guard { level: int }
-        trait Checkable { check(self): string }
+        trait Checkable { method check() -> string }
         impl Checkable for Guard {
             method check() {
                 if self.level > 5 { return "high" }
@@ -363,7 +363,7 @@ fn trait_method_with_loop() {
     ShapeTest::new(
         r#"
         type Repeater { count: int }
-        trait Repeatable { repeat_str(self, s: string): string }
+        trait Repeatable { method repeat_str(s: string) -> string }
         impl Repeatable for Repeater {
             method repeat_str(s: string) {
                 let mut result = ""
@@ -388,7 +388,7 @@ fn trait_method_returns_array_length() {
     ShapeTest::new(
         r#"
         type Bag { items: any }
-        trait Countable { count(self): int }
+        trait Countable { method count() -> int }
         impl Countable for Bag {
             method count() { self.items.length() }
         }
@@ -405,7 +405,7 @@ fn trait_method_string_length() {
     ShapeTest::new(
         r#"
         type Message { text: string }
-        trait Measurable { char_count(self): int }
+        trait Measurable { method char_count() -> int }
         impl Measurable for Message {
             method char_count() { self.text.length() }
         }
@@ -422,7 +422,7 @@ fn trait_method_on_different_instances() {
     ShapeTest::new(
         r#"
         type Box { size: int }
-        trait Sizable { get_size(self): int }
+        trait Sizable { method get_size() -> int }
         impl Sizable for Box { method get_size() { self.size } }
         let small = Box { size: 1 }
         let medium = Box { size: 5 }
@@ -439,7 +439,7 @@ fn trait_method_nested_if() {
     ShapeTest::new(
         r#"
         type Classifier { value: int }
-        trait Classifiable { classify(self): string }
+        trait Classifiable { method classify() -> string }
         impl Classifiable for Classifier {
             method classify() {
                 if self.value > 0 {
@@ -464,7 +464,7 @@ fn trait_method_while_accumulator() {
     ShapeTest::new(
         r#"
         type Summer { n: int }
-        trait Summable { sum_to(self): int }
+        trait Summable { method sum_to() -> int }
         impl Summable for Summer {
             method sum_to() {
                 let mut total = 0
@@ -489,7 +489,7 @@ fn trait_method_complex_expression() {
     ShapeTest::new(
         r#"
         type Matrix2x2 { a: number, b: number, c: number, d: number }
-        trait Determinant { det(self): number }
+        trait Determinant { method det() -> number }
         impl Determinant for Matrix2x2 {
             method det() { self.a * self.d - self.b * self.c }
         }
@@ -506,7 +506,7 @@ fn trait_method_handles_negative_numbers() {
     ShapeTest::new(
         r#"
         type Num { val: int }
-        trait Abs { abs_val(self): int }
+        trait Abs { method abs_val() -> int }
         impl Abs for Num {
             method abs_val() { if self.val < 0 { -self.val } else { self.val } }
         }
@@ -523,7 +523,7 @@ fn trait_method_boundary_zero() {
     ShapeTest::new(
         r#"
         type Counter { val: int }
-        trait IsZero { is_zero(self): bool }
+        trait IsZero { method is_zero() -> bool }
         impl IsZero for Counter { method is_zero() { self.val == 0 } }
         let c = Counter { val: 0 }
         c.is_zero()
@@ -538,7 +538,7 @@ fn trait_method_boundary_nonzero() {
     ShapeTest::new(
         r#"
         type Counter { val: int }
-        trait IsZero { is_zero(self): bool }
+        trait IsZero { method is_zero() -> bool }
         impl IsZero for Counter { method is_zero() { self.val == 0 } }
         let c = Counter { val: 1 }
         c.is_zero()
@@ -557,7 +557,7 @@ fn trait_method_calls_standalone_recursive_function() {
             return n * factorial(n - 1)
         }
         type MathBox { n: int }
-        trait Factorable { fact(self): int }
+        trait Factorable { method fact() -> int }
         impl Factorable for MathBox { method fact() { factorial(self.n) } }
         let m = MathBox { n: 5 }
         m.fact()
@@ -572,7 +572,7 @@ fn trait_method_boolean_logic() {
     ShapeTest::new(
         r#"
         type Gate { a: bool, b: bool }
-        trait Logic { and_gate(self): bool }
+        trait Logic { method and_gate() -> bool }
         impl Logic for Gate { method and_gate() { self.a and self.b } }
         let g = Gate { a: true, b: true }
         g.and_gate()
@@ -587,7 +587,7 @@ fn trait_method_boolean_or() {
     ShapeTest::new(
         r#"
         type Gate { a: bool, b: bool }
-        trait Logic { or_gate(self): bool }
+        trait Logic { method or_gate() -> bool }
         impl Logic for Gate { method or_gate() { self.a or self.b } }
         let g = Gate { a: false, b: true }
         g.or_gate()
@@ -602,7 +602,7 @@ fn trait_method_boolean_false_and() {
     ShapeTest::new(
         r#"
         type Gate { a: bool, b: bool }
-        trait Logic { and_gate(self): bool }
+        trait Logic { method and_gate() -> bool }
         impl Logic for Gate { method and_gate() { self.a and self.b } }
         let g = Gate { a: true, b: false }
         g.and_gate()
@@ -617,7 +617,7 @@ fn trait_method_conditional_f() {
     ShapeTest::new(
         r#"
         type Score { value: int }
-        trait Graded { grade(self): string }
+        trait Graded { method grade() -> string }
         impl Graded for Score {
             method grade() {
                 if self.value >= 90 { "A" }
@@ -638,7 +638,7 @@ fn trait_method_abs_positive() {
     ShapeTest::new(
         r#"
         type Num { val: int }
-        trait Abs { abs_val(self): int }
+        trait Abs { method abs_val() -> int }
         impl Abs for Num {
             method abs_val() { if self.val < 0 { -self.val } else { self.val } }
         }
@@ -655,7 +655,7 @@ fn trait_method_comparison() {
     ShapeTest::new(
         r#"
         type Pair { a: int, b: int }
-        trait Comparable { max_val(self): int }
+        trait Comparable { method max_val() -> int }
         impl Comparable for Pair {
             method max_val() { if self.a > self.b { self.a } else { self.b } }
         }
@@ -672,7 +672,7 @@ fn trait_method_min_val() {
     ShapeTest::new(
         r#"
         type Pair { a: int, b: int }
-        trait Comparable { min_val(self): int }
+        trait Comparable { method min_val() -> int }
         impl Comparable for Pair {
             method min_val() { if self.a < self.b { self.a } else { self.b } }
         }
@@ -689,7 +689,7 @@ fn trait_method_ternary_if() {
     ShapeTest::new(
         r#"
         type Switch { on: bool }
-        trait Valued { numeric(self): int }
+        trait Valued { method numeric() -> int }
         impl Valued for Switch {
             method numeric() { if self.on { 1 } else { 0 } }
         }
@@ -706,7 +706,7 @@ fn trait_method_on_negative_field() {
     ShapeTest::new(
         r#"
         type Temp { celsius: number }
-        trait Weather { is_freezing(self): bool }
+        trait Weather { method is_freezing() -> bool }
         impl Weather for Temp { method is_freezing() { self.celsius < 0.0 } }
         let t = Temp { celsius: -5.0 }
         t.is_freezing()
@@ -721,7 +721,7 @@ fn trait_method_returns_constant() {
     ShapeTest::new(
         r#"
         type Anything { x: int }
-        trait Constant { magic(self): int }
+        trait Constant { method magic() -> int }
         impl Constant for Anything { method magic() { 42 } }
         let a = Anything { x: 0 }
         a.magic()
@@ -736,7 +736,7 @@ fn trait_method_returns_new_instance() {
     ShapeTest::new(
         r#"
         type Counter { val: int }
-        trait Incrementable { inc(self): any }
+        trait Incrementable { method inc() -> any }
         impl Incrementable for Counter {
             method inc() { Counter { val: self.val + 1 } }
         }
@@ -756,7 +756,7 @@ fn trait_method_with_large_numbers() {
     ShapeTest::new(
         r#"
         type Big { val: int }
-        trait Doubler { double(self): int }
+        trait Doubler { method double() -> int }
         impl Doubler for Big { method double() { self.val * 2 } }
         let b = Big { val: 1000000 }
         b.double()
@@ -772,7 +772,7 @@ fn same_field_names_different_types_same_trait() {
         r#"
         type A { val: int }
         type B { val: int }
-        trait GetVal { get_val(self): int }
+        trait GetVal { method get_val() -> int }
         impl GetVal for A { method get_val() { self.val * 10 } }
         impl GetVal for B { method get_val() { self.val * 100 } }
         let a = A { val: 5 }
@@ -788,7 +788,7 @@ fn same_field_names_different_types_same_trait() {
 fn trait_declared_far_from_impl() {
     ShapeTest::new(
         r#"
-        trait Describable { describe(self): string }
+        trait Describable { method describe() -> string }
 
         type Apple { variety: string }
         type Orange { origin: string }
@@ -815,7 +815,7 @@ fn trait_declared_far_from_impl() {
 fn five_types_implement_same_trait() {
     ShapeTest::new(
         r#"
-        trait Named { name(self): string }
+        trait Named { method name() -> string }
         type A { n: string }
         type B { n: string }
         type C { n: string }
@@ -840,7 +840,7 @@ fn display_on_multiple_types() {
         r#"
         type Dog { name: string }
         type Cat { name: string }
-        trait Display { display(self): string }
+        trait Display { method display() -> string }
         impl Display for Dog { method display() { "Dog:" + self.name } }
         impl Display for Cat { method display() { "Cat:" + self.name } }
         let d = Dog { name: "Rex" }
@@ -858,8 +858,8 @@ fn trait_method_calling_another_trait_method() {
         r#"
         type Rect { w: number, h: number }
         trait Shape {
-            area(self): number,
-            perimeter(self): number
+            method area() -> number;
+            method perimeter() -> number;
         }
         impl Shape for Rect {
             method area() { self.w * self.h }
@@ -878,7 +878,7 @@ fn trait_method_using_closure_variable() {
     ShapeTest::new(
         r#"
         type Mapper { factor: number }
-        trait Applicable { apply(self, values: any): any }
+        trait Applicable { method apply(values: any) -> any }
         impl Applicable for Mapper {
             method apply(values: any) {
                 let f = self.factor
@@ -900,9 +900,9 @@ fn trait_mixed_return_types() {
         r#"
         type Data { n: int, s: string, b: bool }
         trait Accessor {
-            get_n(self): int,
-            get_s(self): string,
-            get_b(self): bool
+            method get_n() -> int;
+            method get_s() -> string;
+            method get_b() -> bool;
         }
         impl Accessor for Data {
             method get_n() { self.n }
@@ -923,9 +923,9 @@ fn trait_mixed_return_types_string() {
         r#"
         type Data { n: int, s: string, b: bool }
         trait Accessor {
-            get_n(self): int,
-            get_s(self): string,
-            get_b(self): bool
+            method get_n() -> int;
+            method get_s() -> string;
+            method get_b() -> bool;
         }
         impl Accessor for Data {
             method get_n() { self.n }
@@ -946,9 +946,9 @@ fn trait_mixed_return_types_bool() {
         r#"
         type Data { n: int, s: string, b: bool }
         trait Accessor {
-            get_n(self): int,
-            get_s(self): string,
-            get_b(self): bool
+            method get_n() -> int;
+            method get_s() -> string;
+            method get_b() -> bool;
         }
         impl Accessor for Data {
             method get_n() { self.n }
@@ -967,8 +967,8 @@ fn trait_mixed_return_types_bool() {
 fn two_traits_same_method_name_different_types() {
     ShapeTest::new(
         r#"
-        trait InfoA { info(self): string }
-        trait InfoB { info(self): string }
+        trait InfoA { method info() -> string }
+        trait InfoB { method info() -> string }
         type TypeA { name: string }
         type TypeB { code: int }
         impl InfoA for TypeA { method info() { "A:" + self.name } }
@@ -985,7 +985,7 @@ fn two_traits_same_method_name_different_types() {
 fn call_same_trait_method_on_two_different_types() {
     ShapeTest::new(
         r#"
-        trait Greetable { greet(self): string }
+        trait Greetable { method greet() -> string }
         type Human { name: string }
         type Robot { id: int }
         impl Greetable for Human { method greet() { "Hi, I'm " + self.name } }
@@ -1005,7 +1005,7 @@ fn nested_trait_method_in_expression() {
         r#"
         type A { v: int }
         type B { v: int }
-        trait GetV { get_v(self): int }
+        trait GetV { method get_v() -> int }
         impl GetV for A { method get_v() { self.v } }
         impl GetV for B { method get_v() { self.v } }
         let a = A { v: 10 }
@@ -1022,7 +1022,7 @@ fn function_wraps_trait_method_call() {
     ShapeTest::new(
         r#"
         type Point { x: number, y: number }
-        trait Measurable { distance_from_origin(self): number }
+        trait Measurable { method distance_from_origin() -> number }
         impl Measurable for Point {
             method distance_from_origin() { self.x * self.x + self.y * self.y }
         }
@@ -1042,7 +1042,7 @@ fn trait_method_called_in_loop() {
     ShapeTest::new(
         r#"
         type Counter { val: int }
-        trait Incrementable { inc(self): any }
+        trait Incrementable { method inc() -> any }
         impl Incrementable for Counter {
             method inc() { Counter { val: self.val + 1 } }
         }
@@ -1064,7 +1064,7 @@ fn multiple_named_display_impls_default_used() {
     ShapeTest::new(
         r#"
         type Msg { text: string }
-        trait Display { display(self): string }
+        trait Display { method display() -> string }
         impl Display for Msg { method display() { "plain:" + self.text } }
         impl Display for Msg as Fancy { method display() { "fancy:" + self.text } }
         let m = Msg { text: "hi" }

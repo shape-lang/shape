@@ -222,7 +222,7 @@ fn test_queryable_trait_compiles() {
             map(transform): any,
             orderBy(column, direction): any,
             limit(n): any,
-            execute(): any
+            method execute() -> any
         }
     "#,
     );
@@ -235,7 +235,7 @@ fn test_queryable_impl_for_custom_type() {
         r#"
         trait Queryable {
             filter(predicate): any,
-            execute(): any
+            method execute() -> any
         }
 
         type MyQuery {

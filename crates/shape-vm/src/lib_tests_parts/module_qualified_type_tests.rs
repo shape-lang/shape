@@ -203,7 +203,7 @@ mod module_qualified_type_tests {
     fn test_module_impl_trait() {
         let result = eval(r#"
             mod m {
-                trait Greet { greet(self): string }
+                trait Greet { method greet() -> string }
                 type P { name: string }
                 impl Greet for P {
                     method greet() -> string { self.name }

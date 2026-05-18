@@ -163,7 +163,7 @@ type Dog {
 }
 
 trait Speak {
-  speak(self): string
+  method speak() -> string;
 }
 
 impl Speak for Dog {
@@ -229,7 +229,7 @@ type Dog {
 }
 
 trait Speak {
-  speak(self): string
+  method speak() -> string;
 }
 
 impl Speak for Dog {

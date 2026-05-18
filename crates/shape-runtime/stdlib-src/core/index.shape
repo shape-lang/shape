@@ -57,7 +57,7 @@ trait Index<Key, Value> {
     /// Return the value associated with `key`. By convention the result is
     /// a fresh value or a copy; reference semantics belong to a future
     /// `IndexRef` variant.
-    index(key: Key): Value
+    method index(key: Key) -> Value;
 }
 
 /// Operator trait for `c[k] = v` (write). Implementing `IndexMut<Key, Value>`
@@ -69,5 +69,5 @@ trait Index<Key, Value> {
 trait IndexMut<Key, Value> {
     /// Set the value associated with `key` to `value`. Implementations
     /// typically mutate `self` in place.
-    index_set(key: Key, value: Value)
+    method index_set(key: Key, value: Value);
 }

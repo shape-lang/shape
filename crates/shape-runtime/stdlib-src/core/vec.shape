@@ -187,19 +187,19 @@ extend Vec<T> {
 // -- Numeric-only methods ---------------------------------------------------
 
 trait NumericVec {
-    sum(): number,
-    avg(): number,
-    mean(): number,
-    min(): number,
-    max(): number,
-    std(): number,
-    variance(): number,
-    dot(other: Vec<number>): number,
-    norm(): number,
-    normalize(): Vec<number>,
-    cumsum(): Vec<number>,
-    diff(): Vec<number>,
-    abs(): Vec<number>,
+    method sum() -> number;
+    method avg() -> number;
+    method mean() -> number;
+    method min() -> number;
+    method max() -> number;
+    method std() -> number;
+    method variance() -> number;
+    method dot(other: Vec<number>) -> number;
+    method norm() -> number;
+    method normalize() -> Vec<number>;
+    method cumsum() -> Vec<number>;
+    method diff() -> Vec<number>;
+    method abs() -> Vec<number>;
 }
 
 impl NumericVec for Vec {

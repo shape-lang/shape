@@ -6612,7 +6612,7 @@ mod tests {
 
     #[test]
     fn desugar_impl_method_backfills_return_type_from_trait_declaration() {
-        // Smoke 3 minimal shape: trait T { name(): string }
+        // Smoke 3 minimal shape: trait T { method name() -> string }
         // type X {} impl T for X { method name() { "x" } }
         //
         // The impl method body lacks the return-type annotation. Before
@@ -6623,7 +6623,7 @@ mod tests {
         // backfilled from the trait's `Required(Method { return_type:
         // Basic("string"), .. })` declaration.
         let code = r#"
-            trait T { name(): string }
+            trait T { method name() -> string }
             type X {}
             impl T for X {
                 method name() { "x" }
@@ -6645,7 +6645,7 @@ mod tests {
         assert!(
             func_def.return_type.is_some(),
             "T1' gap 3: impl method `X::name` return_type should be \
-             backfilled from trait declaration `T::name(): string`, \
+             backfilled from trait declaration `T::method name() -> string`, \
              got None"
         );
 
@@ -6685,7 +6685,7 @@ mod tests {
         // method (impl methods use the `->` return-type syntax per
         // `shape.pest::return_type = { "->" ~ type_annotation }`).
         let code = r#"
-            trait T { name(): string }
+            trait T { method name() -> string }
             type X {}
             impl T for X {
                 method name() -> string { "x" }

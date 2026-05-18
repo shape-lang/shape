@@ -75,5 +75,5 @@ trait Ord {
     /// dispatch. Implementations commonly return `-1`/`0`/`1`, but
     /// computing the difference directly (e.g. `self.value - other.value`
     /// for an `int` field) is equally valid.
-    cmp(other: Self): int
+    method cmp(other: Self) -> int;
 }

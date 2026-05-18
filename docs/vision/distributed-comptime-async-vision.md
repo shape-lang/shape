@@ -32,11 +32,11 @@ type Currency {
 }
 
 trait Display {
-    display(): string
+    fn display() -> string;
 }
 
 impl Display for Currency {
-    display() { this.symbol + round(this, this.decimals) }
+    fn display() -> string { this.symbol + round(this, this.decimals) }
 }
 
 // Type aliases with comptime parameter overrides
@@ -546,9 +546,9 @@ let data = await cascade {
 
 ```shape
 trait DataSource<T> {
-    async load(query: DataQuery): Result<DataFrame<T>>,
-    async subscribe(symbol: string): Stream<T>,
-    has_data(symbol: string): bool
+    async fn load(query: DataQuery) -> Result<DataFrame<T>>;
+    async fn subscribe(symbol: string) -> Stream<T>;
+    fn has_data(symbol: string) -> bool;
 }
 ```
 

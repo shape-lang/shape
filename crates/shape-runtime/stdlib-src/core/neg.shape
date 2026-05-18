@@ -33,5 +33,5 @@
 trait Neg {
     /// Return `-self`. By convention the result is a fresh value;
     /// there is no in-place counterpart for unary negation in Shape.
-    neg(): Self
+    method neg() -> Self;
 }

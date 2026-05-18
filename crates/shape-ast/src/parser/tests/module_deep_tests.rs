@@ -608,7 +608,7 @@ fn test_module_export_pub_builtin_function() {
 #[test]
 fn test_module_export_pub_trait() {
     // trait_member uses trait_member_signature syntax for required methods: `name(params): ReturnType`
-    let result = parse_program("pub trait Display { show(self): string }");
+    let result = parse_program("pub trait Display { method show() -> string }");
     assert!(result.is_ok(), "pub trait: {:?}", result.err());
     match &result.unwrap().items[0] {
         crate::ast::Item::Export(export, _) => {
@@ -852,7 +852,7 @@ fn test_module_decl_with_struct() {
 #[test]
 fn test_module_decl_with_trait() {
     // trait_member uses trait_member_signature syntax for required methods: `name(params): ReturnType`
-    let result = parse_program("mod traits { trait Display { show(self): string } }");
+    let result = parse_program("mod traits { trait Display { method show() -> string } }");
     assert!(result.is_ok(), "module with trait: {:?}", result.err());
 }
 

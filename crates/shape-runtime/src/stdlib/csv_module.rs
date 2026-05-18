@@ -87,7 +87,7 @@ pub fn create_csv_module() -> ModuleExports {
             // (nested-TypedArray) variant. Use csv.parse_records for
             // per-record TypedObject dispatch in the meantime.
             Err(format!(
-                "csv.parse(): SURFACE — `Array<Array<string>>` needs a \
+                "csv.method parse() -> SURFACE — `Array<Array<string>>` needs a \
                  nested-array variant in ADR-006 \
                  §2.7.24 Q25.A's spec list. Tracked as \
                  W17-typed-carrier-array-typedarray follow-up (out of \
@@ -169,7 +169,7 @@ pub fn create_csv_module() -> ModuleExports {
             // phase-2d-hardening:(f) — csv.read_file surface-and-stop:
             // same nested-TypedArray gap as csv.parse.
             Err(format!(
-                "csv.read_file(): SURFACE — `Array<Array<string>>` needs a \
+                "csv.method read_file() -> SURFACE — `Array<Array<string>>` needs a \
                  nested-array variant in ADR-006 \
                  §2.7.24 Q25.A's spec list. Tracked as \
                  W17-typed-carrier-array-typedarray follow-up. ADR-006 §2.7.24 Q25.A."
@@ -363,7 +363,7 @@ pub fn create_csv_module() -> ModuleExports {
                         )
                         .ok_or_else(|| {
                             format!(
-                                "csv.stringify_records(): TypedObject schema id {} \
+                                "csv.method stringify_records() -> TypedObject schema id {} \
                                  not registered",
                                 s.schema_id
                             )
@@ -415,7 +415,7 @@ pub fn create_csv_module() -> ModuleExports {
                                 .collect(),
                             other => {
                                 return Err(format!(
-                                    "csv.stringify_records(): HashMap records must be \
+                                    "csv.method stringify_records() -> HashMap records must be \
                                      HashMap<string, string>, got V={:?}",
                                     other.values_kind()
                                 ));
@@ -428,7 +428,7 @@ pub fn create_csv_module() -> ModuleExports {
                         )
                         .ok_or_else(|| {
                             format!(
-                                "csv.stringify_records(): TypedObject schema id {} \
+                                "csv.method stringify_records() -> TypedObject schema id {} \
                                  not registered",
                                 storage.schema_id
                             )

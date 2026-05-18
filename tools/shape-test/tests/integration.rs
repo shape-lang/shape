@@ -28,7 +28,7 @@ fn semantic_tokens_and_hover_on_function() {
 
 #[test]
 fn semantic_tokens_and_hover_on_trait() {
-    let code = "trait Printable {\n    display(self): string\n}";
+    let code = "trait Printable {\n    method display() -> string\n}";
     ShapeTest::new(code)
         .expect_semantic_tokens()
         .expect_semantic_tokens_min(2);

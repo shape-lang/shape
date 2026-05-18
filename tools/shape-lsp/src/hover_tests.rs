@@ -680,7 +680,7 @@ fn test_hover_impl_method_infers_return_type_without_local_trait() {
     if let Some(h) = hover {
         if let HoverContents::Markup(markup) = h.contents {
             assert!(
-                markup.value.contains("display(): string"),
+                markup.value.contains("method display() -> string"),
                 "Impl method hover should infer string return type, got: {}",
                 markup.value
             );
@@ -769,7 +769,7 @@ fn test_hover_impl_trait_resolves_members_from_module_context() {
     if let Some(h) = hover {
         if let HoverContents::Markup(markup) = h.contents {
             assert!(
-                markup.value.contains("display(): string"),
+                markup.value.contains("method display() -> string"),
                 "Trait hover should include trait member signatures, got: {}",
                 markup.value
             );

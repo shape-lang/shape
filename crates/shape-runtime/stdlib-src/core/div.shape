@@ -55,7 +55,7 @@
 trait Div {
     /// Return `self / other`. By convention the result is a fresh value;
     /// in-place mutation belongs to `DivAssign::div_assign`.
-    div(other: Self): Self
+    method div(other: Self) -> Self;
 }
 
 /// Operator trait for `/=`. The grammar desugars `a /= b` to `a = a / b`,
@@ -69,5 +69,5 @@ trait Div {
 /// means the return value is unused under current semantics.
 trait DivAssign {
     /// Mutate `self` in place by dividing by `other`. Return `self` for chaining.
-    div_assign(other: Self): Self
+    method div_assign(other: Self) -> Self;
 }

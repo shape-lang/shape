@@ -48,7 +48,7 @@
 trait Mul {
     /// Return `self * other`. By convention the result is a fresh value;
     /// in-place mutation belongs to `MulAssign::mul_assign`.
-    mul(other: Self): Self
+    method mul(other: Self) -> Self;
 }
 
 /// Operator trait for `*=`. The grammar desugars `a *= b` to `a = a * b`,
@@ -63,5 +63,5 @@ trait Mul {
 /// means the return value is unused under current semantics.
 trait MulAssign {
     /// Mutate `self` in place by multiplying by `other`. Return `self` for chaining.
-    mul_assign(other: Self): Self
+    method mul_assign(other: Self) -> Self;
 }

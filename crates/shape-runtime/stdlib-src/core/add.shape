@@ -49,7 +49,7 @@
 trait Add {
     /// Return `self + other`. By convention the result is a fresh value;
     /// in-place mutation belongs to `AddAssign::add_assign`.
-    add(other: Self): Self
+    method add(other: Self) -> Self;
 }
 
 /// Operator trait for `+=`. The grammar desugars `a += b` to `a = a + b`,
@@ -64,5 +64,5 @@ trait Add {
 /// means the return value is unused under current semantics.
 trait AddAssign {
     /// Mutate `self` in place by adding `other`. Return `self` for chaining.
-    add_assign(other: Self): Self
+    method add_assign(other: Self) -> Self;
 }

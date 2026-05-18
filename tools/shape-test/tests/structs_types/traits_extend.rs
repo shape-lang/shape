@@ -11,7 +11,7 @@ fn trait_definition_basic_parses() {
     ShapeTest::new(
         r#"
         trait Display {
-            display(self): string
+            method display() -> string;
         }
     "#,
     )
@@ -23,9 +23,9 @@ fn trait_with_multiple_methods_parses() {
     ShapeTest::new(
         r#"
         trait Collection {
-            size(self): int;
-            is_empty(self): bool;
-            first(self): any
+            method size() -> int;
+            method is_empty() -> bool;
+            method first() -> any;
         }
     "#,
     )
@@ -53,7 +53,7 @@ fn trait_impl_method_returns_computed_value() {
         r#"
         type Rect { width: number, height: number }
         trait Area {
-            area(self): number
+            method area() -> number;
         }
         impl Area for Rect {
             method area() {
@@ -73,7 +73,7 @@ fn trait_impl_with_string_return() {
         r#"
         type Color { r: int, g: int, b: int }
         trait Describe {
-            describe(self): string
+            method describe() -> string;
         }
         impl Describe for Color {
             method describe() { "color" }
@@ -91,7 +91,7 @@ fn trait_impl_method_accesses_multiple_fields() {
         r#"
         type Vec2 { x: number, y: number }
         trait Magnitude {
-            mag_sq(self): number
+            method mag_sq() -> number;
         }
         impl Magnitude for Vec2 {
             method mag_sq() {
@@ -112,11 +112,11 @@ fn trait_multiple_impls_same_type() {
         type User { name: string, age: int }
 
         trait Greet {
-            greet(self): string
+            method greet() -> string;
         }
 
         trait Info {
-            info(self): string
+            method info() -> string;
         }
 
         impl Greet for User {
@@ -140,7 +140,7 @@ fn trait_bound_function_dispatch() {
     ShapeTest::new(
         r#"
         trait Displayable {
-            display(): string
+            method display() -> string;
         }
 
         type User { name: string }
@@ -165,7 +165,7 @@ fn trait_impl_boolean_method() {
         r#"
         type Box { items: int }
         trait Checkable {
-            is_empty(self): bool
+            method is_empty() -> bool;
         }
         impl Checkable for Box {
             method is_empty() { self.items == 0 }
@@ -183,7 +183,7 @@ fn trait_impl_boolean_method_false() {
         r#"
         type Box { items: int }
         trait Checkable {
-            is_empty(self): bool
+            method is_empty() -> bool;
         }
         impl Checkable for Box {
             method is_empty() { self.items == 0 }
@@ -225,7 +225,7 @@ fn trait_associated_type_parses() {
         r#"
         trait Iterator {
             type Item;
-            next(self): any
+            method next() -> any;
         }
     "#,
     )
@@ -252,7 +252,7 @@ fn trait_default_method_parses() {
     ShapeTest::new(
         r#"
         trait Queryable {
-            filter(pred): any;
+            method filter(pred) -> any;
             method execute() {
                 return self
             }
@@ -304,7 +304,7 @@ fn trait_impl_print_output() {
         r#"
         type Animal { kind: string, sound: string }
         trait Speak {
-            speak(self): string
+            method speak() -> string;
         }
         impl Speak for Animal {
             method speak() { self.kind + " says " + self.sound }
@@ -322,7 +322,7 @@ fn trait_impl_method_with_param() {
         r#"
         type Counter { count: int }
         trait Addable {
-            add(self, n: int): int
+            method add(n: int) -> int;
         }
         impl Addable for Counter {
             method add(n) { self.count + n }

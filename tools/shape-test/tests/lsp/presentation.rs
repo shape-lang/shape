@@ -466,7 +466,7 @@ fn code_lens_on_trait_at_correct_line() {
 
 #[test]
 fn definition_from_format_navigates_to_display_impl() {
-    let code = "trait Display {\n    format(self): string\n}\nimpl Display for MyType {\n    method format() {\n        return \"test\"\n    }\n}\nlet x = MyType {}\nx.format()\n";
+    let code = "trait Display {\n    method format() -> string\n}\nimpl Display for MyType {\n    method format() {\n        return \"test\"\n    }\n}\nlet x = MyType {}\nx.format()\n";
     ShapeTest::new(code).at(pos(9, 2)).expect_definition();
 }
 
@@ -644,6 +644,6 @@ fn test_lsp_semantic_tokens_enum_definition() {
 
 #[test]
 fn test_lsp_code_lens_on_trait() {
-    let code = "trait Serializable {\n  serialize(): string\n}\nimpl Serializable for Data {\n  method serialize() { \"{}\" }\n}\n";
+    let code = "trait Serializable {\n  method serialize() -> string\n}\nimpl Serializable for Data {\n  method serialize() { \"{}\" }\n}\n";
     ShapeTest::new(code).expect_code_lens_not_empty();
 }

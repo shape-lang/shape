@@ -202,7 +202,7 @@ fn test_export_pub_struct_parses() {
 
 #[test]
 fn test_export_pub_trait_parses() {
-    ShapeTest::new("pub trait Display { show(self): string }").expect_parse_ok();
+    ShapeTest::new("pub trait Display { method show() -> string }").expect_parse_ok();
 }
 
 #[test]

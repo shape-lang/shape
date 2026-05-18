@@ -162,7 +162,7 @@ fn test_mod_with_trait_parses() {
     ShapeTest::new(
         r#"
         mod traits {
-            trait Display { show(self): string }
+            trait Display { method show() -> string }
         }
     "#,
     )

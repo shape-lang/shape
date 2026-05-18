@@ -9,7 +9,7 @@
 /// @see std::core::try_from::TryFrom
 trait TryInto<Target> {
     /// Attempt to convert `self` into `Target`.
-    tryInto(): Result<Target, AnyError>
+    method tryInto() -> Result<Target, AnyError>;
 }
 
 impl TryInto<number> for int as number {

@@ -205,7 +205,7 @@ annotation documented(desc) {
 
 @documented("A printable trait")
 trait Printable {
-  to_string(self): string
+  method to_string() -> string;
 }
 
 print("trait annotation defined")

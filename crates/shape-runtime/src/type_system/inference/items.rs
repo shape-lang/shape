@@ -1199,7 +1199,7 @@ mod tests {
         // Trait members use signature syntax: name(params): ReturnType
         let code = r#"
             trait Displayable {
-                format(value: string): string
+                method format(value: string) -> string
             }
         "#;
 
@@ -1227,7 +1227,7 @@ mod tests {
 
         let code = r#"
             trait Filterable {
-                apply(pred: number): number
+                method apply(pred: number) -> number
             }
 
             impl Filterable for Table {
@@ -1261,7 +1261,7 @@ mod tests {
 
         let code = r#"
             trait Into<Target> {
-                into(): Target
+                method into() -> Target
             }
 
             impl Into for string as int {
@@ -1286,7 +1286,7 @@ mod tests {
 
         let code = r#"
             trait Into<Target> {
-                into(): Target
+                method into() -> Target
             }
 
             impl Into<int> for string as number {
@@ -1311,8 +1311,8 @@ mod tests {
 
         let code = r#"
             trait Queryable {
-                filter(pred: number): number;
-                execute(): number
+                method filter(pred: number) -> number;
+                method execute() -> number
             }
 
             impl Queryable for Table {
@@ -1349,7 +1349,7 @@ mod tests {
 
         let code = r#"
             trait Computable {
-                compute(a: number, b: number): number
+                method compute(a: number, b: number) -> number
             }
 
             impl Computable for Calculator {
@@ -1501,7 +1501,7 @@ mod tests {
         // Define a trait, implement it, then verify the method is callable on Person
         let code = r#"
             trait Greetable {
-                greet(name: string): string
+                method greet(name: string) -> string
             }
 
             impl Greetable for Person {
@@ -1584,7 +1584,7 @@ mod tests {
         // Define a trait, implement it for number, then call a bounded function with number
         let code = r#"
             trait Comparable {
-                compare(other: number): number
+                method compare(other: number) -> number
             }
 
             impl Comparable for number {
@@ -1617,7 +1617,7 @@ mod tests {
         // Define a trait but DON'T implement it for string, then call bounded function with string
         let code = r#"
             trait Sortable {
-                rank(): number
+                method rank() -> number
             }
 
             function sort<T: Sortable>(x: T) -> T {
@@ -1654,11 +1654,11 @@ mod tests {
 
         let code = r#"
             trait Comparable {
-                compare(other: number): number
+                method compare(other: number) -> number
             }
 
             trait Displayable {
-                display(): string
+                method display() -> string
             }
 
             impl Comparable for number {
@@ -1696,7 +1696,7 @@ mod tests {
 
         let code = r#"
             trait Displayable {
-                display(): string
+                method display() -> string
             }
 
             type User { name: string }
@@ -1728,11 +1728,11 @@ mod tests {
 
         let code = r#"
             trait Comparable {
-                compare(other: number): number
+                method compare(other: number) -> number
             }
 
             trait Displayable {
-                display(): string
+                method display() -> string
             }
 
             impl Comparable for number {
@@ -1773,7 +1773,7 @@ mod tests {
 
         let code = r#"
             trait Displayable {
-                format(): string;
+                method format() -> string;
                 method describe() -> string {
                     return "object"
                 }
@@ -1801,7 +1801,7 @@ mod tests {
         // Define trait with a default method, impl without overriding it
         let code = r#"
             trait Printable {
-                format(): string;
+                method format() -> string;
                 method describe() -> string {
                     return "default"
                 }
@@ -1845,7 +1845,7 @@ mod tests {
 
         let code = r#"
             trait Printable {
-                format(): string;
+                method format() -> string;
                 method describe() -> string {
                     return "default"
                 }
@@ -1892,7 +1892,7 @@ mod tests {
         // Missing the required "format" method should still error
         let code = r#"
             trait Printable {
-                format(): string;
+                method format() -> string;
                 method describe() -> string {
                     return "default"
                 }

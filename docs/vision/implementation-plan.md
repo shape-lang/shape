@@ -402,8 +402,8 @@ Remove from docs:
 
 1. Define in stdlib:
    ```shape
-   trait Serializable { to_bytes(self): Array<byte>; from_bytes(bytes: Array<byte>): Self }
-   trait Distributable: Serializable { wire_size(self): int; is_deterministic(self): bool }
+   trait Serializable { fn to_bytes(self) -> Array<byte>; fn from_bytes(bytes: Array<byte>) -> Self; }
+   trait Distributable extends Serializable { fn wire_size(self) -> int; fn is_deterministic(self) -> bool; }
    ```
 2. Implement Serializable for builtin types
 3. Wire into snapshot system (types with Serializable use bincode pipeline)

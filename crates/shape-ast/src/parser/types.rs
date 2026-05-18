@@ -1245,6 +1245,13 @@ fn parse_trait_member_signature(pair: Pair<Rule>) -> Result<crate::ast::TraitMem
 
 fn parse_trait_member_kind(raw: &str, name: &str) -> (bool, bool) {
     let trimmed = raw.trim_start();
+    // Strip optional `async` + `fn`/`method` keyword prefix (Form B trait method
+    // signatures use `fn name(...) -> Ret`; Form A no-keyword colon-return form
+    // was removed from the grammar).
+    let trimmed = strip_keyword(trimmed, "async").unwrap_or(trimmed);
+    let trimmed = strip_keyword(trimmed, "fn")
+        .or_else(|| strip_keyword(trimmed, "method"))
+        .unwrap_or(trimmed);
     let Some(mut rest) = trimmed.strip_prefix(name) else {
         return (false, false);
     };
@@ -1256,6 +1263,15 @@ fn parse_trait_member_kind(raw: &str, name: &str) -> (bool, bool) {
     }
     let is_method = rest.starts_with('(');
     (optional, is_method)
+}
+
+fn strip_keyword<'a>(s: &'a str, kw: &str) -> Option<&'a str> {
+    let after = s.strip_prefix(kw)?;
+    if after.starts_with(|c: char| c.is_whitespace() || c == '(') {
+        Some(after.trim_start())
+    } else {
+        None
+    }
 }
 
 fn parse_trait_index_signature(
