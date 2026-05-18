@@ -69,9 +69,16 @@ pub struct Cli {
 /// Execution mode for running Shape code
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
 pub enum ExecutionModeArg {
-    /// Use bytecode VM (interpreter only)
+    /// Use bytecode VM (interpreter only).
     Vm,
-    /// Use JIT compilation (tiered: interpreter → baseline → optimizing)
+    /// Use JIT compilation (tiered: interpreter → baseline @ T1=100 calls →
+    /// optimizing @ T2=10k calls). The toplevel script and every reachable
+    /// function attempt JIT-compile when possible; on JIT-compile failure
+    /// the executor falls through to the bytecode interpreter (NOT
+    /// silent-no-output) and emits a `[jit-fallback]` diagnostic to stderr.
+    /// Use `--trace-jit=shape_jit=debug` to promote per-function diagnostics.
+    /// See `book/advanced/jit-compilation` "--mode jit semantics" for the
+    /// full path (3) binding.
     Jit,
 }
 
