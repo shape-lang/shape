@@ -1,0 +1,6 @@
+// W13 patterns seed m05 — Result<int,string> Ok arm; pattern-bound n
+// reused without arithmetic (type-inference in match arms requires
+// explicit annotations on n*2 today — keep the seed simple).
+let r: Result<int, string> = Ok(10)
+let v = match r { Ok(n) => n, Err(_) => -1 }
+print(v)

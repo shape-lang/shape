@@ -1,0 +1,3 @@
+// W13 async seed y01 — await a constant-return async fn.
+async fn f() -> int { 42 }
+print(await f())

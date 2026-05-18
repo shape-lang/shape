@@ -1,0 +1,3 @@
+// W13 collections seed c04 — array index access.
+let v: Vec<int> = [10, 20, 30, 40]
+print(v[2])

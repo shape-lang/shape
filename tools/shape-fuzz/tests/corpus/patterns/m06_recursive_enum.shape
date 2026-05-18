@@ -1,0 +1,6 @@
+// W13 patterns seed m06 — recursive enum (LinkedList) shaped via Option.
+// Audit's Tree(int, Tree, Tree) form needs annotation on the recursive
+// arithmetic in the Node arm; the LinkedList form below avoids that.
+enum List { Nil, Cons(int, List) }
+fn first_value(l: List) -> int { match l { List::Nil => 0, List::Cons(n, _) => n } }
+print(first_value(List::Cons(7, List::Cons(2, List::Nil))))

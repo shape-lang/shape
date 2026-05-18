@@ -1,0 +1,4 @@
+// W13 generics seed g04 — generic struct field access.
+type Box<T> { value: T }
+let b: Box<int> = Box { value: 99 }
+print(b.value)

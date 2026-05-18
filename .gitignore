@@ -23,3 +23,8 @@
 # Claude Code workspace state — agent worktrees and runtime locks
 .claude/worktrees/
 .claude/scheduled_tasks.lock
+
+# shape-fuzz harness findings (W13) — per-run artifacts, not committed.
+# Audit §6.4 picks GitHub Actions artifact upload (30-day retention) for
+# nightly findings; local dev runs leave per-invocation files behind.
+tools/shape-fuzz/findings/

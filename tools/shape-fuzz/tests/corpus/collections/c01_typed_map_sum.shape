@@ -1,0 +1,3 @@
+// W13 collections seed c01 — typed array map+sum (s2 canonical).
+let v: Vec<int> = [1,2,3,4,5]
+print(v.map(|x| x * 2).sum())

@@ -1,0 +1,3 @@
+// W13 closures seed f03 — `let`-bound closure, then call.
+let dbl = |x| x * 2
+print(dbl(7))

@@ -1,0 +1,10 @@
+// CLASS: LANG-W13-3-double-filter-chain
+// Negative-corpus seed c08 — NEW divergence class surfaced by W13.3 corpus run.
+// Chained `.filter().filter().len()` on Vec<int>:
+//   VM hangs (single-timeout at 30s harness budget).
+//   JIT exits 0 with garbage (`-1407374883553280` — raw pointer leak).
+// CLASSIFICATION: single-timeout (Medium-signal per audit §2 row 6).
+// SURFACE-AND-STOP for follow-up sub-cluster (LANG-W13-3-double-filter-chain).
+// Flips (n) -> (g) when the chained-filter VM-side fix lands.
+let v: Vec<int> = [1,2,3,4,5,6,7,8,9,10]
+print(v.filter(|x| x > 2).filter(|x| x < 8).len())

@@ -7,15 +7,15 @@
 //! and classifies the result against the eight-class taxonomy in
 //! `divergence`.
 //!
-//! **W13.2 scope (this crate at scaffold time):**
+//! **W13.3 scope (this crate at present):**
 //! - `compare_outputs` — subprocess driver.
 //! - `classify_divergence` — pure §2 table.
 //! - `record_finding` — write divergence record to a findings directory.
-//! - `minimize_reproducer` — placeholder; full bisect lands in W13.3.
+//! - `mutation::mutate_seed` — bounded AST-aware mutation engine (audit §4.2).
+//! - `minimizer::minimize_failure` — statement-removal bisect (audit §5.1).
+//! - 50-seed hand-seeded corpus at `tests/corpus/<domain>/` (audit §3).
 //!
-//! W13.3 lands the corpus + bounded mutation engine + AST-subset bisect
-//! minimizer. W13.4 wires the nightly GitHub Actions job. The scaffold
-//! itself does not run a corpus beyond a single self-test seed.
+//! W13.4 wires the nightly GitHub Actions job per audit §6.2.
 
 use std::ffi::OsStr;
 use std::fs;
@@ -25,8 +25,12 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub mod divergence;
+pub mod minimizer;
+pub mod mutation;
 
 pub use divergence::{Divergence, ModeOutcome, Signal, classify_divergence};
+pub use minimizer::{MinimizeConfig, MinimizeError, MinimizeOutcome, minimize_failure};
+pub use mutation::{DerivedSeed, MutationConfig, Strategy, mutate_seed, mutate_seed_to_dir};
 
 /// Default wall-clock budget per subprocess invocation, mirroring the W13
 /// audit §2 corrected-harness shape (`timeout 30 ...`).
@@ -252,29 +256,6 @@ pub fn record_finding(
     Ok(path)
 }
 
-/// Placeholder for the AST-subset-bisect minimizer described in W13 audit
-/// §5.1. The scaffold returns the original snippet unchanged + a
-/// `Unimplemented` marker so callers can wire the API now and the W13.3
-/// closure-wave fills in the bisect body without re-shaping the call site.
-///
-/// W13.3 will replace this with a statement-removal binary search bounded
-/// to 50 iterations per finding per §5.1.
-#[derive(Debug)]
-pub enum MinimizeOutcome {
-    /// W13.3 has not yet landed the bisect engine; the input is returned
-    /// untouched.
-    Unimplemented { original: PathBuf },
-}
-
-pub fn minimize_reproducer(
-    snippet: &Path,
-    _cfg: &CompareConfig,
-) -> Result<MinimizeOutcome, HarnessError> {
-    Ok(MinimizeOutcome::Unimplemented {
-        original: snippet.to_path_buf(),
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -296,17 +277,6 @@ mod tests {
         match result {
             Err(HarnessError::SnippetRead { .. }) => {}
             other => panic!("expected SnippetRead error, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn minimize_reproducer_is_unimplemented_at_scaffold_time() {
-        let tmp = std::env::temp_dir().join("shape-fuzz-minimize-stub.shape");
-        let _ = fs::write(&tmp, "print(1)\n");
-        let cfg = CompareConfig::default();
-        let outcome = minimize_reproducer(&tmp, &cfg).expect("placeholder must succeed");
-        match outcome {
-            MinimizeOutcome::Unimplemented { original } => assert_eq!(original, tmp),
         }
     }
 

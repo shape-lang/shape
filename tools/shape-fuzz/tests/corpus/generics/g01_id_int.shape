@@ -1,0 +1,3 @@
+// W13 generics seed g01 — identity over int.
+fn id<T>(x: T) -> T { x }
+print(id(42))

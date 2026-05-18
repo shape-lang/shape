@@ -1,0 +1,3 @@
+// W13 async seed y02 — await an async fn that takes args.
+async fn add(x: int, y: int) -> int { x + y }
+print(await add(2, 3))

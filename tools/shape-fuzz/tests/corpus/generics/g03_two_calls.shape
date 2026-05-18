@@ -1,0 +1,5 @@
+// W13 generics seed g03 — two monomorphizations of one fn.
+fn id<T>(x: T) -> T { x }
+let a = id(10)
+let b = id(20)
+print(a + b)

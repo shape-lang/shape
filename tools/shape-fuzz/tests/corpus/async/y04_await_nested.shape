@@ -1,0 +1,4 @@
+// W13 async seed y04 — async fn that awaits another async fn.
+async fn inner() -> int { 7 }
+async fn outer() -> int { await inner() + 1 }
+print(await outer())

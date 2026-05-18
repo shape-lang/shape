@@ -1,0 +1,6 @@
+// CLASS: W11-followup-slice-classify
+// Negative-corpus seed c10 — §5.1 residual class #2 (per W13 audit §4.1).
+// VM works; JIT-mode IndexAccess-slice Aggregate fallback or fall-through.
+// Flips (n) -> (g) when W11-followup-slice-classify closure-wave lands.
+let a: Vec<int> = [1, 2, 3, 4, 5]
+print(a[1..3].len())

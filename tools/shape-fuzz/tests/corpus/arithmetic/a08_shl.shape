@@ -1,0 +1,2 @@
+// W13 arithmetic seed a08 — left shift.
+print(1 << 4)

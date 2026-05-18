@@ -1,0 +1,5 @@
+// W13 patterns seed m02 — enum struct-payload pattern.
+enum E { A, B(int), C{x: int} }
+let e = E::C{x:7}
+let r = match e { E::A => 0, E::B(n) => n, E::C{x} => x*2 }
+print(r)

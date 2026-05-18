@@ -1,0 +1,3 @@
+// W13 arithmetic seed a05 — modulo with negative dividend (Rust-style %).
+let x = (-5) % 3
+print(x)

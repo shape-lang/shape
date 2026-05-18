@@ -1,0 +1,3 @@
+// W13 generics seed g02 — identity over string.
+fn id<T>(x: T) -> T { x }
+print(id("hello"))

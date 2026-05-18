@@ -1,0 +1,7 @@
+// CLASS: W11-followup-jit-spread-expand
+// Negative-corpus seed c09 — §5.1 residual class #10 (per W13 audit §4.1).
+// At HEAD JIT may diverge or fall through; harness records actual shape.
+// Flips (n) -> (g) when W11-followup-jit-spread-expand closure-wave lands.
+let a: Vec<int> = [1, 2, 3]
+let b = [0, ...a, 4]
+print(b.len())

@@ -1,0 +1,4 @@
+// W13 async seed y05 — await participates in an expression.
+async fn val() -> int { 100 }
+let x = (await val()) * 2 + 5
+print(x)

@@ -1,0 +1,6 @@
+// W13 async seed y03 — two sequential awaits, sum result.
+async fn one() -> int { 10 }
+async fn two() -> int { 20 }
+let a = await one()
+let b = await two()
+print(a + b)

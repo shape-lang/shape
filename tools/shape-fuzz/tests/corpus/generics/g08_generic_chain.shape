@@ -1,0 +1,8 @@
+// W13 generics seed g08 — type-level generic monomorphization with
+// extraction. The arithmetic uses a concrete-typed intermediate variable
+// to avoid the Box<int>.v -> unknown inference gap that fires when
+// `b1.v + b2.v` is evaluated directly.
+type Box<T> { v: T }
+let b1: Box<int> = Box { v: 5 }
+let n: int = b1.v
+print(n + 10)
