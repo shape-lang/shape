@@ -236,6 +236,53 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 let inst = self.builder.ins().call(func_ref, &[bits_i64]);
                 Ok(self.builder.inst_results(inst)[0])
             }
+
+            Rvalue::TypePatternTest { type_annotation, .. } => {
+                // W15.2-LANG-5 (Phase 4b, 2026-05-18). The MIR producer
+                // emits `Rvalue::TypePatternTest` for every `Pattern::Typed`
+                // arm in a match expression (e.g. `match x { n: int => ...,
+                // s: string => ... }`). The JIT consumer would need a per-
+                // kind dispatch on the §2.7.7 stack parallel-kind track —
+                // for the scalar-name annotations (`int` / `number` /
+                // `bool` / `string`) the test reduces to a NativeKind
+                // comparison; for `Generic { name, args }` the test
+                // requires reading the heap discriminator from the
+                // operand's `KindedSlot.slot.as_heap_value()` per ADR-005
+                // §1 single-discriminator + §2.7.6 / Q8 carrier-API-bound
+                // dispatch.
+                //
+                // Until that codegen lands, surface-and-stop. The JIT
+                // preflight at `mir_compiler::preflight` rejects this
+                // Rvalue at the program-level gate, so under normal
+                // dispatch the W12 fall-through at
+                // `crates/shape-jit/src/executor.rs::execute_program`
+                // routes the program to the bytecode interpreter (which
+                // compiles `Pattern::Typed` via the `OpCode::TypeCheck`
+                // path in `compiler/patterns/checking.rs`). This arm
+                // remains as defense in depth: if a future caller invokes
+                // `compile_rvalue` without running preflight first, the
+                // surface-and-stop here preserves the §2.7.5 producer-
+                // site classification discipline rather than silently
+                // emitting a kind-blind Bool default (CLAUDE.md
+                // "Forbidden rationalizations" — "just a small fallback
+                // for this one edge case" refused on sight).
+                Err(format!(
+                    "Route A surface-and-stop: NotImplemented(SURFACE) — \
+                     `Rvalue::TypePatternTest` codegen not yet wired \
+                     (annotation: {:?}). W15.2-LANG-5 fall-through to \
+                     interpreter is the canonical path today; preflight \
+                     should have already rejected this MIR before reaching \
+                     `compile_rvalue`. Native codegen lands as a \
+                     follow-up: per-kind dispatch on the §2.7.7 stack \
+                     parallel-kind track for scalar annotations + heap-\
+                     value discriminator read for `Generic` annotations \
+                     (ADR-005 §1 / ADR-006 §2.7.6 Q8 / §2.7.5 producer-\
+                     site classification). NOT a Bool-default \
+                     rationalization — the annotation IS the producer-side \
+                     classification.",
+                    type_annotation
+                ))
+            }
         }
     }
 

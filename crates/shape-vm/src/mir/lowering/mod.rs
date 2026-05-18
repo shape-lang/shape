@@ -1691,6 +1691,52 @@ mod tests {
         assert!(analysis.errors.iter().any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed));
     }
 
+    /// W15.2-LANG-5 regression. `Pattern::Typed` arms in a `match`
+    /// expression must lower to a real discriminator — pre-fix
+    /// `lower_match_pattern_condition_operand` grouped `Pattern::Typed`
+    /// with `Identifier`/`Wildcard` (returning `None` for the condition
+    /// operand), so the MIR builder emitted a kind-blind
+    /// `TerminatorKind::Goto(body_block)` for every typed arm. Under JIT
+    /// the first arm always won (e.g. `match x: int | string { n: int =>
+    /// 100, s: string => 200 }` returned 100 for both `7` and `"hi"`).
+    ///
+    /// Post-fix the lowering emits `Rvalue::TypePatternTest` per arm with
+    /// the producer-side stamped `TypeAnnotation`, then a `SwitchBool` on
+    /// the resulting Bool slot. This test pins the producer-side
+    /// classification by scanning the lowered MIR for the new Rvalue.
+    #[test]
+    fn test_lowered_typed_pattern_match_emits_type_pattern_test() {
+        use crate::mir::types::{Rvalue, StatementKind};
+        let lowering = lower_parsed_function(
+            r#"
+                function describe(x) {
+                    match x {
+                        n: int => 100
+                        s: string => 200
+                    }
+                }
+            "#,
+        );
+        assert!(!lowering.had_fallbacks);
+        let typed_tests: Vec<&Rvalue> = lowering
+            .mir
+            .blocks
+            .iter()
+            .flat_map(|b| b.statements.iter())
+            .filter_map(|stmt| match &stmt.kind {
+                StatementKind::Assign(_, rv @ Rvalue::TypePatternTest { .. }) => Some(rv),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            typed_tests.len(),
+            2,
+            "expected one TypePatternTest per typed arm (int + string); got {} -- MIR: {:#?}",
+            typed_tests.len(),
+            lowering.mir.blocks,
+        );
+    }
+
     #[test]
     fn test_lowered_destructure_var_decl_write_while_borrowed_is_visible_to_solver() {
         let lowering = lower_parsed_function(

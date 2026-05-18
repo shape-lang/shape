@@ -442,7 +442,27 @@ pub fn preflight(mir_data: &MirFunctionData) -> MirPreflightResult {
                         ));
                     }
                     match rvalue {
-                        // BinaryOp, UnaryOp, Use, Clone, Borrow, Aggregate are supported
+                        // W15.2-LANG-5 (Phase 4b, 2026-05-18). MIR-level
+                        // marker for `Pattern::Typed` arms in `match`
+                        // expressions. JIT codegen is not yet wired
+                        // (`compile_rvalue` surfaces-and-stops on this
+                        // variant); preflight rejects so the W12 fall-
+                        // through routes the program to the bytecode
+                        // interpreter, which compiles typed patterns via
+                        // `OpCode::TypeCheck` in
+                        // `compiler/patterns/checking.rs`. ADR-006 §2.7.5
+                        // producer-side classification: the annotation is
+                        // carried verbatim from `ast::Pattern::Typed`.
+                        Rvalue::TypePatternTest { type_annotation, .. } => {
+                            blockers.push(format!(
+                                "TypePatternTest (W15.2-LANG-5): \
+                                 `Pattern::Typed` codegen pending, \
+                                 annotation = {:?} at {:?}",
+                                type_annotation, stmt.span
+                            ));
+                        }
+                        // BinaryOp, UnaryOp, Use, Clone, Borrow, Aggregate,
+                        // EnumTest, EnumPayload are supported
                         _ => {}
                     }
                 }
