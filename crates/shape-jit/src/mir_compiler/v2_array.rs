@@ -491,6 +491,107 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 self.write_place(destination, none_val)?;
                 Ok(Some(()))
             }
+            // Phase 4b Round 4 W15 LANG-9-spin-3-first JIT fix
+            // (2026-05-18). ADR-006 §2.7.5 producer-side stamp: inline the
+            // element-0 / element-(len-1) read via `v2_array_get` for the
+            // chained-receiver shape (`[..].map(..).first()` —
+            // F3b reproducer) where the receiver lacks a Place::Local
+            // binding to register `v2_typed_array_locals` against. The
+            // result kind matches the VM PHF (`typed_int_array_methods::
+            // first` returns Int64 for I64-element arrays) — see the
+            // sibling `parametric_method_return_kind_from_receiver`
+            // ("first"|"last"|"pop", Array(elem)) arm in
+            // `mir_compiler/types.rs` which stamps the same element kind
+            // into the JIT slot_kinds track.
+            //
+            // Bypasses the `jit_call_method` trampoline — the typed-
+            // element read is structurally cheap (load data+0 or
+            // data+(len-1)*size) and removes the FFI hop. Pre-fix the
+            // F3b reproducer fell through to `jit_call_method` →
+            // `typed_int_array_methods::first` returning the bare
+            // element bits with kind Int64; the JIT downstream
+            // `operand_slot_kind` previously returned `Ptr(Option)` via
+            // the pre-fix arm above and treated the bare element bits as
+            // an Option<T> pointer carrier → "None" rendered. The
+            // post-fix slot kind is Int64 (sibling §2.7.5 arm) but the
+            // chained-receiver shape's slot-bits trip a different
+            // downstream surface (the result kind+bits flow through
+            // unbinded chain slots without the let-binding's full
+            // §2.7.5 conduit). This arm closes that surface by
+            // structurally emitting the element read inline.
+            //
+            // Empty-array contract: returns the element default (0 for
+            // integers, 0.0 for floats, false for bools) via
+            // `v2_array_get`'s out-of-bounds branch in
+            // `mir_compiler/v2_array.rs::v2_array_get`. This mirrors
+            // the VM PHF's empty-array `KindedSlot::none()` Bool/0
+            // sentinel for the integer/float/bool element families.
+            // String / Decimal / Char element receivers fall through
+            // (Ok(None)) since the heap-element variants need carrier
+            // retain on read and are tracked separately under the
+            // V3-S5 ckpt-6 STRICT close.
+            "first" => {
+                if !rest_args.is_empty() {
+                    return Ok(None);
+                }
+                if !matches!(
+                    elem,
+                    NativeKind::Int64
+                        | NativeKind::UInt64
+                        | NativeKind::Int32
+                        | NativeKind::UInt32
+                        | NativeKind::Int16
+                        | NativeKind::UInt16
+                        | NativeKind::Int8
+                        | NativeKind::UInt8
+                        | NativeKind::Float64
+                        | NativeKind::Float32
+                        | NativeKind::Bool
+                ) {
+                    return Ok(None);
+                }
+                let arr_ptr = self.read_place(receiver)?;
+                let zero_idx = self.builder.ins().iconst(types::I32, 0);
+                let elem_val = self.v2_array_get(arr_ptr, zero_idx, elem);
+                self.release_old_value_if_heap(destination)?;
+                self.write_place(destination, elem_val)?;
+                Ok(Some(()))
+            }
+            "last" => {
+                if !rest_args.is_empty() {
+                    return Ok(None);
+                }
+                if !matches!(
+                    elem,
+                    NativeKind::Int64
+                        | NativeKind::UInt64
+                        | NativeKind::Int32
+                        | NativeKind::UInt32
+                        | NativeKind::Int16
+                        | NativeKind::UInt16
+                        | NativeKind::Int8
+                        | NativeKind::UInt8
+                        | NativeKind::Float64
+                        | NativeKind::Float32
+                        | NativeKind::Bool
+                ) {
+                    return Ok(None);
+                }
+                let arr_ptr = self.read_place(receiver)?;
+                let len_i32 = self.v2_array_len(arr_ptr);
+                let one = self.builder.ins().iconst(types::I32, 1);
+                let last_idx = self.builder.ins().isub(len_i32, one);
+                // `v2_array_get` performs an unsigned bounds check
+                // (`index < len`); when len==0 the resulting last_idx
+                // wraps to a large positive u32 that fails the bounds
+                // check and the OOB path returns the element default —
+                // mirrors the VM PHF's empty-array `KindedSlot::none()`
+                // sentinel for integer/float/bool element families.
+                let elem_val = self.v2_array_get(arr_ptr, last_idx, elem);
+                self.release_old_value_if_heap(destination)?;
+                self.write_place(destination, elem_val)?;
+                Ok(Some(()))
+            }
             "sum" => {
                 // Phase C.3: Bypass method dispatch entirely — call the SIMD
                 // reduction FFI (`jit_v2_array_sum_f64` / `jit_v2_array_sum_i64`)

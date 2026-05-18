@@ -136,7 +136,7 @@ impl VirtualMachine {
         &mut self,
         obj_bits: u64,
         obj_kind: NativeKind,
-        _key_bits: u64,
+        key_bits: u64,
         key_kind: NativeKind,
         key_str: Option<&str>,
     ) -> Result<(), VMError> {
@@ -172,6 +172,65 @@ impl VirtualMachine {
             // The 16-arm dispatch cascade-broke at ckpt-1.
             NativeKind::Ptr(HeapKind::TypedArray) => {
                 Err(ckpt3_surface("GetProp(TypedArray)", key_kind))
+            }
+
+            // ── v2 typed array (raw `*mut TypedArray<T>` pointer) ────────
+            //
+            // Phase 4b Round 4 W15 LANG-9-spin-3-first VM fix. ADR-006
+            // §2.7.5 producer-side stamp: v2 typed-array allocators stamp
+            // `HEAP_KIND_V2_TYPED_ARRAY` (kind=4) + `ELEM_TYPE_*` byte in
+            // the header at `v2_handlers/array.rs` allocation; consumer
+            // recovers via `as_v2_typed_array(bits, kind)` + per-T
+            // `read_element` from `v2_handlers/v2_array_detect.rs`. The
+            // kind carrier is `NativeKind::UInt64` per §2.7.5 the same
+            // carrier shape `len()` / `sum()` PHF entries dispatch on
+            // (`executor/objects/mod.rs::resolve_method_handler` line
+            // 682). The producer-stamped header byte IS the proof of
+            // element type; the kind-carrier `UInt64` is the same one
+            // `typed_int_array_methods::extract_view` reads — no
+            // intermediate translation step is introduced.
+            //
+            // This arm closes the dispatch path for `arr[i]` (parsed as
+            // `IndexAccess`, lowered to `GetProp` at
+            // `compiler/expressions/property_access.rs:642` when the
+            // receiver isn't a tracked typed-array local) for receivers
+            // flowing through function params (e.g. `self` in stdlib
+            // `Vec.first()` body `self[0]` at
+            // `crates/shape-runtime/stdlib-src/core/vec.shape:23`). The
+            // JIT-side `mir_compiler/v2_array.rs::v2_array_get` is the
+            // sibling consumer for the same receiver shape — VM and JIT
+            // share the producer-stamped header byte; no parallel-carrier
+            // duality.
+            NativeKind::UInt64 => {
+                use crate::executor::v2_handlers::v2_array_detect::{
+                    as_v2_typed_array, read_element,
+                };
+                let view = match as_v2_typed_array(obj_bits, obj_kind) {
+                    Some(v) => v,
+                    None => {
+                        // The kind is UInt64 but the bits aren't a v2
+                        // typed-array pointer — surface as scalar (the
+                        // pre-Round-4 behavior for plain unsigned ints).
+                        return Err(VMError::TypeError {
+                            expected: "object, array, string, or other heap value",
+                            got: "scalar",
+                        });
+                    }
+                };
+                let idx = numeric_index_from_kinded(key_bits, key_kind)?;
+                if (idx as u64) >= view.len as u64 {
+                    return Err(VMError::IndexOutOfBounds {
+                        index: idx as i32,
+                        length: view.len as usize,
+                    });
+                }
+                match read_element(&view, idx as u32) {
+                    Some((bits, kind)) => self.push_kinded(bits, kind),
+                    None => Err(VMError::IndexOutOfBounds {
+                        index: idx as i32,
+                        length: view.len as usize,
+                    }),
+                }
             }
 
             // ── HashMap, String index, NativeView, Temporal, TableView,
@@ -561,8 +620,10 @@ impl VirtualMachine {
 /// constants the compiler emits for `arr[i]`.
 ///
 /// Preserved through V3-S5 ckpt-3: no `TypedArrayData` dependency.
+/// Phase 4b Round 4 W15 LANG-9-spin-3-first: now reachable via the v2
+/// typed-array `UInt64` arm of `dispatch_get_prop` for `arr[i]` reads
+/// flowing through stdlib `Vec.first()` body's `self[0]` shape.
 #[inline]
-#[allow(dead_code)]
 fn numeric_index_from_kinded(bits: u64, kind: NativeKind) -> Result<usize, VMError> {
     let i = match kind {
         NativeKind::Int64 => bits as i64,
