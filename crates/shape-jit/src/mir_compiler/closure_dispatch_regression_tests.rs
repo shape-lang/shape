@@ -192,3 +192,93 @@ main()
         20,
     );
 }
+
+// Phase 4b Round 4 Surface-1a LANG-W13-3-iife-closure-capture JIT residual
+// regression (2026-05-18, commit pending). Pinning the MIR-lowering-side
+// IIFE `__call__` interception at `mir/lowering/expr.rs`
+// (`Expr::MethodCall { method: "__call__", .. }` arm) — bytecode parses
+// IIFE / chained call `f(a)(b)` as `MethodCall { method: "__call__",
+// receiver: <callable> }` per `crates/shape-ast/src/parser/expressions/
+// primary.rs:167`. The bytecode compiler already intercepts the same
+// shape at `compiler/expressions/function_calls.rs:1832` and emits
+// `CallValue` directly with the receiver as the callee on the VM
+// stack. Mirror that producer-side classification at MIR lowering per
+// ADR-006 §2.7.5 stamp-at-compile-time: the receiver becomes the Call
+// terminator's `func` operand (NOT a `MirConstant::Method("__call__")`
+// method-name carrier), so the JIT terminator's indirect-call path at
+// `mir_compiler/terminators.rs:1486` routes through `jit_call_value`'s
+// §2.7.11/Q12 closure-arm correctly.
+//
+// Pre-fix: MIR carried `Method("__call__")` → JIT `jit_call_method`
+// shell at `ffi/call_method/mod.rs:801` hit the
+// `NativeKind::Ptr(_) => TAG_NULL` arm (no `__call__` builtin for
+// closure receivers), surfacing as `0xfffb_0000_0000_0000` (TAG_NULL)
+// at the assignment destination.
+
+/// IIFE result assigned to a `let mut` integer slot. Pre-fix: JIT prints
+/// `-1407374883553280` (TAG_NULL NaN-boxed bits); VM prints `8`.
+/// Post-fix: VM=JIT=`8`.
+#[test]
+fn iife_assignment_to_mut_local() {
+    jit_expect_int(
+        r#"
+let base = 7
+let mut total = 0
+total = (|y| y + base)(1)
+total
+"#,
+        8,
+    );
+}
+
+/// IIFE inside a `for` loop accumulating into a `let mut` integer
+/// (the R3-1 close report's exact reproducer). Pre-fix: JIT prints
+/// `-4222124650659840` (a NaN bit pattern produced by adding 0 + TAG_NULL
+/// three times via Int64 addition); VM prints `27`. Post-fix: VM=JIT=`27`.
+#[test]
+fn iife_in_for_loop_accumulator() {
+    jit_expect_int(
+        r#"
+let base = 7
+let v: Vec<int> = [1, 2, 3]
+let mut total = 0
+for x in v { total += (|y| y + base)(x) }
+total
+"#,
+        27,
+    );
+}
+
+/// IIFE with no captures, no `for` — the simplest shape that exercises
+/// the same MIR lowering path. Pre-fix: JIT segfaulted (ec=139); VM
+/// printed `8`. Post-fix: VM=JIT=`8`.
+#[test]
+fn iife_no_capture_assignment_to_mut_local() {
+    jit_expect_int(
+        r#"
+let mut total = 0
+total = (|y| y + 7)(1)
+total
+"#,
+        8,
+    );
+}
+
+/// IIFE result via captured-closure binding in a let chain. Mirrors
+/// the by-name `closure_simple_dispatch_returns_six` shape (which
+/// works without the fix) plus a `let mut` reassign to pin both the
+/// IIFE MIR lowering and the producer-side stamp at the assignment
+/// destination kind together.
+#[test]
+fn iife_with_mut_local_then_let_chain() {
+    jit_expect_int(
+        r#"
+let base = 7
+let mut total = 0
+total = (|y| y + base)(1)
+let result = total + 0
+result
+"#,
+        8,
+    );
+}

@@ -2196,6 +2196,48 @@ pub(crate) fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotI
             named_args,
             ..
         } => {
+            // Phase 4b Round 4 Surface-1a LANG-W13-3-iife-closure-capture
+            // JIT residual fix (2026-05-18). The bytecode compiler at
+            // `compiler/expressions/function_calls.rs:1832` already
+            // intercepts `MethodCall { method: "__call__" }` (the
+            // parser shape for IIFE / chained call `f(a)(b)`) and
+            // emits `CallValue` directly with the receiver as the
+            // callee on the stack — the VM's `op_call_value` then
+            // dispatches through `call_value_immediate_nb` per the
+            // §2.7.11/Q12 callee-kind classification. Mirror that
+            // producer-side classification here at the MIR lowering
+            // site per ADR-006 §2.7.5 stamp-at-compile-time: lower the
+            // receiver as the `func` operand and the user args as
+            // `arg_ops` directly (no `MirConstant::Method("__call__")`
+            // method-name carrier). The JIT terminator's indirect-call
+            // path at `mir_compiler/terminators.rs:1486` then sources
+            // the callee kind via `operand_slot_kind_or_carrier(func)`
+            // — for an IIFE-emitted closure slot stamped
+            // `Ptr(HeapKind::Closure)` per the §2.7.11/Q12 ClosureCapture
+            // arm in `infer_slot_kinds`, this routes through
+            // `jit_call_value`'s closure-arm dispatch correctly. Pre-fix
+            // the MIR carried `Method("__call__")` to the JIT which
+            // routed through `jit_call_method` — that shell's
+            // `Ptr(HeapKind::Closure)` receiver-kind arm at
+            // `ffi/call_method/mod.rs:801` returns `TAG_NULL`
+            // unconditionally (no `__call__` builtin for closure
+            // receivers), surfacing as the `0xfffb_0000_0000_0000`
+            // garbage at the assignment-to-`let mut` destination.
+            if method == "__call__" {
+                let func_op = lower_expr_as_moved_operand(builder, receiver);
+                let mut arg_ops = Vec::with_capacity(args.len() + named_args.len());
+                arg_ops.extend(
+                    args.iter()
+                        .map(|arg| lower_expr_as_moved_operand(builder, arg)),
+                );
+                arg_ops.extend(
+                    named_args
+                        .iter()
+                        .map(|(_, expr)| lower_expr_as_moved_operand(builder, expr)),
+                );
+                builder.emit_call(func_op, arg_ops, Place::Local(temp), span);
+                return temp;
+            }
             let receiver_op = lower_expr_as_moved_operand(builder, receiver);
             let mut arg_ops = Vec::with_capacity(1 + args.len() + named_args.len());
             arg_ops.push(receiver_op);
