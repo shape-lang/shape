@@ -67,6 +67,11 @@ fn elem_type_info(kind: NativeKind) -> (types::Type, i64) {
             (types::I8, 1)
         }
         NativeKind::Bool => (types::I8, 1),
+        // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18) —
+        // 8-byte raw pointer carrier (`*const TypedObjectStorage`). Same shape as
+        // NativeKind::StringV2 / DecimalV2 heap-pointer carriers.
+        NativeKind::StringV2 | NativeKind::DecimalV2 => (types::I64, 8),
+        NativeKind::Ptr(_) => (types::I64, 8),
         other => panic!("v2_array: unsupported element NativeKind: {:?}", other),
     }
 }
@@ -171,6 +176,15 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             NativeKind::Bool | NativeKind::Int8 | NativeKind::UInt8 => Some(self.ffi.v2_array_new_bool),
             NativeKind::StringV2 => Some(self.ffi.v2_array_new_string),
             NativeKind::DecimalV2 => Some(self.ffi.v2_array_new_decimal),
+            // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18) —
+            // v2-raw `TypedArray<*const TypedObjectStorage>` allocator per ADR-006
+            // §2.7.5 + audit `v0.3-w16-v3s5-ckpt56-strict-close-audit.md` §2.1.
+            // Per-element payload is an 8-byte `*const TypedObjectStorage` raw
+            // pointer; pushed via the generic `jit_v2_array_push` I64-shaped
+            // dispatcher (size=8 below). Mirrors the String/Decimal carriers.
+            NativeKind::Ptr(shape_value::HeapKind::TypedObject) => {
+                Some(self.ffi.v2_array_new_typed_object)
+            }
             _ => None,
         }
     }
@@ -191,6 +205,9 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             NativeKind::Int32 | NativeKind::UInt32 => Some(4),
             NativeKind::Bool | NativeKind::Int8 | NativeKind::UInt8 => Some(1),
             NativeKind::StringV2 | NativeKind::DecimalV2 => Some(8),
+            // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18) —
+            // 8-byte raw pointer carrier (`*const TypedObjectStorage`).
+            NativeKind::Ptr(shape_value::HeapKind::TypedObject) => Some(8),
             _ => None,
         }
     }
@@ -302,6 +319,9 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             // materializer in `emit_v2_array_aggregate`'s StringV2/DecimalV2
             // arm. No coercion needed.
             NativeKind::StringV2 | NativeKind::DecimalV2 => val,
+            // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18) —
+            // 8-byte raw pointer carrier, no coercion.
+            NativeKind::Ptr(shape_value::HeapKind::TypedObject) => val,
             _ => val,
         }
     }

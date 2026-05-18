@@ -21,6 +21,7 @@ pub mod typed_map;
 // consumer + `jit_call_method` shell to dispatch through these
 // entry-points; until then they are inert at the program surface.
 
+use shape_value::heap_value::TypedObjectStorage;
 use shape_value::v2::decimal_obj::DecimalObj;
 use shape_value::v2::heap_header::HeapHeader;
 use shape_value::v2::string_obj::StringObj;
@@ -48,7 +49,7 @@ use shape_value::v2::typed_array::TypedArray;
 // the VM-side `op_new_typed_array_*` handlers use.
 use shape_vm::executor::v2_handlers::v2_array_detect::{
     stamp_elem_type, ELEM_TYPE_BOOL, ELEM_TYPE_DECIMAL, ELEM_TYPE_F64,
-    ELEM_TYPE_I32, ELEM_TYPE_I64, ELEM_TYPE_STRING,
+    ELEM_TYPE_I32, ELEM_TYPE_I64, ELEM_TYPE_STRING, ELEM_TYPE_TYPED_OBJECT,
 };
 
 // ============================================================================
@@ -95,6 +96,29 @@ pub extern "C" fn jit_new_typed_array_decimal(
 ) -> *mut TypedArray<*const DecimalObj> {
     let ptr = TypedArray::<*const DecimalObj>::with_capacity(capacity);
     unsafe { stamp_elem_type(ptr as *mut u8, ELEM_TYPE_DECIMAL) };
+    ptr
+}
+
+/// Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18).
+///
+/// JIT-side allocator for `TypedArray<*const TypedObjectStorage>` carriers.
+/// Mirror of `jit_new_typed_array_string` / `_decimal` — allocates an empty
+/// typed-array with given capacity, stamps the v2-raw element-type byte at
+/// `HeapHeader._pad` (offset 7) per the W11-fup-C 2026-05-18 stamp-discipline
+/// rule, returns the raw `*mut TypedArray<*const TypedObjectStorage>` carrier.
+///
+/// Per-element refcount discipline (caller's responsibility): the JIT-emitted
+/// code allocates fresh `TypedObjectStorage` instances via
+/// `TypedObjectStorage::_new` (refcount = 1) and transfers per-element share
+/// to the array via the matching `TypedArrayPushTypedObject` opcode (or its
+/// inline JIT analogue if/when wired). Mirror of the VM-side handler at
+/// `crates/shape-vm/src/executor/v2_handlers/array.rs::NewTypedArrayTypedObject`.
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_new_typed_array_typed_object(
+    capacity: u32,
+) -> *mut TypedArray<*const TypedObjectStorage> {
+    let ptr = TypedArray::<*const TypedObjectStorage>::with_capacity(capacity);
+    unsafe { stamp_elem_type(ptr as *mut u8, ELEM_TYPE_TYPED_OBJECT) };
     ptr
 }
 

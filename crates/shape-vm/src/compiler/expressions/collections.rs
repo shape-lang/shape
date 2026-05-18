@@ -209,6 +209,17 @@ impl BytecodeCompiler {
                 self.pending_variable_typed_array_kind = inferred;
             }
             inferred
+        } else if self.array_elements_all_typed_object(elements) {
+            // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18) —
+            // function-call-result-element case (`let boxes = [aabb(...), aabb(...)]`
+            // where `aabb` returns a registered struct). The producer-side proof is
+            // the function's declared return type tracked in
+            // `type_tracker.function_return_types`; per ADR-006 §2.7.5
+            // stamp-at-compile-time the kind is statically known here without
+            // runtime inspection. Routes the literal to the v2-raw
+            // `TypedArray<*const TypedObjectStorage>` carrier fast path.
+            self.pending_variable_typed_array_kind = Some(TypedArrayKind::TypedObject);
+            Some(TypedArrayKind::TypedObject)
         } else {
             None
         };

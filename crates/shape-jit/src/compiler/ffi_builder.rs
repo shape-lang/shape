@@ -226,6 +226,8 @@ impl JITCompiler {
             // ckpt-6-prime Group X JIT FFI String/Decimal BUILD (2026-05-15)
             v2_array_new_string: r!("jit_new_typed_array_string"),
             v2_array_new_decimal: r!("jit_new_typed_array_decimal"),
+            // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18).
+            v2_array_new_typed_object: r!("jit_new_typed_array_typed_object"),
 
             // v2 typed-array push (generic dispatcher — see ffi_refs.rs)
             v2_array_push: r!("jit_v2_array_push"),

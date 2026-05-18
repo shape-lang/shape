@@ -13,18 +13,19 @@
 
 use crate::bytecode::{Instruction, OpCode, Operand};
 use crate::executor::vm_impl::stack::drop_with_kind;
+use shape_value::heap_value::TypedObjectStorage;
 use shape_value::v2::decimal_obj::DecimalObj;
 use shape_value::v2::heap_element::HeapElement;
 use shape_value::v2::refcount::v2_retain;
 use shape_value::v2::string_obj::StringObj;
 use shape_value::v2::typed_array::TypedArray;
-use shape_value::{NativeKind, VMError};
+use shape_value::{HeapKind, NativeKind, VMError};
 
 use super::super::VirtualMachine;
 use super::v2_array_detect::{
     ELEM_TYPE_BOOL, ELEM_TYPE_CHAR, ELEM_TYPE_DECIMAL, ELEM_TYPE_F32, ELEM_TYPE_F64, ELEM_TYPE_I16,
-    ELEM_TYPE_I32, ELEM_TYPE_I64, ELEM_TYPE_I8, ELEM_TYPE_STRING, ELEM_TYPE_U16, ELEM_TYPE_U32,
-    ELEM_TYPE_U8, stamp_elem_type,
+    ELEM_TYPE_I32, ELEM_TYPE_I64, ELEM_TYPE_I8, ELEM_TYPE_STRING, ELEM_TYPE_TYPED_OBJECT,
+    ELEM_TYPE_U16, ELEM_TYPE_U32, ELEM_TYPE_U8, stamp_elem_type,
 };
 
 impl VirtualMachine {
@@ -780,6 +781,98 @@ impl VirtualMachine {
                 unsafe {
                     let old_ptr = TypedArray::<*const DecimalObj>::get_unchecked(arr, index);
                     <DecimalObj as HeapElement>::release_elem(old_ptr);
+                    TypedArray::set(arr, index, val);
+                }
+                drop_with_kind(arr_bits, arr_kind);
+                Ok(())
+            }
+
+            // ── Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18) ──
+            //
+            // Per ADR-006 §2.7.5 stamp-at-compile-time + §2.7.24 Q25.A SUPERSEDED +
+            // audit `v0.3-w16-v3s5-ckpt56-strict-close-audit.md` §2.1 + §3.A row 1:
+            // v2-raw `TypedArray<*const TypedObjectStorage>` element carrier. Mirror
+            // of the Wave 2 Agent A2 String + Decimal arms above (swapping
+            // `StringObj`/`DecimalObj` → `TypedObjectStorage` and
+            // `NativeKind::StringV2`/`NativeKind::DecimalV2` →
+            // `NativeKind::Ptr(HeapKind::TypedObject)`).
+            //
+            // Per-element refcount discipline: element-read retains the per-element
+            // HeapHeader before pushing the slot bits (mirror of `TypedArrayGetString`
+            // at :677); element-write/push transfers the caller's refcount share
+            // (mirror of `TypedArrayPushString` at :685); element-set additionally
+            // releases the prior element's share (mirror of `TypedArraySetString`
+            // at :701). Kind discriminator strict: only
+            // `NativeKind::Ptr(HeapKind::TypedObject)` accepted on push/set —
+            // matches the existing single-TypedObject carrier label used by the
+            // 4-table HeapKind dispatch (`vm_impl/stack.rs:115`/`:492`).
+
+            OpCode::NewTypedArrayTypedObject => {
+                let cap = match instruction.operand {
+                    Some(Operand::Count(n)) => n as u32,
+                    _ => 0,
+                };
+                let ptr = TypedArray::<*const TypedObjectStorage>::with_capacity(cap);
+                unsafe { stamp_elem_type(ptr as *mut u8, ELEM_TYPE_TYPED_OBJECT) };
+                self.push_kinded(ptr as usize as u64, NativeKind::UInt64)?;
+                Ok(())
+            }
+            OpCode::TypedArrayGetTypedObject => {
+                let (idx_bits, _idx_kind) = self.pop_kinded()?;
+                let index = idx_bits as i64 as u32;
+                let (arr_bits, arr_kind) = self.pop_kinded()?;
+                let arr = arr_bits as usize as *const TypedArray<*const TypedObjectStorage>;
+                let len = unsafe { TypedArray::len(arr) };
+                let elem_ptr = unsafe {
+                    TypedArray::<*const TypedObjectStorage>::get(arr, index).ok_or(
+                        VMError::IndexOutOfBounds {
+                            index: index as i32,
+                            length: len as usize,
+                        },
+                    )?
+                };
+                // Retain the per-element header: the array still owns its share;
+                // the caller gets a fresh share they must release via the
+                // `Ptr(HeapKind::TypedObject)` arm in `drop_with_kind` at
+                // `vm_impl/stack.rs:492`.
+                unsafe { v2_retain(&(*elem_ptr).header) };
+                drop_with_kind(arr_bits, arr_kind);
+                self.push_kinded(elem_ptr as u64, NativeKind::Ptr(HeapKind::TypedObject))?;
+                Ok(())
+            }
+            OpCode::TypedArrayPushTypedObject => {
+                let (val_bits, val_kind) = self.pop_kinded()?;
+                if val_kind != NativeKind::Ptr(HeapKind::TypedObject) {
+                    return Err(VMError::RuntimeError(format!(
+                        "TypedArrayPush/SetTypedObject: expected NativeKind::Ptr(HeapKind::TypedObject), got {:?}",
+                        val_kind
+                    )));
+                }
+                let val = val_bits as usize as *const TypedObjectStorage;
+                let (arr_bits, arr_kind) = self.pop_kinded()?;
+                let arr = arr_bits as usize as *mut TypedArray<*const TypedObjectStorage>;
+                // Caller transfers their refcount share to the array (no retain here).
+                unsafe { TypedArray::push(arr, val); }
+                drop_with_kind(arr_bits, arr_kind);
+                Ok(())
+            }
+            OpCode::TypedArraySetTypedObject => {
+                let (val_bits, val_kind) = self.pop_kinded()?;
+                if val_kind != NativeKind::Ptr(HeapKind::TypedObject) {
+                    return Err(VMError::RuntimeError(format!(
+                        "TypedArrayPush/SetTypedObject: expected NativeKind::Ptr(HeapKind::TypedObject), got {:?}",
+                        val_kind
+                    )));
+                }
+                let val = val_bits as usize as *const TypedObjectStorage;
+                let (idx_bits, _ik) = self.pop_kinded()?;
+                let index = idx_bits as i64 as u32;
+                let (arr_bits, arr_kind) = self.pop_kinded()?;
+                let arr = arr_bits as usize as *mut TypedArray<*const TypedObjectStorage>;
+                unsafe {
+                    let old_ptr =
+                        TypedArray::<*const TypedObjectStorage>::get_unchecked(arr, index);
+                    <TypedObjectStorage as HeapElement>::release_elem(old_ptr);
                     TypedArray::set(arr, index, val);
                 }
                 drop_with_kind(arr_bits, arr_kind);

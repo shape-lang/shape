@@ -1,0 +1,10 @@
+// CLASS: W16.2-A op_new_array-typed-object-element (2026-05-18)
+// Per ADR-006 §2.7.5 + audit v0.3-w16-v3s5-ckpt56-strict-close-audit.md §4.C —
+// `Array<UserStruct>` literal + index access. Before W16.2-A landed both VM
+// and JIT surfaced `op_new_array(2)` SURFACE; post-W16.2-A both Convergent
+// at `2` via the v2-raw `TypedArray<*const TypedObjectStorage>` carrier
+// (`NewTypedArrayTypedObject` + per-element `TypedArrayPushTypedObject`
+// + `TypedArrayGetTypedObject` for the index access).
+type B { v: int }
+let arr = [B { v: 1 }, B { v: 2 }]
+print(arr[1].v)

@@ -32,12 +32,14 @@
 //! pair, decode bits per kind, and reject incompatible kinds.
 
 use shape_value::NativeKind;
+use shape_value::heap_value::TypedObjectStorage;
 use shape_value::v2::decimal_obj::DecimalObj;
 use shape_value::v2::heap_element::HeapElement;
 use shape_value::v2::heap_header::{HEAP_KIND_V2_TYPED_ARRAY, HeapHeader};
 use shape_value::v2::refcount::v2_retain;
 use shape_value::v2::string_obj::StringObj;
 use shape_value::v2::typed_array::TypedArray;
+use shape_value::HeapKind;
 
 // ── Element type discriminants ──────────────────────────────────────────────
 
@@ -68,6 +70,12 @@ pub const ELEM_TYPE_CHAR: u8 = 12;
 // per-element header before pushing the slot.
 pub const ELEM_TYPE_STRING: u8 = 13;
 pub const ELEM_TYPE_DECIMAL: u8 = 14;
+// Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18)
+// per ADR-006 §2.7.5 + audit `v0.3-w16-v3s5-ckpt56-strict-close-audit.md`
+// §2.1. `*const TypedObjectStorage` heap-pointer carrier (HeapHeader at
+// offset 0, refcounted via `v2_retain`/`v2_release` against the on-header
+// refcount). Element-read pushes `NativeKind::Ptr(HeapKind::TypedObject)`.
+pub const ELEM_TYPE_TYPED_OBJECT: u8 = 15;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum V2ElemType {
@@ -92,6 +100,11 @@ pub enum V2ElemType {
     // after per-element `v2_retain` of the header.
     String,
     Decimal,
+    // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18) —
+    // v2-raw heap-pointer carrier (`*const TypedObjectStorage`); element-read
+    // pushes the carrier pointer with `NativeKind::Ptr(HeapKind::TypedObject)`
+    // after per-element `v2_retain` of the header.
+    TypedObject,
 }
 
 impl V2ElemType {
@@ -113,6 +126,8 @@ impl V2ElemType {
             ELEM_TYPE_CHAR => Some(V2ElemType::Char),
             ELEM_TYPE_STRING => Some(V2ElemType::String),
             ELEM_TYPE_DECIMAL => Some(V2ElemType::Decimal),
+            // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18).
+            ELEM_TYPE_TYPED_OBJECT => Some(V2ElemType::TypedObject),
             _ => None,
         }
     }
@@ -135,6 +150,11 @@ impl V2ElemType {
             V2ElemType::Char => NativeKind::Char,
             V2ElemType::String => NativeKind::StringV2,
             V2ElemType::Decimal => NativeKind::DecimalV2,
+            // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18) —
+            // element-read result carries the existing TypedObject pointer kind label.
+            V2ElemType::TypedObject => {
+                NativeKind::Ptr(shape_value::HeapKind::TypedObject)
+            }
         }
     }
 }
@@ -381,6 +401,20 @@ pub fn read_element(view: &V2TypedArrayView, index: u32) -> Option<(u64, NativeK
             v2_retain(&(*elem_ptr).header);
             (elem_ptr as u64, NativeKind::DecimalV2)
         },
+        // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18) —
+        // mirror of the String/Decimal arms. The array owns one share per stored
+        // pointer (refcount discipline on the on-header `v2_retain`/`v2_release`
+        // counter; matches the existing single-TypedObject carrier in
+        // `vm_impl/stack.rs:115`). The caller of read_element gets a fresh share
+        // released by the matching `clone_with_kind` / `drop_with_kind`
+        // `NativeKind::Ptr(HeapKind::TypedObject)` arm.
+        V2ElemType::TypedObject => unsafe {
+            let arr = view.ptr as *const TypedArray<*const TypedObjectStorage>;
+            let elem_ptr =
+                TypedArray::<*const TypedObjectStorage>::get_unchecked(arr, index);
+            v2_retain(&(*elem_ptr).header);
+            (elem_ptr as u64, NativeKind::Ptr(HeapKind::TypedObject))
+        },
     };
     Some(pair)
 }
@@ -508,6 +542,25 @@ pub fn write_element(
                 TypedArray::<*const DecimalObj>::set(arr, index, new_ptr);
             }
         }
+        // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18) —
+        // mirror of the String/Decimal write arms. Kind discriminator strict:
+        // only `NativeKind::Ptr(HeapKind::TypedObject)` accepted (matches the
+        // single-TypedObject carrier label used elsewhere).
+        V2ElemType::TypedObject => {
+            if kind != NativeKind::Ptr(HeapKind::TypedObject) {
+                return Err(
+                    "expected NativeKind::Ptr(HeapKind::TypedObject) for Array<TypedObject> write",
+                );
+            }
+            let new_ptr = bits as usize as *const TypedObjectStorage;
+            unsafe {
+                let arr = view.ptr as *mut TypedArray<*const TypedObjectStorage>;
+                let old_ptr =
+                    TypedArray::<*const TypedObjectStorage>::get_unchecked(arr, index);
+                <TypedObjectStorage as HeapElement>::release_elem(old_ptr);
+                TypedArray::<*const TypedObjectStorage>::set(arr, index, new_ptr);
+            }
+        }
     }
     Ok(())
 }
@@ -624,6 +677,19 @@ pub fn push_element(
                 TypedArray::<*const DecimalObj>::push(arr, new_ptr);
             }
         }
+        // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18).
+        V2ElemType::TypedObject => {
+            if kind != NativeKind::Ptr(HeapKind::TypedObject) {
+                return Err(
+                    "expected NativeKind::Ptr(HeapKind::TypedObject) for Array<TypedObject> push",
+                );
+            }
+            let new_ptr = bits as usize as *const TypedObjectStorage;
+            unsafe {
+                let arr = view.ptr as *mut TypedArray<*const TypedObjectStorage>;
+                TypedArray::<*const TypedObjectStorage>::push(arr, new_ptr);
+            }
+        }
     }
     Ok(())
 }
@@ -689,6 +755,14 @@ pub fn pop_element(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
         V2ElemType::Decimal => unsafe {
             let arr = view.ptr as *mut TypedArray<*const DecimalObj>;
             TypedArray::<*const DecimalObj>::pop(arr).map(|v| (v as u64, NativeKind::DecimalV2))
+        },
+        // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18).
+        // Transfer the array's owned share to the caller; release runs via the
+        // `clone_with_kind` / `drop_with_kind` `Ptr(HeapKind::TypedObject)` arm.
+        V2ElemType::TypedObject => unsafe {
+            let arr = view.ptr as *mut TypedArray<*const TypedObjectStorage>;
+            TypedArray::<*const TypedObjectStorage>::pop(arr)
+                .map(|v| (v as u64, NativeKind::Ptr(HeapKind::TypedObject)))
         },
     }
 }
@@ -760,7 +834,8 @@ pub fn sum_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
         // have no numeric sum semantics; concat for String is a method-level
         // operation, not a sum reduction.
         | V2ElemType::String
-        | V2ElemType::Decimal => None,
+        | V2ElemType::Decimal
+        | V2ElemType::TypedObject => None,
     }
 }
 
@@ -1004,7 +1079,8 @@ pub fn avg_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
             | V2ElemType::F32
             | V2ElemType::Char
             | V2ElemType::String
-            | V2ElemType::Decimal => None,
+            | V2ElemType::Decimal
+            | V2ElemType::TypedObject => None,
         };
     }
     match view.elem_type {
@@ -1052,7 +1128,8 @@ pub fn avg_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
         | V2ElemType::F32
         | V2ElemType::Char
         | V2ElemType::String
-        | V2ElemType::Decimal => None,
+        | V2ElemType::Decimal
+        | V2ElemType::TypedObject => None,
     }
 }
 
@@ -1079,7 +1156,8 @@ pub fn min_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
             | V2ElemType::F32
             | V2ElemType::Char
             | V2ElemType::String
-            | V2ElemType::Decimal => None,
+            | V2ElemType::Decimal
+            | V2ElemType::TypedObject => None,
         };
     }
     match view.elem_type {
@@ -1131,7 +1209,8 @@ pub fn min_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
         | V2ElemType::F32
         | V2ElemType::Char
         | V2ElemType::String
-        | V2ElemType::Decimal => None,
+        | V2ElemType::Decimal
+        | V2ElemType::TypedObject => None,
     }
 }
 
@@ -1153,7 +1232,8 @@ pub fn max_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
             | V2ElemType::F32
             | V2ElemType::Char
             | V2ElemType::String
-            | V2ElemType::Decimal => None,
+            | V2ElemType::Decimal
+            | V2ElemType::TypedObject => None,
         };
     }
     match view.elem_type {
@@ -1205,7 +1285,8 @@ pub fn max_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
         | V2ElemType::F32
         | V2ElemType::Char
         | V2ElemType::String
-        | V2ElemType::Decimal => None,
+        | V2ElemType::Decimal
+        | V2ElemType::TypedObject => None,
     }
 }
 
@@ -1565,6 +1646,31 @@ pub fn clone_array(view: &V2TypedArrayView) -> *mut u8 {
                 (*new_arr).len = view.len;
                 let p = new_arr as *mut u8;
                 stamp_elem_type(p, ELEM_TYPE_DECIMAL);
+                p
+            }
+        }
+        // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18).
+        // Each clone shares the same heap-element pointers as the source array
+        // (no deep copy of the TypedObjectStorage allocations themselves);
+        // retain per-element so both arrays own valid shares — mirror of the
+        // String/Decimal clone arms above.
+        V2ElemType::TypedObject => {
+            let new_arr =
+                TypedArray::<*const TypedObjectStorage>::with_capacity(view.len);
+            unsafe {
+                let src = view.ptr as *const TypedArray<*const TypedObjectStorage>;
+                let src_data = (*src).data;
+                let dst_data = (*new_arr).data;
+                if view.len > 0 && !src_data.is_null() && !dst_data.is_null() {
+                    for i in 0..(view.len as usize) {
+                        let elem = *src_data.add(i);
+                        v2_retain(&(*elem).header);
+                        *dst_data.add(i) = elem;
+                    }
+                }
+                (*new_arr).len = view.len;
+                let p = new_arr as *mut u8;
+                stamp_elem_type(p, ELEM_TYPE_TYPED_OBJECT);
                 p
             }
         }
