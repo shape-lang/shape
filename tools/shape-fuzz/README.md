@@ -35,7 +35,8 @@ following the 50-seed inventory in the W13 audit §3 (arithmetic 10 +
 collections 10 + closures 7 + patterns 8 + async 5 + generics 8 +
 fallthrough 2). Until then, the only seed in this crate is the smoke
 self-test at `tests/smoke-self-test/s1.shape` (the same program as
-`/tmp/smokes/s1.shape`), exercised by `cargo test -p shape-fuzz`.
+`tests/smokes/s1.shape` at the repo root, see `tests/smokes/README.md`),
+exercised by `cargo test -p shape-fuzz`.
 
 When W13.3 lands corpus seeds, each `(g)`-class entry runs end-to-end and
 must classify `Convergent`; each `(n)`-class entry is named after its
