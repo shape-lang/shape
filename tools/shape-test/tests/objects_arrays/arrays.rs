@@ -106,6 +106,69 @@ print(r)"#,
     .expect_output("30");
 }
 
+// Phase 4b Round 4 W15 LANG-9-spin-3-first regression: VM/JIT divergence
+// on `.first()` dispatch over typed-array receivers. Pre-fix VM
+// surfaced `TypeError: expected object, array, string, or other heap
+// value, got scalar` for inline `[1,2,3,4,5].first()` while JIT
+// returned `1` (F3 exit-code AND output divergent); the chained
+// `[1,2,3,4,5].map(|x|x*2).first()` form returned VM=`2` but JIT=`None`
+// (F3b result-correctness bug). Per ADR-006 §2.7.5 producer-side stamp +
+// §2.7.10/Q11 method-dispatch ABI: VM `dispatch_get_prop` now reads
+// v2-typed-array receivers via the `UInt64` carrier + `read_element`
+// projection (matching the producer's stamped element-type byte from
+// `v2_handlers/array.rs`); JIT `try_emit_v2_array_method` now inlines
+// the element-0 / element-(len-1) read for `first`/`last` matching the
+// VM PHF `typed_int_array_methods::first` return-kind contract.
+//
+// Audit: `docs/cluster-audits/v0.3-w15-lang-9-spinoffs-audit.md` §4.2.
+#[test]
+fn inline_array_literal_first() {
+    ShapeTest::new(r#"print([1,2,3,4,5].first())"#)
+        .expect_run_ok()
+        .expect_output("1");
+}
+
+#[test]
+fn inline_array_literal_map_then_first() {
+    ShapeTest::new(r#"print([1,2,3,4,5].map(|x|x*2).first())"#)
+        .expect_run_ok()
+        .expect_output("2");
+}
+
+#[test]
+fn inline_array_literal_last() {
+    ShapeTest::new(r#"print([1,2,3,4,5].last())"#)
+        .expect_run_ok()
+        .expect_output("5");
+}
+
+#[test]
+fn inline_array_literal_map_then_last() {
+    ShapeTest::new(r#"print([1,2,3,4,5].map(|x|x*2).last())"#)
+        .expect_run_ok()
+        .expect_output("10");
+}
+
+#[test]
+fn bound_array_first_typed_int() {
+    ShapeTest::new(
+        r#"let arr = [1,2,3,4,5]
+print(arr.first())"#,
+    )
+    .expect_run_ok()
+    .expect_output("1");
+}
+
+#[test]
+fn bound_array_last_typed_int() {
+    ShapeTest::new(
+        r#"let arr = [10,20,30,40,50]
+print(arr.last())"#,
+    )
+    .expect_run_ok()
+    .expect_output("50");
+}
+
 #[test]
 fn array_filter_evens() {
     ShapeTest::new(

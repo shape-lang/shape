@@ -979,13 +979,38 @@ fn parametric_method_return_kind_from_receiver(
         // `Array.get(i)` — returns element T directly (the VM-side
         // bounds-checked accessor; non-Option return).
         ("get", ConcreteType::Array(elem)) => native_kind_from_concrete_type(elem),
-        // `Array.first() / .last() / .pop()` — wrap in Option<T>.
-        // The destination slot's bits are an `Arc::into_raw(Arc<
-        // OptionData>) as u64` carrier per §2.7.17; the EnumPayload
-        // path picks up the inner V from the surrounding
-        // `concrete_types[r]` Option arm.
-        ("first" | "last" | "pop", ConcreteType::Array(_)) => {
-            Some(NativeKind::Ptr(HeapKind::Option))
+        // `Array.first() / .last() / .pop()` — return the bare element
+        // kind directly. Phase 4b Round 4 W15 LANG-9-spin-3-first JIT
+        // fix (ADR-006 §2.7.5 producer-side stamp).
+        //
+        // The VM-side PHF handlers (`executor/objects/typed_int_array_
+        // methods::first / last / pop`, `typed_number_array_methods::
+        // first / last / pop`) return a `KindedSlot` whose `kind` is the
+        // ELEMENT kind for non-empty arrays (`Int64` / `Float64` / etc.)
+        // and the `KindedSlot::none()` Bool/0 sentinel for empty arrays.
+        // The previous mapping to `Ptr(HeapKind::Option)` here mismatched
+        // the producer's stamp — JIT downstream consumers treated the
+        // bare element bits (e.g. `Int64=2`) as an `Arc<OptionData>`
+        // pointer and rendered "None" on print (pre-fix F3b reproducer
+        // `[1,2,3,4,5].map(|x|x*2).first()` JIT=None vs VM=2).
+        //
+        // Per ADR-006 §2.7.5: the receiver's element type IS the proof
+        // of the result kind. The PHF handler (producer) stamps the
+        // element kind into its returned `KindedSlot`; the JIT codegen
+        // (consumer) must use the same kind expectation. No tag-decode
+        // bridge: VM PHF and JIT codegen share the producer-stamped
+        // element kind from `ConcreteType::Array(elem)`.
+        //
+        // The empty-array Bool(0) sentinel case yields slot bits=0 with
+        // kind=element; downstream `print` of an Int64=0 renders "0"
+        // (NOT "None"). That is the existing PHF contract — the audit's
+        // F3 reproducer `[1,2,3,4,5].first()` is non-empty, expected
+        // result 1 (Int64); the empty-array Option<T> wrapping is a
+        // separate semantic question tracked under a §2.7.17
+        // Option-return-shape amendment, NOT the LANG-9-spin-3-first
+        // territory.
+        ("first" | "last" | "pop", ConcreteType::Array(elem)) => {
+            native_kind_from_concrete_type(elem)
         }
         // ── HashMap.get ────────────────────────────────────────────
         // `HashMap<K, V>.get(k) → Option<V>` — the VM-side
@@ -1885,21 +1910,35 @@ mod tests {
     }
 
     #[test]
-    fn parametric_array_first_last_pop_return_option_carrier() {
-        // Array.first/last/pop wrap in Option<T> — destination slot
-        // carries Ptr(HeapKind::Option) per §2.7.17.
+    fn parametric_array_first_last_pop_return_element_kind() {
+        // Phase 4b Round 4 W15 LANG-9-spin-3-first JIT fix (2026-05-18):
+        // `Array<T>.first/last/pop` now return the bare element kind
+        // matching the VM-side PHF handler (`typed_int_array_methods::
+        // first/last/pop` returns `KindedSlot::from_int(...)` for
+        // non-empty arrays). The previous mapping to `Ptr(HeapKind::
+        // Option)` mismatched the producer's stamp — JIT downstream
+        // consumers treated `Int64=2` bits as an `Arc<OptionData>`
+        // pointer and rendered "None" on print. Per ADR-006 §2.7.5: the
+        // receiver's element type IS the proof of the result kind.
         let cts = vec![ConcreteType::Array(Box::new(ConcreteType::I64))];
         assert_eq!(
             parametric_method_return_kind_from_receiver("first", &[copy_local(0)], &cts),
-            Some(NativeKind::Ptr(HeapKind::Option))
+            Some(NativeKind::Int64)
         );
         assert_eq!(
             parametric_method_return_kind_from_receiver("last", &[copy_local(0)], &cts),
-            Some(NativeKind::Ptr(HeapKind::Option))
+            Some(NativeKind::Int64)
         );
         assert_eq!(
             parametric_method_return_kind_from_receiver("pop", &[copy_local(0)], &cts),
-            Some(NativeKind::Ptr(HeapKind::Option))
+            Some(NativeKind::Int64)
+        );
+
+        // `Array<number>.first/last/pop → Float64`
+        let cts = vec![ConcreteType::Array(Box::new(ConcreteType::F64))];
+        assert_eq!(
+            parametric_method_return_kind_from_receiver("first", &[copy_local(0)], &cts),
+            Some(NativeKind::Float64)
         );
     }
 
