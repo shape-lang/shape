@@ -11,9 +11,29 @@ use std::time::Instant;
 /// JIT-compatible functions are compiled to native code; incompatible functions
 /// (e.g. those using async, pattern matching, or unsupported builtins) are left
 /// as `Interpreted` entries in the mixed function table for VM fallback.
+///
+/// # `--mode jit` semantics (W12-jit-mode-semantics-and-fallthrough, 2026-05-18)
+///
+/// `--mode jit` attempts to JIT-compile the toplevel script and every function
+/// it reaches. If JIT compilation or JIT execution fails for any reason (a
+/// preflight rejection at `compile_program_selective`, a Cranelift codegen
+/// error, a panic in the JIT pipeline, a `RETURN_TAG_NANBOXED` kind-source
+/// gap surface, etc.), the executor falls through to the bytecode interpreter
+/// via `BytecodeExecutor::execute_program` instead of surfacing a hard error
+/// to the CLI. A one-line `[jit-fallback]` diagnostic is emitted on stderr at
+/// `tracing::info` level (default) so the fall-through is observable but does
+/// not silently mask broken programs (the interpreter still re-runs the same
+/// `Program` and surfaces any genuine runtime error from there).
+///
+/// Verbose JIT tracing remains under the `--trace-jit=...` CLI flag (replaces
+/// the legacy `SHAPE_JIT_DEBUG` env-var per closure-wave-F migration). Tier-up
+/// thresholds at T1@100 / T2@10k on hot functions are preserved by the
+/// underlying `compile_program_selective` pipeline — fall-through only fires
+/// when JIT can not handle the program at all.
 pub struct JITExecutor {
     /// Bytecode executor used for extension loading, module resolution,
     /// and other pre-compilation setup that the CLI wires through.
+    /// Also the fall-through target when JIT compile/execute fails.
     pub bytecode_executor: shape_vm::BytecodeExecutor,
 }
 
@@ -101,7 +121,45 @@ impl ProgramExecutor for JITExecutor {
             })?;
         let bytecode_compile_ms = bytecode_compile_start.elapsed().as_millis();
 
-        self.execute_with_jit(engine, &bytecode, bytecode_compile_ms, emit_phase_metrics)
+        // W12-jit-mode-semantics-and-fallthrough (Phase 3d, 2026-05-18):
+        // attempt JIT compile+execute; if either step fails for any reason,
+        // fall through to the bytecode interpreter so `--mode jit` never
+        // silently no-ops on a broken JIT path. The interpreter executes
+        // the same `Program` directly (not the JIT-side bytecode), so
+        // bytecode-graph differences between the two paths do not matter
+        // here. The fall-through is observable via a one-line stderr
+        // `[jit-fallback]` diagnostic at `tracing::info` level (default
+        // visibility); `--trace-jit=shape_jit=debug` promotes the JIT
+        // pipeline's own tracing for root-cause investigation.
+        //
+        // Per supervisor path (3) binding 2026-05-18: "On JIT-compile
+        // failure: fall through to interpreter (NOT silent-no-output);
+        // Diagnostic emitted at info level: `[jit-fallback] function X
+        // failed JIT compile: <reason>; running under interpreter`".
+        match self.execute_with_jit(engine, &bytecode, bytecode_compile_ms, emit_phase_metrics) {
+            Ok(result) => Ok(result),
+            Err(jit_err) => {
+                // Emit the structured fall-through diagnostic. Use `eprintln!`
+                // so the diagnostic is visible even when the user has not
+                // wired up a tracing subscriber (the default `shape run`
+                // CLI invocation has no subscriber installed). Mirror the
+                // event to `tracing::info!` so JSON-tracing consumers and
+                // the `--trace-jit` filter see it too.
+                let reason = jit_err.to_string();
+                let function_name = "main".to_string();
+                eprintln!(
+                    "[jit-fallback] function {function_name} failed JIT compile: \
+                     {reason}; running under interpreter"
+                );
+                tracing::info!(
+                    target: "shape_jit::fallback",
+                    function = %function_name,
+                    reason = %reason,
+                    "jit-fallback: function failed JIT compile, running under interpreter",
+                );
+                self.bytecode_executor.execute_program(engine, program)
+            }
+        }
     }
 }
 
