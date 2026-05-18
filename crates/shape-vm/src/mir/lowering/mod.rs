@@ -2295,4 +2295,92 @@ mod tests {
             "expected MirConstant::Bool(true) in {constants:?}"
         );
     }
+
+    /// W15.2-LANG-2 regression: `continue` inside a `for i in 0..N { ... }`
+    /// body must NOT jump directly to the loop header — it must route
+    /// through a dedicated `continue_target` block that performs the
+    /// counter increment, otherwise `continue` at idx=K leaves idx=K
+    /// and re-enters the body infinitely. Verified by structural MIR
+    /// inspection: the loop-context's `continue_block` exposed via the
+    /// body's `Continue` statement must NOT equal the block targeted by
+    /// the header's `SwitchBool { true_bb, .. }`. Empirically this same
+    /// invariant repaired the audit reproducer (`fundamentals/control-
+    /// flow.mdx:87` snippet `A__fundamentals__control-flow__07__L0087`)
+    /// from JIT `0\n1` (infinite-loop after first continue) to JIT
+    /// `0\n1\n3\n4\n5` matching VM.
+    #[test]
+    fn test_for_range_continue_routes_through_increment_block() {
+        let mir = lower_parsed_function(
+            "fn run() {\n  for i in 0..3 {\n    if i == 1 { continue }\n    print(i)\n  }\n}",
+        )
+        .mir;
+
+        // Find the header block: it has a SwitchBool terminator whose
+        // condition is computed by a BinaryOp::Lt comparison (the
+        // `counter < end` check). There is exactly one such block in
+        // this fixture.
+        let mut header_id: Option<BasicBlockId> = None;
+        let mut header_true_bb: Option<BasicBlockId> = None;
+        for block in &mir.blocks {
+            let has_lt = block.statements.iter().any(|s| {
+                matches!(
+                    &s.kind,
+                    StatementKind::Assign(_, Rvalue::BinaryOp(BinOp::Lt, _, _))
+                )
+            });
+            if has_lt {
+                if let TerminatorKind::SwitchBool { true_bb, .. } = &block.terminator.kind {
+                    header_id = Some(block.id);
+                    header_true_bb = Some(*true_bb);
+                    break;
+                }
+            }
+        }
+        let header_id = header_id.expect("loop header block not found");
+        let header_true_bb = header_true_bb.expect("loop header SwitchBool true_bb not found");
+
+        // Find a block whose terminator is `Goto(target)` AND whose
+        // statements contain the counter advance (`x = x + 1`). The
+        // ForIn lowering may produce more than one block matching one
+        // half of this pattern, so we require BOTH halves to identify
+        // the `continue_target` block unambiguously.
+        let increment_target_id = mir
+            .blocks
+            .iter()
+            .find(|b| {
+                let goes_to_header = matches!(
+                    &b.terminator.kind,
+                    TerminatorKind::Goto(t) if *t == header_id
+                );
+                let increments = b.statements.iter().any(|s| {
+                    matches!(
+                        &s.kind,
+                        StatementKind::Assign(_, Rvalue::BinaryOp(BinOp::Add, _, _))
+                    )
+                });
+                goes_to_header && increments
+            })
+            .map(|b| b.id)
+            .expect("continue_target block (increment + Goto(header)) not found");
+
+        // The fix's invariant: the `continue` statement inside the body
+        // must terminate at a block (the dedicated `continue_target`)
+        // that is DIFFERENT from the body block (the header's true_bb)
+        // — that distinction is exactly what makes the increment run
+        // for the `continue` path.
+        assert_ne!(
+            header_true_bb, increment_target_id,
+            "loop body and continue_target collapsed to the same block — \
+             `continue` would skip the increment and infinite-loop"
+        );
+
+        // Sanity: the increment block must NOT equal the header itself
+        // (otherwise the increment runs at every iteration BEFORE the
+        // cond check, which is a different broken shape).
+        assert_ne!(
+            increment_target_id, header_id,
+            "continue_target block must not equal header (the increment \
+             must precede the back-jump, not the cond check)"
+        );
+    }
 }

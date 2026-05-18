@@ -537,6 +537,21 @@ fn lower_for_loop(
 
             let header = builder.new_block();
             let body_block = builder.new_block();
+            // Per W15.2-LANG-2 (2026-05-18): a `continue` inside the body
+            // must run the loop counter advance before re-checking the
+            // header condition, otherwise `continue` at idx=N leaves idx=N
+            // and re-enters the body for the same element → infinite loop
+            // (the audit symptom was JIT printing `0\n1` then hanging at
+            // i=2 in the reproducer `for i in 0..10 { if i==2 { continue }
+            // if i==6 { break } print(i) }`). The bytecode-VM-side
+            // reference (`compiler/loops.rs::end_range_counter_loop`)
+            // patches `continue_jumps` to the increment block; the MIR
+            // analogue is a dedicated `continue_target` block that
+            // performs the increment and back-jumps to `header`. Both
+            // the body's fall-through path AND every `continue` inside
+            // the body terminate at `continue_target` so the increment
+            // runs exactly once per iteration.
+            let continue_target = builder.new_block();
             let after = builder.new_block();
 
             builder.finish_block(TerminatorKind::Goto(header), span);
@@ -567,7 +582,7 @@ fn lower_for_loop(
             // Loop body: read iter_slot[__idx] into a destructure-source
             // slot (named for single-identifier patterns, anonymous temp
             // otherwise), then bind the pattern, lower the body, and
-            // increment the counter.
+            // fall through into `continue_target` for the increment.
             builder.start_block(body_block);
 
             let pattern_slot = match pattern {
@@ -599,13 +614,17 @@ fn lower_for_loop(
                 );
             }
 
-            builder.push_loop(after, header, None);
+            builder.push_loop(after, continue_target, None);
             builder.push_scope();
             lower_statements(builder, &for_loop.body, exit_block);
             builder.pop_scope();
             builder.pop_loop();
 
-            // __idx = __idx + 1
+            // Body fall-through → continue_target → increment → header.
+            builder.finish_block(TerminatorKind::Goto(continue_target), span);
+
+            // continue_target: __idx = __idx + 1; goto header.
+            builder.start_block(continue_target);
             builder.push_stmt(
                 StatementKind::Assign(
                     Place::Local(idx_slot),
