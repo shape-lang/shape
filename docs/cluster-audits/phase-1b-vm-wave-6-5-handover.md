@@ -13,7 +13,7 @@
 
 ## 1. Project context
 
-Shape is an AI-native statically-typed language implemented in Rust. The "strict-typing bulldozer" is a multi-month migration deleting `ValueWord` (the historical 8-byte tag-decoding word) in favor of typed slots + per-FieldType constructors. Plan source: `~/.claude/plans/stop-native-vs-tagged-tax.md`. Defection-attractor history: CLAUDE.md "Forbidden Patterns" section names the W-series (9 commits of shim regressions). The discipline is hard — every "transitional shim" past sessions introduced became permanent debt. **No shims, ever.**
+Shape is a statically-typed language implemented in Rust. The "strict-typing bulldozer" is a multi-month migration deleting `ValueWord` (the historical 8-byte tag-decoding word) in favor of typed slots + per-FieldType constructors. Plan source: `~/.claude/plans/stop-native-vs-tagged-tax.md`. Defection-attractor history: CLAUDE.md "Forbidden Patterns" section names the W-series (9 commits of shim regressions). The discipline is hard — every "transitional shim" past sessions introduced became permanent debt. **No shims, ever.**
 
 ## 2. Phases closed (durable)
 

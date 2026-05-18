@@ -24,7 +24,7 @@ the architectural surfaces below — no orphans.
 | **IT** IteratorState rebuild | ~9 | `loops/mod.rs` for-await + custom iterators | W9 (after CC1) |
 | **DT** datatable methods | ~12 | `objects/datatable_methods/{joins,query,simulation,aggregation}.rs` | W9 (after CC1) |
 | **TR** trait-object dispatch | ~5 | `trait_object_ops.rs` BoxTraitObject/DynMethodCall/DropCall/DropCallAsync | W9 |
-| **CT** comptime / @ai | ~7 | `compiler/comptime.rs` + scattered call-sites | W9 (parallelizable) |
+| **CT** comptime | ~7 | `compiler/comptime.rs` + scattered call-sites | W9 (parallelizable) |
 | **AS** async / transport / remote | ~14 | `async_ops/`, `remote.rs`, `transport_builtins`, `vm_impl/modules.rs` | W9 |
 | **OBJ** array/object method bodies | ~152 | Mostly CC1-blocked re-fill; small share blocked on T25/T26 | W9 mechanical migration |
 | **TYP** typed_handlers / v2_handlers | ~15 | Some are dead dispatch (cluster-C audit); some live | W9 |

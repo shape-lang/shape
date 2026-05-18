@@ -53,10 +53,11 @@ today does not catch this:
 3. There is no `#[replaces]`/structural-deprecation infrastructure. This is
    greenfield work.
 
-Shape is also explicitly an AI-native language. Agents authoring Shape modify
-the program faster than any human reviewer, and they routinely produce a
-"replacement" function while leaving the old one callable. Without a
-mechanical lockout, the next agent uses the old function because it appears
+Shape's annotation + comptime substrate is also intended to support
+LLM-driven authoring workflows in stdlib and userland. Agents authoring
+Shape modify the program faster than any human reviewer, and they routinely
+produce a "replacement" function while leaving the old one callable. Without
+a mechanical lockout, the next agent uses the old function because it appears
 first in the file, or appears in a stale embedding, or has more callers. By
 the time a human notices, both functions have downstream call sites and the
 "replacement" has bifurcated into a parallel code path.
