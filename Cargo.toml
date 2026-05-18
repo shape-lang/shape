@@ -13,6 +13,7 @@ members = [
   "bin/shape-cli",
   "tools/shape-lsp",
   "tools/shape-test",
+  "tools/shape-fuzz",
   "tools/xtask",
   "crates/shape-abi-v1",
   "crates/shape-gc",
