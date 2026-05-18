@@ -442,7 +442,7 @@ fn test_drop_closure_returned_from_function() {
 fn test_drop_recursive_function() {
     ShapeTest::new(
         r#"
-        fn factorial(n) {
+        fn factorial(n: int) -> int {
             let current = n
             if current <= 1 {
                 return 1

@@ -414,7 +414,7 @@ fn borrow_many_different_variables() {
 fn borrow_recursive_function_with_ref() {
     ShapeTest::new(
         r#"
-        fn count_down(&counter, n) {
+        fn count_down(&counter: int, n: int) {
             if n <= 0 { return }
             counter = counter + 1
             count_down(&counter, n - 1)
