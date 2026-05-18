@@ -1058,6 +1058,15 @@ fn lower_for_expr(
 
         let header = builder.new_block();
         let body_block = builder.new_block();
+        // Per W15.2-LANG-2 (2026-05-18) — see stmt.rs::lower_for_loop
+        // ForIn arm for the design comment. The MIR for-range expr lowers
+        // its post-body counter increment into a dedicated
+        // `continue_target` block so that `continue` inside the body
+        // performs the increment exactly once per iteration; without
+        // this, `for i in 0..10 { if i==2 { continue } ... }` infinite-
+        // loops at i=2 because `continue → header` skips the counter
+        // advance and re-enters the body with idx unchanged.
+        let continue_target = builder.new_block();
         let after = builder.new_block();
 
         builder.finish_block(TerminatorKind::Goto(header), span);
@@ -1091,7 +1100,7 @@ fn lower_for_expr(
 
         // Loop body
         builder.start_block(body_block);
-        builder.push_loop(after, header, Some(temp));
+        builder.push_loop(after, continue_target, Some(temp));
         let body_slot = lower_expr_to_temp(builder, &for_expr.body);
         builder.push_stmt(
             StatementKind::Assign(
@@ -1102,7 +1111,11 @@ fn lower_for_expr(
         );
         builder.pop_loop();
 
-        // Increment counter: counter = counter + 1
+        // Body fall-through → continue_target → increment → header.
+        builder.finish_block(TerminatorKind::Goto(continue_target), span);
+
+        // continue_target: counter = counter + 1; goto header.
+        builder.start_block(continue_target);
         builder.push_stmt(
             StatementKind::Assign(
                 Place::Local(counter_slot),
@@ -1225,6 +1238,12 @@ fn lower_for_expr(
 
         let header = builder.new_block();
         let body_block = builder.new_block();
+        // Per W15.2-LANG-2 (2026-05-18) — see stmt.rs::lower_for_loop
+        // ForIn arm for the design comment. Generic-iterator expr-form
+        // for-loop routes `continue` through a dedicated continue_target
+        // block that performs the index advance so the body's `continue`
+        // does not infinite-loop by skipping the increment.
+        let continue_target = builder.new_block();
         let after = builder.new_block();
 
         builder.finish_block(TerminatorKind::Goto(header), span);
@@ -1304,7 +1323,7 @@ fn lower_for_expr(
             );
         }
 
-        builder.push_loop(after, header, Some(temp));
+        builder.push_loop(after, continue_target, Some(temp));
         let body_slot = lower_expr_to_temp(builder, &for_expr.body);
         builder.push_stmt(
             StatementKind::Assign(
@@ -1315,7 +1334,11 @@ fn lower_for_expr(
         );
         builder.pop_loop();
 
-        // __idx = __idx + 1
+        // Body fall-through → continue_target → increment → header.
+        builder.finish_block(TerminatorKind::Goto(continue_target), span);
+
+        // continue_target: __idx = __idx + 1; goto header.
+        builder.start_block(continue_target);
         builder.push_stmt(
             StatementKind::Assign(
                 Place::Local(idx_slot),
