@@ -26,13 +26,40 @@ use shape_value::v2::heap_header::HeapHeader;
 use shape_value::v2::string_obj::StringObj;
 use shape_value::v2::typed_array::TypedArray;
 
+// W11-fup-C (Phase 3d, 2026-05-18): stamp the v2-raw element-type byte
+// at `HeapHeader._pad` (offset 7) on every JIT-side TypedArray allocator
+// — mirror of the VM-side `op_new_typed_array_*` handlers at
+// `crates/shape-vm/src/executor/v2_handlers/array.rs:40-81` which call
+// `stamp_elem_type(ptr, ELEM_TYPE_<KIND>)` immediately after `with_capacity`.
+// Without the stamp, the canonical `as_v2_typed_array` detection at
+// `crates/shape-vm/src/executor/v2_handlers/v2_array_detect.rs:181-216`
+// returns `None` (reads `_pad = 0 = ELEM_TYPE_UNKNOWN`) — the JIT-allocated
+// array's print path, method-dispatch path, and any other consumer of the
+// canonical v2-detect interface would all silently fall back to non-typed
+// rendering (the empirical pre-fix `print(arr)` output was the raw pointer
+// `100218864737360` printed as a u64 scalar).
+//
+// Per ADR-006 §2.7.5 stamp-at-compile-time: the element kind is statically
+// proven at the JIT codegen site (`mir_compiler/v2_array.rs:166-176`
+// dispatch table picks the matching `jit_v2_array_new_<kind>` FuncRef per
+// the producing slot's `NativeKind`), so the stamp byte authoritatively
+// records compile-time-proven element kind into the v2-raw allocation's
+// heap-header at construction time — the same compile-time-proof shape
+// the VM-side `op_new_typed_array_*` handlers use.
+use shape_vm::executor::v2_handlers::v2_array_detect::{
+    stamp_elem_type, ELEM_TYPE_BOOL, ELEM_TYPE_DECIMAL, ELEM_TYPE_F64,
+    ELEM_TYPE_I32, ELEM_TYPE_I64, ELEM_TYPE_STRING,
+};
+
 // ============================================================================
 // Array FFI — f64
 // ============================================================================
 
 #[unsafe(no_mangle)]
 pub extern "C" fn jit_v2_array_new_f64(capacity: u32) -> *mut TypedArray<f64> {
-    TypedArray::<f64>::with_capacity(capacity)
+    let ptr = TypedArray::<f64>::with_capacity(capacity);
+    unsafe { stamp_elem_type(ptr as *mut u8, ELEM_TYPE_F64) };
+    ptr
 }
 
 // ============================================================================
@@ -57,14 +84,18 @@ pub extern "C" fn jit_v2_array_new_f64(capacity: u32) -> *mut TypedArray<f64> {
 pub extern "C" fn jit_new_typed_array_string(
     capacity: u32,
 ) -> *mut TypedArray<*const StringObj> {
-    TypedArray::<*const StringObj>::with_capacity(capacity)
+    let ptr = TypedArray::<*const StringObj>::with_capacity(capacity);
+    unsafe { stamp_elem_type(ptr as *mut u8, ELEM_TYPE_STRING) };
+    ptr
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn jit_new_typed_array_decimal(
     capacity: u32,
 ) -> *mut TypedArray<*const DecimalObj> {
-    TypedArray::<*const DecimalObj>::with_capacity(capacity)
+    let ptr = TypedArray::<*const DecimalObj>::with_capacity(capacity);
+    unsafe { stamp_elem_type(ptr as *mut u8, ELEM_TYPE_DECIMAL) };
+    ptr
 }
 
 /// JIT-compile-time per-element materializer for `*const StringObj` constants
@@ -756,7 +787,11 @@ unsafe fn simd_binary_mul_f64_inner(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn jit_v2_array_new_i64(capacity: u32) -> *mut TypedArray<i64> {
-    TypedArray::<i64>::with_capacity(capacity)
+    let ptr = TypedArray::<i64>::with_capacity(capacity);
+    // W11-fup-C (Phase 3d, 2026-05-18): stamp element-type byte for
+    // canonical `as_v2_typed_array` carrier recognition. See file header.
+    unsafe { stamp_elem_type(ptr as *mut u8, ELEM_TYPE_I64) };
+    ptr
 }
 
 #[unsafe(no_mangle)]
@@ -791,7 +826,10 @@ pub extern "C" fn jit_v2_array_len_i64(arr: *const TypedArray<i64>) -> u32 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn jit_v2_array_new_i32(capacity: u32) -> *mut TypedArray<i32> {
-    TypedArray::<i32>::with_capacity(capacity)
+    let ptr = TypedArray::<i32>::with_capacity(capacity);
+    // W11-fup-C (Phase 3d, 2026-05-18): stamp element-type byte. See file header.
+    unsafe { stamp_elem_type(ptr as *mut u8, ELEM_TYPE_I32) };
+    ptr
 }
 
 #[unsafe(no_mangle)]
@@ -832,7 +870,10 @@ pub extern "C" fn jit_v2_array_len_i32(arr: *const TypedArray<i32>) -> u32 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn jit_v2_array_new_bool(capacity: u32) -> *mut TypedArray<u8> {
-    TypedArray::<u8>::with_capacity(capacity)
+    let ptr = TypedArray::<u8>::with_capacity(capacity);
+    // W11-fup-C (Phase 3d, 2026-05-18): stamp element-type byte. See file header.
+    unsafe { stamp_elem_type(ptr as *mut u8, ELEM_TYPE_BOOL) };
+    ptr
 }
 
 #[unsafe(no_mangle)]

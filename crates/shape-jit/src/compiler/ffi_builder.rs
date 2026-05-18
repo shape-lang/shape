@@ -128,6 +128,11 @@ impl JITCompiler {
             print_priority_queue: r!("jit_print_priority_queue"),
             print_range: r!("jit_print_range"),
             print_iterator: r!("jit_print_iterator"),
+            // W11-fup-C (Phase 3d, 2026-05-18): v2-raw TypedArray<T> kinded
+            // print entry (ADR-006 §2.7.5). The MIR-side Call-terminator
+            // dispatch routes operands with stamped
+            // `NativeKind::Ptr(HeapKind::TypedArray)` to this FuncRef.
+            print_typed_array: r!("jit_print_typed_array"),
 
             // Closure construction
             make_closure: r!("jit_make_closure"),
