@@ -796,3 +796,122 @@ fn ref_param_three_ref_params_only_one_mutated() {
     )
     .expect_number(30.0);
 }
+
+// =============================================================================
+// W14.2-G4-derefstore-drift regression — ADR-006 §2.7.13 producer-side
+// ref-chain stamp pinning
+// =============================================================================
+//
+// These tests pin the producer-side fix at `functions.rs::compile_function_
+// body` where the per-function compile-entry sets type-tracker info for
+// unannotated ref-params. Prior to the fix, the program-wide type-inference
+// pass at `infer_param_type_hints_from_types` widened int-only ref-param
+// bodies to `"number"` (the inference engine's reference-erasure path drops
+// the integer-literal pairing signal present in `x = x + 1`). The downstream
+// binop emitter at `expressions/binary_ops.rs:880`
+// (`adopt_missing_numeric_operand_hint`) then coerced `x + 1` to
+// `AddNumber` (Float64 result), and the `DerefStore Local(x_slot)` executor
+// at `executor/variables/mod.rs:2696` surfaced the §2.7.13 invariant
+// violation (`debug_assert_eq!(val_kind, projected_kind)`) with
+// `popped Float64, place Int64`.
+//
+// The fix prefers the body-local literal-pairing heuristic
+// (`infer_param_type_from_body` at `expressions/closures.rs:26`) over the
+// program-wide pass when:
+//   (1) the param is a `&x` reference, AND
+//   (2) the program-wide pass returned `"number"`, AND
+//   (3) the body-local pass returned an integer-family primitive name.
+//
+// This re-stamps the ref-param's local-slot type tracker with the
+// producer-side projected kind matching the caller's `let a = 0` (Int64)
+// and the `RefTarget::Local { kind: Int64 }` carried through the ref chain.
+//
+// Smoke matrix at fix time: 4 G4 DerefStore-kind-drift tests
+// (ref_param_forwarded_to_another_function, ref_param_chain_through_three_
+// functions, test_ref_forwarded_to_another_function, test_ref_chain_
+// through_three_functions) PASS; full borrow_refs suite: 158 passed / 47
+// failed (was 154 / 51 — exactly +4 fixed, 0 regressions).
+
+#[test]
+fn w14_2_g4_derefstore_drift_two_function_int_chain() {
+    // Producer-side stamp regression: caller's `let a = 0` (Int64) +
+    // forwarded ref through `double_inc(&a)` -> `inc(&x)` previously
+    // produced `popped Float64, place Int64` at the inner-fn DerefStore
+    // because `inc.x` was inferred as `"number"` instead of `"int"`.
+    ShapeTest::new(
+        r#"
+        fn inc(&x) { x = x + 1 }
+        fn double_inc(&x) {
+            inc(&x)
+            inc(&x)
+        }
+        let a = 0
+        double_inc(&a)
+        a
+    "#,
+    )
+    .expect_number(2.0);
+}
+
+#[test]
+fn w14_2_g4_derefstore_drift_three_function_int_chain() {
+    // Three-deep ref-chain forwarding — exercises the producer-side
+    // stamp at every level (add_four->add_two->add_one). At the bottom,
+    // `add_one.x` must be re-stamped from the body-local literal-pairing
+    // signal (`x + 1`) so the AddInt + DerefStore (Int64) chain matches
+    // the projected_kind carried from `let a = 0`.
+    ShapeTest::new(
+        r#"
+        fn add_one(&x) { x = x + 1 }
+        fn add_two(&x) { add_one(&x); add_one(&x) }
+        fn add_four(&x) { add_two(&x); add_two(&x) }
+        let a = 0
+        add_four(&a)
+        a
+    "#,
+    )
+    .expect_number(4.0);
+}
+
+#[test]
+fn w14_2_g4_derefstore_drift_preserves_explicit_number_annotation() {
+    // Negative test: when the caller's binding is `let a = 0.0` (Float64,
+    // not Int) and the function uses `x + 1.0` (Float64 literal), the
+    // body-local literal-pairing heuristic does NOT mis-promote to "int".
+    // The program-wide inference produces "number" + the body-local
+    // produces "number" (Number literal) — neither triggers the
+    // ref-param widening-attractor override at `functions.rs:1339`.
+    ShapeTest::new(
+        r#"
+        fn inc_float(&x) { x = x + 1.0 }
+        fn double_inc_float(&x) {
+            inc_float(&x)
+            inc_float(&x)
+        }
+        let a = 0.0
+        double_inc_float(&a)
+        a
+    "#,
+    )
+    .expect_number(2.0);
+}
+
+#[test]
+fn w14_2_g4_derefstore_drift_single_function_int_unaffected() {
+    // Negative test: the single-call case (no forwarding) was always
+    // correct because the caller's `let a = 0` populates the type tracker
+    // for `inc(&a)`'s MakeRef projected_kind directly; the bug only
+    // manifested when chaining through an intermediate ref-param `&x`.
+    // This pins that the fix does not regress the simple case.
+    ShapeTest::new(
+        r#"
+        fn inc(&x) { x = x + 1 }
+        let a = 10
+        inc(&a)
+        inc(&a)
+        inc(&a)
+        a
+    "#,
+    )
+    .expect_number(13.0);
+}

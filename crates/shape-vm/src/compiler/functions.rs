@@ -1331,11 +1331,63 @@ impl BytecodeCompiler {
                         // Mark as a param local with inferred type (no explicit annotation).
                         // storage_hint_for_expr will not trust these for typed Add emission.
                         self.param_locals.insert(local_idx);
-                        let inferred_type_name = self
+                        // W14.2-G4-derefstore-drift fix (ADR-006 §2.7.13
+                        // producer-side ref-chain stamp): for ref-params
+                        // (`&x`) without type annotation, the program-wide
+                        // type-inference pass at `infer_param_type_hints_
+                        // from_types` widens int-only ref-param bodies to
+                        // `"number"` because the engine's reference-erasure
+                        // path drops the integer-literal pairing signal
+                        // present in `x = x + 1`. The body-local heuristic
+                        // `infer_param_type_from_body` recovers `"int"`
+                        // from the literal pairing (closures.rs:43-50).
+                        // Prefer the body-local heuristic for ref-params
+                        // when the global inference produced the wider
+                        // `"number"` — this re-stamps the ref-param's
+                        // local-slot type tracker with the producer-side
+                        // (caller's `let a = 0`) projected kind, matching
+                        // the `RefTarget::Local { kind: Int64 }` carried
+                        // through the ref chain. Without this re-stamp,
+                        // the binop emitter at `expressions/binary_ops.rs:
+                        // 880` coerces `x + 1` to `AddNumber` (Float64
+                        // result), and the `DerefStore Local(x_slot)`
+                        // executor at `executor/variables/mod.rs:2696`
+                        // surfaces the §2.7.13 invariant violation
+                        // (`debug_assert_eq!(val_kind, projected_kind)`)
+                        // with `popped Float64, place Int64`.
+                        let global_inferred = self
                             .inferred_param_type_hints
                             .get(&func_def.name)
                             .and_then(|hints| hints.get(idx))
                             .and_then(|hint| hint.clone());
+                        let body_local_inferred = if param.is_reference {
+                            crate::compiler::expressions::closures::infer_param_type_from_body(
+                                name,
+                                &func_def.body,
+                            )
+                            .as_ref()
+                            .and_then(Self::tracked_type_name_from_annotation)
+                        } else {
+                            None
+                        };
+                        let inferred_type_name = match (
+                            global_inferred.as_deref(),
+                            body_local_inferred.as_deref(),
+                        ) {
+                            // Ref-param widening attractor: global says
+                            // "number", body-local literal pairing says
+                            // "int" (or another narrower primitive). The
+                            // body-local signal observed the actual
+                            // operand in `x op <int-literal>` —
+                            // authoritative for the producer-side stamp.
+                            (Some("number"), Some(local @ ("int" | "i8" | "i16" | "i32" | "i64"
+                                | "u8" | "u16" | "u32" | "u64")))
+                                if param.is_reference =>
+                            {
+                                Some(local.to_string())
+                            }
+                            _ => global_inferred,
+                        };
                         if let Some(type_name) = inferred_type_name {
                             self.set_local_type_info(local_idx, &type_name);
                             // Strict-typing-sweep: when inference produces a
