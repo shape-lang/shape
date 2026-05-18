@@ -64,6 +64,48 @@ print(doubled)"#,
     .expect_output_contains("2");
 }
 
+// Phase 4b Round 2 LANG-9 regression: inline array literal receivers
+// (`[1,2,3,4,5].map(|x|x*2).sum()`) must monomorphize the method call
+// the same way bound receivers (`let xs = [1,2,3,4,5]; xs.map(...).sum()`)
+// do. Pre-fix, the inline form hung indefinitely (exit 124 after timeout)
+// because `concrete_type_for_expr(Expr::Array)` returned `None` —
+// `compile_expr_array` never recorded the array literal's element
+// ConcreteType against its AST span, so the bytecode monomorphizer
+// fell back to the generic `Vec.map` stub. Per ADR-006 §2.7.5
+// stamp-at-compile-time, the producer's typed-kind IS the proof; the
+// fix records that proof in `array_element_types[span]` at
+// construction time.
+#[test]
+fn inline_array_literal_map_sum() {
+    ShapeTest::new(r#"print([1,2,3,4,5].map(|x|x*2).sum())"#)
+        .expect_run_ok()
+        .expect_output("30");
+}
+
+#[test]
+fn inline_array_literal_map_only() {
+    ShapeTest::new(r#"print([1,2,3,4,5].map(|x| x * 2))"#)
+        .expect_run_ok()
+        .expect_output_contains("10");
+}
+
+#[test]
+fn inline_array_literal_filter() {
+    ShapeTest::new(r#"print([1,2,3,4,5].filter(|x| x > 2).sum())"#)
+        .expect_run_ok()
+        .expect_output("12");
+}
+
+#[test]
+fn inline_array_literal_map_then_let_then_sum() {
+    ShapeTest::new(
+        r#"let r = [1,2,3,4,5].map(|x|x*2).sum()
+print(r)"#,
+    )
+    .expect_run_ok()
+    .expect_output("30");
+}
+
 #[test]
 fn array_filter_evens() {
     ShapeTest::new(

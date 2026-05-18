@@ -2,7 +2,9 @@
 
 use crate::bytecode::{Constant, Instruction, OpCode, Operand};
 use crate::type_tracking::{NumericType, VariableTypeInfo};
-use shape_ast::ast::{EnumConstructorPayload, Expr, Literal, Spanned, TypeAnnotation, TypeParam};
+use shape_ast::ast::{
+    EnumConstructorPayload, Expr, Literal, Span, Spanned, TypeAnnotation, TypeParam,
+};
 use shape_ast::error::{Result, ShapeError};
 use shape_runtime::type_schema::{FieldType, TypeSchema};
 
@@ -134,7 +136,7 @@ impl BytecodeCompiler {
     }
 
     /// Compile an array expression
-    pub(super) fn compile_expr_array(&mut self, elements: &[Expr]) -> Result<()> {
+    pub(super) fn compile_expr_array(&mut self, elements: &[Expr], span: Span) -> Result<()> {
         use super::super::v2_array_emission::infer_array_element_type;
         use super::super::v2_typed_emission::{
             should_use_typed_array_from_slot_kind, TypedArrayKind,
@@ -212,6 +214,31 @@ impl BytecodeCompiler {
         };
 
         if let Some(kind) = typed_kind {
+            // LANG-9 fix (Phase 4b round 2, 2026-05-18): record the
+            // proven element `ConcreteType` against this array literal's
+            // AST span so subsequent `try_monomorphize_method_call` on an
+            // inline receiver (`[1,2,3].map(|x| x*2)`) can reach the
+            // typed-array specialization. Pre-fix, `concrete_type_for_expr`
+            // hit the `Expr::Array` arm at
+            // `monomorphization/type_resolution.rs:1381`, looked up
+            // `array_element_types[span]`, found nothing, returned `None`,
+            // and `try_monomorphize_method_call` fell back to the generic
+            // `Vec.map` (entry_point=0 stub). The bound form
+            // (`let xs = [...]; xs.map(...)`) succeeded because
+            // `identifier_concrete_type` reads from
+            // `local_array_element_types`/`type_tracker`, which are
+            // populated by the binding propagation path. Per ADR-006
+            // §2.7.5 stamp-at-compile-time, the producer-side `typed_kind`
+            // IS the proof of element type — record it now so the
+            // bytecode-time monomorphizer can consume it. No
+            // Bool-default, no inference fabrication: the typed-kind
+            // branch only fires when `infer_array_literal_numeric_type` /
+            // `infer_array_element_type` / `pending_variable_typed_array_kind`
+            // already proved the element type at the producer site.
+            self.record_array_element_type(
+                span,
+                super::super::v2_typed_emission::concrete_type_for_typed_array_kind(kind),
+            );
             // Allocate the typed array with capacity = element count.
             self.emit(Instruction::new(
                 kind.new_opcode(),
@@ -334,6 +361,28 @@ impl BytecodeCompiler {
                 VariableTypeInfo::named(type_name.to_string())
             })
         };
+        // LANG-9 fix (legacy path): the spread / nested-array / heterogeneous
+        // fall-through above still produces a homogeneous-numeric receiver
+        // when `literal_numeric` is `Some` or `is_bool` (`NewTypedArray`
+        // emission). Record the element type at the same producer site so
+        // the inline `[...].method(...)` monomorphizer can reach
+        // `array_element_types[span]` from this branch too. Idempotent with
+        // the typed-kind branch's `record_array_element_type` above (which
+        // covers the v2 typed-array fast path) — both lower into the same
+        // map keyed by span.
+        let legacy_elem: Option<shape_value::v2::ConcreteType> = if is_bool {
+            Some(shape_value::v2::ConcreteType::Bool)
+        } else {
+            literal_numeric.and_then(|nt| match nt {
+                NumericType::Int => Some(shape_value::v2::ConcreteType::I64),
+                NumericType::Number => Some(shape_value::v2::ConcreteType::F64),
+                NumericType::Decimal => Some(shape_value::v2::ConcreteType::Decimal),
+                NumericType::IntWidth(_) => None,
+            })
+        };
+        if let Some(elem_ct) = legacy_elem {
+            self.record_array_element_type(span, elem_ct);
+        }
         self.last_expr_numeric_type = None;
         Ok(())
     }
