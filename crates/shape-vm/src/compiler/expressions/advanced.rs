@@ -224,6 +224,24 @@ impl BytecodeCompiler {
         self.type_tracker
             .set_local_binding_semantics(local_idx, Self::owned_immutable_binding_semantics());
 
+        // Propagate the RHS expression's type to the local slot. Without a
+        // surface `Future<T>` type in the tracker lattice, the binding's
+        // type unifies with the RHS expression's type — the runtime
+        // sync-resolution path at `async_ops/mod.rs::op_spawn_task`'s
+        // non-callable arm preserves the inner value's kind end-to-end, so
+        // `let va = await a` later resolves `va` to the same kind as the
+        // original RHS. Without this propagation, multi-binding patterns
+        // like `let va = await a; let vb = await b; print(va + vb)` fail
+        // strict typing as `unknown + unknown` because the post-`compile_expr`
+        // type info is unread by `compile_async_let`.
+        //
+        // `propagate_assignment_type_to_slot` reads `last_expr_type_info` /
+        // `last_expr_numeric_type` / `last_expr_schema` set by
+        // `compile_expr(&async_let.expr)` above and stamps the local
+        // accordingly — same shape as `var_decl.value`-less local
+        // declarations in `compile_statement::Let`.
+        self.propagate_initializer_type_to_slot(local_idx, true, false);
+
         // `async let` is an expression — push the future back onto the stack
         self.emit(Instruction::new(
             OpCode::LoadLocal,

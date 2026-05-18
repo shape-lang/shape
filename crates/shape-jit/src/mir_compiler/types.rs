@@ -1193,6 +1193,18 @@ fn infer_rvalue_kind_with_projections(
             field_name_table,
             concrete_types,
         ),
+        // W14.2-A1 (Phase 4b, 2026-05-18): `BitNot` propagates the operand
+        // kind — Int64 in / Int64 out per the VM's `BitNotInt` typed opcode
+        // at `arithmetic/mod.rs:229`. Same `infer_operand_kind_with_projections`
+        // shape as `UnOp::Neg` above. `None` operand kind surfaces unstamped
+        // per §2.7.7 #9 / forbidden #9 (no fabricated default).
+        Rvalue::UnaryOp(UnOp::BitNot, operand) => infer_operand_kind_with_projections(
+            operand,
+            kinds,
+            field_kinds,
+            field_name_table,
+            concrete_types,
+        ),
         // W10 jit-call-method-user-trait-fix (2026-05-17): when the
         // operand is a user-struct receiver (`Ptr(HeapKind::TypedObject)`),
         // the `!x` lowering routes through the `Not::not(self) -> Self`

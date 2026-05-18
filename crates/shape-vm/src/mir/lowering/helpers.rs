@@ -463,7 +463,17 @@ pub(super) fn lower_unary_op(op: ast::UnaryOp) -> Option<UnOp> {
     match op {
         ast::UnaryOp::Neg => Some(UnOp::Neg),
         ast::UnaryOp::Not => Some(UnOp::Not),
-        ast::UnaryOp::BitNot => None,
+        // W14.2-A1 (Phase 4b, 2026-05-18): `BitNot` (`~x`) lowers to native
+        // Int64 bitwise-NOT via the JIT consumer at
+        // `crates/shape-jit/src/mir_compiler/rvalues.rs::compile_unop`
+        // (added in the same sub-cluster). Mirrors the W11-fup-A BinOp
+        // Pow/BitAnd/etc. extension at `mir/lowering/helpers.rs:286+`
+        // (close commit `46be6b0d`). The bytecode VM emits `BitNotInt`
+        // directly per `arithmetic/mod.rs:229`; the MIR conduit lets
+        // the JIT emit Cranelift `bnot` instead of falling through to
+        // the kind-blind `Rvalue::Aggregate(vec![operand])` arm at
+        // `mir/lowering/expr.rs:1722-1727`.
+        ast::UnaryOp::BitNot => Some(UnOp::BitNot),
     }
 }
 

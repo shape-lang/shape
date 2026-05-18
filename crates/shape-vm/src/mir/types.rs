@@ -411,6 +411,18 @@ pub enum BinOp {
 pub enum UnOp {
     Neg,
     Not,
+    // W14.2-A1 (Phase 4b, 2026-05-18): `BitNot` (`~x`) lowers to native
+    // Int64 bitwise-NOT, mirroring the bytecode VM's `BitNotInt` typed
+    // opcode (`arithmetic/mod.rs:229`). The MIR enum extension mirrors
+    // the W11-fup-A `BinOp` Pow/BitAnd/BitOr/BitXor/Shl/Shr pattern at
+    // `mir/types.rs:373-407` (close commit `46be6b0d`) — without this
+    // variant, `lower_unary_op(BitNot)` returned `None` and the
+    // expression fell through to the kind-blind `Rvalue::Aggregate(vec![
+    // operand])` arm at `mir/lowering/expr.rs:1722-1727`, which the JIT
+    // consumer surface-and-stops as W11-followup-unop-bitnot per
+    // W11-fup-A close §"Residuals" line 4 ("Class F NEW UnOp::BitNot:
+    // op_bitwise JIT → W11-followup-unop-bitnot").
+    BitNot,
 }
 
 // ── Task Boundary Kind ───────────────────────────────────────────────

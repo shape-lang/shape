@@ -335,37 +335,98 @@ impl VirtualMachine {
 
     /// Await with a timeout.
     ///
-    /// Spawn a task from a closure/function on the stack
+    /// Spawn a task from a callable or pre-resolved value on the stack.
     ///
-    /// Pops a closure or function reference from the stack and creates a new async task.
-    /// Pushes a Future(task_id) onto the stack representing the spawned task.
-    /// The host runtime is responsible for actually scheduling the task.
+    /// Pops a top-of-stack kinded slot and creates a new async task identified
+    /// by a fresh future id. Pushes a `Ptr(HeapKind::Future)` onto the stack
+    /// representing the spawned task.
     ///
-    /// If inside an async scope, the spawned future ID is tracked for cancellation.
+    /// Two callable-classification paths per the §2.7.11/Q12 value-call dispatch:
+    ///
+    /// - **Callable kinds** (`NativeKind::Ptr(HeapKind::Closure)` /
+    ///   `NativeKind::UInt64`): registered with the scheduler via `register`
+    ///   for later inline execution at `resolve_spawned_task` time. Same shape
+    ///   as the W7-cv-static / W7-cv-async dispatch classification at
+    ///   `call_convention.rs::resolve_spawned_task` (line 438).
+    ///
+    /// - **Non-callable kinds** (every other `NativeKind`, including scalars
+    ///   `Int64`/`Float64`/`Bool`/`String` and heap-bearing
+    ///   `Ptr(HeapKind::*)` for non-callable heap types): treated as already-
+    ///   resolved values per the §2.7.4 sync-shortcut semantic. The compiler
+    ///   surface emits `compile_expr + SpawnTask` for `async let x = 42`,
+    ///   `join all { 1+2, 3+4 }`, and other RHS / branch expressions that
+    ///   evaluate to plain values (not closure literals or function
+    ///   references). Without this path, `resolve_spawned_task` would
+    ///   surface `callable must be NativeKind::Ptr(HeapKind::Closure) or
+    ///   NativeKind::UInt64` for every non-callable RHS.
+    ///
+    ///   The non-callable path uses the scheduler's existing `complete(id,
+    ///   bits, kind)` API (same shape as the external-completion path used
+    ///   by remote calls); the share transfers from the stack slot into the
+    ///   scheduler's cached-result entry. `resolve_spawned_task` then hits
+    ///   its `TaskStatus::Completed` cached fast-path at line 407 and
+    ///   returns the value cleanly via `clone_with_kind`.
+    ///
+    /// If inside an async scope, the spawned future id is tracked for
+    /// cancellation. Cancellation of a non-callable / pre-completed task is
+    /// a no-op (the result is already stored — `cancel` only releases the
+    /// `callables` entry, which is empty for non-callable kinds).
     fn op_spawn_task(&mut self) -> Result<AsyncExecutionResult, VMError> {
         let sp_before = self.sp;
-        // Pop the callable's kinded slot. The share transfers to the
-        // task_scheduler via `register(id, bits, kind)` — same retain-on-store
-        // contract as the §2.7.7 stack and §2.7.8 cell-storage tracks (one
-        // strong-count share owned by the storage; released by `take_callable`
-        // / `cancel` / `Drop`). No `drop_with_kind` here: the share is moved,
-        // not released.
-        let (callable_bits, callable_kind) = self.pop_kinded()?;
+        // Pop the top-of-stack kinded slot. The share transfers to the
+        // task_scheduler via either `register` (callable kinds) or
+        // `complete` (non-callable kinds) — same retain-on-store contract
+        // as the §2.7.7 stack and §2.7.8 cell-storage tracks (one
+        // strong-count share owned by the storage; released by
+        // `take_callable` / cached-result drop / `Drop`). No
+        // `drop_with_kind` here: the share is moved, not released.
+        let (slot_bits, slot_kind) = self.pop_kinded()?;
 
         // Allocate a fresh future id. `next_future_id` is monotonic and
         // single-threaded (the VM is `!Sync` per the module docstring's
         // concurrency model section).
         let task_id = self.next_future_id();
 
-        // Transfer the share into the scheduler. `register` honours the
-        // Wave-6.5 R-async-time kinded API (bits + NativeKind pair).
-        self.task_scheduler
-            .register(task_id, callable_bits, callable_kind);
+        // Classify the popped slot per the §2.7.11/Q12 callable-vs-value
+        // dispatch shape (mirrors `call_convention.rs::resolve_spawned_task`
+        // line 438 + `call_value_immediate_nb` line 854). Callables route
+        // through `register` for later inline execution; non-callable
+        // values route through `complete` as pre-resolved results.
+        match slot_kind {
+            NativeKind::Ptr(HeapKind::Closure) | NativeKind::UInt64 => {
+                // Callable — register for later execution.
+                self.task_scheduler.register(task_id, slot_bits, slot_kind);
+            }
+            _ => {
+                // Non-callable pre-resolved value. Register with Pending
+                // status so the scope tracking + `is_resolved` checks
+                // behave uniformly with the callable path, then `complete`
+                // immediately so `resolve_spawned_task` hits the
+                // cached-result fast-path. The scheduler's `register`
+                // requires a `(bits, kind)` pair to slot into the
+                // `callables` map for refcount discipline; for the
+                // pre-resolved path we transfer the share directly to
+                // the `results` map via `complete` and ensure the
+                // `callables` entry is empty so the take-callable arm
+                // never fires.
+                //
+                // Refcount discipline: `complete(task_id, bits, kind)`
+                // takes one strong-count share into the cached-result
+                // entry; the share transferred to us from `pop_kinded`
+                // moves into the scheduler. `resolve_spawned_task`'s
+                // cached fast-path at `call_convention.rs:407` clones a
+                // fresh share via `clone_with_kind` for the returned
+                // `KindedSlot`, leaving the cached entry's share intact.
+                self.task_scheduler.complete(task_id, slot_bits, slot_kind);
+            }
+        }
 
         // Track the spawned future id in the active async scope (if any)
         // so `op_async_scope_exit` can cancel still-pending tasks in
         // LIFO order (structured concurrency contract — see module
-        // docstring's "Structured Concurrency" section).
+        // docstring's "Structured Concurrency" section). Pre-completed
+        // tasks ignore `cancel` per `TaskScheduler::cancel` line 141
+        // ("Only cancel if still pending").
         if let Some(scope) = self.async_scope_stack.last_mut() {
             scope.push(task_id);
         }
