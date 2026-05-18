@@ -1042,7 +1042,8 @@ fn resolve_with_closure_return_inference(
         let Some(param) = func_def.params.get(param_idx) else {
             continue;
         };
-        let Some(TypeAnnotation::Function { returns: ret_ann, .. }) = param.type_annotation.as_ref()
+        let Some(TypeAnnotation::Function { params: cparam_anns, returns: ret_ann }) =
+            param.type_annotation.as_ref()
         else {
             continue;
         };
@@ -1053,12 +1054,43 @@ fn resolve_with_closure_return_inference(
             continue;
         }
 
+        // LANG-9-spin-1-identity-closure (ADR-006 §2.7.5 producer-side stamp):
+        // compute per-closure-param expected type names by substituting the
+        // already-bound generics into the callee's closure-param annotations.
+        // Pass to `infer_closure_body_return_type_name_with_caller_context`
+        // so the closure body's bare-`Expr::Identifier(param)` terminal
+        // expression resolves via `param_types[name]` seeded from the
+        // caller-side substitution.
+        //
+        // The substituted callee-annotation IS the proof of the closure's
+        // param types at this call site — no runtime probe, no fabrication.
+        // Mirrors the value-call-site caller-context shape at
+        // `expressions/function_calls.rs:694-705`.
+        let caller_arg_type_names: Vec<Option<String>> = cparam_anns
+            .iter()
+            .map(|cp_ann| {
+                concrete_type_from_annotation(&cp_ann.type_annotation, &bindings).and_then(|ct| {
+                    crate::compiler::expressions::closures::concrete_type_to_type_annotation(&ct)
+                        .and_then(|ann| {
+                            crate::compiler::BytecodeCompiler::tracked_type_name_from_annotation(
+                                &ann,
+                            )
+                        })
+                })
+            })
+            .collect();
+
         // Lightweight closure body return-type inference. Returns a name
         // like "int", "number", "bool", "string". The function exists
         // primarily for `local_callable_return_types` — reuse it here.
         let Some(return_type_name) =
-            crate::compiler::expressions::closures::infer_closure_body_return_type_name(
-                compiler, cparams, cbody, None,
+            crate::compiler::expressions::closures::infer_closure_body_return_type_name_with_caller_context(
+                compiler,
+                cparams,
+                cbody,
+                None,
+                &[],
+                &caller_arg_type_names,
             )
         else {
             // Can't infer the closure's return type. Without it we can't
