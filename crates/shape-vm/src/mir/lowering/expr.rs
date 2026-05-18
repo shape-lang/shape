@@ -1504,7 +1504,39 @@ fn lower_match_pattern_condition_operand(
     pattern_span: Span,
 ) -> Option<Operand> {
     match pattern {
-        ast::Pattern::Identifier(_) | ast::Pattern::Typed { .. } | ast::Pattern::Wildcard => None,
+        ast::Pattern::Identifier(_) | ast::Pattern::Wildcard => None,
+        ast::Pattern::Typed {
+            type_annotation, ..
+        } => {
+            // W15.2-LANG-5 (Phase 4b, 2026-05-18). Pre-fix this arm was
+            // grouped with `Identifier`/`Wildcard` and returned `None` —
+            // the MIR builder then emitted `TerminatorKind::Goto(body_block)`
+            // with no discriminator, so under JIT every typed-pattern arm
+            // unconditionally took the first arm (e.g. `match x { n: int
+            // => 100, s: string => 200 }` on a union `int | string`
+            // scrutinee returned 100 for both inputs).
+            //
+            // Producer-side stamp-at-compile-time per ADR-006 §2.7.5: the
+            // type annotation is captured verbatim into `Rvalue::
+            // TypePatternTest` so the consumer dispatches on a known kind
+            // (not on raw bits, not on a Bool-default fabrication). The
+            // JIT consumer's preflight rejects this Rvalue today, routing
+            // the program through the W12 fall-through to the bytecode
+            // interpreter (which compiles `Pattern::Typed` via the
+            // `OpCode::TypeCheck` path in `compiler/patterns/checking.rs`).
+            let bool_slot = builder.alloc_temp(LocalTypeInfo::Copy);
+            builder.push_stmt(
+                StatementKind::Assign(
+                    Place::Local(bool_slot),
+                    Rvalue::TypePatternTest {
+                        operand: Operand::Copy(Place::Local(scrutinee_slot)),
+                        type_annotation: type_annotation.clone(),
+                    },
+                ),
+                pattern_span,
+            );
+            Some(Operand::Copy(Place::Local(bool_slot)))
+        }
         ast::Pattern::Literal(literal) => {
             let literal_expr = Expr::Literal(literal.clone(), pattern_span);
             let literal_operand = lower_expr_to_operand(builder, &literal_expr, false);

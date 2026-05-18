@@ -1257,6 +1257,14 @@ fn infer_rvalue_kind_with_projections(
         Rvalue::EnumPayload { operand, variant } => {
             infer_enum_payload_kind(operand, *variant, concrete_types)
         }
+        // TypePatternTest emits a native Bool — kind is Bool by
+        // construction. The JIT consumer surfaces-and-stops on this
+        // Rvalue today (preflight rejects it), but the destination slot's
+        // kind is still well-defined per ADR-006 §2.7.5 producer-side
+        // classification; downstream MIR passes (kind-flow inference,
+        // SwitchBool operand classification) see the same Bool stamp
+        // whether or not the JIT reaches codegen for the body. W15.2-LANG-5.
+        Rvalue::TypePatternTest { .. } => Some(NativeKind::Bool),
     }
 }
 

@@ -175,7 +175,9 @@ fn add_rvalue_uses(live: &mut HashSet<SlotId>, rvalue: &Rvalue) {
                 add_operand_uses(live, op);
             }
         }
-        Rvalue::EnumTest { operand, .. } | Rvalue::EnumPayload { operand, .. } => {
+        Rvalue::EnumTest { operand, .. }
+        | Rvalue::EnumPayload { operand, .. }
+        | Rvalue::TypePatternTest { operand, .. } => {
             add_operand_uses(live, operand);
         }
     }

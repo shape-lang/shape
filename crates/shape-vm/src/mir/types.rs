@@ -4,7 +4,7 @@
 //! Places track what can be borrowed (locals, fields, indices).
 //! Statements and terminators form basic blocks in a control flow graph.
 
-use shape_ast::ast::Span;
+use shape_ast::ast::{Span, TypeAnnotation};
 use std::fmt;
 
 // ── Identifiers ──────────────────────────────────────────────────────
@@ -365,6 +365,39 @@ pub enum Rvalue {
     EnumPayload {
         operand: Operand,
         variant: VariantTag,
+    },
+    /// Test whether the scrutinee's runtime kind matches a `Pattern::Typed`
+    /// type annotation (e.g. `match x { n: int => ..., s: string => ... }`).
+    /// Result: native Bool (`I8`).
+    ///
+    /// W15.2-LANG-5 (Phase 4b, 2026-05-18). Pre-fix the MIR lowering of
+    /// `Pattern::Typed` returned `None` for the condition operand — same
+    /// shape as `Pattern::Wildcard`/`Pattern::Identifier` — so every typed
+    /// match arm was reached via `TerminatorKind::Goto` with NO type
+    /// discrimination. The first arm always won and the union-scrutinee
+    /// silently took the wrong branch under JIT.
+    ///
+    /// Producer-side classification per ADR-006 §2.7.5 stamp-at-compile-time:
+    /// the type annotation is carried verbatim from `ast::Pattern::Typed`
+    /// so consumers do not re-derive it from the operand bits.
+    ///
+    /// Consumer status:
+    /// - JIT MIR preflight (`shape-jit::mir_compiler::preflight`) REJECTS
+    ///   on this Rvalue → W12 fall-through routes the program to the
+    ///   bytecode interpreter, which compiles the same scrutinee via the
+    ///   `OpCode::TypeCheck` path in `compiler/patterns/checking.rs`.
+    ///   Native JIT codegen lands as a follow-up (`jit_type_check` FFI +
+    ///   per-kind dispatch on the §2.7.7 stack parallel-kind track).
+    /// - VM never consumes MIR; `compile_match_expr` in
+    ///   `compiler/expressions/advanced.rs` calls `compile_pattern_check`
+    ///   directly on the AST and emits `OpCode::TypeCheck` itself.
+    ///
+    /// The annotation IS the producer-side classification — neither a
+    /// Bool-default fabrication nor any of the deleted dispatch families
+    /// enumerated under CLAUDE.md Forbidden Patterns.
+    TypePatternTest {
+        operand: Operand,
+        type_annotation: TypeAnnotation,
     },
 }
 
