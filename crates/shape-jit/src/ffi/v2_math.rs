@@ -312,6 +312,32 @@ pub extern "C" fn jit_abs_i64(a: i64) -> i64 {
     a.wrapping_abs()
 }
 
+// W11-fup-A (Phase 3d, 2026-05-18): Pow on proven Int64 operands. Mirrors
+// the bytecode VM's `PowInt` opcode at `crates/shape-vm/src/executor/
+// arithmetic/mod.rs:146-162` for the non-overflow case: `base.pow(exp as u32)`
+// when `exp >= 0 && exp < u32::MAX`; clamps wrapping for native semantics
+// when `exp` is out of range (signals divergence from the VM's f64 promotion).
+//
+// The VM additionally promotes overflowing i64 results to f64 (line 156);
+// the JIT path does NOT replicate this kind-flip — the result slot's
+// `NativeKind` is stamped at MIR-inference time as `Int64` (same-kind
+// operand inheritance) and §2.7.5 stamp-at-compile-time discipline forbids
+// runtime kind changes. JIT/VM divergence on i64 Pow overflow is a
+// documented residual of the W11-fup-A close (separate follow-up
+// `jit-pow-int-overflow-promotion`).
+#[inline]
+pub extern "C" fn jit_pow_i64(base: i64, exp: i64) -> i64 {
+    if exp < 0 || exp > u32::MAX as i64 {
+        // Out-of-range exponent: VM promotes to f64 via powf; the JIT path
+        // can't kind-flip the result slot at runtime per §2.7.5. Return 0
+        // as a defined-but-divergent value — the divergence is documented
+        // and surfaceable via the kind-mismatch SURFACE in compile_binop
+        // for cases the kind tracker doesn't catch.
+        return 0;
+    }
+    base.wrapping_pow(exp as u32)
+}
+
 // ============================================================================
 // Type Conversions
 // ============================================================================

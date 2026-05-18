@@ -499,6 +499,38 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // Logical ops on floats — box and use generic path
                 self.compile_binop(op, lhs, rhs)
             }
+            // W11-fup-A (Phase 3d, 2026-05-18): `Pow` on f64 lowers to the
+            // existing `jit_pow_f64` FFI helper (`crates/shape-jit/src/ffi/
+            // v2_math.rs:302`); both operands already widened to F64 by
+            // the caller (the `l_type == F64 && r_type == F64` branch in
+            // `compile_rvalue`). Result stays F64 — kind is stamped at
+            // §2.7.5 producing-MIR `infer_rvalue_kind` time (same-kind
+            // operands → `Some(F64)` for non-comparison ops).
+            BinOp::Pow => {
+                let func_ref = self.ffi.pow_f64;
+                let inst = self.builder.ins().call(func_ref, &[lhs, rhs]);
+                Ok(self.builder.inst_results(inst)[0])
+            }
+            // W11-fup-A: bitwise ops on f64 operands — surface-and-stop.
+            // Shape `int` (i64) is the only kind for which the bytecode VM
+            // emits `BitAndInt`/etc. (`opcode_defs.rs:1860-1873`); f64
+            // operands routed here imply a §2.7.5 producing-MIR kind-tracker
+            // gap (the operand should have been Int64-stamped upstream).
+            // Honest surface-and-stop per W10 playbook §5 — no
+            // `f64::to_bits | other_bits` rationalization (that's the
+            // deleted W-series tag-bit dispatch shape).
+            BinOp::BitAnd
+            | BinOp::BitOr
+            | BinOp::BitXor
+            | BinOp::BitShl
+            | BinOp::BitShr => Err(format!(
+                "compile_binop_f64: SURFACE — bitwise {:?} on Float64 operands \
+                 has no semantic in Shape (`int`-only per `BitAndInt`/etc. at \
+                 opcode_defs.rs:1860-1873). Reaching here means the §2.7.5 \
+                 producing-MIR kind-tracker stamped Float64 where Int64 was \
+                 expected. Producer-site gap; surface per W10 playbook §5.",
+                op
+            )),
         }
     }
 
@@ -527,6 +559,20 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 self.builder.ins().trapnz(is_zero, TrapCode::User(0));
                 Ok(self.builder.ins().srem(lhs, rhs))
             }
+            // W11-fup-A (Phase 3d, 2026-05-18): bitwise on native I32 use
+            // Cranelift's native bitwise instructions (`band`/`bor`/`bxor`/
+            // `ishl`/`sshr`). Mirrors the bytecode VM's `BitAndInt`/etc.
+            // typed opcodes (`opcode_defs.rs:1860-1873`); the i64
+            // semantics there fit i32 here without truncation (the
+            // operands are already proven i32 by the caller's
+            // `l_type == I32 && r_type == I32` discriminator).
+            BinOp::BitAnd => Ok(self.builder.ins().band(lhs, rhs)),
+            BinOp::BitOr => Ok(self.builder.ins().bor(lhs, rhs)),
+            BinOp::BitXor => Ok(self.builder.ins().bxor(lhs, rhs)),
+            BinOp::BitShl => Ok(self.builder.ins().ishl(lhs, rhs)),
+            // Arithmetic right-shift matches the VM's `BitShrInt` (`a_int >>
+            // b_int` on i64) per opcode_defs.rs:1856-1857.
+            BinOp::BitShr => Ok(self.builder.ins().sshr(lhs, rhs)),
             _ => Err(format!("unsupported native i32 binop: {:?}", op)),
         }
     }
@@ -601,8 +647,40 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // icmp returns I8 (native bool)
                 Ok(cmp)
             }
-            _ => {
-                // Logical ops — use FFI path
+            // W11-fup-A (Phase 3d, 2026-05-18): bitwise ops on proven Int64
+            // operands lower to Cranelift native instructions; matches
+            // VM `BitAndInt`/etc. (`opcode_defs.rs:1860-1873`). The result
+            // stays Int64 — kind stamped at §2.7.5 producing-MIR
+            // `infer_rvalue_kind` time.
+            BinOp::BitAnd => Ok(self.builder.ins().band(lhs, rhs)),
+            BinOp::BitOr => Ok(self.builder.ins().bor(lhs, rhs)),
+            BinOp::BitXor => Ok(self.builder.ins().bxor(lhs, rhs)),
+            BinOp::BitShl => Ok(self.builder.ins().ishl(lhs, rhs)),
+            // Arithmetic right-shift (matches VM `BitShrInt` semantic per
+            // opcode_defs.rs:1856-1857: `a_int >> b_int` on i64).
+            BinOp::BitShr => Ok(self.builder.ins().sshr(lhs, rhs)),
+            // W11-fup-A: Pow on Int64 routes through the `jit_pow_i64` FFI
+            // helper (added in this sub-cluster). Cranelift has no
+            // native integer-pow instruction; the helper preserves the
+            // bytecode VM's `i64::wrapping_pow` semantic for the
+            // non-overflowing common case. The VM's `PowInt` opcode
+            // additionally promotes overflowing i64 results to f64
+            // (`crates/shape-vm/src/executor/arithmetic/mod.rs:151-160`);
+            // this JIT path does NOT replicate the kind-flip — the
+            // result kind stays Int64 by §2.7.5 stamp-at-compile-time
+            // discipline. JIT/VM divergence on i64 Pow overflow is a
+            // documented residual of the W11-fup-A close (separate
+            // follow-up `jit-pow-int-overflow-promotion` if user
+            // explicitly observes divergence).
+            BinOp::Pow => {
+                let func_ref = self.ffi.pow_i64;
+                let inst = self.builder.ins().call(func_ref, &[lhs, rhs]);
+                Ok(self.builder.inst_results(inst)[0])
+            }
+            BinOp::And | BinOp::Or => {
+                // Logical ops on Int64 — box and use generic path (pre-
+                // W11-fup-A behaviour; logical-on-int wasn't reachable
+                // in practice but the path was kept for symmetry).
                 self.compile_binop(op, lhs, rhs)
             }
         }
@@ -710,6 +788,32 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 );
                 Ok(self.builder.ins().select(either, tag_true, false_val))
             }
+            // W11-fup-A (Phase 3d, 2026-05-18): kind-untyped Pow / bitwise
+            // ops reaching this generic path indicate a §2.7.5 producing-
+            // MIR kind-tracker gap — the operand kinds (Float64 / Int64 /
+            // Int32) determine the codegen path (`compile_binop_f64` /
+            // `compile_binop_int64` / `compile_binop_i32_native`), so a
+            // kind-blind `compile_binop` for these ops cannot honestly
+            // pick the right operation. Honest surface-and-stop per W10
+            // playbook §5; the deleted W-series tag-bit IC would have
+            // branched on operand `tag_bits` at runtime — that path no
+            // longer exists post-strict-typing (CLAUDE.md "Forbidden
+            // code").
+            BinOp::Pow
+            | BinOp::BitAnd
+            | BinOp::BitOr
+            | BinOp::BitXor
+            | BinOp::BitShl
+            | BinOp::BitShr => Err(format!(
+                "compile_binop: kind-untyped {:?} reached the JIT — SURFACE per \
+                 W10 playbook §5: producing-MIR kind-tracker gap; every JIT \
+                 operand must have a proven NativeKind at compile time (ADR-006 \
+                 §2.7.5 / CLAUDE.md \"Forbidden code\" — runtime tag_bits dispatch \
+                 deleted with the W-series IC). W11-fup-A added typed paths in \
+                 compile_binop_f64 / compile_binop_int64 / compile_binop_i32_native \
+                 — extend the producer to stamp the operand kind upstream.",
+                op
+            )),
         }
     }
 

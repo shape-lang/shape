@@ -13,6 +13,12 @@ use std::collections::HashMap;
 use super::super::ffi::math::{
     jit_acos, jit_asin, jit_atan, jit_cos, jit_exp, jit_ln, jit_log, jit_pow, jit_sin, jit_tan,
 };
+// W11-fup-A (Phase 3d, 2026-05-18): typed-pow FFI helpers for the JIT
+// MIR-lowering path's `compile_binop_f64::BinOp::Pow` and
+// `compile_binop_int64::BinOp::Pow` arms. `jit_pow_f64` lifts the
+// pre-existing-but-unregistered helper at `ffi/v2_math.rs:302`;
+// `jit_pow_i64` is new (this sub-cluster, `ffi/v2_math.rs::jit_pow_i64`).
+use super::super::ffi::v2_math::{jit_pow_f64, jit_pow_i64};
 use super::intrinsics::{
     jit_intrinsic_correlation, jit_intrinsic_covariance, jit_intrinsic_max, jit_intrinsic_mean,
     jit_intrinsic_median, jit_intrinsic_min, jit_intrinsic_percentile, jit_intrinsic_std,
@@ -36,6 +42,10 @@ pub fn register_math_symbols(builder: &mut JITBuilder) {
     builder.symbol("jit_ln", jit_ln as *const u8);
     builder.symbol("jit_log", jit_log as *const u8);
     builder.symbol("jit_pow", jit_pow as *const u8);
+    // W11-fup-A typed-pow helpers (native f64 / i64 ABI, distinct from
+    // the NaN-boxed `jit_pow` above).
+    builder.symbol("jit_pow_f64", jit_pow_f64 as *const u8);
+    builder.symbol("jit_pow_i64", jit_pow_i64 as *const u8);
 
     // R7.1: the 11 `jit_generic_*` dispatch-fallback trampolines were
     // removed together with their `FFIFuncRefs` fields and Cranelift
@@ -146,6 +156,33 @@ pub fn declare_math_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<St
             .declare_function("jit_pow", Linkage::Import, &sig)
             .expect("Failed to declare jit_pow");
         ffi_funcs.insert("jit_pow".to_string(), func_id);
+    }
+
+    // W11-fup-A (Phase 3d, 2026-05-18): typed-pow signatures for the
+    // MIR `BinOp::Pow` JIT path. F64 ABI for `compile_binop_f64`,
+    // I64 ABI for `compile_binop_int64`. Distinct from the NaN-boxed
+    // `jit_pow` above which takes/returns I64-bit-pattern operands.
+    // jit_pow_f64(a: f64, b: f64) -> f64
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::F64));
+        sig.params.push(AbiParam::new(types::F64));
+        sig.returns.push(AbiParam::new(types::F64));
+        let func_id = module
+            .declare_function("jit_pow_f64", Linkage::Import, &sig)
+            .expect("Failed to declare jit_pow_f64");
+        ffi_funcs.insert("jit_pow_f64".to_string(), func_id);
+    }
+    // jit_pow_i64(base: i64, exp: i64) -> i64
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+        let func_id = module
+            .declare_function("jit_pow_i64", Linkage::Import, &sig)
+            .expect("Failed to declare jit_pow_i64");
+        ffi_funcs.insert("jit_pow_i64".to_string(), func_id);
     }
 
     // R7.1: Generic binary op declarations (11 `jit_generic_*` names) were

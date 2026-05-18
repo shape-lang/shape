@@ -286,6 +286,20 @@ pub(super) fn lower_binary_op(op: ast::BinaryOp) -> Option<BinOp> {
         ast::BinaryOp::Mul => Some(BinOp::Mul),
         ast::BinaryOp::Div => Some(BinOp::Div),
         ast::BinaryOp::Mod => Some(BinOp::Mod),
+        // W11-fup-A (Phase 3d, 2026-05-18): Pow + bitwise variants land in
+        // MIR per the W11-jit-new-array close §4 Class A disposition. The
+        // bytecode compiler emits the typed opcode flavours directly
+        // (`PowInt`/`PowNumber`/`BitAndInt`/etc.) — the MIR `BinOp` here
+        // mirrors the AST shape and lets the JIT consumer emit
+        // Cranelift-native code (`compile_binop_int64` for i64 bitwise,
+        // `jit_pow_f64` FFI for f64 Pow) instead of falling through to
+        // the kind-blind `Rvalue::Aggregate(vec![l, r])` Route A SURFACE.
+        ast::BinaryOp::Pow => Some(BinOp::Pow),
+        ast::BinaryOp::BitAnd => Some(BinOp::BitAnd),
+        ast::BinaryOp::BitOr => Some(BinOp::BitOr),
+        ast::BinaryOp::BitXor => Some(BinOp::BitXor),
+        ast::BinaryOp::BitShl => Some(BinOp::BitShl),
+        ast::BinaryOp::BitShr => Some(BinOp::BitShr),
         ast::BinaryOp::Greater => Some(BinOp::Gt),
         ast::BinaryOp::Less => Some(BinOp::Lt),
         ast::BinaryOp::GreaterEq => Some(BinOp::Ge),
@@ -294,15 +308,9 @@ pub(super) fn lower_binary_op(op: ast::BinaryOp) -> Option<BinOp> {
         ast::BinaryOp::NotEqual => Some(BinOp::Ne),
         ast::BinaryOp::And => Some(BinOp::And),
         ast::BinaryOp::Or => Some(BinOp::Or),
-        ast::BinaryOp::Pow
-        | ast::BinaryOp::FuzzyEqual
+        ast::BinaryOp::FuzzyEqual
         | ast::BinaryOp::FuzzyGreater
         | ast::BinaryOp::FuzzyLess
-        | ast::BinaryOp::BitAnd
-        | ast::BinaryOp::BitOr
-        | ast::BinaryOp::BitXor
-        | ast::BinaryOp::BitShl
-        | ast::BinaryOp::BitShr
         | ast::BinaryOp::NullCoalesce
         | ast::BinaryOp::ErrorContext
         | ast::BinaryOp::Pipe => None,

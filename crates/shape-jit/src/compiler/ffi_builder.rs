@@ -248,6 +248,12 @@ impl JITCompiler {
             // NativeKind::String operands, incl. f-string desugared chains).
             string_concat: r!("jit_string_concat"),
 
+            // W11-fup-A (Phase 3d, 2026-05-18): typed-pow FFI entry points
+            // for the MIR `BinOp::Pow` JIT codegen path. Native f64 and
+            // i64 ABI; symbols registered in `ffi_symbols/math_symbols.rs`.
+            pow_f64: r!("jit_pow_f64"),
+            pow_i64: r!("jit_pow_i64"),
+
             // ADR-006 §2.7.5 — kinded EnumStore producers
             // (W12-jit-aggregate-non-array, 2026-05-12). Dispatched from
             // the EnumStore consumer based on the MIR statement's

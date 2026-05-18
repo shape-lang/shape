@@ -369,6 +369,20 @@ pub enum Rvalue {
 }
 
 /// Binary operations in MIR.
+///
+/// W11-fup-A (Phase 3d, 2026-05-18) extends this enum with `Pow` + the five
+/// bitwise variants (`BitAnd`/`BitOr`/`BitXor`/`BitShl`/`BitShr`) per the
+/// W11-jit-new-array close §4 Class A residual: the bytecode VM already
+/// emits typed opcodes for these operators (`PowInt`/`PowNumber`,
+/// `BitAndInt`/`BitOrInt`/`BitXorInt`/`BitShlInt`/`BitShrInt` at
+/// `crates/shape-vm/src/bytecode/opcode_defs.rs:317-322 / 1860-1873`); the
+/// MIR layer was the gap forcing `lower_binary_op` to fall through to
+/// `Rvalue::Aggregate(vec![l, r])` and surface-and-stop in JIT (`Route A`
+/// at `crates/shape-jit/src/mir_compiler/rvalues.rs:145`).
+///
+/// Fuzzy ops + `NullCoalesce` / `ErrorContext` / `Pipe` remain unhandled
+/// here per the same close doc's "different semantics" disposition — those
+/// are tracked by their own follow-up sub-clusters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinOp {
     Add,
@@ -376,6 +390,12 @@ pub enum BinOp {
     Mul,
     Div,
     Mod,
+    Pow,
+    BitAnd,
+    BitOr,
+    BitXor,
+    BitShl,
+    BitShr,
     Eq,
     Ne,
     Lt,

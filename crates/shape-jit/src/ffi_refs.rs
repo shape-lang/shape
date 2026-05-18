@@ -275,6 +275,16 @@ pub struct FFIFuncRefs {
     //   chain emitted by `f"..."` formatted strings as well.
     pub(crate) string_concat: FuncRef,
 
+    // W11-fup-A (Phase 3d, 2026-05-18): typed-pow entry points for the
+    // MIR `BinOp::Pow` JIT codegen. `pow_f64` takes/returns native f64;
+    // `pow_i64` takes/returns native i64. Bodies live at
+    // `crates/shape-jit/src/ffi/v2_math.rs::jit_pow_f64 / jit_pow_i64`.
+    // Called from `mir_compiler::rvalues::compile_binop_f64` /
+    // `compile_binop_int64` `BinOp::Pow` arms when both operands have
+    // the proven matching native kind.
+    pub(crate) pow_f64: FuncRef,
+    pub(crate) pow_i64: FuncRef,
+
     // ADR-006 §2.7.5 — kinded EnumStore producers
     // (W12-jit-aggregate-non-array, 2026-05-12). Three entry points
     // matching the VM-side `BuiltinFunction::OkCtor` / `ErrCtor` /
