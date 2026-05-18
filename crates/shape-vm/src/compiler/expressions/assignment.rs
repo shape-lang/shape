@@ -4,6 +4,7 @@ use crate::bytecode::{Constant, Instruction, OpCode, Operand};
 use crate::executor::typed_object_ops::field_type_to_tag;
 use shape_ast::ast::{Expr, Spanned};
 use shape_ast::error::{Result, ShapeError};
+use shape_runtime::type_schema::FieldType;
 
 use super::super::BytecodeCompiler;
 
@@ -498,7 +499,17 @@ impl BytecodeCompiler {
                 object, property, ..
             } => {
                 const OBJECT_REF_STORAGE_ERROR: &str = "cannot store a reference in an object or struct literal — references are scoped borrows that cannot escape into aggregate values. Use owned values instead";
-                if let Some(place) = self.try_resolve_typed_field_place(object, property) {
+                // W15.2-LANG-8 jit-toplevel-render fix (Phase 4b Round 3 Surface-1c,
+                // ADR-006 §2.7.5 producer-side stamp): skip the MakeRef + MakeFieldRef +
+                // DerefStore fast path when the resolved field's type is `FieldType::Any`
+                // (operand tag would be `FIELD_TAG_ANY`, which the MakeFieldRef executor
+                // SURFACEs per ADR-006 §2.7.13 / Q14). Falls through to the
+                // SetFieldTyped + GetProp-style path below which handles `FIELD_TAG_ANY`
+                // via the storage's parallel `field_kinds` track.
+                let typed_field_place = self
+                    .try_resolve_typed_field_place(object, property)
+                    .filter(|place| !matches!(place.field_type_info, FieldType::Any));
+                if let Some(place) = typed_field_place {
                     let label = format!("{}.{}", place.root_name, property);
                     let source_loc = self.span_to_source_location(assign_expr.target.span());
                     self.check_write_allowed_in_current_context(place.borrow_key, Some(source_loc))
