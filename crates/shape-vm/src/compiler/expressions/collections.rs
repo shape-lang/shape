@@ -902,13 +902,41 @@ impl BytecodeCompiler {
                 }
 
                 // Look up the schema that was already registered during type definition compilation
-                // (with correct FieldTypes), instead of creating a duplicate with FieldType::Any
+                // (with correct FieldTypes), instead of creating a duplicate with FieldType::Any.
+                //
+                // W15.2-LANG-8 jit-toplevel-render fix (Phase 4b Round 3 Surface-1c, ADR-006 §2.7.5
+                // producer-side stamp): the previous fallback at the third `else` branch created a
+                // schema with every field typed `FieldType::Any` when neither the resolved
+                // `runtime_type_name` nor `type_name` had a registered schema. For a type alias
+                // `type P = Point` followed by `let origin = P { x: 0, y: 0 }`, only `Point` is
+                // registered — looking up `P` missed, falling through to the all-`Any` fallback.
+                // Subsequent `origin.x` access then emitted `MakeFieldRef` with `FIELD_TAG_ANY`,
+                // which the VM SURFACEs at runtime per ADR-006 §2.7.13 / Q14 — the producer must
+                // stamp a concrete tag. Resolve through `type_aliases` so the alias inherits the
+                // base type's concrete FieldTypes.
+                let alias_target = self.type_aliases.get(type_name.as_str()).cloned();
                 let schema_id = if let Some(schema) =
                     self.type_tracker.schema_registry().get(&runtime_type_name)
                 {
                     schema.id
                 } else if runtime_type_name != *type_name {
                     if let Some(base_schema) = self.type_tracker.schema_registry().get(type_name) {
+                        let fields = base_schema
+                            .fields
+                            .iter()
+                            .map(|f| (f.name.clone(), f.field_type.clone()))
+                            .collect::<Vec<_>>();
+                        let schema = TypeSchema::new(runtime_type_name.clone(), fields);
+                        let schema_id = schema.id;
+                        self.type_tracker.schema_registry_mut().register(schema);
+                        schema_id
+                    } else if let Some(alias_base) = alias_target.as_deref()
+                        && let Some(base_schema) =
+                            self.type_tracker.schema_registry().get(alias_base)
+                    {
+                        // Type-alias indirection: `runtime_type_name` may differ from
+                        // `*type_name`, but the alias resolves to a base type whose schema
+                        // is registered with concrete field types.
                         let fields = base_schema
                             .fields
                             .iter()
@@ -929,6 +957,24 @@ impl BytecodeCompiler {
                     }
                 } else if let Some(schema) = self.type_tracker.schema_registry().get(type_name) {
                     schema.id
+                } else if let Some(alias_base) = alias_target.as_deref()
+                    && let Some(base_schema) =
+                        self.type_tracker.schema_registry().get(alias_base)
+                {
+                    // Type-alias indirection at the `runtime_type_name == type_name` branch:
+                    // `let origin = P { ... }` where `type P = Point` — `runtime_type_name`
+                    // and `type_name` are both `"P"`, but only `"Point"`'s schema is
+                    // registered. Inherit its FieldTypes under the alias's name so
+                    // downstream property access stamps a concrete tag (ADR-006 §2.7.5).
+                    let fields = base_schema
+                        .fields
+                        .iter()
+                        .map(|f| (f.name.clone(), f.field_type.clone()))
+                        .collect::<Vec<_>>();
+                    let schema = TypeSchema::new(runtime_type_name.clone(), fields);
+                    let schema_id = schema.id;
+                    self.type_tracker.schema_registry_mut().register(schema);
+                    schema_id
                 } else {
                     // Fallback: register if not found (shouldn't happen for valid struct types)
                     let typed_fields: Vec<(&str, FieldType)> = expected_fields
@@ -1356,6 +1402,118 @@ mod tests {
             formatted.contains("E0100"),
             "Should use E0100 error code: {}",
             formatted
+        );
+    }
+
+    // W15.2-LANG-8 jit-toplevel-render fix regression tests (Phase 4b Round 3
+    // Surface-1c, ADR-006 §2.7.5 producer-side stamp).
+    //
+    // Pre-fix, these programs surfaced `MakeFieldRef SURFACE: field_type_tag 8
+    // (FIELD_TAG_ANY / FIELD_TAG_UNKNOWN)` from `variables/mod.rs:2501` because
+    // the producer-side emitter emitted `Operand::TypedField { field_type_tag:
+    // FIELD_TAG_ANY }` for fields whose `FieldType` was `Any` (nested object
+    // literals or unresolved type-alias schemas). Per ADR-006 §2.7.13 / Q14 the
+    // producer must stamp a concrete tag — the post-fix path skips the
+    // MakeFieldRef fast path for `FieldType::Any` fields and resolves type-alias
+    // schemas to their base type's concrete FieldTypes.
+    //
+    // Pin: VM execution must complete without surfacing the MakeFieldRef SURFACE
+    // marker for each of the three book reproducer shapes
+    // (`fundamentals/objects-arrays.mdx:113` nested-object-host,
+    //  `fundamentals/variables.mdx:207` type-alias-constructor,
+    //  plus the equivalent inner-object-literal shape that the audit's §6.8
+    //  table conflated under the `jit-toplevel-render` label).
+
+    use crate::test_utils::eval_result;
+
+    /// Reproducer 3 (`objects-arrays.mdx:113`): nested object literal whose
+    /// outer field's inferred `FieldType` is `Any`. Pre-fix, accessing
+    /// `cfg.server` via the MakeRef + MakeFieldRef + DerefLoad fast path
+    /// SURFACEd at runtime. Post-fix, falls through to `GetFieldTyped` which
+    /// sources the kind from the storage's parallel `field_kinds` track.
+    #[test]
+    fn test_w15_2_lang_8_nested_object_literal_host_field_access() {
+        // The print result is irrelevant; we only assert execution completes
+        // without the `MakeFieldRef SURFACE` marker from variables/mod.rs:2501.
+        let code = r#"
+            let cfg = {
+              server: {
+                host: "localhost",
+                port: 9091
+              }
+            }
+            print(cfg.server.host)
+        "#;
+        let result = eval_result(code);
+        assert!(
+            result.is_ok(),
+            "nested object literal field access must not SURFACE: got {:?}",
+            result.err()
+        );
+    }
+
+    /// Reproducer 4 (`variables.mdx:207`): type-alias `type P = Point` used as
+    /// a constructor `P { x: 0, y: 0 }`. Pre-fix, the struct-literal compiler
+    /// at `collections.rs:933-940` fell through to a `FieldType::Any` fallback
+    /// schema because only `Point` (not `P`) was registered. Subsequent
+    /// `origin.x` access then emitted MakeFieldRef with FIELD_TAG_ANY. Post-fix,
+    /// the alias resolves to `Point`'s schema and inherits its concrete
+    /// FieldTypes (`x: I64`), so MakeFieldRef carries FIELD_TAG_I64 and the
+    /// kind is statically sourceable.
+    #[test]
+    fn test_w15_2_lang_8_type_alias_constructor_field_access() {
+        let code = r#"
+            type Point { x: int, y: int }
+            type P = Point
+
+            let origin = P { x: 0, y: 0 }
+            print(origin.x)
+        "#;
+        let result = eval_result(code);
+        assert!(
+            result.is_ok(),
+            "type-alias constructor + field access must not SURFACE: got {:?}",
+            result.err()
+        );
+    }
+
+    /// Inner-object-literal field access alone (the inner shape of rep3 that
+    /// also occurs on its own in many `objects-arrays.mdx` paragraphs). Pre-fix
+    /// `obj.field` on an object literal whose field is itself an object
+    /// emitted a MakeFieldRef carrying FIELD_TAG_ANY. Post-fix, that fast path
+    /// is gated off for `FieldType::Any` and the GetFieldTyped fallback runs.
+    #[test]
+    fn test_w15_2_lang_8_object_literal_any_field_via_get_field_typed() {
+        let code = r#"
+            let host = { server: { name: "x" } }
+            let s = host.server
+            print(s)
+        "#;
+        let result = eval_result(code);
+        assert!(
+            result.is_ok(),
+            "object literal with Any-typed inner field must not SURFACE: got {:?}",
+            result.err()
+        );
+    }
+
+    /// Type-alias field access returns the concrete int value through the
+    /// GetFieldTyped path with a concrete FIELD_TAG_I64 stamp. The variable
+    /// name `pt` (not `origin`) avoids a `or`-keyword tokenization quirk in
+    /// the grammar that's unrelated to this fix.
+    #[test]
+    fn test_w15_2_lang_8_type_alias_constructor_field_typed_value() {
+        let code = r#"
+            type Point { x: int, y: int }
+            type P = Point
+            let pt = P { x: 42, y: 0 }
+            pt.x
+        "#;
+        let result = eval_result(code).expect("should not SURFACE");
+        assert_eq!(
+            result.as_i64(),
+            Some(42),
+            "type-alias field access must return the concrete int value"
         );
     }
 }
