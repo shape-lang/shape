@@ -1,0 +1,65 @@
+name: nightly-fuzz-differential
+
+# Differential-fuzz harness per W13 audit
+# (docs/cluster-audits/v0.3-w13-differential-fuzz-audit.md §6).
+#
+# NIGHTLY ONLY per Phase 4 test execution policy
+# (docs/cluster-audits/phase-3-team-lead-handover.md:42-47). NOT a
+# per-commit gate; NOT a merge-ceremony gate (except at audit-day batch
+# merges); NOT a release gate.
+#
+# Findings persist as GitHub Actions artifacts with 30-day retention per
+# audit §6.4 (no S3, no git-LFS, no separate artifact server).
+
+on:
+  schedule:
+    - cron: '0 4 * * *'  # 04:00 UTC nightly
+  workflow_dispatch:     # on-demand trigger
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180  # 3-hour wall-clock cap per audit §6.3
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release shape binary
+        run: cargo build --release --bin shape
+
+      - name: Build release shape-fuzz harness
+        run: cargo build --release -p shape-fuzz --bin shape-fuzz
+
+      - name: Run differential fuzz harness against full corpus
+        # Corpus lives at tools/shape-fuzz/tests/corpus/<domain>/*.shape
+        # (per W13.3 close; the audit §6.2 sample said
+        # tools/shape-fuzz/corpus/ — see W13.4 surface-and-stop note in
+        # close commit / AGENTS.md row). Recurses all 7 domains
+        # (arithmetic / collections / closures / patterns / async /
+        # generics / fallthrough = 50 seeds). At HEAD this expects
+        # EXIT=1 because the corpus carries 5 negative-class seeds
+        # (a10 / c08 / c09 / f06 + c10) per W13.3 close empirical record;
+        # `continue-on-error: true` keeps the artifact-upload step
+        # reachable so triage gets the findings.
+        continue-on-error: true
+        run: |
+          ./target/release/shape-fuzz run \
+            --corpus tools/shape-fuzz/tests/corpus \
+            --shape-bin target/release/shape \
+            --timeout-secs 30 \
+            --findings-dir tools/shape-fuzz/findings
+
+      - name: Upload findings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-findings-${{ github.run_id }}
+          path: tools/shape-fuzz/findings/
+          retention-days: 30
+          if-no-files-found: ignore
