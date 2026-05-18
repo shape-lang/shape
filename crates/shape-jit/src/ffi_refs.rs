@@ -300,6 +300,36 @@ pub struct FFIFuncRefs {
     pub(crate) pow_f64: FuncRef,
     pub(crate) pow_i64: FuncRef,
 
+    // W15.2-LANG-6 jit-math-nan-poisoning (Phase 4b Round 2, 2026-05-18):
+    // typed-f64 single-arg math FFI entry points dispatched by the JIT
+    // Call-terminator interception in `mir_compiler/terminators.rs` when
+    // the callee is a bare-math-builtin `MirConstant::Function(name)` and
+    // the arg has proven `NativeKind::Float64` (or `NativeKind::Int64`
+    // widened via Cranelift's `fcvt_from_sint`). Native f64 ABI; bodies
+    // live at `crates/shape-jit/src/ffi/v2_math.rs::jit_{sqrt,abs,...}_f64`.
+    //
+    // Per ADR-006 §2.7.5 stamp-at-compile-time: the arg kind is the
+    // producing-site discriminator; no NaN-box decode at the FFI boundary,
+    // no Bool-default fallback. Fixes the symmetric defect of
+    // W12-enum-constructor-mir-lowering / W12-collection-constructor-mir-
+    // lowering — bare-name builtin leaks as `MirConstant::Function(name)`
+    // into MIR which the JIT cannot resolve through `function_indices`,
+    // so the pre-fix indirect-call path returned `TAG_NULL` (NaN-tagged
+    // null bits) which the F64 caller-side decode interpreted as `NaN`.
+    pub(crate) sqrt_f64: FuncRef,
+    pub(crate) abs_f64: FuncRef,
+    pub(crate) floor_f64: FuncRef,
+    pub(crate) ceil_f64: FuncRef,
+    pub(crate) round_f64: FuncRef,
+    pub(crate) sin_f64: FuncRef,
+    pub(crate) cos_f64: FuncRef,
+    pub(crate) tan_f64: FuncRef,
+    pub(crate) asin_f64: FuncRef,
+    pub(crate) acos_f64: FuncRef,
+    pub(crate) atan_f64: FuncRef,
+    pub(crate) exp_f64: FuncRef,
+    pub(crate) ln_f64: FuncRef,
+
     // ADR-006 §2.7.5 — kinded EnumStore producers
     // (W12-jit-aggregate-non-array, 2026-05-12). Three entry points
     // matching the VM-side `BuiltinFunction::OkCtor` / `ErrCtor` /

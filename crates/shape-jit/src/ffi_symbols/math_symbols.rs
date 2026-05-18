@@ -19,6 +19,22 @@ use super::super::ffi::math::{
 // pre-existing-but-unregistered helper at `ffi/v2_math.rs:302`;
 // `jit_pow_i64` is new (this sub-cluster, `ffi/v2_math.rs::jit_pow_i64`).
 use super::super::ffi::v2_math::{jit_pow_f64, jit_pow_i64};
+// W15.2-LANG-6 jit-math-nan-poisoning (Phase 4b Round 2, 2026-05-18):
+// typed-f64 single-arg math FFI helpers for the JIT MIR-lowering path's
+// `MirConstant::Function(<math-builtin>)` Call-terminator interception.
+// Each takes/returns native f64 (no NaN-box). Bodies live at
+// `crates/shape-jit/src/ffi/v2_math.rs::jit_{sqrt,abs,floor,ceil,round,
+// sin,cos,tan,asin,acos,atan,exp,ln}_f64`. The bytecode VM emits
+// `OpCode::BuiltinCall(Sqrt|Abs|...)` for these names, but MIR lowering
+// at `crates/shape-vm/src/mir/lowering/expr.rs:2003` leaks them as
+// `MirConstant::Function(name)` — the JIT must intercept by name at the
+// Call terminator and route to these typed FFI bodies (ADR-006 §2.7.5
+// stamp-at-compile-time: the arg's `NativeKind::Float64` is the
+// producing-site discriminator; no kind-blind fallback per §2.7.7 #9).
+use super::super::ffi::v2_math::{
+    jit_abs_f64, jit_acos_f64, jit_asin_f64, jit_atan_f64, jit_ceil_f64, jit_cos_f64, jit_exp_f64,
+    jit_floor_f64, jit_ln_f64, jit_round_f64, jit_sin_f64, jit_sqrt_f64, jit_tan_f64,
+};
 use super::intrinsics::{
     jit_intrinsic_correlation, jit_intrinsic_covariance, jit_intrinsic_max, jit_intrinsic_mean,
     jit_intrinsic_median, jit_intrinsic_min, jit_intrinsic_percentile, jit_intrinsic_std,
@@ -46,6 +62,26 @@ pub fn register_math_symbols(builder: &mut JITBuilder) {
     // the NaN-boxed `jit_pow` above).
     builder.symbol("jit_pow_f64", jit_pow_f64 as *const u8);
     builder.symbol("jit_pow_i64", jit_pow_i64 as *const u8);
+
+    // W15.2-LANG-6 jit-math-nan-poisoning typed-f64 single-arg math
+    // helpers (Phase 4b Round 2, 2026-05-18). Distinct from the NaN-boxed
+    // `jit_sin` / `jit_cos` / `jit_tan` / `jit_asin` / `jit_acos` /
+    // `jit_atan` / `jit_exp` / `jit_ln` registrations above which take
+    // and return u64 NaN-boxed bits; these take native f64 and return
+    // native f64.
+    builder.symbol("jit_sqrt_f64", jit_sqrt_f64 as *const u8);
+    builder.symbol("jit_abs_f64", jit_abs_f64 as *const u8);
+    builder.symbol("jit_floor_f64", jit_floor_f64 as *const u8);
+    builder.symbol("jit_ceil_f64", jit_ceil_f64 as *const u8);
+    builder.symbol("jit_round_f64", jit_round_f64 as *const u8);
+    builder.symbol("jit_sin_f64", jit_sin_f64 as *const u8);
+    builder.symbol("jit_cos_f64", jit_cos_f64 as *const u8);
+    builder.symbol("jit_tan_f64", jit_tan_f64 as *const u8);
+    builder.symbol("jit_asin_f64", jit_asin_f64 as *const u8);
+    builder.symbol("jit_acos_f64", jit_acos_f64 as *const u8);
+    builder.symbol("jit_atan_f64", jit_atan_f64 as *const u8);
+    builder.symbol("jit_exp_f64", jit_exp_f64 as *const u8);
+    builder.symbol("jit_ln_f64", jit_ln_f64 as *const u8);
 
     // R7.1: the 11 `jit_generic_*` dispatch-fallback trampolines were
     // removed together with their `FFIFuncRefs` fields and Cranelift
@@ -183,6 +219,38 @@ pub fn declare_math_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<St
             .declare_function("jit_pow_i64", Linkage::Import, &sig)
             .expect("Failed to declare jit_pow_i64");
         ffi_funcs.insert("jit_pow_i64".to_string(), func_id);
+    }
+
+    // W15.2-LANG-6 jit-math-nan-poisoning (Phase 4b Round 2, 2026-05-18):
+    // typed-f64 single-arg math FFI signatures for the JIT Call-terminator
+    // interception of `MirConstant::Function("sqrt"|"abs"|...)`. Native
+    // f64 ABI: `extern "C" fn(f64) -> f64`. Bodies at
+    // `ffi/v2_math.rs::jit_{sqrt,abs,...}_f64`. Distinct from the NaN-boxed
+    // `jit_sin` / `jit_cos` / `jit_tan` / `jit_asin` / `jit_acos` /
+    // `jit_atan` / `jit_exp` / `jit_ln` signatures registered above
+    // (single I64 param / I64 return) which the MIR consumer does not call.
+    for name in [
+        "jit_sqrt_f64",
+        "jit_abs_f64",
+        "jit_floor_f64",
+        "jit_ceil_f64",
+        "jit_round_f64",
+        "jit_sin_f64",
+        "jit_cos_f64",
+        "jit_tan_f64",
+        "jit_asin_f64",
+        "jit_acos_f64",
+        "jit_atan_f64",
+        "jit_exp_f64",
+        "jit_ln_f64",
+    ] {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::F64));
+        sig.returns.push(AbiParam::new(types::F64));
+        let func_id = module
+            .declare_function(name, Linkage::Import, &sig)
+            .unwrap_or_else(|_| panic!("Failed to declare {}", name));
+        ffi_funcs.insert(name.to_string(), func_id);
     }
 
     // R7.1: Generic binary op declarations (11 `jit_generic_*` names) were
