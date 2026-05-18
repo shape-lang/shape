@@ -619,13 +619,26 @@ pub fn declare_object_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<
         ffi_funcs.insert("jit_to_number".to_string(), func_id);
     }
 
-    // F5.a/F5.b: jit_string_concat(a_bits: u64, b_bits: u64) -> u64
-    // Signature matches the two-operand MIR BinaryOp::Add lowering for
-    // string slots. Result is a fresh unified-heap string (refcount 1).
+    // W15.2-LANG-7 jit-print-fstring close (Phase 4b Round 3, 2026-05-18):
+    // jit_string_concat(a_bits: u64, a_kind_code: u8, b_bits: u64,
+    //                   b_kind_code: u8) -> u64
+    // Signature matches the kind-aware MIR BinaryOp::Add lowering for
+    // string slots per ADR-006 §2.7.5/§2.7.7 producer-side stamp. Kind
+    // codes are the parallel-track encoding at
+    // `crates/shape-jit/src/ffi/stack_kind_code.rs` (one byte per
+    // operand). Result is a fresh `Arc<String>` carrier
+    // (`Arc::into_raw(Arc::new(out)) as u64`, refcount 1) — the §2.7.5
+    // String carrier shape matching every downstream consumer
+    // (`jit_print_str`, `arc_string_retain`/`_release`, `KindedSlot::Drop`
+    // for `NativeKind::String`). Pre-fix the FFI returned a NaN-boxed
+    // `box_string(out)` — wrong carrier shape; consumers segfaulted on
+    // the next `Arc::from_raw`-shape decode (W15.1 audit §6.7 surface).
     {
         let mut sig = module.make_signature();
         sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I8));
         sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I8));
         sig.returns.push(AbiParam::new(types::I64));
         let func_id = module
             .declare_function("jit_string_concat", Linkage::Import, &sig)

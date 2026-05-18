@@ -36,7 +36,20 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // falling back to `format_value_word` on non-string operands,
                 // which matches the lowering emitted by f-string interpolation.
                 if matches!(op, BinOp::Add) && self.either_string(lhs_kind, rhs_kind) {
-                    return self.compile_string_concat(l, r);
+                    // W15.2-LANG-7 jit-print-fstring close (Phase 4b Round 3,
+                    // 2026-05-18). ADR-006 §2.7.5/§2.7.7 producer-side stamp:
+                    // pass operand kind codes alongside their raw bits so the
+                    // `jit_string_concat` FFI body dispatches per the
+                    // producer-stamped kind, not a runtime tag probe.
+                    // `operand_slot_kind` returns `Some(_)` by construction
+                    // here — `either_string` already matched a `Some(String)`
+                    // on at least one side, and the MIR f-string lowering's
+                    // expression-part path produces typed-temp slots whose
+                    // kind `infer_slot_kinds` stamps from the constant /
+                    // BinaryOp shape. The `unwrap_or` SENTINEL falls through
+                    // to the FFI body's §2.7.7 #9 surface-and-stop arm for
+                    // the rare unproven case.
+                    return self.compile_string_concat(l, lhs_kind, r, rhs_kind);
                 }
 
                 if l_type == types::F64 && r_type == types::F64 {
@@ -530,21 +543,44 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             || matches!(rhs, Some(shape_vm::type_tracking::NativeKind::String))
     }
 
-    /// F5.a/F5.b: emit a call to `jit_string_concat(a_bits, b_bits) -> bits`.
+    /// W15.2-LANG-7 jit-print-fstring close (Phase 4b Round 3, 2026-05-18):
+    /// emit a call to the kind-aware
+    /// `jit_string_concat(a_bits, a_kind_code, b_bits, b_kind_code) -> bits`
+    /// FFI per ADR-006 §2.7.5/§2.7.7 producer-side stamp.
     ///
-    /// Both operand `Value`s must be widened to I64 bit-patterns (the FFI
-    /// signature expects two `i64` params). This handles the cases where the
-    /// MIR lowering produced a native-typed constant for one side — e.g.
-    /// `f"x={n}"` where `n: int` is `NativeKind::Int64` (I64 bits already) or
-    /// a plain number constant (F64, must bitcast to I64).
+    /// Both operand `Value`s are widened to I64 bit-patterns (the FFI
+    /// signature expects `(I64, I8, I64, I8) -> I64`). The kind bytes are
+    /// stamped at JIT-compile time from `operand_slot_kind` per the
+    /// `compile_rvalue` call-site contract above; SENTINEL falls through to
+    /// the FFI body's §2.7.7 #9 surface-and-stop arm for unstamped operands.
+    ///
+    /// The result bits carry the §2.7.5 `NativeKind::String` carrier shape
+    /// (`Arc::into_raw(Arc<String>) as u64`) — the same shape every
+    /// downstream consumer reads (`jit_print_str`, `arc_string_retain`/
+    /// `_release`, `KindedSlot::Drop` for `NativeKind::String`). Pre-fix
+    /// the FFI returned a NaN-boxed `box_string(out)` whose bit-shape did
+    /// not match the consumer-side String carrier; the consumer's
+    /// `Arc::from_raw`-shape decode dereferenced a NaN bit-pattern as a
+    /// `String` struct → garbage memory bytes printed (W15.1 audit §6.7
+    /// surface).
     fn compile_string_concat(
         &mut self,
         lhs: Value,
+        lhs_kind: Option<shape_vm::type_tracking::NativeKind>,
         rhs: Value,
+        rhs_kind: Option<shape_vm::type_tracking::NativeKind>,
     ) -> Result<Value, String> {
+        use crate::ffi::stack_kind_code;
         let a = self.to_i64_bits(lhs);
         let b = self.to_i64_bits(rhs);
-        let inst = self.builder.ins().call(self.ffi.string_concat, &[a, b]);
+        let a_code = lhs_kind.map(stack_kind_code::encode).unwrap_or(stack_kind_code::SENTINEL);
+        let b_code = rhs_kind.map(stack_kind_code::encode).unwrap_or(stack_kind_code::SENTINEL);
+        let a_code_val = self.builder.ins().iconst(types::I8, a_code as i64);
+        let b_code_val = self.builder.ins().iconst(types::I8, b_code as i64);
+        let inst = self.builder.ins().call(
+            self.ffi.string_concat,
+            &[a, a_code_val, b, b_code_val],
+        );
         Ok(self.builder.inst_results(inst)[0])
     }
 

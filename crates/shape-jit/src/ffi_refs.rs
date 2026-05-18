@@ -282,12 +282,16 @@ pub struct FFIFuncRefs {
     pub(crate) v2_array_add_f64: FuncRef,
     pub(crate) v2_array_mul_f64: FuncRef,
 
-    // F5.a/F5.b: string `+` lowering.
-    //   `string_concat` — takes two NaN-boxed string operands (`u64`) and
-    //   returns a fresh unified-heap string (`u64`). Called from
-    //   `mir_compiler::rvalues::compile_rvalue` when both operand slots
-    //   carry `NativeKind::String` under `BinOp::Add`. Covers the desugared
-    //   chain emitted by `f"..."` formatted strings as well.
+    // F5.a/F5.b + W15.2-LANG-7 close: string `+` lowering.
+    //   `string_concat` — `(a_bits: u64, a_kind_code: u8, b_bits: u64,
+    //   b_kind_code: u8) -> u64`. Kind codes carry the ADR-006 §2.7.5/§2.7.7
+    //   producer-side stamp per `crates/shape-jit/src/ffi/stack_kind_code.rs`.
+    //   Returns a fresh `Arc<String>` carrier (`Arc::into_raw(Arc::new(out))
+    //   as u64`) — the §2.7.5 `NativeKind::String` carrier shape every
+    //   downstream consumer reads. Called from `mir_compiler::rvalues::
+    //   compile_rvalue` when either operand slot carries `NativeKind::
+    //   String` under `BinOp::Add`. Covers the desugared chain emitted by
+    //   `f"..."` formatted strings as well.
     pub(crate) string_concat: FuncRef,
 
     // W11-fup-A (Phase 3d, 2026-05-18): typed-pow entry points for the
