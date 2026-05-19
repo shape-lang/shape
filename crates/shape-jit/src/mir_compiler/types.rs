@@ -364,6 +364,18 @@ pub(crate) fn infer_slot_kinds_with_concrete(
                             // exactly, and extends classification for
                             // methods whose return kind genuinely
                             // depends on the receiver shape.
+                            //
+                            // The receiver-in-pass-kinds fallback
+                            // (`method_return_kind_from_in_pass_kinds`) is
+                            // NOT consulted here because at this point in
+                            // the pass the EnumStore-driven kind seeds (line
+                            // ~582) have not been applied — bare-form
+                            // collection ctors like `HashMap()` are still
+                            // unclassified. The chain-temp fallback runs in
+                            // a SECOND fixpoint-iterated call-stamp pass
+                            // BELOW (line ~692, after the forward pass) per
+                            // Phase 4b Round 5c-2-α HashMap-has-2-chain
+                            // ratify 2026-05-19.
                             well_known_method_return_kind(name).or_else(|| {
                                 parametric_method_return_kind_from_receiver(
                                     name,
@@ -648,6 +660,54 @@ pub(crate) fn infer_slot_kinds_with_concrete(
                 | NativeKind::Ptr(HeapKind::Lazy)
         )
     }
+    // Phase 4b Round 5c-2-α HashMap-has-2-chain VM/JIT divergence fix
+    // (v0.3-gating SOUNDNESS BUG ratified 2026-05-19). Unified fixpoint
+    // pass covering both (a) the existing collection-alias propagation
+    // (`let t = s` re-bindings through `Assign(_, Use(Copy/Move))`) and
+    // (b) the NEW chain-temp call-terminator stamping for HashMap
+    // mutators (`set` / `delete` / `merge`) returning self.
+    //
+    // Both stamping rules need to be at the same fixpoint level because
+    // chain-temp patterns interleave: `HashMap().set(...).set(...)` has
+    // each `.set` call's destination temp aliased into a downstream
+    // `let m = ...; m.set(...)` rebind which depends on the alias
+    // propagation, AND each `.set` call's destination kind depends on
+    // its receiver's in-pass `kinds[]` which is the alias-propagated
+    // value from the previous chain link.
+    //
+    // Empirical pre-fix at HEAD 7eb82205: `HashMap().set("a",1).has("a")`
+    // already diverged (VM=true / JIT=false) at the 1-chain length
+    // because:
+    //   1. The EnumStore arm stamps temp_HashMap_ctor's slot as
+    //      `Ptr(HeapKind::HashMap)`.
+    //   2. The call `temp_set = temp_HashMap_ctor.set("a", 1)` has no
+    //      kind classifier entry for `set`, so temp_set stayed None.
+    //   3. The MIR copy `m = temp_set` then needs collection-alias-
+    //      propagation to inherit temp_set's kind — but temp_set has
+    //      no kind, so `m` also stays None.
+    //   4. The next call `temp_has = m.has("a")` pushes `m` as receiver
+    //      with kind None → fallback to `UInt64` carrier at the
+    //      `operand_slot_kind_or_carrier` site →
+    //      `jit_call_method` shell's delegation predicate routes to
+    //      legacy JIT-format dispatch which doesn't recognize
+    //      `Arc::into_raw(Arc<HashMapKindedRef>)` bits → TAG_NULL.
+    //   5. The destination kind for `temp_has` is correctly Bool (from
+    //      `well_known_method_return_kind("has")`), so TAG_NULL bits
+    //      under a Bool consumer renders `false`.
+    //
+    // Post-fix: the unified fixpoint propagates `Ptr(HeapKind::HashMap)`
+    // through each chain link, routing the final `.has()` call's
+    // receiver through `jit_trampoline_call_method` per §2.7.10 / Q11
+    // dispatch to the VM's `HASHMAP_METHODS.get("has") => v2_has`
+    // handler.
+    //
+    // Per ADR-006 §2.7.5 producer-side stamp. The HashMap-mutator
+    // classifier reads the VM-side handler signatures:
+    // `hashmap_methods::v2_set` at line 789 returns
+    // `KindedSlot::from_hashmap(...)`; `v2_delete` at 1235 and
+    // `v2_merge` at 1469 do likewise. VM producer-stamp and JIT
+    // consumer-classify converge on the same `Ptr(HeapKind::HashMap)`
+    // kind without any cross-layer translation step.
     let mut changed = true;
     let mut iterations = 0;
     let max_iterations = n + 4; // safety bound
@@ -655,6 +715,9 @@ pub(crate) fn infer_slot_kinds_with_concrete(
         changed = false;
         iterations += 1;
         for block in &mir.blocks {
+            // (a) Collection-alias propagation through `let t = s` /
+            // `let u = t` re-bindings — preserves the existing
+            // behavior (was a standalone loop pre-Round-5c-2-α).
             for stmt in &block.statements {
                 if let StatementKind::Assign(
                     Place::Local(dst),
@@ -679,6 +742,37 @@ pub(crate) fn infer_slot_kinds_with_concrete(
                                     changed = true;
                                 }
                             }
+                        }
+                    }
+                }
+            }
+            // (b) Chain-temp call-terminator stamping for HashMap
+            // mutators — NEW in Round 5c-2-α. Consults the in-pass
+            // `kinds[]` for the receiver's NativeKind via
+            // `method_return_kind_from_in_pass_kinds`, which the first
+            // call-stamp pass at line ~331 doesn't have access to
+            // (`concrete_types` doesn't carry the chain-temp shape).
+            if let TerminatorKind::Call {
+                func,
+                args,
+                destination,
+                ..
+            } = &block.terminator.kind
+            {
+                if let Place::Local(slot) = destination {
+                    let idx = slot.0 as usize;
+                    if idx < n && kinds[idx].is_none() {
+                        let ret_kind = match func {
+                            Operand::Constant(MirConstant::Method(name)) => {
+                                method_return_kind_from_in_pass_kinds(
+                                    name, args, &kinds,
+                                )
+                            }
+                            _ => None,
+                        };
+                        if let Some(k) = ret_kind {
+                            kinds[idx] = Some(k);
+                            changed = true;
                         }
                     }
                 }
@@ -1019,6 +1113,35 @@ fn parametric_method_return_kind_from_receiver(
         // Carrier kind is `Ptr(HeapKind::Option)`; the inner V flows
         // through EnumPayload at the destructure site.
         ("get", ConcreteType::HashMap(_, _)) => Some(NativeKind::Ptr(HeapKind::Option)),
+        // ── HashMap.set / .delete / .merge ─────────────────────────
+        // Phase 4b Round 5c-2-α HashMap-has-2-chain VM/JIT divergence
+        // fix (v0.3-gating SOUNDNESS BUG ratified 2026-05-19). Per
+        // ADR-006 §2.7.5 producer-side stamp, the VM-side handlers
+        // (`hashmap_methods::v2_set` at line 789, `v2_delete` at 1235,
+        // `v2_merge` at 1469) all return
+        // `KindedSlot::from_hashmap(...)` — carrier kind
+        // `Ptr(HeapKind::HashMap)`. Pre-fix the JIT call-terminator
+        // stamping loop (`infer_slot_kinds_with_concrete` ~331) had no
+        // entry for these mutators, so the chained-set destination
+        // slot's kind stayed `None` → fell back to `UInt64` carrier in
+        // `operand_slot_kind_or_carrier` at the next call's receiver
+        // push → `jit_call_method` shell's delegation predicate (line
+        // 665 `NativeKind::UInt64 => false`) routed to legacy JIT-
+        // format dispatch → `read_heap_kind` on `Arc::into_raw(Arc<
+        // HashMapKindedRef>)` bits returned garbage → dispatch fell
+        // into `_ => TAG_NULL` (line 878) → `try_call_user_method`
+        // declined → final TAG_NULL bits interpreted as Bool=false by
+        // the destination `kinds[idx]=Some(Bool)` (from
+        // `well_known_method_return_kind("has")`). Empirical
+        // reproducer at HEAD 7eb82205: `HashMap().set("a",1)
+        // .set("b",2).has("a")` was VM=true / JIT=false. Post-fix:
+        // each mutator stamps the destination slot
+        // `Ptr(HeapKind::HashMap)`, so the next `.set` or `.has`
+        // receiver kind is the right Ptr arm and `jit_call_method`
+        // delegates to VM through the §2.7.10 / Q11 path.
+        ("set" | "delete" | "merge", ConcreteType::HashMap(_, _)) => {
+            Some(NativeKind::Ptr(HeapKind::HashMap))
+        }
         // ── Mutex.get ──────────────────────────────────────────────
         // `Mutex<T>.get() → T` per §2.7.25. The VM-side
         // `executor/objects/mutex_methods::v2_get` clones the inner
@@ -1039,6 +1162,63 @@ fn parametric_method_return_kind_from_receiver(
         // `KindedSlot::value` payload is cloned from `LazyInner.value`
         // after first-init; same receiver-recovery shape as Mutex.
         ("get", ConcreteType::Lazy(inner)) => native_kind_from_concrete_type(inner),
+        _ => None,
+    }
+}
+
+/// Phase 4b Round 5c-2-α HashMap-has-2-chain VM/JIT divergence fix
+/// (v0.3-gating SOUNDNESS BUG ratified 2026-05-19).
+///
+/// ADR-006 §2.7.5 producer-side stamp companion of
+/// `parametric_method_return_kind_from_receiver` for the case where the
+/// receiver slot's `ConcreteType` is `Void` (no bytecode-compiler
+/// concrete-type seed) but the in-pass `kinds[]` track has already
+/// classified the receiver's `NativeKind` from an upstream source.
+///
+/// Load-bearing for chained collection-mutator patterns like
+/// `HashMap().set("a",1).set("b",2).has("a")`: the bare-form `HashMap()`
+/// ctor receiver gets `Ptr(HeapKind::HashMap)` from the `EnumStore` arm
+/// (`types.rs` ~559), but the next `.set(...)` call's destination slot
+/// has no ConcreteType entry (the bytecode compiler's concrete-type
+/// inference doesn't propagate through method-call return types). With
+/// only the ConcreteType-keyed classifier, the chain temp's kind stays
+/// `None` → next `.set` / `.has` receiver kind falls back to `UInt64`
+/// carrier → `jit_call_method` shell's delegation predicate routes to
+/// legacy JIT-format dispatch which doesn't recognize the
+/// `Arc::into_raw(Arc<HashMapKindedRef>)` bits → silent TAG_NULL →
+/// downstream Bool-kind consumer renders `false`.
+///
+/// This helper reads the receiver's NativeKind directly from `kinds[]`
+/// and classifies HashMap mutator returns (`set` / `delete` / `merge`)
+/// — each VM-side handler returns `KindedSlot::from_hashmap(...)` per
+/// `hashmap_methods.rs` (v2_set at 789, v2_delete at 1235, v2_merge at
+/// 1469). Per §2.7.5: the receiver's `Ptr(HeapKind::HashMap)` kind IS
+/// the proof the result is also `Ptr(HeapKind::HashMap)`.
+///
+/// The companion call-stamp loop in `infer_slot_kinds_with_concrete`
+/// runs iteratively until fixpoint (mirrors the existing collection-
+/// alias propagation pattern at line 651-687) so chain temps propagate
+/// from the EnumStore-stamped ctor receiver through arbitrary chain
+/// depth.
+fn method_return_kind_from_in_pass_kinds(
+    name: &str,
+    args: &[Operand],
+    kinds: &[Option<NativeKind>],
+) -> Option<NativeKind> {
+    use shape_value::heap_value::HeapKind;
+    let receiver = args.first()?;
+    let receiver_slot = match receiver {
+        Operand::Copy(p) | Operand::Move(p) | Operand::MoveExplicit(p) => p.root_local(),
+        Operand::Constant(_) => return None,
+    };
+    let receiver_kind = kinds.get(receiver_slot.0 as usize).and_then(|k| *k)?;
+    match (name, receiver_kind) {
+        // HashMap mutators returning self for chaining. See
+        // `parametric_method_return_kind_from_receiver` "HashMap.set /
+        // .delete / .merge" arm for the VM-side handler citations.
+        ("set" | "delete" | "merge", NativeKind::Ptr(HeapKind::HashMap)) => {
+            Some(NativeKind::Ptr(HeapKind::HashMap))
+        }
         _ => None,
     }
 }
@@ -2100,6 +2280,267 @@ mod tests {
             kinds[1],
             Some(NativeKind::Int64),
             ".sum() on Array<int> should stamp Int64 on the destination slot"
+        );
+    }
+
+    // ── Phase 4b Round 5c-2-α HashMap-has-2-chain regression tests ────
+    //
+    // v0.3-gating SOUNDNESS BUG ratified 2026-05-19. Empirical pre-fix
+    // at HEAD 7eb82205: `HashMap().set("a",1).set("b",2).has("a")`
+    // returned VM=true / JIT=false. Root cause:
+    // `parametric_method_return_kind_from_receiver` had no entry for
+    // HashMap mutators (`set` / `delete` / `merge`) returning self, so
+    // chain temps' kinds stayed None → fell back to `UInt64` carrier
+    // → `jit_call_method` shell routed to legacy JIT-format dispatch
+    // → `read_heap_kind` on `Arc::into_raw(Arc<HashMapKindedRef>)`
+    // bits returned garbage → TAG_NULL → Bool-kind consumer rendered
+    // `false`.
+    //
+    // Post-fix: two stamp sites — (a) the existing
+    // `parametric_method_return_kind_from_receiver` classifier gains
+    // HashMap mutator arms keyed on `ConcreteType::HashMap(_, _)`;
+    // (b) the new `method_return_kind_from_in_pass_kinds` classifier
+    // reads the receiver's NativeKind from the in-pass `kinds[]` track
+    // (load-bearing for the bare-`HashMap()` ctor case where
+    // `concrete_types` is Void but the EnumStore arm has stamped
+    // `Ptr(HeapKind::HashMap)` in `kinds[]`); the call-stamp loop is
+    // unified with the collection-alias-propagation fixpoint so
+    // chain-temps converge through arbitrary depth.
+
+    #[test]
+    fn parametric_hashmap_set_returns_hashmap_carrier() {
+        // HashMap.set(k, v) → HashMap (chainable). The VM-side
+        // `hashmap_methods::v2_set` at line 789 returns
+        // `KindedSlot::from_hashmap(...)`. Per ADR-006 §2.7.5
+        // producer-side stamp: the destination slot's kind is
+        // `Ptr(HeapKind::HashMap)`.
+        let cts = vec![ConcreteType::HashMap(
+            Box::new(ConcreteType::String),
+            Box::new(ConcreteType::I64),
+        )];
+        let kind =
+            parametric_method_return_kind_from_receiver("set", &[copy_local(0)], &cts);
+        assert_eq!(kind, Some(NativeKind::Ptr(HeapKind::HashMap)));
+    }
+
+    #[test]
+    fn parametric_hashmap_delete_returns_hashmap_carrier() {
+        // HashMap.delete(k) → HashMap (chainable). The VM-side
+        // `hashmap_methods::v2_delete` at line 1235 returns
+        // `KindedSlot::from_hashmap(...)`.
+        let cts = vec![ConcreteType::HashMap(
+            Box::new(ConcreteType::String),
+            Box::new(ConcreteType::I64),
+        )];
+        let kind =
+            parametric_method_return_kind_from_receiver("delete", &[copy_local(0)], &cts);
+        assert_eq!(kind, Some(NativeKind::Ptr(HeapKind::HashMap)));
+    }
+
+    #[test]
+    fn parametric_hashmap_merge_returns_hashmap_carrier() {
+        // HashMap.merge(other) → HashMap. The VM-side
+        // `hashmap_methods::v2_merge` at line 1469 returns
+        // `KindedSlot::from_hashmap(...)`.
+        let cts = vec![ConcreteType::HashMap(
+            Box::new(ConcreteType::String),
+            Box::new(ConcreteType::I64),
+        )];
+        let kind =
+            parametric_method_return_kind_from_receiver("merge", &[copy_local(0)], &cts);
+        assert_eq!(kind, Some(NativeKind::Ptr(HeapKind::HashMap)));
+    }
+
+    #[test]
+    fn in_pass_kinds_classifier_stamps_hashmap_mutators_from_kinds_track() {
+        // The bare-form `HashMap()` ctor case: `concrete_types` carries
+        // Void (the bytecode compiler's concrete-type inference doesn't
+        // synthesize `ConcreteType::HashMap(_, _)` for the bare ctor —
+        // the EnumStore arm in `infer_slot_kinds_with_concrete` stamps
+        // `Ptr(HeapKind::HashMap)` into `kinds[]` instead). The new
+        // `method_return_kind_from_in_pass_kinds` classifier reads the
+        // receiver kind directly from `kinds[]` so chain temps following
+        // a bare ctor still classify correctly.
+        let kinds = vec![Some(NativeKind::Ptr(HeapKind::HashMap)), None, None];
+        let kind = method_return_kind_from_in_pass_kinds(
+            "set",
+            &[copy_local(0)],
+            &kinds,
+        );
+        assert_eq!(kind, Some(NativeKind::Ptr(HeapKind::HashMap)));
+
+        let kind = method_return_kind_from_in_pass_kinds(
+            "delete",
+            &[copy_local(0)],
+            &kinds,
+        );
+        assert_eq!(kind, Some(NativeKind::Ptr(HeapKind::HashMap)));
+
+        let kind = method_return_kind_from_in_pass_kinds(
+            "merge",
+            &[copy_local(0)],
+            &kinds,
+        );
+        assert_eq!(kind, Some(NativeKind::Ptr(HeapKind::HashMap)));
+    }
+
+    #[test]
+    fn in_pass_kinds_classifier_returns_none_for_non_hashmap_receivers() {
+        // Non-HashMap receivers must return None — no fabricated default
+        // per §2.7.7 #9. Pins the cohort: only HashMap mutators returning
+        // self are classified by this helper. Array.push, Vec.push, etc.
+        // are NOT classified here (their carrier shape differs; broader
+        // scope per dispatch supervisor disposition).
+        let kinds = vec![Some(NativeKind::Ptr(HeapKind::TypedArray)), None];
+        let kind =
+            method_return_kind_from_in_pass_kinds("set", &[copy_local(0)], &kinds);
+        assert_eq!(kind, None, "Non-HashMap receiver must not be classified");
+
+        let kinds = vec![Some(NativeKind::Int64), None];
+        let kind =
+            method_return_kind_from_in_pass_kinds("set", &[copy_local(0)], &kinds);
+        assert_eq!(kind, None, "Scalar receiver must not be classified");
+
+        // Unknown method on HashMap receiver — return None.
+        let kinds = vec![Some(NativeKind::Ptr(HeapKind::HashMap)), None];
+        let kind = method_return_kind_from_in_pass_kinds(
+            "unknown_method",
+            &[copy_local(0)],
+            &kinds,
+        );
+        assert_eq!(kind, None, "Unknown method must not be classified");
+    }
+
+    #[test]
+    fn hashmap_chain_propagates_kind_through_call_stamp_fixpoint() {
+        // Integration test for the load-bearing chain pattern:
+        //   temp0 = HashMap()       (EnumStore → Ptr(HashMap) in kinds[])
+        //   temp1 = temp0.set(...)  (call-stamp fixpoint → Ptr(HashMap))
+        //   temp2 = temp1.set(...)  (call-stamp fixpoint → Ptr(HashMap))
+        //   temp3 = temp2.has(...)  (well_known → Bool)
+        //
+        // Pre-fix: temp1/temp2 stayed None (no classifier entry for
+        // `set`), causing the `.has` receiver-kind dispatch to surface
+        // the divergence. Post-fix: each chain link's destination slot
+        // is stamped `Ptr(HeapKind::HashMap)` and the .has dispatch
+        // routes through `jit_trampoline_call_method` correctly.
+        let mir = MirFunction {
+            name: "hashmap_chain".to_string(),
+            blocks: vec![
+                BasicBlock {
+                    id: BasicBlockId(0),
+                    statements: vec![
+                        // temp0 = HashMap() — EnumStore arm stamps
+                        // Ptr(HashMap) in the forward pass.
+                        MirStatement {
+                            kind: StatementKind::Assign(
+                                Place::Local(SlotId(0)),
+                                Rvalue::Aggregate(vec![]),
+                            ),
+                            span: shape_ast::Span::default(),
+                            point: Point(0),
+                        },
+                        MirStatement {
+                            kind: StatementKind::EnumStore {
+                                container_slot: SlotId(0),
+                                operands: vec![],
+                                variant_name: Some("HashMap".to_string()),
+                            },
+                            span: shape_ast::Span::default(),
+                            point: Point(1),
+                        },
+                    ],
+                    terminator: Terminator {
+                        kind: TerminatorKind::Call {
+                            func: Operand::Constant(MirConstant::Method(
+                                "set".to_string(),
+                            )),
+                            args: vec![
+                                copy_local(0),
+                                Operand::Constant(MirConstant::Str("a".to_string())),
+                                Operand::Constant(MirConstant::Int(1)),
+                            ],
+                            destination: Place::Local(SlotId(1)),
+                            next: BasicBlockId(1),
+                        },
+                        span: shape_ast::Span::default(),
+                    },
+                },
+                BasicBlock {
+                    id: BasicBlockId(1),
+                    statements: vec![],
+                    terminator: Terminator {
+                        kind: TerminatorKind::Call {
+                            func: Operand::Constant(MirConstant::Method(
+                                "set".to_string(),
+                            )),
+                            args: vec![
+                                copy_local(1),
+                                Operand::Constant(MirConstant::Str("b".to_string())),
+                                Operand::Constant(MirConstant::Int(2)),
+                            ],
+                            destination: Place::Local(SlotId(2)),
+                            next: BasicBlockId(2),
+                        },
+                        span: shape_ast::Span::default(),
+                    },
+                },
+                BasicBlock {
+                    id: BasicBlockId(2),
+                    statements: vec![],
+                    terminator: Terminator {
+                        kind: TerminatorKind::Call {
+                            func: Operand::Constant(MirConstant::Method(
+                                "has".to_string(),
+                            )),
+                            args: vec![
+                                copy_local(2),
+                                Operand::Constant(MirConstant::Str("a".to_string())),
+                            ],
+                            destination: Place::Local(SlotId(3)),
+                            next: BasicBlockId(2),
+                        },
+                        span: shape_ast::Span::default(),
+                    },
+                },
+            ],
+            num_locals: 4,
+            param_slots: vec![],
+            param_reference_kinds: vec![],
+            local_types: vec![],
+            span: shape_ast::Span::default(),
+            field_name_table: Default::default(),
+            local_struct_type_names: Default::default(),
+            local_typed_array_element_types: Default::default(),
+        };
+        // No ConcreteType seeds — every slot is Void, mirroring the
+        // bare-`HashMap()` ctor pattern.
+        let concrete_types = vec![
+            ConcreteType::Void,
+            ConcreteType::Void,
+            ConcreteType::Void,
+            ConcreteType::Void,
+        ];
+        let kinds = infer_slot_kinds_with_concrete(&mir, &[], &concrete_types);
+        assert_eq!(
+            kinds[0],
+            Some(NativeKind::Ptr(HeapKind::HashMap)),
+            "temp0 (HashMap() ctor) must be classified via EnumStore arm"
+        );
+        assert_eq!(
+            kinds[1],
+            Some(NativeKind::Ptr(HeapKind::HashMap)),
+            "temp1 (1st .set) must inherit Ptr(HashMap) via in-pass-kinds classifier"
+        );
+        assert_eq!(
+            kinds[2],
+            Some(NativeKind::Ptr(HeapKind::HashMap)),
+            "temp2 (2nd .set) must inherit Ptr(HashMap) — fixpoint propagates the chain"
+        );
+        assert_eq!(
+            kinds[3],
+            Some(NativeKind::Bool),
+            "temp3 (.has) must be Bool from well_known_method_return_kind"
         );
     }
 
