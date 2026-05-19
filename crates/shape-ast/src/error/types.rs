@@ -216,6 +216,18 @@ pub enum ErrorCode {
     E0303, // Stack overflow
     E0400, // Data access error
     E0403, // Alignment error
+    /// Post-inference `FieldType::Any` in user-facing schema.
+    ///
+    /// Allocated for v0.3 Phase 4b Round 5 sub-cluster W17.2-A
+    /// (`docs/cluster-audits/v0.3-w17-fieldtype-any-boundary-audit.md` §5 +
+    /// §8). `FieldType::Any` is allowed at compile-time intermediate layers
+    /// (inference + resolution passes) as the "unresolved type" carrier;
+    /// post-inference output (the `BytecodeProgram.type_schema_registry`
+    /// shape after `Compiler::compile` returns) is verified at the
+    /// `verify_no_post_inference_any` pass. Five PERMANENT named-exception
+    /// classes are whitelisted per audit §4.D.10-15; nine TRANSITIONAL
+    /// exception classes per §4.D.1-9 close in R5b W17.2-B/W17.2-C.
+    E0900,
     ParseError,
     TypeError,
     SemanticError,
@@ -247,6 +259,7 @@ impl ErrorCode {
             ErrorCode::E0303 => "E0303",
             ErrorCode::E0400 => "E0400",
             ErrorCode::E0403 => "E0403",
+            ErrorCode::E0900 => "E0900",
             ErrorCode::ParseError => "PARSE",
             ErrorCode::TypeError => "TYPE",
             ErrorCode::SemanticError => "SEMANTIC",

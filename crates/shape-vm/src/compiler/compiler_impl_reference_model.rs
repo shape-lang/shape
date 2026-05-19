@@ -1928,6 +1928,20 @@ impl BytecodeCompiler {
             }
         }
 
+        // v0.3 Phase 4b Round 5 W17.2-A — post-inference `FieldType::Any`
+        // boundary verification. Per user 2026-05-18 binding ("after the
+        // pass, any needs to be gone, if not it is a compile time error")
+        // + audit §5 / §8 / §9.B.1 / §9.B.3 + user 2026-05-19 R5a 5-
+        // parallel ratify (transitional whitelist §4.D.1-9 + permanent
+        // whitelist §4.D.10-15). The verification pass walks the post-
+        // inference `type_schema_registry` and surfaces E0900 for any
+        // `FieldType::Any` outside the named-exception classes. ADR-006
+        // §2.7.5 (producer-side stamp) + §2.7.26 (parallel-`field_kinds`
+        // carrier for the permanent classes) anchor the discipline.
+        crate::compiler::post_inference_verify::verify_no_post_inference_any(
+            &self.program,
+        )?;
+
         Ok(self.program)
     }
 
