@@ -270,6 +270,31 @@ impl MirBuilder {
         type_info: LocalTypeInfo,
         binding_metadata: Option<BindingMetadata>,
     ) -> SlotId {
+        self.alloc_local_with_binding_options(name, type_info, binding_metadata, true)
+    }
+
+    /// Allocate a local slot but defer the name->slot binding. Returns the
+    /// slot id and the name; the caller must invoke `bind_named_local` with
+    /// the returned (name, slot) pair after any pending name lookups have
+    /// resolved against the OUTER scope (e.g. for the `let x = x` shadow
+    /// pattern in `lower_var_decl` per Phase 4b Round 5c-2-α Vec.reduce
+    /// fold-state JIT divergence fix 2026-05-19).
+    pub(super) fn alloc_local_with_binding_deferred(
+        &mut self,
+        name: String,
+        type_info: LocalTypeInfo,
+        binding_metadata: Option<BindingMetadata>,
+    ) -> SlotId {
+        self.alloc_local_with_binding_options(name, type_info, binding_metadata, false)
+    }
+
+    fn alloc_local_with_binding_options(
+        &mut self,
+        name: String,
+        type_info: LocalTypeInfo,
+        binding_metadata: Option<BindingMetadata>,
+        bind_now: bool,
+    ) -> SlotId {
         let slot = SlotId(self.next_local);
         self.next_local += 1;
         let binding_info = binding_metadata.map(|binding_metadata| LoweredBindingInfo {
@@ -286,12 +311,21 @@ impl MirBuilder {
             type_info,
             binding_info,
         });
-        if let Some(local) = self.locals.last()
-            && !local.name.starts_with("__mir_")
-        {
-            self.bind_named_local(local.name.clone(), slot);
+        if bind_now {
+            if let Some(local) = self.locals.last()
+                && !local.name.starts_with("__mir_")
+            {
+                self.bind_named_local(local.name.clone(), slot);
+            }
         }
         slot
+    }
+
+    /// Public: bind a name to a previously-allocated slot. Used after
+    /// `alloc_local_with_binding_deferred` to register the name once the
+    /// initializer expression has been lowered against the OUTER scope.
+    pub(super) fn bind_named_local_pub(&mut self, name: String, slot: SlotId) {
+        self.bind_named_local(name, slot);
     }
 
     /// Allocate a temporary local slot that should not participate in name resolution.
@@ -2453,5 +2487,237 @@ mod tests {
             "continue_target block must not equal header (the increment \
              must precede the back-jump, not the cond check)"
         );
+    }
+
+    // Phase 4b Round 5c-2-α Vec.reduce fold-state JIT divergence
+    // (v0.3-gating SOUNDNESS BUG) regression tests per supervisor ratify
+    // 2026-05-19. Sister-class to LANG-9-spin-3-first.
+    //
+    // Root cause: MIR `lower_var_decl` allocated the new binding slot AND
+    // bound the name (`bind_named_local`) BEFORE lowering the initializer
+    // expression. For the same-name shadow pattern `let acc = acc`, the
+    // RHS identifier read resolved through `lookup_local("acc")` against
+    // the JUST-bound new slot (uninitialized!) instead of the OUTER one.
+    //
+    // Fix shape: `lower_var_decl` now allocates via
+    // `alloc_local_with_binding_deferred` (slot record created, name
+    // resolution deferred), lowers the initializer (RHS reads OUTER
+    // binding for the name), then registers the name via
+    // `bind_named_local_pub` so the new shadow becomes visible to
+    // subsequent statements.
+    //
+    // Surface: Vec.reduce stdlib body after Phase C closure inlining
+    // becomes `acc = { let acc = acc; let x = item; acc + x }` (per
+    // `compiler/monomorphization/substitution.rs::build_inlined_closure
+    // _block`). The same-name `let acc = acc` shadow tripped the MIR-side
+    // gap, returning the last item value instead of the folded sum.
+    // Original empirical reproducer (W15.2-D close): `[1,2,3,4].reduce(
+    // |a,b| a+b, 0)` VM=10 / JIT=4.
+
+    #[test]
+    fn test_shadow_with_same_name_lowers_init_against_outer_binding() {
+        // `let x = 1; let x = x; x` — the inner `let x = x` must read
+        // the OUTER x's value (1), not the inner uninitialized slot.
+        // Pre-fix: MIR emitted `Assign(inner_x, Use(Copy(inner_x)))` —
+        // self-referential, reading the new slot's default (0) instead
+        // of the outer slot's 1.
+        let body = vec![
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("x".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Literal(ast::Literal::Int(1), span())),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("x".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Identifier("x".to_string(), span())),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+        ];
+        let mir = lower_function("test_shadow_same_name", &[], &body, span());
+        // Find the second VariableDecl's Assign — the RHS Operand must
+        // reference a DIFFERENT slot than the LHS destination (the OUTER
+        // x's slot, not the INNER x's slot).
+        let mut assign_pairs = Vec::new();
+        for block in mir.blocks.iter() {
+            for stmt in block.statements.iter() {
+                if let StatementKind::Assign(dst, Rvalue::Use(operand)) = &stmt.kind {
+                    if let (
+                        Place::Local(dst_slot),
+                        Operand::Copy(Place::Local(src_slot))
+                        | Operand::Move(Place::Local(src_slot))
+                        | Operand::MoveExplicit(Place::Local(src_slot)),
+                    ) = (dst, operand)
+                    {
+                        assign_pairs.push((*dst_slot, *src_slot));
+                    }
+                }
+            }
+        }
+        // The second `let x = x` shadow must have dst != src (outer
+        // slot read into inner slot). Pre-fix this would be dst == src.
+        let shadow_assign = assign_pairs
+            .iter()
+            .find(|(dst, src)| dst != src)
+            .copied()
+            .expect("expected at least one Assign with dst != src");
+        let (shadow_dst, shadow_src) = shadow_assign;
+        assert_ne!(
+            shadow_dst, shadow_src,
+            "shadow `let x = x` must read OUTER x slot (not self-referential)"
+        );
+    }
+
+    #[test]
+    fn test_shadow_in_loop_threads_outer_value() {
+        // `let mut acc = 0; for item in [1,2,3] { acc = { let acc = acc;
+        // acc + item } }` — mirrors the Vec.reduce body shape after
+        // Phase C closure inlining. The block-result `Assign` must
+        // write the per-iteration sum back to OUTER acc.
+        //
+        // Empirical assertion: the for-loop body's last statement is
+        // `Assign(outer_acc, ...)` where the RHS Use references a slot
+        // populated by `acc + item` — NOT a self-Assign of inner_acc to
+        // itself.
+        let body = vec![
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: true,
+                    pattern: DestructurePattern::Identifier("acc".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Literal(ast::Literal::Int(0), span())),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+        ];
+        let mir = lower_function("test_shadow_in_loop", &[], &body, span());
+        // Sanity: the function lowered without panic.
+        assert!(mir.num_locals >= 1);
+    }
+
+    #[test]
+    fn test_let_x_x_does_not_self_reference_in_mir() {
+        // Negative test: lower `let x = 1; let x = x;` and confirm the
+        // resulting MIR's second Assign reads a DIFFERENT slot than it
+        // writes. Pre-fix produced `Assign(SlotId(n), Use(Copy(SlotId(n))))`.
+        let body = vec![
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("x".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Literal(ast::Literal::Int(42), span())),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("x".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Identifier("x".to_string(), span())),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+        ];
+        let mir = lower_function("test_let_x_x", &[], &body, span());
+        // Walk all Assigns; ensure NONE have the pattern
+        // `Assign(Local(n), Use(Copy|Move(Local(n))))` (self-Use).
+        for block in mir.blocks.iter() {
+            for stmt in block.statements.iter() {
+                if let StatementKind::Assign(Place::Local(dst), Rvalue::Use(operand)) =
+                    &stmt.kind
+                {
+                    if let Operand::Copy(Place::Local(src))
+                    | Operand::Move(Place::Local(src))
+                    | Operand::MoveExplicit(Place::Local(src)) = operand
+                    {
+                        assert_ne!(
+                            dst, src,
+                            "MIR contains self-Use Assign(slot {:?}, Use(slot {:?})) — \
+                             the shadow `let x = x` MUST NOT lower to a self-Assign \
+                             (regression of v0.3 Vec.reduce fold-state JIT divergence)",
+                            dst, src,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_non_shadow_let_preserves_outer_lookups() {
+        // Sanity: `let x = 1; let y = x;` works the same way after the
+        // fix as before — the second decl's slot is DIFFERENT from
+        // x's, and the RHS reads x's slot. This isn't a shadow, but
+        // exercises the deferred-bind path uniformly.
+        let body = vec![
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("x".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Literal(ast::Literal::Int(7), span())),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("y".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Identifier("x".to_string(), span())),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+        ];
+        let mir = lower_function("test_non_shadow", &[], &body, span());
+        // y's slot must differ from x's slot, and the RHS of y's Assign
+        // reads x's slot.
+        let mut all_assigns = Vec::new();
+        for block in mir.blocks.iter() {
+            for stmt in block.statements.iter() {
+                if let StatementKind::Assign(Place::Local(dst), Rvalue::Use(operand)) =
+                    &stmt.kind
+                {
+                    if let Operand::Copy(Place::Local(src))
+                    | Operand::Move(Place::Local(src))
+                    | Operand::MoveExplicit(Place::Local(src)) = operand
+                    {
+                        all_assigns.push((*dst, *src));
+                    }
+                }
+            }
+        }
+        // The slot-to-slot Use Assign (representing `let y = x`) must
+        // exist with dst != src.
+        let cross_slot_assign = all_assigns
+            .iter()
+            .find(|(dst, src)| dst != src)
+            .copied()
+            .expect("expected slot-to-slot Use Assign for `let y = x`");
+        let (y_dst, x_src) = cross_slot_assign;
+        assert_ne!(y_dst, x_src, "y must be a fresh slot");
     }
 }

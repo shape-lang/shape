@@ -107,16 +107,55 @@ pub(super) fn lower_var_decl(builder: &mut MirBuilder, decl: &ast::VariableDecl,
         _ => None,
     };
     if let Some(name) = decl.pattern.as_identifier() {
+        // Phase 4b Round 5c-2-α Vec.reduce fold-state JIT divergence fix
+        // (2026-05-19, v0.3-gating SOUNDNESS BUG). ADR-006 §2.7.5
+        // stamp-at-compile-time + producer-site lookup discipline: the
+        // initializer expression `decl.value` MUST be lowered with the
+        // OUTER scope's binding for `name` still active. Otherwise the
+        // shadow pattern `let acc = acc` resolves the RHS `acc` to the
+        // NEW slot just-allocated for the inner `acc` (uninitialized!)
+        // instead of the OUTER one, producing a self-referential
+        // `Assign(new_acc, Use(new_acc))` MIR sequence.
+        //
+        // The bytecode compiler at `compiler/statements.rs:4307-4709`
+        // already has the correct order: it compiles `init_expr` first
+        // (which leaves the OUTER read on the stack), THEN allocates the
+        // local via `compile_destructure_pattern`. The MIR lowering must
+        // mirror that order so VM and JIT see the same shadowing
+        // semantics.
+        //
+        // Implementation: allocate the slot AND `locals` record up front
+        // (preserves slot id ordering for downstream tests that hard-
+        // coded specific SlotId values), but DEFER the
+        // `bind_named_local("name", slot)` registration until AFTER the
+        // initializer expression has been lowered. The init expr's
+        // identifier reads resolve through `lookup_local` against the
+        // OUTER scope's `local_slots` map; only at the end do we register
+        // the shadow.
+        //
+        // Surface: Vec.reduce stdlib body after Phase C closure inlining
+        // becomes `acc = { let acc = acc; let x = item; acc + x }` (per
+        // `compiler/monomorphization/substitution.rs::build_inlined_
+        // closure_block`). The same-name `let acc = acc` shadow tripped
+        // this MIR-side gap, returning the JIT-shadowed `0` instead of
+        // the OUTER `acc`'s threaded value → JIT fold-state appeared to
+        // lose accumulator state every iteration, returning the last
+        // item value (the W15.2-D `[1,2,3,4].reduce(|a,b| a+b)` VM=10
+        // JIT=4 divergence). Sister-class to LANG-9-spin-3-first per
+        // supervisor ratify 2026-05-19.
         let type_info = decl
             .value
             .as_ref()
             .map(infer_local_type_from_expr)
             .unwrap_or(LocalTypeInfo::Unknown);
-        let slot = if let Some(binding_metadata) = binding_metadata {
-            builder.alloc_local_binding(name.to_string(), type_info, binding_metadata)
-        } else {
-            builder.alloc_local(name.to_string(), type_info)
-        };
+        // Allocate the slot WITHOUT registering the name. The name
+        // resolution stays on the OUTER binding (if any) until after the
+        // init expression is lowered.
+        let slot = builder.alloc_local_with_binding_deferred(
+            name.to_string(),
+            type_info,
+            binding_metadata.clone(),
+        );
 
         // ADR-006 §2.7.5 stamp-at-compile-time — V3-S6e-jit-specialized-
         // vec-map-aggregate-classify (Phase 3 cluster-0+1 Wave 3, 2026-
@@ -138,32 +177,10 @@ pub(super) fn lower_var_decl(builder: &mut MirBuilder, decl: &ast::VariableDecl,
         // elem_kind` returns `None`, and the kind-blind Aggregate fall-
         // back fires per Route A `W11-jit-new-array` SURFACE.
         //
-        // V3-S6a's `synthesize_empty_array_result_annotation` writes the
-        // `Array<C>` annotation onto the specialized `Vec.map<U>` /
-        // `Vec.filter<U>` body's `let mut result = []` after generic
-        // substitution concretizes the return type. The conduit chain:
-        // V3-S6a annotation → MIR `local_typed_array_element_types` →
-        // conduit producer stamps `concrete_types[result_slot] =
-        // Array(elem)` → JIT-MIR v2-fast-path activates →
-        // `emit_v2_array_aggregate` succeeds → specialized body JIT-
-        // compiles → V3-S6c routing's direct FuncRef call returns
-        // correct raw `*const TypedArray<i64>` bits per V3-S5.
-        //
         // cluster-2-closure-wave-B-class-bc-coverage (Phase 3 cluster-2
         // Round 2, 2026-05-16): widen the empty-literal gate to ALL
         // typed-array-annotated bindings (`let doubled: Array<int> =
-        // xs.map(...)` etc.). The empty-literal-only gate covered the
-        // V3-S6a-synthesized `let mut result = []` inside specialized
-        // `Vec.map<U>` bodies; widening to non-empty initializers covers
-        // any user-written `let x: Array<C> = <expr>` whose RHS is a
-        // method call, function call, or other non-literal producing
-        // a typed-array. The annotation IS the proof per §2.7.5 stamp-
-        // at-compile-time discipline — no inference, no decode, no
-        // fabricated default. Initializer-shape-independent: stamps from
-        // the annotation directly, regardless of what the RHS expression
-        // is. Honors §2.7.7 #9 — if no annotation exists the slot stays
-        // unstamped (surface-and-stop at the JIT-MIR consumer for Class B
-        // and Class C inferred cases; tracked as gap below).
+        // xs.map(...)` etc.).
         let annotated_array_elem: Option<shape_value::v2::ConcreteType> =
             decl.type_annotation.as_ref().and_then(|annotation| {
                 crate::compiler::v2_map_emission::concrete_type_from_annotation(annotation)
@@ -206,7 +223,11 @@ pub(super) fn lower_var_decl(builder: &mut MirBuilder, decl: &ast::VariableDecl,
                     builder.record_mut_self_container_local(slot, kind);
                 }
             }
-            // Determine operand based on ownership modifier
+            // Phase 4b Round 5c-2-α Vec.reduce fold-state JIT divergence
+            // fix (2026-05-19): lower the initializer BEFORE registering
+            // the `name → slot` binding (deferred above). Identifier reads
+            // in the init expression resolve against the OUTER scope's
+            // `local_slots` map.
             let operand = match decl.ownership {
                 ast::OwnershipModifier::Move => {
                     lower_expr_to_explicit_move_operand(builder, init_expr)
@@ -258,6 +279,10 @@ pub(super) fn lower_var_decl(builder: &mut MirBuilder, decl: &ast::VariableDecl,
                 builder.record_binding_initialization(slot, point);
             }
         }
+        // Phase 4b Round 5c-2-α Vec.reduce fold-state JIT divergence fix
+        // (2026-05-19): now register `name → slot` so subsequent
+        // statements see the new shadow.
+        builder.bind_named_local_pub(name.to_string(), slot);
         return;
     }
 
