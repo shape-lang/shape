@@ -1639,6 +1639,11 @@ fn field_type_to_annotation(
         FieldType::I32 => Some(TypeAnnotation::Basic("i32".to_string())),
         FieldType::U32 => Some(TypeAnnotation::Basic("u32".to_string())),
         FieldType::U64 => Some(TypeAnnotation::Basic("u64".to_string())),
-        FieldType::Array(_) | FieldType::Any => None,
+        // W17.2-B: Option<T> projects to None at the annotation layer
+        // (mirrors Array/Any refusal-shape — the bidirectional inference
+        // engine handles Option-typed expression contexts via narrowing,
+        // not via TypeAnnotation projection). Per ADR-006 §2.7.5 +
+        // §2.7.7/Q9 — slot kind lives in the parallel-`field_kinds` track.
+        FieldType::Array(_) | FieldType::Any | FieldType::Option(_) => None,
     }
 }

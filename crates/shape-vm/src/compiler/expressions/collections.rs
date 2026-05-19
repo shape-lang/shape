@@ -18,7 +18,18 @@ fn infer_field_type_from_expr(expr: &Expr) -> Option<FieldType> {
             Literal::Decimal(_) => Some(FieldType::Decimal),
             Literal::Bool(_) => Some(FieldType::Bool),
             Literal::String(_) => Some(FieldType::String),
-            Literal::None => Some(FieldType::Any), // None must be NaN-boxed, correct as-is
+            // W17.2-B (audit §4.D.9 subsumption per §4.D.1 PROPAGATE
+            // rebuild + supervisor ratify 2026-05-19): `None` literal IS
+            // by definition an unresolved-element-type carrier (the
+            // schema can't know what `T` is at the literal site without
+            // bidirectional inference). Project to
+            // `FieldType::Option(Box<FieldType::Any>)` — the outer
+            // discriminator is concrete (Option), and bidirectional
+            // narrowing at the context site refines the inner Any
+            // when the surrounding expression's expected type is known.
+            // The post_inference_verify pass surfaces the inner Any
+            // if it persists past the narrowing window.
+            Literal::None => Some(FieldType::Option(Box::new(FieldType::Any))),
             _ => None,
         },
         _ => None,
