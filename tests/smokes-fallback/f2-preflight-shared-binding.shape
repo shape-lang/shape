@@ -1,0 +1,11 @@
+// W14.2-F1: SharedModuleBinding preflight-rejection class
+// Trigger shape: var captured by closure → AllocSharedModuleBinding +
+// LoadSharedModuleBinding opcodes emitted at the toplevel main code →
+// `preflight_instructions` in `crates/shape-jit/src/compiler/accessors.rs:605`
+// rejects → `compile_program_selective` returns Err → W12 fall-through
+// emits `[jit-fallback]` diagnostic + routes execution through the VM.
+var counter = 0
+let inc = || { counter = counter + 1 }
+inc()
+inc()
+print(counter)

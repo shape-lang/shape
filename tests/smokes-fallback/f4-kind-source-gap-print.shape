@@ -1,0 +1,13 @@
+// W14.2-F1: Route A kind-source-gap class (producer-side NativeKind=None
+// at `print` Call-terminator operand).
+// Trigger shape: `print(returns_obj())` where the function returns an
+// object whose NativeKind isn't stamped through the call return path →
+// MIR-time codegen surface-and-stop at `crates/shape-jit/src/mir_compiler/
+// terminators.rs::Route A surface-and-stop` → W12 fall-through emits
+// `[jit-fallback]` diagnostic + routes execution through the VM.
+fn returns_obj() {
+    let o = { x: 1, y: 2 }
+    o
+}
+let r = returns_obj()
+print(r)

@@ -1,0 +1,10 @@
+// W14.2-F1: MirToIR top-level preflight-rejection class
+// Trigger shape: a closure captures `n` (promoting it to shared), then
+// a plain function reads it. The MirToIR top-level preflight rejects
+// with "ClosureCapture missing function_id" so the W12 fall-through
+// emits the [jit-fallback] diagnostic + routes execution through the VM.
+var n = 100
+let _ = || { n }
+fn read() -> int { n }
+let v = read()
+print(v)
