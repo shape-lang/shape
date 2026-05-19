@@ -628,3 +628,145 @@ w.add(32)
         42,
     );
 }
+
+// ───────────────────────────────────────────────────────────────────────
+// Phase 4b Round 5c-2-α Vec.reduce fold-state JIT divergence regression
+// (v0.3-gating SOUNDNESS BUG, 2026-05-19). Sister-class to
+// LANG-9-spin-3-first per supervisor ratify.
+//
+// Root cause was in MIR `lower_var_decl`: the binding slot was allocated
+// AND name was bound BEFORE the initializer expression was lowered. For
+// the same-name shadow pattern `let acc = acc`, the RHS `acc` resolved
+// to the JUST-bound new slot (uninitialized!) instead of the OUTER one.
+//
+// Surface: Vec.reduce stdlib body after Phase C closure inlining
+// becomes `acc = { let acc = acc; let x = item; acc + x }` (per
+// `compiler/monomorphization/substitution.rs::build_inlined_closure
+// _block`). The same-name `let acc = acc` shadow tripped the MIR-side
+// gap, returning the last item value instead of the threaded sum.
+// Empirical reproducer (W15.2-D close): `[1,2,3,4].reduce(|a,b| a+b, 0)`
+// VM=10 / JIT=4.
+//
+// Fix shape: `lower_var_decl` allocates via
+// `alloc_local_with_binding_deferred` (slot created, name resolution
+// deferred), lowers initializer (RHS reads OUTER binding), then binds
+// the name via `bind_named_local_pub`. Mirrors the bytecode compiler's
+// existing order at `compiler/statements.rs:4307-4709`.
+// ───────────────────────────────────────────────────────────────────────
+
+/// Canonical W15.2-D reproducer. `[1,2,3,4].reduce(|a,b| a+b, 0)` must
+/// return `10` (= 0+1+2+3+4) in JIT mode — pre-fix returned `4` (last
+/// item) because the inlined closure's `let acc = acc` shadow lost the
+/// accumulator state every iteration.
+#[test]
+fn vec_reduce_fold_state_canonical_returns_ten() {
+    jit_expect_int(
+        r#"
+let nums = [1, 2, 3, 4]
+nums.reduce(|a, b| a + b, 0)
+"#,
+        10,
+    );
+}
+
+/// Non-zero initial accumulator. `[10,20].reduce(|a,b| a+b, 100)` must
+/// return `130` — pre-fix returned `20` (last item).
+#[test]
+fn vec_reduce_fold_state_with_initial_accumulator() {
+    jit_expect_int(
+        r#"
+let nums = [10, 20]
+nums.reduce(|a, b| a + b, 100)
+"#,
+        130,
+    );
+}
+
+/// Single-element fold. `[42].reduce(|a,b| a+b, 7)` must return `49`
+/// (= 7 + 42) — pre-fix returned `42` (last item only).
+#[test]
+fn vec_reduce_fold_state_single_element_with_init() {
+    jit_expect_int(
+        r#"
+let nums = [42]
+nums.reduce(|a, b| a + b, 7)
+"#,
+        49,
+    );
+}
+
+/// Empty-array fold returns the initial accumulator unchanged.
+/// `[].reduce(|a,b| a+b, 999)` must return `999` (init preserved).
+/// This case PASSED on pre-fix because no iterations happened — no
+/// shadow was triggered. Pinning it here guards against the inverse
+/// regression (init being lost when no iterations occur).
+#[test]
+fn vec_reduce_fold_state_empty_preserves_init() {
+    jit_expect_int(
+        r#"
+let nums: Array<int> = []
+nums.reduce(|a, b| a + b, 999)
+"#,
+        999,
+    );
+}
+
+/// Direct MIR-shape reproducer (no Vec.reduce): the same-name shadow
+/// pattern `acc = { let acc = acc; acc + item }` inside a for-loop.
+/// `for item in [1,2,3,4] { acc = { let acc = acc; acc + item } }`
+/// starting at `acc = 7` must produce 7+1+2+3+4 = 17. Pre-fix
+/// returned `4` (the last item value with init lost).
+#[test]
+fn shadow_let_in_loop_threads_outer_accumulator() {
+    jit_expect_int(
+        r#"
+let mut acc = 7
+for item in [1, 2, 3, 4] {
+    acc = {
+        let acc = acc
+        acc + item
+    }
+}
+acc
+"#,
+        17,
+    );
+}
+
+/// Two-step shadow inside loop body (mimics Phase-C closure inlining
+/// shape `{ let acc = acc; let x = item; acc + x }`).
+#[test]
+fn shadow_let_in_loop_two_step_threads_outer_accumulator() {
+    jit_expect_int(
+        r#"
+let mut acc = 7
+for item in [1, 2, 3, 4] {
+    acc = {
+        let acc = acc
+        let x = item
+        acc + x
+    }
+}
+acc
+"#,
+        17,
+    );
+}
+
+/// Negative regression: confirm the canonical reproducer with a
+/// no-self-reference (`acc + item` baseline without inner shadow)
+/// still works the same way — guards against the deferred-bind path
+/// breaking the non-shadow case.
+#[test]
+fn for_loop_no_shadow_still_threads_accumulator() {
+    jit_expect_int(
+        r#"
+let mut acc = 7
+for item in [1, 2, 3, 4] {
+    acc = acc + item
+}
+acc
+"#,
+        17,
+    );
+}
