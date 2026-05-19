@@ -59,6 +59,15 @@ mod v2_array_tests;
 #[cfg(all(test, feature = "deep-tests"))]
 mod closure_dispatch_regression_tests;
 
+// Phase 4b Round 5c-2-α jit-ref-param-chain-stamp regression tests
+// (ADR-006 §2.7.13 + §2.7.5; supervisor ratify 2026-05-19). Gated
+// behind `deep-tests` for the same reason as
+// `closure_dispatch_regression_tests` above — `JITExecutor::execute_program`
+// JIT-compiles the stdlib on every test, so default-parallelism CI runs
+// would race the JIT code cache.
+#[cfg(all(test, feature = "deep-tests"))]
+mod ref_param_regression_tests;
+
 use cranelift::codegen::ir::{FuncRef, StackSlot};
 use cranelift::prelude::*;
 use std::collections::{HashMap, HashSet};
@@ -210,6 +219,48 @@ pub struct MirToIR<'a, 'b> {
     /// the FFI at all when the JIT itself built the closure.
     pub(crate) stack_closure_call_info:
         HashMap<SlotId, StackClosureCallInfo>,
+
+    // ── Phase 4b Round 5c-2-α jit-ref-param-chain-stamp ────────────
+    /// Param slots whose source-declaration carries a reference borrow kind
+    /// (`&x` / `&mut x`). Populated at JIT compile-entry from
+    /// `mir.param_reference_kinds`. Read/write/null sites for these slots
+    /// auto-dispatch through the cell-indirection path (load/store at the
+    /// referent address) instead of the slot's raw local variable.
+    ///
+    /// ADR-006 §2.7.13 ref-chain stamp + §2.7.5 producer-side stamp:
+    /// MIR-lowering at `crates/shape-vm/src/mir/lowering/mod.rs:617-628`
+    /// classifies reference parameters as `LocalTypeInfo::NonCopy` and
+    /// records `param_reference_kinds[i] = Some(BorrowKind::*)` but does NOT
+    /// emit `Place::Deref` projections for the body's `x = x + 1` style
+    /// reads/writes — the slot is treated as if it held the referenced
+    /// value directly (`crates/shape-vm/src/mir/lowering/expr.rs:24-25`
+    /// returns `Place::Local(slot)` for `Expr::Identifier`, and
+    /// `crates/shape-vm/src/mir/lowering/stmt.rs:307` assigns to
+    /// `Place::Local(slot)` on identifier-target assignments).
+    ///
+    /// The BYTECODE compile path handles this orthogonally by emitting
+    /// `DerefLoad` / `DerefStore` against the ref-slot at
+    /// `compiler/expressions/identifiers.rs:219-221` (read) and the
+    /// assignment lowering (write). The W14.2-G4 close at
+    /// `compiler/functions.rs:1331-1390` further fixes a producer-side
+    /// kind-stamping race on the bytecode side. The JIT-MIR consumer was
+    /// never updated to honor reference semantics — calling
+    /// `bump(&a); print(a)` returns the un-mutated `a` because the JIT
+    /// reads the slot's raw pointer bits, adds 1, and writes the result
+    /// back into the same local slot (never touching the caller's cell).
+    ///
+    /// W14.2-G4 was VM-only by composition: the `tools/shape-test`
+    /// harness's `BytecodeExecutor` (`tools/shape-test/src/shape_test.rs:
+    /// 237`) runs every assertion via the bytecode interpreter — JIT
+    /// divergence is not surfaced. The empirical W15.2-F SURFACE at HEAD
+    /// `989b18d6` and supervisor ratify 2026-05-19 promote this to
+    /// v0.3-gating soundness.
+    ///
+    /// Sister-class to LANG-9-spin-3-first / W14.2-E SURFACE-A. The fix
+    /// site here mirrors the bytecode-compiler's ref-slot handling shape:
+    /// reads auto-deref, writes auto-deref, no NEW cell allocation for
+    /// re-borrowing `&x` of an existing ref-param.
+    pub(crate) ref_param_slots: HashSet<SlotId>,
 
     // ── Closure Spec Phase H1: heap-allocated closure codegen ──────
     /// Map from closure body `function_id` to its `ClosureLayout`.
@@ -836,6 +887,24 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         let field_native_kinds =
             types::infer_field_native_kinds(&mir_data.mir, &slot_kinds);
 
+        // Phase 4b Round 5c-2-α jit-ref-param-chain-stamp (ADR-006 §2.7.13
+        // ref-chain stamp + §2.7.5 producer-side stamp; supervisor ratify
+        // 2026-05-19). Populate `ref_param_slots` from MIR-lowering's
+        // `param_reference_kinds` — entries with `Some(BorrowKind::_)` are
+        // reference parameters whose slot holds the BORROWED CELL ADDRESS
+        // (allocated by `Rvalue::Borrow` in the caller's frame), NOT the
+        // referenced value directly. Read/write sites for these slots
+        // dispatch through the cell-indirection path; see
+        // `read_place` / `write_place` / `null_place` and the
+        // `Rvalue::Borrow` short-circuit in `rvalues.rs`.
+        let ref_param_slots: HashSet<SlotId> = mir_data
+            .mir
+            .param_slots
+            .iter()
+            .zip(mir_data.mir.param_reference_kinds.iter())
+            .filter_map(|(slot, kind)| kind.as_ref().map(|_| *slot))
+            .collect();
+
         Self {
             builder,
             ctx_ptr,
@@ -878,6 +947,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             // layer. Empty is sound — JIT falls through to typed-arith/cmp
             // lowering identically to pre-W10 behaviour.
             operator_trait_dispatch_sites: HashMap::new(),
+            ref_param_slots,
         }
     }
 
