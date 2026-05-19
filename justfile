@@ -148,3 +148,27 @@ verify-phase-2:
 # wired up; see CLAUDE.md "Mechanical enforcement". When it lands, add it here.)
 verify-phase-5: check-no-dynamic
 	@echo "TODO: invoke sentinel test when crates/shape-vm/src/executor/tests/no_dynamic.rs lands"
+
+# --- Phase 4c CI coverage gate (cargo-tarpaulin) ---
+#
+# Per docs/cluster-audits/v0.3-w14-test-coverage-audit.md §1-§6 + Phase 4
+# acceptance criterion (user 2026-05-18): "test coverage ≥99% per-feature
+# with DOCUMENTED EXCEPTIONS ONLY WHEN VERY HARD TO TEST".
+#
+# Cadence (per Phase 4 test execution policy in
+# docs/cluster-audits/phase-3-team-lead-handover.md:42-47):
+#   - Phase-4b-batch-merge invocation point (post-merge gate on main).
+#   - Nightly (per W13.4 nightly-fuzz.yml precedent: cron 0 4 * * * UTC).
+#   - NOT per-commit.
+#
+# Install per audit §1.6 (devenv-shell wrap required on NixOS hosts):
+#   devenv shell --quiet -- bash -c 'cargo install cargo-tarpaulin --version 0.35.4 --locked'
+#
+# Full workspace line coverage.
+coverage:
+	bash scripts/coverage.sh
+
+# Per-crate scoped coverage (uses --include-files to dodge audit Surface 2's
+# workspace-walk denominator-inflation pitfall).
+coverage-crate crate:
+	bash scripts/coverage.sh --crate {{crate}}
