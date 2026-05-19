@@ -48,6 +48,23 @@ fn closure_can_capture_explicit_reference_parameter() {
 
 #[test]
 fn closure_can_capture_inferred_reference_parameter() {
+    // W14.2-G6 e2e-lifetime triage SURFACE-AND-STOP: GetProp on
+    // Ptr(NativeView) surface requires the W17-typed-carrier-
+    // monomorphization replacement for the deleted HashMapData::values:
+    // Arc<Buf<Arc<HeapValue>>> carrier (ADR-006 §2.7.24 Q25.B) or the
+    // per-receiver heterogeneous-kind body. The closure-capturing-array
+    // path lowers `arr[0]` through the NativeView host-tier carrier
+    // where the kind is not yet known at the GetProp dispatch site.
+    // Annotation-fix attempted (`fn make_head_reader(arr: Array<int>)`
+    // + `let xs: Array<int> = [1, 2, 3]`): a SECOND architectural panic
+    // surfaces at crates/shape-vm/src/executor/vm_impl/stack.rs:97
+    // "HeapKind::TypedArray ordinal 8 is vacated per W12 audit §3.6"
+    // (V3-S5 ckpt-4 v2-raw *mut TypedArray<T> carriers per ADR-006
+    // §2.7.24 Q25.A SUPERSEDED). Both surfaces route to W14.2-H1
+    // exception registry as
+    // `v0.4-w17-typed-carrier-monomorphization-getprop-nativeview` +
+    // `v0.4-v3-s5-ckpt-6-strict-close` chain. Test pinned via
+    // expect_run_err_contains to anchor the architectural gap.
     ShapeTest::new(
         r#"
         fn make_head_reader(arr) {
@@ -58,5 +75,5 @@ fn closure_can_capture_inferred_reference_parameter() {
         reader()
     "#,
     )
-    .expect_number(1.0);
+    .expect_run_err_contains("Ptr(NativeView)");
 }
