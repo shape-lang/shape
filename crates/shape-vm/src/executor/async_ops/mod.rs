@@ -208,8 +208,11 @@ impl VirtualMachine {
     fn op_poll(&mut self) -> Result<AsyncExecutionResult, VMError> {
         // In the VM, we don't have direct access to the event queue
         // This is handled via the VMContext passed from the runtime.
-        // No event available — push the §2.7 null sentinel (zero bits, Bool kind).
-        self.push_kinded(0u64, NativeKind::Bool)?;
+        // R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 + §2.7.7/Q9,
+        // 2026-05-19): no event available — push `NativeKind::Null` per
+        // post-disposition; pre-disposition `(0u64, NativeKind::Bool)`
+        // collided with legitimate `false` bool slots.
+        self.push_kinded(0u64, NativeKind::Null)?;
         Ok(AsyncExecutionResult::Continue)
     }
 

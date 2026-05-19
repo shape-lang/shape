@@ -71,7 +71,14 @@ pub fn marshal_arg_to_jit(bits: u64, kind: NativeKind) -> u64 {
         | NativeKind::StringV2
         | NativeKind::DecimalV2
         | NativeKind::String
-        | NativeKind::Ptr(_) => bits,
+        | NativeKind::Ptr(_)
+        // R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 + §2.7.7/Q9,
+        // 2026-05-19): `NativeKind::Null` is identity by bits across
+        // the JIT FFI boundary like every other inline-scalar variant
+        // — bits are unspecified at this layer (kind alone discriminates
+        // the absence-of-value); the JIT callee reads the kind, not
+        // the bits.
+        | NativeKind::Null => bits,
     }
 }
 
@@ -121,7 +128,14 @@ pub fn unmarshal_jit_result(bits: u64, kind: NativeKind) -> u64 {
         | NativeKind::StringV2
         | NativeKind::DecimalV2
         | NativeKind::String
-        | NativeKind::Ptr(_) => bits,
+        | NativeKind::Ptr(_)
+        // R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 + §2.7.7/Q9,
+        // 2026-05-19): `NativeKind::Null` is identity by bits across
+        // the JIT FFI boundary like every other inline-scalar variant
+        // — bits are unspecified at this layer (kind alone discriminates
+        // the absence-of-value); the JIT callee reads the kind, not
+        // the bits.
+        | NativeKind::Null => bits,
     }
 }
 

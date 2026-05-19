@@ -336,24 +336,16 @@ fn test_default_param_bool() {
     .expect_bool(true);
 }
 
-/// Verifies default param bool overridden. W14.2-G6 e2e-functions
-/// triage SURFACE-AND-STOP: VM-only correctness bug — `check(false)`
-/// returns `true` because the default-param fill-in path emits
-/// `LoadLocal(val) + IsNull + JumpIfFalse + StoreLocal(default)` at
-/// crates/shape-vm/src/compiler/functions.rs:1471-1493, and
-/// `is_null_kinded(0, NativeKind::Bool) == true` at
-/// crates/shape-vm/src/executor/comparison/mod.rs:385 (comment cites
-/// "(0u64, NativeKind::Bool) is the §2.7 sentinel"). The bool slot
-/// `false` (bits=0) and the null/unit sentinel share the same bit
-/// pattern under §2.7 carrier semantics — when the caller passes
-/// `false` for a bool-default param, the VM cannot distinguish "caller
-/// passed false" from "caller omitted; fill default". JIT pipeline
-/// passes (--mode jit returns false correctly) — divergence confirms
-/// this is a producer-side bool-vs-null-sentinel ambiguity in the
-/// bytecode default-param lowering, not a runtime general bug.
-/// Annotation fix (`fn check(val: bool = true)`) does not address.
-/// Routed to W14.2-H1 exception registry as
-/// `v0.4-bool-default-param-null-sentinel-collision`.
+/// Verifies default param bool overridden. R5b-2-bool-null-sentinel-cluster
+/// CLOSE: the W14.2-G6 SURFACE-G6-BOOL-NULL pin previously asserted
+/// `expect_bool(true)` documenting the VM-only divergence. Per
+/// ADR-006 §2.7 + §2.7.5 + §2.7.7/Q9 (2026-05-19) the `(0u64,
+/// NativeKind::Bool)` null-sentinel ⇔ `false` bool collision was
+/// fixed by introducing `NativeKind::Null` as the canonical absence-
+/// of-value discriminator; `is_null_kinded(0, NativeKind::Bool)`
+/// now returns `false` so `check(false)` correctly takes the
+/// non-default branch. Test updated to assert correct empirical
+/// behavior: `check(false) == false`.
 #[test]
 fn test_default_param_bool_overridden() {
     ShapeTest::new(
@@ -362,8 +354,49 @@ fn test_default_param_bool_overridden() {
         check(false)
     "#,
     )
-    // VM bool-default null-sentinel collision: returns true instead of false.
+    .expect_bool(false);
+}
+
+/// R5b-2-bool-null-sentinel-cluster regression test (ADR-006 §2.7 +
+/// §2.7.5 + §2.7.7/Q9, 2026-05-19): explicit `true` override on a
+/// bool-default parameter returns `true` (positive case mirroring
+/// the `false` override fix). Bool slot bits=1 must round-trip
+/// through the default-fill `IsNull` check as NOT-null.
+#[test]
+fn test_default_param_bool_overridden_true_explicit() {
+    ShapeTest::new(
+        r#"
+        fn check(val: bool = false) -> bool { val }
+        check(true)
+    "#,
+    )
     .expect_bool(true);
+}
+
+/// R5b-2-bool-null-sentinel-cluster regression test (ADR-006 §2.7 +
+/// §2.7.5 + §2.7.7/Q9, 2026-05-19): omitted bool-default parameter
+/// falls back to the declared default (the `IsNull` branch fires
+/// only when the slot's kind is `NativeKind::Null` post-disposition,
+/// not when bits happen to be 0 with `NativeKind::Bool`).
+#[test]
+fn test_default_param_bool_omitted_takes_default() {
+    ShapeTest::new(
+        r#"
+        fn check(val: bool = true) -> bool { val }
+        check()
+    "#,
+    )
+    .expect_bool(true);
+}
+
+/// R5b-2-bool-null-sentinel-cluster regression test (ADR-006 §2.7 +
+/// §2.7.5 + §2.7.7/Q9, 2026-05-19): explicit `false` literal at top
+/// level renders as `{"Bool": false}` (NOT `{"Bool": false}` as
+/// fall-out-of-null-sentinel — `slot_to_wire` `NativeKind::Bool`
+/// arm carries true bool semantics post-disposition).
+#[test]
+fn test_top_level_false_literal_renders_as_bool() {
+    ShapeTest::new(r#"false"#).expect_bool(false);
 }
 
 /// Verifies three defaults partial. W14.2-G6 e2e-functions triage.

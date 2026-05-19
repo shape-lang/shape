@@ -84,6 +84,11 @@ pub const C_CHAR: u8 = 25;
 // discrimination at the JIT FFI parallel-kind track per §2.7.7 / Q9.
 pub const C_STRING_V2: u8 = 26;
 pub const C_DECIMAL_V2: u8 = 27;
+// R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 + §2.7.5 + §2.7.7/Q9,
+// 2026-05-19): `NativeKind::Null` is the canonical absence-of-value
+// sentinel discriminator. Code allocated contiguously after Wave 2's
+// StringV2 / DecimalV2 (26, 27); still well below `PTR_BASE = 128`.
+pub const C_NULL: u8 = 28;
 
 /// Base code for `Ptr(HeapKind::*)` arms. Each `HeapKind` ordinal is
 /// added to `PTR_BASE` to produce the byte. With HeapKind ordinals 0..=28
@@ -132,6 +137,9 @@ pub const fn encode(kind: NativeKind) -> u8 {
         // (2026-05-14).
         NativeKind::StringV2 => C_STRING_V2,
         NativeKind::DecimalV2 => C_DECIMAL_V2,
+        // R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 + §2.7.7/Q9,
+        // 2026-05-19): canonical absence-of-value discriminator code.
+        NativeKind::Null => C_NULL,
         NativeKind::Ptr(hk) => PTR_BASE.wrapping_add(hk as u8),
     }
 }
@@ -176,6 +184,9 @@ pub fn decode(code: u8) -> Option<NativeKind> {
         // (2026-05-14).
         C_STRING_V2 => Some(NativeKind::StringV2),
         C_DECIMAL_V2 => Some(NativeKind::DecimalV2),
+        // R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 + §2.7.7/Q9,
+        // 2026-05-19): canonical absence-of-value discriminator code.
+        C_NULL => Some(NativeKind::Null),
         c if c >= PTR_BASE && c < SENTINEL => {
             decode_heap_kind(c - PTR_BASE).map(NativeKind::Ptr)
         }

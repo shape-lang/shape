@@ -873,6 +873,13 @@ pub fn slot_to_serializable(
             )),
         },
         NativeKind::Bool => Ok(SV::Bool(bits != 0)),
+        // R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 + §2.7.5 +
+        // §2.7.7/Q9, 2026-05-19): `NativeKind::Null` is the canonical
+        // absence-of-value discriminator. Pre-disposition this was
+        // encoded as `(0u64, NativeKind::Bool)` colliding with
+        // legitimate `false` bool values; post-disposition the kind
+        // IS the discriminator. Project to `SV::None`.
+        NativeKind::Null => Ok(SV::None),
         NativeKind::NullableInt64
         | NativeKind::NullableInt32
         | NativeKind::NullableInt16

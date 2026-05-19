@@ -299,7 +299,10 @@ impl TypedObjectOps for super::VirtualMachine {
         // refcount stays balanced).
         if recv_kind != NativeKind::Ptr(HeapKind::TypedObject) {
             drop_with_kind(recv_bits, recv_kind);
-            return self.push_kinded(0u64, NativeKind::Bool);
+            // R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 +
+            // §2.7.7/Q9, 2026-05-19): post-disposition uses
+            // `NativeKind::Null`.
+            return self.push_kinded(0u64, NativeKind::Null);
         }
 
         // W17-comptime-vm-dispatch (ADR-006 §2.7.26 close, 2026-05-12):
@@ -515,7 +518,9 @@ impl TypedObjectOps for super::VirtualMachine {
             }
 
             // Field not found on either side: push None sentinel.
-            return self.push_kinded(0u64, NativeKind::Bool);
+            // R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 + §2.7.7/Q9,
+            // 2026-05-19): post-disposition uses `NativeKind::Null`.
+            return self.push_kinded(0u64, NativeKind::Null);
         }
 
         // Schema match: direct field index lookup using the operand's
@@ -560,7 +565,9 @@ impl TypedObjectOps for super::VirtualMachine {
         }
 
         // Out-of-bounds: push None sentinel.
-        self.push_kinded(0u64, NativeKind::Bool)
+        // R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 + §2.7.7/Q9,
+        // 2026-05-19): post-disposition uses `NativeKind::Null`.
+        self.push_kinded(0u64, NativeKind::Null)
     }
 
     /// Set field on typed object using precomputed field type tag.

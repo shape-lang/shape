@@ -100,6 +100,10 @@ unsafe fn receiver_type_name(
         | NativeKind::UIntSize
         | NativeKind::NullableUIntSize => Some("number".to_string()),
         NativeKind::Bool => Some("bool".to_string()),
+        // R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 + §2.7.7/Q9,
+        // 2026-05-19): null receivers have no method dispatch; surface
+        // type-name as `"null"`.
+        NativeKind::Null => Some("null".to_string()),
         NativeKind::String => Some("string".to_string()),
         // Round 19 S1.5 W12-nativekind-scalar-additions (2026-05-14):
         // ADR-006 §2.7.5 amendment adds F32 + Char as scalar variants.
@@ -664,6 +668,10 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
             // legacy JIT-format dispatch. The kinded path for these
             // is W10 jit-playbook §5 / §2.7.4 territory.
             NativeKind::Ptr(_) => false,
+            // R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 +
+            // §2.7.7/Q9, 2026-05-19): null receivers delegate to VM
+            // which surfaces a TypeError uniformly.
+            NativeKind::Null => true,
         };
 
         if delegated {
@@ -908,6 +916,10 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
             // fallthrough.
             | NativeKind::StringV2
             | NativeKind::DecimalV2 => TAG_NULL,
+            // R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 +
+            // §2.7.7/Q9, 2026-05-19): null receivers delegate to VM
+            // (defensive TAG_NULL arm).
+            NativeKind::Null => TAG_NULL,
         };
 
         // User-defined method dispatch (UFCS — `"TypeName::method"`

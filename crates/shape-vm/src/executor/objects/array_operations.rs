@@ -184,7 +184,11 @@ impl VirtualMachine {
                             Some((val_bits, val_kind)) => {
                                 self.push_kinded(val_bits, val_kind)
                             }
-                            None => self.push_kinded(0u64, NativeKind::Bool),
+                            // R5b-2-bool-null-sentinel-cluster (ADR-006
+                            // §2.7 + §2.7.7/Q9, 2026-05-19): empty-pop
+                            // returns None per post-disposition kind
+                            // discriminator.
+                            None => self.push_kinded(0u64, NativeKind::Null),
                         }
                     }
                     None => Err(VMError::NotImplemented(
