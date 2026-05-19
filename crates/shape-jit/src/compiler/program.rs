@@ -438,6 +438,28 @@ impl JITCompiler {
                 let elision_plan =
                     crate::mir_compiler::bounds_elision::analyze(&mir_data.mir);
                 mir_compiler.set_bounds_elision_plan(elision_plan);
+                // W14.2-E-followup SURFACE-A2 fix (2026-05-19, v0.3-gating
+                // SOUNDNESS BUG per supervisor ratify): pre-populate
+                // `field_byte_offsets` from the program's
+                // `type_schema_registry` so trait-impl method bodies (and
+                // any function that reads typed-object fields without
+                // emitting a local `ObjectStore`) can resolve field byte
+                // offsets at JIT compile time. Without this pre-pass,
+                // `try_resolve_field_byte_offset` returns `None` for impl
+                // bodies and `Place::Field` falls through to
+                // `jit_get_prop`, whose `heap_kind(obj_bits)` predicate
+                // returns `None` under ADR-006 §2.7.5 raw `Box::into_raw`
+                // typed-object carriers — empirically returning `TAG_NULL`
+                // for every `self.field` read (`vm_trait_method_self_field
+                // _access_n0` reproducer's garbage NaN-bits root cause).
+                //
+                // Per ADR-006 §2.7.5 producer-side stamp: schema field
+                // positions are stamped at AST→bytecode-compile time in
+                // the canonical schema registry. The JIT consumes the
+                // stamp through `populate_field_byte_offsets_from_schemas`
+                // — a derived index, not a runtime decode.
+                mir_compiler
+                    .populate_field_byte_offsets_from_schemas(&program.type_schema_registry);
                 // Track A.1D.2: flag the leading capture param slots whose
                 // `ClosureLayout` marks them as `OwnedMutable`. `read_place`
                 // / `write_place` then route through the cell pointer bits

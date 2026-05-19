@@ -749,7 +749,18 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
 
 /// Call a JIT-compiled function pointer with the right number of native arguments.
 /// The function has Cranelift signature: fn(ctx_ptr: i64, arg0: i64, ...) -> i32
-unsafe fn call_jit_fn_with_args(
+///
+/// `pub(crate)` visibility: shared with `ffi/call_method/mod.rs::try_call_user_method`
+/// per W14.2-E-followup soundness fix (2026-05-19) — trait-method UFCS user-callee
+/// dispatch must invoke the JIT-compiled callee through the same native-ABI path
+/// as `jit_call_value`'s bare-function fast path (line ~717). The prior shape that
+/// called `fn_ptr(ctx)` directly under the `JittedStrategyFn` typedef silently
+/// dropped every receiver/arg slot since the callee's extended Cranelift signature
+/// `fn(ctx_ptr, arg0, ..., argN) -> i32` reads its params via System V register/
+/// stack convention, NOT from `ctx.stack`. Per ADR-006 §2.7.10/Q11 the dispatch
+/// shell sources every kind from the §2.7.7/Q9 parallel-kind track; the data half
+/// flows through this helper's typed-fn transmute selector.
+pub(crate) unsafe fn call_jit_fn_with_args(
     fn_ptr: *const u8,
     ctx: *mut JITContext,
     args: &[u64],

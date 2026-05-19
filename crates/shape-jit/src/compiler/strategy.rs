@@ -137,6 +137,12 @@ impl JITCompiler {
                 let elision_plan =
                     crate::mir_compiler::bounds_elision::analyze(&mir_data.mir);
                 mir_compiler.set_bounds_elision_plan(elision_plan);
+                // W14.2-E-followup SURFACE-A2 fix (2026-05-19): same as
+                // the per-user-function path at `program.rs` — pre-
+                // populate `field_byte_offsets` from the schema registry
+                // so top-level field reads resolve at JIT-compile time.
+                mir_compiler
+                    .populate_field_byte_offsets_from_schemas(&program.type_schema_registry);
                 mir_compiler.create_blocks();
                 mir_compiler.declare_locals();
                 mir_compiler.initialize_locals();
@@ -271,6 +277,11 @@ impl JITCompiler {
                 let elision_plan =
                     crate::mir_compiler::bounds_elision::analyze(&mir_data.mir);
                 mir_compiler.set_bounds_elision_plan(elision_plan);
+                // W14.2-E-followup SURFACE-A2 fix (2026-05-19): top-level
+                // with user-funcs path — same schema pre-population as
+                // the sibling top-level no-user-funcs branch above.
+                mir_compiler
+                    .populate_field_byte_offsets_from_schemas(&program.type_schema_registry);
                 mir_compiler.create_blocks();
                 mir_compiler.declare_locals();
                 mir_compiler.initialize_locals();

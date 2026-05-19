@@ -922,6 +922,152 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         self.bounds_elision = plan;
     }
 
+    /// W14.2-E-followup-jit-trait-method-arity-soundness fix (SURFACE-A2,
+    /// 2026-05-19, v0.3-gating SOUNDNESS BUG): pre-populate
+    /// `field_byte_offsets` from the program's `type_schema_registry` for
+    /// every field name visible in this function's MIR `field_name_table`.
+    ///
+    /// **Background.** The existing `field_byte_offsets` map is populated
+    /// only by `StatementKind::ObjectStore` walks at codegen time
+    /// (`mir_compiler/statements.rs:243`). Trait-impl method bodies (and
+    /// generally any function that READS fields but does not CONSTRUCT
+    /// typed objects) never emit `ObjectStore`, so the map stays empty
+    /// and `try_resolve_field_byte_offset` returns `None`. Field reads
+    /// then fall through to the `jit_get_prop(obj_bits, key_bits)` FFI
+    /// (`places.rs:899-906`), whose `heap_kind(obj_bits)` discriminator
+    /// (`ffi/value_ffi.rs:331-336`) requires `is_heap(bits)` — i.e.
+    /// `is_tagged(bits) && get_tag(bits) == TAG_HEAP_BITS`. Under ADR-006
+    /// §2.7.5 the JIT typed-object allocator (`jit_typed_object_alloc` at
+    /// `ffi/typed_object/allocation.rs:83`) returns raw `Box::into_raw`
+    /// pointers without NaN-box tag bits, so `is_heap` always returns
+    /// false and `jit_get_prop` returns `TAG_NULL` for a TypedObject
+    /// receiver — the empirical garbage NaN-bits at the
+    /// `vm_trait_method_self_field_access_n0` reproducer.
+    ///
+    /// **Fix.** Use the program-wide schema registry to map each field
+    /// name in the MIR to its position in the carrying schema. The JIT
+    /// data layout (`typed_object_alloc(schema_id, field_count * 8)`)
+    /// uses 8-byte slots per field regardless of declared field type, so
+    /// `byte_offset = field_index * 8`. Same shape as the existing
+    /// ObjectStore-walk at `statements.rs:243`.
+    ///
+    /// **Discriminator caveat.** This shares the "last-writer-wins on
+    /// name collision across distinct struct types" caveat documented at
+    /// `field_native_kinds`'s comment (mod.rs:170-180). For impl method
+    /// bodies the receiver is one specific struct type, so the collision
+    /// is benign in practice; the principled schema-aware
+    /// `(StructLayoutId, FieldIdx) → offset` registry remains the
+    /// long-term shape per that comment's "out of scope" note. The W12-
+    /// jit-binop-after-heap-read-kind-tracker invariant is preserved:
+    /// when a function contains both ObjectStore (local-populate at
+    /// statements.rs:243) AND field reads on different types, the
+    /// schema-pre-pass runs FIRST (here, at MirToIR construction time)
+    /// and the local ObjectStore-walk overwrites for the constructed
+    /// type — matching the existing single-name single-offset contract.
+    ///
+    /// Per ADR-006 §2.7.5 producer-side stamp: schema field positions
+    /// are stamped at AST→bytecode-compile time (the canonical schema
+    /// registry); the JIT's `field_byte_offsets` is a derived index, not
+    /// a runtime decode.
+    pub fn populate_field_byte_offsets_from_schemas(
+        &mut self,
+        registry: &shape_runtime::type_schema::TypeSchemaRegistry,
+    ) {
+        use shape_runtime::type_schema::FieldType;
+        // Collect every field name referenced in this function's MIR.
+        let referenced_names: std::collections::HashSet<&str> = self
+            .mir
+            .field_name_table
+            .values()
+            .map(|s| s.as_str())
+            .collect();
+
+        // Schema FieldType → NativeKind projection. Mirrors the JIT
+        // slot encoding for typed-object fields: every field occupies an
+        // 8-byte slot regardless of the declared field width, so the
+        // NativeKind classification follows the field's declared type
+        // (Int64 for `int` / I64, Float64 for `number` / F64, Bool for
+        // `bool`, String for `string`, etc.). Width-specific integers
+        // project to Int64 since they are stored as raw i64 bits in the
+        // 8-byte JIT slot (the alignment-clamped layout at
+        // `mir_compiler/statements.rs:233`).
+        fn field_type_to_native_kind(ft: &FieldType) -> Option<shape_value::NativeKind> {
+            use shape_value::NativeKind;
+            match ft {
+                FieldType::F64 => Some(NativeKind::Float64),
+                FieldType::I64 => Some(NativeKind::Int64),
+                FieldType::Bool => Some(NativeKind::Bool),
+                FieldType::String => Some(NativeKind::String),
+                // Width-specific ints project to Int64 in the JIT slot —
+                // they are stored as raw i64 bits per the typed-object
+                // 8-byte slot encoding.
+                FieldType::I8
+                | FieldType::U8
+                | FieldType::I16
+                | FieldType::U16
+                | FieldType::I32
+                | FieldType::U32
+                | FieldType::U64 => Some(NativeKind::Int64),
+                FieldType::Timestamp => Some(NativeKind::Int64),
+                // Object/Array/Decimal/Any: not projected — leave as None
+                // so the downstream consumer falls back to the existing
+                // surface-and-stop / FFI dispatch path. The principled
+                // projection for nested-object fields requires a typed
+                // pointer kind that the JIT-side carrier discipline
+                // (`Ptr(HeapKind::TypedObject)`) does not yet thread
+                // through schema-recovered reads (W10 jit-playbook §5).
+                FieldType::Object(_)
+                | FieldType::Array(_)
+                | FieldType::Decimal
+                | FieldType::Any => None,
+            }
+        }
+
+        // Walk every registered schema; map name → position (i*8).
+        // Existing `field_byte_offsets` / `field_native_kinds` entries
+        // from the local ObjectStore-walk (statements.rs:243 +
+        // `infer_field_native_kinds` at types.rs:1534, populated at
+        // construction / codegen time) take precedence — we only insert
+        // when absent so the local-walk's per-constructor stamp wins on
+        // collision.
+        for type_name in registry.type_names().collect::<Vec<_>>() {
+            let Some(schema) = registry.get(type_name) else {
+                continue;
+            };
+            for (i, field) in schema.fields.iter().enumerate() {
+                if !referenced_names.contains(field.name.as_str()) {
+                    continue;
+                }
+                // 8-byte JIT slot offsets per `typed_object_alloc(
+                // schema_id, field_count * 8)` at
+                // `mir_compiler/statements.rs:233`.
+                let byte_off = (i as u16) * 8;
+                self.field_byte_offsets
+                    .entry(field.name.clone())
+                    .or_insert(byte_off);
+                // Per ADR-006 §2.7.5 producer-side stamp: project the
+                // schema's declared FieldType into the matching
+                // NativeKind so `place_native_kind(Place::Field(...))`
+                // can return a precise kind for impl-method-body field
+                // reads. The downstream `compile_rvalue::BinaryOp`
+                // picker reads this kind via `operand_slot_kind` →
+                // `place_native_kind` → `field_native_kinds.get(name)`
+                // (see `mir_compiler/rvalues.rs:496-516`) to select the
+                // typed inline arithmetic path (`compile_binop_int64` /
+                // `compile_binop_f64`) instead of surfacing
+                // `compile_binop_dynamic_arith`. Without this stamp
+                // `self.value * 2` in an impl method body falls into
+                // the dynamic-arith surface-and-stop arm — the empirical
+                // SURFACE-A2 garbage NaN-bits root cause.
+                if let Some(kind) = field_type_to_native_kind(&field.field_type) {
+                    self.field_native_kinds
+                        .entry(field.name.clone())
+                        .or_insert(kind);
+                }
+            }
+        }
+    }
+
     /// Track A.1D.2: register the leading capture param slots that back
     /// an `OwnedMutable` capture cell for the closure body currently being
     /// compiled.
