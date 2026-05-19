@@ -94,6 +94,11 @@ pub fn cranelift_type_for_slot(kind: NativeKind) -> types::Type {
         // Boxed/pointer-sized values: String (Arc<String> raw ptr) and
         // every `Ptr(_)` heap arm.
         NativeKind::String | NativeKind::Ptr(_) => types::I64,
+
+        // R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 + §2.7.7/Q9,
+        // 2026-05-19): `NativeKind::Null` is the absence-of-value
+        // sentinel — single-byte I8 storage.
+        NativeKind::Null => types::I8,
     }
 }
 
@@ -126,6 +131,10 @@ pub fn slot_byte_width(kind: NativeKind) -> u32 {
         // (2026-05-14): v2-raw heap-pointer carriers — pointer-width 8 bytes.
         NativeKind::StringV2 | NativeKind::DecimalV2 => 8,
         NativeKind::String | NativeKind::Ptr(_) => 8,
+        // R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 + §2.7.7/Q9,
+        // 2026-05-19): `NativeKind::Null` is 1-byte storage (mirror
+        // of Bool); kind alone is load-bearing.
+        NativeKind::Null => 1,
     }
 }
 

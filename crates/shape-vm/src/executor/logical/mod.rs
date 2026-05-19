@@ -77,6 +77,10 @@ fn kinded_truthy(bits: u64, kind: NativeKind) -> bool {
         NativeKind::StringV2 | NativeKind::DecimalV2 => bits != 0,
         // Heap-bearing kinds: non-null pointer → truthy.
         NativeKind::String | NativeKind::Ptr(_) => bits != 0,
+        // R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 + §2.7.7/Q9,
+        // 2026-05-19): `NativeKind::Null` is the absence-of-value
+        // sentinel; falsy by definition.
+        NativeKind::Null => false,
     }
 }
 
@@ -191,9 +195,17 @@ impl VirtualMachine {
 /// Wave 6: null detection from raw bits + kind. Replaces the deleted
 /// `ValueWord::is_none()`. Heap-bearing kinds are null when the pointer
 /// bits are zero; nullable scalar arms encode null as zero bits.
+///
+/// R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 + §2.7.7/Q9,
+/// 2026-05-19): mirror of `comparison/mod.rs::is_null_kinded` —
+/// `NativeKind::Null` is the canonical absence-of-value discriminator;
+/// `NativeKind::Bool` slots carry only legitimate `{0, 1}` bit patterns
+/// and are NEVER null.
 #[inline]
 fn is_null_kinded(bits: u64, kind: NativeKind) -> bool {
     match kind {
+        // R5b-2 disposition: Null IS the absence-of-value discriminator.
+        NativeKind::Null => true,
         NativeKind::String | NativeKind::Ptr(_) => bits == 0,
         NativeKind::NullableFloat64 => f64::from_bits(bits).is_nan(),
         NativeKind::NullableInt8
@@ -206,7 +218,9 @@ fn is_null_kinded(bits: u64, kind: NativeKind) -> bool {
         | NativeKind::NullableUInt32
         | NativeKind::NullableUInt64
         | NativeKind::NullableUIntSize => bits == 0,
-        // Non-nullable scalar kinds are never null.
+        // Non-nullable scalar kinds are never null. R5b-2 disposition:
+        // Bool slots carry only `{0, 1}` real bool bit patterns —
+        // `false` is NOT null.
         _ => false,
     }
 }

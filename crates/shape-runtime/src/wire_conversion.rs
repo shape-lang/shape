@@ -73,6 +73,17 @@ pub fn slot_to_wire(bits: u64, kind: NativeKind, ctx: &Context) -> WireValue {
         | NativeKind::NullableIntSize
         | NativeKind::NullableUIntSize => WireValue::Integer(bits as i64),
         NativeKind::Bool => WireValue::Bool(bits != 0),
+        // R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 + §2.7.5 +
+        // §2.7.7/Q9, 2026-05-19): `NativeKind::Null` is the canonical
+        // absence-of-value discriminator. Pre-disposition `(0u64,
+        // NativeKind::Bool)` was the null sentinel which collided with
+        // legitimate `false` bool slots (both encoded as bits=0); the
+        // SURFACE-G6-NONE-OUTPUT-ADAPTER reproducer (`fn bar() ->
+        // Option<int> { None }; bar()` at top level) materialized
+        // `None` as `{"Bool": false}`. Post-disposition: kind IS the
+        // discriminator per §2.7.7/Q9 — `NativeKind::Null` slots
+        // project to `WireValue::Null` directly, restoring soundness.
+        NativeKind::Null => WireValue::Null,
         // Round 19 S1.5 W12-nativekind-scalar-additions (2026-05-14):
         // ADR-006 §2.7.5 amendment adds F32 + Char as 4-byte scalar
         // variants. Wire projection: F32 widens to `WireValue::Number`

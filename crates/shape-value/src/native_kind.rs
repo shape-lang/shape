@@ -109,8 +109,48 @@ pub enum NativeKind {
     UIntSize,
     /// Nullable usize value
     NullableUIntSize,
-    /// Boolean value
+    /// Boolean value. Slot bits: `0` = `false`, `1` = `true`. Bool slots
+    /// NEVER carry the null/unit sentinel — null is a distinct variant
+    /// (`NativeKind::Null`) per the R5b-2-bool-null-sentinel disposition
+    /// (ADR-006 §2.7 carrier-semantics + §2.7.7/Q9 parallel-kind track,
+    /// 2026-05-19): pre-disposition `(0u64, NativeKind::Bool)` was the
+    /// canonical null sentinel, which collided with legitimate `false`
+    /// bool values (both encoded as bits=0). The collision caused
+    /// VM-only divergence per W14.2-G6 SURFACE-G6-BOOL-NULL +
+    /// SURFACE-G6-LET-ONLY-BODY + SURFACE-G6-NONE-OUTPUT-ADAPTER.
+    /// Post-disposition: Bool slots carry only `{0, 1}` bits; null is
+    /// pushed with `NativeKind::Null` discriminator (kind from the
+    /// §2.7.7/Q9 parallel-kind track), restoring the kind-discriminator
+    /// soundness invariant.
     Bool,
+    /// Unit / null sentinel. Non-parametric scalar variant indicating
+    /// the slot carries the absence-of-value marker (`None` / `null` /
+    /// implicit unit return). R5b-2-bool-null-sentinel-cluster
+    /// (ADR-006 §2.7 carrier semantics + §2.7.5 producer-side stamp +
+    /// §2.7.7/Q9 parallel-kind track, 2026-05-19): introduced to fix
+    /// the §2.7 `(0u64, NativeKind::Bool)` null-sentinel ⇔ `false`
+    /// bool bit-pattern collision surfaced by W14.2-G6.
+    ///
+    /// Slot bits are unspecified and ignored — the kind alone carries
+    /// the absence signal. Producers use `0u64` by convention so
+    /// uninitialized stack-pad bytes (already zero per
+    /// `push_kinded_slow`) project to the same wire shape under
+    /// `NativeKind::Null` if accidentally observed (defense in depth).
+    ///
+    /// Clone/drop: no-op (no `Arc<T>` payload, no refcount work) —
+    /// mirrors the inline-scalar arm of `clone_with_kind` /
+    /// `drop_with_kind` per ADR-006 §2.7.7/Q9 + §2.7.6/Q8 dispatch
+    /// tables.
+    ///
+    /// Wire projection: `WireValue::Null` (mirrors the `NullableFloat64`
+    /// NaN-sentinel arm at `slot_to_wire`).
+    ///
+    /// `is_null_kinded`: returns `true` for any `(_, NativeKind::Null)`
+    /// pair regardless of bits — kind IS the discriminator per
+    /// §2.7.7/Q9 (not "kind PLUS bit pattern of data slot", which was
+    /// the pre-disposition shape that the §2.7 collision exposed as
+    /// unsound).
+    Null,
     /// String reference (Arc<String> raw pointer)
     String,
     /// v2-raw `*const StringObj` carrier reference. ADR-006 §2.7.5

@@ -135,6 +135,12 @@ pub fn slot_kind_to_clif_type(kind: NativeKind) -> types::Type {
 
         // --- pointer-sized typed slots (heap arms + String) ---
         NativeKind::String | NativeKind::Ptr(_) => types::I64,
+
+        // R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 + §2.7.7/Q9,
+        // 2026-05-19): `NativeKind::Null` is a non-parametric
+        // absence-of-value sentinel discriminator (single-byte I8
+        // ABI width; kind alone is load-bearing).
+        NativeKind::Null => types::I8,
     }
 }
 

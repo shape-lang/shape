@@ -423,7 +423,12 @@ pub(crate) fn clone_with_kind(bits: u64, kind: NativeKind) {
             // into the low 32 bits; no `Arc<T>` payload, no refcount
             // work at clone-on-read / drop-on-write.
             | NativeKind::Float32
-            | NativeKind::Char => {}
+            | NativeKind::Char
+            // R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 +
+            // §2.7.5 + §2.7.7/Q9, 2026-05-19): `NativeKind::Null`
+            // is a non-parametric absence-of-value sentinel — no
+            // `Arc<T>` payload, no refcount work.
+            | NativeKind::Null => {}
         }
     }
 }
@@ -763,7 +768,12 @@ pub(crate) fn drop_with_kind(bits: u64, kind: NativeKind) {
             // into the low 32 bits; no `Arc<T>` payload, no refcount
             // work at clone-on-read / drop-on-write.
             | NativeKind::Float32
-            | NativeKind::Char => {}
+            | NativeKind::Char
+            // R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 +
+            // §2.7.5 + §2.7.7/Q9, 2026-05-19): `NativeKind::Null`
+            // is a non-parametric absence-of-value sentinel — no
+            // `Arc<T>` payload, no refcount work.
+            | NativeKind::Null => {}
         }
     }
 }

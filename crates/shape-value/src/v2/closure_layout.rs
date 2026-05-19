@@ -720,7 +720,12 @@ impl Drop for SharedCell {
                 // the low 32 bits of the 8-byte cell. No `Arc<T>`
                 // payload, no refcount work at cell drop.
                 | NativeKind::Float32
-                | NativeKind::Char => {}
+                | NativeKind::Char
+                // R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 +
+                // §2.7.5 + §2.7.7/Q9, 2026-05-19): `NativeKind::Null`
+                // is a non-parametric absence-of-value sentinel — no
+                // Arc<T> payload, no refcount work at cell drop.
+                | NativeKind::Null => {}
             }
         }
     }

@@ -112,6 +112,12 @@ impl<'a> ValueFormatter<'a> {
         let bits = slot.slot.raw();
         match slot.kind {
             // ── Inline scalars ──────────────────────────────────────────
+            // R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 +
+            // §2.7.7/Q9, 2026-05-19): canonical absence-of-value
+            // discriminator — prints as `null` (mirror of the
+            // pre-disposition `(0, NativeKind::Bool)` sentinel's
+            // intended display surface).
+            NativeKind::Null => "null".to_string(),
             NativeKind::Bool => slot.slot.as_bool().to_string(),
             NativeKind::Int8
             | NativeKind::NullableInt8

@@ -5481,6 +5481,12 @@ pub(crate) fn storage_hint_to_field_kind(
         // the legacy LoadLocal/StoreLocal path that does refcount
         // accounting until per-Ptr typed ops audit lands.
         StorageHint::Ptr(_) => return None,
+        // R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 + §2.7.7/Q9,
+        // 2026-05-19): `NativeKind::Null` storage-hint has no
+        // FieldKind projection — null is an absence-of-value
+        // discriminator, not a per-field typed storage shape. Route
+        // to polymorphic-legacy fallback.
+        StorageHint::Null => return None,
     })
 }
 
@@ -5572,6 +5578,10 @@ pub(crate) mod typed_emit_metrics {
             // heap-bearing variant; one stable label per heap arm
             // would balloon this map, so collapse all `Ptr(_)` to "ptr".
             StorageHint::Ptr(_) => "ptr",
+            // R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 +
+            // §2.7.7/Q9, 2026-05-19): canonical absence-of-value
+            // discriminator joint-counter label.
+            StorageHint::Null => "null",
         }
     }
 

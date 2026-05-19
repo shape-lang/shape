@@ -515,11 +515,21 @@ impl KindedSlot {
         Self::from_string_arc(Arc::new(s.to_string()))
     }
 
-    /// A null/none-value `KindedSlot`. Bool-kind by convention so the slot
-    /// has a stable interpretation and Drop is a no-op.
+    /// A null/none-value `KindedSlot`.
+    ///
+    /// R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 + §2.7.5 +
+    /// §2.7.7/Q9, 2026-05-19): pre-disposition this returned
+    /// `(ValueSlot::none(), NativeKind::Bool)` as the §2.7 sentinel,
+    /// which collided with legitimate `false` bool slots (both encoded
+    /// as bits=0). The collision caused VM-only divergence per
+    /// W14.2-G6 SURFACE-G6-BOOL-NULL + SURFACE-G6-LET-ONLY-BODY +
+    /// SURFACE-G6-NONE-OUTPUT-ADAPTER. Post-disposition: kind IS the
+    /// discriminator per §2.7.7/Q9 — return `NativeKind::Null`. Drop
+    /// remains a no-op (Null is a non-parametric absence-of-value
+    /// sentinel with no Arc<T> payload).
     #[inline]
     pub fn none() -> Self {
-        Self::new(ValueSlot::none(), NativeKind::Bool)
+        Self::new(ValueSlot::none(), NativeKind::Null)
     }
 
     /// Read the inner slot.
@@ -1018,7 +1028,12 @@ impl Drop for KindedSlot {
                 // refcount work. Slot bits are the raw f32 bit pattern
                 // / `c as u32` zero-extended into the low 32 bits.
                 | NativeKind::Float32
-                | NativeKind::Char => {}
+                | NativeKind::Char
+                // R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 +
+                // §2.7.5 + §2.7.7/Q9, 2026-05-19): `NativeKind::Null`
+                // is a non-parametric absence-of-value sentinel — no
+                // Arc<T> payload, no refcount work.
+                | NativeKind::Null => {}
             }
         }
     }
@@ -1335,7 +1350,12 @@ impl Clone for KindedSlot {
                 // refcount work. Slot bits are the raw f32 bit pattern
                 // / `c as u32` zero-extended into the low 32 bits.
                 | NativeKind::Float32
-                | NativeKind::Char => {}
+                | NativeKind::Char
+                // R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 +
+                // §2.7.5 + §2.7.7/Q9, 2026-05-19): `NativeKind::Null`
+                // is a non-parametric absence-of-value sentinel — no
+                // Arc<T> payload, no refcount work.
+                | NativeKind::Null => {}
             }
         }
         Self {

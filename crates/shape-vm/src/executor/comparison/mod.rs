@@ -377,12 +377,27 @@ fn char_value(bits: u64, kind: NativeKind) -> Option<char> {
 }
 
 /// Test whether a `(bits, kind)` pair encodes the null/unit sentinel.
-/// `(0u64, NativeKind::Bool)` is the §2.7 sentinel; nullable scalar arms
-/// encode null as zero bits; heap arms have null as a zero pointer.
+///
+/// R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 + §2.7.5 + §2.7.7/Q9,
+/// 2026-05-19): pre-disposition `(0u64, NativeKind::Bool)` was the
+/// canonical null sentinel; SURFACE-G6-BOOL-NULL surfaced this colliding
+/// with legitimate `false` bool values (both encoded as bits=0). The
+/// `bool`-default parameter fill-in path emitted `LoadLocal + IsNull +
+/// JumpIfFalse + StoreLocal(default)` and mis-detected `check(false)`
+/// as "caller omitted; fill default", causing VM-only divergence vs the
+/// JIT path. Post-disposition: `NativeKind::Bool` slots NEVER carry the
+/// null sentinel — kind IS the discriminator per §2.7.7/Q9. Null is
+/// pushed with `NativeKind::Null` discriminator at `PushNull` +
+/// `Constant::Null` + `Constant::Unit` producer sites.
 #[inline]
 fn is_null_kinded(bits: u64, kind: NativeKind) -> bool {
     match kind {
-        NativeKind::Bool => bits == 0, // unit / null sentinel
+        // R5b-2 disposition: Null IS the absence-of-value discriminator;
+        // kind alone is decisive, bits unused.
+        NativeKind::Null => true,
+        // R5b-2 disposition: Bool slots carry only `{0, 1}` bit
+        // patterns for real bool values — `false` is NOT null.
+        NativeKind::Bool => false,
         NativeKind::String | NativeKind::Ptr(_) => bits == 0,
         NativeKind::NullableFloat64 => f64::from_bits(bits).is_nan(),
         NativeKind::NullableInt8
@@ -404,6 +419,9 @@ fn is_null_kinded(bits: u64, kind: NativeKind) -> bool {
 #[inline]
 fn kind_type_name(kind: NativeKind) -> &'static str {
     match kind {
+        // R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 + §2.7.7/Q9,
+        // 2026-05-19): canonical absence-of-value discriminator.
+        NativeKind::Null => "null",
         NativeKind::Bool => "bool",
         NativeKind::Float64 | NativeKind::NullableFloat64 => "number",
         // Round 19 S1.5 W12-nativekind-scalar-additions (2026-05-14):
@@ -667,10 +685,14 @@ mod tests {
         bits != 0
     }
 
+    /// R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 + §2.7.5 +
+    /// §2.7.7/Q9, 2026-05-19): post-disposition `NativeKind::Null` is
+    /// the canonical absence-of-value discriminator; kind alone is
+    /// decisive, bits unused.
     #[test]
-    fn is_null_on_null_sentinel_returns_true() {
+    fn is_null_on_null_kind_returns_true() {
         let mut vm = make_vm();
-        vm.push_kinded(0u64, NativeKind::Bool).unwrap();
+        vm.push_kinded(0u64, NativeKind::Null).unwrap();
         assert!(run_is_null(&mut vm));
     }
 
@@ -683,19 +705,34 @@ mod tests {
 
     #[test]
     fn is_null_on_zero_int_returns_false() {
-        // int 0 is NOT null — kind discriminates from the (Bool, 0) sentinel.
+        // int 0 is NOT null — kind discriminates the int-zero literal
+        // from the null sentinel (post-R5b-2 the discriminator is
+        // `NativeKind::Null`, not `(NativeKind::Bool, bits=0)`).
         let mut vm = make_vm();
         vm.push_kinded(0u64, NativeKind::Int64).unwrap();
         assert!(!run_is_null(&mut vm));
     }
 
+    /// R5b-2-bool-null-sentinel-cluster regression pin (ADR-006 §2.7 +
+    /// §2.7.5 + §2.7.7/Q9, 2026-05-19): post-disposition Bool slots
+    /// carry only legitimate `{0, 1}` bool bit patterns — `false` is
+    /// NOT null. SURFACE-G6-BOOL-NULL pin: pre-disposition
+    /// `is_null_kinded(0, NativeKind::Bool) == true` caused
+    /// `check(false)` for `fn check(val: bool = true)` to mis-detect
+    /// false as null and fill the default value (returning `true`
+    /// instead of `false`).
     #[test]
-    fn is_null_on_false_bool_returns_true_via_zero_bits() {
-        // Bool with zero bits is, by §2.7 sentinel convention, the null/unit
-        // marker. (Distinct from `Bool` with 1u64 bits = true.)
+    fn is_null_on_false_bool_returns_false_post_r5b2() {
         let mut vm = make_vm();
         vm.push_kinded(0u64, NativeKind::Bool).unwrap();
-        assert!(run_is_null(&mut vm));
+        assert!(!run_is_null(&mut vm));
+    }
+
+    #[test]
+    fn is_null_on_true_bool_returns_false() {
+        let mut vm = make_vm();
+        vm.push_kinded(1u64, NativeKind::Bool).unwrap();
+        assert!(!run_is_null(&mut vm));
     }
 
     // ----- nb_compare_numeric_kinded direct-API tests -----

@@ -146,16 +146,16 @@ fn test_early_return_in_loop() {
     .expect_number(5.0);
 }
 
-/// Verifies void function returns unit or none. W14.2-G6 e2e-functions
-/// triage SURFACE-AND-STOP: a function body whose only statement is
-/// `let x = 1` (no trailing expression) returns `Bool(false)` (the
-/// §2.7 null/unit sentinel bit pattern; see comparison/mod.rs:385
-/// "(0u64, NativeKind::Bool) is the §2.7 sentinel"). Producer-side gap:
-/// the bytecode compiler's implicit-return path for let-only function
-/// bodies emits the §2.7 sentinel as the return-bits + NativeKind::Bool
-/// kind, and the JSON output adapter materializes it as `Bool(false)`
-/// instead of distinguishing unit/null. Routed to W14.2-H1 exception
-/// registry as `v0.4-let-only-fn-body-returns-bool-false-sentinel`.
+/// Verifies void function returns unit or none. R5b-2-bool-null-sentinel-cluster
+/// CLOSE: the W14.2-G6 SURFACE-G6-LET-ONLY-BODY pin previously asserted
+/// `expect_bool(false)` documenting the producer-side bug where the
+/// bytecode compiler's implicit-return path emitted `(0u64,
+/// NativeKind::Bool)` (the §2.7 null sentinel) and the JSON output
+/// adapter materialized it as `{"Bool": false}` instead of `Null`.
+/// Per ADR-006 §2.7 + §2.7.5 + §2.7.7/Q9 (2026-05-19) `PushNull` now
+/// pushes `NativeKind::Null` and `slot_to_wire` projects Null to
+/// `WireValue::Null` directly. Test updated to assert correct empirical
+/// behavior: `do_nothing()` returns None/null.
 #[test]
 fn test_void_function_returns_unit_or_none() {
     ShapeTest::new(
@@ -166,9 +166,43 @@ fn test_void_function_returns_unit_or_none() {
         do_nothing()
     "#,
     )
-    // VM let-only fn body returns Bool(false) sentinel instead of None;
-    // empirically pinned post-W14.2-G6 triage.
-    .expect_bool(false);
+    .expect_none();
+}
+
+/// R5b-2-bool-null-sentinel-cluster regression test (ADR-006 §2.7 +
+/// §2.7.5 + §2.7.7/Q9, 2026-05-19): an empty-body function (no
+/// statements) also returns None via implicit-return at
+/// `compiler/functions.rs:1633` (PushNull + ReturnValue). Post-
+/// disposition the implicit-return null is `NativeKind::Null` not
+/// `(NativeKind::Bool, 0)`.
+#[test]
+fn test_empty_function_body_returns_none() {
+    ShapeTest::new(
+        r#"
+        fn empty() {}
+        empty()
+    "#,
+    )
+    .expect_none();
+}
+
+/// R5b-2-bool-null-sentinel-cluster regression test (ADR-006 §2.7 +
+/// §2.7.5 + §2.7.7/Q9, 2026-05-19): let-only body with two let
+/// statements (no trailing expression) returns None — the
+/// implicit-return path at functions.rs:1633 is independent of
+/// statement count.
+#[test]
+fn test_multi_let_function_body_returns_none() {
+    ShapeTest::new(
+        r#"
+        fn two_lets() {
+            let x: int = 1
+            let y: int = 2
+        }
+        two_lets()
+    "#,
+    )
+    .expect_none();
 }
 
 /// Verifies void function with side effect.

@@ -27,7 +27,16 @@ impl VirtualMachine {
         use OpCode::*;
         match instruction.opcode {
             PushConst => self.op_push_const(instruction)?,
-            PushNull => self.push_kinded(0u64, NativeKind::Bool)?,
+            // R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 + §2.7.5 +
+            // §2.7.7/Q9, 2026-05-19): pre-disposition `PushNull` pushed
+            // `(0u64, NativeKind::Bool)` as the §2.7 null sentinel,
+            // colliding with legitimate `false` bool slots (both encoded
+            // as bits=0). Caused VM-only divergence per W14.2-G6
+            // SURFACE-G6-BOOL-NULL + SURFACE-G6-LET-ONLY-BODY (implicit-
+            // return null at compiler/functions.rs:1633 materialized as
+            // `Bool(false)`). Post-disposition: kind IS the
+            // discriminator per §2.7.7/Q9 — push `NativeKind::Null`.
+            PushNull => self.push_kinded(0u64, NativeKind::Null)?,
             Pop => {
                 let (bits, kind) = self.pop_kinded()?;
                 drop_with_kind(bits, kind);
@@ -97,14 +106,19 @@ impl VirtualMachine {
                 crate::bytecode::Constant::Bool(b) => {
                     return self.push_kinded(*b as u64, NativeKind::Bool);
                 }
-                // Null: zero bits, Bool kind (the §2.7 default sentinel —
-                // Drop is a no-op).
+                // R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 + §2.7.5
+                // + §2.7.7/Q9, 2026-05-19): pre-disposition Null and Unit
+                // constants pushed `(0u64, NativeKind::Bool)` as the §2.7
+                // sentinel, colliding with legitimate `false` bool slots.
+                // Post-disposition uses `NativeKind::Null` — kind is the
+                // discriminator. Drop is no-op (Null is a non-parametric
+                // absence-of-value sentinel with no Arc<T> payload).
                 crate::bytecode::Constant::Null => {
-                    return self.push_kinded(0u64, NativeKind::Bool);
+                    return self.push_kinded(0u64, NativeKind::Null);
                 }
                 // Unit: same shape as Null (no payload).
                 crate::bytecode::Constant::Unit => {
-                    return self.push_kinded(0u64, NativeKind::Bool);
+                    return self.push_kinded(0u64, NativeKind::Null);
                 }
                 crate::bytecode::Constant::Function(id) => {
                     // Function ID is an inline u16 stored in the lower bits.

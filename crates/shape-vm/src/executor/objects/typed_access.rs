@@ -515,6 +515,9 @@ impl VirtualMachine {
 #[inline]
 fn kind_type_name(kind: NativeKind) -> &'static str {
     match kind {
+        // R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 + §2.7.7/Q9,
+        // 2026-05-19): canonical absence-of-value discriminator.
+        NativeKind::Null => "null",
         NativeKind::Bool => "bool",
         NativeKind::Float64 | NativeKind::NullableFloat64 => "number",
         // Round 19 S1.5 W12-nativekind-scalar-additions (2026-05-14):

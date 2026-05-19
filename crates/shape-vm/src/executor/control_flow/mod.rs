@@ -65,6 +65,10 @@ fn kinded_truthy(bits: u64, kind: NativeKind) -> bool {
         // truthy rule below).
         NativeKind::StringV2 | NativeKind::DecimalV2 => bits != 0,
         NativeKind::String | NativeKind::Ptr(_) => bits != 0,
+        // R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 + §2.7.7/Q9,
+        // 2026-05-19): `NativeKind::Null` is the absence-of-value
+        // sentinel; falsy by definition.
+        NativeKind::Null => false,
     }
 }
 

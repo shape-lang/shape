@@ -377,13 +377,15 @@ fn test_function_negative_return() {
 }
 
 /// Verifies function returns none explicitly. W14.2-G6 e2e-functions
-/// triage SURFACE-AND-STOP: `None` value materializes as `Bool(false)`
-/// in the JSON output adapter (even at top-level — `None` as a sole
-/// expression produces `{"Bool": false}` per empirical reproducer at
-/// HEAD), same §2.7 null/Bool sentinel-bit collision class as
-/// `test_void_function_returns_unit_or_none` above. Routed to W14.2-H1
-/// exception registry as
-/// `v0.4-none-output-adapter-bool-sentinel-collision`.
+/// R5b-2-bool-null-sentinel-cluster CLOSE: the W14.2-G6
+/// SURFACE-G6-NONE-OUTPUT-ADAPTER pin previously asserted
+/// `expect_bool(false)` documenting the consumer-side bug where the
+/// `(0u64, NativeKind::Bool)` null sentinel was materialized as
+/// `{"Bool": false}` by `slot_to_wire`. Per ADR-006 §2.7 + §2.7.5 +
+/// §2.7.7/Q9 (2026-05-19) `Constant::Null` / `Constant::Unit` /
+/// `PushNull` now emit `NativeKind::Null` and `slot_to_wire` projects
+/// it to `WireValue::Null` directly. Test updated to assert correct
+/// empirical behavior: `get_none()` returns None/null.
 #[test]
 fn test_function_returns_none_explicitly() {
     ShapeTest::new(
@@ -392,8 +394,31 @@ fn test_function_returns_none_explicitly() {
         get_none()
     "#,
     )
-    // VM None -> output-adapter materializes as Bool(false); empirically pinned.
-    .expect_bool(false);
+    .expect_none();
+}
+
+/// R5b-2-bool-null-sentinel-cluster regression test (ADR-006 §2.7 +
+/// §2.7.5 + §2.7.7/Q9, 2026-05-19): top-level `None` literal renders
+/// as `WireValue::Null` not `{"Bool": false}`. Pre-disposition
+/// SURFACE-G6-NONE-OUTPUT-ADAPTER reproducer.
+#[test]
+fn test_top_level_none_literal_renders_as_null() {
+    ShapeTest::new(r#"None"#).expect_none();
+}
+
+/// R5b-2-bool-null-sentinel-cluster regression test (ADR-006 §2.7 +
+/// §2.7.5 + §2.7.7/Q9, 2026-05-19): a function returning
+/// `Option<int>` with explicit `None` body returns None correctly
+/// (kind discriminator preserved through return path).
+#[test]
+fn test_function_option_int_returns_none() {
+    ShapeTest::new(
+        r#"
+        fn opt() -> Option<int> { None }
+        opt()
+    "#,
+    )
+    .expect_none();
 }
 
 /// Verifies function zero return.
