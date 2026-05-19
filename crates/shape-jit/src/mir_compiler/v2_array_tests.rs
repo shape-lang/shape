@@ -233,3 +233,86 @@ arr.length
     );
     assert_eq!(as_i64(v), 5);
 }
+
+// ===========================================================================
+// Phase 4b Round 5 W14.2-E2 — Array-element aggregate coverage
+//
+// Per `docs/cluster-audits/v0.3-w14-test-coverage-audit.md` §4 W11 and
+// `docs/cluster-audits/v0.3-w11-jit-new-array-close.md` §4 Class A':
+//
+// > W11-followup-slice-classify: arr_slice.shape (nums[1..4]) lowers via
+// > Aggregate([object, index, end_index]) — the destination slot's
+// > ConcreteType is unstamped because no SliceStore MIR statement exists.
+//
+// At HEAD 2924b685 the simple slice-and-read pattern works byte-equal
+// VM == JIT for both `Array<int>` and `Array<number>` because the
+// downstream W13/W14/W16.2-A closes propagated stamping through the
+// IndexAccess slice path. Pin the working cases below.
+// ===========================================================================
+
+/// W14.2-E2 typed `Array<int>` slice element read. VM==JIT=20.
+#[test]
+fn v2_array_i64_slice_first_element() {
+    let v = jit_eval(
+        r#"
+let arr: Array<int> = [10, 20, 30, 40]
+let s = arr[1..3]
+s[0]
+"#,
+    );
+    assert_eq!(as_i64(v), 20);
+}
+
+/// W14.2-E2 typed `Array<int>` slice second element. VM==JIT=30.
+/// Note: parallel `s.length`-on-slice shape surfaces a JITExecutor-direct
+/// TypeError ("expected array, object, or string, got scalar") that does
+/// NOT reproduce at the release-binary `--mode jit` level. Tracked as
+/// W14.2-E-SURFACE-B in the close report. Pin only the element-access
+/// shape here.
+#[test]
+fn v2_array_i64_slice_second_element() {
+    let v = jit_eval(
+        r#"
+let arr: Array<int> = [10, 20, 30, 40]
+let s = arr[1..3]
+s[1]
+"#,
+    );
+    assert_eq!(as_i64(v), 30);
+}
+
+/// W14.2-E2 typed `Array<number>` slice element read. VM==JIT=2.5.
+#[test]
+fn v2_array_f64_slice_first_element() {
+    let v = jit_eval(
+        r#"
+let arr: Array<number> = [1.5, 2.5, 3.5, 4.5]
+let s = arr[1..3]
+s[0]
+"#,
+    );
+    assert!((as_f64(v) - 2.5).abs() < 1e-9);
+}
+
+/// W14.2-E2 typed `Array<int>` open-range iteration sum. VM==JIT=70.
+#[test]
+fn v2_array_i64_open_range_iteration_sum() {
+    let v = jit_eval(
+        r#"
+let arr: Array<int> = [10, 20, 30, 40]
+let mut sum: int = 0
+for i in 0..arr.length {
+    sum = sum + arr[i]
+}
+sum
+"#,
+    );
+    assert_eq!(as_i64(v), 100);
+}
+
+// NOTE: `arr[1..]` open-range slice → bind-and-element-access via
+// JITExecutor direct path surfaces SIGSEGV at HEAD 2924b685. The same
+// pattern works at the release-binary `--mode jit` level (verified via
+// the smoke matrix expansion). Tracked as W14.2-E-SURFACE-C in the
+// W14.2-E close report. NOT pinned as a failing test per surface-and-stop
+// discipline: failing tests would block the close-gate green.

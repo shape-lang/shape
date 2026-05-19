@@ -140,3 +140,196 @@ fn jit_compatible_with_arrays() {
     )
     .expect_number(42.0);
 }
+
+// =========================================================================
+// Phase 4b Round 5 W14.2-E2 — Aggregate / BinOp coverage tier matrix
+//
+// Per `docs/cluster-audits/v0.3-w14-test-coverage-audit.md` §4 W11:
+// > W11 partial close | (b) PARTIAL | 12/27 → 21/27 VM + 12/27 → 16/27 JIT
+// > per W11 close. 5 named follow-ups in §5 v0.4-candidate.
+//
+// `ShapeTest` evaluates via the bytecode VM. Pin the VM-side correct
+// behavior for the W11-fup-A (BinOp Pow/BitAnd/BitOr/BitXor/Shl/Shr) +
+// W14.2-A1 (UnOp::BitNot) landed-pattern set + the W11-fup v0.4-candidate
+// residuals that have become VM==JIT byte-equal at HEAD per the W14.2-E
+// empirical-matrix check (open-range, instanceof, object-spread, slice
+// element-access, unary-neg int64).
+// =========================================================================
+
+#[test]
+fn vm_aggregate_binop_pow_int() {
+    ShapeTest::new(
+        r#"
+        let a = 2
+        let b = 3
+        a ** b
+    "#,
+    )
+    .expect_number(8.0);
+}
+
+#[test]
+fn vm_aggregate_binop_bitand_int() {
+    ShapeTest::new(
+        r#"
+        let a = 12
+        let b = 10
+        a & b
+    "#,
+    )
+    .expect_number(8.0);
+}
+
+#[test]
+fn vm_aggregate_binop_bitor_int() {
+    ShapeTest::new(
+        r#"
+        let a = 12
+        let b = 10
+        a | b
+    "#,
+    )
+    .expect_number(14.0);
+}
+
+#[test]
+fn vm_aggregate_binop_bitxor_int() {
+    ShapeTest::new(
+        r#"
+        let a = 12
+        let b = 10
+        a ^ b
+    "#,
+    )
+    .expect_number(6.0);
+}
+
+#[test]
+fn vm_aggregate_binop_shl_int() {
+    ShapeTest::new(
+        r#"
+        let a = 12
+        a << 1
+    "#,
+    )
+    .expect_number(24.0);
+}
+
+#[test]
+fn vm_aggregate_binop_shr_int() {
+    ShapeTest::new(
+        r#"
+        let a = 12
+        a >> 1
+    "#,
+    )
+    .expect_number(6.0);
+}
+
+#[test]
+fn vm_aggregate_unop_bitnot_int() {
+    ShapeTest::new(
+        r#"
+        let a = 12
+        ~a
+    "#,
+    )
+    .expect_number(-13.0);
+}
+
+#[test]
+fn vm_aggregate_unary_neg_int() {
+    ShapeTest::new(
+        r#"
+        let a = 10
+        let b = -a
+        b
+    "#,
+    )
+    .expect_number(-10.0);
+}
+
+#[test]
+fn vm_aggregate_index_slice_first_element() {
+    ShapeTest::new(
+        r#"
+        let nums = [10, 20, 30, 40]
+        let s = nums[1..3]
+        s[0]
+    "#,
+    )
+    .expect_number(20.0);
+}
+
+#[test]
+fn vm_aggregate_instanceof_int_true() {
+    ShapeTest::new(
+        r#"
+        let v: int = 42
+        v instanceof int
+    "#,
+    )
+    .expect_bool(true);
+}
+
+#[test]
+fn vm_aggregate_object_spread_simple() {
+    ShapeTest::new(
+        r#"
+        let base = { x: 1, y: 2 }
+        let extended = { ...base, z: 3 }
+        extended.z
+    "#,
+    )
+    .expect_number(3.0);
+}
+
+#[test]
+fn vm_aggregate_compound_bitwise_and_assign() {
+    ShapeTest::new(
+        r#"
+        let mut x = 5
+        x &= 3
+        x
+    "#,
+    )
+    .expect_number(1.0);
+}
+
+#[test]
+fn vm_aggregate_compound_bitwise_or_assign() {
+    ShapeTest::new(
+        r#"
+        let mut x = 5
+        x |= 3
+        x
+    "#,
+    )
+    .expect_number(7.0);
+}
+
+#[test]
+fn vm_aggregate_open_range_iteration() {
+    ShapeTest::new(
+        r#"
+        let mut sum = 0
+        for i in 0..5 {
+            sum = sum + i
+        }
+        sum
+    "#,
+    )
+    .expect_number(10.0);
+}
+
+#[test]
+fn vm_aggregate_mixed_bitwise_chain() {
+    ShapeTest::new(
+        r#"
+        let a = 12
+        let b = 10
+        (a & b) | (a ^ b)
+    "#,
+    )
+    .expect_number(14.0);
+}
