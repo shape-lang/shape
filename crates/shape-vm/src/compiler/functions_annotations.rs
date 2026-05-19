@@ -208,7 +208,9 @@ impl BytecodeCompiler {
     }
 
     fn emit_annotation_runtime_ctx(&mut self) -> Result<()> {
-        let empty_schema_id = self.type_tracker.register_inline_object_schema(&[]);
+        // W17.2-C §4.D.5 migration: empty-fields case uses the typed
+        // variant directly (no Any fallback needed at empty-schema sites).
+        let empty_schema_id = self.type_tracker.register_inline_object_schema_typed(&[]);
         if empty_schema_id > u16::MAX as u32 {
             return Err(ShapeError::RuntimeError {
                 message: "Internal error: annotation ctx schema id overflow".to_string(),
@@ -1427,7 +1429,9 @@ impl BytecodeCompiler {
             OpCode::PushConst,
             Some(Operand::Const(impl_ref_const)),
         ));
-        let empty_schema_id = self.type_tracker.register_inline_object_schema(&[]);
+        // W17.2-C §4.D.5 migration: empty-fields case uses the typed
+        // variant directly.
+        let empty_schema_id = self.type_tracker.register_inline_object_schema_typed(&[]);
         self.emit(Instruction::new(
             OpCode::NewTypedObject,
             Some(Operand::TypedObjectAlloc {

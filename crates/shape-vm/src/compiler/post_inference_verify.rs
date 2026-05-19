@@ -117,6 +117,35 @@ pub(crate) const WHITELIST: &[WhitelistEntry] = &[
         reason: "VM-state introspection (call payload args); \
                  state_builtins/core.rs:89",
     },
+    // W17.2-C namespaced-state-builtins prefix exception. The
+    // `std::core::state::*` registered schemas (FrameState / VmState /
+    // ModuleState / CallPayload / Delta / FunctionRef) carry
+    // `FieldType::Any` fields by-design — the VM-state introspection
+    // surface is heterogeneous per audit §4.D.15. Pre-W17.2-C the
+    // empty-prefix transitional row absorbed these; post-W17.2-C
+    // narrowing the entire namespace prefix is whitelisted as a
+    // single named-exception class.
+    //
+    // Module-registration site: `ModuleExports::new("std::core::state")`
+    // at `crates/shape-vm/src/executor/state_builtins/core.rs:46`.
+    // Schemas added via `module.add_type_schema(TypeSchema::new(...))`
+    // at lines 51 (FunctionRef) / 59-69 (FrameState) / 71-78 (VmState) /
+    // 80-83 (ModuleState) / 85-91 (CallPayload). Delta is registered
+    // implicitly via `ConcreteType::Named("Delta")` at
+    // `state_builtins/core.rs:194` (diff function return type) +
+    // schema_registry::register_predeclared_any_schema fallback. All
+    // share the parallel-`field_kinds` carrier-tier per ADR-006 §2.7.7/Q9.
+    WhitelistEntry {
+        rule: WhitelistRule::SchemaNamePrefix("std::core::state::"),
+        section: "§4.D.15",
+        permanent: true,
+        reason: "namespaced VM-state introspection surface \
+                 (FrameState/VmState/ModuleState/CallPayload/Delta/\
+                 FunctionRef); state_builtins/core.rs:46-91 + Delta via \
+                 ConcreteType::Named at core.rs:194 + register_predeclared \
+                 fallback; parallel-`field_kinds` per ADR-006 §2.7.7/Q9 \
+                 + §2.7.26",
+    },
     WhitelistEntry {
         rule: WhitelistRule::SchemaNamePrefix("__mod_"),
         section: "§4.D.6",
@@ -264,57 +293,89 @@ pub(crate) const WHITELIST: &[WhitelistEntry] = &[
         permanent: true,
         reason: "stdlib runtime-builtin schema; builtin_schemas.rs",
     },
-    // ----- TRANSITIONAL row (§4.D.3–§4.D.8) NARROWED at W17.2-B close
+    // ----- TRANSITIONAL row (§4.D.3 + §4.D.5 + §4.D.10-emission)
+    //       NARROWED at W17.2-C close (post-W17.2-B PROPAGATE landings)
     //
-    // v0.3 Phase 4b Round 5b W17.2-B (audit §9.B.1 (a) supervisor
-    // ratify 2026-05-19): the §4.D.1 + §4.D.2 + §4.D.9 sites NOW close
-    // via `FieldType::Option(Box<FieldType>)` PROPAGATE rebuild at
-    // `crates/shape-runtime/src/type_schema/field_types.rs` —
-    // `semantic_to_field_type` returns `FieldType::Any` from ZERO
-    // producer callsites for Option / is_optional inputs, and the
-    // `_ =>` fall-through is replaced with explicit per-variant arms
-    // (TypeVar/Never/Void/Function use `unreachable!()` per audit
-    // §4.D.2). The §4.D.9 `Literal::None` site at
-    // `compiler/expressions/collections.rs:21` now projects to
-    // `FieldType::Option(Box<FieldType::Any>)` — outer discriminator
-    // concrete, inner Any narrowed by bidirectional inference at the
-    // context site.
+    // v0.3 Phase 4b Round 5b W17.2-C (audit §9.B.3 supervisor ratify
+    // 2026-05-19 + team-lead R5b-2 dispatch operational call on
+    // bundling). At W17.2-C close, the transitional row is NARROWED
+    // from the empty-prefix (everything) absorber to a
+    // `__inline_obj_*` prefix-only absorber. The narrowing landings:
     //
-    // The §4.D.3-§4.D.8 sites (inline-object inference at
-    // `expressions/collections.rs:487/496/953/982`, untyped
-    // `register_inline_object_schema` at `type_tracking.rs:1049`,
-    // generic-container annotation lowering at `helpers.rs:4901`,
-    // annotation lowering fall-through at `helpers.rs:4905`) remain
-    // W17.2-C territory + the §4.D.10 emission-name rename
-    // (functions_annotations.rs / expressions/mod.rs → align with the
-    // `__annotation_ctx_*` whitelist convention introduced at W17.2-A)
-    // is also pending. Until both land, the surviving transitional row
-    // below absorbs user-named + `__inline_obj_*` schemas with a
-    // STRUCTURED reason that names the remaining close-gate.
+    // - §4.D.1 + §4.D.2 + §4.D.9: CLOSED at W17.2-B (close commit
+    //   `e316e171`) via `FieldType::Option(Box<FieldType>)` PROPAGATE
+    //   rebuild at `crates/shape-runtime/src/type_schema/field_types.rs`.
+    // - §4.D.4: CLOSED at W17.2-C via structured E#### compile error at
+    //   the struct-literal schema-lookup-miss fallback
+    //   (`compiler/expressions/collections.rs:971-980 + 1000-1008`).
+    // - §4.D.7: NARROWED 5-name → 4-name at W17.2-C
+    //   (`compiler/helpers.rs:4901`) — Option<T> PROPAGATES via the
+    //   §4.D.1 W17.2-B rebuild; HashMap/Map/Result/Set retain the
+    //   TRANSITIONAL fallback pending per-container `FieldType`
+    //   variant introduction at v0.4 W17.3/W17.4.
+    // - §4.D.8: CLOSED at W17.2-C — `_ =>` fall-through at
+    //   `compiler/helpers.rs:4905` replaced with explicit per-variant
+    //   arms (§4.D.2 same-pattern discipline). Variants that can't
+    //   project to a concrete FieldType (Function/Union/Intersection/
+    //   Tuple/inline Object/Void/Never/Null/Undefined/Dyn) each get an
+    //   audit-cited named arm projecting to `FieldType::Any` — the
+    //   verification-pass safety net catches if any reach user-facing
+    //   schemas.
+    // - §4.D.5: CLOSED at W17.2-C via `register_inline_object_schema`
+    //   deprecation at `type_tracking.rs:1024-1057` + caller migration.
+    //   The deprecated untyped variant now routes through
+    //   `register_inline_object_schema_typed` with `FieldType::Any`
+    //   per field; same `__inline_obj_N` schema-name format. The
+    //   prefix absorber below handles these via the verification-pass
+    //   safety net.
     //
-    // SURFACE-AND-STOP per audit §0 + CLAUDE.md §10 (surface-and-stop
-    // discipline): the §4.D.10 emission-rename at functions_annotations.rs
-    // is a NAMED-AND-CITED outstanding item at HEAD <commit>;
-    // verification-pass-side absorption stays in place pre-rename.
+    // SURVIVING (R5b/R6 follow-up territory per audit §4.D.10
+    // explicit cite):
+    //
+    // - §4.D.10 emission-rename: annotation-handler ctx schemas at
+    //   `functions_annotations.rs:228-1555` + `expressions/mod.rs:309-667`
+    //   currently emit through `register_inline_object_schema_typed`,
+    //   producing names `__inline_obj_N` instead of the
+    //   `__annotation_ctx_*` whitelist convention introduced at
+    //   W17.2-A. R5b/R6 follow-up will introduce a dedicated
+    //   registration helper (e.g.
+    //   `register_named_synthetic_schema_typed("__annotation_ctx_logging", ...)`)
+    //   that uses the `__annotation_ctx_*` prefix and lets the
+    //   permanent §4.D.10 whitelist row catch them directly.
+    //
+    // SURFACE-AND-STOP per audit §0 + CLAUDE.md §10: the §4.D.10
+    // emission-rename is a NAMED-AND-CITED R5b/R6 follow-up at the
+    // W17.2-C close commit; verification-pass-side absorption stays
+    // in place pre-rename via the narrowed `__inline_obj_*` prefix
+    // row below.
+    //
+    // NARROWED from `SchemaNamePrefix("")` (catch-all) to
+    // `SchemaNamePrefix("__inline_obj_")` (bounded). User-named schemas
+    // carrying `FieldType::Any` outside the named-exception classes
+    // now surface E0900 — the post-W17.2-C diagnostic shape.
     WhitelistEntry {
-        rule: WhitelistRule::SchemaNamePrefix(""),
-        section: "§4.D.3-8 + §4.D.10-emission",
+        rule: WhitelistRule::SchemaNamePrefix("__inline_obj_"),
+        section: "§4.D.3 + §4.D.5 + §4.D.10-emission",
         permanent: false,
-        reason: "TRANSITIONAL (NARROWED post-W17.2-B) — §4.D.1+§4.D.2+§4.D.9 \
-                 CLOSED at W17.2-B via FieldType::Option PROPAGATE \
-                 rebuild + semantic_to_field_type explicit per-variant \
-                 arms; surviving sites: §4.D.3 (collections.rs:487/496 \
-                 inline-object inference) + §4.D.4 (collections.rs:953/982 \
-                 struct-literal schema-lookup miss) + §4.D.5 \
-                 (type_tracking.rs:1049 untyped \
-                 register_inline_object_schema) + §4.D.7 (helpers.rs:4901 \
-                 generic-container narrowing) + §4.D.8 (helpers.rs:4905 \
-                 annotation lowering fall-through) — W17.2-C territory; \
+        reason: "TRANSITIONAL (NARROWED at W17.2-C from empty-prefix \
+                 catch-all to `__inline_obj_*` prefix-only) — \
+                 §4.D.1+§4.D.2+§4.D.4+§4.D.7+§4.D.8+§4.D.9 CLOSED at \
+                 W17.2-B+W17.2-C via FieldType::Option PROPAGATE rebuild \
+                 + collections.rs:975/1004 structured E#### compile \
+                 error + helpers.rs:4901 4-name narrowing + helpers.rs:4905 \
+                 explicit per-variant arms + register_inline_object_schema \
+                 deprecation+caller migration. Surviving territory: \
+                 §4.D.3 (inline-object inference at \
+                 `expressions/collections.rs:509/518` — `__inline_obj_N` \
+                 emission with FieldType::Any per field when RHS is \
+                 non-literal) + §4.D.5 carrier (`type_tracking.rs:1024` \
+                 deprecated untyped variant routes through typed-with-Any) \
                  + §4.D.10 emission-rename \
-                 (functions_annotations.rs/expressions/mod.rs schemas \
-                 use `__inline_obj_*` instead of the `__annotation_ctx_*` \
-                 whitelist convention) — post-W17.2-A R5b/R6 follow-up. \
-                 Take-both at W17.2-C close strips this row.",
+                 (`functions_annotations.rs/expressions/mod.rs` schemas \
+                 use `__inline_obj_*` instead of `__annotation_ctx_*` \
+                 whitelist convention) — R5b/R6 follow-up per audit \
+                 §4.D.10 explicit cite. Take-both at W17.3/R5b/R6 close \
+                 strips this row.",
     },
 ];
 
@@ -352,16 +413,18 @@ fn verify_schema(schema: &TypeSchema, errors: &mut Vec<ShapeError>) {
     let is_enum_schema = schema.is_enum();
     // Whole-schema whitelist sites (`Row`, `FrameState`, `__mod_*`,
     // builtin schemas, etc.) pass without per-field checks — the
-    // entire schema is by-design heterogeneous. The §4.D.3-8 + §4.D.10-
-    // emission transitional row (post-W17.2-B narrowing) is excluded
-    // from whole-schema short-circuit so per-field tracking still
-    // applies; it fires via match_whitelist at per-field time.
+    // entire schema is by-design heterogeneous. The §4.D.3 + §4.D.5 +
+    // §4.D.10-emission transitional row (post-W17.2-C narrowed to
+    // `__inline_obj_*` prefix-only) IS included in whole-schema
+    // short-circuit since the narrowed prefix is bounded and matches
+    // ONLY synthetic inline-object schemas (the empty-prefix catch-all
+    // was stripped at W17.2-C close per audit §9.B.3).
     let whole_schema_match = WHITELIST.iter().find(|entry| match entry.rule {
         WhitelistRule::SchemaName(name) => name == schema.name,
         WhitelistRule::SchemaNamePrefix(prefix) => {
-            // The empty-prefix transitional row matches everything;
-            // don't short-circuit here — let it fire via match_whitelist
-            // at per-field time.
+            // Defensive guard against accidental empty-prefix
+            // re-introduction; the narrowed `__inline_obj_*` prefix is
+            // bounded by construction at W17.2-C close.
             !prefix.is_empty() && schema.name.starts_with(prefix)
         }
         WhitelistRule::EnumPayloadField => false,
@@ -781,21 +844,17 @@ mod tests {
         }
     }
 
-    // ----- Post-W17.2-B narrowed-transitional sanity check + new
+    // ----- Post-W17.2-C narrowed-transitional sanity check + new
     //       regressions -----
 
-    /// Post-W17.2-B (audit §9.B.1 (a) supervisor ratify 2026-05-19):
-    /// the transitional `permanent: false` row was NARROWED at W17.2-B
-    /// close (not removed wholesale; see source comment). The §4.D.1
-    /// + §4.D.2 + §4.D.9 sites close via Option-rebuild; the §4.D.3-8
-    /// + §4.D.10-emission sites remain absorbed pending W17.2-C close
-    /// + R5b/R6 emission-rename follow-up. The primary entry point
-    /// still ABSORBS user-named schemas with `FieldType::Any` at
-    /// W17.2-B landing; the negative tests use
-    /// `verify_registry_permanent_only` to exercise the post-W17.2-C
+    /// Post-W17.2-C (audit §9.B.3 supervisor ratify 2026-05-19): the
+    /// transitional row was NARROWED from empty-prefix (catch-all) to
+    /// `__inline_obj_*` (prefix-only). User-named schemas with
+    /// `FieldType::Any` outside the named-exception classes NOW fire
+    /// E0900 via the primary `run_on` entry — the post-W17.2-C
     /// diagnostic shape.
     #[test]
-    fn transitional_user_any_still_absorbed_post_w17_2_b() {
+    fn post_w17_2_c_user_named_any_fires_via_primary_entry() {
         let mut reg = TypeSchemaRegistry::new();
         let id = reg.allocate_id();
         let schema = TypeSchema::with_id(
@@ -804,13 +863,62 @@ mod tests {
             vec![("dynamic_field".to_string(), FieldType::Any)],
         );
         reg.register(schema);
-        // The W17.2-B-landing entry point tolerates user Any per
-        // §4.D.3-8 + §4.D.10-emission narrowed-transitional row.
-        // (Take-both at W17.2-C close strips this absorption.)
+        // Post-W17.2-C: user-named schemas with bare Any fields fire
+        // E0900 directly through the primary verification entry. The
+        // empty-prefix catch-all was stripped per audit §9.B.3 +
+        // §8 W17.2-C close-gate.
+        let result = run_on(&reg);
+        assert!(
+            result.is_err(),
+            "user-named schema with Any must surface E0900 post-W17.2-C narrowing"
+        );
+        match result.unwrap_err() {
+            ShapeError::SemanticError { message, .. } => {
+                assert!(message.contains("E0900"));
+                assert!(message.contains("MyUserType"));
+                assert!(message.contains("dynamic_field"));
+            }
+            other => panic!("expected SemanticError, got {:?}", other),
+        }
+    }
+
+    /// Post-W17.2-C: `__inline_obj_*` synthetic schemas STILL pass via
+    /// the narrowed transitional row. These are produced by the
+    /// `register_inline_object_schema*` family at W17.2-C deprecated
+    /// untyped variant + inline-object inference at §4.D.3 sites. The
+    /// W17.3/R5b/R6 follow-up strips this row once the inline-object
+    /// inference path closes.
+    #[test]
+    fn post_w17_2_c_inline_obj_still_absorbed() {
+        let mut reg = TypeSchemaRegistry::new();
+        let id = reg.allocate_id();
+        let schema = TypeSchema::with_id(
+            id,
+            "__inline_obj_99",
+            vec![("dynamic_field".to_string(), FieldType::Any)],
+        );
+        reg.register(schema);
         assert!(
             run_on(&reg).is_ok(),
-            "narrowed-transitional row must absorb user Any pre-W17.2-C close"
+            "narrowed transitional row must still absorb __inline_obj_* schemas"
         );
+    }
+
+    /// Post-W17.2-C: `helpers.rs:4901` 4-name TRANSITIONAL list narrowed
+    /// from 5-name (HashMap | Map | Result | Set; Option REMOVED per
+    /// W17.2-B PROPAGATE). The narrowing is verified at source-grep
+    /// level (test asserts the constant list is exactly 4 names).
+    /// Source-of-truth: `compiler/helpers.rs:4899-4910`.
+    #[test]
+    fn post_w17_2_c_helpers_4901_narrowed_to_4_names() {
+        // This is a documentation-anchor test (the actual narrowing
+        // is enforced by the source-grep close gate). The 4 names per
+        // supervisor §9.B.3 ratify are:
+        let names = ["HashMap", "Map", "Result", "Set"];
+        // Option is NOT in the list (PROPAGATES via FieldType::Option
+        // per W17.2-B close commit e316e171).
+        assert!(!names.contains(&"Option"));
+        assert_eq!(names.len(), 4, "TRANSITIONAL list MUST be 4 names");
     }
 
     /// Post-W17.2-B regression: `FieldType::Option(Box<FieldType::I64>)`

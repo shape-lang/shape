@@ -1302,10 +1302,29 @@ impl BytecodeCompiler {
                     if let Some(type_ann) = &param.type_annotation {
                         match type_ann {
                             shape_ast::ast::TypeAnnotation::Object(fields) => {
-                                let field_refs: Vec<&str> =
-                                    fields.iter().map(|f| f.name.as_str()).collect();
-                                let schema_id =
-                                    self.type_tracker.register_inline_object_schema(&field_refs);
+                                // W17.2-C §4.D.5 migration: route through
+                                // typed-with-Any (NOT per-field lowering;
+                                // schema layout changes from Any-uniform
+                                // break downstream consumers that assume
+                                // the legacy layout — same disposition as
+                                // `extract_object_schema_id_from_annotation`
+                                // at `expressions/function_calls.rs`).
+                                // Per-field-typed schema layout migration
+                                // is v0.4 W17.3+ territory. Verification-
+                                // pass safety net via `__inline_obj_*`.
+                                let typed_fields: Vec<(&str, shape_runtime::type_schema::FieldType)> =
+                                    fields
+                                        .iter()
+                                        .map(|f| {
+                                            (
+                                                f.name.as_str(),
+                                                shape_runtime::type_schema::FieldType::Any,
+                                            )
+                                        })
+                                        .collect();
+                                let schema_id = self
+                                    .type_tracker
+                                    .register_inline_object_schema_typed(&typed_fields);
                                 let schema_name = self
                                     .type_tracker
                                     .schema_registry()

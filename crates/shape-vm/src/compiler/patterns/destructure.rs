@@ -33,9 +33,17 @@ impl BytecodeCompiler {
                 _ => Some(field.key.as_str()),
             })
             .collect();
+        // W17.2-C §4.D.5 migration: destructure-pattern field types are
+        // unavailable here (we're inferring schema FROM the pattern);
+        // route through typed variant with FieldType::Any per field.
+        // Verification-pass safety net catches via `__inline_obj_*`.
+        let typed_fields: Vec<(&str, shape_runtime::type_schema::FieldType)> = explicit_fields
+            .iter()
+            .map(|n| (*n, shape_runtime::type_schema::FieldType::Any))
+            .collect();
         Some(
             self.type_tracker
-                .register_inline_object_schema(&explicit_fields),
+                .register_inline_object_schema_typed(&typed_fields),
         )
     }
 
@@ -59,9 +67,16 @@ impl BytecodeCompiler {
                 }
             }
         }
+        // W17.2-C §4.D.5 migration: decomposition-source schema is
+        // inferred from the destructure bindings; no per-field types
+        // available. Route through typed variant with FieldType::Any.
+        let typed_fields: Vec<(&str, shape_runtime::type_schema::FieldType)> = ordered_fields
+            .iter()
+            .map(|n| (*n, shape_runtime::type_schema::FieldType::Any))
+            .collect();
         Some(
             self.type_tracker
-                .register_inline_object_schema(&ordered_fields),
+                .register_inline_object_schema_typed(&typed_fields),
         )
     }
 
@@ -692,9 +707,22 @@ impl BytecodeCompiler {
         match &binding.type_annotation {
             TypeAnnotation::Object(obj_fields) => {
                 // Inline object type: {x, y, z} or {x: int, y: string}
+                // W17.2-C §4.D.5 migration: route through typed-with-Any
+                // (NOT per-field lowering; schema layout changes from
+                // Any-uniform break downstream consumers that assume
+                // the legacy layout — same disposition as
+                // `extract_object_schema_id_from_annotation` +
+                // function-param Object case at `functions.rs`). Per-
+                // field-typed schema layout migration is v0.4 W17.3+
+                // territory.
                 let fields: Vec<String> = obj_fields.iter().map(|f| f.name.clone()).collect();
-                let field_refs: Vec<&str> = fields.iter().map(|s| s.as_str()).collect();
-                let schema_id = self.type_tracker.register_inline_object_schema(&field_refs);
+                let typed_fields: Vec<(&str, shape_runtime::type_schema::FieldType)> = obj_fields
+                    .iter()
+                    .map(|f| (f.name.as_str(), shape_runtime::type_schema::FieldType::Any))
+                    .collect();
+                let schema_id = self
+                    .type_tracker
+                    .register_inline_object_schema_typed(&typed_fields);
                 Ok((fields, schema_id))
             }
             _ => {
@@ -719,8 +747,21 @@ impl BytecodeCompiler {
                     .get(type_name)
                     .map(|s| s.id)
                     .unwrap_or_else(|| {
-                        let field_refs: Vec<&str> = fields.iter().map(|s| s.as_str()).collect();
-                        self.type_tracker.register_inline_object_schema(&field_refs)
+                        // W17.2-C §4.D.5 migration: registry miss falls
+                        // back to typed-with-Any (no upstream field-type
+                        // info available); verification-pass safety net.
+                        let typed_fields: Vec<(&str, shape_runtime::type_schema::FieldType)> =
+                            fields
+                                .iter()
+                                .map(|n| {
+                                    (
+                                        n.as_str(),
+                                        shape_runtime::type_schema::FieldType::Any,
+                                    )
+                                })
+                                .collect();
+                        self.type_tracker
+                            .register_inline_object_schema_typed(&typed_fields)
                     });
 
                 Ok((fields, schema_id))
