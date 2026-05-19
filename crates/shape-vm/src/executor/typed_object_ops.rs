@@ -47,6 +47,17 @@ pub const FIELD_TAG_ARRAY: u16 = 5;
 pub const FIELD_TAG_OBJECT: u16 = 6;
 pub const FIELD_TAG_DECIMAL: u16 = 7;
 pub const FIELD_TAG_ANY: u16 = 8;
+/// v0.3 Phase 4b Round 5b W17.2-B: `FieldType::Option(Box<FieldType>)`
+/// per audit §4.D.1 + §9.B.1 (a) PROPAGATE supervisor ratify 2026-05-19.
+/// The operand encoding is a coarse `OPTION` discriminator — the inner
+/// `FieldType` is NOT carried in the 16-bit operand (no encoding-space
+/// available without an opcode-width expansion). The slot's per-value
+/// kind lives in the parallel `field_kinds` track at storage time per
+/// ADR-006 §2.7.7 / Q9 + §2.7.26 (W17-comptime-vm-dispatch). Mirrors
+/// the `FIELD_TAG_ARRAY` shape (which also stores only the outer
+/// discriminator + relies on the schema-side `field_type` for the
+/// inner element type during `tag_to_field_type` reconstruction).
+pub const FIELD_TAG_OPTION: u16 = 9;
 pub const FIELD_TAG_UNKNOWN: u16 = 255;
 
 /// Encode a FieldType as a compact u16 tag for the operand.
@@ -61,6 +72,10 @@ pub fn field_type_to_tag(ft: &FieldType) -> u16 {
         FieldType::Object(_) => FIELD_TAG_OBJECT,
         FieldType::Decimal => FIELD_TAG_DECIMAL,
         FieldType::Any => FIELD_TAG_ANY,
+        // W17.2-B (audit §4.D.1 + §9.B.1 (a) supervisor ratify
+        // 2026-05-19): `Option<T>` discriminator. Inner kind lives in
+        // the slot's parallel `field_kinds` track per ADR-006 §2.7.7.
+        FieldType::Option(_) => FIELD_TAG_OPTION,
         // Width integer types stored as I64 in the slot bits.
         FieldType::I8
         | FieldType::U8
@@ -86,6 +101,12 @@ pub(in crate::executor) fn tag_to_field_type(tag: u16) -> Option<FieldType> {
         FIELD_TAG_OBJECT => Some(FieldType::Object(String::new())),
         FIELD_TAG_DECIMAL => Some(FieldType::Decimal),
         FIELD_TAG_ANY => Some(FieldType::Any),
+        // W17.2-B: coarse Option(Any) reconstruction; the operand
+        // doesn't carry inner kind (mirrors FIELD_TAG_ARRAY shape).
+        // Consumers needing the precise inner kind read from the
+        // parallel `field_kinds` track at slot-read time per ADR-006
+        // §2.7.7 / Q9.
+        FIELD_TAG_OPTION => Some(FieldType::Option(Box::new(FieldType::Any))),
         _ => None,
     }
 }

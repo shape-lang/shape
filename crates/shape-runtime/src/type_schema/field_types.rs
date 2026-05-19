@@ -59,6 +59,21 @@ pub enum FieldType {
     I32,
     U32,
     U64,
+    /// Optional value `Option<T>` with concrete inner `FieldType`.
+    ///
+    /// v0.3 Phase 4b Round 5b W17.2-B — per audit §4.D.1 + §9.B.1 (a)
+    /// PROPAGATE supervisor ratify 2026-05-19. Replaces the deleted
+    /// `Option<_> => FieldType::Any` fallback that erased known
+    /// structure at `semantic_to_field_type`. Slot storage stays
+    /// NaN-boxed at the bits level via the parallel-`field_kinds`
+    /// track at storage construction time (per ADR-006 §2.7.7 / Q9 +
+    /// §2.7.26): the kind for `None` is `NativeKind::Null`; for
+    /// `Some(x)` the inner `T`'s kind. Snapshot/wire serialization
+    /// extends naturally via serde's enum-discriminator.
+    ///
+    /// Mirrors the §4.D.14 enum-payload exception (which already uses
+    /// the parallel-`field_kinds` track at storage time per §2.7.26).
+    Option(Box<FieldType>),
 }
 
 impl std::fmt::Display for FieldType {
@@ -80,6 +95,7 @@ impl std::fmt::Display for FieldType {
             FieldType::I32 => write!(f, "i32"),
             FieldType::U32 => write!(f, "u32"),
             FieldType::U64 => write!(f, "u64"),
+            FieldType::Option(inner) => write!(f, "Option<{}>", inner),
         }
     }
 }
@@ -133,6 +149,10 @@ impl FieldType {
             | FieldType::I32
             | FieldType::U32
             | FieldType::U64 => 8, // NaN-boxed slot
+            // Option<T>: NaN-boxed slot at bits level; the parallel
+            // `field_kinds` track carries the per-value kind (Null for
+            // None, inner T's kind for Some(x)) per ADR-006 §2.7.7.
+            FieldType::Option(_) => 8,
         }
     }
 
@@ -182,6 +202,15 @@ impl FieldType {
             Self::U32 => Ok(NativeKind::UInt32),
             Self::U64 => Ok(NativeKind::UInt64),
             Self::Any => Err(FieldKindError::AnyTypeNotStrictlyTyped),
+            // Option<T>: the schema layer's discriminator is `Option`,
+            // but slot storage carries the per-value kind via the
+            // parallel `field_kinds` track at storage construction
+            // time (ADR-006 §2.7.7 / Q9 + §2.7.26). The schema-level
+            // projection refuses statically — runtime callers must
+            // read the per-slot kind, not the static FieldType kind.
+            // Same refusal-shape as `Any` (which is what this variant
+            // SUBSUMES post-W17.2-B per audit §4.D.1 disposition (a)).
+            Self::Option(_) => Err(FieldKindError::AnyTypeNotStrictlyTyped),
         }
     }
 
@@ -247,31 +276,143 @@ impl FieldDef {
     }
 }
 
-/// Convert SemanticType to FieldType for JIT schema creation
+/// Convert SemanticType to FieldType for schema creation.
+///
+/// v0.3 Phase 4b Round 5b W17.2-B (audit §4.D.1 + §4.D.2 + §4.D.9 +
+/// §9.B.1 (a) PROPAGATE supervisor ratify 2026-05-19). Per binding user
+/// 2026-05-18 ruling "after the pass, any needs to be gone": this
+/// function returns `FieldType::Any` from ZERO producer sites. The
+/// `is_optional` + `SemanticType::Option(_)` fallbacks (formerly
+/// returning `FieldType::Any` for "Optional values use NaN boxing")
+/// now route through the explicit `FieldType::Option(Box<FieldType>)`
+/// variant — slot storage stays NaN-boxed at the bits level via the
+/// parallel `field_kinds` track at storage construction time per
+/// ADR-006 §2.7.7 / Q9 + §2.7.26 (W17-comptime-vm-dispatch).
+///
+/// All SemanticType variants are explicitly enumerated; the deleted
+/// `_ => FieldType::Any` catch-all per audit §4.D.2 is replaced by
+/// explicit per-variant arms. Inference-tier variants
+/// (TypeVar/Never/Void/Function) reach this function ONLY when
+/// upstream inference left a soundness gap; they surface via
+/// `unreachable!()` rather than silently emitting an Any fallback,
+/// per the audit §4.D.2 (b) ERROR disposition. Named/Generic route to
+/// `FieldType::Object(name)` (preserves W15.2-LANG-8 schema-lookup
+/// discipline); Struct/Enum route to `FieldType::Object(name)` via
+/// their `.name` projection; Ref/RefMut transparently unwrap to
+/// inner kind. Result<T, E> routes to `FieldType::Object("Result")`
+/// — the schema-side discriminator preserves the "Result" container
+/// shape for the post-inference verify pass to consult against
+/// helpers.rs:4901 generic-container exception territory (W17.2-C).
 pub(crate) fn semantic_to_field_type(
     semantic: &crate::type_system::SemanticType,
     is_optional: bool,
 ) -> FieldType {
     use crate::type_system::SemanticType;
 
-    // If the field is optional, we use Any to handle the NaN sentinel
+    // Optional field at SCHEMA-declaration time (the `field: T?` syntax
+    // — `cf.optional = true`). PROPAGATE-rebuild per audit §4.D.1
+    // disposition (a): wrap the inner FieldType in
+    // `FieldType::Option(Box<FieldType>)` rather than erasing to Any.
+    // The inner kind threads through to the slot's parallel-field_kinds
+    // track at TypedObject construction time per ADR-006 §2.7.26.
     if is_optional {
-        return FieldType::Any;
+        return FieldType::Option(Box::new(semantic_to_field_type(semantic, false)));
     }
 
     match semantic {
+        // === Primitives (statically resolved at the producer site) ===
         SemanticType::Number => FieldType::F64,
         SemanticType::Integer => FieldType::I64,
         SemanticType::Bool => FieldType::Bool,
         SemanticType::String => FieldType::String,
+
+        // === Generic Containers (semantic-tier inner type known) ===
         SemanticType::Array(elem) => {
             FieldType::Array(Box::new(semantic_to_field_type(elem, false)))
         }
-        SemanticType::Option(_) => FieldType::Any, // Optional values use NaN boxing
+        // §4.D.1 (a) PROPAGATE — Option<T> with concrete inner T IS
+        // fully resolved at annotation-lowering time per supervisor
+        // 2026-05-19; the schema-side discriminator preserves the
+        // inner kind explicitly. Subsumes §4.D.9 `Literal::None` site
+        // (None lowers via this arm at the bidirectional-inference
+        // narrowing call site at compiler/expressions/collections.rs).
+        SemanticType::Option(inner) => {
+            FieldType::Option(Box::new(semantic_to_field_type(inner, false)))
+        }
+        // Result<T, E> is a discriminated union at the schema layer —
+        // it's a CLOSURE-WAVE carrier-tier exception class that the
+        // post-inference pass's permanent whitelist may absorb (v0.4
+        // candidate W17.3 territory per audit §8 closure-wave plan).
+        // At this lowering site, the inner Ok-type is preserved via
+        // FieldType::Object("Result") for schema-lookup, mirroring the
+        // helpers.rs:4901 generic-container exception list narrowing
+        // (W17.2-C territory). The Err type erases through the
+        // marshal-layer's Json fallback per §4.D.7.
+        SemanticType::Result { .. } => FieldType::Object("Result".to_string()),
+
+        // === User-Defined Types (resolved at annotation site) ===
         SemanticType::Struct { name, .. } => FieldType::Object(name.clone()),
+        SemanticType::Enum { name, .. } => FieldType::Object(name.clone()),
+
+        // === Named type references ===
         SemanticType::Named(name) if name == "Decimal" => FieldType::Decimal,
         SemanticType::Named(name) => FieldType::Object(name.clone()),
-        _ => FieldType::Any, // Default to Any for complex types
+
+        // === Generic instantiation MyType<A, B> — schema-lookup by
+        //     erased name; the args are projected at type-resolution
+        //     time before reaching the schema layer.
+        SemanticType::Generic { name, .. } => FieldType::Object(name.clone()),
+
+        // === Reference Types — schema-layer treats refs as
+        //     transparent-projection: the schema stores the underlying
+        //     type. Mirrors the borrow-solver's "&T → T at storage" rule.
+        SemanticType::Ref(inner) | SemanticType::RefMut(inner) => {
+            semantic_to_field_type(inner, false)
+        }
+
+        // === Type System Internals — UNREACHABLE at schema lowering.
+        //     Per audit §4.D.2 (b) ERROR disposition: "any unreachable
+        //     arm gets `compile_error!()` or `unreachable!()` at the
+        //     lowering layer". TypeVars MUST be resolved by inference
+        //     before reaching schema construction; if they aren't,
+        //     that's a soundness gap upstream — surface here rather
+        //     than silently emitting an Any fallback.
+        //
+        //     If any of these arms fire in practice, the surface is
+        //     a structured panic that points to the inference-tier
+        //     gap. The post_inference_verify.rs pass at W17.2-A
+        //     catches the SCHEMA-level Any cases; this panic catches
+        //     the SEMANTIC-tier unresolved cases that should never
+        //     reach schema construction.
+        SemanticType::TypeVar(_) => unreachable!(
+            "semantic_to_field_type: TypeVar reached schema lowering — \
+             upstream inference left a type variable unresolved at \
+             post-inference schema construction. Per ADR-006 §2.7.5 \
+             producer-side stamp + audit §4.D.2 (b) ERROR disposition: \
+             this is a soundness gap in the inference layer, not a \
+             schema-side fallback target."
+        ),
+
+        // === Special Types — Never/Void/Function don't map to slot
+        //     storage; they reach this function only via pathological
+        //     paths (e.g. unresolved closure return type bubbling into
+        //     a struct field). Same `unreachable!()` disposition as
+        //     TypeVar per audit §4.D.2 — these should be caught at
+        //     inference time, not papered over with Any.
+        SemanticType::Never => unreachable!(
+            "semantic_to_field_type: Never type reached schema lowering — \
+             a bottom-type field has no storage representation. Audit §4.D.2."
+        ),
+        SemanticType::Void => unreachable!(
+            "semantic_to_field_type: Void type reached schema lowering — \
+             a unit-type field should be elided at the inference layer. \
+             Audit §4.D.2."
+        ),
+        SemanticType::Function(_) => unreachable!(
+            "semantic_to_field_type: Function type reached schema lowering — \
+             closures/function references live in HeapKind::Closure slots, \
+             not as schema-declared field types. Audit §4.D.2."
+        ),
     }
 }
 
@@ -289,6 +430,14 @@ mod tests {
         assert_eq!(FieldType::Array(Box::new(FieldType::F64)).size(), 8);
         assert_eq!(FieldType::Object("Candle".to_string()).size(), 8);
         assert_eq!(FieldType::Any.size(), 8);
+        // W17.2-B: Option<T> NaN-boxed slot; per-value kind from
+        // parallel-`field_kinds` track per ADR-006 §2.7.7.
+        assert_eq!(FieldType::Option(Box::new(FieldType::F64)).size(), 8);
+        assert_eq!(FieldType::Option(Box::new(FieldType::I64)).size(), 8);
+        assert_eq!(
+            FieldType::Option(Box::new(FieldType::Object("X".to_string()))).size(),
+            8
+        );
     }
 
     #[test]
@@ -296,6 +445,7 @@ mod tests {
         assert_eq!(FieldType::F64.alignment(), 8);
         assert_eq!(FieldType::I64.alignment(), 8);
         assert_eq!(FieldType::Bool.alignment(), 8);
+        assert_eq!(FieldType::Option(Box::new(FieldType::F64)).alignment(), 8);
     }
 
     #[test]
@@ -305,5 +455,175 @@ mod tests {
         assert_eq!(field.field_type, FieldType::F64);
         assert_eq!(field.offset, 16);
         assert_eq!(field.index, 2);
+    }
+
+    // ----- W17.2-B FieldType::Option PROPAGATE regression tests -----
+    //
+    // Per audit §4.D.1 + §9.B.1 (a) supervisor ratify 2026-05-19:
+    // `semantic_to_field_type` returns `FieldType::Any` from ZERO
+    // producer callsites for Option / is_optional / Array<Option<T>> /
+    // recursive nesting. Inner kind threads through the schema layer
+    // via the new `FieldType::Option(Box<FieldType>)` variant.
+
+    /// §4.D.1 — `is_optional = true` with concrete inner: PROPAGATE
+    /// inner kind via `FieldType::Option(Box<inner>)`. Was Any.
+    #[test]
+    fn test_semantic_to_field_type_optional_int() {
+        use crate::type_system::SemanticType;
+        let ft = semantic_to_field_type(&SemanticType::Integer, true);
+        assert_eq!(ft, FieldType::Option(Box::new(FieldType::I64)));
+    }
+
+    /// §4.D.1 — `is_optional = true` with concrete number inner.
+    #[test]
+    fn test_semantic_to_field_type_optional_number() {
+        use crate::type_system::SemanticType;
+        let ft = semantic_to_field_type(&SemanticType::Number, true);
+        assert_eq!(ft, FieldType::Option(Box::new(FieldType::F64)));
+    }
+
+    /// §4.D.1 — `is_optional = true` with concrete object inner.
+    #[test]
+    fn test_semantic_to_field_type_optional_object() {
+        use crate::type_system::SemanticType;
+        let ft = semantic_to_field_type(
+            &SemanticType::Named("Candle".to_string()),
+            true,
+        );
+        assert_eq!(
+            ft,
+            FieldType::Option(Box::new(FieldType::Object("Candle".to_string())))
+        );
+    }
+
+    /// §4.D.1 — `SemanticType::Option(inner)` arm without
+    /// `is_optional`: same PROPAGATE shape (the audit-binding
+    /// "all SemanticType variants explicitly handled" close gate).
+    #[test]
+    fn test_semantic_to_field_type_option_variant_int() {
+        use crate::type_system::SemanticType;
+        let ft = semantic_to_field_type(
+            &SemanticType::Option(Box::new(SemanticType::Integer)),
+            false,
+        );
+        assert_eq!(ft, FieldType::Option(Box::new(FieldType::I64)));
+    }
+
+    /// §4.D.1 — `SemanticType::Option(Bool)` propagates inner Bool kind.
+    #[test]
+    fn test_semantic_to_field_type_option_variant_bool() {
+        use crate::type_system::SemanticType;
+        let ft = semantic_to_field_type(
+            &SemanticType::Option(Box::new(SemanticType::Bool)),
+            false,
+        );
+        assert_eq!(ft, FieldType::Option(Box::new(FieldType::Bool)));
+    }
+
+    /// §4.D.1 — Array<Option<T>> threads Option through Array element kind.
+    #[test]
+    fn test_semantic_to_field_type_array_of_option() {
+        use crate::type_system::SemanticType;
+        let inner = SemanticType::Array(Box::new(SemanticType::Option(Box::new(
+            SemanticType::String,
+        ))));
+        let ft = semantic_to_field_type(&inner, false);
+        assert_eq!(
+            ft,
+            FieldType::Array(Box::new(FieldType::Option(Box::new(FieldType::String))))
+        );
+    }
+
+    /// §4.D.2 close-gate: `semantic_to_field_type` returns
+    /// `FieldType::Any` from ZERO producer callsites for the
+    /// previously-Any-fallback inputs. Asserts Any is NOT returned
+    /// for: is_optional + Integer / Option(Integer) / Array<Option<T>>.
+    #[test]
+    fn test_semantic_to_field_type_returns_no_any_for_option_inputs() {
+        use crate::type_system::SemanticType;
+
+        // is_optional=true + Integer (was Any)
+        let ft1 = semantic_to_field_type(&SemanticType::Integer, true);
+        assert!(
+            !matches!(ft1, FieldType::Any),
+            "is_optional=true must not return Any; got {:?}",
+            ft1
+        );
+
+        // Option(Bool) (was Any)
+        let ft2 = semantic_to_field_type(
+            &SemanticType::Option(Box::new(SemanticType::Bool)),
+            false,
+        );
+        assert!(
+            !matches!(ft2, FieldType::Any),
+            "SemanticType::Option(_) must not return Any; got {:?}",
+            ft2
+        );
+
+        // Array<Option<Integer>> nests (no inner Any)
+        let ft3 = semantic_to_field_type(
+            &SemanticType::Array(Box::new(SemanticType::Option(Box::new(
+                SemanticType::Integer,
+            )))),
+            false,
+        );
+        let unwrapped_array = match ft3 {
+            FieldType::Array(inner) => *inner,
+            other => panic!("expected Array, got {:?}", other),
+        };
+        assert!(
+            !matches!(unwrapped_array, FieldType::Any),
+            "Array<Option<Integer>> inner must not be Any; got {:?}",
+            unwrapped_array
+        );
+    }
+
+    /// §4.D.1 — concrete-typed inputs preserve their concrete kind
+    /// (regression: PROPAGATE rebuild does not corrupt non-Option paths).
+    #[test]
+    fn test_semantic_to_field_type_concrete_preserved() {
+        use crate::type_system::SemanticType;
+        assert_eq!(
+            semantic_to_field_type(&SemanticType::Integer, false),
+            FieldType::I64
+        );
+        assert_eq!(
+            semantic_to_field_type(&SemanticType::Number, false),
+            FieldType::F64
+        );
+        assert_eq!(
+            semantic_to_field_type(&SemanticType::Bool, false),
+            FieldType::Bool
+        );
+        assert_eq!(
+            semantic_to_field_type(&SemanticType::String, false),
+            FieldType::String
+        );
+        assert_eq!(
+            semantic_to_field_type(&SemanticType::Named("Decimal".to_string()), false),
+            FieldType::Decimal
+        );
+    }
+
+    /// `Display` for the new variant — `Option<int>` shape.
+    #[test]
+    fn test_field_type_option_display() {
+        let ft = FieldType::Option(Box::new(FieldType::I64));
+        assert_eq!(format!("{}", ft), "Option<int>");
+        let nested = FieldType::Option(Box::new(FieldType::Object("Candle".to_string())));
+        assert_eq!(format!("{}", nested), "Option<Candle>");
+    }
+
+    /// `to_native_kind()` for Option<T> refuses statically — slot kind
+    /// lives in the parallel-`field_kinds` track per ADR-006 §2.7.7.
+    /// Same refusal-shape as `Any` (which the variant SUBSUMES).
+    #[test]
+    fn test_field_type_option_to_native_kind_refuses() {
+        let ft = FieldType::Option(Box::new(FieldType::I64));
+        assert!(matches!(
+            ft.to_native_kind(),
+            Err(FieldKindError::AnyTypeNotStrictlyTyped)
+        ));
     }
 }

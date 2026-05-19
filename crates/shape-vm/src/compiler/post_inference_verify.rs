@@ -154,37 +154,167 @@ pub(crate) const WHITELIST: &[WhitelistEntry] = &[
                  `enum_struct_variant_fields` (`compiler/mod.rs:813-822`) \
                  per ADR-006 §2.3 named-carrier discipline",
     },
-    // ----- TRANSITIONAL classes (§4.D.1–§4.D.9) — close in R5b W17.2-B+C
+    // -----
+    // §4.D.11 RUNTIME_BUILTIN_SCHEMA extension landed at W17.2-B close
+    // (audit §4.D.11+§4.D.13 follow-up). The 15 `__PascalCase`
+    // builtin schemas registered at `register_builtin_schemas`
+    // (`crates/shape-runtime/src/type_schema/builtin_schemas.rs:113`)
+    // are stdlib carrier-tier exception territory — they use
+    // `SchemaBuilder::any_field` (§4.D.13) which is the public method
+    // legitimately used by §4.D.11 / §4.D.12 exception classes per
+    // audit. The W17.2-A whitelist only named `Row` from §4.D.11; the
+    // remaining 15 surface as E0900 once the §4.D.1-9 transitional row
+    // is stripped at W17.2-B close. Each schema's heap-allocated
+    // polymorphic field carries the concrete kind via the parallel
+    // `field_kinds` track at storage construction time per ADR-006
+    // §2.7.7/Q9 + §2.7.26 (per the doc-comment at builtin_schemas.rs:111
+    // — "heap-allocated polymorphic fields use FieldType::String
+    // (informational — the heap_mask bitmap determines actual read
+    // path)"). Mirror of `Row` shape.
+    WhitelistEntry {
+        rule: WhitelistRule::SchemaName("__AnyError"),
+        section: "§4.D.11",
+        permanent: true,
+        reason: "stdlib runtime-builtin schema; \
+                 builtin_schemas.rs:114; \
+                 parallel-`field_kinds` track + heap_mask per \
+                 ADR-006 §2.7.7/Q9 + §2.7.26",
+    },
+    WhitelistEntry {
+        rule: WhitelistRule::SchemaName("__TraceFrame"),
+        section: "§4.D.11",
+        permanent: true,
+        reason: "stdlib runtime-builtin schema; builtin_schemas.rs",
+    },
+    WhitelistEntry {
+        rule: WhitelistRule::SchemaName("__TraceInfoFull"),
+        section: "§4.D.11",
+        permanent: true,
+        reason: "stdlib runtime-builtin schema; builtin_schemas.rs",
+    },
+    WhitelistEntry {
+        rule: WhitelistRule::SchemaName("__TraceInfoSingle"),
+        section: "§4.D.11",
+        permanent: true,
+        reason: "stdlib runtime-builtin schema; builtin_schemas.rs",
+    },
+    WhitelistEntry {
+        rule: WhitelistRule::SchemaName("__ReflectAnnotation"),
+        section: "§4.D.11",
+        permanent: true,
+        reason: "stdlib runtime-builtin schema; builtin_schemas.rs",
+    },
+    WhitelistEntry {
+        rule: WhitelistRule::SchemaName("__ReflectField"),
+        section: "§4.D.11",
+        permanent: true,
+        reason: "stdlib runtime-builtin schema; builtin_schemas.rs",
+    },
+    WhitelistEntry {
+        rule: WhitelistRule::SchemaName("__ReflectResult"),
+        section: "§4.D.11",
+        permanent: true,
+        reason: "stdlib runtime-builtin schema; builtin_schemas.rs",
+    },
+    WhitelistEntry {
+        rule: WhitelistRule::SchemaName("__GroupResult"),
+        section: "§4.D.11",
+        permanent: true,
+        reason: "stdlib runtime-builtin schema; builtin_schemas.rs",
+    },
+    WhitelistEntry {
+        rule: WhitelistRule::SchemaName("__EventLogEntry"),
+        section: "§4.D.11",
+        permanent: true,
+        reason: "stdlib runtime-builtin schema; builtin_schemas.rs",
+    },
+    WhitelistEntry {
+        rule: WhitelistRule::SchemaName("__SimulateReturn"),
+        section: "§4.D.11",
+        permanent: true,
+        reason: "stdlib runtime-builtin schema; builtin_schemas.rs",
+    },
+    WhitelistEntry {
+        rule: WhitelistRule::SchemaName("__EmptyObject"),
+        section: "§4.D.11",
+        permanent: true,
+        reason: "stdlib runtime-builtin schema; builtin_schemas.rs",
+    },
+    WhitelistEntry {
+        rule: WhitelistRule::SchemaName("__ComptimeBuildConfig"),
+        section: "§4.D.11",
+        permanent: true,
+        reason: "stdlib runtime-builtin schema; builtin_schemas.rs",
+    },
+    WhitelistEntry {
+        rule: WhitelistRule::SchemaName("__ComptimeTargetField"),
+        section: "§4.D.11",
+        permanent: true,
+        reason: "stdlib runtime-builtin schema; builtin_schemas.rs",
+    },
+    WhitelistEntry {
+        rule: WhitelistRule::SchemaName("__ComptimeTargetParam"),
+        section: "§4.D.11",
+        permanent: true,
+        reason: "stdlib runtime-builtin schema; builtin_schemas.rs",
+    },
+    WhitelistEntry {
+        rule: WhitelistRule::SchemaName("__ComptimeTarget"),
+        section: "§4.D.11",
+        permanent: true,
+        reason: "stdlib runtime-builtin schema; builtin_schemas.rs",
+    },
+    // ----- TRANSITIONAL row (§4.D.3–§4.D.8) NARROWED at W17.2-B close
     //
-    // Per user 2026-05-19 binding + audit §9.B.1 + §9.B.3 ratify path:
-    // the post-R5b take-both commit (NOT this sub-cluster's responsibility)
-    // tightens the whitelist to §4.D.10-15 only + strips these transitional
-    // rows once W17.2-B (semantic_to_field_type Option rebuild + fall-
-    // through hardening) and W17.2-C (compiler-side fallback hardening)
-    // land.
+    // v0.3 Phase 4b Round 5b W17.2-B (audit §9.B.1 (a) supervisor
+    // ratify 2026-05-19): the §4.D.1 + §4.D.2 + §4.D.9 sites NOW close
+    // via `FieldType::Option(Box<FieldType>)` PROPAGATE rebuild at
+    // `crates/shape-runtime/src/type_schema/field_types.rs` —
+    // `semantic_to_field_type` returns `FieldType::Any` from ZERO
+    // producer callsites for Option / is_optional inputs, and the
+    // `_ =>` fall-through is replaced with explicit per-variant arms
+    // (TypeVar/Never/Void/Function use `unreachable!()` per audit
+    // §4.D.2). The §4.D.9 `Literal::None` site at
+    // `compiler/expressions/collections.rs:21` now projects to
+    // `FieldType::Option(Box<FieldType::Any>)` — outer discriminator
+    // concrete, inner Any narrowed by bidirectional inference at the
+    // context site.
     //
-    // The schema-construction fallback sites (§4.D.1-§4.D.5, §4.D.7-§4.D.9)
-    // currently produce `FieldType::Any` at user-named TypedObject schemas
-    // when the inference layer cannot prove a concrete element type. The
-    // transitional whitelist disposition: until R5b lands the upstream
-    // fixes, allow all post-inference Any in user-named schemas with a
-    // STRUCTURED warning surface that names the §-cite. This is NOT a
-    // blanket fallback — it is a bounded scaffold with a named close-out
-    // commit pending.
+    // The §4.D.3-§4.D.8 sites (inline-object inference at
+    // `expressions/collections.rs:487/496/953/982`, untyped
+    // `register_inline_object_schema` at `type_tracking.rs:1049`,
+    // generic-container annotation lowering at `helpers.rs:4901`,
+    // annotation lowering fall-through at `helpers.rs:4905`) remain
+    // W17.2-C territory + the §4.D.10 emission-name rename
+    // (functions_annotations.rs / expressions/mod.rs → align with the
+    // `__annotation_ctx_*` whitelist convention introduced at W17.2-A)
+    // is also pending. Until both land, the surviving transitional row
+    // below absorbs user-named + `__inline_obj_*` schemas with a
+    // STRUCTURED reason that names the remaining close-gate.
     //
-    // The rule shape is a `*` schema-prefix match (catches every
-    // user-named schema). The `permanent: false` flag marks each row as
-    // closure-pending. R5b close strips them via take-both.
+    // SURFACE-AND-STOP per audit §0 + CLAUDE.md §10 (surface-and-stop
+    // discipline): the §4.D.10 emission-rename at functions_annotations.rs
+    // is a NAMED-AND-CITED outstanding item at HEAD <commit>;
+    // verification-pass-side absorption stays in place pre-rename.
     WhitelistEntry {
         rule: WhitelistRule::SchemaNamePrefix(""),
-        section: "§4.D.1-9",
+        section: "§4.D.3-8 + §4.D.10-emission",
         permanent: false,
-        reason: "TRANSITIONAL — closes in R5b W17.2-B+C per audit \
-                 §9.B.1+§9.B.3 ratifies (semantic_to_field_type \
-                 Option-rebuild + compiler-side fallback hardening + \
-                 W15.2-LANG-8 struct-literal schema-lookup miss + \
-                 helpers.rs:4901 generic-container narrowing); \
-                 user 2026-05-19 binding",
+        reason: "TRANSITIONAL (NARROWED post-W17.2-B) — §4.D.1+§4.D.2+§4.D.9 \
+                 CLOSED at W17.2-B via FieldType::Option PROPAGATE \
+                 rebuild + semantic_to_field_type explicit per-variant \
+                 arms; surviving sites: §4.D.3 (collections.rs:487/496 \
+                 inline-object inference) + §4.D.4 (collections.rs:953/982 \
+                 struct-literal schema-lookup miss) + §4.D.5 \
+                 (type_tracking.rs:1049 untyped \
+                 register_inline_object_schema) + §4.D.7 (helpers.rs:4901 \
+                 generic-container narrowing) + §4.D.8 (helpers.rs:4905 \
+                 annotation lowering fall-through) — W17.2-C territory; \
+                 + §4.D.10 emission-rename \
+                 (functions_annotations.rs/expressions/mod.rs schemas \
+                 use `__inline_obj_*` instead of the `__annotation_ctx_*` \
+                 whitelist convention) — post-W17.2-A R5b/R6 follow-up. \
+                 Take-both at W17.2-C close strips this row.",
     },
 ];
 
@@ -220,15 +350,18 @@ fn match_whitelist(
 /// ADR-006 §2.7.26).
 fn verify_schema(schema: &TypeSchema, errors: &mut Vec<ShapeError>) {
     let is_enum_schema = schema.is_enum();
-    // Whole-schema whitelist sites (`Row`, `FrameState`, `__mod_*`, etc.)
-    // pass without per-field checks — the entire schema is by-design
-    // heterogeneous.
+    // Whole-schema whitelist sites (`Row`, `FrameState`, `__mod_*`,
+    // builtin schemas, etc.) pass without per-field checks — the
+    // entire schema is by-design heterogeneous. The §4.D.3-8 + §4.D.10-
+    // emission transitional row (post-W17.2-B narrowing) is excluded
+    // from whole-schema short-circuit so per-field tracking still
+    // applies; it fires via match_whitelist at per-field time.
     let whole_schema_match = WHITELIST.iter().find(|entry| match entry.rule {
         WhitelistRule::SchemaName(name) => name == schema.name,
         WhitelistRule::SchemaNamePrefix(prefix) => {
             // The empty-prefix transitional row matches everything;
-            // it's also the catch-all fall-through. Don't short-circuit
-            // here — let it fire via match_whitelist at per-field time.
+            // don't short-circuit here — let it fire via match_whitelist
+            // at per-field time.
             !prefix.is_empty() && schema.name.starts_with(prefix)
         }
         WhitelistRule::EnumPayloadField => false,
@@ -247,11 +380,13 @@ fn verify_schema(schema: &TypeSchema, errors: &mut Vec<ShapeError>) {
                 continue;
             }
             Some(entry) => {
-                // Transitional row (§4.D.1–§4.D.9). Tolerated pre-R5b
-                // close per user 2026-05-19 binding. The transitional
-                // entry's `reason` field carries the close-out cite —
-                // the audit pin is recorded here, but the pass does not
-                // surface a diagnostic for transitional matches.
+                // Transitional row (§4.D.3-8 + §4.D.10-emission post-
+                // W17.2-B narrowing). Tolerated pre-W17.2-C take-both
+                // per audit §9.B.1+§9.B.3 + R5b/R6 emission-rename
+                // follow-up. The transitional entry's `reason` field
+                // carries the close-out cite — the audit pin is
+                // recorded here, but the pass does not surface a
+                // diagnostic for transitional matches.
                 let _ = entry;
                 continue;
             }
@@ -263,13 +398,21 @@ fn verify_schema(schema: &TypeSchema, errors: &mut Vec<ShapeError>) {
 }
 
 /// Returns `true` if the given `FieldType` is `Any` or contains `Any`
-/// in a nested `Array(Box<...>)` element position. Other compound
-/// variants (`Object(name)`) reference another schema by name; that
-/// schema is verified independently via its own [`verify_schema`] call.
+/// in a nested `Array(Box<...>)` / `Option(Box<...>)` element position.
+/// Other compound variants (`Object(name)`) reference another schema by
+/// name; that schema is verified independently via its own
+/// [`verify_schema`] call.
+///
+/// W17.2-B (audit §4.D.1 + §9.B.1 (a) supervisor ratify 2026-05-19):
+/// `FieldType::Option(_)` is itself NOT Any (it's a concrete
+/// discriminator). But `Option<Any>` is — the inner Any signals an
+/// unresolved-element-type carrier that bidirectional inference
+/// should have narrowed. Same recursion-shape as `Array`.
 fn field_type_contains_any(ft: &FieldType) -> bool {
     match ft {
         FieldType::Any => true,
         FieldType::Array(inner) => field_type_contains_any(inner),
+        FieldType::Option(inner) => field_type_contains_any(inner),
         _ => false,
     }
 }
@@ -638,14 +781,21 @@ mod tests {
         }
     }
 
-    // ----- Transitional disposition sanity check -----
+    // ----- Post-W17.2-B narrowed-transitional sanity check + new
+    //       regressions -----
 
-    /// Pre-R5b: the transitional whitelist absorbs user schemas with
-    /// `FieldType::Any`. This sub-cluster's primary entry point
-    /// (`verify_no_post_inference_any` via `verify_registry`) MUST
-    /// return Ok for these — they close in R5b W17.2-B+C, not here.
+    /// Post-W17.2-B (audit §9.B.1 (a) supervisor ratify 2026-05-19):
+    /// the transitional `permanent: false` row was NARROWED at W17.2-B
+    /// close (not removed wholesale; see source comment). The §4.D.1
+    /// + §4.D.2 + §4.D.9 sites close via Option-rebuild; the §4.D.3-8
+    /// + §4.D.10-emission sites remain absorbed pending W17.2-C close
+    /// + R5b/R6 emission-rename follow-up. The primary entry point
+    /// still ABSORBS user-named schemas with `FieldType::Any` at
+    /// W17.2-B landing; the negative tests use
+    /// `verify_registry_permanent_only` to exercise the post-W17.2-C
+    /// diagnostic shape.
     #[test]
-    fn transitional_user_any_passes_at_w17_2_a_landing() {
+    fn transitional_user_any_still_absorbed_post_w17_2_b() {
         let mut reg = TypeSchemaRegistry::new();
         let id = reg.allocate_id();
         let schema = TypeSchema::with_id(
@@ -654,12 +804,63 @@ mod tests {
             vec![("dynamic_field".to_string(), FieldType::Any)],
         );
         reg.register(schema);
-
-        // The R5a-landing entry point tolerates user Any per
-        // §4.D.1-9 transitional whitelist.
+        // The W17.2-B-landing entry point tolerates user Any per
+        // §4.D.3-8 + §4.D.10-emission narrowed-transitional row.
+        // (Take-both at W17.2-C close strips this absorption.)
         assert!(
             run_on(&reg).is_ok(),
-            "transitional whitelist must absorb user Any pre-R5b close"
+            "narrowed-transitional row must absorb user Any pre-W17.2-C close"
+        );
+    }
+
+    /// Post-W17.2-B regression: `FieldType::Option(Box<FieldType::I64>)`
+    /// on a user-named schema is concrete (NOT Any) and passes. The
+    /// Option-rebuild from `semantic_to_field_type` lowers `is_optional`
+    /// + concrete inner T through this shape per audit §4.D.1.
+    #[test]
+    fn post_w17_2_b_option_concrete_inner_passes() {
+        let mut reg = TypeSchemaRegistry::new();
+        let id = reg.allocate_id();
+        let schema = TypeSchema::with_id(
+            id,
+            "OptionalIntField",
+            vec![(
+                "x".to_string(),
+                FieldType::Option(Box::new(FieldType::I64)),
+            )],
+        );
+        reg.register(schema);
+        assert!(
+            run_on(&reg).is_ok(),
+            "Option<int> field on user-named schema must pass post-W17.2-B"
+        );
+    }
+
+    /// Post-W17.2-B negative (uses permanent-only helper to test the
+    /// post-W17.2-C diagnostic shape):
+    /// `FieldType::Option(Box<FieldType::Any>)` surfaces E0900 — the
+    /// inner Any inside Option still signals an unresolved-element-type
+    /// carrier per the `field_type_contains_any` recursion update.
+    #[test]
+    fn post_w17_2_b_option_any_inner_rejected_under_permanent_only() {
+        let mut reg = TypeSchemaRegistry::new();
+        let id = reg.allocate_id();
+        let schema = TypeSchema::with_id(
+            id,
+            "OptionalAnyField",
+            vec![(
+                "x".to_string(),
+                FieldType::Option(Box::new(FieldType::Any)),
+            )],
+        );
+        reg.register(schema);
+        let mut errors = Vec::new();
+        verify_registry_permanent_only(&reg, &mut errors);
+        assert_eq!(
+            errors.len(),
+            1,
+            "Option<Any> inner Any must surface E0900 under permanent-only \
+             verification per W17.2-B `field_type_contains_any` recursion"
         );
     }
 }
