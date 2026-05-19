@@ -101,10 +101,14 @@ fn function_keyword_alias() {
 
 #[test]
 fn function_calling_another_function() {
+    // W14.2-G6 e2e-features-functions triage: explicit annotations
+    // required per CLAUDE.md "Type System Rules" — unannotated
+    // recursive-chain params yield unknown types and either reject
+    // (LessEq/Sub/Add) or silently return 0 (chained Add).
     ShapeTest::new(
         r#"
-        fn square(x) { x * x }
-        fn sum_of_squares(a, b) { square(a) + square(b) }
+        fn square(x: int) -> int { x * x }
+        fn sum_of_squares(a: int, b: int) -> int { square(a) + square(b) }
         sum_of_squares(3, 4)
     "#,
     )
