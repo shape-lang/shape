@@ -124,6 +124,35 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             }
 
             Rvalue::Borrow(_kind, place) => {
+                // Phase 4b Round 5c-2-α jit-ref-param-chain-stamp (ADR-006
+                // §2.7.13 + §2.7.5). Re-borrow short-circuit: when the
+                // borrow target's root local is itself a reference
+                // parameter, the slot already holds a CALLER-OWNED cell
+                // pointer. Forwarding `&x` (in `inner(&x)` from within
+                // `outer(&x) { inner(&x) }`) must reuse that pointer —
+                // allocating a fresh stack cell would silently snapshot
+                // the value, decoupling the inner mutation from the
+                // outer caller's binding and reproducing the W14.2-G4
+                // sister-class JIT divergence (`bump(&a); print(a)`
+                // returning the unmutated `a`).
+                //
+                // Only `Place::Local(ref_param_slot)` short-circuits;
+                // any projection (`Place::Field` / `Place::Index` /
+                // `Place::Deref`) keeps the existing per-function stack-
+                // cell allocation since the projection materialises a
+                // new addressable value.
+                if let Place::Local(slot) = place {
+                    if self.ref_param_slots.contains(slot) {
+                        let var = *self.locals.get(slot).ok_or_else(|| {
+                            format!("MirToIR: unknown local slot {}", slot)
+                        })?;
+                        // Slot variable carries the caller's cell address
+                        // (pointer-width I64); forward as-is. Skip the
+                        // `ref_stack_slots` insertion — there is no JIT-
+                        // owned cell to reload after calls.
+                        return Ok(self.builder.use_var(var));
+                    }
+                }
                 // R4.2F: allocate a native-sized/aligned stack cell that
                 // matches the root local's Cranelift type. References are
                 // strictly per-function — they never cross Cranelift call

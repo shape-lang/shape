@@ -755,6 +755,37 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     pub(crate) fn read_place(&mut self, place: &Place) -> Result<Value, String> {
         match place {
             Place::Local(slot) => {
+                // Phase 4b Round 5c-2-α jit-ref-param-chain-stamp (ADR-006
+                // §2.7.13 + §2.7.5; supervisor ratify 2026-05-19,
+                // v0.3-gating soundness). Reference parameters store the
+                // CELL ADDRESS in their slot (allocated by `Rvalue::Borrow`
+                // in the caller's frame); reading the value of the
+                // referenced object requires auto-deref. MIR-lowering at
+                // `crates/shape-vm/src/mir/lowering/expr.rs:24` does NOT
+                // emit `Place::Deref` projections for ref-param identifier
+                // reads — the bytecode compile path solves this orthogonally
+                // by emitting `OpCode::DerefLoad` at `compiler/expressions/
+                // identifiers.rs:219-221`, but the JIT-MIR consumer was
+                // never wired. Re-dispatch through `Place::Deref` here so
+                // every consumer (ownership::compile_operand, BinaryOp
+                // lhs/rhs reads, etc.) picks up the auto-deref centrally.
+                //
+                // The slot's underlying Cranelift variable still holds the
+                // address (pointer-width I64) — `Rvalue::Borrow`'s short-
+                // circuit + the param-init path both keep that invariant.
+                if self.ref_param_slots.contains(slot) {
+                    let ref_addr = self.builder.use_var(
+                        *self.locals.get(slot).ok_or_else(|| {
+                            format!("MirToIR: unknown local slot {}", slot)
+                        })?,
+                    );
+                    return Ok(self.builder.ins().load(
+                        types::I64,
+                        MemFlags::new(),
+                        ref_addr,
+                        0,
+                    ));
+                }
                 let var = self.locals.get(slot).ok_or_else(|| {
                     format!("MirToIR: unknown local slot {}", slot)
                 })?;
@@ -950,6 +981,26 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     ) -> Result<(), String> {
         match place {
             Place::Local(slot) => {
+                // Phase 4b Round 5c-2-α jit-ref-param-chain-stamp (ADR-006
+                // §2.7.13 + §2.7.5). Symmetric to the `read_place` ref-param
+                // auto-deref: writes to a ref-param identifier (e.g.
+                // `x = x + 1` for `fn bump(&x: int)`) must store into the
+                // CELL at the address held in the slot, not into the slot's
+                // local Cranelift variable. The slot's variable carries
+                // the caller's borrowed-cell address — `def_var` over it
+                // would lose the pointer (and the mutation would never
+                // reach the caller's `a` binding).
+                if self.ref_param_slots.contains(slot) {
+                    let ref_addr = self.builder.use_var(
+                        *self.locals.get(slot).ok_or_else(|| {
+                            format!("MirToIR: unknown local slot {}", slot)
+                        })?,
+                    );
+                    self.builder
+                        .ins()
+                        .store(MemFlags::new(), val, ref_addr, 0);
+                    return Ok(());
+                }
                 // Track A.1D.2: OwnedMutable capture slots redirect the
                 // write through the `*mut ValueWord` cell pointer held
                 // in the slot. `var` itself must keep the pointer bits
@@ -1152,6 +1203,21 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         // cell pointer until that release runs.
         if matches!(place, Place::Local(_))
             && self.shared_local_slots.contains(&slot)
+        {
+            return Ok(());
+        }
+        // Phase 4b Round 5c-2-α jit-ref-param-chain-stamp (ADR-006 §2.7.13
+        // + §2.7.5). Reference parameter slots hold the caller's borrowed-
+        // cell pointer for the lifetime of the callee's frame. Nulling the
+        // slot would strand subsequent reads/writes against a null cell
+        // pointer (and the Move-after-ref-param pattern emitted by MIR
+        // for assignments like `x = x + 1` lowers to
+        // `Assign(Local(x), Move(Local(temp)))` — the Move would null the
+        // RHS temp slot, not the param slot, so the ref-param-slot null
+        // path only matters when an explicit Move of the param value is
+        // emitted; either way the pointer must survive).
+        if matches!(place, Place::Local(_))
+            && self.ref_param_slots.contains(&slot)
         {
             return Ok(());
         }
