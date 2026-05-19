@@ -437,3 +437,194 @@ w.op()
         42,
     );
 }
+
+// ============================================================================
+// W14.2-E-followup-jit-trait-method-arity-soundness regression tests
+// (Phase 4b Round 5b, 2026-05-19; v0.3-gating SOUNDNESS BUG per supervisor
+// ratify 2026-05-19).
+//
+// **SURFACE-A root cause.** `crates/shape-jit/src/ffi/call_method/mod.rs::
+// try_call_user_method` invoked the JIT-compiled UFCS callee via the bare
+// `fn_ptr(ctx_mut)` transmute under the `JittedStrategyFn` typedef
+// (`fn(*mut JITContext) -> i32`). The actual JIT-compiled callees have the
+// EXTENDED Cranelift signature
+// `fn(ctx_ptr, capture_0..N, param_0..M) -> i32`
+// emitted by `compile_function_with_user_funcs` at
+// `compiler/program.rs:258-265`, whose entry-block parameter init at
+// `compiler/program.rs:496-528` reads each MIR param slot from
+// `entry_params[native_idx]` — the System V register/stack ABI, NOT
+// `ctx.stack`. Pre-fix the bare `fn_ptr(ctx_mut)` call dropped every
+// receiver/arg slot; the callee read uninitialized System V argument
+// registers/stack frame for `self` and each user param — empirical
+// garbage NaN-bits for n>=1 (e.g. `d.dbl(21) = 189861470636784`) and
+// SEGFAULT for string args (callee-saved garbage decoded as wild
+// `*const Arc<String>` pointers).
+//
+// Per ADR-006 §2.7.10/Q11: the dispatch shell sources every kind from the
+// §2.7.7/Q9 parallel-kind track; the data half now flows through
+// `ffi/control/mod.rs::call_jit_fn_with_args` — identical shape to
+// `jit_call_value`'s bare-function fast path at
+// `ffi/control/mod.rs:534-545` and `:709-732`.
+//
+// **SURFACE-A2 root cause (distinct).** Trait-impl method bodies READ
+// typed-object fields without emitting `StatementKind::ObjectStore`, so
+// the JIT's local `field_byte_offsets` / `field_native_kinds` maps (only
+// populated by ObjectStore walks at `mir_compiler/statements.rs:243` /
+// the `infer_field_native_kinds` pre-pass) stayed empty. The downstream
+// `try_resolve_field_byte_offset` returned `None` and `Place::Field`
+// fell through to `jit_get_prop(obj_bits, key_bits)`, whose
+// `heap_kind(obj_bits)` predicate (`ffi/value_ffi.rs:331-336`) requires
+// NaN-box tag bits — ADR-006 §2.7.5 raw `Box::into_raw` typed-object
+// carriers return `None` and `jit_get_prop` falls through to `TAG_NULL`.
+// Fix: pre-populate both maps from the program's `type_schema_registry`
+// at MirToIR construction time via `populate_field_byte_offsets_from_
+// schemas`. Same shape as the ObjectStore-walk's local population —
+// derived 8-byte slot offsets (`field_idx * 8`) and FieldType→NativeKind
+// projection.
+//
+// All tests below assert VM == JIT byte-equal at the JIT-direct path
+// (bypassing the bytecode interpreter). Pre-fix every one of these
+// reproducers returned garbage NaN-bits or SEGFAULTed.
+// ============================================================================
+
+/// W14.2-E-followup SURFACE-A n=1 int: pre-fix returned garbage NaN-bits
+/// (`d.dbl(21) ≈ 189861470636784`); post-fix VM == JIT byte-equal = 42.
+#[test]
+fn trait_method_arity_n1_int_now_byte_equal() {
+    jit_expect_int(
+        r#"
+trait Doubler {
+    fn dbl(x: int) -> int
+}
+type D {}
+impl Doubler for D {
+    fn dbl(x: int) -> int {
+        x * 2
+    }
+}
+let d = D {}
+d.dbl(21)
+"#,
+        42,
+    );
+}
+
+/// W14.2-E-followup SURFACE-A n=3 int: anchor that the receiver+args
+/// flow through the System V argument ABI correctly for multi-arg
+/// dispatch. Pre-fix returned garbage at any arity n>=1.
+#[test]
+fn trait_method_arity_n3_int_now_byte_equal() {
+    jit_expect_int(
+        r#"
+trait Tri {
+    fn sum3(a: int, b: int, c: int) -> int
+}
+type T3 {}
+impl Tri for T3 {
+    fn sum3(a: int, b: int, c: int) -> int {
+        a + b + c
+    }
+}
+let t = T3 {}
+t.sum3(10, 15, 17)
+"#,
+        42,
+    );
+}
+
+/// W14.2-E-followup SURFACE-A n=7 int: above the typical Rust 6-arg
+/// register-pressure boundary — exercises the System V argument stack
+/// slot path (F7 ABI selector at `ffi/control/mod.rs::call_jit_fn_
+/// with_args:764`). Pre-fix returned garbage; post-fix VM == JIT = 42.
+#[test]
+fn trait_method_arity_n7_int_now_byte_equal() {
+    jit_expect_int(
+        r#"
+trait Sept {
+    fn sum7(a: int, b: int, c: int, d: int, e: int, f: int, g: int) -> int
+}
+type S7 {}
+impl Sept for S7 {
+    fn sum7(a: int, b: int, c: int, d: int, e: int, f: int, g: int) -> int {
+        a + b + c + d + e + f + g
+    }
+}
+let s = S7 {}
+s.sum7(1, 2, 3, 4, 5, 6, 21)
+"#,
+        42,
+    );
+}
+
+/// W14.2-E-followup SURFACE-A n=1 number: pre-fix returned tiny near-zero
+/// (the garbage callee-arg bits decoded as denormalized f64); post-fix
+/// VM == JIT byte-equal = 42.0.
+#[test]
+fn trait_method_arity_n1_number_now_byte_equal() {
+    jit_expect_number(
+        r#"
+trait NumTrait {
+    fn nfn(x: number) -> number
+}
+type N {}
+impl NumTrait for N {
+    fn nfn(x: number) -> number {
+        x * 2.0
+    }
+}
+let n = N {}
+n.nfn(21.0)
+"#,
+        42.0,
+    );
+}
+
+/// W14.2-E-followup SURFACE-A2 n=0 self.field access: trait-impl method
+/// body reads `self.value` without emitting an ObjectStore. Pre-fix the
+/// JIT's `field_byte_offsets` was empty for impl bodies and `Place::Field`
+/// fell through to `jit_get_prop` (`heap_kind` returned None on raw
+/// Box::into_raw TypedObject carriers → TAG_NULL). Post-fix the schema
+/// pre-population at MirToIR construction resolves the field offset.
+#[test]
+fn trait_method_self_field_access_n0_now_byte_equal() {
+    jit_expect_int(
+        r#"
+trait Operate {
+    fn op() -> int
+}
+type Wrapper { value: int }
+impl Operate for Wrapper {
+    fn op() -> int {
+        self.value * 2
+    }
+}
+let w = Wrapper { value: 21 }
+w.op()
+"#,
+        42,
+    );
+}
+
+/// W14.2-E-followup combined: trait method with both self.field access
+/// AND a user arg. Exercises the full producer-side stamp pipeline:
+/// receiver bits via native ABI, field byte offset via schema pre-pop,
+/// field native kind via schema pre-pop, arg via native ABI.
+#[test]
+fn trait_method_self_field_and_arg_n1_now_byte_equal() {
+    jit_expect_int(
+        r#"
+trait Adder {
+    fn add(other: int) -> int
+}
+type Wrapper { value: int }
+impl Adder for Wrapper {
+    fn add(other: int) -> int {
+        self.value + other
+    }
+}
+let w = Wrapper { value: 10 }
+w.add(32)
+"#,
+        42,
+    );
+}

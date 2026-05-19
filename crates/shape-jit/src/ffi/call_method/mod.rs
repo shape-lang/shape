@@ -303,39 +303,80 @@ unsafe fn try_call_user_method(
     if raw_fn_ptr.is_null() {
         return None;
     }
-    let fn_ptr = unsafe { *ctx_ref.function_table.add(func_idx) };
 
-    // Push receiver + args onto the JIT stack for the function call.
-    // UFCS convention: first parameter is `self` (the receiver), then the rest.
+    // W14.2-E-followup-jit-trait-method-arity-soundness fix (2026-05-19,
+    // v0.3-gating SOUNDNESS BUG): the JIT-compiled UFCS callee was emitted
+    // with the extended Cranelift signature
+    // `fn(ctx_ptr, capture_0..N, param_0..M) -> i32`
+    // (`compile_function_with_user_funcs` at `compiler/program.rs:258-265`,
+    // appended params per `effective_arity = captures_count + arity`). Its
+    // entry-block parameter init at `compiler/program.rs:496-528` reads
+    // each MIR param slot from `entry_params[native_idx]` — the SYSTEM V
+    // register/stack ABI, NOT `ctx.stack`. The prior `fn_ptr(ctx_mut)`
+    // call transmuted the function pointer as `JittedStrategyFn` (a single-
+    // arg shape) and silently dropped every receiver/arg slot. The callee
+    // then read uninitialized SystemV-passing registers/stack frame for
+    // `self` and each user param — the empirical garbage NaN-bits for
+    // n>=1 (e.g. `d.dbl(21)` = `189861470636784`) and SEGFAULT for string
+    // args (registers held callee-saved garbage that decoded to wild
+    // `*const Arc<String>` pointers).
     //
-    // ADR-006 §2.7.7 / Q9 lockstep: every data push stamps the parallel-
-    // kind track in the same slot. The receiver kind is the W17-narrow-
-    // threaded `receiver_kind` (classified from the producing call's stamp
-    // at the dispatch entry); each arg pair carries its own kind from the
-    // §2.7.7 / Q9 parallel-track pop at the dispatch entry. Pre-W17-narrow
-    // the code wrote only the data half of the lockstep — under the prior
-    // tag-bit cascade `receiver_type_name` returned `"number"` for raw
-    // typed-object carriers so `find_function_by_name("number::name")`
-    // always missed and the body was unreachable; now that classification
-    // is correct the stack_kinds writes are observable by the called
-    // JIT-compiled function's parallel-track pops.
+    // Per ADR-006 §2.7.5 producer-side classification: the receiver +
+    // each `arg_pairs[i]` already carry the kind stamped at the
+    // `mir_compiler/terminators.rs` push (line ~342-372 for args, line
+    // ~510-535 for receiver). The kind half is sourced from §2.7.7/Q9
+    // parallel-track decode at the dispatch shell entry (lines ~482-501,
+    // ~513-527). The data half flows through this helper's typed-fn
+    // transmute selector via the kinded raw-bits slice — identical shape
+    // to `jit_call_value`'s bare-function fast path at
+    // `ffi/control/mod.rs:534-545` and `:709-732`.
+    //
+    // §2.7.7/Q9 lockstep invariant: the callee's own MIR-compiled body
+    // re-establishes its parallel-kind track from its own FrameDescriptor
+    // when it begins execution (same shape as the bare-function path's
+    // contract). The dispatch shell's parallel-kind track at indices
+    // popped (receiver / arg_pairs / method_name / arg_count) was already
+    // reset to SENTINEL at the pop sites above; we don't write the JIT-
+    // stack push half of the lockstep here because the callee doesn't
+    // read from `ctx.stack` — passing through the native ABI bypasses
+    // the stack entirely.
+
+    // Reset the JIT stack frame for the callee. The callee's first action
+    // is to write its return value to `ctx.stack[0]` and bump `stack_ptr`
+    // to 1 (see `mir_compiler/terminators.rs::TerminatorKind::Return` at
+    // line 1714-1718). Matches the §2.7.11/Q12 bare-function dispatch
+    // contract at `ffi/control/mod.rs:716`.
     let ctx_mut = unsafe { &mut *(ctx as *mut JITContext) };
-    ctx_mut.stack[ctx_mut.stack_ptr] = receiver_bits;
-    ctx_mut.stack_kinds[ctx_mut.stack_ptr] = stack_kind_code::encode(receiver_kind);
-    ctx_mut.stack_ptr += 1;
-    for &(bits, kind) in arg_pairs {
-        ctx_mut.stack[ctx_mut.stack_ptr] = bits;
-        ctx_mut.stack_kinds[ctx_mut.stack_ptr] = stack_kind_code::encode(kind);
-        ctx_mut.stack_ptr += 1;
+    let _ = stack_kind_code::SENTINEL; // silence unused-import warning in this fn
+    ctx_mut.stack_ptr = 0;
+
+    // Build the native-arg slice: receiver as the first user param
+    // (`self`), followed by each user arg. Trait-impl bodies in Shape
+    // are compiled as functions named `"TypeName::method_name"` with
+    // `self` as their first formal parameter (when present); for
+    // n=0-arg methods the receiver is still the first param. Matches
+    // the JIT-compiled callee's `effective_arity = captures_count +
+    // arity` per `compile_function_with_user_funcs` (captures_count = 0
+    // for non-closure trait-impl bodies).
+    let mut native_args: Vec<u64> = Vec::with_capacity(arg_pairs.len() + 1);
+    native_args.push(receiver_bits);
+    for &(bits, _kind) in arg_pairs {
+        native_args.push(bits);
     }
 
-    // Call the JIT-compiled function
-    let _result_code = unsafe { fn_ptr(ctx_mut) };
+    // Call the JIT-compiled function through the native ABI dispatch
+    // helper. The signal value is ignored — error-path deopt is not yet
+    // routed through this trait-method surface (the bare-function path
+    // ignores it identically at `ffi/control/mod.rs:535,:717`).
+    let _result_code = unsafe {
+        crate::ffi::control::call_jit_fn_with_args(raw_fn_ptr, ctx_mut, &native_args)
+    };
 
-    // Pop result from stack. The callee stamped the result kind on the
-    // parallel track per its own producer-side classification; clear it
-    // back to SENTINEL on pop to preserve the §2.7.7 / Q9 invariant for
-    // the slot the caller will reuse.
+    // Pop result from stack. The callee stored the return value at
+    // `ctx.stack[0]` and set `stack_ptr = 1` per the §2.7.5 typed-return
+    // contract; clear the kind track slot back to SENTINEL on pop to
+    // preserve the §2.7.7 / Q9 invariant for the slot the caller will
+    // reuse.
     if ctx_mut.stack_ptr > 0 {
         ctx_mut.stack_ptr -= 1;
         let result = ctx_mut.stack[ctx_mut.stack_ptr];
