@@ -2679,4 +2679,118 @@ function my_func() {
         assert_eq!(related.len(), 1);
         assert!(related[0].message.contains("declared here"));
     }
+
+    // W14.2-B1: per-line coverage additions
+    #[test]
+    fn test_code_description_for_known_code() {
+        let result = code_description_for("E0001");
+        assert!(result.is_some(), "expected code description for E0001");
+    }
+
+    #[test]
+    fn test_code_description_for_empty_returns_none() {
+        let result = code_description_for("");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_diagnostic_tags_for_unused_import_by_code() {
+        let tags = diagnostic_tags_for(Some("W0102"), "unused import 'foo'");
+        assert!(tags.is_some());
+        let tags = tags.unwrap();
+        assert!(tags.contains(&DiagnosticTag::UNNECESSARY));
+    }
+
+    #[test]
+    fn test_diagnostic_tags_for_unused_variable_by_message() {
+        let tags = diagnostic_tags_for(None, "unused variable 'x'");
+        assert!(tags.is_some());
+        let tags = tags.unwrap();
+        assert!(tags.contains(&DiagnosticTag::UNNECESSARY));
+    }
+
+    #[test]
+    fn test_diagnostic_tags_for_other_returns_none() {
+        let tags = diagnostic_tags_for(Some("E0001"), "Expected expression");
+        assert!(tags.is_none(), "non-unused diagnostics should have no tags");
+    }
+
+    #[test]
+    fn test_enrich_diagnostics_with_code_metadata_backfills_description() {
+        let mut diagnostics = vec![Diagnostic {
+            range: Range::default(),
+            severity: Some(DiagnosticSeverity::WARNING),
+            code: Some(NumberOrString::String("W0102".to_string())),
+            code_description: None,
+            tags: None,
+            source: Some("shape".to_string()),
+            message: "unused import 'x'".to_string(),
+            ..Default::default()
+        }];
+        enrich_diagnostics_with_code_metadata(&mut diagnostics);
+        assert!(diagnostics[0].code_description.is_some());
+        assert!(diagnostics[0].tags.is_some());
+        let tags = diagnostics[0].tags.as_ref().unwrap();
+        assert!(tags.contains(&DiagnosticTag::UNNECESSARY));
+    }
+
+    #[test]
+    fn test_enrich_diagnostics_preserves_existing_metadata() {
+        use std::str::FromStr;
+        let existing_desc = CodeDescription {
+            href: Uri::from_str("https://example.com/x").unwrap(),
+        };
+        let mut diagnostics = vec![Diagnostic {
+            range: Range::default(),
+            severity: Some(DiagnosticSeverity::ERROR),
+            code: Some(NumberOrString::String("E0001".to_string())),
+            code_description: Some(existing_desc.clone()),
+            tags: None,
+            source: Some("shape".to_string()),
+            message: "Existing".to_string(),
+            ..Default::default()
+        }];
+        enrich_diagnostics_with_code_metadata(&mut diagnostics);
+        // Should NOT overwrite the existing description
+        assert!(diagnostics[0].code_description.is_some());
+    }
+
+    #[test]
+    fn test_parse_error_diagnostic_no_location_defaults_to_origin() {
+        let error = ShapeError::ParseError {
+            message: "no loc".to_string(),
+            location: None,
+        };
+        let diagnostics = error_to_diagnostic(&error);
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].range.start.line, 0);
+        assert_eq!(diagnostics[0].range.start.character, 0);
+    }
+
+    #[test]
+    fn test_validate_unused_imports_finds_unused() {
+        let source = "from std::core::math use { abs }\nlet x = 5\n";
+        let program = shape_ast::parser::parse_program(source).unwrap();
+        let diagnostics = validate_unused_imports(&program, source);
+        // `abs` is imported but unused — should emit a warning
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.message.contains("unused") || d.message.contains("abs")),
+            "expected unused-import diagnostic; got: {:?}",
+            diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_validate_unused_imports_clean_when_used() {
+        let source = "from std::core::math use { abs }\nlet x = abs(-5)\n";
+        let program = shape_ast::parser::parse_program(source).unwrap();
+        let diagnostics = validate_unused_imports(&program, source);
+        assert!(
+            diagnostics.is_empty(),
+            "expected no diagnostics when import is used; got: {:?}",
+            diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
 }

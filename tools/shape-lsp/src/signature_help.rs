@@ -767,4 +767,220 @@ let s = foo("hi")
             label
         );
     }
+
+    // W14.2-B1: per-line coverage additions
+    #[test]
+    fn test_is_primitive_value_type_name() {
+        // Primitive variants
+        assert!(is_primitive_value_type_name("int"));
+        assert!(is_primitive_value_type_name("integer"));
+        assert!(is_primitive_value_type_name("i64"));
+        assert!(is_primitive_value_type_name("number"));
+        assert!(is_primitive_value_type_name("float"));
+        assert!(is_primitive_value_type_name("f64"));
+        assert!(is_primitive_value_type_name("decimal"));
+        assert!(is_primitive_value_type_name("bool"));
+        assert!(is_primitive_value_type_name("boolean"));
+        assert!(is_primitive_value_type_name("()"));
+        assert!(is_primitive_value_type_name("void"));
+        assert!(is_primitive_value_type_name("unit"));
+        assert!(is_primitive_value_type_name("none"));
+        assert!(is_primitive_value_type_name("null"));
+        assert!(is_primitive_value_type_name("undefined"));
+        assert!(is_primitive_value_type_name("never"));
+    }
+
+    #[test]
+    fn test_is_primitive_value_type_name_strips_optional() {
+        // Optional suffix should be normalized away
+        assert!(is_primitive_value_type_name("int?"));
+        assert!(is_primitive_value_type_name("number?"));
+        assert!(is_primitive_value_type_name("bool?"));
+    }
+
+    #[test]
+    fn test_is_primitive_value_type_name_rejects_non_primitives() {
+        assert!(!is_primitive_value_type_name("string"));
+        assert!(!is_primitive_value_type_name("Foo"));
+        assert!(!is_primitive_value_type_name("Array<int>"));
+        assert!(!is_primitive_value_type_name(""));
+    }
+
+    #[test]
+    fn test_split_top_level_union_no_pipe() {
+        let parts = split_top_level_union("int");
+        assert_eq!(parts, vec!["int".to_string()]);
+    }
+
+    #[test]
+    fn test_split_top_level_union_simple_pipe() {
+        let parts = split_top_level_union("int | string");
+        assert_eq!(parts, vec!["int".to_string(), "string".to_string()]);
+    }
+
+    #[test]
+    fn test_split_top_level_union_nested_brackets() {
+        // Pipes inside angle brackets are not top-level.
+        let parts = split_top_level_union("Array<int | string> | bool");
+        assert_eq!(
+            parts,
+            vec!["Array<int | string>".to_string(), "bool".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_split_top_level_union_nested_parens() {
+        let parts = split_top_level_union("(int | string) | bool");
+        assert_eq!(
+            parts,
+            vec!["(int | string)".to_string(), "bool".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_split_top_level_union_filters_empty() {
+        let parts = split_top_level_union("| int |");
+        assert_eq!(parts, vec!["int".to_string()]);
+    }
+
+    #[test]
+    fn test_apply_ref_prefix_adds_when_missing() {
+        let result = apply_ref_prefix("string", &ParamReferenceMode::Shared);
+        assert!(
+            result.starts_with('&') && result.ends_with("string"),
+            "expected &string-like prefix, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_apply_ref_prefix_no_double_prefix() {
+        let result = apply_ref_prefix("&string", &ParamReferenceMode::Shared);
+        assert_eq!(
+            result, "&string",
+            "should not double-prefix already-referenced type"
+        );
+    }
+
+    #[test]
+    fn test_format_reference_aware_type_none_mode_passthrough() {
+        let result = format_reference_aware_type("string", None);
+        assert_eq!(result, "string");
+    }
+
+    #[test]
+    fn test_format_reference_aware_type_union_splits_primitives() {
+        // Primitives stay unprefixed; non-primitives get the ref prefix.
+        let result =
+            format_reference_aware_type("int | string", Some(&ParamReferenceMode::Shared));
+        // Should contain both `int` (no prefix) and `&string` (prefixed)
+        assert!(
+            result.contains("int") && result.contains("&string"),
+            "expected mixed-prefix union, got {result:?}"
+        );
+        // `int` should not be prefixed
+        assert!(
+            !result.contains("&int"),
+            "primitives should not be prefixed in {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_get_function_call_context_invalid_line() {
+        let text = "abs(";
+        let result = get_function_call_context(
+            text,
+            Position {
+                line: 99,
+                character: 0,
+            },
+        );
+        assert!(result.is_none(), "expected None for out-of-range line");
+    }
+
+    #[test]
+    fn test_get_function_call_context_no_paren() {
+        let text = "let x = 5";
+        let result = get_function_call_context(
+            text,
+            Position {
+                line: 0,
+                character: 8,
+            },
+        );
+        assert!(result.is_none(), "expected None when no '(' before cursor");
+    }
+
+    #[test]
+    fn test_extract_function_name_empty() {
+        assert!(extract_function_name("").is_none());
+        assert!(extract_function_name("   ").is_none());
+    }
+
+    #[test]
+    fn test_extract_function_name_qualified() {
+        // The "." is included for qualified names like csv.load
+        assert_eq!(
+            extract_function_name("csv.load"),
+            Some("csv.load".to_string())
+        );
+    }
+
+    #[test]
+    fn test_get_signature_help_unknown_function_returns_none() {
+        let text = "neverDefined(";
+        let position = Position {
+            line: 0,
+            character: 13,
+        };
+        let result = get_signature_help(text, position);
+        assert!(
+            result.is_none(),
+            "expected None for unknown function call"
+        );
+    }
+
+    #[test]
+    fn test_build_join_signature_unknown_strategy_uses_fallback() {
+        // Path: when strategy is not all/race/any/settle, fall through to default arm
+        let sig = build_join_signature("nonsense", 0);
+        let label = &sig.signatures[0].label;
+        assert!(
+            label.contains("join"),
+            "expected fallback label to mention join, got {label:?}"
+        );
+    }
+
+    #[test]
+    fn test_count_join_branches_counts_top_level_commas() {
+        // "join all { a, b, c, " at cursor — should count 3 commas
+        let text = "async fn foo() {\n  await join all {\n    a,\n    b,\n    c,\n    ";
+        let count = count_join_branches(text, 1, 5, 4);
+        assert_eq!(count, 3, "expected 3 commas at top level");
+    }
+
+    #[test]
+    fn test_join_signature_help_any() {
+        let text = "async fn foo() {\n  await join any {\n    ";
+        let position = Position {
+            line: 2,
+            character: 4,
+        };
+        let sig_help = get_signature_help(text, position);
+        assert!(sig_help.is_some());
+        let sig = &sig_help.unwrap().signatures[0];
+        assert!(sig.label.contains("join any"));
+    }
+
+    #[test]
+    fn test_join_signature_help_settle() {
+        let text = "async fn foo() {\n  await join settle {\n    ";
+        let position = Position {
+            line: 2,
+            character: 4,
+        };
+        let sig_help = get_signature_help(text, position);
+        assert!(sig_help.is_some());
+        let sig = &sig_help.unwrap().signatures[0];
+        assert!(sig.label.contains("join settle"));
+    }
 }

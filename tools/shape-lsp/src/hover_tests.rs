@@ -1588,3 +1588,186 @@ fn test_hover_type_omits_impls_section_when_none_present() {
         panic!("expected markup hover");
     }
 }
+
+// W14.2-B1: per-line coverage additions
+#[test]
+fn test_get_content_api_hover_content() {
+    let hover = get_content_api_hover("Content").expect("expected hover for Content");
+    if let HoverContents::Markup(markup) = hover.contents {
+        assert!(markup.value.contains("Content API"));
+        assert!(markup.value.contains("Content.text"));
+    } else {
+        panic!("expected markup hover");
+    }
+}
+
+#[test]
+fn test_get_content_api_hover_color() {
+    let hover = get_content_api_hover("Color").expect("expected hover for Color");
+    if let HoverContents::Markup(markup) = hover.contents {
+        assert!(markup.value.contains("Color"));
+    } else {
+        panic!("expected markup hover");
+    }
+}
+
+#[test]
+fn test_get_content_api_hover_border() {
+    let hover = get_content_api_hover("Border").expect("expected hover for Border");
+    if let HoverContents::Markup(markup) = hover.contents {
+        assert!(markup.value.contains("Border"));
+    } else {
+        panic!("expected markup hover");
+    }
+}
+
+#[test]
+fn test_get_content_api_hover_charttype() {
+    let hover = get_content_api_hover("ChartType").expect("expected hover for ChartType");
+    if let HoverContents::Markup(markup) = hover.contents {
+        assert!(markup.value.contains("ChartType"));
+    } else {
+        panic!("expected markup hover");
+    }
+}
+
+#[test]
+fn test_get_content_api_hover_align() {
+    let hover = get_content_api_hover("Align").expect("expected hover for Align");
+    if let HoverContents::Markup(markup) = hover.contents {
+        assert!(markup.value.contains("Align"));
+    } else {
+        panic!("expected markup hover");
+    }
+}
+
+#[test]
+fn test_get_content_api_hover_unknown() {
+    let result = get_content_api_hover("NotARealApi");
+    assert!(result.is_none());
+}
+
+#[test]
+fn test_get_content_member_hover_known() {
+    let hover = get_content_member_hover("Content", "text")
+        .expect("expected hover for Content.text");
+    if let HoverContents::Markup(markup) = hover.contents {
+        assert!(
+            markup.value.contains("Content.text") || markup.value.contains("text"),
+            "expected mention of text member; got: {}",
+            markup.value
+        );
+    }
+}
+
+#[test]
+fn test_get_content_member_hover_unknown() {
+    let result = get_content_member_hover("Content", "doesNotExist");
+    assert!(result.is_none());
+}
+
+#[test]
+fn test_get_keyword_hover_let() {
+    let hover = get_keyword_hover("let");
+    assert!(hover.is_some(), "expected hover for 'let' keyword");
+}
+
+#[test]
+fn test_get_keyword_hover_fn() {
+    let hover = get_keyword_hover("fn");
+    assert!(hover.is_some(), "expected hover for 'fn' keyword");
+}
+
+#[test]
+fn test_get_keyword_hover_unknown() {
+    let result = get_keyword_hover("notarealkeyword");
+    assert!(result.is_none());
+}
+
+#[test]
+fn test_get_type_hover_int() {
+    let hover = get_type_hover("int");
+    assert!(hover.is_some(), "expected hover for 'int' type");
+}
+
+#[test]
+fn test_get_type_hover_unknown() {
+    let result = get_type_hover("NeverDefinedType123");
+    assert!(result.is_none(), "expected None for non-builtin type");
+}
+
+#[test]
+fn test_fallback_builtin_type_hover_array() {
+    let result = fallback_builtin_type_hover("Array");
+    // Either Some or None — just confirm no panic.
+    let _ = result;
+}
+
+#[test]
+fn test_is_annotation_word_at_position() {
+    let text = "@deprecated\nfn old() { }";
+    let result = is_annotation_word_at_position(
+        text,
+        Position {
+            line: 0,
+            character: 3,
+        },
+    );
+    assert!(
+        result,
+        "expected @-prefixed identifier to be detected as annotation"
+    );
+}
+
+#[test]
+fn test_is_annotation_word_at_position_no_at_sign() {
+    let text = "deprecated\nfn old() { }";
+    let result = is_annotation_word_at_position(
+        text,
+        Position {
+            line: 0,
+            character: 3,
+        },
+    );
+    assert!(!result, "expected non-@ word to not be detected as annotation");
+}
+
+#[test]
+fn test_get_hover_returns_none_on_empty_source() {
+    let result = get_hover(
+        "",
+        Position {
+            line: 0,
+            character: 0,
+        },
+        None,
+        None,
+        None,
+    );
+    assert!(result.is_none(), "expected None on empty source");
+}
+
+#[test]
+fn test_get_hover_returns_none_off_identifier() {
+    let result = get_hover(
+        "let x = 1\n",
+        Position {
+            line: 0,
+            character: 6, // on `=`
+        },
+        None,
+        None,
+        None,
+    );
+    assert!(result.is_none(), "expected None at non-identifier position");
+}
+
+#[test]
+fn test_span_contains_offset() {
+    let span = Span { start: 10, end: 20 };
+    assert!(span_contains_offset(span, 10));
+    assert!(span_contains_offset(span, 15));
+    assert!(span_contains_offset(span, 19));
+    assert!(!span_contains_offset(span, 9));
+    assert!(!span_contains_offset(span, 20)); // half-open
+}

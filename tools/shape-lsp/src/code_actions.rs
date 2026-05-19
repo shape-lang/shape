@@ -1299,4 +1299,327 @@ mod tests {
                 .collect::<Vec<_>>()
         );
     }
+
+    // W14.2-B1: per-line coverage additions
+    #[test]
+    fn test_extract_quoted_name_no_quote_returns_none() {
+        assert_eq!(extract_quoted_name("no quotes here"), None);
+    }
+
+    #[test]
+    fn test_extract_unused_name() {
+        assert_eq!(
+            extract_unused_name("'baz' is unused"),
+            Some("baz".to_string())
+        );
+        assert_eq!(extract_unused_name("nothing here"), None);
+    }
+
+    #[test]
+    fn test_parse_non_exhaustive_match_basic() {
+        let parsed =
+            parse_non_exhaustive_match("Non-exhaustive match on 'Color': missing variants Red, Green, Blue");
+        assert!(parsed.is_some());
+        let (name, variants) = parsed.unwrap();
+        assert_eq!(name, "Color");
+        assert_eq!(variants, vec!["Red", "Green", "Blue"]);
+    }
+
+    #[test]
+    fn test_parse_non_exhaustive_match_no_prefix() {
+        let parsed = parse_non_exhaustive_match("Some other message");
+        assert!(parsed.is_none());
+    }
+
+    #[test]
+    fn test_parse_non_exhaustive_match_no_variants() {
+        let parsed =
+            parse_non_exhaustive_match("Non-exhaustive match on 'Foo': missing variants ");
+        assert!(parsed.is_none());
+    }
+
+    #[test]
+    fn test_find_match_arm_insert_position_simple() {
+        let text = "fn f() {\n  match x {\n    A => 1,\n  }\n}\n";
+        let range = Range {
+            start: Position {
+                line: 2,
+                character: 0,
+            },
+            end: Position {
+                line: 2,
+                character: 10,
+            },
+        };
+        let result = find_match_arm_insert_position(text, range);
+        assert!(result.is_some(), "expected to find a closing brace position");
+        let (pos, indent) = result.unwrap();
+        // Should point to line 3 (the closing brace)
+        assert_eq!(pos.line, 3);
+        // Indent should be 2 spaces (matching the closing brace's indent)
+        assert_eq!(indent, "  ");
+    }
+
+    #[test]
+    fn test_find_match_arm_insert_position_no_closing_brace() {
+        let text = "abc\ndef\n";
+        let range = Range {
+            start: Position {
+                line: 0,
+                character: 0,
+            },
+            end: Position {
+                line: 0,
+                character: 3,
+            },
+        };
+        let result = find_match_arm_insert_position(text, range);
+        assert!(result.is_none(), "expected None when no closing brace exists");
+    }
+
+    #[test]
+    fn test_get_line_returns_line_content() {
+        let text = "first\nsecond\nthird";
+        assert_eq!(get_line(text, 0), Some("first"));
+        assert_eq!(get_line(text, 1), Some("second"));
+        assert_eq!(get_line(text, 2), Some("third"));
+        assert_eq!(get_line(text, 3), None);
+    }
+
+    #[test]
+    fn test_get_text_in_range_multiline() {
+        let text = "abc\ndef\nghi";
+        let range = Range {
+            start: Position {
+                line: 0,
+                character: 1,
+            },
+            end: Position {
+                line: 2,
+                character: 2,
+            },
+        };
+        let result = get_text_in_range(text, range);
+        assert!(
+            result.contains("bc") && result.contains("def") && result.contains("gh"),
+            "expected multi-line text in {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_is_expression_handles_statements() {
+        // Statement-shaped should be rejected
+        assert!(!is_expression("let x = 1"));
+        assert!(!is_expression("var y = 2"));
+        assert!(!is_expression("const z = 3"));
+        assert!(!is_expression("if x { 1 }"));
+        assert!(!is_expression("for i in 0..10 { }"));
+        assert!(!is_expression("while x { }"));
+        assert!(!is_expression("return x"));
+        assert!(!is_expression("fn foo() { }"));
+        assert!(!is_expression(""));
+        assert!(!is_expression("   "));
+    }
+
+    #[test]
+    fn test_is_kind_requested_none_allows_all() {
+        assert!(is_kind_requested(None, "quickfix"));
+        assert!(is_kind_requested(None, "refactor.extract"));
+    }
+
+    #[test]
+    fn test_is_kind_requested_empty_allows_all() {
+        let empty: &[CodeActionKind] = &[];
+        assert!(is_kind_requested(Some(empty), "quickfix"));
+    }
+
+    #[test]
+    fn test_is_kind_requested_exact_match() {
+        let kinds = &[CodeActionKind::QUICKFIX];
+        assert!(is_kind_requested(Some(kinds), "quickfix"));
+        assert!(!is_kind_requested(Some(kinds), "refactor"));
+    }
+
+    #[test]
+    fn test_is_group_requested_with_parent_kind() {
+        let kinds = &[CodeActionKind::SOURCE];
+        assert!(is_group_requested(Some(kinds), "source"));
+        // Sub-kinds should also be permitted under group "source"
+        assert!(is_kind_requested(
+            Some(kinds),
+            "source.organizeImports"
+        ));
+    }
+
+    #[test]
+    fn test_dedupe_actions_removes_same_title() {
+        let action1 = CodeActionOrCommand::CodeAction(CodeAction {
+            title: "dup".to_string(),
+            kind: Some(CodeActionKind::QUICKFIX),
+            ..Default::default()
+        });
+        let action2 = CodeActionOrCommand::CodeAction(CodeAction {
+            title: "dup".to_string(),
+            kind: Some(CodeActionKind::QUICKFIX),
+            ..Default::default()
+        });
+        let action3 = CodeActionOrCommand::CodeAction(CodeAction {
+            title: "unique".to_string(),
+            kind: Some(CodeActionKind::QUICKFIX),
+            ..Default::default()
+        });
+        let deduped = dedupe_actions(vec![action1, action2, action3]);
+        assert_eq!(deduped.len(), 2, "expected dedupe to collapse same-title actions");
+    }
+
+    #[test]
+    fn test_dedupe_actions_preserves_different_kinds() {
+        let action1 = CodeActionOrCommand::CodeAction(CodeAction {
+            title: "do x".to_string(),
+            kind: Some(CodeActionKind::QUICKFIX),
+            ..Default::default()
+        });
+        let action2 = CodeActionOrCommand::CodeAction(CodeAction {
+            title: "do x".to_string(),
+            kind: Some(CodeActionKind::REFACTOR),
+            ..Default::default()
+        });
+        let deduped = dedupe_actions(vec![action1, action2]);
+        assert_eq!(deduped.len(), 2, "different kinds + same title preserved");
+    }
+
+    #[test]
+    fn test_is_identifier() {
+        assert!(is_identifier("foo"));
+        assert!(is_identifier("_bar"));
+        assert!(is_identifier("baz123"));
+        assert!(!is_identifier(""));
+        assert!(!is_identifier("123abc"));
+        assert!(!is_identifier("foo bar"));
+        assert!(!is_identifier("foo.bar"));
+    }
+
+    #[test]
+    fn test_is_import_candidate_symbol_requires_uppercase() {
+        // Import candidate must be valid identifier AND start with uppercase
+        assert!(is_import_candidate_symbol("Foo"));
+        assert!(is_import_candidate_symbol("Snapshot"));
+        assert!(!is_import_candidate_symbol("foo"));
+        assert!(!is_import_candidate_symbol("foo_bar"));
+        assert!(!is_import_candidate_symbol(""));
+        assert!(!is_import_candidate_symbol("123Foo"));
+    }
+
+    #[test]
+    fn test_import_statement_ranges_finds_from_use() {
+        let text = "from std::core::math use { abs }\nlet x = 1\n";
+        let ranges = import_statement_ranges(text);
+        assert_eq!(ranges.len(), 1, "expected one import range");
+        assert_eq!(ranges[0].start.line, 0);
+    }
+
+    #[test]
+    fn test_import_statement_ranges_handles_parse_failure() {
+        // Use a fallback path with text-based detection for unfinished imports.
+        let text = "from std::core::math\n";
+        let ranges = import_statement_ranges(text);
+        // Either parsed range or fallback range
+        assert!(
+            !ranges.is_empty(),
+            "expected to find import range via parse or fallback"
+        );
+    }
+
+    #[test]
+    fn test_collect_imported_local_names_named() {
+        let text = "from std::core::math use { abs, max }\nlet x = abs(1)\n";
+        let names = collect_imported_local_names(text);
+        assert!(names.contains("abs"));
+        assert!(names.contains("max"));
+    }
+
+    #[test]
+    fn test_collect_imported_local_names_empty() {
+        let text = "let x = 1\n";
+        let names = collect_imported_local_names(text);
+        assert!(names.is_empty());
+    }
+
+    #[test]
+    fn test_import_insert_position_after_existing_imports() {
+        let text = "from std::core::math use { abs }\nlet x = 1\n";
+        let pos = import_insert_position(text);
+        // Should insert after the existing import (at least line 1).
+        assert!(
+            pos.line >= 1,
+            "expected insert position after import line, got {}",
+            pos.line
+        );
+        assert_eq!(pos.character, 0);
+    }
+
+    #[test]
+    fn test_import_insert_position_no_imports() {
+        let text = "let x = 1\n";
+        let pos = import_insert_position(text);
+        assert_eq!(pos.line, 0);
+        assert_eq!(pos.character, 0);
+    }
+
+    #[test]
+    fn test_diagnostic_code_returns_string_form() {
+        let d = Diagnostic {
+            code: Some(NumberOrString::String("E0001".to_string())),
+            ..Default::default()
+        };
+        assert_eq!(diagnostic_code(&d), Some("E0001"));
+
+        let d2 = Diagnostic {
+            code: Some(NumberOrString::Number(42)),
+            ..Default::default()
+        };
+        // Numeric codes return None per the canonical-string contract.
+        assert_eq!(diagnostic_code(&d2), None);
+
+        let d3 = Diagnostic {
+            code: None,
+            ..Default::default()
+        };
+        assert_eq!(diagnostic_code(&d3), None);
+    }
+
+    #[test]
+    fn test_get_code_actions_filters_to_requested_kind() {
+        let text = "let x = 1";
+        let uri = Uri::from_file_path("/tmp/test.shape").unwrap();
+        // Request ONLY refactor kind; quickfix should be excluded.
+        let actions = get_code_actions(
+            text,
+            &uri,
+            Range {
+                start: Position {
+                    line: 0,
+                    character: 0,
+                },
+                end: Position {
+                    line: 0,
+                    character: 5,
+                },
+            },
+            &[],
+            None,
+            Some(&[CodeActionKind::REFACTOR]),
+        );
+        for action in &actions {
+            if let CodeActionOrCommand::CodeAction(ca) = action {
+                if let Some(kind) = &ca.kind {
+                    assert!(
+                        kind.as_str().starts_with("refactor"),
+                        "expected refactor-only action, got {}",
+                        kind.as_str()
+                    );
+                }
+            }
+        }
+    }
 }
