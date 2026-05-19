@@ -1018,6 +1018,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // through schema-recovered reads (W10 jit-playbook §5).
                 FieldType::Object(_)
                 | FieldType::Array(_)
+                | FieldType::Option(_)
                 | FieldType::Decimal
                 | FieldType::Any => None,
             }
