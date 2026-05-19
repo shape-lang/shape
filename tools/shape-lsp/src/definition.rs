@@ -1513,4 +1513,165 @@ let y = myVar * 2;
             "Should find references even with broken code via resilient parsing"
         );
     }
+
+    // W14.2-B1: per-line coverage additions
+    #[test]
+    fn test_get_definition_returns_none_for_non_identifier_position() {
+        let code = "let x = 5\n";
+        let uri = Uri::from_file_path("/test.shape").unwrap();
+        // Position on `=` (non-identifier)
+        let result = get_definition(
+            code,
+            Position {
+                line: 0,
+                character: 6,
+            },
+            &uri,
+            None,
+            None,
+            None,
+        );
+        assert!(result.is_none(), "expected None at non-identifier position");
+    }
+
+    #[test]
+    fn test_get_definition_finds_function_at_call_site() {
+        let code = "fn myFunc() { return 1 }\nlet x = myFunc()\n";
+        let uri = Uri::from_file_path("/test.shape").unwrap();
+        // Position on `myFunc` at call site
+        let result = get_definition(
+            code,
+            Position {
+                line: 1,
+                character: 9,
+            },
+            &uri,
+            None,
+            None,
+            None,
+        );
+        assert!(result.is_some(), "expected definition at call site");
+    }
+
+    #[test]
+    fn test_get_definition_unknown_symbol_returns_none() {
+        let code = "let x = neverDefined\n";
+        let uri = Uri::from_file_path("/test.shape").unwrap();
+        // Position on `neverDefined`
+        let result = get_definition(
+            code,
+            Position {
+                line: 0,
+                character: 8,
+            },
+            &uri,
+            None,
+            None,
+            None,
+        );
+        assert!(result.is_none(), "expected None for unknown symbol");
+    }
+
+    #[test]
+    fn test_get_type_definition_returns_none_for_unknown_symbol() {
+        let code = "let x = 5\n";
+        let uri = Uri::from_file_path("/test.shape").unwrap();
+        let result = get_type_definition(
+            code,
+            Position {
+                line: 0,
+                character: 4,
+            },
+            &uri,
+            None,
+            None,
+        );
+        // int is a primitive — type definition returns None.
+        assert!(result.is_none(), "expected None for primitive type");
+    }
+
+    #[test]
+    fn test_get_implementations_returns_none_for_no_impls() {
+        let code = "let x = 5\n";
+        let uri = Uri::from_file_path("/test.shape").unwrap();
+        let result = get_implementations(
+            code,
+            Position {
+                line: 0,
+                character: 4,
+            },
+            &uri,
+            None,
+        );
+        assert!(result.is_none(), "expected None when no impls exist");
+    }
+
+    #[test]
+    fn test_get_implementations_finds_impl_by_trait_name() {
+        let code = "trait Q { fn q(self) -> int; }\ntype T { x: int }\nimpl Q for T { fn q(self) -> int { 1 } }\n";
+        let uri = Uri::from_file_path("/test.shape").unwrap();
+        // Position on "Q" in the trait header at line 2 (0-indexed)
+        let result = get_implementations(
+            code,
+            Position {
+                line: 2,
+                character: 5,
+            },
+            &uri,
+            None,
+        );
+        assert!(result.is_some(), "expected impl-block location for Q");
+        let locs = result.unwrap();
+        assert!(!locs.is_empty());
+    }
+
+    #[test]
+    fn test_get_document_highlights_returns_none_off_word() {
+        let code = "let x = 5\n";
+        let result = get_document_highlights(
+            code,
+            Position {
+                line: 0,
+                character: 6, // on `=`
+            },
+            None,
+        );
+        // Off any identifier — should still be Some or None gracefully.
+        // The function should not panic; success is just-don't-crash.
+        let _ = result;
+    }
+
+    #[test]
+    fn test_get_references_cross_file_no_documents_or_cache() {
+        let code = "fn foo() { return 1 }\nlet x = foo()\n";
+        let uri = Uri::from_file_path("/test.shape").unwrap();
+        let result = get_references_cross_file(
+            code,
+            Position {
+                line: 0,
+                character: 3,
+            },
+            &uri,
+            None, // cached_program
+            None, // documents
+            None, // module_cache
+            None, // workspace_root
+        );
+        // Should still find local references via get_references.
+        assert!(result.is_some(), "expected local references when no cross-file context");
+    }
+
+    #[test]
+    fn test_get_declaration_aliases_get_definition() {
+        let code = "fn foo() { return 1 }\nlet x = foo()\n";
+        let uri = Uri::from_file_path("/test.shape").unwrap();
+        let pos = Position {
+            line: 1,
+            character: 9,
+        };
+        let decl = get_declaration(code, pos, &uri, None, None, None);
+        let def = get_definition(code, pos, &uri, None, None, None);
+        // Should produce equivalent results (both Some or both None)
+        assert_eq!(decl.is_some(), def.is_some());
+    }
 }

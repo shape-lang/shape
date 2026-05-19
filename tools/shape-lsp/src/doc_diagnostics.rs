@@ -468,4 +468,232 @@ mod tests {
             "annotation param docs should validate cleanly: {diagnostics:?}"
         );
     }
+
+    // W14.2-B1: per-line coverage additions
+    fn collect_codes(diagnostics: &[Diagnostic]) -> Vec<String> {
+        diagnostics
+            .iter()
+            .filter_map(|d| match &d.code {
+                Some(NumberOrString::String(s)) => Some(s.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn reports_unknown_tag() {
+        let source = "/// @bogus content here\nfn f() { }\n";
+        let program = parse_program(source).expect("program");
+        let diagnostics = validate_program_docs(&program, source, None, None, None);
+        let codes = collect_codes(&diagnostics);
+        assert!(
+            codes.iter().any(|c| c == "doc.unknown_tag"),
+            "expected doc.unknown_tag in codes={codes:?}"
+        );
+    }
+
+    #[test]
+    fn reports_empty_body_for_returns() {
+        let source = "/// @returns\nfn f() -> int { 1 }\n";
+        let program = parse_program(source).expect("program");
+        let diagnostics = validate_program_docs(&program, source, None, None, None);
+        let codes = collect_codes(&diagnostics);
+        assert!(
+            codes.iter().any(|c| c == "doc.empty_body"),
+            "expected doc.empty_body in codes={codes:?}"
+        );
+    }
+
+    #[test]
+    fn reports_duplicate_returns_singleton() {
+        let source = "/// @returns first\n/// @returns second\nfn f() -> int { 1 }\n";
+        let program = parse_program(source).expect("program");
+        let diagnostics = validate_program_docs(&program, source, None, None, None);
+        let codes = collect_codes(&diagnostics);
+        assert!(
+            codes.iter().any(|c| c == "doc.duplicate_tag"),
+            "expected doc.duplicate_tag in codes={codes:?}"
+        );
+    }
+
+    #[test]
+    fn reports_duplicate_param() {
+        let source = "/// @param x first\n/// @param x second\nfn f(x: int) -> int { x }\n";
+        let program = parse_program(source).expect("program");
+        let diagnostics = validate_program_docs(&program, source, None, None, None);
+        let codes = collect_codes(&diagnostics);
+        assert!(
+            codes.iter().any(|c| c == "doc.duplicate_param"),
+            "expected doc.duplicate_param in codes={codes:?}"
+        );
+    }
+
+    #[test]
+    fn reports_returns_on_non_callable() {
+        let source = "/// @returns nothing\ntype Foo { x: int }\n";
+        let program = parse_program(source).expect("program");
+        let diagnostics = validate_program_docs(&program, source, None, None, None);
+        let codes = collect_codes(&diagnostics);
+        assert!(
+            codes.iter().any(|c| c == "doc.invalid_returns"),
+            "expected doc.invalid_returns in codes={codes:?}"
+        );
+    }
+
+    #[test]
+    fn reports_param_on_non_callable() {
+        let source = "/// @param x abc\ntype Foo { x: int }\n";
+        let program = parse_program(source).expect("program");
+        let diagnostics = validate_program_docs(&program, source, None, None, None);
+        let codes = collect_codes(&diagnostics);
+        assert!(
+            codes.iter().any(|c| c == "doc.invalid_param_owner"),
+            "expected doc.invalid_param_owner in codes={codes:?}"
+        );
+    }
+
+    #[test]
+    fn reports_typeparam_on_non_generic() {
+        let source = "/// @typeparam T zzz\nfn f(x: int) -> int { x }\n";
+        let program = parse_program(source).expect("program");
+        let diagnostics = validate_program_docs(&program, source, None, None, None);
+        let codes = collect_codes(&diagnostics);
+        assert!(
+            codes.iter().any(|c| c == "doc.invalid_typeparam_owner"),
+            "expected doc.invalid_typeparam_owner in codes={codes:?}"
+        );
+    }
+
+    #[test]
+    fn reports_unknown_typeparam() {
+        let source = "/// @typeparam Z explanation\nfn f<T>(x: T) -> T { x }\n";
+        let program = parse_program(source).expect("program");
+        let diagnostics = validate_program_docs(&program, source, None, None, None);
+        let codes = collect_codes(&diagnostics);
+        assert!(
+            codes.iter().any(|c| c == "doc.unknown_typeparam"),
+            "expected doc.unknown_typeparam in codes={codes:?}"
+        );
+    }
+
+    #[test]
+    fn reports_invalid_module_tag_unqualified() {
+        // @module tag needs to be attached to a `mod` item to find an owner.
+        let source = "/// @module not_qualified\nmod inner {\n}\n";
+        let program = parse_program(source).expect("program");
+        let diagnostics = validate_program_docs(&program, source, None, None, None);
+        let codes = collect_codes(&diagnostics);
+        assert!(
+            codes
+                .iter()
+                .any(|c| c == "doc.invalid_module_tag" || c == "doc.orphan"),
+            "expected doc.invalid_module_tag or doc.orphan in codes={codes:?}"
+        );
+    }
+
+    #[test]
+    fn reports_unresolved_link_target() {
+        let source = "/// @see std::core::nonexistent::nope\nfn f() { }\n";
+        let program = parse_program(source).expect("program");
+        let diagnostics = validate_program_docs(&program, source, None, None, None);
+        let codes = collect_codes(&diagnostics);
+        // Either unresolved_link (when looks like FQN) or unqualified_link (when it fails the FQN check).
+        assert!(
+            codes
+                .iter()
+                .any(|c| c == "doc.unresolved_link" || c == "doc.unqualified_link"),
+            "expected unresolved or unqualified link in codes={codes:?}"
+        );
+    }
+
+    #[test]
+    fn requires_body_returns_true_for_module_tag() {
+        assert!(requires_body(&DocTagKind::Module));
+        assert!(requires_body(&DocTagKind::Returns));
+        assert!(requires_body(&DocTagKind::Throws));
+        assert!(requires_body(&DocTagKind::Deprecated));
+        assert!(requires_body(&DocTagKind::Requires));
+        assert!(requires_body(&DocTagKind::Since));
+        assert!(requires_body(&DocTagKind::See));
+        assert!(requires_body(&DocTagKind::Link));
+        assert!(requires_body(&DocTagKind::Note));
+        assert!(requires_body(&DocTagKind::Example));
+    }
+
+    #[test]
+    fn requires_body_returns_false_for_param_and_typeparam_and_unknown() {
+        assert!(!requires_body(&DocTagKind::Param));
+        assert!(!requires_body(&DocTagKind::TypeParam));
+        assert!(!requires_body(&DocTagKind::Unknown("custom".to_string())));
+    }
+
+    #[test]
+    fn singleton_key_returns_keys_for_singletons() {
+        assert_eq!(singleton_key(&DocTagKind::Module), Some("module"));
+        assert_eq!(singleton_key(&DocTagKind::Returns), Some("returns"));
+        assert_eq!(singleton_key(&DocTagKind::Deprecated), Some("deprecated"));
+        assert_eq!(singleton_key(&DocTagKind::Since), Some("since"));
+    }
+
+    #[test]
+    fn singleton_key_returns_none_for_non_singletons() {
+        assert_eq!(singleton_key(&DocTagKind::Param), None);
+        assert_eq!(singleton_key(&DocTagKind::TypeParam), None);
+        assert_eq!(singleton_key(&DocTagKind::Throws), None);
+        assert_eq!(singleton_key(&DocTagKind::See), None);
+        assert_eq!(singleton_key(&DocTagKind::Example), None);
+    }
+
+    #[test]
+    fn tag_name_formats_each_known_kind() {
+        let kinds = [
+            (DocTagKind::Module, "@module"),
+            (DocTagKind::TypeParam, "@typeparam"),
+            (DocTagKind::Param, "@param"),
+            (DocTagKind::Returns, "@returns"),
+            (DocTagKind::Throws, "@throws"),
+            (DocTagKind::Deprecated, "@deprecated"),
+            (DocTagKind::Requires, "@requires"),
+            (DocTagKind::Since, "@since"),
+            (DocTagKind::See, "@see"),
+            (DocTagKind::Link, "@link"),
+            (DocTagKind::Note, "@note"),
+            (DocTagKind::Example, "@example"),
+        ];
+        for (kind, expected) in kinds {
+            let tag = DocTag {
+                kind,
+                kind_span: Span::DUMMY,
+                span: Span::DUMMY,
+                body: String::new(),
+                name: None,
+                name_span: None,
+                body_span: None,
+                link: None,
+            };
+            assert_eq!(tag_name(&tag), expected);
+        }
+        let unknown_tag = DocTag {
+            kind: DocTagKind::Unknown("xyz".to_string()),
+            kind_span: Span::DUMMY,
+            span: Span::DUMMY,
+            body: String::new(),
+            name: None,
+            name_span: None,
+            body_span: None,
+            link: None,
+        };
+        assert_eq!(tag_name(&unknown_tag), "@xyz");
+    }
+
+    #[test]
+    fn validate_program_docs_returns_empty_for_undocumented_program() {
+        let source = "fn add(x: int) -> int { x }\n";
+        let program = parse_program(source).expect("program");
+        let diagnostics = validate_program_docs(&program, source, None, None, None);
+        assert!(
+            diagnostics.is_empty(),
+            "expected no diagnostics for undocumented program, got {diagnostics:?}"
+        );
+    }
 }

@@ -621,4 +621,175 @@ mod tests {
         assert_eq!(offset_to_line_col(text, 6), (1, 0));
         assert_eq!(offset_to_line_col(text, 9), (1, 3));
     }
+
+    // W14.2-B1: per-line coverage additions
+    #[test]
+    fn test_is_identifier_char() {
+        assert!(is_identifier_char('a'));
+        assert!(is_identifier_char('Z'));
+        assert!(is_identifier_char('0'));
+        assert!(is_identifier_char('_'));
+        assert!(!is_identifier_char(' '));
+        assert!(!is_identifier_char('-'));
+        assert!(!is_identifier_char('.'));
+        assert!(!is_identifier_char('('));
+    }
+
+    #[test]
+    fn test_is_valid_identifier_invalid_chars() {
+        assert!(!is_valid_identifier("foo.bar"));
+        assert!(!is_valid_identifier("foo bar"));
+        assert!(!is_valid_identifier("foo!"));
+        assert!(!is_valid_identifier(""));
+    }
+
+    #[test]
+    fn test_prepare_rename_rejects_keyword() {
+        let text = "let myVar = 5";
+        let response = prepare_rename(
+            text,
+            Position {
+                line: 0,
+                character: 1,
+            },
+        );
+        assert!(response.is_none(), "expected None for keyword 'let'");
+    }
+
+    #[test]
+    fn test_prepare_rename_rejects_builtin() {
+        let text = "let x = abs(5)";
+        let response = prepare_rename(
+            text,
+            Position {
+                line: 0,
+                character: 9,
+            },
+        );
+        assert!(
+            response.is_none(),
+            "expected None for builtin 'abs' (got {response:?})"
+        );
+    }
+
+    #[test]
+    fn test_prepare_rename_accepts_user_identifier() {
+        let text = "let myVar = 5";
+        let response = prepare_rename(
+            text,
+            Position {
+                line: 0,
+                character: 5,
+            },
+        );
+        assert!(response.is_some(), "expected Some for user identifier");
+    }
+
+    #[test]
+    fn test_rename_rejects_invalid_new_name() {
+        let text = "let myVar = 5";
+        let uri = Uri::from_file_path("/tmp/test.shape").unwrap();
+        let result = rename(
+            text,
+            &uri,
+            Position {
+                line: 0,
+                character: 5,
+            },
+            "123bad",
+            None,
+        );
+        assert!(result.is_none(), "expected None for invalid new identifier");
+    }
+
+    #[test]
+    fn test_rename_rejects_keyword_target() {
+        let text = "let myVar = 5";
+        let uri = Uri::from_file_path("/tmp/test.shape").unwrap();
+        let result = rename(
+            text,
+            &uri,
+            Position {
+                line: 0,
+                character: 1,
+            },
+            "newName",
+            None,
+        );
+        assert!(result.is_none(), "expected None when renaming a keyword");
+    }
+
+    #[test]
+    fn test_rename_simple_variable() {
+        let text = "fn f() {\n  let myVar = 1\n  return myVar + myVar\n}\n";
+        let uri = Uri::from_file_path("/tmp/test.shape").unwrap();
+        let offset = text.find("myVar").unwrap();
+        let (line, col) = offset_to_line_col(text, offset);
+        let result = rename(
+            text,
+            &uri,
+            Position {
+                line,
+                character: col,
+            },
+            "newName",
+            None,
+        );
+        assert!(result.is_some(), "expected rename edits");
+        let edit = result.unwrap();
+        let changes = edit.changes.unwrap();
+        let edits = changes.get(&uri).unwrap();
+        for te in edits {
+            assert_eq!(te.new_text, "newName");
+        }
+    }
+
+    #[test]
+    fn test_find_symbol_occurrences_finds_all() {
+        let text = "let foo = 1\nlet bar = foo + foo";
+        let edits = find_symbol_occurrences(text, "foo", "baz");
+        assert_eq!(edits.len(), 3, "expected 3 occurrences of foo");
+        for te in &edits {
+            assert_eq!(te.new_text, "baz");
+        }
+    }
+
+    #[test]
+    fn test_find_symbol_occurrences_respects_word_boundary() {
+        // "foo" should not match "foobar" or "myfoo"
+        let text = "let foo = 1\nlet foobar = 2\nlet myfoo = 3";
+        let edits = find_symbol_occurrences(text, "foo", "baz");
+        assert_eq!(edits.len(), 1, "expected only the standalone foo match");
+    }
+
+    #[test]
+    fn test_get_word_range_returns_none_for_non_identifier() {
+        let text = "+ + +";
+        let result = get_word_range(
+            text,
+            Position {
+                line: 0,
+                character: 0,
+            },
+        );
+        assert!(
+            result.is_none(),
+            "expected None at non-identifier position"
+        );
+    }
+
+    #[test]
+    fn test_get_word_range_returns_span_of_word() {
+        let text = "let myVarName = 5";
+        let range = get_word_range(
+            text,
+            Position {
+                line: 0,
+                character: 7,
+            },
+        )
+        .expect("expected Some range");
+        assert_eq!(range.start.character, 4);
+        assert_eq!(range.end.character, 13);
+    }
 }

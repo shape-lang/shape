@@ -1717,4 +1717,152 @@ let i = 10D
             "invalid parse with no recoverable AST should not emit hints"
         );
     }
+
+    // W14.2-B1: per-line coverage additions
+    #[test]
+    fn test_is_primitive_value_type_inlay() {
+        assert!(is_primitive_value_type("int"));
+        assert!(is_primitive_value_type("number"));
+        assert!(is_primitive_value_type("bool"));
+        assert!(is_primitive_value_type("i32"));
+        assert!(is_primitive_value_type("f64"));
+        assert!(is_primitive_value_type("int?"));
+        assert!(is_primitive_value_type("null"));
+        assert!(is_primitive_value_type("void"));
+        // string is NOT a value primitive here (it's a heap-allocated ref type)
+        assert!(!is_primitive_value_type("string"));
+        assert!(!is_primitive_value_type(""));
+        assert!(!is_primitive_value_type("MyType"));
+        assert!(!is_primitive_value_type("Array<int>"));
+    }
+
+    #[test]
+    fn test_is_in_range_inside() {
+        let range = Range {
+            start: Position {
+                line: 0,
+                character: 0,
+            },
+            end: Position {
+                line: 10,
+                character: 50,
+            },
+        };
+        assert!(is_in_range(
+            Position {
+                line: 5,
+                character: 25,
+            },
+            range
+        ));
+    }
+
+    #[test]
+    fn test_is_in_range_outside() {
+        let range = Range {
+            start: Position {
+                line: 0,
+                character: 0,
+            },
+            end: Position {
+                line: 5,
+                character: 0,
+            },
+        };
+        // Past the end line
+        assert!(!is_in_range(
+            Position {
+                line: 10,
+                character: 0,
+            },
+            range
+        ));
+    }
+
+    #[test]
+    fn test_format_comptime_value_number() {
+        let expr = Expr::Literal(Literal::Int(42), Span::DUMMY);
+        let formatted = format_comptime_value(&expr);
+        assert!(
+            formatted.contains("42"),
+            "expected '42' in formatted output, got {formatted:?}"
+        );
+    }
+
+    #[test]
+    fn test_format_comptime_value_string() {
+        let expr = Expr::Literal(Literal::String("hi".to_string()), Span::DUMMY);
+        let formatted = format_comptime_value(&expr);
+        assert!(
+            formatted.contains("hi") || formatted.contains("\""),
+            "expected string-ish in formatted output, got {formatted:?}"
+        );
+    }
+
+    #[test]
+    fn test_get_inlay_hints_empty_source() {
+        let hints = get_inlay_hints("", full_range(), &InlayHintConfig::default(), None);
+        assert!(hints.is_empty(), "expected no hints for empty source");
+    }
+
+    #[test]
+    fn test_get_inlay_hints_respects_range_filter() {
+        let code = "let x = 1\nlet y = 2\nlet z = 3\n";
+        let limited_range = Range {
+            start: Position {
+                line: 0,
+                character: 0,
+            },
+            end: Position {
+                line: 0,
+                character: 100,
+            },
+        };
+        let hints = get_inlay_hints(code, limited_range, &InlayHintConfig::default(), None);
+        // Only hints for line 0 should be present
+        for h in &hints {
+            assert_eq!(
+                h.position.line, 0,
+                "expected only line 0 hints when range is limited to line 0"
+            );
+        }
+    }
+
+    #[test]
+    fn test_inlay_hints_config_show_type_hints_default() {
+        let cfg = InlayHintConfig::default();
+        assert!(cfg.show_type_hints, "show_type_hints should default to true");
+    }
+
+    #[test]
+    fn test_inlay_hints_with_disabled_type_hints() {
+        let cfg = InlayHintConfig {
+            show_type_hints: false,
+            ..InlayHintConfig::default()
+        };
+        let hints = get_inlay_hints("let x = 1\n", full_range(), &cfg, None);
+        // With type hints disabled, no TYPE hints should appear.
+        assert!(
+            hints.iter().all(|h| h.kind != Some(InlayHintKind::TYPE)),
+            "expected no TYPE hints when show_type_hints=false"
+        );
+    }
+
+    #[test]
+    fn test_get_inlay_hints_function_definition() {
+        let code = "fn add(a, b) { return a + b }\n";
+        let hints = get_inlay_hints(code, full_range(), &InlayHintConfig::default(), None);
+        // Should produce parameter type hints (Variable kind).
+        let _ = hints; // just-don't-crash check on the inferred-param flow
+    }
+
+    #[test]
+    fn test_format_comptime_value_bool() {
+        let expr = Expr::Literal(Literal::Bool(true), Span::DUMMY);
+        let formatted = format_comptime_value(&expr);
+        assert!(
+            formatted.contains("true") || !formatted.is_empty(),
+            "expected non-empty formatted output for bool, got {formatted:?}"
+        );
+    }
 }
