@@ -715,6 +715,139 @@ fn lower_null_coalesce(
     builder.start_block(merge_bb);
 }
 
+/// Lower a short-circuiting logical `&&` or `||` per ADR-006 §2.7.5
+/// producer-side stamp + Phase 4b Round 5c-2-α jit-shortcircuit-eager
+/// soundness fix (2026-05-19; sister-class to LANG-9-spin-3-first).
+///
+/// The bytecode VM compiler emits short-circuit jumps directly in
+/// `crates/shape-vm/src/compiler/expressions/binary_ops.rs:723-754`
+/// (`compile_expr_binary_op` arms for `BinaryOp::And` / `BinaryOp::Or`),
+/// but the MIR lowering pre-fix eagerly evaluated both operands and
+/// emitted `Rvalue::BinaryOp(BinOp::And|Or, l, r)` (this file's
+/// `Expr::BinaryOp` arm). The JIT (`crates/shape-jit/src/mir_compiler/
+/// rvalues.rs:840-841`) compiled those as `band`/`bor` — eager bitwise
+/// — so the JIT observably evaluated the RHS even when the LHS was
+/// already truthy (for `||`) or falsy (for `&&`). The empirical t25
+/// reproducer (W15.2-A close commit `7cbc316b`): `side("a", true) ||
+/// side("b", true)` prints `a\ntrue` under VM (short-circuited) vs
+/// `a\nb\ntrue` under JIT (eager) — a v0.3-gating SOUNDNESS BUG.
+///
+/// Fix shape per W14.2-G4-derefstore-drift / LANG-9-spin-3-first
+/// precedent: surgical producer-side fix at the MIR lowering layer
+/// (where both VM and JIT downstream consumers diverge from), mirroring
+/// the existing `lower_null_coalesce` template. Generates:
+///
+///   _lhs = evaluate(lhs)
+///   SwitchBool(_lhs, true=eval_rhs_bb, false=short_circuit_bb)   ; for &&
+///   (or)
+///   SwitchBool(_lhs, true=short_circuit_bb, false=eval_rhs_bb)   ; for ||
+///
+///   eval_rhs_bb:
+///     _rhs = evaluate(rhs)
+///     SwitchBool(_rhs, true=set_true_bb, false=set_false_bb)
+///   set_true_bb:
+///     temp = true
+///     Goto(merge_bb)
+///   set_false_bb:
+///     temp = false
+///     Goto(merge_bb)
+///
+///   short_circuit_bb:
+///     temp = false (for &&) / true (for ||)
+///     Goto(merge_bb)
+///
+///   merge_bb:
+///     // temp holds the result as `MirConstant::Bool` (always normalized
+///     // to a real bool — matches the bytecode VM's `Not Not` normalize
+///     // pattern at `compiler/expressions/binary_ops.rs:728-729`).
+fn lower_short_circuit_and_or(
+    builder: &mut MirBuilder,
+    lhs: &Expr,
+    op: ast::BinaryOp,
+    rhs: &Expr,
+    temp: SlotId,
+    span: Span,
+) {
+    debug_assert!(matches!(op, ast::BinaryOp::And | ast::BinaryOp::Or));
+    let is_and = matches!(op, ast::BinaryOp::And);
+
+    // Evaluate LHS first.
+    let lhs_slot = lower_expr_to_temp(builder, lhs);
+
+    let eval_rhs_bb = builder.new_block();
+    let short_circuit_bb = builder.new_block();
+    let set_true_bb = builder.new_block();
+    let set_false_bb = builder.new_block();
+    let merge_bb = builder.new_block();
+
+    // For `&&`: lhs truthy -> eval rhs; lhs falsy -> short-circuit with false.
+    // For `||`: lhs truthy -> short-circuit with true; lhs falsy -> eval rhs.
+    let (true_bb, false_bb) = if is_and {
+        (eval_rhs_bb, short_circuit_bb)
+    } else {
+        (short_circuit_bb, eval_rhs_bb)
+    };
+    builder.finish_block(
+        TerminatorKind::SwitchBool {
+            operand: Operand::Copy(Place::Local(lhs_slot)),
+            true_bb,
+            false_bb,
+        },
+        span,
+    );
+
+    // eval_rhs_bb: lhs did not short-circuit; evaluate rhs and normalize to
+    // a real bool via a second SwitchBool (mirrors the bytecode VM's
+    // `Not Not` normalize sequence at `compiler/expressions/
+    // binary_ops.rs:728-729`).
+    builder.start_block(eval_rhs_bb);
+    let rhs_slot = lower_expr_to_temp(builder, rhs);
+    builder.finish_block(
+        TerminatorKind::SwitchBool {
+            operand: Operand::Copy(Place::Local(rhs_slot)),
+            true_bb: set_true_bb,
+            false_bb: set_false_bb,
+        },
+        rhs.span(),
+    );
+
+    builder.start_block(set_true_bb);
+    builder.push_stmt(
+        StatementKind::Assign(
+            Place::Local(temp),
+            Rvalue::Use(Operand::Constant(MirConstant::Bool(true))),
+        ),
+        rhs.span(),
+    );
+    builder.finish_block(TerminatorKind::Goto(merge_bb), rhs.span());
+
+    builder.start_block(set_false_bb);
+    builder.push_stmt(
+        StatementKind::Assign(
+            Place::Local(temp),
+            Rvalue::Use(Operand::Constant(MirConstant::Bool(false))),
+        ),
+        rhs.span(),
+    );
+    builder.finish_block(TerminatorKind::Goto(merge_bb), rhs.span());
+
+    // short_circuit_bb: lhs determined the result.
+    // For `&&`: lhs was falsy -> result is false.
+    // For `||`: lhs was truthy -> result is true.
+    builder.start_block(short_circuit_bb);
+    let short_circuit_value = !is_and; // && -> false, || -> true
+    builder.push_stmt(
+        StatementKind::Assign(
+            Place::Local(temp),
+            Rvalue::Use(Operand::Constant(MirConstant::Bool(short_circuit_value))),
+        ),
+        span,
+    );
+    builder.finish_block(TerminatorKind::Goto(merge_bb), span);
+
+    builder.start_block(merge_bb);
+}
+
 /// Lower a formatted string literal `f"text {expr} more"` into a series
 /// of string constant / expression evaluations concatenated with BinOp::Add.
 fn lower_formatted_string(
@@ -1889,6 +2022,24 @@ pub(crate) fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotI
                 lower_pipe_expr(builder, left, right, temp, span);
             } else if *op == ast::BinaryOp::NullCoalesce {
                 lower_null_coalesce(builder, left, right, temp, span);
+            } else if matches!(*op, ast::BinaryOp::And | ast::BinaryOp::Or) {
+                // Phase 4b Round 5c-2-α jit-shortcircuit-eager soundness fix
+                // (v0.3-gating per supervisor ratify 2026-05-19; sister-class
+                // to LANG-9-spin-3-first) per ADR-006 §2.7.5 producer-side
+                // stamp. Pre-fix MIR eagerly lowered both operands and
+                // emitted `Rvalue::BinaryOp(BinOp::And|Or, l, r)`, which the
+                // JIT then compiled as Cranelift `band`/`bor` — eager
+                // bitwise, not short-circuit branches. The empirical t25
+                // reproducer (W15.2-A close `7cbc316b`):
+                // `side("a", true) || side("b", true)` printed `a\ntrue`
+                // under VM vs `a\nb\ntrue` under JIT. Fix routes through
+                // `SwitchBool` terminator (which JIT already compiles
+                // correctly at `crates/shape-jit/src/mir_compiler/
+                // terminators.rs:27-97`) — mirrors the bytecode VM compiler
+                // pattern at `crates/shape-vm/src/compiler/expressions/
+                // binary_ops.rs:723-754` and reuses the
+                // `lower_null_coalesce` short-circuit template.
+                lower_short_circuit_and_or(builder, left, *op, right, temp, span);
             } else {
                 let l = lower_expr_to_operand(builder, left, false);
                 let r = lower_expr_to_operand(builder, right, false);
