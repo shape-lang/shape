@@ -1,0 +1,92 @@
+name: coverage
+
+# Phase 4c CI coverage gate per
+# docs/cluster-audits/v0.3-w14-test-coverage-audit.md §1-§6 + Phase 4
+# acceptance criterion (user 2026-05-18): "test coverage >=99% per-feature
+# with DOCUMENTED EXCEPTIONS ONLY WHEN VERY HARD TO TEST".
+#
+# Cadence (per Phase 4 test execution policy in
+# docs/cluster-audits/phase-3-team-lead-handover.md:42-47):
+#   - Nightly cron (mirrors W13.4 nightly-fuzz.yml precedent at 04:00 UTC).
+#   - workflow_dispatch (on-demand).
+#   - Path-filtered trigger on crates/** + bin/** + tools/** + extensions/**
+#     for Phase-4b-batch-merge post-merge gate on main.
+#
+# NOT per-commit (per W14.1 audit + Phase 4 policy). The per-commit gates
+# are `just check-clean` + `bash scripts/verify-merge.sh` + `bash
+# scripts/check-no-dynamic.sh` in the main CI workflow (.github/workflows/ci.yml).
+
+on:
+  schedule:
+    - cron: '0 4 * * *'  # 04:00 UTC nightly (mirrors W13.4 nightly-fuzz schedule)
+  workflow_dispatch:     # on-demand trigger
+  push:
+    branches: [main]
+    paths:
+      - 'crates/**'
+      - 'bin/**'
+      - 'tools/**'
+      - 'extensions/**'
+      - 'scripts/coverage.sh'
+      - 'justfile'
+      - '.github/workflows/coverage.yml'
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180  # 3-hour wall-clock cap (mirrors nightly-fuzz §6.3 cap)
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install system deps for cargo-tarpaulin
+        # Per audit §1 install-surface: bare-shell `cargo install cargo-tarpaulin`
+        # fails with `linker `cc` not found` + `openssl-sys` build-script
+        # failure when gcc-wrapper / pkg-config / openssl-dev are not on PATH.
+        # ubuntu-latest has gcc + ld preinstalled but needs explicit
+        # libssl-dev + pkg-config for the openssl-sys build script.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev
+
+      - name: Install cargo-tarpaulin (pinned per audit §1.2)
+        # Version 0.35.4 pinned per docs/cluster-audits/v0.3-w14-test-coverage-audit.md
+        # §1.2 recommendation. Re-evaluate per Phase-4b-batch-merge run cadence.
+        # `--locked` respects the upstream Cargo.lock, matching the audit-day
+        # empirical install shape.
+        run: cargo install cargo-tarpaulin --version 0.35.4 --locked
+
+      - name: Run coverage gate (line + branch)
+        # Continue on error so the artifact-upload step is always reachable
+        # even when coverage measurement aborts mid-run (e.g. pre-existing
+        # test failure per audit §8 Surface 3). Findings persist as GitHub
+        # Actions artifacts with 30-day retention per W13.4 §6.4 precedent.
+        continue-on-error: true
+        run: |
+          mkdir -p coverage-findings
+          bash scripts/coverage.sh 2>&1 | tee coverage-findings/line-coverage.log
+          bash scripts/coverage.sh --branch 2>&1 | tee coverage-findings/branch-coverage.log
+
+      - name: Run coverage gate (dead-code measurement, nightly only)
+        # Dead-code measurement is heavier (adds --bins to the workspace
+        # invocation per audit §2 "Dead-code measurement"). Run nightly only
+        # to keep the path-filtered push-trigger fast.
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        continue-on-error: true
+        run: |
+          bash scripts/coverage.sh --dead-code 2>&1 | tee coverage-findings/dead-code.log
+
+      - name: Upload coverage findings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-findings-${{ github.run_id }}
+          path: coverage-findings/
+          retention-days: 30
+          if-no-files-found: ignore
