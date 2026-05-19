@@ -59,6 +59,17 @@ mod v2_array_tests;
 #[cfg(all(test, feature = "deep-tests"))]
 mod closure_dispatch_regression_tests;
 
+// Phase 4b Round 5c-2-α jit-shortcircuit-eager soundness fix regression
+// tests (v0.3-gating per supervisor ratify 2026-05-19; sister-class to
+// LANG-9-spin-3-first VM/JIT divergence). Pin the t25 reproducer +
+// divzero / chained / nested short-circuit cases against the MIR-layer
+// short-circuit lowering at `crates/shape-vm/src/mir/lowering/expr.rs`
+// `lower_short_circuit_and_or`. Gated behind `deep-tests` per the
+// `closure_dispatch_regression_tests` precedent (full JIT pipeline
+// invocation; non-trivial compile time per test).
+#[cfg(all(test, feature = "deep-tests"))]
+mod short_circuit_regression_tests;
+
 use cranelift::codegen::ir::{FuncRef, StackSlot};
 use cranelift::prelude::*;
 use std::collections::{HashMap, HashSet};
