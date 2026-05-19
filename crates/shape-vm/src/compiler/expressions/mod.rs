@@ -477,7 +477,8 @@ impl BytecodeCompiler {
                 ));
 
                 // Build ctx object: { state: {}, event_log: [] }.
-                let empty_schema_id = self.type_tracker.register_inline_object_schema(&[]);
+                // W17.2-C §4.D.5 migration: empty-fields case uses typed variant.
+                let empty_schema_id = self.type_tracker.register_inline_object_schema_typed(&[]);
                 self.emit(Instruction::new(
                     OpCode::NewTypedObject,
                     Some(Operand::TypedObjectAlloc {
@@ -653,7 +654,8 @@ impl BytecodeCompiler {
                 let subject_local = self.declare_local("__ann_subject")?;
                 let result_local = self.declare_local("__ann_result")?;
 
-                let empty_schema_id = self.type_tracker.register_inline_object_schema(&[]);
+                // W17.2-C §4.D.5 migration: empty-fields case uses typed variant.
+                let empty_schema_id = self.type_tracker.register_inline_object_schema_typed(&[]);
                 self.emit(Instruction::new(
                     OpCode::NewTypedObject,
                     Some(Operand::TypedObjectAlloc {

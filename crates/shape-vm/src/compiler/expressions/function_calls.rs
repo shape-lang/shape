@@ -321,8 +321,27 @@ impl BytecodeCompiler {
         let shape_ast::ast::TypeAnnotation::Object(fields) = ann else {
             return None;
         };
-        let field_refs: Vec<&str> = fields.iter().map(|field| field.name.as_str()).collect();
-        let schema_id = self.type_tracker.register_inline_object_schema(&field_refs);
+        // W17.2-C §4.D.5 migration: route through the typed variant
+        // with FieldType::Any per field (NOT per-field type lowering
+        // via type_annotation_to_field_type — that path changes the
+        // schema layout vs the pre-existing Any-typed shape, which
+        // breaks downstream consumers that depend on the legacy
+        // Any-uniform field layout). The `register_object_field_contracts`
+        // call below STILL preserves per-field TypeAnnotation contracts
+        // so downstream callable-field unwrapping + JIT lookups see
+        // the annotated types. The verification-pass safety net
+        // catches via the `__inline_obj_*` transitional row.
+        // Per audit §4.D.5 PROPAGATE deferred to v0.4 W17.3+ for the
+        // per-field-typed schema layout migration. ADR-006 §2.7.5
+        // producer-side stamp preserved at the contract layer
+        // (`register_object_field_contracts`).
+        let typed_fields: Vec<(&str, shape_runtime::type_schema::FieldType)> = fields
+            .iter()
+            .map(|field| (field.name.as_str(), shape_runtime::type_schema::FieldType::Any))
+            .collect();
+        let schema_id = self
+            .type_tracker
+            .register_inline_object_schema_typed(&typed_fields);
         let mut map = std::collections::HashMap::with_capacity(fields.len());
         for field in fields {
             map.insert(field.name.clone(), field.type_annotation.clone());

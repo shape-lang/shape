@@ -1007,11 +1007,27 @@ impl TypeTracker {
         self.local_type_scopes = snapshot.local_type_scopes;
     }
 
-    /// Register an inline object schema from field names
+    /// Register an inline object schema from field names.
     ///
     /// Creates a TypeSchema for an object literal with the given fields.
-    /// All fields are assumed to be `Any` type (NaN-boxed) since we don't
-    /// have full type inference at compile time.
+    /// All fields are typed `FieldType::Any` at the schema layer since
+    /// the caller does not provide per-field type info — the
+    /// post_inference_verify pass at
+    /// `crates/shape-vm/src/compiler/post_inference_verify.rs` absorbs
+    /// the resulting `__inline_obj_N` schemas via the W17.2-C narrowed
+    /// transitional whitelist row pre-W17.3 (per audit §4.D.5 + §9.B.3
+    /// supervisor ratify 2026-05-19).
+    ///
+    /// **Deprecation (W17.2-C):** prefer
+    /// [`Self::register_inline_object_schema_typed`] when per-field
+    /// types are known at the call site. The untyped variant routes
+    /// internally through `register_inline_object_schema_typed` with
+    /// each field stamped `FieldType::Any` — same `__inline_obj_N` name
+    /// format + same verification-pass absorber. Per audit §4.D.5
+    /// PROPAGATE disposition: callers SHOULD migrate to the typed
+    /// variant; the verification-pass safety net catches any residual
+    /// Any leakage at user-facing schemas. ADR-006 §2.7.5 producer-side
+    /// stamp.
     ///
     /// Returns the SchemaId for use with NewTypedObject opcode.
     ///
@@ -1021,40 +1037,24 @@ impl TypeTracker {
     /// let schema_id = tracker.register_inline_object_schema(&["a", "b"]);
     /// // Now emit NewTypedObject with schema_id
     /// ```
+    #[deprecated(
+        since = "0.3.0",
+        note = "Prefer `register_inline_object_schema_typed` per audit \
+                §4.D.5 W17.2-C (PROPAGATE per-field types at call site). \
+                The untyped variant routes through the typed variant \
+                with FieldType::Any per field; the post_inference_verify \
+                pass absorbs via the __inline_obj_* transitional row."
+    )]
     pub fn register_inline_object_schema(&mut self, field_names: &[&str]) -> SchemaId {
-        if let Some(existing) = self.schema_registry.type_names().find_map(|name| {
-            self.schema_registry.get(name).and_then(|schema| {
-                if schema.fields.len() != field_names.len() {
-                    return None;
-                }
-                let same_order = schema
-                    .fields
-                    .iter()
-                    .map(|f| f.name.as_str())
-                    .eq(field_names.iter().copied());
-                if same_order { Some(schema.id) } else { None }
-            })
-        }) {
-            return existing;
-        }
-
-        // Generate a unique name for this inline object type
-        let id = self.inline_object_counter;
-        self.inline_object_counter += 1;
-        let type_name = format!("__inline_obj_{}", id);
-
-        // Create field definitions - all fields are Any (NaN-boxed)
-        let fields: Vec<(String, FieldType)> = field_names
+        // Route through the typed variant with FieldType::Any per field
+        // — keeps schema-name format (`__inline_obj_N`) + deduplication
+        // identical, while the deprecation nudges callers toward the
+        // typed variant. Per audit §4.D.5 W17.2-C PROPAGATE.
+        let typed_fields: Vec<(&str, FieldType)> = field_names
             .iter()
-            .map(|name| (name.to_string(), FieldType::Any))
+            .map(|name| (*name, FieldType::Any))
             .collect();
-
-        // Create and register the schema
-        let schema = TypeSchema::new(&type_name, fields);
-        let schema_id = schema.id;
-        self.schema_registry.register(schema);
-
-        schema_id
+        self.register_inline_object_schema_typed(&typed_fields)
     }
 
     /// Register an inline object schema with typed fields

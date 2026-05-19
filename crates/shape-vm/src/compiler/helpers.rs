@@ -4865,7 +4865,35 @@ impl BytecodeCompiler {
         None
     }
 
-    /// Convert a TypeAnnotation to a FieldType for TypeSchema registration
+    /// Convert a TypeAnnotation to a FieldType for TypeSchema registration.
+    ///
+    /// v0.3 Phase 4b Round 5b W17.2-C (audit §4.D.7 + §4.D.8 + §9.B.3
+    /// supervisor ratify 2026-05-19). Two hardening edges per the audit:
+    ///
+    /// **§4.D.7 — TRANSITIONAL 4-name generic-container narrowing.**
+    /// `helpers.rs:4901` previously routed five generic containers
+    /// (`HashMap` / `Map` / `Result` / `Option` / `Set`) to `FieldType::Any`.
+    /// `Option<T>` now PROPAGATES through the
+    /// `FieldType::Option(Box<FieldType>)` variant landed at W17.2-B
+    /// (close commit `e316e171`; ADR-006 §2.7.5 producer-side stamp). The
+    /// other four (`HashMap` / `Map` / `Result` / `Set`) retain the
+    /// TRANSITIONAL fallback per the supervisor §9.B.3 ratify; per-container
+    /// `FieldType` variant expansion is v0.4 W17.3/W17.4 territory.
+    ///
+    /// **§4.D.8 — `_ =>` fall-through replaced with explicit per-variant
+    /// arms.** The `TypeAnnotation` shapes that don't lower to a concrete
+    /// `FieldType` (`Function` / `Union` / `Intersection` / `Tuple` /
+    /// inline `Object` / `Void` / `Never` / `Null` / `Undefined` / `Dyn`)
+    /// each get an explicit, audit-cited arm. The arms project to
+    /// `FieldType::Any` (preserving the historical behavior for
+    /// inference-tier intermediate use), AND the post-inference verify
+    /// pass at `compiler/post_inference_verify.rs` surfaces E0900 if any
+    /// such `FieldType::Any` reaches a user-facing schema. Per audit §4.D.2
+    /// same-pattern discipline + the §6 CLAUDE.md extension: explicit
+    /// enumeration of every variant is the §4.D.8 ERROR disposition
+    /// realized as named-and-cited arms (the catch-all `_` is the
+    /// defection-attractor; explicit naming + verification-pass catch
+    /// is the discipline).
     pub(super) fn type_annotation_to_field_type(
         ann: &shape_ast::ast::TypeAnnotation,
     ) -> shape_runtime::type_schema::FieldType {
@@ -4896,13 +4924,65 @@ impl BytecodeCompiler {
             TypeAnnotation::Array(inner) => {
                 FieldType::Array(Box::new(Self::type_annotation_to_field_type(inner)))
             }
-            TypeAnnotation::Generic { name, .. } => match name.as_str() {
-                // Generic containers that need NaN boxing
-                "HashMap" | "Map" | "Result" | "Option" | "Set" => FieldType::Any,
+            TypeAnnotation::Generic { name, args } => match name.as_str() {
+                // §4.D.7 + §9.B.3 supervisor ratify 2026-05-19: Option<T>
+                // PROPAGATES through `FieldType::Option(Box<FieldType>)`
+                // (W17.2-B close commit e316e171). Single-arg shape only;
+                // malformed Option<...> annotations route through the
+                // 4-name TRANSITIONAL fallback below.
+                "Option" if args.len() == 1 => FieldType::Option(Box::new(
+                    Self::type_annotation_to_field_type(&args[0]),
+                )),
+                // §4.D.7 TRANSITIONAL 4-name narrowed-exception list per
+                // §9.B.3 supervisor ratify 2026-05-19. These four generic
+                // containers retain the `FieldType::Any` schema-lowering
+                // pending per-container `FieldType` variant introduction
+                // at v0.4 W17.3/W17.4. The post_inference_verify pass at
+                // `compiler/post_inference_verify.rs` absorbs these via
+                // the `__inline_obj_*` transitional row pre-W17.3; user-
+                // named schemas carrying these still surface E0900 once
+                // the §4.D.10 emission-rename closes (R5b/R6 follow-up).
+                "HashMap" | "Map" | "Result" | "Set" => FieldType::Any,
                 // User-defined generic structs — preserve the type name
                 other => FieldType::Object(other.to_string()),
             },
-            _ => FieldType::Any,
+            // §4.D.8 — explicit per-variant arms replace the deleted
+            // `_ => FieldType::Any` fall-through per audit §4.D.2
+            // same-pattern discipline.
+            //
+            // Tuple types — not yet supported as struct field storage;
+            // route to FieldType::Any at the intermediate-tier and let
+            // post_inference_verify surface E0900 if reached at
+            // user-facing schemas.
+            TypeAnnotation::Tuple(_) => FieldType::Any,
+            // Object inline annotation (e.g. `{ x: int }` as a field
+            // type) — schema construction is at the surrounding caller's
+            // scope, not here; intermediate-tier Any with verification-
+            // pass safety net.
+            TypeAnnotation::Object(_) => FieldType::Any,
+            // Function annotation (e.g. `(int) => string`) — closures
+            // stored as TypedObject fields require explicit closure-
+            // dispatch contract registration (W17-typed-carrier territory).
+            // Intermediate Any; verification-pass safety net.
+            TypeAnnotation::Function { .. } => FieldType::Any,
+            // Union / Intersection annotations — first-class union types
+            // are W17.3/W17.4 territory (per audit §4.D.7 alternate
+            // disposition); intermediate Any.
+            TypeAnnotation::Union(_) => FieldType::Any,
+            TypeAnnotation::Intersection(_) => FieldType::Any,
+            // Void / Never don't have slot storage; intermediate Any
+            // for inference-tier projection; verification-pass catches
+            // if they reach user-facing schemas.
+            TypeAnnotation::Void => FieldType::Any,
+            TypeAnnotation::Never => FieldType::Any,
+            // Null / Undefined map to the typed null sentinel at the
+            // slot level; schema-side use is intermediate-only.
+            TypeAnnotation::Null => FieldType::Any,
+            TypeAnnotation::Undefined => FieldType::Any,
+            // Dyn(Trait) — trait-object dispatch territory (W16.2-B
+            // typed-object element kind); intermediate Any here, the
+            // trait registry resolves the concrete dispatch downstream.
+            TypeAnnotation::Dyn(_) => FieldType::Any,
         }
     }
 

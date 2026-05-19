@@ -502,6 +502,24 @@ impl BytecodeCompiler {
             .and_then(|var| self.hoisted_field_types.get(var))
             .cloned()
             .unwrap_or_default();
+        // v0.3 Phase 4b Round 5b W17.2-C (audit §4.D.3 PROPAGATE):
+        // `infer_field_type_from_expr` only resolves compile-time literals.
+        // Non-literal expressions (function calls, complex expressions,
+        // unresolved variables) cannot project a concrete `FieldType` at
+        // this site — full inference for the entire RHS would require
+        // running the type system over the expression tree, which is not
+        // in scope at the inline-object construction call site.
+        //
+        // PROPAGATE: fall back to `FieldType::Any` and let the
+        // post_inference_verify pass at
+        // `crates/shape-vm/src/compiler/post_inference_verify.rs` absorb
+        // via the `__inline_obj_*` transitional whitelist row (W17.2-C
+        // narrowed-row). The `register_inline_object_schema_typed` call
+        // at line 526 below auto-generates the `__inline_obj_N` schema
+        // name, which is recognized by the verification pass's prefix
+        // rule. Per audit §5 + §9.B.3 supervisor ratify 2026-05-19 +
+        // ADR-006 §2.7.5 producer-side stamp (the schema-side Any is
+        // bounded by the verification-pass-side absorber).
         let typed_fields: Vec<(&str, FieldType)> = entries
             .iter()
             .filter_map(|e| match e {
@@ -512,6 +530,13 @@ impl BytecodeCompiler {
                 ObjectEntry::Spread(_) => None,
             })
             .chain(hoisted.iter().map(|h| {
+                // Hoisted-field type lookup: the AST pre-pass at
+                // `compiler/mod.rs::hoisted_field_types` populates inferred
+                // types when the assigned RHS is a literal. Non-literal
+                // RHS falls back to `FieldType::Any` here — same
+                // verification-pass absorber per the §4.D.3 disposition
+                // above (the inline-object schema name `__inline_obj_N`
+                // routes through the transitional prefix rule).
                 let ft = hoisted_type_lookup
                     .get(h.as_str())
                     .cloned()
@@ -578,10 +603,16 @@ impl BytecodeCompiler {
                 ObjectEntry::Spread(spread_expr) => {
                     // Create TypedObject from pending fields before the spread
                     if !pending_field_names.is_empty() || !has_initial_object {
-                        let field_refs: Vec<&str> =
-                            pending_field_names.iter().map(|s| s.as_str()).collect();
-                        let schema_id =
-                            self.type_tracker.register_inline_object_schema(&field_refs);
+                        // W17.2-C §4.D.5 migration: pending spread-fields
+                        // have no per-field type info at this dynamic
+                        // construction site; route through typed-with-Any.
+                        let typed_fields: Vec<(&str, FieldType)> = pending_field_names
+                            .iter()
+                            .map(|s| (s.as_str(), FieldType::Any))
+                            .collect();
+                        let schema_id = self
+                            .type_tracker
+                            .register_inline_object_schema_typed(&typed_fields);
                         self.emit(Instruction::new(
                             OpCode::NewTypedObject,
                             Some(Operand::TypedObjectAlloc {
@@ -634,8 +665,15 @@ impl BytecodeCompiler {
 
         // Finalize remaining fields
         if !pending_field_names.is_empty() {
-            let field_refs: Vec<&str> = pending_field_names.iter().map(|s| s.as_str()).collect();
-            let schema_id = self.type_tracker.register_inline_object_schema(&field_refs);
+            // W17.2-C §4.D.5 migration: pending-fields finalize site, no
+            // per-field type info available; typed-with-Any + verification.
+            let typed_fields: Vec<(&str, FieldType)> = pending_field_names
+                .iter()
+                .map(|s| (s.as_str(), FieldType::Any))
+                .collect();
+            let schema_id = self
+                .type_tracker
+                .register_inline_object_schema_typed(&typed_fields);
             self.emit(Instruction::new(
                 OpCode::NewTypedObject,
                 Some(Operand::TypedObjectAlloc {
@@ -661,7 +699,8 @@ impl BytecodeCompiler {
             }
         } else if !has_initial_object {
             // Empty object
-            let schema_id = self.type_tracker.register_inline_object_schema(&[]);
+            // W17.2-C §4.D.5 migration: empty-fields case uses typed variant.
+            let schema_id = self.type_tracker.register_inline_object_schema_typed(&[]);
             self.emit(Instruction::new(
                 OpCode::NewTypedObject,
                 Some(Operand::TypedObjectAlloc {
@@ -969,13 +1008,35 @@ impl BytecodeCompiler {
                         self.type_tracker.schema_registry_mut().register(schema);
                         schema_id
                     } else {
-                        // Fallback: register if not found (shouldn't happen for valid struct types)
-                        let typed_fields: Vec<(&str, FieldType)> = expected_fields
-                            .iter()
-                            .map(|s| (s.as_str(), FieldType::Any))
-                            .collect();
-                        self.type_tracker
-                            .register_named_object_schema(&runtime_type_name, &typed_fields)
+                        // v0.3 Phase 4b Round 5b W17.2-C (audit §4.D.4 ERROR
+                        // disposition): the deleted `FieldType::Any` fallback
+                        // here covered the "shouldn't happen for valid struct
+                        // types" residual where `runtime_type_name` differs
+                        // from `*type_name`, neither base-resolution path
+                        // resolves a registered schema, and the type-alias
+                        // chain also misses. Per audit §4.D.4: schema-lookup
+                        // failure at a non-alias non-base struct literal is a
+                        // user-facing soundness issue; surface the structured
+                        // diagnostic instead of registering an all-`Any`
+                        // schema that would route through MakeFieldRef with
+                        // FIELD_TAG_ANY at downstream property access (the
+                        // §2.7.13/Q14 surface). Per ADR-006 §2.7.5 producer-
+                        // side stamp + §4.D.2 same-pattern discipline.
+                        return Err(ShapeError::SemanticError {
+                            message: format!(
+                                "Cannot resolve schema for struct literal: \
+                                 `{}` (runtime name `{}`) has no registered \
+                                 TypeSchema. Per audit §4.D.4 (W17.2-C close \
+                                 commit + ADR-006 §2.7.5 producer-side stamp): \
+                                 struct-literal field types must be statically \
+                                 known at the literal site. If `{}` is a type \
+                                 alias, ensure its base type is defined; if \
+                                 it's a generic instantiation, ensure all \
+                                 type parameters are concrete.",
+                                type_name, runtime_type_name, type_name
+                            ),
+                            location: Some(literal_loc.clone()),
+                        });
                     }
                 } else if let Some(schema) = self.type_tracker.schema_registry().get(type_name) {
                     schema.id
@@ -998,13 +1059,24 @@ impl BytecodeCompiler {
                     self.type_tracker.schema_registry_mut().register(schema);
                     schema_id
                 } else {
-                    // Fallback: register if not found (shouldn't happen for valid struct types)
-                    let typed_fields: Vec<(&str, FieldType)> = expected_fields
-                        .iter()
-                        .map(|s| (s.as_str(), FieldType::Any))
-                        .collect();
-                    self.type_tracker
-                        .register_named_object_schema(&runtime_type_name, &typed_fields)
+                    // v0.3 Phase 4b Round 5b W17.2-C (audit §4.D.4 ERROR
+                    // disposition): parallel-fallback to the :971-980 branch,
+                    // covering the `runtime_type_name == type_name` case
+                    // where neither direct lookup nor type-alias resolution
+                    // succeeds. Same structured diagnostic; same audit cite.
+                    return Err(ShapeError::SemanticError {
+                        message: format!(
+                            "Cannot resolve schema for struct literal: \
+                             `{}` has no registered TypeSchema. Per audit \
+                             §4.D.4 (W17.2-C close commit + ADR-006 §2.7.5 \
+                             producer-side stamp): struct-literal field types \
+                             must be statically known at the literal site. \
+                             Define `{}` with `type {} {{ ... }}` syntax or \
+                             check for typos in the type name.",
+                            type_name, type_name, type_name
+                        ),
+                        location: Some(literal_loc.clone()),
+                    });
                 };
 
                 // Compile field values in the order defined by the struct (not user order)

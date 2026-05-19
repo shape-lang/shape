@@ -108,12 +108,22 @@ pub(crate) fn back_patch_schema_ids(mir: &mut MirFunction, type_tracker: &mut Ty
                 if has_spread {
                     continue;
                 }
-                let field_refs: Vec<&str> = field_names.iter().map(|s| s.as_str()).collect();
-                // `register_inline_object_schema` is idempotent: a
-                // second call with the same field ordering returns
-                // the existing schema id (the registry's
+                // W17.2-C §4.D.5 migration: route through the typed
+                // variant with FieldType::Any per field — per-field type
+                // info is unavailable at MIR back-patch time (the
+                // surrounding comment explains the carrier-tier site).
+                // Verification-pass safety net catches via the
+                // `__inline_obj_*` transitional row.
+                let typed_fields: Vec<(&str, shape_runtime::type_schema::FieldType)> =
+                    field_names
+                        .iter()
+                        .map(|s| (s.as_str(), shape_runtime::type_schema::FieldType::Any))
+                        .collect();
+                // `register_inline_object_schema_typed` is idempotent: a
+                // second call with the same field ordering + types
+                // returns the existing schema id (the registry's
                 // `lookup_predeclared_id_by_field_order` fast path).
-                let sid = type_tracker.register_inline_object_schema(&field_refs);
+                let sid = type_tracker.register_inline_object_schema_typed(&typed_fields);
                 *schema_id = Some(sid);
             }
         }
