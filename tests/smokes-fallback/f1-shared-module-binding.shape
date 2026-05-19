@@ -1,0 +1,4 @@
+var counter = 100
+fn read() { counter }
+let val = read()
+print(val)
