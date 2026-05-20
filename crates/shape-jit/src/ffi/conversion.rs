@@ -290,6 +290,23 @@ pub extern "C" fn jit_print_i64(value: i64) {
     println!("{}", value);
 }
 
+/// Print a raw native `u64` to stdout with a newline — UNSIGNED render.
+///
+/// r5c-2-β-CKPT-C u64-carrier-disambiguation (2026-05-20): the MIR-side
+/// print emitter routes `NativeKind::UInt64` / `UIntSize` operand slots
+/// here, separately from the signed `jit_print_i64` path. Pre-fix both
+/// signed and unsigned integer kinds collapsed onto `jit_print_i64`, which
+/// reinterprets the raw bits as `i64` — so `print(x)` for
+/// `let x: u64 = 18446744073709551615` displayed `-1` on the JIT while the
+/// VM (whose `printing.rs` `UInt64` arm calls `slot.as_u64()`) correctly
+/// displayed `18446744073709551615`. Routing the unsigned kinds to this
+/// entry restores VM == JIT byte-identical output. The carrier `NativeKind`
+/// is the discriminator — no value inspection.
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_print_u64(value: u64) {
+    println!("{}", value);
+}
+
 /// Print a raw native f64 to stdout with a newline.
 ///
 /// W11-jit-new-array companion to `jit_print_i64`: dispatched when the
@@ -849,11 +866,14 @@ pub extern "C" fn jit_print_iterator(
 // §2.7.24 Q25.A SUPERSEDED).
 //
 // The canonical VM-side formatter recognizes the v2-raw carrier via the
-// `NativeKind::UInt64` arm at `crates/shape-vm/src/executor/printing.rs:126`
-// (per Wave 6.5 D-v2-array-detect: `as_v2_typed_array(bits, kind)` accepts
-// `kind == NativeKind::UInt64` and reads the `*mut TypedArray<T>` pointer
-// directly). This FFI body reifies the slot with that label and delegates
-// to `ValueFormatter::format_kinded` for VM == JIT byte-identical output.
+// `NativeKind::Ptr(HeapKind::TypedArray)` arm of `format_heap_kind` in
+// `crates/shape-vm/src/executor/printing.rs` (r5c-2-β-CKPT-C
+// u64-carrier-disambiguation: `as_v2_typed_array(bits, kind)` accepts ONLY
+// `kind == NativeKind::Ptr(HeapKind::TypedArray)` and reads the
+// `*mut TypedArray<T>` pointer directly — a genuine scalar `u64` carrier
+// is never dereferenced). This FFI body reifies the slot with that label
+// and delegates to `ValueFormatter::format_kinded` for VM == JIT
+// byte-identical output.
 //
 // Per-element kinds are read from the v2-raw HeapHeader's `_pad` byte
 // (`v2_array_detect::read_element` arms at lines 304-365) per ADR-006
@@ -885,18 +905,25 @@ pub extern "C" fn jit_print_typed_array(
     }
     let registry = registry_from_ctx(ctx_ptr);
     let formatter = shape_vm::executor::printing::ValueFormatter::new(&registry);
-    // Reify with `NativeKind::UInt64` — the carrier-recognition label the
-    // canonical formatter uses to route v2-raw `*mut TypedArray<T>`
-    // pointers to its `format_v2_typed_array` per-element walker at
-    // `printing.rs:133-137`. The `Ptr(HeapKind::TypedArray)` label routes
-    // to the vacated-ordinal `[TypedArray:ckpt5-surface]` placeholder
-    // arm at `printing.rs:264-269`, which is wrong for the v2-raw shape.
+    // r5c-2-β-CKPT-C u64-carrier-disambiguation (2026-05-20): reify with
+    // `NativeKind::Ptr(HeapKind::TypedArray)` — the canonical carrier kind
+    // the formatter's `format_heap_kind` arm uses to route v2-raw
+    // `*mut TypedArray<T>` pointers to the `format_v2_typed_array`
+    // per-element walker. The pre-fix `NativeKind::UInt64` label is no
+    // longer recognised as the array carrier (it now denotes a genuine
+    // scalar `u64`).
     let slot = shape_value::ValueSlot::from_raw(bits);
-    let kinded = shape_value::KindedSlot::new(slot, shape_value::NativeKind::UInt64);
+    let kinded = shape_value::KindedSlot::new(
+        slot,
+        shape_value::NativeKind::Ptr(shape_value::HeapKind::TypedArray),
+    );
     let rendered = formatter.format_kinded(&kinded);
-    // `UInt64`-kind Drop is a no-op (`kinded_slot.rs:1008` / scalar arm),
-    // so this `mem::forget` is structural-symmetry with the other
-    // `jit_print_<heap_kind>` bodies rather than required for soundness.
+    // The v2-raw `*mut TypedArray<T>` carrier this FFI body prints is
+    // BORROWED — the caller's slot keeps the active refcount share. A
+    // `Ptr(HeapKind::TypedArray)`-kind Drop would call
+    // `release_v2_typed_array` and retire a share this body never
+    // retained, so `mem::forget` is REQUIRED for soundness here (not just
+    // structural symmetry).
     std::mem::forget(kinded);
     println!("{}", rendered);
 }

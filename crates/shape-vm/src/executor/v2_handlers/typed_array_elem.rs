@@ -2,8 +2,9 @@
 //!
 //! These opcodes skip the HeapValue enum dispatch when the compiler proves the
 //! element type. The array lives in a local slot (Operand::Local) as a raw
-//! v2 pointer `*mut TypedArray<T>` — kind = `NativeKind::UInt64`
-//! (NativeScalar shape). Bits = raw pointer (no Arc).
+//! v2 pointer `*mut TypedArray<T>` — kind = `NativeKind::Ptr(HeapKind::
+//! TypedArray)` (r5c-2-β-CKPT-C u64-carrier-disambiguation). Bits = raw
+//! pointer to the v2-raw HeapHeader-equipped flat struct.
 //!
 //! ADR-006 §2.7.7 / Wave 6.5 cluster C: kinded API. Dispatch on the kind
 //! recorded in the parallel kind track for the local slot.
@@ -12,16 +13,22 @@
 //!
 //! The pre-ckpt-1 file supported TWO carrier shapes:
 //!   1. Legacy heap-boxed `Arc<TypedArrayData>` (Ptr(HeapKind::TypedArray)) — DELETED
-//!   2. v2 raw-pointer `*mut TypedArray<T>` (NativeKind::UInt64) — PRESERVED
+//!   2. v2 raw-pointer `*mut TypedArray<T>` — PRESERVED
 //!
 //! Per V3-S5 ckpt-1..ckpt-4 cascade the `TypedArrayData` enum +
 //! `TypedBuffer<T>` / `AlignedTypedBuffer` wrapper layer +
-//! `HeapValue::TypedArray(Arc<TypedArrayData>)` outer arm +
-//! `HeapKind::TypedArray = 8` ordinal were DELETED wholesale per
-//! W12-typed-array-data-deletion audit §3.5 + §3.6 + §B + ADR-006
-//! §2.7.24 Q25.A SUPERSEDED. The Arc-boxed arms in all 7 opcode handlers
-//! are deleted; the UInt64 v2-raw path remains live and is the canonical
-//! post-ckpt-6 STRICT close target.
+//! `HeapValue::TypedArray(Arc<TypedArrayData>)` outer arm were DELETED
+//! wholesale per W12-typed-array-data-deletion audit §3.5 + §3.6 + §B +
+//! ADR-006 §2.7.24 Q25.A SUPERSEDED. The Arc-boxed arms in all 7 opcode
+//! handlers are deleted; the v2-raw path remains live.
+//!
+//! r5c-2-β-CKPT-C u64-carrier-disambiguation (2026-05-20): the v2-raw
+//! `*mut TypedArray<T>` carrier was migrated from the carrier-overloaded
+//! bare `NativeKind::UInt64` kind to `NativeKind::Ptr(HeapKind::TypedArray)`
+//! — `HeapKind::TypedArray` ordinal 8 is now the type LABEL for the v2-raw
+//! carrier (no `Arc<TypedArrayData>` boxed carrier exists). The handler
+//! arms below dispatch on `Ptr(HeapKind::TypedArray)`; a `UInt64` slot is
+//! a genuine scalar and surface-and-stops as a non-array receiver.
 //!
 //! ## Opcodes handled here
 //!
@@ -37,7 +44,7 @@
 
 use crate::bytecode::{Instruction, OpCode, Operand};
 use shape_value::v2::typed_array::TypedArray;
-use shape_value::{NativeKind, VMError};
+use shape_value::{HeapKind, NativeKind, VMError};
 
 use super::super::VirtualMachine;
 
@@ -116,7 +123,7 @@ impl VirtualMachine {
 
         let (arr_bits, arr_kind) = self.stack_read_kinded_raw(slot);
         let val: i64 = match arr_kind {
-            NativeKind::UInt64 => {
+            NativeKind::Ptr(HeapKind::TypedArray) => {
                 let arr = arr_bits as usize as *const TypedArray<i64>;
                 let len = unsafe { TypedArray::len(arr) } as usize;
                 if index >= len {
@@ -147,7 +154,7 @@ impl VirtualMachine {
 
         let (arr_bits, arr_kind) = self.stack_read_kinded_raw(slot);
         let val: f64 = match arr_kind {
-            NativeKind::UInt64 => {
+            NativeKind::Ptr(HeapKind::TypedArray) => {
                 let arr = arr_bits as usize as *const TypedArray<f64>;
                 let len = unsafe { TypedArray::len(arr) } as usize;
                 if index >= len {
@@ -180,7 +187,7 @@ impl VirtualMachine {
 
         let (arr_bits, arr_kind) = self.stack_take_kinded(slot);
         let result = match arr_kind {
-            NativeKind::UInt64 => {
+            NativeKind::Ptr(HeapKind::TypedArray) => {
                 let arr = arr_bits as usize as *mut TypedArray<i64>;
                 let len = unsafe { TypedArray::len(arr) } as usize;
                 if index >= len {
@@ -216,7 +223,7 @@ impl VirtualMachine {
 
         let (arr_bits, arr_kind) = self.stack_take_kinded(slot);
         let result = match arr_kind {
-            NativeKind::UInt64 => {
+            NativeKind::Ptr(HeapKind::TypedArray) => {
                 let arr = arr_bits as usize as *mut TypedArray<f64>;
                 let len = unsafe { TypedArray::len(arr) } as usize;
                 if index >= len {
@@ -243,7 +250,7 @@ impl VirtualMachine {
 
         let (arr_bits, arr_kind) = self.stack_take_kinded(slot);
         let result = match arr_kind {
-            NativeKind::UInt64 => {
+            NativeKind::Ptr(HeapKind::TypedArray) => {
                 let arr = arr_bits as usize as *mut TypedArray<i64>;
                 unsafe { TypedArray::push(arr, val) };
                 Ok(())
@@ -262,7 +269,7 @@ impl VirtualMachine {
 
         let (arr_bits, arr_kind) = self.stack_take_kinded(slot);
         let result = match arr_kind {
-            NativeKind::UInt64 => {
+            NativeKind::Ptr(HeapKind::TypedArray) => {
                 let arr = arr_bits as usize as *mut TypedArray<f64>;
                 unsafe { TypedArray::push(arr, val) };
                 Ok(())
@@ -279,7 +286,7 @@ impl VirtualMachine {
         let (arr_bits, arr_kind) = self.stack_read_kinded_raw(slot);
 
         let len: usize = match arr_kind {
-            NativeKind::UInt64 => {
+            NativeKind::Ptr(HeapKind::TypedArray) => {
                 let arr = arr_bits as usize as *const TypedArray<u8>;
                 unsafe { TypedArray::len(arr) as usize }
             }

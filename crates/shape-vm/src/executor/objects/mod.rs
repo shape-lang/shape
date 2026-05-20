@@ -724,28 +724,30 @@ impl VirtualMachine {
             // DecimalV2 routes to NUMBER_METHODS — same as the Arc-wrapped
             // `HeapKind::Decimal` sibling per the heap-arm row below.
             NativeKind::DecimalV2 => method_registry::NUMBER_METHODS.get(method_name).copied(),
-            // UInt64 may be a v2 typed-array pointer (raw `*mut
-            // TypedArray<T>`, no Arc) or a plain unsigned integer.
-            // Classify via the stamped element-type byte.
-            // `UInt64` may be a v2 typed-array pointer (raw `*mut
-            // TypedArray<T>`, no Arc) or a plain unsigned integer. The
-            // refcounted `Ptr(HeapKind::TypedArray)` carrier (struct-field /
-            // closure-capture array — r5c-2-β-δ-(α)) holds the SAME pointer
-            // shape, so it shares this arm; `as_v2_typed_array` accepts both
-            // kinds. A `UInt64` that is not a v2 typed-array pointer routes
-            // to `NUMBER_METHODS` as a plain scalar.
-            NativeKind::UInt64 | NativeKind::Ptr(HeapKind::TypedArray) => {
+            // r5c-2-β-CKPT-C u64-carrier-disambiguation (2026-05-20):
+            // `Ptr(HeapKind::TypedArray)` is the single canonical carrier
+            // kind for every v2-raw `*mut TypedArray<T>` pointer (direct
+            // `NewTypedArray*` allocation + refcounted struct-field /
+            // closure-capture read). Classify via the stamped element-type
+            // byte → typed-array method registry. A genuine scalar `u64`
+            // (`NativeKind::UInt64`) routes purely to `NUMBER_METHODS` and
+            // is NEVER passed to `as_v2_typed_array` — the pre-fix shared
+            // arm dereferenced an arbitrary scalar `u64` value as a header
+            // pointer → SIGSEGV.
+            NativeKind::Ptr(HeapKind::TypedArray) => {
                 let bits = receiver.slot.raw();
                 if let Some(view) = as_v2_typed_array(bits, kind) {
                     typed_array_method_registry(view.elem_type, method_name)
                         .or_else(|| method_registry::ARRAY_METHODS.get(method_name).copied())
-                } else if matches!(kind, NativeKind::Ptr(HeapKind::TypedArray)) {
+                } else {
                     // Kind says TypedArray but the bits failed v2 detection —
                     // still an array receiver; fall back to generic methods.
                     method_registry::ARRAY_METHODS.get(method_name).copied()
-                } else {
-                    method_registry::NUMBER_METHODS.get(method_name).copied()
                 }
+            }
+            NativeKind::UInt64 => {
+                // Genuine scalar `u64` — numeric method surface only.
+                method_registry::NUMBER_METHODS.get(method_name).copied()
             }
             NativeKind::Ptr(_) => None,
             // R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 +

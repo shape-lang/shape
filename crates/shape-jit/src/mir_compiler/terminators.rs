@@ -458,12 +458,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         use shape_value::heap_value::HeapKind;
                         use shape_vm::type_tracking::NativeKind;
                         match kind_hint {
-                            Some(
-                                NativeKind::Int64
-                                | NativeKind::UInt64
-                                | NativeKind::IntSize
-                                | NativeKind::UIntSize,
-                            ) => {
+                            Some(NativeKind::Int64 | NativeKind::IntSize) => {
                                 let val_ty = self.builder.func.dfg.value_type(val);
                                 let widened = if val_ty == types::I64 {
                                     val
@@ -475,6 +470,30 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                                     val
                                 };
                                 self.builder.ins().call(self.ffi.print_i64, &[widened]);
+                            }
+                            // r5c-2-β-CKPT-C u64-carrier-disambiguation
+                            // (2026-05-20): the UNSIGNED integer kinds route
+                            // to `jit_print_u64`, NOT `jit_print_i64`.
+                            // Pre-fix both kinds shared the signed arm,
+                            // which reinterprets the raw bits as `i64` — so
+                            // `print(x)` for `let x: u64 =
+                            // 18446744073709551615` displayed `-1` on the
+                            // JIT (VM correctly displayed the unsigned
+                            // value). The carrier `NativeKind` is the
+                            // discriminator; widening of narrower unsigned
+                            // values is zero-extension (`uextend`).
+                            Some(NativeKind::UInt64 | NativeKind::UIntSize) => {
+                                let val_ty = self.builder.func.dfg.value_type(val);
+                                let widened = if val_ty == types::I64 {
+                                    val
+                                } else if val_ty == types::I32
+                                    || val_ty == types::I8
+                                {
+                                    self.builder.ins().uextend(types::I64, val)
+                                } else {
+                                    val
+                                };
+                                self.builder.ins().call(self.ffi.print_u64, &[widened]);
                             }
                             Some(NativeKind::Float64) => {
                                 let val_ty = self.builder.func.dfg.value_type(val);

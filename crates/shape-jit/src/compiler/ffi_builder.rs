@@ -86,6 +86,7 @@ impl JITCompiler {
             // kind-blind `r!("jit_print")` lookup DELETED in Round 8A
             // reopen (2026-05-13).
             print_i64: r!("jit_print_i64"),
+            print_u64: r!("jit_print_u64"),
             print_f64: r!("jit_print_f64"),
             print_bool: r!("jit_print_bool"),
             // W12-jit-print-heap-arm-classification (Phase 3 cluster-0
