@@ -97,6 +97,21 @@ mod field_ref_regression_tests;
 #[cfg(all(test, feature = "deep-tests"))]
 mod array_builder_regression_tests;
 
+// γ-CP5 jit-typedarray-ptr regression tests (v0.3-gating
+// NO-KNOWN-INCORRECTNESS). Pin two JIT bugs un-masked by the Family-α
+// TypedArray fix: 7a — `Place::Index` codegen on a `Place::Field` base
+// (`b.items[i]` for a struct field of type `Array<int>`) must use the
+// v2 `TypedArray` layout (data@8/len@16), recognised via the
+// schema-derived `field_array_elem_kinds` map; 7b — `jit_call_value`
+// must retain each heap-typed closure capture (kind-driven
+// `KindedSlot::clone`) before handing it to `jit_trampoline_call_closure`,
+// which builds a fresh `OwnedClosureBlock` whose `Drop` releases each
+// capture. Gated behind `deep-tests` for the same reason as
+// `field_ref_regression_tests`: `JITExecutor::execute_program`
+// JIT-compiles the stdlib on every test.
+#[cfg(all(test, feature = "deep-tests"))]
+mod typedarray_ptr_regression_tests;
+
 use cranelift::codegen::ir::{FuncRef, StackSlot};
 use cranelift::prelude::*;
 use std::collections::{HashMap, HashSet};
@@ -219,6 +234,31 @@ pub struct MirToIR<'a, 'b> {
     /// the kind is available for cross-block field reads, mirroring how
     /// `slot_kinds` is computed pre-codegen via `infer_slot_kinds`.
     pub(crate) field_native_kinds: HashMap<String, NativeKind>,
+
+    /// γ-CP5 7a (jit-typedarray-ptr): field-name → v2 typed-array
+    /// **element** `NativeKind` for struct fields declared `Array<T>`
+    /// with a scalar element `T`.
+    ///
+    /// `field_native_kinds` (above) collapses every `Array<T>` field to
+    /// `NativeKind::Ptr(HeapKind::TypedArray)` — the element type is
+    /// erased. The v2 `Place::Index` fast path (`v2_typed_array_elem_kind`
+    /// in `v2_array.rs`) needs the element kind to pick the inline
+    /// `v2_array_get` codegen (v2 layout: data@8 / len@16) instead of the
+    /// legacy `inline_array_get` (v1 layout: data@+0 / len@+8 past an
+    /// 8-byte header). Without it a `b.items[i]` access where `items` is
+    /// a struct field of type `Array<int>` falls through to the v1 path
+    /// and reads the wrong element offset.
+    ///
+    /// Keyed by field name, matching the `field_byte_offsets` /
+    /// `field_native_kinds` discipline (same "last-writer-wins on name
+    /// collision across distinct struct types" caveat — benign for the
+    /// single-receiver-type field reads this fast path serves).
+    ///
+    /// Per ADR-006 §2.7.5 producer-side stamp: derived from the canonical
+    /// `TypeSchemaRegistry` `FieldType::Array(elem)` declaration at
+    /// `populate_field_byte_offsets_from_schemas` time — a compile-time
+    /// index, not a runtime decode.
+    pub(crate) field_array_elem_kinds: HashMap<String, NativeKind>,
 
     // ── Closure Spec Phase E: stack-allocated closures ──────────────
     /// Slots that hold a non-escaping closure value, per the MIR
@@ -954,6 +994,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             ref_stack_slots: HashMap::new(),
             field_byte_offsets: HashMap::new(),
             field_native_kinds,
+            field_array_elem_kinds: HashMap::new(),
             non_escaping_closure_slots,
             stack_closure_slots: HashMap::new(),
             stack_closure_call_info: HashMap::new(),
@@ -1123,6 +1164,41 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             }
         }
 
+        // γ-CP5 7a (jit-typedarray-ptr): project the *element* type of a
+        // scalar `Array<T>` field declaration into the matching v2
+        // typed-array element `NativeKind`. Mirrors
+        // `mir_compiler/types.rs::elem_slot_kind_for_concrete` (which
+        // operates on `ConcreteType`); here the source is the schema's
+        // declared `FieldType`. Non-scalar element types
+        // (`Object`/`Array`/`Option`/`Any`) and `Decimal` return `None`
+        // — those need heap-element carrier discipline the inline
+        // `v2_array_get` fast path does not provide, so the consumer
+        // falls back to the legacy NaN-boxed array path. `String`
+        // elements likewise return `None`: `Array<string>` reads through
+        // the v2-raw `*const StringObj` carrier need a retain-on-read
+        // that the scalar `v2_array_get` does not emit.
+        fn array_elem_to_native_kind(ft: &FieldType) -> Option<shape_value::NativeKind> {
+            use shape_value::NativeKind;
+            let FieldType::Array(elem) = ft else {
+                return None;
+            };
+            match elem.as_ref() {
+                FieldType::F64 => Some(NativeKind::Float64),
+                FieldType::I64 | FieldType::Timestamp => Some(NativeKind::Int64),
+                FieldType::Bool => Some(NativeKind::Bool),
+                FieldType::I8 | FieldType::U8 => Some(NativeKind::Int8),
+                FieldType::I16 | FieldType::U16 => Some(NativeKind::Int16),
+                FieldType::I32 | FieldType::U32 => Some(NativeKind::Int32),
+                FieldType::U64 => Some(NativeKind::UInt64),
+                FieldType::String
+                | FieldType::Decimal
+                | FieldType::Object(_)
+                | FieldType::Array(_)
+                | FieldType::Option(_)
+                | FieldType::Any => None,
+            }
+        }
+
         // Walk every registered schema; map name → position (i*8).
         // Existing `field_byte_offsets` / `field_native_kinds` entries
         // from the local ObjectStore-walk (statements.rs:243 +
@@ -1163,6 +1239,15 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     self.field_native_kinds
                         .entry(field.name.clone())
                         .or_insert(kind);
+                }
+                // γ-CP5 7a: stamp the v2 typed-array element kind for
+                // scalar `Array<T>` fields so `v2_typed_array_elem_kind`
+                // can recognise a `Place::Field` base and emit the v2
+                // inline `v2_array_get` codegen (v2 layout data@8/len@16).
+                if let Some(elem_kind) = array_elem_to_native_kind(&field.field_type) {
+                    self.field_array_elem_kinds
+                        .entry(field.name.clone())
+                        .or_insert(elem_kind);
                 }
             }
         }

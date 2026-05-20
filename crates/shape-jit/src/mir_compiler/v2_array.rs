@@ -106,20 +106,36 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         }
     }
 
-    /// If the place's root local is known to hold a v2 `Array<T>` whose
-    /// element type is a scalar primitive, return the matching element
-    /// `NativeKind`. Returns `None` for non-array slots, arrays of non-scalar
+    /// If the place is known to hold a v2 `Array<T>` whose element type
+    /// is a scalar primitive, return the matching element `NativeKind`.
+    /// Returns `None` for non-array places, arrays of non-scalar
     /// elements, or unresolved types — caller falls back to legacy path.
     ///
-    /// Source: the per-MirToIR `concrete_types` vector, threaded from
-    /// `BytecodeProgram.top_level_local_concrete_types` per ADR-006
-    /// §2.7.5 (W12-top-level-concrete-types-conduit close, 2026-05-12).
+    /// Two base shapes are recognised:
+    ///
+    /// - `Place::Local(slot)` — the slot's `ConcreteType` (threaded from
+    ///   `BytecodeProgram.top_level_local_concrete_types` per ADR-006
+    ///   §2.7.5, W12-top-level-concrete-types-conduit close 2026-05-12)
+    ///   is inspected via `is_v2_typed_array_slot`.
+    ///
+    /// - `Place::Field(_, field_idx)` — γ-CP5 7a (jit-typedarray-ptr):
+    ///   a struct field declared `Array<T>` carries a v2 `TypedArray<T>`
+    ///   pointer in its 8-byte slot. The element kind comes from the
+    ///   schema-derived `field_array_elem_kinds` map (stamped at
+    ///   `populate_field_byte_offsets_from_schemas` time). Without this
+    ///   arm `b.items[i]` (field-projected array base) fell through to
+    ///   the legacy `inline_array_get` which uses the v1 array layout
+    ///   (data@+0/len@+8) and read the wrong element offset for the v2
+    ///   `TypedArray<T>` (data@8/len@16) actually stored in the field.
     pub(crate) fn v2_typed_array_elem_kind(&self, place: &Place) -> Option<NativeKind> {
-        let slot = match place {
-            Place::Local(s) => *s,
-            _ => return None,
-        };
-        is_v2_typed_array_slot(&self.concrete_types, slot.0)
+        match place {
+            Place::Local(s) => is_v2_typed_array_slot(&self.concrete_types, s.0),
+            Place::Field(_, field_idx) => {
+                let name = self.mir.field_name_table.get(field_idx)?;
+                self.field_array_elem_kinds.get(name).copied()
+            }
+            _ => None,
+        }
     }
 
     /// True when the place's root local is known to hold a TypedObject
