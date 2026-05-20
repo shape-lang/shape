@@ -627,17 +627,49 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
                         let mut caps: Vec<u64> = Vec::with_capacity(cap_count);
                         for idx in 0..cap_count {
                             // §2.7.8/Q10 read_capture_kinded returns
-                            // `(bits, kind)`. The trampoline VM
-                            // `jit_trampoline_call_closure` re-pairs each
-                            // bits/kind through `KindedSlot::new` inside
-                            // the new frame setup; here we only need the
-                            // raw bits because the trampoline call
-                            // ignores per-capture kind on the JIT-FFI
-                            // boundary (the runtime-tier per-slot kind
-                            // track is established by the callee's own
-                            // FrameDescriptor when it begins execution
-                            // — same shape as the bare-function path).
-                            let (cap_bits, _cap_kind) = block.read_capture_kinded(idx);
+                            // `(bits, kind)`. `read_capture_kinded` is a
+                            // RAW bit read — it does NOT bump the
+                            // capture's refcount.
+                            //
+                            // γ-CP5 7b (jit-typedarray-ptr,
+                            // v2-raw-heap-aliasing class): retain each
+                            // heap-typed capture before handing it to
+                            // `jit_trampoline_call_closure`. That
+                            // trampoline builds a FRESH `OwnedClosureBlock`
+                            // from these bits (`write_capture_raw_u64` —
+                            // no bump) and the fresh block's `Drop`
+                            // (`release_typed_closure`) WILL release each
+                            // heap capture via the layout's capture masks.
+                            // Its doc-comment states the contract
+                            // explicitly: "the JIT pre-incremented each
+                            // share before crossing the FFI boundary."
+                            // Without this retain every closure call
+                            // retires one share of each captured heap
+                            // value — the original binding's + the
+                            // closure block's shares are consumed within
+                            // a few calls and the next access
+                            // dereferences freed memory (`malloc():
+                            // unaligned tcache chunk` SIGABRT).
+                            //
+                            // The retain is the §2.7.8/Q10 kind-driven
+                            // bump via `KindedSlot::clone` — same dispatch
+                            // table as the VM's per-capture
+                            // `clone_with_kind` at frame setup
+                            // (`executor/call_convention.rs:776`). Inline
+                            // scalars are a no-op (`KindedSlot::clone`'s
+                            // scalar arms). `mem::forget` hands the bumped
+                            // share to the fresh block; the borrow-view
+                            // `KindedSlot` must NOT run its `Drop` (that
+                            // would cancel the bump) so it is forgotten
+                            // too.
+                            let (cap_bits, cap_kind) = block.read_capture_kinded(idx);
+                            let borrow_view = shape_value::KindedSlot::new(
+                                shape_value::ValueSlot::from_raw(cap_bits),
+                                cap_kind,
+                            );
+                            let retained = borrow_view.clone();
+                            std::mem::forget(borrow_view);
+                            std::mem::forget(retained);
                             caps.push(cap_bits);
                         }
                         Some((fid, caps))
