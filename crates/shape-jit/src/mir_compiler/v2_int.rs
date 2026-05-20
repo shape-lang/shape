@@ -34,17 +34,16 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             BinOp::Add => self.builder.ins().iadd(l, r),
             BinOp::Sub => self.builder.ins().isub(l, r),
             BinOp::Mul => self.builder.ins().imul(l, r),
+            // r5c-2-gz-cp2-jit-div: VM-equivalent trap-free i32 div/mod —
+            // div-by-zero → clean `Division by zero`; `i32::MIN / -1` →
+            // wrapping `i32::MIN` (mod → 0). `compile_int_divmod_guarded`
+            // (in `rvalues.rs`) operates at the `I32` width; the result is
+            // sign-extended back to the I64 ABI slot below.
             BinOp::Div => {
-                let zero = self.builder.ins().iconst(types::I32, 0);
-                let is_zero = self.builder.ins().icmp(IntCC::Equal, r, zero);
-                self.builder.ins().trapnz(is_zero, TrapCode::User(0));
-                self.builder.ins().sdiv(l, r)
+                self.compile_int_divmod_guarded(l, r, types::I32, true, false)?
             }
             BinOp::Mod => {
-                let zero = self.builder.ins().iconst(types::I32, 0);
-                let is_zero = self.builder.ins().icmp(IntCC::Equal, r, zero);
-                self.builder.ins().trapnz(is_zero, TrapCode::User(0));
-                self.builder.ins().srem(l, r)
+                self.compile_int_divmod_guarded(l, r, types::I32, true, true)?
             }
             _ => return Err(format!("unsupported i32 binop: {:?}", op)),
         };
@@ -782,5 +781,314 @@ mod tests {
         assert!(jit_u64_cmp("le", 1u64 << 63, u64::MAX));
         assert!(jit_u64_cmp("eq", u64::MAX, u64::MAX));
         assert!(jit_u64_cmp("ne", u64::MAX, u64::MAX - 1));
+    }
+
+    // ── r5c-2-gz-cp2-jit-div: trap-free integer div/mod regression tests ──
+    //
+    // These mirror `compile_int_divmod_guarded` (in `rvalues.rs`) codegen
+    // exactly, for every integer width:
+    //
+    //   1. Divisor-is-zero guard. The production helper does an immediate
+    //      `return_` of `JIT_SIGNAL_DIVISION_BY_ZERO`; a standalone test fn
+    //      returning the division result cannot early-return an i32 signal,
+    //      so the harness returns a distinct sentinel (`SENTINEL_DIVZERO`) on
+    //      the zero-divisor branch. The assertion proves the branch is taken
+    //      and — crucially — that NO `ud2`/SIGILL trap fires (the test
+    //      process survives; the prior `trapnz` would have aborted it).
+    //
+    //   2. `INT_MIN / -1` signed-overflow substitution. The helper replaces
+    //      the divisor with `1` when `divisor == -1 && dividend == INT_MIN`,
+    //      so `sdiv(INT_MIN, 1) == INT_MIN` (== `wrapping_div`) and
+    //      `srem(INT_MIN, 1) == 0` (== `wrapping_rem`). The harness replicates
+    //      the `select` substitution; the prior raw `sdiv` would SIGFPE here.
+    //
+    //   3. Ordinary division/modulo is bit-identical to the prior `sdiv`/
+    //      `srem`/`udiv`/`urem` — the guard and substitution never trigger.
+    //
+    // Standalone Cranelift fns — fast, deterministic, not `deep-tests`-gated.
+
+    /// Sentinel returned by the test harness on the zero-divisor branch.
+    /// In production this branch instead does `return_(&[i32 signal])`.
+    const SENTINEL_DIVZERO: i64 = 0x7EAD_BEEF_DEAD_BEEFu64 as i64;
+
+    /// Build a JIT fn `(i64, i64) -> i64` replicating `compile_int_divmod_guarded`
+    /// codegen at `narrow` Cranelift width. `is_signed` selects `sdiv`/`srem` +
+    /// the `INT_MIN / -1` substitution vs `udiv`/`urem`; `is_mod` selects
+    /// remainder vs quotient. The zero-divisor branch returns
+    /// `SENTINEL_DIVZERO` (the test analog of the production i32 signal
+    /// early-return — proving the branch is taken without a trap). The
+    /// operands are `ireduce`d to `narrow` and the result widened back to i64.
+    fn jit_guarded_divmod(
+        narrow: types::Type,
+        is_signed: bool,
+        is_mod: bool,
+        dividend: i64,
+        divisor: i64,
+    ) -> i64 {
+        let mut flag_builder = settings::builder();
+        flag_builder.set("opt_level", "speed_and_size").unwrap();
+        let isa = cranelift_native::builder()
+            .unwrap()
+            .finish(settings::Flags::new(flag_builder))
+            .unwrap();
+        let builder =
+            JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        let mut module = JITModule::new(builder);
+        let mut ctx = module.make_context();
+
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+
+        let func_id = module
+            .declare_function("guarded_divmod", cranelift_module::Linkage::Local, &sig)
+            .unwrap();
+        ctx.func.signature = sig;
+
+        let mut fbc = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut ctx.func, &mut fbc);
+        let entry = builder.create_block();
+        builder.append_block_params_for_function_params(entry);
+        builder.switch_to_block(entry);
+        builder.seal_block(entry);
+
+        // Cranelift's `iconst` rejects a raw negative `i64` for sub-`I64`
+        // types — the immediate must be the zero-extended bit pattern. This
+        // mirrors `MirToIR::narrow_iconst` in `rvalues.rs`.
+        let narrow_imm = |value: i64| -> i64 {
+            let bits = narrow.bits();
+            if bits >= 64 {
+                value
+            } else {
+                (value as u64 & ((1u64 << bits) - 1)) as i64
+            }
+        };
+
+        let lhs_i64 = builder.block_params(entry)[0];
+        let rhs_i64 = builder.block_params(entry)[1];
+        let l = if narrow == types::I64 {
+            lhs_i64
+        } else {
+            builder.ins().ireduce(narrow, lhs_i64)
+        };
+        let r = if narrow == types::I64 {
+            rhs_i64
+        } else {
+            builder.ins().ireduce(narrow, rhs_i64)
+        };
+
+        // ── 1. Divisor-is-zero guard ─────────────────────────────────────
+        let zero = builder.ins().iconst(narrow, 0);
+        let is_zero = builder.ins().icmp(IntCC::Equal, r, zero);
+        let div_by_zero_block = builder.create_block();
+        let continue_block = builder.create_block();
+        builder
+            .ins()
+            .brif(is_zero, div_by_zero_block, &[], continue_block, &[]);
+
+        builder.switch_to_block(div_by_zero_block);
+        builder.seal_block(div_by_zero_block);
+        let sentinel = builder.ins().iconst(types::I64, SENTINEL_DIVZERO);
+        builder.ins().return_(&[sentinel]);
+
+        builder.switch_to_block(continue_block);
+        builder.seal_block(continue_block);
+
+        let narrow_result = if !is_signed {
+            if is_mod {
+                builder.ins().urem(l, r)
+            } else {
+                builder.ins().udiv(l, r)
+            }
+        } else {
+            // ── 2. INT_MIN / -1 substitution ─────────────────────────────
+            let neg_one = builder.ins().iconst(narrow, narrow_imm(-1));
+            let int_min = builder
+                .ins()
+                .iconst(narrow, narrow_imm(i64::MIN >> (64 - narrow.bits())));
+            let div_is_neg_one = builder.ins().icmp(IntCC::Equal, r, neg_one);
+            let dividend_is_min = builder.ins().icmp(IntCC::Equal, l, int_min);
+            let is_overflow = builder.ins().band(div_is_neg_one, dividend_is_min);
+            let one = builder.ins().iconst(narrow, narrow_imm(1));
+            let safe_divisor = builder.ins().select(is_overflow, one, r);
+            if is_mod {
+                builder.ins().srem(l, safe_divisor)
+            } else {
+                builder.ins().sdiv(l, safe_divisor)
+            }
+        };
+
+        let widened = if narrow == types::I64 {
+            narrow_result
+        } else if is_signed {
+            builder.ins().sextend(types::I64, narrow_result)
+        } else {
+            builder.ins().uextend(types::I64, narrow_result)
+        };
+        builder.ins().return_(&[widened]);
+        builder.finalize();
+
+        module.define_function(func_id, &mut ctx).unwrap();
+        module.clear_context(&mut ctx);
+        module.finalize_definitions().unwrap();
+        let code_ptr = module.get_finalized_function(func_id);
+        let func: fn(i64, i64) -> i64 = unsafe { std::mem::transmute(code_ptr) };
+        func(dividend, divisor)
+    }
+
+    // ── i64: division/modulo by zero is guarded, not trapped ────────────
+
+    #[test]
+    fn i64_div_by_zero_is_guarded_no_sigill() {
+        // Prior codegen: `trapnz` → `ud2` → SIGILL aborting the process.
+        // Now: the guard branch returns the sentinel; the process survives.
+        assert_eq!(jit_guarded_divmod(types::I64, true, false, 1, 0), SENTINEL_DIVZERO);
+        assert_eq!(jit_guarded_divmod(types::I64, true, false, -42, 0), SENTINEL_DIVZERO);
+    }
+
+    #[test]
+    fn i64_mod_by_zero_is_guarded_no_sigill() {
+        assert_eq!(jit_guarded_divmod(types::I64, true, true, 10, 0), SENTINEL_DIVZERO);
+    }
+
+    #[test]
+    fn i64_div_int_min_by_neg_one_wraps_no_sigfpe() {
+        // Prior codegen: raw `sdiv(i64::MIN, -1)` → SIGFPE. Now: the divisor
+        // substitution yields `sdiv(i64::MIN, 1) == i64::MIN` — the exact
+        // `i64::MIN.wrapping_div(-1)` result the VM produces.
+        assert_eq!(
+            jit_guarded_divmod(types::I64, true, false, i64::MIN, -1),
+            i64::MIN,
+        );
+        assert_eq!(
+            jit_guarded_divmod(types::I64, true, false, i64::MIN, -1),
+            i64::MIN.wrapping_div(-1),
+        );
+    }
+
+    #[test]
+    fn i64_mod_int_min_by_neg_one_is_zero_no_sigfpe() {
+        // `srem(i64::MIN, 1) == 0` == `i64::MIN.wrapping_rem(-1)`.
+        assert_eq!(jit_guarded_divmod(types::I64, true, true, i64::MIN, -1), 0);
+        assert_eq!(
+            jit_guarded_divmod(types::I64, true, true, i64::MIN, -1),
+            i64::MIN.wrapping_rem(-1),
+        );
+    }
+
+    #[test]
+    fn i64_ordinary_div_mod_unaffected() {
+        assert_eq!(jit_guarded_divmod(types::I64, true, false, 17, 5), 3);
+        assert_eq!(jit_guarded_divmod(types::I64, true, true, 17, 5), 2);
+        // -5 / -1 must still be 5 — the substitution only fires for INT_MIN.
+        assert_eq!(jit_guarded_divmod(types::I64, true, false, -5, -1), 5);
+        assert_eq!(jit_guarded_divmod(types::I64, true, false, -20, 4), -5);
+        assert_eq!(jit_guarded_divmod(types::I64, true, true, -20, 6), -2);
+    }
+
+    // ── i32: same guard + substitution at 32-bit width ──────────────────
+
+    #[test]
+    fn i32_div_by_zero_is_guarded_no_sigill() {
+        assert_eq!(jit_guarded_divmod(types::I32, true, false, 7, 0), SENTINEL_DIVZERO);
+        assert_eq!(jit_guarded_divmod(types::I32, true, true, 7, 0), SENTINEL_DIVZERO);
+    }
+
+    #[test]
+    fn i32_div_int_min_by_neg_one_wraps_no_sigfpe() {
+        assert_eq!(
+            jit_guarded_divmod(types::I32, true, false, i32::MIN as i64, -1),
+            i32::MIN as i64,
+        );
+        assert_eq!(
+            jit_guarded_divmod(types::I32, true, true, i32::MIN as i64, -1),
+            0,
+        );
+    }
+
+    #[test]
+    fn i32_ordinary_div_mod_unaffected() {
+        assert_eq!(jit_guarded_divmod(types::I32, true, false, 17, 5), 3);
+        assert_eq!(jit_guarded_divmod(types::I32, true, true, 17, 5), 2);
+        assert_eq!(jit_guarded_divmod(types::I32, true, false, -100, -1), 100);
+    }
+
+    // ── narrow signed (i8 / i16): same guard + substitution ─────────────
+
+    #[test]
+    fn narrow_i8_div_by_zero_is_guarded_no_sigill() {
+        assert_eq!(jit_guarded_divmod(types::I8, true, false, 9, 0), SENTINEL_DIVZERO);
+        assert_eq!(jit_guarded_divmod(types::I16, true, true, 9, 0), SENTINEL_DIVZERO);
+    }
+
+    #[test]
+    fn narrow_i8_div_int_min_by_neg_one_wraps_no_sigfpe() {
+        // i8::MIN / -1 wraps to i8::MIN (-128); i8::MIN % -1 == 0.
+        assert_eq!(
+            jit_guarded_divmod(types::I8, true, false, i8::MIN as i64, -1),
+            i8::MIN as i64,
+        );
+        assert_eq!(
+            jit_guarded_divmod(types::I8, true, true, i8::MIN as i64, -1),
+            0,
+        );
+    }
+
+    #[test]
+    fn narrow_i16_div_int_min_by_neg_one_wraps_no_sigfpe() {
+        assert_eq!(
+            jit_guarded_divmod(types::I16, true, false, i16::MIN as i64, -1),
+            i16::MIN as i64,
+        );
+        assert_eq!(
+            jit_guarded_divmod(types::I16, true, true, i16::MIN as i64, -1),
+            0,
+        );
+    }
+
+    #[test]
+    fn narrow_signed_ordinary_div_mod_unaffected() {
+        assert_eq!(jit_guarded_divmod(types::I8, true, false, 100, 7), 14);
+        assert_eq!(jit_guarded_divmod(types::I8, true, true, 100, 7), 2);
+        // -50 / -1 == 50 — substitution must not fire for non-INT_MIN.
+        assert_eq!(jit_guarded_divmod(types::I8, true, false, -50, -1), 50);
+        assert_eq!(jit_guarded_divmod(types::I16, true, false, 30000, 3), 10000);
+    }
+
+    // ── u64 / narrow unsigned: only the zero-divisor guard applies ──────
+
+    #[test]
+    fn u64_div_by_zero_is_guarded_no_sigill() {
+        assert_eq!(jit_guarded_divmod(types::I64, false, false, 100, 0), SENTINEL_DIVZERO);
+        assert_eq!(jit_guarded_divmod(types::I64, false, true, 100, 0), SENTINEL_DIVZERO);
+    }
+
+    #[test]
+    fn u64_div_full_range_is_unsigned() {
+        // u64::MAX / 2 — unsigned udiv (a signed sdiv would compute 0).
+        // No overflow case exists for unsigned division.
+        let q = jit_guarded_divmod(types::I64, false, false, u64::MAX as i64, 2) as u64;
+        assert_eq!(q, 9_223_372_036_854_775_807);
+        let r = jit_guarded_divmod(types::I64, false, true, u64::MAX as i64, 10) as u64;
+        assert_eq!(r, 5);
+    }
+
+    #[test]
+    fn narrow_unsigned_div_by_zero_is_guarded_no_sigill() {
+        assert_eq!(jit_guarded_divmod(types::I8, false, false, 200, 0), SENTINEL_DIVZERO);
+        assert_eq!(jit_guarded_divmod(types::I32, false, true, 4_000_000_000, 0), SENTINEL_DIVZERO);
+    }
+
+    #[test]
+    fn narrow_unsigned_ordinary_div_mod_unaffected() {
+        // 200u8 / 3 == 66; 200u8 % 3 == 2.
+        assert_eq!(jit_guarded_divmod(types::I8, false, false, 200, 3), 66);
+        assert_eq!(jit_guarded_divmod(types::I8, false, true, 200, 3), 2);
+        // 4_000_000_000u32 / 7 — unsigned udiv at 32-bit width.
+        assert_eq!(
+            jit_guarded_divmod(types::I32, false, false, 4_000_000_000, 7),
+            (4_000_000_000u32 / 7) as i64,
+        );
     }
 }

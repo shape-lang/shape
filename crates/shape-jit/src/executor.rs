@@ -136,8 +136,17 @@ impl ProgramExecutor for JITExecutor {
         // failure: fall through to interpreter (NOT silent-no-output);
         // Diagnostic emitted at info level: `[jit-fallback] function X
         // failed JIT compile: <reason>; running under interpreter`".
+        // r5c-2-gz-cp2-jit-div: `execute_with_jit` returns a nested result so
+        // a JIT-COMPILE-stage failure (fall through to interpreter) is kept
+        // distinct from a genuine PROGRAM runtime error the JIT executed
+        // soundly (e.g. division by zero). The latter must propagate
+        // directly — re-running it under the interpreter would execute the
+        // program a second time, doubling any side effects (a `print`
+        // before the failing divide would fire twice). Outer `Err` =
+        // compile-stage failure; `Ok(Err(_))` = JIT-executed runtime error.
         match self.execute_with_jit(engine, &bytecode, bytecode_compile_ms, emit_phase_metrics) {
-            Ok(result) => Ok(result),
+            Ok(Ok(result)) => Ok(result),
+            Ok(Err(runtime_err)) => Err(runtime_err),
             Err(jit_err) => {
                 // Emit the structured fall-through diagnostic. Use `eprintln!`
                 // so the diagnostic is visible even when the user has not
@@ -164,13 +173,28 @@ impl ProgramExecutor for JITExecutor {
 }
 
 impl JITExecutor {
+    /// Run the JIT pipeline for `bytecode`.
+    ///
+    /// r5c-2-gz-cp2-jit-div: the nested result separates two error classes
+    /// the W12 fall-through must treat differently:
+    ///
+    /// - Outer `Err` — a JIT-COMPILE-stage failure (compiler init, selective
+    ///   compile, foreign-fn link, or a `RETURN_TAG_NANBOXED` kind-source
+    ///   gap). The interpreter can run the program; `execute_program` falls
+    ///   through with a `[jit-fallback]` diagnostic.
+    /// - `Ok(Err(_))` — the JIT compiled and EXECUTED the program soundly,
+    ///   but the program itself hit a runtime error the bytecode VM also
+    ///   reports (division by zero). This must propagate directly: a
+    ///   fall-through would re-execute the program under the interpreter and
+    ///   double any side effects already performed by the JIT run.
+    /// - `Ok(Ok(_))` — success.
     fn execute_with_jit(
         &self,
         engine: &mut ShapeEngine,
         bytecode: &shape_vm::bytecode::BytecodeProgram,
         bytecode_compile_ms: u128,
         emit_phase_metrics: bool,
-    ) -> Result<shape_runtime::engine::ProgramExecutorResult> {
+    ) -> Result<Result<shape_runtime::engine::ProgramExecutorResult>> {
         use crate::JITConfig;
         use crate::JITContext;
         use crate::compiler::JITCompiler;
@@ -459,10 +483,33 @@ impl JITExecutor {
 
         // Check for errors
         if signal < 0 {
-            return Err(shape_runtime::error::ShapeError::RuntimeError {
-                message: format!("JIT execution error (code: {})", signal),
-                location: None,
-            });
+            // r5c-2-gz-cp2-jit-div: a recoverable Shape-level runtime error
+            // the bytecode VM handles cleanly is carved out of the negative
+            // signal space (`crate::context::JIT_SIGNAL_*`). The JIT codegen
+            // emits a guarded branch that returns the signal instead of an
+            // `ud2`/`sdiv` trap; here we map it back to the SAME diagnostic
+            // text the VM produces, so `--mode jit` == `--mode vm`.
+            match signal {
+                crate::context::JIT_SIGNAL_DIVISION_BY_ZERO => {
+                    // Genuine program runtime error — the JIT executed
+                    // soundly. `Ok(Err(_))` so `execute_program` propagates
+                    // it directly (no interpreter re-run / side-effect
+                    // doubling).
+                    return Ok(Err(shape_runtime::error::ShapeError::RuntimeError {
+                        message: "Division by zero".to_string(),
+                        location: None,
+                    }));
+                }
+                _ => {
+                    // Unknown negative signal — treat as a JIT-pipeline
+                    // failure (outer `Err`) so `execute_program` falls
+                    // through to the interpreter, preserving W12 behavior.
+                    return Err(shape_runtime::error::ShapeError::RuntimeError {
+                        message: format!("JIT execution error (code: {})", signal),
+                        location: None,
+                    });
+                }
+            }
         }
 
         // v2: check return_type_tag for native-typed return values.
@@ -540,14 +587,16 @@ impl JITExecutor {
             );
         }
 
-        Ok(shape_runtime::engine::ProgramExecutorResult {
+        // r5c-2-gz-cp2-jit-div: `Ok(Ok(_))` — JIT compiled and executed
+        // successfully (see `execute_with_jit` nested-result contract).
+        Ok(Ok(shape_runtime::engine::ProgramExecutorResult {
             wire_value,
             type_info: None,
             execution_type: ExecutionType::Script,
             content_json: None,
             content_html: None,
             content_terminal: None,
-        })
+        }))
     }
 
     // typed_scalar_to_wire and value_word_to_wire removed — both were
