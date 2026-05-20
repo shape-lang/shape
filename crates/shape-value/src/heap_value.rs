@@ -3725,26 +3725,23 @@ impl TypedObjectStorage {
                         HeapKind::String => {
                             std::sync::Arc::decrement_strong_count(bits as *const String);
                         }
-                        // V3-S5 ckpt-5-prime (2026-05-15): `HeapKind::TypedArray`
-                        // dispatch arm RETIRED per W12 audit §3.6 + handover §0
-                        // 4-table lockstep rule. The `TypedArrayData` enum was
-                        // deleted at ckpt-1; the outer `HeapValue::TypedArray`
-                        // arm at ckpt-4. Ordinal 8 remains as a vacated marker
-                        // in `heap_variants.rs::HeapKind` (per ordinal-collision
-                        // rule — `value_ffi.rs::HK_TYPED_TABLE` asserts the
-                        // collision lineage). No live slot bits in compiled
-                        // bytecode carry `NativeKind::Ptr(HeapKind::TypedArray)`
-                        // post-ckpt-4 (all producers migrated to v2-raw
-                        // `*mut TypedArray<T>` carriers per ADR-006 §2.7.24
-                        // Q25.A SUPERSEDED). Refusal #1 binding: do not
-                        // reintroduce under any rename/shim/bridge.
+                        // r5c-2-β-δ-(α) (2026-05-20): `HeapKind::TypedArray`
+                        // dispatch arm RE-INSTATED. The V3-S5 ckpt-5-prime
+                        // retirement claimed "no live slot bits carry this
+                        // kind", but a struct with an `Array<T>` field is
+                        // exactly such a site — `field_tag_to_native_kind`
+                        // maps `FIELD_TAG_ARRAY` → `Ptr(HeapKind::TypedArray)`,
+                        // so the field slot stores a v2-raw `*mut TypedArray<T>`
+                        // carrier (HeapHeader at offset 0, refcount). When the
+                        // enclosing `TypedObjectStorage` is freed this walk
+                        // must release the field's share. `release_v2_typed_array`
+                        // retires one refcount share and, on the last share,
+                        // frees the array via the stamped-element-type
+                        // `drop_array` / `drop_array_heap`. Mirror of the
+                        // `TypedObject` field arm below (4-table lockstep,
+                        // ADR-006 §2.3 / §2.7.7).
                         HeapKind::TypedArray => {
-                            unreachable!(
-                                "HeapKind::TypedArray ordinal 8 is vacated per W12 audit §3.6; \
-                                 no live slot bits carry this kind post-V3-S5 ckpt-4 (TypedArrayData \
-                                 enum + outer HeapValue::TypedArray arm deleted; v2-raw \
-                                 *mut TypedArray<T> carriers per ADR-006 §2.7.24 Q25.A SUPERSEDED)"
-                            );
+                            crate::v2::typed_array::release_v2_typed_array(bits as *mut u8);
                         }
                         // Wave 2 Agent D4 ckpt-2 (ADR-006 §2.3 / §2.7.5
                         // amendment, 2026-05-14): a `TypedObject` field of

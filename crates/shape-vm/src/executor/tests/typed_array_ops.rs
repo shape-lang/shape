@@ -505,3 +505,113 @@ fn test_typed_object_array_struct_with_number_field() {
     );
     assert_eq!(result.as_f64(), Some(3.5));
 }
+
+// ── r5c-2-β-δ-(α): `Ptr(HeapKind::TypedArray)` carrier regression tests ─────
+//
+// Before the fix, both trigger paths panicked at the vacated
+// `unreachable!()` arm in `vm_impl/stack.rs::clone_with_kind`: the W12
+// audit retired the `HeapKind::TypedArray` dispatch arm asserting "no live
+// slot bits carry this kind", but `Array<T>` struct fields
+// (`field_tag_to_native_kind` → `Ptr(HeapKind::TypedArray)`) and closure
+// captures (`closure_layout.rs::native_kind_from_concrete_type` →
+// `Ptr(HeapKind::TypedArray)`) both put this kind on a live slot. The fix
+// re-instates the arm as a v2-raw `*mut TypedArray<T>` carrier (retain via
+// `v2_retain`, release via `release_v2_typed_array`).
+
+#[test]
+fn test_struct_array_field_read_int() {
+    // Trigger path 1: read an `Array<int>` field out of a struct. Pre-fix:
+    // VM panic at `clone_with_kind` on `Ptr(HeapKind::TypedArray)`.
+    let result = eval(
+        "type Bag { items: Array<int> }\n\
+         let b = Bag { items: [1, 2, 3] }\n\
+         b.items[0]",
+    );
+    assert_eq!(result.as_i64(), Some(1));
+}
+
+#[test]
+fn test_struct_array_field_read_each_index() {
+    // Every index of a struct array field reads correctly — no drift,
+    // no double-free across the three field reads.
+    assert_eq!(
+        eval(
+            "type Bag { items: Array<int> }\n\
+             let b = Bag { items: [10, 20, 30] }\n\
+             let a: int = b.items[0]\n\
+             let c: int = b.items[1]\n\
+             let d: int = b.items[2]\n\
+             a + c + d"
+        )
+        .as_i64(),
+        Some(60)
+    );
+}
+
+#[test]
+fn test_struct_array_field_length() {
+    // `op_length` on a `Ptr(HeapKind::TypedArray)` struct-field carrier.
+    let result = eval(
+        "type Bag { items: Array<int> }\n\
+         let b = Bag { items: [1, 2, 3, 4, 5] }\n\
+         b.items.length",
+    );
+    assert_eq!(result.as_i64(), Some(5));
+}
+
+#[test]
+fn test_struct_array_field_number_elem() {
+    // `Array<number>` struct field — exercises the F64 element-kind arm
+    // of the shared `as_v2_typed_array` carrier classification.
+    let result = eval(
+        "type Bag { xs: Array<number> }\n\
+         let b = Bag { xs: [1.5, 2.5, 3.5] }\n\
+         b.xs[2]",
+    );
+    assert_eq!(result.as_f64(), Some(3.5));
+}
+
+#[test]
+fn test_closure_captures_array_sum() {
+    // Trigger path 2: a closure capturing an `Array<int>`. Pre-fix:
+    // VM panic at `clone_with_kind` on the `Ptr(HeapKind::TypedArray)`
+    // capture (and JIT SIGABRT).
+    let result = eval(
+        "let data = [10, 20, 30]\n\
+         let f = || data.sum()\n\
+         f()",
+    );
+    assert_eq!(result.as_i64(), Some(60));
+}
+
+#[test]
+fn test_closure_captures_array_called_twice() {
+    // Calling the array-capturing closure more than once must keep the
+    // captured array's refcount balanced — no premature free.
+    let result = eval(
+        "let data = [10, 20, 30]\n\
+         let f = || data.sum()\n\
+         f() + f()",
+    );
+    assert_eq!(result.as_i64(), Some(120));
+}
+
+#[test]
+fn test_struct_array_field_drop_balance_in_loop() {
+    // Construct + read a struct array field repeatedly. A retain/release
+    // imbalance in the `Ptr(HeapKind::TypedArray)` clone/drop arms would
+    // surface as a leak (refcount drift) or a double-free abort here.
+    let result = eval(
+        "type Bag { items: Array<int> }\n\
+         fn make_and_read() -> int {\n\
+         \x20 let b = Bag { items: [7, 8, 9] }\n\
+         \x20 return b.items[1]\n\
+         }\n\
+         let mut total = 0\n\
+         for i in 0..50 {\n\
+         \x20 total = total + make_and_read()\n\
+         }\n\
+         total",
+    );
+    assert_eq!(result.as_i64(), Some(400));
+}

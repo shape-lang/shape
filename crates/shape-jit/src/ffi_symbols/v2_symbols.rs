@@ -77,6 +77,15 @@ pub fn register_v2_symbols(builder: &mut JITBuilder) {
     // Refcount
     builder.symbol("jit_v2_retain", v2::jit_v2_retain as *const u8);
     builder.symbol("jit_v2_release", v2::jit_v2_release as *const u8);
+    // r5c-2-β-δ-(α): v2-raw TypedArray<T> retain / release.
+    builder.symbol(
+        "jit_v2_typed_array_retain",
+        v2::jit_v2_typed_array_retain as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_typed_array_release",
+        v2::jit_v2_typed_array_release as *const u8,
+    );
 
     // Struct allocation
     builder.symbol("jit_v2_alloc_struct", v2::jit_v2_alloc_struct as *const u8);
@@ -524,6 +533,20 @@ pub fn declare_v2_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<Stri
         let mut sig = module.make_signature();
         sig.params.push(AbiParam::new(types::I64));
         declare(module, ffi_funcs, "jit_v2_release", &sig);
+    }
+
+    // r5c-2-β-δ-(α): jit_v2_typed_array_retain(ptr) -> void
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        declare(module, ffi_funcs, "jit_v2_typed_array_retain", &sig);
+    }
+
+    // r5c-2-β-δ-(α): jit_v2_typed_array_release(ptr) -> void
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        declare(module, ffi_funcs, "jit_v2_typed_array_release", &sig);
     }
 
     // ========================================================================

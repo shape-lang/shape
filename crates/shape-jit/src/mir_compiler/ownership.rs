@@ -296,6 +296,12 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             // `arc_retain` would write a `fetch_add` at offset +4 of
             // the HeapValue payload — corrupting the discriminant.
             Some(NativeKind::Ptr(HeapKind::Closure)) => self.ffi.arc_closure_retain,
+            // r5c-2-β-δ-(α): v2-raw `*mut TypedArray<T>` carrier. The
+            // legacy `arc_retain` writes a `fetch_add` at offset +4 (inside
+            // the `UnifiedValue<T>` HeapHeader) — wrong for a `TypedArray<T>`
+            // whose HeapHeader is at offset 0. Route to the dedicated v2
+            // helper (`v2_retain` against the on-header refcount).
+            Some(NativeKind::Ptr(HeapKind::TypedArray)) => self.ffi.v2_typed_array_retain,
             _ => self.ffi.arc_retain,
         }
     }
@@ -325,6 +331,12 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             // W15.2-LANG-4 jit-filter-predicate close (2026-05-18).
             // Mirror of the `Ptr(HeapKind::Closure)` retain arm above.
             Some(NativeKind::Ptr(HeapKind::Closure)) => self.ffi.arc_closure_release,
+            // r5c-2-β-δ-(α): v2-raw `*mut TypedArray<T>` carrier. The
+            // legacy `arc_release` deallocs the wrong size + leaks the
+            // element buffer (heap corruption). Route to the dedicated v2
+            // helper (`v2_release` + stamped-element-type `drop_array` /
+            // `drop_array_heap` on the last share).
+            Some(NativeKind::Ptr(HeapKind::TypedArray)) => self.ffi.v2_typed_array_release,
             _ => self.ffi.arc_release,
         }
     }

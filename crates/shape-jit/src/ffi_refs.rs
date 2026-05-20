@@ -237,6 +237,12 @@ pub struct FFIFuncRefs {
     pub(crate) arc_retain: FuncRef,
     pub(crate) arc_release: FuncRef,
 
+    // r5c-2-β-δ-(α): v2-raw `TypedArray<T>` retain / release. The carrier
+    // is `*mut TypedArray<T>` (HeapHeader at offset 0, separate element
+    // buffer); the legacy `arc_retain` / `arc_release` would corrupt it.
+    pub(crate) v2_typed_array_retain: FuncRef,
+    pub(crate) v2_typed_array_release: FuncRef,
+
     // v2 typed-array allocators (used by v2 lowerings).
     pub(crate) v2_array_new_f64: FuncRef,
     pub(crate) v2_array_new_i64: FuncRef,

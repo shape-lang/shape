@@ -323,6 +323,152 @@ impl<T: super::heap_element::HeapElement> TypedArray<*const T> {
     }
 }
 
+// ── Element-type discriminants — canonical home ──────────────────────────────
+//
+// The compile-time element type `T` of a `TypedArray<T>` is preserved at
+// runtime in the `_pad` byte (offset 7) of the `HeapHeader`. The bytecode
+// compiler / VM allocation handlers stamp this byte immediately after
+// `with_capacity`; `retain_v2_typed_array` / `release_v2_typed_array` below
+// (and the `shape-vm` consumer paths in `v2_handlers/v2_array_detect.rs`,
+// re-exporting these constants) read it to pick the monomorphized
+// `drop_array` / `drop_array_heap`.
+//
+// This is the *canonical* definition; `shape-vm::executor::v2_handlers::
+// v2_array_detect` re-exports it via `pub use`. r5c-2-β-δ-(α): moved here
+// from `v2_array_detect` so the kind-blind release function below — needed
+// by the 4 `Ptr(HeapKind::TypedArray)` lockstep dispatch tables, two of
+// which live in this `shape-value` crate (`kinded_slot.rs`, `closure_layout.
+// rs`, `heap_value.rs`) — can dispatch without a constant duplicated across
+// the `shape-vm` crate boundary.
+
+/// `_pad`-byte discriminant for an unstamped / unknown element type.
+pub const ELEM_TYPE_UNKNOWN: u8 = 0;
+/// `_pad`-byte discriminant for `TypedArray<f64>`.
+pub const ELEM_TYPE_F64: u8 = 1;
+/// `_pad`-byte discriminant for `TypedArray<i64>`.
+pub const ELEM_TYPE_I64: u8 = 2;
+/// `_pad`-byte discriminant for `TypedArray<i32>`.
+pub const ELEM_TYPE_I32: u8 = 3;
+/// `_pad`-byte discriminant for `TypedArray<u8>` carrying `bool` elements.
+pub const ELEM_TYPE_BOOL: u8 = 4;
+/// `_pad`-byte discriminant for `TypedArray<i8>`.
+pub const ELEM_TYPE_I8: u8 = 5;
+/// `_pad`-byte discriminant for `TypedArray<u8>` carrying `u8` elements.
+pub const ELEM_TYPE_U8: u8 = 6;
+/// `_pad`-byte discriminant for `TypedArray<i16>`.
+pub const ELEM_TYPE_I16: u8 = 7;
+/// `_pad`-byte discriminant for `TypedArray<u16>`.
+pub const ELEM_TYPE_U16: u8 = 8;
+/// `_pad`-byte discriminant for `TypedArray<u32>`.
+pub const ELEM_TYPE_U32: u8 = 9;
+// Discriminant 10 reserved for `Array<u64>` (deferred — see v2_array_detect).
+/// `_pad`-byte discriminant for `TypedArray<f32>`.
+pub const ELEM_TYPE_F32: u8 = 11;
+/// `_pad`-byte discriminant for `TypedArray<char>`.
+pub const ELEM_TYPE_CHAR: u8 = 12;
+/// `_pad`-byte discriminant for `TypedArray<*const StringObj>`.
+pub const ELEM_TYPE_STRING: u8 = 13;
+/// `_pad`-byte discriminant for `TypedArray<*const DecimalObj>`.
+pub const ELEM_TYPE_DECIMAL: u8 = 14;
+/// `_pad`-byte discriminant for `TypedArray<*const TypedObjectStorage>`.
+pub const ELEM_TYPE_TYPED_OBJECT: u8 = 15;
+
+/// Read the element-type discriminant stamped in the `_pad` byte (offset 7).
+///
+/// # Safety
+/// `ptr` must point to a live `TypedArray<T>` (HeapHeader at offset 0).
+#[inline]
+pub unsafe fn read_elem_type(ptr: *const u8) -> u8 {
+    unsafe { *ptr.add(7) }
+}
+
+/// Retain (bump the refcount of) a v2-raw `*mut TypedArray<T>` carrier.
+///
+/// This is the retain half of the `NativeKind::Ptr(HeapKind::TypedArray)`
+/// dispatch arm shared by the four lockstep clone/drop tables (VM stack
+/// `clone_with_kind`, `KindedSlot::clone`, `SharedCell::clone`,
+/// `TypedObjectStorage` field clone). The element type is irrelevant for a
+/// retain — only the `HeapHeader` refcount at offset 0 is touched.
+///
+/// # Safety
+/// `ptr` must be a non-null `*mut TypedArray<T>` produced by this module's
+/// allocator (`with_capacity` / `with_capacity_generic` / `from_slice`).
+#[inline]
+pub unsafe fn retain_v2_typed_array(ptr: *mut u8) {
+    unsafe { super::refcount::v2_retain(ptr as *const HeapHeader) };
+}
+
+/// Release one refcount share of a v2-raw `*mut TypedArray<T>` carrier; on
+/// the last share, read the stamped element type and free the array via the
+/// matching monomorphized `drop_array` / `drop_array_heap`.
+///
+/// This is the release half of the `NativeKind::Ptr(HeapKind::TypedArray)`
+/// dispatch arm. POD element kinds (`f64` / `i64` / `i32` / `i8` / `u8` /
+/// `i16` / `u16` / `u32` / `f32` / `char` / `bool`) route to `drop_array`;
+/// the heap-element kinds (`String` / `Decimal` / `TypedObject`) route to
+/// `drop_array_heap`, which walks the buffer releasing per-element shares.
+///
+/// # Safety
+/// `ptr` must be a non-null `*mut TypedArray<T>` produced by this module's
+/// allocator, with `T` matching the stamped `_pad` discriminant, and the
+/// caller must own exactly one refcount share being retired here. After the
+/// last share is retired the pointer is invalid.
+pub unsafe fn release_v2_typed_array(ptr: *mut u8) {
+    unsafe {
+        if !super::refcount::v2_release(ptr as *const HeapHeader) {
+            return;
+        }
+        // Refcount reached zero — this thread owns the deallocation.
+        match read_elem_type(ptr) {
+            ELEM_TYPE_F64 => TypedArray::<f64>::drop_array(ptr as *mut TypedArray<f64>),
+            ELEM_TYPE_I64 => TypedArray::<i64>::drop_array(ptr as *mut TypedArray<i64>),
+            ELEM_TYPE_I32 => TypedArray::<i32>::drop_array(ptr as *mut TypedArray<i32>),
+            ELEM_TYPE_BOOL | ELEM_TYPE_U8 => {
+                TypedArray::<u8>::drop_array(ptr as *mut TypedArray<u8>)
+            }
+            ELEM_TYPE_I8 => TypedArray::<i8>::drop_array(ptr as *mut TypedArray<i8>),
+            ELEM_TYPE_I16 => TypedArray::<i16>::drop_array(ptr as *mut TypedArray<i16>),
+            ELEM_TYPE_U16 => TypedArray::<u16>::drop_array(ptr as *mut TypedArray<u16>),
+            ELEM_TYPE_U32 => TypedArray::<u32>::drop_array(ptr as *mut TypedArray<u32>),
+            ELEM_TYPE_F32 => TypedArray::<f32>::drop_array(ptr as *mut TypedArray<f32>),
+            ELEM_TYPE_CHAR => TypedArray::<char>::drop_array(ptr as *mut TypedArray<char>),
+            ELEM_TYPE_STRING => {
+                TypedArray::<*const super::string_obj::StringObj>::drop_array_heap(
+                    ptr as *mut TypedArray<*const super::string_obj::StringObj>,
+                )
+            }
+            ELEM_TYPE_DECIMAL => {
+                TypedArray::<*const super::decimal_obj::DecimalObj>::drop_array_heap(
+                    ptr as *mut TypedArray<*const super::decimal_obj::DecimalObj>,
+                )
+            }
+            ELEM_TYPE_TYPED_OBJECT => {
+                TypedArray::<*const crate::heap_value::TypedObjectStorage>::drop_array_heap(
+                    ptr as *mut TypedArray<*const crate::heap_value::TypedObjectStorage>,
+                )
+            }
+            // An unstamped (`ELEM_TYPE_UNKNOWN`) or unrecognised discriminant
+            // at refcount-0 means the producer-side stamp contract was
+            // violated. The element-buffer monomorphization is unknown so a
+            // typed `drop_array` cannot run; free only the 24-byte struct
+            // header (leaking the element buffer is strictly preferable to
+            // a misaligned `dealloc` / use-after-free). This is a hard bug
+            // upstream — surface it loudly in debug builds.
+            other => {
+                debug_assert!(
+                    false,
+                    "release_v2_typed_array: TypedArray at {:p} has unstamped \
+                     element-type discriminant {} — producer-side stamp_elem_type \
+                     contract violated (ADR-006 §2.7.7)",
+                    ptr, other
+                );
+                let layout = Layout::new::<TypedArray<u8>>();
+                dealloc(ptr, layout);
+            }
+        }
+    }
+}
+
 // Allocation + size-only operations available for non-Copy element types
 // (e.g. `TypedObjectPtr` with manual `Drop`). Per ADR-006 §2.7.24 Q25.B
 // SUPERSEDED + Wave 2 Round 3b C2-joint ckpt-1 — `HashMapData<V>` (in
@@ -894,5 +1040,99 @@ mod tests {
             // Clean up.
             StringObj::drop(s);
         }
+    }
+
+    // ── r5c-2-β-δ-(α): kind-blind retain / release regression tests ─────────
+
+    /// `retain_v2_typed_array` bumps the on-header refcount; a paired
+    /// `release_v2_typed_array` retires it. A POD-element array at refcount
+    /// 1 is freed by the single release that drives the count to zero.
+    #[test]
+    fn release_v2_typed_array_pod_drop_balance() {
+        use crate::v2::refcount::v2_get_refcount;
+        unsafe {
+            let arr = TypedArray::<i64>::with_capacity(4);
+            TypedArray::push(arr, 10);
+            TypedArray::push(arr, 20);
+            TypedArray::push(arr, 30);
+            super::stamp_elem_type_for_test(arr as *mut u8, ELEM_TYPE_I64);
+            let hdr = arr as *const HeapHeader;
+            assert_eq!(v2_get_refcount(hdr), 1);
+
+            // Retain (mirror of the `Ptr(HeapKind::TypedArray)` clone arm).
+            retain_v2_typed_array(arr as *mut u8);
+            assert_eq!(v2_get_refcount(hdr), 2);
+
+            // Release once — back to 1, NOT freed.
+            release_v2_typed_array(arr as *mut u8);
+            assert_eq!(v2_get_refcount(hdr), 1);
+            // The array is still live and readable.
+            assert_eq!(TypedArray::get(arr, 1), Some(20));
+
+            // Final release drives the count to 0 → free (no leak, no
+            // double-free; ASAN/miri would flag a misaligned dealloc).
+            release_v2_typed_array(arr as *mut u8);
+        }
+    }
+
+    /// A heap-element array (`TypedArray<*const StringObj>`) released at
+    /// refcount 0 must route through `drop_array_heap`, retiring each
+    /// element's per-pointer share. An externally-held element share
+    /// survives the array's free.
+    #[test]
+    fn release_v2_typed_array_heap_elem_drop_balance() {
+        use crate::v2::refcount::{v2_get_refcount, v2_retain};
+        use crate::v2::string_obj::StringObj;
+        unsafe {
+            let arr = TypedArray::<*const StringObj>::with_capacity(2);
+            super::stamp_elem_type_for_test(arr as *mut u8, ELEM_TYPE_STRING);
+            let s = StringObj::new("kept");
+            v2_retain(&(*s).header); // refcount 2: one for the array, one external.
+            TypedArray::push(arr, s as *const StringObj);
+
+            retain_v2_typed_array(arr as *mut u8); // array refcount 2.
+            release_v2_typed_array(arr as *mut u8); // → 1, array still live.
+            assert_eq!(StringObj::as_str(s), "kept");
+
+            // Final release → array refcount 0 → drop_array_heap walks the
+            // buffer, releasing the element's per-pointer share (2 → 1).
+            release_v2_typed_array(arr as *mut u8);
+            assert_eq!(v2_get_refcount(&(*s).header), 1);
+            StringObj::drop(s);
+        }
+    }
+
+    /// A repeated retain/release cycle (mirror of a closure-captured array
+    /// read many times) leaves the refcount balanced — no drift.
+    #[test]
+    fn release_v2_typed_array_repeated_cycle_balances() {
+        use crate::v2::refcount::v2_get_refcount;
+        unsafe {
+            let arr = TypedArray::<i64>::with_capacity(1);
+            TypedArray::push(arr, 99);
+            super::stamp_elem_type_for_test(arr as *mut u8, ELEM_TYPE_I64);
+            let hdr = arr as *const HeapHeader;
+            for _ in 0..1000 {
+                retain_v2_typed_array(arr as *mut u8);
+                release_v2_typed_array(arr as *mut u8);
+            }
+            assert_eq!(v2_get_refcount(hdr), 1);
+            assert_eq!(TypedArray::get(arr, 0), Some(99));
+            release_v2_typed_array(arr as *mut u8);
+        }
+    }
+}
+
+/// Test-only `_pad`-byte element-type stamp. The production stamp lives in
+/// `shape-vm`'s `v2_array_detect::stamp_elem_type`; this mirror lets the
+/// `shape-value` crate's own unit tests exercise `release_v2_typed_array`'s
+/// stamped-element-type dispatch without a `shape-vm` dependency.
+#[cfg(test)]
+pub(crate) unsafe fn stamp_elem_type_for_test(ptr: *mut u8, elem_type: u8) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        *ptr.add(7) = elem_type;
     }
 }
