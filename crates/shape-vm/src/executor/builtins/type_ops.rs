@@ -646,13 +646,16 @@ impl VirtualMachine {
     }
 
     /// `ConvertToChar` (`expr as char`): pop, convert to `char`, push
-    /// as `NativeKind::Ptr(HeapKind::Char)` (codepoint bits inline).
+    /// as scalar `NativeKind::Char` (inline 4-byte UTF-32 codepoint, no
+    /// Arc<T>). ADR-006 §2.7.5 producer-side stamp — the prior
+    /// `Ptr(HeapKind::Char)` label mislabeled the codepoint as a heap
+    /// pointer.
     #[inline]
     pub(in crate::executor) fn op_convert_to_char(&mut self) -> Result<(), VMError> {
         let src = pop_one_kinded(self)?;
         let c = read_as_char(&src)?;
         drop(src);
-        self.push_kinded(c as u64, NativeKind::Ptr(HeapKind::Char))
+        self.push_kinded(c as u64, NativeKind::Char)
     }
 
     // ── TryConvertTo* family ─────────────────────────────────────────

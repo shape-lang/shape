@@ -343,7 +343,7 @@ impl VirtualMachine {
     ///     (an `Arc<String>` share is bumped via `Arc::increment_strong_count`
     ///     before being handed to `push_kinded`).
     ///   - `HeapValue::String`                             → `Char` (per
-    ///     codepoint), `NativeKind::Ptr(HeapKind::Char)`.
+    ///     codepoint), scalar `NativeKind::Char` (inline 4-byte UTF-32).
     ///   - `the-deleted-heterogeneous-element-carrier`                     → SURFACE
     ///     (polymorphic `Arc<HeapValue>` carriers don't have a single
     ///     element kind; phase-2c work — see ADR-006 §2.7.4).
@@ -496,7 +496,11 @@ impl VirtualMachine {
                     self.push_kinded(Self::NONE_BITS, NativeKind::Bool)
                 } else {
                     match arc.chars().nth(idx as usize) {
-                        Some(c) => self.push_kinded(c as u64, NativeKind::Ptr(HeapKind::Char)),
+                        // Scalar `NativeKind::Char` — codepoint is an inline
+                        // 4-byte scalar, NOT an `Arc<HeapValue>` pointer
+                        // (ADR-006 §2.7.5 producer-side stamp; see
+                        // `op_string_char_at`).
+                        Some(c) => self.push_kinded(c as u64, NativeKind::Char),
                         None => self.push_kinded(Self::NONE_BITS, NativeKind::Bool),
                     }
                 };
