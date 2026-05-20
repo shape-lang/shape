@@ -206,13 +206,17 @@ pub(super) fn lower_var_decl(builder: &mut MirBuilder, decl: &ast::VariableDecl,
         }
 
         // ADR-006 §2.7.5 stamp-at-compile-time — R5c-2-β-γ (c)
-        // jit-narrow-wrap. When the binding's annotation resolves to a
-        // narrow-integer scalar `ConcreteType` (`i8`/`i16`/`i32`/`u8`/
-        // `u16`/`u32`), record it against the binding slot so the conduit
-        // producer can stamp `concrete_types[slot]` with the declared
-        // width. The bare-int-literal MIR carrier (`Constant(Int(_))`) is
-        // width-blind, so without this the JIT classifies every narrow
-        // binding as `I64` and arithmetic overflow fails to wrap.
+        // jit-narrow-wrap + (b) u64-carrier. When the binding's annotation
+        // resolves to a width-carrying integer scalar `ConcreteType`
+        // (`i8`/`i16`/`i32`/`u8`/`u16`/`u32` — narrow — or `u64` — the
+        // full-range unsigned carrier), record it against the binding slot
+        // so the conduit producer can stamp `concrete_types[slot]` with the
+        // declared width / signedness. The bare-int-literal MIR carrier
+        // (`Constant(Int(_))`) is width-blind, so without this the JIT
+        // classifies every such binding as signed `I64`: a narrow binding's
+        // overflow fails to wrap, and a `u64` binding's div/mod/compare use
+        // signed Cranelift instructions (`sdiv`/`srem`/`SignedLessThan`) —
+        // diverging from the bytecode VM's unsigned `u64` arithmetic.
         if let Some(decl_ct) = decl
             .type_annotation
             .as_ref()
@@ -226,6 +230,7 @@ pub(super) fn lower_var_decl(builder: &mut MirBuilder, decl: &ast::VariableDecl,
                     | shape_value::v2::ConcreteType::U8
                     | shape_value::v2::ConcreteType::U16
                     | shape_value::v2::ConcreteType::U32
+                    | shape_value::v2::ConcreteType::U64
             ) {
                 builder.record_local_declared_scalar_type(slot, decl_ct);
             }

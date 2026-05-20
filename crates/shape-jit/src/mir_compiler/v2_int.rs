@@ -597,4 +597,190 @@ mod tests {
         assert_eq!(jit_narrow_binop("mul", types::I32, false, 7, 6), 42);
         assert_eq!(jit_narrow_binop("add", types::I8, true, 100, 50), 150);
     }
+
+    // ── R5c-2-β-γ (b) u64-carrier JIT-codegen regression tests ──────────
+    //
+    // These mirror `compile_binop_uint64`'s codegen exactly: `u64` and
+    // `i64` share the 64-bit Cranelift `I64` width (no `ireduce`), so the
+    // operands flow through unchanged. Add/Sub/Mul are `iadd`/`isub`/
+    // `imul` (two's-complement — signedness-agnostic, wrap at 2^64);
+    // Div/Mod are `udiv`/`urem` (UNSIGNED — a `sdiv` would reinterpret
+    // `u64::MAX` as `-1`); comparisons use the `Unsigned*` condition
+    // codes. The JIT must match the bytecode VM's u64 arithmetic
+    // (`compact_int_divmod_u64`, `int_cmp_is_unsigned`) byte-for-byte.
+    //
+    // Standalone Cranelift fns — fast, deterministic, not `deep-tests`-gated.
+
+    /// Build a JIT fn `(i64, i64) -> i64` using `compile_binop_uint64`'s
+    /// codegen pattern. Operands and result are raw 64-bit values; `udiv`/
+    /// `urem` decode the full unsigned range. Caller passes `u64` operands
+    /// reinterpreted through `as i64` and reads the result back the same way.
+    fn jit_u64_binop(op: &str, a: u64, b: u64) -> u64 {
+        let mut flag_builder = settings::builder();
+        flag_builder.set("opt_level", "speed_and_size").unwrap();
+        let isa = cranelift_native::builder()
+            .unwrap()
+            .finish(settings::Flags::new(flag_builder))
+            .unwrap();
+        let builder =
+            JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        let mut module = JITModule::new(builder);
+        let mut ctx = module.make_context();
+
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+
+        let func_id = module
+            .declare_function("u64_fn", cranelift_module::Linkage::Local, &sig)
+            .unwrap();
+        ctx.func.signature = sig;
+
+        let mut fbc = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut ctx.func, &mut fbc);
+        let block = builder.create_block();
+        builder.append_block_params_for_function_params(block);
+        builder.switch_to_block(block);
+        builder.seal_block(block);
+
+        let l = builder.block_params(block)[0];
+        let r = builder.block_params(block)[1];
+        let result = match op {
+            "add" => builder.ins().iadd(l, r),
+            "sub" => builder.ins().isub(l, r),
+            "mul" => builder.ins().imul(l, r),
+            "div" => builder.ins().udiv(l, r),
+            "mod" => builder.ins().urem(l, r),
+            _ => panic!("unknown op: {}", op),
+        };
+        builder.ins().return_(&[result]);
+        builder.finalize();
+
+        module.define_function(func_id, &mut ctx).unwrap();
+        module.clear_context(&mut ctx);
+        module.finalize_definitions().unwrap();
+
+        let code_ptr = module.get_finalized_function(func_id);
+        let func: fn(u64, u64) -> u64 = unsafe { std::mem::transmute(code_ptr) };
+        func(a, b)
+    }
+
+    /// Build a JIT fn `(i64, i64) -> i64` using `compile_binop_uint64`'s
+    /// comparison codegen — `Unsigned*` condition codes.
+    fn jit_u64_cmp(op: &str, a: u64, b: u64) -> bool {
+        let mut flag_builder = settings::builder();
+        flag_builder.set("opt_level", "speed_and_size").unwrap();
+        let isa = cranelift_native::builder()
+            .unwrap()
+            .finish(settings::Flags::new(flag_builder))
+            .unwrap();
+        let builder =
+            JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        let mut module = JITModule::new(builder);
+        let mut ctx = module.make_context();
+
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+
+        let func_id = module
+            .declare_function("u64_cmp", cranelift_module::Linkage::Local, &sig)
+            .unwrap();
+        ctx.func.signature = sig;
+
+        let mut fbc = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut ctx.func, &mut fbc);
+        let block = builder.create_block();
+        builder.append_block_params_for_function_params(block);
+        builder.switch_to_block(block);
+        builder.seal_block(block);
+
+        let l = builder.block_params(block)[0];
+        let r = builder.block_params(block)[1];
+        let cc = match op {
+            "lt" => IntCC::UnsignedLessThan,
+            "le" => IntCC::UnsignedLessThanOrEqual,
+            "gt" => IntCC::UnsignedGreaterThan,
+            "ge" => IntCC::UnsignedGreaterThanOrEqual,
+            "eq" => IntCC::Equal,
+            "ne" => IntCC::NotEqual,
+            _ => panic!("unknown cmp: {}", op),
+        };
+        let cmp = builder.ins().icmp(cc, l, r);
+        let t = builder.ins().iconst(types::I64, 1);
+        let f = builder.ins().iconst(types::I64, 0);
+        let result = builder.ins().select(cmp, t, f);
+        builder.ins().return_(&[result]);
+        builder.finalize();
+
+        module.define_function(func_id, &mut ctx).unwrap();
+        module.clear_context(&mut ctx);
+        module.finalize_definitions().unwrap();
+
+        let code_ptr = module.get_finalized_function(func_id);
+        let func: fn(u64, u64) -> u64 = unsafe { std::mem::transmute(code_ptr) };
+        func(a, b) != 0
+    }
+
+    #[test]
+    fn u64_jit_add_exact() {
+        assert_eq!(
+            jit_u64_binop("add", 10_000_000_000_000_000_000, 5),
+            10_000_000_000_000_000_005
+        );
+    }
+
+    #[test]
+    fn u64_jit_add_wraps_at_2_pow_64() {
+        assert_eq!(jit_u64_binop("add", u64::MAX, 1), 0);
+    }
+
+    #[test]
+    fn u64_jit_sub_wraps_below_zero() {
+        assert_eq!(jit_u64_binop("sub", 0, 1), u64::MAX);
+    }
+
+    #[test]
+    fn u64_jit_mul_wraps_at_2_pow_64() {
+        assert_eq!(
+            jit_u64_binop("mul", 10_000_000_000_000_000_000, 10_000_000_000_000_000_000),
+            10_000_000_000_000_000_000u64.wrapping_mul(10_000_000_000_000_000_000),
+        );
+    }
+
+    #[test]
+    fn u64_jit_div_is_unsigned() {
+        // u64::MAX / 2 — unsigned udiv: 9223372036854775807.
+        // A signed sdiv would compute (-1) / 2 == 0.
+        assert_eq!(jit_u64_binop("div", u64::MAX, 2), 9_223_372_036_854_775_807);
+    }
+
+    #[test]
+    fn u64_jit_mod_is_unsigned() {
+        // u64::MAX % 10 == 5 (unsigned urem). Signed srem gives -1.
+        assert_eq!(jit_u64_binop("mod", u64::MAX, 10), 5);
+    }
+
+    #[test]
+    fn u64_jit_div_full_range_operands() {
+        // Both operands above i64::MAX: (2^64-2) / (2^63) == 1.
+        assert_eq!(jit_u64_binop("div", u64::MAX - 1, 1u64 << 63), 1);
+    }
+
+    #[test]
+    fn u64_jit_gt_above_i64_max_is_greater() {
+        // u64::MAX > 2 — true under unsigned compare.
+        assert!(jit_u64_cmp("gt", u64::MAX, 2));
+        assert!(!jit_u64_cmp("lt", u64::MAX, 2));
+    }
+
+    #[test]
+    fn u64_jit_cmp_full_range() {
+        assert!(jit_u64_cmp("ge", u64::MAX, u64::MAX));
+        assert!(jit_u64_cmp("le", 1u64 << 63, u64::MAX));
+        assert!(jit_u64_cmp("eq", u64::MAX, u64::MAX));
+        assert!(jit_u64_cmp("ne", u64::MAX, u64::MAX - 1));
+    }
 }

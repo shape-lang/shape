@@ -71,11 +71,28 @@ pub fn parse_literal(pair: Pair<Rule>) -> Result<Expr> {
                     location: None,
                 })?)
             } else {
-                // Plain integer (no suffix, no decimal)
-                Literal::Int(num_str.parse().map_err(|e| ShapeError::ParseError {
-                    message: format!("Invalid integer: {}", e),
-                    location: None,
-                })?)
+                // Plain integer (no suffix, no decimal).
+                //
+                // R5c-2-β-γ checkpoint (b) u64-carrier: an unsuffixed
+                // decimal literal in `0..2^64` must parse. Values that
+                // fit `i64` keep the default `int` carrier (`Literal::Int`);
+                // values above `i64::MAX` but `<= u64::MAX` are full-range
+                // unsigned literals and produce `Literal::UInt(u64)` — the
+                // type checker unifies them with a `u64` annotation
+                // (`type_system/inference/operators.rs` maps `Literal::UInt`
+                // to the `u64` type). Pre-fix the parser used `parse::<i64>()`
+                // unconditionally, so `let a: u64 = 18446744073709551615`
+                // failed with "Invalid integer: number too large to fit in
+                // target type" — a valid u64 literal rejected at the lexer.
+                match num_str.parse::<i64>() {
+                    Ok(i) => Literal::Int(i),
+                    Err(_) => Literal::UInt(num_str.parse::<u64>().map_err(|e| {
+                        ShapeError::ParseError {
+                            message: format!("Invalid integer: {}", e),
+                            location: None,
+                        }
+                    })?),
+                }
             }
         }
         Rule::string => {
@@ -574,4 +591,66 @@ fn try_parse_suffixed_int(
     }
 
     Ok(None)
+}
+
+#[cfg(test)]
+mod u64_literal_tests {
+    //! R5c-2-β-γ checkpoint (b) u64-carrier — parser/lexer layer.
+    //!
+    //! An unsuffixed decimal literal in `0..2^64` must parse: values
+    //! fitting `i64` keep the default `int` carrier (`Literal::Int`),
+    //! values above `i64::MAX` produce the full-range `Literal::UInt(u64)`.
+    //! Pre-checkpoint-(b) the parser used `parse::<i64>()` unconditionally,
+    //! rejecting any valid u64 literal above `i64::MAX` with
+    //! "Invalid integer: number too large to fit in target type".
+
+    use crate::ast::{Expr, Literal};
+    use crate::parser::parse_expression_str;
+
+    fn parse_int_literal(src: &str) -> Literal {
+        match parse_expression_str(src).expect("should parse") {
+            Expr::Literal(lit, _) => lit,
+            other => panic!("expected literal, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn unsuffixed_u64_max_parses() {
+        // u64::MAX, unsuffixed — pre-fix this was a hard parse error.
+        let lit = parse_int_literal("18446744073709551615");
+        assert_eq!(lit, Literal::UInt(u64::MAX));
+    }
+
+    #[test]
+    fn unsuffixed_above_i64_max_parses_as_uint() {
+        // i64::MAX + 1 — the first value that no longer fits i64.
+        let lit = parse_int_literal("9223372036854775808");
+        assert_eq!(lit, Literal::UInt(9_223_372_036_854_775_808));
+    }
+
+    #[test]
+    fn unsuffixed_at_i64_max_stays_int() {
+        // i64::MAX itself fits i64 — keeps the default `int` carrier.
+        let lit = parse_int_literal("9223372036854775807");
+        assert_eq!(lit, Literal::Int(i64::MAX));
+    }
+
+    #[test]
+    fn unsuffixed_small_stays_int() {
+        let lit = parse_int_literal("100");
+        assert_eq!(lit, Literal::Int(100));
+    }
+
+    #[test]
+    fn suffixed_u64_max_parses() {
+        // The `u64` suffix path (pre-existing) — still parses to UInt.
+        let lit = parse_int_literal("18446744073709551615u64");
+        assert_eq!(lit, Literal::UInt(u64::MAX));
+    }
+
+    #[test]
+    fn above_u64_max_is_parse_error() {
+        // 2^64 — out of range for u64; still a clean parse error.
+        assert!(parse_expression_str("18446744073709551616").is_err());
+    }
 }

@@ -601,3 +601,63 @@ pub fn datatable_from_ipc_bytes(
     };
     Ok(dt)
 }
+
+#[cfg(test)]
+mod u64_wire_tests {
+    //! R5c-2-β-γ checkpoint (b) u64-carrier — wire/snapshot round-trip.
+    //!
+    //! A `NativeKind::UInt64` slot must round-trip through MessagePack
+    //! wire serialization with its full `0..2^64` range intact: a value
+    //! above `i64::MAX` must NOT be lossy-projected to a signed
+    //! `WireValue::Integer`. The carrier projects to `WireValue::U64`
+    //! (full-range), and `wire_to_slot` recovers the exact bits. The
+    //! snapshot path serializes the parallel `Vec<u64>` data + the slot's
+    //! `NativeKind` verbatim (per ADR-006 §2.7.7), so the same bit/kind
+    //! pair is preserved there by construction.
+
+    use super::{slot_to_wire, wire_to_slot};
+    use crate::context::ExecutionContext;
+    use shape_value::NativeKind;
+    use shape_wire::WireValue;
+
+    fn roundtrip(bits: u64) -> u64 {
+        let ctx = ExecutionContext::new_empty();
+        let wire = slot_to_wire(bits, NativeKind::UInt64, &ctx);
+        // Full-range u64 must project to the dedicated U64 wire variant,
+        // not a lossy signed Integer.
+        assert!(
+            matches!(wire, WireValue::U64(_)),
+            "u64 slot must project to WireValue::U64, got {:?}",
+            wire
+        );
+        wire_to_slot(&wire, NativeKind::UInt64).expect("u64 wire should decode")
+    }
+
+    #[test]
+    fn u64_max_round_trips() {
+        assert_eq!(roundtrip(u64::MAX), u64::MAX);
+    }
+
+    #[test]
+    fn u64_above_i64_max_round_trips_lossless() {
+        // i64::MAX + 1 — the first value a signed projection would corrupt.
+        let v = (i64::MAX as u64) + 1;
+        assert_eq!(roundtrip(v), v);
+    }
+
+    #[test]
+    fn u64_small_round_trips() {
+        assert_eq!(roundtrip(0), 0);
+        assert_eq!(roundtrip(42), 42);
+    }
+
+    #[test]
+    fn u64_wire_variant_preserves_full_range() {
+        // The wire value itself must carry the full unsigned magnitude.
+        let ctx = ExecutionContext::new_empty();
+        match slot_to_wire(u64::MAX, NativeKind::UInt64, &ctx) {
+            WireValue::U64(n) => assert_eq!(n, u64::MAX),
+            other => panic!("expected WireValue::U64, got {:?}", other),
+        }
+    }
+}

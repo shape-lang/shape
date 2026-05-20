@@ -396,14 +396,22 @@ impl VirtualMachine {
         }
     }
     fn exec_compact_div(&mut self, width: NumericWidth) -> Result<(), VMError> {
-        if width.is_integer() {
+        if width == NumericWidth::U64 {
+            // R5c-2-β-γ checkpoint (b) u64-carrier: full-range unsigned
+            // division — `u64::wrapping_div` on the raw bits decoded as u64.
+            self.compact_int_divmod_u64(|a, b| a.wrapping_div(b))
+        } else if width.is_integer() {
             self.compact_int_divmod(width, |a, b| a.wrapping_div(b))
         } else {
             self.compact_float_divmod(|a, b| a / b)
         }
     }
     fn exec_compact_mod(&mut self, width: NumericWidth) -> Result<(), VMError> {
-        if width.is_integer() {
+        if width == NumericWidth::U64 {
+            // R5c-2-β-γ checkpoint (b) u64-carrier: full-range unsigned
+            // remainder — `u64::wrapping_rem` on the raw bits decoded as u64.
+            self.compact_int_divmod_u64(|a, b| a.wrapping_rem(b))
+        } else if width.is_integer() {
             self.compact_int_divmod(width, |a, b| a.wrapping_rem(b))
         } else {
             self.compact_float_divmod(|a, b| a % b)
@@ -433,19 +441,48 @@ impl VirtualMachine {
         // declared width; the i64 path (`to_int_width()` == None) wraps at
         // 64 bits. No f64 promotion — `int` arithmetic is exact across the
         // full i64 range (ruling #1).
+        //
+        // R5c-2-β-γ checkpoint (b) u64-carrier: Add/Sub/Mul are
+        // signedness-agnostic (two's-complement — `wrapping_add` on `i64`
+        // and `u64` produce the same bit pattern), so the same `wrapping_op`
+        // is reused for `u64`. The result KIND, however, must reflect the
+        // declared width: a `u64` result is stamped `NativeKind::UInt64` so
+        // downstream `print()` / storage / wire renders it as a full-range
+        // unsigned value (`u64::MAX` prints `18446744073709551615`, not
+        // `-1`). Sub-64 unsigned values are non-negative in i64 and keep the
+        // `Int64` carrier (pre-existing decision; out of u64-carrier scope).
         let result = wrapping_op(ai, bi);
         match width.to_int_width() {
-            Some(int_w) => self.push_kinded(int_w.truncate(result) as u64, NativeKind::Int64),
+            Some(int_w) => {
+                self.push_kinded(int_w.truncate(result) as u64, result_kind_for_width(width))
+            }
             None => self.push_kinded(result as u64, NativeKind::Int64),
         }
     }
 
+    /// Signed integer division / remainder for the compact-typed widths
+    /// other than `U64`.
+    ///
+    /// R5c-2-β-γ checkpoint (b) u64-carrier: division and remainder are NOT
+    /// signedness-agnostic — `i64`'s `wrapping_div` interprets the operands
+    /// as signed two's-complement, so `u64::MAX / 2` would compute
+    /// `(-1) / 2 == 0` instead of `9223372036854775807`. The full-range
+    /// `U64` width is therefore routed to `compact_int_divmod_u64` by
+    /// `exec_compact_div` / `exec_compact_mod`; this function handles only
+    /// the signed widths (`i8`/`i16`/`i32`/`i64`) and the sub-64 unsigned
+    /// widths (`u8`/`u16`/`u32`), whose values are non-negative in `i64` so
+    /// signed division is correct for them.
     #[inline(always)]
     fn compact_int_divmod(
         &mut self,
         width: NumericWidth,
         op: impl FnOnce(i64, i64) -> i64,
     ) -> Result<(), VMError> {
+        debug_assert_ne!(
+            width,
+            NumericWidth::U64,
+            "U64 width must route through compact_int_divmod_u64 (unsigned div)"
+        );
         let (b_bits, _b_kind) = self.pop_kinded()?;
         let (a_bits, _a_kind) = self.pop_kinded()?;
         let bi = b_bits as i64;
@@ -459,6 +496,27 @@ impl VirtualMachine {
         } else {
             self.push_kinded(result as u64, NativeKind::Int64)
         }
+    }
+
+    /// Unsigned 64-bit division / remainder for the `U64` compact width.
+    ///
+    /// R5c-2-β-γ checkpoint (b) u64-carrier: `u64` div/mod operate on the
+    /// raw bits decoded as `u64`. `u64::wrapping_div` / `wrapping_rem` never
+    /// overflow (the `i64::MIN / -1` case has no unsigned analogue), so the
+    /// `wrapping_*` form is exact two's-complement-free unsigned arithmetic.
+    /// Division by zero is a clean `VMError::DivisionByZero` (mirrors the
+    /// signed path). The result is stamped `NativeKind::UInt64`.
+    #[inline(always)]
+    fn compact_int_divmod_u64(
+        &mut self,
+        op: impl FnOnce(u64, u64) -> u64,
+    ) -> Result<(), VMError> {
+        let (b_bits, _b_kind) = self.pop_kinded()?;
+        let (a_bits, _a_kind) = self.pop_kinded()?;
+        if b_bits == 0 {
+            return Err(VMError::DivisionByZero);
+        }
+        self.push_kinded(op(a_bits, b_bits), NativeKind::UInt64)
     }
 
     #[inline(always)]
@@ -597,6 +655,24 @@ impl VirtualMachine {
         let (bits, _kind) = self.pop_kinded()?;
         let a_int = bits as i64;
         self.push_kinded((!a_int) as u64, NativeKind::Int64)
+    }
+}
+
+/// Result `NativeKind` for a compact-typed integer Add/Sub/Mul opcode.
+///
+/// R5c-2-β-γ checkpoint (b) u64-carrier: a `u64`-width result must be
+/// stamped `NativeKind::UInt64` so it is rendered / stored / wired as a
+/// full-range unsigned value (`u64::MAX` → `18446744073709551615`, not the
+/// signed-reinterpret `-1`). All other integer widths keep the `Int64`
+/// carrier: sub-64 unsigned values are non-negative in `i64`, and the
+/// signed widths are `i64` already. This is the single place the U64
+/// carrier diverges from the pre-checkpoint-(b) uniform `Int64` stamp.
+#[inline]
+fn result_kind_for_width(width: NumericWidth) -> NativeKind {
+    if width == NumericWidth::U64 {
+        NativeKind::UInt64
+    } else {
+        NativeKind::Int64
     }
 }
 
@@ -1232,5 +1308,111 @@ mod tests {
         let instr = Instruction::simple(OpCode::NegDecimal);
         vm.exec_typed_arithmetic(&instr).unwrap();
         assert_eq!(pop_decimal_test(&mut vm), Decimal::from_str("-3.14").unwrap());
+    }
+
+    // ── u64 full-range carrier — R5c-2-β-γ checkpoint (b) ─────────────────
+    //
+    // `u64` is a REAL full-range `0..2^64` carrier (integer-semantics
+    // ruling 2026-05-20 #2). The compact-typed opcode family carries the
+    // `NumericWidth::U64` operand; Add/Sub/Mul wrap two's-complement at
+    // 2^64 (#3) and reuse the signedness-agnostic `wrapping_*` ops, but
+    // the result KIND must be `UInt64` so the value renders / stores /
+    // wires as a full-range unsigned number. Div/Mod are signedness-
+    // DEPENDENT — they decode the raw bits as `u64` and use unsigned
+    // `u64::wrapping_div`/`_rem` (a signed reinterpret would compute
+    // `u64::MAX / 2 == (-1)/2 == 0`).
+
+    /// Push raw `u64` bits with the `UInt64` carrier kind.
+    fn push_u64(vm: &mut VirtualMachine, v: u64) {
+        vm.push_kinded(v, NativeKind::UInt64).unwrap();
+    }
+
+    /// Run a compact-typed U64 opcode, returning `(result_bits_as_u64, kind)`.
+    fn run_u64_op(opcode: OpCode, a: u64, b: u64) -> (u64, NativeKind) {
+        let mut vm = make_vm();
+        push_u64(&mut vm, a);
+        push_u64(&mut vm, b);
+        let instr = Instruction::new(opcode, Some(Operand::Width(NumericWidth::U64)));
+        vm.exec_compact_typed_arithmetic(&instr).unwrap();
+        vm.pop_kinded().unwrap()
+    }
+
+    #[test]
+    fn u64_add_exact() {
+        let (v, k) = run_u64_op(OpCode::AddTyped, 10_000_000_000_000_000_000, 5);
+        assert_eq!(v, 10_000_000_000_000_000_005);
+        assert_eq!(k, NativeKind::UInt64);
+    }
+
+    #[test]
+    fn u64_add_wraps_at_2_pow_64() {
+        // u64::MAX + 1 wraps to 0.
+        let (v, k) = run_u64_op(OpCode::AddTyped, u64::MAX, 1);
+        assert_eq!(v, 0);
+        assert_eq!(k, NativeKind::UInt64);
+    }
+
+    #[test]
+    fn u64_mul_wraps_at_2_pow_64() {
+        // 1e19 * 1e19 wraps mod 2^64.
+        let (v, k) = run_u64_op(
+            OpCode::MulTyped,
+            10_000_000_000_000_000_000,
+            10_000_000_000_000_000_000,
+        );
+        assert_eq!(v, 10_000_000_000_000_000_000u64.wrapping_mul(10_000_000_000_000_000_000));
+        assert_eq!(k, NativeKind::UInt64);
+    }
+
+    #[test]
+    fn u64_sub_wraps_below_zero() {
+        // 0 - 1 wraps to u64::MAX.
+        let (v, k) = run_u64_op(OpCode::SubTyped, 0, 1);
+        assert_eq!(v, u64::MAX);
+        assert_eq!(k, NativeKind::UInt64);
+    }
+
+    #[test]
+    fn u64_div_is_unsigned() {
+        // u64::MAX / 2 — unsigned: 9223372036854775807. A signed
+        // reinterpret would compute (-1) / 2 == 0.
+        let (v, k) = run_u64_op(OpCode::DivTyped, u64::MAX, 2);
+        assert_eq!(v, 9_223_372_036_854_775_807);
+        assert_eq!(k, NativeKind::UInt64);
+    }
+
+    #[test]
+    fn u64_div_full_range_dividend() {
+        // (2^64 - 2) / (2^63) == 1 — both operands above i64::MAX.
+        let (v, _) = run_u64_op(OpCode::DivTyped, u64::MAX - 1, 1u64 << 63);
+        assert_eq!(v, 1);
+    }
+
+    #[test]
+    fn u64_mod_is_unsigned() {
+        // u64::MAX % 10 == 5 (unsigned). Signed would give -1.
+        let (v, k) = run_u64_op(OpCode::ModTyped, u64::MAX, 10);
+        assert_eq!(v, 5);
+        assert_eq!(k, NativeKind::UInt64);
+    }
+
+    #[test]
+    fn u64_div_by_zero_is_clean_error() {
+        let mut vm = make_vm();
+        push_u64(&mut vm, u64::MAX);
+        push_u64(&mut vm, 0);
+        let instr = Instruction::new(OpCode::DivTyped, Some(Operand::Width(NumericWidth::U64)));
+        let err = vm.exec_compact_typed_arithmetic(&instr).unwrap_err();
+        assert!(matches!(err, VMError::DivisionByZero));
+    }
+
+    #[test]
+    fn u64_mod_by_zero_is_clean_error() {
+        let mut vm = make_vm();
+        push_u64(&mut vm, u64::MAX);
+        push_u64(&mut vm, 0);
+        let instr = Instruction::new(OpCode::ModTyped, Some(Operand::Width(NumericWidth::U64)));
+        let err = vm.exec_compact_typed_arithmetic(&instr).unwrap_err();
+        assert!(matches!(err, VMError::DivisionByZero));
     }
 }
