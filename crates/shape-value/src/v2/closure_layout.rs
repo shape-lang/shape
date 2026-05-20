@@ -381,20 +381,18 @@ impl Drop for SharedCell {
                     HeapKind::String => {
                         Arc::decrement_strong_count(bits as *const String);
                     }
-                    // V3-S5 ckpt-5-prime (2026-05-15): `HeapKind::TypedArray`
-                    // dispatch arm RETIRED per W12 audit §3.6 + handover §0
-                    // 4-table lockstep rule (SharedCell::drop table). Mirror
-                    // of the drop_with_kind / clone_with_kind retirements in
-                    // `heap_value.rs` + `kinded_slot.rs`. Ordinal 8 vacated;
-                    // no SharedCell single-slot payload carries this kind
-                    // post-V3-S5 ckpt-4. Refusal #1 binding.
+                    // r5c-2-β-δ-(α) (2026-05-20): `HeapKind::TypedArray`
+                    // dispatch arm RE-INSTATED — the V3-S5 ckpt-5-prime
+                    // "no live slot bits carry this kind" claim was
+                    // empirically false (a `var`-shared `Array<T>` flows a
+                    // v2-raw `*mut TypedArray<T>` carrier through a
+                    // `SharedCell`). `release_v2_typed_array` retires one
+                    // refcount share and, on the last share, frees via the
+                    // stamped-element-type `drop_array` / `drop_array_heap`.
+                    // Mirror of the `TypedObject` release arm below
+                    // (4-table lockstep, ADR-006 §2.3 / §2.7.7).
                     HeapKind::TypedArray => {
-                        unreachable!(
-                            "HeapKind::TypedArray ordinal 8 is vacated per W12 audit §3.6 \
-                             (SharedCell::drop); no live slot bits carry this kind \
-                             post-V3-S5 ckpt-4 (v2-raw *mut TypedArray<T> carriers per ADR-006 \
-                             §2.7.24 Q25.A SUPERSEDED)"
-                        );
+                        crate::v2::typed_array::release_v2_typed_array(bits as *mut u8);
                     }
                     // Wave 2 Agent D4 ckpt-2 (ADR-006 §2.3 / §2.7.5
                     // amendment, 2026-05-14): a `SharedCell` whose

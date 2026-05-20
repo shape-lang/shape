@@ -57,40 +57,6 @@ use shape_value::{
 };
 use std::sync::Arc;
 
-// ═══════════════════════════════════════════════════════════════════════════
-// V3-S5 ckpt-3 surface-and-stop builder
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Common surface-and-stop body for TypedArray-receiver arms in
-/// `dispatch_get_prop` and `op_length`.
-#[cold]
-#[inline(never)]
-fn ckpt3_surface(op: &'static str, key_kind: NativeKind) -> VMError {
-    VMError::NotImplemented(format!(
-        "{op}: SURFACE — V3-S5 ckpt-3 consumer-cascade tier 2 surface. \
-         `TypedArrayData` enum DELETED at ckpt-1 (2026-05-15) per W12-\
-         typed-array-data-deletion audit §3.5 + ADR-006 §2.7.24 Q25.A \
-         SUPERSEDED. The previous `Arc<TypedArrayData>` receiver-recovery \
-         + per-variant element-read / length-read dispatch path (~34 \
-         references across `read_typed_array_index` 16 arms + \
-         `typed_array_len` 16 arms) cascade-broke at the enum deletion \
-         site (`crates/shape-value/src/heap_value.rs:3944`). Post-deletion \
-         target is the v2-raw `TypedArray<T>` flat-struct carrier per \
-         audit §1.2 + §A.3 + §3.1 scalar recipe + §2.2 heap-element \
-         variants — per-T `*buf.data.add(idx)` element read + per-T \
-         `data.len()` length; landing across ckpt-3 (this file plus \
-         array_ops/typed_array_methods/iterator_methods/array_sort/concat/\
-         array_query) + ckpt-4 (Buf<T> / HeapValue::TypedArray \
-         arm / HeapKind::TypedArray ordinal) + ckpt-5 (wire/json/marshal \
-         + 4-table lockstep) + ckpt-6 (JIT FFI). Key kind: {key_kind:?}. \
-         UNREACHABLE until ckpt-6 STRICT close. REFUSED ON SIGHT: \
-         TypedArrayData resurrection under any rename (Refusal #1, W12 \
-         audit §7).",
-        op = op,
-        key_kind = key_kind,
-    ))
-}
-
 impl VirtualMachine {
     /// `GetProp`: read a property from a heap object.
     pub(in crate::executor) fn op_get_prop(
@@ -164,16 +130,6 @@ impl VirtualMachine {
                 result
             }
 
-            // ── TypedArray: V3-S5 ckpt-3 surface-and-stop ────────────────
-            //
-            // Previous body: recover `Arc<TypedArrayData>` via
-            // `Arc::from_raw`, dispatch on `TypedArrayData` variant for
-            // raw-bits read + element kind per `read_typed_array_index`.
-            // The 16-arm dispatch cascade-broke at ckpt-1.
-            NativeKind::Ptr(HeapKind::TypedArray) => {
-                Err(ckpt3_surface("GetProp(TypedArray)", key_kind))
-            }
-
             // ── v2 typed array (raw `*mut TypedArray<T>` pointer) ────────
             //
             // Phase 4b Round 4 W15 LANG-9-spin-3-first VM fix. ADR-006
@@ -201,7 +157,11 @@ impl VirtualMachine {
             // sibling consumer for the same receiver shape — VM and JIT
             // share the producer-stamped header byte; no parallel-carrier
             // duality.
-            NativeKind::UInt64 => {
+            // The receiver carrier is either `UInt64` (direct, single-owner)
+            // or `Ptr(HeapKind::TypedArray)` (refcounted — struct-field /
+            // closure-capture array read; r5c-2-β-δ-(α)). Both hold the same
+            // raw `*mut TypedArray<T>` pointer, so they share this arm.
+            NativeKind::UInt64 | NativeKind::Ptr(HeapKind::TypedArray) => {
                 use crate::executor::v2_handlers::v2_array_detect::{
                     as_v2_typed_array, read_element,
                 };
@@ -558,14 +518,30 @@ impl VirtualMachine {
                     self.push_kinded(len as u64, NativeKind::Int64)
                 }
             }
-            NativeKind::Ptr(HeapKind::TypedArray) => {
-                // V3-S5 ckpt-3 surface-and-stop — TypedArrayData enum gone.
+            NativeKind::Ptr(HeapKind::TypedArray) | NativeKind::UInt64 => {
+                // r5c-2-β-δ-(α): the v2-raw `*mut TypedArray<T>` carrier —
+                // length is the `len` field at a fixed offset (T-independent),
+                // read via `as_v2_typed_array`. Both the refcounted
+                // `Ptr(HeapKind::TypedArray)` carrier (struct-field /
+                // closure-capture array) and the direct `UInt64` carrier
+                // hold the same pointer. A `UInt64` that is *not* a v2 typed
+                // array pointer (a plain scalar) is rejected as a non-length
+                // value, matching the pre-fix scalar fallthrough.
                 if bits == 0 {
                     Err(VMError::RuntimeError(
                         "length() on null TypedArray".to_string(),
                     ))
                 } else {
-                    Err(ckpt3_surface("Length(TypedArray)", kind))
+                    use crate::executor::v2_handlers::v2_array_detect::as_v2_typed_array;
+                    match as_v2_typed_array(bits, kind) {
+                        Some(view) => {
+                            self.push_kinded(view.len as u64, NativeKind::Int64)
+                        }
+                        None => Err(VMError::TypeError {
+                            expected: "array, object, or string",
+                            got: "scalar",
+                        }),
+                    }
                 }
             }
             NativeKind::String | NativeKind::Ptr(HeapKind::String) => {

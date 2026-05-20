@@ -42,40 +42,25 @@ use shape_value::v2::typed_array::TypedArray;
 use shape_value::HeapKind;
 
 // ── Element type discriminants ──────────────────────────────────────────────
-
-pub const ELEM_TYPE_UNKNOWN: u8 = 0;
-pub const ELEM_TYPE_F64: u8 = 1;
-pub const ELEM_TYPE_I64: u8 = 2;
-pub const ELEM_TYPE_I32: u8 = 3;
-pub const ELEM_TYPE_BOOL: u8 = 4;
-// W12 S1 (2026-05-13) — sized-integer element-type discriminants.
-pub const ELEM_TYPE_I8: u8 = 5;
-pub const ELEM_TYPE_U8: u8 = 6;
-pub const ELEM_TYPE_I16: u8 = 7;
-pub const ELEM_TYPE_U16: u8 = 8;
-pub const ELEM_TYPE_U32: u8 = 9;
-// ELEM_TYPE_U64 = 10 reserved for S1.5; not allocated in S1 per the
-// supervisor's reopen (Array<u64> deferred pending §2.7.7/Q9 native-
-// kind discriminator).
-// Wave 2 Agent A1 (2026-05-14) — F32 + Char monomorphizations per
-// R19 S1.5 amendment (W12-nativekind-scalar-additions). Each is a
-// `Copy + 4-byte` scalar with no heap indirection.
-pub const ELEM_TYPE_F32: u8 = 11;
-pub const ELEM_TYPE_CHAR: u8 = 12;
-// Wave 2 Agent A2 (2026-05-14) — String + Decimal heap-element monomorphizations
-// per ADR-006 §2.7.24 Q25.A SUPERSEDED + audit §3.2 sub-cluster S2-prime.
-// Each is a v2-raw heap-pointer carrier: `*const StringObj` / `*const DecimalObj`
-// (HeapHeader at offset 0, refcounted). Element-read pushes `NativeKind::StringV2`
-// / `NativeKind::DecimalV2` (Agent B's Round 1 variants) with `v2_retain` of the
-// per-element header before pushing the slot.
-pub const ELEM_TYPE_STRING: u8 = 13;
-pub const ELEM_TYPE_DECIMAL: u8 = 14;
-// Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18)
-// per ADR-006 §2.7.5 + audit `v0.3-w16-v3s5-ckpt56-strict-close-audit.md`
-// §2.1. `*const TypedObjectStorage` heap-pointer carrier (HeapHeader at
-// offset 0, refcounted via `v2_retain`/`v2_release` against the on-header
-// refcount). Element-read pushes `NativeKind::Ptr(HeapKind::TypedObject)`.
-pub const ELEM_TYPE_TYPED_OBJECT: u8 = 15;
+//
+// r5c-2-β-δ-(α): the canonical discriminant definitions moved to
+// `shape_value::v2::typed_array` so the kind-blind `release_v2_typed_array`
+// helper there (called by the four `Ptr(HeapKind::TypedArray)` lockstep
+// clone/drop tables, two of which live in the `shape-value` crate) can
+// dispatch on the stamped `_pad` byte without a cross-crate constant
+// duplication. The `pub use` below preserves every existing import path
+// (`v2_array_detect::ELEM_TYPE_*`) for `shape-vm` / `shape-jit` consumers.
+//
+// W12 S1 sized-integer discriminants; Wave 2 Agent A1 F32 + Char; Wave 2
+// Agent A2 String + Decimal; Phase 4b Round 4 W16.2-A TypedObject. ELEM_TYPE
+// discriminant 10 stays reserved for `Array<u64>` (deferred per the S1
+// reopen — Array<u64> excluded pending the §2.7.7/Q9 native-kind
+// discriminator).
+pub use shape_value::v2::typed_array::{
+    ELEM_TYPE_BOOL, ELEM_TYPE_CHAR, ELEM_TYPE_DECIMAL, ELEM_TYPE_F32, ELEM_TYPE_F64,
+    ELEM_TYPE_I16, ELEM_TYPE_I32, ELEM_TYPE_I64, ELEM_TYPE_I8, ELEM_TYPE_STRING,
+    ELEM_TYPE_TYPED_OBJECT, ELEM_TYPE_U16, ELEM_TYPE_U32, ELEM_TYPE_U8, ELEM_TYPE_UNKNOWN,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum V2ElemType {
@@ -192,14 +177,34 @@ unsafe fn read_elem_type_byte(ptr: *const u8) -> u8 {
 
 /// Try to interpret a `(bits, kind)` pair as a v2 typed array pointer.
 ///
-/// v2 typed array pointers flow through the kinded API as raw `*mut TypedArray<T>`
-/// values stored in `NativeKind::UInt64` slots — no Arc, no refcount (see
-/// `v2_handlers/array.rs` allocation path). Any other `kind` is rejected so a
-/// stray heap pointer (e.g. `Ptr(HeapKind::TypedArray)` carrying an
-/// `Arc<TypedArrayData>` from the legacy boxed path) is not misinterpreted.
+/// v2 typed array pointers flow through the kinded API in one of two carrier
+/// kinds, both holding the *identical* raw `*mut TypedArray<T>` pointer:
+///
+/// - `NativeKind::UInt64` — the direct, single-owner carrier produced by the
+///   `NewTypedArray*` allocation opcodes (no refcount; freed by a dedicated
+///   drop opcode at scope exit; see `v2_handlers/array.rs`).
+/// - `NativeKind::Ptr(HeapKind::TypedArray)` — the refcounted carrier produced
+///   when an `Array<T>` value is read out of a struct field
+///   (`field_tag_to_native_kind` maps `FIELD_TAG_ARRAY` here) or a closure
+///   capture (`closure_layout.rs::native_kind_from_concrete_type` maps
+///   `ConcreteType::Array(_)` here). The slot's `clone_with_kind` /
+///   `drop_with_kind` arms route through `retain_v2_typed_array` /
+///   `release_v2_typed_array` (r5c-2-β-δ-(α)). The on-header `HeapHeader.kind`
+///   check below still confirms the pointee is a genuine `TypedArray<T>`.
+///
+/// Any other `kind` is rejected. r5c-2-β-δ-(α) (2026-05-20): the pre-fix
+/// `kind != UInt64 → None` early-out rejected the `Ptr(HeapKind::TypedArray)`
+/// carrier outright — that left every consumer opcode (`GetProp`, `Length`,
+/// `sum`, ...) surface-and-stopping on struct-field / closure-capture array
+/// reads. The legacy `Arc<TypedArrayData>` boxed path that the old reject
+/// guarded against is deleted, so `Ptr(HeapKind::TypedArray)` now
+/// unambiguously denotes a v2-raw `*mut TypedArray<T>` carrier.
 #[inline]
 pub fn as_v2_typed_array(bits: u64, kind: NativeKind) -> Option<V2TypedArrayView> {
-    if kind != NativeKind::UInt64 {
+    if !matches!(
+        kind,
+        NativeKind::UInt64 | NativeKind::Ptr(HeapKind::TypedArray)
+    ) {
         return None;
     }
     if bits == 0 {

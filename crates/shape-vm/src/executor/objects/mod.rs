@@ -186,6 +186,54 @@ use crate::{
 };
 use shape_value::{HeapKind, HeapValue, KindedSlot, NativeKind, TemporalData, ValueSlot, VMError};
 
+/// Select the method-registry PHF lookup for a v2-raw `TypedArray<T>`
+/// receiver, classified by its stamped element-type discriminant.
+///
+/// r5c-2-β-δ-(α): this is the single element-type → registry sub-
+/// classification table, shared by the two carrier-kind arms of
+/// `resolve_method_handler` — `NativeKind::UInt64` (direct, single-owner
+/// array carrier) and `NativeKind::Ptr(HeapKind::TypedArray)` (refcounted
+/// struct-field / closure-capture array carrier). Both carrier kinds hold
+/// the same `*mut TypedArray<T>` pointer with the same stamped element-type
+/// byte, so they MUST resolve to the same per-element method registry. A
+/// `None` result means "no dedicated typed-array registry for this element
+/// type" — the caller falls back to the generic `ARRAY_METHODS` PHF.
+fn typed_array_method_registry(
+    elem_type: crate::executor::v2_handlers::v2_array_detect::V2ElemType,
+    method_name: &str,
+) -> Option<method_registry::MethodHandler> {
+    use crate::executor::v2_handlers::v2_array_detect::V2ElemType;
+    match elem_type {
+        // All integer-family kinds (I64/I32 plus W12 S1 sized ints
+        // I8/U8/I16/U16/U32) share the typed-int method dispatch — methods
+        // operate on the integer-bit pattern regardless of width; narrower
+        // widths sign-/zero-extend at read time. U64 omitted (deferred to
+        // S1.5 per the S1 reopen).
+        V2ElemType::I64
+        | V2ElemType::I32
+        | V2ElemType::I8
+        | V2ElemType::U8
+        | V2ElemType::I16
+        | V2ElemType::U16
+        | V2ElemType::U32 => method_registry::TYPED_INT_ARRAY_METHODS
+            .get(method_name)
+            .copied(),
+        // F32 rides the same floating-point method family as F64.
+        V2ElemType::F64 | V2ElemType::F32 => method_registry::TYPED_NUMBER_ARRAY_METHODS
+            .get(method_name)
+            .copied(),
+        V2ElemType::Bool => method_registry::BOOL_ARRAY_METHODS
+            .get(method_name)
+            .copied(),
+        // Char / String / Decimal / TypedObject have no dedicated typed-
+        // array method registry at HEAD — fall back to generic ARRAY_METHODS.
+        V2ElemType::Char
+        | V2ElemType::String
+        | V2ElemType::Decimal
+        | V2ElemType::TypedObject => None,
+    }
+}
+
 impl VirtualMachine {
     /// Dispatch shell for object opcodes.
     ///
@@ -620,7 +668,7 @@ impl VirtualMachine {
         args: &[KindedSlot],
         method_name: &str,
     ) -> Result<method_registry::MethodHandler, VMError> {
-        use crate::executor::v2_handlers::v2_array_detect::{V2ElemType, as_v2_typed_array};
+        use crate::executor::v2_handlers::v2_array_detect::as_v2_typed_array;
 
         let receiver = &args[0];
         let kind = receiver.kind;
@@ -679,75 +727,22 @@ impl VirtualMachine {
             // UInt64 may be a v2 typed-array pointer (raw `*mut
             // TypedArray<T>`, no Arc) or a plain unsigned integer.
             // Classify via the stamped element-type byte.
-            NativeKind::UInt64 => {
+            // `UInt64` may be a v2 typed-array pointer (raw `*mut
+            // TypedArray<T>`, no Arc) or a plain unsigned integer. The
+            // refcounted `Ptr(HeapKind::TypedArray)` carrier (struct-field /
+            // closure-capture array — r5c-2-β-δ-(α)) holds the SAME pointer
+            // shape, so it shares this arm; `as_v2_typed_array` accepts both
+            // kinds. A `UInt64` that is not a v2 typed-array pointer routes
+            // to `NUMBER_METHODS` as a plain scalar.
+            NativeKind::UInt64 | NativeKind::Ptr(HeapKind::TypedArray) => {
                 let bits = receiver.slot.raw();
                 if let Some(view) = as_v2_typed_array(bits, kind) {
-                    let typed = match view.elem_type {
-                        // All integer-family kinds (I64/I32 plus W12 S1 sized
-                        // ints I8/U8/I16/U16/U32) share the typed-int method
-                        // dispatch — methods sum/min/max/etc. operate on the
-                        // integer-bit pattern regardless of width; narrower
-                        // widths sign-/zero-extend at read time. U64 omitted
-                        // — deferred to S1.5 per S1 reopen.
-                        V2ElemType::I64
-                        | V2ElemType::I32
-                        | V2ElemType::I8
-                        | V2ElemType::U8
-                        | V2ElemType::I16
-                        | V2ElemType::U16
-                        | V2ElemType::U32 => {
-                            method_registry::TYPED_INT_ARRAY_METHODS
-                                .get(method_name)
-                                .copied()
-                        }
-                        V2ElemType::F64 => method_registry::TYPED_NUMBER_ARRAY_METHODS
-                            .get(method_name)
-                            .copied(),
-                        // Wave 2 Agent A1 (2026-05-14) — F32 rides the same
-                        // floating-point method family as F64 (sum / min /
-                        // max / etc. with NaN-aware semantics). Per-method
-                        // bodies that today operate on `*const TypedArray<f64>`
-                        // currently return None for F32 inputs at the
-                        // v2_array_detect layer (see sum_elements / etc.);
-                        // routing F32 to TYPED_NUMBER_ARRAY_METHODS gives the
-                        // shared method-name surface while preserving the
-                        // per-handler element-kind gate.
-                        V2ElemType::F32 => method_registry::TYPED_NUMBER_ARRAY_METHODS
-                            .get(method_name)
-                            .copied(),
-                        V2ElemType::Bool => method_registry::BOOL_ARRAY_METHODS
-                            .get(method_name)
-                            .copied(),
-                        // Wave 2 Agent A1 (2026-05-14) — Char has no
-                        // dedicated typed-array method registry today;
-                        // dispatch falls back to the generic `ARRAY_METHODS`
-                        // PHF below (length / first / last / etc).
-                        V2ElemType::Char => None,
-                        // Wave 2 Agent A2 (2026-05-14) — String + Decimal v2-raw
-                        // typed-array method dispatch. The architectural surface
-                        // landed for `TypedArray<*const StringObj/DecimalObj>` but
-                        // the producer gate is INTENTIONALLY closed (see
-                        // `should_use_typed_array` in v2_typed_emission.rs;
-                        // Q25.A SUPERSEDED #3 mixed-migration forbidden pattern).
-                        // No producer emits these v2-raw shapes at HEAD; the arm
-                        // here exists for exhaustiveness so future A2-followup
-                        // sub-cluster work can flip the gate + wire up the
-                        // STRING_ARRAY_METHODS / DECIMAL_ARRAY_METHODS PHF
-                        // registries in a single lockstep commit. For now: fall
-                        // back to ARRAY_METHODS (length / first / last / etc).
-                        V2ElemType::String | V2ElemType::Decimal => None,
-                        // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element
-                        // (2026-05-18). No dedicated TYPED_OBJECT_ARRAY_METHODS
-                        // PHF registry at HEAD — `arr[i].field` access lowers to
-                        // `TypedArrayGetTypedObject` then field-access on the
-                        // recovered TypedObject; no `.method()` dispatch is needed
-                        // for the W16.2-A smoke-fixture target. Fall back to the
-                        // generic `ARRAY_METHODS` PHF for `.length` / `.first` /
-                        // etc. Per-method consumer-cascade for TypedObject element
-                        // arrays is downstream W16.2-J §1.B territory.
-                        V2ElemType::TypedObject => None,
-                    };
-                    typed.or_else(|| method_registry::ARRAY_METHODS.get(method_name).copied())
+                    typed_array_method_registry(view.elem_type, method_name)
+                        .or_else(|| method_registry::ARRAY_METHODS.get(method_name).copied())
+                } else if matches!(kind, NativeKind::Ptr(HeapKind::TypedArray)) {
+                    // Kind says TypedArray but the bits failed v2 detection —
+                    // still an array receiver; fall back to generic methods.
+                    method_registry::ARRAY_METHODS.get(method_name).copied()
                 } else {
                     method_registry::NUMBER_METHODS.get(method_name).copied()
                 }

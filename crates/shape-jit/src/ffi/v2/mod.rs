@@ -1008,6 +1008,38 @@ pub extern "C" fn jit_v2_release(ptr: *const u8) {
     }
 }
 
+// ── r5c-2-β-δ-(α): v2-raw `TypedArray<T>` retain / release ──────────────────
+//
+// JIT-side retain/release for a `NativeKind::Ptr(HeapKind::TypedArray)` slot.
+// The carrier is the v2-raw `*mut TypedArray<T>` flat struct (24-byte
+// `repr(C)`, HeapHeader at offset 0, separate element buffer). The generic
+// `arc_retain` / `arc_release` are WRONG for this carrier — they assume a
+// `UnifiedValue<T>` HeapHeader at offset +4 and a single-allocation layout,
+// so `arc_release` deallocs the wrong size and leaks the element buffer
+// (heap corruption). These two route through the same kind-blind helpers the
+// VM uses (`retain_v2_typed_array` / `release_v2_typed_array` in
+// `shape_value::v2::typed_array`), keeping VM and JIT on one carrier.
+
+/// Retain (bump refcount of) a v2-raw `*mut TypedArray<T>` carrier.
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_v2_typed_array_retain(ptr: *const u8) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe { shape_value::v2::typed_array::retain_v2_typed_array(ptr as *mut u8) };
+}
+
+/// Release one refcount share of a v2-raw `*mut TypedArray<T>` carrier;
+/// on the last share, free via the stamped-element-type `drop_array` /
+/// `drop_array_heap`.
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_v2_typed_array_release(ptr: *const u8) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe { shape_value::v2::typed_array::release_v2_typed_array(ptr as *mut u8) };
+}
+
 // ============================================================================
 // Struct allocation FFI
 // ============================================================================

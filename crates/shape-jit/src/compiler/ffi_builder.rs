@@ -218,6 +218,10 @@ impl JITCompiler {
             arc_retain: r!("jit_arc_retain"),
             arc_release: r!("jit_arc_release"),
 
+            // r5c-2-β-δ-(α): v2-raw TypedArray<T> retain / release.
+            v2_typed_array_retain: r!("jit_v2_typed_array_retain"),
+            v2_typed_array_release: r!("jit_v2_typed_array_release"),
+
             // v2 typed-array allocators
             v2_array_new_f64: r!("jit_v2_array_new_f64"),
             v2_array_new_i64: r!("jit_v2_array_new_i64"),
