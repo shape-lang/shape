@@ -1947,11 +1947,30 @@ pub(crate) fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotI
             );
         }
         Expr::Identifier(name, _) => {
+            // γ-CP7 jit-closure-param-fn-ref (2026-05-20): an
+            // `Expr::Identifier` that does NOT resolve to a local slot is
+            // a top-level function name used as a first-class value (e.g.
+            // `apply(dbl)` where `dbl` is a `fn`, or `xs.sort(asc)`). The
+            // bytecode compiler's `compile_expr_identifier`
+            // (`compiler/expressions/identifiers.rs:423`) classifies this
+            // via `find_function` and emits `Constant::Function(idx)`.
+            // The MIR-lowering half previously fell through to
+            // `MirConstant::None`, so the function-ref argument arrived at
+            // the callee's closure-typed parameter slot as `0` — the JIT
+            // indirect call (`jit_call_value`) then BAILed with a null
+            // callee (`Ptr(HeapKind::Closure)` kind, bits=0) and the whole
+            // method returned `TAG_NULL`. Mirror the bytecode classifier:
+            // emit `MirConstant::Function(name)`, which the JIT resolves
+            // through `function_indices` into the `box_function(fn_id)`
+            // function-ref carrier. A name that is NOT a function (the
+            // residual non-local-identifier shapes) still lowers to `0`
+            // bits in `compile_constant` — identical to the prior `None`
+            // behaviour, no regression.
             let operand = builder
                 .lookup_local(name)
                 .map(Place::Local)
                 .map(Operand::Copy)
-                .unwrap_or(Operand::Constant(MirConstant::None));
+                .unwrap_or_else(|| Operand::Constant(MirConstant::Function(name.clone())));
             builder.record_task_boundary_operand(operand.clone());
             builder.push_stmt(
                 StatementKind::Assign(Place::Local(temp), Rvalue::Use(operand)),
@@ -1959,11 +1978,13 @@ pub(crate) fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotI
             );
         }
         Expr::PatternRef(name, _) => {
+            // γ-CP7: mirror the `Expr::Identifier` arm — a non-local
+            // `PatternRef` is likewise a function-name-as-value.
             let operand = builder
                 .lookup_local(name)
                 .map(Place::Local)
                 .map(Operand::Copy)
-                .unwrap_or(Operand::Constant(MirConstant::None));
+                .unwrap_or_else(|| Operand::Constant(MirConstant::Function(name.clone())));
             builder.record_task_boundary_operand(operand.clone());
             builder.push_stmt(
                 StatementKind::Assign(Place::Local(temp), Rvalue::Use(operand)),
