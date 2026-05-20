@@ -1456,11 +1456,90 @@ pub fn concrete_type_for_expr(compiler: &BytecodeCompiler, expr: &Expr) -> Optio
             specialized_call_return_concrete_type(compiler, expr)
         }
 
-        // Anything else (calls, member accesses, closures, …) is opaque
-        // until we have richer side-tables. Returning None lets the resolver
-        // fall back to the generic template.
+        // v0.3 ε-4 generic-fn-chain: a free-function-call argument like the
+        // inner `id(42)` in `id(id(id(42)))`. Without this arm
+        // `concrete_type_for_expr` returns `None` for the chained argument, so
+        // `resolve_call_site_type_args` cannot bind the outer call's type
+        // params and `try_monomorphize_free_function_call` falls back to the
+        // *unspecialized* generic template. Generic templates have empty
+        // (body-skipped) bytecode — dispatching onto one hangs the VM.
+        //
+        // `function_call_return_concrete_type` resolves the callee's return
+        // annotation, substituting type-param bindings for a generic callee.
+        // The recursion is structural over the finite argument AST (each step
+        // descends into strictly-smaller sub-expressions), so it always
+        // terminates — including for self-recursive callees, since it walks
+        // only the call's *argument* expressions, never the callee body.
+        Expr::FunctionCall { name, args, .. } => {
+            function_call_return_concrete_type(compiler, name, args)
+        }
+
+        // Anything else (member accesses, closures, …) is opaque until we
+        // have richer side-tables. Returning None lets the resolver fall back
+        // to the generic template.
         _ => None,
     }
+}
+
+/// v0.3 ε-4 — best-effort return [`ConcreteType`] for a free-function call
+/// `name(args...)`, used so a function-call *argument* (e.g. the inner
+/// `id(42)` in a `id(id(42))` chain) can resolve a concrete type at the outer
+/// monomorphization site.
+///
+/// For a non-generic callee the declared return annotation is reduced
+/// directly. For a generic callee the type-param bindings are recovered from
+/// the call-site argument types (the same unification
+/// [`resolve_call_site_type_args`] performs) and substituted into the return
+/// annotation before reduction — so `id<T>(x: T) -> T` called with an
+/// `int`-typed argument resolves to `ConcreteType::I64`.
+///
+/// Returns `None` whenever a link is missing (unknown callee, foreign/`Result`
+/// shorthand return shape, an unresolved generic, …); the caller then falls
+/// back to the generic-template path. Never fabricates a type.
+///
+/// Termination: the only recursion is the `concrete_type_for_expr` call on
+/// each argument expression, which descends strictly into the finite argument
+/// AST. A chain `id(id(id(42)))` recurses argument-by-argument to the literal
+/// `42` and unwinds; a self-recursive callee `fn f<T>(x:T)->T { f(x) }`
+/// resolves only `f`'s argument list, never re-entering `f`'s body.
+fn function_call_return_concrete_type(
+    compiler: &BytecodeCompiler,
+    name: &str,
+    args: &[Expr],
+) -> Option<ConcreteType> {
+    let func_def = compiler.function_defs.get(name)?;
+    let return_annotation = func_def.return_type.as_ref()?;
+
+    // Collect the declared (non-const) type-param names.
+    let type_params: Vec<String> = func_def
+        .type_params
+        .as_ref()
+        .map(|tps| {
+            tps.iter()
+                .filter(|tp| !tp.is_const())
+                .map(|tp| tp.name().to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if type_params.is_empty() {
+        // Non-generic callee — reduce the return annotation directly.
+        return concrete_type_from_annotation(return_annotation, &HashMap::new());
+    }
+
+    // Generic callee — recover type-param bindings from the argument types,
+    // then substitute them into the return annotation.
+    let arg_types = extract_arg_concrete_types(compiler, args);
+    let resolution = resolve_call_site_type_args(compiler, name, &arg_types, &type_params)?;
+    if resolution.type_args.len() != type_params.len() {
+        return None;
+    }
+    let bindings: HashMap<String, ConcreteType> = type_params
+        .iter()
+        .cloned()
+        .zip(resolution.type_args.iter().cloned())
+        .collect();
+    concrete_type_from_annotation(return_annotation, &bindings)
 }
 
 /// cluster-2-cw-IC-class-c (Phase 3 cluster-2 Round 3, 2026-05-16):
@@ -2281,5 +2360,111 @@ mod tests {
         //      `ensure_monomorphic_function_with_consts`.
         //   3. Replace this placeholder with a real assertion.
         unreachable!("placeholder for turbofish-supported const generics");
+    }
+
+    // ── v0.3 ε-4 — generic-function-chain regression suite ───────────────
+    //
+    // Before the fix, `concrete_type_for_expr` returned `None` for an
+    // `Expr::FunctionCall` argument, so a chained generic call like
+    // `id(id(id(42)))` could not resolve the outer call's type params. The
+    // outer call fell back to the *unspecialized* generic template (which
+    // has empty, body-skipped bytecode); dispatching onto it hung the VM.
+    //
+    // The fix adds a `FunctionCall` arm that resolves the callee's return
+    // ConcreteType (`function_call_return_concrete_type`). These tests drive
+    // the full compile + VM pipeline and assert the chains terminate with
+    // the correct value.
+
+    use crate::test_utils::{eval_typed_bool, eval_typed_i64};
+
+    #[test]
+    fn eps4_generic_id_single_call() {
+        assert_eq!(eval_typed_i64("fn id<T>(x: T) -> T { x }\nid(42)"), 42);
+    }
+
+    #[test]
+    fn eps4_generic_id_chain_2_deep() {
+        assert_eq!(eval_typed_i64("fn id<T>(x: T) -> T { x }\nid(id(42))"), 42);
+    }
+
+    #[test]
+    fn eps4_generic_id_chain_3_deep() {
+        // The exact `type_inference::generic_fn_chain_calls` reproducer
+        // shape — this hung the VM before the fix.
+        assert_eq!(
+            eval_typed_i64("fn id<T>(x: T) -> T { x }\nid(id(id(42)))"),
+            42
+        );
+    }
+
+    #[test]
+    fn eps4_generic_id_chain_6_deep() {
+        assert_eq!(
+            eval_typed_i64("fn id<T>(x: T) -> T { x }\nid(id(id(id(id(id(42))))))"),
+            42
+        );
+    }
+
+    #[test]
+    fn eps4_generic_fn_chain_nontrivial_body() {
+        // A generic body with intermediate let-bindings (not a bare `x`),
+        // chained 3-deep.
+        assert_eq!(
+            eval_typed_i64(
+                "fn box_it<T>(x: T) -> T { let tmp = x; let again = tmp; again }\n\
+                 box_it(box_it(box_it(7)))"
+            ),
+            7
+        );
+    }
+
+    #[test]
+    fn eps4_generic_fn_chain_bool() {
+        assert!(eval_typed_bool(
+            "fn id<T>(x: T) -> T { x }\nid(id(id(true)))"
+        ));
+    }
+
+    #[test]
+    fn eps4_generic_call_as_arg_to_nongeneric_fn() {
+        // A generic-call argument passed to a non-generic callee. The inner
+        // generic call must resolve a concrete type so monomorphization
+        // succeeds rather than falling onto the hanging template.
+        assert_eq!(
+            eval_typed_i64(
+                "fn id<T>(x: T) -> T { x }\n\
+                 fn forty_two() -> int { 42 }\n\
+                 id(forty_two())"
+            ),
+            42
+        );
+    }
+
+    #[test]
+    fn eps4_multi_param_generic_chain() {
+        // Multi-type-param generic with chained generic-call arguments.
+        assert_eq!(
+            eval_typed_i64(
+                "fn id<T>(x: T) -> T { x }\n\
+                 fn snd<A, B>(a: A, b: B) -> B { b }\n\
+                 snd(id(1), id(id(99)))"
+            ),
+            99
+        );
+    }
+
+    #[test]
+    fn eps4_nested_unannotated_fn_chain_not_regressed() {
+        // ε-1 non-regression: transitive callsite type propagation for
+        // nested unannotated functions. `quad(double(double(x)))` with
+        // unannotated params must still resolve and yield 40.
+        assert_eq!(
+            eval_typed_i64(
+                "fn double(x) { x * 2 }\n\
+                 fn quad(x) { double(double(x)) }\n\
+                 quad(10)"
+            ),
+            40
+        );
     }
 }
