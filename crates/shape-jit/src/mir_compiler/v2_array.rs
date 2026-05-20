@@ -544,6 +544,41 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         elem: NativeKind,
     ) -> Result<Option<()>, String> {
         match method_name {
+            // γ-CP9 jit-groupby-surface (v0.3 NO-KNOWN-INCORRECTNESS item
+            // 9). `count` / `group` / `groupBy` on a typed array take a
+            // `|x| ...` closure predicate. The MIR-JIT has no inline
+            // codegen for these here, and the fall-through path
+            // (`jit_call_method` → VM trampoline) cannot carry the JIT-
+            // format NaN-boxed inline-closure carrier across the FFI
+            // boundary to the VM's v2-raw `Ptr(Closure)` ABI — the
+            // carrier-shape mismatch made the transient `kinded_args`
+            // drop SIGSEGV on the closure arg (array `groupBy(|x| ...)`
+            // crashed ec=139). A real inline JIT path would have to model
+            // the closure-callback ABI for typed arrays — W10 jit-
+            // playbook §5 / §2.7.4 territory — and would only re-create a
+            // VM/JIT divergence while the VM-side `handle_group_by_v2` /
+            // `handle_count_v2` still SURFACE.
+            //
+            // The honest fix is a compile-stage surface-and-stop (the
+            // γ-CP3 array-builder pattern): return a structured `Err`.
+            // The W12 fall-through (`docs/cluster-audits/v0.3-w12-jit-
+            // mode-semantics-close.md`) routes the whole program to the
+            // bytecode interpreter, which runs the method call with its
+            // own carrier-correct closure handling and produces the VM's
+            // behaviour verbatim. Net result: VM == JIT — both run the
+            // identical interpreter path, neither produces garbage or
+            // SIGSEGVs.
+            "count" | "group" | "groupBy" => {
+                let _ = (receiver, rest_args, destination, elem);
+                Err(format!(
+                    "γ-CP9 SURFACE: typed-array `.{}()` JIT codegen is \
+                     unimplemented (closure-callback ABI for typed-array \
+                     higher-order methods is W10 jit-playbook §5 / ADR-006 \
+                     §2.7.4 territory) — JIT compilation bails so the W12 \
+                     fall-through runs the interpreter",
+                    method_name,
+                ))
+            }
             "length" | "len" => {
                 let arr_ptr = self.read_place(receiver)?;
                 let len_i32 = self.v2_array_len(arr_ptr);
