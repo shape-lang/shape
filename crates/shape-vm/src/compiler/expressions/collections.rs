@@ -84,14 +84,49 @@ fn default_type_annotation_for_param(param: &TypeParam) -> Option<TypeAnnotation
     param.default_type().cloned()
 }
 
-fn type_annotations_equivalent(left: &TypeAnnotation, right: &TypeAnnotation) -> bool {
-    if left == right {
-        return true;
-    }
-    match (left, right) {
-        (TypeAnnotation::Basic(a), TypeAnnotation::Reference(b)) => a.as_str() == b.as_str(),
-        (TypeAnnotation::Reference(a), TypeAnnotation::Basic(b)) => a.as_str() == b.as_str(),
-        _ => false,
+/// v0.3 Phase 4b Round 5c-2-β-β (d) jit-generic-ctor-default-param-vm-sigsegv
+/// (ADR-006 §2.7.5 producer-side stamp + §2.7.24 typed-carrier monomorphization).
+///
+/// Substitute generic type-parameter references inside a base struct schema's
+/// `FieldType` with the concrete `FieldType` resolved at the monomorphization
+/// site. `type Box<T> { value: T }` registers its base schema field `value`
+/// as `FieldType::Object("T")` (the parser emits `TypeAnnotation::Basic("T")`
+/// for a bare type-parameter name, and `type_annotation_to_field_type` maps any
+/// non-primitive name to `Object(name)`). When the literal `Box { value: 9 }`
+/// monomorphizes to `Box<int>`, the specialized schema must carry `value: I64`
+/// — NOT the unsound `Object("T")` residue. Leaving `Object("T")` makes the
+/// downstream `MakeFieldRef` stamp `FIELD_TAG_OBJECT` on a slot holding an
+/// inline scalar; the VM's `clone_with_kind` then dereferences the raw scalar
+/// bits as a `*const TypedObjectStorage` (misaligned-pointer SIGSEGV at
+/// `executor/vm_impl/stack.rs`).
+///
+/// `substitution` maps type-parameter name → resolved concrete `TypeAnnotation`
+/// (from `resolve_struct_runtime_type_name`). Substitution recurses through
+/// `Array` / `Option` field types so a `value: Array<T>` or `value: T?` field
+/// is monomorphized correctly. `FieldType` variants that cannot carry a
+/// type-parameter reference are returned unchanged.
+fn substitute_type_param_field_type(
+    ft: &FieldType,
+    substitution: &std::collections::HashMap<String, TypeAnnotation>,
+) -> FieldType {
+    match ft {
+        FieldType::Object(name) => match substitution.get(name) {
+            // A type-parameter reference resolved to a concrete annotation —
+            // re-lower it through the canonical annotation→FieldType mapper.
+            Some(ann) => BytecodeCompiler::type_annotation_to_field_type(ann),
+            // `Object(name)` where `name` is NOT a type parameter — a genuine
+            // nested-struct reference. Leave it unchanged.
+            None => ft.clone(),
+        },
+        FieldType::Array(inner) => FieldType::Array(Box::new(
+            substitute_type_param_field_type(inner, substitution),
+        )),
+        FieldType::Option(inner) => FieldType::Option(Box::new(
+            substitute_type_param_field_type(inner, substitution),
+        )),
+        // Primitive / non-parametric field types carry no type-parameter
+        // reference; return unchanged.
+        _ => ft.clone(),
     }
 }
 
@@ -771,11 +806,31 @@ impl BytecodeCompiler {
     /// Compile a struct literal: TypeName { field: value, ... }
     ///
     /// For user types (Point, Candle): creates a TypedObject with field validation.
+    ///
+    /// v0.3 Phase 4b Round 5c-2-β-β (d) jit-generic-ctor-default-param-vm-sigsegv
+    /// (ADR-006 §2.7.5 producer-side stamp + §2.7.24 typed-carrier
+    /// monomorphization): returns the monomorphized runtime type name AND the
+    /// per-type-param resolved `TypeAnnotation` substitution map. The map is
+    /// REQUIRED by the caller — without it, the specialized `Box<int>` schema
+    /// (and even the bare `Box` schema in the all-defaults case) carries field
+    /// types `Object("T")` for type-parameter fields, and a downstream
+    /// `MakeFieldRef`/`DerefLoad` stamps `FIELD_TAG_OBJECT` on a slot that
+    /// actually holds an inline scalar. The VM's `clone_with_kind` then
+    /// dereferences the raw scalar bits as a `TypedObjectStorage` pointer
+    /// (misaligned-pointer SIGSEGV at `vm_impl/stack.rs`).
+    ///
+    /// The pre-fix `all_defaults` early-`None` was an optimization to avoid
+    /// registering a redundant `Box<int>` schema when every type param resolves
+    /// to its declared default — but that "redundancy" was exactly the bug: the
+    /// bare `Box` schema is structurally unsound because its type-parameter
+    /// fields were never substituted. The early-return is removed; a generic
+    /// struct literal ALWAYS resolves to a monomorphized name + substitution
+    /// map when all params are resolvable.
     fn resolve_struct_runtime_type_name(
         &self,
         type_name: &str,
         fields: &[(String, Expr)],
-    ) -> Option<String> {
+    ) -> Option<(String, std::collections::HashMap<String, TypeAnnotation>)> {
         let info = self.struct_generic_info.get(type_name)?;
         if info.type_params.is_empty() {
             return None;
@@ -805,31 +860,22 @@ impl BytecodeCompiler {
         }
 
         let mut resolved_args = Vec::with_capacity(info.type_params.len());
+        let mut substitution: std::collections::HashMap<String, TypeAnnotation> =
+            std::collections::HashMap::new();
         for tp in &info.type_params {
             // TODO(B.3): const generics fall through here but have no type-
             // level inference story yet. The `None` return below bails out of
             // inference, which is the right conservative stub until B.3 lands.
             if let Some(inferred) = inferred_args.get(tp.name()) {
                 resolved_args.push(inferred.clone());
+                substitution.insert(tp.name().to_string(), inferred.clone());
                 continue;
             }
             if let Some(default) = default_type_annotation_for_param(tp) {
-                resolved_args.push(default);
+                resolved_args.push(default.clone());
+                substitution.insert(tp.name().to_string(), default);
                 continue;
             }
-            return None;
-        }
-
-        let all_defaults = info
-            .type_params
-            .iter()
-            .zip(resolved_args.iter())
-            .all(|(tp, arg)| {
-                default_type_annotation_for_param(tp)
-                    .map(|default| type_annotations_equivalent(&default, arg))
-                    .unwrap_or(false)
-            });
-        if all_defaults {
             return None;
         }
 
@@ -837,7 +883,10 @@ impl BytecodeCompiler {
             .iter()
             .map(type_annotation_to_compact_string)
             .collect::<Vec<_>>();
-        Some(format!("{}<{}>", type_name, rendered_args.join(", ")))
+        Some((
+            format!("{}<{}>", type_name, rendered_args.join(", ")),
+            substitution,
+        ))
     }
 
     pub(super) fn compile_struct_literal(
@@ -864,9 +913,19 @@ impl BytecodeCompiler {
 
         match struct_info {
             Some((expected_fields, type_def_span)) => {
-                let runtime_type_name = self
+                // v0.3 Phase 4b Round 5c-2-β-β (d) jit-generic-ctor-default-
+                // param-vm-sigsegv (ADR-006 §2.7.5 producer-side stamp +
+                // §2.7.24 typed-carrier monomorphization): a generic struct
+                // literal resolves to a monomorphized runtime name plus a
+                // per-type-param substitution map. The substitution map is
+                // applied below when the specialized schema is registered, so
+                // type-parameter fields (`value: T`) carry the concrete
+                // `FieldType` (`I64`) instead of the unsound `Object("T")`
+                // residue that segfaults `clone_with_kind` at field-read time.
+                let (runtime_type_name, type_param_substitution) = self
                     .resolve_struct_runtime_type_name(type_name, fields)
-                    .unwrap_or_else(|| type_name.to_string());
+                    .map(|(name, subst)| (name, Some(subst)))
+                    .unwrap_or_else(|| (type_name.to_string(), None));
 
                 // Validate fields match the struct definition
                 // Check for missing fields
@@ -982,10 +1041,33 @@ impl BytecodeCompiler {
                     schema.id
                 } else if runtime_type_name != *type_name {
                     if let Some(base_schema) = self.type_tracker.schema_registry().get(type_name) {
+                        // v0.3 Phase 4b Round 5c-2-β-β (d) jit-generic-ctor-
+                        // default-param-vm-sigsegv (ADR-006 §2.7.5 producer-
+                        // side stamp + §2.7.24 typed-carrier monomorphization):
+                        // when the base type is generic, its type-parameter
+                        // fields (`value: T` → base `FieldType::Object("T")`)
+                        // MUST be substituted with the concrete `FieldType`
+                        // resolved at the monomorphization site. Copying the
+                        // base `Object("T")` verbatim is the SIGSEGV root
+                        // cause — `MakeFieldRef` stamps `FIELD_TAG_OBJECT` on
+                        // a slot holding an inline scalar and the VM's
+                        // `clone_with_kind` dereferences the scalar bits as a
+                        // `*const TypedObjectStorage`. `type_param_substitution`
+                        // is `Some` exactly when `runtime_type_name` is a
+                        // generic monomorphization (`Box<int>`).
                         let fields = base_schema
                             .fields
                             .iter()
-                            .map(|f| (f.name.clone(), f.field_type.clone()))
+                            .map(|f| {
+                                let ft = match &type_param_substitution {
+                                    Some(subst) => substitute_type_param_field_type(
+                                        &f.field_type,
+                                        subst,
+                                    ),
+                                    None => f.field_type.clone(),
+                                };
+                                (f.name.clone(), ft)
+                            })
                             .collect::<Vec<_>>();
                         let schema = TypeSchema::new(runtime_type_name.clone(), fields);
                         let schema_id = schema.id;
@@ -1371,6 +1453,7 @@ impl BytecodeCompiler {
 mod tests {
     use crate::compiler::BytecodeCompiler;
     use shape_ast::parser::parse_program;
+    use shape_runtime::type_schema::FieldType;
 
     #[test]
     fn test_struct_literal_type_mismatch_decimal_for_int() {
@@ -1608,6 +1691,227 @@ mod tests {
             result.as_i64(),
             Some(42),
             "type-alias field access must return the concrete int value"
+        );
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // v0.3 Phase 4b Round 5c-2-β-β (d) jit-generic-ctor-default-param-vm-
+    // sigsegv regression tests (ADR-006 §2.7.5 producer-side stamp +
+    // §2.7.24 typed-carrier monomorphization).
+    //
+    // Pre-fix, `type Box<T> { value: T }` registered the base `Box` schema
+    // with field `value` typed `FieldType::Object("T")` (the parser emits
+    // `TypeAnnotation::Basic("T")` for a bare type-parameter name, and
+    // `type_annotation_to_field_type` maps any non-primitive name to
+    // `Object(name)`). The struct-literal `Box { value: 9 }` monomorphized
+    // to `Box<int>` but COPIED the base field type `Object("T")` verbatim
+    // into the specialized schema. Reading `b.value` then emitted a
+    // `MakeFieldRef` stamping `FIELD_TAG_OBJECT` on a slot that actually
+    // held an inline `i64` — and the VM's `clone_with_kind`
+    // (`executor/vm_impl/stack.rs`) dereferenced the raw scalar bits as a
+    // `*const TypedObjectStorage` (misaligned-pointer SIGSEGV, exit 139).
+    // The JIT path produced the correct value (inverse-direction
+    // divergence). Per supervisor disposition 2026-05-20 this is a pure
+    // soundness bug: the VM gets the JIT-correct behavior.
+    //
+    // The fix substitutes type-parameter fields with the concrete
+    // `FieldType` resolved at the monomorphization site
+    // (`substitute_type_param_field_type`), so the specialized `Box<int>`
+    // schema carries `value: I64` and `MakeFieldRef` stamps
+    // `FIELD_TAG_I64`. The pre-fix `all_defaults` early-`None` was removed
+    // — a generic struct literal always resolves to a monomorphized name +
+    // substitution map.
+    //
+    // These regression tests pin the DETERMINISTIC producer-side invariant:
+    // the monomorphized schema carries a concrete (non-`Object("<param>")`)
+    // `FieldType` for every type-parameter field. The pre-fix bug was a
+    // 100%-deterministic SIGSEGV; pinning the producer-side schema stamp
+    // catches any regression of the `Object("T")` residue without depending
+    // on the runtime path (which carries a SEPARATE, pre-existing,
+    // VM-wide TypedObject-reference double-free — `RefTarget::TypedField`
+    // holds the receiver as `Arc<TypedObjectStorage>` but the runtime
+    // carrier is v2-raw `_new`-allocated, so `resolve_typed_object_receiver`
+    // at `executor/variables/mod.rs` runs `Arc::increment_strong_count` /
+    // `Arc::from_raw` against the wrong allocator layout; surfaced at close,
+    // empirically reproduces ~6% on a non-generic `type Box { value: int }`
+    // on baseline `6b6b50d8`, distinct root-cause family, NOT in (d) scope).
+
+    /// Plain generic struct (no default type param). Pre-fix: the
+    /// monomorphized `Box<int>` schema carried `value: Object("T")` → VM
+    /// SIGSEGV on `b.value`. Post-fix: the schema carries the concrete
+    /// `FieldType::I64`.
+    #[test]
+    fn test_r5c2bb_d_generic_struct_no_default_concrete_field_type() {
+        let code = r#"
+            type Box<T> { value: T }
+            let b = Box { value: 9 }
+            b.value
+        "#;
+        let program = parse_program(code).unwrap();
+        let bytecode = BytecodeCompiler::new()
+            .compile(&program)
+            .expect("compile must succeed");
+        let schema = bytecode
+            .type_schema_registry
+            .get("Box<int>")
+            .expect("monomorphized `Box<int>` schema must be registered");
+        let value_field = schema
+            .fields
+            .iter()
+            .find(|f| f.name == "value")
+            .expect("`value` field must exist");
+        assert_eq!(
+            value_field.field_type,
+            FieldType::I64,
+            "monomorphized `Box<int>` field `value` must be concrete I64, \
+             not the unsound `Object(\"T\")` type-parameter residue"
+        );
+    }
+
+    /// Generic struct with a DEFAULT type param, instantiated relying on
+    /// the default (`Box<T = int>` then `Box { value: 9 }`). Pre-fix: the
+    /// `all_defaults` early-return left the bare `Box` schema's
+    /// `Object("T")` field in place and the literal resolved to the bare
+    /// `Box` schema → VM SIGSEGV. Post-fix: the literal monomorphizes to a
+    /// `Box<int>` schema carrying `value: I64`.
+    #[test]
+    fn test_r5c2bb_d_generic_struct_default_param_concrete_field_type() {
+        let code = r#"
+            type Box<T = int> { value: T }
+            let b = Box { value: 9 }
+            b.value
+        "#;
+        let program = parse_program(code).unwrap();
+        let bytecode = BytecodeCompiler::new()
+            .compile(&program)
+            .expect("compile must succeed");
+        // The all-defaults monomorphization must register a `Box<int>`
+        // schema (the pre-fix `all_defaults` early-`None` skipped this and
+        // left the bare `Box` schema's `Object("T")` field in play).
+        let schema = bytecode
+            .type_schema_registry
+            .get("Box<int>")
+            .expect(
+                "default-type-param generic literal must monomorphize to a \
+                 `Box<int>` schema (pre-fix the `all_defaults` early-return \
+                 left the bare `Box` schema's `Object(\"T\")` field in play)",
+            );
+        let value_field = schema
+            .fields
+            .iter()
+            .find(|f| f.name == "value")
+            .expect("`value` field must exist");
+        assert_eq!(
+            value_field.field_type,
+            FieldType::I64,
+            "default-type-param monomorphized field `value` must be concrete I64"
+        );
+    }
+
+    /// Generic struct whose field resolves to a non-numeric concrete type
+    /// (`Box<T>` instantiated with a string). Verifies the substitution
+    /// re-lowers `Object("T")` to `FieldType::String`, not a numeric tag.
+    #[test]
+    fn test_r5c2bb_d_generic_struct_string_concrete_field_type() {
+        let code = r#"
+            type Box<T> { value: T }
+            let b = Box { value: "hello" }
+            b.value
+        "#;
+        let program = parse_program(code).unwrap();
+        let bytecode = BytecodeCompiler::new()
+            .compile(&program)
+            .expect("compile must succeed");
+        let schema = bytecode
+            .type_schema_registry
+            .get("Box<string>")
+            .expect("monomorphized `Box<string>` schema must be registered");
+        let value_field = schema
+            .fields
+            .iter()
+            .find(|f| f.name == "value")
+            .expect("`value` field must exist");
+        assert_eq!(
+            value_field.field_type,
+            FieldType::String,
+            "monomorphized `Box<string>` field `value` must be concrete String"
+        );
+    }
+
+    /// Multi-type-parameter generic struct with defaults
+    /// (`Pair<A = int, B = string>`). Verifies each parameter is
+    /// independently substituted into its own field's schema type — the
+    /// substitution map is keyed per type-parameter name.
+    #[test]
+    fn test_r5c2bb_d_generic_struct_multi_param_concrete_field_types() {
+        let code = r#"
+            type Pair<A = int, B = string> { first: A, second: B }
+            let p = Pair { first: 1, second: "two" }
+            p.first
+        "#;
+        let program = parse_program(code).unwrap();
+        let bytecode = BytecodeCompiler::new()
+            .compile(&program)
+            .expect("compile must succeed");
+        let schema = bytecode
+            .type_schema_registry
+            .get("Pair<int, string>")
+            .expect("monomorphized `Pair<int, string>` schema must be registered");
+        let first = schema
+            .fields
+            .iter()
+            .find(|f| f.name == "first")
+            .expect("`first` field must exist");
+        let second = schema
+            .fields
+            .iter()
+            .find(|f| f.name == "second")
+            .expect("`second` field must exist");
+        assert_eq!(
+            first.field_type,
+            FieldType::I64,
+            "type-parameter `A` field must monomorphize to concrete I64"
+        );
+        assert_eq!(
+            second.field_type,
+            FieldType::String,
+            "type-parameter `B` field must monomorphize to concrete String"
+        );
+    }
+
+    /// Negative pin: a non-generic struct type has no type parameters, so
+    /// `resolve_struct_runtime_type_name` returns `None` and no monomorphized
+    /// name is produced — the literal binds directly to the base schema. The
+    /// type-param substitution path must NOT fire for non-generic types.
+    #[test]
+    fn test_r5c2bb_d_non_generic_struct_no_monomorphization() {
+        let code = r#"
+            type Plain { value: int }
+            let p = Plain { value: 9 }
+            p.value
+        "#;
+        let program = parse_program(code).unwrap();
+        let bytecode = BytecodeCompiler::new()
+            .compile(&program)
+            .expect("compile must succeed");
+        // No `Plain<...>` monomorphized schema — only the base `Plain`.
+        assert!(
+            bytecode.type_schema_registry.get("Plain<int>").is_none(),
+            "non-generic struct must not produce a monomorphized `Plain<int>` schema"
+        );
+        let schema = bytecode
+            .type_schema_registry
+            .get("Plain")
+            .expect("base `Plain` schema must be registered");
+        let value_field = schema
+            .fields
+            .iter()
+            .find(|f| f.name == "value")
+            .expect("`value` field must exist");
+        assert_eq!(
+            value_field.field_type,
+            FieldType::I64,
+            "non-generic struct field type must be the declared concrete I64"
         );
     }
 }
