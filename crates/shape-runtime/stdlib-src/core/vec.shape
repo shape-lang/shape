@@ -4,9 +4,12 @@
 /// Type-agnostic methods are defined via `extend Vec<T>`.
 /// Numeric-only methods are defined via `trait NumericVec` + `impl NumericVec for Vec`.
 /// Most methods have pure Shape implementations. Methods that need VM intrinsics
-/// (pop, sort, groupBy) delegate to Rust PHF dispatch; the compiler self-call
-/// guard prevents infinite recursion. Note: `len`/`isEmpty` are intentionally
-/// NOT defined here — they would intercept dispatch and recurse on Vec<T>.
+/// (pop, groupBy) delegate to Rust PHF dispatch; the compiler self-call
+/// guard prevents infinite recursion. `sort` is a pure-Shape implementation
+/// (the self-call guard does NOT cover it — a generic `extend` method with
+/// no method-level type parameter — so `self.sort(cmp)` would recurse
+/// unconditionally). Note: `len`/`isEmpty` are intentionally NOT defined
+/// here — they would intercept dispatch and recurse on Vec<T>.
 
 // -- Type-agnostic methods --------------------------------------------------
 
@@ -145,7 +148,56 @@ extend Vec<T> {
         -1
     }
 
-    method sort(cmp: (T, T) => number) -> Vec<T> { self.sort(cmp) }  // keep Rust delegation
+    /// Return a new array sorted by `cmp`.
+    ///
+    /// `cmp(a, b)` returns a negative value when `a` should sort before `b`,
+    /// a positive value when `a` should sort after `b`, and zero when they
+    /// compare equal.
+    ///
+    /// Stable: equal elements keep their original relative order — the
+    /// inner loop shifts a neighbour only when it is *strictly* greater
+    /// than the key, so equal keys never cross. This is a pure-Shape
+    /// in-place insertion sort over a private copy of `self`; it
+    /// terminates for every input and never recurses into itself.
+    ///
+    /// The previous body was `self.sort(cmp)` — annotated "keep Rust
+    /// delegation", but method dispatch resolves `self.sort` back to this
+    /// same Shape method (the monomorphization self-call guard only fires
+    /// for methods with their own type parameter; `sort` inherits `T`
+    /// from the `extend Vec<T>` block and has none), so it recursed
+    /// unconditionally and overflowed the stack on the first call.
+    method sort(cmp: (T, T) => int) -> Vec<T> {
+        let n = self.len()
+        // Private working copy — `self` is never mutated.
+        let mut src = []
+        for item in self { src.push(item) }
+        if n < 2 { return src }
+
+        // Insertion sort: grow a sorted prefix `src[0..i]` one element at
+        // a time. `key` moves left past every strictly-greater neighbour.
+        let mut i = 1
+        while i < n {
+            let key = src[i]
+            let mut j = i - 1
+            while j >= 0 {
+                let cur = src[j]
+                // The `c: int` annotation pins the comparator's return
+                // type so the comparison below type-checks under strict
+                // typing (a bare `cmp(...)` call otherwise infers as
+                // `unknown`).
+                let c: int = cmp(cur, key)
+                if c > 0 {
+                    src[j + 1] = cur
+                    j = j - 1
+                } else {
+                    break
+                }
+            }
+            src[j + 1] = key
+            i = i + 1
+        }
+        src
+    }
 
     method includes(value: T) -> bool {
         for item in self {

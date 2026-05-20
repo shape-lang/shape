@@ -159,9 +159,14 @@ fn array_every_false() {
 
 #[test]
 fn array_sort_with_comparator() {
+    // A named comparator is used here: closure *literal* params typed
+    // `(T, T)` are not inferred by the current inference engine, so the
+    // `|a, b| a - b` form does not type-check — a separate, pre-existing
+    // inference limitation independent of `Vec.sort`.
     ShapeTest::new(
         r#"
-        let sorted = [3, 1, 4, 1, 5].sort(|a, b| a - b)
+        fn asc(a: int, b: int) -> int { a - b }
+        let sorted = [3, 1, 4, 1, 5].sort(asc)
         sorted[0]
     "#,
     )
@@ -172,11 +177,134 @@ fn array_sort_with_comparator() {
 fn array_sort_descending() {
     ShapeTest::new(
         r#"
-        let sorted = [3, 1, 4, 1, 5].sort(|a, b| b - a)
+        fn desc(a: int, b: int) -> int { b - a }
+        let sorted = [3, 1, 4, 1, 5].sort(desc)
         sorted[0]
     "#,
     )
     .expect_number(5.0);
+}
+
+// =========================================================================
+// `Vec.sort` regression coverage (r5c-2-eps-2-stdlib-sort).
+//
+// The previous `Vec.sort` body was `self.sort(cmp)` (annotated "keep Rust
+// delegation"), which method dispatch resolves back to the same Shape
+// method — unconditional infinite self-recursion, so any `.sort(...)`
+// call overflowed the stack. The body is now a real pure-Shape in-place
+// insertion sort. These tests pass a named-function comparator: closure
+// *literal* params typed `(T, T)` are not inferred by the current
+// inference engine, so the `|a, b| a - b` form above is a separate,
+// pre-existing inference limitation tracked independently.
+// =========================================================================
+
+#[test]
+fn array_sort_named_comparator_ascending() {
+    // [3, 1, 4, 1, 5] ascending -> [1, 1, 3, 4, 5]; first three digits.
+    ShapeTest::new(
+        r#"
+        fn asc(a: int, b: int) -> int { a - b }
+        let sorted = [3, 1, 4, 1, 5].sort(asc)
+        sorted[0] * 100 + sorted[1] * 10 + sorted[2]
+    "#,
+    )
+    .expect_number(113.0);
+}
+
+#[test]
+fn array_sort_named_comparator_full_order() {
+    ShapeTest::new(
+        r#"
+        fn asc(a: int, b: int) -> int { a - b }
+        let sorted = [9, 8, 7, 6, 5, 4, 3, 2, 1, 0].sort(asc)
+        let mut ok = 0
+        let mut i = 0
+        while i < 10 {
+            if sorted[i] == i { ok = ok + 1 }
+            i = i + 1
+        }
+        ok
+    "#,
+    )
+    .expect_number(10.0);
+}
+
+#[test]
+fn array_sort_named_comparator_descending() {
+    ShapeTest::new(
+        r#"
+        fn desc(a: int, b: int) -> int { b - a }
+        let sorted = [3, 1, 4, 1, 5].sort(desc)
+        sorted[0] * 100 + sorted[1] * 10 + sorted[4]
+    "#,
+    )
+    .expect_number(541.0);
+}
+
+#[test]
+fn array_sort_single_element() {
+    ShapeTest::new(
+        r#"
+        fn asc(a: int, b: int) -> int { a - b }
+        let sorted = [42].sort(asc)
+        sorted[0]
+    "#,
+    )
+    .expect_number(42.0);
+}
+
+#[test]
+fn array_sort_two_elements_swapped() {
+    ShapeTest::new(
+        r#"
+        fn asc(a: int, b: int) -> int { a - b }
+        let sorted = [2, 1].sort(asc)
+        sorted[0] * 10 + sorted[1]
+    "#,
+    )
+    .expect_number(12.0);
+}
+
+#[test]
+fn array_sort_with_duplicates_preserves_count() {
+    ShapeTest::new(
+        r#"
+        fn asc(a: int, b: int) -> int { a - b }
+        let sorted = [5, 5, 3, 5, 1].sort(asc)
+        sorted[0] * 10000 + sorted[1] * 1000 + sorted[2] * 100
+            + sorted[3] * 10 + sorted[4]
+    "#,
+    )
+    .expect_number(13555.0);
+}
+
+#[test]
+fn array_sort_does_not_mutate_receiver() {
+    // `sort` returns a new array; the source is untouched.
+    ShapeTest::new(
+        r#"
+        fn asc(a: int, b: int) -> int { a - b }
+        let source = [3, 1, 2]
+        let sorted = source.sort(asc)
+        source[0] * 100 + source[1] * 10 + source[2]
+    "#,
+    )
+    .expect_number(312.0);
+}
+
+#[test]
+fn array_sort_stable_for_equal_keys() {
+    // Insertion sort only shifts a neighbour when it is *strictly*
+    // greater than the key, so equal elements never cross — a comparator
+    // that treats everything as equal must leave the array unchanged.
+    ShapeTest::new(
+        r#"
+        fn eq(a: int, b: int) -> int { 0 }
+        let sorted = [4, 1, 3, 2].sort(eq)
+        sorted[0] * 1000 + sorted[1] * 100 + sorted[2] * 10 + sorted[3]
+    "#,
+    )
+    .expect_number(4132.0);
 }
 
 #[test]
