@@ -770,3 +770,142 @@ acc
         17,
     );
 }
+
+// ───────────────────────────────────────────────────────────────────────
+// γ-CP7 jit-closure-param-fn-ref regression (v0.3-gating SOUNDNESS BUG,
+// 2026-05-20). Surfaced by the ε-2 stdlib-sort checkpoint:
+// `[3,1,2,5,4].sort(asc)` returned the unsorted input under JIT.
+//
+// Root cause was MIR-lowering, not JIT codegen. A top-level function
+// name used as a first-class VALUE (`apply(dbl)` where `dbl` is a `fn`,
+// `xs.sort(asc)`) parses as `Expr::Identifier("dbl")`. The bytecode
+// compiler's `compile_expr_identifier`
+// (`compiler/expressions/identifiers.rs:423`) classifies a non-local
+// identifier via `find_function` and emits `Constant::Function(idx)`.
+// The MIR-lowering half (`mir/lowering/expr.rs::lower_expr_to_temp`'s
+// `Expr::Identifier` arm) fell through `lookup_local(name)` to
+// `MirConstant::None` — so the function-ref argument arrived at the
+// callee's closure-typed parameter slot as `0`. Inside the callee the
+// `f(x)` indirect call (`jit_call_value`) saw `callee_kind =
+// Ptr(HeapKind::Closure)` (correct, from the `(int)=>int` param type)
+// but `callee_bits == 0` and BAILed to `TAG_NULL`.
+//
+// Fix: the `Expr::Identifier` / `Expr::PatternRef` arms emit
+// `MirConstant::Function(name)` (mirroring the bytecode classifier)
+// when `lookup_local` fails. The JIT resolves it through
+// `function_indices` into the `box_function(fn_id)` carrier; the
+// indirect-call `jit_call_value` then dispatches the function-id path.
+//
+// Closure LITERALS (`apply(|x| x*2)`) were never affected — they lower
+// through the `ClosurePlaceholder` path. The bug was specific to a
+// NAMED function passed as a value.
+// ───────────────────────────────────────────────────────────────────────
+
+/// Minimal γ-CP7 reproducer: a named `fn` passed as a closure-typed
+/// parameter and invoked indirectly. Pre-fix the JIT returned
+/// `TAG_NULL` (NaN-bits `-1407374883553280`); VM returned `14`.
+/// Post-fix VM == JIT == `14`.
+#[test]
+fn named_fn_passed_as_closure_param_dispatches() {
+    jit_expect_int(
+        r#"
+fn apply(f: (int) => int, x: int) -> int {
+    f(x)
+}
+fn dbl(n: int) -> int { n * 2 }
+apply(dbl, 7)
+"#,
+        14,
+    );
+}
+
+/// γ-CP7: named `fn` as the sole parameter (no trailing scalar args),
+/// invoked with a literal inside the callee.
+#[test]
+fn named_fn_sole_closure_param_dispatches() {
+    jit_expect_int(
+        r#"
+fn apply(f: (int) => int) -> int {
+    f(10)
+}
+fn dbl(n: int) -> int { n * 2 }
+apply(dbl)
+"#,
+        20,
+    );
+}
+
+/// γ-CP7: named `fn` passed to an `extend Vec<T>` closure-parameter
+/// method — the exact shape the ε-2 checkpoint flagged for `Vec.sort`.
+/// A fresh user method declared on `extend Vec<T>` that takes a
+/// closure parameter and calls it. Pre-fix the JIT returned garbage
+/// NaN-bits; post-fix VM == JIT == `14`.
+#[test]
+fn named_fn_passed_to_extend_vec_closure_param_method() {
+    jit_expect_int(
+        r#"
+extend Vec<T> {
+    method applyFirst(f: (T) => T) -> T {
+        f(self[0])
+    }
+}
+fn dbl(n: int) -> int { n * 2 }
+let xs = [7, 1, 2]
+xs.applyFirst(dbl)
+"#,
+        14,
+    );
+}
+
+/// γ-CP7: closure LITERAL on the same `extend Vec<T>` method shape —
+/// negative regression confirming the literal path (always worked) is
+/// not disturbed by the named-fn fix.
+#[test]
+fn closure_literal_passed_to_extend_vec_closure_param_method() {
+    jit_expect_int(
+        r#"
+extend Vec<T> {
+    method applyFirst(f: (T) => T) -> T {
+        f(self[0])
+    }
+}
+let xs = [7, 1, 2]
+xs.applyFirst(|x| x * 2)
+"#,
+        14,
+    );
+}
+
+/// γ-CP7: the stdlib `Vec.sort` end-to-end with a named comparator.
+/// `Vec.sort` is a real in-Shape insertion sort declared on
+/// `extend Vec<T>` taking a `cmp: (T,T) => int` parameter. Pre-fix the
+/// JIT returned the UNSORTED input (`[3,1,2,5,4]`); post-fix the first
+/// element of the sorted result is `1`. Asserting on `[0]` keeps the
+/// `jit_expect_int` scalar-return harness usable.
+#[test]
+fn stdlib_vec_sort_with_named_comparator_sorts() {
+    jit_expect_int(
+        r#"
+fn asc(a: int, b: int) -> int { a - b }
+let xs = [3, 1, 2, 5, 4]
+let sorted = xs.sort(asc)
+sorted[0]
+"#,
+        1,
+    );
+}
+
+/// γ-CP7: confirm the sorted-result is fully ordered, not just the
+/// head element — guards against a partial-sort regression.
+#[test]
+fn stdlib_vec_sort_with_named_comparator_last_element() {
+    jit_expect_int(
+        r#"
+fn asc(a: int, b: int) -> int { a - b }
+let xs = [3, 1, 2, 5, 4]
+let sorted = xs.sort(asc)
+sorted[4]
+"#,
+        5,
+    );
+}
