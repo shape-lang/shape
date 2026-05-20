@@ -137,14 +137,18 @@ impl VirtualMachine {
             // `HEAP_KIND_V2_TYPED_ARRAY` (kind=4) + `ELEM_TYPE_*` byte in
             // the header at `v2_handlers/array.rs` allocation; consumer
             // recovers via `as_v2_typed_array(bits, kind)` + per-T
-            // `read_element` from `v2_handlers/v2_array_detect.rs`. The
-            // kind carrier is `NativeKind::UInt64` per §2.7.5 the same
-            // carrier shape `len()` / `sum()` PHF entries dispatch on
-            // (`executor/objects/mod.rs::resolve_method_handler` line
-            // 682). The producer-stamped header byte IS the proof of
-            // element type; the kind-carrier `UInt64` is the same one
-            // `typed_int_array_methods::extract_view` reads — no
-            // intermediate translation step is introduced.
+            // `read_element` from `v2_handlers/v2_array_detect.rs`.
+            //
+            // r5c-2-β-CKPT-C u64-carrier-disambiguation (2026-05-20): the
+            // v2-typed-array carrier kind is `NativeKind::Ptr(HeapKind::
+            // TypedArray)` — the single canonical carrier for every v2-raw
+            // `*mut TypedArray<T>` pointer (direct `NewTypedArray*`
+            // allocation + refcounted struct-field / closure-capture read).
+            // A genuine scalar `u64` (`NativeKind::UInt64`) is NOT an array
+            // receiver — it falls through to the inline-scalar `_` arm
+            // below as a TypeError, never dereferenced. The pre-fix
+            // `UInt64 | Ptr(HeapKind::TypedArray)` arm dereferenced an
+            // arbitrary scalar `u64` value as a header pointer → SIGSEGV.
             //
             // This arm closes the dispatch path for `arr[i]` (parsed as
             // `IndexAccess`, lowered to `GetProp` at
@@ -157,20 +161,15 @@ impl VirtualMachine {
             // sibling consumer for the same receiver shape — VM and JIT
             // share the producer-stamped header byte; no parallel-carrier
             // duality.
-            // The receiver carrier is either `UInt64` (direct, single-owner)
-            // or `Ptr(HeapKind::TypedArray)` (refcounted — struct-field /
-            // closure-capture array read; r5c-2-β-δ-(α)). Both hold the same
-            // raw `*mut TypedArray<T>` pointer, so they share this arm.
-            NativeKind::UInt64 | NativeKind::Ptr(HeapKind::TypedArray) => {
+            NativeKind::Ptr(HeapKind::TypedArray) => {
                 use crate::executor::v2_handlers::v2_array_detect::{
                     as_v2_typed_array, read_element,
                 };
                 let view = match as_v2_typed_array(obj_bits, obj_kind) {
                     Some(v) => v,
                     None => {
-                        // The kind is UInt64 but the bits aren't a v2
-                        // typed-array pointer — surface as scalar (the
-                        // pre-Round-4 behavior for plain unsigned ints).
+                        // Kind says TypedArray but the bits aren't a v2
+                        // typed-array pointer (missing header) — surface.
                         return Err(VMError::TypeError {
                             expected: "object, array, string, or other heap value",
                             got: "scalar",
@@ -518,15 +517,15 @@ impl VirtualMachine {
                     self.push_kinded(len as u64, NativeKind::Int64)
                 }
             }
-            NativeKind::Ptr(HeapKind::TypedArray) | NativeKind::UInt64 => {
-                // r5c-2-β-δ-(α): the v2-raw `*mut TypedArray<T>` carrier —
+            NativeKind::Ptr(HeapKind::TypedArray) => {
+                // r5c-2-β-CKPT-C: the v2-raw `*mut TypedArray<T>` carrier —
                 // length is the `len` field at a fixed offset (T-independent),
-                // read via `as_v2_typed_array`. Both the refcounted
-                // `Ptr(HeapKind::TypedArray)` carrier (struct-field /
-                // closure-capture array) and the direct `UInt64` carrier
-                // hold the same pointer. A `UInt64` that is *not* a v2 typed
-                // array pointer (a plain scalar) is rejected as a non-length
-                // value, matching the pre-fix scalar fallthrough.
+                // read via `as_v2_typed_array`. `Ptr(HeapKind::TypedArray)`
+                // is the single canonical carrier kind. A genuine scalar
+                // `u64` (`NativeKind::UInt64`) is NOT an array — it falls
+                // through to the inline-scalar `_` arm as a TypeError, never
+                // dereferenced (the pre-fix `UInt64` arm dereferenced an
+                // arbitrary scalar value as a header pointer → SIGSEGV).
                 if bits == 0 {
                     Err(VMError::RuntimeError(
                         "length() on null TypedArray".to_string(),

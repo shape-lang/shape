@@ -53,27 +53,28 @@
 
 use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
-use shape_value::{KindedSlot, NativeKind, VMError};
+use shape_value::{HeapKind, KindedSlot, NativeKind, VMError};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Preserved helpers (no `TypedArrayData` dependency)
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Wave-3a' Agent ζ (2026-05-14) — recognize a v2-raw `Array<string>` /
-/// `Array<decimal>` receiver (kind = `NativeKind::UInt64`, header stamped
-/// `ELEM_TYPE_STRING` / `ELEM_TYPE_DECIMAL`). Preserved through V3-S5
-/// ckpt-5 because the helper carries no `TypedArrayData` dependency —
-/// operates on raw bits + view metadata.
+/// `Array<decimal>` receiver (kind = `NativeKind::Ptr(HeapKind::TypedArray)`
+/// per r5c-2-β-CKPT-C, header stamped `ELEM_TYPE_STRING` /
+/// `ELEM_TYPE_DECIMAL`). Preserved through V3-S5 ckpt-5 because the helper
+/// carries no `TypedArrayData` dependency — operates on raw bits + view
+/// metadata.
 #[allow(dead_code)]
 #[inline]
 fn v2_string_decimal_view(
     slot: &KindedSlot,
 ) -> Option<crate::executor::v2_handlers::v2_array_detect::V2TypedArrayView> {
     use crate::executor::v2_handlers::v2_array_detect::{as_v2_typed_array, V2ElemType};
-    if slot.kind != NativeKind::UInt64 {
+    if slot.kind != NativeKind::Ptr(HeapKind::TypedArray) {
         return None;
     }
-    let view = as_v2_typed_array(slot.slot.raw(), NativeKind::UInt64)?;
+    let view = as_v2_typed_array(slot.slot.raw(), slot.kind)?;
     match view.elem_type {
         V2ElemType::String | V2ElemType::Decimal => Some(view),
         _ => None,

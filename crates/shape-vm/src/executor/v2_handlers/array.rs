@@ -1,15 +1,34 @@
 //! VM executor handlers for v2 typed array opcodes.
 //!
 //! These handlers operate on `TypedArray<T>` raw pointers (`*mut TypedArray<T>`),
-//! NativeScalar-shaped (non-Arc, custom heap allocation). Pointer bits flow
-//! through the kinded API as `NativeKind::UInt64` (no refcount). Element
-//! kinds:
+//! a v2-raw HeapHeader-equipped flat struct (24-byte `repr(C)`, refcount at
+//! offset 0). Pointer bits flow through the kinded API as
+//! `NativeKind::Ptr(HeapKind::TypedArray)` — the kind track itself is the
+//! carrier discriminator, separating a `*mut TypedArray<T>` pointer from a
+//! genuine scalar `u64`. Element kinds:
 //!   F64  -> `NativeKind::Float64`
 //!   I64  -> `NativeKind::Int64`
 //!   I32  -> `NativeKind::Int32`
 //!   Bool -> `NativeKind::Bool`
 //!
-//! ADR-006 §2.7.7 / Wave 6.5 cluster C.
+//! ## r5c-2-β-CKPT-C u64-carrier-disambiguation (2026-05-20)
+//!
+//! The `NewTypedArray*` producers below previously stamped the carrier with
+//! the bare `NativeKind::UInt64` kind — the SAME kind that labels a genuine
+//! scalar `u64`. That overload made `as_v2_typed_array(bits, kind)`
+//! dereference an arbitrary scalar `u64` value (e.g. `u64::MAX`) as a
+//! `*const HeapHeader`, SIGSEGV-ing on `print(x)` for `let x: u64 = ...`.
+//! The fix migrates the v2-typed-array POINTER carrier to
+//! `NativeKind::Ptr(HeapKind::TypedArray)` (ordinal 8, already extant),
+//! completing the Family-α struct-field / closure-capture migration. The
+//! kind track now discriminates: `Ptr(HeapKind::TypedArray)` is the array
+//! carrier, `UInt64` is a scalar. `clone_with_kind` / `drop_with_kind`
+//! route the carrier through `retain_v2_typed_array` /
+//! `release_v2_typed_array` (the array starts at refcount 1 from
+//! `with_capacity`'s `HeapHeader::new`), giving the direct carrier the same
+//! RAII discipline as the refcounted struct-field / closure-capture carrier.
+//!
+//! ADR-006 §2.3 / §2.7.7 / Wave 6.5 cluster C.
 
 use crate::bytecode::{Instruction, OpCode, Operand};
 use crate::executor::vm_impl::stack::drop_with_kind;
@@ -44,7 +63,7 @@ impl VirtualMachine {
                 };
                 let ptr = TypedArray::<f64>::with_capacity(cap);
                 unsafe { stamp_elem_type(ptr as *mut u8, ELEM_TYPE_F64) };
-                self.push_kinded(ptr as usize as u64, NativeKind::UInt64)?;
+                self.push_kinded(ptr as usize as u64, NativeKind::Ptr(HeapKind::TypedArray))?;
                 Ok(())
             }
 
@@ -55,7 +74,7 @@ impl VirtualMachine {
                 };
                 let ptr = TypedArray::<i64>::with_capacity(cap);
                 unsafe { stamp_elem_type(ptr as *mut u8, ELEM_TYPE_I64) };
-                self.push_kinded(ptr as usize as u64, NativeKind::UInt64)?;
+                self.push_kinded(ptr as usize as u64, NativeKind::Ptr(HeapKind::TypedArray))?;
                 Ok(())
             }
 
@@ -66,7 +85,7 @@ impl VirtualMachine {
                 };
                 let ptr = TypedArray::<i32>::with_capacity(cap);
                 unsafe { stamp_elem_type(ptr as *mut u8, ELEM_TYPE_I32) };
-                self.push_kinded(ptr as usize as u64, NativeKind::UInt64)?;
+                self.push_kinded(ptr as usize as u64, NativeKind::Ptr(HeapKind::TypedArray))?;
                 Ok(())
             }
 
@@ -77,7 +96,7 @@ impl VirtualMachine {
                 };
                 let ptr = TypedArray::<u8>::with_capacity(cap);
                 unsafe { stamp_elem_type(ptr as *mut u8, ELEM_TYPE_BOOL) };
-                self.push_kinded(ptr as usize as u64, NativeKind::UInt64)?;
+                self.push_kinded(ptr as usize as u64, NativeKind::Ptr(HeapKind::TypedArray))?;
                 Ok(())
             }
 
@@ -278,7 +297,7 @@ impl VirtualMachine {
                 };
                 let ptr = TypedArray::<i8>::with_capacity(cap);
                 unsafe { stamp_elem_type(ptr as *mut u8, ELEM_TYPE_I8) };
-                self.push_kinded(ptr as usize as u64, NativeKind::UInt64)?;
+                self.push_kinded(ptr as usize as u64, NativeKind::Ptr(HeapKind::TypedArray))?;
                 Ok(())
             }
             OpCode::TypedArrayGetI8 => {
@@ -328,7 +347,7 @@ impl VirtualMachine {
                 // Distinct ELEM_TYPE_U8 (not ELEM_TYPE_BOOL) — the buffer
                 // is byte-equivalent but the user-facing kind is U8 vs Bool.
                 unsafe { stamp_elem_type(ptr as *mut u8, ELEM_TYPE_U8) };
-                self.push_kinded(ptr as usize as u64, NativeKind::UInt64)?;
+                self.push_kinded(ptr as usize as u64, NativeKind::Ptr(HeapKind::TypedArray))?;
                 Ok(())
             }
             OpCode::TypedArrayGetU8 => {
@@ -375,7 +394,7 @@ impl VirtualMachine {
                 };
                 let ptr = TypedArray::<i16>::with_capacity(cap);
                 unsafe { stamp_elem_type(ptr as *mut u8, ELEM_TYPE_I16) };
-                self.push_kinded(ptr as usize as u64, NativeKind::UInt64)?;
+                self.push_kinded(ptr as usize as u64, NativeKind::Ptr(HeapKind::TypedArray))?;
                 Ok(())
             }
             OpCode::TypedArrayGetI16 => {
@@ -422,7 +441,7 @@ impl VirtualMachine {
                 };
                 let ptr = TypedArray::<u16>::with_capacity(cap);
                 unsafe { stamp_elem_type(ptr as *mut u8, ELEM_TYPE_U16) };
-                self.push_kinded(ptr as usize as u64, NativeKind::UInt64)?;
+                self.push_kinded(ptr as usize as u64, NativeKind::Ptr(HeapKind::TypedArray))?;
                 Ok(())
             }
             OpCode::TypedArrayGetU16 => {
@@ -469,7 +488,7 @@ impl VirtualMachine {
                 };
                 let ptr = TypedArray::<u32>::with_capacity(cap);
                 unsafe { stamp_elem_type(ptr as *mut u8, ELEM_TYPE_U32) };
-                self.push_kinded(ptr as usize as u64, NativeKind::UInt64)?;
+                self.push_kinded(ptr as usize as u64, NativeKind::Ptr(HeapKind::TypedArray))?;
                 Ok(())
             }
             OpCode::TypedArrayGetU32 => {
@@ -530,7 +549,7 @@ impl VirtualMachine {
                 };
                 let ptr = TypedArray::<f32>::with_capacity(cap);
                 unsafe { stamp_elem_type(ptr as *mut u8, ELEM_TYPE_F32) };
-                self.push_kinded(ptr as usize as u64, NativeKind::UInt64)?;
+                self.push_kinded(ptr as usize as u64, NativeKind::Ptr(HeapKind::TypedArray))?;
                 Ok(())
             }
             OpCode::TypedArrayGetF32 => {
@@ -579,7 +598,7 @@ impl VirtualMachine {
                 };
                 let ptr = TypedArray::<char>::with_capacity(cap);
                 unsafe { stamp_elem_type(ptr as *mut u8, ELEM_TYPE_CHAR) };
-                self.push_kinded(ptr as usize as u64, NativeKind::UInt64)?;
+                self.push_kinded(ptr as usize as u64, NativeKind::Ptr(HeapKind::TypedArray))?;
                 Ok(())
             }
             OpCode::TypedArrayGetChar => {
@@ -658,7 +677,7 @@ impl VirtualMachine {
                 };
                 let ptr = TypedArray::<*const StringObj>::with_capacity(cap);
                 unsafe { stamp_elem_type(ptr as *mut u8, ELEM_TYPE_STRING) };
-                self.push_kinded(ptr as usize as u64, NativeKind::UInt64)?;
+                self.push_kinded(ptr as usize as u64, NativeKind::Ptr(HeapKind::TypedArray))?;
                 Ok(())
             }
             OpCode::TypedArrayGetString => {
@@ -728,7 +747,7 @@ impl VirtualMachine {
                 };
                 let ptr = TypedArray::<*const DecimalObj>::with_capacity(cap);
                 unsafe { stamp_elem_type(ptr as *mut u8, ELEM_TYPE_DECIMAL) };
-                self.push_kinded(ptr as usize as u64, NativeKind::UInt64)?;
+                self.push_kinded(ptr as usize as u64, NativeKind::Ptr(HeapKind::TypedArray))?;
                 Ok(())
             }
             OpCode::TypedArrayGetDecimal => {
@@ -814,7 +833,7 @@ impl VirtualMachine {
                 };
                 let ptr = TypedArray::<*const TypedObjectStorage>::with_capacity(cap);
                 unsafe { stamp_elem_type(ptr as *mut u8, ELEM_TYPE_TYPED_OBJECT) };
-                self.push_kinded(ptr as usize as u64, NativeKind::UInt64)?;
+                self.push_kinded(ptr as usize as u64, NativeKind::Ptr(HeapKind::TypedArray))?;
                 Ok(())
             }
             OpCode::TypedArrayGetTypedObject => {

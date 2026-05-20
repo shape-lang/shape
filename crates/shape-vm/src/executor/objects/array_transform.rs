@@ -119,10 +119,13 @@ pub(super) fn detect_v2_raw_string_or_decimal_receiver(
     slot: &KindedSlot,
 ) -> Option<crate::executor::v2_handlers::v2_array_detect::V2TypedArrayView> {
     use crate::executor::v2_handlers::v2_array_detect::{as_v2_typed_array, V2ElemType};
-    if slot.kind != NativeKind::UInt64 {
+    // r5c-2-β-CKPT-C: the v2-raw `*mut TypedArray<T>` carrier kind is
+    // `NativeKind::Ptr(HeapKind::TypedArray)` — the kind track is the
+    // carrier discriminator.
+    if slot.kind != NativeKind::Ptr(HeapKind::TypedArray) {
         return None;
     }
-    let view = as_v2_typed_array(slot.slot.raw(), NativeKind::UInt64)?;
+    let view = as_v2_typed_array(slot.slot.raw(), slot.kind)?;
     match view.elem_type {
         V2ElemType::String | V2ElemType::Decimal => Some(view),
         _ => None,

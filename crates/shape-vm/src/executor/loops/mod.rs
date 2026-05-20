@@ -214,15 +214,19 @@ impl VirtualMachine {
         let idx = decode_iter_idx(idx_bits, idx_kind)?;
 
         // v2 typed array fast path: `as_v2_typed_array(bits, kind)` returns
-        // Some only when `kind == UInt64` and the header pad byte stamps a
-        // v2 typed array. No Arc share involved on this path.
+        // Some only when `kind == Ptr(HeapKind::TypedArray)` (r5c-2-β-CKPT-C
+        // u64-carrier-disambiguation) and the header pad byte stamps a v2
+        // typed array.
         if let Some(view) =
             crate::executor::v2_handlers::v2_array_detect::as_v2_typed_array(iter_bits, iter_kind)
         {
             let done = idx < 0 || idx as u32 >= view.len;
-            // Idx is plain numeric; iter is a raw `*mut TypedArray<_>`
-            // pointer in `UInt64` (no refcount). `drop_with_kind` is a
-            // no-op for both kinds, but call it for symmetry/future-proof.
+            // Idx is plain numeric; iter is a v2-raw `*mut TypedArray<_>`
+            // pointer in `Ptr(HeapKind::TypedArray)`. `drop_with_kind`
+            // retires the popped iter share via `release_v2_typed_array`
+            // (the loop `Dup`s the iter before each `IterDone`, so the
+            // share count stays balanced — same RAII contract as the
+            // heap-Arc arms below).
             drop_with_kind(idx_bits, idx_kind);
             drop_with_kind(iter_bits, iter_kind);
             return self.push_kinded(done as u64, NativeKind::Bool);

@@ -111,7 +111,8 @@ fn ckpt2_surface(op: &'static str, args: &[KindedSlot]) -> VMError {
 // `DecimalObj::value` content comparison; result is a fresh `TypedArray::
 // <*const <X>Obj>::with_capacity(n)` with `v2_retain(&(*p).header)` per
 // stored element; result slot is `KindedSlot::new(ValueSlot::from_raw(ptr
-// as u64), NativeKind::UInt64)` per the v2-raw producer carrier shape.
+// as u64), NativeKind::Ptr(HeapKind::TypedArray))` per the v2-raw producer
+// carrier shape (r5c-2-β-CKPT-C u64-carrier-disambiguation).
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Operation tag for the unified v2-raw String/Decimal set-op dispatcher.
@@ -140,11 +141,13 @@ fn as_v2_raw_string_decimal(
     slot: &KindedSlot,
 ) -> Option<(crate::executor::v2_handlers::v2_array_detect::V2ElemType, u64, u32)> {
     use crate::executor::v2_handlers::v2_array_detect::{as_v2_typed_array, V2ElemType};
-    if slot.kind != NativeKind::UInt64 {
+    // r5c-2-β-CKPT-C: the v2-raw `*mut TypedArray<T>` carrier kind is
+    // `NativeKind::Ptr(HeapKind::TypedArray)`.
+    if slot.kind != NativeKind::Ptr(HeapKind::TypedArray) {
         return None;
     }
     let bits = slot.slot.raw();
-    let view = as_v2_typed_array(bits, NativeKind::UInt64)?;
+    let view = as_v2_typed_array(bits, slot.kind)?;
     match view.elem_type {
         V2ElemType::String | V2ElemType::Decimal => Some((view.elem_type, bits, view.len)),
         _ => None,
@@ -159,9 +162,10 @@ fn as_v2_raw_string_decimal(
 /// equality + `Decimal == Decimal` `PartialEq`); computes the kept-index
 /// permutation per `op`; allocates a fresh `TypedArray<*const <X>Obj>` with
 /// `v2_retain(&(*p).header)` on each stored element pointer; stamps the
-/// elem_type byte; returns a `KindedSlot` of kind `NativeKind::UInt64`. The
-/// source receivers are NOT consumed — the dispatch shell owns the source
-/// shares; this helper only READS the source buffers.
+/// elem_type byte; returns a `KindedSlot` of kind
+/// `NativeKind::Ptr(HeapKind::TypedArray)`. The source receivers are NOT
+/// consumed — the dispatch shell owns the source shares; this helper only
+/// READS the source buffers.
 ///
 /// **Unreachable at runtime under HEAD `5d0f1524`** per the gate-state comment
 /// at the section head. The body is the consumer-surface contract for the
@@ -325,7 +329,10 @@ fn set_op_v2_raw_string_decimal(
         },
         _ => unreachable!("as_v2_raw_string_decimal filtered other variants"),
     };
-    Ok(KindedSlot::new(ValueSlot::from_raw(out_bits), NativeKind::UInt64))
+    Ok(KindedSlot::new(
+        ValueSlot::from_raw(out_bits),
+        NativeKind::Ptr(HeapKind::TypedArray),
+    ))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

@@ -177,53 +177,40 @@ unsafe fn read_elem_type_byte(ptr: *const u8) -> u8 {
 
 /// Try to interpret a `(bits, kind)` pair as a v2 typed array pointer.
 ///
-/// v2 typed array pointers flow through the kinded API in one of two carrier
-/// kinds, both holding the *identical* raw `*mut TypedArray<T>` pointer:
+/// v2 typed array pointers flow through the kinded API under a *single*
+/// carrier kind — `NativeKind::Ptr(HeapKind::TypedArray)` — holding the raw
+/// `*mut TypedArray<T>` pointer. This is the canonical carrier for every
+/// producer: the `NewTypedArray*` allocation opcodes
+/// (`v2_handlers/array.rs`), the `op_slice_access` / `op_array_push`
+/// re-stash sites (`objects/array_operations.rs`), the struct-field array
+/// read (`field_tag_to_native_kind` maps `FIELD_TAG_ARRAY` here) and the
+/// closure capture (`closure_layout.rs::native_kind_from_concrete_type`
+/// maps `ConcreteType::Array(_)` here). The slot's `clone_with_kind` /
+/// `drop_with_kind` arms route through `retain_v2_typed_array` /
+/// `release_v2_typed_array`. The on-header `HeapHeader.kind` check below
+/// confirms the pointee is a genuine `TypedArray<T>`.
 ///
-/// - `NativeKind::UInt64` — the direct, single-owner carrier produced by the
-///   `NewTypedArray*` allocation opcodes (no refcount; freed by a dedicated
-///   drop opcode at scope exit; see `v2_handlers/array.rs`).
-/// - `NativeKind::Ptr(HeapKind::TypedArray)` — the refcounted carrier produced
-///   when an `Array<T>` value is read out of a struct field
-///   (`field_tag_to_native_kind` maps `FIELD_TAG_ARRAY` here) or a closure
-///   capture (`closure_layout.rs::native_kind_from_concrete_type` maps
-///   `ConcreteType::Array(_)` here). The slot's `clone_with_kind` /
-///   `drop_with_kind` arms route through `retain_v2_typed_array` /
-///   `release_v2_typed_array` (r5c-2-β-δ-(α)). The on-header `HeapHeader.kind`
-///   check below still confirms the pointee is a genuine `TypedArray<T>`.
-///
-/// Any other `kind` is rejected. r5c-2-β-δ-(α) (2026-05-20): the pre-fix
-/// `kind != UInt64 → None` early-out rejected the `Ptr(HeapKind::TypedArray)`
-/// carrier outright — that left every consumer opcode (`GetProp`, `Length`,
-/// `sum`, ...) surface-and-stopping on struct-field / closure-capture array
-/// reads. The legacy `Arc<TypedArrayData>` boxed path that the old reject
-/// guarded against is deleted, so `Ptr(HeapKind::TypedArray)` now
-/// unambiguously denotes a v2-raw `*mut TypedArray<T>` carrier.
+/// Any other `kind` is rejected — crucially `NativeKind::UInt64` is NOT
+/// accepted. r5c-2-β-CKPT-C u64-carrier-disambiguation (2026-05-20): the
+/// pre-fix arm `NativeKind::UInt64 | Ptr(HeapKind::TypedArray)` overloaded
+/// the scalar-`u64` kind with the array-pointer carrier, so a genuine
+/// scalar `u64` value (e.g. `u64::MAX`) reaching this function was
+/// dereferenced as a `*const HeapHeader` → SIGSEGV (`let x: u64 = ...;
+/// print(x)`). The producers now stamp the array carrier with
+/// `Ptr(HeapKind::TypedArray)` exclusively, so the kind track itself is
+/// the discriminator: a `UInt64` slot is unambiguously a scalar and never
+/// reaches a pointer dereference here. NO value/low-address heuristic, NO
+/// `is_heap()` probe — the kind track separates the two carriers
+/// structurally (CLAUDE.md §"Parallel-implementation across
+/// producer/consumer carrier-shape boundaries").
 #[inline]
 pub fn as_v2_typed_array(bits: u64, kind: NativeKind) -> Option<V2TypedArrayView> {
-    if !matches!(
-        kind,
-        NativeKind::UInt64 | NativeKind::Ptr(HeapKind::TypedArray)
-    ) {
+    if !matches!(kind, NativeKind::Ptr(HeapKind::TypedArray)) {
         return None;
     }
     if bits == 0 {
         return None;
     }
-    // Note (W12 S1 reopen, 2026-05-13): a defensive low-address-pointer
-    // guard (`bits < 0x1_0000 → None`) was added in the pre-reopen S1
-    // commit `4bcae991` to paper over the `NativeKind::UInt64` overload
-    // between scalar u64 and v2-typed-array-pointer carrier (small U64
-    // element values like `1000` would otherwise deref into unmapped
-    // memory at `*(bits as *const HeapHeader)` and SIGSEGV). The
-    // supervisor's reopen names that heuristic as an `is_heap()` probe
-    // in different framing — refused on sight per CLAUDE.md
-    // §"Parallel-implementation across producer/consumer carrier-shape
-    // boundaries" entry (e55b8e71). The structural fix — adding a
-    // discriminator to `NativeKind` so the kind track itself separates
-    // "pointer to TypedArray<T>" from "scalar u64" — is deferred to
-    // sub-cluster S1.5; `Array<u64>` migration is excluded from S1
-    // accordingly.
     let ptr = bits as usize as *mut u8;
     let header = unsafe { &*(ptr as *const HeapHeader) };
     if header.kind != HEAP_KIND_V2_TYPED_ARRAY {
@@ -1846,10 +1833,11 @@ mod tests {
     use super::*;
 
     /// Build the kinded `(bits, kind)` pair for a v2 typed array pointer
-    /// (the shape `v2_handlers/array.rs` push: raw ptr bits + `UInt64`).
+    /// (the shape `v2_handlers/array.rs` push: raw ptr bits +
+    /// `Ptr(HeapKind::TypedArray)` per r5c-2-β-CKPT-C).
     #[inline]
     fn ptr_pair(ptr: *mut u8) -> (u64, NativeKind) {
-        (ptr as usize as u64, NativeKind::UInt64)
+        (ptr as usize as u64, NativeKind::Ptr(HeapKind::TypedArray))
     }
 
     #[test]
@@ -2070,8 +2058,46 @@ mod tests {
         // Wrong kind: bool.
         assert!(as_v2_typed_array(1u64, NativeKind::Bool).is_none());
 
-        // Right kind but null pointer.
+        // r5c-2-β-CKPT-C: a genuine scalar `u64` (kind = `NativeKind::UInt64`)
+        // is NOT the typed-array carrier. The function rejects it on the kind
+        // alone — the bits (here `u64::MAX`) are never dereferenced as a
+        // pointer. This is the regression guard for the SIGSEGV in
+        // `let x: u64 = 18446744073709551615; print(x)`.
+        assert!(as_v2_typed_array(u64::MAX, NativeKind::UInt64).is_none());
+        assert!(as_v2_typed_array(1000u64, NativeKind::UInt64).is_none());
         assert!(as_v2_typed_array(0u64, NativeKind::UInt64).is_none());
+
+        // Right kind but null pointer.
+        assert!(
+            as_v2_typed_array(0u64, NativeKind::Ptr(HeapKind::TypedArray)).is_none()
+        );
+    }
+
+    /// r5c-2-β-CKPT-C: the kind track itself is the carrier discriminator.
+    /// The IDENTICAL pointer bits are recognised as a typed array under the
+    /// `Ptr(HeapKind::TypedArray)` carrier kind and REJECTED under the
+    /// scalar `UInt64` kind — `as_v2_typed_array` never inspects the value
+    /// of the bits to guess whether it is a pointer (no low-address /
+    /// is_heap heuristic).
+    #[test]
+    fn test_kind_track_discriminates_array_carrier_from_scalar() {
+        let arr = TypedArray::<i64>::from_slice(&[100, 200]);
+        unsafe { stamp_elem_type(arr as *mut u8, ELEM_TYPE_I64) };
+        let bits = arr as usize as u64;
+
+        // Same bits, array carrier kind → detected.
+        let view = as_v2_typed_array(bits, NativeKind::Ptr(HeapKind::TypedArray))
+            .expect("array carrier kind must detect the typed array");
+        assert_eq!(view.elem_type, V2ElemType::I64);
+        assert_eq!(view.len, 2);
+
+        // Same bits, scalar `UInt64` kind → rejected on the kind alone.
+        assert!(
+            as_v2_typed_array(bits, NativeKind::UInt64).is_none(),
+            "a scalar-u64 kind must NOT be treated as the array carrier"
+        );
+
+        unsafe { TypedArray::<i64>::drop_array(arr) };
     }
 
     // ──────────────────────────────────────────────────────────────────────

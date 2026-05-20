@@ -129,21 +129,16 @@ impl<'a> ValueFormatter<'a> {
             | NativeKind::NullableInt64
             | NativeKind::IntSize
             | NativeKind::NullableIntSize => slot.slot.as_i64().to_string(),
+            // r5c-2-β-CKPT-C u64-carrier-disambiguation (2026-05-20): a
+            // `UInt64` slot is now unambiguously a genuine scalar `u64` —
+            // the v2-typed-array pointer carrier moved to
+            // `NativeKind::Ptr(HeapKind::TypedArray)` (formatted in
+            // `format_heap_kind`'s `HeapKind::TypedArray` arm). The pre-fix
+            // `as_v2_typed_array(bits, UInt64)` probe dereferenced an
+            // arbitrary scalar `u64` value (e.g. `u64::MAX`) as a
+            // `*const HeapHeader` → SIGSEGV on `print(x)`. Render directly.
             NativeKind::UInt64 | NativeKind::NullableUInt64 => {
-                // ADR-006 §2.7.7 / Wave 6.5 D-v2-array-detect — v2 typed
-                // arrays flow through the kinded API as raw `*mut TypedArray<T>`
-                // bits stamped with `NativeKind::UInt64` (no Arc, no
-                // refcount). Probe the heap-header `_pad` byte to recognize
-                // a v2 typed array pointer; fall back to integer rendering
-                // for plain UInt64 scalars.
-                if let Some(view) = crate::executor::v2_handlers::v2_array_detect::as_v2_typed_array(
-                    bits,
-                    slot.kind,
-                ) {
-                    self.format_v2_typed_array(&view)
-                } else {
-                    slot.slot.as_u64().to_string()
-                }
+                slot.slot.as_u64().to_string()
             }
             NativeKind::UInt8
             | NativeKind::NullableUInt8
@@ -268,10 +263,27 @@ impl<'a> ValueFormatter<'a> {
                 }
             }
             HeapKind::TypedArray => {
-                // V3-S5 ckpt-5: TypedArrayData enum + HeapKind::TypedArray
-                // ordinal DELETED at ckpt-1..ckpt-4. Format placeholder.
+                // r5c-2-β-CKPT-C u64-carrier-disambiguation (2026-05-20):
+                // `Ptr(HeapKind::TypedArray)` is the canonical carrier for
+                // every v2-raw `*mut TypedArray<T>` pointer (the
+                // `NewTypedArray*` direct carrier + the refcounted
+                // struct-field / closure-capture carrier — both hold the
+                // identical pointer shape). Detect the array via the
+                // on-header kind + `_pad` element-type byte and render via
+                // the per-element walker. The legacy `Arc<TypedArrayData>`
+                // boxed carrier this ordinal once labelled is deleted; the
+                // pointee is unambiguously a v2-raw `TypedArray<T>`.
                 let _ = depth;
-                "[TypedArray:ckpt5-surface]".to_string()
+                match crate::executor::v2_handlers::v2_array_detect::as_v2_typed_array(
+                    bits,
+                    NativeKind::Ptr(HeapKind::TypedArray),
+                ) {
+                    Some(view) => self.format_v2_typed_array(&view),
+                    // Kind says TypedArray but the bits failed v2 detection
+                    // (missing `HEAP_KIND_V2_TYPED_ARRAY` header). Render an
+                    // opaque tag rather than dereferencing further.
+                    None => "[TypedArray:?]".to_string(),
+                }
             }
             HeapKind::TypedObject => {
                 // ADR-006 §2.7.4 / §2.7.6 / Q8 — walk the per-field slots,
@@ -1198,5 +1210,54 @@ mod tests {
 
         let c2 = KindedSlot::from_char('λ');
         assert_eq!(formatter.format_kinded(&c2), "λ");
+    }
+
+    /// r5c-2-β-CKPT-C u64-carrier-disambiguation regression guard.
+    ///
+    /// A `NativeKind::UInt64` slot is a genuine scalar `u64` — the
+    /// formatter must render it as the unsigned integer value and must NOT
+    /// dereference the bits as a `*const HeapHeader` (the pre-fix
+    /// `as_v2_typed_array(bits, UInt64)` probe SIGSEGV'd on
+    /// `let x: u64 = 18446744073709551615; print(x)`). Covers small,
+    /// mid-range and `u64::MAX` values — `u64::MAX` is the load-bearing
+    /// case: as a pointer it is non-canonical and would fault on deref;
+    /// as a signed integer it would render `-1`.
+    #[test]
+    fn test_format_u64_scalar_renders_unsigned_no_deref() {
+        let reg = create_test_registry();
+        let formatter = ValueFormatter::new(&reg);
+
+        for &v in &[0u64, 42u64, 1000u64, u64::MAX, u64::MAX - 1] {
+            let slot = KindedSlot::new(
+                ValueSlot::from_raw(v),
+                NativeKind::UInt64,
+            );
+            assert_eq!(formatter.format_kinded(&slot), v.to_string());
+            std::mem::forget(slot);
+        }
+    }
+
+    /// A v2 typed array now flows through the kinded API under the
+    /// `NativeKind::Ptr(HeapKind::TypedArray)` carrier kind (r5c-2-β-CKPT-C
+    /// u64-carrier-disambiguation). The formatter's `HeapKind::TypedArray`
+    /// arm detects the v2-raw `*mut TypedArray<T>` via the on-header kind +
+    /// element-type byte and renders the elements.
+    #[test]
+    fn test_format_typed_array_via_ptr_carrier() {
+        use shape_value::v2::typed_array::{TypedArray, ELEM_TYPE_I64};
+        use crate::executor::v2_handlers::v2_array_detect::stamp_elem_type;
+
+        let reg = create_test_registry();
+        let formatter = ValueFormatter::new(&reg);
+
+        let arr = TypedArray::<i64>::from_slice(&[7, 8, 9]);
+        unsafe { stamp_elem_type(arr as *mut u8, ELEM_TYPE_I64) };
+        let slot = KindedSlot::new(
+            ValueSlot::from_raw(arr as usize as u64),
+            NativeKind::Ptr(HeapKind::TypedArray),
+        );
+        assert_eq!(formatter.format_kinded(&slot), "[7, 8, 9]");
+        std::mem::forget(slot);
+        unsafe { TypedArray::<i64>::drop_array(arr) };
     }
 }

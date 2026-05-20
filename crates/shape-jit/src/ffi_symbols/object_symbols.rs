@@ -15,8 +15,8 @@ use super::super::ffi::conversion::{
     jit_print_i64, jit_print_iterator, jit_print_lazy, jit_print_mutex,
     jit_print_option, jit_print_priority_queue, jit_print_range,
     jit_print_result, jit_print_str, jit_print_typed_array,
-    jit_print_typed_object, jit_string_concat, jit_to_number, jit_to_string,
-    jit_type_check, jit_typeof,
+    jit_print_typed_object, jit_print_u64, jit_string_concat, jit_to_number,
+    jit_to_string, jit_type_check, jit_typeof,
 };
 #[allow(deprecated)]
 use super::super::ffi::object::{
@@ -155,6 +155,7 @@ pub fn register_object_symbols(builder: &mut JITBuilder) {
     // deleted kind-blind tag-decode in `format_value_word` for scalar
     // operands.
     builder.symbol("jit_print_i64", jit_print_i64 as *const u8);
+    builder.symbol("jit_print_u64", jit_print_u64 as *const u8);
     builder.symbol("jit_print_f64", jit_print_f64 as *const u8);
     builder.symbol("jit_print_bool", jit_print_bool as *const u8);
     // W12-jit-print-heap-arm-classification (Phase 3 cluster-0 Round 8A,
@@ -761,6 +762,18 @@ pub fn declare_object_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<
             .declare_function("jit_print_i64", Linkage::Import, &sig)
             .expect("Failed to declare jit_print_i64");
         ffi_funcs.insert("jit_print_i64".to_string(), func_id);
+    }
+    // r5c-2-β-CKPT-C u64-carrier-disambiguation: jit_print_u64(value: u64)
+    // -> void — UNSIGNED render path for `NativeKind::UInt64` / `UIntSize`
+    // operand slots (the I64 Cranelift param carries the raw bits; the FFI
+    // body reinterprets as `u64`).
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        let func_id = module
+            .declare_function("jit_print_u64", Linkage::Import, &sig)
+            .expect("Failed to declare jit_print_u64");
+        ffi_funcs.insert("jit_print_u64".to_string(), func_id);
     }
     // jit_print_f64(value: f64) -> void
     {

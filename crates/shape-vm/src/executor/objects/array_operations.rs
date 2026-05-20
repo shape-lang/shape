@@ -14,12 +14,19 @@
 //!
 //! The pre-ckpt-1 file had two carrier paths:
 //!   - `Ptr(HeapKind::TypedArray)` Arc-boxed `Arc<TypedArrayData>` (DELETED)
-//!   - `NativeKind::UInt64` v2-raw `*mut TypedArray<T>` (PRESERVED)
+//!   - v2-raw `*mut TypedArray<T>` (PRESERVED)
 //!
 //! The Arc-boxed path's helpers (`element_kind_of`, `push_into_typed_array`,
-//! `pop_from_typed_array`, `slice_typed_array`) are DELETED. The
-//! UInt64 v2-raw path is the canonical pattern per W12 audit §A.3 +
-//! §3.1 scalar recipe and stays live.
+//! `pop_from_typed_array`, `slice_typed_array`) are DELETED. The v2-raw
+//! path is the canonical pattern per W12 audit §A.3 + §3.1 scalar recipe
+//! and stays live.
+//!
+//! r5c-2-β-CKPT-C u64-carrier-disambiguation (2026-05-20): the v2-raw
+//! `*mut TypedArray<T>` carrier was migrated off the carrier-overloaded
+//! bare `NativeKind::UInt64` kind onto `NativeKind::Ptr(HeapKind::
+//! TypedArray)` — the kind track is now the carrier discriminator. The
+//! `op_array_*` arms below dispatch on `Ptr(HeapKind::TypedArray)`; a
+//! `UInt64` slot is a genuine scalar `u64` and is no longer dereferenced.
 //!
 //! Refusal #1 binding: TypedArrayData resurrection under any rename
 //! refused on sight.
@@ -35,7 +42,7 @@ use crate::executor::v2_handlers::v2_array_detect::{
 use crate::executor::vm_impl::stack::drop_with_kind;
 use crate::executor::VirtualMachine;
 use shape_value::v2::typed_array::TypedArray;
-use shape_value::{NativeKind, VMError};
+use shape_value::{HeapKind, NativeKind, VMError};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // V3-S5 ckpt-5 surface-and-stop builder (for the deleted Ptr(HeapKind::
@@ -65,16 +72,20 @@ impl VirtualMachine {
         let (array_bits, array_kind) = self.pop_kinded()?;
 
         match array_kind {
-            NativeKind::UInt64 => {
+            NativeKind::Ptr(HeapKind::TypedArray) => {
                 // v2 typed-array carrier (raw `*mut TypedArray<T>` with
-                // UInt64 kind). Detect → push_element → re-stash.
+                // `Ptr(HeapKind::TypedArray)` kind). Detect → push_element
+                // → re-stash.
                 match v2_array_detect::as_v2_typed_array(array_bits, array_kind) {
                     Some(view) => {
                         match v2_array_detect::push_element(
                             &view, value_bits, value_kind,
                         ) {
                             Ok(()) => {
-                                self.push_kinded(array_bits, NativeKind::UInt64)
+                                self.push_kinded(
+                                    array_bits,
+                                    NativeKind::Ptr(HeapKind::TypedArray),
+                                )
                             }
                             Err(msg) => {
                                 drop_with_kind(value_bits, value_kind);
@@ -88,8 +99,8 @@ impl VirtualMachine {
                     None => {
                         drop_with_kind(value_bits, value_kind);
                         Err(VMError::NotImplemented(
-                            "ArrayPush: UInt64 receiver did not resolve to a \
-                             v2 typed-array pointer (HEAP_KIND_V2_TYPED_ARRAY \
+                            "ArrayPush: TypedArray receiver did not resolve to \
+                             a v2 typed-array pointer (HEAP_KIND_V2_TYPED_ARRAY \
                              header missing). ADR-006 §2.7.6 / §2.7.7."
                                 .to_string(),
                         ))
@@ -124,7 +135,7 @@ impl VirtualMachine {
         let (_peek_bits, array_kind) = self.read_receiver_loc(&receiver_loc);
 
         match array_kind {
-            NativeKind::UInt64 => {
+            NativeKind::Ptr(HeapKind::TypedArray) => {
                 let (array_bits, _) = self.read_receiver_loc(&receiver_loc);
                 match v2_array_detect::as_v2_typed_array(array_bits, array_kind) {
                     Some(view) => {
@@ -144,8 +155,8 @@ impl VirtualMachine {
                     None => {
                         drop_with_kind(value_bits, value_kind);
                         Err(VMError::NotImplemented(
-                            "ArrayPushLocal: UInt64 slot did not resolve to a \
-                             v2 typed-array pointer (HEAP_KIND_V2_TYPED_ARRAY \
+                            "ArrayPushLocal: TypedArray slot did not resolve to \
+                             a v2 typed-array pointer (HEAP_KIND_V2_TYPED_ARRAY \
                              header missing). ADR-006 §2.7.6 / §2.7.7."
                                 .to_string(),
                         ))
@@ -175,7 +186,7 @@ impl VirtualMachine {
         let (array_bits, array_kind) = self.pop_kinded()?;
 
         match array_kind {
-            NativeKind::UInt64 => {
+            NativeKind::Ptr(HeapKind::TypedArray) => {
                 match v2_array_detect::as_v2_typed_array(array_bits, array_kind) {
                     Some(view) => {
                         let result = v2_array_detect::pop_element(&view);
@@ -192,7 +203,7 @@ impl VirtualMachine {
                         }
                     }
                     None => Err(VMError::NotImplemented(
-                        "ArrayPop: UInt64 receiver did not resolve to a v2 \
+                        "ArrayPop: TypedArray receiver did not resolve to a v2 \
                          typed-array pointer (HEAP_KIND_V2_TYPED_ARRAY \
                          header missing). ADR-006 §2.7.6 / §2.7.7."
                             .to_string(),
@@ -232,16 +243,19 @@ impl VirtualMachine {
         let _ = (start_bits, end_bits);
 
         match array_kind {
-            NativeKind::UInt64 => {
+            NativeKind::Ptr(HeapKind::TypedArray) => {
                 match v2_array_detect::as_v2_typed_array(array_bits, array_kind) {
                     Some(view) => {
                         let (s, e) = clamp_range(start, end, view.len as i64);
                         let new_ptr = slice_v2_typed_array(&view, s, e);
                         let _ = array_bits;
-                        self.push_kinded(new_ptr as u64, NativeKind::UInt64)
+                        self.push_kinded(
+                            new_ptr as u64,
+                            NativeKind::Ptr(HeapKind::TypedArray),
+                        )
                     }
                     None => Err(VMError::NotImplemented(
-                        "SliceAccess: UInt64 receiver did not resolve to a \
+                        "SliceAccess: TypedArray receiver did not resolve to a \
                          v2 typed-array pointer (HEAP_KIND_V2_TYPED_ARRAY \
                          header missing). ADR-006 §2.7.6 / §2.7.7."
                             .to_string(),
@@ -301,7 +315,8 @@ fn clamp_range(start: i64, end: i64, len: i64) -> (usize, usize) {
 
 /// Slice a v2 typed array `[s, e)` into a freshly-allocated
 /// `TypedArray<T>` of the same element type. Returns the raw pointer
-/// (slot carrier shape — `NativeKind::UInt64`).
+/// (slot carrier shape — `NativeKind::Ptr(HeapKind::TypedArray)` per
+/// r5c-2-β-CKPT-C).
 fn slice_v2_typed_array(
     view: &V2TypedArrayView,
     s: usize,

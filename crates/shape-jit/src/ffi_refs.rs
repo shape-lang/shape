@@ -58,6 +58,11 @@ pub struct FFIFuncRefs {
     // dispatched by the MIR-side print emitter when the operand's
     // `NativeKind` is statically known.
     pub(crate) print_i64: FuncRef,
+    // r5c-2-β-CKPT-C u64-carrier-disambiguation: UNSIGNED render path for
+    // `NativeKind::UInt64` / `UIntSize` operand slots. `print_i64`
+    // reinterprets the bits as `i64` (so `u64::MAX` displayed `-1`); the
+    // unsigned kinds route here instead for VM == JIT identical output.
+    pub(crate) print_u64: FuncRef,
     pub(crate) print_f64: FuncRef,
     pub(crate) print_bool: FuncRef,
     // W12-jit-print-heap-arm-classification (Phase 3 cluster-0 Round 8A,
