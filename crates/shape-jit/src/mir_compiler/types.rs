@@ -1142,6 +1142,82 @@ fn parametric_method_return_kind_from_receiver(
         ("set" | "delete" | "merge", ConcreteType::HashMap(_, _)) => {
             Some(NativeKind::Ptr(HeapKind::HashMap))
         }
+        // ── HashSet.add / .delete / .union / .intersection / ───────
+        //    .difference ──────────────────────────────────────────
+        // Phase 4b Round 5c-2-β-α collection-mutator-chain VM/JIT
+        // divergence fix (v0.3-gating SOUNDNESS BUG ratified
+        // 2026-05-20; sister-class of the HashMap-has-2-chain fix
+        // immediately above). Per ADR-006 §2.7.5 producer-side stamp,
+        // the VM-side handlers in `set_methods.rs` —
+        // `v2_add` (line 259, `MUT_SELF_HASHSET_METHODS`),
+        // `v2_delete`, `v2_union` (312), `v2_intersection` (341),
+        // `v2_difference` (374) — all return
+        // `KindedSlot::from_hashset(...)`, carrier kind
+        // `Ptr(HeapKind::HashSet)`. (`add` / `delete` return the
+        // mutated receiver Arc; `union` / `intersection` /
+        // `difference` return a fresh result set — both produce the
+        // same `Ptr(HeapKind::HashSet)` carrier, mirror of how the
+        // HashMap arm covers self-returning `set` / `delete`
+        // alongside set-valued `merge`.) Pre-fix the chain-temp
+        // slot's kind stayed `None` → `UInt64` carrier fallback →
+        // `jit_call_method` legacy-format dispatch → `read_heap_kind`
+        // garbage → `_ => TAG_NULL` → the final `.has()` Bool
+        // consumer rendered `false`. Empirical reproducer at HEAD
+        // db3668c5: `Set().add("a").add("b").has("a")` was VM=true /
+        // JIT=false (the 1-chain `Set().add("a").has("a")` also
+        // diverged — same root cause as the HashMap 1-chain).
+        (
+            "add" | "delete" | "union" | "intersection" | "difference",
+            ConcreteType::HashSet(_),
+        ) => Some(NativeKind::Ptr(HeapKind::HashSet)),
+        // ── Deque.pushBack / .pushFront ────────────────────────────
+        // Phase 4b Round 5c-2-β-α collection-mutator-chain fix. The
+        // VM-side handlers `deque_methods::v2_push_back` (line 308)
+        // and `v2_push_front` (327) — both `MUT_SELF_DEQUE_METHODS`
+        // members — return `KindedSlot::from_deque(...)`, carrier
+        // kind `Ptr(HeapKind::Deque)`. (`popBack` / `popFront` are
+        // tuple-return — they return the popped element, not the
+        // deque — so they stay off this arm, mirror of the
+        // `MUT_SELF_TUPLE_RETURN_DEQUE_METHODS` exclusion.) Empirical
+        // reproducer at HEAD db3668c5:
+        // `Deque().pushBack(1).pushBack(2).size()` was VM=2 /
+        // JIT=garbage `-1407374883553280`.
+        ("pushBack" | "pushFront", ConcreteType::Deque(_)) => {
+            Some(NativeKind::Ptr(HeapKind::Deque))
+        }
+        // ── PriorityQueue.push ─────────────────────────────────────
+        // Phase 4b Round 5c-2-β-α collection-mutator-chain fix. The
+        // VM-side handler `priority_queue_methods::v2_push` (line
+        // 235) — the sole `MUT_SELF_PRIORITY_QUEUE_METHODS` member —
+        // returns `KindedSlot::from_priority_queue(...)`, carrier
+        // kind `Ptr(HeapKind::PriorityQueue)`. (`pop` is tuple-return
+        // per `MUT_SELF_TUPLE_RETURN_PRIORITY_QUEUE_METHODS` — stays
+        // off this arm.) Empirical reproducer at HEAD db3668c5:
+        // `PriorityQueue().push(5).push(3).size()` was VM=2 /
+        // JIT=garbage `-1407374883553280`.
+        ("push", ConcreteType::PriorityQueue) => {
+            Some(NativeKind::Ptr(HeapKind::PriorityQueue))
+        }
+        // ── Channel.send / .close ──────────────────────────────────
+        // Phase 4b Round 5c-2-β-α collection-mutator-chain fix. The
+        // VM-side handlers `channel_methods::v2_channel_send` (line
+        // 98) and `v2_channel_close` (193) both return
+        // `KindedSlot::from_channel(...)`, carrier kind
+        // `Ptr(HeapKind::Channel)` (the receiver share). `send` /
+        // `close` aren't in a `MUT_SELF_*` writeback set —
+        // `ChannelData` carries interior mutability via
+        // `Mutex<ChannelInner>` so mutations are observed through any
+        // Arc share with no slot writeback needed — but they ARE
+        // chainable self-returns. Pre-fix the chain-temp kind stayed
+        // `None` → `UInt64` carrier → legacy dispatch →
+        // wrong-type `Arc<ChannelData>` retain/release. Empirical
+        // reproducer at HEAD db3668c5 (hot-loop JIT-compiled):
+        // `Channel().send(7).send(9).try_recv()` SIGSEGV'd under JIT
+        // (use-after-free on the mis-dispatched `Arc<ChannelData>`)
+        // vs VM correct.
+        ("send" | "close", ConcreteType::Channel(_)) => {
+            Some(NativeKind::Ptr(HeapKind::Channel))
+        }
         // ── Mutex.get ──────────────────────────────────────────────
         // `Mutex<T>.get() → T` per §2.7.25. The VM-side
         // `executor/objects/mutex_methods::v2_get` clones the inner
@@ -1218,6 +1294,38 @@ fn method_return_kind_from_in_pass_kinds(
         // .delete / .merge" arm for the VM-side handler citations.
         ("set" | "delete" | "merge", NativeKind::Ptr(HeapKind::HashMap)) => {
             Some(NativeKind::Ptr(HeapKind::HashMap))
+        }
+        // HashSet / Deque / PriorityQueue / Channel mutator-chain
+        // links — Phase 4b Round 5c-2-β-α collection-mutator-chain
+        // VM/JIT divergence fix (v0.3-gating SOUNDNESS BUG ratified
+        // 2026-05-20; sister-class of the HashMap-has-2-chain arm
+        // above). Each receiver-kind / method-name pair mirrors the
+        // corresponding `parametric_method_return_kind_from_receiver`
+        // arm — VM-side handler citations are in that function's
+        // comments. `add` / `delete` (HashSet), `pushBack` /
+        // `pushFront` (Deque), `push` (PriorityQueue), `send` /
+        // `close` (Channel) return the (mutated) receiver Arc;
+        // `union` / `intersection` / `difference` (HashSet) return a
+        // fresh result set — both shapes carry
+        // `Ptr(HeapKind::<CollectionType>)`. This in-pass-kinds
+        // classifier is the load-bearing one for bare-form ctors
+        // (`Set()` / `Deque()` / `PriorityQueue()` / `Channel()`)
+        // whose receiver `ConcreteType` is `Struct(_)`/`Void` (not
+        // the typed-Arc collection type) — the EnumStore arm seeds
+        // the ctor temp's `kinds[]` slot, and this fixpoint pass
+        // propagates `Ptr(HeapKind::*)` through each chain link.
+        (
+            "add" | "delete" | "union" | "intersection" | "difference",
+            NativeKind::Ptr(HeapKind::HashSet),
+        ) => Some(NativeKind::Ptr(HeapKind::HashSet)),
+        ("pushBack" | "pushFront", NativeKind::Ptr(HeapKind::Deque)) => {
+            Some(NativeKind::Ptr(HeapKind::Deque))
+        }
+        ("push", NativeKind::Ptr(HeapKind::PriorityQueue)) => {
+            Some(NativeKind::Ptr(HeapKind::PriorityQueue))
+        }
+        ("send" | "close", NativeKind::Ptr(HeapKind::Channel)) => {
+            Some(NativeKind::Ptr(HeapKind::Channel))
         }
         _ => None,
     }
@@ -2542,6 +2650,350 @@ mod tests {
             Some(NativeKind::Bool),
             "temp3 (.has) must be Bool from well_known_method_return_kind"
         );
+    }
+
+    // ── Phase 4b Round 5c-2-β-α collection-mutator-chain regression ───
+    //
+    // Sister-class of the HashMap-has-2-chain tests above. Each
+    // collection type (HashSet / Deque / PriorityQueue / Channel) has a
+    // chainable mutator whose VM-side handler returns
+    // `KindedSlot::from_<collection>(...)`; pre-fix the JIT classifiers
+    // had no entry for these names so the chain-temp slot's kind stayed
+    // `None` → `UInt64` carrier fallback → legacy JIT-format dispatch →
+    // wrong consumer rendering (HashSet `false`, Deque/PQ garbage int,
+    // Channel SIGSEGV). These pin the producer-side stamp arms in both
+    // `parametric_method_return_kind_from_receiver` (ConcreteType-keyed)
+    // and `method_return_kind_from_in_pass_kinds` (in-pass-kinds-keyed,
+    // load-bearing for bare-form ctors).
+
+    #[test]
+    fn parametric_hashset_mutators_return_hashset_carrier() {
+        // HashSet.add / .delete return the mutated receiver Arc;
+        // .union / .intersection / .difference return a fresh result
+        // set — all five VM-side handlers in `set_methods.rs` (v2_add
+        // line 259, v2_delete, v2_union 312, v2_intersection 341,
+        // v2_difference 374) return `KindedSlot::from_hashset(...)`.
+        let cts = vec![ConcreteType::HashSet(Box::new(ConcreteType::String))];
+        for name in ["add", "delete", "union", "intersection", "difference"] {
+            let kind =
+                parametric_method_return_kind_from_receiver(name, &[copy_local(0)], &cts);
+            assert_eq!(
+                kind,
+                Some(NativeKind::Ptr(HeapKind::HashSet)),
+                "HashSet.{name} must classify to Ptr(HeapKind::HashSet)"
+            );
+        }
+    }
+
+    #[test]
+    fn parametric_deque_mutators_return_deque_carrier() {
+        // Deque.pushBack / .pushFront return the mutated receiver Arc.
+        // VM-side `deque_methods::v2_push_back` (308) / `v2_push_front`
+        // (327) return `KindedSlot::from_deque(...)`. `popBack` /
+        // `popFront` are tuple-return (pop the element) — NOT on the arm.
+        let cts = vec![ConcreteType::Deque(Box::new(ConcreteType::I64))];
+        for name in ["pushBack", "pushFront"] {
+            let kind =
+                parametric_method_return_kind_from_receiver(name, &[copy_local(0)], &cts);
+            assert_eq!(
+                kind,
+                Some(NativeKind::Ptr(HeapKind::Deque)),
+                "Deque.{name} must classify to Ptr(HeapKind::Deque)"
+            );
+        }
+        // popBack / popFront stay unclassified by this arm.
+        for name in ["popBack", "popFront"] {
+            let kind =
+                parametric_method_return_kind_from_receiver(name, &[copy_local(0)], &cts);
+            assert_eq!(kind, None, "Deque.{name} (tuple-return) must not classify here");
+        }
+    }
+
+    #[test]
+    fn parametric_priority_queue_push_returns_priority_queue_carrier() {
+        // PriorityQueue.push returns the mutated receiver Arc. VM-side
+        // `priority_queue_methods::v2_push` (235) returns
+        // `KindedSlot::from_priority_queue(...)`. `ConcreteType::
+        // PriorityQueue` is nullary (i64-only at landing per §2.7.18).
+        let cts = vec![ConcreteType::PriorityQueue];
+        let kind =
+            parametric_method_return_kind_from_receiver("push", &[copy_local(0)], &cts);
+        assert_eq!(kind, Some(NativeKind::Ptr(HeapKind::PriorityQueue)));
+        // pop is tuple-return — not classified here.
+        let kind =
+            parametric_method_return_kind_from_receiver("pop", &[copy_local(0)], &cts);
+        assert_eq!(kind, None, "PriorityQueue.pop (tuple-return) must not classify here");
+    }
+
+    #[test]
+    fn parametric_channel_mutators_return_channel_carrier() {
+        // Channel.send / .close return the receiver share. VM-side
+        // `channel_methods::v2_channel_send` (98) / `v2_channel_close`
+        // (193) return `KindedSlot::from_channel(...)`.
+        let cts = vec![ConcreteType::Channel(Box::new(ConcreteType::I64))];
+        for name in ["send", "close"] {
+            let kind =
+                parametric_method_return_kind_from_receiver(name, &[copy_local(0)], &cts);
+            assert_eq!(
+                kind,
+                Some(NativeKind::Ptr(HeapKind::Channel)),
+                "Channel.{name} must classify to Ptr(HeapKind::Channel)"
+            );
+        }
+    }
+
+    #[test]
+    fn in_pass_kinds_classifier_stamps_collection_mutators_from_kinds_track() {
+        // The bare-form ctor case (`Set()` / `Deque()` / etc.): the
+        // receiver `ConcreteType` is Void, but the EnumStore arm has
+        // stamped the collection's `Ptr(HeapKind::*)` into `kinds[]`.
+        // `method_return_kind_from_in_pass_kinds` reads that and
+        // classifies the chain-temp.
+        let hs_kinds = vec![Some(NativeKind::Ptr(HeapKind::HashSet)), None];
+        for name in ["add", "delete", "union", "intersection", "difference"] {
+            assert_eq!(
+                method_return_kind_from_in_pass_kinds(name, &[copy_local(0)], &hs_kinds),
+                Some(NativeKind::Ptr(HeapKind::HashSet)),
+                "HashSet.{name} in-pass-kinds classification"
+            );
+        }
+        let dq_kinds = vec![Some(NativeKind::Ptr(HeapKind::Deque)), None];
+        for name in ["pushBack", "pushFront"] {
+            assert_eq!(
+                method_return_kind_from_in_pass_kinds(name, &[copy_local(0)], &dq_kinds),
+                Some(NativeKind::Ptr(HeapKind::Deque)),
+                "Deque.{name} in-pass-kinds classification"
+            );
+        }
+        let pq_kinds = vec![Some(NativeKind::Ptr(HeapKind::PriorityQueue)), None];
+        assert_eq!(
+            method_return_kind_from_in_pass_kinds("push", &[copy_local(0)], &pq_kinds),
+            Some(NativeKind::Ptr(HeapKind::PriorityQueue)),
+        );
+        let ch_kinds = vec![Some(NativeKind::Ptr(HeapKind::Channel)), None];
+        for name in ["send", "close"] {
+            assert_eq!(
+                method_return_kind_from_in_pass_kinds(name, &[copy_local(0)], &ch_kinds),
+                Some(NativeKind::Ptr(HeapKind::Channel)),
+                "Channel.{name} in-pass-kinds classification"
+            );
+        }
+    }
+
+    #[test]
+    fn in_pass_kinds_classifier_rejects_cross_collection_method_names() {
+        // Cohort discipline: a method name is classified ONLY when the
+        // receiver kind is the matching collection. `add` on a Deque
+        // receiver, `pushBack` on a HashSet receiver, etc. must return
+        // None — no fabricated default per §2.7.7 #9.
+        let dq_kinds = vec![Some(NativeKind::Ptr(HeapKind::Deque)), None];
+        assert_eq!(
+            method_return_kind_from_in_pass_kinds("add", &[copy_local(0)], &dq_kinds),
+            None,
+            "HashSet method `add` on a Deque receiver must not classify"
+        );
+        let hs_kinds = vec![Some(NativeKind::Ptr(HeapKind::HashSet)), None];
+        assert_eq!(
+            method_return_kind_from_in_pass_kinds("pushBack", &[copy_local(0)], &hs_kinds),
+            None,
+            "Deque method `pushBack` on a HashSet receiver must not classify"
+        );
+        assert_eq!(
+            method_return_kind_from_in_pass_kinds("send", &[copy_local(0)], &hs_kinds),
+            None,
+            "Channel method `send` on a HashSet receiver must not classify"
+        );
+        // Scalar receiver — never classified.
+        let scalar_kinds = vec![Some(NativeKind::Int64), None];
+        assert_eq!(
+            method_return_kind_from_in_pass_kinds("add", &[copy_local(0)], &scalar_kinds),
+            None,
+        );
+    }
+
+    #[test]
+    fn hashset_chain_propagates_kind_through_call_stamp_fixpoint() {
+        // End-to-end: `Set().add("a").add("b").has("a")`.
+        //   temp0 = Set()          (EnumStore → Ptr(HashSet) in kinds[])
+        //   temp1 = temp0.add(...) (in-pass-kinds fixpoint → Ptr(HashSet))
+        //   temp2 = temp1.add(...) (in-pass-kinds fixpoint → Ptr(HashSet))
+        //   temp3 = temp2.has(...) (well_known → Bool)
+        let mir = collection_chain_mir(
+            "Set",
+            "add",
+            &[Operand::Constant(MirConstant::Str("a".to_string()))],
+            "has",
+            &[Operand::Constant(MirConstant::Str("a".to_string()))],
+        );
+        let concrete_types = vec![ConcreteType::Void; 4];
+        let kinds = infer_slot_kinds_with_concrete(&mir, &[], &concrete_types);
+        assert_eq!(kinds[0], Some(NativeKind::Ptr(HeapKind::HashSet)));
+        assert_eq!(
+            kinds[1],
+            Some(NativeKind::Ptr(HeapKind::HashSet)),
+            "1st .add chain temp must inherit Ptr(HashSet)"
+        );
+        assert_eq!(
+            kinds[2],
+            Some(NativeKind::Ptr(HeapKind::HashSet)),
+            "2nd .add chain temp must inherit Ptr(HashSet) — fixpoint propagates"
+        );
+        assert_eq!(
+            kinds[3],
+            Some(NativeKind::Bool),
+            ".has destination must be Bool from well_known_method_return_kind"
+        );
+    }
+
+    #[test]
+    fn deque_chain_propagates_kind_through_call_stamp_fixpoint() {
+        // End-to-end: `Deque().pushBack(1).pushBack(2).size()`.
+        let mir = collection_chain_mir(
+            "Deque",
+            "pushBack",
+            &[Operand::Constant(MirConstant::Int(1))],
+            "size",
+            &[],
+        );
+        let concrete_types = vec![ConcreteType::Void; 4];
+        let kinds = infer_slot_kinds_with_concrete(&mir, &[], &concrete_types);
+        assert_eq!(kinds[0], Some(NativeKind::Ptr(HeapKind::Deque)));
+        assert_eq!(kinds[1], Some(NativeKind::Ptr(HeapKind::Deque)));
+        assert_eq!(kinds[2], Some(NativeKind::Ptr(HeapKind::Deque)));
+        assert_eq!(
+            kinds[3],
+            Some(NativeKind::Int64),
+            ".size destination must be Int64 from well_known_method_return_kind"
+        );
+    }
+
+    #[test]
+    fn priority_queue_and_channel_chains_propagate_kind_through_fixpoint() {
+        // PriorityQueue: `PriorityQueue().push(5).push(3).size()`.
+        let pq_mir = collection_chain_mir(
+            "PriorityQueue",
+            "push",
+            &[Operand::Constant(MirConstant::Int(5))],
+            "size",
+            &[],
+        );
+        let pq_kinds =
+            infer_slot_kinds_with_concrete(&pq_mir, &[], &vec![ConcreteType::Void; 4]);
+        assert_eq!(pq_kinds[0], Some(NativeKind::Ptr(HeapKind::PriorityQueue)));
+        assert_eq!(pq_kinds[1], Some(NativeKind::Ptr(HeapKind::PriorityQueue)));
+        assert_eq!(pq_kinds[2], Some(NativeKind::Ptr(HeapKind::PriorityQueue)));
+        assert_eq!(pq_kinds[3], Some(NativeKind::Int64));
+
+        // Channel: `Channel().send(7).send(9).is_closed()`.
+        let ch_mir = collection_chain_mir(
+            "Channel",
+            "send",
+            &[Operand::Constant(MirConstant::Int(7))],
+            "is_closed",
+            &[],
+        );
+        let ch_kinds =
+            infer_slot_kinds_with_concrete(&ch_mir, &[], &vec![ConcreteType::Void; 4]);
+        assert_eq!(ch_kinds[0], Some(NativeKind::Ptr(HeapKind::Channel)));
+        assert_eq!(ch_kinds[1], Some(NativeKind::Ptr(HeapKind::Channel)));
+        assert_eq!(ch_kinds[2], Some(NativeKind::Ptr(HeapKind::Channel)));
+    }
+
+    /// Build a 4-slot collection-mutator-chain MIR mirroring the shape of
+    /// `hashmap_chain_propagates_kind_through_call_stamp_fixpoint`:
+    ///   temp0 = <ctor>()       (Aggregate + EnumStore)
+    ///   temp1 = temp0.<mut>(.) (Call terminator)
+    ///   temp2 = temp1.<mut>(.) (Call terminator)
+    ///   temp3 = temp2.<query>(.) (Call terminator)
+    fn collection_chain_mir(
+        ctor: &str,
+        mutator: &str,
+        mut_arg: &[Operand],
+        query: &str,
+        query_args: &[Operand],
+    ) -> MirFunction {
+        let mut mut_args_1 = vec![copy_local(0)];
+        mut_args_1.extend_from_slice(mut_arg);
+        let mut mut_args_2 = vec![copy_local(1)];
+        mut_args_2.extend_from_slice(mut_arg);
+        let mut query_full = vec![copy_local(2)];
+        query_full.extend_from_slice(query_args);
+        MirFunction {
+            name: "collection_chain".to_string(),
+            blocks: vec![
+                BasicBlock {
+                    id: BasicBlockId(0),
+                    statements: vec![
+                        MirStatement {
+                            kind: StatementKind::Assign(
+                                Place::Local(SlotId(0)),
+                                Rvalue::Aggregate(vec![]),
+                            ),
+                            span: shape_ast::Span::default(),
+                            point: Point(0),
+                        },
+                        MirStatement {
+                            kind: StatementKind::EnumStore {
+                                container_slot: SlotId(0),
+                                operands: vec![],
+                                variant_name: Some(ctor.to_string()),
+                            },
+                            span: shape_ast::Span::default(),
+                            point: Point(1),
+                        },
+                    ],
+                    terminator: Terminator {
+                        kind: TerminatorKind::Call {
+                            func: Operand::Constant(MirConstant::Method(
+                                mutator.to_string(),
+                            )),
+                            args: mut_args_1,
+                            destination: Place::Local(SlotId(1)),
+                            next: BasicBlockId(1),
+                        },
+                        span: shape_ast::Span::default(),
+                    },
+                },
+                BasicBlock {
+                    id: BasicBlockId(1),
+                    statements: vec![],
+                    terminator: Terminator {
+                        kind: TerminatorKind::Call {
+                            func: Operand::Constant(MirConstant::Method(
+                                mutator.to_string(),
+                            )),
+                            args: mut_args_2,
+                            destination: Place::Local(SlotId(2)),
+                            next: BasicBlockId(2),
+                        },
+                        span: shape_ast::Span::default(),
+                    },
+                },
+                BasicBlock {
+                    id: BasicBlockId(2),
+                    statements: vec![],
+                    terminator: Terminator {
+                        kind: TerminatorKind::Call {
+                            func: Operand::Constant(MirConstant::Method(
+                                query.to_string(),
+                            )),
+                            args: query_full,
+                            destination: Place::Local(SlotId(3)),
+                            next: BasicBlockId(2),
+                        },
+                        span: shape_ast::Span::default(),
+                    },
+                },
+            ],
+            num_locals: 4,
+            param_slots: vec![],
+            param_reference_kinds: vec![],
+            local_types: vec![],
+            span: shape_ast::Span::default(),
+            field_name_table: Default::default(),
+            local_struct_type_names: Default::default(),
+            local_typed_array_element_types: Default::default(),
+        }
     }
 
     // ── Phase 3 cluster-0 Round 12 T1 surface pin tests ────────────────
