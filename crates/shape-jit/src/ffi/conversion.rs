@@ -311,13 +311,27 @@ pub extern "C" fn jit_print_u64(value: u64) {
 ///
 /// W11-jit-new-array companion to `jit_print_i64`: dispatched when the
 /// operand slot is proven `NativeKind::Float64`.
+///
+/// γ-CP1-jit-print-f64 (2026-05-20): routes through the canonical VM-side
+/// `ValueFormatter::format_kinded` so VM and JIT produce byte-identical
+/// output. The prior body re-implemented float formatting inline
+/// (`value as i64` for integer-valued floats) and dropped the `.0` that
+/// `format_number` (`printing.rs::format_number`) emits to distinguish
+/// `number` from `int` — `print(3.0)` rendered `3` under the JIT vs `3.0`
+/// under the VM. The `NativeKind::Float64` carrier is an inline scalar:
+/// no heap payload, no refcount, no `KindedSlot::Drop` to forget. The
+/// `Float64` arm of `format_kinded_inner` delegates straight to
+/// `format_number`, the same routine the VM print path uses.
 #[unsafe(no_mangle)]
 pub extern "C" fn jit_print_f64(value: f64) {
-    if value.is_finite() && value == value.trunc() && value.abs() < 1e15 {
-        println!("{}", value as i64);
-    } else {
-        println!("{}", value);
-    }
+    // A transient empty registry suffices: the scalar `Float64` arm of
+    // `format_kinded_inner` never consults the schema registry.
+    let registry = std::sync::Arc::new(
+        shape_runtime::type_schema::TypeSchemaRegistry::default(),
+    );
+    let formatter = shape_vm::executor::printing::ValueFormatter::new(&registry);
+    let kinded = shape_value::KindedSlot::from_number(value);
+    println!("{}", formatter.format_kinded(&kinded));
 }
 
 /// Print a raw native bool to stdout with a newline.
@@ -1831,5 +1845,95 @@ mod jit_string_concat_w15_2_lang_7_tests {
         );
         let out = unsafe { adopt_string_arc_bits(result) };
         assert_eq!(out, "active=true");
+    }
+}
+
+#[cfg(test)]
+mod jit_print_f64_gamma_cp1_tests {
+    //! γ-CP1-jit-print-f64 (2026-05-20) regression tests.
+    //!
+    //! The pre-fix `jit_print_f64` re-implemented float formatting inline
+    //! (`value as i64` for integer-valued floats), dropping the trailing
+    //! `.0` that the VM's `format_number` emits to distinguish a `number`
+    //! (f64) from an `int` — `print(3.0)` rendered `3` under the JIT vs
+    //! `3.0` under the VM. The fix routes the FFI body through the same
+    //! `ValueFormatter::format_kinded` path the VM print uses.
+    //!
+    //! These tests pin VM == JIT byte-identical output by asserting the
+    //! exact string the `Float64` formatter arm produces (the routine
+    //! `jit_print_f64` now delegates to) across the full f64 case range:
+    //! integer-valued, fractional, negative, zero, very large, infinity,
+    //! NaN. Each case also drives the actual FFI body to confirm it
+    //! executes without panic/segfault.
+
+    use super::*;
+
+    /// Render `value` through the exact path `jit_print_f64` delegates to:
+    /// `KindedSlot::from_number` formatted by the canonical VM-side
+    /// `ValueFormatter`. This is byte-identical to what the FFI body
+    /// `println!`s, and — because the `Float64` arm calls the VM's
+    /// `format_number` — byte-identical to the VM print path.
+    fn jit_render_f64(value: f64) -> String {
+        let registry = shape_runtime::type_schema::TypeSchemaRegistry::default();
+        let formatter = shape_vm::executor::printing::ValueFormatter::new(&registry);
+        let kinded = shape_value::KindedSlot::from_number(value);
+        formatter.format_kinded(&kinded)
+    }
+
+    #[test]
+    fn integer_valued_float_keeps_decimal_point() {
+        // The headline bug: `print(3.0)` must render `3.0`, not `3`.
+        assert_eq!(jit_render_f64(3.0), "3.0");
+        assert_eq!(jit_render_f64(1.0), "1.0");
+        assert_eq!(jit_render_f64(100.0), "100.0");
+        jit_print_f64(3.0);
+    }
+
+    #[test]
+    fn fractional_float_renders_fraction() {
+        assert_eq!(jit_render_f64(3.5), "3.5");
+        assert_eq!(jit_render_f64(3.14), "3.14");
+        jit_print_f64(3.5);
+    }
+
+    #[test]
+    fn negative_integer_valued_float_keeps_decimal_point() {
+        assert_eq!(jit_render_f64(-2.0), "-2.0");
+        assert_eq!(jit_render_f64(-5.0), "-5.0");
+        jit_print_f64(-2.0);
+    }
+
+    #[test]
+    fn negative_fractional_float_renders_fraction() {
+        assert_eq!(jit_render_f64(-2.5), "-2.5");
+        jit_print_f64(-2.5);
+    }
+
+    #[test]
+    fn zero_renders_with_decimal_point() {
+        assert_eq!(jit_render_f64(0.0), "0.0");
+        jit_print_f64(0.0);
+    }
+
+    #[test]
+    fn very_large_float_renders_via_to_string() {
+        // 1e20 exceeds the `abs() < 1e15` integer-shape threshold in
+        // `format_number`, so it falls through to `f64::to_string`.
+        assert_eq!(jit_render_f64(1e20), 1e20_f64.to_string());
+        jit_print_f64(1e20);
+    }
+
+    #[test]
+    fn infinity_renders_word_form() {
+        assert_eq!(jit_render_f64(f64::INFINITY), "Infinity");
+        assert_eq!(jit_render_f64(f64::NEG_INFINITY), "-Infinity");
+        jit_print_f64(f64::INFINITY);
+        jit_print_f64(f64::NEG_INFINITY);
+    }
+
+    #[test]
+    fn nan_renders_word_form() {
+        assert_eq!(jit_render_f64(f64::NAN), "NaN");
+        jit_print_f64(f64::NAN);
     }
 }
