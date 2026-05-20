@@ -667,6 +667,39 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_resolvers(
         }
     }
 
+    // ADR-006 §2.7.5 stamp-at-compile-time — R5c-2-β-γ (c) jit-narrow-wrap.
+    //
+    // Narrow-integer declared-width stamping pass. The pre-pass above
+    // classifies every `MirConstant::Int(_)` as `ConcreteType::I64` —
+    // the bare-int-literal MIR carrier is width-blind. The MIR lowering's
+    // `lower_var_decl` records the declared `i8`/`i16`/`i32`/`u8`/`u16`/
+    // `u32` annotation against the binding slot in
+    // `mir.local_declared_scalar_types`. This pass stamps the proven
+    // narrow width onto `concrete_types[slot]` (overriding the constant-
+    // derived `I64`) and `slot_scalar_kind[slot]` so the slot-move
+    // propagation pass below carries it to downstream binop-temp slots.
+    //
+    // The JIT consumer (`mir_compiler/types::infer_slot_kinds_with_
+    // concrete`) projects the narrow `ConcreteType` to the matching
+    // `NativeKind` and declares the slot at native width; the binop
+    // codegen then lowers `iadd`/`isub`/`imul` at that width so overflow
+    // wraps two's-complement — matching the bytecode VM's `AddI32`/
+    // `AddTyped` truncating opcodes. Runs BEFORE slot-move propagation so
+    // a `let c: i32 = a + b` result temp inherits the width from `a`/`b`.
+    for (slot, decl_ct) in &mir.local_declared_scalar_types {
+        let idx = slot.0 as usize;
+        if idx >= n {
+            continue;
+        }
+        if matches!(
+            concrete_types[idx],
+            shape_value::v2::ConcreteType::Void | shape_value::v2::ConcreteType::I64
+        ) {
+            concrete_types[idx] = decl_ct.clone();
+        }
+        slot_scalar_kind[idx] = Some(decl_ct.clone());
+    }
+
     // W11-jit-new-array (2026-05-17): build a slot-copy-source map from
     // `Assign(dst, Use(Move|Copy|MoveExplicit(Place::Local(src))))`
     // statements. Used by `infer_array_elem_from_operands` below to
@@ -6046,6 +6079,7 @@ mod call_return_kind_tests {
             field_name_table: Default::default(),
             local_struct_type_names: Default::default(),
             local_typed_array_element_types: Default::default(),
+            local_declared_scalar_types: Default::default(),
         }
     }
 
@@ -6158,6 +6192,7 @@ mod call_return_kind_tests {
             field_name_table: Default::default(),
             local_struct_type_names: Default::default(),
             local_typed_array_element_types: Default::default(),
+            local_declared_scalar_types: Default::default(),
         };
         let resolver = |name: &str| -> Option<ConcreteType> {
             if name == "divide" {
@@ -6247,6 +6282,7 @@ mod call_return_kind_tests {
             field_name_table: Default::default(),
             local_struct_type_names: Default::default(),
             local_typed_array_element_types: Default::default(),
+            local_declared_scalar_types: Default::default(),
         };
         let result = infer_top_level_concrete_types_from_mir(&mir);
         assert!(
@@ -6332,6 +6368,7 @@ mod call_return_kind_tests {
             field_name_table: Default::default(),
             local_struct_type_names,
             local_typed_array_element_types: std::collections::HashMap::new(),
+            local_declared_scalar_types: std::collections::HashMap::new(),
         };
         let method_returns =
             |type_name: &str, method_name: &str| -> Option<ConcreteType> {
@@ -6431,6 +6468,7 @@ mod call_return_kind_tests {
             field_name_table: Default::default(),
             local_struct_type_names,
             local_typed_array_element_types: std::collections::HashMap::new(),
+            local_declared_scalar_types: std::collections::HashMap::new(),
         };
         let method_returns =
             |type_name: &str, method_name: &str| -> Option<ConcreteType> {
@@ -6510,6 +6548,7 @@ mod call_return_kind_tests {
             field_name_table: Default::default(),
             local_struct_type_names,
             local_typed_array_element_types: std::collections::HashMap::new(),
+            local_declared_scalar_types: std::collections::HashMap::new(),
         };
         // No method_returns resolver — destination stays Void.
         let result =
@@ -6567,6 +6606,7 @@ mod call_return_kind_tests {
             field_name_table: Default::default(),
             local_struct_type_names: std::collections::HashMap::new(),
             local_typed_array_element_types: std::collections::HashMap::new(),
+            local_declared_scalar_types: std::collections::HashMap::new(),
         };
         let method_returns = |_type_name: &str, _method_name: &str| -> Option<ConcreteType> {
             // Resolver would return String, but it's unreachable

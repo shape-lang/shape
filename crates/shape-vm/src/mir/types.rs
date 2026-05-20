@@ -727,6 +727,42 @@ pub struct MirFunction {
     /// forbidden Bool-default.
     pub local_typed_array_element_types:
         std::collections::HashMap<SlotId, shape_value::v2::ConcreteType>,
+    /// Per-slot declared scalar `ConcreteType` for `let`-bindings whose
+    /// type annotation resolves to a narrow integer width (`i8`/`i16`/
+    /// `i32`/`u8`/`u16`/`u32`).
+    ///
+    /// ADR-006 §2.7.5 stamp-at-compile-time — R5c-2-β-γ (c)
+    /// jit-narrow-wrap. The MIR `Rvalue::Use(Constant(Int(_)))` carrier
+    /// is width-blind: a bare integer literal has no width, so
+    /// `infer_top_level_concrete_types_from_mir` classifies every
+    /// `MirConstant::Int` as `ConcreteType::I64`. Top-level `let a: i32 =
+    /// 100` bindings are module bindings (not bytecode locals — see
+    /// `compiler/compiler_impl_reference_model.rs:1472`), so the
+    /// bytecode-compiler's per-local side-tables never carry the
+    /// declared narrow width either. Without a width source the JIT
+    /// declares the slot as a Cranelift `I64` variable and emits
+    /// `iadd`/`isub`/`imul` at 64-bit width — overflow does not wrap to
+    /// the declared width, diverging from the bytecode VM's
+    /// `AddI32`/`AddTyped` truncating opcodes.
+    ///
+    /// This map is populated at MIR lowering for var-decls whose
+    /// `type_annotation` resolves through `concrete_type_from_annotation`
+    /// to one of the narrow integer scalar `ConcreteType` variants. The
+    /// conduit producer
+    /// (`compiler/helpers.rs::infer_top_level_concrete_types_from_mir_
+    /// with_resolvers`) reads it to stamp `concrete_types[slot]` with the
+    /// proven narrow width, which the JIT then projects to
+    /// `NativeKind::Int32`/`Int8`/etc., declares the slot at the matching
+    /// Cranelift width, and lowers arithmetic so overflow wraps.
+    ///
+    /// `None` (no entry) for slots without a narrow-int annotation —
+    /// plain `int`/`number`/heap types are unaffected.
+    ///
+    /// Producer: `mir/lowering/stmt.rs::lower_var_decl`.
+    /// Consumer: `compiler/helpers.rs::infer_top_level_concrete_types_
+    /// from_mir_with_resolvers`.
+    pub local_declared_scalar_types:
+        std::collections::HashMap<SlotId, shape_value::v2::ConcreteType>,
 }
 
 /// Type information for a local variable, used for Copy/Clone inference.

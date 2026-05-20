@@ -316,4 +316,285 @@ mod tests {
             1u64
         );
     }
+
+    // ── R5c-2-β-γ (c) jit-narrow-wrap regression tests ──────────────
+    //
+    // These mirror `compile_binop_narrow_int`'s codegen exactly:
+    // coerce each I64 operand to the narrow Cranelift width via
+    // `ireduce`, then `iadd`/`isub`/`imul` at that width — which wraps
+    // two's-complement natively — matching the bytecode VM's
+    // `AddI32`/`AddTyped` truncating opcodes. Before this checkpoint the
+    // JIT operated at 64-bit width and never truncated, so overflow did
+    // not wrap (e.g. `100i8 + 100i8` produced 200 instead of -56).
+    //
+    // Standalone Cranelift fns (no stdlib JIT-compilation) — fast,
+    // deterministic, and not subject to the `deep-tests` gating that
+    // covers JIT end-to-end stdlib-execution suites.
+
+    /// Build a JIT fn `(i64, i64) -> i64` using the narrow-int codegen
+    /// pattern: `ireduce` both operands to `narrow`, apply `op`, then
+    /// `sextend`/`uextend` the narrow result back to i64 (the same shape
+    /// `compile_binop_narrow_int` produces feeding `store_to_place`'s
+    /// `ensure_kind` widen). `unsigned` selects the result extension.
+    fn jit_narrow_binop(
+        op: &str,
+        narrow: types::Type,
+        unsigned: bool,
+        a: i64,
+        b: i64,
+    ) -> i64 {
+        let mut flag_builder = settings::builder();
+        flag_builder.set("opt_level", "speed_and_size").unwrap();
+        let isa = cranelift_native::builder()
+            .unwrap()
+            .finish(settings::Flags::new(flag_builder))
+            .unwrap();
+        let builder =
+            JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        let mut module = JITModule::new(builder);
+        let mut ctx = module.make_context();
+
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+
+        let func_id = module
+            .declare_function(
+                "narrow_fn",
+                cranelift_module::Linkage::Local,
+                &sig,
+            )
+            .unwrap();
+        ctx.func.signature = sig;
+
+        let mut fbc = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut ctx.func, &mut fbc);
+        let block = builder.create_block();
+        builder.append_block_params_for_function_params(block);
+        builder.switch_to_block(block);
+        builder.seal_block(block);
+
+        let lhs = builder.block_params(block)[0];
+        let rhs = builder.block_params(block)[1];
+        let l = builder.ins().ireduce(narrow, lhs);
+        let r = builder.ins().ireduce(narrow, rhs);
+        let result = match op {
+            "add" => builder.ins().iadd(l, r),
+            "sub" => builder.ins().isub(l, r),
+            "mul" => builder.ins().imul(l, r),
+            _ => panic!("unknown op: {}", op),
+        };
+        let widened = if unsigned {
+            builder.ins().uextend(types::I64, result)
+        } else {
+            builder.ins().sextend(types::I64, result)
+        };
+        builder.ins().return_(&[widened]);
+        builder.finalize();
+
+        module.define_function(func_id, &mut ctx).unwrap();
+        module.clear_context(&mut ctx);
+        module.finalize_definitions().unwrap();
+        let code_ptr = module.get_finalized_function(func_id);
+        let func: fn(i64, i64) -> i64 = unsafe { std::mem::transmute(code_ptr) };
+        func(a, b)
+    }
+
+    #[test]
+    fn narrow_i8_add_overflow_wraps() {
+        // 100i8 + 100i8 = 200 wraps to -56 (the canonical reproducer).
+        assert_eq!(
+            jit_narrow_binop("add", types::I8, false, 100, 100),
+            (100i8).wrapping_add(100) as i64,
+        );
+        assert_eq!(jit_narrow_binop("add", types::I8, false, 100, 100), -56);
+    }
+
+    #[test]
+    fn narrow_i8_sub_overflow_wraps() {
+        // -100i8 - 100i8 = -200 wraps to 56.
+        assert_eq!(
+            jit_narrow_binop("sub", types::I8, false, -100, 100),
+            (-100i8).wrapping_sub(100) as i64,
+        );
+        assert_eq!(jit_narrow_binop("sub", types::I8, false, -100, 100), 56);
+    }
+
+    #[test]
+    fn narrow_i8_mul_overflow_wraps() {
+        // 20i8 * 20i8 = 400 wraps to -112.
+        assert_eq!(
+            jit_narrow_binop("mul", types::I8, false, 20, 20),
+            (20i8).wrapping_mul(20) as i64,
+        );
+        assert_eq!(jit_narrow_binop("mul", types::I8, false, 20, 20), -112);
+    }
+
+    #[test]
+    fn narrow_i16_add_overflow_wraps() {
+        // 30000i16 + 30000i16 = 60000 wraps to -5536.
+        assert_eq!(
+            jit_narrow_binop("add", types::I16, false, 30000, 30000),
+            (30000i16).wrapping_add(30000) as i64,
+        );
+        assert_eq!(jit_narrow_binop("add", types::I16, false, 30000, 30000), -5536);
+    }
+
+    #[test]
+    fn narrow_i16_sub_overflow_wraps() {
+        assert_eq!(
+            jit_narrow_binop("sub", types::I16, false, -30000, 30000),
+            (-30000i16).wrapping_sub(30000) as i64,
+        );
+        assert_eq!(jit_narrow_binop("sub", types::I16, false, -30000, 30000), 5536);
+    }
+
+    #[test]
+    fn narrow_i16_mul_overflow_wraps() {
+        assert_eq!(
+            jit_narrow_binop("mul", types::I16, false, 1000, 1000),
+            (1000i16).wrapping_mul(1000) as i64,
+        );
+        assert_eq!(jit_narrow_binop("mul", types::I16, false, 1000, 1000), 16960);
+    }
+
+    #[test]
+    fn narrow_i32_add_overflow_wraps() {
+        // 2_000_000_000i32 + 2_000_000_000i32 = 4e9 wraps to -294967296.
+        assert_eq!(
+            jit_narrow_binop("add", types::I32, false, 2_000_000_000, 2_000_000_000),
+            (2_000_000_000i32).wrapping_add(2_000_000_000) as i64,
+        );
+        assert_eq!(
+            jit_narrow_binop("add", types::I32, false, 2_000_000_000, 2_000_000_000),
+            -294_967_296,
+        );
+    }
+
+    #[test]
+    fn narrow_i32_sub_overflow_wraps() {
+        assert_eq!(
+            jit_narrow_binop("sub", types::I32, false, -2_000_000_000, 2_000_000_000),
+            (-2_000_000_000i32).wrapping_sub(2_000_000_000) as i64,
+        );
+        assert_eq!(
+            jit_narrow_binop("sub", types::I32, false, -2_000_000_000, 2_000_000_000),
+            294_967_296,
+        );
+    }
+
+    #[test]
+    fn narrow_i32_mul_overflow_wraps() {
+        assert_eq!(
+            jit_narrow_binop("mul", types::I32, false, 100_000, 100_000),
+            (100_000i32).wrapping_mul(100_000) as i64,
+        );
+        assert_eq!(
+            jit_narrow_binop("mul", types::I32, false, 100_000, 100_000),
+            1_410_065_408,
+        );
+    }
+
+    #[test]
+    fn narrow_u8_add_overflow_wraps() {
+        // 200u8 + 200u8 = 400 wraps to 144 (unsigned-extended result).
+        assert_eq!(
+            jit_narrow_binop("add", types::I8, true, 200, 200),
+            (200u8).wrapping_add(200) as i64,
+        );
+        assert_eq!(jit_narrow_binop("add", types::I8, true, 200, 200), 144);
+    }
+
+    #[test]
+    fn narrow_u8_sub_overflow_wraps() {
+        // 50u8 - 200u8 underflows; 50.wrapping_sub(200) = 106.
+        assert_eq!(
+            jit_narrow_binop("sub", types::I8, true, 50, 200),
+            (50u8).wrapping_sub(200) as i64,
+        );
+        assert_eq!(jit_narrow_binop("sub", types::I8, true, 50, 200), 106);
+    }
+
+    #[test]
+    fn narrow_u8_mul_overflow_wraps() {
+        assert_eq!(
+            jit_narrow_binop("mul", types::I8, true, 30, 30),
+            (30u8).wrapping_mul(30) as i64,
+        );
+        assert_eq!(jit_narrow_binop("mul", types::I8, true, 30, 30), 132);
+    }
+
+    #[test]
+    fn narrow_u16_add_overflow_wraps() {
+        assert_eq!(
+            jit_narrow_binop("add", types::I16, true, 60000, 60000),
+            (60000u16).wrapping_add(60000) as i64,
+        );
+        assert_eq!(jit_narrow_binop("add", types::I16, true, 60000, 60000), 54464);
+    }
+
+    #[test]
+    fn narrow_u16_sub_overflow_wraps() {
+        assert_eq!(
+            jit_narrow_binop("sub", types::I16, true, 10000, 60000),
+            (10000u16).wrapping_sub(60000) as i64,
+        );
+        assert_eq!(jit_narrow_binop("sub", types::I16, true, 10000, 60000), 15536);
+    }
+
+    #[test]
+    fn narrow_u16_mul_overflow_wraps() {
+        assert_eq!(
+            jit_narrow_binop("mul", types::I16, true, 1000, 1000),
+            (1000u16).wrapping_mul(1000) as i64,
+        );
+        assert_eq!(jit_narrow_binop("mul", types::I16, true, 1000, 1000), 16960);
+    }
+
+    #[test]
+    fn narrow_u32_add_overflow_wraps() {
+        // 4e9u32 + 4e9u32 = 8e9 wraps to 3_705_032_704.
+        assert_eq!(
+            jit_narrow_binop("add", types::I32, true, 4_000_000_000, 4_000_000_000),
+            (4_000_000_000u32).wrapping_add(4_000_000_000) as i64,
+        );
+        assert_eq!(
+            jit_narrow_binop("add", types::I32, true, 4_000_000_000, 4_000_000_000),
+            3_705_032_704,
+        );
+    }
+
+    #[test]
+    fn narrow_u32_sub_overflow_wraps() {
+        assert_eq!(
+            jit_narrow_binop("sub", types::I32, true, 1_000_000_000, 4_000_000_000),
+            (1_000_000_000u32).wrapping_sub(4_000_000_000) as i64,
+        );
+        assert_eq!(
+            jit_narrow_binop("sub", types::I32, true, 1_000_000_000, 4_000_000_000),
+            1_294_967_296,
+        );
+    }
+
+    #[test]
+    fn narrow_u32_mul_overflow_wraps() {
+        assert_eq!(
+            jit_narrow_binop("mul", types::I32, true, 100_000, 100_000),
+            (100_000u32).wrapping_mul(100_000) as i64,
+        );
+        assert_eq!(
+            jit_narrow_binop("mul", types::I32, true, 100_000, 100_000),
+            1_410_065_408,
+        );
+    }
+
+    #[test]
+    fn narrow_no_overflow_is_exact() {
+        // In-range narrow arithmetic is unaffected by the truncation.
+        assert_eq!(jit_narrow_binop("add", types::I8, false, 5, 7), 12);
+        assert_eq!(jit_narrow_binop("sub", types::I16, false, 100, 40), 60);
+        assert_eq!(jit_narrow_binop("mul", types::I32, false, 7, 6), 42);
+        assert_eq!(jit_narrow_binop("add", types::I8, true, 100, 50), 150);
+    }
 }

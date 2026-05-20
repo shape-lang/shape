@@ -134,6 +134,12 @@ pub struct MirBuilder {
     /// `C` is a `concrete_type_from_annotation`-resolvable element type.
     /// Threaded into `MirFunction.local_typed_array_element_types`.
     local_typed_array_element_types: HashMap<SlotId, shape_value::v2::ConcreteType>,
+    /// Per-slot declared narrow-integer scalar `ConcreteType` — ADR-006
+    /// §2.7.5 stamp-at-compile-time, R5c-2-β-γ (c) jit-narrow-wrap.
+    /// Populated at `lower_var_decl` for `let`-bindings whose type
+    /// annotation resolves to `i8`/`i16`/`i32`/`u8`/`u16`/`u32`. Threaded
+    /// into `MirFunction.local_declared_scalar_types`.
+    local_declared_scalar_types: HashMap<SlotId, shape_value::v2::ConcreteType>,
 }
 
 #[derive(Debug)]
@@ -189,6 +195,7 @@ impl MirBuilder {
             mut_self_container_locals: HashMap::new(),
             local_struct_type_names: HashMap::new(),
             local_typed_array_element_types: HashMap::new(),
+            local_declared_scalar_types: HashMap::new(),
         }
     }
 
@@ -225,6 +232,25 @@ impl MirBuilder {
         elem: shape_value::v2::ConcreteType,
     ) {
         self.local_typed_array_element_types.insert(slot, elem);
+    }
+
+    /// Record the declared narrow-integer scalar `ConcreteType` for a slot
+    /// produced by a `let`-binding with an `i8`/`i16`/`i32`/`u8`/`u16`/`u32`
+    /// type annotation. ADR-006 §2.7.5 stamp-at-compile-time — R5c-2-β-γ
+    /// (c) jit-narrow-wrap.
+    ///
+    /// Read at conduit-time
+    /// (`compiler/helpers.rs::infer_top_level_concrete_types_from_mir_with_
+    /// resolvers`) to stamp `concrete_types[slot]` with the proven narrow
+    /// width, so the JIT declares the slot at the matching Cranelift width
+    /// and lowers arithmetic that wraps on overflow — matching the
+    /// bytecode VM's `AddI32`/`AddTyped` truncating opcodes.
+    pub(super) fn record_local_declared_scalar_type(
+        &mut self,
+        slot: SlotId,
+        ct: shape_value::v2::ConcreteType,
+    ) {
+        self.local_declared_scalar_types.insert(slot, ct);
     }
 
     /// Record a recognized COW-container kind for a binding slot. Called
@@ -610,6 +636,7 @@ impl MirBuilder {
                 field_name_table: field_names.clone(),
                 local_struct_type_names: self.local_struct_type_names,
                 local_typed_array_element_types: self.local_typed_array_element_types,
+                local_declared_scalar_types: self.local_declared_scalar_types,
             },
             had_fallbacks,
             fallback_spans,
