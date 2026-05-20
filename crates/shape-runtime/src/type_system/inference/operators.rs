@@ -99,7 +99,16 @@ impl TypeInferenceEngine {
     ///
     /// Same concrete numeric type → preserve it (int*int→int, number*number→number).
     /// Mixed concrete numeric → widen to number (int*float→number).
-    /// Unknown operand type (TypeVar) → default to number.
+    /// One operand still a TypeVar, the other concrete numeric → propagate the
+    /// TypeVar as the result. This keeps the result type *linked* to the
+    /// unresolved operand instead of eagerly collapsing to `number`. It is the
+    /// load-bearing change for transitive inference: in `fn double(x){x*2}`
+    /// the body's type becomes `x`'s own variable, so `double`'s return type
+    /// is unified with its parameter. Once a callsite (possibly several calls
+    /// deep) resolves the parameter, the return type resolves with it. The
+    /// eager `number` collapse severed that link and made `double` infer as
+    /// `fn(number)->number` even when every observed argument was an `int`.
+    /// Both operands TypeVars → no information yet; default to `number`.
     fn numeric_result_type(left: &Type, right: &Type) -> Type {
         match (left, right) {
             // Same concrete numeric type → preserve it
@@ -114,7 +123,20 @@ impl TypeInferenceEngine {
             ) if BuiltinTypes::is_numeric_type_name(l) && BuiltinTypes::is_numeric_type_name(r) => {
                 BuiltinTypes::number()
             }
-            // Unknown operand type (TypeVar) → default to number
+            // One operand is an unresolved variable, the other a concrete
+            // numeric type → propagate the variable so the result type stays
+            // tied to the operand the call graph will eventually resolve.
+            (Type::Variable(_), Type::Concrete(TypeAnnotation::Basic(r)))
+                if BuiltinTypes::is_numeric_type_name(r) =>
+            {
+                left.clone()
+            }
+            (Type::Concrete(TypeAnnotation::Basic(l)), Type::Variable(_))
+                if BuiltinTypes::is_numeric_type_name(l) =>
+            {
+                right.clone()
+            }
+            // Both operands unresolved (or non-basic) → default to number.
             _ => BuiltinTypes::number(),
         }
     }

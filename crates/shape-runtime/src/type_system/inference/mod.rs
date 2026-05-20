@@ -93,6 +93,16 @@ pub struct TypeInferenceEngine {
     /// Whether each callable parameter has a default value.
     /// Used for compile-time arity validation at call sites.
     pub(crate) callable_param_defaults: HashMap<String, Vec<bool>>,
+    /// Parameter indices for each named function whose body imposes a
+    /// `Numeric` trait bound on an unannotated parameter (e.g. `x` in
+    /// `fn f(x) { x * 2 }`). Recorded by `infer_function` but NOT eagerly
+    /// collapsed to `number` — eager collapse severs the call-graph link a
+    /// transitively-called function needs to resolve its parameter. After
+    /// `apply_callsite_unions` has propagated every concrete callsite type,
+    /// `refine_numeric_params_post_callsite` collapses any of these
+    /// parameters that are *still* unresolved variables to `number` as a
+    /// last-resort default.
+    pub(crate) callable_numeric_param_indices: HashMap<String, Vec<usize>>,
     /// Deferred return unions for callables where one branch returned an unresolved type variable
     /// and another returned a concrete type (e.g. `return c` and `return "hi"`).
     /// We preserve precision by materializing these unions only after call-site widening.
@@ -161,6 +171,7 @@ impl TypeInferenceEngine {
             callsite_param_types: HashMap::new(),
             callable_param_source_vars: HashMap::new(),
             callable_param_defaults,
+            callable_numeric_param_indices: HashMap::new(),
             pending_return_unions: HashMap::new(),
             return_var_aliases: HashMap::new(),
             return_scopes: Vec::new(),
@@ -432,13 +443,22 @@ impl TypeInferenceEngine {
     /// Refine callable parameter types from constraints generated while inferring
     /// the callable body. This prevents unresolved `unknown` parameter types in
     /// hot paths like closure literals used in arithmetic/object access.
+    ///
+    /// Returns the parameter indices whose body imposes a `Numeric` trait
+    /// bound. When `include_numeric_refinement` is `true` those parameters are
+    /// also eagerly collapsed to `number` in place (the closure path keeps
+    /// this behavior — closures are not part of the callsite-union scheme).
+    /// When `false` the parameters are left as variables so the caller can
+    /// defer the `number` default until after transitive callsite propagation
+    /// (the named-function path — see `callable_numeric_param_indices`).
     pub(crate) fn refine_callable_param_types_from_local_constraints(
         &self,
         param_types: &mut [Type],
         local_constraints: &[(Type, Type)],
         include_numeric_refinement: bool,
-    ) {
-        for param_type in param_types.iter_mut() {
+    ) -> Vec<usize> {
+        let mut numeric_indices = Vec::new();
+        for (index, param_type) in param_types.iter_mut().enumerate() {
             let Type::Variable(param_var) = param_type else {
                 continue;
             };
@@ -450,14 +470,16 @@ impl TypeInferenceEngine {
                 continue;
             }
 
-            if include_numeric_refinement
-                && self.var_has_constraint(local_constraints, param_var, |constraint| {
-                    matches!(constraint, TypeConstraint::ImplementsTrait { trait_name } if trait_name == "Numeric")
-                })
-            {
-                *param_type = BuiltinTypes::number();
+            if self.var_has_constraint(local_constraints, param_var, |constraint| {
+                matches!(constraint, TypeConstraint::ImplementsTrait { trait_name } if trait_name == "Numeric")
+            }) {
+                numeric_indices.push(index);
+                if include_numeric_refinement {
+                    *param_type = BuiltinTypes::number();
+                }
             }
         }
+        numeric_indices
     }
 
     pub(crate) fn register_return_var_alias(
@@ -1148,6 +1170,7 @@ impl TypeInferenceEngine {
         self.pending_return_unions.clear();
         self.callable_param_source_vars.clear();
         self.callable_param_defaults.clear();
+        self.callable_numeric_param_indices.clear();
         Self::seed_builtin_callable_defaults(&mut self.callable_param_defaults);
         self.return_var_aliases.clear();
         self.return_scopes.clear();
@@ -1191,6 +1214,14 @@ impl TypeInferenceEngine {
         // callable vars can still be widened in best-effort mode.
         self.apply_callsite_unions(&mut types);
 
+        // Last-resort numeric default: any `Numeric`-bounded parameter that
+        // transitive callsite propagation still could not resolve collapses
+        // to `number` (the deferred half of the split in `infer_function`).
+        // This step also enforces the `Numeric` bound itself: a parameter
+        // whose body imposes `Numeric` must not be widened to a non-numeric
+        // type by callsite propagation — that mismatch is a type error.
+        errors.extend(self.refine_numeric_params_post_callsite(&mut types));
+
         // Apply substitutions to get final types
         for (_name, ty) in types.iter_mut() {
             *ty = self.unifier.apply_substitutions(ty);
@@ -1200,58 +1231,230 @@ impl TypeInferenceEngine {
     }
 
     fn apply_callsite_unions(&mut self, types: &mut HashMap<String, Type>) {
+        // Transitive callsite-union propagation.
+        //
+        // The base callsite-union scheme widens an unannotated parameter to the
+        // union of *concrete* argument types observed at its call sites. That
+        // cannot resolve a function reached only through nested/transitive
+        // calls of other unannotated functions: every observed argument is
+        // itself a still-unresolved `Type::Variable` (a caller's parameter
+        // variable, or another callee's return variable), so the union is
+        // empty and the parameter never widens.
+        //
+        // The fix is a fixpoint: a persistent `resolved` map records every
+        // parameter-source variable (and, via the inferred return type, every
+        // return variable) that has become concrete. `union_from_observed_types`
+        // consults that map — through the unifier first, then `resolved`,
+        // transitively — so an observed `Type::Variable` argument resolves once
+        // some other function in the call graph has been concretized. Each
+        // round can therefore unlock the next; iterating to a fixpoint
+        // propagates concrete types along call edges in both directions
+        // (`double`'s parameter ← `quad`'s parameter via the inner call;
+        // `double`'s return → the outer call's argument).
         let callsites = self.callsite_param_types.clone();
-        for (function_name, observed_by_param) in callsites {
-            let Some(Type::Function { params, returns }) = types.get(&function_name) else {
-                continue;
-            };
-            let param_source_vars = self
-                .callable_param_source_vars
-                .get(&function_name)
-                .cloned()
-                .unwrap_or_default();
+        let mut resolved: HashMap<TypeVar, Type> = HashMap::new();
 
-            let mut widened_params = params.clone();
-            let mut substitutions: HashMap<TypeVar, Type> = HashMap::new();
+        // Bound the fixpoint. Each productive round either concretizes a
+        // previously-unresolved function or records a new `resolved` entry;
+        // the `changed` flag below breaks as soon as a round adds nothing, so
+        // the common case is 1-2 rounds. The hard cap is a small constant —
+        // it bounds the transitive call-graph depth the propagation can chase
+        // (a 16-deep chain of unannotated functions is already pathological)
+        // and guarantees termination without scaling with the (large, when
+        // the stdlib is loaded) function count.
+        const MAX_FIXPOINT_ROUNDS: usize = 16;
+        let max_rounds = callsites.len().saturating_add(2).min(MAX_FIXPOINT_ROUNDS);
+        for _round in 0..max_rounds {
+            let mut changed = false;
 
-            for (index, observed_types) in observed_by_param.iter().enumerate() {
-                if index >= widened_params.len() {
-                    break;
-                }
-                let Some(widened_type) = self.union_from_observed_types(observed_types) else {
+            for (function_name, observed_by_param) in &callsites {
+                let Some(Type::Function { params, returns }) = types.get(function_name) else {
                     continue;
                 };
+                // Clone out of `types` so the borrow ends before the
+                // re-`insert` below.
+                let mut widened_params = params.clone();
+                let returns = (**returns).clone();
+                let param_source_vars = self
+                    .callable_param_source_vars
+                    .get(function_name)
+                    .cloned()
+                    .unwrap_or_default();
 
-                let source_var = param_source_vars.get(index).and_then(|var| var.clone());
-                if let Some(var) = source_var.clone() {
-                    substitutions.insert(var, widened_type.clone());
+                let mut substitutions: HashMap<TypeVar, Type> = HashMap::new();
+
+                for (index, observed_types) in observed_by_param.iter().enumerate() {
+                    if index >= widened_params.len() {
+                        break;
+                    }
+                    let Some(widened_type) =
+                        self.union_from_observed_types_with_resolved(observed_types, &resolved)
+                    else {
+                        continue;
+                    };
+
+                    let source_var = param_source_vars.get(index).and_then(|var| var.clone());
+                    if let Some(var) = source_var.clone() {
+                        substitutions.insert(var, widened_type.clone());
+                    }
+
+                    let current_param = widened_params[index].clone();
+                    match current_param {
+                        Type::Variable(var) => {
+                            widened_params[index] = widened_type.clone();
+                            substitutions.insert(var, widened_type);
+                        }
+                        _ if source_var.is_some() => {
+                            widened_params[index] = widened_type;
+                        }
+                        _ => {}
+                    }
                 }
 
-                let current_param = widened_params[index].clone();
-                match current_param {
-                    Type::Variable(var) => {
-                        widened_params[index] = widened_type.clone();
-                        substitutions.insert(var, widened_type);
+                self.propagate_return_alias_substitution(returns.clone(), &mut substitutions);
+                let widened_return =
+                    self.materialize_pending_return_union(returns.clone(), &substitutions);
+
+                let new_type = Type::Function {
+                    params: widened_params.clone(),
+                    returns: Box::new(widened_return.clone()),
+                };
+                if types.get(function_name) != Some(&new_type) {
+                    changed = true;
+                    types.insert(function_name.clone(), new_type);
+                }
+
+                // Record every parameter-source variable that became concrete
+                // so transitively-called functions can resolve it next round.
+                for (index, source_var) in param_source_vars.iter().enumerate() {
+                    let Some(var) = source_var else { continue };
+                    if let Some(param_ty) = widened_params.get(index) {
+                        if !matches!(param_ty, Type::Variable(_)) {
+                            match resolved.insert(var.clone(), param_ty.clone()) {
+                                Some(prev) if &prev == param_ty => {}
+                                _ => changed = true,
+                            }
+                        }
                     }
-                    _ if source_var.is_some() => {
-                        widened_params[index] = widened_type;
+                }
+                // Record the function's return variable → concrete return type
+                // so a caller that passed this function's result as an argument
+                // can resolve that argument next round.
+                if let Type::Variable(return_var) = &returns {
+                    if !matches!(widened_return, Type::Variable(_)) {
+                        match resolved.insert(return_var.clone(), widened_return.clone()) {
+                            Some(prev) if prev == widened_return => {}
+                            _ => changed = true,
+                        }
                     }
-                    _ => {}
                 }
             }
 
-            self.propagate_return_alias_substitution(*returns.clone(), &mut substitutions);
-            let widened_return =
-                self.materialize_pending_return_union(*returns.clone(), &substitutions);
+            if !changed {
+                break;
+            }
+        }
+    }
+
+    /// `true` when `ty` satisfies the `Numeric` bound — a concrete numeric
+    /// basic/reference type, or a union whose every member is numeric.
+    fn type_satisfies_numeric_bound(ty: &Type) -> bool {
+        let name_is_numeric = |ann: &TypeAnnotation| {
+            ann.as_type_name_str()
+                .is_some_and(BuiltinTypes::is_numeric_type_name)
+        };
+        match ty {
+            Type::Concrete(ann @ (TypeAnnotation::Basic(_) | TypeAnnotation::Reference(_))) => {
+                name_is_numeric(ann)
+            }
+            Type::Concrete(TypeAnnotation::Union(members)) => {
+                members.iter().all(name_is_numeric)
+            }
+            _ => false,
+        }
+    }
+
+    /// Last-resort `number` default for `Numeric`-bounded parameters that
+    /// transitive callsite propagation could not resolve, plus enforcement of
+    /// the `Numeric` bound itself.
+    ///
+    /// Runs after `apply_callsite_unions`. For every parameter recorded in
+    /// `callable_numeric_param_indices`:
+    ///
+    /// * still an unresolved variable → collapse to `number` (last resort);
+    /// * resolved to a numeric type (or all-numeric union) → keep the precise
+    ///   type the call graph produced;
+    /// * resolved to a non-numeric type → emit a `ConstraintViolation`. This
+    ///   restores the rejection that the eager `Numeric` → `number` collapse
+    ///   used to provide for free: a function body like `c = c + 1` imposes
+    ///   `Numeric` on `c`, and a call site passing a non-numeric value (e.g.
+    ///   an object) is a type error.
+    ///
+    /// When a parameter is collapsed to `number`, the collapse is propagated
+    /// into the function's return type if the return type is that same
+    /// parameter variable (`numeric_result_type` returns the operand variable
+    /// for `var <op> concrete-numeric`, so a body like `x * 2` makes the
+    /// return type share the parameter's variable).
+    fn refine_numeric_params_post_callsite(
+        &mut self,
+        types: &mut HashMap<String, Type>,
+    ) -> Vec<TypeError> {
+        let mut errors = Vec::new();
+        let numeric_indices = self.callable_numeric_param_indices.clone();
+        for (function_name, indices) in numeric_indices {
+            let Some(Type::Function { params, returns }) = types.get(&function_name) else {
+                continue;
+            };
+            let mut new_params = params.clone();
+            let mut new_return = *returns.clone();
+            let mut local_subst: HashMap<TypeVar, Type> = HashMap::new();
+
+            for &index in &indices {
+                let Some(param_ty) = new_params.get_mut(index) else {
+                    continue;
+                };
+                let resolved = self.unifier.apply_substitutions(param_ty);
+                match resolved {
+                    Type::Variable(var) | Type::Constrained { var, .. } => {
+                        // Genuinely unresolved → apply the `number` default.
+                        local_subst.insert(var, BuiltinTypes::number());
+                        *param_ty = BuiltinTypes::number();
+                    }
+                    concrete => {
+                        if !Self::type_satisfies_numeric_bound(&concrete) {
+                            // Callsite propagation widened a `Numeric`-bounded
+                            // parameter to a non-numeric type — a type error.
+                            errors.push(TypeError::ConstraintViolation(format!(
+                                "parameter at position {} of '{}' must be numeric \
+                                 (its body requires a Numeric operand), but a call site \
+                                 passes the non-numeric type '{}'",
+                                index,
+                                function_name,
+                                self.render_type_for_diag(&concrete),
+                            )));
+                        }
+                        // Transitive propagation already resolved it — keep
+                        // the precise type the call graph produced (even when
+                        // it violates the bound, so downstream diagnostics
+                        // still see a stable type).
+                        *param_ty = concrete;
+                    }
+                }
+            }
+
+            if !local_subst.is_empty() {
+                new_return = Self::apply_substitutions_to_type(&new_return, &local_subst);
+            }
 
             types.insert(
                 function_name,
                 Type::Function {
-                    params: widened_params,
-                    returns: Box::new(widened_return),
+                    params: new_params,
+                    returns: Box::new(new_return),
                 },
             );
         }
+        errors
     }
 
     fn propagate_return_alias_substitution(
@@ -1327,10 +1530,54 @@ impl TypeInferenceEngine {
         }
     }
 
-    fn union_from_observed_types(&mut self, observed_types: &[Type]) -> Option<Type> {
+    /// Resolve a type through the unifier and the transitive callsite-union
+    /// `resolved` map until it is concrete or no further substitution applies.
+    /// Used by the fixpoint in `apply_callsite_unions` so a still-`Type::Variable`
+    /// observed argument resolves once some other function in the call graph
+    /// has been concretized.
+    ///
+    /// Both maps are consulted at each step: the unifier and `resolved` key
+    /// off different variables (the unifier off the constraint-solver's
+    /// variables; `resolved` off each function's recorded parameter-source /
+    /// return variables), and either may rename a variable into the other's
+    /// key space. Checking both per step — `resolved` first, then the unifier
+    /// — chases the chain regardless of which map owns the next hop.
+    fn resolve_through_callsite_map(&self, ty: &Type, resolved: &HashMap<TypeVar, Type>) -> Type {
+        let mut current = ty.clone();
+        // Bound: every step must consume one variable from a finite pool, so
+        // the unifier's variable count plus the `resolved` size is a safe cap.
+        let max_steps = self.unifier.substitutions().len() + resolved.len() + 2;
+        for _ in 0..max_steps {
+            let Type::Variable(var) = &current else {
+                break;
+            };
+            // Transitive callsite-union hop.
+            if let Some(next) = resolved.get(var) {
+                let stepped = next.clone();
+                if stepped == current {
+                    break;
+                }
+                current = stepped;
+                continue;
+            }
+            // Constraint-solver hop.
+            let stepped = self.unifier.apply_substitutions(&current);
+            if stepped == current {
+                break;
+            }
+            current = stepped;
+        }
+        current
+    }
+
+    fn union_from_observed_types_with_resolved(
+        &mut self,
+        observed_types: &[Type],
+        resolved: &HashMap<TypeVar, Type>,
+    ) -> Option<Type> {
         let mut unique = Vec::new();
         for ty in observed_types {
-            let normalized = self.unifier.apply_substitutions(ty);
+            let normalized = self.resolve_through_callsite_map(ty, resolved);
             if matches!(normalized, Type::Variable(_)) {
                 continue;
             }
