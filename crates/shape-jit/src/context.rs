@@ -65,6 +65,27 @@ pub const RETURN_TAG_UNIT: u8 = 5;
 /// Byte offset of `return_type_tag` in JITContext (for Cranelift codegen).
 pub const RETURN_TYPE_TAG_OFFSET: usize = std::mem::offset_of!(JITContext, return_type_tag);
 
+/// Byte offset of `pending_call_error` in JITContext (for Cranelift codegen).
+///
+/// `r5c-2-bz-b-jit-err-surface`: a VM-trampoline FFI call (`jit_call_method`)
+/// whose VM-side handler returns `Err` writes `1` here, stores the error
+/// message in the `ffi::control::JIT_RUNTIME_ERROR` thread-local, and returns
+/// a value-shaped placeholder. The MIR emitter loads this byte immediately
+/// after every trampoline FFI call and, when set, branches to a deopt block
+/// that returns a negative `i32` signal — abandoning the JIT frame BEFORE the
+/// placeholder result can reach a heap-kinded `write_place` / refcount-retain
+/// site. The `JITExecutor` surfaces the stored message verbatim. This is the
+/// W12 architectural fall-through (a genuine JIT failure abandons the JIT
+/// frame; the VM produces the clean error) — no runtime tag-bit decode, no
+/// value-shaped error sentinel flowing into the typed slot ABI.
+pub const PENDING_CALL_ERROR_OFFSET: usize =
+    std::mem::offset_of!(JITContext, pending_call_error);
+
+/// Negative `i32` deopt signal returned by a JIT-compiled function when a
+/// VM-trampoline FFI call surfaced an `Err`. Distinct from `-1` (generic JIT
+/// execution error) so `JITExecutor` can route to the stored VM error message.
+pub const SIGNAL_TRAMPOLINE_ERROR: i32 = -3;
+
 // ============================================================================
 // Compile-time layout verification for JITContext
 // ============================================================================
@@ -112,6 +133,10 @@ const _: () = {
     assert!(
         std::mem::offset_of!(JITContext, gc_safepoint_flag_ptr) == GC_SAFEPOINT_FLAG_PTR_OFFSET as usize,
         "GC_SAFEPOINT_FLAG_PTR_OFFSET does not match JITContext layout"
+    );
+    assert!(
+        std::mem::offset_of!(JITContext, pending_call_error) == PENDING_CALL_ERROR_OFFSET,
+        "PENDING_CALL_ERROR_OFFSET does not match JITContext layout"
     );
 };
 
@@ -577,6 +602,17 @@ pub struct JITContext {
     /// v2: type tag for the return value in stack[0].
     /// 0 = NaN-boxed (legacy), 1 = raw f64, 2 = raw i64, 3 = raw i32, 4 = raw bool
     pub return_type_tag: u8,
+
+    /// `r5c-2-bz-b-jit-err-surface`: VM-trampoline error flag.
+    ///
+    /// `0` = no pending error (default). `1` = a VM-trampoline FFI call
+    /// (`jit_call_method`) hit an `Err` from the VM-side handler. The FFI body
+    /// sets this and stores the error message in the
+    /// `ffi::control::JIT_RUNTIME_ERROR` thread-local. The MIR emitter loads
+    /// this byte right after every trampoline FFI call and deopts (returns
+    /// `SIGNAL_TRAMPOLINE_ERROR`) when set — so the FFI's placeholder return
+    /// value never reaches a heap-kinded refcount-retain site.
+    pub pending_call_error: u8,
 }
 
 impl Default for JITContext {
@@ -625,6 +661,7 @@ impl Default for JITContext {
             gc_heap_ptr: std::ptr::null_mut(),
             foreign_bridge_ptr: std::ptr::null(),
             return_type_tag: 0,
+            pending_call_error: 0,
         }
     }
 }

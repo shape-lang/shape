@@ -459,11 +459,29 @@ impl JITExecutor {
 
         // Check for errors
         if signal < 0 {
+            // r5c-2-bz-b-jit-err-surface: a `SIGNAL_TRAMPOLINE_ERROR` deopt
+            // means a VM-trampoline FFI call (`jit_call_method`) surfaced a
+            // clean `Err` (e.g. `Set.add()` with a non-string key) and the
+            // JIT frame was abandoned before the placeholder result could
+            // reach a heap-kinded refcount-retain site. The VM-side error
+            // message was stored in the `JIT_RUNTIME_ERROR` thread-local;
+            // surface it verbatim so `--mode jit` reports the SAME error the
+            // interpreter would — rather than an opaque `JIT execution error
+            // (code: N)`. (Any other negative signal keeps the generic
+            // message.)
+            let message =
+                match crate::ffi::control::take_jit_runtime_error() {
+                    Some(vm_err) => vm_err,
+                    None => format!("JIT execution error (code: {})", signal),
+                };
             return Err(shape_runtime::error::ShapeError::RuntimeError {
-                message: format!("JIT execution error (code: {})", signal),
+                message,
                 location: None,
             });
         }
+        // Clear any stale trampoline error on the success path so it cannot
+        // leak into a later, unrelated JIT execution on the same thread.
+        let _ = crate::ffi::control::take_jit_runtime_error();
 
         // v2: check return_type_tag for native-typed return values.
         // Non-zero tags bypass NaN-box decoding entirely.

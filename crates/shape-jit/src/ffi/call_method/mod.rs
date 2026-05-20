@@ -705,13 +705,26 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
             match result {
                 Some(Ok(bits)) => return bits,
                 Some(Err(e)) => {
+                    // r5c-2-bz-b-jit-err-surface: the VM-side method handler
+                    // surfaced a clean `Err` (e.g. `Set.add()` with a non-
+                    // string key). The JIT-compiled caller must NOT continue
+                    // with a value-shaped placeholder — a heap-kinded
+                    // destination place would feed it into a refcount-retain
+                    // (`jit_arc_result_retain`'s `bits != 0` guard passes
+                    // `TAG_NULL`, then dereferences `TAG_NULL - 16`). Instead
+                    // raise `pending_call_error` so the MIR-emitted post-call
+                    // check deopts the JIT frame; the VM produces the clean
+                    // error. The returned bits are never consumed.
                     tracing::debug!(
                         target: "shape_jit",
                         method_name = %method_name,
                         receiver_kind = ?receiver_kind,
                         error = ?e,
-                        "jit-call-method VM trampoline returned error",
+                        "jit-call-method VM trampoline returned error \u{2014} \
+                         raising pending_call_error for MIR-emitted deopt",
                     );
+                    super::control::set_jit_runtime_error(e.to_string());
+                    ctx_ref.pending_call_error = 1;
                     return TAG_NULL;
                 }
                 None => {
@@ -722,6 +735,12 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
                         "jit-call-method VM trampoline unavailable \u{2014} \
                          TRAMPOLINE_VM is null. Surfaces.",
                     );
+                    super::control::set_jit_runtime_error(format!(
+                        "JIT method dispatch for `{}` could not reach the \
+                         interpreter trampoline",
+                        method_name,
+                    ));
+                    ctx_ref.pending_call_error = 1;
                     return TAG_NULL;
                 }
             }
