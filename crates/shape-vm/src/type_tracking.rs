@@ -1254,6 +1254,21 @@ fn proof_gap(site: &'static str, detail: impl Into<String>) -> ProofGap {
     }
 }
 
+/// Surface a [`ProofGap`] for an operand whose compile-time type could not be
+/// resolved to a concrete kind.
+///
+/// This is the emit-side soundness floor (ε-1 PART 1): a typed opcode requires
+/// the compiler to *prove* the operand's `NativeKind`. When the type-inference
+/// engine leaves a value as an unresolved `Type::Variable` (or a still-bounded
+/// `Type::Constrained` variable), the emitter has nothing to prove against —
+/// it must NOT fall back to a default kind (the historical `Float64` default
+/// is exactly the silent-wrong path this guards). The caller turns the
+/// returned `ProofGap` into a clean compile error per CLAUDE.md §Type System
+/// Rules ("if the type can't be proven, it is a compile error").
+pub fn proof_gap_unresolved_operand(site: &'static str, detail: impl Into<String>) -> ProofGap {
+    proof_gap(site, detail)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1757,5 +1772,26 @@ mod tests {
         let info = VariableTypeInfo::known(1, "Bar".to_string());
         assert!(info.v2_array_element_kind.is_none());
         assert!(info.v2_struct_layout.is_none());
+    }
+
+    /// ε-1 PART 1: the emit-side soundness guard surfaces a `ProofGap`,
+    /// labelled `E_TYPED_OPCODE_WITHOUT_PROOF`, carrying the emission site and
+    /// the human-readable reason. This is the clean diagnostic the binary-op
+    /// emitter raises instead of stamping a default `NativeKind` on an operand
+    /// whose type the inference engine could not resolve.
+    #[test]
+    fn test_proof_gap_unresolved_operand_surfaces_cleanly() {
+        let gap = proof_gap_unresolved_operand(
+            "emit_typed_arithmetic",
+            "operand `x` of `Mul` has an unresolved type",
+        );
+        assert_eq!(gap.site(), "emit_typed_arithmetic");
+        assert!(gap.detail().contains("unresolved type"));
+        let rendered = gap.to_string();
+        assert!(
+            rendered.starts_with("E_TYPED_OPCODE_WITHOUT_PROOF at emit_typed_arithmetic:"),
+            "diagnostic must be the labelled proof-gap form, got: {rendered}"
+        );
+        assert!(rendered.contains("operand `x` of `Mul`"));
     }
 }

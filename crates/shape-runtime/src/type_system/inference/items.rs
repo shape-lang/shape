@@ -341,11 +341,25 @@ impl TypeInferenceEngine {
         let local_constraint_start = self.constraints.len();
         let inferred_result =
             self.infer_callable_return_type(&func.body, func.return_type.is_some());
-        self.refine_callable_param_types_from_local_constraints(
+        // `include_numeric_refinement: false` — defer the `number` default for
+        // `Numeric`-bounded parameters. Eagerly collapsing a parameter like
+        // `x` in `fn double(x) { x * 2 }` to `number` severs the call-graph
+        // link: a function reached only through nested calls of unannotated
+        // functions never sees a concrete call site, so the only path to
+        // resolving its parameter is transitive propagation in
+        // `apply_callsite_unions`. The `Numeric`-bounded indices are recorded
+        // and the `number` fallback is applied afterwards by
+        // `refine_numeric_params_post_callsite` to whatever is still a
+        // variable.
+        let numeric_param_indices = self.refine_callable_param_types_from_local_constraints(
             &mut param_types,
             &self.constraints[local_constraint_start..],
-            true,
+            false,
         );
+        if !numeric_param_indices.is_empty() {
+            self.callable_numeric_param_indices
+                .insert(func.name.clone(), numeric_param_indices);
+        }
         let local_constraints = &self.constraints[local_constraint_start..];
         let local_origin = self
             .find_origin_for_callable_param_constraints(&unannotated_param_vars, local_constraints);

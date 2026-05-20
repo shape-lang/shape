@@ -201,6 +201,74 @@ enum EqOperandType {
 }
 
 impl BytecodeCompiler {
+    /// ε-1 PART 1 — emit-side soundness guard.
+    ///
+    /// Returns a `ProofGap`-derived compile error when a typed numeric opcode
+    /// is about to be emitted for `operand` (its `numeric` hint is `Some`, so
+    /// a typed opcode WOULD fire) but the operand's actual compile-time type
+    /// is still an unresolved `Type::Variable`/`Type::Constrained`.
+    ///
+    /// That combination means the `NumericType` claim is *fabricated* — no
+    /// signal proved the kind, so emitting `MulInt`/`MulNumber`/... would
+    /// stamp a default kind on a value of unknown type (the exact silent-wrong
+    /// path that reinterpreted the integer `40` as the denormal `2e-321`).
+    ///
+    /// Restricted to identifiers bound to an *untyped function parameter slot*
+    /// with no tracker type info: those are the only operands whose numeric
+    /// hint can be set without a proving signal (literals, typed locals and
+    /// for-loop variables all carry a real proven kind). This keeps the guard
+    /// from false-positiving on ordinary well-typed code.
+    fn numeric_operand_proof_gap(
+        &mut self,
+        op: &BinaryOp,
+        operand: &Expr,
+        numeric: Option<NumericType>,
+    ) -> Option<ShapeError> {
+        // No typed opcode would fire for this operand → nothing to prove.
+        numeric?;
+
+        let Expr::Identifier(name, _) = operand else {
+            return None;
+        };
+        let local_idx = self.resolve_local(name)?;
+        // Only untyped function parameters can carry an unproven numeric hint.
+        if !self.param_locals.contains(&local_idx) {
+            return None;
+        }
+        // A param with concrete tracker type info has a proven kind.
+        if let Some(info) = self.type_tracker.get_local_type(local_idx) {
+            if info.type_name.is_some() || info.storage_hint.is_some() {
+                return None;
+            }
+        }
+
+        // The decisive check: ask the inference engine for the operand's
+        // resolved type. A bare unresolved variable (or still-bounded
+        // constrained variable) is an unprovable kind.
+        let inferred = self.infer_expr_type(operand).ok()?;
+        if !matches!(
+            inferred,
+            shape_runtime::type_system::Type::Variable(_)
+                | shape_runtime::type_system::Type::Constrained { .. }
+        ) {
+            return None;
+        }
+
+        let gap = crate::type_tracking::proof_gap_unresolved_operand(
+            "emit_typed_arithmetic",
+            format!(
+                "operand `{}` of `{:?}` has an unresolved type — no signal \
+                 proves its NativeKind, so a typed numeric opcode cannot be \
+                 emitted. Add a type annotation to the parameter.",
+                name, op
+            ),
+        );
+        Some(ShapeError::SemanticError {
+            message: gap.to_string(),
+            location: Some(self.span_to_source_location(operand.span())),
+        })
+    }
+
     fn infer_numeric_pair(
         &mut self,
         left: &Expr,
@@ -1758,6 +1826,21 @@ impl BytecodeCompiler {
                             return Ok(());
                         }
                     }
+                }
+
+                // ── ε-1 PART 1: emit-side soundness guard ──
+                // A typed numeric opcode requires the compiler to PROVE both
+                // operand kinds (CLAUDE.md §Mechanical enforcement). If an
+                // operand's compile-time type is still an unresolved
+                // `Type::Variable` the `NumericType` claim is fabricated —
+                // surface a clean `ProofGap` diagnostic instead of stamping a
+                // default kind and emitting a typed opcode (the silent-wrong
+                // path that produced the `2e-321` denormal).
+                if let Some(gap) = self.numeric_operand_proof_gap(op, left, left_numeric) {
+                    return Err(gap);
+                }
+                if let Some(gap) = self.numeric_operand_proof_gap(op, right, right_numeric) {
+                    return Err(gap);
                 }
 
                 // ── Emit typed opcode (with coercion for mixed Int/Number) ──

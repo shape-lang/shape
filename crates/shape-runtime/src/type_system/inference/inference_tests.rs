@@ -1700,3 +1700,125 @@ fn test_object_add_infers_intersection() {
         ),
     }
 }
+
+/// A helper that returns the `(param_name, return_name)` of a `Type::Function`
+/// whose param/return are both `Type::Concrete(Basic(_))`.
+fn fn_param_return_basic(ty: &Type) -> Option<(String, String)> {
+    let Type::Function { params, returns } = ty else {
+        return None;
+    };
+    let p = match params.first()? {
+        Type::Concrete(TypeAnnotation::Basic(n)) => n.clone(),
+        _ => return None,
+    };
+    let r = match returns.as_ref() {
+        Type::Concrete(TypeAnnotation::Basic(n)) => n.clone(),
+        _ => return None,
+    };
+    Some((p, r))
+}
+
+/// ε-1 regression: a function reachable only through nested/transitive calls
+/// of other unannotated functions still resolves its parameter type via the
+/// transitive callsite-union fixpoint. Before the fix `double` inferred as
+/// `fn(number) -> number` (the eager `Numeric` → `number` collapse), which
+/// made the compiler emit `MulNumber` for integer arithmetic and the program
+/// printed a denormal float (`2e-321`, the i64 `40` bit-reinterpreted).
+#[test]
+fn test_nested_unannotated_fn_calls_resolve_param_types() {
+    use shape_ast::ast::TypeAnnotation;
+    use shape_ast::parser::parse_program;
+
+    let code = r#"
+fn double(x){x*2}
+fn quad(x){double(double(x))}
+let r = quad(10)
+"#;
+    let program = parse_program(code).expect("program should parse");
+    let mut engine = TypeInferenceEngine::new();
+    let (types, errors) = engine.infer_program_best_effort(&program);
+    assert!(errors.is_empty(), "inference should succeed: {:?}", errors);
+
+    let (double_p, double_r) = fn_param_return_basic(
+        types.get("double").expect("double should be inferred"),
+    )
+    .expect("double should be fn(basic)->basic");
+    assert_eq!(
+        (double_p.as_str(), double_r.as_str()),
+        ("int", "int"),
+        "double's parameter must resolve to int through the call graph, \
+         not collapse to the number default"
+    );
+
+    let (quad_p, quad_r) = fn_param_return_basic(
+        types.get("quad").expect("quad should be inferred"),
+    )
+    .expect("quad should be fn(basic)->basic");
+    assert_eq!((quad_p.as_str(), quad_r.as_str()), ("int", "int"));
+
+    assert!(
+        matches!(types.get("r"), Some(Type::Concrete(TypeAnnotation::Basic(n))) if n == "int"),
+        "let r = quad(10) must infer as int, got {:?}",
+        types.get("r")
+    );
+}
+
+/// ε-1 regression: `fn double(x){x*2.0}` — when the body pairs the parameter
+/// with a `number` literal the parameter resolves to `number` even when called
+/// only with a literal. Confirms the variable-propagating `numeric_result_type`
+/// stays consistent for the `number` case.
+#[test]
+fn test_nested_unannotated_fn_number_body_resolves_number() {
+    use shape_ast::ast::TypeAnnotation;
+    use shape_ast::parser::parse_program;
+
+    let code = r#"
+fn scalef(x){x*2.0}
+fn quadf(x){scalef(scalef(x))}
+let r = quadf(10.0)
+"#;
+    let program = parse_program(code).expect("program should parse");
+    let mut engine = TypeInferenceEngine::new();
+    let (types, errors) = engine.infer_program_best_effort(&program);
+    assert!(errors.is_empty(), "inference should succeed: {:?}", errors);
+
+    let (scalef_p, scalef_r) = fn_param_return_basic(
+        types.get("scalef").expect("scalef should be inferred"),
+    )
+    .expect("scalef should be fn(basic)->basic");
+    assert_eq!((scalef_p.as_str(), scalef_r.as_str()), ("number", "number"));
+
+    assert!(
+        matches!(types.get("r"), Some(Type::Concrete(TypeAnnotation::Basic(n))) if n == "number"),
+        "let r = quadf(10.0) must infer as number, got {:?}",
+        types.get("r")
+    );
+}
+
+/// ε-1 regression: a transitively-reached unannotated function with NO concrete
+/// callsite anywhere in the program keeps the deferred `number` default. The
+/// `Numeric`-bounded parameter is not left as a bare unresolved variable
+/// (which the emitter would reject), it falls back to `number`.
+#[test]
+fn test_unannotated_numeric_fn_without_callsite_defaults_to_number() {
+    use shape_ast::ast::TypeAnnotation;
+    use shape_ast::parser::parse_program;
+
+    let code = r#"
+fn triple(x){x*3}
+"#;
+    let program = parse_program(code).expect("program should parse");
+    let mut engine = TypeInferenceEngine::new();
+    let (types, errors) = engine.infer_program_best_effort(&program);
+    assert!(errors.is_empty(), "inference should succeed: {:?}", errors);
+
+    let triple = types.get("triple").expect("triple should be inferred");
+    let Type::Function { params, .. } = triple else {
+        panic!("triple should be a function type, got {:?}", triple);
+    };
+    assert!(
+        matches!(&params[0], Type::Concrete(TypeAnnotation::Basic(n)) if n == "number"),
+        "an unannotated numeric param with no callsite must default to number, got {:?}",
+        params[0]
+    );
+}
