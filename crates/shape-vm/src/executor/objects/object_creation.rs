@@ -177,26 +177,35 @@ impl VirtualMachine {
         }
         popped.reverse();
 
-        // Allocate slots + heap_mask. Each popped (bits, kind) pair
-        // transfers its strong-count share into the slot list — the new
-        // TypedObjectStorage's Drop releases it via per-`field_kinds[i]`
-        // dispatch (ADR-006 §2.5).
+        // Allocate slots + heap_mask + per-slot `field_kinds`. Each popped
+        // (bits, kind) pair transfers its strong-count share into the slot
+        // list — the new TypedObjectStorage's Drop releases it via
+        // per-`field_kinds[i]` dispatch (ADR-006 §2.5).
+        //
+        // `field_kinds[i]` is the kind of the slot `kinded_to_slot`
+        // *actually produced*, NOT the raw popped kind. `kinded_to_slot`
+        // normalizes inline-scalar slots to the schema's `FieldType`
+        // (e.g. a `Null`-kinded `PushNull` placeholder for a hoisted
+        // `int` field becomes a real `Int64` zero slot), so the
+        // `field_kinds` entry must reflect the resolved kind. Sourcing
+        // it from the raw popped kind left an uninitialized hoisted-field
+        // slot mislabeled `Null` while the schema (and every downstream
+        // `MakeFieldRef` projection) treated it as the concrete type —
+        // the §2.7.13 / Q14 `DerefStore` kind-invariance check then
+        // aborted on the drift (`let mut a = {x:10}; a.y = 2`).
         let mut slots: Vec<ValueSlot> = Vec::with_capacity(field_count as usize);
+        let mut field_kinds: Vec<NativeKind> = Vec::with_capacity(field_count as usize);
         let mut heap_mask: u64 = 0;
         for (i, (bits, kind)) in popped.iter().enumerate() {
             let field_type = field_types.as_ref().and_then(|types| types.get(i));
-            let (slot, is_heap) = kinded_to_slot(*bits, *kind, field_type);
+            let (slot, is_heap, resolved_kind) =
+                kinded_to_slot(*bits, *kind, field_type);
             if is_heap {
                 heap_mask |= 1u64 << i;
             }
             slots.push(slot);
+            field_kinds.push(resolved_kind);
         }
-
-        // Build the per-slot `field_kinds` table from the popped slot
-        // kinds. Lockstep with `slots` per the §2.5 invariant
-        // (`slots.len() == field_kinds.len()`). Drop walks this table to
-        // dispatch per-slot `Arc::decrement_strong_count`.
-        let field_kinds: Vec<NativeKind> = popped.iter().map(|(_, k)| *k).collect();
 
         // Wave 2 Round 4 D4 ckpt-1: migrated to v2-raw `_new`. The raw
         // pointer is directly the stack carrier bits per ADR-006 §2.4 /
@@ -428,11 +437,19 @@ impl VirtualMachine {
 /// pre-bulldozer behaviour did so (int<->float widening, decimal stored
 /// lossy as f64) and stored zero where the kind cannot represent the
 /// schema type.
+/// Returns `(slot, is_heap, resolved_kind)`. `resolved_kind` is the
+/// `NativeKind` of the slot this function actually produced — for
+/// inline-scalar schema fields it is the schema-aligned kind (e.g. a
+/// `Null`-kinded `PushNull` placeholder for a hoisted `int` field
+/// resolves to `Int64`), so the caller's `field_kinds` table stays
+/// consistent with the slot contents and with the schema. For heap
+/// slots and `Any`/non-primitive fields the popped `kind` is the source
+/// of truth and is returned verbatim.
 fn kinded_to_slot(
     bits: u64,
     kind: NativeKind,
     field_type: Option<&FieldType>,
-) -> (ValueSlot, bool) {
+) -> (ValueSlot, bool, NativeKind) {
     // FieldType::F64 / Decimal: schema demands inline f64 storage.
     // Pre-bulldozer behaviour is lossy for Arc<Decimal> inputs; preserve
     // that here so existing read-back consumers still work. The popped
@@ -464,17 +481,20 @@ fn kinded_to_slot(
             }
             _ => 0.0,
         };
-        return (ValueSlot::from_number(n), false);
+        // The schema demands inline f64 storage regardless of the popped
+        // kind, so the resolved slot kind is always Float64.
+        return (ValueSlot::from_number(n), false, NativeKind::Float64);
     }
 
     // Heap-kind slots (other than the FieldType::F64/Decimal lossy
     // case above): the popped bits are an Arc raw pointer. Move them
     // into the slot via `ValueSlot::from_raw(bits)`; setting the
     // heap_mask bit makes the new TypedObjectStorage's Drop retire the
-    // share through the matching `field_kinds[i]` arm.
+    // share through the matching `field_kinds[i]` arm. The popped kind
+    // is the source of truth for heap slots — return it verbatim.
     let is_heap = matches!(kind, NativeKind::String | NativeKind::Ptr(_));
     if is_heap {
-        return (ValueSlot::from_raw(bits), true);
+        return (ValueSlot::from_raw(bits), true, kind);
     }
 
     // Inline-scalar kinds: rebuild the typed slot per the schema's
@@ -488,7 +508,7 @@ fn kinded_to_slot(
                 NativeKind::Bool => (bits != 0) as i64,
                 _ => 0,
             };
-            (ValueSlot::from_int(i), false)
+            (ValueSlot::from_int(i), false, NativeKind::Int64)
         }
         Some(ft) if ft.is_width_integer() => {
             let raw = match kind {
@@ -510,17 +530,21 @@ fn kinded_to_slot(
                 }
                 _ => 0,
             };
+            // The slot is schema-typed; `field_kinds` carries the
+            // schema's width kind (I8/U8/I16/.../U64), not the popped
+            // kind. `to_native_kind()` is total for width integers.
+            let resolved = ft.to_native_kind().unwrap_or(NativeKind::Int64);
             if matches!(ft, FieldType::U64) {
                 // U64 stored as i64 bits; preserve the high bit
                 // pattern losslessly.
-                (ValueSlot::from_int(raw), false)
+                (ValueSlot::from_int(raw), false, resolved)
             } else {
                 let truncated = if let Some(w) = field_type_to_int_width(ft) {
                     w.truncate(raw)
                 } else {
                     raw
                 };
-                (ValueSlot::from_int(truncated), false)
+                (ValueSlot::from_int(truncated), false, resolved)
             }
         }
         Some(FieldType::Bool) => {
@@ -530,15 +554,18 @@ fn kinded_to_slot(
                 NativeKind::Float64 => f64::from_bits(bits) != 0.0,
                 _ => false,
             };
-            (ValueSlot::from_bool(b), false)
+            (ValueSlot::from_bool(b), false, NativeKind::Bool)
         }
         // `Any` and non-primitive schema types with an inline-scalar
         // popped value: store the raw bits as-is. The schema-driven
         // read path reconstructs the appropriate shape; preserving the
         // raw bits is the lossless round-trip per the existing
         // pre-bulldozer behaviour. heap_mask remains 0 — the value is
-        // inline.
-        Some(FieldType::Any) | None | Some(_) => (ValueSlot::from_raw(bits), false),
+        // inline, and the popped kind is the source of truth (no
+        // schema normalization happened to the bits).
+        Some(FieldType::Any) | None | Some(_) => {
+            (ValueSlot::from_raw(bits), false, kind)
+        }
     }
 }
 

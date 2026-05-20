@@ -28,7 +28,7 @@
 // `TypedArray<T>` rebuild in a downstream wave (the carrier replacement
 // requires per-element-kind receiver variants — `Arc<TypedArray<f64>>`
 // / `Arc<TypedArray<i64>>` / etc. — not a single `Arc<T>` enum).
-use crate::heap_value::TypedObjectStorage;
+use crate::heap_value::TypedObjectPtr;
 use crate::native_kind::NativeKind;
 
 /// Kinded reference target.
@@ -70,13 +70,19 @@ pub enum RefTarget {
 
     /// Projected reference into a typed-object field.
     ///
-    /// `receiver` keeps the projected object alive (typed `Arc` per
-    /// ADR-006 §2.4 `from_typed_object`); `field_offset` is the slot
-    /// index inside `TypedObjectStorage.slots` (the schema-resolved
-    /// `field_idx` from `Operand::TypedField`); `kind` is the projected
-    /// slot's `NativeKind`, sourced from the emitter's `field_type_tag`.
+    /// `receiver` keeps the projected object alive via the v2-raw
+    /// `TypedObjectPtr` carrier (ADR-006 §2.3 typed-Arc carrier — one
+    /// HeapHeader-at-offset-0 refcount share, retained/released through
+    /// `v2_retain` / `TypedObjectStorage::release_elem`). Production
+    /// `TypedObjectStorage` is allocated via the v2-raw `_new` path
+    /// (`op_new_typed_object`), so the receiver slot bits are the raw
+    /// struct pointer (HeapHeader at offset 0); the wrapper matches that
+    /// allocation provenance. `field_offset` is the slot index inside
+    /// `TypedObjectStorage.slots` (the schema-resolved `field_idx` from
+    /// `Operand::TypedField`); `kind` is the projected slot's
+    /// `NativeKind`, sourced from the emitter's `field_type_tag`.
     TypedField {
-        receiver: std::sync::Arc<TypedObjectStorage>,
+        receiver: TypedObjectPtr,
         field_offset: u32,
         kind: NativeKind,
     },
