@@ -69,6 +69,23 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     return self.compile_binop_narrow_int(op, l, r, nw);
                 }
 
+                // R5c-2-β-γ checkpoint (b) u64-carrier: full-range `u64`
+                // arithmetic. A `NativeKind::UInt64` operand shares the
+                // 64-bit Cranelift `I64` width with `Int64`, so the
+                // `l_type == I64` width test below cannot tell them apart —
+                // the operand KIND must drive this path. The bytecode VM
+                // computes `u64` div/mod with `u64::wrapping_div`/`_rem`
+                // and comparisons with unsigned `cmp`
+                // (`executor/arithmetic/mod.rs::compact_int_divmod_u64`,
+                // `compact_int_cmp`); the JIT matches by selecting
+                // `udiv`/`urem` and `Unsigned*` condition codes in
+                // `compile_binop_uint64`. Must precede the `both_int64`
+                // arm — a `UInt64` operand would otherwise fall to the
+                // signed `compile_binop_int64` (`sdiv`/`srem`) and diverge.
+                if Self::uint64_binop_site(lhs_kind, rhs_kind, lhs, rhs) {
+                    return self.compile_binop_uint64(op, l, r);
+                }
+
                 if l_type == types::F64 && r_type == types::F64 {
                     // Both operands are native F64 — inline float ops.
                     self.compile_binop_f64(op, l, r)
@@ -622,6 +639,41 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         }
     }
 
+    /// R5c-2-β-γ checkpoint (b) u64-carrier: classify a binop as a
+    /// full-range `u64` arithmetic site.
+    ///
+    /// Returns `true` when the binop operates on `NativeKind::UInt64`
+    /// operands — the full-range `0..2^64` unsigned carrier. Like the
+    /// narrow-int classifier, an integer literal (`Operand::Constant(
+    /// MirConstant::Int(_))`, classified `Int64` because the literal MIR
+    /// carrier is width-blind) is width-polymorphic and adapts to a `u64`
+    /// context, so a `(UInt64, Int64-literal)` pairing also classifies as
+    /// `u64`. Both operands lower to Cranelift `I64` (u64 and i64 share the
+    /// 64-bit width); the codegen in `compile_binop_uint64` then selects
+    /// `udiv`/`urem` and unsigned compares so the JIT matches the bytecode
+    /// VM's unsigned `u64` arithmetic byte-for-byte.
+    ///
+    /// `false` for any other pairing — `Int64`/`Int64` (signed `int`),
+    /// floats, narrow integers, heap pointers, and unproven kinds all fall
+    /// through to the existing dispatch arms.
+    fn uint64_binop_site(
+        lhs: Option<shape_vm::type_tracking::NativeKind>,
+        rhs: Option<shape_vm::type_tracking::NativeKind>,
+        lhs_op: &Operand,
+        rhs_op: &Operand,
+    ) -> bool {
+        use shape_vm::type_tracking::NativeKind;
+        fn is_int_literal(op: &Operand) -> bool {
+            matches!(op, Operand::Constant(MirConstant::Int(_)))
+        }
+        match (lhs, rhs) {
+            (Some(NativeKind::UInt64), Some(NativeKind::UInt64)) => true,
+            (Some(NativeKind::UInt64), Some(NativeKind::Int64)) => is_int_literal(rhs_op),
+            (Some(NativeKind::Int64), Some(NativeKind::UInt64)) => is_int_literal(lhs_op),
+            _ => false,
+        }
+    }
+
     /// Check if both operand kinds are Int64 (NaN-boxed integers suitable for inline i64 ops).
     fn both_int64(
         &self,
@@ -1065,6 +1117,92 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // in practice but the path was kept for symmetry).
                 self.compile_binop(op, lhs, rhs)
             }
+        }
+    }
+
+    // ── Inline UInt64 arithmetic (full-range unsigned, raw native i64 width) ──
+
+    /// R5c-2-β-γ checkpoint (b) u64-carrier: compile a binary op on proven
+    /// `NativeKind::UInt64` operands — the full-range `0..2^64` unsigned
+    /// carrier.
+    ///
+    /// `u64` and `i64` share the 64-bit Cranelift `I64` width, so the
+    /// operands flow through unchanged (no `ireduce`/`sextend`). The
+    /// signedness-DEPENDENT operations diverge from the signed
+    /// `compile_binop_int64` path:
+    ///
+    /// - Add / Sub / Mul: two's-complement — `iadd`/`isub`/`imul` produce
+    ///   the same bit pattern for `u64` and `i64`. Overflow WRAPS at 2^64
+    ///   (integer-semantics ruling 2026-05-20 #3), matching the bytecode
+    ///   VM's `compact_int_checked_binop` `wrapping_*`.
+    /// - Div / Mod: `udiv`/`urem` — UNSIGNED. The signed `sdiv`/`srem`
+    ///   would interpret `u64::MAX` as `-1` and compute `u64::MAX / 2 == 0`.
+    ///   The unsigned ops never trap on overflow (the `i64::MIN / -1` case
+    ///   has no u64 analogue); only division-by-zero traps (matching the
+    ///   VM's `VMError::DivisionByZero`). Mirrors `compile_binop_uint64`'s
+    ///   VM sibling `compact_int_divmod_u64`.
+    /// - Comparisons: `Unsigned*` Cranelift condition codes — `u64::MAX`
+    ///   compares GREATER than `0`, not less. `Eq`/`Ne` are signedness-
+    ///   agnostic.
+    /// - Bitwise: `band`/`bor`/`bxor`/`ishl` are signedness-agnostic.
+    ///   Right-shift uses the LOGICAL `ushr` (zero-fill) — a `u64` has no
+    ///   sign bit to extend.
+    fn compile_binop_uint64(
+        &mut self,
+        op: &BinOp,
+        lhs: Value,
+        rhs: Value,
+    ) -> Result<Value, String> {
+        match op {
+            BinOp::Add => Ok(self.builder.ins().iadd(lhs, rhs)),
+            BinOp::Sub => Ok(self.builder.ins().isub(lhs, rhs)),
+            BinOp::Mul => Ok(self.builder.ins().imul(lhs, rhs)),
+            BinOp::Div => {
+                let zero = self.builder.ins().iconst(types::I64, 0);
+                let is_zero = self.builder.ins().icmp(IntCC::Equal, rhs, zero);
+                self.builder.ins().trapnz(is_zero, TrapCode::User(0));
+                Ok(self.builder.ins().udiv(lhs, rhs))
+            }
+            BinOp::Mod => {
+                let zero = self.builder.ins().iconst(types::I64, 0);
+                let is_zero = self.builder.ins().icmp(IntCC::Equal, rhs, zero);
+                self.builder.ins().trapnz(is_zero, TrapCode::User(0));
+                Ok(self.builder.ins().urem(lhs, rhs))
+            }
+            BinOp::Eq => Ok(self.builder.ins().icmp(IntCC::Equal, lhs, rhs)),
+            BinOp::Ne => Ok(self.builder.ins().icmp(IntCC::NotEqual, lhs, rhs)),
+            BinOp::Lt => Ok(self
+                .builder
+                .ins()
+                .icmp(IntCC::UnsignedLessThan, lhs, rhs)),
+            BinOp::Le => Ok(self
+                .builder
+                .ins()
+                .icmp(IntCC::UnsignedLessThanOrEqual, lhs, rhs)),
+            BinOp::Gt => Ok(self
+                .builder
+                .ins()
+                .icmp(IntCC::UnsignedGreaterThan, lhs, rhs)),
+            BinOp::Ge => Ok(self
+                .builder
+                .ins()
+                .icmp(IntCC::UnsignedGreaterThanOrEqual, lhs, rhs)),
+            BinOp::BitAnd => Ok(self.builder.ins().band(lhs, rhs)),
+            BinOp::BitOr => Ok(self.builder.ins().bor(lhs, rhs)),
+            BinOp::BitXor => Ok(self.builder.ins().bxor(lhs, rhs)),
+            BinOp::BitShl => Ok(self.builder.ins().ishl(lhs, rhs)),
+            // Logical (zero-fill) right-shift — `u64` has no sign bit.
+            BinOp::BitShr => Ok(self.builder.ins().ushr(lhs, rhs)),
+            BinOp::Pow => {
+                // Integer pow has no native Cranelift instruction; the
+                // i64 path routes through `jit_pow_i64`. `u64` pow on the
+                // non-overflowing common case agrees with the i64 helper
+                // (two's-complement product); reuse it.
+                let func_ref = self.ffi.pow_i64;
+                let inst = self.builder.ins().call(func_ref, &[lhs, rhs]);
+                Ok(self.builder.inst_results(inst)[0])
+            }
+            BinOp::And | BinOp::Or => self.compile_binop(op, lhs, rhs),
         }
     }
 

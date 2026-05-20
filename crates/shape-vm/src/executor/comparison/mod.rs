@@ -116,25 +116,58 @@ impl VirtualMachine {
             // and unconditionally push `NativeKind::Bool`. The pre-Wave-6
             // dual-path `is_tagged()` call is gone (deleted in substep-1;
             // would always have returned false on native bits).
+            // R5c-2-β-γ checkpoint (b) u64-carrier: ordering comparisons are
+            // signedness-DEPENDENT. `u64::MAX` (`0xFFFF…`) must compare
+            // GREATER than `2`, not less. The pre-checkpoint-(b) handlers
+            // discarded the operand kind and always reinterpreted bits as
+            // signed `i64`, so `(u64::MAX) > (2)` evaluated `(-1) > 2 ==
+            // false`. The slot KIND — producer-stamped per ADR-006 §2.7.5 —
+            // is the discriminator: a `NativeKind::UInt64` operand decodes
+            // its bits as `u64` and uses an unsigned comparison. This
+            // reuses the existing `*Int` comparison opcode machinery
+            // (no new opcode family) — the operand kind already on the
+            // §2.7.7/Q9 parallel-kind track drives the signed/unsigned
+            // selection. `EqInt`/`NeqInt` stay kind-agnostic — bitwise
+            // equality is identical for `i64` and `u64`.
             GtInt => {
-                let (b_bits, _b_kind) = self.pop_kinded()?;
-                let (a_bits, _a_kind) = self.pop_kinded()?;
-                self.push_kinded(((a_bits as i64) > (b_bits as i64)) as u64, NativeKind::Bool)?;
+                let (b_bits, b_kind) = self.pop_kinded()?;
+                let (a_bits, a_kind) = self.pop_kinded()?;
+                let result = if int_cmp_is_unsigned(a_kind, b_kind) {
+                    a_bits > b_bits
+                } else {
+                    (a_bits as i64) > (b_bits as i64)
+                };
+                self.push_kinded(result as u64, NativeKind::Bool)?;
             }
             LtInt => {
-                let (b_bits, _b_kind) = self.pop_kinded()?;
-                let (a_bits, _a_kind) = self.pop_kinded()?;
-                self.push_kinded(((a_bits as i64) < (b_bits as i64)) as u64, NativeKind::Bool)?;
+                let (b_bits, b_kind) = self.pop_kinded()?;
+                let (a_bits, a_kind) = self.pop_kinded()?;
+                let result = if int_cmp_is_unsigned(a_kind, b_kind) {
+                    a_bits < b_bits
+                } else {
+                    (a_bits as i64) < (b_bits as i64)
+                };
+                self.push_kinded(result as u64, NativeKind::Bool)?;
             }
             GteInt => {
-                let (b_bits, _b_kind) = self.pop_kinded()?;
-                let (a_bits, _a_kind) = self.pop_kinded()?;
-                self.push_kinded(((a_bits as i64) >= (b_bits as i64)) as u64, NativeKind::Bool)?;
+                let (b_bits, b_kind) = self.pop_kinded()?;
+                let (a_bits, a_kind) = self.pop_kinded()?;
+                let result = if int_cmp_is_unsigned(a_kind, b_kind) {
+                    a_bits >= b_bits
+                } else {
+                    (a_bits as i64) >= (b_bits as i64)
+                };
+                self.push_kinded(result as u64, NativeKind::Bool)?;
             }
             LteInt => {
-                let (b_bits, _b_kind) = self.pop_kinded()?;
-                let (a_bits, _a_kind) = self.pop_kinded()?;
-                self.push_kinded(((a_bits as i64) <= (b_bits as i64)) as u64, NativeKind::Bool)?;
+                let (b_bits, b_kind) = self.pop_kinded()?;
+                let (a_bits, a_kind) = self.pop_kinded()?;
+                let result = if int_cmp_is_unsigned(a_kind, b_kind) {
+                    a_bits <= b_bits
+                } else {
+                    (a_bits as i64) <= (b_bits as i64)
+                };
+                self.push_kinded(result as u64, NativeKind::Bool)?;
             }
             EqInt => {
                 let (b_bits, _b_kind) = self.pop_kinded()?;
@@ -282,6 +315,27 @@ impl VirtualMachine {
 // ────────────────────────────────────────────────────────────────────────────
 // Module-level helpers — read-by-(bits,kind) without consuming the share
 // ────────────────────────────────────────────────────────────────────────────
+
+/// Whether a `*Int` ordering comparison (`GtInt`/`LtInt`/`GteInt`/`LteInt`)
+/// must use UNSIGNED `u64` semantics rather than signed `i64`.
+///
+/// R5c-2-β-γ checkpoint (b) u64-carrier. The only integer kind where the
+/// signed and unsigned interpretations of the 64-bit slot bits genuinely
+/// diverge for ordering is `u64`: a `u64` value above `i64::MAX` has bit 63
+/// set, which signed comparison reads as a negative number. `u8`/`u16`/`u32`
+/// values are always non-negative in `i64` (they occupy only the low
+/// 8/16/32 bits), so signed comparison is already correct for them — and
+/// `i8`..`i64` are signed by definition. A comparison is unsigned when
+/// EITHER operand is the full-range `u64` carrier; the other operand may be
+/// an `Int64`-stamped width-polymorphic literal (a `u64` literal `<=
+/// i64::MAX` pushes `Constant::Int` → `NativeKind::Int64`), and an unsigned
+/// comparison is still correct for it because such a literal's bits have
+/// bit 63 clear.
+#[inline]
+fn int_cmp_is_unsigned(a_kind: NativeKind, b_kind: NativeKind) -> bool {
+    matches!(a_kind, NativeKind::UInt64 | NativeKind::NullableUInt64)
+        || matches!(b_kind, NativeKind::UInt64 | NativeKind::NullableUInt64)
+}
 
 /// Read a `KindedSlot`-style operand as `i128` if it is integer-family
 /// (signed/unsigned, any width). Returns `None` for non-integer kinds.
@@ -774,5 +828,75 @@ mod tests {
             ),
             Some(Ordering::Equal),
         );
+    }
+
+    // ── u64 ordering comparisons — R5c-2-β-γ checkpoint (b) ───────────────
+    //
+    // `*Int` ordering opcodes (`GtInt`/`LtInt`/`GteInt`/`LteInt`) are
+    // signedness-DEPENDENT. The pre-checkpoint-(b) handlers reinterpreted
+    // the 64-bit slot bits as signed `i64` unconditionally, so a
+    // `NativeKind::UInt64` operand above `i64::MAX` (bit 63 set) compared
+    // as a negative number — `u64::MAX > 2` evaluated `false`. The handler
+    // now consults the producer-stamped operand kind (`int_cmp_is_unsigned`)
+    // and uses an unsigned comparison when either operand is `UInt64`.
+
+    /// Push two `u64` operands with the `UInt64` carrier kind, run the
+    /// opcode, return the bool result.
+    fn run_u64_cmp(a: u64, b: u64, opcode: OpCode) -> bool {
+        let mut vm = make_vm();
+        vm.push_kinded(a, NativeKind::UInt64).unwrap();
+        vm.push_kinded(b, NativeKind::UInt64).unwrap();
+        run_typed_cmp(&mut vm, opcode)
+    }
+
+    #[test]
+    fn u64_gt_above_i64_max_is_greater() {
+        // u64::MAX > 2 — true (unsigned). Signed would give false.
+        assert!(run_u64_cmp(u64::MAX, 2, OpCode::GtInt));
+    }
+
+    #[test]
+    fn u64_lt_above_i64_max_is_not_less() {
+        // u64::MAX < 2 — false (unsigned). Signed would give true.
+        assert!(!run_u64_cmp(u64::MAX, 2, OpCode::LtInt));
+    }
+
+    #[test]
+    fn u64_gte_equal_full_range() {
+        assert!(run_u64_cmp(u64::MAX, u64::MAX, OpCode::GteInt));
+    }
+
+    #[test]
+    fn u64_lte_full_range() {
+        // (2^63) <= u64::MAX — true; both above i64::MAX.
+        assert!(run_u64_cmp(1u64 << 63, u64::MAX, OpCode::LteInt));
+    }
+
+    #[test]
+    fn u64_eq_full_range_is_bit_exact() {
+        // Equality is signedness-agnostic — bit-exact.
+        assert!(run_u64_cmp(u64::MAX, u64::MAX, OpCode::EqInt));
+        assert!(run_u64_cmp(u64::MAX, u64::MAX - 1, OpCode::NeqInt));
+    }
+
+    #[test]
+    fn u64_mixed_with_int64_literal_operand_uses_unsigned() {
+        // `a` is UInt64-kinded, `b` is an Int64-stamped width-polymorphic
+        // literal (a `u64` literal <= i64::MAX pushes Constant::Int →
+        // NativeKind::Int64). The comparison must still be unsigned.
+        let mut vm = make_vm();
+        vm.push_kinded(u64::MAX, NativeKind::UInt64).unwrap();
+        vm.push_kinded(2u64, NativeKind::Int64).unwrap();
+        assert!(run_typed_cmp(&mut vm, OpCode::GtInt));
+    }
+
+    #[test]
+    fn signed_int_comparison_unaffected() {
+        // Plain `int` (Int64) comparisons keep signed semantics — a
+        // negative i64 is still less than a positive one.
+        let mut vm = make_vm();
+        vm.push_kinded((-1i64) as u64, NativeKind::Int64).unwrap();
+        vm.push_kinded(2u64, NativeKind::Int64).unwrap();
+        assert!(run_typed_cmp(&mut vm, OpCode::LtInt));
     }
 }
