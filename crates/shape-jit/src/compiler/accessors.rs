@@ -180,6 +180,13 @@ const ALL_OPCODES: &[OpCode] = &[
     OpCode::MakeClosure,
     OpCode::CloseUpvalue,
     OpCode::MakeRef,
+    // γ-CP4 jit-makefieldref: `MakeFieldRef` (`&`/`&mut` into a typed-
+    // object field) is JIT-compiled via the field-address path in
+    // `mir_compiler::rvalues::Rvalue::Borrow`; `MakeIndexRef` is out of
+    // the β1 `RefTarget` scope and clean-deopts to the interpreter. Both
+    // produce correct results, so the parity matrix lists them supported.
+    OpCode::MakeFieldRef,
+    OpCode::MakeIndexRef,
     OpCode::DerefLoad,
     OpCode::DerefStore,
     OpCode::SetIndexRef,

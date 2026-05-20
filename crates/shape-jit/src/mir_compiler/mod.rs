@@ -79,6 +79,17 @@ mod short_circuit_regression_tests;
 #[cfg(all(test, feature = "deep-tests"))]
 mod ref_param_regression_tests;
 
+// γ-CP4 jit-makefieldref regression tests (ADR-006 §2.7.13 + §2.3;
+// v0.3-gating NO-KNOWN-INCORRECTNESS). Pin the JIT codegen for
+// `MakeFieldRef` — `&`/`&mut` references projecting into a typed-object
+// field — against the field-address path in `rvalues.rs::Rvalue::Borrow`
+// + `places.rs::emit_typed_field_address`. Sister-class to
+// `ref_param_regression_tests` (the `Place::Local` ref-param chain).
+// Gated behind `deep-tests` for the same reason: `JITExecutor::
+// execute_program` JIT-compiles the stdlib on every test.
+#[cfg(all(test, feature = "deep-tests"))]
+mod field_ref_regression_tests;
+
 use cranelift::codegen::ir::{FuncRef, StackSlot};
 use cranelift::prelude::*;
 use std::collections::{HashMap, HashSet};

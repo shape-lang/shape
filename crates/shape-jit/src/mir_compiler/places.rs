@@ -736,6 +736,55 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         self.builder.ins().store(MemFlags::trusted(), val, to_ptr, offset);
     }
 
+    /// γ-CP4 jit-makefieldref (ADR-006 §2.7.13 / §2.3): compute the
+    /// **address of a typed-object field slot** for `&`/`&mut` field
+    /// projections (`MakeFieldRef`).
+    ///
+    /// A field reference (`&mut b.value`) is the address of the field's
+    /// 8-byte slot inside the object — the JIT analogue of the VM's
+    /// `RefTarget::TypedField { receiver, field_offset, .. }` carrier
+    /// (`crates/shape-value/src/reference.rs`). The VM resolves the field
+    /// slot as `TypedObjectStorage` base + `field_offset`; the JIT does the
+    /// structurally identical computation against its own
+    /// `UnifiedValue<*const u8>`-wrapped `TypedObject` heap layout:
+    ///
+    ///   nanboxed_bits --&UNIFIED_PTR_MASK--> UnifiedValue*
+    ///     +UNIFIED_VALUE_DATA_OFFSET --load--> raw TypedObject*
+    ///       +TYPED_OBJ_HEADER + byte_off ---> field slot address
+    ///
+    /// The returned address is a real pointer into the live object's field
+    /// memory; loading/storing through it (`Place::Deref`) mutates the
+    /// field in place — byte-equal to the VM's `write_ref_target` /
+    /// `read_ref_target`. NO throwaway stack cell is allocated, so the
+    /// `Rvalue::Borrow` site does NOT register the ref in `ref_stack_slots`
+    /// and `reload_referenced_locals` never clobbers the (struct-pointer)
+    /// root local with a field scalar — the SIGSEGV this CP closes.
+    ///
+    /// References are strictly per-function (the MIR ref-escape analysis
+    /// rejects closure-capture / return of a borrow), and the borrowed
+    /// object is a live local for the whole body, so the field address
+    /// stays valid for every deref reachable from this borrow.
+    pub(crate) fn emit_typed_field_address(
+        &mut self,
+        nanboxed_bits: Value,
+        byte_off: u16,
+    ) -> Value {
+        let to_ptr = self.emit_typed_object_ptr(nanboxed_bits);
+        let offset = TYPED_OBJ_HEADER + byte_off as i32;
+        self.builder.ins().iadd_imm(to_ptr, offset as i64)
+    }
+
+    /// γ-CP4: resolve a `Place::Field`'s slot byte offset for the
+    /// `Rvalue::Borrow` field-address path. `pub(crate)` so `rvalues.rs`
+    /// can decide between the inline field-address codegen and a clean
+    /// surface-and-stop deopt when the offset is not statically known.
+    pub(crate) fn try_resolve_field_byte_offset_pub(
+        &self,
+        field_idx: &FieldIdx,
+    ) -> Option<u16> {
+        self.try_resolve_field_byte_offset(field_idx)
+    }
+
     // ── Field offset resolution ────────────────────────────────────────
 
     fn try_resolve_field_byte_offset(&self, field_idx: &FieldIdx) -> Option<u16> {

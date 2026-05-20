@@ -171,10 +171,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // returning the unmutated `a`).
                 //
                 // Only `Place::Local(ref_param_slot)` short-circuits;
-                // any projection (`Place::Field` / `Place::Index` /
-                // `Place::Deref`) keeps the existing per-function stack-
-                // cell allocation since the projection materialises a
-                // new addressable value.
+                // `Place::Field` projections take the γ-CP4 field-address
+                // path below.
                 if let Place::Local(slot) = place {
                     if self.ref_param_slots.contains(slot) {
                         let var = *self.locals.get(slot).ok_or_else(|| {
@@ -187,6 +185,80 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         return Ok(self.builder.use_var(var));
                     }
                 }
+
+                // γ-CP4 jit-makefieldref (ADR-006 §2.7.13 / §2.3): a
+                // `&`/`&mut` projection into a typed-object field
+                // (`&mut b.value`) — the JIT analogue of the VM's
+                // `RefTarget::TypedField`. The reference IS the address of
+                // the field slot inside the live object; loading/storing
+                // through it (`Place::Deref`) mutates the field in place,
+                // byte-equal to the VM's `write_ref_target`.
+                //
+                // This MUST NOT go through the throwaway-stack-cell path
+                // below: that path snapshots the field VALUE into a cell
+                // keyed (in `ref_stack_slots`) on `place.root_local()` —
+                // the *struct* local. `reload_referenced_locals` then
+                // writes that cell's contents (a field scalar) back into
+                // the struct local's slot variable after every call,
+                // overwriting the `TypedObject` pointer with an integer.
+                // The next field access (`inline_typed_field_get`) then
+                // dereferences the integer-as-pointer → SIGSEGV. Computing
+                // the real field address sidesteps the cell entirely:
+                // there is nothing to register in `ref_stack_slots` and
+                // nothing for `reload_referenced_locals` to clobber.
+                if let Place::Field(base, field_idx) = place {
+                    let byte_off = self
+                        .try_resolve_field_byte_offset_pub(field_idx)
+                        .ok_or_else(|| {
+                            format!(
+                                "γ-CP4 jit-makefieldref: SURFACE — field-reference \
+                                 (`&`/`&mut`) into field idx {} has no statically \
+                                 resolved byte offset (no `field_byte_offsets` / \
+                                 inline-typed-struct layout entry). The schema-less \
+                                 `get_prop`/`set_prop` FFI carrier exposes no field \
+                                 address, so a typed field reference cannot be \
+                                 formed. Clean deopt to the interpreter — \
+                                 ADR-006 §2.7.13.",
+                                field_idx.0,
+                            )
+                        })?;
+                    // Read the receiver's NaN-boxed typed-object bits, then
+                    // compute the field slot address. The receiver local is
+                    // live for the whole function and references never
+                    // escape their frame, so this address stays valid for
+                    // every deref reachable from this borrow.
+                    let base_bits = self.read_place(base)?;
+                    return Ok(self.emit_typed_field_address(base_bits, byte_off));
+                }
+
+                // γ-CP4 jit-makefieldref: `Place::Index` / `Place::Deref`
+                // projection borrows (`&mut arr[i]`, re-borrow of a deref)
+                // are NOT handled by the stack-cell path below. That path
+                // keys the cell on `place.root_local()` and reloads the
+                // cell contents back into the *root local* after every
+                // call (`reload_referenced_locals`) — for a projection the
+                // root local is the container (array / ref), not the
+                // projected slot, so the reload clobbers the container
+                // pointer with a projected scalar exactly as the
+                // `MakeFieldRef` SIGSEGV did. `MakeIndexRef` is explicitly
+                // out of the β1 `RefTarget` scope (the `TypedIndex` variant
+                // was retired pending the per-element-kind `TypedArray<T>`
+                // rebuild — see `crates/shape-value/src/reference.rs`), so
+                // surface-and-stop here for a clean deopt to the
+                // interpreter rather than emitting an unsound cell.
+                if matches!(place, Place::Index(_, _) | Place::Deref(_)) {
+                    return Err(format!(
+                        "γ-CP4 jit-makefieldref: SURFACE — `&`/`&mut` projection \
+                         borrow of `{place}` (Index / nested-Deref) is not \
+                         supported by the JIT. The per-function stack-cell ref \
+                         path is keyed on the root local and would corrupt the \
+                         container pointer via `reload_referenced_locals`. \
+                         `MakeIndexRef` is out of the β1 `RefTarget::TypedField` \
+                         scope. Clean deopt to the interpreter — ADR-006 \
+                         §2.7.13."
+                    ));
+                }
+
                 // R4.2F: allocate a native-sized/aligned stack cell that
                 // matches the root local's Cranelift type. References are
                 // strictly per-function — they never cross Cranelift call
@@ -195,7 +267,9 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 //
                 // For non-native slot kinds (heap / string / unknown),
                 // `cranelift_type_for_slot` returns I64, collapsing to the
-                // legacy 8-byte cell with no behavioural change.
+                // legacy 8-byte cell with no behavioural change. Only
+                // `Place::Local` reaches here — `place.root_local()` is the
+                // slot itself, so the reload-after-call is sound.
                 let raw_val = self.read_place(place)?;
                 let root = place.root_local();
                 let kind = super::types::slot_kind_for_local(&self.slot_kinds, root.0)
