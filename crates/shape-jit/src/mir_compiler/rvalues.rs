@@ -845,17 +845,14 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             BinOp::Add => Ok(self.builder.ins().iadd(lhs, rhs)),
             BinOp::Sub => Ok(self.builder.ins().isub(lhs, rhs)),
             BinOp::Mul => Ok(self.builder.ins().imul(lhs, rhs)),
+            // r5c-2-gz-cp2-jit-div: VM-equivalent trap-free i32 div/mod —
+            // div-by-zero → clean `Division by zero`; `i32::MIN / -1` →
+            // wrapping `i32::MIN` (mod → 0). See `compile_int_divmod_guarded`.
             BinOp::Div => {
-                let zero = self.builder.ins().iconst(types::I32, 0);
-                let is_zero = self.builder.ins().icmp(IntCC::Equal, rhs, zero);
-                self.builder.ins().trapnz(is_zero, TrapCode::User(0));
-                Ok(self.builder.ins().sdiv(lhs, rhs))
+                self.compile_int_divmod_guarded(lhs, rhs, types::I32, true, false)
             }
             BinOp::Mod => {
-                let zero = self.builder.ins().iconst(types::I32, 0);
-                let is_zero = self.builder.ins().icmp(IntCC::Equal, rhs, zero);
-                self.builder.ins().trapnz(is_zero, TrapCode::User(0));
-                Ok(self.builder.ins().srem(lhs, rhs))
+                self.compile_int_divmod_guarded(lhs, rhs, types::I32, true, true)
             }
             // W11-fup-A (Phase 3d, 2026-05-18): bitwise on native I32 use
             // Cranelift's native bitwise instructions (`band`/`bor`/`bxor`/
@@ -943,25 +940,20 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             BinOp::Add => Ok(self.builder.ins().iadd(l, r)),
             BinOp::Sub => Ok(self.builder.ins().isub(l, r)),
             BinOp::Mul => Ok(self.builder.ins().imul(l, r)),
+            // r5c-2-gz-cp2-jit-div: VM-equivalent trap-free narrow-int div/mod.
+            // div-by-zero → clean `Division by zero` (matching the VM's
+            // `compact_int_divmod` / `compact_int_divmod_u64`). For signed
+            // narrow widths `INT_MIN / -1` wraps to `INT_MIN` (mod → 0) —
+            // `compile_int_divmod_guarded` substitutes the divisor with `1`,
+            // computing the overflow case without invoking `sdiv` on the
+            // trapping operand pair. Unsigned narrow widths have no overflow
+            // case. The narrow `INT_MIN`/`-1` constants are derived from
+            // `cl_ty.bits()` inside the helper.
             BinOp::Div => {
-                let zero = self.builder.ins().iconst(cl_ty, 0);
-                let is_zero = self.builder.ins().icmp(IntCC::Equal, r, zero);
-                self.builder.ins().trapnz(is_zero, TrapCode::User(0));
-                if unsigned {
-                    Ok(self.builder.ins().udiv(l, r))
-                } else {
-                    Ok(self.builder.ins().sdiv(l, r))
-                }
+                self.compile_int_divmod_guarded(l, r, cl_ty, !unsigned, false)
             }
             BinOp::Mod => {
-                let zero = self.builder.ins().iconst(cl_ty, 0);
-                let is_zero = self.builder.ins().icmp(IntCC::Equal, r, zero);
-                self.builder.ins().trapnz(is_zero, TrapCode::User(0));
-                if unsigned {
-                    Ok(self.builder.ins().urem(l, r))
-                } else {
-                    Ok(self.builder.ins().srem(l, r))
-                }
+                self.compile_int_divmod_guarded(l, r, cl_ty, !unsigned, true)
             }
             // Bitwise — native Cranelift bitwise ops at the narrow width.
             BinOp::BitAnd => Ok(self.builder.ins().band(l, r)),
@@ -1031,6 +1023,130 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         self.builder.ins().sextend(target, val)
     }
 
+    // ── Integer division / modulo (VM-equivalent, trap-free) ─────────
+
+    /// r5c-2-gz-cp2-jit-div: compile an integer division or modulo with
+    /// semantics identical to the bytecode VM, for every integer width.
+    ///
+    /// The VM (`crates/shape-vm/src/executor/arithmetic/mod.rs`) handles two
+    /// edge cases the raw Cranelift `sdiv`/`udiv`/`srem`/`urem` cannot:
+    ///
+    /// 1. **Divisor is zero** — the VM returns a clean `VMError::DivisionByZero`
+    ///    ("Division by zero"). The prior JIT codegen emitted
+    ///    `trapnz(is_zero, TrapCode::User(0))` → an `ud2` instruction → SIGILL
+    ///    crashing the process. This emits a guarded branch instead: on a zero
+    ///    divisor the function does an immediate `return_` of
+    ///    `JIT_SIGNAL_DIVISION_BY_ZERO`, which the executor maps back to the
+    ///    VM's diagnostic. This is the W12 fall-through shape — a clean
+    ///    diagnostic, not a trap.
+    ///
+    /// 2. **`INT_MIN / -1` signed overflow** — the VM uses `wrapping_div` /
+    ///    `wrapping_rem`, so `INT_MIN / -1` wraps to `INT_MIN` and
+    ///    `INT_MIN % -1` is `0`. Cranelift `sdiv`/`srem` have an implicit
+    ///    integer-overflow trap here → SIGFPE. We avoid it WITHOUT a result
+    ///    `select`: when `divisor == -1 && dividend == INT_MIN` we substitute
+    ///    the divisor with `1`. Then `sdiv(INT_MIN, 1) == INT_MIN` (the exact
+    ///    `wrapping_div` result) and `srem(INT_MIN, 1) == 0` (the exact
+    ///    `wrapping_rem` result), so a single substitution is correct for
+    ///    both div and mod. Non-overflowing dividends are unaffected — the
+    ///    substitution only triggers on the unique `INT_MIN`/`-1` pair.
+    ///
+    /// Unsigned (`udiv`/`urem`) has no overflow case — only the zero-divisor
+    /// guard applies. `is_signed` selects the divide instruction and whether
+    /// the overflow substitution is emitted.
+    pub(crate) fn compile_int_divmod_guarded(
+        &mut self,
+        lhs: Value,
+        rhs: Value,
+        cl_ty: types::Type,
+        is_signed: bool,
+        is_mod: bool,
+    ) -> Result<Value, String> {
+        // ── 1. Divisor-is-zero guard → clean-error early return ──────────
+        //
+        // brif to a dedicated error block that returns the
+        // `JIT_SIGNAL_DIVISION_BY_ZERO` signal. The MirToIR function always
+        // returns `i32` (the `JittedStrategyFn` ABI), so the early `return_`
+        // is type-correct. Mirrors the deopt-block early-return shape in
+        // `terminators.rs` (the `signal < 0` propagation pattern).
+        let zero = self.builder.ins().iconst(cl_ty, 0);
+        let is_zero = self.builder.ins().icmp(IntCC::Equal, rhs, zero);
+        let div_by_zero_block = self.builder.create_block();
+        let continue_block = self.builder.create_block();
+        self.builder
+            .ins()
+            .brif(is_zero, div_by_zero_block, &[], continue_block, &[]);
+
+        self.builder.switch_to_block(div_by_zero_block);
+        self.builder.seal_block(div_by_zero_block);
+        // `narrow_iconst` masks the negative signal to the I32 width — a raw
+        // sign-extended `-2i64` is rejected by Cranelift's `iconst` verifier
+        // for `I32`. The masked `0xFFFF_FFFE` is read back by the executor
+        // as `signal as i32` == `JIT_SIGNAL_DIVISION_BY_ZERO`.
+        let signal = self.narrow_iconst(
+            types::I32,
+            crate::context::JIT_SIGNAL_DIVISION_BY_ZERO as i64,
+        );
+        self.builder.ins().return_(&[signal]);
+
+        self.builder.switch_to_block(continue_block);
+        self.builder.seal_block(continue_block);
+
+        if !is_signed {
+            // Unsigned: no overflow case — `udiv`/`urem` only trap on zero,
+            // already guarded above.
+            return Ok(if is_mod {
+                self.builder.ins().urem(lhs, rhs)
+            } else {
+                self.builder.ins().udiv(lhs, rhs)
+            });
+        }
+
+        // ── 2. INT_MIN / -1 overflow: substitute divisor with 1 ──────────
+        //
+        // When `divisor == -1 && dividend == INT_MIN`, replace the divisor
+        // with `1`. `sdiv(INT_MIN, 1) == INT_MIN` == `INT_MIN.wrapping_div(-1)`
+        // and `srem(INT_MIN, 1) == 0` == `INT_MIN.wrapping_rem(-1)`. Any other
+        // operand pair keeps the real divisor, so non-overflowing division is
+        // bit-identical to the prior `sdiv`/`srem`.
+        //
+        // Cranelift's `iconst` requires a sub-`I64` immediate to be the
+        // zero-extended bit pattern that fits the type width (a raw `-1i64`
+        // is rejected as out-of-bounds for `I8`/`I16`/`I32`). `narrow_iconst`
+        // masks negative values to the type width; the `icmp`/`select` then
+        // operate on the same two's-complement bit pattern as the operands.
+        let neg_one = self.narrow_iconst(cl_ty, -1);
+        let int_min = self.narrow_iconst(cl_ty, i64::MIN >> (64 - cl_ty.bits()));
+        let div_is_neg_one = self.builder.ins().icmp(IntCC::Equal, rhs, neg_one);
+        let dividend_is_min = self.builder.ins().icmp(IntCC::Equal, lhs, int_min);
+        let is_overflow = self.builder.ins().band(div_is_neg_one, dividend_is_min);
+        let one = self.narrow_iconst(cl_ty, 1);
+        let safe_divisor = self.builder.ins().select(is_overflow, one, rhs);
+
+        Ok(if is_mod {
+            self.builder.ins().srem(lhs, safe_divisor)
+        } else {
+            self.builder.ins().sdiv(lhs, safe_divisor)
+        })
+    }
+
+    /// Emit an `iconst` for a possibly-signed value at a possibly-narrow
+    /// integer type. Cranelift's `iconst` accepts a raw `i64` for `I64`, but
+    /// for `I8`/`I16`/`I32` the immediate must be the zero-extended bit
+    /// pattern that fits the type width — a raw negative `i64` (e.g. `-1`,
+    /// sign-extended to `0xFFFF_FFFF_FFFF_FFFF`) is rejected by the verifier
+    /// as out-of-bounds. This masks the value to `cl_ty.bits()` so the narrow
+    /// constant carries the correct two's-complement bit pattern.
+    fn narrow_iconst(&mut self, cl_ty: types::Type, value: i64) -> Value {
+        let bits = cl_ty.bits();
+        let imm: i64 = if bits >= 64 {
+            value
+        } else {
+            (value as u64 & ((1u64 << bits) - 1)) as i64
+        };
+        self.builder.ins().iconst(cl_ty, imm)
+    }
+
     // ── Inline Int64 arithmetic (raw native i64) ──────────────────
 
     /// Compile a binary op on proven `NativeKind::Int64` operands.
@@ -1051,18 +1167,24 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     BinOp::Add => self.builder.ins().iadd(lhs, rhs),
                     BinOp::Sub => self.builder.ins().isub(lhs, rhs),
                     BinOp::Mul => self.builder.ins().imul(lhs, rhs),
-                    BinOp::Div => {
-                        let zero = self.builder.ins().iconst(types::I64, 0);
-                        let is_zero = self.builder.ins().icmp(IntCC::Equal, rhs, zero);
-                        self.builder.ins().trapnz(is_zero, TrapCode::User(0));
-                        self.builder.ins().sdiv(lhs, rhs)
-                    }
-                    BinOp::Mod => {
-                        let zero = self.builder.ins().iconst(types::I64, 0);
-                        let is_zero = self.builder.ins().icmp(IntCC::Equal, rhs, zero);
-                        self.builder.ins().trapnz(is_zero, TrapCode::User(0));
-                        self.builder.ins().srem(lhs, rhs)
-                    }
+                    // r5c-2-gz-cp2-jit-div: VM-equivalent trap-free div/mod —
+                    // div-by-zero → clean `Division by zero`; `i64::MIN / -1`
+                    // → wrapping `i64::MIN` (mod → 0). See
+                    // `compile_int_divmod_guarded`.
+                    BinOp::Div => self.compile_int_divmod_guarded(
+                        lhs,
+                        rhs,
+                        types::I64,
+                        true,
+                        false,
+                    )?,
+                    BinOp::Mod => self.compile_int_divmod_guarded(
+                        lhs,
+                        rhs,
+                        types::I64,
+                        true,
+                        true,
+                    )?,
                     _ => unreachable!(),
                 };
                 Ok(result)
@@ -1157,17 +1279,16 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             BinOp::Add => Ok(self.builder.ins().iadd(lhs, rhs)),
             BinOp::Sub => Ok(self.builder.ins().isub(lhs, rhs)),
             BinOp::Mul => Ok(self.builder.ins().imul(lhs, rhs)),
+            // r5c-2-gz-cp2-jit-div: `u64` has no overflow case — `udiv`/`urem`
+            // only trap on a zero divisor, guarded by a clean-error early
+            // return (matching the VM's `compact_int_divmod_u64`
+            // `VMError::DivisionByZero`). `is_signed = false` skips the
+            // signed `INT_MIN / -1` substitution.
             BinOp::Div => {
-                let zero = self.builder.ins().iconst(types::I64, 0);
-                let is_zero = self.builder.ins().icmp(IntCC::Equal, rhs, zero);
-                self.builder.ins().trapnz(is_zero, TrapCode::User(0));
-                Ok(self.builder.ins().udiv(lhs, rhs))
+                self.compile_int_divmod_guarded(lhs, rhs, types::I64, false, false)
             }
             BinOp::Mod => {
-                let zero = self.builder.ins().iconst(types::I64, 0);
-                let is_zero = self.builder.ins().icmp(IntCC::Equal, rhs, zero);
-                self.builder.ins().trapnz(is_zero, TrapCode::User(0));
-                Ok(self.builder.ins().urem(lhs, rhs))
+                self.compile_int_divmod_guarded(lhs, rhs, types::I64, false, true)
             }
             BinOp::Eq => Ok(self.builder.ins().icmp(IntCC::Equal, lhs, rhs)),
             BinOp::Ne => Ok(self.builder.ins().icmp(IntCC::NotEqual, lhs, rhs)),

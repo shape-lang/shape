@@ -62,6 +62,31 @@ pub const RETURN_TAG_BOOL: u8 = 4;
 /// produces no value (e.g. `print(x)` at top level). Executor maps
 /// this to `WireValue::Null`.
 pub const RETURN_TAG_UNIT: u8 = 5;
+
+// ============================================================================
+// JIT Runtime-Error Signal Codes
+// ============================================================================
+//
+// A JIT-compiled function returns an `i32` signal. The executor treats any
+// negative signal as an error (`crates/shape-jit/src/executor.rs`); a
+// successful run returns `0`. The codes below carve out specific negative
+// values so a recoverable Shape-level runtime error (one the bytecode VM
+// handles cleanly) surfaces with the SAME diagnostic in `--mode jit` as in
+// `--mode vm`, instead of an `ud2`/`sdiv`-trap that crashes the process.
+//
+// r5c-2-gz-cp2-jit-div: integer division/modulo by zero is the first such
+// error. The codegen emits a guarded branch — on a zero divisor it does an
+// immediate `return_` of `JIT_SIGNAL_DIVISION_BY_ZERO` (the W12 fall-through
+// shape: a clean diagnostic, not a trap). The executor maps the code back to
+// the VM's `VMError::DivisionByZero` text ("Division by zero").
+
+/// Signal returned by a JIT-compiled function when an integer division or
+/// modulo had a zero divisor. The executor maps this to the same
+/// `Division by zero` diagnostic the bytecode VM emits for
+/// `VMError::DivisionByZero`. Mirrors the i64/i32/narrow/u64 div/mod arms in
+/// `crates/shape-jit/src/mir_compiler/rvalues.rs` + `v2_int.rs`.
+pub const JIT_SIGNAL_DIVISION_BY_ZERO: i32 = -2;
+
 /// Byte offset of `return_type_tag` in JITContext (for Cranelift codegen).
 pub const RETURN_TYPE_TAG_OFFSET: usize = std::mem::offset_of!(JITContext, return_type_tag);
 
