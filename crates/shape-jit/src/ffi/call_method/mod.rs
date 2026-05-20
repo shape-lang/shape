@@ -611,6 +611,35 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
             | NativeKind::Ptr(HeapKind::Lazy)
             | NativeKind::Ptr(HeapKind::Result)
             | NativeKind::Ptr(HeapKind::Option)
+            // r5c-2-gz-CP9 (v0.3 NO-KNOWN-INCORRECTNESS γ item-9): typed-
+            // array receivers that reach this dispatch shell delegate to
+            // the VM trampoline. The structurally cheap typed-array
+            // methods (`length`/`len`/`push`/`first`/`last`/`sum`/`min`/
+            // `max`/...) are intercepted inline by `try_emit_v2_array_
+            // method` in `mir_compiler/terminators.rs` and never reach
+            // here. The methods that DO fall through to `jit_call_method`
+            // with a `Ptr(TypedArray)` receiver — `count` / `group` /
+            // `groupBy` / `contains` — previously hit the legacy
+            // JIT-format dispatch, where the `builtin_result` cascade
+            // has no JIT-format registry for `Ptr(_)` carriers and the
+            // `Ptr(_) => TAG_NULL` arm returned a silent placeholder.
+            // The JIT-compiled caller then wrote `TAG_NULL` into a
+            // heap-kinded destination: `groupBy().sum()` SIGSEGV'd
+            // (ec=139), `count(pred)` printed garbage
+            // (`-1407374883553280`), `contains(x)` silently returned
+            // `false` — every one a VM/JIT divergence producing garbage
+            // where the bytecode VM cleanly errors (`handle_count_v2` /
+            // `handle_group_by_v2` ckpt2 SURFACE; "no method" for
+            // `contains`). Delegating to the VM trampoline routes these
+            // through `dispatch_method_kinded` — the VM's authoritative
+            // PHF registry — so an unimplemented/missing method surfaces
+            // a clean `Err`, which the trampoline's `Some(Err(_))` arm
+            // turns into a `pending_call_error` deopt (W12 compile-
+            // failure → interpreter fall-through). Net result: VM == JIT.
+            // The full kinded typed-array JIT-format method registry is
+            // W10 jit-playbook §5 / §2.7.4 territory; until it lands,
+            // VM delegation is the correct (non-garbage) behaviour.
+            | NativeKind::Ptr(HeapKind::TypedArray)
             | NativeKind::Float64
             | NativeKind::NullableFloat64
             | NativeKind::Int8
@@ -673,6 +702,61 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
             // which surfaces a TypeError uniformly.
             NativeKind::Null => true,
         };
+
+        // ── Surface-and-stop: JIT-format closure arg cannot cross to VM ──
+        //
+        // r5c-2-gz-CP9 (v0.3 NO-KNOWN-INCORRECTNESS γ item-9). A
+        // higher-order method on a typed-array receiver (`groupBy` /
+        // `count` / `find` / `filter` / ... with a `|x| ...` predicate)
+        // carries the closure as an argument. The MIR producer stamps
+        // that arg's `NativeKind` from `slot_kinds`; for some call sites
+        // the inferred kind is `Ptr(HeapKind::Closure)` even though the
+        // JIT lowered the closure to a JIT-format NaN-boxed inline-
+        // function carrier (a tagged `0xfffd…` bit-pattern), NOT a
+        // v2-raw `*mut ClosureRaw` heap pointer. Delegating such an arg
+        // to the VM trampoline builds `KindedSlot::new(from_raw(bits),
+        // Ptr(Closure))`; when the VM-side method handler surfaces an
+        // `Err` and the transient `kinded_args` Vec drops, the
+        // `Ptr(Closure)` arm of `drop_with_kind` dereferences the
+        // NaN-boxed bits as a heap pointer → SIGSEGV (empirically: array
+        // `groupBy(|x| ...)` crashed ec=139 inside the trampoline's
+        // `kinded_args` drop). The JIT-format closure carrier and the
+        // VM's v2-raw `Ptr(Closure)` carrier are structurally distinct;
+        // they cannot meet at the FFI boundary without a forbidden
+        // carrier-translation bridge (CLAUDE.md §Renames to refuse).
+        //
+        // The honest fix is the W12 compile-failure → interpreter
+        // fall-through: raise a structured `pending_call_error` and
+        // deopt the JIT frame. The bytecode interpreter then re-runs the
+        // method call with its own (carrier-correct) closure handling
+        // and produces the VM's behaviour — for array `groupBy` that is
+        // a clean `Stack overflow` (the in-Shape `vec.shape` `groupBy`
+        // self-recurses) / for unimplemented methods a clean SURFACE
+        // `Err`. Net result: VM == JIT — both cleanly error, neither
+        // SIGSEGVs. A real JIT-format typed-array higher-order method
+        // path is W10 jit-playbook §5 / §2.7.4 territory.
+        if matches!(receiver_kind, NativeKind::Ptr(HeapKind::TypedArray))
+            && arg_pairs
+                .iter()
+                .any(|(_, k)| matches!(k, NativeKind::Ptr(HeapKind::Closure)))
+        {
+            tracing::debug!(
+                target: "shape_jit",
+                method_name = %method_name,
+                "jit-call-method SURFACE: typed-array higher-order method \
+                 with a JIT-format closure arg cannot delegate to the VM \
+                 trampoline (carrier-shape mismatch) \u{2014} raising \
+                 pending_call_error for MIR-emitted deopt to interpreter \
+                 fall-through (W12 pattern)",
+            );
+            super::control::set_jit_runtime_error(format!(
+                "JIT codegen for typed-array `.{}()` with a closure \
+                 argument is unimplemented \u{2014} deopting to interpreter",
+                method_name,
+            ));
+            ctx_ref.pending_call_error = 1;
+            return TAG_NULL;
+        }
 
         if delegated {
             tracing::debug!(
@@ -763,9 +847,54 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
         // closure callback execution via `jit_control_*` FFI bodies —
         // preserved for JIT-format `HK_ARRAY` receivers.
         if is_heap_kind(receiver_bits, HK_ARRAY) {
+            // ── Surface-and-stop: unimplemented JIT-format array methods ──
+            //
+            // r5c-2-gz-CP9 (v0.3 NO-KNOWN-INCORRECTNESS γ item-9): the
+            // JIT-format `count` / `group` / `groupBy` legacy paths were
+            // `todo!()` stubs. `jit_call_method` is an `extern "C"`
+            // function — a `todo!()` panic unwinding across the FFI
+            // boundary is undefined behaviour: empirically `groupBy` +
+            // `.sum()`/`.len()` SIGSEGV'd (ec=139) and `count` printed
+            // garbage (`-1407374883553280`, ec=0) where the bytecode VM
+            // cleanly SURFACEs (`handle_group_by_v2` / the `count` PHF
+            // SURFACE error). That is a VM/JIT divergence producing
+            // garbage/crashes.
+            //
+            // The honest fix is the W12 compile-failure → interpreter
+            // fall-through pattern (`docs/cluster-audits/v0.3-w12-jit-
+            // mode-semantics-close.md`), NOT partial codegen: a real
+            // JIT implementation would only re-create the divergence
+            // while the VM still SURFACEs. We raise a structured
+            // `pending_call_error` BEFORE touching the JIT stack (the
+            // prior `count` arm pushed onto + part-consumed the stack via
+            // `jit_control_filter` then `todo!()`'d, corrupting it). The
+            // MIR-emitted post-call check deopts the JIT frame; the
+            // bytecode interpreter then produces the VM's clean SURFACE
+            // error. Net result: VM == JIT — both cleanly error, neither
+            // produces garbage or SIGSEGVs.
+            match method_name.as_str() {
+                "count" | "group" | "groupBy" => {
+                    tracing::debug!(
+                        target: "shape_jit",
+                        method_name = %method_name,
+                        "jit-call-method SURFACE: array `count`/`group`/\
+                         `groupBy` JIT-format codegen unimplemented \u{2014} \
+                         raising pending_call_error for MIR-emitted deopt \
+                         to interpreter fall-through (W12 pattern)",
+                    );
+                    super::control::set_jit_runtime_error(format!(
+                        "JIT codegen for array `.{}()` is unimplemented \
+                         \u{2014} deopting to interpreter",
+                        method_name,
+                    ));
+                    ctx_ref.pending_call_error = 1;
+                    return TAG_NULL;
+                }
+                _ => {}
+            }
             match method_name.as_str() {
                 "find" | "findIndex" | "some" | "every" | "filter" | "map"
-                | "count" | "group" | "groupBy" | "reduce" => {
+                | "reduce" => {
                     if args.is_empty() {
                         return TAG_NULL;
                     }
@@ -803,25 +932,8 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
                         "every" => super::control::jit_control_every(ctx),
                         "filter" => super::control::jit_control_filter(ctx),
                         "map" => super::control::jit_control_map(ctx),
-                        "count" => {
-                            // SURFACE (W10 jit-playbook §5 / ADR-006
-                            // §2.7.4): count = filter(pred).length —
-                            // the .length read decoded the deleted
-                            // JitArray layout.
-                            let _ = super::control::jit_control_filter(ctx);
-                            todo!(
-                                "phase-2c §2.7.4 / W10 jit-playbook §5: \
-                                 JitArray rebuild — .count() on array."
-                            )
-                        }
-                        "group" | "groupBy" => {
-                            let _ = (predicate, working_array_bits);
-                            todo!(
-                                "phase-2c §2.7.4 / W10 jit-playbook §5: \
-                                 JitArray rebuild — .group()/.groupBy() \
-                                 on array."
-                            )
-                        }
+                        // `count` / `group` / `groupBy` are surfaced-and-
+                        // stopped above before the JIT stack is touched.
                         _ => TAG_NULL,
                     };
 

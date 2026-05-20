@@ -96,6 +96,15 @@ mod field_ref_regression_tests;
 // same reason as the sibling regression modules above.
 #[cfg(all(test, feature = "deep-tests"))]
 mod array_builder_regression_tests;
+// v0.3 γ-CP9 jit-groupby-surface regression tests. Pin the array
+// `groupBy` / `count` / `group` reproducers against the honest
+// surface-and-stop fix (`try_emit_v2_array_method` compile-stage `Err`
+// + the `jit_call_method` defense-in-depth closure-arg guard). Gated
+// behind `deep-tests` for the same reason as the sibling regression
+// modules above — `JITExecutor::execute_program` JIT-compiles the
+// stdlib on every test.
+#[cfg(all(test, feature = "deep-tests"))]
+mod groupby_surface_regression_tests;
 
 // γ-CP5 jit-typedarray-ptr regression tests (v0.3-gating
 // NO-KNOWN-INCORRECTNESS). Pin two JIT bugs un-masked by the Family-α
