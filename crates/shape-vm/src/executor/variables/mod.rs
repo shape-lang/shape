@@ -2471,8 +2471,9 @@ impl VirtualMachine {
 
     /// `MakeFieldRef { Operand::TypedField{type_id, field_idx,
     /// field_type_tag} }` — pops a base-ref carrier from the stack,
-    /// resolves the receiver to an `Arc<TypedObjectStorage>`, and
-    /// pushes a projected `RefTarget::TypedField` ref. The projected
+    /// resolves the receiver to a `TypedObjectPtr` (v2-raw carrier per
+    /// ADR-006 §2.3), and pushes a projected `RefTarget::TypedField`
+    /// ref. The projected
     /// slot's kind is sourced from `field_type_tag` via
     /// `field_tag_to_native_kind` (heap arms + inline scalars) — never
     /// fabricated.
@@ -2752,16 +2753,26 @@ impl VirtualMachine {
     // RefTarget resolution + read/write helpers (ADR-006 §2.7.13).
     // ────────────────────────────────────────────────────────────────────
 
-    /// Resolve a `RefTarget` to its underlying `Arc<TypedObjectStorage>`
-    /// receiver. For chained projections (TypedField → TypedField), walks
-    /// the inner ref. Returns an error if the ref points at a non-
-    /// TypedObject place (e.g. an array or scalar local), which is a
-    /// construction-side bug.
+    /// Resolve a `RefTarget` to its underlying `TypedObjectPtr` receiver.
+    /// For chained projections (TypedField → TypedField), walks the inner
+    /// ref. Returns an error if the ref points at a non-TypedObject place
+    /// (e.g. an array or scalar local), which is a construction-side bug.
+    ///
+    /// Production `TypedObjectStorage` is allocated via the v2-raw `_new`
+    /// path (`op_new_typed_object`), so the receiver slot bits are the raw
+    /// struct pointer with `HeapHeader` at offset 0. The retained share is
+    /// taken via `v2_retain` against that header and handed back wrapped
+    /// in `TypedObjectPtr` (ADR-006 §2.3 typed-Arc carrier) — NOT via
+    /// `Arc::increment_strong_count` / `Arc::from_raw`, which would treat
+    /// the pointer as `&ArcInner.data` and bump/dealloc 16 bytes before
+    /// the real allocation. Mirror of `clone_with_kind`'s `TypedObject`
+    /// arm at `vm_impl/stack.rs`.
     fn resolve_typed_object_receiver(
         &self,
         rt: &shape_value::RefTarget,
-    ) -> Result<std::sync::Arc<shape_value::heap_value::TypedObjectStorage>, VMError> {
+    ) -> Result<shape_value::heap_value::TypedObjectPtr, VMError> {
         use shape_value::HeapKind;
+        use shape_value::heap_value::{TypedObjectPtr, TypedObjectStorage};
         match rt {
             shape_value::RefTarget::Local {
                 frame_index,
@@ -2784,17 +2795,15 @@ impl VirtualMachine {
                 let slot = frame.base_pointer + *slot_index as usize;
                 let (bits, _) = self.stack_read_kinded_raw(slot);
                 // SAFETY: kind == Ptr(HeapKind::TypedObject) means the
-                // bits are `Arc::into_raw::<TypedObjectStorage>`. We bump
-                // the strong-count to hand the caller an independent
-                // share (the local retains its own share).
+                // bits are the raw `*const TypedObjectStorage` from the
+                // v2-raw `_new` path with `HeapHeader` at offset 0. We
+                // bump the on-header refcount to hand the caller an
+                // independent share (the local retains its own share).
+                let ptr = bits as *const TypedObjectStorage;
                 unsafe {
-                    std::sync::Arc::increment_strong_count(
-                        bits as *const shape_value::heap_value::TypedObjectStorage,
-                    );
-                    Ok(std::sync::Arc::from_raw(
-                        bits as *const shape_value::heap_value::TypedObjectStorage,
-                    ))
+                    shape_value::v2::refcount::v2_retain(&(*ptr).header);
                 }
+                Ok(TypedObjectPtr::new(ptr))
             }
             shape_value::RefTarget::ModuleBinding { binding_idx, kind } => {
                 if *kind != NativeKind::Ptr(HeapKind::TypedObject) {
@@ -2805,14 +2814,13 @@ impl VirtualMachine {
                 }
                 let (bits, _) =
                     self.module_binding_read_kinded_raw(*binding_idx as usize);
+                let ptr = bits as *const TypedObjectStorage;
+                // SAFETY: as above — v2-raw `_new` carrier, HeapHeader at
+                // offset 0. The module binding retains its own share.
                 unsafe {
-                    std::sync::Arc::increment_strong_count(
-                        bits as *const shape_value::heap_value::TypedObjectStorage,
-                    );
-                    Ok(std::sync::Arc::from_raw(
-                        bits as *const shape_value::heap_value::TypedObjectStorage,
-                    ))
+                    shape_value::v2::refcount::v2_retain(&(*ptr).header);
                 }
+                Ok(TypedObjectPtr::new(ptr))
             }
             shape_value::RefTarget::TypedField {
                 receiver,
@@ -2826,14 +2834,14 @@ impl VirtualMachine {
                     )));
                 }
                 let bits = receiver.slots[*field_offset as usize].raw();
+                let ptr = bits as *const TypedObjectStorage;
+                // SAFETY: as above — the chained-projection field slot
+                // holds a v2-raw `_new` `*const TypedObjectStorage`; the
+                // parent receiver retains its own share.
                 unsafe {
-                    std::sync::Arc::increment_strong_count(
-                        bits as *const shape_value::heap_value::TypedObjectStorage,
-                    );
-                    Ok(std::sync::Arc::from_raw(
-                        bits as *const shape_value::heap_value::TypedObjectStorage,
-                    ))
+                    shape_value::v2::refcount::v2_retain(&(*ptr).header);
                 }
+                Ok(TypedObjectPtr::new(ptr))
             }
             // V3-S5 ckpt-6 STRICT close (2026-05-15):
             // `RefTarget::TypedIndex { .. }` arm DELETED in lockstep with
@@ -2960,14 +2968,16 @@ impl VirtualMachine {
                 kind,
             } => {
                 // Q14 / ADR-006 §2.7.13 projection-write: the receiver
-                // `Arc<TypedObjectStorage>` is shared between the ref
-                // carrier and the originating binding, so `Arc::make_mut`
-                // is not applicable (refcount > 1 by construction; the
-                // struct is intentionally not `Clone`). The in-place
-                // writer (`TypedObjectStorage::write_slot_in_place`)
-                // takes the kind-aware projected place and rotates the
-                // slot's share — prior occupant returned for caller
-                // release, new occupant transferred in.
+                // `TypedObjectPtr` (v2-raw carrier per ADR-006 §2.3)
+                // shares the underlying `TypedObjectStorage` with the
+                // originating binding, so no copy-on-write applies
+                // (refcount > 1 by construction; the struct is
+                // intentionally not `Clone`). The in-place writer
+                // (`TypedObjectStorage::write_slot_in_place`, reached
+                // through `TypedObjectPtr`'s `Deref`) takes the
+                // kind-aware projected place and rotates the slot's share
+                // — prior occupant returned for caller release, new
+                // occupant transferred in.
                 let field_idx = *field_offset as usize;
                 if field_idx >= receiver.slots.len() {
                     crate::executor::vm_impl::stack::drop_with_kind(
@@ -3480,4 +3490,193 @@ mod tests {
     // surface-equivalent assertions for `as_i64()` / `as_f64()` /
     // `as_bool()` / `as_string_arc()` etc.). Tracked as Phase-2c
     // test-harness work; out of B6 territory.
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// R5c-2-β1 typedfield-doublefree regression suite (2026-05-20)
+// ────────────────────────────────────────────────────────────────────────
+//
+// `RefTarget::TypedField.receiver` was a stale legacy `Arc<TypedObjectStorage>`
+// carrier while production allocates `TypedObjectStorage` via the v2-raw
+// `_new` path (`op_new_typed_object`) — the slot bits are the RAW struct
+// pointer with `HeapHeader` at offset 0. The pre-fix
+// `resolve_typed_object_receiver` ran `Arc::increment_strong_count` /
+// `Arc::from_raw`, which treat the pointer as `&ArcInner.data` (allocation
+// start = `ptr - 16`) — bumping/deallocating 16 bytes before the real
+// allocation → intermittent `free(): double free detected` SIGABRT.
+//
+// The fix migrates the carrier to the v2-raw `TypedObjectPtr` (ADR-006
+// §2.3) and retains via `v2_retain` against the on-header refcount. These
+// tests pin the retain/release balance and the `&mut` typed-field-ref
+// round-trip.
+#[cfg(test)]
+mod typedfield_ref_tests {
+    use crate::executor::{VMConfig, VirtualMachine};
+    use shape_value::heap_value::TypedObjectStorage;
+    use shape_value::v2::refcount::v2_get_refcount;
+    use shape_value::{HeapKind, NativeKind, RefTarget, ValueSlot};
+    use std::sync::Arc;
+
+    /// Build a fresh single-field `TypedObjectStorage` via the v2-raw
+    /// `_new` path (the production allocator) with one i64 field. Returns
+    /// the raw pointer (refcount = 1).
+    fn make_box(value: i64) -> *mut TypedObjectStorage {
+        let slots = vec![ValueSlot::from_raw(value as u64)];
+        TypedObjectStorage::_new(
+            7, // arbitrary schema_id
+            slots.into_boxed_slice(),
+            0, // heap_mask: the i64 field is an inline scalar
+            Arc::from(vec![NativeKind::Int64].into_boxed_slice()),
+        )
+    }
+
+    /// Install a `_new`-allocated TypedObject pointer into module binding
+    /// `idx`, transferring one share to the binding. `module_binding_write_
+    /// kinded` grows the parallel tracks and runs `drop_with_kind` on the
+    /// (zero) prior occupant. Returns a base `RefTarget::ModuleBinding`.
+    fn install_module_box(
+        vm: &mut VirtualMachine,
+        idx: u32,
+        ptr: *const TypedObjectStorage,
+    ) -> RefTarget {
+        vm.module_binding_write_kinded(
+            idx as usize,
+            ptr as u64,
+            NativeKind::Ptr(HeapKind::TypedObject),
+        );
+        RefTarget::ModuleBinding {
+            binding_idx: idx,
+            kind: NativeKind::Ptr(HeapKind::TypedObject),
+        }
+    }
+
+    /// `resolve_typed_object_receiver` bumps the on-header refcount exactly
+    /// once and hands back a `TypedObjectPtr` whose Drop retires exactly
+    /// that share — no leak, no double-free. Pre-fix, the
+    /// `Arc::increment_strong_count` path bumped 16 bytes before the real
+    /// `_new` allocation, corrupting an adjacent malloc chunk.
+    #[test]
+    fn typed_field_receiver_retain_release_balances_refcount() {
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        let ptr = make_box(9);
+        // Refcount = 1 (the `_new` allocation's own share).
+        assert_eq!(unsafe { v2_get_refcount(&(*ptr).header) }, 1);
+        // Installing it into the module binding transfers that share to
+        // the binding — refcount stays 1.
+        let base_rt = install_module_box(&mut vm, 0, ptr);
+        assert_eq!(unsafe { v2_get_refcount(&(*ptr).header) }, 1);
+
+        {
+            let receiver = vm.resolve_typed_object_receiver(&base_rt).unwrap();
+            // The resolve bumped the refcount to 2 (binding share + the
+            // receiver's independent share).
+            assert_eq!(
+                unsafe { v2_get_refcount(&(*ptr).header) },
+                2,
+                "resolve_typed_object_receiver must bump refcount exactly once"
+            );
+            // Reading a field through the receiver works via Deref.
+            assert_eq!(receiver.slots[0].raw(), 9u64);
+            // `receiver` drops here — TypedObjectPtr::Drop retires its share.
+        }
+        assert_eq!(
+            unsafe { v2_get_refcount(&(*ptr).header) },
+            1,
+            "TypedObjectPtr::Drop must retire exactly the resolve share"
+        );
+
+        // Retire the binding's share via the kind-aware drop dispatch —
+        // refcount hits 0 and the allocation is freed.
+        vm.module_binding_write_kinded(0, 0u64, NativeKind::Bool);
+    }
+
+    /// Constructing a `RefTarget::TypedField` via `MakeFieldRef`-shape
+    /// resolution and then dropping it balances the refcount — the
+    /// `Arc<RefTarget>` Drop chains through `TypedObjectPtr::Drop`.
+    #[test]
+    fn typed_field_reftarget_construct_drop_balances_refcount() {
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        let ptr = make_box(40);
+        let base_rt = install_module_box(&mut vm, 0, ptr);
+        assert_eq!(unsafe { v2_get_refcount(&(*ptr).header) }, 1);
+
+        // Resolve the receiver and build the projected TypedField ref —
+        // exactly the shape `op_make_field_ref` produces.
+        let receiver = vm.resolve_typed_object_receiver(&base_rt).unwrap();
+        assert_eq!(unsafe { v2_get_refcount(&(*ptr).header) }, 2);
+        let projected = Arc::new(RefTarget::TypedField {
+            receiver,
+            field_offset: 0,
+            kind: NativeKind::Int64,
+        });
+        // Still 2 — moving the receiver into the variant transfers the
+        // share, no new bump.
+        assert_eq!(unsafe { v2_get_refcount(&(*ptr).header) }, 2);
+
+        // Dropping the `Arc<RefTarget>` chains: RefTarget::TypedField drop
+        // → TypedObjectPtr::Drop → release_elem.
+        drop(projected);
+        assert_eq!(
+            unsafe { v2_get_refcount(&(*ptr).header) },
+            1,
+            "Arc<RefTarget::TypedField> Drop must retire the receiver share"
+        );
+
+        vm.module_binding_write_kinded(0, 0u64, NativeKind::Bool);
+    }
+
+    /// `&mut`-typed-field-ref round-trip: read the projected slot, write a
+    /// new value through it, read back. Mirrors the `DerefLoad` /
+    /// `DerefStore` op pair against a `RefTarget::TypedField`.
+    #[test]
+    fn typed_field_ref_read_write_round_trip() {
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        let ptr = make_box(9);
+        let base_rt = install_module_box(&mut vm, 0, ptr);
+
+        let receiver = vm.resolve_typed_object_receiver(&base_rt).unwrap();
+        let projected = RefTarget::TypedField {
+            receiver,
+            field_offset: 0,
+            kind: NativeKind::Int64,
+        };
+
+        // DerefLoad: the projected slot reads back the constructed value.
+        let (bits, kind) = vm.read_ref_target(&projected).unwrap();
+        assert_eq!(bits, 9u64);
+        assert_eq!(kind, NativeKind::Int64);
+
+        // DerefStore: write a new value through the ref.
+        vm.write_ref_target(&projected, 10u64, NativeKind::Int64)
+            .unwrap();
+
+        // DerefLoad again: the write landed.
+        let (bits_after, _) = vm.read_ref_target(&projected).unwrap();
+        assert_eq!(
+            bits_after, 10u64,
+            "&mut typed-field-ref write must be observable through the ref"
+        );
+        // The write is also visible on the underlying storage.
+        assert_eq!(unsafe { (*ptr).slots[0].raw() }, 10u64);
+
+        drop(projected);
+        vm.module_binding_write_kinded(0, 0u64, NativeKind::Bool);
+    }
+
+    /// Resolving a non-TypedObject base surfaces an error WITHOUT
+    /// corrupting the allocation (the pre-fix path could bump a
+    /// 16-byte-misaligned address before erroring).
+    #[test]
+    fn typed_field_non_typed_object_base_errors_cleanly() {
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        let bad_rt = RefTarget::ModuleBinding {
+            binding_idx: 0,
+            kind: NativeKind::Int64, // not a TypedObject
+        };
+        let result = vm.resolve_typed_object_receiver(&bad_rt);
+        assert!(
+            result.is_err(),
+            "non-TypedObject base must surface an error, not fabricate a receiver"
+        );
+    }
 }
