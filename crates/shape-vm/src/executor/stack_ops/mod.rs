@@ -136,10 +136,13 @@ impl VirtualMachine {
                     return self.push_kinded(bits, NativeKind::String);
                 }
                 crate::bytecode::Constant::Char(c) => {
-                    // Char: inline-scalar payload tagged through HeapKind
-                    // for dispatch uniformity (no Arc<T>).
-                    return self
-                        .push_kinded(*c as u64, NativeKind::Ptr(HeapKind::Char));
+                    // Char: inline 4-byte scalar (UTF-32 codepoint), no
+                    // Arc<T>. ADR-006 §2.7.5 producer-side stamp — the
+                    // scalar `NativeKind::Char` kind is canonical; the prior
+                    // `Ptr(HeapKind::Char)` label mislabeled the codepoint as
+                    // a heap pointer (consumers without a Char arm would
+                    // deref the codepoint bits → misaligned-pointer abort).
+                    return self.push_kinded(*c as u64, NativeKind::Char);
                 }
                 crate::bytecode::Constant::Decimal(d) => {
                     let arc: Arc<rust_decimal::Decimal> = Arc::new(*d);

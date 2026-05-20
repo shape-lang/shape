@@ -149,6 +149,21 @@ fn heap_to_wire(bits: u64, hk: HeapKind, ctx: &Context) -> WireValue {
     if bits == 0 {
         return WireValue::Null;
     }
+    // Defensive: `HeapKind::Char` is an inline-codepoint label, NOT an
+    // `Arc<HeapValue>` pointer — its `bits` are a raw UTF-32 codepoint.
+    // The canonical post-amendment carrier is the scalar `NativeKind::Char`
+    // (handled in `slot_to_wire`), but any producer that still stamps the
+    // pre-amendment `Ptr(HeapKind::Char)` label must not reach the
+    // `*const HeapValue` cast below — casting a codepoint (e.g. 0x63) to a
+    // HeapValue pointer and dereferencing it is a misaligned-pointer abort.
+    // This arm projects the codepoint directly, mirroring the
+    // `NativeKind::Char` arm and `HeapValue::Char` arm.
+    if hk == HeapKind::Char {
+        return match char::from_u32(bits as u32) {
+            Some(c) => WireValue::String(c.to_string()),
+            None => WireValue::Null,
+        };
+    }
     let ptr = bits as *const HeapValue;
     // SAFETY: NativeKind::Ptr(hk) contract — bits is a valid Arc<HeapValue> ptr.
     let hv = unsafe { &*ptr };
@@ -659,5 +674,85 @@ mod u64_wire_tests {
             WireValue::U64(n) => assert_eq!(n, u64::MAX),
             other => panic!("expected WireValue::U64, got {:?}", other),
         }
+    }
+}
+
+#[cfg(test)]
+mod char_wire_tests {
+    //! β-fix CKPT-A char-carrier — `charAt` return-value wire projection.
+    //!
+    //! `op_string_char_at` (and its char-producing siblings) push a
+    //! scalar Unicode codepoint. Pre-fix the slot was stamped
+    //! `NativeKind::Ptr(HeapKind::Char)` — a scalar codepoint mislabeled
+    //! as an `Arc<HeapValue>` pointer. When that slot was the program
+    //! return value, `heap_to_wire` cast the codepoint bits (e.g. 0x63 =
+    //! 'c') to `*const HeapValue` and dereferenced it, triggering a
+    //! misaligned-pointer non-unwinding abort (SIGABRT).
+    //!
+    //! The producer-side fix stamps the canonical scalar
+    //! `NativeKind::Char` (ADR-006 §2.7.5). The defensive `heap_to_wire`
+    //! `HeapKind::Char` early-arm guarantees that even a mislabeled
+    //! `Ptr(HeapKind::Char)` slot projects the codepoint directly
+    //! instead of dereferencing it as a heap object.
+
+    use super::{heap_to_wire, slot_to_wire};
+    use crate::context::ExecutionContext;
+    use shape_value::{HeapKind, NativeKind};
+    use shape_wire::WireValue;
+
+    /// The canonical post-fix carrier: a scalar `NativeKind::Char` slot
+    /// (codepoint inline) projects to a single-codepoint string with no
+    /// pointer dereference.
+    #[test]
+    fn native_kind_char_slot_projects_to_string() {
+        let ctx = ExecutionContext::new_empty();
+        // 'c' = U+0063 — the `"abc".reverse().charAt(0)` reproducer result.
+        let wire = slot_to_wire('c' as u64, NativeKind::Char, &ctx);
+        assert_eq!(wire, WireValue::String("c".to_string()));
+    }
+
+    /// `charAt(0)` of `"abc"` returns 'a' — direct (non-reversed) path.
+    #[test]
+    fn native_kind_char_slot_first_codepoint() {
+        let ctx = ExecutionContext::new_empty();
+        let wire = slot_to_wire('a' as u64, NativeKind::Char, &ctx);
+        assert_eq!(wire, WireValue::String("a".to_string()));
+    }
+
+    /// Defensive: a `Ptr(HeapKind::Char)`-labeled slot (a mislabeled
+    /// scalar codepoint, e.g. emitted by any un-migrated producer) must
+    /// NOT be dereferenced as an `Arc<HeapValue>`. The `heap_to_wire`
+    /// early-arm projects the codepoint directly. Pre-fix this input
+    /// aborted the process with a misaligned-pointer panic.
+    #[test]
+    fn heap_kind_char_label_does_not_deref_codepoint() {
+        let ctx = ExecutionContext::new_empty();
+        // 0x63 ('c') is NOT 8-byte aligned and is not a valid HeapValue
+        // pointer — the pre-fix catch-all would have aborted here.
+        let wire = heap_to_wire('c' as u64, HeapKind::Char, &ctx);
+        assert_eq!(wire, WireValue::String("c".to_string()));
+    }
+
+    /// Defensive arm also covers a non-ASCII multi-byte codepoint.
+    #[test]
+    fn heap_kind_char_label_handles_unicode_codepoint() {
+        let ctx = ExecutionContext::new_empty();
+        let wire = heap_to_wire('λ' as u64, HeapKind::Char, &ctx);
+        assert_eq!(wire, WireValue::String("λ".to_string()));
+    }
+
+    /// A `Ptr(HeapKind::Char)` slot routed through the public
+    /// `slot_to_wire` entry point (the program-return-value path) also
+    /// projects safely — this is the exact path the SIGABRT reproducer
+    /// exercised.
+    #[test]
+    fn slot_to_wire_char_label_return_value_path_is_safe() {
+        let ctx = ExecutionContext::new_empty();
+        let wire = slot_to_wire(
+            'c' as u64,
+            NativeKind::Ptr(HeapKind::Char),
+            &ctx,
+        );
+        assert_eq!(wire, WireValue::String("c".to_string()));
     }
 }
