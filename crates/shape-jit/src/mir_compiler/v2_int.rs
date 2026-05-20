@@ -1091,4 +1091,216 @@ mod tests {
             (4_000_000_000u32 / 7) as i64,
         );
     }
+
+    // ── r5c-2-gz-cp6 narrow-neg-literal regression tests ────────────────
+    //
+    // These mirror `compile_binop_narrow_int`'s COMPARISON codegen exactly:
+    // each operand is widened to I64 via `extend_narrow_to_i64` (sextend for
+    // the signed narrow widths, uextend for the unsigned narrow widths) and
+    // the `icmp` runs at I64 — byte-equal to the VM's `compact_int_cmp`,
+    // which compares the full sign-/zero-extended i64 slot bits and never
+    // re-truncates.
+    //
+    // The bug they pin: pre-cp6 a `(narrow-var, Int64-literal)` comparison
+    // fell to the kind-blind generic `compile_binop_dynamic_cmp`, whose
+    // `to_i64_bits` ZERO-extends an `I8` operand. For a NEGATIVE narrow
+    // value the zero-extend produced a large positive i64 that mis-compared
+    // against the (sign-extended) literal — `(a+b) == -56` for `i8` gave
+    // JIT `false` against VM `true`. Positive values coincided.
+    //
+    // Standalone Cranelift fns — fast, deterministic, not `deep-tests`-gated.
+
+    /// Build a JIT fn `(i64, i64) -> u64` using `compile_binop_narrow_int`'s
+    /// COMPARISON codegen pattern for the given narrow Cranelift width.
+    ///
+    /// The first operand (`a`) models a narrow variable: it is `ireduce`d to
+    /// `narrow` (mirroring how a narrow local is read at its declared width)
+    /// then `extend_narrow_to_i64`'d back per `unsigned`. The second operand
+    /// (`b`) models the width-polymorphic literal / `int` partner: it stays
+    /// at the full I64 width. `icmp` then runs at I64 with the signed /
+    /// unsigned condition code selected by `unsigned`. Returns 1 / 0.
+    fn jit_narrow_cmp(
+        op: &str,
+        narrow: types::Type,
+        unsigned: bool,
+        a: i64,
+        b: i64,
+    ) -> u64 {
+        let mut flag_builder = settings::builder();
+        flag_builder.set("opt_level", "speed_and_size").unwrap();
+        let isa = cranelift_native::builder()
+            .unwrap()
+            .finish(settings::Flags::new(flag_builder))
+            .unwrap();
+        let builder =
+            JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        let mut module = JITModule::new(builder);
+        let mut ctx = module.make_context();
+
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+
+        let func_id = module
+            .declare_function("narrow_cmp_fn", cranelift_module::Linkage::Local, &sig)
+            .unwrap();
+        ctx.func.signature = sig;
+
+        let mut fbc = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut ctx.func, &mut fbc);
+        let block = builder.create_block();
+        builder.append_block_params_for_function_params(block);
+        builder.switch_to_block(block);
+        builder.seal_block(block);
+
+        let lhs = builder.block_params(block)[0];
+        let rhs = builder.block_params(block)[1];
+        // `a` → narrow variable: truncate to the declared narrow width …
+        let l_narrow = builder.ins().ireduce(narrow, lhs);
+        // … then re-extend to I64 per the kind's signedness, exactly as
+        // `extend_narrow_to_i64` does in `compile_binop_narrow_int`.
+        let l = if unsigned {
+            builder.ins().uextend(types::I64, l_narrow)
+        } else {
+            builder.ins().sextend(types::I64, l_narrow)
+        };
+        // `b` → width-polymorphic literal / `int`: kept at full I64 width.
+        let r = rhs;
+        let cc = match (op, unsigned) {
+            ("eq", _) => IntCC::Equal,
+            ("ne", _) => IntCC::NotEqual,
+            ("lt", false) => IntCC::SignedLessThan,
+            ("lt", true) => IntCC::UnsignedLessThan,
+            ("le", false) => IntCC::SignedLessThanOrEqual,
+            ("le", true) => IntCC::UnsignedLessThanOrEqual,
+            ("gt", false) => IntCC::SignedGreaterThan,
+            ("gt", true) => IntCC::UnsignedGreaterThan,
+            ("ge", false) => IntCC::SignedGreaterThanOrEqual,
+            ("ge", true) => IntCC::UnsignedGreaterThanOrEqual,
+            _ => panic!("unknown cmp: {}", op),
+        };
+        let cmp = builder.ins().icmp(cc, l, r);
+        let true_val = builder.ins().iconst(types::I64, 1);
+        let false_val = builder.ins().iconst(types::I64, 0);
+        let result = builder.ins().select(cmp, true_val, false_val);
+        builder.ins().return_(&[result]);
+        builder.finalize();
+
+        module.define_function(func_id, &mut ctx).unwrap();
+        module.clear_context(&mut ctx);
+        module.finalize_definitions().unwrap();
+        let code_ptr = module.get_finalized_function(func_id);
+        let func: fn(i64, i64) -> u64 = unsafe { std::mem::transmute(code_ptr) };
+        func(a, b)
+    }
+
+    // ── i8 == against a negative literal — the canonical reproducer ──
+
+    #[test]
+    fn narrow_i8_eq_negative_literal_canonical_repro() {
+        // `let a:i8=100; let b:i8=100; (a+b) == -56`: i8 add wraps to -56.
+        // The narrow `a+b` temp holds the i8 bit-pattern 0xC8; comparing it
+        // against the literal -56 must be `true` — VM-equal.
+        let sum: i64 = (100i8).wrapping_add(100) as i64; // -56
+        assert_eq!(jit_narrow_cmp("eq", types::I8, false, sum, -56), 1);
+        assert_eq!(jit_narrow_cmp("eq", types::I8, false, -56, -56), 1);
+        // Sanity: positive literal still works (zero/sign-extension agree).
+        assert_eq!(jit_narrow_cmp("eq", types::I8, false, 56, 56), 1);
+    }
+
+    #[test]
+    fn narrow_i8_eq_ne_negative_and_positive_literal() {
+        // -56 == -56 true; -56 == -10 false; -56 != -10 true.
+        assert_eq!(jit_narrow_cmp("eq", types::I8, false, -56, -56), 1);
+        assert_eq!(jit_narrow_cmp("eq", types::I8, false, -56, -10), 0);
+        assert_eq!(jit_narrow_cmp("ne", types::I8, false, -56, -10), 1);
+        assert_eq!(jit_narrow_cmp("ne", types::I8, false, -56, -56), 0);
+        // Positive literals.
+        assert_eq!(jit_narrow_cmp("eq", types::I8, false, 42, 42), 1);
+        assert_eq!(jit_narrow_cmp("ne", types::I8, false, 42, 7), 1);
+    }
+
+    #[test]
+    fn narrow_i8_ordered_cmp_negative_literal() {
+        // -56 < -10 true; -56 <= -56 true; -56 > -100 true; -56 >= -10 false.
+        assert_eq!(jit_narrow_cmp("lt", types::I8, false, -56, -10), 1);
+        assert_eq!(jit_narrow_cmp("le", types::I8, false, -56, -56), 1);
+        assert_eq!(jit_narrow_cmp("gt", types::I8, false, -56, -100), 1);
+        assert_eq!(jit_narrow_cmp("ge", types::I8, false, -56, -10), 0);
+        // Mixed-sign: -56 < 10 true; -56 > 10 false.
+        assert_eq!(jit_narrow_cmp("lt", types::I8, false, -56, 10), 1);
+        assert_eq!(jit_narrow_cmp("gt", types::I8, false, -56, 10), 0);
+    }
+
+    #[test]
+    fn narrow_i16_cmp_negative_and_positive_literal() {
+        let v: i64 = -5536; // 30000i16 + 30000i16 wraps to -5536
+        assert_eq!(jit_narrow_cmp("eq", types::I16, false, v, -5536), 1);
+        assert_eq!(jit_narrow_cmp("ne", types::I16, false, v, -5536), 0);
+        assert_eq!(jit_narrow_cmp("lt", types::I16, false, v, -100), 1);
+        assert_eq!(jit_narrow_cmp("le", types::I16, false, v, v), 1);
+        assert_eq!(jit_narrow_cmp("gt", types::I16, false, v, -10000), 1);
+        assert_eq!(jit_narrow_cmp("ge", types::I16, false, v, -10000), 1);
+        // Positive literal.
+        assert_eq!(jit_narrow_cmp("eq", types::I16, false, 12345, 12345), 1);
+    }
+
+    #[test]
+    fn narrow_i32_cmp_negative_and_positive_literal() {
+        let v: i64 = (2_000_000_000i32).wrapping_add(2_000_000_000) as i64; // -294967296
+        assert_eq!(jit_narrow_cmp("eq", types::I32, false, v, -294_967_296), 1);
+        assert_eq!(jit_narrow_cmp("ne", types::I32, false, v, 0), 1);
+        assert_eq!(jit_narrow_cmp("lt", types::I32, false, v, -1), 1);
+        assert_eq!(jit_narrow_cmp("le", types::I32, false, v, v), 1);
+        assert_eq!(jit_narrow_cmp("gt", types::I32, false, v, -1_000_000_000), 1);
+        assert_eq!(jit_narrow_cmp("ge", types::I32, false, v, v), 1);
+        // Positive literal.
+        assert_eq!(jit_narrow_cmp("eq", types::I32, false, 123_456, 123_456), 1);
+    }
+
+    #[test]
+    fn narrow_unsigned_cmp_uses_uextend_not_sextend() {
+        // A `u8` value above the signed-i8 boundary (200) must zero-extend:
+        // 200 == 200 true (sextend would make it -56 and mis-compare).
+        assert_eq!(jit_narrow_cmp("eq", types::I8, true, 200, 200), 1);
+        assert_eq!(jit_narrow_cmp("ne", types::I8, true, 200, 100), 1);
+        // Unsigned ordering: 200u8 > 100 true; 200u8 < 100 false.
+        assert_eq!(jit_narrow_cmp("gt", types::I8, true, 200, 100), 1);
+        assert_eq!(jit_narrow_cmp("lt", types::I8, true, 200, 100), 0);
+        assert_eq!(jit_narrow_cmp("ge", types::I8, true, 200, 200), 1);
+        assert_eq!(jit_narrow_cmp("le", types::I8, true, 100, 200), 1);
+        // u16 / u32 above their signed boundaries.
+        assert_eq!(jit_narrow_cmp("eq", types::I16, true, 60_000, 60_000), 1);
+        assert_eq!(jit_narrow_cmp("gt", types::I16, true, 60_000, 1_000), 1);
+        assert_eq!(jit_narrow_cmp("eq", types::I32, true, 4_000_000_000, 4_000_000_000), 1);
+        assert_eq!(jit_narrow_cmp("gt", types::I32, true, 4_000_000_000, 1), 1);
+    }
+
+    #[test]
+    fn narrow_cmp_out_of_range_literal_not_truncated() {
+        // `let c:i8=44; c == 300` — the VM compares 44 against the FULL
+        // literal 300 (`44 != 300` → false). Comparing at I64 width (the
+        // partner kept at its real value) reproduces that; truncating the
+        // literal to the i8 window would mask 300 → 44 and wrongly report
+        // equal. The narrow operand `a` is in-range (44); the I64 partner
+        // `b` is the out-of-range 300.
+        assert_eq!(jit_narrow_cmp("eq", types::I8, false, 44, 300), 0);
+        assert_eq!(jit_narrow_cmp("ne", types::I8, false, 44, 300), 1);
+        assert_eq!(jit_narrow_cmp("lt", types::I8, false, 44, 300), 1);
+        // i16 out-of-range partner.
+        assert_eq!(jit_narrow_cmp("eq", types::I16, false, 100, 100_000), 0);
+        assert_eq!(jit_narrow_cmp("lt", types::I16, false, 100, 100_000), 1);
+    }
+
+    #[test]
+    fn narrow_cmp_against_int_variable_signed_extends() {
+        // `let a:i8=-1; let n:int=5; a < n` — signed compare, -1 < 5 true.
+        // The narrow operand sign-extends; the `int` partner stays I64.
+        assert_eq!(jit_narrow_cmp("lt", types::I8, false, -1, 5), 1);
+        assert_eq!(jit_narrow_cmp("eq", types::I8, false, -1, 5), 0);
+        assert_eq!(jit_narrow_cmp("gt", types::I8, false, -1, -100), 1);
+        // i32 narrow vs a large positive `int`.
+        assert_eq!(jit_narrow_cmp("lt", types::I32, false, -1, 9_000_000_000), 1);
+    }
 }
