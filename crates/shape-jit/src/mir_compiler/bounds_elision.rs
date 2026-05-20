@@ -483,6 +483,7 @@ mod tests {
             field_name_table,
             local_struct_type_names: std::collections::HashMap::new(),
             local_typed_array_element_types: std::collections::HashMap::new(),
+            local_declared_scalar_types: std::collections::HashMap::new(),
         }
     }
 

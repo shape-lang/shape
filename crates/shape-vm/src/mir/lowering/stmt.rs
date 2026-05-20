@@ -205,6 +205,32 @@ pub(super) fn lower_var_decl(builder: &mut MirBuilder, decl: &ast::VariableDecl,
             builder.record_local_typed_array_element_type(slot, elem);
         }
 
+        // ADR-006 §2.7.5 stamp-at-compile-time — R5c-2-β-γ (c)
+        // jit-narrow-wrap. When the binding's annotation resolves to a
+        // narrow-integer scalar `ConcreteType` (`i8`/`i16`/`i32`/`u8`/
+        // `u16`/`u32`), record it against the binding slot so the conduit
+        // producer can stamp `concrete_types[slot]` with the declared
+        // width. The bare-int-literal MIR carrier (`Constant(Int(_))`) is
+        // width-blind, so without this the JIT classifies every narrow
+        // binding as `I64` and arithmetic overflow fails to wrap.
+        if let Some(decl_ct) = decl
+            .type_annotation
+            .as_ref()
+            .and_then(crate::compiler::v2_map_emission::concrete_type_from_annotation)
+        {
+            if matches!(
+                decl_ct,
+                shape_value::v2::ConcreteType::I8
+                    | shape_value::v2::ConcreteType::I16
+                    | shape_value::v2::ConcreteType::I32
+                    | shape_value::v2::ConcreteType::U8
+                    | shape_value::v2::ConcreteType::U16
+                    | shape_value::v2::ConcreteType::U32
+            ) {
+                builder.record_local_declared_scalar_type(slot, decl_ct);
+            }
+        }
+
         if let Some(init_expr) = &decl.value {
             // ADR-006 §2.7.27 / W17-mutation-writeback: when the initializer
             // is a recognized COW-container ctor (`Set()` / `HashMap()` /

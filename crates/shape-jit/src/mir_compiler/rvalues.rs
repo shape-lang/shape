@@ -52,6 +52,23 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     return self.compile_string_concat(l, lhs_kind, r, rhs_kind);
                 }
 
+                // R5c-2-β-γ (c) jit-narrow-wrap: narrow integer arithmetic
+                // (i8/i16/i32/u8/u16/u32). The operand KIND — not just the
+                // Cranelift type — drives this path: a `NativeKind::Int8`
+                // and a `NativeKind::Bool` both lower to Cranelift `I8`,
+                // but only the former is integer arithmetic. The bytecode
+                // VM wraps narrow-width overflow two's-complement via
+                // `AddI32`/`AddTyped` truncating opcodes
+                // (`executor/v2_handlers/int.rs`, `executor/arithmetic/
+                // mod.rs::compact_int_checked_binop`); the JIT matches by
+                // operating at the narrow Cranelift width — `iadd`/`isub`/
+                // `imul` on `I8`/`I16`/`I32` wrap natively at that width.
+                if let Some(nw) =
+                    Self::narrow_int_binop_kind(lhs_kind, rhs_kind, lhs, rhs)
+                {
+                    return self.compile_binop_narrow_int(op, l, r, nw);
+                }
+
                 if l_type == types::F64 && r_type == types::F64 {
                     // Both operands are native F64 — inline float ops.
                     self.compile_binop_f64(op, l, r)
@@ -544,6 +561,67 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         }
     }
 
+    /// R5c-2-β-γ (c) jit-narrow-wrap: classify a binop's operands as a
+    /// narrow-integer arithmetic site.
+    ///
+    /// Returns `Some(kind)` when the binop operates at a narrow integer
+    /// width (`Int8`/`Int16`/`Int32`/`UInt8`/`UInt16`/`UInt32`):
+    ///
+    /// - BOTH operands carry the SAME narrow `NativeKind` — the common
+    ///   `let c: i32 = a + b` two-variable shape.
+    /// - ONE operand carries a narrow `NativeKind` and the OTHER is a
+    ///   bare integer literal (`Operand::Constant(MirConstant::Int(_))`,
+    ///   classified `Int64` by `operand_slot_kind` because the literal
+    ///   MIR carrier is width-blind). An integer literal is
+    ///   width-polymorphic — it adapts to the narrow context exactly as
+    ///   the bytecode compiler emits `AddI32`/`AddTyped` for `a + 5`
+    ///   when `a` is narrow. `compile_binop_narrow_int`'s `ireduce`
+    ///   truncates the literal to the narrow width.
+    ///
+    /// `None` for any other pairing — `Bool` (deliberately excluded: it
+    /// shares the Cranelift `I8` width with `Int8`/`UInt8` but is not
+    /// integer arithmetic), `Int64`/`Int64`, floats, heap pointers,
+    /// mismatched narrow widths, and unproven (`None`) kinds all fall
+    /// through to the existing dispatch arms.
+    fn narrow_int_binop_kind(
+        lhs: Option<shape_vm::type_tracking::NativeKind>,
+        rhs: Option<shape_vm::type_tracking::NativeKind>,
+        lhs_op: &Operand,
+        rhs_op: &Operand,
+    ) -> Option<shape_vm::type_tracking::NativeKind> {
+        use shape_vm::type_tracking::NativeKind;
+        fn is_narrow(k: NativeKind) -> bool {
+            matches!(
+                k,
+                NativeKind::Int8
+                    | NativeKind::Int16
+                    | NativeKind::Int32
+                    | NativeKind::UInt8
+                    | NativeKind::UInt16
+                    | NativeKind::UInt32
+            )
+        }
+        fn is_int_literal(op: &Operand) -> bool {
+            matches!(op, Operand::Constant(MirConstant::Int(_)))
+        }
+        match (lhs, rhs) {
+            // Both operands the same narrow kind.
+            (Some(lk), Some(rk)) if lk == rk && is_narrow(lk) => Some(lk),
+            // One operand narrow, the other a width-polymorphic literal.
+            (Some(lk), Some(NativeKind::Int64))
+                if is_narrow(lk) && is_int_literal(rhs_op) =>
+            {
+                Some(lk)
+            }
+            (Some(NativeKind::Int64), Some(rk))
+                if is_narrow(rk) && is_int_literal(lhs_op) =>
+            {
+                Some(rk)
+            }
+            _ => None,
+        }
+    }
+
     /// Check if both operand kinds are Int64 (NaN-boxed integers suitable for inline i64 ops).
     fn both_int64(
         &self,
@@ -763,6 +841,142 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         };
         // icmp returns I8 (native bool)
         Ok(self.builder.ins().icmp(cc, lhs, rhs))
+    }
+
+    // ── Narrow-integer arithmetic (i8/i16/i32/u8/u16/u32) ─────────
+
+    /// R5c-2-β-γ (c) jit-narrow-wrap: compile a binary op on narrow
+    /// integer operands, matching the bytecode VM's wrapping semantics.
+    ///
+    /// The integer-semantics ruling (2026-05-20 #3) makes integer
+    /// overflow WRAPPING (two's-complement). The VM achieves this with
+    /// the `AddI32`/`SubI32`/`MulI32` typed opcodes
+    /// (`executor/v2_handlers/int.rs` — `i32` `wrapping_*`) and the
+    /// width-parameterised `AddTyped`/`SubTyped`/`MulTyped` opcodes
+    /// (`executor/arithmetic/mod.rs::compact_int_checked_binop` —
+    /// `IntWidth::truncate`). The JIT matches by operating at the
+    /// declared narrow Cranelift width: `iadd`/`isub`/`imul` on an
+    /// `I8`/`I16`/`I32` value wrap natively at that width, exactly the
+    /// two's-complement truncation the VM performs.
+    ///
+    /// Both operands are first coerced to the narrow width via `ireduce`
+    /// (literals reach the binop as raw `I64`; same-width variables pass
+    /// through unchanged). The result keeps the narrow Cranelift type;
+    /// the caller's `store_to_place` `ensure_kind` handles any storage-
+    /// width adaptation. Arithmetic add/sub/mul are signedness-agnostic
+    /// (two's-complement); div/mod and comparisons select signed vs
+    /// unsigned Cranelift instructions from the operand kind.
+    fn compile_binop_narrow_int(
+        &mut self,
+        op: &BinOp,
+        lhs: Value,
+        rhs: Value,
+        kind: shape_vm::type_tracking::NativeKind,
+    ) -> Result<Value, String> {
+        use shape_vm::type_tracking::NativeKind;
+        let cl_ty = super::types::cranelift_type_for_slot(kind);
+        let unsigned = matches!(
+            kind,
+            NativeKind::UInt8 | NativeKind::UInt16 | NativeKind::UInt32
+        );
+        // Coerce each operand to the narrow Cranelift width. `ireduce`
+        // truncates a wider value (e.g. an `I64` literal); a value
+        // already at `cl_ty` passes through.
+        let l = self.coerce_to_narrow_int(lhs, cl_ty);
+        let r = self.coerce_to_narrow_int(rhs, cl_ty);
+
+        match op {
+            // Two's-complement wrapping arithmetic — `iadd`/`isub`/`imul`
+            // on a narrow Cranelift integer type wrap at that width.
+            BinOp::Add => Ok(self.builder.ins().iadd(l, r)),
+            BinOp::Sub => Ok(self.builder.ins().isub(l, r)),
+            BinOp::Mul => Ok(self.builder.ins().imul(l, r)),
+            BinOp::Div => {
+                let zero = self.builder.ins().iconst(cl_ty, 0);
+                let is_zero = self.builder.ins().icmp(IntCC::Equal, r, zero);
+                self.builder.ins().trapnz(is_zero, TrapCode::User(0));
+                if unsigned {
+                    Ok(self.builder.ins().udiv(l, r))
+                } else {
+                    Ok(self.builder.ins().sdiv(l, r))
+                }
+            }
+            BinOp::Mod => {
+                let zero = self.builder.ins().iconst(cl_ty, 0);
+                let is_zero = self.builder.ins().icmp(IntCC::Equal, r, zero);
+                self.builder.ins().trapnz(is_zero, TrapCode::User(0));
+                if unsigned {
+                    Ok(self.builder.ins().urem(l, r))
+                } else {
+                    Ok(self.builder.ins().srem(l, r))
+                }
+            }
+            // Bitwise — native Cranelift bitwise ops at the narrow width.
+            BinOp::BitAnd => Ok(self.builder.ins().band(l, r)),
+            BinOp::BitOr => Ok(self.builder.ins().bor(l, r)),
+            BinOp::BitXor => Ok(self.builder.ins().bxor(l, r)),
+            BinOp::BitShl => Ok(self.builder.ins().ishl(l, r)),
+            BinOp::BitShr => {
+                if unsigned {
+                    Ok(self.builder.ins().ushr(l, r))
+                } else {
+                    Ok(self.builder.ins().sshr(l, r))
+                }
+            }
+            // Comparisons — return a native I8 bool. Signed vs unsigned
+            // Cranelift condition codes per the operand kind.
+            BinOp::Eq => Ok(self.builder.ins().icmp(IntCC::Equal, l, r)),
+            BinOp::Ne => Ok(self.builder.ins().icmp(IntCC::NotEqual, l, r)),
+            BinOp::Lt => {
+                let cc = if unsigned {
+                    IntCC::UnsignedLessThan
+                } else {
+                    IntCC::SignedLessThan
+                };
+                Ok(self.builder.ins().icmp(cc, l, r))
+            }
+            BinOp::Le => {
+                let cc = if unsigned {
+                    IntCC::UnsignedLessThanOrEqual
+                } else {
+                    IntCC::SignedLessThanOrEqual
+                };
+                Ok(self.builder.ins().icmp(cc, l, r))
+            }
+            BinOp::Gt => {
+                let cc = if unsigned {
+                    IntCC::UnsignedGreaterThan
+                } else {
+                    IntCC::SignedGreaterThan
+                };
+                Ok(self.builder.ins().icmp(cc, l, r))
+            }
+            BinOp::Ge => {
+                let cc = if unsigned {
+                    IntCC::UnsignedGreaterThanOrEqual
+                } else {
+                    IntCC::SignedGreaterThanOrEqual
+                };
+                Ok(self.builder.ins().icmp(cc, l, r))
+            }
+            _ => Err(format!("unsupported narrow-int binop: {:?}", op)),
+        }
+    }
+
+    /// Coerce a value to a narrow integer Cranelift type. A wider value
+    /// (e.g. an `I64` literal) is `ireduce`d down; a value already at the
+    /// target width passes through. Used by `compile_binop_narrow_int`.
+    fn coerce_to_narrow_int(&mut self, val: Value, target: types::Type) -> Value {
+        let vt = self.builder.func.dfg.value_type(val);
+        if vt == target {
+            return val;
+        }
+        if vt.bits() > target.bits() {
+            return self.builder.ins().ireduce(target, val);
+        }
+        // Narrower source than target — sign-extend up. Cold in practice
+        // (MIR keeps operand widths aligned); kept total for safety.
+        self.builder.ins().sextend(target, val)
     }
 
     // ── Inline Int64 arithmetic (raw native i64) ──────────────────

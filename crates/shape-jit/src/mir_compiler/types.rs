@@ -1913,6 +1913,7 @@ mod tests {
             field_name_table: Default::default(),
             local_struct_type_names: Default::default(),
             local_typed_array_element_types: Default::default(),
+            local_declared_scalar_types: Default::default(),
         }
     }
 
@@ -2376,6 +2377,7 @@ mod tests {
             field_name_table: Default::default(),
             local_struct_type_names: Default::default(),
             local_typed_array_element_types: Default::default(),
+            local_declared_scalar_types: Default::default(),
         };
         let concrete_types = vec![
             ConcreteType::Array(Box::new(ConcreteType::I64)),
@@ -2620,6 +2622,7 @@ mod tests {
             field_name_table: Default::default(),
             local_struct_type_names: Default::default(),
             local_typed_array_element_types: Default::default(),
+            local_declared_scalar_types: Default::default(),
         };
         // No ConcreteType seeds — every slot is Void, mirroring the
         // bare-`HashMap()` ctor pattern.
@@ -2993,6 +2996,7 @@ mod tests {
             field_name_table: Default::default(),
             local_struct_type_names: Default::default(),
             local_typed_array_element_types: Default::default(),
+            local_declared_scalar_types: Default::default(),
         }
     }
 
@@ -3119,6 +3123,7 @@ mod tests {
             field_name_table: Default::default(),
             local_struct_type_names: Default::default(),
             local_typed_array_element_types: Default::default(),
+            local_declared_scalar_types: Default::default(),
         };
         let concrete_types = vec![
             ConcreteType::Struct(shape_value::v2::concrete_type::StructLayoutId(0)),
@@ -3256,6 +3261,7 @@ mod tests {
             field_name_table: Default::default(),
             local_struct_type_names: Default::default(),
             local_typed_array_element_types: Default::default(),
+            local_declared_scalar_types: Default::default(),
         };
         // Simulate post-T1' upstream state: `concrete_types[1]` is
         // stamped String by the VM-side conduit; the caller has
