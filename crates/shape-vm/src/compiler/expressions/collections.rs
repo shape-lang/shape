@@ -1424,11 +1424,15 @@ impl BytecodeCompiler {
         }
 
         // Call MakeTableFromRows builtin
-        // Convention: push arg_count as constant, then BuiltinCall
+        // Convention: push arg_count as constant, then BuiltinCall.
+        // The count MUST be an integer constant — `pop_builtin_args`
+        // reads it via `int_operand` (the W17-make-closure arg-count emit
+        // migration); a `Number` constant produces a `Float64` slot kind
+        // that `int_operand` rejects.
         let total_args = 3 + row_count * field_count;
         let ac_const = self
             .program
-            .add_constant(Constant::Number(total_args as f64));
+            .add_constant(Constant::Int(total_args as i64));
         self.emit(Instruction::new(
             OpCode::PushConst,
             Some(Operand::Const(ac_const)),

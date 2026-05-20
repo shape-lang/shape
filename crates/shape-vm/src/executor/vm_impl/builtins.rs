@@ -791,32 +791,69 @@ impl VirtualMachine {
                         builtin
                     );
                 }
-                BuiltinFunction::DateTimeNow
-                | BuiltinFunction::DateTimeUtc
-                | BuiltinFunction::DateTimeParse
-                | BuiltinFunction::DateTimeFromEpoch
-                | BuiltinFunction::DateTimeFromParts
-                | BuiltinFunction::DateTimeFromUnixSecs => {
-                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
-                    todo!(
-                        "phase-1b-vm wave 5e — DateTime ctor body migration \
-                         pending: {:?}",
-                        builtin
-                    );
+                // ── Wave 5e: DateTime constructor builtins ────────────────
+                //
+                // DateTime values are `HeapValue::Temporal` carrying
+                // `TemporalData::DateTime` (ADR-006 §2.3 typed-Arc payload);
+                // the constructor bodies live in
+                // `executor/builtins/datetime_builtins.rs` on the
+                // `&[KindedSlot] -> Result<KindedSlot, VMError>` carrier ABI.
+                BuiltinFunction::DateTimeNow => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::datetime_builtins::builtin_datetime_now(
+                        &args,
+                    )?;
+                    self.push_kinded_slot(r)?;
                 }
+                BuiltinFunction::DateTimeUtc => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::datetime_builtins::builtin_datetime_utc(
+                        &args,
+                    )?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::DateTimeParse => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::datetime_builtins::builtin_datetime_parse(
+                        &args,
+                    )?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::DateTimeFromEpoch => {
+                    let args = self.pop_builtin_args()?;
+                    let r =
+                        super::super::builtins::datetime_builtins::builtin_datetime_from_epoch(
+                            &args,
+                        )?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::DateTimeFromParts => {
+                    let args = self.pop_builtin_args()?;
+                    let r =
+                        super::super::builtins::datetime_builtins::builtin_datetime_from_parts(
+                            &args,
+                        )?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::DateTimeFromUnixSecs => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::datetime_builtins
+                        ::builtin_datetime_from_unix_secs(&args)?;
+                    self.push_kinded_slot(r)?;
+                }
+                // ── Wave 5e: mat() row-major matrix constructor ───────────
                 BuiltinFunction::MatFromFlat => {
-                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
-                    todo!(
-                        "phase-1b-vm wave 5e — mat() ctor body migration \
-                         pending"
-                    );
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::datetime_builtins::builtin_mat_from_flat(
+                        &args,
+                    )?;
+                    self.push_kinded_slot(r)?;
                 }
+                // ── Wave 5e: Table<T> from-rows constructor ───────────────
                 BuiltinFunction::MakeTableFromRows => {
-                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
-                    todo!(
-                        "phase-1b-vm wave 5e — make_table_from_rows body \
-                         migration pending"
-                    );
+                    let args = self.pop_builtin_args()?;
+                    let r = self.builtin_make_table_from_rows(&args)?;
+                    self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::JsonObjectGet
                 | BuiltinFunction::JsonArrayAt
