@@ -417,6 +417,59 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     // Restore stack_ptr to old value
                     self.builder.ins().store(MemFlags::new(), old_sp, self.ctx_ptr, sp_offset);
 
+                    // ── r5c-2-bz-b-jit-err-surface: VM-trampoline error deopt ─
+                    // `jit_call_method` returns a `u64` value-shaped result; it
+                    // has no negative-signal channel like a JIT-compiled callee.
+                    // When the VM-side method handler surfaces an `Err` (e.g.
+                    // `Set.add()` with a non-string key) the FFI body sets
+                    // `JITContext.pending_call_error = 1` and the returned bits
+                    // are a placeholder. Continuing would feed that placeholder
+                    // into `write_place` and a later refcount-retain — and
+                    // `TAG_NULL` (a non-zero NaN-box sentinel) passes the
+                    // `bits != 0` guard in `jit_arc_*_retain`, dereferencing
+                    // `TAG_NULL - 16` → SIGSEGV. Instead: load the flag and
+                    // deopt the JIT frame BEFORE `write_place`/retain by
+                    // returning `SIGNAL_TRAMPOLINE_ERROR`. The `JITExecutor`
+                    // surfaces the VM's clean error message stored in the
+                    // `JIT_RUNTIME_ERROR` thread-local. This is the W12
+                    // architectural fall-through — a genuine JIT failure
+                    // abandons the JIT frame; the VM produces the error.
+                    let err_flag_offset =
+                        crate::context::PENDING_CALL_ERROR_OFFSET as i32;
+                    let err_flag = self.builder.ins().load(
+                        types::I8,
+                        MemFlags::new(),
+                        self.ctx_ptr,
+                        err_flag_offset,
+                    );
+                    let zero_i8 = self.builder.ins().iconst(types::I8, 0);
+                    let has_err = self.builder.ins().icmp(
+                        IntCC::NotEqual,
+                        err_flag,
+                        zero_i8,
+                    );
+                    let err_deopt_block = self.builder.create_block();
+                    let err_continue_block = self.builder.create_block();
+                    self.builder.ins().brif(
+                        has_err,
+                        err_deopt_block,
+                        &[],
+                        err_continue_block,
+                        &[],
+                    );
+                    self.builder.switch_to_block(err_deopt_block);
+                    self.builder.seal_block(err_deopt_block);
+                    // Cranelift I32 iconst convention: pass the unsigned
+                    // bit-pattern of the signed deopt code.
+                    let trampoline_err_signal = self.builder.ins().iconst(
+                        types::I32,
+                        (crate::context::SIGNAL_TRAMPOLINE_ERROR as u32) as i64,
+                    );
+                    self.builder.ins().return_(&[trampoline_err_signal]);
+
+                    self.builder.switch_to_block(err_continue_block);
+                    self.builder.seal_block(err_continue_block);
+
                     // Store result to destination
                     self.release_old_value_if_heap(destination)?;
                     self.write_place(destination, result)?;
@@ -1584,6 +1637,47 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     self.builder.inst_results(inst)[0]
                 };
 
+                // ── r5c-2-bz-b-jit-err-surface: VM-trampoline error deopt ──
+                // `jit_call_value` (via `dispatch_call_via_trampoline_vm`)
+                // can hit a VM `Err` and return a value-shaped placeholder.
+                // Deopt the JIT frame BEFORE `write_place` / refcount-retain
+                // when `pending_call_error` is set — same shape as the
+                // `MirConstant::Method` path above.
+                {
+                    let err_flag_offset =
+                        crate::context::PENDING_CALL_ERROR_OFFSET as i32;
+                    let err_flag = self.builder.ins().load(
+                        types::I8,
+                        MemFlags::new(),
+                        self.ctx_ptr,
+                        err_flag_offset,
+                    );
+                    let zero_i8 = self.builder.ins().iconst(types::I8, 0);
+                    let has_err = self.builder.ins().icmp(
+                        IntCC::NotEqual,
+                        err_flag,
+                        zero_i8,
+                    );
+                    let err_deopt_block = self.builder.create_block();
+                    let err_continue_block = self.builder.create_block();
+                    self.builder.ins().brif(
+                        has_err,
+                        err_deopt_block,
+                        &[],
+                        err_continue_block,
+                        &[],
+                    );
+                    self.builder.switch_to_block(err_deopt_block);
+                    self.builder.seal_block(err_deopt_block);
+                    let trampoline_err_signal = self.builder.ins().iconst(
+                        types::I32,
+                        (crate::context::SIGNAL_TRAMPOLINE_ERROR as u32) as i64,
+                    );
+                    self.builder.ins().return_(&[trampoline_err_signal]);
+                    self.builder.switch_to_block(err_continue_block);
+                    self.builder.seal_block(err_continue_block);
+                }
+
                 // 4. Store result to destination
                 self.release_old_value_if_heap(destination)?;
                 self.write_place(destination, result)?;
@@ -1874,6 +1968,47 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         self.builder
             .ins()
             .store(MemFlags::new(), old_sp, self.ctx_ptr, sp_offset);
+
+        // ── r5c-2-bz-b-jit-err-surface: VM-trampoline error deopt ─────────
+        // Same shape as the `MirConstant::Method` Call-terminator path
+        // (this file, ~line 421): when the VM-side operator-trait handler
+        // surfaces an `Err`, `jit_call_method` raised `pending_call_error`
+        // and the returned bits are a placeholder. Deopt the JIT frame
+        // (return `SIGNAL_TRAMPOLINE_ERROR`) BEFORE `write_place` so the
+        // placeholder never flows into a heap-kinded refcount-retain site.
+        let err_flag_offset =
+            crate::context::PENDING_CALL_ERROR_OFFSET as i32;
+        let err_flag = self.builder.ins().load(
+            types::I8,
+            MemFlags::new(),
+            self.ctx_ptr,
+            err_flag_offset,
+        );
+        let zero_i8 = self.builder.ins().iconst(types::I8, 0);
+        let has_err = self.builder.ins().icmp(
+            IntCC::NotEqual,
+            err_flag,
+            zero_i8,
+        );
+        let err_deopt_block = self.builder.create_block();
+        let err_continue_block = self.builder.create_block();
+        self.builder.ins().brif(
+            has_err,
+            err_deopt_block,
+            &[],
+            err_continue_block,
+            &[],
+        );
+        self.builder.switch_to_block(err_deopt_block);
+        self.builder.seal_block(err_deopt_block);
+        let trampoline_err_signal = self.builder.ins().iconst(
+            types::I32,
+            (crate::context::SIGNAL_TRAMPOLINE_ERROR as u32) as i64,
+        );
+        self.builder.ins().return_(&[trampoline_err_signal]);
+
+        self.builder.switch_to_block(err_continue_block);
+        self.builder.seal_block(err_continue_block);
 
         // Write result to destination + reload referenced locals (per
         // the standard Call-terminator wind-down).

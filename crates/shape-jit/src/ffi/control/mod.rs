@@ -33,6 +33,35 @@ thread_local! {
     /// functions that weren't JIT-compiled. Set by `execute_with_jit()` before
     /// JIT execution and cleared after. Valid only on the executor thread.
     static TRAMPOLINE_VM: Cell<*mut shape_vm::VirtualMachine> = const { Cell::new(std::ptr::null_mut()) };
+
+    /// `r5c-2-bz-b-jit-err-surface`: error message from the most recent
+    /// VM-trampoline FFI call (`jit_call_method`) whose VM-side handler
+    /// returned `Err`.
+    ///
+    /// When a trampoline FFI call hits a VM `Err`, it stores the error message
+    /// here and sets `JITContext.pending_call_error = 1`. The MIR emitter
+    /// loads that flag right after the FFI call and deopts (returns
+    /// `SIGNAL_TRAMPOLINE_ERROR`) — the JIT frame is abandoned before the
+    /// FFI's placeholder return value reaches a heap-kinded refcount-retain
+    /// site. `JITExecutor` then `take`s this message and surfaces it as the
+    /// program's runtime error — identical to the error the VM produces, so
+    /// VM and JIT modes agree.
+    static JIT_RUNTIME_ERROR: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Record a VM-trampoline error message for the surrounding JIT execution to
+/// surface on deopt. Called from `jit_call_method`'s `Err` arm. Overwrites any
+/// prior message (the most recent error is the one that triggers the deopt).
+pub fn set_jit_runtime_error(message: String) {
+    JIT_RUNTIME_ERROR.with(|cell| *cell.borrow_mut() = Some(message));
+}
+
+/// Take (and clear) the recorded VM-trampoline error message. Called by
+/// `JITExecutor` when a JIT-compiled function returns a negative signal, so
+/// the clean VM error can be surfaced in place of a generic JIT error code.
+pub fn take_jit_runtime_error() -> Option<String> {
+    JIT_RUNTIME_ERROR.with(|cell| cell.borrow_mut().take())
 }
 
 /// Register the trampoline VM for use during JIT execution.
@@ -97,9 +126,23 @@ fn dispatch_call_via_trampoline_vm(
     function_id: u32,
     upvalue_bits: Option<&[u64]>,
     jit_args: &[u64],
-    _jit_ctx: *const JITContext,
+    jit_ctx: *mut JITContext,
 ) -> u64 {
     use shape_value::NativeKind;
+
+    // r5c-2-bz-b-jit-err-surface: a VM-trampoline value-call that surfaces an
+    // `Err` must NOT continue with a value-shaped placeholder — the same
+    // SIGSEGV class as `jit_call_method` (`TAG_NULL` flowing into a heap-
+    // kinded refcount-retain). Record the error + raise `pending_call_error`
+    // so the MIR-emitted post-call check deopts the JIT frame. The closure
+    // captures the raw `jit_ctx` pointer; it is non-null on every real call
+    // path (the MIR emitter always passes `self.ctx_ptr`).
+    let raise_trampoline_error = |message: String| {
+        set_jit_runtime_error(message);
+        if !jit_ctx.is_null() {
+            unsafe { (*jit_ctx).pending_call_error = 1 };
+        }
+    };
 
     // §2.7.5 stable-FFI raw-pair shape: each arg / capture pair is
     // `(u64, NativeKind)`. The JIT MIR emitter widened every arg to
@@ -139,7 +182,10 @@ fn dispatch_call_via_trampoline_vm(
                     .collect();
                 match vm.jit_trampoline_call_closure(func_id, &capture_pairs, &arg_pairs, None) {
                     Ok(bits) => bits,
-                    Err(_) => TAG_NULL,
+                    Err(e) => {
+                        raise_trampoline_error(e.to_string());
+                        TAG_NULL
+                    }
                 }
             }
             None => {
@@ -181,12 +227,25 @@ fn dispatch_call_via_trampoline_vm(
                         std::mem::forget(kinded_args);
                         bits
                     }
-                    Err(_) => TAG_NULL,
+                    Err(e) => {
+                        raise_trampoline_error(e.to_string());
+                        TAG_NULL
+                    }
                 }
             }
         }
     })
-    .unwrap_or(TAG_NULL)
+    .unwrap_or_else(|| {
+        // `TRAMPOLINE_VM` is null — the JIT-compiled callee could not be
+        // dispatched. Raise `pending_call_error` so the MIR-emitted check
+        // deopts rather than continuing with a value-shaped placeholder.
+        raise_trampoline_error(format!(
+            "JIT value-call for function {} could not reach the interpreter \
+             trampoline",
+            function_id,
+        ));
+        TAG_NULL
+    })
 }
 
 /// Dispatch a native module function call through the trampoline VM.
@@ -548,7 +607,7 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
                         function_id as u32,
                         None,
                         &args,
-                        ctx as *const JITContext,
+                        ctx,
                     );
                 }
                 // Borrow the `Arc<HeapValue>` (use `from_raw` + `into_raw`
@@ -742,7 +801,7 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
             function_id as u32,
             upvalues,
             &args,
-            ctx as *const JITContext,
+            ctx,
         )
     }
 }
@@ -1027,6 +1086,37 @@ mod tests {
     // regression test belongs to the kinded ABI rebuild wave (W11 /
     // deeper Phase-2c) where the call signature exposes the kind
     // companion explicitly.
+
+    // ── r5c-2-bz-b-jit-err-surface: VM-trampoline error channel ─────────
+
+    /// `set_jit_runtime_error` then `take_jit_runtime_error` round-trips the
+    /// message exactly once; the take clears it so a later, unrelated JIT
+    /// execution on the same thread does not inherit a stale error.
+    #[test]
+    fn jit_runtime_error_channel_round_trips_and_clears() {
+        // Clear any residue from a prior test on this thread.
+        let _ = take_jit_runtime_error();
+        assert_eq!(take_jit_runtime_error(), None);
+
+        set_jit_runtime_error("Set.add(): key must be a string".to_string());
+        assert_eq!(
+            take_jit_runtime_error().as_deref(),
+            Some("Set.add(): key must be a string"),
+        );
+        // The take cleared it — a second take sees None.
+        assert_eq!(take_jit_runtime_error(), None);
+    }
+
+    /// The most recent `set_jit_runtime_error` wins — the message that
+    /// triggers the deopt is the one surfaced.
+    #[test]
+    fn jit_runtime_error_channel_keeps_most_recent() {
+        let _ = take_jit_runtime_error();
+        set_jit_runtime_error("first error".to_string());
+        set_jit_runtime_error("second error".to_string());
+        assert_eq!(take_jit_runtime_error().as_deref(), Some("second error"));
+        let _ = take_jit_runtime_error();
+    }
 
     #[test]
     #[ignore = "SURFACE: jit_call_foreign_native_0 is extern \"C\" todo!() pending kinded foreign-call ABI rebuild (ADR-006 §2.7.10/Q11, docs/cluster-audits/wave-10-jit-playbook.md §5); extern C can't unwind, so #[should_panic] aborts the test process. Re-enable via `cargo test -- --ignored` once the underlying SURFACE closes."]

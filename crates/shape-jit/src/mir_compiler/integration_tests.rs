@@ -89,6 +89,91 @@ fn jit_expect_bool(source: &str, expected: bool) {
     }
 }
 
+/// Run a Shape program through the JIT and return the raw `Result` so a test
+/// can assert on the *error* path. Used by the `r5c-2-bz-b-jit-err-surface`
+/// regression tests where a method call surfaces a VM `Err`.
+fn jit_run_result(
+    source: &str,
+) -> Result<
+    shape_runtime::engine::ProgramExecutorResult,
+    shape_runtime::error::ShapeError,
+> {
+    let _ = initialize_shared_runtime();
+    let mut engine = ShapeEngine::new().expect("engine creation failed");
+    let program = shape_ast::parse_program(source).expect("parse failed");
+    JITExecutor::new().execute_program(&mut engine, &program)
+}
+
+// ===========================================================================
+// r5c-2-bz-b-jit-err-surface: JIT method-call Err-path surface (no SIGSEGV)
+// ===========================================================================
+//
+// A method call whose VM-side handler returns `Err` (e.g. `Set.add()` with a
+// non-string key) used to map to `TAG_NULL` in the `jit_call_method` shell.
+// `TAG_NULL` is a non-zero NaN-box sentinel; the JIT-compiled caller then ran
+// a heap-kinded result-retain whose only guard is `bits == 0`, so it
+// dereferenced `TAG_NULL - 16` → deterministic SIGSEGV (ec=139).
+//
+// The fix: the `Err` arm raises `JITContext.pending_call_error`; the MIR
+// emitter deopts the JIT frame (returns `SIGNAL_TRAMPOLINE_ERROR`) BEFORE the
+// placeholder result reaches `write_place` / retain. `JITExecutor` surfaces
+// the VM's clean error. These tests assert the program returns a clean `Err`
+// — i.e. it neither crashes nor silently succeeds with a wrong value.
+
+/// `let mut s = Set(); s.add(1); print(s.size())` — the canonical reproducer.
+/// `Set.add` with an `Int64` key fails on the VM side. Under JIT this must
+/// surface a clean error (not SIGSEGV).
+#[test]
+fn jit_err_path_set_add_non_string_key_surfaces_clean_error() {
+    let result = jit_run_result(
+        r#"
+let mut s = Set()
+s.add(1)
+print(s.size())
+"#,
+    );
+    match result {
+        Err(shape_runtime::error::ShapeError::RuntimeError { message, .. }) => {
+            assert!(
+                message.contains("must be a string"),
+                "expected the VM's `Set.add` key-type error, got: {message}",
+            );
+        }
+        Err(other) => {
+            // Any clean `Err` is acceptable (no crash); a non-RuntimeError
+            // shape is unexpected but still proves the no-SIGSEGV property.
+            panic!("expected a RuntimeError, got: {other:?}");
+        }
+        Ok(res) => panic!(
+            "expected an Err from `Set.add(1)`, JIT produced Ok({:?})",
+            res.wire_value, // WireValue is Debug; ProgramExecutorResult is not
+        ),
+    }
+}
+
+/// HashMap mirror: `HashMap` insert with a non-string key also fails VM-side
+/// and must surface cleanly under JIT rather than crash.
+#[test]
+fn jit_err_path_hashmap_non_string_key_surfaces_clean_error() {
+    let result = jit_run_result(
+        r#"
+let mut m = HashMap()
+m.set(1, 2)
+print(m.size())
+"#,
+    );
+    // `ProgramExecutorResult` is not `Debug`; report the `Ok` arm's
+    // `WireValue` (which is `Debug`) so a regression is legible.
+    match result {
+        Err(_) => { /* clean error — no SIGSEGV, fix holds */ }
+        Ok(res) => panic!(
+            "expected an Err from `HashMap.set` with a non-string key — JIT \
+             produced Ok({:?})",
+            res.wire_value,
+        ),
+    }
+}
+
 // ===========================================================================
 // 1. Pure arithmetic (number type)
 // ===========================================================================
