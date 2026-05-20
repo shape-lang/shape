@@ -1556,12 +1556,26 @@ impl BytecodeCompiler {
     /// The receiver was already compiled by the caller, so element-type
     /// side-tables (`array_element_types[span]`, `local_array_element_types`,
     /// `module_binding_array_element_types`) are populated.
+    ///
+    /// Argument-order validation: every HOF wired here takes its callback
+    /// as positional argument 0 — `map(f)` / `filter(predicate)` /
+    /// `reduce(f, init)` / etc. (see `crates/shape-runtime/stdlib-src/core/
+    /// vec.shape`). If argument 0 is a *provably* non-callable expression
+    /// (a literal, an array literal, or an object literal — none of which
+    /// can ever denote a callable), the call is ill-typed. Without this
+    /// guard, the wrong-order call `[1,2,3].reduce(0, |acc,x| acc+x)`
+    /// (init first, JS/conventional order — but Shape's `reduce` is
+    /// `(f, init)`) bound the int `0` to the generic callable param `f`
+    /// and degenerated into a re-entrant `main` miscompile (infinite loop)
+    /// instead of a clean type error. We surface a compile-time
+    /// `SemanticError` here, the earliest point that has both the method
+    /// name and the literal arg kinds in hand.
     pub(crate) fn install_pending_closure_param_types_for_hof(
         &mut self,
         receiver: &Expr,
         method: &str,
         args: &[Expr],
-    ) {
+    ) -> Result<()> {
         // Only the simple "single closure with one user-param-of-element-type"
         // HOFs are wired here. Reduce takes (acc, x) — both are element-type
         // for homogeneous folds, so we hint both.
@@ -1571,11 +1585,34 @@ impl BytecodeCompiler {
         );
         let is_reduce = method == "reduce";
         if !is_single_arg_hof && !is_reduce {
-            return;
+            return Ok(());
         }
         // Need at least one closure arg.
         if args.is_empty() {
-            return;
+            return Ok(());
+        }
+
+        // Argument-order / argument-kind validation. The callback is
+        // positional argument 0 for every HOF wired here. A literal,
+        // array literal, or object literal at that position can never be
+        // a callable — reject it with a clean compile error rather than
+        // letting an int bind a generic callable param and miscompile.
+        // (Identifiers / function references / property accesses are NOT
+        // rejected: they may legitimately resolve to a callable.)
+        if let Some(non_callable_kind) = Self::provably_non_callable_kind(&args[0]) {
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "`{method}` expects a closure (function) as its first argument, \
+                     got {non_callable_kind}. Shape's `{method}` takes the callback \
+                     first{}.",
+                    if is_reduce {
+                        " — the signature is `reduce(f, init)`, not `reduce(init, f)`"
+                    } else {
+                        ""
+                    }
+                ),
+                location: Some(self.span_to_source_location(args[0].span())),
+            });
         }
 
         let elem_ann_opt: Option<shape_ast::ast::TypeAnnotation> = match
@@ -1604,17 +1641,48 @@ impl BytecodeCompiler {
             }
         });
         let Some(elem_ann) = elem_ann_opt else {
-            return;
+            return Ok(());
         };
 
         let hints = if is_reduce {
-            // reduce(|acc, x| ..., init): acc and x are both elem-type for
-            // homogeneous folds. The init arg is the second positional.
+            // reduce(f, init): the callback `f` is positional arg 0 with
+            // two user params `(acc, x)`, both elem-type for homogeneous
+            // folds; `init` is positional arg 1.
             vec![Some(elem_ann.clone()), Some(elem_ann)]
         } else {
             vec![Some(elem_ann)]
         };
         self.pending_closure_param_types = Some(hints);
+        Ok(())
+    }
+
+    /// Classify an argument expression that is *provably* not a callable.
+    /// Returns a human-readable kind name (for diagnostics) when the
+    /// expression can never denote a closure/function, or `None` when it
+    /// might (identifiers, function references, calls, property accesses,
+    /// conditionals, etc. — anything that could resolve to a callable).
+    ///
+    /// Only the unambiguous literal forms are rejected: this is a
+    /// conservative guard that never false-positives on a legitimate
+    /// callable argument such as a named function passed to `.map`.
+    fn provably_non_callable_kind(arg: &Expr) -> Option<&'static str> {
+        match arg {
+            Expr::Literal(lit, _) => Some(match lit {
+                Literal::Int(_) | Literal::UInt(_) | Literal::TypedInt(_, _) => "an int",
+                Literal::Number(_) => "a number",
+                Literal::Decimal(_) => "a decimal",
+                Literal::String(_)
+                | Literal::FormattedString { .. }
+                | Literal::ContentString { .. } => "a string",
+                Literal::Char(_) => "a char",
+                Literal::Bool(_) => "a bool",
+                // `None`, `Unit`, `Timeframe` — non-callable values.
+                _ => "a literal value",
+            }),
+            Expr::Array(_, _) => Some("an array"),
+            Expr::Object(_, _) => Some("an object"),
+            _ => None,
+        }
     }
 
     /// Sweep phase 3c.x: bidirectional inference for free user functions
@@ -2490,7 +2558,7 @@ impl BytecodeCompiler {
         // For known HOF method names operating on arrays, resolve the receiver's
         // element type and use it to type the closure arg's user params. The
         // closure-compile path consumes `pending_closure_param_types`.
-        self.install_pending_closure_param_types_for_hof(receiver, method, args);
+        self.install_pending_closure_param_types_for_hof(receiver, method, args)?;
 
         // Compile arguments (closure_row_schema is consumed during closure compilation)
         for arg in args {

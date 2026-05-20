@@ -357,20 +357,26 @@ fn test_double_filter_chain_into_let() {
 // ckpt56-strict-close-audit.md`.
 
 #[test]
-fn test_lang9_spin_2c_reduce_chained_map_compiles() {
-    // Phase 4b Round 4 §7.4 reproducer row 1: pins F2c compile-success
-    // at HEAD. The closure `|a, b| a + b` resolves both params to `int`
-    // via `install_pending_closure_param_types_for_hof`'s is_reduce
-    // branch; the receiver `[1,2,3,4,5].map(|x|x*2)` resolves to
-    // `Array<int>` via the Surface-1B `Expr::MethodCall` arm.
+fn test_lang9_spin_2c_reduce_chained_map_wrong_order_is_clean_error() {
+    // ε-3 reduce-argorder fix: the wrong-order call
+    // `.reduce(0, |a, b| a + b)` (init first) is genuinely ill-typed —
+    // Shape's `reduce` is `reduce(f, init)`, callback FIRST (see
+    // `crates/shape-runtime/stdlib-src/core/vec.shape:59`). Before the fix
+    // this miscompiled into a re-entrant `main` (infinite loop) because the
+    // int `0` bound the generic callable param `f`. It must now be a CLEAN
+    // compile-time error surfaced by the arg-kind guard in
+    // `install_pending_closure_param_types_for_hof`.
     use super::test_utils::compile_with_prelude;
     let result = compile_with_prelude(
         "let _ = [1,2,3,4,5].map(|x| x * 2).reduce(0, |a, b| a + b)",
     );
+    let err = result.expect_err(
+        "wrong-order reduce(init, closure) must be a clean compile error, not a miscompile",
+    );
+    let msg = format!("{err:?}");
     assert!(
-        result.is_ok(),
-        "F2c chained map.reduce(init,closure) must compile (Surface-1B fix in place at HEAD); got: {:?}",
-        result.err()
+        msg.contains("reduce") && msg.contains("first argument"),
+        "error must explain the arg-order problem; got: {msg}"
     );
 }
 
@@ -393,18 +399,18 @@ fn test_lang9_spin_2c_reduce_callback_first_compiles() {
 }
 
 #[test]
-fn test_lang9_spin_2c_reduce_chained_map_f64_compiles() {
-    // Sibling shape: f64 element + accumulator. The receiver's element
-    // type drives both `a` and `b` hint via the homogeneous-fold branch
-    // — `vec![Some(number_ann), Some(number_ann)]` — so the closure
-    // body `a + b` resolves to AddNumber.
+fn test_lang9_spin_2c_reduce_chained_map_f64_correct_order_compiles() {
+    // Sibling shape: f64 element + accumulator, callback FIRST (correct
+    // order). The receiver's element type drives both `a` and `b` hint via
+    // the homogeneous-fold branch — `vec![Some(number_ann), Some(number_ann)]`
+    // — so the closure body `a + b` resolves to AddNumber.
     use super::test_utils::compile_with_prelude;
     let result = compile_with_prelude(
-        "let _ = [1.0, 2.0, 3.0, 4.0, 5.0].map(|x| x * 2.0).reduce(0.0, |a, b| a + b)",
+        "let _ = [1.0, 2.0, 3.0, 4.0, 5.0].map(|x| x * 2.0).reduce(|a, b| a + b, 0.0)",
     );
     assert!(
         result.is_ok(),
-        "f64 chained map.reduce must compile; got: {:?}",
+        "f64 chained map.reduce(closure, init) must compile; got: {:?}",
         result.err()
     );
 }
@@ -425,6 +431,108 @@ fn test_lang9_spin_2c_reduce_direct_array_compiles() {
         "direct array.reduce must compile; got: {:?}",
         result.err()
     );
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// ε-3 reduce-argorder: a wrong-argument-order `reduce` call (an int /
+// literal where the callback closure is expected) must produce a CLEAN
+// compile-time type error — never the pre-fix re-entrant `main`
+// miscompile (infinite loop / timeout). The guard lives in
+// `install_pending_closure_param_types_for_hof`
+// (`crates/shape-vm/src/compiler/expressions/function_calls.rs`):
+// the callback is positional arg 0 for every wired HOF, so a provably
+// non-callable arg 0 (literal / array literal / object literal) is
+// rejected with a `SemanticError`.
+
+#[test]
+fn test_reduce_correct_order_compiles() {
+    // The exact close-gate input: callback first, init second — the
+    // correct order for Shape's `reduce(f, init)` signature.
+    use super::test_utils::compile_with_prelude;
+    let result = compile_with_prelude(
+        "let _ = [1, 2, 3].reduce(|acc, x| acc + x, 0)",
+    );
+    assert!(
+        result.is_ok(),
+        "correct-order reduce(closure, init) must compile; got: {:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn test_reduce_wrong_order_int_first_is_clean_error() {
+    // The close-gate bug input: `reduce(0, |acc,x| acc+x)` — init first,
+    // callback second (JS/conventional order, but WRONG for Shape).
+    // Pre-fix: re-entrant `main` miscompile (infinite loop, ec=124).
+    // Post-fix: clean compile-time `SemanticError`.
+    use super::test_utils::compile_with_prelude;
+    let result = compile_with_prelude(
+        "let _ = [1, 2, 3].reduce(0, |acc, x| acc + x)",
+    );
+    let err = result.expect_err(
+        "wrong-order reduce(int, closure) must be a clean compile error",
+    );
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("reduce")
+            && msg.contains("first argument")
+            && msg.contains("int"),
+        "error must name `reduce`, the first-argument problem, and `int`; got: {msg}"
+    );
+}
+
+#[test]
+fn test_reduce_non_closure_first_arg_string_is_clean_error() {
+    // A string literal as `reduce`'s first argument is equally
+    // ill-typed and must surface a clean compile error.
+    use super::test_utils::compile_with_prelude;
+    let result = compile_with_prelude(
+        "let _ = [1, 2, 3].reduce(\"seed\", |acc, x| acc + x)",
+    );
+    let err = result.expect_err(
+        "reduce with a string first arg must be a clean compile error",
+    );
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("reduce") && msg.contains("string"),
+        "error must name `reduce` and `string`; got: {msg}"
+    );
+}
+
+#[test]
+fn test_map_non_closure_arg_is_clean_error() {
+    // Sibling-HOF coverage: `map` also takes its callback at positional
+    // arg 0. A non-callable literal there is the same footgun and must
+    // likewise be a clean compile error, not a miscompile.
+    use super::test_utils::compile_with_prelude;
+    let result = compile_with_prelude("let _ = [1, 2, 3].map(7)");
+    let err = result
+        .expect_err("map with a non-closure arg must be a clean compile error");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("map") && msg.contains("first argument"),
+        "error must name `map` and the first-argument problem; got: {msg}"
+    );
+}
+
+#[test]
+fn test_filter_named_function_arg_still_allowed() {
+    // The guard must NOT false-positive on a legitimate non-literal
+    // callable. An identifier could resolve to a function/closure, so
+    // it is never rejected by `provably_non_callable_kind`. This call
+    // may still fail for other reasons, but it must NOT be rejected
+    // with the arg-order/arg-kind diagnostic.
+    use super::test_utils::compile_with_prelude;
+    let result = compile_with_prelude(
+        "fn keep(n: int) -> bool { n > 1 }\nlet _ = [1, 2, 3].filter(keep)",
+    );
+    if let Err(err) = &result {
+        let msg = format!("{err:?}");
+        assert!(
+            !msg.contains("expects a closure (function) as its first argument"),
+            "named-function arg must not trip the arg-kind guard; got: {msg}"
+        );
+    }
 }
 
 
