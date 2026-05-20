@@ -48,6 +48,96 @@ pub(super) fn lower_expr_to_place(builder: &mut MirBuilder, expr: &Expr) -> Opti
 }
 
 // ---------------------------------------------------------------------------
+// Int-literal width inference (ADR-006 §2.7.5 stamp-at-compile-time)
+// ---------------------------------------------------------------------------
+
+/// If `expr` is a bare integer literal, return its value. `Literal::UInt`
+/// is always non-negative. `Literal::TypedInt` is excluded — an explicitly
+/// suffixed literal has a programmer-chosen width and does not adapt.
+/// Mirrors the bytecode compiler's `bare_int_literal_value`
+/// (`compiler/expressions/binary_ops.rs`).
+fn bare_int_literal_value(expr: &Expr) -> Option<i128> {
+    match expr {
+        Expr::Literal(Literal::Int(v), _) => Some(*v as i128),
+        Expr::Literal(Literal::UInt(v), _) => Some(*v as i128),
+        _ => None,
+    }
+}
+
+/// Returns `true` when an expression is statically known to be `u64`-typed
+/// at MIR-lowering time:
+///
+/// - a `u64` literal (`Literal::UInt`),
+/// - an identifier whose binding slot carries the declared scalar
+///   `ConcreteType::U64` recorded by `lower_var_decl`'s
+///   `record_local_declared_scalar_type`,
+/// - an arithmetic `BinaryOp` whose own operands resolve (recursively) to
+///   `u64` — `a / 2` on `a: u64` is itself a `u64` expression, so
+///   `(a / 2) == 5` lowers the `5` as a direct constant too.
+///
+/// This is the MIR-side analogue of the bytecode compiler's
+/// `NumericType::IntWidth(U64)` slot-tracker hint.
+///
+/// Scoped to `u64` — the only integer width where signed and unsigned div/
+/// mod/compare genuinely diverge for the JIT codegen. The narrow widths
+/// (`i8`/.../`u32`) are handled by the bytecode-compiler half of this fix
+/// (`promote_int_literal_to_width_sibling`); their JIT path
+/// (`compile_binop_narrow_int`) is checkpoint-(c) territory and is left
+/// to fall back to the interpreter on a hoisted-literal operand, exactly
+/// as before this change — VM and JIT stay in agreement because both run
+/// the (now-fixed) bytecode interpreter for that case.
+fn expr_is_u64_typed(builder: &MirBuilder, expr: &Expr) -> bool {
+    use shape_ast::ast::BinaryOp;
+    use shape_value::v2::ConcreteType;
+    match expr {
+        Expr::Literal(Literal::UInt(_), _) => true,
+        Expr::Identifier(name, _) => builder
+            .lookup_local(name)
+            .and_then(|slot| builder.lookup_local_declared_scalar_type(slot))
+            .is_some_and(|ct| matches!(ct, ConcreteType::U64)),
+        Expr::BinaryOp { left, op, right, .. }
+            if matches!(
+                op,
+                BinaryOp::Add
+                    | BinaryOp::Sub
+                    | BinaryOp::Mul
+                    | BinaryOp::Div
+                    | BinaryOp::Mod
+            ) =>
+        {
+            expr_is_u64_typed(builder, left) || expr_is_u64_typed(builder, right)
+        }
+        _ => false,
+    }
+}
+
+/// ADR-006 §2.7.5 stamp-at-compile-time — u64-literal kind inference (MIR
+/// producer half; the bytecode-compiler half lives in
+/// `compiler/expressions/binary_ops.rs::promote_int_literal_to_width_sibling`).
+///
+/// When a binary op pairs a `u64`-typed operand with a bare integer
+/// literal, lower the literal directly as `Operand::Constant(MirConstant::
+/// Int(_))` rather than through `lower_expr_to_operand` (which hoists it
+/// into a `Copy(Local)` temp). The JIT's `uint64_binop_site` classifier
+/// explicitly recognizes a direct `Operand::Constant(MirConstant::Int(_))`
+/// sibling as a width-polymorphic literal that adopts the `u64` width —
+/// `(UInt64, Int64-literal)` → unsigned `udiv`/`urem`/`Unsigned*` compares.
+/// A hoisted `Copy(Local)` temp is NOT recognized (its slot kind is the
+/// width-blind `Int64`), so the binop falls into the kind-untyped
+/// surface-and-stop arm.
+///
+/// Returns `Some(operand)` when `expr` is a bare integer literal; `None`
+/// for any other expression (the caller falls back to
+/// `lower_expr_to_operand`).
+fn lower_int_literal_as_direct_constant(expr: &Expr) -> Option<Operand> {
+    bare_int_literal_value(expr).map(|_| match expr {
+        Expr::Literal(Literal::Int(v), _) => Operand::Constant(MirConstant::Int(*v)),
+        Expr::Literal(Literal::UInt(v), _) => Operand::Constant(MirConstant::Int(*v as i64)),
+        _ => unreachable!("bare_int_literal_value gated to Int/UInt"),
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Operand lowering
 // ---------------------------------------------------------------------------
 
@@ -2041,8 +2131,32 @@ pub(crate) fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotI
                 // `lower_null_coalesce` short-circuit template.
                 lower_short_circuit_and_or(builder, left, *op, right, temp, span);
             } else {
-                let l = lower_expr_to_operand(builder, left, false);
-                let r = lower_expr_to_operand(builder, right, false);
+                // ADR-006 §2.7.5 stamp-at-compile-time — u64-literal kind
+                // inference. When one operand is a `u64`-typed expression
+                // and the OTHER is a bare integer literal, lower the
+                // literal directly as `Operand::Constant` instead of
+                // hoisting it into a `Copy(Local)` temp. The JIT's
+                // `uint64_binop_site` classifier recognizes a direct
+                // `Operand::Constant(MirConstant::Int(_))` sibling as a
+                // width-polymorphic literal that adopts the `u64` width —
+                // a hoisted temp is not recognized (its slot kind is the
+                // width-blind `Int64`). The u64-ness is captured BEFORE
+                // lowering since `lower_expr_to_operand` mutates the
+                // builder.
+                let left_is_u64 = expr_is_u64_typed(builder, left);
+                let right_is_u64 = expr_is_u64_typed(builder, right);
+                let l = if right_is_u64 {
+                    lower_int_literal_as_direct_constant(left)
+                        .unwrap_or_else(|| lower_expr_to_operand(builder, left, false))
+                } else {
+                    lower_expr_to_operand(builder, left, false)
+                };
+                let r = if left_is_u64 {
+                    lower_int_literal_as_direct_constant(right)
+                        .unwrap_or_else(|| lower_expr_to_operand(builder, right, false))
+                } else {
+                    lower_expr_to_operand(builder, right, false)
+                };
                 if let Some(op) = lower_binary_op(*op) {
                     builder.push_stmt(
                         StatementKind::Assign(Place::Local(temp), Rvalue::BinaryOp(op, l, r)),

@@ -308,6 +308,76 @@ impl BytecodeCompiler {
         }
     }
 
+    /// If `expr` is a bare integer literal (`Literal::Int` / `Literal::UInt`),
+    /// return its value (`Literal::UInt` always non-negative). `None` for any
+    /// non-literal expression.
+    ///
+    /// `Literal::TypedInt` is excluded: an explicitly-suffixed literal
+    /// (`5i32`, `7u8`) has a declared width that the programmer chose; it
+    /// does not adapt.
+    fn bare_int_literal_value(expr: &Expr) -> Option<i128> {
+        match expr {
+            Expr::Literal(Literal::Int(v), _) => Some(*v as i128),
+            Expr::Literal(Literal::UInt(v), _) => Some(*v as i128),
+            _ => None,
+        }
+    }
+
+    /// Returns `true` when a bare integer literal of value `v` can soundly
+    /// adopt the integer width `w` of a sibling operand. A negative literal
+    /// cannot adopt an unsigned width (it has no representation there);
+    /// every other case is allowed — sub-range overflow truncates per the
+    /// two's-complement wrapping semantics that `let x: i8 = 1000` already
+    /// applies (2026-05-20 integer-semantics ruling #3).
+    fn int_literal_fits_width(v: i128, w: shape_ast::IntWidth) -> bool {
+        !(v < 0 && !w.is_signed())
+    }
+
+    /// ADR-006 §2.7.5 stamp-at-compile-time — int-literal width inference.
+    ///
+    /// A bare integer literal is width-polymorphic: as an operand of a
+    /// width-typed binary op it must be inferred and kind-stamped with the
+    /// sibling's width, exactly as it would be when bound to a width
+    /// annotation (`let x: u64 = 2`, `let y: i8 = 28`). When one operand
+    /// carries `NumericType::IntWidth(W)` and the other is a bare integer
+    /// literal currently classified as the default `NumericType::Int`,
+    /// promote the literal to `IntWidth(W)` so `plan_coercion` keeps the
+    /// operation on `W`'s carrier (`AddTyped`/`DivTyped`/... with the
+    /// matching `NumericWidth`) instead of widening to the signed default
+    /// `i64` `NumericType::Int`.
+    ///
+    /// Without this, `plan_coercion(IntWidth(W), Int)` returns
+    /// `NoCoercion(Int)`: `a / 2` on `a: u64` emits the signed `DivInt`
+    /// (`u64::MAX / 2` computes `(-1) / 2 == 0`), and `x + 28` on `x: i8`
+    /// emits `AddInt` (`100 + 28 == 128` instead of the wrapped `-128`).
+    ///
+    /// Only the literal side is promoted; a genuinely width-typed sibling
+    /// (`let b: int = 3; a / b`) is left untouched (its `Int` hint stands).
+    fn promote_int_literal_to_width_sibling(
+        left: &Expr,
+        right: &Expr,
+        left_numeric: &mut Option<NumericType>,
+        right_numeric: &mut Option<NumericType>,
+    ) {
+        if let (Some(NumericType::IntWidth(w)), Some(NumericType::Int)) =
+            (*left_numeric, *right_numeric)
+        {
+            if let Some(v) = Self::bare_int_literal_value(right) {
+                if Self::int_literal_fits_width(v, w) {
+                    *right_numeric = Some(NumericType::IntWidth(w));
+                }
+            }
+        } else if let (Some(NumericType::Int), Some(NumericType::IntWidth(w))) =
+            (*left_numeric, *right_numeric)
+        {
+            if let Some(v) = Self::bare_int_literal_value(left) {
+                if Self::int_literal_fits_width(v, w) {
+                    *left_numeric = Some(NumericType::IntWidth(w));
+                }
+            }
+        }
+    }
+
     /// Get the compile-time StorageHint for an expression, if it can be determined.
     ///
     /// Only returns a hint for identifiers that are immutable (`let` bindings),
@@ -872,6 +942,17 @@ impl BytecodeCompiler {
                 // If one side is numeric and the other is an identifier/index read with no
                 // hint yet, adopt the known numeric kind and seed slot hints.
                 self.adopt_missing_numeric_operand_hint(
+                    left,
+                    right,
+                    &mut left_numeric,
+                    &mut right_numeric,
+                );
+
+                // ADR-006 §2.7.5 stamp-at-compile-time — int-literal width
+                // inference. A bare integer literal adopts the width of its
+                // sibling so `a + 1` (u64) stays on the unsigned carrier and
+                // `x + 1` (i8) stays on the truncating narrow carrier.
+                Self::promote_int_literal_to_width_sibling(
                     left,
                     right,
                     &mut left_numeric,
@@ -1591,6 +1672,20 @@ impl BytecodeCompiler {
                     );
                 }
 
+                // ADR-006 §2.7.5 stamp-at-compile-time — int-literal width
+                // inference. A bare integer literal adopts the width of its
+                // sibling so the operation stays on the declared-width
+                // carrier (`DivTyped`/`ModTyped` with the matching
+                // `NumericWidth`) rather than widening to the signed default
+                // `Int` (`DivInt`) — covering both `u64` (unsigned div/mod)
+                // and the narrow signed/unsigned widths (truncating arith).
+                Self::promote_int_literal_to_width_sibling(
+                    left,
+                    right,
+                    &mut left_numeric,
+                    &mut right_numeric,
+                );
+
                 // ── Schema-based type safety (catches objects in arithmetic) ──
                 // If an operand has a schema (it's a TypedObject) but no numeric type,
                 // it's an object being used in arithmetic → compile error.
@@ -2062,5 +2157,318 @@ impl BytecodeCompiler {
         ));
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod u64_literal_inference_tests {
+    //! ADR-006 §2.7.5 stamp-at-compile-time — int-literal width inference.
+    //!
+    //! Regression coverage for `r5c-2-bg-b2-u64-literal-inference`: a bare
+    //! integer literal that is a sibling operand of a width-typed binary op
+    //! must adopt the sibling's width so the operation stays on the
+    //! declared-width carrier — emitting `DivTyped`/`ModTyped`/... with the
+    //! matching `NumericWidth` instead of the signed-default `DivInt`.
+    use super::*;
+    use shape_ast::IntWidth;
+
+    // ── promote_int_literal_to_width_sibling unit coverage ──
+
+    fn lit_int(v: i64) -> Expr {
+        Expr::Literal(Literal::Int(v), Span::DUMMY)
+    }
+    fn lit_uint(v: u64) -> Expr {
+        Expr::Literal(Literal::UInt(v), Span::DUMMY)
+    }
+    fn ident() -> Expr {
+        Expr::Identifier("x".to_string(), Span::DUMMY)
+    }
+
+    #[test]
+    fn u64_sibling_promotes_right_int_literal() {
+        // `a / 2`: a:u64, 2:Int literal → 2 adopts IntWidth(U64).
+        let mut l = Some(NumericType::IntWidth(IntWidth::U64));
+        let mut r = Some(NumericType::Int);
+        BytecodeCompiler::promote_int_literal_to_width_sibling(
+            &ident(),
+            &lit_int(2),
+            &mut l,
+            &mut r,
+        );
+        assert_eq!(l, Some(NumericType::IntWidth(IntWidth::U64)));
+        assert_eq!(r, Some(NumericType::IntWidth(IntWidth::U64)));
+    }
+
+    #[test]
+    fn u64_sibling_promotes_left_int_literal() {
+        // `100 / a`: 100:Int literal, a:u64 → 100 adopts IntWidth(U64).
+        let mut l = Some(NumericType::Int);
+        let mut r = Some(NumericType::IntWidth(IntWidth::U64));
+        BytecodeCompiler::promote_int_literal_to_width_sibling(
+            &lit_int(100),
+            &ident(),
+            &mut l,
+            &mut r,
+        );
+        assert_eq!(l, Some(NumericType::IntWidth(IntWidth::U64)));
+        assert_eq!(r, Some(NumericType::IntWidth(IntWidth::U64)));
+    }
+
+    #[test]
+    fn narrow_sibling_promotes_int_literal() {
+        // `x + 28`: x:i8, 28:Int literal → 28 adopts IntWidth(I8).
+        for w in [IntWidth::I8, IntWidth::I16, IntWidth::I32, IntWidth::U8, IntWidth::U16, IntWidth::U32] {
+            let mut l = Some(NumericType::IntWidth(w));
+            let mut r = Some(NumericType::Int);
+            BytecodeCompiler::promote_int_literal_to_width_sibling(
+                &ident(),
+                &lit_int(28),
+                &mut l,
+                &mut r,
+            );
+            assert_eq!(
+                r,
+                Some(NumericType::IntWidth(w)),
+                "literal must adopt {:?}",
+                w
+            );
+        }
+    }
+
+    #[test]
+    fn negative_literal_does_not_adopt_unsigned_width() {
+        // `a + (-5)`: a:u64, -5:Int literal → -5 must NOT silently adopt u64.
+        let mut l = Some(NumericType::IntWidth(IntWidth::U64));
+        let mut r = Some(NumericType::Int);
+        BytecodeCompiler::promote_int_literal_to_width_sibling(
+            &ident(),
+            &lit_int(-5),
+            &mut l,
+            &mut r,
+        );
+        assert_eq!(r, Some(NumericType::Int), "negative literal stays Int for u64 sibling");
+    }
+
+    #[test]
+    fn negative_literal_adopts_signed_width() {
+        // `x + (-5)`: x:i8, -5:Int literal → -5 adopts i8 (signed, fits).
+        let mut l = Some(NumericType::IntWidth(IntWidth::I8));
+        let mut r = Some(NumericType::Int);
+        BytecodeCompiler::promote_int_literal_to_width_sibling(
+            &ident(),
+            &lit_int(-5),
+            &mut l,
+            &mut r,
+        );
+        assert_eq!(r, Some(NumericType::IntWidth(IntWidth::I8)));
+    }
+
+    #[test]
+    fn signed_typed_sibling_is_not_promoted() {
+        // `a / b`: a:u64, b:Int (a genuine variable, not a literal) →
+        // the `Int` operand is NOT a literal so it stays untouched.
+        let mut l = Some(NumericType::IntWidth(IntWidth::U64));
+        let mut r = Some(NumericType::Int);
+        BytecodeCompiler::promote_int_literal_to_width_sibling(
+            &ident(),
+            &ident(), // RHS is an identifier, not a literal
+            &mut l,
+            &mut r,
+        );
+        assert_eq!(r, Some(NumericType::Int), "non-literal Int sibling stays Int");
+    }
+
+    #[test]
+    fn uint_literal_adopts_u64_sibling() {
+        // `a / 18446744073709551615u64`-shaped literal classified as UInt.
+        let mut l = Some(NumericType::IntWidth(IntWidth::U64));
+        let mut r = Some(NumericType::Int);
+        BytecodeCompiler::promote_int_literal_to_width_sibling(
+            &ident(),
+            &lit_uint(9_000_000_000_000_000_000),
+            &mut l,
+            &mut r,
+        );
+        assert_eq!(r, Some(NumericType::IntWidth(IntWidth::U64)));
+    }
+
+    // ── end-to-end opcode-emission coverage ──
+
+    /// Compile a top-level program and return its instructions.
+    fn compile_top_level(code: &str) -> Vec<Instruction> {
+        let program = shape_ast::parser::parse_program(code).expect("parse failed");
+        let compiler = super::super::super::BytecodeCompiler::new();
+        let bc = compiler.compile(&program).expect("compile failed");
+        bc.instructions
+    }
+
+    /// Returns `true` when the instruction stream contains `opcode` carrying
+    /// `Operand::Width(width)`.
+    fn has_width_typed(instrs: &[Instruction], opcode: OpCode, width: NumericWidth) -> bool {
+        instrs.iter().any(|i| {
+            i.opcode == opcode && matches!(i.operand, Some(Operand::Width(w)) if w == width)
+        })
+    }
+
+    fn has_opcode(instrs: &[Instruction], opcode: OpCode) -> bool {
+        instrs.iter().any(|i| i.opcode == opcode)
+    }
+
+    #[test]
+    fn u64_var_div_literal_emits_div_typed_u64() {
+        // `a / 2` on `a: u64` must emit `DivTyped` width U64 — the unsigned
+        // carrier — NOT the signed `DivInt`.
+        let instrs = compile_top_level(
+            "let a: u64 = 100\nlet b: u64 = a / 2\n",
+        );
+        assert!(
+            has_width_typed(&instrs, OpCode::DivTyped, NumericWidth::U64),
+            "u64 / literal must emit DivTyped(U64): {:?}",
+            instrs.iter().map(|i| i.opcode).collect::<Vec<_>>()
+        );
+        assert!(
+            !has_opcode(&instrs, OpCode::DivInt),
+            "u64 / literal must NOT emit signed DivInt"
+        );
+    }
+
+    #[test]
+    fn u64_var_mod_literal_emits_mod_typed_u64() {
+        let instrs = compile_top_level(
+            "let a: u64 = 100\nlet b: u64 = a % 10\n",
+        );
+        assert!(
+            has_width_typed(&instrs, OpCode::ModTyped, NumericWidth::U64),
+            "u64 % literal must emit ModTyped(U64)"
+        );
+        assert!(!has_opcode(&instrs, OpCode::ModInt));
+    }
+
+    #[test]
+    fn u64_literal_on_left_emits_div_typed_u64() {
+        // `100 / a` — literal on the LEFT.
+        let instrs = compile_top_level(
+            "let a: u64 = 7\nlet b: u64 = 100 / a\n",
+        );
+        assert!(
+            has_width_typed(&instrs, OpCode::DivTyped, NumericWidth::U64),
+            "literal / u64 must emit DivTyped(U64)"
+        );
+    }
+
+    #[test]
+    fn u64_var_add_literal_stays_u64_carrier() {
+        // `a + 1` on `a: u64` must emit `AddTyped` width U64.
+        let instrs = compile_top_level(
+            "let a: u64 = 100\nlet b: u64 = a + 1\n",
+        );
+        assert!(
+            has_width_typed(&instrs, OpCode::AddTyped, NumericWidth::U64),
+            "u64 + literal must emit AddTyped(U64)"
+        );
+        assert!(!has_opcode(&instrs, OpCode::AddInt));
+    }
+
+    #[test]
+    fn u64_var_sub_mul_literal_stay_u64_carrier() {
+        let sub = compile_top_level("let a: u64 = 100\nlet b: u64 = a - 1\n");
+        assert!(has_width_typed(&sub, OpCode::SubTyped, NumericWidth::U64));
+        let mul = compile_top_level("let a: u64 = 100\nlet b: u64 = a * 2\n");
+        assert!(has_width_typed(&mul, OpCode::MulTyped, NumericWidth::U64));
+    }
+
+    #[test]
+    fn narrow_var_add_literal_stays_narrow_carrier() {
+        // `x + 28` on `x: i8` must emit `AddTyped` width I8 — the truncating
+        // narrow carrier — NOT the signed-default `AddInt`.
+        let instrs = compile_top_level(
+            "let x: i8 = 100\nlet y: i8 = x + 28\n",
+        );
+        assert!(
+            has_width_typed(&instrs, OpCode::AddTyped, NumericWidth::I8),
+            "i8 + literal must emit AddTyped(I8): {:?}",
+            instrs.iter().map(|i| i.opcode).collect::<Vec<_>>()
+        );
+        assert!(!has_opcode(&instrs, OpCode::AddInt));
+    }
+
+    #[test]
+    fn narrow_u32_div_literal_stays_narrow_carrier() {
+        let instrs = compile_top_level(
+            "let x: u32 = 4000000000\nlet y: u32 = x / 4\n",
+        );
+        assert!(
+            has_width_typed(&instrs, OpCode::DivTyped, NumericWidth::U32),
+            "u32 / literal must emit DivTyped(U32)"
+        );
+        assert!(!has_opcode(&instrs, OpCode::DivInt));
+    }
+
+    #[test]
+    fn plain_int_var_div_literal_still_emits_div_int() {
+        // Guard: the default `int` (i64) path is unchanged — `n / 2` on
+        // `n: int` still emits the signed `DivInt`, not `DivTyped`.
+        let instrs = compile_top_level("let n: int = 100\nlet m: int = n / 2\n");
+        assert!(
+            has_opcode(&instrs, OpCode::DivInt),
+            "int / literal must still emit DivInt"
+        );
+    }
+
+    // ── end-to-end execution coverage (unsigned semantics) ──
+
+    /// Compile + execute a top-level program and return the raw u64 bits of
+    /// the final expression.
+    fn run_top_level(code: &str) -> u64 {
+        use crate::VMConfig;
+        use crate::executor::VirtualMachine;
+        let program = shape_ast::parser::parse_program(code).expect("parse failed");
+        let compiler = super::super::super::BytecodeCompiler::new();
+        let bytecode = compiler.compile(&program).expect("compile failed");
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        vm.load_program(bytecode);
+        vm.execute_raw(None).expect("execution failed")
+    }
+
+    #[test]
+    fn u64_max_div_literal_computes_unsigned() {
+        // u64::MAX / 2 == 9223372036854775807 (unsigned). A signed reinterpret
+        // computes (-1) / 2 == 0.
+        let bits = run_top_level("let a: u64 = 18446744073709551615\na / 2\n");
+        assert_eq!(bits, 9_223_372_036_854_775_807);
+    }
+
+    #[test]
+    fn u64_max_mod_literal_computes_unsigned() {
+        // u64::MAX % 10 == 5 (unsigned). Signed would give -1.
+        let bits = run_top_level("let a: u64 = 18446744073709551615\na % 10\n");
+        assert_eq!(bits, 5);
+    }
+
+    #[test]
+    fn u64_literal_left_div_var_computes_unsigned() {
+        // 100 / u64::MAX == 0 (unsigned). A signed reinterpret of u64::MAX as
+        // -1 would compute 100 / -1 == -100.
+        let bits = run_top_level("let a: u64 = 18446744073709551615\n100 / a\n");
+        assert_eq!(bits, 0);
+    }
+
+    #[test]
+    fn u64_add_sub_mul_literal_wrap_at_2_pow_64() {
+        // a + 1 wraps u64::MAX → 0.
+        assert_eq!(
+            run_top_level("let a: u64 = 18446744073709551615\na + 1\n"),
+            0
+        );
+        // a - 1 on u64::MAX → u64::MAX - 1.
+        assert_eq!(
+            run_top_level("let a: u64 = 18446744073709551615\na - 1\n"),
+            18_446_744_073_709_551_614
+        );
+        // (2^63) * 2 wraps mod 2^64 → 0.
+        assert_eq!(
+            run_top_level("let m: u64 = 9223372036854775808\nm * 2\n"),
+            0
+        );
     }
 }

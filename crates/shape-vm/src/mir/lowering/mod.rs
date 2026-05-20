@@ -253,6 +253,18 @@ impl MirBuilder {
         self.local_declared_scalar_types.insert(slot, ct);
     }
 
+    /// Look up the declared scalar `ConcreteType` recorded for a binding
+    /// slot, if any. Used by the u64-literal kind-inference pass in
+    /// `lower_expr_to_temp`'s `Expr::BinaryOp` arm to detect a `u64`-typed
+    /// sibling operand. Returns `None` when the slot has no declared
+    /// width-carrying scalar annotation.
+    pub(super) fn lookup_local_declared_scalar_type(
+        &self,
+        slot: SlotId,
+    ) -> Option<&shape_value::v2::ConcreteType> {
+        self.local_declared_scalar_types.get(&slot)
+    }
+
     /// Record a recognized COW-container kind for a binding slot. Called
     /// from let-binding lowering when the initializer is a known ctor
     /// (`Set()` / `HashMap()` / `Deque()` / `PriorityQueue()`). Read at
