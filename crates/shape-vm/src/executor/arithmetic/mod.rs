@@ -40,18 +40,6 @@ use std::sync::Arc;
 
 use crate::constants::EXACT_F64_INT_LIMIT;
 
-/// Check if an i64 result fits in the I48 inline range. Values outside this
-/// range would have been heap-boxed as BigInt under the v1 `ValueWord`
-/// encoding; under the kinded ABI we promote to f64 instead, preserving the
-/// legacy overflow semantics.
-#[inline(always)]
-fn fits_i48(v: i64) -> bool {
-    // I48_MIN = -(1<<47), I48_MAX = (1<<47)-1
-    const I48_MIN: i64 = -(1i64 << 47);
-    const I48_MAX: i64 = (1i64 << 47) - 1;
-    (I48_MIN..=I48_MAX).contains(&v)
-}
-
 #[inline(always)]
 fn arith_i128_to_lossless_f64(value: i128) -> Option<f64> {
     if (-EXACT_F64_INT_LIMIT..=EXACT_F64_INT_LIMIT).contains(&value) {
@@ -114,15 +102,21 @@ impl VirtualMachine {
         }
         use OpCode::*;
         match instruction.opcode {
-            // ===== Typed Add (single-path native i64) =====
+            // ===== Typed Add/Sub/Mul (exact native i64, wrapping overflow) =====
             //
-            // The pre-Wave-6 dual-path tag-probe detector is gone.
-            // AddInt unconditionally pops two Int64-kinded slots,
-            // checks for overflow against the i48 inline range, and
-            // promotes to f64 on overflow.
-            AddInt => self.binop_int_with_f64_overflow(|a, b| a.checked_add(b), |a, b| a as f64 + b as f64)?,
-            SubInt => self.binop_int_with_f64_overflow(|a, b| a.checked_sub(b), |a, b| a as f64 - b as f64)?,
-            MulInt => self.binop_int_with_f64_overflow(|a, b| a.checked_mul(b), |a, b| a as f64 * b as f64)?,
+            // `int` is i64 (full 64-bit range). Per the 2026-05-20
+            // integer-semantics ruling: arithmetic is EXACT across the full
+            // i64 range (#1) and overflow has two's-complement WRAPPING
+            // semantics (#3) — defined behavior. We compute directly on i64
+            // with `wrapping_*`; the result kind is unconditionally
+            // `NativeKind::Int64`. No f64 round-trip — the pre-strict-typing
+            // i48-inline / f64-promotion fallback was vestigial v1
+            // `ValueWord` NaN-box boxing semantics and lost precision above
+            // 2^53. This now matches the Cranelift JIT byte-for-byte
+            // (`iadd`/`isub`/`imul` are pure two's-complement).
+            AddInt => self.binop_int_wrapping(|a, b| a.wrapping_add(b))?,
+            SubInt => self.binop_int_wrapping(|a, b| a.wrapping_sub(b))?,
+            MulInt => self.binop_int_wrapping(|a, b| a.wrapping_mul(b))?,
             DivInt => {
                 let (b_bits, _b_kind) = self.pop_kinded()?;
                 let (a_bits, _a_kind) = self.pop_kinded()?;
@@ -131,7 +125,10 @@ impl VirtualMachine {
                 if bi == 0 {
                     return Err(VMError::DivisionByZero);
                 }
-                self.push_kinded((ai / bi) as u64, NativeKind::Int64)?;
+                // `wrapping_div`: exact i64 quotient; the single overflow
+                // case `i64::MIN / -1` wraps to `i64::MIN` per ruling #3
+                // (plain `/` would panic in debug). No f64 round-trip.
+                self.push_kinded(ai.wrapping_div(bi) as u64, NativeKind::Int64)?;
             }
             ModInt => {
                 let (b_bits, _b_kind) = self.pop_kinded()?;
@@ -141,21 +138,22 @@ impl VirtualMachine {
                 if bi == 0 {
                     return Err(VMError::DivisionByZero);
                 }
-                self.push_kinded((ai % bi) as u64, NativeKind::Int64)?;
+                // `wrapping_rem`: exact i64 remainder; `i64::MIN % -1`
+                // wraps to `0` per ruling #3. No f64 round-trip.
+                self.push_kinded(ai.wrapping_rem(bi) as u64, NativeKind::Int64)?;
             }
             PowInt => {
                 let (b_bits, _b_kind) = self.pop_kinded()?;
                 let (a_bits, _a_kind) = self.pop_kinded()?;
                 let exp = b_bits as i64;
                 let base = a_bits as i64;
-                if exp >= 0 && exp < u32::MAX as i64 {
-                    let result = base.pow(exp as u32);
-                    if fits_i48(result) {
-                        self.push_kinded(result as u64, NativeKind::Int64)?;
-                    } else {
-                        self.push_kinded((result as f64).to_bits(), NativeKind::Float64)?;
-                    }
+                if exp >= 0 && exp <= u32::MAX as i64 {
+                    // `wrapping_pow`: exact i64 power with two's-complement
+                    // wrapping on overflow per ruling #3 — no f64 promotion.
+                    self.push_kinded(base.wrapping_pow(exp as u32) as u64, NativeKind::Int64)?;
                 } else {
+                    // Negative exponent has no i64 representation; fall back
+                    // to f64 power (this branch never overflows i64).
                     let result = (base as f64).powf(exp as f64);
                     self.push_kinded(result.to_bits(), NativeKind::Float64)?;
                 }
@@ -239,23 +237,18 @@ impl VirtualMachine {
         Ok(())
     }
 
-    /// Int-int binary op with checked-overflow → f64 fallback (Add/Sub/Mul).
+    /// Int-int binary op with exact wrapping i64 semantics (Add/Sub/Mul).
+    ///
+    /// `int` is i64 across its full range. Overflow wraps (two's-complement)
+    /// per the 2026-05-20 integer-semantics ruling #3 — defined behavior, no
+    /// f64 promotion. Result kind is always `NativeKind::Int64`.
     #[inline(always)]
-    fn binop_int_with_f64_overflow(
-        &mut self,
-        checked: impl FnOnce(i64, i64) -> Option<i64>,
-        overflow: impl FnOnce(i64, i64) -> f64,
-    ) -> Result<(), VMError> {
+    fn binop_int_wrapping(&mut self, op: impl FnOnce(i64, i64) -> i64) -> Result<(), VMError> {
         let (b_bits, _b_kind) = self.pop_kinded()?;
         let (a_bits, _a_kind) = self.pop_kinded()?;
         let bi = b_bits as i64;
         let ai = a_bits as i64;
-        match checked(ai, bi) {
-            Some(result) if fits_i48(result) => {
-                self.push_kinded(result as u64, NativeKind::Int64)
-            }
-            _ => self.push_kinded(overflow(ai, bi).to_bits(), NativeKind::Float64),
-        }
+        self.push_kinded(op(ai, bi) as u64, NativeKind::Int64)
     }
 
     /// Int-int binary op with no overflow gate (BitAnd/BitOr/BitXor/BitShl/BitShr).
@@ -383,36 +376,21 @@ impl VirtualMachine {
 
     fn exec_compact_add(&mut self, width: NumericWidth) -> Result<(), VMError> {
         if width.is_integer() {
-            self.compact_int_checked_binop(
-                width,
-                |a, b| a.wrapping_add(b),
-                |a, b| a.checked_add(b),
-                |a, b| a as f64 + b as f64,
-            )
+            self.compact_int_checked_binop(width, |a, b| a.wrapping_add(b))
         } else {
             self.compact_float_binop(|a, b| a + b)
         }
     }
     fn exec_compact_sub(&mut self, width: NumericWidth) -> Result<(), VMError> {
         if width.is_integer() {
-            self.compact_int_checked_binop(
-                width,
-                |a, b| a.wrapping_sub(b),
-                |a, b| a.checked_sub(b),
-                |a, b| a as f64 - b as f64,
-            )
+            self.compact_int_checked_binop(width, |a, b| a.wrapping_sub(b))
         } else {
             self.compact_float_binop(|a, b| a - b)
         }
     }
     fn exec_compact_mul(&mut self, width: NumericWidth) -> Result<(), VMError> {
         if width.is_integer() {
-            self.compact_int_checked_binop(
-                width,
-                |a, b| a.wrapping_mul(b),
-                |a, b| a.checked_mul(b),
-                |a, b| a as f64 * b as f64,
-            )
+            self.compact_int_checked_binop(width, |a, b| a.wrapping_mul(b))
         } else {
             self.compact_float_binop(|a, b| a * b)
         }
@@ -444,21 +422,21 @@ impl VirtualMachine {
         &mut self,
         width: NumericWidth,
         wrapping_op: impl FnOnce(i64, i64) -> i64,
-        checked: impl FnOnce(i64, i64) -> Option<i64>,
-        overflow_fallback: impl FnOnce(i64, i64) -> f64,
     ) -> Result<(), VMError> {
         let (b_bits, _b_kind) = self.pop_kinded()?;
         let (a_bits, _a_kind) = self.pop_kinded()?;
         let bi = b_bits as i64;
         let ai = a_bits as i64;
 
-        if let Some(int_w) = width.to_int_width() {
-            let result = wrapping_op(ai, bi);
-            return self.push_kinded(int_w.truncate(result) as u64, NativeKind::Int64);
-        }
-        match checked(ai, bi) {
-            Some(result) => self.push_kinded(result as u64, NativeKind::Int64),
-            None => self.push_kinded(overflow_fallback(ai, bi).to_bits(), NativeKind::Float64),
+        // All compact integer opcodes wrap on overflow per the 2026-05-20
+        // integer-semantics ruling #3. Sub-64-bit widths truncate to their
+        // declared width; the i64 path (`to_int_width()` == None) wraps at
+        // 64 bits. No f64 promotion — `int` arithmetic is exact across the
+        // full i64 range (ruling #1).
+        let result = wrapping_op(ai, bi);
+        match width.to_int_width() {
+            Some(int_w) => self.push_kinded(int_w.truncate(result) as u64, NativeKind::Int64),
+            None => self.push_kinded(result as u64, NativeKind::Int64),
         }
     }
 
@@ -812,6 +790,149 @@ mod tests {
     #[test]
     fn typed_arithmetic_pow_int() {
         assert_eq!(exec_typed_int_binop(2, 10, OpCode::PowInt), 1024);
+    }
+
+    // ── i64 integer-semantics: exact arithmetic + wrapping overflow ───────
+    //
+    // R5c-2-β-γ checkpoint (a) — soundness fix. Per the 2026-05-20
+    // integer-semantics ruling: `int` is i64; arithmetic is EXACT across the
+    // full i64 range (#1); overflow has two's-complement WRAPPING semantics
+    // (#3). The pre-fix VM routed i64 add/sub/mul through f64 above the i48
+    // inline range, losing precision and diverging from the (correct) JIT.
+    // These tests pin the VM result byte-for-byte; the JIT computes the same
+    // values via Cranelift `iadd`/`isub`/`imul` (pure two's-complement).
+
+    /// Returns the raw result of an `int`-typed binop together with its kind,
+    /// so tests can assert the result stays `NativeKind::Int64` (no f64
+    /// promotion).
+    fn exec_typed_int_binop_kinded(a: i64, b: i64, opcode: OpCode) -> (i64, NativeKind) {
+        let mut vm = make_vm();
+        push_int(&mut vm, a);
+        push_int(&mut vm, b);
+        let instr = Instruction::simple(opcode);
+        vm.exec_typed_arithmetic(&instr).unwrap();
+        let (bits, kind) = vm.pop_kinded().unwrap();
+        (bits as i64, kind)
+    }
+
+    #[test]
+    fn int_add_exact_crossing_2_pow_53() {
+        // 2^53 + 1 — the smallest add that the old f64 route rounded away.
+        // Reproducer /tmp/intchk_b.shape.
+        let (v, k) = exec_typed_int_binop_kinded(9007199254740992, 1, OpCode::AddInt);
+        assert_eq!(v, 9007199254740993);
+        assert_eq!(k, NativeKind::Int64);
+    }
+
+    #[test]
+    fn int_add_exact_far_above_2_pow_53() {
+        // Both the operand and the sum lie above 2^53, where f64 cannot
+        // represent every integer exactly; the old route lost precision.
+        let (v, k) = exec_typed_int_binop_kinded(
+            9_007_199_254_740_993,
+            1_000_000_001,
+            OpCode::AddInt,
+        );
+        assert_eq!(v, 9_007_200_254_740_994);
+        assert_eq!(k, NativeKind::Int64);
+    }
+
+    #[test]
+    fn int_add_overflow_wraps_two_complement() {
+        // 2^62 + 2^62 + 1 — reproducer /tmp/intchk_c.shape. The first add
+        // overflows; result wraps to i64::MIN, then +1.
+        let half = 4_611_686_018_427_387_904; // 2^62
+        let (sum, _) = exec_typed_int_binop_kinded(half, half, OpCode::AddInt);
+        assert_eq!(sum, i64::MIN); // 2^62 + 2^62 == 2^63 wraps to i64::MIN
+        let (v, k) = exec_typed_int_binop_kinded(sum, 1, OpCode::AddInt);
+        assert_eq!(v, -9_223_372_036_854_775_807);
+        assert_eq!(k, NativeKind::Int64);
+    }
+
+    #[test]
+    fn int_add_at_i64_max_boundary_wraps() {
+        let (v, k) = exec_typed_int_binop_kinded(i64::MAX, 1, OpCode::AddInt);
+        assert_eq!(v, i64::MIN);
+        assert_eq!(k, NativeKind::Int64);
+    }
+
+    #[test]
+    fn int_sub_at_i64_min_boundary_wraps() {
+        let (v, k) = exec_typed_int_binop_kinded(i64::MIN, 1, OpCode::SubInt);
+        assert_eq!(v, i64::MAX);
+        assert_eq!(k, NativeKind::Int64);
+    }
+
+    #[test]
+    fn int_mul_exact_crossing_2_pow_53() {
+        // Product is 9_007_199_705_687_823 — above 2^53 (9_007_199_254_740_992)
+        // and odd, so it is NOT a representable f64. The old route rounded it.
+        let (v, k) = exec_typed_int_binop_kinded(94_906_267, 94_906_269, OpCode::MulInt);
+        assert_eq!(v, 9_007_199_705_687_823);
+        assert!(v > 9_007_199_254_740_992); // genuinely above 2^53
+        assert_eq!(k, NativeKind::Int64);
+    }
+
+    #[test]
+    fn int_mul_overflow_wraps_two_complement() {
+        // 3037000500^2 — reproducer /tmp/intchk_d.shape. Overflows i64;
+        // result is the two's-complement wrapped product.
+        let (v, k) = exec_typed_int_binop_kinded(3_037_000_500, 3_037_000_500, OpCode::MulInt);
+        assert_eq!(v, -9_223_372_036_709_301_616);
+        assert_eq!(k, NativeKind::Int64);
+        // Cross-check: matches i64 wrapping_mul directly.
+        assert_eq!(v, 3_037_000_500i64.wrapping_mul(3_037_000_500));
+    }
+
+    #[test]
+    fn int_mul_i64_min_by_neg_one_wraps() {
+        let (v, k) = exec_typed_int_binop_kinded(i64::MIN, -1, OpCode::MulInt);
+        assert_eq!(v, i64::MIN); // wraps — no f64 promotion
+        assert_eq!(k, NativeKind::Int64);
+    }
+
+    #[test]
+    fn int_div_exact_above_2_pow_53() {
+        // Large exact quotient — old f64 route would lose precision.
+        let (v, k) =
+            exec_typed_int_binop_kinded(9_007_199_254_740_993_000, 1000, OpCode::DivInt);
+        assert_eq!(v, 9_007_199_254_740_993);
+        assert_eq!(k, NativeKind::Int64);
+    }
+
+    #[test]
+    fn int_div_i64_min_by_neg_one_wraps() {
+        // The single i64 division-overflow case. Per ruling #3 it wraps to
+        // i64::MIN (plain `/` panics in debug; the VM uses `wrapping_div`).
+        let (v, k) = exec_typed_int_binop_kinded(i64::MIN, -1, OpCode::DivInt);
+        assert_eq!(v, i64::MIN);
+        assert_eq!(k, NativeKind::Int64);
+    }
+
+    #[test]
+    fn int_div_by_zero_is_clean_error() {
+        let mut vm = make_vm();
+        push_int(&mut vm, i64::MAX);
+        push_int(&mut vm, 0);
+        let instr = Instruction::simple(OpCode::DivInt);
+        let err = vm.exec_typed_arithmetic(&instr).unwrap_err();
+        assert!(matches!(err, VMError::DivisionByZero));
+    }
+
+    #[test]
+    fn int_mod_i64_min_by_neg_one_wraps() {
+        // i64::MIN % -1 wraps to 0 per ruling #3 (`wrapping_rem`).
+        let (v, k) = exec_typed_int_binop_kinded(i64::MIN, -1, OpCode::ModInt);
+        assert_eq!(v, 0);
+        assert_eq!(k, NativeKind::Int64);
+    }
+
+    #[test]
+    fn int_mod_exact_above_2_pow_53() {
+        let (v, k) =
+            exec_typed_int_binop_kinded(9_007_199_254_740_993_007, 1000, OpCode::ModInt);
+        assert_eq!(v, 7);
+        assert_eq!(k, NativeKind::Int64);
     }
 
     // ── Typed Number family ───────────────────────────────────────────────

@@ -179,21 +179,47 @@ fn test_division() {
     assert_eq!(f64::from_bits(result), 5.0);
 }
 
-/// Regression: integer overflow must promote to f64, not silently wrap.
-/// This prevents silent corruption in financial calculations.
+/// Regression (R5c-2-β-γ checkpoint (a)): `int` is i64; arithmetic is EXACT
+/// across the full i64 range and overflow has two's-complement WRAPPING
+/// semantics — defined behavior per the 2026-05-20 integer-semantics ruling
+/// (#1 exact, #3 wrapping). The previous "promote to f64 on overflow"
+/// behavior was a vestige of the deleted v1 `ValueWord` i48-inline NaN-box
+/// encoding; it silently corrupted any `int` arithmetic above 2^53. `AddInt`
+/// now wraps and stays `Int64`.
 #[test]
-fn test_integer_overflow_promotes_to_f64() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted host-tier carriers)")
+fn test_integer_add_overflow_wraps_two_complement() {
+    // AddInt: i64::MAX + 1 wraps to i64::MIN, stays int.
+    let instructions = vec![
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
+        Instruction::simple(OpCode::AddInt),
+    ];
+    let constants = vec![Constant::Int(i64::MAX), Constant::Int(1)];
+
+    let result = execute_bytecode(instructions, constants).unwrap();
+    assert_eq!(result as i64, i64::MIN);
 }
 
+/// `MulInt` wraps on overflow (two's-complement) and stays `Int64`.
 #[test]
-fn test_integer_mul_overflow_promotes_to_f64() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted host-tier carriers)")
+fn test_integer_mul_overflow_wraps_two_complement() {
+    // MulInt: 3037000500^2 overflows i64; result is the wrapped product.
+    let instructions = vec![
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
+        Instruction::simple(OpCode::MulInt),
+    ];
+    let constants = vec![Constant::Int(3_037_000_500), Constant::Int(3_037_000_500)];
+
+    let result = execute_bytecode(instructions, constants).unwrap();
+    assert_eq!(result as i64, 3_037_000_500i64.wrapping_mul(3_037_000_500));
+    assert_eq!(result as i64, -9_223_372_036_709_301_616);
 }
 
+/// `SubInt` wraps on underflow (two's-complement) and stays `Int64`.
 #[test]
-fn test_integer_sub_overflow_promotes_to_f64() {
-    // SubInt: i64::MIN - 1 should promote to f64
+fn test_integer_sub_overflow_wraps_two_complement() {
+    // SubInt: i64::MIN - 1 wraps to i64::MAX, stays int.
     let instructions = vec![
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
@@ -202,8 +228,7 @@ fn test_integer_sub_overflow_promotes_to_f64() {
     let constants = vec![Constant::Int(i64::MIN), Constant::Int(1)];
 
     let result = execute_bytecode(instructions, constants).unwrap();
-    let val = f64::from_bits(result);
-    assert!(val < 0.0, "Underflow must produce negative f64, got {val}");
+    assert_eq!(result as i64, i64::MAX);
 }
 
 #[test]
