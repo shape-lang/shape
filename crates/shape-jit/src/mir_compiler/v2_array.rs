@@ -466,7 +466,64 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // Cranelift SSA value already in the native element type;
                 // coerce_to_v2_elem normalizes and emit_v2_array_push_call
                 // routes through the generic dispatcher.
+                //
+                // γ-CP3 jit-array-builder (v0.3 NO-KNOWN-INCORRECTNESS).
+                // A scalar-element typed array can only be built from
+                // scalar-element operands. An array-builder construct that
+                // the JIT does NOT model — an array-spread element
+                // (`[...a, 4, 5]`), or the slice-shape `Aggregate([source,
+                // start])` the MIR producer emits for an open-range index
+                // (`xs[2..]`) and for a destructure-rest binding
+                // (`let [a, ...rest] = ...`) — carries a heap-pointer
+                // operand (the source `*mut TypedArray<T>`) where a scalar
+                // element value is required.
+                //
+                // Pre-γ-CP3 this loop blindly pushed the raw heap-pointer
+                // bits as an `Int64` element: the destination array then
+                // held the pointer integer instead of the spread/slice
+                // contents, and a downstream `.sum()` / `.len()` read
+                // uninitialized/garbage memory. The VM correctly surfaces
+                // these same constructs (`op_new_array` SURFACE, the V3-S5
+                // ckpt-5 consumer-cascade) — the JIT must match.
+                //
+                // Per ADR-006 §2.7.14 forbidden list ("Bool-default
+                // fallback for unknown element kinds") + §2.7.7 #9, the
+                // honest response is surface-and-stop: a structured `Err`
+                // that the W12 fall-through routes to the bytecode
+                // interpreter, which produces the VM's clean error.
+                // Real array-builder/slice JIT codegen is a follow-up,
+                // gated on the V3-S5 `op_new_array` construction rebuild
+                // landing VM-side first (implementing it before that
+                // would create a NEW VM/JIT divergence).
+                //
+                // Operands whose kind is genuinely unproven (`None`) flow
+                // through the existing scalar path unchanged — the
+                // detector fires ONLY on a proven heap-pointer kind, so
+                // ordinary scalar array literals (`[1, 2, 3]`) are not
+                // over-broadly bailed.
                 for op in operands {
+                    if let Some(NativeKind::Ptr(heap_kind)) =
+                        self.operand_slot_kind(op)
+                    {
+                        return Err(format!(
+                            "emit_v2_array_aggregate: SURFACE — scalar \
+                             element kind {:?} array has an operand with \
+                             heap-pointer kind Ptr({:?}). This is an \
+                             array-builder/slice construct the MIR-JIT \
+                             does not model (array-spread element, \
+                             open-range slice `xs[2..]`, or destructure-\
+                             rest `let [a, ...rest] = ...`). The JIT \
+                             surfaces-and-stops so the W12 fall-through \
+                             routes the program to the bytecode \
+                             interpreter, which surfaces the VM's clean \
+                             `op_new_array` / `SliceAccess` error — VM == \
+                             JIT, neither produces garbage. Real \
+                             array-builder codegen is a γ-CP3 follow-up, \
+                             gated on the V3-S5 op_new_array construction \
+                             rebuild. ADR-006 §2.7.14 / §2.7.7 #9.",
+                            elem, heap_kind
+                        ));
+                    }
                     let raw = self.compile_operand_raw(op)?;
                     let val = self.coerce_to_v2_elem(raw, elem);
                     self.emit_v2_array_push_call(arr_ptr, val, elem)?;

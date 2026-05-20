@@ -89,6 +89,13 @@ mod ref_param_regression_tests;
 // execute_program` JIT-compiles the stdlib on every test.
 #[cfg(all(test, feature = "deep-tests"))]
 mod field_ref_regression_tests;
+// v0.3 γ-CP3 jit-array-builder regression tests. Pin the array-spread +
+// destructure-rest reproducers against the honest surface-and-stop fix
+// (MIR slice-shape lowering of `...rest` + `emit_v2_array_aggregate`
+// heap-pointer-operand rejection). Gated behind `deep-tests` for the
+// same reason as the sibling regression modules above.
+#[cfg(all(test, feature = "deep-tests"))]
+mod array_builder_regression_tests;
 
 use cranelift::codegen::ir::{FuncRef, StackSlot};
 use cranelift::prelude::*;

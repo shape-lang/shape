@@ -833,8 +833,18 @@ pub(super) fn lower_destructure_bindings_from_place_opt(
         }
         ast::DestructurePattern::Array(patterns) => {
             for (index, pattern) in patterns.iter().enumerate() {
-                let projected_place =
-                    source_place.map(|source_place| projected_index_place(source_place, index));
+                // γ-CP3 jit-array-builder: a `...rest` element is the
+                // slice `source[index..]`, not the single element at
+                // `index`. Lower it via `rest_slice_place` (slice-shape
+                // Aggregate) so the JIT cleanly surfaces-and-stops
+                // instead of miscompiling a scalar element read.
+                let projected_place = source_place.map(|source_place| {
+                    if matches!(pattern, ast::DestructurePattern::Rest(_)) {
+                        rest_slice_place(builder, source_place, index, span)
+                    } else {
+                        projected_index_place(source_place, index)
+                    }
+                });
                 lower_destructure_bindings_from_place_opt(
                     builder,
                     pattern,
@@ -1085,7 +1095,16 @@ fn lower_destructure_assignment_from_place(
         }
         ast::DestructurePattern::Array(patterns) => {
             for (index, pattern) in patterns.iter().enumerate() {
-                let projected_place = projected_index_place(source_place, index);
+                // γ-CP3 jit-array-builder: a `...rest` element is the
+                // slice `source[index..]`, not the single element at
+                // `index` — lower it via the slice-shape `rest_slice_place`
+                // so the JIT cleanly surfaces-and-stops.
+                let projected_place =
+                    if matches!(pattern, ast::DestructurePattern::Rest(_)) {
+                        rest_slice_place(builder, source_place, index, span)
+                    } else {
+                        projected_index_place(source_place, index)
+                    };
                 lower_destructure_assignment_from_place(builder, pattern, &projected_place, span);
             }
         }
@@ -1119,6 +1138,62 @@ fn lower_destructure_assignment_from_place(
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Destructure-rest slice projection (γ-CP3 jit-array-builder)
+// ---------------------------------------------------------------------------
+
+/// Project the source array of an array-destructure pattern to the
+/// sub-array consumed by a `...rest` binding starting at `rest_index`.
+///
+/// γ-CP3 jit-array-builder (v0.3 NO-KNOWN-INCORRECTNESS). Pre-γ-CP3 the
+/// three array-destructure lowering arms recursed into a `Rest` element
+/// via the plain element projection `projected_index_place(source,
+/// rest_index)` — a `Place::Index` that reads the SINGLE element at
+/// `rest_index`, not the sub-array from `rest_index` to the end. The JIT
+/// then compiled `rest = source[rest_index]` as a scalar element read:
+/// `let [a, ...rest] = [1, 2, 3, 4]` silently bound `rest` to the scalar
+/// `2` instead of the sub-array `[2, 3, 4]`. The bytecode VM emits a
+/// distinct `OpCode::SliceAccess` for the same binding (see
+/// `compiler/patterns/destructure.rs`) and surfaces cleanly — the JIT's
+/// scalar miscompile was a VM/JIT divergence (KNOWN-INCORRECT).
+///
+/// A `...rest` binding is semantically the slice `source[rest_index..]`.
+/// `rest_slice_place` lowers it as the slice-shape `Rvalue::Aggregate(
+/// [Copy(source), Int(rest_index)])` — the exact 2-operand carrier the
+/// MIR already emits for an open-range index expression (`xs[2..]`, see
+/// `expr.rs` `Expr::IndexAccess`). The first operand carries the source
+/// array's heap-pointer kind, so the JIT's `emit_v2_array_aggregate`
+/// scalar-element detector (or the `Rvalue::Aggregate` Route A
+/// surface-and-stop when the slot has no proven `Array<scalar>` type)
+/// makes JIT compilation cleanly bail — the W12 fall-through then routes
+/// the program to the bytecode interpreter, which produces the VM's
+/// clean error. VM == JIT, neither produces garbage.
+///
+/// Mirrors the W12-jit-result-option-trinity precedent (the `Ok`/`Err`/
+/// `Some` payload binding is lowered to a dedicated `Rvalue::EnumPayload`
+/// into a fresh slot rather than a wrong `Place::Index(scrutinee, 0)`):
+/// allocate a fresh slot, emit the semantically-correct rvalue, recurse
+/// the inner pattern against the new slot.
+fn rest_slice_place(
+    builder: &mut MirBuilder,
+    source_place: &Place,
+    rest_index: usize,
+    span: Span,
+) -> Place {
+    let slice_slot = builder.alloc_temp(LocalTypeInfo::Unknown);
+    builder.push_stmt(
+        StatementKind::Assign(
+            Place::Local(slice_slot),
+            Rvalue::Aggregate(vec![
+                Operand::Copy(source_place.clone()),
+                Operand::Constant(MirConstant::Int(rest_index as i64)),
+            ]),
+        ),
+        span,
+    );
+    Place::Local(slice_slot)
 }
 
 // Helper to get span from Statement
