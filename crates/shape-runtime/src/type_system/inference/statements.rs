@@ -4,9 +4,53 @@
 
 use super::TypeInferenceEngine;
 use crate::type_system::*;
-use shape_ast::ast::{BinaryOp, Expr, Literal, Statement, TypeAnnotation};
+use shape_ast::ast::{Assignment, BinaryOp, Expr, Literal, Span, Statement, TypeAnnotation};
 
 impl TypeInferenceEngine {
+    /// Infer an assignment to an existing binding (`name = expr` or a
+    /// destructuring `(a, b) = expr`).
+    ///
+    /// Shared by `Statement::Assignment` and `BlockItem::Assignment` — a
+    /// for/while loop body is parsed as an `Expr::Block` whose items are
+    /// `BlockItem::Assignment`, so the RHS of a loop-body assignment must be
+    /// inferred here too. Skipping it severs the call graph: the RHS of
+    /// `last = dbl(11)` inside a loop would otherwise never be walked, so the
+    /// callsite of `dbl` is never recorded and an unannotated parameter
+    /// collapses to the `number` default — producing a kind-confused result.
+    pub(crate) fn infer_assignment(
+        &mut self,
+        assign: &Assignment,
+        span: Span,
+    ) -> TypeResult<()> {
+        let value_type = self.infer_expr(&assign.value)?;
+        if let Some(name) = assign.pattern.as_identifier() {
+            let scheme = self.env.lookup(name).cloned();
+            let target_type = match scheme {
+                Some(s) => s.instantiate(&mut self.type_var_gen),
+                None => {
+                    self.register_undefined_variable_origin(name, span);
+                    return Err(TypeError::UndefinedVariable(name.to_string()));
+                }
+            };
+            self.constraints.push((target_type, value_type));
+        } else {
+            // Destructuring assignment: conservatively constrain each bound name
+            // to the assigned value until full pattern assignment inference lands.
+            for name in assign.pattern.get_identifiers() {
+                let scheme = self.env.lookup(&name).cloned();
+                let target_type = match scheme {
+                    Some(s) => s.instantiate(&mut self.type_var_gen),
+                    None => {
+                        self.register_undefined_variable_origin(&name, span);
+                        return Err(TypeError::UndefinedVariable(name.clone()));
+                    }
+                };
+                self.constraints.push((target_type, value_type.clone()));
+            }
+        }
+        Ok(())
+    }
+
     /// Infer type of statements
     pub(crate) fn infer_statements(&mut self, stmts: &[Statement]) -> TypeResult<Type> {
         let mut last_type = BuiltinTypes::void();
@@ -98,32 +142,7 @@ impl TypeInferenceEngine {
                 Ok(BuiltinTypes::void())
             }
             Statement::Assignment(assign, span) => {
-                let value_type = self.infer_expr(&assign.value)?;
-                if let Some(name) = assign.pattern.as_identifier() {
-                    let scheme = self.env.lookup(name).cloned();
-                    let target_type = match scheme {
-                        Some(s) => s.instantiate(&mut self.type_var_gen),
-                        None => {
-                            self.register_undefined_variable_origin(name, *span);
-                            return Err(TypeError::UndefinedVariable(name.to_string()));
-                        }
-                    };
-                    self.constraints.push((target_type, value_type));
-                } else {
-                    // Destructuring assignment: conservatively constrain each bound name
-                    // to the assigned value until full pattern assignment inference lands.
-                    for name in assign.pattern.get_identifiers() {
-                        let scheme = self.env.lookup(&name).cloned();
-                        let target_type = match scheme {
-                            Some(s) => s.instantiate(&mut self.type_var_gen),
-                            None => {
-                                self.register_undefined_variable_origin(&name, *span);
-                                return Err(TypeError::UndefinedVariable(name.clone()));
-                            }
-                        };
-                        self.constraints.push((target_type, value_type.clone()));
-                    }
-                }
+                self.infer_assignment(assign, *span)?;
                 Ok(BuiltinTypes::void())
             }
             Statement::Expression(expr, _) => {

@@ -1025,6 +1025,30 @@ impl BytecodeCompiler {
             {
                 call_func_idx = specialized_idx;
                 call_name = self.program.functions[call_func_idx].name.clone();
+            } else if self
+                .function_defs
+                .get(&call_name)
+                .and_then(|d| d.type_params.as_ref())
+                .is_some_and(|tps| tps.iter().any(|tp| !tp.is_const()))
+            {
+                // Soundness: the callee is a generic function and
+                // monomorphization could not resolve a concrete specialization
+                // from the call-site arguments. Generic function bodies are
+                // intentionally skipped in `compile_function` (their AST is
+                // kept only as a substitution template), so emitting a `Call`
+                // onto this index would dispatch into a zero-instruction body
+                // — the VM runs off the end and hangs. A type argument that
+                // cannot be inferred is a compile error, not a silent
+                // fall-through. A self-recursive generic call resolves to its
+                // specialization's index above (`ensure_monomorphic_function`
+                // caches before compiling the body), so it never reaches here.
+                return Err(ShapeError::SemanticError {
+                    message: format!(
+                        "cannot infer type argument(s) for generic function '{}' from the call-site arguments — annotate the arguments or call with values whose types are statically known",
+                        call_name
+                    ),
+                    location: Some(self.span_to_source_location(span)),
+                });
             }
 
             let total_arity = self.program.functions[call_func_idx].arity as usize;
@@ -3628,21 +3652,19 @@ impl BytecodeCompiler {
 
         // 5. Produce / reuse the specialization. On cycle or compile error,
         //    the cache returns Err and we fall back to the unspecialized
-        //    template — callers handle the empty-body case via the existing
-        //    error reporting.
+        //    template.
         match self.ensure_monomorphic_function(func_name, &resolution.type_args) {
             Ok(specialized_idx) => {
-                let idx = specialized_idx as usize;
-                // Self-call guard: compiling `inner::f64`'s body may contain
-                // a recursive `inner(...)` that re-resolves to itself —
-                // without this guard we'd emit a direct call back into the
-                // function currently being compiled, which would be fine
-                // at runtime but routes through the compiler an extra time
-                // while the cache entry is not yet finalized.
-                if self.current_function == Some(idx) {
-                    return Ok(None);
-                }
-                Ok(Some(idx))
+                // A recursive call inside a generic body that re-resolves to
+                // the specialization currently being compiled MUST still
+                // redirect to that specialization's index — `Call`-ing the
+                // generic template index instead would dispatch into a
+                // zero-instruction body (generic bodies are skipped in
+                // `compile_function`). `ensure_monomorphic_function` caches
+                // the specialization index *before* compiling the body, so a
+                // self-recursive resolution is a plain cache hit and never
+                // re-enters compilation.
+                Ok(Some(specialized_idx as usize))
             }
             Err(_) => Ok(None),
         }
@@ -3929,5 +3951,59 @@ impl BytecodeCompiler {
             body: body.to_vec(),
             capture_names: captured_vars,
         }
+    }
+}
+
+#[cfg(test)]
+mod ws2_zeta_b_tests {
+    //! ζ-(b) regression: a call to a generic function whose type arguments
+    //! cannot be resolved from the call site must surface a clean compile
+    //! error. Generic function bodies are intentionally skipped in
+    //! `compile_function` (their AST is kept only as a substitution
+    //! template); emitting a `Call` onto that zero-instruction body let the
+    //! VM run off the end and hang (30s timeout on `print(id(None))`).
+
+    use crate::compiler::BytecodeCompiler;
+    use shape_ast::error::Result;
+
+    /// Compile a whole top-level program, returning the compile `Result`.
+    fn try_compile(code: &str) -> Result<()> {
+        let program = shape_ast::parser::parse_program(code).expect("parse failed");
+        BytecodeCompiler::new().compile(&program).map(|_| ())
+    }
+
+    #[test]
+    fn generic_call_with_unresolvable_type_arg_is_compile_error() {
+        // `id<T>(x: T)` called with `None` — `None` has no ConcreteType, so
+        // `T` cannot be bound. This must be a clean compile error, not a
+        // fall-through onto the empty generic template (which hangs the VM).
+        let err = try_compile("fn id<T>(x: T) -> T { x }\nlet y = id(None)\n")
+            .expect_err("id(None) must not compile — T is unresolvable");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("cannot infer type argument") && msg.contains("id"),
+            "expected a generic-type-arg inference error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn generic_call_with_concrete_arg_compiles() {
+        // `id(5)` — `5` is `int`, so `T = int` resolves and `id::I64`
+        // monomorphizes. Must compile cleanly (no false positive from the
+        // empty-template guard).
+        try_compile("fn id<T>(x: T) -> T { x }\nlet y = id(5)\n")
+            .expect("id(5) must compile — T resolves to int");
+    }
+
+    #[test]
+    fn self_recursive_generic_compiles() {
+        // A generic body whose recursive call re-resolves to the
+        // specialization currently being compiled must redirect to that
+        // specialization's index — not trip the empty-template guard.
+        try_compile(
+            "fn countdown<T>(x: int, v: T) -> T { if x <= 0 { v } else { countdown(x - 1, v) } }\n\
+             let r = countdown(3, 42)\n",
+        )
+        .expect("self-recursive generic must compile");
     }
 }
