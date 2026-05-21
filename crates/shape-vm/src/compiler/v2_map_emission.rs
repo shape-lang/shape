@@ -169,21 +169,7 @@ impl BytecodeCompiler {
     /// stricter check ensures we never emit typed map opcodes for receivers
     /// allocated as legacy NaN-boxed `HashMapData`.
     pub(crate) fn is_typed_map_receiver(&self, receiver: &Expr) -> bool {
-        let name = match receiver {
-            Expr::Identifier(name, _) => name,
-            _ => return false,
-        };
-        if let Some(local_idx) = self.resolve_local(name) {
-            if self.v2_typed_map_locals.contains_key(&local_idx) {
-                return true;
-            }
-        }
-        if let Some(&binding_idx) = self.module_bindings.get(name) {
-            if self.v2_typed_map_module_bindings.contains_key(&binding_idx) {
-                return true;
-            }
-        }
-        false
+        self.resolve_receiver_typed_map_kind(receiver).is_some()
     }
 
     /// Resolve a typed-map receiver expression to its
@@ -194,18 +180,57 @@ impl BytecodeCompiler {
         &self,
         receiver: &Expr,
     ) -> Option<crate::compiler::v2_typed_map_emission::TypedMapKind> {
-        let name = match receiver {
-            Expr::Identifier(name, _) => name,
-            _ => return None,
-        };
-        if let Some(local_idx) = self.resolve_local(name) {
-            if let Some(&kind) = self.v2_typed_map_locals.get(&local_idx) {
-                return Some(kind);
+        if let Expr::Identifier(name, _) = receiver {
+            if let Some(local_idx) = self.resolve_local(name) {
+                if let Some(&kind) = self.v2_typed_map_locals.get(&local_idx) {
+                    return Some(kind);
+                }
+            }
+            if let Some(&binding_idx) = self.module_bindings.get(name) {
+                if let Some(&kind) = self.v2_typed_map_module_bindings.get(&binding_idx) {
+                    return Some(kind);
+                }
+            }
+            return None;
+        }
+
+        // v0.3 WS-6b GAP B: a non-identifier receiver — e.g. the result of a
+        // (possibly generic) function call `id(m)` or a method-chain — whose
+        // statically-resolved type is `HashMap<K, V>`. A `HashMap<K, V>`
+        // annotation whose `(K, V)` pair has a typed-map opcode is ALWAYS
+        // allocated as a v2 `*mut TypedMap*` carrier (the `HashMapCtor` fast
+        // path at `function_calls.rs` fires unconditionally once the
+        // annotation resolves), so a function returning that type returns a
+        // typed-map pointer. Driving `.get`/`.set` through the typed-map
+        // opcodes is therefore sound — the receiver value on the stack IS a
+        // `*mut TypedMap*`, regardless of the `NativeKind::UInt64` carrier
+        // tag the generic call boundary stamps onto it.
+        //
+        // Per ADR-006 §2.7.5 stamp-at-compile-time: the (specialized) callee's
+        // substituted return-type annotation IS the proof — no runtime decode,
+        // no kind probe. `concrete_type_for_expr` returns `None` for any
+        // receiver whose type is not statically resolvable, in which case the
+        // caller falls back to the generic `CallMethod` path unchanged.
+        // A fluent typed-map method (`set` / `delete`) returns the receiver
+        // map itself, so a `m.set(...).get(...)` chain's `.get` receiver
+        // carries the inner receiver's typed-map kind. Recurse on the inner
+        // receiver — `concrete_type_for_expr` does not model the typed-map
+        // fast path's fluent return, so this structural step covers it.
+        if let Expr::MethodCall { receiver: inner, method, .. } = receiver {
+            if matches!(method.as_str(), "set" | "delete") {
+                if let Some(kind) = self.resolve_receiver_typed_map_kind(inner) {
+                    return Some(kind);
+                }
             }
         }
-        if let Some(&binding_idx) = self.module_bindings.get(name) {
-            if let Some(&kind) = self.v2_typed_map_module_bindings.get(&binding_idx) {
-                return Some(kind);
+
+        if matches!(receiver, Expr::FunctionCall { .. } | Expr::MethodCall { .. }) {
+            if let Some(shape_value::v2::ConcreteType::HashMap(k, v)) =
+                crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(
+                    self, receiver,
+                )
+            {
+                return crate::compiler::v2_typed_map_emission::should_use_typed_map(&k, &v);
             }
         }
         None
@@ -978,5 +1003,90 @@ mod tests {
             .get_array_element_type(call_span)
             .expect("array element type recorded");
         assert_eq!(*elem, ConcreteType::String);
+    }
+
+    // ── v0.3 WS-6b GAP B — typed-map fast path for non-identifier
+    //    receivers + function-local typed-map registration ───────────────
+    //
+    // Two pre-fix failures, both surfacing as
+    // `no method 'set'/'get' on receiver kind UInt64`:
+    //
+    //   1. A function-LOCAL `let m: HashMap<K,V> = HashMap()` allocated a
+    //      `NewTypedMap*` carrier but its slot was never registered in
+    //      `v2_typed_map_locals` (only the module-binding mirror existed),
+    //      so `m.set` / `m.get` fell through to generic `CallMethod`
+    //      dispatch — which sees the typed-map pointer's `NativeKind::UInt64`
+    //      carrier tag and routes to `NUMBER_METHODS`.
+    //   2. The RESULT of a function call returning `HashMap<K,V>` (e.g.
+    //      `id(m)`) is a typed-map pointer, but the typed-map fast path was
+    //      gated on identifier receivers only.
+    //
+    // Fix: register `v2_typed_map_locals` at the local let-binding site, and
+    // extend `resolve_receiver_typed_map_kind` to recognise a `FunctionCall`
+    // / `MethodCall` receiver whose statically-resolved return type is a
+    // typed-map `HashMap<K,V>`.
+
+    #[test]
+    fn ws6b_typed_map_local_in_function_set_get() {
+        // Function-local typed-map: `m.set` / `m.get` on a local binding.
+        assert_eq!(
+            crate::test_utils::eval_typed_i64(
+                "fn run() -> int {\n\
+                 let mut m: HashMap<string,int> = HashMap()\n\
+                 m.set(\"k\", 1)\n\
+                 m.get(\"k\")\n\
+                 }\n\
+                 run()"
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn ws6b_typed_map_generic_call_result_get() {
+        // GAP B canonical reproducer: `.get` on the result of a generic
+        // free-function call returning `HashMap<string,int>`.
+        assert_eq!(
+            crate::test_utils::eval_typed_i64(
+                "fn id<T>(x: T) -> T { x }\n\
+                 let mut m: HashMap<string,int> = HashMap()\n\
+                 m.set(\"k\", 1)\n\
+                 id(m).get(\"k\")"
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn ws6b_typed_map_nongeneric_call_result_get() {
+        // The same shape with a non-generic constructor function returning
+        // a typed map — the typed-map fast path keys off the statically
+        // resolved return type, not on genericity.
+        assert_eq!(
+            crate::test_utils::eval_typed_i64(
+                "fn mk() -> HashMap<string,int> {\n\
+                 let mut m: HashMap<string,int> = HashMap()\n\
+                 m.set(\"k\", 1)\n\
+                 m\n\
+                 }\n\
+                 mk().get(\"k\")"
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn ws6b_typed_map_call_result_fluent_set_chain() {
+        // `set` on a call result returns the map for fluent chaining — the
+        // non-identifier receiver is spilled into a temp so the call is
+        // evaluated exactly once.
+        assert_eq!(
+            crate::test_utils::eval_typed_i64(
+                "fn id<T>(x: T) -> T { x }\n\
+                 let mut m: HashMap<string,int> = HashMap()\n\
+                 id(m).set(\"a\", 5).get(\"a\")"
+            ),
+            5
+        );
     }
 }

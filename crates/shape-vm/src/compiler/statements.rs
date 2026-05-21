@@ -4580,6 +4580,22 @@ impl BytecodeCompiler {
                         } else {
                             let is_mutable = var_decl.kind == shape_ast::ast::VarKind::Var;
                             self.propagate_initializer_type_to_slot(binding_idx, false, is_mutable);
+                            // v0.3 WS-6b GAP A: an *inferred-type* `let p =
+                            // <expr>` carries no annotation, so the WS-6
+                            // annotated-only recording above never runs. Resolve
+                            // the binding's ConcreteType structurally from the
+                            // initializer expression (struct literal, enum
+                            // constructor, `Some`/`Ok`/`Err`, …) so a later
+                            // generic call site `id(p)` can bind its type
+                            // argument. `concrete_type_for_expr` returns `None`
+                            // for a genuinely type-ambiguous initializer (e.g.
+                            // `let n = None`), in which case nothing is recorded
+                            // and `id(n)` stays a clean compile error.
+                            if let Some(init_expr) = var_decl.value.as_ref() {
+                                if let Some(ct) = crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(self, init_expr) {
+                                    self.module_binding_concrete_types.insert(binding_idx, ct);
+                                }
+                            }
                         }
 
                         // cluster-2-cw-IC-class-c (Phase 3 cluster-2 Round 3,
@@ -4899,6 +4915,21 @@ impl BytecodeCompiler {
                         } else if let Some(local_idx) = self.resolve_local(name) {
                             let is_mutable = var_decl.kind == shape_ast::ast::VarKind::Var;
                             self.propagate_initializer_type_to_slot(local_idx, true, is_mutable);
+                            // v0.3 WS-6b GAP A: mirror of the inferred-type
+                            // module-binding path above. An inferred `let p =
+                            // <expr>` local carries no annotation, so the WS-6
+                            // annotated-only `current_function_local_concrete_types`
+                            // recording never fires. Resolve the local's
+                            // ConcreteType structurally from the initializer so a
+                            // later generic call site `id(p)` (inside the same
+                            // function) can bind its type argument. `None` for a
+                            // type-ambiguous initializer records nothing — the
+                            // clean-compile-error contract is preserved.
+                            if let Some(init_expr) = var_decl.value.as_ref() {
+                                if let Some(ct) = crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(self, init_expr) {
+                                    self.current_function_local_concrete_types.insert(local_idx, ct);
+                                }
+                            }
                         }
                     }
 
@@ -4907,6 +4938,25 @@ impl BytecodeCompiler {
                         if let Some(name) = var_decl.pattern.as_identifier() {
                             if let Some(local_idx) = self.resolve_local(name) {
                                 self.v2_typed_array_locals.insert(local_idx, kind);
+                            }
+                        }
+                    }
+                    // v0.3 WS-6b GAP B: record v2 typed-map kind for the
+                    // local. The module-binding path above stamps
+                    // `v2_typed_map_module_bindings`, but the function-local
+                    // path had no mirror — so a function-scoped
+                    // `let m: HashMap<K,V> = HashMap()` produced a
+                    // `NewTypedMap*` carrier whose slot was never registered
+                    // as a typed map. `is_typed_map_receiver` /
+                    // `try_compile_typed_slot_method` then both missed it,
+                    // method dispatch fell through to the generic
+                    // `CallMethod` path, and the runtime surfaced
+                    // `no method 'set'/'get' on receiver kind UInt64`.
+                    // Mirrors the `v2_typed_array_locals` arm directly above.
+                    if let Some(kind) = captured_typed_map_kind {
+                        if let Some(name) = var_decl.pattern.as_identifier() {
+                            if let Some(local_idx) = self.resolve_local(name) {
+                                self.v2_typed_map_locals.insert(local_idx, kind);
                             }
                         }
                     }

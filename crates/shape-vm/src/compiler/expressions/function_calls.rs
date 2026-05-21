@@ -3521,8 +3521,56 @@ impl BytecodeCompiler {
             Some(k) => k,
             None => return Ok(None),
         };
-        // Compile receiver to put map_ptr on the stack.
-        self.compile_expr(receiver)?;
+
+        // v0.3 WS-6b GAP B: `set` / `delete` re-emit the receiver for the
+        // fluent-chaining return value. Re-`compile_expr` is safe for a pure
+        // identifier receiver (it just re-emits `LoadLocal` /
+        // `LoadModuleBinding`), but for a non-identifier receiver — e.g. a
+        // function call `id(m)` — that would evaluate the receiver TWICE,
+        // duplicating side effects and re-running monomorphization. Spill
+        // such receivers into a temp local and reload from it instead.
+        let receiver_is_pure_identifier = matches!(receiver, Expr::Identifier(..));
+        let needs_fluent_return = matches!(method, "set" | "delete");
+        let receiver_temp: Option<u16> = if needs_fluent_return
+            && !receiver_is_pure_identifier
+        {
+            // Wrong arity bails before we touch the temp — pre-check here so
+            // we don't declare a temp we won't use.
+            if args.len() != if method == "set" { 2 } else { 1 } {
+                return Ok(None);
+            }
+            self.compile_expr(receiver)?;
+            let t = self.declare_temp_local("__typed_map_recv_")?;
+            self.emit(Instruction::new(
+                OpCode::StoreLocal,
+                Some(Operand::Local(t)),
+            ));
+            self.emit(Instruction::new(
+                OpCode::LoadLocal,
+                Some(Operand::Local(t)),
+            ));
+            Some(t)
+        } else {
+            // Compile receiver to put map_ptr on the stack.
+            self.compile_expr(receiver)?;
+            None
+        };
+
+        // Re-emit the receiver value for the fluent-chaining return. Reloads
+        // from the spill temp when one was allocated, otherwise re-compiles
+        // the pure-identifier receiver expression.
+        let reload_receiver = |this: &mut Self| -> Result<()> {
+            match receiver_temp {
+                Some(t) => {
+                    this.emit(Instruction::new(
+                        OpCode::LoadLocal,
+                        Some(Operand::Local(t)),
+                    ));
+                    Ok(())
+                }
+                None => this.compile_expr(receiver),
+            }
+        };
 
         match method {
             "set" => {
@@ -3533,9 +3581,8 @@ impl BytecodeCompiler {
                 self.compile_expr_as_value_or_placeholder(&args[0])?;
                 self.compile_expr_as_value_or_placeholder(&args[1])?;
                 self.emit(Instruction::simple(kind.set_opcode()));
-                // set() returns the map itself for fluent chaining; mirror
-                // that by re-loading the receiver.
-                self.compile_expr(receiver)?;
+                // set() returns the map itself for fluent chaining.
+                reload_receiver(self)?;
             }
             "get" => {
                 if args.len() != 1 {
@@ -3558,7 +3605,7 @@ impl BytecodeCompiler {
                 self.compile_expr_as_value_or_placeholder(&args[0])?;
                 self.emit(Instruction::simple(kind.delete_opcode()));
                 // delete() returns the map itself for chaining.
-                self.compile_expr(receiver)?;
+                reload_receiver(self)?;
             }
             _ => return Ok(None),
         }
