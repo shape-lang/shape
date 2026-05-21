@@ -104,6 +104,22 @@ fn parse_match_scrutinee(pair: Pair<Rule>) -> Result<Expr> {
             pair.as_str().to_string(),
             pair_span(&pair),
         )),
+        // WS-4 4c: a bare struct-literal scrutinee
+        // (`match Point { x: 3, y: 4 } { … }`) parses to a
+        // `match_scrutinee_struct` wrapper around a `struct_literal`,
+        // which `parse_expression` does not accept directly — route the
+        // inner `struct_literal` through `parse_primary_expr`.
+        Rule::match_scrutinee_struct => {
+            let inner = pair
+                .into_inner()
+                .next()
+                .ok_or_else(|| ShapeError::ParseError {
+                    message: "expected struct literal in match scrutinee".to_string(),
+                    location: Some(pair_loc),
+                })?;
+            super::super::parse_primary_expr(inner)
+        }
+        Rule::struct_literal => super::super::parse_primary_expr(pair),
         Rule::expression => super::super::parse_expression(pair),
         _ => super::super::parse_expression(pair),
     }

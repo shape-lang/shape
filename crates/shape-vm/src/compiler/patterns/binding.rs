@@ -471,6 +471,29 @@ impl BytecodeCompiler {
                     })
                 }
                 (None, _) => {
+                    // WS-4 4c: a bare `Constructor` pattern with no
+                    // enum-name (`Point { x, y }`) may name a registered
+                    // *struct*/TypedObject, not an enum variant. Resolve
+                    // `variant` against the schema registry; if it is a
+                    // non-enum schema with a struct payload, route to the
+                    // `Pattern::Object` struct-pattern codegen. The
+                    // bare-enum-variant reject stays only for the genuine
+                    // case (no schema, or an enum schema).
+                    let resolved_name = self.resolve_type_name(variant);
+                    let is_struct_schema = self
+                        .type_tracker
+                        .schema_registry()
+                        .get(resolved_name.as_str())
+                        .map(|s| !s.is_enum())
+                        .unwrap_or(false);
+                    if is_struct_schema {
+                        if let PatternConstructorFields::Struct(field_pats) = fields {
+                            return self.compile_match_binding_local(
+                                &Pattern::Object(field_pats.clone()),
+                                value_local,
+                            );
+                        }
+                    }
                     Err(ShapeError::SemanticError {
                         message: "Bare enum variant patterns require type-resolved enum context. Generic fallback is disabled.".to_string(),
                         location: None,
@@ -633,5 +656,90 @@ mod tests {
                 .map(|semantics| semantics.ownership_class),
             Some(BindingOwnershipClass::OwnedMutable)
         );
+    }
+
+    // ─── WS-4 4c: `match` struct-pattern classification ─────────────
+    //
+    // A bare `Constructor` pattern with no enum-name (`Point { x, y }`)
+    // over a registered struct/TypedObject scrutinee must route to the
+    // `Pattern::Object` codegen instead of being rejected as a bare
+    // enum-variant pattern. Also covers 4c defect (i): a bare
+    // struct-literal `match` scrutinee parses correctly.
+    use crate::test_utils::eval;
+
+    #[test]
+    fn ws4_4c_match_struct_pattern_over_variable() {
+        let result = eval(
+            r#"
+            type Point { x: int, y: int }
+            let p = Point { x: 3, y: 4 }
+            match p { Point { x, y } => x + y }
+            "#,
+        );
+        assert_eq!(result.as_i64(), Some(7));
+    }
+
+    #[test]
+    fn ws4_4c_match_struct_pattern_paren_scrutinee() {
+        let result = eval(
+            r#"
+            type Point { x: int, y: int }
+            match (Point { x: 3, y: 4 }) { Point { x, y } => x + y }
+            "#,
+        );
+        assert_eq!(result.as_i64(), Some(7));
+    }
+
+    #[test]
+    fn ws4_4c_match_struct_pattern_bare_struct_literal_scrutinee() {
+        // 4c defect (i): the bare struct-literal scrutinee
+        // `match Point { … } { … }` previously mis-parsed the
+        // struct-literal body as the match body.
+        let result = eval(
+            r#"
+            type Point { x: int, y: int }
+            match Point { x: 3, y: 4 } { Point { x, y } => x + y }
+            "#,
+        );
+        assert_eq!(result.as_i64(), Some(7));
+    }
+
+    #[test]
+    fn ws4_4c_match_struct_pattern_in_function() {
+        let result = eval(
+            r#"
+            type Point { x: int, y: int }
+            fn f(p: Point) -> int { match p { Point { x, y } => x * y } }
+            f(Point { x: 10, y: 20 })
+            "#,
+        );
+        assert_eq!(result.as_i64(), Some(200));
+    }
+
+    #[test]
+    fn ws4_4c_enum_match_still_works() {
+        // The classification fix must not regress enum-variant matching:
+        // a bare-name enum variant with no enum context still rejects.
+        let result = eval(
+            r#"
+            enum E { A, B }
+            let e = E::A
+            match e { E::A => 1, E::B => 2 }
+            "#,
+        );
+        assert_eq!(result.as_i64(), Some(1));
+    }
+
+    #[test]
+    fn ws4_4c_bare_match_scrutinee_still_works() {
+        // The `match_scrutinee_ident` fast-path must still handle a
+        // bare-variable scrutinee with literal arms.
+        let result = eval(
+            r#"
+            let v = 2
+            match v { 1 => 10, 2 => 20, _ => 0 }
+            "#,
+        );
+        assert_eq!(result.as_i64(), Some(20));
     }
 }

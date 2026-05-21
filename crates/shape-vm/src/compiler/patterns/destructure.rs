@@ -102,6 +102,204 @@ impl BytecodeCompiler {
             })
     }
 
+    /// Map a schema `FieldType` to a tracked-type-name (`int`, `number`,
+    /// `bool`, `string`, `decimal`) for destructured-binding type
+    /// propagation. Mirrors the match-path mapping at
+    /// `compiler/patterns/binding.rs` (`Pattern::Object` arm). Returns
+    /// `None` for non-scalar field types (the binding then carries no
+    /// scalar hint — a nested struct field is handled separately via
+    /// `last_expr_schema`).
+    fn destructure_field_scalar_type_name(
+        field_type: &shape_runtime::type_schema::FieldType,
+    ) -> Option<&'static str> {
+        use shape_runtime::type_schema::FieldType;
+        match field_type {
+            FieldType::I64 => Some("int"),
+            FieldType::F64 => Some("number"),
+            FieldType::Bool => Some("bool"),
+            FieldType::String => Some("string"),
+            FieldType::Decimal => Some("decimal"),
+            FieldType::I8 => Some("i8"),
+            FieldType::U8 => Some("u8"),
+            FieldType::I16 => Some("i16"),
+            FieldType::U16 => Some("u16"),
+            FieldType::I32 => Some("i32"),
+            FieldType::U32 => Some("u32"),
+            FieldType::U64 => Some("u64"),
+            _ => None,
+        }
+    }
+
+    /// WS-4 4b: propagate the schema field's type onto the
+    /// `last_expr_*` tracker state BEFORE the recursive
+    /// `compile_destructure_pattern*` call, so the destructured binding
+    /// inherits a proven compile-time kind. Without this, `let { x, y }
+    /// = p` over a `Point { x: int, y: int }` leaves `x` and `y` with
+    /// no proven kind and `x + y` fails `prove_native_kind()`.
+    ///
+    /// The match-path enum/struct codegen (`binding.rs`) already does
+    /// this; this is the destructure-path twin. Sets `last_expr_schema`
+    /// for nested `Object`-typed fields so a nested `let { a: { b } }`
+    /// destructure resolves the inner schema; sets
+    /// `last_expr_numeric_type` / `last_expr_type_info` for scalar
+    /// fields so `let_decl_storage_hint()` emits a typed `StoreLocal`.
+    fn seed_destructure_field_type(&mut self, schema_id: u32, field_key: &str) {
+        use shape_runtime::type_schema::FieldType;
+        // Default: clear — the extracted value is a scalar, not the
+        // parent TypedObject. Overridden below when the field type is
+        // recognised.
+        self.last_expr_schema = None;
+        self.last_expr_type_info = None;
+        self.last_expr_numeric_type = None;
+
+        let Some(field_type) = self
+            .type_tracker
+            .schema_registry()
+            .get_by_id(schema_id)
+            .and_then(|schema| schema.get_field(field_key))
+            .map(|field| field.field_type.clone())
+        else {
+            return;
+        };
+
+        match &field_type {
+            FieldType::Object(type_name) => {
+                // Nested struct field — propagate the inner schema so a
+                // nested object destructure (`let { p: { x } } = …`)
+                // resolves the inner field operands.
+                if let Some(nested) =
+                    self.type_tracker.schema_registry().get(type_name.as_str())
+                {
+                    self.last_expr_schema = Some(nested.id);
+                    self.last_expr_type_info = Some(VariableTypeInfo::known(
+                        nested.id,
+                        type_name.clone(),
+                    ));
+                }
+            }
+            _ => {
+                if let Some(tn) = Self::destructure_field_scalar_type_name(&field_type) {
+                    let info = VariableTypeInfo::named(tn.to_string());
+                    match &field_type {
+                        FieldType::I64 => {
+                            self.last_expr_numeric_type =
+                                Some(crate::type_tracking::NumericType::Int);
+                        }
+                        FieldType::F64 => {
+                            self.last_expr_numeric_type =
+                                Some(crate::type_tracking::NumericType::Number);
+                        }
+                        FieldType::Decimal => {
+                            self.last_expr_numeric_type =
+                                Some(crate::type_tracking::NumericType::Decimal);
+                        }
+                        FieldType::I8 => {
+                            self.last_expr_numeric_type = Some(
+                                crate::type_tracking::NumericType::IntWidth(
+                                    shape_ast::IntWidth::I8,
+                                ),
+                            );
+                        }
+                        FieldType::U8 => {
+                            self.last_expr_numeric_type = Some(
+                                crate::type_tracking::NumericType::IntWidth(
+                                    shape_ast::IntWidth::U8,
+                                ),
+                            );
+                        }
+                        FieldType::I16 => {
+                            self.last_expr_numeric_type = Some(
+                                crate::type_tracking::NumericType::IntWidth(
+                                    shape_ast::IntWidth::I16,
+                                ),
+                            );
+                        }
+                        FieldType::U16 => {
+                            self.last_expr_numeric_type = Some(
+                                crate::type_tracking::NumericType::IntWidth(
+                                    shape_ast::IntWidth::U16,
+                                ),
+                            );
+                        }
+                        FieldType::I32 => {
+                            self.last_expr_numeric_type = Some(
+                                crate::type_tracking::NumericType::IntWidth(
+                                    shape_ast::IntWidth::I32,
+                                ),
+                            );
+                        }
+                        FieldType::U32 => {
+                            self.last_expr_numeric_type = Some(
+                                crate::type_tracking::NumericType::IntWidth(
+                                    shape_ast::IntWidth::U32,
+                                ),
+                            );
+                        }
+                        FieldType::U64 => {
+                            self.last_expr_numeric_type = Some(
+                                crate::type_tracking::NumericType::IntWidth(
+                                    shape_ast::IntWidth::U64,
+                                ),
+                            );
+                        }
+                        _ => {}
+                    }
+                    self.last_expr_type_info = Some(info);
+                }
+            }
+        }
+    }
+
+    /// WS-4 4b: after the recursive destructure call has declared a
+    /// binding for a plain `Identifier` field pattern, stamp the schema
+    /// field's type onto that binding's tracker entry. The `Identifier`
+    /// arm only records type info when `last_expr_schema` is set
+    /// (nested-object fields); scalar fields need this explicit fixup so
+    /// `get_local_type()` / `get_binding_type()` resolves for the
+    /// downstream `x + y`.
+    ///
+    /// `is_global` selects the module-binding tracker
+    /// (`set_module_binding_type_info`) for the top-level
+    /// `compile_destructure_pattern_global` path, or the local tracker
+    /// (`set_local_type_info`) for the function-scope path.
+    fn stamp_destructure_binding_type(
+        &mut self,
+        field_pattern: &shape_ast::ast::DestructurePattern,
+        schema_id: u32,
+        field_key: &str,
+        is_global: bool,
+    ) {
+        use shape_ast::ast::DestructurePattern;
+        let DestructurePattern::Identifier(name, _) = field_pattern else {
+            return;
+        };
+        let Some(field_type) = self
+            .type_tracker
+            .schema_registry()
+            .get_by_id(schema_id)
+            .and_then(|schema| schema.get_field(field_key))
+            .map(|field| field.field_type.clone())
+        else {
+            return;
+        };
+        let type_name: Option<String> = match &field_type {
+            shape_runtime::type_schema::FieldType::Object(tn) => Some(tn.clone()),
+            other => {
+                Self::destructure_field_scalar_type_name(other).map(|s| s.to_string())
+            }
+        };
+        let Some(tn) = type_name else {
+            return;
+        };
+        if is_global {
+            if let Some(slot) = self.module_bindings.get(name).copied() {
+                self.set_module_binding_type_info(slot, &tn);
+            }
+        } else if let Some(local_idx) = self.resolve_local(name) {
+            self.set_local_type_info(local_idx, &tn);
+        }
+    }
+
     /// Compile destructuring pattern for value on stack
     /// Assumes value is already on the stack
     pub(in crate::compiler) fn compile_destructure_pattern(
@@ -252,11 +450,20 @@ impl BytecodeCompiler {
                             location: None,
                         })?;
                     self.emit(Instruction::new(OpCode::GetFieldTyped, Some(operand)));
-                    // Clear schema after field extraction — the extracted value is a
-                    // scalar (number, string, etc.), not the parent TypedObject.
-                    self.last_expr_schema = None;
-                    self.last_expr_type_info = None;
+                    // WS-4 4b: propagate the schema field's type onto the
+                    // tracker state so the destructured binding inherits a
+                    // proven compile-time kind (mirrors the match-path
+                    // propagation in `binding.rs`). Replaces the old
+                    // unconditional `last_expr_*` clear that left `x`/`y`
+                    // with an unknown kind.
+                    self.seed_destructure_field_type(schema_id, &field.key);
                     self.compile_destructure_pattern(&field.pattern)?;
+                    self.stamp_destructure_binding_type(
+                        &field.pattern,
+                        schema_id,
+                        &field.key,
+                        false,
+                    );
                 }
 
                 if let Some(rest) = rest_pattern {
@@ -478,11 +685,20 @@ impl BytecodeCompiler {
                             location: None,
                         })?;
                     self.emit(Instruction::new(OpCode::GetFieldTyped, Some(operand)));
-                    // Clear schema after field extraction — the extracted value is a
-                    // scalar (number, string, etc.), not the parent TypedObject.
-                    self.last_expr_schema = None;
-                    self.last_expr_type_info = None;
+                    // WS-4 4b: propagate the schema field's type onto the
+                    // tracker state so the destructured binding inherits a
+                    // proven compile-time kind (mirrors the match-path
+                    // propagation in `binding.rs`). Replaces the old
+                    // unconditional `last_expr_*` clear that left `x`/`y`
+                    // with an unknown kind.
+                    self.seed_destructure_field_type(schema_id, &field.key);
                     self.compile_destructure_pattern_global(&field.pattern)?;
+                    self.stamp_destructure_binding_type(
+                        &field.pattern,
+                        schema_id,
+                        &field.key,
+                        true,
+                    );
                 }
 
                 if let Some(rest) = rest_pattern {
@@ -883,5 +1099,135 @@ mod ws3_array_rest_tests {
             "non-rest array destructure must compile: {:?}",
             result.err()
         );
+    }
+}
+
+#[cfg(test)]
+mod ws4_destructure_tests {
+    //! WS-4 — object-destructuring regression tests (v0.3, 2026-05-21).
+    //!
+    //! Covers 4a (VM `let { … } = obj` no longer throws) and 4b
+    //! (destructured binding types are propagated so `x + y` proves a
+    //! native kind). The 4c match struct-pattern classification tests
+    //! live in `compiler/patterns/binding.rs`.
+    use crate::test_utils::{eval, eval_result};
+
+    // ─── 4a: `let { … } = obj` runs in the VM ───────────────────────
+
+    #[test]
+    fn ws4_4a_global_object_destructure_runs() {
+        // Pre-fix: the VM `emit_destructure_type_check("object")` guard
+        // threw because `type_check_kinded` had no `"object"` arm.
+        let result = eval(
+            r#"
+            type Point { x: int, y: int }
+            let p = Point { x: 1, y: 2 }
+            let { x, y } = p
+            x
+            "#,
+        );
+        assert_eq!(result.as_i64(), Some(1));
+    }
+
+    #[test]
+    fn ws4_4a_global_object_destructure_second_field() {
+        let result = eval(
+            r#"
+            type Point { x: int, y: int }
+            let p = Point { x: 1, y: 2 }
+            let { x, y } = p
+            y
+            "#,
+        );
+        assert_eq!(result.as_i64(), Some(2));
+    }
+
+    #[test]
+    fn ws4_4a_function_scope_object_destructure_runs() {
+        let result = eval(
+            r#"
+            type Point { x: int, y: int }
+            fn first(p: Point) -> int { let { x, y } = p; x }
+            first(Point { x: 7, y: 9 })
+            "#,
+        );
+        assert_eq!(result.as_i64(), Some(7));
+    }
+
+    // ─── 4b: destructured binding types are propagated ──────────────
+
+    #[test]
+    fn ws4_4b_function_scope_destructured_int_add() {
+        // Pre-fix: `x + y` failed `prove_native_kind()` — the
+        // destructure path cleared `last_expr_*` and never propagated
+        // the schema field's `FieldType` onto the bindings.
+        let result = eval(
+            r#"
+            type Point { x: int, y: int }
+            fn sum(p: Point) -> int { let { x, y } = p; x + y }
+            sum(Point { x: 6, y: 8 })
+            "#,
+        );
+        assert_eq!(result.as_i64(), Some(14));
+    }
+
+    #[test]
+    fn ws4_4b_global_scope_destructured_int_add() {
+        let result = eval(
+            r#"
+            type Point { x: int, y: int }
+            let p = Point { x: 6, y: 8 }
+            let { x, y } = p
+            x + y
+            "#,
+        );
+        assert_eq!(result.as_i64(), Some(14));
+    }
+
+    #[test]
+    fn ws4_4b_destructured_number_field_add() {
+        let result = eval(
+            r#"
+            type P { x: number, y: number }
+            fn sum(p: P) -> number { let { x, y } = p; x + y }
+            sum(P { x: 1.5, y: 2.5 })
+            "#,
+        );
+        assert_eq!(result.as_f64(), Some(4.0));
+    }
+
+    #[test]
+    fn ws4_4b_nested_object_destructure() {
+        // The nested struct field's schema must be propagated so the
+        // inner `let { v } = inner` resolves its field operand and the
+        // inner binding inherits the `int` kind.
+        let result = eval(
+            r#"
+            type Inner { v: int }
+            type Outer { inner: Inner, k: int }
+            fn f(o: Outer) -> int {
+                let { inner, k } = o
+                let { v } = inner
+                v + k
+            }
+            f(Outer { inner: Inner { v: 5 }, k: 7 })
+            "#,
+        );
+        assert_eq!(result.as_i64(), Some(12));
+    }
+
+    #[test]
+    fn ws4_4b_destructured_string_field() {
+        // String field destructure must not fail compilation; the
+        // binding carries the `string` type.
+        let result = eval_result(
+            r#"
+            type Name { first: string, last: string }
+            let n = Name { first: "Ada", last: "Lovelace" }
+            let { first, last } = n
+            first
+            "#,
+        );
+        assert!(result.is_ok(), "string-field destructure failed: {result:?}");
     }
 }
