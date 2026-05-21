@@ -1,140 +1,118 @@
-# Phase 3 team-lead handover — v0.3 Phase 4 (test hardening + book truth)
+# Team-lead handover — Shape v0.3 close-approach
 
-**Generated:** 2026-05-18 (Phase 4 reframe per user 2026-05-18 acceptance criterion revision).
-**Authority for Phase 4 reframe:** user dispatch 2026-05-18 expanded v0.3 acceptance criteria to require test coverage ≥99% per-feature (W14) + book 100% correct vs HEAD (W15) + W13 differential fuzz, with W11-fup-C jit_print_typed_array as the closing Phase 3d sub-cluster (merged at `672bda24`). v0.3 tag NOT yet annotated; close-summary §6 paste-ready text was STRIPPED at the same atomic commit to prevent premature tag landing.
+**Refreshed:** 2026-05-21 at main HEAD `3f227c63`. Round 6 (post the 5-family
+no-known-incorrectness program). Git holds prior content; no archaeology here.
 
-## Current state at Phase 4 entry
+## Role
+
+Team-lead for the Shape v0.3 close-approach. Runs the program **autonomously**
+— dispatch / partition / batch / merge / close-gate are self-authorized. A
+supervisor handles architectural calls; the user (strategic owner) authorizes
+tags and language semantics. The user relays between team-lead and supervisor.
+
+## Current state
 
 | | |
 |---|---|
-| Main HEAD at handover bundle | (set by atomic bundled commit; see git log first-parent) |
-| Smoke matrix s1–s5 | 5/5 VM == JIT preserved per release-binary corrected harness |
-| v0.3 trajectory phase | Phase 4 (test hardening + W13 differential fuzz + W14 test coverage + W15 book truth) |
-| v0.3 tag | NOT yet annotated; gated on Phase 4 close |
-| Cumulative bad-code merges into main | 0 per release-binary corrected harness |
+| Main HEAD | `3f227c63` |
+| Smoke matrix s1–s5 | 5/5 VM == JIT (canonical (ii) F' release-binary harness) |
+| verify-merge / check-no-dynamic | 13/13 / exit 0 |
+| v0.3 tag | NOT landed; gated on WS-1..4 fix close |
 
-### Phase 4 acceptance criteria (binding; supersedes pre-2026-05-18 v0.3 acceptance)
+## Canonical (ii) F' smoke harness
 
-- Operator coverage full set (substantially MET at HEAD per W1.1–W1.11 sub-clusters)
-- LSP en-par with rust-analyzer (substantially MET at HEAD per W2.1 audit + W2.2/W2.3/W2.4/W2.5/W2.6/W2.7/W2.8/W2.9 closure-waves)
-- Book 100% correct vs HEAD (W15 workstream; zero made-up content; every labeled-runnable snippet runs cleanly VM == JIT)
-- Test coverage ≥99% per-feature with DOCUMENTED EXCEPTIONS ONLY WHEN VERY HARD TO TEST (W14 workstream; cargo-tarpaulin measurement)
-- Smoke 5/5 VM == JIT preserved (corrected release-binary harness)
-- W12 fall-through + diagnostic operational
-- v2-raw residuals RESOLVED (cluster-1.5)
-- 0 bad-code merges into main preserved per corrected harness
-
-### Phase 4 sequencing
-
-- **Phase 4a** — parallel sub-agent audit-day round (4 agents in parallel):
-  - W11-fup-C status check (residual surfaces post-merge audit)
-  - W13 differential fuzz audit-day (scope + cargo-fuzz vs custom; per-domain inventory)
-  - W14.1 test coverage audit-day (cargo-tarpaulin install + invocation pattern + per-crate baseline measurement + per-feature coverage classification)
-  - W15.1 book re-audit-day (every labeled-runnable snippet at HEAD; W3.2-A/B/C/D/E divergence residuals)
-- **Phase 4b** — parallel sub-agent fix waves (batched 5-10 per ceremony round; strict folder/file structure rules per audit):
-  - W14.2 parallel test-coverage fix waves (per W14.1 audit per-crate gaps)
-  - W15.2 parallel book fix waves (per W15.1 residuals; smaller batches)
-- **Phase 4c** — after batch merges:
-  - W14.3 coverage gate (cargo-tarpaulin Phase-4b-batch-merge gate + nightly post-v0.3)
-  - W15.3 book-truth-gate (CI executes every labeled-runnable snippet under VM AND JIT; fails on output divergence OR runtime error)
-- **v0.3 close attempt + tag** (post Phase 4c)
-
-### Test execution policy (binding)
-
-- Per-commit gate = FOCUSED tests relevant to the specific change (sub-agent determines scope per change; team-lead enforces at close-gate review)
-- Full suite + fuzz = NIGHTLY ONLY (not per-commit; not per-merge-ceremony unless audit-day batch merge)
-- Coverage tool runs at Phase-4b-batch-merge + nightly only
-- Coverage tooling: cargo-tarpaulin (line + branch + dead-code via `--ignore-tests` + `--skip-clean` variants); install + invocation pattern in W14.1 audit deliverable
-
-### Trajectory estimate
-
-8–10 sessions to v0.3 close (Phase 4a 1 + Phase 4b 3–4 + Phase 4c 1 + close 0.5 + buffer).
-
-## First action — fresh team-lead
-
-1. Read this doc + `docs/v0.3-close-summary.md` (current state at Phase 4 entry) + `docs/v0.3-roadmap.md` (§Phase-4 expansion) + `CLAUDE.md` (Forbidden Patterns + Renames to refuse on sight + ADR-005 / ADR-006 key rules).
-2. Post the 1-line confirmation: *"Read 4 mandatory docs; team-lead role ready under Phase 4 (test hardening + book truth). Current state: <one sentence>."*
-3. Verify main HEAD + smoke matrix 5/5 VM == JIT via release-binary corrected harness before any sub-agent dispatch.
-4. Surface Phase 4a parallel partition shape to supervisor (4 agents: W11-fup-C status check + W13 audit-day + W14.1 audit-day + W15.1 audit-day). Wait for ratification.
-5. Dispatch sub-agents in a single message with parallel Agent calls (no sequencing — territory non-overlap per audit-only deliverables).
-
-## Your role this session
-
-Team lead for Phase 4. Job:
-
-1. Dispatch sub-agents via `Agent` tool per supervisor relays.
-2. Verify close gates: `just check-clean` exit 0 + `bash scripts/verify-merge.sh` 12/12 exit 0 + `bash scripts/check-no-dynamic.sh` exit 0 + AGENTS.md row appended + smoke matrix 5/5 VM == JIT preserved via release-binary corrected harness.
-3. Merge sub-agent branches into main (take-both for AGENTS.md row + ADR-006 amendment text + dispatch-table arm collisions).
-4. Update `docs/v0.3-close-summary.md` + `docs/v0.3-roadmap.md` + this handover doc as Phase 4 progresses.
-5. Surface architectural questions to the supervisor via the user (strategic-owner relays).
-
-Architectural calls (ADR amendments, scope changes, defection-pattern refusals at the meta layer, tag authorization) are NOT in your lane — surface them.
-
-## Discipline bindings (load-bearing; refuse on sight)
-
-All standard Phase 3 / cluster-1.5 / v0.2.0 / v0.3 disciplines apply unchanged:
-
-- **NO ARCHAEOLOGY in living docs** (strip wholesale; git holds history)
-- **Smoke-gate harness MUST use release binary + verified exit code**
-- **All CLAUDE.md Forbidden Patterns + Renames to refuse on sight** (broader-family regex; bridge/probe/helper/hop/translator/adapter/shim; W-series ValueWord renames; "compatibility layer" rationalization)
-- **All ADR-006 §2.7.x rulings** (4-table HeapKind lockstep, §2.7.5 stamp-at-compile-time, §2.7.6/Q8 carrier-API-bound, §2.7.7/Q9 stack parallel-kind, §2.7.8/Q10 cell-storage parallel-kind, §2.7.10/Q11 method-dispatch ABI, §2.7.11/Q12 value-call ABI)
-- **ADR-005 §1 single-discriminator + §2 String exception**
-- **5-arm receiver-recovery soundness rule** (W13→W16 lesson)
-- **Refuse #10 anti-deferral within wave scope** ("preserve for v0.4", "needs its own audit sub-cluster", "multi-week scope" — all refused)
-- **Refuse #11 Ptr-newtype-shim defection** (TypedObjectPtr / TraitObjectPtr canonical per D4; not transitional shims)
-- **"Pre-existing" framing FORBIDDEN if sub-agent introduces a regression** (per CLAUDE.md "Own all code quality"; instance 82 CRITICAL recovery precedent)
-- **CLAUDE.md modifications require explicit user authorization**
-- **Tag landings require explicit user authorization**
-- **No Co-Authored-By: Claude trailer; own all code quality**
-
-### Cadence binding (Reading 3 carry-forward, 2026-05-16 + 2026-05-17 + 2026-05-18)
-
-- Max ~100 lines per supervisor relay
-- Surfacings = NEW facts + ONE specific ask (NO re-citation of cumulative state, NO multi-paragraph rationale, NO pathway taxonomies when direct recommendation suffices)
-- Pre-flight ground-truth binding extends to dispatch prompts you draft: every file:line / commit hash / symbol presence MUST grep-verify at HEAD before sub-agent commits time on broken-path enumeration
-- One refinement pass per dispatch prompt
-- 30–50 parallel sub-agent dispatch precedent established 2026-05-18
-
-## Decision authority pattern
-
-- **Supervisor authorizes:** cluster/wave scope, ADR amendments, sub-cluster dispatch shape, defection-pattern refusals at meta-architectural layer
-- **User authorizes:** CLAUDE.md modifications, cluster-close + release tags (incl. `v0.3.0` tag), language-design semantics, project-scope decisions, Phase 4 acceptance criterion revisions
-- **Team-lead authorizes:** wave-agent dispatch within supervisor-ratified scope, close-gate verification, merge ceremony, take-both resolution, status / handover / roadmap doc updates, AGENTS.md updates, reopen via SendMessage for small recoverable fixes (per S1-R18 precedent)
-
-## Smoke matrix shape (canonical fixtures)
-
-```
-s1 scalar-loop          let mut sum = 0; for i in 0..100 { sum += i }; print(sum) → 4950
-s2 typed-array map+sum  [1,2,3,4,5].map(|x|x*2).sum() → 30
-s3 UFCS dispatch        canonical fixture → x
-s4 Set basics           Set + .add + .size → 2
-s5 dyn T trait-object   canonical fixture → x
-```
-
-Corrected release-binary harness shape:
-
+Release binary; NOT pipe-to-tail.
 ```bash
-out=$(timeout 30 ./target/release/shape run --mode $mode $file 2>/dev/null | tail -1)
-ec=$?
+out=$(timeout 30 ./target/release/shape run --mode $m $f 2>&1)
+ec=$?; last=$(echo "$out" | tail -1)
 ```
+Fixtures `tests/smokes/s{1..5}.shape`; expected s1 `4950` / s2 `30` / s3 `x`
+/ s4 `2` / s5 `x`, all ec=0, VM == JIT.
 
-`ec` must be 0 + `out` must match expected value for VM == JIT to hold.
+## Round-6 workstreams
 
-## User preferences + working style
+The four audits are CLOSED (docs in `docs/cluster-audits/`). Fix wave follows.
 
-- **No `Co-Authored-By: Claude` trailer in commits.** MEMORY.md rule.
-- **Own all code quality.** Never frame as "pre-existing" — all code is the agent's responsibility once touched.
-- **Plain code fences for relay text**, not blockquotes. The user copies relay blocks verbatim; blockquote `>` prefixes break paste.
-- **Direct, concise communication.** Tight responses; substantive when needed; no padding.
-- **Strategic owner / language designer.** Delegates architectural calls to the supervisor. Surfaces explicitly on language-design / project-scope / cadence questions.
-- **Working in agent velocity.** 30–50 parallel sub-agent dispatch precedent (2026-05-18).
+**WS-1 — V3-S5 ckpt-5/6 `op_new_array` construction.** Audit:
+`v0.3-w16-2-c-empty-literal-audit.md`. W16.2-A is MERGED (`2924b685`); smoke
+s5 passes. Remaining = **W16.2-C** (empty-literal / spread / list-comprehension
+— 10 `Count(0)` `NewArray` sites SURFACE with a jargon dump; comprehension
+JIT path diverges from VM → v0.3-gating). W16.2-B is NOT redundant (scalar-
+element `dyn Trait` arrays still SURFACE) but its round-4 branch is not
+mergeable — re-implement fresh. 6.B.1 codegen choice is supervisor-ratify;
+WS-1 fix is HELD pending that ratify.
 
-## Operational continuity
+**WS-2 — ζ-round.** (a) unannotated nested fn calls in a loop → VM silent-
+wrong `1.0`, JIT correct (loop-triggered, unannotated-only). (b) `id(None)`
+hangs (ec=124). Investigate-first. Fix agent re-dispatched.
 
-1. Standard interaction pattern: sub-agent closes → team-lead verifies gate + reads close report → drafts consolidated status → user relays to supervisor → supervisor responds → user pastes back → team-lead executes.
-2. Don't re-derive context that's already in `v0.3-close-summary.md`, `v0.3-roadmap.md`, `CLAUDE.md`, ADR-006, or this handover.
-3. After Phase 4 closes + smoke matrix 5/5 VM == JIT empirically re-verified + supervisor ratifies + user authorizes `v0.3.0` tag → team-lead lands tag on main at user-authorized commit. v0.3 trajectory complete.
+**WS-3 — Result/AnyError machinery.** Audit:
+`v0.3-ws3-result-anyerror-audit.md` — 7 v0.3-gating sub-items, all localized,
+no opcode/ABI/schema change: F1 (JIT typed-array OOB → 0; `v2_array.rs:838`),
+F2a (`?` type-loss; `advanced.rs:32`), F2b (`?` runtime SIGSEGV;
+`exceptions/mod.rs:662`), F3 (`!!` no dispatch arm; `binary_ops.rs:853`),
+F4 (jargon-dump is `handle_exception` no-handler branch `exceptions/mod.rs:243`
+— `build_any_error` is NOT stubbed), array-rest clean-error, `type_check_kinded`
+`"array"` arm.
+
+**WS-4 — Object destructuring.** Audit:
+`v0.3-ws4-object-destructuring-audit.md` — 4a (`type_check_kinded` missing
+`"object"` arm; fixing it resolves 4a without an F4 rebuild), 4b (destructure
+binding-type loss; `destructure.rs` Object arms + `inference/items.rs:1176`),
+4c (`match` struct-pattern misclassified — parse ambiguity `shape.pest` +
+classification `checking.rs`/`binding.rs`). One moderate sub-cluster, ~5 files.
+
+**WS-5 — ADR-006 §2.7.13 amendment ratify.** Surfacing. β1 carrier migration
+merged (`a287c795`); §2.7.13 text stale (`TypedField.receiver` → `TypedObjectPtr`;
+`TypedIndex` variant deleted).
+
+WS-3 + WS-4 share `exceptions/mod.rs` (`type_check_kinded` array/object arms)
++ `destructure.rs` — resolve the 2-file overlap at integration (take-both,
+distinct arms/functions).
+
+## Dispatch hygiene (Round-6 lesson — binding)
+
+Agent `isolation: "worktree"` is unreliable here: some worktrees were created
+on a stale base (`ec27b1ef`), and agents `cd`'d into the main repo because the
+prompt named its path. For every dispatch: **pre-create a sibling worktree**
+(`git worktree add ../shape-r6-<ws> -b <branch> 3f227c63`), pin the agent to
+that absolute path, and explicitly forbid `cd`-ing to `/home/dev/dev/shape-lang/shape`
+(the main repo). Serialize any `git stash` step across parallel worktrees.
+
+## Bindings — refuse on sight
+
+Full detail: CLAUDE.md + ADR-006 §2.7.x. Operative:
+- **No-known-incorrectness-ships-in-v0.3** (user 2026-05-20): known-incorrect
+  (crash / VM-JIT divergence / wrong result / memory-unsafety / silent-wrong-
+  output) → v0.3-gating. Incomplete-but-CLEAN → v0.4-OK. A jargon-dump stub is
+  NOT "clean".
+- **Q3 recursive pre-flight:** ground-truth before disposition.
+- Hypotheses are INVESTIGATE not FIX until empirical bisect.
+- HEAD-commit-cite every surfacing; workspace cargo-check at API-change closes.
+- All CLAUDE.md Forbidden Patterns + Renames + ADR-006 §2.7.x + 4-table
+  HeapKind lockstep + 5-arm receiver-recovery.
+- NO ARCHAEOLOGY in living docs; no Co-Authored-By trailer; own all code
+  quality (never "pre-existing").
+
+## Cadence
+
+Autonomous. Surface to supervisor (via user) only on: (1) defection-attractor
+framing; (2) ADR amendment needed; (3) novel architectural gap needing a scope
+decision; (4) user-decision item. Relays ≤ ~80 lines; plain code fences.
+
+## Close gates (every checkpoint)
+
+`just check-clean` exit 0 · `bash scripts/verify-merge.sh` all pass ·
+`bash scripts/check-no-dynamic.sh` exit 0 · smoke s1–s5 5/5 VM == JIT ·
+AGENTS.md row appended; no Co-Authored-By trailer.
+
+## v0.3 tag
+
+After WS-1..4 fix close + no-known-incorrectness set empty + smoke 5/5 → relay
+close evidence to supervisor → supervisor ratifies → USER authorizes the
+`v0.3.0` tag. Land the tag only on explicit user authorization.
 
 ---
 
-*End of handover. Read §First action before any dispatch.*
+*Live operational state. Next rotation: verify HEAD + smoke 5/5 + verify-merge,
+read the four `cluster-audits/` round-6 docs, continue the fix wave.*
