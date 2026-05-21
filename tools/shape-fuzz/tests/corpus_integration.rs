@@ -96,7 +96,9 @@ fn corpus_inventory_matches_audit_5_3_expected_layout() {
         // Phase 4b Round 6 WS-1 W16.2-C op_new_array spread/comprehension
         // construction (2026-05-21): c12_spread.shape + c13_comprehension.shape
         // added per audit v0.3-w16-2-c-empty-literal-audit.md §5.E.
-        ("collections", 13),
+        // Phase 4b Round 6 WS-1b W16.2-C residual — bare empty-array
+        // accumulator construction (2026-05-21): c14_bare_accumulator.shape.
+        ("collections", 14),
         ("closures", 7),
         ("patterns", 8),
         ("async", 5),
@@ -119,7 +121,9 @@ fn corpus_inventory_matches_audit_5_3_expected_layout() {
     // total grows by 1 (c11_array_typed_object) → 51.
     // Phase 4b Round 6 WS-1 W16.2-C (2026-05-21): total grows by 2
     // (c12_spread + c13_comprehension) → 53.
-    assert_eq!(total, 53, "audit §3 requires 53 hand-seeded total");
+    // Phase 4b Round 6 WS-1b W16.2-C residual (2026-05-21): total grows by
+    // 1 (c14_bare_accumulator) → 54.
+    assert_eq!(total, 54, "audit §3 requires 54 hand-seeded total");
 
     // Audit §4.1 baseline negative-corpus inventory: a10 + c09 + c10 = 3
     // entries. W13.3 corpus surfaced 2 NEW divergence classes during the

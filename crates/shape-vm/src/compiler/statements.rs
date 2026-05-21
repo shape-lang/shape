@@ -700,6 +700,11 @@ impl BytecodeCompiler {
                     self.emit(Instruction::simple(OpCode::PushNull));
                     None
                 };
+                // Phase 4b Round 6 WS-1b W16.2-C residual: capture the bare
+                // empty-array-accumulator placeholder index now, before any
+                // downstream emission can reset it.
+                let captured_empty_array_alloc_idx =
+                    self.pending_empty_array_alloc_idx.take();
 
                 if let Some(name) = var_decl.pattern.as_identifier() {
                     if ref_borrow.is_some() {
@@ -727,6 +732,17 @@ impl BytecodeCompiler {
                     if let Some(kind) = self.pending_variable_typed_array_kind {
                         self.v2_typed_array_module_bindings.insert(binding_idx, kind);
                     }
+                    // Phase 4b Round 6 WS-1b W16.2-C residual: re-key a bare
+                    // empty-array-accumulator placeholder against this module
+                    // binding so the first downstream `.push()` can resolve
+                    // its element kind and patch the allocator.
+                    self.register_empty_array_accumulator(
+                        crate::compiler::EmptyArrayAccumulatorKey::ModuleBinding(binding_idx),
+                        var_decl.value.as_ref(),
+                        captured_empty_array_alloc_idx,
+                        name,
+                        var_decl.value.as_ref().map(|v| v.span()),
+                    );
                     if let Some(value) = &var_decl.value {
                         self.finish_reference_binding_from_expr(
                             binding_idx,
@@ -4439,6 +4455,11 @@ impl BytecodeCompiler {
                 self.pending_variable_typed_array_kind = None;
                 let captured_typed_map_kind = self.pending_variable_typed_map_kind;
                 self.pending_variable_typed_map_kind = None;
+                // Phase 4b Round 6 WS-1b W16.2-C residual: capture the bare
+                // empty-array-accumulator placeholder index alongside the
+                // other initializer-derived signals.
+                let captured_empty_array_alloc_idx =
+                    self.pending_empty_array_alloc_idx.take();
 
                 // ADR-006 §2.7.24 Q25.C: coerce-to-dyn emission. When the
                 // binding's annotation is `TypeAnnotation::Dyn(traits)`,
@@ -4535,6 +4556,20 @@ impl BytecodeCompiler {
                         // v2 Phase 3.1 (Agent 3): record v2 typed array kind for this binding
                         if let Some(kind) = captured_typed_array_kind {
                             self.v2_typed_array_module_bindings.insert(binding_idx, kind);
+                        }
+                        // Phase 4b Round 6 WS-1b W16.2-C residual: re-key a
+                        // bare empty-array-accumulator placeholder against
+                        // this module binding (top-level `Statement::VarDecl`).
+                        if let Some(name) = var_decl.pattern.as_identifier() {
+                            self.register_empty_array_accumulator(
+                                crate::compiler::EmptyArrayAccumulatorKey::ModuleBinding(
+                                    binding_idx,
+                                ),
+                                var_decl.value.as_ref(),
+                                captured_empty_array_alloc_idx,
+                                name,
+                                var_decl.value.as_ref().map(|v| v.span()),
+                            );
                         }
                         // v2 Phase 3.2: record v2 typed map kind for this binding
                         if let Some(kind) = captured_typed_map_kind {
@@ -4939,6 +4974,21 @@ impl BytecodeCompiler {
                             if let Some(local_idx) = self.resolve_local(name) {
                                 self.v2_typed_array_locals.insert(local_idx, kind);
                             }
+                        }
+                    }
+                    // Phase 4b Round 6 WS-1b W16.2-C residual: re-key a bare
+                    // empty-array-accumulator placeholder against this local
+                    // slot so the first downstream `.push()` resolves its
+                    // element kind and patches the allocator.
+                    if let Some(name) = var_decl.pattern.as_identifier() {
+                        if let Some(local_idx) = self.resolve_local(name) {
+                            self.register_empty_array_accumulator(
+                                crate::compiler::EmptyArrayAccumulatorKey::Local(local_idx),
+                                var_decl.value.as_ref(),
+                                captured_empty_array_alloc_idx,
+                                name,
+                                var_decl.value.as_ref().map(|v| v.span()),
+                            );
                         }
                     }
                     // v0.3 WS-6b GAP B: record v2 typed-map kind for the
@@ -5377,12 +5427,50 @@ impl BytecodeCompiler {
                     if method == "push" && args.len() == 1 && !bespoke_push_blocked {
                         if let Expr::Identifier(recv_name, _) = receiver.as_ref() {
                             let source_loc = self.span_to_source_location(receiver.as_ref().span());
+                            // Phase 4b Round 6 WS-1b W16.2-C residual
+                            // (2026-05-21): a bare empty-array accumulator's
+                            // FIRST `.push()` resolves its element kind,
+                            // patches the placeholder allocator, and promotes
+                            // the binding. The method leaves the array on the
+                            // stack — pop it (statement context discards the
+                            // result).
+                            if self.compile_first_push_to_empty_accumulator(
+                                recv_name,
+                                &args[0],
+                                Some(source_loc.clone()),
+                            )? {
+                                self.emit(Instruction::simple(OpCode::Pop));
+                                return Ok(());
+                            }
+                            // Resolve the receiver's `TypedArrayKind`. A
+                            // receiver that is ALREADY a v2 typed array
+                            // (annotated `Array<T>`, inferred typed literal,
+                            // a promoted accumulator from an earlier push)
+                            // must emit the typed `TypedArrayPush*` opcode.
+                            // The legacy `ArrayPushLocal` below is the v1
+                            // NaN-boxed carrier path: emitting it against a
+                            // v2-raw `TypedArray<T>` receiver is a
+                            // kind-mismatch (the V3-S5 `op_array_push`
+                            // strict-kind check).
+                            let typed_kind = self
+                                .resolve_receiver_typed_array_kind(receiver.as_ref());
                             if let Some(local_idx) = self.resolve_local(recv_name) {
                                 if !self.ref_locals.contains(&local_idx) {
                                     self.check_named_binding_write_allowed(
                                         recv_name,
                                         Some(source_loc.clone()),
                                     )?;
+                                }
+                                if let Some(kind) = typed_kind {
+                                    // v2 typed array push: `TypedArrayPush*`
+                                    // pops (arr_ptr, value).
+                                    self.emit(Instruction::new(
+                                        OpCode::LoadLocal,
+                                        Some(Operand::Local(local_idx)),
+                                    ));
+                                    self.compile_typed_array_element_value(kind, &args[0])?;
+                                    self.emit(Instruction::simple(kind.push_opcode()));
+                                    return Ok(());
                                 }
                                 self.compile_expr(&args[0])?;
                                 let pushed_numeric = self.last_expr_numeric_type;
@@ -5403,6 +5491,15 @@ impl BytecodeCompiler {
                                     Some(source_loc),
                                 )?;
                                 let binding_idx = self.get_or_create_module_binding(recv_name);
+                                if let Some(kind) = typed_kind {
+                                    self.emit(Instruction::new(
+                                        OpCode::LoadModuleBinding,
+                                        Some(Operand::ModuleBinding(binding_idx)),
+                                    ));
+                                    self.compile_typed_array_element_value(kind, &args[0])?;
+                                    self.emit(Instruction::simple(kind.push_opcode()));
+                                    return Ok(());
+                                }
                                 self.compile_expr(&args[0])?;
                                 self.emit(Instruction::new(
                                     OpCode::ArrayPushLocal,

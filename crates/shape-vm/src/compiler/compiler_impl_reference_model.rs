@@ -1422,6 +1422,13 @@ impl BytecodeCompiler {
         }
         self.non_function_mir_context_stack.pop();
 
+        // Phase 4b Round 6 WS-1b W16.2-C residual: surface-and-stop any
+        // top-level bare empty-array accumulator (`let mut out = []`) whose
+        // element type was never resolved by a downstream `.push(...)`.
+        if let Err(e) = self.finalize_unresolved_empty_array_accumulators() {
+            self.errors.push(e);
+        }
+
         // Return collected errors before emitting Halt
         if !self.errors.is_empty() {
             if self.errors.len() == 1 {

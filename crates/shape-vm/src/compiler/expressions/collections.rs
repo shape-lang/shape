@@ -194,6 +194,11 @@ impl BytecodeCompiler {
         for elem in elements {
             self.reject_direct_reference_storage(elem, ARRAY_REF_STORAGE_ERROR)?;
         }
+        // Phase 4b Round 6 WS-1b W16.2-C residual: reset the bare
+        // empty-array-accumulator placeholder signal. Only an empty,
+        // un-annotated, un-inferable literal compiled by THIS call sets it;
+        // the enclosing `VariableDecl` reads it immediately after.
+        self.pending_empty_array_alloc_idx = None;
         let literal_numeric = infer_array_literal_numeric_type(elements);
         let is_bool = is_homogeneous_bool_array(elements);
 
@@ -331,40 +336,7 @@ impl BytecodeCompiler {
             for elem in elements {
                 self.plan_flexible_binding_escape_from_expr(elem);
                 self.emit(Instruction::simple(OpCode::Dup));
-                match (kind, elem) {
-                    (
-                        super::super::v2_typed_emission::TypedArrayKind::String,
-                        Expr::Literal(Literal::String(s), _),
-                    ) => {
-                        // String literal → v2-raw StringObj with NativeKind::StringV2.
-                        let str_id = self.program.add_string(s.clone());
-                        self.emit(Instruction::new(
-                            OpCode::NewStringV2,
-                            Some(Operand::Property(str_id)),
-                        ));
-                    }
-                    (
-                        super::super::v2_typed_emission::TypedArrayKind::Decimal,
-                        Expr::Literal(Literal::Decimal(d), _),
-                    ) => {
-                        // Decimal literal → v2-raw DecimalObj with NativeKind::DecimalV2.
-                        let const_idx = self.program.add_constant(Constant::Decimal(*d));
-                        self.emit(Instruction::new(
-                            OpCode::NewDecimalV2,
-                            Some(Operand::Const(const_idx)),
-                        ));
-                    }
-                    _ => {
-                        // Legacy element path (numeric / bool scalar kinds OR
-                        // non-literal string/decimal expressions). For
-                        // string/decimal non-literals this still produces the
-                        // legacy Arc-wrapped carrier; the typed array push
-                        // handler will surface a structured RuntimeError at
-                        // runtime per the Round 3a' gate-flip note. Consumer-
-                        // side migration is V3-S5 Round 2 territory.
-                        self.compile_expr_as_value_or_placeholder(elem)?;
-                    }
-                }
+                self.compile_typed_array_element_value(kind, elem)?;
                 self.emit(Instruction::simple(kind.push_opcode()));
             }
         } else if elements.iter().any(|elem| matches!(elem, Expr::Spread(..))) {
@@ -398,10 +370,30 @@ impl BytecodeCompiler {
                     Some(Operand::Count(elements.len() as u16)),
                 ));
             } else {
+                // Phase 4b Round 6 WS-1b W16.2-C residual (2026-05-21):
+                // a bare empty array literal (`let mut out = []`, no
+                // `Array<T>` annotation) cannot resolve its element
+                // `TypedArrayKind` here — the element type is determined
+                // only by downstream `out.push(x)` calls. `op_array_push`
+                // / `op_new_array` accept ONLY a v2-raw typed
+                // `TypedArray<T>` carrier (audit §3.B), so an untyped
+                // `NewArray(0)` SURFACEs at runtime. Emit a placeholder
+                // `NewArray(0)` and record its instruction index; the
+                // enclosing `VariableDecl` re-keys it into
+                // `empty_array_accumulators` against the binding, and the
+                // first `.push()` patches it to the typed allocator with
+                // the kind proven at the push site (ADR-006 §2.7.5
+                // producer-side stamp). A never-pushed empty array is
+                // surface-and-stopped cleanly by
+                // `finalize_unresolved_empty_array_accumulators`.
+                let alloc_idx = self.program.instructions.len();
                 self.emit(Instruction::new(
                     OpCode::NewArray,
                     Some(Operand::Count(elements.len() as u16)),
                 ));
+                if elements.is_empty() {
+                    self.pending_empty_array_alloc_idx = Some(alloc_idx);
+                }
             }
         }
         // Arrays don't produce TypedObjects
@@ -1450,6 +1442,172 @@ impl BytecodeCompiler {
         self.last_expr_numeric_type = None;
 
         Ok(())
+    }
+
+    /// Compile a value expression in the carrier shape a typed-array push of
+    /// `kind` requires, leaving the value on the stack.
+    ///
+    /// For `String` / `Decimal` element kinds the push handler
+    /// (`v2_handlers/array.rs` `TypedArrayPushString` / `TypedArrayPushDecimal`)
+    /// requires the element to arrive as `NativeKind::StringV2` /
+    /// `NativeKind::DecimalV2`. A bare `LoadConst` of a string / decimal
+    /// literal produces the legacy `Arc<String>` / `Arc<Decimal>` carrier
+    /// (`NativeKind::String` / `NativeKind::Decimal`), which the typed push
+    /// handler's strict-kind check rejects. For literal string / decimal
+    /// elements emit `NewStringV2` / `NewDecimalV2` directly (fresh v2-raw
+    /// object, refcount 1, transferred into the array by the push handler's
+    /// refcount discipline). All other kinds — and non-literal string /
+    /// decimal expressions — compile through the standard value path.
+    ///
+    /// Shared by `compile_expr_array`'s typed-literal fast path and the
+    /// bare-empty-array-accumulator typed-push site so both stamp the same
+    /// producer-side carrier (ADR-006 §2.7.5).
+    pub(crate) fn compile_typed_array_element_value(
+        &mut self,
+        kind: super::super::v2_typed_emission::TypedArrayKind,
+        elem: &Expr,
+    ) -> Result<()> {
+        use super::super::v2_typed_emission::TypedArrayKind;
+        // WS-1b W16.2-C residual: a literal element whose own type FAMILY
+        // disagrees with the array's proven element kind is a HETEROGENEOUS
+        // push — a clean compile error, not a silent wrong result.
+        // `TypedArrayPush*` is monomorphic; pushing a `string` literal into
+        // an `Array<int>` (or vice-versa) must surface-and-stop at compile
+        // time per ADR-006 §2.7.5 + the W16.2-C audit §3.C
+        // heterogeneous-element stance.
+        //
+        // The check is FAMILY-level, not exact-kind: an `int` literal is a
+        // valid element for ANY sized-integer array (`Array<i32>` etc.) — a
+        // width type and `int` share the integer family — and a `number`
+        // literal is valid for `f32` / `f64`. Only a cross-family mismatch
+        // (string vs int, bool vs number, …) is rejected. Non-literal
+        // element kind agreement is left to the runtime strict-kind check.
+        if let Expr::Literal(lit, lit_span) = elem {
+            #[derive(PartialEq)]
+            enum Family {
+                Integer,
+                Float,
+                Bool,
+                Decimal,
+                StringF,
+            }
+            let literal_family = match lit {
+                Literal::Int(_) => Some(Family::Integer),
+                Literal::Number(_) => Some(Family::Float),
+                Literal::Decimal(_) => Some(Family::Decimal),
+                Literal::Bool(_) => Some(Family::Bool),
+                Literal::String(_) => Some(Family::StringF),
+                _ => None,
+            };
+            let array_family = match kind {
+                TypedArrayKind::I64
+                | TypedArrayKind::I32
+                | TypedArrayKind::I8
+                | TypedArrayKind::U8
+                | TypedArrayKind::I16
+                | TypedArrayKind::U16
+                | TypedArrayKind::U32 => Some(Family::Integer),
+                TypedArrayKind::F64 | TypedArrayKind::F32 => Some(Family::Float),
+                TypedArrayKind::Bool => Some(Family::Bool),
+                TypedArrayKind::Decimal => Some(Family::Decimal),
+                TypedArrayKind::String => Some(Family::StringF),
+                TypedArrayKind::Char | TypedArrayKind::TypedObject => None,
+            };
+            if let (Some(lf), Some(af)) = (literal_family, array_family) {
+                if lf != af {
+                    let lk = match lit {
+                        Literal::Int(_) => TypedArrayKind::I64,
+                        Literal::Number(_) => TypedArrayKind::F64,
+                        Literal::Decimal(_) => TypedArrayKind::Decimal,
+                        Literal::Bool(_) => TypedArrayKind::Bool,
+                        Literal::String(_) => TypedArrayKind::String,
+                        _ => unreachable!("literal_family Some implies a known literal"),
+                    };
+                    return Err(ShapeError::SemanticError {
+                        message: format!(
+                            "type mismatch: cannot push a `{}` value into an \
+                             array whose element type is `{}`. An array's \
+                             element type is fixed — every element must have \
+                             the same type.",
+                            super::super::v2_typed_emission::vec_element_type_name_for_typed_array_kind(lk),
+                            super::super::v2_typed_emission::vec_element_type_name_for_typed_array_kind(kind),
+                        ),
+                        location: Some(self.span_to_source_location(*lit_span)),
+                    });
+                }
+            }
+        }
+        match (kind, elem) {
+            (TypedArrayKind::String, Expr::Literal(Literal::String(s), _)) => {
+                // String literal → v2-raw StringObj with NativeKind::StringV2.
+                let str_id = self.program.add_string(s.clone());
+                self.emit(Instruction::new(
+                    OpCode::NewStringV2,
+                    Some(Operand::Property(str_id)),
+                ));
+            }
+            (TypedArrayKind::Decimal, Expr::Literal(Literal::Decimal(d), _)) => {
+                // Decimal literal → v2-raw DecimalObj with NativeKind::DecimalV2.
+                let const_idx = self.program.add_constant(Constant::Decimal(*d));
+                self.emit(Instruction::new(
+                    OpCode::NewDecimalV2,
+                    Some(Operand::Const(const_idx)),
+                ));
+            }
+            _ => {
+                // Numeric / bool scalar kinds, TypedObject elements, and
+                // non-literal string / decimal expressions compile through
+                // the standard value path.
+                self.compile_expr_as_value_or_placeholder(elem)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Phase 4b Round 6 WS-1b W16.2-C residual (2026-05-21): register a bare
+    /// empty-array accumulator (`let mut out = []`) against its resolved
+    /// binding slot.
+    ///
+    /// Called from the `VariableDecl` code paths immediately after the
+    /// initializer compiles. Registration is gated on BOTH:
+    ///
+    ///   1. `init_expr` is structurally a bare empty array literal
+    ///      (`Expr::Array` with zero elements) — guards against a stale
+    ///      `pending_empty_array_alloc_idx` from an unrelated prior literal
+    ///      being mis-attributed to a non-array binding.
+    ///   2. `alloc_idx` is `Some` — the empty-literal compile path actually
+    ///      emitted a placeholder `NewArray(0)` awaiting an element kind
+    ///      (i.e. there was no `Array<T>` annotation resolving the kind).
+    ///
+    /// The placeholder is recorded against `key`; the first downstream
+    /// `arr.push(v)` resolves the element kind and patches it, and a
+    /// never-pushed accumulator is surface-and-stopped by
+    /// `finalize_unresolved_empty_array_accumulators`.
+    pub(crate) fn register_empty_array_accumulator(
+        &mut self,
+        key: crate::compiler::EmptyArrayAccumulatorKey,
+        init_expr: Option<&Expr>,
+        alloc_idx: Option<usize>,
+        var_name: &str,
+        literal_span: Option<shape_ast::ast::Span>,
+    ) {
+        let is_bare_empty_array_literal = matches!(
+            init_expr,
+            Some(Expr::Array(elements, _)) if elements.is_empty()
+        );
+        if !is_bare_empty_array_literal {
+            return;
+        }
+        if let Some(alloc_instr_idx) = alloc_idx {
+            self.empty_array_accumulators.insert(
+                key,
+                crate::compiler::EmptyArrayAccumulator {
+                    alloc_instr_idx,
+                    literal_loc: literal_span.map(|s| self.span_to_source_location(s)),
+                    var_name: var_name.to_string(),
+                },
+            );
+        }
     }
 }
 

@@ -1,0 +1,14 @@
+// CLASS: W16.2-C residual — bare empty-array accumulator construction
+// (Round 6 WS-1b, 2026-05-21). Per ADR-006 §2.7.5 + audit
+// v0.3-w16-2-c-empty-literal-audit.md §2.A / §3.C. A bare `let mut out = []`
+// (empty array literal, no `Array<T>` annotation) cannot resolve its
+// element kind at the literal site — the kind comes from downstream
+// `out.push(...)` calls. Before WS-1b landed the VM/JIT both surfaced
+// `op_new_array(0)` SURFACE (an internal-jargon dump). Post-WS-1b the
+// placeholder `NewArray(0)` is patched to the typed `NewTypedArrayI64(0)`
+// allocator with the kind STAMPED at compile time from the first push's
+// proven argument type — the accumulator constructs and `out.len()`
+// converges at `3` VM == JIT.
+let mut out = []
+for i in 0..3 { out.push(i) }
+print(out.len())

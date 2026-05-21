@@ -104,20 +104,26 @@ fn test_ode_integrators() {
 #[test]
 #[ignore = "Generic-function inference loss (NOT op_new_array). Round 6 WS-1 \
             W16.2-C re-classified 2026-05-21: the queryable.shape parse defect \
-            (TypeScript-style `filter(...): Self,` at line 37) is FIXED, and \
-            the W16.2-C op_new_array / spread / list-comprehension construction \
-            is rebuilt — `let mut results = []` + `out.push(...)` accumulators \
-            now construct correctly. The residual blocker is a distinct class: \
-            `core/ode.shape`'s unannotated helpers `vec_add(a, b)` / `vec_sub` \
-            / `vec_scale` do `a[i] + b[i]` on unannotated params, and \
-            `rk4_system(f, y0_vec, ...)` is itself an unannotated generic \
-            function — the closure-result + generic-helper return types \
-            resolve to `unknown`, so strict-typing inference fails on \
-            `unknown + unknown` (Add/Sub/Mul). This is the \
-            generic-function-call-return-type / unannotated-generic-param \
-            inference-loss class (epsilon-4 / round-6 WS-2/WS-6 follow-up \
-            family) — it is NOT resolved at this branch's HEAD. Tracked as \
-            the generic-inference follow-up, distinct from W16.2-C."]
+            (TypeScript-style `filter(...): Self,` at line 37) is FIXED, the \
+            W16.2-C op_new_array / spread / list-comprehension construction is \
+            rebuilt (WS-1), and the W16.2-C bare empty-array accumulator \
+            (`let mut results = []` resolved from downstream `.push(...)`) is \
+            rebuilt (WS-1b) — all op_new_array construction paths now work. \
+            The residual blocker is a distinct class: `core/ode.shape`'s \
+            unannotated helpers `vec_add(a, b)` / `vec_sub` / `vec_scale` do \
+            `a[i] + b[i]` on unannotated params, and `rk4_system(f, y0_vec, \
+            ...)` is itself an unannotated generic function — the \
+            closure-result + generic-helper return types resolve to \
+            `unknown`, so strict-typing inference fails on `unknown + \
+            unknown` (Add/Sub/Mul). That same `unknown` then defeats the \
+            WS-1b bare-accumulator element-kind resolution (`results.push(f \
+            (...))` — `f(...)` is `unknown`), so the accumulator surfaces a \
+            clean `cannot determine the element type` error: a DOWNSTREAM \
+            symptom of the inference loss, not an op_new_array gap. This is \
+            the generic-function-call-return-type / unannotated-generic-param \
+            inference-loss class (epsilon-4 / round-6 WS-2/WS-6/WS-9 \
+            follow-up family) — NOT resolved at this branch's HEAD. Tracked \
+            as the generic-inference follow-up, distinct from W16.2-C."]
 fn test_harmonic_oscillator_rk4_system() {
     init_runtime();
 
