@@ -694,7 +694,7 @@ impl TypeInferenceEngine {
             }
 
             // Block expression
-            Expr::Block(block, _) => {
+            Expr::Block(block, block_span) => {
                 self.env.push_scope();
                 let mut last_type = BuiltinTypes::void();
 
@@ -704,8 +704,19 @@ impl TypeInferenceEngine {
                             self.infer_variable_decl(decl)?;
                             BuiltinTypes::void()
                         }
-                        shape_ast::ast::BlockItem::Assignment(_assign) => BuiltinTypes::void(),
-                        shape_ast::ast::BlockItem::Statement(_stmt) => BuiltinTypes::void(),
+                        // A loop body is parsed as an `Expr::Block` whose items
+                        // are `BlockItem::Assignment` — the RHS of a loop-body
+                        // assignment (`last = dbl(11)`) must be walked here, or
+                        // its function callsites never get recorded and an
+                        // unannotated callee parameter collapses to the
+                        // `number` default (kind-confused silent-wrong result).
+                        shape_ast::ast::BlockItem::Assignment(assign) => {
+                            self.infer_assignment(assign, *block_span)?;
+                            BuiltinTypes::void()
+                        }
+                        shape_ast::ast::BlockItem::Statement(stmt) => {
+                            self.infer_statement(stmt)?
+                        }
                         shape_ast::ast::BlockItem::Expression(expr) => self.infer_expr(expr)?,
                     };
                 }

@@ -1822,3 +1822,47 @@ fn triple(x){x*3}
         params[0]
     );
 }
+
+/// ζ-(a) regression: a for/while loop body is parsed as an `Expr::Block`
+/// whose items are `BlockItem::Assignment` — the RHS of a loop-body
+/// assignment (`last = dbl(11)`) must be walked by inference, or the
+/// callsite of `dbl` is never recorded and its unannotated parameter
+/// collapses to the `number` default. That made the bytecode compiler emit
+/// `MulNumber` for integer arithmetic; the VM then printed the i64 result
+/// bit-reinterpreted as an f64 denormal. `dbl` must resolve as `fn(int)->int`.
+#[test]
+fn test_loop_body_assignment_records_callsite() {
+    use shape_ast::ast::TypeAnnotation;
+    use shape_ast::parser::parse_program;
+
+    for code in [
+        // for-loop body assignment
+        "fn dbl(x){x*2}\nlet mut last = 0\nfor i in 0..5 { last = dbl(11) }\n",
+        // while-loop body assignment
+        "fn dbl(x){x*2}\nlet mut last = 0\nlet mut i = 0\nwhile i < 5 { last = dbl(11); i = i + 1 }\n",
+        // nested-call loop body assignment
+        "fn dbl(x){x*2}\nfn inc(x){x+1}\nlet mut last = 0\nfor i in 0..5 { last = inc(dbl(11)) }\n",
+    ] {
+        let program = parse_program(code).expect("program should parse");
+        let mut engine = TypeInferenceEngine::new();
+        let (types, errors) = engine.infer_program_best_effort(&program);
+        assert!(errors.is_empty(), "inference should succeed: {:?}", errors);
+
+        let dbl = types.get("dbl").expect("dbl should be inferred");
+        let Type::Function { params, returns } = dbl else {
+            panic!("dbl should be a function type, got {:?}", dbl);
+        };
+        assert!(
+            matches!(&params[0], Type::Concrete(TypeAnnotation::Basic(n)) if n == "int"),
+            "dbl's parameter must resolve to int via the loop-body callsite, \
+             not collapse to the number default — got {:?} for code:\n{}",
+            params[0],
+            code,
+        );
+        assert!(
+            matches!(returns.as_ref(), Type::Concrete(TypeAnnotation::Basic(n)) if n == "int"),
+            "dbl's return must resolve to int — got {:?}",
+            returns,
+        );
+    }
+}
