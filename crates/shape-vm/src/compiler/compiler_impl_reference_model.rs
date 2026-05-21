@@ -8,27 +8,56 @@ impl BytecodeCompiler {
         let funcs = Self::collect_program_functions(program);
         let mut inferred = HashMap::new();
 
+        // v0.3 WS-7: the inferred pass-by-reference optimization is
+        // DISABLED. It is unsound on the JIT/MIR pipeline.
+        //
+        // Background. This pass used to flag every UNANNOTATED heap-typed
+        // parameter as an implicit `ByRefShared` reference parameter
+        // (`type_is_heap_like` → `inferred_flags[idx] = true`). The bytecode
+        // VM honors that consistently: the call site emits a borrow
+        // (`compile_implicit_reference_arg`, `helpers.rs`) and the callee
+        // reads the borrowed cell via `DerefLoad`. Both ends agree.
+        //
+        // The MIR/JIT pipeline does NOT. MIR-lowering only emits
+        // `Rvalue::Borrow` for an EXPLICIT `&expr` argument
+        // (`mir/lowering/expr.rs` `Expr::Reference` arm); an inferred-ref
+        // argument is a plain identifier, lowered as `Operand::Copy`. Yet
+        // MIR-lowering still marks the callee parameter as a reference
+        // (`param_reference_kinds[i] = Some(BorrowKind::Shared)`, driven by
+        // the `effective_def.params[i].is_reference = true` write-back in
+        // `compiler/functions.rs`). The JIT then auto-derefs that parameter
+        // slot (`ref_param_slots` in `shape-jit`, the W5c-2-α
+        // jit-ref-param-chain-stamp), treating the slot as a cell address.
+        // Caller passes the heap pointer BY VALUE; callee dereferences it
+        // as a cell. For an `Array<int>` parameter (`fn get(xs, i) {
+        // xs[i] }`) the JIT v2 typed-array fast path then reads
+        // `[arr_ptr + 8]` off a raw `TypedArrayHeader` mistaken for a cell
+        // — SIGSEGV even on a valid in-bounds access once `get` is
+        // tier-compiled.
+        //
+        // The optimization only ever applied to heap-shared types
+        // (`type_is_heap_like` gate). Those values are already `Arc`-backed;
+        // passing the `Arc` pointer by value shares the SAME heap object —
+        // `ByRefShared` adds a cell indirection that buys nothing and is the
+        // sole source of the VM/JIT divergence. An ANNOTATED `Array<int>`
+        // parameter is passed `ByValue` today and is sound in both tiers
+        // (verified) — that is the correct, uniform convention. Mutation
+        // through such a parameter (`fn f(xs) { xs.push(1) }`) is likewise
+        // visible to the caller under `ByValue` because the heap object is
+        // shared. Disabling the inference makes the VM and JIT use one
+        // convention (by-value `Arc`-pointer pass) and removes the
+        // indirection entirely — no cell, no auto-deref, no divergence.
+        //
+        // EXPLICIT reference parameters (`&x` / `&mut x` in source) are
+        // unaffected: they are `param.is_reference` from the parser, their
+        // call sites carry an explicit `&` that MIR-lowering DOES lower to
+        // `Rvalue::Borrow`, so caller and callee remain consistent.
         for (name, func) in funcs {
-            let mut inferred_flags = vec![false; func.params.len()];
-            let Some(Type::Function { params, .. }) = inferred_types.get(&name) else {
-                inferred.insert(name, inferred_flags);
-                continue;
-            };
-
-            for (idx, param) in func.params.iter().enumerate() {
-                if param.type_annotation.is_some()
-                    || param.is_reference
-                    || param.simple_name().is_none()
-                {
-                    continue;
-                }
-                if let Some(inferred_param_ty) = params.get(idx)
-                    && Self::type_is_heap_like(inferred_param_ty)
-                {
-                    inferred_flags[idx] = true;
-                }
-            }
-            inferred.insert(name, inferred_flags);
+            // Every parameter flagged `false` — no inferred reference
+            // parameters. `inferred_types` is intentionally unused now;
+            // it remains a parameter for call-site signature stability.
+            let _ = inferred_types;
+            inferred.insert(name, vec![false; func.params.len()]);
         }
 
         inferred
@@ -774,6 +803,7 @@ impl BytecodeCompiler {
         HashMap<String, Vec<bool>>,
         HashMap<String, Vec<Option<String>>>,
         HashMap<String, String>,
+        HashMap<String, Vec<Option<shape_value::v2::ConcreteType>>>,
     ) {
         let funcs = Self::collect_program_functions(program);
         let mut inference = shape_runtime::type_system::inference::TypeInferenceEngine::new();
@@ -781,6 +811,12 @@ impl BytecodeCompiler {
         let inferred_ref_params = Self::infer_reference_params_from_types(program, &types);
         let inferred_param_type_hints = Self::infer_param_type_hints_from_types(program, &types);
         let inferred_return_type_hints = Self::infer_return_type_hints_from_types(program, &types);
+        // v0.3 WS-7: project the inference engine's per-parameter `Type`
+        // for UNANNOTATED params into a `ConcreteType`. This is the JIT's
+        // proof source for the v2 typed-array fast path on unannotated
+        // array params.
+        let inferred_param_concrete_types =
+            Self::infer_param_concrete_types_from_types(program, &types);
 
         let mut effective_ref_params: HashMap<String, Vec<bool>> = HashMap::new();
         for (name, func) in &funcs {
@@ -844,7 +880,75 @@ impl BytecodeCompiler {
             }
         }
 
-        (inferred_ref_params, result, inferred_param_type_hints, inferred_return_type_hints)
+        (
+            inferred_ref_params,
+            result,
+            inferred_param_type_hints,
+            inferred_return_type_hints,
+            inferred_param_concrete_types,
+        )
+    }
+
+    /// v0.3 WS-7: project the program-wide type-inference engine's
+    /// per-parameter `Type` into a `ConcreteType` for UNANNOTATED params.
+    ///
+    /// The JIT's v2 typed-array fast path is gated on
+    /// `function_local_concrete_types[fn][param_slot]` carrying a precise
+    /// `ConcreteType::Array(elem)`. For an annotated param that stamp comes
+    /// from the annotation; for an UNANNOTATED param (`fn get(xs, i) {
+    /// xs[i] }`) there is no annotation to read, so without this projection
+    /// the slot stays `ConcreteType::Void`. The JIT then mis-takes the v2
+    /// `TypedArray<T>` pointer (data@+8/len@+16) for a NaN-boxed v1 array
+    /// (data@+0/len@+8 after an 8-byte header) and the inline index load
+    /// reads garbage / SIGSEGVs even on a valid in-bounds access.
+    ///
+    /// Mirrors `infer_param_type_hints_from_types` exactly — same
+    /// `Type::Function`-keyed lookup, same annotated-param skip — but
+    /// projects to `ConcreteType` (the JIT's proof carrier) instead of a
+    /// display string. Annotated params keep `None`; their `ConcreteType`
+    /// is stamped from the annotation in the per-fn seeding pass.
+    pub(super) fn infer_param_concrete_types_from_types(
+        program: &Program,
+        inferred_types: &HashMap<String, Type>,
+    ) -> HashMap<String, Vec<Option<shape_value::v2::ConcreteType>>> {
+        let funcs = Self::collect_program_functions(program);
+        let mut out = HashMap::new();
+
+        for (name, func) in funcs {
+            let mut param_cts: Vec<Option<shape_value::v2::ConcreteType>> =
+                vec![None; func.params.len()];
+            let Some(Type::Function { params, .. }) = inferred_types.get(&name) else {
+                out.insert(name, param_cts);
+                continue;
+            };
+
+            for (idx, param) in func.params.iter().enumerate() {
+                // Annotated params are stamped from the annotation directly
+                // in the `function_local_concrete_types` per-fn seeding pass;
+                // a destructuring param has no single slot ConcreteType.
+                if param.type_annotation.is_some() || param.simple_name().is_none() {
+                    continue;
+                }
+                let Some(inferred_param_ty) = params.get(idx) else {
+                    continue;
+                };
+                // `Type::to_annotation()` reconstructs the `TypeAnnotation`
+                // for resolved concrete / generic types and yields `None`
+                // for unresolved type variables — exactly the gate we want
+                // (no fabricated kind, no Bool-default). The existing
+                // `concrete_type_from_annotation` then projects
+                // `Array<int>` → `ConcreteType::Array(I64)`.
+                let Some(ann) = inferred_param_ty.to_annotation() else {
+                    continue;
+                };
+                param_cts[idx] =
+                    crate::compiler::v2_map_emission::concrete_type_from_annotation(&ann);
+            }
+
+            out.insert(name, param_cts);
+        }
+
+        out
     }
 
     pub(crate) fn inferred_type_to_hint_name(ty: &Type) -> Option<String> {
@@ -1173,12 +1277,14 @@ impl BytecodeCompiler {
             inferred_ref_mutates,
             inferred_param_type_hints,
             inferred_return_type_hints,
+            inferred_param_concrete_types,
         ) = Self::infer_reference_model(&program);
         self.inferred_param_pass_modes =
             Self::build_param_pass_mode_map(&program, &inferred_ref_params, &inferred_ref_mutates);
         self.inferred_ref_params = inferred_ref_params;
         self.inferred_ref_mutates = inferred_ref_mutates;
         self.inferred_param_type_hints = inferred_param_type_hints;
+        self.inferred_param_concrete_types = inferred_param_concrete_types;
         // Phase 3e: register inferred return types so function-call
         // compilation can recover the numeric type even for sources with
         // no explicit `-> T` annotation.
@@ -1775,6 +1881,12 @@ impl BytecodeCompiler {
                 // MIR-walk inference's classifications dominate when both
                 // sources are present.
                 if let Some(def) = self.function_defs.get(&func.name) {
+                    // v0.3 WS-7: inference-resolved per-param `ConcreteType`
+                    // for UNANNOTATED params (projected in
+                    // `infer_param_concrete_types_from_types`). Used as the
+                    // seed source when a param has no annotation to read.
+                    let inferred_param_cts =
+                        self.inferred_param_concrete_types.get(&func.name);
                     for (i, &param_slot) in mir_data.mir.param_slots.iter().enumerate() {
                         let idx = param_slot.0 as usize;
                         if idx >= concrete_types.len() {
@@ -1789,13 +1901,38 @@ impl BytecodeCompiler {
                         let Some(param) = def.params.get(i) else {
                             continue;
                         };
-                        let Some(ref ann) = param.type_annotation else {
-                            continue;
-                        };
-                        if let Some(ct) =
-                            crate::compiler::v2_map_emission::concrete_type_from_annotation(ann)
-                        {
-                            concrete_types[idx] = ct;
+                        match param.type_annotation {
+                            Some(ref ann) => {
+                                // Annotated param: the declared type IS the
+                                // proof source for the slot's ConcreteType.
+                                if let Some(ct) =
+                                    crate::compiler::v2_map_emission::concrete_type_from_annotation(ann)
+                                {
+                                    concrete_types[idx] = ct;
+                                }
+                            }
+                            None => {
+                                // v0.3 WS-7: UNANNOTATED param. The bytecode
+                                // compiler's MIR-walk inference could not
+                                // prove a `ConcreteType` for the slot from
+                                // MIR-observable statements alone (it stayed
+                                // `Void`), but the program-wide
+                                // type-inference engine DID resolve the
+                                // parameter's type — and the VM relies on
+                                // that resolution (strict typing has no
+                                // dynamic fallback). Thread the
+                                // inference-resolved `ConcreteType` so the
+                                // JIT's v2 typed-array / typed-object fast
+                                // paths use the SAME proven type the VM
+                                // uses, instead of mis-classifying a v2
+                                // heap pointer as a NaN-boxed v1 value.
+                                if let Some(ct) = inferred_param_cts
+                                    .and_then(|v| v.get(i))
+                                    .and_then(|opt| opt.clone())
+                                {
+                                    concrete_types[idx] = ct;
+                                }
+                            }
                         }
                     }
                 }

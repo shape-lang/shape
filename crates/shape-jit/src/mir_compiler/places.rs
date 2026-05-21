@@ -555,15 +555,6 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         self.builder.ins().select(is_negative, adjusted, idx)
     }
 
-    /// Bounds check: if index >= length (unsigned), return 0 (safe default).
-    /// Using unsigned comparison catches both negative (wrapped) and too-large indices.
-    #[inline]
-    fn bounds_check(&mut self, index: Value, length: Value) -> Value {
-        let in_bounds = self.builder.ins().icmp(IntCC::UnsignedLessThan, index, length);
-        let zero = self.builder.ins().iconst(types::I64, 0);
-        self.builder.ins().select(in_bounds, index, zero)
-    }
-
     /// Convert an index value to i64, specializing for native types.
     /// For native I32: sextend (1 instruction).
     /// For NaN-boxed I64: extract payload (7 instructions via emit_index_to_i64).
@@ -587,10 +578,20 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// Inline array element read: arr[index] → direct memory load.
     /// ~8 Cranelift instructions instead of an FFI call.
     ///
-    /// Out-of-bounds reads return a raw `0` I64 — matches the v2 typed-array
-    /// path's zero-default semantics. The old implementation pinned the index
-    /// to `0` on OOB, which silently returned `arr[0]`; that differs from user-
-    /// visible semantics where OOB should read as a zero value.
+    /// v0.3 WS-7 (WS-3 F1 "second defect" on the legacy path): an
+    /// out-of-bounds read RAISES — it early-`return_`s the
+    /// `JIT_SIGNAL_INDEX_OUT_OF_BOUNDS` signal, exactly mirroring the v2
+    /// typed-array path (`v2_array.rs` `v2_array_get`). The prior codegen
+    /// jumped the OOB block to a merge block producing `iconst 0` — that
+    /// silently fabricated a zero for a memory-unsafe access the VM
+    /// correctly rejects with `VMError::IndexOutOfBounds`, a
+    /// silent-wrong-result / VM-JIT divergence. The MirToIR function
+    /// returns `i32` (the `JittedStrategyFn` ABI), so the early `return_`
+    /// is type-correct; the executor maps the signal back to the VM's
+    /// `Index out of bounds` diagnostic. Negative indices are normalised
+    /// (`length + idx`) first; an index still out of range after
+    /// normalisation (`final_idx >= length`, unsigned — also catches a
+    /// too-negative index that wrapped) raises.
     fn inline_array_get(&mut self, arr_boxed: Value, index_val: Value) -> Value {
         let (data_ptr, length) = self.emit_array_data_and_len(arr_boxed);
         let idx_i64 = self.index_to_i64(index_val);
@@ -609,12 +610,14 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             .ins()
             .brif(in_bounds, in_bounds_block, &[], oob_block, &[]);
 
-        // OOB: return raw zero (decoded as `Integer(0)` / `Number(0.0)` /
-        // `Bool(false)` depending on the result slot's interpretation).
+        // OOB: raise (early-return the signal) — VM/JIT parity.
         self.builder.switch_to_block(oob_block);
         self.builder.seal_block(oob_block);
-        let zero = self.builder.ins().iconst(types::I64, 0);
-        self.builder.ins().jump(merge_block, &[zero]);
+        let oob_signal = self.narrow_iconst(
+            types::I32,
+            crate::context::JIT_SIGNAL_INDEX_OUT_OF_BOUNDS as i64,
+        );
+        self.builder.ins().return_(&[oob_signal]);
 
         // In-bounds: compute address and load the element word.
         self.builder.switch_to_block(in_bounds_block);
@@ -633,13 +636,44 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     }
 
     /// Inline array element write: arr[index] = value → direct memory store.
+    ///
+    /// v0.3 WS-7 (WS-3 F1 "second defect" on the legacy path): an
+    /// out-of-bounds store RAISES — it early-`return_`s the
+    /// `JIT_SIGNAL_INDEX_OUT_OF_BOUNDS` signal, mirroring the v2
+    /// typed-array path (`v2_array.rs` `v2_array_set`). The prior codegen
+    /// clamped the OOB index to `0` via `bounds_check` and then stored —
+    /// an OOB write silently corrupted `arr[0]` instead of being rejected
+    /// as the VM rejects it. Negative indices are normalised first; an
+    /// index still out of range after normalisation raises.
     fn inline_array_set(&mut self, arr_boxed: Value, index_val: Value, val: Value) {
         let (data_ptr, length) = self.emit_array_data_and_len(arr_boxed);
         let idx_i64 = self.index_to_i64(index_val);
         let final_idx = self.normalize_index(idx_i64, length);
-        let safe_idx = self.bounds_check(final_idx, length);
 
-        let byte_offset = self.builder.ins().ishl_imm(safe_idx, 3);
+        let in_bounds_block = self.builder.create_block();
+        let oob_block = self.builder.create_block();
+
+        let in_bounds = self
+            .builder
+            .ins()
+            .icmp(IntCC::UnsignedLessThan, final_idx, length);
+        self.builder
+            .ins()
+            .brif(in_bounds, in_bounds_block, &[], oob_block, &[]);
+
+        // OOB: raise (early-return the signal) — VM/JIT parity.
+        self.builder.switch_to_block(oob_block);
+        self.builder.seal_block(oob_block);
+        let oob_signal = self.narrow_iconst(
+            types::I32,
+            crate::context::JIT_SIGNAL_INDEX_OUT_OF_BOUNDS as i64,
+        );
+        self.builder.ins().return_(&[oob_signal]);
+
+        // In-bounds: compute address and store the element word.
+        self.builder.switch_to_block(in_bounds_block);
+        self.builder.seal_block(in_bounds_block);
+        let byte_offset = self.builder.ins().ishl_imm(final_idx, 3);
         let elem_addr = self.builder.ins().iadd(data_ptr, byte_offset);
         self.builder.ins().store(MemFlags::trusted(), val, elem_addr, 0);
     }
