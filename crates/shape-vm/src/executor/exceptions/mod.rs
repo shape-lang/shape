@@ -63,10 +63,8 @@
 //! `extract_err_inner` raw_helpers) or surface against an empty
 //! contract.
 //!
-//! The 8 ops therefore close as surface-and-stop with refined
-//! per-op messages naming the precise upstream gap
-//! (`PHASE_2C_VARIANT_CODEGEN_SURFACE` below). Re-emission cluster:
-//! `W14-variant-codegen` — land OkCtor / ErrCtor / SomeCtor body in
+//! The 8 ops were closed by the `W14-variant-codegen` re-emission
+//! cluster — OkCtor / ErrCtor / SomeCtor body in
 //! Wave-5e closure, register `__Result` / `__Option` schema OR amend
 //! `HeapKind::Result` / `HeapKind::Option` per Q8 carrier-API-bound,
 //! then close all 8 ops in a single follow-up.
@@ -106,85 +104,14 @@ use shape_value::{
 use shape_value::heap_value::{OptionData, ResultData};
 use std::sync::Arc;
 
-/// Phase-2c surface message used by every helper body that depends on
-/// the deleted `ValueWord` / `raw_helpers` machinery. Centralized so
-/// the supervisor can grep one literal at re-emission time.
-const PHASE_2C_EXCEPTION_OBJECT_SURFACE: &str =
-    "phase-2c — exception object machinery (AnyError TypedObject build, \
-     trace-frame build, cause-chain format) pending re-emission on the \
-     kinded Arc<TypedObjectStorage> model. Depends on D-raw-helpers \
-     cleanup of heap-decode primitives and cross-cluster cascade in \
-     dispatch.rs / control_flow/mod.rs / builtins/type_ops.rs migrating \
-     ValueWord-typed arguments to (u64, NativeKind). See ADR-006 \
-     §2.7.4 / playbook §10 E-exceptions row.";
-
-/// Phase-2c surface message for the variant-discriminator opcode family
-/// (`IsOk`, `IsErr`, `UnwrapOk`, `UnwrapErr`, `UnwrapOption`,
-/// `TryUnwrap`). W13-result-option-ops audit (close 2026-05-10):
-///
-/// W13-anyerror (close `e9c7260`) deferred these 6 opcodes plus
-/// `op_type_check` and `op_error_context` because the consumer-side
-/// discriminator dispatches on a Result/Option runtime representation
-/// that the upstream variant-codegen producers have not migrated to.
-/// The precise upstream gap:
-///
-/// - `BuiltinFunction::OkCtor` / `ErrCtor` / `SomeCtor` in
-///   `executor/vm_impl/builtins.rs:510-518` are still `todo!("phase-1b-vm
-///   wave 5e — Option/Result ctor body migration pending")`. Without
-///   the producer, no determined runtime bits flow through the
-///   discriminator. Filling the consumer first would either fabricate
-///   a representation (defection-attractor: same shape as the deleted
-///   `extract_ok_inner` / `extract_err_inner` / `extract_some_inner`
-///   helpers in pre-bulldozer `raw_helpers`, forbidden #7 in playbook
-///   §4) or surface against an empty contract.
-///
-/// - No `HeapKind::Result` / `HeapKind::Option` variant exists in
-///   `shape-value/src/heap_variants.rs` (verified 2026-05-10). The
-///   `Q8` carrier-API-bound forbids inventing a variant outside the
-///   ADR-amendment process (mirror of §2.7.9 `HeapKind::FilterExpr`
-///   ordinal-18 and §2.7.12 `HeapKind::SharedCell` ordinal-20).
-///
-/// - No `__Result` / `__Option` schema in `shape-runtime/src/
-///   type_schema/builtin_schemas.rs::register_builtin_schemas` — the
-///   alternative TypedObject-discriminator path (`schema_id == result_id
-///   ? read field 0 as discriminant : read field 1 as payload`) is
-///   also un-substantiated.
-///
-/// The one fragmentary signal in current code is null-coding for
-/// `Option`: `compile_pattern_check_local` at
-/// `compiler/patterns/checking.rs:213` emits `LoadLocal; IsNull;
-/// JumpIfTrue fail` for `None`, and `op_is_null` in
-/// `executor/comparison/mod.rs:177` dispatches the null sentinel via
-/// `is_null_kinded`. But `Some(x)` requires the `SomeCtor` body to
-/// land before any value flows through `op_unwrap_option` — without
-/// it, even the null-coded Option half is starved of producers.
-///
-/// `op_type_check` and `op_error_context` carry their own additional
-/// substrate dependencies (runtime `TypeAnnotation` matching against
-/// `KindedSlot`; AnyError cause-chain construction respectively) but
-/// fall under the same close: the variant-codegen contract is the
-/// upstream gate.
-///
-/// Re-emission cluster (recommended naming): `W14-variant-codegen` —
-/// land OkCtor / ErrCtor / SomeCtor body in
-/// `executor/vm_impl/builtins.rs` (Wave-5e deferral closure) +
-/// register `__Result` / `__Option` schema OR amend
-/// `HeapKind::Result` / `HeapKind::Option` per Q8 carrier-API-bound,
-/// then close all 8 ops here in a single follow-up.
-#[allow(dead_code)]
-const PHASE_2C_VARIANT_CODEGEN_SURFACE: &str =
-    "phase-2c — Result/Option variant-discriminator pending upstream \
-     codegen migration. BuiltinFunction::OkCtor / ErrCtor / SomeCtor \
-     bodies in executor/vm_impl/builtins.rs are still todo!() (Wave-5e \
-     deferral); no HeapKind::Result / HeapKind::Option variant in \
-     shape-value/heap_variants.rs; no __Result / __Option schema in \
-     shape-runtime/type_schema/builtin_schemas.rs. Filling the \
-     consumer-side discriminator first would fabricate the runtime \
-     representation. See ADR-006 §2.7.4 (Phase-2c surface-and-stop) + \
-     §2.7.6 / Q8 carrier-API-bound (Q8-amendment process for new \
-     HeapKind variants). Re-emission cluster: W14-variant-codegen — \
-     land OkCtor/ErrCtor/SomeCtor producer + register schema or amend \
-     HeapKind, then close all 8 ops in this module.";
+// WS-3 F4: the `PHASE_2C_EXCEPTION_OBJECT_SURFACE` and
+// `PHASE_2C_VARIANT_CODEGEN_SURFACE` jargon literals were deleted. The
+// machinery they documented as "pending" has since landed: `build_any_error`
+// builds a real `Arc<TypedObjectStorage>`, the `OkCtor` / `ErrCtor` /
+// `SomeCtor` producers are implemented (W14-variant-codegen close), and the
+// 8 variant-discriminator opcodes are filled. The `handle_exception`
+// no-handler branch now surfaces a clean `Uncaught error: <message>` instead
+// of interpolating the internal-jargon literal.
 
 impl VirtualMachine {
     // ===== Helper Methods =====
@@ -235,18 +162,46 @@ impl VirtualMachine {
             self.ip = handler.catch_ip;
             Ok(())
         } else {
-            // No handler — propagate as a runtime error. The Phase-2c
-            // surface covers AnyError-chain formatting; release the
-            // payload share via `KindedSlot::Drop` (kind-dispatched
-            // refcount retire per §2.7.6 / Q8) and surface a generic
-            // runtime error so the kind track stays balanced.
-            let kind = payload.kind();
+            // No handler — an exception unwound past every `try` block.
+            // WS-3 F4: surface a clean user-facing error. When the payload
+            // is an AnyError TypedObject (the normal case post
+            // `normalize_err_payload` / `build_any_error`), read its
+            // `message` field and report `Uncaught error: <message>`.
+            // Otherwise stringify the payload. The `trace_info` frame-walk
+            // is a v0.4 follow-up (`trace_info_*` builders return empty
+            // strings today) — a clean message simply omits the trace.
+            let message = self.uncaught_error_message(&payload);
+            // Release the payload share via `KindedSlot::Drop`
+            // (kind-dispatched refcount retire per §2.7.6 / Q8) so the
+            // kind track stays balanced.
             drop(payload);
-            Err(VMError::RuntimeError(format!(
-                "Uncaught exception (kind {:?}): {}",
-                kind, PHASE_2C_EXCEPTION_OBJECT_SURFACE
-            )))
+            Err(VMError::RuntimeError(message))
         }
+    }
+
+    /// WS-3 F4: render a clean user-facing message for an uncaught
+    /// exception. Reads the AnyError TypedObject's `message` field when
+    /// the payload carries one; falls back to a stringified payload.
+    fn uncaught_error_message(&self, payload: &KindedSlot) -> String {
+        if let NativeKind::Ptr(HeapKind::TypedObject) = payload.kind() {
+            let bits = payload.slot().raw();
+            if bits != 0 {
+                // SAFETY: kind says Ptr(TypedObject); bits are
+                // `Arc::into_raw::<TypedObjectStorage>`. Borrow transiently
+                // (no share retire) to inspect the schema + message field.
+                let obj: &TypedObjectStorage =
+                    unsafe { &*(bits as *const TypedObjectStorage) };
+                if obj.schema_id == self.builtin_schemas.any_error as u64 {
+                    if let Some(msg) = anyerror_message_field(obj) {
+                        return format!("Uncaught error: {}", msg);
+                    }
+                }
+            }
+        }
+        let formatter = crate::executor::printing::ValueFormatter::new(
+            &self.program.type_schema_registry,
+        );
+        format!("Uncaught error: {}", formatter.format_kinded(payload))
     }
 
     // ===== Opcode Implementations =====
@@ -288,7 +243,7 @@ impl VirtualMachine {
     /// `Generic { Result, [T, E] }` and `Generic { Option, [T] }`
     /// arms specifically need the variant-discriminator contract that
     /// `op_is_ok` / `op_is_err` / `op_unwrap_option` are blocked on
-    /// (see PHASE_2C_VARIANT_CODEGEN_SURFACE). The Basic-scalar arms
+    /// (W14-variant-codegen close). The Basic-scalar arms
     /// (int / number / bool / string) could land independently, but
     /// the compiler in `compiler/patterns/checking.rs:91` and
     /// `compiler/expressions/type_ops.rs:837` emits `TypeCheck` against
@@ -560,7 +515,7 @@ impl VirtualMachine {
     /// parallel-kind. Half (c) is now available — `build_any_error`
     /// landed in W13-anyerror close `e9c7260` — but halves (a) and (b)
     /// share the same upstream blocker as `op_is_err` / `op_unwrap_ok`
-    /// (see PHASE_2C_VARIANT_CODEGEN_SURFACE). Drop both carriers
+    /// (W14-variant-codegen close). Drop both carriers
     /// (kind-dispatched refcount retire via `KindedSlot::Drop`) and
     /// surface so the stack stays balanced.
     pub(in crate::executor) fn op_error_context(&mut self) -> Result<(), VMError> {
@@ -640,7 +595,7 @@ impl VirtualMachine {
     /// substrate gaps stack here.
     ///
     /// (1) Variant discriminator — same gap as `op_is_ok` /
-    /// `op_unwrap_ok` (see PHASE_2C_VARIANT_CODEGEN_SURFACE): no
+    /// `op_unwrap_ok` (W14-variant-codegen close): no
     /// determined runtime representation for `Result<_,_>` because
     /// `BuiltinFunction::OkCtor` / `ErrCtor` are still `todo!()`. The
     /// pre-bulldozer `extract_ok_inner` / `extract_err_inner` /
@@ -744,7 +699,7 @@ impl VirtualMachine {
     /// schema-wrapped, mirroring AnyError) which would invalidate a
     /// null-coding-only body. Surface-and-stop is the correct shape:
     /// the consumer body is contracted by the producer choice, which
-    /// must land first. See PHASE_2C_VARIANT_CODEGEN_SURFACE.
+    /// must land first (W14-variant-codegen close).
     pub(in crate::executor) fn op_unwrap_option(&mut self) -> Result<(), VMError> {
         let (bits, kind) = self.pop_kinded()?;
         let value = KindedSlot::new(ValueSlot::from_raw(bits), kind);
@@ -1013,6 +968,14 @@ fn type_check_kinded(
                 NativeKind::String | NativeKind::Ptr(HeapKind::String)
             ),
             "char" => matches!(value.kind, NativeKind::Ptr(HeapKind::Char)),
+            // WS-3: `emit_destructure_type_check` (`patterns/helpers.rs`)
+            // passes the bare name `"array"` (not the `Generic { name:
+            // "Array", .. }` form). Without this arm the `TypeCheck`
+            // returned `false` for every `let [a, b, c] = xs`, the
+            // guard `JumpIfTrue` did not jump, and the `Throw` fired —
+            // surfacing the uncaught-exception path on a valid program.
+            // Matches the `Generic "Array" | "Vec"` arm below.
+            "array" => matches!(value.kind, NativeKind::Ptr(HeapKind::TypedArray)),
             _ => false,
         },
         TypeAnnotation::Null => value.slot.raw() == 0,
@@ -1103,6 +1066,32 @@ fn kinded_to_string_arc(slot: KindedSlot) -> Arc<String> {
     let text = stringify_non_string_kinded(&slot);
     drop(slot);
     Arc::new(text)
+}
+
+/// WS-3 F4: read the `message` field of an AnyError `TypedObjectStorage`
+/// without consuming any strong-count share. Returns `None` when the
+/// message slot is empty (heap_mask bit clear / zero bits) or absent.
+///
+/// The caller must already have verified `obj.schema_id` is the AnyError
+/// schema id; that schema declares all 6 fields `String`-kinded, so the
+/// `ANYERROR_MESSAGE` slot's bits are `Arc::into_raw::<String>` when the
+/// `heap_mask` bit is set.
+fn anyerror_message_field(obj: &TypedObjectStorage) -> Option<String> {
+    let idx = ANYERROR_MESSAGE;
+    if (obj.heap_mask >> idx) & 1 == 0 {
+        return None;
+    }
+    let bits = obj.slots.get(idx)?.raw();
+    if bits == 0 {
+        return None;
+    }
+    // SAFETY: the AnyError schema declares field `ANYERROR_MESSAGE` as a
+    // `String`; `build_any_error` stamps it with `Arc::into_raw::<String>`
+    // bits and sets the matching `heap_mask` bit. Borrow the `&String`
+    // for the duration of this read — no `Arc::from_raw`, so the object's
+    // share is untouched.
+    let s: &String = unsafe { &*(bits as *const String) };
+    Some(s.clone())
 }
 
 /// Like `kinded_to_string_arc` but returns `None` when the carrier is
@@ -1495,5 +1484,74 @@ mod unwrap_refcount_regression_tests {
             "#,
         );
         assert_eq!(v.as_i64(), Some(5));
+    }
+}
+
+#[cfg(test)]
+mod ws3_uncaught_and_array_typecheck_tests {
+    //! WS-3 F4 + the `type_check_kinded` `"array"` Basic-name arm.
+    //!
+    //! F4: the `handle_exception` no-handler branch used to interpolate
+    //! the internal-jargon `PHASE_2C_EXCEPTION_OBJECT_SURFACE` literal
+    //! (ADR section numbers, deleted-symbol names) as a user-facing
+    //! error. It now surfaces a clean `Uncaught error: <message>`.
+    //!
+    //! `type_check_kinded`: `emit_destructure_type_check` passes the bare
+    //! name `"array"`, which no Basic arm matched — so `let [a,b,c] = xs`
+    //! failed the runtime `TypeCheck`, fired `Throw`, and dumped the F4
+    //! jargon. The new `"array"` arm makes plain array-destructure work.
+
+    use crate::test_utils::eval_result;
+
+    /// A non-exhaustive `match` with no enclosing `try` unwinds to the
+    /// `handle_exception` no-handler branch. The surfaced error must be
+    /// the clean message, NOT the internal jargon.
+    #[test]
+    fn ws3_f4_uncaught_match_failure_is_clean_no_jargon() {
+        let err = eval_result(
+            r#"
+            fn run() -> int {
+                let x = 5
+                match x { 1 => 10, 2 => 20 }
+            }
+            run()
+            "#,
+        )
+        .expect_err("non-exhaustive match must surface a runtime error");
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("Uncaught error:"),
+            "expected a clean `Uncaught error:` message, got: {}",
+            msg
+        );
+        // The jargon literal's distinctive fragments must NOT appear.
+        assert!(
+            !msg.contains("phase-2c")
+                && !msg.contains("ADR-006")
+                && !msg.contains("ValueWord")
+                && !msg.contains("D-raw-helpers"),
+            "uncaught-exception message must not dump internal jargon: {}",
+            msg
+        );
+    }
+
+    /// WS-3: a plain (non-rest) array destructure `let [a,b,c] = xs` must
+    /// run cleanly. Before the `type_check_kinded` `"array"` arm, the
+    /// runtime `TypeCheck` against the bare `"array"` name returned
+    /// `false`, fired `Throw`, and dumped the F4 jargon.
+    #[test]
+    fn ws3_non_rest_array_destructure_runs_cleanly() {
+        let result = eval_result(
+            r#"
+            fn run() -> int {
+                let xs = [10, 20, 30]
+                let [a, b, c] = xs
+                b
+            }
+            run()
+            "#,
+        );
+        let slot = result.expect("plain array destructure must not raise");
+        assert_eq!(slot.as_i64(), Some(20));
     }
 }

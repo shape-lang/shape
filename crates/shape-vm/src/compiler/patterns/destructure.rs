@@ -144,6 +144,24 @@ impl BytecodeCompiler {
             }
 
             DestructurePattern::Array(patterns) => {
+                // WS-3: the array rest-pattern `let [a, ...rest] = xs` is
+                // v0.4-out-of-scope as a feature. At HEAD the `Rest`
+                // sub-pattern compiled a `SliceAccess` path that, on the
+                // common runtime shape, surfaced the internal-jargon
+                // uncaught-exception dump. Reject it CLEANLY at compile
+                // time instead — a compile-time `SemanticError` never
+                // reaches `handle_exception`.
+                if patterns
+                    .iter()
+                    .any(|p| matches!(p, DestructurePattern::Rest(_)))
+                {
+                    return Err(ShapeError::SemanticError {
+                        message: "array rest-pattern (`[a, ...rest]`) is not supported"
+                            .to_string(),
+                        location: None,
+                    });
+                }
+
                 let value_local = self.declare_temp_local("__destructure_array_")?;
                 self.emit(Instruction::new(
                     OpCode::StoreLocal,
@@ -353,6 +371,24 @@ impl BytecodeCompiler {
                 Ok(())
             }
             DestructurePattern::Array(patterns) => {
+                // WS-3: the array rest-pattern `let [a, ...rest] = xs` is
+                // v0.4-out-of-scope as a feature. At HEAD the `Rest`
+                // sub-pattern compiled a `SliceAccess` path that, on the
+                // common runtime shape, surfaced the internal-jargon
+                // uncaught-exception dump. Reject it CLEANLY at compile
+                // time instead — a compile-time `SemanticError` never
+                // reaches `handle_exception`.
+                if patterns
+                    .iter()
+                    .any(|p| matches!(p, DestructurePattern::Rest(_)))
+                {
+                    return Err(ShapeError::SemanticError {
+                        message: "array rest-pattern (`[a, ...rest]`) is not supported"
+                            .to_string(),
+                        location: None,
+                    });
+                }
+
                 let value_local = self.declare_temp_local("__destructure_array_")?;
                 self.emit(Instruction::new(
                     OpCode::StoreLocal,
@@ -544,6 +580,24 @@ impl BytecodeCompiler {
         match pattern {
             DestructurePattern::Identifier(name, _) => self.emit_store_identifier(name),
             DestructurePattern::Array(patterns) => {
+                // WS-3: the array rest-pattern `[a, ...rest] = xs` is
+                // v0.4-out-of-scope as a feature. At HEAD the `Rest`
+                // sub-pattern compiled a `SliceAccess` path that, on the
+                // common runtime shape, surfaced the internal-jargon
+                // uncaught-exception dump. Reject it CLEANLY at compile
+                // time instead — a compile-time `SemanticError` never
+                // reaches `handle_exception`.
+                if patterns
+                    .iter()
+                    .any(|p| matches!(p, DestructurePattern::Rest(_)))
+                {
+                    return Err(ShapeError::SemanticError {
+                        message: "array rest-pattern (`[a, ...rest]`) is not supported"
+                            .to_string(),
+                        location: None,
+                    });
+                }
+
                 let value_local = self.declare_temp_local("__assign_array_")?;
                 self.emit(Instruction::new(
                     OpCode::StoreLocal,
@@ -767,5 +821,67 @@ impl BytecodeCompiler {
                 Ok((fields, schema_id))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod ws3_array_rest_tests {
+    //! WS-3: the array rest-pattern `[a, ...rest]` is v0.4-out-of-scope.
+    //!
+    //! At HEAD the `Rest` sub-pattern compiled a `SliceAccess` path that,
+    //! on the common runtime shape, surfaced the internal-jargon
+    //! uncaught-exception dump. It must now reject CLEANLY at compile
+    //! time with a plain `SemanticError`.
+    use crate::compiler::BytecodeCompiler;
+    use shape_ast::parser::parse_program;
+
+    #[test]
+    fn ws3_array_rest_pattern_errors_cleanly() {
+        let code = r#"
+            fn run() {
+                let xs = [1, 2, 3, 4]
+                let [a, ...rest] = xs
+                print(a)
+            }
+        "#;
+        let program = parse_program(code).expect("Failed to parse");
+        let result = BytecodeCompiler::new().compile(&program);
+        assert!(
+            result.is_err(),
+            "array rest-pattern must be rejected at compile time"
+        );
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("array rest-pattern") && msg.contains("not supported"),
+            "expected a clean array rest-pattern error, got: {}",
+            msg
+        );
+        // The clean error must NOT carry internal jargon.
+        assert!(
+            !msg.contains("phase-2c") && !msg.contains("ADR-006"),
+            "array rest-pattern error must not dump internal jargon: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn ws3_non_rest_array_destructure_compiles() {
+        // The non-rest `let [a, b, c] = xs` form must still compile —
+        // it was collateral damage of the missing `type_check_kinded`
+        // `"array"` Basic-name arm before the WS-3 fix.
+        let code = r#"
+            fn run() {
+                let xs = [10, 20, 30]
+                let [a, b, c] = xs
+                print(b)
+            }
+        "#;
+        let program = parse_program(code).expect("Failed to parse");
+        let result = BytecodeCompiler::new().compile(&program);
+        assert!(
+            result.is_ok(),
+            "non-rest array destructure must compile: {:?}",
+            result.err()
+        );
     }
 }

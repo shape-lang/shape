@@ -918,6 +918,30 @@ impl BytecodeCompiler {
                 self.last_expr_schema = None;
                 self.last_expr_numeric_type = None;
             }
+            BinaryOp::ErrorContext => {
+                // WS-3 F3: the `!!` error-context operator. Before this
+                // arm existed, `ErrorContext` fell into the generic `_ =>`
+                // arithmetic arm, whose strict-operand-type gate rejected
+                // the `Result<…>` left operand — so a core operator could
+                // not be compiled at all.
+                //
+                // `value !! context`: the `op_error_context` handler
+                // (`executor/exceptions/mod.rs`) pops `context` (top of
+                // stack) then `value`, so we compile `left` (value) then
+                // `right` (context). On the success leg the handler
+                // unwraps to the inner value (`Ok(v) => v`, `Some(v) => v`,
+                // bare `v => v`); on the failure leg it builds an AnyError
+                // and throws. The opcode + handler already exist; this arm
+                // is the only missing dispatch piece.
+                self.compile_expr(left)?;
+                self.compile_expr(right)?;
+                self.emit(Instruction::simple(OpCode::ErrorContext));
+                // `!!` yields the UNWRAPPED success value `T` (same as `?`
+                // — both unwrap `Ok(v)`/`Some(v)` to `v` on success).
+                // Stamp the tracker with the unwrapped success type so a
+                // downstream `let v = expr !! "ctx"` records `v`'s type.
+                self.stamp_unwrapped_success_type(left);
+            }
             BinaryOp::Pipe => {
                 // Pipe operator: a |> f transforms to f(a)
                 // a |> f(x) transforms to f(a, x)
@@ -2552,6 +2576,62 @@ mod u64_literal_inference_tests {
         assert_eq!(
             run_top_level("let m: u64 = 9223372036854775808\nm * 2\n"),
             0
+        );
+    }
+}
+
+#[cfg(test)]
+mod ws3_f3_error_context_tests {
+    //! WS-3 F3: the `!!` error-context operator compiles.
+    //!
+    //! Before this fix `compile_expr_binary_op` had no
+    //! `BinaryOp::ErrorContext` arm, so `!!` fell into the generic
+    //! arithmetic arm whose strict-operand-type gate rejected the
+    //! `Result<…>` left operand — a core operator could not be compiled
+    //! at all. The opcode (`OpCode::ErrorContext`) and the runtime
+    //! handler (`op_error_context`) already existed; only the
+    //! compiler-dispatch arm was missing.
+    use crate::compiler::BytecodeCompiler;
+    use shape_ast::parser::parse_program;
+
+    #[test]
+    fn ws3_f3_error_context_operator_compiles() {
+        let code = r#"
+            fn boom() -> Result<int, string> { Err("bad") }
+            fn main() -> Result<int, string> {
+                let v = boom() !! "ctx"
+                print(v)
+                Ok(0)
+            }
+        "#;
+        let program = parse_program(code).expect("Failed to parse");
+        let result = BytecodeCompiler::new().compile(&program);
+        assert!(
+            result.is_ok(),
+            "`!!` error-context operator must compile: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn ws3_f3_error_context_unwrapped_type_propagates_to_binding() {
+        // `!!` yields the UNWRAPPED success value `T` (`Ok(v) => v`), so
+        // a downstream `v + 1` must type-check as `int + int`.
+        let code = r#"
+            fn good() -> Result<int, string> { Ok(99) }
+            fn main() -> Result<int, string> {
+                let v = good() !! "ctx"
+                let w = v + 1
+                print(w)
+                Ok(0)
+            }
+        "#;
+        let program = parse_program(code).expect("Failed to parse");
+        let result = BytecodeCompiler::new().compile(&program);
+        assert!(
+            result.is_ok(),
+            "`!!`-unwrapped value must keep its type for a downstream binop: {:?}",
+            result.err()
         );
     }
 }

@@ -164,6 +164,37 @@ fn heap_to_wire(bits: u64, hk: HeapKind, ctx: &Context) -> WireValue {
             None => WireValue::Null,
         };
     }
+    // WS-3 F2b: `HeapKind::Result` / `HeapKind::Option` are typed-Arc
+    // dispatch labels — their bits are `Arc::into_raw(Arc<ResultData>)` /
+    // `Arc::into_raw(Arc<OptionData>)`, NOT an `Arc<HeapValue>`. Casting
+    // those bits to `*const HeapValue` (the path below) reads a
+    // `ResultData`/`OptionData` as a `HeapValue` enum — type confusion +
+    // UB. This crashed (SIGSEGV) whenever a `Result`/`Option` was the
+    // program's terminal value (e.g. `fn main() -> Result<int,string>`
+    // returning `Ok(0)` as the trailing expression). Project the typed
+    // payload directly, mirroring `printing.rs`'s `HeapKind::Result` /
+    // `HeapKind::Option` formatter arms.
+    if hk == HeapKind::Result {
+        // SAFETY: `KindedSlot::from_result` construction contract —
+        // Result-kind bits are `Arc::into_raw(Arc<ResultData>)`.
+        let r: &shape_value::heap_value::ResultData =
+            unsafe { &*(bits as *const shape_value::heap_value::ResultData) };
+        let inner = slot_to_wire(r.payload.raw(), r.payload.kind(), ctx);
+        return WireValue::Result {
+            ok: r.is_ok,
+            value: Box::new(inner),
+        };
+    }
+    if hk == HeapKind::Option {
+        // SAFETY: `KindedSlot::from_option` construction contract —
+        // Option-kind bits are `Arc::into_raw(Arc<OptionData>)`.
+        let o: &shape_value::heap_value::OptionData =
+            unsafe { &*(bits as *const shape_value::heap_value::OptionData) };
+        if o.is_some {
+            return slot_to_wire(o.payload.raw(), o.payload.kind(), ctx);
+        }
+        return WireValue::Null;
+    }
     let ptr = bits as *const HeapValue;
     // SAFETY: NativeKind::Ptr(hk) contract — bits is a valid Arc<HeapValue> ptr.
     let hv = unsafe { &*ptr };
@@ -754,5 +785,78 @@ mod char_wire_tests {
             &ctx,
         );
         assert_eq!(wire, WireValue::String("c".to_string()));
+    }
+}
+
+#[cfg(test)]
+mod ws3_f2b_result_option_wire_tests {
+    //! WS-3 F2b — `Result` / `Option` program-return-value wire projection.
+    //!
+    //! `HeapKind::Result` / `HeapKind::Option` are typed-Arc dispatch
+    //! labels — their slot bits are `Arc::into_raw(Arc<ResultData>)` /
+    //! `Arc::into_raw(Arc<OptionData>)`, NOT an `Arc<HeapValue>`. Pre-fix,
+    //! `heap_to_wire`'s catch-all cast those bits to `*const HeapValue`
+    //! and dereferenced — reading a `ResultData`/`OptionData` as a
+    //! `HeapValue` enum (type confusion + UB). This crashed (SIGSEGV)
+    //! whenever a `Result`/`Option` was the program's terminal value
+    //! (e.g. `fn main() -> Result<int,string>` returning `Ok(0)`), which
+    //! made every `?`-using program crash once it compiled.
+    //!
+    //! The fix adds dedicated `HeapKind::Result` / `HeapKind::Option`
+    //! arms that read the typed payload directly.
+
+    use super::slot_to_wire;
+    use crate::context::ExecutionContext;
+    use shape_value::heap_value::{OptionData, ResultData};
+    use shape_value::kinded_slot::KindedSlot;
+    use shape_wire::WireValue;
+    use std::sync::Arc;
+
+    #[test]
+    fn ok_result_projects_to_wire_result_ok() {
+        let ctx = ExecutionContext::new_empty();
+        let payload = KindedSlot::from_int(42);
+        let slot = KindedSlot::from_result(Arc::new(ResultData::ok(payload)));
+        let wire = slot_to_wire(slot.raw(), slot.kind(), &ctx);
+        match wire {
+            WireValue::Result { ok, value } => {
+                assert!(ok, "Ok(42) must wire with ok=true");
+                assert_eq!(*value, WireValue::Integer(42));
+            }
+            other => panic!("expected WireValue::Result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn err_result_projects_to_wire_result_err() {
+        let ctx = ExecutionContext::new_empty();
+        let payload = KindedSlot::from_int(7);
+        let slot = KindedSlot::from_result(Arc::new(ResultData::err(payload)));
+        let wire = slot_to_wire(slot.raw(), slot.kind(), &ctx);
+        match wire {
+            WireValue::Result { ok, value } => {
+                assert!(!ok, "Err(7) must wire with ok=false");
+                assert_eq!(*value, WireValue::Integer(7));
+            }
+            other => panic!("expected WireValue::Result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn some_option_projects_to_inner_value() {
+        let ctx = ExecutionContext::new_empty();
+        let payload = KindedSlot::from_int(5);
+        let slot = KindedSlot::from_option(Arc::new(OptionData::some(payload)));
+        let wire = slot_to_wire(slot.raw(), slot.kind(), &ctx);
+        // Null-coding semantics: `Some(x) ≡ x`.
+        assert_eq!(wire, WireValue::Integer(5));
+    }
+
+    #[test]
+    fn none_option_projects_to_null() {
+        let ctx = ExecutionContext::new_empty();
+        let slot = KindedSlot::from_option(Arc::new(OptionData::none()));
+        let wire = slot_to_wire(slot.raw(), slot.kind(), &ctx);
+        assert_eq!(wire, WireValue::Null);
     }
 }

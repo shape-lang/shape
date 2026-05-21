@@ -38,7 +38,160 @@ impl BytecodeCompiler {
         // 2. Option propagation (Some/None)
         // 3. Nullable Option runtime encoding compatibility for bare non-None values
         self.emit(Instruction::simple(OpCode::TryUnwrap));
+
+        // WS-3 F2a: stamp the compile-time type tracker with the type of the
+        // UNWRAPPED success value. The `?` operator yields the inner `T` of a
+        // `Result<T, E>` / `Option<T>` (or `T?`); the runtime inference engine
+        // already does this (`try_unwrap_inner_type`,
+        // `type_system/inference/expressions.rs`), but the bytecode compiler's
+        // parallel tracker did not. Without this stamp, a `let v = expr?`
+        // binding records slot `v` with no type, and a later `v + 1` fails
+        // strict typing as `unknown + int`. We mirror the runtime engine's
+        // unwrap onto `last_expr_*` so `propagate_initializer_type_to_slot`
+        // records the unwrapped type on the binding's slot.
+        self.stamp_unwrapped_success_type(inner);
         Ok(())
+    }
+
+    /// WS-3 F2a: infer the `?`-operand's type, unwrap the `Result`/`Option`
+    /// wrapper to the success type, and stamp `last_expr_*` so a downstream
+    /// `let`-binding records the unwrapped type on its slot.
+    ///
+    /// Also reused for the `!!` error-context operator (WS-3 F3): both `?`
+    /// and `!!` yield the UNWRAPPED success value `T` on the success leg
+    /// (`Ok(v) => v`), so both stamp the same unwrapped type.
+    pub(super) fn stamp_unwrapped_success_type(&mut self, inner: &Expr) {
+        // Clear any stale stamps from `compile_expr(inner)` first — the
+        // unwrapped value's type, not the wrapper's, is what flows out.
+        self.last_expr_type_info = None;
+        self.last_expr_numeric_type = None;
+        self.last_expr_schema = None;
+
+        let Ok(inner_ty) = self.infer_expr_type(inner) else {
+            return;
+        };
+        let Some(success_name) = Self::try_operator_success_type_name(&inner_ty) else {
+            return;
+        };
+        self.stamp_last_expr_from_type_name(&success_name);
+    }
+
+    /// Extract the success type-name of a `Result<T, E>` / `Option<T>` /
+    /// `T?` type. Handles every shape `infer_expr_type` can produce:
+    /// a `Type::Generic` whose base is the `Result`/`Option` name, a
+    /// `Type::Concrete(Generic { name, .. })`, and the
+    /// `Type::Concrete(Basic("Result<int, string>"))` string-baked form the
+    /// function-return-type hint table produces. Returns `None` when the
+    /// operand is not a recognised fallible wrapper.
+    fn try_operator_success_type_name(
+        ty: &shape_runtime::type_system::Type,
+    ) -> Option<String> {
+        use shape_ast::ast::TypeAnnotation;
+        use shape_runtime::type_system::Type;
+
+        let is_fallible_name = |n: &str| n == "Result" || n == "Option";
+
+        match ty {
+            Type::Generic { base, args } if !args.is_empty() => {
+                let base_name = match base.as_ref() {
+                    Type::Concrete(ann) => ann.as_type_name_str()?.to_string(),
+                    _ => return None,
+                };
+                if !is_fallible_name(&base_name) {
+                    return None;
+                }
+                Self::type_to_simple_name(&args[0])
+            }
+            Type::Concrete(TypeAnnotation::Generic { name, args })
+                if is_fallible_name(name) && !args.is_empty() =>
+            {
+                Some(args[0].to_type_string())
+            }
+            Type::Concrete(TypeAnnotation::Basic(s)) => {
+                // The function-return-type hint table bakes generics into a
+                // single `Basic` string, e.g. `Result<int, string>`. Split
+                // off the first type argument at angle-bracket depth 0.
+                Self::first_generic_arg_of_baked_name(s, is_fallible_name)
+            }
+            _ => None,
+        }
+    }
+
+    /// Render a `Type` to a simple type-name string (best effort).
+    fn type_to_simple_name(ty: &shape_runtime::type_system::Type) -> Option<String> {
+        use shape_runtime::type_system::Type;
+        match ty {
+            Type::Concrete(ann) => Some(ann.to_type_string()),
+            Type::Generic { .. } => Self::inferred_type_to_hint_name(ty),
+            _ => None,
+        }
+    }
+
+    /// Given a baked generic name like `Result<int, string>`, verify the base
+    /// name is a fallible wrapper and return its FIRST type argument
+    /// (`int`). Bracket-depth-aware so nested generics in later args do not
+    /// confuse the split.
+    fn first_generic_arg_of_baked_name(
+        s: &str,
+        is_fallible_name: impl Fn(&str) -> bool,
+    ) -> Option<String> {
+        let open = s.find('<')?;
+        let base = s[..open].trim();
+        if !is_fallible_name(base) {
+            return None;
+        }
+        if !s.ends_with('>') {
+            return None;
+        }
+        let inner = &s[open + 1..s.len() - 1];
+        let mut depth = 0usize;
+        for (i, ch) in inner.char_indices() {
+            match ch {
+                '<' => depth += 1,
+                '>' => depth = depth.saturating_sub(1),
+                ',' if depth == 0 => {
+                    return Some(inner[..i].trim().to_string());
+                }
+                _ => {}
+            }
+        }
+        Some(inner.trim().to_string())
+    }
+
+    /// Stamp `last_expr_*` from a resolved success type-name so a
+    /// downstream `let`-binding's `propagate_initializer_type_to_slot`
+    /// records the type. Mirrors the `tracked_callable_rt` stamping in
+    /// `compile_expr_function_call`.
+    fn stamp_last_expr_from_type_name(&mut self, name: &str) {
+        use crate::type_tracking::{NumericType, VariableTypeInfo};
+        use shape_runtime::type_system::BuiltinTypes;
+
+        match name {
+            "int" => self.last_expr_numeric_type = Some(NumericType::Int),
+            "number" => self.last_expr_numeric_type = Some(NumericType::Number),
+            "decimal" => self.last_expr_numeric_type = Some(NumericType::Decimal),
+            "string" | "bool" | "char" | "bigint" => {
+                self.last_expr_type_info =
+                    Some(VariableTypeInfo::named(name.to_string()));
+            }
+            other if BuiltinTypes::is_integer_type_name(other) => {
+                // Width-aware ints (i8/u8/i16/...): the name round-trips via
+                // `type_info`; `propagate_assignment_type_to_slot` re-derives
+                // the storage hint from the recorded name.
+                self.last_expr_type_info =
+                    Some(VariableTypeInfo::named(other.to_string()));
+            }
+            other => {
+                // A user struct / enum success type — stamp the schema so the
+                // binding inherits it. Strip any generic args before lookup.
+                let base = other.split('<').next().unwrap_or(other).trim();
+                if let Some(schema) =
+                    self.type_tracker.schema_registry().get(base)
+                {
+                    self.last_expr_schema = Some(schema.id);
+                }
+            }
+        }
     }
 
     /// Compile a match expression
@@ -1127,6 +1280,54 @@ mod tests {
             "AsyncScopeEnter (pos {}) should come before AsyncScopeExit (pos {})",
             enter_pos,
             exit_pos
+        );
+    }
+
+    // ── WS-3 F2a: `?` operator unwrapped-type stamp ──────────────────────
+
+    #[test]
+    fn ws3_f2a_try_operator_unwrapped_type_propagates_to_binding() {
+        // The `?` operator unwraps `Result<int, string>` to `int`; a
+        // later `v + 1` must type-check (`int + int`). Before the F2a
+        // fix, `compile_expr_try_operator` did not stamp the tracker, so
+        // `v` was recorded with no type and `v + 1` failed strict typing
+        // as `unknown + int`.
+        let code = r#"
+            fn p(s: string) -> Result<int, string> { Ok(42) }
+            fn main() -> Result<int, string> {
+                let v = p("x")?
+                let w = v + 1
+                print(w)
+                Ok(0)
+            }
+        "#;
+        let program = parse_program(code).expect("Failed to parse");
+        let result = BytecodeCompiler::new().compile(&program);
+        assert!(
+            result.is_ok(),
+            "`?`-unwrapped value must keep its type for a downstream binop: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn ws3_f2a_try_operator_option_unwrapped_type_propagates() {
+        // Same as above but for `Option<int>` — `?` unwraps to `int`.
+        let code = r#"
+            fn p() -> Option<int> { Some(7) }
+            fn main() -> Option<int> {
+                let v = p()?
+                let w = v + 1
+                print(w)
+                Some(0)
+            }
+        "#;
+        let program = parse_program(code).expect("Failed to parse");
+        let result = BytecodeCompiler::new().compile(&program);
+        assert!(
+            result.is_ok(),
+            "`?`-unwrapped Option value must keep its type: {:?}",
+            result.err()
         );
     }
 }

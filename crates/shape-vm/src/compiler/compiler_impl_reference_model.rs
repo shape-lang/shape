@@ -847,7 +847,7 @@ impl BytecodeCompiler {
         (inferred_ref_params, result, inferred_param_type_hints, inferred_return_type_hints)
     }
 
-    pub(super) fn inferred_type_to_hint_name(ty: &Type) -> Option<String> {
+    pub(crate) fn inferred_type_to_hint_name(ty: &Type) -> Option<String> {
         match ty {
             Type::Concrete(annotation) => Some(annotation.to_type_string()),
             Type::Generic { base, args } => {

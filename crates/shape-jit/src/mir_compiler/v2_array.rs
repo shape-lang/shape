@@ -76,21 +76,6 @@ fn elem_type_info(kind: NativeKind) -> (types::Type, i64) {
     }
 }
 
-/// Return the zero/default Cranelift constant for a given `NativeKind`.
-///
-/// Used as the out-of-bounds fallback value in `v2_array_get`.
-fn emit_default(builder: &mut FunctionBuilder, kind: NativeKind) -> Value {
-    let (ty, _) = elem_type_info(kind);
-    match ty {
-        types::F64 => builder.ins().f64const(0.0),
-        types::I64 => builder.ins().iconst(types::I64, 0),
-        types::I32 => builder.ins().iconst(types::I32, 0),
-        types::I16 => builder.ins().iconst(types::I16, 0),
-        types::I8 => builder.ins().iconst(types::I8, 0),
-        _ => unreachable!(),
-    }
-}
-
 // ── Implementation ──────────────────────────────────────────────────────────
 
 impl<'a, 'b> MirToIR<'a, 'b> {
@@ -828,7 +813,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// Emits:
     /// 1. Load `data` pointer from `[arr_ptr + 8]`
     /// 2. Load `len` (u32) from `[arr_ptr + 16]`
-    /// 3. Bounds check: `if index >= len` return zero-default
+    /// 3. Bounds check: `if index >= len` raise an out-of-bounds error
+    ///    (early `return_` of `JIT_SIGNAL_INDEX_OUT_OF_BOUNDS` — VM/JIT parity)
     /// 4. Compute element address: `data + index * elem_size`
     /// 5. Load element with the correct Cranelift type
     ///
@@ -871,12 +857,24 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             .ins()
             .brif(cmp, in_bounds_block, &[], oob_block, &[]);
 
-        // ── Out-of-bounds path: return default ──────────────────────────
+        // ── Out-of-bounds path: raise an out-of-bounds error ────────────
+        //
+        // WS-3 F1: the prior codegen fabricated the element-type zero here
+        // (a default-constant `jump merge`). That silently produced a value
+        // for a memory-unsafe access the VM correctly rejects with
+        // `VMError::IndexOutOfBounds` — a VM/JIT divergence. The MirToIR
+        // function returns `i32` (the `JittedStrategyFn` ABI), so an early
+        // `return_` of the `JIT_SIGNAL_INDEX_OUT_OF_BOUNDS` signal is
+        // type-correct. The executor maps that signal back to the VM's
+        // `Index out of bounds` diagnostic. Mirrors the
+        // `compile_int_divmod_guarded` clean-error fall-through shape.
         self.builder.switch_to_block(oob_block);
         self.builder.seal_block(oob_block);
-
-        let default_val = emit_default(self.builder, elem_type);
-        self.builder.ins().jump(merge_block, &[default_val]);
+        let oob_signal = self.narrow_iconst(
+            types::I32,
+            crate::context::JIT_SIGNAL_INDEX_OUT_OF_BOUNDS as i64,
+        );
+        self.builder.ins().return_(&[oob_signal]);
 
         // ── In-bounds path: compute address and load element ────────────
         self.builder.switch_to_block(in_bounds_block);
@@ -922,7 +920,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// Emits:
     /// 1. Load `data` pointer from `[arr_ptr + 8]`
     /// 2. Load `len` (u32) from `[arr_ptr + 16]`
-    /// 3. Bounds check: `if index >= len` skip (silent no-op for OOB)
+    /// 3. Bounds check: `if index >= len` raise an out-of-bounds error
+    ///    (early `return_` of `JIT_SIGNAL_INDEX_OUT_OF_BOUNDS` — VM/JIT parity)
     /// 4. Compute element address: `data + index * elem_size`
     /// 5. Store element with the correct Cranelift type
     ///
@@ -950,6 +949,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 
         // 3. Bounds check
         let in_bounds_block = self.builder.create_block();
+        let oob_block = self.builder.create_block();
         let continue_block = self.builder.create_block();
 
         let cmp = self
@@ -958,7 +958,23 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             .icmp(IntCC::UnsignedLessThan, index, len);
         self.builder
             .ins()
-            .brif(cmp, in_bounds_block, &[], continue_block, &[]);
+            .brif(cmp, in_bounds_block, &[], oob_block, &[]);
+
+        // ── Out-of-bounds path: raise an out-of-bounds error ────────────
+        //
+        // WS-3 F1: the prior codegen silently skipped the store on OOB
+        // (`brif` fell through to `continue_block`). That diverges from the
+        // VM, which rejects the access with `VMError::IndexOutOfBounds`. The
+        // MirToIR function returns `i32`, so an early `return_` of the
+        // `JIT_SIGNAL_INDEX_OUT_OF_BOUNDS` signal is type-correct; the
+        // executor maps it to the VM's `Index out of bounds` diagnostic.
+        self.builder.switch_to_block(oob_block);
+        self.builder.seal_block(oob_block);
+        let oob_signal = self.narrow_iconst(
+            types::I32,
+            crate::context::JIT_SIGNAL_INDEX_OUT_OF_BOUNDS as i64,
+        );
+        self.builder.ins().return_(&[oob_signal]);
 
         // ── In-bounds path: store element ───────────────────────────────
         self.builder.switch_to_block(in_bounds_block);
