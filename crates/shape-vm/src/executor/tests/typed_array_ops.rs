@@ -790,3 +790,82 @@ fn ws9_index_ordered_comparison_on_unannotated_params() {
     );
     assert_eq!(ge.as_bool(), Some(true));
 }
+
+// ── WS-9b: property access into an unannotated parameter ──
+//
+// The property-access sibling of WS-9 Cluster A. At HEAD `68826829` a
+// `a.field` access into an UNANNOTATED parameter, fed to a binary
+// operator, was spuriously rejected: `infer_function` eagerly projected
+// the parameter to a partial structural `Object([{ field: unknown }])`,
+// which could not unify with the call site's NAMED struct argument, so
+// inference failed with `UnsolvedConstraints` and the binop emitter saw
+// `unknown <op> unknown`.
+//
+// The fix: defer the object projection for named functions (it is now a
+// closure-only refinement) so callsite union resolves the parameter to
+// its concrete struct type; the parameter's local slot then carries that
+// struct's schema id and `infer_expr_type`'s `PropertyAccess` arm
+// resolves `a.field` to the proven field type. Struct schemas are also
+// pre-registered in a pass-1 prepass so a function declared before the
+// `type` it accepts can still resolve the field.
+
+#[test]
+fn ws9b_property_access_le_on_unannotated_params() {
+    // The reproducer: `a.lo <= b.hi` over two `Box` arguments must compile
+    // and yield `true` (1 <= 9).
+    let result = eval(
+        "fn ov(a, b) { a.lo <= b.hi }\n\
+         type Box { lo: int, hi: int }\n\
+         ov(Box { lo: 1, hi: 5 }, Box { lo: 3, hi: 9 })",
+    );
+    assert_eq!(result.as_bool(), Some(true));
+}
+
+#[test]
+fn ws9b_property_access_add_on_unannotated_params() {
+    // `a.x + b.y` over `int`-field structs must yield the integer sum.
+    let result = eval(
+        "fn f(a, b) { a.x + b.y }\n\
+         type Pair { x: int, y: int }\n\
+         f(Pair { x: 10, y: 1 }, Pair { x: 3, y: 5 })",
+    );
+    assert_eq!(result.as_i64(), Some(15));
+}
+
+#[test]
+fn ws9b_property_access_div_on_int_fields_is_integer_division() {
+    // The silent-wrong-result check: `a.x / a.y` over an `int`-field
+    // struct must do INTEGER division — `7 / 2 = 3`, NOT a fabricated
+    // `3.5`. The field kind is recovered from the proven struct schema.
+    let result = eval(
+        "fn f(a) { a.x / a.y }\n\
+         type Pair { x: int, y: int }\n\
+         f(Pair { x: 7, y: 2 })",
+    );
+    assert_eq!(result.as_i64(), Some(3));
+}
+
+#[test]
+fn ws9b_property_access_div_on_number_fields_stays_number() {
+    // The field type is PROVEN, not fabricated: a `number`-field struct
+    // must still divide as `number` — `7.0 / 2.0 = 3.5`.
+    let result = eval(
+        "fn f(a) { a.x / a.y }\n\
+         type Pair { x: number, y: number }\n\
+         f(Pair { x: 7.0, y: 2.0 })",
+    );
+    assert_eq!(result.as_f64(), Some(3.5));
+}
+
+#[test]
+fn ws9b_property_access_resolves_when_type_declared_after_function() {
+    // The struct-schema pass-1 prepass: `ov` is declared BEFORE `type
+    // Box`. Property access into `ov`'s parameter must still resolve the
+    // `Box` field types — type definitions are order-independent.
+    let result = eval(
+        "fn ov(a, b) { a.lo >= b.hi }\n\
+         type Box { lo: int, hi: int }\n\
+         ov(Box { lo: 9, hi: 5 }, Box { lo: 3, hi: 4 })",
+    );
+    assert_eq!(result.as_bool(), Some(true));
+}

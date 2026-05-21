@@ -1953,3 +1953,106 @@ fn ws9_indexable_constraint_backward_propagates_element_type() {
         resolved_elem,
     );
 }
+
+/// WS-9b: a property access (`a.field`) into an UNANNOTATED parameter
+/// whose call site supplies a NAMED struct must not produce
+/// `UnsolvedConstraints`. At HEAD `68826829`, `infer_function`'s
+/// `refine_callable_param_types_from_local_constraints` eagerly projected
+/// such a parameter to a partial structural `Object([{ field: unknown }])`
+/// type; that partial object could not unify with the call site's named
+/// `Box` argument, so the leftover `Object(...) ~ Box` constraint failed.
+/// Deferring the object projection for named functions (callsite union
+/// resolves the parameter instead) eliminates the spurious reject.
+#[test]
+fn ws9b_property_access_on_unannotated_param_resolves_named_struct() {
+    use shape_ast::ast::TypeAnnotation;
+    use shape_ast::parser::parse_program;
+
+    let code = "fn ov(a, b) { a.lo <= b.hi }\n\
+                type Box { lo: int, hi: int }\n\
+                print(ov(Box { lo: 1, hi: 5 }, Box { lo: 3, hi: 9 }))\n";
+    let program = parse_program(code).expect("program should parse");
+    let mut engine = TypeInferenceEngine::new();
+    let (types, errors) = engine.infer_program_best_effort(&program);
+    assert!(
+        errors.is_empty(),
+        "inference must not reject property access into a named-struct \
+         unannotated param: {:?}",
+        errors
+    );
+    let Some(Type::Function { params, .. }) = types.get("ov") else {
+        panic!("ov should be inferred as a function");
+    };
+    for (idx, p) in params.iter().enumerate() {
+        assert!(
+            matches!(
+                p,
+                Type::Concrete(TypeAnnotation::Reference(path))
+                    if path.as_str() == "Box"
+            ),
+            "ov param {} must resolve to the named struct Box, got {:?}",
+            idx,
+            p,
+        );
+    }
+}
+
+/// WS-9b: the object projection in
+/// `refine_callable_param_types_from_local_constraints` is a closure-only
+/// refinement. For a NAMED FUNCTION (`is_closure = false`) an
+/// object-field-accessed parameter must be LEFT as a `Type::Variable` so
+/// callsite union can resolve it — projecting it to a partial `Object`
+/// here severs that link.
+#[test]
+fn ws9b_named_function_object_param_left_as_variable_for_callsite_union() {
+    use crate::type_system::{Type, TypeConstraint, TypeVar};
+
+    let mut engine = TypeInferenceEngine::new();
+    let param_var = TypeVar::new("p".to_string());
+    let field_var = TypeVar::new("f".to_string());
+    let mut param_types = vec![Type::Variable(param_var.clone())];
+    // Body constraint: `p` has field `lo` (the shape `p.lo` produces).
+    let local_constraints = vec![(
+        Type::Variable(param_var.clone()),
+        Type::Constrained {
+            var: TypeVar::new("bound".to_string()),
+            constraint: Box::new(TypeConstraint::HasField(
+                "lo".to_string(),
+                Box::new(Type::Variable(field_var)),
+            )),
+        },
+    )];
+
+    // Named-function path (`is_closure = false`): the parameter must stay
+    // a variable.
+    engine.refine_callable_param_types_from_local_constraints(
+        &mut param_types,
+        &local_constraints,
+        false,
+    );
+    assert!(
+        matches!(param_types[0], Type::Variable(_)),
+        "a named function's object-field-accessed param must stay a \
+         Type::Variable for callsite union, got {:?}",
+        param_types[0],
+    );
+
+    // Closure path (`is_closure = true`): the parameter IS eagerly
+    // projected to a partial structural object (closures have no callsite
+    // union to resolve them).
+    let mut closure_param_types = vec![Type::Variable(param_var)];
+    engine.refine_callable_param_types_from_local_constraints(
+        &mut closure_param_types,
+        &local_constraints,
+        true,
+    );
+    assert!(
+        matches!(
+            &closure_param_types[0],
+            Type::Concrete(shape_ast::ast::TypeAnnotation::Object(_))
+        ),
+        "a closure's object-field-accessed param is eagerly projected, \
+         got {:?}",
+        closure_param_types[0],
+    );
+}

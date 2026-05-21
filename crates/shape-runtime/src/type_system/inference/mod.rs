@@ -445,17 +445,40 @@ impl TypeInferenceEngine {
     /// hot paths like closure literals used in arithmetic/object access.
     ///
     /// Returns the parameter indices whose body imposes a `Numeric` trait
-    /// bound. When `include_numeric_refinement` is `true` those parameters are
-    /// also eagerly collapsed to `number` in place (the closure path keeps
-    /// this behavior — closures are not part of the callsite-union scheme).
-    /// When `false` the parameters are left as variables so the caller can
-    /// defer the `number` default until after transitive callsite propagation
-    /// (the named-function path — see `callable_numeric_param_indices`).
+    /// bound.
+    ///
+    /// `is_closure` selects between the two callable kinds:
+    ///
+    /// * **Closures (`true`)** are NOT part of the callsite-union scheme — a
+    ///   closure literal has no named-function symbol-table entry that
+    ///   `apply_callsite_unions` could widen. So a closure parameter must be
+    ///   pinned down here, from the body's own constraints: a `Numeric`-bounded
+    ///   parameter is eagerly collapsed to `number`, and a parameter whose body
+    ///   only does field access is eagerly projected to a partial structural
+    ///   `Object` type (`project_object_param_fields_from_constraints`).
+    ///
+    /// * **Named functions (`false`)** ARE part of the callsite-union scheme.
+    ///   Their parameters are left as `Type::Variable`s so the call-graph
+    ///   fixpoint in `apply_callsite_unions` can widen them to the union of
+    ///   the concrete argument types observed at every call site —
+    ///   `refine_numeric_params_post_callsite` then applies the deferred
+    ///   `number` default to whatever is still a variable.
+    ///
+    ///   WS-9b: the object projection is ALSO deferred for named functions.
+    ///   Eagerly projecting `fn ov(a, b) { a.lo <= b.hi }` to a partial
+    ///   `Object([{ lo: unknown }])` parameter severs the parameter variable
+    ///   from the call site exactly the way the numeric collapse does — the
+    ///   call site's concrete argument is a *named* struct (`Box`), which a
+    ///   partial structural `Object` type cannot unify with, so the leftover
+    ///   `Object(...) ~ Box` constraint fails as `UnsolvedConstraints` and the
+    ///   whole program is spuriously rejected. Keeping the parameter a variable
+    ///   lets callsite union resolve it to `Box`, and the body's `HasField`
+    ///   constraint then validates against the resolved struct schema.
     pub(crate) fn refine_callable_param_types_from_local_constraints(
         &self,
         param_types: &mut [Type],
         local_constraints: &[(Type, Type)],
-        include_numeric_refinement: bool,
+        is_closure: bool,
     ) -> Vec<usize> {
         let mut numeric_indices = Vec::new();
         for (index, param_type) in param_types.iter_mut().enumerate() {
@@ -463,18 +486,22 @@ impl TypeInferenceEngine {
                 continue;
             };
 
-            if let Some(fields) =
-                self.project_object_param_fields_from_constraints(param_var, local_constraints)
-            {
-                *param_type = Type::Concrete(TypeAnnotation::Object(fields));
-                continue;
+            // Object projection is a closure-only refinement: named functions
+            // resolve object parameters through callsite union (see doc above).
+            if is_closure {
+                if let Some(fields) =
+                    self.project_object_param_fields_from_constraints(param_var, local_constraints)
+                {
+                    *param_type = Type::Concrete(TypeAnnotation::Object(fields));
+                    continue;
+                }
             }
 
             if self.var_has_constraint(local_constraints, param_var, |constraint| {
                 matches!(constraint, TypeConstraint::ImplementsTrait { trait_name } if trait_name == "Numeric")
             }) {
                 numeric_indices.push(index);
-                if include_numeric_refinement {
+                if is_closure {
                     *param_type = BuiltinTypes::number();
                 }
             }

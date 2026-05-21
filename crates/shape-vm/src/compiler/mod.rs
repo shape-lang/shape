@@ -1132,6 +1132,25 @@ pub struct BytecodeCompiler {
     /// load reads garbage / SIGSEGVs.
     pub(crate) inferred_param_concrete_types:
         HashMap<String, Vec<Option<shape_value::v2::ConcreteType>>>,
+    /// WS-9b: inference-resolved per-parameter ANONYMOUS-OBJECT field
+    /// definitions for UNANNOTATED params. Keyed by function name; each
+    /// entry is a per-param optional `Vec<(field_name, FieldType)>`.
+    ///
+    /// A *named* struct parameter (`type Box`) resolves through the schema
+    /// registry — `set_local_type_info` already stamps its `schema_id` from
+    /// the `"Box"` hint name. But an *anonymous* object parameter (the shape
+    /// `fn aabb(...) { { min_x: ..., ... } }` produces) has no named schema:
+    /// its inference hint is the structural string `"{min_x: number, ...}"`,
+    /// which matches no registered schema. `compile_function_body` consumes
+    /// this map to register an inline `__inline_obj_*` schema for such a
+    /// parameter and stamp the slot's `schema_id`, so `param.field` resolves
+    /// to the proven field type the same way a named-struct field does. The
+    /// field types are projected from inference's resolved param `Type` —
+    /// proven, never fabricated; an unresolved field yields `None`.
+    pub(crate) inferred_param_object_fields: HashMap<
+        String,
+        Vec<Option<Vec<(String, shape_runtime::type_schema::FieldType)>>>,
+    >,
     /// Stack of scopes, each containing locals that need Drop calls at scope exit.
     /// Each entry is (local_index, is_async).
     pub(crate) drop_locals: Vec<Vec<(u16, bool)>>,
@@ -1418,7 +1437,7 @@ mod compiler_impl_reference_model;
 pub fn infer_reference_model(
     program: &Program,
 ) -> (HashMap<String, Vec<bool>>, HashMap<String, Vec<bool>>) {
-    let (inferred_ref_params, inferred_ref_mutates, _, _, _) =
+    let (inferred_ref_params, inferred_ref_mutates, _, _, _, _) =
         BytecodeCompiler::infer_reference_model(program);
     (inferred_ref_params, inferred_ref_mutates)
 }
@@ -1426,7 +1445,7 @@ pub fn infer_reference_model(
 /// Infer effective parameter pass modes (`ByValue` / `ByRefShared` / `ByRefExclusive`)
 /// keyed by function name.
 pub fn infer_param_pass_modes(program: &Program) -> HashMap<String, Vec<ParamPassMode>> {
-    let (inferred_ref_params, inferred_ref_mutates, _, _, _) =
+    let (inferred_ref_params, inferred_ref_mutates, _, _, _, _) =
         BytecodeCompiler::infer_reference_model(program);
     BytecodeCompiler::build_param_pass_mode_map(
         program,

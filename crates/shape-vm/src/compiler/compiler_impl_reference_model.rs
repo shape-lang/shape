@@ -804,6 +804,7 @@ impl BytecodeCompiler {
         HashMap<String, Vec<Option<String>>>,
         HashMap<String, String>,
         HashMap<String, Vec<Option<shape_value::v2::ConcreteType>>>,
+        HashMap<String, Vec<Option<Vec<(String, shape_runtime::type_schema::FieldType)>>>>,
     ) {
         let funcs = Self::collect_program_functions(program);
         let mut inference = shape_runtime::type_system::inference::TypeInferenceEngine::new();
@@ -817,6 +818,12 @@ impl BytecodeCompiler {
         // array params.
         let inferred_param_concrete_types =
             Self::infer_param_concrete_types_from_types(program, &types);
+        // WS-9b: project anonymous-object param types into per-field
+        // `FieldType` lists so `compile_function_body` can register an
+        // inline schema and resolve `param.field` for unannotated
+        // object-literal-shaped parameters.
+        let inferred_param_object_fields =
+            Self::infer_param_object_fields_from_types(program, &types);
 
         let mut effective_ref_params: HashMap<String, Vec<bool>> = HashMap::new();
         for (name, func) in &funcs {
@@ -886,7 +893,66 @@ impl BytecodeCompiler {
             inferred_param_type_hints,
             inferred_return_type_hints,
             inferred_param_concrete_types,
+            inferred_param_object_fields,
         )
+    }
+
+    /// WS-9b: project the program-wide type-inference engine's per-parameter
+    /// `Type` into a `Vec<(field_name, FieldType)>` for UNANNOTATED params
+    /// whose resolved type is an anonymous structural object.
+    ///
+    /// Mirrors `infer_param_concrete_types_from_types` — same
+    /// `Type::Function`-keyed lookup, same annotated-param / non-simple-name
+    /// skip. Only `Type::Concrete(TypeAnnotation::Object(_))` params produce
+    /// `Some`; named structs (which resolve through the schema registry via
+    /// their hint name) and every non-object param keep `None`. A field
+    /// whose annotation projects to `FieldType::Any` is still recorded —
+    /// `Any` is the honest "field exists, kind not narrowed" marker, not a
+    /// fabricated primitive.
+    pub(super) fn infer_param_object_fields_from_types(
+        program: &Program,
+        inferred_types: &HashMap<String, Type>,
+    ) -> HashMap<String, Vec<Option<Vec<(String, shape_runtime::type_schema::FieldType)>>>> {
+        use shape_ast::ast::TypeAnnotation;
+        let funcs = Self::collect_program_functions(program);
+        let mut out = HashMap::new();
+
+        for (name, func) in funcs {
+            let mut param_fields: Vec<
+                Option<Vec<(String, shape_runtime::type_schema::FieldType)>>,
+            > = vec![None; func.params.len()];
+            let Some(Type::Function { params, .. }) = inferred_types.get(&name) else {
+                out.insert(name, param_fields);
+                continue;
+            };
+
+            for (idx, param) in func.params.iter().enumerate() {
+                if param.type_annotation.is_some() || param.simple_name().is_none() {
+                    continue;
+                }
+                let Some(inferred_param_ty) = params.get(idx) else {
+                    continue;
+                };
+                if let Type::Concrete(TypeAnnotation::Object(obj_fields)) = inferred_param_ty {
+                    let fields: Vec<(String, shape_runtime::type_schema::FieldType)> = obj_fields
+                        .iter()
+                        .map(|f| {
+                            (
+                                f.name.clone(),
+                                Self::type_annotation_to_field_type(&f.type_annotation),
+                            )
+                        })
+                        .collect();
+                    if !fields.is_empty() {
+                        param_fields[idx] = Some(fields);
+                    }
+                }
+            }
+
+            out.insert(name, param_fields);
+        }
+
+        out
     }
 
     /// v0.3 WS-7: project the program-wide type-inference engine's
@@ -1278,6 +1344,7 @@ impl BytecodeCompiler {
             inferred_param_type_hints,
             inferred_return_type_hints,
             inferred_param_concrete_types,
+            inferred_param_object_fields,
         ) = Self::infer_reference_model(&program);
         self.inferred_param_pass_modes =
             Self::build_param_pass_mode_map(&program, &inferred_ref_params, &inferred_ref_mutates);
@@ -1285,6 +1352,7 @@ impl BytecodeCompiler {
         self.inferred_ref_mutates = inferred_ref_mutates;
         self.inferred_param_type_hints = inferred_param_type_hints;
         self.inferred_param_concrete_types = inferred_param_concrete_types;
+        self.inferred_param_object_fields = inferred_param_object_fields;
         // Phase 3e: register inferred return types so function-call
         // compilation can recover the numeric type even for sources with
         // no explicit `-> T` annotation.
@@ -1353,6 +1421,21 @@ impl BytecodeCompiler {
         // First pass: collect all function definitions
         for item in &program.items {
             self.register_item_functions(item)?;
+        }
+
+        // WS-9b: pre-register struct type SCHEMAS (runtime fields only — no
+        // comptime-handler execution, that stays in the pass-2
+        // `register_struct_type`). This makes `type` definitions
+        // order-independent the same way `register_item_functions` makes
+        // function definitions order-independent: a function declared
+        // *before* the `type` it takes as a parameter (`fn ov(a, b) { a.lo
+        // <= b.hi }` ahead of `type Box`) can now resolve `a.lo` against the
+        // `Box` schema during its body compilation. Without the prepass the
+        // schema is registered only when the later `type` item compiles, so
+        // `tracker_schema_id_for_expr` misses it and the property access
+        // types as `unknown`.
+        for item in &program.items {
+            self.predeclare_item_struct_schemas(item);
         }
 
         // MIR authority for non-function items: run borrow analysis on top-level

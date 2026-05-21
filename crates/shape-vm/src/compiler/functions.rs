@@ -1363,6 +1363,55 @@ impl BytecodeCompiler {
                         // Mark as a param local with inferred type (no explicit annotation).
                         // storage_hint_for_expr will not trust these for typed Add emission.
                         self.param_locals.insert(local_idx);
+
+                        // WS-9b: an unannotated parameter whose program-wide
+                        // inferred type is an ANONYMOUS object (e.g.
+                        // `aabb_overlaps(a, b)` where `a`/`b` were observed
+                        // at a call site as the object literal `aabb(...)`
+                        // returns) has no named schema — its hint name is
+                        // the structural string `"{min_x: number, ...}"`,
+                        // which `set_local_type_info` cannot match to a
+                        // registered schema, so the slot would carry no
+                        // `schema_id` and `param.field` would type as
+                        // `unknown`. Register an inline `__inline_obj_*`
+                        // schema from inference's proven per-field types and
+                        // stamp the slot's `schema_id` — `infer_expr_type`'s
+                        // `PropertyAccess` arm then resolves `a.min_x` to
+                        // the proven field type via `tracker_schema_id_for_
+                        // expr`, exactly the way a named-struct field
+                        // resolves. The field types are inference output,
+                        // never fabricated.
+                        let object_fields = self
+                            .inferred_param_object_fields
+                            .get(&func_def.name)
+                            .and_then(|fields| fields.get(idx))
+                            .and_then(|entry| entry.clone());
+                        let stamped_object_schema = object_fields.is_some();
+                        if let Some(object_fields) = object_fields {
+                            let typed_fields: Vec<(
+                                &str,
+                                shape_runtime::type_schema::FieldType,
+                            )> = object_fields
+                                .iter()
+                                .map(|(n, ft)| (n.as_str(), ft.clone()))
+                                .collect();
+                            let schema_id = self
+                                .type_tracker
+                                .register_inline_object_schema_typed(&typed_fields);
+                            let schema_name = self
+                                .type_tracker
+                                .schema_registry()
+                                .get_by_id(schema_id)
+                                .map(|s| s.name.clone())
+                                .unwrap_or_else(|| format!("__anon_{}", schema_id));
+                            self.type_tracker.set_local_type(
+                                local_idx,
+                                crate::type_tracking::VariableTypeInfo::known(
+                                    schema_id,
+                                    schema_name,
+                                ),
+                            );
+                        }
                         // W14.2-G4-derefstore-drift fix (ADR-006 §2.7.13
                         // producer-side ref-chain stamp): for ref-params
                         // (`&x`) without type annotation, the program-wide
@@ -1420,7 +1469,17 @@ impl BytecodeCompiler {
                             }
                             _ => global_inferred,
                         };
-                        if let Some(type_name) = inferred_type_name {
+                        if stamped_object_schema {
+                            // WS-9b: the anonymous-object inline schema was
+                            // already stamped above. `inferred_type_name`
+                            // here would be the structural object string
+                            // (`"{min_x: number, ...}"`); routing it through
+                            // `set_local_type_info` would overwrite the
+                            // schema-bearing `VariableTypeInfo::known` with a
+                            // schema-less `VariableTypeInfo::named`, undoing
+                            // the field-type resolution. Keep the schema
+                            // stamp.
+                        } else if let Some(type_name) = inferred_type_name {
                             self.set_local_type_info(local_idx, &type_name);
                             // Strict-typing-sweep: when inference produces a
                             // concrete primitive name, the param is no longer
