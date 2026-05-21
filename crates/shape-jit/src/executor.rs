@@ -501,6 +501,19 @@ impl JITExecutor {
                         location: None,
                     }));
                 }
+                crate::context::JIT_SIGNAL_INDEX_OUT_OF_BOUNDS => {
+                    // WS-3 F1: JIT typed-array codegen emits a guarded branch
+                    // returning this signal on an out-of-bounds element
+                    // access instead of silently fabricating the element-type
+                    // zero (read) / skipping the store (write). Maps to the
+                    // same `Index out of bounds` diagnostic the bytecode VM
+                    // emits for `VMError::IndexOutOfBounds`, so `--mode jit`
+                    // reports the SAME error as `--mode vm`.
+                    return Ok(Err(shape_runtime::error::ShapeError::RuntimeError {
+                        message: "Index out of bounds".to_string(),
+                        location: None,
+                    }));
+                }
                 crate::context::SIGNAL_TRAMPOLINE_ERROR => {
                     // r5c-2-bz-b-jit-err-surface: a VM-trampoline FFI call
                     // (`jit_call_method`) surfaced a clean `Err` (e.g.

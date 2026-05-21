@@ -111,6 +111,17 @@ pub const PENDING_CALL_ERROR_OFFSET: usize =
 /// execution error) so `JITExecutor` can route to the stored VM error message.
 pub const SIGNAL_TRAMPOLINE_ERROR: i32 = -3;
 
+/// Signal returned by a JIT-compiled function when a typed-array element
+/// access (`v2_array_get` / `v2_array_set`) had an out-of-bounds index. The
+/// executor maps this to the same `Index out of bounds` diagnostic the
+/// bytecode VM emits for `VMError::IndexOutOfBounds`. The prior JIT codegen
+/// silently produced the element-type zero (read) or skipped the store
+/// (write) — a VM/JIT divergence and a memory-unsafe access surfacing as a
+/// fabricated value. This emits a guarded early `return_` instead: a clean
+/// diagnostic, not silent-wrong-output. Mirrors the `JIT_SIGNAL_DIVISION_BY_ZERO`
+/// fall-through shape.
+pub const JIT_SIGNAL_INDEX_OUT_OF_BOUNDS: i32 = -4;
+
 // ============================================================================
 // Compile-time layout verification for JITContext
 // ============================================================================

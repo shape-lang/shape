@@ -32,6 +32,22 @@ fn jit_eval(source: &str) -> WireValue {
     result.wire_value
 }
 
+/// Run a Shape program through the JIT and return the runtime-error message
+/// it surfaced. Panics if the program ran cleanly. Used to assert VM/JIT
+/// parity on error-raising paths (e.g. out-of-bounds element access).
+fn jit_eval_err(source: &str) -> String {
+    let _ = initialize_shared_runtime();
+    let mut engine = ShapeEngine::new().expect("engine creation failed");
+    let program = shape_ast::parse_program(source).expect("parse failed");
+    match JITExecutor::new().execute_program(&mut engine, &program) {
+        Ok(result) => panic!(
+            "expected a runtime error, but the program ran cleanly: {:?}",
+            result.wire_value
+        ),
+        Err(e) => format!("{}", e),
+    }
+}
+
 /// Coerce a JIT result into an `f64`. Accepts both `WireValue::Number` and
 /// `WireValue::Integer` because the JIT may return a number from an integer
 /// expression depending on the slot's resolved type.
@@ -174,34 +190,60 @@ arr[0]
 }
 
 // ===========================================================================
-// 5. Out-of-bounds access — `v2_array_get` returns the zero-default for the
-//    element kind on OOB. The legacy path returns 0 as well, so both paths
-//    behave identically in user space.
+// 5. Out-of-bounds access — `v2_array_get` raises an out-of-bounds error,
+//    matching the bytecode VM's `VMError::IndexOutOfBounds`. WS-3 F1: the
+//    prior codegen silently fabricated the element-type zero, which diverged
+//    from the VM and produced a value for a memory-unsafe access.
 // ===========================================================================
 
 #[test]
-fn v2_array_f64_out_of_bounds_returns_zero() {
+fn v2_array_f64_out_of_bounds_raises_error() {
     // Index 10 is past the end of a 3-element array. `v2_array_get` emits
-    // a bounds-check branch that returns the F64 zero default on OOB.
-    let v = jit_eval(
+    // a bounds-check branch that does an early `return_` of the
+    // out-of-bounds signal — the executor maps it to the VM's diagnostic.
+    let msg = jit_eval_err(
         r#"
 let arr: Array<number> = [1.0, 2.0, 3.0]
 arr[10]
 "#,
     );
-    // Reach a numeric 0.0 — both Integer(0) and Number(0.0) are accepted.
-    assert!((as_f64(v) - 0.0).abs() < 1e-9);
+    assert!(
+        msg.contains("out of bounds"),
+        "expected an out-of-bounds error, got: {}",
+        msg
+    );
 }
 
 #[test]
-fn v2_array_i64_out_of_bounds_returns_zero() {
-    let v = jit_eval(
+fn v2_array_i64_out_of_bounds_raises_error() {
+    let msg = jit_eval_err(
         r#"
 let arr: Array<int> = [10, 20, 30]
 arr[100]
 "#,
     );
-    assert_eq!(as_i64(v), 0);
+    assert!(
+        msg.contains("out of bounds"),
+        "expected an out-of-bounds error, got: {}",
+        msg
+    );
+}
+
+#[test]
+fn v2_array_i64_out_of_bounds_store_raises_error() {
+    // WS-3 F1: the OOB store path must also raise, not silently skip.
+    let msg = jit_eval_err(
+        r#"
+let mut arr: Array<int> = [10, 20, 30]
+arr[100] = 7
+arr[0]
+"#,
+    );
+    assert!(
+        msg.contains("out of bounds"),
+        "expected an out-of-bounds error, got: {}",
+        msg
+    );
 }
 
 // ===========================================================================

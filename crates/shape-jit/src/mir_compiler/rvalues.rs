@@ -1368,7 +1368,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// sign-extended to `0xFFFF_FFFF_FFFF_FFFF`) is rejected by the verifier
     /// as out-of-bounds. This masks the value to `cl_ty.bits()` so the narrow
     /// constant carries the correct two's-complement bit pattern.
-    fn narrow_iconst(&mut self, cl_ty: types::Type, value: i64) -> Value {
+    pub(crate) fn narrow_iconst(&mut self, cl_ty: types::Type, value: i64) -> Value {
         let bits = cl_ty.bits();
         let imm: i64 = if bits >= 64 {
             value
