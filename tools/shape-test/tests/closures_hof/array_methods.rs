@@ -318,6 +318,132 @@ fn array_flatmap_basic() {
     .expect_number(4.0);
 }
 
+// =========================================================================
+// `Vec.groupBy` regression coverage (r5c-2-eps-5-stdlib-groupby).
+//
+// The previous `Vec.groupBy` body was `self.groupBy(key_fn)` (annotated
+// "keep Rust delegation"), which method dispatch resolves back to the same
+// Shape method — unconditional infinite self-recursion, so any
+// `.groupBy(...)` call overflowed the stack (the same defect class ε-2
+// fixed for `Vec.sort`). The Rust PHF handler is itself an unimplemented
+// V3-S5 surface stub, so delegation could never have worked.
+//
+// The body is now a real pure-Shape implementation that returns a flat
+// `Vec<T>` in which every element sharing a key is contiguous, groups in
+// first-seen key order. (`Vec<Vec<T>>` buckets and `HashMap<K, Vec<T>>`
+// are both blocked by V3-S5 ckpt-5: nested-array construction hits the
+// `op_new_array` surface, and HashMap keys must be strings with no array
+// values.) The closure argument is a literal `(T) => K` whose param type
+// flows from the method signature.
+// =========================================================================
+
+#[test]
+fn array_group_by_parity() {
+    // [1,2,3,4,5,6] grouped by x%2 -> odds first (key 1 seen first),
+    // then evens: [1, 3, 5, 2, 4, 6].
+    ShapeTest::new(
+        r#"
+        let g = [1, 2, 3, 4, 5, 6].groupBy(|x| x % 2)
+        g[0] * 100000 + g[1] * 10000 + g[2] * 1000
+            + g[3] * 100 + g[4] * 10 + g[5]
+    "#,
+    )
+    .expect_number(135246.0);
+}
+
+#[test]
+fn array_group_by_preserves_count() {
+    // Every element appears exactly once — the result length equals the
+    // input length.
+    ShapeTest::new(
+        r#"
+        [1, 2, 3, 4, 5, 6].groupBy(|x| x % 2).length
+    "#,
+    )
+    .expect_number(6.0);
+}
+
+#[test]
+fn array_group_by_single_element() {
+    // `let n: int` pins the length: the method-form `.len()` on a
+    // generic groupBy result otherwise infers as `unknown` (a separate,
+    // pre-existing generic-return inference limitation).
+    ShapeTest::new(
+        r#"
+        let g = [42].groupBy(|x| x % 2)
+        let n: int = g.len()
+        n * 1000 + g[0]
+    "#,
+    )
+    .expect_number(1042.0);
+}
+
+#[test]
+fn array_group_by_empty() {
+    // An empty receiver groups into an empty result. The empty array is
+    // produced by `slice(0, 0)` — a bare `[]` literal at user scope hits
+    // an unrelated pre-existing V3-S5 ckpt-5 surface.
+    ShapeTest::new(
+        r#"
+        let empty = [1, 2, 3].slice(0, 0)
+        empty.groupBy(|x| x % 2).length
+    "#,
+    )
+    .expect_number(0.0);
+}
+
+#[test]
+fn array_group_by_all_same_key() {
+    // Every element shares one key — a single group, original order kept.
+    ShapeTest::new(
+        r#"
+        let g = [7, 7, 7].groupBy(|x| x)
+        let n: int = g.len()
+        n * 1000 + g[0] * 100 + g[1] * 10 + g[2]
+    "#,
+    )
+    .expect_number(3777.0);
+}
+
+#[test]
+fn array_group_by_first_seen_key_order() {
+    // [3,1,3,2,1] grouped by identity: key 3 first, then 1, then 2 ->
+    // [3, 3, 1, 1, 2]. Groups follow first-seen key order; within a group
+    // elements keep their original relative order.
+    ShapeTest::new(
+        r#"
+        let g = [3, 1, 3, 2, 1].groupBy(|x| x)
+        g[0] * 10000 + g[1] * 1000 + g[2] * 100 + g[3] * 10 + g[4]
+    "#,
+    )
+    .expect_number(33112.0);
+}
+
+#[test]
+fn array_group_by_does_not_mutate_receiver() {
+    // `groupBy` returns a new array; the source is untouched.
+    ShapeTest::new(
+        r#"
+        let source = [1, 2, 3, 4]
+        let grouped = source.groupBy(|x| x % 2)
+        source[0] * 1000 + source[1] * 100 + source[2] * 10 + source[3]
+    "#,
+    )
+    .expect_number(1234.0);
+}
+
+#[test]
+fn array_group_by_no_stack_overflow() {
+    // Regression guard: the old self-recursive body overflowed the stack
+    // on the first call. A run that completes proves termination.
+    ShapeTest::new(
+        r#"
+        [10, 20, 30, 40].groupBy(|x| x % 3).length
+    "#,
+    )
+    .expect_number(4.0);
+}
+
 #[test]
 fn array_filter_then_map_chain() {
     ShapeTest::new(

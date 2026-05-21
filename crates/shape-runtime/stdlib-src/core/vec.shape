@@ -223,7 +223,76 @@ extend Vec<T> {
         result
     }
 
-    method groupBy<K>(key_fn: (T) => K) -> Vec<K> { self.groupBy(key_fn) }  // keep Rust delegation (HashMap needed)
+    /// Group the elements of `self` by the key returned by `key_fn`.
+    ///
+    /// Returns a flat `Vec<T>` in which every element that shares a key
+    /// is contiguous. Groups appear in the order each key was first
+    /// encountered, and within a group the elements keep their original
+    /// relative order. For `[1,2,3,4,5,6].groupBy(|x| x % 2)` the result
+    /// is `[1, 3, 5, 2, 4, 6]` — the odd group, then the even group.
+    ///
+    /// This is a pure-Shape implementation built from a single result
+    /// array and index-based loops. For each position `i`, the method
+    /// first checks whether `key_fn(self[i])` is the *first* occurrence
+    /// of that key (no earlier element shares it). On a first occurrence
+    /// it scans the rest of the array once and appends every element
+    /// with the matching key, so the group is emitted contiguously and
+    /// in original relative order. Later positions whose key already
+    /// appeared are skipped. Every loop is bounded by `self.len()`, so
+    /// the method always terminates and never recurses into itself.
+    ///
+    /// Why a flat `Vec<T>` and not a `Vec<Vec<T>>` of buckets: a
+    /// collection-of-collections return value cannot currently be
+    /// constructed — a nested array literal or a `[a, b]` of array
+    /// variables hits the `op_new_array` / `op_new_typed_array` V3-S5
+    /// ckpt-5 surface (the W12 typed-array-data deletion has not yet
+    /// landed its construction-site rebuild). A `HashMap<K, Vec<T>>` is
+    /// equally blocked: HashMap keys must be strings and HashMap values
+    /// reject array payloads. A flat `Vec<T>` is the only return shape
+    /// that is fully supported today — the same working envelope the
+    /// ε-2 checkpoint used for `sort`. The grouping is real: callers
+    /// recover the bucket boundaries by re-applying `key_fn` to adjacent
+    /// elements (a key change marks a new group). The body uses a single
+    /// `[]` literal: a *second* array literal in one method body hits
+    /// the same `op_new_array(0)` V3-S5 ckpt-5 surface, so the distinct
+    /// keys are detected inline by re-scanning rather than collected
+    /// into their own array.
+    ///
+    /// The previous body was `self.groupBy(key_fn)` — annotated "keep
+    /// Rust delegation", but method dispatch resolves `self.groupBy`
+    /// back to this same Shape method, so it recursed unconditionally
+    /// and overflowed the stack on the first call. The Rust PHF handler
+    /// (`array_transform::handle_group_by_v2`) is itself an unimplemented
+    /// V3-S5 surface stub, so delegation could never have worked.
+    method groupBy<K>(key_fn: (T) => K) -> Vec<T> {
+        let mut result = []
+        let n = self.len()
+        let mut i = 0
+        while i < n {
+            let key = key_fn(self[i])
+            // First occurrence of `key`? Scan every earlier element.
+            let mut is_first = true
+            let mut j = 0
+            while j < i {
+                if key_fn(self[j]) == key {
+                    is_first = false
+                }
+                j = j + 1
+            }
+            if is_first {
+                // Emit this whole group contiguously, in original order.
+                let mut k = i
+                while k < n {
+                    if key_fn(self[k]) == key {
+                        result.push(self[k])
+                    }
+                    k = k + 1
+                }
+            }
+            i = i + 1
+        }
+        result
+    }
 
     method sortBy(key_fn: (T) => number) -> Vec<T> {
         self.sort(|a, b| {
