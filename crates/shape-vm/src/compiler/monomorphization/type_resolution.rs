@@ -2861,4 +2861,103 @@ mod tests {
             "expected the WS-2 'cannot infer type argument' diagnostic, got: {msg}"
         );
     }
+
+    // ── v0.3 WS-6b GAP A — inferred-type let-bound variable arg ──────────
+    //
+    // WS-6 recorded a `let`-binding's ConcreteType ONLY when the binding
+    // carried an explicit type annotation (`let n: Option<int> = ...`). An
+    // *inferred*-type binding `let p = P { a: 7 }` carries no annotation, so
+    // a later `id(p)` could not resolve the type argument and was rejected
+    // with `cannot infer type argument(s)`. WS-6b extends the recording at
+    // the let-binding site to also resolve the binding's ConcreteType
+    // structurally from the initializer expression via
+    // `concrete_type_for_expr`.
+
+    #[test]
+    fn ws6b_inferred_struct_variable_arg() {
+        // `let p = P { a: 7 }` (no annotation) then `id(p).a`.
+        assert_eq!(
+            eval_typed_i64(
+                "type P { a: int }\n\
+                 fn id<T>(x: T) -> T { x }\n\
+                 let p = P { a: 7 }\n\
+                 id(p).a"
+            ),
+            7
+        );
+    }
+
+    #[test]
+    fn ws6b_inferred_enum_variable_arg() {
+        // `let c = Color::Red` (inferred) passed to a generic free function.
+        assert_eq!(
+            eval_typed_i64(
+                "enum Color { Red, Green }\n\
+                 fn id<T>(x: T) -> T { x }\n\
+                 let c = Color::Red\n\
+                 match id(c) { Color::Red => 1, Color::Green => 2 }"
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn ws6b_inferred_option_variable_arg() {
+        // `let n = Some(5)` (inferred `Option<int>`) passed to `id`.
+        assert_eq!(
+            eval_typed_i64(
+                "fn id<T>(x: T) -> T { x }\n\
+                 let n = Some(5)\n\
+                 match id(n) { Some(v) => v, None => 0 }"
+            ),
+            5
+        );
+    }
+
+    #[test]
+    fn ws6b_inferred_result_variable_arg() {
+        // `let r = Ok(9)` (inferred `Result`) passed to `id`.
+        assert_eq!(
+            eval_typed_i64(
+                "fn id<T>(x: T) -> T { x }\n\
+                 let r = Ok(9)\n\
+                 match id(r) { Ok(v) => v, Err(e) => 0 }"
+            ),
+            9
+        );
+    }
+
+    #[test]
+    fn ws6b_inferred_struct_variable_arg_local_scope() {
+        // The inferred-binding recording must also fire for a function-local
+        // `let` (mirror of the module-binding path).
+        assert_eq!(
+            eval_typed_i64(
+                "type P { a: int }\n\
+                 fn id<T>(x: T) -> T { x }\n\
+                 fn run() -> int { let p = P { a: 7 }\n id(p).a }\n\
+                 run()"
+            ),
+            7
+        );
+    }
+
+    #[test]
+    fn ws6b_inferred_none_variable_still_clean_error() {
+        // GAP A non-regression: an inferred `let n = None` is genuinely
+        // type-ambiguous — `concrete_type_for_expr` returns `None`, nothing
+        // is recorded, and `id(n)` STAYS a clean compile error.
+        let result = crate::test_utils::compile_with_prelude(
+            "fn id<T>(x: T) -> T { x }\nlet n = None\nid(n)",
+        );
+        assert!(
+            result.is_err(),
+            "id(n) where `n` is an inferred bare None must be a clean compile error"
+        );
+        let msg = format!("{:?}", result.unwrap_err());
+        assert!(
+            msg.contains("cannot infer type argument"),
+            "expected the 'cannot infer type argument' diagnostic, got: {msg}"
+        );
+    }
 }

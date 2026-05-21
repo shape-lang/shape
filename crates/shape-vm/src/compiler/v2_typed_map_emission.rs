@@ -404,7 +404,7 @@ mod compile_integration_tests {
         // Verify both NewTypedMap*, TypedMap*Set and TypedMap*Get are emitted.
         let prog = compile(
             r#"
-            let m: HashMap<string, number> = HashMap()
+            let mut m: HashMap<string, number> = HashMap()
             m.set("foo", 1.0)
             m.get("foo")
         "#,
@@ -427,7 +427,7 @@ mod compile_integration_tests {
     fn test_hashmap_int_string_set_emits_i64_ptr_set() {
         let prog = compile(
             r#"
-            let m: HashMap<int, string> = HashMap()
+            let mut m: HashMap<int, string> = HashMap()
             m.set(1, "x")
             m
         "#,
@@ -440,7 +440,7 @@ mod compile_integration_tests {
     fn test_hashmap_has_emits_typed_has() {
         let prog = compile(
             r#"
-            let m: HashMap<string, int> = HashMap()
+            let mut m: HashMap<string, int> = HashMap()
             m.set("a", 1)
             m.has("a")
         "#,
@@ -452,7 +452,7 @@ mod compile_integration_tests {
     fn test_hashmap_delete_emits_typed_delete() {
         let prog = compile(
             r#"
-            let m: HashMap<string, int> = HashMap()
+            let mut m: HashMap<string, int> = HashMap()
             m.set("a", 1)
             m.delete("a")
             m
@@ -502,7 +502,7 @@ mod compile_integration_tests {
         // legacy ctor + CallMethod dispatch.
         let prog = compile(
             r#"
-            let m: HashMap<string, bool> = HashMap()
+            let mut m: HashMap<string, bool> = HashMap()
             m.set("a", true)
             m
         "#,
@@ -532,7 +532,7 @@ mod compile_integration_tests {
     fn test_hashmap_int_int_emits_i64_i64_ops() {
         let prog = compile(
             r#"
-            let m: HashMap<int, int> = HashMap()
+            let mut m: HashMap<int, int> = HashMap()
             m.set(42, 99)
             m.get(42)
         "#,
@@ -546,7 +546,7 @@ mod compile_integration_tests {
     fn test_hashmap_int_number_emits_i64_f64_ops() {
         let prog = compile(
             r#"
-            let m: HashMap<int, number> = HashMap()
+            let mut m: HashMap<int, number> = HashMap()
             m.set(1, 3.14)
             m
         "#,
