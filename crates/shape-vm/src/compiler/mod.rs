@@ -1093,6 +1093,19 @@ pub struct BytecodeCompiler {
     /// Inferred parameter type hints for unannotated params.
     /// Keyed by function name; each entry is a per-param optional type string.
     pub(crate) inferred_param_type_hints: HashMap<String, Vec<Option<String>>>,
+    /// v0.3 WS-7: inference-resolved per-parameter `ConcreteType` for
+    /// UNANNOTATED params. Keyed by function name; each entry is a per-param
+    /// optional `ConcreteType` projected from the program-wide type-inference
+    /// engine's result. Annotated params keep `None` here (their
+    /// `ConcreteType` is stamped directly from the annotation in the
+    /// `function_local_concrete_types` per-fn seeding pass). This is the
+    /// proof source that lets the JIT take the v2 typed-array fast path for
+    /// `fn get(xs, i) { xs[i] }`-style unannotated array parameters — without
+    /// it the slot stays `ConcreteType::Void`, the JIT mis-classifies the v2
+    /// `TypedArray` pointer as a NaN-boxed v1 array, and the inline index
+    /// load reads garbage / SIGSEGVs.
+    pub(crate) inferred_param_concrete_types:
+        HashMap<String, Vec<Option<shape_value::v2::ConcreteType>>>,
     /// Stack of scopes, each containing locals that need Drop calls at scope exit.
     /// Each entry is (local_index, is_async).
     pub(crate) drop_locals: Vec<Vec<(u16, bool)>>,
@@ -1379,7 +1392,7 @@ mod compiler_impl_reference_model;
 pub fn infer_reference_model(
     program: &Program,
 ) -> (HashMap<String, Vec<bool>>, HashMap<String, Vec<bool>>) {
-    let (inferred_ref_params, inferred_ref_mutates, _, _) =
+    let (inferred_ref_params, inferred_ref_mutates, _, _, _) =
         BytecodeCompiler::infer_reference_model(program);
     (inferred_ref_params, inferred_ref_mutates)
 }
@@ -1387,7 +1400,7 @@ pub fn infer_reference_model(
 /// Infer effective parameter pass modes (`ByValue` / `ByRefShared` / `ByRefExclusive`)
 /// keyed by function name.
 pub fn infer_param_pass_modes(program: &Program) -> HashMap<String, Vec<ParamPassMode>> {
-    let (inferred_ref_params, inferred_ref_mutates, _, _) =
+    let (inferred_ref_params, inferred_ref_mutates, _, _, _) =
         BytecodeCompiler::infer_reference_model(program);
     BytecodeCompiler::build_param_pass_mode_map(
         program,

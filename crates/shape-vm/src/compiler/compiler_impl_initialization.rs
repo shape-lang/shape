@@ -137,6 +137,7 @@ impl BytecodeCompiler {
             inferred_ref_mutates: HashMap::new(),
             inferred_param_pass_modes: HashMap::new(),
             inferred_param_type_hints: HashMap::new(),
+            inferred_param_concrete_types: HashMap::new(),
             drop_locals: Vec::new(),
             ownership_drop_locals: Vec::new(),
             drop_type_info: HashMap::new(),

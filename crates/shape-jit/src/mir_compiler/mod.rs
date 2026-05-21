@@ -121,6 +121,18 @@ mod groupby_surface_regression_tests;
 #[cfg(all(test, feature = "deep-tests"))]
 mod typedarray_ptr_regression_tests;
 
+// v0.3 WS-7 jit-array-param-fix regression tests (v0.3-gating
+// NO-KNOWN-INCORRECTNESS). Pin the SIGSEGV crash where a named function
+// with an UNANNOTATED array parameter, indexed `xs[i]`, crashed in JIT
+// mode once tier-compiled — even on a valid in-bounds access. Root cause:
+// the inferred pass-by-reference optimization marked the param as a
+// reference (callee auto-deref) while the JIT/MIR caller passed the heap
+// pointer by value. Gated behind `deep-tests` for the same reason as
+// `typedarray_ptr_regression_tests`: `JITExecutor::execute_program`
+// JIT-compiles the stdlib on every test.
+#[cfg(all(test, feature = "deep-tests"))]
+mod jit_array_param_regression_tests;
+
 use cranelift::codegen::ir::{FuncRef, StackSlot};
 use cranelift::prelude::*;
 use std::collections::{HashMap, HashSet};
