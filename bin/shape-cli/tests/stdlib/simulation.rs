@@ -102,17 +102,22 @@ fn test_ode_integrators() {
 }
 
 #[test]
-#[ignore = "V3-S5 ckpt-5/ckpt-6 SURFACE class: op_new_array trips the \
-            consumer-cascade tier 3 SURFACE-and-stop at object_creation.rs:353 \
-            (per V3-S5 ckpt-1..ckpt-5 TypedArrayData enum + Buf<T> wrapper + \
-            outer HeapValue::TypedArray arm + HeapKind::TypedArray=8 ordinal \
-            deletion per W12 audit §3.5+§3.6 + ADR-006 §2.7.24 Q25.A \
-            SUPERSEDED). Construction-site rebuild lands at V3-S5 ckpt-6 \
-            STRICT close per cluster-0 territory. NOT a v2-raw-heap aliasing \
-            class at HEAD (the original ignore reason cited a pre-V3-S5 \
-            failure shape; cluster-1.5-v2-raw-heap-audit re-classified \
-            2026-05-16 per docs/cluster-audits/cluster-1.5-v2-raw-heap-audit.md \
-            §1.A)."]
+#[ignore = "Generic-function inference loss (NOT op_new_array). Round 6 WS-1 \
+            W16.2-C re-classified 2026-05-21: the queryable.shape parse defect \
+            (TypeScript-style `filter(...): Self,` at line 37) is FIXED, and \
+            the W16.2-C op_new_array / spread / list-comprehension construction \
+            is rebuilt — `let mut results = []` + `out.push(...)` accumulators \
+            now construct correctly. The residual blocker is a distinct class: \
+            `core/ode.shape`'s unannotated helpers `vec_add(a, b)` / `vec_sub` \
+            / `vec_scale` do `a[i] + b[i]` on unannotated params, and \
+            `rk4_system(f, y0_vec, ...)` is itself an unannotated generic \
+            function — the closure-result + generic-helper return types \
+            resolve to `unknown`, so strict-typing inference fails on \
+            `unknown + unknown` (Add/Sub/Mul). This is the \
+            generic-function-call-return-type / unannotated-generic-param \
+            inference-loss class (epsilon-4 / round-6 WS-2/WS-6 follow-up \
+            family) — it is NOT resolved at this branch's HEAD. Tracked as \
+            the generic-inference follow-up, distinct from W16.2-C."]
 fn test_harmonic_oscillator_rk4_system() {
     init_runtime();
 
@@ -181,15 +186,17 @@ fn test_rk45_uses_fewer_steps_on_smooth_ode() {
 }
 
 #[test]
-#[ignore = "V3-S5 ckpt-5/ckpt-6 SURFACE class: op_new_array trips the \
-            consumer-cascade tier 3 SURFACE-and-stop at object_creation.rs:353 \
-            (same V3-S5 ckpt-1..ckpt-5 deletion lineage as \
-            test_harmonic_oscillator_rk4_system). Construction-site rebuild \
-            lands at V3-S5 ckpt-6 STRICT close per cluster-0 territory. NOT \
-            a v2-raw-heap aliasing class at HEAD (the original ignore reason \
-            cited a pre-V3-S5 failure shape; cluster-1.5-v2-raw-heap-audit \
-            re-classified 2026-05-16 per docs/cluster-audits/cluster-1.5-v2-raw-heap-audit.md \
-            §1.A)."]
+#[ignore = "Generic-function inference loss (NOT op_new_array). Round 6 WS-1 \
+            W16.2-C re-classified 2026-05-21: same residual class as \
+            test_harmonic_oscillator_rk4_system — the queryable.shape parse \
+            defect is FIXED and W16.2-C op_new_array / spread / \
+            list-comprehension construction is rebuilt, but `core/ode.shape`'s \
+            unannotated `vec_*` helpers + the unannotated generic \
+            `rk45_system(f, y0_vec, ...)` resolve closure-result / \
+            generic-helper return types to `unknown`, failing strict-typing \
+            inference on `unknown + unknown` (Add/Sub/Mul). \
+            Generic-function-call-return-type inference-loss class, distinct \
+            from W16.2-C — NOT resolved at this branch's HEAD."]
 fn test_rk45_system_harmonic_oscillator() {
     // Harmonic oscillator: y'' + y = 0, y(0) = 1, y'(0) = 0
     // Exact: y(t) = cos(t), y(2π) ≈ 1.0
@@ -457,18 +464,18 @@ fn test_aabb_centered_and_union() {
 }
 
 #[test]
-#[ignore = "V3-S5 ckpt-5/ckpt-6 SURFACE class: op_new_object + arr[i] for \
-            Array<TypedObject> trip the consumer-cascade tier 3 SURFACE-and- \
-            stop at object_creation.rs:228 + property_access.rs (per V3-S5 \
-            ckpt-1..ckpt-5 TypedArrayData enum + Buf<T> wrapper + outer \
-            HeapValue::TypedArray arm + HeapKind::TypedArray=8 ordinal \
-            deletion per W12 audit §3.5+§3.6 + ADR-006 §2.7.24 Q25.A \
-            SUPERSEDED). Construction-site rebuild + arr[i] \
-            RefTarget::TypedIndex rebuild lands at V3-S5 ckpt-6 STRICT close \
-            per cluster-0 territory. NOT a v2-raw-heap aliasing class at \
-            HEAD (the original ignore reason cited a pre-V3-S5 failure \
-            shape; cluster-1.5-v2-raw-heap-audit re-classified 2026-05-16 \
-            per docs/cluster-audits/cluster-1.5-v2-raw-heap-audit.md §1.A)."]
+#[ignore = "Generic-function inference loss (NOT op_new_array / op_new_object). \
+            Round 6 WS-1 W16.2-C re-classified 2026-05-21: the queryable.shape \
+            parse defect is FIXED and the W16.2-C op_new_array / spread / \
+            list-comprehension construction is rebuilt. The residual blocker \
+            is a distinct class: `physics/collision.shape`'s unannotated \
+            functions (`aabb(min_x, min_y, ...)`, `aabb_overlaps(a, b)`, \
+            `find_collisions_brute(boxes)`) do arithmetic on unannotated \
+            params, and the generic-call return types resolve to `unknown` — \
+            strict-typing inference fails on `unknown` operands (Add/Sub/Mul). \
+            Generic-function-call-return-type / unannotated-param inference- \
+            loss class, distinct from W16.2-C — NOT resolved at this branch's \
+            HEAD."]
 fn test_find_collisions_brute() {
     init_runtime();
 
@@ -490,15 +497,15 @@ fn test_find_collisions_brute() {
 }
 
 #[test]
-#[ignore = "V3-S5 ckpt-5/ckpt-6 SURFACE class: op_new_object + arr[i] for \
-            Array<TypedObject> trip the same consumer-cascade tier 3 \
-            SURFACE-and-stop as test_find_collisions_brute (per V3-S5 ckpt-1..ckpt-5 \
-            deletion lineage). Construction-site rebuild + arr[i] \
-            RefTarget::TypedIndex rebuild lands at V3-S5 ckpt-6 STRICT close \
-            per cluster-0 territory. NOT a v2-raw-heap aliasing class at \
-            HEAD (the original ignore reason cited a pre-V3-S5 failure \
-            shape; cluster-1.5-v2-raw-heap-audit re-classified 2026-05-16 \
-            per docs/cluster-audits/cluster-1.5-v2-raw-heap-audit.md §1.A)."]
+#[ignore = "Generic-function inference loss (NOT op_new_array / op_new_object). \
+            Round 6 WS-1 W16.2-C re-classified 2026-05-21: same residual class \
+            as test_find_collisions_brute — the queryable.shape parse defect \
+            is FIXED and W16.2-C op_new_array / spread / list-comprehension \
+            construction is rebuilt, but `physics/collision.shape`'s \
+            unannotated functions resolve generic-call return types to \
+            `unknown`, failing strict-typing inference on `unknown` operands \
+            (Add/Sub/Mul). Generic-function-call-return-type inference-loss \
+            class, distinct from W16.2-C — NOT resolved at this branch's HEAD."]
 fn test_find_collisions_sweep() {
     init_runtime();
 

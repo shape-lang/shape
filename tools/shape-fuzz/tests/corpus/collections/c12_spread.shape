@@ -1,0 +1,11 @@
+// CLASS: W16.2-C op_new_array spread construction (Round 6 WS-1, 2026-05-21)
+// Per ADR-006 §2.7.5 + audit v0.3-w16-2-c-empty-literal-audit.md §3.C / §5.E —
+// array-spread literal `[...a, 4, 5]`. Before W16.2-C landed both VM and JIT
+// surfaced `op_new_array(0)` SURFACE (an internal-jargon dump); post-W16.2-C
+// both Convergent at `15` via the v2-raw `TypedArray<i64>` accumulator
+// (`NewTypedArrayI64(0)` + generic `ArrayPush` dispatching on the stamped
+// element-type byte). The spread accumulator's element kind is resolved
+// structurally from the spread source's / tail elements' `ConcreteType`.
+let a = [1, 2, 3]
+let b = [...a, 4, 5]
+print(b.sum())

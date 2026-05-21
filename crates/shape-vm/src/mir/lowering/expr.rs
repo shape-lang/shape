@@ -561,8 +561,37 @@ fn lower_list_comprehension_expr(
             }
         }
     }
-    let element_slot = lower_expr_to_temp(builder, &comp.element);
-    assign_copy_from_slot(builder, temp, element_slot, span);
+    // W16.2-C (Round 6 WS-1, 2026-05-21): model the comprehension RESULT
+    // as an array, not the bare element.
+    //
+    // Pre-fix this emitted `assign_copy_from_slot(temp, element_slot)` —
+    // i.e. `temp = <element>`, which classified the comprehension result
+    // slot as the element's scalar `ConcreteType` (e.g. `Int64` for
+    // `[x for x in 0..5]`). The MIR here is not executed for the
+    // comprehension (the bytecode compiler's `compile_list_comprehension`
+    // lowers the real loop); the MIR feeds ONLY the
+    // `top_level_local_concrete_types` conduit that the JIT reads to stamp
+    // slot kinds. With `temp` mis-classified as a scalar, the JIT stamped
+    // the comprehension's `let c = [...]` binding as `Int64` and a
+    // downstream `c.len()` dispatched against an `Int64` receiver —
+    // surfacing `no method 'len' on receiver kind Int64` (the W16.2-C
+    // audit §5.D comprehension VM/JIT divergence).
+    //
+    // Emit a `StatementKind::ArrayStore { container_slot: temp,
+    // operands: [element] }` instead — the same kind-source statement an
+    // array literal `[element]` emits. The conduit's `ArrayStore` arm
+    // (`infer_top_level_concrete_types_from_mir`) then classifies `temp`
+    // as `Array(elem)` from the moved element operand. Per ADR-006 §2.7.5
+    // the element expression's `ConcreteType` IS the proof of the
+    // comprehension's element kind — no fabrication, no decode.
+    let element_operand = lower_expr_as_moved_operand(builder, &comp.element);
+    emit_container_store_if_needed(
+        builder,
+        ContainerStoreKind::Array,
+        temp,
+        vec![element_operand],
+        span,
+    );
     builder.pop_scope();
 }
 

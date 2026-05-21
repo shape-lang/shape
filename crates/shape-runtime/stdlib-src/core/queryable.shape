@@ -34,7 +34,7 @@
 /// @see std::core::iterable::Iterable
 trait Queryable<T> {
     /// Return a query filtered by `predicate`.
-    filter(predicate: (T) => bool): Self,
+    method filter(predicate) -> Self;
     /// Project each row with `transform`.
     method map(transform) -> Self;
     /// Apply backend ordering by `column` and `direction`.
