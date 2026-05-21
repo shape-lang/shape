@@ -1,0 +1,12 @@
+// CLASS: W16.2-C op_new_array list-comprehension construction (Round 6 WS-1,
+// 2026-05-21). Per ADR-006 §2.7.5 + audit v0.3-w16-2-c-empty-literal-audit.md
+// §3.C / §5.D / §5.E — list-comprehension `[x * 2 for x in 0..5]`. Before
+// W16.2-C landed the VM surfaced `op_new_array(0)` SURFACE and the JIT
+// deterministically produced an `Int64` (the §5.D comprehension VM/JIT
+// divergence); post-W16.2-C both Convergent at `20`. The result accumulator
+// allocates via `NewTypedArrayI64(0)` with `TypedArrayPushI64` element pushes,
+// and the MIR `lower_list_comprehension_expr` models the comprehension result
+// as an `ArrayStore` so the JIT's `top_level_local_concrete_types` conduit
+// classifies the binding as `Array<int>` (not the bare element scalar).
+let c = [x * 2 for x in 0..5]
+print(c.sum())

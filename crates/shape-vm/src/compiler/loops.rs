@@ -951,6 +951,47 @@ impl BytecodeCompiler {
         Ok(())
     }
 
+    /// W16.2-C (Round 6 WS-1, 2026-05-21) — resolve the [`TypedArrayKind`]
+    /// of a list-comprehension element expression that just compiled.
+    ///
+    /// Reads, in order:
+    ///   1. `last_expr_numeric_type` — set when the element is a numeric
+    ///      literal / operation (covers `x * 2`, `x + 1`, range-counter
+    ///      loop variables which the range specialization types as `int`).
+    ///   2. `last_expr_type_info`'s `storage_hint` — covers the `bool`
+    ///      case (a comparison result clears `last_expr_numeric_type` but
+    ///      stamps `StorageHint::Bool`).
+    ///   3. `concrete_type_for_expr` on the element AST — covers a bare
+    ///      identifier loop variable bound by a generic-iterator clause
+    ///      (`[x for x in src]`), where the kind lives in the type tracker.
+    ///
+    /// Per ADR-006 §2.7.5 every signal is a producer-side type proof set
+    /// when the element compiled (or a structural type-tracker fact) —
+    /// never fabricated, never decoded from runtime bits. Returns `None`
+    /// when no scalar kind is proven; the caller surfaces a clean compile
+    /// error.
+    fn resolve_pushed_element_typed_array_kind(
+        &self,
+        element: &Expr,
+    ) -> Option<super::v2_typed_emission::TypedArrayKind> {
+        use super::monomorphization::type_resolution::concrete_type_for_expr;
+        use super::v2_typed_emission::{
+            should_use_typed_array, typed_array_kind_from_numeric_type,
+            TypedArrayKind,
+        };
+        if let Some(nt) = self.last_expr_numeric_type {
+            return Some(typed_array_kind_from_numeric_type(nt));
+        }
+        if let Some(info) = &self.last_expr_type_info {
+            if info.storage_hint == Some(crate::type_tracking::NativeKind::Bool) {
+                return Some(TypedArrayKind::Bool);
+            }
+        }
+        // Structural fallback — a bare identifier whose tracked type is a
+        // scalar (the generic-iterator loop variable case).
+        concrete_type_for_expr(self, element).and_then(|ct| should_use_typed_array(&ct))
+    }
+
     pub(super) fn compile_list_comprehension(
         &mut self,
         comp: &shape_ast::ast::ListComprehension,
@@ -958,18 +999,99 @@ impl BytecodeCompiler {
         self.push_scope();
 
         let result_local = self.declare_local("__comp_result")?;
+        // W16.2-C (Round 6 WS-1, 2026-05-21): the result accumulator MUST be
+        // a v2 typed array — `op_array_push` only accepts a
+        // `Ptr(HeapKind::TypedArray)` receiver, and there is no untyped
+        // runtime array carrier. The element kind is proven only AFTER the
+        // body compiles, so emit a placeholder allocator here, record its
+        // instruction index, then patch it once
+        // `compile_comprehension_clauses` writes the proven
+        // `comprehension_element_kind`. Per ADR-006 §2.7.5 the kind is
+        // stamped at the producer site (the compiled element expression) —
+        // never decoded from runtime bits, never Bool-defaulted.
+        let alloc_instr_idx = self.program.instructions.len();
         self.emit(Instruction::new(OpCode::NewArray, Some(Operand::Count(0))));
         self.emit(Instruction::new(
             OpCode::StoreLocal,
             Some(Operand::Local(result_local)),
         ));
 
+        // Save/restore both comprehension-scoped fields so a nested
+        // comprehension (`[[y for y in r] for x in ...]`) does not bleed
+        // its element kind / push sites into the enclosing one.
+        let saved_element_kind = self.comprehension_element_kind.take();
+        let saved_push_sites = std::mem::take(&mut self.comprehension_push_sites);
         self.compile_comprehension_clauses(&comp.element, &comp.clauses, result_local, 0)?;
+        let element_kind = self.comprehension_element_kind.take();
+        let push_sites = std::mem::take(&mut self.comprehension_push_sites);
+        self.comprehension_element_kind = saved_element_kind;
+        self.comprehension_push_sites = saved_push_sites;
+
+        match element_kind {
+            Some(kind) => {
+                // Patch the placeholder allocator with the resolved typed
+                // allocator (capacity 0). Record the typed-array kind
+                // against the result slot so downstream `.method()`
+                // dispatch resolves the carrier.
+                self.program.instructions[alloc_instr_idx] =
+                    Instruction::new(kind.new_opcode(), Some(Operand::Count(0)));
+                // Patch every element-push site to the matching typed
+                // `TypedArrayPush*` opcode — the typed push unambiguously
+                // identifies the v2 typed-array carrier for both the VM
+                // and JIT (no generic-carrier slot-kind ambiguity).
+                for &site in &push_sites {
+                    self.program.instructions[site] =
+                        Instruction::simple(kind.push_opcode());
+                }
+                self.v2_typed_array_locals.insert(result_local, kind);
+                // Signal the typed-array kind to the enclosing `let c = [...]`
+                // binding path (`Statement::VarDecl`), which records it
+                // against the destination slot via
+                // `pending_variable_typed_array_kind` — the same hand-off
+                // `compile_expr_array` uses for bare typed literals. Without
+                // this the destination binding is untyped and `.len()` /
+                // method dispatch on it falls to the generic carrier path.
+                self.pending_variable_typed_array_kind = Some(kind);
+            }
+            None => {
+                return Err(ShapeError::SemanticError {
+                    message: "list comprehension element type could not be \
+                              determined at compile time. Strict typing \
+                              requires the element expression to have a \
+                              proven scalar type (int / number / bool / \
+                              decimal / sized integer). Annotate the \
+                              comprehension's source so the element type \
+                              resolves."
+                        .to_string(),
+                    location: None,
+                });
+            }
+        }
 
         self.emit(Instruction::new(
             OpCode::LoadLocal,
             Some(Operand::Local(result_local)),
         ));
+
+        // The comprehension body compiled the element expression, leaving
+        // `last_expr_numeric_type` stamped with the ELEMENT's scalar type
+        // (e.g. `Int` for `[x for x in 0..5]`). If left set, the enclosing
+        // `let c = [...]` binding's `propagate_initializer_type_to_slot`
+        // would record `c` as a bare `int`, mis-stamping the method-call
+        // receiver tag. Reset to the array shape — mirrors the tail of
+        // `compile_expr_array`.
+        if let Some(kind) = element_kind {
+            self.last_expr_type_info = Some(
+                crate::type_tracking::VariableTypeInfo::named(
+                    super::v2_typed_emission::vec_type_name_for_typed_array_kind(kind)
+                        .to_string(),
+                ),
+            );
+        } else {
+            self.last_expr_type_info = None;
+        }
+        self.last_expr_numeric_type = None;
+        self.last_expr_schema = None;
 
         self.pop_scope();
         Ok(())
@@ -988,11 +1110,38 @@ impl BytecodeCompiler {
                 Some(Operand::Local(result_local)),
             ));
             self.compile_expr(element)?;
+            // W16.2-C (Round 6 WS-1): capture the proven element kind for
+            // `compile_list_comprehension` to patch the accumulator
+            // allocator with the matching typed `NewTypedArray*` opcode. The
+            // element expression has just compiled — `last_expr_numeric_type`
+            // / `last_expr_type_info` carry the producer-side type proof per
+            // ADR-006 §2.7.5. A `bool`-typed element (comparison result)
+            // surfaces via `last_expr_type_info.storage_hint == Bool`.
+            let resolved_kind = self.resolve_pushed_element_typed_array_kind(element);
+            // Every base-case visit compiles the SAME element expression, so
+            // the resolved kind is identical across loop/filter clauses;
+            // recording it once is sufficient. If a later visit somehow
+            // disagrees, downgrade to `None` (un-provable) rather than
+            // silently picking one.
+            match (self.comprehension_element_kind, resolved_kind) {
+                (None, k) => self.comprehension_element_kind = k,
+                (Some(prev), Some(k)) if prev == k => {}
+                (Some(_), _) => self.comprehension_element_kind = None,
+            }
+            // Emit a placeholder `ArrayPush` and record its index.
+            // `compile_list_comprehension` patches it to the matching
+            // `TypedArrayPush*` opcode once the element kind is resolved.
+            // The typed push pops `[arr, val]` and pushes nothing back
+            // (the `TypedArray<T>` struct pointer is stable across the
+            // in-place `TypedArray::push` — only the inner data buffer
+            // reallocs), so NO `StoreLocal` re-store is emitted: the
+            // accumulator slot already holds the stable pointer. The
+            // placeholder `ArrayPush` is never executed — it is always
+            // patched before the program runs (or the comprehension
+            // fails to compile).
+            self.comprehension_push_sites
+                .push(self.program.instructions.len());
             self.emit(Instruction::simple(OpCode::ArrayPush));
-            self.emit(Instruction::new(
-                OpCode::StoreLocal,
-                Some(Operand::Local(result_local)),
-            ));
             return Ok(());
         }
 
@@ -1084,6 +1233,22 @@ impl BytecodeCompiler {
             Self::owned_mutable_binding_semantics(),
         );
 
+        // W16.2-C (Round 6 WS-1, 2026-05-21): type the comprehension loop
+        // variable from the iterable's element type — mirrors the `for x in
+        // iter` loop-variable typing (`compile_for_loop` `iter_element_type
+        // _name` + `set_local_type_info`). Without this, `[x for x in arr]`
+        // leaves `x` untyped and `resolve_pushed_element_typed_array_kind`
+        // cannot prove the comprehension's element kind. Per ADR-006 §2.7.5
+        // the iterable's tracked `Array<T>` element type IS the proof.
+        if let (Some(loop_var), Some(elem_type)) = (
+            clause.pattern.as_identifier(),
+            self.iter_element_type_name(&clause.iterable),
+        ) {
+            if let Some(local_idx) = self.resolve_local(loop_var) {
+                self.set_local_type_info(local_idx, &elem_type);
+            }
+        }
+
         if let Some(filter) = &clause.filter {
             self.compile_expr(filter)?;
             let skip_jump = self.emit_jump(OpCode::JumpIfFalse, 0);
@@ -1119,11 +1284,98 @@ impl BytecodeCompiler {
         Ok(())
     }
 
+    /// W16.2-C (Round 6 WS-1, 2026-05-21) — resolve the homogeneous
+    /// [`TypedArrayKind`] of an array-spread literal's elements.
+    ///
+    /// Walks every element of `[...src, tail, ...]`: a `...src` spread
+    /// contributes `src`'s array-element type (a `0..n` range spread
+    /// contributes `int`); a bare element contributes its own type. The
+    /// accumulator kind is the single kind every element agrees on. Returns
+    /// `None` for a genuinely heterogeneous literal (e.g. `[...intArr,
+    /// "str"]`) or an element whose type is not statically provable — the
+    /// caller surfaces a clean compile error. Per ADR-006 §2.7.5 every kind
+    /// is proven structurally at the producer site; no runtime inference.
+    fn resolve_spread_accumulator_kind(
+        &self,
+        elements: &[Expr],
+    ) -> Option<super::v2_typed_emission::TypedArrayKind> {
+        use super::monomorphization::type_resolution::concrete_type_for_expr;
+        use super::v2_typed_emission::should_use_typed_array;
+        use shape_value::v2::ConcreteType;
+
+        let mut acc: Option<super::v2_typed_emission::TypedArrayKind> = None;
+        for elem in elements {
+            let elem_kind = match elem {
+                Expr::Spread(inner, _) => {
+                    // A `0..n` / `0..=n` range spread yields `int` counters.
+                    if let Expr::Range {
+                        start: Some(_),
+                        end: Some(_),
+                        ..
+                    } = inner.as_ref()
+                    {
+                        Some(super::v2_typed_emission::TypedArrayKind::I64)
+                    } else {
+                        // Any other spread source must be an `Array<T>`;
+                        // its element type is the contributed kind.
+                        match concrete_type_for_expr(self, inner) {
+                            Some(ConcreteType::Array(inner_ct)) => {
+                                should_use_typed_array(&inner_ct)
+                            }
+                            _ => None,
+                        }
+                    }
+                }
+                _ => concrete_type_for_expr(self, elem)
+                    .and_then(|ct| should_use_typed_array(&ct)),
+            };
+            let elem_kind = elem_kind?;
+            match acc {
+                None => acc = Some(elem_kind),
+                Some(prev) if prev == elem_kind => {}
+                // Heterogeneous element kinds — not a typed-array literal.
+                Some(_) => return None,
+            }
+        }
+        acc
+    }
+
     pub(super) fn compile_array_with_spread(&mut self, elements: &[Expr]) -> Result<()> {
         self.push_scope();
 
+        // W16.2-C (Round 6 WS-1): the spread accumulator MUST be a v2 typed
+        // array — `op_array_push` rejects any non-`Ptr(HeapKind::TypedArray)`
+        // receiver. Resolve the homogeneous element kind structurally before
+        // emission (per ADR-006 §2.7.5 the producer-side proof is the spread
+        // sources' / tail elements' statically-known `ConcreteType`s).
+        let accumulator_kind = self.resolve_spread_accumulator_kind(elements);
         let result_local = self.declare_local("__array_result")?;
-        self.emit(Instruction::new(OpCode::NewArray, Some(Operand::Count(0))));
+        match accumulator_kind {
+            Some(kind) => {
+                self.emit(Instruction::new(
+                    kind.new_opcode(),
+                    Some(Operand::Count(0)),
+                ));
+                self.v2_typed_array_locals.insert(result_local, kind);
+                // Signal the kind to the enclosing `let b = [...spread]`
+                // binding path so the destination slot is recorded as a
+                // typed array (mirrors `compile_expr_array`).
+                self.pending_variable_typed_array_kind = Some(kind);
+            }
+            None => {
+                return Err(ShapeError::SemanticError {
+                    message: "array spread element types could not be \
+                              reconciled at compile time. Strict typing \
+                              requires every spread source and bare element \
+                              to share one proven scalar element type \
+                              (int / number / bool / decimal / sized \
+                              integer). A heterogeneous spread literal is \
+                              not supported."
+                        .to_string(),
+                    location: None,
+                });
+            }
+        }
         self.emit(Instruction::new(
             OpCode::StoreLocal,
             Some(Operand::Local(result_local)),
@@ -1326,6 +1578,22 @@ impl BytecodeCompiler {
             OpCode::LoadLocal,
             Some(Operand::Local(result_local)),
         ));
+
+        // Reset `last_expr_*` to the array shape so the enclosing
+        // `let b = [...spread]` binding records `b` as an array, not as
+        // the bare element scalar the last spread element left behind.
+        if let Some(kind) = accumulator_kind {
+            self.last_expr_type_info = Some(
+                crate::type_tracking::VariableTypeInfo::named(
+                    super::v2_typed_emission::vec_type_name_for_typed_array_kind(kind)
+                        .to_string(),
+                ),
+            );
+        } else {
+            self.last_expr_type_info = None;
+        }
+        self.last_expr_numeric_type = None;
+        self.last_expr_schema = None;
 
         self.pop_scope();
         Ok(())

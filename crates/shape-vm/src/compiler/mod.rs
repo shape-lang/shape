@@ -924,6 +924,32 @@ pub struct BytecodeCompiler {
     pub(crate) v2_typed_array_module_bindings:
         HashMap<u16, crate::compiler::v2_typed_emission::TypedArrayKind>,
 
+    /// Phase 4b Round 6 WS-1 W16.2-C (2026-05-21) — list-comprehension
+    /// element-kind capture.
+    ///
+    /// `compile_list_comprehension` emits the result accumulator's
+    /// `NewTypedArray*` allocator BEFORE the comprehension body is compiled,
+    /// but the element-expression's proven scalar kind is only known AFTER
+    /// the body compiles. `compile_comprehension_clauses` writes the proven
+    /// [`TypedArrayKind`] here at the innermost (clause-empty) base case,
+    /// reading the bytecode compiler's `last_expr_numeric_type` /
+    /// `last_expr_type_info` right after the element expression compiles —
+    /// per ADR-006 §2.7.5 the kind is proven at the producer site, never
+    /// fabricated. `compile_list_comprehension` then patches the recorded
+    /// allocator instruction with the matching typed opcode. `None` means
+    /// the element kind was not statically provable — a clean compile error.
+    pub(crate) comprehension_element_kind:
+        Option<crate::compiler::v2_typed_emission::TypedArrayKind>,
+
+    /// Phase 4b Round 6 WS-1 W16.2-C (2026-05-21) — instruction indices of
+    /// the placeholder `ArrayPush` opcodes emitted at list-comprehension
+    /// element-push sites. `compile_comprehension_clauses` records each
+    /// base-case push here; `compile_list_comprehension` patches them all
+    /// to the resolved `TypedArrayPush*` opcode once the element kind is
+    /// known — so the typed accumulator receives a typed push that the JIT
+    /// and VM both dispatch unambiguously (no generic-carrier path).
+    pub(crate) comprehension_push_sites: Vec<usize>,
+
     /// v2 Phase 3.2: when the enclosing `let m: HashMap<K, V> = HashMap()`
     /// declares an explicit `HashMap<K, V>` annotation whose key/value pair
     /// maps to a [`v2_typed_map_emission::TypedMapKind`], stash the kind here

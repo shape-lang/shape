@@ -95,6 +95,8 @@ impl BytecodeCompiler {
             nested_array_literal_depth: 0,
             v2_typed_array_locals: HashMap::new(),
             v2_typed_array_module_bindings: HashMap::new(),
+            comprehension_element_kind: None,
+            comprehension_push_sites: Vec::new(),
             pending_variable_typed_map_kind: None,
             v2_typed_map_locals: HashMap::new(),
             v2_typed_map_module_bindings: HashMap::new(),

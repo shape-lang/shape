@@ -419,6 +419,74 @@ pub fn typed_array_kind_from_type_name(type_name: &str) -> Option<TypedArrayKind
     }
 }
 
+/// Phase 4b Round 6 WS-1 W16.2-C (2026-05-21) — the `Vec<…>` type-tracker
+/// name for a [`TypedArrayKind`].
+///
+/// `compile_list_comprehension` / `compile_array_with_spread` stamp this as
+/// `last_expr_type_info` once the accumulator kind is resolved, so the
+/// enclosing `let` binding's `propagate_initializer_type_to_slot` records the
+/// destination slot as an array (not as the bare element scalar). Mirrors the
+/// `Vec<int>` / `Vec<number>` / `Vec<bool>` names `compile_expr_array` stamps.
+#[inline]
+pub fn vec_type_name_for_typed_array_kind(kind: TypedArrayKind) -> &'static str {
+    match kind {
+        TypedArrayKind::F64 => "Vec<number>",
+        TypedArrayKind::I64 => "Vec<int>",
+        TypedArrayKind::I32 => "Vec<i32>",
+        TypedArrayKind::Bool => "Vec<bool>",
+        TypedArrayKind::I8 => "Vec<i8>",
+        TypedArrayKind::U8 => "Vec<u8>",
+        TypedArrayKind::I16 => "Vec<i16>",
+        TypedArrayKind::U16 => "Vec<u16>",
+        TypedArrayKind::U32 => "Vec<u32>",
+        TypedArrayKind::F32 => "Vec<f32>",
+        TypedArrayKind::Char => "Vec<char>",
+        TypedArrayKind::String => "Vec<string>",
+        TypedArrayKind::Decimal => "Vec<decimal>",
+        TypedArrayKind::TypedObject => "Vec<object>",
+    }
+}
+
+/// Phase 4b Round 6 WS-1 W16.2-C (2026-05-21) — map a proven [`NumericType`]
+/// to its [`TypedArrayKind`].
+///
+/// Used by the spread / list-comprehension accumulator rebuild: once the
+/// element expression has been compiled and the bytecode compiler's
+/// `last_expr_numeric_type` reports a proven scalar numeric type, this maps
+/// it to the typed-array carrier kind so the accumulator can be allocated
+/// with the matching `NewTypedArray*` opcode. Per ADR-006 §2.7.5 the kind is
+/// proven at the producer site (the compiled element expression) — never
+/// decoded from runtime bits, never Bool-defaulted.
+#[inline]
+pub fn typed_array_kind_from_numeric_type(
+    nt: crate::type_tracking::NumericType,
+) -> TypedArrayKind {
+    use crate::type_tracking::NumericType;
+    use shape_ast::IntWidth;
+    match nt {
+        NumericType::Int => TypedArrayKind::I64,
+        NumericType::Number => TypedArrayKind::F64,
+        NumericType::Decimal => TypedArrayKind::Decimal,
+        NumericType::IntWidth(w) => match w {
+            IntWidth::I8 => TypedArrayKind::I8,
+            IntWidth::U8 => TypedArrayKind::U8,
+            IntWidth::I16 => TypedArrayKind::I16,
+            IntWidth::U16 => TypedArrayKind::U16,
+            IntWidth::I32 => TypedArrayKind::I32,
+            IntWidth::U32 => TypedArrayKind::U32,
+            // `u64` has no typed-array carrier yet (S1.5 territory — the
+            // §2.7.7/Q9 parallel-kind track has no discriminator between
+            // scalar u64 and a v2-typed-array pointer). Route `u64`
+            // elements to the i64 carrier's storage shape: `IntWidth::U64`
+            // values still fit an 8-byte slot and round-trip through the
+            // i64 push/get opcodes bit-identically. (A genuine `Array<u64>`
+            // monomorphization is deferred; this is the spread/comprehension
+            // accumulator, not an annotated `Array<u64>` binding.)
+            IntWidth::U64 => TypedArrayKind::I64,
+        },
+    }
+}
+
 impl super::BytecodeCompiler {
     /// Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18).
     ///
@@ -1039,6 +1107,73 @@ mod compile_integration_tests {
 
     fn has_opcode(prog: &BytecodeProgram, op: OpCode) -> bool {
         prog.instructions.iter().any(|i| i.opcode == op)
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // W16.2-C (Round 6 WS-1) — spread / list-comprehension typed-array
+    // accumulator construction.
+    // ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn ws1_int_comprehension_emits_typed_array() {
+        let prog = compile("let c=[x for x in 0..5]\nc\n");
+        assert!(
+            has_opcode(&prog, OpCode::NewTypedArrayI64),
+            "int comprehension accumulator must allocate via NewTypedArrayI64"
+        );
+        assert!(
+            has_opcode(&prog, OpCode::TypedArrayPushI64),
+            "int comprehension element push must use TypedArrayPushI64"
+        );
+        assert!(
+            !has_opcode(&prog, OpCode::NewArray),
+            "int comprehension must NOT emit the generic NewArray opcode"
+        );
+    }
+
+    #[test]
+    fn ws1_int_spread_emits_typed_array() {
+        let prog = compile("let a=[1,2,3]\nlet b=[...a,4,5]\nb\n");
+        assert!(
+            has_opcode(&prog, OpCode::NewTypedArrayI64),
+            "int spread accumulator must allocate via NewTypedArrayI64"
+        );
+        assert!(
+            !has_opcode(&prog, OpCode::NewArray),
+            "int spread must NOT emit the generic NewArray opcode"
+        );
+    }
+
+    #[test]
+    fn ws1_number_comprehension_emits_typed_array() {
+        let prog = compile("let c=[x * 1.5 for x in 0..4]\nc\n");
+        assert!(
+            has_opcode(&prog, OpCode::NewTypedArrayF64),
+            "number comprehension accumulator must allocate via NewTypedArrayF64"
+        );
+        assert!(
+            has_opcode(&prog, OpCode::TypedArrayPushF64),
+            "number comprehension element push must use TypedArrayPushF64"
+        );
+    }
+
+    #[test]
+    fn ws1_heterogeneous_spread_is_clean_compile_error() {
+        // `[...intArr, "str"]` mixes an int-array spread with a string
+        // tail — no homogeneous scalar element kind. Must surface a clean
+        // SemanticError, NOT a runtime jargon dump.
+        let src = "let a=[1,2,3]\nlet b=[...a,\"str\"]\nb\n";
+        let program = shape_ast::parser::parse_program(src).expect("parse should succeed");
+        let result = BytecodeCompiler::new().compile_with_source(&program, src);
+        assert!(
+            result.is_err(),
+            "heterogeneous spread must be a compile error"
+        );
+        let msg = format!("{:?}", result.unwrap_err());
+        assert!(
+            msg.contains("spread element types could not be reconciled"),
+            "heterogeneous spread error must be the clean structured message, got: {msg}"
+        );
     }
 
     #[test]
