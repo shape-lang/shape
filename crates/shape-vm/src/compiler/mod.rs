@@ -527,6 +527,38 @@ pub struct ClosureBodyPeek {
     pub function_index: Option<usize>,
 }
 
+/// Phase 4b Round 6 WS-1b W16.2-C residual (2026-05-21) — identifies the
+/// binding slot that holds a bare empty-array accumulator awaiting a
+/// downstream-`.push()`-resolved element kind.
+///
+/// A `let mut out = []` either lands in a function-body local slot or a
+/// top-level module binding; both are keyed by their `u16` index. The push
+/// site (`compile_expr_method_call`) resolves the receiver to the same key,
+/// patches the placeholder allocator, and promotes the binding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum EmptyArrayAccumulatorKey {
+    /// Function-body local slot index.
+    Local(u16),
+    /// Top-level module-binding index.
+    ModuleBinding(u16),
+}
+
+/// Phase 4b Round 6 WS-1b W16.2-C residual — a pending bare empty-array
+/// accumulator. Carries the placeholder `NewArray(0)` instruction index so
+/// the first `.push()` (or the end-of-compilation finalizer) can patch it.
+#[derive(Debug, Clone)]
+pub(crate) struct EmptyArrayAccumulator {
+    /// Instruction index of the placeholder `OpCode::NewArray` emitted at the
+    /// empty-array literal site. Patched in-place to `kind.new_opcode()` once
+    /// the element kind is proven.
+    pub alloc_instr_idx: usize,
+    /// Source location of the empty-array literal — used for the clean
+    /// "element type un-resolvable" diagnostic if no push ever resolves it.
+    pub literal_loc: Option<SourceLocation>,
+    /// The accumulator variable's source name (for diagnostics).
+    pub var_name: String,
+}
+
 /// Compiler state
 pub struct BytecodeCompiler {
     /// The program being built
@@ -949,6 +981,36 @@ pub struct BytecodeCompiler {
     /// known — so the typed accumulator receives a typed push that the JIT
     /// and VM both dispatch unambiguously (no generic-carrier path).
     pub(crate) comprehension_push_sites: Vec<usize>,
+
+    /// Phase 4b Round 6 WS-1b W16.2-C residual (2026-05-21) — bare
+    /// empty-array accumulator deferred-kind capture.
+    ///
+    /// A bare `let mut out = []` (empty array literal, no `Array<T>`
+    /// annotation, no elements) cannot resolve its `TypedArrayKind` at the
+    /// literal site — the element type is determined only by downstream
+    /// `out.push(x)` calls. `compile_expr_array` emits a placeholder
+    /// `NewArray(0)` and records its instruction index here against the
+    /// binding (local slot or module binding). The FIRST `arr.push(v)` on
+    /// that binding resolves the element kind from the compiled argument's
+    /// proven type (ADR-006 §2.7.5 producer-side stamp — read from the
+    /// type-tracker at the push site, never decoded from runtime bits, never
+    /// Bool-defaulted), patches the placeholder to the matching typed
+    /// `NewTypedArray*` allocator, and promotes the binding into
+    /// `v2_typed_array_locals` / `v2_typed_array_module_bindings` so every
+    /// subsequent push is a typed `TypedArrayPush*`. A bare empty array that
+    /// is never pushed to and never annotated has a genuinely un-resolvable
+    /// element type — `finalize_unresolved_empty_array_accumulators`
+    /// surface-and-stops with a clean structured compile error.
+    pub(crate) empty_array_accumulators: HashMap<EmptyArrayAccumulatorKey, EmptyArrayAccumulator>,
+
+    /// Phase 4b Round 6 WS-1b — instruction index of the placeholder
+    /// `NewArray(0)` emitted by the most recent `compile_expr_array` call for
+    /// a bare empty array literal. The enclosing `Statement::VariableDecl` /
+    /// `Item::VariableDecl` reads this immediately after the initializer
+    /// compiles and re-keys it into [`empty_array_accumulators`] against the
+    /// resolved binding. `None` when the last array literal was non-empty,
+    /// annotated, or otherwise resolved a kind directly.
+    pub(crate) pending_empty_array_alloc_idx: Option<usize>,
 
     /// v2 Phase 3.2: when the enclosing `let m: HashMap<K, V> = HashMap()`
     /// declares an explicit `HashMap<K, V>` annotation whose key/value pair

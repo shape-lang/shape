@@ -447,6 +447,30 @@ pub fn vec_type_name_for_typed_array_kind(kind: TypedArrayKind) -> &'static str 
     }
 }
 
+/// Phase 4b Round 6 WS-1b W16.2-C residual (2026-05-21) — the user-facing
+/// ELEMENT type name for a [`TypedArrayKind`] (`I64` → `"int"`), used in
+/// heterogeneous-push diagnostics. Distinct from
+/// [`vec_type_name_for_typed_array_kind`], which renders the array type
+/// (`"Vec<int>"`).
+pub fn vec_element_type_name_for_typed_array_kind(kind: TypedArrayKind) -> &'static str {
+    match kind {
+        TypedArrayKind::F64 => "number",
+        TypedArrayKind::I64 => "int",
+        TypedArrayKind::I32 => "i32",
+        TypedArrayKind::Bool => "bool",
+        TypedArrayKind::I8 => "i8",
+        TypedArrayKind::U8 => "u8",
+        TypedArrayKind::I16 => "i16",
+        TypedArrayKind::U16 => "u16",
+        TypedArrayKind::U32 => "u32",
+        TypedArrayKind::F32 => "f32",
+        TypedArrayKind::Char => "char",
+        TypedArrayKind::String => "string",
+        TypedArrayKind::Decimal => "decimal",
+        TypedArrayKind::TypedObject => "object",
+    }
+}
+
 /// Phase 4b Round 6 WS-1 W16.2-C (2026-05-21) — map a proven [`NumericType`]
 /// to its [`TypedArrayKind`].
 ///
@@ -654,6 +678,266 @@ impl super::BytecodeCompiler {
         }
 
         None
+    }
+
+    /// Phase 4b Round 6 WS-1b W16.2-C residual (2026-05-21): resolve the
+    /// `EmptyArrayAccumulatorKey` for a receiver name, if it is a registered
+    /// bare empty-array accumulator awaiting an element kind.
+    ///
+    /// Mirrors the local-then-module-binding lookup order of
+    /// [`resolve_receiver_typed_array_kind`].
+    fn empty_array_accumulator_key(
+        &self,
+        recv_name: &str,
+    ) -> Option<super::EmptyArrayAccumulatorKey> {
+        if let Some(local_idx) = self.resolve_local(recv_name) {
+            let key = super::EmptyArrayAccumulatorKey::Local(local_idx);
+            return self.empty_array_accumulators.contains_key(&key).then_some(key);
+        }
+        let scoped_name = self
+            .resolve_scoped_module_binding_name(recv_name)
+            .unwrap_or_else(|| recv_name.to_string());
+        if let Some(&binding_idx) = self.module_bindings.get(&scoped_name) {
+            let key = super::EmptyArrayAccumulatorKey::ModuleBinding(binding_idx);
+            return self.empty_array_accumulators.contains_key(&key).then_some(key);
+        }
+        None
+    }
+
+    /// Resolve the `TypedArrayKind` an `arr.push(arg)` argument contributes
+    /// WITHOUT compiling `arg` — from a structural producer-side type proof
+    /// (ADR-006 §2.7.5; never from runtime bits, never Bool-defaulted).
+    ///
+    /// A literal argument is its own proof (`1` → `I64`, `"x"` → `String`,
+    /// …); a non-literal resolves through `concrete_type_for_expr` (the
+    /// type tracker — a range-loop counter is typed `int`, an
+    /// iterator-bound loop variable carries its element type, …). Returns
+    /// `None` when no kind is structurally provable — the caller then
+    /// compiles `arg` and reads the post-compile numeric / storage-hint
+    /// proof via [`push_element_kind_from_compiled_arg`].
+    fn structural_push_argument_typed_array_kind(
+        &self,
+        arg: &shape_ast::ast::Expr,
+    ) -> Option<TypedArrayKind> {
+        use shape_ast::ast::{Expr, Literal};
+        if let Expr::Literal(lit, _) = arg {
+            match lit {
+                Literal::Int(_) => return Some(TypedArrayKind::I64),
+                Literal::Number(_) => return Some(TypedArrayKind::F64),
+                Literal::Decimal(_) => return Some(TypedArrayKind::Decimal),
+                Literal::Bool(_) => return Some(TypedArrayKind::Bool),
+                Literal::String(_) => return Some(TypedArrayKind::String),
+                _ => {}
+            }
+        }
+        super::monomorphization::type_resolution::concrete_type_for_expr(self, arg)
+            .and_then(|ct| should_use_typed_array(&ct))
+    }
+
+    /// Resolve the `TypedArrayKind` from the `last_expr_*` proof stamped by
+    /// the bytecode compiler immediately after a push argument compiled.
+    ///
+    /// `last_expr_numeric_type` covers numeric literals / operations
+    /// (`j * 2`, `x + 1`); `last_expr_type_info`'s `storage_hint == Bool`
+    /// covers comparison results. Per ADR-006 §2.7.5 each is a producer-side
+    /// proof set when the element compiled — never fabricated. Returns
+    /// `None` when no scalar kind is proven.
+    fn push_element_kind_from_compiled_arg(&self) -> Option<TypedArrayKind> {
+        if let Some(nt) = self.last_expr_numeric_type {
+            return Some(typed_array_kind_from_numeric_type(nt));
+        }
+        if let Some(info) = &self.last_expr_type_info {
+            if info.storage_hint == Some(crate::type_tracking::NativeKind::Bool) {
+                return Some(TypedArrayKind::Bool);
+            }
+        }
+        None
+    }
+
+    /// Patch a pending empty-array accumulator's placeholder allocator to the
+    /// typed `NewTypedArray*` opcode for `kind`, and promote the binding into
+    /// `v2_typed_array_locals` / `v2_typed_array_module_bindings`.
+    ///
+    /// The runtime element kind is STAMPED into the bytecode at compile time
+    /// (ADR-006 §2.7.5) — the placeholder `NewArray(0)` becomes
+    /// `kind.new_opcode()` with `Count(0)` capacity; the typed array grows
+    /// via `TypedArrayPush*`. After this call the accumulator is no longer
+    /// pending and `resolve_receiver_typed_array_kind` reports `kind`.
+    fn finalize_empty_array_accumulator_kind(
+        &mut self,
+        key: super::EmptyArrayAccumulatorKey,
+        kind: TypedArrayKind,
+    ) {
+        let acc = self
+            .empty_array_accumulators
+            .remove(&key)
+            .expect("caller verified key presence");
+        self.program.instructions[acc.alloc_instr_idx] =
+            crate::bytecode::Instruction::new(
+                kind.new_opcode(),
+                Some(crate::bytecode::Operand::Count(0)),
+            );
+        // The resolved element type and the `Array<elem>` carrier type — the
+        // same stamps the annotated `let mut xs: Array<T> = []` path records,
+        // so a downstream `xs[i]` index access / `.method()` dispatch on the
+        // promoted accumulator resolves through the type tracker exactly as
+        // it would for an annotated binding (ADR-006 §2.7.5).
+        let elem_ct = concrete_type_for_typed_array_kind(kind);
+        let array_ct =
+            shape_value::v2::ConcreteType::Array(Box::new(elem_ct.clone()));
+        let array_type_name = vec_type_name_for_typed_array_kind(kind);
+        match key {
+            super::EmptyArrayAccumulatorKey::Local(local_idx) => {
+                self.v2_typed_array_locals.insert(local_idx, kind);
+                self.set_local_type_info(local_idx, array_type_name);
+                self.current_function_local_concrete_types
+                    .insert(local_idx, array_ct);
+                self.local_array_element_types.insert(local_idx, elem_ct);
+            }
+            super::EmptyArrayAccumulatorKey::ModuleBinding(binding_idx) => {
+                self.v2_typed_array_module_bindings.insert(binding_idx, kind);
+                self.set_module_binding_type_info(binding_idx, array_type_name);
+                self.module_binding_concrete_types
+                    .insert(binding_idx, array_ct);
+                self.module_binding_array_element_types
+                    .insert(binding_idx, elem_ct);
+            }
+        }
+    }
+
+    /// Phase 4b Round 6 WS-1b W16.2-C residual (2026-05-21): compile the
+    /// FIRST `arr.push(arg)` on a bare empty-array accumulator.
+    ///
+    /// When `recv_name` is a registered empty-array accumulator
+    /// (`let mut out = []`, no annotation), this resolves the element
+    /// `TypedArrayKind` from `arg`'s producer-side type proof, patches the
+    /// placeholder `NewArray(0)` allocator to the typed `NewTypedArray*`
+    /// opcode, promotes the binding, and emits the typed push — leaving the
+    /// pushed-into array on the stack as the expression result.
+    ///
+    /// Returns `Ok(true)` when `recv_name` was a pending accumulator and the
+    /// push was fully emitted; `Ok(false)` when it was not (the caller falls
+    /// through to its normal push path). A genuinely un-resolvable element
+    /// type is a clean structured compile error.
+    ///
+    /// Element-kind resolution is two-tier: a structural proof
+    /// ([`structural_push_argument_typed_array_kind`]) when `arg` is a
+    /// literal or a type-tracked identifier — which also lets string /
+    /// decimal literals route through `compile_typed_array_element_value`'s
+    /// `NewStringV2` / `NewDecimalV2` carrier; otherwise `arg` is compiled
+    /// and the kind read from the post-compile numeric / storage-hint proof
+    /// (covers `j * 2`, `x + 1`, comparison results — all scalar). The
+    /// compiled value is then ordered under the array via `Swap`.
+    pub(crate) fn compile_first_push_to_empty_accumulator(
+        &mut self,
+        recv_name: &str,
+        arg: &shape_ast::ast::Expr,
+        receiver_loc: Option<shape_ast::error::SourceLocation>,
+    ) -> shape_ast::error::Result<bool> {
+        let Some(key) = self.empty_array_accumulator_key(recv_name) else {
+            return Ok(false);
+        };
+        // Immutability check — `let out = []` (no `mut`) cannot be pushed
+        // into. Runs before any emission so the diagnostic is clean. On
+        // failure, drop the accumulator entry so the end-of-compilation
+        // finalizer does not ALSO emit a redundant "never pushed" error —
+        // the immutability error is the single accurate diagnostic.
+        if let Err(e) = self.check_named_binding_write_allowed(recv_name, receiver_loc) {
+            self.empty_array_accumulators.remove(&key);
+            return Err(e);
+        }
+
+        // Tier 1: structural resolution (literal / type-tracked identifier).
+        if let Some(kind) = self.structural_push_argument_typed_array_kind(arg) {
+            self.finalize_empty_array_accumulator_kind(key, kind);
+            self.emit_load_accumulator_binding(key);
+            self.compile_typed_array_element_value(kind, arg)?;
+            self.emit(crate::bytecode::Instruction::simple(kind.push_opcode()));
+            self.emit_load_accumulator_binding(key);
+            return Ok(true);
+        }
+
+        // Tier 2: compile `arg`, then read the post-compile numeric /
+        // storage-hint proof. Non-structural push arguments are scalar
+        // numeric / bool expressions (`j * 2`, `x + 1`, `a < b`) — never a
+        // string / decimal that would need the `NewStringV2` carrier.
+        self.compile_expr(arg)?;
+        let Some(kind) = self.push_element_kind_from_compiled_arg() else {
+            let acc = &self.empty_array_accumulators[&key];
+            return Err(shape_ast::error::ShapeError::SemanticError {
+                message: format!(
+                    "cannot determine the element type of empty array \
+                     `{}`. The array is created empty with no `Array<T>` \
+                     annotation, so its element type must come from the \
+                     first `.push(...)` — but the type of the value pushed \
+                     here is not statically known. Strict typing requires a \
+                     proven concrete element type: annotate the binding \
+                     (`let mut {}: Array<T> = []`) or push a value whose \
+                     type the compiler can resolve.",
+                    acc.var_name, acc.var_name,
+                ),
+                location: acc.literal_loc.clone(),
+            });
+        };
+        self.finalize_empty_array_accumulator_kind(key, kind);
+        // Stack: [value]. The typed push needs [arr, value] — load the
+        // array and swap it under the already-compiled value.
+        self.emit_load_accumulator_binding(key);
+        self.emit(crate::bytecode::Instruction::simple(crate::bytecode::OpCode::Swap));
+        self.emit(crate::bytecode::Instruction::simple(kind.push_opcode()));
+        self.emit_load_accumulator_binding(key);
+        Ok(true)
+    }
+
+    /// Emit a `LoadLocal` / `LoadModuleBinding` for an empty-array
+    /// accumulator's binding slot.
+    fn emit_load_accumulator_binding(&mut self, key: super::EmptyArrayAccumulatorKey) {
+        match key {
+            super::EmptyArrayAccumulatorKey::Local(local_idx) => {
+                self.emit(crate::bytecode::Instruction::new(
+                    crate::bytecode::OpCode::LoadLocal,
+                    Some(crate::bytecode::Operand::Local(local_idx)),
+                ));
+            }
+            super::EmptyArrayAccumulatorKey::ModuleBinding(binding_idx) => {
+                self.emit(crate::bytecode::Instruction::new(
+                    crate::bytecode::OpCode::LoadModuleBinding,
+                    Some(crate::bytecode::Operand::ModuleBinding(binding_idx)),
+                ));
+            }
+        }
+    }
+
+    /// Phase 4b Round 6 WS-1b W16.2-C residual (2026-05-21): surface-and-stop
+    /// for bare empty-array accumulators whose element type was never
+    /// resolved.
+    ///
+    /// A `let mut out = []` (no annotation) that is never pushed to has a
+    /// genuinely un-resolvable element type — there is no runtime untyped
+    /// array carrier, so the placeholder `NewArray(0)` would SURFACE. Rather
+    /// than ship that internal-jargon dump, emit a clean structured compile
+    /// error. Called once per compilation unit after all code is compiled.
+    pub(crate) fn finalize_unresolved_empty_array_accumulators(
+        &mut self,
+    ) -> shape_ast::error::Result<()> {
+        if let Some((_, acc)) = self.empty_array_accumulators.iter().next() {
+            let err = shape_ast::error::ShapeError::SemanticError {
+                message: format!(
+                    "empty array `{}` has an un-resolvable element type. \
+                     It is created empty (`[]`) with no `Array<T>` \
+                     annotation and is never pushed to, so the compiler \
+                     cannot prove what element type it holds. Strict typing \
+                     requires a known concrete element type: add an \
+                     annotation (`let {}: Array<T> = []`) or remove the \
+                     unused binding.",
+                    acc.var_name, acc.var_name,
+                ),
+                location: acc.literal_loc.clone(),
+            };
+            self.empty_array_accumulators.clear();
+            return Err(err);
+        }
+        Ok(())
     }
 }
 
@@ -1173,6 +1457,131 @@ mod compile_integration_tests {
         assert!(
             msg.contains("spread element types could not be reconciled"),
             "heterogeneous spread error must be the clean structured message, got: {msg}"
+        );
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // W16.2-C residual (Round 6 WS-1b) — bare empty-array accumulator
+    // (`let mut out = []`) whose element kind comes from downstream
+    // `.push()`. The placeholder `NewArray(0)` must be patched to the
+    // typed `NewTypedArray*` allocator with the kind proven at the first
+    // push, and every push must be a typed `TypedArrayPush*`.
+    // ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn ws1b_bare_int_accumulator_emits_typed_array() {
+        // `let mut out = []` then int pushes — the placeholder NewArray(0)
+        // must be patched to NewTypedArrayI64, pushes to TypedArrayPushI64.
+        let prog = compile("let mut out = []\nfor i in 0..3 { out.push(i) }\nout.len()\n");
+        assert!(
+            has_opcode(&prog, OpCode::NewTypedArrayI64),
+            "bare int accumulator must allocate via NewTypedArrayI64"
+        );
+        assert!(
+            has_opcode(&prog, OpCode::TypedArrayPushI64),
+            "bare int accumulator push must use TypedArrayPushI64"
+        );
+        assert!(
+            !has_opcode(&prog, OpCode::NewArray),
+            "bare int accumulator must NOT leave a kind-erased NewArray"
+        );
+    }
+
+    #[test]
+    fn ws1b_bare_number_accumulator_emits_typed_array() {
+        let prog = compile("let mut out = []\nout.push(1.5)\nout.push(2.5)\nout.len()\n");
+        assert!(
+            has_opcode(&prog, OpCode::NewTypedArrayF64),
+            "bare number accumulator must allocate via NewTypedArrayF64"
+        );
+        assert!(
+            has_opcode(&prog, OpCode::TypedArrayPushF64),
+            "bare number accumulator push must use TypedArrayPushF64"
+        );
+        assert!(!has_opcode(&prog, OpCode::NewArray));
+    }
+
+    #[test]
+    fn ws1b_bare_string_accumulator_emits_typed_array() {
+        let prog = compile("let mut out = []\nout.push(\"a\")\nout[0]\n");
+        assert!(
+            has_opcode(&prog, OpCode::NewTypedArrayString),
+            "bare string accumulator must allocate via NewTypedArrayString"
+        );
+        assert!(
+            has_opcode(&prog, OpCode::TypedArrayPushString),
+            "bare string accumulator push must use TypedArrayPushString"
+        );
+        // A string literal element must be produced via NewStringV2 so the
+        // TypedArrayPushString strict-kind check accepts the StringV2 carrier.
+        assert!(
+            has_opcode(&prog, OpCode::NewStringV2),
+            "bare string accumulator literal element must use NewStringV2"
+        );
+        assert!(!has_opcode(&prog, OpCode::NewArray));
+    }
+
+    #[test]
+    fn ws1b_bare_accumulator_in_function_body_emits_typed_array() {
+        // Function-local `let mut acc = []` — exercises the local-slot
+        // accumulator path (distinct from the top-level module-binding path).
+        let prog = compile(
+            "fn build() -> int {\n  let mut acc = []\n  acc.push(10)\n  acc.push(20)\n  acc[0] + acc[1]\n}\nbuild()\n",
+        );
+        assert!(
+            has_opcode(&prog, OpCode::NewTypedArrayI64),
+            "function-local int accumulator must allocate via NewTypedArrayI64"
+        );
+        assert!(!has_opcode(&prog, OpCode::NewArray));
+    }
+
+    #[test]
+    fn ws1b_bare_accumulator_complex_push_arg_emits_typed_array() {
+        // `out.push(i * i)` — a non-literal scalar push argument. The first
+        // push resolves the kind via the post-compile numeric proof (Tier 2).
+        let prog = compile("let mut out = []\nfor i in 0..5 { out.push(i * i) }\nout.len()\n");
+        assert!(
+            has_opcode(&prog, OpCode::NewTypedArrayI64),
+            "accumulator with a complex int push arg must allocate via NewTypedArrayI64"
+        );
+        assert!(!has_opcode(&prog, OpCode::NewArray));
+    }
+
+    #[test]
+    fn ws1b_never_pushed_empty_array_is_clean_compile_error() {
+        // A bare empty array that is never pushed to and never annotated has
+        // a genuinely un-resolvable element type — a clean structured
+        // compile error, NOT a runtime jargon dump.
+        let src = "let mut never = []\nnever\n";
+        let program = shape_ast::parser::parse_program(src).expect("parse should succeed");
+        let result = BytecodeCompiler::new().compile_with_source(&program, src);
+        assert!(
+            result.is_err(),
+            "never-pushed bare empty array must be a compile error"
+        );
+        let msg = format!("{:?}", result.unwrap_err());
+        assert!(
+            msg.contains("un-resolvable element type"),
+            "never-pushed empty array error must be the clean structured message, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn ws1b_heterogeneous_accumulator_push_is_clean_compile_error() {
+        // `out.push(1)` then `out.push("x")` — the second push's element
+        // type disagrees with the accumulator's resolved `int` kind. Must
+        // surface a clean SemanticError, not a silent wrong result.
+        let src = "let mut out = []\nout.push(1)\nout.push(\"x\")\nout.len()\n";
+        let program = shape_ast::parser::parse_program(src).expect("parse should succeed");
+        let result = BytecodeCompiler::new().compile_with_source(&program, src);
+        assert!(
+            result.is_err(),
+            "heterogeneous accumulator push must be a compile error"
+        );
+        let msg = format!("{:?}", result.unwrap_err());
+        assert!(
+            msg.contains("type mismatch") && msg.contains("element type"),
+            "heterogeneous accumulator error must be the clean structured message, got: {msg}"
         );
     }
 

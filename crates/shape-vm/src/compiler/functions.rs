@@ -1204,6 +1204,19 @@ impl BytecodeCompiler {
             std::mem::replace(&mut self.current_function_params, func_def.params.clone());
         let saved_current_function_return_reference_summary =
             self.current_function_return_reference_summary.clone();
+        // Phase 4b Round 6 WS-1b W16.2-C residual: empty-array accumulators
+        // are keyed by per-function local slot index — isolate them to this
+        // function's compilation so a sibling function's slot index cannot
+        // collide. `finalize_function_empty_array_accumulators` (called at
+        // every exit point) surface-and-stops any that were never resolved,
+        // then restores the saved map.
+        let saved_empty_array_accumulators =
+            std::mem::take(&mut self.empty_array_accumulators);
+        // Per-function `v2_typed_array_locals` are also slot-index keyed;
+        // isolate them so a promoted accumulator's typed-kind record cannot
+        // bleed across function boundaries.
+        let saved_v2_typed_array_locals =
+            std::mem::take(&mut self.v2_typed_array_locals);
 
         // Set up isolated locals for function compilation
         self.current_function = Some(func_idx);
@@ -1602,6 +1615,14 @@ impl BytecodeCompiler {
                         self.comptime_mode = saved_comptime_mode;
                         self.current_function_return_reference_summary =
                             saved_current_function_return_reference_summary;
+                        // WS-1b: surface-and-stop any unresolved empty-array
+                        // accumulator, then restore the caller's maps.
+                        let acc_result =
+                            self.finalize_unresolved_empty_array_accumulators();
+                        self.empty_array_accumulators =
+                            saved_empty_array_accumulators;
+                        self.v2_typed_array_locals = saved_v2_typed_array_locals;
+                        acc_result?;
                         // Patch the jump-over instruction if we emitted one
                         if let Some(jump_addr) = jump_over {
                             self.patch_jump(jump_addr);
@@ -1711,6 +1732,13 @@ impl BytecodeCompiler {
         self.comptime_mode = saved_comptime_mode;
         self.current_function_return_reference_summary =
             saved_current_function_return_reference_summary;
+
+        // WS-1b: surface-and-stop any unresolved empty-array accumulator,
+        // then restore the caller's maps.
+        let acc_result = self.finalize_unresolved_empty_array_accumulators();
+        self.empty_array_accumulators = saved_empty_array_accumulators;
+        self.v2_typed_array_locals = saved_v2_typed_array_locals;
+        acc_result?;
 
         // Patch the jump-over instruction if we emitted one
         if let Some(jump_addr) = jump_over {

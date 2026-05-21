@@ -2103,6 +2103,22 @@ impl BytecodeCompiler {
         };
         if method == "push" && args.len() == 1 && !bespoke_push_blocked {
             if let Expr::Identifier(recv_name, _) = receiver {
+                // Phase 4b Round 6 WS-1b W16.2-C residual (2026-05-21): if
+                // the receiver is a bare empty-array accumulator
+                // (`let mut out = []`) still awaiting its element kind, this
+                // FIRST `.push()` resolves the kind, patches the placeholder
+                // allocator, promotes the binding, and emits the typed push
+                // — leaving the array on the stack as the expression result.
+                // Every subsequent push then takes the typed path below
+                // (`resolve_receiver_typed_array_kind` now reports the kind).
+                if self.compile_first_push_to_empty_accumulator(
+                    recv_name,
+                    &args[0],
+                    Some(self.span_to_source_location(receiver.span())),
+                )? {
+                    self.clear_last_expr_reference_result();
+                    return Ok(());
+                }
                 // v2 Phase 3.1 (Agent 3): typed-array fast path for `arr.push(x)`.
                 // Resolved BEFORE arg compilation since compile_expr may
                 // overwrite tracker state. Falls through to legacy
@@ -2125,7 +2141,12 @@ impl BytecodeCompiler {
                             OpCode::LoadLocal,
                             Some(Operand::Local(local_idx)),
                         ));
-                        self.compile_expr(&args[0])?;
+                        // WS-1b: emit the element in the carrier shape the
+                        // typed push requires — `NewStringV2` / `NewDecimalV2`
+                        // for string / decimal literals so the
+                        // `TypedArrayPushString` / `TypedArrayPushDecimal`
+                        // strict-kind check accepts it.
+                        self.compile_typed_array_element_value(kind, &args[0])?;
                         self.emit(Instruction::simple(kind.push_opcode()));
                         // Push the mutated array as expression result.
                         if self.ref_locals.contains(&local_idx)
@@ -2181,7 +2202,9 @@ impl BytecodeCompiler {
                             OpCode::LoadModuleBinding,
                             Some(Operand::ModuleBinding(binding_idx)),
                         ));
-                        self.compile_expr(&args[0])?;
+                        // WS-1b: carrier-aware element emit (see local-slot
+                        // path above).
+                        self.compile_typed_array_element_value(kind, &args[0])?;
                         self.emit(Instruction::simple(kind.push_opcode()));
                         self.emit(Instruction::new(
                             OpCode::LoadModuleBinding,
