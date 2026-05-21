@@ -1013,6 +1013,11 @@ fn type_check_kinded(
                 NativeKind::String | NativeKind::Ptr(HeapKind::String)
             ),
             "char" => matches!(value.kind, NativeKind::Ptr(HeapKind::Char)),
+            // `let { … } = obj` lowers an `emit_destructure_type_check("object")`
+            // guard before field extraction. The slot's `NativeKind` is stamped
+            // at compile time; this is a kind-tag match (no decode, no
+            // fabrication), the same shape as the `"string"` arm above.
+            "object" => matches!(value.kind, NativeKind::Ptr(HeapKind::TypedObject)),
             _ => false,
         },
         TypeAnnotation::Null => value.slot.raw() == 0,

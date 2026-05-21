@@ -328,7 +328,31 @@ impl BytecodeCompiler {
                             })
                         }
                     }
-                    _ => {
+                    (None, _) => {
+                        // WS-4 4c: a bare `Constructor` pattern with no
+                        // enum-name (`Point { x, y }`) may name a
+                        // registered struct/TypedObject. Resolve
+                        // `variant`; if it is a non-enum schema with a
+                        // struct payload, route to the `Pattern::Object`
+                        // struct-pattern check. Otherwise fail the arm
+                        // (the genuine bare-enum-variant case).
+                        let resolved_name = self.resolve_type_name(variant);
+                        let is_struct_schema = self
+                            .type_tracker
+                            .schema_registry()
+                            .get(resolved_name.as_str())
+                            .map(|s| !s.is_enum())
+                            .unwrap_or(false);
+                        if is_struct_schema {
+                            if let PatternConstructorFields::Struct(field_pats) = fields {
+                                return self.compile_pattern_check_local(
+                                    &Pattern::Object(field_pats.clone()),
+                                    value_local,
+                                    fail_jumps,
+                                    hint_span,
+                                );
+                            }
+                        }
                         fail_jumps.push(self.emit_jump(OpCode::Jump, 0));
                         Ok(())
                     }

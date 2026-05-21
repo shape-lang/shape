@@ -507,8 +507,10 @@ impl TypeInferenceEngine {
                 for arm in &match_expr.arms {
                     self.env.push_scope();
 
-                    // Bind pattern variables
-                    self.bind_pattern_vars(&arm.pattern)?;
+                    // Bind pattern variables. WS-4 4b: pass the scrutinee
+                    // type so object/struct patterns bind each field to
+                    // its declared type rather than a fresh type var.
+                    self.bind_pattern_vars_typed(&arm.pattern, Some(&scrutinee_type))?;
 
                     // Check guard if present
                     if let Some(guard) = &arm.guard {
@@ -1245,6 +1247,21 @@ impl TypeInferenceEngine {
         &mut self,
         pattern: &shape_ast::ast::Pattern,
     ) -> TypeResult<()> {
+        self.bind_pattern_vars_typed(pattern, None)
+    }
+
+    /// WS-4 4b: scrutinee-aware variant of [`bind_pattern_vars`]. When
+    /// `scrutinee` resolves to a registered struct, an `Object` or
+    /// struct-`Constructor` pattern binds each field to that field's
+    /// declared type instead of a fresh type var — keeping
+    /// `match p { Point { x, y } => x + y }` type-sound. `scrutinee ==
+    /// None` reproduces the prior fresh-var behaviour for callers
+    /// without a scrutinee type.
+    pub(crate) fn bind_pattern_vars_typed(
+        &mut self,
+        pattern: &shape_ast::ast::Pattern,
+        scrutinee: Option<&Type>,
+    ) -> TypeResult<()> {
         use shape_ast::ast::{Pattern, PatternConstructorFields};
 
         match pattern {
@@ -1267,12 +1284,24 @@ impl TypeInferenceEngine {
             }
             Pattern::Array(patterns) => {
                 for p in patterns {
-                    self.bind_pattern_vars(p)?;
+                    self.bind_pattern_vars_typed(p, None)?;
                 }
             }
             Pattern::Object(fields) => {
-                for (_, p) in fields {
-                    self.bind_pattern_vars(p)?;
+                let struct_name = scrutinee
+                    .and_then(|ty| self.struct_name_of_type(ty));
+                for (key, p) in fields {
+                    let field_ty = struct_name.as_deref().and_then(|name| {
+                        self.struct_field_annotation(name, key)
+                            .map(|ann| self.resolve_type_annotation(&ann))
+                    });
+                    self.bind_pattern_vars_typed(p, field_ty.as_ref())?;
+                    // For a plain identifier field, override the
+                    // fresh-var binding with the resolved field type.
+                    if let (Pattern::Identifier(bind_name), Some(ft)) = (p, &field_ty) {
+                        self.env
+                            .define(bind_name, TypeScheme::mono(ft.clone()));
+                    }
                 }
             }
             Pattern::Constructor { fields, .. } => {
@@ -1282,12 +1311,30 @@ impl TypeInferenceEngine {
                     }
                     PatternConstructorFields::Tuple(patterns) => {
                         for p in patterns {
-                            self.bind_pattern_vars(p)?;
+                            self.bind_pattern_vars_typed(p, None)?;
                         }
                     }
-                    PatternConstructorFields::Struct(fields) => {
-                        for (_, p) in fields {
-                            self.bind_pattern_vars(p)?;
+                    PatternConstructorFields::Struct(field_pats) => {
+                        // A bare struct `Constructor` pattern (`Point {
+                        // x, y }`) over a registered struct scrutinee:
+                        // resolve each field's declared type. Enum
+                        // struct-variant payloads are not in
+                        // `struct_type_defs`, so `struct_name` is `None`
+                        // and this falls back to fresh vars.
+                        let struct_name = scrutinee
+                            .and_then(|ty| self.struct_name_of_type(ty));
+                        for (key, p) in field_pats {
+                            let field_ty = struct_name.as_deref().and_then(|name| {
+                                self.struct_field_annotation(name, key)
+                                    .map(|ann| self.resolve_type_annotation(&ann))
+                            });
+                            self.bind_pattern_vars_typed(p, field_ty.as_ref())?;
+                            if let (Pattern::Identifier(bind_name), Some(ft)) =
+                                (p, &field_ty)
+                            {
+                                self.env
+                                    .define(bind_name, TypeScheme::mono(ft.clone()));
+                            }
                         }
                     }
                 }

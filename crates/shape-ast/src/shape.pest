@@ -1187,9 +1187,18 @@ let_expr = { "let" ~ pattern ~ ("=" ~ expression)? ~ "in" ~ expression }
 
 // ===== Match Expression =====
 match_expr = { "match" ~ match_scrutinee ~ "{" ~ (match_arm ~ (","? ~ match_arm)* ~ ","?)? ~ "}" }
-// Fast path for `match x { ... }` without letting `expression` greedily parse
-// `x { ... }` as a struct literal.
-match_scrutinee = { match_scrutinee_ident | expression }
+// WS-4 4c: `match_scrutinee_struct` is tried FIRST so a bare
+// struct-literal scrutinee — `match Point { x: 3, y: 4 } { … }` —
+// parses correctly. The `&"{"` lookahead is load-bearing: a
+// struct-literal scrutinee is ALWAYS followed by the match-body `{`,
+// so `match c { }` (empty match over a variable `c`) does NOT match
+// here — `struct_literal` would greedily consume `c { }` as an empty
+// struct literal, but the absent following `{` fails the lookahead and
+// the parse falls through to `match_scrutinee_ident`. This keeps the
+// greedy-struct-literal mis-parse (the reason the `match_scrutinee_ident`
+// fast-path exists) from re-appearing.
+match_scrutinee = { match_scrutinee_struct | match_scrutinee_ident | expression }
+match_scrutinee_struct = { struct_literal ~ &"{" }
 match_scrutinee_ident = { ident ~ &"{" }
 match_arm = { pattern ~ ("where" ~ expression)? ~ "=>" ~ expression }
 

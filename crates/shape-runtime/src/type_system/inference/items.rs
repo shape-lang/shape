@@ -1188,9 +1188,22 @@ impl TypeInferenceEngine {
                 }
             }
             DestructurePattern::Object(fields) => {
+                // WS-4 4b: when the source type resolves to a known
+                // struct, bind each destructured field pattern to that
+                // field's declared type instead of a fresh type var.
+                // Mirrors the `Decomposition` arm above (which resolves
+                // field annotations) and keeps `let { x, y } = p`
+                // type-sound for downstream inference. Falls back to a
+                // fresh var when the source struct or the field is
+                // unknown.
+                let struct_name = self.struct_name_of_type(&fallback_type);
                 for field in fields {
-                    let fallback = self.fresh_type_var();
-                    self.bind_decl_pattern(&field.pattern, fallback);
+                    let resolved = struct_name.as_deref().and_then(|name| {
+                        self.struct_field_annotation(name, &field.key)
+                            .map(|ann| self.resolve_type_annotation(&ann))
+                    });
+                    let field_type = resolved.unwrap_or_else(|| self.fresh_type_var());
+                    self.bind_decl_pattern(&field.pattern, field_type);
                 }
             }
             DestructurePattern::Rest(pattern) => {
@@ -1198,6 +1211,42 @@ impl TypeInferenceEngine {
                 self.bind_decl_pattern(pattern, BuiltinTypes::array(elem));
             }
         }
+    }
+
+    /// WS-4 4b: extract a struct type name from a resolved `Type` when
+    /// it names a registered struct in `struct_type_defs`. Returns
+    /// `None` for type variables, generics, functions, and non-struct
+    /// references.
+    pub(crate) fn struct_name_of_type(&self, ty: &Type) -> Option<String> {
+        let name = match ty {
+            Type::Concrete(TypeAnnotation::Basic(name)) => name.clone(),
+            Type::Concrete(TypeAnnotation::Reference(path)) => path.as_str().to_string(),
+            Type::Generic { base, .. } => return self.struct_name_of_type(base),
+            _ => return None,
+        };
+        if self.struct_type_defs.contains_key(&name) {
+            Some(name)
+        } else {
+            None
+        }
+    }
+
+    /// WS-4 4b: look up the declared `TypeAnnotation` of a field on a
+    /// registered struct. Used to bind destructured field patterns to
+    /// their real types.
+    pub(crate) fn struct_field_annotation(
+        &self,
+        struct_name: &str,
+        field_name: &str,
+    ) -> Option<TypeAnnotation> {
+        self.struct_type_defs
+            .get(struct_name)
+            .and_then(|def| {
+                def.fields
+                    .iter()
+                    .find(|f| f.name == field_name)
+                    .map(|f| f.type_annotation.clone())
+            })
     }
 }
 
