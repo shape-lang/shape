@@ -1530,12 +1530,73 @@ impl BytecodeCompiler {
             }
         }
 
+        // WS-9: element type of `arr[i]` for a tracked-array receiver.
+        //
+        // The runtime inference engine the compiler shares here is at module
+        // scope — it has no per-function parameter bindings, so
+        // `infer_expr(IndexAccess { object: Identifier(param), .. })` returns
+        // a disconnected, unresolved variable ("unknown"). That severs the
+        // element type for an indexed unannotated parameter (`a[0] + b[0]`),
+        // producing a spurious `unknown + unknown` reject.
+        //
+        // The program-wide inference pass DOES resolve the parameter — via
+        // callsite unification of the concrete argument — and records its
+        // type in `inferred_param_type_hints`, which `compile_function_body`
+        // stamps onto the local slot's tracker `type_name` (e.g.
+        // `"Array<int>"`). Recovering the element type from that proven
+        // array type name is reading inference's own output, not fabricating
+        // a kind: if inference could not prove the parameter is an array the
+        // tracker name is absent and this returns `None`, so the operand
+        // stays unproven and the binop emitter raises a loud compile error.
+        if let Expr::IndexAccess { object, end_index: None, .. } = expr {
+            if let Some(elem) = self.tracked_array_element_type(object) {
+                return Ok(elem);
+            }
+        }
+
         self.type_inference.infer_expr(expr).map_err(|e| {
             shape_ast::error::ShapeError::SemanticError {
                 message: format!("Type inference failed: {:?}", e),
                 location: None,
             }
         })
+    }
+
+    /// WS-9: when `object` is an identifier tracked as a homogeneous array
+    /// (`Array<T>` / `Vec<T>` / `T[]`), return the element type `T` as a
+    /// concrete inference `Type`. Returns `None` for non-identifier
+    /// receivers, untracked names, non-array tracker types, and element type
+    /// names the compiler does not model as a basic primitive.
+    ///
+    /// This intentionally trusts the tracker `type_name` for parameters too:
+    /// unlike the scalar-numeric mis-inference the `param_locals` guard
+    /// elsewhere defends against (a string parameter inferred numeric), an
+    /// array element type extracted from a fully-resolved `Array<int>` param
+    /// hint is exactly as sound as the parameter type itself — the hint is
+    /// only `Some` when the program-wide pass observed a concrete array
+    /// argument at a call site.
+    fn tracked_array_element_type(
+        &self,
+        object: &Expr,
+    ) -> Option<shape_runtime::type_system::Type> {
+        use shape_ast::ast::TypeAnnotation;
+        use shape_runtime::type_system::Type;
+
+        let Expr::Identifier(name, _) = object else {
+            return None;
+        };
+        let type_name = self.tracker_type_name_for_identifier(name)?;
+        let trimmed = type_name.trim();
+        let inner = trimmed
+            .strip_prefix("Array<")
+            .or_else(|| trimmed.strip_prefix("Vec<"))
+            .and_then(|s| s.strip_suffix('>'))
+            .map(str::trim)
+            .or_else(|| trimmed.strip_suffix("[]").map(str::trim))?;
+        if inner.is_empty() || inner == "unknown" {
+            return None;
+        }
+        Some(Type::Concrete(TypeAnnotation::Basic(inner.to_string())))
     }
 
     /// R5.3B helper: return the tracker-recorded `type_name` for an

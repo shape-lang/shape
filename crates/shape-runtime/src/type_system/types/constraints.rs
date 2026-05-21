@@ -13,6 +13,13 @@ pub enum TypeConstraint {
     Iterable,
     /// Type must have a specific field
     HasField(String, Box<Type>),
+    /// Type must support index access (`obj[i]`), with the boxed type
+    /// recording the element type produced by the access. Mirrors
+    /// `HasField`'s element-carrying shape: when the constrained variable
+    /// resolves to `Array<T>`, the boxed element variable is bound to `T`
+    /// (backward propagation in `apply_bounds`). String indexing produces
+    /// a `string` element.
+    Indexable(Box<Type>),
     /// Type must be callable
     Callable {
         params: Vec<Type>,

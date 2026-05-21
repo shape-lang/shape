@@ -1744,14 +1744,32 @@ impl BytecodeCompiler {
                     }
                 }
 
-                // Strict arithmetic requires numeric operands. If an indexed access
-                // lacks a concrete hint, treat it as numeric to enable typed lowering.
-                if is_strict_arithmetic(op) {
+                // WS-9: an indexed-access operand (`a[0]`) carries no numeric
+                // hint from `compile_expr` (the index read produces an
+                // untyped slot). Recover the element kind from the proven
+                // array element type — `infer_expr_type` resolves `a[i]` for
+                // an array-tracked receiver via `tracked_array_element_type`.
+                //
+                // This REPLACES the former blanket `IndexAccess` → `Number`
+                // default. That fabrication stamped `Float64` on a value
+                // whose element type was statically `int`, silently emitting
+                // `DivNumber` for `a[0] / a[1]` over an `Array<int>` and
+                // turning integer `7 / 2 = 3` into `3.5`. The element type
+                // is proven here, never fabricated: when it cannot be proven
+                // numeric the hint stays `None` and the strict-arithmetic
+                // proof guard / `NoPlan` path raises a loud compile error.
+                if is_strict_arithmetic(op) || is_ordered_comparison(op) {
                     if left_numeric.is_none() && matches!(left, Expr::IndexAccess { .. }) {
-                        left_numeric = Some(NumericType::Number);
+                        left_numeric = self
+                            .infer_expr_type(left)
+                            .ok()
+                            .and_then(|t| inferred_type_to_numeric(&t));
                     }
                     if right_numeric.is_none() && matches!(right, Expr::IndexAccess { .. }) {
-                        right_numeric = Some(NumericType::Number);
+                        right_numeric = self
+                            .infer_expr_type(right)
+                            .ok()
+                            .and_then(|t| inferred_type_to_numeric(&t));
                     }
                 }
 

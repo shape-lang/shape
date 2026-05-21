@@ -1866,3 +1866,90 @@ fn test_loop_body_assignment_records_callsite() {
         );
     }
 }
+
+/// WS-9 Cluster A: an `obj[i]` access on an unannotated parameter must
+/// connect the element type to the parameter's resolved array type. The
+/// `Indexable` element-carrying constraint (replacing the element-less
+/// `Iterable` marker) lets the solver bind the index-access result to the
+/// parameter's `Array<int>` element type once the call site resolves it.
+#[test]
+fn ws9_index_access_on_unannotated_param_resolves_element_type() {
+    use shape_ast::ast::TypeAnnotation;
+    use shape_ast::parser::parse_program;
+
+    // `a[0] + b[0]` over two `Array<int>` arguments: both parameters must
+    // resolve to `Array<int>` and inference must not fail.
+    let code = "fn twoidx(a, b) { a[0] + b[0] }\nprint(twoidx([1,2],[3,4]))\n";
+    let program = parse_program(code).expect("program should parse");
+    let mut engine = TypeInferenceEngine::new();
+    let (types, errors) = engine.infer_program_best_effort(&program);
+    assert!(
+        errors.is_empty(),
+        "inference must not reject indexed unannotated params: {:?}",
+        errors
+    );
+    let Some(Type::Function { params, .. }) = types.get("twoidx") else {
+        panic!("twoidx should be inferred as a function");
+    };
+    for (idx, p) in params.iter().enumerate() {
+        assert!(
+            matches!(
+                p,
+                Type::Concrete(TypeAnnotation::Array(elem))
+                    if matches!(elem.as_ref(), TypeAnnotation::Basic(n) if n == "int")
+            ),
+            "twoidx param {} must resolve to Array<int>, got {:?}",
+            idx,
+            p,
+        );
+    }
+}
+
+/// WS-9 Cluster A: the bare-`Type::Variable` arm of `infer_index_access`
+/// must push an element-carrying `Indexable` constraint, and the solver's
+/// `apply_bounds` backward propagation must bind that element variable when
+/// the object resolves to a concrete array.
+#[test]
+fn ws9_indexable_constraint_backward_propagates_element_type() {
+    use crate::type_system::constraints::ConstraintSolver;
+    use crate::type_system::{Type, TypeConstraint, TypeVar};
+    use shape_ast::ast::TypeAnnotation;
+
+    let obj_var = TypeVar::new("obj".to_string());
+    let elem_var = TypeVar::new("elem".to_string());
+
+    let mut constraints: Vec<(Type, Type)> = vec![
+        // obj ~ Constrained{ Indexable(elem) }  (the index-access constraint)
+        (
+            Type::Variable(obj_var.clone()),
+            Type::Constrained {
+                var: TypeVar::new("bound".to_string()),
+                constraint: Box::new(TypeConstraint::Indexable(Box::new(Type::Variable(
+                    elem_var.clone(),
+                )))),
+            },
+        ),
+        // obj ~ Array<int>  (the resolved object type, e.g. from a call site)
+        (
+            Type::Variable(obj_var.clone()),
+            Type::Concrete(TypeAnnotation::Array(Box::new(TypeAnnotation::Basic(
+                "int".to_string(),
+            )))),
+        ),
+    ];
+
+    let mut solver = ConstraintSolver::new();
+    solver.solve(&mut constraints).expect("solve should succeed");
+
+    let resolved_elem = solver
+        .unifier()
+        .apply_substitutions(&Type::Variable(elem_var));
+    assert!(
+        matches!(
+            &resolved_elem,
+            Type::Concrete(TypeAnnotation::Basic(n)) if n == "int"
+        ),
+        "Indexable element variable must backward-propagate to int, got {:?}",
+        resolved_elem,
+    );
+}

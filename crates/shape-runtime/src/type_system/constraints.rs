@@ -550,6 +550,46 @@ impl ConstraintSolver {
                     }
                 }
             }
+
+            // Backward propagation: when an Indexable constraint is satisfied
+            // and the constrained variable resolved to a concrete array type,
+            // bind the carried element variable to the actual element type.
+            // This is the connective tissue that lets `a[0]` on an
+            // unannotated parameter recover its element type once `a`
+            // resolves to `Array<int>` (via callsite unification). Without
+            // this, the index access returns a disconnected fresh variable
+            // and a downstream `a[0] + b[0]` sees `unknown + unknown`.
+            if let TypeConstraint::Indexable(expected_elem_type) = constraint {
+                if let Type::Variable(elem_var) = expected_elem_type.as_ref() {
+                    let elem_resolved = self
+                        .unifier
+                        .apply_substitutions(&Type::Variable(elem_var.clone()));
+                    if let Type::Variable(_) = &elem_resolved {
+                        let actual_elem: Option<Type> = match &resolved {
+                            Type::Concrete(TypeAnnotation::Array(elem)) => {
+                                Some(Type::Concrete((**elem).clone()))
+                            }
+                            Type::Generic { base, args }
+                                if args.len() == 1 && is_array_or_vec_base(base) =>
+                            {
+                                Some(args[0].clone())
+                            }
+                            // String indexing yields a single-character string.
+                            Type::Concrete(TypeAnnotation::Basic(name))
+                                if name == "string" =>
+                            {
+                                Some(BuiltinTypes::string())
+                            }
+                            _ => None,
+                        };
+                        if let Some(elem_ty) = actual_elem {
+                            if !matches!(elem_ty, Type::Variable(_)) {
+                                new_bindings.push((elem_var.clone(), elem_ty));
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // Apply collected bindings
@@ -586,6 +626,27 @@ impl ConstraintSolver {
                 }
                 _ => Err(TypeError::ConstraintViolation(format!(
                     "{:?} is not iterable",
+                    ty
+                ))),
+            },
+
+            // `obj[i]` index access. The carried element type is bound by
+            // `apply_bounds` backward propagation (mirrors `HasField`); here
+            // we only validate that the resolved type supports indexing.
+            TypeConstraint::Indexable(_) => match ty {
+                Type::Concrete(TypeAnnotation::Array(_)) => Ok(()),
+                Type::Generic { base, args }
+                    if args.len() == 1 && is_array_or_vec_base(base) =>
+                {
+                    Ok(())
+                }
+                Type::Concrete(TypeAnnotation::Basic(name))
+                    if name == "string" || name == "rows" =>
+                {
+                    Ok(())
+                }
+                _ => Err(TypeError::ConstraintViolation(format!(
+                    "{:?} does not support index access",
                     ty
                 ))),
             },

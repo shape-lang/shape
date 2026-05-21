@@ -723,3 +723,70 @@ fn test_struct_array_field_drop_balance_in_loop() {
     );
     assert_eq!(result.as_i64(), Some(400));
 }
+
+// ── WS-9 Cluster A: index-access into an unannotated parameter ──
+//
+// At HEAD `cbc020ba` an `a[i]` access into an UNANNOTATED parameter, fed
+// to a binary operator, mishandled the element type two ways:
+//   * `Add` / `<=` / `>=` SPURIOUS-REJECT — the index access returned a
+//     disconnected, unresolved type variable, so the binop emitter saw
+//     `unknown + unknown` and raised a strict-typing compile error.
+//   * `Sub`/`Mul`/`Div`/`Mod`/`Pow` SILENT-WRONG — the binary-op emitter
+//     defaulted an un-hinted `IndexAccess` operand to `NumericType::Number`,
+//     silently emitting `DivNumber` for an `Array<int>` element; integer
+//     `7 / 2 = 3` became `3.5`.
+//
+// The fix: an element-carrying `Indexable` inference constraint connects
+// the index-access element type to the parameter's resolved array type,
+// and the `IndexAccess` → `Number` fabrication is removed in favor of the
+// proven element type.
+
+#[test]
+fn ws9_index_add_on_unannotated_params() {
+    // SPURIOUS-REJECT reproducer: `a[0] + b[0]` over two `Array<int>`
+    // arguments must compile and yield the integer sum `1 + 3 = 4`.
+    let result = eval(
+        "fn twoidx(a, b) { a[0] + b[0] }\n\
+         twoidx([1, 2], [3, 4])",
+    );
+    assert_eq!(result.as_i64(), Some(4));
+}
+
+#[test]
+fn ws9_index_div_on_unannotated_param_is_integer_division() {
+    // SILENT-WRONG reproducer: `a[0] / a[1]` over an `Array<int>` must do
+    // integer division — `7 / 2 = 3`, NOT the fabricated `3.5`.
+    let result = eval(
+        "fn dv(a) { a[0] / a[1] }\n\
+         dv([7, 2])",
+    );
+    assert_eq!(result.as_i64(), Some(3));
+}
+
+#[test]
+fn ws9_index_div_on_number_array_stays_number() {
+    // The element type is PROVEN, not fabricated: a `number`-element array
+    // must still divide as `number` — `7.0 / 2.0 = 3.5`.
+    let result = eval(
+        "fn dv(a) { a[0] / a[1] }\n\
+         dv([7.0, 2.0])",
+    );
+    assert_eq!(result.as_f64(), Some(3.5));
+}
+
+#[test]
+fn ws9_index_ordered_comparison_on_unannotated_params() {
+    // The `<=` / `>=` spurious-rejects over indexed unannotated params
+    // also resolve once the element type connects.
+    let le = eval(
+        "fn cmp(a, b) { a[0] <= b[0] }\n\
+         cmp([1, 2], [3, 4])",
+    );
+    assert_eq!(le.as_bool(), Some(true));
+
+    let ge = eval(
+        "fn cmp(a, b) { a[0] >= b[0] }\n\
+         cmp([5, 2], [3, 4])",
+    );
+    assert_eq!(ge.as_bool(), Some(true));
+}

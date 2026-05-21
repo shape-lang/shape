@@ -355,6 +355,31 @@ impl TypeInferenceEngine {
         Ok(result_type)
     }
 
+    /// Push an element-carrying `Indexable` constraint for an `obj[i]`
+    /// access whose object type is not yet a concrete array.
+    ///
+    /// Returns the fresh element-type variable. The constraint records that
+    /// variable inside `TypeConstraint::Indexable`, so when the object's
+    /// type later resolves to a concrete `Array<T>` (e.g. via callsite
+    /// unification of an unannotated parameter), `ConstraintSolver::
+    /// apply_bounds` binds the element variable to `T`. Without the carried
+    /// element type the access would return a disconnected fresh variable
+    /// and a downstream `obj[i] + ...` would see `unknown` operands.
+    fn push_indexable_constraint(&mut self, object_type: &Type) -> Type {
+        let result_type = self.fresh_type_var();
+        let var = self.fresh_var();
+        self.constraints.push((
+            object_type.clone(),
+            Type::Constrained {
+                var,
+                constraint: Box::new(TypeConstraint::Indexable(Box::new(
+                    result_type.clone(),
+                ))),
+            },
+        ));
+        result_type
+    }
+
     /// Infer type of index access
     pub(crate) fn infer_index_access(
         &mut self,
@@ -382,35 +407,16 @@ impl TypeInferenceEngine {
                         .push((index_type.clone(), BuiltinTypes::number()));
                     Ok(Type::Concrete(TypeAnnotation::Basic(name.clone())))
                 } else {
-                    // For unknown types, create a constraint
-                    let result_type = self.fresh_type_var();
-                    let var = self.fresh_var();
-
-                    self.constraints.push((
-                        object_type.clone(),
-                        Type::Constrained {
-                            var,
-                            constraint: Box::new(TypeConstraint::Iterable),
-                        },
-                    ));
-
-                    Ok(result_type)
+                    // For unknown types, create an element-carrying index
+                    // constraint so the element type connects to the
+                    // object's resolved type (mirrors `HasField`).
+                    Ok(self.push_indexable_constraint(object_type))
                 }
             }
             _ => {
-                // For unknown types, create a constraint
-                let result_type = self.fresh_type_var();
-                let var = self.fresh_var();
-
-                self.constraints.push((
-                    object_type.clone(),
-                    Type::Constrained {
-                        var,
-                        constraint: Box::new(TypeConstraint::Iterable),
-                    },
-                ));
-
-                Ok(result_type)
+                // For unknown types, create an element-carrying index
+                // constraint (mirrors `HasField`) — see above.
+                Ok(self.push_indexable_constraint(object_type))
             }
         }
     }
