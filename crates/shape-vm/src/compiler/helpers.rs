@@ -747,8 +747,10 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_resolvers(
                 StatementKind::ObjectStore { container_slot, .. } => {
                     let idx = container_slot.0 as usize;
                     if idx < n {
+                        // MIR-shape inference has no source-level type name
+                        // here — placeholder struct id (v0.3 WS-6).
                         concrete_types[idx] =
-                            shape_value::v2::ConcreteType::Struct(
+                            shape_value::v2::ConcreteType::placeholder_struct(
                                 shape_value::v2::concrete_type::StructLayoutId(0),
                             );
                     }
@@ -829,9 +831,11 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_resolvers(
                                 );
                             }
                             _ => {
-                                // Legacy / user-defined enum variant.
+                                // Legacy / user-defined enum variant. MIR-shape
+                                // inference has no source-level type name here
+                                // — placeholder enum id (v0.3 WS-6).
                                 concrete_types[idx] =
-                                    shape_value::v2::ConcreteType::Enum(
+                                    shape_value::v2::ConcreteType::placeholder_enum(
                                         shape_value::v2::concrete_type::EnumLayoutId(0),
                                     );
                             }

@@ -1231,6 +1231,10 @@ impl BytecodeCompiler {
         self.exclusive_reference_value_locals.clear();
         self.immutable_locals.clear();
         self.param_locals.clear();
+        // v0.3 WS-6: per-function local ConcreteType table — local slot
+        // indices are per-function, so it must be cleared at each function
+        // entry to avoid a stale prior-function entry colliding.
+        self.current_function_local_concrete_types.clear();
         self.push_scope();
         self.push_drop_scope();
         self.next_local = 0;
@@ -1344,6 +1348,15 @@ impl BytecodeCompiler {
                                     self.set_local_type_info(local_idx, &type_name);
                                 }
                             }
+                        }
+                        // v0.3 WS-6: record the parameter's concrete type from
+                        // its explicit annotation so the slot ConcreteType is
+                        // available to the JIT MIR resolver. Without this a
+                        // monomorphized function's struct/enum/Option/Result
+                        // parameter slot stays unstamped and downstream
+                        // ownership/field codegen mis-classifies it.
+                        if let Some(ct) = crate::compiler::monomorphization::type_resolution::declared_annotation_concrete_type(self, type_ann) {
+                            self.current_function_local_concrete_types.insert(local_idx, ct);
                         }
                         self.try_track_datatable_type(type_ann, local_idx, true)?;
                     } else {

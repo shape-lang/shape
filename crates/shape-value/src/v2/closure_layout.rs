@@ -1478,7 +1478,7 @@ mod tests {
 
     #[test]
     fn test_struct_capture_is_heap() {
-        let s = ConcreteType::Struct(StructLayoutId(42));
+        let s = ConcreteType::placeholder_struct(StructLayoutId(42));
         let layout = immutable_layout(&[s]);
         assert_eq!(layout.capture_kind(0), FieldKind::Ptr);
         assert_eq!(layout.heap_capture_mask, 0b1);
@@ -1748,7 +1748,7 @@ mod tests {
     #[test]
     fn capture_native_kinds_struct() {
         // Struct captures map to NativeKind::Ptr(HeapKind::TypedObject).
-        let s = ConcreteType::Struct(StructLayoutId(7));
+        let s = ConcreteType::placeholder_struct(StructLayoutId(7));
         let layout = immutable_layout(&[s]);
         assert_eq!(
             layout.capture_native_kind(0),

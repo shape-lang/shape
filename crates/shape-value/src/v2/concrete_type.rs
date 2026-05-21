@@ -18,6 +18,50 @@ pub struct StructLayoutId(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct EnumLayoutId(pub u32);
 
+/// v0.3 WS-6 — the source-level type name carried alongside a
+/// `ConcreteType::Struct` / `ConcreteType::Enum`.
+///
+/// A struct's / enum's type identity is its *name*, not its layout id (the
+/// `StructLayoutId` / `EnumLayoutId` carriers are placeholders today — the
+/// schema-aware layout registry is a tracked follow-up). The monomorphizer
+/// uses this name for two load-bearing purposes:
+///
+///   1. The specialization cache key (`ConcreteType::mono_key`) — so
+///      `id<T>(P{..})` and `id<T>(Q{..})` produce *distinct* specializations.
+///   2. The substituted parameter / return annotation
+///      (`concrete_to_annotation`) — so the specialized body type-checks
+///      against the real user type rather than a synthetic placeholder.
+///
+/// `None` is the legacy/placeholder spelling: a struct/enum `ConcreteType`
+/// produced by a path that does not yet thread the name (e.g. the JIT-side
+/// MIR-shape inference at `helpers.rs`). Name-aware producers (the
+/// monomorphization call-site resolver) always populate it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct NamedTypeId<Id> {
+    /// Layout-registry id (placeholder `0` until the schema-aware layout
+    /// registry lands).
+    pub layout: Id,
+    /// Source-level type name, when the producing site could thread it.
+    pub name: Option<std::sync::Arc<str>>,
+}
+
+impl<Id> NamedTypeId<Id> {
+    /// A named type id — the name is the load-bearing identity.
+    pub fn named(layout: Id, name: impl Into<std::sync::Arc<str>>) -> Self {
+        NamedTypeId { layout, name: Some(name.into()) }
+    }
+
+    /// A placeholder type id — no name threaded (legacy producers).
+    pub fn placeholder(layout: Id) -> Self {
+        NamedTypeId { layout, name: None }
+    }
+
+    /// The source-level name, if threaded.
+    pub fn name_str(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+}
+
 /// Opaque ID into a registry of closure capture layouts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ClosureTypeId(pub u32);
@@ -67,8 +111,9 @@ pub enum ConcreteType {
     Bool,
     /// Interned string (*const StringObj).
     String,
-    /// Typed struct with compile-time field layout.
-    Struct(StructLayoutId),
+    /// Typed struct with compile-time field layout. Carries the source-level
+    /// type name (v0.3 WS-6) — see [`NamedTypeId`].
+    Struct(NamedTypeId<StructLayoutId>),
     /// Homogeneous typed array with known element type.
     /// `Array<number>` → `Array(Box::new(ConcreteType::F64))`.
     Array(Box<ConcreteType>),
@@ -78,8 +123,9 @@ pub enum ConcreteType {
     Option(Box<ConcreteType>),
     /// Result type — `Result<T, E>`.
     Result(Box<ConcreteType>, Box<ConcreteType>),
-    /// Typed enum with compile-time variant layouts.
-    Enum(EnumLayoutId),
+    /// Typed enum with compile-time variant layouts. Carries the source-level
+    /// type name (v0.3 WS-6) — see [`NamedTypeId`].
+    Enum(NamedTypeId<EnumLayoutId>),
     /// Closure with typed capture slots.
     Closure(ClosureTypeId),
     /// Function pointer with known signature.
@@ -162,6 +208,31 @@ pub enum ConcreteType {
 }
 
 impl ConcreteType {
+    /// v0.3 WS-6 — a named struct `ConcreteType`. The `name` is the
+    /// load-bearing type identity (cache key + substituted annotation); the
+    /// `layout` id is a placeholder until the schema-aware layout registry
+    /// lands.
+    pub fn named_struct(name: impl Into<std::sync::Arc<str>>, layout: StructLayoutId) -> Self {
+        ConcreteType::Struct(NamedTypeId::named(layout, name))
+    }
+
+    /// v0.3 WS-6 — a named enum `ConcreteType`. See [`Self::named_struct`].
+    pub fn named_enum(name: impl Into<std::sync::Arc<str>>, layout: EnumLayoutId) -> Self {
+        ConcreteType::Enum(NamedTypeId::named(layout, name))
+    }
+
+    /// A struct `ConcreteType` with no threaded name (legacy/placeholder
+    /// producers — see [`NamedTypeId`]).
+    pub fn placeholder_struct(layout: StructLayoutId) -> Self {
+        ConcreteType::Struct(NamedTypeId::placeholder(layout))
+    }
+
+    /// An enum `ConcreteType` with no threaded name (legacy/placeholder
+    /// producers — see [`NamedTypeId`]).
+    pub fn placeholder_enum(layout: EnumLayoutId) -> Self {
+        ConcreteType::Enum(NamedTypeId::placeholder(layout))
+    }
+
     /// Size in bytes for stack storage (all values stored as 8-byte slots).
     #[inline]
     pub fn stack_size(&self) -> usize {
@@ -333,7 +404,15 @@ impl ConcreteType {
             ConcreteType::U8 => "u8".into(),
             ConcreteType::Bool => "bool".into(),
             ConcreteType::String => "string".into(),
-            ConcreteType::Struct(id) => format!("struct_{}", id.0),
+            // v0.3 WS-6: a struct's specialization-cache identity is its
+            // source-level name when threaded — so `id<T>(P{..})` and
+            // `id<T>(Q{..})` produce *distinct* mono keys. When the name is
+            // absent (legacy/placeholder producers) the layout id is the
+            // fallback, preserving the pre-WS-6 `struct_<id>` spelling.
+            ConcreteType::Struct(id) => match id.name_str() {
+                Some(name) => format!("struct_{}", name),
+                None => format!("struct_{}", id.layout.0),
+            },
             ConcreteType::Array(elem) => format!("array_{}", elem.mono_key()),
             ConcreteType::HashMap(k, v) => {
                 format!("hashmap_{}_{}", k.mono_key(), v.mono_key())
@@ -342,7 +421,12 @@ impl ConcreteType {
             ConcreteType::Result(ok, err) => {
                 format!("result_{}_{}", ok.mono_key(), err.mono_key())
             }
-            ConcreteType::Enum(id) => format!("enum_{}", id.0),
+            // v0.3 WS-6: see the `Struct` arm above — name-keyed when
+            // threaded, layout-id fallback otherwise.
+            ConcreteType::Enum(id) => match id.name_str() {
+                Some(name) => format!("enum_{}", name),
+                None => format!("enum_{}", id.layout.0),
+            },
             ConcreteType::Closure(id) => format!("closure_{}", id.0),
             ConcreteType::Function(id) => format!("fn_{}", id.0),
             ConcreteType::Pointer(inner) => format!("ptr_{}", inner.mono_key()),
@@ -448,12 +532,18 @@ impl std::fmt::Display for ConcreteType {
             ConcreteType::U8 => write!(f, "u8"),
             ConcreteType::Bool => write!(f, "bool"),
             ConcreteType::String => write!(f, "string"),
-            ConcreteType::Struct(id) => write!(f, "Struct#{}", id.0),
+            ConcreteType::Struct(id) => match id.name_str() {
+                Some(name) => write!(f, "{}", name),
+                None => write!(f, "Struct#{}", id.layout.0),
+            },
             ConcreteType::Array(elem) => write!(f, "Array<{elem}>"),
             ConcreteType::HashMap(k, v) => write!(f, "HashMap<{k}, {v}>"),
             ConcreteType::Option(inner) => write!(f, "{inner}?"),
             ConcreteType::Result(ok, err) => write!(f, "Result<{ok}, {err}>"),
-            ConcreteType::Enum(id) => write!(f, "Enum#{}", id.0),
+            ConcreteType::Enum(id) => match id.name_str() {
+                Some(name) => write!(f, "{}", name),
+                None => write!(f, "Enum#{}", id.layout.0),
+            },
             ConcreteType::Closure(id) => write!(f, "Closure#{}", id.0),
             ConcreteType::Function(id) => write!(f, "Function#{}", id.0),
             ConcreteType::Pointer(inner) => write!(f, "ptr<{inner}>"),
@@ -513,6 +603,38 @@ mod tests {
     }
 
     #[test]
+    fn ws6_named_struct_mono_key_uses_name() {
+        // v0.3 WS-6: a named struct's mono key is keyed on the source-level
+        // type name — so a generic `id<T>` specialized on two different
+        // structs produces two distinct cache keys / specializations.
+        let p = ConcreteType::named_struct("P", StructLayoutId(0));
+        let q = ConcreteType::named_struct("Q", StructLayoutId(0));
+        assert_eq!(p.mono_key(), "struct_P");
+        assert_eq!(q.mono_key(), "struct_Q");
+        assert_ne!(
+            p.mono_key(),
+            q.mono_key(),
+            "distinct structs must produce distinct mono keys"
+        );
+        assert_ne!(p, q, "named structs with distinct names are not equal");
+    }
+
+    #[test]
+    fn ws6_named_enum_mono_key_uses_name() {
+        let c = ConcreteType::named_enum("Color", EnumLayoutId(0));
+        assert_eq!(c.mono_key(), "enum_Color");
+    }
+
+    #[test]
+    fn ws6_placeholder_struct_falls_back_to_layout_id() {
+        // A struct ConcreteType produced by a name-blind path (legacy
+        // producer) keeps the pre-WS-6 `struct_<id>` mono-key spelling.
+        let s = ConcreteType::placeholder_struct(StructLayoutId(0));
+        assert_eq!(s.mono_key(), "struct_0");
+        assert!(matches!(s, ConcreteType::Struct(ref id) if id.name_str().is_none()));
+    }
+
+    #[test]
     fn test_type_tags_unique() {
         let types = vec![
             ConcreteType::F64,
@@ -526,12 +648,12 @@ mod tests {
             ConcreteType::U8,
             ConcreteType::Bool,
             ConcreteType::String,
-            ConcreteType::Struct(StructLayoutId(0)),
+            ConcreteType::placeholder_struct(StructLayoutId(0)),
             ConcreteType::Array(Box::new(ConcreteType::F64)),
             ConcreteType::HashMap(Box::new(ConcreteType::String), Box::new(ConcreteType::F64)),
             ConcreteType::Option(Box::new(ConcreteType::I64)),
             ConcreteType::Result(Box::new(ConcreteType::I64), Box::new(ConcreteType::String)),
-            ConcreteType::Enum(EnumLayoutId(0)),
+            ConcreteType::placeholder_enum(EnumLayoutId(0)),
             ConcreteType::Closure(ClosureTypeId(0)),
             ConcreteType::Function(FunctionTypeId(0)),
             ConcreteType::Pointer(Box::new(ConcreteType::U8)),

@@ -139,10 +139,11 @@ fn generic_to_concrete(
                 Box::new(err_concrete),
             ))
         }
-        _ => {
-            // Unknown generic — treat as a struct reference. Agent 3 will
-            // assign a real StructLayoutId during monomorphization.
-            Ok(ConcreteType::Struct(StructLayoutId(0)))
+        other => {
+            // Unknown generic — treat as a struct reference. v0.3 WS-6
+            // threads the source-level base name (the StructLayoutId stays
+            // a placeholder until the schema-aware layout registry lands).
+            Ok(ConcreteType::named_struct(other, StructLayoutId(0)))
         }
     }
 }
@@ -170,10 +171,13 @@ pub fn annotation_to_concrete(ann: &TypeAnnotation) -> Result<ConcreteType, Shap
                 "BigInt" | "bigint" => Ok(ConcreteType::BigInt),
                 "DateTime" | "datetime" => Ok(ConcreteType::DateTime),
                 "String" | "string" => Ok(ConcreteType::String),
-                _ => {
-                    // Unknown named reference — treat as struct. Agent 3 will
-                    // assign a real StructLayoutId during monomorphization.
-                    Ok(ConcreteType::Struct(StructLayoutId(0)))
+                other => {
+                    // Unknown named reference — treat as struct. The
+                    // StructLayoutId stays a placeholder, but v0.3 WS-6
+                    // threads the source-level name so the monomorphizer
+                    // can produce distinct specializations / a resolvable
+                    // substituted annotation.
+                    Ok(ConcreteType::named_struct(other, StructLayoutId(0)))
                 }
             }
         }
@@ -236,9 +240,11 @@ pub fn annotation_to_concrete(ann: &TypeAnnotation) -> Result<ConcreteType, Shap
                     };
                     Ok(ConcreteType::Result(Box::new(ok_ct), Box::new(err_ct)))
                 }
-                _ => {
-                    // Unknown named generic — treat as struct.
-                    Ok(ConcreteType::Struct(StructLayoutId(0)))
+                other => {
+                    // Unknown named generic — treat as struct. v0.3 WS-6
+                    // threads the source-level name (see the `Reference`
+                    // arm above).
+                    Ok(ConcreteType::named_struct(other, StructLayoutId(0)))
                 }
             }
         }
@@ -249,8 +255,9 @@ pub fn annotation_to_concrete(ann: &TypeAnnotation) -> Result<ConcreteType, Shap
 
         TypeAnnotation::Object(_) => {
             // Anonymous object literals lower to a struct layout. Agent 3
-            // will compute and assign the actual StructLayoutId.
-            Ok(ConcreteType::Struct(StructLayoutId(0)))
+            // will compute and assign the actual StructLayoutId. Anonymous
+            // objects have no source-level name (v0.3 WS-6).
+            Ok(ConcreteType::placeholder_struct(StructLayoutId(0)))
         }
 
         TypeAnnotation::Void => Ok(ConcreteType::Void),

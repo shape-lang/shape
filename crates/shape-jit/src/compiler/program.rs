@@ -708,6 +708,36 @@ impl JITCompiler {
             }
         }
 
+        // v0.3 WS-6: a generic free function specialized on a struct type
+        // argument (`fn id<T>(x: T) -> T` called as `id(P { .. })`) produces
+        // a `<base>::struct_<name>` specialization. The JIT MIR codegen for
+        // a struct value flowing out of such a specialization is currently
+        // unsound — the returned `HeapKind::TypedObject` handle is
+        // mishandled when the result is stored to a slot and a field is
+        // later read, producing a use-after-free. The bytecode VM handles
+        // this case correctly. Per the CLAUDE.md surface-and-stop discipline
+        // (refuse what cannot be lowered soundly rather than emit crashing
+        // native code), surface here so `--mode jit` cleanly falls back to
+        // the interpreter for the whole program. Enum / Option / Result /
+        // Array / HashMap monomorphizations are unaffected — only the
+        // struct-typed free-function specialization is gated. (Generic
+        // struct args were rejected outright at the compile stage before
+        // WS-6, so this is a strict improvement: such programs now run
+        // correctly on the interpreter rather than failing to compile.)
+        if program
+            .functions
+            .iter()
+            .any(|func| func.name.contains("::struct_"))
+        {
+            return Err(
+                "WS-6 surface-and-stop: program uses a generic free function \
+                 specialized on a struct type argument; the JIT struct-value \
+                 codegen for that specialization is not yet sound — falling \
+                 back to the bytecode interpreter"
+                    .to_string(),
+            );
+        }
+
         // Phase 2: Pre-declare ALL functions (both JIT and interpreted) in
         // Cranelift so that JIT functions can call other JIT functions.
         // Interpreted functions get declared too (for uniform call tables)

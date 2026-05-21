@@ -253,7 +253,7 @@ mod tests {
     #[test]
     fn test_struct_falls_back_to_legacy() {
         assert_eq!(
-            should_use_typed_array(&ConcreteType::Struct(StructLayoutId(0))),
+            should_use_typed_array(&ConcreteType::placeholder_struct(StructLayoutId(0))),
             None
         );
     }
@@ -261,7 +261,7 @@ mod tests {
     #[test]
     fn test_enum_falls_back_to_legacy() {
         assert_eq!(
-            should_use_typed_array(&ConcreteType::Enum(EnumLayoutId(0))),
+            should_use_typed_array(&ConcreteType::placeholder_enum(EnumLayoutId(0))),
             None
         );
     }
