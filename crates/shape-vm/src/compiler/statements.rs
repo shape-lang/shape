@@ -529,6 +529,41 @@ impl BytecodeCompiler {
         }
     }
 
+    /// WS-9b pass-1 prepass: pre-register the runtime `TypeSchema` of every
+    /// struct type declared anywhere in the program (including inside
+    /// modules), so struct schemas are available before any function body
+    /// compiles. Mirrors `register_item_functions`'s module recursion and
+    /// name qualification so a module-scoped `type` registers under its
+    /// fully-qualified name.
+    ///
+    /// Schema registration only — comptime-annotation handlers and the
+    /// annotation lifecycle stay in pass 2's `register_struct_type`
+    /// (`predeclare_struct_schema`'s `is_some()` guard makes that pass-2
+    /// schema registration a no-op once the prepass has run).
+    pub(super) fn predeclare_item_struct_schemas(&mut self, item: &Item) {
+        match item {
+            Item::StructType(struct_def, _) => {
+                self.predeclare_struct_schema(struct_def);
+            }
+            Item::Export(export, _) => {
+                if let ExportItem::Struct(struct_def) = &export.item {
+                    self.predeclare_struct_schema(struct_def);
+                }
+            }
+            Item::Module(module_def, _) => {
+                let module_path = self.current_module_path_for(module_def.name.as_str());
+                self.module_scope_stack.push(module_path.clone());
+                for inner in &module_def.items {
+                    if let Ok(qualified) = self.qualify_module_item(inner, &module_path) {
+                        self.predeclare_item_struct_schemas(&qualified);
+                    }
+                }
+                self.module_scope_stack.pop();
+            }
+            _ => {}
+        }
+    }
+
     /// Register a function definition
     pub(super) fn register_function(&mut self, func_def: &FunctionDef) -> Result<()> {
         // Detect duplicate function definitions (Shape does not support overloading).
@@ -2490,6 +2525,82 @@ impl BytecodeCompiler {
         Ok(())
     }
 
+    /// Register ONLY a struct's runtime `TypeSchema` into the compiler's
+    /// schema registry — no comptime-handler execution, no annotation
+    /// lifecycle, no native-layout / generic-info side effects.
+    ///
+    /// WS-9b: this is the single source of truth for "the struct's runtime
+    /// fields, indexed by name, are known to the compiler". It is called
+    /// from two places:
+    ///
+    /// * the pass-1 prepass (`predeclare_item_struct_schemas`), so a
+    ///   struct's schema is available *before any function body compiles* —
+    ///   making `type` definitions order-independent the same way function
+    ///   definitions already are (pass-1 `register_item_functions`). Without
+    ///   this, a function declared *before* the `type` it accepts as a
+    ///   parameter could not resolve `param.field`: `tracker_schema_id_for_
+    ///   expr` would miss the not-yet-registered schema, so `a.lo` in
+    ///   `fn ov(a, b) { a.lo <= b.hi }` (with `type Box` declared after `ov`)
+    ///   typed as `unknown` and the binop was spuriously rejected.
+    ///
+    /// * `register_struct_type` (pass 2), guarded by the same `is_none()`
+    ///   check — when the prepass already registered the schema this is a
+    ///   no-op, so pass 2 only runs the comptime handlers / lifecycle once.
+    fn predeclare_struct_schema(&mut self, struct_def: &shape_ast::ast::StructTypeDef) {
+        use shape_ast::ast::Literal;
+        use shape_runtime::type_schema::FieldAnnotation;
+
+        if self
+            .type_tracker
+            .schema_registry()
+            .get(&struct_def.name)
+            .is_some()
+        {
+            return;
+        }
+        let runtime_fields: Vec<(String, shape_runtime::type_schema::FieldType)> = struct_def
+            .fields
+            .iter()
+            .filter(|f| !f.is_comptime)
+            .map(|f| {
+                (
+                    f.name.clone(),
+                    Self::type_annotation_to_field_type(&f.type_annotation),
+                )
+            })
+            .collect();
+        // Collect field annotations (e.g. @alias) so that JSON
+        // deserialization can map wire names to field names.
+        let field_annotations: Vec<Vec<FieldAnnotation>> = struct_def
+            .fields
+            .iter()
+            .filter(|f| !f.is_comptime)
+            .map(|f| {
+                f.annotations
+                    .iter()
+                    .map(|ann| FieldAnnotation {
+                        name: ann.name.clone(),
+                        args: ann
+                            .args
+                            .iter()
+                            .filter_map(|arg| match arg {
+                                Expr::Literal(Literal::String(s), _) => Some(s.clone()),
+                                _ => None,
+                            })
+                            .collect(),
+                    })
+                    .collect()
+            })
+            .collect();
+        self.type_tracker
+            .schema_registry_mut()
+            .register_type_with_annotations(
+                struct_def.name.clone(),
+                runtime_fields,
+                field_annotations,
+            );
+    }
+
     /// Register a struct type definition.
     ///
     /// Comptime fields are baked at compile time and excluded from the runtime TypeSchema.
@@ -2499,7 +2610,6 @@ impl BytecodeCompiler {
         struct_def: &shape_ast::ast::StructTypeDef,
         span: shape_ast::ast::Span,
     ) -> Result<()> {
-        use shape_ast::ast::Literal;
         use shape_runtime::type_schema::{FieldAnnotation, TypeSchemaBuilder};
 
         // Validate annotation target kinds before type registration.
@@ -2542,54 +2652,7 @@ impl BytecodeCompiler {
                 runtime_field_types,
             },
         );
-        if self
-            .type_tracker
-            .schema_registry()
-            .get(&struct_def.name)
-            .is_none()
-        {
-            let runtime_fields: Vec<(String, shape_runtime::type_schema::FieldType)> = struct_def
-                .fields
-                .iter()
-                .filter(|f| !f.is_comptime)
-                .map(|f| {
-                    (
-                        f.name.clone(),
-                        Self::type_annotation_to_field_type(&f.type_annotation),
-                    )
-                })
-                .collect();
-            // Collect field annotations (e.g. @alias) so that JSON
-            // deserialization can map wire names to field names.
-            let field_annotations: Vec<Vec<FieldAnnotation>> = struct_def
-                .fields
-                .iter()
-                .filter(|f| !f.is_comptime)
-                .map(|f| {
-                    f.annotations
-                        .iter()
-                        .map(|ann| FieldAnnotation {
-                            name: ann.name.clone(),
-                            args: ann
-                                .args
-                                .iter()
-                                .filter_map(|arg| match arg {
-                                    Expr::Literal(Literal::String(s), _) => Some(s.clone()),
-                                    _ => None,
-                                })
-                                .collect(),
-                        })
-                        .collect()
-                })
-                .collect();
-            self.type_tracker
-                .schema_registry_mut()
-                .register_type_with_annotations(
-                    struct_def.name.clone(),
-                    runtime_fields,
-                    field_annotations,
-                );
-        }
+        self.predeclare_struct_schema(struct_def);
 
         // Execute comptime annotation handlers before registration so
         // `remove target` can suppress type emission entirely.

@@ -1744,28 +1744,42 @@ impl BytecodeCompiler {
                     }
                 }
 
-                // WS-9: an indexed-access operand (`a[0]`) carries no numeric
-                // hint from `compile_expr` (the index read produces an
-                // untyped slot). Recover the element kind from the proven
-                // array element type — `infer_expr_type` resolves `a[i]` for
-                // an array-tracked receiver via `tracked_array_element_type`.
+                // WS-9 / WS-9b: an access operand (`a[0]` index access, or
+                // `a.lo` property access) carries no numeric hint from
+                // `compile_expr` when the receiver is an unannotated
+                // parameter — the access reads an untyped slot. Recover the
+                // operand kind from the proven access type:
                 //
-                // This REPLACES the former blanket `IndexAccess` → `Number`
-                // default. That fabrication stamped `Float64` on a value
-                // whose element type was statically `int`, silently emitting
-                // `DivNumber` for `a[0] / a[1]` over an `Array<int>` and
-                // turning integer `7 / 2 = 3` into `3.5`. The element type
-                // is proven here, never fabricated: when it cannot be proven
-                // numeric the hint stays `None` and the strict-arithmetic
-                // proof guard / `NoPlan` path raises a loud compile error.
+                // * Index access — `infer_expr_type` resolves `a[i]` for an
+                //   array-tracked receiver via `tracked_array_element_type`.
+                //   This REPLACES the former blanket `IndexAccess` → `Number`
+                //   default, which stamped `Float64` on a statically-`int`
+                //   element and silently turned `7 / 2 = 3` into `3.5`.
+                //
+                // * Property access (WS-9b) — `infer_expr_type` resolves
+                //   `a.lo` via `tracker_schema_id_for_expr`: once inference
+                //   widens the unannotated parameter to its callsite struct
+                //   type (`Box`), the parameter's local slot carries the
+                //   `Box` schema id, and the field type is read from the
+                //   proven struct schema. The field kind is PROVEN from the
+                //   schema, never fabricated — when it cannot be proven the
+                //   hint stays `None` and the strict-arithmetic proof guard /
+                //   `NoPlan` path raises a loud compile error (no `Number`
+                //   default is introduced for property access).
                 if is_strict_arithmetic(op) || is_ordered_comparison(op) {
-                    if left_numeric.is_none() && matches!(left, Expr::IndexAccess { .. }) {
+                    let is_access = |e: &Expr| {
+                        matches!(
+                            e,
+                            Expr::IndexAccess { .. } | Expr::PropertyAccess { .. }
+                        )
+                    };
+                    if left_numeric.is_none() && is_access(left) {
                         left_numeric = self
                             .infer_expr_type(left)
                             .ok()
                             .and_then(|t| inferred_type_to_numeric(&t));
                     }
-                    if right_numeric.is_none() && matches!(right, Expr::IndexAccess { .. }) {
+                    if right_numeric.is_none() && is_access(right) {
                         right_numeric = self
                             .infer_expr_type(right)
                             .ok()
