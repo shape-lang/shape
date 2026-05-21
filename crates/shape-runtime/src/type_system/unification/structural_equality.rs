@@ -183,6 +183,7 @@ pub fn constraints_equal(a: &TypeConstraint, b: &TypeConstraint) -> bool {
         (TypeConstraint::HasField(n1, t1), TypeConstraint::HasField(n2, t2)) => {
             n1 == n2 && types_equal(t1, t2)
         }
+        (TypeConstraint::Indexable(t1), TypeConstraint::Indexable(t2)) => types_equal(t1, t2),
         (
             TypeConstraint::Callable {
                 params: p1,
