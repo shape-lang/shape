@@ -415,11 +415,22 @@ impl BytecodeCompiler {
         // MIR-to-IR `capture-count mismatch` assertion.
         let saved_closure_function_ids =
             std::mem::take(&mut self.closure_function_ids);
+        // v0.3 WS-6: save/restore the per-function local ConcreteType table
+        // across the nested specialized-body `compile_function`. That call
+        // clears + repopulates `current_function_local_concrete_types` for
+        // the specialization's own local slots; without the save/restore the
+        // OUTER (caller) function's compilation would resume with the
+        // specialization's slot entries still installed, mis-resolving a
+        // later monomorphization call site's argument types against a stale
+        // foreign-function slot index.
+        let saved_local_concrete_types =
+            std::mem::take(&mut self.current_function_local_concrete_types);
         // Compile the specialized body. On failure, surface the error — the
         // caller is responsible for falling through to the generic path on
         // any failure mode it wants to tolerate.
         let result = self.compile_function(&specialized_def);
         self.closure_function_ids = saved_closure_function_ids;
+        self.current_function_local_concrete_types = saved_local_concrete_types;
         self.monomorphization_in_progress.remove(&mono_key);
         result?;
 
@@ -600,8 +611,13 @@ impl BytecodeCompiler {
         // F7: see note in `ensure_monomorphic_function` above.
         let saved_closure_function_ids =
             std::mem::take(&mut self.closure_function_ids);
+        // v0.3 WS-6: see `ensure_monomorphic_function` — save/restore the
+        // per-function local ConcreteType table across the nested compile.
+        let saved_local_concrete_types =
+            std::mem::take(&mut self.current_function_local_concrete_types);
         let result = self.compile_function(&specialized_def);
         self.closure_function_ids = saved_closure_function_ids;
+        self.current_function_local_concrete_types = saved_local_concrete_types;
         self.monomorphization_in_progress.remove(&mono_key);
         result?;
 
@@ -778,8 +794,13 @@ impl BytecodeCompiler {
         // F7: see note in `ensure_monomorphic_function`.
         let saved_closure_function_ids =
             std::mem::take(&mut self.closure_function_ids);
+        // v0.3 WS-6: see `ensure_monomorphic_function` — save/restore the
+        // per-function local ConcreteType table across the nested compile.
+        let saved_local_concrete_types =
+            std::mem::take(&mut self.current_function_local_concrete_types);
         let compile_result = self.compile_function(&specialized_def);
         self.closure_function_ids = saved_closure_function_ids;
+        self.current_function_local_concrete_types = saved_local_concrete_types;
         self.monomorphization_in_progress.remove(&mono_key);
         if compile_result.is_err() {
             // Compilation failed — we already inserted the cache entry; the

@@ -4566,6 +4566,15 @@ impl BytecodeCompiler {
                             {
                                 self.set_module_binding_type_info(binding_idx, &type_name);
                             }
+                            // v0.3 WS-6: record the binding's concrete type
+                            // from its explicit annotation so a later generic
+                            // call site `id(n)` can resolve the argument's
+                            // type. The type-tracker only retains a lossy
+                            // head-name string (e.g. "option" with no inner
+                            // type); this table carries the full ConcreteType.
+                            if let Some(ct) = crate::compiler::monomorphization::type_resolution::declared_annotation_concrete_type(self, type_ann) {
+                                self.module_binding_concrete_types.insert(binding_idx, ct);
+                            }
                             // Handle Table<T> generic annotation
                             self.try_track_datatable_type(type_ann, binding_idx, false)?;
                         } else {
@@ -4861,6 +4870,15 @@ impl BytecodeCompiler {
                                 // Get the local index for self variable
                                 if let Some(local_idx) = self.resolve_local(name) {
                                     self.set_local_type_info(local_idx, &type_name);
+                                }
+                            }
+                            // v0.3 WS-6: record the local's concrete type from
+                            // its explicit annotation so a later generic call
+                            // site `id(n)` can resolve the argument's type.
+                            // See the mirror module-binding path above.
+                            if let Some(local_idx) = self.resolve_local(name) {
+                                if let Some(ct) = crate::compiler::monomorphization::type_resolution::declared_annotation_concrete_type(self, type_ann) {
+                                    self.current_function_local_concrete_types.insert(local_idx, ct);
                                 }
                             }
                             // Handle Table<T> generic annotation

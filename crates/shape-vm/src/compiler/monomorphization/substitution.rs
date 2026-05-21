@@ -122,16 +122,26 @@ pub fn concrete_to_annotation(ct: &ConcreteType) -> TypeAnnotation {
             args: vec![concrete_to_annotation(inner)],
         },
 
-        // Opaque IDs: there is no source-level spelling for "the struct with
-        // layout #4", so we synthesize a unique reference name. The
-        // monomorphization cache uses `mono_key()` (which is bijective on
-        // these IDs) so it never collides with a user identifier.
-        ConcreteType::Struct(id) => {
-            TypeAnnotation::Reference(TypePath::simple(format!("__mono_struct_{}", id.0)))
-        }
-        ConcreteType::Enum(id) => {
-            TypeAnnotation::Reference(TypePath::simple(format!("__mono_enum_{}", id.0)))
-        }
+        // v0.3 WS-6: a struct / enum `ConcreteType` carries its source-level
+        // type name (`NamedTypeId::name`). Re-emit the real user identifier so
+        // the specialized body type-checks against the genuine struct/enum
+        // schema (field access, enum patterns, …). When the name is absent
+        // (legacy/placeholder producer — see `NamedTypeId`) we fall back to
+        // the synthetic `__mono_struct_<id>` reference: the monomorphization
+        // cache keys on `mono_key()` so a placeholder layout id still never
+        // collides with a user identifier.
+        ConcreteType::Struct(id) => match id.name_str() {
+            Some(name) => TypeAnnotation::Reference(TypePath::simple(name.to_string())),
+            None => {
+                TypeAnnotation::Reference(TypePath::simple(format!("__mono_struct_{}", id.layout.0)))
+            }
+        },
+        ConcreteType::Enum(id) => match id.name_str() {
+            Some(name) => TypeAnnotation::Reference(TypePath::simple(name.to_string())),
+            None => {
+                TypeAnnotation::Reference(TypePath::simple(format!("__mono_enum_{}", id.layout.0)))
+            }
+        },
         ConcreteType::Closure(id) => {
             TypeAnnotation::Reference(TypePath::simple(format!("__mono_closure_{}", id.0)))
         }

@@ -1216,6 +1216,90 @@ fn concrete_type_from_annotation(
     }
 }
 
+/// v0.3 WS-6 — compiler-aware `ConcreteType` for a declared
+/// [`TypeAnnotation`], used to record the concrete type of a `let`-binding
+/// with an explicit annotation so a later generic call site
+/// (`let n: Option<int> = ...; id(n)`) can resolve its argument's type.
+///
+/// This is `concrete_type_from_annotation` extended with user-type
+/// awareness: a bare `Reference`/`Basic` name that is not a primitive but
+/// IS a registered struct / enum resolves to the matching named
+/// `ConcreteType::Struct` / `ConcreteType::Enum`. Composite annotations
+/// (`Array<T>`, `Option<T>`, `Result<T, E>`, `HashMap<K, V>`, tuples)
+/// recurse. Returns `None` for anything not fully resolvable — the caller
+/// then simply records nothing (best-effort, never fabricates).
+pub fn declared_annotation_concrete_type(
+    compiler: &BytecodeCompiler,
+    ann: &TypeAnnotation,
+) -> Option<ConcreteType> {
+    use shape_value::v2::concrete_type::{EnumLayoutId, StructLayoutId};
+    match ann {
+        TypeAnnotation::Basic(name) => concrete_type_from_name(name)
+            .or_else(|| named_user_type_concrete(compiler, name, StructLayoutId(0), EnumLayoutId(0))),
+        TypeAnnotation::Reference(path) if !path.is_qualified() => {
+            let n = path.as_str();
+            concrete_type_from_name(n)
+                .or_else(|| named_user_type_concrete(compiler, n, StructLayoutId(0), EnumLayoutId(0)))
+        }
+        TypeAnnotation::Generic { name, args } => {
+            let base = name.as_str();
+            match base {
+                "Array" | "Vec" if args.len() == 1 => Some(ConcreteType::Array(Box::new(
+                    declared_annotation_concrete_type(compiler, &args[0])?,
+                ))),
+                "HashMap" | "Map" if args.len() == 2 => Some(ConcreteType::HashMap(
+                    Box::new(declared_annotation_concrete_type(compiler, &args[0])?),
+                    Box::new(declared_annotation_concrete_type(compiler, &args[1])?),
+                )),
+                "Option" if args.len() == 1 => Some(ConcreteType::Option(Box::new(
+                    declared_annotation_concrete_type(compiler, &args[0])?,
+                ))),
+                "Result" if args.len() == 2 => Some(ConcreteType::Result(
+                    Box::new(declared_annotation_concrete_type(compiler, &args[0])?),
+                    Box::new(declared_annotation_concrete_type(compiler, &args[1])?),
+                )),
+                _ => None,
+            }
+        }
+        TypeAnnotation::Array(inner) => Some(ConcreteType::Array(Box::new(
+            declared_annotation_concrete_type(compiler, inner)?,
+        ))),
+        TypeAnnotation::Tuple(items) => {
+            let elems: Option<Vec<ConcreteType>> = items
+                .iter()
+                .map(|t| declared_annotation_concrete_type(compiler, t))
+                .collect();
+            Some(ConcreteType::Tuple(elems?))
+        }
+        TypeAnnotation::Void => Some(ConcreteType::Void),
+        _ => None,
+    }
+}
+
+/// v0.3 WS-6 — resolve a bare type name to a named struct / enum
+/// `ConcreteType` when it is a registered user type. Returns `None` for an
+/// unknown name.
+fn named_user_type_concrete(
+    compiler: &BytecodeCompiler,
+    name: &str,
+    struct_layout: shape_value::v2::concrete_type::StructLayoutId,
+    enum_layout: shape_value::v2::concrete_type::EnumLayoutId,
+) -> Option<ConcreteType> {
+    if compiler.struct_types.contains_key(name) {
+        return Some(ConcreteType::named_struct(name, struct_layout));
+    }
+    if compiler
+        .type_tracker
+        .schema_registry()
+        .get(name)
+        .map(|schema| schema.get_enum_info().is_some())
+        .unwrap_or(false)
+    {
+        return Some(ConcreteType::named_enum(name, enum_layout));
+    }
+    None
+}
+
 /// Map a Shape type-annotation identifier to its `ConcreteType`. Recognises
 /// the builtin primitive scalar names; returns `None` for unknown identifiers.
 fn concrete_type_from_name(name: &str) -> Option<ConcreteType> {
@@ -1410,15 +1494,34 @@ pub fn concrete_type_for_expr(compiler: &BytecodeCompiler, expr: &Expr) -> Optio
 
         Expr::Identifier(name, _) => identifier_concrete_type(compiler, name),
 
-        Expr::Array(_, _) => {
+        Expr::Array(elements, _) => {
             // Array literals: prefer the per-span side-table (populated by
             // `compile_expr_array` for typed literals).
             let span = Spanned::span(expr);
-            compiler
-                .array_element_types
-                .get(&span)
-                .cloned()
-                .map(|elem| ConcreteType::Array(Box::new(elem)))
+            if let Some(elem) = compiler.array_element_types.get(&span).cloned() {
+                return Some(ConcreteType::Array(Box::new(elem)));
+            }
+            // v0.3 WS-6: the span side-table is only populated once the
+            // literal has been *compiled*; at a generic call site
+            // (`id([1,2,3])`) the argument resolver runs *before* arg
+            // compilation, so the table is empty. Fall back to inferring
+            // the element type structurally from the literal's elements —
+            // the first element's `ConcreteType`, provided every element
+            // agrees (a homogeneous literal). A heterogeneous or
+            // unresolvable literal yields `None` (the resolver then falls
+            // back to the generic template — no fabrication).
+            let mut elem_ct: Option<ConcreteType> = None;
+            for el in elements {
+                match concrete_type_for_expr(compiler, el) {
+                    Some(ct) => match &elem_ct {
+                        Some(existing) if existing != &ct => return None,
+                        Some(_) => {}
+                        None => elem_ct = Some(ct),
+                    },
+                    None => return None,
+                }
+            }
+            elem_ct.map(|elem| ConcreteType::Array(Box::new(elem)))
         }
 
         Expr::UnaryOp { operand, .. } => {
@@ -1471,13 +1574,124 @@ pub fn concrete_type_for_expr(compiler: &BytecodeCompiler, expr: &Expr) -> Optio
         // terminates — including for self-recursive callees, since it walks
         // only the call's *argument* expressions, never the callee body.
         Expr::FunctionCall { name, args, .. } => {
-            function_call_return_concrete_type(compiler, name, args)
+            // v0.3 WS-6 generic-arg-fix: the trinity constructors `Some` /
+            // `Ok` / `Err` parse as `Expr::FunctionCall` (they map to
+            // `BuiltinFunction::SomeCtor` / `OkCtor` / `ErrCtor`, not to a
+            // user `function_defs` entry). Resolve them to the matching
+            // `Option<T>` / `Result<T, E>` ConcreteType from the payload
+            // expression so a generic free-function call like
+            // `id(Some(5))` can bind its type param. A genuinely
+            // type-ambiguous payload (`Some(<unresolvable>)`) returns
+            // `None`, preserving the WS-2 clean-compile-error contract.
+            match name.as_str() {
+                "Some" if args.len() == 1 => concrete_type_for_expr(compiler, &args[0])
+                    .map(|inner| ConcreteType::Option(Box::new(inner))),
+                "Ok" if args.len() == 1 => concrete_type_for_expr(compiler, &args[0])
+                    .map(|inner| {
+                        ConcreteType::Result(Box::new(inner), Box::new(ConcreteType::Void))
+                    }),
+                "Err" if args.len() == 1 => concrete_type_for_expr(compiler, &args[0])
+                    .map(|inner| {
+                        ConcreteType::Result(Box::new(ConcreteType::Void), Box::new(inner))
+                    }),
+                // `None` carries no payload — its `Option<T>` element type
+                // is genuinely unresolvable without call-site context.
+                // Returning `None` keeps `id(None)` a clean compile error.
+                "None" => None,
+                _ => function_call_return_concrete_type(compiler, name, args),
+            }
+        }
+
+        // v0.3 WS-6 generic-arg-fix: a struct literal `P { a: 7 }` is a
+        // fully type-known argument expression. Resolve it to the named
+        // struct ConcreteType so a generic free-function call like
+        // `id(P { a: 7 })` can bind its type param. `ConcreteType::Struct`
+        // carries a `StructLayoutId` placeholder; the load-bearing type
+        // identity for monomorphization is the struct *name*, threaded via
+        // `struct_concrete_type` into the resolver's name-aware path.
+        Expr::StructLiteral { type_name, .. } => {
+            struct_or_enum_concrete_type(compiler, type_name.name())
+        }
+
+        // v0.3 WS-6 generic-arg-fix: an enum constructor `Color::Red` /
+        // `Shape::Circle(2.0)` is a fully type-known argument. Resolve it to
+        // the named enum ConcreteType. The user-defined-enum case maps to
+        // `ConcreteType::Enum`; the trinity enum names `Option` / `Result`
+        // are handled by the `Some` / `Ok` / `Err` FunctionCall arms above
+        // and the dedicated trinity arm here.
+        Expr::EnumConstructor { enum_name, variant, payload, .. } => {
+            enum_constructor_concrete_type(compiler, enum_name.name(), variant, payload)
         }
 
         // Anything else (member accesses, closures, …) is opaque until we
         // have richer side-tables. Returning None lets the resolver fall back
         // to the generic template.
         _ => None,
+    }
+}
+
+/// v0.3 WS-6 — best-effort `ConcreteType` for a named user type referenced
+/// by a struct literal or unit-payload enum constructor.
+///
+/// The bytecode compiler records every user `type` / `enum` declaration in
+/// `struct_types` (structs) and the schema registry (enums). When `name`
+/// resolves to a known user type the helper produces the matching
+/// `ConcreteType::Struct` / `ConcreteType::Enum`. The `StructLayoutId` /
+/// `EnumLayoutId` are placeholders — the monomorphization key and the
+/// substituted annotation are name-carried (see `concrete_to_annotation`'s
+/// WS-6 named-type arm), so the placeholder id never participates in type
+/// identity.
+///
+/// Returns `None` for an unknown name; the resolver then falls back to the
+/// generic template (no fabrication).
+fn struct_or_enum_concrete_type(
+    compiler: &BytecodeCompiler,
+    name: &str,
+) -> Option<ConcreteType> {
+    use shape_value::v2::concrete_type::{EnumLayoutId, StructLayoutId};
+    named_user_type_concrete(compiler, name, StructLayoutId(0), EnumLayoutId(0))
+}
+
+/// v0.3 WS-6 — best-effort `ConcreteType` for an `Expr::EnumConstructor`.
+///
+/// The trinity enums `Option` / `Result` carry parametric inner types; their
+/// constructor payloads are resolved to the matching `ConcreteType::Option`
+/// / `ConcreteType::Result`. A user-defined enum resolves to the named
+/// `ConcreteType::Enum`. A trinity constructor whose payload type cannot be
+/// resolved (e.g. `Option::Some` of an opaque expression) returns `None`,
+/// preserving the clean-compile-error contract for genuinely ambiguous
+/// arguments.
+fn enum_constructor_concrete_type(
+    compiler: &BytecodeCompiler,
+    enum_name: &str,
+    variant: &str,
+    payload: &shape_ast::ast::EnumConstructorPayload,
+) -> Option<ConcreteType> {
+    use shape_ast::ast::EnumConstructorPayload;
+    match enum_name {
+        "Option" => match (variant, payload) {
+            ("Some", EnumConstructorPayload::Tuple(items)) if items.len() == 1 => {
+                concrete_type_for_expr(compiler, &items[0])
+                    .map(|inner| ConcreteType::Option(Box::new(inner)))
+            }
+            // `Option::None` carries no payload — genuinely ambiguous.
+            ("None", _) => None,
+            _ => None,
+        },
+        "Result" => match (variant, payload) {
+            ("Ok", EnumConstructorPayload::Tuple(items)) if items.len() == 1 => {
+                concrete_type_for_expr(compiler, &items[0]).map(|inner| {
+                    ConcreteType::Result(Box::new(inner), Box::new(ConcreteType::Void))
+                })
+            }
+            ("Err", EnumConstructorPayload::Tuple(items)) if items.len() == 1 => {
+                concrete_type_for_expr(compiler, &items[0]).map(|inner| {
+                    ConcreteType::Result(Box::new(ConcreteType::Void), Box::new(inner))
+                })
+            }
+            _ => None,
+        },
+        _ => struct_or_enum_concrete_type(compiler, enum_name),
     }
 }
 
@@ -1659,6 +1873,14 @@ fn identifier_concrete_type(compiler: &BytecodeCompiler, name: &str) -> Option<C
 
     // Module binding fallback.
     if let Some(&binding_idx) = compiler.module_bindings.get(name) {
+        // v0.3 WS-6: a module binding declared with an explicit struct /
+        // enum / `Option<T>` / `Result<T, E>` / `HashMap<K, V>` annotation
+        // records its `ConcreteType` here at let-binding time (see
+        // `statements.rs`). This covers the variable-argument cases that
+        // the array / map element side-tables below do not.
+        if let Some(ct) = compiler.module_binding_concrete_types.get(&binding_idx).cloned() {
+            return Some(ct);
+        }
         if let Some(elem) = compiler
             .module_binding_array_element_types
             .get(&binding_idx)
@@ -2465,6 +2687,178 @@ mod tests {
                  quad(10)"
             ),
             40
+        );
+    }
+
+    // ── v0.3 WS-6 — generic free function non-scalar argument suite ──────
+    //
+    // Before the fix, `concrete_type_for_expr` had no arm for struct-literal
+    // / enum-constructor / `Some`/`Ok`/`Err` argument expressions, nor for a
+    // variable annotated with a struct / enum / `Option<T>` / `Result<T,E>`
+    // type. So a generic free-function call like `id(P { a: 7 })` could not
+    // bind its type parameter and was rejected with
+    // `error[SEMANTIC]: cannot infer type argument(s) ...` — even though the
+    // argument's type is fully statically known.
+    //
+    // The fix adds the missing `concrete_type_for_expr` arms (struct literal,
+    // enum constructor, `Some`/`Ok`/`Err`), records declared-annotation
+    // ConcreteTypes for `let`-bindings, and threads the source-level type
+    // name through `ConcreteType::Struct` / `Enum` (`NamedTypeId`) so the
+    // monomorphized specialization carries the proven concrete type.
+
+    #[test]
+    fn ws6_generic_id_struct_literal_arg() {
+        // `id(P { a: 7 }).a` — a struct literal passed to a generic
+        // free function; the result's field access yields the value.
+        assert_eq!(
+            eval_typed_i64(
+                "type P { a: int }\n\
+                 fn id<T>(x: T) -> T { x }\n\
+                 id(P { a: 7 }).a"
+            ),
+            7
+        );
+    }
+
+    #[test]
+    fn ws6_generic_id_two_distinct_structs_distinct_specializations() {
+        // `id<T>` called with two different struct types must produce two
+        // distinct specializations (`id::struct_P` vs `id::struct_Q`) — the
+        // `NamedTypeId` name field is what keys them apart in the mono key.
+        assert_eq!(
+            eval_typed_i64(
+                "type P { a: int }\n\
+                 type Q { b: int }\n\
+                 fn id<T>(x: T) -> T { x }\n\
+                 let p = id(P { a: 7 })\n\
+                 let q = id(Q { b: 9 })\n\
+                 p.a + q.b"
+            ),
+            16
+        );
+    }
+
+    #[test]
+    fn ws6_generic_id_some_arg() {
+        // `Some(5)` (an `Option<int>` constructor) passed to a generic free
+        // function. Unwrapping the result yields the payload.
+        assert_eq!(
+            eval_typed_i64(
+                "fn id<T>(x: T) -> T { x }\n\
+                 let s = id(Some(5))\n\
+                 match s { Some(v) => v, None => 0 }"
+            ),
+            5
+        );
+    }
+
+    #[test]
+    fn ws6_generic_id_ok_arg() {
+        // `Ok(9)` (a `Result` constructor) passed to a generic free function.
+        assert_eq!(
+            eval_typed_i64(
+                "fn id<T>(x: T) -> T { x }\n\
+                 let r = id(Ok(9))\n\
+                 match r { Ok(v) => v, Err(e) => 0 }"
+            ),
+            9
+        );
+    }
+
+    #[test]
+    fn ws6_generic_id_option_variable_arg() {
+        // A variable with an explicit `Option<int>` annotation passed to a
+        // generic free function. The declared-annotation ConcreteType lets
+        // the call site bind the type parameter.
+        assert_eq!(
+            eval_typed_i64(
+                "fn id<T>(x: T) -> T { x }\n\
+                 let n: Option<int> = Some(5)\n\
+                 let r = id(n)\n\
+                 match r { Some(v) => v, None => 0 }"
+            ),
+            5
+        );
+    }
+
+    #[test]
+    fn ws6_generic_id_result_variable_arg() {
+        // A variable with an explicit `Result<int, string>` annotation.
+        assert_eq!(
+            eval_typed_i64(
+                "fn id<T>(x: T) -> T { x }\n\
+                 let r: Result<int, string> = Ok(9)\n\
+                 let x = id(r)\n\
+                 match x { Ok(v) => v, Err(e) => 0 }"
+            ),
+            9
+        );
+    }
+
+    #[test]
+    fn ws6_generic_id_enum_arg() {
+        // A user enum constructor passed to a generic free function.
+        assert_eq!(
+            eval_typed_i64(
+                "enum Color { Red, Green }\n\
+                 fn id<T>(x: T) -> T { x }\n\
+                 let c = id(Color::Red)\n\
+                 match c { Color::Red => 1, Color::Green => 2 }"
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn ws6_generic_id_array_literal_arg() {
+        // An array literal passed to a generic free function — the element
+        // type is inferred structurally from the literal's elements when the
+        // span side-table is not yet populated (resolution runs before arg
+        // compilation).
+        assert_eq!(
+            eval_typed_i64(
+                "fn id<T>(x: T) -> T { x }\n\
+                 let a = id([10, 20, 30])\n\
+                 a[1]"
+            ),
+            20
+        );
+    }
+
+    #[test]
+    fn ws6_generic_struct_arg_passed_to_nongeneric_callee() {
+        // The result of a generic call on a struct, fed to a non-generic
+        // function — the struct round-trips through the monomorphized
+        // specialization with the proven concrete type.
+        assert_eq!(
+            eval_typed_i64(
+                "type P { a: int }\n\
+                 fn id<T>(x: T) -> T { x }\n\
+                 fn geta(p: P) -> int { p.a }\n\
+                 geta(id(P { a: 7 }))"
+            ),
+            7
+        );
+    }
+
+    #[test]
+    fn ws6_generic_id_bare_none_is_clean_compile_error() {
+        // WS-2 non-regression: a genuinely type-ambiguous argument — bare
+        // `None` with no annotation or context — must STAY a clean compile
+        // error, not be force-resolved. `concrete_type_for_expr` returns
+        // `None` for a bare `None` constructor, so `resolve_call_site_type_args`
+        // cannot bind the type parameter and the call is rejected.
+        let result = crate::test_utils::compile_with_prelude(
+            "fn id<T>(x: T) -> T { x }\nid(None)",
+        );
+        assert!(
+            result.is_err(),
+            "id(None) with no type context must be a clean compile error"
+        );
+        let msg = format!("{:?}", result.unwrap_err());
+        assert!(
+            msg.contains("cannot infer type argument"),
+            "expected the WS-2 'cannot infer type argument' diagnostic, got: {msg}"
         );
     }
 }

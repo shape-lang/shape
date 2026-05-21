@@ -291,18 +291,18 @@ pub fn concrete_type_for_typed_array_kind(kind: TypedArrayKind) -> ConcreteType 
         TypedArrayKind::String => ConcreteType::String,
         TypedArrayKind::Decimal => ConcreteType::Decimal,
         // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18).
-        // Returns `ConcreteType::Struct(StructLayoutId(0))` as a placeholder —
+        // Returns `ConcreteType::placeholder_struct(StructLayoutId(0))` as a placeholder —
         // every typed-object struct schema collapses to the same TypedArrayKind
         // (the slot-bits kind is uniformly `Ptr(HeapKind::TypedObject)`), so
         // the kind→ConcreteType round-trip cannot recover the specific
         // StructLayoutId without an additional side-table lookup. This mirrors
-        // the `helpers.rs:719` shape `ConcreteType::Struct(StructLayoutId(0))`
+        // the `helpers.rs:719` shape `ConcreteType::placeholder_struct(StructLayoutId(0))`
         // used by `StatementKind::ObjectStore` slot-stamping. Downstream
         // consumers that need the precise schema must read from the bytecode
         // compiler's `array_element_types[span]` side-table populated at the
         // literal site (which records the resolved struct schema, NOT this
         // round-trip placeholder).
-        TypedArrayKind::TypedObject => ConcreteType::Struct(
+        TypedArrayKind::TypedObject => ConcreteType::placeholder_struct(
             shape_value::v2::concrete_type::StructLayoutId(0),
         ),
     }
@@ -651,11 +651,11 @@ mod tests {
         // ConcreteType::Struct(_) now routes to the v2-raw TypedArray<*const
         // TypedObjectStorage> fast path per ADR-006 §2.7.5 + audit §2.1.
         assert_eq!(
-            should_use_typed_array(&ConcreteType::Struct(StructLayoutId(0))),
+            should_use_typed_array(&ConcreteType::placeholder_struct(StructLayoutId(0))),
             Some(TypedArrayKind::TypedObject)
         );
         assert_eq!(
-            should_use_typed_array(&ConcreteType::Struct(StructLayoutId(42))),
+            should_use_typed_array(&ConcreteType::placeholder_struct(StructLayoutId(42))),
             Some(TypedArrayKind::TypedObject)
         );
     }
@@ -663,7 +663,7 @@ mod tests {
     #[test]
     fn test_enum_falls_back_to_legacy() {
         assert_eq!(
-            should_use_typed_array(&ConcreteType::Enum(EnumLayoutId(0))),
+            should_use_typed_array(&ConcreteType::placeholder_enum(EnumLayoutId(0))),
             None
         );
     }

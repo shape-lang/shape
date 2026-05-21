@@ -202,7 +202,7 @@ mod tests {
         assert_eq!(
             should_use_typed_map(
                 &ConcreteType::String,
-                &ConcreteType::Struct(StructLayoutId(0))
+                &ConcreteType::placeholder_struct(StructLayoutId(0))
             ),
             Some(TypedMapKind::StringPtr)
         );
@@ -235,7 +235,7 @@ mod tests {
     #[test]
     fn test_int_enum_maps_to_i64_ptr() {
         assert_eq!(
-            should_use_typed_map(&ConcreteType::I64, &ConcreteType::Enum(EnumLayoutId(0))),
+            should_use_typed_map(&ConcreteType::I64, &ConcreteType::placeholder_enum(EnumLayoutId(0))),
             Some(TypedMapKind::I64Ptr)
         );
     }

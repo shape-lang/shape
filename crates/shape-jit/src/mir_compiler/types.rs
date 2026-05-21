@@ -3066,9 +3066,7 @@ mod tests {
         // NOT a fabricated `NativeKind::String` from hard-coding `"name"`
         // — that would be a CLAUDE.md "Forbidden rationalizations"
         // walk-back ("hard-code the kickoff Smoke 3 case for now").
-        let cts = vec![ConcreteType::Struct(
-            shape_value::v2::concrete_type::StructLayoutId(0),
-        )];
+        let cts = vec![ConcreteType::placeholder_struct(shape_value::v2::concrete_type::StructLayoutId(0))];
         let kind =
             parametric_method_return_kind_from_receiver("name", &[copy_local(0)], &cts);
         assert_eq!(
@@ -3126,7 +3124,7 @@ mod tests {
             local_declared_scalar_types: Default::default(),
         };
         let concrete_types = vec![
-            ConcreteType::Struct(shape_value::v2::concrete_type::StructLayoutId(0)),
+            ConcreteType::placeholder_struct(shape_value::v2::concrete_type::StructLayoutId(0)),
             ConcreteType::Void,
             ConcreteType::Void,
             ConcreteType::Void,
@@ -3165,9 +3163,7 @@ mod tests {
         // fall through to any of these arms — that would be a wrong-
         // carrier classification (a user struct with a `.sum()` method
         // is not an `Array<T>`).
-        let cts = vec![ConcreteType::Struct(
-            shape_value::v2::concrete_type::StructLayoutId(0),
-        )];
+        let cts = vec![ConcreteType::placeholder_struct(shape_value::v2::concrete_type::StructLayoutId(0))];
         for method_name in [
             "get",
             "sum",
@@ -3268,7 +3264,7 @@ mod tests {
         // projected it through `native_kind_from_concrete_type` to
         // form `existing[1] = Some(NativeKind::String)`.
         let concrete_types = vec![
-            ConcreteType::Struct(shape_value::v2::concrete_type::StructLayoutId(0)),
+            ConcreteType::placeholder_struct(shape_value::v2::concrete_type::StructLayoutId(0)),
             ConcreteType::String,
             ConcreteType::Void,
             ConcreteType::Void,

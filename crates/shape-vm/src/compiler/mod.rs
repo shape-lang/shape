@@ -1318,6 +1318,20 @@ pub struct BytecodeCompiler {
     /// Per-local-slot concrete type table for the function currently being compiled.
     pub(crate) current_function_local_concrete_types: HashMap<u16, shape_value::v2::ConcreteType>,
 
+    /// v0.3 WS-6 — per-module-binding concrete type table, populated at
+    /// let-binding time from the binding's explicit `TypeAnnotation`.
+    ///
+    /// Consumed by the monomorphization call-site resolver
+    /// (`identifier_concrete_type`) so a generic free-function call whose
+    /// argument is a variable with an explicit struct / enum / `Option<T>` /
+    /// `Result<T, E>` / `HashMap<K, V>` annotation can bind its type
+    /// parameter — `let n: Option<int> = ...; id(n)`. The array / map
+    /// element side-tables (`module_binding_array_element_types`,
+    /// `module_binding_map_key_value_types`) already cover the
+    /// container-element cases; this table covers the remaining
+    /// fully-annotated shapes.
+    pub(crate) module_binding_concrete_types: HashMap<u16, shape_value::v2::ConcreteType>,
+
     /// Monomorphization cache for generic function specialization.
     pub(crate) monomorphization_cache: monomorphization::cache::MonomorphizationCache,
 
