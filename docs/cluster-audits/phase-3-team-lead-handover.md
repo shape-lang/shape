@@ -1,7 +1,8 @@
 # Team-lead handover — Shape v0.3 close-approach
 
-**Refreshed:** 2026-05-22 at main HEAD `4ffde515`. Round-6+ CLOSED; v0.3
-scope EXPANDED by user 2026-05-22. Git holds prior content; no
+**Refreshed:** 2026-05-22 at main HEAD `43d3f86c` (post audit-day landing
++ same-day dialogue additions). Round-6+ CLOSED; expanded-scope audits
+LANDED; first-wave fix dispatch in flight. Git holds prior content; no
 archaeology here.
 
 ## Role
@@ -15,35 +16,60 @@ tags and language semantics. The user relays between team-lead and supervisor.
 
 | | |
 |---|---|
-| Main HEAD | `4ffde515` (post §2.7.13 amendment + close-doc refresh) |
-| Smoke matrix s1–s5 | **5/5 VM == JIT** (canonical (ii) F' release-binary harness; re-verified 2026-05-22) |
+| Main HEAD | `43d3f86c` (post 4-audit-day landing + same-day dialogue refresh) |
+| Smoke matrix s1–s5 | **5/5 VM == JIT** (canonical (ii) F' release-binary harness; re-verified 2026-05-22 post-refresh) |
 | verify-merge / check-no-dynamic | 13/13 / exit 0 |
 | Round-6+ no-known-incorrectness set | **EMPTY** per user 2026-05-20 binding |
-| 2026-05-22 expanded-scope gating set | **OPEN** — audits in flight (A: W16.2-J, B: W17.3-4, C: phase-2c, D: 6 KCs); doc-truth round E.1/E.2 gated on A–D |
+| 2026-05-22 expanded-scope gating set | **OPEN** — audits CLOSED for A/B/C/D; first-wave fix dispatch in flight (W16.2-J.1 + W17.3-4.1 + D-δ); E (W18) audit-first PENDING next round; F (Len trait + membership) PENDING dispatch alongside W18; doc-truth round G.1/G.2 gated on A–F |
 | v0.3.0 tag | NOT landed — gated on expanded-scope work + user authorization |
 
-## 2026-05-22 expanded scope (binding — user)
+## 2026-05-22 expanded scope (binding — user, dialogue-supplemented same day)
 
-Four architectural workstreams + six Known Constraints land pre-tag.
-Then the doc-truth + book-driven testing round runs on stable HEAD.
-Then close + tag. **Sequencing:** code work first (parallel where
-territories don't overlap) → doc-truth Step 1 → Step 2 → tag.
+Six v0.3-gating criteria (A–F) + the 2-step doc-truth round (G.1/G.2)
+land pre-tag. **Sequencing:** code work first (parallel where territories
+don't overlap) → doc-truth Step 1 → Step 2 → tag.
 
 Full criteria + dispositions: `docs/v0.3-close-summary.md` §0.A.
 
-| Crit | Workstream | Audit shape | HEAD probe (2026-05-22) |
+| Crit | Workstream | Audit shape | Status at HEAD `43d3f86c` |
 |---|---|---|---|
-| A | **W16.2-J PHF-retirement** (architectural — the BIG one) | AUDIT-FIRST mandatory | PHF registries 343+324 LoC; ckpt cascade 125 calls / 13 files; v2_handlers/array.rs 990 LoC w/ 14 hand-written arms; JIT FFI 16 per-kind allocators. Likely needs ADR amendment. |
-| B | **W17.3-4 per-container `FieldType`** (bounded type-system) | AUDIT-FIRST | `crates/shape-runtime/src/type_schema/field_types.rs:35` |
-| C | **Phase-2c host-tier marshal/snapshot rebuild** (ADR-006 §2.7.4) | AUDIT-FIRST mandatory | ~42 prod `todo!("phase-2c")` + 17 `PHASE_2C_*` SURFACE + 282 test `todo!("phase-2c")` consumers |
-| D | **6 Known Constraints** | Single discovery-audit sizing each | Type::to_annotation TypeVar loss (`type_system/types/core.rs:283`); `format()` shadowing; `Queryable<T>` erasure; deep-tests gating; `object_len_function`; ~48 pre-existing shape-test failure clusters (a–g) |
-| E.1 | **Doc-truth Step 1** (DOC↔CODE reconciliation) | Parallel slice agents per book chapter | GATED on A–D close + main stable |
-| E.2 | **Doc-truth Step 2** (USER-followable validation) | Same partition, on updated docs | GATED on Step 1 fully merging |
+| A | **W16.2-J PHF-retirement** (architectural) | AUDIT-CLOSED | 5 sub-clusters (J.1–J.5); 24–37h; ADR-006 §2.7.24 amendment likely needed. **J.1 dispatched first-wave 2026-05-22.** |
+| B | **W17.3-4 per-container `FieldType`** | AUDIT-CLOSED | 3 sub-clusters (.1–.3); 18–24h; no ADR amendment. Supervisor SURFACE: HeapKind::Set ordinal. **W17.3-4.1 dispatched first-wave 2026-05-22.** |
+| C | **Phase-2c host-tier marshal/snapshot rebuild** (ADR-006 §2.7.4) | AUDIT-CLOSED | 8 sub-clusters; 70–90h serial / 25–30h parallel. **4 supervisor architectural under-specs surfaced.** Fix-dispatch pending supervisor disposition. |
+| D | **6 Known Constraints** | AUDIT-CLOSED | 4 v0.3-gating (D-α/β/γ/δ); 8–17h. **D-δ dispatched first-wave 2026-05-22.** KC #5 → DROP test (user decided). KC #2 PENDING user. |
+| E | **W18 content-rendering kind-threaded rebuild** (NEW 2026-05-22 — v0.3-gating regression) | AUDIT-FIRST mandatory; NEXT audit round | Phase 2b deleted ~600 LoC dispatch chain; user-value → ContentNode rebuild missing. Symptoms: enum Display leaks `{__variant:N,__payload_0:...}`. ~2–4 sessions. |
+| F | **Len trait + membership-naming standardization** (NEW 2026-05-22) | Direct dispatch (close-coupled w/ W18) | New `trait Len { method len() -> int; method isEmpty() -> bool }`; rename `Set.size() → Set.len()`; standardize `.includes(x)` / `.some(\|x\| pred)`; reject `.contains()`. ~1 session. |
+| G.1 | **Doc-truth Step 1** (DOC↔CODE reconciliation) | Parallel slice agents per book chapter | GATED on A–F close + main stable |
+| G.2 | **Doc-truth Step 2** (USER-followable validation) | Same partition, on updated docs | GATED on Step 1 fully merging |
 
-**Classification rule for doc-truth (E.1 + E.2):**
+**Classification rule for doc-truth (G.1 + G.2):**
 - (a) doc aspirational/wrong, code right → fix doc in place
 - (b) doc was a contract, code wrong → NEW known-incorrect → v0.3-gating
 - (c) doc describes v0.4 feature → annotate doc + add to §5 inventory
+
+**Eq/Display struct-semantic clarifications** fold into G.1 (a)/(b)/(c)
+classification per the standard rule.
+
+## Pending user-decision items
+
+- **KC #2 `format()` shadowing** — supervisor rec: rename globals to
+  `format_pct/format_num/format_string`. User not yet ruled; carry to
+  next relay.
+- **Comptime trait primitive (yes/no)** — surfaced 2026-05-22; if yes,
+  ~1–2 sessions for parser + type-checker + comptime-evaluator dispatch;
+  scope-discipline = JUST the primitive, no const-fn-markers /
+  compile-time-generics sprawl.
+
+## Send/Sync — CONFIRMED v0.4 (2026-05-22)
+
+User annotation: "Rust way too complicated; needs deep design thought."
+§5.13 of `v0.3-close-summary.md` records this as a v0.4 design-question
+workstream, not a feature-gap.
+
+## Trajectory
+
+~**13 ± 4 sessions** to v0.3 tag (was ~10 ± 3 pre-2026-05-22 dialogue
+additions). Each addition bounded; they compound.
 
 ## Round-6+ workstreams (15 merged + verified) — preserved
 
@@ -144,14 +170,12 @@ Multi-session rotation expected. Refresh this doc at every rotation
 `check-no-dynamic.sh` exit 0 · smoke s1–s5 5/5 VM == JIT (canonical (ii)
 F' release-binary harness) · AGENTS.md row; no Co-Authored-By trailer.
 
-## Trajectory
-
-~10 ± 3 sessions to v0.3 tag under the expanded scope. Each architectural
-workstream has scope-expansion risk; audit-first guards it. Honest
-re-estimate after the first audit-day round closes.
-
 ---
 
-*Round-6+ CLOSED; expanded-scope work in flight. Audit-day for A/B/C/D
-dispatched 2026-05-22. Next: ratify the four audits and partition fix-
-dispatch per the audit recommendations.*
+*Round-6+ CLOSED; audit-day landing for A/B/C/D landed 2026-05-22 at
+commit `43d3f86c`. First-wave fix dispatch (W16.2-J.1 + W17.3-4.1 + D-δ)
+in flight. E (W18 content-rendering rebuild) + F (Len trait + membership-
+naming) added same day per user dialogue. Next: settle the supervisor
+architectural surfaces (4 phase-2c under-specs; W17.3-4 HeapKind::Set
+ordinal; W16.2-J ADR amendment text) + the 2 user-decision items (KC #2;
+comptime trait primitive); land second-wave fix dispatch.*
