@@ -444,6 +444,11 @@ pub static HASHMAP_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "get" => crate::executor::objects::hashmap_methods::v2_get,
     "set" => crate::executor::objects::hashmap_methods::v2_set,
     "has" => crate::executor::objects::hashmap_methods::v2_has,
+    // Criterion F (2026-05-22): `.includes(key)` is the user-binding for
+    // direct key membership; aliases `has` to standardize the
+    // membership-naming surface with Array/Set. `.contains` is
+    // intentionally NOT present on HashMap.
+    "includes" => crate::executor::objects::hashmap_methods::v2_has,
     "delete" => crate::executor::objects::hashmap_methods::v2_delete,
     // ADR-006 §2.7.27 amendment (W17-pop-mutation, 2026-05-12):
     // `remove(k)` is the canonical pop-shape sibling of `delete(k)` —
@@ -469,17 +474,24 @@ pub static HASHMAP_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "iter" => crate::executor::objects::hashmap_methods::v2_iter,
 };
 
-/// PHF registry for Set methods (14 methods)
+/// PHF registry for Set methods (criterion F: `size` removed, `includes`
+/// added 2026-05-22).
 ///
-/// **Core:** add, has, delete, size, len, length, isEmpty, toArray
+/// **Core:** add, has, includes, delete, len, length, isEmpty, toArray
 /// **Higher-order:** forEach, map, filter
 /// **Set operations:** union, intersection, difference
+///
+/// Membership-naming standardization (criterion F): `.includes(item)` is
+/// the user-binding for direct membership across Array/Set/HashMap;
+/// `.has(key)` is preserved on Set/HashMap for the key-lookup-shape API.
+/// `.contains()` is intentionally NOT present on Set — it is reserved
+/// for semantic-substring/range-inclusion shapes (String, Range).
 pub static SET_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "add" => crate::executor::objects::set_methods::v2_add,
     "delete" => crate::executor::objects::set_methods::v2_delete,
     // Read-only — MethodFnV2
     "has" => crate::executor::objects::set_methods::v2_has,
-    "size" => crate::executor::objects::set_methods::v2_size,
+    "includes" => crate::executor::objects::set_methods::v2_has,
     "len" => crate::executor::objects::set_methods::v2_size,
     "length" => crate::executor::objects::set_methods::v2_size,
     "isEmpty" => crate::executor::objects::set_methods::v2_is_empty,

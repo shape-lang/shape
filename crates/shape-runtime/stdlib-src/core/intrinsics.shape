@@ -131,11 +131,14 @@ builtin fn lowest<T>(collection: T, count: number) -> number;
 builtin fn configure_data_source(config: object) -> void;
 
 /// Format a value with a template.
+///
+/// Criterion F (KC #2 resolve-by-deletion, 2026-05-22): the
+/// `format_percent` / `format_number` prefix-sibling globals were
+/// removed in favour of the single `format(value, template)` global
+/// plus `DateTime.format(...)` method. No backwards-compat aliases
+/// shipped — `format_percent(0.15)` now surfaces a clean compile-time
+/// "unknown function" diagnostic.
 builtin fn format<T>(value: T, template: string) -> string;
-/// Format a number as percent.
-builtin fn format_percent(value: number) -> string;
-/// Format a number with optional decimals.
-builtin fn format_number(value: number, decimals: number = 0) -> string;
 
 /// Shift a table by periods.
 builtin fn shift<T>(table: Table<T>, periods: number) -> Table<T>;

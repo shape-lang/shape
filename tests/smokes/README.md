@@ -37,7 +37,7 @@ canonical harness at branch HEAD `5d842283`.
 | `s2.shape` | typed-array `[1,2,3,4,5].map(|x|x*2).sum()` | `(30, 0)` | `(30, 0)` | PASS |
 | `s2-oneliner.shape` | one-line equivalent of `s2` | `(30, 0)` | `(30, 0)` | PASS |
 | `s3.shape` | UFCS-dispatch `impl HasX for Foo` returning `"x"` | `(x, 0)` | `(x, 0)` | PASS |
-| `s4.shape` | `Set()` basics: `add("a"); add("b"); size()` | `(2, 0)` | `(2, 0)` | PASS (R3-3 fixture restoration) |
+| `s4.shape` | `Set()` basics: `add("a"); add("b"); len()` | `(2, 0)` | `(2, 0)` | PASS (R7-F: `.size` deleted, `.len` only) |
 | `s5.shape` | `Array<dyn HasX>` trait-object reproducer | SURFACE `op_new_array(2)` | SURFACE `op_new_array(2)` | SURFACE — W16.2-B target |
 | `s5-kickoff-literal.shape` | kickoff prose Rust-syntax variant (`box(X{})`) | parse error | parse error | informational — NOT in canonical s1-s5 matrix |
 

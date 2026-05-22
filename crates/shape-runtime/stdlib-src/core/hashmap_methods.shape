@@ -8,6 +8,10 @@ extend HashMap<K, V> {
     method get(key: K) -> Option<V> { self.get(key) }
     method set(key: K, value: V) -> HashMap<K, V> { self.set(key, value) }
     method has(key: K) -> bool { self.has(key) }
+    // Criterion F (2026-05-22) — `.includes(key)` standardizes the
+    // membership-naming surface across Array/Set/HashMap. Delegates to
+    // the PHF `has` handler via `method_registry.rs` (alias-shape).
+    method includes(key: K) -> bool { self.includes(key) }
     method delete(key: K) -> HashMap<K, V> { self.delete(key) }
     method keys() -> Vec<K> { self.keys() }
     method values() -> Vec<V> { self.values() }

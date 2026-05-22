@@ -480,42 +480,12 @@ static CORE_BUILTINS: &[BuiltinMetadata] = &[
         return_type: "string",
         example: Some("format(0.15, \"percent\") // \"15%\""),
     },
-    BuiltinMetadata {
-        name: "format_percent",
-        signature: "format_percent(value) -> string",
-        description: "Format a number as a percentage string.",
-        category: "Utility",
-        parameters: &[BuiltinParam {
-            name: "value",
-            param_type: "number",
-            optional: false,
-            description: "Decimal value",
-        }],
-        return_type: "string",
-        example: Some("format_percent(0.15) // \"15%\""),
-    },
-    BuiltinMetadata {
-        name: "format_number",
-        signature: "format_number(value, decimals?) -> string",
-        description: "Format a number with optional decimal places.",
-        category: "Utility",
-        parameters: &[
-            BuiltinParam {
-                name: "value",
-                param_type: "number",
-                optional: false,
-                description: "Number to format",
-            },
-            BuiltinParam {
-                name: "decimals",
-                param_type: "number",
-                optional: true,
-                description: "Decimal places",
-            },
-        ],
-        return_type: "string",
-        example: Some("format_number(1234.5, 2) // \"1234.50\""),
-    },
+    // Criterion F / KC #2 resolve-by-deletion (2026-05-22): the
+    // `format_percent` and `format_number` BuiltinMetadata entries were
+    // removed alongside their `builtin fn` declarations in
+    // `stdlib-src/core/intrinsics.shape`. The single `format(value,
+    // template)` global and `DateTime.format(...)` method survive. No
+    // backwards-compat aliases.
     // Column operations
     BuiltinMetadata {
         name: "shift",
