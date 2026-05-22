@@ -177,6 +177,37 @@ impl BytecodeCompiler {
                     ));
                 }
             }
+            // W17.3-4.2 — per-container destructure narrowing. When the
+            // schema field is a typed container (`Array<T>`, `HashMap<K,
+            // V>`, `Set<T>`), the destructured binding inherits the
+            // container's surface type-info for downstream inference.
+            // Per audit §4.B.2 + close-gate signal §5.B "pattern
+            // destructuring on HashMap/Set extracts key/value/element
+            // types correctly".
+            //
+            // The bidirectional-narrowing call site in
+            // `compile_destructure_pattern` consumes
+            // `last_expr_type_info` for typed-receiver dispatch; setting
+            // it to the container's outer-shape name lets the downstream
+            // `.iter()` / `.entries()` / `.get(k)` calls resolve to the
+            // correct PHF method registry without falling back to a
+            // dynamic dispatch path. The element/key/value `FieldType`s
+            // remain accessible via the schema-registry lookup at the
+            // consumer site (no separate parallel discriminator — ADR-005
+            // §1 single-discriminator preserved; the container variants
+            // carry the inner FieldTypes inline).
+            FieldType::Array(_) => {
+                self.last_expr_type_info =
+                    Some(VariableTypeInfo::named("array".to_string()));
+            }
+            FieldType::HashMap { .. } => {
+                self.last_expr_type_info =
+                    Some(VariableTypeInfo::named("hashmap".to_string()));
+            }
+            FieldType::Set(_) => {
+                self.last_expr_type_info =
+                    Some(VariableTypeInfo::named("set".to_string()));
+            }
             _ => {
                 if let Some(tn) = Self::destructure_field_scalar_type_name(&field_type) {
                     let info = VariableTypeInfo::named(tn.to_string());

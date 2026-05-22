@@ -124,9 +124,43 @@ fn substitute_type_param_field_type(
         FieldType::Option(inner) => FieldType::Option(Box::new(
             substitute_type_param_field_type(inner, substitution),
         )),
+        // W17.3-4.2 — per-container substitution. `type Bag<T> { items:
+        // HashMap<string, T>, tags: Set<T> }` monomorphized to
+        // `Bag<int>` must thread `T` through the inner key/value/element
+        // FieldTypes, NOT leave them as the unsound `Object("T")`
+        // residue. Mirrors the Array/Option arm's recursion shape per
+        // audit §4.B.1. Without this, the per-FieldType
+        // `MakeFieldRef`/`GetFieldTyped` stamps emitted downstream would
+        // carry `FIELD_TAG_OBJECT` on slot bits holding a typed
+        // `HashMapKindedRef` carrier, surfacing as a kind-mismatch at
+        // load time (same SIGSEGV class as the d-jit-generic-ctor fix
+        // that originally motivated this substitution helper).
+        FieldType::HashMap { key, value } => FieldType::HashMap {
+            key: Box::new(substitute_type_param_field_type(key, substitution)),
+            value: Box::new(substitute_type_param_field_type(value, substitution)),
+        },
+        FieldType::Set(inner) => FieldType::Set(Box::new(
+            substitute_type_param_field_type(inner, substitution),
+        )),
         // Primitive / non-parametric field types carry no type-parameter
-        // reference; return unchanged.
-        _ => ft.clone(),
+        // reference; return unchanged. Per audit §4.D.2 + CLAUDE.md
+        // exhaustive-match guidance — explicit per-variant arms keep the
+        // closing wildcard tight and surface a compile error if a new
+        // variant lands without matched substitution wiring.
+        FieldType::F64
+        | FieldType::I64
+        | FieldType::Bool
+        | FieldType::String
+        | FieldType::Timestamp
+        | FieldType::Decimal
+        | FieldType::Any
+        | FieldType::I8
+        | FieldType::U8
+        | FieldType::I16
+        | FieldType::U16
+        | FieldType::I32
+        | FieldType::U32
+        | FieldType::U64 => ft.clone(),
     }
 }
 
@@ -2053,6 +2087,100 @@ mod tests {
             second.field_type,
             FieldType::String,
             "type-parameter `B` field must monomorphize to concrete String"
+        );
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // W17.3-4.2 — `substitute_type_param_field_type` per-container
+    // recursion (audit §4.B.1 + close-gate signal §5.B "post-inference
+    // verify pass handles new variants without panicking"). Mirrors the
+    // existing Array/Option recursion shape — the substituter must NOT
+    // leave `Object("T")` residue inside HashMap K/V or Set element
+    // positions, otherwise downstream `MakeFieldRef`/`GetFieldTyped`
+    // stamps the wrong FIELD_TAG on a typed-container slot.
+    // ───────────────────────────────────────────────────────────────────
+
+    /// W17.3-4.2 — direct unit test for `substitute_type_param_field_type`
+    /// against `HashMap<string, T>` with substitution `T → int`. The
+    /// substituter must return `HashMap<string, I64>`, NOT leave the
+    /// `Object("T")` residue inside the value position.
+    #[test]
+    fn w17_3_4_2_substitute_hashmap_value_recurses() {
+        use shape_ast::ast::TypeAnnotation;
+        let mut subst = std::collections::HashMap::new();
+        subst.insert("T".to_string(), TypeAnnotation::Basic("int".to_string()));
+        let input = FieldType::HashMap {
+            key: Box::new(FieldType::String),
+            value: Box::new(FieldType::Object("T".to_string())),
+        };
+        let result = super::substitute_type_param_field_type(&input, &subst);
+        assert_eq!(
+            result,
+            FieldType::HashMap {
+                key: Box::new(FieldType::String),
+                value: Box::new(FieldType::I64),
+            },
+            "HashMap<string, T> with T→int must monomorphize the value position"
+        );
+    }
+
+    /// W17.3-4.2 — substitution recurses through HashMap key position too.
+    #[test]
+    fn w17_3_4_2_substitute_hashmap_key_recurses() {
+        use shape_ast::ast::TypeAnnotation;
+        let mut subst = std::collections::HashMap::new();
+        subst.insert("K".to_string(), TypeAnnotation::Basic("int".to_string()));
+        let input = FieldType::HashMap {
+            key: Box::new(FieldType::Object("K".to_string())),
+            value: Box::new(FieldType::Bool),
+        };
+        let result = super::substitute_type_param_field_type(&input, &subst);
+        assert_eq!(
+            result,
+            FieldType::HashMap {
+                key: Box::new(FieldType::I64),
+                value: Box::new(FieldType::Bool),
+            },
+            "HashMap<K, bool> with K→int must monomorphize the key position"
+        );
+    }
+
+    /// W17.3-4.2 — substitution recurses through `Set<T>`.
+    #[test]
+    fn w17_3_4_2_substitute_set_recurses() {
+        use shape_ast::ast::TypeAnnotation;
+        let mut subst = std::collections::HashMap::new();
+        subst.insert("T".to_string(), TypeAnnotation::Basic("string".to_string()));
+        let input = FieldType::Set(Box::new(FieldType::Object("T".to_string())));
+        let result = super::substitute_type_param_field_type(&input, &subst);
+        assert_eq!(
+            result,
+            FieldType::Set(Box::new(FieldType::String)),
+            "Set<T> with T→string must monomorphize the element position"
+        );
+    }
+
+    /// W17.3-4.2 — non-type-parameter `Object(name)` references inside
+    /// HashMap/Set are preserved (e.g. a nested struct reference is NOT
+    /// touched by an unrelated `T`-substitution).
+    #[test]
+    fn w17_3_4_2_substitute_hashmap_preserves_non_param_object() {
+        use shape_ast::ast::TypeAnnotation;
+        let mut subst = std::collections::HashMap::new();
+        subst.insert("T".to_string(), TypeAnnotation::Basic("int".to_string()));
+        let input = FieldType::HashMap {
+            key: Box::new(FieldType::String),
+            value: Box::new(FieldType::Object("Candle".to_string())),
+        };
+        let result = super::substitute_type_param_field_type(&input, &subst);
+        assert_eq!(
+            result,
+            FieldType::HashMap {
+                key: Box::new(FieldType::String),
+                value: Box::new(FieldType::Object("Candle".to_string())),
+            },
+            "non-type-parameter Object(Candle) inside HashMap.value must \
+             survive substitution unchanged"
         );
     }
 
