@@ -1,7 +1,8 @@
 # Team-lead handover — Shape v0.3 close-approach
 
-**Refreshed:** 2026-05-22 at main HEAD `45dedd02`. Round-6+ CLOSED. Git holds
-prior content; no archaeology here.
+**Refreshed:** 2026-05-22 at main HEAD `4ffde515`. Round-6+ CLOSED; v0.3
+scope EXPANDED by user 2026-05-22. Git holds prior content; no
+archaeology here.
 
 ## Role
 
@@ -10,17 +11,41 @@ Team-lead for the Shape v0.3 close-approach. Runs the program **autonomously**
 supervisor handles architectural calls; the user (strategic owner) authorizes
 tags and language semantics. The user relays between team-lead and supervisor.
 
-## Current state — Round-6+ CLOSED, awaiting tag authorization
+## Current state — Round-6+ CLOSED, expanded-scope work in flight
 
 | | |
 |---|---|
-| Main HEAD | `45dedd02` (post §2.7.13 amendment) |
-| Smoke matrix s1–s5 | **5/5 VM == JIT** (canonical (ii) F' release-binary harness) |
+| Main HEAD | `4ffde515` (post §2.7.13 amendment + close-doc refresh) |
+| Smoke matrix s1–s5 | **5/5 VM == JIT** (canonical (ii) F' release-binary harness; re-verified 2026-05-22) |
 | verify-merge / check-no-dynamic | 13/13 / exit 0 |
 | Round-6+ no-known-incorrectness set | **EMPTY** per user 2026-05-20 binding |
-| v0.3.0 tag | NOT landed — awaiting user authorization |
+| 2026-05-22 expanded-scope gating set | **OPEN** — audits in flight (A: W16.2-J, B: W17.3-4, C: phase-2c, D: 6 KCs); doc-truth round E.1/E.2 gated on A–D |
+| v0.3.0 tag | NOT landed — gated on expanded-scope work + user authorization |
 
-## Round-6+ workstreams (15 merged + verified)
+## 2026-05-22 expanded scope (binding — user)
+
+Four architectural workstreams + six Known Constraints land pre-tag.
+Then the doc-truth + book-driven testing round runs on stable HEAD.
+Then close + tag. **Sequencing:** code work first (parallel where
+territories don't overlap) → doc-truth Step 1 → Step 2 → tag.
+
+Full criteria + dispositions: `docs/v0.3-close-summary.md` §0.A.
+
+| Crit | Workstream | Audit shape | HEAD probe (2026-05-22) |
+|---|---|---|---|
+| A | **W16.2-J PHF-retirement** (architectural — the BIG one) | AUDIT-FIRST mandatory | PHF registries 343+324 LoC; ckpt cascade 125 calls / 13 files; v2_handlers/array.rs 990 LoC w/ 14 hand-written arms; JIT FFI 16 per-kind allocators. Likely needs ADR amendment. |
+| B | **W17.3-4 per-container `FieldType`** (bounded type-system) | AUDIT-FIRST | `crates/shape-runtime/src/type_schema/field_types.rs:35` |
+| C | **Phase-2c host-tier marshal/snapshot rebuild** (ADR-006 §2.7.4) | AUDIT-FIRST mandatory | ~42 prod `todo!("phase-2c")` + 17 `PHASE_2C_*` SURFACE + 282 test `todo!("phase-2c")` consumers |
+| D | **6 Known Constraints** | Single discovery-audit sizing each | Type::to_annotation TypeVar loss (`type_system/types/core.rs:283`); `format()` shadowing; `Queryable<T>` erasure; deep-tests gating; `object_len_function`; ~48 pre-existing shape-test failure clusters (a–g) |
+| E.1 | **Doc-truth Step 1** (DOC↔CODE reconciliation) | Parallel slice agents per book chapter | GATED on A–D close + main stable |
+| E.2 | **Doc-truth Step 2** (USER-followable validation) | Same partition, on updated docs | GATED on Step 1 fully merging |
+
+**Classification rule for doc-truth (E.1 + E.2):**
+- (a) doc aspirational/wrong, code right → fix doc in place
+- (b) doc was a contract, code wrong → NEW known-incorrect → v0.3-gating
+- (c) doc describes v0.4 feature → annotate doc + add to §5 inventory
+
+## Round-6+ workstreams (15 merged + verified) — preserved
 
 WS-1 (W16.2-C empty-literal/spread/comprehension), WS-1b (bare-accumulator),
 WS-2 (ζ-round), WS-3 (Result/AnyError F1–F4 + array-rest), WS-4 (object
@@ -32,9 +57,7 @@ WS-10b (verifier-noise fix + 29-classification), WS-11 (REPL cross-cell
 persistence), WS-12 (Option as-cast).
 
 ADR-006 §2.7.13 amendment landed (commit `45dedd02`): `TypedField.receiver
-→ TypedObjectPtr` per β1 (`a287c795` / `278aa214`); `TypedIndex` deletion
-recorded; full strike set applied (post-apply check = 1 line, the single
-canonical historical deletion-note).
+→ TypedObjectPtr` per β1; `TypedIndex` deletion recorded.
 
 ## Canonical (ii) F' smoke harness
 
@@ -48,33 +71,44 @@ Fixtures `tests/smokes/s{1..5}.shape`; expected s1 `4950` / s2 `30` / s3 `x`
 
 ## Pending the v0.3 tag
 
-1. Relay close-evidence to supervisor (this turn).
-2. Supervisor ratifies close.
-3. **User** authorizes the `v0.3.0` tag (CLAUDE.md / supervisor handover
-   binding — release-tag authority is the user's lane).
-4. Team-lead lands the tag at the authorized commit. Do NOT annotate the
+1. A–D land + smoke 5/5 preserved at every checkpoint.
+2. Doc-truth Step 1 fully merges before Step 2 starts (no stale-doc race).
+3. Doc-truth Step 2 closes; any (b)-class findings folded into the gating
+   set + fixed.
+4. Relay close-evidence to supervisor; supervisor ratifies.
+5. **User** authorizes the `v0.3.0` tag (release-tag authority is the
+   user's lane).
+6. Team-lead lands the tag at the authorized commit. Do NOT annotate the
    tag pre-authorization.
 
-## v0.4 inventory (close-summary §5)
+## v0.4 inventory (close-summary §5 — POST-expansion pruning)
 
-In `docs/v0.3-close-summary.md` §5.9–§5.12 (new in round-6+): W16.2-J
-PHF-retirement workstream; scalar-element `dyn Trait` arrays (W16.2-B);
-native JIT decimal-scalar codegen; REPL declaration-statement `false`
-print; WS-9c `tyvar` marker → `TypeAnnotation::Variable` variant; plus
-the prior set (W15.2-K, §4.D.10, W17.3-4, shape-web-worktree-infra,
-annotated-closure-param parse + `sortBy` defect, phase-2c host-tier
-marshal/snapshot rebuild).
+W15.2-K stdlib doc pages; §4.D.10 emission-rename; shape-web-per-agent-
+worktree-infra; annotated-closure-param parse + `sortBy` closure defect.
+**MOVED to v0.3 §0.A:** W16.2-J PHF-retirement (criterion A); W17.3-4
+per-container FieldType (B); phase-2c host-tier marshal/snapshot rebuild
+(C). v0.4 still holds: W16.2-B scalar-element `dyn Trait` arrays, native
+JIT decimal-scalar codegen, REPL declaration-statement `false` print,
+WS-9c `tyvar` marker → `TypeAnnotation::Variable` variant.
 
 ## Bindings — refuse on sight
 
-Full detail: CLAUDE.md + ADR-006 §2.7.x. Operative:
+Full detail: CLAUDE.md + ADR-006 §2.7.x. Operative under expanded scope:
+
 - **No-known-incorrectness-ships-in-v0.3** (user 2026-05-20): known-incorrect
   (crash / VM-JIT divergence / wrong result / memory-unsafety / silent-wrong-
   output / spurious-reject of valid code) → v0.3-gating; incomplete-but-CLEAN
   → v0.4-OK; jargon-dump NOT clean.
+- **W16.2-J must be REAL retirement** — no half-retire ("preserve PHF for
+  one edge case" / "rename to a less suspicious name"). Refusal #10 family.
+  Monomorphization-to-concrete only — NEVER reintroduce a tagged/dynamic
+  path.
+- **Doc-truth round: RECONCILE-doc-to-shipped, NOT aspirational rewrite.**
+  If a slice wants to expand language scope to match an aspirational doc,
+  surface it.
 - **Q3 ground-truth before disposition + full-breadth verification.**
-- **Run-verify binding extension (supervisor 2026-05-22):** every repro in
-  a surfacing MUST run-verify at HEAD before relay — same standing as the
+- **Run-verify binding (supervisor 2026-05-22):** every repro in a
+  surfacing MUST run-verify at HEAD before relay — same standing as the
   file:line / commit-hash grep-verify rule.
 - All CLAUDE.md Forbidden Patterns + Renames + ADR-006 §2.7.x. NO ARCHAEOLOGY.
   No Co-Authored-By trailer; own all code quality.
@@ -88,20 +122,36 @@ path as its first `cd`, forbid `cd`-ing to `/home/dev/dev/shape-lang/shape`.
 Avoid `git stash` (shared `.git` stash-stack race). Each fix branch is built +
 its reproducers re-verified on main post-merge before the next dispatch.
 
+**Audit-day exception:** read-only audits (no source changes) can run in
+the main repo without worktrees provided they each write only their own
+audit doc and stop without committing. Team-lead commits the audit docs
+together at audit-round close.
+
 ## Cadence
 
-Autonomous. Surface only on: defection-attractor framing / ADR amendment /
-novel architectural gap needing a scope decision / user-decision item.
+Autonomous. Surface only on: (1) defection-attractor framing; (2) ADR
+amendment genuinely needed (W16.2-J likely qualifies; surface drafted
+text); (3) novel architectural gap needing a scope decision; (4) user-
+decision item. Do NOT recreate a per-round ratification gate.
 Relays ≤ ~80 lines; plain code fences (user pastes verbatim).
+
+Multi-session rotation expected. Refresh this doc at every rotation
+(don't let it drift round-stale like the prior cycle).
 
 ## Close gates (every checkpoint)
 
-`just check-clean` exit 0 · `verify-merge.sh` all pass · `check-no-dynamic.sh`
-exit 0 · smoke s1–s5 5/5 VM == JIT · AGENTS.md row; no Co-Authored-By trailer.
+`just check-clean` exit 0 · `verify-merge.sh` all 13 pass ·
+`check-no-dynamic.sh` exit 0 · smoke s1–s5 5/5 VM == JIT (canonical (ii)
+F' release-binary harness) · AGENTS.md row; no Co-Authored-By trailer.
+
+## Trajectory
+
+~10 ± 3 sessions to v0.3 tag under the expanded scope. Each architectural
+workstream has scope-expansion risk; audit-first guards it. Honest
+re-estimate after the first audit-day round closes.
 
 ---
 
-*Round-6+ CLOSED. The v0.3-close-summary.md §0/§4/§5 are refreshed; the
-close-relay carries the final close evidence. Next rotation: read this doc +
-the close-summary, verify HEAD + smoke 5/5, and proceed per the user's tag
-authorization.*
+*Round-6+ CLOSED; expanded-scope work in flight. Audit-day for A/B/C/D
+dispatched 2026-05-22. Next: ratify the four audits and partition fix-
+dispatch per the audit recommendations.*
