@@ -736,6 +736,39 @@ impl BytecodeCompiler {
         }
     }
 
+    /// Seed the compiler's type-schema registry with user type schemas
+    /// from prior REPL cells (WS-11 cross-cell schema-id stabilization).
+    ///
+    /// Each `TypeSchema` is registered under its **original** id (the id
+    /// it received the first time its `type` was compiled this REPL
+    /// session). Because `predeclare_struct_schema` / `register_struct_type`
+    /// both short-circuit on `schema_registry().get(name).is_some()`,
+    /// pre-seeding a schema makes the cell's re-injected `type` resolve
+    /// to that same id instead of allocating a fresh one — so a
+    /// `TypedObject` persisted from an earlier cell (which carries the
+    /// original `schema_id`) still resolves under this cell's program
+    /// registry.
+    ///
+    /// `ensure_next_id_above` advances the allocator past every seeded
+    /// id so a *new* type declared in this cell cannot collide with a
+    /// seeded one.
+    pub fn seed_persistent_schemas(
+        &mut self,
+        schemas: &[shape_runtime::type_schema::TypeSchema],
+    ) {
+        let registry = self.type_tracker.schema_registry_mut();
+        let mut max_id = 0u32;
+        for schema in schemas {
+            max_id = max_id.max(schema.id);
+            if registry.get(&schema.name).is_none() {
+                registry.register(schema.clone());
+            }
+        }
+        if max_id > 0 {
+            registry.ensure_next_id_above(max_id);
+        }
+    }
+
     /// Create a new compiler with a data schema for column resolution.
     /// This enables optimized GetDataField/GetDataRow opcodes.
     pub fn with_schema(schema: crate::bytecode::DataFrameSchema) -> Self {

@@ -52,6 +52,29 @@ impl ProgramExecutor for JITExecutor {
         program: &Program,
     ) -> Result<shape_runtime::engine::ProgramExecutorResult> {
         use shape_vm::BytecodeCompiler;
+
+        // REPL cross-cell persistence (WS-11): when the engine is a REPL
+        // (`init_repl` enabled persistence), execute the cell on the
+        // bytecode interpreter. Cross-cell `let`/`var` bindings and
+        // `fn`/`type` definitions are round-tripped through the
+        // persistent `ExecutionContext` by `BytecodeExecutor::
+        // execute_program`; the JIT's ahead-of-time `compile_strategy`
+        // path stores top-level module bindings in its own `jit_ctx`
+        // locals which never reach that context, so a JIT-executed cell
+        // would silently drop every binding the next cell needs.
+        //
+        // This is not a fallback or a degradation hatch: a REPL cell is
+        // a one-shot interactive line for which ahead-of-time native
+        // codegen yields no measurable benefit, and the interpreter's
+        // own tiered JIT (T1@100 / T2@10k) still promotes any function
+        // that genuinely runs hot across cells. The `--mode jit` flag
+        // continues to drive AOT compilation for `shape run` scripts;
+        // only the interactive REPL routes through the interpreter, so
+        // cross-cell correctness is identical to `--mode vm`.
+        if engine.repl_persistence() {
+            return self.bytecode_executor.execute_program(engine, program);
+        }
+
         // Cluster-2 closure-wave-F tracing-crate migration (2026-05-16):
         // `tracing::enabled!` compiles away under `release_max_level_off`
         // (the default when the `jit-trace` Cargo feature is OFF), so this
