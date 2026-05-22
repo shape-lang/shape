@@ -609,11 +609,41 @@ fn vm_only_opcode_reason(opcode: OpCode) -> Option<&'static str> {
     // The module-binding variants remain gated for the same reason
     // plus the per-module side-table requirement — their storage
     // lives outside the MIR slot space.
+    //
+    // WS-12 as-cast (v0.3 round-6, 2026-05-22): the `ConvertTo*` /
+    // `TryConvertTo*` opcode family (`expr as int/number/string/bool/
+    // decimal/char`) is NOT lowered by the JIT translator. The opcode-
+    // FFI trampoline (`ffi/generic_builtin.rs::dispatch_opcode`) is a
+    // deliberate pass-through stub — it returns the operand bits
+    // unchanged, so a JIT'd `x as int` silently yields the unconverted
+    // value (`true` instead of `1`, or a raw `Ptr(Option)` pointer
+    // printed as garbage). That is a real VM≠JIT correctness divergence.
+    // Until the per-kind typed convert opcode bodies land on the JIT
+    // side, these opcodes are VM-only: the preflight gate routes any
+    // program containing them to the bytecode interpreter via the
+    // documented `[jit-fallback]` path (NOT silent-wrong-output). This
+    // is surface-and-stop, not a dynamic-fallback shim — the JIT simply
+    // does not implement these opcodes yet.
     match opcode {
         OpCode::AllocSharedModuleBinding
         | OpCode::LoadSharedModuleBinding
         | OpCode::StoreSharedModuleBinding => Some(
             "A.1C.3 outer-scope Shared module-binding opcode; Cranelift lowering pending",
+        ),
+        OpCode::ConvertToInt
+        | OpCode::ConvertToNumber
+        | OpCode::ConvertToString
+        | OpCode::ConvertToBool
+        | OpCode::ConvertToDecimal
+        | OpCode::ConvertToChar
+        | OpCode::TryConvertToInt
+        | OpCode::TryConvertToNumber
+        | OpCode::TryConvertToString
+        | OpCode::TryConvertToBool
+        | OpCode::TryConvertToDecimal
+        | OpCode::TryConvertToChar => Some(
+            "WS-12: ConvertTo*/TryConvertTo* (`as` cast) not lowered by the \
+             JIT translator; VM-only until per-kind typed convert bodies land",
         ),
         _ => None,
     }
@@ -1152,6 +1182,53 @@ mod tests {
             assert!(
                 report.can_jit(),
                 "Capture-side Shared opcode {:?} must pass preflight after A.1E",
+                op
+            );
+        }
+    }
+
+    #[test]
+    fn ws12_preflight_rejects_convert_cast_opcodes() {
+        // WS-12: the `ConvertTo*` / `TryConvertTo*` (`as` cast) opcode
+        // family is not lowered by the JIT translator — the opcode-FFI
+        // trampoline `dispatch_opcode` is a pass-through stub that
+        // returns the operand unchanged, silently yielding the
+        // unconverted value (`true` instead of `1`, a raw Ptr printed
+        // as garbage). Preflight must reject any program containing one
+        // so `--mode jit` cleanly falls back to the bytecode
+        // interpreter rather than producing wrong output. This guard
+        // pins the exact gated set.
+        for op in [
+            OpCode::ConvertToInt,
+            OpCode::ConvertToNumber,
+            OpCode::ConvertToString,
+            OpCode::ConvertToBool,
+            OpCode::ConvertToDecimal,
+            OpCode::ConvertToChar,
+            OpCode::TryConvertToInt,
+            OpCode::TryConvertToNumber,
+            OpCode::TryConvertToString,
+            OpCode::TryConvertToBool,
+            OpCode::TryConvertToDecimal,
+            OpCode::TryConvertToChar,
+        ] {
+            let program = BytecodeProgram {
+                instructions: vec![
+                    Instruction::simple(op),
+                    Instruction::simple(OpCode::ReturnValue),
+                ],
+                ..Default::default()
+            };
+            let report = preflight_jit_compatibility(&program);
+            assert!(
+                !report.can_jit(),
+                "WS-12: cast opcode {:?} must be preflight-rejected \
+                 (JIT translator does not lower it)",
+                op
+            );
+            assert!(
+                report.vm_only_opcodes.contains(&op),
+                "WS-12: {:?} must appear in vm_only_opcodes",
                 op
             );
         }

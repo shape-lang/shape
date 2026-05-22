@@ -273,6 +273,84 @@ let val = opt as int
     );
 }
 
+// =========================================================================
+// WS-12 — Option as-cast Some/None symmetry regression tests
+//
+// The `Option<T> as U` cast is an element-wise lift: `Some(x) as U`
+// unwraps to `x` and converts; `None as U` stays the null sentinel.
+// Before WS-12 the `Some` path fed the whole `Ptr(HeapKind::Option)`
+// carrier into the `ConvertTo*` opcode (which only accepts proven
+// scalar/heap-numeric source kinds) and surfaced
+// `"cannot convert kind Ptr(Option) to <U>"`, while the `None` path
+// (null sentinel, skipped by `IsNull`) succeeded — an asymmetric,
+// inconsistent cast. The fix inserts the missing `UnwrapOption` step
+// in `emit_option_lift_infallible` / `emit_option_lift_fallible`,
+// mirroring `emit_result_lift_infallible`'s `IsOk; UnwrapOk; convert`.
+// =========================================================================
+
+#[test]
+fn ws12_option_some_and_none_as_int_are_symmetric() {
+    // Both the Some path and the None path must execute cleanly — the
+    // Some path lifts to the converted inner value, the None path stays
+    // null. Neither errors. (GATING-B #13/#14 root defect.)
+    let some_src = r#"
+let s: Option<int> = Some(7)
+s as int
+"#;
+    let mut bytecode = compile_source(some_src).expect("Some cast should compile");
+    let mut frame = bytecode
+        .top_level_frame
+        .clone()
+        .unwrap_or_else(crate::type_tracking::FrameDescriptor::new);
+    frame.return_kind = Some(crate::type_tracking::NativeKind::Int64);
+    bytecode.top_level_frame = Some(frame);
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(bytecode);
+    let some_result = vm
+        .execute(None)
+        .expect("Some(7) as int must succeed, not error")
+        .clone();
+    assert_eq!(
+        some_result.as_i64(),
+        Some(7),
+        "Some(7) as int should lift to the unwrapped converted value 7"
+    );
+
+    let none_src = r#"
+let n: Option<int> = None
+n as int
+"#;
+    let none_bytecode = compile_source(none_src).expect("None cast should compile");
+    let mut none_vm = VirtualMachine::new(VMConfig::default());
+    none_vm.load_program(none_bytecode);
+    let none_result = none_vm.execute(None);
+    assert!(
+        none_result.is_ok(),
+        "None as int should succeed (the null sentinel passes through), got: {:?}",
+        none_result.err()
+    );
+}
+
+#[test]
+fn ws12_option_some_int_as_number_unwraps_and_converts() {
+    // `Some(13) as number` must lift to the bare converted scalar 13.0
+    // — the cast unwraps the Some payload, never feeds the Option
+    // carrier into ConvertToNumber.
+    let source = r#"
+let s: Option<int> = Some(13)
+s as number
+"#;
+    let bytecode = compile_source(source).expect("compile should succeed");
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(bytecode);
+    let result = vm.execute(None).expect("execution should succeed").clone();
+    assert_eq!(
+        result.as_f64(),
+        Some(13.0),
+        "Some(13) as number should be 13.0, not a Ptr(Option) carrier"
+    );
+}
+
 #[test]
 fn direct_number_as_int_rejected_at_compile_time() {
     // number has no Into<int>, only TryInto<int>
