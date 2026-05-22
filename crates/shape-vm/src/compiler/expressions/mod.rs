@@ -1734,6 +1734,16 @@ fn field_type_to_annotation(
         // engine handles Option-typed expression contexts via narrowing,
         // not via TypeAnnotation projection). Per ADR-006 §2.7.5 +
         // §2.7.7/Q9 — slot kind lives in the parallel-`field_kinds` track.
-        FieldType::Array(_) | FieldType::Any | FieldType::Option(_) => None,
+        //
+        // W17.3-4.1: HashMap<K, V> / Set<T> share the same refusal shape
+        // here — the inference engine handles container-typed
+        // expression contexts via per-element narrowing, not via flat
+        // TypeAnnotation projection. Consumer integration (full
+        // bidirectional inference threading) is W17.3-4.2 territory.
+        FieldType::Array(_)
+        | FieldType::Any
+        | FieldType::Option(_)
+        | FieldType::HashMap { .. }
+        | FieldType::Set(_) => None,
     }
 }

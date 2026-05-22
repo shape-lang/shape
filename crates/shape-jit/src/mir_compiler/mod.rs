@@ -1170,18 +1170,24 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 | FieldType::U32
                 | FieldType::U64 => Some(NativeKind::Int64),
                 FieldType::Timestamp => Some(NativeKind::Int64),
-                // Object/Array/Decimal/Any: not projected — leave as None
-                // so the downstream consumer falls back to the existing
-                // surface-and-stop / FFI dispatch path. The principled
-                // projection for nested-object fields requires a typed
-                // pointer kind that the JIT-side carrier discipline
-                // (`Ptr(HeapKind::TypedObject)`) does not yet thread
-                // through schema-recovered reads (W10 jit-playbook §5).
+                // Object/Array/Decimal/Any/HashMap/Set: not projected —
+                // leave as None so the downstream consumer falls back to
+                // the existing surface-and-stop / FFI dispatch path. The
+                // principled projection for nested-object fields
+                // requires a typed pointer kind that the JIT-side
+                // carrier discipline (`Ptr(HeapKind::TypedObject)`) does
+                // not yet thread through schema-recovered reads (W10
+                // jit-playbook §5). W17.3-4.1 adds HashMap/Set to the
+                // same None-fallback shape as Array/Option — runtime
+                // dispatch + JIT typed-pointer-kind threading for the
+                // new containers lands at W17.3-4.3.
                 FieldType::Object(_)
                 | FieldType::Array(_)
                 | FieldType::Option(_)
                 | FieldType::Decimal
-                | FieldType::Any => None,
+                | FieldType::Any
+                | FieldType::HashMap { .. }
+                | FieldType::Set(_) => None,
             }
         }
 
@@ -1216,7 +1222,12 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 | FieldType::Object(_)
                 | FieldType::Array(_)
                 | FieldType::Option(_)
-                | FieldType::Any => None,
+                | FieldType::Any
+                // W17.3-4.1 — HashMap<K, V> / Set<T> elements are
+                // not scalar element types; fall back to legacy
+                // NaN-boxed array path (matches Array/Option shape).
+                | FieldType::HashMap { .. }
+                | FieldType::Set(_) => None,
             }
         }
 

@@ -185,7 +185,15 @@ impl VirtualMachine {
                 | FieldType::Object(_)
                 | FieldType::Any
                 | FieldType::Array(_)
-                | FieldType::Option(_) => {
+                | FieldType::Option(_)
+                // W17.3-4.1 — HashMap<K, V> / Set<T> heap-resident
+                // containers stringify into Utf8 columns at the
+                // DataTable-construction boundary (same shape as
+                // Array/Object/Option pre-W17.3-4). Container-aware
+                // Arrow column projection is W17.3-4.3 territory
+                // (runtime dispatch + snapshot/wire integration).
+                | FieldType::HashMap { .. }
+                | FieldType::Set(_) => {
                     let arr: Vec<String> =
                         col_values.iter().map(|v| cell_as_string(v)).collect();
                     arrow_fields.push(Field::new(field_name, DataType::Utf8, false));

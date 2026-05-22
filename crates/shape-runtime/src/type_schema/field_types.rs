@@ -74,6 +74,51 @@ pub enum FieldType {
     /// Mirrors the §4.D.14 enum-payload exception (which already uses
     /// the parallel-`field_kinds` track at storage time per §2.7.26).
     Option(Box<FieldType>),
+    /// HashMap<K, V> — typed key-value map with per-container element
+    /// kinds carried inline.
+    ///
+    /// v0.3 Round 7 W17.3-4.1 — per `docs/cluster-audits/v0.3-w17-3-4-audit.md`
+    /// §3.A Option 1 (foundational per-container FieldType refinement,
+    /// supervisor ratify 2026-05-22). Replaces the TRANSITIONAL
+    /// `HashMap` / `Map` → `FieldType::Any` fallback at
+    /// `compiler/helpers.rs::type_annotation_to_field_type` (W17.2-C
+    /// §4.D.7 narrowed-exception list) with a typed schema-side carrier.
+    ///
+    /// Slot storage points to `HeapKind::HashMap` (ordinal 17 — Stage C
+    /// P1(b) `HashMapKindedRef` per `crates/shape-value/src/heap_variants.rs`);
+    /// per-entry value kind is monomorphized by `HashMapKindedRef::{I64,
+    /// F64, Bool, Char, ...}` at the runtime carrier. The `key` and
+    /// `value` `FieldType`s on this schema-side variant are stamp-at-
+    /// compile-time projections (ADR-006 §2.7.5) — `to_native_kind()`
+    /// refuses static projection (same shape as `Any` / `Option` /
+    /// `Array`) because the slot bits are an `Arc<HashMapData>`
+    /// pointer; consumers route through `HeapValue::kind()` for heap
+    /// dispatch (ADR-005 §1 single-discriminator preserved).
+    HashMap {
+        key: Box<FieldType>,
+        value: Box<FieldType>,
+    },
+    /// Set<T> — typed unique-element collection with per-container
+    /// element kind carried inline.
+    ///
+    /// v0.3 Round 7 W17.3-4.1 — per `docs/cluster-audits/v0.3-w17-3-4-audit.md`
+    /// §3.A Option 1 (foundational per-container FieldType refinement,
+    /// supervisor ratify 2026-05-22). Replaces the TRANSITIONAL `Set`
+    /// → `FieldType::Any` fallback at
+    /// `compiler/helpers.rs::type_annotation_to_field_type` (W17.2-C
+    /// §4.D.7 narrowed-exception list) with a typed schema-side carrier.
+    ///
+    /// Slot storage points to `HeapKind::HashSet` (ordinal 21 — Wave 13
+    /// W13-hashset-rebuild per `crates/shape-value/src/heap_variants.rs`,
+    /// already present at HEAD; the audit §6.A surface-and-stop is
+    /// stale w.r.t. HeapKind::Set ordinal — HashSet exists). The
+    /// element `FieldType` is a stamp-at-compile-time projection
+    /// (ADR-006 §2.7.5); `to_native_kind()` refuses static projection
+    /// (same shape as `Any` / `Option` / `Array` / `HashMap`) because
+    /// slot bits are an `Arc<HashSetData>` pointer; consumers route
+    /// through `HeapValue::kind()` for heap dispatch (ADR-005 §1
+    /// single-discriminator preserved).
+    Set(Box<FieldType>),
 }
 
 impl std::fmt::Display for FieldType {
@@ -96,6 +141,12 @@ impl std::fmt::Display for FieldType {
             FieldType::U32 => write!(f, "u32"),
             FieldType::U64 => write!(f, "u64"),
             FieldType::Option(inner) => write!(f, "Option<{}>", inner),
+            // W17.3-4.1 — per-container Display matches the surface-syntax
+            // `HashMap<K, V>` / `Set<T>` form the parser emits for the
+            // matching `TypeAnnotation::Generic { name: "HashMap"/"Set", .. }`
+            // shape at `compiler/helpers.rs::type_annotation_to_field_type`.
+            FieldType::HashMap { key, value } => write!(f, "HashMap<{}, {}>", key, value),
+            FieldType::Set(inner) => write!(f, "Set<{}>", inner),
         }
     }
 }
@@ -153,6 +204,12 @@ impl FieldType {
             // `field_kinds` track carries the per-value kind (Null for
             // None, inner T's kind for Some(x)) per ADR-006 §2.7.7.
             FieldType::Option(_) => 8,
+            // W17.3-4.1 — HashMap<K, V> / Set<T> are heap-resident
+            // containers; slot stores an `Arc<HashMapData>` /
+            // `Arc<HashSetData>` pointer (8 bytes). Mirrors the
+            // existing Array(_) / Object(_) shape.
+            FieldType::HashMap { .. } => 8,
+            FieldType::Set(_) => 8,
         }
     }
 
@@ -163,11 +220,22 @@ impl FieldType {
 
     /// Returns true if this field type could potentially hold a callable value
     /// (closure, function reference). Primitive numeric/bool/string types are
-    /// never callable. `Any`, `Object`, and `Array` might hold callables.
+    /// never callable. `Any`, `Object`, and container types (`Array`, `HashMap`,
+    /// `Set`, `Option`) might hold callables.
+    ///
+    /// W17.3-4.1 extends the original Array/Object/Any set with the new
+    /// per-container variants (HashMap, Set, Option). Mirrors the existing
+    /// Array policy: a typed container of `Object<Closure>` or similar can
+    /// carry callables.
     pub fn is_potentially_callable(&self) -> bool {
         matches!(
             self,
-            FieldType::Any | FieldType::Object(_) | FieldType::Array(_)
+            FieldType::Any
+                | FieldType::Object(_)
+                | FieldType::Array(_)
+                | FieldType::Option(_)
+                | FieldType::HashMap { .. }
+                | FieldType::Set(_)
         )
     }
 
@@ -211,6 +279,20 @@ impl FieldType {
             // Same refusal-shape as `Any` (which is what this variant
             // SUBSUMES post-W17.2-B per audit §4.D.1 disposition (a)).
             Self::Option(_) => Err(FieldKindError::AnyTypeNotStrictlyTyped),
+            // W17.3-4.1 — HashMap<K, V> / Set<T> are heap-resident.
+            // The schema-side discriminator preserves the container
+            // shape and the element FieldType(s) for compile-time
+            // checking, but `to_native_kind()` refuses static
+            // projection because the slot bits are an
+            // `Arc<HashMapData>` / `Arc<HashSetData>` pointer with a
+            // runtime-tier kind monomorphized via `HashMapKindedRef`
+            // (V-tag at the carrier). Mirrors the Option/Any refusal
+            // shape. Consumers route through `HeapValue::kind()` for
+            // heap dispatch (ADR-005 §1 single-discriminator
+            // preserved) and read the per-entry V-tag from the typed
+            // heap carrier — not from the schema-side FieldType.
+            Self::HashMap { .. } => Err(FieldKindError::AnyTypeNotStrictlyTyped),
+            Self::Set(_) => Err(FieldKindError::AnyTypeNotStrictlyTyped),
         }
     }
 
@@ -625,5 +707,220 @@ mod tests {
             ft.to_native_kind(),
             Err(FieldKindError::AnyTypeNotStrictlyTyped)
         ));
+    }
+
+    // =======================================================================
+    // W17.3-4.1 — Per-container FieldType variants (HashMap / Set)
+    //
+    // Per `docs/cluster-audits/v0.3-w17-3-4-audit.md` §3.A Option 1
+    // (foundational refinement, supervisor ratify 2026-05-22). The
+    // tests below assert the close-gate signals from §4.B / §5.B
+    // W17.3-4.1:
+    //   1. `to_native_kind()` refuses HashMap/Set (matches Any/Option
+    //      refusal shape — single-discriminator discipline ADR-005 §1).
+    //   2. size() = 8 (heap-pointer carrier; mirrors Array/Object).
+    //   3. Display strings: `HashMap<K, V>` / `Set<T>`.
+    //   4. Serde round-trip preserves the variants.
+    // =======================================================================
+
+    /// W17.3-4.1 §5.B — size() is 8 bytes for HashMap (heap-pointer
+    /// carrier, mirrors `Array(_)` / `Object(_)`).
+    #[test]
+    fn test_field_type_hashmap_size_8() {
+        let ft = FieldType::HashMap {
+            key: Box::new(FieldType::String),
+            value: Box::new(FieldType::I64),
+        };
+        assert_eq!(ft.size(), 8);
+        assert_eq!(ft.alignment(), 8);
+    }
+
+    /// W17.3-4.1 §5.B — size() is 8 bytes for Set<T>.
+    #[test]
+    fn test_field_type_set_size_8() {
+        let ft = FieldType::Set(Box::new(FieldType::I64));
+        assert_eq!(ft.size(), 8);
+        assert_eq!(ft.alignment(), 8);
+    }
+
+    /// W17.3-4.1 §5.B — Display: `HashMap<string, int>`.
+    #[test]
+    fn test_field_type_hashmap_display() {
+        let ft = FieldType::HashMap {
+            key: Box::new(FieldType::String),
+            value: Box::new(FieldType::I64),
+        };
+        assert_eq!(format!("{}", ft), "HashMap<string, int>");
+
+        let nested = FieldType::HashMap {
+            key: Box::new(FieldType::String),
+            value: Box::new(FieldType::Object("Candle".to_string())),
+        };
+        assert_eq!(format!("{}", nested), "HashMap<string, Candle>");
+    }
+
+    /// W17.3-4.1 §5.B — Display: `Set<int>`.
+    #[test]
+    fn test_field_type_set_display() {
+        let ft = FieldType::Set(Box::new(FieldType::I64));
+        assert_eq!(format!("{}", ft), "Set<int>");
+
+        let nested = FieldType::Set(Box::new(FieldType::Option(Box::new(FieldType::String))));
+        assert_eq!(format!("{}", nested), "Set<Option<string>>");
+    }
+
+    /// W17.3-4.1 §5.B — `to_native_kind()` refuses HashMap (slot is an
+    /// `Arc<HashMapData>` pointer; per-entry V-kind lives in the typed
+    /// `HashMapKindedRef` carrier at the runtime tier — schema-side
+    /// projection is unsound). Same refusal shape as Any / Option.
+    /// ADR-005 §1 single-discriminator preserved.
+    #[test]
+    fn test_field_type_hashmap_to_native_kind_refuses() {
+        let ft = FieldType::HashMap {
+            key: Box::new(FieldType::String),
+            value: Box::new(FieldType::I64),
+        };
+        assert!(matches!(
+            ft.to_native_kind(),
+            Err(FieldKindError::AnyTypeNotStrictlyTyped)
+        ));
+    }
+
+    /// W17.3-4.1 §5.B — `to_native_kind()` refuses Set (slot is an
+    /// `Arc<HashSetData>` pointer; schema-side projection unsound).
+    /// Mirrors the HashMap refusal.
+    #[test]
+    fn test_field_type_set_to_native_kind_refuses() {
+        let ft = FieldType::Set(Box::new(FieldType::I64));
+        assert!(matches!(
+            ft.to_native_kind(),
+            Err(FieldKindError::AnyTypeNotStrictlyTyped)
+        ));
+    }
+
+    /// W17.3-4.1 §5.B — `is_potentially_callable()` returns true for
+    /// container variants (Array / HashMap / Set / Option / Object /
+    /// Any) since their element types may transitively carry callables.
+    #[test]
+    fn test_field_type_hashmap_set_potentially_callable() {
+        assert!(
+            FieldType::HashMap {
+                key: Box::new(FieldType::String),
+                value: Box::new(FieldType::I64),
+            }
+            .is_potentially_callable()
+        );
+        assert!(FieldType::Set(Box::new(FieldType::I64)).is_potentially_callable());
+        assert!(FieldType::Option(Box::new(FieldType::Bool)).is_potentially_callable());
+        // scalars are not callable
+        assert!(!FieldType::I64.is_potentially_callable());
+        assert!(!FieldType::F64.is_potentially_callable());
+        assert!(!FieldType::Bool.is_potentially_callable());
+        assert!(!FieldType::String.is_potentially_callable());
+    }
+
+    /// W17.3-4.1 §5.B — Serde round-trip preserves the new variants
+    /// (wire/snapshot serialization compatibility close gate).
+    #[test]
+    fn test_field_type_hashmap_serde_round_trip() {
+        let ft = FieldType::HashMap {
+            key: Box::new(FieldType::String),
+            value: Box::new(FieldType::I64),
+        };
+        let json = serde_json::to_string(&ft).expect("serialize HashMap variant");
+        let decoded: FieldType =
+            serde_json::from_str(&json).expect("deserialize HashMap variant");
+        assert_eq!(decoded, ft);
+    }
+
+    /// W17.3-4.1 §5.B — Serde round-trip for Set<T>.
+    #[test]
+    fn test_field_type_set_serde_round_trip() {
+        let ft = FieldType::Set(Box::new(FieldType::I64));
+        let json = serde_json::to_string(&ft).expect("serialize Set variant");
+        let decoded: FieldType = serde_json::from_str(&json).expect("deserialize Set variant");
+        assert_eq!(decoded, ft);
+    }
+
+    /// W17.3-4.1 §5.B — Serde round-trip for all variants exhaustively
+    /// (close-gate per audit §5.B "Serde round-trip: FieldType → JSON
+    /// → FieldType for all 17 variants").
+    #[test]
+    fn test_field_type_serde_round_trip_all_variants() {
+        let variants: Vec<FieldType> = vec![
+            FieldType::F64,
+            FieldType::I64,
+            FieldType::Bool,
+            FieldType::String,
+            FieldType::Timestamp,
+            FieldType::Decimal,
+            FieldType::Any,
+            FieldType::I8,
+            FieldType::U8,
+            FieldType::I16,
+            FieldType::U16,
+            FieldType::I32,
+            FieldType::U32,
+            FieldType::U64,
+            FieldType::Array(Box::new(FieldType::F64)),
+            FieldType::Object("Candle".to_string()),
+            FieldType::Option(Box::new(FieldType::I64)),
+            FieldType::HashMap {
+                key: Box::new(FieldType::String),
+                value: Box::new(FieldType::F64),
+            },
+            FieldType::Set(Box::new(FieldType::Bool)),
+        ];
+
+        for variant in variants {
+            let json =
+                serde_json::to_string(&variant).expect("serialize all-variant round-trip");
+            let decoded: FieldType =
+                serde_json::from_str(&json).expect("deserialize all-variant round-trip");
+            assert_eq!(
+                decoded, variant,
+                "round-trip mismatch for variant {:?}",
+                variant
+            );
+        }
+    }
+
+    /// W17.3-4.1 §5.B — Nested containers preserve element kinds
+    /// across serde round-trip (e.g. `HashMap<string, Set<int>>`).
+    #[test]
+    fn test_field_type_nested_containers_serde_round_trip() {
+        let ft = FieldType::HashMap {
+            key: Box::new(FieldType::String),
+            value: Box::new(FieldType::Set(Box::new(FieldType::I64))),
+        };
+        let json = serde_json::to_string(&ft).expect("serialize nested containers");
+        let decoded: FieldType =
+            serde_json::from_str(&json).expect("deserialize nested containers");
+        assert_eq!(decoded, ft);
+
+        // Set<Option<HashMap<string, bool>>>
+        let ft2 = FieldType::Set(Box::new(FieldType::Option(Box::new(FieldType::HashMap {
+            key: Box::new(FieldType::String),
+            value: Box::new(FieldType::Bool),
+        }))));
+        let json2 = serde_json::to_string(&ft2).expect("serialize deeply-nested");
+        let decoded2: FieldType =
+            serde_json::from_str(&json2).expect("deserialize deeply-nested");
+        assert_eq!(decoded2, ft2);
+    }
+
+    /// W17.3-4.1 §5.B — is_width_integer remains false for the new
+    /// container variants (regression: container variants are NOT
+    /// width-int storage).
+    #[test]
+    fn test_field_type_containers_are_not_width_integers() {
+        assert!(
+            !FieldType::HashMap {
+                key: Box::new(FieldType::I64),
+                value: Box::new(FieldType::I64),
+            }
+            .is_width_integer()
+        );
+        assert!(!FieldType::Set(Box::new(FieldType::I64)).is_width_integer());
     }
 }

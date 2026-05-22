@@ -84,6 +84,18 @@ pub fn field_type_to_tag(ft: &FieldType) -> u16 {
         | FieldType::I32
         | FieldType::U32
         | FieldType::U64 => FIELD_TAG_I64,
+        // W17.3-4.1 — HashMap<K, V> / Set<T> route to FIELD_TAG_ANY at
+        // the slot encoding boundary, preserving pre-W17.3-4 VM
+        // behavior (previously these `TypeAnnotation::Generic` shapes
+        // lowered to `FieldType::Any` via the W17.2-C §4.D.7 narrowed
+        // TRANSITIONAL exception; the schema-side FieldType is now
+        // typed, but slot bits remain an opaque heap pointer until
+        // dedicated FIELD_TAG_HASHMAP / FIELD_TAG_SET runtime
+        // dispatch lands at W17.3-4.3 (per audit §4.B runtime
+        // dispatch + snapshot/wire integration sub-cluster). The
+        // schema-side typing still drives compile-time checking +
+        // serde round-trip per ADR-006 §2.7.5 producer-side stamp.
+        FieldType::HashMap { .. } | FieldType::Set(_) => FIELD_TAG_ANY,
     }
 }
 

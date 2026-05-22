@@ -640,6 +640,36 @@ mod tests {
         assert!(matches!(err, TypeBindingError::TypeMismatch { .. }));
     }
 
+    /// W17.3-4.1 — TypeSchema construction with per-container variants
+    /// (HashMap / Set) produces correctly-aligned 8-byte slots and
+    /// `field_kind()` refuses static projection (matches Option/Any
+    /// refusal shape per ADR-005 §1 single-discriminator + ADR-006
+    /// §2.7.5 producer-side stamp).
+    #[test]
+    fn test_schema_construction_with_hashmap_set_fields() {
+        let schema = TypeSchema::new(
+            "ContainerHolder",
+            vec![
+                (
+                    "by_name".to_string(),
+                    FieldType::HashMap {
+                        key: Box::new(FieldType::String),
+                        value: Box::new(FieldType::I64),
+                    },
+                ),
+                ("tags".to_string(), FieldType::Set(Box::new(FieldType::String))),
+            ],
+        );
+        // Both containers are 8-byte heap pointers; total layout = 16 bytes.
+        assert_eq!(schema.data_size, 16);
+        assert_eq!(schema.field_offset("by_name"), Some(0));
+        assert_eq!(schema.field_offset("tags"), Some(8));
+        // `field_kind()` refuses static projection for both — slot kind
+        // lives in the runtime carrier (HashMapKindedRef / HashSetData).
+        assert_eq!(schema.field_kind(0), None);
+        assert_eq!(schema.field_kind(1), None);
+    }
+
     #[test]
     fn test_bind_compatible_types() {
         use arrow_schema::{Field, Schema as ArrowSchema, TimeUnit};

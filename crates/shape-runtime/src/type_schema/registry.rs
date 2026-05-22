@@ -662,6 +662,38 @@ impl TypeSchemaBuilder {
         self
     }
 
+    /// Add a HashMap<K, V> field. W17.3-4.1 — per audit §4.B builder
+    /// parity with `array_field`. Slot storage points to
+    /// `HeapKind::HashMap`; the schema-side variant carries the static
+    /// K/V FieldTypes for compile-time checking (ADR-006 §2.7.5).
+    pub fn hashmap_field(
+        mut self,
+        name: impl Into<String>,
+        key_type: FieldType,
+        value_type: FieldType,
+    ) -> Self {
+        self.fields.push((
+            name.into(),
+            FieldType::HashMap {
+                key: Box::new(key_type),
+                value: Box::new(value_type),
+            },
+        ));
+        self.field_meta.push(vec![]);
+        self
+    }
+
+    /// Add a Set<T> field. W17.3-4.1 — per audit §4.B builder parity
+    /// with `array_field`. Slot storage points to `HeapKind::HashSet`;
+    /// the schema-side variant carries the static element FieldType
+    /// for compile-time checking (ADR-006 §2.7.5).
+    pub fn set_field(mut self, name: impl Into<String>, element_type: FieldType) -> Self {
+        self.fields
+            .push((name.into(), FieldType::Set(Box::new(element_type))));
+        self.field_meta.push(vec![]);
+        self
+    }
+
     /// Add a dynamic/any field
     pub fn any_field(mut self, name: impl Into<String>) -> Self {
         self.fields.push((name.into(), FieldType::Any));
