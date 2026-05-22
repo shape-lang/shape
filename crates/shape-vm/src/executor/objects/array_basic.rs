@@ -19,18 +19,27 @@
 //! receivers (e.g. a future `HeapValue::TypedArray` re-shape) surfaces via
 //! the residual stubs preserved below.
 //!
-//! ## Cascade migration target (post-ckpt-6 STRICT close)
+//! ## W16.2-J.0 kind-generic mutation + clone + get/set (2026-05-22)
 //!
-//! `reverse`, `push`, `pop`, `zip`, `clone` remain at the V3-S5 ckpt-5
-//! surface — they require mutation primitives and shape-changing carrier
-//! plumbing that the W17 typed-carrier-monomorphization workstream owns.
-//! WS-8 lights up only the read-only header handlers.
+//! `push`, `pop`, `clone`, `get`, `set` are KIND-GENERIC: they delegate
+//! to `v2_array_detect::{push,pop,read,write}_element + clone_array`
+//! primitives over the `V2TypedArrayView` extracted from the receiver
+//! `KindedSlot`. Receiver kind `Ptr(HeapKind::TypedArray)`; element kind
+//! flows through the stamped element-type byte. Per W16.2-J audit §3
+//! REVISED (2026-05-22), this prereq closes the J.1 PHF-deletion cascade
+//! hole for I64/F64 receivers (the per-kind `typed_int_array_methods` /
+//! `typed_number_array_methods` PHF entries fall through to ARRAY_METHODS
+//! after J.1).
+//!
+//! `reverse` + `zip` remain surface-and-stop: no `v2_array_detect::*`
+//! primitive at HEAD covers either operation. J.4-rest / J.5 territory.
 //!
 //! Refusal #1 binding: `TypedArrayData` resurrection under any rename refused
 //! on sight.
 
 use crate::executor::v2_handlers::v2_array_detect::{
-    as_v2_typed_array, read_element, V2TypedArrayView,
+    as_v2_typed_array, clone_array, pop_element, push_element, read_element, write_element,
+    V2TypedArrayView,
 };
 use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
@@ -177,13 +186,23 @@ pub(crate) fn handle_last_v2(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// MethodFnV2 public handlers — residual surface-and-stop stubs
-// (mutation/transform methods on the v2-raw carrier — W17 territory)
+// W16.2-J.0 kind-generic mutation + clone handlers
 // ═══════════════════════════════════════════════════════════════════════════
+//
+// `push`, `pop`, `clone`, `get`, `set` delegate to the kind-generic
+// `v2_array_detect::{push,pop,read,write}_element + clone_array`
+// primitives. The view's `elem_type` (stamped at allocation) drives the
+// per-T mutation inside the primitive.
+//
+// `reverse` + `zip` remain surface-and-stop: no `v2_array_detect::*`
+// primitive at HEAD covers either operation (reverse needs an in-place
+// reorder + clone hybrid; zip needs a result-shape carrier that v2-raw
+// `TypedArray<T>` doesn't yet have). These are J.4-rest / J.5 territory
+// per W16.2-J audit §3 REVISED. Refusal #1 binding: surface-and-stop
+// disallows fabricating a primitive on-the-fly.
 
-/// `arr.reverse()` — produce a reversed array. The v2-raw `TypedArray<T>`
-/// rebuild is W17 territory (allocation-shape changes per element kind);
-/// users can compose `for` + index access today.
+/// `arr.reverse()` — produce a reversed array. No `v2_array_detect`
+/// reverse primitive at HEAD; surfaces W17/J.4-rest territory.
 pub(crate) fn handle_reverse_v2(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
@@ -192,27 +211,60 @@ pub(crate) fn handle_reverse_v2(
     Err(ckpt5_surface("reverse", args))
 }
 
-/// `arr.push(elem)` — append element. Mutation primitive on the v2-raw
-/// carrier — W17 territory.
+/// `arr.push(elem)` — append element, return the new length. Kind-generic
+/// via `v2_array_detect::push_element`.
 pub(crate) fn handle_push_v2(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(ckpt5_surface("push", args))
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "Array.push expects 1 argument".into(),
+        ));
+    }
+    let view = extract_typed_array_view(&args[0]).ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "Array.push: expected v2 TypedArray receiver, got kind {:?}",
+            args[0].kind
+        ))
+    })?;
+    let bits = args[1].slot.raw();
+    let kind = args[1].kind;
+    push_element(&view, bits, kind)
+        .map_err(|e| VMError::RuntimeError(format!("Array.push: {}", e)))?;
+    // Re-read the header for the post-push element count.
+    let post = extract_typed_array_view(&args[0]).ok_or_else(|| {
+        VMError::RuntimeError(
+            "Array.push: receiver re-detection failed after push".into(),
+        )
+    })?;
+    Ok(KindedSlot::from_int(post.len as i64))
 }
 
-/// `arr.pop()` — remove and return last element. Mutation primitive on the
-/// v2-raw carrier — W17 territory.
+/// `arr.pop()` — remove and return the last element, or the null sentinel
+/// if empty. Kind-generic via `v2_array_detect::pop_element`; result kind
+/// is the per-element kind from the view (`Int64`/`Float64`/etc.).
 pub(crate) fn handle_pop_v2(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(ckpt5_surface("pop", args))
+    let view = extract_typed_array_view(&args[0]).ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "Array.pop: expected v2 TypedArray receiver, got kind {:?}",
+            args[0].kind
+        ))
+    })?;
+    match pop_element(&view) {
+        Some(pair) => Ok(pair_to_slot(pair)),
+        None => Ok(KindedSlot::none()),
+    }
 }
 
-/// `arr.zip(other)` — pairwise element zip.
+/// `arr.zip(other)` — pairwise element zip. No `v2_array_detect` zip
+/// primitive at HEAD (zip output is a tuple-element carrier; v2-raw
+/// `TypedArray<T>` doesn't model tuples). J.4-rest territory.
 pub(crate) fn handle_zip_v2(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
@@ -221,13 +273,106 @@ pub(crate) fn handle_zip_v2(
     Err(ckpt5_surface("zip", args))
 }
 
-/// `arr.clone()` — deep-clone the receiver array.
+/// `arr.clone()` — deep-clone the receiver array. Kind-generic via
+/// `v2_array_detect::clone_array`; returns a fresh
+/// `Ptr(HeapKind::TypedArray)` slot pointing at the new allocation with
+/// the same stamped element-type byte.
 pub(crate) fn handle_clone_v2(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(ckpt5_surface("clone", args))
+    let view = extract_typed_array_view(&args[0]).ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "Array.clone: expected v2 TypedArray receiver, got kind {:?}",
+            args[0].kind
+        ))
+    })?;
+    let new_ptr = clone_array(&view);
+    Ok(KindedSlot::new(
+        ValueSlot::from_u64(new_ptr as usize as u64),
+        NativeKind::Ptr(HeapKind::TypedArray),
+    ))
+}
+
+/// `arr.get(i)` — element at index `i`, error if out of bounds.
+/// Kind-generic via `v2_array_detect::read_element`; result kind is the
+/// per-element kind from the view.
+pub(crate) fn handle_get_v2(
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "Array.get expects 1 argument".into(),
+        ));
+    }
+    let view = extract_typed_array_view(&args[0]).ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "Array.get: expected v2 TypedArray receiver, got kind {:?}",
+            args[0].kind
+        ))
+    })?;
+    let idx = args[1].as_i64().ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "Array.get: index must be an integer, got kind {:?}",
+            args[1].kind
+        ))
+    })?;
+    if idx < 0 || (idx as u32) >= view.len {
+        return Err(VMError::RuntimeError(format!(
+            "Array.get: index {} out of bounds (len={})",
+            idx, view.len
+        )));
+    }
+    match read_element(&view, idx as u32) {
+        Some(pair) => Ok(pair_to_slot(pair)),
+        None => Err(VMError::RuntimeError(
+            "Array.get: read_element returned None".into(),
+        )),
+    }
+}
+
+/// `arr.set(i, x)` — set element at index, return the receiver pointer
+/// for chained calls. Kind-generic via `v2_array_detect::write_element`.
+pub(crate) fn handle_set_v2(
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    if args.len() < 3 {
+        return Err(VMError::RuntimeError(
+            "Array.set expects 2 arguments".into(),
+        ));
+    }
+    let view = extract_typed_array_view(&args[0]).ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "Array.set: expected v2 TypedArray receiver, got kind {:?}",
+            args[0].kind
+        ))
+    })?;
+    let idx = args[1].as_i64().ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "Array.set: index must be an integer, got kind {:?}",
+            args[1].kind
+        ))
+    })?;
+    if idx < 0 || (idx as u32) >= view.len {
+        return Err(VMError::RuntimeError(format!(
+            "Array.set: index {} out of bounds (len={})",
+            idx, view.len
+        )));
+    }
+    let bits = args[2].slot.raw();
+    let kind = args[2].kind;
+    write_element(&view, idx as u32, bits, kind)
+        .map_err(|e| VMError::RuntimeError(format!("Array.set: {}", e)))?;
+    // Return the receiver pointer carrier for chained calls.
+    Ok(KindedSlot::new(
+        ValueSlot::from_u64(view.ptr as usize as u64),
+        NativeKind::Ptr(HeapKind::TypedArray),
+    ))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

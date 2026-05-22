@@ -285,6 +285,14 @@ pub static ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "push" => crate::executor::objects::array_basic::handle_push_v2,
     "pop" => crate::executor::objects::array_basic::handle_pop_v2,
     "zip" => crate::executor::objects::array_basic::handle_zip_v2,
+    // W16.2-J.0 (2026-05-22): `get` / `set` are kind-generic handlers
+    // delegating to `v2_array_detect::read_element` / `write_element`.
+    // Pre-W16.2-J.0 their only host was the per-kind PHF registries
+    // (TYPED_INT_ARRAY_METHODS / TYPED_NUMBER_ARRAY_METHODS), which W16.2-J.1
+    // deletes — without these entries the methods would have no fall-
+    // through target post-deletion.
+    "get" => crate::executor::objects::array_basic::handle_get_v2,
+    "set" => crate::executor::objects::array_basic::handle_set_v2,
     "slice" => crate::executor::objects::array_transform::handle_slice_v2,
     "concat" => crate::executor::objects::array_transform::handle_concat_v2,
     "take" => crate::executor::objects::array_transform::handle_take_v2,

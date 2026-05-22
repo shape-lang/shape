@@ -2,94 +2,67 @@
 //!
 //! Handles: sum, avg, min, max, count, reduce
 //!
-//! ## V3-S5 ckpt-2 consumer-cascade surface (2026-05-15)
+//! ## W16.2-J.0 kind-generic v2_array_detect migration (2026-05-22)
 //!
-//! Per V3-S5 ckpt-1 close (commit `aac8495e`, 2026-05-15), the
-//! `TypedArrayData` enum + impl blocks + `Display for TypedArrayData` +
-//! `typed_array_structural_eq` fn were DELETED at
-//! `crates/shape-value/src/heap_value.rs` per W12-typed-array-data-deletion
-//! audit §3.5 + ADR-006 §2.7.24 Q25.A SUPERSEDED. This file's previous
-//! consumer-shape — `Arc<TypedArrayData>` receiver recovery via
-//! `with_typed_array` + per-variant numeric-domain dispatch via
-//! `variant_numeric_domain` + `fold_int` / `fold_float` over
-//! `TypedArrayData::I8 / I16 / I32 / I64 / U8 / U16 / U32 / U64 / Bool /
-//! F32 / F64 / String / Decimal / BigInt / Char / TypedObject` arms — cascade-
-//! breaks here as the deletion's consumer cascade tier 1.
+//! Per `docs/cluster-audits/v0.3-w16-2-j-audit.md` §3 REVISED sequencing
+//! (2026-05-22, W16.2-J.0 surface-and-stop prereq to W16.2-J.1 PHF
+//! deletion), the public handler bodies in this file delegate to the
+//! kind-generic `v2_array_detect::{sum,avg,min,max}_elements` primitives
+//! over a `V2TypedArrayView` extracted from the receiver `KindedSlot`.
+//! Receiver kind is `NativeKind::Ptr(HeapKind::TypedArray)` per
+//! r5c-2-β-CKPT-C u64-carrier-disambiguation; the view's `elem_type`
+//! field (stamped at allocation by `stamp_elem_type`) drives the per-T
+//! reduction inside `v2_array_detect`.
 //!
-//! Public handler bodies (`handle_sum_v2 / avg / min / max / count /
-//! reduce`) are replaced with structured surface-and-stop returning
-//! `VMError::NotImplemented`. Local helpers (`with_typed_array /
-//! typed_array_len / variant_numeric_domain / fold_int / fold_float /
-//! element_kinded`) are DELETED — every one took `&TypedArrayData` /
-//! produced `Result<R, VMError>` ranging over per-variant arms; with the
-//! type gone they cannot exist.
+//! `count`/`reduce` invoke a user closure per element via
+//! `vm.call_value_immediate_nb` (ADR-006 §2.7.11 / Q12) — kind-generic
+//! over the element kind exposed by `read_element`.
 //!
-//! `slot_truthy` is preserved (no `TypedArrayData` dependency — operates
-//! on raw bits + `NativeKind`).
+//! No Bool-default for unknown element kinds (forbidden per ADR-006
+//! §2.7.14): non-numeric element kinds surface a structured
+//! `RuntimeError` from the primitive's `None` return.
 //!
-//! ## Cascade migration target (post-ckpt-6 STRICT close)
-//!
-//! Per W12-typed-array-data-deletion audit §A.3 + §2.1 scalar recipe +
-//! §2.2 heap-element variants, every previous `TypedArrayData::X(buf)`
-//! match arm in this file's numeric folds migrates to the v2-raw
-//! `TypedArray<T>` flat-struct carrier with per-T `as_slice()` access.
-//! Closure-callback dispatch (`count(predicate)` arity-1, `reduce`/`fold`)
-//! re-instates via `vm.call_value_immediate_nb` once the receiver-shape
-//! migration lands (the closure-callback ABI itself stays — ADR-006
-//! §2.7.11 / Q12 is unaffected by the TypedArrayData deletion).
-//!
-//! Bodies REFUSED ON SIGHT under Refusal #1 (resurrection under rename
-//! per ckpt-1 close-marker at `heap_value.rs:3956`).
+//! `slot_truthy` is the truthiness helper used by `count(predicate)` to
+//! interpret a non-Bool closure return — same shape as `kinded_truthy` in
+//! `executor/logical/mod.rs:43`.
 
-use shape_runtime::context::ExecutionContext;
+use crate::executor::v2_handlers::v2_array_detect::{
+    as_v2_typed_array, read_element, V2TypedArrayView,
+};
 use crate::executor::VirtualMachine;
-use shape_value::{KindedSlot, NativeKind, VMError};
+use shape_runtime::context::ExecutionContext;
+use shape_value::{HeapKind, KindedSlot, NativeKind, ValueSlot, VMError};
 
 // ═══════════════════════════════════════════════════════════════════════════
-// V3-S5 ckpt-2 surface-and-stop builder
+// W16.2-J.0 kind-generic header-view helpers
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Common surface-and-stop body for every public handler in this file.
-///
-/// Returns a structured `VMError::NotImplemented` citing the V3-S5 ckpt-2
-/// cascade-broken state: the previous per-`TypedArrayData::X` variant
-/// numeric-domain dispatch path is gone (ckpt-1 deleted the enum); the
-/// v2-raw `TypedArray<T>` flat-struct consumer cascade lands across
-/// ckpt-3 / 4 / 5 per W12-typed-array-data-deletion audit §A.3
-/// per-variant migration disposition.
-#[cold]
-#[inline(never)]
-fn ckpt2_surface(op: &'static str, args: &[KindedSlot]) -> VMError {
-    let receiver_kind = if args.is_empty() {
-        "<no args>".to_string()
-    } else {
-        format!("{:?}", args[0].kind)
-    };
-    VMError::NotImplemented(format!(
-        "{op}: SURFACE — V3-S5 ckpt-2 consumer-cascade tier 1 surface. \
-         `TypedArrayData` enum DELETED at ckpt-1 (2026-05-15) per W12-\
-         typed-array-data-deletion audit §3.5 + ADR-006 §2.7.24 Q25.A \
-         SUPERSEDED. The previous `Arc<TypedArrayData>` receiver-recovery \
-         (`with_typed_array`) + per-variant `fold_int / fold_float` \
-         numeric-domain dispatch path (~65 references across 6 public \
-         handlers in this file) cascade-broke at the enum deletion site \
-         (`crates/shape-value/src/heap_value.rs:3944`). Post-deletion \
-         target is the v2-raw `TypedArray<T>` flat-struct carrier per \
-         audit §1.2 + §A.3 + §3.1 scalar recipe; per-T monomorphization \
-         landing across ckpt-3 (array_ops/typed_array_methods/\
-         iterator_methods/array_sort/concat/property_access) + ckpt-4 \
-         (Buf<T> / HeapValue::TypedArray arm / \
-         HeapKind::TypedArray ordinal) + ckpt-5 (wire/json/marshal + \
-         4-table lockstep) + ckpt-6 (JIT FFI). Closure-callback ABI \
-         (ADR-006 §2.7.11 / Q12 `vm.call_value_immediate_nb` for \
-         `count(predicate)` arity-1 + `reduce`/`fold`) is unaffected \
-         and re-instates once receiver-shape migration lands. Receiver \
-         kind: {kind}. UNREACHABLE until ckpt-6 STRICT close. REFUSED \
-         ON SIGHT: TypedArrayData resurrection under any rename \
-         (Refusal #1, W12 audit §7).",
-        op = op,
-        kind = receiver_kind,
-    ))
+/// Extract the kind-generic `V2TypedArrayView` from the receiver
+/// `KindedSlot`. Receiver kind must be `Ptr(HeapKind::TypedArray)`
+/// (r5c-2-β-CKPT-C single carrier).
+#[inline]
+fn extract_view(op: &'static str, slot: &KindedSlot) -> Result<V2TypedArrayView, VMError> {
+    if slot.kind != NativeKind::Ptr(HeapKind::TypedArray) {
+        return Err(VMError::RuntimeError(format!(
+            "Array.{op}: expected v2 TypedArray receiver, got kind {:?}",
+            slot.kind
+        )));
+    }
+    as_v2_typed_array(slot.slot.raw(), slot.kind).ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "Array.{op}: receiver bits failed v2 TypedArray detection (kind {:?})",
+            slot.kind
+        ))
+    })
+}
+
+/// Lift a `(u64, NativeKind)` pair (the kinded helper return shape from
+/// `v2_array_detect::{sum,avg,min,max,read}_element(s)`) into a
+/// `KindedSlot` carrier. Matches the shape used in
+/// `typed_int_array_methods::pair_to_slot`.
+#[inline]
+fn pair_to_slot((bits, kind): (u64, NativeKind)) -> KindedSlot {
+    KindedSlot::new(ValueSlot::from_raw(bits), kind)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -99,11 +72,8 @@ fn ckpt2_surface(op: &'static str, args: &[KindedSlot]) -> VMError {
 /// Test a `KindedSlot` for truthiness — Bool/numeric arms read bits,
 /// heap arms are non-null → truthy. Mirrors the `kinded_truthy` helper in
 /// `executor/logical/mod.rs:43` (private there). Used by `count(predicate)`
-/// post-ckpt-6 when closure-callback aggregation re-instates against the
-/// v2-raw `TypedArray<T>` receiver-shape; preserved through V3-S5 ckpt-2
-/// because it has no `TypedArrayData` dependency.
+/// to interpret a non-Bool closure return.
 #[inline]
-#[allow(dead_code)]
 fn slot_truthy(slot: &KindedSlot) -> bool {
     let bits = slot.slot.raw();
     match slot.kind {
@@ -142,60 +112,155 @@ fn slot_truthy(slot: &KindedSlot) -> bool {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// MethodFnV2 (native ABI) public handlers — ckpt-2 surface-and-stop stubs
-// Signatures preserved for `method_registry.rs` PHF integrity.
+// MethodFnV2 (native ABI) public handlers — kind-generic v2_array_detect bodies
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// `arr.sum()` — fold the array via numeric addition.
+/// `arr.sum()` — fold the array via numeric addition. Result kind matches
+/// the element-family domain: `Float64` for F64 receivers, `Int64` for
+/// integer-family receivers. Non-numeric element kinds surface a structured
+/// `RuntimeError` (no Bool-default per ADR-006 §2.7.14).
 pub(crate) fn handle_sum_v2(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(ckpt2_surface("sum", args))
+    let view = extract_view("sum", &args[0])?;
+    match crate::executor::v2_handlers::v2_array_detect::sum_elements(&view) {
+        Some(pair) => Ok(pair_to_slot(pair)),
+        None => Err(VMError::RuntimeError(format!(
+            "Array.sum: not defined for element kind {:?}",
+            view.elem_type
+        ))),
+    }
 }
 
-/// `arr.avg()` — arithmetic mean as Float64.
+/// `arr.avg()` / `arr.mean()` — arithmetic mean as `Float64`. Empty
+/// numeric arrays return NaN per `v2_array_detect::avg_elements` contract.
 pub(crate) fn handle_avg_v2(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(ckpt2_surface("avg", args))
+    let view = extract_view("avg", &args[0])?;
+    match crate::executor::v2_handlers::v2_array_detect::avg_elements(&view) {
+        Some(pair) => Ok(pair_to_slot(pair)),
+        None => Err(VMError::RuntimeError(format!(
+            "Array.avg: not defined for element kind {:?}",
+            view.elem_type
+        ))),
+    }
 }
 
-/// `arr.min()` — minimum element.
+/// `arr.min()` — minimum element. Empty integer arrays push the
+/// `(0u64, Bool)` null sentinel; empty float arrays push NaN.
 pub(crate) fn handle_min_v2(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(ckpt2_surface("min", args))
+    let view = extract_view("min", &args[0])?;
+    match crate::executor::v2_handlers::v2_array_detect::min_elements(&view) {
+        Some(pair) => Ok(pair_to_slot(pair)),
+        None => Err(VMError::RuntimeError(format!(
+            "Array.min: not defined for element kind {:?}",
+            view.elem_type
+        ))),
+    }
 }
 
-/// `arr.max()` — maximum element.
+/// `arr.max()` — maximum element. Empty-array contract mirrors
+/// [`handle_min_v2`].
 pub(crate) fn handle_max_v2(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(ckpt2_surface("max", args))
+    let view = extract_view("max", &args[0])?;
+    match crate::executor::v2_handlers::v2_array_detect::max_elements(&view) {
+        Some(pair) => Ok(pair_to_slot(pair)),
+        None => Err(VMError::RuntimeError(format!(
+            "Array.max: not defined for element kind {:?}",
+            view.elem_type
+        ))),
+    }
 }
 
-/// `arr.count()` / `arr.count(predicate)`.
+/// `arr.count()` / `arr.count(predicate)`. The arity-0 form returns the
+/// header `.len` field as `Int64`; the arity-1 form runs the predicate
+/// closure per element and counts truthy returns. Closure callback uses
+/// `vm.call_value_immediate_nb` per ADR-006 §2.7.11 / Q12; element kinds
+/// flow through `read_element` (kind-generic over `V2ElemType`).
 pub(crate) fn handle_count_v2(
-    _vm: &mut VirtualMachine,
+    vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(ckpt2_surface("count", args))
+    let view = extract_view("count", &args[0])?;
+    if args.len() < 2 {
+        // Arity-0: total element count.
+        return Ok(KindedSlot::from_int(view.len as i64));
+    }
+    // Arity-1: closure predicate.
+    let closure = &args[1];
+    if closure.kind != NativeKind::Ptr(HeapKind::Closure) {
+        return Err(VMError::RuntimeError(format!(
+            "Array.count: predicate must be a closure, got kind {:?}",
+            closure.kind
+        )));
+    }
+    let mut count: i64 = 0;
+    for i in 0..view.len {
+        let (bits, kind) = read_element(&view, i).ok_or_else(|| {
+            VMError::RuntimeError(format!(
+                "Array.count: read_element({i}) returned None for element kind {:?}",
+                view.elem_type
+            ))
+        })?;
+        let elem_slot = KindedSlot::new(ValueSlot::from_raw(bits), kind);
+        let result = vm.call_value_immediate_nb(closure, &[elem_slot], ctx.as_deref_mut())?;
+        if slot_truthy(&result) {
+            count += 1;
+        }
+    }
+    Ok(KindedSlot::from_int(count))
 }
 
-/// `arr.reduce(init, |acc, x| ...)` / `arr.fold(init, |acc, x| ...)`.
+/// `arr.reduce(|acc, x| ..., init)` / `arr.fold(|acc, x| ..., init)`.
+///
+/// Walks the receiver in index order, invoking the closure on
+/// `(acc, elem)` for each element and threading the return into the next
+/// iteration. Closure-callback ABI per ADR-006 §2.7.11 / Q12; element
+/// kinds flow through `read_element` (kind-generic over `V2ElemType`).
+/// Final accumulator is returned as-is. Argument order matches the
+/// user-facing call shape `arr.reduce(closure, init)`.
 pub(crate) fn handle_reduce_v2(
-    _vm: &mut VirtualMachine,
+    vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(ckpt2_surface("reduce", args))
+    if args.len() < 3 {
+        return Err(VMError::RuntimeError(
+            "Array.reduce expects 2 arguments: (fn, init)".into(),
+        ));
+    }
+    let view = extract_view("reduce", &args[0])?;
+    let closure = &args[1];
+    if closure.kind != NativeKind::Ptr(HeapKind::Closure) {
+        return Err(VMError::RuntimeError(format!(
+            "Array.reduce: first argument must be a closure, got kind {:?}",
+            closure.kind
+        )));
+    }
+    let mut acc = args[2].clone();
+    for i in 0..view.len {
+        let (bits, kind) = read_element(&view, i).ok_or_else(|| {
+            VMError::RuntimeError(format!(
+                "Array.reduce: read_element({i}) returned None for element kind {:?}",
+                view.elem_type
+            ))
+        })?;
+        let elem_slot = KindedSlot::new(ValueSlot::from_raw(bits), kind);
+        acc = vm.call_value_immediate_nb(closure, &[acc, elem_slot], ctx.as_deref_mut())?;
+    }
+    Ok(acc)
 }
