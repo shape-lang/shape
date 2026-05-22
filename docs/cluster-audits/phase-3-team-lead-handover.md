@@ -16,11 +16,11 @@ tags and language semantics. The user relays between team-lead and supervisor.
 
 | | |
 |---|---|
-| Main HEAD | `43d3f86c` (post 4-audit-day landing + same-day dialogue refresh) |
-| Smoke matrix s1–s5 | **5/5 VM == JIT** (canonical (ii) F' release-binary harness; re-verified 2026-05-22 post-refresh) |
+| Main HEAD | `4b6d6833` (W17.3-4.1 merged + audit corrections landed) |
+| Smoke matrix s1–s5 | **5/5 VM == JIT** (canonical (ii) F' release-binary harness; re-verified post-merge 2026-05-22) |
 | verify-merge / check-no-dynamic | 13/13 / exit 0 |
 | Round-6+ no-known-incorrectness set | **EMPTY** per user 2026-05-20 binding |
-| 2026-05-22 expanded-scope gating set | **OPEN** — audits CLOSED for A/B/C/D; first-wave fix dispatch in flight (W16.2-J.1 + W17.3-4.1 + D-δ); E (W18) audit-first PENDING next round; F (Len trait + membership) PENDING dispatch alongside W18; doc-truth round G.1/G.2 gated on A–F |
+| 2026-05-22 expanded-scope gating set | **OPEN.** Audits CLOSED A/B/C/D. **W17.3-4.1 MERGED** (criterion B partial close, 1 of 3). W16.2-J.1 surface-and-stopped — audit §3 sequencing corrected (NEW J.0 prereq); slate 5→6 sub-clusters; effort 24–37h→30–47h. D-δ in flight. E (W18) + J (comptime trait) audit-first next round. F (Len + membership + KC #2 deletion) PENDING dispatch alongside W18. G.1/G.2 doc-truth gated on A–F+J. |
 | v0.3.0 tag | NOT landed — gated on expanded-scope work + user authorization |
 
 ## 2026-05-22 expanded scope (binding — user, dialogue-supplemented same day)
@@ -34,13 +34,14 @@ Full criteria + dispositions: `docs/v0.3-close-summary.md` §0.A.
 | Crit | Workstream | Audit shape | Status at HEAD `43d3f86c` |
 |---|---|---|---|
 | A | **W16.2-J PHF-retirement** (architectural) | AUDIT-CLOSED | 5 sub-clusters (J.1–J.5); 24–37h; ADR-006 §2.7.24 amendment likely needed. **J.1 dispatched first-wave 2026-05-22.** |
-| B | **W17.3-4 per-container `FieldType`** | AUDIT-CLOSED | 3 sub-clusters (.1–.3); 18–24h; no ADR amendment. Supervisor SURFACE: HeapKind::Set ordinal. **W17.3-4.1 dispatched first-wave 2026-05-22.** |
-| C | **Phase-2c host-tier marshal/snapshot rebuild** (ADR-006 §2.7.4) | AUDIT-CLOSED | 8 sub-clusters; 70–90h serial / 25–30h parallel. **4 supervisor architectural under-specs surfaced.** Fix-dispatch pending supervisor disposition. |
-| D | **6 Known Constraints** | AUDIT-CLOSED | 4 v0.3-gating (D-α/β/γ/δ); 8–17h. **D-δ dispatched first-wave 2026-05-22.** KC #5 → DROP test (user decided). KC #2 PENDING user. |
+| B | **W17.3-4 per-container `FieldType`** | AUDIT-CLOSED | 3 sub-clusters (.1–.3); 18–24h; no ADR amendment. **W17.3-4.1 MERGED `4b6d6833` 2026-05-22.** HeapKind::Set ordinal SURFACE retired empirically (HeapKind::HashMap ord 17 + HeapKind::HashSet ord 21 already exist; 4-table lockstep intact). .2 + .3 queued. |
+| C | **Phase-2c host-tier marshal/snapshot rebuild** (ADR-006 §2.7.4) | AUDIT-CLOSED | 8 sub-clusters; 70–90h serial / 25–30h parallel. **4 supervisor architectural rulings:** 4 RULED, 2 direction-ruled-with-text-pending (per user 2026-05-22). Fix-dispatch unblocked. |
+| D | **6 Known Constraints** | AUDIT-CLOSED | 4 v0.3-gating (D-α/β/γ/δ); 8–17h. **D-δ dispatched first-wave 2026-05-22.** KC #5 → DROP test (user); KC #2 → RESOLVE BY DELETION (user: delete `format_*` prefix globals; keep bare `format()` + `DateTime.format()`; no backwards-compat shim). KC #2 absorbed into F. |
 | E | **W18 content-rendering kind-threaded rebuild** (NEW 2026-05-22 — v0.3-gating regression) | AUDIT-FIRST mandatory; NEXT audit round | Phase 2b deleted ~600 LoC dispatch chain; user-value → ContentNode rebuild missing. Symptoms: enum Display leaks `{__variant:N,__payload_0:...}`. ~2–4 sessions. |
-| F | **Len trait + membership-naming standardization** (NEW 2026-05-22) | Direct dispatch (close-coupled w/ W18) | New `trait Len { method len() -> int; method isEmpty() -> bool }`; rename `Set.size() → Set.len()`; standardize `.includes(x)` / `.some(\|x\| pred)`; reject `.contains()`. ~1 session. |
-| G.1 | **Doc-truth Step 1** (DOC↔CODE reconciliation) | Parallel slice agents per book chapter | GATED on A–F close + main stable |
+| F | **Len trait + membership-naming standardization + KC #2 format-deletion** (NEW 2026-05-22; KC #2 folded) | Direct dispatch (close-coupled w/ W18) | New `trait Len { method len() -> int; method isEmpty() -> bool }`; rename `Set.size() → Set.len()`; standardize `.includes(x)` / `.some(\|x\| pred)`; reject `.contains()`; delete `format_*` prefix globals (KC #2). ~1 session. |
+| G.1 | **Doc-truth Step 1** (DOC↔CODE reconciliation) | Parallel slice agents per book chapter | GATED on A–F + J close + main stable |
 | G.2 | **Doc-truth Step 2** (USER-followable validation) | Same partition, on updated docs | GATED on Step 1 fully merging |
+| J | **Comptime trait primitive** (NEW 2026-05-22 — user YES) | Audit-first short pass; direct dispatch | `comptime trait` + `comptime impl Trait for Type` parser + type-checker + comptime-evaluator dispatch. **Scope DISCIPLINE = JUST the primitive + dispatch + error.** NO const-fn markers / compile-time-generics / other comptime sprawl (v0.4). Refusal #10 family applies if scope creeps. ~1–2 sessions. |
 
 **Classification rule for doc-truth (G.1 + G.2):**
 - (a) doc aspirational/wrong, code right → fix doc in place
@@ -50,15 +51,17 @@ Full criteria + dispositions: `docs/v0.3-close-summary.md` §0.A.
 **Eq/Display struct-semantic clarifications** fold into G.1 (a)/(b)/(c)
 classification per the standard rule.
 
-## Pending user-decision items
+## User decisions — all landed (2026-05-22)
 
-- **KC #2 `format()` shadowing** — supervisor rec: rename globals to
-  `format_pct/format_num/format_string`. User not yet ruled; carry to
-  next relay.
-- **Comptime trait primitive (yes/no)** — surfaced 2026-05-22; if yes,
-  ~1–2 sessions for parser + type-checker + comptime-evaluator dispatch;
-  scope-discipline = JUST the primitive, no const-fn-markers /
-  compile-time-generics sprawl.
+- KC #5 `object_len_function` → **DROP test.**
+- KC #2 `format()` shadowing → **RESOLVE BY DELETION** (delete `format_*`
+  prefix globals; keep bare `format()` + `DateTime.format()`; no
+  backwards-compat shim). Folded into criterion F.
+- Comptime trait primitive → **YES** (criterion J added). Scope discipline:
+  JUST primitive + dispatch + error. Refusal #10 if scope creeps.
+- Send/Sync → **v0.4** (design-question, not feature-gap).
+
+**No user decisions outstanding from the 2026-05-22 dialogue.**
 
 ## Send/Sync — CONFIRMED v0.4 (2026-05-22)
 
@@ -172,10 +175,11 @@ F' release-binary harness) · AGENTS.md row; no Co-Authored-By trailer.
 
 ---
 
-*Round-6+ CLOSED; audit-day landing for A/B/C/D landed 2026-05-22 at
-commit `43d3f86c`. First-wave fix dispatch (W16.2-J.1 + W17.3-4.1 + D-δ)
-in flight. E (W18 content-rendering rebuild) + F (Len trait + membership-
-naming) added same day per user dialogue. Next: settle the supervisor
-architectural surfaces (4 phase-2c under-specs; W17.3-4 HeapKind::Set
-ordinal; W16.2-J ADR amendment text) + the 2 user-decision items (KC #2;
-comptime trait primitive); land second-wave fix dispatch.*
+*Round-6+ CLOSED. 4-audit-day landing 2026-05-22; first-wave fix dispatch
+2026-05-22 (W17.3-4.1 MERGED `4b6d6833`; W16.2-J.1 surface-and-stopped +
+audit §3 corrected; D-δ in flight). All 2026-05-22 user-dialogue
+decisions LANDED (KC #5 drop; KC #2 deletion; comptime trait YES; Send/Sync
+v0.4). 4 supervisor architectural rulings ruled. Next: D-δ close +
+second-wave fix dispatch (W16.2-J.0 prereq; W17.3-4.2; D-α audit-first;
+D-β; D-γ); E (W18) + J (comptime trait) audit-first; F (Len + membership
++ KC #2 deletion) dispatch alongside W18.*
