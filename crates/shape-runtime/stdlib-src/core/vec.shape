@@ -100,10 +100,18 @@ extend Vec<T> {
         result
     }
 
-    method slice(start: int, end: int) -> Vec<T> {
+    /// Returns elements from `start` (inclusive) up to `end` (exclusive).
+    /// When `end` is omitted (or negative) the slice runs to `self.len()`,
+    /// matching the standard `arr.slice(start)` short form.
+    /// D-δ array_slice single-arg close: a `-1` sentinel default lets the
+    /// UFCS call site supply the suffix-from-`start` semantics without the
+    /// caller having to spell out `self.len()`. See
+    /// `v0.3-known-constraints-audit` §6(f) Repro 1.
+    method slice(start: int, end: int = -1) -> Vec<T> {
+        let actual_end = if end < 0 { self.len() } else { end }
         let mut result = []
         let mut i = start
-        while i < end && i < self.len() {
+        while i < actual_end && i < self.len() {
             result.push(self[i])
             i = i + 1
         }
