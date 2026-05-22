@@ -2501,7 +2501,28 @@ impl BytecodeCompiler {
             ));
             self.last_expr_schema = None;
             self.last_expr_numeric_type = None;
-            self.last_expr_type_info = None;
+            // D-β string-join receiver-kind fix (v0.3 KC #6(d), 2026-05-22):
+            // `.toString()` / `.to_string()` always returns a `string`. The
+            // pre-fix code cleared `last_expr_type_info` to None, which made
+            // downstream string-Add operations infer the RHS as `unknown` and
+            // surface "Cannot infer types for binary operation `Add`: operand
+            // types are `string` and `unknown`". The cascade hit
+            // monomorphizing `Vec.join`'s body (`result + self[i].toString()`)
+            // for any element kind, which raised the compile error inside
+            // `ensure_monomorphic_function`. The unrestored
+            // `current_blob_builder` (the `?`-early-exit between take and
+            // restore in `compile_function_body`) then leaked Vec.join's
+            // builder into `build_content_addressed_program`, which finalized
+            // it as the `__main__` blob (arity=0 synthetic). The `__main__`
+            // blob disappeared, the linker entry pointed to Vec.join's body,
+            // execution started inside Vec.join with self/separator slots
+            // uninitialized (Bool sentinel) → "no method 'len' on receiver
+            // kind Bool". Per ADR-006 §2.7.5 stamp-at-compile-time, the
+            // producer-site IS the `toString` builtin — its return kind is
+            // statically known. No fabrication, no Bool-default.
+            self.last_expr_type_info = Some(
+                crate::type_tracking::VariableTypeInfo::named("string".to_string()),
+            );
             self.clear_last_expr_reference_result();
             return Ok(());
         }

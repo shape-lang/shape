@@ -1431,6 +1431,30 @@ impl BytecodeCompiler {
             }
         }
 
+        // D-β string-join receiver-kind fix (v0.3 KC #6(d), 2026-05-22):
+        // `.toString()` / `.to_string()` always returns `string` (universal
+        // method per `MethodTable::register_builtin_methods`). The runtime
+        // inference engine's `Expr::MethodCall` arm falls through to the
+        // method registry on `extract_receiver_info` `None` (Type::Variable
+        // receivers e.g. `self[i]` on `Vec<T>` where the index access pushes
+        // an `Indexable` constraint and returns a fresh type-var); the
+        // sibling fix at `MethodTable::resolve_method_call` handles that
+        // path, but `BytecodeCompiler::infer_expr_type` is called by the
+        // strict-typing binop emitter at `binary_ops.rs:166-173` with a
+        // `compiler.infer_expr_type` shape that does NOT go through the
+        // `TypeInferenceEngine.infer_expr` constraint solver until the
+        // fallback at line ~1570 below — and the toString MethodCall here
+        // can short-circuit cleanly without needing the full engine. Per
+        // ADR-006 §2.7.5 stamp-at-compile-time: the universal method's
+        // return type is statically known at registration.
+        if let Expr::MethodCall { method, .. } = expr {
+            if method == "to_string" || method == "toString" {
+                return Ok(shape_runtime::type_system::Type::Concrete(
+                    TypeAnnotation::Basic("string".to_string()),
+                ));
+            }
+        }
+
         // Sweep phase 3c.x: callable-array-element invocation. The parser
         // models `arr[i](args...)` as
         // `MethodCall { method: "__call__", receiver: IndexAccess { object: Identifier(arr), .. }, .. }`.

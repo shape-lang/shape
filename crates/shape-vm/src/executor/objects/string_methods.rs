@@ -65,9 +65,10 @@ fn ckpt5_string_array_surface(op: &'static str) -> VMError {
 }
 
 /// Read the receiver `&str` from `args[0]`. The dispatcher contract
-/// guarantees `args[0].kind == NativeKind::String` for STRING_METHODS
-/// entries, so this is total in practice; we still surface a TypeError
-/// rather than panic on a contract violation.
+/// guarantees `args[0].kind == NativeKind::String` or
+/// `NativeKind::StringV2` for STRING_METHODS entries; `KindedSlot::as_str`
+/// dispatches on both carrier kinds (D-β fix, see `kinded_slot.rs`).
+/// We still surface a TypeError rather than panic on a contract violation.
 #[inline]
 fn receiver_str<'a>(args: &'a [KindedSlot]) -> Result<&'a str, VMError> {
     args.first()

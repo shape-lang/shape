@@ -370,6 +370,43 @@ impl MethodTable {
         var_gen: &mut crate::type_system::TypeVarGen,
     ) -> Option<Type> {
         let (type_name, receiver_params) = Self::extract_receiver_info(receiver_type);
+
+        // D-β string-join receiver-kind fix (v0.3 KC #6(d), 2026-05-22):
+        // when the receiver is a Type::Variable / Type::Constrained
+        // (e.g. `self[i]` on a `Vec<string>` self, which falls through
+        // to `push_indexable_constraint` and returns a fresh type-var),
+        // `extract_receiver_info` returns `None` and the original early-
+        // return at `type_name?` skipped the universal method registry
+        // (`UNIVERSAL_RECEIVER`-keyed `toString` / `to_string` / `type`).
+        // The cascade: `result + self[i].toString()` inside `Vec.join`'s
+        // monomorphized body inferred `unknown` for the RHS, surfaced
+        // "Cannot infer types for binary operation `Add`" inside
+        // `ensure_monomorphic_function`, leaked Vec.join's
+        // `current_blob_builder` past the `?`-early-exit in
+        // `compile_function_body` (between take and restore), and
+        // `build_content_addressed_program` finalized that leaked builder
+        // as the synthetic `__main__` (arity=0). The `__main__` blob
+        // disappeared from the linker output, the linker entry pointed
+        // to Vec.join's body, execution started inside Vec.join with
+        // self/separator slots at the §2.7.7 Bool sentinel —
+        // "no method 'len' on receiver kind Bool".
+        //
+        // Per ADR-006 §2.7.5 the universal methods' return types are
+        // statically known at registration time (`register_builtin_methods`
+        // above stamps `toString`/`to_string` -> `string`, `type` ->
+        // `Type`). When the receiver type didn't extract a name, fall
+        // through to the universal registry so the receiver-agnostic
+        // method's return type still propagates.
+        if type_name.is_none() {
+            let universal_key =
+                (UNIVERSAL_RECEIVER.to_string(), method_name.to_string());
+            if let Some(sig) =
+                self.methods.get(&universal_key).and_then(|sigs| sigs.first())
+            {
+                return Some(sig.return_type.clone());
+            }
+            return None;
+        }
         let type_name = type_name?;
 
         let key = (type_name, method_name.to_string());
