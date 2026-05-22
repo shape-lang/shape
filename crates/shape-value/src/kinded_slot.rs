@@ -620,10 +620,26 @@ impl KindedSlot {
         }
     }
 
-    /// Read as `&str` if `self.kind == NativeKind::String`, else `None`.
-    /// The slot stores an `Arc<String>` raw pointer; this accessor borrows
-    /// the inner `&str` for the lifetime of `&self` (the `KindedSlot` owns
-    /// one strong-count share, so the `Arc` is alive while `&self` lives).
+    /// Read as `&str` if `self.kind == NativeKind::String` (legacy Arc<String>
+    /// carrier) or `NativeKind::StringV2` (v2-raw `*const StringObj` carrier),
+    /// else `None`. Both carriers expose the same UTF-8 bytes; the accessor
+    /// dispatches on kind and borrows the inner `&str` for the lifetime of
+    /// `&self`. The carrier owns one strong-count share (Arc<String>) /
+    /// HeapHeader refcount (StringObj), so the inner string is alive while
+    /// `&self` lives.
+    ///
+    /// D-β string-join receiver-kind fix (v0.3 KC #6(d), 2026-05-22):
+    /// the pre-fix arm gated only on `NativeKind::String`. Elements read
+    /// from a v2-raw `TypedArray<*const StringObj>` (i.e. an `Array<string>`
+    /// literal lowered through `NewTypedArrayString` + `TypedArrayPushString`)
+    /// flow through `TypedArrayGetString` (`v2_handlers/array.rs:702`) which
+    /// pushes `NativeKind::StringV2`; without the StringV2 arm here, every
+    /// universal-method dispatch on a v2-raw string receiver (e.g.
+    /// `arr[i].toString()` inside `Vec<T>.join`'s body) surfaced
+    /// "TypeError: expected string receiver, got non-string kind". Per
+    /// ADR-006 §2.7.5 amendment Wave 2 Agent B both carrier labels store
+    /// equivalent UTF-8 bytes; the per-carrier read is the producer-site
+    /// proof, not fabrication.
     #[inline]
     pub fn as_str(&self) -> Option<&str> {
         match self.kind {
@@ -639,6 +655,24 @@ impl KindedSlot {
                 // `&self`; lifetime is bounded by the slot's ownership.
                 let s: &String = unsafe { &*(bits as *const String) };
                 Some(s.as_str())
+            }
+            NativeKind::StringV2 => {
+                let bits = self.slot.raw();
+                if bits == 0 {
+                    return None;
+                }
+                // SAFETY: per ADR-006 §2.7.5 amendment Wave 2 Agent B, when
+                // `kind == NativeKind::StringV2` the slot bits are
+                // `ptr as u64` where `ptr: *const StringObj` (the v2-raw
+                // `HeapHeader`-prefixed UTF-8 carrier per
+                // `crates/shape-value/src/v2/string_obj.rs`). The carrier
+                // owns one HeapHeader refcount share for the duration of
+                // `&self`; `StringObj::as_str(ptr)` borrows the inner UTF-8
+                // bytes — lifetime is bounded by the slot's ownership.
+                let ptr = bits as *const crate::v2::string_obj::StringObj;
+                Some(unsafe {
+                    crate::v2::string_obj::StringObj::as_str(ptr)
+                })
             }
             _ => None,
         }
