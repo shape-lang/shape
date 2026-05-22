@@ -162,10 +162,14 @@ pub mod range_methods;
 // Typed array (Vec<int>, Vec<number>, Vec<bool>) method handlers.
 pub mod typed_array_methods;
 
-// V0.c scaffolding: handlers for native v2 TypedArray<i64>/TypedArray<f64>
-// receivers. Registered in `method_registry` under typed-array PHF maps.
-pub mod typed_int_array_methods;
-pub mod typed_number_array_methods;
+// W16.2-J.1 (2026-05-22): the V0.c per-kind typed-array handler modules
+// (`typed_int_array_methods` + `typed_number_array_methods`, 667 LoC
+// combined) DELETED. The kind-generic counterparts in
+// `array_aggregation::handle_{sum,avg,min,max,count,reduce}_v2` +
+// `array_basic::handle_{len,is_empty,first,last,push,pop,get,set,clone}_v2`
+// (registered in `ARRAY_METHODS` and gained real bodies via W16.2-J.0,
+// commit `fbe86020`) cover every method the per-kind handlers used to
+// host. See `method_registry.rs` for the deletion banner.
 
 // Concurrency primitive (Mutex<T>, Atomic<T>, Lazy<T>) method handlers.
 pub mod concurrency_methods;
@@ -189,44 +193,55 @@ use shape_value::{HeapKind, HeapValue, KindedSlot, NativeKind, TemporalData, Val
 /// Select the method-registry PHF lookup for a v2-raw `TypedArray<T>`
 /// receiver, classified by its stamped element-type discriminant.
 ///
-/// r5c-2-β-δ-(α): this is the single element-type → registry sub-
-/// classification table, shared by the two carrier-kind arms of
-/// `resolve_method_handler` — `NativeKind::UInt64` (direct, single-owner
-/// array carrier) and `NativeKind::Ptr(HeapKind::TypedArray)` (refcounted
-/// struct-field / closure-capture array carrier). Both carrier kinds hold
-/// the same `*mut TypedArray<T>` pointer with the same stamped element-type
-/// byte, so they MUST resolve to the same per-element method registry. A
-/// `None` result means "no dedicated typed-array registry for this element
-/// type" — the caller falls back to the generic `ARRAY_METHODS` PHF.
+/// **W16.2-J.1 (2026-05-22):** the per-kind PHF registries
+/// `TYPED_INT_ARRAY_METHODS` + `TYPED_NUMBER_ARRAY_METHODS` were deleted
+/// alongside their handler module files (`typed_int_array_methods.rs` /
+/// `typed_number_array_methods.rs`, 667 LoC combined). The prereq W16.2-J.0
+/// (commit `fbe86020`) migrated the kind-generic counterparts in
+/// `array_aggregation::handle_{sum,avg,min,max,count,reduce}_v2` +
+/// `array_basic::handle_{len,is_empty,first,last,push,pop,get,set,clone}_v2`
+/// from `ckpt[2-5]_surface` stubs to real bodies delegating to the
+/// `v2_array_detect::{sum,avg,min,max,push,pop,read,write}_element(s)`
+/// primitives — those entries live in `ARRAY_METHODS`.
+///
+/// Result: every numeric `V2ElemType` arm now returns `None`; the caller
+/// falls back to `ARRAY_METHODS` for the kind-generic implementation. The
+/// surviving non-`None` arm is `V2ElemType::Bool` → `BOOL_ARRAY_METHODS`,
+/// which carries closure-callback / aggregation residuals (`count`, `any`,
+/// `all`, `toArray`) tracked by the W17 typed-carrier-monomorphization
+/// workstream and still routes through the bool-specific handler set.
 fn typed_array_method_registry(
     elem_type: crate::executor::v2_handlers::v2_array_detect::V2ElemType,
     method_name: &str,
 ) -> Option<method_registry::MethodHandler> {
     use crate::executor::v2_handlers::v2_array_detect::V2ElemType;
     match elem_type {
-        // All integer-family kinds (I64/I32 plus W12 S1 sized ints
-        // I8/U8/I16/U16/U32) share the typed-int method dispatch — methods
-        // operate on the integer-bit pattern regardless of width; narrower
-        // widths sign-/zero-extend at read time. U64 omitted (deferred to
-        // S1.5 per the S1 reopen).
+        // Numeric element kinds — fall through to ARRAY_METHODS via the
+        // caller's `.or_else(...)` chain. W16.2-J.1 deleted the per-kind
+        // PHFs that previously lived here; the kind-generic
+        // `array_aggregation::*` / `array_basic::*` handlers in
+        // ARRAY_METHODS now cover len/length/push/pop/first/last/get/set/
+        // sum/avg/mean/min/max/clone uniformly.
         V2ElemType::I64
         | V2ElemType::I32
         | V2ElemType::I8
         | V2ElemType::U8
         | V2ElemType::I16
         | V2ElemType::U16
-        | V2ElemType::U32 => method_registry::TYPED_INT_ARRAY_METHODS
-            .get(method_name)
-            .copied(),
-        // F32 rides the same floating-point method family as F64.
-        V2ElemType::F64 | V2ElemType::F32 => method_registry::TYPED_NUMBER_ARRAY_METHODS
-            .get(method_name)
-            .copied(),
+        | V2ElemType::U32
+        | V2ElemType::F64
+        | V2ElemType::F32 => None,
+        // Bool carries closure-callback / aggregation residuals
+        // (count / any / all / toArray) — W17 typed-carrier-
+        // monomorphization territory. The kind-generic len/first/last/
+        // isEmpty entries in BOOL_ARRAY_METHODS still alias to
+        // `array_basic::handle_*_v2`, so semantics are uniform with
+        // ARRAY_METHODS for those names.
         V2ElemType::Bool => method_registry::BOOL_ARRAY_METHODS
             .get(method_name)
             .copied(),
         // Char / String / Decimal / TypedObject have no dedicated typed-
-        // array method registry at HEAD — fall back to generic ARRAY_METHODS.
+        // array method registry — fall back to generic ARRAY_METHODS.
         V2ElemType::Char
         | V2ElemType::String
         | V2ElemType::Decimal
@@ -336,9 +351,12 @@ impl VirtualMachine {
     ///    sub-classified on the inner `TemporalData::{DateTime,
     ///    TimeSpan, ...}` variant. The v2 typed-array fast path
     ///    (`UInt64`-tagged raw `*mut TypedArray<T>` pointer) routes
-    ///    through `as_v2_typed_array` to `TYPED_INT_ARRAY_METHODS` /
-    ///    `TYPED_NUMBER_ARRAY_METHODS` per playbook §10
-    ///    `D-v2-array-detect`.
+    ///    through `as_v2_typed_array`; post-W16.2-J.1 every numeric
+    ///    element kind falls through to the kind-generic
+    ///    `ARRAY_METHODS` PHF (per the `typed_array_method_registry`
+    ///    helper, which returns `None` for `V2ElemType::{I*, U*, F*}`).
+    ///    `V2ElemType::Bool` continues to route via
+    ///    `BOOL_ARRAY_METHODS`.
     /// 4. PHF lookup keyed on `&str` method name returns the
     ///    `MethodFnV2` handler. A miss surfaces a `RuntimeError`
     ///    citing the receiver kind + method name; user-defined

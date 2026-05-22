@@ -127,11 +127,13 @@ pub static MUT_SELF_PRIORITY_QUEUE_METHODS: phf::Set<&'static str> = phf_set! {
 
 /// TypedArray<i64> / TypedArray<f64> methods that opt into `&mut self`.
 ///
-/// The shared set covers both `TYPED_INT_ARRAY_METHODS` and
-/// `TYPED_NUMBER_ARRAY_METHODS` PHF registries — `push` / `set` mutate
-/// the underlying TypedBuffer via Arc::make_mut and return the
-/// (mutated) array. `pop` is excluded per the same return-value rule
-/// as `MUT_SELF_ARRAY_METHODS`.
+/// Post-W16.2-J.1 (2026-05-22), `push` / `set` for numeric v2-raw
+/// TypedArrays dispatch through `ARRAY_METHODS` (kind-generic
+/// `array_basic::handle_push_v2` / `handle_set_v2`); the per-kind
+/// `TYPED_INT_ARRAY_METHODS` / `TYPED_NUMBER_ARRAY_METHODS` PHF maps were
+/// deleted. The shared mut-self set remains for the compiler's
+/// write-back gate, which is liberal across container kinds. `pop` is
+/// excluded per the same return-value rule as `MUT_SELF_ARRAY_METHODS`.
 pub static MUT_SELF_TYPED_ARRAY_METHODS: phf::Set<&'static str> = phf_set! {
     "push",
     "set",
@@ -288,9 +290,10 @@ pub static ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     // W16.2-J.0 (2026-05-22): `get` / `set` are kind-generic handlers
     // delegating to `v2_array_detect::read_element` / `write_element`.
     // Pre-W16.2-J.0 their only host was the per-kind PHF registries
-    // (TYPED_INT_ARRAY_METHODS / TYPED_NUMBER_ARRAY_METHODS), which W16.2-J.1
-    // deletes — without these entries the methods would have no fall-
-    // through target post-deletion.
+    // (TYPED_INT_ARRAY_METHODS / TYPED_NUMBER_ARRAY_METHODS); W16.2-J.1
+    // (2026-05-22) deleted those PHFs and routed numeric `V2ElemType`
+    // arms straight to ARRAY_METHODS — these entries are now the
+    // canonical (and only) host for `get` / `set`.
     "get" => crate::executor::objects::array_basic::handle_get_v2,
     "set" => crate::executor::objects::array_basic::handle_set_v2,
     "slice" => crate::executor::objects::array_transform::handle_slice_v2,
@@ -750,63 +753,20 @@ pub static INT_ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "toArray" => crate::executor::objects::typed_array_methods::handle_int_to_array,
 };
 
-/// PHF registry for native v2 `TypedArray<i64>` methods.
-///
-/// **Status:** wired into the dispatch cascade in
-/// [`executor::objects`](crate::executor::objects) (V2.a). When a method call
-/// receives a native v2 `TypedArray<i64>` pointer, this PHF is consulted
-/// before the bespoke match in `dispatch_v2_typed_array_method` and before
-/// the generic [`ARRAY_METHODS`] lookup. Method names not present here fall
-/// through to the bespoke path (which in turn falls through to
-/// [`ARRAY_METHODS`] for higher-order methods like `map/filter/reduce`).
-///
-/// Handlers live in
-/// [`typed_int_array_methods`](crate::executor::objects::typed_int_array_methods)
-/// and delegate to the typed element primitives in
-/// `executor::v2_handlers::v2_array_detect` (read/write/push/pop/sum).
-///
-/// **Methods:** len, length, push, pop, sum, avg, min, max, first, last,
-/// get, set.
-pub static TYPED_INT_ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
-    "len" => crate::executor::objects::typed_int_array_methods::len,
-    "length" => crate::executor::objects::typed_int_array_methods::len,
-    "push" => crate::executor::objects::typed_int_array_methods::push,
-    "pop" => crate::executor::objects::typed_int_array_methods::pop,
-    "sum" => crate::executor::objects::typed_int_array_methods::sum,
-    "avg" => crate::executor::objects::typed_int_array_methods::avg,
-    "mean" => crate::executor::objects::typed_int_array_methods::avg,
-    "min" => crate::executor::objects::typed_int_array_methods::min,
-    "max" => crate::executor::objects::typed_int_array_methods::max,
-    "first" => crate::executor::objects::typed_int_array_methods::first,
-    "last" => crate::executor::objects::typed_int_array_methods::last,
-    "get" => crate::executor::objects::typed_int_array_methods::get,
-    "set" => crate::executor::objects::typed_int_array_methods::set,
-};
-
-/// PHF registry for native v2 `TypedArray<f64>` methods.
-///
-/// **Status:** wired into the dispatch cascade in
-/// [`executor::objects`](crate::executor::objects) (V2.a). See
-/// [`TYPED_INT_ARRAY_METHODS`] for the dispatch contract; this map is the
-/// `f64` counterpart.
-///
-/// **Methods:** len, length, push, pop, sum, avg, min, max, first, last,
-/// get, set.
-pub static TYPED_NUMBER_ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
-    "len" => crate::executor::objects::typed_number_array_methods::len,
-    "length" => crate::executor::objects::typed_number_array_methods::len,
-    "push" => crate::executor::objects::typed_number_array_methods::push,
-    "pop" => crate::executor::objects::typed_number_array_methods::pop,
-    "sum" => crate::executor::objects::typed_number_array_methods::sum,
-    "avg" => crate::executor::objects::typed_number_array_methods::avg,
-    "mean" => crate::executor::objects::typed_number_array_methods::avg,
-    "min" => crate::executor::objects::typed_number_array_methods::min,
-    "max" => crate::executor::objects::typed_number_array_methods::max,
-    "first" => crate::executor::objects::typed_number_array_methods::first,
-    "last" => crate::executor::objects::typed_number_array_methods::last,
-    "get" => crate::executor::objects::typed_number_array_methods::get,
-    "set" => crate::executor::objects::typed_number_array_methods::set,
-};
+// W16.2-J.1 (2026-05-22): `TYPED_INT_ARRAY_METHODS` + `TYPED_NUMBER_ARRAY_METHODS`
+// PHF registries DELETED — they were per-kind duplicates of the kind-generic
+// `array_aggregation::handle_{sum,avg,min,max}_v2` / `array_basic::handle_{push,
+// pop,first,last,get,set,len,is_empty,reverse,zip,clone}_v2` handlers that
+// W16.2-J.0 (commit `fbe86020`) migrated to kind-generic bodies delegating to
+// `v2_array_detect::{sum,avg,min,max,push,pop,read,write}_element(s)`
+// primitives. The dispatcher in `objects/mod.rs::typed_array_method_registry`
+// now routes every `V2ElemType::{I64,I32,I8,U8,I16,U16,U32,F64,F32}` arm
+// straight to `ARRAY_METHODS`, which contains those same kind-generic entries.
+//
+// Handler module files `typed_int_array_methods.rs` + `typed_number_array_methods.rs`
+// (667 LoC combined) deleted alongside the maps. CLAUDE.md Forbidden Patterns
+// Refusal #10 binding: no half-retire ("preserve PHF for one kind"), no
+// rename. Per-kind PHF retirement is a complete deletion.
 
 /// PHF registry for Vec<bool> (BoolArray) methods
 ///
