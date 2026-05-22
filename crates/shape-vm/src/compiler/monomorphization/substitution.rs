@@ -2260,6 +2260,22 @@ pub fn inline_closure_body_into_specialization(
     closure_params: &[String],
     closure_body: &[shape_ast::ast::Statement],
     capture_names: &[String],
+    // D-α.1 close (2026-05-22, KC #6(f)): formal closure-param annotations
+    // from the callee's `cmp: (T, T) => int` after the spec's
+    // type-substitution pass (e.g. `[int, int]` for `Vec.sort::i64`'s `cmp`).
+    // Applied to the `let a = cur; let b = key` prelude of the inlined
+    // block so the post-inlining body type-checks under strict typing —
+    // without the annotations, `a, b` inherit `cur, key`'s un-tracked types
+    // (the specialized body's `let mut src = []` defers element-type
+    // promotion to the first push, leaving `src[j]` un-typed at the inline
+    // site) and the body's `a - b` fails as "unknown unknown" at compile
+    // time. The closure-param hint installed at the call site (HOF
+    // dispatch in `function_calls.rs:1755`) already types the OUTER
+    // closure literal; this parallel propagation closes the same gap for
+    // the inlined body inside the closure-aware specialization. See
+    // `v0.3-d-alpha-audit.md` §4 trigger KC #6(f) for the empirical
+    // narrowing trace.
+    closure_param_annotations: &[Option<shape_ast::ast::TypeAnnotation>],
 ) -> shape_ast::error::Result<()> {
     // Walk the body and replace every call to the formal closure parameter
     // (`f(item)`) with the inlined closure body.
@@ -2328,6 +2344,7 @@ pub fn inline_closure_body_into_specialization(
                 closure_param_name,
                 closure_params,
                 closure_body,
+                closure_param_annotations,
             )
         })
         .collect();
@@ -2392,22 +2409,23 @@ fn inline_closure_calls_in_statement(
     closure_param_name: &str,
     closure_params: &[String],
     closure_body: &[shape_ast::ast::Statement],
+    closure_param_annotations: &[Option<shape_ast::ast::TypeAnnotation>],
 ) -> shape_ast::ast::Statement {
     use shape_ast::ast::{Statement, statements::{ForInit, ForLoop, IfStatement, WhileLoop}};
     match stmt {
         Statement::Return(expr, span) => Statement::Return(
             expr.as_ref()
-                .map(|e| inline_closure_calls_in_expr(e, closure_param_name, closure_params, closure_body)),
+                .map(|e| inline_closure_calls_in_expr(e, closure_param_name, closure_params, closure_body, closure_param_annotations)),
             *span,
         ),
         Statement::Expression(expr, span) => Statement::Expression(
-            inline_closure_calls_in_expr(expr, closure_param_name, closure_params, closure_body),
+            inline_closure_calls_in_expr(expr, closure_param_name, closure_params, closure_body, closure_param_annotations),
             *span,
         ),
         Statement::VariableDecl(decl, span) => {
             let mut new_decl = decl.clone();
             new_decl.value = decl.value.as_ref().map(|e| {
-                inline_closure_calls_in_expr(e, closure_param_name, closure_params, closure_body)
+                inline_closure_calls_in_expr(e, closure_param_name, closure_params, closure_body, closure_param_annotations)
             });
             Statement::VariableDecl(new_decl, *span)
         }
@@ -2418,6 +2436,7 @@ fn inline_closure_calls_in_statement(
                 closure_param_name,
                 closure_params,
                 closure_body,
+                closure_param_annotations,
             );
             Statement::Assignment(new_assign, *span)
         }
@@ -2438,6 +2457,7 @@ fn inline_closure_calls_in_statement(
                         closure_param_name,
                         closure_params,
                         closure_body,
+                        closure_param_annotations,
                     ),
                 },
                 ForInit::ForC { init, condition, update } => ForInit::ForC {
@@ -2446,18 +2466,21 @@ fn inline_closure_calls_in_statement(
                         closure_param_name,
                         closure_params,
                         closure_body,
+                        closure_param_annotations,
                     )),
                     condition: inline_closure_calls_in_expr(
                         condition,
                         closure_param_name,
                         closure_params,
                         closure_body,
+                        closure_param_annotations,
                     ),
                     update: inline_closure_calls_in_expr(
                         update,
                         closure_param_name,
                         closure_params,
                         closure_body,
+                        closure_param_annotations,
                     ),
                 },
             };
@@ -2473,6 +2496,7 @@ fn inline_closure_calls_in_statement(
                                 closure_param_name,
                                 closure_params,
                                 closure_body,
+                                closure_param_annotations,
                             )
                         })
                         .collect(),
@@ -2488,6 +2512,7 @@ fn inline_closure_calls_in_statement(
                     closure_param_name,
                     closure_params,
                     closure_body,
+                    closure_param_annotations,
                 ),
                 body: wl
                     .body
@@ -2498,6 +2523,7 @@ fn inline_closure_calls_in_statement(
                             closure_param_name,
                             closure_params,
                             closure_body,
+                            closure_param_annotations,
                         )
                     })
                     .collect(),
@@ -2511,6 +2537,7 @@ fn inline_closure_calls_in_statement(
                     closure_param_name,
                     closure_params,
                     closure_body,
+                    closure_param_annotations,
                 ),
                 then_body: ifs
                     .then_body
@@ -2521,6 +2548,7 @@ fn inline_closure_calls_in_statement(
                             closure_param_name,
                             closure_params,
                             closure_body,
+                            closure_param_annotations,
                         )
                     })
                     .collect(),
@@ -2532,6 +2560,7 @@ fn inline_closure_calls_in_statement(
                                 closure_param_name,
                                 closure_params,
                                 closure_body,
+                                closure_param_annotations,
                             )
                         })
                         .collect()
@@ -2554,6 +2583,7 @@ fn inline_closure_calls_in_expr(
     closure_param_name: &str,
     closure_params: &[String],
     closure_body: &[shape_ast::ast::Statement],
+    closure_param_annotations: &[Option<shape_ast::ast::TypeAnnotation>],
 ) -> shape_ast::ast::Expr {
     use shape_ast::ast::Expr;
     // Intercept the target case first: a call whose name is the formal
@@ -2584,10 +2614,11 @@ fn inline_closure_calls_in_expr(
                         closure_param_name,
                         closure_params,
                         closure_body,
+                        closure_param_annotations,
                     )
                 })
                 .collect();
-            return build_inlined_closure_block(closure_params, &rewritten_args, closure_body);
+            return build_inlined_closure_block(closure_params, &rewritten_args, closure_body, closure_param_annotations);
         }
     }
 
@@ -2595,7 +2626,7 @@ fn inline_closure_calls_in_expr(
     // Expr variant that can hold sub-expressions. This is verbose but
     // correct: any variant not matched here falls through unchanged.
     let rec = |e: &Expr| {
-        inline_closure_calls_in_expr(e, closure_param_name, closure_params, closure_body)
+        inline_closure_calls_in_expr(e, closure_param_name, closure_params, closure_body, closure_param_annotations)
     };
     let rec_box = |e: &Box<Expr>| Box::new(rec(e));
     let rec_vec = |v: &Vec<Expr>| v.iter().map(rec).collect();
@@ -2690,6 +2721,7 @@ fn inline_closure_calls_in_expr(
                             closure_param_name,
                             closure_params,
                             closure_body,
+                            closure_param_annotations,
                         ),
                     ),
                     BlockItem::VariableDecl(decl) => {
@@ -2802,6 +2834,7 @@ fn build_inlined_closure_block(
     closure_params: &[String],
     call_args: &[shape_ast::ast::Expr],
     closure_body: &[shape_ast::ast::Statement],
+    closure_param_annotations: &[Option<shape_ast::ast::TypeAnnotation>],
 ) -> shape_ast::ast::Expr {
     use shape_ast::ast::expr_helpers::{BlockExpr, BlockItem};
     use shape_ast::ast::{DestructurePattern, Expr, Statement, VarKind, VariableDecl};
@@ -2810,12 +2843,25 @@ fn build_inlined_closure_block(
 
     let mut items: Vec<BlockItem> = Vec::new();
     // Bind each closure formal to its corresponding arg via a let statement.
-    for (pname, aexpr) in closure_params.iter().zip(call_args.iter()) {
+    // D-α.1 close (2026-05-22, KC #6(f)): when the callee's formal
+    // closure-param annotation is known (e.g. `cmp: (T, T) => int` after
+    // T → int substitution gives `[int, int]`), attach the annotation to
+    // each generated `let <pname> = <aexpr>` so the post-inlining body
+    // type-checks under strict typing. Without this, when the call args
+    // come from un-tracked local-typed slots inside the specialized body
+    // (e.g. `src[j]` where `src` was declared via `let mut src = []` and
+    // only promotes after the first push), `let a = cur` infers `a` as
+    // un-tracked and the subsequent `a - b` in the closure body fails as
+    // `Sub: unknown unknown`. See `v0.3-d-alpha-audit.md` §4 KC #6(f).
+    for (idx, (pname, aexpr)) in closure_params.iter().zip(call_args.iter()).enumerate() {
+        let type_annotation = closure_param_annotations
+            .get(idx)
+            .and_then(|opt| opt.clone());
         let decl = VariableDecl {
             kind: VarKind::Let,
             is_mut: false,
             pattern: DestructurePattern::Identifier(pname.clone(), span),
-            type_annotation: None,
+            type_annotation,
             value: Some(aexpr.clone()),
             ownership: Default::default(),
         };
@@ -3476,6 +3522,7 @@ mod tests {
             &["x".into()],
             &closure_body,
             &[], // no captures
+            &[], // no closure-param annotations (test default)
         )
         .expect("inlining should succeed");
 
@@ -3513,6 +3560,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
         )
         .unwrap();
         assert_eq!(spec.name, "original_name");
@@ -3546,6 +3594,7 @@ mod tests {
             &["x".into()],
             &[],
             &["captured_n".into()], // unused by Phase C
+            &[],                    // no closure-param annotations (test default)
         )
         .unwrap();
         // Params should still contain `self` AND `f` (the closure formal).
@@ -3598,6 +3647,7 @@ mod tests {
         super::inline_closure_body_into_specialization(
             &mut spec,
             "f",
+            &[],
             &[],
             &[],
             &[],

@@ -733,6 +733,45 @@ impl BytecodeCompiler {
         // Inline each closure body in turn.
         for (i, spec_info) in closure_defs.iter().enumerate() {
             let closure_param_name = &callee_closure_param_names[i];
+            // D-α.1 close (2026-05-22, KC #6(f)): extract per-closure-param
+            // type annotations from the callee's already-substituted spec.
+            // `specialized_def` has had its declared type params (e.g. `T`)
+            // substituted to ConcreteType (e.g. `int`) by
+            // `substitute_function_def` above, so the param at
+            // `closure_param_name` carries `(int, int) => int` (rather
+            // than `(T, T) => int`) here. The annotations are then
+            // attached as type hints to the inlined block's
+            // `let a = arg0; let b = arg1` prelude, closing the
+            // strict-typing gap in `Vec.sort`'s `let mut src = []`
+            // promotion-deferred body. See
+            // `v0.3-d-alpha-audit.md` §4 KC #6(f).
+            let closure_param_annotations: Vec<Option<shape_ast::ast::TypeAnnotation>> =
+                specialized_def
+                    .params
+                    .iter()
+                    .find(|p| {
+                        p.get_identifiers()
+                            .first()
+                            .map(|s| s == closure_param_name)
+                            .unwrap_or(false)
+                    })
+                    .and_then(|p| p.type_annotation.as_ref())
+                    .and_then(|ann| {
+                        if let shape_ast::ast::TypeAnnotation::Function {
+                            params: fps,
+                            ..
+                        } = ann
+                        {
+                            Some(
+                                fps.iter()
+                                    .map(|fp| Some(fp.type_annotation.clone()))
+                                    .collect(),
+                            )
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_default();
             // cluster-2 V3-S6f empirical-verification trace (2026-05-16);
             // cluster-2 closure-wave-F tracing-crate migration (2026-05-16):
             // ADR-006 §2.7.5 amendment — `tracing::debug!` is compile-out
@@ -754,6 +793,7 @@ impl BytecodeCompiler {
                 &spec_info.param_names,
                 &spec_info.body,
                 &spec_info.capture_names,
+                &closure_param_annotations,
             )
             .is_err()
             {
