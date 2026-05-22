@@ -58,6 +58,18 @@ impl TypeInferenceEngine {
             }
         }
 
+        // D-α.2: built-in `.length` property on length-bearing types
+        // (Array<T>, String, HashMap<K,V>, Set<T>, Deque<T>,
+        // PriorityQueue<T>, Range). The compiler emits typed length opcodes
+        // for these (see `compiler/expressions/property_access.rs:288-335`,
+        // method registry entries at `executor/objects/method_registry.rs`).
+        // Without this arm the inference layer falls through to the
+        // `HasField` fallback and the result variable stays `unknown`,
+        // breaking expressions like `arr.length - 1` (KC #6(c)).
+        if property == "length" && Self::is_length_bearing_type(object_type) {
+            return Ok(BuiltinTypes::integer());
+        }
+
         // Special handling for known types
         match object_type {
             Type::Generic { base, args } => {
@@ -228,6 +240,40 @@ impl TypeInferenceEngine {
             Type::Concrete(ann) => ann.as_type_name_str(),
             _ => None,
         }
+    }
+
+    /// Returns true when `object_type` is one of the built-in length-bearing
+    /// types whose `.length` property the compiler lowers to a typed length
+    /// opcode (`ArrayLenTyped`, `MapLenTyped`, `StringLenTyped`, etc.). Used
+    /// by `infer_property_access_internal` to short-circuit the
+    /// `HasField` fallback so binary ops on the result are typed `int`.
+    ///
+    /// D-α.2. Mirrors the receiver-classification done by
+    /// `try_resolve_typed_length_local` in
+    /// `crates/shape-vm/src/compiler/expressions/property_access.rs` and the
+    /// `"length"` PHF entries in
+    /// `crates/shape-vm/src/executor/objects/method_registry.rs`.
+    fn is_length_bearing_type(object_type: &Type) -> bool {
+        let name = match object_type {
+            Type::Concrete(TypeAnnotation::Array(_)) => return true,
+            Type::Concrete(TypeAnnotation::Basic(n)) => n.as_str(),
+            Type::Concrete(TypeAnnotation::Generic { name, .. }) => name.as_str(),
+            Type::Generic { base, .. } => match Self::generic_base_name(base) {
+                Some(n) => n,
+                None => return false,
+            },
+            _ => return false,
+        };
+        matches!(
+            name,
+            "string"
+                | "String"
+                | "HashMap"
+                | "Set"
+                | "Deque"
+                | "PriorityQueue"
+                | "Range"
+        )
     }
 
     fn resolve_struct_generic_field(

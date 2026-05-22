@@ -533,6 +533,22 @@ impl BytecodeCompiler {
         self.last_expr_type_info = None;
         // Propagate numeric type from field type for typed opcode emission
         self.last_expr_numeric_type = field_numeric_type;
+        // D-α.2: when the slow-path `Length` / `TypedArrayLen` opcode was
+        // emitted (reached only when neither a v2 field load nor a typed-
+        // object field-tag carrier applied), the produced value is always
+        // an `int`. Stamp the numeric type so downstream tracker propagation
+        // (`propagate_assignment_type_to_slot` in
+        // `crates/shape-vm/src/compiler/helpers.rs`) records the binding as
+        // `int` and subsequent binary ops on it type-check. Without this,
+        // `let n = arr.length; let x = n - 1` rejects with `unknown - int`
+        // (KC #6(c) bubble_sort).
+        if property == "length"
+            && v2_load_opcode.is_none()
+            && typed_field.is_none()
+            && field_numeric_type.is_none()
+        {
+            self.last_expr_numeric_type = Some(NumericType::Int);
+        }
         Ok(())
     }
 
