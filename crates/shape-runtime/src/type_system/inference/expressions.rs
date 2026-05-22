@@ -210,9 +210,22 @@ impl TypeInferenceEngine {
                                 self.constraints.push((value_type.clone(), annotated_type));
                                 ta.clone()
                             } else {
-                                value_type
-                                    .to_annotation()
-                                    .unwrap_or_else(|| TypeAnnotation::Basic("unknown".to_string()))
+                                // Resolve through the unifier first — a field whose
+                                // value already unified with a concrete type freezes
+                                // to that type. A field value that is still an
+                                // unresolved variable is encoded as a `tyvar` marker
+                                // (not `unknown`) so callsite substitution can later
+                                // resolve it: `fn aabb(lo, hi) { {min: lo, max: hi} }`
+                                // returns `{min: <tyvar lo>, max: <tyvar hi>}`, and a
+                                // call `aabb(1, 5)` substitutes the markers to `int`.
+                                let resolved = self.unifier.apply_substitutions(&value_type);
+                                match &resolved {
+                                    Type::Variable(var) => tyvar_to_annotation(var),
+                                    Type::Constrained { var, .. } => tyvar_to_annotation(var),
+                                    _ => resolved.to_annotation().unwrap_or_else(|| {
+                                        TypeAnnotation::Basic("unknown".to_string())
+                                    }),
+                                }
                             };
                             field_types.push(shape_ast::ast::ObjectTypeField {
                                 name: key.clone(),

@@ -38,8 +38,9 @@ pub mod universal_error;
 
 // Re-export from types module
 pub use types::{
-    BuiltinTypes, Type, TypeConstraint, TypeScheme, TypeVar, TypeVarGen, annotation_to_semantic,
-    annotation_to_string, semantic_to_annotation, substitute,
+    BuiltinTypes, TYVAR_ANNOTATION_PREFIX, Type, TypeConstraint, TypeScheme, TypeVar, TypeVarGen,
+    annotation_as_tyvar, annotation_to_semantic, annotation_to_string, semantic_to_annotation,
+    substitute, tyvar_to_annotation,
 };
 
 // Re-export other public types

@@ -2056,3 +2056,128 @@ fn ws9b_named_function_object_param_left_as_variable_for_callsite_union() {
         closure_param_types[0],
     );
 }
+
+/// WS-9c: an anonymous-object factory `fn aabb(lo, hi) { {min: lo, max: hi} }`
+/// must, after callsite-union propagation, expose a return type whose
+/// `Object` field types are the concrete argument types — not frozen
+/// `unknown`. This is the inference-side half of the WS-9c fix: the object
+/// literal keeps its field-value parameters as `tyvar` markers, and the
+/// `resolved` fixpoint is published into the unifier so the final
+/// substitution pass concretizes them.
+#[test]
+fn test_ws9c_anonymous_object_factory_return_fields_resolve_to_int() {
+    use shape_ast::ast::TypeAnnotation;
+    use shape_ast::parser::parse_program;
+
+    let code = r#"
+fn aabb(lo, hi) { {min: lo, max: hi} }
+let a = aabb(1, 5)
+"#;
+    let program = parse_program(code).expect("program should parse");
+    let mut engine = TypeInferenceEngine::new();
+    let types = engine
+        .infer_program(&program)
+        .expect("inference should succeed");
+
+    let Some(Type::Function { returns, .. }) = types.get("aabb") else {
+        panic!("aabb should be inferred as a function type");
+    };
+    let TypeAnnotation::Object(fields) = returns
+        .to_annotation()
+        .expect("aabb return type should convert to an annotation")
+    else {
+        panic!("aabb should return an anonymous object, got {:?}", returns);
+    };
+    assert_eq!(fields.len(), 2, "object should have min/max fields");
+    for field in &fields {
+        assert_eq!(
+            field.type_annotation,
+            TypeAnnotation::Basic("int".to_string()),
+            "field `{}` must resolve to int, not a frozen `unknown`",
+            field.name,
+        );
+    }
+}
+
+/// WS-9c: a factory observed at two call sites with `number` arguments
+/// resolves its object-literal field types to `number` — proving the field
+/// kind tracks the parameter, never a fabricated default.
+#[test]
+fn test_ws9c_anonymous_object_factory_return_fields_resolve_to_number() {
+    use shape_ast::ast::TypeAnnotation;
+    use shape_ast::parser::parse_program;
+
+    let code = r#"
+fn point(x, y) { {px: x, py: y} }
+let a = point(1.0, 2.0)
+let b = point(3.0, 4.0)
+"#;
+    let program = parse_program(code).expect("program should parse");
+    let mut engine = TypeInferenceEngine::new();
+    let types = engine
+        .infer_program(&program)
+        .expect("inference should succeed");
+
+    let Some(Type::Function { returns, .. }) = types.get("point") else {
+        panic!("point should be inferred as a function type");
+    };
+    let TypeAnnotation::Object(fields) = returns
+        .to_annotation()
+        .expect("point return type should convert to an annotation")
+    else {
+        panic!("point should return an anonymous object, got {:?}", returns);
+    };
+    for field in &fields {
+        assert_eq!(
+            field.type_annotation,
+            TypeAnnotation::Basic("number".to_string()),
+            "field `{}` must resolve to number",
+            field.name,
+        );
+    }
+}
+
+/// WS-9c: a factory result threaded through a second unannotated function
+/// `fn area(box) { box.max - box.min }` resolves `box`'s field accesses —
+/// the transitive callsite-union case. Inference must not reject the body.
+#[test]
+fn test_ws9c_factory_result_through_unannotated_function_param() {
+    use shape_ast::parser::parse_program;
+
+    let code = r#"
+fn aabb(lo, hi) { {min: lo, max: hi} }
+fn area(box) { box.max - box.min }
+let r = area(aabb(1, 5))
+"#;
+    let program = parse_program(code).expect("program should parse");
+    let mut engine = TypeInferenceEngine::new();
+    let result = engine.infer_program(&program);
+    assert!(
+        result.is_ok(),
+        "factory result through an unannotated param must not be \
+         spuriously rejected, got {:?}",
+        result.err(),
+    );
+}
+
+/// WS-9c: a `tyvar` marker that callsite propagation never resolves stays a
+/// marker and projects to a clean `unknown` — an honest "not inferred", not
+/// a crash and not a fabricated type. Guards the marker round-trip.
+#[test]
+fn test_ws9c_unresolved_factory_field_marker_round_trips() {
+    use crate::type_system::{TypeVar, annotation_as_tyvar, tyvar_to_annotation};
+
+    let var = TypeVar::new("T42".to_string());
+    let ann = tyvar_to_annotation(&var);
+    assert_eq!(
+        annotation_as_tyvar(&ann),
+        Some(var),
+        "a tyvar marker must decode back to its variable",
+    );
+    // A plain user type name is never mistaken for a marker.
+    assert_eq!(
+        annotation_as_tyvar(&shape_ast::ast::TypeAnnotation::Basic("T42".to_string())),
+        None,
+        "a bare `T42` user type must not be decoded as a tyvar marker",
+    );
+}

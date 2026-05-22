@@ -74,6 +74,41 @@ fn qualify_type_annotation_with_namespace(
     }
 }
 
+/// WS-9c: project a `FieldType` to the `TypeAnnotation` used as an
+/// object-field contract. Unlike `field_type_to_annotation` (which refuses
+/// `Array`/`Any`/`Option` so the caller falls back to the inference engine),
+/// this best-effort projection records a contract for every field that has
+/// a representable annotation; `Any` and unrepresentable shapes yield `None`
+/// and simply carry no contract (the field stays an honest `unknown`).
+pub(crate) fn field_type_contract_annotation(
+    ft: &shape_runtime::type_schema::FieldType,
+) -> Option<shape_ast::ast::TypeAnnotation> {
+    use shape_ast::ast::TypeAnnotation;
+    use shape_runtime::type_schema::FieldType;
+    let basic = |s: &str| Some(TypeAnnotation::Basic(s.to_string()));
+    match ft {
+        FieldType::String => basic("string"),
+        FieldType::I64 => basic("int"),
+        FieldType::F64 => basic("number"),
+        FieldType::Bool => basic("bool"),
+        FieldType::Decimal => basic("decimal"),
+        FieldType::Timestamp => basic("DateTime"),
+        FieldType::I8 => basic("i8"),
+        FieldType::U8 => basic("u8"),
+        FieldType::I16 => basic("i16"),
+        FieldType::U16 => basic("u16"),
+        FieldType::I32 => basic("i32"),
+        FieldType::U32 => basic("u32"),
+        FieldType::U64 => basic("u64"),
+        FieldType::Object(name) => Some(TypeAnnotation::Reference(name.as_str().into())),
+        FieldType::Array(inner) => field_type_contract_annotation(inner)
+            .map(|inner_ann| TypeAnnotation::Array(Box::new(inner_ann))),
+        FieldType::Option(inner) => field_type_contract_annotation(inner)
+            .map(TypeAnnotation::option),
+        FieldType::Any => None,
+    }
+}
+
 /// Map a return type name string to a NumericType.
 fn return_type_to_numeric(type_name: &str) -> Option<NumericType> {
     if BuiltinTypes::is_integer_type_name(type_name) {
@@ -349,6 +384,24 @@ impl BytecodeCompiler {
         self.type_tracker
             .register_object_field_contracts(schema_id, map);
         Some(schema_id)
+    }
+
+    /// WS-9c: build a `VariableTypeInfo` for an unannotated function whose
+    /// inferred return type is an anonymous structural object.
+    ///
+    /// The inline anonymous schema (+ per-field contracts) was registered
+    /// up-front by `register_inferred_return_object_schemas`; this just looks
+    /// up the recorded schema id. Returns `None` when the function has no
+    /// inferred anonymous-object return.
+    fn inline_schema_for_inferred_return(&mut self, call_name: &str) -> Option<VariableTypeInfo> {
+        let schema_id = *self.function_return_schema_ids.get(call_name)?;
+        let schema_name = self
+            .type_tracker
+            .schema_registry()
+            .get_by_id(schema_id)
+            .map(|schema| schema.name.clone())
+            .unwrap_or_else(|| format!("__anon_{}", schema_id));
+        Some(VariableTypeInfo::known(schema_id, schema_name))
     }
 
     fn type_info_from_annotation(
@@ -1212,12 +1265,19 @@ impl BytecodeCompiler {
             let direct = return_type_annotation
                 .as_ref()
                 .and_then(|ann| self.type_info_from_annotation(ann));
-            self.last_expr_type_info = direct.or_else(|| {
-                let ann = return_type_annotation.as_ref()?;
-                let namespace = call_name.rsplit_once("::").map(|(ns, _)| ns)?;
-                let qualified = qualify_type_annotation_with_namespace(ann, namespace)?;
-                self.type_info_from_annotation(&qualified)
-            });
+            self.last_expr_type_info = direct
+                .or_else(|| {
+                    let ann = return_type_annotation.as_ref()?;
+                    let namespace = call_name.rsplit_once("::").map(|(ns, _)| ns)?;
+                    let qualified = qualify_type_annotation_with_namespace(ann, namespace)?;
+                    self.type_info_from_annotation(&qualified)
+                })
+                // WS-9c: an unannotated function whose inferred return type
+                // is an anonymous object (an object-literal factory) carries
+                // no `return_type_annotation`. Register an inline anonymous
+                // schema for the projected return fields so the call result
+                // — and a `let` bound to it — resolves `.field` access.
+                .or_else(|| self.inline_schema_for_inferred_return(&call_name));
             self.last_expr_schema = self
                 .last_expr_type_info
                 .as_ref()

@@ -52,6 +52,42 @@ impl TypeVar {
     }
 }
 
+/// Prefix marking a `TypeAnnotation::Basic` string as a deferred inference
+/// type variable rather than a user-facing type name.
+///
+/// `TypeAnnotation` has no type-variable variant, so an object-literal field
+/// whose value is an as-yet-unresolved parameter variable (e.g. `{min: lo}`
+/// inside `fn aabb(lo, hi) { {min: lo, max: hi} }`) cannot carry that
+/// variable structurally. Freezing the field to `Basic("unknown")` is lossy:
+/// once a caller `aabb(1, 5)` resolves the parameter to `int`, there is no
+/// variable left in the object type for callsite substitution to update.
+///
+/// Encoding the variable as `Basic("\u{1}tyvar:T7")` keeps it recoverable.
+/// The `\u{1}` (SOH control character) cannot occur in any identifier or
+/// user type name, so the marker can never collide with a real type. The
+/// substitution functions (`apply_substitutions_to_type`,
+/// `Unifier::apply_to_annotation`) decode the marker, resolve the variable,
+/// and re-encode if still unresolved. A marker that survives to the final
+/// type map is an honestly-unresolved field and projects to the same
+/// `unknown` it would have frozen to.
+pub const TYVAR_ANNOTATION_PREFIX: &str = "\u{1}tyvar:";
+
+/// Encode a type variable as a `TypeAnnotation::Basic` marker string.
+pub fn tyvar_to_annotation(var: &TypeVar) -> TypeAnnotation {
+    TypeAnnotation::Basic(format!("{}{}", TYVAR_ANNOTATION_PREFIX, var.0))
+}
+
+/// Decode a `TypeAnnotation::Basic` marker string back into a `TypeVar`.
+/// Returns `None` for any annotation that is not a type-variable marker.
+pub fn annotation_as_tyvar(ann: &TypeAnnotation) -> Option<TypeVar> {
+    match ann {
+        TypeAnnotation::Basic(name) => name
+            .strip_prefix(TYVAR_ANNOTATION_PREFIX)
+            .map(|rest| TypeVar(rest.to_string())),
+        _ => None,
+    }
+}
+
 /// Inferred type representation
 #[derive(Debug, Clone, PartialEq)]
 pub enum Type {

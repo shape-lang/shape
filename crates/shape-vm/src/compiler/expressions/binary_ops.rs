@@ -2667,3 +2667,73 @@ mod ws3_f3_error_context_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod ws9c_anonymous_object_factory_tests {
+    //! WS-9c: an unannotated function returning an object literal built from
+    //! its parameters — `fn aabb(lo, hi) { {min: lo, max: hi} }` — is an
+    //! anonymous-object factory. Before this fix the object literal froze its
+    //! field types to `unknown` (no `TypeAnnotation` variable variant), so a
+    //! later `a.min + b.max` over the factory result was spuriously rejected
+    //! as `unknown + unknown`. The fix keeps the field-value parameters as
+    //! `tyvar` markers through inference, publishes `apply_callsite_unions`'
+    //! `resolved` fixpoint into the unifier, and registers an inline schema
+    //! for the inferred return so the compiler resolves `.field` access.
+    use crate::compiler::BytecodeCompiler;
+    use shape_ast::parser::parse_program;
+
+    fn compiles(code: &str) -> bool {
+        let program = parse_program(code).expect("Failed to parse");
+        BytecodeCompiler::new().compile(&program).is_ok()
+    }
+
+    #[test]
+    fn ws9c_factory_result_field_binop_compiles() {
+        // The headline repro: a binop over two factory results' fields.
+        assert!(compiles(
+            r#"
+            fn aabb(lo, hi) { {min: lo, max: hi} }
+            let a = aabb(1, 5)
+            let b = aabb(2, 6)
+            print(a.min + b.max)
+            "#
+        ));
+    }
+
+    #[test]
+    fn ws9c_factory_result_through_unannotated_param_compiles() {
+        // The factory result threaded into a second unannotated function.
+        assert!(compiles(
+            r#"
+            fn aabb(lo, hi) { {min: lo, max: hi} }
+            fn area(box) { box.max - box.min }
+            print(area(aabb(1, 5)))
+            "#
+        ));
+    }
+
+    #[test]
+    fn ws9c_factory_result_direct_field_access_compiles() {
+        // `f(...).field` directly, with no intervening `let` binding.
+        assert!(compiles(
+            r#"
+            fn aabb(lo, hi) { {min: lo, max: hi} }
+            print(aabb(1, 5).min + 1)
+            "#
+        ));
+    }
+
+    #[test]
+    fn ws9c_factory_result_array_literal_compiles() {
+        // An array literal of factory results must compile — the element
+        // type resolves to the factory's anonymous-object return type rather
+        // than cascading an `unknown` element into `op_new_array`.
+        assert!(compiles(
+            r#"
+            fn aabb(lo, hi) { {min: lo, max: hi} }
+            let xs = [aabb(1, 5), aabb(2, 6)]
+            print(xs)
+            "#
+        ));
+    }
+}

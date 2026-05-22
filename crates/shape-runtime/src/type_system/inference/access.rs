@@ -150,6 +150,14 @@ impl TypeInferenceEngine {
             Type::Concrete(TypeAnnotation::Object(fields)) => {
                 // Object type with known fields - check declared fields first
                 if let Some(field) = fields.iter().find(|f| f.name == property) {
+                    // A field may carry a `tyvar` marker (an object literal
+                    // built from an unannotated parameter). Decode it back to
+                    // a `Type::Variable` so a binop / comparison on the field
+                    // resolves through the unifier once callsite propagation
+                    // has bound the parameter.
+                    if let Some(var) = annotation_as_tyvar(&field.type_annotation) {
+                        return Ok(self.unifier.apply_substitutions(&Type::Variable(var)));
+                    }
                     return Ok(Type::Concrete(field.type_annotation.clone()));
                 }
 

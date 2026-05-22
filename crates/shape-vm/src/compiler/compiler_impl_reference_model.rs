@@ -805,6 +805,7 @@ impl BytecodeCompiler {
         HashMap<String, String>,
         HashMap<String, Vec<Option<shape_value::v2::ConcreteType>>>,
         HashMap<String, Vec<Option<Vec<(String, shape_runtime::type_schema::FieldType)>>>>,
+        HashMap<String, Vec<(String, shape_runtime::type_schema::FieldType)>>,
     ) {
         let funcs = Self::collect_program_functions(program);
         let mut inference = shape_runtime::type_system::inference::TypeInferenceEngine::new();
@@ -824,6 +825,11 @@ impl BytecodeCompiler {
         // object-literal-shaped parameters.
         let inferred_param_object_fields =
             Self::infer_param_object_fields_from_types(program, &types);
+        // WS-9c: project anonymous-object inferred RETURN types so
+        // `compile_expr_function_call` can register an inline schema and
+        // resolve `f(...).field` for unannotated object-literal factories.
+        let inferred_return_object_fields =
+            Self::infer_return_object_fields_from_types(program, &types);
 
         let mut effective_ref_params: HashMap<String, Vec<bool>> = HashMap::new();
         for (name, func) in &funcs {
@@ -894,6 +900,7 @@ impl BytecodeCompiler {
             inferred_return_type_hints,
             inferred_param_concrete_types,
             inferred_param_object_fields,
+            inferred_return_object_fields,
         )
     }
 
@@ -953,6 +960,100 @@ impl BytecodeCompiler {
         }
 
         out
+    }
+
+    /// WS-9c: project each function's inferred RETURN type into a
+    /// `Vec<(field_name, FieldType)>` when that return type is an anonymous
+    /// structural object.
+    ///
+    /// Mirrors `infer_param_object_fields_from_types` for the return
+    /// position. The motivating shape is an anonymous-object factory:
+    /// `fn aabb(lo, hi) { {min: lo, max: hi} }`. The program-wide inference
+    /// pass resolves the return type to `Object({min: int, max: int})` once
+    /// callsite propagation binds the parameters; this projection hands the
+    /// bytecode compiler the per-field types so it can register an anonymous
+    /// schema for the return value and resolve `aabb(...).field` /
+    /// `let a = aabb(...); a.field` — exactly the resolution a named struct
+    /// return type already gets. A return type that is not an anonymous
+    /// object (a primitive, a named struct, an array, or still-unresolved)
+    /// keeps `None`.
+    pub(super) fn infer_return_object_fields_from_types(
+        program: &Program,
+        inferred_types: &HashMap<String, Type>,
+    ) -> HashMap<String, Vec<(String, shape_runtime::type_schema::FieldType)>> {
+        use shape_ast::ast::TypeAnnotation;
+        let funcs = Self::collect_program_functions(program);
+        let mut out = HashMap::new();
+
+        for (name, func) in funcs {
+            // A function with an explicit return-type annotation already
+            // resolves through the annotation path in
+            // `compile_expr_function_call`; only unannotated functions need
+            // the inferred-return projection.
+            if func.return_type.is_some() {
+                continue;
+            }
+            let Some(Type::Function { returns, .. }) = inferred_types.get(&name) else {
+                continue;
+            };
+            if let Type::Concrete(TypeAnnotation::Object(obj_fields)) = returns.as_ref() {
+                let fields: Vec<(String, shape_runtime::type_schema::FieldType)> = obj_fields
+                    .iter()
+                    .map(|f| {
+                        (
+                            f.name.clone(),
+                            Self::type_annotation_to_field_type(&f.type_annotation),
+                        )
+                    })
+                    .collect();
+                if !fields.is_empty() {
+                    out.insert(name, fields);
+                }
+            }
+        }
+        out
+    }
+
+    /// WS-9c: register an inline anonymous schema for every unannotated
+    /// function whose inferred return type is an anonymous object, recording
+    /// the schema id under the function name in `function_return_schema_ids`
+    /// and the precise per-field types as schema field contracts.
+    ///
+    /// The schema is Any-uniform (mirroring
+    /// `extract_object_schema_id_from_annotation` so the layout matches the
+    /// pre-existing inline-object shape); the precise field types live in the
+    /// parallel field-contract side table consulted by `infer_expr_type`.
+    fn register_inferred_return_object_schemas(&mut self) {
+        use shape_runtime::type_schema::FieldType;
+        let return_fields = self.inferred_return_object_fields.clone();
+        for (fn_name, fields) in return_fields {
+            if fields.is_empty() {
+                continue;
+            }
+            let typed_fields: Vec<(&str, FieldType)> = fields
+                .iter()
+                .map(|(name, _)| (name.as_str(), FieldType::Any))
+                .collect();
+            let schema_id = self
+                .type_tracker
+                .register_inline_object_schema_typed(&typed_fields);
+            let mut contracts = std::collections::HashMap::with_capacity(fields.len());
+            for (name, field_ty) in &fields {
+                if let Some(ann) =
+                    crate::compiler::expressions::function_calls::field_type_contract_annotation(
+                        field_ty,
+                    )
+                {
+                    contracts.insert(name.clone(), ann);
+                }
+            }
+            if !contracts.is_empty() {
+                self.type_tracker
+                    .register_object_field_contracts(schema_id, contracts);
+            }
+            self.function_return_schema_ids
+                .insert(fn_name, schema_id);
+        }
     }
 
     /// v0.3 WS-7: project the program-wide type-inference engine's
@@ -1345,6 +1446,7 @@ impl BytecodeCompiler {
             inferred_return_type_hints,
             inferred_param_concrete_types,
             inferred_param_object_fields,
+            inferred_return_object_fields,
         ) = Self::infer_reference_model(&program);
         self.inferred_param_pass_modes =
             Self::build_param_pass_mode_map(&program, &inferred_ref_params, &inferred_ref_mutates);
@@ -1353,6 +1455,17 @@ impl BytecodeCompiler {
         self.inferred_param_type_hints = inferred_param_type_hints;
         self.inferred_param_concrete_types = inferred_param_concrete_types;
         self.inferred_param_object_fields = inferred_param_object_fields;
+        self.inferred_return_object_fields = inferred_return_object_fields;
+        // WS-9c: eagerly register an inline anonymous schema (+ per-field
+        // contracts) for every unannotated function whose inferred return
+        // type is an anonymous object. Registering up-front — before any
+        // body compiles — makes the return-object schema available both to
+        // `compile_expr_function_call` (which stamps it on the call's
+        // `last_expr_schema` so a `let` binding inherits it) and to the
+        // read-only `infer_expr_type` property-access path (which resolves
+        // `f(...).field` directly). `register_inline_object_schema_typed` is
+        // idempotent on the field set, so this never duplicates a schema.
+        self.register_inferred_return_object_schemas();
         // Phase 3e: register inferred return types so function-call
         // compilation can recover the numeric type even for sources with
         // no explicit `-> T` annotation.

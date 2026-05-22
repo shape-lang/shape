@@ -3,7 +3,7 @@
 //! Implements unification algorithm for type inference,
 //! maintaining substitutions and applying them to types.
 
-use crate::type_system::{Type, TypeVar};
+use crate::type_system::{Type, TypeVar, annotation_as_tyvar, tyvar_to_annotation};
 use shape_ast::ast::TypeAnnotation;
 use std::collections::HashMap;
 
@@ -79,12 +79,35 @@ impl Unifier {
                 returns: Box::new(self.apply_substitutions(returns)),
             },
 
-            Type::Concrete(_) => ty.clone(),
+            // A concrete annotation can still embed `tyvar` markers — an
+            // object literal over an unresolved parameter freezes to
+            // `Object({field: <tyvar>})`. Recurse so the marker resolves
+            // once the underlying variable is bound.
+            Type::Concrete(ann) => Type::Concrete(self.apply_to_annotation(ann)),
         }
     }
 
     /// Apply substitutions to a type annotation
     pub fn apply_to_annotation(&self, ann: &TypeAnnotation) -> TypeAnnotation {
+        // A `tyvar` marker (an object-literal field over an unresolved
+        // variable) resolves through the substitution store. If the binding
+        // is itself an unresolved variable the marker is re-encoded so a
+        // later pass can finish the job; an unbound marker stays as-is and
+        // projects to `unknown` downstream — an honest "not inferred".
+        if let Some(var) = annotation_as_tyvar(ann) {
+            return match self.substitutions.get(&var) {
+                Some(_) => {
+                    let resolved = self.apply_substitutions(&Type::Variable(var));
+                    match &resolved {
+                        Type::Variable(v) | Type::Constrained { var: v, .. } => {
+                            tyvar_to_annotation(v)
+                        }
+                        _ => resolved.to_annotation().unwrap_or_else(|| ann.clone()),
+                    }
+                }
+                None => ann.clone(),
+            };
+        }
         match ann {
             TypeAnnotation::Array(elem) => {
                 TypeAnnotation::Array(Box::new(self.apply_to_annotation(elem)))
