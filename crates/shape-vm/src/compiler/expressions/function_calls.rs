@@ -2808,9 +2808,59 @@ impl BytecodeCompiler {
                 })
             })
         });
+        // D-γ window_over_partition_by hang fix (v0.3 KC #6(e), 2026-05-22):
+        // a UFCS-resolved generic extend method (e.g. `Vec.map<T,U>`) has
+        // its body skipped at compile time (functions.rs:201-207 — generic
+        // bodies stay in `function_defs` only, awaiting monomorphization).
+        // If monomorphization fails for the concrete receiver/arg types
+        // (e.g. `Vec<Struct>.map` where the closure-aware resolver bails on
+        // the struct element kind and the type-only resolver returns None
+        // for the same reason), the previous code unconditionally emitted
+        // `Call(generic_idx)`. The generic blob has no instructions and no
+        // entry in `blob_name_to_hash`, so the content-addressed linker's
+        // `remap_fid` (linker.rs:105) takes the ZERO-sentinel branch,
+        // fails the `name_to_id[callee_name]` lookup, and falls back to
+        // `current_function_id` — rewriting the call target to `__main__`
+        // itself. The program then recurses through `__main__` until stack
+        // overflow / SIGKILL. Fix: when the resolved function is generic
+        // and monomorphization fails, skip the UFCS branch and let the
+        // standard `CallMethod` runtime dispatch handle it — that path
+        // surfaces a clean NotImplemented error from the PHF method
+        // registry (e.g. ckpt2_surface for typed-array methods), preserving
+        // the surface-and-stop discipline rather than silently hanging.
+        let is_generic_unmonomorphizable = extend_func_idx
+            .or_else(|| self.find_function(method))
+            .filter(|&idx| self.current_function != Some(idx))
+            .and_then(|idx| {
+                let func_name = self.program.functions[idx].name.clone();
+                let is_generic = self
+                    .function_defs
+                    .get(&func_name)
+                    .and_then(|d| d.type_params.as_ref())
+                    .is_some_and(|tps| !tps.is_empty());
+                if !is_generic {
+                    return None;
+                }
+                // Probe monomorphization without compiling default args yet.
+                // If it succeeds, the UFCS branch below will re-run it and
+                // hit the cache; if it fails, we know to skip the UFCS
+                // branch entirely.
+                let mono_idx = self.try_monomorphize_method_call(
+                    &func_name,
+                    receiver,
+                    args,
+                    call_site_span,
+                );
+                if mono_idx.is_none() {
+                    Some(idx)
+                } else {
+                    None
+                }
+            });
         if let Some(func_idx) = extend_func_idx
             .or_else(|| self.find_function(method))
             .filter(|&idx| self.current_function != Some(idx))
+            .filter(|&idx| Some(idx) != is_generic_unmonomorphizable)
         {
             // UFCS rewrite: receiver already compiled (on stack), args already compiled.
             // Stack is: [receiver, arg1, arg2, ...] — receiver is first, which is what we want.
@@ -2845,7 +2895,11 @@ impl BytecodeCompiler {
             // concrete element type. This produces a specialized function that
             // the v2 pipeline can emit typed opcodes for.
             //
-            // Falls back to the generic function index on any failure.
+            // Falls back to the generic function index on any failure — but the
+            // D-γ guard above ensures we only reach this fallback for
+            // non-generic functions (whose generic-empty body is the actual
+            // compiled body) or for generic functions where the probe
+            // succeeded (so monomorphization here will hit the cache).
             let call_func_idx = self
                 .try_monomorphize_method_call(&func_name, receiver, args, call_site_span)
                 .unwrap_or(func_idx);
@@ -2924,9 +2978,42 @@ impl BytecodeCompiler {
                 })
                 .flatten();
 
+            // D-γ window_over_partition_by hang fix (v0.3 KC #6(e), 2026-05-22):
+            // parallel guard to the extend-method UFCS site above — see the
+            // comment there for the root-cause analysis. When the resolved
+            // impl/trait method is a generic-no-body and monomorphization
+            // fails, skip this branch so the standard `CallMethod` runtime
+            // dispatch handles it (clean NotImplemented error vs. silent
+            // hang from the linker's `current_function_id` fallback).
+            let scoped_is_generic_unmonomorphizable = scoped_func_idx
+                .or(trait_func_idx)
+                .filter(|&idx| self.current_function != Some(idx))
+                .and_then(|idx| {
+                    let func_name = self.program.functions[idx].name.clone();
+                    let is_generic = self
+                        .function_defs
+                        .get(&func_name)
+                        .and_then(|d| d.type_params.as_ref())
+                        .is_some_and(|tps| !tps.is_empty());
+                    if !is_generic {
+                        return None;
+                    }
+                    let mono_idx = self.try_monomorphize_method_call(
+                        &func_name,
+                        receiver,
+                        args,
+                        call_site_span,
+                    );
+                    if mono_idx.is_none() {
+                        Some(idx)
+                    } else {
+                        None
+                    }
+                });
             if let Some(func_idx) = scoped_func_idx
                 .or(trait_func_idx)
                 .filter(|&idx| self.current_function != Some(idx))
+                .filter(|&idx| Some(idx) != scoped_is_generic_unmonomorphizable)
             {
                 let func_name = self.program.functions[func_idx].name.clone();
                 let total_arity = self.program.functions[func_idx].arity as usize;
@@ -2952,7 +3039,10 @@ impl BytecodeCompiler {
                 // When an impl method has synthesized type parameters (e.g.
                 // `Array::findIndex` with T from the receiver's element type),
                 // try to monomorphize it for the receiver's concrete type.
-                // Falls back to the generic function index on any failure.
+                // Falls back to the generic function index on any failure —
+                // but the D-γ guard above ensures we only reach this fallback
+                // for non-generic functions or generic functions where the
+                // probe succeeded (cache hit).
                 let call_func_idx = self
                     .try_monomorphize_method_call(&func_name, receiver, args, call_site_span)
                     .unwrap_or(func_idx);

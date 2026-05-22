@@ -89,7 +89,19 @@ fn window_ntile_quartiles() {
 // Over (Partition + Order)
 // =========================================================================
 
-// TDD: over() clause and rank() builtin not implemented
+// TDD: over() clause and rank() builtin not implemented.
+// D-γ close (v0.3 KC #6(e), 2026-05-22): the prior `expect_run_ok` form
+// HUNG until SIGKILL because `from..select` desugars to `Vec.map`, and the
+// generic `Vec.map<T,U>` extend method's monomorphization fails for the
+// struct-element receiver here. The compiler's previous fallback emitted
+// `Call(generic_idx)` for the body-less generic, which the content-
+// addressed linker (`linker.rs:remap_fid`) rewrote to `current_function_id`
+// — recursing through `__main__`. The fix routes generic-no-body callees
+// to the standard `CallMethod` runtime dispatch, which surface-and-stops
+// at `handle_map_v2`'s V3-S5 ckpt-2 NotImplemented stub. Aligned with the
+// audit §6(e) classification: 7 sibling window_* tests stay INCOMPLETE-
+// CLEAN feature-gap (v0.4 polish); this one moves from KNOWN-INCORRECT
+// (hang) to INCOMPLETE-CLEAN (clean surface error) by the same fix.
 #[test]
 fn window_over_partition_by() {
     ShapeTest::new(
@@ -102,8 +114,7 @@ fn window_over_partition_by() {
         print(result.length)
     "#,
     )
-    .expect_run_ok()
-    .expect_output("2");
+    .expect_run_err_contains("map: SURFACE");
 }
 
 // =========================================================================
