@@ -8,13 +8,14 @@
 //! ## Wave-δ B6-round-2 close (2026-05-09)
 //!
 //! Final close for cluster B's `variables/mod.rs`. Migration sources kind
-//! through the §2.7.7 stack parallel-`Vec<NativeKind>` track, the §2.7.8
+//! through the §2.7.7 stack parallel-`Vec<NativeKind>` track and the §2.7.8
 //! cell-storage parallel-kind tracks (`OwnedClosureBlock` /
 //! `ClosureLayout::capture_native_kinds` per Wave-γ G-owned-closure-block
 //! commit `cb0bf86`, `module_binding_*_kinded` API per Wave-γ
 //! G-module-bindings-kind commit `27e2918`, `SharedCell::kind()` per
-//! Wave-α B8-shared-cell), and the FrameDescriptor's per-local kind
-//! track (`current_frame_descriptor()?.slot(idx)`).
+//! Wave-α B8-shared-cell). Slot kind is the parallel-track `kinds[slot]`;
+//! the `FrameDescriptor` is not consulted by the VM interpreter at all
+//! (it is a JIT-only marshaling input — WS-10b verifier note).
 //!
 //! The polymorphic legacy paths that dispatched on `tag_bits::is_tagged`
 //! / `tag_bits::get_tag` (the deleted ValueWord NaN-box discriminator) and
