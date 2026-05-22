@@ -16,11 +16,11 @@ tags and language semantics. The user relays between team-lead and supervisor.
 
 | | |
 |---|---|
-| Main HEAD | `4b6d6833` (W17.3-4.1 merged + audit corrections landed) |
-| Smoke matrix s1–s5 | **5/5 VM == JIT** (canonical (ii) F' release-binary harness; re-verified post-merge 2026-05-22) |
+| Main HEAD | `975536d3` (W17.3-4.1 + D-δ merged; audit corrections landed) |
+| Smoke matrix s1–s5 | **5/5 VM == JIT** (canonical (ii) F' release-binary harness; re-verified post-D-δ-merge 2026-05-22) |
 | verify-merge / check-no-dynamic | 13/13 / exit 0 |
 | Round-6+ no-known-incorrectness set | **EMPTY** per user 2026-05-20 binding |
-| 2026-05-22 expanded-scope gating set | **OPEN.** Audits CLOSED A/B/C/D. **W17.3-4.1 MERGED** (criterion B partial close, 1 of 3). W16.2-J.1 surface-and-stopped — audit §3 sequencing corrected (NEW J.0 prereq); slate 5→6 sub-clusters; effort 24–37h→30–47h. D-δ in flight. E (W18) + J (comptime trait) audit-first next round. F (Len + membership + KC #2 deletion) PENDING dispatch alongside W18. G.1/G.2 doc-truth gated on A–F+J. |
+| 2026-05-22 expanded-scope gating set | **OPEN.** Audits CLOSED A/B/C/D. **First wave: 2/3 MERGED** — W17.3-4.1 (`4b6d6833`); D-δ (`975536d3`); W16.2-J.1 surface-and-stopped + audit §3 corrected (NEW J.0 prereq). Slate 5→6 sub-clusters; effort 24–37h→30–47h. E (W18) + J (comptime trait) audit-first next round. F (Len + membership + KC #2 deletion) PENDING dispatch alongside W18. G.1/G.2 doc-truth gated on A–F+J. |
 | v0.3.0 tag | NOT landed — gated on expanded-scope work + user authorization |
 
 ## 2026-05-22 expanded scope (binding — user, dialogue-supplemented same day)
