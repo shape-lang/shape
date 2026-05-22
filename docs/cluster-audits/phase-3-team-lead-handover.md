@@ -1,7 +1,7 @@
 # Team-lead handover — Shape v0.3 close-approach
 
-**Refreshed:** 2026-05-21 at main HEAD `33ddace6`. Round 6+. Git holds prior
-content; no archaeology here.
+**Refreshed:** 2026-05-22 at main HEAD `45dedd02`. Round-6+ CLOSED. Git holds
+prior content; no archaeology here.
 
 ## Role
 
@@ -10,14 +10,31 @@ Team-lead for the Shape v0.3 close-approach. Runs the program **autonomously**
 supervisor handles architectural calls; the user (strategic owner) authorizes
 tags and language semantics. The user relays between team-lead and supervisor.
 
-## Current state
+## Current state — Round-6+ CLOSED, awaiting tag authorization
 
 | | |
 |---|---|
-| Main HEAD | `33ddace6` |
-| Smoke matrix s1–s5 | 5/5 VM == JIT (canonical (ii) F' release-binary harness) |
+| Main HEAD | `45dedd02` (post §2.7.13 amendment) |
+| Smoke matrix s1–s5 | **5/5 VM == JIT** (canonical (ii) F' release-binary harness) |
 | verify-merge / check-no-dynamic | 13/13 / exit 0 |
-| v0.3 tag | NOT landed; decision-gated (see below) |
+| Round-6+ no-known-incorrectness set | **EMPTY** per user 2026-05-20 binding |
+| v0.3.0 tag | NOT landed — awaiting user authorization |
+
+## Round-6+ workstreams (15 merged + verified)
+
+WS-1 (W16.2-C empty-literal/spread/comprehension), WS-1b (bare-accumulator),
+WS-2 (ζ-round), WS-3 (Result/AnyError F1–F4 + array-rest), WS-4 (object
+destructuring 4a/4b/4c), WS-6 + WS-6b (generic-arg monomorphization), WS-7
+(JIT array-param SIGSEGV + legacy OOB), WS-8 (consumer-cascade kind-generic
+bundle), WS-9 (index-access inference + silent-wrong-result), WS-9b
+(property-access inference), WS-9c (factory inference / `apply_callsite_unions`),
+WS-10b (verifier-noise fix + 29-classification), WS-11 (REPL cross-cell
+persistence), WS-12 (Option as-cast).
+
+ADR-006 §2.7.13 amendment landed (commit `45dedd02`): `TypedField.receiver
+→ TypedObjectPtr` per β1 (`a287c795` / `278aa214`); `TypedIndex` deletion
+recorded; full strike set applied (post-apply check = 1 line, the single
+canonical historical deletion-note).
 
 ## Canonical (ii) F' smoke harness
 
@@ -29,41 +46,38 @@ ec=$?; last=$(echo "$out" | tail -1)
 Fixtures `tests/smokes/s{1..5}.shape`; expected s1 `4950` / s2 `30` / s3 `x`
 / s4 `2` / s5 `x`, all ec=0, VM == JIT.
 
-## Round-6+ — merged + verified (10 workstreams)
+## Pending the v0.3 tag
 
-WS-1 (W16.2-C op_new_array spread/comprehension), WS-2 (ζ-round loop inference
-+ `id(None)`), WS-3 (Result/AnyError F1-F4 + array-rest), WS-4 (object
-destructuring 4a/4b/4c), WS-6 + WS-6b (generic-arg monomorphization), WS-7
-(JIT array-param SIGSEGV + legacy array-OOB), WS-9 (index-access-into-
-unannotated-param inference + silent-wrong-result), WS-9b (property-access-
-into-unannotated-param inference), WS-1b (bare-accumulator op_new_array).
-Audit docs: `v0.3-w16-2-c-empty-literal-audit.md`, `v0.3-ws3-result-anyerror-
-audit.md`, `v0.3-ws4-object-destructuring-audit.md`, `v0.3-ws8-consumer-
-cascade-audit.md`, `v0.3-ws9-generic-fn-inference-audit.md`,
-`v0.3-ws10-preexisting-items-audit.md`.
+1. Relay close-evidence to supervisor (this turn).
+2. Supervisor ratifies close.
+3. **User** authorizes the `v0.3.0` tag (CLAUDE.md / supervisor handover
+   binding — release-tag authority is the user's lane).
+4. Team-lead lands the tag at the authorized commit. Do NOT annotate the
+   tag pre-authorization.
 
-## Decision-gated — remaining v0.3 work (nothing autonomously dispatchable)
+## v0.4 inventory (close-summary §5)
 
-1. **WS-8 consumer-cascade fix-wave** — gated on the user's string-array
-   implement-vs-clean-error ruling (WS-8 map relayed). Settled/unconditional:
-   6 bool + 2 decimal VM/JIT divergences + 2 string bugs (bundle on dispatch).
-   Open: implement string-array basic methods in v0.3 vs de-jargon-to-v0.4;
-   `.contains()` disposition (alias `.includes` vs absent-by-design).
-2. **Anonymous-object-factory inference loss** — `fn aabb(lo,hi){{min:lo,
-   max:hi}}` spurious-rejects ("cannot infer ... unknown"); the true root of
-   the ~14 `simulation.rs` Cluster-A tests. `apply_callsite_unions` widens a
-   `types` map without binding the param variable in the unifier → object-
-   literal fields from unannotated params freeze to `unknown`. Decision: (A)
-   `apply_callsite_unions` restructure in v0.3 (architectural), or (B) rule it
-   a v0.3 language limitation (annotate such params) + clean-error + v0.4
-   restructure.
-3. **WS-5** ADR-006 §2.7.13 amendment ratify (β1 `a287c795` / `278aa214`).
-   **W16.2-B** scalar-element `dyn Trait` scope (`Array<dyn Speak>=[1,2]`
-   stores raw Int64; `arr[0].s()` fails).
+In `docs/v0.3-close-summary.md` §5.9–§5.12 (new in round-6+): W16.2-J
+PHF-retirement workstream; scalar-element `dyn Trait` arrays (W16.2-B);
+native JIT decimal-scalar codegen; REPL declaration-statement `false`
+print; WS-9c `tyvar` marker → `TypeAnnotation::Variable` variant; plus
+the prior set (W15.2-K, §4.D.10, W17.3-4, shape-web-worktree-infra,
+annotated-closure-param parse + `sortBy` defect, phase-2c host-tier
+marshal/snapshot rebuild).
 
-Pre-existing, WS-10-classified v0.4 (no action): bytecode-verifier "16
-violations" stderr noise (stale rule, not a soundness gap); 314 shape-vm test
-failures (285 phase-2c host-tier stubs + 29 other; 0 round-6 regressions).
+## Bindings — refuse on sight
+
+Full detail: CLAUDE.md + ADR-006 §2.7.x. Operative:
+- **No-known-incorrectness-ships-in-v0.3** (user 2026-05-20): known-incorrect
+  (crash / VM-JIT divergence / wrong result / memory-unsafety / silent-wrong-
+  output / spurious-reject of valid code) → v0.3-gating; incomplete-but-CLEAN
+  → v0.4-OK; jargon-dump NOT clean.
+- **Q3 ground-truth before disposition + full-breadth verification.**
+- **Run-verify binding extension (supervisor 2026-05-22):** every repro in
+  a surfacing MUST run-verify at HEAD before relay — same standing as the
+  file:line / commit-hash grep-verify rule.
+- All CLAUDE.md Forbidden Patterns + Renames + ADR-006 §2.7.x. NO ARCHAEOLOGY.
+  No Co-Authored-By trailer; own all code quality.
 
 ## Dispatch hygiene (binding — round-6 lesson)
 
@@ -74,35 +88,20 @@ path as its first `cd`, forbid `cd`-ing to `/home/dev/dev/shape-lang/shape`.
 Avoid `git stash` (shared `.git` stash-stack race). Each fix branch is built +
 its reproducers re-verified on main post-merge before the next dispatch.
 
-## Bindings — refuse on sight
-
-Full detail: CLAUDE.md + ADR-006 §2.7.x. Operative: No-known-incorrectness-
-ships-in-v0.3 (user 2026-05-20) — known-incorrect (crash / VM-JIT divergence /
-wrong result / memory-unsafety / silent-wrong-output / spurious-reject of
-valid code) → v0.3-gating; incomplete-but-CLEAN → v0.4-OK; jargon-dump is NOT
-clean. Q3 ground-truth before disposition (and verify FULL breadth, not an
-agent's chosen reproducers). Hypotheses INVESTIGATE not FIX. HEAD-commit-cite.
-All CLAUDE.md Forbidden Patterns + Renames + ADR-006 §2.7.x. NO ARCHAEOLOGY;
-no Co-Authored-By trailer; own all code quality.
-
 ## Cadence
 
 Autonomous. Surface only on: defection-attractor framing / ADR amendment /
 novel architectural gap needing a scope decision / user-decision item.
-Relays ≤ ~80 lines; plain code fences.
+Relays ≤ ~80 lines; plain code fences (user pastes verbatim).
 
 ## Close gates (every checkpoint)
 
 `just check-clean` exit 0 · `verify-merge.sh` all pass · `check-no-dynamic.sh`
-exit 0 · smoke s1–s5 5/5 VM == JIT · AGENTS.md row; no Co-Authored-By.
-
-## v0.3 tag
-
-After the gating set is empty + smoke 5/5 → relay close evidence to supervisor
-→ supervisor ratifies → USER authorizes the `v0.3.0` tag. Land only on
-explicit user authorization.
+exit 0 · smoke s1–s5 5/5 VM == JIT · AGENTS.md row; no Co-Authored-By trailer.
 
 ---
 
-*Live operational state. Next rotation: verify HEAD + smoke 5/5 + verify-merge,
-read the round-6 `cluster-audits/` docs, resolve the decision-gated items.*
+*Round-6+ CLOSED. The v0.3-close-summary.md §0/§4/§5 are refreshed; the
+close-relay carries the final close evidence. Next rotation: read this doc +
+the close-summary, verify HEAD + smoke 5/5, and proceed per the user's tag
+authorization.*
