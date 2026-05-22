@@ -61,6 +61,98 @@ pub fn register_v2_symbols(builder: &mut JITBuilder) {
         v2::jit_new_typed_array_typed_object as *const u8,
     );
 
+    // W16.2-J.3 (2026-05-22): macro-uniform per-kind allocator aliases +
+    // get/set entries for the 3 heap-element kinds. The legacy
+    // `jit_new_typed_array_<kind>` symbols above stay consumer-wired via
+    // `compiler/ffi_builder.rs`; these `jit_v2_array_new_<kind>` aliases
+    // complete the per-kind symbol matrix for the macro-generated surface.
+    // Get/set entries operate on the `*const T` heap-element carrier with
+    // raw pointer payloads at the FFI boundary; per-element refcount
+    // discipline is the caller's responsibility per the VM-side transfer
+    // convention.
+    builder.symbol(
+        "jit_v2_array_new_string",
+        v2::jit_v2_array_new_string as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_array_get_string",
+        v2::jit_v2_array_get_string as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_array_set_string",
+        v2::jit_v2_array_set_string as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_array_new_decimal",
+        v2::jit_v2_array_new_decimal as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_array_get_decimal",
+        v2::jit_v2_array_get_decimal as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_array_set_decimal",
+        v2::jit_v2_array_set_decimal as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_array_new_typed_object",
+        v2::jit_v2_array_new_typed_object as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_array_get_typed_object",
+        v2::jit_v2_array_get_typed_object as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_array_set_typed_object",
+        v2::jit_v2_array_set_typed_object as *const u8,
+    );
+
+    // W16.2-J.3 (2026-05-22): macro-generated per-kind new/get/set FFI
+    // symbols for the 7 sized-integer + F32 + Char `TypedArrayKind` variants
+    // (W12 S1 + Wave 2 A1 monomorphizations). Bodies live in
+    // `ffi/v2/mod.rs` under the `v2_typed_array_scalar!` macro expansion.
+    // Each allocator stamps the matching `ELEM_TYPE_<KIND>` byte at
+    // `HeapHeader._pad` offset 7 per ADR-006 §2.7.5 producer-side stamp.
+    // Consumer-side dispatch (`mir_compiler/v2_array.rs::v2_array_new_func`)
+    // does NOT yet route per-NativeKind for these kinds at HEAD — wiring
+    // them into the JIT codegen consumer is a follow-up territory.
+    builder.symbol("jit_v2_array_new_i8", v2::jit_v2_array_new_i8 as *const u8);
+    builder.symbol("jit_v2_array_get_i8", v2::jit_v2_array_get_i8 as *const u8);
+    builder.symbol("jit_v2_array_set_i8", v2::jit_v2_array_set_i8 as *const u8);
+
+    builder.symbol("jit_v2_array_new_u8", v2::jit_v2_array_new_u8 as *const u8);
+    builder.symbol("jit_v2_array_get_u8", v2::jit_v2_array_get_u8 as *const u8);
+    builder.symbol("jit_v2_array_set_u8", v2::jit_v2_array_set_u8 as *const u8);
+
+    builder.symbol("jit_v2_array_new_i16", v2::jit_v2_array_new_i16 as *const u8);
+    builder.symbol("jit_v2_array_get_i16", v2::jit_v2_array_get_i16 as *const u8);
+    builder.symbol("jit_v2_array_set_i16", v2::jit_v2_array_set_i16 as *const u8);
+
+    builder.symbol("jit_v2_array_new_u16", v2::jit_v2_array_new_u16 as *const u8);
+    builder.symbol("jit_v2_array_get_u16", v2::jit_v2_array_get_u16 as *const u8);
+    builder.symbol("jit_v2_array_set_u16", v2::jit_v2_array_set_u16 as *const u8);
+
+    builder.symbol("jit_v2_array_new_u32", v2::jit_v2_array_new_u32 as *const u8);
+    builder.symbol("jit_v2_array_get_u32", v2::jit_v2_array_get_u32 as *const u8);
+    builder.symbol("jit_v2_array_set_u32", v2::jit_v2_array_set_u32 as *const u8);
+
+    builder.symbol("jit_v2_array_new_f32", v2::jit_v2_array_new_f32 as *const u8);
+    builder.symbol("jit_v2_array_get_f32", v2::jit_v2_array_get_f32 as *const u8);
+    builder.symbol("jit_v2_array_set_f32", v2::jit_v2_array_set_f32 as *const u8);
+
+    builder.symbol(
+        "jit_v2_array_new_char",
+        v2::jit_v2_array_new_char as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_array_get_char",
+        v2::jit_v2_array_get_char as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_array_set_char",
+        v2::jit_v2_array_set_char as *const u8,
+    );
+
     // Generic typed-array push dispatcher (R7.2 consolidation)
     builder.symbol("jit_v2_array_push", v2::jit_v2_array_push as *const u8);
 
@@ -440,6 +532,102 @@ pub fn declare_v2_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<Stri
             &sig,
         );
     }
+
+    // ========================================================================
+    // W16.2-J.3 (2026-05-22): per-kind get/set + macro-uniform new aliases
+    // for the 3 heap-element kinds (String / Decimal / TypedObject). Pointer
+    // payloads use the I64 raw-bits carrier (matches `jit_v2_field_load_ptr`).
+    // ========================================================================
+
+    // String / Decimal / TypedObject — alias allocators + get/set entries.
+    for new_alias in [
+        "jit_v2_array_new_string",
+        "jit_v2_array_new_decimal",
+        "jit_v2_array_new_typed_object",
+    ] {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I32)); // capacity
+        sig.returns.push(AbiParam::new(types::I64)); // *mut TypedArray<*const T>
+        declare(module, ffi_funcs, new_alias, &sig);
+    }
+    for get_name in [
+        "jit_v2_array_get_string",
+        "jit_v2_array_get_decimal",
+        "jit_v2_array_get_typed_object",
+    ] {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // arr ptr
+        sig.params.push(AbiParam::new(types::I64)); // index
+        sig.returns.push(AbiParam::new(types::I64)); // *const T (raw bits)
+        declare(module, ffi_funcs, get_name, &sig);
+    }
+    for set_name in [
+        "jit_v2_array_set_string",
+        "jit_v2_array_set_decimal",
+        "jit_v2_array_set_typed_object",
+    ] {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // arr ptr
+        sig.params.push(AbiParam::new(types::I64)); // index
+        sig.params.push(AbiParam::new(types::I64)); // val (raw bits)
+        declare(module, ffi_funcs, set_name, &sig);
+    }
+
+    // ========================================================================
+    // W16.2-J.3 (2026-05-22): per-kind new/get/set for the 7 sized-integer +
+    // F32 + Char `TypedArrayKind` variants (W12 S1 + Wave 2 A1
+    // monomorphizations). Each kind has 3 entries: new(capacity) -> ptr,
+    // get(ptr, idx) -> native, set(ptr, idx, val).
+    // ========================================================================
+
+    // Helper: declare a triple (new, get, set) for a scalar kind.
+    macro_rules! declare_v2_array_scalar {
+        ($kind:ident, $ct:expr) => {{
+            // new(capacity: u32) -> ptr
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I32));
+            sig.returns.push(AbiParam::new(types::I64));
+            declare(
+                module,
+                ffi_funcs,
+                concat!("jit_v2_array_new_", stringify!($kind)),
+                &sig,
+            );
+            // get(arr, index) -> native
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new($ct));
+            declare(
+                module,
+                ffi_funcs,
+                concat!("jit_v2_array_get_", stringify!($kind)),
+                &sig,
+            );
+            // set(arr, index, val)
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new($ct));
+            declare(
+                module,
+                ffi_funcs,
+                concat!("jit_v2_array_set_", stringify!($kind)),
+                &sig,
+            );
+        }};
+    }
+
+    declare_v2_array_scalar!(i8, types::I8);
+    declare_v2_array_scalar!(u8, types::I8);
+    declare_v2_array_scalar!(i16, types::I16);
+    declare_v2_array_scalar!(u16, types::I16);
+    declare_v2_array_scalar!(u32, types::I32);
+    declare_v2_array_scalar!(f32, types::F32);
+    // `char` codepoints are exchanged as `u32` at the FFI boundary; the
+    // body in `ffi/v2/mod.rs` performs the `char::from_u32_unchecked`
+    // conversion using the JIT codegen-site's compile-time-proven Char kind.
+    declare_v2_array_scalar!(char, types::I32);
 
     // ========================================================================
     // Struct field access

@@ -48,39 +48,357 @@ use shape_value::v2::typed_array::TypedArray;
 // heap-header at construction time — the same compile-time-proof shape
 // the VM-side `op_new_typed_array_*` handlers use.
 use shape_vm::executor::v2_handlers::v2_array_detect::{
-    stamp_elem_type, ELEM_TYPE_BOOL, ELEM_TYPE_DECIMAL, ELEM_TYPE_F64,
-    ELEM_TYPE_I32, ELEM_TYPE_I64, ELEM_TYPE_STRING, ELEM_TYPE_TYPED_OBJECT,
+    stamp_elem_type, ELEM_TYPE_BOOL, ELEM_TYPE_CHAR, ELEM_TYPE_DECIMAL, ELEM_TYPE_F32,
+    ELEM_TYPE_F64, ELEM_TYPE_I16, ELEM_TYPE_I32, ELEM_TYPE_I64, ELEM_TYPE_I8,
+    ELEM_TYPE_STRING, ELEM_TYPE_TYPED_OBJECT, ELEM_TYPE_U16, ELEM_TYPE_U32, ELEM_TYPE_U8,
 };
 
 // ============================================================================
-// Array FFI — f64
+// W16.2-J.3 (2026-05-22): macro-generated per-kind TypedArray FFI symbols
 // ============================================================================
+//
+// Mirror of the VM-side W16.2-J.2 opcode macro-gen for the per-kind JIT FFI
+// surface. Generates `jit_v2_array_new_<suffix>` / `jit_v2_array_get_<suffix>`
+// / `jit_v2_array_set_<suffix>` per `(suffix, native_ty, ELEM_TYPE_<KIND>)`
+// triple. 14 `TypedArrayKind` variants covered: F64, I64, I32, Bool, I8, U8,
+// I16, U16, U32, F32, Char, String, Decimal, TypedObject.
+//
+// Each allocator stamps the element-kind byte at `HeapHeader._pad` (offset 7)
+// per ADR-006 §2.7.5 producer-side stamp + W11-fup-C 2026-05-18 stamp
+// discipline (`crates/shape-vm/src/executor/v2_handlers/array.rs:40-81`
+// matching VM-side `op_new_typed_array_*` shape). The element kind is
+// statically proven at the JIT codegen site that picks the FuncRef, so the
+// stamp byte authoritatively records the compile-time-proven kind into the
+// v2-raw allocation at construction time — zero-tag runtime preserved.
+//
+// `Bool` uses `u8` storage to match the VM-side `TypedArray<u8>` carrier
+// (`crates/shape-vm/src/executor/v2_handlers/v2_array_detect.rs:1476-1490`).
+// `Char` uses `char` storage (4-byte `Copy`) matching the VM; the get/set
+// FFI signatures use `u32` for C-ABI-safety with `char::from_u32_unchecked`
+// at the boundary (the kind is statically proven so the bits are always a
+// valid Unicode scalar). `String` / `Decimal` / `TypedObject` use the
+// `*const T` heap-element carrier per ADR-006 §2.7.24 Q25.A SUPERSEDED +
+// audit `v0.3-w16-2-j-audit.md` §1.D; the FFI signatures use `*const u8` at
+// the boundary to match the existing `jit_v2_field_load_ptr` carrier
+// convention. Per-element refcount discipline is the caller's responsibility
+// per the VM-side `NewStringV2` / `TypedArrayPushString` / `_Decimal` /
+// `_TypedObject` transfer convention.
+//
+// The 3 heap-element kinds retain the legacy `jit_new_typed_array_<kind>`
+// allocator names (consumer-wired via `compiler/ffi_builder.rs:232-235`);
+// the macro additionally generates `jit_v2_array_new_<kind>` aliases that
+// share the same body, keeping the symbol surface uniform for the macro-
+// generated `get`/`set` entries.
 
+/// Generate `new`, `get`, `set` FFI symbols for one `TypedArrayKind` variant
+/// whose elements are POD scalar (`f64`, `i64`, `i32`, etc.).
+///
+/// The macro takes the fully-spelled symbol names so the expansion matches
+/// the existing `jit_v2_array_<op>_<suffix>` convention referenced from
+/// `crates/shape-jit/src/compiler/ffi_builder.rs` and
+/// `crates/shape-jit/src/ffi_symbols/v2_symbols.rs`.
+macro_rules! v2_typed_array_scalar {
+    (
+        new = $new_fn:ident,
+        get = $get_fn:ident,
+        set = $set_fn:ident,
+        ty = $native_ty:ty,
+        elem_byte = $elem_byte:expr,
+        kind_label = $kind_label:literal $(,)?
+    ) => {
+        #[doc = concat!(
+            "Allocate an empty `TypedArray<", stringify!($native_ty), ">` of given capacity. ",
+            "Stamps `", $kind_label, "` at `HeapHeader._pad` offset 7 per ADR-006 §2.7.5."
+        )]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn $new_fn(capacity: u32) -> *mut TypedArray<$native_ty> {
+            let ptr = TypedArray::<$native_ty>::with_capacity(capacity);
+            // SAFETY: `with_capacity` returned a freshly-allocated TypedArray
+            // with a valid HeapHeader at offset 0; stamping the `_pad` byte
+            // at offset 7 is the documented W11-fup-C producer-side stamp.
+            unsafe { stamp_elem_type(ptr as *mut u8, $elem_byte) };
+            ptr
+        }
+
+        #[doc = concat!(
+            "Read the element at `index` from a `TypedArray<", stringify!($native_ty), ">`. ",
+            "Panics on out-of-bounds."
+        )]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn $get_fn(
+            arr: *const TypedArray<$native_ty>,
+            index: i64,
+        ) -> $native_ty {
+            unsafe {
+                if index < 0 || index as u32 >= (*arr).len {
+                    panic!(
+                        concat!(
+                            "v2 array ", $kind_label, " index {} out of bounds (len {})"
+                        ),
+                        index,
+                        (*arr).len
+                    );
+                }
+                TypedArray::get_unchecked(arr, index as u32)
+            }
+        }
+
+        #[doc = concat!(
+            "Write `val` to the element at `index` in a `TypedArray<",
+            stringify!($native_ty), ">`."
+        )]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn $set_fn(
+            arr: *mut TypedArray<$native_ty>,
+            index: i64,
+            val: $native_ty,
+        ) {
+            unsafe {
+                TypedArray::set(arr, index as u32, val);
+            }
+        }
+    };
+}
+
+// ── 11 POD-element kinds (f64 / i64 / i32 / bool / i8 / u8 / i16 / u16 /
+//    u32 / f32 / char) ──────────────────────────────────────────────────────
+
+v2_typed_array_scalar! {
+    new = jit_v2_array_new_f64,
+    get = jit_v2_array_get_f64,
+    set = jit_v2_array_set_f64,
+    ty = f64,
+    elem_byte = ELEM_TYPE_F64,
+    kind_label = "f64",
+}
+
+v2_typed_array_scalar! {
+    new = jit_v2_array_new_i64,
+    get = jit_v2_array_get_i64,
+    set = jit_v2_array_set_i64,
+    ty = i64,
+    elem_byte = ELEM_TYPE_I64,
+    kind_label = "i64",
+}
+
+v2_typed_array_scalar! {
+    new = jit_v2_array_new_i32,
+    get = jit_v2_array_get_i32,
+    set = jit_v2_array_set_i32,
+    ty = i32,
+    elem_byte = ELEM_TYPE_I32,
+    kind_label = "i32",
+}
+
+// `Bool` uses `u8` storage per the VM-side `TypedArray<u8>` carrier
+// (1 byte / element, 0 = false, 1 = true). Same shape as the dedicated
+// `U8` kind below; distinguished at the runtime element-type-tag layer
+// (`ELEM_TYPE_BOOL` vs `ELEM_TYPE_U8`).
+v2_typed_array_scalar! {
+    new = jit_v2_array_new_bool,
+    get = jit_v2_array_get_bool,
+    set = jit_v2_array_set_bool,
+    ty = u8,
+    elem_byte = ELEM_TYPE_BOOL,
+    kind_label = "bool",
+}
+
+// W12 S1 (2026-05-13) — sized-integer monomorphizations for `TypedArray<i8>` /
+// `<u8>` / `<i16>` / `<u16>` / `<u32>`. `U64` deliberately omitted per the
+// `v2_array_detect.rs::V2ElemType` doc (deferred to S1.5 per the
+// `NativeKind::UInt64` carrier-disambiguation ruling).
+v2_typed_array_scalar! {
+    new = jit_v2_array_new_i8,
+    get = jit_v2_array_get_i8,
+    set = jit_v2_array_set_i8,
+    ty = i8,
+    elem_byte = ELEM_TYPE_I8,
+    kind_label = "i8",
+}
+
+v2_typed_array_scalar! {
+    new = jit_v2_array_new_u8,
+    get = jit_v2_array_get_u8,
+    set = jit_v2_array_set_u8,
+    ty = u8,
+    elem_byte = ELEM_TYPE_U8,
+    kind_label = "u8",
+}
+
+v2_typed_array_scalar! {
+    new = jit_v2_array_new_i16,
+    get = jit_v2_array_get_i16,
+    set = jit_v2_array_set_i16,
+    ty = i16,
+    elem_byte = ELEM_TYPE_I16,
+    kind_label = "i16",
+}
+
+v2_typed_array_scalar! {
+    new = jit_v2_array_new_u16,
+    get = jit_v2_array_get_u16,
+    set = jit_v2_array_set_u16,
+    ty = u16,
+    elem_byte = ELEM_TYPE_U16,
+    kind_label = "u16",
+}
+
+v2_typed_array_scalar! {
+    new = jit_v2_array_new_u32,
+    get = jit_v2_array_get_u32,
+    set = jit_v2_array_set_u32,
+    ty = u32,
+    elem_byte = ELEM_TYPE_U32,
+    kind_label = "u32",
+}
+
+// Wave 2 Agent A1 (2026-05-14) — `F32` scalar bucket.
+v2_typed_array_scalar! {
+    new = jit_v2_array_new_f32,
+    get = jit_v2_array_get_f32,
+    set = jit_v2_array_set_f32,
+    ty = f32,
+    elem_byte = ELEM_TYPE_F32,
+    kind_label = "f32",
+}
+
+// `Char` storage is `TypedArray<char>` (4-byte `Copy`) matching the VM-side
+// carrier at `crates/shape-vm/src/executor/v2_handlers/v2_array_detect.rs:1587`.
+// `char` is not C-ABI-safe as a scalar parameter/return per the
+// `improper_ctypes_definitions` lint, so the FFI signatures use `u32`
+// codepoint at the boundary with `char::from_u32_unchecked` /
+// `<char as Into<u32>>` conversion. The kind is statically proven at the JIT
+// codegen site, so the bits are always a valid Unicode scalar value (per
+// the matching VM-side compile-time-proof at the producing
+// `NewTypedArrayChar` opcode).
+
+#[doc = "Allocate an empty `TypedArray<char>` of given capacity. \
+Stamps `ELEM_TYPE_CHAR` at `HeapHeader._pad` offset 7 per ADR-006 §2.7.5."]
 #[unsafe(no_mangle)]
-pub extern "C" fn jit_v2_array_new_f64(capacity: u32) -> *mut TypedArray<f64> {
-    let ptr = TypedArray::<f64>::with_capacity(capacity);
-    unsafe { stamp_elem_type(ptr as *mut u8, ELEM_TYPE_F64) };
+pub extern "C" fn jit_v2_array_new_char(capacity: u32) -> *mut TypedArray<char> {
+    let ptr = TypedArray::<char>::with_capacity(capacity);
+    unsafe { stamp_elem_type(ptr as *mut u8, ELEM_TYPE_CHAR) };
     ptr
 }
 
-// ============================================================================
-// Array FFI — *const StringObj / *const DecimalObj — v2-raw heap-element
-// element carrier per ADR-006 §2.7.5 + §2.7.24 Q25.A SUPERSEDED + audit
-// deliverable (b) §4.1.B + Wave 2 Agent B W12-StringV2-DecimalV2-NativeKind
-// additions (2026-05-14). Phase 3 cluster-0+1 Wave 3 Stabilize Round 2 V3-S5
-// ckpt-6-prime Group X JIT FFI String/Decimal BUILD (2026-05-15) — 10th and
-// LAST checkpoint of the EXTENDED 10-ckpt chain.
-//
-// Element type is `*const T` where T: HeapElement (StringObj / DecimalObj),
-// not a flat scalar. The allocators mirror `jit_v2_array_new_f64`'s shape
-// (`TypedArray::with_capacity` returning a `*mut TypedArray<T>` carrier);
-// per-element refcount discipline is the caller's responsibility (the bytecode
-// emits `TypedArrayPushString` / `TypedArrayPushDecimal` consuming the
-// per-element share allocated by the corresponding `NewStringV2` /
-// `NewDecimalV2` site — matches the VM-side handler at
-// `crates/shape-vm/src/executor/v2_handlers/array.rs:803-858`).
-// ============================================================================
+#[doc = "Read the codepoint at `index` from a `TypedArray<char>`. Panics on \
+out-of-bounds."]
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_v2_array_get_char(
+    arr: *const TypedArray<char>,
+    index: i64,
+) -> u32 {
+    unsafe {
+        if index < 0 || index as u32 >= (*arr).len {
+            panic!(
+                "v2 array char index {} out of bounds (len {})",
+                index,
+                (*arr).len
+            );
+        }
+        TypedArray::<char>::get_unchecked(arr, index as u32) as u32
+    }
+}
 
+#[doc = "Write a Unicode codepoint to the element at `index` in a \
+`TypedArray<char>`. The caller must ensure `val` is a valid Unicode scalar \
+value (the JIT codegen site proves this at compile time)."]
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_v2_array_set_char(
+    arr: *mut TypedArray<char>,
+    index: i64,
+    val: u32,
+) {
+    // SAFETY: the JIT codegen site that emits this call has compile-time-proven
+    // the producing slot's NativeKind::Char, so `val` is always a valid
+    // Unicode scalar value (matching the VM-side `NewTypedArrayChar` +
+    // `TypedArraySetChar` producer compile-time proof).
+    let c = unsafe { char::from_u32_unchecked(val) };
+    unsafe {
+        TypedArray::set(arr, index as u32, c);
+    }
+}
+
+// ── 3 heap-element kinds (`*const StringObj` / `*const DecimalObj` /
+//    `*const TypedObjectStorage`) ───────────────────────────────────────────
+//
+// Element type is `*const T` where `T: HeapElement`, not a flat scalar. The
+// allocators mirror the scalar shape (`TypedArray::with_capacity` returning a
+// `*mut TypedArray<*const T>` carrier); per-element refcount discipline is
+// the caller's responsibility (the bytecode emits `TypedArrayPushString` /
+// `TypedArrayPushDecimal` / `TypedArrayPushTypedObject` consuming the
+// per-element share allocated by the corresponding `NewStringV2` /
+// `NewDecimalV2` / `op_new_typed_object` site — matches the VM-side handler
+// at `crates/shape-vm/src/executor/v2_handlers/array.rs:803-858`).
+//
+// Two allocator names per heap kind: the legacy `jit_new_typed_array_<kind>`
+// (consumer-wired via `crates/shape-jit/src/compiler/ffi_builder.rs:232-235`)
+// AND the macro-uniform `jit_v2_array_new_<kind>` (forwarder for code paths
+// that walk the per-kind symbol matrix). Bodies are identical.
+//
+// `get` / `set` FFI signatures use `*const u8` for the pointer payload to
+// match the existing `jit_v2_field_load_ptr` / `_store_ptr` carrier
+// convention. Callers transfer per-element refcount shares per the VM-side
+// transfer rules.
+
+/// Generate `get` / `set` FFI symbols for one heap-element `TypedArrayKind`
+/// variant. The `new` allocator is defined separately to keep the legacy
+/// `jit_new_typed_array_<kind>` name + add the macro-uniform alias.
+macro_rules! v2_typed_array_heap_get_set {
+    (
+        get = $get_fn:ident,
+        set = $set_fn:ident,
+        elem_obj_ty = $elem_obj_ty:ty,
+        kind_label = $kind_label:literal $(,)?
+    ) => {
+        #[doc = concat!(
+            "Read the per-element heap pointer at `index` from a ",
+            "`TypedArray<*const ", stringify!($elem_obj_ty), ">`. ",
+            "Panics on out-of-bounds. Caller is responsible for per-element ",
+            "retain discipline before transferring the share."
+        )]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn $get_fn(
+            arr: *const TypedArray<*const $elem_obj_ty>,
+            index: i64,
+        ) -> *const u8 {
+            unsafe {
+                if index < 0 || index as u32 >= (*arr).len {
+                    panic!(
+                        concat!(
+                            "v2 array ", $kind_label, " index {} out of bounds (len {})"
+                        ),
+                        index,
+                        (*arr).len
+                    );
+                }
+                TypedArray::<*const $elem_obj_ty>::get_unchecked(arr, index as u32)
+                    as *const u8
+            }
+        }
+
+        #[doc = concat!(
+            "Write a per-element heap pointer at `index` in a ",
+            "`TypedArray<*const ", stringify!($elem_obj_ty), ">`. The caller ",
+            "must have an owning refcount share for `val` and is responsible ",
+            "for releasing any previous element at `index` before this call."
+        )]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn $set_fn(
+            arr: *mut TypedArray<*const $elem_obj_ty>,
+            index: i64,
+            val: *const u8,
+        ) {
+            unsafe {
+                TypedArray::set(arr, index as u32, val as *const $elem_obj_ty);
+            }
+        }
+    };
+}
+
+#[doc = "Allocate an empty `TypedArray<*const StringObj>` of given capacity. \
+Stamps `ELEM_TYPE_STRING` at `HeapHeader._pad` offset 7 per ADR-006 §2.7.5. \
+ckpt-6-prime Group X JIT FFI String/Decimal BUILD (2026-05-15)."]
 #[unsafe(no_mangle)]
 pub extern "C" fn jit_new_typed_array_string(
     capacity: u32,
@@ -90,6 +408,26 @@ pub extern "C" fn jit_new_typed_array_string(
     ptr
 }
 
+/// Macro-uniform alias for `jit_new_typed_array_string`. Same body; exists so
+/// the per-kind symbol matrix (`jit_v2_array_new_<suffix>`) is complete for
+/// all 14 `TypedArrayKind` variants. Consumer-wired alias to the legacy name.
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_v2_array_new_string(
+    capacity: u32,
+) -> *mut TypedArray<*const StringObj> {
+    jit_new_typed_array_string(capacity)
+}
+
+v2_typed_array_heap_get_set! {
+    get = jit_v2_array_get_string,
+    set = jit_v2_array_set_string,
+    elem_obj_ty = StringObj,
+    kind_label = "string",
+}
+
+#[doc = "Allocate an empty `TypedArray<*const DecimalObj>` of given capacity. \
+Stamps `ELEM_TYPE_DECIMAL` at `HeapHeader._pad` offset 7 per ADR-006 §2.7.5. \
+ckpt-6-prime Group X JIT FFI String/Decimal BUILD (2026-05-15)."]
 #[unsafe(no_mangle)]
 pub extern "C" fn jit_new_typed_array_decimal(
     capacity: u32,
@@ -97,6 +435,22 @@ pub extern "C" fn jit_new_typed_array_decimal(
     let ptr = TypedArray::<*const DecimalObj>::with_capacity(capacity);
     unsafe { stamp_elem_type(ptr as *mut u8, ELEM_TYPE_DECIMAL) };
     ptr
+}
+
+/// Macro-uniform alias for `jit_new_typed_array_decimal`. See
+/// `jit_v2_array_new_string` for rationale.
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_v2_array_new_decimal(
+    capacity: u32,
+) -> *mut TypedArray<*const DecimalObj> {
+    jit_new_typed_array_decimal(capacity)
+}
+
+v2_typed_array_heap_get_set! {
+    get = jit_v2_array_get_decimal,
+    set = jit_v2_array_set_decimal,
+    elem_obj_ty = DecimalObj,
+    kind_label = "decimal",
 }
 
 /// Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18).
@@ -120,6 +474,22 @@ pub extern "C" fn jit_new_typed_array_typed_object(
     let ptr = TypedArray::<*const TypedObjectStorage>::with_capacity(capacity);
     unsafe { stamp_elem_type(ptr as *mut u8, ELEM_TYPE_TYPED_OBJECT) };
     ptr
+}
+
+/// Macro-uniform alias for `jit_new_typed_array_typed_object`. See
+/// `jit_v2_array_new_string` for rationale.
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_v2_array_new_typed_object(
+    capacity: u32,
+) -> *mut TypedArray<*const TypedObjectStorage> {
+    jit_new_typed_array_typed_object(capacity)
+}
+
+v2_typed_array_heap_get_set! {
+    get = jit_v2_array_get_typed_object,
+    set = jit_v2_array_set_typed_object,
+    elem_obj_ty = TypedObjectStorage,
+    kind_label = "typed_object",
 }
 
 /// JIT-compile-time per-element materializer for `*const StringObj` constants
@@ -171,27 +541,6 @@ pub fn decimal_obj_constant(value: rust_decimal::Decimal) -> *const DecimalObj {
         (*ptr).header.retain();
     }
     ptr as *const DecimalObj
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn jit_v2_array_get_f64(arr: *const TypedArray<f64>, index: i64) -> f64 {
-    unsafe {
-        if index < 0 || index as u32 >= (*arr).len {
-            panic!(
-                "v2 array f64 index {} out of bounds (len {})",
-                index,
-                (*arr).len
-            );
-        }
-        TypedArray::get_unchecked(arr, index as u32)
-    }
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn jit_v2_array_set_f64(arr: *mut TypedArray<f64>, index: i64, val: f64) {
-    unsafe {
-        TypedArray::set(arr, index as u32, val);
-    }
 }
 
 /// Generic typed-array push dispatcher (R7.2).
@@ -806,119 +1155,20 @@ unsafe fn simd_binary_mul_f64_inner(
 }
 
 // ============================================================================
-// Array FFI — i64
+// Per-kind `len` accessors for the 3 non-f64 base kinds (i64 / i32 / bool).
+// The `len_f64` companion is defined above (next to the f64 SIMD ops). `len`
+// is not in the audit §1.D macro scope (new/get/set only) so these stay as
+// hand-written entries until a follow-up extends the macro.
 // ============================================================================
-
-#[unsafe(no_mangle)]
-pub extern "C" fn jit_v2_array_new_i64(capacity: u32) -> *mut TypedArray<i64> {
-    let ptr = TypedArray::<i64>::with_capacity(capacity);
-    // W11-fup-C (Phase 3d, 2026-05-18): stamp element-type byte for
-    // canonical `as_v2_typed_array` carrier recognition. See file header.
-    unsafe { stamp_elem_type(ptr as *mut u8, ELEM_TYPE_I64) };
-    ptr
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn jit_v2_array_get_i64(arr: *const TypedArray<i64>, index: i64) -> i64 {
-    unsafe {
-        if index < 0 || index as u32 >= (*arr).len {
-            panic!(
-                "v2 array i64 index {} out of bounds (len {})",
-                index,
-                (*arr).len
-            );
-        }
-        TypedArray::get_unchecked(arr, index as u32)
-    }
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn jit_v2_array_set_i64(arr: *mut TypedArray<i64>, index: i64, val: i64) {
-    unsafe {
-        TypedArray::set(arr, index as u32, val);
-    }
-}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn jit_v2_array_len_i64(arr: *const TypedArray<i64>) -> u32 {
     unsafe { TypedArray::len(arr) }
 }
 
-// ============================================================================
-// Array FFI — i32
-// ============================================================================
-
-#[unsafe(no_mangle)]
-pub extern "C" fn jit_v2_array_new_i32(capacity: u32) -> *mut TypedArray<i32> {
-    let ptr = TypedArray::<i32>::with_capacity(capacity);
-    // W11-fup-C (Phase 3d, 2026-05-18): stamp element-type byte. See file header.
-    unsafe { stamp_elem_type(ptr as *mut u8, ELEM_TYPE_I32) };
-    ptr
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn jit_v2_array_get_i32(arr: *const TypedArray<i32>, index: i64) -> i32 {
-    unsafe {
-        if index < 0 || index as u32 >= (*arr).len {
-            panic!(
-                "v2 array i32 index {} out of bounds (len {})",
-                index,
-                (*arr).len
-            );
-        }
-        TypedArray::get_unchecked(arr, index as u32)
-    }
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn jit_v2_array_set_i32(arr: *mut TypedArray<i32>, index: i64, val: i32) {
-    unsafe {
-        TypedArray::set(arr, index as u32, val);
-    }
-}
-
 #[unsafe(no_mangle)]
 pub extern "C" fn jit_v2_array_len_i32(arr: *const TypedArray<i32>) -> u32 {
     unsafe { TypedArray::len(arr) }
-}
-
-// ============================================================================
-// Array FFI — bool (stored as u8 internally)
-// ============================================================================
-//
-// Bool elements are stored as u8 (0 or 1) in the underlying TypedArray<u8>
-// buffer. The Cranelift IR side uses i8 for bool slots (matching NativeKind::Bool
-// → I8 in `cranelift_type_for_slot`), and the FFI translates u8 ↔ bool at the
-// edges. This keeps the buffer compact (1 byte per element) and matches the
-// JIT's native i8 width for bool locals.
-
-#[unsafe(no_mangle)]
-pub extern "C" fn jit_v2_array_new_bool(capacity: u32) -> *mut TypedArray<u8> {
-    let ptr = TypedArray::<u8>::with_capacity(capacity);
-    // W11-fup-C (Phase 3d, 2026-05-18): stamp element-type byte. See file header.
-    unsafe { stamp_elem_type(ptr as *mut u8, ELEM_TYPE_BOOL) };
-    ptr
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn jit_v2_array_get_bool(arr: *const TypedArray<u8>, index: i64) -> u8 {
-    unsafe {
-        if index < 0 || index as u32 >= (*arr).len {
-            panic!(
-                "v2 array bool index {} out of bounds (len {})",
-                index,
-                (*arr).len
-            );
-        }
-        TypedArray::get_unchecked(arr, index as u32)
-    }
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn jit_v2_array_set_bool(arr: *mut TypedArray<u8>, index: i64, val: u8) {
-    unsafe {
-        TypedArray::set(arr, index as u32, val);
-    }
 }
 
 #[unsafe(no_mangle)]
