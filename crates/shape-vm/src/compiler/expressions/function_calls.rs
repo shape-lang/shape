@@ -1981,6 +1981,71 @@ impl BytecodeCompiler {
         )
     }
 
+    /// Compile missing trailing arguments at a UFCS-style method call site.
+    ///
+    /// For each position in `actual_arity_with_self..effective_total_arity`,
+    /// look up the corresponding `FunctionParameter::default_value` on the
+    /// resolved callee's `FunctionDef` and compile that expression in place.
+    /// Positions whose param declares no default fall back to a `Unit`
+    /// sentinel (the prior, blunt behavior for both UFCS sites).
+    ///
+    /// Mirrors the regular `Call` path (see `compile_expr_function_call`
+    /// lines ~1175-1208) so UFCS method calls participate in default-arg
+    /// expansion identically to direct function calls. This is what makes
+    /// `arr.slice(start)` reach `Vec.slice(self, start, end: int = -1)` with
+    /// `end = -1` rather than `end = Unit` (D-δ array_slice single-arg
+    /// close — `v0.3-known-constraints-audit` §6(f) Repro 1).
+    ///
+    /// `func_name` is the resolved callee name (e.g. `"Vec.slice"`); it keys
+    /// both `function_defs` (for the default-expr AST) and the per-param
+    /// reference-mode flags read from `program.functions[func_idx]`. The
+    /// `func_idx` index addresses the same function so we can read
+    /// `ref_params` / `ref_mutates` without re-looking up by name.
+    pub(super) fn compile_missing_ufcs_default_args(
+        &mut self,
+        func_name: &str,
+        func_idx: usize,
+        actual_arity_with_self: usize,
+        effective_total_arity: usize,
+    ) -> Result<()> {
+        if actual_arity_with_self >= effective_total_arity {
+            return Ok(());
+        }
+        let func_def = self.function_defs.get(func_name).cloned();
+        let ref_params = self.program.functions[func_idx].ref_params.clone();
+        let ref_mutates = self.program.functions[func_idx].ref_mutates.clone();
+        for param_idx in actual_arity_with_self..effective_total_arity {
+            let mut emitted_default = false;
+            if let Some(ref fdef) = func_def {
+                if let Some(param) = fdef.params.get(param_idx) {
+                    if let Some(ref default_expr) = param.default_value {
+                        let is_ref_param =
+                            ref_params.get(param_idx).copied().unwrap_or(false);
+                        if is_ref_param {
+                            let borrow_mode = if ref_mutates
+                                .get(param_idx)
+                                .copied()
+                                .unwrap_or(false)
+                            {
+                                crate::compiler::BorrowMode::Exclusive
+                            } else {
+                                crate::compiler::BorrowMode::Shared
+                            };
+                            self.compile_implicit_reference_arg(default_expr, borrow_mode)?;
+                        } else {
+                            self.compile_expr(default_expr)?;
+                        }
+                        emitted_default = true;
+                    }
+                }
+            }
+            if !emitted_default {
+                self.emit_unit();
+            }
+        }
+        Ok(())
+    }
+
     /// Compile a method call expression
     pub(super) fn compile_expr_method_call(
         &mut self,
@@ -2728,7 +2793,14 @@ impl BytecodeCompiler {
         {
             // UFCS rewrite: receiver already compiled (on stack), args already compiled.
             // Stack is: [receiver, arg1, arg2, ...] — receiver is first, which is what we want.
-            // Pad missing default args with Unit sentinels (same as regular call path).
+            // For missing args, compile the param's `default_value` expression (if
+            // declared); else pad with `Unit` (preserves prior behavior for params
+            // without defaults). This mirrors the regular Call path
+            // (lines 1175-1208). The default-expression compile site lets stdlib
+            // extend methods like `Vec.slice(start: int, end: int = -1)` accept
+            // the single-arg form (`arr.slice(start)`) without the caller having
+            // to push a sentinel — D-δ array_slice single-arg silent-wrong-output
+            // close (v0.3-known-constraints-audit §6(f) Repro 1).
             let func_name = self.program.functions[func_idx].name.clone();
             let total_arity = self.program.functions[func_idx].arity as usize;
             let effective_total_arity = self
@@ -2737,9 +2809,12 @@ impl BytecodeCompiler {
                 .map(|(_, eff)| *eff)
                 .unwrap_or(total_arity);
             let actual_arity_with_self = args.len() + 1;
-            for _ in actual_arity_with_self..effective_total_arity {
-                self.emit_unit();
-            }
+            self.compile_missing_ufcs_default_args(
+                &func_name,
+                func_idx,
+                actual_arity_with_self,
+                effective_total_arity,
+            )?;
             let call_arity = actual_arity_with_self.max(effective_total_arity);
 
             // --- Monomorphization: specialize generic extend methods ---
@@ -2840,9 +2915,15 @@ impl BytecodeCompiler {
                     .map(|(_, eff)| *eff)
                     .unwrap_or(total_arity);
                 let actual_arity_with_self = args.len() + 1;
-                for _ in actual_arity_with_self..effective_total_arity {
-                    self.emit_unit();
-                }
+                // Compile each missing arg's declared `default_value` (or pad
+                // with Unit when none is declared) — same logic as the extend
+                // UFCS site above; see that comment for rationale.
+                self.compile_missing_ufcs_default_args(
+                    &func_name,
+                    func_idx,
+                    actual_arity_with_self,
+                    effective_total_arity,
+                )?;
                 let call_arity = actual_arity_with_self.max(effective_total_arity);
 
                 // --- Monomorphization: specialize generic impl/trait methods ---
