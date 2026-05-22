@@ -105,6 +105,27 @@ pub(crate) fn field_type_contract_annotation(
             .map(|inner_ann| TypeAnnotation::Array(Box::new(inner_ann))),
         FieldType::Option(inner) => field_type_contract_annotation(inner)
             .map(TypeAnnotation::option),
+        // W17.3-4.1 — project HashMap<K, V> / Set<T> back to the
+        // surface `TypeAnnotation::Generic { name, args }` shape the
+        // parser emits. Inner contract projection is best-effort:
+        // mirrors the existing Array/Option `?`-style propagation so
+        // a container with an unrepresentable inner falls back to
+        // `None` (the field stays an honest `unknown`).
+        FieldType::HashMap { key, value } => {
+            let k = field_type_contract_annotation(key)?;
+            let v = field_type_contract_annotation(value)?;
+            Some(TypeAnnotation::Generic {
+                name: shape_ast::ast::type_path::TypePath::simple("HashMap"),
+                args: vec![k, v],
+            })
+        }
+        FieldType::Set(inner) => {
+            let elem = field_type_contract_annotation(inner)?;
+            Some(TypeAnnotation::Generic {
+                name: shape_ast::ast::type_path::TypePath::simple("Set"),
+                args: vec![elem],
+            })
+        }
         FieldType::Any => None,
     }
 }

@@ -4966,20 +4966,42 @@ impl BytecodeCompiler {
                 // PROPAGATES through `FieldType::Option(Box<FieldType>)`
                 // (W17.2-B close commit e316e171). Single-arg shape only;
                 // malformed Option<...> annotations route through the
-                // 4-name TRANSITIONAL fallback below.
+                // residual TRANSITIONAL fallback below.
                 "Option" if args.len() == 1 => FieldType::Option(Box::new(
                     Self::type_annotation_to_field_type(&args[0]),
                 )),
-                // §4.D.7 TRANSITIONAL 4-name narrowed-exception list per
-                // §9.B.3 supervisor ratify 2026-05-19. These four generic
-                // containers retain the `FieldType::Any` schema-lowering
-                // pending per-container `FieldType` variant introduction
-                // at v0.4 W17.3/W17.4. The post_inference_verify pass at
-                // `compiler/post_inference_verify.rs` absorbs these via
-                // the `__inline_obj_*` transitional row pre-W17.3; user-
-                // named schemas carrying these still surface E0900 once
-                // the §4.D.10 emission-rename closes (R5b/R6 follow-up).
-                "HashMap" | "Map" | "Result" | "Set" => FieldType::Any,
+                // W17.3-4.1 (v0.3 Round 7, supervisor ratify 2026-05-22):
+                // HashMap<K, V> and Map<K, V> PROPAGATE through the
+                // `FieldType::HashMap { key, value }` variant introduced
+                // at `type_schema::field_types.rs` per audit §3.A Option 1.
+                // Replaces the W17.2-C §4.D.7 TRANSITIONAL `HashMap | Map`
+                // → `FieldType::Any` fallback. Slot storage points to
+                // `HeapKind::HashMap` (ordinal 17 — Stage C P1(b)
+                // `HashMapKindedRef`); the schema-side variant carries
+                // the static K/V FieldTypes for compile-time checking
+                // (ADR-006 §2.7.5 producer-side stamp). Malformed
+                // arities route through the residual fallback below.
+                "HashMap" | "Map" if args.len() == 2 => FieldType::HashMap {
+                    key: Box::new(Self::type_annotation_to_field_type(&args[0])),
+                    value: Box::new(Self::type_annotation_to_field_type(&args[1])),
+                },
+                // W17.3-4.1: Set<T> PROPAGATES through
+                // `FieldType::Set(Box<FieldType>)` per audit §3.A Option
+                // 1. Slot storage points to `HeapKind::HashSet` (ordinal
+                // 21 — Wave 13 W13-hashset-rebuild, already at HEAD; the
+                // audit §6.A surface-and-stop is stale — HashSet exists).
+                "Set" if args.len() == 1 => FieldType::Set(Box::new(
+                    Self::type_annotation_to_field_type(&args[0]),
+                )),
+                // §4.D.7 RESIDUAL TRANSITIONAL fallback per §9.B.3
+                // supervisor ratify 2026-05-19. `Result<T, E>` continues
+                // to lower to `FieldType::Any` pending its own per-
+                // container variant introduction (out of scope for
+                // W17.3-4.1; the audit explicitly bounds W17.3-4 to
+                // Array / HashMap / Set / Option). Malformed arities
+                // for the otherwise-handled containers (e.g. `Option<>`,
+                // `HashMap<K>`, `Set<>`) also land here.
+                "HashMap" | "Map" | "Result" | "Set" | "Option" => FieldType::Any,
                 // User-defined generic structs — preserve the type name
                 other => FieldType::Object(other.to_string()),
             },
