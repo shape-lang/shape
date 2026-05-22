@@ -1381,6 +1381,36 @@ impl TypeInferenceEngine {
                 break;
             }
         }
+
+        // Publish the fixpoint result into the unifier.
+        //
+        // `apply_callsite_unions` widens each function's `Type::Function`
+        // entry in `types` directly, but the parameter-source variables it
+        // resolved (`resolved`) were never visible to `self.unifier`. A
+        // function that returns an object literal built from its parameters
+        // — `fn aabb(lo, hi) { {min: lo, max: hi} }` — has those parameter
+        // variables embedded as `tyvar` markers inside its return type's
+        // `Object` annotation. The final `unifier.apply_substitutions` pass
+        // (and every `infer_property_access` the bytecode compiler runs)
+        // can only resolve those markers if the unifier knows the binding.
+        //
+        // Binding here closes that gap. An existing binding is respected:
+        // when the unifier already resolved a variable to a *conflicting*
+        // concrete type, that is a genuine type error surfaced elsewhere —
+        // do not clobber it. A binding that merely refines an unresolved
+        // variable, or agrees with the existing one, is published.
+        for (var, ty) in &resolved {
+            if matches!(ty, Type::Variable(_)) {
+                continue;
+            }
+            match self.unifier.lookup(var) {
+                Some(existing) if !matches!(existing, Type::Variable(_)) => {
+                    // Already concretely bound — leave the prior binding;
+                    // a real conflict is reported by constraint solving.
+                }
+                _ => self.unifier.bind(var.clone(), ty.clone()),
+            }
+        }
     }
 
     /// `true` when `ty` satisfies the `Numeric` bound — a concrete numeric
@@ -1654,7 +1684,104 @@ impl TypeInferenceEngine {
                     .collect(),
                 returns: Box::new(Self::apply_substitutions_to_type(returns, substitutions)),
             },
-            Type::Concrete(_) => ty.clone(),
+            // A concrete annotation can still embed `tyvar` markers — an
+            // object literal `{min: lo}` over an unresolved parameter freezes
+            // to `Object({min: <tyvar lo>})`. Recurse so callsite
+            // substitution resolves those embedded markers.
+            Type::Concrete(ann) => {
+                Type::Concrete(Self::apply_substitutions_to_annotation(ann, substitutions))
+            }
+        }
+    }
+
+    /// Recurse through a `TypeAnnotation`, replacing every `tyvar` marker with
+    /// its bound type (re-encoding as a marker if the binding is itself an
+    /// unresolved variable). Mirrors `Unifier::apply_to_annotation` but keys
+    /// off an explicit substitution map rather than the unifier's store.
+    fn apply_substitutions_to_annotation(
+        ann: &TypeAnnotation,
+        substitutions: &HashMap<TypeVar, Type>,
+    ) -> TypeAnnotation {
+        if let Some(var) = annotation_as_tyvar(ann) {
+            return match substitutions.get(&var) {
+                Some(bound) => {
+                    let resolved = Self::apply_substitutions_to_type(bound, substitutions);
+                    match &resolved {
+                        Type::Variable(v) | Type::Constrained { var: v, .. } => {
+                            tyvar_to_annotation(v)
+                        }
+                        _ => resolved
+                            .to_annotation()
+                            .unwrap_or_else(|| ann.clone()),
+                    }
+                }
+                None => ann.clone(),
+            };
+        }
+        match ann {
+            TypeAnnotation::Array(elem) => TypeAnnotation::Array(Box::new(
+                Self::apply_substitutions_to_annotation(elem, substitutions),
+            )),
+            TypeAnnotation::Tuple(elems) => TypeAnnotation::Tuple(
+                elems
+                    .iter()
+                    .map(|e| Self::apply_substitutions_to_annotation(e, substitutions))
+                    .collect(),
+            ),
+            TypeAnnotation::Object(fields) => TypeAnnotation::Object(
+                fields
+                    .iter()
+                    .map(|field| shape_ast::ast::ObjectTypeField {
+                        name: field.name.clone(),
+                        optional: field.optional,
+                        type_annotation: Self::apply_substitutions_to_annotation(
+                            &field.type_annotation,
+                            substitutions,
+                        ),
+                        annotations: field.annotations.clone(),
+                    })
+                    .collect(),
+            ),
+            TypeAnnotation::Function { params, returns } => TypeAnnotation::Function {
+                params: params
+                    .iter()
+                    .map(|p| shape_ast::ast::FunctionParam {
+                        name: p.name.clone(),
+                        optional: p.optional,
+                        type_annotation: Self::apply_substitutions_to_annotation(
+                            &p.type_annotation,
+                            substitutions,
+                        ),
+                    })
+                    .collect(),
+                returns: Box::new(Self::apply_substitutions_to_annotation(returns, substitutions)),
+            },
+            TypeAnnotation::Union(members) => TypeAnnotation::Union(
+                members
+                    .iter()
+                    .map(|m| Self::apply_substitutions_to_annotation(m, substitutions))
+                    .collect(),
+            ),
+            TypeAnnotation::Intersection(members) => TypeAnnotation::Intersection(
+                members
+                    .iter()
+                    .map(|m| Self::apply_substitutions_to_annotation(m, substitutions))
+                    .collect(),
+            ),
+            TypeAnnotation::Generic { name, args } => TypeAnnotation::Generic {
+                name: name.clone(),
+                args: args
+                    .iter()
+                    .map(|a| Self::apply_substitutions_to_annotation(a, substitutions))
+                    .collect(),
+            },
+            TypeAnnotation::Basic(_)
+            | TypeAnnotation::Reference(_)
+            | TypeAnnotation::Void
+            | TypeAnnotation::Never
+            | TypeAnnotation::Null
+            | TypeAnnotation::Undefined
+            | TypeAnnotation::Dyn(_) => ann.clone(),
         }
     }
 }

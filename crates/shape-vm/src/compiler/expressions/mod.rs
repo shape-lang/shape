@@ -1526,6 +1526,19 @@ impl BytecodeCompiler {
                             return Ok(Type::Concrete(ann));
                         }
                     }
+                    // An anonymous-object schema stores every field as
+                    // `FieldType::Any` (the schema layout is Any-uniform);
+                    // the precise per-field type lives in the parallel
+                    // field-contract side table. Consult it so `a.min` on a
+                    // `let a = {min: 1, ...}` / a factory result resolves to
+                    // the proven field type rather than `unknown`.
+                    if let Some(contract) = self
+                        .type_tracker
+                        .get_object_field_contract(schema_id, property)
+                        .cloned()
+                    {
+                        return Ok(Type::Concrete(contract));
+                    }
                 }
             }
         }
@@ -1670,6 +1683,20 @@ impl BytecodeCompiler {
                             return Some(id);
                         }
                     }
+                }
+            }
+        }
+        // WS-9c: a direct `f(...).field` access — the receiver is a call to
+        // an unannotated function whose inferred return type is an anonymous
+        // object. The return-object schema was registered up-front; resolve
+        // it here so the property access types without an intervening `let`.
+        if let Expr::FunctionCall { name, .. } = expr {
+            if let Some(&schema_id) = self.function_return_schema_ids.get(name) {
+                return Some(schema_id);
+            }
+            if let Some(scoped) = self.resolve_scoped_module_binding_name(name) {
+                if let Some(&schema_id) = self.function_return_schema_ids.get(&scoped) {
+                    return Some(schema_id);
                 }
             }
         }
