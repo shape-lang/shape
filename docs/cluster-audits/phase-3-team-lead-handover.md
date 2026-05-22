@@ -16,7 +16,7 @@ tags and language semantics. The user relays between team-lead and supervisor.
 
 | | |
 |---|---|
-| Main HEAD | `fbe86020` (W17.3-4.1 + D-δ + W16.2-J.0 + D-α audit merged) |
+| Main HEAD | `bf864620` (W17.3-4.1 + D-δ + W16.2-J.0 + D-γ + D-α audit merged) |
 | Smoke matrix s1–s5 | **5/5 VM == JIT** (canonical (ii) F' release-binary harness; re-verified post-D-δ-merge 2026-05-22) |
 | verify-merge / check-no-dynamic | 13/13 / exit 0 |
 | Round-6+ no-known-incorrectness set | **EMPTY** per user 2026-05-20 binding |
@@ -36,7 +36,7 @@ Full criteria + dispositions: `docs/v0.3-close-summary.md` §0.A.
 | A | **W16.2-J PHF-retirement** (architectural) | AUDIT-CLOSED (REVISED) | 6 sub-clusters (J.0–J.5); 30–47h; ADR-006 §2.7.24 amendment likely needed. **W16.2-J.0 MERGED `fbe86020` 2026-05-22**; J.1 hypothesis VALIDATED via probe; J.1 + J.2 + J.3 queued next wave. |
 | B | **W17.3-4 per-container `FieldType`** | AUDIT-CLOSED | 3 sub-clusters (.1–.3); 18–24h; no ADR amendment. **W17.3-4.1 MERGED `4b6d6833` 2026-05-22.** HeapKind::Set ordinal SURFACE retired empirically (HeapKind::HashMap ord 17 + HeapKind::HashSet ord 21 already exist; 4-table lockstep intact). .2 + .3 queued. |
 | C | **Phase-2c host-tier marshal/snapshot rebuild** (ADR-006 §2.7.4) | AUDIT-CLOSED | 8 sub-clusters; 70–90h serial / 25–30h parallel. **4 supervisor architectural rulings:** 4 RULED, 2 direction-ruled-with-text-pending (per user 2026-05-22). Fix-dispatch unblocked. |
-| D | **6 Known Constraints** | AUDIT-CLOSED + D-α audit-first CLOSED | **5 v0.3-gating sub-clusters** (D-α audit split D-α into D-α.1 + D-α.2 — 2 distinct families): D-α.1 closure-param inference loss (4–8h); D-α.2 flow-sensitive type loss through reassignment chain (1–3h, orthogonal); D-β string-join Bool-receiver dispatch (1–3h); D-γ window_over_partition_by hang (2–4h); **D-δ MERGED `975536d3` 2026-05-22**. Total 8–18h. D-α.1 + D-α.2 parallel-dispatchable. KC #5 → DROP test (user); KC #2 → RESOLVE BY DELETION (user; folded into F). |
+| D | **6 Known Constraints** | AUDIT-CLOSED + D-α audit-first CLOSED | **5 v0.3-gating sub-clusters** (D-α split into D-α.1 + D-α.2 per D-α audit): D-α.1 closure-param inference loss (4–8h); D-α.2 flow-sensitive type loss through reassignment chain (1–3h, orthogonal); D-β string-join Bool-receiver dispatch (1–3h); **D-γ MERGED `bf864620` 2026-05-22** (UFCS-generic-monomorphization → linker-ZERO-sentinel → __main__-self-recursion → infinite loop; fixed via probe-then-filter guard); **D-δ MERGED `975536d3` 2026-05-22**. Remaining 6–14h. D-α.1 + D-α.2 + D-β parallel-dispatchable. KC #5 → DROP test (user); KC #2 → RESOLVE BY DELETION (user; folded into F). |
 | E | **W18 content-rendering kind-threaded rebuild** (NEW 2026-05-22 — v0.3-gating regression) | AUDIT-FIRST mandatory; NEXT audit round | Phase 2b deleted ~600 LoC dispatch chain; user-value → ContentNode rebuild missing. Symptoms: enum Display leaks `{__variant:N,__payload_0:...}`. ~2–4 sessions. |
 | F | **Len trait + membership-naming standardization + KC #2 format-deletion** (NEW 2026-05-22; KC #2 folded) | Direct dispatch (close-coupled w/ W18) | New `trait Len { method len() -> int; method isEmpty() -> bool }`; rename `Set.size() → Set.len()`; standardize `.includes(x)` / `.some(\|x\| pred)`; reject `.contains()`; delete `format_*` prefix globals (KC #2). ~1 session. |
 | G.1 | **Doc-truth Step 1** (DOC↔CODE reconciliation) | Parallel slice agents per book chapter | GATED on A–F + J close + main stable |
@@ -175,11 +175,15 @@ F' release-binary harness) · AGENTS.md row; no Co-Authored-By trailer.
 
 ---
 
-*Round-6+ CLOSED. 4-audit-day landing 2026-05-22; first-wave fix dispatch
-2026-05-22 (W17.3-4.1 MERGED `4b6d6833`; W16.2-J.1 surface-and-stopped +
-audit §3 corrected; D-δ in flight). All 2026-05-22 user-dialogue
-decisions LANDED (KC #5 drop; KC #2 deletion; comptime trait YES; Send/Sync
-v0.4). 4 supervisor architectural rulings ruled. Next: D-δ close +
-second-wave fix dispatch (W16.2-J.0 prereq; W17.3-4.2; D-α audit-first;
-D-β; D-γ); E (W18) + J (comptime trait) audit-first; F (Len + membership
-+ KC #2 deletion) dispatch alongside W18.*
+*Round-6+ CLOSED. Round-7 wave 1 (3 dispatches): W17.3-4.1 MERGED
+`4b6d6833`; D-δ MERGED `975536d3`; W16.2-J.1 surface-and-stopped + audit
+§3 corrected (NEW J.0 prereq inserted). Round-7 wave 2 (3 dispatches):
+D-α audit-first CLOSED (2-family split); W16.2-J.0 MERGED `fbe86020`
+(11 handlers + 2 NEW; J.1 hypothesis probe-validated); D-γ MERGED
+`bf864620` (UFCS-monomorphization-fail → linker-ZERO-sentinel → recursion
+hang fixed via probe-then-filter guard). All 2026-05-22 user-dialogue
+decisions LANDED. 2 audit-layer imprecisions caught + corrected at
+fix-dispatch/audit-first layer (W16.2-J §3 sequencing + D-α 1-family
+hypothesis). Next: wave-3 fix dispatch (D-α.1 + D-α.2 + D-β + W17.3-4.2
++ W16.2-J.1/.2/.3) per territory non-overlap; audit round 2 (E W18 +
+J comptime trait); F (Len + membership + KC #2 deletion) dispatch.*
