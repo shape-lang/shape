@@ -16,7 +16,7 @@ tags and language semantics. The user relays between team-lead and supervisor.
 
 | | |
 |---|---|
-| Main HEAD | `975536d3` (W17.3-4.1 + D-δ merged; audit corrections landed) |
+| Main HEAD | `fbe86020` (W17.3-4.1 + D-δ + W16.2-J.0 + D-α audit merged) |
 | Smoke matrix s1–s5 | **5/5 VM == JIT** (canonical (ii) F' release-binary harness; re-verified post-D-δ-merge 2026-05-22) |
 | verify-merge / check-no-dynamic | 13/13 / exit 0 |
 | Round-6+ no-known-incorrectness set | **EMPTY** per user 2026-05-20 binding |
@@ -33,7 +33,7 @@ Full criteria + dispositions: `docs/v0.3-close-summary.md` §0.A.
 
 | Crit | Workstream | Audit shape | Status at HEAD `43d3f86c` |
 |---|---|---|---|
-| A | **W16.2-J PHF-retirement** (architectural) | AUDIT-CLOSED | 5 sub-clusters (J.1–J.5); 24–37h; ADR-006 §2.7.24 amendment likely needed. **J.1 dispatched first-wave 2026-05-22.** |
+| A | **W16.2-J PHF-retirement** (architectural) | AUDIT-CLOSED (REVISED) | 6 sub-clusters (J.0–J.5); 30–47h; ADR-006 §2.7.24 amendment likely needed. **W16.2-J.0 MERGED `fbe86020` 2026-05-22**; J.1 hypothesis VALIDATED via probe; J.1 + J.2 + J.3 queued next wave. |
 | B | **W17.3-4 per-container `FieldType`** | AUDIT-CLOSED | 3 sub-clusters (.1–.3); 18–24h; no ADR amendment. **W17.3-4.1 MERGED `4b6d6833` 2026-05-22.** HeapKind::Set ordinal SURFACE retired empirically (HeapKind::HashMap ord 17 + HeapKind::HashSet ord 21 already exist; 4-table lockstep intact). .2 + .3 queued. |
 | C | **Phase-2c host-tier marshal/snapshot rebuild** (ADR-006 §2.7.4) | AUDIT-CLOSED | 8 sub-clusters; 70–90h serial / 25–30h parallel. **4 supervisor architectural rulings:** 4 RULED, 2 direction-ruled-with-text-pending (per user 2026-05-22). Fix-dispatch unblocked. |
 | D | **6 Known Constraints** | AUDIT-CLOSED + D-α audit-first CLOSED | **5 v0.3-gating sub-clusters** (D-α audit split D-α into D-α.1 + D-α.2 — 2 distinct families): D-α.1 closure-param inference loss (4–8h); D-α.2 flow-sensitive type loss through reassignment chain (1–3h, orthogonal); D-β string-join Bool-receiver dispatch (1–3h); D-γ window_over_partition_by hang (2–4h); **D-δ MERGED `975536d3` 2026-05-22**. Total 8–18h. D-α.1 + D-α.2 parallel-dispatchable. KC #5 → DROP test (user); KC #2 → RESOLVE BY DELETION (user; folded into F). |
