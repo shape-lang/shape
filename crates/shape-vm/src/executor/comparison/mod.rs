@@ -407,16 +407,34 @@ fn numeric_as_decimal_ref<'a>(bits: u64, kind: NativeKind) -> Option<&'a rust_de
     decimal_ref(bits, kind)
 }
 
-/// Read a `KindedSlot`-style operand as a borrowed `&str` if the kind is
-/// `NativeKind::String`. The slot owns one `Arc<String>` strong-count
-/// share, so the borrow is valid for the lifetime of the slot.
+/// Read a `KindedSlot`-style operand as a borrowed `&str`.
+///
+/// Accepts BOTH string carriers — `NativeKind::String` (Phase-2c
+/// `Arc<String>` carrier; ADR-005 §2 String exception) AND
+/// `NativeKind::StringV2` (Wave 2 Agent B v2-raw `*const StringObj` carrier
+/// per ADR-006 §2.7.5 amendment) — equating them at the comparison-shell
+/// boundary. WS-8 (2026-05-22): the post-fix `cmp_string_eq_kinded` then
+/// compares the resulting `&str` slices for both directions, so
+/// `let xs = ["a", "b"]; xs.includes("a")` (where the array-iterated element
+/// arrives as `StringV2` and the literal `"a"` arrives as `String`) returns
+/// the correct `true`. The slot owns the per-carrier share; the borrow is
+/// valid for the lifetime of the slot.
 #[inline]
 fn str_ref<'a>(bits: u64, kind: NativeKind) -> Option<&'a str> {
-    if !matches!(kind, NativeKind::String) || bits == 0 {
+    if bits == 0 {
         return None;
     }
-    let ptr = bits as *const String;
-    Some(unsafe { (*ptr).as_str() })
+    match kind {
+        NativeKind::String => {
+            let ptr = bits as *const String;
+            Some(unsafe { (*ptr).as_str() })
+        }
+        NativeKind::StringV2 => {
+            let ptr = bits as usize as *const shape_value::v2::string_obj::StringObj;
+            Some(unsafe { shape_value::v2::string_obj::StringObj::as_str(ptr) })
+        }
+        _ => None,
+    }
 }
 
 /// Read a `KindedSlot`-style operand as a `char` if the kind is

@@ -271,8 +271,14 @@ pub static ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "flatMap" => crate::executor::objects::array_transform::handle_flat_map_v2,
 
     // Basic operations — Native
+    // WS-8 (2026-05-22): `len` / `length` / `isEmpty` / `first` / `last` are
+    // KIND-GENERIC header handlers (one handler per method dispatches on the
+    // `TypedArray<T>` element-type byte). Works uniformly for every element
+    // kind — bool / string / int / number / decimal / TypedObject / sized
+    // ints / Char — without per-kind PHF entries.
     "len" => crate::executor::objects::array_basic::handle_len_v2,
     "length" => crate::executor::objects::array_basic::handle_len_v2,
+    "isEmpty" => crate::executor::objects::array_basic::handle_is_empty_v2,
     "first" => crate::executor::objects::array_basic::handle_first_v2,
     "last" => crate::executor::objects::array_basic::handle_last_v2,
     "reverse" => crate::executor::objects::array_basic::handle_reverse_v2,
@@ -796,12 +802,24 @@ pub static TYPED_NUMBER_ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = p
 
 /// PHF registry for Vec<bool> (BoolArray) methods
 ///
-/// **Standard:** len, length, toArray
+/// **Standard:** len, length, isEmpty, first, last, toArray
 /// **Query:** any, all, count
+///
+/// WS-8 (2026-05-22): `len` / `length` / `isEmpty` / `first` / `last` route
+/// to the kind-generic `array_basic::handle_*_v2` header handlers — these
+/// dispatch on the `TypedArray<T>` element-type byte and work for every
+/// element kind including bool. The pre-WS-8 `typed_array_methods::v2_len`
+/// surface-and-stop stub (ckpt-3) is retired for these methods. `count` /
+/// `any` / `all` / `toArray` remain on the closure-callback / aggregation
+/// path tracked by the W17 typed-carrier-monomorphization workstream.
 pub static BOOL_ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
-    // MethodFnV2 (v2 typed array + v1 fallback)
-    "len" => crate::executor::objects::typed_array_methods::v2_len,
-    "length" => crate::executor::objects::typed_array_methods::v2_len,
+    // Kind-generic header handlers (WS-8)
+    "len" => crate::executor::objects::array_basic::handle_len_v2,
+    "length" => crate::executor::objects::array_basic::handle_len_v2,
+    "isEmpty" => crate::executor::objects::array_basic::handle_is_empty_v2,
+    "first" => crate::executor::objects::array_basic::handle_first_v2,
+    "last" => crate::executor::objects::array_basic::handle_last_v2,
+    // Closure-callback / aggregation residuals (W17 territory)
     "count" => crate::executor::objects::typed_array_methods::v2_bool_count,
     "any" => crate::executor::objects::typed_array_methods::v2_bool_any,
     "all" => crate::executor::objects::typed_array_methods::v2_bool_all,

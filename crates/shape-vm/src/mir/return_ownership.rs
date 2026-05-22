@@ -216,6 +216,15 @@ fn classify_constant(c: &MirConstant) -> ReturnOwnershipMode {
         | MirConstant::Float(_)
         | MirConstant::Char(_)
         | MirConstant::None => ReturnOwnershipMode::NewlyOwned,
+        // WS-8 (2026-05-22): `MirConstant::Decimal` carries the decimal
+        // lexeme verbatim; the actual carrier the JIT would produce is a
+        // `*const DecimalObj` raw heap pointer (refcounted via the v2 heap-
+        // header counter). The JIT consumer surfaces-and-stops today, so
+        // ownership classification here is academic for the JIT path — but
+        // structurally the decimal is a newly-allocated heap object (same
+        // shape as a fresh String), and a future native JIT decimal codegen
+        // would mark it `NewlyOwned` matching the String arm's discipline.
+        MirConstant::Decimal(_) => ReturnOwnershipMode::NewlyOwned,
         MirConstant::ClosurePlaceholder => ReturnOwnershipMode::Unknown,
     }
 }

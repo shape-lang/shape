@@ -206,6 +206,20 @@ pub enum MirConstant {
     Str(String),
     /// Float (stored as bits for Eq/Hash)
     Float(u64),
+    /// Decimal literal — carried through MIR as the source-form lexeme.
+    ///
+    /// WS-8 (2026-05-22): pre-WS-8 `Literal::Decimal(_)` MIR lowering at
+    /// `mir/lowering/expr.rs:1937` collapsed to `MirConstant::Float(0)` ("decimal
+    /// not yet modeled"), silently losing the value. The JIT then printed
+    /// `0.0` for `print(1.5D)` while the VM printed `1.5D` — a v0.3-gating
+    /// silent wrong-answer divergence (WS-8 audit §1.D). The MIR producer now
+    /// emits this variant verbatim; the JIT consumer SURFACEs (`compile_constant`
+    /// returns Err), triggering the W12 fall-through to the bytecode interpreter
+    /// (which materializes the decimal via the VM's `NewDecimalV2` opcode and
+    /// prints correctly). VM == JIT, both run the interpreter path. The variant
+    /// stores the decimal's lexeme so JIT codegen can light up later without
+    /// re-parsing the AST.
+    Decimal(String),
     /// Character literal (scalar codepoint).
     ///
     /// Phase 3 cluster-2 Round 4 cw-D-fam12 follow-up (instance 57, 2026-05-16).
@@ -237,6 +251,7 @@ impl fmt::Display for MirConstant {
             MirConstant::StringId(id) => write!(f, "str#{}", id),
             MirConstant::Str(s) => write!(f, "\"{}\"", s),
             MirConstant::Float(bits) => write!(f, "{}", f64::from_bits(*bits)),
+            MirConstant::Decimal(s) => write!(f, "{}D", s),
             MirConstant::Char(c) => write!(f, "'{}'", c.escape_default()),
             MirConstant::Function(name) => write!(f, "fn:{}", name),
             MirConstant::Method(name) => write!(f, "method:{}", name),

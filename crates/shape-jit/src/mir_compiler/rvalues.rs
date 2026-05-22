@@ -578,6 +578,12 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             // §2.7.5 stamp-at-compile-time discipline for the print dispatch
             // at `terminators.rs` ~679 `NativeKind::Char` arm.
             Operand::Constant(MirConstant::Char(_)) => Some(NativeKind::Char),
+            // WS-8 (2026-05-22): the producer-site stamp for `Literal::Decimal`
+            // through MIR is `NativeKind::DecimalV2`. The `compile_constant`
+            // arm at `ownership.rs` surfaces-and-stops on the value, so
+            // downstream consumers reaching this stamp run under the W12
+            // fall-through to the VM interpreter (VM == JIT).
+            Operand::Constant(MirConstant::Decimal(_)) => Some(NativeKind::DecimalV2),
             // ADR-006 §2.7.11/Q12 function-id-class callee-classification
             // kind: a `MirConstant::Function(name)` lowers to the JIT-
             // internal `box_function(fn_id)` shape (TAG_FUNCTION NaN-box),
