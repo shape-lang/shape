@@ -1,8 +1,9 @@
 # Team-lead handover — Shape v0.3 close-approach
 
-**Refreshed:** 2026-05-22 at main HEAD `43d3f86c` (post audit-day landing
-+ same-day dialogue additions). Round-6+ CLOSED; expanded-scope audits
-LANDED; first-wave fix dispatch in flight. Git holds prior content; no
+**Refreshed:** 2026-05-22 at main HEAD `43fcc923` (post round-7 wave-1
++ wave-2 close + docs record). Round-6+ CLOSED; expanded-scope audits
+LANDED; round-7 wave-1 + wave-2 MERGED (5 sub-clusters + 1 audit);
+wave-3 fix dispatch + audit-round-2 next. Git holds prior content; no
 archaeology here.
 
 ## Role
@@ -16,11 +17,11 @@ tags and language semantics. The user relays between team-lead and supervisor.
 
 | | |
 |---|---|
-| Main HEAD | `bf864620` (W17.3-4.1 + D-δ + W16.2-J.0 + D-γ + D-α audit merged) |
-| Smoke matrix s1–s5 | **5/5 VM == JIT** (canonical (ii) F' release-binary harness; re-verified post-D-δ-merge 2026-05-22) |
-| verify-merge / check-no-dynamic | 13/13 / exit 0 |
+| Main HEAD | `43fcc923` (W17.3-4.1 + D-δ + W16.2-J.0 + D-γ + D-α audit + R7 W1/W2 close-doc records merged) |
+| Smoke matrix s1–s5 | **5/5 VM == JIT** (canonical (ii) F' release-binary harness; re-verified at HEAD `43fcc923` 2026-05-22) |
+| verify-merge / check-no-dynamic / check-clean | 13/13 / exit 0 / exit 0 |
 | Round-6+ no-known-incorrectness set | **EMPTY** per user 2026-05-20 binding |
-| 2026-05-22 expanded-scope gating set | **OPEN.** Audits CLOSED A/B/C/D. **First wave: 2/3 MERGED** — W17.3-4.1 (`4b6d6833`); D-δ (`975536d3`); W16.2-J.1 surface-and-stopped + audit §3 corrected (NEW J.0 prereq). Slate 5→6 sub-clusters; effort 24–37h→30–47h. E (W18) + J (comptime trait) audit-first next round. F (Len + membership + KC #2 deletion) PENDING dispatch alongside W18. G.1/G.2 doc-truth gated on A–F+J. |
+| 2026-05-22 expanded-scope gating set | **OPEN.** Audits CLOSED A/B/C/D. **Round-7 W1 (3 dispatches):** W17.3-4.1 (`4b6d6833`) + D-δ (`975536d3`) MERGED; W16.2-J.1 SURFACE-AND-STOP + audit §3 corrected (J.0 prereq inserted; slate 5→6 sub-clusters; effort 24-37h→30-47h). **Round-7 W2 (3 dispatches):** D-α audit-first CLOSED (2-family split D-α.1 + D-α.2); W16.2-J.0 MERGED `fbe86020`; D-γ MERGED `bf864620`. **Round-7 W3 + audit-round-2 dispatching now.** E (W18) + J (comptime trait) audit-first in audit-round-2. F (Len + membership + KC #2 deletion) dispatches alongside W18 audit per close-coupling. G.1/G.2 doc-truth gated on A–F+J. |
 | v0.3.0 tag | NOT landed — gated on expanded-scope work + user authorization |
 
 ## 2026-05-22 expanded scope (binding — user, dialogue-supplemented same day)
