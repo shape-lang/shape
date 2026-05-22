@@ -410,6 +410,36 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // Native F64 — direct float constant. ~100x faster than FFI path.
                 Ok(self.builder.ins().f64const(f64::from_bits(*bits)))
             }
+            MirConstant::Decimal(_) => {
+                // WS-8 (2026-05-22): surface-and-stop. The MIR producer now
+                // preserves the decimal lexeme (`MirConstant::Decimal(s)`)
+                // verbatim instead of the pre-WS-8 silent collapse to
+                // `MirConstant::Float(0)` ("decimal not yet modeled") that
+                // caused `print(1.5D)` to JIT-print `0.0` while VM printed
+                // `1.5D` — a v0.3-gating silent wrong-answer divergence per
+                // WS-8 audit §1.D. Native JIT decimal codegen would require
+                // a `*const DecimalObj` carrier producer + a
+                // `jit_print_decimal` FFI body + the print-dispatch arm
+                // (terminators.rs `Some(NativeKind::DecimalV2) =>` arm).
+                // Surface-and-stop instead routes the program through the
+                // W12 fall-through to the bytecode interpreter (which
+                // materializes via the VM's `NewDecimalV2` opcode and
+                // prints correctly). VM == JIT, both run the interpreter
+                // path. Native JIT decimal codegen is a follow-up.
+                Err(
+                    "Route A surface-and-stop: NotImplemented(SURFACE) — \
+                     `MirConstant::Decimal` carries the decimal lexeme \
+                     through MIR but native JIT decimal codegen is not yet \
+                     wired (the `*const DecimalObj` producer + \
+                     `jit_print_decimal` FFI + `terminators.rs` DecimalV2 \
+                     print-dispatch arm together are a follow-up). The W12 \
+                     fall-through to the bytecode interpreter runs the \
+                     program under VM, which materializes decimals via \
+                     `NewDecimalV2` and prints correctly. WS-8 audit §1.D / \
+                     ADR-006 §2.7.5."
+                        .to_string(),
+                )
+            }
             MirConstant::Bool(b) => {
                 // Native I8 bool — 0 or 1.
                 Ok(self.builder.ins().iconst(types::I8, *b as i64))

@@ -192,12 +192,20 @@ enum NumericEmitResult {
 /// Simplified type category for equality dispatch.
 /// Collapses int-width variants to `Int` and char to `String` (EqString
 /// handles both heap-boxed string and char values via `as_str()`).
+///
+/// WS-8 (2026-05-22): `Bool` added — `bool == bool` lowers to `EqInt`
+/// (bools are 0/1 bits, so bitwise comparison is correct). Pre-WS-8 the
+/// missing bool arm fell through to `Eq`-trait dispatch which surfaced
+/// `no method 'eq' on receiver kind Bool` for both direct `a == b` and
+/// for `vec.shape`'s generic `.includes`/`.indexOf` that compare bool
+/// elements element-by-element.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EqOperandType {
     Int,
     Number,
     Decimal,
     String,
+    Bool,
 }
 
 impl BytecodeCompiler {
@@ -670,6 +678,18 @@ impl BytecodeCompiler {
             (Some(EqOperandType::String), Some(EqOperandType::String)) => {
                 Some((OpCode::EqString, is_neq))
             }
+            // WS-8 (2026-05-22): bool == bool lowers to EqInt — bools carry
+            // 0/1 bits on the §2.7.7 parallel-kind track and EqInt compares
+            // raw 64-bit slot bits, so the bitwise comparison is correct for
+            // bool values regardless of which slot bits represent {true,
+            // false}. Routes through the existing typed integer opcode
+            // without introducing a per-kind PHF entry. Result kind is
+            // already Bool downstream.
+            (Some(EqOperandType::Bool), Some(EqOperandType::Bool)) => Some(if is_neq {
+                (OpCode::NeqInt, false)
+            } else {
+                (OpCode::EqInt, false)
+            }),
             _ => None,
         };
 
@@ -827,6 +847,9 @@ impl BytecodeCompiler {
             let name = type_display_name(&ty);
             match name.as_str() {
                 "string" | "char" => return Some(EqOperandType::String),
+                // WS-8 (2026-05-22): bool inferred type lights up the
+                // typed-equality fast path (EqInt over bool bits).
+                "bool" => return Some(EqOperandType::Bool),
                 _ => {}
             }
         }
@@ -839,6 +862,9 @@ impl BytecodeCompiler {
             Expr::Literal(Literal::Number(_), _) => Some(EqOperandType::Number),
             Expr::Literal(Literal::Decimal(_), _) => Some(EqOperandType::Decimal),
             Expr::Literal(Literal::String(_), _) => Some(EqOperandType::String),
+            // WS-8 (2026-05-22): bool literal type for the AST-fallback
+            // source (handles `x == true` where `x` is untyped).
+            Expr::Literal(Literal::Bool(_), _) => Some(EqOperandType::Bool),
             _ => None,
         }
     }

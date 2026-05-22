@@ -1874,6 +1874,14 @@ fn infer_constant_kind(constant: &MirConstant) -> Option<NativeKind> {
         // line ~679 (post-amendment scalar label) and routes to
         // `jit_print_char(u32)`.
         MirConstant::Char(_) => Some(NativeKind::Char),
+        // WS-8 (2026-05-22): the canonical post-amendment scalar label for
+        // a decimal carrier is `NativeKind::DecimalV2` per ADR-006 §2.7.5
+        // amendment Wave 2 Agent B W12-StringV2-DecimalV2-NativeKind-
+        // additions. Stamping it here surfaces correctly downstream when
+        // `compile_constant` returns Err (the `print` dispatch's DecimalV2
+        // arm is not wired today, so the W12 fall-through routes to the VM
+        // interpreter — VM == JIT, both print correctly).
+        MirConstant::Decimal(_) => Some(NativeKind::DecimalV2),
         MirConstant::None => None,
         MirConstant::StringId(_) | MirConstant::Str(_) => Some(NativeKind::String),
         MirConstant::Function(_) => Some(NativeKind::UInt64),

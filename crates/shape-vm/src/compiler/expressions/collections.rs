@@ -398,7 +398,22 @@ impl BytecodeCompiler {
         }
         // Arrays don't produce TypedObjects
         self.last_expr_schema = None;
-        self.last_expr_type_info = if is_bool {
+        // WS-8 (2026-05-22): stamp `last_expr_type_info` for every typed-
+        // array element kind the producer picked, not just `bool` /
+        // numeric. Pre-WS-8 string / decimal / char element kinds left
+        // `type_info=None`, so the receiver-extend-type at a downstream
+        // `xs.map(...)` / `xs.indexOf(...)` call site resolved to `None`,
+        // missing the user-defined `Vec<T>.method` extend route and
+        // falling through to the generic ARRAY_METHODS ckpt-2/3 SURFACE.
+        // The `typed_kind` value computed above (or the legacy `is_bool` /
+        // `literal_numeric` fallback) is the producer-site proof of the
+        // element kind (ADR-006 §2.7.5 stamp-at-compile-time).
+        self.last_expr_type_info = if let Some(kind) = typed_kind {
+            Some(VariableTypeInfo::named(
+                super::super::v2_typed_emission::vec_type_name_for_typed_array_kind(kind)
+                    .to_string(),
+            ))
+        } else if is_bool {
             Some(VariableTypeInfo::named("Vec<bool>".to_string()))
         } else {
             literal_numeric.map(|nt| {

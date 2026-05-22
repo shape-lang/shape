@@ -1934,7 +1934,16 @@ pub(crate) fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotI
                 Literal::UInt(v) => MirConstant::Int(*v as i64),
                 Literal::TypedInt(v, _) => MirConstant::Int(*v),
                 Literal::Number(v) => MirConstant::Float(f64::to_bits(*v)),
-                Literal::Decimal(_) => MirConstant::Float(0), // decimal not yet modeled
+                // WS-8 (2026-05-22): preserve the decimal lexeme through MIR
+                // instead of collapsing to Float(0). The pre-WS-8 collapse
+                // silently lost the value, and the JIT printed `0.0` for
+                // `print(1.5D)` (a v0.3-gating VM/JIT divergence per WS-8
+                // audit §1.D). The JIT consumer surfaces-and-stops on this
+                // variant (`compile_constant` returns Err), triggering the
+                // W12 fall-through to the bytecode interpreter so the
+                // program runs under VM (which materializes via
+                // `NewDecimalV2` and prints correctly). VM == JIT.
+                Literal::Decimal(d) => MirConstant::Decimal(d.to_string()),
                 Literal::String(s) => MirConstant::Str(s.clone()),
                 // Phase 3 cluster-2 Round 4 cw-D-fam12 follow-up (instance 57,
                 // 2026-05-16). ADR-006 §2.7.5 amendment Round 19 S1.5: preserve
