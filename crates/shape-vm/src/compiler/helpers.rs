@@ -6654,3 +6654,124 @@ mod call_return_kind_tests {
         );
     }
 }
+
+// =============================================================================
+// W17.3-4.2 — TypeAnnotation→FieldType per-container lowering tests.
+//
+// Pins the supervisor 2026-05-22 ratified consolidation of the
+// `BytecodeCompiler::type_annotation_to_field_type` lowering for
+// `HashMap<K, V>` / `Map<K, V>` / `Set<T>` (per audit §4.B.4 +
+// `crates/shape-runtime/src/type_schema/field_types.rs` semantic_to_field_type
+// twin). Asserts the lowering threads through to the per-container
+// FieldType variants (no `FieldType::Object("HashMap")` / `Any` erasure)
+// per ADR-005 §1 + ADR-006 §2.7.5 producer-side stamp.
+// =============================================================================
+#[cfg(test)]
+mod w17_3_4_2_type_annotation_lowering_tests {
+    use super::*;
+    use shape_ast::ast::TypeAnnotation;
+    use shape_runtime::type_schema::FieldType;
+
+    /// W17.3-4.2 — `HashMap<string, int>` lowers to
+    /// `FieldType::HashMap { key: String, value: I64 }`. Mirrors the
+    /// semantic_to_field_type twin in `crates/shape-runtime/src/type_schema/
+    /// field_types.rs::test_semantic_to_field_type_generic_hashmap`.
+    #[test]
+    fn type_annotation_hashmap_threads_kv() {
+        let ann = TypeAnnotation::Generic {
+            name: shape_ast::ast::type_path::TypePath::simple("HashMap"),
+            args: vec![
+                TypeAnnotation::Basic("string".to_string()),
+                TypeAnnotation::Basic("int".to_string()),
+            ],
+        };
+        let ft = BytecodeCompiler::type_annotation_to_field_type(&ann);
+        assert_eq!(
+            ft,
+            FieldType::HashMap {
+                key: Box::new(FieldType::String),
+                value: Box::new(FieldType::I64),
+            }
+        );
+    }
+
+    /// W17.3-4.2 — `Map<string, bool>` alias maps to the same shape.
+    #[test]
+    fn type_annotation_map_alias_threads_kv() {
+        let ann = TypeAnnotation::Generic {
+            name: shape_ast::ast::type_path::TypePath::simple("Map"),
+            args: vec![
+                TypeAnnotation::Basic("string".to_string()),
+                TypeAnnotation::Basic("bool".to_string()),
+            ],
+        };
+        let ft = BytecodeCompiler::type_annotation_to_field_type(&ann);
+        assert_eq!(
+            ft,
+            FieldType::HashMap {
+                key: Box::new(FieldType::String),
+                value: Box::new(FieldType::Bool),
+            }
+        );
+    }
+
+    /// W17.3-4.2 — `Set<int>` lowers to `FieldType::Set(I64)`.
+    #[test]
+    fn type_annotation_set_threads_elem() {
+        let ann = TypeAnnotation::Generic {
+            name: shape_ast::ast::type_path::TypePath::simple("Set"),
+            args: vec![TypeAnnotation::Basic("int".to_string())],
+        };
+        let ft = BytecodeCompiler::type_annotation_to_field_type(&ann);
+        assert_eq!(ft, FieldType::Set(Box::new(FieldType::I64)));
+    }
+
+    /// W17.3-4.2 — nested `HashMap<string, Array<int>>` threads inner
+    /// `Array(I64)` through the value position (recursion-composition).
+    #[test]
+    fn type_annotation_hashmap_of_array_threads_nested() {
+        let ann = TypeAnnotation::Generic {
+            name: shape_ast::ast::type_path::TypePath::simple("HashMap"),
+            args: vec![
+                TypeAnnotation::Basic("string".to_string()),
+                TypeAnnotation::Array(Box::new(TypeAnnotation::Basic(
+                    "int".to_string(),
+                ))),
+            ],
+        };
+        let ft = BytecodeCompiler::type_annotation_to_field_type(&ann);
+        assert_eq!(
+            ft,
+            FieldType::HashMap {
+                key: Box::new(FieldType::String),
+                value: Box::new(FieldType::Array(Box::new(FieldType::I64))),
+            }
+        );
+    }
+
+    /// W17.3-4.2 — malformed arity (`HashMap<int>` with single arg)
+    /// falls back to the TRANSITIONAL `FieldType::Any` per the residual
+    /// safety net at `type_annotation_to_field_type` line ~5004.
+    #[test]
+    fn type_annotation_hashmap_malformed_arity_falls_back_to_any() {
+        let ann = TypeAnnotation::Generic {
+            name: shape_ast::ast::type_path::TypePath::simple("HashMap"),
+            args: vec![TypeAnnotation::Basic("int".to_string())],
+        };
+        let ft = BytecodeCompiler::type_annotation_to_field_type(&ann);
+        assert_eq!(ft, FieldType::Any);
+    }
+
+    /// W17.3-4.2 — `Array<int>` continues to lower correctly through the
+    /// dedicated `TypeAnnotation::Array` arm (separate from the
+    /// `Generic` per-container handler — Array is a first-class
+    /// TypeAnnotation variant, not Generic-wrapped).
+    #[test]
+    fn type_annotation_array_threads_elem() {
+        let ann = TypeAnnotation::Array(Box::new(TypeAnnotation::Basic(
+            "int".to_string(),
+        )));
+        let ft = BytecodeCompiler::type_annotation_to_field_type(&ann);
+        assert_eq!(ft, FieldType::Array(Box::new(FieldType::I64)));
+    }
+}

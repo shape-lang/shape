@@ -461,22 +461,57 @@ fn verify_schema(schema: &TypeSchema, errors: &mut Vec<ShapeError>) {
 }
 
 /// Returns `true` if the given `FieldType` is `Any` or contains `Any`
-/// in a nested `Array(Box<...>)` / `Option(Box<...>)` element position.
-/// Other compound variants (`Object(name)`) reference another schema by
-/// name; that schema is verified independently via its own
-/// [`verify_schema`] call.
+/// in a nested `Array(Box<...>)` / `Option(Box<...>)` / `HashMap { key,
+/// value }` / `Set(Box<...>)` element position. Other compound variants
+/// (`Object(name)`) reference another schema by name; that schema is
+/// verified independently via its own [`verify_schema`] call.
 ///
 /// W17.2-B (audit §4.D.1 + §9.B.1 (a) supervisor ratify 2026-05-19):
 /// `FieldType::Option(_)` is itself NOT Any (it's a concrete
 /// discriminator). But `Option<Any>` is — the inner Any signals an
 /// unresolved-element-type carrier that bidirectional inference
 /// should have narrowed. Same recursion-shape as `Array`.
+///
+/// W17.3-4.2 (audit §4.B compiler integration, supervisor ratify
+/// 2026-05-22): `HashMap { key, value }` and `Set(inner)` recurse the
+/// same way — an inner `Any` inside a per-container variant signals an
+/// unresolved element/key/value type that bidirectional inference
+/// should have narrowed. Without this recursion the previous
+/// `_ => false` defensive arm would silently absorb e.g.
+/// `HashMap<string, Any>` past the E0900 boundary. Explicit per-variant
+/// arms preserve the §4.D.2 "no catch-all" discipline + ADR-005 §1
+/// single-discriminator (HeapValue::kind() canonical for heap dispatch;
+/// FieldType variants are schema-layer descriptors only).
 fn field_type_contains_any(ft: &FieldType) -> bool {
     match ft {
         FieldType::Any => true,
         FieldType::Array(inner) => field_type_contains_any(inner),
         FieldType::Option(inner) => field_type_contains_any(inner),
-        _ => false,
+        // W17.3-4.2 — per-container recursion. Mirrors the Array /
+        // Option recursion shape per audit §4.B.3 + close-gate signal
+        // "post-inference verify pass handles new variants without
+        // panicking or reaching fallback Any" (§5.B W17.3-4.2).
+        FieldType::HashMap { key, value } => {
+            field_type_contains_any(key) || field_type_contains_any(value)
+        }
+        FieldType::Set(inner) => field_type_contains_any(inner),
+        // Explicit per-variant arms (no catch-all per audit §4.D.2 +
+        // CLAUDE.md "exhaustive-match errors guide completion; do NOT
+        // use catch-all `_ =>` arms that mask missing variants").
+        FieldType::F64
+        | FieldType::I64
+        | FieldType::Bool
+        | FieldType::String
+        | FieldType::Timestamp
+        | FieldType::Decimal
+        | FieldType::Object(_)
+        | FieldType::I8
+        | FieldType::U8
+        | FieldType::I16
+        | FieldType::U16
+        | FieldType::I32
+        | FieldType::U32
+        | FieldType::U64 => false,
     }
 }
 
@@ -969,6 +1004,170 @@ mod tests {
             1,
             "Option<Any> inner Any must surface E0900 under permanent-only \
              verification per W17.2-B `field_type_contains_any` recursion"
+        );
+    }
+
+    // =======================================================================
+    // W17.3-4.2 — `field_type_contains_any` recursion through per-container
+    // variants (HashMap/Set) per audit §4.B.3 + §5.B W17.3-4.2 close gate:
+    // "Post-inference verify pass handles new variants without panicking or
+    // reaching fallback Any". Mirrors the W17.2-B Option recursion tests.
+    // =======================================================================
+
+    /// W17.3-4.2 — `HashMap<string, int>` field is concrete (no inner Any)
+    /// and passes verification under permanent-only. Source-of-truth for
+    /// the "handles new variants without panicking" close-gate signal.
+    #[test]
+    fn w17_3_4_2_hashmap_concrete_passes() {
+        let mut reg = TypeSchemaRegistry::new();
+        let id = reg.allocate_id();
+        let schema = TypeSchema::with_id(
+            id,
+            "TaggedTable",
+            vec![(
+                "tags".to_string(),
+                FieldType::HashMap {
+                    key: Box::new(FieldType::String),
+                    value: Box::new(FieldType::I64),
+                },
+            )],
+        );
+        reg.register(schema);
+        let mut errors = Vec::new();
+        verify_registry_permanent_only(&reg, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "HashMap<string, int> field must pass verification post-W17.3-4.2; \
+             got {} error(s)",
+            errors.len()
+        );
+    }
+
+    /// W17.3-4.2 — `Set<int>` concrete field passes.
+    #[test]
+    fn w17_3_4_2_set_concrete_passes() {
+        let mut reg = TypeSchemaRegistry::new();
+        let id = reg.allocate_id();
+        let schema = TypeSchema::with_id(
+            id,
+            "TaggedTable",
+            vec![("ids".to_string(), FieldType::Set(Box::new(FieldType::I64)))],
+        );
+        reg.register(schema);
+        let mut errors = Vec::new();
+        verify_registry_permanent_only(&reg, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "Set<int> field must pass verification post-W17.3-4.2; got {} error(s)",
+            errors.len()
+        );
+    }
+
+    /// W17.3-4.2 — `HashMap<string, Any>` value-inner Any surfaces E0900
+    /// under permanent-only. The W17.3-4.1 defensive `_ => false` arm
+    /// pre-W17.3-4.2 silently absorbed this; the recursion update closes
+    /// the gap per §4.B.3.
+    #[test]
+    fn w17_3_4_2_hashmap_value_any_rejected_under_permanent_only() {
+        let mut reg = TypeSchemaRegistry::new();
+        let id = reg.allocate_id();
+        let schema = TypeSchema::with_id(
+            id,
+            "TaggedTableWithAnyValue",
+            vec![(
+                "tags".to_string(),
+                FieldType::HashMap {
+                    key: Box::new(FieldType::String),
+                    value: Box::new(FieldType::Any),
+                },
+            )],
+        );
+        reg.register(schema);
+        let mut errors = Vec::new();
+        verify_registry_permanent_only(&reg, &mut errors);
+        assert_eq!(
+            errors.len(),
+            1,
+            "HashMap<string, Any> inner Any must surface E0900 under \
+             permanent-only verification per W17.3-4.2 recursion"
+        );
+    }
+
+    /// W17.3-4.2 — `HashMap<Any, int>` key-inner Any also surfaces.
+    /// Mirrors the value-inner symmetry; both K and V are checked.
+    #[test]
+    fn w17_3_4_2_hashmap_key_any_rejected_under_permanent_only() {
+        let mut reg = TypeSchemaRegistry::new();
+        let id = reg.allocate_id();
+        let schema = TypeSchema::with_id(
+            id,
+            "TaggedTableWithAnyKey",
+            vec![(
+                "tags".to_string(),
+                FieldType::HashMap {
+                    key: Box::new(FieldType::Any),
+                    value: Box::new(FieldType::I64),
+                },
+            )],
+        );
+        reg.register(schema);
+        let mut errors = Vec::new();
+        verify_registry_permanent_only(&reg, &mut errors);
+        assert_eq!(
+            errors.len(),
+            1,
+            "HashMap<Any, int> inner Any in key must surface E0900 under \
+             permanent-only verification per W17.3-4.2 recursion"
+        );
+    }
+
+    /// W17.3-4.2 — `Set<Any>` inner Any surfaces E0900 under permanent-only.
+    #[test]
+    fn w17_3_4_2_set_any_inner_rejected_under_permanent_only() {
+        let mut reg = TypeSchemaRegistry::new();
+        let id = reg.allocate_id();
+        let schema = TypeSchema::with_id(
+            id,
+            "SetOfAny",
+            vec![("ids".to_string(), FieldType::Set(Box::new(FieldType::Any)))],
+        );
+        reg.register(schema);
+        let mut errors = Vec::new();
+        verify_registry_permanent_only(&reg, &mut errors);
+        assert_eq!(
+            errors.len(),
+            1,
+            "Set<Any> inner Any must surface E0900 under permanent-only \
+             verification per W17.3-4.2 recursion"
+        );
+    }
+
+    /// W17.3-4.2 — deeply-nested `Array<HashMap<string, Set<Any>>>`
+    /// surfaces the deeply-nested Any. Verifies recursion composes
+    /// correctly through Array → HashMap.value → Set.
+    #[test]
+    fn w17_3_4_2_nested_containers_inner_any_rejected() {
+        let mut reg = TypeSchemaRegistry::new();
+        let id = reg.allocate_id();
+        let schema = TypeSchema::with_id(
+            id,
+            "NestedContainerAnyField",
+            vec![(
+                "x".to_string(),
+                FieldType::Array(Box::new(FieldType::HashMap {
+                    key: Box::new(FieldType::String),
+                    value: Box::new(FieldType::Set(Box::new(FieldType::Any))),
+                })),
+            )],
+        );
+        reg.register(schema);
+        let mut errors = Vec::new();
+        verify_registry_permanent_only(&reg, &mut errors);
+        assert_eq!(
+            errors.len(),
+            1,
+            "deeply-nested Any inside Array<HashMap<string, Set<Any>>> \
+             must surface E0900 per W17.3-4.2 recursion-composition"
         );
     }
 }

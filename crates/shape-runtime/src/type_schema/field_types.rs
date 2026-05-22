@@ -443,6 +443,39 @@ pub(crate) fn semantic_to_field_type(
         // === Generic instantiation MyType<A, B> — schema-lookup by
         //     erased name; the args are projected at type-resolution
         //     time before reaching the schema layer.
+        //
+        //     W17.3-4.2 (audit §4.B.4 + supervisor ratify 2026-05-22) —
+        //     `HashMap<K, V>` / `Map<K, V>` / `Set<T>` PROPAGATE through
+        //     the per-container `FieldType` variants introduced at
+        //     W17.3-4.1. Subsumes the prior `SemanticType::Generic {
+        //     name: "HashMap" | "Map" | "Set" }` lowering to
+        //     `FieldType::Object(name)` (which erased the K/V/element
+        //     kinds at the schema layer and forced consumers through
+        //     the registry-lookup hot path). Slot storage continues to
+        //     point to `HeapKind::HashMap` (ordinal 17) /
+        //     `HeapKind::HashSet` (ordinal 21); ADR-005 §1 preserved.
+        //     Mirrors the `Option<T>` arm above + the
+        //     `compiler/helpers.rs::type_annotation_to_field_type`
+        //     surface-side lowering shape introduced at W17.3-4.1.
+        SemanticType::Generic { name, args } if name == "HashMap" || name == "Map" => {
+            if args.len() == 2 {
+                FieldType::HashMap {
+                    key: Box::new(semantic_to_field_type(&args[0], false)),
+                    value: Box::new(semantic_to_field_type(&args[1], false)),
+                }
+            } else {
+                // Malformed arity — preserve the legacy schema-lookup
+                // shape (Object(name) → registry lookup downstream).
+                FieldType::Object(name.clone())
+            }
+        }
+        SemanticType::Generic { name, args } if name == "Set" => {
+            if args.len() == 1 {
+                FieldType::Set(Box::new(semantic_to_field_type(&args[0], false)))
+            } else {
+                FieldType::Object(name.clone())
+            }
+        }
         SemanticType::Generic { name, .. } => FieldType::Object(name.clone()),
 
         // === Reference Types — schema-layer treats refs as
@@ -907,6 +940,112 @@ mod tests {
         let decoded2: FieldType =
             serde_json::from_str(&json2).expect("deserialize deeply-nested");
         assert_eq!(decoded2, ft2);
+    }
+
+    // =======================================================================
+    // W17.3-4.2 — semantic_to_field_type per-container lowering for
+    // SemanticType::Generic { name: "HashMap"|"Map"|"Set", args } per
+    // audit §4.B.4 + supervisor ratify 2026-05-22. Subsumes the prior
+    // lowering to FieldType::Object(name) which erased the K/V/element
+    // kinds at the schema layer.
+    // =======================================================================
+
+    /// W17.3-4.2 — `SemanticType::Generic { name: "HashMap", args: [String,
+    /// Integer] }` lowers to `FieldType::HashMap { key: String, value: I64 }`.
+    /// Subsumes the prior `FieldType::Object("HashMap")` lowering.
+    #[test]
+    fn test_semantic_to_field_type_generic_hashmap() {
+        use crate::type_system::SemanticType;
+        let ft = semantic_to_field_type(
+            &SemanticType::Generic {
+                name: "HashMap".to_string(),
+                args: vec![SemanticType::String, SemanticType::Integer],
+            },
+            false,
+        );
+        assert_eq!(
+            ft,
+            FieldType::HashMap {
+                key: Box::new(FieldType::String),
+                value: Box::new(FieldType::I64),
+            }
+        );
+    }
+
+    /// W17.3-4.2 — `Map<K, V>` alias maps to the same FieldType::HashMap shape.
+    #[test]
+    fn test_semantic_to_field_type_generic_map_alias() {
+        use crate::type_system::SemanticType;
+        let ft = semantic_to_field_type(
+            &SemanticType::Generic {
+                name: "Map".to_string(),
+                args: vec![SemanticType::String, SemanticType::Bool],
+            },
+            false,
+        );
+        assert_eq!(
+            ft,
+            FieldType::HashMap {
+                key: Box::new(FieldType::String),
+                value: Box::new(FieldType::Bool),
+            }
+        );
+    }
+
+    /// W17.3-4.2 — `SemanticType::Generic { name: "Set", args: [Integer] }`
+    /// lowers to `FieldType::Set(Box<I64>)`.
+    #[test]
+    fn test_semantic_to_field_type_generic_set() {
+        use crate::type_system::SemanticType;
+        let ft = semantic_to_field_type(
+            &SemanticType::Generic {
+                name: "Set".to_string(),
+                args: vec![SemanticType::Integer],
+            },
+            false,
+        );
+        assert_eq!(ft, FieldType::Set(Box::new(FieldType::I64)));
+    }
+
+    /// W17.3-4.2 — malformed arity (`HashMap<int>` with single arg) falls
+    /// back to `FieldType::Object("HashMap")` rather than panicking — the
+    /// inference layer should have surfaced the arity error upstream;
+    /// this arm is a safety net.
+    #[test]
+    fn test_semantic_to_field_type_generic_hashmap_malformed_arity_falls_back() {
+        use crate::type_system::SemanticType;
+        let ft = semantic_to_field_type(
+            &SemanticType::Generic {
+                name: "HashMap".to_string(),
+                args: vec![SemanticType::Integer],
+            },
+            false,
+        );
+        assert_eq!(ft, FieldType::Object("HashMap".to_string()));
+    }
+
+    /// W17.3-4.2 — nested `HashMap<string, Array<int>>` lowers correctly
+    /// (recursive K/V threading).
+    #[test]
+    fn test_semantic_to_field_type_nested_hashmap_of_array() {
+        use crate::type_system::SemanticType;
+        let ft = semantic_to_field_type(
+            &SemanticType::Generic {
+                name: "HashMap".to_string(),
+                args: vec![
+                    SemanticType::String,
+                    SemanticType::Array(Box::new(SemanticType::Integer)),
+                ],
+            },
+            false,
+        );
+        assert_eq!(
+            ft,
+            FieldType::HashMap {
+                key: Box::new(FieldType::String),
+                value: Box::new(FieldType::Array(Box::new(FieldType::I64))),
+            }
+        );
     }
 
     /// W17.3-4.1 §5.B — is_width_integer remains false for the new
