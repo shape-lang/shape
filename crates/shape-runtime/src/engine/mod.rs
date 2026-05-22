@@ -94,6 +94,30 @@ pub struct ShapeEngine {
     pub(crate) script_path: Option<String>,
     /// Exported symbol names (persisted across REPL commands)
     pub(crate) exported_symbols: std::collections::HashSet<String>,
+    /// REPL cross-cell persistence enabled. Set by [`init_repl`].
+    ///
+    /// When `true`, `execute_repl` accumulates `fn` / `type` / `enum` /
+    /// `trait` / `impl` / type-alias / annotation definitions across
+    /// cells and re-injects them into each subsequent cell's program,
+    /// and the program executor round-trips top-level `let`/`var`
+    /// bindings through the persistent `ExecutionContext`.
+    pub(crate) repl_persistence: bool,
+    /// Definition items accumulated from prior REPL cells. Re-prepended
+    /// to each new cell's program so the bytecode compiler resolves
+    /// types, enums, traits, and functions defined in earlier lines.
+    pub(crate) repl_definitions: Vec<shape_ast::ast::Item>,
+    /// User type schemas (struct / enum) compiled in prior REPL cells,
+    /// keyed by type name and carrying their first-assigned `SchemaId`.
+    ///
+    /// The bytecode compiler's per-cell `TypeSchemaRegistry` allocates
+    /// fresh ids each compile. A `TypedObject` value persisted across
+    /// cells carries the `schema_id` stamped at its construction; if the
+    /// next cell re-compiles the same `type` to a different id, the VM's
+    /// `GetFieldTyped` lookup misses. Seeding each cell's compiler with
+    /// these schemas (ids preserved) keeps a user type's id stable for
+    /// the whole REPL session, so persisted instances stay resolvable.
+    pub(crate) repl_user_schemas:
+        std::collections::HashMap<String, crate::type_schema::TypeSchema>,
 }
 
 impl ShapeEngine {
@@ -112,6 +136,9 @@ impl ShapeEngine {
             last_snapshot: None,
             script_path: None,
             exported_symbols: std::collections::HashSet::new(),
+            repl_persistence: false,
+            repl_definitions: Vec::new(),
+            repl_user_schemas: std::collections::HashMap::new(),
         })
     }
 
@@ -129,6 +156,9 @@ impl ShapeEngine {
             last_snapshot: None,
             script_path: None,
             exported_symbols: std::collections::HashSet::new(),
+            repl_persistence: false,
+            repl_definitions: Vec::new(),
+            repl_user_schemas: std::collections::HashMap::new(),
         })
     }
 
@@ -158,6 +188,9 @@ impl ShapeEngine {
             last_snapshot: None,
             script_path: None,
             exported_symbols: std::collections::HashSet::new(),
+            repl_persistence: false,
+            repl_definitions: Vec::new(),
+            repl_user_schemas: std::collections::HashMap::new(),
         })
     }
 
@@ -165,12 +198,21 @@ impl ShapeEngine {
     ///
     /// Call this once after creating the engine and loading stdlib,
     /// but before executing any REPL commands. This configures output adapters
-    /// for REPL-friendly display.
+    /// for REPL-friendly display and enables cross-cell persistence: `let`/
+    /// `var` bindings round-trip through the persistent `ExecutionContext`
+    /// and `fn`/`type`/`enum`/`trait`/`impl`/type-alias/annotation
+    /// definitions accumulate across cells.
     pub fn init_repl(&mut self) {
         // Set REPL output adapter to preserve PrintResult spans
         if let Some(ctx) = self.runtime.persistent_context_mut() {
             ctx.set_output_adapter(Box::new(crate::output_adapter::ReplAdapter));
         }
+        self.repl_persistence = true;
+    }
+
+    /// Whether REPL cross-cell persistence is active (set by [`init_repl`]).
+    pub fn repl_persistence(&self) -> bool {
+        self.repl_persistence
     }
 
     /// Capture semantic/runtime state after stdlib bootstrap.
