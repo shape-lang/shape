@@ -1683,13 +1683,18 @@ impl BytecodeCompiler {
     ) -> Result<()> {
         // Only the simple "single closure with one user-param-of-element-type"
         // HOFs are wired here. Reduce takes (acc, x) — both are element-type
-        // for homogeneous folds, so we hint both.
+        // for homogeneous folds, so we hint both. Sort takes a comparator
+        // `(T, T) => int` — both params are element-type, like reduce's
+        // homogeneous fold but with the array element type for both
+        // positions (D-α.1 close, 2026-05-22, per
+        // `v0.3-d-alpha-audit.md` §4 trigger KC #6(f)).
         let is_single_arg_hof = matches!(
             method,
             "map" | "filter" | "forEach" | "find" | "findIndex" | "some" | "every" | "flatMap"
         );
         let is_reduce = method == "reduce";
-        if !is_single_arg_hof && !is_reduce {
+        let is_sort = method == "sort";
+        if !is_single_arg_hof && !is_reduce && !is_sort {
             return Ok(());
         }
         // Need at least one closure arg.
@@ -1753,6 +1758,15 @@ impl BytecodeCompiler {
             // reduce(f, init): the callback `f` is positional arg 0 with
             // two user params `(acc, x)`, both elem-type for homogeneous
             // folds; `init` is positional arg 1.
+            vec![Some(elem_ann.clone()), Some(elem_ann)]
+        } else if is_sort {
+            // sort(cmp): the callback `cmp` is positional arg 0 with two
+            // user params `(a, b)`, both elem-type for a homogeneous
+            // comparator. The return type (int) is not propagated as a
+            // hint — closure body inference recovers it from the literal
+            // arithmetic ops on the int-typed params. (D-α.1 close —
+            // closes KC #6(f) test_array_sort_ascending /
+            // test_array_sort_descending; see audit §4 sort row.)
             vec![Some(elem_ann.clone()), Some(elem_ann)]
         } else {
             vec![Some(elem_ann)]
