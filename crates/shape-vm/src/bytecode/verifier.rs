@@ -1,31 +1,56 @@
 //! Bytecode verifier for trusted and v2 typed opcodes.
 //!
 //! Validates that trusted opcode invariants hold:
-//! - Every trusted opcode appears inside a function with a `FrameDescriptor`
-//! - The FrameDescriptor has no `NativeKind::Unknown` entries for the relevant operands
+//! - Every trusted opcode carries the operand shape its handler requires
+//!   (`LoadLocalTrusted` → `Operand::Local`, `JumpIfFalseTrusted` →
+//!   `Operand::Offset`).
 //!
 //! Also validates v2 typed opcode invariants:
 //! - Typed array ops require a FrameDescriptor with non-Unknown slots
 //! - Typed field ops have FieldOffset operands with reasonable byte offsets
 //! - Sized integer (i32) ops require a FrameDescriptor with non-Unknown slots
+//!
+//! ## WS-10b — stale `MissingFrameDescriptor` rule removed (2026-05-22)
+//!
+//! `verify_trusted_opcodes` previously errored `MissingFrameDescriptor` /
+//! `UnknownSlotKind` for any trusted opcode in a function whose
+//! `Function.frame_descriptor` was `None` / empty. That rule encoded the
+//! **pre-ADR-006 §2.7.7 trusted-opcode contract**, when trusted opcodes
+//! skipped runtime tag-bit validation and relied on descriptor-supplied
+//! slot-kind metadata to justify the skip.
+//!
+//! Post-§2.7.7 only two trusted opcodes survive — `LoadLocalTrusted`
+//! (0xD7) and `JumpIfFalseTrusted` (0xD8). Their executors
+//! (`executor/variables/mod.rs::op_load_local_trusted`,
+//! `executor/control_flow/mod.rs::op_jump_if_false_trusted`) source slot
+//! kind from the §2.7.7 stack parallel-`Vec<NativeKind>` track, NOT the
+//! `FrameDescriptor`. `LoadLocalTrusted` is byte-for-byte identical to
+//! non-trusted `LoadLocal`; `JumpIfFalseTrusted` pops the kinded
+//! condition slot directly. `current_frame_descriptor()` has zero VM
+//! executor call sites — the descriptor is consumed at runtime only by
+//! the JIT, which already has an explicit absent-descriptor fallback
+//! (`shape-jit::worker.rs`, `mir_compiler/v2_call_abi.rs`).
+//!
+//! The stale rule fired 16 false positives on every program run (stdlib
+//! prelude functions with an unannotated / `any`-typed local whose whole
+//! frame the storage-hint pass could not prove). It enforced nothing —
+//! `load_program` only `eprintln!`'d — but printed "Bytecode verification
+//! failed" on a clean prelude. The rule is dropped; `verify_trusted_opcodes`
+//! now verifies the still-meaningful invariant (operand shape). The
+//! `verify_v2_typed_opcodes` pass — which checks real v2 invariants — is
+//! unchanged and keeps its enforcement structure.
 
 use super::{BytecodeProgram, OpCode, Operand};
 
 /// Errors produced by the bytecode verifier.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VerifyError {
-    /// A trusted opcode was found in a function that has no FrameDescriptor.
-    MissingFrameDescriptor {
+    /// A trusted opcode carries the wrong operand shape for its handler
+    /// (e.g. `LoadLocalTrusted` without an `Operand::Local`).
+    TrustedOpcodeBadOperand {
         function_name: String,
         opcode: OpCode,
         instruction_offset: usize,
-    },
-    /// A trusted opcode operand slot has `NativeKind::Unknown` in the FrameDescriptor.
-    UnknownSlotKind {
-        function_name: String,
-        opcode: OpCode,
-        instruction_offset: usize,
-        slot_index: usize,
     },
     /// A v2 typed opcode was found in a function without a FrameDescriptor.
     V2MissingFrameDescriptor {
@@ -51,24 +76,14 @@ pub enum VerifyError {
 impl std::fmt::Display for VerifyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            VerifyError::MissingFrameDescriptor {
+            VerifyError::TrustedOpcodeBadOperand {
                 function_name,
                 opcode,
                 instruction_offset,
             } => write!(
                 f,
-                "Trusted opcode {:?} at offset {} in function '{}' has no FrameDescriptor",
+                "Trusted opcode {:?} at offset {} in function '{}' has the wrong operand shape",
                 opcode, instruction_offset, function_name
-            ),
-            VerifyError::UnknownSlotKind {
-                function_name,
-                opcode,
-                instruction_offset,
-                slot_index,
-            } => write!(
-                f,
-                "Trusted opcode {:?} at offset {} in function '{}': slot {} has Unknown kind",
-                opcode, instruction_offset, function_name, slot_index
             ),
             VerifyError::V2MissingFrameDescriptor {
                 function_name,
@@ -104,7 +119,16 @@ impl std::fmt::Display for VerifyError {
 
 impl std::error::Error for VerifyError {}
 
-/// Verify that all trusted opcodes in a program have valid FrameDescriptors.
+/// Verify that all trusted opcodes in a program are well-formed.
+///
+/// Post-ADR-006 §2.7.7 the two surviving trusted opcodes (`LoadLocalTrusted`,
+/// `JumpIfFalseTrusted`) source slot kind from the stack
+/// parallel-`Vec<NativeKind>` track, not the `FrameDescriptor` — see the
+/// module doc comment (`WS-10b`). The descriptor-presence rule that used to
+/// live here was stale (it fired 16 false positives on a clean stdlib
+/// prelude) and is removed. The verifier still checks the invariant that is
+/// still real: each trusted opcode carries the operand shape its executor
+/// requires, so a future malformed trusted opcode still surfaces.
 ///
 /// Returns `Ok(())` if all trusted opcodes pass verification, or a list of
 /// all violations found.
@@ -134,33 +158,28 @@ pub fn verify_trusted_opcodes(program: &BytecodeProgram) -> Result<(), Vec<Verif
                 continue;
             }
 
-            // Check FrameDescriptor exists
-            let Some(ref fd) = func.frame_descriptor else {
-                errors.push(VerifyError::MissingFrameDescriptor {
-                    function_name: func.name.clone(),
-                    opcode: instruction.opcode,
-                    instruction_offset: offset,
-                });
-                continue;
+            // Operand-shape check — the still-meaningful trusted-opcode
+            // invariant. `LoadLocalTrusted` indexes a local; `JumpIfFalseTrusted`
+            // branches by a signed offset. A mismatch is a real malformed-bytecode
+            // bug the executor would reject with `VMError::InvalidOperand` at
+            // runtime; surface it statically.
+            let operand_ok = match instruction.opcode {
+                OpCode::LoadLocalTrusted => {
+                    matches!(instruction.operand, Some(Operand::Local(_)))
+                }
+                OpCode::JumpIfFalseTrusted => {
+                    matches!(instruction.operand, Some(Operand::Offset(_)))
+                }
+                // Any future trusted opcode without an operand-shape rule
+                // is conservatively accepted here; add its rule alongside
+                // its executor.
+                _ => true,
             };
-
-            // Check that the descriptor is populated. Per ADR-006 §2.7.5.1,
-            // `FrameDescriptor.slots: Vec<NativeKind>` is post-proof — the
-            // deleted `NativeKind::Unknown` variant cannot appear at this
-            // layer. An empty descriptor means the compiler couldn't
-            // prove every slot's kind (`Z-compiler-option-cascade` migrates
-            // `populate_program_storage_hints` /
-            // `capture_function_local_storage_hints` to short-circuit to
-            // `Vec::new()` in that case via
-            // `collect::<Option<Vec<_>>>()`), so the trusted-opcode contract
-            // is unmet and we error out the same way the deleted
-            // `is_all_unknown` path did.
-            if fd.is_empty() {
-                errors.push(VerifyError::UnknownSlotKind {
+            if !operand_ok {
+                errors.push(VerifyError::TrustedOpcodeBadOperand {
                     function_name: func.name.clone(),
                     opcode: instruction.opcode,
                     instruction_offset: offset,
-                    slot_index: 0,
                 });
             }
         }
@@ -302,8 +321,16 @@ mod tests {
         assert!(verify_trusted_opcodes(&prog).is_ok());
     }
 
+    /// WS-10b: post-ADR-006 §2.7.7 a trusted opcode in a function with NO
+    /// `FrameDescriptor` is NOT a violation — the surviving trusted opcodes
+    /// (`LoadLocalTrusted`, `JumpIfFalseTrusted`) source slot kind from the
+    /// §2.7.7 stack parallel-`NativeKind` track, not the descriptor. The
+    /// stale `MissingFrameDescriptor` rule that fired 16 false positives on
+    /// every program run is removed. This is the regression guard for that
+    /// removal: well-formed trusted opcodes with `frame_descriptor: None`
+    /// pass clean.
     #[test]
-    fn trusted_opcode_missing_frame_descriptor() {
+    fn trusted_opcode_no_frame_descriptor_is_not_a_violation() {
         use crate::bytecode::Operand;
         let func = Function {
             name: "load_trusted".to_string(),
@@ -311,7 +338,7 @@ mod tests {
             param_names: vec!["a".to_string(), "b".to_string()],
             locals_count: 2,
             entry_point: 0,
-            body_length: 2,
+            body_length: 3,
             is_closure: false,
             captures_count: 0,
             is_async: false,
@@ -324,6 +351,42 @@ mod tests {
         };
         let instructions = vec![
             Instruction::new(OpCode::LoadLocalTrusted, Some(Operand::Local(0))),
+            Instruction::new(OpCode::JumpIfFalseTrusted, Some(Operand::Offset(1))),
+            Instruction::simple(OpCode::ReturnValue),
+        ];
+        let prog = make_program(vec![func], instructions);
+        assert!(
+            verify_trusted_opcodes(&prog).is_ok(),
+            "trusted opcodes with no FrameDescriptor must pass (WS-10b stale-rule removal)"
+        );
+    }
+
+    /// WS-10b: the still-meaningful trusted-opcode invariant — operand shape.
+    /// `LoadLocalTrusted` must carry an `Operand::Local`; a wrong operand
+    /// shape is a real malformed-bytecode bug and is still surfaced.
+    #[test]
+    fn trusted_opcode_bad_operand_is_a_violation() {
+        use crate::bytecode::Operand;
+        let func = Function {
+            name: "bad_load".to_string(),
+            arity: 0,
+            param_names: vec![],
+            locals_count: 1,
+            entry_point: 0,
+            body_length: 2,
+            is_closure: false,
+            captures_count: 0,
+            is_async: false,
+            ref_params: vec![],
+            ref_mutates: vec![],
+            mutable_captures: vec![],
+            frame_descriptor: Some(FrameDescriptor::from_slots(vec![NativeKind::Int64])),
+            osr_entry_points: vec![],
+            mir_data: None,
+        };
+        // LoadLocalTrusted carrying an Offset operand instead of Local — malformed.
+        let instructions = vec![
+            Instruction::new(OpCode::LoadLocalTrusted, Some(Operand::Offset(3))),
             Instruction::simple(OpCode::ReturnValue),
         ];
         let prog = make_program(vec![func], instructions);
@@ -331,12 +394,12 @@ mod tests {
         assert_eq!(errs.len(), 1);
         assert!(matches!(
             &errs[0],
-            VerifyError::MissingFrameDescriptor { .. }
+            VerifyError::TrustedOpcodeBadOperand { .. }
         ));
     }
 
     #[test]
-    fn trusted_opcode_with_valid_frame_descriptor() {
+    fn trusted_opcode_with_valid_operand_passes() {
         use crate::bytecode::Operand;
         let func = Function {
             name: "load_trusted".to_string(),
