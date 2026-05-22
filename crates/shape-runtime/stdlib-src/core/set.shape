@@ -3,8 +3,13 @@
 ///
 /// Backed by HashMap for O(1) lookup.
 /// Exports: set.new(), set.from_array(arr), set.add(s, item), set.remove(s, item),
-///          set.contains(s, item), set.union(a, b), set.intersection(a, b),
-///          set.difference(a, b), set.to_array(s), set.size(s)
+///          set.includes(s, item), set.union(a, b), set.intersection(a, b),
+///          set.difference(a, b), set.to_array(s), set.len(s)
+///
+/// Criterion F (2026-05-22): `set.contains(s, item)` was renamed to
+/// `set.includes(s, item)` and `set.size(s)` was renamed to `set.len(s)`
+/// to standardize the membership/length-naming surface across
+/// Array/Set/HashMap. No backwards-compat aliases shipped.
 
 /// Create a new empty set
 pub fn new() {
@@ -30,8 +35,8 @@ pub fn remove(s, item) {
     s.delete(item)
 }
 
-/// Check if set contains an item
-pub fn contains(s, item) {
+/// Check if set includes an item (criterion F: renamed from `contains`).
+pub fn includes(s, item) {
     s.has(item)
 }
 
@@ -71,7 +76,7 @@ pub fn to_array(s) {
     s.keys()
 }
 
-/// Get the number of elements
-pub fn size(s) {
+/// Get the number of elements (criterion F: renamed from `size`).
+pub fn len(s) {
     s.len()
 }

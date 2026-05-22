@@ -28,7 +28,24 @@
 /// on `.len()`. The declared signature intentionally returns `int` (not
 /// `number`) to match the zero-tag typed-opcode path (`ArrayLenTyped`,
 /// `MapLenTyped`).
+///
+/// `isEmpty()` is a defaulted method whose body returns `self.len() == 0`.
+/// Built-in types whose method registry already exposes a faster
+/// `isEmpty` handler (`array_basic::handle_len_v2` is_empty shim,
+/// `hashmap_methods::v2_is_empty`, Set/Deque/PriorityQueue/TypedArray/
+/// Range `v2_is_empty` PHF entries, `string_methods::v2_string_is_empty`)
+/// bypass the default at dispatch time. User-defined types that
+/// implement `impl Len for T` inherit the default body without
+/// authoring their own `isEmpty`.
 trait Len {
     /// Return the number of elements (or bytes, for strings).
     method len() -> int;
+
+    /// Return `true` when the receiver has zero elements. Default body
+    /// delegates to `self.len() == 0`; types with a faster path (e.g.
+    /// HashMap, Range) override via their PHF method registry, which
+    /// takes precedence over this default at dispatch time.
+    method isEmpty() -> bool {
+        self.len() == 0
+    }
 }

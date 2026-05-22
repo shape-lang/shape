@@ -1,4 +1,4 @@
 let mut s = Set()
 s.add("a")
 s.add("b")
-print(s.size())
+print(s.len())
