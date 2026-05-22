@@ -443,8 +443,18 @@ impl BytecodeCompiler {
 
     /// Emit bytecode for Option<T> lifting with an infallible conversion.
     ///
-    /// Stack effect: replaces top-of-stack Option<T> value with Option<M>.
-    /// None values pass through unchanged; Some(t) values are converted.
+    /// Stack effect: replaces top-of-stack Option<T> value with the
+    /// lifted result. `None` passes through unchanged (stays the null
+    /// sentinel); `Some(t)` is **unwrapped** to its payload `t` and then
+    /// converted. This mirrors `emit_result_lift_infallible`'s
+    /// `IsOk; UnwrapOk; convert` shape — the `UnwrapOption` step is
+    /// mandatory: the `ConvertTo*` opcode bodies (`executor/builtins/
+    /// type_ops.rs`) accept only proven scalar/heap-numeric source
+    /// kinds, never `Ptr(HeapKind::Option)`. Without the unwrap the
+    /// `Some` arm would feed the whole Option carrier into the convert
+    /// and surface `"cannot convert kind Ptr(Option) to <T>"`, while the
+    /// `None` arm (null sentinel, skipped by `IsNull`) succeeds — the
+    /// asymmetric cast WS-12 fixes.
     fn emit_option_lift_infallible(
         &mut self,
         convert_opcode: OpCode,
@@ -456,11 +466,13 @@ impl BytecodeCompiler {
         self.emit(Instruction::simple(OpCode::IsNull));
         // Stack: [option_val, is_none]
         let jump_skip = self.emit_jump(OpCode::JumpIfTrue, 0);
-        // Stack: [option_val] — not None, convert it
+        // Stack: [option_val] — not None: unwrap the Some payload, convert it.
+        self.emit(Instruction::simple(OpCode::UnwrapOption));
+        // Stack: [inner_val]
         self.emit(Instruction::new(convert_opcode, None));
         // Stack: [converted_val]
         let jump_end = self.emit_jump(OpCode::Jump, 0);
-        // skip: value is None, leave it on stack
+        // skip: value is None, leave the null sentinel on stack
         self.patch_jump(jump_skip);
         // Stack: [null]
         // end:
@@ -469,8 +481,11 @@ impl BytecodeCompiler {
 
     /// Emit bytecode for Option<T> lifting with a fallible conversion.
     ///
-    /// Stack effect: replaces top-of-stack Option<T> value with Option<Result<M, AnyError>>.
-    /// None values pass through; Some(t) values are try-converted.
+    /// Stack effect: replaces top-of-stack Option<T> value with the
+    /// lifted result. `None` passes through; `Some(t)` is unwrapped to
+    /// its payload `t` and then try-converted. Same `UnwrapOption`
+    /// requirement as `emit_option_lift_infallible` — see that method's
+    /// doc comment.
     fn emit_option_lift_fallible(
         &mut self,
         try_convert_opcode: OpCode,
@@ -480,6 +495,8 @@ impl BytecodeCompiler {
         self.emit(Instruction::simple(OpCode::Dup));
         self.emit(Instruction::simple(OpCode::IsNull));
         let jump_skip = self.emit_jump(OpCode::JumpIfTrue, 0);
+        // Not None: unwrap the Some payload before the try-convert.
+        self.emit(Instruction::simple(OpCode::UnwrapOption));
         self.emit(Instruction::new(try_convert_opcode, None));
         let jump_end = self.emit_jump(OpCode::Jump, 0);
         self.patch_jump(jump_skip);
@@ -612,6 +629,43 @@ impl BytecodeCompiler {
             "decimal" => Some(OpCode::ConvertToDecimal),
             "char" => Some(OpCode::ConvertToChar),
             _ => None,
+        }
+    }
+
+    /// Record the last-expr kind for a completed primitive `as`-cast so
+    /// downstream consumers (top-level return-kind synthesis, `let`
+    /// binding type tracking, binary-op typed dispatch) observe the
+    /// CAST TARGET kind rather than the source kind.
+    ///
+    /// WS-12: applies only to the direct (non-lift) primitive cast —
+    /// the Option/Result lift result is a null-coded `Option<U>` /
+    /// `Result<U, _>` whose top-of-stack value is either the null
+    /// sentinel or the scalar, so a bare scalar kind must NOT be
+    /// stamped for the lift paths.
+    fn record_cast_result_kind(&mut self, target_selector: &str) {
+        use crate::type_tracking::NumericType;
+        match target_selector {
+            "int" => {
+                self.last_expr_numeric_type = Some(NumericType::Int);
+                self.last_expr_type_info = None;
+            }
+            "number" => {
+                self.last_expr_numeric_type = Some(NumericType::Number);
+                self.last_expr_type_info = None;
+            }
+            "decimal" => {
+                self.last_expr_numeric_type = Some(NumericType::Decimal);
+                self.last_expr_type_info = None;
+            }
+            "bool" | "string" | "char" => {
+                self.last_expr_numeric_type = None;
+                self.last_expr_type_info = Some(
+                    crate::type_tracking::VariableTypeInfo::named(target_selector.to_string()),
+                );
+            }
+            // Non-primitive targets do not reach this helper (the caller
+            // gates on `convert_opcode_for_primitive` being `Some`).
+            _ => {}
         }
     }
 
@@ -754,6 +808,20 @@ impl BytecodeCompiler {
                         // Direct conversion (primitive fast path)
                         self.compile_expr(expr)?;
                         self.emit(Instruction::new(convert_opcode, None));
+                        // WS-12: the `ConvertTo*` opcode body re-stamps
+                        // the result slot's `NativeKind` to the cast
+                        // target (`op_convert_to_*` in `executor/
+                        // builtins/type_ops.rs`). The compiler's
+                        // last-expr kind trackers must follow suit or a
+                        // downstream consumer — top-level return-kind
+                        // synthesis, a `let` binding's type, a binary
+                        // op's typed-opcode dispatch — keeps the SOURCE
+                        // type and mis-formats the converted value
+                        // (e.g. `let y = x as number` then `y + 0.5`
+                        // printing the f64 bits as an integer). The
+                        // `CastWidth` width-cast arm already does this;
+                        // the primitive `as`-cast arm must match.
+                        self.record_cast_result_kind(&target_selector);
                         return Ok(());
                     }
                 }
