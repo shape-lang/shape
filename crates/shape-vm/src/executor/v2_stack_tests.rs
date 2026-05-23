@@ -155,18 +155,36 @@ fn v2_stack_raw_i64_large_positive() {
 
 #[test]
 fn v2_stack_raw_i32_push_pop_roundtrip() {
-    // Phase-2c surface: `NativeScalar::I32` lived inside the deleted
-    // `ValueWord` heap-tag encoding. The kinded `clone_with_kind` /
-    // `drop_with_kind` dispatch tables (vm_impl/stack.rs) intentionally
-    // debug_assert!() against `HeapKind::NativeScalar` — there is no
-    // Arc<NativeScalar> kinded carrier yet. See ADR-006 §2.7.4.
-    todo!("phase-2c — see ADR-006 §2.7.4 (NativeScalar carrier pending kinded redesign)");
+    // T1-host-tier-marshal-rebuild (R8, 2026-05-23): supervisor RULED
+    // REFUSED on a NativeScalar carrier — i32 is the existing
+    // `NativeKind::Int32` scalar variant per ADR-006 §2.7.5 (no new
+    // sum type, no Bool-default fallback). The slot stores the i32 in
+    // the low 32 bits, sign-extended into i64 on read.
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(BytecodeProgram::default());
+
+    let val: i32 = 12345;
+    // i32 zero-extends into the low 32 bits of the slot; `as i32` on
+    // read recovers the signed value.
+    vm.push_kinded(val as u32 as u64, NativeKind::Int32).unwrap();
+    let (bits, kind) = vm.pop_kinded().unwrap();
+    assert_eq!(kind, NativeKind::Int32, "kind must be Int32");
+    assert_eq!(bits as u32 as i32, val, "i32 value must round-trip exactly");
 }
 
 #[test]
 fn v2_stack_raw_i32_negative() {
-    // Phase-2c surface: NativeScalar — see ADR-006 §2.7.4.
-    todo!("phase-2c — see ADR-006 §2.7.4 (NativeScalar carrier pending kinded redesign)");
+    // T1-host-tier-marshal-rebuild: same `NativeKind::Int32` carrier
+    // as above for a negative value. Slot bits are the two's-complement
+    // i32 pattern zero-extended; `as i32` reinterprets the low 32 bits.
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(BytecodeProgram::default());
+
+    let val: i32 = -42;
+    vm.push_kinded(val as u32 as u64, NativeKind::Int32).unwrap();
+    let (bits, kind) = vm.pop_kinded().unwrap();
+    assert_eq!(kind, NativeKind::Int32);
+    assert_eq!(bits as u32 as i32, val, "negative i32 round-trip");
 }
 
 // =========================================================================
@@ -207,15 +225,49 @@ fn v2_stack_raw_bool_push_pop_false() {
 
 #[test]
 fn v2_stack_raw_pointer_push_pop() {
-    // Phase-2c surface: `NativeScalar::Ptr` lived inside the deleted
-    // `ValueWord` heap-tag encoding — see ADR-006 §2.7.4.
-    todo!("phase-2c — see ADR-006 §2.7.4 (NativeScalar carrier pending kinded redesign)");
+    // T1-host-tier-marshal-rebuild (R8, 2026-05-23): supervisor RULED
+    // REFUSED on a NativeScalar carrier — heap pointers flow through
+    // `NativeKind::Ptr(HeapKind::*)` per ADR-006 §2.7.6 / Q8. Pick the
+    // String arm: bits = `Arc::into_raw(Arc<HeapValue::String>)`.
+    use shape_value::HeapKind;
+    use shape_value::heap_value::HeapValue;
+    use std::sync::Arc;
+
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(BytecodeProgram::default());
+
+    let arc = Arc::new(HeapValue::String(Arc::new("hello".to_string())));
+    let bits_in = Arc::into_raw(arc) as u64;
+    vm.push_kinded(bits_in, NativeKind::Ptr(HeapKind::String))
+        .unwrap();
+
+    let (bits, kind) = vm.pop_kinded().unwrap();
+    assert_eq!(kind, NativeKind::Ptr(HeapKind::String));
+    assert_eq!(bits, bits_in, "raw pointer bits must round-trip");
+
+    // Retire the strong-count share so we don't leak — pop_kinded
+    // hands the owned share back to the caller per ADR-006 §2.7.6 / Q8.
+    unsafe {
+        let _ = Arc::from_raw(bits as *const HeapValue);
+    }
 }
 
 #[test]
 fn v2_stack_raw_pointer_null() {
-    // Phase-2c surface: NativeScalar — see ADR-006 §2.7.4.
-    todo!("phase-2c — see ADR-006 §2.7.4 (NativeScalar carrier pending kinded redesign)");
+    // T1-host-tier-marshal-rebuild: `NativeKind::Null` is the canonical
+    // absence-of-value discriminator per ADR-006 §2.7 + §2.7.5 + §2.7.7
+    // (R5b-2-bool-null-sentinel-cluster, 2026-05-19). Pre-disposition
+    // null was `(0u64, NativeKind::Bool)` which collided with the
+    // legitimate `false` bool slot; post-disposition the kind IS the
+    // discriminator. A null slot pushes (0u64, Null) and pops the same
+    // pair.
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(BytecodeProgram::default());
+
+    vm.push_kinded(0u64, NativeKind::Null).unwrap();
+    let (bits, kind) = vm.pop_kinded().unwrap();
+    assert_eq!(kind, NativeKind::Null);
+    assert_eq!(bits, 0);
 }
 
 // =========================================================================
@@ -253,12 +305,54 @@ fn v2_stack_mixed_types_push_pop_order() {
 
 #[test]
 fn v2_stack_mixed_types_with_native_scalars() {
-    // Phase-2c surface: NativeScalar — see ADR-006 §2.7.4. The body
-    // mixed inline scalars (f64, i64, bool) with NativeScalar-boxed
-    // I32 / Ptr; the kinded carrier for `HeapKind::NativeScalar` is
-    // pending (clone_with_kind / drop_with_kind currently
-    // debug_assert!() against it).
-    todo!("phase-2c — see ADR-006 §2.7.4 (NativeScalar carrier pending kinded redesign)");
+    // T1-host-tier-marshal-rebuild (R8, 2026-05-23): supervisor RULED
+    // REFUSED on a NativeScalar carrier. The pre-W17 test mixed inline
+    // scalars (f64, i64, bool) with NativeScalar-boxed I32 / Ptr; the
+    // post-RULED shape uses the existing `NativeKind::Int32` and
+    // `NativeKind::Ptr(HeapKind::String)` arms directly per ADR-006
+    // §2.7.5 / §2.7.6 / Q8 — no Bool-default, no new sum-type.
+    use shape_value::HeapKind;
+    use shape_value::heap_value::HeapValue;
+    use std::sync::Arc;
+
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(BytecodeProgram::default());
+
+    let arc = Arc::new(HeapValue::String(Arc::new("hi".to_string())));
+    let ptr_bits = Arc::into_raw(arc) as u64;
+
+    // Push f64, i64, bool, i32, ptr — five mixed types in order.
+    vm.push_kinded(1.5f64.to_bits(), NativeKind::Float64).unwrap();
+    vm.push_kinded(99i64 as u64, NativeKind::Int64).unwrap();
+    vm.push_kinded(1u64, NativeKind::Bool).unwrap();
+    vm.push_kinded((-7i32) as u32 as u64, NativeKind::Int32).unwrap();
+    vm.push_kinded(ptr_bits, NativeKind::Ptr(HeapKind::String))
+        .unwrap();
+
+    // Pop in reverse order.
+    let (top_bits, top_kind) = vm.pop_kinded().unwrap();
+    assert_eq!(top_kind, NativeKind::Ptr(HeapKind::String));
+    assert_eq!(top_bits, ptr_bits);
+    // Retire the pointer share.
+    unsafe {
+        let _ = Arc::from_raw(top_bits as *const HeapValue);
+    }
+
+    let (i32_bits, i32_kind) = vm.pop_kinded().unwrap();
+    assert_eq!(i32_kind, NativeKind::Int32);
+    assert_eq!(i32_bits as u32 as i32, -7);
+
+    let (b_bits, b_kind) = vm.pop_kinded().unwrap();
+    assert_eq!(b_kind, NativeKind::Bool);
+    assert!(bits_as_bool(b_bits));
+
+    let (i_bits, i_kind) = vm.pop_kinded().unwrap();
+    assert_eq!(i_kind, NativeKind::Int64);
+    assert_eq!(bits_as_i64(i_bits), 99);
+
+    let (f_bits, f_kind) = vm.pop_kinded().unwrap();
+    assert_eq!(f_kind, NativeKind::Float64);
+    assert_eq!(bits_as_f64(f_bits), 1.5);
 }
 
 // =========================================================================
