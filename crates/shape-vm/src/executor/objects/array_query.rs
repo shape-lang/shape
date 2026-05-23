@@ -3,275 +3,462 @@
 //! Handles: where, select, find, find_index, index_of, includes, some, every,
 //! any, all, single, take_while, skip_while, for_each
 //!
-//! ## V3-S5 ckpt-3 consumer-cascade tier 2 surface (2026-05-15) — drive-by
+//! ## W16.2-J.4-rest kind-generic closure-callback migration (2026-05-23)
 //!
-//! This file's pickup is a drive-by from ckpt-2's `array_transform.rs`
-//! cross-module helper deletion: the imports at original lines 49-52
-//! (`typed_array_arc_from_kinded / element_kinded / project_indices /
-//! collect_homogeneous_results / bump_closure_share`) reference helpers
-//! that were deleted in ckpt-2 — every one of the first four took
-//! `&TypedArrayData` or produced `Arc<TypedArrayData>`. Plus the file's
-//! own 24 in-file `TypedArrayData::` references (value-search handlers
-//! `handle_index_of_v2` / `handle_includes_v2` dispatching on
-//! `TypedArrayData` arms via `typed_array_ref` and `read_element_at`)
-//! cascade-broke at ckpt-1 enum deletion.
+//! The read-only / scalar-result handlers (`some`, `every`, `any`, `all`,
+//! `find`, `findIndex`, `forEach`) and the value-result `single` handler
+//! are KIND-GENERIC: they extract the `V2TypedArrayView` from the receiver
+//! `KindedSlot` (`Ptr(HeapKind::TypedArray)` carrier per r5c-2-β-CKPT-C)
+//! and iterate via `v2_array_detect::read_element`, invoking the user
+//! closure per element with `vm.call_value_immediate_nb` (ADR-006 §2.7.11
+//! / Q12). No new `v2_array_detect` primitive needed — the closure-callback
+//! ABI + the existing `read_element` per-`V2ElemType` body suffice.
 //!
-//! Per V3-S5 ckpt-1 close (commit `aac8495e`, 2026-05-15), the
-//! `TypedArrayData` enum + impl blocks + `Display for TypedArrayData` +
-//! `typed_array_structural_eq` fn were DELETED at
-//! `crates/shape-value/src/heap_value.rs` per W12-typed-array-data-deletion
-//! audit §3.5 + ADR-006 §2.7.24 Q25.A SUPERSEDED.
+//! The result-builder handlers (`where`, `select`, `takeWhile`, `skipWhile`)
+//! remain SURFACE — they construct a new `Ptr(HeapKind::TypedArray)`
+//! result carrier whose element kind cannot be proven without inspecting
+//! every closure return (varying-kind result rejection territory) AND
+//! there is no `v2_array_detect::collect_*` primitive at HEAD for the
+//! result-shape allocation. That's J.5 / V3-S5 ckpt-6 territory. Refusal
+//! #1 binding: no fabricated builder, no Bool-default fallback.
 //!
-//! Public handler bodies (`handle_where_v2 / handle_select_v2 /
-//! handle_find_v2 / handle_find_index_v2 / handle_index_of_v2 /
-//! handle_includes_v2 / handle_some_v2 / handle_every_v2 / handle_any_v2 /
-//! handle_all_v2 / handle_single_v2 / handle_take_while_v2 /
-//! handle_skip_while_v2 / handle_for_each_v2`) are replaced with
-//! structured surface-and-stop returning `VMError::NotImplemented`. Local
-//! helpers (`typed_array_arc / typed_array_ref / read_element_at` and
-//! every per-`TypedArrayData::X` value-comparison body) and the deleted
-//! cross-module imports are DELETED.
+//! The value-search handlers (`indexOf`, `includes`) remain SURFACE —
+//! per-kind value-equality comparison (especially for heap-element kinds
+//! `StringV2` / `DecimalV2` / `TypedObject`) requires a `v2_array_detect::
+//! position_of` / `contains_element` primitive that doesn't exist at
+//! HEAD. J.5 territory.
 //!
-//! ## Cascade migration target (post-ckpt-6 STRICT close)
+//! ## ADR-006 discipline preserved
 //!
-//! Per W12-typed-array-data-deletion audit §A.3 + §2.1 scalar recipe +
-//! §2.2 heap-element variants, every previous `TypedArrayData::X(buf)`
-//! match arm in `handle_index_of_v2` / `handle_includes_v2` /
-//! `read_element_at` migrates to the v2-raw `TypedArray<T>` flat-struct
-//! carrier — per-T direct comparison via `*buf.data.add(idx)`. The
-//! closure-callback ABI (ADR-006 §2.7.11 / Q12 `vm.call_value_immediate_nb`)
-//! is unaffected; predicate handlers re-instate against the v2-raw
-//! receiver-shape once the per-T element-read path lands. The
-//! result-builder handlers (`handle_where_v2` / `handle_select_v2` /
-//! `handle_take_while_v2` / `handle_skip_while_v2`) re-route through the
-//! sibling W9-array-transform cluster's per-T builder once the
-//! `array_transform.rs` v2-raw rewrite lands.
-//!
-//! Bodies REFUSED ON SIGHT under Refusal #1 (resurrection under rename
-//! per ckpt-1 close-marker at `heap_value.rs:3956`).
+//! - §2.7.5 producer-side stamp: element kind stamped at allocation,
+//!   never fabricated at the consumer.
+//! - §2.7.10 / Q11 `MethodFnV2` ABI unchanged.
+//! - §2.7.11 / Q12 closure-callback ABI unchanged.
+//! - §2.7.14 forbids Bool-default for unknown element kinds — every
+//!   `read_element` `None` surfaces a structured `RuntimeError`.
+//! - ADR-005 §1 single-discriminator preserved.
 
+use crate::executor::v2_handlers::v2_array_detect::{
+    as_v2_typed_array, read_element, V2TypedArrayView,
+};
 use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
 use shape_value::heap_value::HeapKind;
-use shape_value::{KindedSlot, NativeKind, VMError};
+use shape_value::{KindedSlot, NativeKind, ValueSlot, VMError};
 
 // ═══════════════════════════════════════════════════════════════════════════
-// V3-S5 ckpt-3 surface-and-stop builder
+// W16.2-J.4-rest kind-generic header-view helpers (mirror of
+// array_aggregation::extract_view + slot_truthy + pair_to_slot)
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Common surface-and-stop body for every public handler in this file.
+/// Extract the kind-generic `V2TypedArrayView` from the receiver
+/// `KindedSlot`. Receiver kind must be `Ptr(HeapKind::TypedArray)`
+/// (r5c-2-β-CKPT-C single carrier).
+#[inline]
+fn extract_view(op: &'static str, slot: &KindedSlot) -> Result<V2TypedArrayView, VMError> {
+    if slot.kind != NativeKind::Ptr(HeapKind::TypedArray) {
+        return Err(VMError::RuntimeError(format!(
+            "Array.{op}: expected v2 TypedArray receiver, got kind {:?}",
+            slot.kind
+        )));
+    }
+    as_v2_typed_array(slot.slot.raw(), slot.kind).ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "Array.{op}: receiver bits failed v2 TypedArray detection (kind {:?})",
+            slot.kind
+        ))
+    })
+}
+
+/// Test a `KindedSlot` for truthiness — mirrors
+/// `array_aggregation::slot_truthy`. Used to interpret a non-Bool closure
+/// return as a predicate result.
+#[inline]
+fn slot_truthy(slot: &KindedSlot) -> bool {
+    let bits = slot.slot.raw();
+    match slot.kind {
+        NativeKind::Bool => bits != 0,
+        NativeKind::Float64 => f64::from_bits(bits) != 0.0,
+        NativeKind::Int8
+        | NativeKind::Int16
+        | NativeKind::Int32
+        | NativeKind::Int64
+        | NativeKind::IntSize
+        | NativeKind::UInt8
+        | NativeKind::UInt16
+        | NativeKind::UInt32
+        | NativeKind::UInt64
+        | NativeKind::UIntSize => bits != 0,
+        NativeKind::NullableFloat64
+        | NativeKind::NullableInt8
+        | NativeKind::NullableInt16
+        | NativeKind::NullableInt32
+        | NativeKind::NullableInt64
+        | NativeKind::NullableIntSize
+        | NativeKind::NullableUInt8
+        | NativeKind::NullableUInt16
+        | NativeKind::NullableUInt32
+        | NativeKind::NullableUInt64
+        | NativeKind::NullableUIntSize => bits != 0,
+        NativeKind::Float32 => f32::from_bits(bits as u32) != 0.0,
+        NativeKind::Char => bits != 0,
+        NativeKind::StringV2 | NativeKind::DecimalV2 => bits != 0,
+        NativeKind::String | NativeKind::Ptr(_) => bits != 0,
+        // R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 + §2.7.7/Q9):
+        // Null is the absence-of-value sentinel; falsy by definition.
+        NativeKind::Null => false,
+    }
+}
+
+/// Closure-arg validation for closure-callback handlers. The closure-arg
+/// kind contract is preserved pre-iteration so the early shape-error is
+/// surfaced before any element read.
+#[inline]
+fn require_closure(op: &str, arg: &KindedSlot) -> Result<(), VMError> {
+    if arg.kind != NativeKind::Ptr(HeapKind::Closure) {
+        Err(VMError::RuntimeError(format!(
+            "Array.{}: predicate must be a closure, got kind {:?}",
+            op, arg.kind
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// W16.2-J.4-rest J.5 SURFACE builder (preserved for result-builder /
+// value-search handlers that still need a v2_array_detect primitive)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Surface-and-stop body for the handlers that need a result-builder or
+/// per-kind value-equality primitive (`where`, `select`, `takeWhile`,
+/// `skipWhile`, `indexOf`, `includes`). Class-shift target: J.5 /
+/// V3-S5 ckpt-6.
 #[cold]
 #[inline(never)]
-fn ckpt3_surface(op: &'static str, args: &[KindedSlot]) -> VMError {
+fn j5_builder_surface(op: &'static str, args: &[KindedSlot]) -> VMError {
     let receiver_kind = if args.is_empty() {
         "<no args>".to_string()
     } else {
         format!("{:?}", args[0].kind)
     };
     VMError::NotImplemented(format!(
-        "{op}: SURFACE — V3-S5 ckpt-3 consumer-cascade tier 2 surface \
-         (drive-by from ckpt-2 cross-module helper deletion). \
-         `TypedArrayData` enum DELETED at ckpt-1 (2026-05-15) per W12-\
-         typed-array-data-deletion audit §3.5 + ADR-006 §2.7.24 Q25.A \
-         SUPERSEDED. The previous `Arc<TypedArrayData>` receiver-recovery \
-         + per-variant value-search / closure-callback dispatch path (~24 \
-         references across 14 public handlers in this file plus the \
-         5-import E0432 cluster from ckpt-2 cross-module helper deletion \
-         at array_transform.rs) cascade-broke at the enum deletion site \
-         (`crates/shape-value/src/heap_value.rs:3944`). Post-deletion \
-         target is the v2-raw `TypedArray<T>` flat-struct carrier per \
-         audit §1.2 + §A.3 + §3.1 scalar recipe; per-T monomorphization \
-         landing across ckpt-3 (this file plus array_ops/typed_array_methods/\
-         iterator_methods/array_sort/concat/property_access) + ckpt-4 \
-         (Buf<T> / HeapValue::TypedArray arm / HeapKind::TypedArray \
-         ordinal) + ckpt-5 (wire/json/marshal + 4-table lockstep) + \
-         ckpt-6 (JIT FFI). Closure-callback ABI (ADR-006 §2.7.11 / Q12 \
-         `vm.call_value_immediate_nb`) is unaffected and re-instates \
-         once receiver-shape migration lands. Receiver kind: {kind}. \
-         UNREACHABLE until ckpt-6 STRICT close. REFUSED ON SIGHT: \
-         TypedArrayData resurrection under any rename (Refusal #1, W12 \
-         audit §7).",
+        "Array.{op}: SURFACE — W16.2-J.5 / V3-S5 ckpt-6 territory. \
+         The closure-callback / read-only handlers in this file landed at \
+         W16.2-J.4-rest (2026-05-23), but this handler builds a new \
+         TypedArray result whose element kind cannot be proven without a \
+         `v2_array_detect::collect_*` builder primitive (varying-kind \
+         result rejection territory); OR performs per-kind value-equality \
+         comparison requiring a `v2_array_detect::position_of` / \
+         `contains_element` primitive. Neither exists at HEAD. J.5 / \
+         ckpt-6 territory. NO Bool-default fallback (ADR-006 §2.7.14). \
+         Receiver kind: {kind}.",
         op = op,
         kind = receiver_kind,
     ))
 }
 
-/// Closure-arg validation for closure-callback handlers.
-#[inline]
-fn validate_closure_arg(op: &str, args: &[KindedSlot]) -> Option<VMError> {
-    if args.len() >= 2 && args[1].kind != NativeKind::Ptr(HeapKind::Closure) {
-        Some(VMError::RuntimeError(format!(
-            "{}: second argument must be a closure, got kind {:?}",
-            op, args[1].kind
-        )))
-    } else {
-        None
-    }
-}
-
 // ═══════════════════════════════════════════════════════════════════════════
-// MethodFnV2 handlers — surface-and-stop stubs
-// Signatures preserved for method_registry.rs PHF integrity.
+// MethodFnV2 (native ABI) public handlers
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// `arr.where(|x| ...)` — predicate-filter projection.
+/// `arr.where(|x| ...)` — predicate-filter projection. SURFACE: builds a
+/// new TypedArray result whose element kind requires a builder primitive.
+/// J.5 territory.
 pub(crate) fn handle_where_v2(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    if let Some(err) = validate_closure_arg("where", args) {
-        return Err(err);
+    if args.len() >= 2 {
+        require_closure("where", &args[1])?;
     }
-    Err(ckpt3_surface("where", args))
+    Err(j5_builder_surface("where", args))
 }
 
-/// `arr.select(|x| ...)` — per-element transform.
+/// `arr.select(|x| ...)` — per-element transform projection. SURFACE:
+/// builds a new TypedArray result whose element kind is the closure's
+/// return kind — varying-kind result rejection requires a builder
+/// primitive. J.5 territory.
 pub(crate) fn handle_select_v2(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    if let Some(err) = validate_closure_arg("select", args) {
-        return Err(err);
+    if args.len() >= 2 {
+        require_closure("select", &args[1])?;
     }
-    Err(ckpt3_surface("select", args))
+    Err(j5_builder_surface("select", args))
 }
 
-/// `arr.find(|x| ...)`.
+/// `arr.find(|x| ...)` — first element satisfying the predicate, or the
+/// `null` sentinel if none match. Kind-generic via `read_element` +
+/// closure-callback.
 pub(crate) fn handle_find_v2(
-    _vm: &mut VirtualMachine,
+    vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    if let Some(err) = validate_closure_arg("find", args) {
-        return Err(err);
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "Array.find expects 1 argument: (predicate)".into(),
+        ));
     }
-    Err(ckpt3_surface("find", args))
+    require_closure("find", &args[1])?;
+    let view = extract_view("find", &args[0])?;
+    let closure = &args[1];
+    for i in 0..view.len {
+        let (bits, kind) = read_element(&view, i).ok_or_else(|| {
+            VMError::RuntimeError(format!(
+                "Array.find: read_element({i}) returned None for element kind {:?}",
+                view.elem_type
+            ))
+        })?;
+        let elem_slot = KindedSlot::new(ValueSlot::from_raw(bits), kind);
+        // Clone the element slot for the predicate call: a found element
+        // is also the return value, and the closure invocation consumes
+        // its arg shares.
+        let elem_for_pred = elem_slot.clone();
+        let result = vm.call_value_immediate_nb(closure, &[elem_for_pred], ctx.as_deref_mut())?;
+        if slot_truthy(&result) {
+            return Ok(elem_slot);
+        }
+    }
+    Ok(KindedSlot::none())
 }
 
-/// `arr.findIndex(|x| ...)`.
+/// `arr.findIndex(|x| ...)` — index of the first element satisfying the
+/// predicate as `Int64`, or `-1` if none match. Kind-generic via
+/// `read_element` + closure-callback.
 pub(crate) fn handle_find_index_v2(
-    _vm: &mut VirtualMachine,
+    vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    if let Some(err) = validate_closure_arg("findIndex", args) {
-        return Err(err);
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "Array.findIndex expects 1 argument: (predicate)".into(),
+        ));
     }
-    Err(ckpt3_surface("findIndex", args))
+    require_closure("findIndex", &args[1])?;
+    let view = extract_view("findIndex", &args[0])?;
+    let closure = &args[1];
+    for i in 0..view.len {
+        let (bits, kind) = read_element(&view, i).ok_or_else(|| {
+            VMError::RuntimeError(format!(
+                "Array.findIndex: read_element({i}) returned None for element kind {:?}",
+                view.elem_type
+            ))
+        })?;
+        let elem_slot = KindedSlot::new(ValueSlot::from_raw(bits), kind);
+        let result = vm.call_value_immediate_nb(closure, &[elem_slot], ctx.as_deref_mut())?;
+        if slot_truthy(&result) {
+            return Ok(KindedSlot::from_int(i as i64));
+        }
+    }
+    Ok(KindedSlot::from_int(-1))
 }
 
-/// `arr.indexOf(value)` — value-search.
+/// `arr.indexOf(value)` — value-search. SURFACE: per-kind equality
+/// requires a `v2_array_detect::position_of` primitive. J.5 territory.
 pub(crate) fn handle_index_of_v2(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(ckpt3_surface("indexOf", args))
+    Err(j5_builder_surface("indexOf", args))
 }
 
-/// `arr.includes(value)` — value-search.
+/// `arr.includes(value)` — value-search. SURFACE: per-kind equality
+/// requires a `v2_array_detect::contains_element` primitive. J.5 territory.
 pub(crate) fn handle_includes_v2(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(ckpt3_surface("includes", args))
+    Err(j5_builder_surface("includes", args))
 }
 
-/// `arr.some(|x| ...)`.
+/// `arr.some(|x| ...)` — true iff at least one element satisfies the
+/// predicate. Kind-generic via `read_element` + closure-callback.
 pub(crate) fn handle_some_v2(
-    _vm: &mut VirtualMachine,
+    vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    if let Some(err) = validate_closure_arg("some", args) {
-        return Err(err);
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "Array.some expects 1 argument: (predicate)".into(),
+        ));
     }
-    Err(ckpt3_surface("some", args))
+    require_closure("some", &args[1])?;
+    let view = extract_view("some", &args[0])?;
+    let closure = &args[1];
+    for i in 0..view.len {
+        let (bits, kind) = read_element(&view, i).ok_or_else(|| {
+            VMError::RuntimeError(format!(
+                "Array.some: read_element({i}) returned None for element kind {:?}",
+                view.elem_type
+            ))
+        })?;
+        let elem_slot = KindedSlot::new(ValueSlot::from_raw(bits), kind);
+        let result = vm.call_value_immediate_nb(closure, &[elem_slot], ctx.as_deref_mut())?;
+        if slot_truthy(&result) {
+            return Ok(KindedSlot::from_bool(true));
+        }
+    }
+    Ok(KindedSlot::from_bool(false))
 }
 
-/// `arr.every(|x| ...)`.
+/// `arr.every(|x| ...)` — true iff every element satisfies the predicate.
+/// Kind-generic via `read_element` + closure-callback.
 pub(crate) fn handle_every_v2(
-    _vm: &mut VirtualMachine,
+    vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    if let Some(err) = validate_closure_arg("every", args) {
-        return Err(err);
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "Array.every expects 1 argument: (predicate)".into(),
+        ));
     }
-    Err(ckpt3_surface("every", args))
+    require_closure("every", &args[1])?;
+    let view = extract_view("every", &args[0])?;
+    let closure = &args[1];
+    for i in 0..view.len {
+        let (bits, kind) = read_element(&view, i).ok_or_else(|| {
+            VMError::RuntimeError(format!(
+                "Array.every: read_element({i}) returned None for element kind {:?}",
+                view.elem_type
+            ))
+        })?;
+        let elem_slot = KindedSlot::new(ValueSlot::from_raw(bits), kind);
+        let result = vm.call_value_immediate_nb(closure, &[elem_slot], ctx.as_deref_mut())?;
+        if !slot_truthy(&result) {
+            return Ok(KindedSlot::from_bool(false));
+        }
+    }
+    Ok(KindedSlot::from_bool(true))
 }
 
-/// `arr.any(|x| ...)`.
+/// `arr.any(|x| ...)` — alias for `some` per `vec.shape` `Vec<T>` extend
+/// block. Kind-generic via `read_element` + closure-callback.
 pub(crate) fn handle_any_v2(
-    _vm: &mut VirtualMachine,
+    vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    if let Some(err) = validate_closure_arg("any", args) {
-        return Err(err);
-    }
-    Err(ckpt3_surface("any", args))
+    handle_some_v2(vm, args, ctx)
 }
 
-/// `arr.all(|x| ...)`.
+/// `arr.all(|x| ...)` — alias for `every` per `vec.shape` `Vec<T>` extend
+/// block. Kind-generic via `read_element` + closure-callback.
 pub(crate) fn handle_all_v2(
-    _vm: &mut VirtualMachine,
+    vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    if let Some(err) = validate_closure_arg("all", args) {
-        return Err(err);
-    }
-    Err(ckpt3_surface("all", args))
+    handle_every_v2(vm, args, ctx)
 }
 
-/// `arr.single(|x| ...)` — find the unique element matching the predicate.
+/// `arr.single(|x| ...)` — find the unique element matching the
+/// predicate. Kind-generic via `read_element` + closure-callback.
+/// Returns the matching element if exactly one matches; surfaces a
+/// `RuntimeError` if zero or more than one match.
 pub(crate) fn handle_single_v2(
-    _vm: &mut VirtualMachine,
+    vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    if let Some(err) = validate_closure_arg("single", args) {
-        return Err(err);
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "Array.single expects 1 argument: (predicate)".into(),
+        ));
     }
-    Err(ckpt3_surface("single", args))
+    require_closure("single", &args[1])?;
+    let view = extract_view("single", &args[0])?;
+    let closure = &args[1];
+    let mut found: Option<KindedSlot> = None;
+    for i in 0..view.len {
+        let (bits, kind) = read_element(&view, i).ok_or_else(|| {
+            VMError::RuntimeError(format!(
+                "Array.single: read_element({i}) returned None for element kind {:?}",
+                view.elem_type
+            ))
+        })?;
+        let elem_slot = KindedSlot::new(ValueSlot::from_raw(bits), kind);
+        let elem_for_pred = elem_slot.clone();
+        let result = vm.call_value_immediate_nb(closure, &[elem_for_pred], ctx.as_deref_mut())?;
+        if slot_truthy(&result) {
+            if found.is_some() {
+                return Err(VMError::RuntimeError(
+                    "Array.single: more than one element matched the predicate".into(),
+                ));
+            }
+            found = Some(elem_slot);
+        }
+    }
+    found.ok_or_else(|| {
+        VMError::RuntimeError(
+            "Array.single: no element matched the predicate".into(),
+        )
+    })
 }
 
-/// `arr.takeWhile(|x| ...)`.
+/// `arr.takeWhile(|x| ...)` — prefix elements while the predicate
+/// returns true. SURFACE: builds a new TypedArray result whose element
+/// kind needs a builder primitive. J.5 territory.
 pub(crate) fn handle_take_while_v2(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    if let Some(err) = validate_closure_arg("takeWhile", args) {
-        return Err(err);
+    if args.len() >= 2 {
+        require_closure("takeWhile", &args[1])?;
     }
-    Err(ckpt3_surface("takeWhile", args))
+    Err(j5_builder_surface("takeWhile", args))
 }
 
-/// `arr.skipWhile(|x| ...)`.
+/// `arr.skipWhile(|x| ...)` — drop prefix elements while the predicate
+/// returns true. SURFACE: builds a new TypedArray result. J.5 territory.
 pub(crate) fn handle_skip_while_v2(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    if let Some(err) = validate_closure_arg("skipWhile", args) {
-        return Err(err);
+    if args.len() >= 2 {
+        require_closure("skipWhile", &args[1])?;
     }
-    Err(ckpt3_surface("skipWhile", args))
+    Err(j5_builder_surface("skipWhile", args))
 }
 
-/// `arr.forEach(|x| ...)`.
+/// `arr.forEach(|x| ...)` — invoke the closure per element for side
+/// effects; return the unit/null sentinel. Kind-generic via
+/// `read_element` + closure-callback.
 pub(crate) fn handle_for_each_v2(
-    _vm: &mut VirtualMachine,
+    vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    if let Some(err) = validate_closure_arg("forEach", args) {
-        return Err(err);
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "Array.forEach expects 1 argument: (closure)".into(),
+        ));
     }
-    Err(ckpt3_surface("forEach", args))
+    require_closure("forEach", &args[1])?;
+    let view = extract_view("forEach", &args[0])?;
+    let closure = &args[1];
+    for i in 0..view.len {
+        let (bits, kind) = read_element(&view, i).ok_or_else(|| {
+            VMError::RuntimeError(format!(
+                "Array.forEach: read_element({i}) returned None for element kind {:?}",
+                view.elem_type
+            ))
+        })?;
+        let elem_slot = KindedSlot::new(ValueSlot::from_raw(bits), kind);
+        // Drop the closure return (forEach is for side effects only).
+        let _ = vm.call_value_immediate_nb(closure, &[elem_slot], ctx.as_deref_mut())?;
+    }
+    Ok(KindedSlot::none())
 }
+
