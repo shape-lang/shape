@@ -5,6 +5,29 @@
 
 use std::collections::HashMap;
 
+/// Payload shape carried by a single enum variant.
+///
+/// Drives `print()` / `Display` rendering at the W18.0 enum-variant arm
+/// (`crates/shape-vm/src/executor/printing.rs::format_enum_typed_object`)
+/// so unit / tuple / struct variants render `Red` / `Blue(42)` /
+/// `Point { x: 1, y: 2 }` respectively per User 2026-05-23 Item 1.
+///
+/// The runtime layout in TypedObjectStorage is unchanged — payload fields
+/// are still `__payload_0` / `__payload_1` / ... at offsets 8/16/...; the
+/// kind here only describes the surface-syntax shape that produced the
+/// variant so print() can recover the user-visible name/form.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+pub enum EnumVariantKind {
+    /// Unit variant — no payload. `Red`.
+    #[default]
+    Unit,
+    /// Tuple variant — N positional payloads. `Blue(42)`, `Pair(1, 2)`.
+    Tuple,
+    /// Struct variant — N named-field payloads. `Point { x: 1, y: 2 }`.
+    /// `field_names[i]` is the source-level name of the i-th `__payload_i`.
+    Struct(Vec<String>),
+}
+
 /// Information about an enum variant for TypedObject optimization
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EnumVariantInfo {
@@ -14,15 +37,42 @@ pub struct EnumVariantInfo {
     pub id: u16,
     /// Number of payload fields for this variant
     pub payload_fields: u16,
+    /// Surface-syntax kind that produced this variant — drives W18.0
+    /// `print()` rendering shape (Unit / Tuple / Struct{field_names}).
+    /// Defaults to `Unit` when `payload_fields == 0`, `Tuple` otherwise,
+    /// for back-compat with `EnumVariantInfo::new(name, id, count)` call
+    /// sites that don't carry struct-field metadata (e.g. the stdlib
+    /// Option/Result aliases registered in `registry.rs`).
+    #[serde(default)]
+    pub kind: EnumVariantKind,
 }
 
 impl EnumVariantInfo {
-    /// Create a new enum variant info
+    /// Create a new enum variant info. Infers `kind` from `payload_fields`:
+    /// 0 → `Unit`, >0 → `Tuple`. Use [`Self::new_struct`] for struct variants.
     pub fn new(name: impl Into<String>, id: u16, payload_fields: u16) -> Self {
+        let kind = if payload_fields == 0 {
+            EnumVariantKind::Unit
+        } else {
+            EnumVariantKind::Tuple
+        };
         Self {
             name: name.into(),
             id,
             payload_fields,
+            kind,
+        }
+    }
+
+    /// Create a struct-shaped variant info. `field_names.len()` is the
+    /// payload count.
+    pub fn new_struct(name: impl Into<String>, id: u16, field_names: Vec<String>) -> Self {
+        let payload_fields = field_names.len() as u16;
+        Self {
+            name: name.into(),
+            id,
+            payload_fields,
+            kind: EnumVariantKind::Struct(field_names),
         }
     }
 }

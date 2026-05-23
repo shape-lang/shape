@@ -26,7 +26,7 @@
 //! §2.7.4")` placeholders rather than papering over with ValueWord-shape
 //! recovery, per the playbook's surface-and-stop discipline.
 
-use shape_runtime::type_schema::TypeSchemaRegistry;
+use shape_runtime::type_schema::{EnumVariantKind, TypeSchema, TypeSchemaRegistry};
 use shape_value::heap_value::{
     HeapKind, HeapValue, TypedObjectStorage,
 };
@@ -702,6 +702,17 @@ impl<'a> ValueFormatter<'a> {
     /// lifetime of `&self`.
     fn format_typed_object(&self, storage: &TypedObjectStorage, depth: usize) -> String {
         let schema = self.schema_registry.get_by_id(storage.schema_id as u32);
+        // W18.0 (User 2026-05-23 Item 1): enum-typed TypedObjects render
+        // as `Variant(payload)` / `Variant { field: v }` / `Variant`
+        // rather than the synthetic `{__variant: N, __payload_0: ...}`
+        // shape. Fallback to the generic record walk only when the
+        // schema lookup genuinely fails (rare — runtime-built objects
+        // without registered schema).
+        if let Some(s) = schema {
+            if s.is_enum() {
+                return self.format_enum_typed_object(s, storage, depth);
+            }
+        }
         let n = storage.slots.len().min(storage.field_kinds.len());
         let mut out = String::with_capacity(2 + n * 8);
         out.push('{');
@@ -725,6 +736,137 @@ impl<'a> ValueFormatter<'a> {
             // formatter call. This carrier never owns a strong-count share
             // — it is dropped via `mem::forget` at the end of the loop
             // iteration so the parent storage retains every payload.
+            let slot = ValueSlot::from_raw(storage.slots[i].raw());
+            let kinded = KindedSlot::new(slot, storage.field_kinds[i]);
+            let rendered = self.format_kinded_inner(&kinded, depth + 1, true);
+            out.push_str(&rendered);
+            std::mem::forget(kinded);
+        }
+        out.push('}');
+        out
+    }
+
+    /// Format an enum-typed `TypedObjectStorage` as `Variant(payload)` /
+    /// `Variant { field: v }` / `Variant` per W18.0 (User 2026-05-23
+    /// Item 1).
+    ///
+    /// Reads slot 0 (`__variant` discriminator, I64) to recover the
+    /// variant ID, then dispatches on the variant's [`EnumVariantKind`]
+    /// to choose the render shape:
+    ///
+    /// - `Unit`   → `Red`
+    /// - `Tuple`  → `Blue(42)` / `Pair(1, 2)`
+    /// - `Struct` → `Point { x: 1, y: 2 }` (field names from
+    ///              `EnumVariantKind::Struct(names)`)
+    ///
+    /// Falls through to the generic `{__variant: N, __payload_0: V}`
+    /// shape ONLY if the variant ID fails to resolve (e.g. enum_info
+    /// missing or discriminator out of range — should be rare since
+    /// compiler emits matched discriminators per audit §2.D).
+    fn format_enum_typed_object(
+        &self,
+        schema: &TypeSchema,
+        storage: &TypedObjectStorage,
+        depth: usize,
+    ) -> String {
+        let n = storage.slots.len().min(storage.field_kinds.len());
+        // Slot 0 is `__variant` (I64) per `new_enum`'s layout.
+        if n == 0 {
+            return schema.name.clone();
+        }
+        let variant_id = storage.slots[0].raw() as i64;
+        let info = schema
+            .get_enum_info()
+            .and_then(|ei| ei.variant_by_id(variant_id as u16));
+        let Some(info) = info else {
+            // Schema missing enum_info OR variant_id out of range.
+            // Fall back to the generic record walk so the formatter
+            // degrades visibly without lying about variant names.
+            return self.format_typed_object_generic(schema, storage, depth);
+        };
+
+        // Render the i-th payload slot through the canonical kinded
+        // formatter (same borrow pattern as `format_typed_object`).
+        let render_payload = |i: usize, out: &mut String| {
+            let slot_idx = i + 1; // skip __variant
+            if slot_idx >= n {
+                out.push_str("?");
+                return;
+            }
+            let slot = ValueSlot::from_raw(storage.slots[slot_idx].raw());
+            let kinded = KindedSlot::new(slot, storage.field_kinds[slot_idx]);
+            let rendered = self.format_kinded_inner(&kinded, depth + 1, true);
+            out.push_str(&rendered);
+            std::mem::forget(kinded);
+        };
+
+        match &info.kind {
+            EnumVariantKind::Unit => info.name.clone(),
+            EnumVariantKind::Tuple => {
+                let count = info.payload_fields as usize;
+                let mut out = String::with_capacity(info.name.len() + 2 + count * 4);
+                out.push_str(&info.name);
+                out.push('(');
+                for i in 0..count {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    render_payload(i, &mut out);
+                }
+                out.push(')');
+                out
+            }
+            EnumVariantKind::Struct(field_names) => {
+                let count = field_names.len();
+                let mut out = String::with_capacity(info.name.len() + 4 + count * 8);
+                out.push_str(&info.name);
+                if count == 0 {
+                    // Defensive: a zero-field struct variant renders
+                    // identically to a unit variant.
+                    return out;
+                }
+                out.push_str(" { ");
+                for (i, fname) in field_names.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    out.push_str(fname);
+                    out.push_str(": ");
+                    render_payload(i, &mut out);
+                }
+                out.push_str(" }");
+                out
+            }
+        }
+    }
+
+    /// Generic `{field: value, ...}` walk extracted from
+    /// `format_typed_object` so the enum-fallback path can reuse it
+    /// without re-running the enum check.
+    fn format_typed_object_generic(
+        &self,
+        schema: &TypeSchema,
+        storage: &TypedObjectStorage,
+        depth: usize,
+    ) -> String {
+        let n = storage.slots.len().min(storage.field_kinds.len());
+        let mut out = String::with_capacity(2 + n * 8);
+        out.push('{');
+        for i in 0..n {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            let name: &str = schema
+                .fields
+                .get(i)
+                .map(|f| f.name.as_str())
+                .unwrap_or("_");
+            if name == "_" {
+                out.push_str(&format!("_{}", i));
+            } else {
+                out.push_str(name);
+            }
+            out.push_str(": ");
             let slot = ValueSlot::from_raw(storage.slots[i].raw());
             let kinded = KindedSlot::new(slot, storage.field_kinds[i]);
             let rendered = self.format_kinded_inner(&kinded, depth + 1, true);
