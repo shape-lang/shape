@@ -234,6 +234,7 @@ impl TypeEnvironment {
                 doc_comment: None,
             })],
             annotations: vec![],
+            is_comptime: false,
         };
         self.define_trait(&content_trait);
 
@@ -290,6 +291,7 @@ impl TypeEnvironment {
                 doc_comment: None,
             })],
             annotations: vec![],
+            is_comptime: false,
         };
         self.define_trait(&content_for_trait);
     }
@@ -319,6 +321,7 @@ impl TypeEnvironment {
                 doc_comment: None,
             })],
             annotations: vec![],
+            is_comptime: false,
         };
         self.define_trait(&drop_trait);
 
@@ -358,6 +361,7 @@ impl TypeEnvironment {
                 doc_comment: None,
             })],
             annotations: vec![],
+            is_comptime: false,
         };
         self.define_trait(&into_trait);
     }
@@ -396,6 +400,7 @@ impl TypeEnvironment {
                 doc_comment: None,
             })],
             annotations: vec![],
+            is_comptime: false,
         };
         self.define_trait(&try_into_trait);
     }
@@ -435,6 +440,7 @@ impl TypeEnvironment {
                 doc_comment: None,
             })],
             annotations: vec![],
+            is_comptime: false,
         };
         self.define_trait(&iterable_trait);
 
@@ -504,6 +510,7 @@ impl TypeEnvironment {
                     doc_comment: None,
                 })],
                 annotations: vec![],
+                is_comptime: false,
             };
             self.define_trait(&trait_def);
         }
@@ -524,6 +531,7 @@ impl TypeEnvironment {
                 doc_comment: None,
             })],
             annotations: vec![],
+            is_comptime: false,
         };
         self.define_trait(&neg_trait);
 
@@ -544,6 +552,7 @@ impl TypeEnvironment {
                 doc_comment: None,
             })],
             annotations: vec![],
+            is_comptime: false,
         };
         self.define_trait(&not_trait);
 
@@ -563,6 +572,7 @@ impl TypeEnvironment {
                 doc_comment: None,
             })],
             annotations: vec![],
+            is_comptime: false,
         };
         self.define_trait(&eq_trait);
 
@@ -582,6 +592,7 @@ impl TypeEnvironment {
                 doc_comment: None,
             })],
             annotations: vec![],
+            is_comptime: false,
         };
         self.define_trait(&ord_trait);
 
@@ -754,6 +765,7 @@ impl TypeEnvironment {
                 doc_comment: None,
             })],
             annotations: vec![],
+            is_comptime: false,
         };
         self.define_trait(&index_trait);
 
@@ -787,6 +799,7 @@ impl TypeEnvironment {
                 doc_comment: None,
             })],
             annotations: vec![],
+            is_comptime: false,
         };
         self.define_trait(&index_mut_trait);
 
@@ -828,6 +841,7 @@ impl TypeEnvironment {
             super_traits: vec![],
             members: vec![],
             annotations: vec![],
+            is_comptime: false,
         };
         self.define_trait(&numeric_trait);
 
@@ -1669,6 +1683,7 @@ mod tests {
                 }),
             ],
             annotations: vec![],
+            is_comptime: false,
         };
 
         env.define_trait(&trait_def);
@@ -1714,6 +1729,7 @@ mod tests {
                 }),
             ],
             annotations: vec![],
+            is_comptime: false,
         };
         env.define_trait(&trait_def);
 
@@ -1760,6 +1776,7 @@ mod tests {
                 }),
             ],
             annotations: vec![],
+            is_comptime: false,
         };
         env.define_trait(&trait_def);
 

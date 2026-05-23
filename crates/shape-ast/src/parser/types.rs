@@ -927,12 +927,16 @@ pub fn parse_trait_def(pair: Pair<Rule>) -> Result<crate::ast::TraitDef> {
     let mut super_traits = Vec::new();
     let mut members = Vec::new();
     let mut name = String::new();
+    let mut is_comptime = false;
 
-    // First child may be annotations or ident
+    // First child may be annotations, comptime_keyword, or ident
     for part in inner {
         match part.as_rule() {
             Rule::annotations => {
                 annotations = crate::parser::functions::parse_annotations(part)?;
+            }
+            Rule::comptime_keyword => {
+                is_comptime = true;
             }
             Rule::ident => {
                 if name.is_empty() {
@@ -970,6 +974,7 @@ pub fn parse_trait_def(pair: Pair<Rule>) -> Result<crate::ast::TraitDef> {
         super_traits,
         members,
         annotations,
+        is_comptime,
     })
 }
 

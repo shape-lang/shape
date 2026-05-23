@@ -601,6 +601,7 @@ mod tests {
                 })
                 .collect(),
             annotations: vec![],
+            is_comptime: false,
         }
     }
 
@@ -818,6 +819,7 @@ mod tests {
             super_traits: vec![],
             members,
             annotations: vec![],
+            is_comptime: false,
         }
     }
 
@@ -1140,6 +1142,7 @@ mod tests {
                 })
                 .collect(),
             annotations: vec![],
+            is_comptime: false,
         }
     }
 

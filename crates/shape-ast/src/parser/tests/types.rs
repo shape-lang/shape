@@ -1551,3 +1551,119 @@ fn test_dyn_type_in_return_type() {
         other => panic!("Expected Function, got {:?}", other),
     }
 }
+
+// =========================================================================
+// J-CT.0 — comptime trait + impl parser-only tests
+//
+// These tests cover ONLY the AST surface: that the `comptime` keyword is
+// accepted on `trait` / `impl` definitions and that `TraitDef::is_comptime` /
+// `ImplBlock::is_comptime` are populated. Downstream sub-clusters land the
+// rest: J-CT.1 = type-checker validation (e.g. clean error if a comptime
+// trait is called at runtime); J-CT.2 = comptime-evaluator dispatch; J-CT.3
+// = stdlib uptake. Until J-CT.1 + J-CT.2 land, programs using `comptime
+// trait` parse cleanly but have no semantic effect.
+// =========================================================================
+
+#[test]
+fn comptime_trait_parses_with_is_comptime_true() {
+    let content = r#"
+        comptime trait Greeter {
+            fn greet() -> string;
+        }
+    "#;
+    let items = parse_program_helper(content).expect("comptime trait should parse");
+    match &items[0] {
+        crate::ast::Item::Trait(trait_def, _) => {
+            assert_eq!(trait_def.name, "Greeter");
+            assert!(
+                trait_def.is_comptime,
+                "expected is_comptime=true on `comptime trait Greeter`"
+            );
+        }
+        other => panic!("Expected Trait item, got {:?}", other),
+    }
+}
+
+#[test]
+fn plain_trait_parses_with_is_comptime_false() {
+    let content = r#"
+        trait Greeter {
+            fn greet() -> string;
+        }
+    "#;
+    let items = parse_program_helper(content).expect("plain trait should parse");
+    match &items[0] {
+        crate::ast::Item::Trait(trait_def, _) => {
+            assert_eq!(trait_def.name, "Greeter");
+            assert!(
+                !trait_def.is_comptime,
+                "expected is_comptime=false on plain `trait Greeter`"
+            );
+        }
+        other => panic!("Expected Trait item, got {:?}", other),
+    }
+}
+
+#[test]
+fn comptime_impl_parses_with_is_comptime_true() {
+    let content = r#"
+        comptime impl Greeter for User {
+            method greet() -> string {
+                return "hi"
+            }
+        }
+    "#;
+    let items = parse_program_helper(content).expect("comptime impl should parse");
+    match &items[0] {
+        crate::ast::Item::Impl(impl_block, _) => {
+            assert!(
+                impl_block.is_comptime,
+                "expected is_comptime=true on `comptime impl Greeter for User`"
+            );
+        }
+        other => panic!("Expected Impl item, got {:?}", other),
+    }
+}
+
+#[test]
+fn plain_impl_parses_with_is_comptime_false() {
+    let content = r#"
+        impl Greeter for User {
+            method greet() -> string {
+                return "hi"
+            }
+        }
+    "#;
+    let items = parse_program_helper(content).expect("plain impl should parse");
+    match &items[0] {
+        crate::ast::Item::Impl(impl_block, _) => {
+            assert!(
+                !impl_block.is_comptime,
+                "expected is_comptime=false on plain `impl Greeter for User`"
+            );
+        }
+        other => panic!("Expected Impl item, got {:?}", other),
+    }
+}
+
+#[test]
+fn comptime_block_at_top_level_still_parses_after_trait_comptime_prefix() {
+    // Regression: trait_def has `comptime_keyword?` before `"trait"`. A standalone
+    // top-level `comptime { ... }` block must NOT be eaten by trait_def's failed
+    // match path. PEG backtracking + comptime_block ordering in item_core handles
+    // this; this test guards against accidental reordering.
+    let content = r#"
+        comptime {
+            let x = 1
+        }
+    "#;
+    let items = parse_program_helper(content).expect(
+        "top-level `comptime { ... }` block should still parse after \
+         trait_def grew an optional comptime prefix",
+    );
+    // item_core ordering puts comptime_block AFTER trait_def, so it falls
+    // through correctly. Don't assert on the item variant here — the
+    // discriminator depends on how comptime_block is wrapped at the AST
+    // layer (statement vs item), and is outside the J-CT.0 scope.
+    assert!(!items.is_empty(), "expected at least one item");
+}

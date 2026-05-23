@@ -516,6 +516,12 @@ pub struct TraitDef {
     /// Annotations applied to the trait (e.g., `@documented("...") trait Foo { ... }`)
     #[serde(default)]
     pub annotations: Vec<super::Annotation>,
+    /// `comptime trait Foo { ... }` — parser-only flag (J-CT.0).
+    /// Type-checker validation lands in J-CT.1; comptime evaluator dispatch in
+    /// J-CT.2. Until those land, a `true` value here parses cleanly but has no
+    /// downstream semantic effect.
+    #[serde(default)]
+    pub is_comptime: bool,
 }
 
 /// Impl block — implements a trait for a type
@@ -544,6 +550,12 @@ pub struct ImplBlock {
     pub associated_type_bindings: Vec<AssociatedTypeBinding>,
     /// Where clause: `where T: Display + Comparable`
     pub where_clause: Option<Vec<WherePredicate>>,
+    /// `comptime impl Foo for Bar { ... }` — parser-only flag (J-CT.0).
+    /// Type-checker validation lands in J-CT.1; comptime evaluator dispatch in
+    /// J-CT.2. Until those land, a `true` value here parses cleanly but has no
+    /// downstream semantic effect.
+    #[serde(default)]
+    pub is_comptime: bool,
 }
 
 /// Type extension for adding methods to existing types
