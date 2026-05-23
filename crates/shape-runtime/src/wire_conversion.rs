@@ -536,6 +536,24 @@ pub fn slot_to_envelope(
 /// If the slot carries a renderable Content shape (Content node, DataTable,
 /// or TableView), return `(content_json, content_html, content_terminal)`.
 /// Otherwise all three are `None`.
+///
+/// W18.2 (R8 — output-adapter integration): the kind-threaded content
+/// dispatch is rebuilt on top of the surviving 6-renderer infrastructure
+/// (TERMINAL / HTML / MARKDOWN / JSON / PLAIN). Slot bits are dispatched
+/// per `HeapKind`, the underlying typed payload is materialised as a
+/// `ContentNode`, and each renderer projects the node into its own
+/// output shape:
+///
+/// - JSON via [`crate::renderers::json::JsonRenderer`] parsed into
+///   [`serde_json::Value`] (the renderer guarantees valid JSON per the
+///   `renderers::cross_renderer_tests::json_is_valid_json` regression).
+/// - HTML via [`crate::renderers::html::HtmlRenderer`].
+/// - Terminal via [`crate::renderers::terminal::TerminalRenderer`] (ANSI
+///   escapes; consumers route to PLAIN when the sink is non-TTY).
+///
+/// Pre-rebuild this function returned `(None, None, None)` for every
+/// Content-bearing slot per the Phase 1.B placeholder — that scar is
+/// resolved here.
 pub fn slot_extract_content(
     bits: u64,
     kind: NativeKind,
@@ -546,32 +564,55 @@ pub fn slot_extract_content(
     if bits == 0 {
         return (None, None, None);
     }
-    let hv = unsafe { &*(bits as *const HeapValue) };
-    let node = match (hk, hv) {
-        (HeapKind::Content, HeapValue::Content(node)) => Some((**node).clone()),
-        (HeapKind::DataTable, HeapValue::DataTable(dt)) => Some(
-            crate::content_dispatch::datatable_to_content_node(dt.as_ref(), None),
-        ),
-        (HeapKind::TableView, HeapValue::TableView(arc)) => match &**arc {
-            shape_value::heap_value::TableViewData::TypedTable { table, .. }
-            | shape_value::heap_value::TableViewData::IndexedTable { table, .. } => Some(
-                crate::content_dispatch::datatable_to_content_node(table.as_ref(), None),
-            ),
-            // RowView / ColumnRef are deferred Phase 2c content
-            // adapters — no current renderer.
-            _ => None,
-        },
+    // SAFETY: `Ptr(HeapKind::*)` contract — bits is a valid typed pointer
+    // for the labelled heap kind. The `(hk, hv)` cross-check below is
+    // belt-and-braces; an inconsistent label is a producer-side bug.
+    let node = match hk {
+        HeapKind::Content => {
+            let hv = unsafe { &*(bits as *const HeapValue) };
+            match hv {
+                HeapValue::Content(node) => Some((**node).clone()),
+                _ => None,
+            }
+        }
+        HeapKind::DataTable => {
+            let dt: &shape_value::DataTable =
+                unsafe { &*(bits as *const shape_value::DataTable) };
+            Some(crate::content_dispatch::datatable_to_content_node(dt, None))
+        }
+        HeapKind::TableView => {
+            let tv: &shape_value::heap_value::TableViewData =
+                unsafe { &*(bits as *const shape_value::heap_value::TableViewData) };
+            match tv {
+                shape_value::heap_value::TableViewData::TypedTable { table, .. }
+                | shape_value::heap_value::TableViewData::IndexedTable { table, .. } => Some(
+                    crate::content_dispatch::datatable_to_content_node(table.as_ref(), None),
+                ),
+                // RowView / ColumnRef are deferred Phase 2c content
+                // adapters — no current renderer.
+                _ => None,
+            }
+        }
         _ => None,
     };
-    let Some(_node) = node else {
+    let Some(node) = node else {
         return (None, None, None);
     };
 
-    // Phase 1.B (ADR-006 §2.7.4): the JSON / HTML / terminal renderer
-    // adapters for `ContentNode` are part of the deferred Phase 2c
-    // content-marshal rebuild. Until then, return `None` for all three
-    // payloads rather than emit a partial / wrong-shape rendering.
-    (None, None, None)
+    // W18.2: route the materialised `ContentNode` through each of the
+    // three renderer adapters wired into the host boundary. The JSON
+    // renderer's output is guaranteed-valid JSON (see
+    // `renderers::cross_renderer_tests::json_is_valid_json`); the
+    // `serde_json::from_str` fallback to `None` is defensive only.
+    use crate::content_renderer::ContentRenderer;
+    let json_renderer = crate::renderers::json::JsonRenderer;
+    let html_renderer = crate::renderers::html::HtmlRenderer::new();
+    let terminal_renderer = crate::renderers::terminal::TerminalRenderer::new();
+    let content_json: Option<serde_json::Value> =
+        serde_json::from_str(&json_renderer.render(&node)).ok();
+    let content_html = Some(html_renderer.render(&node));
+    let content_terminal = Some(terminal_renderer.render(&node));
+    (content_json, content_html, content_terminal)
 }
 
 // ───────────────────────── DataTable ↔ wire/IPC ─────────────────────────
