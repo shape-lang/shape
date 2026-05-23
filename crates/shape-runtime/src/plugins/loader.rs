@@ -107,18 +107,50 @@ impl PluginLoader {
                 location: None,
             })?;
 
-        // Check ABI version if available
-        if let Ok(get_version) = unsafe { lib.get::<GetAbiVersionFn>(b"shape_abi_version") } {
-            let version = unsafe { get_version() };
-            if version != ABI_VERSION {
-                return Err(ShapeError::RuntimeError {
-                    message: format!(
-                        "Plugin ABI version mismatch: expected {}, got {}",
-                        ABI_VERSION, version
-                    ),
-                    location: None,
-                });
-            }
+        // Check ABI version — REQUIRED.
+        //
+        // v0.3 Round 8 W17-foreign-ffi (2026-05-23, supervisor (iv) ruling):
+        // fail-safe FFI version-mismatch — extensions built against an OLD
+        // ABI version MUST refuse to load with a structured error rather
+        // than silently degrading at the marshal boundary. The
+        // `shape_abi_version` symbol is REQUIRED (the previous code path
+        // silently accepted libraries without the symbol, which left the
+        // door open to silent ABI drift).
+        //
+        // Plugin authors generate this symbol automatically via the
+        // `shape_abi_v1::language_runtime_plugin!` / `data_source_plugin!`
+        // macros at `crates/shape-abi-v1/src/lib.rs:1493`.
+        let get_version = unsafe { lib.get::<GetAbiVersionFn>(b"shape_abi_version") }
+            .map_err(|e| ShapeError::RuntimeError {
+                message: format!(
+                    "Plugin '{}' missing required 'shape_abi_version' export \
+                     (fail-safe ABI version check, ADR-006 §2.7.4 / §2.7.5 — \
+                     W17-foreign-ffi supervisor (iv) ruling). The host ABI \
+                     version is {}. The extension must export \
+                     `shape_abi_version()` — use the \
+                     `shape_abi_v1::language_runtime_plugin!` macro to \
+                     generate it automatically. Underlying loader error: {}",
+                    path.display(),
+                    ABI_VERSION,
+                    e
+                ),
+                location: None,
+            })?;
+        let version = unsafe { get_version() };
+        if version != ABI_VERSION {
+            return Err(ShapeError::RuntimeError {
+                message: format!(
+                    "Plugin '{}' ABI version mismatch: host expects v{}, \
+                     plugin reports v{}. The plugin must be rebuilt against \
+                     the current Shape ABI to load (fail-safe refuse-load \
+                     per W17-foreign-ffi supervisor (iv) ruling — silent \
+                     degradation at the marshal boundary is forbidden).",
+                    path.display(),
+                    ABI_VERSION,
+                    version
+                ),
+                location: None,
+            });
         }
 
         // Get plugin info
