@@ -192,7 +192,9 @@ trait_member_signature = {
 trait_member_signature_separator = { ";" | "," }
 
 // ===== Trait Definitions =====
-trait_def = { annotations? ~ "trait" ~ ident ~ type_params? ~ supertrait_list? ~ "{" ~ trait_body ~ "}" }
+// Optional `comptime` prefix marks a comptime trait (J-CT.0 parser-only;
+// type-checker validation is J-CT.1, evaluator dispatch is J-CT.2).
+trait_def = { annotations? ~ comptime_keyword? ~ "trait" ~ ident ~ type_params? ~ supertrait_list? ~ "{" ~ trait_body ~ "}" }
 supertrait_list = { ":" ~ optional_type ~ ("+" ~ optional_type)* }
 
 trait_body = {
@@ -217,8 +219,10 @@ associated_type_decl = {
 }
 
 // ===== Impl Blocks =====
+// Optional `comptime` prefix marks a comptime impl (J-CT.0 parser-only;
+// type-checker validation is J-CT.1, evaluator dispatch is J-CT.2).
 impl_block = {
-    "impl" ~ type_name ~ "for" ~ type_name ~ impl_name? ~ where_clause? ~ "{" ~ impl_member* ~ "}"
+    comptime_keyword? ~ "impl" ~ type_name ~ "for" ~ type_name ~ impl_name? ~ where_clause? ~ "{" ~ impl_member* ~ "}"
 }
 
 impl_member = {

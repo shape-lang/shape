@@ -258,11 +258,23 @@ pub fn parse_extend_statement(pair: Pair<Rule>) -> Result<crate::ast::ExtendStat
 pub fn parse_impl_block(pair: Pair<Rule>) -> Result<crate::ast::ImplBlock> {
     let mut inner = pair.into_inner();
 
-    // First type_name is the trait being implemented
-    let trait_name_pair = inner.next().ok_or_else(|| ShapeError::ParseError {
+    // First child may be the optional comptime_keyword (J-CT.0) or directly
+    // the trait type_name. Peel comptime first if present.
+    let mut is_comptime = false;
+    let mut first_pair = inner.next().ok_or_else(|| ShapeError::ParseError {
         message: "Missing trait name in impl block".to_string(),
         location: None,
     })?;
+    if first_pair.as_rule() == Rule::comptime_keyword {
+        is_comptime = true;
+        first_pair = inner.next().ok_or_else(|| ShapeError::ParseError {
+            message: "Missing trait name in impl block".to_string(),
+            location: None,
+        })?;
+    }
+
+    // First type_name is the trait being implemented
+    let trait_name_pair = first_pair;
     let trait_name = parse_type_name(trait_name_pair)?;
 
     // Second type_name is the target type
@@ -318,6 +330,7 @@ pub fn parse_impl_block(pair: Pair<Rule>) -> Result<crate::ast::ImplBlock> {
         methods,
         associated_type_bindings,
         where_clause,
+        is_comptime,
     })
 }
 
