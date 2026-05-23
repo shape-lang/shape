@@ -1,12 +1,13 @@
 # Team-lead handover — Shape v0.3 close-approach
 
-**Refreshed:** 2026-05-22 at main HEAD `3f364aea` (post round-7 wave-3
-+ audit-round-2 close). Round-6+ CLOSED; expanded-scope audits LANDED;
-round-7 W1 + W2 + W3 MERGED (8 fix sub-clusters + 4 audit-round dispositions
-+ 2 round-2 audits). v0.3 criterion D (Known Constraints) + criterion F
-(Len + membership + KC #2 deletion) CLOSED; criterion B 2/3 + criterion A
-3/6 advanced; E + J audits closed. Git holds prior content; no archaeology
-here.
+**Refreshed:** 2026-05-23 at main HEAD `faecbcd1` (post Round-8 W1 close).
+Round-7 CLOSED (8 fix + 4 audits + audit-round-2). **Round-8 W1: 9
+parallel agents merged.** v0.3 criterion B (per-container FieldType)
+**COMPLETE**; criterion C 4/8 (T1 critical-path landed; W17 phase-2c
+sub-clusters unblocked); criterion E 2/4 (W18.0 + W18.2 merged; W18.1
+HOLDS on user Item 2); criterion J 1/4 (J-CT.0 parser+AST merged);
+criterion A advance to 3.1/6 (J.4-rest partial 10%; J.5 needs
+primitive-layer scope re-audit).
 
 ## Role
 
@@ -19,11 +20,11 @@ tags and language semantics. The user relays between team-lead and supervisor.
 
 | | |
 |---|---|
-| Main HEAD | `3f364aea` (R7 W3 8-merge batch + R2-audit 2-doc batch + close-doc record) |
-| Smoke matrix s1–s5 | **5/5 VM == JIT** (canonical (ii) F' release-binary harness; re-verified at HEAD `3f364aea` post 8-branch merge) |
+| Main HEAD | `faecbcd1` (R8 W1 9-merge batch + close-doc record) |
+| Smoke matrix s1–s5 | **5/5 VM == JIT** (canonical (ii) F' release-binary harness; re-verified at HEAD `faecbcd1` post 9-branch merge) |
 | verify-merge / check-no-dynamic / check-clean | 13/13 / exit 0 / exit 0 |
 | Round-6+ no-known-incorrectness set | **EMPTY** per user 2026-05-20 binding |
-| 2026-05-22 expanded-scope gating set | **OPEN.** Audits CLOSED A/B/C/D/E/J. **Round-7 W3 + audit-round-2 (10 parallel dispatches):** J.1 PHF-deletion MERGED `99d53183`; J.2 VM-opcode macro MERGED `13868c8c`; J.3 JIT-FFI macro MERGED `fd7f25e7`; W17.3-4.2 compiler-integration MERGED `baefe876`; F bundle MERGED `fe197f70` (KC #2 deletion folded); D-α.1 closure-param MERGED `572791a3`; D-β string-join MERGED `44780043`; D-α.2 `.length` opcode-stamp MERGED `3f364aea`. E W18 + J comptime-trait audits CLOSED + landed at `1a94c9ee`. **Criteria status:** A 3/6 (J.4-rest + J.5 queued); B 2/3 (.3 runtime + snapshot/wire queued); C 0/8 (4 supervisor rulings landed; 8 sub-clusters queued); **D COMPLETE** (all 5 v0.3-gating sub-clusters merged; 6(b)/6(c) class-shifted to V3-S5/criterion-C territory); E AUDIT-CLOSED (4-cluster partition; 2 user decisions pending); **F COMPLETE**; J AUDIT-CLOSED (4-cluster partition; dispatch-ready). G.1/G.2 doc-truth gated on remaining A/B/C/E/J fix close. |
+| 2026-05-22+05-23 expanded-scope gating set | **OPEN.** Audits CLOSED A/B/C/D/E/J. **Round-8 W1 (9 parallel dispatches MERGED 2026-05-23):** J-CT.0 `81ee84f9` (parser+AST); W17.3-4.3 `56665cb4` (**criterion B closes**); C1 `fdab3749` (temporal-lowering); C2 `d8bc36b6` (comptime env snapshot); C3 `d5e666b8` (expr-lowering integration); J.4-rest `b6fbbb9e` (partial 10%); T1 `c125aeb3` (host-tier marshal critical-path); W18.0 `445eac72` (enum-variant-display); W18.2 `faecbcd1` (output-adapter integration). **Criteria status:** **A 3.1/6** (J.4-rest 10% partial; J.5 primitives-layer scope re-audit needed); **B 3/3 COMPLETE**; **C 4/8** (T1+C1+C2+C3; W17-snapshot-resume + W17-typed-module-exports + W17-foreign-ffi + V3-S5 unblocked by T1, queued for R8 W2); **D COMPLETE**; **E 2/4** (W18.0+W18.2; W18.1 HOLDS on user Item 2; W18.3 integration met cumulatively); **F COMPLETE**; **J 1/4** (J-CT.0; J-CT.1/.2/.3 queued). G.1/G.2 doc-truth gated on remaining A/C/E/J fix close. |
 | v0.3.0 tag | NOT landed — gated on expanded-scope work + user authorization |
 
 ## 2026-05-22 expanded scope (binding — user, dialogue-supplemented same day)
@@ -196,27 +197,20 @@ F' release-binary harness) · AGENTS.md row; no Co-Authored-By trailer.
 
 ---
 
-*Round-6+ CLOSED. Round-7 W1 (3 dispatches): W17.3-4.1 + D-δ MERGED;
-J.1 surface-and-stop + audit §3 corrected. Round-7 W2 (3 dispatches):
-D-α audit (2-family split); J.0 MERGED; D-γ MERGED. **Round-7 W3 +
-audit-round-2 (10 parallel dispatches) MERGED 2026-05-22**: J.1/J.2/J.3
-(W16.2-J 3/6 merged) + W17.3-4.2 + F bundle (KC #2 folded) + D-α.1 +
-D-α.2 + D-β; 2 audit-round-2 audits closed (E W18 + J comptime trait).
-**6 audit-layer imprecisions logged for cumulative tally:** (a) D-α
-1-family hypothesis falsified at audit (2-family); (b) D-α.2
-reassignment-chain hypothesis falsified at fix (single .length stamp);
-(c) D-β kind-tracker mis-stamp hypothesis falsified at fix (4-stage
-compile-time cascade through builder-leak); (d) W17.3-4 audit §5.B
-Set-literal + HashMap-literal syntax claims falsified (neither in Pest
-grammar); (e) KC #6(b) typed_closure_in_array_map stack-overflow anchor
-incidentally retired between audit + fix dispatch (class-shift to
-V3-S5); (f) KC #6(c) bubble_sort PASS-gate inherited by V3-S5 (criterion
-C territory). **5 git-stash binding violations** (J.1, F, W17.3-4.2,
-J.2, D-α.2 × 2) — under parallel-worktree pressure when verifying
-baselines. Future-dispatch addendum mandatory: instruct agents to use
-`git show HEAD:path` + saved-patch backups + dedicated baseline
-worktree, never `git stash`. **Next**: criterion C phase-2c fix-dispatch
-when items 2 + 6 text-ratify lands; J fix-dispatch (4 sub-clusters);
-A J.4-rest + J.5 dispatch; B W17.3-4.3 dispatch; E W18.0/.1/.2/.3
-dispatch (gated on 2 user decisions). v0.3-gating gating-set remaining:
-A 3/6, B 1/3, C 8/8, E 4/4 (+2 user decisions), J 4/4.*
+*Round-6+ CLOSED. R7 W1-W3 + audit-round-2 closed. **Round-8 W1
+(9 parallel dispatches MERGED 2026-05-23):** J-CT.0 + W17.3-4.3 +
+C1 + C2 + C3 + J.4-rest (partial) + T1 + W18.0 + W18.2. v0.3 criterion
+B (per-container FieldType) **COMPLETE**; C 4/8; E 2/4; J 1/4; A 3.1/6.
+**Cumulative audit-layer imprecisions: 8 logged** (R7 #1-6 + R8 #7
+truncation-mid-build pattern + R8 #8 J.4-rest scope mis-classification
+— audit framed as "lowest-frequency residuals" but ~90% needs
+primitive-layer build, distinct territory). **Cumulative git-stash
+violations: 6** (5 in R7 W3 + 1 in R8 C3 self-reported despite hardened
+binding). **R8 commit-first procedure VALIDATED** for build-wait
+truncation recovery (C1 + W18.2 finalized via that pattern; bake into
+R8 W2 dispatch template). **Next: R8 W2** — primary territory: J-CT.1
+type-checker + J-CT.2 evaluator + J-CT.3 integration; J.5
+primitive-layer scope re-audit before dispatch; W17-snapshot-resume +
+W17-typed-module-exports + W17-foreign-ffi + V3-S5 host-tier-eval (now
+T1-unblocked); W18.1 (HOLDS on user Item 2 ruling). v0.3-gating
+remaining: A 2.9/6 + B 0/3 + C 4/8 + E 2/4 + J 3/4 + G.1/G.2 doc-truth.*
