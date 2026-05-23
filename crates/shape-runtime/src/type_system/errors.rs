@@ -129,6 +129,32 @@ pub enum TypeError {
         type_name: String,
         trait_name: String,
     },
+
+    /// J-CT.1: a `comptime trait` method was called outside a comptime context.
+    /// Comptime-trait methods are compile-time-only — runtime call sites must
+    /// be rejected by the type-checker before bytecode emission.
+    #[error(
+        "Cannot call comptime-trait method '{method_name}' on type '{type_name}' \
+         outside a `comptime {{ ... }}` block — the method is compile-time-only"
+    )]
+    ComptimeMethodCallOutsideComptime {
+        type_name: String,
+        method_name: String,
+    },
+
+    /// J-CT.1: `comptime trait` / `comptime impl` alignment mismatch.
+    /// A non-comptime `impl` cannot implement a `comptime trait`, and a
+    /// `comptime impl` cannot implement a non-comptime trait.
+    #[error(
+        "comptime alignment mismatch: trait '{trait_name}' is_comptime={trait_is_comptime}, \
+         impl for '{type_name}' is_comptime={impl_is_comptime} — both must agree"
+    )]
+    ComptimeImplTraitMismatch {
+        trait_name: String,
+        type_name: String,
+        trait_is_comptime: bool,
+        impl_is_comptime: bool,
+    },
 }
 
 fn format_unsolved_constraints(constraints: &[(Type, Type)]) -> String {

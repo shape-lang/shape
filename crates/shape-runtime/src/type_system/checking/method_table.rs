@@ -121,6 +121,10 @@ pub struct MethodTable {
     methods: HashMap<(String, String), Vec<MethodSignature>>,
     /// Generic method signatures for types with type parameters
     generic_methods: HashMap<(String, String), GenericMethodSignature>,
+    /// J-CT.1: methods registered by a `comptime impl` block, indexed by
+    /// (receiver type name, method name). The type-checker rejects calls
+    /// to these methods outside a `comptime { ... }` context.
+    comptime_methods: std::collections::HashSet<(String, String)>,
 }
 
 impl MethodTable {
@@ -128,6 +132,7 @@ impl MethodTable {
         let mut table = MethodTable {
             methods: HashMap::new(),
             generic_methods: HashMap::new(),
+            comptime_methods: std::collections::HashSet::new(),
         };
         table.register_builtin_methods();
         table
@@ -219,6 +224,27 @@ impl MethodTable {
         return_type: Type,
     ) {
         self.register_method(type_name, method_name, param_types, return_type, false);
+    }
+
+    /// J-CT.1: mark a method as comptime-only.
+    ///
+    /// Called by `register_impl` when the source `impl_block.is_comptime`
+    /// is true (i.e. `comptime impl Trait for Type { ... }`). After this,
+    /// `is_comptime_method(type_name, method_name)` returns true and the
+    /// expression-level type checker rejects runtime call sites.
+    pub fn mark_comptime_method(&mut self, type_name: &str, method_name: &str) {
+        self.comptime_methods
+            .insert((type_name.to_string(), method_name.to_string()));
+    }
+
+    /// J-CT.1: query whether a method was registered by a `comptime impl`.
+    ///
+    /// Used by the method-call type-checker to reject runtime call sites
+    /// for compile-time-only methods. Returns `false` for any (type, method)
+    /// pair never marked via `mark_comptime_method`.
+    pub fn is_comptime_method(&self, type_name: &str, method_name: &str) -> bool {
+        self.comptime_methods
+            .contains(&(type_name.to_string(), method_name.to_string()))
     }
 
     /// Get all methods registered for a type name
@@ -717,5 +743,45 @@ mod tests {
 
         assert!(table.takes_closure_with_receiver_param("Vec", "filter"));
         assert!(!table.takes_closure_with_receiver_param("Vec", "len"));
+    }
+
+    // ----------------------------------------------------------------------
+    // J-CT.1 — comptime-method marking
+    // ----------------------------------------------------------------------
+
+    #[test]
+    fn jct1_mark_comptime_method_records_pair() {
+        let mut table = MethodTable::new();
+        table.mark_comptime_method("Calculator", "eval");
+        assert!(
+            table.is_comptime_method("Calculator", "eval"),
+            "marked method should report comptime-only"
+        );
+    }
+
+    #[test]
+    fn jct1_unmarked_methods_are_not_comptime() {
+        let mut table = MethodTable::new();
+        // Register a regular user method — must not be classified as comptime.
+        table.register_user_method("Calculator", "value", vec![], BuiltinTypes::number());
+        assert!(
+            !table.is_comptime_method("Calculator", "value"),
+            "register_user_method must NOT mark methods as comptime"
+        );
+    }
+
+    #[test]
+    fn jct1_comptime_marker_is_per_type() {
+        let mut table = MethodTable::new();
+        table.mark_comptime_method("Calculator", "eval");
+        assert!(table.is_comptime_method("Calculator", "eval"));
+        assert!(
+            !table.is_comptime_method("OtherType", "eval"),
+            "comptime marker must not leak across types"
+        );
+        assert!(
+            !table.is_comptime_method("Calculator", "other_method"),
+            "comptime marker must not leak across method names"
+        );
     }
 }

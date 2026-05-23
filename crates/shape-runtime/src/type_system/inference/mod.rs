@@ -130,6 +130,15 @@ pub struct TypeInferenceEngine {
     /// bytecode compiler to drive monomorphization.
     pub callsite_type_args:
         HashMap<(String, usize, usize), Vec<(String, TypeAnnotation)>>,
+    /// J-CT.1: depth of the current `comptime { ... }` nesting.
+    ///
+    /// Incremented on entering `Expr::Comptime` / `Expr::ComptimeFor` /
+    /// `Item::Comptime` during inference; decremented on exit. The
+    /// method-call type-checker (`expressions.rs::Expr::MethodCall`)
+    /// rejects calls to `comptime impl`-registered methods when this
+    /// counter is zero. A counter (not a bool) keeps nested comptime
+    /// blocks correct, but in practice the depth stays at 0 or 1.
+    pub(crate) comptime_depth: usize,
 }
 
 impl Default for TypeInferenceEngine {
@@ -178,7 +187,25 @@ impl TypeInferenceEngine {
             implicit_return_scopes: Vec::new(),
             struct_type_defs: HashMap::new(),
             callsite_type_args: HashMap::new(),
+            comptime_depth: 0,
         }
+    }
+
+    /// J-CT.1: enter a comptime context (e.g. `comptime { ... }`).
+    pub(crate) fn enter_comptime(&mut self) {
+        self.comptime_depth = self.comptime_depth.saturating_add(1);
+    }
+
+    /// J-CT.1: exit a comptime context.
+    pub(crate) fn exit_comptime(&mut self) {
+        self.comptime_depth = self.comptime_depth.saturating_sub(1);
+    }
+
+    /// J-CT.1: whether the current expression is being checked inside a
+    /// `comptime { ... }` block. Drives runtime-call rejection of methods
+    /// registered by `comptime impl` blocks.
+    pub(crate) fn in_comptime_context(&self) -> bool {
+        self.comptime_depth > 0
     }
 
     /// Register host-known root-scope bindings before program inference.

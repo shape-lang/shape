@@ -854,7 +854,18 @@ impl BytecodeCompiler {
     }
 
     pub(super) fn should_emit_type_diagnostic(error: &TypeError) -> bool {
-        matches!(error, TypeError::UnknownProperty(_, _))
+        matches!(
+            error,
+            TypeError::UnknownProperty(_, _)
+            // J-CT.1: comptime-trait diagnostics are emitted in the default
+            // `ReliableOnly` mode. Both are pure rules with no false-positive
+            // surface (the gate fires only on `comptime impl`-marked methods
+            // and the alignment check only on declared trait/impl pairs), so
+            // failing the compile is the right behavior — matches the audit's
+            // §5(d) "compile-time semantic error" expectation.
+            | TypeError::ComptimeMethodCallOutsideComptime { .. }
+            | TypeError::ComptimeImplTraitMismatch { .. }
+        )
     }
 
     pub(super) fn collect_program_functions(
