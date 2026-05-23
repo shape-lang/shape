@@ -77,7 +77,7 @@ pub use builtin_schemas::BuiltinSchemaIds;
 pub use current::{
     SyncRegistryScope, current_registry, default_registry, try_current_registry, with_async_scope,
 };
-pub use enum_support::{EnumInfo, EnumVariantInfo};
+pub use enum_support::{EnumInfo, EnumVariantInfo, EnumVariantKind};
 pub use field_types::{FieldAnnotation, FieldDef, FieldType};
 pub use physical_binding::PhysicalSchemaBinding;
 pub use registry::{TypeSchemaBuilder, TypeSchemaRegistry};

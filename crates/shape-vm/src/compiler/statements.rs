@@ -1550,12 +1550,25 @@ impl BytecodeCompiler {
             .iter()
             .enumerate()
             .map(|(id, member)| {
-                let payload_fields = match &member.kind {
-                    EnumMemberKind::Unit { .. } => 0,
-                    EnumMemberKind::Tuple(types) => types.len() as u16,
-                    EnumMemberKind::Struct(fields) => fields.len() as u16,
-                };
-                EnumVariantInfo::new(&member.name, id as u16, payload_fields)
+                // W18.0 (User 2026-05-23 Item 1): carry variant payload
+                // shape into the runtime EnumVariantInfo so print() can
+                // render `Red` / `Blue(42)` / `Point { x: 1, y: 2 }` per
+                // the source-syntax form. The runtime TypedObject layout
+                // is unchanged (`__payload_N` slots at offset 8/16/...);
+                // the kind here only descriptively shapes the print form.
+                match &member.kind {
+                    EnumMemberKind::Unit { .. } => {
+                        EnumVariantInfo::new(&member.name, id as u16, 0)
+                    }
+                    EnumMemberKind::Tuple(types) => {
+                        EnumVariantInfo::new(&member.name, id as u16, types.len() as u16)
+                    }
+                    EnumMemberKind::Struct(fields) => {
+                        let names: Vec<String> =
+                            fields.iter().map(|f| f.name.clone()).collect();
+                        EnumVariantInfo::new_struct(&member.name, id as u16, names)
+                    }
+                }
             })
             .collect();
 
