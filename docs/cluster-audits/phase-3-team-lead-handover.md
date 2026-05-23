@@ -1,13 +1,16 @@
 # Team-lead handover — Shape v0.3 close-approach
 
-**Refreshed:** 2026-05-23 at main HEAD `faecbcd1` (post Round-8 W1 close).
-Round-7 CLOSED (8 fix + 4 audits + audit-round-2). **Round-8 W1: 9
-parallel agents merged.** v0.3 criterion B (per-container FieldType)
-**COMPLETE**; criterion C 4/8 (T1 critical-path landed; W17 phase-2c
-sub-clusters unblocked); criterion E 2/4 (W18.0 + W18.2 merged; W18.1
-HOLDS on user Item 2); criterion J 1/4 (J-CT.0 parser+AST merged);
-criterion A advance to 3.1/6 (J.4-rest partial 10%; J.5 needs
-primitive-layer scope re-audit).
+**Refreshed:** 2026-05-23 at main HEAD `ae34b01f` (post Round-8 W2 close).
+R7 CLOSED + R8 W1 (9 merges) + **R8 W2 (8 merges including 2 audits)**.
+v0.3 criterion progress: A 3.1/6 + re-audit (4 user-decisions queued);
+B 3/3 COMPLETE; **C 7.5/8** (T1+C1+C2+C3 R8W1 + W17-snapshot-resume +
+W17-typed-module-exports + W17-foreign-ffi + V3-S5 R8W2; residuals
+**W17-marshal-return-arms** + **W17-typed-module-exports-followup-
+constant-pool** smaller sub-clusters); D COMPLETE; E 2/4 + deep-research
+audit (W18 RESHAPED per user 2026-05-23; W18.1 HOLDS indefinitely; 4
+user-decisions queued); F COMPLETE; **J 3/4** (J-CT.0 R8W1 + J-CT.1 +
+J-CT.2 R8W2; combined gate (d) lands naturally; J-CT.3 already met
+cumulatively).
 
 ## Role
 
@@ -20,11 +23,11 @@ tags and language semantics. The user relays between team-lead and supervisor.
 
 | | |
 |---|---|
-| Main HEAD | `faecbcd1` (R8 W1 9-merge batch + close-doc record) |
-| Smoke matrix s1–s5 | **5/5 VM == JIT** (canonical (ii) F' release-binary harness; re-verified at HEAD `faecbcd1` post 9-branch merge) |
+| Main HEAD | `ae34b01f` (R8 W2 8-merge batch including 2 audits + close-doc record) |
+| Smoke matrix s1–s5 | **5/5 VM == JIT** (canonical (ii) F' release-binary harness; re-verified at HEAD `ae34b01f` post-merge) |
 | verify-merge / check-no-dynamic / check-clean | 13/13 / exit 0 / exit 0 |
 | Round-6+ no-known-incorrectness set | **EMPTY** per user 2026-05-20 binding |
-| 2026-05-22+05-23 expanded-scope gating set | **OPEN.** Audits CLOSED A/B/C/D/E/J. **Round-8 W1 (9 parallel dispatches MERGED 2026-05-23):** J-CT.0 `81ee84f9` (parser+AST); W17.3-4.3 `56665cb4` (**criterion B closes**); C1 `fdab3749` (temporal-lowering); C2 `d8bc36b6` (comptime env snapshot); C3 `d5e666b8` (expr-lowering integration); J.4-rest `b6fbbb9e` (partial 10%); T1 `c125aeb3` (host-tier marshal critical-path); W18.0 `445eac72` (enum-variant-display); W18.2 `faecbcd1` (output-adapter integration). **Criteria status:** **A 3.1/6** (J.4-rest 10% partial; J.5 primitives-layer scope re-audit needed); **B 3/3 COMPLETE**; **C 4/8** (T1+C1+C2+C3; W17-snapshot-resume + W17-typed-module-exports + W17-foreign-ffi + V3-S5 unblocked by T1, queued for R8 W2); **D COMPLETE**; **E 2/4** (W18.0+W18.2; W18.1 HOLDS on user Item 2; W18.3 integration met cumulatively); **F COMPLETE**; **J 1/4** (J-CT.0; J-CT.1/.2/.3 queued). G.1/G.2 doc-truth gated on remaining A/C/E/J fix close. |
+| 2026-05-22+05-23 expanded-scope gating set | **OPEN.** Audits CLOSED A/B/C/D/E/J + 2 R8-round-audit-2 docs (W18 deep-research + J.4-rest re-audit). **Round-8 W1 (9 merges) + W2 (8 merges incl. 2 audits) at main HEAD `ae34b01f`.** R8 W2 fix merges: V3-S5 `b4250000` + W17-snapshot-resume `014cdf60` + W17-typed-module-exports `a4fa323d` + W17-foreign-ffi `aadfdc2d` + J-CT.1 `eaea9c87` + J-CT.2 `ae34b01f`. **Criteria status at HEAD ae34b01f:** **A 3.1/6** (J.5 60-90h scope mapped; 4 architectural decisions queued for user/supervisor: tuple-carrier / deep-equality / closure-return-kind / v0.4-deferral-line); **B 3/3 COMPLETE**; **C 7.5/8** (residuals: W17-marshal-return-arms + W17-typed-module-exports-followup-constant-pool); **D COMPLETE**; **E 2/4 + deep-research-audit RESHAPED** (W18.1 HOLDS indefinitely; 4 user-decisions queued: styled f-string return type / c-string retirement timing / builder API shape / v0.3 scope line; 4-cluster partition W18.3-.6 28-38h total); **F COMPLETE**; **J 3/4** (J-CT.3 already met cumulatively). 2 ADR §2.7.4 amendment texts DRAFTED for supervisor text-ratify (items 2+6 direction-ruled territory). G.1/G.2 doc-truth gated on remaining A/E + 2 phase-2c residuals. |
 | v0.3.0 tag | NOT landed — gated on expanded-scope work + user authorization |
 
 ## 2026-05-22 expanded scope (binding — user, dialogue-supplemented same day)
