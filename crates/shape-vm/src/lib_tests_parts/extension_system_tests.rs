@@ -49,7 +49,45 @@ fn test_from_import_compiles() {
 /// and the extension should be stored for later use.
 #[test]
 fn test_extension_registration() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
+    // V3-S5 host-tier rebuild (R8 W2, 2026-05-23): the legacy
+    // `register_test_function` wrapper was deleted alongside the dynamic
+    // carrier. Kinded replacement is `register_typed_fn_0` (string return)
+    // per ADR-006 §2.7.4 — the body declares its return shape via
+    // `ConcreteType::String` and the marshal layer projects the result
+    // into a `KindedSlot` at the boundary. Per supervisor 2026-05-23
+    // ruling, no NativeScalar carrier; only existing `NativeKind`
+    // variants. This test is registration-only — no execution.
+    use shape_runtime::marshal::register_typed_fn_0;
+    use shape_runtime::module_exports::ModuleExports;
+    use shape_runtime::typed_module_exports::{ConcreteReturn, ConcreteType, TypedReturn};
+
+    let mut ext = ModuleExports::new("test_ext");
+    register_typed_fn_0(
+        &mut ext,
+        "hello",
+        "Test export returning a fixed string",
+        ConcreteType::String,
+        |_ctx| Ok(TypedReturn::Concrete(ConcreteReturn::String("hi".to_string()))),
+    );
+
+    let mut executor = BytecodeExecutor::new();
+    executor.register_extension(ext);
+
+    // Verify the extension was stored. A second registration must not
+    // panic — the executor allows multiple extensions side-by-side.
+    let mut ext2 = ModuleExports::new("test_ext_2");
+    register_typed_fn_0(
+        &mut ext2,
+        "world",
+        "Second test export returning a fixed string",
+        ConcreteType::String,
+        |_ctx| {
+            Ok(TypedReturn::Concrete(ConcreteReturn::String(
+                "hello".to_string(),
+            )))
+        },
+    );
+    executor.register_extension(ext2);
 }
 
 #[test]

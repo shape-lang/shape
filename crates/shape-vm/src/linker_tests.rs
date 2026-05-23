@@ -495,13 +495,19 @@ fn test_vm_starts_linked_program_at_entry_function() {
     assert_eq!(linked.functions[1].name, "main");
     assert_eq!(linked.entry, main_hash);
 
-    // Phase-2c surface: `execute(None)` returns the deleted host-tier
-    // dynamic-value carrier; the `as_number_coerce()` accessor lived on
-    // an extension trait that was deleted with the carrier. Once the
-    // host-tier kinded eval API lands in Phase-2c, use `execute_raw(None)`
-    // (returns raw u64 bits) and decode against the program's declared
-    // `top_level_frame.return_kind`. Per playbook §7 REVISED part 4 +
-    // ADR-006 §2.7.4 surface as todo!() until then.
-    let _linked_program = linked;
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
+    // V3-S5 host-tier rebuild (R8 W2, 2026-05-23): the program pushes
+    // `Constant::Number(42.0)` (an `f64`) and `Halt`s. The top-of-stack
+    // bits are the raw `f64::to_bits(42.0)` per ADR-006 §2.7.7; decode
+    // via `f64::from_bits` (the same shape used by `v2_stack_tests.rs`
+    // helpers for `Halt`-terminated programs without a stamped
+    // `top_level_frame.return_kind`). No tag decode, no `as_number_coerce`
+    // — just raw bits + kind discipline.
+    let mut vm = crate::executor::VirtualMachine::new(crate::executor::VMConfig::default());
+    vm.load_linked_program(linked);
+    let bits = vm.execute_raw(None).expect("execution should succeed");
+    assert_eq!(
+        f64::from_bits(bits),
+        42.0,
+        "linked program with `Constant::Number(42.0)` + Halt must leave the f64 bits on top of stack",
+    );
 }
