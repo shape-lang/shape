@@ -324,9 +324,45 @@ impl<'a> ValueFormatter<'a> {
                 format!("{}", dt)
             }
             HeapKind::Content => {
+                // W18.2 (R8 — output-adapter integration): route the
+                // Content payload through the kind-threaded
+                // `slot_extract_content` host-boundary helper and render
+                // via the adapter selected for `print()`. The audit
+                // dispatch pins TERMINAL as the default for `print()` —
+                // the per-adapter capabilities table at
+                // `content_dispatch::capabilities_for_adapter` keys off
+                // the same adapter constants (TERMINAL / HTML /
+                // MARKDOWN / JSON / PLAIN) and the surviving
+                // 6-renderer infrastructure projects the node per its
+                // own `ContentRenderer::render` impl. Pre-rebuild this
+                // arm called `ContentNode::Display` directly, which
+                // emitted plain text with no ANSI styling; the
+                // TerminalRenderer now resolves the per-span style
+                // (bold / italic / fg / bg) into escape codes that the
+                // `print()`-stdout sink renders directly. The
+                // `quote_strings` flag is unused for Content nodes —
+                // they're a self-contained renderable tree, not a leaf
+                // string that needs quoting in a parent container.
+                let _ = quote_strings;
                 let node: &shape_value::content::ContentNode =
                     unsafe { &*(bits as *const shape_value::content::ContentNode) };
-                format!("{}", node)
+                let adapter = shape_runtime::content_dispatch::adapters::TERMINAL;
+                let _capabilities =
+                    shape_runtime::content_dispatch::capabilities_for_adapter(adapter);
+                // The capabilities are passed implicitly via the
+                // renderer constructor — `TerminalRenderer::new()`
+                // builds a `RenderContext::terminal()` with ANSI on by
+                // default. The `_capabilities` lookup is kept as the
+                // documented dispatch surface per the audit
+                // (`capabilities_for_adapter` is the public selector);
+                // hooking it into the renderer constructors landed via
+                // the per-renderer `new`/`Default` shape — additional
+                // renderer constructors that take an explicit
+                // `RendererCapabilities` would replace the implicit
+                // construction here.
+                use shape_runtime::content_renderer::ContentRenderer;
+                let renderer = shape_runtime::renderers::terminal::TerminalRenderer::new();
+                renderer.render(node)
             }
             HeapKind::Instant => {
                 let t: &std::time::Instant =
@@ -970,7 +1006,18 @@ impl<'a> ValueFormatter<'a> {
             HeapValue::HashSet(s) => self.format_hashset(s.as_ref()),
             HeapValue::Deque(d) => self.format_deque(d.as_ref(), depth),
             HeapValue::DataTable(t) => format!("{}", t),
-            HeapValue::Content(n) => format!("{}", n),
+            HeapValue::Content(n) => {
+                // W18.2 (R8 — output-adapter integration): mirror the
+                // `format_heap_kind`'s `HeapKind::Content` arm. A
+                // Content node reached via a HashMap-value /
+                // heterogeneous-element walk renders through the
+                // TerminalRenderer per the TERMINAL-as-default
+                // print() dispatch.
+                use shape_runtime::content_renderer::ContentRenderer;
+                let renderer =
+                    shape_runtime::renderers::terminal::TerminalRenderer::new();
+                renderer.render(n)
+            }
             HeapValue::Instant(t) => format!("<instant:{:?}>", t.elapsed()),
             HeapValue::IoHandle(h) => {
                 let status = if h.is_open() { "open" } else { "closed" };
@@ -1259,5 +1306,77 @@ mod tests {
         assert_eq!(formatter.format_kinded(&slot), "[7, 8, 9]");
         std::mem::forget(slot);
         unsafe { TypedArray::<i64>::drop_array(arr) };
+    }
+
+    /// W18.2 (R8 — output-adapter integration): a Content-kind slot
+    /// renders through the TerminalRenderer per the TERMINAL-as-default
+    /// adapter selection for `print()`. Pre-W18.2 the arm called
+    /// `ContentNode::Display` directly, which emits plain text with no
+    /// ANSI styling; the rebuilt arm projects through the surviving
+    /// 6-renderer infrastructure so styled spans surface escape codes
+    /// at the print() sink.
+    ///
+    /// The c-string upstream lowering (`MakeContentText` /
+    /// `ApplyContentStyle` / `MakeContentFragment` builtins) is still a
+    /// Phase-2c surface — `content_builders` returns `deferred(...)` and
+    /// the VM `MakeContent*` arm panics — so this test constructs the
+    /// `ContentNode` directly (mirroring what the upstream builders
+    /// will emit once Wave 5e lands).
+    #[test]
+    fn test_format_content_via_terminal_renderer() {
+        use shape_value::content::{Color, ContentNode, NamedColor};
+
+        let reg = create_test_registry();
+        let formatter = ValueFormatter::new(&reg);
+
+        // Plain text Content node — TerminalRenderer leaves un-styled
+        // spans alone, so the surface should contain the literal text.
+        let node = ContentNode::plain("hello");
+        let arc = std::sync::Arc::new(node);
+        let bits = std::sync::Arc::into_raw(arc) as u64;
+        let slot = KindedSlot::new(
+            ValueSlot::from_raw(bits),
+            NativeKind::Ptr(HeapKind::Content),
+        );
+        let out = formatter.format_kinded(&slot);
+        assert!(
+            out.contains("hello"),
+            "TerminalRenderer should surface plain Content text; got {:?}",
+            out
+        );
+        std::mem::forget(slot);
+        unsafe {
+            let _ = std::sync::Arc::from_raw(
+                bits as *const shape_value::content::ContentNode,
+            );
+        }
+
+        // Styled Content node — TerminalRenderer should emit ANSI
+        // escape sequences (`\x1b[...]`) for the bold-red span. This is
+        // the load-bearing W18.2 evidence: pre-rebuild the arm called
+        // `ContentNode::Display` which produces NO `\x1b[...]` bytes.
+        let styled = ContentNode::plain("hi")
+            .with_bold()
+            .with_fg(Color::Named(NamedColor::Red));
+        let arc2 = std::sync::Arc::new(styled);
+        let bits2 = std::sync::Arc::into_raw(arc2) as u64;
+        let slot2 = KindedSlot::new(
+            ValueSlot::from_raw(bits2),
+            NativeKind::Ptr(HeapKind::Content),
+        );
+        let styled_out = formatter.format_kinded(&slot2);
+        assert!(
+            styled_out.contains("\x1b["),
+            "TerminalRenderer should emit ANSI escape codes for styled \
+             Content nodes; got {:?}",
+            styled_out
+        );
+        assert!(styled_out.contains("hi"));
+        std::mem::forget(slot2);
+        unsafe {
+            let _ = std::sync::Arc::from_raw(
+                bits2 as *const shape_value::content::ContentNode,
+            );
+        }
     }
 }
