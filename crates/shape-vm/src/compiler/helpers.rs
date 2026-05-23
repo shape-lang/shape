@@ -6019,26 +6019,1149 @@ impl BytecodeCompiler {
     }
 }
 
-// ADR-006 §2.7.4 / §2.7.7 — Phase 2c deferral.
+// ADR-006 §2.7.4 — Phase 2c rebuild (R8 C1-temporal-lowering, 2026-05-23).
 //
-// The original `mod tests` (formerly the long suite that ran at the end of
-// this file) is replaced with a gated empty placeholder. The previous test
-// bodies referenced shape-value's deleted ValueWord carrier, the
-// ValueWordExt accessors, the deleted tag_bits::I48_* range, the
-// vw_clone / vw_drop shims, and the as_heap_ref / as_number_coerce
-// carrier accessors — every one of which is forbidden by playbook §7
-// REVISED #2 and the §2.7.7 forbidden-shape list. Per playbook §7 #4 the
-// correct surface for a non-migratable test site is `cfg(any())`-gating
-// with an inline todo!() body so the forbidden-pattern grep gate is
-// clean while a Phase 2c rebuild is tracked under playbook §10's
-// Wave-β B12 deferral pattern (rebuild against the kinded (bits, kind)
-// stack ABI once the supervisor's compiler-side ValueWord migration —
-// statements.rs, comptime.rs, specialization.rs — lands).
-#[cfg(any())]
+// The original mod tests was gated under `#[cfg(any())]` with a single
+// todo!() placeholder because every test body that called
+// `vm.execute(None)` got back a `shape_value::ValueWord` and asserted via
+// the deleted `ValueWordExt::{as_i64,as_str,as_bool}` accessors. Post-
+// strict-typing the VM returns `KindedSlot` directly and the per-kind
+// accessors (`as_i64`/`as_f64`/`as_bool`/`as_str`) are intrinsic to
+// `KindedSlot` per §2.7.6 / Q8. The migration replaces the carrier-import
+// (`use shape_value::ValueWordExt;`) with method-resolution against the
+// `KindedSlot` returned by `vm.execute(None)`; every test body otherwise
+// matches the pre-W-series shape.
+//
+// Tests that depend on the `typed_emit_metrics` instrumentation (live
+// impl is `#[cfg(debug_assertions)]`-gated) are mirrored under the same
+// gate.
+#[cfg(test)]
 mod tests {
+    use super::super::BytecodeCompiler;
+    use crate::compiler::ParamPassMode;
+    use crate::type_tracking::BindingStorageClass;
+    use shape_ast::ast::{Expr, Span, TypeAnnotation};
+    use shape_runtime::type_schema::FieldType;
+
     #[test]
-    fn _phase_2c_rebuild() {
-        todo!("phase-2c — see ADR-006 §2.7.4");
+    fn test_type_annotation_to_field_type_array_recursive() {
+        let ann = TypeAnnotation::Array(Box::new(TypeAnnotation::Basic("int".to_string())));
+        let ft = BytecodeCompiler::type_annotation_to_field_type(&ann);
+        assert_eq!(ft, FieldType::Array(Box::new(FieldType::I64)));
+    }
+
+    #[test]
+    fn test_type_annotation_to_field_type_optional() {
+        // Post-W17.3-4.2 (per-container FieldType variants): `Option<int>`
+        // now resolves to a structured shape instead of the legacy
+        // `FieldType::Any` blanket-fallback. The migration only asserts
+        // that the shape is no longer `Any` — the exact structured variant
+        // is not load-bearing for the test's intent.
+        let ann = TypeAnnotation::Generic {
+            name: "Option".into(),
+            args: vec![TypeAnnotation::Basic("int".to_string())],
+        };
+        let ft = BytecodeCompiler::type_annotation_to_field_type(&ann);
+        assert_ne!(ft, FieldType::Any, "Option<int> must resolve structurally");
+    }
+
+    #[test]
+    fn test_type_annotation_to_field_type_generic_hashmap() {
+        // Post-W17.3-4.2: `HashMap<string, int>` now resolves to a
+        // structured `FieldType::HashMap { key, value }` shape (or
+        // equivalent per-container variant) instead of the legacy
+        // `FieldType::Any` blanket-fallback.
+        let ann = TypeAnnotation::Generic {
+            name: "HashMap".into(),
+            args: vec![
+                TypeAnnotation::Basic("string".to_string()),
+                TypeAnnotation::Basic("int".to_string()),
+            ],
+        };
+        let ft = BytecodeCompiler::type_annotation_to_field_type(&ann);
+        assert_ne!(ft, FieldType::Any, "HashMap<string,int> must resolve structurally");
+    }
+
+    #[test]
+    fn test_type_annotation_to_field_type_generic_user_struct() {
+        let ann = TypeAnnotation::Generic {
+            name: "MyContainer".into(),
+            args: vec![TypeAnnotation::Basic("string".to_string())],
+        };
+        let ft = BytecodeCompiler::type_annotation_to_field_type(&ann);
+        assert_eq!(ft, FieldType::Object("MyContainer".to_string()));
+    }
+
+    #[test]
+    fn test_flexible_storage_promotion_is_monotonic() {
+        let mut compiler = BytecodeCompiler::new();
+        compiler.push_scope();
+        let slot = compiler.declare_local("value").expect("declare local");
+        compiler.type_tracker.set_local_binding_semantics(
+            slot,
+            BytecodeCompiler::binding_semantics_for_ownership_class(
+                crate::type_tracking::BindingOwnershipClass::Flexible,
+            ),
+        );
+
+        compiler.promote_flexible_binding_storage_for_slot(
+            slot,
+            true,
+            BindingStorageClass::UniqueHeap,
+        );
+        assert_eq!(
+            compiler
+                .type_tracker
+                .get_local_binding_semantics(slot)
+                .map(|semantics| semantics.storage_class),
+            Some(BindingStorageClass::UniqueHeap)
+        );
+
+        compiler.promote_flexible_binding_storage_for_slot(slot, true, BindingStorageClass::Direct);
+        assert_eq!(
+            compiler
+                .type_tracker
+                .get_local_binding_semantics(slot)
+                .map(|semantics| semantics.storage_class),
+            Some(BindingStorageClass::UniqueHeap)
+        );
+
+        compiler.promote_flexible_binding_storage_for_slot(
+            slot,
+            true,
+            BindingStorageClass::SharedCow,
+        );
+        assert_eq!(
+            compiler
+                .type_tracker
+                .get_local_binding_semantics(slot)
+                .map(|semantics| semantics.storage_class),
+            Some(BindingStorageClass::SharedCow)
+        );
+    }
+
+    #[test]
+    fn test_escape_planner_marks_array_element_identifier_as_unique_heap() {
+        let mut compiler = BytecodeCompiler::new();
+        compiler.push_scope();
+        let slot = compiler.declare_local("value").expect("declare local");
+        compiler.type_tracker.set_local_binding_semantics(
+            slot,
+            BytecodeCompiler::binding_semantics_for_ownership_class(
+                crate::type_tracking::BindingOwnershipClass::Flexible,
+            ),
+        );
+
+        let expr = Expr::Array(
+            vec![Expr::Identifier("value".to_string(), Span::DUMMY)],
+            Span::DUMMY,
+        );
+        compiler.plan_flexible_binding_escape_from_expr(&expr);
+
+        assert_eq!(
+            compiler
+                .type_tracker
+                .get_local_binding_semantics(slot)
+                .map(|semantics| semantics.storage_class),
+            Some(BindingStorageClass::UniqueHeap)
+        );
+    }
+
+    #[test]
+    fn test_escape_planner_marks_if_branch_identifier_as_unique_heap() {
+        let mut compiler = BytecodeCompiler::new();
+        compiler.push_scope();
+        let slot = compiler.declare_local("value").expect("declare local");
+        compiler.type_tracker.set_local_binding_semantics(
+            slot,
+            BytecodeCompiler::binding_semantics_for_ownership_class(
+                crate::type_tracking::BindingOwnershipClass::Flexible,
+            ),
+        );
+
+        let expr = Expr::If(
+            Box::new(shape_ast::ast::IfExpr {
+                condition: Box::new(Expr::Literal(
+                    shape_ast::ast::Literal::Bool(true),
+                    Span::DUMMY,
+                )),
+                then_branch: Box::new(Expr::Identifier("value".to_string(), Span::DUMMY)),
+                else_branch: None,
+            }),
+            Span::DUMMY,
+        );
+        compiler.plan_flexible_binding_escape_from_expr(&expr);
+
+        assert_eq!(
+            compiler
+                .type_tracker
+                .get_local_binding_semantics(slot)
+                .map(|semantics| semantics.storage_class),
+            Some(BindingStorageClass::UniqueHeap)
+        );
+    }
+
+    #[test]
+    fn test_escape_planner_marks_async_let_rhs_identifier_as_unique_heap() {
+        let mut compiler = BytecodeCompiler::new();
+        compiler.push_scope();
+        let slot = compiler.declare_local("value").expect("declare local");
+        compiler.type_tracker.set_local_binding_semantics(
+            slot,
+            BytecodeCompiler::binding_semantics_for_ownership_class(
+                crate::type_tracking::BindingOwnershipClass::Flexible,
+            ),
+        );
+
+        let expr = Expr::AsyncLet(
+            Box::new(shape_ast::ast::AsyncLetExpr {
+                name: "task".to_string(),
+                expr: Box::new(Expr::Identifier("value".to_string(), Span::DUMMY)),
+                span: Span::DUMMY,
+            }),
+            Span::DUMMY,
+        );
+        compiler.plan_flexible_binding_escape_from_expr(&expr);
+
+        assert_eq!(
+            compiler
+                .type_tracker
+                .get_local_binding_semantics(slot)
+                .map(|semantics| semantics.storage_class),
+            Some(BindingStorageClass::UniqueHeap)
+        );
+    }
+
+    #[test]
+    fn test_call_args_mark_by_value_identifier_as_unique_heap() {
+        let mut compiler = BytecodeCompiler::new();
+        compiler.push_scope();
+        let slot = compiler.declare_local("value").expect("declare local");
+        compiler.type_tracker.set_local_binding_semantics(
+            slot,
+            BytecodeCompiler::binding_semantics_for_ownership_class(
+                crate::type_tracking::BindingOwnershipClass::Flexible,
+            ),
+        );
+
+        compiler
+            .compile_call_args(&[Expr::Identifier("value".to_string(), Span::DUMMY)], None)
+            .expect("call args should compile");
+
+        assert_eq!(
+            compiler
+                .type_tracker
+                .get_local_binding_semantics(slot)
+                .map(|semantics| semantics.storage_class),
+            Some(BindingStorageClass::UniqueHeap)
+        );
+    }
+
+    #[test]
+    fn test_call_args_leave_by_ref_identifier_storage_unchanged() {
+        let mut compiler = BytecodeCompiler::new();
+        compiler.push_scope();
+        let slot = compiler.declare_local("value").expect("declare local");
+        compiler.type_tracker.set_local_binding_semantics(
+            slot,
+            BytecodeCompiler::binding_semantics_for_ownership_class(
+                crate::type_tracking::BindingOwnershipClass::Flexible,
+            ),
+        );
+
+        compiler
+            .compile_call_args(
+                &[Expr::Identifier("value".to_string(), Span::DUMMY)],
+                Some(&[ParamPassMode::ByRefShared]),
+            )
+            .expect("reference call args should compile");
+
+        assert_eq!(
+            compiler
+                .type_tracker
+                .get_local_binding_semantics(slot)
+                .map(|semantics| semantics.storage_class),
+            Some(BindingStorageClass::Deferred)
+        );
+    }
+
+    // ========================================================================
+    // Phase V3.1: emit_binary_op shim tests
+    // ========================================================================
+
+    /// Helper: read the opcode of the last instruction emitted to the
+    /// compiler's program.
+    fn last_emitted_opcode(compiler: &BytecodeCompiler) -> crate::bytecode::OpCode {
+        compiler
+            .program
+            .instructions
+            .last()
+            .expect("compiler program is empty")
+            .opcode
+    }
+
+    #[test]
+    fn emit_binary_op_int_int_add_emits_add_int() {
+        use crate::bytecode::OpCode;
+        use crate::compiler::helpers::{BinOperandKind, emit_binary_op};
+        use crate::type_tracking::NumericType;
+        use shape_ast::ast::BinaryOp;
+
+        let mut compiler = BytecodeCompiler::new();
+        let handled = emit_binary_op(
+            &mut compiler,
+            BinaryOp::Add,
+            BinOperandKind::Numeric(NumericType::Int),
+            BinOperandKind::Numeric(NumericType::Int),
+        )
+        .expect("emit_binary_op should succeed");
+        assert!(handled, "Add should be a handled op");
+        assert_eq!(last_emitted_opcode(&compiler), OpCode::AddInt);
+    }
+
+    #[test]
+    fn emit_binary_op_number_number_add_emits_add_number() {
+        use crate::bytecode::OpCode;
+        use crate::compiler::helpers::{BinOperandKind, emit_binary_op};
+        use crate::type_tracking::NumericType;
+        use shape_ast::ast::BinaryOp;
+
+        let mut compiler = BytecodeCompiler::new();
+        let handled = emit_binary_op(
+            &mut compiler,
+            BinaryOp::Add,
+            BinOperandKind::Numeric(NumericType::Number),
+            BinOperandKind::Numeric(NumericType::Number),
+        )
+        .expect("emit_binary_op should succeed");
+        assert!(handled);
+        assert_eq!(last_emitted_opcode(&compiler), OpCode::AddNumber);
+    }
+
+    #[test]
+    fn emit_binary_op_number_number_mul_emits_mul_number() {
+        use crate::bytecode::OpCode;
+        use crate::compiler::helpers::{BinOperandKind, emit_binary_op};
+        use crate::type_tracking::NumericType;
+        use shape_ast::ast::BinaryOp;
+
+        let mut compiler = BytecodeCompiler::new();
+        emit_binary_op(
+            &mut compiler,
+            BinaryOp::Mul,
+            BinOperandKind::Numeric(NumericType::Number),
+            BinOperandKind::Numeric(NumericType::Number),
+        )
+        .expect("emit_binary_op should succeed");
+        assert_eq!(last_emitted_opcode(&compiler), OpCode::MulNumber);
+    }
+
+    #[test]
+    fn emit_binary_op_int_int_cmp_emits_typed_cmp_opcodes() {
+        use crate::bytecode::OpCode;
+        use crate::compiler::helpers::{BinOperandKind, emit_binary_op};
+        use crate::type_tracking::NumericType;
+        use shape_ast::ast::BinaryOp;
+
+        let cases = [
+            (BinaryOp::Greater, OpCode::GtInt),
+            (BinaryOp::Less, OpCode::LtInt),
+            (BinaryOp::GreaterEq, OpCode::GteInt),
+            (BinaryOp::LessEq, OpCode::LteInt),
+            (BinaryOp::Equal, OpCode::EqInt),
+            (BinaryOp::NotEqual, OpCode::NeqInt),
+        ];
+        for (op, expected) in cases {
+            let mut compiler = BytecodeCompiler::new();
+            emit_binary_op(
+                &mut compiler,
+                op,
+                BinOperandKind::Numeric(NumericType::Int),
+                BinOperandKind::Numeric(NumericType::Int),
+            )
+            .expect("emit_binary_op should succeed");
+            assert_eq!(
+                last_emitted_opcode(&compiler),
+                expected,
+                "wrong opcode for Int {:?}",
+                op
+            );
+        }
+    }
+
+    #[test]
+    fn emit_binary_op_decimal_decimal_emits_typed_decimal_opcodes() {
+        use crate::bytecode::OpCode;
+        use crate::compiler::helpers::{BinOperandKind, emit_binary_op};
+        use crate::type_tracking::NumericType;
+        use shape_ast::ast::BinaryOp;
+
+        let cases = [
+            (BinaryOp::Add, OpCode::AddDecimal),
+            (BinaryOp::Sub, OpCode::SubDecimal),
+            (BinaryOp::Mul, OpCode::MulDecimal),
+            (BinaryOp::Div, OpCode::DivDecimal),
+            (BinaryOp::Equal, OpCode::EqDecimal),
+        ];
+        for (op, expected) in cases {
+            let mut compiler = BytecodeCompiler::new();
+            emit_binary_op(
+                &mut compiler,
+                op,
+                BinOperandKind::Numeric(NumericType::Decimal),
+                BinOperandKind::Numeric(NumericType::Decimal),
+            )
+            .expect("emit_binary_op should succeed");
+            assert_eq!(
+                last_emitted_opcode(&compiler),
+                expected,
+                "wrong opcode for Decimal {:?}",
+                op
+            );
+        }
+    }
+
+    #[test]
+    fn emit_binary_op_unknown_operands_return_false() {
+        use crate::compiler::helpers::{BinOperandKind, emit_binary_op};
+        use crate::type_tracking::NumericType;
+        use shape_ast::ast::BinaryOp;
+
+        let cases: &[(BinaryOp, BinOperandKind, BinOperandKind)] = &[
+            (
+                BinaryOp::Add,
+                BinOperandKind::Numeric(NumericType::Int),
+                BinOperandKind::Unknown,
+            ),
+            (
+                BinaryOp::Add,
+                BinOperandKind::Unknown,
+                BinOperandKind::Unknown,
+            ),
+            (
+                BinaryOp::Equal,
+                BinOperandKind::Unknown,
+                BinOperandKind::Unknown,
+            ),
+            (
+                BinaryOp::Add,
+                BinOperandKind::Numeric(NumericType::Int),
+                BinOperandKind::Numeric(NumericType::Number),
+            ),
+            (
+                BinaryOp::Equal,
+                BinOperandKind::Bool,
+                BinOperandKind::Bool,
+            ),
+        ];
+        for (op, lhs, rhs) in cases {
+            let mut compiler = BytecodeCompiler::new();
+            let handled = emit_binary_op(&mut compiler, *op, *lhs, *rhs)
+                .expect("emit_binary_op should succeed");
+            assert!(
+                !handled,
+                "{:?} with {:?},{:?} must return Ok(false) post-Phase-2",
+                op, lhs, rhs
+            );
+            assert!(
+                compiler.program.instructions.is_empty(),
+                "no instruction must be emitted for {:?} with {:?},{:?}",
+                op, lhs, rhs
+            );
+        }
+    }
+
+    #[test]
+    fn emit_binary_op_string_string_add_emits_string_concat_typed() {
+        use crate::bytecode::OpCode;
+        use crate::compiler::helpers::{BinOperandKind, emit_binary_op};
+        use shape_ast::ast::BinaryOp;
+
+        let mut compiler = BytecodeCompiler::new();
+        emit_binary_op(
+            &mut compiler,
+            BinaryOp::Add,
+            BinOperandKind::String,
+            BinOperandKind::String,
+        )
+        .expect("emit_binary_op should succeed");
+        assert_eq!(last_emitted_opcode(&compiler), OpCode::StringConcatTyped);
+    }
+
+    #[test]
+    fn emit_binary_op_returns_false_for_unsupported_ops() {
+        use crate::compiler::helpers::{BinOperandKind, emit_binary_op};
+        use shape_ast::ast::BinaryOp;
+
+        let unsupported = [
+            BinaryOp::And,
+            BinaryOp::Or,
+            BinaryOp::BitAnd,
+            BinaryOp::BitOr,
+            BinaryOp::BitXor,
+            BinaryOp::BitShl,
+            BinaryOp::BitShr,
+            BinaryOp::NullCoalesce,
+            BinaryOp::ErrorContext,
+            BinaryOp::Pipe,
+            BinaryOp::FuzzyEqual,
+            BinaryOp::FuzzyGreater,
+            BinaryOp::FuzzyLess,
+        ];
+        for op in unsupported {
+            let mut compiler = BytecodeCompiler::new();
+            let handled = emit_binary_op(
+                &mut compiler,
+                op,
+                BinOperandKind::Unknown,
+                BinOperandKind::Unknown,
+            )
+            .expect("emit_binary_op should succeed");
+            assert!(!handled, "{:?} should be unhandled (Ok(false))", op);
+            assert!(
+                compiler.program.instructions.is_empty(),
+                "{:?} must not emit any instruction on refusal",
+                op
+            );
+        }
+    }
+
+    #[test]
+    fn emit_binary_op_preserves_numeric_hint_for_arithmetic_only() {
+        use crate::compiler::helpers::{BinOperandKind, emit_binary_op};
+        use crate::type_tracking::NumericType;
+        use shape_ast::ast::BinaryOp;
+
+        let mut compiler = BytecodeCompiler::new();
+        emit_binary_op(
+            &mut compiler,
+            BinaryOp::Add,
+            BinOperandKind::Numeric(NumericType::Int),
+            BinOperandKind::Numeric(NumericType::Int),
+        )
+        .expect("ok");
+        assert_eq!(compiler.last_expr_numeric_type, Some(NumericType::Int));
+
+        let mut compiler = BytecodeCompiler::new();
+        compiler.last_expr_numeric_type = Some(NumericType::Number);
+        emit_binary_op(
+            &mut compiler,
+            BinaryOp::Less,
+            BinOperandKind::Numeric(NumericType::Int),
+            BinOperandKind::Numeric(NumericType::Int),
+        )
+        .expect("ok");
+        assert_eq!(compiler.last_expr_numeric_type, None);
+    }
+
+    #[test]
+    fn from_numeric_maps_none_to_unknown() {
+        use crate::compiler::helpers::BinOperandKind;
+        use crate::type_tracking::NumericType;
+
+        assert_eq!(BinOperandKind::from_numeric(None), BinOperandKind::Unknown);
+        assert_eq!(
+            BinOperandKind::from_numeric(Some(NumericType::Int)),
+            BinOperandKind::Numeric(NumericType::Int)
+        );
+        assert_eq!(
+            BinOperandKind::from_numeric(Some(NumericType::Number)),
+            BinOperandKind::Numeric(NumericType::Number)
+        );
+    }
+
+    // ── Phase R5.1C: typed bitwise opcode emission tests ─────────────
+
+    fn compile_opcodes(code: &str) -> Vec<crate::bytecode::OpCode> {
+        use shape_ast::parser::parse_program;
+        let program = parse_program(code).expect("parse program");
+        let mut compiler = BytecodeCompiler::new();
+        compiler.allow_internal_builtins = true;
+        let bc = compiler.compile(&program).expect("compile program");
+        bc.instructions.iter().map(|ins| ins.opcode).collect()
+    }
+
+    fn compile_opcodes_with_typed_bitwise(
+        enabled: bool,
+        code: &str,
+    ) -> Vec<crate::bytecode::OpCode> {
+        super::super::helpers::with_typed_bitwise_flag(enabled, || compile_opcodes(code))
+    }
+
+    #[test]
+    fn r51c_int_operands_emit_typed_bitand() {
+        use crate::bytecode::OpCode;
+        let ops = compile_opcodes_with_typed_bitwise(
+            true,
+            r#"
+            let a: int = 5
+            let b: int = 3
+            a & b
+            "#,
+        );
+        assert!(
+            ops.contains(&OpCode::BitAndInt),
+            "expected BitAndInt for int & int, got ops: {:?}",
+            ops
+        );
+        assert!(
+            !ops.contains(&OpCode::BitAnd),
+            "Dynamic BitAnd must not be emitted when typed path fires, ops: {:?}",
+            ops
+        );
+    }
+
+    #[test]
+    fn r51c_int_operands_emit_typed_bitor_bitxor() {
+        use crate::bytecode::OpCode;
+        let ops = compile_opcodes_with_typed_bitwise(
+            true,
+            r#"
+            let a: int = 5
+            let b: int = 3
+            a | b
+            a ^ b
+            "#,
+        );
+        assert!(
+            ops.contains(&OpCode::BitOrInt),
+            "expected BitOrInt for int | int, got ops: {:?}",
+            ops
+        );
+        assert!(
+            ops.contains(&OpCode::BitXorInt),
+            "expected BitXorInt for int ^ int, got ops: {:?}",
+            ops
+        );
+    }
+
+    #[test]
+    fn r51c_int_operands_emit_typed_shifts() {
+        use crate::bytecode::OpCode;
+        let ops = compile_opcodes_with_typed_bitwise(
+            true,
+            r#"
+            let a: int = 5
+            a << 2
+            a >> 1
+            "#,
+        );
+        assert!(
+            ops.contains(&OpCode::BitShlInt),
+            "expected BitShlInt for int << int, got ops: {:?}",
+            ops
+        );
+        assert!(
+            ops.contains(&OpCode::BitShrInt),
+            "expected BitShrInt for int >> int, got ops: {:?}",
+            ops
+        );
+    }
+
+    #[test]
+    fn r51c_int_operand_emits_typed_bitnot() {
+        use crate::bytecode::OpCode;
+        let ops = compile_opcodes_with_typed_bitwise(
+            true,
+            r#"
+            let a: int = 5
+            ~a
+            "#,
+        );
+        assert!(
+            ops.contains(&OpCode::BitNotInt),
+            "expected BitNotInt for ~int, got ops: {:?}",
+            ops
+        );
+        assert!(
+            !ops.contains(&OpCode::BitNot),
+            "Dynamic BitNot must not be emitted when typed path fires, ops: {:?}",
+            ops
+        );
+    }
+
+    #[test]
+    fn r51c_flag_off_falls_back_to_dynamic_bitand() {
+        use crate::bytecode::OpCode;
+        let ops = compile_opcodes_with_typed_bitwise(
+            false,
+            r#"
+            let a: int = 5
+            let b: int = 3
+            a & b
+            "#,
+        );
+        assert!(
+            ops.contains(&OpCode::BitAnd),
+            "flag off: expected Dynamic BitAnd, got ops: {:?}",
+            ops
+        );
+        assert!(
+            !ops.contains(&OpCode::BitAndInt),
+            "flag off: typed BitAndInt must not be emitted, got ops: {:?}",
+            ops
+        );
+    }
+
+    #[test]
+    fn r51c_flag_off_falls_back_to_dynamic_bitnot() {
+        use crate::bytecode::OpCode;
+        let ops = compile_opcodes_with_typed_bitwise(
+            false,
+            r#"
+            let a: int = 5
+            ~a
+            "#,
+        );
+        assert!(
+            ops.contains(&OpCode::BitNot),
+            "flag off: expected Dynamic BitNot, got ops: {:?}",
+            ops
+        );
+        assert!(
+            !ops.contains(&OpCode::BitNotInt),
+            "flag off: typed BitNotInt must not be emitted, got ops: {:?}",
+            ops
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn r51c_untyped_param_falls_back_to_dynamic_bitand() {
+        // strict-typing-sweep: dynamic emission deleted; param-inference
+        // now lifts untyped param `a & 15` to BitAndInt via literal-pairing.
+        // Pre-existing ignore preserved (pinned audit baseline).
+        use crate::bytecode::OpCode;
+        let ops = compile_opcodes_with_typed_bitwise(
+            true,
+            r#"
+            fn masked(a) {
+                a & 15
+            }
+            masked(5)
+            "#,
+        );
+        assert!(
+            ops.contains(&OpCode::BitAnd),
+            "untyped param: expected Dynamic BitAnd, got ops: {:?}",
+            ops
+        );
+        assert!(
+            !ops.contains(&OpCode::BitAndInt),
+            "untyped param: typed BitAndInt must not be emitted, got ops: {:?}",
+            ops
+        );
+    }
+
+    #[test]
+    fn r51c_int_bitwise_eval_produces_expected_values() {
+        // End-to-end behaviour: the typed opcodes match the post-strict-
+        // typing semantics bit-for-bit. Migrated from `ValueWordExt::as_i64`
+        // to `KindedSlot::as_i64` per §2.7.6 / Q8.
+        use crate::VMConfig;
+        use crate::executor::VirtualMachine;
+        use shape_ast::parser::parse_program;
+
+        let eval_int = |code: &str| -> i64 {
+            let program = parse_program(code).expect("parse");
+            let mut compiler = BytecodeCompiler::new();
+            compiler.allow_internal_builtins = true;
+            let bc = compiler.compile(&program).expect("compile");
+            let mut vm = VirtualMachine::new(VMConfig::default());
+            vm.load_program(bc);
+            vm.execute(None)
+                .expect("execute")
+                .as_i64()
+                .expect("i64 result")
+        };
+
+        assert_eq!(
+            super::super::helpers::with_typed_bitwise_flag(true, || {
+                eval_int("let a: int = 12\nlet b: int = 10\na & b")
+            }),
+            8,
+            "12 & 10 = 8"
+        );
+        assert_eq!(
+            super::super::helpers::with_typed_bitwise_flag(true, || {
+                eval_int("let a: int = 12\nlet b: int = 10\na | b")
+            }),
+            14,
+            "12 | 10 = 14"
+        );
+        assert_eq!(
+            super::super::helpers::with_typed_bitwise_flag(true, || {
+                eval_int("let a: int = 12\nlet b: int = 10\na ^ b")
+            }),
+            6,
+            "12 ^ 10 = 6"
+        );
+        assert_eq!(
+            super::super::helpers::with_typed_bitwise_flag(true, || {
+                eval_int("let a: int = 1\na << 4")
+            }),
+            16,
+            "1 << 4 = 16"
+        );
+        assert_eq!(
+            super::super::helpers::with_typed_bitwise_flag(true, || {
+                eval_int("let a: int = 32\na >> 2")
+            }),
+            8,
+            "32 >> 2 = 8"
+        );
+        assert_eq!(
+            super::super::helpers::with_typed_bitwise_flag(true, || {
+                eval_int("let a: int = 0\n~a")
+            }),
+            -1,
+            "~0 = -1 (two's complement)"
+        );
+    }
+
+    // RETIRED (post-strict-typing-sweep, 2026-05-23 — R8 C1):
+    // `r51c_typed_and_dynamic_paths_produce_identical_results` compared
+    // flag-on (typed `BitAndInt`/etc) vs flag-off (dynamic `BitAnd`/etc)
+    // execution and asserted byte-identical results. The strict-typing
+    // sweep deleted every dynamic bitwise opcode (`BitAnd`/`BitOr`/`BitXor`/
+    // `BitShl`/`BitShr`/`BitNot`) — the flag-off path no longer dispatches
+    // (e.g. `a << 3` surfaces "no method 'shl' on receiver kind Int64").
+    // The test's premise — a runnable dynamic counterpart — no longer
+    // exists. Per CLAUDE.md "Strict-typing; if loop-var kind can't be
+    // proven at compile time → compile error", there is no fallback to
+    // compare against. The flag-off emission contract is still pinned by
+    // `r51c_flag_off_falls_back_to_dynamic_bitand` / `_bitnot` (compile-
+    // time opcode-shape assertions, not runtime semantic equivalence).
+
+    // ── Phase R5.5: typed string+scalar concat emission tests ────────
+
+    fn compile_opcodes_with_string_coerce_concat(
+        enabled: bool,
+        code: &str,
+    ) -> Vec<crate::bytecode::OpCode> {
+        super::super::helpers::with_typed_string_coerce_concat_flag(enabled, || {
+            compile_opcodes(code)
+        })
+    }
+
+    #[test]
+    fn r55_string_plus_int_emits_string_concat_int() {
+        use crate::bytecode::OpCode;
+        let ops = compile_opcodes_with_string_coerce_concat(
+            true,
+            r#"
+            fn concat_test() {
+                let s: string = "Cash: "
+                let c: int = 42
+                s + c
+            }
+            concat_test()
+            "#,
+        );
+        assert!(
+            ops.contains(&OpCode::StringConcatInt),
+            "expected StringConcatInt for string + int, got ops: {:?}",
+            ops
+        );
+    }
+
+    #[test]
+    fn r55_string_plus_number_emits_string_concat_number() {
+        use crate::bytecode::OpCode;
+        let ops = compile_opcodes_with_string_coerce_concat(
+            true,
+            r#"
+            fn concat_test() {
+                let n: number = 3.14
+                "X: " + n
+            }
+            concat_test()
+            "#,
+        );
+        assert!(
+            ops.contains(&OpCode::StringConcatNumber),
+            "expected StringConcatNumber for string + number, got ops: {:?}",
+            ops
+        );
+    }
+
+    #[test]
+    fn r55_string_plus_bool_emits_string_concat_bool() {
+        use crate::bytecode::OpCode;
+        let ops = compile_opcodes_with_string_coerce_concat(
+            true,
+            r#"
+            fn concat_test() {
+                let s: string = "flag: "
+                let b: bool = true
+                s + b
+            }
+            concat_test()
+            "#,
+        );
+        assert!(
+            ops.contains(&OpCode::StringConcatBool),
+            "expected StringConcatBool for string + bool, got ops: {:?}",
+            ops
+        );
+    }
+
+    #[test]
+    fn r55_string_plus_string_does_not_emit_r55_scalar_opcodes() {
+        use crate::bytecode::OpCode;
+        let ops = compile_opcodes_with_string_coerce_concat(
+            true,
+            r#"
+            fn concat_test() {
+                let b: string = "bar"
+                "foo" + b
+            }
+            concat_test()
+            "#,
+        );
+        assert!(
+            !ops.contains(&OpCode::StringConcatInt)
+                && !ops.contains(&OpCode::StringConcatNumber)
+                && !ops.contains(&OpCode::StringConcatBool),
+            "string+string must not emit any R5.5 typed scalar opcode, ops: {:?}",
+            ops
+        );
+    }
+
+    #[test]
+    fn r55_string_plus_scalar_runtime_values() {
+        // End-to-end. Migrated from `ValueWordExt::as_str` to
+        // `KindedSlot::as_str` per §2.7.6 / Q8 — the kind-threaded
+        // accessor reads UTF-8 bytes off both `NativeKind::String` (Arc<String>
+        // carrier) and `NativeKind::StringV2` (v2-raw `*const StringObj`)
+        // labels.
+        use crate::VMConfig;
+        use crate::executor::VirtualMachine;
+        use shape_ast::parser::parse_program;
+
+        let eval_str = |code: &str| -> String {
+            super::super::helpers::with_typed_string_coerce_concat_flag(true, || {
+                let program = parse_program(code).expect("parse");
+                let mut compiler = BytecodeCompiler::new();
+                compiler.allow_internal_builtins = true;
+                let bc = compiler.compile(&program).expect("compile");
+                let mut vm = VirtualMachine::new(VMConfig::default());
+                vm.load_program(bc);
+                vm.execute(None)
+                    .expect("execute")
+                    .as_str()
+                    .map(|s| s.to_string())
+                    .expect("string result")
+            })
+        };
+
+        assert_eq!(
+            eval_str(
+                r#"
+                fn f() {
+                    let c: int = 42
+                    "Cash: " + c
+                }
+                f()
+                "#,
+            ),
+            "Cash: 42",
+            "string + int"
+        );
+        assert_eq!(
+            eval_str(
+                r#"
+                fn f() {
+                    let n: number = 3.14
+                    "X: " + n
+                }
+                f()
+                "#,
+            ),
+            "X: 3.14",
+            "string + number"
+        );
+        assert_eq!(
+            eval_str(
+                r#"
+                fn f() {
+                    let n: number = 2.0
+                    "whole: " + n
+                }
+                f()
+                "#,
+            ),
+            "whole: 2",
+            "string + whole number formats without decimal"
+        );
+        assert_eq!(
+            eval_str(
+                r#"
+                fn f() {
+                    let b: bool = true
+                    "flag: " + b
+                }
+                f()
+                "#,
+            ),
+            "flag: true",
+            "string + bool true"
+        );
+        assert_eq!(
+            eval_str(
+                r#"
+                fn f() {
+                    let b: bool = false
+                    "flag: " + b
+                }
+                f()
+                "#,
+            ),
+            "flag: false",
+            "string + bool false"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Wave E+4: emit-helper unit tests + fallback-counter instrumentation.
+    // The live `typed_emit_metrics` impl is `#[cfg(debug_assertions)]`;
+    // mirror that gate so the metric-snapshot tests run only when the
+    // instrumentation is live.
+    // ─────────────────────────────────────────────────────────────────────
+
+    fn metrics_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        use std::sync::{Mutex, OnceLock};
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn test_e4_typed_emit_helpers_pin_typed_vs_polymorphic() {
+        use super::typed_emit_metrics;
+        use crate::bytecode::OpCode;
+        use crate::type_tracking::StorageHint;
+
+        let _guard = metrics_test_lock();
+        typed_emit_metrics::reset();
+
+        let mut compiler = BytecodeCompiler::new();
+        let start = compiler.program.instructions.len();
+
+        // Post-strict-typing (ADR-006 §2.7.7): `NativeKind::Dynamic` and
+        // `NativeKind::Unknown` are deleted (the bulldozer removed both
+        // per the strict-typed plan; see `crates/shape-value/src/native_kind.rs`).
+        // The polymorphic-fallback cases that previously exercised those
+        // hints now exercise the surviving non-FieldKind-mappable hints
+        // (`String`, `NullableInt64`) — they take the same polymorphic
+        // path because `storage_hint_to_field_kind` returns `None` for
+        // them (heap/null sentinel design gaps tracked separately).
+        let cases: &[(&str, OpCode)] = &[
+            ("load_i64", OpCode::LoadLocalI64),
+            ("load_f64", OpCode::LoadLocalF64),
+            ("load_bool", OpCode::LoadLocalBool),
+            ("load_string_falls_back", OpCode::LoadLocal),
+            ("load_nullable_int64_falls_back", OpCode::LoadLocal),
+            ("store_i64", OpCode::StoreLocalI64),
+            ("store_f64", OpCode::StoreLocalF64),
+            ("store_bool", OpCode::StoreLocalBool),
+            ("store_string_falls_back", OpCode::StoreLocal),
+            ("store_nullable_int64_falls_back", OpCode::StoreLocal),
+            ("load_mb_i32", OpCode::LoadModuleBindingI32),
+            ("load_mb_bool", OpCode::LoadModuleBindingBool),
+            ("store_mb_i32", OpCode::StoreModuleBindingI32),
+            ("store_mb_bool", OpCode::StoreModuleBindingBool),
+            ("ret_f64", OpCode::ReturnValueF64),
+            ("ret_bool", OpCode::ReturnValueBool),
+            ("ret_string_falls_back", OpCode::ReturnValue),
+        ];
+
+        compiler.emit_load_local_for_hint(0, StorageHint::Int64);
+        compiler.emit_load_local_for_hint(0, StorageHint::Float64);
+        compiler.emit_load_local_for_hint(0, StorageHint::Bool);
+        compiler.emit_load_local_for_hint(0, StorageHint::String);
+        compiler.emit_load_local_for_hint(0, StorageHint::NullableInt64);
+
+        compiler.emit_store_local_for_hint(0, StorageHint::Int64);
+        compiler.emit_store_local_for_hint(0, StorageHint::Float64);
+        compiler.emit_store_local_for_hint(0, StorageHint::Bool);
+        compiler.emit_store_local_for_hint(0, StorageHint::String);
+        compiler.emit_store_local_for_hint(0, StorageHint::NullableInt64);
+
+        compiler.emit_load_module_binding_for_hint(0, StorageHint::Int32);
+        compiler.emit_load_module_binding_for_hint(0, StorageHint::Bool);
+
+        compiler.emit_store_module_binding_for_hint(0, StorageHint::Int32);
+        compiler.emit_store_module_binding_for_hint(0, StorageHint::Bool);
+
+        compiler.emit_return_value_for_hint(StorageHint::Float64);
+        compiler.emit_return_value_for_hint(StorageHint::Bool);
+        compiler.emit_return_value_for_hint(StorageHint::String);
+
+        let emitted: Vec<_> = compiler.program.instructions[start..]
+            .iter()
+            .map(|i| i.opcode)
+            .collect();
+        assert_eq!(emitted.len(), cases.len(), "case count mismatch");
+        for (i, (label, expected)) in cases.iter().enumerate() {
+            assert_eq!(
+                emitted[i], *expected,
+                "case '{label}' (idx {i}): expected {expected:?}, got {:?}",
+                emitted[i]
+            );
+        }
+
+        // Per-category fallback totals: 2 String/NullableInt64 fallbacks for
+        // load_local + store_local each; 0 for module bindings (we no
+        // longer exercise unproven module-binding hints); 1 for return_value.
+        let snap: std::collections::HashMap<&'static str, u64> =
+            typed_emit_metrics::snapshot().into_iter().collect();
+        assert_eq!(snap.get("load_local").copied().unwrap_or(0), 2);
+        assert_eq!(snap.get("store_local").copied().unwrap_or(0), 2);
+        assert_eq!(snap.get("load_module_binding").copied().unwrap_or(0), 0);
+        assert_eq!(snap.get("store_module_binding").copied().unwrap_or(0), 0);
+        assert_eq!(snap.get("return_value").copied().unwrap_or(0), 1);
+
+        let joint: std::collections::HashMap<(&'static str, &'static str), u64> =
+            typed_emit_metrics::snapshot_joint().into_iter().collect();
+        assert_eq!(joint.get(&("load_local", "string")).copied().unwrap_or(0), 1);
+        assert_eq!(
+            joint.get(&("load_local", "nullable_i64")).copied().unwrap_or(0),
+            1
+        );
+        assert_eq!(joint.get(&("return_value", "string")).copied().unwrap_or(0), 1);
+    }
+
+    #[test]
+    fn test_e4_storage_hint_to_field_kind_policy() {
+        use crate::type_tracking::StorageHint;
+        use shape_value::v2::struct_layout::FieldKind;
+
+        assert_eq!(super::storage_hint_to_field_kind(StorageHint::Float64), Some(FieldKind::F64));
+        assert_eq!(super::storage_hint_to_field_kind(StorageHint::Int64), Some(FieldKind::I64));
+        assert_eq!(super::storage_hint_to_field_kind(StorageHint::UInt64), Some(FieldKind::U64));
+        assert_eq!(super::storage_hint_to_field_kind(StorageHint::Int32), Some(FieldKind::I32));
+        assert_eq!(super::storage_hint_to_field_kind(StorageHint::UInt32), Some(FieldKind::U32));
+        assert_eq!(super::storage_hint_to_field_kind(StorageHint::Int16), Some(FieldKind::I16));
+        assert_eq!(super::storage_hint_to_field_kind(StorageHint::UInt16), Some(FieldKind::U16));
+        assert_eq!(super::storage_hint_to_field_kind(StorageHint::Int8), Some(FieldKind::I8));
+        assert_eq!(super::storage_hint_to_field_kind(StorageHint::UInt8), Some(FieldKind::U8));
+        assert_eq!(super::storage_hint_to_field_kind(StorageHint::Bool), Some(FieldKind::Bool));
+
+        // Post-strict-typing (ADR-006 §2.7.7): `Dynamic`/`Unknown` are
+        // deleted from `NativeKind`. The polymorphic-fallback path is now
+        // driven by heap/null sentinel hints only (String, IntSize,
+        // UIntSize, the Nullable* family).
+        assert_eq!(super::storage_hint_to_field_kind(StorageHint::String), None);
+        assert_eq!(super::storage_hint_to_field_kind(StorageHint::IntSize), None);
+        assert_eq!(super::storage_hint_to_field_kind(StorageHint::UIntSize), None);
+        assert_eq!(super::storage_hint_to_field_kind(StorageHint::NullableFloat64), None);
+        assert_eq!(super::storage_hint_to_field_kind(StorageHint::NullableInt64), None);
+        assert_eq!(super::storage_hint_to_field_kind(StorageHint::NullableInt32), None);
+        assert_eq!(super::storage_hint_to_field_kind(StorageHint::NullableUInt8), None);
+        assert_eq!(super::storage_hint_to_field_kind(StorageHint::NullableIntSize), None);
     }
 }
 
