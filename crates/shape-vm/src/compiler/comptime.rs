@@ -369,7 +369,7 @@ pub(crate) fn execute_comptime(
 fn compile_and_execute_comptime_program(
     program: &Program,
     mut known_bindings: Vec<String>,
-    runtime_module_bindings: Vec<(String, KindedSlot)>,
+    mut runtime_module_bindings: Vec<(String, KindedSlot)>,
     extensions: &[shape_runtime::module_exports::ModuleExports],
     trait_impl_keys: std::collections::HashSet<String>,
     known_type_symbols: std::collections::HashSet<String>,
@@ -407,7 +407,7 @@ fn compile_and_execute_comptime_program(
     }
     let mut bytecode = compiler.compile(program)?;
 
-    rebind_typed_object_bindings_to_bytecode_schemas(&bytecode, &runtime_module_bindings);
+    rebind_typed_object_bindings_to_bytecode_schemas(&bytecode, &mut runtime_module_bindings);
 
     for module in &all_extensions {
         ensure_module_object_schema(&mut bytecode, module);
@@ -422,39 +422,206 @@ fn compile_and_execute_comptime_program(
 /// Re-register comptime module bindings against the freshly-compiled
 /// bytecode's schema registry.
 ///
-/// **Phase-2c rebuild pending — see ADR-006 §2.4.** The previous body read
-/// each binding as a `HeapValue::TypedObject { schema_id, slots, heap_mask }`
-/// (the deleted inline-struct shape), looked up the matching bytecode schema
-/// by field-name set, and rebuilt a new `HeapValue::TypedObject` against the
-/// new schema id via `ValueSlot::from_value_word`. After the strict-typing
-/// bulldozer:
+/// **Phase-2c rebuild (C2-comptime-rebuild) per ADR-006 §2.4 / §2.7.4.**
+/// The pre-bulldozer body walked `HeapValue::TypedObject { schema_id,
+/// slots, heap_mask }` (the deleted inline-struct shape), looked up the
+/// matching bytecode schema by field-name superset, and rebuilt the
+/// binding via `ValueSlot::from_value_word`. Post-strict-typing the
+/// payload is `TypedObjectPtr` wrapping a v2-raw
+/// `*const TypedObjectStorage` (§2.3 amendment, Wave 2 Round 4 D4) — slot
+/// bits are a direct typed pointer, NOT `Arc::into_raw(Arc<HeapValue>)`
+/// (so `as_heap_value()` would be unsound; the typed-Arc dispatch
+/// recovers `&TypedObjectStorage` directly per §2.7.16 receiver-recovery
+/// soundness rule).
 ///
-/// - `HeapValue::TypedObject` now wraps `Arc<TypedObjectStorage>` per
-///   ADR-006 §2.3 — there is no inline `slots` slice to walk.
-/// - `ValueSlot::from_value_word` is replaced by per-FieldType constructors
-///   (ADR-006 §2.4 / Q6) that take typed `Arc<T>` directly.
-/// - The schema-rebind round-trip itself needs a kind-threaded
-///   `read_typed_object_field(slot, kind, field_idx) -> KindedSlot` helper
-///   to walk the comptime-VM's TypedObjectStorage and re-emit per-field
-///   typed slots into the outer bytecode's schema.
+/// Promotion shape (mirrors the pre-bulldozer behaviour): for each
+/// TypedObject-kinded binding, the smallest superset schema in the new
+/// bytecode is selected (by field-name superset); the binding is rebuilt
+/// against that schema's id with one share per heap-kinded slot read via
+/// the §2.7.7 / Q9 kind-driven `read_typed_object_field` helper. Missing
+/// target fields surface (no silent-default — promotion across mismatched
+/// field sets would corrupt schema-keyed reads). Strict equality (target
+/// id matches source id) short-circuits.
 ///
-/// All three pieces are part of the comptime-rebuild surface; until that
-/// lands, this function is a structural no-op so callers continue to
-/// compile. Comptime annotation handlers that pass typed-object module
-/// bindings between the comptime VM and the outer compiler will lose the
-/// re-registration step — surfacing as schema-id mismatches on read in the
-/// outer compiler. That is the deferral cost; placeholder TypedObject
-/// rebuilds are explicitly forbidden by playbook §7 #4 because they would
-/// silently corrupt schema-keyed field reads.
+/// Refcount discipline: `read_typed_object_field` bumps one independent
+/// share on each heap-kinded slot via `Arc::increment_strong_count::<T>`
+/// or `v2_retain`. The accumulated `(bits, kind)` pairs are transferred
+/// into a fresh `TypedObjectStorage::_new(...)` allocation; the new
+/// storage owns those shares (retired by `_drop` at refcount=0 via
+/// `drop_fields`). The source binding's `KindedSlot::Drop` releases the
+/// original `TypedObjectPtr` share on `mem::replace`.
 fn rebind_typed_object_bindings_to_bytecode_schemas(
-    _bytecode: &BytecodeProgram,
-    _module_bindings: &[(String, KindedSlot)],
+    bytecode: &BytecodeProgram,
+    module_bindings: &mut [(String, KindedSlot)],
 ) {
-    // todo!("phase-2c — comptime rebuild against typed-Arc HeapValue layout — see ADR-006 §2.4")
-    //
-    // No-op deferral: callers compile, schema mismatch surfaces at read
-    // time rather than corruption at rebind time. See playbook §7 #4 and
-    // ADR-006 §2.4 / §2.7.4.
+    use shape_value::TypedObjectStorage;
+    use shape_value::ValueSlot;
+
+    for (_name, value) in module_bindings.iter_mut() {
+        // Only TypedObject-kinded bindings carry a schema id that may
+        // need re-pointing into the fresh bytecode registry. Other
+        // kinds (scalars, strings, arrays, etc.) are independent of
+        // the bytecode's `TypeSchemaRegistry`.
+        if !matches!(
+            value.kind(),
+            NativeKind::Ptr(HeapKind::TypedObject)
+        ) {
+            continue;
+        }
+        let src_bits = value.slot().raw();
+        if src_bits == 0 {
+            // Null TypedObject — nothing to rebind.
+            continue;
+        }
+
+        // Typed-Arc dispatch label recovery (§2.7.16 receiver-recovery
+        // soundness rule): TypedObject slot bits are
+        // `*const TypedObjectStorage`, never `*const HeapValue`. Cast
+        // directly to the typed payload pointer; do NOT route through
+        // `slot.as_heap_value()` (unsound under the v2-raw Path-B
+        // `from_typed_object_raw` carrier per ADR-006 §2.3 amendment
+        // Wave 2 Round 4 D4 ckpt-final-prime²).
+        //
+        // SAFETY: `NativeKind::Ptr(HeapKind::TypedObject)` is the kind
+        // table's witness that these bits point to a live
+        // `TypedObjectStorage`. The binding owns one strong-count share
+        // on the HeapHeader-at-offset-0 refcount for the duration of
+        // this iteration; the storage cannot be deallocated under us.
+        let src_storage: &TypedObjectStorage =
+            unsafe { &*(src_bits as *const TypedObjectStorage) };
+
+        // Resolve the source schema (the ambient registry holds both
+        // stdlib + predeclared schemas, including any registered by
+        // `register_predeclared_any_schema` on the comptime
+        // construction side e.g. via `ComptimeTarget::to_nanboxed`).
+        let src_schema_id = src_storage.schema_id as shape_runtime::type_schema::SchemaId;
+        let Some(src_schema) =
+            shape_runtime::type_schema::lookup_schema_by_id_public(src_schema_id)
+        else {
+            // Source schema not resolvable — no safe rebind path.
+            // Leave the binding alone; downstream schema-keyed reads
+            // surface the mismatch with a clean diagnostic rather
+            // than silent corruption.
+            continue;
+        };
+
+        // Find the smallest target schema in the bytecode registry
+        // whose field set is a superset of the source's. Mirrors the
+        // pre-bulldozer promotion shape.
+        let src_field_names: Vec<&str> =
+            src_schema.fields.iter().map(|f| f.name.as_str()).collect();
+        let target_schema = bytecode
+            .type_schema_registry
+            .type_names()
+            .filter_map(|name| bytecode.type_schema_registry.get(name))
+            .filter(|schema| {
+                src_field_names
+                    .iter()
+                    .all(|name| schema.get_field(name).is_some())
+            })
+            .min_by_key(|schema| schema.fields.len())
+            .cloned();
+        let Some(target_schema) = target_schema else {
+            // No matching target schema. The binding stays as-is; the
+            // comptime body either reads it directly (the runtime
+            // ambient registry resolves the source schema id) or
+            // surfaces a clean schema-keyed access error.
+            continue;
+        };
+        if target_schema.id == src_schema_id {
+            // Already aligned — no rebuild needed.
+            continue;
+        }
+
+        // Walk the target schema's fields in declared order. For each,
+        // look up the source slot by field name and read it kinded;
+        // missing target fields surface (silent-default promotion is
+        // forbidden — playbook §7 #4).
+        let n = target_schema.fields.len();
+        let mut new_slots: Vec<ValueSlot> = Vec::with_capacity(n);
+        let mut new_kinds: Vec<NativeKind> = Vec::with_capacity(n);
+        let mut new_heap_mask: u64 = 0;
+        let mut bail = false;
+
+        for (target_idx, target_field) in target_schema.fields.iter().enumerate() {
+            let Some(src_field) = src_schema.get_field(&target_field.name) else {
+                // Target schema has a field not present in source.
+                // Mirrors the pre-bulldozer `unwrap_or_else(none)` only
+                // when the source had at least covered the target's
+                // field set; the superset-match filter above guarantees
+                // every source field exists in the target — but the
+                // target may carry extras the source can't fill. Refuse
+                // the rebuild (cleaner than fabricating a kind-stamped
+                // None default that could mis-type the slot).
+                bail = true;
+                break;
+            };
+            let src_idx = src_field.index as usize;
+            if src_idx >= src_storage.slots.len() || src_idx >= src_storage.field_kinds.len() {
+                bail = true;
+                break;
+            }
+
+            // The source slot's actual stored kind drives the read.
+            // For `FieldType::Any` schemas (the predeclared comptime
+            // shape), `to_native_kind()` refuses; we trust the
+            // construction-side parallel kind table (§2.7.7 / Q9).
+            let src_kind = src_storage.field_kinds[src_idx];
+            let src_slot = src_storage.slots[src_idx];
+            let kinded = read_typed_object_field(
+                src_slot,
+                src_kind,
+                src_storage.heap_mask,
+                src_idx,
+            );
+
+            // Transfer the share into `new_slots`; the rebuilt
+            // TypedObject's `_drop` releases it via `drop_fields`.
+            let bits = kinded.slot().raw();
+            let kind = kinded.kind();
+            std::mem::forget(kinded);
+            new_slots.push(ValueSlot::from_raw(bits));
+            new_kinds.push(kind);
+            let is_heap_kind = matches!(kind, NativeKind::String | NativeKind::Ptr(_));
+            if is_heap_kind && bits != 0 && target_idx < 64 {
+                new_heap_mask |= 1u64 << target_idx;
+            }
+        }
+
+        if bail {
+            // Release every share we already accumulated so the
+            // partial walk does not leak. Reconstruct each as a
+            // `KindedSlot` and let Drop retire the share via the
+            // §2.7.7 kind-driven dispatch.
+            for (i, slot) in new_slots.drain(..).enumerate() {
+                let kind = new_kinds[i];
+                drop(KindedSlot::new(slot, kind));
+            }
+            continue;
+        }
+
+        // Build the rebuilt TypedObject. `_new` returns a `*mut
+        // TypedObjectStorage` with refcount=1 on the HeapHeader; the
+        // slot bits = `ptr as u64` via `from_typed_object_raw`
+        // (ADR-006 §2.3 amendment Wave 2 D1 / D4).
+        let new_ptr = TypedObjectStorage::_new(
+            target_schema.id as u64,
+            new_slots.into_boxed_slice(),
+            new_heap_mask,
+            Arc::from(new_kinds.into_boxed_slice()),
+        );
+        let new_kinded = KindedSlot::new(
+            ValueSlot::from_typed_object_raw(new_ptr),
+            NativeKind::Ptr(HeapKind::TypedObject),
+        );
+
+        // Replace the binding. The old `KindedSlot` Drop releases the
+        // source TypedObject's share via the §2.7.7 / Q9 kind-driven
+        // dispatch (TypedObjectStorage::release_elem → v2_release →
+        // _drop at refcount=0).
+        let old = std::mem::replace(value, new_kinded);
+        drop(old);
+    }
 }
 
 fn ensure_module_object_schema(
