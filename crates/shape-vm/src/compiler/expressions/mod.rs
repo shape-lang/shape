@@ -1253,9 +1253,25 @@ impl BytecodeCompiler {
                     self,
                     &[],
                 );
-                let execution = super::comptime::execute_comptime(
+                // J-CT.2 — comptime-context items: trait defs, struct defs,
+                // and comptime impl blocks are prepended to the mini-VM
+                // program so `instance.method()` inside the comptime block
+                // resolves via the standard UFCS / `Type::method` path
+                // (audit §2.D carve-out).
+                let comptime_impl_blocks = self.comptime_impl_blocks.clone();
+                let comptime_context_trait_defs: Vec<_> =
+                    self.trait_defs.values().cloned().collect();
+                let comptime_context_struct_defs: Vec<_> = self
+                    .comptime_context_struct_defs
+                    .values()
+                    .cloned()
+                    .collect();
+                let execution = super::comptime::execute_comptime_with_context(
                     stmts,
                     &comptime_helpers,
+                    &comptime_impl_blocks,
+                    &comptime_context_trait_defs,
+                    &comptime_context_struct_defs,
                     &extensions,
                     trait_impls,
                     known_type_symbols,

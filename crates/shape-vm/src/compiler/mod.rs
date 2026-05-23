@@ -1105,6 +1105,28 @@ pub struct BytecodeCompiler {
     /// Used to install default method implementations for impl blocks that omit them.
     pub(crate) trait_defs: HashMap<String, shape_ast::ast::types::TraitDef>,
 
+    /// J-CT.2 (2026-05-23) — comptime impl blocks deferred for in-mini-VM
+    /// registration. The outer compiler does NOT desugar/register/compile
+    /// methods of `comptime impl Trait for Type { ... }` blocks into the
+    /// runtime program; they are skipped from runtime processing and stored
+    /// here so the comptime-evaluator mini-VM (`execute_comptime` in
+    /// `compiler/comptime.rs`) can prepend them as `Item::Impl` items, where
+    /// the in-comptime-mode compiler then desugars + compiles them normally.
+    /// Method dispatch from `instance.method()` inside a `comptime { }` block
+    /// then routes through the standard UFCS / `Type::method` resolution
+    /// path without a new dispatch shape (audit §2.D carve-out).
+    pub(crate) comptime_impl_blocks: Vec<shape_ast::ast::types::ImplBlock>,
+
+    /// J-CT.2 (2026-05-23) — original struct definitions captured during
+    /// the first pass. The outer compiler only retains field NAMES in
+    /// `struct_types`; the comptime-evaluator mini-VM needs full AST
+    /// (typed annotations, generic info, annotations) to compile
+    /// struct-literal constructions and field accesses inside `comptime { }`
+    /// blocks that interact with `comptime_impl_blocks`. Populated in the
+    /// first-pass `Item::StructType` arm.
+    pub(crate) comptime_context_struct_defs:
+        HashMap<String, shape_ast::ast::types::StructTypeDef>,
+
     /// Extension registry for comptime execution
     pub(crate) extension_registry: Option<Arc<Vec<shape_runtime::module_exports::ModuleExports>>>,
 

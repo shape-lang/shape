@@ -116,6 +116,8 @@ impl BytecodeCompiler {
             future_reference_use_name_scopes: Vec::new(),
             known_traits: std::collections::HashSet::new(),
             trait_defs: HashMap::new(),
+            comptime_impl_blocks: Vec::new(),
+            comptime_context_struct_defs: HashMap::new(),
             extension_registry: None,
             comptime_fields: HashMap::new(),
             type_diagnostic_mode: TypeDiagnosticMode::ReliableOnly,
