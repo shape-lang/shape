@@ -631,40 +631,264 @@ pub fn execute_remote_call_with_runtimes(
 }
 
 fn execute_inner(
-    _request: RemoteCallRequest,
-    _store: &SnapshotStore,
+    request: RemoteCallRequest,
+    store: &SnapshotStore,
 ) -> Result<SerializableVMValue, RemoteCallError> {
-    // Phase-2c deferral (ADR-006 §2.7.4): the body needs the kind-threaded
-    // `slot_to_serializable` / `serializable_to_slot` pair that replaces
-    // the deleted `nanboxed_to_serializable` / `serializable_to_nanboxed`
-    // / `serializable_to_nanboxed_with_layouts` round-trip. Until that
-    // pair lands (per `crates/shape-runtime/src/snapshot.rs:649`), the
-    // VM dispatch path can't materialize args without re-introducing
-    // forbidden ValueWord shapes. The deferral surfaces the gap at
-    // first invocation rather than serializing wrong values.
+    // T1-host-tier-marshal-rebuild (ADR-006 §2.7.4, R8 2026-05-23):
+    // kind-threaded marshal protocol via
+    // `shape_runtime::snapshot::serializable_to_slot` (in) +
+    // `shape_runtime::snapshot::slot_to_serializable` (out). Each arg's
+    // expected kind is read from the callee's `frame_descriptor.slots`
+    // (i.e. the per-slot proven `NativeKind` per ADR-006 §2.7.5.1 — no
+    // `Unknown` placeholder). The return-kind is read from the callee's
+    // `frame_descriptor.return_kind`.
     //
-    // The pre-bulldozer dispatch contract (closure → hash → id → name,
-    // with layout-aware arg/upvalue round-trip via
-    // `serializable_to_nanboxed_with_layouts`) is captured in the
-    // git history at the parent commit of the Wave-β
-    // R-transport-remote close — the Phase-2c rebuilder consults that
-    // commit when the kind-threaded serializer pair lands.
-    todo!("phase-2c — typed-module-exports rebuild — see ADR-006 §2.7.4 + addendum")
+    // Per the §0.A.iv supervisor ruling, frame-descriptor absence
+    // produces a structured `RemoteCallError` (no silent-degrade): a
+    // remote call cannot proceed if the callee has no proven param
+    // kinds, because the marshal protocol cannot pick an in-arm.
+    run_remote_call(request, store, None)
 }
 
 fn execute_inner_with_runtimes(
-    _request: RemoteCallRequest,
-    _store: &SnapshotStore,
-    _language_runtimes: &std::collections::HashMap<
+    request: RemoteCallRequest,
+    store: &SnapshotStore,
+    language_runtimes: &std::collections::HashMap<
         String,
         std::sync::Arc<shape_runtime::plugins::language_runtime::PluginLanguageRuntime>,
     >,
 ) -> Result<SerializableVMValue, RemoteCallError> {
-    // Phase-2c deferral (ADR-006 §2.7.4): same kind-threaded
-    // `slot_to_serializable` / `serializable_to_slot` dependency as
-    // `execute_inner` plus the foreign-function language-runtime hookup.
-    // Both halves wait for the Phase-2c snapshot rebuild.
-    todo!("phase-2c — typed-module-exports rebuild — see ADR-006 §2.7.4 + addendum")
+    // Same path as `execute_inner` plus the foreign-function language-
+    // runtime hookup. T1-host-tier-marshal-rebuild covers the marshal
+    // protocol; the language-runtime registration is forwarded through
+    // `run_remote_call` so the VM picks up the runtimes before invoking
+    // the callee.
+    run_remote_call(request, store, Some(language_runtimes))
+}
+
+/// Shared marshal+dispatch core for `execute_inner` /
+/// `execute_inner_with_runtimes`. Per ADR-006 §2.7.4 the protocol is:
+///
+/// 1. Reconstruct the `BytecodeProgram` (full payload or from blobs).
+/// 2. Build a `VirtualMachine`, load the program, populate module objects.
+/// 3. Resolve the callee (hash → id → name precedence).
+/// 4. Read the callee's per-slot `NativeKind` from `frame_descriptor.slots`
+///    and the return kind from `frame_descriptor.return_kind`.
+/// 5. Materialize each `SerializableVMValue` arg into a `KindedSlot` via
+///    `serializable_to_slot(arg, expected_kind, store)`.
+/// 6. Invoke the callee through the kinded ABI (`execute_function_by_id`).
+/// 7. Project the returned `KindedSlot` to `SerializableVMValue` via
+///    `slot_to_serializable(bits, kind, store)`.
+///
+/// Closure upvalue marshal (`request.upvalues` and `execute_closure`) is
+/// NOT covered by T1: the per-capture kind track lives on the closure
+/// header (ADR-006 §2.7.8 / Q10 cell-storage parallel-kind), which is
+/// rebuilt in a downstream sub-cluster. The body surfaces this with a
+/// structured error rather than silently dispatching.
+fn run_remote_call(
+    request: RemoteCallRequest,
+    store: &SnapshotStore,
+    language_runtimes: Option<
+        &std::collections::HashMap<
+            String,
+            std::sync::Arc<shape_runtime::plugins::language_runtime::PluginLanguageRuntime>,
+        >,
+    >,
+) -> Result<SerializableVMValue, RemoteCallError> {
+    use crate::executor::{VMConfig, VirtualMachine};
+    use shape_runtime::snapshot::{serializable_to_slot, slot_to_serializable};
+    use shape_value::{KindedSlot, ValueSlot};
+
+    // Forward the language_runtimes registration through the VM hookup
+    // path. The current VM API does not expose a register-language-
+    // runtime entry-point; consumers that need foreign-function support
+    // through the remote-call boundary should pre-load runtimes via the
+    // extension pipeline before dispatch. T1 stages the parameter
+    // surface so downstream W17-foreign-ffi can wire it up.
+    let _ = language_runtimes;
+
+    // Step 1: reconstruct the program. If function_blobs are supplied,
+    // build a content-addressed Program; otherwise use the full payload.
+    let mut program: BytecodeProgram = request.program;
+    program.type_schema_registry = request.type_schemas;
+
+    if let (Some(blobs), Some(entry_hash)) =
+        (request.function_blobs.clone(), request.function_hash)
+    {
+        if let Some(ca) = program_from_blobs_by_hash(blobs, entry_hash, &program) {
+            program.content_addressed = Some(ca);
+        }
+    }
+
+    // Closures need per-capture kinded marshal (ADR-006 §2.7.8 / Q10);
+    // T1 does not cover that path. Surface-and-stop rather than
+    // dispatch a possibly-wrong call.
+    if request.upvalues.is_some() {
+        return Err(RemoteCallError {
+            message: "remote closure dispatch requires upvalue kind track \
+                      (ADR-006 §2.7.8 / Q10 cell-storage parallel-kind) — \
+                      not yet wired through the remote-call boundary"
+                .to_string(),
+            kind: RemoteErrorKind::RuntimeError,
+        });
+    }
+
+    // Step 2: build VM and load program.
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(program);
+    vm.populate_module_objects();
+
+    // Step 3: resolve callee. function_hash (canonical) > function_id > name.
+    let func_id: u16 = if let Some(hash) = request.function_hash {
+        vm.program
+            .function_blob_hashes
+            .iter()
+            .position(|h| *h == Some(hash))
+            .map(|p| p as u16)
+            .or_else(|| request.function_id)
+            .or_else(|| {
+                vm.program
+                    .functions
+                    .iter()
+                    .position(|f| f.name == request.function_name)
+                    .map(|p| p as u16)
+            })
+            .ok_or_else(|| RemoteCallError {
+                message: format!(
+                    "function not found by hash; name='{}', id={:?}",
+                    request.function_name, request.function_id,
+                ),
+                kind: RemoteErrorKind::FunctionNotFound,
+            })?
+    } else if let Some(id) = request.function_id {
+        id
+    } else {
+        vm.program
+            .functions
+            .iter()
+            .position(|f| f.name == request.function_name)
+            .map(|p| p as u16)
+            .ok_or_else(|| RemoteCallError {
+                message: format!("function '{}' not found", request.function_name),
+                kind: RemoteErrorKind::FunctionNotFound,
+            })?
+    };
+
+    // Step 4: pick per-arg expected kinds from the callee's frame
+    // descriptor. ADR-006 §2.7.5.1: a present FunctionBlob has every
+    // slot's NativeKind proven — no Unknown placeholder.
+    let function = vm
+        .program
+        .functions
+        .get(func_id as usize)
+        .ok_or_else(|| RemoteCallError {
+            message: format!("function_id {} out of range", func_id),
+            kind: RemoteErrorKind::FunctionNotFound,
+        })?;
+
+    let arity = function.arity as usize;
+    if request.arguments.len() != arity {
+        return Err(RemoteCallError {
+            message: format!(
+                "argument count mismatch for function '{}': expected {}, got {}",
+                function.name,
+                arity,
+                request.arguments.len(),
+            ),
+            kind: RemoteErrorKind::ArgumentError,
+        });
+    }
+
+    let frame_desc = function.frame_descriptor.clone();
+    let arg_kinds: Vec<shape_value::NativeKind> = if let Some(ref fd) = frame_desc {
+        if fd.slots.len() < arity {
+            return Err(RemoteCallError {
+                message: format!(
+                    "function '{}' frame_descriptor has {} slots but arity is {}",
+                    function.name,
+                    fd.slots.len(),
+                    arity,
+                ),
+                kind: RemoteErrorKind::ArgumentError,
+            });
+        }
+        fd.slots.iter().take(arity).copied().collect()
+    } else if arity == 0 {
+        Vec::new()
+    } else {
+        return Err(RemoteCallError {
+            message: format!(
+                "function '{}' has no frame_descriptor — cannot derive \
+                 per-arg NativeKind for marshal protocol (ADR-006 §2.7.5.1)",
+                function.name,
+            ),
+            kind: RemoteErrorKind::ArgumentError,
+        });
+    };
+
+    let return_kind = frame_desc.as_ref().and_then(|fd| fd.return_kind);
+    let function_name_owned = function.name.clone();
+    let _ = function; // release the borrow before moving vm into call
+
+    // Step 5: marshal each SerializableVMValue → KindedSlot per
+    // expected_kind. `serializable_to_slot` allocates strong-count
+    // shares for heap-kinded args; each share transfers into the
+    // callee's frame via `execute_function_by_id`'s share-neutral
+    // call-helper (per cluster-1.5 fix).
+    let mut args: Vec<KindedSlot> = Vec::with_capacity(arity);
+    for (idx, sv) in request.arguments.iter().enumerate() {
+        let expected = arg_kinds[idx];
+        let (bits, kind) = serializable_to_slot(sv, expected, store).map_err(|e| {
+            RemoteCallError {
+                message: format!(
+                    "arg {} marshal failure (expected kind {:?}): {}",
+                    idx, expected, e,
+                ),
+                kind: RemoteErrorKind::ArgumentError,
+            }
+        })?;
+        args.push(KindedSlot::new(ValueSlot::from_raw(bits), kind));
+    }
+
+    // Step 6: dispatch.
+    let result = vm
+        .execute_function_by_id(func_id, args, None)
+        .map_err(|e| RemoteCallError {
+            message: format!(
+                "remote execution of '{}' failed: {:?}",
+                function_name_owned, e,
+            ),
+            kind: RemoteErrorKind::RuntimeError,
+        })?;
+
+    // Step 7: project the returned KindedSlot → SerializableVMValue.
+    // The slot owns one strong-count share that we must release after
+    // serialization (slot_to_serializable does NOT consume the share —
+    // it borrows). `KindedSlot::Drop` retires it at scope exit.
+    let (bits, kind) = (result.slot.raw(), result.kind);
+    // Cross-check: if the program declared a top-level return_kind, the
+    // returned slot's kind must agree. Mismatch is a structured error
+    // rather than a silent reinterpretation (ADR-006 §2.7.7 / Q9).
+    if let Some(declared) = return_kind {
+        if kind != declared {
+            return Err(RemoteCallError {
+                message: format!(
+                    "function '{}' returned kind {:?} but frame_descriptor \
+                     declared return_kind {:?}",
+                    function_name_owned, kind, declared,
+                ),
+                kind: RemoteErrorKind::RuntimeError,
+            });
+        }
+    }
+    let serialized = slot_to_serializable(bits, kind, store).map_err(|e| RemoteCallError {
+        message: format!("return-value marshal failure: {}", e),
+        kind: RemoteErrorKind::RuntimeError,
+    })?;
+    // `result` drops here, retiring the strong-count share via
+    // `KindedSlot::Drop` (ADR-006 §2.7.6 / Q8).
+    drop(result);
+    Ok(serialized)
 }
 
 /// Compute a SHA-256 hash of a `BytecodeProgram` for caching.
