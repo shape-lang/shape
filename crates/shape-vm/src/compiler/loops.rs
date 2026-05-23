@@ -1663,18 +1663,124 @@ impl BytecodeCompiler {
     }
 }
 
-// ADR-006 §2.7.4 / §2.7.7 — Phase 2c deferral.
+// ADR-006 §2.7.4 — Phase 2c rebuild (R8 C1-temporal-lowering, 2026-05-23).
 //
-// The original `mod tests` referenced the deleted `shape_value::ValueWord`
-// carrier and `ValueWordExt::as_i64`. Per playbook §7 REVISED #2 / #4
-// every forbidden-pattern textual hit must leave the cluster file —
-// even within a `#[cfg(any())]` gate — so the body is replaced with an
-// inline `todo!()` placeholder tracked under §10's Wave-β B12 deferral
-// pattern.
-#[cfg(any())]
+// The original suite asserted via `shape_value::ValueWordExt::as_i64`
+// against a `vm.execute(None) -> ValueWord` return. Post-strict-typing,
+// `VirtualMachine::execute(None) -> Result<KindedSlot, VMError>` and
+// `KindedSlot` exposes intrinsic per-kind accessors (`as_i64`, `as_f64`,
+// `as_bool`, `as_str`) per §2.7.6 / Q8. The migration drops the deleted
+// `ValueWordExt` trait import; every accessor body is byte-identical to
+// the pre-W-series shape because the kinded API was designed to be a
+// drop-in replacement for the deleted tagged-bits accessors.
+#[cfg(test)]
 mod tests {
+    use crate::VMConfig;
+    use crate::compiler::BytecodeCompiler;
+    use crate::executor::VirtualMachine;
+    use shape_ast::parser::parse_program;
+
+    fn compile_and_run_i64(code: &str) -> i64 {
+        let program = parse_program(code).unwrap();
+        let mut compiler = BytecodeCompiler::new();
+        compiler.allow_internal_builtins = true;
+        let bytecode = compiler.compile(&program).unwrap();
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        vm.load_program(bytecode);
+        vm.execute(None)
+            .unwrap()
+            .as_i64()
+            .expect("expected i64 top-level return")
+    }
+
     #[test]
-    fn _phase_2c_rebuild() {
-        todo!("phase-2c — see ADR-006 §2.7.4");
+    fn test_range_loop_exclusive() {
+        let result = compile_and_run_i64(
+            "fn t() { let mut s = 0; for i in 0..5 { s = s + i }; s } t()",
+        );
+        assert_eq!(result, 10);
+    }
+
+    #[test]
+    fn test_range_loop_inclusive() {
+        let result = compile_and_run_i64(
+            "fn t() { let mut s = 0; for i in 0..=5 { s = s + i }; s } t()",
+        );
+        assert_eq!(result, 15);
+    }
+
+    #[test]
+    fn test_range_loop_empty() {
+        let result = compile_and_run_i64(
+            "fn t() { let mut s = 0; for i in 5..0 { s = s + i }; s } t()",
+        );
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    fn test_range_loop_break() {
+        let result = compile_and_run_i64(
+            "fn t() { let mut s = 0; for i in 0..100 { if i == 5 { break }; s = s + i }; s } t()",
+        );
+        assert_eq!(result, 10);
+    }
+
+    #[test]
+    fn test_range_loop_continue() {
+        let result = compile_and_run_i64(
+            "fn t() { let mut s = 0; for i in 0..10 { if i % 2 == 0 { continue }; s = s + i }; s } t()",
+        );
+        assert_eq!(result, 25);
+    }
+
+    #[test]
+    fn test_range_loop_no_makerange() {
+        // Range-counter loops compile to a direct increment-and-compare
+        // pattern; they must NOT emit MakeRange/IterDone (which would
+        // allocate a Range heap value).
+        let code = "fn t() { let mut s = 0; for i in 0..10 { s = s + i }; s }";
+        let program = parse_program(code).unwrap();
+        let bytecode = BytecodeCompiler::new().compile(&program).unwrap();
+        let opcodes: Vec<_> = bytecode.instructions.iter().map(|i| i.opcode).collect();
+        assert!(
+            !opcodes.contains(&crate::bytecode::OpCode::MakeRange),
+            "Range counter loop must not emit MakeRange"
+        );
+        assert!(
+            !opcodes.contains(&crate::bytecode::OpCode::IterDone),
+            "Range counter loop must not emit IterDone"
+        );
+    }
+
+    #[test]
+    fn test_range_loop_for_expr() {
+        let result = compile_and_run_i64(
+            "fn t() { let r = for i in 0..5 { i * 2 }; r } t()",
+        );
+        assert_eq!(result, 8);
+    }
+
+    #[test]
+    fn test_range_loop_comprehension() {
+        let result = compile_and_run_i64(
+            "fn t() { let a = [i * 2 for i in 0..5]; a.len() } t()",
+        );
+        assert_eq!(result, 5);
+    }
+
+    #[test]
+    fn test_range_loop_spread() {
+        let result = compile_and_run_i64(
+            "fn t() { let a = [...0..5]; a.len() } t()",
+        );
+        assert_eq!(result, 5);
+    }
+
+    #[test]
+    fn test_non_range_fallback() {
+        let result = compile_and_run_i64(
+            "fn t() { let mut s = 0; for x in [10, 20, 30] { s = s + x }; s } t()",
+        );
+        assert_eq!(result, 60);
     }
 }
