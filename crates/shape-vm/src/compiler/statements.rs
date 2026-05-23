@@ -353,6 +353,22 @@ impl BytecodeCompiler {
                 Ok(())
             }
             Item::Impl(impl_block, _) => {
+                // J-CT.2 (2026-05-23) — comptime impl blocks are deferred
+                // for in-mini-VM registration. The outer compiler does not
+                // desugar/register/compile their methods into the runtime
+                // program. They are stored on `comptime_impl_blocks` so the
+                // comptime evaluator (`compiler/comptime.rs::execute_comptime`)
+                // can prepend them as `Item::Impl` items into the mini-VM
+                // program, where the in-comptime-mode compiler then
+                // processes them through this same arm normally. Audit
+                // §2.D carve-out: no new dispatch shape — comptime-trait
+                // methods reuse the standard UFCS / `Type::method`
+                // resolution path; the difference is *when* they're
+                // available (only inside `comptime { }`), not *how*.
+                if impl_block.is_comptime {
+                    self.comptime_impl_blocks.push(impl_block.clone());
+                    return Ok(());
+                }
                 // Impl blocks use scoped UFCS names.
                 // - default impl: "Type::method" (legacy compatibility)
                 // - named impl: "Trait::Type::ImplName::method"
@@ -1026,6 +1042,14 @@ impl BytecodeCompiler {
                 }
             }
             Item::Impl(impl_block, _) => {
+                // J-CT.2 — comptime impl blocks are deferred; the
+                // first-pass arm captured them in `comptime_impl_blocks`
+                // and skipped runtime processing, so the second pass also
+                // skips. Their bodies are compiled inside the comptime
+                // mini-VM (`execute_comptime`).
+                if impl_block.is_comptime {
+                    return Ok(());
+                }
                 // Compile impl block methods with scoped names
                 let raw_trait_name = match &impl_block.trait_name {
                     shape_ast::ast::types::TypeName::Simple(n) => n.as_str(),
@@ -1104,9 +1128,22 @@ impl BytecodeCompiler {
                     self,
                     &[],
                 );
-                let execution = super::comptime::execute_comptime(
+                // J-CT.2 — see `expressions/mod.rs::Expr::Comptime` for
+                // rationale on comptime-context items.
+                let comptime_impl_blocks = self.comptime_impl_blocks.clone();
+                let comptime_context_trait_defs: Vec<_> =
+                    self.trait_defs.values().cloned().collect();
+                let comptime_context_struct_defs: Vec<_> = self
+                    .comptime_context_struct_defs
+                    .values()
+                    .cloned()
+                    .collect();
+                let execution = super::comptime::execute_comptime_with_context(
                     stmts,
                     &comptime_helpers,
+                    &comptime_impl_blocks,
+                    &comptime_context_trait_defs,
+                    &comptime_context_struct_defs,
                     &extensions,
                     trait_impls,
                     known_type_symbols,
@@ -2665,6 +2702,17 @@ impl BytecodeCompiler {
                 runtime_field_types,
             },
         );
+        // J-CT.2 (2026-05-23) — snapshot full struct AST for the comptime
+        // mini-VM. `comptime_impl_blocks` referencing this type need the
+        // original AST (field annotations, generic info, default values) to
+        // compile struct-literal constructions + field access inside
+        // `comptime { }` blocks. `struct_types` retains only field NAMES;
+        // the mini-VM gets the full def via `comptime_context_struct_defs`.
+        // Stored here in the canonical `register_struct_type` site so both
+        // `Item::StructType` and `Item::Export(ExportItem::Struct)` paths
+        // populate it uniformly.
+        self.comptime_context_struct_defs
+            .insert(struct_def.name.clone(), struct_def.clone());
         self.predeclare_struct_schema(struct_def);
 
         // Execute comptime annotation handlers before registration so
@@ -2672,6 +2720,7 @@ impl BytecodeCompiler {
         if self.execute_struct_comptime_handlers(struct_def)? {
             self.struct_types.remove(&struct_def.name);
             self.struct_generic_info.remove(&struct_def.name);
+            self.comptime_context_struct_defs.remove(&struct_def.name);
             return Ok(());
         }
 
@@ -3924,9 +3973,22 @@ impl BytecodeCompiler {
                 self,
                 &[],
             );
-            let execution = super::comptime::execute_comptime(
+            // J-CT.2 — see `expressions/mod.rs::Expr::Comptime` for
+            // rationale on comptime-context items.
+            let comptime_impl_blocks = self.comptime_impl_blocks.clone();
+            let comptime_context_trait_defs: Vec<_> =
+                self.trait_defs.values().cloned().collect();
+            let comptime_context_struct_defs: Vec<_> = self
+                .comptime_context_struct_defs
+                .values()
+                .cloned()
+                .collect();
+            let execution = super::comptime::execute_comptime_with_context(
                 &stmts,
                 &comptime_helpers,
+                &comptime_impl_blocks,
+                &comptime_context_trait_defs,
+                &comptime_context_struct_defs,
                 &extensions,
                 trait_impls,
                 known_type_symbols,
@@ -3989,7 +4051,28 @@ impl BytecodeCompiler {
                 // comptime handlers, native layout, and schema registration).
                 // This makes the type name resolvable for forward references
                 // during first-pass registration.
-                if !self.struct_types.contains_key(&struct_def.name) {
+                //
+                // J-CT.2 — also overwrite empty-field placeholders inserted
+                // by the comptime mini-VM bootstrapping via
+                // `compile_and_execute_comptime_program`'s `known_type_symbols`
+                // pre-population (which inserts `Vec::new()` field lists to
+                // mark types as "known" for downstream resolution). If the
+                // existing entry is empty and we have real fields, replace
+                // it. Without this, the `contains_key` guard short-circuits
+                // and the real fields never land — struct literals inside
+                // `comptime { }` blocks then fail with "Unknown field 'x'".
+                let existing_is_empty = self
+                    .struct_types
+                    .get(&struct_def.name)
+                    .map(|(names, _)| names.is_empty())
+                    .unwrap_or(false);
+                let has_real_fields = struct_def
+                    .fields
+                    .iter()
+                    .any(|f| !f.is_comptime);
+                if !self.struct_types.contains_key(&struct_def.name)
+                    || (existing_is_empty && has_real_fields)
+                {
                     let runtime_field_names: Vec<String> = struct_def
                         .fields
                         .iter()
@@ -4013,6 +4096,16 @@ impl BytecodeCompiler {
                             runtime_field_types,
                         },
                     );
+                    // J-CT.2 — snapshot full struct AST for the comptime
+                    // mini-VM. `comptime_impl_blocks` referencing this
+                    // type need the original AST (field annotations,
+                    // generic info, default values) to compile
+                    // struct-literal constructions + field access inside
+                    // `comptime { }` blocks. `struct_types` retains only
+                    // field NAMES; the mini-VM gets the full def via
+                    // `comptime_context_struct_defs`.
+                    self.comptime_context_struct_defs
+                        .insert(struct_def.name.clone(), struct_def.clone());
                 }
                 Ok(())
             }
@@ -4099,6 +4192,12 @@ impl BytecodeCompiler {
                                 runtime_field_types,
                             },
                         );
+                        // J-CT.2 — see Item::StructType arm above for
+                        // rationale; mirror the snapshot for exported structs
+                        // so `comptime { }` blocks in the same compilation
+                        // unit can resolve them.
+                        self.comptime_context_struct_defs
+                            .insert(struct_def.name.clone(), struct_def.clone());
                     }
                     Ok(())
                 }

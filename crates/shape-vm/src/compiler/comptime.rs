@@ -305,6 +305,42 @@ pub(crate) fn execute_comptime(
     known_type_symbols: std::collections::HashSet<String>,
     type_snapshot: super::comptime_builtins::TypeReflectionSnapshot,
 ) -> Result<ComptimeExecutionResult> {
+    execute_comptime_with_context(
+        statements,
+        comptime_helpers,
+        &[],
+        &[],
+        &[],
+        extensions,
+        trait_impl_keys,
+        known_type_symbols,
+        type_snapshot,
+    )
+}
+
+/// J-CT.2 (2026-05-23) — execute_comptime extended with a comptime-context
+/// items slice. `comptime_impl_blocks` carry user-defined `comptime impl
+/// Trait for Type { ... }` blocks; `comptime_context_trait_defs` carry the
+/// `Item::Trait` AST for the traits those impls implement;
+/// `comptime_context_struct_defs` carry the `Item::StructType` AST for the
+/// types those impls target. All three are prepended as items into the
+/// mini-VM program so the in-comptime-mode compiler desugars + compiles
+/// them normally (same `Item::StructType` / `Item::Trait` / `Item::Impl`
+/// arms as the outer compiler). Method dispatch from `instance.method()`
+/// inside the comptime block then routes through the standard UFCS /
+/// `Type::method` resolution path — audit §2.D carve-out, no new dispatch
+/// shape.
+pub(crate) fn execute_comptime_with_context(
+    statements: &[Statement],
+    comptime_helpers: &[FunctionDef],
+    comptime_impl_blocks: &[shape_ast::ast::types::ImplBlock],
+    comptime_context_trait_defs: &[shape_ast::ast::types::TraitDef],
+    comptime_context_struct_defs: &[shape_ast::ast::types::StructTypeDef],
+    extensions: &[shape_runtime::module_exports::ModuleExports],
+    trait_impl_keys: std::collections::HashSet<String>,
+    known_type_symbols: std::collections::HashSet<String>,
+    type_snapshot: super::comptime_builtins::TypeReflectionSnapshot,
+) -> Result<ComptimeExecutionResult> {
     // Wrap statements in a function so the compiler produces a callable entry point.
     // Ensure the last statement is a tail return so if/else values aren't discarded.
     let mut body = statements.to_vec();
@@ -334,6 +370,30 @@ pub(crate) fn execute_comptime(
     };
 
     let mut items = comptime_builtin_forwarders();
+    // J-CT.2 — struct defs FIRST so impl-block trait/method bindings can
+    // resolve the target type. Impl blocks SECOND so the trait-method
+    // symbol registry is populated before the wrapping `__comptime_block__`
+    // function's body compiles its `instance.method()` calls. Each
+    // comptime impl block has `is_comptime: true`; the in-comptime-mode
+    // compiler's `Item::Impl` arm hits the J-CT.2 short-circuit (which
+    // re-stores into the *mini-VM's* `comptime_impl_blocks` field, a
+    // no-op for the inner mini-VM since there is no further nesting in
+    // the audit-scoped one-level depth). To compile the methods, we
+    // clear `is_comptime` on the cloned blocks before passing through —
+    // they NEED to be compiled into mini-VM bytecode (we're already in
+    // comptime mode; the outer-skip discipline doesn't apply within the
+    // mini-VM).
+    for trait_def in comptime_context_trait_defs {
+        items.push(Item::Trait(trait_def.clone(), Span::DUMMY));
+    }
+    for struct_def in comptime_context_struct_defs {
+        items.push(Item::StructType(struct_def.clone(), Span::DUMMY));
+    }
+    for impl_block in comptime_impl_blocks {
+        let mut block = impl_block.clone();
+        block.is_comptime = false;
+        items.push(Item::Impl(block, Span::DUMMY));
+    }
     items.extend(
         comptime_helpers
             .iter()
