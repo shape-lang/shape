@@ -245,6 +245,20 @@ impl TypeInferenceEngine {
                 }
                 _ => {}
             },
+            Item::Comptime(stmts, _) => {
+                // J-CT.1: a top-level `comptime { ... }` item is itself a
+                // comptime context. Walk its statements with the comptime
+                // depth incremented so method calls on `comptime impl`
+                // methods type-check. We tolerate per-statement errors here
+                // the same way the `Item::Statement` arm does for
+                // top-level expression statements — best-effort surface
+                // without aborting the whole program.
+                self.enter_comptime();
+                for stmt in stmts {
+                    let _ = self.infer_statement(stmt);
+                }
+                self.exit_comptime();
+            }
             _ => {} // Other items handled separately
         }
 
@@ -541,6 +555,22 @@ impl TypeInferenceEngine {
 
         self.validate_conversion_impl_shape(impl_block)?;
 
+        // J-CT.1: validate `comptime` alignment between trait and impl.
+        // A `comptime impl` must implement a `comptime trait`, and a plain
+        // `impl` must implement a non-comptime trait. We only validate when
+        // the trait is known to the type environment — unknown traits are
+        // diagnosed by the existing `register_trait_impl_*` path.
+        if let Some(trait_def) = self.env.lookup_trait(&trait_name) {
+            if trait_def.is_comptime != impl_block.is_comptime {
+                return Err(TypeError::ComptimeImplTraitMismatch {
+                    trait_name: trait_name.clone(),
+                    type_name: type_name.clone(),
+                    trait_is_comptime: trait_def.is_comptime,
+                    impl_is_comptime: impl_block.is_comptime,
+                });
+            }
+        }
+
         let method_names: Vec<String> = impl_block.methods.iter().map(|m| m.name.clone()).collect();
 
         // Collect associated type bindings from the impl block
@@ -652,6 +682,30 @@ impl TypeInferenceEngine {
                             &receiver_param_bounds,
                             has_receiver_params,
                         );
+                    }
+                }
+            }
+        }
+
+        // J-CT.1: mark every method registered by a `comptime impl` block as
+        // comptime-only. The expression-level method-call checker rejects
+        // runtime call sites for these methods via `is_comptime_method`.
+        // This includes default methods inherited from the trait — a
+        // comptime impl that doesn't override a default still exposes that
+        // method only at compile time.
+        if impl_block.is_comptime {
+            for method in &impl_block.methods {
+                self.method_table
+                    .mark_comptime_method(&type_name, &method.name);
+            }
+            if let Some(trait_def) = self.env.lookup_trait(&trait_name) {
+                let trait_def = trait_def.clone();
+                for member in &trait_def.members {
+                    if let TraitMember::Default(default_method) = member {
+                        if !impl_method_names.contains(&default_method.name) {
+                            self.method_table
+                                .mark_comptime_method(&type_name, &default_method.name);
+                        }
                     }
                 }
             }
@@ -1247,6 +1301,42 @@ impl TypeInferenceEngine {
                     .find(|f| f.name == field_name)
                     .map(|f| f.type_annotation.clone())
             })
+    }
+
+    /// J-CT.1: reverse lookup from a resolved `Object(...)` shape to its
+    /// original struct name.
+    ///
+    /// `type Name { ... }` is registered as a type alias whose target is
+    /// `Object(fields)`; `resolve_type_annotation` follows the alias
+    /// recursively, so a parameter declared `c: Name` arrives at the
+    /// method-call gate as `Type::Concrete(Object(...))` with no name
+    /// left to compare against the method table.
+    ///
+    /// We compare field-name sets only (not types or order) because the
+    /// gate's job is to identify the *named* user type that hosts the
+    /// `comptime impl`; declaring two structs with the same field set is
+    /// already a naming collision that the user resolves at trait-impl
+    /// registration time. Comptime fields are excluded — the alias the
+    /// type-checker stores already filters them out (see line 101 above).
+    pub(crate) fn struct_name_for_object_shape(
+        &self,
+        actual_fields: &[shape_ast::ast::ObjectTypeField],
+    ) -> Option<String> {
+        use std::collections::HashSet;
+        let actual_names: HashSet<&str> =
+            actual_fields.iter().map(|f| f.name.as_str()).collect();
+        for (name, def) in self.struct_type_defs.iter() {
+            let expected_names: HashSet<&str> = def
+                .fields
+                .iter()
+                .filter(|f| !f.is_comptime)
+                .map(|f| f.name.as_str())
+                .collect();
+            if expected_names == actual_names {
+                return Some(name.clone());
+            }
+        }
+        None
     }
 }
 
@@ -2071,5 +2161,252 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ----------------------------------------------------------------------
+    // J-CT.1 — comptime trait + impl type-checker validation
+    // ----------------------------------------------------------------------
+
+    #[test]
+    fn jct1_comptime_trait_registers_with_is_comptime_true() {
+        use shape_ast::parser::parse_program;
+        let code = r#"
+            comptime trait MetaInfo {
+                method name() -> string
+                method field_count() -> int
+            }
+        "#;
+        let program = parse_program(code).expect("comptime trait should parse");
+        let mut engine = TypeInferenceEngine::new();
+        let result = engine.infer_program(&program);
+        assert!(
+            result.is_ok(),
+            "comptime trait definition should type-check: {:?}",
+            result.err()
+        );
+        let td = engine
+            .env
+            .lookup_trait("MetaInfo")
+            .expect("MetaInfo should be registered");
+        assert!(td.is_comptime, "MetaInfo should carry is_comptime=true");
+    }
+
+    #[test]
+    fn jct1_comptime_impl_for_comptime_trait_marks_methods() {
+        use shape_ast::parser::parse_program;
+        let code = r#"
+            comptime trait Auditor {
+                method audit() -> bool
+            }
+
+            type MyType {
+                value: int,
+            }
+
+            comptime impl Auditor for MyType {
+                method audit() -> bool {
+                    return true
+                }
+            }
+        "#;
+        let program = parse_program(code).expect("should parse");
+        let mut engine = TypeInferenceEngine::new();
+        let result = engine.infer_program(&program);
+        assert!(
+            result.is_ok(),
+            "comptime trait + comptime impl should type-check: {:?}",
+            result.err()
+        );
+        assert!(
+            engine.method_table.is_comptime_method("MyType", "audit"),
+            "audit on MyType should be marked comptime-only"
+        );
+    }
+
+    #[test]
+    fn jct1_non_comptime_impl_for_comptime_trait_is_rejected() {
+        use shape_ast::parser::parse_program;
+        let code = r#"
+            comptime trait Auditor {
+                method audit() -> bool
+            }
+
+            type MyType {
+                value: int,
+            }
+
+            impl Auditor for MyType {
+                method audit() -> bool {
+                    return true
+                }
+            }
+        "#;
+        let program = parse_program(code).expect("should parse");
+        let mut engine = TypeInferenceEngine::new();
+        let result = engine.infer_program(&program);
+        assert!(
+            result.is_err(),
+            "plain impl for comptime trait must be rejected"
+        );
+        match result.err().unwrap() {
+            TypeError::ComptimeImplTraitMismatch {
+                trait_is_comptime,
+                impl_is_comptime,
+                ..
+            } => {
+                assert!(trait_is_comptime);
+                assert!(!impl_is_comptime);
+            }
+            other => panic!("expected ComptimeImplTraitMismatch, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn jct1_comptime_impl_for_non_comptime_trait_is_rejected() {
+        use shape_ast::parser::parse_program;
+        let code = r#"
+            trait Auditor {
+                method audit() -> bool
+            }
+
+            type MyType {
+                value: int,
+            }
+
+            comptime impl Auditor for MyType {
+                method audit() -> bool {
+                    return true
+                }
+            }
+        "#;
+        let program = parse_program(code).expect("should parse");
+        let mut engine = TypeInferenceEngine::new();
+        let result = engine.infer_program(&program);
+        assert!(
+            result.is_err(),
+            "comptime impl for plain trait must be rejected"
+        );
+        match result.err().unwrap() {
+            TypeError::ComptimeImplTraitMismatch {
+                trait_is_comptime,
+                impl_is_comptime,
+                ..
+            } => {
+                assert!(!trait_is_comptime);
+                assert!(impl_is_comptime);
+            }
+            other => panic!("expected ComptimeImplTraitMismatch, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn jct1_comptime_method_call_outside_comptime_rejected() {
+        use shape_ast::parser::parse_program;
+        // A `comptime impl`-registered method called at runtime (top-level
+        // expression statement, not inside `comptime { ... }`) must surface
+        // a clean ComptimeMethodCallOutsideComptime error.
+        let code = r#"
+            comptime trait OnlyComptime {
+                method secret() -> string
+            }
+
+            type Carrier {
+                data: string,
+            }
+
+            comptime impl OnlyComptime for Carrier {
+                method secret() -> string {
+                    return "hidden"
+                }
+            }
+
+            fn use_at_runtime(c: Carrier) -> string {
+                return c.secret()
+            }
+        "#;
+        let program = parse_program(code).expect("should parse");
+        let mut engine = TypeInferenceEngine::new();
+        let (_types, errors) = engine.infer_program_best_effort(&program);
+        let has_jct1_err = errors.iter().any(|e| {
+            matches!(
+                e,
+                TypeError::ComptimeMethodCallOutsideComptime { type_name, method_name }
+                    if type_name == "Carrier" && method_name == "secret"
+            )
+        });
+        assert!(
+            has_jct1_err,
+            "expected ComptimeMethodCallOutsideComptime for Carrier::secret(), got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn jct1_comptime_method_call_inside_comptime_accepted() {
+        use shape_ast::parser::parse_program;
+        // Same comptime impl, but the call site is inside a top-level
+        // `comptime { ... }` item — the gate must NOT fire.
+        let code = r#"
+            comptime trait OnlyComptime {
+                method secret() -> string
+            }
+
+            type Carrier {
+                data: string,
+            }
+
+            comptime impl OnlyComptime for Carrier {
+                method secret() -> string {
+                    return "hidden"
+                }
+            }
+
+            comptime {
+                let c = Carrier { data: "public" }
+                let s = c.secret()
+            }
+        "#;
+        let program = parse_program(code).expect("should parse");
+        let mut engine = TypeInferenceEngine::new();
+        let (_types, errors) = engine.infer_program_best_effort(&program);
+        let has_jct1_err = errors.iter().any(|e| {
+            matches!(e, TypeError::ComptimeMethodCallOutsideComptime { .. })
+        });
+        assert!(
+            !has_jct1_err,
+            "inside a comptime block, the call should NOT raise \
+             ComptimeMethodCallOutsideComptime; got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn jct1_plain_trait_methods_are_not_comptime_marked() {
+        use shape_ast::parser::parse_program;
+        // Regression: marking must be gated on impl_block.is_comptime, not
+        // on the presence of the trait. A regular impl block must NOT mark
+        // its methods as comptime-only.
+        let code = r#"
+            trait Plain {
+                method op() -> int
+            }
+
+            type Foo {
+                v: int,
+            }
+
+            impl Plain for Foo {
+                method op() -> int {
+                    return 1
+                }
+            }
+        "#;
+        let program = parse_program(code).expect("should parse");
+        let mut engine = TypeInferenceEngine::new();
+        let _ = engine.infer_program(&program);
+        assert!(
+            !engine.method_table.is_comptime_method("Foo", "op"),
+            "plain impl methods must NOT be marked comptime"
+        );
     }
 }

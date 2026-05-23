@@ -428,6 +428,55 @@ impl TypeInferenceEngine {
                         .collect::<Result<_, _>>()?
                 };
 
+                // J-CT.1: reject calls to `comptime impl`-registered methods
+                // outside a `comptime { ... }` context. We check before the
+                // normal method-table resolution so the error surfaces with
+                // the comptime-specific message (and not a generic
+                // "method not found"). Receiver-name extraction reuses the
+                // same `extract_receiver_info` that drives normal resolution
+                // — if the receiver type is too unresolved to extract a
+                // name, the gate is a no-op (the method-not-found path
+                // surfaces a clearer diagnostic anyway).
+                if !self.in_comptime_context() {
+                    // Primary path: receiver name extracted via the same helper
+                    // that drives normal resolution. Reuses the type-name slot
+                    // that already powers `lookup_generic_signature` above so
+                    // we never invent a name the resolver wouldn't see.
+                    let mut gated = false;
+                    if let Some(ref tn) = type_name {
+                        if self.method_table.is_comptime_method(tn, method) {
+                            return Err(TypeError::ComptimeMethodCallOutsideComptime {
+                                type_name: tn.clone(),
+                                method_name: method.clone(),
+                            });
+                        }
+                        gated = true;
+                    }
+                    // Fallback: `type T { ... }` is registered as a type alias
+                    // that `resolve_type_annotation` recursively expands to
+                    // its `Object(...)` shape, so a function parameter typed
+                    // `T` arrives here as `Type::Concrete(Object(...))` —
+                    // `extract_receiver_info` returns `None` and the primary
+                    // path can't fire. Recover the original struct name by
+                    // matching the object shape against `struct_type_defs`.
+                    // This keeps the gate sound for the public API surface
+                    // (struct fields are a stable identity) without leaking
+                    // any new naming convention.
+                    if !gated {
+                        if let Type::Concrete(TypeAnnotation::Object(actual_fields)) = &receiver_type
+                            && let Some(struct_name) = self.struct_name_for_object_shape(actual_fields)
+                            && self
+                                .method_table
+                                .is_comptime_method(&struct_name, method)
+                        {
+                            return Err(TypeError::ComptimeMethodCallOutsideComptime {
+                                type_name: struct_name,
+                                method_name: method.clone(),
+                            });
+                        }
+                    }
+                }
+
                 // Try to resolve the method statically using the method table
                 if let Some(result_type) = self.method_table.resolve_method_call(
                     &receiver_type,
@@ -1018,10 +1067,33 @@ impl TypeInferenceEngine {
             Expr::AsyncScope(inner, _) => self.infer_expr(inner),
 
             // Comptime block - evaluated at compile time, returns Any for now
-            Expr::Comptime(_, _) => Ok(self.fresh_type_var()),
+            //
+            // J-CT.1: also push the engine's comptime-depth so nested method
+            // calls on `comptime impl`-registered methods are accepted here.
+            // Statements are walked for side-effect type checking; per-stmt
+            // errors are tolerated the same way `infer_item` tolerates them
+            // for the top-level fallthrough path.
+            Expr::Comptime(stmts, _) => {
+                self.enter_comptime();
+                for stmt in stmts {
+                    let _ = self.infer_statement(stmt);
+                }
+                self.exit_comptime();
+                Ok(self.fresh_type_var())
+            }
 
             // Comptime for - unrolled at compile time, returns Unit
-            Expr::ComptimeFor(_, _) => Ok(Type::Concrete(TypeAnnotation::Void)),
+            //
+            // J-CT.1: ComptimeFor is itself a comptime context — calls to
+            // `comptime impl` methods inside its body must type-check.
+            Expr::ComptimeFor(cf, _) => {
+                self.enter_comptime();
+                for stmt in &cf.body {
+                    let _ = self.infer_statement(stmt);
+                }
+                self.exit_comptime();
+                Ok(Type::Concrete(TypeAnnotation::Void))
+            }
 
             // Reference expression - infer the inner expression type
             Expr::Reference { expr: inner, .. } => self.infer_expr(inner),
