@@ -58,6 +58,28 @@ pub const FIELD_TAG_ANY: u16 = 8;
 /// discriminator + relies on the schema-side `field_type` for the
 /// inner element type during `tag_to_field_type` reconstruction).
 pub const FIELD_TAG_OPTION: u16 = 9;
+/// W17.3-4.3 (audit §4.B + supervisor ratify 2026-05-22): `HashMap<K, V>`
+/// discriminator. Slot bits are `Arc::into_raw(Arc<HashMapKindedRef>) as u64`
+/// per ADR-006 §2.7 / Stage C P1(b); the heap target is
+/// `NativeKind::Ptr(HeapKind::HashMap)` (ordinal 17). K/V `FieldType`s on
+/// the schema-side variant guide compile-time checking; the operand
+/// encoding is a coarse discriminator — per-entry V-kind lives in the
+/// `HashMapKindedRef` carrier at the runtime tier (mirror of the
+/// `FIELD_TAG_ARRAY` shape, which stores only the outer discriminator
+/// and relies on the typed `TypedArray<T>` carrier for element kind).
+/// Replaces the W17.3-4.1 transitional `HashMap { .. } → FIELD_TAG_ANY`
+/// bridge with a typed runtime-dispatch tag.
+pub const FIELD_TAG_HASHMAP: u16 = 10;
+/// W17.3-4.3 (audit §4.B + supervisor ratify 2026-05-22): `Set<T>`
+/// discriminator. Slot bits are `Arc::into_raw(Arc<HashSetData>) as u64`
+/// per ADR-006 §2.7.15 / Q16 (W13-hashset-rebuild, HeapKind ordinal 21).
+/// The element `FieldType` on the schema-side variant is a stamp-at-
+/// compile-time projection (ADR-006 §2.7.5) — the operand encoding is a
+/// coarse discriminator (mirror of `FIELD_TAG_ARRAY` / `FIELD_TAG_HASHMAP`
+/// shape; element kind lives at the typed heap carrier). Replaces the
+/// W17.3-4.1 transitional `Set(_) → FIELD_TAG_ANY` bridge with a typed
+/// runtime-dispatch tag.
+pub const FIELD_TAG_SET: u16 = 11;
 pub const FIELD_TAG_UNKNOWN: u16 = 255;
 
 /// Encode a FieldType as a compact u16 tag for the operand.
@@ -84,18 +106,20 @@ pub fn field_type_to_tag(ft: &FieldType) -> u16 {
         | FieldType::I32
         | FieldType::U32
         | FieldType::U64 => FIELD_TAG_I64,
-        // W17.3-4.1 — HashMap<K, V> / Set<T> route to FIELD_TAG_ANY at
-        // the slot encoding boundary, preserving pre-W17.3-4 VM
-        // behavior (previously these `TypeAnnotation::Generic` shapes
-        // lowered to `FieldType::Any` via the W17.2-C §4.D.7 narrowed
-        // TRANSITIONAL exception; the schema-side FieldType is now
-        // typed, but slot bits remain an opaque heap pointer until
-        // dedicated FIELD_TAG_HASHMAP / FIELD_TAG_SET runtime
-        // dispatch lands at W17.3-4.3 (per audit §4.B runtime
-        // dispatch + snapshot/wire integration sub-cluster). The
-        // schema-side typing still drives compile-time checking +
-        // serde round-trip per ADR-006 §2.7.5 producer-side stamp.
-        FieldType::HashMap { .. } | FieldType::Set(_) => FIELD_TAG_ANY,
+        // W17.3-4.3 (audit §4.B + supervisor ratify 2026-05-22):
+        // HashMap<K, V> / Set<T> route to dedicated FIELD_TAG_HASHMAP /
+        // FIELD_TAG_SET runtime-dispatch tags. Replaces the W17.3-4.1
+        // transitional FIELD_TAG_ANY bridge — the operand now carries a
+        // concrete discriminator so `field_tag_to_heap_native_kind`
+        // projects to `Ptr(HeapKind::HashMap)` / `Ptr(HeapKind::HashSet)`
+        // and the §2.7.7 / Q9 retain dispatch in `vm_impl/stack.rs`
+        // (`Arc::increment_strong_count::<HashMapKindedRef>` /
+        // `::<HashSetData>`) fires the correct refcount discipline.
+        // ADR-005 §1 single-discriminator preserved: HeapValue::kind()
+        // is canonical at heap dispatch; the operand tag is the
+        // schema-side compile-time stamp per ADR-006 §2.7.5.
+        FieldType::HashMap { .. } => FIELD_TAG_HASHMAP,
+        FieldType::Set(_) => FIELD_TAG_SET,
     }
 }
 
@@ -119,6 +143,17 @@ pub(in crate::executor) fn tag_to_field_type(tag: u16) -> Option<FieldType> {
         // parallel `field_kinds` track at slot-read time per ADR-006
         // §2.7.7 / Q9.
         FIELD_TAG_OPTION => Some(FieldType::Option(Box::new(FieldType::Any))),
+        // W17.3-4.3 — coarse HashMap/Set reconstruction; the operand
+        // doesn't carry K/V/element inner kinds (mirrors FIELD_TAG_ARRAY
+        // shape). Consumers needing the precise K/V/element kind read
+        // from the typed `HashMapKindedRef` / `HashSetData` carrier at
+        // slot-read time per ADR-006 §2.7.7 / Q9 + the runtime-tier
+        // monomorphization story.
+        FIELD_TAG_HASHMAP => Some(FieldType::HashMap {
+            key: Box::new(FieldType::Any),
+            value: Box::new(FieldType::Any),
+        }),
+        FIELD_TAG_SET => Some(FieldType::Set(Box::new(FieldType::Any))),
         _ => None,
     }
 }
@@ -137,6 +172,13 @@ fn field_tag_to_heap_native_kind(tag: u16) -> Option<NativeKind> {
         FIELD_TAG_DECIMAL => Some(NativeKind::Ptr(HeapKind::Decimal)),
         // FIELD_TAG_TIMESTAMP heap-backed → Temporal payload.
         FIELD_TAG_TIMESTAMP => Some(NativeKind::Ptr(HeapKind::Temporal)),
+        // W17.3-4.3 — per-container kind projections. HASHMAP →
+        // HeapKind::HashMap (ordinal 17, Stage C P1(b)); SET →
+        // HeapKind::HashSet (ordinal 21, W13-hashset-rebuild). The
+        // §2.7.7 / Q9 retain/release dispatch in `vm_impl/stack.rs`
+        // handles both kinds via `Arc::increment_strong_count`.
+        FIELD_TAG_HASHMAP => Some(NativeKind::Ptr(HeapKind::HashMap)),
+        FIELD_TAG_SET => Some(NativeKind::Ptr(HeapKind::HashSet)),
         // Tags below are non-heap (inline scalar); exposing them here is a
         // construction-side bug — caller must check `is_heap` first.
         FIELD_TAG_F64 | FIELD_TAG_I64 | FIELD_TAG_BOOL => None,
@@ -167,6 +209,12 @@ pub(in crate::executor) fn field_tag_to_native_kind(tag: u16) -> Option<NativeKi
         FIELD_TAG_OBJECT => Some(NativeKind::Ptr(HeapKind::TypedObject)),
         FIELD_TAG_DECIMAL => Some(NativeKind::Ptr(HeapKind::Decimal)),
         FIELD_TAG_TIMESTAMP => Some(NativeKind::Ptr(HeapKind::Temporal)),
+        // W17.3-4.3 — per-container kind projections. Mirror of the
+        // `field_tag_to_heap_native_kind` heap arms; consumers (e.g.
+        // `MakeFieldRef`'s `op_make_field_ref`) source the projected
+        // slot's `NativeKind` from the operand tag, never fabricating.
+        FIELD_TAG_HASHMAP => Some(NativeKind::Ptr(HeapKind::HashMap)),
+        FIELD_TAG_SET => Some(NativeKind::Ptr(HeapKind::HashSet)),
         // Dynamic / unknown — ADR-006 §2.7.7: no statically-sourceable kind.
         _ => None,
     }
@@ -871,6 +919,15 @@ fn write_field_at_idx(
                 value_kind,
                 NativeKind::String | NativeKind::Ptr(HeapKind::String)
             ),
+            // W17.3-4.3 — HASHMAP/SET tags accept the corresponding
+            // heap-pointer kinds. Slot bits at write time carry an
+            // `Arc::into_raw(Arc<HashMapKindedRef>) as u64` /
+            // `Arc::into_raw(Arc<HashSetData>) as u64` (per §2.7 / Stage C
+            // P1(b) / W13-hashset-rebuild). The runtime-tier
+            // monomorphization happens in the HashMapKindedRef carrier
+            // itself, not at the schema-side tag.
+            FIELD_TAG_HASHMAP => value_kind == NativeKind::Ptr(HeapKind::HashMap),
+            FIELD_TAG_SET => value_kind == NativeKind::Ptr(HeapKind::HashSet),
             _ => value_kind == stored_kind,
         };
         if !kind_compatible_with_tag {
@@ -974,6 +1031,269 @@ mod tests {
         assert_eq!(storage_back.slots[1].raw(), 99u64);
         // Retire the popped share through the v2-raw drop dispatch.
         crate::executor::vm_impl::stack::drop_with_kind(obj_bits_back, obj_kind_back);
+    }
+
+    // =======================================================================
+    // W17.3-4.3 — Per-container FIELD_TAG_HASHMAP / FIELD_TAG_SET runtime
+    // dispatch (audit §4.B + supervisor ratify 2026-05-22).
+    //
+    // These tests assert the close-gate signals from §5.B W17.3-4.3:
+    //   1. `field_type_to_tag` routes HashMap/Set FieldTypes to the new
+    //      dedicated tags (replaces the W17.3-4.1 FIELD_TAG_ANY bridge).
+    //   2. `field_tag_to_heap_native_kind` / `field_tag_to_native_kind`
+    //      project HASHMAP → Ptr(HeapKind::HashMap), SET → Ptr(HashSet).
+    //   3. `tag_to_field_type` round-trips the new tags back to coarse
+    //      HashMap{Any,Any} / Set(Any) shapes (mirrors FIELD_TAG_ARRAY).
+    //   4. Set field write/read round-trip on a TypedObject works:
+    //      `Arc<HashSetData>` retain/release dispatches correctly via
+    //      §2.7.7 stack.rs HashSet arm.
+    // =======================================================================
+
+    /// W17.3-4.3 §5.B — `field_type_to_tag` maps HashMap{K,V} to
+    /// FIELD_TAG_HASHMAP (replaces the W17.3-4.1 FIELD_TAG_ANY bridge).
+    #[test]
+    fn field_type_to_tag_hashmap_routes_to_hashmap_tag() {
+        let ft = FieldType::HashMap {
+            key: Box::new(FieldType::String),
+            value: Box::new(FieldType::I64),
+        };
+        assert_eq!(field_type_to_tag(&ft), FIELD_TAG_HASHMAP);
+    }
+
+    /// W17.3-4.3 §5.B — `field_type_to_tag` maps Set<T> to FIELD_TAG_SET.
+    #[test]
+    fn field_type_to_tag_set_routes_to_set_tag() {
+        let ft = FieldType::Set(Box::new(FieldType::I64));
+        assert_eq!(field_type_to_tag(&ft), FIELD_TAG_SET);
+    }
+
+    /// W17.3-4.3 §5.B — `field_tag_to_heap_native_kind` projects HASHMAP
+    /// to `Ptr(HeapKind::HashMap)` (ordinal 17, Stage C P1(b)).
+    #[test]
+    fn field_tag_to_heap_native_kind_hashmap() {
+        assert_eq!(
+            field_tag_to_heap_native_kind(FIELD_TAG_HASHMAP),
+            Some(NativeKind::Ptr(HeapKind::HashMap))
+        );
+    }
+
+    /// W17.3-4.3 §5.B — `field_tag_to_heap_native_kind` projects SET to
+    /// `Ptr(HeapKind::HashSet)` (ordinal 21, W13-hashset-rebuild).
+    #[test]
+    fn field_tag_to_heap_native_kind_set() {
+        assert_eq!(
+            field_tag_to_heap_native_kind(FIELD_TAG_SET),
+            Some(NativeKind::Ptr(HeapKind::HashSet))
+        );
+    }
+
+    /// W17.3-4.3 §5.B — `field_tag_to_native_kind` projects HASHMAP to
+    /// `Ptr(HeapKind::HashMap)`. Used by `MakeFieldRef` at
+    /// `variables/mod.rs::op_make_field_ref` to source the projected
+    /// slot's kind without fabrication.
+    #[test]
+    fn field_tag_to_native_kind_hashmap_and_set() {
+        assert_eq!(
+            field_tag_to_native_kind(FIELD_TAG_HASHMAP),
+            Some(NativeKind::Ptr(HeapKind::HashMap))
+        );
+        assert_eq!(
+            field_tag_to_native_kind(FIELD_TAG_SET),
+            Some(NativeKind::Ptr(HeapKind::HashSet))
+        );
+    }
+
+    /// W17.3-4.3 §5.B — `tag_to_field_type` round-trips FIELD_TAG_HASHMAP
+    /// to a coarse `HashMap { key: Any, value: Any }` (mirrors
+    /// FIELD_TAG_ARRAY's `Array(Any)` reconstruction shape). Consumers
+    /// needing precise K/V kinds read from the typed `HashMapKindedRef`
+    /// carrier at slot-read time per ADR-006 §2.7.7 / Q9.
+    #[test]
+    fn tag_to_field_type_hashmap_round_trip() {
+        let ft = tag_to_field_type(FIELD_TAG_HASHMAP).unwrap();
+        assert_eq!(
+            ft,
+            FieldType::HashMap {
+                key: Box::new(FieldType::Any),
+                value: Box::new(FieldType::Any),
+            }
+        );
+    }
+
+    /// W17.3-4.3 §5.B — `tag_to_field_type` round-trips FIELD_TAG_SET
+    /// to a coarse `Set(Any)`. Mirrors the HashMap round-trip shape.
+    #[test]
+    fn tag_to_field_type_set_round_trip() {
+        let ft = tag_to_field_type(FIELD_TAG_SET).unwrap();
+        assert_eq!(ft, FieldType::Set(Box::new(FieldType::Any)));
+    }
+
+    /// W17.3-4.3 §5.B — outer `field_type_to_tag` → `tag_to_field_type`
+    /// preserves the schema-side container discriminator across the
+    /// operand-encoding boundary (modulo the K/V/element-kind erasure
+    /// inherent to the 16-bit operand encoding — see FIELD_TAG_ARRAY
+    /// precedent). The schema-side typing still drives compile-time
+    /// checking; the operand boundary is a coarse outer discriminator.
+    #[test]
+    fn field_type_to_tag_to_field_type_round_trip_outer_discriminator() {
+        let hm = FieldType::HashMap {
+            key: Box::new(FieldType::String),
+            value: Box::new(FieldType::I64),
+        };
+        let hm_tag = field_type_to_tag(&hm);
+        assert_eq!(hm_tag, FIELD_TAG_HASHMAP);
+        let hm_back = tag_to_field_type(hm_tag).unwrap();
+        assert!(matches!(hm_back, FieldType::HashMap { .. }));
+
+        let s = FieldType::Set(Box::new(FieldType::Bool));
+        let s_tag = field_type_to_tag(&s);
+        assert_eq!(s_tag, FIELD_TAG_SET);
+        let s_back = tag_to_field_type(s_tag).unwrap();
+        assert!(matches!(s_back, FieldType::Set(_)));
+    }
+
+    /// W17.3-4.3 §5.B — end-to-end TypedObject Set field write/read
+    /// round-trip. Constructs a TypedObject with one Set<int> field,
+    /// invokes `op_set_field_typed` to install an Arc<HashSetData> share,
+    /// then `op_get_field_typed` to recover it. The §2.7.7 stack.rs
+    /// HashSet retain arm (`Arc::increment_strong_count::<HashSetData>`)
+    /// must fire correctly — failure mode is a tcache double-free or
+    /// segfault on snapshot drop.
+    #[test]
+    fn typed_object_set_field_write_read_round_trip() {
+        use shape_value::heap_value::HashSetData;
+
+        let mut vm = VirtualMachine::new(VMConfig::default());
+
+        // type SetHolder { items: Set<int> }
+        let schema = TypeSchema::new(
+            "SetHolder".to_string(),
+            vec![("items".to_string(), FieldType::Set(Box::new(FieldType::I64)))],
+        );
+        let schema_id = schema.id;
+        vm.program.type_schema_registry.register(schema);
+
+        // Build an empty HashSetData and install it as the initial slot
+        // value. The TypedObjectStorage takes ownership of one share via
+        // the slot bits; the kind track records Ptr(HashSet).
+        let initial_set: Arc<HashSetData> = Arc::new(HashSetData::default());
+        let initial_bits = Arc::into_raw(initial_set) as u64;
+        let slots = vec![ValueSlot::from_raw(initial_bits)];
+        let ptr = TypedObjectStorage::_new(
+            schema_id as u64,
+            slots.into_boxed_slice(),
+            1u64, // heap_mask: bit 0 set (field 0 is heap-backed)
+            Arc::from(
+                vec![NativeKind::Ptr(HeapKind::HashSet)].into_boxed_slice(),
+            ),
+        );
+        let recv_bits = ptr as u64;
+
+        // Build a fresh HashSetData with one entry to write into the slot.
+        // (Construct via the public default + insert path would require
+        // method-side wiring; here we mint a bare Arc to drive the write
+        // path's kind-compatibility check — the close-gate signal we want
+        // to verify is the Ptr(HashSet) round-trip through the FIELD_TAG_SET
+        // dispatch, not the HashSet contents.)
+        let new_set: Arc<HashSetData> = Arc::new(HashSetData::default());
+        let new_bits = Arc::into_raw(new_set) as u64;
+
+        // Stack: [recv, value]; op_set_field_typed pops value then recv,
+        // mutates the slot in place, pushes mutated receiver back.
+        vm.push_kinded(recv_bits, NativeKind::Ptr(HeapKind::TypedObject))
+            .unwrap();
+        vm.push_kinded(new_bits, NativeKind::Ptr(HeapKind::HashSet))
+            .unwrap();
+
+        let operand = Operand::TypedField {
+            type_id: schema_id as u16,
+            field_idx: 0,
+            field_type_tag: FIELD_TAG_SET,
+        };
+        let instr = Instruction::new(OpCode::SetFieldTyped, Some(operand));
+        vm.op_set_field_typed(&instr).expect("set_field_typed must succeed for Set field");
+
+        // Read the field back. op_get_field_typed pops the receiver and
+        // pushes the field value (with one refcount share for the
+        // borrow + push).
+        let get_instr = Instruction::new(OpCode::GetFieldTyped, Some(operand));
+        vm.op_get_field_typed(&get_instr)
+            .expect("get_field_typed must succeed for Set field");
+
+        let (got_bits, got_kind) = vm.pop_kinded().unwrap();
+        assert_eq!(
+            got_kind,
+            NativeKind::Ptr(HeapKind::HashSet),
+            "field read must round-trip Ptr(HashSet) kind"
+        );
+        assert_eq!(got_bits, new_bits, "field read must return installed bits");
+        // Release the popped share through the §2.7.7 dispatch.
+        crate::executor::vm_impl::stack::drop_with_kind(got_bits, got_kind);
+    }
+
+    /// W17.3-4.3 §5.B — end-to-end TypedObject HashMap field write/read
+    /// round-trip. Mirror of the Set round-trip; verifies the
+    /// `Arc::increment_strong_count::<HashMapKindedRef>` retain arm in
+    /// `vm_impl/stack.rs` fires correctly for HASHMAP-tagged fields.
+    #[test]
+    fn typed_object_hashmap_field_write_read_round_trip() {
+        use shape_value::heap_value::HashMapKindedRef;
+
+        let mut vm = VirtualMachine::new(VMConfig::default());
+
+        // type MapHolder { m: HashMap<string, int> }
+        let schema = TypeSchema::new(
+            "MapHolder".to_string(),
+            vec![(
+                "m".to_string(),
+                FieldType::HashMap {
+                    key: Box::new(FieldType::String),
+                    value: Box::new(FieldType::I64),
+                },
+            )],
+        );
+        let schema_id = schema.id;
+        vm.program.type_schema_registry.register(schema);
+
+        // Build initial HashMapKindedRef::I64 (string-keyed i64-valued).
+        let initial_map: Arc<HashMapKindedRef> =
+            Arc::new(HashMapKindedRef::I64(Arc::default()));
+        let initial_bits = Arc::into_raw(initial_map) as u64;
+        let slots = vec![ValueSlot::from_raw(initial_bits)];
+        let ptr = TypedObjectStorage::_new(
+            schema_id as u64,
+            slots.into_boxed_slice(),
+            1u64,
+            Arc::from(vec![NativeKind::Ptr(HeapKind::HashMap)].into_boxed_slice()),
+        );
+        let recv_bits = ptr as u64;
+
+        let new_map: Arc<HashMapKindedRef> =
+            Arc::new(HashMapKindedRef::I64(Arc::default()));
+        let new_bits = Arc::into_raw(new_map) as u64;
+
+        vm.push_kinded(recv_bits, NativeKind::Ptr(HeapKind::TypedObject))
+            .unwrap();
+        vm.push_kinded(new_bits, NativeKind::Ptr(HeapKind::HashMap))
+            .unwrap();
+
+        let operand = Operand::TypedField {
+            type_id: schema_id as u16,
+            field_idx: 0,
+            field_type_tag: FIELD_TAG_HASHMAP,
+        };
+        let instr = Instruction::new(OpCode::SetFieldTyped, Some(operand));
+        vm.op_set_field_typed(&instr)
+            .expect("set_field_typed must succeed for HashMap field");
+
+        let get_instr = Instruction::new(OpCode::GetFieldTyped, Some(operand));
+        vm.op_get_field_typed(&get_instr)
+            .expect("get_field_typed must succeed for HashMap field");
+
+        let (got_bits, got_kind) = vm.pop_kinded().unwrap();
+        assert_eq!(got_kind, NativeKind::Ptr(HeapKind::HashMap));
+        assert_eq!(got_bits, new_bits);
+        crate::executor::vm_impl::stack::drop_with_kind(got_bits, got_kind);
     }
 
     /// `op_set_field_typed` on a non-TypedObject receiver returns a
