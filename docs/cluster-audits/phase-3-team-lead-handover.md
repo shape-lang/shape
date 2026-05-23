@@ -131,6 +131,12 @@ Full detail: CLAUDE.md + ADR-006 §2.7.x. Operative under expanded scope:
   (crash / VM-JIT divergence / wrong result / memory-unsafety / silent-wrong-
   output / spurious-reject of valid code) → v0.3-gating; incomplete-but-CLEAN
   → v0.4-OK; jargon-dump NOT clean.
+- **Class-shift verify-at-close (supervisor 2026-05-23):** KC #6(b)
+  typed_closure_in_array_map + KC #6(c) test_complex_bubble_sort
+  class-shifted to V3-S5 / criterion-C territory at R7 W3 close. **Standing
+  rule:** if criterion-C close doesn't sweep these EMPIRICALLY (re-run
+  both tests at criterion-C close), they come back as un-resolved
+  v0.3-gating items. No deferral-by-renaming.
 - **W16.2-J must be REAL retirement** — no half-retire ("preserve PHF for
   one edge case" / "rename to a less suspicious name"). Refusal #10 family.
   Monomorphization-to-concrete only — NEVER reintroduce a tagged/dynamic
@@ -145,14 +151,26 @@ Full detail: CLAUDE.md + ADR-006 §2.7.x. Operative under expanded scope:
 - All CLAUDE.md Forbidden Patterns + Renames + ADR-006 §2.7.x. NO ARCHAEOLOGY.
   No Co-Authored-By trailer; own all code quality.
 
-## Dispatch hygiene (binding — round-6 lesson)
+## Dispatch hygiene (binding — round-6 lesson + R7 W3 git-stash hardening)
 
 Agent `isolation: "worktree"` is unreliable here. Pre-create a sibling
-worktree (`git worktree add /home/dev/dev/shape-lang/shape-r6-<ws> -b <branch>
-<main-HEAD>`), dispatch WITHOUT `isolation`, pin the agent to that absolute
-path as its first `cd`, forbid `cd`-ing to `/home/dev/dev/shape-lang/shape`.
-Avoid `git stash` (shared `.git` stash-stack race). Each fix branch is built +
-its reproducers re-verified on main post-merge before the next dispatch.
+worktree (`git worktree add /home/dev/dev/shape-lang/shape-<branch> -b
+<branch> <main-HEAD>`), dispatch WITHOUT `isolation`, pin the agent to
+that absolute path as its first `cd`, forbid `cd`-ing to
+`/home/dev/dev/shape-lang/shape`. Each fix branch is built + its
+reproducers re-verified on main post-merge before the next dispatch.
+
+**`git stash` ABSOLUTE BINDING (R7 W3 hardening — supervisor 2026-05-23):**
+
+> Parallel-dispatch agents are FORBIDDEN from `git stash` in any form.
+> State-recovery uses targeted `git checkout -- <file>`, `git reset
+> HEAD <file>`, or explicit commits in the agent's own pinned worktree.
+> The shared `.git/refs/stash` stack is off-limits. Every dispatch
+> prompt for a parallel-worktree agent MUST include this verbatim.
+
+R7 W3 hit 5 violations (J.1, F, W17.3-4.2, J.2, D-α.2 × 2) under
+baseline-verification pressure — prior "serialize git-stash ops" form
+was too soft. Hard form is enforceable at dispatch-prompt-review.
 
 **Audit-day exception:** read-only audits (no source changes) can run in
 the main repo without worktrees provided they each write only their own
