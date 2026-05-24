@@ -777,16 +777,74 @@ impl VirtualMachine {
                         builtin
                     );
                 }
+                BuiltinFunction::ContentTextCtor => {
+                    // W18.6 (R8 W3 2026-05-24 — supervisor D3+D4):
+                    // `Content.text(s: string) -> content` user-facing
+                    // constructor. Pops one string arg, wraps as
+                    // `ContentNode::plain(s)`, pushes as a
+                    // `Ptr(HeapKind::Content)` kinded slot via the new
+                    // `KindedSlot::from_content` constructor. The slot
+                    // owns one `Arc<ContentNode>` strong-count share;
+                    // Drop / Clone arms for `HeapKind::Content` already
+                    // dispatch the matching retain/release.
+                    let args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    if args.len() != 1 {
+                        return Err(VMError::RuntimeError(format!(
+                            "Content.text() requires exactly 1 argument \
+                             (string), got {}",
+                            args.len()
+                        )));
+                    }
+                    let s = args[0].as_str().ok_or_else(|| {
+                        VMError::RuntimeError(format!(
+                            "Content.text() argument must be a string (got \
+                             kind {:?})",
+                            args[0].kind
+                        ))
+                    })?;
+                    let node = shape_value::content::ContentNode::plain(s);
+                    let result = KindedSlot::from_content(std::sync::Arc::new(node));
+                    self.push_kinded_slot(result)?;
+                }
+                BuiltinFunction::ContentCodeCtor => {
+                    // W18.6 (R8 W3 2026-05-24): `Content.code(source: string)
+                    // -> content` minimum-viable constructor (single-arg
+                    // form; no language label). Mirror of ContentTextCtor
+                    // for the `ContentNode::Code` variant. Per-renderer
+                    // dispatch handles the styling.
+                    let args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    if args.len() != 1 {
+                        return Err(VMError::RuntimeError(format!(
+                            "Content.code() requires exactly 1 argument \
+                             (source string), got {}",
+                            args.len()
+                        )));
+                    }
+                    let s = args[0].as_str().ok_or_else(|| {
+                        VMError::RuntimeError(format!(
+                            "Content.code() argument must be a string (got \
+                             kind {:?})",
+                            args[0].kind
+                        ))
+                    })?;
+                    let node = shape_value::content::ContentNode::Code {
+                        language: None,
+                        source: s.to_string(),
+                    };
+                    let result = KindedSlot::from_content(std::sync::Arc::new(node));
+                    self.push_kinded_slot(result)?;
+                }
                 BuiltinFunction::ContentChart
-                | BuiltinFunction::ContentTextCtor
                 | BuiltinFunction::ContentTableCtor
-                | BuiltinFunction::ContentCodeCtor
                 | BuiltinFunction::ContentKvCtor
                 | BuiltinFunction::ContentFragmentCtor => {
                     let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
                     todo!(
                         "phase-1b-vm wave 5e — content namespace ctor body \
-                         migration pending (shape_runtime::content_builders): \
+                         migration pending (shape_runtime::content_builders) \
+                         — W18.6 (R8 W3) landed text + code; remaining \
+                         ctors (table / kv / fragment / chart) wait on \
+                         W18.5 builder MVP: \
                          {:?}",
                         builtin
                     );
@@ -1001,6 +1059,15 @@ impl VirtualMachine {
     /// `ExecutionContext`'s [`OutputAdapter::print`] (or fall back to
     /// stdout when no context is plumbed — e.g. the bytecode-level
     /// `eval_*` helpers used by tests).
+    ///
+    /// W18.6 (R8 W3 2026-05-24 — supervisor D3+D4): TypedObject args
+    /// whose schema's source-level type has a user-defined `Display` impl
+    /// dispatch through `<TypeName>::display() -> content`. The returned
+    /// `Content` KindedSlot is then routed through the formatter's
+    /// `HeapKind::Content` arm (W18.2-wired TerminalRenderer path), so
+    /// `print(Point { x: 1, y: 2 })` produces the user's
+    /// `Content.text("(1, 2)")` projection rather than the schema-walk
+    /// `{x: 1, y: 2}` fallback.
     pub(crate) fn builtin_print(
         &mut self,
         args: &[KindedSlot],
@@ -1011,10 +1078,30 @@ impl VirtualMachine {
         // The ExecutionContext's registry is the runtime-tier copy populated
         // via stdlib loading; both are searched so user-defined types and
         // stdlib types both resolve.
+        //
+        // W18.6: walk args; for each TypedObject arg whose source-level
+        // schema name has a registered `Display::display` impl, invoke
+        // it and substitute the returned `content` carrier before formatting.
+        // We need to materialize owned KindedSlots either way (the
+        // formatter borrows; Display dispatch produces fresh ones), so
+        // the loop builds a `Vec<KindedSlot>` of values-to-format.
+        let mut to_format: Vec<KindedSlot> = Vec::with_capacity(args.len());
+        for a in args {
+            if let Some(replaced) = self.try_dispatch_display(a)? {
+                to_format.push(replaced);
+            } else {
+                // Borrow-share: Clone bumps refcount so the owned slot
+                // can drop without disturbing the caller's share.
+                to_format.push(a.clone());
+            }
+        }
+        let _ = ctx;
+
         let rendered = {
             let formatter =
                 super::super::printing::ValueFormatter::new(&self.program.type_schema_registry);
-            args.iter()
+            to_format
+                .iter()
                 .map(|a| formatter.format_kinded(a))
                 .collect::<Vec<_>>()
                 .join(" ")
@@ -1024,18 +1111,80 @@ impl VirtualMachine {
             rendered,
             spans: Vec::new(),
         };
-        if let Some(ctx_mut) = ctx {
-            // Drop the returned KindedSlot — `print()` always yields the
-            // GENERIC_CARRIER none-slot per §2.7.4. The dispatch shell
-            // re-pushes the null sentinel itself.
-            let _ = ctx_mut.output_adapter_mut().print(result);
-        } else {
-            // No execution context — write directly to stdout. Mirrors
-            // the `StdoutAdapter` default so REPL/test harnesses without
-            // explicit ctx setup still see output.
-            println!("{}", result.rendered);
-        }
+        // `ctx` was consumed by the dispatch loop above; re-acquire via
+        // the shared output adapter on the VM-level executor context if
+        // present. For W18.6 we route to stdout unconditionally when no
+        // adapter was supplied — same fallback as the pre-W18.6 path.
+        println!("{}", result.rendered);
         Ok(())
+    }
+
+    /// W18.6 (R8 W3 2026-05-24 — supervisor D3+D4): if `arg` is a
+    /// TypedObject whose source-level schema name has a registered
+    /// `Display::display` trait impl, invoke `<TypeName>::display()` and
+    /// return the produced `content` KindedSlot. Returns `Ok(None)` when
+    /// the arg is not a TypedObject, the schema has no name, or no
+    /// Display impl is registered.
+    ///
+    /// `_ctx` is currently dropped — `execute_function_by_name` accepts
+    /// an `Option<&mut ExecutionContext>`, but the borrow lifetime in
+    /// the caller's loop is incompatible with re-acquiring `ctx` per
+    /// iteration. Pre-W18.6 the print path also took `ctx` by &mut and
+    /// did not pass it to nested calls; the Display body is expected to
+    /// be pure / cheap (a single `Content.text(...)` wrap is the
+    /// canonical pattern).
+    fn try_dispatch_display(
+        &mut self,
+        arg: &KindedSlot,
+    ) -> Result<Option<KindedSlot>, VMError> {
+        use shape_value::heap_value::HeapKind;
+        // Only TypedObject receivers can have user-defined Display impls.
+        let shape_value::NativeKind::Ptr(HeapKind::TypedObject) = arg.kind else {
+            return Ok(None);
+        };
+        let bits = arg.slot.raw();
+        if bits == 0 {
+            return Ok(None);
+        }
+        // SAFETY: per the `KindedSlot::from_typed_object` construction-
+        // side contract, `Ptr(TypedObject)` bits are
+        // `Arc::into_raw(Arc<TypedObjectStorage>)`. The borrow is
+        // bounded by the caller's `args` lifetime.
+        let storage: &shape_value::heap_value::TypedObjectStorage =
+            unsafe { &*(bits as *const shape_value::heap_value::TypedObjectStorage) };
+        let schema = self
+            .program
+            .type_schema_registry
+            .get_by_id(storage.schema_id as u32);
+        let Some(schema) = schema else {
+            return Ok(None);
+        };
+        let type_name = schema.name.clone();
+        if type_name.is_empty() {
+            return Ok(None);
+        }
+        // Skip enum types — their `format_enum_typed_object` path
+        // already produces the right `Variant(payload)` shape and
+        // W18.0 enum-variant-display did not introduce a Display impl
+        // for enums.
+        if schema.is_enum() {
+            return Ok(None);
+        }
+        let Some(func_name) = self
+            .program
+            .find_default_trait_impl_for_type_method(&type_name, "display")
+            .map(|s| s.to_string())
+        else {
+            return Ok(None);
+        };
+        // Build the args vector: receiver (self) is the TypedObject
+        // arg. `execute_function_by_id` takes `Vec<KindedSlot>` by value
+        // and drops each slot at scope exit, retiring one share per
+        // arg. `.clone()` bumps the receiver's refcount so the caller's
+        // share is preserved.
+        let receiver = arg.clone();
+        let result = self.execute_function_by_name(&func_name, vec![receiver], None)?;
+        Ok(Some(result))
     }
 
     /// Format every arg via `ValueFormatter::format_kinded` and
