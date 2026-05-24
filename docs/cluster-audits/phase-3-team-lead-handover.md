@@ -1,11 +1,12 @@
 # Team-lead handover — Shape v0.3 close-approach
 
-**Refreshed:** 2026-05-24 at main HEAD `8570e228` (**R8 W6 CLOSED** — G.2
-bulk panic→SURFACE + G.1 JIT FrameDescriptor + G.1 W17 IoHandle/DataTable
-+ G.3 http options-arg + 5 audit docs + ADR §2.7.4 drafts file). v0.3
-code criteria substantially complete (A 5.5/6, B/C/D/E/F COMPLETE, J 3/4);
-G.1 Step 1 disposition fully ground-truthed + 4 of 5 supervisor groups
-substantially closed.
+**Refreshed:** 2026-05-24 at main HEAD `ebb3717c` (**R8 W7 CLOSED** —
+match enum-payload tuple-binder + ADR §2.7.28/§2.7.29 apply + aliased-CoW
+audit + G.5 Cluster B (5 stdlib files) + G.5 Cluster C (2 stdlib files) +
+G.5 HashMap divergence-elimination). v0.3 code criteria substantially
+complete (A 5.5/6, B/C/D/E/F COMPLETE, J 3/4); all G.1 Step 1 supervisor
+groups now closed except Cluster A (module-level binding rejection;
+deferred for user-decision on language semantics).
 
 ## Role
 
@@ -18,13 +19,13 @@ semantics. User relays between team-lead and supervisor.
 
 | | |
 |---|---|
-| Main HEAD | `8570e228` (R8 W6 close: 4 merges + 1 audit-batch commit) |
-| Smoke matrix s1–s5 | **5/5 VM == JIT** (canonical (ii) F' release-binary harness; re-verified at HEAD `8570e228` post-final-merge) |
+| Main HEAD | `ebb3717c` (R8 W7 close: 5 merges + 1 ADR/audit commit + 1 cleanup) |
+| Smoke matrix s1–s5 | **5/5 VM == JIT** (canonical (ii) F' release-binary harness; re-verified at HEAD `ebb3717c` post-final-merge) |
 | verify-merge / check-no-dynamic / check-clean | 13/13 / exit 0 / exit 0 |
-| git-stash pre-commit hook | DEPLOYED (R8 W5+W6 ZERO violations cumulative) |
+| git-stash pre-commit hook | DEPLOYED (R8 W5+W6+W7 ZERO violations cumulative) |
 | Co-Authored-By trailers (cumulative) | 0 |
-| Bad-code merges (cumulative) | 0 |
-| v0.3.0 tag | NOT landed — gated on remaining R8 W7+ dispositions + user authorization |
+| Bad-code merges (cumulative) | 0 (1 conflict-marker miss in R8 W7 was caught + cleaned in follow-up commit `675dcf1b`) |
+| v0.3.0 tag | NOT landed — gated on remaining items + user authorization |
 
 ## R8 W6 dispatch — Supervisor 16-item disposition (binding 2026-05-24)
 
@@ -54,26 +55,57 @@ at every checkpoint; smoke 5/5 VM == JIT preserved throughout.
 | G.3 http options-arg | `94dc8fa9` → `d8d79daf` | doc-fix path: 8 fns in http.shape + http.mdx (shape-web) |
 | R8 W6 audit-round close | `8570e228` | 5 audit docs + ADR drafts + handover refresh |
 
+## R8 W7 outcome (CLOSED 2026-05-24)
+
+5 merges + ADR §2.7.28/§2.7.29 verbatim text apply + aliased-CoW
+audit-doc landed per supervisor 2026-05-24 ratify (ADR 4-decisions + match
+enum-payload v0.3-gating override + aliased-CoW v0.3 scope confirmation).
+
+| Merge / Commit | Substance |
+|---|---|
+| G.5 HashMap divergence-elimination → `83e6e86a` | JIT V2-verifier refusal routes through existing `[jit-fallback]` interpreter path (Option B per audit §5; Option A reverted after empirical smoke-s2 evidence of regression). Eliminates `set::from_array([1,2,3])` JIT garbage-return divergence; smoke 5/5 preserved. |
+| Match enum-payload → `5669a8ff` (+ cleanup `675dcf1b`) | TWO sites fixed (audit suggested one): `bind_pattern_vars_typed` Tuple arm in inference engine + `compile_typed_enum_binding` Tuple arm in bytecode compiler via new symmetric `enum_tuple_variant_fields` cache. Sanity test revealed silent-wrong-output on Struct payload that the fix also resolves. |
+| ADR §2.7.28/§2.7.29 apply + aliased-CoW audit → `cfd613d8` | §2.7.28 (W17-typed-module-exports) + §2.7.29 (W17-foreign-ffi) verbatim text inserted at ADR-006 line 6587 (+422 LoC). 5 marker comments added at named source locations. Post-apply grep checks all clean. Plus aliased-CoW SEGFAULT audit at `v0.3-r8w7-jit-aliased-cow-segfault-audit.md` (root cause at mir_compiler/v2_array.rs:591-606; M-scope refcount-aware codegen fix recipe). |
+| G.5 Cluster C empty-array annotations → `97911e5b` | property_testing.shape + monte_carlo.shape: `Array<int>` / `Array<number>` element-type annotations + necessary Cluster-B-style unblock annotations on param/intermediate types. Anonymous-typed-object element annotation empirically rejected; refused to fabricate workaround. |
+| G.5 Cluster B type annotations → `ebb3717c` | testing.shape + math::{optimize, linalg, rotation, interpolation}: function-signature type annotations + 3 documented architectural workarounds: (1) nested `Array<Array<T>>` empty-array workaround via seed-then-overwrite; (2) cross-module generic-fn-via-namespace gap → import-only smoke; (3) generic type-arg inference gap → monomorphize `clamp<T>`/`lerp<T>` to `clamp_int`/`lerp_num` (private helpers only; global `clamp`/`lerp` in math.shape untouched). |
+
+**Cluster A NOT dispatched** — language-semantics decision needed:
+log.shape requires module-level mutable state (`let mut current_level`);
+fix path is either (a) implement module-level const + refactor log.shape
+to function-state OR (b) implement module-level mutable bindings OR (c)
+v0.4 with stdlib refactor. Surface to user for ruling.
+
+## Supervisor surfaces (R8 W7 close)
+
+1. **ADR §2.7.28/§2.7.29 LANDED** at `docs/adr/006-value-and-memory-model.md`
+   lines 6587-7008 area (5 marker comments + 8 post-apply grep checks clean).
+   Drafts-file mechanism confirmed working — same pattern usable for any
+   future multi-section ADR text surfaces.
+2. **Match enum-payload v0.3-gating fix LANDED** per supervisor's
+   doc-contract-leg ruling. Two-site fix; sanity test surfaced
+   silent-wrong-output on Struct payload that the same fix resolves.
+3. **Aliased-CoW SEGFAULT** audit-doc landed; M-scope fix queued for
+   R8 W8+. Fix territory: `crates/shape-jit/src/mir_compiler/v2_array.rs:591-606`
+   (refcount-aware codegen with `jit_clone_array_if_shared` FFI wrapper).
+4. **G.5 Cluster A** language-semantics decision needed (module-level
+   const-only vs module-level mutable state vs stdlib refactor + v0.4).
+
 ## Supervisor surfaces (for relay)
 
 1. **ADR §2.7.4 addendum drafts file** at `docs/cluster-audits/v0.3-adr-2-7-4-addendum-drafts.md` — supervisor reads from disk per the new mechanism (bypasses relay-chain text-loss). 4 `[SUPERVISOR-DECISION: ...]` markers: (a) NEW top-level §2.7.28/.29 vs amendment-subsection under §2.7.4; (b) insertion position (numeric vs file-position dominant); (c) retro-add `// §2.7.28` / `// §2.7.29` marker comments; (d) Q-number allocation (next available Q26/Q27).
 2. **Match enum-payload inference (G5)** — recommended v0.4 in audit; surface if supervisor reads doc-contract leg of no-known-incorrectness binding stronger than clean-compile-error leg. See `docs/cluster-audits/v0.3-r8w6-match-enum-payload-inference-audit.md` §2.
 
-## Remaining v0.3 scope (post-R8-W6)
+## Remaining v0.3 scope (post-R8-W7)
 
-- **G5 pure-Shape stdlib cluster fixes** (~8-10h across 3 clusters per audit
-  `v0.3-r8w6-pure-shape-stdlib-inference-audit.md`): module-level-binding
-  rejection (2 files), generic-arithmetic inference loss (5 files),
-  empty-array element-type loss (2 files); 1 file already passes (remote.shape).
-- **G5 HashMap key-kind divergence-elimination** (~1.5 sessions per audit
-  `v0.3-r8w6-hashmap-key-kind-audit.md` §5): JIT V2-verifier-failure path
-  fatal-or-interpreter-fallback. Full int-key HashMap support → v0.4 epic.
-- **G3 a-class follow-ups** surfaced during R8 W6 (none net-new this round
-  beyond the http options-arg fix).
+- **G5 Cluster A** (module-level binding rejection — 2 files): gated on
+  user language-semantics ruling. Trivial fix once design lands.
+- **Aliased-CoW JIT SEGFAULT fix** (~M scope per
+  `v0.3-r8w7-jit-aliased-cow-segfault-audit.md` §4): refcount-aware codegen
+  at `mir_compiler/v2_array.rs::compile_typed_array_method`. Per supervisor
+  2026-05-24 ruling: memory-unsafety unconditionally v0.3-gating.
 - **J.4-rest residuals** (joinStr + small sort-family items).
 - **G.2 Step 2** doc-truth round (USER-followable validation; gated on
-  Step 1 finalized + main stable; nominally ready now that R8 W6 closes).
-- **ADR §2.7.4 text-ratify** (gated on supervisor reading the drafts file).
+  Step 1 finalized + main stable — both met).
 - **v0.3.0 tag** (user-authorization-gated; gated on all above).
 
 ## ADR §2.7.4 addendum text-ratify — STRUCTURAL FIX
@@ -87,11 +119,11 @@ post-apply-grep discipline as §2.7.13 ratify.
 
 ## Trajectory
 
-~**3-5 sessions** to v0.3 tag (re-projected post-R8-W6 close). Sized:
-G5 pure-Shape stdlib (1-2) + G5 HashMap divergence (0.5-1) + J.4-rest (0.5)
-+ G.2 Step 2 (1) + ADR text-ratify (0.5) + close + tag (0.5). R8 W6
-substantially compressed the trajectory by closing 4 dispositions in one
-round.
+~**2-3 sessions** to v0.3 tag (re-projected post-R8-W7 close). Sized:
+Aliased-CoW fix (M, 0.5-1) + G5 Cluster A (0.5 once user-decision lands)
++ J.4-rest (0.5) + G.2 Step 2 (1) + close + tag (0.5). R8 W7 compressed
+the trajectory further by closing 6 dispositions in one round including
+the supervisor-ratified ADR text apply.
 
 ## Dispatch hygiene (binding — R7 W3 + R8 W4 hardening)
 
@@ -177,8 +209,12 @@ row appended; no Co-Authored-By trailer.
 
 ---
 
-*R8 W6 CLOSED 2026-05-24: 4 merges landed (G.2 bulk surface, G.1 JIT
-framedesc, G.1 W17 IoHandle, G.3 http options-arg); 5 audit docs + ADR
-§2.7.4 drafts file committed. Smoke 5/5 + 13/13 + git-stash hook ZERO
-violations preserved throughout. Next round: G5 pure-Shape stdlib + G5
-HashMap divergence-elimination.*
+*R8 W7 CLOSED 2026-05-24: 5 merges landed (G.5 HashMap divergence,
+match enum-payload, G.5 Cluster B, G.5 Cluster C, ADR §2.7.28+§2.7.29
+verbatim apply + aliased-CoW audit). Supervisor 4-decision ratify on
+ADR (Q26/Q27 sequential, NEW top-level, append-after-§2.7.27, marker
+comments) all applied + post-apply grep clean. One conflict-marker miss
+(commit 5669a8ff) caught + cleaned in follow-up `675dcf1b`. Smoke 5/5
++ 13/13 + git-stash hook ZERO violations preserved through W7. Next
+round: aliased-CoW JIT fix + G5 Cluster A (post user-decision) +
+J.4-rest + G.2 Step 2 + tag.*
