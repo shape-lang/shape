@@ -160,7 +160,8 @@ that absolute path as its first `cd`, forbid `cd`-ing to
 `/home/dev/dev/shape-lang/shape`. Each fix branch is built + its
 reproducers re-verified on main post-merge before the next dispatch.
 
-**`git stash` ABSOLUTE BINDING (R7 W3 hardening — supervisor 2026-05-23):**
+**`git stash` ABSOLUTE BINDING (R7 W3 hardening — supervisor 2026-05-23;
+R8 W4 pre-commit-hook authorization — supervisor 2026-05-24):**
 
 > Parallel-dispatch agents are FORBIDDEN from `git stash` in any form.
 > State-recovery uses targeted `git checkout -- <file>`, `git reset
@@ -168,9 +169,18 @@ reproducers re-verified on main post-merge before the next dispatch.
 > The shared `.git/refs/stash` stack is off-limits. Every dispatch
 > prompt for a parallel-worktree agent MUST include this verbatim.
 
-R7 W3 hit 5 violations (J.1, F, W17.3-4.2, J.2, D-α.2 × 2) under
-baseline-verification pressure — prior "serialize git-stash ops" form
-was too soft. Hard form is enforceable at dispatch-prompt-review.
+**Mechanical enforcement landed R8 W4 close 2026-05-24:** pre-commit
+hook at `.git/hooks/pre-commit` rejects any commit while `git stash
+list` is non-empty (shared across all worktrees via shared `.git/`).
+Recovery instructions baked into the hook's stderr message: `git
+stash pop` (or `git stash drop` if recovered) + `git stash clear` +
+retry commit. **Tested empirically:** stash present → hook fires +
+exit 1; stash empty → commit succeeds.
+
+R7 W3 + R8 W2 + R8 W3 + R8 W4 cumulative: 12 violations (5 + 3 + 1 +
+3 self-reported) under baseline-verification pressure despite the
+verbatim binding + worked-example. Pre-commit hook is the mechanical
+fallback per supervisor 2026-05-24 disposition.
 
 **Audit-day exception:** read-only audits (no source changes) can run in
 the main repo without worktrees provided they each write only their own
