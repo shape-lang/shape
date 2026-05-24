@@ -4,15 +4,15 @@
 /// Grids are stored as flat 1D arrays with manual index computation.
 /// Query points are provided as Mat<number> (Nx3 or Nx2).
 
-/// Clamp a value to [lo, hi].
-fn clamp<T: Ord>(x: T, lo: T, hi: T) -> T {
+/// Clamp an int value to [lo, hi].
+fn clamp_int(x: int, lo: int, hi: int) -> int {
     if x < lo { lo }
     else if x > hi { hi }
     else { x }
 }
 
-/// Linearly interpolate between two values.
-fn lerp<T: Add + Sub + Mul>(a: T, b: T, t: T) -> T {
+/// Linearly interpolate between two numbers.
+fn lerp_num(a: number, b: number, t: number) -> number {
     a + (b - a) * t
 }
 
@@ -27,66 +27,69 @@ fn lerp<T: Add + Sub + Mul>(a: T, b: T, t: T) -> T {
 ///
 /// @example
 /// trilinear([0,1,2,3,4,5,6,7], [2,2,2], [0,0,0], [1,1,1], points)
-pub fn trilinear(grid, shape, lo, hi, points) {
-    let nz = shape[0]
-    let ny = shape[1]
-    let nx = shape[2]
+pub fn trilinear(grid: Array<number>, shape: Array<int>, lo: Array<number>, hi: Array<number>, points: Mat<number>) {
+    let nz: int = shape[0]
+    let ny: int = shape[1]
+    let nx: int = shape[2]
+    let nxf: number = (nx - 1) as number
+    let nyf: number = (ny - 1) as number
+    let nzf: number = (nz - 1) as number
 
-    let n = points.shape()[0]
-    let mut result = []
-    let mut row = 0
+    let n: int = points.shape()[0]
+    let mut result: Array<number> = []
+    let mut row: int = 0
 
     while row < n {
-        let pt = points.row(row)
-        let px = pt[0]
-        let py = pt[1]
-        let pz = pt[2]
+        let pt: Array<number> = points.row(row)
+        let px: number = pt[0]
+        let py: number = pt[1]
+        let pz: number = pt[2]
 
         // Map world coords to grid coords
-        let gx = if nx > 1 { (px - lo[2]) / (hi[2] - lo[2]) * (nx - 1) } else { 0.0 }
-        let gy = if ny > 1 { (py - lo[1]) / (hi[1] - lo[1]) * (ny - 1) } else { 0.0 }
-        let gz = if nz > 1 { (pz - lo[0]) / (hi[0] - lo[0]) * (nz - 1) } else { 0.0 }
+        let gx: number = if nx > 1 { (px - lo[2]) / (hi[2] - lo[2]) * nxf } else { 0.0 }
+        let gy: number = if ny > 1 { (py - lo[1]) / (hi[1] - lo[1]) * nyf } else { 0.0 }
+        let gz: number = if nz > 1 { (pz - lo[0]) / (hi[0] - lo[0]) * nzf } else { 0.0 }
 
         // Integer indices
-        let ix0 = floor(gx)
-        let iy0 = floor(gy)
-        let iz0 = floor(gz)
+        let ix0: int = floor(gx) as int
+        let iy0: int = floor(gy) as int
+        let iz0: int = floor(gz) as int
 
         // Fractional parts
-        let fx = gx - ix0
-        let fy = gy - iy0
-        let fz = gz - iz0
+        let fx: number = gx - (ix0 as number)
+        let fy: number = gy - (iy0 as number)
+        let fz: number = gz - (iz0 as number)
 
         // Clamp indices
-        let ix0c = clamp(ix0, 0, nx - 1)
-        let ix1c = clamp(ix0 + 1, 0, nx - 1)
-        let iy0c = clamp(iy0, 0, ny - 1)
-        let iy1c = clamp(iy0 + 1, 0, ny - 1)
-        let iz0c = clamp(iz0, 0, nz - 1)
-        let iz1c = clamp(iz0 + 1, 0, nz - 1)
+        let ix0c: int = clamp_int(ix0, 0, nx - 1)
+        let ix1c: int = clamp_int(ix0 + 1, 0, nx - 1)
+        let iy0c: int = clamp_int(iy0, 0, ny - 1)
+        let iy1c: int = clamp_int(iy0 + 1, 0, ny - 1)
+        let iz0c: int = clamp_int(iz0, 0, nz - 1)
+        let iz1c: int = clamp_int(iz0 + 1, 0, nz - 1)
 
         // Look up 8 corner values: grid[iz * ny*nx + iy * nx + ix]
-        let c000 = grid[iz0c * ny * nx + iy0c * nx + ix0c]
-        let c001 = grid[iz0c * ny * nx + iy0c * nx + ix1c]
-        let c010 = grid[iz0c * ny * nx + iy1c * nx + ix0c]
-        let c011 = grid[iz0c * ny * nx + iy1c * nx + ix1c]
-        let c100 = grid[iz1c * ny * nx + iy0c * nx + ix0c]
-        let c101 = grid[iz1c * ny * nx + iy0c * nx + ix1c]
-        let c110 = grid[iz1c * ny * nx + iy1c * nx + ix0c]
-        let c111 = grid[iz1c * ny * nx + iy1c * nx + ix1c]
+        let c000: number = grid[iz0c * ny * nx + iy0c * nx + ix0c]
+        let c001: number = grid[iz0c * ny * nx + iy0c * nx + ix1c]
+        let c010: number = grid[iz0c * ny * nx + iy1c * nx + ix0c]
+        let c011: number = grid[iz0c * ny * nx + iy1c * nx + ix1c]
+        let c100: number = grid[iz1c * ny * nx + iy0c * nx + ix0c]
+        let c101: number = grid[iz1c * ny * nx + iy0c * nx + ix1c]
+        let c110: number = grid[iz1c * ny * nx + iy1c * nx + ix0c]
+        let c111: number = grid[iz1c * ny * nx + iy1c * nx + ix1c]
 
         // Interpolate along x
-        let c00 = lerp(c000, c001, fx)
-        let c01 = lerp(c010, c011, fx)
-        let c10 = lerp(c100, c101, fx)
-        let c11 = lerp(c110, c111, fx)
+        let c00 = lerp_num(c000, c001, fx)
+        let c01 = lerp_num(c010, c011, fx)
+        let c10 = lerp_num(c100, c101, fx)
+        let c11 = lerp_num(c110, c111, fx)
 
         // Interpolate along y
-        let c0 = lerp(c00, c01, fy)
-        let c1 = lerp(c10, c11, fy)
+        let c0 = lerp_num(c00, c01, fy)
+        let c1 = lerp_num(c10, c11, fy)
 
         // Interpolate along z
-        let val = lerp(c0, c1, fz)
+        let val = lerp_num(c0, c1, fz)
 
         result = result.push(val)
         row = row + 1
@@ -106,47 +109,49 @@ pub fn trilinear(grid, shape, lo, hi, points) {
 ///
 /// @example
 /// bilinear([0,1,2,3], [2,2], [0,0], [1,1], points)
-pub fn bilinear(grid, shape, lo, hi, points) {
-    let ny = shape[0]
-    let nx = shape[1]
+pub fn bilinear(grid: Array<number>, shape: Array<int>, lo: Array<number>, hi: Array<number>, points: Mat<number>) {
+    let ny: int = shape[0]
+    let nx: int = shape[1]
+    let nxf: number = (nx - 1) as number
+    let nyf: number = (ny - 1) as number
 
-    let n = points.shape()[0]
-    let mut result = []
-    let mut row = 0
+    let n: int = points.shape()[0]
+    let mut result: Array<number> = []
+    let mut row: int = 0
 
     while row < n {
-        let pt = points.row(row)
-        let px = pt[0]
-        let py = pt[1]
+        let pt: Array<number> = points.row(row)
+        let px: number = pt[0]
+        let py: number = pt[1]
 
         // Map world coords to grid coords
-        let gx = if nx > 1 { (px - lo[1]) / (hi[1] - lo[1]) * (nx - 1) } else { 0.0 }
-        let gy = if ny > 1 { (py - lo[0]) / (hi[0] - lo[0]) * (ny - 1) } else { 0.0 }
+        let gx: number = if nx > 1 { (px - lo[1]) / (hi[1] - lo[1]) * nxf } else { 0.0 }
+        let gy: number = if ny > 1 { (py - lo[0]) / (hi[0] - lo[0]) * nyf } else { 0.0 }
 
         // Integer indices
-        let ix0 = floor(gx)
-        let iy0 = floor(gy)
+        let ix0: int = floor(gx) as int
+        let iy0: int = floor(gy) as int
 
         // Fractional parts
-        let fx = gx - ix0
-        let fy = gy - iy0
+        let fx: number = gx - (ix0 as number)
+        let fy: number = gy - (iy0 as number)
 
         // Clamp indices
-        let ix0c = clamp(ix0, 0, nx - 1)
-        let ix1c = clamp(ix0 + 1, 0, nx - 1)
-        let iy0c = clamp(iy0, 0, ny - 1)
-        let iy1c = clamp(iy0 + 1, 0, ny - 1)
+        let ix0c: int = clamp_int(ix0, 0, nx - 1)
+        let ix1c: int = clamp_int(ix0 + 1, 0, nx - 1)
+        let iy0c: int = clamp_int(iy0, 0, ny - 1)
+        let iy1c: int = clamp_int(iy0 + 1, 0, ny - 1)
 
         // Look up 4 corner values: grid[iy * nx + ix]
-        let c00 = grid[iy0c * nx + ix0c]
-        let c01 = grid[iy0c * nx + ix1c]
-        let c10 = grid[iy1c * nx + ix0c]
-        let c11 = grid[iy1c * nx + ix1c]
+        let c00: number = grid[iy0c * nx + ix0c]
+        let c01: number = grid[iy0c * nx + ix1c]
+        let c10: number = grid[iy1c * nx + ix0c]
+        let c11: number = grid[iy1c * nx + ix1c]
 
         // Interpolate along x, then y
-        let c0 = lerp(c00, c01, fx)
-        let c1 = lerp(c10, c11, fx)
-        let val = lerp(c0, c1, fy)
+        let c0 = lerp_num(c00, c01, fx)
+        let c1 = lerp_num(c10, c11, fx)
+        let val = lerp_num(c0, c1, fy)
 
         result = result.push(val)
         row = row + 1
