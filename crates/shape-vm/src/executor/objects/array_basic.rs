@@ -43,7 +43,9 @@ use crate::executor::v2_handlers::v2_array_detect::{
 };
 use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
-use shape_value::{HeapKind, KindedSlot, NativeKind, ValueSlot, VMError};
+use shape_value::v2::heap_header::HEAP_KIND_V2_TYPED_ARRAY;
+use shape_value::v2::typed_array::{TypedArray, ELEM_TYPE_TYPED_OBJECT};
+use shape_value::{HeapKind, KindedSlot, NativeKind, TypedObjectStorage, ValueSlot, VMError};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // WS-8 kind-generic header-view helpers
@@ -76,30 +78,14 @@ fn pair_to_slot((bits, kind): (u64, NativeKind)) -> KindedSlot {
 // ═══════════════════════════════════════════════════════════════════════════
 // V3-S5 ckpt-5 surface-and-stop builder (legacy fallback)
 // ═══════════════════════════════════════════════════════════════════════════
-
-/// Surface-and-stop body for handlers that have not yet migrated to the
-/// kind-generic v2-raw `TypedArray<T>` carrier (zip remains here; reverse
-/// migrated R8 W3 J.5a via `reverse_array` primitive). These mutate the
-/// receiver or produce a new array — distinct from the WS-8 read-only
-/// header handlers.
-#[cold]
-#[inline(never)]
-fn ckpt5_surface(op: &'static str, args: &[KindedSlot]) -> VMError {
-    let receiver_kind = if args.is_empty() {
-        "<no args>".to_string()
-    } else {
-        format!("{:?}", args[0].kind)
-    };
-    VMError::NotImplemented(format!(
-        "Array<T>.{op} is not yet supported on the v2-raw TypedArray<T> \
-         carrier (receiver kind: {kind}). The kind-generic read-only header \
-         handlers (len / length / isEmpty / first / last) are wired; \
-         mutation/transform methods are scheduled for the v0.4 PHF-\
-         retirement workstream (W17 typed-carrier-monomorphization).",
-        op = op,
-        kind = receiver_kind,
-    ))
-}
+//
+// `ckpt5_surface` retired R8 W4 J.5d (2026-05-24) — zip was the last caller;
+// migrated to the Array<TypedObject> heap-fallback carrier per supervisor
+// D1 OPTION (c). Reverse migrated R8 W3 J.5a via `reverse_array`. If a
+// future site needs a new surface-and-stop body, prefer per-site inlined
+// `VMError::NotImplemented` over reviving this helper — the helper's
+// generic "scheduled for v0.4 PHF-retirement" message is no longer the
+// right surface signal.
 
 // ═══════════════════════════════════════════════════════════════════════════
 // WS-8 kind-generic header handlers
@@ -275,15 +261,141 @@ pub(crate) fn handle_pop_v2(
     }
 }
 
-/// `arr.zip(other)` — pairwise element zip. No `v2_array_detect` zip
-/// primitive at HEAD (zip output is a tuple-element carrier; v2-raw
-/// `TypedArray<T>` doesn't model tuples). J.4-rest territory.
+/// `arr.zip(other)` — pairwise element zip into `Array<Pair<A, B>>`.
+///
+/// **R8 W4 J.5d — Option (c) Array<Tuple> heap fallback (supervisor D1,
+/// 2026-05-24).** Materializes as `TypedArray<*const TypedObjectStorage>`
+/// (stamped `ELEM_TYPE_TYPED_OBJECT`); each element is a TypedObject with
+/// fields `_0` (from the receiver) and `_1` (from the argument). The
+/// `_0` / `_1` schema is auto-registered (or retrieved) via
+/// `shape_runtime::type_schema::typed_object_from_pairs`, mirroring the
+/// W17-typed-carrier-bundle-A `{key, value}` Entry precedent for
+/// `HashMap.entries()`.
+///
+/// **Carrier rationale — supervisor D1 binding:** Tuples are not a
+/// first-class heap value at HEAD (no `HeapKind::Tuple`, no `Expr::Tuple`
+/// literal). Option (a) general `TypedArray<TupleN<T1,...,Tn>>` carrier is
+/// the v0.4 promotion (touches ADR-006 §2.7.24 typed-carrier-
+/// monomorphization). Option (b) `HeapKind::ZippedArray` REFUSED per
+/// CLAUDE.md §Forbidden-Patterns parallel-implementation rule + ADR-005
+/// §1 single-discriminator debt. Option (d) defer-to-v0.4 REFUSED per
+/// stdlib API gap. The (c) heap-allocation-per-tuple cost is the
+/// accepted v0.3 trade-off — zip is not a hot path. **v0.4 promotes to
+/// (a) general `TypedArray<TupleN>` as a typed-carrier-monomorphization
+/// workstream.**
+///
+/// **Length:** `min(a.len, b.len)` — common stdlib precedent
+/// (JS Array.zip / Rust Iterator::zip / Python zip).
+///
+/// **Refcount discipline:** `typed_object_from_pairs` clones each element
+/// `KindedSlot` (bumping any heap refcount), transfers the share into the
+/// constructed TypedObject's slot, and returns a `KindedSlot` owning a
+/// share of the freshly-allocated `*const TypedObjectStorage` (refcount=1
+/// on the on-header counter). We extract `bits` via `slot().raw()` +
+/// `mem::forget` to transfer the share into the result array's element
+/// buffer without double-drop; the array's stamp + `read_element`
+/// `V2ElemType::TypedObject` arm handle subsequent retain/release via
+/// the on-header `v2_retain` / `v2_release` (`HeapElement` trait).
 pub(crate) fn handle_zip_v2(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(ckpt5_surface("zip", args))
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "Array.zip expects 1 argument".into(),
+        ));
+    }
+    let a = extract_typed_array_view(&args[0]).ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "Array.zip: expected v2 TypedArray receiver, got kind {:?}",
+            args[0].kind
+        ))
+    })?;
+    let b = extract_typed_array_view(&args[1]).ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "Array.zip: expected v2 TypedArray argument, got kind {:?}",
+            args[1].kind
+        ))
+    })?;
+
+    let out_len = a.len.min(b.len);
+
+    // SAFETY: allocate `TypedArray<*const TypedObjectStorage>` with capacity
+    // = out_len; stamp `ELEM_TYPE_TYPED_OBJECT` so subsequent reads dispatch
+    // through the `V2ElemType::TypedObject` arm. The buffer is owned by the
+    // allocated array; each element slot will be initialized below.
+    let new_arr = TypedArray::<*const TypedObjectStorage>::with_capacity(out_len);
+    let dst_data = unsafe { (*new_arr).data };
+
+    for i in 0..out_len {
+        // Read element pairs (bits, kind). `read_element` retains heap
+        // elements (String / Decimal / TypedObject) on the producer side
+        // per its docstring — the share is owned by the caller and must
+        // be transferred into the TypedObject's slot via the standard
+        // `typed_object_from_pairs` clone-and-forget recipe.
+        let (a_bits, a_kind) = read_element(&a, i).ok_or_else(|| {
+            VMError::RuntimeError(format!("Array.zip: failed to read receiver element {}", i))
+        })?;
+        let (b_bits, b_kind) = read_element(&b, i).ok_or_else(|| {
+            VMError::RuntimeError(format!("Array.zip: failed to read argument element {}", i))
+        })?;
+        let a_slot = KindedSlot::new(ValueSlot::from_raw(a_bits), a_kind);
+        let b_slot = KindedSlot::new(ValueSlot::from_raw(b_bits), b_kind);
+
+        // Build a `Pair<A, B>` TypedObject with fields `_0` / `_1`
+        // (Rust-tuple convention). The schema is auto-registered on
+        // first use via `lookup_schema_for_fields` → `register_
+        // predeclared_any_schema` with `FieldType::Any` columns; subsequent
+        // calls hit the registry cache. `typed_object_from_pairs` clones
+        // each input slot (bumping any heap refcount), so a_slot/b_slot's
+        // shares — owned by us — must be dropped via the explicit
+        // `drop_with_kind` lockstep that `KindedSlot::Drop` performs.
+        let pair = shape_runtime::type_schema::typed_object_from_pairs(&[
+            ("_0", a_slot),
+            ("_1", b_slot),
+        ]);
+        if pair.kind != NativeKind::Ptr(HeapKind::TypedObject) {
+            return Err(VMError::RuntimeError(format!(
+                "Array.zip: typed_object_from_pairs returned unexpected kind {:?}",
+                pair.kind
+            )));
+        }
+        let pair_ptr = pair.slot.raw() as usize as *const TypedObjectStorage;
+        // Transfer the `pair` share into the destination buffer without
+        // dropping it — `KindedSlot::Drop` would otherwise release the
+        // refcount we just gave the array. Mirror of the recipe at
+        // `type_schema/mod.rs::typed_object_from_pairs` body for
+        // per-field slot construction.
+        std::mem::forget(pair);
+        unsafe {
+            *dst_data.add(i as usize) = pair_ptr;
+        }
+    }
+
+    unsafe {
+        (*new_arr).len = out_len;
+    }
+    let p = new_arr as *mut u8;
+    unsafe {
+        crate::executor::v2_handlers::v2_array_detect::stamp_elem_type(
+            p,
+            ELEM_TYPE_TYPED_OBJECT,
+        );
+    }
+    // The on-header `kind` byte is already `HEAP_KIND_V2_TYPED_ARRAY` from
+    // `TypedArray::with_capacity` → `HeapHeader::new(HEAP_KIND_V2_TYPED_ARRAY)`;
+    // assert as a debug-only sanity check.
+    debug_assert_eq!(
+        unsafe { (*(p as *const shape_value::HeapHeader)).kind },
+        HEAP_KIND_V2_TYPED_ARRAY,
+        "Array.zip: freshly-allocated TypedArray header kind mismatch"
+    );
+
+    Ok(KindedSlot::new(
+        ValueSlot::from_u64(p as usize as u64),
+        NativeKind::Ptr(HeapKind::TypedArray),
+    ))
 }
 
 /// `arr.clone()` — deep-clone the receiver array. Kind-generic via
