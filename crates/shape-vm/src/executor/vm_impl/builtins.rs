@@ -838,6 +838,147 @@ impl VirtualMachine {
                         builtin
                     );
                 }
+                BuiltinFunction::FStringContentText => {
+                    // R8 W4 W18.4: wrap a string as `ContentNode::plain` for
+                    // literal segments of a styled f-string.
+                    let args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    if args.len() != 1 {
+                        return Err(VMError::RuntimeError(format!(
+                            "FStringContentText requires exactly 1 argument \
+                             (string), got {}",
+                            args.len()
+                        )));
+                    }
+                    let s = args[0].as_str().ok_or_else(|| {
+                        VMError::RuntimeError(format!(
+                            "FStringContentText argument must be a string \
+                             (got kind {:?})",
+                            args[0].kind
+                        ))
+                    })?;
+                    let node = shape_value::content::ContentNode::plain(s);
+                    let result =
+                        KindedSlot::from_content(std::sync::Arc::new(node));
+                    self.push_kinded_slot(result)?;
+                }
+                BuiltinFunction::FStringContentStyledText => {
+                    // R8 W4 W18.4: wrap a string as a styled
+                    // `ContentNode::Text` (single span). Args:
+                    // `[value_str, fg_kind, fg_payload, bg_kind, bg_payload,
+                    //   flags]` (see opcode_defs comment for encoding).
+                    let args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    if args.len() != 6 {
+                        return Err(VMError::RuntimeError(format!(
+                            "FStringContentStyledText requires 6 arguments \
+                             (value, fg_kind, fg_payload, bg_kind, \
+                             bg_payload, flags), got {}",
+                            args.len()
+                        )));
+                    }
+                    let value = args[0].as_str().ok_or_else(|| {
+                        VMError::RuntimeError(format!(
+                            "FStringContentStyledText value must be a string \
+                             (got kind {:?})",
+                            args[0].kind
+                        ))
+                    })?;
+                    let fg_kind = args[1].as_i64().ok_or_else(|| {
+                        VMError::RuntimeError(
+                            "FStringContentStyledText fg_kind must be int"
+                                .to_string(),
+                        )
+                    })?;
+                    let fg_payload = args[2].as_i64().ok_or_else(|| {
+                        VMError::RuntimeError(
+                            "FStringContentStyledText fg_payload must be int"
+                                .to_string(),
+                        )
+                    })?;
+                    let bg_kind = args[3].as_i64().ok_or_else(|| {
+                        VMError::RuntimeError(
+                            "FStringContentStyledText bg_kind must be int"
+                                .to_string(),
+                        )
+                    })?;
+                    let bg_payload = args[4].as_i64().ok_or_else(|| {
+                        VMError::RuntimeError(
+                            "FStringContentStyledText bg_payload must be int"
+                                .to_string(),
+                        )
+                    })?;
+                    let flags = args[5].as_i64().ok_or_else(|| {
+                        VMError::RuntimeError(
+                            "FStringContentStyledText flags must be int"
+                                .to_string(),
+                        )
+                    })?;
+
+                    let style = decode_fstring_style(
+                        fg_kind, fg_payload, bg_kind, bg_payload, flags,
+                    )?;
+                    let node = shape_value::content::ContentNode::styled(
+                        value, style,
+                    );
+                    let result =
+                        KindedSlot::from_content(std::sync::Arc::new(node));
+                    self.push_kinded_slot(result)?;
+                }
+                BuiltinFunction::FStringContentFragment => {
+                    // R8 W4 W18.4: combine N content nodes into a Fragment.
+                    // Per ADR-006 §2.3 v2-raw-heap: `Ptr(HeapKind::Content)`
+                    // slots store `Arc::into_raw(Arc<ContentNode>)` bits
+                    // directly (NOT a `Box<HeapValue>` wrapper). Classify
+                    // on `args[i].kind`, then deref the raw `*const
+                    // ContentNode` (mirror of `printing.rs::format_heap_
+                    // kind`'s Content arm and the `Arc::decrement_strong_
+                    // count::<ContentNode>` in `heap_value.rs::drop_with_
+                    // kind` HeapKind::Content arm).
+                    let args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    let mut nodes: Vec<shape_value::content::ContentNode> =
+                        Vec::with_capacity(args.len());
+                    for (i, arg) in args.iter().enumerate() {
+                        if arg.kind
+                            != shape_value::NativeKind::Ptr(
+                                shape_value::HeapKind::Content,
+                            )
+                        {
+                            return Err(VMError::RuntimeError(format!(
+                                "FStringContentFragment arg #{} must be a \
+                                 content value (got kind {:?})",
+                                i, arg.kind
+                            )));
+                        }
+                        let bits = arg.slot.raw();
+                        if bits == 0 {
+                            return Err(VMError::RuntimeError(format!(
+                                "FStringContentFragment arg #{} is a null \
+                                 content pointer",
+                                i
+                            )));
+                        }
+                        // SAFETY: per the `KindedSlot::from_content`
+                        // construction contract (and §heap_value.rs::
+                        // drop_with_kind HeapKind::Content arm), a
+                        // `Ptr(HeapKind::Content)` slot's bits are
+                        // `Arc::into_raw(Arc<ContentNode>)`. The borrow is
+                        // bounded by `args`'s lifetime; the underlying
+                        // share survives because `args[i]` still owns it.
+                        // We deep-clone the `ContentNode` (cheap — the
+                        // node enum carries owned strings + Vecs) into the
+                        // Fragment because the receiving Vec owns its
+                        // elements.
+                        let node: &shape_value::content::ContentNode = unsafe {
+                            &*(bits as *const shape_value::content::ContentNode)
+                        };
+                        nodes.push(node.clone());
+                    }
+                    let node = shape_value::content::ContentNode::Fragment(
+                        nodes,
+                    );
+                    let result =
+                        KindedSlot::from_content(std::sync::Arc::new(node));
+                    self.push_kinded_slot(result)?;
+                }
                 // ── Wave 5e: DateTime constructor builtins ────────────────
                 //
                 // DateTime values are `HeapValue::Temporal` carrying
@@ -1288,3 +1429,150 @@ impl VirtualMachine {
 // in the PHF method-dispatch handlers' own test surface
 // (`typed_array_methods` / `array_aggregation` / `typed_int_array_methods`
 // / `typed_number_array_methods`) — single discriminator per ADR-005 §1.
+
+// ===== R8 W4 W18.4: f-string styled-content lowering helpers =====
+//
+// (supervisor 2026-05-24 D1 + (a-modified) REVIVE-WITH-SHARED-MODULE)
+//
+// The compiler at `compiler/string_interpolation.rs` lowers each styled
+// interpolation `{x:bold,red}` to a `FStringContentStyledText` builtin
+// call whose i64-encoded payload is decoded here back into a
+// `shape_value::content::Style`.
+
+const FSTRING_COLOR_NONE: i64 = -1;
+const FSTRING_COLOR_NAMED: i64 = 0;
+const FSTRING_COLOR_RGB: i64 = 1;
+
+const FSTRING_FLAG_BOLD: i64 = 1;
+const FSTRING_FLAG_ITALIC: i64 = 2;
+const FSTRING_FLAG_UNDERLINE: i64 = 4;
+const FSTRING_FLAG_DIM: i64 = 8;
+
+fn decode_fstring_color(kind: i64, payload: i64) -> Result<Option<shape_value::content::Color>, VMError> {
+    use shape_value::content::{Color, NamedColor};
+    match kind {
+        FSTRING_COLOR_NONE => Ok(None),
+        FSTRING_COLOR_NAMED => {
+            let named = match payload {
+                0 => NamedColor::Red,
+                1 => NamedColor::Green,
+                2 => NamedColor::Blue,
+                3 => NamedColor::Yellow,
+                4 => NamedColor::Magenta,
+                5 => NamedColor::Cyan,
+                6 => NamedColor::White,
+                7 => NamedColor::Default,
+                other => {
+                    return Err(VMError::RuntimeError(format!(
+                        "decode_fstring_color: invalid named-color id {}",
+                        other
+                    )));
+                }
+            };
+            Ok(Some(Color::Named(named)))
+        }
+        FSTRING_COLOR_RGB => {
+            let r = ((payload >> 16) & 0xFF) as u8;
+            let g = ((payload >> 8) & 0xFF) as u8;
+            let b = (payload & 0xFF) as u8;
+            Ok(Some(Color::Rgb(r, g, b)))
+        }
+        other => Err(VMError::RuntimeError(format!(
+            "decode_fstring_color: invalid color kind {}",
+            other
+        ))),
+    }
+}
+
+fn decode_fstring_style(
+    fg_kind: i64,
+    fg_payload: i64,
+    bg_kind: i64,
+    bg_payload: i64,
+    flags: i64,
+) -> Result<shape_value::content::Style, VMError> {
+    Ok(shape_value::content::Style {
+        fg: decode_fstring_color(fg_kind, fg_payload)?,
+        bg: decode_fstring_color(bg_kind, bg_payload)?,
+        bold: (flags & FSTRING_FLAG_BOLD) != 0,
+        italic: (flags & FSTRING_FLAG_ITALIC) != 0,
+        underline: (flags & FSTRING_FLAG_UNDERLINE) != 0,
+        dim: (flags & FSTRING_FLAG_DIM) != 0,
+    })
+}
+
+#[cfg(test)]
+mod fstring_decode_tests {
+    use super::*;
+
+    #[test]
+    fn decode_color_none() {
+        assert_eq!(decode_fstring_color(FSTRING_COLOR_NONE, 0).unwrap(), None);
+    }
+
+    #[test]
+    fn decode_color_named_red() {
+        use shape_value::content::{Color, NamedColor};
+        assert_eq!(
+            decode_fstring_color(FSTRING_COLOR_NAMED, 0).unwrap(),
+            Some(Color::Named(NamedColor::Red))
+        );
+    }
+
+    #[test]
+    fn decode_color_rgb_roundtrip() {
+        use shape_value::content::Color;
+        // (10 << 16) | (20 << 8) | 30
+        let payload = (10 << 16) | (20 << 8) | 30;
+        assert_eq!(
+            decode_fstring_color(FSTRING_COLOR_RGB, payload).unwrap(),
+            Some(Color::Rgb(10, 20, 30))
+        );
+    }
+
+    #[test]
+    fn decode_style_bold_red() {
+        use shape_value::content::{Color, NamedColor};
+        let style = decode_fstring_style(
+            FSTRING_COLOR_NAMED,
+            0, // Red
+            FSTRING_COLOR_NONE,
+            0,
+            FSTRING_FLAG_BOLD,
+        )
+        .unwrap();
+        assert!(style.bold);
+        assert!(!style.italic);
+        assert_eq!(style.fg, Some(Color::Named(NamedColor::Red)));
+        assert_eq!(style.bg, None);
+    }
+
+    #[test]
+    fn decode_style_all_flags() {
+        let style = decode_fstring_style(
+            FSTRING_COLOR_NONE,
+            0,
+            FSTRING_COLOR_NONE,
+            0,
+            FSTRING_FLAG_BOLD
+                | FSTRING_FLAG_ITALIC
+                | FSTRING_FLAG_UNDERLINE
+                | FSTRING_FLAG_DIM,
+        )
+        .unwrap();
+        assert!(style.bold);
+        assert!(style.italic);
+        assert!(style.underline);
+        assert!(style.dim);
+    }
+
+    #[test]
+    fn decode_color_invalid_kind() {
+        assert!(decode_fstring_color(99, 0).is_err());
+    }
+
+    #[test]
+    fn decode_color_invalid_named_id() {
+        assert!(decode_fstring_color(FSTRING_COLOR_NAMED, 99).is_err());
+    }
+}

@@ -2404,6 +2404,24 @@ pub enum BuiltinFunction {
     /// Format a value using a typed interpolation format spec.
     /// Used by string interpolation for spec-aware rendering (fixed/table).
     FormatValueWithSpec,
+    /// R8 W4 W18.4 (supervisor 2026-05-24 D1 + (a-modified) REVIVE-WITH-
+    /// SHARED-MODULE): wrap a stack-top string as a plain (unstyled)
+    /// `ContentNode::Text` for f-string content-lowering. Pops `[string]`,
+    /// pushes `Ptr(HeapKind::Content)`. Used for literal segments of a
+    /// styled f-string (e.g. the `"hello "` in `f"hello {x:bold,red}"`).
+    FStringContentText,
+    /// R8 W4 W18.4: wrap a stack-top string as a styled `ContentNode::Text`
+    /// with the encoded style. Pops `[value_str, fg_kind, fg_payload,
+    /// bg_kind, bg_payload, flags]` (6 args). `fg_kind`/`bg_kind`: -1=none,
+    /// 0=named, 1=rgb. `fg_payload`/`bg_payload`: named-color id 0..7 or
+    /// `(r<<16)|(g<<8)|b`. `flags`: bitmask (bold=1, italic=2, underline=4,
+    /// dim=8). Pushes `Ptr(HeapKind::Content)`.
+    FStringContentStyledText,
+    /// R8 W4 W18.4: combine N stack content values into a
+    /// `ContentNode::Fragment`. Pops N `Ptr(HeapKind::Content)` slots,
+    /// pushes the fragment. The arg-count slot encodes N per the standard
+    /// `pop_builtin_args` ABI.
+    FStringContentFragment,
 
     // Optimization
     IntrinsicMinimize,
@@ -2699,6 +2717,10 @@ impl BuiltinFunction {
             // Format (2)
             BuiltinFunction::FormatValueWithMeta,
             BuiltinFunction::FormatValueWithSpec,
+            // R8 W4 W18.4: f-string content-lowering builtins (3)
+            BuiltinFunction::FStringContentText,
+            BuiltinFunction::FStringContentStyledText,
+            BuiltinFunction::FStringContentFragment,
             // Optimization
             BuiltinFunction::IntrinsicMinimize,
             // Math intrinsics (6) — W12-stdlib-intrinsic-collapse close

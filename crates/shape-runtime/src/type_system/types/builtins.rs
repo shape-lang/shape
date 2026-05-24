@@ -21,6 +21,15 @@ impl BuiltinTypes {
         Type::Concrete(TypeAnnotation::Basic("string".to_string()))
     }
 
+    /// R8 W4 W18.4 (supervisor 2026-05-24 D1 + (a-modified)): the f-string
+    /// styled return type. Used when the f-string contains at least one
+    /// `ContentStyle` interpolation per the syntax-determined inference
+    /// rule. Surface name `"content"` matches the `Content` trait /
+    /// `HeapKind::Content` value family.
+    pub fn content() -> Type {
+        Type::Concrete(TypeAnnotation::Basic("content".to_string()))
+    }
+
     pub fn char() -> Type {
         Type::Concrete(TypeAnnotation::Basic("char".to_string()))
     }

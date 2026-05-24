@@ -6,6 +6,7 @@
 use crate::bytecode::{BuiltinFunction, Constant, Instruction, OpCode, Operand};
 use crate::compiler::BytecodeCompiler;
 use shape_ast::ast::InterpolationMode;
+use shape_ast::content_style::{ColorSpec, ContentFormatSpec, NamedContentColor};
 use shape_ast::error::{Result, ShapeError};
 use shape_ast::interpolation::{
     FormatAlignment, FormatColor, InterpolationFormatSpec, InterpolationPart,
@@ -15,6 +16,74 @@ pub use shape_ast::interpolation::{has_interpolation, has_interpolation_with_mod
 
 const FORMAT_SPEC_FIXED: i64 = 1;
 const FORMAT_SPEC_TABLE: i64 = 2;
+
+// R8 W4 W18.4: encoding constants mirroring `executor/vm_impl/builtins.rs`
+// `decode_fstring_*` helpers. Keep these in lockstep.
+const FSTRING_COLOR_NONE: i64 = -1;
+const FSTRING_COLOR_NAMED: i64 = 0;
+const FSTRING_COLOR_RGB: i64 = 1;
+
+const FSTRING_FLAG_BOLD: i64 = 1;
+const FSTRING_FLAG_ITALIC: i64 = 2;
+const FSTRING_FLAG_UNDERLINE: i64 = 4;
+const FSTRING_FLAG_DIM: i64 = 8;
+
+fn encode_color_args(color: Option<&ColorSpec>) -> (i64, i64) {
+    match color {
+        None => (FSTRING_COLOR_NONE, 0),
+        Some(ColorSpec::Named(named)) => {
+            let id: i64 = match named {
+                NamedContentColor::Red => 0,
+                NamedContentColor::Green => 1,
+                NamedContentColor::Blue => 2,
+                NamedContentColor::Yellow => 3,
+                NamedContentColor::Magenta => 4,
+                NamedContentColor::Cyan => 5,
+                NamedContentColor::White => 6,
+                NamedContentColor::Default => 7,
+            };
+            (FSTRING_COLOR_NAMED, id)
+        }
+        Some(ColorSpec::Rgb(r, g, b)) => {
+            let payload = ((*r as i64) << 16) | ((*g as i64) << 8) | (*b as i64);
+            (FSTRING_COLOR_RGB, payload)
+        }
+    }
+}
+
+fn encode_flag_bits(spec: &ContentFormatSpec) -> i64 {
+    let mut bits: i64 = 0;
+    if spec.bold {
+        bits |= FSTRING_FLAG_BOLD;
+    }
+    if spec.italic {
+        bits |= FSTRING_FLAG_ITALIC;
+    }
+    if spec.underline {
+        bits |= FSTRING_FLAG_UNDERLINE;
+    }
+    if spec.dim {
+        bits |= FSTRING_FLAG_DIM;
+    }
+    bits
+}
+
+/// R8 W4 W18.4: presence-test for any `ContentStyle` arm in a parsed
+/// f-string. Drives the D1 syntax-determined `string` → `content` flip:
+/// if any interpolation part carries a content-styling spec, the whole
+/// f-string lowers through the `ContentNode::Fragment` path and the
+/// inference engine reports `content` as the return type.
+pub fn has_content_style_spec(parts: &[InterpolationPart]) -> bool {
+    parts.iter().any(|p| {
+        matches!(
+            p,
+            InterpolationPart::Expression {
+                format_spec: Some(InterpolationFormatSpec::ContentStyle(_)),
+                ..
+            }
+        )
+    })
+}
 
 impl BytecodeCompiler {
     fn emit_interpolation_format_call(
@@ -55,6 +124,22 @@ impl BytecodeCompiler {
                     OpCode::BuiltinCall,
                     Some(Operand::Builtin(BuiltinFunction::FormatValueWithSpec)),
                 ));
+            }
+            Some(InterpolationFormatSpec::ContentStyle(_)) => {
+                // Unreachable on the string-concat lowering path:
+                // `compile_interpolated_string_expression` dispatches to
+                // the content-fragment path BEFORE this is called when any
+                // part has a `ContentStyle` spec. Reaching here means the
+                // dispatch decision is out of sync with this match — a
+                // compiler bug, not user error.
+                return Err(ShapeError::RuntimeError {
+                    message: "internal: ContentStyle reached \
+                              string-concat emitter — \
+                              compile_interpolated_string_expression \
+                              dispatch is out of sync"
+                        .to_string(),
+                    location: None,
+                });
             }
             Some(InterpolationFormatSpec::Table(spec)) => {
                 // Args: [value, spec_tag, max_rows, align, precision, color, border]
@@ -134,13 +219,16 @@ impl BytecodeCompiler {
         Ok(())
     }
 
-    /// Compile an interpolated string, producing a single string value on the stack.
+    /// Compile an interpolated string. Per R8 W4 W18.4 (supervisor
+    /// 2026-05-24 D1 + (a-modified) REVIVE-WITH-SHARED-MODULE), the
+    /// lowering shape is syntax-determined:
     ///
-    /// For `text {expr} more`:
-    /// 1. Push literal `text `
-    /// 2. Compile expression, call `FormatValueWithMeta`
-    /// 3. Concatenate with `Add`
-    /// 4. Continue for remaining parts
+    /// - If NO part carries a `ContentStyle` spec: traditional
+    ///   string-concat path (preserves the `string` return type used by
+    ///   500+ existing call sites).
+    /// - If ANY part carries a `ContentStyle` spec: lower to a
+    ///   `ContentNode::Fragment` of styled/plain text nodes; return type
+    ///   is `content` (`Ptr(HeapKind::Content)`).
     pub(in crate::compiler) fn compile_interpolated_string_expression(
         &mut self,
         s: &str,
@@ -148,6 +236,21 @@ impl BytecodeCompiler {
     ) -> Result<()> {
         let parts = parse_interpolation_with_mode(s, mode)?;
 
+        if has_content_style_spec(&parts) {
+            self.compile_interpolated_string_as_content(&parts)
+        } else {
+            self.compile_interpolated_string_as_string(parts)
+        }
+    }
+
+    /// Original f-string lowering path: every part lowers to a string,
+    /// concatenated via `StringConcat`. Preserved verbatim from pre-W18.4
+    /// behaviour — every existing call site without styling syntax stays
+    /// on this path.
+    fn compile_interpolated_string_as_string(
+        &mut self,
+        parts: Vec<InterpolationPart>,
+    ) -> Result<()> {
         if parts.is_empty() {
             // Empty string
             let const_idx = self.program.add_constant(Constant::String(String::new()));
@@ -200,6 +303,158 @@ impl BytecodeCompiler {
         }
 
         Ok(())
+    }
+
+    /// R8 W4 W18.4 content-fragment lowering:
+    /// 1. For each plain literal part: push the string, call
+    ///    `FStringContentText` → `ContentNode::Text` plain span on stack.
+    /// 2. For each expression with NO styling: compile expr →
+    ///    `FormatValueWithMeta` to string → `FStringContentText`.
+    /// 3. For each expression WITH `ContentStyle` spec: compile expr →
+    ///    `FormatValueWithMeta` to string → push encoded style args →
+    ///    `FStringContentStyledText` → styled `ContentNode::Text` on stack.
+    /// 4. After all parts emitted: push count → `FStringContentFragment`
+    ///    → `ContentNode::Fragment` on stack.
+    fn compile_interpolated_string_as_content(
+        &mut self,
+        parts: &[InterpolationPart],
+    ) -> Result<()> {
+        if parts.is_empty() {
+            // Empty f-string with no parts shouldn't reach here (we only
+            // dispatch when content-style is present), but be defensive:
+            // emit a plain empty content text.
+            self.emit_empty_content_text()?;
+            return Ok(());
+        }
+
+        let part_count = parts.len();
+
+        for part in parts {
+            match part {
+                InterpolationPart::Literal(text) => {
+                    // Push literal string, then FStringContentText.
+                    let const_idx =
+                        self.program.add_constant(Constant::String(text.clone()));
+                    self.emit(Instruction::new(
+                        OpCode::PushConst,
+                        Some(Operand::Const(const_idx)),
+                    ));
+                    self.emit_fstring_content_text_call()?;
+                }
+                InterpolationPart::Expression { expr, format_spec } => {
+                    let parsed_expr =
+                        shape_ast::parser::parse_expression_str(expr).map_err(|e| {
+                            ShapeError::RuntimeError {
+                                message: format!(
+                                    "Failed to parse expression '{}' in \
+                                     interpolation: {}",
+                                    expr, e
+                                ),
+                                location: None,
+                            }
+                        })?;
+                    self.compile_expr(&parsed_expr)?;
+
+                    match format_spec {
+                        Some(InterpolationFormatSpec::ContentStyle(spec)) => {
+                            // Convert expression value to string first.
+                            self.emit_format_value_with_meta()?;
+                            // Then emit FStringContentStyledText with
+                            // encoded style payload.
+                            self.emit_fstring_content_styled_text(spec)?;
+                        }
+                        _ => {
+                            // Plain or fixed/table-spec'd expression: route
+                            // through the existing format path to a string,
+                            // then wrap as plain content.
+                            self.emit_interpolation_format_call(
+                                format_spec.as_ref(),
+                            )?;
+                            self.emit_fstring_content_text_call()?;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Combine all part-results into a Fragment.
+        let count_idx = self
+            .program
+            .add_constant(Constant::Int(part_count as i64));
+        self.emit(Instruction::new(
+            OpCode::PushConst,
+            Some(Operand::Const(count_idx)),
+        ));
+        self.emit(Instruction::new(
+            OpCode::BuiltinCall,
+            Some(Operand::Builtin(BuiltinFunction::FStringContentFragment)),
+        ));
+
+        Ok(())
+    }
+
+    fn emit_format_value_with_meta(&mut self) -> Result<()> {
+        let count = self.program.add_constant(Constant::Int(1));
+        self.emit(Instruction::new(
+            OpCode::PushConst,
+            Some(Operand::Const(count)),
+        ));
+        self.emit(Instruction::new(
+            OpCode::BuiltinCall,
+            Some(Operand::Builtin(BuiltinFunction::FormatValueWithMeta)),
+        ));
+        Ok(())
+    }
+
+    fn emit_fstring_content_text_call(&mut self) -> Result<()> {
+        let count = self.program.add_constant(Constant::Int(1));
+        self.emit(Instruction::new(
+            OpCode::PushConst,
+            Some(Operand::Const(count)),
+        ));
+        self.emit(Instruction::new(
+            OpCode::BuiltinCall,
+            Some(Operand::Builtin(BuiltinFunction::FStringContentText)),
+        ));
+        Ok(())
+    }
+
+    fn emit_fstring_content_styled_text(
+        &mut self,
+        spec: &ContentFormatSpec,
+    ) -> Result<()> {
+        // Stack on entry: [value_str]. Push 5 i64 style args, then 6 as
+        // arg-count, then BuiltinCall.
+        let (fg_kind, fg_payload) = encode_color_args(spec.fg.as_ref());
+        let (bg_kind, bg_payload) = encode_color_args(spec.bg.as_ref());
+        let flags = encode_flag_bits(spec);
+
+        for v in [fg_kind, fg_payload, bg_kind, bg_payload, flags] {
+            let idx = self.program.add_constant(Constant::Int(v));
+            self.emit(Instruction::new(
+                OpCode::PushConst,
+                Some(Operand::Const(idx)),
+            ));
+        }
+        let count_idx = self.program.add_constant(Constant::Int(6));
+        self.emit(Instruction::new(
+            OpCode::PushConst,
+            Some(Operand::Const(count_idx)),
+        ));
+        self.emit(Instruction::new(
+            OpCode::BuiltinCall,
+            Some(Operand::Builtin(BuiltinFunction::FStringContentStyledText)),
+        ));
+        Ok(())
+    }
+
+    fn emit_empty_content_text(&mut self) -> Result<()> {
+        let const_idx = self.program.add_constant(Constant::String(String::new()));
+        self.emit(Instruction::new(
+            OpCode::PushConst,
+            Some(Operand::Const(const_idx)),
+        ));
+        self.emit_fstring_content_text_call()
     }
 
 }

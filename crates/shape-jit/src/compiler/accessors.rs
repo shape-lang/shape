@@ -409,6 +409,13 @@ const ALL_BUILTINS: &[BuiltinFunction] = &[
     // Format (2)
     BuiltinFunction::FormatValueWithMeta,
     BuiltinFunction::FormatValueWithSpec,
+    // R8 W4 W18.4 (supervisor 2026-05-24 D1 + (a-modified)
+    // REVIVE-WITH-SHARED-MODULE): f-string content-lowering (3).
+    // VM-dispatched today; registered here to keep
+    // `build_full_opcode_parity_matrix` exhaustive.
+    BuiltinFunction::FStringContentText,
+    BuiltinFunction::FStringContentStyledText,
+    BuiltinFunction::FStringContentFragment,
     // Math intrinsics (5)
     // W12-stdlib-intrinsic-collapse (Wave-2-Agent-G, 2026-05-14):
     // `IntrinsicSum` deleted — PHF `.sum()` is canonical (ADR-005 §1).
