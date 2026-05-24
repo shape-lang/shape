@@ -2507,6 +2507,16 @@ impl BytecodeCompiler {
             self.register_function(&func_def)?;
             self.compile_function(&func_def)?;
 
+            // Capture frame descriptor for the annotation handler function.
+            // Mirrors functions.rs:1750 — required for v2 typed opcode verification
+            // (ADR-006 §2.7.5.1) and JIT deoptimization map construction. Without
+            // this, v2 typed opcodes emitted in the handler body (e.g. NewTypedArrayI64,
+            // TypedArrayPushI64 from CoW array mutations) fail verification and the
+            // JIT SEGFAULTs on deopt paths.
+            let func_idx = self.program.functions.len() - 1;
+            self.program.functions[func_idx].locals_count = self.next_local;
+            self.capture_function_local_storage_hints(func_idx);
+
             let func_id = (self.program.functions.len() - 1) as u16;
 
             match handler.handler_type {
