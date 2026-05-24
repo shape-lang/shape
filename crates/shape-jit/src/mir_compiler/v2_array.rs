@@ -123,6 +123,99 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         }
     }
 
+    /// R8 W8 jit-aliased-cow-push v0.3 surface-and-stop helper.
+    ///
+    /// Scan ALL statements in ALL blocks of the current MIR function for
+    /// any `Operand::Move(Place::Local(slot))` or
+    /// `Operand::MoveExplicit(Place::Local(slot))` occurrence. Returns
+    /// true on first hit.
+    ///
+    /// Used by the typed-array `.push()` inline codegen to detect the
+    /// aliased-CoW SEGFAULT shape (see audit
+    /// `docs/cluster-audits/v0.3-r8w7-jit-aliased-cow-segfault-audit.md`
+    /// §3 / §6): when the receiver slot has been previously moved out of
+    /// (e.g. via `let alias = data` MIR-lowering at
+    /// `crates/shape-vm/src/mir/lowering/stmt.rs:269-273`), reading the
+    /// nulled slot at push time dereferences NULL → SIGSEGV in
+    /// `jit_v2_array_push`. The detector triggers a structured `Err` on
+    /// match, which the W12 fall-through (`shape-jit/src/executor.rs:
+    /// 170-194`) routes to the bytecode interpreter — VM == JIT.
+    ///
+    /// **Conservatism.** A function-wide scan is over-conservative: a
+    /// `Move(slot)` in an unreachable arm or strictly AFTER the push site
+    /// in execution order would still trigger the deopt. The
+    /// conservatism is binding-compliant for v0.3 — over-deopt costs JIT
+    /// throughput, never correctness. A precise data-flow check is v0.4
+    /// territory (alongside the deeper MIR-lowering fix that would not
+    /// emit `Move` from still-live `let`-source bindings at all).
+    ///
+    /// **Operand coverage.** Scans `Rvalue::Use` / `Rvalue::Clone`
+    /// operands, `Rvalue::BinaryOp` / `Rvalue::UnaryOp` operands,
+    /// `Rvalue::Aggregate` operands, `StatementKind::ArrayStore` /
+    /// `ObjectStore` / `EnumStore` / `ClosureCapture` / `TaskBoundary`
+    /// operands, and `TerminatorKind::Call` `func` + `args` operands +
+    /// `TerminatorKind::SwitchBool` `operand`. Other terminators
+    /// (`Goto` / `Return` / `Unreachable`) carry no operands.
+    pub(crate) fn mir_has_prior_move_of_slot(&self, slot: SlotId) -> bool {
+        use shape_vm::mir::types::{Operand, Rvalue, StatementKind, TerminatorKind};
+        let matches_slot = |op: &Operand| -> bool {
+            matches!(
+                op,
+                Operand::Move(Place::Local(s)) | Operand::MoveExplicit(Place::Local(s))
+                    if *s == slot
+            )
+        };
+        let rvalue_has_move = |rv: &Rvalue| -> bool {
+            match rv {
+                Rvalue::Use(op) | Rvalue::Clone(op) | Rvalue::UnaryOp(_, op) => matches_slot(op),
+                Rvalue::BinaryOp(_, lhs, rhs) => matches_slot(lhs) || matches_slot(rhs),
+                Rvalue::Aggregate(ops) => ops.iter().any(&matches_slot),
+                Rvalue::Borrow(_, _) => false,
+                Rvalue::EnumTest { operand, .. }
+                | Rvalue::EnumPayload { operand, .. }
+                | Rvalue::TypePatternTest { operand, .. }
+                | Rvalue::EnumDiscriminantTest { operand, .. } => matches_slot(operand),
+            }
+        };
+        for block in &self.mir.blocks {
+            for stmt in &block.statements {
+                match &stmt.kind {
+                    StatementKind::Assign(_, rv) => {
+                        if rvalue_has_move(rv) {
+                            return true;
+                        }
+                    }
+                    StatementKind::ArrayStore { operands, .. }
+                    | StatementKind::ObjectStore { operands, .. }
+                    | StatementKind::EnumStore { operands, .. }
+                    | StatementKind::ClosureCapture { operands, .. }
+                    | StatementKind::TaskBoundary(operands, _) => {
+                        if operands.iter().any(&matches_slot) {
+                            return true;
+                        }
+                    }
+                    StatementKind::Drop(_) | StatementKind::Nop => {}
+                }
+            }
+            match &block.terminator.kind {
+                TerminatorKind::Call { func, args, .. } => {
+                    if matches_slot(func) || args.iter().any(&matches_slot) {
+                        return true;
+                    }
+                }
+                TerminatorKind::SwitchBool { operand, .. } => {
+                    if matches_slot(operand) {
+                        return true;
+                    }
+                }
+                TerminatorKind::Goto(_)
+                | TerminatorKind::Return
+                | TerminatorKind::Unreachable => {}
+            }
+        }
+        false
+    }
+
     /// True when the place's root local is known to hold a TypedObject
     /// (`ConcreteType::Struct(_)` / `ConcreteType::Enum(_)` /
     /// `ConcreteType::Option(_)` / `ConcreteType::Result(_, _)` /
@@ -594,6 +687,77 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 }
                 if self.v2_array_push_elem_size(elem).is_none() {
                     return Ok(None);
+                }
+                // R8 W8 jit-aliased-cow-push v0.3 surface-and-stop
+                // (audit `docs/cluster-audits/v0.3-r8w7-jit-aliased-cow-
+                // segfault-audit.md` §4 fallback / §6, supervisor ratify
+                // 2026-05-24, memory-unsafety unconditional v0.3-gating).
+                //
+                // Reproducer:
+                //   var data: Array<int> = [1, 2, 3]
+                //   let alias = data        // MIR: Assign(alias, Use(Move(data)))
+                //   data.push(4)            // SEGFAULT under JIT
+                //
+                // Root cause: MIR lowering at `crates/shape-vm/src/mir/
+                // lowering/stmt.rs:269-273` emits `Operand::Move` for `let`
+                // bindings whose ownership is `Inferred` (per the
+                // `OwnershipModifier::Inferred` doc-comment in
+                // `shape-ast/src/ast/program.rs:107` — "For `let`: always
+                // move"). The JIT's `compile_operand` Move arm at
+                // `mir_compiler/ownership.rs:225-230` nulls the source slot
+                // after reading via `null_place`. The bytecode VM's
+                // `data.push(4)` compile path does NOT go through MIR — it
+                // emits CloneLocal-equivalent opcodes that keep the source
+                // live, which is why `--mode vm` correctly shows both
+                // `data` and `alias` as `[1, 2, 3, 4]` (the array is shared
+                // through the refcount-bumped aliasing).
+                //
+                // The post-MIR-Move JIT then reads NULL from `data`'s slot
+                // (verified empirically via gdb: `rbx = 0x0` at
+                // `jit_v2_array_push+39`) and the subsequent `mov
+                // 0x10(%rbx),%eax` dereferences NULL → SIGSEGV.
+                //
+                // The v0.3-binding-compliant fix is the audit §6 fallback:
+                // detect the at-risk shape statically (the receiver slot
+                // has been previously moved out of via `Operand::Move` /
+                // `MoveExplicit` in the same function) and surface-and-stop
+                // by returning `Err` — the existing W12 fall-through at
+                // `executor.rs:170-194` routes the whole program to the
+                // bytecode interpreter, which produces the VM's clean
+                // semantics. Eliminates the SEGFAULT (memory-unsafety, the
+                // v0.3 gating condition); the deeper MIR-lowering fix to
+                // not Move from a still-live `let`-source binding is v0.4
+                // territory (touches the documented `OwnershipModifier::
+                // Inferred` semantics).
+                //
+                // Refused defection-attractor framings per CLAUDE.md
+                // §Forbidden-Patterns: no Bool-default refcount probe, no
+                // decode kind from bits, no "preserve unverified path with
+                // a fallback flag", no CoW codegen (would diverge from VM
+                // semantics — VM does NOT clone-on-write, both aliases
+                // observe the in-place mutation).
+                if let Place::Local(recv_slot) = receiver {
+                    if self.mir_has_prior_move_of_slot(*recv_slot) {
+                        return Err(format!(
+                            "R8 W8 jit-aliased-cow-push SURFACE: typed-array \
+                             `.push()` receiver slot {} has a prior \
+                             `Operand::Move` / `MoveExplicit` in the same \
+                             function (e.g. `let alias = data` MIR-lowering \
+                             at `mir/lowering/stmt.rs:269-273` nulls `data`'s \
+                             slot post-Move). The JIT inline push would \
+                             dereference a NULL receiver pointer → SIGSEGV \
+                             (audit `v0.3-r8w7-jit-aliased-cow-segfault-\
+                             audit.md`). Surface-and-stop deopts the whole \
+                             program to the bytecode interpreter (W12 \
+                             fall-through at `shape-jit/src/executor.rs:\
+                             170-194`), which uses its own MIR-independent \
+                             compile that does NOT null the source slot — \
+                             VM == JIT semantics restored. Memory-unsafety \
+                             unconditional v0.3-gating per supervisor \
+                             2026-05-24 ruling.",
+                            recv_slot.0,
+                        ));
+                    }
                 }
                 let arr_ptr = self.read_place(receiver)?;
                 let raw_arg = self.compile_operand_raw(&rest_args[0])?;
