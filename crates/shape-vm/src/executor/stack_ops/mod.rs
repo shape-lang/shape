@@ -188,17 +188,36 @@ impl VirtualMachine {
                     return self
                         .push_kinded(bits, NativeKind::Ptr(HeapKind::Temporal));
                 }
+                // R8 W3 W17-typed-module-exports-followup-constant-pool
+                // (ADR-006 §2.7.4 / §2.7.7 / Q9, 2026-05-24): kinded
+                // constant carrier — host-injected RowView / DataTable /
+                // TypedTable / etc. values. The constant holds one
+                // `Arc::into_raw::<T>` share for heap-bearing kinds;
+                // `clone_with_kind` bumps the refcount so the stack
+                // gets its own share and the constant retains its own
+                // (subsequent loads see the same payload). Inline
+                // scalar kinds no-op on `clone_with_kind`. Mirror of
+                // `Constant::Decimal` shape above except the kind is
+                // sourced from the constant (not statically known by
+                // the variant).
+                crate::bytecode::Constant::Value(kc) => {
+                    let bits = kc.bits();
+                    let kind = kc.kind();
+                    crate::executor::vm_impl::stack::clone_with_kind(bits, kind);
+                    return self.push_kinded(bits, kind);
+                }
                 _ => {}
             }
 
             // Remaining complex constants (Timeframe, TimeReference,
-            // DataDateTimeRef, TypeAnnotation, Value): these are deferred
+            // DataDateTimeRef, TypeAnnotation): these are deferred
             // to a follow-up wave that aligns the constant table with the
             // kinded heap encoding. The temporal-carrier arms (Duration /
-            // DateTimeExpr) are handled above; pure data-reference flavours
-            // belong to the data-reference / pipeline subsystems whose
-            // runtime entry points are themselves SURFACE per their own
-            // sub-clusters (W8-WJ for window_join, D-data-refs cascade).
+            // DateTimeExpr) and the kinded `Value(KindedConstant)` arm are
+            // handled above; pure data-reference flavours belong to the
+            // data-reference / pipeline subsystems whose runtime entry
+            // points are themselves SURFACE per their own sub-clusters
+            // (W8-WJ for window_join, D-data-refs cascade).
             return Err(VMError::RuntimeError(format!(
                 "unsupported constant variant in PushConst (Wave 6 follow-up): {:?}",
                 std::mem::discriminant(constant)
