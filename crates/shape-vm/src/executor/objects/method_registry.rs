@@ -1025,6 +1025,19 @@ pub static CONTENT_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "xLabel" => crate::executor::objects::content_methods::v2_content_x_label_camel,
     "y_label" => crate::executor::objects::content_methods::v2_content_y_label,
     "yLabel" => crate::executor::objects::content_methods::v2_content_y_label_camel,
+    // W18.5 builder methods (R8 W4, 2026-05-24 — supervisor D4): per-type
+    // builder chain ergonomics for `Table::new()` / `Code::new()` /
+    // `KeyValue::new()`. The receiver kind is always
+    // `Ptr(HeapKind::Content)` and each method clones + mutates a single
+    // field on the underlying `ContentNode` variant, returning a fresh
+    // Content slot. `.build()` is identity (no typed Table → content
+    // projection per "shortest path" supervisor D4 disposition).
+    "headers" => crate::executor::objects::content_methods::v2_content_headers,
+    "row" => crate::executor::objects::content_methods::v2_content_row,
+    "language" => crate::executor::objects::content_methods::v2_content_language,
+    "source" => crate::executor::objects::content_methods::v2_content_source,
+    "pair" => crate::executor::objects::content_methods::v2_content_pair,
+    "build" => crate::executor::objects::content_methods::v2_content_build,
 };
 
 /// PHF registry for Range methods (W15-range, ADR-006 §2.7.23 / Q24).

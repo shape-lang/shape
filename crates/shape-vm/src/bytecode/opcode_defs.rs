@@ -2617,6 +2617,31 @@ pub enum BuiltinFunction {
     // Table construction (1)
     /// Build a TypedTable from inline row values: args = [schema_id, row_count, field_count, val1, val2, ...]
     MakeTableFromRows,
+
+    // W18.5 per-type content builder constructors (supervisor D4, 2026-05-24)
+    //
+    // `Table::new()` / `Code::new()` / `KeyValue::new()` — return an empty
+    // ContentNode of the matching variant as a `Ptr(HeapKind::Content)`
+    // slot. Chainable methods (`headers`, `row`, `border`, `language`,
+    // `source`, `pair`, `build`) are dispatched via `CONTENT_METHODS` PHF
+    // on the receiver (`content_methods.rs`). `.build()` is identity —
+    // returns the receiver unchanged. The build → content → renderer path
+    // is the "shortest path" deliverable per supervisor D4 (Chart builder
+    // remains scoped to v0.4 / ECharts integration).
+    //
+    // Sibling-ctor pattern follows W18.6 ContentTextCtor / ContentCodeCtor
+    // (shipped at R8 W3, builtins.rs:769–824). The receiver Content slot
+    // round-trips through the `KindedSlot::from_content` constructor; the
+    // chainable methods take Content receivers, immutably clone + mutate
+    // the underlying ContentNode, and return a fresh Content slot —
+    // ADR-005 §1 / ADR-006 §2.3 typed-Arc dispatch, no parallel
+    // discriminator.
+    /// Table::new() — return an empty `ContentNode::Table` builder seed
+    TableBuilderNew,
+    /// Code::new() — return an empty `ContentNode::Code` builder seed
+    CodeBuilderNew,
+    /// KeyValue::new() — return an empty `ContentNode::KeyValue` builder seed
+    KeyValueBuilderNew,
 }
 
 impl BuiltinFunction {
@@ -2845,6 +2870,10 @@ impl BuiltinFunction {
             BuiltinFunction::MatFromFlat,
             // Table construction (1)
             BuiltinFunction::MakeTableFromRows,
+            // W18.5 content builder ctors (3)
+            BuiltinFunction::TableBuilderNew,
+            BuiltinFunction::CodeBuilderNew,
+            BuiltinFunction::KeyValueBuilderNew,
         ];
         VARIANTS.get(id as usize).copied()
     }

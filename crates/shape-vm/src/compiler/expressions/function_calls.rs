@@ -1578,6 +1578,20 @@ impl BytecodeCompiler {
             ("Content", "code") => Some(BuiltinFunction::ContentCodeCtor),
             ("Content", "kv") => Some(BuiltinFunction::ContentKvCtor),
             ("Content", "fragment") => Some(BuiltinFunction::ContentFragmentCtor),
+            // W18.5 per-type builder constructors (supervisor D4,
+            // R8 W3 2026-05-24): `Table::new()` / `Code::new()` /
+            // `KeyValue::new()` → empty `ContentNode` of the matching
+            // variant. Chained `.headers(...)` / `.row(...)` / `.border(...)`
+            // / `.language(...)` / `.source(...)` / `.pair(...)` / `.build()`
+            // live in `CONTENT_METHODS` PHF as method-call dispatch on the
+            // Content receiver. Both `Foo::new()` (parsed as
+            // QualifiedFunctionCall) and `Foo.new()` (parsed as MethodCall
+            // on Identifier("Foo")) route here through
+            // `compile_expr_qualified_function_call` /
+            // `compile_expr_method_call` → `compile_type_namespace_builtin_call`.
+            ("Table", "new") => Some(BuiltinFunction::TableBuilderNew),
+            ("Code", "new") => Some(BuiltinFunction::CodeBuilderNew),
+            ("KeyValue", "new") => Some(BuiltinFunction::KeyValueBuilderNew),
             _ => None,
         };
 

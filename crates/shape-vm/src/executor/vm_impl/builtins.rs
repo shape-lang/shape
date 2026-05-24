@@ -823,20 +823,132 @@ impl VirtualMachine {
                     let result = KindedSlot::from_content(std::sync::Arc::new(node));
                     self.push_kinded_slot(result)?;
                 }
-                BuiltinFunction::ContentChart
-                | BuiltinFunction::ContentTableCtor
-                | BuiltinFunction::ContentKvCtor
-                | BuiltinFunction::ContentFragmentCtor => {
+                BuiltinFunction::ContentChart => {
+                    // Chart constructor is v0.4 scope per supervisor D4
+                    // (R8 W3, 2026-05-24) — ECharts integration is its own
+                    // workstream. W18.5 ships Table / Code / KeyValue only;
+                    // surfacing the Chart MVP keeps the dispatch arm honest
+                    // (no Bool-default kinded shim per playbook §4 #9).
                     let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
-                    todo!(
-                        "phase-1b-vm wave 5e — content namespace ctor body \
-                         migration pending (shape_runtime::content_builders) \
-                         — W18.6 (R8 W3) landed text + code; remaining \
-                         ctors (table / kv / fragment / chart) wait on \
-                         W18.5 builder MVP: \
-                         {:?}",
-                        builtin
-                    );
+                    return Err(VMError::NotImplemented(
+                        "Content.chart(...) is v0.4 scope per supervisor D4 \
+                         (R8 W3, 2026-05-24) — ECharts integration is its \
+                         own workstream. W18.5 ships Table / Code / KeyValue \
+                         builders only."
+                            .to_string(),
+                    ));
+                }
+                BuiltinFunction::ContentTableCtor => {
+                    // W18.5 (R8 W4, 2026-05-24 — supervisor D4):
+                    // `Content.table(headers: Array<string>, rows: Array<Array<string>>)`
+                    // direct ctor. Builds a `ContentNode::Table` with the
+                    // provided headers + rows + default border. Sibling to
+                    // the per-type `Table::new().headers(...).row(...).build()`
+                    // builder (TableBuilderNew + Content method chain). Per
+                    // supervisor D4 "shortest path builder → content →
+                    // renderer", returns a `Ptr(HeapKind::Content)` slot
+                    // directly — no intermediate typed Table value.
+                    let args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    let table = build_table_from_headers_and_rows(&args)?;
+                    let node = shape_value::content::ContentNode::Table(table);
+                    let result = KindedSlot::from_content(std::sync::Arc::new(node));
+                    self.push_kinded_slot(result)?;
+                }
+                BuiltinFunction::ContentKvCtor => {
+                    // W18.5 (R8 W4, 2026-05-24 — supervisor D4):
+                    // `Content.kv(keys: Array<string>, values: Array<*>)`
+                    // direct ctor. Pairs each key with its corresponding
+                    // value formatted as a `ContentNode::plain`. Mirrors
+                    // the per-type `KeyValue::new().pair("k", v).build()`
+                    // builder. ContentNode::KeyValue stores `Vec<(String,
+                    // ContentNode)>` so heterogeneous value types coerce
+                    // through `format_kinded` (numeric / bool / string /
+                    // nested content all render).
+                    let args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    let pairs = build_kv_pairs_from_keys_values(self, &args)?;
+                    let node = shape_value::content::ContentNode::KeyValue(pairs);
+                    let result = KindedSlot::from_content(std::sync::Arc::new(node));
+                    self.push_kinded_slot(result)?;
+                }
+                BuiltinFunction::ContentFragmentCtor => {
+                    // W18.5 (R8 W4, 2026-05-24 — supervisor D4):
+                    // `Content.fragment(parts: Array<content>)` direct
+                    // ctor. Wraps a sequence of Content nodes into a
+                    // single `ContentNode::Fragment` for composition.
+                    let args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    let parts = collect_content_nodes_from_array_arg(&args)?;
+                    let node = shape_value::content::ContentNode::Fragment(parts);
+                    let result = KindedSlot::from_content(std::sync::Arc::new(node));
+                    self.push_kinded_slot(result)?;
+                }
+                BuiltinFunction::TableBuilderNew => {
+                    // W18.5 (R8 W4, 2026-05-24 — supervisor D4):
+                    // `Table::new()` returns an empty `ContentNode::Table`
+                    // seed. Chainable methods (`headers`, `row`, `border`,
+                    // `build`) are registered in `CONTENT_METHODS` PHF and
+                    // dispatched on the Content receiver. `.build()` is
+                    // identity — returns the receiver. Each chained method
+                    // immutably clones + mutates the underlying ContentNode
+                    // and pushes a fresh `Ptr(HeapKind::Content)` slot.
+                    let args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    if !args.is_empty() {
+                        return Err(VMError::RuntimeError(format!(
+                            "Table::new() takes no arguments, got {}",
+                            args.len()
+                        )));
+                    }
+                    let empty = shape_value::content::ContentTable {
+                        headers: Vec::new(),
+                        rows: Vec::new(),
+                        border: shape_value::content::BorderStyle::default(),
+                        max_rows: None,
+                        column_types: None,
+                        total_rows: None,
+                        sortable: false,
+                    };
+                    let node = shape_value::content::ContentNode::Table(empty);
+                    let result = KindedSlot::from_content(std::sync::Arc::new(node));
+                    self.push_kinded_slot(result)?;
+                }
+                BuiltinFunction::CodeBuilderNew => {
+                    // W18.5 (R8 W4, 2026-05-24 — supervisor D4):
+                    // `Code::new()` returns an empty `ContentNode::Code`
+                    // seed with no language and empty source. Chainable
+                    // methods (`language`, `source`, `build`) live in
+                    // `CONTENT_METHODS`. The W18.6 `Content.code(s)`
+                    // one-liner ctor coexists — keep both per task spec:
+                    // Content.code(s) is single-arg, Code::new() builder
+                    // is the multi-property form.
+                    let args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    if !args.is_empty() {
+                        return Err(VMError::RuntimeError(format!(
+                            "Code::new() takes no arguments, got {}",
+                            args.len()
+                        )));
+                    }
+                    let node = shape_value::content::ContentNode::Code {
+                        language: None,
+                        source: String::new(),
+                    };
+                    let result = KindedSlot::from_content(std::sync::Arc::new(node));
+                    self.push_kinded_slot(result)?;
+                }
+                BuiltinFunction::KeyValueBuilderNew => {
+                    // W18.5 (R8 W4, 2026-05-24 — supervisor D4):
+                    // `KeyValue::new()` returns an empty
+                    // `ContentNode::KeyValue` seed with no pairs. Chainable
+                    // `.pair(key, value)` accumulates the pair; `.build()`
+                    // is identity.
+                    let args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    if !args.is_empty() {
+                        return Err(VMError::RuntimeError(format!(
+                            "KeyValue::new() takes no arguments, got {}",
+                            args.len()
+                        )));
+                    }
+                    let node = shape_value::content::ContentNode::KeyValue(Vec::new());
+                    let result = KindedSlot::from_content(std::sync::Arc::new(node));
+                    self.push_kinded_slot(result)?;
                 }
                 // ── Wave 5e: DateTime constructor builtins ────────────────
                 //
@@ -1280,6 +1392,278 @@ impl VirtualMachine {
     // ===== Helper Methods =====
     // binary_arithmetic, eval_runtime_binary_op_value, binary_comparison
     // moved to arithmetic/mod.rs
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// W18.5 content builder helpers (R8 W4, 2026-05-24 — supervisor D4).
+//
+// Free-function helpers (not VirtualMachine methods) used by the
+// `Content.table` / `Content.kv` / `Content.fragment` constructor arms and
+// the Content method handlers in `objects/content_methods.rs`. The
+// builder pattern relies on these helpers to:
+//   - read a `Ptr(HeapKind::Content)` slot back into a `ContentNode`
+//   - read string elements from a v2 `TypedArray<*const StringObj>`
+//   - format a heterogeneous `KindedSlot` value into a `ContentNode::plain`
+//     cell (for `Table.row(...)` / `KeyValue.pair("k", v)` value coercion)
+//
+// Per supervisor D4 "shortest path builder → content → renderer", these
+// helpers stay at the dispatch shell — no cross-crate detour into
+// shape-runtime, no parallel-implementation of styling spec types (the
+// W18.4 shared spec module is a follow-up — see commit message).
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Read string elements from a v2 `TypedArray<*const StringObj>` slot.
+///
+/// Returns `None` if the slot is not a v2-raw typed array of strings; the
+/// caller surfaces a typed error. The returned `Vec<String>` owns its
+/// contents — each element is copied out of the array's interned UTF-8.
+pub(in crate::executor) fn read_string_array(slot: &KindedSlot) -> Option<Vec<String>> {
+    use crate::executor::v2_handlers::v2_array_detect::{
+        as_v2_typed_array, read_element, V2ElemType,
+    };
+    use shape_value::{HeapKind, NativeKind};
+    if slot.kind != NativeKind::Ptr(HeapKind::TypedArray) {
+        return None;
+    }
+    let view = as_v2_typed_array(slot.slot.raw(), slot.kind)?;
+    if view.elem_type != V2ElemType::String {
+        return None;
+    }
+    let mut out = Vec::with_capacity(view.len as usize);
+    for i in 0..view.len {
+        let (bits, kind) = read_element(&view, i)?;
+        // `read_element` retains a fresh share on the element header per
+        // its Wave-2-Agent-A2 contract (see
+        // `executor/v2_handlers/v2_array_detect.rs:378-388`); wrap into
+        // a `KindedSlot` so the share retires on drop after we've copied
+        // the UTF-8 out via `as_str`.
+        let elem_slot = KindedSlot::new(ValueSlot::from_raw(bits), kind);
+        let s = elem_slot.as_str()?.to_string();
+        // `elem_slot` drops at end of iteration — releases the share.
+        let _ = elem_slot;
+        out.push(s);
+    }
+    Some(out)
+}
+
+/// Read a `Ptr(HeapKind::Content)` slot as an `Arc<ContentNode>`.
+///
+/// Returns `None` if the kind doesn't match. The returned Arc is a fresh
+/// strong-count share (incremented from the slot's bits); the caller is
+/// responsible for the share-accounting of the returned Arc.
+pub(in crate::executor) fn read_content_arc(
+    slot: &KindedSlot,
+) -> Option<std::sync::Arc<shape_value::content::ContentNode>> {
+    use shape_value::{HeapKind, NativeKind};
+    if slot.kind != NativeKind::Ptr(HeapKind::Content) {
+        return None;
+    }
+    let bits = slot.slot.raw();
+    if bits == 0 {
+        return None;
+    }
+    // SAFETY: by construction `Ptr(HeapKind::Content)` slot bits are
+    // `Arc::into_raw(Arc<ContentNode>) as u64` (set by
+    // `KindedSlot::from_content` and its producers — `ContentTextCtor`,
+    // `ContentCodeCtor`, this module's W18.5 ctors, Display.display()
+    // returns, etc.). The slot owns one strong-count share for the
+    // dispatch duration. We borrow the inner Arc by reconstituting it,
+    // cloning to get a fresh share, then `mem::forget`-ing the original
+    // reconstitution so the slot's share remains intact.
+    unsafe {
+        let raw = bits as *const shape_value::content::ContentNode;
+        let arc = std::sync::Arc::from_raw(raw);
+        let cloned = arc.clone();
+        std::mem::forget(arc);
+        Some(cloned)
+    }
+}
+
+/// Build a `ContentTable` from a `Content.table(headers, rows)` arg list.
+///
+/// `args[0]` is the headers array (`Array<string>`), `args[1]` is the
+/// rows array (`Array<Array<string>>`). Cell values render as
+/// `ContentNode::plain` strings — string-typed MVP per supervisor D4
+/// "string-typed-MVP follow-up surfaced for W18.4 spec-types swap".
+fn build_table_from_headers_and_rows(
+    args: &[KindedSlot],
+) -> Result<shape_value::content::ContentTable, VMError> {
+    if args.len() != 2 {
+        return Err(VMError::RuntimeError(format!(
+            "Content.table(headers, rows) requires exactly 2 arguments, \
+             got {}",
+            args.len()
+        )));
+    }
+    let headers = read_string_array(&args[0]).ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "Content.table: headers argument must be Array<string>, got \
+             kind {:?}",
+            args[0].kind
+        ))
+    })?;
+    // Rows is an Array<Array<string>>. The outer array carries
+    // TypedArray-of-TypedArray pointers. Read each inner row via
+    // `read_string_array`.
+    use crate::executor::v2_handlers::v2_array_detect::{
+        as_v2_typed_array, read_element,
+    };
+    use shape_value::{HeapKind, NativeKind};
+    if args[1].kind != NativeKind::Ptr(HeapKind::TypedArray) {
+        return Err(VMError::RuntimeError(format!(
+            "Content.table: rows argument must be Array<Array<string>>, \
+             got kind {:?}",
+            args[1].kind
+        )));
+    }
+    let outer_view = as_v2_typed_array(args[1].slot.raw(), args[1].kind)
+        .ok_or_else(|| {
+            VMError::RuntimeError(
+                "Content.table: rows array has invalid v2 header".to_string(),
+            )
+        })?;
+    let mut rows: Vec<Vec<shape_value::content::ContentNode>> =
+        Vec::with_capacity(outer_view.len as usize);
+    for i in 0..outer_view.len {
+        let (bits, kind) = read_element(&outer_view, i).ok_or_else(|| {
+            VMError::RuntimeError(format!(
+                "Content.table: failed to read row {} from rows array",
+                i
+            ))
+        })?;
+        let row_slot = KindedSlot::new(ValueSlot::from_raw(bits), kind);
+        let cells = read_string_array(&row_slot).ok_or_else(|| {
+            VMError::RuntimeError(format!(
+                "Content.table: row {} must be Array<string>, got kind {:?}",
+                i, row_slot.kind
+            ))
+        })?;
+        // Drop row_slot to release the share held by `read_element`.
+        drop(row_slot);
+        let row_nodes: Vec<shape_value::content::ContentNode> = cells
+            .into_iter()
+            .map(shape_value::content::ContentNode::plain)
+            .collect();
+        rows.push(row_nodes);
+    }
+    Ok(shape_value::content::ContentTable {
+        headers,
+        rows,
+        border: shape_value::content::BorderStyle::default(),
+        max_rows: None,
+        column_types: None,
+        total_rows: None,
+        sortable: false,
+    })
+}
+
+/// Build a `Vec<(String, ContentNode)>` from a `Content.kv(keys, values)`
+/// arg list — keys array is `Array<string>`, values array is the parallel
+/// `Array<*>` whose elements coerce through `format_kinded`.
+fn build_kv_pairs_from_keys_values(
+    vm: &VirtualMachine,
+    args: &[KindedSlot],
+) -> Result<Vec<(String, shape_value::content::ContentNode)>, VMError> {
+    if args.len() != 2 {
+        return Err(VMError::RuntimeError(format!(
+            "Content.kv(keys, values) requires exactly 2 arguments, got {}",
+            args.len()
+        )));
+    }
+    let keys = read_string_array(&args[0]).ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "Content.kv: keys argument must be Array<string>, got kind {:?}",
+            args[0].kind
+        ))
+    })?;
+    use crate::executor::v2_handlers::v2_array_detect::{
+        as_v2_typed_array, read_element,
+    };
+    use shape_value::{HeapKind, NativeKind};
+    if args[1].kind != NativeKind::Ptr(HeapKind::TypedArray) {
+        return Err(VMError::RuntimeError(format!(
+            "Content.kv: values argument must be an Array, got kind {:?}",
+            args[1].kind
+        )));
+    }
+    let view = as_v2_typed_array(args[1].slot.raw(), args[1].kind).ok_or_else(|| {
+        VMError::RuntimeError("Content.kv: values array has invalid v2 header".to_string())
+    })?;
+    if (view.len as usize) != keys.len() {
+        return Err(VMError::RuntimeError(format!(
+            "Content.kv: keys.len() ({}) != values.len() ({})",
+            keys.len(),
+            view.len
+        )));
+    }
+    let formatter = super::super::printing::ValueFormatter::new(&vm.program.type_schema_registry);
+    let mut pairs = Vec::with_capacity(keys.len());
+    for (i, key) in keys.into_iter().enumerate() {
+        let (bits, kind) = read_element(&view, i as u32).ok_or_else(|| {
+            VMError::RuntimeError(format!("Content.kv: failed to read value at index {}", i))
+        })?;
+        let val_slot = KindedSlot::new(ValueSlot::from_raw(bits), kind);
+        let rendered = formatter.format_kinded(&val_slot);
+        // val_slot drops here — releases the share.
+        drop(val_slot);
+        pairs.push((key, shape_value::content::ContentNode::plain(rendered)));
+    }
+    Ok(pairs)
+}
+
+/// Read an `Array<content>` argument and collect each element as an
+/// owned `ContentNode`. Each element of the array must have kind
+/// `Ptr(HeapKind::Content)`; the function clones the inner ContentNode
+/// out of the read-share Arc returned by `read_content_arc`.
+fn collect_content_nodes_from_array_arg(
+    args: &[KindedSlot],
+) -> Result<Vec<shape_value::content::ContentNode>, VMError> {
+    if args.len() != 1 {
+        return Err(VMError::RuntimeError(format!(
+            "Content.fragment(parts) requires exactly 1 argument \
+             (Array<content>), got {}",
+            args.len()
+        )));
+    }
+    use crate::executor::v2_handlers::v2_array_detect::{
+        as_v2_typed_array, read_element,
+    };
+    use shape_value::{HeapKind, NativeKind};
+    if args[0].kind != NativeKind::Ptr(HeapKind::TypedArray) {
+        return Err(VMError::RuntimeError(format!(
+            "Content.fragment: parts argument must be Array<content>, got \
+             kind {:?}",
+            args[0].kind
+        )));
+    }
+    let view = as_v2_typed_array(args[0].slot.raw(), args[0].kind).ok_or_else(|| {
+        VMError::RuntimeError(
+            "Content.fragment: parts array has invalid v2 header".to_string(),
+        )
+    })?;
+    let mut parts = Vec::with_capacity(view.len as usize);
+    for i in 0..view.len {
+        let (bits, kind) = read_element(&view, i).ok_or_else(|| {
+            VMError::RuntimeError(format!(
+                "Content.fragment: failed to read element {}",
+                i
+            ))
+        })?;
+        let elem_slot = KindedSlot::new(ValueSlot::from_raw(bits), kind);
+        let arc = read_content_arc(&elem_slot).ok_or_else(|| {
+            VMError::RuntimeError(format!(
+                "Content.fragment: element {} must be a content value, got \
+                 kind {:?}",
+                i, elem_slot.kind
+            ))
+        })?;
+        // Clone the underlying ContentNode out of the Arc (cheap — most
+        // variants are themselves Arc-shaped vectors / structs that share
+        // their interior storage on clone).
+        parts.push((*arc).clone());
+        drop(elem_slot);
+    }
+    Ok(parts)
 }
 
 // W12-stdlib-intrinsic-collapse (Wave-2-Agent-G, 2026-05-14): the
