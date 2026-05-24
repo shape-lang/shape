@@ -2577,6 +2577,355 @@ pub fn drop_array_n(view: &V2TypedArrayView, n: u32) -> *mut u8 {
     copy_range_to_new_array(view, n, view.len)
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// R8 W4 J.5c (2026-05-24) — deep-equality primitives per supervisor D2.
+//
+// `eq_element(a, b, elem_type) -> bool` is a generic value-equality body
+// with an internal 14-arm dispatch on `V2ElemType` (one arm per element
+// kind landed in this module). Matches the existing primitives-layer ABI
+// shape (mirrors `write_element` / `push_element`): the host opcode /
+// handler passes the (bits, kind) pair of the needle plus the receiver's
+// element type; the primitive performs the per-kind compare and returns
+// a plain `bool`.
+//
+// `position_of(view, needle_bits, needle_kind) -> Option<u32>` is the
+// per-op driver for `Array.indexOf(value)` (the `Some(i)` arm projects to
+// the result; `None` projects to `-1`).
+//
+// `contains_element(view, needle_bits, needle_kind) -> bool` is the
+// per-op driver for `Array.includes(value)`.
+//
+// Supervisor D2 binding (2026-05-24): generic eq_element with internal
+// kind dispatch. REFUSED on sight: MethodFnV2 trait dispatch (forbidden
+// MethodFn bridge pattern per CLAUDE.md §Renames-to-refuse). REFUSED on
+// sight: dynamic-fallback / Bool-default on unknown / unsupported kinds —
+// the kind-mismatch path returns `false` structurally (no element is
+// equal to a value of a different carrier shape) without fabricating
+// equality on bits, mirroring the strict §2.7.5 producer-stamp + §2.7.14
+// no-Bool-default discipline.
+//
+// Refcount discipline: `eq_element` only READS bits, never retains or
+// releases. Per-element reads inside `position_of` / `contains_element`
+// do NOT use `read_element` (which would retain the element header on
+// every iteration for the heap-element kinds and then immediately drop);
+// instead they walk the underlying `TypedArray<T>` buffer directly via
+// `get_unchecked` and compare against the needle via `eq_element` — the
+// receiver's per-element shares are NOT touched, and the needle's share
+// is owned by the caller (the dispatch shell `args[1]`). This keeps the
+// includes / indexOf hot path allocation-free for the scalar arms.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Per-kind value equality for the `(bits, kind)` carrier shape.
+///
+/// Returns `true` iff `(a_bits, kind)` and `(b_bits, kind)` denote the
+/// same value under the kind's semantics. Returns `false` when either
+/// pointer is null for a heap-element kind (defensive — the dispatch
+/// shell rejects null receivers earlier, but the primitive must stay
+/// sound under any input).
+///
+/// Float semantics: bitwise equality (NOT `==`). This is the
+/// IEEE-754-pure choice — `NaN == NaN` is `false` under `==` but `true`
+/// under bitwise compare. The choice matches the `includes` / `indexOf`
+/// observable: a NaN element pushed into the array IS findable via the
+/// same NaN bit pattern (the array doesn't lose track of its own
+/// elements). The user can still write a custom predicate via
+/// `find(|x| x != x)` when IEEE compare is desired.
+///
+/// String / Decimal: deref through the v2-raw `StringObj` / `DecimalObj`
+/// carrier and compare content (`StringObj::as_str` → `&str` equality;
+/// `DecimalObj::value` → `Decimal` `PartialEq`).
+///
+/// TypedObject: deep field-by-field comparison. The two objects are
+/// equal iff (a) they share the same `schema_id`, (b) they share the
+/// same per-field `NativeKind` table, and (c) every per-field slot
+/// compares equal under the slot's `NativeKind` via a recursive
+/// `eq_element` call on the slot bits. Per ADR-006 §2.7.16 typed-Arc
+/// dispatch-label receiver-recovery: the comparison reads the storage
+/// directly via `&*(p as *const TypedObjectStorage)` (no Box-wrap
+/// reinterpret).
+///
+/// # Safety
+/// The caller must uphold the §2.7.5 producer-side stamp invariant —
+/// for heap-element kinds (`StringV2` / `DecimalV2` /
+/// `Ptr(HeapKind::TypedObject)`), the bits must be either `0` (null) or
+/// a live carrier pointer of the matching `T`. The `bits == 0` early-out
+/// is the defensive bound; otherwise the deref is sound under the
+/// construction-side contract upheld by every producer in this module.
+#[inline]
+pub fn eq_element(a_bits: u64, b_bits: u64, elem_type: V2ElemType) -> bool {
+    match elem_type {
+        // Scalar arms: bitwise equality on the slot's significant bits.
+        // For width-narrowed scalars (I8 / U8 / I16 / U16 / I32 / U32 /
+        // Bool / F32 / Char) the producer zero/sign-extends into the
+        // 8-byte slot via `as u64`; comparing the full 8 bytes is sound
+        // (the unused high bits agree by construction).
+        V2ElemType::F64 => a_bits == b_bits,
+        V2ElemType::I64 => a_bits == b_bits,
+        V2ElemType::I32 => a_bits == b_bits,
+        V2ElemType::Bool => a_bits == b_bits,
+        V2ElemType::I8 => a_bits == b_bits,
+        V2ElemType::U8 => a_bits == b_bits,
+        V2ElemType::I16 => a_bits == b_bits,
+        V2ElemType::U16 => a_bits == b_bits,
+        V2ElemType::U32 => a_bits == b_bits,
+        V2ElemType::F32 => a_bits == b_bits,
+        V2ElemType::Char => a_bits == b_bits,
+        // Heap-element arms: deref and compare content.
+        V2ElemType::String => {
+            if a_bits == 0 || b_bits == 0 {
+                return a_bits == b_bits;
+            }
+            let a_ptr = a_bits as usize as *const StringObj;
+            let b_ptr = b_bits as usize as *const StringObj;
+            if a_ptr == b_ptr {
+                return true;
+            }
+            unsafe { StringObj::as_str(a_ptr) == StringObj::as_str(b_ptr) }
+        }
+        V2ElemType::Decimal => {
+            if a_bits == 0 || b_bits == 0 {
+                return a_bits == b_bits;
+            }
+            let a_ptr = a_bits as usize as *const DecimalObj;
+            let b_ptr = b_bits as usize as *const DecimalObj;
+            if a_ptr == b_ptr {
+                return true;
+            }
+            unsafe { DecimalObj::value(a_ptr) == DecimalObj::value(b_ptr) }
+        }
+        V2ElemType::TypedObject => {
+            if a_bits == 0 || b_bits == 0 {
+                return a_bits == b_bits;
+            }
+            let a_ptr = a_bits as usize as *const TypedObjectStorage;
+            let b_ptr = b_bits as usize as *const TypedObjectStorage;
+            if a_ptr == b_ptr {
+                return true;
+            }
+            // SAFETY: per the construction-side contract for the
+            // `*const TypedObjectStorage` v2-raw carrier (Wave 2 Agent D1,
+            // ADR-006 §2.3 typed-Arc dispatch-label receiver-recovery):
+            // a non-null `*const TypedObjectStorage` slot bits value is
+            // a live carrier (HeapHeader at offset 0). The borrow is
+            // bounded to this scope; no share is retained or released.
+            unsafe { typed_object_deep_eq(&*a_ptr, &*b_ptr) }
+        }
+    }
+}
+
+/// Deep equality for two `TypedObjectStorage` instances.
+///
+/// Returns `true` iff (a) `schema_id` matches, (b) `slots.len()` matches,
+/// (c) `field_kinds` table matches (this is the production-time
+/// per-schema invariant — same schema_id → identical field_kinds slice),
+/// and (d) every slot compares equal via `eq_element` dispatching on the
+/// per-field `NativeKind`.
+///
+/// Per ADR-005 §1 single-discriminator + ADR-006 §2.7.6 / Q8 carrier-
+/// API-bound: the per-field `NativeKind` is the discriminator; the
+/// recursion maps `NativeKind` back to `V2ElemType` for the per-field
+/// `eq_element` call (the field families covered are the ones the v2-raw
+/// `TypedArray<T>` element-storage layer supports — scalar primitives +
+/// String / Decimal / nested TypedObject). Other `NativeKind` variants
+/// (e.g. `Ptr(HeapKind::HashMap)` field) surface-and-stop with `false` —
+/// the §2.7.14 no-Bool-default discipline is preserved by being the
+/// strict-equal answer, not a fabricated truth value.
+///
+/// # Safety
+/// `a` / `b` must be live `&TypedObjectStorage` borrows bounded to the
+/// caller's scope.
+unsafe fn typed_object_deep_eq(
+    a: &TypedObjectStorage,
+    b: &TypedObjectStorage,
+) -> bool {
+    if a.schema_id != b.schema_id {
+        return false;
+    }
+    if a.slots.len() != b.slots.len() {
+        return false;
+    }
+    // field_kinds is `Arc<[NativeKind]>` shared per-schema; equal
+    // schema_ids guarantee equal field_kinds in production. The
+    // length-then-elementwise compare below is defensive.
+    if a.field_kinds.len() != b.field_kinds.len() {
+        return false;
+    }
+    for (k1, k2) in a.field_kinds.iter().zip(b.field_kinds.iter()) {
+        if k1 != k2 {
+            return false;
+        }
+    }
+    for i in 0..a.slots.len() {
+        let bits_a = a.slots[i].raw();
+        let bits_b = b.slots[i].raw();
+        let kind = a.field_kinds[i];
+        // Map the per-field NativeKind back to the V2ElemType the
+        // primitive dispatches on. Fields whose kind lies outside the
+        // supported families return `false` (the strict, no-Bool-default
+        // answer per §2.7.14): a TypedObject with a HashMap-valued field
+        // compares unequal under deep-equality at the structural layer
+        // until that field's comparison primitive lands; a future
+        // amendment can extend this map without changing the call shape.
+        let field_elem = match kind {
+            NativeKind::Float64 => Some(V2ElemType::F64),
+            NativeKind::Int64 => Some(V2ElemType::I64),
+            NativeKind::Int32 => Some(V2ElemType::I32),
+            NativeKind::Int16 => Some(V2ElemType::I16),
+            NativeKind::Int8 => Some(V2ElemType::I8),
+            NativeKind::UInt8 => Some(V2ElemType::U8),
+            NativeKind::UInt16 => Some(V2ElemType::U16),
+            NativeKind::UInt32 => Some(V2ElemType::U32),
+            NativeKind::Float32 => Some(V2ElemType::F32),
+            NativeKind::Char => Some(V2ElemType::Char),
+            NativeKind::Bool => Some(V2ElemType::Bool),
+            NativeKind::StringV2 => Some(V2ElemType::String),
+            NativeKind::DecimalV2 => Some(V2ElemType::Decimal),
+            NativeKind::Ptr(HeapKind::TypedObject) => Some(V2ElemType::TypedObject),
+            // Null-as-sentinel field: equal iff both slots agree on the
+            // null tag. The §2.7.5 stamp guarantees the per-slot
+            // discriminator already filtered non-null bits before reach.
+            NativeKind::Null => {
+                if bits_a != bits_b {
+                    return false;
+                }
+                continue;
+            }
+            // NativeKind::String (Arc<String> carrier) — deref via Arc
+            // raw pointer and compare content. NOT covered by V2ElemType
+            // (that variant is the StringV2 v2-raw carrier); handled
+            // inline here.
+            NativeKind::String => {
+                if bits_a == bits_b {
+                    continue;
+                }
+                if bits_a == 0 || bits_b == 0 {
+                    return false;
+                }
+                let s_a = unsafe { &*(bits_a as usize as *const String) };
+                let s_b = unsafe { &*(bits_b as usize as *const String) };
+                if s_a != s_b {
+                    return false;
+                }
+                continue;
+            }
+            // Other heap-kinded fields (HashMap / Deque / TraitObject /
+            // Channel / TypedArray / etc.): strict no-Bool-default —
+            // compare equal only when the raw pointer bits agree
+            // (identity equality). The structurally-typed deep-equality
+            // for these field shapes is out of J.5c scope; extending
+            // this match without a Bool-default fallback is the correct
+            // forward path when a future driver needs them.
+            _ => {
+                if bits_a != bits_b {
+                    return false;
+                }
+                continue;
+            }
+        };
+        if let Some(et) = field_elem {
+            if !eq_element(bits_a, bits_b, et) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Return the first index `i` where `view[i] == needle` under the
+/// element-type's equality, or `None` if no element matches.
+///
+/// The needle's bits must be the value of kind matching `view.elem_type`
+/// — the dispatch shell at `handle_index_of_v2` enforces the
+/// kind-precondition (returns `-1` on mismatch without invoking this
+/// primitive, mirroring the JS semantics that `[1,2,3].indexOf("1")` is
+/// `-1` not an error).
+///
+/// Reads the underlying `TypedArray<T>` buffer directly via
+/// `get_unchecked` (no `read_element` indirection) — no per-iteration
+/// retain/release on heap-element kinds.
+///
+/// # Safety
+/// Caller must guarantee `view` is a live `V2TypedArrayView` (produced
+/// by `as_v2_typed_array`) and `needle_bits` is a value of `view.elem_type`
+/// per the §2.7.5 producer-stamp contract.
+#[inline]
+pub fn position_of(view: &V2TypedArrayView, needle_bits: u64) -> Option<u32> {
+    let n = view.len;
+    if n == 0 {
+        return None;
+    }
+    // Per-element pointer read path for heap-element kinds avoids the
+    // per-iteration `v2_retain` work that `read_element` does — we only
+    // need the bits, not a fresh share.
+    macro_rules! scan_scalar {
+        ($t:ty, $to_bits:expr) => {{
+            let arr = view.ptr as *const TypedArray<$t>;
+            for i in 0..n {
+                let v = unsafe { TypedArray::<$t>::get_unchecked(arr, i) };
+                if $to_bits(v) == needle_bits {
+                    return Some(i);
+                }
+            }
+            None
+        }};
+    }
+    match view.elem_type {
+        V2ElemType::F64 => scan_scalar!(f64, |v: f64| v.to_bits()),
+        V2ElemType::I64 => scan_scalar!(i64, |v: i64| v as u64),
+        V2ElemType::I32 => scan_scalar!(i32, |v: i32| (v as i64) as u64),
+        V2ElemType::Bool => scan_scalar!(u8, |v: u8| (v != 0) as u64),
+        V2ElemType::I8 => scan_scalar!(i8, |v: i8| (v as i64) as u64),
+        V2ElemType::U8 => scan_scalar!(u8, |v: u8| v as u64),
+        V2ElemType::I16 => scan_scalar!(i16, |v: i16| (v as i64) as u64),
+        V2ElemType::U16 => scan_scalar!(u16, |v: u16| v as u64),
+        V2ElemType::U32 => scan_scalar!(u32, |v: u32| v as u64),
+        V2ElemType::F32 => scan_scalar!(f32, |v: f32| v.to_bits() as u64),
+        V2ElemType::Char => scan_scalar!(char, |v: char| v as u32 as u64),
+        V2ElemType::String => unsafe {
+            let arr = view.ptr as *const TypedArray<*const StringObj>;
+            for i in 0..n {
+                let elem_ptr = TypedArray::<*const StringObj>::get_unchecked(arr, i);
+                if eq_element(elem_ptr as u64, needle_bits, V2ElemType::String) {
+                    return Some(i);
+                }
+            }
+            None
+        },
+        V2ElemType::Decimal => unsafe {
+            let arr = view.ptr as *const TypedArray<*const DecimalObj>;
+            for i in 0..n {
+                let elem_ptr = TypedArray::<*const DecimalObj>::get_unchecked(arr, i);
+                if eq_element(elem_ptr as u64, needle_bits, V2ElemType::Decimal) {
+                    return Some(i);
+                }
+            }
+            None
+        },
+        V2ElemType::TypedObject => unsafe {
+            let arr = view.ptr as *const TypedArray<*const TypedObjectStorage>;
+            for i in 0..n {
+                let elem_ptr = TypedArray::<*const TypedObjectStorage>::get_unchecked(arr, i);
+                if eq_element(elem_ptr as u64, needle_bits, V2ElemType::TypedObject) {
+                    return Some(i);
+                }
+            }
+            None
+        },
+    }
+}
+
+/// Return `true` iff any element of `view` equals `needle_bits` under
+/// the element-type's equality.
+///
+/// Thin wrapper over `position_of` — present as a named primitive so the
+/// per-op driver naming in `array_query.rs` (`handle_includes_v2`)
+/// matches the surface comment (J.5 territory: per-kind value-equality
+/// `v2_array_detect::contains_element` primitive).
+#[inline]
+pub fn contains_element(view: &V2TypedArrayView, needle_bits: u64) -> bool {
+    position_of(view, needle_bits).is_some()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3303,6 +3652,268 @@ mod tests {
             assert_eq!(new_view.len, 0);
             TypedArray::<i64>::drop_array(arr);
             TypedArray::<i64>::drop_array(new_ptr as *mut TypedArray<i64>);
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // R8 W4 J.5c (2026-05-24) — eq_element + position_of + contains_element
+    // value-equality round-trip smokes per supervisor D2.
+    //
+    // Per-kind dispatch verified empirically for scalar I64 / F64 / Bool +
+    // heap-element String / Decimal. TypedObject deep-equality covered via
+    // schema_id mismatch (negative) + nil-payload positive (degenerate
+    // schema → equal). NaN float bitwise compare verified for the
+    // `[NaN, 1.0].indexOf(NaN)` edge case.
+    // ──────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_eq_element_scalar_i64() {
+        assert!(eq_element(42, 42, V2ElemType::I64));
+        assert!(!eq_element(42, 43, V2ElemType::I64));
+        // Negative numbers (sign-extension into the u64 slot).
+        assert!(eq_element((-5i64) as u64, (-5i64) as u64, V2ElemType::I64));
+        assert!(!eq_element((-5i64) as u64, (5i64) as u64, V2ElemType::I64));
+    }
+
+    #[test]
+    fn test_eq_element_scalar_f64_bitwise() {
+        assert!(eq_element(1.5f64.to_bits(), 1.5f64.to_bits(), V2ElemType::F64));
+        assert!(!eq_element(1.5f64.to_bits(), 2.5f64.to_bits(), V2ElemType::F64));
+        // IEEE bitwise: NaN bits == NaN bits is TRUE under eq_element
+        // (this matches the includes/indexOf observable that an array
+        // containing NaN can find its own NaN element).
+        let nan = f64::NAN.to_bits();
+        assert!(eq_element(nan, nan, V2ElemType::F64));
+    }
+
+    #[test]
+    fn test_eq_element_scalar_bool() {
+        assert!(eq_element(1, 1, V2ElemType::Bool));
+        assert!(eq_element(0, 0, V2ElemType::Bool));
+        assert!(!eq_element(1, 0, V2ElemType::Bool));
+    }
+
+    #[test]
+    fn test_eq_element_string_content() {
+        unsafe {
+            let s1 = StringObj::new("hello");
+            let s2 = StringObj::new("hello"); // distinct alloc, same content
+            let s3 = StringObj::new("world");
+            assert!(eq_element(s1 as u64, s2 as u64, V2ElemType::String));
+            assert!(!eq_element(s1 as u64, s3 as u64, V2ElemType::String));
+            // null-defensive
+            assert!(eq_element(0, 0, V2ElemType::String));
+            assert!(!eq_element(s1 as u64, 0, V2ElemType::String));
+            // identity short-circuit
+            assert!(eq_element(s1 as u64, s1 as u64, V2ElemType::String));
+            StringObj::drop(s1);
+            StringObj::drop(s2);
+            StringObj::drop(s3);
+        }
+    }
+
+    #[test]
+    fn test_eq_element_decimal_content() {
+        use rust_decimal::Decimal;
+        use rust_decimal::prelude::FromPrimitive;
+        unsafe {
+            let d1 = DecimalObj::new(Decimal::from_f64(3.14).unwrap());
+            let d2 = DecimalObj::new(Decimal::from_f64(3.14).unwrap());
+            let d3 = DecimalObj::new(Decimal::from_f64(2.71).unwrap());
+            assert!(eq_element(d1 as u64, d2 as u64, V2ElemType::Decimal));
+            assert!(!eq_element(d1 as u64, d3 as u64, V2ElemType::Decimal));
+            DecimalObj::drop(d1);
+            DecimalObj::drop(d2);
+            DecimalObj::drop(d3);
+        }
+    }
+
+    #[test]
+    fn test_position_of_i64() {
+        unsafe {
+            let arr = TypedArray::<i64>::from_slice(&[10, 20, 30, 20, 40]);
+            stamp_elem_type(arr as *mut u8, ELEM_TYPE_I64);
+            let view = as_v2_typed_array(arr as u64, NativeKind::Ptr(HeapKind::TypedArray))
+                .unwrap();
+            assert_eq!(position_of(&view, 10u64), Some(0));
+            assert_eq!(position_of(&view, 20u64), Some(1)); // first match
+            assert_eq!(position_of(&view, 30u64), Some(2));
+            assert_eq!(position_of(&view, 99u64), None);
+            TypedArray::<i64>::drop_array(arr);
+        }
+    }
+
+    #[test]
+    fn test_position_of_empty_returns_none() {
+        unsafe {
+            let arr = TypedArray::<i64>::with_capacity(0);
+            stamp_elem_type(arr as *mut u8, ELEM_TYPE_I64);
+            let view = as_v2_typed_array(arr as u64, NativeKind::Ptr(HeapKind::TypedArray))
+                .unwrap();
+            assert_eq!(position_of(&view, 0u64), None);
+            TypedArray::<i64>::drop_array(arr);
+        }
+    }
+
+    #[test]
+    fn test_contains_element_i64() {
+        unsafe {
+            let arr = TypedArray::<i64>::from_slice(&[1, 2, 3, 4, 5]);
+            stamp_elem_type(arr as *mut u8, ELEM_TYPE_I64);
+            let view = as_v2_typed_array(arr as u64, NativeKind::Ptr(HeapKind::TypedArray))
+                .unwrap();
+            assert!(contains_element(&view, 3u64));
+            assert!(!contains_element(&view, 99u64));
+            TypedArray::<i64>::drop_array(arr);
+        }
+    }
+
+    #[test]
+    fn test_position_of_f64_nan_bitwise() {
+        unsafe {
+            let arr = TypedArray::<f64>::from_slice(&[1.0, f64::NAN, 2.0]);
+            stamp_elem_type(arr as *mut u8, ELEM_TYPE_F64);
+            let view = as_v2_typed_array(arr as u64, NativeKind::Ptr(HeapKind::TypedArray))
+                .unwrap();
+            // NaN findable by its own bit pattern.
+            assert_eq!(position_of(&view, f64::NAN.to_bits()), Some(1));
+            assert_eq!(position_of(&view, (1.0f64).to_bits()), Some(0));
+            assert_eq!(position_of(&view, (99.0f64).to_bits()), None);
+            TypedArray::<f64>::drop_array(arr);
+        }
+    }
+
+    #[test]
+    fn test_position_of_string_content() {
+        unsafe {
+            let s1 = StringObj::new("a");
+            let s2 = StringObj::new("b");
+            let s3 = StringObj::new("c");
+            let arr = TypedArray::<*const StringObj>::with_capacity(3);
+            TypedArray::push(arr, s1 as *const StringObj);
+            TypedArray::push(arr, s2 as *const StringObj);
+            TypedArray::push(arr, s3 as *const StringObj);
+            stamp_elem_type(arr as *mut u8, ELEM_TYPE_STRING);
+            let view = as_v2_typed_array(arr as u64, NativeKind::Ptr(HeapKind::TypedArray))
+                .unwrap();
+            // Needle is a SEPARATELY-allocated StringObj with the same
+            // content as s2 — content-equality must find it (not pointer
+            // identity).
+            let needle = StringObj::new("b");
+            assert_eq!(position_of(&view, needle as u64), Some(1));
+            // Non-matching content.
+            let other = StringObj::new("zzz");
+            assert_eq!(position_of(&view, other as u64), None);
+            assert!(contains_element(&view, needle as u64));
+            assert!(!contains_element(&view, other as u64));
+            TypedArray::<*const StringObj>::drop_array_heap(arr);
+            StringObj::drop(needle);
+            StringObj::drop(other);
+        }
+    }
+
+    #[test]
+    fn test_position_of_decimal_content() {
+        use rust_decimal::Decimal;
+        use rust_decimal::prelude::FromPrimitive;
+        unsafe {
+            let d1 = DecimalObj::new(Decimal::from_f64(1.5).unwrap());
+            let d2 = DecimalObj::new(Decimal::from_f64(2.5).unwrap());
+            let arr = TypedArray::<*const DecimalObj>::with_capacity(2);
+            TypedArray::push(arr, d1 as *const DecimalObj);
+            TypedArray::push(arr, d2 as *const DecimalObj);
+            stamp_elem_type(arr as *mut u8, ELEM_TYPE_DECIMAL);
+            let view = as_v2_typed_array(arr as u64, NativeKind::Ptr(HeapKind::TypedArray))
+                .unwrap();
+            let needle = DecimalObj::new(Decimal::from_f64(2.5).unwrap());
+            assert_eq!(position_of(&view, needle as u64), Some(1));
+            let other = DecimalObj::new(Decimal::from_f64(9.9).unwrap());
+            assert_eq!(position_of(&view, other as u64), None);
+            TypedArray::<*const DecimalObj>::drop_array_heap(arr);
+            DecimalObj::drop(needle);
+            DecimalObj::drop(other);
+        }
+    }
+
+    #[test]
+    fn test_position_of_typed_object_schema_mismatch() {
+        use shape_value::slot::ValueSlot;
+        use std::sync::Arc;
+        unsafe {
+            // Two TypedObjectStorages with the SAME field layout (empty)
+            // but different schema_ids — deep-eq must return inequality.
+            let kinds_a: Arc<[NativeKind]> = Arc::from(vec![].into_boxed_slice());
+            let kinds_b: Arc<[NativeKind]> = Arc::from(vec![].into_boxed_slice());
+            let obj_a = TypedObjectStorage::_new(
+                1,
+                vec![].into_boxed_slice() as Box<[ValueSlot]>,
+                0,
+                kinds_a,
+            );
+            let obj_b = TypedObjectStorage::_new(
+                2,
+                vec![].into_boxed_slice() as Box<[ValueSlot]>,
+                0,
+                kinds_b,
+            );
+            assert!(!eq_element(
+                obj_a as u64,
+                obj_b as u64,
+                V2ElemType::TypedObject
+            ));
+            TypedObjectStorage::_drop(obj_a);
+            TypedObjectStorage::_drop(obj_b);
+        }
+    }
+
+    #[test]
+    fn test_position_of_typed_object_same_schema_equal_fields() {
+        use shape_value::slot::ValueSlot;
+        use std::sync::Arc;
+        unsafe {
+            // Two TypedObjectStorages with the same schema_id + same single
+            // i64 field value (42) — deep-eq must return TRUE.
+            let kinds: Arc<[NativeKind]> = Arc::from(vec![NativeKind::Int64].into_boxed_slice());
+            let obj_a = TypedObjectStorage::_new(
+                7,
+                vec![ValueSlot::from_raw(42u64)].into_boxed_slice(),
+                0,
+                kinds.clone(),
+            );
+            let obj_b = TypedObjectStorage::_new(
+                7,
+                vec![ValueSlot::from_raw(42u64)].into_boxed_slice(),
+                0,
+                kinds.clone(),
+            );
+            let obj_c = TypedObjectStorage::_new(
+                7,
+                vec![ValueSlot::from_raw(99u64)].into_boxed_slice(),
+                0,
+                kinds.clone(),
+            );
+            assert!(eq_element(
+                obj_a as u64,
+                obj_b as u64,
+                V2ElemType::TypedObject
+            ));
+            assert!(!eq_element(
+                obj_a as u64,
+                obj_c as u64,
+                V2ElemType::TypedObject
+            ));
+            // Identity short-circuit.
+            assert!(eq_element(
+                obj_a as u64,
+                obj_a as u64,
+                V2ElemType::TypedObject
+            ));
+            // Null-defensive.
+            assert!(!eq_element(0, obj_a as u64, V2ElemType::TypedObject));
+            assert!(eq_element(0, 0, V2ElemType::TypedObject));
+            TypedObjectStorage::_drop(obj_a);
+            TypedObjectStorage::_drop(obj_b);
+            TypedObjectStorage::_drop(obj_c);
         }
     }
 }

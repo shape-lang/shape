@@ -22,11 +22,21 @@
 //! result-shape allocation. That's J.5 / V3-S5 ckpt-6 territory. Refusal
 //! #1 binding: no fabricated builder, no Bool-default fallback.
 //!
-//! The value-search handlers (`indexOf`, `includes`) remain SURFACE —
-//! per-kind value-equality comparison (especially for heap-element kinds
-//! `StringV2` / `DecimalV2` / `TypedObject`) requires a `v2_array_detect::
-//! position_of` / `contains_element` primitive that doesn't exist at
-//! HEAD. J.5 territory.
+//! The value-search handlers (`indexOf`, `includes`) landed at R8 W4
+//! J.5c (2026-05-24, supervisor D2) via the generic `eq_element` +
+//! `position_of` / `contains_element` primitives at
+//! `v2_handlers/v2_array_detect.rs`. The handler shells extract the
+//! `V2TypedArrayView` from the receiver `KindedSlot`, validate the
+//! needle kind matches the array's element type (strict — no coercion;
+//! kind-mismatch returns `-1` / `false` to mirror JS-family semantics),
+//! and invoke the primitive. Scalar arms use bitwise compare; String /
+//! Decimal deref the v2-raw `StringObj` / `DecimalObj` carriers and
+//! compare content; TypedObject deep-compares schema_id + per-field
+//! `NativeKind` table + per-slot equality (recursive `eq_element` on
+//! the field bits per ADR-006 §2.7.16 typed-Arc dispatch-label
+//! receiver-recovery). No MethodFnV2 trait dispatch (supervisor D2
+//! REFUSED; per CLAUDE.md §Renames-to-refuse the "MethodFnV2 bridge"
+//! pattern is forbidden).
 //!
 //! ## ADR-006 discipline preserved
 //!
@@ -39,7 +49,8 @@
 //! - ADR-005 §1 single-discriminator preserved.
 
 use crate::executor::v2_handlers::v2_array_detect::{
-    as_v2_typed_array, read_element, V2TypedArrayView,
+    as_v2_typed_array, contains_element, position_of, read_element, V2ElemType,
+    V2TypedArrayView,
 };
 use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
@@ -259,24 +270,101 @@ pub(crate) fn handle_find_index_v2(
     Ok(KindedSlot::from_int(-1))
 }
 
-/// `arr.indexOf(value)` — value-search. SURFACE: per-kind equality
-/// requires a `v2_array_detect::position_of` primitive. J.5 territory.
+/// `arr.indexOf(value)` — value-search per the value-equality primitive
+/// `v2_array_detect::position_of`. Returns the first index whose element
+/// equals the needle (per `V2ElemType` equality), or `Int64(-1)` on no
+/// match.
+///
+/// R8 W4 J.5c (2026-05-24, supervisor D2): wired to the generic
+/// `eq_element` + `position_of` deep-equality primitives. Per-kind
+/// equality semantics: scalar arms use bitwise compare on the
+/// significant slot bits (matches `==` for integers / bool / char,
+/// matches BITWISE equality for float — IEEE NaN compares equal to its
+/// own bit pattern; the user can opt into IEEE semantics via
+/// `find(|x| x != needle)`); String / Decimal arms deref the v2-raw
+/// `StringObj` / `DecimalObj` carrier and compare content;
+/// TypedObject arms deep-compare schema_id + every field via recursive
+/// dispatch (see `eq_element` documentation).
+///
+/// Kind-mismatch between the needle and the array's element type is a
+/// strict "not found" — returns `-1` without invoking the per-element
+/// scan. This matches the JS-family `indexOf` semantics
+/// (`[1,2,3].indexOf("1") === -1`).
 pub(crate) fn handle_index_of_v2(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(j5_builder_surface("indexOf", args))
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "Array.indexOf expects 1 argument: (value)".into(),
+        ));
+    }
+    let view = extract_view("indexOf", &args[0])?;
+    let needle = &args[1];
+    if !needle_kind_matches(view.elem_type, needle.kind) {
+        return Ok(KindedSlot::from_int(-1));
+    }
+    let needle_bits = needle.slot.raw();
+    match position_of(&view, needle_bits) {
+        Some(i) => Ok(KindedSlot::from_int(i as i64)),
+        None => Ok(KindedSlot::from_int(-1)),
+    }
 }
 
-/// `arr.includes(value)` — value-search. SURFACE: per-kind equality
-/// requires a `v2_array_detect::contains_element` primitive. J.5 territory.
+/// `arr.includes(value)` — value-search per the value-equality primitive
+/// `v2_array_detect::contains_element`. Returns `true` iff any element
+/// equals the needle under the per-`V2ElemType` equality. See
+/// `handle_index_of_v2` for equality-semantics documentation.
+///
+/// Kind-mismatch between the needle and the array's element type returns
+/// `false` without invoking the scan (mirrors `indexOf` returning -1).
 pub(crate) fn handle_includes_v2(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(j5_builder_surface("includes", args))
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "Array.includes expects 1 argument: (value)".into(),
+        ));
+    }
+    let view = extract_view("includes", &args[0])?;
+    let needle = &args[1];
+    if !needle_kind_matches(view.elem_type, needle.kind) {
+        return Ok(KindedSlot::from_bool(false));
+    }
+    let needle_bits = needle.slot.raw();
+    Ok(KindedSlot::from_bool(contains_element(&view, needle_bits)))
+}
+
+/// Check whether `needle_kind` is a value-equality match for the array's
+/// `elem_type`. Returns `false` for kind-mismatch (strict, no coercion
+/// per CLAUDE.md §Type-System-Rules "NO runtime coercion"). For each
+/// `V2ElemType` arm, only the canonical producer-stamped `NativeKind`
+/// is accepted: Bool/F64/I64/I32/I8/U8/I16/U16/U32/F32/Char map to their
+/// matching `NativeKind::*` variant; the heap-element arms (String /
+/// Decimal / TypedObject) require the matching v2-raw carrier
+/// (`StringV2` / `DecimalV2` / `Ptr(HeapKind::TypedObject)`).
+#[inline]
+fn needle_kind_matches(elem_type: V2ElemType, needle_kind: NativeKind) -> bool {
+    match (elem_type, needle_kind) {
+        (V2ElemType::F64, NativeKind::Float64) => true,
+        (V2ElemType::I64, NativeKind::Int64) => true,
+        (V2ElemType::I32, NativeKind::Int32) => true,
+        (V2ElemType::Bool, NativeKind::Bool) => true,
+        (V2ElemType::I8, NativeKind::Int8) => true,
+        (V2ElemType::U8, NativeKind::UInt8) => true,
+        (V2ElemType::I16, NativeKind::Int16) => true,
+        (V2ElemType::U16, NativeKind::UInt16) => true,
+        (V2ElemType::U32, NativeKind::UInt32) => true,
+        (V2ElemType::F32, NativeKind::Float32) => true,
+        (V2ElemType::Char, NativeKind::Char) => true,
+        (V2ElemType::String, NativeKind::StringV2) => true,
+        (V2ElemType::Decimal, NativeKind::DecimalV2) => true,
+        (V2ElemType::TypedObject, NativeKind::Ptr(HeapKind::TypedObject)) => true,
+        _ => false,
+    }
 }
 
 /// `arr.some(|x| ...)` — true iff at least one element satisfies the
