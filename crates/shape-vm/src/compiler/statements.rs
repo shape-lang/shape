@@ -1631,6 +1631,20 @@ impl BytecodeCompiler {
                     }
                 }
             }
+            // R8 W7: parallel cache for tuple variants so positional
+            // payload types are recoverable at pattern-compile time
+            // (the schema collapses them into `__payload_N: Any`).
+            if let EnumMemberKind::Tuple(types) = &member.kind {
+                let tv = types.clone();
+                self.enum_tuple_variant_fields
+                    .insert((enum_def.name.clone(), member.name.clone()), tv.clone());
+                if let Some(basename) = enum_def.name.rsplit("::").next() {
+                    if basename != enum_def.name {
+                        self.enum_tuple_variant_fields
+                            .insert((basename.to_string(), member.name.clone()), tv);
+                    }
+                }
+            }
         }
 
         let schema = shape_runtime::type_schema::TypeSchema::new_enum(&enum_def.name, variants.clone());

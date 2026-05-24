@@ -853,6 +853,16 @@ pub struct BytecodeCompiler {
     /// y.
     pub(crate) enum_struct_variant_fields:
         HashMap<(String, String), Vec<(String, shape_ast::ast::TypeAnnotation)>>,
+    /// R8 W7: per-(enum, variant) tuple-payload positional type
+    /// annotations. Symmetric to `enum_struct_variant_fields` for
+    /// tuple variants. The runtime schema collapses tuple payloads
+    /// into `__payload_N: Any`, so per-position types of
+    /// `enum E { V(string) }` are otherwise lost at pattern-compile
+    /// time. Populated by `register_enum`; consumed by
+    /// `compile_typed_enum_binding` (tuple arm) so `match E::V(id) =>
+    /// id + "!"` propagates `string` onto `id`.
+    pub(crate) enum_tuple_variant_fields:
+        HashMap<(String, String), Vec<shape_ast::ast::TypeAnnotation>>,
     /// Cached const specializations keyed by `(base_name + const-arg fingerprint)`.
     pub(crate) const_specializations: HashMap<String, usize>,
     /// Monotonic counter for unique specialization symbol names.

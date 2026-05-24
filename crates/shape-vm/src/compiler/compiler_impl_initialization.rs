@@ -78,6 +78,7 @@ impl BytecodeCompiler {
             function_defs: HashMap::new(),
             foreign_function_defs: HashMap::new(),
             enum_struct_variant_fields: HashMap::new(),
+            enum_tuple_variant_fields: HashMap::new(),
             const_specializations: HashMap::new(),
             next_const_specialization_id: 0,
             specialization_const_bindings: HashMap::new(),
