@@ -57,6 +57,23 @@ impl VirtualMachine {
         self.reset();
 
         // Bytecode verification: ensure trusted opcodes have valid FrameDescriptors.
+        //
+        // R8 W7 G.5 (v0.3 divergence-elimination, ADR-006 §2.7.14 SURFACE):
+        // V2 typed-opcode verifier failures here are warning-only — the
+        // bytecode interpreter handles missing FrameDescriptor opcodes fine
+        // (smoke s2's `Vec.map::i64_*` closure runs cleanly through the VM
+        // even with verifier warnings). The JIT path is the actual
+        // divergence surface: native code emitted for unverified opcodes
+        // skipped the runtime string-key check in `as_string_key` and
+        // returned garbage where the VM cleanly errored (audit
+        // `docs/cluster-audits/v0.3-r8w6-hashmap-key-kind-audit.md` §4 —
+        // `set::from_array([1,2,3])` ec=0 with `{"Integer": -1407...}`
+        // garbage vs VM ec=1 "HashMap key must be a string"). The fatal-
+        // surface lives in `JITExecutor::execute_with_jit` (Option B per
+        // audit §5): the JIT compile step refuses unverified bytecode and
+        // the existing `[jit-fallback]` path routes the program through
+        // the interpreter, which agrees with the VM error surface. Full V2
+        // type soundness for every JIT-emitted opcode is v0.4 follow-up.
         #[cfg(debug_assertions)]
         {
             if let Err(errors) = crate::bytecode::verifier::verify_trusted_opcodes(&self.program) {

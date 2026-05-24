@@ -222,6 +222,44 @@ impl JITExecutor {
         use crate::JITContext;
         use crate::compiler::JITCompiler;
 
+        // R8 W7 G.5 (v0.3 divergence-elimination, ADR-006 §2.7.14 SURFACE):
+        // Refuse to JIT-compile programs whose V2 typed opcodes lack matching
+        // FrameDescriptor entries. The bytecode interpreter handles such
+        // opcodes by reading their kind from the runtime parallel-kind
+        // track per §2.7.7 — the JIT path consumes FrameDescriptors and
+        // previously emitted native code that silently bypassed the runtime
+        // string-key check in `as_string_key`, returning garbage where the
+        // VM cleanly errored (audit
+        // `docs/cluster-audits/v0.3-r8w6-hashmap-key-kind-audit.md` §4 —
+        // `set::from_array([1,2,3])` ec=0 with `{"Integer": -1407...}` vs
+        // VM ec=1 "HashMap key must be a string"). Returning the outer
+        // `Err` triggers the existing `[jit-fallback]` path in
+        // `JITExecutor::execute_program` (line 173): the program runs
+        // under the bytecode interpreter and reports the same surface as
+        // `--mode vm`. Full V2 type soundness for every JIT-emitted opcode
+        // is v0.4 follow-up (per audit §5 Option B; Option A was infeasible
+        // because smoke s2 currently emits the same `Vec.map::*` unverified
+        // shape and depends on the interpreter handling it cleanly).
+        if let Err(errors) = shape_vm::bytecode::verifier::verify_v2_typed_opcodes(bytecode) {
+            let total = errors.len();
+            let first = errors
+                .first()
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "<none>".to_string());
+            return Err(shape_runtime::error::ShapeError::RuntimeError {
+                message: format!(
+                    "V2 bytecode verification failed: {} violation(s); first: {}. \
+                     R8 W7 G.5 SURFACE (ADR-006 §2.7.14) — JIT refuses unverified \
+                     V2 typed opcodes; falling through to bytecode interpreter so \
+                     the runtime error surface agrees with `--mode vm`. Tracked via \
+                     docs/cluster-audits/v0.3-r8w6-hashmap-key-kind-audit.md (v0.4 \
+                     / planned: full V2 type soundness for every JIT-emitted opcode)",
+                    total, first,
+                ),
+                location: None,
+            });
+        }
+
         // JIT compile the bytecode
         let jit_config = JITConfig::default();
         let mut jit = JITCompiler::new(jit_config).map_err(|e| {
