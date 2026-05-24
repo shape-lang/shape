@@ -1,10 +1,11 @@
 # Team-lead handover — Shape v0.3 close-approach
 
-**Refreshed:** 2026-05-24 at main HEAD `79783499` (R8 W5 close — G.1 Step 1
-doc-truth audits + shape-web (a)-class batch merged; **R8 W6 dispatch in
-flight**). v0.3 code criteria substantially complete (A 5.5/6, B/C/D/E/F
-COMPLETE, J 3/4); G.1 Step 1 surfaced 16 doc/code-drift items dispositioned
-into 5 groups by supervisor 2026-05-24.
+**Refreshed:** 2026-05-24 at main HEAD `8570e228` (**R8 W6 CLOSED** — G.2
+bulk panic→SURFACE + G.1 JIT FrameDescriptor + G.1 W17 IoHandle/DataTable
++ G.3 http options-arg + 5 audit docs + ADR §2.7.4 drafts file). v0.3
+code criteria substantially complete (A 5.5/6, B/C/D/E/F COMPLETE, J 3/4);
+G.1 Step 1 disposition fully ground-truthed + 4 of 5 supervisor groups
+substantially closed.
 
 ## Role
 
@@ -17,13 +18,13 @@ semantics. User relays between team-lead and supervisor.
 
 | | |
 |---|---|
-| Main HEAD | `79783499` (R8 W5 doc-only close) |
-| Smoke matrix s1–s5 | **5/5 VM == JIT** (canonical (ii) F' release-binary harness; re-verified at HEAD `79783499` start of R8 W6) |
+| Main HEAD | `8570e228` (R8 W6 close: 4 merges + 1 audit-batch commit) |
+| Smoke matrix s1–s5 | **5/5 VM == JIT** (canonical (ii) F' release-binary harness; re-verified at HEAD `8570e228` post-final-merge) |
 | verify-merge / check-no-dynamic / check-clean | 13/13 / exit 0 / exit 0 |
-| git-stash pre-commit hook | DEPLOYED (R8 W5 ZERO violations) |
+| git-stash pre-commit hook | DEPLOYED (R8 W5+W6 ZERO violations cumulative) |
 | Co-Authored-By trailers (cumulative) | 0 |
 | Bad-code merges (cumulative) | 0 |
-| v0.3.0 tag | NOT landed — gated on R8 W6 dispositions + user authorization |
+| v0.3.0 tag | NOT landed — gated on remaining R8 W7+ dispositions + user authorization |
 
 ## R8 W6 dispatch — Supervisor 16-item disposition (binding 2026-05-24)
 
@@ -40,27 +41,40 @@ and-stop messaging.
 | **4** | v0.4 deferral (already errors cleanly OR pure feature-add) | clone in call-arg (verify clean), cview/cmut C-ABI, E b-5 module schema gap, E b-6 transport::quic NYI, F domain legacy type syntax, A G1-B-FQ7-V2VERIFIER stderr noise, J.5e iterator-protocol |
 | **5** | Investigate-then-classify (per-binding routing) | C Match enum-payload inference; E b-2 pure-Shape stdlib inference family (~9-10 files); E b-3 HashMap key-kind discriminator gap + W17.3-4.3 alignment |
 
-## R8 W6 active dispatches (this session)
+## R8 W6 outcome (CLOSED 2026-05-24)
 
-7 parallel agents:
-1. **G1 audit** — JIT TypedArrayPushI64 FrameDescriptor SEGFAULT (read-only, main repo)
-2. **G1 audit** — W17 factory-return arms (ConcreteReturn::Discriminant(16)) + transport::tcp divergence (read-only, main repo)
-3. **G2 conversion** — Wave 5d ~40+ todo!() panics → structured errors (worktree: `../shape-r8w6-g2-bulk-surface`, branch `r8w6-g2-bulk-surface`)
-4. **G5 investigate** — match enum-payload inference loss (read-only, main repo)
-5. **G5 investigate** — pure-Shape stdlib inference family ~9-10 files (read-only, main repo)
-6. **G5 investigate** — HashMap key-kind discriminator gap (read-only, main repo)
-7. **ADR drafts** — 2 §2.7.4 addendum verbatim-text drafts to `docs/cluster-audits/v0.3-adr-2-7-4-addendum-drafts.md` (read-only, main repo)
+4 merges + 5 audit docs + ADR drafts file landed; all close-gates green
+at every checkpoint; smoke 5/5 VM == JIT preserved throughout.
 
-## Remaining v0.3 scope (post-G.1-Step-1)
+| Merge | Commit | Substance |
+|---|---|---|
+| G.2 bulk panic→SURFACE | (in d8d79daf history) `d61171f4` → merge | 13 dispatch arms in vm_impl/builtins.rs converted Wave-5c/5d/5e |
+| G.1 W17 IoHandle/DataTable | `5b134204` → `6bdf09fc` | 2 KindedSlot ctors + 2 project_typed_return arms; eliminates transport::tcp VM/JIT divergence |
+| G.1 JIT FrameDescriptor | `1ef4ca9d` → `9639d8c4` | annotation-handler local-storage-hint capture; verifier complaints eliminated |
+| G.3 http options-arg | `94dc8fa9` → `d8d79daf` | doc-fix path: 8 fns in http.shape + http.mdx (shape-web) |
+| R8 W6 audit-round close | `8570e228` | 5 audit docs + ADR drafts + handover refresh |
 
-- Group 1 fixes (after audits land + dispatch as separate worktree branches)
-- Group 2 bulk conversion (in flight)
-- Group 3 a-class doc fixes (queued)
-- Group 5 routing per investigation outputs (queued)
-- J.4-rest residuals (joinStr + small sort-family items)
-- G.2 Step 2 (doc-based example writing per slice; gated on Step 1 fully closed)
-- 2 ADR §2.7.4 addendum texts (in flight via drafts file mechanism)
-- v0.3 close + tag (user-authorization-gated)
+## Supervisor surfaces (for relay)
+
+1. **ADR §2.7.4 addendum drafts file** at `docs/cluster-audits/v0.3-adr-2-7-4-addendum-drafts.md` — supervisor reads from disk per the new mechanism (bypasses relay-chain text-loss). 4 `[SUPERVISOR-DECISION: ...]` markers: (a) NEW top-level §2.7.28/.29 vs amendment-subsection under §2.7.4; (b) insertion position (numeric vs file-position dominant); (c) retro-add `// §2.7.28` / `// §2.7.29` marker comments; (d) Q-number allocation (next available Q26/Q27).
+2. **Match enum-payload inference (G5)** — recommended v0.4 in audit; surface if supervisor reads doc-contract leg of no-known-incorrectness binding stronger than clean-compile-error leg. See `docs/cluster-audits/v0.3-r8w6-match-enum-payload-inference-audit.md` §2.
+
+## Remaining v0.3 scope (post-R8-W6)
+
+- **G5 pure-Shape stdlib cluster fixes** (~8-10h across 3 clusters per audit
+  `v0.3-r8w6-pure-shape-stdlib-inference-audit.md`): module-level-binding
+  rejection (2 files), generic-arithmetic inference loss (5 files),
+  empty-array element-type loss (2 files); 1 file already passes (remote.shape).
+- **G5 HashMap key-kind divergence-elimination** (~1.5 sessions per audit
+  `v0.3-r8w6-hashmap-key-kind-audit.md` §5): JIT V2-verifier-failure path
+  fatal-or-interpreter-fallback. Full int-key HashMap support → v0.4 epic.
+- **G3 a-class follow-ups** surfaced during R8 W6 (none net-new this round
+  beyond the http options-arg fix).
+- **J.4-rest residuals** (joinStr + small sort-family items).
+- **G.2 Step 2** doc-truth round (USER-followable validation; gated on
+  Step 1 finalized + main stable; nominally ready now that R8 W6 closes).
+- **ADR §2.7.4 text-ratify** (gated on supervisor reading the drafts file).
+- **v0.3.0 tag** (user-authorization-gated; gated on all above).
 
 ## ADR §2.7.4 addendum text-ratify — STRUCTURAL FIX
 
@@ -73,10 +87,11 @@ post-apply-grep discipline as §2.7.13 ratify.
 
 ## Trajectory
 
-~**5-8 sessions** to v0.3 tag (re-projected post-R8 W5 supervisor disposition).
-Sized: G1 (1-2) + G2 (1) + G3 (0.5) + G5 routing (0.5) + J.4-rest (0.5) +
-G.2 Step 2 (1-2) + ADR ratify (0.5) + close + tag (0.5). Re-project after
-G1 audits + G2 conversion close.
+~**3-5 sessions** to v0.3 tag (re-projected post-R8-W6 close). Sized:
+G5 pure-Shape stdlib (1-2) + G5 HashMap divergence (0.5-1) + J.4-rest (0.5)
++ G.2 Step 2 (1) + ADR text-ratify (0.5) + close + tag (0.5). R8 W6
+substantially compressed the trajectory by closing 4 dispositions in one
+round.
 
 ## Dispatch hygiene (binding — R7 W3 + R8 W4 hardening)
 
@@ -162,6 +177,8 @@ row appended; no Co-Authored-By trailer.
 
 ---
 
-*R8 W5 CLOSED (G.1 Step 1 6-slice audits + shape-web (a)-class batch).
-R8 W6 dispatched 2026-05-24: 2 G1 audits + 1 G2 bulk-conversion +
-3 G5 investigations + 1 ADR-drafts agent in parallel.*
+*R8 W6 CLOSED 2026-05-24: 4 merges landed (G.2 bulk surface, G.1 JIT
+framedesc, G.1 W17 IoHandle, G.3 http options-arg); 5 audit docs + ADR
+§2.7.4 drafts file committed. Smoke 5/5 + 13/13 + git-stash hook ZERO
+violations preserved throughout. Next round: G5 pure-Shape stdlib + G5
+HashMap divergence-elimination.*
