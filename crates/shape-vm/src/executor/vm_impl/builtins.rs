@@ -375,22 +375,35 @@ impl VirtualMachine {
                 | BuiltinFunction::IsArray
                 | BuiltinFunction::IsObject
                 | BuiltinFunction::IsDataRow => {
+                    // SURFACE per ADR-006 §2.7.14: phase-1b-vm wave 5c —
+                    // is_* type-check body migration deferred. Drain args
+                    // to keep the §2.7.7 parallel-kind track balanced,
+                    // then return a structured `NotImplemented` so the
+                    // dispatch arm fails loudly without panicking. The
+                    // re-fill rebuilds bodies against the `KindedSlot`
+                    // carrier (Q8 carrier-API-bound).
                     let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
-                    todo!(
-                        "phase-1b-vm wave 5c — is_* type-check body migration \
-                         pending: {:?}",
+                    return Err(VMError::NotImplemented(format!(
+                        "phase-1b-vm-wave-5c-is-type-check: {:?} body \
+                         migration to kinded carrier (ADR-006 §2.7.6) \
+                         pending (v0.4 / planned)",
                         builtin
-                    );
+                    )));
                 }
                 BuiltinFunction::ToString
                 | BuiltinFunction::ToNumber
                 | BuiltinFunction::ToBool => {
+                    // SURFACE per ADR-006 §2.7.14: phase-1b-vm wave 5c —
+                    // conversion body migration (`dispatch_conversion_builtin`)
+                    // deferred. Drain args to balance the §2.7.7 parallel-
+                    // kind track before surfacing.
                     let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
-                    todo!(
-                        "phase-1b-vm wave 5c — conversion body migration \
-                         pending (dispatch_conversion_builtin): {:?}",
+                    return Err(VMError::NotImplemented(format!(
+                        "phase-1b-vm-wave-5c-conversion: {:?} body \
+                         migration to kinded carrier (dispatch_conversion_builtin) \
+                         pending (v0.4 / planned)",
                         builtin
-                    );
+                    )));
                 }
                 BuiltinFunction::NativePtrSize
                 | BuiltinFunction::NativePtrNewCell
@@ -400,20 +413,31 @@ impl VirtualMachine {
                 | BuiltinFunction::NativeTableFromArrowC
                 | BuiltinFunction::NativeTableFromArrowCTyped
                 | BuiltinFunction::NativeTableBindType => {
+                    // SURFACE per ADR-006 §2.7.14: phase-1b-vm wave 5c —
+                    // native-interop body migration
+                    // (`dispatch_native_interop_builtin`) deferred. Drain
+                    // args to balance the §2.7.7 parallel-kind track.
                     let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
-                    todo!(
-                        "phase-1b-vm wave 5c — native-interop body migration \
-                         pending (dispatch_native_interop_builtin): {:?}",
+                    return Err(VMError::NotImplemented(format!(
+                        "phase-1b-vm-wave-5c-native-interop: {:?} body \
+                         migration to kinded carrier (dispatch_native_interop_builtin) \
+                         pending (v0.4 / planned)",
                         builtin
-                    );
+                    )));
                 }
                 BuiltinFunction::TypeOf => {
-                    todo!(
-                        "phase-1b-vm wave 5c — TypeOf body migration pending \
-                         (legacy body popped via the deleted raw-bits stack \
-                         shim; needs kinded-carrier rebuild — see ADR-006 \
-                         §2.7.6)"
-                    );
+                    // SURFACE per ADR-006 §2.7.14: phase-1b-vm wave 5c —
+                    // `TypeOf` body migration pending. The legacy body
+                    // popped via the deleted raw-bits stack shim; needs a
+                    // kinded-carrier rebuild per ADR-006 §2.7.6. No args
+                    // are popped because the legacy emit shape did not
+                    // emit an arity prefix here.
+                    return Err(VMError::NotImplemented(
+                        "phase-1b-vm-wave-5c-typeof: TypeOf body migration \
+                         to kinded carrier (ADR-006 §2.7.6) pending \
+                         (v0.4 / planned)"
+                            .to_string(),
+                    ));
                 }
 
                 // ── Wave 5d: closure-driven array builtins + intrinsics ──────
@@ -426,12 +450,18 @@ impl VirtualMachine {
                 | BuiltinFunction::Some
                 | BuiltinFunction::Every
                 | BuiltinFunction::ControlFold => {
+                    // SURFACE per ADR-006 §2.7.14: phase-1b-vm wave 5d —
+                    // closure-driven array builtin body migration deferred.
+                    // The rebuild routes through the §2.7.11 / Q12 kinded
+                    // value-call ABI for the closure invocation. Drain
+                    // args to balance the §2.7.7 parallel-kind track.
                     let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
-                    todo!(
-                        "phase-1b-vm wave 5d — closure-driven array builtin \
-                         body migration pending: {:?}",
+                    return Err(VMError::NotImplemented(format!(
+                        "phase-1b-vm-wave-5d-closure-array: {:?} body \
+                         migration to kinded carrier + value-call ABI \
+                         (ADR-006 §2.7.11/Q12) pending (v0.4 / planned)",
                         builtin
-                    );
+                    )));
                 }
                 BuiltinFunction::IntrinsicVecAbs
                 | BuiltinFunction::IntrinsicVecSqrt
@@ -445,28 +475,47 @@ impl VirtualMachine {
                 | BuiltinFunction::IntrinsicVecMin
                 | BuiltinFunction::IntrinsicVecSelect
                 | BuiltinFunction::IntrinsicVecAddI64 => {
-                    todo!(
-                        "phase-1b-vm wave 5d — vector intrinsic body \
-                         migration pending (handle_vector_intrinsic): {:?}",
+                    // SURFACE per ADR-006 §2.7.14: phase-1b-vm wave 5d —
+                    // SIMD vector intrinsic body migration
+                    // (`handle_vector_intrinsic`) deferred. No arg pop
+                    // because the legacy dispatcher handled it internally;
+                    // surface immediately so the operator sees a clean
+                    // error before any state mutation. Stack rebalancing
+                    // is the rebuild's responsibility per
+                    // `executor/builtins/vector_intrinsics.rs`.
+                    return Err(VMError::NotImplemented(format!(
+                        "phase-1b-vm-wave-5d-vec-intrinsic: {:?} body \
+                         migration to kinded carrier (handle_vector_intrinsic) \
+                         pending (v0.4 / planned)",
                         builtin
-                    );
+                    )));
                 }
                 BuiltinFunction::IntrinsicMatMulVec
                 | BuiltinFunction::IntrinsicMatMulMat
                 | BuiltinFunction::IntrinsicMatAdd
                 | BuiltinFunction::IntrinsicMatSub => {
-                    todo!(
-                        "phase-1b-vm wave 5d — matrix intrinsic body \
-                         migration pending (handle_matrix_intrinsic): {:?}",
+                    // SURFACE per ADR-006 §2.7.14: phase-1b-vm wave 5d —
+                    // matrix intrinsic body migration
+                    // (`handle_matrix_intrinsic`) deferred. See sibling
+                    // vector arm above for arg-pop rationale.
+                    return Err(VMError::NotImplemented(format!(
+                        "phase-1b-vm-wave-5d-mat-intrinsic: {:?} body \
+                         migration to kinded carrier (handle_matrix_intrinsic) \
+                         pending (v0.4 / planned)",
                         builtin
-                    );
+                    )));
                 }
                 BuiltinFunction::IntrinsicMinimize => {
+                    // SURFACE per ADR-006 §2.7.14: phase-1b-vm wave 5d —
+                    // `minimize` intrinsic body deferred. Drain args to
+                    // balance the §2.7.7 parallel-kind track.
                     let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
-                    todo!(
-                        "phase-1b-vm wave 5d — minimize intrinsic body \
-                         migration pending"
-                    );
+                    return Err(VMError::NotImplemented(
+                        "phase-1b-vm-wave-5d-minimize: minimize() intrinsic \
+                         body migration to kinded carrier + value-call ABI \
+                         (ADR-006 §2.7.11/Q12) pending (v0.4 / planned)"
+                            .to_string(),
+                    ));
                 }
                 // W12-stdlib-intrinsic-collapse (Wave-2-Agent-G, 2026-05-14):
                 // `BuiltinFunction::IntrinsicSum` deleted as the canonical
@@ -522,11 +571,26 @@ impl VirtualMachine {
                 | BuiltinFunction::IntrinsicCharCode
                 | BuiltinFunction::IntrinsicFromCharCode
                 | BuiltinFunction::IntrinsicSeries => {
-                    todo!(
-                        "phase-1b-vm wave 5d — intrinsic body migration \
-                         pending (handle_intrinsic_builtin): {:?}",
+                    // SURFACE per ADR-006 §2.7.14: phase-1b-vm wave 5d —
+                    // stats / random / stochastic / rolling / scalar-math /
+                    // series intrinsic body migration
+                    // (`handle_intrinsic_builtin`) deferred. Covers the
+                    // ~37-variant cluster (Bspline2_3dBatch, Mean, Min,
+                    // Max, Std, Variance, Random*, Dist*, BrownianMotion,
+                    // Gbm, OuProcess, RandomWalk, Rolling*, Ema,
+                    // LinearRecurrence, Shift, Diff, PctChange, Fillna,
+                    // Cumsum, Cumprod, Clip, Correlation, Covariance,
+                    // Percentile, Median, Atan2, Sinh, Cosh, Tanh,
+                    // CharCode, FromCharCode, Series). No arg pop because
+                    // the legacy dispatcher handled per-variant arity; the
+                    // rebuild lives at `executor/builtins/intrinsics/`
+                    // (math.rs / statistical.rs / signal.rs).
+                    return Err(VMError::NotImplemented(format!(
+                        "phase-1b-vm-wave-5d-intrinsic: {:?} body migration \
+                         to kinded carrier (handle_intrinsic_builtin) \
+                         pending (v0.4 / planned)",
                         builtin
-                    );
+                    )));
                 }
 
                 // ── Wave 5e: constructors (Result/Option, Set, Deque,
@@ -1160,12 +1224,18 @@ impl VirtualMachine {
                 | BuiltinFunction::JsonObjectKeys
                 | BuiltinFunction::JsonArrayLen
                 | BuiltinFunction::JsonObjectLen => {
+                    // SURFACE per ADR-006 §2.7.14: phase-1b-vm wave 5e —
+                    // JSON navigation helper body migration deferred.
+                    // Rebuild target lives at
+                    // `executor/builtins/json_helpers.rs`. Drain args to
+                    // balance the §2.7.7 parallel-kind track.
                     let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
-                    todo!(
-                        "phase-1b-vm wave 5e — JSON navigation helper body \
-                         migration pending: {:?}",
+                    return Err(VMError::NotImplemented(format!(
+                        "phase-1b-vm-wave-5e-json-nav: {:?} body migration \
+                         to kinded carrier (executor/builtins/json_helpers.rs) \
+                         pending (v0.4 / planned)",
                         builtin
-                    );
+                    )));
                 }
                 // ── W8-WJ: window function dispatch (ADR-006 §2.7.10/Q11) ──
                 //
@@ -1246,10 +1316,17 @@ impl VirtualMachine {
                     return self.handle_join_execute();
                 }
                 BuiltinFunction::Reflect => {
-                    todo!(
-                        "phase-1b-vm wave 5e — reflect builtin body \
-                         migration pending"
-                    );
+                    // SURFACE per ADR-006 §2.7.14: phase-1b-vm wave 5e —
+                    // `reflect()` builtin body migration deferred. No arg
+                    // pop because the legacy emit shape did not emit an
+                    // arity prefix at this dispatch arm; the rebuild
+                    // wires arg-popping along with the body re-fill.
+                    return Err(VMError::NotImplemented(
+                        "phase-1b-vm-wave-5e-reflect: reflect() body \
+                         migration to kinded carrier pending \
+                         (v0.4 / planned)"
+                            .to_string(),
+                    ));
                 }
 
                 // ── Eval-* removed-feature stubs (preserved as runtime
