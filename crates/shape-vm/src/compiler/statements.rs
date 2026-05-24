@@ -703,7 +703,32 @@ impl BytecodeCompiler {
             Item::Module(module_def, span) => {
                 self.compile_module_decl(module_def, *span)?;
             }
-            Item::VariableDecl(var_decl, _) => {
+            Item::VariableDecl(var_decl, span) => {
+                // R8 W8 Cluster A (2026-05-24): module-level `const`
+                // initializers must be comptime-evaluable. Reject
+                // runtime-only initializers (function calls, identifier
+                // references to non-const bindings, etc.) with a clean
+                // compile error. ADR-006 §2.7.5 stamp-at-compile-time
+                // invariant: the const's value must be known at compile
+                // time so the bytecode emits `PushConst(<value>)` instead
+                // of a deferred runtime computation.
+                if var_decl.kind == shape_ast::ast::VarKind::Const {
+                    if let Some(ref init_expr) = var_decl.value {
+                        if !Self::const_initializer_is_comptime_evaluable(init_expr) {
+                            return Err(ShapeError::SemanticError {
+                                message: format!(
+                                    "module-level `const` initializer must be comptime-evaluable \
+                                     (literal, or unary `-`/`!` on a literal). \
+                                     Function calls and other runtime-dependent expressions are \
+                                     rejected per R8 W8 Cluster A (2026-05-24). \
+                                     Extending the comptime evaluator is v0.4-concurrency-design-pass \
+                                     territory per docs/v0.3-close-summary.md \u{a7}5.15."
+                                ),
+                                location: Some(self.span_to_source_location(*span)),
+                            });
+                        }
+                    }
+                }
                 // ModuleBinding variable — register the variable even if the initializer fails,
                 // to prevent cascading "Undefined variable" errors on later references.
                 let mut ref_borrow = None;
@@ -858,7 +883,33 @@ impl BytecodeCompiler {
                     self.emit(Instruction::simple(OpCode::Pop));
                 }
             }
-            Item::Statement(stmt, _) => {
+            Item::Statement(stmt, stmt_item_span) => {
+                // R8 W8 Cluster A (2026-05-24): reject runtime-only `const`
+                // initializers at the top-level script-item path. Module-
+                // scoped `const`s reach `Item::VariableDecl` via the
+                // qualify pass; script-level `const`s reach
+                // `Item::Statement(Statement::VariableDecl)` per the
+                // grammar (`item_core → statement → variable_decl`).
+                if let Statement::VariableDecl(var_decl, decl_span) = stmt {
+                    if var_decl.kind == shape_ast::ast::VarKind::Const {
+                        if let Some(ref init_expr) = var_decl.value {
+                            if !Self::const_initializer_is_comptime_evaluable(init_expr) {
+                                return Err(ShapeError::SemanticError {
+                                    message: format!(
+                                        "`const` initializer must be comptime-evaluable \
+                                         (literal, or unary `-`/`!` on a literal). \
+                                         Function calls and other runtime-dependent expressions \
+                                         are rejected per R8 W8 Cluster A (2026-05-24). \
+                                         Extending the comptime evaluator is v0.4-concurrency-\
+                                         design-pass territory per docs/v0.3-close-summary.md \u{a7}5.15."
+                                    ),
+                                    location: Some(self.span_to_source_location(*decl_span)),
+                                });
+                            }
+                        }
+                    }
+                }
+                let _ = stmt_item_span;
                 // For expression statements that are the last item, keep result on stack
                 if is_last {
                     if let Statement::Expression(expr, _) = stmt {
@@ -1469,6 +1520,39 @@ impl BytecodeCompiler {
                                     export_name: sym.original_name.clone(),
                                     source_module_path: canonical_path.clone(),
                                 });
+                        }
+
+                        // R8 W8 Cluster A: imported `pub const NAME = expr` —
+                        // capture the initializer expression so the consumer-
+                        // side identifier-load path can emit it inline as
+                        // `PushConst(<comptime-value>)`. ADR-006 §2.7.5
+                        // stamp-at-compile-time invariant preserved: the
+                        // constant's kind is stamped from the literal at
+                        // compile time when the compiler reaches the
+                        // identifier reference.
+                        if matches!(
+                            sym.kind,
+                            shape_ast::module_utils::ModuleExportKind::Value
+                        ) {
+                            if let Some(ref dep_ast) = dep_node.ast {
+                                for item in &dep_ast.items {
+                                    if let shape_ast::ast::Item::Export(export, _) = item {
+                                        if let Some(ref decl) = export.source_decl {
+                                            if decl.kind == shape_ast::ast::VarKind::Const {
+                                                if let Some(decl_name) = decl.pattern.as_identifier() {
+                                                    if decl_name == sym.original_name {
+                                                        if let Some(ref init) = decl.value {
+                                                            self.imported_consts
+                                                                .entry(sym.local_name.clone())
+                                                                .or_insert_with(|| init.clone());
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -3437,6 +3521,28 @@ impl BytecodeCompiler {
 
     pub(super) fn qualify_module_symbol(module_path: &str, name: &str) -> String {
         format!("{}::{}", module_path, name)
+    }
+
+    /// R8 W8 Cluster A (2026-05-24): predicate for the module-level
+    /// `const` reject-runtime-init validation. Returns `true` when the
+    /// initializer expression can be evaluated entirely at compile time
+    /// without invoking the VM:
+    ///   - literals (any kind)
+    ///   - unary `-` / `!` / `~` applied to a comptime-evaluable operand
+    /// Function calls, identifiers, binary ops, etc. return `false` and
+    /// surface a clean compile error per the dispatch's reject test.
+    /// ADR-006 §2.7.5 stamp-at-compile-time alignment: the predicate
+    /// matches the loader-side `comptime_eval_const_initializer` shape
+    /// in `crates/shape-runtime/src/module_loader/loading.rs`.
+    fn const_initializer_is_comptime_evaluable(expr: &shape_ast::ast::Expr) -> bool {
+        use shape_ast::ast::Expr;
+        match expr {
+            Expr::Literal(_, _) => true,
+            Expr::UnaryOp { operand, .. } => {
+                Self::const_initializer_is_comptime_evaluable(operand)
+            }
+            _ => false,
+        }
     }
 
     /// Returns true if a name refers to a builtin/primitive type that should

@@ -121,6 +121,20 @@ impl BytecodeCompiler {
                 location: Some(self.span_to_source_location(span)),
             });
         }
+
+        // R8 W8 Cluster A (2026-05-24): imported `pub const` references —
+        // inline the comptime-evaluated literal at the use site as
+        // `PushConst(<value>)` rather than going through a module binding
+        // (whose initialization bytecode lives in the unreachable gap
+        // between dep-module bodies and `__main__`'s entry point — see
+        // `compile_with_graph_and_prelude` note at
+        // `compiler_impl_reference_model.rs:2356`). ADR-006 §2.7.5
+        // stamp-at-compile-time invariant preserved: the const's
+        // initializer kind is determined here from its literal shape;
+        // `compile_expr` on the literal stamps `last_expr_*` consistently.
+        if let Some(init_expr) = self.imported_consts.get(name).cloned() {
+            return self.compile_expr(&init_expr);
+        }
         // Mutable closure captures: dispatch by CaptureKind.
         //   * `CaptureKind::Shared`        → A.1B `LoadSharedCapture`.
         //   * `CaptureKind::OwnedMutable`  → A.1B `LoadOwnedMutableCapture`.

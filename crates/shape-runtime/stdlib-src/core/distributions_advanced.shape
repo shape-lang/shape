@@ -5,9 +5,9 @@
 /// beyond the basic ones in distributions.shape.
 /// Built on top of random.shape intrinsics using standard mathematical methods.
 
-let PI = 3.141592653589793;
-let E = 2.718281828459045;
-let SQRT_2PI = 2.5066282746310002;
+const PI: number = 3.141592653589793;
+const E: number = 2.718281828459045;
+const SQRT_2PI: number = 2.5066282746310002;
 
 // ===== Helper: Gamma function (Lanczos approximation) =====
 

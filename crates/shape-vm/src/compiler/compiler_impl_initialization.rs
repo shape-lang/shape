@@ -68,6 +68,7 @@ impl BytecodeCompiler {
             source_lines: Vec::new(),
             imported_names: HashMap::new(),
             imported_annotations: HashMap::new(),
+            imported_consts: HashMap::new(),
             module_builtin_functions: HashMap::new(),
             module_namespace_bindings: HashSet::new(),
             module_scope_sources: HashMap::new(),

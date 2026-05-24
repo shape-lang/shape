@@ -3,64 +3,98 @@
 ///
 /// Levels (from most to least verbose): trace, debug, info, warn, error
 /// Default level: debug (all messages shown)
+///
+/// R8 W8 Cluster A (2026-05-24): refactored to explicit `Logger` type with
+/// `set_level` accessor (singleton pattern). The module-level mutable
+/// `current_level` is gone; concurrency-design-pass territory per
+/// docs/v0.3-close-summary.md §5.15. Callers thread a `Logger` value
+/// explicitly. Stdlib internals continue to use the level constants.
 
-// Level constants
-let LOG_LEVEL_TRACE = 0
-let LOG_LEVEL_DEBUG = 1
-let LOG_LEVEL_INFO = 2
-let LOG_LEVEL_WARN = 3
-let LOG_LEVEL_ERROR = 4
+// Level constants — comptime-evaluated, exported via `use`
+pub const LEVEL_TRACE: int = 0
+pub const LEVEL_DEBUG: int = 1
+pub const LEVEL_INFO: int = 2
+pub const LEVEL_WARN: int = 3
+pub const LEVEL_ERROR: int = 4
 
-// Current minimum level — default to debug (show everything)
-let mut current_level = 1
+pub const DEFAULT_LEVEL: int = 1
 
-/// Set the minimum log level.
-/// Valid levels: "trace", "debug", "info", "warn", "error"
-pub fn set_level(level) {
-    current_level = _level_num(level)
+/// Logger value — carries the minimum log level.
+/// Construct via `logger()` (default debug-level) or `logger_at(LEVEL_*)`.
+pub type Logger {
+    level: int,
 }
 
-/// Log a trace-level message
-pub fn trace(msg) {
-    if current_level <= LOG_LEVEL_TRACE {
+/// Construct a default Logger (level = debug; show everything debug+).
+pub fn logger() -> Logger {
+    Logger { level: 1 }
+}
+
+/// Construct a Logger at the given level.
+pub fn logger_at(level: int) -> Logger {
+    Logger { level: level }
+}
+
+/// Returns a new Logger with the updated minimum level.
+/// Logger values are immutable; this returns a fresh value.
+/// Valid levels: integer 0..=4 (use LEVEL_TRACE..=LEVEL_ERROR constants).
+pub fn set_level(l: Logger, level: int) -> Logger {
+    Logger { level: level }
+}
+
+/// Get the Logger's current minimum level.
+pub fn get_level(l: Logger) -> int {
+    l.level
+}
+
+/// Log a trace-level message (only emitted at LEVEL_TRACE).
+pub fn trace(l: Logger, msg: string) -> int {
+    if l.level <= 0 {
         print(f"[TRACE] {msg}")
     }
+    0
 }
 
-/// Log a debug-level message
-pub fn debug(msg) {
-    if current_level <= LOG_LEVEL_DEBUG {
+/// Log a debug-level message (LEVEL_TRACE or LEVEL_DEBUG).
+pub fn debug(l: Logger, msg: string) -> int {
+    if l.level <= 1 {
         print(f"[DEBUG] {msg}")
     }
+    0
 }
 
-/// Log an info-level message
-pub fn info(msg) {
-    if current_level <= LOG_LEVEL_INFO {
+/// Log an info-level message (LEVEL_TRACE..=LEVEL_INFO).
+pub fn info(l: Logger, msg: string) -> int {
+    if l.level <= 2 {
         print(f"[INFO] {msg}")
     }
+    0
 }
 
-/// Log a warning-level message
-pub fn warn(msg) {
-    if current_level <= LOG_LEVEL_WARN {
+/// Log a warning-level message (LEVEL_TRACE..=LEVEL_WARN).
+pub fn warn(l: Logger, msg: string) -> int {
+    if l.level <= 3 {
         print(f"[WARN] {msg}")
     }
+    0
 }
 
-/// Log an error-level message
-pub fn error(msg) {
-    if current_level <= LOG_LEVEL_ERROR {
+/// Log an error-level message (always emitted unless level filtered).
+pub fn error(l: Logger, msg: string) -> int {
+    if l.level <= 4 {
         print(f"[ERROR] {msg}")
     }
+    0
 }
 
-fn _level_num(level) {
+/// Map a string level name to its numeric constant.
+/// Valid names: "trace", "debug", "info", "warn"/"warning", "error".
+/// Unknown names default to LEVEL_INFO.
+pub fn level_num(level: string) -> int {
     if level == "trace" { return 0 }
     if level == "debug" { return 1 }
     if level == "info" { return 2 }
     if level == "warn" || level == "warning" { return 3 }
     if level == "error" { return 4 }
-    // Default to info for unknown levels
     2
 }
