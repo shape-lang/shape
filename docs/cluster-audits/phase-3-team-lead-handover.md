@@ -23,6 +23,7 @@ semantics. User relays between team-lead and supervisor.
 | Smoke matrix s1–s5 | **5/5 VM == JIT** (canonical (ii) F' release-binary harness; re-verified at HEAD `ebb3717c` post-final-merge) |
 | verify-merge / check-no-dynamic / check-clean | 13/13 / exit 0 / exit 0 |
 | git-stash pre-commit hook | DEPLOYED (R8 W5+W6+W7 ZERO violations cumulative) |
+| conflict-marker pre-commit hook | DEPLOYED R8 W7 close (supervisor 2026-05-24 operational suggestion after the 5669a8ff incident); tested empirically (catches `+<<<<<<<` / `+=======` / `+>>>>>>>` in staged diff, exits 1 with recovery instructions) |
 | Co-Authored-By trailers (cumulative) | 0 |
 | Bad-code merges (cumulative) | 0 (1 conflict-marker miss in R8 W7 was caught + cleaned in follow-up commit `675dcf1b`) |
 | v0.3.0 tag | NOT landed — gated on remaining items + user authorization |
