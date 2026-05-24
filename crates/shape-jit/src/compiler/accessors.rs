@@ -560,6 +560,14 @@ const ALL_BUILTINS: &[BuiltinFunction] = &[
     BuiltinFunction::IsFinite,
     // Table construction
     BuiltinFunction::MakeTableFromRows,
+    // W18.5 content builder ctors (3) — supervisor D4 (R8 W3, 2026-05-24).
+    // VM-dispatched via builtins.rs; listed here to keep
+    // `build_full_opcode_parity_matrix` exhaustive (the JIT trampoline
+    // routes BuiltinCall instructions to the VM dispatch for these
+    // identifiers).
+    BuiltinFunction::TableBuilderNew,
+    BuiltinFunction::CodeBuilderNew,
+    BuiltinFunction::KeyValueBuilderNew,
 ];
 
 fn vm_only_opcode_reason(opcode: OpCode) -> Option<&'static str> {

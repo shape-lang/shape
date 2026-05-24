@@ -3423,6 +3423,13 @@ impl BytecodeCompiler {
             "int" | "number" | "string" | "bool" | "decimal" | "bigint"
                 | "Array" | "HashMap" | "Option" | "Result" | "DateTime"
                 | "Content" | "Table" | "DataTable" | "Mat"
+                // W18.5 per-type content builders (supervisor D4,
+                // R8 W3 2026-05-24): `Code::new()` / `KeyValue::new()`
+                // namespaces ride the same builtin-type-name path as
+                // `Table` / `Content` so module-qualification doesn't
+                // wrap them. The runtime ctors are wired in
+                // `function_calls.rs::compile_type_namespace_builtin_call`.
+                | "Code" | "KeyValue"
                 | "Json" | "Duration" | "Regex"
                 | "Vec"
                 | "int8" | "int16" | "int32" | "int64"
