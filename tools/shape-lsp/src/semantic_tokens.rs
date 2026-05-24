@@ -820,110 +820,6 @@ impl<'a> TokenCollector<'a> {
         self.add_token_from_span(Span::new(span.end - suffix_len, span.end), 9, 0);
     }
 
-    /// Add semantic tokens for a content string literal (`c"..."`, `c$"..."`, `c#"..."`).
-    ///
-    /// The `c` prefix is highlighted as a KEYWORD token to distinguish content strings
-    /// from formatted strings. The rest uses the same interpolation logic as f-strings.
-    fn add_content_string_tokens(&mut self, span: Span, mode: InterpolationMode) {
-        let literal_source = match self.source.get(span.start..span.end) {
-            Some(src) => src,
-            None => return,
-        };
-
-        // Content strings use c/c$/c# prefix
-        let c_prefix = match mode {
-            InterpolationMode::Braces => "c",
-            InterpolationMode::Dollar => "c$",
-            InterpolationMode::Hash => "c#",
-        };
-        let triple_prefix = format!(r#"{}"""#, c_prefix);
-        let simple_prefix = format!(r#"{}""#, c_prefix);
-
-        let (body, body_offset, prefix_len, suffix_len) = if literal_source
-            .starts_with(&triple_prefix)
-            && literal_source.ends_with("\"\"\"")
-            && literal_source.len() >= triple_prefix.len() + 3
-        {
-            (
-                &literal_source[triple_prefix.len()..literal_source.len() - 3],
-                triple_prefix.len(),
-                triple_prefix.len(),
-                3usize,
-            )
-        } else if literal_source.starts_with(&simple_prefix)
-            && literal_source.ends_with('"')
-            && literal_source.len() >= simple_prefix.len() + 1
-        {
-            (
-                &literal_source[simple_prefix.len()..literal_source.len() - 1],
-                simple_prefix.len(),
-                simple_prefix.len(),
-                1usize,
-            )
-        } else {
-            // Fallback: treat entire span as single string token
-            self.add_token_from_span(span, 9, 0);
-            return;
-        };
-
-        // Emit KEYWORD token for the `c` prefix character to distinguish from f-strings
-        let c_char_len = 1; // just the 'c' character
-        self.add_token_from_span(Span::new(span.start, span.start + c_char_len), 8, 0);
-
-        // Emit STRING token for the rest of the prefix (the quote(s))
-        self.add_token_from_span(
-            Span::new(span.start + c_char_len, span.start + prefix_len),
-            9,
-            0,
-        );
-
-        let segments = find_interpolation_segments(body, mode);
-        let mut last_end = 0;
-
-        for (expr_start, expr_end) in &segments {
-            let opener_len = if mode == InterpolationMode::Braces {
-                1
-            } else {
-                2
-            };
-            let brace_open_pos = expr_start.saturating_sub(opener_len);
-            if brace_open_pos > last_end {
-                let text_abs_start = span.start + body_offset + last_end;
-                let text_abs_end = span.start + body_offset + brace_open_pos;
-                self.add_token_from_span(Span::new(text_abs_start, text_abs_end), 9, 0);
-            }
-
-            let raw_expr = &body[*expr_start..*expr_end];
-            let trimmed_expr = raw_expr.trim();
-            if !trimmed_expr.is_empty() {
-                let leading_ws = raw_expr.len().saturating_sub(raw_expr.trim_start().len());
-                let base_offset = span.start + body_offset + expr_start + leading_ws;
-                let expr_for_tokens = if let Ok((expr_only, _spec)) =
-                    split_expression_and_format_spec(trimmed_expr)
-                {
-                    expr_only
-                } else {
-                    trimmed_expr.to_string()
-                };
-
-                if let Ok(parsed) = parse_expression_str(&expr_for_tokens) {
-                    let mut nested = InterpolationExprTokenCollector::new(self, base_offset);
-                    walk_expr(&mut nested, &parsed);
-                }
-            }
-
-            last_end = expr_end + 1;
-        }
-
-        if last_end < body.len() {
-            let text_abs_start = span.start + body_offset + last_end;
-            let text_abs_end = span.start + body_offset + body.len();
-            self.add_token_from_span(Span::new(text_abs_start, text_abs_end), 9, 0);
-        }
-
-        // Emit STRING token for suffix (" or """)
-        self.add_token_from_span(Span::new(span.end - suffix_len, span.end), 9, 0);
-    }
 }
 
 /// Find interpolation expression segments in a formatted string body.
@@ -1201,9 +1097,7 @@ impl Visitor for InterpolationExprTokenCollector<'_, '_> {
                     | Literal::TypedInt(_, _)
                     | Literal::Number(_)
                     | Literal::Decimal(_) => 10,
-                    Literal::String(_)
-                    | Literal::FormattedString { .. }
-                    | Literal::ContentString { .. } => 9,
+                    Literal::String(_) | Literal::FormattedString { .. } => 9,
                     Literal::Char(_) => 9,
                     Literal::Bool(_) | Literal::None | Literal::Unit => 8,
                     Literal::Timeframe(_) => 10,
@@ -1787,10 +1681,6 @@ impl<'a> Visitor for TokenCollector<'a> {
                         // STRING tokens for text parts, code tokens for {expr} parts.
                         self.add_formatted_string_tokens(*span, *mode);
                     }
-                    Literal::ContentString { mode, .. } => {
-                        // Content strings use c/c$/c# prefix instead of f/f$/f#.
-                        self.add_content_string_tokens(*span, *mode);
-                    }
                     _ => {
                         let token_type = match lit {
                             Literal::Int(_) | Literal::UInt(_) | Literal::TypedInt(_, _) => 10, // number
@@ -1800,7 +1690,7 @@ impl<'a> Visitor for TokenCollector<'a> {
                             Literal::Char(_) => 9,     // string-like
                             Literal::Bool(_) | Literal::None | Literal::Unit => 8, // keyword
                             Literal::Timeframe(_) => 10, // number-like
-                            Literal::FormattedString { .. } | Literal::ContentString { .. } => 9, // unreachable in self branch
+                            Literal::FormattedString { .. } => 9, // unreachable in self branch
                         };
                         self.add_token_from_span(*span, token_type, 0);
                     }
@@ -2739,28 +2629,6 @@ let s = f"val: {x}""#;
             param_tokens.len() >= 2,
             "expected at least 2 parameter tokens for 'name' and 'age', got {:?}",
             param_tokens
-        );
-    }
-
-    #[test]
-    fn test_content_string_prefix_is_keyword_token() {
-        let source = r#"let x = c"hello {name}""#;
-        let tokens = get_semantic_tokens(source).expect("tokens");
-        let decoded = decode_tokens(&tokens.data);
-
-        // The 'c' prefix character should be tagged as KEYWORD (8)
-        assert!(
-            decoded
-                .iter()
-                .any(|&(line, _col, len, ty)| line == 0 && len == 1 && ty == 8),
-            "expected KEYWORD token for 'c' prefix in content string, got {:?}",
-            decoded
-        );
-        // There should be STRING tokens (9) for the quoted parts
-        let string_tokens: Vec<_> = decoded.iter().filter(|t| t.3 == 9).collect();
-        assert!(
-            !string_tokens.is_empty(),
-            "expected STRING tokens in content string"
         );
     }
 

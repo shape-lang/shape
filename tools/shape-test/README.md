@@ -104,12 +104,6 @@ Status legend: **P** = passing tests exist, **P/F** = mix of passing and failing
 | 29 | Annotations (Comptime) | `annotations_comptime/` | P/F | on_define, comptime pre/post, extend target, remove target, replace body |
 | 30 | Annotation Targets | `annotation_targets/` | P/F | function, type, module, expression, block, await_expr, binding |
 
-### 8. Content System
-
-| # | Area | Dir | Status | Tests |
-|---|------|-----|--------|-------|
-| 31 | Content System | `content_system/` | P/F | c-literals, styling, builders, trait dispatch, renderers |
-
 ### 9. Standard Library
 
 | # | Area | Dir | Status | Tests |
@@ -236,7 +230,6 @@ tests/
 ├── closures_hof/                 # 5: Closures & higher-order functions
 ├── complex_integration/          # 51: Cross-feature integration
 ├── comptime/                     # 27: Comptime blocks & expressions
-├── content_system/               # 31: Content strings & rendering
 ├── control_flow/                 # 3: If/else, loops, match
 ├── datetime_stdlib/              # 32-34: DateTime, time, I/O
 ├── drop_raii/                    # 40: Automatic drop & RAII

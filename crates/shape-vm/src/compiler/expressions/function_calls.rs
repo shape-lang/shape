@@ -1790,9 +1790,7 @@ impl BytecodeCompiler {
                 Literal::Int(_) | Literal::UInt(_) | Literal::TypedInt(_, _) => "an int",
                 Literal::Number(_) => "a number",
                 Literal::Decimal(_) => "a decimal",
-                Literal::String(_)
-                | Literal::FormattedString { .. }
-                | Literal::ContentString { .. } => "a string",
+                Literal::String(_) | Literal::FormattedString { .. } => "a string",
                 Literal::Char(_) => "a char",
                 Literal::Bool(_) => "a bool",
                 // `None`, `Unit`, `Timeframe` — non-callable values.

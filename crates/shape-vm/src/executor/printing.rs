@@ -1458,12 +1458,10 @@ mod tests {
     /// 6-renderer infrastructure so styled spans surface escape codes
     /// at the print() sink.
     ///
-    /// The c-string upstream lowering (`MakeContentText` /
-    /// `ApplyContentStyle` / `MakeContentFragment` builtins) is still a
-    /// Phase-2c surface — `content_builders` returns `deferred(...)` and
-    /// the VM `MakeContent*` arm panics — so this test constructs the
-    /// `ContentNode` directly (mirroring what the upstream builders
-    /// will emit once Wave 5e lands).
+    /// W18.3 retired c-string syntax entirely (supervisor D2 2026-05-24);
+    /// rich content is now produced via the builder-pattern `Content.*`
+    /// namespace constructors. This test constructs the `ContentNode`
+    /// directly to exercise the renderer surface.
     #[test]
     fn test_format_content_via_terminal_renderer() {
         use shape_value::content::{Color, ContentNode, NamedColor};

@@ -129,7 +129,7 @@ Shape supports:
 - **Pattern matching**: `match expr { Pattern => expr }` with destructuring, guards, enum/struct/array/object patterns
 - **Error handling**: `Result<T,E>` with `Ok(v)`/`Err(e)`, `?` operator for propagation, `!!` error context
 - **Control flow**: `if/else`, `for x in iter`, `while`, `loop`, `break` (with value), `continue`, `return`
-- **Strings**: `"literal"`, `f"interpolated {expr}"`, `c"content styled {text:bold}"`
+- **Strings**: `"literal"`, `f"interpolated {expr}"` (styling via f-string format specs; rich content via builder pattern — `Content.text(...)`, `Content.table(...)`, etc. The legacy `c"..."` syntax was retired in W18.3.)
 - **Collections**: arrays `[1, 2, 3]`, objects `{ k: v }`, `HashMap()`, ranges `0..10`, `0..=10`
 - **Modules**: `import`, `export`, `mod`, `use`
 - **RAII**: Automatic scope-based drop via `Drop` trait — no `using`/`defer`

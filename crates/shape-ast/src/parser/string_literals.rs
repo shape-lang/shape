@@ -11,8 +11,6 @@ use crate::error::{Result, ShapeError};
 pub struct ParsedStringLiteral {
     pub value: String,
     pub interpolation_mode: Option<InterpolationMode>,
-    /// `true` when the source used a `c` prefix (content string).
-    pub is_content: bool,
 }
 
 /// Decode a parsed string literal (including surrounding quotes) into its runtime content.
@@ -20,9 +18,9 @@ pub fn parse_string_literal(raw: &str) -> Result<String> {
     Ok(parse_string_literal_with_kind(raw)?.value)
 }
 
-/// Decode a parsed string literal and report whether it used the `f` or `c` prefix.
+/// Decode a parsed string literal and report whether it used the `f` prefix.
 pub fn parse_string_literal_with_kind(raw: &str) -> Result<ParsedStringLiteral> {
-    let (interpolation_mode, is_content, unprefixed) = strip_interpolation_prefix(raw);
+    let (interpolation_mode, unprefixed) = strip_interpolation_prefix(raw);
     let is_interpolated = interpolation_mode.is_some();
     let value = if is_triple_quoted(unprefixed) {
         parse_triple_quoted(unprefixed)
@@ -34,29 +32,19 @@ pub fn parse_string_literal_with_kind(raw: &str) -> Result<ParsedStringLiteral> 
     Ok(ParsedStringLiteral {
         value,
         interpolation_mode,
-        is_content,
     })
 }
 
-/// Strip `f`/`f$`/`f#`/`c`/`c$`/`c#` prefix and return (mode, is_content, rest).
-fn strip_interpolation_prefix(raw: &str) -> (Option<InterpolationMode>, bool, &str) {
-    // Try f-string prefixes first (higher priority)
+/// Strip `f`/`f$`/`f#` prefix and return (mode, rest).
+fn strip_interpolation_prefix(raw: &str) -> (Option<InterpolationMode>, &str) {
     if raw.starts_with("f$") && raw.get(2..).is_some_and(|rest| rest.starts_with('"')) {
-        (Some(InterpolationMode::Dollar), false, &raw[2..])
+        (Some(InterpolationMode::Dollar), &raw[2..])
     } else if raw.starts_with("f#") && raw.get(2..).is_some_and(|rest| rest.starts_with('"')) {
-        (Some(InterpolationMode::Hash), false, &raw[2..])
+        (Some(InterpolationMode::Hash), &raw[2..])
     } else if raw.starts_with('f') && raw.get(1..).is_some_and(|rest| rest.starts_with('"')) {
-        (Some(InterpolationMode::Braces), false, &raw[1..])
-    }
-    // Then c-string prefixes
-    else if raw.starts_with("c$") && raw.get(2..).is_some_and(|rest| rest.starts_with('"')) {
-        (Some(InterpolationMode::Dollar), true, &raw[2..])
-    } else if raw.starts_with("c#") && raw.get(2..).is_some_and(|rest| rest.starts_with('"')) {
-        (Some(InterpolationMode::Hash), true, &raw[2..])
-    } else if raw.starts_with('c') && raw.get(1..).is_some_and(|rest| rest.starts_with('"')) {
-        (Some(InterpolationMode::Braces), true, &raw[1..])
+        (Some(InterpolationMode::Braces), &raw[1..])
     } else {
-        (None, false, raw)
+        (None, raw)
     }
 }
 
@@ -350,54 +338,6 @@ mod tests {
     fn simple_string_escape_null() {
         // \0 should produce a null byte
         assert_eq!(parse_string_literal("\"a\\0b\"").unwrap(), "a\0b");
-    }
-
-    // --- Content string (c-prefix) tests ---
-
-    #[test]
-    fn content_simple_string_sets_content_flag() {
-        let parsed = parse_string_literal_with_kind("c\"hello {x}\"").unwrap();
-        assert_eq!(parsed.interpolation_mode, Some(InterpolationMode::Braces));
-        assert!(parsed.is_content);
-        assert_eq!(parsed.value, "hello {x}");
-    }
-
-    #[test]
-    fn content_dollar_prefix_sets_mode_and_content() {
-        let parsed = parse_string_literal_with_kind("c$\"value: ${x}\"").unwrap();
-        assert_eq!(parsed.interpolation_mode, Some(InterpolationMode::Dollar));
-        assert!(parsed.is_content);
-        assert_eq!(parsed.value, "value: ${x}");
-    }
-
-    #[test]
-    fn content_hash_prefix_sets_mode_and_content() {
-        let parsed = parse_string_literal_with_kind("c#\"value: #{x}\"").unwrap();
-        assert_eq!(parsed.interpolation_mode, Some(InterpolationMode::Hash));
-        assert!(parsed.is_content);
-        assert_eq!(parsed.value, "value: #{x}");
-    }
-
-    #[test]
-    fn content_triple_string_sets_content_flag() {
-        let parsed = parse_string_literal_with_kind("c\"\"\"\n  row: {x}\n\"\"\"").unwrap();
-        assert_eq!(parsed.interpolation_mode, Some(InterpolationMode::Braces));
-        assert!(parsed.is_content);
-        assert_eq!(parsed.value, "row: {x}");
-    }
-
-    #[test]
-    fn formatted_string_is_not_content() {
-        let parsed = parse_string_literal_with_kind("f\"value: {x}\"").unwrap();
-        assert_eq!(parsed.interpolation_mode, Some(InterpolationMode::Braces));
-        assert!(!parsed.is_content);
-    }
-
-    #[test]
-    fn plain_string_is_not_content() {
-        let parsed = parse_string_literal_with_kind("\"plain\"").unwrap();
-        assert_eq!(parsed.interpolation_mode, None);
-        assert!(!parsed.is_content);
     }
 
     // --- LOW-2: f-string backslash-escaped braces ---

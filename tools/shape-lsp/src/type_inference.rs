@@ -325,7 +325,6 @@ pub fn infer_literal_type(lit: &Literal) -> String {
         Literal::Decimal(_) => "decimal".to_string(),
         Literal::String(_) => "string".to_string(),
         Literal::FormattedString { .. } => "string".to_string(),
-        Literal::ContentString { .. } => "string".to_string(),
         Literal::Bool(_) => "bool".to_string(),
         Literal::Char(_) => "char".to_string(),
         Literal::None => "Option".to_string(),

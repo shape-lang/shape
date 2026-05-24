@@ -2557,16 +2557,6 @@ pub enum BuiltinFunction {
     // Reflection
     Reflect,
 
-    // Content string builtins
-    /// Wrap a string value as ContentNode::plain(text)
-    MakeContentText,
-    /// Collect N ContentNodes from the stack into a ContentNode::Fragment
-    MakeContentFragment,
-    /// Apply a ContentFormatSpec (encoded as ints/bools on stack) to a ContentNode
-    ApplyContentStyle,
-    /// Create a chart ContentNode from a table/array value using column specs
-    MakeContentChartFromValue,
-
     // Content namespace constructors
     /// Content.chart(type_str) — create a chart ContentNode
     ContentChart,
@@ -2824,11 +2814,7 @@ impl BuiltinFunction {
             // Join/Reflect (2)
             BuiltinFunction::JoinExecute,
             BuiltinFunction::Reflect,
-            // Content (3 + 6 constructors)
-            BuiltinFunction::MakeContentText,
-            BuiltinFunction::MakeContentFragment,
-            BuiltinFunction::ApplyContentStyle,
-            BuiltinFunction::MakeContentChartFromValue,
+            // Content (6 constructors)
             BuiltinFunction::ContentChart,
             BuiltinFunction::ContentTextCtor,
             BuiltinFunction::ContentTableCtor,

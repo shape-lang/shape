@@ -402,9 +402,7 @@ pub(crate) fn infer_closure_body_return_type_name_with_caller_context(
                 Literal::Int(_) => "int",
                 Literal::Number(_) => "number",
                 Literal::Bool(_) => "bool",
-                Literal::String(_) | Literal::FormattedString { .. } | Literal::ContentString { .. } => {
-                    "string"
-                }
+                Literal::String(_) | Literal::FormattedString { .. } => "string",
                 Literal::Decimal(_) => "decimal",
                 _ => return None,
             }

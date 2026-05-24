@@ -49,11 +49,6 @@ pub enum Literal {
         value: String,
         mode: InterpolationMode,
     },
-    /// Content string literal (`c"..."`, `c$"..."`, `c#"..."` + triple variants)
-    ContentString {
-        value: String,
-        mode: InterpolationMode,
-    },
     Bool(bool),
     /// Option::None literal (replaces null)
     None,
@@ -79,14 +74,6 @@ impl std::fmt::Display for Literal {
             Literal::String(s) => write!(f, "\"{}\"", s),
             Literal::Char(c) => write!(f, "'{}'", c.escape_default()),
             Literal::FormattedString { value, mode } => write!(f, "{}\"{}\"", mode.prefix(), value),
-            Literal::ContentString { value, mode } => {
-                let prefix = match mode {
-                    InterpolationMode::Braces => "c",
-                    InterpolationMode::Dollar => "c$",
-                    InterpolationMode::Hash => "c#",
-                };
-                write!(f, "{}\"{}\"", prefix, value)
-            }
             Literal::Bool(b) => write!(f, "{}", b),
             Literal::None => write!(f, "None"),
             Literal::Unit => write!(f, "()"),
@@ -107,7 +94,6 @@ impl Literal {
             Literal::String(s) => serde_json::json!(s),
             Literal::Char(c) => serde_json::json!(c.to_string()),
             Literal::FormattedString { value, .. } => serde_json::json!(value),
-            Literal::ContentString { value, .. } => serde_json::json!(value),
             Literal::Bool(b) => serde_json::json!(*b),
             Literal::None => serde_json::Value::Null,
             Literal::Unit => serde_json::Value::Null,

@@ -270,9 +270,9 @@ pub(super) fn infer_local_type_from_expr(expr: &Expr) -> LocalTypeInfo {
             | ast::Literal::None
             | ast::Literal::Unit
             | ast::Literal::Timeframe(_) => LocalTypeInfo::Copy,
-            ast::Literal::String(_)
-            | ast::Literal::FormattedString { .. }
-            | ast::Literal::ContentString { .. } => LocalTypeInfo::NonCopy,
+            ast::Literal::String(_) | ast::Literal::FormattedString { .. } => {
+                LocalTypeInfo::NonCopy
+            }
         },
         Expr::Reference { .. } => LocalTypeInfo::NonCopy,
         _ => LocalTypeInfo::Unknown,
