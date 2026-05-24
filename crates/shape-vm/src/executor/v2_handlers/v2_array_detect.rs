@@ -2577,6 +2577,112 @@ pub fn drop_array_n(view: &V2TypedArrayView, n: u32) -> *mut u8 {
     copy_range_to_new_array(view, n, view.len)
 }
 
+// ── R8 W4 J.5b HOF-builder primitives (2026-05-24) ──────────────────────────
+//
+// `where` / `select` / `take_while` / `skip_while` need to build a fresh
+// `TypedArray<T>` whose element kind is determined either by the input
+// (filter ops: same as input view.elem_type) or by the closure's return
+// kind (select). The two helpers below are the kind-mapping +
+// empty-allocator pieces; the per-op two-pass scan-then-allocate driver
+// lives in `objects/array_query.rs` because it must call the closure via
+// `VirtualMachine::call_value_immediate_nb` (§2.7.11 / Q12 ABI), which is
+// not reachable from this leaf module.
+//
+// Supervisor D3 binding (2026-05-24): structured error on closure-return
+// kind mismatch; NO coercion (forbidden per CLAUDE.md §Type System Rules);
+// NO heterogeneous `Array<Any>` carrier (Shape has no `any` type per
+// CLAUDE.md "No `any` type"). First invocation establishes the closure-
+// return kind; subsequent mismatch surfaces `VMError::RuntimeError` with a
+// structured message naming the expected / got kinds + the offending index.
+
+/// Map a `NativeKind` to its corresponding `V2ElemType` for HOF-builder
+/// output-array allocation. Returns `None` for kinds with no monomorphized
+/// `TypedArray<T>` carrier (e.g. `Null`, `Ptr(Closure)`, generic
+/// `Ptr(HeapKind::HashMap)`). Pairs with `allocate_empty_typed_array` +
+/// `push_element` to build a result array element-by-element.
+///
+/// The mapping mirrors `V2ElemType::elem_kind` in reverse (§2.7.7 / Q9
+/// kind ↔ elem-type bijection over the 14 stamped carriers). Anything not
+/// in the bijection is unsupported as an output-array element kind —
+/// callers (e.g. `select`) surface a structured `RuntimeError` rather than
+/// fabricating a Bool-default carrier (forbidden per ADR-006 §2.7.14).
+#[inline]
+pub fn native_kind_to_v2_elem_type(kind: NativeKind) -> Option<V2ElemType> {
+    match kind {
+        NativeKind::Float64 => Some(V2ElemType::F64),
+        NativeKind::Int64 => Some(V2ElemType::I64),
+        NativeKind::Int32 => Some(V2ElemType::I32),
+        NativeKind::Bool => Some(V2ElemType::Bool),
+        NativeKind::Int8 => Some(V2ElemType::I8),
+        NativeKind::UInt8 => Some(V2ElemType::U8),
+        NativeKind::Int16 => Some(V2ElemType::I16),
+        NativeKind::UInt16 => Some(V2ElemType::U16),
+        NativeKind::UInt32 => Some(V2ElemType::U32),
+        NativeKind::Float32 => Some(V2ElemType::F32),
+        NativeKind::Char => Some(V2ElemType::Char),
+        NativeKind::StringV2 => Some(V2ElemType::String),
+        NativeKind::DecimalV2 => Some(V2ElemType::Decimal),
+        NativeKind::Ptr(HeapKind::TypedObject) => Some(V2ElemType::TypedObject),
+        _ => None,
+    }
+}
+
+/// Allocate an empty `TypedArray<T>` for the given `V2ElemType`,
+/// initialised with `capacity` slots, length zero, and stamped with the
+/// matching element-type discriminant byte (§2.7.5 producer-side stamp).
+/// Returns the raw `*mut u8` carrier pointer for wrapping into a
+/// `Ptr(HeapKind::TypedArray)` `KindedSlot`. Subsequent `push_element`
+/// calls grow the array.
+///
+/// Used by the HOF-builder handlers (`where` / `select` / `take_while` /
+/// `skip_while`) for output-array allocation after the closure-return
+/// kind is established (select) or known statically (filter ops, where
+/// the input view's elem_type is the output's elem_type).
+pub fn allocate_empty_typed_array(elem_type: V2ElemType, capacity: u32) -> *mut u8 {
+    unsafe {
+        let p: *mut u8 = match elem_type {
+            V2ElemType::F64 => TypedArray::<f64>::with_capacity(capacity) as *mut u8,
+            V2ElemType::I64 => TypedArray::<i64>::with_capacity(capacity) as *mut u8,
+            V2ElemType::I32 => TypedArray::<i32>::with_capacity(capacity) as *mut u8,
+            V2ElemType::Bool => TypedArray::<u8>::with_capacity(capacity) as *mut u8,
+            V2ElemType::I8 => TypedArray::<i8>::with_capacity(capacity) as *mut u8,
+            V2ElemType::U8 => TypedArray::<u8>::with_capacity(capacity) as *mut u8,
+            V2ElemType::I16 => TypedArray::<i16>::with_capacity(capacity) as *mut u8,
+            V2ElemType::U16 => TypedArray::<u16>::with_capacity(capacity) as *mut u8,
+            V2ElemType::U32 => TypedArray::<u32>::with_capacity(capacity) as *mut u8,
+            V2ElemType::F32 => TypedArray::<f32>::with_capacity(capacity) as *mut u8,
+            V2ElemType::Char => TypedArray::<char>::with_capacity(capacity) as *mut u8,
+            V2ElemType::String => {
+                TypedArray::<*const StringObj>::with_capacity(capacity) as *mut u8
+            }
+            V2ElemType::Decimal => {
+                TypedArray::<*const DecimalObj>::with_capacity(capacity) as *mut u8
+            }
+            V2ElemType::TypedObject => {
+                TypedArray::<*const TypedObjectStorage>::with_capacity(capacity) as *mut u8
+            }
+        };
+        let stamp_byte: u8 = match elem_type {
+            V2ElemType::F64 => ELEM_TYPE_F64,
+            V2ElemType::I64 => ELEM_TYPE_I64,
+            V2ElemType::I32 => ELEM_TYPE_I32,
+            V2ElemType::Bool => ELEM_TYPE_BOOL,
+            V2ElemType::I8 => ELEM_TYPE_I8,
+            V2ElemType::U8 => ELEM_TYPE_U8,
+            V2ElemType::I16 => ELEM_TYPE_I16,
+            V2ElemType::U16 => ELEM_TYPE_U16,
+            V2ElemType::U32 => ELEM_TYPE_U32,
+            V2ElemType::F32 => ELEM_TYPE_F32,
+            V2ElemType::Char => ELEM_TYPE_CHAR,
+            V2ElemType::String => ELEM_TYPE_STRING,
+            V2ElemType::Decimal => ELEM_TYPE_DECIMAL,
+            V2ElemType::TypedObject => ELEM_TYPE_TYPED_OBJECT,
+        };
+        stamp_elem_type(p, stamp_byte);
+        p
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
