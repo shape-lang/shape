@@ -58,11 +58,23 @@ fn project_typed_return(
                     ))),
                 }
             }
+            // R8 W6 G.1 W17-marshal-return-arms close (2026-05-24): explicit
+            // arms for ConcreteReturn::IoHandle (disc 16) +
+            // ConcreteReturn::DataTable (disc 15). Mirrors the 14 existing
+            // typed-Arc constructor precedents in `kinded_slot.rs` per
+            // ADR-005 §1 single-discriminator + ADR-006 §2.7.6 / Q8
+            // bounded carrier-API. Pre-fix: VM surfaced
+            // `project_typed_return: W17-marshal-return-arms` while JIT
+            // returned ec=0 garbage (slice-E §3.b-4 divergence). Drop /
+            // Clone arms already wired at `kinded_slot.rs` ~lines 863-870
+            // (Drop) / 1222-1229 (Clone). See
+            // `docs/cluster-audits/v0.3-r8w6-w17-factory-return-arms-audit.md`.
+            ConcreteReturn::IoHandle(h) => Ok(KindedSlot::from_io_handle(h)),
+            ConcreteReturn::DataTable(d) => Ok(KindedSlot::from_data_table(d)),
             other => Err(VMError::NotImplemented(format!(
-                "project_typed_return: W17-snapshot-roundtrip surface — \
+                "project_typed_return: W17-marshal-return-arms residual — \
                  ConcreteReturn::{:?} arm has no in-session KindedSlot \
-                 projection. Tracked as W17-marshal-return-arms follow-up. \
-                 ADR-006 §2.7.4.",
+                 projection. Tracked as W17-followup. ADR-006 §2.7.4.",
                 std::mem::discriminant(&other)
             ))),
         },

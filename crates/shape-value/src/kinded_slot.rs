@@ -446,6 +446,48 @@ impl KindedSlot {
         Self::new(ValueSlot::from_bigint(b), NativeKind::Ptr(HeapKind::BigInt))
     }
 
+    /// Convenience: a `Ptr(HeapKind::IoHandle)`-kind slot from an
+    /// `Arc<IoHandleData>`. R8 W6 G.1 W17-marshal-return-arms close
+    /// (2026-05-24): mirrors the existing 14 typed-Arc constructor
+    /// precedents (ADR-005 §1 single-discriminator + ADR-006 §2.7.6 / Q8
+    /// bounded carrier-API). Slot bits = `Arc::into_raw(h) as u64` via
+    /// `ValueSlot::from_io_handle`; the Drop / Clone arms for
+    /// `HeapKind::IoHandle` (`kinded_slot.rs` ~line 868 / ~line 1227)
+    /// already dispatch the matching `Arc::increment/decrement_strong_
+    /// count::<IoHandleData>` retain/release. Used by
+    /// `project_typed_return` (`vm_impl/modules.rs`) to land the
+    /// `ConcreteReturn::IoHandle(Arc<IoHandleData>)` arm from
+    /// `transport::tcp()` / `io::tcp_listen()` / `file::open()` etc.
+    /// without producer/consumer divergence (pre-fix VM surfaced
+    /// `project_typed_return: W17-marshal-return-arms` while JIT
+    /// returned ec=0 garbage).
+    #[inline]
+    pub fn from_io_handle(h: Arc<IoHandleData>) -> Self {
+        Self::new(
+            ValueSlot::from_io_handle(h),
+            NativeKind::Ptr(HeapKind::IoHandle),
+        )
+    }
+
+    /// Convenience: a `Ptr(HeapKind::DataTable)`-kind slot from an
+    /// `Arc<DataTable>`. R8 W6 G.1 W17-marshal-return-arms close
+    /// (2026-05-24): sibling of `from_io_handle` — same family of
+    /// `ConcreteReturn` discriminant gap (disc 15 vs disc 16). Slot
+    /// bits = `Arc::into_raw(d) as u64` via `ValueSlot::from_data_table`;
+    /// the Drop / Clone arms for `HeapKind::DataTable` (`kinded_slot.rs`
+    /// ~line 863 / ~line 1222) already dispatch the matching
+    /// `Arc::increment/decrement_strong_count::<DataTable>`
+    /// retain/release. Used by `project_typed_return` to land the
+    /// `ConcreteReturn::DataTable(Arc<DataTable>)` arm from
+    /// `arrow_module` / wire-conversion factory returns.
+    #[inline]
+    pub fn from_data_table(d: Arc<crate::datatable::DataTable>) -> Self {
+        Self::new(
+            ValueSlot::from_data_table(d),
+            NativeKind::Ptr(HeapKind::DataTable),
+        )
+    }
+
     /// Convenience: a `Char`-kind slot. ADR-006 §2.7.5 amendment (Round
     /// 19 S1.5 W12-nativekind-scalar-additions, 2026-05-14): Char joins
     /// the scalar bucket — `char` is `Copy + 4-byte` (UTF-32 codepoint),
