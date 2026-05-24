@@ -9,7 +9,7 @@
 /// ```shape
 /// use std::core::http
 ///
-/// let response = http.get("https://api.example.com/data")
+/// let response = http.get("https://api.example.com/data", {})
 /// match response {
 ///     Ok(r) => {
 ///         if r["ok"] { print(r["body"]) }
@@ -24,7 +24,7 @@
 /// # Arguments
 ///
 /// * `url` - URL to request
-/// * `options` - Optional request options: `{ headers?: HashMap, timeout?: number }`
+/// * `options` - Request options: `{ headers?: HashMap, timeout?: number }` (pass `{}` for defaults)
 ///
 /// # Returns
 ///
@@ -33,7 +33,7 @@
 /// # Example
 ///
 /// ```shape
-/// let r = http.get("https://api.example.com/users")
+/// let r = http.get("https://api.example.com/users", {})
 /// let r = http.get("https://api.example.com/users", { headers: { "Authorization": "Bearer token" } })
 /// ```
 pub builtin fn get(url: string, options: _) -> Result<_, string>;
@@ -46,7 +46,7 @@ pub builtin fn get(url: string, options: _) -> Result<_, string>;
 ///
 /// * `url` - URL to request
 /// * `body` - Request body as a string (sent verbatim)
-/// * `options` - Optional request options: `{ headers?: HashMap, timeout?: number }`
+/// * `options` - Request options: `{ headers?: HashMap, timeout?: number }` (pass `{}` for defaults)
 ///
 /// # Returns
 ///
@@ -55,7 +55,7 @@ pub builtin fn get(url: string, options: _) -> Result<_, string>;
 /// # Example
 ///
 /// ```shape
-/// let r = http.post_text("https://api.example.com/notes", "hello")
+/// let r = http.post_text("https://api.example.com/notes", "hello", {})
 /// ```
 pub builtin fn post_text(url: string, body: string, options: _) -> Result<_, string>;
 
@@ -67,7 +67,7 @@ pub builtin fn post_text(url: string, body: string, options: _) -> Result<_, str
 ///
 /// * `url` - URL to request
 /// * `body` - Request body as a byte array (`Array<int>`, each element 0..=255)
-/// * `options` - Optional request options: `{ headers?: HashMap, timeout?: number }`
+/// * `options` - Request options: `{ headers?: HashMap, timeout?: number }` (pass `{}` for defaults)
 ///
 /// # Returns
 ///
@@ -76,7 +76,7 @@ pub builtin fn post_text(url: string, body: string, options: _) -> Result<_, str
 /// # Example
 ///
 /// ```shape
-/// let r = http.post_bytes("https://api.example.com/upload", [0x48, 0x69])
+/// let r = http.post_bytes("https://api.example.com/upload", [0x48, 0x69], {})
 /// ```
 pub builtin fn post_bytes(url: string, body: Array<int>, options: _) -> Result<_, string>;
 
@@ -88,7 +88,7 @@ pub builtin fn post_bytes(url: string, body: Array<int>, options: _) -> Result<_
 ///
 /// * `url` - URL to request
 /// * `body` - Request body as a string (sent verbatim)
-/// * `options` - Optional request options: `{ headers?: HashMap, timeout?: number }`
+/// * `options` - Request options: `{ headers?: HashMap, timeout?: number }` (pass `{}` for defaults)
 ///
 /// # Returns
 ///
@@ -97,7 +97,7 @@ pub builtin fn post_bytes(url: string, body: Array<int>, options: _) -> Result<_
 /// # Example
 ///
 /// ```shape
-/// let r = http.put_text("https://api.example.com/notes/1", "hello")
+/// let r = http.put_text("https://api.example.com/notes/1", "hello", {})
 /// ```
 pub builtin fn put_text(url: string, body: string, options: _) -> Result<_, string>;
 
@@ -109,7 +109,7 @@ pub builtin fn put_text(url: string, body: string, options: _) -> Result<_, stri
 ///
 /// * `url` - URL to request
 /// * `body` - Request body as a byte array (`Array<int>`, each element 0..=255)
-/// * `options` - Optional request options: `{ headers?: HashMap, timeout?: number }`
+/// * `options` - Request options: `{ headers?: HashMap, timeout?: number }` (pass `{}` for defaults)
 ///
 /// # Returns
 ///
@@ -118,7 +118,7 @@ pub builtin fn put_text(url: string, body: string, options: _) -> Result<_, stri
 /// # Example
 ///
 /// ```shape
-/// let r = http.put_bytes("https://api.example.com/files/1", [0x48, 0x69])
+/// let r = http.put_bytes("https://api.example.com/files/1", [0x48, 0x69], {})
 /// ```
 pub builtin fn put_bytes(url: string, body: Array<int>, options: _) -> Result<_, string>;
 
@@ -132,7 +132,7 @@ pub builtin fn put_bytes(url: string, body: Array<int>, options: _) -> Result<_,
 ///
 /// * `url` - URL to request
 /// * `body` - Request body as an object (serialized to JSON)
-/// * `options` - Optional request options: `{ headers?: HashMap, timeout?: number }`
+/// * `options` - Request options: `{ headers?: HashMap, timeout?: number }` (pass `{}` for defaults)
 ///
 /// # Returns
 ///
@@ -141,7 +141,7 @@ pub builtin fn put_bytes(url: string, body: Array<int>, options: _) -> Result<_,
 /// # Example
 ///
 /// ```shape
-/// let r = http.post_json("https://api.example.com/users", { name: "Alice", age: 30 })
+/// let r = http.post_json("https://api.example.com/users", { name: "Alice", age: 30 }, {})
 /// ```
 pub builtin fn post_json(url: string, body: _, options: _) -> Result<_, string>;
 
@@ -154,7 +154,7 @@ pub builtin fn post_json(url: string, body: _, options: _) -> Result<_, string>;
 ///
 /// * `url` - URL to request
 /// * `body` - Request body as an object (serialized to JSON)
-/// * `options` - Optional request options: `{ headers?: HashMap, timeout?: number }`
+/// * `options` - Request options: `{ headers?: HashMap, timeout?: number }` (pass `{}` for defaults)
 ///
 /// # Returns
 ///
@@ -163,7 +163,7 @@ pub builtin fn post_json(url: string, body: _, options: _) -> Result<_, string>;
 /// # Example
 ///
 /// ```shape
-/// let r = http.put_json("https://api.example.com/users/1", { name: "Alice" })
+/// let r = http.put_json("https://api.example.com/users/1", { name: "Alice" }, {})
 /// ```
 pub builtin fn put_json(url: string, body: _, options: _) -> Result<_, string>;
 
@@ -172,7 +172,7 @@ pub builtin fn put_json(url: string, body: _, options: _) -> Result<_, string>;
 /// # Arguments
 ///
 /// * `url` - URL to request
-/// * `options` - Optional request options: `{ headers?: HashMap, timeout?: number }`
+/// * `options` - Request options: `{ headers?: HashMap, timeout?: number }` (pass `{}` for defaults)
 ///
 /// # Returns
 ///
@@ -181,6 +181,6 @@ pub builtin fn put_json(url: string, body: _, options: _) -> Result<_, string>;
 /// # Example
 ///
 /// ```shape
-/// let r = http.delete("https://api.example.com/users/1")
+/// let r = http.delete("https://api.example.com/users/1", {})
 /// ```
 pub builtin fn delete(url: string, options: _) -> Result<_, string>;
