@@ -1,12 +1,12 @@
 # Team-lead handover — Shape v0.3 close-approach
 
-**Refreshed:** 2026-05-24 at main HEAD `ebb3717c` (**R8 W7 CLOSED** —
-match enum-payload tuple-binder + ADR §2.7.28/§2.7.29 apply + aliased-CoW
-audit + G.5 Cluster B (5 stdlib files) + G.5 Cluster C (2 stdlib files) +
-G.5 HashMap divergence-elimination). v0.3 code criteria substantially
-complete (A 5.5/6, B/C/D/E/F COMPLETE, J 3/4); all G.1 Step 1 supervisor
-groups now closed except Cluster A (module-level binding rejection;
-deferred for user-decision on language semantics).
+**Refreshed:** 2026-05-24 at main HEAD `ff978be4` (**R8 W8 CLOSED** —
+JIT aliased-CoW typed-array-push SEGFAULT eliminated via surface-and-stop,
+audit-recipe empirically corrected post-fix). v0.3 code criteria
+substantially complete (A 5.5/6, B/C/D/E/F COMPLETE, J 3/4); all G.1
+Step 1 supervisor groups + supervisor-ratified ADR text apply + aliased-
+CoW JIT fix closed. Remaining: Cluster A (user-decision gated) + J.4-rest
++ G.2 Step 2 doc-truth round + close + tag.
 
 ## Role
 
@@ -19,8 +19,8 @@ semantics. User relays between team-lead and supervisor.
 
 | | |
 |---|---|
-| Main HEAD | `ebb3717c` (R8 W7 close: 5 merges + 1 ADR/audit commit + 1 cleanup) |
-| Smoke matrix s1–s5 | **5/5 VM == JIT** (canonical (ii) F' release-binary harness; re-verified at HEAD `ebb3717c` post-final-merge) |
+| Main HEAD | `ff978be4` (R8 W8 close: 1 merge + 1 audit-correction commit) |
+| Smoke matrix s1–s5 | **5/5 VM == JIT** (canonical (ii) F' release-binary harness; re-verified at HEAD `ff978be4` post-final-merge) |
 | verify-merge / check-no-dynamic / check-clean | 13/13 / exit 0 / exit 0 |
 | git-stash pre-commit hook | DEPLOYED (R8 W5+W6+W7 ZERO violations cumulative) |
 | conflict-marker pre-commit hook | DEPLOYED R8 W7 close (supervisor 2026-05-24 operational suggestion after the 5669a8ff incident); tested empirically (catches `+<<<<<<<` / `+=======` / `+>>>>>>>` in staged diff, exits 1 with recovery instructions) |
@@ -96,14 +96,20 @@ v0.4 with stdlib refactor. Surface to user for ruling.
 1. **ADR §2.7.4 addendum drafts file** at `docs/cluster-audits/v0.3-adr-2-7-4-addendum-drafts.md` — supervisor reads from disk per the new mechanism (bypasses relay-chain text-loss). 4 `[SUPERVISOR-DECISION: ...]` markers: (a) NEW top-level §2.7.28/.29 vs amendment-subsection under §2.7.4; (b) insertion position (numeric vs file-position dominant); (c) retro-add `// §2.7.28` / `// §2.7.29` marker comments; (d) Q-number allocation (next available Q26/Q27).
 2. **Match enum-payload inference (G5)** — recommended v0.4 in audit; surface if supervisor reads doc-contract leg of no-known-incorrectness binding stronger than clean-compile-error leg. See `docs/cluster-audits/v0.3-r8w6-match-enum-payload-inference-audit.md` §2.
 
-## Remaining v0.3 scope (post-R8-W7)
+## R8 W8 outcome (CLOSED 2026-05-24)
+
+1 merge + 1 audit-correction landed.
+
+| Merge / Commit | Substance |
+|---|---|
+| JIT aliased-CoW SEGFAULT → `ec184dc9` (merge in `ff978be4` lineage) | Surface-and-stop in `mir_compiler/v2_array.rs::try_emit_v2_array_method` push arm. New `mir_has_prior_move_of_slot(slot)` helper scans MIR statements + terminators for prior `Operand::Move/MoveExplicit(Place::Local(slot))`; on match returns Err with structured SURFACE message to trigger W12 fall-through to interpreter (preserves VM in-place mutation semantics). repro1 post-fix: VM ec=0 + JIT ec=0 (deopt to interpreter), both print `[1,2,3,4]` twice. |
+| Audit empirical-correction → `ff978be4` | §7 added to `v0.3-r8w7-jit-aliased-cow-segfault-audit.md`: gdb investigation falsified the §3 refcount-aliasing hypothesis (actual cause: `Operand::Move` nulls source slot during `let alias = data` lowering at `mir/lowering/stmt.rs:269-273`). The audit's §4 CoW recipe would have CREATED a NEW VM/JIT divergence (CoW-cloned JIT vs in-place VM). Surface-and-stop is the correct binding-compliant path. Future SEGFAULT-audit lesson preserved (use print() probes to localize slot-loss before hypothesizing refcount issues). |
+
+## Remaining v0.3 scope (post-R8-W8)
 
 - **G5 Cluster A** (module-level binding rejection — 2 files): gated on
-  user language-semantics ruling. Trivial fix once design lands.
-- **Aliased-CoW JIT SEGFAULT fix** (~M scope per
-  `v0.3-r8w7-jit-aliased-cow-segfault-audit.md` §4): refcount-aware codegen
-  at `mir_compiler/v2_array.rs::compile_typed_array_method`. Per supervisor
-  2026-05-24 ruling: memory-unsafety unconditionally v0.3-gating.
+  user language-semantics ruling (a/b/c per R8 W7 relay; supervisor lean
+  (a); user may prefer (c) v0.4-defer-with-stdlib-refactor for tag-soon).
 - **J.4-rest residuals** (joinStr + small sort-family items).
 - **G.2 Step 2** doc-truth round (USER-followable validation; gated on
   Step 1 finalized + main stable — both met).
@@ -120,11 +126,10 @@ post-apply-grep discipline as §2.7.13 ratify.
 
 ## Trajectory
 
-~**2-3 sessions** to v0.3 tag (re-projected post-R8-W7 close). Sized:
-Aliased-CoW fix (M, 0.5-1) + G5 Cluster A (0.5 once user-decision lands)
-+ J.4-rest (0.5) + G.2 Step 2 (1) + close + tag (0.5). R8 W7 compressed
-the trajectory further by closing 6 dispositions in one round including
-the supervisor-ratified ADR text apply.
+~**1-2 sessions** to v0.3 tag (re-projected post-R8-W8 close). Sized:
+Cluster A (0.5 if (c) v0.4-defer, ~1 if (a) const-only-impl) + J.4-rest
+(0.5) + G.2 Step 2 (1) + close + tag (0.5). R8 W8 compressed further by
+landing aliased-CoW with surface-and-stop instead of the full CoW recipe.
 
 ## Dispatch hygiene (binding — R7 W3 + R8 W4 hardening)
 
@@ -210,12 +215,12 @@ row appended; no Co-Authored-By trailer.
 
 ---
 
-*R8 W7 CLOSED 2026-05-24: 5 merges landed (G.5 HashMap divergence,
-match enum-payload, G.5 Cluster B, G.5 Cluster C, ADR §2.7.28+§2.7.29
-verbatim apply + aliased-CoW audit). Supervisor 4-decision ratify on
-ADR (Q26/Q27 sequential, NEW top-level, append-after-§2.7.27, marker
-comments) all applied + post-apply grep clean. One conflict-marker miss
-(commit 5669a8ff) caught + cleaned in follow-up `675dcf1b`. Smoke 5/5
-+ 13/13 + git-stash hook ZERO violations preserved through W7. Next
-round: aliased-CoW JIT fix + G5 Cluster A (post user-decision) +
-J.4-rest + G.2 Step 2 + tag.*
+*R8 W8 CLOSED 2026-05-24: 1 merge (JIT aliased-CoW surface-and-stop) +
+1 audit-correction commit. Fix-agent's gdb investigation FALSIFIED the
+audit's refcount-aliasing root-cause hypothesis (actual cause: MIR
+Operand::Move nulls source slot during `let alias = data`); surface-and-
+stop turned out to be the correct binding-compliant path, not just a
+fallback. Audit doc updated with §7 empirical-correction. Conflict-marker
+pre-commit hook deployed + tested per supervisor 2026-05-24 operational
+suggestion. Trajectory now ~1-2 sessions to v0.3 tag. Next round:
+Cluster A (post user-decision) + J.4-rest + G.2 Step 2 + tag.*
