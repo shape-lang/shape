@@ -31,7 +31,7 @@ pub fn assert(condition, message = "Assertion failed: condition was false") {
 /// @example
 /// assert_eq(add(2, 3), 5, "addition should work")
 /// assert_eq(add(2, 3), 5)
-pub fn assert_eq(actual, expected, message = "Assertion failed") {
+pub fn assert_eq<T>(actual: T, expected: T, message: string = "Assertion failed") {
     if actual == expected {
         Ok(true)
     } else {
@@ -49,7 +49,7 @@ pub fn assert_eq(actual, expected, message = "Assertion failed") {
 /// @example
 /// assert_ne(result, 0, "result must not be zero")
 /// assert_ne(result, 0)
-pub fn assert_ne(actual, expected, message = "Assertion failed") {
+pub fn assert_ne<T>(actual: T, expected: T, message: string = "Assertion failed") {
     if actual != expected {
         Ok(true)
     } else {
@@ -67,7 +67,7 @@ pub fn assert_ne(actual, expected, message = "Assertion failed") {
 /// @example
 /// assert_approx(sqrt(2) * sqrt(2), 2.0)
 /// assert_approx(pi(), 3.14, 0.01)
-pub fn assert_approx(actual, expected, tolerance = 1e-10) {
+pub fn assert_approx(actual: number, expected: number, tolerance: number = 1e-10) {
     let diff = abs(actual - expected);
     if diff <= tolerance {
         Ok(true)

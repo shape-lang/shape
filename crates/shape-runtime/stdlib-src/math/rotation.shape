@@ -4,6 +4,8 @@
 /// Uses ZYX Euler angle convention: R = Rz(alpha) * Ry(beta) * Rx(gamma).
 /// All angles are in radians. Matrices are 3x3 Mat<number>.
 
+from std::core::math use { atan2 }
+
 /// Convert ZYX Euler angles to a 3x3 rotation matrix.
 ///
 /// @param alpha - Rotation about Z axis (yaw) in radians
@@ -13,13 +15,13 @@
 ///
 /// @example
 /// euler_to_matrix(0, 0, 0)  // identity matrix
-pub fn euler_to_matrix(alpha, beta, gamma) {
-    let ca = cos(alpha)
-    let sa = sin(alpha)
-    let cb = cos(beta)
-    let sb = sin(beta)
-    let cg = cos(gamma)
-    let sg = sin(gamma)
+pub fn euler_to_matrix(alpha: number, beta: number, gamma: number) {
+    let ca: number = cos(alpha)
+    let sa: number = sin(alpha)
+    let cb: number = cos(beta)
+    let sb: number = sin(beta)
+    let cg: number = cos(gamma)
+    let sg: number = sin(gamma)
 
     // R = Rz(alpha) * Ry(beta) * Rx(gamma)
     mat(3, 3, [
@@ -38,23 +40,23 @@ pub fn euler_to_matrix(alpha, beta, gamma) {
 ///
 /// @example
 /// matrix_to_euler(euler_to_matrix(0.1, 0.2, 0.3))  // ~[0.1, 0.2, 0.3]
-pub fn matrix_to_euler(m) {
-    let r20 = m.row(2)[0]
+pub fn matrix_to_euler(m: Mat<number>) -> Array<number> {
+    let r20: number = m.row(2)[0]
 
     // beta = -asin(r20), clamped to avoid NaN
-    let clamped = if r20 < -1.0 { -1.0 } else if r20 > 1.0 { 1.0 } else { r20 }
-    let beta = asin(0.0 - clamped)
-    let cb = cos(beta)
+    let clamped: number = if r20 < -1.0 { -1.0 } else if r20 > 1.0 { 1.0 } else { r20 }
+    let beta: number = asin(0.0 - clamped)
+    let cb: number = cos(beta)
 
     if abs(cb) > 0.0001 {
         // Normal case
-        let alpha = atan2(m.row(1)[0], m.row(0)[0])
-        let gamma = atan2(m.row(2)[1], m.row(2)[2])
+        let alpha: number = atan2(m.row(1)[0], m.row(0)[0])
+        let gamma: number = atan2(m.row(2)[1], m.row(2)[2])
         [alpha, beta, gamma]
     } else {
         // Gimbal lock: beta near +/- pi/2
-        let alpha = atan2(0.0 - m.row(0)[1], m.row(1)[1])
-        let gamma = 0.0
+        let alpha: number = atan2(0.0 - m.row(0)[1], m.row(1)[1])
+        let gamma: number = 0.0
         [alpha, beta, gamma]
     }
 }
@@ -66,9 +68,9 @@ pub fn matrix_to_euler(m) {
 /// @param rot - 3x3 rotation matrix
 /// @param points - Nx3 matrix of points (each row is a point)
 /// @returns Nx3 matrix of rotated points
-pub fn rotation_apply(rot, points) {
-    let pt = points.transpose()
-    let rotated = rot * pt
+pub fn rotation_apply(rot: Mat<number>, points: Mat<number>) {
+    let pt: Mat<number> = points.transpose()
+    let rotated: Mat<number> = rot * pt
     rotated.transpose()
 }
 
@@ -78,7 +80,7 @@ pub fn rotation_apply(rot, points) {
 ///
 /// @param rot - 3x3 rotation matrix
 /// @returns Inverse (transpose) rotation matrix
-pub fn rotation_inverse(rot) {
+pub fn rotation_inverse(rot: Mat<number>) {
     rot.transpose()
 }
 
@@ -89,21 +91,22 @@ pub fn rotation_inverse(rot) {
 /// @param r1 - First rotation matrix (applied second)
 /// @param r2 - Second rotation matrix (applied first)
 /// @returns Combined 3x3 rotation matrix
-pub fn rotation_compose(r1, r2) {
-    r1 * r2
+pub fn rotation_compose(r1: Mat<number>, r2: Mat<number>) -> Mat<number> {
+    let result: Mat<number> = r1 * r2
+    result
 }
 
 /// Create a Mat<number> from an array of row arrays.
 ///
 /// @param rows - Array of 3-element arrays, e.g. [[1,0,0],[0,1,0],[0,0,1]]
 /// @returns 3x3 Mat<number>
-pub fn rotation_from_rows(rows) {
-    let nrows = rows.length
-    let ncols = rows[0].length
-    let mut flat = []
-    let mut i = 0
+pub fn rotation_from_rows(rows: Array<Array<number>>) {
+    let nrows: int = rows.length
+    let ncols: int = rows[0].length
+    let mut flat: Array<number> = []
+    let mut i: int = 0
     while i < nrows {
-        let mut j = 0
+        let mut j: int = 0
         while j < ncols {
             flat = flat.push(rows[i][j])
             j = j + 1
@@ -120,11 +123,11 @@ pub fn rotation_from_rows(rows) {
 ///
 /// @example
 /// normalize_euler([7.0, -7.0, 0.0])  // wrapped values
-pub fn normalize_euler(angles) {
-    let pi = 3.141592653589793
-    let two_pi = 6.283185307179586
-    angles.map(|a| {
-        let mut v = a
+pub fn normalize_euler(angles: Array<number>) -> Array<number> {
+    let pi: number = 3.141592653589793
+    let two_pi: number = 6.283185307179586
+    angles.map(|a: number| {
+        let mut v: number = a
         while v > pi {
             v = v - two_pi
         }

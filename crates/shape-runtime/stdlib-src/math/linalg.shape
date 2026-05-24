@@ -12,10 +12,10 @@
 ///
 /// @example
 /// dot([1, 2, 3], [4, 5, 6])  // 32
-pub fn dot(a, b) {
-    let n = a.length
-    let mut result = 0.0
-    let mut i = 0
+pub fn dot(a: Array<number>, b: Array<number>) -> number {
+    let n: int = a.length
+    let mut result: number = 0.0
+    let mut i: int = 0
     while i < n {
         result = result + a[i] * b[i]
         i = i + 1
@@ -31,7 +31,7 @@ pub fn dot(a, b) {
 ///
 /// @example
 /// cross([1, 0, 0], [0, 1, 0])  // [0, 0, 1]
-pub fn cross(a, b) {
+pub fn cross(a: Array<number>, b: Array<number>) -> Array<number> {
     [
         a[1] * b[2] - a[2] * b[1],
         a[2] * b[0] - a[0] * b[2],
@@ -46,9 +46,9 @@ pub fn cross(a, b) {
 ///
 /// @example
 /// norm([3, 4])  // 5
-pub fn norm(v) {
-    let mut sum_sq = 0.0
-    let mut i = 0
+pub fn norm(v: Array<number>) -> number {
+    let mut sum_sq: number = 0.0
+    let mut i: int = 0
     while i < v.length {
         sum_sq = sum_sq + v[i] * v[i]
         i = i + 1
@@ -65,8 +65,8 @@ pub fn norm(v) {
 ///
 /// @example
 /// normalize([3, 4])  // [0.6, 0.8]
-pub fn normalize(v) {
-    let mag = norm(v)
+pub fn normalize(v: Array<number>) -> Array<number> {
+    let mag: number = norm(v)
     if mag == 0.0 {
         scale(v, 1.0)
     } else {
@@ -82,7 +82,7 @@ pub fn normalize(v) {
 ///
 /// @example
 /// distance([0, 0], [3, 4])  // 5
-pub fn distance(a, b) {
+pub fn distance(a: Array<number>, b: Array<number>) -> number {
     norm(sub(a, b))
 }
 
@@ -94,7 +94,7 @@ pub fn distance(a, b) {
 ///
 /// @example
 /// scale([1, 2, 3], 2)  // [2, 4, 6]
-pub fn scale(v, s) {
+pub fn scale(v: Array<number>, s: number) -> Array<number> {
     v.map(|x| x * s)
 }
 
@@ -106,10 +106,10 @@ pub fn scale(v, s) {
 ///
 /// @example
 /// add([1, 2], [3, 4])  // [4, 6]
-pub fn add(a, b) {
-    let n = a.length
-    let mut result = []
-    let mut i = 0
+pub fn add(a: Array<number>, b: Array<number>) -> Array<number> {
+    let n: int = a.length
+    let mut result: Array<number> = []
+    let mut i: int = 0
     while i < n {
         result = result.push(a[i] + b[i])
         i = i + 1
@@ -125,10 +125,10 @@ pub fn add(a, b) {
 ///
 /// @example
 /// sub([3, 4], [1, 2])  // [2, 2]
-pub fn sub(a, b) {
-    let n = a.length
-    let mut result = []
-    let mut i = 0
+pub fn sub(a: Array<number>, b: Array<number>) -> Array<number> {
+    let n: int = a.length
+    let mut result: Array<number> = []
+    let mut i: int = 0
     while i < n {
         result = result.push(a[i] - b[i])
         i = i + 1
