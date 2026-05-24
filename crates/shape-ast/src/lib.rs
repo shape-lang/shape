@@ -3,6 +3,7 @@
 #![allow(clippy::result_large_err)]
 
 pub mod ast;
+pub mod content_style;
 pub mod data;
 pub mod error;
 pub mod int_width;

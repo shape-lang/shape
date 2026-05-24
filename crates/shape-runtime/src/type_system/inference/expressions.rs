@@ -15,7 +15,32 @@ impl TypeInferenceEngine {
         match expr {
             Expr::Literal(Literal::FormattedString { value, mode }, span) => {
                 self.infer_formatted_string_interpolations(value, *mode, *span)?;
-                Ok(BuiltinTypes::string())
+                // R8 W4 W18.4 (supervisor 2026-05-24 D1): syntax-determined
+                // return type. F-string with NO content-styling syntax →
+                // `string` (preserves existing 500+ call sites). F-string
+                // with ≥1 `ContentStyle` interpolation → `content`. The
+                // presence test re-parses the value; this is a cheap pure-
+                // syntax check (re-uses the same parser the lowering will
+                // call).
+                let parts = parse_interpolation_with_mode(value, *mode)
+                    .map_err(|err| TypeError::ConstraintViolation(err.to_string()))?;
+                let has_content_style = parts.iter().any(|p| {
+                    matches!(
+                        p,
+                        shape_ast::interpolation::InterpolationPart::Expression {
+                            format_spec: Some(
+                                shape_ast::interpolation::InterpolationFormatSpec
+                                    ::ContentStyle(_),
+                            ),
+                            ..
+                        }
+                    )
+                });
+                if has_content_style {
+                    Ok(BuiltinTypes::content())
+                } else {
+                    Ok(BuiltinTypes::string())
+                }
             }
 
             Expr::Literal(lit, _) => self.infer_literal(lit),

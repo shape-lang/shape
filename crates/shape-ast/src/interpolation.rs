@@ -6,6 +6,7 @@
 //! extracted `{...}` expressions.
 
 use crate::ast::InterpolationMode;
+use crate::content_style::{ContentFormatSpec, parse_content_format_spec};
 use crate::{Result, ShapeError};
 
 /// Horizontal alignment for formatted output.
@@ -87,6 +88,13 @@ pub enum InterpolationFormatSpec {
     Fixed { precision: u8 },
     /// Tabular formatting for `DataTable`-like values (`table(...)`).
     Table(TableFormatSpec),
+    /// Content-styling specification (R8 W4 W18.4 — supervisor 2026-05-24
+    /// D1 + (a-modified) REVIVE-WITH-SHARED-MODULE). Parsed from f-string
+    /// styling syntax like `{x:bold,red}` / `{x:fg(blue),italic}`.
+    /// The presence of this variant in any interpolation part flips the
+    /// f-string's return type from `string` to `content` per D1's
+    /// syntax-determined rule.
+    ContentStyle(ContentFormatSpec),
 }
 
 /// A parsed segment of an interpolated string.
@@ -342,13 +350,20 @@ fn parse_format_spec(raw_spec: &str) -> Result<InterpolationFormatSpec> {
         )?));
     }
 
-    Err(ShapeError::RuntimeError {
+    // R8 W4 W18.4 (supervisor 2026-05-24 D1): try content-styling syntax
+    // (`bold` / `red` / `fg(blue)` / `bold,red` / etc.). The content-style
+    // parser is permissive about composition (multiple comma-separated
+    // entries) and surfaces a descriptive error if no entry matches. Any
+    // successful parse here triggers the syntax-determined `string` →
+    // `content` flip at the f-string return-type inference site.
+    let content_spec = parse_content_format_spec(spec).map_err(|err| ShapeError::RuntimeError {
         message: format!(
-            "Unsupported interpolation format spec '{}'. Supported: fixed(N), table(...).",
-            spec
+            "Unsupported interpolation format spec '{}'. Supported: fixed(N), table(...), content-styling (bold, italic, underline, dim, fg(color), bg(color), border(style), align(side), chart(type)). Inner error: {}",
+            spec, err
         ),
         location: None,
-    })
+    })?;
+    Ok(InterpolationFormatSpec::ContentStyle(content_spec))
 }
 
 fn parse_legacy_fixed_precision(spec: &str) -> Result<Option<u8>> {
@@ -787,4 +802,86 @@ mod tests {
         ));
     }
 
+    // --- R8 W4 W18.4: content-styling f-string syntax ---
+
+    #[test]
+    fn parse_content_style_bold() {
+        use crate::content_style::ContentFormatSpec;
+        let parts = parse_interpolation("{x:bold}").unwrap();
+        assert_eq!(parts.len(), 1);
+        match &parts[0] {
+            InterpolationPart::Expression {
+                expr,
+                format_spec: Some(InterpolationFormatSpec::ContentStyle(spec)),
+            } => {
+                assert_eq!(expr, "x");
+                let expected = ContentFormatSpec {
+                    bold: true,
+                    ..Default::default()
+                };
+                assert_eq!(spec, &expected);
+            }
+            other => panic!("expected ContentStyle bold, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_content_style_bold_red_canonical() {
+        use crate::content_style::{ColorSpec, NamedContentColor};
+        // Canonical W18.4 example from supervisor: `{x:bold,red}` parses to
+        // ContentStyle with bold=true and fg=Named(Red).
+        let parts = parse_interpolation("hello {name:bold,red}").unwrap();
+        assert_eq!(parts.len(), 2);
+        assert!(matches!(&parts[0], InterpolationPart::Literal(s) if s == "hello "));
+        match &parts[1] {
+            InterpolationPart::Expression {
+                expr,
+                format_spec: Some(InterpolationFormatSpec::ContentStyle(spec)),
+            } => {
+                assert_eq!(expr, "name");
+                assert!(spec.bold);
+                assert_eq!(spec.fg, Some(ColorSpec::Named(NamedContentColor::Red)));
+            }
+            other => panic!("expected ContentStyle, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_content_style_fg_call() {
+        use crate::content_style::{ColorSpec, NamedContentColor};
+        let parts = parse_interpolation("{x:fg(green)}").unwrap();
+        match &parts[0] {
+            InterpolationPart::Expression {
+                format_spec: Some(InterpolationFormatSpec::ContentStyle(spec)),
+                ..
+            } => {
+                assert_eq!(spec.fg, Some(ColorSpec::Named(NamedContentColor::Green)));
+            }
+            other => panic!("expected ContentStyle, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn fixed_and_table_still_parse_separately_from_content_style() {
+        // Regression: fixed(N) must not be reinterpreted as content-style.
+        let parts = parse_interpolation("{x:fixed(2)}").unwrap();
+        match &parts[0] {
+            InterpolationPart::Expression {
+                format_spec: Some(InterpolationFormatSpec::Fixed { precision }),
+                ..
+            } => {
+                assert_eq!(*precision, 2);
+            }
+            other => panic!("expected Fixed, got {:?}", other),
+        }
+
+        let parts = parse_interpolation("{x:table()}").unwrap();
+        assert!(matches!(
+            &parts[0],
+            InterpolationPart::Expression {
+                format_spec: Some(InterpolationFormatSpec::Table(_)),
+                ..
+            }
+        ));
+    }
 }
