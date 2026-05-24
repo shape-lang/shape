@@ -1,5 +1,6 @@
 use super::*;
 use crate::type_tracking::{FrameDescriptor, NativeKind, StorageHint};
+use shape_value::{HeapKind, TableViewData};
 use std::sync::Arc;
 
 /// Cached MIR analysis data for JIT v2 (MirToIR compilation).
@@ -606,16 +607,175 @@ pub enum Constant {
     DataDateTimeRef(DataDateTimeRef),
     TypeAnnotation(TypeAnnotation),
     /// Opaque runtime value (not serializable — used for host-injected
-    /// constants like RowView, DataTable, etc.).
+    /// constants like RowView, DataTable, TypedTable, etc.).
     ///
-    /// SURFACE (playbook §8 — `Constant::*` arm pending kinded heap
-    /// alignment): the prior `Value(ValueWord)` shape was deleted by the
-    /// strict-typing bulldozer; the kinded rebuild lives in phase-2c per
-    /// ADR-006 §2.7.4. The placeholder unit shape keeps the variant
-    /// reachable so dispatch sites in `op_push_const` continue to compile,
-    /// without re-introducing a dynamic-tag carrier.
+    /// R8 W3 W17-typed-module-exports-followup-constant-pool
+    /// (ADR-006 §2.7.4 / §2.7.7 / Q9, 2026-05-24): the placeholder unit
+    /// shape (introduced post-strict-typing-bulldozer when the legacy
+    /// `Value(ValueWord)` arm was deleted) is replaced by the kinded
+    /// constant carrier `KindedConstant { bits, kind }`. Bits are a
+    /// type-erased typed-Arc pointer (`Arc::into_raw::<T>` for the
+    /// matching `T`) or an inline scalar; `kind` is the producer-side
+    /// stamp identifying the carrier (§2.7.5). Refcount discipline is
+    /// preserved by `KindedConstant`'s `Clone` (`clone_with_kind`) and
+    /// `Drop` (`drop_with_kind`) impls — every `op_push_const` of this
+    /// variant pushes a retained share via `clone_with_kind`. The
+    /// constant carries its kind directly per §2.7.7/Q9; the dispatch
+    /// shape mirrors the existing `Constant::Decimal` arm (§Forbidden
+    /// Patterns preserved — no carrier reintroduction).
     #[serde(skip)]
-    Value,
+    Value(KindedConstant),
+}
+
+/// Kinded constant carrier — host-tier `(bits, kind)` payload for
+/// `Constant::Value`.
+///
+/// Mirrors the §2.7.7/Q9 parallel-kind invariant: `bits` is the raw
+/// 8-byte slot payload (either an inline scalar or
+/// `Arc::into_raw::<T>` for the heap-pointer variant matching `kind`),
+/// and `kind` is the producer-side stamp. Refcount discipline goes
+/// through the kind label via `clone_with_kind` / `drop_with_kind`
+/// (§Q8 carrier-API bound — no per-heap-variant accessors here; the
+/// kind label is the dispatch discriminator).
+///
+/// **Ownership.** A `KindedConstant` owns one strong-count share
+/// (heap-bearing kinds) or is a pure inline scalar (no share). The
+/// share is bumped on `Clone` (linker / program cloning) and released
+/// on `Drop` (program teardown). Every `op_push_const` of the
+/// containing `Constant::Value` MUST `clone_with_kind` before pushing,
+/// so the constant retains its share for subsequent loads.
+///
+/// **Surface.** Constructed only by host code (test harness, embedding
+/// layer, comptime evaluator) — the compiler never emits a
+/// `Constant::Value`. The `Constant` enum's `#[serde(skip)]` on this
+/// variant matches the host-injected semantics; on deserialization the
+/// `Default` impl reconstructs a null payload (caller must inject the
+/// host value before execution).
+pub struct KindedConstant {
+    bits: u64,
+    kind: NativeKind,
+}
+
+impl KindedConstant {
+    /// Construct from raw `(bits, kind)`. The caller transfers
+    /// ownership of one strong-count share for heap-bearing kinds (the
+    /// `Arc::into_raw::<T>` share). Inline scalars pass `bits` directly.
+    ///
+    /// # Safety
+    /// Caller must ensure `bits` is a valid representation of `kind`
+    /// per the §2.7.5 producer-side stamp (e.g. for `Ptr(HeapKind::T)`,
+    /// `bits` is the result of `Arc::into_raw::<TPayload>` for the
+    /// matching payload type `TPayload`).
+    #[inline]
+    pub unsafe fn from_raw(bits: u64, kind: NativeKind) -> Self {
+        Self { bits, kind }
+    }
+
+    /// Construct a `DataTable`-kinded constant from an
+    /// `Arc<DataTable>`. The Arc share is transferred into the
+    /// constant (no additional clone); subsequent `op_push_const` calls
+    /// bump the refcount via `clone_with_kind`.
+    pub fn from_datatable(table: Arc<shape_value::DataTable>) -> Self {
+        let bits = Arc::into_raw(table) as u64;
+        Self {
+            bits,
+            kind: NativeKind::Ptr(HeapKind::DataTable),
+        }
+    }
+
+    /// Construct a `TableView`-kinded `RowView` constant.
+    pub fn from_row_view(
+        schema_id: u64,
+        table: Arc<shape_value::DataTable>,
+        row_idx: usize,
+    ) -> Self {
+        let tv = Arc::new(TableViewData::RowView {
+            schema_id,
+            table,
+            row_idx,
+        });
+        let bits = Arc::into_raw(tv) as u64;
+        Self {
+            bits,
+            kind: NativeKind::Ptr(HeapKind::TableView),
+        }
+    }
+
+    /// Construct a `TableView`-kinded `TypedTable` constant.
+    pub fn from_typed_table(schema_id: u64, table: Arc<shape_value::DataTable>) -> Self {
+        let tv = Arc::new(TableViewData::TypedTable { schema_id, table });
+        let bits = Arc::into_raw(tv) as u64;
+        Self {
+            bits,
+            kind: NativeKind::Ptr(HeapKind::TableView),
+        }
+    }
+
+    /// The raw slot bits.
+    #[inline]
+    pub fn bits(&self) -> u64 {
+        self.bits
+    }
+
+    /// The producer-side stamped kind.
+    #[inline]
+    pub fn kind(&self) -> NativeKind {
+        self.kind
+    }
+}
+
+impl Default for KindedConstant {
+    /// Default reconstructs a null carrier (bits=0, kind=Null) — used
+    /// only when serde encounters the `#[serde(skip)]` Value variant
+    /// on deserialization. The host must inject the real payload
+    /// before execution.
+    #[inline]
+    fn default() -> Self {
+        Self {
+            bits: 0,
+            kind: NativeKind::Null,
+        }
+    }
+}
+
+impl Clone for KindedConstant {
+    /// Cloning bumps the underlying refcount via `clone_with_kind`
+    /// (mirror of `KindedSlot::clone` — single-discriminator
+    /// dispatch via `(bits, kind)`).
+    fn clone(&self) -> Self {
+        crate::executor::vm_impl::stack::clone_with_kind(self.bits, self.kind);
+        Self {
+            bits: self.bits,
+            kind: self.kind,
+        }
+    }
+}
+
+impl Drop for KindedConstant {
+    /// Drop releases the underlying refcount via `drop_with_kind`
+    /// (mirror of `KindedSlot::drop`).
+    fn drop(&mut self) {
+        crate::executor::vm_impl::stack::drop_with_kind(self.bits, self.kind);
+    }
+}
+
+impl std::fmt::Debug for KindedConstant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KindedConstant")
+            .field("bits", &format_args!("{:#x}", self.bits))
+            .field("kind", &self.kind)
+            .finish()
+    }
+}
+
+impl PartialEq for KindedConstant {
+    /// Equality compares `(bits, kind)` — same heap pointer + same
+    /// kind label. Sufficient for the constant-pool dedup contract
+    /// (heap-payload equality is the same pointer identity, not deep
+    /// content comparison).
+    fn eq(&self, other: &Self) -> bool {
+        self.bits == other.bits && self.kind == other.kind
+    }
 }
 
 /// Function definition in bytecode

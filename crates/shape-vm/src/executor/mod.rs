@@ -566,7 +566,7 @@ pub struct DebugVMState {
     pub call_stack_depth: usize,
 }
 
-mod vm_impl;
+pub(crate) mod vm_impl;
 
 /// Drop implementation for VirtualMachine.
 ///

@@ -886,148 +886,876 @@ fn test_multiple_type_annotations() {
 }
 
 // ===== Typed Column Access Tests =====
+//
+// R8 W3 W17-typed-module-exports-followup-constant-pool (ADR-006 §2.7.4
+// / §2.7.7 / Q9, 2026-05-24): the deleted `Constant::Value(ValueWord)`
+// carrier is replaced by the kinded `Constant::Value(KindedConstant)`
+// variant. Tests use `KindedConstant::from_row_view` /
+// `from_datatable` to inject host-tier values; the constant holds one
+// strong-count share, and every `op_push_const` bumps the refcount via
+// `clone_with_kind`. Result inspection uses `vm.execute(None)` which
+// returns `KindedSlot` directly — heap-typed results unwrap by
+// matching `kind() == Ptr(HeapKind::TableView)` and recovering the
+// `&TableViewData` from `raw()` bits (mirror of `exec_bind_schema`'s
+// receiver borrow at `executor/window_join.rs:465`).
+
+/// Test-only helper to recover a `(schema_id, &Arc<DataTable>)` from a
+/// `KindedSlot` carrying a `TableView::TypedTable` payload. Returns
+/// `None` if the slot's kind is not `Ptr(HeapKind::TableView)` or the
+/// inner `TableViewData` is not the `TypedTable` variant.
+///
+/// SAFETY: borrows the inner `TableViewData` for the lifetime of
+/// `&KindedSlot` — the slot owns one `Arc::into_raw(Arc<TableViewData>)`
+/// strong-count share (kept alive until the slot's `Drop` runs), so
+/// the borrow is sound. Mirror of the receiver-borrow shape in
+/// `executor/window_join.rs:465` (`exec_bind_schema` /
+/// `exec_load_col`).
+#[allow(dead_code)]
+fn typed_table_from_slot(
+    slot: &shape_value::KindedSlot,
+) -> Option<(u64, std::sync::Arc<shape_value::DataTable>)> {
+    use shape_value::heap_value::TableViewData;
+    use shape_value::{HeapKind, NativeKind};
+    match slot.kind() {
+        NativeKind::Ptr(HeapKind::TableView) => {
+            let bits = slot.raw();
+            if bits == 0 {
+                return None;
+            }
+            // SAFETY: per the §2.7.7/Q9 producer-side stamp on every
+            // `TableView`-kinded push site (e.g. exec_bind_schema), `bits`
+            // are `Arc::into_raw::<TableViewData>` for the matching `T`.
+            let tv = unsafe { &*(bits as *const TableViewData) };
+            match tv {
+                TableViewData::TypedTable { schema_id, table } => {
+                    Some((*schema_id, std::sync::Arc::clone(table)))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
 
 #[test]
-#[ignore = "T1 class-shift surface (ADR-006 §2.7.4) — depends on deleted host-tier helpers / typed-Arc accessors not in T1 scope"]
 fn test_load_col_f64() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted host-tier carriers)")
+    use arrow_array::{Float64Array, RecordBatch};
+    use arrow_schema::{DataType, Field, Schema};
+    use shape_value::DataTable;
+
+    let schema = std::sync::Arc::new(Schema::new(vec![Field::new(
+        "price",
+        DataType::Float64,
+        false,
+    )]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![std::sync::Arc::new(Float64Array::from(vec![42.5, 99.0]))],
+    )
+    .unwrap();
+    let table = std::sync::Arc::new(DataTable::new(batch));
+
+    let row_view = KindedConstant::from_row_view(0, table, 0);
+
+    let instructions = vec![
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::new(
+            OpCode::LoadColF64,
+            Some(Operand::ColumnAccess { col_id: 0 }),
+        ),
+        Instruction::simple(OpCode::Halt),
+    ];
+    let constants = vec![Constant::Value(row_view)];
+
+    let bits = execute_bytecode_typed(instructions, constants, crate::type_tracking::NativeKind::Float64).unwrap();
+    let v = f64::from_bits(bits);
+    assert_eq!(v, 42.5, "Expected 42.5, got {}", v);
 }
 
 #[test]
-#[ignore = "T1 class-shift surface (ADR-006 §2.7.4) — depends on deleted host-tier helpers / typed-Arc accessors not in T1 scope"]
 fn test_load_col_i64() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted host-tier carriers)")
+    use arrow_array::{Int64Array, RecordBatch};
+    use arrow_schema::{DataType, Field, Schema};
+    use shape_value::DataTable;
+
+    let schema = std::sync::Arc::new(Schema::new(vec![Field::new(
+        "volume",
+        DataType::Int64,
+        false,
+    )]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![std::sync::Arc::new(Int64Array::from(vec![1000, 2000]))],
+    )
+    .unwrap();
+    let table = std::sync::Arc::new(DataTable::new(batch));
+
+    let row_view = KindedConstant::from_row_view(0, table, 1);
+
+    let instructions = vec![
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::new(
+            OpCode::LoadColI64,
+            Some(Operand::ColumnAccess { col_id: 0 }),
+        ),
+        Instruction::simple(OpCode::Halt),
+    ];
+    let constants = vec![Constant::Value(row_view)];
+
+    let bits = execute_bytecode_typed(instructions, constants, crate::type_tracking::NativeKind::Int64).unwrap();
+    assert_eq!(bits as i64, 2000, "Expected 2000, got {}", bits as i64);
 }
 
 #[test]
-#[ignore = "T1 class-shift surface (ADR-006 §2.7.4) — depends on deleted host-tier helpers / typed-Arc accessors not in T1 scope"]
 fn test_load_col_str() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted host-tier carriers)")
+    use arrow_array::{RecordBatch, StringArray};
+    use arrow_schema::{DataType, Field, Schema};
+    use shape_value::DataTable;
+
+    let schema = std::sync::Arc::new(Schema::new(vec![Field::new(
+        "symbol",
+        DataType::Utf8,
+        false,
+    )]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![std::sync::Arc::new(StringArray::from(vec!["AAPL", "GOOG"]))],
+    )
+    .unwrap();
+    let table = std::sync::Arc::new(DataTable::new(batch));
+
+    let row_view = KindedConstant::from_row_view(0, table, 0);
+
+    let instructions = vec![
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::new(
+            OpCode::LoadColStr,
+            Some(Operand::ColumnAccess { col_id: 0 }),
+        ),
+        Instruction::simple(OpCode::Halt),
+    ];
+    let constants = vec![Constant::Value(row_view)];
+
+    let program = BytecodeProgram {
+        instructions,
+        constants,
+        ..Default::default()
+    };
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(program);
+    let result = vm.execute(None).unwrap();
+    assert_eq!(
+        result.as_str().expect("Expected String"),
+        "AAPL"
+    );
 }
 
 #[test]
-#[ignore = "T1 class-shift surface (ADR-006 §2.7.4) — depends on deleted host-tier helpers / typed-Arc accessors not in T1 scope"]
 fn test_bind_schema_success() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted host-tier carriers)")
+    use arrow_array::{Float64Array, RecordBatch, StringArray};
+    use arrow_schema::{DataType, Field, Schema as ArrowSchema};
+    use shape_runtime::type_schema::TypeSchemaBuilder;
+    use shape_value::datatable::DataTable;
+    use std::sync::Arc;
+
+    // Create a DataTable with Arrow schema
+    let schema = Arc::new(ArrowSchema::new(vec![
+        Field::new("price", DataType::Float64, false),
+        Field::new("symbol", DataType::Utf8, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Float64Array::from(vec![100.0, 200.0])),
+            Arc::new(StringArray::from(vec!["AAPL", "GOOG"])),
+        ],
+    )
+    .unwrap();
+    let table = DataTable::new(batch);
+
+    // Create matching TypeSchema
+    let mut registry = shape_runtime::type_schema::TypeSchemaRegistry::new();
+    let schema_id = TypeSchemaBuilder::new("TestTrade")
+        .f64_field("price")
+        .string_field("symbol")
+        .register(&mut registry);
+
+    // Build bytecode program with BindSchema
+    let datatable_val = KindedConstant::from_datatable(Arc::new(table));
+    let mut program = BytecodeProgram {
+        instructions: vec![
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+            Instruction::new(OpCode::BindSchema, Some(Operand::Count(schema_id as u16))),
+            Instruction::simple(OpCode::Halt),
+        ],
+        constants: vec![Constant::Value(datatable_val)],
+        ..Default::default()
+    };
+    program.type_schema_registry = registry;
+
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(program);
+    let result = vm.execute(None).unwrap();
+
+    let (sid, table) =
+        typed_table_from_slot(&result).expect("Expected TypedTable result");
+    assert_eq!(sid, schema_id as u64);
+    assert_eq!(table.row_count(), 2);
 }
 
 #[test]
-#[ignore = "T1 class-shift surface (ADR-006 §2.7.4) — depends on deleted host-tier helpers / typed-Arc accessors not in T1 scope"]
 fn test_bind_schema_missing_column() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted host-tier carriers)")
+    use arrow_array::{Float64Array, RecordBatch};
+    use arrow_schema::{DataType, Field, Schema as ArrowSchema};
+    use shape_runtime::type_schema::TypeSchemaBuilder;
+    use shape_value::datatable::DataTable;
+    use std::sync::Arc;
+
+    // Create a DataTable missing the "volume" column
+    let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+        "price",
+        DataType::Float64,
+        false,
+    )]));
+    let batch =
+        RecordBatch::try_new(schema, vec![Arc::new(Float64Array::from(vec![100.0]))]).unwrap();
+    let table = DataTable::new(batch);
+
+    // TypeSchema requires "price" and "volume"
+    let mut registry = shape_runtime::type_schema::TypeSchemaRegistry::new();
+    let schema_id = TypeSchemaBuilder::new("TestTrade2")
+        .f64_field("price")
+        .f64_field("volume")
+        .register(&mut registry);
+
+    let datatable_val = KindedConstant::from_datatable(Arc::new(table));
+    let mut program = BytecodeProgram {
+        instructions: vec![
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+            Instruction::new(OpCode::BindSchema, Some(Operand::Count(schema_id as u16))),
+            Instruction::simple(OpCode::Halt),
+        ],
+        constants: vec![Constant::Value(datatable_val)],
+        ..Default::default()
+    };
+    program.type_schema_registry = registry;
+
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(program);
+    let result = vm.execute(None);
+
+    assert!(result.is_err(), "BindSchema should fail for missing column");
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("volume"),
+        "Error should mention missing column 'volume': {}",
+        err
+    );
 }
 
 // ===== End-to-End Load() → BindSchema Pipeline Tests =====
-//
-// Phase-2c surface: helpers `make_test_pipeline_table` and
-// `build_bind_schema_program` consumed the deleted `ValueWord` carrier
-// (return type / param type). Removed pending host-tier kinded
-// constant-table API (`Constant::Kinded { bits: u64, kind: NativeKind }`
-// or similar). All call sites in the dependent test bodies are stubbed
-// to `todo!()` per playbook §7 REVISED part 4.
+
+/// Build a deterministic DataTable with 5 columns, returned as a
+/// `KindedConstant` (DataTable-kinded) ready to inject into a
+/// `Constant::Value`.
+fn make_test_pipeline_table() -> KindedConstant {
+    use arrow_array::{
+        BooleanArray, Float64Array, Int64Array, RecordBatch, StringArray, TimestampMillisecondArray,
+    };
+    use arrow_schema::{DataType, Field, Schema as ArrowSchema, TimeUnit};
+    use shape_value::datatable::DataTable;
+    use std::sync::Arc;
+
+    let symbols = ["AAPL", "GOOG", "MSFT", "TSLA", "AMZN"];
+    let timestamp_values: Vec<i64> = (0..100)
+        .map(|i| 1_704_067_200_000_i64 + (i as i64) * 60_000_i64)
+        .collect();
+    let symbol_values: Vec<&str> = (0..100).map(|i| symbols[i % symbols.len()]).collect();
+    let price_values: Vec<f64> = (0..100).map(|i| 100.0 + (i as f64) * 1.23).collect();
+    let volume_values: Vec<i64> = (0..100).map(|i| 1_000_000 + i as i64 * 12_345).collect();
+    let is_buy_values: Vec<bool> = (0..100).map(|i| i % 2 == 0).collect();
+
+    let schema = Arc::new(ArrowSchema::new(vec![
+        Field::new(
+            "timestamp",
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            false,
+        ),
+        Field::new("symbol", DataType::Utf8, false),
+        Field::new("price", DataType::Float64, false),
+        Field::new("volume", DataType::Int64, false),
+        Field::new("is_buy", DataType::Boolean, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(TimestampMillisecondArray::from(timestamp_values)),
+            Arc::new(StringArray::from(symbol_values)),
+            Arc::new(Float64Array::from(price_values)),
+            Arc::new(Int64Array::from(volume_values)),
+            Arc::new(BooleanArray::from(is_buy_values)),
+        ],
+    )
+    .unwrap();
+    KindedConstant::from_datatable(Arc::new(DataTable::new(batch)))
+}
+
+/// Build a `BytecodeProgram` that pushes a `Constant::Value`, runs
+/// `BindSchema`, and halts.
+fn build_bind_schema_program(
+    value: KindedConstant,
+    registry: shape_runtime::type_schema::TypeSchemaRegistry,
+    schema_id: u32,
+) -> BytecodeProgram {
+    let mut program = BytecodeProgram {
+        instructions: vec![
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+            Instruction::new(OpCode::BindSchema, Some(Operand::Count(schema_id as u16))),
+            Instruction::simple(OpCode::Halt),
+        ],
+        constants: vec![Constant::Value(value)],
+        ..Default::default()
+    };
+    program.type_schema_registry = registry;
+    program
+}
 
 #[test]
-#[ignore = "T1 class-shift surface (ADR-006 §2.7.4) — depends on deleted host-tier helpers / typed-Arc accessors not in T1 scope"]
 fn test_load_pipeline_correct_mapping() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted host-tier carriers)")
+    use shape_runtime::type_schema::{TypeSchemaBuilder, TypeSchemaRegistry};
+    let dt_val = make_test_pipeline_table();
+
+    let mut registry = TypeSchemaRegistry::new();
+    let schema_id = TypeSchemaBuilder::new("PipelineTrade")
+        .timestamp_field("timestamp")
+        .string_field("symbol")
+        .f64_field("price")
+        .i64_field("volume")
+        .bool_field("is_buy")
+        .register(&mut registry);
+
+    let program = build_bind_schema_program(dt_val, registry, schema_id);
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(program);
+    let result = vm.execute(None).unwrap();
+
+    let (sid, table) =
+        typed_table_from_slot(&result).expect("Expected TypedTable result");
+    assert_eq!(sid, schema_id as u64);
+    assert_eq!(table.row_count(), 100);
 }
 
 #[test]
-#[ignore = "T1 class-shift surface (ADR-006 §2.7.4) — depends on deleted host-tier helpers / typed-Arc accessors not in T1 scope"]
 fn test_load_pipeline_f64_field_on_string_column() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted helper)")
+    use shape_runtime::type_schema::{TypeSchemaBuilder, TypeSchemaRegistry};
+    let dt_val = make_test_pipeline_table();
+
+    let mut registry = TypeSchemaRegistry::new();
+    let schema_id = TypeSchemaBuilder::new("BadF64")
+        .f64_field("symbol") // symbol is Utf8, not Float64
+        .register(&mut registry);
+
+    let program = build_bind_schema_program(dt_val, registry, schema_id);
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(program);
+    let result = vm.execute(None);
+
+    assert!(result.is_err());
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("symbol"),
+        "Error should mention 'symbol': {}",
+        err
+    );
+    assert!(
+        err.contains("type"),
+        "Error should mention type mismatch: {}",
+        err
+    );
 }
 
 #[test]
-#[ignore = "T1 class-shift surface (ADR-006 §2.7.4) — depends on deleted host-tier helpers / typed-Arc accessors not in T1 scope"]
 fn test_load_pipeline_string_field_on_number_column() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted helper)")
+    use shape_runtime::type_schema::{TypeSchemaBuilder, TypeSchemaRegistry};
+    let dt_val = make_test_pipeline_table();
+
+    let mut registry = TypeSchemaRegistry::new();
+    let schema_id = TypeSchemaBuilder::new("BadStr")
+        .string_field("price") // price is Float64, not Utf8
+        .register(&mut registry);
+
+    let program = build_bind_schema_program(dt_val, registry, schema_id);
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(program);
+    let result = vm.execute(None);
+
+    assert!(result.is_err());
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("price"),
+        "Error should mention 'price': {}",
+        err
+    );
+    assert!(
+        err.contains("type"),
+        "Error should mention type mismatch: {}",
+        err
+    );
 }
 
 #[test]
-#[ignore = "T1 class-shift surface (ADR-006 §2.7.4) — depends on deleted host-tier helpers / typed-Arc accessors not in T1 scope"]
 fn test_load_pipeline_missing_column() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted helper)")
+    use shape_runtime::type_schema::{TypeSchemaBuilder, TypeSchemaRegistry};
+    let dt_val = make_test_pipeline_table();
+
+    let mut registry = TypeSchemaRegistry::new();
+    let schema_id = TypeSchemaBuilder::new("MissingCol")
+        .f64_field("nonexistent")
+        .register(&mut registry);
+
+    let program = build_bind_schema_program(dt_val, registry, schema_id);
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(program);
+    let result = vm.execute(None);
+
+    assert!(result.is_err());
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("nonexistent"),
+        "Error should mention 'nonexistent': {}",
+        err
+    );
+    assert!(
+        err.contains("column"),
+        "Error should mention missing column: {}",
+        err
+    );
 }
 
 #[test]
-#[ignore = "T1 class-shift surface (ADR-006 §2.7.4) — depends on deleted host-tier helpers / typed-Arc accessors not in T1 scope"]
 fn test_load_pipeline_subset_columns() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted host-tier carriers)")
+    use shape_runtime::type_schema::{TypeSchemaBuilder, TypeSchemaRegistry};
+    let dt_val = make_test_pipeline_table();
+
+    let mut registry = TypeSchemaRegistry::new();
+    let schema_id = TypeSchemaBuilder::new("SubsetTrade")
+        .f64_field("price")
+        .string_field("symbol")
+        .register(&mut registry);
+
+    let program = build_bind_schema_program(dt_val, registry, schema_id);
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(program);
+    let result = vm.execute(None).unwrap();
+
+    let (sid, table) =
+        typed_table_from_slot(&result).expect("Expected TypedTable result");
+    assert_eq!(sid, schema_id as u64);
+    assert_eq!(table.row_count(), 100);
 }
 
 #[test]
-#[ignore = "T1 class-shift surface (ADR-006 §2.7.4) — depends on deleted host-tier helpers / typed-Arc accessors not in T1 scope"]
 fn test_load_pipeline_column_alias() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted host-tier carriers)")
+    use shape_runtime::type_schema::FieldType;
+    use shape_runtime::type_schema::{TypeSchemaBuilder, TypeSchemaRegistry};
+    let dt_val = make_test_pipeline_table();
+
+    let mut registry = TypeSchemaRegistry::new();
+    // Field "close" maps to CSV column "price" via @alias annotation
+    let schema_id = TypeSchemaBuilder::new("AliasTrade")
+        .field_with_meta(
+            "close",
+            FieldType::F64,
+            vec![shape_runtime::type_schema::FieldAnnotation {
+                name: "alias".to_string(),
+                args: vec!["price".to_string()],
+            }],
+        )
+        .register(&mut registry);
+
+    let program = build_bind_schema_program(dt_val, registry, schema_id);
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(program);
+    let result = vm.execute(None).unwrap();
+
+    let (sid, table) =
+        typed_table_from_slot(&result).expect("Expected TypedTable result");
+    assert_eq!(sid, schema_id as u64);
+    assert_eq!(table.row_count(), 100);
 }
 
 #[test]
-#[ignore = "T1 class-shift surface (ADR-006 §2.7.4) — depends on deleted host-tier helpers / typed-Arc accessors not in T1 scope"]
 fn test_load_pipeline_wrong_alias() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted helper)")
+    use shape_runtime::type_schema::FieldType;
+    use shape_runtime::type_schema::{TypeSchemaBuilder, TypeSchemaRegistry};
+    let dt_val = make_test_pipeline_table();
+
+    let mut registry = TypeSchemaRegistry::new();
+    // Field "close" maps to nonexistent CSV column via @alias annotation
+    let schema_id = TypeSchemaBuilder::new("WrongAlias")
+        .field_with_meta(
+            "close",
+            FieldType::F64,
+            vec![shape_runtime::type_schema::FieldAnnotation {
+                name: "alias".to_string(),
+                args: vec!["nonexistent".to_string()],
+            }],
+        )
+        .register(&mut registry);
+
+    let program = build_bind_schema_program(dt_val, registry, schema_id);
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(program);
+    let result = vm.execute(None);
+
+    assert!(result.is_err());
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("nonexistent"),
+        "Error should mention 'nonexistent': {}",
+        err
+    );
 }
 
 #[test]
-#[ignore = "T1 class-shift surface (ADR-006 §2.7.4) — depends on deleted host-tier helpers / typed-Arc accessors not in T1 scope"]
 fn test_load_pipeline_timestamp_field() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted host-tier carriers)")
+    use shape_runtime::type_schema::{TypeSchemaBuilder, TypeSchemaRegistry};
+    let dt_val = make_test_pipeline_table();
+
+    let mut registry = TypeSchemaRegistry::new();
+    let schema_id = TypeSchemaBuilder::new("TsTrade")
+        .timestamp_field("timestamp")
+        .register(&mut registry);
+
+    let program = build_bind_schema_program(dt_val, registry, schema_id);
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(program);
+    let result = vm.execute(None).unwrap();
+
+    let (sid, table) =
+        typed_table_from_slot(&result).expect("Expected TypedTable result");
+    assert_eq!(sid, schema_id as u64);
+    assert_eq!(table.row_count(), 100);
 }
 
 #[test]
-#[ignore = "T1 class-shift surface (ADR-006 §2.7.4) — depends on deleted host-tier helpers / typed-Arc accessors not in T1 scope"]
 fn test_load_pipeline_numeric_promotion() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted host-tier carriers)")
+    use shape_runtime::type_schema::{TypeSchemaBuilder, TypeSchemaRegistry};
+    let dt_val = make_test_pipeline_table();
+
+    let mut registry = TypeSchemaRegistry::new();
+    // F64 field on Int64 column — should succeed (numeric promotion)
+    let schema_id = TypeSchemaBuilder::new("PromoTrade")
+        .f64_field("volume")
+        .register(&mut registry);
+
+    let program = build_bind_schema_program(dt_val, registry, schema_id);
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(program);
+    let result = vm.execute(None).unwrap();
+
+    let (sid, table) =
+        typed_table_from_slot(&result).expect("Expected TypedTable result");
+    assert_eq!(sid, schema_id as u64);
+    assert_eq!(table.row_count(), 100);
 }
 
 #[test]
-#[ignore = "T1 class-shift surface (ADR-006 §2.7.4) — depends on deleted host-tier helpers / typed-Arc accessors not in T1 scope"]
 fn test_load_pipeline_non_table_value() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted host-tier carriers)")
+    use shape_runtime::type_schema::{TypeSchemaBuilder, TypeSchemaRegistry};
+    let mut registry = shape_runtime::type_schema::TypeSchemaRegistry::new();
+    let schema_id = TypeSchemaBuilder::new("AnyType")
+        .f64_field("x")
+        .register(&mut registry);
+    let _ = TypeSchemaRegistry::new; // suppress unused import warning when only one path uses it
+
+    // Push a Number (not a DataTable) then BindSchema — uses a plain
+    // `Constant::Number` rather than `Constant::Value`.
+    let mut program = BytecodeProgram {
+        instructions: vec![
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+            Instruction::new(OpCode::BindSchema, Some(Operand::Count(schema_id as u16))),
+            Instruction::simple(OpCode::Halt),
+        ],
+        constants: vec![Constant::Number(42.0)],
+        ..Default::default()
+    };
+    program.type_schema_registry = registry;
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(program);
+    let result = vm.execute(None);
+
+    assert!(result.is_err());
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("expected DataTable") || err.contains("got") || err.contains("DataTable"),
+        "Error should mention expected DataTable: {}",
+        err
+    );
 }
 
 // ===== LoadCol* Opcode Coverage Tests =====
 
 #[test]
-#[ignore = "T1 class-shift surface (ADR-006 §2.7.4) — depends on deleted host-tier helpers / typed-Arc accessors not in T1 scope"]
 fn test_load_col_bool() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted host-tier carriers)")
+    use arrow_array::{BooleanArray, RecordBatch};
+    use arrow_schema::{DataType, Field, Schema};
+    use shape_value::DataTable;
+
+    let schema = std::sync::Arc::new(Schema::new(vec![Field::new(
+        "flag",
+        DataType::Boolean,
+        false,
+    )]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![std::sync::Arc::new(BooleanArray::from(vec![
+            true, false, true,
+        ]))],
+    )
+    .unwrap();
+    let table = std::sync::Arc::new(DataTable::new(batch));
+
+    // Read row 1 (false)
+    let row_view = KindedConstant::from_row_view(0, table.clone(), 1);
+    let instructions = vec![
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::new(
+            OpCode::LoadColBool,
+            Some(Operand::ColumnAccess { col_id: 0 }),
+        ),
+        Instruction::simple(OpCode::Halt),
+    ];
+    let constants = vec![Constant::Value(row_view)];
+    let bits = execute_bytecode_typed(instructions, constants, crate::type_tracking::NativeKind::Bool).unwrap();
+    assert_eq!(bits != 0, false, "Expected false, got {}", bits != 0);
+
+    // Read row 2 (true) — verifies bit-level read at offset > 0
+    let row_view2 = KindedConstant::from_row_view(0, table, 2);
+    let instructions2 = vec![
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::new(
+            OpCode::LoadColBool,
+            Some(Operand::ColumnAccess { col_id: 0 }),
+        ),
+        Instruction::simple(OpCode::Halt),
+    ];
+    let constants2 = vec![Constant::Value(row_view2)];
+    let bits2 = execute_bytecode_typed(instructions2, constants2, crate::type_tracking::NativeKind::Bool).unwrap();
+    assert_eq!(bits2 != 0, true, "Expected true, got {}", bits2 != 0);
 }
 
 #[test]
-#[ignore = "T1 class-shift surface (ADR-006 §2.7.4) — depends on deleted host-tier helpers / typed-Arc accessors not in T1 scope"]
 fn test_load_col_f64_from_float32() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted host-tier carriers)")
+    use arrow_array::{Float32Array, RecordBatch};
+    use arrow_schema::{DataType, Field, Schema};
+    use shape_value::DataTable;
+
+    let schema = std::sync::Arc::new(Schema::new(vec![Field::new(
+        "val",
+        DataType::Float32,
+        false,
+    )]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![std::sync::Arc::new(Float32Array::from(vec![
+            3.14f32, 2.72f32,
+        ]))],
+    )
+    .unwrap();
+    let table = std::sync::Arc::new(DataTable::new(batch));
+
+    let row_view = KindedConstant::from_row_view(0, table, 0);
+    let instructions = vec![
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::new(
+            OpCode::LoadColF64,
+            Some(Operand::ColumnAccess { col_id: 0 }),
+        ),
+        Instruction::simple(OpCode::Halt),
+    ];
+    let constants = vec![Constant::Value(row_view)];
+
+    let bits = execute_bytecode_typed(instructions, constants, crate::type_tracking::NativeKind::Float64).unwrap();
+    let n = f64::from_bits(bits);
+    assert!((n - 3.14).abs() < 0.001, "Expected ~3.14, got {}", n);
 }
 
 #[test]
-#[ignore = "T1 class-shift surface (ADR-006 §2.7.4) — depends on deleted host-tier helpers / typed-Arc accessors not in T1 scope"]
 fn test_load_col_f64_from_int64() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted host-tier carriers)")
+    use arrow_array::{Int64Array, RecordBatch};
+    use arrow_schema::{DataType, Field, Schema};
+    use shape_value::DataTable;
+
+    let schema = std::sync::Arc::new(Schema::new(vec![Field::new(
+        "count",
+        DataType::Int64,
+        false,
+    )]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![std::sync::Arc::new(Int64Array::from(vec![42, 100]))],
+    )
+    .unwrap();
+    let table = std::sync::Arc::new(DataTable::new(batch));
+
+    let row_view = KindedConstant::from_row_view(0, table, 0);
+    let instructions = vec![
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::new(
+            OpCode::LoadColF64,
+            Some(Operand::ColumnAccess { col_id: 0 }),
+        ),
+        Instruction::simple(OpCode::Halt),
+    ];
+    let constants = vec![Constant::Value(row_view)];
+
+    let bits = execute_bytecode_typed(instructions, constants, crate::type_tracking::NativeKind::Float64).unwrap();
+    let v = f64::from_bits(bits);
+    assert_eq!(v, 42.0, "Expected 42.0, got {}", v);
 }
 
 #[test]
-#[ignore = "T1 class-shift surface (ADR-006 §2.7.4) — depends on deleted host-tier helpers / typed-Arc accessors not in T1 scope"]
 fn test_load_col_i64_from_int32() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted host-tier carriers)")
+    use arrow_array::{Int32Array, RecordBatch};
+    use arrow_schema::{DataType, Field, Schema};
+    use shape_value::DataTable;
+
+    let schema = std::sync::Arc::new(Schema::new(vec![Field::new(
+        "small",
+        DataType::Int32,
+        false,
+    )]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![std::sync::Arc::new(Int32Array::from(vec![123, 456]))],
+    )
+    .unwrap();
+    let table = std::sync::Arc::new(DataTable::new(batch));
+
+    let row_view = KindedConstant::from_row_view(0, table, 1);
+    let instructions = vec![
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::new(
+            OpCode::LoadColI64,
+            Some(Operand::ColumnAccess { col_id: 0 }),
+        ),
+        Instruction::simple(OpCode::Halt),
+    ];
+    let constants = vec![Constant::Value(row_view)];
+
+    let bits = execute_bytecode_typed(instructions, constants, crate::type_tracking::NativeKind::Int64).unwrap();
+    assert_eq!(bits as i64, 456, "Expected 456, got {}", bits as i64);
 }
 
 #[test]
-#[ignore = "T1 class-shift surface (ADR-006 §2.7.4) — depends on deleted host-tier helpers / typed-Arc accessors not in T1 scope"]
 fn test_load_col_str_row1() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted host-tier carriers)")
+    use arrow_array::{RecordBatch, StringArray};
+    use arrow_schema::{DataType, Field, Schema};
+    use shape_value::DataTable;
+
+    let schema = std::sync::Arc::new(Schema::new(vec![Field::new("name", DataType::Utf8, false)]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![std::sync::Arc::new(StringArray::from(vec![
+            "alpha", "beta", "gamma",
+        ]))],
+    )
+    .unwrap();
+    let table = std::sync::Arc::new(DataTable::new(batch));
+
+    let row_view = KindedConstant::from_row_view(0, table, 1);
+    let instructions = vec![
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::new(
+            OpCode::LoadColStr,
+            Some(Operand::ColumnAccess { col_id: 0 }),
+        ),
+        Instruction::simple(OpCode::Halt),
+    ];
+    let constants = vec![Constant::Value(row_view)];
+
+    let program = BytecodeProgram {
+        instructions,
+        constants,
+        ..Default::default()
+    };
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(program);
+    let result = vm.execute(None).unwrap();
+    assert_eq!(result.as_str().expect("Expected String"), "beta");
 }
 
 #[test]
-#[ignore = "T1 class-shift surface (ADR-006 §2.7.4) — depends on deleted host-tier helpers / typed-Arc accessors not in T1 scope"]
 fn test_load_col_out_of_bounds_row() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted host-tier carriers)")
+    use arrow_array::{Float64Array, RecordBatch};
+    use arrow_schema::{DataType, Field, Schema};
+    use shape_value::DataTable;
+
+    let schema = std::sync::Arc::new(Schema::new(vec![Field::new("x", DataType::Float64, false)]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![std::sync::Arc::new(Float64Array::from(vec![1.0, 2.0]))],
+    )
+    .unwrap();
+    let table = std::sync::Arc::new(DataTable::new(batch));
+
+    // row_idx=5, but table only has 2 rows
+    let row_view = KindedConstant::from_row_view(0, table, 5);
+    let instructions = vec![
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::new(
+            OpCode::LoadColF64,
+            Some(Operand::ColumnAccess { col_id: 0 }),
+        ),
+        Instruction::simple(OpCode::Halt),
+    ];
+    let constants = vec![Constant::Value(row_view)];
+
+    let result = execute_bytecode(instructions, constants);
+    assert!(result.is_err(), "Should error on out-of-bounds row");
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("Row index") || err.contains("out of bounds"),
+        "Error should mention row out of bounds: {}",
+        err
+    );
 }
 
 #[test]
-#[ignore = "T1 class-shift surface (ADR-006 §2.7.4) — depends on deleted host-tier helpers / typed-Arc accessors not in T1 scope"]
 fn test_load_col_out_of_bounds_col() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted host-tier carriers)")
+    use arrow_array::{Float64Array, RecordBatch};
+    use arrow_schema::{DataType, Field, Schema};
+    use shape_value::DataTable;
+
+    let schema = std::sync::Arc::new(Schema::new(vec![Field::new("x", DataType::Float64, false)]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![std::sync::Arc::new(Float64Array::from(vec![1.0]))],
+    )
+    .unwrap();
+    let table = std::sync::Arc::new(DataTable::new(batch));
+
+    // col_id=5, but table only has 1 column
+    let row_view = KindedConstant::from_row_view(0, table, 0);
+    let instructions = vec![
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::new(
+            OpCode::LoadColF64,
+            Some(Operand::ColumnAccess { col_id: 5 }),
+        ),
+        Instruction::simple(OpCode::Halt),
+    ];
+    let constants = vec![Constant::Value(row_view)];
+
+    let result = execute_bytecode(instructions, constants);
+    assert!(result.is_err(), "Should error on out-of-bounds column");
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("Column index") || err.contains("out of bounds"),
+        "Error should mention column out of bounds: {}",
+        err
+    );
 }
 
 #[test]
@@ -1057,9 +1785,80 @@ fn test_load_col_wrong_value_type() {
 }
 
 #[test]
-#[ignore = "T1 class-shift surface (ADR-006 §2.7.4) — depends on deleted host-tier helpers / typed-Arc accessors not in T1 scope"]
 fn test_load_col_multi_column() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted host-tier carriers)")
+    use arrow_array::{BooleanArray, Float64Array, RecordBatch, StringArray};
+    use arrow_schema::{DataType, Field, Schema};
+    use shape_value::DataTable;
+
+    let schema = std::sync::Arc::new(Schema::new(vec![
+        Field::new("price", DataType::Float64, false),
+        Field::new("active", DataType::Boolean, false),
+        Field::new("label", DataType::Utf8, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            std::sync::Arc::new(Float64Array::from(vec![10.5, 20.0])),
+            std::sync::Arc::new(BooleanArray::from(vec![true, false])),
+            std::sync::Arc::new(StringArray::from(vec!["buy", "sell"])),
+        ],
+    )
+    .unwrap();
+    let table = std::sync::Arc::new(DataTable::new(batch));
+
+    // Read f64 from col 0, row 1
+    let rv = KindedConstant::from_row_view(0, table.clone(), 1);
+    let bits = execute_bytecode_typed(
+        vec![
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+            Instruction::new(
+                OpCode::LoadColF64,
+                Some(Operand::ColumnAccess { col_id: 0 }),
+            ),
+            Instruction::simple(OpCode::Halt),
+        ],
+        vec![Constant::Value(rv)],
+        crate::type_tracking::NativeKind::Float64,
+    )
+    .unwrap();
+    let v = f64::from_bits(bits);
+    assert_eq!(v, 20.0, "Expected 20.0, got {}", v);
+
+    // Read bool from col 1, row 0
+    let rv = KindedConstant::from_row_view(0, table.clone(), 0);
+    let bits = execute_bytecode_typed(
+        vec![
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+            Instruction::new(
+                OpCode::LoadColBool,
+                Some(Operand::ColumnAccess { col_id: 1 }),
+            ),
+            Instruction::simple(OpCode::Halt),
+        ],
+        vec![Constant::Value(rv)],
+        crate::type_tracking::NativeKind::Bool,
+    )
+    .unwrap();
+    assert_eq!(bits != 0, true, "Expected true, got {}", bits != 0);
+
+    // Read string from col 2, row 1
+    let rv = KindedConstant::from_row_view(0, table.clone(), 1);
+    let program = BytecodeProgram {
+        instructions: vec![
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+            Instruction::new(
+                OpCode::LoadColStr,
+                Some(Operand::ColumnAccess { col_id: 2 }),
+            ),
+            Instruction::simple(OpCode::Halt),
+        ],
+        constants: vec![Constant::Value(rv)],
+        ..Default::default()
+    };
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(program);
+    let result = vm.execute(None).unwrap();
+    assert_eq!(result.as_str().expect("Expected String"), "sell");
 }
 
 // =========================================================================
