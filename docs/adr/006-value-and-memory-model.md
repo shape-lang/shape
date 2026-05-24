@@ -6584,6 +6584,429 @@ addition to the §2.7.27 base list):**
 
 Binding for Phase 2d onward.
 
+#### 2.7.28 Typed module-export polymorphic-payload protocol — `transport.*` / `remote.*` kind-threaded rebuild (W17-typed-module-exports, Phase 2c R8-W2, 2026-05-23)
+
+Phase 1.B-vm's strict-typing bulldozer left two module-export crates
+on `phase_2c_stub` bodies: `crates/shape-vm/src/executor/builtins/
+transport_builtins.rs` (9 exports — `tcp` / `memoized` / `send` /
+`connect` / `connection_send` / `connection_recv` / `connection_close`
+/ `memo_stats` / `memo_invalidate`) and `crates/shape-vm/src/executor/
+builtins/remote_builtins.rs` (3 exports — `execute` / `ping` /
+`__call`). The deleted pre-rebuild path hand-marshalled `WireValue`
+results into `ValueWord` via the deleted `from_string` / `from_i64` /
+`from_ok` / `from_err` constructors plus a bespoke `nb_to_serializable`
+walker that decoded values via the deleted `tag_bits::*` dispatch
+(`is_tagged` / `get_tag` / `TAG_*`). Every constructor is deleted
+(CLAUDE.md "Forbidden code" #1-#6); `tag_bits::*` is forbidden per
+§2.7.7 #4 + #7.
+
+`register_typed_function`'s post-Phase-2a body shape is
+`Fn(&[KindedSlot], &ModuleContext) -> Result<TypedReturn, String>` and
+`TypedReturn::ValueWord` is unrepresentable (the pass-through escape
+hatch was deleted at `crates/shape-runtime/src/typed_module_exports.rs:179`
+together with the "long-deleted `TypedReturn::ValueWord` escape hatch"
+note). The Phase-2c rebuild needs a kind-threaded `WireValue →
+KindedSlot` marshal that lives at this boundary — `WireValue::Object`
+/ `Array` members do not have a 1:1 `ConcreteReturn` projection
+today.
+
+**Decision (W17-typed-module-exports ruling, 2026-05-23):** the
+module-symbol-table boundary projects polymorphic payloads through
+**existing typed `ConcreteReturn` variants only** — no new
+discriminator, no `TypedReturn::ValueWord` revival, no parallel
+sum type whose variants project 1:1 to wire-value shapes. Two
+protocol clauses cover the surface area:
+
+1. **Polymorphic-payload clause.** Wire values whose Shape type is
+   user-program-determined (the success arm of `remote.execute` /
+   `remote.__call`, the body of `transport.connection_recv`) project
+   to `ConcreteReturn::JsonValue(JsonValue)` — the strict-typed
+   parsed-data tree (`Null/Bool/Int/Number/String/Bytes/Array/Object`)
+   defined at `crates/shape-runtime/src/typed_module_exports.rs:109-120`.
+   The projection mirrors the json.rs parse-side shape
+   (`stdlib/json.rs::serde_json_to_json_value`): leaf variants
+   project directly, structural variants (`Array` / `Object`)
+   recurse at the `JsonValue` layer.
+
+   ```rust
+   // crates/shape-vm/src/executor/builtins/remote_builtins.rs::wire_to_json_value
+   fn wire_to_json_value(wire: &WireValue) -> JsonValue {
+       match wire {
+           WireValue::Null => JsonValue::Null,
+           WireValue::Bool(b) => JsonValue::Bool(*b),
+           WireValue::Integer(i) => JsonValue::Int(*i),
+           WireValue::Number(n) => JsonValue::Number(*n),
+           WireValue::String(s) => JsonValue::String(s.clone()),
+           WireValue::Array(items) => JsonValue::Array(
+               items.iter().map(wire_to_json_value).collect()
+           ),
+           WireValue::Object(map) => JsonValue::Object(
+               map.iter().map(|(k, v)| (k.clone(), wire_to_json_value(v))).collect()
+           ),
+           WireValue::Result { ok, value } => JsonValue::Object(vec![(
+               if *ok { "Ok" } else { "Err" }.to_string(),
+               wire_to_json_value(value),
+           )]),
+           // ... width-int / float / timestamp / duration ...
+       }
+   }
+   ```
+
+   Non-JSON-projectable wire variants (`Table` / `Range` /
+   `FunctionRef` / `PrintResult` / `Content`) surface a structured
+   `JsonValue::String("<wire:<VariantName>:phase-2c>")` placeholder
+   per the §2.7.5.1 surface-and-stop rule. Full typed projection for
+   those variants is bounded to the
+   `W17-typed-module-exports-followup: typed-payload-projection`
+   sub-cluster (audit §6.4) — out of W17-typed-module-exports
+   scope.
+
+2. **Opaque-resource clause.** Wire values whose Shape type is a
+   built-in heap-handle (file / socket / process / TCP connection /
+   memo-cache) project to `ConcreteReturn::IoHandle(Arc<IoHandleData>)`
+   per the `IoHandleData` carrier at
+   `crates/shape-value/src/heap_value.rs:385`. The
+   `IoResource::Custom` downcast for protocol-specific behaviour
+   (TCP-connection state, memoized-cache state) happens **inside
+   the export body**, not at the marshal boundary — the boundary
+   stays oblivious to the resource's protocol family per ADR-005
+   §1 (one discriminator: `HeapValue::IoHandle(Arc<IoHandleData>)`).
+
+**The registration shape (per-arity helpers + variadic fallback):**
+
+`transport.*` + `remote.*` use the per-arity `register_typed_fn_N` /
+`register_typed_fn_N_full` helpers at
+`crates/shape-runtime/src/marshal.rs:930-1597` for fixed-arity
+exports (the 8 `transport.*` exports + `remote.execute` /
+`remote.ping` are all fixed-arity). `remote.__call` retains the
+variadic `register_typed_function` shape (body signature
+`Fn(&[KindedSlot], &ModuleContext) -> Result<TypedReturn, String>`)
+because its `args: Array<_>` parameter is heterogeneous — closure /
+typed-object / generic-value payloads cannot project into a single
+Rust `Vec<T>` at registration time. Both registration paths are
+valid per §2.7.4 bullet 2 (the variadic helper "lives alongside
+the per-arity ones in `marshal.rs`"); per-arity is preferred when
+arity is fixed.
+
+**The closure-payload deferral (`remote.__call` SURFACE):** the
+`remote.__call`'s `fn_ref: Function` parameter is a closure handle
+carrying per-capture-kind metadata on the closure header (the
+§2.7.8 / Q10 cell-storage parallel-kind track). The pre-bulldozer
+path materialised this via the deleted `as_closure_handle` +
+`captures_as_values` accessors — both forbidden per §2.7.7 #7 and
+the §Renames-to-refuse-on-sight `capture-injection adapter`
+descriptor family. The W17-typed-module-exports body surface-and-
+stops at this case with a structured `TypedReturn::Err` citing
+ADR-006 §2.7.8 / Q10 by name and the
+`W17-typed-module-exports-followup: typed-payload-projection`
+sub-cluster as the binding-rebuild authority; the registration is
+preserved so LSP signature help + completion continues to surface
+the export.
+
+**Lockstep tables impacted:** none new. The 4-table HeapKind
+lockstep (§2.7.7 / Q9 `stack.rs::{clone,drop}_with_kind`, §2.7.6 /
+Q8 `kinded_slot.rs` Drop + Clone, §2.7.8 / Q10
+`closure_layout.rs::{read,store}_capture_kinded`, §2.7.10 / Q11
+`MethodFnV2` dispatch) is unchanged — this addendum re-uses the
+existing `HeapKind::String` / `HeapKind::TypedObject` /
+`HeapKind::IoHandle` ordinals via existing `Arc<HeapValue>`
+dispatch. No new `HeapKind` variant; no new `ConcreteReturn`
+variant; no new `TypedReturn` variant.
+
+**Forbidden shapes this rules out (mirror of §2.7.13 / §2.7.27
+forbidden lists, applied to the typed-module-export boundary):**
+
+- **`TypedReturn::ValueWord` resurrection.** The pre-Phase-2a
+  pass-through escape hatch was deleted; reintroducing it as a
+  "documented FFI-boundary helper" or "wire-marshal bridge" is the
+  defection-attractor CLAUDE.md §Renames-to-refuse-on-sight
+  enumerates verbatim. Heterogeneous wire payloads go through
+  `ConcreteReturn::JsonValue`, not a re-introduced opaque carrier.
+- **Per-wire-variant `ConcreteReturn` arm proliferation.** Adding
+  `ConcreteReturn::WireTable` / `WireRange` / `WireFunctionRef` for
+  each non-JSON-projectable wire variant violates ADR-005 §1
+  (single discriminator) — `WireValue` already discriminates at
+  the wire layer, projecting through `ConcreteReturn::JsonValue`
+  preserves that discrimination at the typed-export layer without
+  duplication. The followup sub-cluster's job is to either (a)
+  project each remaining variant through an EXISTING `ConcreteReturn`
+  arm (e.g. `Table` → `ObjectPairs`, `Range` → object with start /
+  end / step fields), or (b) propose a single-discriminator
+  amendment with measurement.
+- **Silent placeholder values.** Non-JSON-projectable wire variants
+  MUST surface their wire-variant name as a structured placeholder
+  string (`<wire:Table:phase-2c>`), NOT silently project to
+  `JsonValue::Null` / empty `Object`. Silent value corruption at
+  the marshal boundary is forbidden per the §2.7.4 snapshot
+  precedent ("do not paper over it with placeholder serializers
+  that silently corrupt persisted state").
+- **`as_closure_handle` / `captures_as_values` revival.** The
+  deleted closure-payload accessors are forbidden under any
+  rename (`closure-callback translator` / `capture-injection
+  adapter` / `value-call shim` / `frame-setup probe` — the
+  §2.7.11 / Q12 family CLAUDE.md §Renames-to-refuse-on-sight
+  enumerates). The `remote.__call` body MUST surface-and-stop
+  pending the §2.7.8 / Q10 cell-storage parallel-kind track
+  follow-up; partial bodies that materialize captures via any
+  parallel accessor are refused on sight.
+- **Defection-attractor descriptors** — "wire-marshal bridge",
+  "module-export translator", "wire-to-typed adapter",
+  "polymorphic-payload helper", "json-value decode hop". Per the
+  2026-05-09 user ruling broadening the W-series rename family +
+  the broader-family regex, any descriptor of the typed-module-
+  export boundary using bridge / probe / helper / hop / translator
+  / adapter framing belongs to the §Renames-to-refuse-on-sight
+  family. Describe the boundary by name (the
+  `register_typed_fn_N` body shape + the `wire_to_json_value`
+  projection at `remote_builtins.rs`).
+
+**Out-of-scope this ruling (downstream sub-clusters):**
+
+- Typed-payload projection for `WireValue::{Table, Range,
+  FunctionRef, PrintResult, Content}` —
+  `W17-typed-module-exports-followup: typed-payload-projection`
+  (audit §6.4).
+- `remote.__call` closure-upvalue rebuild — bounded to the §2.7.8
+  / Q10 cell-storage parallel-kind sub-cluster.
+- Cross-host snapshot round-trip for typed-module-export payloads
+  carrying `IoHandle` — the resource's `IoResource::Custom`
+  state is host-bound; cross-host transport is its own ADR
+  amendment with measurement.
+- `Constant::Value` kinded-pool extension (host-tier kinded
+  constant variant) — the 22 pre-existing `#[ignore]`'d
+  `LoadCol` / `BindSchema` / `LoadPipeline` tests depend on this;
+  distinct sub-cluster from W17-typed-module-exports
+  (module-export ABI territory), tracked as the
+  `host-tier-kinded-constants` follow-up.
+
+**Status:** W17-typed-module-exports landed at commit `33f165cd`
+(2026-05-23). Close gates: `just check-clean` PASS;
+`scripts/verify-merge.sh` 13/13 PASS;
+`scripts/check-no-dynamic.sh` PASS; 6 unit tests
+(3 `wire_to_json` + 2 module-creation + 1 transport
+no-tcpstream-fallback) added in-wave.
+
+Code touchpoints carry a `// ADR-006 §2.7.28 W17-typed-module-exports
+2026-05-23` marker comment for grep visibility.
+#### 2.7.29 Foreign-function-call marshal kind-threaded — `foreign_marshal::{marshal_args, unmarshal_result}` typed-Arc payload protocol + fail-safe FFI version-mismatch (W17-foreign-ffi, Phase 2c R8-W2, 2026-05-23)
+
+Phase 1.B-vm's strict-typing bulldozer deleted the
+`foreign_marshal::marshal_args` / `unmarshal_result` bodies at
+`crates/shape-vm/src/executor/control_flow/foreign_marshal.rs` (the
+B11-control-flow-heap pass). The pre-bulldozer shape consumed
+`Vec<ValueWord>` for the outgoing arg vector and dispatched on
+`tag_bits::*` to route per-arm encoding to the rmpv wire; the
+inverse `typed_msgpack_to_nanboxed` decoded msgpack bytes into
+`ValueWord` per declared type, with per-FieldType writes through
+deleted `ValueSlot::from_*` accessors. Both halves are forbidden
+post-strict-typing (CLAUDE.md "Forbidden code" #1-#6; §2.7.7 #4
++ #7).
+
+The foreign-function-call boundary sits between the byte-level
+msgpack wire (extern C / Python / TypeScript extensions speaking
+the §2.7.5 stable `*mut c_void` ABI via `RawCallableInvoker.invoke`
+at `crates/shape-runtime/src/module_exports.rs:21`) and the runtime-
+tier `KindedSlot` carrier. Per §2.7.5 the extension contract via
+`*mut c_void` keeps the raw-bits ABI; the conversion to/from
+`KindedSlot` happens **inside `shape-vm` at this boundary**, not
+at the extension call frame.
+
+**Decision (W17-foreign-ffi ruling, 2026-05-23):** the marshal
+layer reads `KindedSlot::kind()` as the single source of truth for
+the outgoing dispatch ladder, and uses the declared `return_type` +
+`schema_id` as the kind oracle for the incoming construction (§2.7.5
+producer-side proof discipline). The protocol has three clauses:
+
+1. **Outgoing args clause (`marshal_args`).** Each
+   `KindedSlot` in the args slice routes to its matching
+   `NativeKind` arm in `kinded_slot_to_msgpack` at
+   `foreign_marshal.rs::kinded_slot_to_msgpack`. Scalar arms
+   (`Int{8,16,32,64}` / `UInt{8,16,32,64}` / `IntSize` /
+   `UIntSize` / `Float{32,64}` / `Bool` / `Char` / `Null`)
+   project the inline u64 bits via the kind-specific cast; the
+   string carriers (`String` / `StringV2` / `DecimalV2`)
+   project their inline UTF-8 / decimal-string payloads via the
+   §2.7.5 amendment Wave 2 Agent B `StringObj::as_str` /
+   `DecimalObj::value` accessors. Heap-kinded slots
+   (`Ptr(HeapKind::X)`) route through `heap_slot_to_msgpack`
+   which performs the 5-arm receiver-recovery dance for
+   `HeapKind::{String, BigInt, Decimal, Char, TypedObject}` —
+   reconstructing the typed `Arc<T>` (or `TypedObjectPtr` for
+   the v2-raw TypedObject carrier per §2.3 amendment Wave 2
+   D4), peeking at the payload, and restoring the share
+   (`Arc::into_raw(arc)` post-read). The pre-bulldozer
+   `tag_bits::*` decode has no role.
+
+   ```rust
+   // crates/shape-vm/src/executor/control_flow/foreign_marshal.rs
+   fn kinded_slot_to_msgpack(
+       slot: &KindedSlot,
+       schemas: &TypeSchemaRegistry,
+   ) -> Result<Rmp, VMError> {
+       let bits = slot.raw();
+       match slot.kind() {
+           NativeKind::Int64 => Ok(Rmp::Integer((bits as i64).into())),
+           NativeKind::Float64 => Ok(Rmp::F64(f64::from_bits(bits))),
+           NativeKind::Bool => Ok(Rmp::Boolean(bits != 0)),
+           NativeKind::Null => Ok(Rmp::Nil),
+           NativeKind::String => /* Arc<String> peek + restore */,
+           NativeKind::StringV2 => /* StringObj::as_str + Rmp::String */,
+           NativeKind::DecimalV2 => /* DecimalObj::value + to_string */,
+           NativeKind::Ptr(heap_kind) =>
+               heap_slot_to_msgpack(bits, heap_kind, schemas),
+           NativeKind::Nullable<X> => surface-and-stop,
+       }
+   }
+   ```
+
+2. **Incoming result clause (`unmarshal_result`).** The msgpack
+   wire bytes are deserialized to `rmpv::Value`; the declared
+   `return_type` string + `schema_id` (registered at compile
+   time via the typed-module-exports machinery — §2.7.28) drive
+   per-target construction through the matching `KindedSlot::from_*`
+   constructor on the §2.7.6 / Q8 carrier-bound API surface. The
+   wire bytes are NOT free to re-discriminate — a wire-vs-declared
+   type mismatch surfaces as `VMError::RuntimeError` with a
+   structured "expected X, got Y" message, NOT a Bool-default
+   fallback (§2.7.5.1 forbidden) and NOT a silent `KindedSlot::none()`
+   substitution. Per-FieldType slot construction for
+   `TypedObject` returns goes through
+   `marshal_typed_object_from_msgpack` which allocates a fresh
+   `TypedObjectStorage` via `TypedObjectStorage::_new` (v2-raw
+   carrier per §2.3 amendment Wave 2 Agent D1, HeapHeader
+   refcount-at-offset-0) with a per-field `field_kinds` array
+   carrying the proven `NativeKind` per slot.
+
+3. **Fail-safe ABI version-mismatch clause (supervisor (iv)
+   ruling).** Extensions MUST export `shape_abi_version()`
+   (FFI symbol, returns `u32`). The host plugin loader at
+   `crates/shape-runtime/src/plugins/loader.rs:123` REFUSES TO
+   LOAD any extension where (a) the symbol is absent, or
+   (b) the reported version diverges from
+   `shape_abi_v1::ABI_VERSION` (`crates/shape-abi-v1/src/lib.rs:1448`,
+   currently 3). Both refusal branches emit a structured
+   `ShapeError::RuntimeError` citing this ruling by name. The
+   pre-ruling code path silently accepted libraries without the
+   symbol, which left the door open to silent ABI drift at the
+   marshal boundary (a value-corruption failure mode of the
+   exact §2.7.4 "do not paper over it with placeholder
+   serializers" precedent shape). Extension authors generate the
+   symbol automatically via the
+   `shape_abi_v1::language_runtime_plugin!` / `data_source_plugin!`
+   macros at `crates/shape-abi-v1/src/lib.rs:1497-1601`.
+
+**Lockstep tables impacted:** none new. The marshal layer consumes
+the §2.7.7 / Q9 stack parallel-kind track at the outgoing
+boundary (`KindedSlot::kind()` reads its inline `NativeKind` per
+§2.7.6 / Q8 carrier API) and produces a fresh `KindedSlot` for
+the incoming return per §2.7.6 constructor discipline. No
+`HeapKind` variant added; no new dispatch table; no opcode
+introduced. The §2.7.7 / §2.7.8 / §2.7.10 / §2.7.11 dispatch
+tables are touched only via the consumer side (`pop_kinded` +
+`push_kinded` at the `extern C` call site) which already match
+the kinded-API discipline.
+
+**Forbidden shapes this rules out (mirror of §2.7.13 / §2.7.28
+forbidden lists, applied to the foreign-function-call boundary):**
+
+- **`ValueWord` revival "for the wire".** The wire format is
+  `rmpv::Value` (an external msgpack model defined by the
+  `rmpv` crate, NOT a deleted internal carrier). Re-introducing
+  `ValueWord` as a "wire encoder" / "msgpack bridge" /
+  "ABI-boundary helper" is the W-series defection-attractor
+  CLAUDE.md §Renames-to-refuse-on-sight enumerates verbatim.
+  `KindedSlot` is the runtime-tier carrier from end to end;
+  `rmpv::Value` is the wire model.
+- **Tag-bit dispatch reintroduction under any rename.** The
+  pre-bulldozer body's `tag_bits::*` dispatch + the
+  `synthesize_value_word_from_raw` synthesis pattern are
+  deleted; routing the outgoing dispatch through any
+  "tag-decode bridge" / "tag-decode probe" / "tag-decode helper"
+  / "tag-decode adapter" descriptor (the
+  §Renames-to-refuse-on-sight tag-decode family) is refused on
+  sight. The discriminator is `KindedSlot::kind() -> NativeKind`
+  — read directly, dispatched directly.
+- **`is_heap()` probe at the outgoing dispatch.** The
+  outgoing arm's heap routing reads
+  `NativeKind::Ptr(heap_kind)` from the kind label directly
+  and dispatches on the `HeapKind` variant; a parallel
+  `slot.is_heap()` probe (the pre-strict-typing pattern
+  forbidden per §2.7.7 #7) does not appear.
+- **Bool-default fallback at unmarshal.** The incoming
+  `msgpack_to_kinded_slot` dispatch surfaces an explicit
+  `VMError` for every unrecognised target-type / wire-shape
+  pair — `KindedSlot::from_bool(false)` / `KindedSlot::none()`
+  as a "default for unknown declared types" is the §2.7.7 #9
+  rationalization the §Forbidden rationalizations list
+  enumerates. Surface-and-stop is the only legitimate response.
+- **Silent FFI version-mismatch.** The pre-ruling code path
+  silently accepted libraries without `shape_abi_version` —
+  a value-corruption failure mode of the §2.7.4 "do not paper
+  over it with placeholder serializers" precedent shape.
+  Loader code that downgrades the requirement to a "soft warn"
+  / "best-effort load" / "fallback to last-known ABI" is the
+  §Forbidden rationalizations #4 ("Soft-fail counter for now,
+  harden later") + #8 ("Add a feature flag we can toggle")
+  defection-attractor pair — refused.
+- **Defection-attractor descriptors** — "FFI marshal bridge",
+  "msgpack-to-typed adapter", "extension-boundary helper",
+  "extern-C decode hop", "rmpv-to-KindedSlot translator". Per
+  the 2026-05-09 broader-family regex, any descriptor of the
+  marshal layer using bridge / probe / helper / hop /
+  translator / adapter framing belongs to the
+  §Renames-to-refuse-on-sight family. Describe the boundary
+  by name (`foreign_marshal::marshal_args` + `unmarshal_result`)
+  or by deletion-fate (the deleted `tag_bits`-dispatch +
+  `typed_msgpack_to_nanboxed` bodies), never by hypothetical
+  role.
+
+**Out-of-scope this ruling (downstream sub-clusters):**
+
+- **Container kinds at unmarshal.** `Array<T>` / `Option<T>` /
+  `HashMap<K,V>` / `Set<T>` / `Any` return types
+  surface-and-stop with structured errors pending V3-S5
+  (per-element-kind `TypedArray<T>` monomorphization) +
+  W17.3-4 (`FieldType::Any` boundary). The current landing
+  covers scalar primitives + `String` + `TypedObject`
+  (schema-driven, recursive); container kinds are the
+  W17-foreign-ffi-followup sub-cluster.
+- **Nullable scalar kinds at marshal.**
+  `NativeKind::Nullable{Int64, Int32, Int16, Int8, UInt64,
+  UInt32, UInt16, UInt8, IntSize, UIntSize, Float64}`
+  surface-and-stop pending the same sentinel-rule decision
+  as the snapshot-side `W17-snapshot-nullable` follow-up
+  (a paired ADR amendment with measurement covers both at
+  once).
+- **Rarer heap kinds at marshal.**
+  `HeapKind::{HashMap, HashSet, Deque, Range, Channel,
+  Mutex, Atomic, Lazy, Iterator, Reference, FilterExpr,
+  SharedCell, Matrix, MatrixSlice, PriorityQueue, Column,
+  TraitObject, Content, PrintResult, Duration, Timestamp}`
+  surface-and-stop with structured errors. The audit §2.3
+  bounds the W17 round to typed-Arc payloads (String,
+  Decimal, TypedObject, scalar); rarer heap kinds land per
+  FFI demand in the W17-foreign-ffi-followup sub-cluster.
+- **Cross-runtime extern-C tier promotion.** Python /
+  TypeScript extensions via `LanguageRuntimeVTable`
+  (`crates/shape-abi-v1/src/lib.rs:722`) speak the same
+  `foreign_marshal` boundary; no per-language carrier
+  proliferation. If a future runtime needs a per-FieldType
+  carrier different from `rmpv::Value`, the amendment
+  introducing it carries its own ADR ruling with
+  measurement.
+
+**Status:** W17-foreign-ffi landed at commit `e9f73b57`
+(2026-05-23). Close gates: `just check-clean` exit 0;
+`scripts/verify-merge.sh` 13/13; `scripts/check-no-dynamic.sh`
+exit 0; differential smoke matrix s1=4950, s2=30, s3=x, s4=2,
+s5=x all ec=0 on both VM and JIT; 6 unit tests in
+`foreign_marshal::tests` (marshal/unmarshal round-trips,
+Result-wrapper strip, empty-bytes branch, wire-vs-declared
+mismatch).
+
+Code touchpoints carry a `// ADR-006 §2.7.29 W17-foreign-ffi
+2026-05-23` marker comment for grep visibility.
+
 ## 16. References
 
 ### Research base

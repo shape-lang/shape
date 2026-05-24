@@ -1,5 +1,7 @@
 //! Native `transport` module for distributed Shape communication.
 //!
+//! ADR-006 §2.7.28 W17-typed-module-exports 2026-05-23
+//!
 //! Thin wrapper around `shape_wire::transport` that exposes the transport
 //! abstraction to Shape code via the module/builtin system. The actual
 //! TCP framing logic lives in `shape_wire::transport::tcp`.

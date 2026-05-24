@@ -1,5 +1,7 @@
 //! Shape-value <-> MessagePack marshaling for foreign function calls.
 //!
+//! ADR-006 §2.7.29 W17-foreign-ffi 2026-05-23
+//!
 //! ADR-006 §2.7.4 / §2.7.5 / §2.7.6: this module is the Rust-side carrier
 //! shape for foreign function (extern C / Python / TypeScript) call args
 //! and results, sitting between the byte-level msgpack wire and the

@@ -1,5 +1,7 @@
 //! Typed-return ABI for native stdlib modules (Phase 4b).
 //!
+//! ADR-006 §2.7.28 W17-typed-module-exports 2026-05-23
+//!
 //! Companion to [`crate::module_exports`]. The legacy `ModuleExports` ABI
 //! exposes every native function as
 //! `fn(&[ValueWord], &ModuleContext) -> Result<ValueWord, String>` — i.e.,

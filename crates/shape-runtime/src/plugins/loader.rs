@@ -1,5 +1,7 @@
 //! Plugin Loader
 //!
+//! ADR-006 §2.7.29 W17-foreign-ffi 2026-05-23
+//!
 //! Handles dynamic loading of plugin shared libraries using libloading.
 
 use std::collections::HashMap;

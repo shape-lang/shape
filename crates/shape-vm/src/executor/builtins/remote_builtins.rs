@@ -1,5 +1,7 @@
 //! Native `remote` module for executing Shape code on remote `shape serve` instances.
 //!
+//! ADR-006 §2.7.28 W17-typed-module-exports 2026-05-23
+//!
 //! Provides a high-level abstraction over the wire protocol so users can
 //! execute code or call functions on a remote Shape server directly from
 //! Shape code, without manually encoding wire messages.
