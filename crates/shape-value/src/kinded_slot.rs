@@ -361,6 +361,25 @@ impl KindedSlot {
         )
     }
 
+    /// Convenience: a `Ptr(HeapKind::Content)`-kind slot. Stores the
+    /// `Arc<ContentNode>` directly per ADR-006 §2.3 (W18.6 R8 W3
+    /// 2026-05-24 — supervisor D3+D4 Display.display() → content +
+    /// ContentNode user-facing type exposure). Slot bits are
+    /// `Arc::into_raw(Arc<ContentNode>) as u64`; the Drop / Clone arms
+    /// for `HeapKind::Content` already dispatch the matching strong-
+    /// count retain/release. Used by the `Content.text(...)` /
+    /// `Content.code(...)` / etc. user-facing constructor builtins
+    /// (`ContentTextCtor` family) and by user-defined `Display` impls
+    /// whose `method display() -> content` return value is pushed
+    /// through this carrier.
+    #[inline]
+    pub fn from_content(c: Arc<crate::content::ContentNode>) -> Self {
+        Self::new(
+            ValueSlot::from_content(c),
+            NativeKind::Ptr(HeapKind::Content),
+        )
+    }
+
     /// Convenience: a `Ptr(HeapKind::Result)`-kind slot. ADR-006 §2.7.17 /
     /// Q18 amendment (Wave 14 W14-variant-codegen). Mirror of
     /// `from_iterator` typed-Arc dispatch shape.

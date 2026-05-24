@@ -310,6 +310,16 @@ impl ValueSlot {
         Self(Arc::into_raw(r) as u64)
     }
 
+    /// Store an `Arc<ContentNode>` directly. Mirrors
+    /// `HeapValue::Content(Arc<ContentNode>)`. ADR-006 §2.3 (W18.6 R8 W3
+    /// 2026-05-24 — supervisor D3+D4): paired with `KindedSlot::from_content`
+    /// to land the `Content.text(...)` / `Content.code(...)` etc.
+    /// user-facing constructor surface and the `Display.display() -> content`
+    /// return-type discipline.
+    pub fn from_content(c: Arc<crate::content::ContentNode>) -> Self {
+        Self(Arc::into_raw(c) as u64)
+    }
+
     /// Store an `Arc<ResultData>` directly. Mirrors
     /// `HeapValue::Result(Arc<ResultData>)`. ADR-006 §2.7.17 / Q18
     /// amendment (Wave 14 W14-variant-codegen).
