@@ -1285,6 +1285,26 @@ impl TypeInferenceEngine {
         }
     }
 
+    /// R8 W7: extract a registered enum's name from a resolved `Type`.
+    /// Mirrors [`struct_name_of_type`] but checks `self.env.get_enum`
+    /// instead of `struct_type_defs` so `bind_pattern_vars_typed` can
+    /// look up enum-payload field types for tuple and struct variants.
+    /// Returns `None` for type variables, functions, and references to
+    /// non-enum names.
+    pub(crate) fn enum_name_of_type(&self, ty: &Type) -> Option<String> {
+        let name = match ty {
+            Type::Concrete(TypeAnnotation::Basic(name)) => name.clone(),
+            Type::Concrete(TypeAnnotation::Reference(path)) => path.as_str().to_string(),
+            Type::Generic { base, .. } => return self.enum_name_of_type(base),
+            _ => return None,
+        };
+        if self.env.get_enum(&name).is_some() {
+            Some(name)
+        } else {
+            None
+        }
+    }
+
     /// WS-4 4b: look up the declared `TypeAnnotation` of a field on a
     /// registered struct. Used to bind destructured field patterns to
     /// their real types.

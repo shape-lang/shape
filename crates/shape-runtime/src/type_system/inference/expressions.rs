@@ -1386,30 +1386,92 @@ impl TypeInferenceEngine {
                     }
                 }
             }
-            Pattern::Constructor { fields, .. } => {
+            Pattern::Constructor {
+                variant, fields, ..
+            } => {
+                // R8 W7: resolve the enum's `EnumDef` from the scrutinee
+                // type so enum-payload binders carry the variant's
+                // declared payload types instead of unconstrained fresh
+                // vars. Mirrors WS-4 4b's struct-field flow but indexed
+                // positionally for tuple payloads and by name for struct
+                // payloads. Falls back to fresh vars when the scrutinee
+                // is non-enum (e.g. a registered struct via the Struct
+                // arm, or no scrutinee at all).
+                let enum_kind = scrutinee
+                    .and_then(|ty| self.enum_name_of_type(ty))
+                    .and_then(|name| {
+                        self.env.get_enum(&name).and_then(|def| {
+                            def.members
+                                .iter()
+                                .find(|m| &m.name == variant)
+                                .map(|m| m.kind.clone())
+                        })
+                    });
+
                 match fields {
                     PatternConstructorFields::Unit => {
                         // No variables to bind
                     }
                     PatternConstructorFields::Tuple(patterns) => {
-                        for p in patterns {
-                            self.bind_pattern_vars_typed(p, None)?;
+                        let payload_tys: Option<Vec<TypeAnnotation>> = match &enum_kind
+                        {
+                            Some(shape_ast::ast::EnumMemberKind::Tuple(types)) => {
+                                Some(types.clone())
+                            }
+                            _ => None,
+                        };
+                        for (idx, p) in patterns.iter().enumerate() {
+                            let field_ty = payload_tys.as_ref().and_then(|tys| {
+                                tys.get(idx)
+                                    .map(|ann| self.resolve_type_annotation(ann))
+                            });
+                            self.bind_pattern_vars_typed(p, field_ty.as_ref())?;
+                            // For a plain identifier binder, override the
+                            // fresh-var define with the resolved payload
+                            // type — same shape as the Object/Struct arms.
+                            if let (Pattern::Identifier(bind_name), Some(ft)) =
+                                (p, &field_ty)
+                            {
+                                self.env
+                                    .define(bind_name, TypeScheme::mono(ft.clone()));
+                            }
                         }
                     }
                     PatternConstructorFields::Struct(field_pats) => {
-                        // A bare struct `Constructor` pattern (`Point {
-                        // x, y }`) over a registered struct scrutinee:
-                        // resolve each field's declared type. Enum
-                        // struct-variant payloads are not in
-                        // `struct_type_defs`, so `struct_name` is `None`
-                        // and this falls back to fresh vars.
+                        // Two scrutinee shapes can drive this arm:
+                        //
+                        // (a) A registered struct (`Point { x, y }`): look up
+                        //     via `struct_type_defs` (WS-4 4b).
+                        // (b) An enum struct-variant (`Shape::Circle { r }`):
+                        //     look up via `EnumDef` members and use the
+                        //     variant's `EnumMemberKind::Struct(fields)`.
                         let struct_name = scrutinee
                             .and_then(|ty| self.struct_name_of_type(ty));
+                        let enum_struct_fields: Option<
+                            Vec<shape_ast::ast::ObjectTypeField>,
+                        > = match &enum_kind {
+                            Some(shape_ast::ast::EnumMemberKind::Struct(fields)) => {
+                                Some(fields.clone())
+                            }
+                            _ => None,
+                        };
                         for (key, p) in field_pats {
-                            let field_ty = struct_name.as_deref().and_then(|name| {
+                            let field_ty = if let Some(name) = struct_name.as_deref()
+                            {
                                 self.struct_field_annotation(name, key)
                                     .map(|ann| self.resolve_type_annotation(&ann))
-                            });
+                            } else {
+                                enum_struct_fields.as_ref().and_then(|fields| {
+                                    fields
+                                        .iter()
+                                        .find(|f| &f.name == key)
+                                        .map(|f| {
+                                            self.resolve_type_annotation(
+                                                &f.type_annotation,
+                                            )
+                                        })
+                                })
+                            };
                             self.bind_pattern_vars_typed(p, field_ty.as_ref())?;
                             if let (Pattern::Identifier(bind_name), Some(ft)) =
                                 (p, &field_ty)

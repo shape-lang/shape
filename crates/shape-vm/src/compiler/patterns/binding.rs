@@ -515,6 +515,29 @@ impl BytecodeCompiler {
         match fields {
             PatternConstructorFields::Unit => Ok(()),
             PatternConstructorFields::Tuple(patterns) => {
+                // R8 W7: look up the per-position payload annotations
+                // (parallel to the Struct arm's
+                // `enum_struct_variant_fields` flow). Without this the
+                // tuple-payload binders fall through to Unknown and
+                // surface as "Cannot infer types for binary operation
+                // `Add`: operand types are `string` and `unknown`" when
+                // a downstream binop touches them.
+                let variant_tuple_tys: Option<Vec<shape_ast::ast::TypeAnnotation>> =
+                    match (enum_name, variant_name) {
+                        (Some(en), Some(vn)) => self
+                            .enum_tuple_variant_fields
+                            .get(&(en.to_string(), vn.to_string()))
+                            .cloned()
+                            .or_else(|| {
+                                en.rsplit("::").next().and_then(|bare| {
+                                    self.enum_tuple_variant_fields
+                                        .get(&(bare.to_string(), vn.to_string()))
+                                        .cloned()
+                                })
+                            }),
+                        _ => None,
+                    };
+
                 // Payload fields are at __payload_0, __payload_1, etc.
                 for (idx, pat) in patterns.iter().enumerate() {
                     self.emit(Instruction::new(
@@ -531,6 +554,20 @@ impl BytecodeCompiler {
                         }),
                     ));
                     let elem_local = self.declare_temp_local("__typed_enum_elem_")?;
+                    // R8 W7: propagate the variant's positional payload
+                    // type onto the temp local so the downstream
+                    // Identifier/Typed binding inherits it via the
+                    // existing source_info copy in those arms — same
+                    // shape as the struct-arm variant_fields path.
+                    if let Some(ref tys) = variant_tuple_tys {
+                        if let Some(ann) = tys.get(idx) {
+                            if let Some(tn) =
+                                BytecodeCompiler::tracked_type_name_from_annotation(ann)
+                            {
+                                self.set_local_type_info(elem_local, &tn);
+                            }
+                        }
+                    }
                     self.emit(Instruction::new(
                         OpCode::StoreLocal,
                         Some(Operand::Local(elem_local)),
