@@ -14,19 +14,30 @@
 //! / Q12). No new `v2_array_detect` primitive needed — the closure-callback
 //! ABI + the existing `read_element` per-`V2ElemType` body suffice.
 //!
+//! ## R8 W4 J.5b HOF builders (2026-05-24)
+//!
 //! The result-builder handlers (`where`, `select`, `takeWhile`, `skipWhile`)
-//! remain SURFACE — they construct a new `Ptr(HeapKind::TypedArray)`
-//! result carrier whose element kind cannot be proven without inspecting
-//! every closure return (varying-kind result rejection territory) AND
-//! there is no `v2_array_detect::collect_*` primitive at HEAD for the
-//! result-shape allocation. That's J.5 / V3-S5 ckpt-6 territory. Refusal
-//! #1 binding: no fabricated builder, no Bool-default fallback.
+//! are now KIND-GENERIC two-pass scan-then-allocate builders backed by the
+//! new `v2_array_detect::native_kind_to_v2_elem_type` +
+//! `allocate_empty_typed_array` + existing `push_element` primitives.
+//!
+//! - **Filter family (`where` / `takeWhile` / `skipWhile`):** output
+//!   element kind = input view's `elem_type` (no kind-mismatch territory).
+//!   Single-pass with `slot_truthy(closure_result)` deciding inclusion.
+//!
+//! - **`select`:** output element kind = closure-return kind, established
+//!   by the FIRST closure invocation per supervisor D3 (2026-05-24):
+//!   structured `VMError::RuntimeError` on subsequent kind mismatch (no
+//!   coercion — forbidden per CLAUDE.md §Type System Rules — and no
+//!   heterogeneous `Array<Any>` — Shape has no `any` type). Empty input
+//!   returns an empty array stamped with the input's elem_type as a
+//!   well-typed neutral fallback (no closure runs → no kind to establish).
 //!
 //! The value-search handlers (`indexOf`, `includes`) remain SURFACE —
 //! per-kind value-equality comparison (especially for heap-element kinds
 //! `StringV2` / `DecimalV2` / `TypedObject`) requires a `v2_array_detect::
 //! position_of` / `contains_element` primitive that doesn't exist at
-//! HEAD. J.5 territory.
+//! HEAD. J.5c territory.
 //!
 //! ## ADR-006 discipline preserved
 //!
@@ -39,11 +50,13 @@
 //! - ADR-005 §1 single-discriminator preserved.
 
 use crate::executor::v2_handlers::v2_array_detect::{
-    as_v2_typed_array, read_element, V2TypedArrayView,
+    allocate_empty_typed_array, as_v2_typed_array, native_kind_to_v2_elem_type, push_element,
+    read_element, V2ElemType, V2TypedArrayView,
 };
 use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
 use shape_value::heap_value::HeapKind;
+use shape_value::v2::typed_array::release_v2_typed_array;
 use shape_value::{KindedSlot, NativeKind, ValueSlot, VMError};
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -126,14 +139,18 @@ fn require_closure(op: &str, arg: &KindedSlot) -> Result<(), VMError> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// W16.2-J.4-rest J.5 SURFACE builder (preserved for result-builder /
-// value-search handlers that still need a v2_array_detect primitive)
+// J.5c SURFACE (value-equality handlers: `indexOf`, `includes`)
+//
+// R8 W4 J.5b (2026-05-24) retired this helper's `where` / `select` /
+// `takeWhile` / `skipWhile` callsites by promoting them to two-pass
+// scan-then-allocate HOF builders. The remaining callsites (`indexOf` /
+// `includes`) still need per-kind value-equality primitives
+// (`v2_array_detect::position_of` / `contains_element`) — J.5c territory.
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Surface-and-stop body for the handlers that need a result-builder or
-/// per-kind value-equality primitive (`where`, `select`, `takeWhile`,
-/// `skipWhile`, `indexOf`, `includes`). Class-shift target: J.5 /
-/// V3-S5 ckpt-6.
+/// Surface-and-stop body for the value-search handlers that still need a
+/// `v2_array_detect` per-kind value-equality primitive (`indexOf`,
+/// `includes`). Class-shift target: J.5c.
 #[cold]
 #[inline(never)]
 fn j5_builder_surface(op: &'static str, args: &[KindedSlot]) -> VMError {
@@ -143,52 +160,315 @@ fn j5_builder_surface(op: &'static str, args: &[KindedSlot]) -> VMError {
         format!("{:?}", args[0].kind)
     };
     VMError::NotImplemented(format!(
-        "Array.{op}: SURFACE — W16.2-J.5 / V3-S5 ckpt-6 territory. \
-         The closure-callback / read-only handlers in this file landed at \
-         W16.2-J.4-rest (2026-05-23), but this handler builds a new \
-         TypedArray result whose element kind cannot be proven without a \
-         `v2_array_detect::collect_*` builder primitive (varying-kind \
-         result rejection territory); OR performs per-kind value-equality \
-         comparison requiring a `v2_array_detect::position_of` / \
-         `contains_element` primitive. Neither exists at HEAD. J.5 / \
-         ckpt-6 territory. NO Bool-default fallback (ADR-006 §2.7.14). \
-         Receiver kind: {kind}.",
+        "Array.{op}: SURFACE — J.5c territory. \
+         Per-kind value-equality comparison (especially for heap-element \
+         kinds `StringV2` / `DecimalV2` / `TypedObject`) requires a \
+         `v2_array_detect::position_of` / `contains_element` primitive \
+         that doesn't exist at HEAD. NO Bool-default fallback (ADR-006 \
+         §2.7.14). Receiver kind: {kind}.",
         op = op,
         kind = receiver_kind,
     ))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// R8 W4 J.5b HOF-builder driver helpers (2026-05-24)
+//
+// Closure-callback ABI = ADR-006 §2.7.11 / Q12 (`vm.call_value_immediate_nb`).
+// The HOF body sits here (not in `v2_array_detect`) because the closure
+// invocation needs `&mut VirtualMachine`, which the leaf
+// `v2_array_detect` module cannot reach.
+//
+// Supervisor D3 binding (2026-05-24): closure-return kind mismatch on
+// `select` surfaces a structured `VMError::RuntimeError` naming the
+// expected/got kinds + offending index. NO coercion (forbidden per
+// CLAUDE.md §Type System Rules). NO heterogeneous `Array<Any>` carrier
+// (Shape has no `any` type).
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Wrap a freshly-built v2 typed-array carrier pointer into a
+/// `Ptr(HeapKind::TypedArray)`-kinded slot suitable for returning from a
+/// `MethodFnV2` handler.
+#[inline]
+fn wrap_typed_array_result(ptr: *mut u8) -> KindedSlot {
+    KindedSlot::new(
+        ValueSlot::from_raw(ptr as usize as u64),
+        NativeKind::Ptr(HeapKind::TypedArray),
+    )
+}
+
+/// Filter-family driver shared by `where` / `takeWhile` / `skipWhile`.
+/// Output element kind = input view's `elem_type` (filter operations
+/// preserve element kind — no closure-return kind mismatch territory).
+///
+/// `mode` selects the semantic:
+/// - `FilterMode::All`: include every element where the predicate is true
+///   (the `where` semantic).
+/// - `FilterMode::TakePrefix`: include the prefix until the predicate is
+///   false (the `takeWhile` semantic — stops at the first false).
+/// - `FilterMode::SkipPrefix`: skip the prefix while the predicate is
+///   true; include everything afterwards regardless of the predicate (the
+///   `skipWhile` semantic — only the prefix is gated).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FilterMode {
+    All,
+    TakePrefix,
+    SkipPrefix,
+}
+
+fn run_filter_builder(
+    op: &'static str,
+    mode: FilterMode,
+    vm: &mut VirtualMachine,
+    view: &V2TypedArrayView,
+    closure: &KindedSlot,
+    mut ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    // Output element kind = input elem_type (filter ops never change the
+    // carrier monomorphization). Allocate with capacity = input length
+    // (worst case: every element passes); the buffer may be over-
+    // provisioned but is correctly stamped.
+    let out_ptr = allocate_empty_typed_array(view.elem_type, view.len);
+    let out_view = match as_v2_typed_array(
+        out_ptr as usize as u64,
+        NativeKind::Ptr(HeapKind::TypedArray),
+    ) {
+        Some(v) => v,
+        None => {
+            // Allocator failure mode (should be impossible — stamp+detect
+            // is structural). Release the allocation and surface.
+            unsafe { release_v2_typed_array(out_ptr) };
+            return Err(VMError::RuntimeError(format!(
+                "Array.{op}: failed to re-detect freshly-allocated TypedArray<{:?}>",
+                view.elem_type
+            )));
+        }
+    };
+
+    let mut skipping = matches!(mode, FilterMode::SkipPrefix);
+    for i in 0..view.len {
+        let (bits, kind) = match read_element(view, i) {
+            Some(pair) => pair,
+            None => {
+                unsafe { release_v2_typed_array(out_ptr) };
+                return Err(VMError::RuntimeError(format!(
+                    "Array.{op}: read_element({i}) returned None for element kind {:?}",
+                    view.elem_type
+                )));
+            }
+        };
+        let elem_slot = KindedSlot::new(ValueSlot::from_raw(bits), kind);
+
+        // Two roles for the element slot: predicate arg + (on inclusion)
+        // copy pushed into the output. Clone the slot bits to share the
+        // refcount for heap-element carriers.
+        let elem_for_pred = elem_slot.clone();
+        let pred = match vm.call_value_immediate_nb(closure, &[elem_for_pred], ctx.as_deref_mut()) {
+            Ok(p) => p,
+            Err(e) => {
+                unsafe { release_v2_typed_array(out_ptr) };
+                return Err(e);
+            }
+        };
+        let truthy = slot_truthy(&pred);
+
+        let include = match mode {
+            FilterMode::All => truthy,
+            FilterMode::TakePrefix => {
+                if !truthy {
+                    // Stop accumulating; remaining elements dropped.
+                    break;
+                }
+                true
+            }
+            FilterMode::SkipPrefix => {
+                if skipping {
+                    if truthy {
+                        // Still skipping prefix.
+                        continue;
+                    }
+                    skipping = false;
+                }
+                // Past the prefix: include unconditionally (`skipWhile`
+                // only gates the prefix per stdlib semantics).
+                true
+            }
+        };
+        if include {
+            let push_bits = elem_slot.slot.raw();
+            let push_kind = elem_slot.kind;
+            if let Err(msg) = push_element(&out_view, push_bits, push_kind) {
+                unsafe { release_v2_typed_array(out_ptr) };
+                return Err(VMError::RuntimeError(format!(
+                    "Array.{op}: push_element failed at index {i}: {msg}"
+                )));
+            }
+            // The element-slot ownership transferred into the output
+            // array via push_element (for heap-element carriers,
+            // push_element stores the caller's share — see
+            // `v2_array_detect::push_element` String / Decimal /
+            // TypedObject arms). Forget the local clone so the share
+            // isn't double-released when `elem_slot` drops.
+            std::mem::forget(elem_slot);
+        }
+    }
+
+    Ok(wrap_typed_array_result(out_ptr))
+}
+
+/// `select`-driver (per-element transform projection). Output element
+/// kind is the closure's return kind, established by the first
+/// invocation. Subsequent kind mismatch surfaces a structured
+/// `VMError::RuntimeError` per supervisor D3 (2026-05-24). Two-pass:
+/// pass 1 invokes the closure on every element and collects
+/// `KindedSlot` returns; pass 2 allocates the output `TypedArray<T>` for
+/// the established kind and pushes each collected slot.
+fn run_select_builder(
+    vm: &mut VirtualMachine,
+    view: &V2TypedArrayView,
+    closure: &KindedSlot,
+    mut ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    // Edge case: empty input. No closure runs → no kind to establish.
+    // Return an empty array stamped with the input's elem_type as a
+    // well-typed neutral fallback. (No Bool-default; no Any.)
+    if view.len == 0 {
+        let out_ptr = allocate_empty_typed_array(view.elem_type, 0);
+        return Ok(wrap_typed_array_result(out_ptr));
+    }
+
+    // Pass 1: scan. Collect closure results; establish the output kind
+    // on the first invocation; reject any subsequent kind mismatch with
+    // a structured error.
+    let mut results: Vec<KindedSlot> = Vec::with_capacity(view.len as usize);
+    let mut established_kind: Option<NativeKind> = None;
+
+    for i in 0..view.len {
+        let (bits, kind) = read_element(view, i).ok_or_else(|| {
+            VMError::RuntimeError(format!(
+                "Array.select: read_element({i}) returned None for element kind {:?}",
+                view.elem_type
+            ))
+        })?;
+        let elem_slot = KindedSlot::new(ValueSlot::from_raw(bits), kind);
+        let result = vm.call_value_immediate_nb(closure, &[elem_slot], ctx.as_deref_mut())?;
+
+        match established_kind {
+            None => {
+                established_kind = Some(result.kind);
+            }
+            Some(expected) if expected != result.kind => {
+                // Supervisor D3 structured error: name the expected /
+                // got kinds + the offending index. NO coercion (forbidden
+                // per CLAUDE.md §Type System Rules); NO heterogeneous
+                // Array<Any> (Shape has no `any` type).
+                //
+                // `results` and `result` drop here, releasing their
+                // accumulated shares cleanly.
+                return Err(VMError::RuntimeError(format!(
+                    "Array.select: closure-return kind mismatch at index {i}: \
+                     expected {expected:?} (established by index 0), got {got:?}. \
+                     HOF builders require a single output element kind per \
+                     CLAUDE.md \"No `any` type\" rule + D3 binding (no coercion).",
+                    expected = expected,
+                    got = result.kind,
+                    i = i,
+                )));
+            }
+            _ => {}
+        }
+        results.push(result);
+    }
+
+    // Pass 2: allocate + push. The established kind must map to a
+    // `V2ElemType`; otherwise the output carrier is unsupported and we
+    // surface (no Bool-default, no fabricated carrier).
+    let result_kind = established_kind.expect("non-empty input → established_kind is Some");
+    let elem_type = native_kind_to_v2_elem_type(result_kind).ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "Array.select: closure-return kind {result_kind:?} has no `TypedArray<T>` \
+             carrier monomorphization (no element-type stamp). Supported result \
+             kinds: Float64/Int64/Int32/Int16/Int8/UInt32/UInt16/UInt8/Float32/Char/\
+             Bool/StringV2/DecimalV2/Ptr(TypedObject). J.5d / future tuple-carrier \
+             territory for other kinds."
+        ))
+    })?;
+    let out_ptr = allocate_empty_typed_array(elem_type, view.len);
+    let out_view = match as_v2_typed_array(
+        out_ptr as usize as u64,
+        NativeKind::Ptr(HeapKind::TypedArray),
+    ) {
+        Some(v) => v,
+        None => {
+            unsafe { release_v2_typed_array(out_ptr) };
+            return Err(VMError::RuntimeError(format!(
+                "Array.select: failed to re-detect freshly-allocated TypedArray<{elem_type:?}>"
+            )));
+        }
+    };
+
+    for (i, slot) in results.into_iter().enumerate() {
+        let push_bits = slot.slot.raw();
+        let push_kind = slot.kind;
+        if let Err(msg) = push_element(&out_view, push_bits, push_kind) {
+            unsafe { release_v2_typed_array(out_ptr) };
+            return Err(VMError::RuntimeError(format!(
+                "Array.select: push_element failed at index {i}: {msg}"
+            )));
+        }
+        // Per the heap-element push contract (String / Decimal /
+        // TypedObject) the caller's refcount share transfers into the
+        // output array. Forget the slot so the share isn't double-
+        // released when `slot` would otherwise drop.
+        std::mem::forget(slot);
+    }
+
+    Ok(wrap_typed_array_result(out_ptr))
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // MethodFnV2 (native ABI) public handlers
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// `arr.where(|x| ...)` — predicate-filter projection. SURFACE: builds a
-/// new TypedArray result whose element kind requires a builder primitive.
-/// J.5 territory.
+/// `arr.where(|x| ...)` — predicate-filter projection. Output element
+/// kind = input view's elem_type (filter ops preserve carrier mono-
+/// morphization). R8 W4 J.5b (2026-05-24): kind-generic two-pass scan-
+/// then-allocate via `v2_array_detect` builder primitives.
 pub(crate) fn handle_where_v2(
-    _vm: &mut VirtualMachine,
+    vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    if args.len() >= 2 {
-        require_closure("where", &args[1])?;
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "Array.where expects 1 argument: (predicate)".into(),
+        ));
     }
-    Err(j5_builder_surface("where", args))
+    require_closure("where", &args[1])?;
+    let view = extract_view("where", &args[0])?;
+    let closure = &args[1];
+    run_filter_builder("where", FilterMode::All, vm, &view, closure, ctx)
 }
 
-/// `arr.select(|x| ...)` — per-element transform projection. SURFACE:
-/// builds a new TypedArray result whose element kind is the closure's
-/// return kind — varying-kind result rejection requires a builder
-/// primitive. J.5 territory.
+/// `arr.select(|x| ...)` — per-element transform projection. Output
+/// element kind = closure-return kind (established by the first
+/// invocation; subsequent kind mismatch surfaces a structured
+/// `VMError::RuntimeError` per supervisor D3, 2026-05-24). R8 W4 J.5b:
+/// kind-generic two-pass scan-then-allocate.
 pub(crate) fn handle_select_v2(
-    _vm: &mut VirtualMachine,
+    vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    if args.len() >= 2 {
-        require_closure("select", &args[1])?;
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "Array.select expects 1 argument: (transform)".into(),
+        ));
     }
-    Err(j5_builder_surface("select", args))
+    require_closure("select", &args[1])?;
+    let view = extract_view("select", &args[0])?;
+    let closure = &args[1];
+    run_select_builder(vm, &view, closure, ctx)
 }
 
 /// `arr.find(|x| ...)` — first element satisfying the predicate, or the
@@ -406,30 +686,43 @@ pub(crate) fn handle_single_v2(
 }
 
 /// `arr.takeWhile(|x| ...)` — prefix elements while the predicate
-/// returns true. SURFACE: builds a new TypedArray result whose element
-/// kind needs a builder primitive. J.5 territory.
+/// returns true. Output element kind = input view's elem_type (filter op,
+/// no kind-mismatch territory). R8 W4 J.5b (2026-05-24): kind-generic
+/// two-pass scan-then-allocate via `v2_array_detect` builder primitives.
 pub(crate) fn handle_take_while_v2(
-    _vm: &mut VirtualMachine,
+    vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    if args.len() >= 2 {
-        require_closure("takeWhile", &args[1])?;
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "Array.takeWhile expects 1 argument: (predicate)".into(),
+        ));
     }
-    Err(j5_builder_surface("takeWhile", args))
+    require_closure("takeWhile", &args[1])?;
+    let view = extract_view("takeWhile", &args[0])?;
+    let closure = &args[1];
+    run_filter_builder("takeWhile", FilterMode::TakePrefix, vm, &view, closure, ctx)
 }
 
 /// `arr.skipWhile(|x| ...)` — drop prefix elements while the predicate
-/// returns true. SURFACE: builds a new TypedArray result. J.5 territory.
+/// returns true, then include the remainder unconditionally. Output
+/// element kind = input view's elem_type. R8 W4 J.5b (2026-05-24):
+/// kind-generic two-pass scan-then-allocate.
 pub(crate) fn handle_skip_while_v2(
-    _vm: &mut VirtualMachine,
+    vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    if args.len() >= 2 {
-        require_closure("skipWhile", &args[1])?;
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "Array.skipWhile expects 1 argument: (predicate)".into(),
+        ));
     }
-    Err(j5_builder_surface("skipWhile", args))
+    require_closure("skipWhile", &args[1])?;
+    let view = extract_view("skipWhile", &args[0])?;
+    let closure = &args[1];
+    run_filter_builder("skipWhile", FilterMode::SkipPrefix, vm, &view, closure, ctx)
 }
 
 /// `arr.forEach(|x| ...)` — invoke the closure per element for side
