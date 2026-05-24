@@ -2577,6 +2577,341 @@ pub fn drop_array_n(view: &V2TypedArrayView, n: u32) -> *mut u8 {
     copy_range_to_new_array(view, n, view.len)
 }
 
+// ── R8 W4 J.5f sort/orderBy/thenBy primitives (2026-05-24) ──────────────────
+//
+// Kind-generic permutation + natural-ordering compare primitives backing the
+// `array_sort.rs` sort / orderBy / thenBy handlers (supervisor D4 v0.3 scope:
+// basic sort + orderBy + thenBy; relational joins + groupBy → v0.4).
+//
+// `permute_array` copies elements at the given indices from `view` into a
+// fresh `TypedArray<T>` of the SAME element kind — output elem_type =
+// input elem_type. Heap-element kinds (`String`/`Decimal`/`TypedObject`)
+// bump the per-elem refcount once per stored slot (matches the
+// `copy_range_to_new_array` heap-arm contract; the J.5b `allocate_empty +
+// per-element push_element` pattern works too but allocates one share per
+// push, which over-counts when the same index appears twice in an
+// `indices` slice; the explicit retain-per-stored-slot here is the
+// canonical refcount discipline for the permute case).
+//
+// `cmp_element_natural` compares two `(bits, kind)` pairs read from the
+// SAME view (so the discriminator on both sides is the view's elem_type)
+// per the supervisor D4 v0.3 natural-ordering matrix:
+//   - scalar (F64/F32/I64/I32/I16/I8/U32/U16/U8): direct `<`/`==`
+//   - Bool: false < true
+//   - Char: codepoint order
+//   - String: lexicographic compare
+//   - Decimal: rust_decimal::Decimal::cmp
+//   - TypedObject: SURFACE — natural ordering on heap aggregates needs an
+//     ADR-006-amendment-level decision (`Ord` trait + per-field projection).
+//     Refused per supervisor D3 + ADR-006 §2.7.14 (no fabricated default).
+//
+// NaN handling: `f64::total_cmp` / `f32::total_cmp` — NaN is the largest
+// element (Rust precedent). No silent NaN-skip / NaN-equals fabrication.
+
+/// Compare two elements of the SAME view by natural ordering.
+///
+/// Returns `Some(Ordering)` on success; `None` if the element kind has no
+/// canonical natural ordering at v0.3 (`TypedObject` SURFACE per supervisor
+/// D3 + ADR-006 §2.7.14 — Bool-default refused). Callers surface a
+/// structured `RuntimeError` when `None` is returned.
+///
+/// `bits_a` and `bits_b` are read via `read_element(view, i)` and refer to
+/// the same `view.elem_type` (the SAME-view discipline). For heap-element
+/// reads (`StringV2` / `DecimalV2`), the returned `(bits, kind)` carries
+/// the raw `*const StringObj/DecimalObj` pointer — the comparison here
+/// dereferences but does not retain or release the pointer (the caller's
+/// share remains live for the comparator's borrow).
+#[inline]
+pub fn cmp_element_natural(
+    view: &V2TypedArrayView,
+    bits_a: u64,
+    bits_b: u64,
+) -> Option<std::cmp::Ordering> {
+    use std::cmp::Ordering;
+    match view.elem_type {
+        V2ElemType::F64 => Some(f64::from_bits(bits_a).total_cmp(&f64::from_bits(bits_b))),
+        V2ElemType::F32 => Some(
+            f32::from_bits(bits_a as u32).total_cmp(&f32::from_bits(bits_b as u32)),
+        ),
+        V2ElemType::I64 => Some((bits_a as i64).cmp(&(bits_b as i64))),
+        V2ElemType::I32 => Some((bits_a as u32 as i32).cmp(&(bits_b as u32 as i32))),
+        V2ElemType::I16 => Some((bits_a as u16 as i16).cmp(&(bits_b as u16 as i16))),
+        V2ElemType::I8 => Some((bits_a as u8 as i8).cmp(&(bits_b as u8 as i8))),
+        V2ElemType::U32 => Some((bits_a as u32).cmp(&(bits_b as u32))),
+        V2ElemType::U16 => Some((bits_a as u16).cmp(&(bits_b as u16))),
+        V2ElemType::U8 => Some((bits_a as u8).cmp(&(bits_b as u8))),
+        V2ElemType::Bool => {
+            // false (0) < true (non-zero) — fold any non-zero to true for
+            // ordering parity with Rust `bool::cmp`.
+            let a = bits_a != 0;
+            let b = bits_b != 0;
+            Some(a.cmp(&b))
+        }
+        V2ElemType::Char => {
+            // Codepoint order — `read_element` produces a valid codepoint
+            // per the V2ElemType::Char arm; cmp on the raw u32 produces the
+            // same ordering as `char::cmp`.
+            Some((bits_a as u32).cmp(&(bits_b as u32)))
+        }
+        V2ElemType::String => unsafe {
+            let a_ptr = bits_a as usize as *const StringObj;
+            let b_ptr = bits_b as usize as *const StringObj;
+            if a_ptr.is_null() || b_ptr.is_null() {
+                return None;
+            }
+            let a = StringObj::as_str(a_ptr);
+            let b = StringObj::as_str(b_ptr);
+            Some(a.cmp(b))
+        },
+        V2ElemType::Decimal => unsafe {
+            let a_ptr = bits_a as usize as *const DecimalObj;
+            let b_ptr = bits_b as usize as *const DecimalObj;
+            if a_ptr.is_null() || b_ptr.is_null() {
+                return None;
+            }
+            let a = DecimalObj::value(a_ptr);
+            let b = DecimalObj::value(b_ptr);
+            Some(a.cmp(&b))
+        },
+        V2ElemType::TypedObject => {
+            // SURFACE per supervisor D3 + ADR-006 §2.7.14: natural ordering
+            // on heap aggregates (TypedObject) requires an Ord-trait
+            // mechanism + per-field projection decision. v0.4 territory.
+            // Bool-default refused; return None and let caller surface the
+            // structured RuntimeError naming the elem_type.
+            None
+        }
+        _ => {
+            // Defensive: any other elem_type without natural ordering.
+            // Returns None; caller surfaces structured RuntimeError.
+            #[allow(unreachable_patterns)]
+            None
+        }
+    }
+}
+
+/// Materialize a permutation of `view` into a fresh `TypedArray<T>` of the
+/// same element kind. `indices[i]` selects the source element at position
+/// `i` of the output. Indices out of range `[0, view.len)` are skipped
+/// (defensive — callers should validate up front; out-of-range indices
+/// indicate a sort comparator bug, not a user-input edge).
+///
+/// Refcount discipline for heap-element kinds (`String` / `Decimal` /
+/// `TypedObject`): each stored slot receives one `v2_retain` on the
+/// per-element header so the output array independently owns its shares.
+/// This matches the `copy_range_to_new_array` heap-arm contract — the
+/// caller's input view share is unaffected by this function (read-only).
+///
+/// Used by `array_sort::handle_sort_v2` / `handle_order_by_v2` /
+/// `handle_then_by_v2` to materialize the sorted permutation. Kind-generic
+/// across all 14 monomorphized `TypedArray<T>` carriers per supervisor D4
+/// v0.3 scope.
+pub fn permute_array(view: &V2TypedArrayView, indices: &[u32]) -> *mut u8 {
+    let out_len = indices.len() as u32;
+
+    /// Helper: scalar permute — read source[indices[i]] and write to
+    /// dst[i]. Out-of-range indices are skipped silently (sort
+    /// comparator bugs surface elsewhere); the corresponding output
+    /// slot is left at its `with_capacity` initial bit pattern. Output
+    /// length is set to the number of successfully written slots so
+    /// the output never claims an uninitialized slot is valid.
+    ///
+    /// Returns the actual write count (== indices.len() in the
+    /// well-formed case where every index is in `[0, src_len)`).
+    #[inline]
+    unsafe fn permute_scalar<T: Copy>(
+        src_data: *const T,
+        dst_data: *mut T,
+        src_len: u32,
+        indices: &[u32],
+    ) -> u32 {
+        if src_data.is_null() || dst_data.is_null() {
+            return 0;
+        }
+        let mut w: u32 = 0;
+        for &idx in indices {
+            if idx >= src_len {
+                continue;
+            }
+            unsafe {
+                let v = *src_data.add(idx as usize);
+                *dst_data.add(w as usize) = v;
+            }
+            w += 1;
+        }
+        w
+    }
+
+    match view.elem_type {
+        V2ElemType::F64 => unsafe {
+            let new_arr = TypedArray::<f64>::with_capacity(out_len);
+            let src = view.ptr as *const TypedArray<f64>;
+            let written = permute_scalar((*src).data, (*new_arr).data, view.len, indices);
+            (*new_arr).len = written;
+            let p = new_arr as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_F64);
+            p
+        },
+        V2ElemType::I64 => unsafe {
+            let new_arr = TypedArray::<i64>::with_capacity(out_len);
+            let src = view.ptr as *const TypedArray<i64>;
+            let written = permute_scalar((*src).data, (*new_arr).data, view.len, indices);
+            (*new_arr).len = written;
+            let p = new_arr as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_I64);
+            p
+        },
+        V2ElemType::I32 => unsafe {
+            let new_arr = TypedArray::<i32>::with_capacity(out_len);
+            let src = view.ptr as *const TypedArray<i32>;
+            let written = permute_scalar((*src).data, (*new_arr).data, view.len, indices);
+            (*new_arr).len = written;
+            let p = new_arr as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_I32);
+            p
+        },
+        V2ElemType::Bool => unsafe {
+            let new_arr = TypedArray::<u8>::with_capacity(out_len);
+            let src = view.ptr as *const TypedArray<u8>;
+            let written = permute_scalar((*src).data, (*new_arr).data, view.len, indices);
+            (*new_arr).len = written;
+            let p = new_arr as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_BOOL);
+            p
+        },
+        V2ElemType::I8 => unsafe {
+            let new_arr = TypedArray::<i8>::with_capacity(out_len);
+            let src = view.ptr as *const TypedArray<i8>;
+            let written = permute_scalar((*src).data, (*new_arr).data, view.len, indices);
+            (*new_arr).len = written;
+            let p = new_arr as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_I8);
+            p
+        },
+        V2ElemType::U8 => unsafe {
+            let new_arr = TypedArray::<u8>::with_capacity(out_len);
+            let src = view.ptr as *const TypedArray<u8>;
+            let written = permute_scalar((*src).data, (*new_arr).data, view.len, indices);
+            (*new_arr).len = written;
+            let p = new_arr as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_U8);
+            p
+        },
+        V2ElemType::I16 => unsafe {
+            let new_arr = TypedArray::<i16>::with_capacity(out_len);
+            let src = view.ptr as *const TypedArray<i16>;
+            let written = permute_scalar((*src).data, (*new_arr).data, view.len, indices);
+            (*new_arr).len = written;
+            let p = new_arr as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_I16);
+            p
+        },
+        V2ElemType::U16 => unsafe {
+            let new_arr = TypedArray::<u16>::with_capacity(out_len);
+            let src = view.ptr as *const TypedArray<u16>;
+            let written = permute_scalar((*src).data, (*new_arr).data, view.len, indices);
+            (*new_arr).len = written;
+            let p = new_arr as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_U16);
+            p
+        },
+        V2ElemType::U32 => unsafe {
+            let new_arr = TypedArray::<u32>::with_capacity(out_len);
+            let src = view.ptr as *const TypedArray<u32>;
+            let written = permute_scalar((*src).data, (*new_arr).data, view.len, indices);
+            (*new_arr).len = written;
+            let p = new_arr as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_U32);
+            p
+        },
+        V2ElemType::F32 => unsafe {
+            let new_arr = TypedArray::<f32>::with_capacity(out_len);
+            let src = view.ptr as *const TypedArray<f32>;
+            let written = permute_scalar((*src).data, (*new_arr).data, view.len, indices);
+            (*new_arr).len = written;
+            let p = new_arr as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_F32);
+            p
+        },
+        V2ElemType::Char => unsafe {
+            let new_arr = TypedArray::<char>::with_capacity(out_len);
+            let src = view.ptr as *const TypedArray<char>;
+            let written = permute_scalar((*src).data, (*new_arr).data, view.len, indices);
+            (*new_arr).len = written;
+            let p = new_arr as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_CHAR);
+            p
+        },
+        V2ElemType::String => unsafe {
+            let new_arr = TypedArray::<*const StringObj>::with_capacity(out_len);
+            let src = view.ptr as *const TypedArray<*const StringObj>;
+            let src_data = (*src).data;
+            let dst_data = (*new_arr).data;
+            let mut w: u32 = 0;
+            if !src_data.is_null() && !dst_data.is_null() {
+                for &idx in indices {
+                    if idx >= view.len {
+                        continue;
+                    }
+                    let elem = *src_data.add(idx as usize);
+                    v2_retain(&(*elem).header);
+                    *dst_data.add(w as usize) = elem;
+                    w += 1;
+                }
+            }
+            (*new_arr).len = w;
+            let p = new_arr as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_STRING);
+            p
+        },
+        V2ElemType::Decimal => unsafe {
+            let new_arr = TypedArray::<*const DecimalObj>::with_capacity(out_len);
+            let src = view.ptr as *const TypedArray<*const DecimalObj>;
+            let src_data = (*src).data;
+            let dst_data = (*new_arr).data;
+            let mut w: u32 = 0;
+            if !src_data.is_null() && !dst_data.is_null() {
+                for &idx in indices {
+                    if idx >= view.len {
+                        continue;
+                    }
+                    let elem = *src_data.add(idx as usize);
+                    v2_retain(&(*elem).header);
+                    *dst_data.add(w as usize) = elem;
+                    w += 1;
+                }
+            }
+            (*new_arr).len = w;
+            let p = new_arr as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_DECIMAL);
+            p
+        },
+        V2ElemType::TypedObject => unsafe {
+            let new_arr =
+                TypedArray::<*const TypedObjectStorage>::with_capacity(out_len);
+            let src = view.ptr as *const TypedArray<*const TypedObjectStorage>;
+            let src_data = (*src).data;
+            let dst_data = (*new_arr).data;
+            let mut w: u32 = 0;
+            if !src_data.is_null() && !dst_data.is_null() {
+                for &idx in indices {
+                    if idx >= view.len {
+                        continue;
+                    }
+                    let elem = *src_data.add(idx as usize);
+                    v2_retain(&(*elem).header);
+                    *dst_data.add(w as usize) = elem;
+                    w += 1;
+                }
+            }
+            (*new_arr).len = w;
+            let p = new_arr as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_TYPED_OBJECT);
+            p
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

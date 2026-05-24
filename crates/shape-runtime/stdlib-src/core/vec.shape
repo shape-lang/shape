@@ -5,11 +5,13 @@
 /// Numeric-only methods are defined via `trait NumericVec` + `impl NumericVec for Vec`.
 /// Most methods have pure Shape implementations. Methods that need VM intrinsics
 /// (pop, groupBy) delegate to Rust PHF dispatch; the compiler self-call
-/// guard prevents infinite recursion. `sort` is a pure-Shape implementation
-/// (the self-call guard does NOT cover it — a generic `extend` method with
-/// no method-level type parameter — so `self.sort(cmp)` would recurse
-/// unconditionally). Note: `len`/`isEmpty` are intentionally NOT defined
-/// here — they would intercept dispatch and recurse on Vec<T>.
+/// guard prevents infinite recursion. R8 W4 J.5f (supervisor D4 2026-05-24):
+/// `sort` is now Rust-PHF only (the previous pure-Shape `sort(cmp)` body
+/// couldn't handle the 0-arg `arr.sort()` natural-ordering case + was
+/// element-kind-blind; the J.5f Rust handler dispatches both arities
+/// kind-generically across every V2ElemType carrier). Note: `len`/`isEmpty`
+/// are intentionally NOT defined here — they would intercept dispatch and
+/// recurse on Vec<T>.
 
 // -- Type-agnostic methods --------------------------------------------------
 
@@ -156,56 +158,29 @@ extend Vec<T> {
         -1
     }
 
-    /// Return a new array sorted by `cmp`.
-    ///
-    /// `cmp(a, b)` returns a negative value when `a` should sort before `b`,
-    /// a positive value when `a` should sort after `b`, and zero when they
-    /// compare equal.
-    ///
-    /// Stable: equal elements keep their original relative order — the
-    /// inner loop shifts a neighbour only when it is *strictly* greater
-    /// than the key, so equal keys never cross. This is a pure-Shape
-    /// in-place insertion sort over a private copy of `self`; it
-    /// terminates for every input and never recurses into itself.
-    ///
-    /// The previous body was `self.sort(cmp)` — annotated "keep Rust
-    /// delegation", but method dispatch resolves `self.sort` back to this
-    /// same Shape method (the monomorphization self-call guard only fires
-    /// for methods with their own type parameter; `sort` inherits `T`
-    /// from the `extend Vec<T>` block and has none), so it recursed
-    /// unconditionally and overflowed the stack on the first call.
-    method sort(cmp: (T, T) => int) -> Vec<T> {
-        let n = self.len()
-        // Private working copy — `self` is never mutated.
-        let mut src = []
-        for item in self { src.push(item) }
-        if n < 2 { return src }
-
-        // Insertion sort: grow a sorted prefix `src[0..i]` one element at
-        // a time. `key` moves left past every strictly-greater neighbour.
-        let mut i = 1
-        while i < n {
-            let key = src[i]
-            let mut j = i - 1
-            while j >= 0 {
-                let cur = src[j]
-                // The `c: int` annotation pins the comparator's return
-                // type so the comparison below type-checks under strict
-                // typing (a bare `cmp(...)` call otherwise infers as
-                // `unknown`).
-                let c: int = cmp(cur, key)
-                if c > 0 {
-                    src[j + 1] = cur
-                    j = j - 1
-                } else {
-                    break
-                }
-            }
-            src[j + 1] = key
-            i = i + 1
-        }
-        src
-    }
+    // `sort` is intentionally NOT defined as a pure-Shape `extend Vec<T>`
+    // method here. The R8 W4 J.5f (supervisor D4 2026-05-24, v0.3 scope)
+    // Rust PHF handler at `array_sort::handle_sort_v2` is the canonical
+    // dispatcher for BOTH `arr.sort()` (natural ordering, no comparator)
+    // and `arr.sort(|a, b| cmp)` (closure comparator). Defining a
+    // Shape-side `extend Vec<T> { method sort(cmp) ... }` here would
+    // intercept dispatch and consume the 0-arg case as `sort(cmp=null)`
+    // → null-callee failure on first comparator invocation. The PHF
+    // handler is kind-generic across all 14 V2ElemType carriers + stable
+    // (bottom-up merge sort) + supports natural-ordering for scalar /
+    // String / Decimal / Char / Bool element kinds + structured surface
+    // on TypedObject natural-ordering (v0.4 territory per ADR-006
+    // §2.7.14 — Bool-default ordering refused).
+    //
+    // Pre-J.5f the body was a pure-Shape insertion sort with a required
+    // `cmp` parameter that broke `arr.sort()` (no args) by passing null
+    // to the comparator. Pre-D-α.1 (R7 W3 close `572791a3`) the body was
+    // `self.sort(cmp)` (self-recursing — generic extend method without
+    // its own type parameter; the monomorphization self-call guard only
+    // fires for methods with their own type parameter). The R8 W4 J.5f
+    // deletion lets dispatch fall through to the Rust PHF handler,
+    // which handles both arities + every supervisor D4 v0.3 element
+    // kind uniformly.
 
     method includes(value: T) -> bool {
         for item in self {
