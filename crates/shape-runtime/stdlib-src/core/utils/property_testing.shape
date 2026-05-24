@@ -37,8 +37,18 @@ pub fn property(name, n_trials, gen_fn, prop_fn) {
 ///
 /// @param tests - Array of { name, trials, gen, prop } objects
 /// @returns { passed, failed, results }
+///
+/// Note: `Array<int>` is the strict-typing-required concrete element type
+/// for the empty-array accumulator (Cluster C of R8 W6 audit). The real
+/// payload is the TypedObject returned by `property()`, but the strict
+/// typing pass rejects anonymous typed-object and named typed-object
+/// empty-array bindings at module-load time; only primitive element
+/// annotations are honored. End-to-end behaviour for this function is
+/// blocked by Cluster B (generic-arithmetic inference loss in `property`
+/// callees) and is tracked alongside the broader pure-shape stdlib
+/// inference fix follow-up.
 pub fn run_properties(tests) {
-    let mut results = [];
+    let mut results: Array<int> = [];
     var passed_count = 0;
     var failed_count = 0;
 
@@ -63,39 +73,53 @@ pub fn run_properties(tests) {
 // ===== Built-in Generators =====
 
 /// Generate random integer in [lo, hi]
-pub fn gen_int(lo, hi) {
+pub fn gen_int(lo: number, hi: number) {
     || __intrinsic_random_int(lo, hi)
 }
 
 /// Generate random float in [lo, hi)
-pub fn gen_float(lo, hi) {
-    || lo + __intrinsic_random() * (hi - lo)
+pub fn gen_float(lo: number, hi: number) {
+    || {
+        let r: number = __intrinsic_random();
+        let span: number = hi - lo;
+        lo + r * span
+    }
 }
 
 /// Generate random boolean
 pub fn gen_bool() {
-    || __intrinsic_random() < 0.5
+    || {
+        let r: number = __intrinsic_random();
+        r < 0.5
+    }
 }
 
 /// Generate random string of given length from ascii letters
-pub fn gen_string(max_len) {
+pub fn gen_string(max_len: number) {
     || {
-        let chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-        let n = __intrinsic_random_int(0, max_len);
-        var s = "";
+        let chars: string = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        let n: number = __intrinsic_random_int(0, max_len);
+        var s: string = "";
         for i in range(0, n) {
-            let idx = __intrinsic_random_int(0, 61);
-            s = s + chars[idx];
+            let idx: number = __intrinsic_random_int(0, 61);
+            let ch: string = chars[idx];
+            s = s + ch;
         }
         s
     }
 }
 
-/// Generate random array of given max length using element generator
-pub fn gen_array(max_len, elem_gen) {
+/// Generate random array of given max length using element generator.
+///
+/// Note: strict typing requires a concrete element type for the empty-array
+/// accumulator. `Array<int>` is chosen as the representative concrete element
+/// (matches `gen_int`); generators returning other types are v0.3-gating until
+/// generic empty-array element-type inference (Cluster C of R8 W6 audit, with
+/// the broader generic-arithmetic inference loss in Cluster B) is implemented.
+pub fn gen_array(max_len: number, elem_gen) {
     || {
         let n = __intrinsic_random_int(0, max_len);
-        let mut arr = [];
+        let mut arr: Array<int> = [];
         for i in range(0, n) {
             arr.push(elem_gen());
         }
@@ -104,7 +128,7 @@ pub fn gen_array(max_len, elem_gen) {
 }
 
 /// Generate a value picked uniformly from a list of choices
-pub fn gen_one_of(choices) {
+pub fn gen_one_of(choices: Array<int>) {
     || {
         let idx = __intrinsic_random_int(0, choices.len() - 1);
         choices[idx]

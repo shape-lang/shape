@@ -5,7 +5,7 @@
 
 // percentile is defined in math.shape but each stdlib file is compiled
 // independently, so we call the intrinsic directly.
-fn percentile(series, p) {
+fn percentile(series: Array<number>, p: number) {
     __intrinsic_percentile(series, p)
 }
 
@@ -20,7 +20,7 @@ type MonteCarloConfig {
 /// @param sim_fn - function (i, config) => result
 /// @param config - optional config (seed, collect_results)
 pub fn monte_carlo(
-    n_sims,
+    n_sims: int,
     sim_fn,
     config: MonteCarloConfig = { seed: 0, collect_results: true }
 ) {
@@ -30,7 +30,7 @@ pub fn monte_carlo(
         __intrinsic_random_seed(cfg.seed);
     }
 
-    let mut results = [];
+    let mut results: Array<number> = [];
 
     for i in range(0, n_sims) {
         let r = sim_fn(i, cfg);
@@ -59,7 +59,7 @@ pub fn monte_carlo(
 /// @param config - optional config (seed, collect_results)
 /// @returns { simulations, results } where results are pair averages
 pub fn monte_carlo_antithetic(
-    n_sims,
+    n_sims: int,
     sim_fn,
     config: MonteCarloConfig = { seed: 0, collect_results: true }
 ) {
@@ -69,11 +69,11 @@ pub fn monte_carlo_antithetic(
         __intrinsic_random_seed(cfg.seed);
     }
 
-    let mut results = [];
+    let mut results: Array<number> = [];
 
     for i in range(0, n_sims) {
-        let r1 = sim_fn(i, false);
-        let r2 = sim_fn(i, true);
+        let r1: number = sim_fn(i, false);
+        let r2: number = sim_fn(i, true);
         let avg = (r1 + r2) / 2.0;
         if cfg.collect_results {
             results.push(avg);
@@ -99,9 +99,9 @@ pub fn monte_carlo_antithetic(
 /// @param config - optional config (seed, collect_results)
 /// @returns { simulations, results, raw_mean, adjusted_mean, variance_reduction }
 pub fn monte_carlo_control_variate(
-    n_sims,
+    n_sims: int,
     sim_fn,
-    control_mean,
+    control_mean: number,
     config: MonteCarloConfig = { seed: 0, collect_results: true }
 ) {
     let cfg: MonteCarloConfig = config;
@@ -110,8 +110,8 @@ pub fn monte_carlo_control_variate(
         __intrinsic_random_seed(cfg.seed);
     }
 
-    let mut values = [];
-    let mut controls = [];
+    let mut values: Array<number> = [];
+    let mut controls: Array<number> = [];
 
     for i in range(0, n_sims) {
         let r = sim_fn(i);
@@ -121,35 +121,40 @@ pub fn monte_carlo_control_variate(
 
     // Compute optimal coefficient c = Cov(X,Y) / Var(Y)
     let n = values.len();
-    let mean_x = __intrinsic_mean(values);
-    let mean_y = __intrinsic_mean(controls);
+    let mean_x: number = __intrinsic_mean(values);
+    let mean_y: number = __intrinsic_mean(controls);
 
-    let mut cov_xy = 0.0;
-    let mut var_y = 0.0;
+    let mut cov_xy: number = 0.0;
+    let mut var_y: number = 0.0;
     for i in range(0, n) {
-        let dx = values[i] - mean_x;
-        let dy = controls[i] - mean_y;
-        cov_xy = cov_xy + dx * dy;
-        var_y = var_y + dy * dy;
+        let dx: number = values[i] - mean_x;
+        let dy: number = controls[i] - mean_y;
+        let cov_inc: number = dx * dy;
+        let var_inc: number = dy * dy;
+        cov_xy = cov_xy + cov_inc;
+        var_y = var_y + var_inc;
     }
 
-    let mut c_star = 0.0;
+    let mut c_star: number = 0.0;
     if var_y > 0.0 {
-        c_star = cov_xy / var_y;
+        let ratio: number = cov_xy / var_y;
+        c_star = ratio;
     }
 
     // Compute adjusted values
-    let mut adjusted = [];
+    let mut adjusted: Array<number> = [];
     for i in range(0, n) {
         adjusted.push(values[i] - c_star * (controls[i] - control_mean));
     }
 
-    let adjusted_mean = __intrinsic_mean(adjusted);
-    let raw_var = __intrinsic_std(values);
-    let adj_var = __intrinsic_std(adjusted);
-    let mut var_reduction = 0.0;
+    let adjusted_mean: number = __intrinsic_mean(adjusted);
+    let raw_var: number = __intrinsic_std(values);
+    let adj_var: number = __intrinsic_std(adjusted);
+    let mut var_reduction: number = 0.0;
     if raw_var > 0.0 {
-        var_reduction = 1.0 - (adj_var * adj_var) / (raw_var * raw_var);
+        let adj_var_sq: number = adj_var * adj_var;
+        let raw_var_sq: number = raw_var * raw_var;
+        var_reduction = 1.0 - adj_var_sq / raw_var_sq;
     }
 
     return {
@@ -171,7 +176,7 @@ pub fn monte_carlo_control_variate(
 /// @param config - optional config (seed, collect_results)
 /// @returns { simulations, results }
 pub fn monte_carlo_stratified(
-    n_sims,
+    n_sims: int,
     sim_fn,
     config: MonteCarloConfig = { seed: 0, collect_results: true }
 ) {
@@ -181,13 +186,17 @@ pub fn monte_carlo_stratified(
         __intrinsic_random_seed(cfg.seed);
     }
 
-    let mut results = [];
+    let mut results: Array<number> = [];
     let n = n_sims;
 
     for i in range(0, n) {
         // Stratified sample: u in [i/n, (i+1)/n)
-        let u = (i + __intrinsic_random()) / n;
-        let r = sim_fn(i, u);
+        let i_f: number = i as number;
+        let n_f: number = n as number;
+        let rand_val: number = __intrinsic_random();
+        let stratum: number = i_f + rand_val;
+        let u: number = stratum / n_f;
+        let r: number = sim_fn(i, u);
         if cfg.collect_results {
             results.push(r);
         }
@@ -200,7 +209,7 @@ pub fn monte_carlo_stratified(
 }
 
 /// Compute summary statistics for Monte Carlo results
-pub fn monte_carlo_stats(results) {
+pub fn monte_carlo_stats(results: Array<number>) {
     let n = results.len();
     if n == 0 {
         return {
@@ -217,10 +226,11 @@ pub fn monte_carlo_stats(results) {
         };
     }
 
-    let mean_val = __intrinsic_mean(results);
-    let std_val = __intrinsic_std(results);
-    let stderr = std_val / sqrt(n);
-    let z = 1.96; // 95% CI
+    let mean_val: number = __intrinsic_mean(results);
+    let std_val: number = __intrinsic_std(results);
+    let n_f: number = n as number;
+    let stderr: number = std_val / sqrt(n_f);
+    let z: number = 1.96; // 95% CI
 
     return {
         count: n,
