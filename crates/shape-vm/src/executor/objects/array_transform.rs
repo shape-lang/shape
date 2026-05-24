@@ -90,8 +90,11 @@
 
 use shape_runtime::context::ExecutionContext;
 use crate::executor::VirtualMachine;
+use crate::executor::v2_handlers::v2_array_detect::{
+    as_v2_typed_array, concat_arrays, drop_array_n, slice_array, take_array, V2TypedArrayView,
+};
 use shape_value::heap_value::HeapKind;
-use shape_value::{KindedSlot, NativeKind, VMError};
+use shape_value::{KindedSlot, NativeKind, ValueSlot, VMError};
 
 // ───────────────────────────────────────────────────────────────────────────
 // Wave 2 Round 3a' sub-cluster α — v2-raw `TypedArray<*const StringObj>` /
@@ -245,6 +248,57 @@ fn ckpt2_surface(op: &'static str, args: &[KindedSlot]) -> VMError {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// J.5a primitive-routing helpers (R8 W3, 2026-05-24)
+//
+// Per `docs/cluster-audits/v0.3-j4-rest-reaudit.md` §6 J.5a row: the
+// `slice / concat / take / drop / skip` handlers route through the
+// non-blocking kind-generic primitives added to `v2_array_detect`. Each
+// helper extracts the v2 typed array view (kind = `Ptr(HeapKind::TypedArray)`
+// per r5c-2-β-CKPT-C single carrier) before delegating to the per-T primitive.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Extract the kind-generic `V2TypedArrayView` from the receiver
+/// `KindedSlot`. Mirror of `array_basic::extract_typed_array_view`; same
+/// single-carrier discipline.
+#[inline]
+fn extract_view(slot: &KindedSlot) -> Option<V2TypedArrayView> {
+    if slot.kind != NativeKind::Ptr(HeapKind::TypedArray) {
+        return None;
+    }
+    as_v2_typed_array(slot.slot.raw(), slot.kind)
+}
+
+/// Wrap a freshly-allocated v2 typed array pointer as a `KindedSlot` with
+/// `NativeKind::Ptr(HeapKind::TypedArray)` (the single carrier kind per
+/// r5c-2-β-CKPT-C u64-carrier-disambiguation).
+#[inline]
+fn new_array_slot(ptr: *mut u8) -> KindedSlot {
+    KindedSlot::new(
+        ValueSlot::from_u64(ptr as usize as u64),
+        NativeKind::Ptr(HeapKind::TypedArray),
+    )
+}
+
+/// Coerce an integer-family `KindedSlot` to a clamped `u32` count, treating
+/// negatives as 0. Used by `take` / `drop` / `slice` arg parsing.
+#[inline]
+fn clamp_count(slot: &KindedSlot, op: &'static str, arg_name: &'static str) -> Result<u32, VMError> {
+    let n = slot.as_i64().ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "Array.{}: {} must be an integer, got kind {:?}",
+            op, arg_name, slot.kind
+        ))
+    })?;
+    if n < 0 {
+        Ok(0)
+    } else if n > u32::MAX as i64 {
+        Ok(u32::MAX)
+    } else {
+        Ok(n as u32)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // MethodFnV2 (native ABI) public handlers — ckpt-2 surface-and-stop stubs
 // Signatures preserved for `method_registry.rs` PHF integrity.
 // ═══════════════════════════════════════════════════════════════════════════
@@ -292,49 +346,134 @@ pub(crate) fn handle_sort_v2(
     Err(ckpt2_surface("sort", args))
 }
 
-/// `arr.slice(start, end?)` — range projection.
+/// `arr.slice(start, end?)` — range projection. Kind-generic via the
+/// R8 W3 J.5a `slice_array` primitive. `start` and `end` are clamped to
+/// `[0, view.len]`; if `end` is omitted (1-arg form), defaults to `view.len`.
 pub(crate) fn handle_slice_v2(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(ckpt2_surface("slice", args))
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "Array.slice expects 1 or 2 arguments (start, [end])".into(),
+        ));
+    }
+    let view = extract_view(&args[0]).ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "Array.slice: expected v2 TypedArray receiver, got kind {:?}",
+            args[0].kind
+        ))
+    })?;
+    let start = clamp_count(&args[1], "slice", "start")?;
+    let end = if args.len() >= 3 {
+        clamp_count(&args[2], "slice", "end")?
+    } else {
+        view.len
+    };
+    let new_ptr = slice_array(&view, start, end);
+    Ok(new_array_slot(new_ptr))
 }
 
-/// `arr.concat(other)` — homogeneous-element-kind concat.
+/// `arr.concat(other)` — homogeneous-element-kind concat. Kind-generic via
+/// the R8 W3 J.5a `concat_arrays` primitive. Both operands must be v2 typed
+/// arrays with matching element types (mismatch surfaces a structured
+/// `TypeError` per ADR-006 §2.7.5 stamp-at-compile-time — no coercion).
 pub(crate) fn handle_concat_v2(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(ckpt2_surface("concat", args))
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "Array.concat expects 1 argument (other)".into(),
+        ));
+    }
+    let view_a = extract_view(&args[0]).ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "Array.concat: expected v2 TypedArray receiver, got kind {:?}",
+            args[0].kind
+        ))
+    })?;
+    let view_b = extract_view(&args[1]).ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "Array.concat: expected v2 TypedArray argument, got kind {:?}",
+            args[1].kind
+        ))
+    })?;
+    let new_ptr = concat_arrays(&view_a, &view_b)
+        .map_err(|e| VMError::RuntimeError(format!("Array.concat: {}", e)))?;
+    Ok(new_array_slot(new_ptr))
 }
 
-/// `arr.take(n)` — first-N projection.
+/// `arr.take(n)` — first-N projection. Kind-generic via the R8 W3 J.5a
+/// `take_array` primitive. `n` clamped to `[0, view.len]`; negative `n`
+/// produces an empty array.
 pub(crate) fn handle_take_v2(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(ckpt2_surface("take", args))
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "Array.take expects 1 argument (n)".into(),
+        ));
+    }
+    let view = extract_view(&args[0]).ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "Array.take: expected v2 TypedArray receiver, got kind {:?}",
+            args[0].kind
+        ))
+    })?;
+    let n = clamp_count(&args[1], "take", "n")?;
+    let new_ptr = take_array(&view, n);
+    Ok(new_array_slot(new_ptr))
 }
 
-/// `arr.drop(n)` — skip-first-N projection.
+/// `arr.drop(n)` — skip-first-N projection. Kind-generic via the R8 W3 J.5a
+/// `drop_array_n` primitive. `n` clamped to `[0, view.len]`.
 pub(crate) fn handle_drop_v2(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(ckpt2_surface("drop", args))
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "Array.drop expects 1 argument (n)".into(),
+        ));
+    }
+    let view = extract_view(&args[0]).ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "Array.drop: expected v2 TypedArray receiver, got kind {:?}",
+            args[0].kind
+        ))
+    })?;
+    let n = clamp_count(&args[1], "drop", "n")?;
+    let new_ptr = drop_array_n(&view, n);
+    Ok(new_array_slot(new_ptr))
 }
 
-/// `arr.skip(n)` — alias for drop.
+/// `arr.skip(n)` — alias for `drop`. Same R8 W3 J.5a `drop_array_n`
+/// primitive routing.
 pub(crate) fn handle_skip_v2(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(ckpt2_surface("skip", args))
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "Array.skip expects 1 argument (n)".into(),
+        ));
+    }
+    let view = extract_view(&args[0]).ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "Array.skip: expected v2 TypedArray receiver, got kind {:?}",
+            args[0].kind
+        ))
+    })?;
+    let n = clamp_count(&args[1], "skip", "n")?;
+    let new_ptr = drop_array_n(&view, n);
+    Ok(new_array_slot(new_ptr))
 }
 
 /// `arr.flatten()` — one-level array-of-array flatten.

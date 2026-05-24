@@ -19,11 +19,14 @@
 //! Decimal / BigInt / Char / TypedObject`) — cascade-breaks here as the
 //! deletion's consumer cascade tier 2.
 //!
-//! `op_array_concat` body is replaced with structured surface-and-stop
-//! returning `VMError::NotImplemented`. The cross-variant TypeError
-//! discrimination via `type_pair_static_str` is DELETED — it produced
-//! `&'static str` from `TypedArrayData::type_name()` which is gone.
-//! `concat_typed_arrays` is DELETED.
+//! `op_array_concat` body was surface-and-stop until R8 W3 J.5a
+//! (2026-05-24): it now routes through the kind-generic
+//! `v2_array_detect::concat_arrays` primitive (14-arm match on
+//! `V2ElemType`), preserving the same single-carrier (`Ptr(HeapKind::TypedArray)`)
+//! ABI and refcount discipline. The cross-variant TypeError discrimination
+//! via `type_pair_static_str` is DELETED — it produced `&'static str` from
+//! `TypedArrayData::type_name()` which is gone. The legacy `concat_typed_arrays`
+//! is DELETED.
 //!
 //! PRESERVED:
 //! - `op_string_concat` — no `TypedArrayData` dependency; operates on
@@ -45,6 +48,7 @@
 //! per ckpt-1 close-marker at `heap_value.rs:3956`).
 
 use crate::executor::VirtualMachine;
+use crate::executor::v2_handlers::v2_array_detect::{as_v2_typed_array, concat_arrays};
 use crate::executor::vm_impl::stack::drop_with_kind;
 use shape_value::heap_value::HeapKind;
 use shape_value::{NativeKind, VMError};
@@ -101,14 +105,13 @@ impl VirtualMachine {
     ///
     /// Stack: `[a, b]` → `[a ++ b]`.
     ///
-    /// V3-S5 ckpt-3 surface-and-stop. The previous body recovered two
-    /// `Arc<TypedArrayData>` via `Arc::<TypedArrayData>::from_raw` and
-    /// dispatched through 16 per-variant pair-arms in `concat_typed_arrays`;
-    /// the type is gone (ckpt-1 deletion). Post-ckpt-6 the body becomes a
-    /// per-T v2-raw `TypedArray<T>` extend dispatch.
-    ///
-    /// Releases both operand shares before erroring to preserve refcount
-    /// discipline per ADR-006 §2.7.7.
+    /// R8 W3 J.5a (2026-05-24) — routes through the kind-generic
+    /// `v2_array_detect::concat_arrays` primitive. Both operands must carry
+    /// the `Ptr(HeapKind::TypedArray)` carrier kind (r5c-2-β-CKPT-C single
+    /// carrier) and have matching `V2ElemType` (mismatch surfaces as a
+    /// structured `TypeError` per ADR-006 §2.7.5; no coercion). Operand
+    /// shares are released after the result has been built, preserving
+    /// refcount discipline per ADR-006 §2.7.7.
     #[inline]
     pub(in crate::executor) fn op_array_concat(&mut self) -> Result<(), VMError> {
         // Pop b then a (LIFO).
@@ -122,54 +125,51 @@ impl VirtualMachine {
                 NativeKind::Ptr(HeapKind::TypedArray),
             )
         );
-
-        // Always release the popped shares — surface-and-stop emits an
-        // error regardless of operand-kind validity, but the refcount
-        // discipline is preserved per ADR-006 §2.7.7.
-        drop_with_kind(b_bits, b_kind);
-        drop_with_kind(a_bits, a_kind);
-
         if !kinds_ok {
+            drop_with_kind(b_bits, b_kind);
+            drop_with_kind(a_bits, a_kind);
             return Err(VMError::TypeError {
                 expected: "two TypedArray operands for ArrayConcat",
                 got: "non-TypedArray kind",
             });
         }
-        Err(ckpt3_surface("ArrayConcat", a_kind, b_kind))
+
+        let view_a = as_v2_typed_array(a_bits, a_kind).ok_or_else(|| {
+            drop_with_kind(b_bits, b_kind);
+            drop_with_kind(a_bits, a_kind);
+            VMError::RuntimeError(
+                "ArrayConcat: operand A is not a v2 TypedArray (header mismatch)".into(),
+            )
+        })?;
+        let view_b = as_v2_typed_array(b_bits, b_kind).ok_or_else(|| {
+            drop_with_kind(b_bits, b_kind);
+            drop_with_kind(a_bits, a_kind);
+            VMError::RuntimeError(
+                "ArrayConcat: operand B is not a v2 TypedArray (header mismatch)".into(),
+            )
+        })?;
+
+        let result = concat_arrays(&view_a, &view_b);
+
+        // Release input shares — heap-element variants of `concat_arrays`
+        // retained per-element, so the inputs' owning shares are no longer
+        // needed.
+        drop_with_kind(b_bits, b_kind);
+        drop_with_kind(a_bits, a_kind);
+
+        let new_ptr = result.map_err(|e| VMError::RuntimeError(format!("ArrayConcat: {}", e)))?;
+        self.push_kinded(new_ptr as usize as u64, NativeKind::Ptr(HeapKind::TypedArray))
     }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// V3-S5 ckpt-3 surface-and-stop builder
+// V3-S5 ckpt-3 surface-and-stop builder — RETIRED by R8 W3 J.5a (2026-05-24)
+//
+// The previous surface-and-stop body for `op_array_concat` was retired when
+// the kind-generic `v2_array_detect::concat_arrays` primitive landed
+// (see `op_array_concat` above for the routing). No remaining caller in
+// this file.
 // ═══════════════════════════════════════════════════════════════════════════
-
-/// Surface-and-stop body for `op_array_concat`.
-#[cold]
-#[inline(never)]
-fn ckpt3_surface(op: &'static str, a_kind: NativeKind, b_kind: NativeKind) -> VMError {
-    VMError::NotImplemented(format!(
-        "{op}: SURFACE — V3-S5 ckpt-3 consumer-cascade tier 2 surface. \
-         `TypedArrayData` enum DELETED at ckpt-1 (2026-05-15) per W12-\
-         typed-array-data-deletion audit §3.5 + ADR-006 §2.7.24 Q25.A \
-         SUPERSEDED. The previous `Arc<TypedArrayData>` operand-recovery \
-         + per-variant pair-arm dispatch path (~32 references across \
-         `concat_typed_arrays` 16 pair-arms) cascade-broke at the enum \
-         deletion site (`crates/shape-value/src/heap_value.rs:3944`). \
-         Post-deletion target is the v2-raw `TypedArray<T>` flat-struct \
-         carrier per audit §1.2 + §A.3 + §3.1 scalar recipe + §2.2 \
-         heap-element variants — per-T `data.extend_from_slice()` append; \
-         landing across ckpt-3 (this file plus array_ops/typed_array_methods/\
-         iterator_methods/array_sort/property_access/array_query) + ckpt-4 \
-         (Buf<T> / HeapValue::TypedArray arm / HeapKind::TypedArray \
-         ordinal) + ckpt-5 (wire/json/marshal + 4-table lockstep) + ckpt-6 \
-         (JIT FFI). Operand kinds: a={a_kind:?}, b={b_kind:?}. UNREACHABLE \
-         until ckpt-6 STRICT close. REFUSED ON SIGHT: TypedArrayData \
-         resurrection under any rename (Refusal #1, W12 audit §7).",
-        op = op,
-        a_kind = a_kind,
-        b_kind = b_kind,
-    ))
-}
 
 /// Read a `string` or `char` operand's payload as a borrow.
 ///

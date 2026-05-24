@@ -38,8 +38,8 @@
 //! on sight.
 
 use crate::executor::v2_handlers::v2_array_detect::{
-    as_v2_typed_array, clone_array, pop_element, push_element, read_element, write_element,
-    V2TypedArrayView,
+    as_v2_typed_array, clone_array, pop_element, push_element, read_element, reverse_array,
+    write_element, V2TypedArrayView,
 };
 use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
@@ -78,9 +78,10 @@ fn pair_to_slot((bits, kind): (u64, NativeKind)) -> KindedSlot {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Surface-and-stop body for handlers that have not yet migrated to the
-/// kind-generic v2-raw `TypedArray<T>` carrier (reverse / push / pop / zip /
-/// clone). These mutate the receiver or produce a new array — distinct from
-/// the WS-8 read-only header handlers.
+/// kind-generic v2-raw `TypedArray<T>` carrier (zip remains here; reverse
+/// migrated R8 W3 J.5a via `reverse_array` primitive). These mutate the
+/// receiver or produce a new array — distinct from the WS-8 read-only
+/// header handlers.
 #[cold]
 #[inline(never)]
 fn ckpt5_surface(op: &'static str, args: &[KindedSlot]) -> VMError {
@@ -201,14 +202,26 @@ pub(crate) fn handle_last_v2(
 // per W16.2-J audit §3 REVISED. Refusal #1 binding: surface-and-stop
 // disallows fabricating a primitive on-the-fly.
 
-/// `arr.reverse()` — produce a reversed array. No `v2_array_detect`
-/// reverse primitive at HEAD; surfaces W17/J.4-rest territory.
+/// `arr.reverse()` — produce a reversed array. Kind-generic via the
+/// `v2_array_detect::reverse_array` primitive (R8 W3 J.5a, 2026-05-24);
+/// returns a fresh `Ptr(HeapKind::TypedArray)` slot with the same stamped
+/// element-type byte and elements in reversed order.
 pub(crate) fn handle_reverse_v2(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(ckpt5_surface("reverse", args))
+    let view = extract_typed_array_view(&args[0]).ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "Array.reverse: expected v2 TypedArray receiver, got kind {:?}",
+            args[0].kind
+        ))
+    })?;
+    let new_ptr = reverse_array(&view);
+    Ok(KindedSlot::new(
+        ValueSlot::from_u64(new_ptr as usize as u64),
+        NativeKind::Ptr(HeapKind::TypedArray),
+    ))
 }
 
 /// `arr.push(elem)` — append element, return the new length. Kind-generic

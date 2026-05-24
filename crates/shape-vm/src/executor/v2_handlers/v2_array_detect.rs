@@ -1828,6 +1828,755 @@ pub fn diff_f64(view: &V2TypedArrayView) -> Option<*mut u8> {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// J.5a non-blocking primitives (2026-05-24)
+//
+// Per `docs/cluster-audits/v0.3-j4-rest-reaudit.md` §6 J.5a row: kind-generic
+// reverse / concat / slice / take / drop primitives over the existing 14-arm
+// `V2ElemType` dispatch shape. Each primitive mirrors the `clone_array`
+// scaffold (`v2_array_detect.rs:1429-1670`): allocate a fresh `TypedArray<T>`
+// with the same element type, copy the relevant range, retain per-element for
+// heap-element kinds (String / Decimal / TypedObject), stamp the result's
+// element-type byte, return the raw pointer.
+//
+// Refusal #10 binding (re-audit §6): `flatten` is NOT implemented here —
+// the outer carrier shape (`TypedArray<*const TypedArray<T>>`) requires the
+// J.5d tuple-carrier-class architectural decision (§3 of the re-audit). The
+// `handle_flatten_v2` site remains surface-and-stop pending that gate.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Produce a reversed copy of `view`. Kind-generic over the 14 `V2ElemType`
+/// variants. For heap-element variants (String / Decimal / TypedObject) the
+/// new array's pointers share the same heap targets as the source; each is
+/// retained per-element so both arrays own valid shares.
+///
+/// Allocator + stamp shape mirrors `clone_array`; only the per-element copy
+/// loop differs (reverse iteration).
+pub fn reverse_array(view: &V2TypedArrayView) -> *mut u8 {
+    // Helper: copy `Copy` scalar elements in reverse order.
+    #[inline]
+    unsafe fn copy_reverse_scalar<T: Copy>(
+        src_data: *const T,
+        dst_data: *mut T,
+        len: usize,
+    ) {
+        if len == 0 || src_data.is_null() || dst_data.is_null() {
+            return;
+        }
+        for i in 0..len {
+            unsafe {
+                *dst_data.add(i) = *src_data.add(len - 1 - i);
+            }
+        }
+    }
+
+    match view.elem_type {
+        V2ElemType::F64 => {
+            let new_arr = TypedArray::<f64>::with_capacity(view.len);
+            unsafe {
+                let src = view.ptr as *const TypedArray<f64>;
+                copy_reverse_scalar((*src).data, (*new_arr).data, view.len as usize);
+                (*new_arr).len = view.len;
+                let p = new_arr as *mut u8;
+                stamp_elem_type(p, ELEM_TYPE_F64);
+                p
+            }
+        }
+        V2ElemType::I64 => {
+            let new_arr = TypedArray::<i64>::with_capacity(view.len);
+            unsafe {
+                let src = view.ptr as *const TypedArray<i64>;
+                copy_reverse_scalar((*src).data, (*new_arr).data, view.len as usize);
+                (*new_arr).len = view.len;
+                let p = new_arr as *mut u8;
+                stamp_elem_type(p, ELEM_TYPE_I64);
+                p
+            }
+        }
+        V2ElemType::I32 => {
+            let new_arr = TypedArray::<i32>::with_capacity(view.len);
+            unsafe {
+                let src = view.ptr as *const TypedArray<i32>;
+                copy_reverse_scalar((*src).data, (*new_arr).data, view.len as usize);
+                (*new_arr).len = view.len;
+                let p = new_arr as *mut u8;
+                stamp_elem_type(p, ELEM_TYPE_I32);
+                p
+            }
+        }
+        V2ElemType::Bool => {
+            let new_arr = TypedArray::<u8>::with_capacity(view.len);
+            unsafe {
+                let src = view.ptr as *const TypedArray<u8>;
+                copy_reverse_scalar((*src).data, (*new_arr).data, view.len as usize);
+                (*new_arr).len = view.len;
+                let p = new_arr as *mut u8;
+                stamp_elem_type(p, ELEM_TYPE_BOOL);
+                p
+            }
+        }
+        V2ElemType::I8 => {
+            let new_arr = TypedArray::<i8>::with_capacity(view.len);
+            unsafe {
+                let src = view.ptr as *const TypedArray<i8>;
+                copy_reverse_scalar((*src).data, (*new_arr).data, view.len as usize);
+                (*new_arr).len = view.len;
+                let p = new_arr as *mut u8;
+                stamp_elem_type(p, ELEM_TYPE_I8);
+                p
+            }
+        }
+        V2ElemType::U8 => {
+            let new_arr = TypedArray::<u8>::with_capacity(view.len);
+            unsafe {
+                let src = view.ptr as *const TypedArray<u8>;
+                copy_reverse_scalar((*src).data, (*new_arr).data, view.len as usize);
+                (*new_arr).len = view.len;
+                let p = new_arr as *mut u8;
+                stamp_elem_type(p, ELEM_TYPE_U8);
+                p
+            }
+        }
+        V2ElemType::I16 => {
+            let new_arr = TypedArray::<i16>::with_capacity(view.len);
+            unsafe {
+                let src = view.ptr as *const TypedArray<i16>;
+                copy_reverse_scalar((*src).data, (*new_arr).data, view.len as usize);
+                (*new_arr).len = view.len;
+                let p = new_arr as *mut u8;
+                stamp_elem_type(p, ELEM_TYPE_I16);
+                p
+            }
+        }
+        V2ElemType::U16 => {
+            let new_arr = TypedArray::<u16>::with_capacity(view.len);
+            unsafe {
+                let src = view.ptr as *const TypedArray<u16>;
+                copy_reverse_scalar((*src).data, (*new_arr).data, view.len as usize);
+                (*new_arr).len = view.len;
+                let p = new_arr as *mut u8;
+                stamp_elem_type(p, ELEM_TYPE_U16);
+                p
+            }
+        }
+        V2ElemType::U32 => {
+            let new_arr = TypedArray::<u32>::with_capacity(view.len);
+            unsafe {
+                let src = view.ptr as *const TypedArray<u32>;
+                copy_reverse_scalar((*src).data, (*new_arr).data, view.len as usize);
+                (*new_arr).len = view.len;
+                let p = new_arr as *mut u8;
+                stamp_elem_type(p, ELEM_TYPE_U32);
+                p
+            }
+        }
+        V2ElemType::F32 => {
+            let new_arr = TypedArray::<f32>::with_capacity(view.len);
+            unsafe {
+                let src = view.ptr as *const TypedArray<f32>;
+                copy_reverse_scalar((*src).data, (*new_arr).data, view.len as usize);
+                (*new_arr).len = view.len;
+                let p = new_arr as *mut u8;
+                stamp_elem_type(p, ELEM_TYPE_F32);
+                p
+            }
+        }
+        V2ElemType::Char => {
+            let new_arr = TypedArray::<char>::with_capacity(view.len);
+            unsafe {
+                let src = view.ptr as *const TypedArray<char>;
+                copy_reverse_scalar((*src).data, (*new_arr).data, view.len as usize);
+                (*new_arr).len = view.len;
+                let p = new_arr as *mut u8;
+                stamp_elem_type(p, ELEM_TYPE_CHAR);
+                p
+            }
+        }
+        V2ElemType::String => {
+            let new_arr = TypedArray::<*const StringObj>::with_capacity(view.len);
+            unsafe {
+                let src = view.ptr as *const TypedArray<*const StringObj>;
+                let src_data = (*src).data;
+                let dst_data = (*new_arr).data;
+                let len = view.len as usize;
+                if len > 0 && !src_data.is_null() && !dst_data.is_null() {
+                    for i in 0..len {
+                        let elem = *src_data.add(len - 1 - i);
+                        v2_retain(&(*elem).header);
+                        *dst_data.add(i) = elem;
+                    }
+                }
+                (*new_arr).len = view.len;
+                let p = new_arr as *mut u8;
+                stamp_elem_type(p, ELEM_TYPE_STRING);
+                p
+            }
+        }
+        V2ElemType::Decimal => {
+            let new_arr = TypedArray::<*const DecimalObj>::with_capacity(view.len);
+            unsafe {
+                let src = view.ptr as *const TypedArray<*const DecimalObj>;
+                let src_data = (*src).data;
+                let dst_data = (*new_arr).data;
+                let len = view.len as usize;
+                if len > 0 && !src_data.is_null() && !dst_data.is_null() {
+                    for i in 0..len {
+                        let elem = *src_data.add(len - 1 - i);
+                        v2_retain(&(*elem).header);
+                        *dst_data.add(i) = elem;
+                    }
+                }
+                (*new_arr).len = view.len;
+                let p = new_arr as *mut u8;
+                stamp_elem_type(p, ELEM_TYPE_DECIMAL);
+                p
+            }
+        }
+        V2ElemType::TypedObject => {
+            let new_arr =
+                TypedArray::<*const TypedObjectStorage>::with_capacity(view.len);
+            unsafe {
+                let src = view.ptr as *const TypedArray<*const TypedObjectStorage>;
+                let src_data = (*src).data;
+                let dst_data = (*new_arr).data;
+                let len = view.len as usize;
+                if len > 0 && !src_data.is_null() && !dst_data.is_null() {
+                    for i in 0..len {
+                        let elem = *src_data.add(len - 1 - i);
+                        v2_retain(&(*elem).header);
+                        *dst_data.add(i) = elem;
+                    }
+                }
+                (*new_arr).len = view.len;
+                let p = new_arr as *mut u8;
+                stamp_elem_type(p, ELEM_TYPE_TYPED_OBJECT);
+                p
+            }
+        }
+    }
+}
+
+/// Concatenate two v2 typed arrays of the same element type. Returns the
+/// raw pointer to a freshly-allocated `TypedArray<T>` with `a.len + b.len`
+/// elements. Returns `Err` on element-type mismatch (per ADR-006 §2.7.5
+/// stamp-at-compile-time: mixed-kind concat is structurally rejected, no
+/// coercion).
+///
+/// Kind-generic over the 14 `V2ElemType` variants. Same retain discipline
+/// as `clone_array` for heap-element variants.
+pub fn concat_arrays(
+    a: &V2TypedArrayView,
+    b: &V2TypedArrayView,
+) -> Result<*mut u8, &'static str> {
+    if a.elem_type != b.elem_type {
+        return Err("concat_arrays: element type mismatch");
+    }
+    let total_len = a
+        .len
+        .checked_add(b.len)
+        .ok_or("concat_arrays: result length overflow")?;
+
+    // Helper: copy two source ranges into a fresh scalar buffer.
+    #[inline]
+    unsafe fn copy_two_scalar<T: Copy>(
+        a_data: *const T,
+        a_len: usize,
+        b_data: *const T,
+        b_len: usize,
+        dst_data: *mut T,
+    ) {
+        if dst_data.is_null() {
+            return;
+        }
+        if a_len > 0 && !a_data.is_null() {
+            unsafe { std::ptr::copy_nonoverlapping(a_data, dst_data, a_len) };
+        }
+        if b_len > 0 && !b_data.is_null() {
+            unsafe { std::ptr::copy_nonoverlapping(b_data, dst_data.add(a_len), b_len) };
+        }
+    }
+
+    let result = match a.elem_type {
+        V2ElemType::F64 => unsafe {
+            let new_arr = TypedArray::<f64>::with_capacity(total_len);
+            let a_arr = a.ptr as *const TypedArray<f64>;
+            let b_arr = b.ptr as *const TypedArray<f64>;
+            copy_two_scalar(
+                (*a_arr).data,
+                a.len as usize,
+                (*b_arr).data,
+                b.len as usize,
+                (*new_arr).data,
+            );
+            (*new_arr).len = total_len;
+            let p = new_arr as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_F64);
+            p
+        },
+        V2ElemType::I64 => unsafe {
+            let new_arr = TypedArray::<i64>::with_capacity(total_len);
+            let a_arr = a.ptr as *const TypedArray<i64>;
+            let b_arr = b.ptr as *const TypedArray<i64>;
+            copy_two_scalar(
+                (*a_arr).data,
+                a.len as usize,
+                (*b_arr).data,
+                b.len as usize,
+                (*new_arr).data,
+            );
+            (*new_arr).len = total_len;
+            let p = new_arr as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_I64);
+            p
+        },
+        V2ElemType::I32 => unsafe {
+            let new_arr = TypedArray::<i32>::with_capacity(total_len);
+            let a_arr = a.ptr as *const TypedArray<i32>;
+            let b_arr = b.ptr as *const TypedArray<i32>;
+            copy_two_scalar(
+                (*a_arr).data,
+                a.len as usize,
+                (*b_arr).data,
+                b.len as usize,
+                (*new_arr).data,
+            );
+            (*new_arr).len = total_len;
+            let p = new_arr as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_I32);
+            p
+        },
+        V2ElemType::Bool => unsafe {
+            let new_arr = TypedArray::<u8>::with_capacity(total_len);
+            let a_arr = a.ptr as *const TypedArray<u8>;
+            let b_arr = b.ptr as *const TypedArray<u8>;
+            copy_two_scalar(
+                (*a_arr).data,
+                a.len as usize,
+                (*b_arr).data,
+                b.len as usize,
+                (*new_arr).data,
+            );
+            (*new_arr).len = total_len;
+            let p = new_arr as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_BOOL);
+            p
+        },
+        V2ElemType::I8 => unsafe {
+            let new_arr = TypedArray::<i8>::with_capacity(total_len);
+            let a_arr = a.ptr as *const TypedArray<i8>;
+            let b_arr = b.ptr as *const TypedArray<i8>;
+            copy_two_scalar(
+                (*a_arr).data,
+                a.len as usize,
+                (*b_arr).data,
+                b.len as usize,
+                (*new_arr).data,
+            );
+            (*new_arr).len = total_len;
+            let p = new_arr as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_I8);
+            p
+        },
+        V2ElemType::U8 => unsafe {
+            let new_arr = TypedArray::<u8>::with_capacity(total_len);
+            let a_arr = a.ptr as *const TypedArray<u8>;
+            let b_arr = b.ptr as *const TypedArray<u8>;
+            copy_two_scalar(
+                (*a_arr).data,
+                a.len as usize,
+                (*b_arr).data,
+                b.len as usize,
+                (*new_arr).data,
+            );
+            (*new_arr).len = total_len;
+            let p = new_arr as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_U8);
+            p
+        },
+        V2ElemType::I16 => unsafe {
+            let new_arr = TypedArray::<i16>::with_capacity(total_len);
+            let a_arr = a.ptr as *const TypedArray<i16>;
+            let b_arr = b.ptr as *const TypedArray<i16>;
+            copy_two_scalar(
+                (*a_arr).data,
+                a.len as usize,
+                (*b_arr).data,
+                b.len as usize,
+                (*new_arr).data,
+            );
+            (*new_arr).len = total_len;
+            let p = new_arr as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_I16);
+            p
+        },
+        V2ElemType::U16 => unsafe {
+            let new_arr = TypedArray::<u16>::with_capacity(total_len);
+            let a_arr = a.ptr as *const TypedArray<u16>;
+            let b_arr = b.ptr as *const TypedArray<u16>;
+            copy_two_scalar(
+                (*a_arr).data,
+                a.len as usize,
+                (*b_arr).data,
+                b.len as usize,
+                (*new_arr).data,
+            );
+            (*new_arr).len = total_len;
+            let p = new_arr as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_U16);
+            p
+        },
+        V2ElemType::U32 => unsafe {
+            let new_arr = TypedArray::<u32>::with_capacity(total_len);
+            let a_arr = a.ptr as *const TypedArray<u32>;
+            let b_arr = b.ptr as *const TypedArray<u32>;
+            copy_two_scalar(
+                (*a_arr).data,
+                a.len as usize,
+                (*b_arr).data,
+                b.len as usize,
+                (*new_arr).data,
+            );
+            (*new_arr).len = total_len;
+            let p = new_arr as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_U32);
+            p
+        },
+        V2ElemType::F32 => unsafe {
+            let new_arr = TypedArray::<f32>::with_capacity(total_len);
+            let a_arr = a.ptr as *const TypedArray<f32>;
+            let b_arr = b.ptr as *const TypedArray<f32>;
+            copy_two_scalar(
+                (*a_arr).data,
+                a.len as usize,
+                (*b_arr).data,
+                b.len as usize,
+                (*new_arr).data,
+            );
+            (*new_arr).len = total_len;
+            let p = new_arr as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_F32);
+            p
+        },
+        V2ElemType::Char => unsafe {
+            let new_arr = TypedArray::<char>::with_capacity(total_len);
+            let a_arr = a.ptr as *const TypedArray<char>;
+            let b_arr = b.ptr as *const TypedArray<char>;
+            copy_two_scalar(
+                (*a_arr).data,
+                a.len as usize,
+                (*b_arr).data,
+                b.len as usize,
+                (*new_arr).data,
+            );
+            (*new_arr).len = total_len;
+            let p = new_arr as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_CHAR);
+            p
+        },
+        V2ElemType::String => unsafe {
+            let new_arr = TypedArray::<*const StringObj>::with_capacity(total_len);
+            let a_arr = a.ptr as *const TypedArray<*const StringObj>;
+            let b_arr = b.ptr as *const TypedArray<*const StringObj>;
+            let dst_data = (*new_arr).data;
+            let a_data = (*a_arr).data;
+            let b_data = (*b_arr).data;
+            if !dst_data.is_null() {
+                if a.len > 0 && !a_data.is_null() {
+                    for i in 0..(a.len as usize) {
+                        let elem = *a_data.add(i);
+                        v2_retain(&(*elem).header);
+                        *dst_data.add(i) = elem;
+                    }
+                }
+                if b.len > 0 && !b_data.is_null() {
+                    let off = a.len as usize;
+                    for i in 0..(b.len as usize) {
+                        let elem = *b_data.add(i);
+                        v2_retain(&(*elem).header);
+                        *dst_data.add(off + i) = elem;
+                    }
+                }
+            }
+            (*new_arr).len = total_len;
+            let p = new_arr as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_STRING);
+            p
+        },
+        V2ElemType::Decimal => unsafe {
+            let new_arr = TypedArray::<*const DecimalObj>::with_capacity(total_len);
+            let a_arr = a.ptr as *const TypedArray<*const DecimalObj>;
+            let b_arr = b.ptr as *const TypedArray<*const DecimalObj>;
+            let dst_data = (*new_arr).data;
+            let a_data = (*a_arr).data;
+            let b_data = (*b_arr).data;
+            if !dst_data.is_null() {
+                if a.len > 0 && !a_data.is_null() {
+                    for i in 0..(a.len as usize) {
+                        let elem = *a_data.add(i);
+                        v2_retain(&(*elem).header);
+                        *dst_data.add(i) = elem;
+                    }
+                }
+                if b.len > 0 && !b_data.is_null() {
+                    let off = a.len as usize;
+                    for i in 0..(b.len as usize) {
+                        let elem = *b_data.add(i);
+                        v2_retain(&(*elem).header);
+                        *dst_data.add(off + i) = elem;
+                    }
+                }
+            }
+            (*new_arr).len = total_len;
+            let p = new_arr as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_DECIMAL);
+            p
+        },
+        V2ElemType::TypedObject => unsafe {
+            let new_arr =
+                TypedArray::<*const TypedObjectStorage>::with_capacity(total_len);
+            let a_arr = a.ptr as *const TypedArray<*const TypedObjectStorage>;
+            let b_arr = b.ptr as *const TypedArray<*const TypedObjectStorage>;
+            let dst_data = (*new_arr).data;
+            let a_data = (*a_arr).data;
+            let b_data = (*b_arr).data;
+            if !dst_data.is_null() {
+                if a.len > 0 && !a_data.is_null() {
+                    for i in 0..(a.len as usize) {
+                        let elem = *a_data.add(i);
+                        v2_retain(&(*elem).header);
+                        *dst_data.add(i) = elem;
+                    }
+                }
+                if b.len > 0 && !b_data.is_null() {
+                    let off = a.len as usize;
+                    for i in 0..(b.len as usize) {
+                        let elem = *b_data.add(i);
+                        v2_retain(&(*elem).header);
+                        *dst_data.add(off + i) = elem;
+                    }
+                }
+            }
+            (*new_arr).len = total_len;
+            let p = new_arr as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_TYPED_OBJECT);
+            p
+        },
+    };
+    Ok(result)
+}
+
+/// Allocate a fresh `TypedArray<T>` containing the elements of `view` from
+/// `start` (inclusive) to `end` (exclusive), clamped to `[0, view.len]`.
+/// Kind-generic. Empty / out-of-order ranges produce an empty result array
+/// (mirrors Rust's `slice::get(start..end)` clamping rather than panicking).
+///
+/// Shared internal worker for `slice_array` / `take_array` / `drop_array_n`.
+fn copy_range_to_new_array(
+    view: &V2TypedArrayView,
+    start: u32,
+    end: u32,
+) -> *mut u8 {
+    // Clamp the range to `[0, view.len]` and compute out_len.
+    let start = start.min(view.len);
+    let end = end.min(view.len);
+    let out_len = end.saturating_sub(start);
+    let s = start as usize;
+    let n = out_len as usize;
+
+    // Helper: scalar copy of `view.data[start..start+n]` into the fresh
+    // buffer.
+    #[inline]
+    unsafe fn copy_scalar_range<T: Copy>(
+        src_data: *const T,
+        dst_data: *mut T,
+        start: usize,
+        len: usize,
+    ) {
+        if len == 0 || src_data.is_null() || dst_data.is_null() {
+            return;
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(src_data.add(start), dst_data, len);
+        }
+    }
+
+    match view.elem_type {
+        V2ElemType::F64 => unsafe {
+            let new_arr = TypedArray::<f64>::with_capacity(out_len);
+            let src = view.ptr as *const TypedArray<f64>;
+            copy_scalar_range((*src).data, (*new_arr).data, s, n);
+            (*new_arr).len = out_len;
+            let p = new_arr as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_F64);
+            p
+        },
+        V2ElemType::I64 => unsafe {
+            let new_arr = TypedArray::<i64>::with_capacity(out_len);
+            let src = view.ptr as *const TypedArray<i64>;
+            copy_scalar_range((*src).data, (*new_arr).data, s, n);
+            (*new_arr).len = out_len;
+            let p = new_arr as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_I64);
+            p
+        },
+        V2ElemType::I32 => unsafe {
+            let new_arr = TypedArray::<i32>::with_capacity(out_len);
+            let src = view.ptr as *const TypedArray<i32>;
+            copy_scalar_range((*src).data, (*new_arr).data, s, n);
+            (*new_arr).len = out_len;
+            let p = new_arr as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_I32);
+            p
+        },
+        V2ElemType::Bool => unsafe {
+            let new_arr = TypedArray::<u8>::with_capacity(out_len);
+            let src = view.ptr as *const TypedArray<u8>;
+            copy_scalar_range((*src).data, (*new_arr).data, s, n);
+            (*new_arr).len = out_len;
+            let p = new_arr as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_BOOL);
+            p
+        },
+        V2ElemType::I8 => unsafe {
+            let new_arr = TypedArray::<i8>::with_capacity(out_len);
+            let src = view.ptr as *const TypedArray<i8>;
+            copy_scalar_range((*src).data, (*new_arr).data, s, n);
+            (*new_arr).len = out_len;
+            let p = new_arr as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_I8);
+            p
+        },
+        V2ElemType::U8 => unsafe {
+            let new_arr = TypedArray::<u8>::with_capacity(out_len);
+            let src = view.ptr as *const TypedArray<u8>;
+            copy_scalar_range((*src).data, (*new_arr).data, s, n);
+            (*new_arr).len = out_len;
+            let p = new_arr as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_U8);
+            p
+        },
+        V2ElemType::I16 => unsafe {
+            let new_arr = TypedArray::<i16>::with_capacity(out_len);
+            let src = view.ptr as *const TypedArray<i16>;
+            copy_scalar_range((*src).data, (*new_arr).data, s, n);
+            (*new_arr).len = out_len;
+            let p = new_arr as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_I16);
+            p
+        },
+        V2ElemType::U16 => unsafe {
+            let new_arr = TypedArray::<u16>::with_capacity(out_len);
+            let src = view.ptr as *const TypedArray<u16>;
+            copy_scalar_range((*src).data, (*new_arr).data, s, n);
+            (*new_arr).len = out_len;
+            let p = new_arr as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_U16);
+            p
+        },
+        V2ElemType::U32 => unsafe {
+            let new_arr = TypedArray::<u32>::with_capacity(out_len);
+            let src = view.ptr as *const TypedArray<u32>;
+            copy_scalar_range((*src).data, (*new_arr).data, s, n);
+            (*new_arr).len = out_len;
+            let p = new_arr as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_U32);
+            p
+        },
+        V2ElemType::F32 => unsafe {
+            let new_arr = TypedArray::<f32>::with_capacity(out_len);
+            let src = view.ptr as *const TypedArray<f32>;
+            copy_scalar_range((*src).data, (*new_arr).data, s, n);
+            (*new_arr).len = out_len;
+            let p = new_arr as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_F32);
+            p
+        },
+        V2ElemType::Char => unsafe {
+            let new_arr = TypedArray::<char>::with_capacity(out_len);
+            let src = view.ptr as *const TypedArray<char>;
+            copy_scalar_range((*src).data, (*new_arr).data, s, n);
+            (*new_arr).len = out_len;
+            let p = new_arr as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_CHAR);
+            p
+        },
+        V2ElemType::String => unsafe {
+            let new_arr = TypedArray::<*const StringObj>::with_capacity(out_len);
+            let src = view.ptr as *const TypedArray<*const StringObj>;
+            let src_data = (*src).data;
+            let dst_data = (*new_arr).data;
+            if n > 0 && !src_data.is_null() && !dst_data.is_null() {
+                for i in 0..n {
+                    let elem = *src_data.add(s + i);
+                    v2_retain(&(*elem).header);
+                    *dst_data.add(i) = elem;
+                }
+            }
+            (*new_arr).len = out_len;
+            let p = new_arr as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_STRING);
+            p
+        },
+        V2ElemType::Decimal => unsafe {
+            let new_arr = TypedArray::<*const DecimalObj>::with_capacity(out_len);
+            let src = view.ptr as *const TypedArray<*const DecimalObj>;
+            let src_data = (*src).data;
+            let dst_data = (*new_arr).data;
+            if n > 0 && !src_data.is_null() && !dst_data.is_null() {
+                for i in 0..n {
+                    let elem = *src_data.add(s + i);
+                    v2_retain(&(*elem).header);
+                    *dst_data.add(i) = elem;
+                }
+            }
+            (*new_arr).len = out_len;
+            let p = new_arr as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_DECIMAL);
+            p
+        },
+        V2ElemType::TypedObject => unsafe {
+            let new_arr =
+                TypedArray::<*const TypedObjectStorage>::with_capacity(out_len);
+            let src = view.ptr as *const TypedArray<*const TypedObjectStorage>;
+            let src_data = (*src).data;
+            let dst_data = (*new_arr).data;
+            if n > 0 && !src_data.is_null() && !dst_data.is_null() {
+                for i in 0..n {
+                    let elem = *src_data.add(s + i);
+                    v2_retain(&(*elem).header);
+                    *dst_data.add(i) = elem;
+                }
+            }
+            (*new_arr).len = out_len;
+            let p = new_arr as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_TYPED_OBJECT);
+            p
+        },
+    }
+}
+
+/// `arr.slice(start, end)` — bounded copy of `[start..end)`. `start` and
+/// `end` are clamped to `[0, view.len]`; if `start >= end`, the result is
+/// empty. Mirrors Rust's `slice::get(range)` clamping behaviour.
+#[inline]
+pub fn slice_array(view: &V2TypedArrayView, start: u32, end: u32) -> *mut u8 {
+    copy_range_to_new_array(view, start, end)
+}
+
+/// `arr.take(n)` — first `n` elements. `n` clamped to `[0, view.len]`.
+#[inline]
+pub fn take_array(view: &V2TypedArrayView, n: u32) -> *mut u8 {
+    copy_range_to_new_array(view, 0, n)
+}
+
+/// `arr.drop(n)` — all elements except the first `n`. `n` clamped to
+/// `[0, view.len]`. Named `drop_array_n` to avoid collision with
+/// `TypedArray::drop_array` (the allocator destructor).
+#[inline]
+pub fn drop_array_n(view: &V2TypedArrayView, n: u32) -> *mut u8 {
+    copy_range_to_new_array(view, n, view.len)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2275,6 +3024,285 @@ mod tests {
             // Release the caller-side share via HeapElement → free.
             <StringObj as HeapElement>::release_elem(s);
             TypedArray::<*const StringObj>::drop_array_heap(arr);
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // R8 W3 J.5a (2026-05-24) — reverse / concat / slice / take / drop /
+    // skip primitive round-trip smokes.
+    //
+    // Each primitive shares the `clone_array` scaffold (per-V2ElemType
+    // allocator + stamp + retain). The tests exercise the most common
+    // element kinds (I64, F64) for empirical confirmation that the
+    // result array has the expected length, stamped element type, and
+    // element values in the expected order; heap-element retain paths
+    // (String) are also smoke-tested via `reverse_array` to guard the
+    // per-element `v2_retain` discipline.
+    // ──────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_reverse_array_i64() {
+        unsafe {
+            let arr = TypedArray::<i64>::from_slice(&[1, 2, 3, 4, 5]);
+            stamp_elem_type(arr as *mut u8, ELEM_TYPE_I64);
+            let (bits, kind) = ptr_pair(arr as *mut u8);
+            let view = as_v2_typed_array(bits, kind).unwrap();
+            let new_ptr = reverse_array(&view);
+            let new_view =
+                as_v2_typed_array(new_ptr as u64, NativeKind::Ptr(HeapKind::TypedArray))
+                    .unwrap();
+            assert_eq!(new_view.elem_type, V2ElemType::I64);
+            assert_eq!(new_view.len, 5);
+            let new_arr = new_ptr as *const TypedArray<i64>;
+            let data = (*new_arr).data;
+            assert_eq!(*data.add(0), 5);
+            assert_eq!(*data.add(1), 4);
+            assert_eq!(*data.add(2), 3);
+            assert_eq!(*data.add(3), 2);
+            assert_eq!(*data.add(4), 1);
+            TypedArray::<i64>::drop_array(arr);
+            TypedArray::<i64>::drop_array(new_ptr as *mut TypedArray<i64>);
+        }
+    }
+
+    #[test]
+    fn test_reverse_array_empty() {
+        unsafe {
+            let arr = TypedArray::<i64>::with_capacity(0);
+            stamp_elem_type(arr as *mut u8, ELEM_TYPE_I64);
+            let (bits, kind) = ptr_pair(arr as *mut u8);
+            let view = as_v2_typed_array(bits, kind).unwrap();
+            let new_ptr = reverse_array(&view);
+            let new_view =
+                as_v2_typed_array(new_ptr as u64, NativeKind::Ptr(HeapKind::TypedArray))
+                    .unwrap();
+            assert_eq!(new_view.len, 0);
+            TypedArray::<i64>::drop_array(arr);
+            TypedArray::<i64>::drop_array(new_ptr as *mut TypedArray<i64>);
+        }
+    }
+
+    #[test]
+    fn test_reverse_array_string_retains_each_element() {
+        use shape_value::v2::refcount::v2_get_refcount;
+        unsafe {
+            let s1 = StringObj::new("a");
+            let s2 = StringObj::new("b");
+            let arr = TypedArray::<*const StringObj>::with_capacity(2);
+            TypedArray::push(arr, s1 as *const StringObj);
+            TypedArray::push(arr, s2 as *const StringObj);
+            stamp_elem_type(arr as *mut u8, ELEM_TYPE_STRING);
+            assert_eq!(v2_get_refcount(&(*s1).header), 1);
+            assert_eq!(v2_get_refcount(&(*s2).header), 1);
+
+            let (bits, kind) = ptr_pair(arr as *mut u8);
+            let view = as_v2_typed_array(bits, kind).unwrap();
+            let new_ptr = reverse_array(&view);
+
+            // After reverse, both s1 and s2 have refcount 2 — once owned by
+            // the source array, once by the new reversed array.
+            assert_eq!(v2_get_refcount(&(*s1).header), 2);
+            assert_eq!(v2_get_refcount(&(*s2).header), 2);
+
+            let new_view =
+                as_v2_typed_array(new_ptr as u64, NativeKind::Ptr(HeapKind::TypedArray))
+                    .unwrap();
+            assert_eq!(new_view.elem_type, V2ElemType::String);
+            assert_eq!(new_view.len, 2);
+            let new_arr = new_ptr as *const TypedArray<*const StringObj>;
+            let data = (*new_arr).data;
+            assert_eq!(*data.add(0), s2 as *const StringObj);
+            assert_eq!(*data.add(1), s1 as *const StringObj);
+
+            TypedArray::<*const StringObj>::drop_array_heap(arr);
+            TypedArray::<*const StringObj>::drop_array_heap(
+                new_ptr as *mut TypedArray<*const StringObj>,
+            );
+            // Both StringObj allocations are now freed by `drop_array_heap`.
+        }
+    }
+
+    #[test]
+    fn test_concat_arrays_i64() {
+        unsafe {
+            let a = TypedArray::<i64>::from_slice(&[1, 2]);
+            let b = TypedArray::<i64>::from_slice(&[3, 4, 5]);
+            stamp_elem_type(a as *mut u8, ELEM_TYPE_I64);
+            stamp_elem_type(b as *mut u8, ELEM_TYPE_I64);
+            let view_a = as_v2_typed_array(a as u64, NativeKind::Ptr(HeapKind::TypedArray))
+                .unwrap();
+            let view_b = as_v2_typed_array(b as u64, NativeKind::Ptr(HeapKind::TypedArray))
+                .unwrap();
+            let new_ptr = concat_arrays(&view_a, &view_b).unwrap();
+            let new_view =
+                as_v2_typed_array(new_ptr as u64, NativeKind::Ptr(HeapKind::TypedArray))
+                    .unwrap();
+            assert_eq!(new_view.elem_type, V2ElemType::I64);
+            assert_eq!(new_view.len, 5);
+            let new_arr = new_ptr as *const TypedArray<i64>;
+            let data = (*new_arr).data;
+            assert_eq!(*data.add(0), 1);
+            assert_eq!(*data.add(1), 2);
+            assert_eq!(*data.add(2), 3);
+            assert_eq!(*data.add(3), 4);
+            assert_eq!(*data.add(4), 5);
+            TypedArray::<i64>::drop_array(a);
+            TypedArray::<i64>::drop_array(b);
+            TypedArray::<i64>::drop_array(new_ptr as *mut TypedArray<i64>);
+        }
+    }
+
+    #[test]
+    fn test_concat_arrays_kind_mismatch() {
+        unsafe {
+            let a = TypedArray::<i64>::from_slice(&[1, 2]);
+            let b = TypedArray::<f64>::from_slice(&[3.0, 4.0]);
+            stamp_elem_type(a as *mut u8, ELEM_TYPE_I64);
+            stamp_elem_type(b as *mut u8, ELEM_TYPE_F64);
+            let view_a = as_v2_typed_array(a as u64, NativeKind::Ptr(HeapKind::TypedArray))
+                .unwrap();
+            let view_b = as_v2_typed_array(b as u64, NativeKind::Ptr(HeapKind::TypedArray))
+                .unwrap();
+            assert!(concat_arrays(&view_a, &view_b).is_err());
+            TypedArray::<i64>::drop_array(a);
+            TypedArray::<f64>::drop_array(b);
+        }
+    }
+
+    #[test]
+    fn test_slice_array_i64() {
+        unsafe {
+            let arr = TypedArray::<i64>::from_slice(&[10, 20, 30, 40, 50]);
+            stamp_elem_type(arr as *mut u8, ELEM_TYPE_I64);
+            let view = as_v2_typed_array(arr as u64, NativeKind::Ptr(HeapKind::TypedArray))
+                .unwrap();
+            let new_ptr = slice_array(&view, 1, 4);
+            let new_view =
+                as_v2_typed_array(new_ptr as u64, NativeKind::Ptr(HeapKind::TypedArray))
+                    .unwrap();
+            assert_eq!(new_view.elem_type, V2ElemType::I64);
+            assert_eq!(new_view.len, 3);
+            let new_arr = new_ptr as *const TypedArray<i64>;
+            let data = (*new_arr).data;
+            assert_eq!(*data.add(0), 20);
+            assert_eq!(*data.add(1), 30);
+            assert_eq!(*data.add(2), 40);
+            TypedArray::<i64>::drop_array(arr);
+            TypedArray::<i64>::drop_array(new_ptr as *mut TypedArray<i64>);
+        }
+    }
+
+    #[test]
+    fn test_slice_array_clamps_oversize_end() {
+        unsafe {
+            let arr = TypedArray::<i64>::from_slice(&[10, 20, 30]);
+            stamp_elem_type(arr as *mut u8, ELEM_TYPE_I64);
+            let view = as_v2_typed_array(arr as u64, NativeKind::Ptr(HeapKind::TypedArray))
+                .unwrap();
+            // end > len → clamp to len; result is `[30]`.
+            let new_ptr = slice_array(&view, 2, 100);
+            let new_view =
+                as_v2_typed_array(new_ptr as u64, NativeKind::Ptr(HeapKind::TypedArray))
+                    .unwrap();
+            assert_eq!(new_view.len, 1);
+            let new_arr = new_ptr as *const TypedArray<i64>;
+            assert_eq!(*(*new_arr).data.add(0), 30);
+            TypedArray::<i64>::drop_array(arr);
+            TypedArray::<i64>::drop_array(new_ptr as *mut TypedArray<i64>);
+        }
+    }
+
+    #[test]
+    fn test_slice_array_inverted_range_empty() {
+        unsafe {
+            let arr = TypedArray::<i64>::from_slice(&[1, 2, 3]);
+            stamp_elem_type(arr as *mut u8, ELEM_TYPE_I64);
+            let view = as_v2_typed_array(arr as u64, NativeKind::Ptr(HeapKind::TypedArray))
+                .unwrap();
+            // start > end → empty result (no panic).
+            let new_ptr = slice_array(&view, 5, 2);
+            let new_view =
+                as_v2_typed_array(new_ptr as u64, NativeKind::Ptr(HeapKind::TypedArray))
+                    .unwrap();
+            assert_eq!(new_view.len, 0);
+            TypedArray::<i64>::drop_array(arr);
+            TypedArray::<i64>::drop_array(new_ptr as *mut TypedArray<i64>);
+        }
+    }
+
+    #[test]
+    fn test_take_array_i64() {
+        unsafe {
+            let arr = TypedArray::<i64>::from_slice(&[1, 2, 3, 4, 5]);
+            stamp_elem_type(arr as *mut u8, ELEM_TYPE_I64);
+            let view = as_v2_typed_array(arr as u64, NativeKind::Ptr(HeapKind::TypedArray))
+                .unwrap();
+            let new_ptr = take_array(&view, 2);
+            let new_view =
+                as_v2_typed_array(new_ptr as u64, NativeKind::Ptr(HeapKind::TypedArray))
+                    .unwrap();
+            assert_eq!(new_view.len, 2);
+            let new_arr = new_ptr as *const TypedArray<i64>;
+            assert_eq!(*(*new_arr).data.add(0), 1);
+            assert_eq!(*(*new_arr).data.add(1), 2);
+            TypedArray::<i64>::drop_array(arr);
+            TypedArray::<i64>::drop_array(new_ptr as *mut TypedArray<i64>);
+        }
+    }
+
+    #[test]
+    fn test_take_array_n_exceeds_len() {
+        unsafe {
+            let arr = TypedArray::<i64>::from_slice(&[1, 2]);
+            stamp_elem_type(arr as *mut u8, ELEM_TYPE_I64);
+            let view = as_v2_typed_array(arr as u64, NativeKind::Ptr(HeapKind::TypedArray))
+                .unwrap();
+            // n > len → clamped to len.
+            let new_ptr = take_array(&view, 100);
+            let new_view =
+                as_v2_typed_array(new_ptr as u64, NativeKind::Ptr(HeapKind::TypedArray))
+                    .unwrap();
+            assert_eq!(new_view.len, 2);
+            TypedArray::<i64>::drop_array(arr);
+            TypedArray::<i64>::drop_array(new_ptr as *mut TypedArray<i64>);
+        }
+    }
+
+    #[test]
+    fn test_drop_array_n_i64() {
+        unsafe {
+            let arr = TypedArray::<i64>::from_slice(&[1, 2, 3, 4, 5]);
+            stamp_elem_type(arr as *mut u8, ELEM_TYPE_I64);
+            let view = as_v2_typed_array(arr as u64, NativeKind::Ptr(HeapKind::TypedArray))
+                .unwrap();
+            let new_ptr = drop_array_n(&view, 2);
+            let new_view =
+                as_v2_typed_array(new_ptr as u64, NativeKind::Ptr(HeapKind::TypedArray))
+                    .unwrap();
+            assert_eq!(new_view.len, 3);
+            let new_arr = new_ptr as *const TypedArray<i64>;
+            assert_eq!(*(*new_arr).data.add(0), 3);
+            assert_eq!(*(*new_arr).data.add(1), 4);
+            assert_eq!(*(*new_arr).data.add(2), 5);
+            TypedArray::<i64>::drop_array(arr);
+            TypedArray::<i64>::drop_array(new_ptr as *mut TypedArray<i64>);
+        }
+    }
+
+    #[test]
+    fn test_drop_array_n_exceeds_len_yields_empty() {
+        unsafe {
+            let arr = TypedArray::<i64>::from_slice(&[1, 2]);
+            stamp_elem_type(arr as *mut u8, ELEM_TYPE_I64);
+            let view = as_v2_typed_array(arr as u64, NativeKind::Ptr(HeapKind::TypedArray))
+                .unwrap();
+            let new_ptr = drop_array_n(&view, 100);
+            let new_view =
+                as_v2_typed_array(new_ptr as u64, NativeKind::Ptr(HeapKind::TypedArray))
+                    .unwrap();
+            assert_eq!(new_view.len, 0);
+            TypedArray::<i64>::drop_array(arr);
+            TypedArray::<i64>::drop_array(new_ptr as *mut TypedArray<i64>);
         }
     }
 }
