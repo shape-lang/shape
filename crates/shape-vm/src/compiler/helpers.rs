@@ -4114,8 +4114,7 @@ impl BytecodeCompiler {
         match receiver {
             shape_ast::ast::Expr::Literal(lit, _) => match lit {
                 shape_ast::ast::Literal::String(_)
-                | shape_ast::ast::Literal::FormattedString { .. }
-                | shape_ast::ast::Literal::ContentString { .. } => Some("String".to_string()),
+                | shape_ast::ast::Literal::FormattedString { .. } => Some("String".to_string()),
                 shape_ast::ast::Literal::Bool(_) => Some("Bool".to_string()),
                 _ => None,
             },

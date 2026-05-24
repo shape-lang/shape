@@ -1836,7 +1836,6 @@ fn literal_concrete_type(literal: &shape_ast::ast::Literal) -> Option<ConcreteTy
         Literal::String(_) => Some(ConcreteType::String),
         Literal::Char(_) => Some(ConcreteType::I8),
         Literal::FormattedString { .. } => Some(ConcreteType::String),
-        Literal::ContentString { .. } => Some(ConcreteType::String),
         Literal::Bool(_) => Some(ConcreteType::Bool),
         Literal::None => None,
         Literal::Unit => Some(ConcreteType::Void),

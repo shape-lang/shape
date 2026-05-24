@@ -360,9 +360,9 @@ impl VirtualMachine {
                 }
                 BuiltinFunction::FormatValueWithSpec => {
                     // Args: [value, spec_tag, …spec-payload]. Currently
-                    // routes the basic FORMAT_SPEC_FIXED path; richer
-                    // spec arms (Table, ContentStyle) surface as
-                    // `NotImplemented` per W13 playbook §7.4 surface-and-stop.
+                    // routes the basic FORMAT_SPEC_FIXED path; the Table
+                    // arm surfaces as `NotImplemented` per W13 playbook
+                    // §7.4 surface-and-stop.
                     let args = self.pop_builtin_args()?;
                     let r = self.builtin_format_with_spec(&args)?;
                     self.push_kinded_slot(r)?;
@@ -766,17 +766,6 @@ impl VirtualMachine {
                     let result = KindedSlot::from_lazy(l);
                     self.push_kinded_slot(result)?;
                 }
-                BuiltinFunction::MakeContentText
-                | BuiltinFunction::MakeContentFragment
-                | BuiltinFunction::ApplyContentStyle
-                | BuiltinFunction::MakeContentChartFromValue => {
-                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
-                    todo!(
-                        "phase-1b-vm wave 5e — content builder body \
-                         migration pending: {:?}",
-                        builtin
-                    );
-                }
                 BuiltinFunction::ContentChart
                 | BuiltinFunction::ContentTextCtor
                 | BuiltinFunction::ContentTableCtor
@@ -1058,8 +1047,7 @@ impl VirtualMachine {
 
     /// `FormatValueWithSpec`: `[value, spec_tag, …spec-payload]`. Routes
     /// the FORMAT_SPEC_FIXED arm (precision-controlled f64 rendering);
-    /// the Table and ContentStyle arms surface per W13 playbook §7.4
-    /// surface-and-stop.
+    /// the Table arm surfaces per W13 playbook §7.4 surface-and-stop.
     pub(crate) fn builtin_format_with_spec(
         &mut self,
         args: &[KindedSlot],

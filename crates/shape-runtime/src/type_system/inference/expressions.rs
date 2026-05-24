@@ -7,9 +7,7 @@ use crate::type_system::checking::MethodTable;
 use crate::type_system::exhaustiveness;
 use crate::type_system::*;
 use shape_ast::ast::{Expr, Literal, Span, TypeAnnotation};
-use shape_ast::interpolation::{
-    InterpolationPart, parse_content_interpolation_with_mode, parse_interpolation_with_mode,
-};
+use shape_ast::interpolation::{InterpolationPart, parse_interpolation_with_mode};
 
 impl TypeInferenceEngine {
     /// Infer type of an expression
@@ -18,11 +16,6 @@ impl TypeInferenceEngine {
             Expr::Literal(Literal::FormattedString { value, mode }, span) => {
                 self.infer_formatted_string_interpolations(value, *mode, *span)?;
                 Ok(BuiltinTypes::string())
-            }
-
-            Expr::Literal(Literal::ContentString { value, mode }, span) => {
-                self.infer_content_string_interpolations(value, *mode, *span)?;
-                Ok(Type::Concrete(TypeAnnotation::Basic("content".into())))
             }
 
             Expr::Literal(lit, _) => self.infer_literal(lit),
@@ -1278,38 +1271,6 @@ impl TypeInferenceEngine {
         span: Span,
     ) -> TypeResult<()> {
         let parts = parse_interpolation_with_mode(value, mode)
-            .map_err(|err| TypeError::ConstraintViolation(err.to_string()))?;
-
-        for part in parts {
-            if let InterpolationPart::Expression { expr, .. } = part {
-                let parsed_expr = shape_ast::parser::parse_expression_str(&expr)
-                    .map_err(|err| TypeError::ConstraintViolation(err.to_string()))?;
-                match self.infer_expr(&parsed_expr) {
-                    Ok(_) => {}
-                    Err(TypeError::UnknownProperty(type_name, property)) => {
-                        self.overwrite_unknown_property_origin(&property, span);
-                        return Err(TypeError::UnknownProperty(type_name, property));
-                    }
-                    Err(err) => return Err(err),
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Infer types of interpolation expressions within a content string literal (c"...").
-    ///
-    /// Uses `parse_content_interpolation_with_mode` which understands content-specific
-    /// format directives like `fg(red)`, `bold`, `border(rounded)` in addition to
-    /// the standard `fixed(N)` numeric format.
-    fn infer_content_string_interpolations(
-        &mut self,
-        value: &str,
-        mode: shape_ast::ast::InterpolationMode,
-        span: Span,
-    ) -> TypeResult<()> {
-        let parts = parse_content_interpolation_with_mode(value, mode)
             .map_err(|err| TypeError::ConstraintViolation(err.to_string()))?;
 
         for part in parts {

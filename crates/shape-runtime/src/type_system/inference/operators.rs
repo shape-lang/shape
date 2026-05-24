@@ -30,7 +30,6 @@ impl TypeInferenceEngine {
             Literal::String(_) => BuiltinTypes::string(),
             Literal::Char(_) => Type::Concrete(TypeAnnotation::Basic("char".to_string())),
             Literal::FormattedString { .. } => BuiltinTypes::string(),
-            Literal::ContentString { .. } => BuiltinTypes::string(),
             Literal::Bool(_) => BuiltinTypes::boolean(),
             // `None` is polymorphic: Option<T> for fresh T.
             Literal::None => Self::wrap_in_option(self.fresh_type_var()),

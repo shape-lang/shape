@@ -12,9 +12,6 @@ impl BytecodeCompiler {
         if let Literal::FormattedString { value, mode } = lit {
             return self.compile_interpolated_string_expression(value, *mode);
         }
-        if let Literal::ContentString { value, mode } = lit {
-            return self.compile_content_string_expression(value, *mode);
-        }
 
         let const_val = match lit {
             Literal::Int(i) => Some(Constant::Int(*i)),
@@ -31,7 +28,6 @@ impl BytecodeCompiler {
             Literal::String(s) => Some(Constant::String(s.clone())),
             Literal::Char(c) => Some(Constant::Char(*c)),
             Literal::FormattedString { .. } => unreachable!("handled above"),
-            Literal::ContentString { .. } => unreachable!("handled above"),
             Literal::Bool(b) => Some(Constant::Bool(*b)),
             Literal::None => None,
             Literal::Unit => {

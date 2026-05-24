@@ -1956,7 +1956,6 @@ pub(crate) fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotI
                 // §2.7.5-violating producer-site kind-source loss.
                 Literal::Char(c) => MirConstant::Char(*c),
                 Literal::FormattedString { .. } => unreachable!("handled above"),
-                Literal::ContentString { .. } => MirConstant::Str(String::new()),
                 Literal::Bool(v) => MirConstant::Bool(*v),
                 Literal::None => MirConstant::None,
                 Literal::Unit => MirConstant::Int(0), // unit is zero-sized

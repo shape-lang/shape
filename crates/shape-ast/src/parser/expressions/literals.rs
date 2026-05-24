@@ -98,16 +98,9 @@ pub fn parse_literal(pair: Pair<Rule>) -> Result<Expr> {
         Rule::string => {
             let parsed = parse_string_literal_with_kind(inner.as_str())?;
             if let Some(mode) = parsed.interpolation_mode {
-                if parsed.is_content {
-                    Literal::ContentString {
-                        value: parsed.value,
-                        mode,
-                    }
-                } else {
-                    Literal::FormattedString {
-                        value: parsed.value,
-                        mode,
-                    }
+                Literal::FormattedString {
+                    value: parsed.value,
+                    mode,
                 }
             } else {
                 Literal::String(parsed.value)

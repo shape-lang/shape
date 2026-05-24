@@ -880,11 +880,7 @@ pub fn validate_interpolation_format_specs(program: &Program, source: &str) -> V
 
     impl Visitor for InterpolationFormatSpecValidator<'_> {
         fn visit_expr(&mut self, expr: &Expr) -> bool {
-            if let Expr::Literal(
-                Literal::FormattedString { value, mode } | Literal::ContentString { value, mode },
-                span,
-            ) = expr
-            {
+            if let Expr::Literal(Literal::FormattedString { value, mode }, span) = expr {
                 if let Err(err) = parse_interpolation_with_mode(value, *mode) {
                     let range = span_to_range(self.source, span);
                     self.diagnostics.push(Diagnostic {
@@ -1428,46 +1424,29 @@ pub fn validate_trait_bounds(program: &Program, source: &str) -> Vec<Diagnostic>
     diagnostics
 }
 
-/// Validate content string usage and Content API calls.
+/// Validate Content API calls.
 ///
-/// - Error on empty interpolation `{}` in c-strings
 /// - Warn on `Color.rgb()` with values outside 0-255
-pub fn validate_content_strings(program: &Program, source: &str) -> Vec<Diagnostic> {
+pub fn validate_color_rgb_range(program: &Program, source: &str) -> Vec<Diagnostic> {
     use shape_runtime::visitor::{Visitor, walk_program};
 
-    struct ContentStringValidator<'a> {
+    struct ColorRgbValidator<'a> {
         source: &'a str,
         diagnostics: Vec<Diagnostic>,
     }
 
-    impl Visitor for ContentStringValidator<'_> {
+    impl Visitor for ColorRgbValidator<'_> {
         fn visit_expr(&mut self, expr: &Expr) -> bool {
-            match expr {
-                Expr::Literal(Literal::ContentString { value, .. }, span) => {
-                    // Check for empty interpolation `{}`
-                    if value.contains("{}") {
-                        let range = span_to_range(self.source, span);
-                        self.diagnostics.push(Diagnostic {
-                            range,
-                            severity: Some(DiagnosticSeverity::ERROR),
-                            code: Some(NumberOrString::String("E0310".to_string())),
-                            code_description: None,
-                            source: Some("shape".to_string()),
-                            message: "Empty interpolation `{}` in content string. Provide an expression inside the braces.".to_string(),
-                            related_information: None,
-                            tags: None,
-                            data: None,
-                        });
-                    }
-                }
-                // Check Color.rgb(r, g, b) for out-of-range values
-                Expr::MethodCall {
-                    receiver,
-                    method,
-                    args,
-                    span,
-                    ..
-                } if method == "rgb" => {
+            // Check Color.rgb(r, g, b) for out-of-range values
+            if let Expr::MethodCall {
+                receiver,
+                method,
+                args,
+                span,
+                ..
+            } = expr
+            {
+                if method == "rgb" {
                     if let Expr::Identifier(name, _) = receiver.as_ref() {
                         if name == "Color" {
                             for arg in args {
@@ -1504,13 +1483,12 @@ pub fn validate_content_strings(program: &Program, source: &str) -> Vec<Diagnost
                         }
                     }
                 }
-                _ => {}
             }
             true
         }
     }
 
-    let mut validator = ContentStringValidator {
+    let mut validator = ColorRgbValidator {
         source,
         diagnostics: Vec::new(),
     };
@@ -2520,52 +2498,12 @@ function my_func() {
     }
 
     #[test]
-    fn test_validate_content_strings_empty_interpolation() {
-        use shape_ast::parser::parse_program;
-
-        let source = r#"let x = c"hello {}""#;
-        let program = parse_program(source).unwrap();
-        let diagnostics = validate_content_strings(&program, source);
-
-        assert_eq!(
-            diagnostics.len(),
-            1,
-            "expected 1 diagnostic for empty interpolation, got: {:?}",
-            diagnostics
-        );
-        assert!(
-            diagnostics[0].message.contains("Empty interpolation"),
-            "unexpected message: {}",
-            diagnostics[0].message
-        );
-        assert_eq!(
-            diagnostics[0].code,
-            Some(NumberOrString::String("E0310".to_string()))
-        );
-    }
-
-    #[test]
-    fn test_validate_content_strings_valid_interpolation_ok() {
-        use shape_ast::parser::parse_program;
-
-        let source = r#"let x = c"hello {name}""#;
-        let program = parse_program(source).unwrap();
-        let diagnostics = validate_content_strings(&program, source);
-
-        assert!(
-            diagnostics.is_empty(),
-            "valid content string should produce no diagnostics: {:?}",
-            diagnostics
-        );
-    }
-
-    #[test]
     fn test_validate_color_rgb_out_of_range() {
         use shape_ast::parser::parse_program;
 
         let source = "let c = Color.rgb(300, 100, 256)";
         let program = parse_program(source).unwrap();
-        let diagnostics = validate_content_strings(&program, source);
+        let diagnostics = validate_color_rgb_range(&program, source);
 
         assert_eq!(
             diagnostics.len(),
@@ -2588,7 +2526,7 @@ function my_func() {
 
         let source = "let c = Color.rgb(255, 128, 0)";
         let program = parse_program(source).unwrap();
-        let diagnostics = validate_content_strings(&program, source);
+        let diagnostics = validate_color_rgb_range(&program, source);
 
         assert!(
             diagnostics.is_empty(),

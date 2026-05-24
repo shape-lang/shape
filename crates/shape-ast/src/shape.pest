@@ -1531,12 +1531,11 @@ number = @{
         )?
     )
 }
-string = @{ formatted_triple_string | formatted_simple_string | content_triple_string | content_simple_string | triple_string | simple_string }
+string = @{ formatted_triple_string | formatted_simple_string | triple_string | simple_string }
 formatted_prefix = { "f$" | "f#" | "f" }
-content_prefix = { "c$" | "c#" | "c" }
 string_escape = { "\\\"" | "\\\\" | "\\n" | "\\t" | "\\r" | "\\{" | "\\}" | "\\$" | "\\#" }
 simple_string_char = { string_escape | !("\"") ~ ANY }
-// Characters inside {}-interpolation blocks in formatted/content strings.
+// Characters inside {}-interpolation blocks in formatted strings.
 // Allows nested simple strings (so f"x: {fn("arg")}" is valid), nested blocks,
 // or any non-} character.  fmt_block_string uses a restricted char rule that
 // stops at "}" so strings cannot eat past the closing brace of the block.
@@ -1544,13 +1543,11 @@ fmt_block_string_char = _{ string_escape | (!"}" ~ !"\"" ~ ANY) }
 fmt_block_string = _{ "\"" ~ fmt_block_string_char* ~ "\"" }
 fmt_block_char = _{ fmt_block_string | fmt_nested_block | (!"}" ~ ANY) }
 fmt_nested_block = _{ "{" ~ fmt_block_char* ~ "}" }
-// Body character for formatted/content simple strings: escape, a {}-block
+// Body character for formatted simple strings: escape, a {}-block
 // (which may contain nested strings), or any non-" character.
 fmt_body_char = _{ string_escape | fmt_nested_block | !("\"") ~ ANY }
 formatted_triple_string = @{ formatted_prefix ~ "\"\"\"" ~ (!"\"\"\"" ~ ANY)* ~ "\"\"\"" }
 formatted_simple_string = @{ formatted_prefix ~ "\"" ~ fmt_body_char* ~ "\"" }
-content_triple_string = @{ content_prefix ~ "\"\"\"" ~ (!"\"\"\"" ~ ANY)* ~ "\"\"\"" }
-content_simple_string = @{ content_prefix ~ "\"" ~ fmt_body_char* ~ "\"" }
 triple_string = @{ "\"\"\"" ~ (!"\"\"\"" ~ ANY)* ~ "\"\"\"" }
 simple_string = @{ "\"" ~ simple_string_char* ~ "\"" }
 timeframe = @{ ASCII_DIGIT+ ~ ("s" | "m" | "h" | "d" | "w" | "M") }
