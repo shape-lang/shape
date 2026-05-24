@@ -1,12 +1,13 @@
 # Team-lead handover — Shape v0.3 close-approach
 
-**Refreshed:** 2026-05-24 at main HEAD `a635ae36` (post Round-8 W4 close).
-R7 + R8 W1 + R8 W2 + R8 W3 + **R8 W4 (7 merges: 6 fix + 1 audit)**.
-v0.3 criterion progress: **A 5.5/6** (J.0/.1/.2/.3/J.5a/.5b/.5c/.5d/.5f
-merged; J.4-rest partial; J.5e iterator-protocol → v0.4 per audit
-recommendation); B 3/3 COMPLETE; **C 8/8 + 2 RESIDUALS**; D COMPLETE;
-**E COMPLETE** (W18.0+.2+.3+.4+.5+.6 all merged; W18.1 v0.4-deferred);
-F COMPLETE; J 3/4.
+**Refreshed:** 2026-05-24 at main HEAD `427ba02c` (post Round-8 W5 close
+— G.1 Step 1 doc-truth audits + (a)-class shape-web batch). R7 + R8
+W1-W4 + **R8 W5 (6 parallel G.1 slice agents + shape-web batch +
+6 audit-doc merges)**. v0.3 code criteria substantially complete (A
+5.5/6, B/C/D/E/F COMPLETE, J 3/4); **G.1 Step 1 audit surfaces ~10
+NEW (b)-class v0.3-gating items including LARGE-scope Wave 5d intrinsic
+migration (~40+ todo!()'s) + pure-Shape stdlib inference family (~10
+files)**. Trajectory re-projection pending supervisor scope-disposition.
 
 ## Role
 
@@ -19,8 +20,8 @@ tags and language semantics. The user relays between team-lead and supervisor.
 
 | | |
 |---|---|
-| Main HEAD | `a635ae36` (R8 W4 7-merge batch incl. 2 conflict-resolutions on v2_array_detect.rs take-both) |
-| Smoke matrix s1–s5 | **5/5 VM == JIT** (canonical (ii) F' release-binary harness; re-verified at HEAD `a635ae36` post-merge) |
+| Main HEAD | `427ba02c` (R8 W5 6 G.1 slice-audit doc-merges + shape-web (a)-class batch at shape-web `13bc6fc`) |
+| Smoke matrix s1–s5 | **5/5 VM == JIT** (canonical (ii) F' release-binary harness; re-verified at HEAD `427ba02c` post-merge) |
 | verify-merge / check-no-dynamic / check-clean | 13/13 / exit 0 / exit 0 |
 | Round-6+ no-known-incorrectness set | **EMPTY** per user 2026-05-20 binding |
 | 2026-05-22+05-23 expanded-scope gating set | **OPEN.** Audits CLOSED A/B/C/D/E/J + 2 R8-round-audit-2 docs (W18 deep-research + J.4-rest re-audit). **Round-8 W1 (9 merges) + W2 (8 merges incl. 2 audits) at main HEAD `ae34b01f`.** R8 W2 fix merges: V3-S5 `b4250000` + W17-snapshot-resume `014cdf60` + W17-typed-module-exports `a4fa323d` + W17-foreign-ffi `aadfdc2d` + J-CT.1 `eaea9c87` + J-CT.2 `ae34b01f`. **Criteria status at HEAD ae34b01f:** **A 3.1/6** (J.5 60-90h scope mapped; 4 architectural decisions queued for user/supervisor: tuple-carrier / deep-equality / closure-return-kind / v0.4-deferral-line); **B 3/3 COMPLETE**; **C 7.5/8** (residuals: W17-marshal-return-arms + W17-typed-module-exports-followup-constant-pool); **D COMPLETE**; **E 2/4 + deep-research-audit RESHAPED** (W18.1 HOLDS indefinitely; 4 user-decisions queued: styled f-string return type / c-string retirement timing / builder API shape / v0.3 scope line; 4-cluster partition W18.3-.6 28-38h total); **F COMPLETE**; **J 3/4** (J-CT.3 already met cumulatively). 2 ADR §2.7.4 amendment texts DRAFTED for supervisor text-ratify (items 2+6 direction-ruled territory). G.1/G.2 doc-truth gated on remaining A/E + 2 phase-2c residuals. |
