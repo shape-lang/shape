@@ -1,13 +1,12 @@
 # Team-lead handover — Shape v0.3 close-approach
 
-**Refreshed:** 2026-05-24 at main HEAD `f98ce051` (post Round-8 W3 Wave A close).
-R7 + R8 W1 + R8 W2 + **R8 W3 Wave A (5 merges)**. v0.3 criterion
-progress: A 3.2/6 + J.5a (5/6 primitives + flatten REFUSED per Refusal
-#10 J.5d territory); B 3/3 COMPLETE; **C 8/8 + 2 RESIDUALS** (W17-
-marshal-return-arms + W17-typed-module-exports-followup-constant-pool
-both merged R8 W3); D COMPLETE; **E 3/4** (W18.0+.2+.3+.6; W18.5
-dispatch-ready; W18.4 BLOCKED on D1+D2 architectural conflict); F
-COMPLETE; J 3/4 (per R8 W2).
+**Refreshed:** 2026-05-24 at main HEAD `a635ae36` (post Round-8 W4 close).
+R7 + R8 W1 + R8 W2 + R8 W3 + **R8 W4 (7 merges: 6 fix + 1 audit)**.
+v0.3 criterion progress: **A 5.5/6** (J.0/.1/.2/.3/J.5a/.5b/.5c/.5d/.5f
+merged; J.4-rest partial; J.5e iterator-protocol → v0.4 per audit
+recommendation); B 3/3 COMPLETE; **C 8/8 + 2 RESIDUALS**; D COMPLETE;
+**E COMPLETE** (W18.0+.2+.3+.4+.5+.6 all merged; W18.1 v0.4-deferred);
+F COMPLETE; J 3/4.
 
 ## Role
 
@@ -20,8 +19,8 @@ tags and language semantics. The user relays between team-lead and supervisor.
 
 | | |
 |---|---|
-| Main HEAD | `f98ce051` (R8 W3 Wave A 5-merge batch incl. manual conflict resolution on builtins.rs) |
-| Smoke matrix s1–s5 | **5/5 VM == JIT** (canonical (ii) F' release-binary harness; re-verified at HEAD `f98ce051` post-merge) |
+| Main HEAD | `a635ae36` (R8 W4 7-merge batch incl. 2 conflict-resolutions on v2_array_detect.rs take-both) |
+| Smoke matrix s1–s5 | **5/5 VM == JIT** (canonical (ii) F' release-binary harness; re-verified at HEAD `a635ae36` post-merge) |
 | verify-merge / check-no-dynamic / check-clean | 13/13 / exit 0 / exit 0 |
 | Round-6+ no-known-incorrectness set | **EMPTY** per user 2026-05-20 binding |
 | 2026-05-22+05-23 expanded-scope gating set | **OPEN.** Audits CLOSED A/B/C/D/E/J + 2 R8-round-audit-2 docs (W18 deep-research + J.4-rest re-audit). **Round-8 W1 (9 merges) + W2 (8 merges incl. 2 audits) at main HEAD `ae34b01f`.** R8 W2 fix merges: V3-S5 `b4250000` + W17-snapshot-resume `014cdf60` + W17-typed-module-exports `a4fa323d` + W17-foreign-ffi `aadfdc2d` + J-CT.1 `eaea9c87` + J-CT.2 `ae34b01f`. **Criteria status at HEAD ae34b01f:** **A 3.1/6** (J.5 60-90h scope mapped; 4 architectural decisions queued for user/supervisor: tuple-carrier / deep-equality / closure-return-kind / v0.4-deferral-line); **B 3/3 COMPLETE**; **C 7.5/8** (residuals: W17-marshal-return-arms + W17-typed-module-exports-followup-constant-pool); **D COMPLETE**; **E 2/4 + deep-research-audit RESHAPED** (W18.1 HOLDS indefinitely; 4 user-decisions queued: styled f-string return type / c-string retirement timing / builder API shape / v0.3 scope line; 4-cluster partition W18.3-.6 28-38h total); **F COMPLETE**; **J 3/4** (J-CT.3 already met cumulatively). 2 ADR §2.7.4 amendment texts DRAFTED for supervisor text-ratify (items 2+6 direction-ruled territory). G.1/G.2 doc-truth gated on remaining A/E + 2 phase-2c residuals. |
