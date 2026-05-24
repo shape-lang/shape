@@ -338,12 +338,19 @@ pub(crate) fn handle_filter_v2(
 }
 
 /// `arr.sort()` / `arr.sort(|a, b| ...)` — per-element comparator sort.
+///
+/// R8 W4 J.5f (2026-05-24, supervisor D4): delegates to the canonical
+/// implementation in `array_sort::handle_sort_v2` (natural-ordering sort
+/// + comparator-closure sort, stable per supervisor D4 user expectation).
+/// The registration in `method_registry.rs` still routes through this
+/// entry-point for backwards-compatibility with the PHF table; the body
+/// is a thin trampoline.
 pub(crate) fn handle_sort_v2(
-    _vm: &mut VirtualMachine,
+    vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(ckpt2_surface("sort", args))
+    crate::executor::objects::array_sort::handle_sort_v2(vm, args, ctx)
 }
 
 /// `arr.slice(start, end?)` — range projection. Kind-generic via the
