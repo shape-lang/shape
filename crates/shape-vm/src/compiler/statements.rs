@@ -783,17 +783,12 @@ impl BytecodeCompiler {
                     self.pending_empty_array_alloc_idx.take();
 
                 if let Some(name) = var_decl.pattern.as_identifier() {
-                    if ref_borrow.is_some() {
-                        return Err(ShapeError::SemanticError {
-                            message:
-                                "[B0003] cannot return or store a reference that outlives its owner"
-                                    .to_string(),
-                            location: var_decl
-                                .value
-                                .as_ref()
-                                .map(|expr| self.span_to_source_location(expr.span())),
-                        });
-                    }
+                    // R8 W9 B9: removed categorical ban on module-scope `ref_borrow`.
+                    // The MIR borrow solver is the documented sole authority for
+                    // escape analysis (per audit
+                    // docs/cluster-audits/v0.3-r8w9-borrow-b0003-audit.md §3).
+                    // Local-scope `let r = &x` already accepts the same shape;
+                    // module-scope must match.
                     let binding_idx = self.get_or_create_module_binding(name);
                     self.emit(Instruction::new(
                         OpCode::StoreModuleBinding,
@@ -4832,16 +4827,12 @@ impl BytecodeCompiler {
                 if self.current_function.is_none() {
                     // Top-level: create module_binding variable
                     if let Some(name) = var_decl.pattern.as_identifier() {
-                        if ref_borrow.is_some() {
-                            return Err(ShapeError::SemanticError {
-                                message:
-                                    "[B0003] cannot return or store a reference that outlives its owner"
-                                        .to_string(),
-                                location: var_decl.value.as_ref().map(|expr| {
-                                    self.span_to_source_location(expr.span())
-                                }),
-                            });
-                        }
+                        // R8 W9 B9: removed categorical ban on module-scope
+                        // `ref_borrow`. The MIR borrow solver is the documented
+                        // sole authority for escape analysis (per audit
+                        // docs/cluster-audits/v0.3-r8w9-borrow-b0003-audit.md §3).
+                        // Local-scope `let r = &x` already accepts the same shape;
+                        // module-scope must match.
                         let binding_idx = self.get_or_create_module_binding(name);
 
                         // Emit StoreModuleBindingTyped for width-typed bindings,
