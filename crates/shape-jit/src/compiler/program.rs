@@ -327,6 +327,7 @@ impl JITCompiler {
                 closure_function_layouts: program.closure_function_layouts.clone(),
                 trait_vtables: program.trait_vtables.clone(),
                 has_imported_const_inline: program.has_imported_const_inline,
+                has_w17_marshal_residual: program.has_w17_marshal_residual,
             };
 
             // MirToIR is the ONLY JIT compilation path (Phase 4: BytecodeToIR removed).

@@ -499,6 +499,7 @@ pub fn link(program: &Program) -> Result<LinkedProgram, LinkError> {
             ),
             trait_vtables: program.trait_vtables.clone(),
             has_imported_const_inline: program.has_imported_const_inline,
+            has_w17_marshal_residual: program.has_w17_marshal_residual,
         });
     }
 
@@ -622,6 +623,7 @@ pub fn link(program: &Program) -> Result<LinkedProgram, LinkError> {
         closure_function_layouts: remap_closure_function_layouts(program, &blobs),
         trait_vtables: program.trait_vtables.clone(),
         has_imported_const_inline: program.has_imported_const_inline,
+        has_w17_marshal_residual: program.has_w17_marshal_residual,
     })
 }
 
@@ -683,6 +685,7 @@ pub fn linked_to_bytecode_program(linked: &LinkedProgram) -> BytecodeProgram {
         strings: linked.strings.clone(),
         functions,
         has_imported_const_inline: linked.has_imported_const_inline,
+        has_w17_marshal_residual: linked.has_w17_marshal_residual,
         debug_info: linked.debug_info.clone(),
         data_schema: linked.data_schema.clone(),
         module_binding_names: linked.module_binding_names.clone(),

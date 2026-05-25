@@ -283,6 +283,32 @@ impl BytecodeCompiler {
                 location: Some(self.span_to_source_location(span)),
             });
         }
+        // R8 W9 B1 W17-marshal-return JIT surface-and-stop flag
+        // (2026-05-25). `builtin fn` declarations like
+        // `from std::core::state use { serialize }` route through this
+        // helper which calls `compile_module_namespace_call_on_binding`
+        // — emitting a `LoadModuleBinding(idx) + GetFieldTyped(...) +
+        // CallValue` sequence whose callee is a `Ptr(HeapKind::ModuleFn)`
+        // (see ADR-006 §2.7.26 amendment). At runtime VM-side this
+        // routes cleanly through `invoke_module_fn_id_stub` +
+        // `project_typed_return`; JIT-side `jit_call_value` ModuleFn
+        // arm at `ffi/control/mod.rs:704-715` silently returns TAG_NULL
+        // — silent-wrong-output. Set the flag so the JIT preflight
+        // refuses and deopts to the bytecode interpreter via the W12
+        // `[jit-fallback]` path. Root-cause fix in JIT ModuleFn dispatch
+        // (`dispatch_module_fn_call` `todo!()` + the §2.7.10/Q11 kinded
+        // handler ABI rebuild) is v0.4 per
+        // `docs/v0.3-close-summary.md` §5.16 JIT-lowering followup.
+        // Restrict to user-space main compilation. Dep-module bodies
+        // execute their internal stdlib calls only when transitively
+        // reachable from main; setting the flag during dep-module
+        // compilation would poison every program that imports any
+        // stdlib (e.g. s1's `let mut sum = 0; for i in 0..100 {...}`
+        // pulls in `std::core::remote::__call` during stdlib bootstrap
+        // even though main never invokes it).
+        if self.module_scope_stack.is_empty() {
+            self.program.has_w17_marshal_residual = true;
+        }
         let binding_name = self.ensure_hidden_native_module_binding(&builtin_decl.source_module_path);
         self.compile_module_namespace_call_on_binding(
             &binding_name,
@@ -593,6 +619,42 @@ impl BytecodeCompiler {
             || self.mutable_closure_captures.contains_key(name)
             || self.resolve_scoped_module_binding_name(name).is_some()
         {
+            // R8 W9 B1 W17-marshal-return JIT surface-and-stop flag
+            // (2026-05-25). Direct call to an imported stdlib function —
+            // the callee resolves via `resolve_scoped_module_binding_name`
+            // and loads a `Ptr(HeapKind::ModuleFn)` value. At runtime the
+            // `CallValue` opcode dispatches via the VM-side
+            // `call_value_immediate_nb` ModuleFn arm, which routes to
+            // `invoke_module_fn_id_stub` + `project_typed_return` and
+            // surfaces cleanly when the typed-return arm hits the
+            // W17-marshal-return-arms catch-all at
+            // `crates/shape-vm/src/executor/vm_impl/modules.rs:74`.
+            //
+            // The JIT-side `jit_call_value` ModuleFn arm at
+            // `crates/shape-jit/src/ffi/control/mod.rs:704-715` instead
+            // returns `TAG_NULL` (= the `-1407374883553280` NaN-box null
+            // pattern) silently with only a `tracing::debug!` line —
+            // swallowing the W17-marshal-return surface and producing
+            // silent-wrong-output (VM=ec1 SURFACE / JIT=ec0 garbage on
+            // `print(serialize([1.0,2.0,3.0]).len())`).
+            //
+            // Mark the program so `JITExecutor::execute_with_jit` deopts
+            // to the bytecode interpreter via the existing W12
+            // `[jit-fallback]` path — VM == JIT semantics restored via
+            // path-convergence. Mirrors R8 W7 G.5 V2-verifier preflight
+            // + R8 W8 imported-const-inline surface-and-stop precedents.
+            // Root-cause fix in JIT ModuleFn dispatch
+            // (`dispatch_module_fn_call` `todo!()` + the §2.7.10/Q11
+            // kinded handler ABI rebuild) is v0.4 per
+            // `docs/v0.3-close-summary.md` §5.16 JIT-lowering followup.
+            // Restrict to user-space main compilation (see
+            // `compile_module_builtin_function_call` below for the
+            // dep-module-bootstrap rationale).
+            if self.resolve_scoped_module_binding_name(name).is_some()
+                && self.module_scope_stack.is_empty()
+            {
+                self.program.has_w17_marshal_residual = true;
+            }
             let expected_param_modes = if let Some(local_idx) = self.resolve_local(name) {
                 self.local_callable_pass_modes.get(&local_idx).cloned()
             } else if let Some(scoped_name) = self.resolve_scoped_module_binding_name(name) {
@@ -3577,6 +3639,29 @@ impl BytecodeCompiler {
                 ),
                 location: Some(self.span_to_source_location(namespace_span)),
             });
+        }
+
+        // R8 W9 B1 W17-marshal-return JIT surface-and-stop flag
+        // (2026-05-25). Native module namespace calls (e.g.
+        // `state::serialize(arr)` or imported `serialize(arr)` via
+        // `from std::core::state use { serialize }`) emit
+        // `LoadModuleBinding + GetFieldTyped + CallValue` per ADR-006
+        // §2.7.26. The callee is a `Ptr(HeapKind::ModuleFn)` value; at
+        // runtime VM-side this routes cleanly through
+        // `invoke_module_fn_id_stub` + `project_typed_return`; JIT-side
+        // `jit_call_value` ModuleFn arm at
+        // `crates/shape-jit/src/ffi/control/mod.rs:704-715` silently
+        // returns TAG_NULL. Set the flag so the JIT preflight refuses
+        // and deopts to the bytecode interpreter via the W12
+        // `[jit-fallback]` path. v0.4 root-cause fix per
+        // `docs/v0.3-close-summary.md` §5.16 JIT-lowering followup.
+        // Restrict to user-space main compilation (see same restriction
+        // at `compile_module_builtin_function_call` above for the
+        // dep-module-bootstrap rationale).
+        if self.is_native_module_export(namespace_name, method)
+            && self.module_scope_stack.is_empty()
+        {
+            self.program.has_w17_marshal_residual = true;
         }
 
         // For native module exports, use a hidden binding so that the native
