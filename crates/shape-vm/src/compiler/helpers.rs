@@ -5128,6 +5128,23 @@ impl BytecodeCompiler {
                 if self.slot_is_boxed(local_idx) || self.slot_is_shared(local_idx) {
                     continue;
                 }
+                // R8 W9 B3 Drop runtime fix: when the slot's type has a
+                // user `impl Drop` impl, skip the `DropLocal` opcode. The
+                // V1.1C `DropLocal` poisons the slot with the no-op Bool
+                // sentinel; the subsequent `LoadLocal` + `DropCall` pair
+                // (emitted below) would then read poisoned bits and call
+                // the user `Drop::drop` method on a stale receiver,
+                // surfacing as `MakeFieldRef base must reference a
+                // TypedObject; got Bool` once `self.field` is accessed in
+                // the drop body. The `DropCall` opcode's `pop_kinded` +
+                // `call_function_with_nb_args` path already retires the
+                // slot's heap share via the canonical kind-dispatch (see
+                // `executor/trait_object_ops.rs::op_drop_call_impl`), so
+                // the V1.1C ownership-aware release is redundant for
+                // user-Drop slots — `DropCall` is the sole releaser.
+                if self.local_drop_kind(local_idx).is_some() {
+                    continue;
+                }
                 self.emit(Instruction::new(
                     OpCode::DropLocal,
                     Some(Operand::Local(local_idx)),
@@ -5361,6 +5378,16 @@ impl BytecodeCompiler {
                         // `AllocSharedLocal` — `DropSharedLocal` is emitted
                         // below in parallel.
                         if self.slot_is_boxed(local_idx) || self.slot_is_shared(local_idx) {
+                            continue;
+                        }
+                        // R8 W9 B3 Drop runtime fix: skip `DropLocal` when
+                        // the slot's type has a user `impl Drop` impl. The
+                        // `DropCall` opcode emitted below is the sole
+                        // releaser for user-Drop slots — `DropLocal` here
+                        // would poison the slot before `DropCall` reads
+                        // it. See the companion comment in
+                        // `pop_drop_scope` above for rationale.
+                        if self.local_drop_kind(local_idx).is_some() {
                             continue;
                         }
                         self.emit(Instruction::new(

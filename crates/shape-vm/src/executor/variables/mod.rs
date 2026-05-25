@@ -2420,15 +2420,35 @@ impl VirtualMachine {
         use shape_value::HeapKind;
         let rt = match instruction.operand {
             Some(Operand::Local(local_idx)) => {
-                let frame_index = self
-                    .call_stack
-                    .len()
-                    .checked_sub(1)
-                    .ok_or_else(|| {
-                        VMError::RuntimeError(
-                            "MakeRef Local outside any call frame".into(),
-                        )
-                    })? as u32;
+                // R8 W9 B3 Drop runtime fix: top-level frame sentinel.
+                //
+                // `MakeRef Local` may be emitted at top-level (outside any
+                // call frame) for typed-field reads like `f.path` inside a
+                // top-level block scope. The audit recipe surfaces this via
+                // `impl Drop for T { method drop() { print(self.x) } }` at
+                // top-level (the Drop body's own `self.x` read is fine —
+                // it runs inside a frame pushed by `op_drop_call_impl` —
+                // but the *enclosing* top-level block emits MakeRef Local
+                // for `f.path` reads, and that path had no frame).
+                //
+                // Encode the top-level slot space as `frame_index =
+                // u32::MAX` (sentinel). Consumers
+                // (`resolve_typed_object_receiver`, `read_ref_target`,
+                // `write_ref_target`) check this sentinel and use
+                // `base_pointer = 0` instead of looking up the frame in
+                // `call_stack`. The sentinel survives across frame
+                // boundaries — a Drop method body that received a ref
+                // captured against the top-level frame still resolves to
+                // slot 0 of the stack root.
+                //
+                // Slot bits are read from absolute slot index `local_idx`
+                // (top-level `current_locals_base()` is 0), matching the
+                // §2.7.7 parallel-kind track at the same index.
+                let frame_index = if self.call_stack.is_empty() {
+                    u32::MAX
+                } else {
+                    (self.call_stack.len() - 1) as u32
+                };
                 let bp = self.current_locals_base();
                 let slot = bp + local_idx as usize;
                 if slot >= self.stack.len() {
@@ -2786,14 +2806,24 @@ impl VirtualMachine {
                         kind
                     )));
                 }
-                let frame =
-                    self.call_stack.get(*frame_index as usize).ok_or_else(|| {
-                        VMError::RuntimeError(format!(
-                            "RefTarget::Local frame_index {} out of bounds",
-                            frame_index
-                        ))
-                    })?;
-                let slot = frame.base_pointer + *slot_index as usize;
+                // R8 W9 B3 Drop runtime fix: top-level frame sentinel.
+                // `frame_index == u32::MAX` means the ref was captured at
+                // top-level (no call frame); base_pointer is 0 (the stack
+                // root). See `op_make_ref` for construction site.
+                let base_pointer = if *frame_index == u32::MAX {
+                    0
+                } else {
+                    self.call_stack
+                        .get(*frame_index as usize)
+                        .ok_or_else(|| {
+                            VMError::RuntimeError(format!(
+                                "RefTarget::Local frame_index {} out of bounds",
+                                frame_index
+                            ))
+                        })?
+                        .base_pointer
+                };
+                let slot = base_pointer + *slot_index as usize;
                 let (bits, _) = self.stack_read_kinded_raw(slot);
                 // SAFETY: kind == Ptr(HeapKind::TypedObject) means the
                 // bits are the raw `*const TypedObjectStorage` from the
@@ -2874,14 +2904,21 @@ impl VirtualMachine {
                 slot_index,
                 kind,
             } => {
-                let frame =
-                    self.call_stack.get(*frame_index as usize).ok_or_else(|| {
-                        VMError::RuntimeError(format!(
-                            "DerefLoad: RefTarget::Local frame_index {} out of bounds",
-                            frame_index
-                        ))
-                    })?;
-                let slot = frame.base_pointer + *slot_index as usize;
+                // R8 W9 B3 Drop runtime fix: top-level frame sentinel.
+                let base_pointer = if *frame_index == u32::MAX {
+                    0
+                } else {
+                    self.call_stack
+                        .get(*frame_index as usize)
+                        .ok_or_else(|| {
+                            VMError::RuntimeError(format!(
+                                "DerefLoad: RefTarget::Local frame_index {} out of bounds",
+                                frame_index
+                            ))
+                        })?
+                        .base_pointer
+                };
+                let slot = base_pointer + *slot_index as usize;
                 let (bits, _stored_kind) = self.stack_read_kinded_raw(slot);
                 Ok((bits, *kind))
             }
@@ -2922,17 +2959,24 @@ impl VirtualMachine {
                 slot_index,
                 kind,
             } => {
-                let frame =
-                    self.call_stack.get(*frame_index as usize).ok_or_else(|| {
-                        crate::executor::vm_impl::stack::drop_with_kind(
-                            val_bits, val_kind,
-                        );
-                        VMError::RuntimeError(format!(
-                            "DerefStore: RefTarget::Local frame_index {} out of bounds",
-                            frame_index
-                        ))
-                    })?;
-                let slot = frame.base_pointer + *slot_index as usize;
+                // R8 W9 B3 Drop runtime fix: top-level frame sentinel.
+                let base_pointer = if *frame_index == u32::MAX {
+                    0
+                } else {
+                    match self.call_stack.get(*frame_index as usize) {
+                        Some(f) => f.base_pointer,
+                        None => {
+                            crate::executor::vm_impl::stack::drop_with_kind(
+                                val_bits, val_kind,
+                            );
+                            return Err(VMError::RuntimeError(format!(
+                                "DerefStore: RefTarget::Local frame_index {} out of bounds",
+                                frame_index
+                            )));
+                        }
+                    }
+                };
+                let slot = base_pointer + *slot_index as usize;
                 // Cross-check: the place's stored kind matches the ref's
                 // captured kind (drift = construction-side bug).
                 let (prior_bits, prior_kind) = self.stack_read_kinded_raw(slot);
