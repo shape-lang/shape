@@ -12,9 +12,9 @@ const SQRT_2PI: number = 2.5066282746310002;
 // ===== Helper: Gamma function (Lanczos approximation) =====
 
 /// Log-gamma function via Lanczos approximation (g=7, n=9)
-function ln_gamma(x) {
+function ln_gamma(x: number) -> number {
     let g = 7.0;
-    let coefs = [
+    let coefs: Array<number> = [
         0.99999999999980993,
         676.5203681218851,
         -1259.1392167224028,
@@ -28,14 +28,18 @@ function ln_gamma(x) {
 
     if x < 0.5 {
         // Reflection formula: Gamma(1-x) * Gamma(x) = pi / sin(pi*x)
-        let reflect = ln(PI / sin(PI * x)) - ln_gamma(1.0 - x);
+        // NOTE: recursive call result bound to typed local — the v0.3 inference
+        // engine does not propagate return-type annotations through self-
+        // recursive calls (v0.4 bidirectional-inference followup).
+        let recur_g: number = ln_gamma(1.0 - x);
+        let reflect: number = ln(PI / sin(PI * x)) - recur_g;
         return reflect;
     }
 
     let z = x - 1.0;
     let mut ag = coefs[0];
     for i in range(1, 9) {
-        ag = ag + coefs[i] / (z + i);
+        ag = ag + coefs[i] / (z + (i as number));
     }
 
     let t = z + g + 0.5;
@@ -43,25 +47,31 @@ function ln_gamma(x) {
 }
 
 /// Gamma function
-pub fn gamma(x) {
+pub fn gamma(x: number) -> number {
     exp(ln_gamma(x))
 }
 
 /// Beta function B(a, b) = Gamma(a) * Gamma(b) / Gamma(a+b)
-pub fn beta_fn(a, b) {
-    exp(ln_gamma(a) + ln_gamma(b) - ln_gamma(a + b))
+pub fn beta_fn(a: number, b: number) -> number {
+    // NOTE: user-fn call results bound to typed locals per v0.3 inference gap
+    // (return-type annotations not propagated through user-defined-fn calls;
+    // mirrors linalg.shape pattern; v0.4 bidirectional-inference followup).
+    let la: number = ln_gamma(a);
+    let lb: number = ln_gamma(b);
+    let lab: number = ln_gamma(a + b);
+    exp(la + lb - lab)
 }
 
 // ===== Normal Distribution =====
 
 /// Standard normal PDF: phi(x)
-pub fn normal_pdf(x, mu = 0.0, sigma = 1.0) {
+pub fn normal_pdf(x: number, mu: number = 0.0, sigma: number = 1.0) -> number {
     let z = (x - mu) / sigma;
     exp(-0.5 * z * z) / (sigma * SQRT_2PI)
 }
 
 /// Standard normal CDF using rational approximation (Abramowitz & Stegun)
-pub fn normal_cdf(x, mu = 0.0, sigma = 1.0) {
+pub fn normal_cdf(x: number, mu: number = 0.0, sigma: number = 1.0) -> number {
     let z = (x - mu) / sigma;
 
     // Use symmetry for negative values
@@ -96,9 +106,9 @@ pub fn normal_cdf(x, mu = 0.0, sigma = 1.0) {
 }
 
 /// Inverse normal CDF (quantile function) using rational approximation
-pub fn normal_quantile(p, mu = 0.0, sigma = 1.0) {
+pub fn normal_quantile(p: number, mu: number = 0.0, sigma: number = 1.0) -> number {
     // Beasley-Springer-Moro algorithm
-    let a = [
+    let a: Array<number> = [
         -3.969683028665376e+01,
          2.209460984245205e+02,
         -2.759285104469687e+02,
@@ -106,14 +116,14 @@ pub fn normal_quantile(p, mu = 0.0, sigma = 1.0) {
         -3.066479806614716e+01,
          2.506628277459239e+00
     ];
-    let b = [
+    let b: Array<number> = [
         -5.447609879822406e+01,
          1.615858368580409e+02,
         -1.556989798598866e+02,
          6.680131188771972e+01,
         -1.328068155288572e+01
     ];
-    let c = [
+    let c: Array<number> = [
         -7.784894002430293e-03,
         -3.223964580411365e-01,
         -2.400758277161838e+00,
@@ -121,7 +131,7 @@ pub fn normal_quantile(p, mu = 0.0, sigma = 1.0) {
          4.374664141464968e+00,
          2.938163982698783e+00
     ];
-    let d = [
+    let d: Array<number> = [
          7.784695709041462e-03,
          3.224671290700398e-01,
          2.445134137142996e+00,
@@ -156,16 +166,17 @@ pub fn normal_quantile(p, mu = 0.0, sigma = 1.0) {
 // ===== Chi-Square Distribution =====
 
 /// Chi-square PDF: f(x; k) = x^(k/2-1) * exp(-x/2) / (2^(k/2) * Gamma(k/2))
-pub fn chi_square_pdf(x, k) {
+pub fn chi_square_pdf(x: number, k: number) -> number {
     if x <= 0.0 {
         return 0.0;
     }
-    let half_k = k / 2.0;
-    exp((half_k - 1.0) * ln(x) - x / 2.0 - half_k * ln(2.0) - ln_gamma(half_k))
+    let half_k: number = k / 2.0;
+    let lg: number = ln_gamma(half_k);
+    exp((half_k - 1.0) * ln(x) - x / 2.0 - half_k * ln(2.0) - lg)
 }
 
 /// Chi-square CDF (via regularized incomplete gamma — series expansion)
-pub fn chi_square_cdf(x, k) {
+pub fn chi_square_cdf(x: number, k: number) -> number {
     if x <= 0.0 {
         return 0.0;
     }
@@ -173,10 +184,10 @@ pub fn chi_square_cdf(x, k) {
 }
 
 /// Sample from chi-square distribution (sum of k squared standard normals)
-pub fn chi_square_sample(k) {
-    let mut sum = 0.0;
+pub fn chi_square_sample(k: int) -> number {
+    let mut sum: number = 0.0;
     for i in range(0, k) {
-        let z = __intrinsic_random_normal(0.0, 1.0);
+        let z: number = __intrinsic_random_normal(0.0, 1.0);
         sum = sum + z * z;
     }
     sum
@@ -185,15 +196,17 @@ pub fn chi_square_sample(k) {
 // ===== Student's t Distribution =====
 
 /// Student's t PDF
-pub fn t_pdf(x, df) {
-    let half_df_plus = (df + 1.0) / 2.0;
-    let half_df = df / 2.0;
-    let coeff = exp(ln_gamma(half_df_plus) - ln_gamma(half_df)) / sqrt(df * PI);
+pub fn t_pdf(x: number, df: number) -> number {
+    let half_df_plus: number = (df + 1.0) / 2.0;
+    let half_df: number = df / 2.0;
+    let lg_plus: number = ln_gamma(half_df_plus);
+    let lg_half: number = ln_gamma(half_df);
+    let coeff: number = exp(lg_plus - lg_half) / sqrt(df * PI);
     coeff * pow(1.0 + x * x / df, -half_df_plus)
 }
 
 /// Student's t CDF (numerical integration via Simpson's rule)
-pub fn t_cdf(x, df) {
+pub fn t_cdf(x: number, df: number) -> number {
     // Use symmetry and numerical integration
     if x == 0.0 {
         return 0.5;
@@ -201,8 +214,9 @@ pub fn t_cdf(x, df) {
 
     // Integrate from -inf to x using change of variable
     // For t-distribution, use the regularized incomplete beta function
-    let t2 = x * x;
-    let p = 1.0 - 0.5 * regularized_beta(df / (df + t2), df / 2.0, 0.5);
+    let t2: number = x * x;
+    let rb: number = regularized_beta(df / (df + t2), df / 2.0, 0.5);
+    let p: number = 1.0 - 0.5 * rb;
     if x > 0.0 {
         p
     } else {
@@ -211,24 +225,28 @@ pub fn t_cdf(x, df) {
 }
 
 /// Sample from Student's t distribution
-pub fn t_sample(df) {
-    let z = __intrinsic_random_normal(0.0, 1.0);
-    let v = chi_square_sample(df) / df;
+pub fn t_sample(df: int) -> number {
+    let z: number = __intrinsic_random_normal(0.0, 1.0);
+    let cs: number = chi_square_sample(df);
+    let v: number = cs / (df as number);
     z / sqrt(v)
 }
 
 // ===== Beta Distribution =====
 
 /// Beta PDF: f(x; a, b) = x^(a-1) * (1-x)^(b-1) / B(a,b)
-pub fn beta_pdf(x, a, b) {
+pub fn beta_pdf(x: number, a: number, b: number) -> number {
     if x <= 0.0 || x >= 1.0 {
         return 0.0;
     }
-    exp((a - 1.0) * ln(x) + (b - 1.0) * ln(1.0 - x) - ln_gamma(a) - ln_gamma(b) + ln_gamma(a + b))
+    let lga: number = ln_gamma(a);
+    let lgb: number = ln_gamma(b);
+    let lgab: number = ln_gamma(a + b);
+    exp((a - 1.0) * ln(x) + (b - 1.0) * ln(1.0 - x) - lga - lgb + lgab)
 }
 
 /// Beta CDF (regularized incomplete beta function)
-pub fn beta_cdf(x, a, b) {
+pub fn beta_cdf(x: number, a: number, b: number) -> number {
     if x <= 0.0 {
         return 0.0;
     }
@@ -240,25 +258,26 @@ pub fn beta_cdf(x, a, b) {
 
 /// Sample from Beta distribution (Joehnk's method for small params,
 /// gamma ratio for general case)
-pub fn beta_sample(a, b) {
+pub fn beta_sample(a: number, b: number) -> number {
     // Use gamma ratio method: X = G1/(G1+G2) where G1~Gamma(a), G2~Gamma(b)
-    let g1 = gamma_sample(a);
-    let g2 = gamma_sample(b);
+    let g1: number = gamma_sample(a);
+    let g2: number = gamma_sample(b);
     g1 / (g1 + g2)
 }
 
 // ===== Gamma Distribution =====
 
 /// Gamma PDF: f(x; k, theta) = x^(k-1) * exp(-x/theta) / (theta^k * Gamma(k))
-pub fn gamma_pdf(x, k, theta = 1.0) {
+pub fn gamma_pdf(x: number, k: number, theta: number = 1.0) -> number {
     if x <= 0.0 {
         return 0.0;
     }
-    exp((k - 1.0) * ln(x) - x / theta - k * ln(theta) - ln_gamma(k))
+    let lgk: number = ln_gamma(k);
+    exp((k - 1.0) * ln(x) - x / theta - k * ln(theta) - lgk)
 }
 
 /// Gamma CDF
-pub fn gamma_cdf(x, k, theta = 1.0) {
+pub fn gamma_cdf(x: number, k: number, theta: number = 1.0) -> number {
     if x <= 0.0 {
         return 0.0;
     }
@@ -266,28 +285,31 @@ pub fn gamma_cdf(x, k, theta = 1.0) {
 }
 
 /// Sample from Gamma distribution (Marsaglia and Tsang's method)
-pub fn gamma_sample(k, theta = 1.0) {
+pub fn gamma_sample(k: number, theta: number = 1.0) -> number {
     if k < 1.0 {
         // For k < 1, use Gamma(k+1) * U^(1/k)
-        let s = gamma_sample(k + 1.0, 1.0);
-        return s * pow(__intrinsic_random(), 1.0 / k) * theta;
+        // NOTE: recursive call result bound to typed local per v0.3 inference gap.
+        let s: number = gamma_sample(k + 1.0, 1.0);
+        let u_recur: number = __intrinsic_random();
+        let p_uk: number = pow(u_recur, 1.0 / k);
+        return s * p_uk * theta;
     }
 
-    let d = k - 1.0 / 3.0;
-    let c = 1.0 / sqrt(9.0 * d);
+    let d: number = k - 1.0 / 3.0;
+    let c: number = 1.0 / sqrt(9.0 * d);
 
-    let mut result = 0.0;
+    let mut result: number = 0.0;
     let mut found = false;
     let mut attempts = 0;
     while !found && attempts < 10000 {
-        let mut x = __intrinsic_random_normal(0.0, 1.0);
-        let mut v = 1.0 + c * x;
+        let mut x: number = __intrinsic_random_normal(0.0, 1.0);
+        let mut v: number = 1.0 + c * x;
         while v <= 0.0 {
             x = __intrinsic_random_normal(0.0, 1.0);
             v = 1.0 + c * x;
         }
         v = v * v * v;
-        let u = __intrinsic_random();
+        let u: number = __intrinsic_random();
         if u < 1.0 - 0.0331 * (x * x) * (x * x) {
             result = d * v * theta;
             found = true;
@@ -303,40 +325,44 @@ pub fn gamma_sample(k, theta = 1.0) {
 // ===== Special Functions =====
 
 /// Regularized incomplete gamma function P(a, x) via series expansion
-function regularized_gamma_p(a, x) {
+function regularized_gamma_p(a: number, x: number) -> number {
     if x <= 0.0 {
         return 0.0;
     }
     if x > a + 1.0 {
         // Use complement: P = 1 - Q, where Q uses continued fraction
-        return 1.0 - regularized_gamma_q(a, x);
+        // NOTE: forward call result bound to typed local per v0.3 inference gap.
+        let q_val: number = regularized_gamma_q(a, x);
+        return 1.0 - q_val;
     }
 
     // Series expansion: P(a,x) = e^(-x) * x^a * sum(x^n / Gamma(a+n+1))
     let mut sum = 1.0 / a;
     let mut term = 1.0 / a;
     for n in range(1, 200) {
-        term = term * x / (a + n);
+        term = term * x / (a + (n as number));
         sum = sum + term;
         if abs(term) < abs(sum) * 0.0000000001 {
             break;
         }
     }
-    exp(-x + a * ln(x) - ln_gamma(a)) * sum
+    let lga: number = ln_gamma(a);
+    exp(-x + a * ln(x) - lga) * sum
 }
 
 /// Complementary regularized incomplete gamma Q(a, x) via continued fraction
-function regularized_gamma_q(a, x) {
+function regularized_gamma_q(a: number, x: number) -> number {
     // Lentz's method for continued fraction
     let mut f = 0.0000000000000001;
     let mut c_val = f;
     let mut d_val = 0.0;
 
     for n in range(1, 200) {
-        let mut an = 0.0;
-        if n % 2 == 1 {
-            let k = (n - 1) / 2;
-            an = -(a + k) * (a + k + 0.0 - a + n * 1.0);
+        let nn: int = n;
+        let mut an: number = 0.0;
+        if nn % 2 == 1 {
+            let k: number = ((nn - 1) / 2) as number;
+            an = -(a + k) * (a + k + 0.0 - a + (nn as number) * 1.0);
             an = (k + 1.0 - a) * (k + 1.0);
             // Simplified: use the standard CF for Q
         }
@@ -349,18 +375,19 @@ function regularized_gamma_q(a, x) {
     let mut sum = 1.0 / a;
     let mut term = 1.0 / a;
     for n in range(1, 200) {
-        term = term * x / (a + n);
+        term = term * x / (a + (n as number));
         sum = sum + term;
         if abs(term) < abs(sum) * 0.0000000001 {
             break;
         }
     }
-    1.0 - exp(-x + a * ln(x) - ln_gamma(a)) * sum
+    let lga: number = ln_gamma(a);
+    1.0 - exp(-x + a * ln(x) - lga) * sum
 }
 
 /// Regularized incomplete beta function I_x(a, b)
 /// Using continued fraction expansion (Lentz's method)
-function regularized_beta(x, a, b) {
+function regularized_beta(x: number, a: number, b: number) -> number {
     if x <= 0.0 {
         return 0.0;
     }
@@ -369,13 +396,18 @@ function regularized_beta(x, a, b) {
     }
 
     // Use symmetry: if x > (a+1)/(a+b+2), use I_x(a,b) = 1 - I_(1-x)(b,a)
+    // NOTE: recursive call result bound to typed local per v0.3 inference gap.
     if x > (a + 1.0) / (a + b + 2.0) {
-        return 1.0 - regularized_beta(1.0 - x, b, a);
+        let recur_b: number = regularized_beta(1.0 - x, b, a);
+        return 1.0 - recur_b;
     }
 
     // Compute the prefix: x^a * (1-x)^b / (a * B(a,b))
-    let ln_prefix = a * ln(x) + b * ln(1.0 - x) - ln(a) - ln_gamma(a) - ln_gamma(b) + ln_gamma(a + b);
-    let prefix = exp(ln_prefix);
+    let lga: number = ln_gamma(a);
+    let lgb: number = ln_gamma(b);
+    let lgab: number = ln_gamma(a + b);
+    let ln_prefix: number = a * ln(x) + b * ln(1.0 - x) - ln(a) - lga - lgb + lgab;
+    let prefix: number = exp(ln_prefix);
 
     // Continued fraction (Lentz's method)
     let eps = 0.0000000001;
@@ -391,8 +423,9 @@ function regularized_beta(x, a, b) {
     f = d_val;
 
     for m in range(1, 200) {
+        let mf: number = m as number;
         // Even step
-        let mut num = m * (b - m) * x / ((a + 2.0 * m - 1.0) * (a + 2.0 * m));
+        let mut num = mf * (b - mf) * x / ((a + 2.0 * mf - 1.0) * (a + 2.0 * mf));
         d_val = 1.0 + num / d_val;
         if abs(d_val) < tiny { d_val = tiny; }
         c_val = 1.0 + num / c_val;
@@ -401,7 +434,7 @@ function regularized_beta(x, a, b) {
         f = f * d_val * c_val;
 
         // Odd step
-        num = -(a + m) * (a + b + m) * x / ((a + 2.0 * m) * (a + 2.0 * m + 1.0));
+        num = -(a + mf) * (a + b + mf) * x / ((a + 2.0 * mf) * (a + 2.0 * mf + 1.0));
         d_val = 1.0 + num / d_val;
         if abs(d_val) < tiny { d_val = tiny; }
         c_val = 1.0 + num / c_val;
