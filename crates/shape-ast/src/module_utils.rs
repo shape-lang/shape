@@ -96,6 +96,12 @@ pub fn strip_import_items(items: Vec<Item>) -> Vec<Item> {
 
 /// Internal scope-symbol kind mirroring [`ModuleExportKind`] for scope
 /// resolution of `export { name }` statements.
+///
+/// `Const` is the well-bounded module-level `const` binding kind introduced
+/// in R8 W8 Cluster A (2026-05-24, user Option (a) ruling); it is the only
+/// `VariableDecl`-shape that may be re-exported via `pub { name }` or appear
+/// as a `pub const` source_decl. `Value` is the residual catch-all for
+/// `let`/`var` decls which remain non-exportable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScopeSymbolKind {
     Function,
@@ -106,6 +112,7 @@ enum ScopeSymbolKind {
     Enum,
     Annotation,
     Value,
+    Const,
 }
 
 fn scope_symbol_kind_to_export(kind: ScopeSymbolKind) -> ModuleExportKind {
@@ -118,6 +125,7 @@ fn scope_symbol_kind_to_export(kind: ScopeSymbolKind) -> ModuleExportKind {
         ScopeSymbolKind::Enum => ModuleExportKind::Enum,
         ScopeSymbolKind::Annotation => ModuleExportKind::Annotation,
         ScopeSymbolKind::Value => ModuleExportKind::Value,
+        ScopeSymbolKind::Const => ModuleExportKind::Value,
     }
 }
 
@@ -154,7 +162,33 @@ impl ScopeTable {
                 }
                 Item::VariableDecl(decl, span) => {
                     if let Some(name) = decl.pattern.as_identifier() {
-                        symbols.insert(name.to_string(), (ScopeSymbolKind::Value, *span));
+                        // R8 W8 Cluster A: `const` at module scope is the
+                        // exportable variant; `let`/`var` stay Value (still
+                        // rejected by the Named-export resolution branch).
+                        let kind = if decl.kind == crate::ast::VarKind::Const {
+                            ScopeSymbolKind::Const
+                        } else {
+                            ScopeSymbolKind::Value
+                        };
+                        symbols.insert(name.to_string(), (kind, *span));
+                    }
+                }
+                Item::Export(export, export_span) => {
+                    // `pub const NAME = ...` parses as an Export wrapping a
+                    // Named([NAME]) export with a `source_decl` carrying the
+                    // VariableDecl. Pick those up here so that the Named-
+                    // export resolution branch can find them in scope.
+                    if let Some(decl) = export.source_decl.as_ref() {
+                        if let Some(name) = decl.pattern.as_identifier() {
+                            let kind = if decl.kind == crate::ast::VarKind::Const {
+                                ScopeSymbolKind::Const
+                            } else {
+                                ScopeSymbolKind::Value
+                            };
+                            symbols
+                                .entry(name.to_string())
+                                .or_insert((kind, *export_span));
+                        }
                     }
                 }
                 Item::AnnotationDef(a, span) => {
@@ -211,11 +245,15 @@ pub fn collect_exported_symbols(program: &Program) -> Result<Vec<ModuleExportSym
             for spec in specs {
                 match scope.resolve(&spec.name) {
                     Some((kind, span)) => {
+                        // R8 W8 Cluster A (2026-05-24): `Value` (i.e. `let`/`var`)
+                        // remains non-exportable; `Const` is the bounded
+                        // exportable shape introduced by the module-level
+                        // `const` feature.
                         if kind == ScopeSymbolKind::Value {
                             return Err(ShapeError::ModuleError {
                                 message: format!(
                                     "Cannot export variable '{}': variable exports are not yet supported. \
-                                     Only functions and types can be exported.",
+                                     Only `const` bindings (plus functions and types) can be exported.",
                                     spec.name
                                 ),
                                 module_path: None,

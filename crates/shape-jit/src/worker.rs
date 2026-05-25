@@ -325,6 +325,7 @@ fn build_sub_program(program: &BytecodeProgram, start: usize, end: usize) -> Byt
         monomorphization_keys: vec![],
         closure_function_layouts: program.closure_function_layouts.clone(),
         trait_vtables: program.trait_vtables.clone(),
+        has_imported_const_inline: program.has_imported_const_inline,
     }
 }
 

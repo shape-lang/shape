@@ -121,6 +121,32 @@ impl BytecodeCompiler {
                 location: Some(self.span_to_source_location(span)),
             });
         }
+
+        // R8 W8 Cluster A (2026-05-24): imported `pub const` references —
+        // inline the comptime-evaluated literal at the use site as
+        // `PushConst(<value>)` rather than going through a module binding
+        // (whose initialization bytecode lives in the unreachable gap
+        // between dep-module bodies and `__main__`'s entry point — see
+        // `compile_with_graph_and_prelude` note at
+        // `compiler_impl_reference_model.rs:2356`). ADR-006 §2.7.5
+        // stamp-at-compile-time invariant preserved: the const's
+        // initializer kind is determined here from its literal shape;
+        // `compile_expr` on the literal stamps `last_expr_*` consistently.
+        if let Some(init_expr) = self.imported_consts.get(name).cloned() {
+            // R8 W8 Cluster A surface-and-stop flag (2026-05-25): mark the
+            // program so `JITExecutor::execute_with_jit` deopts to the
+            // bytecode interpreter via the existing W12 `[jit-fallback]`
+            // path. The inlined `PushConst(<value>)` bytecode is correct,
+            // but the JIT's direct-identifier-eval lowering of this shape
+            // produces silent-wrong-output (e.g. VM=2, JIT=0 on
+            // `print(LEVEL_INFO)` from an imported `pub const LEVEL_INFO`).
+            // Whole-program deopt is the binding-compliant surface-and-stop
+            // per supervisor 2026-05-25 path (i) ruling; root-cause fix in
+            // JIT identifier-eval lowering is v0.4 per close-summary §5.16
+            // JIT-lowering followup workstream.
+            self.program.has_imported_const_inline = true;
+            return self.compile_expr(&init_expr);
+        }
         // Mutable closure captures: dispatch by CaptureKind.
         //   * `CaptureKind::Shared`        → A.1B `LoadSharedCapture`.
         //   * `CaptureKind::OwnedMutable`  → A.1B `LoadOwnedMutableCapture`.

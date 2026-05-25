@@ -1387,6 +1387,11 @@ impl BytecodeCompiler {
             }
         }
         known_bindings.extend(namespace_bindings.iter().cloned());
+        // R8 W8 Cluster A: imported `pub const` names are valid identifier
+        // bindings at consumer-side use sites; teach the analyzer about
+        // them so `unknown-binding` warnings don't blanket the use site
+        // before the const-inline path replaces the identifier reference.
+        known_bindings.extend(self.imported_consts.keys().cloned());
         self.module_namespace_bindings
             .extend(namespace_bindings.into_iter());
         for namespace in self.module_namespace_bindings.clone() {

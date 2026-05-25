@@ -583,6 +583,32 @@ pub struct BytecodeProgram {
         String,
         Arc<shape_value::value::VTable>,
     >,
+
+    /// R8 W8 Cluster A surface-and-stop flag (2026-05-25).
+    ///
+    /// Set to `true` by `compile_expr_identifier` whenever it inlines an
+    /// imported `pub const` initializer expression at a use site. Read by
+    /// `JITExecutor::execute_with_jit` at the JIT compile-step preflight
+    /// to refuse JIT compilation of the program — triggering the existing
+    /// W12 `[jit-fallback]` path so the whole program runs under the
+    /// bytecode interpreter (which evaluates the inlined `PushConst`
+    /// correctly). VM=JIT convergence preserved.
+    ///
+    /// Background: Cluster A's `compile_expr_identifier` intercept emits
+    /// the inlined-at-use bytecode (`PushConst(<value>)`) correctly, but
+    /// the JIT's direct-identifier-eval lowering of that shape fires
+    /// `jit_print_*` FFI with zero-init bits, producing silent-wrong-
+    /// output (VM=2, JIT=0 on `print(IMPORTED_CONST)` bare). Per
+    /// supervisor 2026-05-25 path (i) ruling — surface-and-stop is the
+    /// binding-compliant fix; root-cause fix in JIT identifier-eval
+    /// lowering is v0.4 per `docs/v0.3-close-summary.md` §5.16
+    /// JIT-lowering followup workstream.
+    ///
+    /// NOT serialised because the cached-program reload path
+    /// recomputes by re-running the inline intercept; nothing here is
+    /// runtime-mutated, just compile-time state.
+    #[serde(skip, default)]
+    pub has_imported_const_inline: bool,
 }
 
 /// Constants in the constant pool

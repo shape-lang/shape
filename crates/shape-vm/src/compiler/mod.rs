@@ -815,6 +815,16 @@ pub struct BytecodeCompiler {
     pub(crate) imported_names: HashMap<String, ImportedSymbol>,
     /// Imported annotations: local_name -> ImportedAnnotationSymbol
     pub(crate) imported_annotations: HashMap<String, ImportedAnnotationSymbol>,
+    /// R8 W8 Cluster A (2026-05-24): imported `pub const NAME = expr`
+    /// initializers, keyed by the local binding name (alias-respecting).
+    /// At identifier-load time, references to these names compile to an
+    /// inlined `PushConst(<comptime-value>)` rather than a
+    /// `LoadModuleBinding` — the dispatch's "use the existing
+    /// comptime-evaluated-constant mechanism (the `Constant` pool); NOT a
+    /// new opcode, NOT a deferred init runtime computation" binding.
+    /// ADR-006 §2.7.5 stamp-at-compile-time invariant preserved: the
+    /// constant's kind is stamped from the literal's shape at compile time.
+    pub(crate) imported_consts: HashMap<String, shape_ast::ast::Expr>,
     /// Qualified builtin function declarations available as module-scoped callables.
     pub(crate) module_builtin_functions: HashMap<String, ModuleBuiltinFunction>,
     /// Module namespace bindings introduced by `use module.path`.

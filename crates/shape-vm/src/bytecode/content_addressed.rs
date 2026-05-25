@@ -318,6 +318,16 @@ pub struct Program {
         String,
         std::sync::Arc<shape_value::value::VTable>,
     >,
+
+    /// R8 W8 Cluster A surface-and-stop flag (2026-05-25). Mirror of
+    /// `BytecodeProgram::has_imported_const_inline` for the content-
+    /// addressed Program shape; propagated through the linker so the JIT
+    /// executor can deopt the whole program to the bytecode interpreter
+    /// when imported `pub const` identifiers were inlined-at-use by
+    /// `compile_expr_identifier`. v0.4 root-cause fix per close-summary
+    /// §5.16. NOT serialised — compile-time state.
+    #[serde(skip, default)]
+    pub has_imported_const_inline: bool,
 }
 
 /// A linked function ready for execution in a flat instruction array.
@@ -514,4 +524,18 @@ pub struct LinkedProgram {
         String,
         std::sync::Arc<shape_value::value::VTable>,
     >,
+
+    /// R8 W8 Cluster A surface-and-stop flag (2026-05-25).
+    ///
+    /// Mirrors `BytecodeProgram::has_imported_const_inline`; propagated
+    /// through the linker so the JIT executor (which receives the
+    /// post-link `BytecodeProgram`) can refuse to JIT-compile the program
+    /// when imported `pub const` identifiers were inlined-at-use as
+    /// `PushConst(<value>)` by `compile_expr_identifier`. Triggers W12
+    /// `[jit-fallback]` deopt to bytecode interpreter; root-cause fix in
+    /// JIT identifier-eval lowering is v0.4 per
+    /// `docs/v0.3-close-summary.md` §5.16. NOT serialised — compile-time
+    /// state.
+    #[serde(skip, default)]
+    pub has_imported_const_inline: bool,
 }
