@@ -609,6 +609,46 @@ pub struct BytecodeProgram {
     /// runtime-mutated, just compile-time state.
     #[serde(skip, default)]
     pub has_imported_const_inline: bool,
+
+    /// R8 W9 B1 W17-marshal-return JIT surface-and-stop flag (2026-05-25).
+    ///
+    /// Set to `true` by `compile_expr_function_call` whenever it compiles
+    /// a direct call whose callee resolves via
+    /// `resolve_scoped_module_binding_name` — i.e. an imported stdlib
+    /// function call routed through a `Ptr(HeapKind::ModuleFn)` callee.
+    /// Read by `JITExecutor::execute_with_jit` at the JIT compile-step
+    /// preflight to refuse JIT compilation of the program — triggering
+    /// the existing W12 `[jit-fallback]` path so the whole program runs
+    /// under the bytecode interpreter (which dispatches ModuleFn callees
+    /// soundly through `invoke_module_fn_id_stub` + `project_typed_return`).
+    /// VM == JIT convergence preserved.
+    ///
+    /// Background: the JIT-side `jit_call_value` ModuleFn arm at
+    /// `ffi/control/mod.rs:704-715` returns `TAG_NULL` (= the
+    /// `-1407374883553280` NaN-box null pattern) silently with only a
+    /// `tracing::debug!` line — no error propagation. For module
+    /// functions whose VM-side body surfaces clean (e.g. `state.serialize`
+    /// returning the W17-snapshot-resume surface message, or any function
+    /// whose `TypedReturn` arm hits the catch-all in `project_typed_return`
+    /// at `crates/shape-vm/src/executor/vm_impl/modules.rs:74`), the JIT
+    /// path swallows the surface and continues with a null result —
+    /// silent-wrong-output VM=ec1 SURFACE / JIT=ec0 garbage on
+    /// `print(serialize([1.0,2.0,3.0]).len())`.
+    ///
+    /// Per supervisor 2026-05-25 path (i) ruling — surface-and-stop is the
+    /// binding-compliant fix; root-cause fix in JIT marshal-return-arms
+    /// lowering (`dispatch_module_fn_call` `todo!()` at
+    /// `crates/shape-jit/src/ffi/control/mod.rs:252` + the §2.7.10/Q11
+    /// kinded handler ABI rebuild) is v0.4 per
+    /// `docs/v0.3-close-summary.md` §5.16 JIT-lowering followup workstream.
+    /// Mirrors R8 W7 G.5 V2-verifier preflight + R8 W8 imported-const-inline
+    /// surface-and-stop precedents.
+    ///
+    /// NOT serialised because the cached-program reload path recomputes
+    /// by re-running the call-site intercept; nothing here is
+    /// runtime-mutated, just compile-time state.
+    #[serde(skip, default)]
+    pub has_w17_marshal_residual: bool,
 }
 
 /// Constants in the constant pool

@@ -563,6 +563,8 @@ pub fn program_from_blobs_by_hash(
         trait_vtables: source.trait_vtables.clone(),
         // R8 W8 Cluster A surface-and-stop flag propagation.
         has_imported_const_inline: source.has_imported_const_inline,
+        // R8 W9 B1 W17-marshal-return surface-and-stop flag propagation.
+        has_w17_marshal_residual: source.has_w17_marshal_residual,
     })
 }
 
@@ -945,6 +947,8 @@ fn create_stub_program(program: &BytecodeProgram) -> BytecodeProgram {
             trait_vtables: ca.trait_vtables.clone(),
             // R8 W8 Cluster A surface-and-stop flag propagation.
             has_imported_const_inline: ca.has_imported_const_inline,
+            // R8 W9 B1 W17-marshal-return surface-and-stop flag propagation.
+            has_w17_marshal_residual: ca.has_w17_marshal_residual,
         });
     }
     // Copy top-level metadata needed by program_from_blobs
@@ -1861,6 +1865,7 @@ mod tests {
             closure_function_layouts_by_name: HashMap::new(),
             trait_vtables: HashMap::new(),
             has_imported_const_inline: false,
+            has_w17_marshal_residual: false,
         });
 
         assert!(
@@ -2014,6 +2019,7 @@ mod tests {
             closure_function_layouts_by_name: HashMap::new(),
             trait_vtables: HashMap::new(),
             has_imported_const_inline: false,
+            has_w17_marshal_residual: false,
         });
         program.functions = vec![crate::bytecode::Function {
             name: "entry".to_string(),
@@ -2373,6 +2379,7 @@ mod tests {
             closure_function_layouts_by_name: HashMap::new(),
             trait_vtables: HashMap::new(),
             has_imported_const_inline: false,
+            has_w17_marshal_residual: false,
         });
         program.functions = vec![crate::bytecode::Function {
             name: "entry".to_string(),
@@ -2436,6 +2443,7 @@ mod tests {
             closure_function_layouts_by_name: HashMap::new(),
             trait_vtables: HashMap::new(),
             has_imported_const_inline: false,
+            has_w17_marshal_residual: false,
         });
         program.functions = vec![crate::bytecode::Function {
             name: "entry".to_string(),

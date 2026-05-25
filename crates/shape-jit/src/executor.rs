@@ -294,6 +294,64 @@ impl JITExecutor {
             });
         }
 
+        // R8 W9 B1 W17-marshal-return JIT surface-and-stop
+        // (v0.3 divergence-elimination per supervisor 2026-05-25 ruling,
+        // ADR-006 §2.7.14): Refuse to JIT-compile programs whose
+        // bytecode contains direct calls to imported stdlib functions
+        // (callee resolved via `resolve_scoped_module_binding_name` at
+        // `compile_expr_function_call` — see
+        // `crates/shape-vm/src/compiler/expressions/function_calls.rs`).
+        // Such calls flow through `op_call_value` whose VM-side
+        // ModuleFn dispatch arm in
+        // `crates/shape-vm/src/executor/call_convention.rs:999` cleanly
+        // routes through `invoke_module_fn_id_stub` +
+        // `project_typed_return` and surfaces the W17-marshal-return-arms
+        // catch-all at
+        // `crates/shape-vm/src/executor/vm_impl/modules.rs:74` when the
+        // stdlib body returns a `ConcreteReturn` arm without a typed-slot
+        // projection (`Bytes` / `ArrayHeapValue` /
+        // `HashMapStringHeapValue` / etc.).
+        //
+        // The JIT-side `jit_call_value` ModuleFn arm at
+        // `crates/shape-jit/src/ffi/control/mod.rs:704-715` instead
+        // returns `TAG_NULL` silently (`-1407374883553280` NaN-box null
+        // pattern) with only a `tracing::debug!` line — swallowing the
+        // surface and producing silent-wrong-output VM=ec1 SURFACE /
+        // JIT=ec0 garbage on `print(serialize([1.0,2.0,3.0]).len())`.
+        //
+        // Whole-program deopt to the bytecode interpreter is the
+        // binding-compliant surface-and-stop (mirrors R8 W7 G.5
+        // V2-verifier deopt + R8 W8 imported-const-inline deopt
+        // immediately above + R8 W8 aliased-CoW
+        // `mir_has_prior_move_of_slot` precedent). Root-cause fix in
+        // JIT ModuleFn dispatch (`dispatch_module_fn_call` `todo!()` +
+        // §2.7.10/Q11 kinded handler ABI rebuild) is v0.4 per
+        // `docs/v0.3-close-summary.md` §5.16 JIT-lowering followup
+        // workstream — third member of the bundle alongside Cluster A
+        // imported-const-inline + aliased-CoW.
+        if bytecode.has_w17_marshal_residual {
+            return Err(shape_runtime::error::ShapeError::RuntimeError {
+                message: "R8 W9 B1 W17-marshal-return-arms SURFACE (ADR-006 \
+                          §2.7.14): the program contains direct calls to imported \
+                          stdlib functions (callee resolved via \
+                          `resolve_scoped_module_binding_name`). The JIT-side \
+                          `jit_call_value` ModuleFn dispatch arm at \
+                          `ffi/control/mod.rs:704-715` returns TAG_NULL silently, \
+                          swallowing the W17-marshal-return-arms surface that \
+                          VM-side `invoke_module_fn_id_stub` + \
+                          `project_typed_return` would clean-surface on (e.g. \
+                          `state.serialize` returning Array<int>/Bytes hits the \
+                          catch-all at `vm_impl/modules.rs:74`). Whole-program \
+                          deopting to the bytecode interpreter via this \
+                          `[jit-fallback]` path preserves VM == JIT semantics. \
+                          Tracked via `docs/v0.3-close-summary.md` §5.16 (v0.4 / \
+                          planned: JIT ModuleFn dispatch root-cause fix at \
+                          `dispatch_module_fn_call` todo!() + §2.7.10/Q11 kinded \
+                          handler ABI rebuild)".to_string(),
+                location: None,
+            });
+        }
+
         // JIT compile the bytecode
         let jit_config = JITConfig::default();
         let mut jit = JITCompiler::new(jit_config).map_err(|e| {

@@ -582,6 +582,7 @@ impl BytecodeCompiler {
                 // runtime.
                 trait_vtables: self.program.trait_vtables.clone(),
                 has_imported_const_inline: self.program.has_imported_const_inline,
+                has_w17_marshal_residual: self.program.has_w17_marshal_residual,
             });
         }
     }

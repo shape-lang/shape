@@ -328,6 +328,18 @@ pub struct Program {
     /// §5.16. NOT serialised — compile-time state.
     #[serde(skip, default)]
     pub has_imported_const_inline: bool,
+
+    /// R8 W9 B1 W17-marshal-return surface-and-stop flag (2026-05-25).
+    /// Mirror of `BytecodeProgram::has_w17_marshal_residual` for the
+    /// content-addressed Program shape; propagated through the linker so
+    /// the JIT executor can deopt the whole program to the bytecode
+    /// interpreter when the program contains direct calls to imported
+    /// stdlib functions (which route through `Ptr(HeapKind::ModuleFn)`
+    /// callees that the JIT's `jit_call_value` silently returns
+    /// TAG_NULL for). v0.4 root-cause fix per close-summary §5.16.
+    /// NOT serialised — compile-time state.
+    #[serde(skip, default)]
+    pub has_w17_marshal_residual: bool,
 }
 
 /// A linked function ready for execution in a flat instruction array.
@@ -538,4 +550,15 @@ pub struct LinkedProgram {
     /// state.
     #[serde(skip, default)]
     pub has_imported_const_inline: bool,
+
+    /// R8 W9 B1 W17-marshal-return surface-and-stop flag (2026-05-25).
+    /// Mirror of `Program::has_w17_marshal_residual` propagated through
+    /// the linker so the JIT executor can refuse to JIT-compile programs
+    /// containing direct stdlib-imported function calls. Triggers W12
+    /// `[jit-fallback]` deopt to bytecode interpreter; root-cause fix in
+    /// JIT ModuleFn dispatch (`jit_call_value` arm + `dispatch_module_fn_call`
+    /// `todo!()`) is v0.4 per `docs/v0.3-close-summary.md` §5.16. NOT
+    /// serialised — compile-time state.
+    #[serde(skip, default)]
+    pub has_w17_marshal_residual: bool,
 }
