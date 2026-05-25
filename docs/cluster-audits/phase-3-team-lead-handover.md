@@ -1,12 +1,14 @@
 # Team-lead handover — Shape v0.3 close-approach
 
-**Refreshed:** 2026-05-24 at main HEAD `ff978be4` (**R8 W8 CLOSED** —
-JIT aliased-CoW typed-array-push SEGFAULT eliminated via surface-and-stop,
-audit-recipe empirically corrected post-fix). v0.3 code criteria
-substantially complete (A 5.5/6, B/C/D/E/F COMPLETE, J 3/4); all G.1
-Step 1 supervisor groups + supervisor-ratified ADR text apply + aliased-
-CoW JIT fix closed. Remaining: Cluster A (user-decision gated) + J.4-rest
-+ G.2 Step 2 doc-truth round + close + tag.
+**Refreshed:** 2026-05-25 at main HEAD `326f41bd` (**R8 W8 EXTENDED CLOSE**
+— Cluster A module-level const-only bindings + log.shape Logger refactor
++ JIT imported-const surface-and-stop both merged per user 2026-05-25
+Option (a) ruling + supervisor 2026-05-25 path (i) ruling on the in-round
+divergence surface). v0.3 code criteria substantially complete (A 5.5/6,
+B/C/D/E/F COMPLETE, J 3/4); G.1 Step 1 + ADR §2.7.28/§2.7.29 + 2
+aliased/imported JIT surfaces (both routed to v0.4 root-cause via
+close-summary §5.16 JIT-lowering followup workstream). Remaining v0.3:
+J.4-rest + G.2 Step 2 doc-truth round + close + tag.
 
 ## Role
 
@@ -19,8 +21,8 @@ semantics. User relays between team-lead and supervisor.
 
 | | |
 |---|---|
-| Main HEAD | `ff978be4` (R8 W8 close: 1 merge + 1 audit-correction commit) |
-| Smoke matrix s1–s5 | **5/5 VM == JIT** (canonical (ii) F' release-binary harness; re-verified at HEAD `ff978be4` post-final-merge) |
+| Main HEAD | `326f41bd` (R8 W8 extended close: aliased-CoW fix + Cluster A feature + JIT surface-and-stop + §5.16 v0.4 workstream + conflict-marker hook deploy) |
+| Smoke matrix s1–s5 | **5/5 VM == JIT** (canonical (ii) F' release-binary harness; re-verified at HEAD `326f41bd` post-final-merge) |
 | verify-merge / check-no-dynamic / check-clean | 13/13 / exit 0 / exit 0 |
 | git-stash pre-commit hook | DEPLOYED (R8 W5+W6+W7 ZERO violations cumulative) |
 | conflict-marker pre-commit hook | DEPLOYED R8 W7 close (supervisor 2026-05-24 operational suggestion after the 5669a8ff incident); tested empirically (catches `+<<<<<<<` / `+=======` / `+>>>>>>>` in staged diff, exits 1 with recovery instructions) |
@@ -105,11 +107,23 @@ v0.4 with stdlib refactor. Surface to user for ruling.
 | JIT aliased-CoW SEGFAULT → `ec184dc9` (merge in `ff978be4` lineage) | Surface-and-stop in `mir_compiler/v2_array.rs::try_emit_v2_array_method` push arm. New `mir_has_prior_move_of_slot(slot)` helper scans MIR statements + terminators for prior `Operand::Move/MoveExplicit(Place::Local(slot))`; on match returns Err with structured SURFACE message to trigger W12 fall-through to interpreter (preserves VM in-place mutation semantics). repro1 post-fix: VM ec=0 + JIT ec=0 (deopt to interpreter), both print `[1,2,3,4]` twice. |
 | Audit empirical-correction → `ff978be4` | §7 added to `v0.3-r8w7-jit-aliased-cow-segfault-audit.md`: gdb investigation falsified the §3 refcount-aliasing hypothesis (actual cause: `Operand::Move` nulls source slot during `let alias = data` lowering at `mir/lowering/stmt.rs:269-273`). The audit's §4 CoW recipe would have CREATED a NEW VM/JIT divergence (CoW-cloned JIT vs in-place VM). Surface-and-stop is the correct binding-compliant path. Future SEGFAULT-audit lesson preserved (use print() probes to localize slot-loss before hypothesizing refcount issues). |
 
-## Remaining v0.3 scope (post-R8-W8)
+## R8 W8 extended close additions (CLOSED 2026-05-25)
 
-- **G5 Cluster A** (module-level binding rejection — 2 files): gated on
-  user language-semantics ruling (a/b/c per R8 W7 relay; supervisor lean
-  (a); user may prefer (c) v0.4-defer-with-stdlib-refactor for tag-soon).
+3 additional merges + 2 docs commits on top of the original R8 W8 (aliased-CoW):
+
+| Merge / Commit | Substance |
+|---|---|
+| Conflict-marker pre-commit hook | `.git/hooks/pre-commit` extended with `^\+(<<<<<<<\|=======\|>>>>>>>)` staged-diff guard per supervisor 2026-05-25 operational suggestion. Tested empirically: catches markers + rejects + provides recovery instructions. Same mechanical-enforcement pattern as the git-stash hook. R8 W7 5669a8ff incident shape now blocked at commit time. |
+| close-summary §5.15 + §5.16 (commits `86de03be` + `a927e607`) | §5.15 "Module-level mutable bindings + concurrency design pass v0.4" bundles module-level mutable state + thread-safety in async-scope + Send/Sync + Mutex/Atomic/Lazy interaction as a coherent v0.4 design pass per user 2026-05-25 framing. §5.16 "JIT-lowering followup workstream v0.4" bundles the 2 R8 W8 v0.3-gating JIT surface-and-stops (aliased-CoW + imported-const ident-eval) for a coherent v0.4 root-cause-fix workstream per supervisor 2026-05-25 bundling. |
+| Cluster A module-level const + log.shape Logger refactor → `55fc8531` | Per user 2026-05-25 Option (a) ruling. New `const NAME: Type = expr` at module scope (parser + type-checker + comptime evaluator + bytecode emitter wired through existing Constant-pool mechanism; ADR-006 §2.7.5 stamp-at-compile-time invariant preserved). distributions_advanced.shape `let PI/E/SQRT_2PI` → `const PI/E/SQRT_2PI: number`. log.shape rewritten to explicit `Logger` struct + `pub const LEVEL_*` + free-fn API; module-level mutable `current_level` removed per v0.4 concurrency-design-pass deferral. |
+| Cluster A JIT imported-const surface-and-stop → `5ac2613e` (merge in `326f41bd`) | The Cluster A landing introduced a new VM=2/JIT=0 silent-wrong-output divergence on `print(IMPORTED_CONST)` bare + sibling shapes. Per supervisor 2026-05-25 path (i) ruling: NEW `has_imported_const_inline: bool` flag on `BytecodeProgram`/`Program`/`LinkedProgram` set at the Cluster A intercept; JIT preflight refuses + triggers W12 `[jit-fallback]` whole-program deopt to interpreter. Convergence achieved on 5 divergence repros. Root-cause fix in JIT identifier-eval lowering → v0.4 per §5.16. Mirrors aliased-CoW precedent. |
+
+The aliased-CoW SEGFAULT + JIT imported-const ident-eval are the FIRST
+TWO members of the §5.16 v0.4 JIT-lowering followup workstream — a
+named bundle, not piecemeal items.
+
+## Remaining v0.3 scope (post-R8-W8-extended)
+
 - **J.4-rest residuals** (joinStr + small sort-family items).
 - **G.2 Step 2** doc-truth round (USER-followable validation; gated on
   Step 1 finalized + main stable — both met).
@@ -126,10 +140,12 @@ post-apply-grep discipline as §2.7.13 ratify.
 
 ## Trajectory
 
-~**1-2 sessions** to v0.3 tag (re-projected post-R8-W8 close). Sized:
-Cluster A (0.5 if (c) v0.4-defer, ~1 if (a) const-only-impl) + J.4-rest
-(0.5) + G.2 Step 2 (1) + close + tag (0.5). R8 W8 compressed further by
-landing aliased-CoW with surface-and-stop instead of the full CoW recipe.
+~**1-2 sessions** to v0.3 tag (re-projected post-R8-W8 extended close).
+Sized: J.4-rest (0.5) + G.2 Step 2 (1) + close + tag (0.5). Cluster A
+fully landed this round (feature + JIT surface-and-stop both merged) at
+~1.5x the original 1-session estimate due to the in-round divergence
+discovery, but the trajectory holds because the original ~2-3-session
+projection already had Cluster A factored in.
 
 ## Dispatch hygiene (binding — R7 W3 + R8 W4 hardening)
 
@@ -215,12 +231,12 @@ row appended; no Co-Authored-By trailer.
 
 ---
 
-*R8 W8 CLOSED 2026-05-24: 1 merge (JIT aliased-CoW surface-and-stop) +
-1 audit-correction commit. Fix-agent's gdb investigation FALSIFIED the
-audit's refcount-aliasing root-cause hypothesis (actual cause: MIR
-Operand::Move nulls source slot during `let alias = data`); surface-and-
-stop turned out to be the correct binding-compliant path, not just a
-fallback. Audit doc updated with §7 empirical-correction. Conflict-marker
-pre-commit hook deployed + tested per supervisor 2026-05-24 operational
-suggestion. Trajectory now ~1-2 sessions to v0.3 tag. Next round:
-Cluster A (post user-decision) + J.4-rest + G.2 Step 2 + tag.*
+*R8 W8 EXTENDED CLOSE 2026-05-25: 5 merges + 4 docs/infra commits.
+Aliased-CoW surface-and-stop (with audit empirical-correction); ADR §2.7.4
+§5.15 + §5.16 v0.4 workstream bundles; Cluster A module-level const +
+log.shape Logger refactor; Cluster A JIT imported-const surface-and-stop
+(in-round divergence discovery + path (i) fix); conflict-marker
+pre-commit hook deploy. Both R8 W8 JIT divergences (aliased-CoW + imported-
+const ident-eval) routed through coherent §5.16 v0.4 JIT-lowering followup
+workstream. Trajectory ~1-2 sessions to v0.3 tag. Next round: J.4-rest +
+G.2 Step 2 + tag.*
