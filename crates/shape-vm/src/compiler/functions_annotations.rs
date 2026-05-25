@@ -354,7 +354,10 @@ impl BytecodeCompiler {
     ) -> Result<bool> {
         // Build the target object from the function definition
         let target = super::comptime_target::ComptimeTarget::from_function(func_def);
-        let target_value = target.to_nanboxed();
+        // R8 W9 G.2 Step 2 Bucket 7: to_nanboxed now returns Result;
+        // surface the V3-S5 ckpt-5 SURFACE through the caller's Result
+        // chain instead of panicking.
+        let target_value = target.to_nanboxed()?;
         let target_name = func_def.name.clone();
         let handler_span = handler.span;
         let const_bindings = self

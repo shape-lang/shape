@@ -174,7 +174,10 @@ impl BytecodeCompiler {
                 } else {
                     target_desc.name.clone()
                 };
-                let target_value = target_desc.to_nanboxed();
+                // R8 W9 G.2 Step 2 Bucket 7: to_nanboxed now returns
+                // Result; surface the V3-S5 ckpt-5 SURFACE through the
+                // caller's Result chain instead of panicking.
+                let target_value = target_desc.to_nanboxed()?;
                 let handler_span = handler.span;
                 let execution = self.execute_comptime_annotation_handler(
                     annotation,

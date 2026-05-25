@@ -3478,7 +3478,10 @@ impl BytecodeCompiler {
                         &struct_def.name,
                         &fields,
                     );
-                    let target_value = target.to_nanboxed();
+                    // R8 W9 G.2 Step 2 Bucket 7: to_nanboxed now returns
+                    // Result; surface the V3-S5 ckpt-5 SURFACE through the
+                    // caller's Result chain instead of panicking.
+                    let target_value = target.to_nanboxed()?;
                     let target_name = struct_def.name.clone();
                     let handler_span = handler.span;
                     let execution = self.execute_comptime_annotation_handler(
@@ -4011,7 +4014,10 @@ impl BytecodeCompiler {
                         module_path,
                         &Self::module_target_fields(module_items),
                     );
-                    let target_value = target.to_nanboxed();
+                    // R8 W9 G.2 Step 2 Bucket 7: to_nanboxed now returns
+                    // Result; surface the V3-S5 ckpt-5 SURFACE through the
+                    // caller's Result chain instead of panicking.
+                    let target_value = target.to_nanboxed()?;
                     let handler_span = handler.span;
                     let execution = self.execute_comptime_annotation_handler(
                         ann,
