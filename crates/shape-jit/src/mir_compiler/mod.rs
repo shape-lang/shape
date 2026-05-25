@@ -631,8 +631,67 @@ pub fn preflight(mir_data: &MirFunctionData) -> MirPreflightResult {
                                 enum_name, variant_name, stmt.span
                             ));
                         }
+                        // R8 W9 G.2 Step 2 Bucket 2 EnumPayload SURFACE
+                        // (ADR-006 §2.7.14 / §2.7.17, supervisor 2026-05-25).
+                        // `Rvalue::EnumPayload { variant: Ok|Err|Some_ }`
+                        // is the MIR-level marker for the payload binder in
+                        // `Pattern::Constructor` arms like `Ok(path)`,
+                        // `Some(p)`, `Err(m)`. The JIT codegen at
+                        // `compile_rvalue` calls `jit_arc_*_payload` which
+                        // casts the operand bits to `*const ResultData` /
+                        // `*const OptionData`; when the operand is the
+                        // return slot of a user-defined fn whose return
+                        // shape doesn't actually carry the strict
+                        // `Arc<ResultData>` / `Arc<OptionData>` carrier
+                        // (i.e. the §2.7.17 receiver-recovery soundness rule
+                        // is violated at the call-site producer because the
+                        // return-kind track threads an `Arc<HeapValue>`
+                        // pointer instead), the cast is UB and produces
+                        // either silent-wrong-output (e.g. Result<int,int>
+                        // payload `42` returning `8589934634` — the i64
+                        // overlapped by a neighbouring slot's bits) or a
+                        // SIGSEGV (e.g. `Result<string,string>` payload
+                        // dereferencing a HeapValue::String through a
+                        // `*const ResultData` layout offset). Empirically
+                        // observed at HEAD on Option<string> → Result<string,
+                        // string> match-destruct (deterministic ec=139
+                        // SIGSEGV) and Result<int,int> match-destruct
+                        // (deterministic silent-wrong-output).
+                        //
+                        // Mirrors the W15.2-LANG-5 / LANG-1 preflight
+                        // precedent above + R8 W7 G.5 HashMap key-kind +
+                        // R8 W8 Cluster A imported-const-inline / aliased-
+                        // CoW typed-array-push surface-and-stop. Whole-
+                        // program deopt via W12 `[jit-fallback]` routes the
+                        // program to the bytecode interpreter where the
+                        // EnumPayload Rvalue is compiled to opcodes that
+                        // dispatch on the actual carrier shape (not the
+                        // JIT's strict `Arc<*Data>` cast). Root-cause fix
+                        // — extending §2.7.17 receiver-recovery to the
+                        // user-fn return-kind boundary so the producer at
+                        // the call-site stamps the strict carrier per
+                        // ADR-006 §2.7.5 — is v0.4 per
+                        // `docs/v0.3-close-summary.md` §5.16 JIT-lowering
+                        // followup workstream.
+                        Rvalue::EnumPayload { variant, .. } => {
+                            blockers.push(format!(
+                                "EnumPayload (R8 W9 G.2 Step 2 Bucket 2): \
+                                 `Pattern::Constructor` payload binder \
+                                 (`Ok(_)` / `Err(_)` / `Some(_)`) codegen \
+                                 has receiver-recovery soundness gap at the \
+                                 user-fn return-kind boundary per ADR-006 \
+                                 \u{a7}2.7.17; whole-program deopt via W12 \
+                                 `[jit-fallback]` routes to the bytecode \
+                                 interpreter (which compiles EnumPayload via \
+                                 the kind-aware opcode dispatch). \
+                                 variant = {:?} at {:?}. Tracked v0.4 per \
+                                 `docs/v0.3-close-summary.md` \u{a7}5.16 \
+                                 JIT-lowering followup workstream.",
+                                variant, stmt.span
+                            ));
+                        }
                         // BinaryOp, UnaryOp, Use, Clone, Borrow, Aggregate,
-                        // EnumTest, EnumPayload are supported
+                        // EnumTest are supported
                         _ => {}
                     }
                 }

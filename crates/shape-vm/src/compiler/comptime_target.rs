@@ -16,6 +16,7 @@ use shape_ast::ast::functions::Annotation;
 pub(crate) use shape_ast::ast::functions::AnnotationTargetKind;
 use shape_ast::ast::literals::Literal;
 use shape_ast::ast::{Expr, FunctionDef, TypeAnnotation};
+use shape_ast::error::ShapeError;
 use shape_value::KindedSlot;
 use shape_value::heap_value::{HeapValue, TypedObjectStorage};
 // V3-S5 ckpt-5 (2026-05-15): `TypedArrayData` + `typed_buffer::TypedBuffer`
@@ -208,7 +209,29 @@ impl ComptimeTarget {
     /// rewires onto the specialized `TypedArrayData::TypedObject` arm; the
     /// territory is flagged in the C2 close report so the supervisor can
     /// verify lockstep.
-    pub fn to_nanboxed(&self) -> KindedSlot {
+    /// Build a comptime-target descriptor as a kinded slot for handler dispatch.
+    ///
+    /// R8 W9 G.2 Step 2 Bucket 7 (supervisor 2026-05-25): converted from
+    /// `panic!`-on-unbounded-shape to `Err(ShapeError::RuntimeError)`. The
+    /// inner `nb_string_array` / `nb_object_array` closures previously
+    /// panicked unconditionally because their producer carriers
+    /// (`Arc<TypedArrayData::{String, TypedObject}>` wrapped in the deleted
+    /// `HeapValue::TypedArray` outer arm) were retired at V3-S5 ckpt-1..
+    /// ckpt-4 per `docs/cluster-audits/w12-typed-array-data-deletion-audit.md`
+    /// §3.5 + §B + ADR-006 §2.7.24 Q25.A SUPERSEDED — and the v2-raw
+    /// `TypedArray<*const StringObj>` / `TypedArray<TypedObjectPtr>` rebuild
+    /// lands at ckpt-6 STRICT close (not yet on main). Surface-and-stop via
+    /// `Err` propagation through `execute_struct_comptime_handlers` /
+    /// `execute_function_comptime_handler` / `execute_module_comptime_handlers`
+    /// / `run_comptime_annotation_handlers_for_target`, mirroring the R8 W6
+    /// G.2 mechanical pattern (panic\u{2192}Err conversion preserves
+    /// CLAUDE.md "Forbidden rationalizations" — no kind-blind Bool default,
+    /// no NaN-box fallback, no "documented out-of-scope" rationalization).
+    ///
+    /// Returns `Err(ShapeError::RuntimeError)` with a structured SURFACE
+    /// message tracking the v0.4 / planned rebuild at v2-raw `TypedArray<T>`
+    /// direct-access; root-cause fix lands at V3-S5 ckpt-6 STRICT close.
+    pub fn to_nanboxed(&self) -> Result<KindedSlot, ShapeError> {
         use shape_runtime::type_schema::{
             register_predeclared_any_schema, typed_object_from_pairs,
         };
@@ -246,83 +269,96 @@ impl ComptimeTarget {
             AnnotationTargetKind::Binding => "binding",
         };
 
-        // V3-S5 ckpt-5 (2026-05-15): `nb_string_array` + `nb_object_array`
-        // surface-and-stop. Both produced `Arc<TypedArrayData::{String,
-        // TypedObject}>` carriers (deleted at ckpt-1) wrapped in the
-        // deleted `HeapValue::TypedArray` arm. Rebuild lands at ckpt-6
-        // STRICT close per the v2-raw `TypedArray<*const StringObj>` /
-        // `TypedArray<TypedObjectPtr>` direct carrier targets. Refusal #1
-        // binding. Comptime annotation-target materialization (the only
-        // caller chain) is not on a hot path — the panic surfaces a
-        // clean PHASE-2C blocker for any test exercising
-        // `ComptimeTarget::to_nanboxed` before ckpt-6 lands.
-        let nb_string_array = |_strings: Vec<String>| -> KindedSlot {
-            panic!(
-                "comptime_target::nb_string_array: V3-S5 ckpt-5 \
-                 consumer-cascade tier 3 SURFACE. \
-                 the deleted typed-array-data String `Arc<Buf<Arc<String>>>` \
-                 result carrier DELETED at ckpt-1..ckpt-4 per W12 audit \
-                 §3.5 + §B + ADR-006 §2.7.24 Q25.A SUPERSEDED. Rebuild \
-                 lands at ckpt-6 STRICT close per v2-raw `TypedArray<\
-                 *const StringObj>` direct-access. REFUSED ON SIGHT \
-                 (Refusal #1)."
-            );
+        // V3-S5 ckpt-5 (2026-05-15) — R8 W9 G.2 Step 2 Bucket 7 mechanical
+        // panic\u{2192}Err conversion (supervisor 2026-05-25). The original
+        // `nb_string_array` + `nb_object_array` closures panicked
+        // unconditionally because their producer carriers
+        // (`Arc<TypedArrayData::{String, TypedObject}>` wrapped in the
+        // deleted `HeapValue::TypedArray` outer arm) were retired at
+        // V3-S5 ckpt-1..ckpt-4 per W12 audit §3.5 + §B + ADR-006 §2.7.24
+        // Q25.A SUPERSEDED. The v2-raw `TypedArray<*const StringObj>` /
+        // `TypedArray<TypedObjectPtr>` rebuild lands at ckpt-6 STRICT close
+        // (not yet on main). Refusal #1 binding preserved; the conversion
+        // surfaces a structured `Err(ShapeError::RuntimeError)` instead of
+        // a runtime panic so caller-side recovery / diagnostics can route
+        // the SURFACE message through the normal error reporting chain
+        // rather than `catch_unwind` boundaries. Mirrors the R8 W6 G.2
+        // mechanical pattern.
+        let nb_string_array = |_strings: Vec<String>| -> Result<KindedSlot, ShapeError> {
+            Err(ShapeError::RuntimeError {
+                message: "comptime_target::nb_string_array: V3-S5 ckpt-5 \
+                          consumer-cascade tier 3 SURFACE. \
+                          the deleted typed-array-data String \
+                          `Arc<Buf<Arc<String>>>` result carrier DELETED \
+                          at ckpt-1..ckpt-4 per W12 audit \u{a7}3.5 + \u{a7}B \
+                          + ADR-006 \u{a7}2.7.24 Q25.A SUPERSEDED. Rebuild \
+                          lands at ckpt-6 STRICT close per v2-raw \
+                          `TypedArray<*const StringObj>` direct-access. \
+                          REFUSED ON SIGHT (Refusal #1). Feature impl \
+                          pending (v0.4 / planned per \
+                          `docs/v0.3-close-summary.md` \u{a7}5.16 \
+                          JIT-lowering followup workstream)."
+                    .to_string(),
+                location: None,
+            })
         };
 
-        let nb_object_array = |objs: Vec<KindedSlot>| -> KindedSlot {
-            // Drain the popped slots' shares before panicking — preserves
-            // refcount discipline if a future caller wraps this in a
-            // `catch_unwind`.
+        let nb_object_array = |objs: Vec<KindedSlot>| -> Result<KindedSlot, ShapeError> {
+            // Drain the popped slots' shares before surfacing — preserves
+            // refcount discipline through the Err return path (the inner
+            // KindedSlot::Drop retires each share via §2.7.6 kind-aware
+            // drop dispatch).
             for obj in objs {
                 drop(obj);
             }
             // Suppress unused-import warning.
             let _ = TypedObjectStorage::_new;
-            panic!(
-                "comptime_target::nb_object_array: V3-S5 ckpt-5 \
-                 consumer-cascade tier 3 SURFACE. \
-                 the deleted typed-array-data TypedObject `Arc<Buf<TypedObjectPtr>>` \
-                 result carrier DELETED at ckpt-1..ckpt-4 per W12 audit \
-                 §3.5 + §B + ADR-006 §2.7.24 Q25.A SUPERSEDED. Rebuild \
-                 lands at ckpt-6 STRICT close per v2-raw `TypedArray<\
-                 TypedObjectPtr>` direct-access. REFUSED ON SIGHT \
-                 (Refusal #1)."
-            );
+            Err(ShapeError::RuntimeError {
+                message: "comptime_target::nb_object_array: V3-S5 ckpt-5 \
+                          consumer-cascade tier 3 SURFACE. \
+                          the deleted typed-array-data TypedObject \
+                          `Arc<Buf<TypedObjectPtr>>` result carrier DELETED \
+                          at ckpt-1..ckpt-4 per W12 audit \u{a7}3.5 + \u{a7}B \
+                          + ADR-006 \u{a7}2.7.24 Q25.A SUPERSEDED. Rebuild \
+                          lands at ckpt-6 STRICT close per v2-raw \
+                          `TypedArray<TypedObjectPtr>` direct-access. \
+                          REFUSED ON SIGHT (Refusal #1). Feature impl \
+                          pending (v0.4 / planned per \
+                          `docs/v0.3-close-summary.md` \u{a7}5.16 \
+                          JIT-lowering followup workstream)."
+                    .to_string(),
+                location: None,
+            })
         };
 
         // fields: array of {name, type, annotations, optional} TypedObjects
-        let field_objs: Vec<KindedSlot> = self
-            .fields
-            .iter()
-            .map(|(fname, ftype, fanns)| {
-                // Each annotation becomes {name, args} where args is an
-                // array of stringified arg values.
-                let ann_objs: Vec<KindedSlot> = fanns
-                    .iter()
-                    .map(|(aname, aargs)| {
-                        let args_arr = nb_string_array(aargs.clone());
-                        typed_object_from_pairs(&[
-                            ("name", nb_string(aname.clone())),
-                            ("args", args_arr),
-                        ])
-                    })
-                    .collect();
-                let anns_arr = nb_object_array(ann_objs);
-                let is_optional = is_option_type(ftype);
-                let effective_type = if is_optional {
-                    unwrap_option_type(ftype)
-                } else {
-                    ftype.clone()
-                };
-                typed_object_from_pairs(&[
-                    ("name", nb_string(fname.clone())),
-                    ("type", nb_string(effective_type)),
-                    ("annotations", anns_arr),
-                    ("optional", KindedSlot::from_bool(is_optional)),
-                ])
-            })
-            .collect();
-        let fields_arr = nb_object_array(field_objs);
+        let mut field_objs: Vec<KindedSlot> = Vec::with_capacity(self.fields.len());
+        for (fname, ftype, fanns) in &self.fields {
+            // Each annotation becomes {name, args} where args is an
+            // array of stringified arg values.
+            let mut ann_objs: Vec<KindedSlot> = Vec::with_capacity(fanns.len());
+            for (aname, aargs) in fanns {
+                let args_arr = nb_string_array(aargs.clone())?;
+                ann_objs.push(typed_object_from_pairs(&[
+                    ("name", nb_string(aname.clone())),
+                    ("args", args_arr),
+                ]));
+            }
+            let anns_arr = nb_object_array(ann_objs)?;
+            let is_optional = is_option_type(ftype);
+            let effective_type = if is_optional {
+                unwrap_option_type(ftype)
+            } else {
+                ftype.clone()
+            };
+            field_objs.push(typed_object_from_pairs(&[
+                ("name", nb_string(fname.clone())),
+                ("type", nb_string(effective_type)),
+                ("annotations", anns_arr),
+                ("optional", KindedSlot::from_bool(is_optional)),
+            ]));
+        }
+        let fields_arr = nb_object_array(field_objs)?;
 
         // params: array of {name, type, const} TypedObjects
         let param_objs: Vec<KindedSlot> = self
@@ -336,7 +372,7 @@ impl ComptimeTarget {
                 ])
             })
             .collect();
-        let params_arr = nb_object_array(param_objs);
+        let params_arr = nb_object_array(param_objs)?;
 
         // return_type: optional string
         let ret = self
@@ -346,12 +382,12 @@ impl ComptimeTarget {
             .unwrap_or_else(KindedSlot::none);
 
         // annotations: array of strings (names only)
-        let ann_arr = nb_string_array(self.annotations.clone());
+        let ann_arr = nb_string_array(self.annotations.clone())?;
 
         // captures: array of strings (captured names)
-        let captures_arr = nb_string_array(self.captures.clone());
+        let captures_arr = nb_string_array(self.captures.clone())?;
 
-        typed_object_from_pairs(&[
+        Ok(typed_object_from_pairs(&[
             ("kind", nb_str(kind_str)),
             ("name", nb_string(self.name.clone())),
             ("fields", fields_arr),
@@ -359,7 +395,7 @@ impl ComptimeTarget {
             ("return_type", ret),
             ("annotations", ann_arr),
             ("captures", captures_arr),
-        ])
+        ]))
     }
 }
 
