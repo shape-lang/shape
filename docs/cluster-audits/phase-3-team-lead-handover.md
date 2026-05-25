@@ -1,12 +1,14 @@
 # Team-lead handover — Shape v0.3 close-approach
 
-**Refreshed:** 2026-05-25 at main HEAD `64a2d8e1` (**R8 W9 G.2 STEP 2
-CLOSE** — 6 bucket dispositions per supervisor 2026-05-25 fully landed:
-B1+B2+B3+B5+B7+B9 fixed (6 merges); B4+B6+B8 reclassified (c) v0.4;
-8 audit docs committed; 4 shape-web .mdx (a)-class doc-fixes batched at
-shape-web 228f6eb). v0.3 code criteria substantially complete (A 5.5/6,
-B/C/D/E/F + G.1 + G.2 COMPLETE, J 3/4). Remaining v0.3: close-relay +
-supervisor ratify + user-authorize v0.3.0 tag.
+**Refreshed:** 2026-05-25 at main HEAD `70507224` (post-R8-W9 close-doc
+refresh). v0.3 §0.A criteria A–J all substantively met; supervisor
+close-ratified at HEAD `70507224`. **v0.3.0 tag HELD** per user
+2026-05-25 directive: shape-lsp at HEAD shows 22 test failures vs 14
+baseline (+8 new) and the LSP's empirical functional state in a real
+editor has not been verified. **NEW v0.3 workstream:** LSP-parity-with-
+rust-analyzer ("inline hints top notch + all other features en-par or
+better than rust-analyzer"). Tag does NOT land until LSP-parity closes
+and user re-authorizes.
 
 ## Role
 
@@ -19,8 +21,8 @@ semantics. User relays between team-lead and supervisor.
 
 | | |
 |---|---|
-| Main HEAD | `64a2d8e1` (R8 W9 G.2 Step 2 close: 6 bucket fixes + 3 reclassifies + 8 audit docs + shape-web (a)-class batch) |
-| Smoke matrix s1–s5 | **5/5 VM == JIT** (canonical (ii) F' release-binary harness; re-verified at HEAD `64a2d8e1` post-final-merge) |
+| Main HEAD | `70507224` (post-R8 W9 close-doc handover refresh; substance HEAD = `64a2d8e1`) |
+| Smoke matrix s1–s5 | **5/5 VM == JIT** (canonical (ii) F' release-binary harness; re-verified at HEAD `70507224` at LSP-parity session entry) |
 | verify-merge / check-no-dynamic / check-clean | 13/13 / exit 0 / exit 0 |
 | git-stash pre-commit hook | DEPLOYED (R8 W5+W6+W7 ZERO violations cumulative) |
 | conflict-marker pre-commit hook | DEPLOYED R8 W7 close (supervisor 2026-05-24 operational suggestion after the 5669a8ff incident); tested empirically (catches `+<<<<<<<` / `+=======` / `+>>>>>>>` in staged diff, exits 1 with recovery instructions) |
@@ -149,14 +151,65 @@ Cluster-A-JIT + R8 W9 B1-narrowing). Slice-agent (c)-verify self-
 correction layer matured (4 (c)→(b) self-corrections at audit time
 during R8 W9).
 
-## Remaining v0.3 scope (post-R8-W9)
+## Remaining v0.3 scope — NEW LSP-PARITY WORKSTREAM (2026-05-25)
 
-- **Close-relay** to supervisor (HEAD anchor + gates + criteria mapped to §0.A)
-- **Supervisor ratify** of close evidence
-- **User authorize** v0.3.0 tag
-- Team-lead **lands tag** at authorized commit
+User 2026-05-25 directive (binding): **inline hints "top notch"; all
+other LSP features "en-par or better than rust-analyzer"; functional in
+a real editor (not just unit-test-green).** v0.3 §0.A criteria A–J
+substance-met but the tag is held pending this addition.
 
-No code work remaining. The substance is COMPLETE.
+Honest sizing: **~5–10 sessions** to a defensible "en-par" position +
+tag. Audit-day refines.
+
+### Phase structure (proposal — LSP-A audit refines)
+
+- **PHASE LSP-A — AUDIT-DAY.** Single agent, audit-only (no source
+  changes). Output: `docs/cluster-audits/v0.3-lsp-parity-audit.md`.
+  Sections §A–G:
+  - §A current Shape-LSP feature surface (per-feature grep + behavior)
+  - §B 22 failing-test per-test characterization (fixture-drift vs
+    functional regression; no bulk fixture updates)
+  - §C rust-analyzer feature-set survey + per-feature gap
+    (PARITY / GAP-MINOR / GAP-MEDIUM / GAP-MAJOR / NOT-APPLICABLE)
+  - §D empirical functional state in a real editor (VS Code OR neovim
+    adapter; hover / inlay / completion / diagnostics / signature-help
+    / go-to / refs / symbols / code-actions / semantic-tokens / codelens
+    / rename); transcripts/screenshots
+  - §E sub-cluster partition into closure-waves
+  - §F v0.3-vs-v0.4 deferral line per feature (user-decision items
+    surfaced)
+  - §G 22-test routing per-test → fix vs update-fixture-in-lockstep
+- **PHASES LSP-B+ — SUB-CLUSTER DISPATCH WAVES** per audit §E
+  partition. Parallel where territory non-overlap; serial where not.
+- **PHASE LSP-CLOSE — EMPIRICAL VERIFICATION + close-relay.**
+  Re-run audit §D in-editor against post-fix LSP across the test
+  matrix (VS Code + per user direction).
+
+### LSP-specific discipline (additive to standing bindings)
+
+- **Test fixtures NEVER bulk-updated** to turn red green. Each red is
+  investigated per-test.
+- **Functional verification in a real editor is not optional.** Unit-
+  test-green ≠ LSP works.
+- **Rust-analyzer parity is directional**, not literal — audit
+  identifies what matters; user ratifies per-feature.
+
+### LSP-specific surface triggers (additive to standing 4)
+
+- LSP-A audit close → surface for supervisor + user ratify of per-
+  feature v0.3-vs-v0.4 line.
+- Empirical-in-editor finding that's a functional regression →
+  v0.3-gating fix dispatch.
+
+### Parked items (NOT for this phase)
+
+- v0.3.0 tag landing (deferred until LSP-CLOSE + supervisor re-ratify
+  + user re-authorize).
+- Multi-repo coordination: shape-web tag (currently `228f6eb`
+  post-G.2-batch); shape-app playground rebuild + redeploy; shape-mcp
+  / shape-registry / shape-infra version tags; tag-push CI deploy
+  mechanism. Surface as a coordination relay at the actual tag-land
+  step (after LSP-CLOSE), not before.
 
 ## ADR §2.7.4 addendum text-ratify — STRUCTURAL FIX
 
@@ -169,11 +222,10 @@ post-apply-grep discipline as §2.7.13 ratify.
 
 ## Trajectory
 
-**Effectively 0 sessions to v0.3 tag** (post-R8-W9 close). All code work
-complete; only close-relay + user-authorize tag remain. Trajectory
-landed within the supervisor's 2-3-session projection despite R8 W9's
-unexpected B-finding surge (28 (b) findings collapsing to 6 fix
-dispatches via root-cause bucketing).
+**~5–10 sessions to v0.3.0 tag** (LSP-parity scope addition 2026-05-25).
+A–J substance was effectively-0 at HEAD `70507224`; the LSP-parity
+binding extends the cycle. LSP-A audit-day produces a firmer estimate
++ partition; re-project at LSP-A close.
 
 ## Dispatch hygiene (binding — R7 W3 + R8 W4 hardening)
 
@@ -259,10 +311,9 @@ row appended; no Co-Authored-By trailer.
 
 ---
 
-*R8 W9 G.2 STEP 2 CLOSE 2026-05-25: 6 fix merges (B1+B2+B3+B5+B7+B9)
-+ 8 audit docs committed + 4 shape-web (a)-class doc-fixes batched.
-3 supervisor-disposition reclassifies (B4+B6+B8 → (c) v0.4 per existing
-§5.14/§5.16 inventory). 3-for-3 catch-pre-merge preserved (R8 W9
-catch on B1 "already convergent" narrowing). Trajectory effectively 0
-sessions to v0.3.0 tag — all code work complete; close-relay + user
-authorize tag remain.*
+*LSP-PARITY-SCOPE ENTRY 2026-05-25 at HEAD `70507224`: v0.3 §0.A
+substance A–J ratified by supervisor; v0.3.0 tag HELD per user
+2026-05-25 directive on LSP "en-par with rust-analyzer + inline hints
+top notch + functional in a real editor". Trajectory re-projected
+~5–10 sessions to tag. PHASE LSP-A audit-day dispatched as first
+action; all other dispatch held until audit lands.*
