@@ -1,14 +1,12 @@
 # Team-lead handover — Shape v0.3 close-approach
 
-**Refreshed:** 2026-05-25 at main HEAD `326f41bd` (**R8 W8 EXTENDED CLOSE**
-— Cluster A module-level const-only bindings + log.shape Logger refactor
-+ JIT imported-const surface-and-stop both merged per user 2026-05-25
-Option (a) ruling + supervisor 2026-05-25 path (i) ruling on the in-round
-divergence surface). v0.3 code criteria substantially complete (A 5.5/6,
-B/C/D/E/F COMPLETE, J 3/4); G.1 Step 1 + ADR §2.7.28/§2.7.29 + 2
-aliased/imported JIT surfaces (both routed to v0.4 root-cause via
-close-summary §5.16 JIT-lowering followup workstream). Remaining v0.3:
-J.4-rest + G.2 Step 2 doc-truth round + close + tag.
+**Refreshed:** 2026-05-25 at main HEAD `64a2d8e1` (**R8 W9 G.2 STEP 2
+CLOSE** — 6 bucket dispositions per supervisor 2026-05-25 fully landed:
+B1+B2+B3+B5+B7+B9 fixed (6 merges); B4+B6+B8 reclassified (c) v0.4;
+8 audit docs committed; 4 shape-web .mdx (a)-class doc-fixes batched at
+shape-web 228f6eb). v0.3 code criteria substantially complete (A 5.5/6,
+B/C/D/E/F + G.1 + G.2 COMPLETE, J 3/4). Remaining v0.3: close-relay +
+supervisor ratify + user-authorize v0.3.0 tag.
 
 ## Role
 
@@ -21,8 +19,8 @@ semantics. User relays between team-lead and supervisor.
 
 | | |
 |---|---|
-| Main HEAD | `326f41bd` (R8 W8 extended close: aliased-CoW fix + Cluster A feature + JIT surface-and-stop + §5.16 v0.4 workstream + conflict-marker hook deploy) |
-| Smoke matrix s1–s5 | **5/5 VM == JIT** (canonical (ii) F' release-binary harness; re-verified at HEAD `326f41bd` post-final-merge) |
+| Main HEAD | `64a2d8e1` (R8 W9 G.2 Step 2 close: 6 bucket fixes + 3 reclassifies + 8 audit docs + shape-web (a)-class batch) |
+| Smoke matrix s1–s5 | **5/5 VM == JIT** (canonical (ii) F' release-binary harness; re-verified at HEAD `64a2d8e1` post-final-merge) |
 | verify-merge / check-no-dynamic / check-clean | 13/13 / exit 0 / exit 0 |
 | git-stash pre-commit hook | DEPLOYED (R8 W5+W6+W7 ZERO violations cumulative) |
 | conflict-marker pre-commit hook | DEPLOYED R8 W7 close (supervisor 2026-05-24 operational suggestion after the 5669a8ff incident); tested empirically (catches `+<<<<<<<` / `+=======` / `+>>>>>>>` in staged diff, exits 1 with recovery instructions) |
@@ -122,12 +120,43 @@ The aliased-CoW SEGFAULT + JIT imported-const ident-eval are the FIRST
 TWO members of the §5.16 v0.4 JIT-lowering followup workstream — a
 named bundle, not piecemeal items.
 
-## Remaining v0.3 scope (post-R8-W8-extended)
+## R8 W9 outcome (G.2 Step 2 CLOSED 2026-05-25)
 
-- **J.4-rest residuals** (joinStr + small sort-family items).
-- **G.2 Step 2** doc-truth round (USER-followable validation; gated on
-  Step 1 finalized + main stable — both met).
-- **v0.3.0 tag** (user-authorization-gated; gated on all above).
+236 USER-followable programs across 6 parallel slice agents; 24 (a) +
+28 (b) + 7 (c). All 6 supervisor-dispositioned buckets landed:
+
+| Merge | Commit | Substance |
+|---|---|---|
+| B2+B7 batch | `dbf25a5a` → `8f3da917` | EnumPayload MIR preflight + comptime_target panic→Err |
+| B1 W17-marshal | `77546a3b` → `5a1bddb0` | has_w17_marshal_residual flag + JIT preflight; state::serialize divergence eliminated (re-dispatch after pre-merge catch of "already convergent" wrong-narrowing) |
+| B3 Drop runtime | `50910757` → `cb5683bb` | VM MakeRef sentinel + DropLocal-guard + JIT Drop-trait preflight (interpreter Drop dispatch sound per audit §4) |
+| B5+B9 bundle | `8bbd2f99` → `fa516bab` | B9 categorical ref_borrow ban deletion + B5 distributions_advanced/ode annotations |
+| Audit batch | `64a2d8e1` | 8 audit docs: 6 G.2 Step 2 slices + 2 R8 W9 audit-day (borrow-b0003 + stdlib-inference-residuals) |
+| shape-web (a) batch | `228f6eb` (in shape-web) | 4 .mdx files: functions/log/set/collections doc-fixes |
+
+**Reclassified (c) v0.4** (already in close-summary §5.14/§5.16 inventory):
+- B4 Wave-5d intrinsics (already R8 W6 G.2 panic→SURFACE; agent (b) classification incorrect)
+- B6 HashMap/Set key-kind (already §5.16 v0.4 epic; (a) Set chapter caution added in shape-web batch)
+- B8 extern C libm (already §5.14 W17-foreign-ffi-followup)
+
+**§5.16 v0.4 JIT-lowering followup workstream** now has 4 named members
+(aliased-CoW + imported-const ident-eval + W17-marshal + Drop codegen)
++ B2 EnumPayload preflight surface-and-stop's root-cause (§2.7.17
+receiver-recovery extension) listed.
+
+**3-for-3 catch-pre-merge** preserved (R8 W7 aliased-CoW + R8 W8
+Cluster-A-JIT + R8 W9 B1-narrowing). Slice-agent (c)-verify self-
+correction layer matured (4 (c)→(b) self-corrections at audit time
+during R8 W9).
+
+## Remaining v0.3 scope (post-R8-W9)
+
+- **Close-relay** to supervisor (HEAD anchor + gates + criteria mapped to §0.A)
+- **Supervisor ratify** of close evidence
+- **User authorize** v0.3.0 tag
+- Team-lead **lands tag** at authorized commit
+
+No code work remaining. The substance is COMPLETE.
 
 ## ADR §2.7.4 addendum text-ratify — STRUCTURAL FIX
 
@@ -140,12 +169,11 @@ post-apply-grep discipline as §2.7.13 ratify.
 
 ## Trajectory
 
-~**1-2 sessions** to v0.3 tag (re-projected post-R8-W8 extended close).
-Sized: J.4-rest (0.5) + G.2 Step 2 (1) + close + tag (0.5). Cluster A
-fully landed this round (feature + JIT surface-and-stop both merged) at
-~1.5x the original 1-session estimate due to the in-round divergence
-discovery, but the trajectory holds because the original ~2-3-session
-projection already had Cluster A factored in.
+**Effectively 0 sessions to v0.3 tag** (post-R8-W9 close). All code work
+complete; only close-relay + user-authorize tag remain. Trajectory
+landed within the supervisor's 2-3-session projection despite R8 W9's
+unexpected B-finding surge (28 (b) findings collapsing to 6 fix
+dispatches via root-cause bucketing).
 
 ## Dispatch hygiene (binding — R7 W3 + R8 W4 hardening)
 
@@ -231,12 +259,10 @@ row appended; no Co-Authored-By trailer.
 
 ---
 
-*R8 W8 EXTENDED CLOSE 2026-05-25: 5 merges + 4 docs/infra commits.
-Aliased-CoW surface-and-stop (with audit empirical-correction); ADR §2.7.4
-§5.15 + §5.16 v0.4 workstream bundles; Cluster A module-level const +
-log.shape Logger refactor; Cluster A JIT imported-const surface-and-stop
-(in-round divergence discovery + path (i) fix); conflict-marker
-pre-commit hook deploy. Both R8 W8 JIT divergences (aliased-CoW + imported-
-const ident-eval) routed through coherent §5.16 v0.4 JIT-lowering followup
-workstream. Trajectory ~1-2 sessions to v0.3 tag. Next round: J.4-rest +
-G.2 Step 2 + tag.*
+*R8 W9 G.2 STEP 2 CLOSE 2026-05-25: 6 fix merges (B1+B2+B3+B5+B7+B9)
++ 8 audit docs committed + 4 shape-web (a)-class doc-fixes batched.
+3 supervisor-disposition reclassifies (B4+B6+B8 → (c) v0.4 per existing
+§5.14/§5.16 inventory). 3-for-3 catch-pre-merge preserved (R8 W9
+catch on B1 "already convergent" narrowing). Trajectory effectively 0
+sessions to v0.3.0 tag — all code work complete; close-relay + user
+authorize tag remain.*
