@@ -352,6 +352,58 @@ impl JITExecutor {
             });
         }
 
+        // R8 W9 B3 Drop-bearing-scope-exit SURFACE (v0.3 divergence-elimination
+        // per supervisor 2026-05-25 G.2 Step 2 ruling, ADR-006 §2.7.14):
+        // Refuse to JIT-compile programs that register a user `impl Drop for T`
+        // impl. The JIT `emit_drop` codegen (`mir_compiler/ownership.rs`)
+        // currently only releases the slot's refcount and nulls the slot —
+        // there is NO user-Drop trait-method dispatch on the JIT path, so
+        // `drop_locals_at_scope_exit` silently elides the user's `Drop::drop`
+        // body, breaking the resource-management.mdx documented RAII
+        // contract (VM prints the user's drop output; JIT prints nothing).
+        // Whole-program deopt to the bytecode interpreter is the binding-
+        // compliant surface-and-stop: the interpreter has a working Drop
+        // dispatch at `executor/trait_object_ops.rs::op_drop_call_impl`
+        // (per audit `docs/cluster-audits/v0.3-r8w9-drop-runtime-audit.md`
+        // §4 — `op_drop_call_impl` looks up `Drop::TypeName::__default__::drop`
+        // in `trait_method_symbols` and dispatches via
+        // `call_function_with_nb_args`).
+        //
+        // Detection: presence of any `Drop::*::*::drop` entry in
+        // `trait_method_symbols` (registered at compile time per
+        // `compiler/statements.rs::register_trait_method_symbol` for every
+        // `impl Drop for T` block — see drop_type_info handling at
+        // `compiler/statements.rs:418`).
+        //
+        // Root-cause fix in JIT Drop codegen (Drop-trait-method dispatch
+        // at `emit_drop` time) is v0.4 per `docs/v0.3-close-summary.md`
+        // §5.16 JIT-lowering followup workstream (joining the
+        // aliased-CoW + imported-const + W17-marshal bundle).
+        let has_user_drop_impl = bytecode
+            .trait_method_symbols
+            .keys()
+            .any(|k| k.starts_with("Drop::"));
+        if has_user_drop_impl {
+            return Err(shape_runtime::error::ShapeError::RuntimeError {
+                message: "R8 W9 B3 Drop-bearing-scope-exit SURFACE \
+                          (ADR-006 §2.7.14): the program registers one or more \
+                          `impl Drop for T` impls. The JIT `emit_drop` codegen \
+                          (mir_compiler/ownership.rs::emit_drop) lacks user-Drop \
+                          trait-method dispatch — it only releases refcounts + \
+                          nulls slots, silently eliding the user's `Drop::drop` \
+                          body and breaking the resource-management.mdx \
+                          documented RAII contract. Whole-program deopting to \
+                          the bytecode interpreter via this `[jit-fallback]` \
+                          path preserves VM == JIT semantics (the interpreter \
+                          dispatches Drop methods through \
+                          `op_drop_call_impl` at trait_object_ops.rs:687). \
+                          Tracked via `docs/v0.3-close-summary.md` §5.16 \
+                          (v0.4 / planned: JIT Drop codegen root-cause fix)"
+                    .to_string(),
+                location: None,
+            });
+        }
+
         // JIT compile the bytecode
         let jit_config = JITConfig::default();
         let mut jit = JITCompiler::new(jit_config).map_err(|e| {

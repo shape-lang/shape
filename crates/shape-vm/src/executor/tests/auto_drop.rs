@@ -225,3 +225,79 @@ fn test_sync_function_uses_sync_drop() {
         "sync function should NOT emit DropCallAsync"
     );
 }
+
+/// R8 W9 B3 Drop runtime fix regression test.
+///
+/// Pre-fix (see `docs/cluster-audits/v0.3-r8w9-drop-runtime-audit.md`):
+///   - VM: `MakeRef Local outside any call frame` SURFACE at top-level
+///     property-access inside a block scope. Top-level `MakeRef Local` had
+///     `call_stack.len() == 0` and the construction site rejected with
+///     `checked_sub(1)`.
+///   - VM (repro 2 in audit): `MakeFieldRef base must reference a TypedObject;
+///     got Bool` SURFACE: a slot with a user `impl Drop` impl had its V1.1C
+///     `DropLocal` poison-pass fire BEFORE the legacy `LoadLocal + DropCall`
+///     pair — so the Drop method received Bool-sentinel bits at `self`.
+///
+/// Post-fix: `op_make_ref` encodes top-level frames as `frame_index =
+/// u32::MAX`, consumers route base_pointer=0 on that sentinel. Compiler
+/// drop-scope emitter skips `DropLocal` for slots whose type has a user Drop
+/// impl (the `DropCall` is the sole releaser).
+#[test]
+fn test_drop_top_level_block_self_field_access() {
+    use crate::VMConfig;
+    use crate::executor::VirtualMachine;
+    let src = r#"
+type FileHandle { path: string }
+impl Drop for FileHandle {
+  method drop() {
+    print(f"Closed file: {self.path}")
+  }
+}
+{
+  let f = FileHandle { path: "/tmp/a.txt" }
+  print(f"opened {f.path}")
+}
+print("after block")
+"#;
+    let bc = crate::executor::tests::test_utils::compile(src);
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(bc);
+    let result = vm.execute(None);
+    assert!(
+        result.is_ok(),
+        "Drop body should not surface; got {:?}",
+        result.err()
+    );
+}
+
+/// Drop bodies inside `fn main()` exit in reverse declaration order without
+/// the V1.1C `DropLocal` poison breaking the subsequent `LoadLocal +
+/// DropCall` dispatch.
+#[test]
+fn test_drop_fn_main_reverse_order() {
+    use crate::VMConfig;
+    use crate::executor::VirtualMachine;
+    let src = r#"
+type R { name: string }
+impl Drop for R {
+  method drop() { print(f"drop: {self.name}") }
+}
+fn main() {
+  let a = R { name: "a" }
+  let b = R { name: "b" }
+  let c = R { name: "c" }
+  print("body running")
+}
+main()
+print("done")
+"#;
+    let bc = crate::executor::tests::test_utils::compile(src);
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(bc);
+    let result = vm.execute(None);
+    assert!(
+        result.is_ok(),
+        "Drop in fn main should not surface; got {:?}",
+        result.err()
+    );
+}
