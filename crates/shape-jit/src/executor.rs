@@ -260,6 +260,40 @@ impl JITExecutor {
             });
         }
 
+        // R8 W8 Cluster A imported-const ident-eval SURFACE
+        // (v0.3 divergence-elimination per supervisor 2026-05-25 path (i),
+        // ADR-006 §2.7.14): Refuse to JIT-compile programs whose bytecode
+        // was emitted via the Cluster A `compile_expr_identifier`
+        // inlined-at-use intercept for imported `pub const` bindings.
+        // The inlined `PushConst(<value>)` bytecode is correct, but the
+        // JIT direct-identifier-eval lowering of this shape fires
+        // `jit_print_*` FFI with zero-init bits — silent-wrong-output
+        // VM=2 / JIT=0 on `print(IMPORTED_CONST)` bare. Whole-program
+        // deopt to the bytecode interpreter is the binding-compliant
+        // surface-and-stop (the interpreter evaluates the inlined
+        // PushConst correctly). Mirrors R8 W7 G.5 V2-verifier deopt
+        // immediately above + R8 W8 aliased-CoW
+        // `mir_has_prior_move_of_slot` precedent.
+        // Root-cause fix in JIT identifier-eval lowering is v0.4 per
+        // `docs/v0.3-close-summary.md` §5.16 JIT-lowering followup
+        // workstream.
+        if bytecode.has_imported_const_inline {
+            return Err(shape_runtime::error::ShapeError::RuntimeError {
+                message: "R8 W8 Cluster A imported-const ident-eval SURFACE \
+                          (ADR-006 §2.7.14): the program uses imported `pub const` \
+                          identifiers whose values were inlined-at-use as \
+                          `PushConst(<value>)` bytecode by `compile_expr_identifier`. \
+                          The JIT direct-identifier-eval lowering of this shape \
+                          produces silent-wrong-output (zero-init bits at the print \
+                          FFI dispatch); whole-program deopting to the bytecode \
+                          interpreter via this `[jit-fallback]` path preserves \
+                          VM == JIT semantics. Tracked via \
+                          `docs/v0.3-close-summary.md` §5.16 (v0.4 / planned: JIT \
+                          identifier-eval lowering root-cause fix)".to_string(),
+                location: None,
+            });
+        }
+
         // JIT compile the bytecode
         let jit_config = JITConfig::default();
         let mut jit = JITCompiler::new(jit_config).map_err(|e| {

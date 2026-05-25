@@ -561,6 +561,8 @@ pub fn program_from_blobs_by_hash(
         // the source BytecodeProgram so remote-streamed programs can
         // dispatch dyn method calls.
         trait_vtables: source.trait_vtables.clone(),
+        // R8 W8 Cluster A surface-and-stop flag propagation.
+        has_imported_const_inline: source.has_imported_const_inline,
     })
 }
 
@@ -941,6 +943,8 @@ fn create_stub_program(program: &BytecodeProgram) -> BytecodeProgram {
                 .closure_function_layouts_by_name
                 .clone(),
             trait_vtables: ca.trait_vtables.clone(),
+            // R8 W8 Cluster A surface-and-stop flag propagation.
+            has_imported_const_inline: ca.has_imported_const_inline,
         });
     }
     // Copy top-level metadata needed by program_from_blobs
@@ -1856,6 +1860,7 @@ mod tests {
             debug_info: crate::bytecode::DebugInfo::new("<test>".to_string()),
             closure_function_layouts_by_name: HashMap::new(),
             trait_vtables: HashMap::new(),
+            has_imported_const_inline: false,
         });
 
         assert!(
@@ -2008,6 +2013,7 @@ mod tests {
             debug_info: crate::bytecode::DebugInfo::new("<test>".to_string()),
             closure_function_layouts_by_name: HashMap::new(),
             trait_vtables: HashMap::new(),
+            has_imported_const_inline: false,
         });
         program.functions = vec![crate::bytecode::Function {
             name: "entry".to_string(),
@@ -2366,6 +2372,7 @@ mod tests {
             debug_info: crate::bytecode::DebugInfo::new("<test>".to_string()),
             closure_function_layouts_by_name: HashMap::new(),
             trait_vtables: HashMap::new(),
+            has_imported_const_inline: false,
         });
         program.functions = vec![crate::bytecode::Function {
             name: "entry".to_string(),
@@ -2428,6 +2435,7 @@ mod tests {
             debug_info: crate::bytecode::DebugInfo::new("<test>".to_string()),
             closure_function_layouts_by_name: HashMap::new(),
             trait_vtables: HashMap::new(),
+            has_imported_const_inline: false,
         });
         program.functions = vec![crate::bytecode::Function {
             name: "entry".to_string(),

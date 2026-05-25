@@ -581,6 +581,7 @@ impl BytecodeCompiler {
                 // VM `op_box_trait_object` handler can look them up at
                 // runtime.
                 trait_vtables: self.program.trait_vtables.clone(),
+                has_imported_const_inline: self.program.has_imported_const_inline,
             });
         }
     }

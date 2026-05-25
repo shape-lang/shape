@@ -74,6 +74,7 @@ fn make_program(blobs: Vec<FunctionBlob>, entry: FunctionHash) -> Program {
         },
         closure_function_layouts_by_name: HashMap::new(),
         trait_vtables: HashMap::new(),
+        has_imported_const_inline: false,
     }
 }
 

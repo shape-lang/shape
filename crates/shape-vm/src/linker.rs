@@ -498,6 +498,7 @@ pub fn link(program: &Program) -> Result<LinkedProgram, LinkError> {
                 &blobs,
             ),
             trait_vtables: program.trait_vtables.clone(),
+            has_imported_const_inline: program.has_imported_const_inline,
         });
     }
 
@@ -620,6 +621,7 @@ pub fn link(program: &Program) -> Result<LinkedProgram, LinkError> {
         total_required_permissions,
         closure_function_layouts: remap_closure_function_layouts(program, &blobs),
         trait_vtables: program.trait_vtables.clone(),
+        has_imported_const_inline: program.has_imported_const_inline,
     })
 }
 
@@ -680,6 +682,7 @@ pub fn linked_to_bytecode_program(linked: &LinkedProgram) -> BytecodeProgram {
         constants: linked.constants.clone(),
         strings: linked.strings.clone(),
         functions,
+        has_imported_const_inline: linked.has_imported_const_inline,
         debug_info: linked.debug_info.clone(),
         data_schema: linked.data_schema.clone(),
         module_binding_names: linked.module_binding_names.clone(),
