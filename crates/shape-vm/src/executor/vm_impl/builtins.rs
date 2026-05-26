@@ -1414,7 +1414,6 @@ impl VirtualMachine {
                 to_format.push(a.clone());
             }
         }
-        let _ = ctx;
 
         let rendered = {
             let formatter =
@@ -1430,11 +1429,26 @@ impl VirtualMachine {
             rendered,
             spans: Vec::new(),
         };
-        // `ctx` was consumed by the dispatch loop above; re-acquire via
-        // the shared output adapter on the VM-level executor context if
-        // present. For W18.6 we route to stdout unconditionally when no
-        // adapter was supplied — same fallback as the pre-W18.6 path.
-        println!("{}", result.rendered);
+        // Route to the active `OutputAdapter` when an `ExecutionContext`
+        // is plumbed (script runner, REPL, shape-server playground /
+        // notebook — all of which install a capture/REPL/stdout adapter).
+        // Fall back to stdout only when no context was supplied, e.g.
+        // the bytecode-level `eval_*` helpers in tests.
+        //
+        // W18.6 (R8 W3 2026-05-24) originally dropped `ctx` here because
+        // the Display dispatch loop took `&mut self` for an opaque
+        // duration — but `try_dispatch_display` does not need `ctx` (the
+        // Display body is expected to be pure per the inline doc on
+        // `try_dispatch_display`), so the `&mut` borrow on `ctx` is
+        // free at this point. Routing the rendered line to the adapter
+        // restores hosted-embedder capture (`SharedCaptureAdapter` for
+        // shape-server, `ReplAdapter` for REPL spans) without touching
+        // the W18.6 Display-trait dispatch above.
+        if let Some(ctx) = ctx {
+            ctx.output_adapter_mut().print(result);
+        } else {
+            println!("{}", result.rendered);
+        }
         Ok(())
     }
 
