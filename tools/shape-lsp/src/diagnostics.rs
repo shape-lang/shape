@@ -2122,7 +2122,8 @@ function my_func() {
     fn test_validate_trait_bounds_missing_method() {
         use shape_ast::parser::parse_program;
 
-        let source = "trait Queryable {\n    filter(pred): any;\n    select(cols): any\n}\nimpl Queryable for MyTable {\n    method filter(pred) { self }\n}\n";
+        // Fixture migrated to Form B per cd7d97a4 (2026-05-18) grammar surgery.
+        let source = "trait Queryable {\n    method filter(self, pred) -> any;\n    method select(self, cols) -> any;\n}\nimpl Queryable for MyTable {\n    method filter(pred) { self }\n}\n";
         let program = parse_program(source).unwrap();
         let diagnostics = validate_trait_bounds(&program, source);
 
@@ -2140,7 +2141,8 @@ function my_func() {
     fn test_validate_trait_bounds_all_implemented() {
         use shape_ast::parser::parse_program;
 
-        let source = "trait Queryable {\n    filter(pred): any;\n    select(cols): any\n}\nimpl Queryable for MyTable {\n    method filter(pred) { self }\n    method select(cols) { self }\n}\n";
+        // Fixture migrated to Form B per cd7d97a4 (2026-05-18) grammar surgery.
+        let source = "trait Queryable {\n    method filter(self, pred) -> any;\n    method select(self, cols) -> any;\n}\nimpl Queryable for MyTable {\n    method filter(pred) { self }\n    method select(cols) { self }\n}\n";
         let program = parse_program(source).unwrap();
         let diagnostics = validate_trait_bounds(&program, source);
 
@@ -2172,7 +2174,8 @@ function my_func() {
     fn test_validate_trait_bounds_valid_bound() {
         use shape_ast::parser::parse_program;
 
-        let source = "trait Comparable {\n    compare(other): number\n}\nfn foo<T: Comparable>(x: T) {\n    x\n}\n";
+        // Fixture migrated to Form B per cd7d97a4 (2026-05-18) grammar surgery.
+        let source = "trait Comparable {\n    method compare(self, other) -> number;\n}\nfn foo<T: Comparable>(x: T) {\n    x\n}\n";
         let program = parse_program(source).unwrap();
         let diagnostics = validate_trait_bounds(&program, source);
 

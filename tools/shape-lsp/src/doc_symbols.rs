@@ -787,8 +787,9 @@ mod tests {
 
     #[test]
     fn collects_member_symbols_with_qualified_paths() {
+        // Fixture migrated to Form B per cd7d97a4 (2026-05-18) grammar surgery.
         let program = parse_program(
-            "type Point { /// x\n x: number }\ntrait Drawable { /// draw\n draw(): void }\n",
+            "type Point { /// x\n x: number }\ntrait Drawable { /// draw\n method draw(self) -> void;\n}\n",
         )
         .expect("program");
         let symbols = collect_program_doc_symbols(&program, "pkg::math");
