@@ -342,9 +342,25 @@ impl<'a> HintContext<'a> {
         // 1.21 type hint (existing behavior, behind want_type_hint).
         if want_type_hint {
             if let Some(inferred_type) = inferred_type.as_ref() {
+                // LSP-B: if the variable's initializer is a `&expr` / `&mut
+                // expr` reference expression, surface the reference mode in
+                // the inlay hint. The TypeInferenceEngine erases reference
+                // mode on `Expr::Reference` (infers the inner expr's type
+                // only) — without this prefix the hint would silently drop
+                // `&` and the rendered type would diverge from what the
+                // user could write as an annotation.
+                let label_type = match decl.value.as_ref() {
+                    Some(Expr::Reference { is_mutable, .. })
+                        if !inferred_type.starts_with('&') =>
+                    {
+                        let prefix = if *is_mutable { "&mut " } else { "&" };
+                        format!("{}{}", prefix, inferred_type)
+                    }
+                    _ => inferred_type.clone(),
+                };
                 self.hints.push(InlayHint {
                     position,
-                    label: InlayHintLabel::String(format!(": {}", inferred_type)),
+                    label: InlayHintLabel::String(format!(": {}", label_type)),
                     kind: Some(InlayHintKind::TYPE),
                     text_edits: None,
                     tooltip: None,

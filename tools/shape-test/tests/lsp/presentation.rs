@@ -655,7 +655,6 @@ fn test_lsp_code_lens_on_trait() {
 // Currently red; LSP-B closes.
 
 #[test]
-#[should_panic] // LSP-B closes — reference-mode inferrer path silent end-to-end
 fn lsp_n_type_hint_includes_reference_mode() {
     // §D #4: `let s = &"hello"` should produce a type hint of `&string`,
     // not `string` (which silently drops the reference mode).
