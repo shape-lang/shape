@@ -583,16 +583,25 @@ impl Runtime {
                         | shape_ast::ast::ExportItem::BuiltinType(_)
                         | shape_ast::ast::ExportItem::Annotation(_) => {}
                         shape_ast::ast::ExportItem::Named(specs) => {
-                            for spec in specs {
-                                if let Ok(value) = ctx.get_variable(&spec.name) {
-                                    if value.is_none() {
-                                        return Err(ShapeError::RuntimeError {
-                                            message: format!(
-                                                "Cannot export undefined variable '{}'",
-                                                spec.name
-                                            ),
-                                            location: None,
-                                        });
+                            // For `pub { name1, name2 }` re-exports of names
+                            // defined earlier in the module, verify each name
+                            // exists. For `pub const/let/var X = ...` (the
+                            // ExportStmt carries the source VariableDecl), the
+                            // bytecode compiler handles the initialization at
+                            // a later pass; the runtime loader should NOT pre-
+                            // check existence here.
+                            if export.source_decl.is_none() {
+                                for spec in specs {
+                                    if let Ok(value) = ctx.get_variable(&spec.name) {
+                                        if value.is_none() {
+                                            return Err(ShapeError::RuntimeError {
+                                                message: format!(
+                                                    "Cannot export undefined variable '{}'",
+                                                    spec.name
+                                                ),
+                                                location: None,
+                                            });
+                                        }
                                     }
                                 }
                             }

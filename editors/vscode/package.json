@@ -2,7 +2,7 @@
   "name": "shape-lang",
   "displayName": "Shape Language",
   "description": "Language support for Shape - syntax highlighting and LSP integration",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "publisher": "shape-lang",
   "author": "Daniel Amesberger",
   "license": "MIT",

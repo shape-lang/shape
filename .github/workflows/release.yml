@@ -117,6 +117,7 @@ jobs:
             shape-ast
             shape-value
             shape-wire
+            shape-diagnostics
             shape-runtime
             shape-vm
             shape-jit
