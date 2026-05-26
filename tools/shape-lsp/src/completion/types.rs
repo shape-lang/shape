@@ -101,9 +101,26 @@ pub fn property_completions(
             }
         }
 
-        // Add methods from impl/extend/trait blocks
-        if let Some(methods) = impl_methods.get(&resolved_type) {
+        // Add methods from impl/extend/trait blocks. Try the resolved type
+        // first (e.g. `"User"` or `"Array<int>"`); also try the normalized
+        // form (e.g. `"Vec"`) so stdlib `extend Vec<T> { ... }` methods
+        // surface on `Array<T>` / `int[]` receivers. LSP-C audit close.
+        let normalized = normalize_type_for_methods(&resolved_type);
+        let mut seen_method_names: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        let lookup_keys: Vec<String> = if normalized == resolved_type {
+            vec![resolved_type.clone()]
+        } else {
+            vec![resolved_type.clone(), normalized.clone()]
+        };
+        for key in &lookup_keys {
+            let Some(methods) = impl_methods.get(key) else {
+                continue;
+            };
             for method in methods {
+                if !seen_method_names.insert(method.name.clone()) {
+                    continue;
+                }
                 let detail = method
                     .signature
                     .clone()
@@ -126,7 +143,7 @@ pub fn property_completions(
         // Add builtin methods from MethodTable (string, number, Array, etc.)
         // Normalize type names to match MethodTable keys
         let table = method_table();
-        let method_type = normalize_type_for_methods(&resolved_type);
+        let method_type = normalized;
         let builtin_methods = table.methods_for_type(&method_type);
         for sig in &builtin_methods {
             // Avoid duplicates with already-added completions

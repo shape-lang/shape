@@ -486,9 +486,12 @@ fn test_lsp_nav_signature_help_user_function() {
 // return ZERO items in real editor flow. Currently red; LSP-C closes.
 
 #[test]
-#[should_panic] // LSP-C closes — method-chain completion currently returns 0
 fn lsp_n_method_completion_after_dot_on_stdlib_array() {
-    // §D #1 (stdlib leg): expect `xs.map` to appear
+    // §D #1 (stdlib leg): expect `xs.map` to appear.
+    // LSP-C close (R8 W10): stdlib `extend Vec<T>` methods now load via
+    // `completion/stdlib_methods.rs` and surface in `impl_methods` keyed
+    // by `"Vec"`, with the receiver-type lookup falling back to the
+    // normalized type so `Array<int>` receivers match.
     let code = "let xs = [1, 2, 3]\nxs.\n";
     ShapeTest::new(code)
         .at(pos(1, 3))
@@ -513,18 +516,28 @@ u.
 }
 
 #[test]
-#[should_panic] // LSP-C closes — impl-method completion currently returns 0
 fn lsp_n_method_completion_after_dot_on_user_type_impl_method() {
     // §D #1 (user-type, IMPL-method leg): the §D regression is specifically
-    // that `u.` does not surface methods declared in an `impl User { ... }`
+    // that `u.` does not surface methods declared in an `impl Trait for User`
     // block. This is the §D "u. → 0 methods" leg.
+    //
+    // Shape requires `impl Trait for Type` (the `for` is mandatory; bare
+    // `impl Type` does not parse — see `crates/shape-ast/src/shape.pest`
+    // `impl_block` rule), so the §D real-editor fixture uses
+    // `impl Greet for User`. LSP-C close (R8 W10): the existing
+    // `extract_type_methods` path correctly indexes impl-block methods;
+    // the regression was that stdlib methods were never loaded, suppressing
+    // the entire `.` completion handler's output for stdlib receivers. The
+    // user-impl path was already wired and just needs the matching trait
+    // declaration to make the test fixture parse.
     let code = "\
 type User { name: string }
-impl User { fn hello(self) -> string { \"hi\" } }
+trait Greet { method hello(self) -> string; }
+impl Greet for User { method hello(self) -> string { \"hi\" } }
 let u = User { name: \"a\" }
 u.
 ";
     ShapeTest::new(code)
-        .at(pos(3, 2))
+        .at(pos(4, 2))
         .expect_completion("hello");
 }
