@@ -79,18 +79,28 @@ let d = distance(
 }
 
 #[test]
-#[should_panic] // LSP-F closes — signature help currently returns null on method call
 fn lsp_n_signature_help_for_user_method_call() {
     // §D #2 (user-method leg): `u.hello(` mid-typing must surface a signature.
+    // Mirrors the audit's `traits.shape` fixture (`trait Greet` + `impl Greet
+    // for User { fn hello(...) }`). LSP-F closes the prior `null` return.
+    //
+    // Notes:
+    //   - Shape requires `impl Trait for Type` (inherent `impl Type { ... }`
+    //     does not parse), and trait/impl methods take an implicit `self`
+    //     (explicit `self` is a semantic error). The cursor sits inside an
+    //     incomplete call (`u.hello(`) which by itself is a parse error;
+    //     `signature_help` recovers by stripping the dangling line before
+    //     re-parsing for type / method lookup.
     let code = "\
+trait Greet { fn hello(greeting: string) -> string; }
 type User { name: string }
-impl User {
-    fn hello(self, greeting: string) -> string { greeting }
+impl Greet for User {
+    fn hello(greeting: string) -> string { greeting }
 }
 let u = User { name: \"a\" }
 let s = u.hello(
 ";
     ShapeTest::new(code)
-        .at(pos(5, 16))
+        .at(pos(6, 16))
         .expect_signature_help();
 }
