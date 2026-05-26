@@ -17,8 +17,8 @@ use tower_lsp_server::ls_types::{InlayHint, InlayHintKind, InlayHintLabel, Posit
 
 use crate::type_inference::{
     FunctionTypeInfo, ParamReferenceMode, infer_expr_type, infer_expr_type_via_engine,
-    infer_function_signatures, infer_program_types, infer_program_types_with_context,
-    infer_variable_type_for_display, unified_metadata,
+    infer_expr_type_with_env_public, infer_function_signatures, infer_program_types,
+    infer_program_types_with_context, infer_variable_type_for_display, unified_metadata,
 };
 
 /// Configuration for inlay hints
@@ -361,9 +361,17 @@ impl<'a> HintContext<'a> {
                         .or_else(|| self.type_map.get(name).cloned())
                 })
                 .or_else(|| {
+                    // LSP-H: program-level type_map flows in as env so the
+                    // syntactic fallback can resolve identifier receivers in
+                    // method-chain RHS (`xs.map(...)` learns `xs: int[]`).
                     decl.value
                         .as_ref()
                         .and_then(infer_expr_type_via_engine)
+                        .or_else(|| {
+                            decl.value
+                                .as_ref()
+                                .and_then(|v| infer_expr_type_with_env_public(v, &self.type_map))
+                        })
                         .or_else(|| decl.value.as_ref().and_then(infer_expr_type))
                 })
         });
@@ -1345,6 +1353,88 @@ mod tests {
             label.contains("bool"),
             "Expected 'bool' in hint, got: {}",
             label
+        );
+    }
+
+    // LSP-H regression: `let d = distance(p, q)` for a user-defined function
+    // must propagate `-> number` (not `: any` / `: unknown`). Before LSP-H the
+    // syntactic fallback was used with an empty env so identifier receivers
+    // couldn't resolve through `.map(...)` chains; we now thread the
+    // program-level type_map as env.
+    #[test]
+    fn lsp_h_type_hint_propagates_through_user_fn_call() {
+        let code = "\
+type Point { x: number, y: number }
+fn distance(a: Point, b: Point) -> number { 0.0 }
+let p = Point { x: 0.0, y: 0.0 }
+let q = Point { x: 1.0, y: 1.0 }
+let d = distance(p, q)
+";
+        let cfg = InlayHintConfig::default();
+        let hints = get_inlay_hints(code, full_range(), &cfg, None);
+        let labels = type_hint_labels(&hints);
+        assert!(
+            labels.iter().any(|l| l == ": number"),
+            "expected `: number` for `let d = distance(...)`, got {:?}",
+            labels
+        );
+    }
+
+    // LSP-H regression: `.map` chain element type recovered from the closure
+    // body (was bare `Array` pre-LSP-H, leaking element type).
+    #[test]
+    fn lsp_h_map_chain_preserves_element_type() {
+        let code = "\
+let xs = [1, 2, 3]
+let doubled = xs.map(|x| x * 2)
+";
+        let cfg = InlayHintConfig::default();
+        let hints = get_inlay_hints(code, full_range(), &cfg, None);
+        let labels = type_hint_labels(&hints);
+        assert!(
+            labels.iter().any(|l| l == ": Array<int>"),
+            "expected `: Array<int>` for `let doubled = xs.map(...)`, got {:?}",
+            labels
+        );
+        // Regression guard: bare `: Array` would indicate the leak returned.
+        assert!(
+            !labels.iter().any(|l| l == ": Array"),
+            "regression: bare `: Array` leak returned, labels = {:?}",
+            labels
+        );
+    }
+
+    // LSP-H new feature: chain hints after intermediate `.method()` calls
+    // (`xs.map(...).sum()` shows `: Array<int>` after `.map` and `: number`
+    // for the binding). Default-on per the LSP-H brief.
+    #[test]
+    fn lsp_h_chain_hint_emitted_for_intermediate_method() {
+        let code = "\
+let xs = [1, 2, 3]
+let total = xs.map(|x| x * 2).sum()
+";
+        let cfg = InlayHintConfig::default();
+        let hints = get_inlay_hints(code, full_range(), &cfg, None);
+        let chain_hints: Vec<_> = hints
+            .iter()
+            .filter(|h| {
+                h.data
+                    .as_ref()
+                    .and_then(|d| d.get("kind"))
+                    .and_then(|k| k.as_str())
+                    == Some("chain")
+            })
+            .collect();
+        assert!(
+            !chain_hints.is_empty(),
+            "expected at least one chain hint on multi-`.` method chain, got hints = {:?}",
+            hints
+                .iter()
+                .map(|h| match &h.label {
+                    InlayHintLabel::String(s) => s.clone(),
+                    _ => "non-string".to_string(),
+                })
+                .collect::<Vec<_>>()
         );
     }
 

@@ -666,15 +666,18 @@ fn lsp_n_type_hint_includes_reference_mode() {
 //
 // Audit `v0.3-lsp-parity-audit.md` executive summary item #5: type inference
 // through fn-call chains degrades to `: any` or bare `: Array` (no element
-// type). Currently red; LSP-B closes.
+// type). LSP-H closes by (a) threading the program-level type_map as env into
+// the syntactic fallback so identifier receivers resolve, (b) recovering the
+// closure body's return type for `.map(...)` (was bare `Array`), and (c) the
+// chain-hint visitor surfacing intermediate-call types.
 
 #[test]
 fn lsp_n_type_hint_propagates_through_fn_call() {
     // §D #5: `distance(p, q)` must propagate `-> number` to `let d` inlay.
-    // PASSES today at HEAD 7813a652 — single-file characterization does
-    // not reproduce the §D regression (which surfaced under the editor's
-    // workspace-aware analysis with cached programs). Regression-prevention
-    // coverage so the inlay path can't silently drop type propagation.
+    // LSP-H tightens this from a loose "any-`: number`-hint" assertion to
+    // pinning the variable hint to `: number` and forbidding the bare
+    // `: any` / `: unknown` shape so a future regression can't silently drop
+    // the propagation again.
     let code = "\
 type Point { x: number, y: number }
 fn distance(a: Point, b: Point) -> number { 0.0 }
@@ -682,5 +685,40 @@ let p = Point { x: 0.0, y: 0.0 }
 let q = Point { x: 1.0, y: 1.0 }
 let d = distance(p, q)
 ";
-    ShapeTest::new(code).expect_type_hint_label(": number");
+    ShapeTest::new(code)
+        .expect_type_hint_label(": number")
+        .expect_no_type_hint_label(": any")
+        .expect_no_type_hint_label(": unknown");
+}
+
+#[test]
+fn lsp_n_map_chain_preserves_array_element_type() {
+    // LSP-H §E: `xs.map(|x| x * 2)` over `int[]` must render as `Array<int>`,
+    // not bare `Array`. Closure body's return type is recovered and wrapped.
+    let code = "\
+let xs = [1, 2, 3]
+let doubled = xs.map(|x| x * 2)
+";
+    ShapeTest::new(code)
+        .expect_type_hint_label(": Array<int>")
+        .expect_no_type_hint_label(": Array");
+}
+
+#[test]
+fn lsp_n_chain_hints_after_dot_on_method_chain() {
+    // LSP-H §D #5: chain-hint visitor emits `: T` after each intermediate
+    // `.method()` call in a multi-`.` chain. r-a-parity feature, default-on.
+    // We assert at least one intermediate type renders — the audit example is
+    // `xs.map(|x| x * 2).sum()` where the hint after `.map(...)` should be
+    // `: Array<int>` (the sum is the binding's final type, already on the
+    // `let` hint).
+    let code = "\
+let xs = [1, 2, 3]
+let total = xs.map(|x| x * 2).sum()
+";
+    ShapeTest::new(code)
+        // The binding hint shows the final type.
+        .expect_type_hint_label(": number")
+        // The chain hint after `.map(...)` shows the intermediate array shape.
+        .expect_type_hint_label(": Array<int>");
 }

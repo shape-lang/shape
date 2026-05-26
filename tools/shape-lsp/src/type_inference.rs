@@ -89,7 +89,10 @@ fn infer_expr_type_with_env(expr: &Expr, env: &HashMap<String, String>) -> Optio
         } => infer_function_return_type(&format!("{}::{}", namespace, function)),
         Expr::EnumConstructor { enum_name, .. } => Some(enum_name.to_string()),
         Expr::MethodCall {
-            receiver, method, ..
+            receiver,
+            method,
+            args,
+            ..
         } => match method.as_str() {
             // Type-preserving methods: return same type as receiver
             "filter" | "where" | "head" | "tail" | "slice" | "reverse" | "concat" | "orderBy"
@@ -115,8 +118,19 @@ fn infer_expr_type_with_env(expr: &Expr, env: &HashMap<String, String>) -> Optio
                     None
                 }
             }
-            // Map produces Array
-            "map" => Some("Array".to_string()),
+            // first / last / find / pop: extract element type from Array<T> / T[]
+            "first" | "last" | "find" | "pop" => {
+                let receiver_ty = infer_expr_type_with_env(receiver, env)?;
+                array_element_type(&receiver_ty).map(|t| t.to_string())
+            }
+            // Map produces Array<closure_body_type>. Recover element type from
+            // the closure body so chain hints propagate (`Array<int>` not bare
+            // `Array`).
+            "map" => Some(infer_map_result_type(receiver, args, env)),
+            // flatMap: same element-shape recovery as map, but flatten one level
+            "flatMap" | "flat_map" => Some(infer_flat_map_result_type(receiver, args, env)),
+            // collect (terminal in iterator chains): preserve receiver array shape
+            "collect" | "toArray" | "to_array" => infer_expr_type_with_env(receiver, env),
             _ => None,
         },
         Expr::BinaryOp {
@@ -357,6 +371,94 @@ pub fn infer_function_return_type(name: &str) -> Option<String> {
     unified_metadata()
         .get_function(name)
         .map(|f| f.return_type.clone())
+}
+
+/// LSP-H: extract the element type from an `Array<T>` / `T[]` type string.
+/// Returns `None` if `ty` is not recognized as an array shape.
+pub fn array_element_type(ty: &str) -> Option<&str> {
+    let trimmed = ty.trim();
+    if let Some(rest) = trimmed.strip_prefix("Array<") {
+        if let Some(inner) = rest.strip_suffix('>') {
+            return Some(inner.trim());
+        }
+    }
+    if let Some(inner) = trimmed.strip_suffix("[]") {
+        // Sanity: avoid splitting trailing `[]` of an inner pattern like
+        // `Array<int>[]`. The strip_suffix yields the lhs slice; for `int[]`
+        // → `int`, for `Array<int>[]` → `Array<int>`.
+        return Some(inner.trim());
+    }
+    None
+}
+
+/// LSP-H: infer the result-type string for `xs.map(closure)`. Recovers the
+/// closure body's return type and wraps it as `Array<T>`. Falls back to the
+/// receiver's array shape when the closure body cannot be inferred (preserves
+/// chain-hint type-prop through unannotated identity closures), and bare
+/// `Array` only as a last resort.
+fn infer_map_result_type(
+    receiver: &Expr,
+    args: &[Expr],
+    env: &HashMap<String, String>,
+) -> String {
+    let receiver_ty = infer_expr_type_with_env(receiver, env);
+    let elem_ty: Option<String> = args.first().and_then(|arg| match arg {
+        Expr::FunctionExpr {
+            params,
+            return_type,
+            body,
+            ..
+        } => {
+            // Build a tiny env: bind closure params to the receiver's element
+            // type so `|x| x * 2` over `int[]` resolves `x` to `int`.
+            let mut closure_env = env.clone();
+            if let Some(recv_ty) = receiver_ty.as_deref() {
+                if let Some(elem) = array_element_type(recv_ty) {
+                    for p in params {
+                        if let Some(name) = p.simple_name() {
+                            closure_env.insert(name.to_string(), elem.to_string());
+                        }
+                    }
+                }
+            }
+            return_type
+                .as_ref()
+                .and_then(type_annotation_to_string)
+                .or_else(|| infer_block_return_type(body, &closure_env))
+        }
+        _ => None,
+    });
+    match (elem_ty, receiver_ty) {
+        (Some(t), _) => format!("Array<{}>", t),
+        (None, Some(recv)) => {
+            // Identity closure shape unknown — propagate receiver array shape
+            // (e.g. `int[]`) rather than bare `Array`.
+            if array_element_type(&recv).is_some() {
+                recv
+            } else {
+                "Array".to_string()
+            }
+        }
+        (None, None) => "Array".to_string(),
+    }
+}
+
+/// LSP-H: infer the result-type string for `xs.flatMap(closure)`. If the
+/// closure body itself resolves to `Array<T>`, flatten one level — `Array<T>`
+/// not `Array<Array<T>>`. Otherwise behave like `map`.
+fn infer_flat_map_result_type(
+    receiver: &Expr,
+    args: &[Expr],
+    env: &HashMap<String, String>,
+) -> String {
+    let mapped = infer_map_result_type(receiver, args, env);
+    // Strip one `Array<...>` layer if doubled.
+    if let Some(inner) = mapped.strip_prefix("Array<").and_then(|s| s.strip_suffix('>')) {
+        if let Some(_) = array_element_type(inner) {
+            return inner.to_string();
+        }
+    }
+    mapped
 }
 
 /// Infer the type string for an array expression
