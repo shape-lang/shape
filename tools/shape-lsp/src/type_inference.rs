@@ -2263,11 +2263,12 @@ type Point { x: int, y: int }
 
     #[test]
     fn test_extract_type_methods_impl_block() {
+        // Fixture migrated to Form B per cd7d97a4 (2026-05-18) grammar surgery.
         let code = r#"
 trait Queryable {
-    filter(pred): any;
-    select(cols): any;
-    orderBy(col): any
+    method filter(self, pred) -> any;
+    method select(self, cols) -> any;
+    method orderBy(self, col) -> any;
 }
 impl Queryable for MyQ {
     method filter(pred) { self }

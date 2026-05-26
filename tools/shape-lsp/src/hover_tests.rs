@@ -855,7 +855,8 @@ fn test_hover_locally_defined_annotation_usage_with_module_cache() {
 
 #[test]
 fn test_hover_bounded_type_param() {
-    let code = "trait Comparable {\n    compare(other): number\n}\nfn foo<T: Comparable>(x: T) {\n    x\n}\n";
+    // Fixture migrated to Form B per cd7d97a4 (2026-05-18) grammar surgery.
+    let code = "trait Comparable {\n    method compare(self, other) -> number;\n}\nfn foo<T: Comparable>(x: T) {\n    x\n}\n";
     // Hover on "T" in the function declaration
     let hover = get_hover(
         code,
@@ -889,7 +890,8 @@ fn test_hover_bounded_type_param() {
 
 #[test]
 fn test_hover_default_trait_method() {
-    let code = "trait Queryable {\n    filter(pred): any;\n    method execute() {\n        return self\n    }\n}\nimpl Queryable for MyTable {\n    method filter(pred) { self }\n    method execute() { self }\n}\n";
+    // Fixture migrated to Form B per cd7d97a4 (2026-05-18) grammar surgery.
+    let code = "trait Queryable {\n    method filter(self, pred) -> any;\n    method execute() {\n        return self\n    }\n}\nimpl Queryable for MyTable {\n    method filter(pred) { self }\n    method execute() { self }\n}\n";
     // Hover on "execute" in the impl block
     let hover = get_hover(
         code,

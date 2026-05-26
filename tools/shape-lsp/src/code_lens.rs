@@ -395,7 +395,9 @@ mod tests {
 
     #[test]
     fn test_trait_code_lens() {
-        let text = "trait Queryable {\n    filter(pred): any\n}\nimpl Queryable for Table {\n    method filter(pred) { self }\n}\n";
+        // Fixture migrated to Form B per cd7d97a4 (2026-05-18) grammar surgery —
+        // Form A `name(params): RetType` was deleted from trait_member_signature.
+        let text = "trait Queryable {\n    method filter(self, pred) -> any;\n}\nimpl Queryable for Table {\n    method filter(pred) { self }\n}\n";
         let uri = Uri::from_file_path("/tmp/test.shape").unwrap();
         let lenses = get_code_lenses(text, &uri);
         // Should have at least one code lens for the trait

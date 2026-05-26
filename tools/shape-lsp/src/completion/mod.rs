@@ -1936,7 +1936,10 @@ let x = 1
     #[test]
     fn test_impl_method_completions() {
         // Use parseable code (t.x is valid) with cursor positioned after "t."
-        let code = "trait Q {\n    filter(p): any;\n    select(c): any\n}\nimpl Q for T {\n    method filter(p) { self }\n}\nlet t: T\nt.x\n";
+        // Fixture migrated to Form B per cd7d97a4 (2026-05-18) grammar surgery.
+        // FN-REG side (method completion on user-receiver returning 0 items)
+        // belongs to LSP-C per audit §G.
+        let code = "trait Q {\n    method filter(self, p) -> any;\n    method select(self, c) -> any;\n}\nimpl Q for T {\n    method filter(p) { self }\n}\nlet t: T\nt.x\n";
         let position = Position {
             line: 8,
             character: 2, // cursor after "t."
@@ -2129,7 +2132,8 @@ let x = 1
 
     #[test]
     fn test_impl_block_completions_suggests_unimplemented() {
-        let code = "trait Queryable {\n    filter(pred): any;\n    select(cols): any;\n    orderBy(col): any\n}\nimpl Queryable for MyTable {\n    method filter(pred) { self }\n    \n}\n";
+        // Fixture migrated to Form B per cd7d97a4 (2026-05-18) grammar surgery.
+        let code = "trait Queryable {\n    method filter(self, pred) -> any;\n    method select(self, cols) -> any;\n    method orderBy(self, col) -> any;\n}\nimpl Queryable for MyTable {\n    method filter(pred) { self }\n    \n}\n";
         let completions =
             impl_block_completions(code, "Queryable", &["filter".to_string()], None, None, None);
         let labels: Vec<_> = completions.iter().map(|c| c.label.as_str()).collect();
@@ -2173,7 +2177,8 @@ let x = 1
 
     #[test]
     fn test_impl_block_completions_snippet_format() {
-        let code = "trait Filt {\n    filter(pred): any\n}\n";
+        // Fixture migrated to Form B per cd7d97a4 (2026-05-18) grammar surgery.
+        let code = "trait Filt {\n    method filter(self, pred) -> any;\n}\n";
         let completions = impl_block_completions(code, "Filt", &[], None, None, None);
         assert_eq!(completions.len(), 1);
         let item = &completions[0];
