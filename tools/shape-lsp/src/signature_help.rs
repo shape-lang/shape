@@ -4,9 +4,10 @@
 
 use crate::doc_render::render_doc_comment;
 use crate::type_inference::{
-    ParamReferenceMode, infer_function_signatures, type_annotation_to_string, unified_metadata,
+    ParamReferenceMode, infer_function_signatures, infer_program_types, type_annotation_to_string,
+    unified_metadata,
 };
-use shape_ast::ast::{Item, Program};
+use shape_ast::ast::{Item, Program, TypeName};
 use shape_ast::parser::parse_program;
 use tower_lsp_server::ls_types::{
     ParameterInformation, ParameterLabel, Position, SignatureHelp, SignatureInformation,
@@ -23,7 +24,7 @@ pub fn get_signature_help(text: &str, position: Position) -> Option<SignatureHel
     let (function_name, active_param) = get_function_call_context(text, position)?;
 
     // Try to find signature for this function
-    get_signature_for_function(text, &function_name, active_param)
+    get_signature_for_function(text, position, &function_name, active_param)
 }
 
 /// Extract function name and active parameter index from cursor position
@@ -86,15 +87,26 @@ fn extract_function_name(text: &str) -> Option<String> {
 /// Get signature for a specific function
 fn get_signature_for_function(
     text: &str,
+    position: Position,
     function_name: &str,
     active_param: u32,
 ) -> Option<SignatureHelp> {
     // Check for qualified module function names (e.g., "csv.load")
     if let Some(dot) = function_name.rfind('.') {
-        let module = &function_name[..dot];
+        let receiver = &function_name[..dot];
         let func = &function_name[dot + 1..];
         if let Some(sig_help) =
-            get_module_function_signature(module, func, active_param, Some(text))
+            get_module_function_signature(receiver, func, active_param, Some(text))
+        {
+            return Some(sig_help);
+        }
+
+        // Method-call dispatch: `<receiver_expr>.<method>(`. Resolve the
+        // receiver's type via best-effort program inference (recovering past
+        // the dangling open-paren the cursor sits inside) and look up the
+        // method in any matching `impl Trait for Type` / `extend Type` block.
+        if let Some(sig_help) =
+            get_user_method_signature(text, position, receiver, func, active_param)
         {
             return Some(sig_help);
         }
@@ -419,6 +431,181 @@ fn get_user_function_signature(
     let signature = SignatureInformation {
         label: signature_label,
         documentation: doc.map(|comment| {
+            tower_lsp_server::ls_types::Documentation::String(render_doc_comment(
+                &program, comment, None, None, None,
+            ))
+        }),
+        parameters: Some(parameters),
+        active_parameter: Some(active_param),
+    };
+
+    Some(SignatureHelp {
+        signatures: vec![signature],
+        active_signature: Some(0),
+        active_parameter: Some(active_param),
+    })
+}
+
+/// Strip the cursor's incomplete-call line back to text-before-cursor.
+///
+/// Signature help is invoked mid-typing — the line containing the cursor
+/// typically holds a dangling open-paren (e.g. `let s = u.hello(`) that fails
+/// the strict whole-file parse. Truncating the cursor line at the cursor and
+/// then erasing it to whitespace keeps line/column offsets stable for any
+/// later span work while letting the rest of the program parse normally.
+fn sanitize_text_for_recovery(text: &str, position: Position) -> String {
+    let mut lines: Vec<String> = text.split('\n').map(|s| s.to_string()).collect();
+    let line_idx = position.line as usize;
+    if line_idx >= lines.len() {
+        return text.to_string();
+    }
+    let line = &lines[line_idx];
+    let char_pos = (position.character as usize).min(line.len());
+    let before = &line[..char_pos];
+    // Replace with a blank line of the same byte length so trailing
+    // line/column positions stay consistent. We only need the structural
+    // surrounding items to parse cleanly.
+    let blanked = " ".repeat(before.len());
+    lines[line_idx] = blanked;
+    lines.join("\n")
+}
+
+fn parse_program_recovering(text: &str, position: Position) -> Option<Program> {
+    if let Ok(program) = parse_program(text) {
+        return Some(program);
+    }
+    let sanitized = sanitize_text_for_recovery(text, position);
+    parse_program(&sanitized).ok()
+}
+
+/// Resolve receiver identifier text (`u`, `self`, etc.) to a type name suitable
+/// for impl/extend lookup. Only handles simple identifiers — complex receiver
+/// expressions (`get_user().hello(...)`) fall through and return None.
+fn resolve_receiver_type_name(program: &Program, receiver_text: &str) -> Option<String> {
+    let trimmed = receiver_text.trim();
+    if trimmed.is_empty() || !is_simple_identifier(trimmed) {
+        return None;
+    }
+    let types = infer_program_types(program);
+    let raw = types.get(trimmed)?.clone();
+    Some(strip_to_base_type_name(&raw))
+}
+
+fn is_simple_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_alphanumeric() || c == '_')
+}
+
+/// Reduce an inferred type string to its base name for impl/extend matching.
+/// `User` → `User`; `Array<int>` → `Array`; `&User` → `User`.
+fn strip_to_base_type_name(ty: &str) -> String {
+    let mut s = ty.trim();
+    while let Some(rest) = s.strip_prefix('&') {
+        s = rest.trim_start_matches("mut ").trim();
+    }
+    let head = s.split(['<', '?', ' ']).next().unwrap_or(s);
+    head.trim().to_string()
+}
+
+fn typename_base(tn: &TypeName) -> &str {
+    match tn {
+        TypeName::Simple(path) => path.name(),
+        TypeName::Generic { name, .. } => name.name(),
+    }
+}
+
+/// Look up a method by name on a target type, scanning every `impl ... for
+/// Type { ... }` and `extend Type { ... }` block in the program.
+fn lookup_method_def<'a>(
+    program: &'a Program,
+    target_type: &str,
+    method_name: &str,
+) -> Option<&'a shape_ast::ast::MethodDef> {
+    for item in &program.items {
+        match item {
+            Item::Impl(impl_block, _) => {
+                if typename_base(&impl_block.target_type) == target_type {
+                    if let Some(method) =
+                        impl_block.methods.iter().find(|m| m.name == method_name)
+                    {
+                        return Some(method);
+                    }
+                }
+            }
+            Item::Extend(extend_stmt, _) => {
+                if typename_base(&extend_stmt.type_name) == target_type {
+                    if let Some(method) =
+                        extend_stmt.methods.iter().find(|m| m.name == method_name)
+                    {
+                        return Some(method);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Get signature for a user-defined method call (`receiver.method(`).
+fn get_user_method_signature(
+    text: &str,
+    position: Position,
+    receiver_text: &str,
+    method_name: &str,
+    active_param: u32,
+) -> Option<SignatureHelp> {
+    let program = parse_program_recovering(text, position)?;
+    let target_type = resolve_receiver_type_name(&program, receiver_text)?;
+    let method = lookup_method_def(&program, &target_type, method_name)?;
+
+    let mut param_labels: Vec<String> = Vec::new();
+    let mut parameters: Vec<ParameterInformation> = Vec::new();
+    for param in &method.params {
+        let name = param.simple_name().unwrap_or("_").to_string();
+        // Skip an explicit `self` receiver param — Shape's impl methods take
+        // an implicit `self`, but some legacy fixtures still spell it out.
+        if name == "self" {
+            continue;
+        }
+        let rendered = if let Some(type_ann) = &param.type_annotation {
+            let type_str = type_annotation_to_string(type_ann).unwrap_or_else(|| "_".to_string());
+            format!("{}: {}", name, type_str)
+        } else {
+            name.clone()
+        };
+        param_labels.push(rendered.clone());
+        parameters.push(ParameterInformation {
+            label: ParameterLabel::Simple(rendered),
+            documentation: method
+                .doc_comment
+                .as_ref()
+                .and_then(|comment| comment.param_doc(&name))
+                .map(|value| tower_lsp_server::ls_types::Documentation::String(value.to_string())),
+        });
+    }
+
+    let mut signature_label = format!(
+        "fn {}.{}({})",
+        target_type,
+        method_name,
+        param_labels.join(", ")
+    );
+    if let Some(return_type) = method
+        .return_type
+        .as_ref()
+        .and_then(type_annotation_to_string)
+    {
+        signature_label.push_str(&format!(" -> {}", return_type));
+    }
+
+    let signature = SignatureInformation {
+        label: signature_label,
+        documentation: method.doc_comment.as_ref().map(|comment| {
             tower_lsp_server::ls_types::Documentation::String(render_doc_comment(
                 &program, comment, None, None, None,
             ))
@@ -982,5 +1169,108 @@ let s = foo("hi")
         assert!(sig_help.is_some());
         let sig = &sig_help.unwrap().signatures[0];
         assert!(sig.label.contains("join settle"));
+    }
+
+    // LSP-F: method-call signature help with parse-recovery
+    #[test]
+    fn test_is_simple_identifier() {
+        assert!(is_simple_identifier("u"));
+        assert!(is_simple_identifier("user_name"));
+        assert!(is_simple_identifier("_x"));
+        assert!(!is_simple_identifier(""));
+        assert!(!is_simple_identifier("1u"));
+        assert!(!is_simple_identifier("u.name"));
+        assert!(!is_simple_identifier("get_user()"));
+    }
+
+    #[test]
+    fn test_strip_to_base_type_name_handles_prefixes_and_generics() {
+        assert_eq!(strip_to_base_type_name("User"), "User");
+        assert_eq!(strip_to_base_type_name("&User"), "User");
+        assert_eq!(strip_to_base_type_name("&mut User"), "User");
+        assert_eq!(strip_to_base_type_name("Array<int>"), "Array");
+        assert_eq!(strip_to_base_type_name("User?"), "User");
+        assert_eq!(strip_to_base_type_name("  &Foo<T>  "), "Foo");
+    }
+
+    #[test]
+    fn test_sanitize_text_for_recovery_blanks_cursor_line_prefix() {
+        let text = "let x = 1\nlet s = u.hello(\n";
+        let position = Position {
+            line: 1,
+            character: 16,
+        };
+        let sanitized = sanitize_text_for_recovery(text, position);
+        // The cursor's incomplete-call prefix is blanked so the rest parses.
+        assert!(sanitized.contains("let x = 1"));
+        assert!(!sanitized.contains("u.hello("));
+        // Line count unchanged.
+        assert_eq!(sanitized.lines().count(), text.lines().count());
+    }
+
+    #[test]
+    fn test_method_call_signature_via_impl_trait_block() {
+        let text = "\
+trait Greet { fn hello(greeting: string) -> string; }
+type User { name: string }
+impl Greet for User {
+    fn hello(greeting: string) -> string { greeting }
+}
+let u = User { name: \"a\" }
+let s = u.hello(
+";
+        let position = Position {
+            line: 6,
+            character: 16,
+        };
+        let sig_help =
+            get_signature_help(text, position).expect("expected method-call signature help");
+        let sig = &sig_help.signatures[0];
+        assert!(
+            sig.label.contains("hello"),
+            "label should mention method name, got {:?}",
+            sig.label
+        );
+        assert!(
+            sig.label.contains("greeting"),
+            "label should mention the parameter, got {:?}",
+            sig.label
+        );
+        assert_eq!(sig_help.active_parameter, Some(0));
+    }
+
+    #[test]
+    fn test_method_call_signature_via_extend_block() {
+        let text = "\
+type User { name: string }
+extend User {
+    method hello(greeting: string) -> string { greeting }
+}
+let u = User { name: \"a\" }
+let s = u.hello(
+";
+        let position = Position {
+            line: 5,
+            character: 16,
+        };
+        let sig_help =
+            get_signature_help(text, position).expect("expected extend-method signature help");
+        let sig = &sig_help.signatures[0];
+        assert!(sig.label.contains("hello"));
+        assert!(sig.label.contains("greeting"));
+    }
+
+    #[test]
+    fn test_method_call_signature_returns_none_for_unknown_method() {
+        let text = "\
+type User { name: string }
+let u = User { name: \"a\" }
+let s = u.no_such_method(
+";
+        let position = Position {
+            line: 2,
+            character: 24,
+        };
+        assert!(get_signature_help(text, position).is_none());
     }
 }
