@@ -647,3 +647,41 @@ fn test_lsp_code_lens_on_trait() {
     let code = "trait Serializable {\n  method serialize() -> string\n}\nimpl Serializable for Data {\n  method serialize() { \"{}\" }\n}\n";
     ShapeTest::new(code).expect_code_lens_not_empty();
 }
+
+// == LSP-N §D regression flow #4: reference-mode hints absent =================
+//
+// Audit `v0.3-lsp-parity-audit.md` executive summary item #4: inferred
+// reference-mode hints (`: &string`, `: &mut string`) never rendered.
+// Currently red; LSP-B closes.
+
+#[test]
+#[should_panic] // LSP-B closes — reference-mode inferrer path silent end-to-end
+fn lsp_n_type_hint_includes_reference_mode() {
+    // §D #4: `let s = &"hello"` should produce a type hint of `&string`,
+    // not `string` (which silently drops the reference mode).
+    let code = "let s = &\"hello\"\n";
+    ShapeTest::new(code).expect_type_hint_label(": &string");
+}
+
+// == LSP-N §D regression flow #5: type-prop loss in fn-call chains ============
+//
+// Audit `v0.3-lsp-parity-audit.md` executive summary item #5: type inference
+// through fn-call chains degrades to `: any` or bare `: Array` (no element
+// type). Currently red; LSP-B closes.
+
+#[test]
+fn lsp_n_type_hint_propagates_through_fn_call() {
+    // §D #5: `distance(p, q)` must propagate `-> number` to `let d` inlay.
+    // PASSES today at HEAD 7813a652 — single-file characterization does
+    // not reproduce the §D regression (which surfaced under the editor's
+    // workspace-aware analysis with cached programs). Regression-prevention
+    // coverage so the inlay path can't silently drop type propagation.
+    let code = "\
+type Point { x: number, y: number }
+fn distance(a: Point, b: Point) -> number { 0.0 }
+let p = Point { x: 0.0, y: 0.0 }
+let q = Point { x: 1.0, y: 1.0 }
+let d = distance(p, q)
+";
+    ShapeTest::new(code).expect_type_hint_label(": number");
+}

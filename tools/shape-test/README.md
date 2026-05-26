@@ -30,8 +30,36 @@ Key methods: `expect_run_ok()`, `expect_run_err_contains(msg)`, `expect_output(e
 
 LSP: `expect_hover_contains()`, `expect_completion()`, `expect_semantic_tokens()`,
 `expect_inlay_hints_not_empty()`, `expect_definition()`, `expect_references_min()`,
-`expect_rename_edits()`, `expect_code_actions_ok()`, `expect_code_lens_not_empty()`,
-`expect_signature_help()`, `expect_format_preserves()`.
+`expect_rename_edits()`, `expect_code_actions_ok()`, `expect_code_actions_min(n)`,
+`expect_code_lens_not_empty()`, `expect_signature_help()`,
+`expect_format_preserves()`, `expect_document_symbol_named(name)`,
+`expect_document_symbol_kind_count(kind, n)`,
+`expect_call_hierarchy_prepare_ok()`, `expect_call_hierarchy_prepare_empty()`.
+
+## LSP E2E lockstep discipline (binding from 2026-05-26)
+
+`tools/shape-test/tests/lsp/` is the canonical LSP E2E test suite. Every
+change to `tools/shape-lsp/src/` MUST add or update a corresponding E2E
+test in `tools/shape-test/tests/lsp/<area>.rs` in the same commit (or in
+a paired commit on the same branch). This is the same pattern Shape
+language semantics use for test coverage: source change without a test
+is a defection-attractor.
+
+Per the v0.3 LSP-parity audit (`docs/cluster-audits/v0.3-lsp-parity-audit.md`),
+the LSP-A audit-day used an ephemeral JSON-RPC harness for §D empirical
+real-editor exercise. That harness was never committed; this suite
+supersedes it. All §D-surfaced regression flows are characterized here
+(see `lsp_n_*` tests across `completions`, `signature_help`, `symbols`,
+`hover`, `presentation`, `code_actions`, `call_hierarchy`, and
+`navigation` modules), marked `#[should_panic]` until their fix wave
+(LSP-B / LSP-C / LSP-D / LSP-E / LSP-F / LSP-G / LSP-I / LSP-J) lands
+— at which point the `#[should_panic]` annotation is removed by the
+landing wave and the test becomes a true green-on-success assertion.
+
+The LSP-N close-gate is the manual real-editor exercise on VS Code +
+nvim (per the audit §F test matrix). Unit-test-green is necessary but
+not sufficient; the manual exercise on the ratified test matrix is the
+final pre-tag close-gate.
 
 ---
 

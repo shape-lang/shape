@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use tower_lsp_server::ls_types::{
-    CodeActionOrCommand, CompletionItem, Diagnostic, FormattingOptions, Hover, HoverContents,
-    MarkupContent, Position, Range, Uri,
+    CodeActionOrCommand, CompletionItem, Diagnostic, DocumentSymbol, DocumentSymbolResponse,
+    FormattingOptions, Hover, HoverContents, MarkupContent, Position, Range, SymbolKind, Uri,
 };
 
 use shape_lsp::context::CompletionContext;
@@ -614,6 +614,38 @@ impl ShapeTest {
         self
     }
 
+    /// Assert at least `min_count` code actions are produced for the selected
+    /// range, given the real semantic diagnostics computed from the document.
+    ///
+    /// This exercises the diagnostic-driven quickfix path (LSP-A §D regression
+    /// flow #6: "codeAction returns 0 on real diagnostic"). Unlike
+    /// [`expect_code_actions_ok`], we pass the actual diagnostics so the
+    /// quickfix triggers can fire.
+    pub fn expect_code_actions_min(self, min_count: usize) -> Self {
+        let uri = self.uri();
+        let r = self.selected_range.unwrap_or(self.full_range());
+        let diagnostics = self.collect_semantic_diagnostics();
+        let actions: Vec<CodeActionOrCommand> = shape_lsp::code_actions::get_code_actions(
+            &self.text,
+            &uri,
+            r,
+            &diagnostics,
+            None,
+            None,
+        );
+        assert!(
+            actions.len() >= min_count,
+            "Expected at least {} code actions, got {}. Diagnostics in range: {:?}",
+            min_count,
+            actions.len(),
+            diagnostics
+                .iter()
+                .map(|d| d.message.as_str())
+                .collect::<Vec<_>>()
+        );
+        self
+    }
+
     // -- Code Lens assertions -----------------------------------------------
 
     /// Assert code lenses are not empty.
@@ -782,6 +814,116 @@ impl ShapeTest {
     pub fn expect_no_document_symbols(self) -> Self {
         let symbols = shape_lsp::document_symbols::get_document_symbols(&self.text);
         assert!(symbols.is_none(), "Expected no document symbols");
+        self
+    }
+
+    /// Collect every `DocumentSymbol` (recursively flattened) from the LSP
+    /// response. Returns an empty `Vec` if no symbols or the response was the
+    /// flat `SymbolInformation` variant (current LSP returns `Nested`).
+    fn collect_flat_document_symbols(&self) -> Vec<DocumentSymbol> {
+        let resp = match shape_lsp::document_symbols::get_document_symbols(&self.text) {
+            Some(r) => r,
+            None => return Vec::new(),
+        };
+        let mut out = Vec::new();
+        if let DocumentSymbolResponse::Nested(symbols) = resp {
+            fn walk(syms: &[DocumentSymbol], out: &mut Vec<DocumentSymbol>) {
+                for s in syms {
+                    out.push(s.clone());
+                    if let Some(children) = &s.children {
+                        walk(children, out);
+                    }
+                }
+            }
+            walk(&symbols, &mut out);
+        }
+        out
+    }
+
+    /// Assert a document symbol with the exact name is present (recursive).
+    ///
+    /// Exercises LSP-A §D regression flow #3: "documentSymbol misses
+    /// trait / type / impl / enum" — the file-level outline must surface
+    /// non-function items.
+    pub fn expect_document_symbol_named(self, name: &str) -> Self {
+        let symbols = self.collect_flat_document_symbols();
+        assert!(
+            symbols.iter().any(|s| s.name == name),
+            "Expected document symbol named '{}', got: {:?}",
+            name,
+            symbols.iter().map(|s| s.name.clone()).collect::<Vec<_>>()
+        );
+        self
+    }
+
+    /// Assert exactly `expected` document symbols have `SymbolKind` == `kind`
+    /// (recursive). Use this to verify the dispatch covers each `Item::*`
+    /// variant — paired with §D #3 (the dispatch table at
+    /// `document_symbols.rs:47-126` is missing arms for `Item::Trait` /
+    /// `Item::StructType` / `Item::Impl`).
+    pub fn expect_document_symbol_kind_count(self, kind: SymbolKind, expected: usize) -> Self {
+        let symbols = self.collect_flat_document_symbols();
+        let count = symbols.iter().filter(|s| s.kind == kind).count();
+        assert_eq!(
+            count, expected,
+            "Expected {} document symbols of kind {:?}, got {} (all: {:?})",
+            expected,
+            kind,
+            count,
+            symbols
+                .iter()
+                .map(|s| (s.name.clone(), s.kind))
+                .collect::<Vec<_>>()
+        );
+        self
+    }
+
+    // -- Call hierarchy assertions -----------------------------------------
+
+    /// Assert `textDocument/prepareCallHierarchy` returns at least one item
+    /// at the current cursor position.
+    ///
+    /// Exercises LSP-A §D regression flow #7: "prepareCallHierarchy returns
+    /// [] on a visible fn". When prepare returns empty, the entire incoming
+    /// / outgoing call-hierarchy chain is unreachable from the editor.
+    pub fn expect_call_hierarchy_prepare_ok(self) -> Self {
+        let uri = self.uri();
+        let result =
+            shape_lsp::call_hierarchy::prepare_call_hierarchy(&self.text, self.position, &uri);
+        assert!(
+            result.is_some(),
+            "Expected prepare_call_hierarchy result at ({}, {})",
+            self.position.line,
+            self.position.character
+        );
+        let items = result.unwrap();
+        assert!(
+            !items.is_empty(),
+            "Expected at least one CallHierarchyItem at ({}, {}), got []",
+            self.position.line,
+            self.position.character
+        );
+        self
+    }
+
+    /// Assert `textDocument/prepareCallHierarchy` returns no items at the
+    /// current cursor position (e.g. cursor in whitespace, on a literal, on
+    /// a non-function identifier). Counterpart to
+    /// [`expect_call_hierarchy_prepare_ok`].
+    pub fn expect_call_hierarchy_prepare_empty(self) -> Self {
+        let uri = self.uri();
+        let result =
+            shape_lsp::call_hierarchy::prepare_call_hierarchy(&self.text, self.position, &uri);
+        let is_empty = match result {
+            None => true,
+            Some(items) => items.is_empty(),
+        };
+        assert!(
+            is_empty,
+            "Expected prepare_call_hierarchy empty/None at ({}, {})",
+            self.position.line,
+            self.position.character
+        );
         self
     }
 

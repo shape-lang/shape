@@ -769,3 +769,48 @@ fn msgpack_module_hover() {
         .at(pos(1, 10))
         .expect_hover_contains("encode");
 }
+
+// == LSP-N §D regression flow #8: annotation hover returns null ===============
+//
+// Audit `v0.3-lsp-parity-audit.md` executive summary item #8: hover on an
+// `@description` annotation usage returns null in real editor flow despite
+// the discovery + rendering paths existing. Currently red; LSP-J closes.
+
+#[test]
+#[should_panic] // LSP-J closes — annotation hover currently returns null
+fn lsp_n_annotation_hover_returns_content() {
+    // §D #8: hover on the `@description` annotation site should render the
+    // annotation's documentation, not return null.
+    let code = "\
+@description(\"adds two numbers\")
+fn add(a: int, b: int) -> int { a + b }
+";
+    ShapeTest::new(code)
+        .at(pos(0, 2))
+        .expect_hover_contains("description");
+}
+
+// == LSP-N §D regression flow #9: hover renders deleted Form-A syntax =========
+//
+// Audit `v0.3-lsp-parity-audit.md` executive summary item #9: hover renders
+// method signatures using the DELETED `name(args): RetType` Form-A syntax
+// (7 sites in `hover.rs` + 1 in `type_inference.rs`). Form-A was deleted by
+// `cd7d97a4` (2026-05-18); hover must use Form-B (`fn name(args) -> Ret`).
+// LSP-E closes (Form-A render-site migration).
+
+#[test]
+#[should_panic] // LSP-E closes — hover currently renders Form-A `name(args): Ret`
+fn lsp_n_trait_method_hover_uses_form_b_not_form_a() {
+    // §D #9: hover on `draw` inside a trait must render Form-B syntax
+    // (`fn draw(self) -> ...` or `-> Unit`), never the deleted Form-A
+    // (`draw(self): ...`).
+    let code = "\
+trait Drawable {
+    fn draw(self) -> string;
+}
+";
+    ShapeTest::new(code)
+        .at(pos(1, 7))
+        .expect_hover_not_contains("):")
+        .expect_hover_contains("->");
+}
