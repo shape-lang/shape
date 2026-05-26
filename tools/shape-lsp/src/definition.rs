@@ -7,7 +7,9 @@ use crate::document::DocumentManager;
 use crate::module_cache::ModuleCache;
 use crate::type_inference::infer_variable_type;
 use crate::util::{get_word_at_position, offset_to_line_col, position_to_offset};
-use shape_ast::ast::{ImportItems, Item, Program, Span, Statement, TypeName};
+use shape_ast::ast::{
+    ImportItems, Item, Program, Span, Statement, TraitMember, TraitMemberSignature, TypeName,
+};
 use shape_ast::parser::parse_program;
 use std::path::{Path, PathBuf};
 use tower_lsp_server::ls_types::{
@@ -447,6 +449,13 @@ pub fn get_type_definition(
 /// that trait. When the cursor is on a type name, return every impl block
 /// (and extend block) whose target type matches.
 ///
+/// LSP-K (audit §D regression flow): when the cursor is on a trait-method
+/// name (inside the trait body, either `Required` signature or `Default`
+/// method), return every matching impl-method body location across all
+/// impl blocks in the current file that target the enclosing trait. This
+/// is the trait-method → impl-method jump the audit §A.1 surfaced as
+/// returning null.
+///
 /// This is a current-file-only enumeration; cross-workspace impl discovery
 /// is part of the broader workspace-symbol indexing work tracked in W2.6/W2.7.
 pub fn get_implementations(
@@ -471,6 +480,21 @@ pub fn get_implementations(
             }
         }
     };
+
+    // LSP-K: trait-method → impl-method path. If the cursor sits on a
+    // trait-method name (`Required` signature or `Default` method) inside
+    // a trait body, surface every impl-method body that overrides it.
+    if let Some(cursor_offset) = position_to_offset(text, position) {
+        if let Some((trait_name, method_name)) =
+            find_trait_method_at_offset(&program, cursor_offset, &word)
+        {
+            let impl_method_locations =
+                collect_impl_method_locations(&program, trait_name, method_name, uri, text);
+            if !impl_method_locations.is_empty() {
+                return Some(impl_method_locations);
+            }
+        }
+    }
 
     let mut locations: Vec<Location> = Vec::new();
 
@@ -498,6 +522,69 @@ pub fn get_implementations(
     } else {
         Some(locations)
     }
+}
+
+/// LSP-K helper: detect whether the cursor sits on a trait-method name
+/// (in a `Required` signature or `Default` method) inside the body of a
+/// `trait` item in the parsed program.
+///
+/// Returns `Some((trait_name, method_name))` when the offset falls inside
+/// a trait-member span AND the cursor word matches the method's name.
+/// The word match prevents drilling into impl-methods when the cursor is
+/// on a method body keyword/identifier that happens to share a name with
+/// another trait-method.
+fn find_trait_method_at_offset<'p>(
+    program: &'p Program,
+    offset: usize,
+    word: &str,
+) -> Option<(&'p str, &'p str)> {
+    for item in &program.items {
+        if let Item::Trait(trait_def, _trait_span) = item {
+            for member in &trait_def.members {
+                match member {
+                    TraitMember::Required(TraitMemberSignature::Method { name, span, .. }) => {
+                        if offset >= span.start && offset <= span.end && name == word {
+                            return Some((trait_def.name.as_str(), name.as_str()));
+                        }
+                    }
+                    TraitMember::Default(method) => {
+                        let span = method.span;
+                        if offset >= span.start && offset <= span.end && method.name == word {
+                            return Some((trait_def.name.as_str(), method.name.as_str()));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    None
+}
+
+/// LSP-K helper: collect impl-method body `Location`s for every
+/// `impl <trait_name> for X` block whose method list contains a method
+/// named `method_name`.
+fn collect_impl_method_locations(
+    program: &Program,
+    trait_name: &str,
+    method_name: &str,
+    uri: &Uri,
+    text: &str,
+) -> Vec<Location> {
+    let mut locations: Vec<Location> = Vec::new();
+    for item in &program.items {
+        if let Item::Impl(impl_block, _) = item {
+            if type_name_str(&impl_block.trait_name) != trait_name {
+                continue;
+            }
+            for method in &impl_block.methods {
+                if method.name == method_name {
+                    locations.push(create_location_from_span(uri, method.span, text));
+                }
+            }
+        }
+    }
+    locations
 }
 
 /// Find the declaration site of a symbol at the cursor.
@@ -1623,6 +1710,129 @@ let y = myVar * 2;
         assert!(result.is_some(), "expected impl-block location for Q");
         let locs = result.unwrap();
         assert!(!locs.is_empty());
+    }
+
+    // == LSP-K: trait-method → impl-method body jump ============================
+
+    #[test]
+    fn test_get_implementations_jumps_from_trait_method_to_impl_method() {
+        // LSP-K: cursor on the trait-method name `q` (line 0 char 13, the 'q'
+        // inside `fn q(self)` of the trait body) must surface the impl-method
+        // body, not the impl block as a whole.
+        let code = "trait Q { fn q(self) -> int; }\ntype T { x: int }\nimpl Q for T { fn q(self) -> int { 1 } }\n";
+        let uri = Uri::from_file_path("/test.shape").unwrap();
+        let result = get_implementations(
+            code,
+            Position {
+                line: 0,
+                character: 13,
+            },
+            &uri,
+            None,
+        );
+        assert!(
+            result.is_some(),
+            "expected impl-method location for trait-method 'q'"
+        );
+        let locs = result.unwrap();
+        assert_eq!(locs.len(), 1, "expected exactly one impl-method match");
+        // The returned range must fall inside the impl block on line 2 — that
+        // is, NOT the trait declaration itself on line 0.
+        assert_eq!(locs[0].range.start.line, 2);
+    }
+
+    #[test]
+    fn test_get_implementations_trait_method_multi_impls() {
+        // Multiple impls of the same trait — all impl-method bodies must
+        // appear in the result.
+        let code = "trait Greet {\n    fn hello(self) -> string;\n}\ntype Cat { name: string }\ntype Dog { name: string }\nimpl Greet for Cat {\n    fn hello(self) -> string { return \"meow\" }\n}\nimpl Greet for Dog {\n    fn hello(self) -> string { return \"woof\" }\n}\n";
+        let uri = Uri::from_file_path("/test.shape").unwrap();
+        // Cursor on the trait-method name `hello` (line 1).
+        let result = get_implementations(
+            code,
+            Position {
+                line: 1,
+                character: 7,
+            },
+            &uri,
+            None,
+        );
+        assert!(
+            result.is_some(),
+            "expected impl-method locations for trait-method 'hello'"
+        );
+        let locs = result.unwrap();
+        assert_eq!(locs.len(), 2, "expected two impl-method matches");
+    }
+
+    #[test]
+    fn test_get_implementations_default_trait_method_still_finds_impls() {
+        // Cursor on a default-method name in a trait body — impls that
+        // override it must still surface.
+        let code = "trait Greet {\n    fn hello(self) -> string { return \"hi\" }\n}\ntype Cat { name: string }\nimpl Greet for Cat {\n    fn hello(self) -> string { return \"meow\" }\n}\n";
+        let uri = Uri::from_file_path("/test.shape").unwrap();
+        // Cursor on `hello` in the default-method body's signature line.
+        let result = get_implementations(
+            code,
+            Position {
+                line: 1,
+                character: 7,
+            },
+            &uri,
+            None,
+        );
+        assert!(
+            result.is_some(),
+            "expected impl-method location for default trait-method 'hello'"
+        );
+        let locs = result.unwrap();
+        // Default-method body is itself in the trait — the impl override is
+        // the only "implementation" target.
+        assert_eq!(locs.len(), 1);
+    }
+
+    #[test]
+    fn test_get_implementations_trait_name_still_returns_impl_block() {
+        // Regression guard for the existing trait-name → impl-block path
+        // (LSP-D's existing behavior must not be broken by LSP-K).
+        let code = "trait Q { fn q(self) -> int; }\ntype T { x: int }\nimpl Q for T { fn q(self) -> int { 1 } }\n";
+        let uri = Uri::from_file_path("/test.shape").unwrap();
+        // Cursor on the trait name `Q` in the impl header.
+        let result = get_implementations(
+            code,
+            Position {
+                line: 2,
+                character: 5,
+            },
+            &uri,
+            None,
+        );
+        assert!(result.is_some(), "trait-name path must still resolve");
+        let locs = result.unwrap();
+        assert_eq!(locs.len(), 1);
+        // The trait-name path returns the impl BLOCK range, which begins on
+        // line 2 (start of `impl Q for T { ... }`).
+        assert_eq!(locs[0].range.start.line, 2);
+    }
+
+    #[test]
+    fn test_get_implementations_trait_method_no_matching_impl() {
+        // Trait-method exists, but no impl provides it — return None
+        // (the impl-method path must not fall back to the impl-block path
+        // here, since the cursor is on a trait-method, not a trait-name).
+        let code = "trait Q { fn q(self) -> int; }\n";
+        let uri = Uri::from_file_path("/test.shape").unwrap();
+        let result = get_implementations(
+            code,
+            Position {
+                line: 0,
+                character: 13,
+            },
+            &uri,
+            None,
+        );
+        // No impls at all → None is correct (current-file enumeration).
+        assert!(result.is_none());
     }
 
     #[test]

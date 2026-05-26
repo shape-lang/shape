@@ -224,3 +224,57 @@ let c = shared()
 ";
     ShapeTest::new(code).at(pos(0, 3)).expect_references_min(3);
 }
+
+// == LSP-K §A.1 / §D regression: trait-method → impl-method jump =============
+//
+// Audit `v0.3-lsp-parity-audit.md` §A.1 row `textDocument/implementation`:
+// "Works for trait → impl block ... **Regression:** trait-method → impl-method
+// returns null". This sub-cluster closes the regression by drilling
+// `get_implementations` into impl-method bodies when the cursor sits on a
+// trait-method name.
+
+#[test]
+fn lsp_n_implementation_jumps_from_trait_method_to_impl_method() {
+    // Cursor on the trait-method name `hello` (line 1, the 'h' of `fn hello`).
+    // Must return the impl-method body Location on line 5 (the `fn hello`
+    // inside `impl Greet for Cat { ... }`), NOT the impl-block start at
+    // line 4 (which is what the trait-name-on-impl-header path returns).
+    let code = "\
+trait Greet {
+    fn hello(self) -> string;
+}
+type Cat { name: string }
+impl Greet for Cat {
+    fn hello(self) -> string { return \"meow\" }
+}
+";
+    // Line 1 col 7: the 'h' in `fn hello` inside the trait body.
+    ShapeTest::new(code)
+        .at(pos(1, 7))
+        .expect_implementation_in_line_range(1, 5, 5);
+}
+
+#[test]
+fn lsp_n_implementation_jumps_from_trait_method_to_all_impl_methods() {
+    // Multi-impl coverage: trait has one method `hello`, two impls override
+    // it (Cat on line 6, Dog on line 9). Cursor on the trait-method name
+    // must surface BOTH impl-method body Locations.
+    let code = "\
+trait Greet {
+    fn hello(self) -> string;
+}
+type Cat { name: string }
+type Dog { name: string }
+impl Greet for Cat {
+    fn hello(self) -> string { return \"meow\" }
+}
+impl Greet for Dog {
+    fn hello(self) -> string { return \"woof\" }
+}
+";
+    // Cursor on `hello` in trait body — expects both impl-method body lines
+    // (line 6 for Cat, line 9 for Dog).
+    ShapeTest::new(code)
+        .at(pos(1, 7))
+        .expect_implementation_in_line_range(2, 6, 9);
+}
