@@ -165,7 +165,7 @@ fn test_lsp_nav_goto_def_type_reference() {
 
 #[test]
 fn test_lsp_nav_goto_def_trait_in_impl() {
-    let code = "trait Render {\n  draw(): any\n}\nimpl Render for Canvas {\n  method draw() { \"drawn\" }\n}\n";
+    let code = "trait Render {\n  fn draw(self) -> any;\n}\nimpl Render for Canvas {\n  method draw() { \"drawn\" }\n}\n";
     ShapeTest::new(code).at(pos(3, 5)).expect_definition();
 }
 
