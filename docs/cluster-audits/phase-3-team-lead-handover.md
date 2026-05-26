@@ -1,18 +1,22 @@
 # Team-lead handover — Shape v0.3 close-approach
 
-**Refreshed:** 2026-05-26 at main HEAD `116320ba` (post-WAVE-2 close;
+**Refreshed:** 2026-05-26 at main HEAD `ad585a34` (post-WAVE-3 close;
 awaiting supervisor + user ratify). v0.3 §0.A criteria A–J substantively
-met. v0.3.0 tag HELD pending Wave 3 + Wave 4 close-gate.
+met. v0.3.0 tag HELD pending Wave 4 close-gate (LSP-N E2E re-verify +
+manual VS Code + nvim pass) + supervisor + user re-authorize.
 
-**Wave 1 + Wave 2 cumulative effect:** shape-lsp --lib 22 failures →
-**0 failures** (762 passed; +15 new tests on top of Wave 1's 747).
-**9 of 10 §D real-editor regression flows closed** (only #7
-prepareCallHierarchy outstanding — audit's LSP-I dropped from
-supervisor's Wave 2 list; disposition question surfaced for ratify
-below). 11 sub-clusters total (LSP-E / N / G / D / F / J / B / C
-Wave 1 + LSP-K / LSP-I / LSP-H Wave 2) — all per-merge gates green
-between every checkpoint. **Wave 2 discipline: 0/3 git-stash incidents**
-(Wave 1 was 2/8); reinforced dispatch template effective.
+**Wave 1 + 2 + 3 cumulative effect:** shape-lsp --lib 22 failures →
+**0 failures** (764 passed). **All 10 §D real-editor regression flows
+closed** (incl. #7 prepareCallHierarchy via LSP-CH). 13 sub-clusters
+total (8 Wave 1 + 3 Wave 2 + 2 Wave 3) — per-merge gates green between
+every checkpoint. **Cumulative discipline: 2/13 git-stash incidents**
+(LSP-B + LSP-C Wave 1; Wave 2 and 3 = 0/5). Dispatch-template forbid-
+line + commit-first WIP alternative is load-bearing; per-worktree git
+alias retracted by supervisor 2026-05-26 (empirically no-op for
+built-ins). Editor adapters polished (VS Code + nvim per Decision 1);
+headless nvim 23/23 ServerCapabilities advertised + content responses
+on definition / references / signatureHelp / inlayHint / semanticTokens
+/ foldingRange / documentSymbol.
 
 ## Role
 
@@ -25,8 +29,8 @@ semantics. User relays between team-lead and supervisor.
 
 | | |
 |---|---|
-| Main HEAD | `116320ba` (post-LSP-H merge; Wave 2 substance complete) |
-| Smoke matrix s1–s5 | **5/5 VM == JIT** re-verified at every Wave 1+2 checkpoint + final at `116320ba` |
+| Main HEAD | `ad585a34` (post-LSP-L merge; Wave 3 substance complete) |
+| Smoke matrix s1–s5 | **5/5 VM == JIT** re-verified at every Wave 1+2+3 checkpoint + final at `ad585a34` |
 | verify-merge / check-no-dynamic / check-clean | 13/13 / exit 0 / exit 0 |
 | git-stash pre-commit hook | DEPLOYED (R8 W5+W6+W7 ZERO violations cumulative) |
 | conflict-marker pre-commit hook | DEPLOYED R8 W7 close (supervisor 2026-05-24 operational suggestion after the 5669a8ff incident); tested empirically (catches `+<<<<<<<` / `+=======` / `+>>>>>>>` in staged diff, exits 1 with recovery instructions) |
@@ -233,11 +237,26 @@ annotations, chain hints) stay default-ON per r-a convention.
   **Disposition question outstanding** for supervisor + user ratify
   (v0.3-gating Wave 3 add OR v0.4 deferral).
 
-- **Wave 3 (pending ratify + callHierarchy disposition):** LSP-L editor
-  adapters (VS Code + nvim minimum per Decision 1) + possibly
-  callHierarchy if v0.3-gating.
-- **Wave 4 — LSP-N CLOSE-GATE:** Manual real-editor exercise on
-  VS Code + nvim. shape-test E2E re-verifies §D flows.
+- **Wave 3 — CLOSED 2026-05-26 at HEAD `ad585a34`** (2 sub-clusters
+  merged with per-merge gates green; supervisor 2026-05-26 ratify of
+  callHierarchy v0.3-gating + form-A fixture cleanup + Wave 3 dispatch
+  authorization; awaiting Wave 3 ratify):
+
+  | Sub-cluster | Merge SHA | Substance |
+  |---|---|---|
+  | LSP-CH | `f18f333e` | callHierarchy (§D #7); dispatch arm gap closed — `prepare_call_hierarchy` / `incoming_calls` / `outgoing_calls` / `find_function_item` / `MethodCall` collectors extended beyond `Item::Function` / `ForeignFunction` to cover impl methods / struct-inline / extend / trait-default |
+  | LSP-L | `ad585a34` | VS Code + nvim adapter polish per Decision 1; 7 `shape.inlayHints.*` settings registered in package.json + nvim init_options; both READMEs refreshed; headless nvim empirical exercise 23/23 ServerCapabilities advertised + content responses on def/refs/sigHelp/inlayHint(+`[UniqueHeap approx]` storage-class hint when opt-in)/semanticTokens/folding/docSymbol |
+
+  Plus team-lead direct commit (`9279b1e5`): Form-A fixture cleanup in
+  `navigation::test_lsp_nav_goto_def_trait_in_impl` per supervisor
+  2026-05-26 ratify (1 file, 1-line edit).
+
+- **Wave 4 — LSP-N CLOSE-GATE (pending):** Manual real-editor exercise
+  on VS Code + nvim; shape-test E2E re-verify all §D regression flows
+  (currently the LSP-N `lsp_n_*` family with should_panic markers
+  removed where their fix waves landed). Manual VS Code exercise needs
+  human-in-the-loop (or headless equivalent via VS Code CLI if
+  available).
 
 ### LSP-N revised scope (sub-cluster, dispatchable Wave-1-parallel)
 
@@ -306,9 +325,10 @@ post-apply-grep discipline as §2.7.13 ratify.
 
 ## Trajectory
 
-**~2–4 supervisor sessions to v0.3.0 tag** (re-projected at Wave 2
-close; 9/10 §D regressions closed; only LSP-L editor adapters +
-LSP-N close-gate manual exercise + optional callHierarchy remain).
+**~1 supervisor session to v0.3.0 tag** (re-projected at Wave 3 close;
+10/10 §D regressions closed; substance work complete; only Wave 4
+close-gate manual editor pass + supervisor ratify + user authorize tag
+remain).
 
 ## Dispatch hygiene (binding — R7 W3 + R8 W4 hardening)
 
@@ -425,12 +445,12 @@ high-impact regression flows in-editor.
 
 ---
 
-*WAVE 2 CLOSE 2026-05-26 at HEAD `116320ba`: 3 sub-clusters merged
-(LSP-K + LSP-I + LSP-H) with per-merge gates green. shape-lsp --lib
-762 passed / 0 failed. 9/10 §D real-editor regression flows closed
-(only #7 prepareCallHierarchy remains — disposition question
-outstanding). Wave 2 discipline: 0/3 stash incidents (vs Wave 1 2/8);
-reinforced dispatch template effective; alias-hardening empirically
-no-op for builtins but harmless. Trajectory re-projected ~2-4
-sessions to v0.3.0 tag. Wave 3 dispatch awaits supervisor + user
-ratify + callHierarchy disposition.*
+*WAVE 3 CLOSE 2026-05-26 at HEAD `ad585a34`: 2 sub-clusters merged
+(LSP-CH + LSP-L) with per-merge gates green + 1 team-lead direct
+commit (Form-A fixture cleanup). shape-lsp --lib 764 passed / 0
+failed. **All 10 §D real-editor regression flows now closed.** Wave 3
+discipline: 0/2 stash incidents. Cumulative across Waves 1-3: 2/13
+incidents (15.4%; Wave 2-3 trend down). Trajectory re-projected
+~1 session to v0.3.0 tag — substance complete; only Wave 4 close-gate
+manual editor exercise + supervisor ratify + user authorize tag
+remain.*
