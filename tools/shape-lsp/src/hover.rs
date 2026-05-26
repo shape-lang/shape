@@ -443,24 +443,95 @@ fn get_annotation_hover(
         discovery.discover_from_imports(&program);
     }
 
-    let info = discovery.get(word)?;
-    let signature = if info.params.is_empty() {
-        format!("@{}", info.name)
-    } else {
-        format!("@{}({})", info.name, info.params.join(", "))
+    if let Some(info) = discovery.get(word) {
+        let signature = if info.params.is_empty() {
+            format!("@{}", info.name)
+        } else {
+            format!("@{}({})", info.name, info.params.join(", "))
+        };
+        let mut sections = vec![format!("**Annotation**: `{signature}`")];
+        if let Some(documentation) =
+            render_annotation_documentation(info, Some(&program), module_cache, current_file, None)
+        {
+            sections.push(documentation);
+        }
+        if let Some(source_file) = &info.source_file {
+            sections.push(format!("**Defined in:** `{}`", source_file.display()));
+        } else {
+            sections.push("**Defined in:** current file".to_string());
+        }
+        let content = sections.join("\n\n");
+
+        return Some(Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: content,
+            }),
+            range: None,
+        });
+    }
+
+    // Fallback: compiler-recognized field annotations that don't require a
+    // user-side `annotation foo { ... }` declaration (`@description`, `@range`,
+    // `@example` per CLAUDE.md "Type definitions" + RFC-001 §Annotations).
+    // Real editor flow surfaces these as bare doc-style annotations on type
+    // fields and on functions; LSP-J restores hover for them.
+    builtin_annotation_hover(word)
+}
+
+/// Documentation for compiler-recognized "field annotations" (`@description`,
+/// `@range`, `@example`) and other bare doc annotations that don't require an
+/// `annotation foo { ... }` declaration. Returns None for unknown names so the
+/// caller can fall through to other hover paths.
+fn builtin_annotation_hover(word: &str) -> Option<Hover> {
+    let (signature, body) = match word {
+        "description" => (
+            "@description(text: string)",
+            "**Field/item documentation annotation.**\n\n\
+             Attaches a human-readable description to a type field or item. \
+             Surfaced by tooling (LSP hover, generated docs) and available to \
+             comptime handlers via `target.fields[i].annotations`.\n\n\
+             ```shape\n\
+             type Point {\n    \
+                 @description(\"X coordinate in meters\")\n    \
+                 x: number,\n\
+             }\n\
+             ```",
+        ),
+        "range" => (
+            "@range(min, max)",
+            "**Value-range constraint annotation.**\n\n\
+             Attaches an inclusive `[min, max]` constraint to a numeric field. \
+             Used by witness-generation and contract-checking (RFC-002) and \
+             surfaced to comptime handlers.\n\n\
+             ```shape\n\
+             type Config {\n    \
+                 @range(0, 100)\n    \
+                 percent: int,\n\
+             }\n\
+             ```",
+        ),
+        "example" => (
+            "@example(value)",
+            "**Representative-value annotation.**\n\n\
+             Adds `value` to the seeded example vector for the annotated field. \
+             Multiple `@example` annotations stack. Used by witness-generation \
+             and surfaced to comptime handlers.\n\n\
+             ```shape\n\
+             type Trade {\n    \
+                 @example(\"AAPL\")\n    \
+                 @example(\"MSFT\")\n    \
+                 symbol: string,\n\
+             }\n\
+             ```",
+        ),
+        _ => return None,
     };
-    let mut sections = vec![format!("**Annotation**: `{signature}`")];
-    if let Some(documentation) =
-        render_annotation_documentation(info, Some(&program), module_cache, current_file, None)
-    {
-        sections.push(documentation);
-    }
-    if let Some(source_file) = &info.source_file {
-        sections.push(format!("**Defined in:** `{}`", source_file.display()));
-    } else {
-        sections.push("**Defined in:** current file".to_string());
-    }
-    let content = sections.join("\n\n");
+
+    let content = format!(
+        "**Annotation**: `{signature}`\n\n{body}\n\n\
+         **Defined in:** compiler (built-in field annotation)"
+    );
 
     Some(Hover {
         contents: HoverContents::Markup(MarkupContent {
@@ -959,6 +1030,17 @@ fn get_comptime_block_hover(text: &str, position: Position) -> Option<Hover> {
 
 /// Get hover for comptime builtin functions.
 fn get_comptime_builtin_hover(word: &str) -> Option<Hover> {
+    // B9 (audit `v0.3-lsp-parity-audit.md` §B B9 row): suppress hover for
+    // `type_info`. The bare-name builtin is reachable via metadata for
+    // compiler-side bookkeeping, but the LSP hover surface treats the
+    // comptime-builtin set as the four canonical Comptime entries
+    // (`implements`, `warning`, `error`, `build_config`). `type_info` is
+    // exposed via `<expr>.type()` and `T.type()` plus `type_info(T).fields`
+    // inside comptime; surface-and-stop the bare-name hover so editors don't
+    // imply a stable bare-name surface in user code.
+    if word == "type_info" {
+        return None;
+    }
     let function = unified_metadata()
         .all_functions()
         .into_iter()
