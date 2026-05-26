@@ -1218,8 +1218,12 @@ fn get_impl_method_hover(
                         .collect();
                     let return_type_str =
                         type_annotation_to_string(return_type).unwrap_or_else(|| "_".to_string());
-                    let signature =
-                        format!("{}({}): {}", name, param_names.join(", "), return_type_str);
+                    let signature = format!(
+                        "method {}({}) -> {}",
+                        name,
+                        param_names.join(", "),
+                        return_type_str
+                    );
                     let mut content = format!(
                         "**Trait Method**: `{}`\n\n**Trait:** `{}`\n**Target:** `{}`\n\n**Signature:**\n```shape\n{}\n```",
                         name, trait_name, target_type, signature
@@ -1255,7 +1259,7 @@ fn get_impl_method_hover(
                         .unwrap_or_else(|| "_".to_string());
 
                     let signature = format!(
-                        "{}({}): {}",
+                        "method {}({}) -> {}",
                         method_def.name,
                         param_names.join(", "),
                         return_type_str
@@ -1315,7 +1319,7 @@ fn get_impl_method_hover(
             .unwrap_or_else(|| "unknown".to_string());
 
         let signature = format!(
-            "{}({}): {}",
+            "method {}({}) -> {}",
             method_def.name,
             param_names.join(", "),
             return_type_str
@@ -1399,7 +1403,7 @@ fn get_extend_method_hover(
         .or_else(|| infer_block_return_type_via_engine(&method.body))
         .unwrap_or_else(|| "unknown".to_string());
     let signature = format!(
-        "{}({}): {}",
+        "method {}({}) -> {}",
         method.name,
         param_names.join(", "),
         return_type
@@ -1780,7 +1784,7 @@ fn trait_member_signatures(trait_def: &shape_ast::ast::TraitDef) -> Vec<String> 
                 let return_type_str =
                     type_annotation_to_string(return_type).unwrap_or_else(|| "unknown".to_string());
                 signatures.push(format!(
-                    "{}({}): {}",
+                    "method {}({}) -> {}",
                     name,
                     param_names.join(", "),
                     return_type_str
@@ -1798,7 +1802,7 @@ fn trait_member_signatures(trait_def: &shape_ast::ast::TraitDef) -> Vec<String> 
                     .and_then(type_annotation_to_string)
                     .unwrap_or_else(|| "unknown".to_string());
                 signatures.push(format!(
-                    "{}({}): {}",
+                    "method {}({}) -> {}",
                     method_def.name,
                     param_names.join(", "),
                     return_type_str

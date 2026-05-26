@@ -1673,7 +1673,7 @@ pub fn extract_type_methods(program: &Program) -> HashMap<String, Vec<MethodComp
                             .map(|p| p.name.clone().unwrap_or_else(|| "_".to_string()))
                             .collect();
                         let sig = format!(
-                            "{}({}): {}",
+                            "method {}({}) -> {}",
                             name,
                             param_names.join(", "),
                             type_annotation_to_string(return_type)
