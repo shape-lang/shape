@@ -1,13 +1,14 @@
 # Team-lead handover — Shape v0.3 close-approach
 
-**Refreshed:** 2026-05-26 at main HEAD `ad8c5185` (post-PHASE-LSP-A close
-+ supervisor ratify). v0.3 §0.A criteria A–J substantively met; v0.3.0
-tag HELD pending LSP-parity-with-rust-analyzer workstream. LSP-A audit
-ratified by supervisor; Wave 1 dispatch authorized; LSP-N scope revised
-to **shape-test E2E infrastructure + manual editor close-gate + audit-
-harness retirement** per user 2026-05-26 directive ("fluent test api in
-the shape-test project is used for end-to-end tests on LSP"). Decision 2
-(BindingStorageClass inlay hints) user-pending.
+**Refreshed:** 2026-05-26 at main HEAD `a572185b` (post-WAVE-1 close;
+awaiting supervisor + user ratify). v0.3 §0.A criteria A–J substantively
+met. v0.3.0 tag HELD pending Wave 2 + Wave 3 + Wave 4 close-gate.
+
+**Wave 1 cumulative effect:** shape-lsp --lib 22 failures → **0 failures**
+(747 passed); 8/10 §D real-editor regression flows closed. All 8
+sub-clusters (LSP-E / N / G / D / F / J / B / C) merged + per-merge
+gates green. 2 discipline incidents (git-stash binding breaches by
+LSP-B + LSP-C agents; both reversed; pre-commit hook gap surfaced).
 
 ## Role
 
@@ -20,8 +21,8 @@ semantics. User relays between team-lead and supervisor.
 
 | | |
 |---|---|
-| Main HEAD | `70507224` (post-R8 W9 close-doc handover refresh; substance HEAD = `64a2d8e1`) |
-| Smoke matrix s1–s5 | **5/5 VM == JIT** (canonical (ii) F' release-binary harness; re-verified at HEAD `70507224` at LSP-parity session entry) |
+| Main HEAD | `a572185b` (post-LSP-C merge; Wave 1 substance complete) |
+| Smoke matrix s1–s5 | **5/5 VM == JIT** re-verified at every Wave 1 checkpoint + final at `a572185b` |
 | verify-merge / check-no-dynamic / check-clean | 13/13 / exit 0 / exit 0 |
 | git-stash pre-commit hook | DEPLOYED (R8 W5+W6+W7 ZERO violations cumulative) |
 | conflict-marker pre-commit hook | DEPLOYED R8 W7 close (supervisor 2026-05-24 operational suggestion after the 5669a8ff incident); tested empirically (catches `+<<<<<<<` / `+=======` / `+>>>>>>>` in staged diff, exits 1 with recovery instructions) |
@@ -196,23 +197,27 @@ annotations, chain hints) stay default-ON per r-a convention.
 
 ### Wave structure (ratified)
 
-- **Wave 1 (parallel):** LSP-B / LSP-C / LSP-D / LSP-E / LSP-F / LSP-G
-  / LSP-J. Per audit §E, no inter-dependencies. **Team-lead dispatch
-  refinement:** LSP-E (Form-A fixture + 8 render-site migration) goes
-  SERIAL FIRST — it touches hover.rs / type_inference.rs / multiple
-  fixture files that Wave-1-rest co-edit. ~1 session bounded mechanical
-  migration; unblocks test signal across Wave-1-rest. LSP-N runs
-  PARALLEL with LSP-E from the start (zero source-tree overlap).
-- **Wave 1-rest (parallel after LSP-E merges):** LSP-B / LSP-C / LSP-D
-  / LSP-F / LSP-G / LSP-J.
-- **Wave 2:** LSP-H (deps LSP-B; includes BindingStorageClass opt-in
-  setting per Decision 2) + LSP-I + LSP-K (LSP-I may bundle with
-  LSP-D if root cause overlaps).
-- **Wave 3:** LSP-L editor adapters (VS Code + nvim minimum per
-  Decision 1).
+- **Wave 1 — CLOSED 2026-05-26 at HEAD `a572185b`** (8 sub-clusters
+  merged with per-merge gates green; awaiting supervisor + user ratify):
+
+  | Sub-cluster | Merge SHA | Substance |
+  |---|---|---|
+  | LSP-E | `6a5749ce` | 8 render sites + 11 fixture updates Form-A → Form-B |
+  | LSP-N | `62090cb5` | shape-test fluent API extensions + 10 §D E2E + lockstep doc |
+  | LSP-G | `29631ed3` | Code-keyed quickfix + extract-fn/extract-var (Decision 4) |
+  | LSP-D | `1c885e42` | documentSymbol Trait/StructType/Impl arms + span-derived ranges |
+  | LSP-F | `837a32b0` | signatureHelp user-method dispatch restore |
+  | LSP-J | `42cac9af` | Annotation hover restore + B9 type_info filter |
+  | LSP-B | `d536d155` | Reference-mode classifier + B14 (impl-aware renderer + alias norm) |
+  | LSP-C | `a572185b` | Stdlib type-methods OnceLock cache → method-completion restored |
+
+- **Wave 2 (pending ratify):** LSP-H (deps LSP-B; CLOSED; includes
+  BindingStorageClass opt-in setting per Decision 2) + LSP-I
+  (callHierarchy) + LSP-K (trait-method → impl-method jump).
+- **Wave 3 (pending ratify):** LSP-L editor adapters (VS Code + nvim
+  minimum per Decision 1).
 - **Wave 4 — LSP-N CLOSE-GATE:** Manual real-editor exercise on
-  VS Code + nvim. Pre-condition: shape-test E2E suite (sub-cluster
-  LSP-N below) covers the 10 §D regression flows.
+  VS Code + nvim. shape-test E2E re-verifies §D flows.
 
 ### LSP-N revised scope (sub-cluster, dispatchable Wave-1-parallel)
 
@@ -281,8 +286,10 @@ post-apply-grep discipline as §2.7.13 ratify.
 
 ## Trajectory
 
-**~5–10 supervisor sessions to v0.3.0 tag** (LSP-parity scope per LSP-A
-audit + supervisor 2026-05-26 ratify). Re-project at Wave 1 close.
+**~3–6 supervisor sessions to v0.3.0 tag** (re-projected at Wave 1
+close; Wave 1 closed faster than the 5–10-session LSP-A projection due
+to root-cause clustering — 8 §D real-editor regression flows closed in
+1 wave; 22→0 shape-lsp test deltas).
 
 ## Dispatch hygiene (binding — R7 W3 + R8 W4 hardening)
 
@@ -304,7 +311,14 @@ pre-commit-hook enforcement):**
 
 Mechanical enforcement: pre-commit hook at `.git/hooks/pre-commit` rejects
 commits while `git stash list` is non-empty (shared across all worktrees).
-**R8 W5 ZERO violations** — hook is working.
+**Hook gap surfaced 2026-05-26 R8 W10 Wave 1**: hook fires at commit-time
+ONLY, not on every `git stash` op. LSP-B + LSP-C agents each used
+`git stash push` + immediate `git stash pop` for transient work; pre-
+commit hook found stash stack EMPTY at commit time and allowed the
+commit. Both agents self-surfaced per Q3; no committed state lost.
+Hardening pending supervisor authorization — likely shell wrapper or
+git alias that rejects `stash` invocation outright (git has no native
+`pre-stash` hook).
 
 **Audit-day exception:** read-only audits (no source changes) run in the
 main repo without worktrees provided each writes only its own audit doc and
@@ -379,11 +393,10 @@ high-impact regression flows in-editor.
 
 ---
 
-*LSP-A POST-RATIFY 2026-05-26 at HEAD `ad8c5185`: supervisor ratified
-4-wave / 13-sub-cluster partition; all 5 user-decision items
-dispositioned (BindingStorageClass opt-in default-OFF v0.3-gating;
-formatter v0.4; VS Code + nvim test matrix; refactor-assists scope;
-magic-completions per LSP-C capacity). LSP-N scope revised to
-shape-test E2E infrastructure + manual editor close-gate + audit-
-harness retirement. Wave 1 dispatch authorized: LSP-E serial first,
-LSP-N parallel, then Wave-1-rest 6-way parallel.*
+*WAVE 1 CLOSE 2026-05-26 at HEAD `a572185b`: 8 sub-clusters merged
+with per-merge gates green. shape-lsp --lib 22 failures → 0 (747
+passed). 8/10 §D real-editor regression flows closed (only #7
+prepareCallHierarchy remains for Wave 2 LSP-I). Trajectory re-projected
+~3-6 sessions to v0.3.0 tag. 2 discipline incidents (git-stash binding
+breaches by LSP-B + LSP-C; both reversed; hook gap surfaced for
+hardening). Wave 2 dispatch awaits supervisor + user ratify.*
