@@ -1,14 +1,13 @@
 # Team-lead handover — Shape v0.3 close-approach
 
-**Refreshed:** 2026-05-25 at main HEAD `70507224` (post-R8-W9 close-doc
-refresh). v0.3 §0.A criteria A–J all substantively met; supervisor
-close-ratified at HEAD `70507224`. **v0.3.0 tag HELD** per user
-2026-05-25 directive: shape-lsp at HEAD shows 22 test failures vs 14
-baseline (+8 new) and the LSP's empirical functional state in a real
-editor has not been verified. **NEW v0.3 workstream:** LSP-parity-with-
-rust-analyzer ("inline hints top notch + all other features en-par or
-better than rust-analyzer"). Tag does NOT land until LSP-parity closes
-and user re-authorizes.
+**Refreshed:** 2026-05-26 at main HEAD `ad8c5185` (post-PHASE-LSP-A close
++ supervisor ratify). v0.3 §0.A criteria A–J substantively met; v0.3.0
+tag HELD pending LSP-parity-with-rust-analyzer workstream. LSP-A audit
+ratified by supervisor; Wave 1 dispatch authorized; LSP-N scope revised
+to **shape-test E2E infrastructure + manual editor close-gate + audit-
+harness retirement** per user 2026-05-26 directive ("fluent test api in
+the shape-test project is used for end-to-end tests on LSP"). Decision 2
+(BindingStorageClass inlay hints) user-pending.
 
 ## Role
 
@@ -151,55 +150,115 @@ Cluster-A-JIT + R8 W9 B1-narrowing). Slice-agent (c)-verify self-
 correction layer matured (4 (c)→(b) self-corrections at audit time
 during R8 W9).
 
-## Remaining v0.3 scope — NEW LSP-PARITY WORKSTREAM (2026-05-25)
+## Remaining v0.3 scope — LSP-PARITY WORKSTREAM (post-LSP-A ratify)
 
 User 2026-05-25 directive (binding): **inline hints "top notch"; all
 other LSP features "en-par or better than rust-analyzer"; functional in
 a real editor (not just unit-test-green).** v0.3 §0.A criteria A–J
-substance-met but the tag is held pending this addition.
+substance-met; tag held pending this workstream.
 
-Honest sizing: **~5–10 sessions** to a defensible "en-par" position +
-tag. Audit-day refines.
+User 2026-05-26 directive (binding): **"fluent test api in the
+shape-test project is used for end-to-end tests on LSP."** Standing
+rule: every LSP change adds/updates its E2E test in shape-test
+(lockstep, mirrors language test-coverage). Manual editor exercise is
+the close-gate per release.
 
-### Phase structure (proposal — LSP-A audit refines)
+### Audit + supervisor ratify (HEAD `ad8c5185`)
 
-- **PHASE LSP-A — AUDIT-DAY.** Single agent, audit-only (no source
-  changes). Output: `docs/cluster-audits/v0.3-lsp-parity-audit.md`.
-  Sections §A–G:
-  - §A current Shape-LSP feature surface (per-feature grep + behavior)
-  - §B 22 failing-test per-test characterization (fixture-drift vs
-    functional regression; no bulk fixture updates)
-  - §C rust-analyzer feature-set survey + per-feature gap
-    (PARITY / GAP-MINOR / GAP-MEDIUM / GAP-MAJOR / NOT-APPLICABLE)
-  - §D empirical functional state in a real editor (VS Code OR neovim
-    adapter; hover / inlay / completion / diagnostics / signature-help
-    / go-to / refs / symbols / code-actions / semantic-tokens / codelens
-    / rename); transcripts/screenshots
-  - §E sub-cluster partition into closure-waves
-  - §F v0.3-vs-v0.4 deferral line per feature (user-decision items
-    surfaced)
-  - §G 22-test routing per-test → fix vs update-fixture-in-lockstep
-- **PHASES LSP-B+ — SUB-CLUSTER DISPATCH WAVES** per audit §E
-  partition. Parallel where territory non-overlap; serial where not.
-- **PHASE LSP-CLOSE — EMPIRICAL VERIFICATION + close-relay.**
-  Re-run audit §D in-editor against post-fix LSP across the test
-  matrix (VS Code + per user direction).
+- LSP-A audit at `docs/cluster-audits/v0.3-lsp-parity-audit.md` (656 lines).
+- Supervisor RATIFIED the 4-wave / 13-sub-cluster partition.
+- 5 user-decision items DISPOSITIONED:
+  1. **Test matrix:** VS Code + neovim minimum. Helix/Zed → v0.4
+     ecosystem-expansion. shape-test E2E is editor-agnostic.
+  2. **BindingStorageClass inlay hints:** v0.3-GATING **opt-in default-OFF**
+     LSP setting `shape.inlayHints.bindingStorageClass.enable: boolean`
+     (single toggle; per-variant granularity v0.4 if demand surfaces).
+     Folds into LSP-H scope.
+  3. **Formatter depth (LSP-M):** v0.4 with formatter-design pass
+     (current shallow formatter is non-destructive correct).
+  4. **Refactor-assists:** v0.3 = extract-fn + extract-var (LSP-G+);
+     v0.4 = convert-* family. Team-lead checks 1-2 Shape-specific
+     assists (e.g. "extract typed constant" from Cluster-A const work)
+     and surfaces if any belong in v0.3.
+  5. **Magic completions (postfix `.if`/`.match`):** v0.3-polish if
+     LSP-C capacity; v0.4 otherwise (team-lead call at LSP-C dispatch).
+
+### Standing pattern (binding 2026-05-26)
+
+**Shape-unique inlay hints ship opt-in default-OFF** under
+`shape.inlayHints.*`. Default LSP experience stays clean; users opt
+into Shape-specific visualizations. Apply going forward to comptime-
+field hints, capability-tag hints, async-scope hints, ref-mode hints
+that go beyond r-a's parameter/chain types, etc.
+
+**Rust-analyzer-parallel hint types** (parameter names, type
+annotations, chain hints) stay default-ON per r-a convention.
+
+### Wave structure (ratified)
+
+- **Wave 1 (parallel):** LSP-B / LSP-C / LSP-D / LSP-E / LSP-F / LSP-G
+  / LSP-J. Per audit §E, no inter-dependencies. **Team-lead dispatch
+  refinement:** LSP-E (Form-A fixture + 8 render-site migration) goes
+  SERIAL FIRST — it touches hover.rs / type_inference.rs / multiple
+  fixture files that Wave-1-rest co-edit. ~1 session bounded mechanical
+  migration; unblocks test signal across Wave-1-rest. LSP-N runs
+  PARALLEL with LSP-E from the start (zero source-tree overlap).
+- **Wave 1-rest (parallel after LSP-E merges):** LSP-B / LSP-C / LSP-D
+  / LSP-F / LSP-G / LSP-J.
+- **Wave 2:** LSP-H (deps LSP-B; includes BindingStorageClass opt-in
+  setting per Decision 2) + LSP-I + LSP-K (LSP-I may bundle with
+  LSP-D if root cause overlaps).
+- **Wave 3:** LSP-L editor adapters (VS Code + nvim minimum per
+  Decision 1).
+- **Wave 4 — LSP-N CLOSE-GATE:** Manual real-editor exercise on
+  VS Code + nvim. Pre-condition: shape-test E2E suite (sub-cluster
+  LSP-N below) covers the 10 §D regression flows.
+
+### LSP-N revised scope (sub-cluster, dispatchable Wave-1-parallel)
+
+Per user 2026-05-26 directive. Empirical-re-verify (Wave 4 close-gate)
+is the manual editor exercise step; the *sub-cluster work* LSP-N owns
+in Wave 1 is:
+
+1. **Extend the shape-test fluent API** (`tools/shape-test/src/shape_test.rs`,
+   already 1098 LoC + 17 tests/lsp/*.rs modules @ 4432 LoC) with the
+   gaps the §D regression flows need:
+   - `expect_call_hierarchy_prepare_ok()` / `_returns_empty()` (#7 §D)
+   - fine-grained `expect_document_symbol_named(...)` /
+     `expect_document_symbol_kind_count(...)` (#3 §D)
+   - `expect_code_actions_min(n)` (#6 §D)
+2. **Add E2E tests** in `tools/shape-test/tests/lsp/*.rs` covering the
+   10 §D regression flows + standard LSP flows the fluent suite
+   currently lacks.
+3. **Going-forward standing discipline** (handover-baked): any LSP
+   change adds/updates its E2E test in shape-test in lockstep with
+   the language change. Same pattern as language test-coverage.
+4. **Retire the JSON-RPC audit-day harness** (ephemeral, not committed)
+   when the shape-test E2E suite covers equivalent flows.
 
 ### LSP-specific discipline (additive to standing bindings)
 
-- **Test fixtures NEVER bulk-updated** to turn red green. Each red is
-  investigated per-test.
-- **Functional verification in a real editor is not optional.** Unit-
-  test-green ≠ LSP works.
-- **Rust-analyzer parity is directional**, not literal — audit
-  identifies what matters; user ratifies per-feature.
+- **Test fixtures NEVER bulk-updated** to turn red green. Per-test.
+- **Functional verification in a real editor** is the close-gate; not
+  optional. Unit-test-green ≠ LSP works.
+- **Rust-analyzer parity is directional**, not literal.
+- **LSP E2E lockstep:** every LSP source change adds/updates its E2E
+  test in `tools/shape-test/tests/lsp/`.
+- **Shape-unique inlay hints opt-in default-OFF** under
+  `shape.inlayHints.*` (standing pattern above).
 
 ### LSP-specific surface triggers (additive to standing 4)
 
 - LSP-A audit close → surface for supervisor + user ratify of per-
-  feature v0.3-vs-v0.4 line.
+  feature v0.3-vs-v0.4 line. **RATIFIED 2026-05-26.**
 - Empirical-in-editor finding that's a functional regression →
   v0.3-gating fix dispatch.
+
+### Catch-pre-tag (standing close-gate addition 2026-05-26)
+
+Final pre-tag close-gate is the LSP manual real-editor exercise on
+the ratified test matrix (VS Code + nvim). Folded into the existing
+close-gates list at end of doc.
 
 ### Parked items (NOT for this phase)
 
@@ -222,10 +281,8 @@ post-apply-grep discipline as §2.7.13 ratify.
 
 ## Trajectory
 
-**~5–10 sessions to v0.3.0 tag** (LSP-parity scope addition 2026-05-25).
-A–J substance was effectively-0 at HEAD `70507224`; the LSP-parity
-binding extends the cycle. LSP-A audit-day produces a firmer estimate
-+ partition; re-project at LSP-A close.
+**~5–10 supervisor sessions to v0.3.0 tag** (LSP-parity scope per LSP-A
+audit + supervisor 2026-05-26 ratify). Re-project at Wave 1 close.
 
 ## Dispatch hygiene (binding — R7 W3 + R8 W4 hardening)
 
@@ -266,13 +323,19 @@ Fixtures `tests/smokes/s{1..5}.shape`; expected s1 `4950` / s2 `30` / s3 `x`
 
 ## Pending the v0.3 tag
 
-1. A–F land + smoke 5/5 preserved at every checkpoint.
-2. G.1 Step 1 (a)/(b)/(c) groups close (R8 W6 in flight).
-3. G.2 Step 2 closes; any new (b)-class findings folded.
-4. ADR §2.7.4 addendum text ratifies.
-5. Relay close-evidence to supervisor; supervisor ratifies.
-6. **User** authorizes the `v0.3.0` tag.
-7. Team-lead lands the tag at the authorized commit.
+1. **LSP-parity Wave 1 lands** (LSP-E serial first; rest parallel
+   after; LSP-N parallel from start).
+2. **LSP-parity Wave 2 lands** (LSP-H w/ BindingStorageClass opt-in;
+   LSP-I; LSP-K).
+3. **LSP-parity Wave 3 lands** (LSP-L editor adapters: VS Code + nvim).
+4. **LSP-N CLOSE-GATE manual editor exercise** on VS Code + nvim;
+   shape-test E2E covers 10 §D regression flows; audit-day JSON-RPC
+   harness retired.
+5. Smoke 5/5 preserved at every checkpoint.
+6. ADR §2.7.4 addendum text ratifies (carry-over from R8 W7).
+7. Relay close-evidence to supervisor; supervisor ratifies.
+8. **User** authorizes the `v0.3.0` tag.
+9. Team-lead lands the tag at the authorized commit.
 
 ## Bindings — refuse on sight
 
@@ -306,14 +369,21 @@ Multi-session rotation expected. Refresh this doc at every rotation.
 
 `just check-clean` exit 0 · `verify-merge.sh` 13/13 · `check-no-dynamic.sh`
 exit 0 · smoke s1–s5 5/5 VM == JIT (canonical (ii) F' release-binary
-harness) · git-stash pre-commit hook ZERO violations preserved · AGENTS.md
-row appended; no Co-Authored-By trailer.
+harness) · git-stash + conflict-marker pre-commit hooks ZERO violations
+preserved · AGENTS.md row appended; no Co-Authored-By trailer.
+
+**Catch-pre-tag (standing 2026-05-26):** LSP manual editor exercise on
+ratified test matrix (VS Code + nvim) is the FINAL pre-tag close-gate.
+Tag does NOT land until the manual exercise re-verifies the 10 §D
+high-impact regression flows in-editor.
 
 ---
 
-*LSP-PARITY-SCOPE ENTRY 2026-05-25 at HEAD `70507224`: v0.3 §0.A
-substance A–J ratified by supervisor; v0.3.0 tag HELD per user
-2026-05-25 directive on LSP "en-par with rust-analyzer + inline hints
-top notch + functional in a real editor". Trajectory re-projected
-~5–10 sessions to tag. PHASE LSP-A audit-day dispatched as first
-action; all other dispatch held until audit lands.*
+*LSP-A POST-RATIFY 2026-05-26 at HEAD `ad8c5185`: supervisor ratified
+4-wave / 13-sub-cluster partition; all 5 user-decision items
+dispositioned (BindingStorageClass opt-in default-OFF v0.3-gating;
+formatter v0.4; VS Code + nvim test matrix; refactor-assists scope;
+magic-completions per LSP-C capacity). LSP-N scope revised to
+shape-test E2E infrastructure + manual editor close-gate + audit-
+harness retirement. Wave 1 dispatch authorized: LSP-E serial first,
+LSP-N parallel, then Wave-1-rest 6-way parallel.*
