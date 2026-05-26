@@ -1,6 +1,6 @@
 [package]
 name = "shape-viz-core"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 description = "Core charting library with GPU-accelerated rendering for time series visualization"
 license = "MIT OR Apache-2.0"
