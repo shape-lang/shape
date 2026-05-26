@@ -3,12 +3,68 @@
 //! Supports "prepare", "incoming calls", and "outgoing calls" for function symbols.
 
 use crate::util::{get_word_at_position, offset_to_line_col, span_to_range};
-use shape_ast::ast::{BlockItem, Expr, Item, Program, Statement};
+use shape_ast::ast::{BlockItem, Expr, Item, MethodDef, Program, Span, Statement, TraitMember};
 use shape_ast::parser::parse_program;
 use tower_lsp_server::ls_types::{
     CallHierarchyIncomingCall, CallHierarchyItem, CallHierarchyOutgoingCall, Position, Range,
     SymbolKind, Uri,
 };
+
+/// Compute a best-effort name span for a `MethodDef`.
+///
+/// `MethodDef` does not carry a dedicated `name_span` (unlike `FunctionDef`),
+/// so we scan the source slice covered by `method.span` for the first
+/// occurrence of `method.name` as the identifier. The grammar guarantees
+/// methods start with `[async] (method|fn) <name>`, so the first hit after
+/// the keyword prefix is the name token.
+///
+/// Falls back to the full method span if the name cannot be located (e.g.
+/// resilient-parse fragment with a dummy span).
+fn method_name_span(method: &MethodDef, text: &str) -> Span {
+    if method.span.is_dummy() {
+        return method.span;
+    }
+    let start = method.span.start;
+    let end = method.span.end.min(text.len());
+    if start >= end {
+        return method.span;
+    }
+    let slice = &text[start..end];
+    if let Some(offset) = slice.find(method.name.as_str()) {
+        let name_start = start + offset;
+        let name_end = name_start + method.name.len();
+        Span {
+            start: name_start,
+            end: name_end,
+        }
+    } else {
+        method.span
+    }
+}
+
+/// Build a `CallHierarchyItem` for an impl/struct/extend/trait-default method.
+fn method_item(method: &MethodDef, span: &Span, text: &str, uri: &Uri) -> CallHierarchyItem {
+    let range = span_to_range(text, span);
+    let sel_range = span_to_range(text, &method_name_span(method, text));
+    CallHierarchyItem {
+        name: method.name.clone(),
+        kind: SymbolKind::METHOD,
+        tags: None,
+        detail: Some(format!(
+            "({})",
+            method
+                .params
+                .iter()
+                .flat_map(|p| p.get_identifiers())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+        uri: uri.clone(),
+        range,
+        selection_range: sel_range,
+        data: None,
+    }
+}
 
 /// Parse with resilient fallback for broken code.
 fn parse_resilient(text: &str) -> Option<Program> {
@@ -81,6 +137,37 @@ pub fn prepare_call_hierarchy(
                     data: None,
                 }]);
             }
+            // §D regression flow #7 (impl-method leg): methods inside
+            // `impl Type { ... }` / `impl Trait for Type { ... }` are first-
+            // class call-hierarchy targets too. Match on method name when the
+            // cursor word is identical.
+            Item::Impl(impl_block, _) => {
+                if let Some(method) = impl_block.methods.iter().find(|m| m.name == word) {
+                    return Some(vec![method_item(method, &method.span, text, uri)]);
+                }
+            }
+            // Inline methods inside `type Foo { ... fn bar(self) {} ... }`.
+            Item::StructType(struct_def, _) => {
+                if let Some(method) = struct_def.methods.iter().find(|m| m.name == word) {
+                    return Some(vec![method_item(method, &method.span, text, uri)]);
+                }
+            }
+            // Methods added via `extend Type { fn bar() { ... } }`.
+            Item::Extend(extend_stmt, _) => {
+                if let Some(method) = extend_stmt.methods.iter().find(|m| m.name == word) {
+                    return Some(vec![method_item(method, &method.span, text, uri)]);
+                }
+            }
+            // Default methods inside a trait definition.
+            Item::Trait(trait_def, _) => {
+                for member in &trait_def.members {
+                    if let TraitMember::Default(method) = member {
+                        if method.name == word {
+                            return Some(vec![method_item(method, &method.span, text, uri)]);
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -104,28 +191,86 @@ pub fn incoming_calls(
     let mut results = Vec::new();
 
     for ast_item in &program.items {
-        if let Item::Function(func, func_span) = ast_item {
-            // Don't report self-references as incoming (unless recursive)
-            let mut call_ranges = Vec::new();
-            collect_call_sites_in_stmts(&func.body, target_name, text, &mut call_ranges);
+        match ast_item {
+            Item::Function(func, func_span) => {
+                // Don't report self-references as incoming (unless recursive)
+                let mut call_ranges = Vec::new();
+                collect_call_sites_in_stmts(&func.body, target_name, text, &mut call_ranges);
 
-            if !call_ranges.is_empty() {
-                let from_range = span_to_range(text, func_span);
-                let from_sel = span_to_range(text, &func.name_span);
-                results.push(CallHierarchyIncomingCall {
-                    from: CallHierarchyItem {
-                        name: func.name.clone(),
-                        kind: SymbolKind::FUNCTION,
-                        tags: None,
-                        detail: None,
-                        uri: uri.clone(),
-                        range: from_range,
-                        selection_range: from_sel,
-                        data: None,
-                    },
-                    from_ranges: call_ranges,
-                });
+                if !call_ranges.is_empty() {
+                    let from_range = span_to_range(text, func_span);
+                    let from_sel = span_to_range(text, &func.name_span);
+                    results.push(CallHierarchyIncomingCall {
+                        from: CallHierarchyItem {
+                            name: func.name.clone(),
+                            kind: SymbolKind::FUNCTION,
+                            tags: None,
+                            detail: None,
+                            uri: uri.clone(),
+                            range: from_range,
+                            selection_range: from_sel,
+                            data: None,
+                        },
+                        from_ranges: call_ranges,
+                    });
+                }
             }
+            Item::Impl(impl_block, _) => {
+                for method in &impl_block.methods {
+                    let mut call_ranges = Vec::new();
+                    collect_call_sites_in_stmts(&method.body, target_name, text, &mut call_ranges);
+                    if !call_ranges.is_empty() {
+                        results.push(CallHierarchyIncomingCall {
+                            from: method_item(method, &method.span, text, uri),
+                            from_ranges: call_ranges,
+                        });
+                    }
+                }
+            }
+            Item::StructType(struct_def, _) => {
+                for method in &struct_def.methods {
+                    let mut call_ranges = Vec::new();
+                    collect_call_sites_in_stmts(&method.body, target_name, text, &mut call_ranges);
+                    if !call_ranges.is_empty() {
+                        results.push(CallHierarchyIncomingCall {
+                            from: method_item(method, &method.span, text, uri),
+                            from_ranges: call_ranges,
+                        });
+                    }
+                }
+            }
+            Item::Extend(extend_stmt, _) => {
+                for method in &extend_stmt.methods {
+                    let mut call_ranges = Vec::new();
+                    collect_call_sites_in_stmts(&method.body, target_name, text, &mut call_ranges);
+                    if !call_ranges.is_empty() {
+                        results.push(CallHierarchyIncomingCall {
+                            from: method_item(method, &method.span, text, uri),
+                            from_ranges: call_ranges,
+                        });
+                    }
+                }
+            }
+            Item::Trait(trait_def, _) => {
+                for member in &trait_def.members {
+                    if let TraitMember::Default(method) = member {
+                        let mut call_ranges = Vec::new();
+                        collect_call_sites_in_stmts(
+                            &method.body,
+                            target_name,
+                            text,
+                            &mut call_ranges,
+                        );
+                        if !call_ranges.is_empty() {
+                            results.push(CallHierarchyIncomingCall {
+                                from: method_item(method, &method.span, text, uri),
+                                from_ranges: call_ranges,
+                            });
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -198,31 +343,59 @@ pub fn outgoing_calls(
         None => return vec![],
     };
 
-    // Find the function matching the item
+    // Helper: convert a method body into a results vec.
+    let materialize = |body: &[Statement]| -> Vec<CallHierarchyOutgoingCall> {
+        let mut calls: Vec<(String, Range)> = Vec::new();
+        collect_outgoing_calls_in_stmts(body, text, &mut calls);
+
+        let mut grouped: std::collections::HashMap<String, Vec<Range>> =
+            std::collections::HashMap::new();
+        for (name, range) in calls {
+            grouped.entry(name).or_default().push(range);
+        }
+
+        let mut results = Vec::new();
+        for (callee_name, from_ranges) in grouped {
+            let callee_item = find_function_item(&program, &callee_name, uri, text);
+            results.push(CallHierarchyOutgoingCall {
+                to: callee_item,
+                from_ranges,
+            });
+        }
+        results
+    };
+
+    // Find the function or method matching the item.
     for ast_item in &program.items {
-        if let Item::Function(func, _) = ast_item {
-            if func.name == item.name {
-                let mut calls: Vec<(String, Range)> = Vec::new();
-                collect_outgoing_calls_in_stmts(&func.body, text, &mut calls);
-
-                // Group by callee name
-                let mut grouped: std::collections::HashMap<String, Vec<Range>> =
-                    std::collections::HashMap::new();
-                for (name, range) in calls {
-                    grouped.entry(name).or_default().push(range);
-                }
-
-                let mut results = Vec::new();
-                for (callee_name, from_ranges) in grouped {
-                    // Try to find the callee function definition for a proper item
-                    let callee_item = find_function_item(&program, &callee_name, uri, text);
-                    results.push(CallHierarchyOutgoingCall {
-                        to: callee_item,
-                        from_ranges,
-                    });
-                }
-                return results;
+        match ast_item {
+            Item::Function(func, _) if func.name == item.name => {
+                return materialize(&func.body);
             }
+            Item::Impl(impl_block, _) => {
+                if let Some(method) = impl_block.methods.iter().find(|m| m.name == item.name) {
+                    return materialize(&method.body);
+                }
+            }
+            Item::StructType(struct_def, _) => {
+                if let Some(method) = struct_def.methods.iter().find(|m| m.name == item.name) {
+                    return materialize(&method.body);
+                }
+            }
+            Item::Extend(extend_stmt, _) => {
+                if let Some(method) = extend_stmt.methods.iter().find(|m| m.name == item.name) {
+                    return materialize(&method.body);
+                }
+            }
+            Item::Trait(trait_def, _) => {
+                for member in &trait_def.members {
+                    if let TraitMember::Default(method) = member {
+                        if method.name == item.name {
+                            return materialize(&method.body);
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -233,8 +406,8 @@ pub fn outgoing_calls(
 
 fn find_function_item(program: &Program, name: &str, uri: &Uri, text: &str) -> CallHierarchyItem {
     for item in &program.items {
-        if let Item::Function(func, span) = item {
-            if func.name == name {
+        match item {
+            Item::Function(func, span) if func.name == name => {
                 return CallHierarchyItem {
                     name: func.name.clone(),
                     kind: SymbolKind::FUNCTION,
@@ -246,6 +419,31 @@ fn find_function_item(program: &Program, name: &str, uri: &Uri, text: &str) -> C
                     data: None,
                 };
             }
+            Item::Impl(impl_block, _) => {
+                if let Some(method) = impl_block.methods.iter().find(|m| m.name == name) {
+                    return method_item(method, &method.span, text, uri);
+                }
+            }
+            Item::StructType(struct_def, _) => {
+                if let Some(method) = struct_def.methods.iter().find(|m| m.name == name) {
+                    return method_item(method, &method.span, text, uri);
+                }
+            }
+            Item::Extend(extend_stmt, _) => {
+                if let Some(method) = extend_stmt.methods.iter().find(|m| m.name == name) {
+                    return method_item(method, &method.span, text, uri);
+                }
+            }
+            Item::Trait(trait_def, _) => {
+                for member in &trait_def.members {
+                    if let TraitMember::Default(method) = member {
+                        if method.name == name {
+                            return method_item(method, &method.span, text, uri);
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
     // Return a placeholder for unknown/builtin functions
@@ -331,7 +529,18 @@ fn collect_call_sites_in_expr(expr: &Expr, target: &str, text: &str, out: &mut V
                 collect_call_sites_in_expr(arg, target, text, out);
             }
         }
-        Expr::MethodCall { receiver, args, .. } => {
+        Expr::MethodCall {
+            receiver,
+            method,
+            args,
+            span,
+            ..
+        } => {
+            if method == target && !span.is_dummy() {
+                if let Some(name_range) = method_call_name_range(text, receiver, method, span) {
+                    out.push(name_range);
+                }
+            }
             collect_call_sites_in_expr(receiver, target, text, out);
             for arg in args {
                 collect_call_sites_in_expr(arg, target, text, out);
@@ -397,6 +606,32 @@ fn collect_call_sites_in_expr(expr: &Expr, target: &str, text: &str, out: &mut V
     }
 }
 
+/// Compute the LSP `Range` covering the method-name token inside a
+/// `expr.method(args)` call expression.
+///
+/// `MethodCall.span` covers the full `receiver.method(args)` expression, so we
+/// locate `method` in the source slice after the receiver's end offset (the
+/// first identifier-shaped occurrence is the method name).
+fn method_call_name_range(
+    text: &str,
+    receiver: &Expr,
+    method: &str,
+    span: &Span,
+) -> Option<Range> {
+    use shape_ast::ast::Spanned;
+    let recv_end = receiver.span().end;
+    let search_start = recv_end.min(text.len());
+    let search_end = span.end.min(text.len());
+    if search_start >= search_end {
+        return None;
+    }
+    let slice = &text[search_start..search_end];
+    let offset = slice.find(method)?;
+    let name_start = search_start + offset;
+    let name_end = name_start + method.len();
+    Some(range_from_offsets(text, name_start, name_end))
+}
+
 /// Collect (callee_name, call_range) pairs from statements
 fn collect_outgoing_calls_in_stmts(
     stmts: &[Statement],
@@ -448,7 +683,18 @@ fn collect_outgoing_calls_in_expr(expr: &Expr, text: &str, out: &mut Vec<(String
                 collect_outgoing_calls_in_expr(arg, text, out);
             }
         }
-        Expr::MethodCall { receiver, args, .. } => {
+        Expr::MethodCall {
+            receiver,
+            method,
+            args,
+            span,
+            ..
+        } => {
+            if !span.is_dummy() {
+                if let Some(name_range) = method_call_name_range(text, receiver, method, span) {
+                    out.push((method.clone(), name_range));
+                }
+            }
             collect_outgoing_calls_in_expr(receiver, text, out);
             for arg in args {
                 collect_outgoing_calls_in_expr(arg, text, out);
@@ -647,6 +893,70 @@ mod tests {
         assert!(
             calls.iter().any(|c| c.from.name == "<module>"),
             "Should have module-level caller"
+        );
+    }
+
+    #[test]
+    fn prepare_call_hierarchy_on_impl_method() {
+        // LSP-CH §D regression flow #7 (impl-method leg): cursor on a method
+        // name inside `impl Trait for Type { fn name(...) {...} }` must
+        // surface a CallHierarchyItem. Pre-fix, the dispatch only matched
+        // `Item::Function` and `Item::ForeignFunction`; impl-block methods
+        // were silently dropped.
+        let code = "\
+type User { name: string }
+trait Greet { fn hello(self) -> string; }
+impl Greet for User {
+    fn hello(self) -> string { self.name }
+}
+";
+        let uri = Uri::from_file_path("/test.shape").unwrap();
+        // Cursor on `hello` inside the impl method definition: line 3 col 7
+        // ("    fn hello" — 4 spaces + "fn " + "h" at col 7).
+        let result = prepare_call_hierarchy(
+            code,
+            Position {
+                line: 3,
+                character: 7,
+            },
+            &uri,
+        );
+        assert!(result.is_some(), "prepare should find impl method");
+        let items = result.unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name, "hello");
+        assert_eq!(items[0].kind, SymbolKind::METHOD);
+    }
+
+    #[test]
+    fn outgoing_calls_from_impl_method() {
+        // Outgoing leg: target = an impl method; verify its body is
+        // scanned (FunctionCall + MethodCall).
+        let code = "\
+fn helper() -> int { 1 }
+type T { x: int }
+trait Op { fn run(self) -> int; }
+impl Op for T {
+    fn run(self) -> int { helper() }
+}
+";
+        let uri = Uri::from_file_path("/test.shape").unwrap();
+        let item = CallHierarchyItem {
+            name: "run".to_string(),
+            kind: SymbolKind::METHOD,
+            tags: None,
+            detail: None,
+            uri: uri.clone(),
+            range: Range::default(),
+            selection_range: Range::default(),
+            data: None,
+        };
+        let calls = outgoing_calls(code, &item, &uri);
+        let callee_names: Vec<&str> = calls.iter().map(|c| c.to.name.as_str()).collect();
+        assert!(
+            callee_names.contains(&"helper"),
+            "impl run() should call helper, got {:?}",
+            callee_names
         );
     }
 }

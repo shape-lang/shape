@@ -86,21 +86,28 @@ fn main() { hello(\"world\"); }
 }
 
 #[test]
-#[should_panic] // LSP-I closes — prepare returns [] for impl methods
 fn lsp_n_prepare_call_hierarchy_on_impl_method() {
-    // §D #7 (impl-method leg): the §D regression is specifically
+    // §D #7 (impl-method leg): the §D regression was specifically
     // `fn hello (impl)` returning `[]` — i.e. the call_hierarchy dispatch
-    // at `call_hierarchy.rs:38-100` only matches `Item::Function` and
-    // `Item::ForeignFunction`; impl-block methods are silently dropped.
+    // only matched `Item::Function` and `Item::ForeignFunction`; impl-block
+    // methods were silently dropped. LSP-CH (r8w12-lsp-ch) extended
+    // `prepare_call_hierarchy` with arms for `Item::Impl`, `Item::StructType`,
+    // `Item::Extend`, and `Item::Trait` default methods.
+    //
+    // NB: the grammar requires `impl Trait for Type { ... }`; inherent
+    // `impl Type { ... }` syntax does not parse (see
+    // `crates/shape-ast/src/shape.pest:224` — `impl_block` requires `for`).
+    // Test fixture uses the trait+impl form which exercises the same
+    // dispatch-arm regression.
     let code = "\
 type User { name: string }
-impl User {
+trait Greet { fn hello(self) -> string; }
+impl Greet for User {
     fn hello(self) -> string { self.name }
 }
-fn main() { let u = User { name: \"a\" }; u.hello(); }
 ";
     ShapeTest::new(code)
-        .at(pos(2, 7))
+        .at(pos(3, 7))
         .expect_call_hierarchy_prepare_ok();
 }
 
