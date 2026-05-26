@@ -159,8 +159,17 @@ impl ShapeError {
             }
             ShapeError::TypeError(_) => Some(ErrorCode::TypeError),
             ShapeError::SemanticError { message, .. } => {
+                // R8 W10 LSP-G — narrow SemanticError messages into the
+                // numbered E-code family so LSP code-action dispatch can
+                // key off `diagnostic.code` instead of substring-matching
+                // the message text (audit `v0.3-lsp-parity-audit.md` §E /
+                // LSP-N §D regression #6).
                 if message.contains("type mismatch") {
                     Some(ErrorCode::E0100)
+                } else if message.starts_with("Undefined variable")
+                    || message.starts_with("Undefined variables")
+                {
+                    Some(ErrorCode::E0101)
                 } else {
                     Some(ErrorCode::SemanticError)
                 }
@@ -200,5 +209,31 @@ mod tests {
         let rendered = err.format_with_source();
         assert!(rendered.contains("error[RUNTIME]: division by zero"));
         assert!(!rendered.contains("Runtime error: Runtime error:"));
+    }
+
+    /// R8 W10 LSP-G — SemanticError carrying "Undefined variable" should
+    /// be mapped onto E0101 so LSP code-action dispatch can key off
+    /// `diagnostic.code` instead of `diagnostic.message` substring
+    /// matching. Single- and multi-variable variants both surface E0101.
+    #[test]
+    fn semantic_error_code_undefined_variable_maps_to_e0101() {
+        let single = ShapeError::SemanticError {
+            message: "Undefined variable: 'zzz_undefined'".to_string(),
+            location: None,
+        };
+        assert!(matches!(single.error_code(), Some(ErrorCode::E0101)));
+
+        let multi = ShapeError::SemanticError {
+            message: "Undefined variables: 'h', 'i'".to_string(),
+            location: None,
+        };
+        assert!(matches!(multi.error_code(), Some(ErrorCode::E0101)));
+
+        // Other SemanticError shapes remain bucketed as SEMANTIC.
+        let other = ShapeError::SemanticError {
+            message: "some other semantic error".to_string(),
+            location: None,
+        };
+        assert!(matches!(other.error_code(), Some(ErrorCode::SemanticError)));
     }
 }
