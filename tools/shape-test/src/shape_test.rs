@@ -845,6 +845,69 @@ impl ShapeTest {
         self
     }
 
+    /// LSP-I (R8 W11): assert a TYPE inlay hint with the given label exists
+    /// under a caller-supplied `InlayHintConfig`. Needed for Shape-unique
+    /// opt-in hints (binding-storage-class, future inlay sub-clusters) where
+    /// the default config has the hint OFF and the test must explicitly turn
+    /// it on. Mirrors `expect_type_hint_label` but takes a config instead of
+    /// using `InlayHintConfig::default()`.
+    pub fn expect_type_hint_label_with_config(
+        self,
+        expected_label: &str,
+        config: &InlayHintConfig,
+    ) -> Self {
+        let range = self.full_range();
+        let hints = shape_lsp::inlay_hints::get_inlay_hints(&self.text, range, config, None);
+        let type_hints: Vec<_> = hints
+            .iter()
+            .filter(|h| h.kind == Some(tower_lsp_server::ls_types::InlayHintKind::TYPE))
+            .collect();
+        let labels: Vec<String> = type_hints
+            .iter()
+            .filter_map(|h| match &h.label {
+                tower_lsp_server::ls_types::InlayHintLabel::String(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            labels.iter().any(|l| l == expected_label),
+            "Expected type hint '{}' under config {:?}, found: {:?}",
+            expected_label,
+            config,
+            labels
+        );
+        self
+    }
+
+    /// LSP-I (R8 W11): assert NO TYPE inlay hint with the given label exists
+    /// under a caller-supplied `InlayHintConfig`. Mirror of
+    /// `expect_no_type_hint_label` for opt-in hints whose default-OFF state
+    /// must be verified via an explicit config.
+    pub fn expect_no_type_hint_label_with_config(
+        self,
+        excluded_label: &str,
+        config: &InlayHintConfig,
+    ) -> Self {
+        let range = self.full_range();
+        let hints = shape_lsp::inlay_hints::get_inlay_hints(&self.text, range, config, None);
+        let type_hints: Vec<String> = hints
+            .iter()
+            .filter(|h| h.kind == Some(tower_lsp_server::ls_types::InlayHintKind::TYPE))
+            .filter_map(|h| match &h.label {
+                tower_lsp_server::ls_types::InlayHintLabel::String(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !type_hints.iter().any(|l| l == excluded_label),
+            "Did not expect type hint '{}' under config {:?}, but found it in: {:?}",
+            excluded_label,
+            config,
+            type_hints
+        );
+        self
+    }
+
     // -- Document Symbols assertions ----------------------------------------
 
     /// Assert document symbols exist.

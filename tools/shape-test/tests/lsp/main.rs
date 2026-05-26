@@ -9,6 +9,7 @@ mod editing;
 mod folding;
 mod foreign_lsp;
 mod hover;
+mod inlay_storage_class;
 mod navigation;
 mod presentation;
 mod signature_help;
