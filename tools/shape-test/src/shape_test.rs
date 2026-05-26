@@ -432,6 +432,53 @@ impl ShapeTest {
         self
     }
 
+    /// Assert go-to-implementation at the current position returns at least
+    /// `min_count` impl-method body `Location`s whose start line falls within
+    /// `[start_line_min, start_line_max]` (inclusive). This is the
+    /// LSP-K editor flow: cursor on a trait-method name jumps to every
+    /// impl-method body, not to the impl block as a whole.
+    pub fn expect_implementation_in_line_range(
+        self,
+        min_count: usize,
+        start_line_min: u32,
+        start_line_max: u32,
+    ) -> Self {
+        let uri = self.uri();
+        let impls = shape_lsp::definition::get_implementations(
+            &self.text,
+            self.position,
+            &uri,
+            None,
+        );
+        assert!(
+            impls.is_some(),
+            "Expected implementations at ({}, {})",
+            self.position.line,
+            self.position.character
+        );
+        let locs = impls.unwrap();
+        assert!(
+            locs.len() >= min_count,
+            "Expected at least {} implementations, got {} (locations: {:?})",
+            min_count,
+            locs.len(),
+            locs.iter()
+                .map(|l| (l.range.start.line, l.range.start.character))
+                .collect::<Vec<_>>()
+        );
+        for loc in &locs {
+            let line = loc.range.start.line;
+            assert!(
+                line >= start_line_min && line <= start_line_max,
+                "Implementation start line {} outside expected range [{}, {}]",
+                line,
+                start_line_min,
+                start_line_max
+            );
+        }
+        self
+    }
+
     /// Assert find-references at current position returns at least `min_count` results.
     pub fn expect_references_min(self, min_count: usize) -> Self {
         let uri = self.uri();
