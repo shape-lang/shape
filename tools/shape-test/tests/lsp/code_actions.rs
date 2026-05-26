@@ -72,3 +72,31 @@ fn code_actions_on_function_definition() {
         .in_range(range(0, 0, 2, 1))
         .expect_code_actions_ok();
 }
+
+// == R8 W10 LSP-G refactor-assists (Decision 4 v0.3 scope) ====================
+//
+// Decision 4 ratified extract-fn + extract-var for v0.3. The skeletons in
+// `code_actions.rs::get_refactor_actions` ship working edits today; these
+// E2E flows lock in the contract so the LSP-G+ follow-up that hardens them
+// (parameter capture, statement-boundary insertion, multi-line indent)
+// stays behavior-compatible.
+
+#[test]
+fn lsp_n_refactor_extract_variable_on_expression() {
+    // Selecting a single expression should surface an "Extract to
+    // variable" action via REFACTOR_EXTRACT.
+    let code = "let result = 10 + 20;\n";
+    ShapeTest::new(code)
+        .in_range(range(0, 13, 0, 20))
+        .expect_refactor_extract_action("Extract to variable");
+}
+
+#[test]
+fn lsp_n_refactor_extract_function_on_multiline() {
+    // Multi-line selection should surface an "Extract to function"
+    // action via REFACTOR_EXTRACT.
+    let code = "fn main() {\n    let a = 1;\n    let b = 2;\n    let c = a + b;\n}\n";
+    ShapeTest::new(code)
+        .in_range(range(1, 4, 3, 18))
+        .expect_refactor_extract_action("Extract to function");
+}

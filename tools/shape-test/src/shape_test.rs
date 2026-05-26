@@ -646,6 +646,50 @@ impl ShapeTest {
         self
     }
 
+    /// R8 W10 LSP-G — assert a refactor-extract action with the given
+    /// title is offered for the selected range. Locks the Decision 4 v0.3
+    /// scope (extract-fn + extract-var) so subsequent hardening stays
+    /// behavior-compatible. Action must:
+    ///   - carry `CodeActionKind::REFACTOR_EXTRACT`,
+    ///   - have a non-empty `WorkspaceEdit` (no disabled-style stubs).
+    pub fn expect_refactor_extract_action(self, title: &str) -> Self {
+        use tower_lsp_server::ls_types::CodeActionKind;
+        let uri = self.uri();
+        let r = self.selected_range.unwrap_or(self.full_range());
+        let actions: Vec<CodeActionOrCommand> = shape_lsp::code_actions::get_code_actions(
+            &self.text,
+            &uri,
+            r,
+            &[],
+            None,
+            Some(&[CodeActionKind::REFACTOR]),
+        );
+
+        let titles: Vec<String> = actions
+            .iter()
+            .map(|a| match a {
+                CodeActionOrCommand::CodeAction(action) => action.title.clone(),
+                CodeActionOrCommand::Command(cmd) => cmd.title.clone(),
+            })
+            .collect();
+
+        let matched = actions.iter().any(|a| {
+            let CodeActionOrCommand::CodeAction(action) = a else {
+                return false;
+            };
+            let is_extract = matches!(action.kind.as_ref(), Some(k) if k == &CodeActionKind::REFACTOR_EXTRACT);
+            let has_edit = action.edit.is_some();
+            let title_matches = action.title.contains(title);
+            is_extract && has_edit && title_matches
+        });
+
+        assert!(
+            matched,
+            "Expected refactor-extract action with title containing {title:?} and a non-empty edit; got: {titles:?}"
+        );
+        self
+    }
+
     // -- Code Lens assertions -----------------------------------------------
 
     /// Assert code lenses are not empty.

@@ -169,7 +169,13 @@ fn get_quick_fixes(
     // Prefer-let lint — no current canonical code; keep message-keyed
     // until the lint's emitter is wired through the structured-error
     // path. Tracked as a follow-up under shape-lsp-quality-residuals.
-    if message.contains("prefer 'let'") || message.contains("use 'let' instead of 'var'") {
+    // R8 W10 LSP-G — W0104 reserved for the prefer-let lint when wiring
+    // through the structured-error path; matched here defensively so
+    // future code-emitters fire the same fix without an LSP redeploy.
+    let is_prefer_let = matches!(code, Some("W0104"))
+        || message.contains("prefer 'let'")
+        || message.contains("use 'let' instead of 'var'");
+    if is_prefer_let {
         let line = get_line(text, diagnostic.range.start.line as usize);
         if let Some(line_text) = line {
             if let Some(var_pos) = line_text.find("var ") {
@@ -195,11 +201,15 @@ fn get_quick_fixes(
         }
     }
 
-    // Auto-import for unknown enum/type — message-keyed; the compiler
-    // emits these via the general TypeError / SemanticError paths that
-    // don't carry a stable narrow code. Fallback retained until the
-    // type-error pipeline gains its own code family.
-    if message.contains("Unknown enum type") || message.contains("Unknown variant") {
+    // Auto-import for unknown enum/type — code-keyed dispatch off
+    // E0102 / E0105 when the structured-error path emits them; message
+    // fallback covers the SemanticError-bucket emissions in
+    // `compiler/expressions/collections.rs` + `compiler/patterns/checking.rs`
+    // that haven't been routed through the code table yet.
+    let is_unknown_enum = matches!(code, Some("E0102") | Some("E0105"))
+        || message.contains("Unknown enum type")
+        || message.contains("Unknown variant");
+    if is_unknown_enum {
         if let Some(cache) = module_cache {
             if let Some(name) = extract_quoted_name(message) {
                 let symbols = if let Some(current_file) = uri.to_file_path() {
@@ -231,7 +241,14 @@ fn get_quick_fixes(
         }
     }
 
-    if message.contains("match expression requires at least one arm") {
+    // Empty-match arm — code-keyed off E0103 (invalid arguments family
+    // — closest existing bucket for "expression requires arms" /
+    // exhaustiveness) when the resilient parser path is upgraded;
+    // message fallback today catches the `ParseErrorKind::EmptyMatch`
+    // shape that flows through `server.rs` without a diagnostic code.
+    let is_empty_match = matches!(code, Some("E0103"))
+        || message.contains("match expression requires at least one arm");
+    if is_empty_match {
         if let Some((insert_pos, indent)) = find_match_arm_insert_position(text, diagnostic.range) {
             let arm_indent = format!("{indent}  ");
             fixes.push(create_quick_fix(
@@ -249,7 +266,18 @@ fn get_quick_fixes(
         }
     }
 
-    if let Some((enum_name, missing_variants)) = parse_non_exhaustive_match(message) {
+    // Non-exhaustive match — E0103 (invalid arguments / exhaustiveness
+    // family) preferred when present; the variant list itself comes
+    // from `parse_non_exhaustive_match(message)` which inherently has
+    // to read the message text (structured payload not threaded
+    // through the diagnostic shape). Code guard is defensive: a future
+    // compiler emitter with a different message format but the right
+    // code still benefits from the fallback.
+    let is_non_exhaustive = matches!(code, Some("E0103"))
+        || message.contains("Non-exhaustive match");
+    if is_non_exhaustive
+        && let Some((enum_name, missing_variants)) = parse_non_exhaustive_match(message)
+    {
         if let Some((insert_pos, indent)) = find_match_arm_insert_position(text, diagnostic.range) {
             let arm_indent = format!("{indent}  ");
             let mut new_text = String::new();
@@ -273,8 +301,13 @@ fn get_quick_fixes(
         }
     }
 
-    // Fix for missing required trait method — suggest adding the method stub
-    if message.contains("Missing required method") {
+    // Fix for missing required trait method — suggest adding the method
+    // stub. E0401 emitted by `validate_trait_bounds` in `diagnostics.rs`
+    // is the canonical code; message fallback catches any compiler-side
+    // emitters that haven't been routed through the code table yet.
+    let is_missing_method = matches!(code, Some("E0401"))
+        || message.contains("Missing required method");
+    if is_missing_method {
         if let Some(method_name) = extract_quoted_name(message) {
             // Find the closing brace of the impl block on the diagnostic line
             let impl_end_line = diagnostic.range.end.line;
@@ -1586,6 +1619,92 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(diagnostic_code(&d3), None);
+    }
+
+    /// R8 W10 LSP-G — verify code-keyed dispatch fires the
+    /// declare-variable quickfix when the diagnostic carries E0101 but
+    /// the message text does NOT contain "undefined" / "not defined".
+    /// This guards the migration from message-substring keying off the
+    /// SemanticError text shape onto the canonical numbered code.
+    #[test]
+    fn test_quickfix_keys_off_e0101_code_without_message_substring() {
+        let uri = Uri::from_file_path("/tmp/test.shape").unwrap();
+        let diagnostic = Diagnostic {
+            range: Range {
+                start: Position {
+                    line: 0,
+                    character: 8,
+                },
+                end: Position {
+                    line: 0,
+                    character: 21,
+                },
+            },
+            severity: Some(tower_lsp_server::ls_types::DiagnosticSeverity::ERROR),
+            // E0101 set; message has NO "undefined" / "not defined" substring.
+            code: Some(NumberOrString::String("E0101".to_string())),
+            message: "Identifier 'zzz_xyz' is not in scope".to_string(),
+            ..Default::default()
+        };
+        let text = "let x = zzz_xyz + 1\n";
+        let actions = get_code_actions(text, &uri, diagnostic.range, &[diagnostic], None, None);
+        assert!(
+            actions.iter().any(|a| matches!(
+                a,
+                CodeActionOrCommand::CodeAction(CodeAction { title, .. })
+                    if title.contains("Declare variable 'zzz_xyz'")
+            )),
+            "expected declare-variable quickfix from E0101 code-keyed dispatch; got: {:?}",
+            actions
+                .iter()
+                .map(|a| match a {
+                    CodeActionOrCommand::CodeAction(action) => action.title.clone(),
+                    CodeActionOrCommand::Command(cmd) => cmd.title.clone(),
+                })
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// R8 W10 LSP-G — verify code-keyed dispatch fires the
+    /// implement-method quickfix when the diagnostic carries E0401 but
+    /// the message text does NOT contain "Missing required method".
+    #[test]
+    fn test_quickfix_keys_off_e0401_code_without_message_substring() {
+        let uri = Uri::from_file_path("/tmp/test.shape").unwrap();
+        let diagnostic = Diagnostic {
+            range: Range {
+                start: Position {
+                    line: 0,
+                    character: 0,
+                },
+                end: Position {
+                    line: 1,
+                    character: 1,
+                },
+            },
+            severity: Some(tower_lsp_server::ls_types::DiagnosticSeverity::ERROR),
+            code: Some(NumberOrString::String("E0401".to_string())),
+            // Note: no "Missing required method" substring; quoted name still extracted.
+            message: "impl block omits trait method 'select'".to_string(),
+            ..Default::default()
+        };
+        let text = "impl Q for T {\n}\n";
+        let actions = get_code_actions(text, &uri, diagnostic.range, &[diagnostic], None, None);
+        assert!(
+            actions.iter().any(|a| matches!(
+                a,
+                CodeActionOrCommand::CodeAction(CodeAction { title, .. })
+                    if title.contains("Implement method 'select'")
+            )),
+            "expected implement-method quickfix from E0401 code-keyed dispatch; got: {:?}",
+            actions
+                .iter()
+                .map(|a| match a {
+                    CodeActionOrCommand::CodeAction(action) => action.title.clone(),
+                    CodeActionOrCommand::Command(cmd) => cmd.title.clone(),
+                })
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
