@@ -1735,7 +1735,12 @@ fn get_impl_header_trait_hover(
             content.push_str("\n\nResolved from current file.");
         }
 
-        let signatures = trait_member_signatures(&resolved_trait.trait_def);
+        let signatures = trait_member_signatures_with_impl(
+            &resolved_trait.trait_def,
+            impl_block,
+            &target_type,
+            &program,
+        );
         if !signatures.is_empty() {
             content.push_str("\n\n**Members:**\n```shape\n");
             for sig in signatures {
@@ -1761,7 +1766,26 @@ fn get_impl_header_trait_hover(
     })
 }
 
-fn trait_member_signatures(trait_def: &shape_ast::ast::TraitDef) -> Vec<String> {
+/// Render trait member signatures, overriding declared return types with
+/// impl-body-inferred return types when the impl block provides a method
+/// implementation whose return type is more specific than the trait's
+/// declaration. The trait declaration carries an abstract return type
+/// (e.g. `content` or `()` for `display`); an impl that returns
+/// `self.name` (a `string`) deserves to render with `-> string` so the
+/// user sees what the specific impl actually produces.
+///
+/// Only required trait members are eligible for override. Default
+/// methods render with the trait's declared signature unchanged (the
+/// default body, not an impl-block override, is the authoritative source
+/// there). Impl-method-only methods (not declared on the trait) are
+/// passed through with the trait-method declared return type — they have
+/// no trait-side abstract type to override.
+fn trait_member_signatures_with_impl(
+    trait_def: &shape_ast::ast::TraitDef,
+    impl_block: &shape_ast::ast::ImplBlock,
+    target_type: &str,
+    program: &Program,
+) -> Vec<String> {
     let mut signatures = Vec::new();
 
     for member in &trait_def.members {
@@ -1781,8 +1805,33 @@ fn trait_member_signatures(trait_def: &shape_ast::ast::TraitDef) -> Vec<String> 
                         format!("{}: {}", pname, ptype)
                     })
                     .collect();
-                let return_type_str =
+
+                let trait_return_str =
                     type_annotation_to_string(return_type).unwrap_or_else(|| "unknown".to_string());
+
+                // If the impl block has a matching method, prefer the
+                // impl-body-inferred return type. The impl method's
+                // explicit annotation (if present) takes priority over
+                // body inference; both are more specific than the trait's
+                // declared return.
+                let return_type_str = impl_block
+                    .methods
+                    .iter()
+                    .find(|m| &m.name == name)
+                    .and_then(|method| {
+                        if let Some(ann) = &method.return_type {
+                            type_annotation_to_string(ann)
+                        } else {
+                            crate::type_inference::infer_impl_method_return_type(
+                                &method.body,
+                                &method.params,
+                                program,
+                                target_type,
+                            )
+                        }
+                    })
+                    .unwrap_or(trait_return_str);
+
                 signatures.push(format!(
                     "method {}({}) -> {}",
                     name,
@@ -1814,6 +1863,7 @@ fn trait_member_signatures(trait_def: &shape_ast::ast::TraitDef) -> Vec<String> 
 
     signatures
 }
+
 
 /// Render an "Implementations" section listing every `impl Trait for Type`
 /// block discovered for `type_name`. Returns `None` when no impls are present

@@ -827,7 +827,7 @@ pub fn infer_expr_type_via_engine(expr: &Expr) -> Option<String> {
 }
 
 /// Inferred type information for a function's parameters and return type.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParamReferenceMode {
     Shared,
     Exclusive,
@@ -852,6 +852,315 @@ pub struct FunctionTypeInfo {
     pub param_ref_modes: HashMap<String, ParamReferenceMode>,
     /// Return type if inferred (None when the function has an explicit return annotation).
     pub return_type: Option<String>,
+}
+
+/// Normalize capitalized primitive aliases (`String`, `Int`, `Bool`,
+/// `Number`, `Float`) to Shape's canonical lowercase primitive names.
+/// The inference engine returns whatever the user wrote in source (per
+/// `type_annotation_to_string`'s `Basic(s)` arm), but Shape's canonical
+/// primitive names are lowercase. Hover / inlay rendering normalizes so
+/// `name: String` renders as `-> string`. Generic args inside `<...>`
+/// are normalized recursively. Non-primitive identifiers are left alone.
+pub fn normalize_primitive_alias(type_str: &str) -> String {
+    fn normalize_token(token: &str) -> String {
+        match token {
+            "String" => "string".to_string(),
+            "Int" | "Integer" => "int".to_string(),
+            "Bool" | "Boolean" => "bool".to_string(),
+            "Number" => "number".to_string(),
+            "Float" => "float".to_string(),
+            "Decimal" => "decimal".to_string(),
+            other => other.to_string(),
+        }
+    }
+
+    // Fast path: bare identifier.
+    if !type_str.contains(|c: char| matches!(c, '<' | '|' | '[' | '(' | ' ' | '?' | '&')) {
+        return normalize_token(type_str.trim());
+    }
+
+    let mut out = String::with_capacity(type_str.len());
+    let mut token = String::new();
+    for ch in type_str.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            token.push(ch);
+        } else {
+            if !token.is_empty() {
+                out.push_str(&normalize_token(&token));
+                token.clear();
+            }
+            out.push(ch);
+        }
+    }
+    if !token.is_empty() {
+        out.push_str(&normalize_token(&token));
+    }
+    out
+}
+
+/// LSP-only display-mode inference for unannotated function parameters.
+///
+/// Returns a vector of length `func_def.params.len()` where each entry is:
+/// - `Some(Exclusive)` — the body reassigns the parameter (e.g. `a = ...`).
+/// - `Some(Shared)`    — the parameter's inferred type contains at least
+///                       one non-primitive (heap-like) member.
+/// - `None`            — the parameter has an explicit annotation, has no
+///                       inferred type, or its inferred type is purely
+///                       primitive (int / number / bool / etc.). The LSP
+///                       renders these without a `&` prefix.
+///
+/// This is a DISPLAY-ONLY signal. The compiler's `infer_param_pass_modes`
+/// is intentionally disabled at runtime (WS-7) for JIT/MIR soundness; no
+/// value computed here flows into codegen.
+fn infer_lsp_display_ref_modes(
+    func_def: &shape_ast::ast::FunctionDef,
+    inferred_param_types: &[String],
+) -> Vec<Option<ParamReferenceMode>> {
+    let mut modes = vec![None; func_def.params.len()];
+
+    // Step 1: build name → idx map for params with a simple identifier.
+    let mut idx_by_name: HashMap<String, usize> = HashMap::new();
+    for (idx, param) in func_def.params.iter().enumerate() {
+        if param.type_annotation.is_some() {
+            // Annotated params already render from the annotation; no
+            // inferred ref-mode hint needed.
+            continue;
+        }
+        if let Some(name) = param.simple_name() {
+            idx_by_name.insert(name.to_string(), idx);
+        }
+    }
+
+    // Step 2: scan the body for assignments to a param name.
+    if !idx_by_name.is_empty() {
+        for stmt in &func_def.body {
+            collect_param_assignments_in_stmt(stmt, &idx_by_name, &mut modes);
+        }
+    }
+
+    // Step 3: for remaining unannotated params, fall back to Shared when
+    // the inferred type contains a non-primitive component.
+    for (idx, param) in func_def.params.iter().enumerate() {
+        if modes[idx].is_some() {
+            continue;
+        }
+        if param.type_annotation.is_some() {
+            continue;
+        }
+        let Some(ty_str) = inferred_param_types.get(idx) else {
+            continue;
+        };
+        if ty_str == "_" || ty_str == "unknown" {
+            continue;
+        }
+        if type_string_has_heap_member(ty_str) {
+            modes[idx] = Some(ParamReferenceMode::Shared);
+        }
+    }
+
+    modes
+}
+
+/// Walk a statement and mark any assignment whose LHS is a parameter name
+/// as `Exclusive` in `modes`. Handles nested control flow (if / while /
+/// for / block) by recursing through child statements.
+fn collect_param_assignments_in_stmt(
+    stmt: &shape_ast::ast::Statement,
+    idx_by_name: &HashMap<String, usize>,
+    modes: &mut [Option<ParamReferenceMode>],
+) {
+    use shape_ast::ast::{ForInit, Statement};
+
+    match stmt {
+        Statement::Assignment(assign, _) => {
+            if let Some(name) = assign.pattern.as_identifier()
+                && let Some(&idx) = idx_by_name.get(name)
+            {
+                modes[idx] = Some(ParamReferenceMode::Exclusive);
+            }
+            collect_param_assignments_in_expr(&assign.value, idx_by_name, modes);
+        }
+        Statement::VariableDecl(decl, _) => {
+            if let Some(value) = &decl.value {
+                collect_param_assignments_in_expr(value, idx_by_name, modes);
+            }
+        }
+        Statement::Return(Some(expr), _) | Statement::Expression(expr, _) => {
+            collect_param_assignments_in_expr(expr, idx_by_name, modes);
+        }
+        Statement::If(if_stmt, _) => {
+            collect_param_assignments_in_expr(&if_stmt.condition, idx_by_name, modes);
+            for s in &if_stmt.then_body {
+                collect_param_assignments_in_stmt(s, idx_by_name, modes);
+            }
+            if let Some(else_body) = &if_stmt.else_body {
+                for s in else_body {
+                    collect_param_assignments_in_stmt(s, idx_by_name, modes);
+                }
+            }
+        }
+        Statement::While(while_loop, _) => {
+            collect_param_assignments_in_expr(&while_loop.condition, idx_by_name, modes);
+            for s in &while_loop.body {
+                collect_param_assignments_in_stmt(s, idx_by_name, modes);
+            }
+        }
+        Statement::For(for_loop, _) => {
+            match &for_loop.init {
+                ForInit::ForIn { iter, .. } => {
+                    collect_param_assignments_in_expr(iter, idx_by_name, modes);
+                }
+                ForInit::ForC {
+                    init,
+                    condition,
+                    update,
+                } => {
+                    collect_param_assignments_in_stmt(init, idx_by_name, modes);
+                    collect_param_assignments_in_expr(condition, idx_by_name, modes);
+                    collect_param_assignments_in_expr(update, idx_by_name, modes);
+                }
+            }
+            for s in &for_loop.body {
+                collect_param_assignments_in_stmt(s, idx_by_name, modes);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Walk an expression looking for assignment expressions that target a
+/// parameter name. Covers block / if / while / for / loop / match
+/// expressions so that an `if cond { a = ... }` inside a return position
+/// is still detected. Other expression forms (literals, calls, binary
+/// ops) cannot contain a top-level parameter assignment in Shape — bare
+/// reassignment is a `Statement`, not an `Expr` — so they recurse only
+/// through their structurally-block-bearing children.
+fn collect_param_assignments_in_expr(
+    expr: &Expr,
+    idx_by_name: &HashMap<String, usize>,
+    modes: &mut [Option<ParamReferenceMode>],
+) {
+    use shape_ast::ast::expr_helpers::BlockItem;
+    match expr {
+        Expr::Block(block, _) => {
+            for item in &block.items {
+                match item {
+                    BlockItem::Statement(s) => {
+                        collect_param_assignments_in_stmt(s, idx_by_name, modes);
+                    }
+                    BlockItem::Assignment(assign) => {
+                        if let Some(name) = assign.pattern.as_identifier()
+                            && let Some(&idx) = idx_by_name.get(name)
+                        {
+                            modes[idx] = Some(ParamReferenceMode::Exclusive);
+                        }
+                        collect_param_assignments_in_expr(&assign.value, idx_by_name, modes);
+                    }
+                    BlockItem::VariableDecl(decl) => {
+                        if let Some(v) = &decl.value {
+                            collect_param_assignments_in_expr(v, idx_by_name, modes);
+                        }
+                    }
+                    BlockItem::Expression(e) => {
+                        collect_param_assignments_in_expr(e, idx_by_name, modes);
+                    }
+                }
+            }
+        }
+        Expr::If(if_expr, _) => {
+            collect_param_assignments_in_expr(&if_expr.condition, idx_by_name, modes);
+            collect_param_assignments_in_expr(&if_expr.then_branch, idx_by_name, modes);
+            if let Some(else_branch) = &if_expr.else_branch {
+                collect_param_assignments_in_expr(else_branch, idx_by_name, modes);
+            }
+        }
+        Expr::While(while_expr, _) => {
+            collect_param_assignments_in_expr(&while_expr.condition, idx_by_name, modes);
+            collect_param_assignments_in_expr(&while_expr.body, idx_by_name, modes);
+        }
+        Expr::For(for_expr, _) => {
+            collect_param_assignments_in_expr(&for_expr.iterable, idx_by_name, modes);
+            collect_param_assignments_in_expr(&for_expr.body, idx_by_name, modes);
+        }
+        Expr::Assign(assign_expr, _) => {
+            if let Expr::Identifier(name, _) = &*assign_expr.target
+                && let Some(&idx) = idx_by_name.get(name)
+            {
+                modes[idx] = Some(ParamReferenceMode::Exclusive);
+            }
+            collect_param_assignments_in_expr(&assign_expr.value, idx_by_name, modes);
+        }
+        _ => {}
+    }
+}
+
+/// Return `true` if the LSP-rendered type string contains at least one
+/// non-primitive (heap-like) member. Handles top-level union splits so
+/// that `int | string` is recognised as having a heap member (the
+/// `string`).
+fn type_string_has_heap_member(type_str: &str) -> bool {
+    split_top_level_union_for_ref_check(type_str)
+        .into_iter()
+        .any(|part| !is_lsp_primitive_value_type_name(&part))
+}
+
+fn is_lsp_primitive_value_type_name(name: &str) -> bool {
+    let normalized = name.trim().trim_end_matches('?');
+    matches!(
+        normalized,
+        "int"
+            | "integer"
+            | "i64"
+            | "number"
+            | "float"
+            | "f64"
+            | "decimal"
+            | "bool"
+            | "boolean"
+            | "()"
+            | "void"
+            | "unit"
+            | "none"
+            | "null"
+            | "undefined"
+            | "never"
+            | "_"
+            | "unknown"
+    )
+}
+
+fn split_top_level_union_for_ref_check(type_str: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut brace_depth = 0usize;
+    let mut angle_depth = 0usize;
+
+    for (idx, ch) in type_str.char_indices() {
+        match ch {
+            '(' => paren_depth += 1,
+            ')' => paren_depth = paren_depth.saturating_sub(1),
+            '[' => bracket_depth += 1,
+            ']' => bracket_depth = bracket_depth.saturating_sub(1),
+            '{' => brace_depth += 1,
+            '}' => brace_depth = brace_depth.saturating_sub(1),
+            '<' => angle_depth += 1,
+            '>' => angle_depth = angle_depth.saturating_sub(1),
+            _ => {}
+        }
+        if ch == '|'
+            && paren_depth == 0
+            && bracket_depth == 0
+            && brace_depth == 0
+            && angle_depth == 0
+        {
+            parts.push(type_str[start..idx].trim().to_string());
+            start = idx + ch.len_utf8();
+        }
+    }
+    parts.push(type_str[start..].trim().to_string());
+    parts.into_iter().filter(|p| !p.is_empty()).collect()
 }
 
 /// Run TypeInferenceEngine and extract per-function parameter/return types.
@@ -922,21 +1231,40 @@ pub fn infer_function_signatures(program: &Program) -> HashMap<String, FunctionT
             .get(name)
             .cloned()
             .unwrap_or_default();
+        // LSP-only display-mode inference. The compiler's runtime
+        // `infer_param_pass_modes` is intentionally disabled (WS-7, returns
+        // `ByValue` for every param) for JIT/MIR soundness: marking an
+        // unannotated heap-typed param as `ByRefShared` is unsound on the
+        // JIT auto-deref path. The LSP, however, needs to render hover /
+        // inlay / signature-help with the inferred reference mode the user
+        // can WRITE as an annotation. That is a pure display concern —
+        // nothing here flows into codegen. The fallback below classifies an
+        // unannotated param as `Exclusive` if its body assigns into it,
+        // `Shared` if its inferred type contains a non-primitive member, and
+        // omits the entry otherwise.
+        let lsp_display_modes =
+            infer_lsp_display_ref_modes(func_def, param_type_strings.as_slice());
         for (idx, ast_param) in func_def.params.iter().enumerate() {
             let Some(param_name) = ast_param.simple_name() else {
                 continue;
             };
-            let mode = match param_modes
+            let compiler_mode = param_modes
                 .get(idx)
                 .copied()
                 .unwrap_or(if ast_param.is_reference {
                     ParamPassMode::ByRefShared
                 } else {
                     ParamPassMode::ByValue
-                }) {
-                ParamPassMode::ByRefExclusive => ParamReferenceMode::Exclusive,
-                ParamPassMode::ByRefShared => ParamReferenceMode::Shared,
-                ParamPassMode::ByValue => continue,
+                });
+            let mode_from_compiler = match compiler_mode {
+                ParamPassMode::ByRefExclusive => Some(ParamReferenceMode::Exclusive),
+                ParamPassMode::ByRefShared => Some(ParamReferenceMode::Shared),
+                ParamPassMode::ByValue => None,
+            };
+            let mode = match (mode_from_compiler, lsp_display_modes.get(idx).copied().flatten()) {
+                (Some(m), _) => m,
+                (None, Some(m)) => m,
+                (None, None) => continue,
             };
             param_ref_modes.insert(param_name.to_string(), mode);
         }
@@ -1019,6 +1347,86 @@ fn infer_function_return_from_body_via_engine(
 /// This is shared by hover for impl-method fallback signatures.
 pub fn infer_block_return_type_via_engine(body: &[Statement]) -> Option<String> {
     infer_return_type_for_block_with_params(body, None)
+}
+
+/// Infer a return type for an `impl Trait for Target` method body, binding
+/// `self` to `target_type` so that expressions like `self.field` resolve
+/// through the engine's type environment. Returns the inferred type string
+/// when the body's implicit-return / `return` expression is resolvable;
+/// otherwise `None`.
+///
+/// Used by hover when rendering an `impl` header's "Members" block to show
+/// the impl-body inferred return type instead of the trait's declared
+/// return (which may be the trait's abstract `void` / `content` placeholder).
+pub fn infer_impl_method_return_type(
+    body: &[Statement],
+    params: &[shape_ast::ast::FunctionParameter],
+    program: &Program,
+    target_type: &str,
+) -> Option<String> {
+    let return_exprs = collect_return_expressions(body);
+    if return_exprs.is_empty() {
+        return None;
+    }
+
+    let mut engine = TypeInferenceEngine::new();
+    // Walk the program once so user-defined types (e.g. `type User { ... }`)
+    // are registered in the engine's type environment. Without this, a
+    // `self: User` binding cannot resolve `self.name` because `User`'s
+    // field schema is not yet known to the engine.
+    let augmented = shape_ast::transform::augment_program_with_generated_extends(program);
+    let _ = engine.infer_program_best_effort(&augmented);
+
+    // Bind `self` to the target type so `self.field` resolves.
+    // `Reference` (not `Basic`) is the variant the inference engine's
+    // property-access path indexes into `struct_type_defs` against.
+    engine.env.define(
+        "self",
+        TypeScheme::mono(Type::Concrete(TypeAnnotation::Reference(
+            target_type.into(),
+        ))),
+    );
+
+    for param in params {
+        let Some(name) = param.simple_name() else {
+            continue;
+        };
+        let Some(type_ann) = &param.type_annotation else {
+            continue;
+        };
+        engine
+            .env
+            .define(name, TypeScheme::mono(Type::Concrete(type_ann.clone())));
+    }
+
+    let mut inferred = Vec::new();
+    for expr in return_exprs {
+        if let Ok(ty) = engine.infer_expr(&expr) {
+            let s = normalize_primitive_alias(&type_to_string(&ty));
+            if s != "unknown" {
+                inferred.push(s);
+                continue;
+            }
+        }
+        if let Some(fallback) = infer_expr_type(&expr)
+            && fallback != "unknown"
+        {
+            inferred.push(normalize_primitive_alias(&fallback));
+        }
+    }
+
+    if inferred.is_empty() {
+        return None;
+    }
+
+    // Deduplicate and join via " | " for union returns.
+    let mut unique: Vec<String> = Vec::new();
+    for ty in inferred {
+        if !unique.contains(&ty) {
+            unique.push(ty);
+        }
+    }
+    Some(unique.join(" | "))
 }
 
 fn infer_return_type_for_block_with_params(
