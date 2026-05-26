@@ -70,7 +70,6 @@ enum Direction {
 // shows only `main`. Currently red; LSP-D closes.
 
 #[test]
-#[should_panic] // LSP-D closes — Item::Trait arm currently missing
 fn lsp_n_document_symbol_includes_trait() {
     // §D #3 (trait leg): trait Drawable must surface in the outline.
     let code = "\
@@ -81,7 +80,6 @@ fn main() { }
 }
 
 #[test]
-#[should_panic] // LSP-D closes — Item::StructType arm currently missing
 fn lsp_n_document_symbol_includes_struct_type() {
     // §D #3 (type leg): `type Point` must surface as a STRUCT symbol.
     // The current dispatch covers TypeAlias only.
@@ -93,7 +91,6 @@ fn main() { }
 }
 
 #[test]
-#[should_panic] // LSP-D closes — Item::Impl arm currently missing
 fn lsp_n_document_symbol_includes_impl() {
     // §D #3 (impl leg): impl blocks must surface in the outline (typically as
     // INTERFACE or class — at minimum the impl symbol must be discoverable
