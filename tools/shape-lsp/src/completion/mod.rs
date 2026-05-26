@@ -12,6 +12,7 @@ pub mod inference;
 pub mod methods;
 pub mod providers;
 pub mod snippets;
+pub mod stdlib_methods;
 pub mod types;
 
 // Re-exports for backward compatibility
@@ -503,6 +504,23 @@ fn analyze_parsed_program(
         for m in ext_methods {
             if !entry.iter().any(|existing| existing.name == m.name) {
                 entry.push(m);
+            }
+        }
+    }
+
+    // Merge methods from Shape stdlib `.shape` sources (e.g., extend Vec<T>
+    // in stdlib-src/core/vec.shape). Cached process-wide so this is a
+    // single hashmap clone per request, not a re-parse. Without this
+    // merge, completion after `xs.` on `let xs = [1,2,3]` would never
+    // surface `map`/`filter`/etc., because those methods live in pure
+    // Shape source and the runtime `MethodTable` only carries universal
+    // methods (`toString`, `type`). See `stdlib_methods.rs` for
+    // background. LSP-C audit §A.1 / §D regression close.
+    for (type_name, std_methods) in stdlib_methods::stdlib_type_methods() {
+        let entry = impl_meths.entry(type_name.clone()).or_default();
+        for m in std_methods {
+            if !entry.iter().any(|existing| existing.name == m.name) {
+                entry.push(m.clone());
             }
         }
     }
@@ -2043,9 +2061,13 @@ let x = 1
 
     #[test]
     fn test_array_method_completions() {
-        // Array-specific methods (map, filter, etc.) are now registered from
-        // Shape stdlib (stdlib-src/core/vec.shape) during compilation.
-        // Universal methods are always present.
+        // Array-specific methods (`map`, `filter`, etc.) live in pure Shape
+        // source in `stdlib-src/core/vec.shape` via `extend Vec<T>`.
+        // LSP-C audit §A.1 / §D regression close: those stdlib methods are
+        // now loaded into the impl-methods cache by `stdlib_methods.rs` and
+        // merged into the per-request method map, parallel to the existing
+        // extension-source plumbing. Universal methods (`toString`, `type`)
+        // remain available from the runtime `MethodTable`.
         let code = "let a = [1, 2]\na.x\n";
         let position = Position {
             line: 1,
@@ -2061,6 +2083,16 @@ let x = 1
         assert!(
             labels.contains(&"type"),
             "Should include universal method 'type'. Got: {:?}",
+            labels
+        );
+        assert!(
+            labels.contains(&"map"),
+            "Should include stdlib Vec.map. Got: {:?}",
+            labels
+        );
+        assert!(
+            labels.contains(&"filter"),
+            "Should include stdlib Vec.filter. Got: {:?}",
             labels
         );
     }
