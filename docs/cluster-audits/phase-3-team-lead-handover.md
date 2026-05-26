@@ -1,14 +1,18 @@
 # Team-lead handover — Shape v0.3 close-approach
 
-**Refreshed:** 2026-05-26 at main HEAD `a572185b` (post-WAVE-1 close;
+**Refreshed:** 2026-05-26 at main HEAD `116320ba` (post-WAVE-2 close;
 awaiting supervisor + user ratify). v0.3 §0.A criteria A–J substantively
-met. v0.3.0 tag HELD pending Wave 2 + Wave 3 + Wave 4 close-gate.
+met. v0.3.0 tag HELD pending Wave 3 + Wave 4 close-gate.
 
-**Wave 1 cumulative effect:** shape-lsp --lib 22 failures → **0 failures**
-(747 passed); 8/10 §D real-editor regression flows closed. All 8
-sub-clusters (LSP-E / N / G / D / F / J / B / C) merged + per-merge
-gates green. 2 discipline incidents (git-stash binding breaches by
-LSP-B + LSP-C agents; both reversed; pre-commit hook gap surfaced).
+**Wave 1 + Wave 2 cumulative effect:** shape-lsp --lib 22 failures →
+**0 failures** (762 passed; +15 new tests on top of Wave 1's 747).
+**9 of 10 §D real-editor regression flows closed** (only #7
+prepareCallHierarchy outstanding — audit's LSP-I dropped from
+supervisor's Wave 2 list; disposition question surfaced for ratify
+below). 11 sub-clusters total (LSP-E / N / G / D / F / J / B / C
+Wave 1 + LSP-K / LSP-I / LSP-H Wave 2) — all per-merge gates green
+between every checkpoint. **Wave 2 discipline: 0/3 git-stash incidents**
+(Wave 1 was 2/8); reinforced dispatch template effective.
 
 ## Role
 
@@ -21,8 +25,8 @@ semantics. User relays between team-lead and supervisor.
 
 | | |
 |---|---|
-| Main HEAD | `a572185b` (post-LSP-C merge; Wave 1 substance complete) |
-| Smoke matrix s1–s5 | **5/5 VM == JIT** re-verified at every Wave 1 checkpoint + final at `a572185b` |
+| Main HEAD | `116320ba` (post-LSP-H merge; Wave 2 substance complete) |
+| Smoke matrix s1–s5 | **5/5 VM == JIT** re-verified at every Wave 1+2 checkpoint + final at `116320ba` |
 | verify-merge / check-no-dynamic / check-clean | 13/13 / exit 0 / exit 0 |
 | git-stash pre-commit hook | DEPLOYED (R8 W5+W6+W7 ZERO violations cumulative) |
 | conflict-marker pre-commit hook | DEPLOYED R8 W7 close (supervisor 2026-05-24 operational suggestion after the 5669a8ff incident); tested empirically (catches `+<<<<<<<` / `+=======` / `+>>>>>>>` in staged diff, exits 1 with recovery instructions) |
@@ -211,11 +215,27 @@ annotations, chain hints) stay default-ON per r-a convention.
   | LSP-B | `d536d155` | Reference-mode classifier + B14 (impl-aware renderer + alias norm) |
   | LSP-C | `a572185b` | Stdlib type-methods OnceLock cache → method-completion restored |
 
-- **Wave 2 (pending ratify):** LSP-H (deps LSP-B; CLOSED; includes
-  BindingStorageClass opt-in setting per Decision 2) + LSP-I
-  (callHierarchy) + LSP-K (trait-method → impl-method jump).
-- **Wave 3 (pending ratify):** LSP-L editor adapters (VS Code + nvim
-  minimum per Decision 1).
+- **Wave 2 — CLOSED 2026-05-26 at HEAD `116320ba`** (3 sub-clusters
+  merged with per-merge gates green; awaiting supervisor + user ratify;
+  supervisor 2026-05-26 split audit's LSP-H into LSP-H general-inlay +
+  LSP-I BindingStorageClass-opt-in sub-clusters):
+
+  | Sub-cluster | Merge SHA | Substance |
+  |---|---|---|
+  | LSP-K | `1e4e9ca5` | trait-method → impl-method jump (audit-confirmed NOT closed by LSP-D bundle); `find_trait_method_at_offset` + `collect_impl_method_locations` extension of `get_implementations` |
+  | LSP-I | `91ac004b` | BindingStorageClass opt-in default-OFF `shape.inlayHints.bindingStorageClass.enable`; 5-variant render; 10 E2E cross-product; first deployment of Shape-unique-inlay-opt-in-default-OFF standing pattern |
+  | LSP-H | `116320ba` | inlay type-prop through fn-call chains (§D #5 closed) via env-threading `infer_expr_type_with_env_public`; `.map(closure)` element-type recovery; chain-hint visitor verified default-on (W2.4/1.27 in-tree, benefits transitively) |
+
+  **callHierarchy DROPPED from Wave 2** (audit's LSP-I was callHierarchy;
+  supervisor 2026-05-26 ratify reassigned LSP-I to BindingStorageClass;
+  callHierarchy unaccounted for in explicit dispatch list — §D
+  regression flow #7 prepareCallHierarchy returns [] remains open).
+  **Disposition question outstanding** for supervisor + user ratify
+  (v0.3-gating Wave 3 add OR v0.4 deferral).
+
+- **Wave 3 (pending ratify + callHierarchy disposition):** LSP-L editor
+  adapters (VS Code + nvim minimum per Decision 1) + possibly
+  callHierarchy if v0.3-gating.
 - **Wave 4 — LSP-N CLOSE-GATE:** Manual real-editor exercise on
   VS Code + nvim. shape-test E2E re-verifies §D flows.
 
@@ -286,10 +306,9 @@ post-apply-grep discipline as §2.7.13 ratify.
 
 ## Trajectory
 
-**~3–6 supervisor sessions to v0.3.0 tag** (re-projected at Wave 1
-close; Wave 1 closed faster than the 5–10-session LSP-A projection due
-to root-cause clustering — 8 §D real-editor regression flows closed in
-1 wave; 22→0 shape-lsp test deltas).
+**~2–4 supervisor sessions to v0.3.0 tag** (re-projected at Wave 2
+close; 9/10 §D regressions closed; only LSP-L editor adapters +
+LSP-N close-gate manual exercise + optional callHierarchy remain).
 
 ## Dispatch hygiene (binding — R7 W3 + R8 W4 hardening)
 
@@ -315,10 +334,23 @@ commits while `git stash list` is non-empty (shared across all worktrees).
 ONLY, not on every `git stash` op. LSP-B + LSP-C agents each used
 `git stash push` + immediate `git stash pop` for transient work; pre-
 commit hook found stash stack EMPTY at commit time and allowed the
-commit. Both agents self-surfaced per Q3; no committed state lost.
-Hardening pending supervisor authorization — likely shell wrapper or
-git alias that rejects `stash` invocation outright (git has no native
-`pre-stash` hook).
+commit.
+
+**Hardening deployed Wave 2 (supervisor 2026-05-26 ratify):**
+- (1) Per-worktree `git -C <worktree> config alias.stash '...'` — **verified
+  empirically NO-OP** at this layer (git aliases do NOT shadow built-in
+  commands; `git stash save` still creates stashes). Deployed per
+  supervisor instruction; harmless.
+- (2) **Dispatch-template forbid-line** (verbatim) including explicit
+  syntactic-bypass refusal (`git --no-aliases stash`, etc.) + commit-
+  first WIP-commit alternative direction. LOAD-BEARING.
+- (3) Pre-commit hook stays as belt-and-suspenders for stash-pop-commits.
+
+**Wave 2 result: 0/3 stash incidents** (vs Wave 1 2/8). Hardening (2)
+is the load-bearing layer; (1) is no-op-but-harmless; (3) still useful.
+
+Hardening (4) PATH wrapper escalation NOT YET deployed per supervisor
+"don't deploy preemptively" — hold pending future violation pattern.
 
 **Audit-day exception:** read-only audits (no source changes) run in the
 main repo without worktrees provided each writes only its own audit doc and
@@ -393,10 +425,12 @@ high-impact regression flows in-editor.
 
 ---
 
-*WAVE 1 CLOSE 2026-05-26 at HEAD `a572185b`: 8 sub-clusters merged
-with per-merge gates green. shape-lsp --lib 22 failures → 0 (747
-passed). 8/10 §D real-editor regression flows closed (only #7
-prepareCallHierarchy remains for Wave 2 LSP-I). Trajectory re-projected
-~3-6 sessions to v0.3.0 tag. 2 discipline incidents (git-stash binding
-breaches by LSP-B + LSP-C; both reversed; hook gap surfaced for
-hardening). Wave 2 dispatch awaits supervisor + user ratify.*
+*WAVE 2 CLOSE 2026-05-26 at HEAD `116320ba`: 3 sub-clusters merged
+(LSP-K + LSP-I + LSP-H) with per-merge gates green. shape-lsp --lib
+762 passed / 0 failed. 9/10 §D real-editor regression flows closed
+(only #7 prepareCallHierarchy remains — disposition question
+outstanding). Wave 2 discipline: 0/3 stash incidents (vs Wave 1 2/8);
+reinforced dispatch template effective; alias-hardening empirically
+no-op for builtins but harmless. Trajectory re-projected ~2-4
+sessions to v0.3.0 tag. Wave 3 dispatch awaits supervisor + user
+ratify + callHierarchy disposition.*
