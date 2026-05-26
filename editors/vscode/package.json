@@ -17,7 +17,9 @@
   "categories": [
     "Programming Languages"
   ],
-  "activationEvents": [],
+  "activationEvents": [
+    "onLanguage:shape"
+  ],
   "main": "./out/extension.js",
   "contributes": {
     "languages": [
@@ -43,7 +45,48 @@
         "scopeName": "source.shape",
         "path": "./syntaxes/shape.tmLanguage.json"
       }
-    ]
+    ],
+    "configuration": {
+      "type": "object",
+      "title": "Shape",
+      "properties": {
+        "shape.inlayHints.enable": {
+          "type": "boolean",
+          "default": true,
+          "description": "Master toggle for Shape inlay hints. When false, suppresses every category below."
+        },
+        "shape.inlayHints.typeHints": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show inferred type hints on `let` bindings."
+        },
+        "shape.inlayHints.parameterHints": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show parameter-name hints at call sites."
+        },
+        "shape.inlayHints.variableTypeHints": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show inferred variable types where elided."
+        },
+        "shape.inlayHints.returnTypeHints": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show inferred return-type hints on `fn` declarations."
+        },
+        "shape.inlayHints.chainHints": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show intermediate-type hints on method-chain expressions."
+        },
+        "shape.inlayHints.bindingStorageClass.enable": {
+          "type": "boolean",
+          "default": false,
+          "description": "Shape-unique: show LSP-side approximation of BindingStorageClass (Direct / UniqueHeap / SharedCow / SharedAtomic / SharedAtomicMut per ADR-006). Default OFF — opt in only if you want to see storage-class inference."
+        }
+      }
+    }
   },
   "dependencies": {
     "vscode-languageclient": "^9.0.0",

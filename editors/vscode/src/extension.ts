@@ -89,6 +89,30 @@ async function checkForUpdate(): Promise<void> {
     }
 }
 
+function buildInitializationOptions(): Record<string, unknown> {
+    // Read the `shape.*` configuration block and forward it as
+    // `initializationOptions` so the server can apply preferences on first
+    // contact, in addition to receiving them via `workspace/configuration`
+    // pulls and `workspace/didChangeConfiguration` pushes.
+    const cfg = workspace.getConfiguration('shape');
+    return {
+        shape: {
+            inlayHints: {
+                enable: cfg.get<boolean>('inlayHints.enable', true),
+                typeHints: cfg.get<boolean>('inlayHints.typeHints', true),
+                parameterHints: cfg.get<boolean>('inlayHints.parameterHints', true),
+                variableTypeHints: cfg.get<boolean>('inlayHints.variableTypeHints', true),
+                returnTypeHints: cfg.get<boolean>('inlayHints.returnTypeHints', true),
+                chainHints: cfg.get<boolean>('inlayHints.chainHints', true),
+                bindingStorageClass: {
+                    // Decision 2 canonical key — opt-in default OFF.
+                    enable: cfg.get<boolean>('inlayHints.bindingStorageClass.enable', false),
+                },
+            },
+        },
+    };
+}
+
 function startLspClient() {
     const serverOptions: ServerOptions = {
         command: 'shape-lsp',
@@ -99,7 +123,12 @@ function startLspClient() {
         documentSelector: [{ scheme: 'file', language: 'shape' }],
         synchronize: {
             fileEvents: workspace.createFileSystemWatcher('**/*.shape'),
+            // Forward changes to `shape.*` settings as `workspace/didChangeConfiguration`
+            // notifications. The server's `did_change_configuration` handler honors
+            // these and refreshes the inlay-hint config (see tools/shape-lsp/src/server.rs).
+            configurationSection: 'shape',
         },
+        initializationOptions: buildInitializationOptions(),
     };
 
     client = new LanguageClient(
