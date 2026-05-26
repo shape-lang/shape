@@ -777,7 +777,6 @@ fn msgpack_module_hover() {
 // the discovery + rendering paths existing. Currently red; LSP-J closes.
 
 #[test]
-#[should_panic] // LSP-J closes — annotation hover currently returns null
 fn lsp_n_annotation_hover_returns_content() {
     // §D #8: hover on the `@description` annotation site should render the
     // annotation's documentation, not return null.
