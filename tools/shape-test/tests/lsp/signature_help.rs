@@ -52,3 +52,45 @@ fn nested_calls_inner_function_shows_signature() {
     let code = "function foo(x) { return x; }\nlet y = foo(abs(\n";
     ShapeTest::new(code).at(pos(1, 16)).expect_signature_help();
 }
+
+// == LSP-N §D regression flow #2: signatureHelp returns null mid-call =========
+//
+// Audit `v0.3-lsp-parity-audit.md` executive summary item #2: signatureHelp
+// returns null for both stdlib calls (`distance(`) and user-method calls
+// (`u.hello(`) mid-typing. Currently red; LSP-F closes.
+
+#[test]
+fn lsp_n_signature_help_for_user_function_call() {
+    // §D #2 (stdlib leg analogue using a typed user fn at module scope):
+    // `distance(` mid-typing must surface a signature. PASSES today at HEAD
+    // 7813a652 — single-file characterization does not reproduce the §D
+    // regression (which used the multi-file editor fixture
+    // `main.shape::let d = distance(p,q)`). Regression-prevention coverage.
+    let code = "\
+type Point { x: number, y: number }
+fn distance(a: Point, b: Point) -> number { 0.0 }
+let p = Point { x: 0.0, y: 0.0 }
+let q = Point { x: 1.0, y: 1.0 }
+let d = distance(
+";
+    ShapeTest::new(code)
+        .at(pos(4, 17))
+        .expect_signature_help();
+}
+
+#[test]
+#[should_panic] // LSP-F closes — signature help currently returns null on method call
+fn lsp_n_signature_help_for_user_method_call() {
+    // §D #2 (user-method leg): `u.hello(` mid-typing must surface a signature.
+    let code = "\
+type User { name: string }
+impl User {
+    fn hello(self, greeting: string) -> string { greeting }
+}
+let u = User { name: \"a\" }
+let s = u.hello(
+";
+    ShapeTest::new(code)
+        .at(pos(5, 16))
+        .expect_signature_help();
+}

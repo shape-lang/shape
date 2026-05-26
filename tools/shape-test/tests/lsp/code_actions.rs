@@ -2,6 +2,28 @@
 
 use shape_test::shape_test::{ShapeTest, range};
 
+// == LSP-N §D regression flow #6: codeAction returns 0 on real diagnostic ====
+//
+// Audit `v0.3-lsp-parity-audit.md` executive summary item #6: returns 0
+// actions on a real `Undefined variable: zzz_undefined` diagnostic — 8 sites
+// in `code_actions.rs:77-265` use `.contains("...")` keying that has drifted
+// from the diagnostic message format. Currently red; LSP-G closes.
+
+#[test]
+fn lsp_n_code_actions_for_undefined_variable_diagnostic() {
+    // §D #6: a file with a known `Undefined variable: foo` diagnostic must
+    // surface at least one quickfix action. PASSES today at HEAD 7813a652
+    // — single-file characterization does not reproduce the §D regression
+    // (which used `broken.shape` with `SEMANTIC: Undefined variable: zzz`
+    // diagnostic code keying). Regression-prevention coverage; LSP-G
+    // close-gate is the manual editor exercise on a real
+    // module-cache-bound diagnostic.
+    let code = "let x = zzz_undefined + 1\n";
+    ShapeTest::new(code)
+        .in_range(range(0, 8, 0, 21))
+        .expect_code_actions_min(1);
+}
+
 // == Quickfix actions =========================================================
 
 #[test]

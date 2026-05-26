@@ -196,3 +196,31 @@ fn test_lsp_nav_rename_function() {
         .at(pos(0, 4))
         .expect_rename_edits("compute", 3);
 }
+
+// == LSP-N §D regression flow #10: cross-file references PLUMBED (positive) ===
+//
+// Audit `v0.3-lsp-parity-audit.md` executive summary item #10: contrary to
+// the 2026-05-17 audit, the references handler is plumbed cross-file
+// (`server.rs:1239-1286` uses `get_references_cross_file`). PARTIAL →
+// COVERED. This is the only §D flow that PASSES today; the test serves as
+// regression-prevention so a future change can't silently drop the plumbing.
+//
+// Note: shape-test's `ShapeTest` is a single-file harness, so this test
+// verifies the same-file leg of the plumbed path (call-site enumeration via
+// `get_references_with_fallback`, which is the first half of
+// `get_references_cross_file`). Multi-file cross-workspace coverage is
+// owned by the audit-day harness retirement + LSP-N close-gate manual
+// editor exercise.
+
+#[test]
+fn lsp_n_references_plumbed_multiple_call_sites() {
+    // §D #10 (positive coverage): a top-level fn called multiple times must
+    // surface ≥2 references via the plumbed handler path.
+    let code = "\
+fn shared() -> int { 42 }
+let a = shared()
+let b = shared()
+let c = shared()
+";
+    ShapeTest::new(code).at(pos(0, 3)).expect_references_min(3);
+}

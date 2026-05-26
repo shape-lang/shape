@@ -63,3 +63,56 @@ function combined(x, y) { return add(x, y) + mul(x, y); }
     // "mul" starts at column 46 in "... + mul(x, y)"
     ShapeTest::new(code).at(pos(2, 46)).expect_definition();
 }
+
+// == LSP-N §D regression flow #7: prepareCallHierarchy returns [] =============
+//
+// Audit `v0.3-lsp-parity-audit.md` executive summary item #7: returns `[]`
+// for a visible user fn — the entire call-hierarchy chain is dead in the
+// editor. Currently red; LSP-I closes.
+
+#[test]
+fn lsp_n_prepare_call_hierarchy_on_visible_free_fn() {
+    // §D #7 (free-fn leg): cursor on `hello` definition must surface a
+    // CallHierarchyItem. PASSES today at HEAD 7813a652 — the
+    // `Item::Function` arm in `call_hierarchy.rs:40` is wired.
+    // Regression-prevention coverage.
+    let code = "\
+fn hello(name: string) -> string { name }
+fn main() { hello(\"world\"); }
+";
+    ShapeTest::new(code)
+        .at(pos(0, 4))
+        .expect_call_hierarchy_prepare_ok();
+}
+
+#[test]
+#[should_panic] // LSP-I closes — prepare returns [] for impl methods
+fn lsp_n_prepare_call_hierarchy_on_impl_method() {
+    // §D #7 (impl-method leg): the §D regression is specifically
+    // `fn hello (impl)` returning `[]` — i.e. the call_hierarchy dispatch
+    // at `call_hierarchy.rs:38-100` only matches `Item::Function` and
+    // `Item::ForeignFunction`; impl-block methods are silently dropped.
+    let code = "\
+type User { name: string }
+impl User {
+    fn hello(self) -> string { self.name }
+}
+fn main() { let u = User { name: \"a\" }; u.hello(); }
+";
+    ShapeTest::new(code)
+        .at(pos(2, 7))
+        .expect_call_hierarchy_prepare_ok();
+}
+
+#[test]
+fn lsp_n_prepare_call_hierarchy_on_whitespace_is_empty() {
+    // Positive-coverage regression: cursor on blank line must return empty.
+    let code = "\
+fn hello(name: string) -> string { name }
+
+fn main() { hello(\"world\"); }
+";
+    ShapeTest::new(code)
+        .at(pos(1, 0))
+        .expect_call_hierarchy_prepare_empty();
+}

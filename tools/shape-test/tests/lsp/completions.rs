@@ -479,3 +479,52 @@ fn test_lsp_nav_signature_help_user_function() {
         .at(pos(1, 6))
         .expect_signature_help_if_available();
 }
+
+// == LSP-N §D regression flow #1: method-chain completion after `.` ===========
+//
+// Audit `v0.3-lsp-parity-audit.md` executive summary item #1: `xs.` and `u.`
+// return ZERO items in real editor flow. Currently red; LSP-C closes.
+
+#[test]
+#[should_panic] // LSP-C closes — method-chain completion currently returns 0
+fn lsp_n_method_completion_after_dot_on_stdlib_array() {
+    // §D #1 (stdlib leg): expect `xs.map` to appear
+    let code = "let xs = [1, 2, 3]\nxs.\n";
+    ShapeTest::new(code)
+        .at(pos(1, 3))
+        .expect_completion("map");
+}
+
+#[test]
+fn lsp_n_method_completion_after_dot_on_user_type_field() {
+    // §D #1 (user-type, field-completion leg): expect field `name` to appear
+    // on `u.`. PASSES today at HEAD 7813a652 — single-file characterization
+    // does not reproduce the §D regression (which used a multi-line richer
+    // editor fixture). Regression-prevention coverage so future changes
+    // can't silently drop field completion on user types.
+    let code = "\
+type User { name: string }
+let u = User { name: \"a\" }
+u.
+";
+    ShapeTest::new(code)
+        .at(pos(2, 2))
+        .expect_completion("name");
+}
+
+#[test]
+#[should_panic] // LSP-C closes — impl-method completion currently returns 0
+fn lsp_n_method_completion_after_dot_on_user_type_impl_method() {
+    // §D #1 (user-type, IMPL-method leg): the §D regression is specifically
+    // that `u.` does not surface methods declared in an `impl User { ... }`
+    // block. This is the §D "u. → 0 methods" leg.
+    let code = "\
+type User { name: string }
+impl User { fn hello(self) -> string { \"hi\" } }
+let u = User { name: \"a\" }
+u.
+";
+    ShapeTest::new(code)
+        .at(pos(3, 2))
+        .expect_completion("hello");
+}
