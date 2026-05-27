@@ -1,22 +1,34 @@
-# Team-lead handover — Shape v0.3 close-approach
+# Team-lead handover — Shape v0.3.3 fix cycle
 
-**Refreshed:** 2026-05-26 at main HEAD `ad585a34` (post-WAVE-3 close;
-awaiting supervisor + user ratify). v0.3 §0.A criteria A–J substantively
-met. v0.3.0 tag HELD pending Wave 4 close-gate (LSP-N E2E re-verify +
-manual VS Code + nvim pass) + supervisor + user re-authorize.
+**Refreshed:** 2026-05-27 at main HEAD `7877fc6b` (post-classification-
+audit doc-truth refresh). **v0.3.0 / v0.3.1 / v0.3.2 SHIPPED** to crates.io
++ VS Code Marketplace + playground + book. v0.3.x LSP-parity workstream
+closed (shape-lsp 22→0; all 10 §D real-editor regression flows closed;
+13 LSP sub-clusters Wave 1-3).
 
-**Wave 1 + 2 + 3 cumulative effect:** shape-lsp --lib 22 failures →
-**0 failures** (764 passed). **All 10 §D real-editor regression flows
-closed** (incl. #7 prepareCallHierarchy via LSP-CH). 13 sub-clusters
-total (8 Wave 1 + 3 Wave 2 + 2 Wave 3) — per-merge gates green between
-every checkpoint. **Cumulative discipline: 2/13 git-stash incidents**
-(LSP-B + LSP-C Wave 1; Wave 2 and 3 = 0/5). Dispatch-template forbid-
-line + commit-first WIP alternative is load-bearing; per-worktree git
-alias retracted by supervisor 2026-05-26 (empirically no-op for
-built-ins). Editor adapters polished (VS Code + nvim per Decision 1);
-headless nvim 23/23 ServerCapabilities advertised + content responses
-on definition / references / signatureHelp / inlayHint / semanticTokens
-/ foldingRange / documentSymbol.
+**v0.3.3 IN-FLIGHT — fix cycle.** Triggered by user 2026-05-26 surfacing
+1065 silently-failing shape-test integration tests shipped through
+v0.3.0/.1/.2. Classification audit closed at HEAD `41584620` (TAXONOMY
++ TRUTH-SET + SCOPE-RECLAIM + ALLOWLIST + 61 per-binary docs); doc-
+truth refresh at `7877fc6b`.
+
+**v0.3.3 release-blocking set: 1220 fails** per user 2026-05-27
+disposition (B): *"everything needs to work, v0.3.3 is the target. we
+are talking about a programming language. correctness is key."*
+
+| Class | Count | Disposition |
+|---|---:|---|
+| FN-REG-CORRECTNESS | 459 | RELEASE-BLOCKING |
+| SCOPE-RECLAIM | 761 | RELEASE-BLOCKING (no v0.4 re-disposition) |
+| FN-REG-DIAGNOSTIC | 57 | Per-test fixture update in lockstep with language fix |
+| V0.4-DEFER | 40 | Allowlisted (§5.16 B2 EnumPayload + IntrinsicVecAddI64) |
+| INFRA-FLAKY | 1 | complex_integration parallel-cargo OOM |
+| UNKNOWN | 4 | Narrow bisects pre-reclassify |
+
+**Audit-day in flight (HEAD `7877fc6b`):** 13 parallel root-cause audit
+agents dispatched 2026-05-27. Output: `docs/cluster-audits/v0.3.3/<NN>-
+<cluster>.md`. Audit-only (audit-day exception); fix-dispatch starts
+after audits close + team-lead consolidates partition.
 
 ## Role
 
@@ -29,14 +41,50 @@ semantics. User relays between team-lead and supervisor.
 
 | | |
 |---|---|
-| Main HEAD | `ad585a34` (post-LSP-L merge; Wave 3 substance complete) |
-| Smoke matrix s1–s5 | **5/5 VM == JIT** re-verified at every Wave 1+2+3 checkpoint + final at `ad585a34` |
+| Main HEAD | `7877fc6b` (post-classification-audit doc-truth refresh) |
+| Smoke matrix s1–s5 | **5/5 VM == JIT** preserved through v0.3.0/.1/.2 shipping |
 | verify-merge / check-no-dynamic / check-clean | 13/13 / exit 0 / exit 0 |
-| git-stash pre-commit hook | DEPLOYED (R8 W5+W6+W7 ZERO violations cumulative) |
-| conflict-marker pre-commit hook | DEPLOYED R8 W7 close (supervisor 2026-05-24 operational suggestion after the 5669a8ff incident); tested empirically (catches `+<<<<<<<` / `+=======` / `+>>>>>>>` in staged diff, exits 1 with recovery instructions) |
+| Pre-commit hooks | git-stash + conflict-marker DEPLOYED |
+| Tagged + shipped | **v0.3.0** (yanked from crates.io for LEVEL_TRACE; YANK pending; tag retained), **v0.3.1**, **v0.3.2** (current) |
 | Co-Authored-By trailers (cumulative) | 0 |
-| Bad-code merges (cumulative) | 0 (1 conflict-marker miss in R8 W7 was caught + cleaned in follow-up commit `675dcf1b`) |
-| v0.3.0 tag | NOT landed — gated on remaining items + user authorization |
+| Bad-code merges (cumulative) | 0 |
+| shape-test corpus | **1322 fails classified** (459 FN-REG-C + 761 SCOPE-RECLAIM + 57 D + 40 V4 + 1 F + 4 U) |
+
+## v0.3.3 scope — release-blocking fix cycle
+
+**User 2026-05-27 disposition (B):** *"everything needs to work, v0.3.3
+is the target. we are talking about a programming language. correctness
+is key."* → all 761 SCOPE-RECLAIM stays release-blocking; no v0.4
+re-disposition. Release-blocking set = **1220 fails** (459 + 761).
+
+**Sequencing binding (memory-unsafety + silent-wrong FIRST per
+2026-05-20 no-known-incorrectness):**
+
+1. SIGABRT 130-137 TB OOM ×3 (nested struct access)
+2. ADR-006 §2.7.13 DerefStore kind-drift ×3
+3. wire_conversion enum-discriminant panic ×2 + `.type()` cluster (×9)
+4. pointer-as-float silent-wrong-output ×3 (NaN-box residual?)
+5. Result `!!`/`?` runtime broken (~85 tests — single largest user-
+   facing impact bucket)
+6. bitwise reinterpret memory ×8
+7. borrow-check bypass ×2
+
+**Audit-day in flight at HEAD `7877fc6b`:** 13 parallel root-cause audit
+agents dispatched 2026-05-27. Output `docs/cluster-audits/v0.3.3/<NN>-
+<cluster>.md`. After audits land, team-lead consolidates partition +
+supervisor ratifies sequencing + fix waves dispatch.
+
+**New v0.3.3 close-gates (per supervisor 2026-05-26 Step 3 ratify):**
+
+- `cargo test -p shape-test --no-fail-fast` classified-allowlist diff
+  (allowlist pinned at 41 = 40 V4 + 1 INFRA-FLAKY).
+- ZERO FN-REG-CORRECTNESS / ZERO SCOPE-RECLAIM in pre-tag corpus.
+- `check-no-mis-cite` gate (queued; pre-commit-hook deploy planned)
+  — any NEW SURFACE citing §5.16/§5.15/Wave-6/"v0.4 / planned" must
+  grep-verify against TAXONOMY dated pull-in table.
+- Combination-shape smoke fixtures s6+ (planned; covers TypedObject +
+  HOF + interpolation + Result-chain).
+- "Pre-existing baseline" exemption category REMOVED.
 
 ## R8 W6 dispatch — Supervisor 16-item disposition (binding 2026-05-24)
 
@@ -325,10 +373,25 @@ post-apply-grep discipline as §2.7.13 ratify.
 
 ## Trajectory
 
-**~1 supervisor session to v0.3.0 tag** (re-projected at Wave 3 close;
-10/10 §D regressions closed; substance work complete; only Wave 4
-close-gate manual editor pass + supervisor ratify + user authorize tag
-remain).
+**v0.3.0/.1/.2 SHIPPED.** v0.3.0 yanked from crates.io for LEVEL_TRACE
+(user-noted yank pending); v0.3.1 republished + fixed; v0.3.2 fixed
+print() OutputAdapter regression. All live on crates.io / VS Code
+Marketplace / playground / book.
+
+**v0.3.3 in flight — multi-session fix cycle.** 1220 release-blocking
+fails to address across ~13 root-cause families. Audit-day in flight at
+HEAD `7877fc6b`. Honest sizing: **~8-15 supervisor sessions to v0.3.3
+tag** depending on:
+- (a) how many SCOPE-RECLAIM families share root cause (single-bisect
+  potential for the V3-S5 ckpt-5/6 + ckpt-2/3 families could collapse
+  ~520 fails into 2-3 fix waves);
+- (b) how many FN-REG-CORRECTNESS clusters share root cause (closures_hof
+  S1 + variables_bindings width-types + type_inference inference loss
+  may collapse if the W17/W18 typed-publish path is a common upstream);
+- (c) supervisor architectural calls on the SIGABRT OOM family (likely
+  the most-uncertain root cause; may need ADR amendment).
+
+Re-project after audit-day closes + partition consolidates.
 
 ## Dispatch hygiene (binding — R7 W3 + R8 W4 hardening)
 
@@ -387,21 +450,28 @@ ec=$?; last=$(echo "$out" | tail -1)
 Fixtures `tests/smokes/s{1..5}.shape`; expected s1 `4950` / s2 `30` / s3 `x`
 / s4 `2` / s5 `x`, all ec=0, VM == JIT.
 
-## Pending the v0.3 tag
+## Pending the v0.3.3 tag
 
-1. **LSP-parity Wave 1 lands** (LSP-E serial first; rest parallel
-   after; LSP-N parallel from start).
-2. **LSP-parity Wave 2 lands** (LSP-H w/ BindingStorageClass opt-in;
-   LSP-I; LSP-K).
-3. **LSP-parity Wave 3 lands** (LSP-L editor adapters: VS Code + nvim).
-4. **LSP-N CLOSE-GATE manual editor exercise** on VS Code + nvim;
-   shape-test E2E covers 10 §D regression flows; audit-day JSON-RPC
-   harness retired.
-5. Smoke 5/5 preserved at every checkpoint.
-6. ADR §2.7.4 addendum text ratifies (carry-over from R8 W7).
-7. Relay close-evidence to supervisor; supervisor ratifies.
-8. **User** authorizes the `v0.3.0` tag.
-9. Team-lead lands the tag at the authorized commit.
+1. **13-agent root-cause audit closes** (in flight at `7877fc6b`;
+   output `docs/cluster-audits/v0.3.3/<NN>-<cluster>.md`).
+2. **Team-lead consolidates v0.3.3 partition** from audit findings;
+   sequences by memory-unsafety-first binding.
+3. **Supervisor + user ratify partition** + per-wave sequencing.
+4. **Fix waves dispatch** sequentially per ratified order. Memory-
+   unsafety / silent-wrong-output FIRST.
+5. **Per-merge gates green** at every checkpoint: smoke 5/5 + verify-
+   merge 13/13 + check-no-dynamic + check-clean + **NEW**: shape-test
+   --no-fail-fast allowlist-diff stays ≤41.
+6. **check-no-mis-cite pre-commit hook deploys** before any new SURFACE
+   strings land.
+7. **Combination-shape smoke fixtures s6+ ship** (TypedObject + HOF +
+   interpolation + Result-chain).
+8. **Full corpus reaches 0 FN-REG-CORRECTNESS / 0 SCOPE-RECLAIM /
+   ≤41 allowlist.**
+9. Relay close-evidence to supervisor; supervisor ratifies.
+10. **User** authorizes the `v0.3.3` tag.
+11. Team-lead lands the tag (per shape-release skill); shape-app +
+    shape-web consumer bumps; playground deploy verify.
 
 ## Bindings — refuse on sight
 
