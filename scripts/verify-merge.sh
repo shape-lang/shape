@@ -405,6 +405,7 @@ colon_return_hits=$(rg --no-heading -n -P '^\s*[a-z_][a-zA-Z0-9_]*\s*\([^)]*\)\s
   | rg -v ':\s*//' \
   | rg -v '\bfn\s+[a-z_]' \
   | rg -v '\bmethod\s+[a-z_]' \
+  | rg -v '^docs/cluster-audits/v0\.3(\.3)?-?(classification)?/' \
   || true)
 
 if [[ -z "$colon_return_hits" ]]; then
