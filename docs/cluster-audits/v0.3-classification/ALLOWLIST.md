@@ -17,7 +17,7 @@ the release. Built per supervisor 2026-05-26 Step 3(a) ratify:
 | INFRA-FLAKY | 1 | Test-isolation defect; investigate but not release-blocking. |
 | **TOTAL ALLOWLISTED** | **98** | |
 
-## Per-binary allowlist
+## Per-binary allowlist (refined post error_handling + regression re-class)
 
 ```
 binary                  V4   D   F   Allowlist total
@@ -27,23 +27,31 @@ comptime                 0   1   0   1
 complex_integration      0   0   1   1
 control_flow             0   5   0   5
 enums                   27   0   0  27
+error_handling          12   1   0  13   ← post --nocapture re-class
 literals                 0   1   0   1
 lsp                      0   4   0   4
 modules_visibility       0   1   0   1
 objects_arrays           1   0   0   1
 query_language           0   2   0   2
-regression               0  36   0  36
+regression               0  27   0  27   ← post serial-run refinement (was 36)
 stdlib_http              0   5   0   5
 window_functions         0   7   0   7
 ─────────────────────────────────────────────────────
-TOTALS                  28  65   1  94
+TOTALS                  40  57   1  98
 ```
 
-## V0.4-DEFER per-test issue links (28)
+## V0.4-DEFER per-test issue links (40)
+
+Per user 2026-05-27 disposition (B): all 761 SCOPE-RECLAIM stays
+release-blocking. Allowlist is **PINNED at 41** (40 V0.4-DEFER + 1
+INFRA-FLAKY). All entries below have user-confirmed v0.4 deferral
+authority (§5.16 B2 EnumPayload supervisor 2026-05-25; bare-cite
+fall-through for IntrinsicVecAddI64 SURFACE).
 
 | Test | Issue / justification |
 |---|---|
-| enums::* (27 match-arm payload tests, e.g. `match_some_then_arithmetic_on_x`, `match_ok_then_arithmetic_on_v`, etc.) | §5.16 B2 EnumPayload preflight (supervisor 2026-05-25 named scope). Match-arm payload binding has type `unknown` in arithmetic context. Surface-and-stops with structured semantic error. Issue: TBD-v0.4-b2-enum-payload-preflight. |
+| enums::* (27 match-arm payload tests) | §5.16 B2 EnumPayload preflight (supervisor 2026-05-25 named scope). Match-arm payload binding has type `unknown` in arithmetic context. Surface-and-stops with structured semantic error. Issue: TBD-v0.4-b2-enum-payload-preflight. |
+| error_handling::stress_ok_err::match_ok_with_* + result_creation::result_match_* + result_in_array + result_creation::option_*coalesce* + stress_propagation::result_accumulation_in_loop (12 tests) | Same §5.16 B2 EnumPayload preflight — Result/Option match-arm payload `unknown` in arithmetic. Sister cluster to enums above. Issue: TBD-v0.4-b2-enum-payload-preflight (shared). |
 | objects_arrays::array_concatenation_with_plus | SURFACE explicitly cites `v0.4 / planned` for `IntrinsicVecAddI64`. Vec append via `+` operator. Issue: TBD-v0.4-vec-plus-op. |
 
 ## FN-REG-DIAGNOSTIC per-binary

@@ -2,7 +2,7 @@
 
 **HEAD:** `82f049dd`.
 **Audit closed:** 2026-05-27.
-**Scope:** all 756 SCOPE-RECLAIM entries from the v0.3.2 classification
+**Scope:** all 761 SCOPE-RECLAIM entries from the v0.3.2 classification
 audit. This doc enumerates the SURFACE-cite-vs-dated-pull-in
 contradictions sorted by user-pull-in date so the supervisor + user can
 re-disposition systematically.
@@ -19,8 +19,10 @@ authority that no dated re-disposition granted. Per the taxonomy rule:
 > without the dated re-disposition are MIS-CITES; the underlying
 > failure routes here, not to V0.4-DEFER.
 
-The 756 SCOPE-RECLAIM entries are RELEASE-BLOCKING **until the user
-explicitly re-dispositions specific entries to v0.4**.
+The 761 SCOPE-RECLAIM entries are RELEASE-BLOCKING. Per user 2026-05-27
+disposition (B): all 761 stays release-blocking; no family re-
+dispositioned to v0.4. This SCOPE-RECLAIM bucket is part of the 1220-
+fail v0.3.3 release-gating set.
 
 ## §5.16 actual scope (supervisor 2026-05-25)
 
@@ -142,33 +144,26 @@ the underlying work is in DATED v0.3 user-pull-in scope:
 | `"v0.4 / planned"` (bare) | ~30 | various; bare-cite without a specific anchor — no authority to defer. |
 | `"W17-marshal-return-arms follow-up"` | ~30 | W17.3-4 pulled in 2026-05-22; follow-up is in-scope completion, not v0.4. |
 
-## Recommended supervisor + user re-disposition
+## User disposition 2026-05-27 — (B) full release-blocking
 
-Three families warrant supervisor + user review for potential v0.4
-re-disposition:
+User chose option (B): all 761 SCOPE-RECLAIM stays release-blocking. No
+family re-dispositioned to v0.4. Rationale (verbatim): *"everything
+needs to work, v0.3.3 is the target. we are talking about a programming
+language. correctness is key."*
 
-1. **comptime / W18 content-rendering complex interactions** (~12) — if
-   the W18 supervisor-routing kept some narrow surfaces deferred, those
-   may be eligible.
-2. **Cross-workspace call-hierarchy** (mentioned in LSP-K close) —
-   single-file only landed in v0.3; cross-file may be v0.4. Not in
-   SCOPE-RECLAIM today (no failing tests cite it) but flag.
-3. **§5.15 module-mutable-bindings** is correctly v0.4. Anything that
-   genuinely needs module-level `let mut` (not const) and that the test
-   was asserting on module-mutable behavior is V0.4-DEFER, not SCOPE-
-   RECLAIM. Audit didn't surface any such tests, but worth confirming.
+**No SCOPE-RECLAIM re-disposition without a NEW dated user message
+naming the family.** The 2026-05-27 (B) disposition is the standing
+word. v0.3.3 release-gating set = 459 FN-REG-CORRECTNESS + 761 SCOPE-
+RECLAIM = 1220.
 
-**All other SCOPE-RECLAIM entries are release-blocking by default.**
+## Action items (post-disposition)
 
-## Action items
-
-1. Supervisor + user review this doc and either:
-   a. Confirm full SCOPE-RECLAIM bucket (756) is release-blocking, OR
-   b. Re-disposition specific named families to v0.4 with dated
-      authorization (must be a new dated authorization explicitly
-      naming the family).
-2. After (1), the next-release-gating set = FN-REG-CORRECTNESS (367) +
-   surviving SCOPE-RECLAIM.
-3. Add a `check-no-mis-cite` gate (grep verify that no SURFACE message
-   cites v0.4 / §5.16 / §5.15 / Wave-6 anchors without a corresponding
-   dated re-disposition in the pull-in table).
+1. ✅ Supervisor + user ratified at HEAD `41584620` (this commit's
+   parent lineage).
+2. Next-release-gating set = FN-REG-CORRECTNESS (459) + SCOPE-RECLAIM
+   (761) = 1220.
+3. Add a `check-no-mis-cite` gate per supervisor-binding: any NEW
+   SURFACE message that cites `§5.16` / `§5.15` / `Wave 6 follow-up` /
+   `"v0.4 / planned"` must grep-verify against the TAXONOMY dated
+   pull-in table at commit time. Mechanical enforcement preferred
+   (pre-commit hook).

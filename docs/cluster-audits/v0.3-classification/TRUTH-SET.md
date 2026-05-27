@@ -195,30 +195,36 @@ Mostly stale text in test assertions. Largest cluster:
 Fix path: per-test fixture text updates (NOT bulk-update; per-test per
 the binding).
 
-## UNKNOWN (92)
+## UNKNOWN (4)
 
-- **error_handling (90)** — log truncated; re-run with `--nocapture`
-  is in flight in this session (background task `bgfkvvp4p`). After
-  re-run the agent re-classifies; expected to be predominantly the
-  Result `!!` / `?` operator regression family (FN-REG-CORRECTNESS).
+- **error_handling (1)** — `const_types_strings::const_complex_expression`
+  (trivial `const X = 3 * 4 + 2; X` fixture; no obvious connection to
+  Result/Option/`?`/`!!`/B2 patterns). Needs narrow bisect.
 - **iterators (1)** — `stress_reduce_collect::test_array_foreach` —
   closure-capture / borrow-solver path needing bisect.
 - **pattern_matching (1)** — `t115_match_recursive_function` — `int | number`
   union shape needing fixture-read to disambiguate generic-instantiation
   vs strict-typing destructuring.
+- **regression (1)** — `qa::regression_med_13_mutable_params` —
+  `#[should_panic]` that no longer panics; needs re-run with attribute
+  removed.
 
-## Next-release-gating fix set
+## v0.3.3 release-gating fix set (per user 2026-05-27 disposition (B))
 
-After supervisor + user re-disposition of any SCOPE-RECLAIM entries:
+Per user 2026-05-27 verbatim: *"everything needs to work, v0.3.3 is the
+target. we are talking about a programming language. correctness is key."*
 
-1. All **FN-REG-CORRECTNESS** (367) — RELEASE-BLOCKING.
-2. All remaining **SCOPE-RECLAIM** (756 minus re-dispositioned) —
-   RELEASE-BLOCKING.
-3. **FN-REG-DIAGNOSTIC** (65) — per-test fixture updates in lockstep.
-4. **V0.4-DEFER** (28) — issue-file for v0.4; allowlisted.
-5. **INFRA-FLAKY** (1) — complex_integration full-binary OOM under
-   parallel cargo; investigate test isolation.
-6. **UNKNOWN** (92) — error_handling re-run + 2 narrow bisects.
+1. All **FN-REG-CORRECTNESS** (459) — RELEASE-BLOCKING.
+2. All **SCOPE-RECLAIM** (761) — RELEASE-BLOCKING (no re-disposition).
+3. **FN-REG-DIAGNOSTIC** (57) — per-test fixture updates in LOCKSTEP
+   with the language fix that drove the new diagnostic.
+4. **V0.4-DEFER** (40) — issue-file for v0.4; allowlisted (B2 EnumPayload
+   §5.16 cluster + IntrinsicVecAddI64 bare SURFACE).
+5. **INFRA-FLAKY** (1) — complex_integration parallel-cargo OOM;
+   isolation defect.
+6. **UNKNOWN** (4) — narrow bisects before reclassify.
+
+**Release-blocking total: 1220 fails. Allowlist pinned at 41 (40 V4 + 1 F).**
 
 ## Discipline findings
 
