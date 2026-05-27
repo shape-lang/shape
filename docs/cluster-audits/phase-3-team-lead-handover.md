@@ -69,10 +69,119 @@ re-disposition. Release-blocking set = **1220 fails** (459 + 761).
 6. bitwise reinterpret memory ×8
 7. borrow-check bypass ×2
 
-**Audit-day in flight at HEAD `7877fc6b`:** 13 parallel root-cause audit
-agents dispatched 2026-05-27. Output `docs/cluster-audits/v0.3.3/<NN>-
-<cluster>.md`. After audits land, team-lead consolidates partition +
-supervisor ratifies sequencing + fix waves dispatch.
+**Audit-day CLOSED 2026-05-27.** 13 parallel root-cause audits landed
+at `docs/cluster-audits/v0.3.3/01-…13-…md` with bisect anchors,
+minimal repros, sub-cluster names, sizes, and cross-cluster
+dependencies. Supervisor 2026-05-27 RATIFIED partition + sequencing
+(below).
+
+## v0.3.3 fix-wave plan (supervisor-ratified 2026-05-27)
+
+### Wave 1 — memory-unsafety / silent-wrong (S–M each, ~7–10 sessions)
+
+  → **JOINT-FIX #1** (c7+c3 return-kind family)
+     Cluster #7 Result-fn-return-kind-clobber + cluster #3
+     wire_conversion v2-raw carrier projection. Smoking gun:
+     `control_flow/mod.rs:874-877 op_return_value_bool` (and _i64/_u64/
+     _i32/_u8 family L830-866) hard-codes NativeKind, discarding
+     src_kind. ONE LINE-FAMILY FIX flips ~85 (c7) + ~11 (c3 named) +
+     larger silent-wrong cone.
+     **MANDATORY ARCHITECTURAL BINDERS (supervisor 2026-05-27):**
+     (a) verify JIT-side return-handling doesn't rely on
+         `op_return_value_<scalar>`'s suffix-as-truth contract — READ
+         the JIT consumer site BEFORE patching executor;
+     (b) fix shape = uniform §2.7.7 "kind from producer" across ALL
+         typed `op_return_value_*` (NOT a heap-carrier-only special
+         case that becomes permanent dual-path maintenance);
+     (c) update L820-825 docstring at the same commit — that contract
+         text is now wrong.
+     **Cross-check before JOINT-FIX #2 dispatches:** if cluster #2
+     sub-bug B shares the typed-return-clobber root, fold into
+     JOINT-FIX #1 scope (not #2).
+
+  → **JOINT-FIX #2** (c1+c2-B+c4-4C carrier-disambig)
+     SIGABRT-OOM-nested-struct + DerefStore §2.7.13 sub-bug B nested-
+     projection + pointer-as-float-leak 4C. All three at v2-raw
+     `*const StringObj`/`TypedObjectStorage` vs Arc-wrapped carrier
+     disambiguation gap. Producer-side kind-drift at
+     `typed_object_ops.rs:237-471` / `helpers_reference.rs:107-141`.
+     Note: agent #1 vs agent #4 had conflicting overlap reads;
+     agent #4 (4C drives c1 SIGABRT) is authoritative per cross-agent
+     reconciliation. SIZE: S-M.
+
+  → **c4-4A/4B sub-fixes** (post-#1/#2): VM `op_return_value_*` re-stamp
+     + JIT trampoline-VM boundary raw-u64 return.
+
+  → **c5 bitwise gate + pop_kinded sweep**
+     `binary_ops.rs:1403-1576` bitwise arm — extend `is_strict_arithmetic`
+     to cover bitwise; delete `exec_dyn_bit_*` helpers (CLAUDE.md
+     §Forbidden-Code violation). **MANDATORY** (supervisor 2026-05-27):
+     audit every `pop_kinded()` caller in `executor/` for discarded
+     src_kind; bake the SWEEP into the c5 close, not a future round.
+
+  → **c6 borrow-check bypass**: re-add narrow compiler guards
+     (`statements.rs:783 + :4827`) + add `LoanSinkKind::ModuleBindingStore`
+     to MIR solver. Bisect `8bbd2f99` (R8 W9 B5+B9). 3 small commits.
+
+  → **c9-A misaligned-ptr-deref** (after c8 S1 closes — see Wave 2)
+
+  → **c2-A assignment widening** at `assignment.rs:498-553` — COMPILE-
+     REJECT mismatched-numeric-width assigns (NOT a runtime
+     `ConvertIntToNumber` opcode; that's the W4-δ defection-attractor).
+
+### Wave 2 — closures/traits/enums/width-types (~5–8 sessions)
+
+  → **c8 S1** closure-param infer loss. Fix A: defer let-bound closure
+     compile until first call site, reuse `ClosureBodyPeek` +
+     `pending_closure_param_types`. Fix surface `closures.rs:742-780`.
+     **Blocks c9 S2.**
+
+  → **c9 S2** var-capture upvalue ABI mismatch. CallFrame.upvalues
+     has NO WRITER; W7 lands captures into local-slot window but 22
+     opcodes read via frame.upvalues. Bisect `05eb1d6d` + `10a2a011` +
+     `028b8f47`.
+
+  → **c10 traits-W1** two-locus fix: thread trait return-type through
+     `emit_operator_trait_call` (~9 call sites) + extend `builtin_format`
+     to invoke `try_dispatch_display`. Closes ~30/34.
+
+  → **c11 width-types** return-projection at `execution.rs:557-568` +
+     compile-time width-overflow gate. Closes 19.
+
+  → **c12 enums-eq** synthesize Eq for enum at `register_enum` +
+     extend `compile_typed_equality` Enum arm. Closes 32. Shares
+     `binary_ops.rs` site with c10 — coordinate sequencing.
+
+### Wave 3 — SCOPE-RECLAIM F1+F2+F3+F4+F6 (parallelizable, ~10–15 sessions)
+
+  → Family 1 V3-S5 ckpt-5/6 op_new_array construction (XL ~340) —
+     architectural keystone (1a).
+  → Family 3 W17.3-4 + W17-marshal (M ~110) — 1b parallel.
+  → Family 4 destructuring (S–M ~80) — 1c parallel.
+  → Family 6 comptime trait Cluster A const-init (M ~70) — 1d parallel.
+  → Family 2 V3-S5 ckpt-2/3 consumer-cascade (L ~180) — 2a after F1.
+
+### Wave 4 — F5 + F7 + LSP + UNKNOWN (~3–5 sessions)
+
+  → Family 5 HashMap rebuild + W13 mutation (M ~65).
+  → Family 7 W18 content + LSP-parity gaps (S ~24).
+  → UNKNOWN bisects (4 tests).
+  → Final allowlist-diff close-gate verification.
+
+### Pre-Wave-1 mandatory deploys
+
+- **`check-no-mis-cite` gate** at `.git/hooks/pre-commit` — protects
+  the fix-set from re-introducing the §5.16/§5.15/Wave-6/"v0.4 /
+  planned" mis-cite pattern. Deploy BEFORE Wave 1 dispatch.
+- **Doc-truth refresh** already committed at HEAD `7877fc6b`
+  (ALLOWLIST per-binary 94→98 + TRUTH-SET §UNKNOWN(4) +
+  SCOPE-RECLAIM 761/459 — already in tree).
+
+### Trajectory (locked)
+
+**~25–38 supervisor sessions to v0.3.3 tag.** Downward-revisable as
+shared roots collapse families (JOINT-FIX #1 alone removes ~85+~11+
+silent-wrong-cone in one fix).
 
 **New v0.3.3 close-gates (per supervisor 2026-05-26 Step 3 ratify):**
 
