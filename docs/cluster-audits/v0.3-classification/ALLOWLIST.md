@@ -8,14 +8,14 @@ the release. Built per supervisor 2026-05-26 Step 3(a) ratify:
 > Allowlist with **ZERO FN-REG-CORRECTNESS** and **ZERO SCOPE-RECLAIM**
 > entries by design (both classes RELEASE-BLOCKING).
 
-## Allowlisted classes (release-safe)
+## Allowlisted classes (release-safe; refined post error_handling + regression re-class)
 
 | Class | Count | Disposition |
 |---|---:|---|
-| V0.4-DEFER | 28 | Legitimate v0.4 (§5.16 named scope). Each entry has an issue link or in-doc justification. |
-| FN-REG-DIAGNOSTIC | 65 | Per-test fixture text updates; the language behavior is correct. |
+| V0.4-DEFER | 40 | Legitimate v0.4 (§5.16 named scope). Each entry has an issue link or in-doc justification. |
+| FN-REG-DIAGNOSTIC | 57 | Per-test fixture text updates; the language behavior is correct. |
 | INFRA-FLAKY | 1 | Test-isolation defect; investigate but not release-blocking. |
-| **TOTAL ALLOWLISTED** | **94** | |
+| **TOTAL ALLOWLISTED** | **98** | |
 
 ## Per-binary allowlist
 

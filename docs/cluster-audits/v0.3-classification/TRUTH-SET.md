@@ -8,19 +8,19 @@ tests in `shape-test` shipped silently through v0.3.0 / v0.3.1 / v0.3.2.
 sequential batch for slow-build binaries. One audit doc per test binary
 under `docs/cluster-audits/v0.3-classification/<binary>.md`.
 
-## Aggregate
+## Aggregate (refined post error_handling + regression re-classification)
 
 | Class | Count | % | Disposition |
 |---|---:|---:|---|
-| **FN-REG-CORRECTNESS** | **367** | **28%** | **RELEASE-BLOCKING** — real correctness regressions, must fix before next tag. |
-| **SCOPE-RECLAIM** | **756** | **58%** | **RELEASE-BLOCKING** until user re-dispositions to v0.4. Work pulled into v0.3 by dated user authorization. |
-| FN-REG-DIAGNOSTIC | 65 | 5% | Per-test fixture text update. |
-| V0.4-DEFER | 28 | 2% | Legitimately v0.4 (§5.16 named scope: B2 EnumPayload-payload binding). |
+| **FN-REG-CORRECTNESS** | **459** | **35%** | **RELEASE-BLOCKING** — real correctness regressions, must fix before next tag. |
+| **SCOPE-RECLAIM** | **761** | **58%** | **RELEASE-BLOCKING** until user re-dispositions to v0.4. Work pulled into v0.3 by dated user authorization. |
+| FN-REG-DIAGNOSTIC | 57 | 4% | Per-test fixture text update. |
+| V0.4-DEFER | 40 | 3% | Legitimately v0.4 (§5.16 B2 EnumPayload — 27 in enums + 12 in error_handling + 1 IntrinsicVecAddI64). |
 | INFRA-FLAKY | 1 | <1% | Binary-level SIGSEGV under parallel cargo (complex_integration). |
-| UNKNOWN | 92 | 7% | 90 in error_handling (log truncated; re-run in flight); 2 narrow cases. |
-| **TOTAL** | **1309** | | (some over-count from per-shape grouping vs per-test 1065 raw fails) |
+| UNKNOWN | 4 | <1% | error_handling(1) const_complex_expression + iterators(1) forEach + pattern_matching(1) recursive-match + regression(1) should_panic-no-longer-panics. |
+| **TOTAL** | **1322** | | (over-count from per-shape grouping vs per-test 1065 raw fails) |
 
-**Release-blocking total: 1123 fails (86% of corpus).**
+**Release-blocking total: 1220 fails (92% of corpus).**
 
 ## Per-binary table
 
@@ -44,7 +44,7 @@ drop_raii                   0   0    3   0  0   0
 e2e                         1   0    0   0  0   0
 e2e_gated                   0   0    0   0  0   0  ← Cargo-feature gated
 enums                      44   0   19  27  0   0
-error_handling              0   0    0   0  0  90  ← log truncated (re-run)
+error_handling             76   1    0  12  0   1  ← Result `!!`/`?` runtime broken
 extend_blocks               0   0    0   0  0   0  ← all-green
 features                    2   0    0   0  0   0
 functions                   0   0    0   0  0   0  ← all-green (214/214)
@@ -67,7 +67,7 @@ packages_bundles            0   0    0   0  0   0  ← all-green
 pattern_matching            4   0   28   0  0   1
 query_language              3   2    2   0  0   0
 ranges                      2   0    1   0  0   0
-regression                  6  36    0   0  0   0
+regression                 22  27    5   0  0   1  ← refined per serial-run evidence
 security_permissions        1   0    1   0  0   0
 smoke_test                  0   0    0   0  0   0  ← all-green
 snapshots_resume            0   0    1   0  0   0
@@ -89,7 +89,7 @@ variables_bindings         20   0    5   0  0   0
 window_functions            0   7    0   0  0   0
 wire_protocol               0   0    0   0  0   0  ← all-green
 ─────────────────────────────────────────────────
-TOTALS                    367  65  756  28  1  92  = 1309
+TOTALS                    459  57  761  40  1   4  = 1322
 ```
 
 C = FN-REG-CORRECTNESS · D = FN-REG-DIAGNOSTIC · SR = SCOPE-RECLAIM · V4 = V0.4-DEFER · F = INFRA-FLAKY · U = UNKNOWN
@@ -107,10 +107,15 @@ C = FN-REG-CORRECTNESS · D = FN-REG-DIAGNOSTIC · SR = SCOPE-RECLAIM · V4 = V0
 1. **closures_hof (123)** — closure-param type-inference loss (77), var-
    capture upvalue allocation broken (23), NativeView carrier-mislabel
    (19). **Core ADR-006 closure semantics.**
-2. **enums (44)** — enum equality `==/!=` rejected on statically-
+2. **error_handling (76)** — Result `!!` context-operator broken at
+   runtime (26), Result `?` try-operator broken at runtime (15), `?` +
+   propagation chain regressions (9), `!!`+`?` combined edge-cases (16),
+   TryInto/Into semantic-diagnostic (5), array-bounds returns-None
+   contract broken (5).
+3. **enums (44)** — enum equality `==/!=` rejected on statically-
    resolved same-enum operands; wire_conversion soundness panic;
    Option print not unwrapping; Result `!!`/`?` broken.
-3. **traits (34)** — 30/34 collapse to W1 trait-operator-coverage
+4. **traits (34)** — 30/34 collapse to W1 trait-operator-coverage
    regression (operator unresolved on user types / Display not
    dispatching / trait return-type not threaded). Likely single bisect
    fixes ~30.
