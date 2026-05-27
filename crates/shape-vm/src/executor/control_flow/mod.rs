@@ -815,65 +815,68 @@ impl VirtualMachine {
     // Wave E+3: typed `ReturnValue<Kind>` handlers (opcodes 0x198..=0x1A2)
     //
     // Each typed handler is a thin wrapper around `return_value_inner`.
-    // The handler bodies are identical at runtime — the encoded `<Kind>`
-    // exists for static type information so the caller's stack
-    // discipline is known at the call site (consumed by the JIT and
-    // other downstream tooling).
+    // Per ADR-006 §2.7.7 the kind on the parallel-kind track MUST come
+    // from the actual producer (popped from the callee stack via
+    // `pop_kinded`), never fabricated from the opcode suffix. The
+    // encoded `<Kind>` suffix is a JIT static-annotation only — a
+    // compile-time witness that the producer kind matched the declared
+    // return type. Fabricating from the suffix here would clobber heap
+    // carriers (`Ptr(HeapKind::Result)` / `Ptr(HeapKind::Option)` /
+    // enum TypedObject carriers) when the compile-time picker
+    // mis-classifies the function body (joint-fix-1 c7+c3 bug).
     //
     // The legacy `op_return_value` (0x45) stays live for unproven-type
-    // return positions.
+    // return positions and uses the same "kind from producer" rule.
     // ─────────────────────────────────────────────────────────────────
 
     pub(in crate::executor) fn op_return_value_i64(&mut self) -> Result<(), VMError> {
-        // Opcode-suffix supplies the return kind regardless of what the
-        // callee's last opcode reported (typed return is post-proof).
-        let (bits, _src_kind) = self.pop_kinded()?;
-        self.return_value_inner(bits, shape_value::NativeKind::Int64)
+        let (bits, src_kind) = self.pop_kinded()?;
+        self.return_value_inner(bits, src_kind)
     }
 
     pub(in crate::executor) fn op_return_value_u64(&mut self) -> Result<(), VMError> {
-        let (bits, _src_kind) = self.pop_kinded()?;
-        self.return_value_inner(bits, shape_value::NativeKind::UInt64)
+        let (bits, src_kind) = self.pop_kinded()?;
+        self.return_value_inner(bits, src_kind)
     }
 
     pub(in crate::executor) fn op_return_value_f64(&mut self) -> Result<(), VMError> {
-        let (bits, _src_kind) = self.pop_kinded()?;
-        self.return_value_inner(bits, shape_value::NativeKind::Float64)
+        let (bits, src_kind) = self.pop_kinded()?;
+        self.return_value_inner(bits, src_kind)
     }
 
     pub(in crate::executor) fn op_return_value_i32(&mut self) -> Result<(), VMError> {
-        let (bits, _src_kind) = self.pop_kinded()?;
-        self.return_value_inner(bits, shape_value::NativeKind::Int32)
+        let (bits, src_kind) = self.pop_kinded()?;
+        self.return_value_inner(bits, src_kind)
     }
 
     pub(in crate::executor) fn op_return_value_u32(&mut self) -> Result<(), VMError> {
-        let (bits, _src_kind) = self.pop_kinded()?;
-        self.return_value_inner(bits, shape_value::NativeKind::UInt32)
+        let (bits, src_kind) = self.pop_kinded()?;
+        self.return_value_inner(bits, src_kind)
     }
 
     pub(in crate::executor) fn op_return_value_i16(&mut self) -> Result<(), VMError> {
-        let (bits, _src_kind) = self.pop_kinded()?;
-        self.return_value_inner(bits, shape_value::NativeKind::Int16)
+        let (bits, src_kind) = self.pop_kinded()?;
+        self.return_value_inner(bits, src_kind)
     }
 
     pub(in crate::executor) fn op_return_value_u16(&mut self) -> Result<(), VMError> {
-        let (bits, _src_kind) = self.pop_kinded()?;
-        self.return_value_inner(bits, shape_value::NativeKind::UInt16)
+        let (bits, src_kind) = self.pop_kinded()?;
+        self.return_value_inner(bits, src_kind)
     }
 
     pub(in crate::executor) fn op_return_value_i8(&mut self) -> Result<(), VMError> {
-        let (bits, _src_kind) = self.pop_kinded()?;
-        self.return_value_inner(bits, shape_value::NativeKind::Int8)
+        let (bits, src_kind) = self.pop_kinded()?;
+        self.return_value_inner(bits, src_kind)
     }
 
     pub(in crate::executor) fn op_return_value_u8(&mut self) -> Result<(), VMError> {
-        let (bits, _src_kind) = self.pop_kinded()?;
-        self.return_value_inner(bits, shape_value::NativeKind::UInt8)
+        let (bits, src_kind) = self.pop_kinded()?;
+        self.return_value_inner(bits, src_kind)
     }
 
     pub(in crate::executor) fn op_return_value_bool(&mut self) -> Result<(), VMError> {
-        let (bits, _src_kind) = self.pop_kinded()?;
-        self.return_value_inner(bits, shape_value::NativeKind::Bool)
+        let (bits, src_kind) = self.pop_kinded()?;
+        self.return_value_inner(bits, src_kind)
     }
 
     pub(in crate::executor) fn op_return_value_ptr(&mut self) -> Result<(), VMError> {

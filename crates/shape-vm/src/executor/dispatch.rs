@@ -283,13 +283,27 @@ impl VirtualMachine {
         // top-level locals region). The slot transfers ownership: the
         // returned `KindedSlot` owns the strong-count share previously
         // held by the stack slot.
+        //
+        // Sentinel for "no value left on stack": `(0, NativeKind::Null)`
+        // per ADR-006 §2.7 / R5b-2-bool-null-sentinel-cluster
+        // (2026-05-19). The pre-disposition `(0, NativeKind::Bool)`
+        // sentinel collided with legitimate `false` bool slots — both
+        // encoded as bits=0 — and surfaced at the host boundary as
+        // `WireValue::Bool(false)` (pretty-printed JSON: `{"Bool":
+        // false}`) for any script whose terminal stack position was a
+        // void slot (e.g. a program that only declares `fn divide` /
+        // `fn main` with no top-level invocation). `NativeKind::Null`
+        // is the canonical absence-of-value discriminator;
+        // `slot_to_wire` projects it directly to `WireValue::Null`,
+        // which `script_cmd` suppresses (`scripts that print no value
+        // produce no terminal line`).
         let tl = self.program.top_level_locals_count as usize;
         Ok(ExecutionResult::Completed(if self.sp > tl {
             self.sp -= 1;
             let (bits, kind) = self.stack_take_kinded(self.sp);
             KindedSlot::new(ValueSlot::from_raw(bits), kind)
         } else {
-            KindedSlot::new(ValueSlot::none(), NativeKind::Bool)
+            KindedSlot::new(ValueSlot::none(), NativeKind::Null)
         }))
     }
 
@@ -418,13 +432,16 @@ impl VirtualMachine {
             }
         }
 
+        // Sentinel "no value left on stack": `(0, NativeKind::Null)` per
+        // ADR-006 §2.7 / R5b-2-bool-null-sentinel-cluster — see the
+        // matching comment on `execute_with_suspend` above.
         let tl = self.program.top_level_locals_count as usize;
         Ok(ExecutionResult::Completed(if self.sp > tl {
             self.sp -= 1;
             let (bits, kind) = self.stack_take_kinded(self.sp);
             KindedSlot::new(ValueSlot::from_raw(bits), kind)
         } else {
-            KindedSlot::new(ValueSlot::none(), NativeKind::Bool)
+            KindedSlot::new(ValueSlot::none(), NativeKind::Null)
         }))
     }
 
@@ -473,13 +490,16 @@ impl VirtualMachine {
             }
         }
 
+        // Sentinel "no value left on stack": `(0, NativeKind::Null)` per
+        // ADR-006 §2.7 / R5b-2-bool-null-sentinel-cluster — see the
+        // matching comment on `execute_with_suspend` above.
         let tl = self.program.top_level_locals_count as usize;
         Ok(if self.sp > tl {
             self.sp -= 1;
             let (bits, kind) = self.stack_take_kinded(self.sp);
             KindedSlot::new(ValueSlot::from_raw(bits), kind)
         } else {
-            KindedSlot::new(ValueSlot::none(), NativeKind::Bool)
+            KindedSlot::new(ValueSlot::none(), NativeKind::Null)
         })
     }
 
