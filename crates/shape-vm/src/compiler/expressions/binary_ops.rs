@@ -89,6 +89,26 @@ fn emit_cmp_result_comparison(compiler: &mut BytecodeCompiler, op: &BinaryOp) {
     compiler.emit(Instruction::simple(cmp_op));
 }
 
+/// v0.3.3 c6-binop-ref-operand-segfault helper. Return the span of a
+/// direct `Expr::Reference` operand if either side of a binary operation
+/// is a reference expression. Used by `compile_expr_binary_op` to refuse
+/// `&x + y` / `f(&a) + &a` / `&x == y` and friends at semantic-check time
+/// — the immediate operand is the only shape that reproduces the JIT
+/// `jit_call_method::read_heap_kind` misaligned-pointer SEGFAULT (a
+/// `Reference` nested inside, e.g., `(1 + &a)` is caught by the inner
+/// binop's own check on recursive descent). Returns the reference's
+/// span (preferred error-marker position) so the error diagnostic
+/// underlines the borrow rather than the operator.
+fn reference_operand_span(left: &Expr, right: &Expr) -> Option<Span> {
+    if let Expr::Reference { span, .. } = left {
+        return Some(*span);
+    }
+    if let Expr::Reference { span, .. } = right {
+        return Some(*span);
+    }
+    None
+}
+
 fn try_emit_trait_dispatch(compiler: &mut BytecodeCompiler, op: &BinaryOp, left_schema: Option<SchemaId>, left_expr: &Expr, op_span: Span) -> bool {
     let trait_name = match operator_trait_for_op(op) { Some(t) => t, None => return false };
     let method_name = match operator_trait_method_for_op(op) { Some(m) => m, None => return false };
@@ -883,6 +903,36 @@ impl BytecodeCompiler {
         right: &Expr,
         op_span: Span,
     ) -> Result<()> {
+        // v0.3.3 c6-binop-ref-operand-segfault (Wave 1 Round 2, 2026-05-28).
+        // Refuse `&` / `&mut` as a direct binop operand at semantic-check
+        // time. The c6 JOINT-FIX (merge `30f36307`) closed the validator-
+        // bypass family (silent module-binding loan escape) but `let b =
+        // f(&a) + &a` still SEGFAULT'd in JIT mode and produced a runtime
+        // error in VM mode — because neither operand has a proven numeric
+        // kind, the bytecode compiler emits `CallMethod("add")`, and at
+        // JIT-compile time the receiver/arg kinds on the §2.7.7/Q9
+        // parallel-kind track are UInt64 (opaque bits) so the JIT
+        // `jit_call_method` shell falls into the legacy heap-prefix
+        // dispatch which deref-reads `read_heap_kind(receiver_bits)` —
+        // SIGSEGV on the raw integer / dangling-ref bits. Reject the shape
+        // here, before any code reaches the dispatcher. Mirrors the c2-A
+        // semantic-error pattern: structured `SemanticError` pointing at
+        // the operator span; the hint suggests `*ref` deref. See audit
+        // doc 06 §5(c).
+        if let Some(ref_span) = reference_operand_span(left, right) {
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "Cannot apply binary operator `{:?}` to a reference operand. \
+                     `&x` produces a borrow (reference), not a value — arithmetic, \
+                     comparison, and other binary operators are not defined on \
+                     references. Hint: dereference the operand with `*ref` to use \
+                     its underlying value, or restructure to keep refs out of \
+                     binary expressions.",
+                    op
+                ),
+                location: Some(self.span_to_source_location(ref_span)),
+            });
+        }
         match op {
             BinaryOp::And => {
                 self.compile_expr(left)?;
