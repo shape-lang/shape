@@ -501,84 +501,125 @@ impl VirtualMachine {
         self.build_any_error(payload, None, trace, None)
     }
 
-    /// `ErrorContext` (`!!` operator): pop context + value, wrap value
-    /// into AnyError with context.
+    /// `ErrorContext` (`!!` operator): pop context + value, produce a
+    /// `Result<T, AnyError>` carrier per the canonical Shape contract.
     ///
-    /// SURFACE (W13-result-option-ops audit, 2026-05-10): the body
-    /// must (a) discriminate whether `value` is an `Err(_)` or `None`
-    /// (uses the same variant discriminator as `op_is_err` /
-    /// `op_unwrap_option`), (b) extract the inner error / handle the
-    /// None case as an AnyError, (c) wrap with the user-provided
-    /// `context` string via `build_any_error(payload=inner,
-    /// cause=Some(context_arc), trace, code=None)`, (d) re-push as
-    /// `NativeKind::Ptr(HeapKind::TypedObject)` per §2.7.7 stack
-    /// parallel-kind. Half (c) is now available — `build_any_error`
-    /// landed in W13-anyerror close `e9c7260` — but halves (a) and (b)
-    /// share the same upstream blocker as `op_is_err` / `op_unwrap_ok`
-    /// (W14-variant-codegen close). Drop both carriers
-    /// (kind-dispatched refcount retire via `KindedSlot::Drop`) and
-    /// surface so the stack stays balanced.
+    /// Canonical contract (book reference:
+    /// `shape-web/book/book-site/src/content/docs/fundamentals/error-handling.mdx`
+    /// L232-248 "## `!!` Error Context Operator", as of 2026-05-28):
+    ///
+    /// > `lhs !! rhs` adds higher-level context and **always** yields a `Result`.
+    ///
+    /// | `lhs`           | `lhs !! rhs`                                                                  |
+    /// | :-------------- | :---------------------------------------------------------------------------- |
+    /// | `Ok(v)`         | `Ok(v)`                                                                       |
+    /// | `Some(v)`       | `Ok(v)`                                                                       |
+    /// | `Err(e)`        | `Err(AnyError { payload: rhs, cause: e, trace_info: single-frame })`          |
+    /// | `None`          | `Err(AnyError { payload: rhs, cause: AnyError("Value was None"),
+    ///                          trace_info: single-frame })`                                          |
+    /// | plain value `v` | `Ok(v)`                                                                       |
+    ///
+    /// `!!` is **purely a wrap operator** — it never throws. To turn a
+    /// wrapped `Err(_)` into a propagated exception, the user composes
+    /// with `?`: `expr !! "context"?`. The throw happens in `op_try_unwrap`
+    /// + `?`-on-Err early-return when the enclosing fallible-fn frame
+    /// surfaces an uncaught Err to the host.
+    ///
+    /// Doc-coherence: this body, the docstring above, the book chapter
+    /// `error-handling.mdx` L232-248, and `docs/cluster-audits/v0.3.3/
+    /// 07-result-bang-and-try-broken.md` §8 (empirical correction)
+    /// all describe the same contract — WRAP. Audit doc 07 §1.1's
+    /// pre-fix "Expected: program raises `Uncaught error: ...`" entry
+    /// is empirically FALSIFIED post JOINT-FIX-1a; per the book the
+    /// canonical post-fix behavior is `print(r)` showing the wrapped
+    /// `Err(AnyError { ... })` value.
+    ///
+    /// Refcount discipline (per ADR-006 §2.7.6 / Q8 + WB2.4): the
+    /// inner extraction paths (`rd.payload.clone()`, `od.payload.clone()`)
+    /// retain the inner share via `KindedSlot::Clone`; the outer
+    /// wrapper (`value`) is then dropped, releasing the source carrier's
+    /// strong-count. For Err/None paths the `context` carrier's share
+    /// transfers into the AnyError's `cause`/`payload` String field via
+    /// `build_any_error`'s stringify path (no leak).
     pub(in crate::executor) fn op_error_context(&mut self) -> Result<(), VMError> {
         let (context_bits, context_kind) = self.pop_kinded()?;
         let (value_bits, value_kind) = self.pop_kinded()?;
         let context = KindedSlot::new(ValueSlot::from_raw(context_bits), context_kind);
         let value = KindedSlot::new(ValueSlot::from_raw(value_bits), value_kind);
-        // Wave 14 W14-variant-codegen (ADR-006 §2.7.17 / Q18,
-        // 2026-05-10): the `!!` operator pattern:
-        //   Ok(v)  =>  v   (unwrap on success — same as `op_unwrap_ok`)
-        //   Err(e) =>  AnyError(payload=e, cause=context)  +  throw
-        //   Some(v) => v
-        //   None   =>  AnyError(payload="None", cause=context) + throw
-        //   bare value => v (null-coding pass-through)
-        // The inner-discriminate path mirrors `op_try_unwrap` but the
-        // failure leg builds an AnyError + handle_exception (not a
-        // frame return) — `!!` is a runtime assertion, not a fallible
-        // function return.
+
+        // Five branches per the canonical contract table above. Every
+        // branch produces a `KindedSlot::from_result(Arc<ResultData>)`
+        // carrier (kind = `Ptr(HeapKind::Result)`). NO throw path:
+        // `!!` is a wrap operator, not a runtime assertion.
+        //
+        // Doc-coherence binder (JOINT-FIX-1a, 2026-05-28): if you find
+        // yourself reaching for `handle_exception` in any branch below,
+        // STOP — that contradicts the book + the 26 Group A WRAP-shaped
+        // tests. The throw shape was the deleted pre-fix behavior; do
+        // not reintroduce.
         if let Some(rd) = read_result(&value)? {
             if rd.is_ok {
+                // Ok(v) → Ok(v). Re-wrap as a fresh Result carrier so
+                // the output kind stays `Ptr(HeapKind::Result)`
+                // regardless of input refcount sharing. `context` is
+                // discarded (book: "should not appear").
                 let inner = rd.payload.clone();
                 drop(value);
                 drop(context);
-                self.push_kinded_slot(inner)
+                let res = Arc::new(ResultData::ok(inner));
+                self.push_kinded_slot(KindedSlot::from_result(res))
             } else {
-                // Err(e) — wrap in AnyError with the context as the
-                // cause; the `e` payload becomes the AnyError's
-                // payload field (stringified per build_any_error's
-                // contract).
+                // Err(e) → Err(AnyError { payload: rhs, cause: e, ... }).
+                // The book contract puts the high-level context as the
+                // visible `payload`/`message`, and the original error
+                // as the `cause`. The uncaught-render path reads
+                // `message` (= payload) so the user sees the context.
                 let inner = rd.payload.clone();
                 drop(value);
                 let trace = self.trace_info_full()?;
-                let any_err = self.build_any_error(inner, Some(context), trace, None)?;
-                self.handle_exception(any_err)
+                let any_err = self.build_any_error(context, Some(inner), trace, None)?;
+                let res = Arc::new(ResultData::err(any_err));
+                self.push_kinded_slot(KindedSlot::from_result(res))
             }
         } else if let Some(od) = read_option(&value)? {
             if od.is_some {
+                // Some(v) → Ok(v). Lift Option → Result. `context`
+                // discarded.
                 let inner = od.payload.clone();
                 drop(value);
                 drop(context);
-                self.push_kinded_slot(inner)
+                let res = Arc::new(ResultData::ok(inner));
+                self.push_kinded_slot(KindedSlot::from_result(res))
             } else {
+                // None → Err(AnyError { payload: rhs, cause: "Value was None", ... }).
                 drop(value);
-                let none_payload = KindedSlot::from_string_arc(Arc::new("None".to_string()));
+                let none_cause =
+                    KindedSlot::from_string_arc(Arc::new("Value was None".to_string()));
                 let trace = self.trace_info_full()?;
-                let any_err = self.build_any_error(none_payload, Some(context), trace, None)?;
-                self.handle_exception(any_err)
+                let any_err = self.build_any_error(context, Some(none_cause), trace, None)?;
+                let res = Arc::new(ResultData::err(any_err));
+                self.push_kinded_slot(KindedSlot::from_result(res))
             }
         } else if is_null_sentinel(&value) {
+            // Null-coded None → Err(AnyError { payload: rhs, cause: "Value was None", ... }).
+            // Same shape as the typed-None branch — null-coding is the
+            // wire-tier representation of None, the user-facing
+            // contract is identical.
             drop(value);
-            let none_payload = KindedSlot::from_string_arc(Arc::new("None".to_string()));
+            let none_cause =
+                KindedSlot::from_string_arc(Arc::new("Value was None".to_string()));
             let trace = self.trace_info_full()?;
-            let any_err = self.build_any_error(none_payload, Some(context), trace, None)?;
-            self.handle_exception(any_err)
+            let any_err = self.build_any_error(context, Some(none_cause), trace, None)?;
+            let res = Arc::new(ResultData::err(any_err));
+            self.push_kinded_slot(KindedSlot::from_result(res))
         } else {
-            // Bare non-null value — pass through (null-coding's
-            // `Some(x) ≡ x`); context is discarded. Transfer the
-            // share verbatim via mem::forget.
+            // Bare non-null value `v` → Ok(v). `context` discarded.
+            // Per book: "plain value `v` | `Ok(v)`". This is NOT
+            // null-coding pass-through — the value must be wrapped in
+            // Ok so the result kind is `Ptr(HeapKind::Result)`.
             drop(context);
-            let kind = value.kind();
-            let bits = value.slot().raw();
-            std::mem::forget(value);
-            self.push_kinded(bits, kind)
+            let res = Arc::new(ResultData::ok(value));
+            self.push_kinded_slot(KindedSlot::from_result(res))
         }
     }
 
@@ -906,20 +947,33 @@ fn read_option(slot: &KindedSlot) -> Result<Option<&OptionData>, VMError> {
 }
 
 /// Whether a kinded carrier represents the `null` sentinel — used by
-/// `op_unwrap_option` and `op_try_unwrap` to recognise the legacy
-/// null-coded Option half (`compile_pattern_check_local` at
-/// `compiler/patterns/checking.rs:213` still emits `LoadLocal; IsNull;
-/// JumpIfTrue fail` for `None`, so a bare null sentinel reaching the
-/// discriminator must be treated as None).
+/// `op_unwrap_option`, `op_try_unwrap`, and `op_error_context` to
+/// recognise the legacy null-coded Option half
+/// (`compile_pattern_check_local` at `compiler/patterns/checking.rs:213`
+/// still emits `LoadLocal; IsNull; JumpIfTrue fail` for `None`, so a
+/// bare null sentinel reaching the discriminator must be treated as
+/// None).
 ///
-/// Mirrors `comparison/mod.rs::is_null_kinded` exactly — only nullable
-/// kinds with zero bits / NaN bits qualify; non-nullable scalars
-/// (including `0i64` and `false`) are never null.
+/// JOINT-FIX-1a (2026-05-28): added the `NativeKind::Null` arm to
+/// mirror `comparison/mod.rs::is_null_kinded` after probe4
+/// (`let r = None !! "missing"; print(r)`) revealed `None` literals
+/// reach this site with `NativeKind::Null` (per R5b-2 disposition —
+/// `PushNull` / `Constant::Null` producers stamp `NativeKind::Null`),
+/// which the pre-fix arm-set did not classify as null and so fell
+/// through to the bare-value branch.
+///
+/// Mirrors `comparison/mod.rs::is_null_kinded` exactly — `NativeKind::Null`
+/// is decisive (bits unused per R5b-2); nullable kinds qualify on
+/// zero-bits / NaN-bits; non-nullable scalars (including `0i64` and
+/// `false`) are never null.
 #[inline]
 fn is_null_sentinel(slot: &KindedSlot) -> bool {
     let bits = slot.slot.raw();
     let kind = slot.kind;
     match kind {
+        // R5b-2 disposition: Null IS the absence-of-value discriminator;
+        // kind alone is decisive, bits unused.
+        NativeKind::Null => true,
         NativeKind::String | NativeKind::Ptr(_) => bits == 0,
         NativeKind::NullableFloat64 => f64::from_bits(bits).is_nan(),
         NativeKind::NullableInt8
