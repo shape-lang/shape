@@ -529,6 +529,50 @@ impl TypeInferenceEngine {
         self.constraints.extend(bound_constraints);
         self.record_function_callsite(name, &arg_types);
 
+        // v0.3.3 c4-4D — HOF callee-param-inference propagation.
+        //
+        // When a named function is passed as a value argument to another
+        // function (`apply(double, 21)`), the standard callsite-union scheme
+        // records `arg_types` against the OUTER callee (`apply`) only —
+        // `record_function_callsite("apply", [Fn(...), int])`. The INNER
+        // callee (`double`) gets no direct call site, so
+        // `callsite_param_types["double"]` stays empty. The
+        // `refine_numeric_params_post_callsite` last-resort default then
+        // collapses double's parameter to `number`, and the bytecode
+        // compiler emits `MulNumber` on call-supplied `int` bits, producing
+        // a Float64 denormal at runtime (audit-04 §8 c4-4D root).
+        //
+        // The body of the outer callee constrains how its function-typed
+        // parameter is called against its other parameters: the body of
+        // `fn apply(f, x) { f(x) }` pushes the constraint
+        // `Type::Variable(f_src) ~ Function { params: [Variable(x_src)], returns: _ }`
+        // before the outer call site is processed (each function's body is
+        // inferred eagerly in `infer_item`). Reading that constraint here
+        // lets us derive a synthetic callsite for the inner callee:
+        // "double's parameter[0] gets called with whatever the OUTER
+        // callsite passed as the corresponding parameter of `apply`".
+        //
+        // Specifically: when args[i] is `Expr::Identifier(callee_name)` for
+        // a known named function and `callable_param_source_vars[name][i]`
+        // is bound to a `Function { params: [Variable(p_var)], returns: _ }`
+        // shape via constraints, find which of `name`'s OTHER params has
+        // source var `p_var` — call its index `j`. Then record a synthetic
+        // callsite for `callee_name` with the arg type at position `j`.
+        //
+        // Only fires for HOF args that are bare named-function identifiers
+        // (`Expr::Identifier`). Closures and lambdas use the closure-eager
+        // refinement at `refine_callable_param_types_from_local_constraints`
+        // (is_closure=true), which already collapses their numeric params
+        // to `number` at body-inference time; they are out of scope here.
+        //
+        // Soundness: only the source vars are read, only existing constraints
+        // are inspected (no new ones pushed), and the synthetic callsite
+        // recording goes through the same `record_function_callsite` path
+        // that direct call sites use — `refine_numeric_params_post_callsite`
+        // then resolves the inner callee's parameter from the recorded
+        // concrete type. No type kind is fabricated.
+        self.propagate_hof_arg_callsites(name, args, &arg_types);
+
         let origin = self
             .lookup_callable_origin_for_name(name)
             .unwrap_or(call_span);
@@ -699,6 +743,133 @@ impl TypeInferenceEngine {
                 }
             }
             Type::Concrete(_) => {}
+        }
+    }
+
+    /// v0.3.3 c4-4D: HOF callee-param-inference propagation.
+    ///
+    /// At the call site of an outer function (`apply(double, 21)`), find
+    /// each argument that is a bare named-function identifier and propagate
+    /// a synthetic callsite for that inner callee using the outer body's
+    /// call-shape constraint.
+    ///
+    /// See the comment block at the call site in `infer_function_call` for
+    /// the full rationale + soundness argument. The mechanism in three
+    /// steps:
+    ///
+    ///  1. Locate `args[i]` of the form `Expr::Identifier(callee_name)`
+    ///     where `callee_name` resolves to a known named function (i.e.
+    ///     has its own callable_param_source_vars entry).
+    ///  2. Look up the outer function's i-th parameter source-var. Scan
+    ///     `self.constraints` for `Variable(outer_param_i_src) ~
+    ///     Function { params: [...], returns: _ }` (the body-imposed
+    ///     call-shape constraint pushed by `infer_function_call` when the
+    ///     outer body invokes its own parameter).
+    ///  3. For each parameter slot in that call-shape, if the slot is
+    ///     itself a bare `Variable(outer_param_j_src)`, find which of the
+    ///     outer's other parameters has source var `outer_param_j_src` —
+    ///     index `j`. Use `arg_types[j]` as the synthetic callsite arg for
+    ///     `callee_name` at the same parameter position.
+    ///
+    /// Stays in inference-engine state: no new constraints are pushed; no
+    /// type kind is fabricated. The synthetic callsite goes through the
+    /// existing `record_function_callsite` path, so downstream widening +
+    /// `refine_numeric_params_post_callsite` resolve the inner callee's
+    /// parameter from the recorded concrete type exactly as if a direct
+    /// `double(21)` call site had existed.
+    pub(crate) fn propagate_hof_arg_callsites(
+        &mut self,
+        outer_name: &str,
+        args: &[Expr],
+        arg_types: &[Type],
+    ) {
+        eprintln!("HOF: outer_name={} args={} arg_types={:?}", outer_name, args.len(), arg_types);
+        // Read the outer function's parameter source-vars. An annotated
+        // outer parameter has `None` here; we need an unannotated
+        // function-typed slot whose body imposed a call-shape constraint,
+        // so `None` slots are skipped.
+        let Some(outer_source_vars) = self.callable_param_source_vars.get(outer_name).cloned()
+        else {
+            return;
+        };
+        eprintln!("HOF: outer_source_vars={:?}", outer_source_vars);
+
+        // Build outer_param_j_src → j lookup for resolving "this slot
+        // references the outer's parameter j" once we read the call-shape
+        // constraint.
+        let outer_var_to_index: HashMap<TypeVar, usize> = outer_source_vars
+            .iter()
+            .enumerate()
+            .filter_map(|(j, sv)| sv.as_ref().map(|v| (v.clone(), j)))
+            .collect();
+
+        for (i, arg) in args.iter().enumerate() {
+            let Expr::Identifier(callee_name, _) = arg else {
+                continue;
+            };
+            // The argument must reference a known named function whose
+            // callsite-union scheme can consume the synthetic record.
+            // (Closures/lambdas use the eager closure-collapse path at
+            // body-inference time; they're out of scope.)
+            if !self.callable_param_source_vars.contains_key(callee_name) {
+                continue;
+            }
+            // The outer's i-th source-var must be the unannotated kind
+            // whose body imposed a Fn-shape constraint.
+            let Some(Some(outer_param_i_src)) = outer_source_vars.get(i) else {
+                continue;
+            };
+
+            // Find a constraint `Variable(outer_param_i_src) ~
+            // Function { params: [...], returns: _ }` in either direction.
+            // Multiple such constraints can exist (e.g. if the outer body
+            // calls `f` more than once); record from each.
+            let outer_param_i_src = outer_param_i_src.clone();
+            let snapshot: Vec<(Type, Type)> = self.constraints.clone();
+            for (lhs, rhs) in &snapshot {
+                let body_params = match (lhs, rhs) {
+                    (Type::Variable(v), Type::Function { params, .. })
+                    | (Type::Function { params, .. }, Type::Variable(v))
+                        if v == &outer_param_i_src =>
+                    {
+                        params
+                    }
+                    _ => continue,
+                };
+
+                // Map each body-call parameter slot back to one of the
+                // outer's parameter source vars (the call-shape `f(x)`
+                // where `x` is outer param j tells us "callee receives
+                // outer's param j"). Then take the synthetic arg type
+                // from `arg_types[j]`.
+                let mut synthetic_arg_types: Vec<Type> = Vec::with_capacity(body_params.len());
+                let mut ok = true;
+                for slot in body_params {
+                    let Type::Variable(slot_var) = slot else {
+                        ok = false;
+                        break;
+                    };
+                    let Some(&j) = outer_var_to_index.get(slot_var) else {
+                        ok = false;
+                        break;
+                    };
+                    let Some(arg_ty) = arg_types.get(j) else {
+                        ok = false;
+                        break;
+                    };
+                    synthetic_arg_types.push(arg_ty.clone());
+                }
+                if !ok {
+                    continue;
+                }
+
+                // The synthetic callsite goes through the normal record
+                // path — `apply_callsite_unions` + `refine_numeric_params_post_callsite`
+                // pick it up exactly as if `callee_name(arg_ty)` had been
+                // written directly.
+                eprintln!("HOF: synthetic callsite for {} arg_types={:?}", callee_name, synthetic_arg_types);
+                self.record_function_callsite(callee_name, &synthetic_arg_types);
+            }
         }
     }
 }
