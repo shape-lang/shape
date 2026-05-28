@@ -189,6 +189,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     | StatementKind::ObjectStore { operands, .. }
                     | StatementKind::EnumStore { operands, .. }
                     | StatementKind::ClosureCapture { operands, .. }
+                    | StatementKind::ModuleBindingStore { operands, .. }
                     | StatementKind::TaskBoundary(operands, _) => {
                         if operands.iter().any(&matches_slot) {
                             return true;

@@ -2102,23 +2102,48 @@ pub(crate) fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotI
             }
         }
         Expr::Assign(assign, _) => {
-            let Some(target_place) = lower_assign_target_place(builder, &assign.target) else {
+            if let Some(target_place) = lower_assign_target_place(builder, &assign.target) {
+                let value_slot = lower_expr_to_temp(builder, &assign.value);
+                builder.push_stmt(
+                    StatementKind::Assign(
+                        target_place.clone(),
+                        Rvalue::Use(Operand::Move(Place::Local(value_slot))),
+                    ),
+                    span,
+                );
+                builder.push_stmt(
+                    StatementKind::Assign(
+                        Place::Local(temp),
+                        Rvalue::Use(Operand::Copy(target_place)),
+                    ),
+                    span,
+                );
+            } else if let Expr::Identifier(name, _) = assign.target.as_ref() {
+                // v0.3.3 c6 (Wave 1): identifier resolves to a module-level
+                // binding (no local slot). Emit `ModuleBindingStore` so the
+                // borrow solver can detect ref escapes into the module
+                // binding instead of bailing to fallback. See
+                // `docs/cluster-audits/v0.3.3/06-borrow-check-bypass.md`.
+                let value_slot = lower_expr_to_temp(builder, &assign.value);
+                builder.push_stmt(
+                    StatementKind::ModuleBindingStore {
+                        binding_name: name.clone(),
+                        operands: vec![Operand::Copy(Place::Local(value_slot))],
+                    },
+                    span,
+                );
+                builder.push_stmt(
+                    StatementKind::Assign(
+                        Place::Local(temp),
+                        Rvalue::Use(Operand::Move(Place::Local(value_slot))),
+                    ),
+                    span,
+                );
+            } else {
                 builder.mark_fallback();
                 assign_none(builder, temp, span);
                 return temp;
-            };
-            let value_slot = lower_expr_to_temp(builder, &assign.value);
-            builder.push_stmt(
-                StatementKind::Assign(
-                    target_place.clone(),
-                    Rvalue::Use(Operand::Move(Place::Local(value_slot))),
-                ),
-                span,
-            );
-            builder.push_stmt(
-                StatementKind::Assign(Place::Local(temp), Rvalue::Use(Operand::Copy(target_place))),
-                span,
-            );
+            }
         }
         Expr::Conditional {
             condition,

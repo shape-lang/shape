@@ -630,6 +630,10 @@ impl BytecodeCompiler {
                 "reference cannot escape into a closure",
                 "capture an owned value instead of a reference",
             ),
+            crate::mir::analysis::BorrowErrorKind::ReferenceEscapeIntoModuleBinding => (
+                "cannot return or store a reference that outlives its owner",
+                "store an owned value in the module-level binding instead of a reference",
+            ),
             crate::mir::analysis::BorrowErrorKind::UseAfterMove => (
                 "cannot use this value after it was moved",
                 "clone the value before moving it, or stop using the original after the move",
@@ -669,7 +673,8 @@ impl BytecodeCompiler {
             | crate::mir::analysis::BorrowErrorKind::ReferenceStoredInArray
             | crate::mir::analysis::BorrowErrorKind::ReferenceStoredInObject
             | crate::mir::analysis::BorrowErrorKind::ReferenceStoredInEnum
-            | crate::mir::analysis::BorrowErrorKind::ReferenceEscapeIntoClosure => {
+            | crate::mir::analysis::BorrowErrorKind::ReferenceEscapeIntoClosure
+            | crate::mir::analysis::BorrowErrorKind::ReferenceEscapeIntoModuleBinding => {
                 "reference originates here"
             }
             crate::mir::analysis::BorrowErrorKind::UseAfterMove => "value was moved here",

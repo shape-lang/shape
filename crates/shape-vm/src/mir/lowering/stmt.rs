@@ -353,14 +353,27 @@ pub(super) fn lower_var_decl(builder: &mut MirBuilder, decl: &ast::VariableDecl,
 /// Lower an assignment statement.
 pub(super) fn lower_assignment(builder: &mut MirBuilder, assign: &ast::Assignment, span: Span) {
     if let Some(name) = assign.pattern.as_identifier() {
-        let Some(slot) = builder.lookup_local(name) else {
-            builder.mark_fallback();
-            builder.push_stmt(StatementKind::Nop, span);
+        if let Some(slot) = builder.lookup_local(name) {
+            let value = lower_expr_to_operand(builder, &assign.value, true);
+            builder.push_stmt(
+                StatementKind::Assign(Place::Local(slot), Rvalue::Use(value)),
+                span,
+            );
             return;
-        };
+        }
+        // v0.3.3 c6 (Wave 1): target identifier resolves to a module-level
+        // binding (or a not-yet-known name). Emit `ModuleBindingStore` so
+        // the borrow solver can detect ref escapes that flow into the
+        // module binding from inside this function. Loan-detection scan
+        // sees the source operand and pushes `LoanSinkKind::ModuleBindingStore`.
+        // The bytecode compiler still emits the actual `StoreModuleBinding`
+        // opcode from the AST; this MIR statement is borrow-check-only.
         let value = lower_expr_to_operand(builder, &assign.value, true);
         builder.push_stmt(
-            StatementKind::Assign(Place::Local(slot), Rvalue::Use(value)),
+            StatementKind::ModuleBindingStore {
+                binding_name: name.to_string(),
+                operands: vec![value],
+            },
             span,
         );
         return;

@@ -150,7 +150,8 @@ fn collect_statement_field_accesses(
         | StatementKind::ClosureCapture { operands: ops, .. }
         | StatementKind::ArrayStore { operands: ops, .. }
         | StatementKind::ObjectStore { operands: ops, .. }
-        | StatementKind::EnumStore { operands: ops, .. } => {
+        | StatementKind::EnumStore { operands: ops, .. }
+        | StatementKind::ModuleBindingStore { operands: ops, .. } => {
             for op in ops {
                 collect_operand_field_reads(op, reads);
             }
@@ -432,7 +433,8 @@ fn compute_block_use_def_order(block: &BasicBlock) -> (HashSet<FieldKey>, HashSe
             | StatementKind::ClosureCapture { operands: ops, .. }
             | StatementKind::ArrayStore { operands: ops, .. }
             | StatementKind::ObjectStore { operands: ops, .. }
-            | StatementKind::EnumStore { operands: ops, .. } => {
+            | StatementKind::EnumStore { operands: ops, .. }
+            | StatementKind::ModuleBindingStore { operands: ops, .. } => {
                 for op in ops {
                     collect_operand_field_reads(op, &mut stmt_reads);
                 }

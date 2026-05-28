@@ -606,6 +606,20 @@ pub enum StatementKind {
         operands: Vec<Operand>,
         variant_name: Option<String>,
     },
+    /// Store a value into a module-level binding from within a function body.
+    /// Operands carry the source value(s) flowing into the module binding.
+    /// `binding_name` is the textual identifier (the bytecode-side
+    /// `BindingIdx` is resolved later by the compiler). This statement is a
+    /// **borrow-check-only annotation**: the JIT and VM codegen treat it as a
+    /// no-op because the actual `StoreModuleBinding` bytecode op is emitted
+    /// by the bytecode compiler from the AST, not from MIR. The MIR borrow
+    /// solver scans for loans flowing into this statement and pushes a
+    /// `LoanSinkKind::ModuleBindingStore` to catch ref escapes. v0.3.3 c6
+    /// (Wave 1) — see `docs/cluster-audits/v0.3.3/06-borrow-check-bypass.md`.
+    ModuleBindingStore {
+        binding_name: String,
+        operands: Vec<Operand>,
+    },
     /// No-op (placeholder, padding).
     Nop,
 }

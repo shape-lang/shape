@@ -153,6 +153,11 @@ fn update_liveness_for_statement(live: &mut HashSet<SlotId>, kind: &StatementKin
                 add_operand_uses(live, operand);
             }
         }
+        StatementKind::ModuleBindingStore { operands, .. } => {
+            for operand in operands {
+                add_operand_uses(live, operand);
+            }
+        }
         StatementKind::Nop => {}
     }
 }
