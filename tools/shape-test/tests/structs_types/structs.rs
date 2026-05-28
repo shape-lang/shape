@@ -124,11 +124,19 @@ fn struct_nested_string_field() {
 
 #[test]
 fn struct_field_mutation() {
+    // v0.3.3 c2-A fix (audit `docs/cluster-audits/v0.3.3/02-adr-006-2-7-13-kind-drift.md`
+    // Sub-bug A — int→number assignment-side widening gap): the RHS literal `10` is
+    // `int` and the field type is `number` — `compile_struct_property_assignment` now
+    // rejects this at compile time per CLAUDE.md §Type System Rules "NO runtime
+    // coercion". The test exercises the post-fix happy path with an explicit `10.0`.
+    // The construction-side `Point { x: 1, y: 2 }` remains permissive (widens via
+    // `kinded_to_slot` at `executor/objects/object_creation.rs:448-487`) — symmetry
+    // with the assignment-side is a separate user-decision item (see c2-A close-relay).
     ShapeTest::new(
         r#"
         type Point { x: number, y: number }
-        let mut p = Point { x: 1, y: 2 }
-        p.x = 10
+        let mut p = Point { x: 1.0, y: 2.0 }
+        p.x = 10.0
         p.x
     "#,
     )
@@ -137,15 +145,39 @@ fn struct_field_mutation() {
 
 #[test]
 fn struct_field_mutation_second_field() {
+    // v0.3.3 c2-A fix — see `struct_field_mutation` above.
     ShapeTest::new(
         r#"
         type Point { x: number, y: number }
-        let mut p = Point { x: 1, y: 2 }
-        p.y = 99
+        let mut p = Point { x: 1.0, y: 2.0 }
+        p.y = 99.0
         p.y
     "#,
     )
     .expect_number(99.0);
+}
+
+#[test]
+fn struct_field_mutation_int_to_number_rejected_at_compile_time() {
+    // v0.3.3 c2-A fix (audit `docs/cluster-audits/v0.3.3/02-adr-006-2-7-13-kind-drift.md`
+    // Sub-bug A): the assignment-side has no `kinded_to_slot` widening, so an
+    // `int` RHS literal into a `number` field is rejected at compile time
+    // rather than silently corrupting the slot (release build: writer lays
+    // Int64 bits into a Float64-kinded slot → next read reinterprets as f64
+    // denormal). The diagnostic shape mirrors construction-side
+    // `compile_struct_literal` at `crates/shape-vm/src/compiler/expressions/collections.rs:1054`.
+    ShapeTest::new(
+        r#"
+        type Point { x: number, y: number }
+        let mut p = Point { x: 1.0, y: 2.0 }
+        p.x = 10
+        p.x
+    "#,
+    )
+    .expect_run_err_contains("type mismatch")
+    .expect_run_err_contains("cannot assign `int`")
+    .expect_run_err_contains("field `p.x`")
+    .expect_run_err_contains("type `number`");
 }
 
 #[test]
