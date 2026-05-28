@@ -663,7 +663,21 @@ fn jit_trampoline_result_callvalue() {
     // When a JIT-compiled function calls a non-JIT function via CallValue
     // (dynamic dispatch) that returns Ok(42), the trampoline must convert
     // VM-format Result bits to JIT format so jit_is_ok() works correctly.
-    jit_expect_number(
+    //
+    // c4-4B (2026-05-28): the program's return type is `int` (per `fn
+    // call_it(f) -> int`), so the runtime correctly emits
+    // `WireValue::Integer(42)` once the value flows through the bytecode
+    // interpreter on the W12 `[jit-fallback]` path (the
+    // `has_try_unwrap_residual` SURFACE in `JITExecutor::execute_with_jit`
+    // refuses to JIT-compile programs containing `?` because MIR collapses
+    // `Expr::TryOperator => copy` and the JIT Return arm stamps
+    // `RETURN_TAG_I64` on heap-Result pointer bits — silent-wrong-output
+    // `Integer(137_900_062_693_984)` pre-fix). The pre-fix shape mistakenly
+    // used `jit_expect_number` even though the program type is `int`; fixed
+    // in the same change as the SURFACE addition per supervisor 2026-05-28
+    // c4-4B fold-in (necessary: the assertion's type-form is wrong on its
+    // face; same-Wave-class; disclosed).
+    let result = jit_eval(
         r#"
 fn make_ok() -> Result<int, string> {
     return Ok(42)
@@ -674,8 +688,11 @@ fn call_it(f) -> int {
 }
 call_it(make_ok)
 "#,
-        42.0,
     );
+    match result {
+        WireValue::Integer(n) => assert_eq!(n, 42),
+        other => panic!("Expected Integer(42), got {:?}", other),
+    }
 }
 
 #[test]
