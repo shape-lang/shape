@@ -10,8 +10,8 @@ use shape_runtime::type_schema::{FieldType, SchemaId};
 use super::super::BytecodeCompiler;
 use super::numeric_ops::{
     CoercionPlan, apply_coercion, inferred_type_to_numeric, is_function_type,
-    is_ordered_comparison, is_strict_arithmetic, is_type_numeric, plan_coercion,
-    type_display_name, typed_opcode_for,
+    is_ordered_comparison, is_strict_arithmetic, is_strict_bitwise, is_type_numeric,
+    plan_coercion, type_display_name, typed_opcode_for,
 };
 
 /// Map a BinaryOp to its operator trait name, if one exists.
@@ -1538,8 +1538,6 @@ impl BytecodeCompiler {
 
                 let both_int = matches!(left_numeric, Some(NumericType::Int))
                     && matches!(right_numeric, Some(NumericType::Int));
-                let emit_typed = both_int
-                    && crate::compiler::helpers::typed_bitwise_enabled();
 
                 // W1.10 (v0.3 R2): user-type operator trait dispatch for
                 // `<<` / `>>`. When the left operand has a TypedObject
@@ -1551,10 +1549,13 @@ impl BytecodeCompiler {
                 // is not eligible — the typed bitwise path takes
                 // precedence for `int << int` to preserve the existing
                 // zero-dispatch behavior. BitAnd/BitOr/BitXor handled
-                // by sibling W1.9 dispatch.
-                if !emit_typed
-                    && matches!(op, BinaryOp::BitShl | BinaryOp::BitShr)
-                {
+                // by sibling W1.9 dispatch above.
+                //
+                // c5 Phase B (2026-05-28): moved BEFORE the strict-typing
+                // gate below so user-type `impl Shl/Shr` dispatch can
+                // fire on non-int receivers (e.g. `vec << 2`). The gate
+                // would otherwise reject every non-int left operand.
+                if !both_int && matches!(op, BinaryOp::BitShl | BinaryOp::BitShr) {
                     let trait_name = operator_trait_for_op(op);
                     let method_name = operator_trait_method_for_op(op);
                     if let (Some(trait_name), Some(method_name)) =
@@ -1586,43 +1587,94 @@ impl BytecodeCompiler {
                     }
                 }
 
-                if emit_typed {
-                    let typed_opcode = match op {
-                        BinaryOp::BitAnd => OpCode::BitAndInt,
-                        BinaryOp::BitOr => OpCode::BitOrInt,
-                        BinaryOp::BitXor => OpCode::BitXorInt,
-                        BinaryOp::BitShl => OpCode::BitShlInt,
-                        BinaryOp::BitShr => OpCode::BitShrInt,
+                // c5 Phase B (v0.3.3, 2026-05-28) — bitwise-strict-typing
+                // gate. When both operands aren't provably `int` AND no
+                // user operator-trait dispatch fires above, refuse at
+                // compile time. Pre-fix, the else-branch at L1555 emitted
+                // a `BitAnd`/`BitOr`/… dynamic opcode whose executor
+                // (`exec_dyn_bit_binary`) discarded the operand kinds and
+                // reinterpreted the slot bits as i64 — silently producing
+                // garbage integers for `1.5 | 3`, `"hello" & 3`, etc.
+                // (audit doc 05 §3 quote, audit doc 05a §c5 anchor sites).
+                //
+                // The polarity is producer-side: refuse at the compiler
+                // rather than preserving kinds at the consumer (diverges
+                // from c5/c7/1b precedent because the wrong-bits-on-stack
+                // consequence flows from accepting non-int operands at
+                // compile time, not from fabricating kind at runtime). Per
+                // CLAUDE.md §Type-System-Rules: "NO runtime coercion".
+                //
+                // The `SHAPE_V2_TYPED_BITWISE` rollback flag (R5.1C) is
+                // not consulted here — the dynamic `BitAnd`/`BitOr`/etc.
+                // opcodes that the flag-off path emitted are deleted as
+                // part of this Phase B fix. The typed-int path is the
+                // only path that survives.
+                debug_assert!(
+                    is_strict_bitwise(op),
+                    "bitwise arm must classify as is_strict_bitwise (gate site)"
+                );
+                if !both_int {
+                    let op_symbol = match op {
+                        BinaryOp::BitAnd => "&",
+                        BinaryOp::BitOr => "|",
+                        BinaryOp::BitXor => "^",
+                        BinaryOp::BitShl => "<<",
+                        BinaryOp::BitShr => ">>",
                         _ => unreachable!(),
                     };
-                    self.emit(Instruction::simple(typed_opcode));
-                    // Typed bitwise op on two ints yields an int — preserve
-                    // the numeric hint so downstream typed emission keeps
-                    // working (e.g. (a & b) + c stays on the int path).
-                    self.last_expr_schema = None;
-                    self.last_expr_type_info = None;
-                    self.last_expr_numeric_type = Some(NumericType::Int);
-                } else {
-                    // Dynamic fallback: mixed / unresolved operand types,
-                    // or flag disabled. Preserves pre-R5.1C semantics
-                    // byte-identically.
-                    self.compile_binary_op(op)?;
-                    self.last_expr_schema = None;
-                    self.last_expr_type_info = None;
-                    // The dynamic bitwise opcodes (`BitAnd`, `BitOr`, ...)
-                    // post-Wave-E+5.5 push raw native i64 bits via
-                    // `exec_dyn_bit_binary` / `exec_dyn_bit_unary`. When both
-                    // operands were proven `int` at compile time (we just
-                    // didn't take the typed-emit path because the flag was
-                    // off), preserve the Int numeric hint so the top-level
-                    // return-kind inference can pair this producer with
-                    // the inferred Int kind.
-                    self.last_expr_numeric_type = if both_int {
-                        Some(NumericType::Int)
-                    } else {
-                        None
+                    let left_desc = match left_numeric {
+                        Some(NumericType::Int) => "int".to_string(),
+                        Some(_) => self
+                            .infer_expr_type(left)
+                            .map(|t| type_display_name(&t))
+                            .unwrap_or_else(|_| "unknown".to_string()),
+                        None => self
+                            .infer_expr_type(left)
+                            .map(|t| type_display_name(&t))
+                            .unwrap_or_else(|_| "unknown".to_string()),
                     };
+                    let right_desc = match right_numeric {
+                        Some(NumericType::Int) => "int".to_string(),
+                        Some(_) => self
+                            .infer_expr_type(right)
+                            .map(|t| type_display_name(&t))
+                            .unwrap_or_else(|_| "unknown".to_string()),
+                        None => self
+                            .infer_expr_type(right)
+                            .map(|t| type_display_name(&t))
+                            .unwrap_or_else(|_| "unknown".to_string()),
+                    };
+                    return Err(ShapeError::SemanticError {
+                        message: format!(
+                            "Cannot apply '{}' to {} and {}. Bitwise operators require both \
+                             operands to be `int` at compile time. Use an explicit cast \
+                             (e.g. `(x as int) {} (y as int)`) when intentional.",
+                            op_symbol, left_desc, right_desc, op_symbol,
+                        ),
+                        location: Some(
+                            self.span_to_source_location(combined_span(left, right)),
+                        ),
+                    });
                 }
+
+                // c5 Phase B: with the strict-typing gate above refusing
+                // every non-int operand at compile time, only the typed-
+                // int path remains. Emit the proven-typed opcode.
+                let typed_opcode = match op {
+                    BinaryOp::BitAnd => OpCode::BitAndInt,
+                    BinaryOp::BitOr => OpCode::BitOrInt,
+                    BinaryOp::BitXor => OpCode::BitXorInt,
+                    BinaryOp::BitShl => OpCode::BitShlInt,
+                    BinaryOp::BitShr => OpCode::BitShrInt,
+                    _ => unreachable!(),
+                };
+                self.emit(Instruction::simple(typed_opcode));
+                // Typed bitwise op on two ints yields an int — preserve
+                // the numeric hint so downstream typed emission keeps
+                // working (e.g. (a & b) + c stays on the int path).
+                self.last_expr_schema = None;
+                self.last_expr_type_info = None;
+                self.last_expr_numeric_type = Some(NumericType::Int);
             }
             _ => {
                 // Typed matrix kernels: Mat<number> * Vec<number>/Mat<number>.

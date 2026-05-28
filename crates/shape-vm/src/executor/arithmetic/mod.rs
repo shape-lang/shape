@@ -614,48 +614,22 @@ impl VirtualMachine {
         }
     }
 
-    /// Bitwise dynamic op dispatch: routes BitAnd/BitOr/BitXor/BitShl/BitShr
-    /// to the binary helper and BitNot to the unary helper.
-    #[inline(always)]
-    pub(in crate::executor) fn exec_dyn_bit_dispatch(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
-        use OpCode::*;
-        match instruction.opcode {
-            BitXor | BitAnd | BitOr | BitShl | BitShr => {
-                self.exec_dyn_bit_binary(instruction.opcode)
-            }
-            BitNot => self.exec_dyn_bit_unary(),
-            _ => unreachable!(
-                "exec_dyn_bit_dispatch called with non-bitwise opcode: {:?}",
-                instruction.opcode
-            ),
-        }
-    }
-
-    fn exec_dyn_bit_binary(&mut self, op: OpCode) -> Result<(), VMError> {
-        use OpCode::*;
-        let (b_bits, _b_kind) = self.pop_kinded()?;
-        let (a_bits, _a_kind) = self.pop_kinded()?;
-        let b_int = b_bits as i64;
-        let a_int = a_bits as i64;
-        let result = match op {
-            BitXor => a_int ^ b_int,
-            BitAnd => a_int & b_int,
-            BitOr => a_int | b_int,
-            BitShl => a_int << b_int,
-            BitShr => a_int >> b_int,
-            _ => unreachable!(),
-        };
-        self.push_kinded(result as u64, NativeKind::Int64)
-    }
-
-    fn exec_dyn_bit_unary(&mut self) -> Result<(), VMError> {
-        let (bits, _kind) = self.pop_kinded()?;
-        let a_int = bits as i64;
-        self.push_kinded((!a_int) as u64, NativeKind::Int64)
-    }
+    // c5 Phase B (v0.3.3, 2026-05-28) — DELETED `exec_dyn_bit_dispatch`,
+    // `exec_dyn_bit_binary`, `exec_dyn_bit_unary`. The three helpers
+    // discarded operand kinds at `pop_kinded()?` (`(b_bits, _b_kind)`)
+    // and reinterpreted the slot bits as i64 — the 3-line DISCARDS class
+    // surfaced by the Phase A pop_kinded() sweep at audit doc 05a §c5
+    // anchor sites. With the producer-side compile-time gate in
+    // `compiler/expressions/binary_ops.rs:1403` + `unary_ops.rs:28`
+    // refusing every non-int operand, the dynamic `BitAnd`/`BitOr`/
+    // `BitXor`/`BitShl`/`BitShr`/`BitNot` opcodes are dead code: they
+    // had no producer. Deletion-not-deprecation per CLAUDE.md
+    // §Forbidden-Code "`exec_*_dynamic_fallback` handlers. Deleted."
+    //
+    // The typed `BitAndInt`/`BitOrInt`/`BitXorInt`/`BitShlInt`/`BitShrInt`/
+    // `BitNotInt` arms (kept) remain the only bitwise emit path; they
+    // statically pin operand kind via opcode suffix per ADR-006 §2.7.5
+    // (see `exec_typed_arithmetic` arms at L121-228 in this file).
 }
 
 /// Result `NativeKind` for a compact-typed integer Add/Sub/Mul opcode.

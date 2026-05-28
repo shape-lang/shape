@@ -2229,11 +2229,11 @@ impl BytecodeCompiler {
         let instr = &instrs[idx - 1];
         match instr.opcode {
             // ===== Raw i64 producers (Wave E+5.3 + Unit B) =====
-            // Single-path Int arithmetic / bitwise / negation. Both the
-            // typed `*Int` variants and the dynamic `BitAnd` / `BitOr` /
-            // etc. variants now push raw native i64 bits per Wave E+5.5
-            // (`exec_dyn_bit_binary` / `exec_dyn_bit_unary` consume native
-            // i64 inputs and push native i64 outputs).
+            // Single-path Int arithmetic / bitwise / negation via the
+            // typed `*Int` variants. The dynamic `BitAnd`/`BitOr`/etc.
+            // opcodes (and `exec_dyn_bit_binary` / `exec_dyn_bit_unary`)
+            // were deleted in c5 Phase B (v0.3.3, 2026-05-28); only the
+            // typed-int arms survive.
             OpCode::AddInt
             | OpCode::SubInt
             | OpCode::MulInt
@@ -2247,17 +2247,6 @@ impl BytecodeCompiler {
             | OpCode::BitShlInt
             | OpCode::BitShrInt
             | OpCode::BitNotInt
-            // Dynamic bitwise opcodes: post-Wave-E+5.5 these push native i64
-            // bits via `exec_dyn_bit_binary` / `exec_dyn_bit_unary`. The
-            // pre-flip claim that they were "output-tagged" is no longer
-            // true — they're now byte-identical to the typed `*Int`
-            // variants on stack, modulo type proof at compile time.
-            | OpCode::BitAnd
-            | OpCode::BitOr
-            | OpCode::BitXor
-            | OpCode::BitShl
-            | OpCode::BitShr
-            | OpCode::BitNot
             // Typed local / module-binding load (Wave E+3) — push raw i64.
             | OpCode::LoadLocalI64
             | OpCode::LoadLocalU64
@@ -6630,11 +6619,10 @@ mod tests {
             "expected BitAndInt for int & int, got ops: {:?}",
             ops
         );
-        assert!(
-            !ops.contains(&OpCode::BitAnd),
-            "Dynamic BitAnd must not be emitted when typed path fires, ops: {:?}",
-            ops
-        );
+        // c5 Phase B (2026-05-28): `OpCode::BitAnd` deleted; the
+        // non-emission assertion is now structural (the opcode no
+        // longer exists). The typed `BitAndInt` is the only bitwise
+        // opcode emitted.
     }
 
     #[test]
@@ -6699,85 +6687,32 @@ mod tests {
             "expected BitNotInt for ~int, got ops: {:?}",
             ops
         );
-        assert!(
-            !ops.contains(&OpCode::BitNot),
-            "Dynamic BitNot must not be emitted when typed path fires, ops: {:?}",
-            ops
-        );
+        // c5 Phase B (2026-05-28): `OpCode::BitNot` deleted; the
+        // non-emission assertion is now structural (the opcode no
+        // longer exists).
     }
 
-    #[test]
-    fn r51c_flag_off_falls_back_to_dynamic_bitand() {
-        use crate::bytecode::OpCode;
-        let ops = compile_opcodes_with_typed_bitwise(
-            false,
-            r#"
-            let a: int = 5
-            let b: int = 3
-            a & b
-            "#,
-        );
-        assert!(
-            ops.contains(&OpCode::BitAnd),
-            "flag off: expected Dynamic BitAnd, got ops: {:?}",
-            ops
-        );
-        assert!(
-            !ops.contains(&OpCode::BitAndInt),
-            "flag off: typed BitAndInt must not be emitted, got ops: {:?}",
-            ops
-        );
-    }
-
-    #[test]
-    fn r51c_flag_off_falls_back_to_dynamic_bitnot() {
-        use crate::bytecode::OpCode;
-        let ops = compile_opcodes_with_typed_bitwise(
-            false,
-            r#"
-            let a: int = 5
-            ~a
-            "#,
-        );
-        assert!(
-            ops.contains(&OpCode::BitNot),
-            "flag off: expected Dynamic BitNot, got ops: {:?}",
-            ops
-        );
-        assert!(
-            !ops.contains(&OpCode::BitNotInt),
-            "flag off: typed BitNotInt must not be emitted, got ops: {:?}",
-            ops
-        );
-    }
-
-    #[test]
-    #[ignore]
-    fn r51c_untyped_param_falls_back_to_dynamic_bitand() {
-        // strict-typing-sweep: dynamic emission deleted; param-inference
-        // now lifts untyped param `a & 15` to BitAndInt via literal-pairing.
-        // Pre-existing ignore preserved (pinned audit baseline).
-        use crate::bytecode::OpCode;
-        let ops = compile_opcodes_with_typed_bitwise(
-            true,
-            r#"
-            fn masked(a) {
-                a & 15
-            }
-            masked(5)
-            "#,
-        );
-        assert!(
-            ops.contains(&OpCode::BitAnd),
-            "untyped param: expected Dynamic BitAnd, got ops: {:?}",
-            ops
-        );
-        assert!(
-            !ops.contains(&OpCode::BitAndInt),
-            "untyped param: typed BitAndInt must not be emitted, got ops: {:?}",
-            ops
-        );
-    }
+    // c5 Phase B (v0.3.3, 2026-05-28) — DELETED tests that asserted on
+    // `OpCode::BitAnd` / `OpCode::BitNot` emission via the `flag off`
+    // path:
+    //   * `r51c_flag_off_falls_back_to_dynamic_bitand`
+    //   * `r51c_flag_off_falls_back_to_dynamic_bitnot`
+    //   * `r51c_untyped_param_falls_back_to_dynamic_bitand` (#[ignore]'d)
+    // The dynamic bitwise opcodes (`BitAnd`/`BitOr`/`BitXor`/`BitShl`/
+    // `BitShr`/`BitNot`) and their executor handlers
+    // (`exec_dyn_bit_binary` / `exec_dyn_bit_unary`) were deleted per
+    // audit doc 05a §c5 anchor sites. The `SHAPE_V2_TYPED_BITWISE`
+    // rollback flag is no longer consulted (no dynamic path to roll
+    // back to). The compile-time gate at
+    // `compiler/expressions/binary_ops.rs:1403` + `unary_ops.rs:28`
+    // is the only producer for bitwise ops.
+    //
+    // Coverage that survives: the `_emit_typed_bitand` / `_bitor_bitxor`
+    // / `_typed_shifts` / `_emits_typed_bitnot` tests above confirm
+    // typed-int emission on proven-int operands; the 8 c5 fixtures at
+    // `tools/shape-test/tests/operators/stress_bitwise_*.rs`
+    // (`expect_run_err()`) confirm compile-time refusal for non-int
+    // operands.
 
     #[test]
     fn r51c_int_bitwise_eval_produces_expected_values() {

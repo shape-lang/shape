@@ -516,13 +516,11 @@ fn opcode_is_non_allocating(opcode: OpCode) -> bool {
             | OpCode::Continue
             | OpCode::Return
             | OpCode::ReturnValue
-            // Bitwise (inline i64 ops)
-            | OpCode::BitAnd
-            | OpCode::BitOr
-            | OpCode::BitXor
-            | OpCode::BitShl
-            | OpCode::BitShr
-            | OpCode::BitNot
+            // Bitwise (inline i64 ops) — dynamic `BitAnd`/etc. deleted in
+            // c5 Phase B (v0.3.3, 2026-05-28); typed `BitAndInt`/etc.
+            // arms now carry every bitwise op. They're lowered via MIR
+            // `BinOp` to inline Cranelift `band`/`bor`/`bxor` (see
+            // `mir_compiler/rvalues.rs:1047-1053`).
             // Type coercion (inline, no allocation)
             | OpCode::IntToNumber
             | OpCode::NumberToInt
