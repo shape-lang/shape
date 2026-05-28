@@ -260,7 +260,20 @@ impl BytecodeCompiler {
     /// Collect the chain of typed field operands for a property access path.
     /// For `a.b.c`, returns [operand_for_b, operand_for_c].
     /// For `a.b` (flat), returns [operand_for_b].
-    fn collect_property_access_chain(&self, object: &Expr, property: &str) -> Vec<Operand> {
+    ///
+    /// JOINT-FIX #2 (v0.3.3 c1/c2-B/c4-4C nested-projection root-cause fix):
+    /// callers in `expressions/assignment.rs` (struct-property assignment) and
+    /// `expressions/property_access.rs` (read fast-path) emit a `MakeFieldRef`
+    /// per chain entry so the projection walks through each schema's
+    /// `field_kinds` track instead of mis-projecting the leaf field_idx
+    /// against the root receiver's schema (which violates ADR-006 §2.7.13 /
+    /// Q14 and surfaces as SIGABRT on string projection or denormal-leak on
+    /// numeric projection).
+    pub(super) fn collect_property_access_chain(
+        &self,
+        object: &Expr,
+        property: &str,
+    ) -> Vec<Operand> {
         let mut chain = Vec::new();
         self.collect_property_chain_inner(object, &mut chain);
         // Add the leaf field operand
