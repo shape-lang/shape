@@ -48,11 +48,13 @@ fn test_complex_array_mutation_through_ref_caller_sees_changes() {
 fn test_complex_object_field_mutation_through_ref() {
     // BUG: Field assignment on ref param requires compile-time field resolution.
     // Test via reading typed object fields through ref instead.
+    // v0.3.3 c2a-cluster sub-fix (i): int literal `8080` for `port: number` is
+    // compile-rejected; migrated to `8080.0`.
     ShapeTest::new(
         r#"
         type Config { host: string, port: number }
         fn read_port(&cfg) { cfg.port }
-        let cfg = Config { host: "localhost", port: 8080 }
+        let cfg = Config { host: "localhost", port: 8080.0 }
         read_port(&cfg)
     "#,
     )

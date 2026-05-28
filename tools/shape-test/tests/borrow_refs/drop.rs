@@ -295,11 +295,13 @@ fn test_drop_return_from_loop() {
 
 #[test]
 fn test_drop_custom_type_without_drop_impl() {
+    // v0.3.3 c2a-cluster sub-fix (i): int literals for number fields are
+    // compile-rejected; migrated to number literals.
     ShapeTest::new(
         r#"
         type Point { x: number, y: number }
         fn f() {
-            let p = Point { x: 1, y: 2 }
+            let p = Point { x: 1.0, y: 2.0 }
             return p.x + p.y
         }
         f()
@@ -329,11 +331,13 @@ fn test_drop_custom_type_in_loop() {
 
 #[test]
 fn test_drop_custom_type_returned_not_dropped() {
+    // v0.3.3 c2a-cluster sub-fix (i): int literal `42` for `value: number` is
+    // compile-rejected; migrated to `42.0`.
     ShapeTest::new(
         r#"
         type Res { value: number }
         fn make() {
-            let r = Res { value: 42 }
+            let r = Res { value: 42.0 }
             return r
         }
         fn f() {

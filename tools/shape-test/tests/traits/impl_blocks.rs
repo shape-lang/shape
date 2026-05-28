@@ -44,6 +44,8 @@ fn impl_trait_method_returns_number() {
 
 #[test]
 fn impl_trait_method_returns_bool() {
+    // v0.3.3 c2a-cluster sub-fix (i): int literal `0` for `balance: number` is
+    // compile-rejected; migrated to `0.0`.
     ShapeTest::new(
         r#"
         type Wallet { balance: number }
@@ -53,7 +55,7 @@ fn impl_trait_method_returns_bool() {
         impl Checkable for Wallet {
             method is_empty() { self.balance == 0 }
         }
-        let w = Wallet { balance: 0 }
+        let w = Wallet { balance: 0.0 }
         w.is_empty()
     "#,
     )

@@ -1035,12 +1035,51 @@ impl BytecodeCompiler {
                                         continue;
                                     }
                                 }
-                                if !field_def.field_type.is_compatible_with(&inferred) {
+                                // v0.3.3 c2a-cluster sub-fix (i) — construction-side
+                                // symmetry with the c2-A assignment-side compile-reject
+                                // (audit `docs/cluster-audits/v0.3.3/02-adr-006-2-7-13-kind-drift.md`
+                                // Sub-bug A "Recommended" disposition lines 62-66). Pre-fix this
+                                // call-site used `field_def.field_type.is_compatible_with(&inferred)`
+                                // which permitted `(F64, I64) => true` and `(Decimal, I64) => true`
+                                // per `crates/shape-runtime/src/type_schema/field_types.rs:175-176`,
+                                // letting `Point { x: 1, y: 2 }` (where `x: number`) construct with
+                                // an I64 literal that the runtime widens via `kinded_to_slot` at
+                                // `executor/objects/object_creation.rs:448-487`. The JIT-side
+                                // `field_kinds_pre` map at `crates/shape-jit/src/mir_compiler/types.rs:438-462`
+                                // is built from the construction operands' kinds (I64 here) — NOT
+                                // the field's declared FieldType (F64) — so a downstream
+                                // `Use(Move(Field(p, x)))` projects through with `NativeKind::Int64`
+                                // and the JIT-emitted Return terminator stamps `RETURN_TAG_I64`
+                                // (verified at HEAD `67768f17`: `--mode jit` returns `Integer(1)`
+                                // for `Point { x: 1, y: 2 }; p.x` with `x: number`). Sub-fix (iii)
+                                // ground-truth: the read-side kind drift is downstream of THIS
+                                // construction-side widening — closing (i) eliminates the only path
+                                // that produces an int-kinded slot for a number-declared field, so
+                                // the JIT field-kind-projection bug becomes unreachable for
+                                // statically-checked programs.
+                                //
+                                // Switch from `is_compatible_with` to exact-equality (mirror of
+                                // `assignment.rs:550` `inferred != place.field_type_info`). The
+                                // permissive widening at `is_compatible_with` lines 175-179 is the
+                                // same defection that c2-A unwound at the assignment producer side
+                                // (CLAUDE.md §Type System Rules: "NO runtime coercion"); per the
+                                // audit, the construction site should reject for symmetry instead
+                                // of mirroring the widening shape (which would be the W4-δ
+                                // Convert-opcode defection-attractor named in §Forbidden Patterns).
+                                if field_def.field_type != inferred {
                                     let value_loc = self.span_to_source_location(value_expr.span());
                                     let mut loc = value_loc;
                                     loc.hints.push(format!(
                                         "expected `{}`, found `{}`",
                                         field_def.field_type, inferred
+                                    ));
+                                    // Add a conversion hint mirroring the c2-A assignment-side
+                                    // diagnostic shape at `assignment.rs:558-561`. For the dominant
+                                    // int→number defection the user writes `1.0` (number literal)
+                                    // or `1 as number` (explicit cast).
+                                    loc.hints.push(format!(
+                                        "use an explicit conversion: `... as {}`",
+                                        field_def.field_type
                                     ));
                                     loc.notes.push(shape_ast::error::ErrorNote {
                                         message: format!(
@@ -1051,7 +1090,7 @@ impl BytecodeCompiler {
                                     });
                                     return Err(ShapeError::SemanticError {
                                         message: format!(
-                                            "type mismatch: field `{}` of `{}` expects `{}`, found `{}`",
+                                            "type mismatch: cannot construct field `{}` of `{}` (type `{}`) with `{}` literal",
                                             field_name, type_name, field_def.field_type, inferred
                                         ),
                                         location: Some(loc),

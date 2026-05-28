@@ -49,6 +49,8 @@ fn trait_impl_method_call() {
 
 #[test]
 fn trait_impl_method_returns_computed_value() {
+    // v0.3.3 c2a-cluster sub-fix (i): int literals for number fields are
+    // compile-rejected; migrated to number literals.
     ShapeTest::new(
         r#"
         type Rect { width: number, height: number }
@@ -60,7 +62,7 @@ fn trait_impl_method_returns_computed_value() {
                 self.width * self.height
             }
         }
-        let r = Rect { width: 5, height: 10 }
+        let r = Rect { width: 5.0, height: 10.0 }
         r.area()
     "#,
     )
@@ -87,6 +89,8 @@ fn trait_impl_with_string_return() {
 
 #[test]
 fn trait_impl_method_accesses_multiple_fields() {
+    // v0.3.3 c2a-cluster sub-fix (i): int literals for number fields are
+    // compile-rejected; migrated to number literals.
     ShapeTest::new(
         r#"
         type Vec2 { x: number, y: number }
@@ -98,7 +102,7 @@ fn trait_impl_method_accesses_multiple_fields() {
                 self.x * self.x + self.y * self.y
             }
         }
-        let v = Vec2 { x: 3, y: 4 }
+        let v = Vec2 { x: 3.0, y: 4.0 }
         v.mag_sq()
     "#,
     )
@@ -340,6 +344,8 @@ fn trait_impl_method_with_param() {
 
 #[test]
 fn extend_basic_method() {
+    // v0.3.3 c2a-cluster sub-fix (i): int literals for number fields are
+    // compile-rejected; migrated to number literals.
     ShapeTest::new(
         r#"
         type Vec2 { x: number, y: number }
@@ -348,7 +354,7 @@ fn extend_basic_method() {
                 self.x * self.x + self.y * self.y
             }
         }
-        let v = Vec2 { x: 3, y: 4 }
+        let v = Vec2 { x: 3.0, y: 4.0 }
         v.magnitude_sq()
     "#,
     )
@@ -390,6 +396,8 @@ fn extend_method_returns_string() {
 
 #[test]
 fn extend_method_returns_bool() {
+    // v0.3.3 c2a-cluster sub-fix (i): int literal `-5` for `balance: number`
+    // is compile-rejected; migrated to `-5.0`.
     ShapeTest::new(
         r#"
         type Account { balance: number }
@@ -398,7 +406,7 @@ fn extend_method_returns_bool() {
                 self.balance < 0
             }
         }
-        let a = Account { balance: -5 }
+        let a = Account { balance: -5.0 }
         a.is_overdrawn()
     "#,
     )
@@ -407,6 +415,8 @@ fn extend_method_returns_bool() {
 
 #[test]
 fn extend_method_with_parameter() {
+    // v0.3.3 c2a-cluster sub-fix (i): int literal `100` for `balance: number`
+    // is compile-rejected; migrated to `100.0`.
     ShapeTest::new(
         r#"
         type Account { balance: number }
@@ -415,7 +425,7 @@ fn extend_method_with_parameter() {
                 self.balance + amount
             }
         }
-        let a = Account { balance: 100 }
+        let a = Account { balance: 100.0 }
         a.deposit(50)
     "#,
     )
@@ -424,6 +434,8 @@ fn extend_method_with_parameter() {
 
 #[test]
 fn extend_method_with_conditional() {
+    // v0.3.3 c2a-cluster sub-fix (i): int literal `5` for `n: number` is
+    // compile-rejected; migrated to `5.0`.
     ShapeTest::new(
         r#"
         type Value { n: number }
@@ -432,7 +444,7 @@ fn extend_method_with_conditional() {
                 if self.n > 0 { "positive" } else if self.n < 0 { "negative" } else { "zero" }
             }
         }
-        let v = Value { n: 5 }
+        let v = Value { n: 5.0 }
         v.classify()
     "#,
     )
@@ -441,6 +453,8 @@ fn extend_method_with_conditional() {
 
 #[test]
 fn extend_method_negative_classify() {
+    // v0.3.3 c2a-cluster sub-fix (i): int literal `-3` for `n: number` is
+    // compile-rejected; migrated to `-3.0`.
     ShapeTest::new(
         r#"
         type Value { n: number }
@@ -449,7 +463,7 @@ fn extend_method_negative_classify() {
                 if self.n > 0 { "positive" } else if self.n < 0 { "negative" } else { "zero" }
             }
         }
-        let v = Value { n: -3 }
+        let v = Value { n: -3.0 }
         v.classify()
     "#,
     )
@@ -479,13 +493,15 @@ fn extend_method_with_loop() {
 
 #[test]
 fn extend_method_chained_call() {
+    // v0.3.3 c2a-cluster sub-fix (i): int literal `21` for `val: number` is
+    // compile-rejected; migrated to `21.0`.
     ShapeTest::new(
         r#"
         type Num { val: number }
         extend Num {
             method doubled() { self.val * 2 }
         }
-        let n = Num { val: 21 }
+        let n = Num { val: 21.0 }
         n.doubled()
     "#,
     )
