@@ -20,9 +20,17 @@ fn object_creation_all_fields_number() {
     .expect_number(7.0);
 }
 
-/// Verifies int widening to number field.
+/// v0.3.3 c2a-cluster sub-fix (i) (audit `docs/cluster-audits/v0.3.3/
+/// 02-adr-006-2-7-13-kind-drift.md` Sub-bug A "Recommended" disposition lines 62-66):
+/// the construction-side int→number widening at `kinded_to_slot`
+/// (`executor/objects/object_creation.rs:448-487`) is now compile-rejected for
+/// symmetry with the c2-A assignment-side fix (commit `516afcad`). The pre-fix
+/// test name "int_widening_to_number" documented the deleted runtime widening;
+/// the post-fix discipline mirrors `struct_field_mutation_int_to_number_rejected_
+/// at_compile_time` in `structs.rs` — the user writes `1.0`/`2.0` (number
+/// literals) or `1 as number` (explicit cast).
 #[test]
-fn object_creation_int_widening_to_number() {
+fn object_creation_int_to_number_rejected_at_compile_time() {
     ShapeTest::new(
         r#"
         type Point { x: number, y: number }
@@ -30,7 +38,10 @@ fn object_creation_int_widening_to_number() {
         p.x + p.y
     "#,
     )
-    .expect_number(3.0);
+    .expect_run_err_contains("type mismatch")
+    .expect_run_err_contains("cannot construct field `x`")
+    .expect_run_err_contains("type `number`")
+    .expect_run_err_contains("with `int` literal");
 }
 
 /// Verifies object creation with mixed types.

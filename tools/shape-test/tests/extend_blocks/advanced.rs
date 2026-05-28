@@ -41,6 +41,9 @@ fn extend_multiple_methods_on_type() {
 
 #[test]
 fn extend_method_with_parameter() {
+    // v0.3.3 c2a-cluster sub-fix (i): `Account { balance: 100 }` with
+    // `balance: number` is compile-rejected (int literal for number field).
+    // Migrated to `100.0` per c2-A precedent.
     ShapeTest::new(
         r#"
         type Account { balance: number }
@@ -49,7 +52,7 @@ fn extend_method_with_parameter() {
                 self.balance + amount
             }
         }
-        let a = Account { balance: 100 }
+        let a = Account { balance: 100.0 }
         a.deposit(50)
     "#,
     )
@@ -62,6 +65,8 @@ fn extend_method_with_parameter() {
 
 #[test]
 fn extend_method_with_conditional() {
+    // v0.3.3 c2a-cluster sub-fix (i): `Value { n: 0 }` with `n: number` is
+    // compile-rejected (int literal for number field). Migrated to `0.0`.
     ShapeTest::new(
         r#"
         type Value { n: number }
@@ -70,7 +75,7 @@ fn extend_method_with_conditional() {
                 if self.n > 0 { "positive" } else if self.n < 0 { "negative" } else { "zero" }
             }
         }
-        let v = Value { n: 0 }
+        let v = Value { n: 0.0 }
         v.classify()
     "#,
     )
@@ -129,14 +134,16 @@ fn extend_method_print_output() {
 
 #[test]
 fn extend_method_called_like_function() {
-    // TDD: UFCS allows calling extend methods as receiver.method()
+    // TDD: UFCS allows calling extend methods as receiver.method().
+    // v0.3.3 c2a-cluster sub-fix (i): `Num { val: 21 }` with `val: number` is
+    // compile-rejected (int literal for number field). Migrated to `21.0`.
     ShapeTest::new(
         r#"
         type Num { val: number }
         extend Num {
             method doubled() { self.val * 2.0 }
         }
-        let n = Num { val: 21 }
+        let n = Num { val: 21.0 }
         n.doubled()
     "#,
     )

@@ -89,6 +89,8 @@ fn extend_string_wrap() {
 
 #[test]
 fn extend_custom_type_method() {
+    // v0.3.3 c2a-cluster sub-fix (i): int literals for number fields are
+    // compile-rejected; migrated to number literals.
     ShapeTest::new(
         r#"
         type Vec2 { x: number, y: number }
@@ -97,7 +99,7 @@ fn extend_custom_type_method() {
                 self.x * self.x + self.y * self.y
             }
         }
-        let v = Vec2 { x: 3, y: 4 }
+        let v = Vec2 { x: 3.0, y: 4.0 }
         v.magnitude_sq()
     "#,
     )
@@ -123,6 +125,9 @@ fn extend_custom_type_string_method() {
 
 #[test]
 fn extend_custom_type_bool_method() {
+    // v0.3.3 c2a-cluster sub-fix (i): `Account { balance: -5 }` with
+    // `balance: number` is compile-rejected (int literal for number field).
+    // Migrated to `-5.0`.
     ShapeTest::new(
         r#"
         type Account { balance: number }
@@ -131,7 +136,7 @@ fn extend_custom_type_bool_method() {
                 self.balance < 0
             }
         }
-        let a = Account { balance: -5 }
+        let a = Account { balance: -5.0 }
         a.is_overdrawn()
     "#,
     )

@@ -250,6 +250,8 @@ fn test_complex_frequency_counter() {
 
 #[test]
 fn test_complex_linked_operations_on_typed_struct() {
+    // v0.3.3 c2a-cluster sub-fix (i): int literals for number fields are
+    // compile-rejected; migrated to number literals.
     ShapeTest::new(
         r#"
         type Point { x: number, y: number }
@@ -259,7 +261,7 @@ fn test_complex_linked_operations_on_typed_struct() {
         fn scale(p, factor) {
             Point { x: p.x * factor, y: p.y * factor }
         }
-        let p = Point { x: 1, y: 2 }
+        let p = Point { x: 1.0, y: 2.0 }
         let p2 = scale(translate(p, 3, 4), 2)
         print(p2.x)
         print(p2.y)
@@ -294,7 +296,9 @@ fn test_complex_deep_nested_struct_access() {
 #[test]
 fn test_complex_trait_impl_dispatch() {
     // BUG: Multiple extend blocks with same method name cause type confusion
-    // Test single extend block dispatch
+    // Test single extend block dispatch.
+    // v0.3.3 c2a-cluster sub-fix (i): int literal `5` for `radius: number` is
+    // compile-rejected; migrated to `5.0`.
     ShapeTest::new(
         r#"
         type Circle { radius: number }
@@ -302,7 +306,7 @@ fn test_complex_trait_impl_dispatch() {
             method area() { 3 * self.radius * self.radius }
             method circumference() { 2 * 3 * self.radius }
         }
-        let c = Circle { radius: 5 }
+        let c = Circle { radius: 5.0 }
         print(c.area())
         print(c.circumference())
     "#,

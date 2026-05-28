@@ -9,6 +9,8 @@ use shape_test::shape_test::ShapeTest;
 
 #[test]
 fn complex_point_distance_squared() {
+    // v0.3.3 c2a-cluster sub-fix (i): int literals for `number` fields are
+    // compile-rejected; migrated to number literals.
     ShapeTest::new(
         r#"
         type Point { x: number, y: number }
@@ -17,8 +19,8 @@ fn complex_point_distance_squared() {
             let dy = b.y - a.y
             dx * dx + dy * dy
         }
-        let p1 = Point { x: 0, y: 0 }
-        let p2 = Point { x: 3, y: 4 }
+        let p1 = Point { x: 0.0, y: 0.0 }
+        let p2 = Point { x: 3.0, y: 4.0 }
         distance_sq(p1, p2)
     "#,
     )
@@ -46,6 +48,8 @@ fn complex_line_from_points() {
 
 #[test]
 fn complex_struct_with_trait_and_extend() {
+    // v0.3.3 c2a-cluster sub-fix (i): int literal `5` for `radius: number` is
+    // compile-rejected; migrated to `5.0`.
     ShapeTest::new(
         r#"
         type Circle { radius: number }
@@ -64,7 +68,7 @@ fn complex_struct_with_trait_and_extend() {
             method diameter() { self.radius * 2 }
         }
 
-        let c = Circle { radius: 5 }
+        let c = Circle { radius: 5.0 }
         print(c.area_approx())
         print(c.diameter())
     "#,
@@ -108,6 +112,8 @@ fn complex_nested_struct_mutation() {
 
 #[test]
 fn complex_struct_in_match() {
+    // v0.3.3 c2a-cluster sub-fix (i): int literal `5` for `size: number` is
+    // compile-rejected; migrated to `5.0`.
     ShapeTest::new(
         r#"
         type Shape { kind: string, size: number }
@@ -118,7 +124,7 @@ fn complex_struct_in_match() {
                 _ => "unknown"
             }
         }
-        describe(Shape { kind: "circle", size: 5 })
+        describe(Shape { kind: "circle", size: 5.0 })
     "#,
     )
     .expect_string("round");
@@ -156,10 +162,12 @@ fn complex_hashmap_with_struct_field() {
 
 #[test]
 fn complex_struct_destructured_and_repackaged() {
+    // v0.3.3 c2a-cluster sub-fix (i): int literals for `x: number, y: number`
+    // are compile-rejected; migrated to number literals.
     ShapeTest::new(
         r#"
         type Point { x: number, y: number }
-        let p = Point { x: 3, y: 4 }
+        let p = Point { x: 3.0, y: 4.0 }
         let { x, y } = p
         let swapped = Point { x: y, y: x }
         swapped.x

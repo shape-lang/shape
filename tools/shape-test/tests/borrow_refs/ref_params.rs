@@ -70,11 +70,13 @@ fn test_ref_set_object_field_through_ref() {
     // BUG: Assignment through ref to typed object field requires compile-time
     // field resolution which is not yet supported for ref params.
     // Using direct mutation instead to test ref value propagation.
+    // v0.3.3 c2a-cluster sub-fix (i): int literals for `x: number, y: number`
+    // are compile-rejected; migrated to number literals.
     ShapeTest::new(
         r#"
         type Pt { x: number, y: number }
         fn get_x(&obj) { obj.x }
-        let p = Pt { x: 42, y: 0 }
+        let p = Pt { x: 42.0, y: 0.0 }
         get_x(&p)
     "#,
     )

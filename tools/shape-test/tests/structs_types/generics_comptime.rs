@@ -219,13 +219,15 @@ fn comptime_field_numeric_default() {
 
 #[test]
 fn comptime_field_with_runtime_field() {
+    // v0.3.3 c2a-cluster sub-fix (i): int literal `100` for `amount: number`
+    // is compile-rejected; migrated to `100.0`.
     ShapeTest::new(
         r#"
         type Currency {
             comptime symbol: string = "$",
             amount: number
         }
-        let c = Currency { amount: 100 }
+        let c = Currency { amount: 100.0 }
         c.amount
     "#,
     )

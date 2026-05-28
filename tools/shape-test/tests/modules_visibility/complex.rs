@@ -180,11 +180,13 @@ fn test_complex_module_then_array_ops() {
 
 #[test]
 fn test_complex_module_then_type_construction() {
+    // v0.3.3 c2a-cluster sub-fix (i): int literals for number fields are
+    // compile-rejected; migrated to number literals.
     ShapeTest::new(
         r#"
         mod M { fn unused() { 0 } }
         type Point { x: number, y: number }
-        let p = Point { x: 3, y: 4 }
+        let p = Point { x: 3.0, y: 4.0 }
         p.x + p.y
     "#,
     )

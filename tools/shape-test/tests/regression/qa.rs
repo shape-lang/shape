@@ -453,6 +453,8 @@ fn regression_med_12_enum_variant_printing() {
 /// BUG-MED-8: extend method arithmetic results not corrupt
 #[test]
 fn regression_med_8_extend_method_arithmetic() {
+    // v0.3.3 c2a-cluster sub-fix (i): int literals for number fields are
+    // compile-rejected; migrated to number literals.
     ShapeTest::new(
         r#"
         type Vec2 { x: number, y: number }
@@ -461,7 +463,7 @@ fn regression_med_8_extend_method_arithmetic() {
                 self.x * self.x + self.y * self.y
             }
         }
-        let v = Vec2 { x: 3, y: 4 }
+        let v = Vec2 { x: 3.0, y: 4.0 }
         v.magnitude()
     "#,
     )

@@ -570,6 +570,96 @@ impl BytecodeCompiler {
                                 location: Some(loc),
                             });
                         }
+                    } else if let Ok(rhs_ty) = self.infer_expr_type(&assign_expr.value) {
+                        // v0.3.3 c2a-cluster sub-fix (ii) — non-literal RHS at the
+                        // assignment producer site (audit `docs/cluster-audits/v0.3.3/
+                        // 02-adr-006-2-7-13-kind-drift.md` Sub-bug A "Recommended"
+                        // disposition + supervisor 2026-05-28 dispatch). The c2-A literal
+                        // arm above handles `p.x = 10` where the RHS is a literal we can
+                        // classify via `infer_field_type_from_expr`. For non-literal RHS
+                        // like `let v = 10; p.x = v`, the literal helper returns `None`
+                        // and the pre-fix code path fell through to silent corruption —
+                        // verified at HEAD `67768f17`:
+                        //
+                        //   type Point { x: number, y: number }
+                        //   let mut p = Point { x: 1.0, y: 2.0 }
+                        //   let v = 10
+                        //   p.x = v
+                        //   p.x   // -> {"Number": 5e-323}    ← Int64-bits-as-F64 denormal
+                        //
+                        // Fix shape: read-only AST-level inference via `infer_expr_type`
+                        // (defined at `crates/shape-vm/src/compiler/expressions/mod.rs:1364`).
+                        // This is NOT a producer-walk-back over already-emitted opcodes —
+                        // that path would require the RHS expression to ALREADY be emitted,
+                        // which would commit a `MakeRef + MakeFieldRef + ... + DerefStore`
+                        // chain to the program before discovering the mismatch (we'd then
+                        // have to dead-pop the stream, fragile). The AST-level type
+                        // inference is read-only and emission-free.
+                        //
+                        // For non-literal sites we resolve the RHS expression's type to a
+                        // `FieldType` via the same mapping `type_annotation_to_field_type`
+                        // uses for type-def field declarations
+                        // (`helpers.rs:4933`). If both sides resolve to a primitive
+                        // `FieldType` (I64 / F64 / Bool / Decimal / String / Timestamp /
+                        // width-int) AND they differ → compile-reject with the same
+                        // diagnostic shape as the literal arm. When either side fails to
+                        // resolve (generic param, untracked binding, complex chain) we
+                        // skip the check — leaving the §2.7.13 SURFACE for the
+                        // kind-tracker walk-back to catch downstream. This is the same
+                        // conservatism `infer_expr_type` already applies to identifier
+                        // resolution at lines 1389-1397.
+                        //
+                        // Forbidden patterns explicitly avoided: no runtime
+                        // `ConvertIntToNumber` opcode (W4-δ defection-attractor per
+                        // CLAUDE.md §Forbidden Patterns); no producer-side fabrication
+                        // of NativeKind at emit time; no defection-attractor descriptor
+                        // (per §Renames-to-refuse-on-sight family).
+                        let rhs_field_type =
+                            Self::primitive_type_to_field_type(&rhs_ty);
+                        if let Some(rhs_ft) = rhs_field_type {
+                            // Only fire when BOTH sides resolve to a primitive — the
+                            // generic / object / unresolved cases are conservatively
+                            // skipped (see comment above).
+                            let lhs_is_primitive = matches!(
+                                place.field_type_info,
+                                FieldType::I64
+                                    | FieldType::F64
+                                    | FieldType::Bool
+                                    | FieldType::String
+                                    | FieldType::Decimal
+                                    | FieldType::Timestamp
+                                    | FieldType::I8
+                                    | FieldType::U8
+                                    | FieldType::I16
+                                    | FieldType::U16
+                                    | FieldType::I32
+                                    | FieldType::U32
+                                    | FieldType::U64
+                            );
+                            if lhs_is_primitive && rhs_ft != place.field_type_info {
+                                let value_loc =
+                                    self.span_to_source_location(assign_expr.value.span());
+                                let mut loc = value_loc;
+                                loc.hints.push(format!(
+                                    "expected `{}`, found `{}`",
+                                    place.field_type_info, rhs_ft
+                                ));
+                                loc.hints.push(format!(
+                                    "use an explicit conversion: `... as {}`",
+                                    place.field_type_info
+                                ));
+                                return Err(ShapeError::SemanticError {
+                                    message: format!(
+                                        "type mismatch: cannot assign `{}` to field `{}.{}` of type `{}`",
+                                        rhs_ft,
+                                        place.root_name,
+                                        property,
+                                        place.field_type_info
+                                    ),
+                                    location: Some(loc),
+                                });
+                            }
+                        }
                     }
 
                     let field_ref = self.declare_temp_local("__field_assign_ref_")?;
@@ -1149,6 +1239,52 @@ impl BytecodeCompiler {
                 Ok(())
             }
         }
+    }
+
+    /// v0.3.3 c2a-cluster sub-fix (ii) helper — map a `Type::Concrete(Basic(...))`
+    /// result from `infer_expr_type` to a primitive `FieldType` so the
+    /// assignment-side compile-reject can compare against the resolved field's
+    /// declared FieldType.
+    ///
+    /// Mirrors the primitive-name table of `type_annotation_to_field_type` at
+    /// `crates/shape-vm/src/compiler/helpers.rs:4933`. We intentionally only
+    /// classify the Basic-name primitives here; complex shapes (Array<T>,
+    /// HashMap<K,V>, Option<T>, Object("...")) return `None` and the caller
+    /// conservatively skips the check.
+    ///
+    /// Why a focused helper instead of reusing `type_annotation_to_field_type`:
+    /// `infer_expr_type` returns `shape_runtime::type_system::Type`, not
+    /// `shape_ast::ast::TypeAnnotation`. The mappings overlap on primitives
+    /// but diverge on generic shapes and tuple syntax. Sub-fix (ii) only
+    /// needs the primitive cohort — keeping the helper scoped here documents
+    /// the scope and avoids drift across the boundary.
+    fn primitive_type_to_field_type(
+        ty: &shape_runtime::type_system::Type,
+    ) -> Option<FieldType> {
+        use shape_ast::ast::TypeAnnotation;
+        use shape_runtime::type_system::Type;
+        let name = match ty {
+            Type::Concrete(TypeAnnotation::Basic(s)) => s.as_str(),
+            _ => return None,
+        };
+        Some(match name {
+            "number" | "float" | "f64" | "f32" => FieldType::F64,
+            "i8" => FieldType::I8,
+            "u8" => FieldType::U8,
+            "i16" => FieldType::I16,
+            "u16" => FieldType::U16,
+            "i32" => FieldType::I32,
+            "u32" => FieldType::U32,
+            "u64" => FieldType::U64,
+            "int" | "i64" | "integer" | "isize" | "usize" | "byte" | "char" => {
+                FieldType::I64
+            }
+            "string" | "str" => FieldType::String,
+            "decimal" => FieldType::Decimal,
+            "bool" | "boolean" => FieldType::Bool,
+            "timestamp" => FieldType::Timestamp,
+            _ => return None,
+        })
     }
 }
 

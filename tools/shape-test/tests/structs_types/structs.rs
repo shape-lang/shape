@@ -181,14 +181,70 @@ fn struct_field_mutation_int_to_number_rejected_at_compile_time() {
 }
 
 #[test]
+fn struct_field_mutation_int_var_to_number_rejected_at_compile_time() {
+    // v0.3.3 c2a-cluster sub-fix (ii) (audit Sub-bug A "Recommended" disposition
+    // + supervisor 2026-05-28 dispatch). c2-A's literal-only check only fired on
+    // `p.x = 10` literals; this test extends to non-literal RHS like
+    // `let v = 10; p.x = v` which pre-fix silently corrupted the slot (verified
+    // at HEAD `67768f17`: post-fix the same release-build program returned the
+    // `5e-323` f64 denormal — the Int64-bits-as-F64 reinterpret of `10`).
+    // Sub-fix (ii) consults `infer_expr_type` for non-literal RHS and compile-
+    // rejects with the same diagnostic shape as the literal arm.
+    ShapeTest::new(
+        r#"
+        type Point { x: number, y: number }
+        let mut p = Point { x: 1.0, y: 2.0 }
+        let v = 10
+        p.x = v
+        p.x
+    "#,
+    )
+    .expect_run_err_contains("type mismatch")
+    .expect_run_err_contains("cannot assign `int`")
+    .expect_run_err_contains("field `p.x`")
+    .expect_run_err_contains("type `number`");
+}
+
+#[test]
+fn struct_literal_int_to_number_rejected_at_compile_time() {
+    // v0.3.3 c2a-cluster sub-fix (i) (audit Sub-bug A "Recommended" disposition
+    // lines 62-66 + supervisor 2026-05-28 dispatch). Construction-side symmetry
+    // with c2-A's assignment-side compile-reject: `Point { x: 1, y: 2 }` with
+    // `x: number` (int literal for number field) was permitted pre-fix via
+    // `is_compatible_with` permissiveness at `field_types.rs:175 (F64, I64) =>
+    // true` and runtime-widened by `kinded_to_slot` at `object_creation.rs:
+    // 448-487`. Post-fix the literal-check at `compile_struct_literal` uses
+    // exact-equality (mirror of c2-A `assignment.rs:550`), eliminating the
+    // construction-side path that feeds the JIT's `field_kinds_pre` map at
+    // `mir_compiler/types.rs:438-462` with int-kinded operands for number-
+    // declared fields (the root cause sub-fix iii's read-side kind drift was
+    // downstream of).
+    ShapeTest::new(
+        r#"
+        type Point { x: number, y: number }
+        let p = Point { x: 1, y: 2 }
+        p.x
+    "#,
+    )
+    .expect_run_err_contains("type mismatch")
+    .expect_run_err_contains("cannot construct field `x`")
+    .expect_run_err_contains("type `number`")
+    .expect_run_err_contains("with `int` literal");
+}
+
+#[test]
 fn struct_passed_to_function() {
+    // v0.3.3 c2a-cluster sub-fix (i): construction-side `Point { x: 3, y: 4 }`
+    // with `x: number` is compile-rejected (int literal for number field).
+    // Migrated to `3.0` / `4.0` per audit-anticipated path (mirrors c2-A's
+    // `struct_field_mutation` migration at `516afcad`).
     ShapeTest::new(
         r#"
         type Point { x: number, y: number }
         fn sum_point(p: Point) -> number {
             return p.x + p.y
         }
-        sum_point(Point { x: 3, y: 4 })
+        sum_point(Point { x: 3.0, y: 4.0 })
     "#,
     )
     .expect_number(7.0);
@@ -211,10 +267,12 @@ fn struct_returned_from_function() {
 
 #[test]
 fn struct_in_array() {
+    // v0.3.3 c2a-cluster sub-fix (i): int literals for `x: number, y: number`
+    // fields are compile-rejected; migrated to number literals.
     ShapeTest::new(
         r#"
         type Point { x: number, y: number }
-        let pts = [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }]
+        let pts = [Point { x: 1.0, y: 2.0 }, Point { x: 3.0, y: 4.0 }]
         pts[0].x + pts[1].y
     "#,
     )
@@ -285,10 +343,12 @@ fn struct_in_if_condition() {
 
 #[test]
 fn struct_field_in_arithmetic() {
+    // v0.3.3 c2a-cluster sub-fix (i): int literals for `number` fields are
+    // compile-rejected; migrated to number literals.
     ShapeTest::new(
         r#"
         type Rect { width: number, height: number }
-        let r = Rect { width: 5, height: 10 }
+        let r = Rect { width: 5.0, height: 10.0 }
         r.width * r.height
     "#,
     )

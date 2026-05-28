@@ -140,6 +140,8 @@ fn trait_method_bool_check() {
 
 #[test]
 fn impl_with_multiple_methods_dispatch() {
+    // v0.3.3 c2a-cluster sub-fix (i): int literals for number fields are
+    // compile-rejected; migrated to number literals.
     ShapeTest::new(
         r#"
         type Vec2 { x: number, y: number }
@@ -151,7 +153,7 @@ fn impl_with_multiple_methods_dispatch() {
             method mag_sq() { self.x * self.x + self.y * self.y }
             method is_zero() { self.x == 0 && self.y == 0 }
         }
-        let v = Vec2 { x: 3, y: 4 }
+        let v = Vec2 { x: 3.0, y: 4.0 }
         print(v.mag_sq())
         print(v.is_zero())
     "#,
