@@ -308,3 +308,129 @@ Per CLAUDE.md §Forbidden Patterns + the broader-family regex:
 The remediation shape is producer-side kind correctness at each of
 the three named sites. The kind track is the discriminator; the bits
 follow.
+
+---
+
+## §8 Empirical correction post-JOINT-FIX-#1
+
+Round-1 closure trace (joint-fix-c4-4A SURFACE-AND-STOP 2026-05-28):
+the §4A hypothesis ("`op_return_value` lacks src-kind preservation for
+the kind-leaking sites identified in audit-04") was **FALSIFIED** by
+Q3 ground-truth re-check at `53549fcb` post JOINT-FIX-#1 + JOINT-FIX-#1b:
+the `op_return_value` family at `executor/control_flow/mod.rs` now
+correctly preserves `src_kind` for every CallFrame return per ADR-006
+§2.7.7. The Round-2 dispatch carries the corrected disposition for the
+audit-04 family.
+
+### (a) §4A predicted root-site falsification
+
+`bug5_named_fn_as_argument` (the c4-4D anchor) was the only test in the
+audit-04 §4A pool still reproducing at HEAD `67768f17`. The
+joint-fix-c4-4A agent's investigate-first traces showed:
+
+* Inner-body `print(x)` inside `double` shows `x:Float64` with bits
+  `21` (i.e. `f64::from_bits(21)` formatted as denormal) when invoked
+  via the HOF path `apply(double, 21)`, but the runtime hand-off path
+  (`call_function_with_nb_args`) DID push `(21, Int64)` correctly per
+  the §2.7.7 stack parallel-kind track — confirmed via stack-track
+  probe + `op_return_value` src-kind audit.
+
+* The mis-stamp surfaces strictly DOWNSTREAM of the call-frame setup,
+  inside `double`'s compiled body. The bytecode for `x * 2` had
+  `MulNumber` (a Float64-typed op) instead of `MulInt` — emitted at
+  compile time, not at runtime kind-write.
+
+* `op_return_value` sites are NOT the producer of this kind drift;
+  they correctly project the stack-track kind onto the returning slot.
+  The audit-04 §4A "remaining sites" hypothesis is closed without a
+  fix needed at those sites — the JF#1 + JF#1b changes already
+  achieved that hardening for the rest of the audit-04 family.
+
+### (b) Actual root: c4-4D HOF-callee-param-inference-default-number
+
+The producer of `MulNumber` is the bytecode compiler's `BinaryOp::Mul`
+emission path at `crates/shape-vm/src/compiler/expressions/binary_ops.rs:1929-1937`
+(`emit_numeric_binary_with_coercion_trusted`). For `x * 2` inside
+`double`, `left_numeric` (`x`'s storage hint) is read from the
+type-tracker's local-slot info. That hint is stamped by
+`set_local_type_info` at `crates/shape-vm/src/compiler/functions.rs:1500-1508`
+from `inferred_param_type_hints["double"][0]` — which the inference
+engine populates from `types["double"]`'s parameter type.
+
+For the HOF call site `apply(double, 21)`:
+
+* No direct call site for `double` exists (only the HOF call exists),
+  so `callsite_param_types["double"]` is empty post-`record_function_callsite`.
+
+* `apply_callsite_unions` widens `apply`'s parameter `f` to the
+  callsite-supplied function type, but `double`'s own parameter source
+  vars are not in `apply`'s widening scope — they live in a fresh
+  instantiation of `double`'s `TypeScheme::poly` (the HM-generalized
+  scheme created by `make_function_scheme` at `inference/items.rs:1176`).
+  The instantiated TypeVars have no back-link to `double`'s stored
+  source vars in `callable_param_source_vars["double"]`, so the
+  widening doesn't reach `types["double"]`.
+
+* `refine_numeric_params_post_callsite` at `inference/mod.rs:1482`
+  then sees `double`'s parameter still as `Type::Variable` AND in
+  `callable_numeric_param_indices["double"]` (body imposes Numeric
+  bound via `x * 2`) → applies the "last-resort `number` default"
+  collapse: `types["double"]` becomes `Fn(number) -> number`.
+
+* `inferred_param_type_hints["double"][0] = "number"` then flows to
+  `set_local_type_info` and the compile-time check at
+  `Self::tracker_type_name_is_primitive("number")` removes `double`'s
+  parameter local from `param_locals` (`functions.rs:1507`). The
+  param-locals safety net at `binary_ops.rs:1758-1771` that would
+  otherwise clear `left_numeric` for untyped params is bypassed.
+
+* Result: `MulNumber` is emitted for `x * 2`. At runtime the stack
+  slot carries the call-supplied `Int64`-stamped bits `21` (correctly
+  preserved by the §2.7.7 stack parallel-kind track + `op_return_value`
+  per JF#1), but the consumer reads them as `f64` via
+  `coerce_to_f64_kinded` and multiplies by `2.0`, producing a Float64
+  result that displays as the `f64::from_bits(42)` denormal `2e-321`.
+  Bits are correct (42); kind stamp is wrong (Float64 vs Int64).
+
+The fix (this commit) propagates the HOF callsite information from
+the outer call (`apply(double, 21)`) into the inner callee
+(`double`)'s callsite record by reading the outer body's call-shape
+constraint `Variable(f_src) ~ Function { params: [Variable(x_src)],
+returns: _ }` (already in `self.constraints` from `infer_function_call`
+when apply's body invoked its parameter) and synthesizing a callsite
+record for `double` from the outer's `arg_types[1]` (= `int`).
+`apply_callsite_unions` then widens `double`'s parameter to `int`
+through the normal path, `refine_numeric_params_post_callsite` keeps
+the precise `int`, the bytecode compiler emits `MulInt`, and `21 * 2
+= 42` (Int64) is the runtime result.
+
+No defection-attractor: the fix is producer-side (compile-time
+inference), not symptom-site (no kind rewriting at the consumer or
+the runtime kind-write site). No `Convert<X>To<Y>` opcode added. No
+`tag-decode`/`kind-bridge`/`shim`/`probe`/`adapter` family naming.
+The synthetic callsite record goes through the existing
+`record_function_callsite` API; only existing constraints are
+inspected (no new ones pushed). Soundness rests on the same
+single-discriminator basis as direct callsites: the recorded type is
+proved by inference, not fabricated.
+
+### (c) Audit-04 family closure status
+
+* §4A — return-value sites in the audit-04 pool: **CLOSED** by
+  JOINT-FIX-#1 (`c6226b18`) + JOINT-FIX-#1b (`805a834a`). §4A's
+  hypothesis falsified by Q3 ground-truth re-check (this section).
+
+* §4B — `jit_trampoline_result_callvalue`: **CLOSED** by c4-4B at
+  `e0ffcbd0`.
+
+* §4C — `regression_crit_1_nested_property_access`: **CLOSED** by
+  JOINT-FIX-#2 at `2a50aa32`.
+
+* §4A-subsumed bug5 / c4-4D — HOF-callee-param-inference: **CLOSED
+  by this commit** (root re-classified per §8.b; producer-side fix at
+  `crates/shape-runtime/src/type_system/inference/access.rs::propagate_hof_arg_callsites`).
+
+The audit-04 cluster is now fully closed for v0.3.3 release-blocker
+scope. The mechanical recurrence guard is the new test
+`bug5_named_fn_as_argument` at `tools/shape-test/tests/regression/tdd.rs:55-65`
+(already present at the c4-4D anchor; this commit makes it pass).

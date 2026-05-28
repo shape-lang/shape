@@ -1426,6 +1426,21 @@ impl TypeInferenceEngine {
         // concrete type, that is a genuine type error surfaced elsewhere —
         // do not clobber it. A binding that merely refines an unresolved
         // variable, or agrees with the existing one, is published.
+        //
+        // HOF callee-param propagation (v0.3.3 c4-4D): the real fix lives
+        // at the call site itself, in `propagate_hof_arg_callsites` in
+        // `access.rs` — it records a synthetic callsite for a named
+        // function passed as an HOF argument, derived from the body's
+        // call-shape constraint on the outer callable. The component-wise
+        // unification at this publish step is intentionally NOT applied:
+        // an HM-generalized scheme is instantiated with fresh TypeVars at
+        // each call site, so the widened-side variables here have no
+        // back-link to the original (stored) source-vars of the inner
+        // callee, and component-wise unification of the body-constraint
+        // would route through fresh dead variables without helping. The
+        // synthetic-callsite path goes through the existing widening +
+        // numeric-refinement pipeline and writes the inner callee's stored
+        // `Type::Function` entry in `types` directly.
         for (var, ty) in &resolved {
             if matches!(ty, Type::Variable(_)) {
                 continue;
@@ -1434,6 +1449,7 @@ impl TypeInferenceEngine {
                 Some(existing) if !matches!(existing, Type::Variable(_)) => {
                     // Already concretely bound — leave the prior binding;
                     // a real conflict is reported by constraint solving.
+                    let _ = existing;
                 }
                 _ => self.unifier.bind(var.clone(), ty.clone()),
             }
