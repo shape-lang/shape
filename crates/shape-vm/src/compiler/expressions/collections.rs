@@ -10,7 +10,7 @@ use shape_runtime::type_schema::{FieldType, TypeSchema};
 
 /// Infer the FieldType of a compile-time expression (literals only).
 /// Returns None if the type can't be determined statically (skip check).
-fn infer_field_type_from_expr(expr: &Expr) -> Option<FieldType> {
+pub(super) fn infer_field_type_from_expr(expr: &Expr) -> Option<FieldType> {
     match expr {
         Expr::Literal(lit, _) => match lit {
             Literal::Int(_) => Some(FieldType::I64),

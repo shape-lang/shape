@@ -515,6 +515,63 @@ impl BytecodeCompiler {
                     self.check_write_allowed_in_current_context(place.borrow_key, Some(source_loc))
                         .map_err(|err| Self::relabel_borrow_error(err, place.borrow_key, &label))?;
 
+                    // v0.3.3 c2-A (audit `docs/cluster-audits/v0.3.3/02-adr-006-2-7-13-kind-drift.md`
+                    // Sub-bug A — int→number assignment-side widening gap): reject at
+                    // compile time when the RHS literal's inferred `FieldType` does not
+                    // exactly match the resolved field's declared type. The DerefStore
+                    // chain emitted below stamps the captured place-kind from
+                    // `place.typed_operand.field_type_tag`; the RHS producer (a literal
+                    // here) lands its own `NativeKind` on the stack with no widening
+                    // (assignment-side has no `kinded_to_slot` equivalent — that is the
+                    // construction-only path at `executor/objects/object_creation.rs:448-487`).
+                    // The runtime invariant at ADR-006 §2.7.13 (`executor/variables/mod.rs:2718`)
+                    // then SURFACEs the drift as a debug_assert! panic; in release the
+                    // assert is stripped and the writer silently lays the RHS bits into
+                    // a kind-mismatched slot — subsequent reads via `field_kinds[i]`
+                    // reinterpret the bits (verified: `5e-323` denormal for an Int64
+                    // pattern of `10` in an F64 slot at HEAD `53549fcb`).
+                    //
+                    // Fix shape: compile-time reject (strict-typing playbook). Per audit
+                    // §2 Sub-bug A "Fix #1" + CLAUDE.md §Type System Rules "NO runtime
+                    // coercion" — adding a runtime int->number coercion opcode here is
+                    // the W4-δ Convert-opcode defection-attractor named in CLAUDE.md
+                    // §Forbidden Patterns ("paper over a kind-tracker gap"). The user
+                    // writes `10.0` or `10 as number` explicitly.
+                    //
+                    // Scope: only literal RHS (matches `infer_field_type_from_expr`,
+                    // identical helper used construction-side at `collections.rs:1026`).
+                    // Non-literal RHS that would drift falls through and may still hit
+                    // the §2.7.13 SURFACE — that is a kind-tracker followup, not c2-A
+                    // scope. `FieldType::Any` is already filtered out at the
+                    // `typed_field_place` `.filter(...)` above (W15.2-LANG-8 path).
+                    if let Some(inferred) =
+                        super::collections::infer_field_type_from_expr(&assign_expr.value)
+                    {
+                        if inferred != place.field_type_info {
+                            let value_loc =
+                                self.span_to_source_location(assign_expr.value.span());
+                            let mut loc = value_loc;
+                            loc.hints.push(format!(
+                                "expected `{}`, found `{}`",
+                                place.field_type_info, inferred
+                            ));
+                            loc.hints.push(format!(
+                                "use an explicit conversion: `... as {}`",
+                                place.field_type_info
+                            ));
+                            return Err(ShapeError::SemanticError {
+                                message: format!(
+                                    "type mismatch: cannot assign `{}` to field `{}.{}` of type `{}`",
+                                    inferred,
+                                    place.root_name,
+                                    property,
+                                    place.field_type_info
+                                ),
+                                location: Some(loc),
+                            });
+                        }
+                    }
+
                     let field_ref = self.declare_temp_local("__field_assign_ref_")?;
                     let root_operand = if place.is_local {
                         Operand::Local(place.slot)
