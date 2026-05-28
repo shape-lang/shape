@@ -2164,6 +2164,42 @@ impl VirtualMachine {
         self.push_kinded(bits, kind)
     }
 
+    // ─────────────────────────────────────────────────────────────────────
+    // joint-fix-1b (β) — typed `StoreLocal<Kind>` handlers preserve src_kind
+    //
+    // Per ADR-006 §2.7.7 the kind on the parallel-kind track MUST come from
+    // the actual producer (popped from the stack via `pop_kinded`), never
+    // fabricated from the opcode suffix. The encoded `<Kind>` suffix is a
+    // JIT static-annotation only — a compile-time witness that the producer
+    // kind matched the declared local type. Fabricating from the suffix here
+    // would clobber heap carriers (`Ptr(HeapKind::Result)` / `Ptr(HeapKind::
+    // Option)` / typed TypedObject) when the compile-time picker mis-
+    // classifies a `let v = expr?` binding (e.g. `fn get() -> Result<number>
+    // { Ok(42) }; let v = get()?` — `stamp_unwrapped_success_type` records
+    // Float64 from the static success type, but `op_try_unwrap` produces the
+    // payload kind (Int64 from `42`); the pre-fix `StoreLocalF64` clobbered
+    // Int64 → Float64 with identical bits, surfacing as f64 denormal
+    // ≈ 2.08e-322 at `print(v)`).
+    //
+    // Sub-int-width truncation (`as i32 as i64`, `(src_bits != 0)`) deleted
+    // — it was paired with the fabricated kind. Legitimate sub-width
+    // producers push canonical sign-/zero-extended Int64 bits via
+    // `push_kinded(bits, NativeKind::Int<N>)`, so storing src_bits
+    // unmodified preserves the value. Mirror of joint-fix-1 c7+c3
+    // (`return_value_inner` preserves src_kind, drops opcode-suffix
+    // fabrication) at the StoreLocal site instead of ReturnValue.
+    //
+    // JIT does NOT consume these typed Store opcodes today (grep
+    // -rEn 'StoreLocal(I64|U64|F64|I32|U32|I16|U16|I8|U8|Bool)\b'
+    // crates/shape-jit/ returns zero hits), so the executor-only change
+    // introduces NO VM/JIT divergence.
+    //
+    // Per CLAUDE.md ADR-006 §2.7.7. Per c4-pointer-as-float-leak audit
+    // §4A "kind-stamping defect" (sister site: ReturnValue). No
+    // `if src_kind.is_heap()` dual-path; no `ValueWord` resurrection; no
+    // `ConvertXToY` opcode added.
+    // ─────────────────────────────────────────────────────────────────────
+
     fn op_store_local_i64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
@@ -2174,10 +2210,10 @@ impl VirtualMachine {
             self.stack.resize_with(slot + 1, || Self::NONE_BITS);
             self.kinds.resize(slot + 1, NativeKind::Bool);
         }
-        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let (src_bits, src_kind) = self.pop_kinded()?;
         record_heap_write();
         write_barrier_slot(self.stack[slot], src_bits);
-        self.stack_write_kinded(slot, src_bits, NativeKind::Int64);
+        self.stack_write_kinded(slot, src_bits, src_kind);
         Ok(())
     }
 
@@ -2191,10 +2227,10 @@ impl VirtualMachine {
             self.stack.resize_with(slot + 1, || Self::NONE_BITS);
             self.kinds.resize(slot + 1, NativeKind::Bool);
         }
-        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let (src_bits, src_kind) = self.pop_kinded()?;
         record_heap_write();
         write_barrier_slot(self.stack[slot], src_bits);
-        self.stack_write_kinded(slot, src_bits, NativeKind::UInt64);
+        self.stack_write_kinded(slot, src_bits, src_kind);
         Ok(())
     }
 
@@ -2208,10 +2244,10 @@ impl VirtualMachine {
             self.stack.resize_with(slot + 1, || Self::NONE_BITS);
             self.kinds.resize(slot + 1, NativeKind::Bool);
         }
-        let (src_bits, _src_kind) = self.pop_kinded()?;
+        let (src_bits, src_kind) = self.pop_kinded()?;
         record_heap_write();
         write_barrier_slot(self.stack[slot], src_bits);
-        self.stack_write_kinded(slot, src_bits, NativeKind::Float64);
+        self.stack_write_kinded(slot, src_bits, src_kind);
         Ok(())
     }
 
@@ -2225,11 +2261,10 @@ impl VirtualMachine {
             self.stack.resize_with(slot + 1, || Self::NONE_BITS);
             self.kinds.resize(slot + 1, NativeKind::Bool);
         }
-        let (src_bits, _src_kind) = self.pop_kinded()?;
-        let value = src_bits as i32 as i64 as u64;
+        let (src_bits, src_kind) = self.pop_kinded()?;
         record_heap_write();
-        write_barrier_slot(self.stack[slot], value);
-        self.stack_write_kinded(slot, value, NativeKind::Int32);
+        write_barrier_slot(self.stack[slot], src_bits);
+        self.stack_write_kinded(slot, src_bits, src_kind);
         Ok(())
     }
 
@@ -2243,11 +2278,10 @@ impl VirtualMachine {
             self.stack.resize_with(slot + 1, || Self::NONE_BITS);
             self.kinds.resize(slot + 1, NativeKind::Bool);
         }
-        let (src_bits, _src_kind) = self.pop_kinded()?;
-        let value = src_bits as u32 as u64;
+        let (src_bits, src_kind) = self.pop_kinded()?;
         record_heap_write();
-        write_barrier_slot(self.stack[slot], value);
-        self.stack_write_kinded(slot, value, NativeKind::UInt32);
+        write_barrier_slot(self.stack[slot], src_bits);
+        self.stack_write_kinded(slot, src_bits, src_kind);
         Ok(())
     }
 
@@ -2261,11 +2295,10 @@ impl VirtualMachine {
             self.stack.resize_with(slot + 1, || Self::NONE_BITS);
             self.kinds.resize(slot + 1, NativeKind::Bool);
         }
-        let (src_bits, _src_kind) = self.pop_kinded()?;
-        let value = src_bits as i16 as i64 as u64;
+        let (src_bits, src_kind) = self.pop_kinded()?;
         record_heap_write();
-        write_barrier_slot(self.stack[slot], value);
-        self.stack_write_kinded(slot, value, NativeKind::Int16);
+        write_barrier_slot(self.stack[slot], src_bits);
+        self.stack_write_kinded(slot, src_bits, src_kind);
         Ok(())
     }
 
@@ -2279,11 +2312,10 @@ impl VirtualMachine {
             self.stack.resize_with(slot + 1, || Self::NONE_BITS);
             self.kinds.resize(slot + 1, NativeKind::Bool);
         }
-        let (src_bits, _src_kind) = self.pop_kinded()?;
-        let value = src_bits as u16 as u64;
+        let (src_bits, src_kind) = self.pop_kinded()?;
         record_heap_write();
-        write_barrier_slot(self.stack[slot], value);
-        self.stack_write_kinded(slot, value, NativeKind::UInt16);
+        write_barrier_slot(self.stack[slot], src_bits);
+        self.stack_write_kinded(slot, src_bits, src_kind);
         Ok(())
     }
 
@@ -2297,11 +2329,10 @@ impl VirtualMachine {
             self.stack.resize_with(slot + 1, || Self::NONE_BITS);
             self.kinds.resize(slot + 1, NativeKind::Bool);
         }
-        let (src_bits, _src_kind) = self.pop_kinded()?;
-        let value = src_bits as i8 as i64 as u64;
+        let (src_bits, src_kind) = self.pop_kinded()?;
         record_heap_write();
-        write_barrier_slot(self.stack[slot], value);
-        self.stack_write_kinded(slot, value, NativeKind::Int8);
+        write_barrier_slot(self.stack[slot], src_bits);
+        self.stack_write_kinded(slot, src_bits, src_kind);
         Ok(())
     }
 
@@ -2315,11 +2346,10 @@ impl VirtualMachine {
             self.stack.resize_with(slot + 1, || Self::NONE_BITS);
             self.kinds.resize(slot + 1, NativeKind::Bool);
         }
-        let (src_bits, _src_kind) = self.pop_kinded()?;
-        let value = src_bits as u8 as u64;
+        let (src_bits, src_kind) = self.pop_kinded()?;
         record_heap_write();
-        write_barrier_slot(self.stack[slot], value);
-        self.stack_write_kinded(slot, value, NativeKind::UInt8);
+        write_barrier_slot(self.stack[slot], src_bits);
+        self.stack_write_kinded(slot, src_bits, src_kind);
         Ok(())
     }
 
@@ -2333,11 +2363,10 @@ impl VirtualMachine {
             self.stack.resize_with(slot + 1, || Self::NONE_BITS);
             self.kinds.resize(slot + 1, NativeKind::Bool);
         }
-        let (src_bits, _src_kind) = self.pop_kinded()?;
-        let value = (src_bits != 0) as u64;
+        let (src_bits, src_kind) = self.pop_kinded()?;
         record_heap_write();
-        write_barrier_slot(self.stack[slot], value);
-        self.stack_write_kinded(slot, value, NativeKind::Bool);
+        write_barrier_slot(self.stack[slot], src_bits);
+        self.stack_write_kinded(slot, src_bits, src_kind);
         Ok(())
     }
 
@@ -3260,6 +3289,15 @@ impl VirtualMachine {
         self.push_kinded(bits, kind)
     }
 
+    // ─────────────────────────────────────────────────────────────────────
+    // joint-fix-1b (β) — typed `StoreModuleBinding<Kind>` handlers preserve
+    // src_kind. Mirror of the local-tier fix above at the module-binding
+    // tier. Same rationale per ADR-006 §2.7.7 — kind on the parallel
+    // module-binding kind track must come from the producer, never
+    // fabricated from the opcode suffix. The sibling `op_store_module_
+    // binding_ptr` already does this (L3411-3416); these arms now match.
+    // ─────────────────────────────────────────────────────────────────────
+
     fn op_store_module_binding_i64(
         &mut self,
         instruction: &Instruction,
@@ -3267,9 +3305,9 @@ impl VirtualMachine {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let (value, _src_kind) = self.pop_kinded()?;
+        let (value, src_kind) = self.pop_kinded()?;
         record_heap_write();
-        self.module_binding_write_kinded(idx as usize, value, NativeKind::Int64);
+        self.module_binding_write_kinded(idx as usize, value, src_kind);
         Ok(())
     }
 
@@ -3280,9 +3318,9 @@ impl VirtualMachine {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let (value, _src_kind) = self.pop_kinded()?;
+        let (value, src_kind) = self.pop_kinded()?;
         record_heap_write();
-        self.module_binding_write_kinded(idx as usize, value, NativeKind::UInt64);
+        self.module_binding_write_kinded(idx as usize, value, src_kind);
         Ok(())
     }
 
@@ -3293,9 +3331,9 @@ impl VirtualMachine {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let (value, _src_kind) = self.pop_kinded()?;
+        let (value, src_kind) = self.pop_kinded()?;
         record_heap_write();
-        self.module_binding_write_kinded(idx as usize, value, NativeKind::Float64);
+        self.module_binding_write_kinded(idx as usize, value, src_kind);
         Ok(())
     }
 
@@ -3306,10 +3344,9 @@ impl VirtualMachine {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let (src_bits, _src_kind) = self.pop_kinded()?;
-        let value = src_bits as i32 as i64 as u64;
+        let (src_bits, src_kind) = self.pop_kinded()?;
         record_heap_write();
-        self.module_binding_write_kinded(idx as usize, value, NativeKind::Int32);
+        self.module_binding_write_kinded(idx as usize, src_bits, src_kind);
         Ok(())
     }
 
@@ -3320,10 +3357,9 @@ impl VirtualMachine {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let (src_bits, _src_kind) = self.pop_kinded()?;
-        let value = src_bits as u32 as u64;
+        let (src_bits, src_kind) = self.pop_kinded()?;
         record_heap_write();
-        self.module_binding_write_kinded(idx as usize, value, NativeKind::UInt32);
+        self.module_binding_write_kinded(idx as usize, src_bits, src_kind);
         Ok(())
     }
 
@@ -3334,10 +3370,9 @@ impl VirtualMachine {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let (src_bits, _src_kind) = self.pop_kinded()?;
-        let value = src_bits as i16 as i64 as u64;
+        let (src_bits, src_kind) = self.pop_kinded()?;
         record_heap_write();
-        self.module_binding_write_kinded(idx as usize, value, NativeKind::Int16);
+        self.module_binding_write_kinded(idx as usize, src_bits, src_kind);
         Ok(())
     }
 
@@ -3348,10 +3383,9 @@ impl VirtualMachine {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let (src_bits, _src_kind) = self.pop_kinded()?;
-        let value = src_bits as u16 as u64;
+        let (src_bits, src_kind) = self.pop_kinded()?;
         record_heap_write();
-        self.module_binding_write_kinded(idx as usize, value, NativeKind::UInt16);
+        self.module_binding_write_kinded(idx as usize, src_bits, src_kind);
         Ok(())
     }
 
@@ -3362,10 +3396,9 @@ impl VirtualMachine {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let (src_bits, _src_kind) = self.pop_kinded()?;
-        let value = src_bits as i8 as i64 as u64;
+        let (src_bits, src_kind) = self.pop_kinded()?;
         record_heap_write();
-        self.module_binding_write_kinded(idx as usize, value, NativeKind::Int8);
+        self.module_binding_write_kinded(idx as usize, src_bits, src_kind);
         Ok(())
     }
 
@@ -3376,10 +3409,9 @@ impl VirtualMachine {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let (src_bits, _src_kind) = self.pop_kinded()?;
-        let value = src_bits as u8 as u64;
+        let (src_bits, src_kind) = self.pop_kinded()?;
         record_heap_write();
-        self.module_binding_write_kinded(idx as usize, value, NativeKind::UInt8);
+        self.module_binding_write_kinded(idx as usize, src_bits, src_kind);
         Ok(())
     }
 
@@ -3390,10 +3422,9 @@ impl VirtualMachine {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let (src_bits, _src_kind) = self.pop_kinded()?;
-        let value = (src_bits != 0) as u64;
+        let (src_bits, src_kind) = self.pop_kinded()?;
         record_heap_write();
-        self.module_binding_write_kinded(idx as usize, value, NativeKind::Bool);
+        self.module_binding_write_kinded(idx as usize, src_bits, src_kind);
         Ok(())
     }
 
