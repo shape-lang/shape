@@ -39,6 +39,26 @@ impl BytecodeCompiler {
         // 3. Nullable Option runtime encoding compatibility for bare non-None values
         self.emit(Instruction::simple(OpCode::TryUnwrap));
 
+        // c4-4B (2026-05-28): mark the program as containing `?` so the JIT
+        // executor preflight deopts to the bytecode interpreter. `?` lowers
+        // in MIR as a transparent `Expr::TryOperator => copy`
+        // (`crates/shape-vm/src/mir/lowering/expr.rs:2594`), which discards
+        // the unwrap-or-early-return semantics — the JIT emits a plain
+        // call+store sequence whose result slot retains the trampoline's
+        // raw heap-Result `u64` while the parallel-kind tracker (driven by
+        // `stamp_unwrapped_success_type` below) records the SUCCESS type's
+        // `NativeKind`. The mismatch surfaces at
+        // `crates/shape-jit/src/mir_compiler/terminators.rs:1801-1813`
+        // (Return I64-wide arm) as `RETURN_TAG_I64` stamped onto a heap
+        // pointer — silent-wrong-output VM=42, JIT=137_900_062_693_984 per
+        // `regression::jit::jit_trampoline_result_callvalue`. Whole-program
+        // deopt mirrors the R8 W7 G.5 V2-verifier + R8 W8 imported-const-
+        // inline + R8 W9 B1 W17-marshal-return surface-and-stop pattern.
+        // Per supervisor 2026-05-28 c4-4B ratification (audit doc
+        // `docs/cluster-audits/v0.3.3/04-pointer-as-float-leak.md` §4B
+        // Sub-cluster — FN-REG-CORRECTNESS / RELEASE-BLOCKING).
+        self.program.has_try_unwrap_residual = true;
+
         // WS-3 F2a: stamp the compile-time type tracker with the type of the
         // UNWRAPPED success value. The `?` operator yields the inner `T` of a
         // `Result<T, E>` / `Option<T>` (or `T?`); the runtime inference engine

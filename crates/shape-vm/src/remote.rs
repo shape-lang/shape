@@ -565,6 +565,8 @@ pub fn program_from_blobs_by_hash(
         has_imported_const_inline: source.has_imported_const_inline,
         // R8 W9 B1 W17-marshal-return surface-and-stop flag propagation.
         has_w17_marshal_residual: source.has_w17_marshal_residual,
+        // c4-4B TryUnwrap (`?` operator) surface-and-stop flag propagation.
+        has_try_unwrap_residual: source.has_try_unwrap_residual,
     })
 }
 
@@ -949,6 +951,8 @@ fn create_stub_program(program: &BytecodeProgram) -> BytecodeProgram {
             has_imported_const_inline: ca.has_imported_const_inline,
             // R8 W9 B1 W17-marshal-return surface-and-stop flag propagation.
             has_w17_marshal_residual: ca.has_w17_marshal_residual,
+            // c4-4B TryUnwrap (`?` operator) surface-and-stop flag propagation.
+            has_try_unwrap_residual: ca.has_try_unwrap_residual,
         });
     }
     // Copy top-level metadata needed by program_from_blobs
@@ -1866,6 +1870,7 @@ mod tests {
             trait_vtables: HashMap::new(),
             has_imported_const_inline: false,
             has_w17_marshal_residual: false,
+            has_try_unwrap_residual: false,
         });
 
         assert!(
@@ -2020,6 +2025,7 @@ mod tests {
             trait_vtables: HashMap::new(),
             has_imported_const_inline: false,
             has_w17_marshal_residual: false,
+            has_try_unwrap_residual: false,
         });
         program.functions = vec![crate::bytecode::Function {
             name: "entry".to_string(),
@@ -2380,6 +2386,7 @@ mod tests {
             trait_vtables: HashMap::new(),
             has_imported_const_inline: false,
             has_w17_marshal_residual: false,
+            has_try_unwrap_residual: false,
         });
         program.functions = vec![crate::bytecode::Function {
             name: "entry".to_string(),
@@ -2444,6 +2451,7 @@ mod tests {
             trait_vtables: HashMap::new(),
             has_imported_const_inline: false,
             has_w17_marshal_residual: false,
+            has_try_unwrap_residual: false,
         });
         program.functions = vec![crate::bytecode::Function {
             name: "entry".to_string(),

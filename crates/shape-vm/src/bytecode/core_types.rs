@@ -649,6 +649,49 @@ pub struct BytecodeProgram {
     /// runtime-mutated, just compile-time state.
     #[serde(skip, default)]
     pub has_w17_marshal_residual: bool,
+
+    /// c4-4B `?`-operator (TryUnwrap) JIT surface-and-stop flag (2026-05-28).
+    ///
+    /// Set to `true` by `compile_expr_try_operator` whenever it emits an
+    /// `OpCode::TryUnwrap` for a `?`-operator use. Read by
+    /// `JITExecutor::execute_with_jit` at the JIT compile-step preflight to
+    /// refuse JIT compilation of the program — triggering the existing W12
+    /// `[jit-fallback]` path so the whole program runs under the bytecode
+    /// interpreter (which executes `op_try_unwrap` soundly through
+    /// `read_result` / `read_option` / `return_value_inner`). VM == JIT
+    /// convergence preserved.
+    ///
+    /// Background: `?` lowers in MIR (`mir/lowering/expr.rs:2594`) as a
+    /// transparent `Expr::TryOperator(expr, _) => copy`, which discards
+    /// the unwrap-or-return semantics. The bytecode compiler's parallel
+    /// type tracker stamps the unwrapped success type onto the binding
+    /// slot via `stamp_unwrapped_success_type`, so a downstream
+    /// `let val = f()?; return val` records `val` with `NativeKind::Int64`
+    /// when the success type is `int`. The JIT-emitted code calls `f()`
+    /// via the trampoline (`dispatch_call_via_trampoline_vm` at
+    /// `crates/shape-jit/src/ffi/control/mod.rs:832`), stores the
+    /// trampoline's `u64` (a heap `Arc<ResultData>` pointer) into the
+    /// `val` slot, and at `TerminatorKind::Return` the I64-wide arm in
+    /// `terminators.rs:1801-1813` stamps `RETURN_TAG_I64` because the
+    /// slot kind is `Int64` — silent-wrong-output VM=42, JIT=
+    /// `Integer(137_900_062_693_984)` (pointer bits as a raw int) per
+    /// `regression::jit::jit_trampoline_result_callvalue`. The string
+    /// twin `jit_trampoline_string_callvalue` passes by falling through
+    /// to `RETURN_TAG_NANBOXED` and SURFACING + deopting at
+    /// `crates/shape-jit/src/executor.rs:802-812`.
+    ///
+    /// Per supervisor 2026-05-28 c4-4B ratification (audit doc
+    /// `docs/cluster-audits/v0.3.3/04-pointer-as-float-leak.md` §4B
+    /// Sub-cluster — FN-REG-CORRECTNESS / RELEASE-BLOCKING) — this
+    /// SURFACE-and-deopt IS the ratified v0.3.3 fix shape. Mirrors
+    /// R8 W7 G.5 V2-verifier preflight + R8 W8 imported-const-inline
+    /// + R8 W9 B1 W17-marshal-return surface-and-stop precedents.
+    ///
+    /// NOT serialised because the cached-program reload path recomputes
+    /// by re-running the call-site intercept; nothing here is
+    /// runtime-mutated, just compile-time state.
+    #[serde(skip, default)]
+    pub has_try_unwrap_residual: bool,
 }
 
 /// Constants in the constant pool

@@ -340,6 +340,25 @@ pub struct Program {
     /// NOT serialised — compile-time state.
     #[serde(skip, default)]
     pub has_w17_marshal_residual: bool,
+
+    /// c4-4B `?`-operator (TryUnwrap) JIT surface-and-stop flag (2026-05-28).
+    /// Mirror of `BytecodeProgram::has_try_unwrap_residual` for the
+    /// content-addressed Program shape; propagated through the linker so
+    /// the JIT executor can deopt the whole program to the bytecode
+    /// interpreter when the program contains an `OpCode::TryUnwrap` (the
+    /// `?` operator) — whose unwrap-or-early-return semantics MIR drops
+    /// (`Expr::TryOperator => copy` at `mir/lowering/expr.rs:2594`), so
+    /// the JIT-emitted code stores the trampoline's heap-Result `u64`
+    /// into a slot whose stamped kind is the success type's `NativeKind`
+    /// (`Int64` for `Result<int,_>`), and `terminators.rs:1801-1813`'s
+    /// I64-wide arm stamps `RETURN_TAG_I64` on pointer bits — silent-
+    /// wrong-output per `regression::jit::jit_trampoline_result_callvalue`.
+    /// SURFACE-and-deopt per supervisor 2026-05-28 c4-4B ratification (audit
+    /// doc `docs/cluster-audits/v0.3.3/04-pointer-as-float-leak.md` §4B
+    /// Sub-cluster — FN-REG-CORRECTNESS / RELEASE-BLOCKING).
+    /// NOT serialised — compile-time state.
+    #[serde(skip, default)]
+    pub has_try_unwrap_residual: bool,
 }
 
 /// A linked function ready for execution in a flat instruction array.
@@ -561,4 +580,19 @@ pub struct LinkedProgram {
     /// serialised — compile-time state.
     #[serde(skip, default)]
     pub has_w17_marshal_residual: bool,
+
+    /// c4-4B `?`-operator (TryUnwrap) JIT surface-and-stop flag (2026-05-28).
+    /// Mirror of `Program::has_try_unwrap_residual` propagated through the
+    /// linker so the JIT executor can refuse to JIT-compile programs
+    /// containing the `?` operator (whose `OpCode::TryUnwrap` semantics
+    /// MIR collapses to a transparent copy at `mir/lowering/expr.rs:2594`,
+    /// leaving the JIT-emitted Return arm to stamp `RETURN_TAG_I64` on
+    /// heap-Result pointer bits). Triggers W12 `[jit-fallback]` deopt to
+    /// bytecode interpreter. SURFACE-and-deopt per supervisor 2026-05-28
+    /// c4-4B ratification (audit doc
+    /// `docs/cluster-audits/v0.3.3/04-pointer-as-float-leak.md` §4B
+    /// Sub-cluster — FN-REG-CORRECTNESS / RELEASE-BLOCKING).
+    /// NOT serialised — compile-time state.
+    #[serde(skip, default)]
+    pub has_try_unwrap_residual: bool,
 }

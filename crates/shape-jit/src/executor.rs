@@ -352,6 +352,77 @@ impl JITExecutor {
             });
         }
 
+        // c4-4B TryUnwrap (`?` operator) SURFACE (v0.3.3 divergence-elimination
+        // per supervisor 2026-05-28 ratification, ADR-006 §2.7.14): Refuse to
+        // JIT-compile programs containing the `?` operator (`OpCode::TryUnwrap`
+        // emitted by `compile_expr_try_operator` at
+        // `crates/shape-vm/src/compiler/expressions/advanced.rs:40`).
+        //
+        // Background: `?` lowers in MIR (`mir/lowering/expr.rs:2594`) as a
+        // transparent `Expr::TryOperator(expr, _) => copy`, which discards
+        // the unwrap-or-early-return semantics. The bytecode compiler's
+        // parallel type tracker stamps the UNWRAPPED success type onto the
+        // binding slot via `stamp_unwrapped_success_type`, so a downstream
+        // `let val = f()?; return val` records `val` with the success
+        // `NativeKind` (`Int64` for `Result<int,_>`). The JIT-emitted code
+        // calls `f()` via the trampoline
+        // (`dispatch_call_via_trampoline_vm` at
+        // `crates/shape-jit/src/ffi/control/mod.rs:832`), stores the
+        // trampoline's `u64` (a heap `Arc<ResultData>` pointer) into the
+        // `val` slot, and at `TerminatorKind::Return` the I64-wide arm in
+        // `crates/shape-jit/src/mir_compiler/terminators.rs:1801-1813`
+        // stamps `RETURN_TAG_I64` because the slot kind is `Int64` —
+        // silent-wrong-output `VM=42, JIT=Integer(137_900_062_693_984)`
+        // (pointer bits as a raw int) per
+        // `regression::jit::jit_trampoline_result_callvalue`.
+        //
+        // The string twin `jit_trampoline_string_callvalue` passes by
+        // falling through to `RETURN_TAG_NANBOXED` and SURFACING + deopting
+        // at `executor.rs:802-812` because its slot kind is heap-bearing
+        // and the I64-arm `raw_int` predicate fires false. The Result-twin
+        // breaks because the static slot-kind classification is `Int64`
+        // (the SUCCESS type) while the runtime payload is heap-Result bits.
+        //
+        // Whole-program deopt to the bytecode interpreter is the
+        // binding-compliant surface-and-stop (the interpreter executes
+        // `op_try_unwrap` soundly through `read_result` / `read_option` /
+        // `return_value_inner` per `crates/shape-vm/src/executor/exceptions/
+        // mod.rs:658`). Mirrors R8 W7 G.5 V2-verifier + R8 W8
+        // imported-const-inline + R8 W9 B1 W17-marshal-return surface-and-
+        // stop precedents immediately above. This SURFACE-and-deopt IS the
+        // ratified v0.3.3 fix shape per audit doc
+        // `docs/cluster-audits/v0.3.3/04-pointer-as-float-leak.md` §4B
+        // (FN-REG-CORRECTNESS / RELEASE-BLOCKING sub-cluster).
+        if bytecode.has_try_unwrap_residual {
+            return Err(shape_runtime::error::ShapeError::RuntimeError {
+                message: "c4-4B TryUnwrap (`?` operator) SURFACE (ADR-006 §2.7.14): \
+                          the program contains an `OpCode::TryUnwrap` (the `?` \
+                          operator) whose unwrap-or-early-return semantics MIR \
+                          collapses to a transparent copy at \
+                          `mir/lowering/expr.rs:2594`. The JIT-emitted code calls \
+                          the inner expression via the trampoline \
+                          (`dispatch_call_via_trampoline_vm`), stores the \
+                          trampoline's heap-Result/Option `u64` into a slot whose \
+                          parallel-kind tracker records the SUCCESS type's \
+                          NativeKind (e.g. `Int64` for `Result<int,_>`), and the \
+                          I64-wide arm of `TerminatorKind::Return` at \
+                          `mir_compiler/terminators.rs:1801-1813` stamps \
+                          `RETURN_TAG_I64` on pointer bits — silent-wrong-output \
+                          `VM=42, JIT=Integer(137_900_062_693_984)` per \
+                          `regression::jit::jit_trampoline_result_callvalue`. \
+                          Whole-program deopting to the bytecode interpreter via \
+                          this `[jit-fallback]` path preserves VM == JIT semantics \
+                          (`op_try_unwrap` at `executor/exceptions/mod.rs:658` \
+                          executes the unwrap soundly through `read_result` / \
+                          `read_option` / `return_value_inner`). Tracked per \
+                          supervisor 2026-05-28 c4-4B ratification + \
+                          `docs/cluster-audits/v0.3.3/04-pointer-as-float-leak.md` \
+                          §4B (Sub-cluster 4B FN-REG-CORRECTNESS / RELEASE-BLOCKING; \
+                          this SURFACE-deopt is the ratified v0.3.3 fix shape)".to_string(),
+                location: None,
+            });
+        }
+
         // R8 W9 B3 Drop-bearing-scope-exit SURFACE (v0.3 divergence-elimination
         // per supervisor 2026-05-25 G.2 Step 2 ruling, ADR-006 §2.7.14):
         // Refuse to JIT-compile programs that register a user `impl Drop for T`
