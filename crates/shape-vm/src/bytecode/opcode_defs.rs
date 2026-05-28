@@ -89,18 +89,16 @@ define_opcodes! {
     // 0x13 (DivDynamic), 0x14 (ModDynamic), 0x16 (PowDynamic)
     // were deleted; the compiler now emits typed opcodes (AddInt/AddNumber/...)
     // exclusively, or fails with a strict-typing error.
-    /// Bitwise AND
-    BitAnd = 0x17, Arithmetic, pops: 2, pushes: 1;
-    /// Bitwise OR
-    BitOr = 0x18, Arithmetic, pops: 2, pushes: 1;
-    /// Bitwise shift left
-    BitShl = 0x19, Arithmetic, pops: 2, pushes: 1;
-    /// Bitwise shift right
-    BitShr = 0x1A, Arithmetic, pops: 2, pushes: 1;
-    /// Bitwise NOT
-    BitNot = 0x1B, Arithmetic, pops: 1, pushes: 1;
-    /// Bitwise XOR
-    BitXor = 0x1C, Arithmetic, pops: 2, pushes: 1;
+    //
+    // c5 Phase B (v0.3.3, 2026-05-28) — DELETED dynamic bitwise opcodes:
+    // 0x17 (BitAnd), 0x18 (BitOr), 0x19 (BitShl), 0x1A (BitShr),
+    // 0x1B (BitNot), 0x1C (BitXor). The producer-side compile-time gate
+    // at `compiler/expressions/binary_ops.rs:1403` + `unary_ops.rs:28`
+    // refuses every non-int operand at compile time, so the dynamic
+    // executor handlers (`exec_dyn_bit_binary` / `exec_dyn_bit_unary`)
+    // had no producer and were removed. Only the typed `BitAndInt`/etc.
+    // opcodes (defined below at 0x129-0x12E) remain. Opcode bytes are
+    // not reused — gap preserved for binary-compat with old bytecode.
 
     // ===== Dynamic Comparison Operations (DELETED - strict-typing sweep Phase 2) =====
     // 0x20 (GtDynamic), 0x21 (LtDynamic), 0x22 (GteDynamic),

@@ -6,7 +6,7 @@ use shape_ast::ast::{Expr, Span, UnaryOp};
 use shape_ast::error::Result;
 
 use super::super::BytecodeCompiler;
-use super::numeric_ops::inferred_type_to_numeric;
+use super::numeric_ops::{inferred_type_to_numeric, is_strict_unary_bitwise};
 
 impl BytecodeCompiler {
     /// Compile a unary operation expression.
@@ -26,15 +26,22 @@ impl BytecodeCompiler {
         self.compile_expr(operand)?;
         match op {
             UnaryOp::BitNot => {
-                // Phase R5.1C: emit `BitNotInt` when the operand type is
-                // provably `int` at compile time. Otherwise fall through
-                // to the Dynamic `BitNot` opcode via `compile_unary_op`.
+                // c5 Phase B (v0.3.3, 2026-05-28) — bitwise-strict-typing
+                // gate (unary). When the operand isn't provably `int`,
+                // refuse at compile time. Pre-fix, the fall-through
+                // emitted a `BitNot` dynamic opcode whose executor
+                // (`exec_dyn_bit_unary`) discarded the operand kind and
+                // reinterpreted the slot bits as i64 — `~1.5` silently
+                // returned `-4609434218613702657` (`!f64::to_bits(1.5)`).
+                // See audit doc 05 §3 + audit doc 05a §c5 anchor sites.
                 //
-                // Semantics match the Dynamic variant exactly — i48
-                // payload truncation applies. Gate:
-                // `SHAPE_V2_TYPED_BITWISE` (default ON via
-                // `typed_bitwise_enabled()`, shared with the binary
-                // bitwise ops).
+                // Producer-side polarity: refuse at the compiler rather
+                // than preserve kinds at the consumer. Per CLAUDE.md
+                // §Type-System-Rules: "NO runtime coercion".
+                debug_assert!(
+                    is_strict_unary_bitwise(op),
+                    "unary `~` arm must classify as is_strict_unary_bitwise (gate site)"
+                );
                 let mut numeric = self.last_expr_numeric_type;
                 if let Expr::Identifier(name, _) = operand {
                     if let Some(local_idx) = self.resolve_local(name) {
@@ -50,28 +57,28 @@ impl BytecodeCompiler {
                         .and_then(|t| inferred_type_to_numeric(&t));
                 }
                 let is_int = matches!(numeric, Some(NumericType::Int));
-                let emit_typed =
-                    is_int && crate::compiler::helpers::typed_bitwise_enabled();
-                if emit_typed {
-                    self.emit(Instruction::simple(OpCode::BitNotInt));
-                    self.last_expr_schema = None;
-                    self.last_expr_type_info = None;
-                    self.last_expr_numeric_type = Some(NumericType::Int);
-                    return Ok(());
+                if !is_int {
+                    let operand_desc = self
+                        .infer_expr_type(operand)
+                        .ok()
+                        .map(|t| {
+                            super::numeric_ops::type_display_name(&t)
+                        })
+                        .unwrap_or_else(|| "unknown".to_string());
+                    return Err(shape_ast::error::ShapeError::SemanticError {
+                        message: format!(
+                            "Cannot apply '~' to {}. Bitwise NOT requires the operand to be \
+                             `int` at compile time. Use an explicit cast (e.g. `~(x as int)`) \
+                             when intentional.",
+                            operand_desc,
+                        ),
+                        location: None,
+                    });
                 }
-                // Fall through to Dynamic `BitNot` — preserves pre-R5.1C
-                // emission byte-identically.
-                self.compile_unary_op(op)?;
-                // The dynamic `BitNot` opcode post-Wave-E+5.5 pushes raw
-                // native i64 bits (`exec_dyn_bit_unary`). When the operand
-                // was proven `int` at compile time, preserve the Int
-                // numeric hint so the top-level return-kind inference
-                // pairs this producer with the inferred Int kind.
-                if is_int {
-                    self.last_expr_schema = None;
-                    self.last_expr_type_info = None;
-                    self.last_expr_numeric_type = Some(NumericType::Int);
-                }
+                self.emit(Instruction::simple(OpCode::BitNotInt));
+                self.last_expr_schema = None;
+                self.last_expr_type_info = None;
+                self.last_expr_numeric_type = Some(NumericType::Int);
                 return Ok(());
             }
             UnaryOp::Neg => {

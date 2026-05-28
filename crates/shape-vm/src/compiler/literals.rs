@@ -63,11 +63,22 @@ impl BytecodeCompiler {
             BinaryOp::Div => unreachable!("generic Div should be handled by typed dispatch"),
             BinaryOp::Mod => unreachable!("generic Mod should be handled by typed dispatch"),
             BinaryOp::Pow => unreachable!("generic Pow should be handled by typed dispatch"),
-            BinaryOp::BitAnd => OpCode::BitAnd,
-            BinaryOp::BitOr => OpCode::BitOr,
-            BinaryOp::BitShl => OpCode::BitShl,
-            BinaryOp::BitXor => OpCode::BitXor,
-            BinaryOp::BitShr => OpCode::BitShr,
+            // c5 Phase B (v0.3.3, 2026-05-28) — bitwise binary ops handled
+            // exclusively by the strict-typing gate at
+            // `compiler/expressions/binary_ops.rs:1403`. That arm emits
+            // typed `BitAndInt`/`BitOrInt`/etc. on proven-int operands
+            // and returns a compile error otherwise; the dynamic opcodes
+            // (`BitAnd`/`BitOr`/`BitXor`/`BitShl`/`BitShr`) are deleted
+            // along with their executor handlers.
+            BinaryOp::BitAnd
+            | BinaryOp::BitOr
+            | BinaryOp::BitShl
+            | BinaryOp::BitXor
+            | BinaryOp::BitShr => {
+                unreachable!(
+                    "bitwise binary ops handled by compile_binary_op_inner (typed-int gate)"
+                )
+            }
             BinaryOp::Greater => unreachable!("generic Gt should be handled by typed dispatch"),
             BinaryOp::Less => unreachable!("generic Lt should be handled by typed dispatch"),
             BinaryOp::GreaterEq => unreachable!("generic Gte should be handled by typed dispatch"),
@@ -105,7 +116,14 @@ impl BytecodeCompiler {
         let opcode = match op {
             UnaryOp::Not => OpCode::Not,
             UnaryOp::Neg => unreachable!("generic Neg should be handled by unary_ops::compile_expr_unary_op"),
-            UnaryOp::BitNot => OpCode::BitNot,
+            // c5 Phase B (v0.3.3, 2026-05-28) — `~x` handled exclusively
+            // by the strict-typing gate at `unary_ops.rs:28`. That arm
+            // emits typed `BitNotInt` on a proven-int operand and returns
+            // a compile error otherwise; the dynamic `BitNot` opcode is
+            // deleted along with `exec_dyn_bit_unary`.
+            UnaryOp::BitNot => unreachable!(
+                "unary `~` handled by unary_ops::compile_expr_unary_op (typed-int gate)"
+            ),
         };
 
         self.emit(Instruction::simple(opcode));

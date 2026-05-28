@@ -552,14 +552,13 @@ impl VirtualMachine {
                 return self.exec_stack_ops(instruction);
             }
 
-            // Bitwise dynamic ops (int-typed bitwise still routes here when operand
-            // types aren't proven at compile time). The strict-typing sweep
-            // (Phase 1+2) deleted the `*Dynamic` arithmetic/comparison opcodes;
-            // the bitwise variants remain because typed `BitAndInt`/etc. only
-            // fire when both operands are proven `int`.
-            BitAnd | BitOr | BitXor | BitShl | BitShr | BitNot => {
-                return self.exec_dyn_bit_dispatch(instruction);
-            }
+            // Bitwise dynamic ops (BitAnd/BitOr/BitXor/BitShl/BitShr/BitNot)
+            // DELETED in c5 Phase B (v0.3.3, 2026-05-28) per audit doc 05 + 05a.
+            // The producer-side compile-time gate at
+            // `compiler/expressions/binary_ops.rs:1403` + `unary_ops.rs:28`
+            // refuses every non-int operand at compile time; the dispatch
+            // path is dead and the executor helpers are removed.
+            // Only the typed `BitAndInt`/`BitOrInt`/etc. arms remain.
 
             // Typed arithmetic (compiler-guaranteed types, zero dispatch).
             //

@@ -115,12 +115,10 @@ const ALL_OPCODES: &[OpCode] = &[
     OpCode::Pop,
     OpCode::Dup,
     OpCode::Swap,
-    OpCode::BitAnd,
-    OpCode::BitOr,
-    OpCode::BitShl,
-    OpCode::BitShr,
-    OpCode::BitNot,
-    OpCode::BitXor,
+    // c5 Phase B (v0.3.3, 2026-05-28) — `OpCode::BitAnd`/`BitOr`/`BitShl`/
+    // `BitShr`/`BitNot`/`BitXor` deleted; the typed `BitAndInt`/etc. arms
+    // are the only bitwise opcodes (covered via JIT MIR-level `BinOp`
+    // lowering at `mir_compiler/rvalues.rs`).
     OpCode::GtInt,
     OpCode::GtNumber,
     OpCode::GtDecimal,

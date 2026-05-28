@@ -16,6 +16,40 @@ pub(super) fn is_strict_arithmetic(op: &BinaryOp) -> bool {
     )
 }
 
+/// c5 Phase B (v0.3.3, 2026-05-28) — bitwise-strict-typing gate.
+///
+/// Check if a BinaryOp is strictly bitwise (requires both operands provably
+/// `int` at compile time). The bitwise binary arm at
+/// `binary_ops.rs:1403` rejects non-int operands with a compile error rather
+/// than falling through to a runtime-bit-reinterpret helper. Per c5 audit
+/// doc 05 §5 + 05a §c5-Phase-B-fix-target-list — the producer-side gate is
+/// the c5 remediation polarity.
+///
+/// User-defined `impl BitAnd / BitOr / BitXor / Shl / Shr for T` dispatch
+/// is detected and emitted BEFORE the gate is consulted; the gate only
+/// fires when neither operand is provably-int AND no operator trait
+/// dispatch handled the call.
+pub(super) fn is_strict_bitwise(op: &BinaryOp) -> bool {
+    matches!(
+        op,
+        BinaryOp::BitAnd
+            | BinaryOp::BitOr
+            | BinaryOp::BitXor
+            | BinaryOp::BitShl
+            | BinaryOp::BitShr
+    )
+}
+
+/// c5 Phase B (v0.3.3, 2026-05-28) — bitwise-strict-typing gate (unary).
+///
+/// Check if a UnaryOp is strictly bitwise (requires operand provably `int`
+/// at compile time). Sibling of `is_strict_bitwise` for `~x`; the unary
+/// arm at `unary_ops.rs:28` rejects non-int operands with a compile error
+/// rather than falling through to `exec_dyn_bit_unary`.
+pub(super) fn is_strict_unary_bitwise(op: &shape_ast::ast::UnaryOp) -> bool {
+    matches!(op, shape_ast::ast::UnaryOp::BitNot)
+}
+
 /// Check if a BinaryOp is an ordered comparison (typed variants exist).
 pub(super) fn is_ordered_comparison(op: &BinaryOp) -> bool {
     matches!(
