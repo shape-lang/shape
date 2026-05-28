@@ -195,6 +195,82 @@ fn heap_to_wire(bits: u64, hk: HeapKind, ctx: &Context) -> WireValue {
         }
         return WireValue::Null;
     }
+    // JOINT-FIX-1a (2026-05-28): `HeapKind::TypedObject` is a typed-Arc
+    // dispatch label per ADR-006 §2.3 + Wave 2 D4 ckpt-2 v2-raw `_new`
+    // allocator — its bits are `*const TypedObjectStorage` (or
+    // `Arc::into_raw(Arc<TypedObjectStorage>)` for the Arc-allocated
+    // sibling at `from_typed_object`), NOT an `Arc<HeapValue>`. Casting
+    // those bits to `*const HeapValue` (the path below) reads a
+    // `TypedObjectStorage` as a `HeapValue` enum — type confusion + UB
+    // identical in shape to the WS-3 F2b Result/Option crash precedent
+    // above. Repro: `type P { x: int, y: int }; P { x: 1, y: 2 }` (raw
+    // TypedObject as script terminal value) — pre-fix 10/10 SEGV; same
+    // pattern via `!!`-produced AnyError TypedObject inside a Result
+    // carrier flowing through the recursive `slot_to_wire(r.payload, …)`
+    // at L182. Mirror of the `HeapValue::TypedObject(storage)` arm
+    // body at L270-301 below — schema-driven field projection into
+    // `WireValue::Object(map)`.
+    if hk == HeapKind::TypedObject {
+        if bits == 0 {
+            return WireValue::Null;
+        }
+        // SAFETY: per the `KindedSlot::from_typed_object_raw` /
+        // `from_typed_object` construction contract,
+        // `Ptr(HeapKind::TypedObject)` bits are `*const TypedObjectStorage`.
+        // Borrow transiently to read schema_id + slots — no share
+        // retire (the caller still owns the carrier).
+        let storage: &shape_value::TypedObjectStorage =
+            unsafe { &*(bits as *const shape_value::TypedObjectStorage) };
+        let schema_id = storage.schema_id;
+        let slots = &storage.slots;
+        let heap_mask = storage.heap_mask;
+        let schema = ctx
+            .type_schema_registry()
+            .get_by_id(schema_id as u32)
+            .cloned()
+            .or_else(|| crate::type_schema::lookup_schema_by_id_public(schema_id as u32));
+        if let Some(schema) = schema {
+            let mut map = BTreeMap::new();
+            for field_def in &schema.fields {
+                let idx = field_def.index as usize;
+                if idx >= slots.len() {
+                    continue;
+                }
+                let Some(field_kind) = schema.field_kind(idx) else {
+                    continue;
+                };
+                let field_bits = slots[idx].raw();
+                // JOINT-FIX-1a guard: for heap-kind fields (String /
+                // Ptr(_)), the `heap_mask` bit being clear means the
+                // slot is uninitialized (zero bits represent "field
+                // absent" per the construction-side contract in
+                // `build_any_error` at `exceptions/mod.rs:421-440`
+                // which initializes `slots` to `ValueSlot::none()` and
+                // only sets bits for fields with values). Reading a
+                // null `*const String` and dereferencing it is UB —
+                // project as `WireValue::Null` per the
+                // `NullableFloat64::is_nan` / nullable-int-bits=0
+                // sibling discipline at L47-74. Non-heap-kind fields
+                // (scalar Bool / Int / etc.) are bit-pattern-valid
+                // regardless of mask state.
+                let is_heap_kind = matches!(
+                    field_kind,
+                    NativeKind::String
+                        | NativeKind::StringV2
+                        | NativeKind::DecimalV2
+                        | NativeKind::Ptr(_)
+                );
+                if is_heap_kind && ((heap_mask >> idx) & 1 == 0) {
+                    map.insert(field_def.name.clone(), WireValue::Null);
+                    continue;
+                }
+                let field_wire = slot_to_wire(field_bits, field_kind, ctx);
+                map.insert(field_def.name.clone(), field_wire);
+            }
+            return WireValue::Object(map);
+        }
+        return WireValue::String(format!("<typed_object:schema#{}>", schema_id));
+    }
     let ptr = bits as *const HeapValue;
     // SAFETY: NativeKind::Ptr(hk) contract — bits is a valid Arc<HeapValue> ptr.
     let hv = unsafe { &*ptr };
