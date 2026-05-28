@@ -445,6 +445,28 @@ pub fn extract_facts(
                         });
                     }
                 }
+                StatementKind::ModuleBindingStore {
+                    binding_name: _,
+                    operands,
+                } => {
+                    // v0.3.3 c6 (Wave 1): a loan flowing into a module-level
+                    // binding always escapes the issuing frame. No
+                    // `sink_is_local` exemption — module bindings outlive
+                    // the function. Compiler-side narrow guards at
+                    // statements.rs:783 + :4827 catch the simple
+                    // top-level `let r = &x` shape; this sink catches the
+                    // in-function `module_g = &local` shape that the
+                    // narrow guards miss.
+                    for loan_id in local_loans_from_operands(&slot_loans, operands) {
+                        facts.escaped_loans.push((loan_id, stmt.span));
+                        facts.loan_sinks.push(LoanSink {
+                            loan_id,
+                            kind: LoanSinkKind::ModuleBindingStore,
+                            sink_slot: None,
+                            span: stmt.span,
+                        });
+                    }
+                }
                 StatementKind::Nop => {}
             }
 
@@ -637,6 +659,11 @@ fn statement_read_places(kind: &StatementKind) -> Vec<Place> {
             }
         }
         StatementKind::EnumStore { operands, .. } => {
+            for operand in operands {
+                operand_read_places(operand, &mut reads);
+            }
+        }
+        StatementKind::ModuleBindingStore { operands, .. } => {
             for operand in operands {
                 operand_read_places(operand, &mut reads);
             }
@@ -1180,6 +1207,11 @@ pub fn solve(facts: &BorrowFacts) -> SolverResult {
                 BorrowErrorKind::ExclusiveRefAcrossTaskBoundary
             }
             LoanSinkKind::DetachedTaskBoundary => BorrowErrorKind::SharedRefAcrossDetachedTask,
+            // v0.3.3 c6 (Wave 1): module bindings outlive every frame; no
+            // `sink_is_local` exemption applies. Always emit B0003.
+            LoanSinkKind::ModuleBindingStore => {
+                BorrowErrorKind::ReferenceEscapeIntoModuleBinding
+            }
         };
 
         errors.push(BorrowError {
@@ -1484,7 +1516,8 @@ fn param_slot_escapes(param_slot: SlotId, mir: &MirFunction) -> bool {
                     | StatementKind::ObjectStore { operands, .. }
                     | StatementKind::EnumStore { operands, .. }
                     | StatementKind::TaskBoundary(operands, _)
-                    | StatementKind::ClosureCapture { operands, .. } => {
+                    | StatementKind::ClosureCapture { operands, .. }
+                    | StatementKind::ModuleBindingStore { operands, .. } => {
                         if operands.iter().any(|op| operand_uses_any(op, &tracked)) {
                             return true;
                         }
@@ -1880,7 +1913,8 @@ fn statement_dest_place(kind: &StatementKind) -> Option<&Place> {
         | StatementKind::ClosureCapture { .. }
         | StatementKind::ArrayStore { .. }
         | StatementKind::ObjectStore { .. }
-        | StatementKind::EnumStore { .. } => None,
+        | StatementKind::EnumStore { .. }
+        | StatementKind::ModuleBindingStore { .. } => None,
         StatementKind::Nop => None,
     }
 }

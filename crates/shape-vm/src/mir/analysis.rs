@@ -52,6 +52,15 @@ pub enum LoanSinkKind {
     ObjectAssignment,
     StructuredTaskBoundary,
     DetachedTaskBoundary,
+    /// v0.3.3 c6 (Wave 1): loan flows into a module-level binding store
+    /// (`StoreModuleBinding` / `StoreModuleBindingTyped`). Module bindings
+    /// outlive every function frame so any loan rooted in a non-static
+    /// owner escapes. Per `docs/cluster-audits/v0.3.3/06-borrow-check-bypass.md`
+    /// §5(b): re-introduced to systemically catch ref escapes through
+    /// module-binding assignment that the compiler-side narrow guards
+    /// (statements.rs:783 + :4827) miss when the AST shape doesn't set
+    /// `ref_borrow.is_some()` (e.g., function-internal `module_g = &local`).
+    ModuleBindingStore,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -139,6 +148,11 @@ pub enum BorrowErrorKind {
     ReferenceStoredInEnum,
     /// Reference escapes into a closure environment.
     ReferenceEscapeIntoClosure,
+    /// Reference escapes into a module-level binding (top-level `let` /
+    /// assignment to a module-scope variable). Module bindings outlive the
+    /// frame the loan was issued in, so the reference is by-construction
+    /// not safely returnable. v0.3.3 c6 (Wave 1).
+    ReferenceEscapeIntoModuleBinding,
     /// Use after move.
     UseAfterMove,
     /// Cannot share exclusive reference across task boundary.
@@ -222,7 +236,8 @@ impl BorrowErrorKind {
             BorrowErrorKind::WriteWhileBorrowed => BorrowErrorCode::B0002,
 
             BorrowErrorKind::ReferenceEscape
-            | BorrowErrorKind::ReferenceEscapeIntoClosure => BorrowErrorCode::B0003,
+            | BorrowErrorKind::ReferenceEscapeIntoClosure
+            | BorrowErrorKind::ReferenceEscapeIntoModuleBinding => BorrowErrorCode::B0003,
 
             BorrowErrorKind::ReferenceStoredInArray
             | BorrowErrorKind::ReferenceStoredInObject

@@ -663,7 +663,11 @@ fn closure_slot_escapes_direct(
                     // Row 2: store into array / object / enum literal.
                     StatementKind::ArrayStore { operands, .. }
                     | StatementKind::ObjectStore { operands, .. }
-                    | StatementKind::EnumStore { operands, .. } => {
+                    | StatementKind::EnumStore { operands, .. }
+                    | StatementKind::ModuleBindingStore { operands, .. } => {
+                        // v0.3.3 c6 (Wave 1): writes into a module-level
+                        // binding always escape — the binding outlives the
+                        // function.
                         if operands.iter().any(|op| operand_uses_any_slot(op, &tracked)) {
                             return true;
                         }

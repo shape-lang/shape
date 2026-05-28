@@ -471,6 +471,15 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 Ok(())
             }
 
+            StatementKind::ModuleBindingStore { .. } => {
+                // v0.3.3 c6 (Wave 1): module-binding stores are a
+                // borrow-check-only annotation. The actual
+                // `StoreModuleBinding` bytecode op is emitted by the
+                // bytecode compiler from the AST, not from MIR. No JIT
+                // codegen.
+                Ok(())
+            }
+
             StatementKind::ClosureCapture {
                 closure_slot,
                 operands,

@@ -783,12 +783,33 @@ impl BytecodeCompiler {
                     self.pending_empty_array_alloc_idx.take();
 
                 if let Some(name) = var_decl.pattern.as_identifier() {
-                    // R8 W9 B9: removed categorical ban on module-scope `ref_borrow`.
-                    // The MIR borrow solver is the documented sole authority for
-                    // escape analysis (per audit
-                    // docs/cluster-audits/v0.3-r8w9-borrow-b0003-audit.md §3).
-                    // Local-scope `let r = &x` already accepts the same shape;
-                    // module-scope must match.
+                    // v0.3.3 c6 (Wave 1): re-add narrow B0003 guard for
+                    // module-scope `let r = &x`. Module-level top-level
+                    // statements are NOT lowered to MIR (the MIR solver
+                    // runs per-function only), so the solver cannot see
+                    // this binding. Without this categorical guard the
+                    // ref-binding silently runs (returns Bool(false)) and
+                    // bypasses borrow analysis entirely. Per audit
+                    // `docs/cluster-audits/v0.3.3/06-borrow-check-bypass.md`
+                    // §5(a). Defense-in-depth alongside the MIR solver's
+                    // new `LoanSinkKind::ModuleBindingStore` (which
+                    // catches the in-function `module_g = &local` shape
+                    // that this site doesn't see). The R8 W9 B9 deletion
+                    // (commit 8bbd2f99) was wrong to remove this — the
+                    // claim "MIR is the sole authority" only holds inside
+                    // function bodies; module-scope top-level statements
+                    // need a dedicated guard.
+                    if ref_borrow.is_some() {
+                        return Err(ShapeError::SemanticError {
+                            message:
+                                "[B0003] cannot return or store a reference that outlives its owner"
+                                    .to_string(),
+                            location: var_decl
+                                .value
+                                .as_ref()
+                                .map(|expr| self.span_to_source_location(expr.span())),
+                        });
+                    }
                     let binding_idx = self.get_or_create_module_binding(name);
                     self.emit(Instruction::new(
                         OpCode::StoreModuleBinding,
@@ -4827,12 +4848,32 @@ impl BytecodeCompiler {
                 if self.current_function.is_none() {
                     // Top-level: create module_binding variable
                     if let Some(name) = var_decl.pattern.as_identifier() {
-                        // R8 W9 B9: removed categorical ban on module-scope
-                        // `ref_borrow`. The MIR borrow solver is the documented
-                        // sole authority for escape analysis (per audit
-                        // docs/cluster-audits/v0.3-r8w9-borrow-b0003-audit.md §3).
-                        // Local-scope `let r = &x` already accepts the same shape;
-                        // module-scope must match.
+                        // v0.3.3 c6 (Wave 1): re-add narrow B0003 guard for
+                        // module-scope `let r = &x` at the `Statement::VariableDecl`
+                        // path (Item::VariableDecl is handled at the matching
+                        // earlier site). Module-level top-level statements
+                        // are NOT lowered to MIR — the MIR solver runs per
+                        // function only — so without this guard a top-level
+                        // `let r = &x` silently runs (SEGFAULTs on use in
+                        // some shapes). Per audit
+                        // `docs/cluster-audits/v0.3.3/06-borrow-check-bypass.md`
+                        // §5(a). Defense-in-depth alongside the MIR
+                        // solver's new `LoanSinkKind::ModuleBindingStore`
+                        // (which catches in-function `module_g = &local`).
+                        // The R8 W9 B9 deletion (commit 8bbd2f99) removed
+                        // this on the basis that "MIR is the sole
+                        // authority" — but MIR never sees module-scope
+                        // statements.
+                        if ref_borrow.is_some() {
+                            return Err(ShapeError::SemanticError {
+                                message:
+                                    "[B0003] cannot return or store a reference that outlives its owner"
+                                        .to_string(),
+                                location: var_decl.value.as_ref().map(|expr| {
+                                    self.span_to_source_location(expr.span())
+                                }),
+                            });
+                        }
                         let binding_idx = self.get_or_create_module_binding(name);
 
                         // Emit StoreModuleBindingTyped for width-typed bindings,

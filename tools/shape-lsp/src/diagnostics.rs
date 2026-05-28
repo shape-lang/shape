@@ -1699,6 +1699,9 @@ fn borrow_error_message(
         BorrowErrorKind::ReferenceEscapeIntoClosure => {
             "reference cannot escape into a closure"
         }
+        BorrowErrorKind::ReferenceEscapeIntoModuleBinding => {
+            "cannot return or store a reference that outlives its owner"
+        }
         BorrowErrorKind::UseAfterMove => {
             "cannot use this value after it was moved"
         }
@@ -1744,6 +1747,9 @@ fn borrow_error_hint(kind: &shape_vm::mir::analysis::BorrowErrorKind) -> &'stati
         BorrowErrorKind::ReferenceEscapeIntoClosure => {
             "capture an owned value instead of a reference"
         }
+        BorrowErrorKind::ReferenceEscapeIntoModuleBinding => {
+            "store an owned value in the module-level binding instead of a reference"
+        }
         BorrowErrorKind::UseAfterMove => {
             "clone the value before moving it, or stop using the original after the move"
         }
@@ -1778,6 +1784,7 @@ fn borrow_origin_note(kind: &shape_vm::mir::analysis::BorrowErrorKind) -> String
         | BorrowErrorKind::ReferenceStoredInObject
         | BorrowErrorKind::ReferenceStoredInEnum
         | BorrowErrorKind::ReferenceEscapeIntoClosure
+        | BorrowErrorKind::ReferenceEscapeIntoModuleBinding
         | BorrowErrorKind::ExclusiveRefAcrossTaskBoundary
         | BorrowErrorKind::SharedRefAcrossDetachedTask => {
             "reference originates here".to_string()
