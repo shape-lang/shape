@@ -522,10 +522,33 @@ impl BytecodeCompiler {
                         Operand::ModuleBinding(place.slot)
                     };
                     self.emit(Instruction::new(OpCode::MakeRef, Some(root_operand)));
-                    self.emit(Instruction::new(
-                        OpCode::MakeFieldRef,
-                        Some(place.typed_operand),
-                    ));
+                    // JOINT-FIX #2 (v0.3.3 c2-sub-bug-B nested-projection):
+                    // emit a `MakeFieldRef` per chain entry so a nested write
+                    // like `o.data.val = 42` produces
+                    //   MakeRef(o); MakeFieldRef(data); MakeFieldRef(val)
+                    // — the previous shape emitted only ONE `MakeFieldRef`
+                    // with the leaf's `(type_id=Inner, field_idx=val_idx)`
+                    // operand. At runtime that mis-projected the leaf's
+                    // field_idx against the root receiver's schema (Outer),
+                    // landing kind=Int64 against `Outer.field_kinds[0]=
+                    // Ptr(TypedObject)` and tripping the §2.7.13 / Q14
+                    // `DerefStore` debug_assert (release: silent v2-raw
+                    // double-free SIGABRT). For a non-nested write the
+                    // chain has a single entry and the emission shape is
+                    // identical to the pre-fix code path.
+                    let field_chain =
+                        self.collect_property_access_chain(object, property);
+                    debug_assert!(
+                        !field_chain.is_empty(),
+                        "JOINT-FIX #2: collect_property_access_chain produced \
+                         an empty chain for a resolved typed_field_place",
+                    );
+                    for field_operand in field_chain {
+                        self.emit(Instruction::new(
+                            OpCode::MakeFieldRef,
+                            Some(field_operand),
+                        ));
+                    }
                     self.emit(Instruction::new(
                         OpCode::StoreLocal,
                         Some(Operand::Local(field_ref)),
