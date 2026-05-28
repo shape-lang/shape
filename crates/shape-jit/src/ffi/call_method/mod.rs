@@ -992,6 +992,53 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
                     || receiver_bits == TAG_NONE
                 {
                     TAG_NULL
+                } else if receiver_bits & 0x1 != 0 || receiver_bits < 0x1000 {
+                    // v0.3.3 c6-binop-ref-operand-segfault defense-in-depth
+                    // (Wave 1 Round 2, 2026-05-28). The §2.7.7/Q9 parallel-
+                    // kind track classified the receiver as UInt64 (opaque
+                    // JIT-format heap bits), but the bits are not a
+                    // plausible `Box::into_raw`-returned `JitAlloc<T>` /
+                    // `UnifiedValue<T>` pointer: either not 2-byte aligned
+                    // (the `read_heap_kind` u16-read alignment requirement)
+                    // or smaller than a typical heap allocation address
+                    // (the bits look like a raw scalar value, e.g. the
+                    // empirically-observed `0x5` from `f(&a) + &a` where
+                    // a borrowed-int-cell payload reached this shell).
+                    // Pre-fix: `read_heap_kind` would dereference the
+                    // malformed bits and panic-abort with Rust's
+                    // `misaligned pointer dereference` UB guard → SIGSEGV /
+                    // SIGABRT across the extern-"C" FFI boundary. The
+                    // compiler-side `&`-as-binop-operand gate in
+                    // `crates/shape-vm/src/compiler/expressions/
+                    // binary_ops.rs::compile_expr_binary_op` makes the
+                    // documented repro unreachable in well-formed Shape,
+                    // but this defense-in-depth surface-and-stop (per
+                    // c4-4B SURFACE-and-deopt precedent) prevents future
+                    // regression if a new path emerges. Routes through
+                    // the `pending_call_error` deopt-to-interpreter
+                    // pattern; the VM then surfaces the actual cause.
+                    tracing::debug!(
+                        target: "shape_jit",
+                        method_name = %method_name,
+                        receiver_bits,
+                        "jit-call-method SURFACE: UInt64 carrier kind with \
+                         malformed receiver bits (not a plausible heap \
+                         pointer: misaligned for u16 read or below \
+                         minimum heap address). Likely a misclassified \
+                         scalar or reference operand reaching the legacy \
+                         heap-prefix dispatch. Raising pending_call_error \
+                         for MIR-emitted deopt to interpreter fall-\
+                         through (W12 pattern + v0.3.3 c6 defense-in-\
+                         depth).",
+                    );
+                    super::control::set_jit_runtime_error(format!(
+                        "JIT method dispatch for `.{}()` reached the \
+                         heap-prefix path with malformed receiver bits \
+                         — deopting to interpreter",
+                        method_name,
+                    ));
+                    ctx_ref.pending_call_error = 1;
+                    return TAG_NULL;
                 } else {
                     match read_heap_kind(receiver_bits) {
                         HK_OK | HK_ERR => {
