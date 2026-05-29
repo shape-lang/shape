@@ -660,52 +660,93 @@ impl VirtualMachine {
 
     // ── TryConvertTo* family ─────────────────────────────────────────
     //
-    // The fallible variants share the success path with their
-    // infallible siblings — the compiler handles the `Result<T, E>` /
-    // `Option<T>` shape externally (`emit_option_lift_fallible` /
-    // `emit_result_lift_fallible` in `compiler/expressions/type_ops.rs`)
-    // by wrapping with the `Ok` builtin and/or null-checking at the
-    // call site. The opcode body itself produces the unwrapped
-    // converted value; runtime conversion failures surface as
-    // `VMError::RuntimeError` and propagate through the standard
-    // exception handler. The pre-strict-typing AnyError-wrap path
-    // (`build_any_error`) is itself a Phase-2c surface, but is not
-    // needed here because the compiler emits the wrapping separately.
+    // `TryConvertTo*` is the FALLIBLE cast opcode for `expr as Type?`.
+    // Its result is an `Option<Target>` carried in the null-coded
+    // convention `op_try_unwrap` consumes (`executor/exceptions/mod.rs`):
+    // a bare scalar of the target kind ≡ `Some(v)`; the `(0,
+    // NativeKind::Null)` sentinel ≡ `None`. A successful conversion
+    // produces the scalar (same as the infallible sibling); a
+    // conversion FAILURE produces `None` rather than throwing.
+    //
+    // This is what makes the compiler's direct fallible path correct:
+    // `compile_expr_type_assertion` emits a bare `TryConvertTo*` for a
+    // direct `string as int?` (no `emit_option_lift_*` wrapping), and
+    // the enclosing `?` (`op_try_unwrap`) then sees the `None` sentinel
+    // on failure and early-returns `Err(AnyError{OPTION_NONE})` to the
+    // caller — never observing a thrown exception. PB5 (v0.3.3
+    // Wave-1-extension, 2026-05-29): before this, the bodies delegated
+    // to the THROWING infallible `op_convert_to_*`, so `(raw as int?)?`
+    // on a non-numeric string threw "cannot convert string '…' to int"
+    // instead of yielding `None` for `?` to propagate.
+    //
+    // Only a conversion-failure `VMError::RuntimeError` (the `read_as_*`
+    // failure modes — unparseable string, non-integer float, unproven
+    // source kind) maps to `None`. Other error variants (notably the
+    // `VMError::NotImplemented` SURFACE arms in `read_as_string` for
+    // still-SURFACE heap kinds) propagate verbatim — masking a SURFACE
+    // gap as `None` is forbidden.
 
-    /// `TryConvertToInt`: see `op_convert_to_int`.
+    /// Run an infallible `op_convert_to_*` body but map a conversion
+    /// failure (`VMError::RuntimeError`) to the `None` sentinel `(0,
+    /// NativeKind::Null)` instead of throwing — the fallible `as Type?`
+    /// contract. Non-`RuntimeError` variants (SURFACE `NotImplemented`,
+    /// stack underflow, …) propagate unchanged.
+    #[inline]
+    fn try_convert_or_none(
+        &mut self,
+        convert: impl FnOnce(&mut Self) -> Result<(), VMError>,
+    ) -> Result<(), VMError> {
+        match convert(self) {
+            Ok(()) => Ok(()),
+            // Conversion failure → `None`. The infallible body already
+            // popped + dropped its source carrier before the `read_as_*`
+            // error returned, so the stack is balanced; we only push the
+            // null sentinel.
+            Err(VMError::RuntimeError(_)) => self.push_kinded(0, NativeKind::Null),
+            Err(other) => Err(other),
+        }
+    }
+
+    /// `TryConvertToInt` (`expr as int?`): `Some(i)` on success, `None`
+    /// on conversion failure. Success path mirrors `op_convert_to_int`.
     #[inline]
     pub(in crate::executor) fn op_try_convert_to_int(&mut self) -> Result<(), VMError> {
-        self.op_convert_to_int()
+        self.try_convert_or_none(Self::op_convert_to_int)
     }
 
-    /// `TryConvertToNumber`: see `op_convert_to_number`.
+    /// `TryConvertToNumber` (`expr as number?`): `Some`/`None` per
+    /// `op_try_convert_to_int`. Success path mirrors `op_convert_to_number`.
     #[inline]
     pub(in crate::executor) fn op_try_convert_to_number(&mut self) -> Result<(), VMError> {
-        self.op_convert_to_number()
+        self.try_convert_or_none(Self::op_convert_to_number)
     }
 
-    /// `TryConvertToString`: see `op_convert_to_string`.
+    /// `TryConvertToString` (`expr as string?`): `Some`/`None` per
+    /// `op_try_convert_to_int`. Success path mirrors `op_convert_to_string`.
     #[inline]
     pub(in crate::executor) fn op_try_convert_to_string(&mut self) -> Result<(), VMError> {
-        self.op_convert_to_string()
+        self.try_convert_or_none(Self::op_convert_to_string)
     }
 
-    /// `TryConvertToBool`: see `op_convert_to_bool`.
+    /// `TryConvertToBool` (`expr as bool?`): `Some`/`None` per
+    /// `op_try_convert_to_int`. Success path mirrors `op_convert_to_bool`.
     #[inline]
     pub(in crate::executor) fn op_try_convert_to_bool(&mut self) -> Result<(), VMError> {
-        self.op_convert_to_bool()
+        self.try_convert_or_none(Self::op_convert_to_bool)
     }
 
-    /// `TryConvertToDecimal`: see `op_convert_to_decimal`.
+    /// `TryConvertToDecimal` (`expr as decimal?`): `Some`/`None` per
+    /// `op_try_convert_to_int`. Success path mirrors `op_convert_to_decimal`.
     #[inline]
     pub(in crate::executor) fn op_try_convert_to_decimal(&mut self) -> Result<(), VMError> {
-        self.op_convert_to_decimal()
+        self.try_convert_or_none(Self::op_convert_to_decimal)
     }
 
-    /// `TryConvertToChar`: see `op_convert_to_char`.
+    /// `TryConvertToChar` (`expr as char?`): `Some`/`None` per
+    /// `op_try_convert_to_int`. Success path mirrors `op_convert_to_char`.
     #[inline]
     pub(in crate::executor) fn op_try_convert_to_char(&mut self) -> Result<(), VMError> {
-        self.op_convert_to_char()
+        self.try_convert_or_none(Self::op_convert_to_char)
     }
 }
 

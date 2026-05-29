@@ -274,6 +274,91 @@ let val = opt as int
 }
 
 // =========================================================================
+// PB5 (v0.3.3 Wave-1-extension, 2026-05-29) — direct fallible cast
+// `expr as Type?` yields None on conversion failure, not a throw.
+//
+// `TryConvertTo*` is the fallible cast opcode. Its result is an
+// `Option<Target>` in the null-coded convention `op_try_unwrap` consumes:
+// a bare scalar ≡ Some, the `(0, NativeKind::Null)` sentinel ≡ None. A
+// successful parse produces Some(v); a FAILED parse produces None — so
+// the enclosing `?` propagates Err rather than the cast throwing. Before
+// PB5 the `op_try_convert_to_*` bodies delegated to the THROWING
+// infallible `op_convert_to_*`, so `(raw as int?)?` on a non-numeric
+// string threw "cannot convert string '…' to int" instead of yielding
+// None for `?` to propagate. Root: `executor/builtins/type_ops.rs`
+// `op_try_convert_to_int` family.
+// =========================================================================
+
+#[test]
+fn pb5_direct_string_as_int_fallible_success_yields_some() {
+    // "42" as int? → Some(42): the bare scalar (null-coded Some).
+    let source = r#"
+"42" as int?
+"#;
+    let mut bytecode = compile_source(source).expect("compile should succeed");
+    let mut frame = bytecode
+        .top_level_frame
+        .clone()
+        .unwrap_or_else(crate::type_tracking::FrameDescriptor::new);
+    frame.return_kind = Some(crate::type_tracking::NativeKind::Int64);
+    bytecode.top_level_frame = Some(frame);
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(bytecode);
+    let result = vm.execute(None).expect("execution should succeed").clone();
+    assert_eq!(result.as_i64(), Some(42), "\"42\" as int? should be Some(42)");
+}
+
+#[test]
+fn pb5_direct_string_as_int_fallible_failure_yields_none_not_throw() {
+    // "not-int" as int? → None (null sentinel). Must NOT throw — this is
+    // the PB5 root defect: the fallible cast on a non-numeric string used
+    // to surface VMError::RuntimeError instead of None.
+    let source = r#"
+("not-int" as int?) == None
+"#;
+    let bytecode = compile_source(source).expect("compile should succeed");
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(bytecode);
+    let raw = vm
+        .execute_raw(None)
+        .expect("execution should succeed (None, not a throw)");
+    assert_eq!(raw, 1u64, "\"not-int\" as int? should be None");
+}
+
+#[test]
+fn pb5_direct_string_as_int_fallible_failure_propagates_via_try() {
+    // The end-to-end shape from the failing shape-test fixture: a failed
+    // fallible cast feeds `?`, which lifts None to Err in a Result-fn and
+    // returns it — `match` then hits the Err arm (no uncaught throw).
+    let source = r#"
+fn parse(raw: string) -> Result<int> {
+    let n = (raw as int?)?
+    Ok(n)
+}
+
+match parse("not-int") {
+    Ok(v) => v
+    Err(_) => -1
+}
+"#;
+    let mut bytecode = compile_source(source).expect("compile should succeed");
+    let mut frame = bytecode
+        .top_level_frame
+        .clone()
+        .unwrap_or_else(crate::type_tracking::FrameDescriptor::new);
+    frame.return_kind = Some(crate::type_tracking::NativeKind::Int64);
+    bytecode.top_level_frame = Some(frame);
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(bytecode);
+    let result = vm.execute(None).expect("execution should succeed").clone();
+    assert_eq!(
+        result.as_i64(),
+        Some(-1),
+        "failed fallible cast should propagate Err through ? to the match Err arm"
+    );
+}
+
+// =========================================================================
 // WS-12 — Option as-cast Some/None symmetry regression tests
 //
 // The `Option<T> as U` cast is an element-wise lift: `Some(x) as U`
