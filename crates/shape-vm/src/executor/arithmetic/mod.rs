@@ -187,15 +187,59 @@ impl VirtualMachine {
                 push_decimal(self, result)?;
             }
             // ===== Numeric Coercion =====
+            //
+            // PB3 (2026-05-29) — kind-aware coercion.
+            //
+            // Pre-PB3 `IntToNumber` / `NumberToInt` discarded the source kind
+            // and treated the popped bits as i64 / f64 respectively. With the
+            // PB3 typed-LoadLocal fix preserving the slot's actual kind from
+            // the §2.7.7 parallel-kind track, these coercion opcodes are now
+            // emitted at sites where the runtime kind may already match the
+            // target (e.g. `LoadLocalI64` on a slot that was re-stored as
+            // Float64 by a prior typed-Number-arith result whose StoreLocal
+            // preserved Float64 per JF-1b). When the runtime kind already
+            // matches the target, the coercion is an identity — passing the
+            // bits through. When the runtime kind is the source-tier kind,
+            // we coerce via `coerce_to_f64_kinded` (which handles all
+            // numeric-tier kinds: Int8..Int64, UInt8..UInt64, Float64).
+            //
+            // This mirrors the post-JF-1b reality that compile-time picker
+            // and runtime kind can diverge across typed-Store boundaries;
+            // the coercion site must reconcile rather than blind-reinterpret.
             IntToNumber => {
-                let (bits, _kind) = self.pop_kinded()?;
-                let v = bits as i64;
-                self.push_kinded((v as f64).to_bits(), NativeKind::Float64)?;
+                let (bits, kind) = self.pop_kinded()?;
+                let v = coerce_to_f64_kinded(bits, kind).ok_or_else(|| VMError::TypeError {
+                    expected: "number",
+                    got: kind_type_name(kind),
+                })?;
+                drop_with_kind(bits, kind);
+                self.push_kinded(v.to_bits(), NativeKind::Float64)?;
             }
             NumberToInt => {
-                let (bits, _kind) = self.pop_kinded()?;
-                let v = f64::from_bits(bits);
-                self.push_kinded((v as i64) as u64, NativeKind::Int64)?;
+                let (bits, kind) = self.pop_kinded()?;
+                let v = match kind {
+                    NativeKind::Int8
+                    | NativeKind::Int16
+                    | NativeKind::Int32
+                    | NativeKind::Int64
+                    | NativeKind::IntSize => bits as i64,
+                    NativeKind::UInt8
+                    | NativeKind::UInt16
+                    | NativeKind::UInt32
+                    | NativeKind::UInt64
+                    | NativeKind::UIntSize => bits as i64,
+                    NativeKind::Float64 | NativeKind::NullableFloat64 => {
+                        f64::from_bits(bits) as i64
+                    }
+                    _ => {
+                        return Err(VMError::TypeError {
+                            expected: "int",
+                            got: kind_type_name(kind),
+                        });
+                    }
+                };
+                drop_with_kind(bits, kind);
+                self.push_kinded(v as u64, NativeKind::Int64)?;
             }
             // ===== Negation =====
             NegInt => {

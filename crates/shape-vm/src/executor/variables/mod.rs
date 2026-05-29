@@ -1977,6 +1977,48 @@ impl VirtualMachine {
 
     // ─────────────────────────────────────────────────────────────────────
     // Typed local Load/Store (per-Kind handlers)
+    //
+    // PB3 (2026-05-29) — typed `LoadLocal<Kind>` handlers preserve the
+    // slot's actual kind from the §2.7.7 stack parallel-kind track.
+    //
+    // Mirror of joint-fix-1b's `op_store_local_*` fix at the sister Load
+    // site. Per ADR-006 §2.7.7 the pushed slot's kind MUST come from the
+    // slot's parallel-kind track entry (the producer's kind stamped at
+    // the original write), never fabricated from the opcode suffix.
+    // The encoded `<Kind>` suffix is a JIT static-annotation only — a
+    // compile-time witness that the producer kind matched the declared
+    // local/param type.
+    //
+    // Pre-PB3 the typed Loads fabricated `NativeKind::Int64` /
+    // `NativeKind::Float64` etc. from the opcode suffix and discarded the
+    // slot's parallel-kind entry. When the static-type picker and the
+    // producer's kind disagreed — most visibly at call-arg passing into
+    // a function whose param has a wider/different declared type than
+    // the literal being passed (e.g. `fn check(n: number)` called with
+    // int literal `5`, or `let v = step1()?` (Result<number> with int
+    // payload) then `step2(v)`) — the typed `LoadLocalF64` re-stamped the
+    // slot's Int64 bits as Float64. Downstream consumers (`print`,
+    // arithmetic ops, snapshot serialization) read the int bits as f64,
+    // producing denormals (e.g. `print(5)` → `2.5e-323` =
+    // `f64::from_bits(5)`).
+    //
+    // Sub-int-width truncation (`bits as i32 as i64 as u64`, etc.)
+    // DELETED — it was paired with the fabricated kind. Legitimate
+    // sub-width producers push canonical sign-/zero-extended Int64 bits
+    // via `push_kinded(bits, NativeKind::Int<N>)`, so reading the stored
+    // bits unmodified preserves the value. Mirror of joint-fix-1b's
+    // identical deletion at the StoreLocal sub-width arms.
+    //
+    // JIT does NOT consume these typed Load opcodes today (grep
+    // -rEn 'LoadLocal(I64|U64|F64|I32|U32|I16|U16|I8|U8|Bool)\b'
+    // crates/shape-jit/ returns zero hits — symmetric to JF-1b's check
+    // for the typed Store opcodes), so the executor-only change
+    // introduces NO VM/JIT divergence.
+    //
+    // Per CLAUDE.md ADR-006 §2.7.7. Per audit doc 14b sub-root #4
+    // ("call-arg / loop-var KIND CLOBBER post-`?`"). No
+    // `if src_kind.is_heap()` dual-path; no `ValueWord` resurrection;
+    // no `ConvertXToY` opcode added.
     // ─────────────────────────────────────────────────────────────────────
 
     fn op_load_local_i64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
@@ -1991,8 +2033,9 @@ impl VirtualMachine {
             slot,
             self.stack.len()
         );
-        let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
-        self.push_kinded(bits, NativeKind::Int64)
+        let (bits, kind) = self.stack_read_kinded_raw(slot);
+        crate::executor::vm_impl::stack::clone_with_kind(bits, kind);
+        self.push_kinded(bits, kind)
     }
 
     fn op_load_local_u64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
@@ -2007,8 +2050,9 @@ impl VirtualMachine {
             slot,
             self.stack.len()
         );
-        let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
-        self.push_kinded(bits, NativeKind::UInt64)
+        let (bits, kind) = self.stack_read_kinded_raw(slot);
+        crate::executor::vm_impl::stack::clone_with_kind(bits, kind);
+        self.push_kinded(bits, kind)
     }
 
     fn op_load_local_f64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
@@ -2023,8 +2067,9 @@ impl VirtualMachine {
             slot,
             self.stack.len()
         );
-        let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
-        self.push_kinded(bits, NativeKind::Float64)
+        let (bits, kind) = self.stack_read_kinded_raw(slot);
+        crate::executor::vm_impl::stack::clone_with_kind(bits, kind);
+        self.push_kinded(bits, kind)
     }
 
     fn op_load_local_i32(&mut self, instruction: &Instruction) -> Result<(), VMError> {
@@ -2039,9 +2084,9 @@ impl VirtualMachine {
             slot,
             self.stack.len()
         );
-        let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
-        let value = bits as i32;
-        self.push_kinded(value as i64 as u64, NativeKind::Int32)
+        let (bits, kind) = self.stack_read_kinded_raw(slot);
+        crate::executor::vm_impl::stack::clone_with_kind(bits, kind);
+        self.push_kinded(bits, kind)
     }
 
     fn op_load_local_u32(&mut self, instruction: &Instruction) -> Result<(), VMError> {
@@ -2056,9 +2101,9 @@ impl VirtualMachine {
             slot,
             self.stack.len()
         );
-        let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
-        let value = bits as u32;
-        self.push_kinded(value as u64, NativeKind::UInt32)
+        let (bits, kind) = self.stack_read_kinded_raw(slot);
+        crate::executor::vm_impl::stack::clone_with_kind(bits, kind);
+        self.push_kinded(bits, kind)
     }
 
     fn op_load_local_i16(&mut self, instruction: &Instruction) -> Result<(), VMError> {
@@ -2073,9 +2118,9 @@ impl VirtualMachine {
             slot,
             self.stack.len()
         );
-        let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
-        let value = bits as i16;
-        self.push_kinded(value as i64 as u64, NativeKind::Int16)
+        let (bits, kind) = self.stack_read_kinded_raw(slot);
+        crate::executor::vm_impl::stack::clone_with_kind(bits, kind);
+        self.push_kinded(bits, kind)
     }
 
     fn op_load_local_u16(&mut self, instruction: &Instruction) -> Result<(), VMError> {
@@ -2090,9 +2135,9 @@ impl VirtualMachine {
             slot,
             self.stack.len()
         );
-        let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
-        let value = bits as u16;
-        self.push_kinded(value as u64, NativeKind::UInt16)
+        let (bits, kind) = self.stack_read_kinded_raw(slot);
+        crate::executor::vm_impl::stack::clone_with_kind(bits, kind);
+        self.push_kinded(bits, kind)
     }
 
     fn op_load_local_i8(&mut self, instruction: &Instruction) -> Result<(), VMError> {
@@ -2107,9 +2152,9 @@ impl VirtualMachine {
             slot,
             self.stack.len()
         );
-        let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
-        let value = bits as i8;
-        self.push_kinded(value as i64 as u64, NativeKind::Int8)
+        let (bits, kind) = self.stack_read_kinded_raw(slot);
+        crate::executor::vm_impl::stack::clone_with_kind(bits, kind);
+        self.push_kinded(bits, kind)
     }
 
     fn op_load_local_u8(&mut self, instruction: &Instruction) -> Result<(), VMError> {
@@ -2124,9 +2169,9 @@ impl VirtualMachine {
             slot,
             self.stack.len()
         );
-        let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
-        let value = bits as u8;
-        self.push_kinded(value as u64, NativeKind::UInt8)
+        let (bits, kind) = self.stack_read_kinded_raw(slot);
+        crate::executor::vm_impl::stack::clone_with_kind(bits, kind);
+        self.push_kinded(bits, kind)
     }
 
     fn op_load_local_bool(&mut self, instruction: &Instruction) -> Result<(), VMError> {
@@ -2141,8 +2186,9 @@ impl VirtualMachine {
             slot,
             self.stack.len()
         );
-        let bits = unsafe { *(self.stack.as_ptr().add(slot) as *const u64) };
-        self.push_kinded(bits, NativeKind::Bool)
+        let (bits, kind) = self.stack_read_kinded_raw(slot);
+        crate::executor::vm_impl::stack::clone_with_kind(bits, kind);
+        self.push_kinded(bits, kind)
     }
 
     fn op_load_local_ptr(&mut self, instruction: &Instruction) -> Result<(), VMError> {
@@ -3151,6 +3197,16 @@ impl VirtualMachine {
         Ok(())
     }
 
+    // ─────────────────────────────────────────────────────────────────────
+    // PB3 (2026-05-29) — typed `LoadModuleBinding<Kind>` handlers preserve
+    // src_kind. Mirror of the local-tier fix above at the module-binding
+    // tier. Same rationale per ADR-006 §2.7.7 — pushed kind MUST come from
+    // the parallel module-binding kind track (the producer's kind stamped
+    // by `module_binding_write_kinded`), never fabricated from the opcode
+    // suffix. Sister site to joint-fix-1b's `op_store_module_binding_*`
+    // typed Store fix at L3301+.
+    // ─────────────────────────────────────────────────────────────────────
+
     fn op_load_module_binding_i64(
         &mut self,
         instruction: &Instruction,
@@ -3158,8 +3214,9 @@ impl VirtualMachine {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let (bits, _kind) = self.module_binding_read_kinded_raw(idx as usize);
-        self.push_kinded(bits, NativeKind::Int64)
+        let (bits, kind) = self.module_binding_read_kinded_raw(idx as usize);
+        crate::executor::vm_impl::stack::clone_with_kind(bits, kind);
+        self.push_kinded(bits, kind)
     }
 
     fn op_load_module_binding_u64(
@@ -3169,8 +3226,9 @@ impl VirtualMachine {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let (bits, _kind) = self.module_binding_read_kinded_raw(idx as usize);
-        self.push_kinded(bits, NativeKind::UInt64)
+        let (bits, kind) = self.module_binding_read_kinded_raw(idx as usize);
+        crate::executor::vm_impl::stack::clone_with_kind(bits, kind);
+        self.push_kinded(bits, kind)
     }
 
     fn op_load_module_binding_f64(
@@ -3180,8 +3238,9 @@ impl VirtualMachine {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let (bits, _kind) = self.module_binding_read_kinded_raw(idx as usize);
-        self.push_kinded(bits, NativeKind::Float64)
+        let (bits, kind) = self.module_binding_read_kinded_raw(idx as usize);
+        crate::executor::vm_impl::stack::clone_with_kind(bits, kind);
+        self.push_kinded(bits, kind)
     }
 
     fn op_load_module_binding_i32(
@@ -3191,9 +3250,9 @@ impl VirtualMachine {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let (bits, _kind) = self.module_binding_read_kinded_raw(idx as usize);
-        let value = bits as i32 as i64 as u64;
-        self.push_kinded(value, NativeKind::Int32)
+        let (bits, kind) = self.module_binding_read_kinded_raw(idx as usize);
+        crate::executor::vm_impl::stack::clone_with_kind(bits, kind);
+        self.push_kinded(bits, kind)
     }
 
     fn op_load_module_binding_u32(
@@ -3203,9 +3262,9 @@ impl VirtualMachine {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let (bits, _kind) = self.module_binding_read_kinded_raw(idx as usize);
-        let value = bits as u32 as u64;
-        self.push_kinded(value, NativeKind::UInt32)
+        let (bits, kind) = self.module_binding_read_kinded_raw(idx as usize);
+        crate::executor::vm_impl::stack::clone_with_kind(bits, kind);
+        self.push_kinded(bits, kind)
     }
 
     fn op_load_module_binding_i16(
@@ -3215,9 +3274,9 @@ impl VirtualMachine {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let (bits, _kind) = self.module_binding_read_kinded_raw(idx as usize);
-        let value = bits as i16 as i64 as u64;
-        self.push_kinded(value, NativeKind::Int16)
+        let (bits, kind) = self.module_binding_read_kinded_raw(idx as usize);
+        crate::executor::vm_impl::stack::clone_with_kind(bits, kind);
+        self.push_kinded(bits, kind)
     }
 
     fn op_load_module_binding_u16(
@@ -3227,9 +3286,9 @@ impl VirtualMachine {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let (bits, _kind) = self.module_binding_read_kinded_raw(idx as usize);
-        let value = bits as u16 as u64;
-        self.push_kinded(value, NativeKind::UInt16)
+        let (bits, kind) = self.module_binding_read_kinded_raw(idx as usize);
+        crate::executor::vm_impl::stack::clone_with_kind(bits, kind);
+        self.push_kinded(bits, kind)
     }
 
     fn op_load_module_binding_i8(
@@ -3239,9 +3298,9 @@ impl VirtualMachine {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let (bits, _kind) = self.module_binding_read_kinded_raw(idx as usize);
-        let value = bits as i8 as i64 as u64;
-        self.push_kinded(value, NativeKind::Int8)
+        let (bits, kind) = self.module_binding_read_kinded_raw(idx as usize);
+        crate::executor::vm_impl::stack::clone_with_kind(bits, kind);
+        self.push_kinded(bits, kind)
     }
 
     fn op_load_module_binding_u8(
@@ -3251,9 +3310,9 @@ impl VirtualMachine {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let (bits, _kind) = self.module_binding_read_kinded_raw(idx as usize);
-        let value = bits as u8 as u64;
-        self.push_kinded(value, NativeKind::UInt8)
+        let (bits, kind) = self.module_binding_read_kinded_raw(idx as usize);
+        crate::executor::vm_impl::stack::clone_with_kind(bits, kind);
+        self.push_kinded(bits, kind)
     }
 
     fn op_load_module_binding_bool(
@@ -3263,9 +3322,9 @@ impl VirtualMachine {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
-        let (bits, _kind) = self.module_binding_read_kinded_raw(idx as usize);
-        let value = ((bits as u8) != 0) as u64;
-        self.push_kinded(value, NativeKind::Bool)
+        let (bits, kind) = self.module_binding_read_kinded_raw(idx as usize);
+        crate::executor::vm_impl::stack::clone_with_kind(bits, kind);
+        self.push_kinded(bits, kind)
     }
 
     /// `LoadModuleBindingPtr { idx }` — Wave-γ G-module-bindings-kind:
