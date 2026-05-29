@@ -182,6 +182,17 @@ impl VirtualMachine {
     /// WS-3 F4: render a clean user-facing message for an uncaught
     /// exception. Reads the AnyError TypedObject's `message` field when
     /// the payload carries one; falls back to a stringified payload.
+    ///
+    /// PB1 Wave-1-extension fold-in (audit 14a, 2026-05-29): when the
+    /// AnyError carries a `cause` field, include the cause-chain entry
+    /// alongside the high-level message so the user-facing render
+    /// preserves both layers (matches the book §"## Uncaught Exception
+    /// Display" example `Error: <message>` + `Caused by: <cause>` —
+    /// minus the trace-frame walk which remains v0.4 follow-up
+    /// territory per audit 14a §"Phase B fix-target preview" Q3).
+    /// Required for the 6 `context_op_*_includes_*_cause` /
+    /// `context_op_err_preserves_cause` Group A tests that assert the
+    /// cause is visible in the user-facing error string.
     fn uncaught_error_message(&self, payload: &KindedSlot) -> String {
         if let NativeKind::Ptr(HeapKind::TypedObject) = payload.kind() {
             let bits = payload.slot().raw();
@@ -192,9 +203,16 @@ impl VirtualMachine {
                 let obj: &TypedObjectStorage =
                     unsafe { &*(bits as *const TypedObjectStorage) };
                 if obj.schema_id == self.builtin_schemas.any_error as u64 {
-                    if let Some(msg) = anyerror_message_field(obj) {
-                        return format!("Uncaught error: {}", msg);
-                    }
+                    let msg = anyerror_message_field(obj);
+                    let cause = anyerror_cause_field(obj);
+                    return match (msg, cause) {
+                        (Some(m), Some(c)) => {
+                            format!("Uncaught error: {}\nCaused by: {}", m, c)
+                        }
+                        (Some(m), None) => format!("Uncaught error: {}", m),
+                        (None, Some(c)) => format!("Uncaught error: {}", c),
+                        (None, None) => "Uncaught error".to_string(),
+                    };
                 }
             }
         }
@@ -659,32 +677,71 @@ impl VirtualMachine {
         let (bits, kind) = self.pop_kinded()?;
         let value = KindedSlot::new(ValueSlot::from_raw(bits), kind);
         // Wave 14 W14-variant-codegen (ADR-006 §2.7.17 / Q18,
-        // 2026-05-10):
+        // 2026-05-10) + PB1 Wave-1-extension (audit 14a / 14b,
+        // 2026-05-29):
         //   Ok(v)   => unwrap to v
-        //   Err(e)  => early-return Err(e) to caller
+        //   Err(e)  => early-return:
+        //                - in a fallible-fn frame: return Err(e) to caller
+        //                - at script-toplevel: surface as uncaught
+        //                  exception via handle_exception (audit 14a
+        //                  decision (A) Throw-at-toplevel)
         //   Some(v) => unwrap to v
-        //   None    => early-return None to caller (wrapped as
-        //              AnyError-compatible Err in caller's Result<T> by
-        //              type inference; here we just propagate the None
-        //              carrier verbatim, matching the docstring's
-        //              "AnyError-wrapped OPTION_NONE" intent — the
-        //              wrapping is downstream of this opcode in
-        //              fallible-fn return position)
-        //   bare non-null => pass through (null-coding fallback)
+        //   None    => early-return:
+        //                - in a Result-returning fn: LIFT to
+        //                  Err(AnyError{OPTION_NONE,...}) and return
+        //                  to caller (audit 14b sub-root #1 inside-fn
+        //                  None-to-Err lift)
+        //                - in an Option-returning fn: propagate None
+        //                  verbatim (early-return)
+        //                - at script-toplevel: surface as uncaught
+        //                  Err(AnyError{OPTION_NONE,...})
+        //   bare non-null => pass through (null-coding fallback;
+        //                    treated as None at script-toplevel)
+        //
+        // Audit 14a single-mode framing: `?` early-returns the failure
+        // to the nearest enclosing fallible scope. Inside a function
+        // returning Result/Option that's an early return to the caller
+        // frame; at script-toplevel the enclosing scope is the host
+        // process which surfaces the failure as an uncaught error. ONE
+        // semantics, two targets — the `self.call_stack.is_empty()`
+        // check at each early-return site expresses the target
+        // dispatch. There is no `op_try_unwrap_toplevel` variant.
         if let Some(rd) = read_result(&value)? {
             if rd.is_ok {
                 let inner = rd.payload.clone();
                 drop(value);
                 self.push_kinded_slot(inner)
             } else {
-                // Err(e) — early-return Err(e) to caller. We need to
-                // re-emit the wrapper carrier as the call frame's
-                // return value, NOT unwrap the inner — `?` on Err
-                // propagates the wrapper, not the inner.
+                // Err(e) — early-return.
                 let result_kind = value.kind();
                 let result_bits = value.slot().raw();
                 std::mem::forget(value);
-                self.return_value_inner(result_bits, result_kind)
+                if self.call_stack.is_empty() {
+                    // Toplevel: surface as uncaught exception (audit
+                    // 14a (A)). The Err wrapper's payload is normalized
+                    // via `normalize_err_payload` (already-AnyError
+                    // payloads pass through unchanged; raw payloads
+                    // get wrapped) so the catch-render path sees a
+                    // canonical TypedObject. We unwrap the Result
+                    // shell to expose the inner error payload — `?`
+                    // surfaces the error, not the Result-wrapped
+                    // carrier (mirrors how a fn-position `?` exposes
+                    // the Err carrier as the frame return; here the
+                    // host frame consumes the inner directly).
+                    let result_arc: Arc<shape_value::heap_value::ResultData> =
+                        unsafe { Arc::from_raw(result_bits as *const _) };
+                    let inner = result_arc.payload.clone();
+                    drop(result_arc);
+                    let normalized = self.normalize_err_payload(inner)?;
+                    self.handle_exception(normalized)
+                } else {
+                    // In-fn: return Err(e) wrapper to caller. We
+                    // re-emit the wrapper carrier as the call frame's
+                    // return value, NOT unwrap the inner — `?` on Err
+                    // propagates the wrapper to the enclosing fallible
+                    // scope.
+                    self.return_value_inner(result_bits, result_kind)
+                }
             }
         } else if let Some(od) = read_option(&value)? {
             if od.is_some {
@@ -692,21 +749,16 @@ impl VirtualMachine {
                 drop(value);
                 self.push_kinded_slot(inner)
             } else {
-                // None — early-return None to caller. Same shape as
-                // Err propagation; the option_none-as-error wrapping
-                // is part of the broader fallible-fn protocol layered
-                // on top of this opcode.
-                let opt_kind = value.kind();
-                let opt_bits = value.slot().raw();
-                std::mem::forget(value);
-                self.return_value_inner(opt_bits, opt_kind)
+                // None — early-return. Target-dispatch identical to
+                // the null-coded-None arm below; both delegate to
+                // `propagate_none_early_return`.
+                drop(value);
+                self.propagate_none_early_return()
             }
         } else if is_null_sentinel(&value) {
-            // null-coded None — same early-return shape.
-            let null_kind = value.kind();
-            let null_bits = value.slot().raw();
-            std::mem::forget(value);
-            self.return_value_inner(null_bits, null_kind)
+            // null-coded None — same shape as typed-None arm.
+            drop(value);
+            self.propagate_none_early_return()
         } else {
             // Bare non-null value — null-coded Some(x) ≡ x. Pass
             // through the share verbatim via mem::forget (no
@@ -716,6 +768,102 @@ impl VirtualMachine {
             std::mem::forget(value);
             self.push_kinded(bits, kind)
         }
+    }
+
+    /// PB1 Wave-1-extension (audit 14a + 14b, 2026-05-29): shared
+    /// early-return helper for the None / null-coded-None arms of
+    /// `op_try_unwrap`. Target-dispatched per the audit-14a single-mode
+    /// framing (one semantics, two targets):
+    ///
+    /// - **Script-toplevel** (`self.call_stack.is_empty()`): surface
+    ///   `Err(AnyError{ payload: "Value was None", code: "OPTION_NONE" })`
+    ///   as an uncaught exception via `handle_exception`. Audit 14a §c
+    ///   sibling-consistency analysis: the host is the enclosing
+    ///   fallible scope for bare-toplevel `?`.
+    ///
+    /// - **Inside-fn** — discriminate by the enclosing frame's declared
+    ///   return-type kind (read from
+    ///   `current_frame_descriptor().return_kind`):
+    ///
+    ///   - **Result-returning** (`return_kind ==
+    ///     Some(NativeKind::Ptr(HeapKind::Result))`): LIFT None to
+    ///     `Err(AnyError{ payload: "Value was None", code: "OPTION_NONE" })`
+    ///     wrapped in a Result-Err carrier, and return that to the
+    ///     caller. Per audit 14b sub-root #1 inside-fn None-to-Err
+    ///     lift, this is the documented book contract (L114: "None →
+    ///     early-return `Err(AnyError)` (code `OPTION_NONE`)").
+    ///
+    ///   - **Option-returning** (`return_kind ==
+    ///     Some(NativeKind::Ptr(HeapKind::Option))`) or **unknown**:
+    ///     propagate None verbatim as the early-return value. For
+    ///     Option-typed enclosing frames, None IS the valid early-
+    ///     return; lifting to Err would break that semantics. For
+    ///     unknown frame return kinds (no FrameDescriptor or no
+    ///     `return_kind` stamp), propagate verbatim — the pre-PB1
+    ///     behavior is preserved for any compile-time emit site that
+    ///     hasn't reached return-kind-stamp territory yet.
+    ///
+    /// Per audit 14a binder: this is NOT two operators. The `?`
+    /// semantics is single-mode "early-return failure to nearest
+    /// enclosing fallible scope"; the target (host vs frame) and the
+    /// frame-return-type sub-case (Result-lift vs Option-propagate)
+    /// are mechanical dispatch, not parallel implementations. No
+    /// `op_try_unwrap_toplevel` variant; no `op_try_unwrap_option_fn`
+    /// variant.
+    fn propagate_none_early_return(&mut self) -> Result<(), VMError> {
+        if self.call_stack.is_empty() {
+            // Toplevel: surface OPTION_NONE AnyError as uncaught
+            // exception. Build the AnyError with payload = "Value was
+            // None" and code = "OPTION_NONE" per the book contract.
+            let any_err = self.build_option_none_any_error()?;
+            return self.handle_exception(any_err);
+        }
+
+        // In-fn: discriminate on the enclosing frame's declared
+        // return-type kind.
+        let return_kind = self
+            .current_frame_descriptor()
+            .and_then(|fd| fd.return_kind);
+        let lift_to_result_err = matches!(
+            return_kind,
+            Some(NativeKind::Ptr(HeapKind::Result))
+        );
+
+        if lift_to_result_err {
+            // Result-returning fn: LIFT None to Err(AnyError) wrapped
+            // in a Result-Err carrier, then return to caller. Audit
+            // 14b sub-root #1 (inside-fn None-to-Err lift). Matches
+            // the book contract at L114.
+            let any_err = self.build_option_none_any_error()?;
+            let res = Arc::new(shape_value::heap_value::ResultData::err(any_err));
+            let carrier = KindedSlot::from_result(res);
+            let bits = carrier.slot().raw();
+            let kind = carrier.kind();
+            std::mem::forget(carrier);
+            return self.return_value_inner(bits, kind);
+        }
+
+        // Option-returning fn OR unknown frame return kind:
+        // propagate None verbatim as the early-return value. For
+        // Option-typed frames this IS the correct early-return; for
+        // unknown frames the pre-PB1 behavior is preserved (the
+        // null-sentinel propagates as today).
+        self.return_value_inner(Self::NONE_BITS, NativeKind::Null)
+    }
+
+    /// PB1 Wave-1-extension (audit 14a + 14b): build an
+    /// `Arc<TypedObjectStorage>` AnyError carrier with the canonical
+    /// OPTION_NONE shape per the book contract (L114): `payload =
+    /// "Value was None"`, `code = "OPTION_NONE"`. Returned as a
+    /// `KindedSlot` with kind `NativeKind::Ptr(HeapKind::TypedObject)`
+    /// owning one strong-count share — the caller transfers the share
+    /// either to `handle_exception` (toplevel surface) or into a
+    /// `ResultData::err` carrier (in-fn lift).
+    fn build_option_none_any_error(&mut self) -> Result<KindedSlot, VMError> {
+        let payload =
+            KindedSlot::from_string_arc(Arc::new("Value was None".to_string()));
+        let trace = self.trace_info_full()?;
+        self.build_any_error(payload, None, trace, Some("OPTION_NONE"))
     }
 
     /// `UnwrapOption` (`opt!`-style): pop a `T?` and unwrap to `T`,
@@ -1148,6 +1296,28 @@ fn anyerror_message_field(obj: &TypedObjectStorage) -> Option<String> {
     // `String`; `build_any_error` stamps it with `Arc::into_raw::<String>`
     // bits and sets the matching `heap_mask` bit. Borrow the `&String`
     // for the duration of this read — no `Arc::from_raw`, so the object's
+    // share is untouched.
+    let s: &String = unsafe { &*(bits as *const String) };
+    Some(s.clone())
+}
+
+/// PB1 Wave-1-extension fold-in (audit 14a, 2026-05-29): mirror of
+/// `anyerror_message_field` for the `cause` field. Returns `None` when
+/// the cause slot is empty (no cause chain — `!!` was applied to a
+/// non-Err / non-None value) or the heap_mask bit is clear.
+fn anyerror_cause_field(obj: &TypedObjectStorage) -> Option<String> {
+    let idx = ANYERROR_CAUSE;
+    if (obj.heap_mask >> idx) & 1 == 0 {
+        return None;
+    }
+    let bits = obj.slots.get(idx)?.raw();
+    if bits == 0 {
+        return None;
+    }
+    // SAFETY: AnyError schema declares `ANYERROR_CAUSE` as `String`;
+    // `build_any_error` stamps it with `Arc::into_raw::<String>` bits
+    // and sets the matching `heap_mask` bit. Borrow the `&String` for
+    // the duration of this read — no `Arc::from_raw`, so the object's
     // share is untouched.
     let s: &String = unsafe { &*(bits as *const String) };
     Some(s.clone())
