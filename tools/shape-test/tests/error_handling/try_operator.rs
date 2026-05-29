@@ -207,11 +207,22 @@ fn fallible_type_assertion_uses_named_try_into_impl() {
 
 #[test]
 fn fallible_type_assertion_propagates_conversion_failure() {
+    // v0.3.3 Wave-1-extension team-lead direct (2026-05-29): migrated stale
+    // `__try_into_int` intrinsic to `self as int?` per the canonical stdlib
+    // shape at `stdlib-src/core/try_into.shape:63-65`. The `__try_into_int`
+    // builtin was intentionally removed (per `intrinsics.shape:162` —
+    // "primitive conversions now use typed ConvertTo*/TryConvertTo*
+    // opcodes directly"); the compiler does NOT emit it. PB4's
+    // recursion guard at `compiler/expressions/type_ops.rs::user_impl_
+    // method_for_cast` ensures `self as int?` inside the impl body skips
+    // dispatch and emits the primitive `TryConvertToInt` opcode directly.
+    // Per supervisor 2026-05-29 audit-14b sub-root #2 verbatim ratify:
+    // FIXTURE-ONLY edit; not a compiler-emit gap.
     ShapeTest::new(
         r#"
         impl TryInto<int> for string as int {
             method tryInto() {
-                __try_into_int(self)
+                self as int?
             }
         }
 
@@ -231,11 +242,18 @@ fn fallible_type_assertion_propagates_conversion_failure() {
 
 #[test]
 fn infallible_type_assertion_uses_into_impl() {
+    // v0.3.3 Wave-1-extension team-lead direct (2026-05-29): migrated stale
+    // `__into_int` intrinsic to `self as int` per the canonical stdlib
+    // pattern. PB4's recursion guard at `compiler/expressions/type_ops.rs
+    // ::user_impl_method_for_cast` ensures `self as int` inside the impl
+    // body skips dispatch and emits the primitive `ConvertToInt` opcode
+    // directly (current_function == impl_method_idx). Per supervisor
+    // 2026-05-29 audit-14b sub-root #2 verbatim ratify: FIXTURE-ONLY edit.
     ShapeTest::new(
         r#"
         impl Into<int> for bool as int {
             method into() {
-                __into_int(self)
+                self as int
             }
         }
 

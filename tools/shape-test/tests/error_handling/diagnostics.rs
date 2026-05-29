@@ -128,10 +128,13 @@ let val = maybe ?? 0
 
 #[test]
 fn fallible_type_assertion_no_semantic_diagnostics_for_supported_conversion() {
+    // v0.3.3 Wave-1-extension team-lead direct (2026-05-29): migrated
+    // `__try_into_int` → `self as int?` per audit-14b sub-root #2 ratify
+    // (FIXTURE-ONLY; intrinsic intentionally removed at intrinsics.shape:162).
     let code = r#"
 impl TryInto<int> for string as int {
   method tryInto() {
-    __try_into_int(self)
+    self as int?
   }
 }
 
@@ -162,10 +165,14 @@ fn parse_price(p: string) -> Result<int> {
 
 #[test]
 fn infallible_type_assertion_no_semantic_diagnostics_for_supported_into_conversion() {
+    // v0.3.3 Wave-1-extension team-lead direct (2026-05-29): migrated
+    // `__into_int` → `self as int` per audit-14b sub-root #2 ratify
+    // (FIXTURE-ONLY; intrinsic intentionally removed at intrinsics.shape:162;
+    // PB4's recursion guard handles the impl-body cast emission).
     let code = r#"
 impl Into<int> for bool as int {
   method into() {
-    __into_int(self)
+    self as int
   }
 }
 
