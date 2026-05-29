@@ -7323,3 +7323,35 @@ Shape's 16-byte tagged `String` value. Phase 1.A profiles a Shape stdlib
 parser workload; if measurement shows a meaningfully higher threshold
 performs better (e.g., 23 bytes per Mojo / smol_str), increment the
 const and re-profile.
+
+---
+
+#### 2.7.30 Reference escape→RC promotion + snapshot reference-serialization (narrow floor) — RATIFIED 2026-05-29
+
+**Status:** RATIFIED (user / strategic-owner 2026-05-29, after two adversarial design rounds; design corpus `docs/design/v0.3.3-reference-serialization/`). Scope: the v0.3.3 **NARROW FLOOR** only. Broad container/closure-env escape flips + live-continuation resume are explicitly OUT (v0.3.4+, §2.7.30.6); this amendment does not authorize them. Code touchpoints carry `// ADR-006 §2.7.30` markers, placed with each implementation sub-step (the feature is greenfield — `PromotedCell` / the identity-map / non-opaque ref-serialization are all unbuilt at ratification).
+
+**2.7.30.1 Context.** References are escape-aware and SOUND but *reject* long-lived escapes: a reference outliving its referent's scope is a B0003 `ReferenceEscape` compile error (`mir/solver.rs:1146-1160`). The escape→RC promotion machinery (§2.7.8 / `storage_planning.rs:928-959`) already promotes referents for the other escape kinds (closure-capture, cross-task, store-into-shared). References are the one escape kind that rejects instead of promoting — so a long-lived reference cannot exist, hence cannot be snapshotted, leaving `snapshot()` incomplete for programs that bind references (user 2026-05-29: release-blocking for v0.3.3). Two adversarial design rounds established: (round 1) the non-owning `RefTarget::Local`-coordinate carrier is a use-after-free on `return &local` (`control_flow/mod.rs:778` + `stack.rs:929-935`); (round 2) the broad flip + live continuation carry unresolved UAF / double-free / cross-instance-`&mut` breaks and are not soundly landable in v0.3.3.
+
+**2.7.30.2 Decision — heap-owning PromotedCell carrier.** When a reference escapes via a flipped sink (§2.7.30.3), the referent is promoted to an RC'd `SharedCell` and the reference holds an owning `Arc` share via a new `RefTarget` variant (`shape-value/src/reference.rs`):
+
+```rust
+RefTarget::PromotedCell { cell: Arc<SharedCell> }
+```
+
+The owning share keeps the referent alive past lexical frame-pop (refcount ≥ 1 while any reference exists) → frame-independent identity. The non-owning-coordinate alternative is the proven round-1 UAF and is FORBIDDEN. The carrier reuses the existing `SharedCell` (`v2/closure_layout.rs:130`), no new heap type. Deref reads/writes go through the cell (unwrap-the-Arc), never a raw frozen-kind slot read; the `RefTarget::Local` fast-path (`variables/mod.rs:2997`) remains for non-escaping references only. The double-decrement concern is the cluster-1.5 share-accounting pattern (explicit `clone_with_kind` retain before claim), NOT grounds for a non-owning carrier.
+
+**2.7.30.3 Decision — reference-escape is the fourth escape→RC trigger (NARROW).** `detect_escape_status` / `decide_slot_storage` add reference-escape as a promotion trigger for EXACTLY two loan sinks: `LoanSinkKind::ReturnSlot` (`return &x`) and `LoanSinkKind::ModuleBindingStore` (`let r = &x` at module/script scope). On these, the escaping reference's referent transitions `Direct → SharedCow`/`UniqueHeap` (promoted, RC'd) instead of emitting B0003. ALL OTHER sinks STAY hard-rejecting in v0.3.3: `ClosureEnv` (B0003-closure → v0.3.4, UAF without further design), container store (B0004 → v0.3.4, KL-4 provenance-double-free unresolved + cycle-UAF), task-boundary (B0006/B0012, cross-task coherence), `TypedField` field-escape. Residual genuine-dangling still rejects: a reference to a moved value (B0005) and any case where promotion cannot guarantee referent liveness. `&mut` exclusivity (B0001) is UNCHANGED — a second `&mut` to a promoted referent still rejects.
+
+**2.7.30.4 Decision — Drop defers to reference lifetime.** A referent with `impl Drop` whose reference escapes has its Drop deferred from lexical scope to the escaping reference's lifetime (program/module lifetime for `ModuleBindingStore`). Required for soundness (the referent must outlive every reference). Observable Drop-ordering change → carries a CLAUDE.md note (user-ratified 2026-05-29).
+
+**2.7.30.5 Decision — snapshot reference-serialization (replay-only).** References serialize via an identity-handle + restore-time identity-map (the same mechanism as the SharedCell snapshot arm):
+
+- A new `SerializableVMValue` arm replaces the identity-free `ReferenceOpaque`: `SerializableVMValue::Reference { handle, is_mut }`, where `handle` keys the identity-map and `is_mut` is **carried, reserved-not-read in v0.3.3**.
+- A `restore_identity_map` side-table (NEW — original-pointer → restored-pointer) is **shared by references and SharedCells**; on restore, aliased references/cells dedupe to ONE restored referent. `from_snapshot` becomes allocate-then-link (currently single-pass) with a cycle/depth guard.
+- **REPLAY-ONLY:** a resumed VM replays the same MIR; no live-loan continuation on a resumed VM holding restored loans (v0.3.4). The `is_mut` bit is carried-not-dropped so the v0.3.4 runtime-loan re-establishment has it. This sidesteps round-2 BREAK-1 (multi-instance `&mut`) and BREAK-2 (NLL-dead-loan-resurrection), which are live-continuation problems.
+
+**2.7.30.6 Scope boundary (binding).** IN (v0.3.3): ReturnSlot + ModuleBinding reference-escape→promote; `PromotedCell` carrier; deferred-Drop; replay-only snapshot ref-serialization with the shared identity-map. OUT (v0.3.4+, per-sub-feature soundness-gated): broad container-escape flip (needs KL-4 provenance-double-free design + points-to acyclicity), closure-env flip, live-continuation resume (runtime-loan re-establishment), cross-instance/cross-node `&mut` coherence (distributed-execution design).
+
+**2.7.30.7 Forbidden (per CLAUDE.md §Forbidden).** NO non-owning reference carrier (the proven UAF — `PromotedCell` owns its share). NO new `ValueWord`-shape carrier / "serialization helper" / "reference marshal bridge" — references serialize via the parallel `Vec<u64>`+`Vec<NativeKind>` track (§2.7.7) + the identity-map; NO Bool-default; NO raw-pointer-token (the KL-4 double-free path). NO silent broad-scope creep: the flipped-sink set is exactly the two in §2.7.30.3; widening requires a further amendment with its own soundness design.
+
+**2.7.30.8 Prerequisite (hard sequencing).** The `c6-binop-ref` reject (`compiler/expressions/binary_ops.rs:92-102` helper / refuse at :906-928) must WIDEN from a syntactic `Expr::Reference` operand to **reference-TYPED operands** (`make()+1` where `make()->&int`) and land BEFORE the flip — the flip makes `return &x` legal, enlarging the live-at-HEAD c6 segfault surface (`EXIT=139`).

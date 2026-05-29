@@ -132,7 +132,7 @@ Shape supports:
 - **Strings**: `"literal"`, `f"interpolated {expr}"` (styling via f-string format specs; rich content via builder pattern — `Content.text(...)`, `Content.table(...)`, etc. The legacy `c"..."` syntax was retired in W18.3.)
 - **Collections**: arrays `[1, 2, 3]`, objects `{ k: v }`, `HashMap()`, ranges `0..10`, `0..=10`
 - **Modules**: `import`, `export`, `mod`, `use`
-- **RAII**: Automatic scope-based drop via `Drop` trait — no `using`/`defer`
+- **RAII**: Automatic scope-based drop via `Drop` trait — no `using`/`defer`. A value whose reference escapes (returned, or bound at module scope) has its `Drop` deferred from lexical scope to the escaping reference's lifetime — program/module lifetime for module bindings (ADR-006 §2.7.30). Observable Drop-ordering change for escaping `impl Drop` referents.
 - **References**: `&expr`, `&mut expr`
 - **Pipe operator**: `expr |> fn`
 - **Null coalescing**: `expr ?? default`
