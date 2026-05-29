@@ -3877,6 +3877,17 @@ impl BytecodeCompiler {
                     info.type_name.as_deref(),
                     Some("string" | "bool" | "char")
                 )
+                // PB2-fix #8 (`let r = inner()` where `inner -> Result<T>`):
+                // propagate fallible-wrapper type names so `r?` can peel the
+                // success arm in `stamp_unwrapped_success_type`. Narrow to
+                // `Result<...>` / `Option<...>` so this does not regress
+                // other generic types — they retain their existing
+                // `numeric_type` / `schema_id` propagation paths.
+                || info
+                    .type_name
+                    .as_deref()
+                    .map(|s| s.starts_with("Result<") || s.starts_with("Option<"))
+                    .unwrap_or(false)
             {
                 if is_local {
                     self.type_tracker.set_local_type(slot, info.clone());

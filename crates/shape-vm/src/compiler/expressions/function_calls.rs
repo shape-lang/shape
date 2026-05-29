@@ -479,6 +479,21 @@ impl BytecodeCompiler {
                 .schema_registry()
                 .get(name.as_str())
                 .map(|schema| VariableTypeInfo::known(schema.id, name.to_string())),
+            // PB2-fix #8 (`let r = inner()` where `inner -> Result<T>`):
+            // stamp the binding with the baked wrapper-type-name string so
+            // `propagate_assignment_type_to_slot` records it on the slot.
+            // `compile_expr_try_operator::stamp_unwrapped_success_type`
+            // peels the success arm out of that baked name (already handled
+            // by `first_generic_arg_of_baked_name`) and stamps the unwrapped
+            // type onto the downstream `let v = r?` binding. Narrow to the
+            // two fallible-wrapper names — `Result` and `Option` — so this
+            // does not regress other generic returns (`Array<T>` etc. have
+            // their own `is_array_type_name` propagation path).
+            shape_ast::ast::TypeAnnotation::Generic { name, .. }
+                if name == "Result" || name == "Option" =>
+            {
+                Some(VariableTypeInfo::named(ann.to_type_string()))
+            }
             _ => None,
         }
     }
