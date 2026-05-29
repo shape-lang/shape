@@ -87,13 +87,131 @@ impl BytecodeCompiler {
         self.last_expr_numeric_type = None;
         self.last_expr_schema = None;
 
-        let Ok(inner_ty) = self.infer_expr_type(inner) else {
+        // Primary path: full type inference on the `?` operand. Covers
+        // `Ok(literal)?`, `inline_fn()?`, etc. Returns a `Type::Generic`
+        // / `Type::Concrete(Generic)` / `Type::Concrete(Basic("Result<...>"))`
+        // shape from which the success arm can be peeled.
+        let inferred = self.infer_expr_type(inner).ok();
+
+        // PB2-fix #8 (let-binding-on-fn-result-identifier): the runtime
+        // inference engine is module-scope only — it does NOT see
+        // function-local `let r = inner()` bindings. For
+        // `Expr::Identifier(name)` that is a local with a tracker-recorded
+        // `Result<T>` / `Option<T>` type-name, fall back to the tracker.
+        // Same shape as the `BuiltinTypes::is_integer_type_name` / scalar
+        // fallback at `crates/shape-vm/src/compiler/expressions/mod.rs:1372`,
+        // extended to the parameterized fallible wrappers.
+        let inner_ty = inferred.or_else(|| {
+            use shape_ast::ast::TypeAnnotation;
+            use shape_runtime::type_system::Type;
+            if let Expr::Identifier(name, _) = inner {
+                if let Some(type_name) = self.tracker_type_name_for_identifier(name) {
+                    let trimmed = type_name.trim();
+                    if trimmed.starts_with("Result<") || trimmed.starts_with("Option<") {
+                        return Some(Type::Concrete(TypeAnnotation::Basic(
+                            type_name,
+                        )));
+                    }
+                }
+            }
+            None
+        });
+
+        let Some(inner_ty) = inner_ty else {
             return;
         };
-        let Some(success_name) = Self::try_operator_success_type_name(&inner_ty) else {
-            return;
-        };
-        self.stamp_last_expr_from_type_name(&success_name);
+
+        // Primary success-arm extraction.
+        let mut success_name = Self::try_operator_success_type_name(&inner_ty);
+
+        // PB2-fix #6 (`Err("...")?` / `Ok(literal)?` with unresolved
+        // success-arm TypeVar): when the inner `?` operand is a `Result<T,E>`
+        // / `Option<T>` whose success arm is an unresolved type variable
+        // (`Err(string)` has no Ok-arm to constrain T; the engine returns
+        // `Result<TypeVar, string>`), fall back to the enclosing function's
+        // DECLARED return type. By contract, `?` inside a `fn -> Result<T>`
+        // / `fn -> Option<T>` propagates Err/None and unwraps to that T —
+        // so the enclosing return type's success arm IS the unwrapped type
+        // the let-binding will receive on the success leg.
+        if success_name.is_none() && self.success_arm_is_unresolved_typevar(&inner_ty) {
+            if let Some(name) = self.enclosing_function_return_success_name() {
+                success_name = Some(name);
+            }
+        }
+
+        if let Some(name) = success_name {
+            self.stamp_last_expr_from_type_name(&name);
+        }
+    }
+
+    /// Returns `true` when `ty` is a `Result<T, E>` / `Option<T>` /
+    /// `T?` whose SUCCESS arm is an unresolved `Type::Variable`. Used to
+    /// gate the PB2-fix #6 enclosing-fn fallback narrowly — we ONLY
+    /// substitute the enclosing return type when the inner expression
+    /// genuinely failed to resolve its success arm; resolved-but-mismatched
+    /// success types must surface as type errors, not get silently rewritten.
+    fn success_arm_is_unresolved_typevar(
+        &self,
+        ty: &shape_runtime::type_system::Type,
+    ) -> bool {
+        use shape_ast::ast::TypeAnnotation;
+        use shape_runtime::type_system::Type;
+
+        let is_fallible_name = |n: &str| n == "Result" || n == "Option";
+
+        match ty {
+            Type::Generic { base, args } if !args.is_empty() => {
+                let base_name = match base.as_ref() {
+                    Type::Concrete(ann) => ann.as_type_name_str().map(str::to_string),
+                    _ => None,
+                };
+                match base_name {
+                    Some(n) if is_fallible_name(&n) => {
+                        matches!(args[0], Type::Variable(_))
+                    }
+                    _ => false,
+                }
+            }
+            Type::Concrete(TypeAnnotation::Generic { name, args })
+                if is_fallible_name(name) && !args.is_empty() =>
+            {
+                // `args[0]: TypeAnnotation` — the only annotation shape
+                // that round-trips through `to_type_string` as `"unknown"`
+                // is a fully-unresolved variable.
+                args[0].to_type_string() == "unknown"
+            }
+            Type::Concrete(TypeAnnotation::Basic(s)) => {
+                // Baked form: `Result<unknown, string>` etc.
+                Self::first_generic_arg_of_baked_name(s, is_fallible_name)
+                    .as_deref()
+                    == Some("unknown")
+            }
+            _ => false,
+        }
+    }
+
+    /// PB2-fix #6 helper: peel the SUCCESS arm out of the enclosing
+    /// function's declared `return_type` when it is `Result<T>` /
+    /// `Result<T, E>` / `Option<T>`. Returns `None` if there is no current
+    /// function, the function has no declared return type, or its declared
+    /// return type is not a fallible wrapper.
+    fn enclosing_function_return_success_name(&self) -> Option<String> {
+        use shape_ast::ast::TypeAnnotation;
+
+        let func_idx = self.current_function?;
+        let func_name = self.program.functions.get(func_idx).map(|f| f.name.clone())?;
+        let func_def = self.function_defs.get(&func_name)?;
+        let ann = func_def.return_type.as_ref()?;
+        let is_fallible_name = |n: &str| n == "Result" || n == "Option";
+        match ann {
+            TypeAnnotation::Generic { name, args } if is_fallible_name(name) && !args.is_empty() => {
+                Some(args[0].to_type_string())
+            }
+            TypeAnnotation::Basic(s) => {
+                Self::first_generic_arg_of_baked_name(s, is_fallible_name)
+            }
+            _ => None,
+        }
     }
 
     /// Extract the success type-name of a `Result<T, E>` / `Option<T>` /
