@@ -1327,6 +1327,63 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_resolvers(
 /// Project an `Operand` to a scalar `ConcreteType` via the same
 /// constant + pre-pass scalar-slot lookup that
 /// `infer_array_elem_from_operands` uses. Used by the EnumStore Result/
+/// PB1 Wave-1-extension (audit 14a + 14b, 2026-05-29): translate a
+/// function's registered return-type string into a `NativeKind`
+/// suitable for `FrameDescriptor.return_kind`. Today only the
+/// Result/Option discriminator is recognized — the `op_try_unwrap`
+/// None-arm uses this stamp to discriminate Result-returning frames
+/// (LIFT None to `Err(AnyError{OPTION_NONE,...})`) vs Option-returning
+/// frames (propagate None verbatim).
+///
+/// Returns `None` for any other return type (scalar, struct, etc.) —
+/// the frame-descriptor `return_kind` field is left `None`, preserving
+/// the §2.7.5.1 "kind not yet stamped" sentinel. The opcode handler
+/// must treat `None` as "unknown frame return kind" and propagate None
+/// verbatim (pre-PB1 behavior — no behavioral change for non-fallible
+/// fn returns).
+///
+/// Returns `NativeKind::Ptr(HeapKind::Result)` for any return type
+/// whose head is `Result` (e.g. `Result<int>`, `Result<int, string>`).
+/// Returns `NativeKind::Ptr(HeapKind::Option)` for any return type
+/// whose head is `Option`. The match is on the head identifier — the
+/// generic arguments are not parsed here (the discriminator is just
+/// the variant-carrier shape).
+fn classify_fn_return_kind(return_type: &str) -> Option<shape_value::NativeKind> {
+    let trimmed = return_type.trim();
+    let head_end = trimmed
+        .find(|c: char| !c.is_alphanumeric() && c != '_')
+        .unwrap_or(trimmed.len());
+    let head = &trimmed[..head_end];
+    match head {
+        "Result" => Some(shape_value::NativeKind::Ptr(
+            shape_value::HeapKind::Result,
+        )),
+        "Option" => Some(shape_value::NativeKind::Ptr(
+            shape_value::HeapKind::Option,
+        )),
+        _ => None,
+    }
+}
+
+/// PB1 Wave-1-extension companion to `classify_fn_return_kind`:
+/// classify directly off the `TypeAnnotation` AST. Used when the
+/// FunctionDef is available so generic `Result<T>` / `Option<T>` heads
+/// classify correctly (the string-fallback via `as_simple_name()`
+/// misses generic types — `Generic { name, args }` returns `None` from
+/// `as_simple_name`).
+fn classify_type_annotation_kind(
+    return_type: &shape_ast::ast::TypeAnnotation,
+) -> Option<shape_value::NativeKind> {
+    use shape_ast::ast::TypeAnnotation;
+    let head: &str = match return_type {
+        TypeAnnotation::Basic(name) => name.as_str(),
+        TypeAnnotation::Reference(path) => path.as_str(),
+        TypeAnnotation::Generic { name, .. } => name.as_str(),
+        _ => return None,
+    };
+    classify_fn_return_kind(head)
+}
+
 /// Option inference to stamp the inner type of `Ok(v)` / `Err(e)` /
 /// `Some(x)` from the operand at MIR-emission time per ADR-006 §2.7.5.
 ///
@@ -3276,6 +3333,30 @@ impl BytecodeCompiler {
     /// has local slot metadata. Also populates the function's `FrameDescriptor` so
     /// the verifier and executor can use per-slot type info for trusted opcodes.
     pub(super) fn capture_function_local_storage_hints(&mut self, func_idx: usize) {
+        self.capture_function_local_storage_hints_inner(func_idx, None);
+    }
+
+    /// PB1 Wave-1-extension (audit 14a + 14b, 2026-05-29): variant of
+    /// `capture_function_local_storage_hints` that accepts the
+    /// FunctionDef so the Result/Option return-kind can be classified
+    /// from the AST directly. Used by call sites that compile a
+    /// `FunctionDef`; other call sites continue using
+    /// `capture_function_local_storage_hints` (return-kind inference
+    /// then falls back to the registered `function_return_types` map,
+    /// which captures simple-name return types).
+    pub(super) fn capture_function_local_storage_hints_with_def(
+        &mut self,
+        func_idx: usize,
+        func_def: &shape_ast::ast::FunctionDef,
+    ) {
+        self.capture_function_local_storage_hints_inner(func_idx, Some(func_def));
+    }
+
+    fn capture_function_local_storage_hints_inner(
+        &mut self,
+        func_idx: usize,
+        func_def: Option<&shape_ast::ast::FunctionDef>,
+    ) {
         let Some(func) = self.program.functions.get(func_idx) else {
             return;
         };
@@ -3306,21 +3387,58 @@ impl BytecodeCompiler {
             false
         };
 
-        // Populate FrameDescriptor only when every slot's kind is proven —
-        // §2.7.5.1 forbids `NativeKind::Unknown` placeholders in the wire
-        // format. If any slot is unproven, leave the descriptor unset and
-        // fall through to the legacy polymorphic path.
-        let hints: Vec<StorageHint> = match proven_hints {
-            Some(h) => {
-                if !h.is_empty() || has_trusted {
-                    self.program.functions[func_idx].frame_descriptor = Some(
-                        crate::type_tracking::FrameDescriptor::from_slots(h.clone()),
-                    );
-                }
-                h
-            }
-            None => Vec::new(),
+        // PB1 Wave-1-extension (audit 14a + 14b, 2026-05-29): infer the
+        // function's return-value `NativeKind` from its return-type
+        // annotation. Used by `op_try_unwrap`'s None arm to discriminate
+        // Result-returning frames (LIFT None to
+        // `Err(AnyError{OPTION_NONE,...})`) vs Option-returning frames
+        // (propagate None verbatim) — the target-fn-return-type contract
+        // per audit 14b sub-root #1 + supervisor binder. Only the
+        // Result/Option discriminator is stamped here; other return
+        // kinds are left None today (callers can extend as needed).
+        //
+        // Source priority: (1) FunctionDef AST when available (handles
+        // generic `Result<T>` / `Option<T>` types whose head name isn't
+        // captured by `TypeAnnotation::as_simple_name()`). (2)
+        // registered `function_return_types` map fallback for simple
+        // names (and call sites that didn't pass a FunctionDef).
+        let return_kind: Option<shape_value::NativeKind> = func_def
+            .and_then(|fd| fd.return_type.as_ref())
+            .and_then(classify_type_annotation_kind)
+            .or_else(|| {
+                let func_name = self.program.functions[func_idx].name.clone();
+                self.type_tracker
+                    .get_function_return_type(&func_name)
+                    .and_then(|rt| classify_fn_return_kind(rt))
+            });
+
+        // Populate FrameDescriptor when (a) every slot's kind is proven
+        // and we have hints/trusted-opcode coverage, OR (b) we have a
+        // Result/Option return-kind that the `op_try_unwrap` None-arm
+        // depends on. Case (b) preserves the §2.7.5.1 "no Unknown
+        // placeholders" invariant by leaving `slots` empty when the
+        // per-slot proof is incomplete — the descriptor still carries
+        // `return_kind` for the opcode-handler discriminator. Per
+        // ADR-006 §2.7.5.1, `slots: Vec<NativeKind>` is wire-format and
+        // every entry must be proven; an empty vec is the documented
+        // "no proven slot info" signal.
+        let needs_descriptor_for_slots = match &proven_hints {
+            Some(h) => !h.is_empty() || has_trusted,
+            None => false,
         };
+        let needs_descriptor_for_return = return_kind.is_some();
+
+        if needs_descriptor_for_slots || needs_descriptor_for_return {
+            let slots = match &proven_hints {
+                Some(h) if needs_descriptor_for_slots => h.clone(),
+                _ => Vec::new(),
+            };
+            let mut frame = crate::type_tracking::FrameDescriptor::from_slots(slots);
+            frame.return_kind = return_kind;
+            self.program.functions[func_idx].frame_descriptor = Some(frame);
+        }
+
+        let hints: Vec<StorageHint> = proven_hints.unwrap_or_default();
 
         if self.program.function_local_storage_hints.len() <= func_idx {
             self.program

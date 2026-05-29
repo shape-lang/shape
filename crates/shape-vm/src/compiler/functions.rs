@@ -1625,7 +1625,12 @@ impl BytecodeCompiler {
                         // Skip the fallback return below since we've already returned
                         // Update function locals count
                         self.program.functions[func_idx].locals_count = self.next_local;
-                        self.capture_function_local_storage_hints(func_idx);
+                        // PB1 Wave-1-extension: pass FunctionDef so
+                        // Result/Option return-kind stamps onto
+                        // `FrameDescriptor.return_kind` per audit 14a/14b.
+                        self.capture_function_local_storage_hints_with_def(
+                            func_idx, func_def,
+                        );
                         // Finalize blob builder and store completed blob
                         self.finalize_current_blob(func_idx);
                         self.current_blob_builder = saved_blob_builder;
@@ -1752,7 +1757,11 @@ impl BytecodeCompiler {
 
         // Update function locals count
         self.program.functions[func_idx].locals_count = self.next_local;
-        self.capture_function_local_storage_hints(func_idx);
+        // PB1 Wave-1-extension: pass FunctionDef so the Result/Option
+        // return-kind stamps onto `FrameDescriptor.return_kind` per
+        // audit 14a + 14b (used by `op_try_unwrap` None-arm target
+        // discrimination).
+        self.capture_function_local_storage_hints_with_def(func_idx, func_def);
 
         // Finalize blob builder and store completed blob
         self.finalize_current_blob(func_idx);
