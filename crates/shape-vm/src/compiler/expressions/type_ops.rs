@@ -258,6 +258,84 @@ impl BytecodeCompiler {
                 .is_some()
     }
 
+    /// PB4 sub-root #6: route `expr as Target` / `expr as Target?` to a
+    /// user-registered `Into`/`TryInto` impl method when one is in scope.
+    ///
+    /// Returns the function index of the impl's `into`/`tryInto` method
+    /// when dispatch should route through it, or `None` to fall back to
+    /// the primitive `ConvertTo*` / `TryConvertTo*` opcode path.
+    ///
+    /// Guards:
+    /// - Identity casts (`source == target`) stay on the primitive path
+    ///   (no user method to call; primitive is a typed no-op cast).
+    /// - **Recursion guard:** when `current_function` is the very impl
+    ///   method being compiled, dispatch falls through to the primitive
+    ///   opcode. This is how stdlib impl bodies such as
+    ///   `impl TryInto<int> for string as int { method tryInto() { self as int? } }`
+    ///   (`crates/shape-runtime/stdlib-src/core/try_into.shape:63-65`)
+    ///   reach the primitive `TryConvertToInt` opcode without infinite-
+    ///   recursing through `lookup_trait_method_symbol`.
+    ///
+    /// The trait registry's `register_trait_method_symbol` overwrites on
+    /// duplicate keys, so a user fixture that redeclares the stdlib
+    /// `TryInto<int> for string as int` impl shadows the stdlib body —
+    /// the user's `tryInto` function index is what this helper returns,
+    /// and the user's `Ok(7)` body fires at the cast site.
+    fn user_impl_method_for_cast(
+        &self,
+        source_name: &str,
+        target_selector: &str,
+        fallible: bool,
+    ) -> Option<usize> {
+        if source_name == target_selector {
+            return None;
+        }
+        let (trait_name, method_name) = if fallible {
+            ("TryInto", "tryInto")
+        } else {
+            ("Into", "into")
+        };
+        let func_name = self
+            .program
+            .lookup_trait_method_symbol(trait_name, source_name, Some(target_selector), method_name)
+            .map(|s| s.to_string())?;
+        let func_idx = self.find_function(&func_name)?;
+        if self.current_function == Some(func_idx) {
+            return None;
+        }
+        Some(func_idx)
+    }
+
+    /// Emit a single-arg `Call` to a user-impl `into`/`tryInto` method.
+    ///
+    /// The source expression (`self`) must already be on the stack.
+    /// Mirrors `emit_call_ok`'s push-arg-count-then-Call pattern.
+    fn emit_user_impl_cast_call(&mut self, func_idx: usize) {
+        let arg_count = self.program.add_constant(Constant::Int(1));
+        self.emit(Instruction::new(
+            OpCode::PushConst,
+            Some(Operand::Const(arg_count)),
+        ));
+        self.emit(Instruction::new(
+            OpCode::Call,
+            Some(Operand::Function(shape_value::FunctionId(func_idx as u16))),
+        ));
+    }
+
+    /// Resolve the source-expression's type-name for user-impl lookup.
+    /// Returns `None` when the source type cannot be reduced to a single
+    /// canonical type-name (e.g. unresolved type variable).
+    fn cast_source_name(&mut self, expr: &Expr) -> Option<String> {
+        self.static_type_annotation_for_expr(expr)
+            .ok()
+            .and_then(|ann| Self::try_into_name_from_annotation(&ann))
+            .or_else(|| {
+                self.infer_expr_type(expr)
+                    .ok()
+                    .and_then(|ty| Self::try_into_name_from_type(&ty))
+            })
+    }
+
     /// Validate an infallible `as Type` cast and determine the compilation
     /// strategy: direct conversion, Option lifting, or Result lifting.
     ///
@@ -712,6 +790,30 @@ impl BytecodeCompiler {
             // Validate the fallible cast (checks source type + lifting)
             let cast_kind = self.validate_fallible_cast(expr, &target_selector)?;
 
+            // PB4 sub-root #6: when a user `TryInto<Target>` impl is in
+            // scope for the source type (and we are not currently
+            // compiling that impl's body — the stdlib `self as int?`
+            // recursion guard), dispatch through the user method
+            // instead of the primitive `TryConvertTo*` opcode. The
+            // user's body (e.g. `Ok(7)` in
+            // `tools/shape-test/tests/error_handling/try_operator.rs:189`)
+            // would otherwise be unreachable for primitive targets.
+            // Bounded to `CastLiftKind::Direct` (non-wrapped source);
+            // Option/Result lift paths preserve current behaviour.
+            if matches!(cast_kind, Some(CastLiftKind::Direct)) {
+                if let Some(source_name) = self.cast_source_name(expr) {
+                    if let Some(func_idx) = self.user_impl_method_for_cast(
+                        &source_name,
+                        &target_selector,
+                        true,
+                    ) {
+                        self.compile_expr(expr)?;
+                        self.emit_user_impl_cast_call(func_idx);
+                        return Ok(());
+                    }
+                }
+            }
+
             if let Some(try_convert_opcode) =
                 Self::try_convert_opcode_for_primitive(&target_selector)
             {
@@ -789,6 +891,24 @@ impl BytecodeCompiler {
         if let Some(target_selector) = Self::try_into_name_from_annotation(type_annotation) {
             // Validate the infallible cast (checks source type + lifting)
             let cast_kind = self.validate_infallible_cast(expr, &target_selector)?;
+
+            // PB4 sub-root #6: same user-impl routing as the fallible
+            // path — see the `Some(CastLiftKind::Direct)` block in
+            // `validate_fallible_cast` above for the recursion-guard
+            // and stdlib-redeclare semantics.
+            if matches!(cast_kind, Some(CastLiftKind::Direct)) {
+                if let Some(source_name) = self.cast_source_name(expr) {
+                    if let Some(func_idx) = self.user_impl_method_for_cast(
+                        &source_name,
+                        &target_selector,
+                        false,
+                    ) {
+                        self.compile_expr(expr)?;
+                        self.emit_user_impl_cast_call(func_idx);
+                        return Ok(());
+                    }
+                }
+            }
 
             if let Some(convert_opcode) = Self::convert_opcode_for_primitive(&target_selector) {
                 match cast_kind {
