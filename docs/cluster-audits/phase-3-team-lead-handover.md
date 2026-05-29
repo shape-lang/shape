@@ -601,6 +601,26 @@ Full detail: CLAUDE.md + ADR-006 §2.7.x. Operative:
   SURFACE pattern (feature-name + clear "v0.4 / planned" annotation). NOT
   silent no-ops; NOT Bool-default; NOT panic.
 
+## Deleted opcodes — tombstoned bytes (binary-compat preserved)
+
+Per supervisor 2026-05-28 carry-forward binder on c5-B's bitwise
+deletion: the byte slots of deleted opcodes are TOMBSTONED, not
+free. New opcodes take fresh bytes — never reuse a tombstoned slot.
+Reusing a slot would silently collide with pre-deletion content-
+addressed blobs in any distributed-execution / snapshot-resume path.
+
+| Opcode | Byte | Deleted in | Reason |
+|---|---|---|---|
+| `OpCode::BitAnd` | `0x17` | c5-B (`af351c06`, 2026-05-28) | bitwise strict-typing gate — operand type-check moved to compile-time |
+| `OpCode::BitOr` | `0x18` | c5-B | same |
+| `OpCode::BitShl` | `0x19` | c5-B | same |
+| `OpCode::BitShr` | `0x1A` | c5-B | same |
+| `OpCode::BitNot` | `0x1B` | c5-B | same |
+| `OpCode::BitXor` | `0x1C` | c5-B | same |
+
+Future opcode additions: pick fresh bytes from the next-available
+range; cite this table in the addition commit's rationale.
+
 ## Cadence
 
 Autonomous. Surface only on: (1) defection-attractor framing; (2) ADR

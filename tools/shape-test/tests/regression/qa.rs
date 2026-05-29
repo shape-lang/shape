@@ -135,8 +135,16 @@ fn regression_crit_1_nested_property_access() {
 }
 
 /// BUG-CRIT-1: Three-level deep access (NaN-boxing bug with nested TypedObject)
+///
+/// v0.3.3 cleanup (2026-05-29): removed stale `#[should_panic]` marker
+/// per supervisor 2026-05-29 ratify. The bug was closed by JOINT-FIX #2's
+/// chain-emission fix (`2bffe2b6` → merge `2a50aa32`); the test now
+/// correctly returns `42`. Per joint-fix-2 transparency note: the
+/// `#[should_panic]` was originally added because the bug caused pointer-
+/// bits-as-output; with the fix the test correctly asserts on the
+/// happy-path value. `expect_number(42.0)` accepts both `Integer(42)`
+/// and `Number(42.0)` via `extract_number`.
 #[test]
-#[should_panic]
 fn regression_crit_1_deep_nested_access() {
     ShapeTest::new(
         r#"
