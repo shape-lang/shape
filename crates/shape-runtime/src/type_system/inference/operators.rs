@@ -59,6 +59,34 @@ impl TypeInferenceEngine {
         }
     }
 
+    /// Is this type a bare null sentinel — the `None` literal or an explicit
+    /// `null`/`Null` annotation?
+    ///
+    /// The `None` literal infers as `Option<var>` (an Option whose element is a
+    /// still-unresolved type variable, see `infer_literal`). A concrete
+    /// `Option<int>` is NOT a sentinel — its element type is known and equality
+    /// against it should still type-check normally. Used by the `==`/`!=` arm to
+    /// allow `None == x` (null-presence checks) without forcing same-type
+    /// unification, while keeping `1 == "x"` a rejection.
+    fn is_null_sentinel(ty: &Type) -> bool {
+        match ty {
+            // Explicit `null`/`None` annotation.
+            Type::Concrete(TypeAnnotation::Null) => true,
+            // `None` literal → `Option<var>`; only an unresolved element counts.
+            Type::Generic { base, args }
+                if args.len() == 1
+                    && matches!(
+                        base.as_ref(),
+                        Type::Concrete(ann) if ann.as_type_name_str() == Some("Option")
+                    )
+                    && matches!(args[0], Type::Variable(_)) =>
+            {
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Wrap a type in Option<T>
     fn wrap_in_option(ty: Type) -> Type {
         Type::Generic {
@@ -366,6 +394,19 @@ impl TypeInferenceEngine {
             }
 
             BinaryOp::Equal | BinaryOp::NotEqual => {
+                // `null`/`None` is comparable to a value of any type — `None == 0`,
+                // `x == None`, etc. are legitimate null-presence checks that must
+                // not force same-type unification. When exactly one operand is a
+                // bare null sentinel (the `None` literal infers as `Option<var>`,
+                // or an explicit `Null` annotation), skip the `left ~ right`
+                // constraint and yield bool directly.
+                //
+                // This is narrow on purpose: it does NOT relax equality between
+                // two distinct non-null concrete types — `1 == "x"` still pushes
+                // the same-type constraint and rejects.
+                if Self::is_null_sentinel(left) != Self::is_null_sentinel(right) {
+                    return Ok(BuiltinTypes::boolean());
+                }
                 // Equality can work on any types, but they should be the same
                 self.push_constraint_with_origin(left.clone(), right.clone(), span);
                 Ok(BuiltinTypes::boolean())
@@ -634,6 +675,89 @@ mod tests {
         // Verify it's Option<number>
         let unwrapped = TypeInferenceEngine::unwrap_option_type(&wrapped);
         assert!(unwrapped.is_some());
+    }
+
+    #[test]
+    fn test_null_sentinel_eq_skips_same_type_constraint() {
+        // `None == 0` / `0 == None`: the `None` literal infers as `Option<var>`,
+        // a null sentinel. Equality against it must NOT push a `left ~ right`
+        // same-type constraint (null is comparable to any value), and yields bool.
+        for left_is_none in [true, false] {
+            let mut engine = TypeInferenceEngine::new();
+            let none = TypeInferenceEngine::wrap_in_option(engine.fresh_type_var());
+            let (l, r) = if left_is_none {
+                (none, basic("int"))
+            } else {
+                (basic("int"), none)
+            };
+            let before = engine.constraints.len();
+            let inferred = engine
+                .infer_binary_op(&l, &BinaryOp::Equal, &r, Span::DUMMY)
+                .expect("null-sentinel equality should infer");
+            assert_eq!(inferred, BuiltinTypes::boolean());
+            assert_eq!(
+                engine.constraints.len(),
+                before,
+                "null-sentinel `==` must not push a same-type unification constraint \
+                 ({l:?} == {r:?})"
+            );
+        }
+        // Explicit `Null` annotation is also a sentinel.
+        let mut engine = TypeInferenceEngine::new();
+        let before = engine.constraints.len();
+        engine
+            .infer_binary_op(
+                &Type::Concrete(TypeAnnotation::Null),
+                &BinaryOp::NotEqual,
+                &basic("string"),
+                Span::DUMMY,
+            )
+            .expect("explicit-Null inequality should infer");
+        assert_eq!(engine.constraints.len(), before);
+    }
+
+    #[test]
+    fn test_distinct_concrete_eq_still_constrains_and_rejects() {
+        // NOT broad suppression: two distinct non-null concrete types (`1 == "x"`)
+        // must STILL push the same-type unification constraint, which the solver
+        // then rejects. `None == None` also keeps constraining (both sentinels →
+        // condition is false), so `Option<var> ~ Option<var>` is still pushed.
+        {
+            let mut engine = TypeInferenceEngine::new();
+            let before = engine.constraints.len();
+            engine
+                .infer_binary_op(&basic("int"), &BinaryOp::Equal, &basic("string"), Span::DUMMY)
+                .expect("equality should infer");
+            assert_eq!(
+                engine.constraints.len(),
+                before + 1,
+                "`int == string` must still push the same-type constraint"
+            );
+        }
+        {
+            let mut engine = TypeInferenceEngine::new();
+            let none_l = TypeInferenceEngine::wrap_in_option(engine.fresh_type_var());
+            let none_r = TypeInferenceEngine::wrap_in_option(engine.fresh_type_var());
+            let before = engine.constraints.len();
+            engine
+                .infer_binary_op(&none_l, &BinaryOp::Equal, &none_r, Span::DUMMY)
+                .expect("None == None should infer");
+            assert_eq!(
+                engine.constraints.len(),
+                before + 1,
+                "two-sentinel `None == None` must still push the same-type constraint"
+            );
+        }
+
+        // And the genuine mismatch `int ~ string` is actually rejected by the solver.
+        let mut engine = TypeInferenceEngine::new();
+        engine
+            .infer_binary_op(&basic("int"), &BinaryOp::Equal, &basic("string"), Span::DUMMY)
+            .expect("inference itself succeeds; the constraint is what fails");
+        assert!(
+            engine.solver.solve(&mut engine.constraints).is_err(),
+            "`int == string` must still be a type error after the null-eq fix"
+        );
     }
 
     #[test]
