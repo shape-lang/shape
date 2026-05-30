@@ -1283,6 +1283,105 @@ fn test_impl_with_associated_type_binding() {
     }
 }
 
+// ---------------------------------------------------------------
+// Root r7 regression: trait-method value params + return type must
+// be parsed. The trait-method grammar emits value params as
+// `Rule::function_params` and the return type as `Rule::return_type`;
+// before the fix both fell into `_ => {}` in
+// `parse_trait_member_signature`, so every required trait method
+// parsed with 0 value params — driving a spurious
+// `TraitImplArityMismatch { expected: 0, .. }` under Strict mode.
+// ---------------------------------------------------------------
+
+#[test]
+fn test_trait_method_value_params_are_parsed_r7() {
+    let content = r#"
+        trait Scalable {
+            method scale(factor: number) -> Self;
+        }
+    "#;
+    let items = parse_program_helper(content).expect("should parse trait method with value param");
+    match &items[0] {
+        crate::ast::Item::Trait(trait_def, _) => {
+            assert_eq!(trait_def.members.len(), 1);
+            match &trait_def.members[0] {
+                crate::ast::TraitMember::Required(
+                    crate::ast::TraitMemberSignature::Method {
+                        name,
+                        params,
+                        return_type,
+                        ..
+                    },
+                ) => {
+                    assert_eq!(name, "scale");
+                    // Root r7: this MUST be 1, not 0. The arity check in
+                    // type inference compares `params.len()`.
+                    assert_eq!(params.len(), 1, "trait method value params dropped (r7)");
+                    assert_eq!(params[0].name.as_deref(), Some("factor"));
+                    assert!(matches!(
+                        &params[0].type_annotation,
+                        crate::ast::TypeAnnotation::Basic(s) if s == "number"
+                    ));
+                    // Return type must come through `Rule::return_type`, not
+                    // default to `void`.
+                    assert!(matches!(
+                        return_type,
+                        crate::ast::TypeAnnotation::Basic(s) if s == "Self"
+                    ));
+                }
+                other => panic!("Expected Required Method, got {:?}", other),
+            }
+        }
+        other => panic!("Expected Trait, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_trait_method_multiple_value_params_arity_r7() {
+    let content = r#"
+        trait Computable {
+            method compute(a: number, b: number) -> number;
+        }
+    "#;
+    let items = parse_program_helper(content).expect("should parse trait method with two params");
+    match &items[0] {
+        crate::ast::Item::Trait(trait_def, _) => match &trait_def.members[0] {
+            crate::ast::TraitMember::Required(crate::ast::TraitMemberSignature::Method {
+                params,
+                ..
+            }) => {
+                assert_eq!(params.len(), 2, "two-param trait method must parse arity 2 (r7)");
+            }
+            other => panic!("Expected Required Method, got {:?}", other),
+        },
+        other => panic!("Expected Trait, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_trait_method_no_params_is_arity_zero_r7() {
+    // Guard the boundary: a genuinely no-param trait method must still
+    // parse with 0 value params (the fix must not fabricate params).
+    let content = r#"
+        trait Describable {
+            method describe() -> string;
+        }
+    "#;
+    let items = parse_program_helper(content).expect("should parse no-param trait method");
+    match &items[0] {
+        crate::ast::Item::Trait(trait_def, _) => match &trait_def.members[0] {
+            crate::ast::TraitMember::Required(crate::ast::TraitMemberSignature::Method {
+                params,
+                ..
+            }) => {
+                assert_eq!(params.len(), 0, "no-param trait method must stay arity 0");
+            }
+            other => panic!("Expected Required Method, got {:?}", other),
+        },
+        other => panic!("Expected Trait, got {:?}", other),
+    }
+}
+
 #[test]
 fn test_impl_with_multiple_associated_types() {
     let content = r#"
