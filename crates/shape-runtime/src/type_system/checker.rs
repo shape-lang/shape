@@ -390,10 +390,20 @@ impl TypeChecker {
     fn check_item(&mut self, item: &Item) {
         match item {
             Item::Function(func, span) => {
-                // Check for missing return statements
+                // Check for missing return statements. A function with a
+                // non-void `-> Type` annotation must produce a value on every
+                // path. This is satisfied either by explicit `return`
+                // statements that cover all paths (`has_return_statement`) OR by
+                // an implicit return — a trailing block-expression such as
+                // `fn zero() -> int { 0 }` or `fn pick(b) -> int { if b { 1 }
+                // else { 2 } }`. The inference engine type-checks the produced
+                // value against the annotation, so a genuinely-wrong body still
+                // errors there; here we only verify that *some* value is
+                // produced.
                 if func.return_type.is_some()
                     && !matches!(func.return_type.as_ref().unwrap(), TypeAnnotation::Void)
                     && !self.has_return_statement(&func.body)
+                    && !self.block_has_implicit_return(&func.body)
                 {
                     let (line, col) = self.item_span_to_line_col(*span);
                     self.add_error(TypeError::MissingReturn(func.name.clone()), line, col);
@@ -444,6 +454,50 @@ impl TypeChecker {
         }
 
         false
+    }
+
+    /// Check whether a block produces a value via *implicit* return — i.e. its
+    /// trailing statement is a value-producing block-expression rather than an
+    /// explicit `return`.
+    ///
+    /// Implicit returns recognized:
+    /// - A trailing expression statement (`{ 0 }`, `{ match x { .. } }`,
+    ///   `{ loop { break v } }`) — the trailing expression IS the return value.
+    /// - A trailing `if`/`else` where BOTH branches produce a value (each branch
+    ///   recursively satisfies this same rule, or ends in an explicit return).
+    /// - A trailing explicit `return` (so a block mixing early returns with a
+    ///   trailing return is also accepted).
+    ///
+    /// This mirrors how `infer_callable_return_type` treats the final statement
+    /// of an expression-style body as the implicit return. It does NOT validate
+    /// the produced type — that is the inference engine's job — so a wrongly
+    /// typed implicit return still errors via the normal type-mismatch path.
+    fn block_has_implicit_return(&self, stmts: &[Statement]) -> bool {
+        let Some(last) = stmts.last() else {
+            return false;
+        };
+        match last {
+            Statement::Expression(_, _) => true,
+            Statement::Return(_, _) => true,
+            Statement::If(if_stmt, _) => {
+                // Both branches must produce a value for the if-expression to
+                // count as a value-producing implicit return. A bare `if`
+                // without `else` cannot, since the else path falls through.
+                if let Some(else_body) = &if_stmt.else_body {
+                    self.branch_produces_value(&if_stmt.then_body)
+                        && self.branch_produces_value(else_body)
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// A branch produces a value if it ends in an implicit return or contains an
+    /// all-paths explicit return.
+    fn branch_produces_value(&self, stmts: &[Statement]) -> bool {
+        self.block_has_implicit_return(stmts) || self.has_return_statement(stmts)
     }
 
     /// Check for cyclic type aliases
