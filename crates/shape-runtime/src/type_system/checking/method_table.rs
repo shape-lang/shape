@@ -305,6 +305,46 @@ impl MethodTable {
                 vec![func(vec![E::ReceiverParam(0)], num())],
                 E::SelfType,
             ),
+            // `.sort()` / `.sort(cmp)` — PHF-only (handle_sort_v2; no stdlib
+            // .shape def per vec.shape:166), so the mirror-stdlib seed missed
+            // it. Comparator `(T,T)->number`; resolver ignores arity so bare
+            // `.sort()` resolves too. Returns a sorted copy (non-mutating).
+            (
+                "sort",
+                0,
+                vec![func(vec![E::ReceiverParam(0), E::ReceiverParam(0)], num())],
+                E::SelfType,
+            ),
+            // `groupBy<K>(key_fn: (T)=>K) -> Vec<T>` (vec.shape:250) — present
+            // in stdlib but missed by the seed.
+            (
+                "groupBy",
+                1,
+                vec![func(vec![E::ReceiverParam(0)], E::MethodParam(0))],
+                E::SelfType,
+            ),
+            // LINQ / query-DSL + remaining builtin Vec methods — PHF-registry
+            // (array_transform.rs) / Table-Queryable defined, absent from the
+            // stdlib `extend Vec` the seed mirrored. Closure-taking entries
+            // carry sigs so closure params still infer (`a.where(|x| ...)`);
+            // the rest resolve by name (the resolver ignores arity).
+            ("length", 0, vec![], int()),
+            ("distinct", 0, vec![], E::SelfType),
+            ("skip", 0, vec![int()], E::SelfType),
+            ("union", 0, vec![E::SelfType], E::SelfType),
+            ("except", 0, vec![E::SelfType], E::SelfType),
+            ("intersect", 0, vec![E::SelfType], E::SelfType),
+            ("zip", 0, vec![E::SelfType], E::SelfType),
+            ("where", 0, vec![func(vec![E::ReceiverParam(0)], boolean())], E::SelfType),
+            ("select", 1, vec![func(vec![E::ReceiverParam(0)], E::MethodParam(0))], vec_of(E::MethodParam(0))),
+            ("orderBy", 0, vec![func(vec![E::ReceiverParam(0)], num())], E::SelfType),
+            ("skipWhile", 0, vec![func(vec![E::ReceiverParam(0)], boolean())], E::SelfType),
+            ("takeWhile", 0, vec![func(vec![E::ReceiverParam(0)], boolean())], E::SelfType),
+            ("any", 0, vec![func(vec![E::ReceiverParam(0)], boolean())], boolean()),
+            ("all", 0, vec![func(vec![E::ReceiverParam(0)], boolean())], boolean()),
+            ("distinctBy", 0, vec![func(vec![E::ReceiverParam(0)], num())], E::SelfType),
+            ("count", 0, vec![func(vec![E::ReceiverParam(0)], boolean())], int()),
+            ("single", 0, vec![func(vec![E::ReceiverParam(0)], boolean())], E::ReceiverParam(0)),
         ];
         for (name, mtp, params, ret) in vec_methods {
             self.register_user_generic_method("Vec", name, mtp, params, ret, vec![]);
@@ -395,6 +435,9 @@ impl MethodTable {
             ),
             ("graphemeLen", vec![], BuiltinTypes::integer()),
             ("isAscii", vec![], BuiltinTypes::boolean()),
+            ("slice", vec![BuiltinTypes::integer(), BuiltinTypes::integer()], BuiltinTypes::string()),
+            ("toString", vec![], BuiltinTypes::string()),
+            ("join", vec![BuiltinTypes::string()], BuiltinTypes::string()),
         ];
         for (name, params, ret) in str_methods {
             self.register_method("string", name, params, ret, false);
@@ -448,6 +491,25 @@ impl MethodTable {
                     void(),
                 )],
                 void(),
+            ),
+            // PHF-defined HashMap methods absent from the seed's stdlib mirror.
+            ("getOrDefault", 0, vec![E::ReceiverParam(0), E::ReceiverParam(1)], E::ReceiverParam(1)),
+            ("merge", 0, vec![E::SelfType], E::SelfType),
+            (
+                "reduce",
+                1,
+                vec![
+                    func(vec![E::MethodParam(0), E::ReceiverParam(0), E::ReceiverParam(1)], E::MethodParam(0)),
+                    E::MethodParam(0),
+                ],
+                E::MethodParam(0),
+            ),
+            ("toArray", 0, vec![], vec_of(E::ReceiverParam(1))),
+            (
+                "groupBy",
+                1,
+                vec![func(vec![E::ReceiverParam(0), E::ReceiverParam(1)], E::MethodParam(0))],
+                E::SelfType,
             ),
         ];
         for (name, mtp, params, ret) in map_methods {
