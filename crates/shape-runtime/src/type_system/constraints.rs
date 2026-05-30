@@ -321,18 +321,67 @@ impl ConstraintSolver {
         }
     }
 
+    /// Check if two type-annotation names canonicalize to the same script-level
+    /// numeric type.
+    ///
+    /// Width-aware integer aliases (`i8`/`i16`/`i32`/`i64`/`u8`/`u16`/`u32`/`u64`,
+    /// plus `byte`/`char`) all canonicalize to the script type `int`; the
+    /// float-family widths (`f32`/`f64`) canonicalize to `number`. At the
+    /// script-level type system these aliases denote the same logical type, so a
+    /// width-integer (e.g. `i8`) is interchangeable with `int` (and with other
+    /// integer widths) — `let a: i8 = 100` may be returned from a `-> int` fn.
+    ///
+    /// This is the same alias-resolution strategy already used by
+    /// [`Self::has_trait_impl`] (script-alias arm). It deliberately does NOT
+    /// collapse `int` and `number` together: they map to distinct script aliases
+    /// (`int` vs `number`), preserving the int/number separation. Cross-family
+    /// `int -> number` promotion remains the directional concern of
+    /// [`Self::can_numeric_widen`].
+    fn same_canonical_numeric_type(name1: &str, name2: &str) -> bool {
+        match (
+            BuiltinTypes::canonical_script_alias(name1),
+            BuiltinTypes::canonical_script_alias(name2),
+        ) {
+            (Some(a), Some(b)) => a == b,
+            _ => false,
+        }
+    }
+
+    /// Extract the bare name from a `Basic` / `Reference` annotation (the only
+    /// shapes a primitive numeric alias can take). Returns `None` for compound
+    /// annotations.
+    fn annotation_name(ann: &TypeAnnotation) -> Option<&str> {
+        match ann {
+            TypeAnnotation::Basic(n) => Some(n.as_str()),
+            // `TypePath` derefs to its qualified string; numeric aliases are
+            // always single-segment, so this yields e.g. `"i8"`.
+            TypeAnnotation::Reference(p) => Some(&**p),
+            _ => None,
+        }
+    }
+
+    /// Whether two annotations name the same script-level numeric type.
+    fn annotations_same_numeric(ann1: &TypeAnnotation, ann2: &TypeAnnotation) -> bool {
+        match (Self::annotation_name(ann1), Self::annotation_name(ann2)) {
+            (Some(n1), Some(n2)) => Self::same_canonical_numeric_type(n1, n2),
+            _ => false,
+        }
+    }
+
     /// Unify two type annotations
     fn unify_annotations(&self, ann1: &TypeAnnotation, ann2: &TypeAnnotation) -> TypeResult<bool> {
         match (ann1, ann2) {
             // Basic types
-            (TypeAnnotation::Basic(_), TypeAnnotation::Basic(_)) => {
-                Ok(ann1 == ann2 || Self::can_numeric_widen(ann1, ann2))
+            (TypeAnnotation::Basic(_), TypeAnnotation::Basic(_)) => Ok(ann1 == ann2
+                || Self::annotations_same_numeric(ann1, ann2)
+                || Self::can_numeric_widen(ann1, ann2)),
+            (TypeAnnotation::Reference(n1), TypeAnnotation::Reference(n2)) => {
+                Ok(n1 == n2 || Self::annotations_same_numeric(ann1, ann2))
             }
-            (TypeAnnotation::Reference(n1), TypeAnnotation::Reference(n2)) => Ok(n1 == n2),
             (TypeAnnotation::Basic(_), TypeAnnotation::Reference(_))
-            | (TypeAnnotation::Reference(_), TypeAnnotation::Basic(_)) => {
-                Ok(ann1 == ann2 || Self::can_numeric_widen(ann1, ann2))
-            }
+            | (TypeAnnotation::Reference(_), TypeAnnotation::Basic(_)) => Ok(ann1 == ann2
+                || Self::annotations_same_numeric(ann1, ann2)
+                || Self::can_numeric_widen(ann1, ann2)),
 
             // Array types
             (TypeAnnotation::Array(e1), TypeAnnotation::Array(e2)) => {
@@ -1268,6 +1317,55 @@ mod tests {
             Type::Concrete(TypeAnnotation::Basic("int".to_string())),
         )];
         assert!(solver.solve(&mut constraints).is_err());
+    }
+
+    #[test]
+    fn test_width_int_unifies_with_int_both_directions() {
+        // Strict-flip root R5: a width-integer where `int` is expected (and
+        // vice versa) is a VALID program — `let a: i8 = 100` returned from a
+        // `-> int` fn. Both `i8` and `int` canonicalize to the script type
+        // `int`, so they must unify.
+        for (a, b) in [("i8", "int"), ("int", "i8"), ("u16", "int"), ("int", "u64")] {
+            let mut solver = ConstraintSolver::new();
+            let mut constraints = vec![(
+                Type::Concrete(TypeAnnotation::Basic(a.to_string())),
+                Type::Concrete(TypeAnnotation::Basic(b.to_string())),
+            )];
+            assert!(
+                solver.solve(&mut constraints).is_ok(),
+                "{a} should unify with {b} (both canonicalize to `int`)"
+            );
+        }
+    }
+
+    #[test]
+    fn test_distinct_width_ints_unify() {
+        // Different integer widths share the `int` script type, so `i8 + i16`
+        // (a mixed-width add) must type-check.
+        let mut solver = ConstraintSolver::new();
+        let mut constraints = vec![(
+            Type::Concrete(TypeAnnotation::Basic("i8".to_string())),
+            Type::Concrete(TypeAnnotation::Basic("i16".to_string())),
+        )];
+        assert!(solver.solve(&mut constraints).is_ok());
+    }
+
+    #[test]
+    fn test_width_int_does_not_collapse_into_number_or_bool() {
+        // The R5 fix must NOT collapse `int` and `number` (they stay distinct
+        // script types), and must never make an integer unify with `bool`.
+        // `number → int` (lossy) must still fail; `bool` vs `i8` must fail.
+        for (a, b) in [("number", "i8"), ("f64", "i32"), ("bool", "i8"), ("i8", "bool")] {
+            let mut solver = ConstraintSolver::new();
+            let mut constraints = vec![(
+                Type::Concrete(TypeAnnotation::Basic(a.to_string())),
+                Type::Concrete(TypeAnnotation::Basic(b.to_string())),
+            )];
+            assert!(
+                solver.solve(&mut constraints).is_err(),
+                "{a} must NOT unify with {b}"
+            );
+        }
     }
 
     #[test]
