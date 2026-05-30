@@ -414,6 +414,20 @@ impl TypeChecker {
 
     /// Check if statements contain a return statement
     fn has_return_statement(&self, stmts: &[Statement]) -> bool {
+        // A value-producing TAIL EXPRESSION is the implicit return in Shape's
+        // tail-expression semantics: `fn f() -> int { 42 }`,
+        // `fn g(c: Color) -> string { match c { ... } }`, and
+        // `fn h(b: bool) -> int { if b { 1 } else { 2 } }` all return a value via
+        // their final expression — there is no explicit `return` keyword. The
+        // last statement being a `Statement::Expression` (or a value-yielding
+        // tail `if`/`match`) therefore satisfies the requirement. Type agreement
+        // between the tail expression and the declared return type is enforced
+        // separately by inference; this check only asks "is there a value-
+        // producing terminal at all".
+        if Self::block_yields_tail_value(stmts) {
+            return true;
+        }
+
         for stmt in stmts {
             match stmt {
                 Statement::Return(_, _) => return true,
@@ -444,6 +458,88 @@ impl TypeChecker {
         }
 
         false
+    }
+
+    /// True when the final statement of a function body produces a value (the
+    /// implicit tail return). Recurses through tail `if`/`match`/block so that
+    /// `if cond { a } else { b }` and `match x { ... }` count when every arm
+    /// yields a value via its own tail expression.
+    fn block_yields_tail_value(stmts: &[Statement]) -> bool {
+        let Some(last) = stmts.last() else {
+            return false;
+        };
+        match last {
+            // An explicit `return` is a value-producing terminal.
+            Statement::Return(_, _) => true,
+            // A bare tail expression is the implicit return value.
+            Statement::Expression(expr, _) => Self::expr_yields_tail_value(expr),
+            _ => false,
+        }
+    }
+
+    /// True when the items of a block expression (`{ ... }`) end in a
+    /// value-producing tail. The trailing `BlockItem::Expression` carries the
+    /// block's value; an explicit `return` also terminates with a value.
+    fn block_items_yield_tail_value(items: &[shape_ast::ast::BlockItem]) -> bool {
+        use shape_ast::ast::BlockItem;
+        match items.last() {
+            Some(BlockItem::Expression(expr)) => Self::expr_yields_tail_value(expr),
+            Some(BlockItem::Statement(Statement::Return(_, _))) => true,
+            Some(BlockItem::Statement(Statement::Expression(expr, _))) => {
+                Self::expr_yields_tail_value(expr)
+            }
+            _ => false,
+        }
+    }
+
+    /// True when an expression in tail position produces a value for the
+    /// enclosing function's implicit return. Plain value expressions (literals,
+    /// calls, arithmetic, identifiers, ...) always do; tail `if`/`match`/`block`
+    /// produce a value only when every arm/branch does.
+    fn expr_yields_tail_value(expr: &Expr) -> bool {
+        match expr {
+            // `if` in tail position yields a value only if BOTH branches do; a
+            // one-armed `if` (no `else`) cannot be the function's value. The
+            // parser emits `Expr::Conditional`; a desugar pass may also produce
+            // `Expr::If` — handle both shapes.
+            Expr::Conditional {
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                let Some(else_expr) = else_expr else {
+                    return false;
+                };
+                Self::expr_yields_tail_value(then_expr) && Self::expr_yields_tail_value(else_expr)
+            }
+            Expr::If(if_expr, _) => {
+                let Some(else_branch) = &if_expr.else_branch else {
+                    return false;
+                };
+                Self::expr_yields_tail_value(&if_expr.then_branch)
+                    && Self::expr_yields_tail_value(else_branch)
+            }
+            // `match` yields a value when every arm's body yields one. An empty
+            // match (no arms) cannot produce a value.
+            Expr::Match(match_expr, _) => {
+                !match_expr.arms.is_empty()
+                    && match_expr
+                        .arms
+                        .iter()
+                        .all(|arm| Self::expr_yields_tail_value(&arm.body))
+            }
+            // A nested block yields a value when its own tail does.
+            Expr::Block(block_expr, _) => Self::block_items_yield_tail_value(&block_expr.items),
+            // An explicit `return` expression always produces a value-terminal.
+            Expr::Return(_, _) => true,
+            // `Unit` (void) is not a value for a non-void return type. A tail
+            // `if` whose synthesized else is Unit must NOT satisfy the check.
+            Expr::Unit(_) => false,
+            // Any other expression in tail position is a value (literal, call,
+            // binary op, identifier, constructor, ...). Type correctness against
+            // the declared return type is checked by inference, not here.
+            _ => true,
+        }
     }
 
     /// Check for cyclic type aliases

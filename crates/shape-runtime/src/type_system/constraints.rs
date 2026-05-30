@@ -329,9 +329,20 @@ impl ConstraintSolver {
                 Ok(ann1 == ann2 || Self::can_numeric_widen(ann1, ann2))
             }
             (TypeAnnotation::Reference(n1), TypeAnnotation::Reference(n2)) => Ok(n1 == n2),
+            // A `Basic` name and a `Reference` path denote the same nominal type
+            // when their names agree — `Color` (resolved enum) is sometimes carried
+            // as `Basic("Color")` and sometimes as `Reference(TypePath{"Color"})`
+            // depending on where the annotation originated (declaration site vs.
+            // call site). Compare by nominal name, not by the variant tag, so a
+            // type unifies with an identical copy of itself. Distinct names (e.g.
+            // `Basic("Color")` vs `Reference("Dir")`) still correctly fail.
             (TypeAnnotation::Basic(_), TypeAnnotation::Reference(_))
             | (TypeAnnotation::Reference(_), TypeAnnotation::Basic(_)) => {
-                Ok(ann1 == ann2 || Self::can_numeric_widen(ann1, ann2))
+                let names_match = matches!(
+                    (ann1.as_type_name_str(), ann2.as_type_name_str()),
+                    (Some(n1), Some(n2)) if n1 == n2
+                );
+                Ok(names_match || Self::can_numeric_widen(ann1, ann2))
             }
 
             // Array types
