@@ -167,6 +167,292 @@ impl MethodTable {
             BuiltinTypes::string(),
             false,
         );
+
+        // Builtin collection methods (Vec / string / HashMap).
+        //
+        // STRICT-FLIP (v0.3.3, collection-dispatch root #1): the strict
+        // type-checker runs over the user program only — it never sees the
+        // stdlib `extend Vec<T>` / `extend string` / `extend HashMap<K,V>`
+        // blocks that normally register these signatures at inference time
+        // (compiler_impl_reference_model.rs builds `analysis_program` from the
+        // user file, not the prelude). Without seeding, every valid collection
+        // method call (`[1,2,3].map(...)`, `"hi".split(...)`, `m.get(k)`) had
+        // `resolve_method_call` return `None`, fell through to the
+        // HasField / HasMethod fallback, and surfaced a spurious
+        // "cannot have fields" / "Method 'X' not found on type 'Vec'/'string'"
+        // — the #1 strict false-positive class.
+        //
+        // The runtime dispatches these correctly through shape-vm's PHF method
+        // registry; the checker's MethodTable was simply incomplete. The seed
+        // below mirrors the canonical stdlib `.shape` definitions
+        // (stdlib-src/core/{vec,string_methods,hashmap_methods}.shape) so the
+        // checker resolves them. A method that is genuinely NOT a stdlib
+        // collection method (e.g. `[1].frobnicate()`) is still absent here and
+        // still errors — this is a correct resolution, not a blanket suppress.
+        self.register_builtin_collection_methods();
+    }
+
+    /// Seed the canonical builtin collection-method signatures for the strict
+    /// type-checker. Mirrors stdlib `extend Vec<T>` / `extend string` /
+    /// `extend HashMap<K,V>`. See `register_builtin_methods` for why this is
+    /// needed (the strict analysis path doesn't load the stdlib prelude).
+    fn register_builtin_collection_methods(&mut self) {
+        use TypeParamExpr as E;
+
+        let func = |params: Vec<E>, returns: E| E::Function {
+            params,
+            returns: Box::new(returns),
+        };
+        let vec_of = |arg: E| E::GenericContainer {
+            name: "Vec".to_string(),
+            args: vec![arg],
+        };
+        let opt_of = |arg: E| E::GenericContainer {
+            name: "Option".to_string(),
+            args: vec![arg],
+        };
+        let hashmap_of = |k: E, v: E| E::GenericContainer {
+            name: "HashMap".to_string(),
+            args: vec![k, v],
+        };
+        let int = || E::Concrete(BuiltinTypes::integer());
+        let num = || E::Concrete(BuiltinTypes::number());
+        let boolean = || E::Concrete(BuiltinTypes::boolean());
+        let string = || E::Concrete(BuiltinTypes::string());
+        let void = || E::Concrete(Type::Concrete(TypeAnnotation::Basic("void".into())));
+
+        // ---- Vec<T> (receiver param 0 = T) -----------------------------
+        // (name, method_type_params, param_types, return_type)
+        let vec_methods: Vec<(&str, usize, Vec<E>, E)> = vec![
+            ("first", 0, vec![], E::ReceiverParam(0)),
+            ("last", 0, vec![], E::ReceiverParam(0)),
+            ("push", 0, vec![E::ReceiverParam(0)], void()),
+            ("pop", 0, vec![], E::ReceiverParam(0)),
+            ("reverse", 0, vec![], E::SelfType),
+            ("clone", 0, vec![], E::SelfType),
+            (
+                "filter",
+                0,
+                vec![func(vec![E::ReceiverParam(0)], boolean())],
+                E::SelfType,
+            ),
+            (
+                "map",
+                1,
+                vec![func(vec![E::ReceiverParam(0)], E::MethodParam(0))],
+                vec_of(E::MethodParam(0)),
+            ),
+            (
+                "reduce",
+                1,
+                vec![
+                    func(
+                        vec![E::MethodParam(0), E::ReceiverParam(0)],
+                        E::MethodParam(0),
+                    ),
+                    E::MethodParam(0),
+                ],
+                E::MethodParam(0),
+            ),
+            (
+                "find",
+                0,
+                vec![func(vec![E::ReceiverParam(0)], boolean())],
+                E::ReceiverParam(0),
+            ),
+            (
+                "findIndex",
+                0,
+                vec![func(vec![E::ReceiverParam(0)], boolean())],
+                int(),
+            ),
+            (
+                "forEach",
+                0,
+                vec![func(vec![E::ReceiverParam(0)], void())],
+                void(),
+            ),
+            (
+                "some",
+                0,
+                vec![func(vec![E::ReceiverParam(0)], boolean())],
+                boolean(),
+            ),
+            (
+                "every",
+                0,
+                vec![func(vec![E::ReceiverParam(0)], boolean())],
+                boolean(),
+            ),
+            ("join", 0, vec![string()], string()),
+            ("slice", 0, vec![int(), int()], E::SelfType),
+            ("take", 0, vec![int()], E::SelfType),
+            ("drop", 0, vec![int()], E::SelfType),
+            ("flatten", 0, vec![], E::SelfType),
+            ("unique", 0, vec![], E::SelfType),
+            ("concat", 0, vec![E::SelfType], E::SelfType),
+            ("indexOf", 0, vec![E::ReceiverParam(0)], int()),
+            ("includes", 0, vec![E::ReceiverParam(0)], boolean()),
+            (
+                "flatMap",
+                1,
+                vec![func(vec![E::ReceiverParam(0)], vec_of(E::MethodParam(0)))],
+                vec_of(E::MethodParam(0)),
+            ),
+            (
+                "sortBy",
+                0,
+                vec![func(vec![E::ReceiverParam(0)], num())],
+                E::SelfType,
+            ),
+        ];
+        for (name, mtp, params, ret) in vec_methods {
+            self.register_user_generic_method("Vec", name, mtp, params, ret, vec![]);
+        }
+        // Numeric-vector aggregates (`impl NumericVec for Vec`). Receiver-param
+        // generic so they register in the generic table alongside the rest.
+        let vec_numeric: Vec<(&str, Vec<E>, E)> = vec![
+            ("sum", vec![], num()),
+            ("avg", vec![], num()),
+            ("mean", vec![], num()),
+            ("min", vec![], num()),
+            ("max", vec![], num()),
+            ("std", vec![], num()),
+            ("variance", vec![], num()),
+            ("dot", vec![vec_of(num())], num()),
+            ("norm", vec![], num()),
+            ("normalize", vec![], vec_of(num())),
+            ("cumsum", vec![], vec_of(num())),
+            ("diff", vec![], vec_of(num())),
+            ("abs", vec![], vec_of(num())),
+        ];
+        for (name, params, ret) in vec_numeric {
+            self.register_user_generic_method("Vec", name, 0, params, ret, vec![]);
+        }
+
+        // ---- string (monomorphic) --------------------------------------
+        let str_methods: Vec<(&str, Vec<Type>, Type)> = vec![
+            ("len", vec![], BuiltinTypes::integer()),
+            ("isEmpty", vec![], BuiltinTypes::boolean()),
+            ("toLowerCase", vec![], BuiltinTypes::string()),
+            ("toUpperCase", vec![], BuiltinTypes::string()),
+            ("trim", vec![], BuiltinTypes::string()),
+            (
+                "split",
+                vec![BuiltinTypes::string()],
+                Type::Concrete(TypeAnnotation::Array(Box::new(TypeAnnotation::Basic(
+                    "string".into(),
+                )))),
+            ),
+            ("contains", vec![BuiltinTypes::string()], BuiltinTypes::boolean()),
+            (
+                "startsWith",
+                vec![BuiltinTypes::string()],
+                BuiltinTypes::boolean(),
+            ),
+            (
+                "endsWith",
+                vec![BuiltinTypes::string()],
+                BuiltinTypes::boolean(),
+            ),
+            (
+                "replace",
+                vec![BuiltinTypes::string(), BuiltinTypes::string()],
+                BuiltinTypes::string(),
+            ),
+            ("trimStart", vec![], BuiltinTypes::string()),
+            ("trimEnd", vec![], BuiltinTypes::string()),
+            ("toNumber", vec![], BuiltinTypes::number()),
+            ("toBool", vec![], BuiltinTypes::boolean()),
+            (
+                "chars",
+                vec![],
+                Type::Concrete(TypeAnnotation::Array(Box::new(TypeAnnotation::Basic(
+                    "string".into(),
+                )))),
+            ),
+            ("padStart", vec![BuiltinTypes::integer()], BuiltinTypes::string()),
+            ("padEnd", vec![BuiltinTypes::integer()], BuiltinTypes::string()),
+            ("repeat", vec![BuiltinTypes::integer()], BuiltinTypes::string()),
+            ("charAt", vec![BuiltinTypes::integer()], BuiltinTypes::string()),
+            ("reverse", vec![], BuiltinTypes::string()),
+            ("indexOf", vec![BuiltinTypes::string()], BuiltinTypes::integer()),
+            ("isDigit", vec![], BuiltinTypes::boolean()),
+            ("isAlpha", vec![], BuiltinTypes::boolean()),
+            (
+                "codePointAt",
+                vec![BuiltinTypes::integer()],
+                BuiltinTypes::integer(),
+            ),
+            ("substring", vec![BuiltinTypes::integer()], BuiltinTypes::string()),
+            ("normalize", vec![BuiltinTypes::string()], BuiltinTypes::string()),
+            (
+                "graphemes",
+                vec![],
+                Type::Concrete(TypeAnnotation::Array(Box::new(TypeAnnotation::Basic(
+                    "string".into(),
+                )))),
+            ),
+            ("graphemeLen", vec![], BuiltinTypes::integer()),
+            ("isAscii", vec![], BuiltinTypes::boolean()),
+        ];
+        for (name, params, ret) in str_methods {
+            self.register_method("string", name, params, ret, false);
+        }
+
+        // ---- HashMap<K,V> (receiver param 0 = K, 1 = V) ----------------
+        let map_methods: Vec<(&str, usize, Vec<E>, E)> = vec![
+            ("get", 0, vec![E::ReceiverParam(0)], opt_of(E::ReceiverParam(1))),
+            (
+                "set",
+                0,
+                vec![E::ReceiverParam(0), E::ReceiverParam(1)],
+                hashmap_of(E::ReceiverParam(0), E::ReceiverParam(1)),
+            ),
+            ("has", 0, vec![E::ReceiverParam(0)], boolean()),
+            ("includes", 0, vec![E::ReceiverParam(0)], boolean()),
+            (
+                "delete",
+                0,
+                vec![E::ReceiverParam(0)],
+                hashmap_of(E::ReceiverParam(0), E::ReceiverParam(1)),
+            ),
+            ("keys", 0, vec![], vec_of(E::ReceiverParam(0))),
+            ("values", 0, vec![], vec_of(E::ReceiverParam(1))),
+            ("entries", 0, vec![], vec_of(vec_of(E::ReceiverParam(0)))),
+            ("len", 0, vec![], int()),
+            ("isEmpty", 0, vec![], boolean()),
+            (
+                "map",
+                1,
+                vec![func(
+                    vec![E::ReceiverParam(0), E::ReceiverParam(1)],
+                    E::MethodParam(0),
+                )],
+                hashmap_of(E::ReceiverParam(0), E::MethodParam(0)),
+            ),
+            (
+                "filter",
+                0,
+                vec![func(
+                    vec![E::ReceiverParam(0), E::ReceiverParam(1)],
+                    boolean(),
+                )],
+                E::SelfType,
+            ),
+            (
+                "forEach",
+                0,
+                vec![func(
+                    vec![E::ReceiverParam(0), E::ReceiverParam(1)],
+                    void(),
+                )],
+                void(),
+            ),
+        ];
+        for (name, mtp, params, ret) in map_methods {
+            self.register_user_generic_method("HashMap", name, mtp, params, ret, vec![]);
+        }
     }
 
     /// Register generic builtin methods for types with type parameters.

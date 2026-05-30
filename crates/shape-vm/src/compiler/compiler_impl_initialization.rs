@@ -122,7 +122,7 @@ impl BytecodeCompiler {
             comptime_context_struct_defs: HashMap::new(),
             extension_registry: None,
             comptime_fields: HashMap::new(),
-            type_diagnostic_mode: TypeDiagnosticMode::ReliableOnly,
+            type_diagnostic_mode: TypeDiagnosticMode::Strict, // STRICT-FLIP (fix-then-flip branch): ReliableOnly→Strict, merges when corpus clears FPs
             compile_diagnostic_mode: CompileDiagnosticMode::FailFast,
             comptime_mode: false,
             removed_functions: HashSet::new(),
@@ -860,19 +860,10 @@ impl BytecodeCompiler {
         ShapeError::MultiError(mapped)
     }
 
-    pub(super) fn should_emit_type_diagnostic(error: &TypeError) -> bool {
-        matches!(
-            error,
-            TypeError::UnknownProperty(_, _)
-            // J-CT.1: comptime-trait diagnostics are emitted in the default
-            // `ReliableOnly` mode. Both are pure rules with no false-positive
-            // surface (the gate fires only on `comptime impl`-marked methods
-            // and the alignment check only on declared trait/impl pairs), so
-            // failing the compile is the right behavior — matches the audit's
-            // §5(d) "compile-time semantic error" expectation.
-            | TypeError::ComptimeMethodCallOutsideComptime { .. }
-            | TypeError::ComptimeImplTraitMismatch { .. }
-        )
+    pub(super) fn should_emit_type_diagnostic(_error: &TypeError) -> bool {
+        // STRICT-FLIP (fix-then-flip branch): allowlist dropped — emit every
+        // type error (fail-closed). Neutralizes any residual ReliableOnly path.
+        true
     }
 
     pub(super) fn collect_program_functions(
