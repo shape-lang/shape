@@ -420,10 +420,21 @@ impl ConstraintSolver {
             (TypeAnnotation::Reference(n1), TypeAnnotation::Reference(n2)) => {
                 Ok(n1 == n2 || Self::annotations_same_numeric(ann1, ann2))
             }
+            // Combined (merge r3 enum-nominal + r5 width-int): a `Basic` name
+            // and a `Reference` path denote the same nominal type when their
+            // names agree (`Color` carried as Basic at decl vs Reference at call
+            // site); OR they are the same numeric script (`i8` ~ `int`); OR a
+            // legal numeric-widen. Distinct names (`Color` vs `Dir`) still fail.
             (TypeAnnotation::Basic(_), TypeAnnotation::Reference(_))
-            | (TypeAnnotation::Reference(_), TypeAnnotation::Basic(_)) => Ok(ann1 == ann2
-                || Self::annotations_same_numeric(ann1, ann2)
-                || Self::can_numeric_widen(ann1, ann2)),
+            | (TypeAnnotation::Reference(_), TypeAnnotation::Basic(_)) => {
+                let names_match = matches!(
+                    (ann1.as_type_name_str(), ann2.as_type_name_str()),
+                    (Some(n1), Some(n2)) if n1 == n2
+                );
+                Ok(names_match
+                    || Self::annotations_same_numeric(ann1, ann2)
+                    || Self::can_numeric_widen(ann1, ann2))
+            }
 
             // Array types
             (TypeAnnotation::Array(e1), TypeAnnotation::Array(e2)) => {
