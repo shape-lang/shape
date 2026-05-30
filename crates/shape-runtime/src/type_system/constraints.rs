@@ -43,6 +43,26 @@ fn is_array_or_vec_base(base: &Type) -> bool {
     }
 }
 
+/// Collapse a degenerate `Union` to a single member when all its members are
+/// structurally equal (which includes the single-element `Union([T])` case).
+///
+/// Match arms whose branches all yield the same type combine into a
+/// `Union([T])` / `Union([T, T, ...])` during inference (e.g. `match { Some(v)
+/// => v, None => 0 }` where both arms are `int`). Such a union is just `T`, but
+/// the trait-bound check would otherwise stringify it (`Union([Basic("int")])`)
+/// and fail `Numeric`. A genuinely heterogeneous union (`Union([int, string])`)
+/// is left intact and continues to fail single-type trait bounds correctly.
+fn collapse_degenerate_union(ann: &TypeAnnotation) -> &TypeAnnotation {
+    if let TypeAnnotation::Union(members) = ann {
+        if let Some(first) = members.first() {
+            if members.iter().all(|m| m == first) {
+                return first;
+            }
+        }
+    }
+    ann
+}
+
 pub struct ConstraintSolver {
     /// Type unifier
     unifier: Unifier,
@@ -965,6 +985,10 @@ impl ConstraintSolver {
                         })
                     }
                     Type::Concrete(ann) => {
+                        // A match-accumulate union whose arms all yield the same
+                        // type (`Union([int])`) is just that type — collapse it
+                        // before extracting the name so `Numeric`/etc. resolve.
+                        let ann = collapse_degenerate_union(ann);
                         let type_name = match ann {
                             TypeAnnotation::Basic(n) => n.clone(),
                             TypeAnnotation::Reference(n) => n.to_string(),
@@ -1784,6 +1808,65 @@ mod tests {
             }
             other => panic!("Expected TraitBoundViolation, got: {:?}", other),
         }
+    }
+
+    /// A degenerate `Union([T])` (all arms of a match yield the same type)
+    /// collapses to `T` and satisfies the trait `T` implements. Mirrors
+    /// `match { Some(v) => v, None => 0 }` inferring `Union([int])`.
+    #[test]
+    fn test_implements_trait_single_member_union_collapses() {
+        let mut solver = ConstraintSolver::new();
+        let mut impls = std::collections::HashSet::new();
+        impls.insert("Numeric::number".to_string());
+        solver.set_trait_impls(impls);
+
+        let mut tvgen = TypeVarGen::new();
+        let bound_var = fresh_var(&mut tvgen);
+        let mut constraints = vec![(
+            Type::Concrete(TypeAnnotation::Union(vec![TypeAnnotation::Basic(
+                "number".to_string(),
+            )])),
+            Type::Constrained {
+                var: bound_var,
+                constraint: Box::new(TypeConstraint::ImplementsTrait {
+                    trait_name: "Numeric".to_string(),
+                }),
+            },
+        )];
+        assert!(
+            solver.solve(&mut constraints).is_ok(),
+            "Union([number]) should collapse to number and satisfy Numeric"
+        );
+    }
+
+    /// NOT-BROAD-SUPPRESSION: a genuinely heterogeneous union is left intact
+    /// and must still FAIL a single-type trait bound. The collapse only fires
+    /// when every member is structurally equal.
+    #[test]
+    fn test_implements_trait_heterogeneous_union_still_violates() {
+        let mut solver = ConstraintSolver::new();
+        let mut impls = std::collections::HashSet::new();
+        impls.insert("Numeric::number".to_string());
+        solver.set_trait_impls(impls);
+
+        let mut tvgen = TypeVarGen::new();
+        let bound_var = fresh_var(&mut tvgen);
+        let mut constraints = vec![(
+            Type::Concrete(TypeAnnotation::Union(vec![
+                TypeAnnotation::Basic("number".to_string()),
+                TypeAnnotation::Basic("string".to_string()),
+            ])),
+            Type::Constrained {
+                var: bound_var,
+                constraint: Box::new(TypeConstraint::ImplementsTrait {
+                    trait_name: "Numeric".to_string(),
+                }),
+            },
+        )];
+        assert!(
+            solver.solve(&mut constraints).is_err(),
+            "Union([number, string]) is heterogeneous and must NOT satisfy Numeric"
+        );
     }
 
     #[test]
