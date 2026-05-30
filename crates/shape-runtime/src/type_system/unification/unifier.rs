@@ -238,7 +238,17 @@ impl Unifier {
                 Ok(())
             }
             (Type::Concrete(ann1), Type::Concrete(ann2)) => {
-                if crate::type_system::unification::annotations_equal(ann1, ann2) {
+                // `AnyError` is the top of the error lattice (the default `E` for
+                // bare `Ok(..)`/`?`); it unifies with any concrete error type.
+                // Bounded to the `AnyError` name so two distinct concrete named
+                // error types still mismatch. Mirrors ConstraintSolver::is_any_error.
+                let is_any_error = |ann: &TypeAnnotation| {
+                    matches!(ann.as_type_name_str(), Some("AnyError"))
+                };
+                if crate::type_system::unification::annotations_equal(ann1, ann2)
+                    || is_any_error(ann1)
+                    || is_any_error(ann2)
+                {
                     Ok(())
                 } else {
                     Err(())

@@ -210,6 +210,13 @@ impl ConstraintSolver {
                 } else if Self::can_numeric_widen(ann1, ann2) {
                     // Implicit numeric promotion (int → number/float)
                     Ok(())
+                } else if Self::is_any_error(ann1) || Self::is_any_error(ann2) {
+                    // `AnyError` is the top of the error lattice: the default `E`
+                    // for bare `Ok(..)`/`?`. It unifies with any concrete error
+                    // type (e.g. `Result<int, AnyError> ~ Result<T, string>`).
+                    // Bounded to `AnyError` so two distinct concrete named error
+                    // types still mismatch.
+                    Ok(())
                 } else {
                     Err(TypeError::TypeMismatch(
                         format!("{:?}", ann1),
@@ -402,6 +409,18 @@ impl ConstraintSolver {
         }
     }
 
+    /// Whether an annotation is the `AnyError` top of the error lattice.
+    ///
+    /// `AnyError` is the default error type the compiler stamps for bare
+    /// `Ok(..)`/`?` (env/mod.rs and operators.rs) when no concrete error type
+    /// is in scope. It is the top of the error sub-lattice: it unifies with any
+    /// concrete error type in the error-arg position of `Result<T, E>`. This is
+    /// bounded to the `AnyError` name specifically — two *distinct concrete*
+    /// named error types still mismatch (no broad suppression).
+    fn is_any_error(ann: &TypeAnnotation) -> bool {
+        matches!(Self::annotation_name(ann), Some("AnyError"))
+    }
+
     /// Whether two annotations name the same script-level numeric type.
     fn annotations_same_numeric(ann1: &TypeAnnotation, ann2: &TypeAnnotation) -> bool {
         match (Self::annotation_name(ann1), Self::annotation_name(ann2)) {
@@ -412,6 +431,12 @@ impl ConstraintSolver {
 
     /// Unify two type annotations
     fn unify_annotations(&self, ann1: &TypeAnnotation, ann2: &TypeAnnotation) -> TypeResult<bool> {
+        // `AnyError` is the top of the error lattice (see `is_any_error`): it
+        // unifies with any type in the error-arg position. Bounded to the
+        // `AnyError` name so two distinct concrete named error types still fail.
+        if Self::is_any_error(ann1) || Self::is_any_error(ann2) {
+            return Ok(true);
+        }
         match (ann1, ann2) {
             // Basic types
             (TypeAnnotation::Basic(_), TypeAnnotation::Basic(_)) => Ok(ann1 == ann2
@@ -1792,6 +1817,67 @@ mod tests {
         assert!(
             solver.solve(&mut constraints).is_ok(),
             "T resolved to number which implements Sortable"
+        );
+    }
+
+    /// Build `Result<ok, err>` as a Generic with a Result base.
+    fn make_result(ok: TypeAnnotation, err: TypeAnnotation) -> Type {
+        Type::Generic {
+            base: Box::new(Type::Concrete(TypeAnnotation::Reference(
+                shape_ast::ast::TypePath::simple("Result"),
+            ))),
+            args: vec![Type::Concrete(ok), Type::Concrete(err)],
+        }
+    }
+
+    #[test]
+    fn any_error_is_top_of_error_lattice() {
+        // `Result<int, AnyError> ~ Result<T, string>`: AnyError is the default
+        // error type for bare Ok(..)/? and must unify with any concrete error
+        // type in the error-arg position.
+        let mut solver = ConstraintSolver::new();
+        let mut tvgen = TypeVarGen::new();
+        let t = fresh_var(&mut tvgen);
+
+        let mut constraints = vec![(
+            make_result(
+                TypeAnnotation::Basic("int".to_string()),
+                TypeAnnotation::Reference(shape_ast::ast::TypePath::simple("AnyError")),
+            ),
+            Type::Generic {
+                base: Box::new(Type::Concrete(TypeAnnotation::Reference(
+                    shape_ast::ast::TypePath::simple("Result"),
+                ))),
+                args: vec![
+                    Type::Variable(t),
+                    Type::Concrete(TypeAnnotation::Basic("string".to_string())),
+                ],
+            },
+        )];
+        assert!(
+            solver.solve(&mut constraints).is_ok(),
+            "Result<int, AnyError> should unify with Result<T, string>"
+        );
+    }
+
+    #[test]
+    fn any_error_top_is_bounded_distinct_concrete_errors_still_mismatch() {
+        // NOT broad suppression: two DISTINCT concrete named error types must
+        // still mismatch in the error-arg position. AnyError is the only top.
+        let mut solver = ConstraintSolver::new();
+        let mut constraints = vec![(
+            make_result(
+                TypeAnnotation::Basic("int".to_string()),
+                TypeAnnotation::Reference(shape_ast::ast::TypePath::simple("FooErr")),
+            ),
+            make_result(
+                TypeAnnotation::Basic("int".to_string()),
+                TypeAnnotation::Reference(shape_ast::ast::TypePath::simple("BarErr")),
+            ),
+        )];
+        assert!(
+            solver.solve(&mut constraints).is_err(),
+            "Result<int, FooErr> must NOT unify with Result<int, BarErr> (distinct concrete error types)"
         );
     }
 }
