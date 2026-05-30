@@ -1079,7 +1079,20 @@ impl TypeInferenceEngine {
             // surface "Cannot infer types for binary operation Add: operand
             // types are unknown and unknown" because both va and vb were
             // typed as fresh type vars.
-            Expr::AsyncLet(async_let, _) => self.infer_expr(&async_let.expr),
+            Expr::AsyncLet(async_let, _) => {
+                let inner_type = self.infer_expr(&async_let.expr)?;
+                // Register the binding into the CURRENT scope (no new scope —
+                // `async let x = expr` is statement-positioned, so `x` must
+                // remain visible to the sibling statements that follow,
+                // including a later `await x`. Mirrors the ordinary `let`
+                // binding registration but without the let-in body/scope shape.
+                // Without this the analyzer scope never learns `x` and the
+                // subsequent `await x` is wrongly rejected as an undefined
+                // variable, even though the compiler + VM bind it correctly.
+                self.env
+                    .define(&async_let.name, TypeScheme::mono(inner_type.clone()));
+                Ok(inner_type)
+            }
 
             // Async scope - cancellation boundary, type is the body's type
             Expr::AsyncScope(inner, _) => self.infer_expr(inner),
