@@ -1205,30 +1205,27 @@ impl TypeInferenceEngine {
 
     /// Infer type of variable declaration
     pub(crate) fn infer_variable_decl(&mut self, decl: &VariableDecl) -> TypeResult<Type> {
-        let inferred_init_type = if let Some(init_expr) = &decl.value {
-            Some(self.infer_expr(init_expr)?)
-        } else {
-            None
-        };
-
+        // When an explicit annotation is present, drive the initializer through
+        // bidirectional `check_against` so the declared type propagates inward
+        // (e.g. `let arr: Array<int> = []` types `[]` as `Array<int>` directly
+        // instead of a dead `Vec<unknown>`). `check_against` infers + constrains
+        // for every non-array/object/closure/conditional/match initializer, so
+        // this is a strict superset of the old infer+constrain path -- the
+        // default arm still pushes `inferred == declared`, so genuinely-bad
+        // initializers still reject.
         let declared_type = if let Some(ann) = &decl.type_annotation {
-            self.resolve_type_annotation(ann)
-        } else if let Some(inferred) = inferred_init_type.clone() {
+            let declared_type = self.resolve_type_annotation(ann);
+            if let Some(init_expr) = &decl.value {
+                self.check_against(init_expr, &declared_type)?;
+            }
+            declared_type
+        } else if let Some(init_expr) = &decl.value {
             // When no annotation is provided, keep the inferred initializer type
             // so subsequent expressions can immediately use structural info.
-            inferred
+            self.infer_expr(init_expr)?
         } else {
             self.fresh_type_var()
         };
-
-        if let Some(inferred_type) = inferred_init_type {
-            // Only add a constraint when an explicit annotation exists.
-            // For unannotated declarations we already use the inferred type directly.
-            if decl.type_annotation.is_some() {
-                self.constraints
-                    .push((declared_type.clone(), inferred_type));
-            }
-        }
 
         // For const, the type must be fully known
         if decl.kind == VarKind::Const && matches!(declared_type, Type::Variable(_)) {
