@@ -115,7 +115,25 @@ impl TypeInferenceEngine {
                 Type::Concrete(TypeAnnotation::Basic(l)),
                 Type::Concrete(TypeAnnotation::Basic(r)),
             ) if l == r && BuiltinTypes::is_numeric_type_name(l) => left.clone(),
-            // Mixed concrete numeric → widen to number
+            // Mixed widths within the same script-level numeric family
+            // (e.g. `i8 + i16`, `u8 + u32`) → preserve the script family type.
+            // Both integer widths canonicalize to `int`; both float widths to
+            // `number`. This keeps `i8 + i16` an `int` (not a `number`), so it
+            // satisfies a `-> int` return. Cross-family mixes (int + float,
+            // int + decimal) fall through to the widen-to-number arm below.
+            (
+                Type::Concrete(TypeAnnotation::Basic(l)),
+                Type::Concrete(TypeAnnotation::Basic(r)),
+            ) if BuiltinTypes::is_numeric_type_name(l)
+                && BuiltinTypes::is_numeric_type_name(r)
+                && BuiltinTypes::canonical_script_alias(l).is_some()
+                && BuiltinTypes::canonical_script_alias(l) == BuiltinTypes::canonical_script_alias(r) =>
+            {
+                let alias = BuiltinTypes::canonical_script_alias(l)
+                    .expect("guarded by is_some() above");
+                Type::Concrete(TypeAnnotation::Basic(alias.to_string()))
+            }
+            // Mixed concrete numeric across families → widen to number
             (
                 Type::Concrete(TypeAnnotation::Basic(l)),
                 Type::Concrete(TypeAnnotation::Basic(r)),
@@ -544,6 +562,38 @@ impl TypeInferenceEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn basic(name: &str) -> Type {
+        Type::Concrete(TypeAnnotation::Basic(name.to_string()))
+    }
+
+    #[test]
+    fn test_mixed_width_int_arithmetic_stays_int() {
+        // Strict-flip root R5: `i8 + i16` (mixed integer widths) must produce
+        // `int`, not `number`, so it satisfies a `-> int` return. Previously
+        // the mismatched-name path widened any mixed concrete pair to `number`.
+        for (l, r) in [("i8", "i16"), ("u8", "u32"), ("i32", "i8"), ("i8", "int")] {
+            let result = TypeInferenceEngine::numeric_result_type(&basic(l), &basic(r));
+            assert_eq!(
+                result,
+                basic("int"),
+                "{l} + {r} should stay `int`, got {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_int_plus_float_widens_to_number() {
+        // Cross-family mixes still widen to `number` — int/number stay distinct.
+        for (l, r) in [("i8", "f64"), ("int", "number"), ("i16", "f32")] {
+            let result = TypeInferenceEngine::numeric_result_type(&basic(l), &basic(r));
+            assert_eq!(
+                result,
+                BuiltinTypes::number(),
+                "{l} + {r} should widen to `number`, got {result:?}"
+            );
+        }
+    }
 
     #[test]
     fn test_unwrap_option_generic() {
