@@ -193,12 +193,15 @@ impl TypeInferenceEngine {
                     let elem_type = self.fresh_type_var();
                     Ok(BuiltinTypes::array(elem_type))
                 } else {
-                    // Infer element type from first element
-                    let first_type = self.infer_expr(&elements[0])?;
+                    // Compute the contributed *element* type for each entry. A
+                    // spread element `...a` contributes the element type of `a`'s
+                    // array (not the whole array type), so `[0, ...a, 3]` unifies
+                    // `int` with `int`, not `int` with `Vec<int>`.
+                    let first_type = self.array_literal_element_contribution(&elements[0])?;
 
-                    // All elements should have the same type
+                    // All elements should contribute the same element type.
                     for elem in &elements[1..] {
-                        let elem_type = self.infer_expr(elem)?;
+                        let elem_type = self.array_literal_element_contribution(elem)?;
                         self.constraints.push((first_type.clone(), elem_type));
                     }
 
@@ -1129,6 +1132,54 @@ impl TypeInferenceEngine {
             // Reference expression - infer the inner expression type
             Expr::Reference { expr: inner, .. } => self.infer_expr(inner),
         }
+    }
+
+    /// Element type that an array-literal entry contributes for homogeneity
+    /// unification. A spread element `...a` contributes the *element* type of
+    /// `a`'s array (so `[0, ...a, 3]` unifies `int` with `int`); a plain element
+    /// contributes its own type. Spreading a value whose resolved type is a
+    /// concrete non-array is a genuine error and is rejected here.
+    fn array_literal_element_contribution(&mut self, elem: &Expr) -> TypeResult<Type> {
+        if let Expr::Spread(inner, _) = elem {
+            let spread_type = self.infer_expr(inner)?;
+            let resolved = self.unifier.apply_substitutions(&spread_type);
+            match &resolved {
+                // Concrete array forms: unwrap the element type directly.
+                Type::Concrete(TypeAnnotation::Array(inner_ann)) => {
+                    return Ok(Type::Concrete((**inner_ann).clone()));
+                }
+                Type::Concrete(TypeAnnotation::Generic { name, args })
+                    if (name == "Array" || name == "Vec") && args.len() == 1 =>
+                {
+                    return Ok(Type::Concrete(args[0].clone()));
+                }
+                Type::Generic { base, args }
+                    if args.len() == 1
+                        && matches!(
+                            base.as_ref(),
+                            Type::Concrete(ann)
+                                if matches!(ann.as_type_name_str(), Some("Array") | Some("Vec"))
+                        ) =>
+                {
+                    return Ok(args[0].clone());
+                }
+                // Still-unresolved type variable: constrain the spread source to
+                // be an array of a fresh element type so the element flows into
+                // homogeneity unification without prematurely deciding the type.
+                Type::Variable(_) | Type::Constrained { .. } => {
+                    let elem_ty = self.fresh_type_var();
+                    self.constraints
+                        .push((resolved.clone(), BuiltinTypes::array(elem_ty.clone())));
+                    return Ok(elem_ty);
+                }
+                // Concrete non-array: spreading this is a genuine type error.
+                _ => {
+                    let actual = self.type_name_for_union(&resolved);
+                    return Err(TypeError::TypeMismatch("array".to_string(), actual));
+                }
+            }
+        }
+        self.infer_expr(elem)
     }
 
     fn infer_struct_literal_type(
