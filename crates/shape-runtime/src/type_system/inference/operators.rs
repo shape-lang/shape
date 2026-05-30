@@ -558,12 +558,65 @@ impl TypeInferenceEngine {
                         Ok(result_type)
                     };
                 }
-                self.constraints
-                    .push((effective_operand, BuiltinTypes::number()));
+                // Unary analogue of `numeric_result_type` (the binary precision
+                // fix). `-x` must preserve the operand's numeric type instead of
+                // unconditionally widening to `number`:
+                //   - concrete numeric (int/number/i8/decimal/…) → preserve it
+                //     (so `-x` with x:int stays `int`, satisfying a `-> int`
+                //     return and `int`/`number` separation);
+                //   - unresolved Variable/Constrained → propagate the operand
+                //     var (stays call-graph-linked, like the `var <op> concrete`
+                //     arm of `numeric_result_type`) so a later callsite resolves
+                //     the result with the parameter, instead of collapsing to
+                //     `number` and severing the link;
+                //   - non-numeric concrete (e.g. `-"s"`) → keep the `== number`
+                //     constraint so it still rejects.
+                let result = match &effective_operand {
+                    Type::Concrete(TypeAnnotation::Basic(name))
+                        if BuiltinTypes::is_numeric_type_name(name) =>
+                    {
+                        // Concrete numeric: validate via the Numeric trait bound
+                        // (accepts int/number/i8/…, rejects non-numeric) without
+                        // forcing `number`, then preserve the operand's type.
+                        let bound = self.fresh_var();
+                        self.constraints.push((
+                            effective_operand.clone(),
+                            Type::Constrained {
+                                var: bound,
+                                constraint: Box::new(TypeConstraint::ImplementsTrait {
+                                    trait_name: "Numeric".to_string(),
+                                }),
+                            },
+                        ));
+                        effective_operand.clone()
+                    }
+                    Type::Variable(_) | Type::Constrained { .. } => {
+                        // Unresolved: constrain to Numeric (keeps it linked to the
+                        // call graph) and propagate the operand var as the result.
+                        let bound = self.fresh_var();
+                        self.constraints.push((
+                            effective_operand.clone(),
+                            Type::Constrained {
+                                var: bound,
+                                constraint: Box::new(TypeConstraint::ImplementsTrait {
+                                    trait_name: "Numeric".to_string(),
+                                }),
+                            },
+                        ));
+                        effective_operand.clone()
+                    }
+                    // Non-numeric concrete (or other) → keep the strict `== number`
+                    // constraint so genuinely-bad operands like `-"s"` reject.
+                    _ => {
+                        self.constraints
+                            .push((effective_operand.clone(), BuiltinTypes::number()));
+                        BuiltinTypes::number()
+                    }
+                };
                 if is_optional {
-                    Ok(Self::wrap_in_option(BuiltinTypes::number()))
+                    Ok(Self::wrap_in_option(result))
                 } else {
-                    Ok(BuiltinTypes::number())
+                    Ok(result)
                 }
             }
             UnaryOp::BitNot => {
