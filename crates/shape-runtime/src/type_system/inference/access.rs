@@ -268,6 +268,8 @@ impl TypeInferenceEngine {
             name,
             "string"
                 | "String"
+                | "Vec"
+                | "Array"
                 | "HashMap"
                 | "Set"
                 | "Deque"
