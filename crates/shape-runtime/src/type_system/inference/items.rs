@@ -401,9 +401,11 @@ impl TypeInferenceEngine {
             }
         }
 
-        // Determine the actual return type
-        self.constraints
-            .push((inferred_return_type.clone(), declared_return_type.clone()));
+        // Determine the actual return type. When the declared return is a
+        // Result/Option and the inferred body type is a bare success value,
+        // constrain against the success type (Shape implicitly Ok/Some-wraps
+        // the return value of a fallible/optional function).
+        self.push_return_constraint(inferred_return_type.clone(), declared_return_type.clone());
 
         // If deferred return-union members were recorded on the inferred return
         // variable, transfer them to the declared return variable that is

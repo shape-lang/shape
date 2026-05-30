@@ -417,6 +417,55 @@ impl TypeInferenceEngine {
         }
     }
 
+    /// Extract the success (inner) type `T` of a `Result<T, E>` / `Option<T>`.
+    /// Returns `None` for any type that is not a Result/Option carrier.
+    pub(crate) fn result_or_option_success_type(&self, ty: &Type) -> Option<Type> {
+        match ty {
+            Type::Generic { base, args } if !args.is_empty() => match base.as_ref() {
+                Type::Concrete(ann)
+                    if ann
+                        .as_type_name_str()
+                        .is_some_and(|n| n == "Result" || n == "Option") =>
+                {
+                    Some(args[0].clone())
+                }
+                _ => None,
+            },
+            Type::Concrete(TypeAnnotation::Generic { name, args })
+                if (name == "Result" || name == "Option") && !args.is_empty() =>
+            {
+                Some(Type::Concrete(args[0].clone()))
+            }
+            _ => None,
+        }
+    }
+
+    /// Push the constraint linking an inferred body-return type to a declared
+    /// return annotation, modelling Shape's implicit `Ok`/`Some`-wrap of a bare
+    /// return value inside a fallible/optional function.
+    ///
+    /// When `declared` is `Result<T, E>` / `Option<T>` and `inferred` is NOT
+    /// itself a Result/Option, the body is constraining against the success
+    /// type `T` (the function will implicitly wrap the value), so we push
+    /// `inferred ~ T` instead of `inferred ~ declared`. When `inferred` IS
+    /// already a Result/Option the body produced the wrapper directly, so the
+    /// direct `inferred ~ declared` constraint is kept. A value whose inner
+    /// type genuinely mismatches `T` still rejects via `inferred ~ T`.
+    pub(crate) fn push_return_constraint(&mut self, inferred: Type, declared: Type) {
+        let declared_is_result_or_option =
+            self.is_result_type(&declared) || self.is_option_type(&declared);
+        let inferred_is_result_or_option =
+            self.is_result_type(&inferred) || self.is_option_type(&inferred);
+
+        if declared_is_result_or_option && !inferred_is_result_or_option {
+            if let Some(success) = self.result_or_option_success_type(&declared) {
+                self.constraints.push((inferred, success));
+                return;
+            }
+        }
+        self.constraints.push((inferred, declared));
+    }
+
     pub(crate) fn wrap_result_type(&self, inner: Type) -> Type {
         self.wrap_result_type_with_error(inner, self.any_error_type())
     }

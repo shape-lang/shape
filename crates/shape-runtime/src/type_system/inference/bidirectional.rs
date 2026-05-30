@@ -292,10 +292,13 @@ impl TypeInferenceEngine {
         let inferred_return_type = inferred_result?;
 
         // If return type is annotated, constrain inferred type to annotation.
+        // When the annotation is a Result/Option and the inferred body type is
+        // a bare success value, constrain against the success type (Shape
+        // implicitly Ok/Some-wraps the return value of a fallible/optional
+        // function).
         let return_type = if let Some(ann) = return_type_ann {
             let annotated = Type::Concrete(ann.clone());
-            self.constraints
-                .push((inferred_return_type, annotated.clone()));
+            self.push_return_constraint(inferred_return_type, annotated.clone());
             annotated
         } else {
             inferred_return_type
