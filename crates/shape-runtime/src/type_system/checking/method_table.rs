@@ -226,7 +226,7 @@ impl MethodTable {
         let vec_methods: Vec<(&str, usize, Vec<E>, E)> = vec![
             ("first", 0, vec![], E::ReceiverParam(0)),
             ("last", 0, vec![], E::ReceiverParam(0)),
-            ("push", 0, vec![E::ReceiverParam(0)], void()),
+            ("push", 0, vec![E::ReceiverParam(0)], E::SelfType),
             ("pop", 0, vec![], E::ReceiverParam(0)),
             ("reverse", 0, vec![], E::SelfType),
             ("clone", 0, vec![], E::SelfType),
@@ -329,6 +329,9 @@ impl MethodTable {
             // carry sigs so closure params still infer (`a.where(|x| ...)`);
             // the rest resolve by name (the resolver ignores arity).
             ("length", 0, vec![], int()),
+            // `.len()` alias for `.length` — mirrors HashMap `len` (:466) and
+            // string `len` (:375); PHF-registered but missed by the seed.
+            ("len", 0, vec![], int()),
             ("distinct", 0, vec![], E::SelfType),
             ("skip", 0, vec![int()], E::SelfType),
             ("union", 0, vec![E::SelfType], E::SelfType),
