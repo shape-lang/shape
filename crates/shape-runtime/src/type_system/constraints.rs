@@ -55,6 +55,10 @@ pub struct ConstraintSolver {
     method_table: Option<MethodTable>,
     /// Trait implementation registry: set of "TraitName::TypeName" keys
     trait_impls: HashSet<String>,
+    /// Named-struct field schemas: struct name → its structural object fields.
+    /// Lets the solver unify a nominal struct type (`Point`) with the
+    /// structural object type that flows in (`{ x: number, y: number }`).
+    struct_schemas: HashMap<String, Vec<ObjectTypeField>>,
 }
 
 impl Default for ConstraintSolver {
@@ -71,6 +75,7 @@ impl ConstraintSolver {
             bounds: HashMap::new(),
             method_table: None,
             trait_impls: HashSet::new(),
+            struct_schemas: HashMap::new(),
         }
     }
 
@@ -85,6 +90,43 @@ impl ConstraintSolver {
     /// Each entry is a "TraitName::TypeName" key indicating that TypeName implements TraitName.
     pub fn set_trait_impls(&mut self, impls: HashSet<String>) {
         self.trait_impls = impls;
+    }
+
+    /// Register named-struct field schemas so a nominal struct type can unify
+    /// with the structural object type that flows into it (and vice versa).
+    /// Each entry maps a struct name to its declared fields as
+    /// `ObjectTypeField`s — the same shape produced for an object literal.
+    pub fn set_struct_schemas(&mut self, schemas: HashMap<String, Vec<ObjectTypeField>>) {
+        self.struct_schemas = schemas;
+    }
+
+    /// Resolve a named struct's structural fields, if it is a registered
+    /// struct schema. Returns `None` for non-struct names (builtins, enums,
+    /// type aliases, unknown types) so those keep their existing behaviour.
+    fn struct_fields(&self, name: &str) -> Option<&[ObjectTypeField]> {
+        self.struct_schemas.get(name).map(|v| v.as_slice())
+    }
+
+    /// Unify a structural object's fields against a named struct's declared
+    /// fields. Only succeeds when `name` is a *registered struct schema*;
+    /// otherwise returns `Ok(false)` so non-struct references keep their
+    /// existing (non-unifying) behaviour. Field comparison is exact
+    /// (`object_fields_compatible`), so a structurally wrong object still
+    /// fails to unify and the program is still correctly rejected.
+    fn unify_object_with_named_struct(
+        &self,
+        obj_fields: &[ObjectTypeField],
+        name: &str,
+    ) -> TypeResult<bool> {
+        match self.struct_fields(name) {
+            Some(struct_fields) => {
+                // Clone the resolved fields to drop the borrow on `self`
+                // before the recursive `&self` call in object_fields_compatible.
+                let struct_fields = struct_fields.to_vec();
+                self.object_fields_compatible(obj_fields, &struct_fields)
+            }
+            None => Ok(false),
+        }
     }
 
     /// Solve all type constraints
@@ -448,6 +490,24 @@ impl ConstraintSolver {
                 if name == "Array" && args.len() == 1 =>
             {
                 self.unify_annotations(&args[0], elem)
+            }
+
+            // Nominal struct ~ structural object: a named struct type (`Point`)
+            // unifies with the structural object type its instances carry
+            // (`{ x: number, y: number }`), in both directions. Resolution is
+            // gated on the name being a *registered struct schema* — builtins,
+            // enums, and unknown names fall through to `_ => Ok(false)`, so this
+            // never broadens unification for non-struct references. Field
+            // comparison reuses the exact-match `object_fields_compatible`
+            // (equal field set + per-field unification), so a structurally
+            // wrong object (missing/extra/mistyped field) still fails to unify.
+            (TypeAnnotation::Object(obj_fields), TypeAnnotation::Basic(name))
+            | (TypeAnnotation::Basic(name), TypeAnnotation::Object(obj_fields)) => {
+                self.unify_object_with_named_struct(obj_fields, name)
+            }
+            (TypeAnnotation::Object(obj_fields), TypeAnnotation::Reference(path))
+            | (TypeAnnotation::Reference(path), TypeAnnotation::Object(obj_fields)) => {
+                self.unify_object_with_named_struct(obj_fields, path.as_str())
             }
 
             // Different types don't unify
@@ -1420,6 +1480,90 @@ mod tests {
             ])),
         )];
         assert!(solver.solve(&mut constraints).is_ok());
+    }
+
+    /// R4: a named struct type (`Point`) unifies with the structural object
+    /// type its instances carry (`{ x: number, y: number }`), in both
+    /// directions — but only when registered as a struct schema, and only
+    /// when the fields match exactly. This mirrors the call-site constraint
+    /// `({ x: number, y: number }) -> number ~ (Point) -> number`.
+    #[test]
+    fn test_named_struct_unifies_with_structural_object() {
+        let point_fields = vec![
+            ObjectTypeField {
+                name: "x".to_string(),
+                optional: false,
+                type_annotation: TypeAnnotation::Basic("number".to_string()),
+                annotations: vec![],
+            },
+            ObjectTypeField {
+                name: "y".to_string(),
+                optional: false,
+                type_annotation: TypeAnnotation::Basic("number".to_string()),
+                annotations: vec![],
+            },
+        ];
+        let mut schemas = HashMap::new();
+        schemas.insert("Point".to_string(), point_fields.clone());
+
+        // Positive: structural object ~ nominal Point (both Basic and Reference
+        // spellings of the named struct), and the reverse direction.
+        for (obj_first, named) in [
+            (true, TypeAnnotation::Basic("Point".to_string())),
+            (false, TypeAnnotation::Basic("Point".to_string())),
+            (
+                true,
+                TypeAnnotation::Reference(shape_ast::ast::TypePath::simple("Point")),
+            ),
+            (
+                false,
+                TypeAnnotation::Reference(shape_ast::ast::TypePath::simple("Point")),
+            ),
+        ] {
+            let mut solver = ConstraintSolver::new();
+            solver.set_struct_schemas(schemas.clone());
+            let obj = Type::Concrete(TypeAnnotation::Object(point_fields.clone()));
+            let nom = Type::Concrete(named);
+            let pair = if obj_first { (obj, nom) } else { (nom, obj) };
+            let mut constraints = vec![pair];
+            assert!(
+                solver.solve(&mut constraints).is_ok(),
+                "named struct must unify with matching structural object"
+            );
+        }
+
+        // Negative 1: a structurally-wrong object (extra/mismatched field) must
+        // STILL fail — the fix must not blanket-suppress the error.
+        let mut solver = ConstraintSolver::new();
+        solver.set_struct_schemas(schemas.clone());
+        let wrong_obj = Type::Concrete(TypeAnnotation::Object(vec![ObjectTypeField {
+            name: "x".to_string(),
+            optional: false,
+            type_annotation: TypeAnnotation::Basic("number".to_string()),
+            annotations: vec![],
+        }]));
+        let mut constraints = vec![(
+            wrong_obj,
+            Type::Concrete(TypeAnnotation::Basic("Point".to_string())),
+        )];
+        assert!(
+            solver.solve(&mut constraints).is_err(),
+            "object with missing field must NOT unify with named struct"
+        );
+
+        // Negative 2: a name that is NOT a registered struct schema must keep
+        // its existing (non-unifying) behaviour.
+        let mut solver = ConstraintSolver::new();
+        solver.set_struct_schemas(schemas);
+        let obj = Type::Concrete(TypeAnnotation::Object(point_fields));
+        let mut constraints = vec![(
+            obj,
+            Type::Concrete(TypeAnnotation::Basic("NotAStruct".to_string())),
+        )];
+        assert!(
+            solver.solve(&mut constraints).is_err(),
+            "unregistered name must not unify with a structural object"
+        );
     }
 
     #[test]

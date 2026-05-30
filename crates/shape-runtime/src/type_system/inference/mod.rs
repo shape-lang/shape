@@ -1259,6 +1259,33 @@ impl TypeInferenceEngine {
         // then solve all constraints
         self.solver.set_method_table(self.method_table.clone());
         self.solver.set_trait_impls(self.env.trait_impl_keys());
+        // Named-struct field schemas let the solver unify a nominal struct
+        // type (`Point`) with the structural object type its instances carry
+        // (`{ x: number, y: number }`). A declared `fn f(p: Point)` param
+        // resolves through the struct's type alias to `Object([x, y])`, while
+        // a `Point { .. }` literal stays nominal as `Reference("Point")`; the
+        // two must unify at the call site. Comptime fields are excluded —
+        // they occupy zero runtime slots, matching the alias construction in
+        // `infer_item`/`predeclare_struct_type`.
+        let struct_schemas: HashMap<String, Vec<ObjectTypeField>> = self
+            .struct_type_defs
+            .iter()
+            .map(|(name, def)| {
+                let fields = def
+                    .fields
+                    .iter()
+                    .filter(|f| !f.is_comptime)
+                    .map(|f| ObjectTypeField {
+                        name: f.name.clone(),
+                        optional: f.default_value.is_some(),
+                        type_annotation: f.type_annotation.clone(),
+                        annotations: vec![],
+                    })
+                    .collect();
+                (name.clone(), fields)
+            })
+            .collect();
+        self.solver.set_struct_schemas(struct_schemas);
         if let Err(err) = self.solver.solve(&mut self.constraints) {
             errors.push(err);
         }
