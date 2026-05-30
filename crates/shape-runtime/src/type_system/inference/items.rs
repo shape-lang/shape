@@ -584,12 +584,30 @@ impl TypeInferenceEngine {
         if let Some(trait_def) = self.env.lookup_trait(&trait_name) {
             let trait_def = trait_def.clone();
             for member in &trait_def.members {
+                // Root #8 (consistent `self`-handling): the trait side carries the
+                // receiver `self` — built-in operator/Drop traits register a `self`
+                // FunctionParam (environment/mod.rs), and the parser includes `self`
+                // in trait method signatures — but impl method params strip the
+                // receiver. Compare only the value (non-`self`) params on both sides
+                // so the arity check is receiver-agnostic and a `fn drop(&mut self)`
+                // trait method matches a `method drop()` impl.
                 let (trait_method_name, trait_arity) = match member {
                     TraitMember::Required(TraitMemberSignature::Method { name, params, .. }) => {
-                        (name.as_str(), params.len())
+                        let arity = params
+                            .iter()
+                            .filter(|p| p.name.as_deref() != Some("self"))
+                            .count();
+                        (name.as_str(), arity)
                     }
                     TraitMember::Default(method_def) => {
-                        (method_def.name.as_str(), method_def.params.len())
+                        let arity = method_def
+                            .params
+                            .iter()
+                            .filter(|p| {
+                                !matches!(&p.pattern, DestructurePattern::Identifier(n, _) if n == "self")
+                            })
+                            .count();
+                        (method_def.name.as_str(), arity)
                     }
                     _ => continue,
                 };
@@ -600,7 +618,13 @@ impl TypeInferenceEngine {
                     .iter()
                     .find(|m| m.name == trait_method_name)
                 {
-                    let impl_arity = impl_method.params.len();
+                    let impl_arity = impl_method
+                        .params
+                        .iter()
+                        .filter(|p| {
+                            !matches!(&p.pattern, DestructurePattern::Identifier(n, _) if n == "self")
+                        })
+                        .count();
                     if trait_arity != impl_arity {
                         return Err(TypeError::TraitImplArityMismatch {
                             trait_name: trait_name.clone(),
