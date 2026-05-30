@@ -40,6 +40,25 @@ impl TypeInferenceEngine {
             if let Some(struct_def) = self.struct_type_defs.get(name.as_str()).cloned() {
                 for field in &struct_def.fields {
                     if field.name == property {
+                        // A bare `Reference("Pair")` reaches here when an
+                        // all-default generic literal (`Pair { first: 1,
+                        // second: 2 }` where `type Pair<A=int,B=int>`)
+                        // short-circuits to a bare reference in
+                        // `infer_struct_literal_type`. The field's annotation
+                        // is then the abstract param name (`A`/`B`); returning
+                        // it raw makes `p.first + p.second` typecheck as
+                        // `A + B`. If the annotation names a type param that
+                        // carries a default, substitute that default so the
+                        // field resolves to its defaulted concrete type. A
+                        // param with no default (or a field that names no
+                        // param) is unchanged — genuinely-abstract fields
+                        // stay abstract, genuine UnknownProperty still errors.
+                        if let Some(default) = Self::default_for_named_type_param(
+                            &struct_def,
+                            &field.type_annotation,
+                        ) {
+                            return Ok(default);
+                        }
                         return Ok(Type::Concrete(field.type_annotation.clone()));
                     }
                 }
@@ -276,6 +295,32 @@ impl TypeInferenceEngine {
                 | "PriorityQueue"
                 | "Range"
         )
+    }
+
+    /// If `field_annotation` names one of `struct_def`'s declared type params,
+    /// and that param has a default type, return the defaulted type. Used by
+    /// the bare-`Reference` struct field-access arm so an all-default generic
+    /// literal (`Pair { first: 1 }` for `type Pair<A = int>`) resolves field
+    /// access to the param's default rather than the abstract param name.
+    ///
+    /// Returns `None` when the annotation is not a bare type-name, names no
+    /// type param, or names a param without a default — in those cases the
+    /// caller keeps the field's original (possibly abstract) annotation.
+    fn default_for_named_type_param(
+        struct_def: &shape_ast::ast::StructTypeDef,
+        field_annotation: &TypeAnnotation,
+    ) -> Option<Type> {
+        // Only a bare name can alias a type param (e.g. `A`, not `Array<A>`).
+        let field_name = match field_annotation {
+            TypeAnnotation::Basic(_) | TypeAnnotation::Reference(_) => {
+                field_annotation.as_type_name_str()?
+            }
+            _ => return None,
+        };
+        let type_params = struct_def.type_params.as_ref()?;
+        let tp = type_params.iter().find(|tp| tp.name() == field_name)?;
+        let default_ann = tp.default_type()?;
+        Some(Type::Concrete(default_ann.clone()))
     }
 
     fn resolve_struct_generic_field(
