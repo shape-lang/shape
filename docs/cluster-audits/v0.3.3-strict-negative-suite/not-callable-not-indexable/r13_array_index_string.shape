@@ -1,0 +1,3 @@
+// Indexing an array with a string key. Array index must be int.
+let arr = [10, 20, 30]
+print(arr["x"])

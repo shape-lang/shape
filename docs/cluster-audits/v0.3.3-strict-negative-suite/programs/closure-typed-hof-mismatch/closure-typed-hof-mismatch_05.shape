@@ -1,0 +1,7 @@
+// NEGATIVE: `some` predicate closure returns int, not bool.
+// `some` requires `(T) -> bool`. The body `x + 5` returns `int`. A strict type
+// checker must reject a non-bool predicate; instead the int is treated as
+// truthy and `some` returns `true`.
+let arr: Array<int> = [1, 2, 3];
+let r = arr.some(|x| x + 5);
+print(r);

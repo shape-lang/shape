@@ -1,0 +1,10 @@
+// int-number-split_01: int literal passed where a `number` (f64) param is required.
+// `int` and `number` are SEPARATE types and never unify (CLAUDE.md §Type System Rules).
+// Passing the int literal `5` where `number` is declared must be a compile error —
+// there is no implicit int->number coercion ("NO runtime coercion").
+fn takesNumber(x: number) -> number {
+    x
+}
+
+let r = takesNumber(5)
+print(r)

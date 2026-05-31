@@ -1,0 +1,9 @@
+// fn declared -> int returns a string via the implicit tail-expression form
+// (no `return` keyword). Strict typing MUST reject: the tail expression's
+// type (string) is the function result and must match the declared int.
+fn tail_count() -> int {
+    "tail string"
+}
+
+let t = tail_count()
+print(t)

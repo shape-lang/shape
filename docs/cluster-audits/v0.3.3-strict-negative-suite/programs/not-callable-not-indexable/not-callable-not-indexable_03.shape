@@ -1,0 +1,6 @@
+// Error mode: calling a non-function value (bool variant).
+// `b` has type `bool`, not a function. `b()` must be rejected at compile
+// time -- bool is not a callable type.
+let b: bool = true
+let y = b()
+print(y)

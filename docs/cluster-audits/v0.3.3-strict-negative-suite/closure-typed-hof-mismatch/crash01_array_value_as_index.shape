@@ -1,0 +1,11 @@
+// THE BREACH (crash): an HOF-shaped element-vs-index type confusion. `rows` is
+// an Array<int>; `key` aliases it. Using `rows[key]` indexes the array by an
+// Array<int> value -- exactly the type a `filter`/`map` predicate parameter
+// carries -- where strict typing requires an `int`. The predicate-parameter
+// type (Array<int>) must be rejected as an index. Instead the heap array
+// pointer is reinterpreted as a raw 64-bit index and the JIT-compiled load
+// dereferences unmapped memory -> SIGSEGV (ec=139) instead of a clean
+// compile-reject.
+let rows = [1, 2, 3]
+let key = rows
+print(rows[key])

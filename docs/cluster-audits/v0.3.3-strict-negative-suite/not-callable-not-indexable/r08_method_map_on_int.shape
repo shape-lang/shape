@@ -1,0 +1,3 @@
+// Calling array method .map on an int receiver. int has no .map.
+let n = 7
+print(n.map(|x| x + 1))

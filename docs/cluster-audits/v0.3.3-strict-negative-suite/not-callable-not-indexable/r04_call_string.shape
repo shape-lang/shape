@@ -1,0 +1,3 @@
+// Calling a string value. string is not callable.
+let s = "hello"
+s()

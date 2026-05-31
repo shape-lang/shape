@@ -1,0 +1,6 @@
+// Error mode: member access on a scalar.
+// `x` has type `int`, which has no fields. `x.value` is a field access on
+// a scalar -- a strict type system must reject it (int has no member `value`).
+let x: int = 7
+let y = x.value
+print(y)

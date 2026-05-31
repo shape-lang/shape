@@ -1,0 +1,6 @@
+// THE BREACH: some's predicate must return `bool`, but this closure returns
+// `number` (`x + 0.0`). Strict typing must reject (predicate type is
+// `int -> bool`). Instead it runs and prints `true`.
+let arr = [1, 2, 3]
+let r = arr.some(|x| x + 0.0)
+print(r)

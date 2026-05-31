@@ -1,0 +1,6 @@
+// Error mode: member access on a scalar (bool variant).
+// `b` has type `bool`, which has no fields. `b.field` is a field access on
+// a scalar -- a strict type system must reject it (bool has no member `field`).
+let b: bool = true
+let y = b.field
+print(y)

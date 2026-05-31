@@ -1,0 +1,9 @@
+// arity-mismatch_06: enum tuple-variant constructor with TOO MANY args.
+// Circle declares one number field; passing two arguments has no field to bind the extra.
+enum Shape {
+    Circle(number),
+    Rectangle(number, number),
+}
+
+let s = Shape::Circle(1.0, 2.0)
+print(s)

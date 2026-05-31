@@ -1,0 +1,10 @@
+// NEGATIVE: closure param used at a type inconsistent with the element type.
+// The element type is `int`, but the predicate `x == "two"` compares the int
+// param against a `string` literal. `int` and `string` have no common type;
+// a strict type checker must reject the comparison at COMPILE time with a clean
+// type error. Instead the program compiles and only blows up at RUNTIME with a
+// dispatch error ("no method 'eq' on receiver kind Int64") — a runtime crash
+// where a clean compile-reject is required.
+let arr: Array<int> = [1, 2, 3];
+let r = arr.filter(|x| x == "two");
+print(r);

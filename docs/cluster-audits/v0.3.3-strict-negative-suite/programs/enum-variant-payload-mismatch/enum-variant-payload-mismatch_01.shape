@@ -1,0 +1,6 @@
+// Error mode: wrong payload type to a tuple-variant ctor.
+// B expects an int payload; we pass a string. int and string do not unify.
+enum E { A, B(int) }
+let e = E::B("not an int")
+let r = match e { E::A => 0, E::B(n) => n }
+print(r)

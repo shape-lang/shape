@@ -1,0 +1,6 @@
+// Error mode: indexing a non-indexable value (bool variant).
+// `b` has type `bool`. `b[0]` is meaningless -- bool is not indexable.
+// A strict type system must reject this at compile time.
+let b: bool = true
+let y = b[0]
+print(y)

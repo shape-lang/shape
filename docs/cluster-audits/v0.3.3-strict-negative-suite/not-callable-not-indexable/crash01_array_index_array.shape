@@ -1,0 +1,8 @@
+// THE BREACH (crash): indexing an array with an array value. Strict typing
+// must reject (index must be int). Instead the array heap pointer is
+// reinterpreted as a raw index, the out-of-range load dereferences mapped
+// memory and SIGSEGVs (ec=139 under JIT) instead of producing a clean
+// compile-reject.
+let arr = [1, 2, 3]
+let idx = arr
+print(arr[idx])

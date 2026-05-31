@@ -1,0 +1,9 @@
+// fn declared -> bool but returns a number (f64) literal.
+// Strict typing MUST reject: number is not bool; they are separate types
+// and do not unify. No coercion exists.
+fn flag() -> bool {
+    return 2.5
+}
+
+let f = flag()
+print(f)

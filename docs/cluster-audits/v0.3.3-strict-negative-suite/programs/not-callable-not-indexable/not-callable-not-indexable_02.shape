@@ -1,0 +1,6 @@
+// Error mode: calling a non-function value (number variant).
+// `x` has type `number` (f64), not a function. Calling it must be a
+// compile-time rejection: number is not a callable type.
+let x: number = 3.5
+let y = x()
+print(y)

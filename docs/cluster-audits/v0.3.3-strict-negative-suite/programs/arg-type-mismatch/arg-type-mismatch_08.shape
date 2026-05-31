@@ -1,0 +1,15 @@
+// arg-type-mismatch_08 — struct (TypedObject) passed to string param
+// A strict type system MUST reject: a `Person` TypedObject argument cannot bind
+// to a `string` parameter. A heap struct is not a string.
+type Person {
+    name: string,
+    age: int
+}
+
+fn greet(name: string) -> string {
+    return name
+}
+
+let p = Person { name: "Ada", age: 36 }
+let r = greet(p)
+print(r)

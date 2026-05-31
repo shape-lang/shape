@@ -1,0 +1,9 @@
+// fn declared -> int but returns a number (f64) literal.
+// Strict typing MUST reject: int and number are SEPARATE types and do not
+// unify (CLAUDE.md §Type System Rules). No IntToNumber/NumberToInt coercion.
+fn whole() -> int {
+    return 3.14
+}
+
+let w = whole()
+print(w)

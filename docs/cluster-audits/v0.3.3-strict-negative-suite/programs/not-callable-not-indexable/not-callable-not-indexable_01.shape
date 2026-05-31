@@ -1,0 +1,6 @@
+// Error mode: calling a non-function value.
+// `x` has type `int`, which is not callable. A strict type system must
+// reject `x()` at compile time (int is not a function type).
+let x: int = 5
+let y = x()
+print(y)

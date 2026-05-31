@@ -1,0 +1,3 @@
+// Indexing a string with an int. string[int] is not a valid index expr.
+let s = "hello"
+print(s[1])

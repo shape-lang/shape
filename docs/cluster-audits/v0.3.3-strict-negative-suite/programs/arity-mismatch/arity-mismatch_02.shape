@@ -1,0 +1,8 @@
+// arity-mismatch_02: named fn called with TOO MANY args.
+// `add` takes exactly two int params; a third argument has no parameter to bind to.
+fn add(a: int, b: int) -> int {
+    a + b
+}
+
+let r = add(1, 2, 3)
+print(r)

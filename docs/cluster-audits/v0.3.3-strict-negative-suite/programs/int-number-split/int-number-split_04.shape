@@ -1,0 +1,6 @@
+// int-number-split_04: 2 vs 2.0 confusion in a binding annotation.
+// The annotation declares `number` (f64) but the initializer `2` is an int literal.
+// Use `2.0` (not `2`) when a number is needed (CLAUDE.md §Type System Rules). The
+// literal type (int) does not match the declared type (number) — compile error, no coercion.
+let x: number = 2
+print(x)

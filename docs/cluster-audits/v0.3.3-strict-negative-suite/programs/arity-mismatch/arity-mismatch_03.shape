@@ -1,0 +1,5 @@
+// arity-mismatch_03: closure (lambda) called with TOO FEW args.
+// The closure declares two params; invoking it with one leaves `b` unbound.
+let combine = |a: int, b: int| a * b
+let r = combine(7)
+print(r)

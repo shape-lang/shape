@@ -1,0 +1,5 @@
+// arity-mismatch_04: closure (lambda) called with TOO MANY args.
+// The closure declares one param; passing two has no parameter for the extra arg.
+let square = |x: int| x * x
+let r = square(3, 4)
+print(r)

@@ -1,0 +1,5 @@
+// MODE: let x: number = true  (bool literal bound to number annotation)
+// A strict type system must reject: declared `number` (f64) does not unify
+// with `bool`. bool and number are separate types; no implicit conversion.
+let x: number = true
+print(x)

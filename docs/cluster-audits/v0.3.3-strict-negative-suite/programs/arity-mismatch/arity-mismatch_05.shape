@@ -1,0 +1,9 @@
+// arity-mismatch_05: enum tuple-variant constructor with TOO FEW args.
+// Rectangle declares two number fields; constructing with one must be rejected.
+enum Shape {
+    Circle(number),
+    Rectangle(number, number),
+}
+
+let s = Shape::Rectangle(2.0)
+print(s)

@@ -1,0 +1,7 @@
+// Error mode: wrong payload type to a tuple-variant ctor (bool vs int).
+// B expects an int payload; we pass a bool. bool and int are separate types and
+// do not unify (CLAUDE.md §Type System Rules: no runtime coercion).
+enum E { A, B(int) }
+let e = E::B(true)
+let r = match e { E::A => 0, E::B(n) => n }
+print(r)

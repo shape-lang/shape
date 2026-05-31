@@ -1,0 +1,9 @@
+// NEGATIVE: closure param used at a type inconsistent with the element type.
+// The element type is `int`, but the predicate `x > 2.5` compares the int param
+// against a `number` literal. `int` and `number` are separate types that do not
+// unify (CLAUDE.md §Type System Rules: "use 2.0 not 2 when a number is needed").
+// A strict type checker must reject the mixed-type comparison `int > number`;
+// instead it silently runs and returns a filtered array.
+let arr: Array<int> = [1, 2, 3, 4];
+let r = arr.filter(|x| x > 2.5);
+print(r);

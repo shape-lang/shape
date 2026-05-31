@@ -1,0 +1,7 @@
+// Error mode: match arm binding used at the wrong type.
+// E::B(n) binds n: int; using it in string concatenation requires n: string.
+// int and string do not unify, so the arm body is ill-typed.
+enum E { A, B(int) }
+let e = E::B(7)
+let r = match e { E::A => "", E::B(n) => n + "x" }
+print(r)

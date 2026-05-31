@@ -1,0 +1,6 @@
+// Error mode: indexing a non-indexable value.
+// `x` has type `int`. Index syntax `x[0]` is only valid on Array/String/
+// HashMap. A strict type system must reject indexing into an int scalar.
+let x: int = 5
+let y = x[0]
+print(y)
