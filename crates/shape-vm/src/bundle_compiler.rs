@@ -9,7 +9,8 @@ use sha2::{Digest, Sha256};
 use shape_ast::parser::parse_program;
 use shape_runtime::module_manifest::ModuleManifest;
 use shape_runtime::package_bundle::{
-    BundleMetadata, BundledModule, BundledNativeDependencyScope, PackageBundle,
+    BundleMetadata, BundledModule, BundledNativeDependencyScope, ExportVisibility, PackageBundle,
+    ResolvedInterface, KNOWN_INTERFACE_SCHEMA,
 };
 use shape_runtime::project::ProjectRoot;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -35,9 +36,16 @@ impl BundleCompiler {
         let mut modules = Vec::new();
         let mut all_sources = String::new();
         let mut docs: HashMap<String, Vec<shape_runtime::doc_extract::DocItem>> = HashMap::new();
-        // Collect content-addressed programs alongside modules (avoids deserialize roundtrip)
-        let mut compiled_programs: Vec<(String, Vec<String>, Option<bytecode::Program>)> =
-            Vec::new();
+        // Collect content-addressed programs alongside modules (avoids deserialize roundtrip).
+        // The trailing `ResolvedInterface` is the §1.1 source-ordered interface for the
+        // module, carried through to the manifest-build loop (it needs the AST, which is
+        // dropped after the per-file compile).
+        let mut compiled_programs: Vec<(
+            String,
+            Vec<String>,
+            Option<bytecode::Program>,
+            ResolvedInterface,
+        )> = Vec::new();
 
         let mut loader = shape_runtime::module_loader::ModuleLoader::new();
         loader.set_project_root(root, &project.resolved_module_paths());
@@ -96,6 +104,14 @@ impl BundleCompiler {
             // Collect export names from AST (must use original AST)
             let export_names = collect_export_names(&ast);
 
+            // Collect the resolved type-checker interface from the AST (DESIGN
+            // §1.1 / §2.3 PRODUCER step): every interface-relevant item def in
+            // EXACT SOURCE ORDER plus the export surface (names + visibility).
+            // Built from the same AST the compiler just type-checked, so the
+            // loader's two-pass replay (§2.4) sees items in the identical order
+            // a from-source compile would.
+            let resolved_interface = collect_resolved_interface(&ast);
+
             // Build module graph and compile via graph pipeline
             let (graph, stdlib_names, prelude_imports) =
                 crate::module_resolution::build_graph_and_stdlib_names(&ast, &mut loader, &[])
@@ -128,7 +144,12 @@ impl BundleCompiler {
                 )
             })?;
 
-            compiled_programs.push((module_path.clone(), export_names.clone(), content_addressed));
+            compiled_programs.push((
+                module_path.clone(),
+                export_names.clone(),
+                content_addressed,
+                resolved_interface,
+            ));
 
             modules.push(BundledModule {
                 module_path: module_path.clone(),
@@ -138,12 +159,52 @@ impl BundleCompiler {
             });
         }
 
-        // 3. Compute combined source hash
-        let mut hasher = Sha256::new();
-        hasher.update(all_sources.as_bytes());
-        let source_hash = format!("{:x}", hasher.finalize());
+        // 3. Compute the §2.2 four-part cache key (NOT source bytes alone). The
+        //    tuple is SHA256(source_bytes ‖ compiler_fingerprint ‖
+        //    dep_source_hashes ‖ permission_profile), each component a separately
+        //    length-prefixed field for deterministic, unambiguous framing.
+        //    `all_sources` is the source-bytes component, accumulated in
+        //    file-path-sorted order (`discover_shape_files` sorts at line ~474).
 
-        // 4. Collect dependency versions
+        // 3a. Permission profile: the resolved required_permissions surface
+        //     across every compiled blob, deduped + sorted by permission name —
+        //     same normalization the FunctionBlob hash uses
+        //     (content_addressed.rs:124). The same source under a different
+        //     permission scope is a different artifact (§2.2 component 4).
+        let mut permission_names: HashSet<String> = HashSet::new();
+        for (_module_path, _exports, content_addressed, _interface) in &compiled_programs {
+            if let Some(ca) = content_addressed {
+                for blob in ca.function_store.values() {
+                    for perm in blob.required_permissions.iter() {
+                        permission_names.insert(perm.name().to_string());
+                    }
+                }
+            }
+        }
+        let mut permission_profile: Vec<String> = permission_names.into_iter().collect();
+        permission_profile.sort();
+
+        // 3b. Transitive dependency source hashes (§2.2 component 3 / AMENDMENT C).
+        //     Path/workspace/git deps fold in a recomputed hash over THEIR source
+        //     bytes (Merkle-style) so a dep-source edit propagates to the
+        //     dependent's key; registry deps pinned to an immutable published
+        //     version may keep the version string.
+        let dep_source_hashes = collect_transitive_dep_source_hashes(root, &project.config)?;
+
+        // 3c. Compiler fingerprint (§2.2 component 2 / AMENDMENT B): a build
+        //     content-id that changes on every meaningful compiler rebuild, NOT
+        //     the coarse `CARGO_PKG_VERSION` semver. Emitted by build.rs.
+        let compiler_fingerprint = compiler_fingerprint();
+
+        let source_hash = compute_cache_key(
+            all_sources.as_bytes(),
+            &compiler_fingerprint,
+            &dep_source_hashes,
+            &permission_profile,
+        );
+
+        // 4. Collect dependency versions (display/metadata surface; the freshness
+        //    gate keys off the §2.2 tuple above, not these strings).
         let mut dependencies = HashMap::new();
         for (name, spec) in &project.config.dependencies {
             let version = match spec {
@@ -201,7 +262,8 @@ impl BundleCompiler {
         let mut blob_store: HashMap<[u8; 32], Vec<u8>> = HashMap::new();
         let mut manifests: Vec<ModuleManifest> = Vec::new();
 
-        for (module_path, export_names, content_addressed) in &compiled_programs {
+        for (module_path, export_names, content_addressed, resolved_interface) in &compiled_programs
+        {
             if let Some(ca) = content_addressed {
                 // Extract blobs into blob_store
                 for (hash, blob) in &ca.function_store {
@@ -259,6 +321,13 @@ impl BundleCompiler {
                     manifest.dependency_closure.insert(*export_hash, closure);
                 }
 
+                // Stamp the §1.1 resolved interface for this module. Done before
+                // `finalize()` is immaterial: `resolved_interface` is deliberately
+                // NOT part of `ManifestHashInput` (DESIGN §1.2, supervisor
+                // decision 3) — it is integrity-bound transitively via the bundle
+                // `source_hash`, so it does not perturb `manifest_hash`.
+                manifest.resolved_interface = Some(resolved_interface.clone());
+
                 manifest.finalize();
                 manifests.push(manifest);
             }
@@ -273,6 +342,179 @@ impl BundleCompiler {
             native_dependency_scopes,
             docs,
         })
+    }
+}
+
+/// The build-time compiler fingerprint (compile-cache DESIGN §2.2 AMENDMENT B).
+///
+/// Folded into the cache key so a checker rebuild WITHOUT a `CARGO_PKG_VERSION`
+/// bump (the normal dev cycle) still invalidates stale `.shapec` interfaces.
+/// Emitted by `build.rs` as `SHAPE_COMPILER_FINGERPRINT`; if somehow unset
+/// (e.g. an unusual build path), falls back to the crate semver so the key is
+/// still well-defined.
+fn compiler_fingerprint() -> String {
+    option_env!("SHAPE_COMPILER_FINGERPRINT")
+        .map(str::to_string)
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string())
+}
+
+/// Compute the §2.2 four-part cache key:
+/// `SHA256(source_bytes ‖ compiler_fingerprint ‖ dep_source_hashes ‖ permission_profile)`.
+///
+/// Each component is length-prefixed (a fixed little-endian `u64` length tag,
+/// then the bytes) so distinct decompositions can never collide — e.g. a source
+/// edit that happens to shift a byte into the fingerprint region cannot alias a
+/// different (source, fingerprint) pair. `dep_source_hashes` and
+/// `permission_profile` are sorted by the caller for determinism; each element
+/// is itself length-framed.
+fn compute_cache_key(
+    source_bytes: &[u8],
+    compiler_fingerprint: &str,
+    dep_source_hashes: &[(String, String)],
+    permission_profile: &[String],
+) -> String {
+    let mut hasher = Sha256::new();
+
+    update_framed(&mut hasher, source_bytes);
+    update_framed(&mut hasher, compiler_fingerprint.as_bytes());
+
+    // dep_source_hashes: count, then each (name, hash) pair framed in order.
+    hasher.update((dep_source_hashes.len() as u64).to_le_bytes());
+    for (name, hash) in dep_source_hashes {
+        update_framed(&mut hasher, name.as_bytes());
+        update_framed(&mut hasher, hash.as_bytes());
+    }
+
+    // permission_profile: count, then each framed name in order.
+    hasher.update((permission_profile.len() as u64).to_le_bytes());
+    for perm in permission_profile {
+        update_framed(&mut hasher, perm.as_bytes());
+    }
+
+    format!("{:x}", hasher.finalize())
+}
+
+/// Feed a length-prefixed byte field into the hasher (8-byte LE length, then
+/// the bytes) for unambiguous framing across variable-length components.
+fn update_framed(hasher: &mut Sha256, bytes: &[u8]) {
+    hasher.update((bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
+}
+
+/// Recompute SHA-256 over the combined source bytes of every `.shape` file under
+/// a dependency source directory, in file-path-sorted order — mirroring the
+/// producer's own combined `source_hash` (the `all_sources` accumulation in
+/// `BundleCompiler::compile`). Used for path/workspace/git deps so a dep-source
+/// edit propagates into the dependent's cache key (DESIGN §2.2 AMENDMENT C).
+fn recompute_dir_source_hash(dep_root: &Path) -> Result<String, String> {
+    let mut files: Vec<(PathBuf, String)> = Vec::new();
+    collect_shape_files(dep_root, dep_root, &mut files)?;
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    files.dedup_by(|a, b| a.0 == b.0);
+
+    let mut combined = String::new();
+    for (file_path, _module_path) in &files {
+        let source = std::fs::read_to_string(file_path).map_err(|e| {
+            format!(
+                "Failed to read dependency source '{}': {}",
+                file_path.display(),
+                e
+            )
+        })?;
+        combined.push_str(&source);
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(combined.as_bytes());
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// Collect transitive dependency source hashes for the §2.2 cache key
+/// (AMENDMENT C / CLOSURE C). Returns `(dependency-name, hash-or-version)` pairs
+/// sorted by dependency name.
+///
+/// Classification (DESIGN §2.2 component 3):
+/// - **Path / Git**: recompute a `source_hash` over the dependency's own source
+///   bytes (Merkle-style). Editing the dep's source changes its hash → changes
+///   every dependent's key.
+/// - **Registry**: pinned to an immutable published version → the version string
+///   is sufficient (immutable by registry contract).
+/// - **Bundle (`.shapec`)**: the dependency is already a compiled artifact; its
+///   own embedded `source_hash` (`BundleMetadata.source_hash`) is the
+///   Merkle-stable input, read directly rather than recomputed.
+fn collect_transitive_dep_source_hashes(
+    root: &Path,
+    project: &shape_runtime::project::ShapeProject,
+) -> Result<Vec<(String, String)>, String> {
+    use shape_runtime::dependency_resolver::{DependencyResolver, ResolvedDependencySource};
+
+    if project.dependencies.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let Some(resolver) = DependencyResolver::new(canonical_root) else {
+        // No home dir → cannot resolve transitive paths. Fall back to the
+        // declared version strings so the key is still dep-aware (degrades to
+        // the pre-AMENDMENT-C behavior rather than dropping deps entirely).
+        let mut pairs: Vec<(String, String)> = project
+            .dependencies
+            .iter()
+            .map(|(name, spec)| (name.clone(), dependency_spec_version_string(spec)))
+            .collect();
+        pairs.sort_by(|a, b| a.0.cmp(&b.0));
+        return Ok(pairs);
+    };
+
+    // `resolve` returns the full transitive set in topological order.
+    let resolved = resolver.resolve(&project.dependencies).map_err(|e| {
+        format!(
+            "failed to resolve dependencies for cache-key dep hashing: {}",
+            e
+        )
+    })?;
+
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    for dep in resolved {
+        let hash = match &dep.source {
+            // Immutable published version → version string is sufficient.
+            ResolvedDependencySource::Registry { .. } => format!("registry:{}", dep.version),
+            // Already-compiled artifact: reuse its embedded source_hash.
+            ResolvedDependencySource::Bundle => {
+                match shape_runtime::package_bundle::PackageBundle::read_from_file(&dep.path) {
+                    Ok(bundle) => format!("bundle:{}", bundle.metadata.source_hash),
+                    // Unreadable bundle → fall back to version so a corrupt/stale
+                    // dep still perturbs the key rather than silently dropping.
+                    Err(_) => format!("bundle-version:{}", dep.version),
+                }
+            }
+            // Mutable source on disk → recompute over its source bytes.
+            ResolvedDependencySource::Path | ResolvedDependencySource::Git { .. } => {
+                recompute_dir_source_hash(&dep.path)?
+            }
+        };
+        pairs.push((dep.name.clone(), hash));
+    }
+
+    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(pairs)
+}
+
+/// Display-form version string for a dependency spec (fallback path only).
+fn dependency_spec_version_string(spec: &shape_runtime::project::DependencySpec) -> String {
+    match spec {
+        shape_runtime::project::DependencySpec::Version(v) => format!("version:{}", v),
+        shape_runtime::project::DependencySpec::Detailed(d) => {
+            if let Some(p) = &d.path {
+                format!("path:{}", p)
+            } else if let Some(g) = &d.git {
+                format!("git:{}", g)
+            } else if let Some(v) = &d.version {
+                format!("version:{}", v)
+            } else {
+                "local".to_string()
+            }
+        }
     }
 }
 
@@ -585,9 +827,452 @@ fn collect_export_names(program: &shape_ast::ast::Program) -> Vec<String> {
     names
 }
 
+/// Collect the resolved type-checker interface from a parsed AST (DESIGN §1.1 /
+/// §2.3 PRODUCER step).
+///
+/// Returns a [`ResolvedInterface`] carrying every interface-relevant item def in
+/// EXACT SOURCE ORDER (Function / ForeignFunction / StructType / Enum / Trait /
+/// Impl / Extend / TypeAlias) plus the export surface (names + visibility).
+///
+/// Per DESIGN §1.1 AMENDMENT A this is a SINGLE source-ordered `Vec<Item>` — NOT
+/// grouped-per-kind vectors — because trait/impl/enum registration is
+/// source-order-sensitive (an `impl T for S` textually before `trait T` must
+/// replay before the trait). Per the §1.1 sub-decision we carry ALL
+/// interface-relevant defs regardless of visibility: visibility gates only the
+/// consumer-visible query surface (`exports`), NOT registration order (a private
+/// trait can affect a public impl's registration).
+///
+/// Items wrapped in a `pub` export (`Item::Export(ExportStmt { item, .. })`) are
+/// unwrapped into their equivalent bare `Item` variant so the loader's
+/// `predeclare_item`/`infer_item` replay (§2.4) dispatches on the same node a
+/// from-source compile would. Nested `mod { ... }` blocks are walked recursively
+/// in place to preserve their interface items' source order relative to the
+/// enclosing scope.
+pub(crate) fn collect_resolved_interface(program: &shape_ast::ast::Program) -> ResolvedInterface {
+    let mut items: Vec<shape_ast::ast::Item> = Vec::new();
+    let mut exports: Vec<(String, ExportVisibility)> = Vec::new();
+
+    collect_interface_items(&program.items, &mut items, &mut exports);
+
+    ResolvedInterface {
+        interface_schema: KNOWN_INTERFACE_SCHEMA,
+        items,
+        exports,
+    }
+}
+
+/// Walk a slice of AST items in source order, pushing interface-relevant defs
+/// (unwrapping `pub` exports) into `items` and the export surface into `exports`.
+/// Recurses into `Item::Module` so nested interface items keep their source
+/// order relative to the enclosing scope.
+fn collect_interface_items(
+    src_items: &[shape_ast::ast::Item],
+    items: &mut Vec<shape_ast::ast::Item>,
+    exports: &mut Vec<(String, ExportVisibility)>,
+) {
+    use shape_ast::ast::{ExportItem, Item};
+
+    for item in src_items {
+        match item {
+            // Already-bare interface-relevant defs: carry verbatim in source order.
+            Item::Function(..)
+            | Item::ForeignFunction(..)
+            | Item::StructType(..)
+            | Item::Enum(..)
+            | Item::Trait(..)
+            | Item::Impl(..)
+            | Item::Extend(..)
+            | Item::TypeAlias(..) => {
+                items.push(item.clone());
+            }
+
+            // Nested module: recurse in place to preserve relative source order.
+            Item::Module(module, _span) => {
+                collect_interface_items(&module.items, items, exports);
+            }
+
+            // `pub` exports: record the export surface, and (where the export
+            // carries a def) unwrap into the equivalent bare `Item` so the
+            // replay passes dispatch identically to a from-source compile. Top-
+            // level `export` is the only visibility signal in source ASTs;
+            // comptime-only / internal are extension-registry concepts, so all
+            // source-level exports map to `Public`.
+            Item::Export(export, span) => {
+                match &export.item {
+                    ExportItem::Function(func) => {
+                        exports.push((func.name.clone(), ExportVisibility::Public));
+                        items.push(Item::Function(func.clone(), *span));
+                    }
+                    ExportItem::ForeignFunction(func) => {
+                        exports.push((func.name.clone(), ExportVisibility::Public));
+                        items.push(Item::ForeignFunction(func.clone(), *span));
+                    }
+                    ExportItem::Struct(s) => {
+                        exports.push((s.name.clone(), ExportVisibility::Public));
+                        items.push(Item::StructType(s.clone(), *span));
+                    }
+                    ExportItem::Enum(e) => {
+                        exports.push((e.name.clone(), ExportVisibility::Public));
+                        items.push(Item::Enum(e.clone(), *span));
+                    }
+                    ExportItem::Trait(t) => {
+                        exports.push((t.name.clone(), ExportVisibility::Public));
+                        items.push(Item::Trait(t.clone(), *span));
+                    }
+                    ExportItem::TypeAlias(alias) => {
+                        exports.push((alias.name.clone(), ExportVisibility::Public));
+                        items.push(Item::TypeAlias(alias.clone(), *span));
+                    }
+                    // Re-exports (`pub { name as alias }`): names only, no def to
+                    // register — the def lives in the imported module.
+                    ExportItem::Named(specs) => {
+                        for spec in specs {
+                            let name = spec.alias.clone().unwrap_or_else(|| spec.name.clone());
+                            exports.push((name, ExportVisibility::Public));
+                        }
+                    }
+                    // Not interface-relevant defs in the §1.1 sense (no annotation-
+                    // level signature the consumer type-checks against): record the
+                    // export name for the query surface but emit no replayable item.
+                    ExportItem::BuiltinFunction(func) => {
+                        exports.push((func.name.clone(), ExportVisibility::Public));
+                    }
+                    ExportItem::BuiltinType(ty) => {
+                        exports.push((ty.name.clone(), ExportVisibility::Public));
+                    }
+                    ExportItem::Annotation(annotation) => {
+                        exports.push((annotation.name.clone(), ExportVisibility::Public));
+                    }
+                }
+            }
+
+            // Everything else (imports, top-level statements, queries, tests,
+            // datasources, comptime blocks, builtin decls, …) is not part of the
+            // annotation-level interface surface (DESIGN §5 scope boundary).
+            _ => {}
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- §2.2 four-part cache-key (CLOSURE B + C) -------------------------
+
+    /// Baseline inputs for the four-part key. Each `cache_key_*` test perturbs
+    /// exactly one component and asserts the resulting hash differs from this.
+    fn baseline_key_inputs() -> (Vec<u8>, String, Vec<(String, String)>, Vec<String>) {
+        (
+            b"pub fn f() -> int { 1 }".to_vec(),
+            "abc1234".to_string(),
+            vec![("utils".to_string(), "deadbeef".to_string())],
+            vec!["FsRead".to_string(), "NetConnect".to_string()],
+        )
+    }
+
+    #[test]
+    fn cache_key_stable_for_identical_inputs() {
+        let (src, fp, deps, perms) = baseline_key_inputs();
+        let k1 = compute_cache_key(&src, &fp, &deps, &perms);
+        let k2 = compute_cache_key(&src, &fp, &deps, &perms);
+        assert_eq!(k1, k2, "key must be deterministic for identical inputs");
+    }
+
+    #[test]
+    fn cache_key_changes_when_source_bytes_change() {
+        let (src, fp, deps, perms) = baseline_key_inputs();
+        let base = compute_cache_key(&src, &fp, &deps, &perms);
+
+        let edited = b"pub fn f() -> int { 2 }".to_vec();
+        let changed = compute_cache_key(&edited, &fp, &deps, &perms);
+        assert_ne!(
+            base, changed,
+            "(i) editing source bytes must change the cache key"
+        );
+    }
+
+    #[test]
+    fn cache_key_changes_when_fingerprint_changes() {
+        let (src, fp, deps, perms) = baseline_key_inputs();
+        let base = compute_cache_key(&src, &fp, &deps, &perms);
+
+        // Same source + deps + perms, different compiler build (the AMENDMENT B
+        // case: a checker rebuild that does NOT bump CARGO_PKG_VERSION).
+        let changed = compute_cache_key(&src, "def5678-dirty-1700000000", &deps, &perms);
+        assert_ne!(
+            base, changed,
+            "(ii) a different compiler fingerprint must change the cache key"
+        );
+    }
+
+    #[test]
+    fn cache_key_changes_when_path_dep_source_hash_changes() {
+        let (src, fp, _deps, perms) = baseline_key_inputs();
+        let deps_v1 = vec![("utils".to_string(), "deadbeef".to_string())];
+        let deps_v2 = vec![("utils".to_string(), "feedface".to_string())];
+
+        let base = compute_cache_key(&src, &fp, &deps_v1, &perms);
+        let changed = compute_cache_key(&src, &fp, &deps_v2, &perms);
+        assert_ne!(
+            base, changed,
+            "(iii) a changed path-dep source_hash must change the cache key"
+        );
+    }
+
+    #[test]
+    fn cache_key_changes_when_permission_profile_changes() {
+        // Permissions are baked into FunctionBlob.content_hash; the cache key
+        // must mirror that — the same source under a narrower permission scope
+        // is a distinct artifact (§2.2 component 4).
+        let (src, fp, deps, _perms) = baseline_key_inputs();
+        let perms_broad = vec!["FsRead".to_string(), "NetConnect".to_string()];
+        let perms_narrow = vec!["FsRead".to_string()];
+
+        let broad = compute_cache_key(&src, &fp, &deps, &perms_broad);
+        let narrow = compute_cache_key(&src, &fp, &deps, &perms_narrow);
+        assert_ne!(
+            broad, narrow,
+            "a narrowed permission profile must change the cache key"
+        );
+    }
+
+    #[test]
+    fn cache_key_framing_prevents_boundary_collision() {
+        // Length-prefixed framing must keep (source="ab", fp="c") distinct from
+        // (source="a", fp="bc") — naive concatenation would collide.
+        let deps: Vec<(String, String)> = Vec::new();
+        let perms: Vec<String> = Vec::new();
+        let k1 = compute_cache_key(b"ab", "c", &deps, &perms);
+        let k2 = compute_cache_key(b"a", "bc", &deps, &perms);
+        assert_ne!(
+            k1, k2,
+            "component boundaries must be unambiguous (length-framed)"
+        );
+    }
+
+    // ---- §1.1 / §2.3 resolved-interface producer ------------------------
+
+    /// A short order-stable label for an interface item, used to assert that
+    /// `resolved_interface.items` preserves source order across a `.shapec`
+    /// round-trip (DESIGN §1.1 AMENDMENT A: the single source-ordered list is
+    /// load-bearing for trait/impl/enum registration).
+    fn interface_item_label(item: &shape_ast::ast::Item) -> String {
+        use shape_ast::ast::types::TypeName;
+        use shape_ast::ast::Item;
+
+        fn type_name_label(tn: &TypeName) -> String {
+            match tn {
+                TypeName::Simple(p) => p.name().to_string(),
+                TypeName::Generic { name, .. } => name.name().to_string(),
+            }
+        }
+
+        match item {
+            Item::Function(f, _) => format!("fn:{}", f.name),
+            Item::ForeignFunction(f, _) => format!("foreign:{}", f.name),
+            Item::StructType(s, _) => format!("struct:{}", s.name),
+            Item::Enum(e, _) => format!("enum:{}", e.name),
+            Item::Trait(t, _) => format!("trait:{}", t.name),
+            Item::Impl(i, _) => format!(
+                "impl:{}:{}",
+                type_name_label(&i.trait_name),
+                type_name_label(&i.target_type)
+            ),
+            Item::Extend(e, _) => format!("extend:{}", type_name_label(&e.type_name)),
+            Item::TypeAlias(a, _) => format!("alias:{}", a.name),
+            other => format!("other:{:?}", std::mem::discriminant(other)),
+        }
+    }
+
+    #[test]
+    fn resolved_interface_items_round_trip_preserving_source_order() {
+        // A small multi-item module whose `impl` is textually BEFORE its
+        // `trait` — the §1.1 AMENDMENT A order-sensitive case. The producer must
+        // carry items in EXACT source order, and that order must survive the
+        // SHAPEPKG to_bytes/from_bytes round-trip unchanged.
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let root = tmp.path();
+
+        std::fs::write(
+            root.join("shape.toml"),
+            "[project]\nname = \"iface-order\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("write shape.toml");
+
+        // Source order:
+        //   1. type Point        (struct)
+        //   2. impl Greet for Point  (impl, BEFORE the trait it implements)
+        //   3. trait Greet       (trait)
+        //   4. enum Color        (enum)
+        //   5. pub fn run        (function, via export)
+        std::fs::write(
+            root.join("main.shape"),
+            r#"
+type Point { x: int, y: int }
+
+impl Greet for Point {
+    method greet() -> int { 1 }
+}
+
+trait Greet {
+    method greet() -> int;
+}
+
+enum Color { Red, Green, Blue }
+
+pub fn run() -> int { 42 }
+"#,
+        )
+        .expect("write main.shape");
+
+        let project =
+            shape_runtime::project::find_project_root(root).expect("should find project root");
+        let bundle = BundleCompiler::compile(&project).expect("compile should succeed");
+
+        // The producer must have stamped a resolved_interface on the main module
+        // manifest (§2.3 producer step).
+        let main_manifest = bundle
+            .manifests
+            .iter()
+            .find(|m| m.name == "main")
+            .expect("main module manifest should exist");
+        let iface = main_manifest
+            .resolved_interface
+            .as_ref()
+            .expect("main manifest must carry a resolved interface");
+        assert_eq!(
+            iface.interface_schema,
+            shape_runtime::package_bundle::KNOWN_INTERFACE_SCHEMA,
+            "interface_schema must be the current revision"
+        );
+
+        let expected_order = vec![
+            "struct:Point".to_string(),
+            "impl:Greet:Point".to_string(),
+            "trait:Greet".to_string(),
+            "enum:Color".to_string(),
+            "fn:run".to_string(),
+        ];
+        let produced_order: Vec<String> =
+            iface.items.iter().map(interface_item_label).collect();
+        assert_eq!(
+            produced_order, expected_order,
+            "producer must carry interface items in EXACT source order \
+             (impl BEFORE trait), not grouped-per-kind"
+        );
+
+        // The export surface carries the public `run` function.
+        assert!(
+            iface
+                .exports
+                .iter()
+                .any(|(name, vis)| name == "run"
+                    && *vis == shape_runtime::package_bundle::ExportVisibility::Public),
+            "exports must record `run` as Public, got {:?}",
+            iface.exports
+        );
+
+        // Round-trip the whole bundle through the SHAPEPKG container and assert
+        // the restored manifest's interface item order is byte-for-byte the same
+        // ordered sequence — the load-bearing §1.1 property.
+        let bytes = bundle.to_bytes().expect("to_bytes should succeed");
+        let restored = PackageBundle::from_bytes(&bytes).expect("from_bytes should succeed");
+
+        let restored_iface = restored
+            .manifests
+            .iter()
+            .find(|m| m.name == "main")
+            .and_then(|m| m.resolved_interface.as_ref())
+            .expect("restored main manifest must carry a resolved interface");
+        let restored_order: Vec<String> = restored_iface
+            .items
+            .iter()
+            .map(interface_item_label)
+            .collect();
+        assert_eq!(
+            restored_order, expected_order,
+            "resolved_interface.items must round-trip through to_bytes/from_bytes \
+             PRESERVING ORDER"
+        );
+    }
+
+    #[test]
+    fn recompute_dir_source_hash_tracks_dep_source_edits() {
+        // The path-dep source-hash recomputation must change when a .shape file
+        // under the dep dir is edited (the Merkle input to CLOSURE C).
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let dep = tmp.path().join("utils");
+        std::fs::create_dir_all(&dep).expect("create dep dir");
+        std::fs::write(dep.join("lib.shape"), "pub fn util() -> int { 1 }")
+            .expect("write dep source");
+
+        let h1 = recompute_dir_source_hash(&dep).expect("hash v1");
+
+        std::fs::write(dep.join("lib.shape"), "pub fn util() -> int { 2 }")
+            .expect("rewrite dep source");
+        let h2 = recompute_dir_source_hash(&dep).expect("hash v2");
+
+        assert_ne!(h1, h2, "editing a dep .shape file must change its source hash");
+
+        // Stable when unchanged.
+        let h3 = recompute_dir_source_hash(&dep).expect("hash v3");
+        assert_eq!(h2, h3, "unchanged dep source must hash identically");
+    }
+
+    #[test]
+    fn bundle_source_hash_changes_when_path_dep_source_changes() {
+        // End-to-end: a dependent package's BundleMetadata.source_hash must move
+        // when its path dependency's source is edited (CLOSURE C wired through
+        // BundleCompiler::compile).
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let dep_dir = tmp.path().join("dep");
+        let app_dir = tmp.path().join("app");
+        std::fs::create_dir_all(&dep_dir).expect("create dep dir");
+        std::fs::create_dir_all(&app_dir).expect("create app dir");
+
+        std::fs::write(
+            dep_dir.join("shape.toml"),
+            "[project]\nname = \"dep\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("write dep shape.toml");
+        std::fs::write(dep_dir.join("main.shape"), "pub fn dep_val() -> int { 1 }")
+            .expect("write dep source v1");
+
+        std::fs::write(
+            app_dir.join("shape.toml"),
+            "[project]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\ndep = { path = \"../dep\" }\n",
+        )
+        .expect("write app shape.toml");
+        std::fs::write(
+            app_dir.join("main.shape"),
+            "from dep::main use { dep_val }\n\npub fn run() -> int { dep_val() }\n",
+        )
+        .expect("write app source");
+
+        let app_project_v1 =
+            shape_runtime::project::find_project_root(&app_dir).expect("app project root");
+        let key_v1 = BundleCompiler::compile(&app_project_v1)
+            .expect("compile app v1")
+            .metadata
+            .source_hash;
+
+        // Edit ONLY the dependency's source; the app source is untouched.
+        std::fs::write(dep_dir.join("main.shape"), "pub fn dep_val() -> int { 2 }")
+            .expect("write dep source v2");
+
+        let app_project_v2 =
+            shape_runtime::project::find_project_root(&app_dir).expect("app project root");
+        let key_v2 = BundleCompiler::compile(&app_project_v2)
+            .expect("compile app v2")
+            .metadata
+            .source_hash;
+
+        assert_ne!(
+            key_v1, key_v2,
+            "editing a path-dep's source must change the dependent bundle's cache key"
+        );
+    }
 
     fn discover_system_library_alias() -> Option<String> {
         let candidates = [
@@ -966,6 +1651,503 @@ pub fn run() -> number {
         assert!(
             bundle.modules.iter().any(|m| m.module_path == "main"),
             "should have main module"
+        );
+    }
+}
+
+// ===========================================================================
+// DESIGN §3.1 / §3.3 — RESULTS-IDENTICAL differential test.
+//
+// For each corpus case (module M + consumer P) this asserts that:
+//   route A: compile M FROM SOURCE, then type-check P
+//   route B: build M's interface, ROUND-TRIP its bytes through
+//            PackageBundle::to_bytes/from_bytes, REPLAY the cached interface
+//            (`replay_resolved_interface`), then type-check P
+// produce
+//   (1) BYTE-IDENTICAL diagnostics — same set, order, spans, messages, LSDS
+//       (Display) rendering — and
+//   (2) an IDENTICAL inferred-type surface for P.
+//
+// Per the §3.3 lower-severity amendment, TypeVar ids are NORMALIZED in the
+// rendered inferred-type surface (first-encounter ordinal, scoped per render)
+// so the comparison neither passes nor fails for the wrong reason. The
+// diagnostic Display surface is already TypeVar-normalized: `TypeError`'s
+// `format_type` lowers `Type::Variable(_) => "unknown"` (errors.rs:181), so no
+// raw TypeVar id leaks into a rendered message.
+//
+// The differential is honest: route A registers M's interface via the SAME
+// from-source passes a real compile runs (`infer_program_best_effort` over M),
+// route B via the SAME loader replay a real cache LOAD runs
+// (`replay_resolved_interface` over the bytes-round-tripped cached items); the
+// consumer-check step (`check_consumer_against_registered_interface`) is byte-
+// for-byte identical on both routes — the only variable is HOW M's interface
+// entered the engine.
+// ===========================================================================
+#[cfg(test)]
+mod results_identical_differential {
+    use super::*;
+    use shape_ast::parser::parse_program;
+    use shape_runtime::type_system::inference::TypeInferenceEngine;
+    use shape_runtime::type_system::{Type, TypeError};
+    use std::collections::HashMap;
+
+    /// LSDS-rendered diagnostic surface: the user-facing Display string for each
+    /// diagnostic, in emission order (NOT sorted — order is part of the binder).
+    /// Display is the §3.3 "LSDS-rendered" message text; it is already TypeVar-id
+    /// normalized via `TypeError::format_type`.
+    fn render_lsds(errors: &[TypeError]) -> Vec<String> {
+        errors.iter().map(|e| format!("{}", e)).collect()
+    }
+
+    /// Stronger structural surface: the full `{:?}` of each diagnostic, in
+    /// emission order. Catches any divergence the human-facing message would
+    /// elide (variant, captured fields, symbol attribution).
+    fn render_structural(errors: &[TypeError]) -> Vec<String> {
+        errors.iter().map(|e| format!("{:?}", e)).collect()
+    }
+
+    /// TypeVar-id-NORMALIZING renderer for the inferred-type surface (§3.3
+    /// amendment). Two routes may start their `fresh_type_var` counter at
+    /// different points, so a raw TypeVar id that leaks into a rendered type
+    /// would make the surfaces differ spuriously — or coincide and mask a real
+    /// difference. We assign each DISTINCT TypeVar a first-encounter ordinal
+    /// (`'#0`, `'#1`, …) scoped to ONE render call, so the rendering depends on
+    /// the *structure* of the type, never on the absolute id.
+    struct VarNormalizer {
+        map: HashMap<String, usize>,
+    }
+    impl VarNormalizer {
+        fn new() -> Self {
+            Self {
+                map: HashMap::new(),
+            }
+        }
+        fn norm(&mut self, raw: &str) -> String {
+            let n = self.map.len();
+            let id = *self.map.entry(raw.to_string()).or_insert(n);
+            format!("'#{}", id)
+        }
+        fn render(&mut self, ty: &Type) -> String {
+            match ty {
+                Type::Concrete(ann) => format!("{:?}", ann),
+                Type::Variable(v) => self.norm(&v.0),
+                Type::Constrained { var, constraint } => {
+                    format!("{}:{:?}", self.norm(&var.0), constraint)
+                }
+                Type::Generic { base, args } => {
+                    let base = self.render(base);
+                    let args: Vec<String> = args.iter().map(|a| self.render(a)).collect();
+                    format!("{}<{}>", base, args.join(", "))
+                }
+                Type::Function { params, returns } => {
+                    let params: Vec<String> = params.iter().map(|p| self.render(p)).collect();
+                    let returns = self.render(returns);
+                    format!("({}) => {}", params.join(", "), returns)
+                }
+            }
+        }
+    }
+
+    /// Render the consumer's inferred-type surface as a SORTED-by-name list of
+    /// `name => normalized-type` lines. Sorted by name because the surface is a
+    /// HashMap; the per-render VarNormalizer keeps id assignment deterministic
+    /// across the (identical) key set the two routes produce.
+    fn inferred_surface(types: &HashMap<String, Type>) -> Vec<String> {
+        let mut names: Vec<&String> = types.keys().collect();
+        names.sort();
+        let mut norm = VarNormalizer::new();
+        names
+            .iter()
+            .map(|n| format!("{} => {}", n, norm.render(&types[*n])))
+            .collect()
+    }
+
+    /// ROUTE A — compile module M FROM SOURCE, then type-check consumer P.
+    /// Returns P's (inferred-type surface, diagnostics).
+    fn route_a(module_src: &str, consumer_src: &str) -> (Vec<String>, Vec<TypeError>) {
+        let m = parse_program(module_src).expect("module M parses");
+        let p = parse_program(consumer_src).expect("consumer P parses");
+
+        let mut engine = TypeInferenceEngine::new();
+        // Full from-source compile of M (predeclare + infer + solve), exactly the
+        // passes a real compile of M runs. We discard M's own diagnostics here:
+        // the binder (§3.1) is scoped to the consumer's view of M's INTERFACE,
+        // not M's body re-checking (M is well-formed in every corpus case).
+        let _ = engine.infer_program_best_effort(&m);
+        let (types, errors) = engine.check_consumer_against_registered_interface(&p);
+        (inferred_surface(&types), errors)
+    }
+
+    /// ROUTE B — build M's interface, ROUND-TRIP its bytes
+    /// (`PackageBundle::to_bytes`/`from_bytes`), REPLAY the cached interface,
+    /// then type-check consumer P. Returns P's (inferred-type surface,
+    /// diagnostics). This drives the SAME loader code (`replay_resolved_interface`
+    /// over `manifest.resolved_interface.items`) a real cache LOAD drives.
+    fn route_b(module_src: &str, consumer_src: &str) -> (Vec<String>, Vec<TypeError>) {
+        let m = parse_program(module_src).expect("module M parses");
+        let p = parse_program(consumer_src).expect("consumer P parses");
+
+        // PRODUCER: AST → ResolvedInterface (DESIGN §1.1, source-ordered items).
+        let interface = collect_resolved_interface(&m);
+
+        // Attach to a manifest, wrap in a minimal SHAPEPKG bundle, serialize.
+        let mut manifest = ModuleManifest::new("m".into(), "1.0.0".into());
+        manifest.resolved_interface = Some(interface);
+        manifest.finalize();
+
+        let bundle = PackageBundle {
+            metadata: BundleMetadata {
+                name: "diff-m".to_string(),
+                version: "1.0.0".to_string(),
+                compiler_version: env!("CARGO_PKG_VERSION").to_string(),
+                source_hash: "diff_hash".to_string(),
+                bundle_kind: "portable-bytecode".to_string(),
+                build_host: "test".to_string(),
+                native_portable: true,
+                entry_module: None,
+                built_at: 0,
+                readme: None,
+            },
+            modules: vec![],
+            dependencies: HashMap::new(),
+            blob_store: HashMap::new(),
+            manifests: vec![manifest],
+            native_dependency_scopes: vec![],
+            docs: HashMap::new(),
+        };
+
+        // BYTE ROUND-TRIP through the SHAPEPKG container.
+        let bytes = bundle.to_bytes().expect("bundle serializes");
+        let restored = PackageBundle::from_bytes(&bytes).expect("bundle deserializes");
+        let cached_interface = restored.manifests[0]
+            .resolved_interface
+            .as_ref()
+            .expect("cached interface survives the byte round-trip");
+
+        // LOADER: replay the cached interface (predeclare + register, no bodies),
+        // then type-check P against it.
+        let mut engine = TypeInferenceEngine::new();
+        let replay_errors = engine.replay_resolved_interface(&cached_interface.items);
+        assert!(
+            replay_errors.is_empty(),
+            "well-formed interface must replay cleanly; got {:?}",
+            replay_errors
+        );
+        let (types, errors) = engine.check_consumer_against_registered_interface(&p);
+        (inferred_surface(&types), errors)
+    }
+
+    /// The §3.3 binder assertion for one corpus case. On any divergence the panic
+    /// message carries the diff (NOT silenced) — a real RESULTS-IDENTICAL
+    /// violation, per the prompt, must be reported, never weakened.
+    fn assert_results_identical(case: &str, module_src: &str, consumer_src: &str) {
+        let (surface_a, diags_a) = route_a(module_src, consumer_src);
+        let (surface_b, diags_b) = route_b(module_src, consumer_src);
+
+        let lsds_a = render_lsds(&diags_a);
+        let lsds_b = render_lsds(&diags_b);
+        assert_eq!(
+            lsds_a, lsds_b,
+            "[{case}] LSDS diagnostics differ between source-compile and \
+             cache-replay routes (RESULTS-IDENTICAL violation)\n  A: {lsds_a:#?}\n  B: {lsds_b:#?}"
+        );
+
+        let struct_a = render_structural(&diags_a);
+        let struct_b = render_structural(&diags_b);
+        assert_eq!(
+            struct_a, struct_b,
+            "[{case}] structural diagnostic surface differs between routes\n  \
+             A: {struct_a:#?}\n  B: {struct_b:#?}"
+        );
+
+        assert_eq!(
+            surface_a, surface_b,
+            "[{case}] inferred-type surface differs between routes \
+             (TypeVar-normalized)\n  A: {surface_a:#?}\n  B: {surface_b:#?}"
+        );
+    }
+
+    // ----- Corpus -----------------------------------------------------------
+    //
+    // Each case is the §3.3 required hard case. The cache would FAIL (diverge)
+    // if a lossy `to_annotation()` round-trip or a reordering encoding crept in.
+
+    /// §3.3 — a generic stdlib fn with bounds + defaults: `clamp<T: Ord>`.
+    /// Consumer calls it concretely; the inferred return type must match on both
+    /// routes (the generic param + bound survive the annotation-level cache).
+    #[test]
+    fn case_generic_fn_with_bounds_clamp() {
+        let m = r#"
+            pub fn clamp<T: Ord>(x: T, lo: T, hi: T) -> T {
+                if x < lo { return lo }
+                if x > hi { return hi }
+                return x
+            }
+        "#;
+        let p = r#"
+            fn use_clamp() -> int {
+                return clamp(5, 0, 10)
+            }
+        "#;
+        assert_results_identical("generic_fn_clamp", m, p);
+    }
+
+    /// §3.3 — a fn with a DEFAULT generic param. The default_type on the
+    /// `TypeParam` is annotation-level (ast/types.rs:210) and survives the cache.
+    #[test]
+    fn case_generic_fn_with_default_param() {
+        let m = r#"
+            pub fn identity<T = int>(x: T) -> T {
+                return x
+            }
+        "#;
+        let p = r#"
+            fn use_identity() -> int {
+                return identity(7)
+            }
+        "#;
+        assert_results_identical("generic_fn_default_param", m, p);
+    }
+
+    /// §3.3 — a generic method table exercising BIDIRECTIONAL inference:
+    /// `extend Vec<T> { method map<U>(f: (T) => U): Vec<U> }`. The consumer does
+    /// `arr.map(|x| ...)` and the closure param `x`'s inferred type must be
+    /// IDENTICAL on both routes (this is the case that would regress to
+    /// `(unknown) => unknown` under a `to_annotation()` seam — §3.3 / Area 1 §c.3).
+    #[test]
+    fn case_generic_method_table_bidirectional_inference() {
+        let m = r#"
+            extend Vec<T> {
+                method map<U>(f: (T) => U) -> Vec<U> {
+                    return this
+                }
+            }
+        "#;
+        let p = r#"
+            fn use_map() -> Vec<int> {
+                let arr: Vec<int> = [1, 2, 3]
+                return arr.map(|x| x + 1)
+            }
+        "#;
+        assert_results_identical("generic_method_table_map", m, p);
+    }
+
+    /// §3.3 — `Some`/`Ok`/`Err` with the `E = AnyError` default. The consumer
+    /// constructs each; the inferred Option/Result surface must match on both
+    /// routes. (These constructors are builtin-seeded, so this case primarily
+    /// guards that the cache replay does not perturb the builtin env that a
+    /// from-source compile leaves intact.)
+    #[test]
+    fn case_some_ok_err_anyerror_default() {
+        let m = r#"
+            pub fn wrap(x: int) -> Option<int> {
+                return Some(x)
+            }
+            pub fn try_it(x: int) -> Result<int, AnyError> {
+                return Ok(x)
+            }
+        "#;
+        let p = r#"
+            fn use_some() -> Option<int> {
+                return Some(1)
+            }
+            fn use_ok() -> Result<int, AnyError> {
+                return Ok(2)
+            }
+            fn use_err() -> Result<int, AnyError> {
+                return Err(AnyError("boom"))
+            }
+            fn use_wrap() -> Option<int> {
+                return wrap(3)
+            }
+        "#;
+        assert_results_identical("some_ok_err_default", m, p);
+    }
+
+    /// §3.3 — a struct with a COMPTIME field + `@range`/`@description`
+    /// annotation. `StructField.is_comptime`/`annotations` are annotation-level
+    /// (ast/types.rs:674) and must survive the cache verbatim.
+    #[test]
+    fn case_struct_comptime_field_and_range_annotation() {
+        let m = r#"
+            pub type Sensor {
+                @description("measured value")
+                @range(0, 100)
+                value: number,
+                comptime max_readings: int,
+            }
+        "#;
+        let p = r#"
+            fn use_sensor(s: Sensor) -> number {
+                return s.value
+            }
+        "#;
+        assert_results_identical("struct_comptime_range", m, p);
+    }
+
+    /// §3.3 — a trait + impl + extend exercising `TypeParamExpr`
+    /// (ReceiverParam/MethodParam). The consumer calls the trait method on the
+    /// impl'ing type; the dispatched return type must match on both routes.
+    #[test]
+    fn case_trait_impl_extend_typeparamexpr() {
+        let m = r#"
+            type Point { x: number, y: number }
+
+            trait Shape {
+                method area() -> number;
+            }
+
+            impl Shape for Point {
+                method area() -> number { return this.x * this.y }
+            }
+
+            extend Vec<T> {
+                method first_or<U>(fallback: U) -> U {
+                    return fallback
+                }
+            }
+        "#;
+        let p = r#"
+            fn use_area(pt: Point) -> number {
+                return pt.area()
+            }
+        "#;
+        assert_results_identical("trait_impl_extend", m, p);
+    }
+
+    /// §3.3 / Amendment A / R3 — an `impl` textually BEFORE its `trait` in M's
+    /// SOURCE ORDER. The cache's single source-ordered `Vec<Item>` (§1.1) must
+    /// replay the impl before the trait, reproducing from-source registration
+    /// behavior; a grouped-per-kind encoding would diverge. The consumer using
+    /// the type must check identically on both routes.
+    #[test]
+    fn case_impl_before_trait_source_order() {
+        let m = r#"
+            type Canvas { w: int }
+
+            impl Drawable for Canvas {
+                method draw() -> string { return "drawn" }
+            }
+
+            trait Drawable {
+                method draw() -> string;
+            }
+        "#;
+        let p = r#"
+            fn use_draw(c: Canvas) -> string {
+                return c.draw()
+            }
+        "#;
+        assert_results_identical("impl_before_trait", m, p);
+    }
+
+    /// §3.3 — the NEGATIVE case: a consumer that SHOULD error against M's
+    /// interface. The SAME error must fire on BOTH routes — proving the cache
+    /// does NOT silently widen M's interface to `unknown` and accept what a
+    /// from-source compile rejects.
+    #[test]
+    fn case_negative_consumer_error_fires_on_both_routes() {
+        let m = r#"
+            pub fn needs_int(x: int) -> int {
+                return x
+            }
+        "#;
+        // P calls a function M does NOT export — must be an undefined-function
+        // error on both routes (the interface does not contain `does_not_exist`).
+        let p = r#"
+            fn bad() -> int {
+                return does_not_exist(1)
+            }
+        "#;
+        let (_, diags_a) = route_a(m, p);
+        let (_, diags_b) = route_b(m, p);
+
+        assert!(
+            !diags_a.is_empty(),
+            "negative case must produce an error on the source-compile route \
+             (else it is not actually a negative case)"
+        );
+        assert_eq!(
+            render_lsds(&diags_a),
+            render_lsds(&diags_b),
+            "negative case: the SAME error must fire on both routes — the cache \
+             must NOT silently widen the interface and accept (RESULTS-IDENTICAL)\n  \
+             A: {:#?}\n  B: {:#?}",
+            render_lsds(&diags_a),
+            render_lsds(&diags_b),
+        );
+        assert_eq!(
+            render_structural(&diags_a),
+            render_structural(&diags_b),
+            "negative case: structural diagnostic surface must match on both routes"
+        );
+    }
+
+    /// §3.3 SECOND GUARD — the container round-trip is BYTE-STABLE:
+    /// `to_bytes -> from_bytes -> to_bytes` is identical. Catches nondeterministic
+    /// map ordering in the MessagePack encoding of `ResolvedInterface` (R2);
+    /// `exports` is a `Vec<(K,V)>` not a HashMap precisely to keep this stable.
+    #[test]
+    fn case_round_trip_is_byte_stable() {
+        // Exercise a rich interface (struct + trait + impl + generic fn + extend)
+        // so the guard covers the full item-node serde surface, not a trivial one.
+        let m = r#"
+            pub type Point { x: number, y: number }
+
+            pub trait Shape {
+                method area() -> number;
+            }
+
+            impl Shape for Point {
+                method area() -> number { return this.x * this.y }
+            }
+
+            pub fn clamp<T: Ord>(x: T, lo: T, hi: T) -> T {
+                return x
+            }
+
+            extend Vec<T> {
+                method map<U>(f: (T) => U) -> Vec<U> {
+                    return this
+                }
+            }
+        "#;
+        let program = parse_program(m).expect("module parses");
+        let interface = collect_resolved_interface(&program);
+
+        let mut manifest = ModuleManifest::new("m".into(), "1.0.0".into());
+        manifest.resolved_interface = Some(interface);
+        manifest.finalize();
+
+        let bundle = PackageBundle {
+            metadata: BundleMetadata {
+                name: "stable".to_string(),
+                version: "1.0.0".to_string(),
+                compiler_version: env!("CARGO_PKG_VERSION").to_string(),
+                source_hash: "stable_hash".to_string(),
+                bundle_kind: "portable-bytecode".to_string(),
+                build_host: "test".to_string(),
+                native_portable: true,
+                entry_module: None,
+                built_at: 0,
+                readme: None,
+            },
+            modules: vec![],
+            dependencies: HashMap::new(),
+            blob_store: HashMap::new(),
+            manifests: vec![manifest],
+            native_dependency_scopes: vec![],
+            docs: HashMap::new(),
+        };
+
+        let bytes1 = bundle.to_bytes().expect("first serialize");
+        let restored = PackageBundle::from_bytes(&bytes1).expect("deserialize");
+        let bytes2 = restored.to_bytes().expect("second serialize");
+
+        assert_eq!(
+            bytes1, bytes2,
+            "to_bytes -> from_bytes -> to_bytes must be byte-identical (R2: \
+             MessagePack map nondeterminism guard)"
         );
     }
 }

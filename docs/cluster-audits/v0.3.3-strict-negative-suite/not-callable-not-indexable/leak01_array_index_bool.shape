@@ -1,0 +1,5 @@
+// THE BREACH: indexing an array with a bool. Strict typing must reject
+// (index must be int), but bool `true` is silently reinterpreted as
+// index 1 and the program runs, printing 20.
+let arr = [10, 20, 30]
+print(arr[true])

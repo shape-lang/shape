@@ -1,0 +1,4 @@
+// Calling an int value. Strict typing must reject: int is not callable.
+let x = 5
+let y = x()
+print(y)

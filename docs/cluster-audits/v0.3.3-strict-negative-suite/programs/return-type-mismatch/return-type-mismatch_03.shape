@@ -1,0 +1,8 @@
+// fn declared -> int but returns an array literal.
+// Strict typing MUST reject: Array<int> is not int. No coercion exists.
+fn count_items() -> int {
+    return [1, 2, 3]
+}
+
+let c = count_items()
+print(c)

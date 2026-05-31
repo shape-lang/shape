@@ -1,0 +1,7 @@
+// Error mode: wrong payload type to a tuple-variant ctor (int vs number split).
+// B expects an int payload; we pass a number literal (2.5). int and number are
+// separate types and do not unify (CLAUDE.md §Type System Rules).
+enum E { A, B(int) }
+let e = E::B(2.5)
+let r = match e { E::A => 0, E::B(n) => n }
+print(r)

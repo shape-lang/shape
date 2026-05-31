@@ -1,0 +1,6 @@
+// THE BREACH: filter's predicate must return `bool`, but this closure returns
+// `number` (`x * 1.0`). Strict typing must reject (predicate type is
+// `int -> bool`). Instead it runs and keeps all elements.
+let arr = [1, 2, 3, 4]
+let r = arr.filter(|x| x * 1.0)
+print(r)

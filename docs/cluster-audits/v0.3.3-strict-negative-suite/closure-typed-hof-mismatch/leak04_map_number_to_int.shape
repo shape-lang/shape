@@ -1,0 +1,6 @@
+// THE BREACH: map over Array<number> with a closure returning `int` (`7`).
+// The element type would change from number to int -- strict typing must reject
+// (number and int do not unify). Instead it runs and prints an Array<int>.
+let arr = [1.0, 2.0, 3.0]
+let r = arr.map(|x| 7)
+print(r)

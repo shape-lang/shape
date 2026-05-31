@@ -1,0 +1,9 @@
+// arg-type-mismatch_05 — int passed to string param
+// A strict type system MUST reject: an `int` argument cannot bind to a
+// `string` parameter. There is no implicit int->string conversion.
+fn greet(name: string) -> string {
+    return name
+}
+
+let r = greet(42)
+print(r)

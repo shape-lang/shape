@@ -1,0 +1,5 @@
+// MODE: let x: int = "s"  (string literal bound to int annotation)
+// A strict type system must reject: the declared type `int` (i64) does not
+// match the initializer's type `string`. No coercion exists.
+let x: int = "s"
+print(x)

@@ -1,0 +1,10 @@
+// arg-type-mismatch_06 — int passed to number param (int/number do NOT unify)
+// A strict type system MUST reject: `int` (i64) and `number` (f64) are
+// separate types that do not unify, and NO IntToNumber coercion may be
+// emitted (CLAUDE.md §Type System Rules). The literal must be `2.0`, not `2`.
+fn half(x: number) -> number {
+    return x / 2.0
+}
+
+let r = half(7)
+print(r)

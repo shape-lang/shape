@@ -1,0 +1,6 @@
+// Error mode: wrong payload type to a struct-variant field.
+// C has field x: int; we initialize it with a string. Field type mismatch.
+enum E { A, C { x: int } }
+let e = E::C { x: "hello" }
+let r = match e { E::A => 0, E::C { x } => x }
+print(r)

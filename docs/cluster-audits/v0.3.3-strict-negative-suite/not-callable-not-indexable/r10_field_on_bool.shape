@@ -1,0 +1,3 @@
+// Field access .foo on a bool. bool has no fields.
+let b = true
+print(b.foo)

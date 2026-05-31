@@ -1,0 +1,12 @@
+// fn declared -> int but returns bool through a value-carrying branch.
+// Strict typing MUST reject: every return path must yield int; the
+// `return false` path yields bool which does not unify with int.
+fn pick(n: int) -> int {
+    if n > 0 {
+        return 1
+    }
+    return false
+}
+
+let p = pick(-5)
+print(p)

@@ -1,0 +1,9 @@
+// fn declared -> int but returns a bool literal.
+// Strict typing MUST reject: bool is not int; int and bool are separate
+// types and do not unify. No coercion exists.
+fn is_ready() -> int {
+    return true
+}
+
+let x = is_ready()
+print(x)

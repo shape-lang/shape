@@ -1,0 +1,3 @@
+// Calling a bool value. bool is not callable.
+let b = true
+b()

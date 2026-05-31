@@ -1,0 +1,7 @@
+// Error mode: constructing a unit variant with a struct-style payload.
+// A is a unit variant; supplying { x: 1 } is a shape error — a unit variant
+// has no fields.
+enum E { A, C { x: int } }
+let e = E::A { x: 1 }
+let r = match e { E::A => 0, E::C { x } => x }
+print(r)

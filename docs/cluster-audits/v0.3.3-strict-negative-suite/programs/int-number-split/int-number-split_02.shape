@@ -1,0 +1,9 @@
+// int-number-split_02: number literal passed where an `int` (i64) param is required (the vice-versa case).
+// `number` does not unify with `int`. Passing `3.5` (an f64 literal) where `int` is
+// declared must be a compile error — no implicit number->int coercion / truncation.
+fn takesInt(x: int) -> int {
+    x
+}
+
+let r = takesInt(3.5)
+print(r)

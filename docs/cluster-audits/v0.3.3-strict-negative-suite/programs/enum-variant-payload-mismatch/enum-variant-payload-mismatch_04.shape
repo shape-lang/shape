@@ -1,0 +1,7 @@
+// Error mode: constructing a unit variant WITH a payload.
+// A is a unit variant (no payload); supplying (5) is an arity/shape error —
+// a unit variant ctor takes no arguments.
+enum E { A, B(int) }
+let e = E::A(5)
+let r = match e { E::A => 0, E::B(n) => n }
+print(r)

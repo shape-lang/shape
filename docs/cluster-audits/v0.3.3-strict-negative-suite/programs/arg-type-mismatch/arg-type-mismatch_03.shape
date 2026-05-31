@@ -1,0 +1,10 @@
+// arg-type-mismatch_03 — array passed to scalar (int) param
+// A strict type system MUST reject: an `Array<int>` argument cannot bind to a
+// scalar `int` parameter. A heap array is not an int.
+fn addone(n: int) -> int {
+    return n + 1
+}
+
+let xs = [1, 2, 3]
+let r = addone(xs)
+print(r)

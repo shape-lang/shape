@@ -1,0 +1,15 @@
+// arg-type-mismatch_04 — struct (TypedObject) passed to primitive (int) param
+// A strict type system MUST reject: a `Point` TypedObject argument cannot bind
+// to a scalar `int` parameter. A heap struct is not an int.
+type Point {
+    x: int,
+    y: int
+}
+
+fn show(n: int) -> int {
+    return n
+}
+
+let p = Point { x: 1, y: 2 }
+let r = show(p)
+print(r)

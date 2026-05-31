@@ -1,0 +1,9 @@
+// arg-type-mismatch_02 — bool passed to number param
+// A strict type system MUST reject: a `bool` argument cannot bind to a
+// `number` (f64) parameter. No bool->number coercion exists.
+fn scale(x: number) -> number {
+    return x * 2.0
+}
+
+let r = scale(true)
+print(r)

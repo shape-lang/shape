@@ -1,0 +1,9 @@
+// NEGATIVE: map closure returns the wrong type for a typed HOF.
+// Element type is `int`; the closure body `x * 2.0` mixes the int param with a
+// `number` literal, so the closure yields `number` (f64). `int` and `number`
+// are separate types that DO NOT unify (CLAUDE.md §Type System Rules), so the
+// element type of the mapped array silently changes int -> number. A strict
+// type checker must reject `int * number`.
+let arr: Array<int> = [1, 2, 3];
+let r = arr.map(|x| x * 2.0);
+print(r);

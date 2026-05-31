@@ -1,0 +1,8 @@
+// NEGATIVE: filter closure returns a string literal, not bool.
+// The predicate body is the constant `"yes"` (type `string`). `filter` requires
+// `(T) -> bool`. A strict type checker must reject `string` where `bool` is
+// required; instead the string constant is treated as truthy and the whole
+// array passes through unchanged.
+let arr: Array<int> = [1, 2, 3];
+let r = arr.filter(|x| "yes");
+print(r);

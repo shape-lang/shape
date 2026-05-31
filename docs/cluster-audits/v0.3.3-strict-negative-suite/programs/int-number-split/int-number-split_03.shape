@@ -1,0 +1,8 @@
+// int-number-split_03: mixed int + number arithmetic with NO implicit coercion.
+// `a` is int (i64), `b` is number (f64). `a + b` has no common type — there is no
+// typed AddInt/AddNumber opcode that accepts mixed operands, and the compiler must
+// NOT emit an IntToNumber coercion to "fix" the mismatch. Must be a compile error.
+let a: int = 2
+let b: number = 2.0
+let s = a + b
+print(s)

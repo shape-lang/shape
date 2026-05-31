@@ -1,0 +1,9 @@
+// arg-type-mismatch_07 — string passed to bool param
+// A strict type system MUST reject: a `string` argument cannot bind to a
+// `bool` parameter. No string->bool coercion exists.
+fn negate(b: bool) -> bool {
+    return !b
+}
+
+let r = negate("true")
+print(r)

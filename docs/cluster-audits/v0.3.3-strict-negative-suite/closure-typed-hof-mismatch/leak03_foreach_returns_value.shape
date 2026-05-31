@@ -1,0 +1,7 @@
+// THE BREACH: forEach's closure must return Unit (its result is discarded),
+// but this closure returns `int` (`x * 2`). A strict signature `int -> ()`
+// must reject the non-Unit body. Instead the value is silently dropped and the
+// program runs to completion.
+let arr = [1, 2, 3]
+arr.forEach(|x| x * 2)
+print("done")

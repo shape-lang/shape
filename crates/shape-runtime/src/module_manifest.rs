@@ -26,6 +26,17 @@ pub struct ModuleManifest {
     pub manifest_hash: [u8; 32],
     /// Optional cryptographic signature.
     pub signature: Option<ModuleSignature>,
+    /// Resolved type-checker interface for this module (compile-cache
+    /// resolved-interface extension, DESIGN §1.2). `None` on v1–v3 bundles and
+    /// on any module without a cached interface → consumers rebuild from source.
+    ///
+    /// Deliberately NOT included in `ManifestHashInput` (DESIGN §1.2, supervisor
+    /// decision 3): the interface is fully derived from source and is
+    /// integrity-bound transitively via `source_hash`; keeping it out of the
+    /// manifest hash lets the interface be regenerated or schema-migrated without
+    /// invalidating content-addressed blob identity.
+    #[serde(default)]
+    pub resolved_interface: Option<crate::package_bundle::ResolvedInterface>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,6 +72,7 @@ impl ModuleManifest {
             dependency_closure: HashMap::new(),
             manifest_hash: [0u8; 32],
             signature: None,
+            resolved_interface: None,
         }
     }
 

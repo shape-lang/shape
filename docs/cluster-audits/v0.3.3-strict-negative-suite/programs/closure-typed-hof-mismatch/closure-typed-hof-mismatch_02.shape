@@ -1,0 +1,8 @@
+// NEGATIVE: filter closure does not return bool.
+// `filter` requires its closure to be a predicate `(T) -> bool`. Here the body
+// `x + 1` returns `int`. A strict type checker must reject a non-bool filter
+// predicate; instead the compiler stamps the closure `closure_0_bool` and
+// treats the returned int as truthy, so every element passes through.
+let arr: Array<int> = [1, 2, 3, 4];
+let r = arr.filter(|x| x + 1);
+print(r);

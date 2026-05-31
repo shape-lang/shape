@@ -1,0 +1,6 @@
+// THE BREACH: filter's predicate must return `bool`, but this closure returns
+// `int` (`x + 1`). Strict typing must reject (predicate type is `int -> bool`).
+// Instead nonzero ints are treated as truthy and every element is kept.
+let arr = [1, 2, 3, 4]
+let r = arr.filter(|x| x + 1)
+print(r)

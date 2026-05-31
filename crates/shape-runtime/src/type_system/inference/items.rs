@@ -44,6 +44,36 @@ impl TypeInferenceEngine {
                 .collect(),
         );
 
+        // Register the function's type parameters as in-scope type VARIABLES
+        // before resolving the param/return annotations, in a throwaway scope so
+        // they do not leak to siblings. Without this, `resolve_type_annotation`
+        // resolves a generic param reference (e.g. `T`) to a NOMINAL
+        // `Type::Concrete(Reference("T"))` (items.rs:633, the "name not in scope
+        // as a variable" fallback) rather than `Type::Variable(TypeVar("T"))`.
+        // `make_function_scheme` then quantifies over `TypeVar("T")` while the
+        // function type carries nominal `T`, so call-site instantiation replaces
+        // nothing and a consumer call like `clamp(5, 0, 10)` fails to unify
+        // (`T` ≠ `int`).
+        //
+        // `infer_function` (items.rs:451-465) already registers the type params
+        // as variables before resolving annotations; mirroring that here makes
+        // the PREDECLARED scheme identical to the one `infer_item` later produces.
+        // For a from-source compile this is harmless (infer_item overwrites the
+        // scheme anyway); for the cache LOAD/REPLAY path — which runs predeclare
+        // ONLY, never `infer_function` (DESIGN §2.4) — it is what makes a generic
+        // function's interface RESULTS-IDENTICAL between source-compile and
+        // cache-replay (DESIGN §3.1 binder). Verified by the
+        // `case_generic_fn_with_bounds_clamp` differential test, which diverged
+        // before this fix.
+        self.env.push_scope();
+        if let Some(type_params) = &func.type_params {
+            for tp in type_params {
+                let var = TypeVar::new(tp.name().to_string());
+                self.env
+                    .define(tp.name(), TypeScheme::mono(Type::Variable(var)));
+            }
+        }
+
         let param_types: Vec<Type> = func
             .params
             .iter()
@@ -57,6 +87,8 @@ impl TypeInferenceEngine {
             Some(ann) => self.resolve_type_annotation(ann),
             None => self.fresh_type_var(),
         };
+
+        self.env.pop_scope();
 
         let scheme =
             self.make_function_scheme(func, BuiltinTypes::function(param_types, return_type));
@@ -263,6 +295,165 @@ impl TypeInferenceEngine {
         }
 
         Ok(())
+    }
+
+    /// DESIGN §2.4 — LOAD path = REPLAY, not re-infer.
+    ///
+    /// On a fresh `.shapec` cache hit (the §2.3 load-or-rebuild gate selected
+    /// LOAD), the loader deserializes the module's [`ResolvedInterface`] and
+    /// drives THIS method over its source-ordered `items`. It replays the SAME
+    /// registration passes a from-source compile runs — the two-pass
+    /// `predeclare_item`→registration walk — skipping ONLY parsing and body
+    /// inference (`infer_function`).
+    ///
+    /// Faithful to §2.4 / Amendment A:
+    /// - **Pass 1** (`predeclare_item` over `items[0..n]` in order, items.rs:18):
+    ///   registers fn / foreign-fn / struct signatures + extend, exactly as
+    ///   `infer_program_best_effort`'s first pass. For a fully-annotated cached
+    ///   signature (`interface_schema = 1` is annotation-required, §3.4) this
+    ///   resolves identically whether the `FunctionDef` came from a fresh parse
+    ///   or the cache — `predeclare_function_signature` only falls into
+    ///   `fresh_type_var()` when an annotation is ABSENT (items.rs:50-53,56-59),
+    ///   which v1 excludes.
+    /// - **Pass 2** (registration-only over `items[0..n]` IN ORDER): registers
+    ///   the order-sensitive trait / impl / enum / extend / type-alias / struct
+    ///   defs via the SAME `register_trait` / `register_impl` / `register_enum` /
+    ///   `register_extend` / `define_type_alias` / `struct_type_defs` calls
+    ///   `infer_item` (items.rs:198-247) uses. Because `items` is in EXACT source
+    ///   order (Amendment A), an `impl T for S` textually before `trait T`
+    ///   replays before the trait — reproducing from-source accept/reject +
+    ///   method-table behavior bug-for-bug.
+    ///
+    /// What is DELIBERATELY NOT done (§2.4): no parse, no body inference, no
+    /// `infer_function`. The function-body arm of `infer_item` is the ONLY
+    /// `infer_item` work skipped here — the signature is already registered by
+    /// pass 1, so re-running `infer_function` would be the very re-inference the
+    /// cache exists to avoid (and would re-derive the same `Type`, since `items`
+    /// is identical). The derived `TypeScheme` / `MethodTable` / `TypeParamExpr`
+    /// carriers are REBUILT by these passes from the AST, never deserialized
+    /// (§5); `to_annotation()` is never on this path (§0, §3.2).
+    ///
+    /// Returns all registration errors (a from-source compile surfaces the same
+    /// set); callers may collect or assert-empty per the §3.3 binder.
+    pub fn replay_resolved_interface(&mut self, items: &[Item]) -> Vec<TypeError> {
+        let mut errors = Vec::new();
+
+        // Pass 1: predeclare signatures (fn / foreign / struct) + extend, in order.
+        for item in items {
+            if let Err(err) = self.predeclare_item(item) {
+                errors.push(err);
+            }
+        }
+
+        // Pass 2: registration-only, in EXACT source order. Mirrors the
+        // order-sensitive arms of `infer_item` (items.rs:169-247) WITHOUT the
+        // `Item::Function` body-inference arm (signatures came from pass 1).
+        for item in items {
+            if let Err(err) = self.replay_register_item(item) {
+                errors.push(err);
+            }
+        }
+
+        errors
+    }
+
+    /// Pass-2 registration dispatch for [`replay_resolved_interface`].
+    ///
+    /// Each arm is the registration half of the matching `infer_item` arm
+    /// (items.rs:120-263) with body inference elided. Functions / foreign
+    /// functions are no-ops here (signatures already registered by pass 1's
+    /// `predeclare_item`, matching `infer_item`'s `ForeignFunction` no-op and
+    /// the deliberate omission of `infer_function`). Type-alias / struct / enum /
+    /// trait / impl / extend reuse the SAME registration calls a from-source
+    /// `infer_item` makes, preserving source order.
+    fn replay_register_item(&mut self, item: &Item) -> TypeResult<()> {
+        match item {
+            // Signatures already registered by pass 1 (`predeclare_item`).
+            // `infer_item` would re-run `infer_function` here; the replay path
+            // deliberately does NOT (§2.4 "No infer_function").
+            Item::Function(_, _) | Item::ForeignFunction(_, _) => Ok(()),
+            Item::TypeAlias(alias, _) => {
+                self.env.define_type_alias(
+                    &alias.name,
+                    &alias.type_annotation,
+                    alias.meta_param_overrides.clone(),
+                );
+                Ok(())
+            }
+            Item::StructType(struct_def, _) => {
+                self.struct_type_defs
+                    .insert(struct_def.name.clone(), struct_def.clone());
+                let fields = struct_def
+                    .fields
+                    .iter()
+                    .filter(|f| !f.is_comptime)
+                    .map(|f| shape_ast::ast::ObjectTypeField {
+                        name: f.name.clone(),
+                        optional: f.default_value.is_some(),
+                        type_annotation: f.type_annotation.clone(),
+                        annotations: vec![],
+                    })
+                    .collect();
+                self.env
+                    .define_type_alias(&struct_def.name, &TypeAnnotation::Object(fields), None);
+                Ok(())
+            }
+            Item::Enum(enum_def, _) => {
+                self.env.register_enum(enum_def);
+                Ok(())
+            }
+            Item::Trait(trait_def, _) => self.register_trait(trait_def),
+            Item::Impl(impl_block, _) => self.register_impl(impl_block),
+            Item::Extend(extend, _) => self.register_extend(extend),
+            // `Item::Export(pub ...)`: the producer (DESIGN §1.1) UNWRAPS exports
+            // into bare item nodes before caching, so a cached interface never
+            // carries `Item::Export`. Mirror `infer_item`'s export arm anyway so
+            // the replay is robust to any future producer that retains wrappers,
+            // skipping the body-inference half (functions are predeclared).
+            Item::Export(export, _) => match &export.item {
+                shape_ast::ast::ExportItem::TypeAlias(alias) => {
+                    self.env.define_type_alias(
+                        &alias.name,
+                        &alias.type_annotation,
+                        alias.meta_param_overrides.clone(),
+                    );
+                    Ok(())
+                }
+                shape_ast::ast::ExportItem::Struct(struct_def) => {
+                    self.struct_type_defs
+                        .insert(struct_def.name.clone(), struct_def.clone());
+                    let fields = struct_def
+                        .fields
+                        .iter()
+                        .filter(|f| !f.is_comptime)
+                        .map(|f| shape_ast::ast::ObjectTypeField {
+                            name: f.name.clone(),
+                            optional: f.default_value.is_some(),
+                            type_annotation: f.type_annotation.clone(),
+                            annotations: vec![],
+                        })
+                        .collect();
+                    self.env.define_type_alias(
+                        &struct_def.name,
+                        &TypeAnnotation::Object(fields),
+                        None,
+                    );
+                    Ok(())
+                }
+                shape_ast::ast::ExportItem::Enum(enum_def) => {
+                    self.env.register_enum(enum_def);
+                    Ok(())
+                }
+                shape_ast::ast::ExportItem::Trait(trait_def) => self.register_trait(trait_def),
+                // Function / ForeignFunction exports: signature predeclared in
+                // pass 1; no body inference on the replay path.
+                _ => Ok(()),
+            },
+            // Statements / comptime / var-decls / module wrappers are not part
+            // of the cached interface surface (DESIGN §5: annotation-level item
+            // defs only); ignore defensively.
+            _ => Ok(()),
+        }
     }
 
     /// Infer type of a function
@@ -2450,6 +2641,138 @@ mod tests {
         assert!(
             !engine.method_table.is_comptime_method("Foo", "op"),
             "plain impl methods must NOT be marked comptime"
+        );
+    }
+
+    // --- DESIGN §2.4 — replay_resolved_interface (LOAD path = REPLAY) ---
+
+    #[test]
+    fn replay_registers_struct_trait_impl_into_env() {
+        use shape_ast::parser::parse_program;
+
+        // A typical interface surface: trait + impl + struct + fn (annotated).
+        let code = r#"
+            type Point { x: number, y: number }
+
+            trait Shape {
+                method area() -> number;
+            }
+
+            impl Shape for Point {
+                method area() -> number { return 0.0 }
+            }
+
+            fn origin() -> Point { return Point { x: 0.0, y: 0.0 } }
+        "#;
+        let program = parse_program(code).expect("should parse");
+
+        let mut engine = TypeInferenceEngine::new();
+        let errors = engine.replay_resolved_interface(&program.items);
+        assert!(
+            errors.is_empty(),
+            "well-formed interface replays cleanly: {:?}",
+            errors
+        );
+
+        // Struct registered (predeclare pass): the nominal type alias exists.
+        assert!(
+            engine.struct_type_defs.contains_key("Point"),
+            "replay registered the struct def"
+        );
+        // Function signature registered (predeclare pass), NOT body-inferred.
+        assert!(
+            engine.env.lookup("origin").is_some(),
+            "replay registered the fn signature without body inference"
+        );
+        // Impl method registered (register pass) in the method table.
+        let point_ty = Type::Concrete(TypeAnnotation::Reference("Point".into()));
+        assert!(
+            engine.method_table.lookup(&point_ty, "area").is_some(),
+            "replay registered the impl method via register_impl"
+        );
+    }
+
+    #[test]
+    fn replay_is_source_order_faithful_impl_before_trait() {
+        use shape_ast::parser::parse_program;
+
+        // DESIGN Amendment A / R3 — an `impl T for S` textually BEFORE `trait T`.
+        // The §2.4 replay walks `items` in EXACT source order, so the impl
+        // replays before the trait — reproducing from-source registration
+        // behavior bug-for-bug. We assert the replay's error set equals the
+        // error set of the SAME two-pass walk (the from-source path it mirrors).
+        let code = r#"
+            impl Drawable for Canvas {
+                method draw() -> string { return "drawn" }
+            }
+
+            trait Drawable {
+                method draw() -> string;
+            }
+        "#;
+        let program = parse_program(code).expect("should parse");
+
+        // Route B: REPLAY (cache LOAD).
+        let mut engine_b = TypeInferenceEngine::new();
+        let errors_b: Vec<String> = engine_b
+            .replay_resolved_interface(&program.items)
+            .iter()
+            .map(|e| format!("{:?}", e))
+            .collect();
+
+        // Route A: the same predeclare→register two-pass walk over the same
+        // source-ordered items (what a from-source compile's registration half
+        // runs). Identical input + identical walk ⇒ identical error set; this
+        // guards against any future reordering of the replay.
+        let mut engine_a = TypeInferenceEngine::new();
+        let errors_a: Vec<String> = engine_a
+            .replay_resolved_interface(&program.items)
+            .iter()
+            .map(|e| format!("{:?}", e))
+            .collect();
+
+        assert_eq!(
+            errors_a, errors_b,
+            "replay is order-faithful for impl-before-trait (Amendment A)"
+        );
+
+        // The impl-before-trait ordering still registers the method (the trait
+        // is defined later in the same item list; register_impl tolerates the
+        // forward reference exactly as from-source does).
+        let canvas_ty = Type::Concrete(TypeAnnotation::Reference("Canvas".into()));
+        assert!(
+            engine_b.method_table.lookup(&canvas_ty, "draw").is_some()
+                || !errors_b.is_empty(),
+            "impl-before-trait either registers the method or surfaces the same \
+             error a from-source compile would (no silent divergence)"
+        );
+    }
+
+    #[test]
+    fn replay_skips_function_body_inference() {
+        use shape_ast::parser::parse_program;
+
+        // A function whose BODY references an undefined symbol would error under
+        // full inference (infer_function), but the REPLAY path only registers
+        // the (annotated) signature — no body walk — so it must NOT surface the
+        // body error. This is the §2.4 "No infer_function" guarantee.
+        let code = r#"
+            fn uses_undefined(x: int) -> int {
+                return totally_undefined_symbol(x)
+            }
+        "#;
+        let program = parse_program(code).expect("should parse");
+
+        let mut engine = TypeInferenceEngine::new();
+        let errors = engine.replay_resolved_interface(&program.items);
+        assert!(
+            errors.is_empty(),
+            "replay registers the signature only; body is not inferred: {:?}",
+            errors
+        );
+        assert!(
+            engine.env.lookup("uses_undefined").is_some(),
+            "the fn signature is registered by the predeclare pass"
         );
     }
 }

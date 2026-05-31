@@ -1,0 +1,8 @@
+// fn declared -> string but returns an int literal.
+// Strict typing MUST reject: int is not string. No coercion exists.
+fn label() -> string {
+    return 42
+}
+
+let s = label()
+print(s)

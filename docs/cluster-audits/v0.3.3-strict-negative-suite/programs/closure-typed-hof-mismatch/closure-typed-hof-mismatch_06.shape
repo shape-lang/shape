@@ -1,0 +1,9 @@
+// NEGATIVE: `every` predicate closure returns number, not bool.
+// `every` requires `(T) -> bool`. The body `x + 0.5` returns `number` (f64).
+// A strict type checker must reject a non-bool predicate. Not only does the
+// program leak (run instead of reject), VM and JIT disagree on the truthiness
+// of the f64 result, so the SAME program prints different answers under the
+// two backends — a direct consequence of having no bool proof for the result.
+let arr: Array<number> = [1.0, 2.0, 3.0];
+let r = arr.every(|x| x + 0.5);
+print(r);

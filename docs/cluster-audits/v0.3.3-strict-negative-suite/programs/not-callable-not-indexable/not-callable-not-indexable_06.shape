@@ -1,0 +1,6 @@
+// Error mode: indexing a non-indexable value (number variant).
+// `x` has type `number` (f64). `x[1]` is not valid -- number is not
+// indexable. A strict type system must reject this at compile time.
+let x: number = 2.5
+let y = x[1]
+print(y)

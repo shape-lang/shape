@@ -1261,6 +1261,82 @@ impl TypeInferenceEngine {
         }
     }
 
+    /// DESIGN §3.3 RESULTS-IDENTICAL differential-test support: type-check a
+    /// CONSUMER program against a module interface that is ALREADY registered in
+    /// this engine (by a from-source compile — `infer_program_best_effort` —
+    /// OR by a cache replay — `replay_resolved_interface`).
+    ///
+    /// This mirrors `infer_program_best_effort`'s predeclare→infer→solve→
+    /// substitute sequence EXACTLY, but DELIBERATELY OMITS the leading
+    /// registration-state resets (`struct_type_defs.clear()`,
+    /// `callable_origins_by_name.clear()`, …) so the previously-registered module
+    /// interface (structs, fns, enums, traits, impls, method table) SURVIVES and
+    /// drives consumer checking. It performs only the per-run scratch resets that
+    /// are local to a single inference pass (return/union/callsite scratch), then
+    /// re-seeds the builtin callable defaults — identical to the production path —
+    /// so the only difference between the two differential routes is HOW M's
+    /// interface entered the engine, never the consumer-check itself.
+    ///
+    /// Differential-test support: the production checker always starts from a
+    /// clean engine via `infer_program_best_effort`. This additive-check entry
+    /// has NO production caller and exists solely to make the §3.3
+    /// RESULTS-IDENTICAL binder mechanically verifiable from a downstream crate
+    /// (`shape-vm`'s `bundle_compiler` differential test), where a `#[cfg(test)]`
+    /// method on this crate would be invisible across the crate boundary. It is
+    /// pure type-checking — no dynamic dispatch, no runtime carrier — so carries
+    /// no forbidden-pattern surface.
+    pub fn check_consumer_against_registered_interface(
+        &mut self,
+        consumer: &Program,
+    ) -> (HashMap<String, Type>, Vec<TypeError>) {
+        // Per-run scratch resets ONLY (local to a single inference pass). These
+        // are the same fields `infer_program_best_effort` resets; what we do NOT
+        // touch here is the registration state (`struct_type_defs`, the
+        // callable/property/variable origin maps) that carries the registered M
+        // interface across into the consumer check.
+        self.pending_return_unions.clear();
+        self.callable_param_source_vars.clear();
+        self.callable_param_defaults.clear();
+        self.callable_numeric_param_indices.clear();
+        Self::seed_builtin_callable_defaults(&mut self.callable_param_defaults);
+        self.return_var_aliases.clear();
+        self.return_scopes.clear();
+        self.implicit_return_scopes.clear();
+
+        // Hoisting pre-pass over the consumer (mirrors production).
+        self.run_hoisting_prepass(consumer);
+
+        let mut types = HashMap::new();
+        let mut errors = Vec::new();
+
+        for item in &consumer.items {
+            if let Err(err) = self.predeclare_item(item) {
+                errors.push(err);
+            }
+        }
+        for item in &consumer.items {
+            if let Err(err) = self.infer_item(item, &mut types) {
+                errors.push(err);
+            }
+        }
+
+        self.solver.set_method_table(self.method_table.clone());
+        self.solver.set_trait_impls(self.env.trait_impl_keys());
+        if let Err(err) = self.solver.solve(&mut self.constraints) {
+            errors.push(err);
+        }
+        self.unifier.merge(self.solver.unifier());
+
+        self.apply_callsite_unions(&mut types);
+        errors.extend(self.refine_numeric_params_post_callsite(&mut types));
+
+        for (_name, ty) in types.iter_mut() {
+            *ty = self.unifier.apply_substitutions(ty);
+        }
+
+        (types, errors)
+    }
+
     /// Infer types for a complete program and keep successful inferences even
     /// when some items fail type checking.
     ///

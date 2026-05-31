@@ -1,0 +1,8 @@
+// NEGATIVE: filter closure returns number, not bool.
+// Element type is `number`; the body `x * 2.0` returns `number` (f64). `filter`
+// requires the predicate to return `bool`. A strict type checker must reject
+// `number` where `bool` is required; instead the f64 result is treated as
+// truthy and every element passes through.
+let arr: Array<number> = [1.0, 2.0, 3.0];
+let r = arr.filter(|x| x * 2.0);
+print(r);

@@ -1,0 +1,9 @@
+// fn declared -> int but returns a string literal.
+// Strict typing MUST reject: the return expression type (string) does not
+// match the declared return type (int). No coercion exists.
+fn get_count() -> int {
+    return "not a number"
+}
+
+let n = get_count()
+print(n)

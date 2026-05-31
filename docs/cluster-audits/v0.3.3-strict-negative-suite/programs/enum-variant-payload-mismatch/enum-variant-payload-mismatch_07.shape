@@ -1,0 +1,7 @@
+// Error mode: match arm STRUCT-variant binding used at the wrong type.
+// E::C { x } binds x: int; calling .toUpperCase() (a string method) on it is
+// ill-typed — int has no such method and x is not a string.
+enum E { A, C { x: int } }
+let e = E::C { x: 3 }
+let r = match e { E::A => "", E::C { x } => x.toUpperCase() }
+print(r)

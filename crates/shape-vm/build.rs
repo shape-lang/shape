@@ -6,9 +6,104 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 
 fn main() {
     generate_grammar_features();
+    emit_compiler_fingerprint();
+    emit_prelude_bundle_presence();
+}
+
+/// DESIGN decision 4a — set `cfg(prelude_bundle_present)` only when the baked
+/// prelude `SHAPEPKG` bundle (`embedded/core_prelude.shapec`) exists. This lets
+/// `stdlib.rs`'s `include_bytes_optional!` resolve the artifact when present and
+/// expand to `None` when it is not yet generated — so the crate builds before
+/// `stdlib_gen` has written the bundle (the R6 fallback chain then applies), and
+/// picks the bundle up on the next build once it is baked.
+fn emit_prelude_bundle_presence() {
+    // Declare the custom cfg so `--check-cfg` (warn-by-default on recent
+    // toolchains) does not flag it.
+    println!("cargo:rustc-check-cfg=cfg(prelude_bundle_present)");
+
+    let path = Path::new("embedded/core_prelude.shapec");
+    if path.exists() {
+        println!("cargo:rustc-cfg=prelude_bundle_present");
+    }
+    println!("cargo:rerun-if-changed=embedded/core_prelude.shapec");
+}
+
+/// Emit `SHAPE_COMPILER_FINGERPRINT` (compile-cache DESIGN §2.2 AMENDMENT B /
+/// CLOSURE B). The cache key folds in a build content-id that changes on every
+/// *meaningful* compiler rebuild, NOT the coarse `CARGO_PKG_VERSION` semver
+/// (which stays `"0.3.3"` across every dev rebuild of the checker → stale-cache
+/// silent-wrong during exactly the checker churn this cache must survive).
+///
+/// Shape of the fingerprint:
+/// - `<short-sha>`               — clean checkout at a committed compiler.
+/// - `<short-sha>-dirty-<epoch>` — uncommitted working tree; the build timestamp
+///   forces a distinct id on every dirty rebuild (the inference engine can change
+///   without any commit, so the sha alone would alias).
+/// - `<CARGO_PKG_VERSION>`       — fallback when git is unavailable (e.g. a
+///   release tarball with no `.git`). Semver alone is acceptable ONLY for
+///   immutable published releases; the fingerprint covers both cases.
+fn emit_compiler_fingerprint() {
+    let fingerprint = compute_compiler_fingerprint();
+    println!("cargo:rustc-env=SHAPE_COMPILER_FINGERPRINT={}", fingerprint);
+
+    // Re-run when HEAD moves or the index changes so the fingerprint stays in
+    // sync with the committed/dirty state. (Best-effort: paths may be absent in
+    // a non-git build, in which case Cargo simply re-runs whenever build.rs's
+    // own inputs change.)
+    if let Some(git_dir) = locate_git_dir() {
+        println!("cargo:rerun-if-changed={}/HEAD", git_dir.display());
+        println!("cargo:rerun-if-changed={}/index", git_dir.display());
+    }
+    // A dirty tree mints a timestamped id every build, so always re-run.
+    println!("cargo:rerun-if-env-changed=SHAPE_COMPILER_FINGERPRINT");
+}
+
+fn compute_compiler_fingerprint() -> String {
+    let Some(short_sha) = git_output(&["rev-parse", "--short", "HEAD"]) else {
+        // No git available — fall back to the crate semver.
+        return env_semver();
+    };
+
+    let dirty = git_output(&["status", "--porcelain"])
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+
+    if dirty {
+        let epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        format!("{}-dirty-{}", short_sha, epoch)
+    } else {
+        short_sha
+    }
+}
+
+fn env_semver() -> String {
+    std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "unknown".to_string())
+}
+
+fn git_output(args: &[&str]) -> Option<String> {
+    let out = Command::new("git").args(args).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8(out.stdout).ok()?;
+    let trimmed = s.trim().to_string();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+fn locate_git_dir() -> Option<std::path::PathBuf> {
+    let dir = git_output(&["rev-parse", "--absolute-git-dir"])?;
+    Some(std::path::PathBuf::from(dir))
 }
 
 fn generate_grammar_features() {

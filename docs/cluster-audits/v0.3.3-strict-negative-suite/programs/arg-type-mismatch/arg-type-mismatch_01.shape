@@ -1,0 +1,9 @@
+// arg-type-mismatch_01 — string passed to int param
+// A strict type system MUST reject: a `string` argument cannot bind to an
+// `int` parameter. `int` and `string` do not unify; there is no coercion.
+fn addone(n: int) -> int {
+    return n + 1
+}
+
+let r = addone("hello")
+print(r)

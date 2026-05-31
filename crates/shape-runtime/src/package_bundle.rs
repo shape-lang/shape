@@ -12,12 +12,137 @@ use std::collections::HashMap;
 use std::path::Path;
 
 const MAGIC: &[u8; 8] = b"SHAPEPKG";
-const FORMAT_VERSION: u32 = 3;
+/// SHAPEPKG container format version. v4 adds the per-module
+/// `ModuleManifest.resolved_interface` field (compile-cache resolved-interface
+/// extension, DESIGN §1.3). The field is `#[serde(default)]`, so a v4 bundle
+/// round-trips on a v3 serde reader — but the explicit `version > FORMAT_VERSION`
+/// reject below means a v3 *binary* refuses a v4 bundle (the honest stale-binary
+/// signal; forces rebuild from source rather than running without an interface).
+const FORMAT_VERSION: u32 = 4;
 /// Minimum version we can still load (v1 bundles lack blob_store/manifests).
+/// v4 binaries still load v1–v3 bundles; the absent `resolved_interface`
+/// defaults to `None`, which triggers a from-source rebuild (DESIGN §1.3, §2).
 const MIN_FORMAT_VERSION: u32 = 1;
 
 fn default_bundle_kind() -> String {
     "portable-bytecode".to_string()
+}
+
+/// Current revision of the resolved-interface schema carried in
+/// [`ResolvedInterface::interface_schema`]. v1 is annotation-required for cached
+/// public signatures (DESIGN §1.3, §3.4, supervisor decision 5); a loader treats
+/// `interface_schema > KNOWN_INTERFACE_SCHEMA` as "interface absent" → rebuild.
+pub const KNOWN_INTERFACE_SCHEMA: u32 = 1;
+
+/// Consumer-visibility of an exported symbol, recorded in
+/// [`ResolvedInterface::exports`].
+///
+/// This is the serde-derivable, registry-ID-free analogue of the runtime
+/// `module_exports::ModuleExportVisibility` (which derives only
+/// `Debug/Clone/Copy/PartialEq/Eq` and is not serde). The cache deliberately
+/// uses its own portable enum so a `.shapec` stays cross-machine readable (the
+/// `.d.ts` role, DESIGN §4 purpose 2) without dragging in any runtime registry
+/// type. Visibility gates only the consumer-visible query surface; it does NOT
+/// affect registration order (DESIGN §1.1 AMENDMENT A).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ExportVisibility {
+    /// Normal module API: available in runtime + comptime contexts.
+    #[default]
+    Public,
+    /// Only callable from comptime contexts.
+    ComptimeOnly,
+    /// Internal helper: callable but hidden from normal user-facing discovery.
+    Internal,
+}
+
+/// Resolved type-checker interface for one module, serialized into the
+/// `.shapec` container so a consumer can type-check against the module without
+/// re-parsing or re-inferring its bodies (DESIGN §0, §1.1).
+///
+/// Per DESIGN §1.1 AMENDMENT A this carries a SINGLE source-ordered
+/// `Vec<shape_ast::ast::Item>` — NOT grouped-per-kind vectors. Registration is
+/// source-order-sensitive: trait/impl/enum register in `infer_item` in source
+/// order (`predeclare_item` has no arm for them), so an `impl T for S` textually
+/// before `trait T` must replay before the trait to reproduce from-source
+/// accept/reject + method-table behavior bug-for-bug. The loader (DESIGN §2.4)
+/// re-runs `predeclare_item` over `items` then `infer_item` over `items` in this
+/// exact order.
+///
+/// Nothing below the annotation layer is stored: the derived
+/// `Type`/`TypeScheme`/`MethodTable`/`TypeParamExpr` carriers are rebuilt by the
+/// replay passes, never serialized (DESIGN §5). `to_annotation()` is never on the
+/// cache path (DESIGN §0, §3.2).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ResolvedInterface {
+    /// Format-internal revision of the interface schema (independent of the
+    /// SHAPEPKG container [`FORMAT_VERSION`]; lets the interface evolve without a
+    /// container bump and lets the loader hard-reject a too-new interface).
+    /// Current = [`KNOWN_INTERFACE_SCHEMA`] (= 1).
+    #[serde(default)]
+    pub interface_schema: u32,
+
+    /// Interface-relevant item defs in EXACT SOURCE ORDER (DESIGN §1.1
+    /// AMENDMENT A). Carries the `FunctionDef` / `ForeignFunctionDef` /
+    /// `StructTypeDef` / `EnumDef` / `TraitDef` / `ImplBlock` / `ExtendStatement`
+    /// / `TypeAliasDef` nodes, in order. `shape_ast::ast::Item` derives
+    /// `Serialize + Deserialize` (`program.rs:29`), and the two replay passes
+    /// match on the same enum a from-source compile uses.
+    ///
+    /// CODEC NOTE (DESIGN §1.1 "if a variant holds a non-serde field" caveat,
+    /// realized): several AST item nodes carry
+    /// `#[serde(skip_serializing_if = "Option::is_none")]` fields
+    /// (`FunctionDef.declaring_module_path` `functions.rs:20`,
+    /// `MethodDef` provenance `types.rs:580`, `ExportStmt.source_decl`
+    /// `modules.rs:39`, `NativeAbiBinding.package_key` `functions.rs:81`). Under
+    /// the bundle's compact `rmp_serde::to_vec` (struct-as-array) codec, a
+    /// skipped optional shrinks the positional array and the deserializer
+    /// mis-aligns subsequent fields (observed: "invalid length 1, expected
+    /// struct DocComment with 4 elements"). The field type stays the public
+    /// `Vec<Item>` (the §1.1 data model is unchanged); only its (de)serialization
+    /// is routed through `items_codec`, which encodes the items with
+    /// `rmp_serde::to_vec_named` (named/map form, skip-tolerant) into an opaque
+    /// byte blob — the same shape `BundledModule.bytecode_bytes` already uses to
+    /// embed pre-serialized bytecode inside the compact-encoded bundle. This
+    /// isolates the AST nodes' named encoding from the outer bundle codec and is
+    /// byte-deterministic (a sequence encode preserves order).
+    #[serde(with = "items_codec")]
+    pub items: Vec<shape_ast::ast::Item>,
+
+    /// Module export surface: names + visibility. Signatures live in `items`.
+    /// A `Vec<(K, V)>` (not a `HashMap`) keeps the MessagePack encoding
+    /// byte-deterministic for the round-trip stability guard (DESIGN §3.3, R2).
+    pub exports: Vec<(String, ExportVisibility)>,
+}
+
+/// Serde adapter for [`ResolvedInterface::items`].
+///
+/// Encodes the `Vec<Item>` with `rmp_serde::to_vec_named` (named/map MessagePack
+/// form, tolerant of `#[serde(skip_serializing_if)]` optionals) into an opaque
+/// byte blob, then defers the blob's own (de)serialization to the surrounding
+/// format. Decode reverses it. See the CODEC NOTE on `ResolvedInterface::items`
+/// for why the compact bundle codec cannot encode these AST nodes directly.
+mod items_codec {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use shape_ast::ast::Item;
+
+    pub fn serialize<S>(items: &[Item], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let bytes = rmp_serde::to_vec_named(items).map_err(serde::ser::Error::custom)?;
+        // Emit the named-encoded blob as an ordinary `Vec<u8>`. Under MessagePack
+        // this is a length-prefixed sequence, so it round-trips under the outer
+        // compact bundle codec and stays byte-deterministic (no new dependency).
+        bytes.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<Item>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let bytes = Vec::<u8>::deserialize(deserializer)?;
+        rmp_serde::from_slice(&bytes).map_err(serde::de::Error::custom)
+    }
 }
 
 /// Metadata about a compiled package bundle.
@@ -161,6 +286,91 @@ impl PackageBundle {
             .map_err(|e| format!("Failed to read bundle from '{}': {}", path.display(), e))?;
         Self::from_bytes(&data)
     }
+}
+
+/// Outcome of the DESIGN §2.3 load-or-rebuild freshness gate for one module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheAction {
+    /// All §2.3 preconditions hold: deserialize the [`ResolvedInterface`] and
+    /// REPLAY it via the §2.4 two-pass walk
+    /// (`TypeInferenceEngine::replay_resolved_interface`); skip parse + infer.
+    LoadAndReplay,
+    /// A precondition failed; REBUILD from source and write a fresh `.shapec`.
+    Rebuild(RebuildReason),
+}
+
+impl CacheAction {
+    pub fn is_load(&self) -> bool {
+        matches!(self, CacheAction::LoadAndReplay)
+    }
+}
+
+/// Why the §2.3 gate chose REBUILD over LOAD (diagnostics / tracing only).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RebuildReason {
+    /// Container version outside `MIN_FORMAT_VERSION..=FORMAT_VERSION`.
+    ContainerVersionOutOfRange,
+    /// Stamped `source_hash` does not match the freshly computed §2.2 key
+    /// (only checked when the caller has source to recompute — prelude +
+    /// package rebuild path; a pure `.shapec` dependency passes `None`).
+    SourceHashMismatch,
+    /// Manifest carries no `resolved_interface` (a pre-v4 bundle, or a package
+    /// whose public signatures were unannotated under `interface_schema = 1`,
+    /// DESIGN §3.4 — no interface cached → consumer rebuilds from source).
+    InterfaceAbsent,
+    /// `interface_schema > KNOWN_INTERFACE_SCHEMA`: a too-new interface a
+    /// loader at this binary cannot replay → treat as absent → rebuild.
+    InterfaceSchemaTooNew,
+}
+
+/// DESIGN §2.3 — the load-or-rebuild decision, as a pure predicate.
+///
+/// Returns [`CacheAction::LoadAndReplay`] iff ALL of:
+/// - the `.shapec` exists (the caller only invokes this once it has a bundle),
+/// - `container_version` is in `MIN_FORMAT_VERSION..=FORMAT_VERSION`,
+/// - when `fresh_key` is `Some` (caller has source to recompute the §2.2 key),
+///   the stamped `metadata.source_hash` equals it; a pure `.shapec` dependency
+///   has no local source so passes `None` and relies on the dep's embedded
+///   hash being the recorded freshness (the same hash stage-2 CLOSURE C folds
+///   into a dependent's key),
+/// - `resolved_interface` is `Some`,
+/// - `resolved_interface.interface_schema <= KNOWN_INTERFACE_SCHEMA`.
+///
+/// Otherwise [`CacheAction::Rebuild`] with the failing reason. This is the
+/// single decision both the consumer chokepoint (`ModuleLoader::load_bundle`)
+/// and the prelude chokepoint (`shape-vm` `stdlib.rs`) route through.
+pub fn decide_cache_action(
+    container_version: u32,
+    stamped_source_hash: &str,
+    fresh_key: Option<&str>,
+    resolved_interface: Option<&ResolvedInterface>,
+) -> CacheAction {
+    if container_version < MIN_FORMAT_VERSION || container_version > FORMAT_VERSION {
+        return CacheAction::Rebuild(RebuildReason::ContainerVersionOutOfRange);
+    }
+    if let Some(key) = fresh_key {
+        if stamped_source_hash != key {
+            return CacheAction::Rebuild(RebuildReason::SourceHashMismatch);
+        }
+    }
+    let Some(interface) = resolved_interface else {
+        return CacheAction::Rebuild(RebuildReason::InterfaceAbsent);
+    };
+    if interface.interface_schema > KNOWN_INTERFACE_SCHEMA {
+        return CacheAction::Rebuild(RebuildReason::InterfaceSchemaTooNew);
+    }
+    CacheAction::LoadAndReplay
+}
+
+/// The container [`FORMAT_VERSION`] for callers that need to gate on it
+/// (e.g. a bundle read from raw bytes that wants the §2.3 decision).
+pub const fn current_format_version() -> u32 {
+    FORMAT_VERSION
+}
+
+/// The minimum loadable container version.
+pub const fn min_format_version() -> u32 {
+    MIN_FORMAT_VERSION
 }
 
 /// Verify SHA-256 checksum of raw bundle bytes.
@@ -406,6 +616,89 @@ mod tests {
         let hash = sha256_hex(data).to_uppercase();
         // hex::encode produces lowercase; uppercase should fail
         assert!(!verify_bundle_checksum(data, &hash));
+    }
+
+    // --- DESIGN §2.3 — decide_cache_action freshness gate ---
+
+    fn iface_v(schema: u32) -> ResolvedInterface {
+        ResolvedInterface {
+            interface_schema: schema,
+            items: vec![],
+            exports: vec![],
+        }
+    }
+
+    #[test]
+    fn decide_load_on_all_preconditions() {
+        let iface = iface_v(KNOWN_INTERFACE_SCHEMA);
+        // fresh_key matches the stamped hash; interface present; schema known.
+        let action =
+            decide_cache_action(FORMAT_VERSION, "hashA", Some("hashA"), Some(&iface));
+        assert_eq!(action, CacheAction::LoadAndReplay);
+        assert!(action.is_load());
+    }
+
+    #[test]
+    fn decide_load_when_no_local_source_to_recompute() {
+        // A pure `.shapec` dependency passes fresh_key = None; freshness rests
+        // on the embedded source_hash, so the gate still loads.
+        let iface = iface_v(KNOWN_INTERFACE_SCHEMA);
+        let action = decide_cache_action(FORMAT_VERSION, "embeddedhash", None, Some(&iface));
+        assert_eq!(action, CacheAction::LoadAndReplay);
+    }
+
+    #[test]
+    fn decide_rebuild_on_source_hash_mismatch() {
+        let iface = iface_v(KNOWN_INTERFACE_SCHEMA);
+        let action =
+            decide_cache_action(FORMAT_VERSION, "stale", Some("fresh"), Some(&iface));
+        assert_eq!(action, CacheAction::Rebuild(RebuildReason::SourceHashMismatch));
+    }
+
+    #[test]
+    fn decide_rebuild_on_absent_interface() {
+        let action = decide_cache_action(FORMAT_VERSION, "h", Some("h"), None);
+        assert_eq!(action, CacheAction::Rebuild(RebuildReason::InterfaceAbsent));
+    }
+
+    #[test]
+    fn decide_rebuild_on_too_new_interface_schema() {
+        let iface = iface_v(KNOWN_INTERFACE_SCHEMA + 1);
+        let action = decide_cache_action(FORMAT_VERSION, "h", Some("h"), Some(&iface));
+        assert_eq!(
+            action,
+            CacheAction::Rebuild(RebuildReason::InterfaceSchemaTooNew)
+        );
+    }
+
+    #[test]
+    fn decide_rebuild_on_container_version_out_of_range() {
+        let iface = iface_v(KNOWN_INTERFACE_SCHEMA);
+        // Above FORMAT_VERSION — a future bundle a binary this old cannot load.
+        let action =
+            decide_cache_action(FORMAT_VERSION + 1, "h", Some("h"), Some(&iface));
+        assert_eq!(
+            action,
+            CacheAction::Rebuild(RebuildReason::ContainerVersionOutOfRange)
+        );
+        // Below MIN — a legacy bundle (would also lack the interface anyway).
+        let action_low =
+            decide_cache_action(MIN_FORMAT_VERSION - 1, "h", Some("h"), Some(&iface));
+        assert_eq!(
+            action_low,
+            CacheAction::Rebuild(RebuildReason::ContainerVersionOutOfRange)
+        );
+    }
+
+    #[test]
+    fn decide_container_range_checked_before_interface() {
+        // Out-of-range version with a None interface still reports the version
+        // reason (the §2.3 predicate evaluates container version first).
+        let action = decide_cache_action(FORMAT_VERSION + 5, "h", None, None);
+        assert_eq!(
+            action,
+            CacheAction::Rebuild(RebuildReason::ContainerVersionOutOfRange)
+        );
     }
 
     #[test]
