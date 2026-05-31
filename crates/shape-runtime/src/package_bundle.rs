@@ -12,12 +12,87 @@ use std::collections::HashMap;
 use std::path::Path;
 
 const MAGIC: &[u8; 8] = b"SHAPEPKG";
-const FORMAT_VERSION: u32 = 3;
+/// SHAPEPKG container format version. v4 adds the per-module
+/// `ModuleManifest.resolved_interface` field (compile-cache resolved-interface
+/// extension, DESIGN §1.3). The field is `#[serde(default)]`, so a v4 bundle
+/// round-trips on a v3 serde reader — but the explicit `version > FORMAT_VERSION`
+/// reject below means a v3 *binary* refuses a v4 bundle (the honest stale-binary
+/// signal; forces rebuild from source rather than running without an interface).
+const FORMAT_VERSION: u32 = 4;
 /// Minimum version we can still load (v1 bundles lack blob_store/manifests).
+/// v4 binaries still load v1–v3 bundles; the absent `resolved_interface`
+/// defaults to `None`, which triggers a from-source rebuild (DESIGN §1.3, §2).
 const MIN_FORMAT_VERSION: u32 = 1;
 
 fn default_bundle_kind() -> String {
     "portable-bytecode".to_string()
+}
+
+/// Current revision of the resolved-interface schema carried in
+/// [`ResolvedInterface::interface_schema`]. v1 is annotation-required for cached
+/// public signatures (DESIGN §1.3, §3.4, supervisor decision 5); a loader treats
+/// `interface_schema > KNOWN_INTERFACE_SCHEMA` as "interface absent" → rebuild.
+pub const KNOWN_INTERFACE_SCHEMA: u32 = 1;
+
+/// Consumer-visibility of an exported symbol, recorded in
+/// [`ResolvedInterface::exports`].
+///
+/// This is the serde-derivable, registry-ID-free analogue of the runtime
+/// `module_exports::ModuleExportVisibility` (which derives only
+/// `Debug/Clone/Copy/PartialEq/Eq` and is not serde). The cache deliberately
+/// uses its own portable enum so a `.shapec` stays cross-machine readable (the
+/// `.d.ts` role, DESIGN §4 purpose 2) without dragging in any runtime registry
+/// type. Visibility gates only the consumer-visible query surface; it does NOT
+/// affect registration order (DESIGN §1.1 AMENDMENT A).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ExportVisibility {
+    /// Normal module API: available in runtime + comptime contexts.
+    #[default]
+    Public,
+    /// Only callable from comptime contexts.
+    ComptimeOnly,
+    /// Internal helper: callable but hidden from normal user-facing discovery.
+    Internal,
+}
+
+/// Resolved type-checker interface for one module, serialized into the
+/// `.shapec` container so a consumer can type-check against the module without
+/// re-parsing or re-inferring its bodies (DESIGN §0, §1.1).
+///
+/// Per DESIGN §1.1 AMENDMENT A this carries a SINGLE source-ordered
+/// `Vec<shape_ast::ast::Item>` — NOT grouped-per-kind vectors. Registration is
+/// source-order-sensitive: trait/impl/enum register in `infer_item` in source
+/// order (`predeclare_item` has no arm for them), so an `impl T for S` textually
+/// before `trait T` must replay before the trait to reproduce from-source
+/// accept/reject + method-table behavior bug-for-bug. The loader (DESIGN §2.4)
+/// re-runs `predeclare_item` over `items` then `infer_item` over `items` in this
+/// exact order.
+///
+/// Nothing below the annotation layer is stored: the derived
+/// `Type`/`TypeScheme`/`MethodTable`/`TypeParamExpr` carriers are rebuilt by the
+/// replay passes, never serialized (DESIGN §5). `to_annotation()` is never on the
+/// cache path (DESIGN §0, §3.2).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ResolvedInterface {
+    /// Format-internal revision of the interface schema (independent of the
+    /// SHAPEPKG container [`FORMAT_VERSION`]; lets the interface evolve without a
+    /// container bump and lets the loader hard-reject a too-new interface).
+    /// Current = [`KNOWN_INTERFACE_SCHEMA`] (= 1).
+    #[serde(default)]
+    pub interface_schema: u32,
+
+    /// Interface-relevant item defs in EXACT SOURCE ORDER (DESIGN §1.1
+    /// AMENDMENT A). Carries the `FunctionDef` / `ForeignFunctionDef` /
+    /// `StructTypeDef` / `EnumDef` / `TraitDef` / `ImplBlock` / `ExtendStatement`
+    /// / `TypeAliasDef` nodes, in order. `shape_ast::ast::Item` already derives
+    /// `Serialize + Deserialize` (`program.rs:29`), so no new codec is needed —
+    /// the two replay passes match on the same enum a from-source compile uses.
+    pub items: Vec<shape_ast::ast::Item>,
+
+    /// Module export surface: names + visibility. Signatures live in `items`.
+    /// A `Vec<(K, V)>` (not a `HashMap`) keeps the MessagePack encoding
+    /// byte-deterministic for the round-trip stability guard (DESIGN §3.3, R2).
+    pub exports: Vec<(String, ExportVisibility)>,
 }
 
 /// Metadata about a compiled package bundle.
