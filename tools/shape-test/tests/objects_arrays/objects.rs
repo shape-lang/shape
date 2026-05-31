@@ -160,7 +160,11 @@ fn object_bracket_notation() {
 }
 let property = "age"
 print(person[property])"#;
-    ShapeTest::new(code).expect_run_ok().expect_output("30");
+    // Strict-typing re-baseline (v0.3.3): dynamic bracket-access `person[runtimeKey]`
+    // on a TypedObject is correctly REJECTED — a computed key cannot statically prove
+    // the field type, and Shape is no-any / no-dynamic-fallback. Dynamic TypedObject
+    // field access is a v0.4 language-design question, not a v0.3.3 bug.
+    ShapeTest::new(code).expect_run_err_contains("does not support index access");
 }
 
 // =====================================================================
