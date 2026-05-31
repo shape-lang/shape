@@ -26,6 +26,50 @@ pub use resolver::{
 
 include!(concat!(env!("OUT_DIR"), "/embedded_stdlib_modules.rs"));
 
+/// Process-global parsed-AST memo for module *source text*.
+///
+/// Parsing the embedded stdlib `.shape` sources is, in a debug build, a Pest
+/// hot spot (e.g. `std::core::vec` ≈ 2.6s) that dominates per-`ModuleLoader`
+/// load. Because each integration test builds a fresh `ModuleLoader` with an
+/// empty per-loader `ModuleCache`, the stdlib was re-parsed from scratch on
+/// every test (~4–5s/test), taxing the whole shape-test gate.
+///
+/// Parsing is a pure, deterministic function of the source text, so memoizing
+/// the parsed [`Program`] by exact source content is RESULTS-IDENTICAL: a given
+/// source string always yields the same AST. Callers receive an owned clone of
+/// the cached AST and apply their own path-dependent post-parse annotations
+/// (`annotate_program_*`) on top, so no cross-load state is shared beyond the
+/// immutable parse result. The cache is keyed by content (not module path),
+/// which also de-dupes identical on-disk sources and never aliases two distinct
+/// sources.
+///
+/// Only successful parses are cached; parse *errors* are never memoized, so a
+/// source that fails to parse surfaces the error identically on every load.
+fn parse_program_cached(source: &str) -> Result<Program> {
+    use std::collections::HashMap as StdHashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static PARSE_CACHE: OnceLock<Mutex<StdHashMap<String, Arc<Program>>>> = OnceLock::new();
+    let cache = PARSE_CACHE.get_or_init(|| Mutex::new(StdHashMap::new()));
+
+    // Fast path: hit.
+    if let Ok(guard) = cache.lock() {
+        if let Some(program) = guard.get(source) {
+            return Ok((**program).clone());
+        }
+    }
+
+    // Miss: parse once, store, return a clone. Parsing outside the lock keeps
+    // the (poison-tolerant) critical section short; a benign duplicate parse on
+    // a race just overwrites with an identical AST.
+    let parsed = parse_program(source)?;
+    let arc = Arc::new(parsed);
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(source.to_string(), arc.clone());
+    }
+    Ok((*arc).clone())
+}
+
 /// Known stdlib module leaf names that live under `std::core::`.
 ///
 /// When a bare-name import like `"file"` fails to resolve, we check this list
@@ -610,8 +654,9 @@ impl ModuleLoader {
             module_path: Some(file_path.clone()),
         })?;
 
-        // Parse the module
-        let ast = parse_program(&content).map_err(|e| ShapeError::ModuleError {
+        // Parse the module (process-global parsed-AST memo; RESULTS-IDENTICAL,
+        // see `parse_program_cached`).
+        let ast = parse_program_cached(&content).map_err(|e| ShapeError::ModuleError {
             message: format!("Failed to parse module: {}: {}", compile_module_path, e),
             module_path: None,
         })?;
@@ -652,8 +697,9 @@ impl ModuleLoader {
         origin_path: Option<PathBuf>,
         context_path: Option<&PathBuf>,
     ) -> Result<Arc<Module>> {
-        // Parse the module
-        let ast = parse_program(source).map_err(|e| ShapeError::ModuleError {
+        // Parse the module (process-global parsed-AST memo; RESULTS-IDENTICAL,
+        // see `parse_program_cached`).
+        let ast = parse_program_cached(source).map_err(|e| ShapeError::ModuleError {
             message: format!("Failed to parse module: {}: {}", compile_module_path, e),
             module_path: origin_path.clone(),
         })?;
