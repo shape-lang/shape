@@ -376,6 +376,27 @@ impl<'a> HintContext<'a> {
                 })
         });
 
+        // LSP-H: if the engine produced a degraded type (a generic-method element
+        // collapsed to `unknown` — e.g. `xs.map(|x| x*2)` renders `Vec<unknown>`
+        // after the collection-method-table registration, since the result's
+        // `MethodParam` isn't bound to the closure return), prefer the syntactic
+        // heuristic, which recovers the element type from the closure body
+        // (`Array<int>`). Only swaps a strictly-more-resolved type in.
+        let inferred_type = inferred_type.map(|t| {
+            if t.contains("unknown") {
+                // Pass the program-level type_map as env so an identifier receiver
+                // (`xs` in `xs.map(...)`) resolves to its element type (`int[]`),
+                // yielding `Array<int>` rather than `Array<number>`.
+                decl.value
+                    .as_ref()
+                    .and_then(|v| infer_expr_type_with_env_public(v, &self.type_map))
+                    .filter(|h| !h.contains("unknown"))
+                    .unwrap_or(t)
+            } else {
+                t
+            }
+        });
+
         let Some(span) = decl.pattern.as_identifier_span() else {
             return;
         };
