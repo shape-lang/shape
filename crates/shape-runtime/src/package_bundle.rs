@@ -84,15 +84,65 @@ pub struct ResolvedInterface {
     /// Interface-relevant item defs in EXACT SOURCE ORDER (DESIGN §1.1
     /// AMENDMENT A). Carries the `FunctionDef` / `ForeignFunctionDef` /
     /// `StructTypeDef` / `EnumDef` / `TraitDef` / `ImplBlock` / `ExtendStatement`
-    /// / `TypeAliasDef` nodes, in order. `shape_ast::ast::Item` already derives
-    /// `Serialize + Deserialize` (`program.rs:29`), so no new codec is needed —
-    /// the two replay passes match on the same enum a from-source compile uses.
+    /// / `TypeAliasDef` nodes, in order. `shape_ast::ast::Item` derives
+    /// `Serialize + Deserialize` (`program.rs:29`), and the two replay passes
+    /// match on the same enum a from-source compile uses.
+    ///
+    /// CODEC NOTE (DESIGN §1.1 "if a variant holds a non-serde field" caveat,
+    /// realized): several AST item nodes carry
+    /// `#[serde(skip_serializing_if = "Option::is_none")]` fields
+    /// (`FunctionDef.declaring_module_path` `functions.rs:20`,
+    /// `MethodDef` provenance `types.rs:580`, `ExportStmt.source_decl`
+    /// `modules.rs:39`, `NativeAbiBinding.package_key` `functions.rs:81`). Under
+    /// the bundle's compact `rmp_serde::to_vec` (struct-as-array) codec, a
+    /// skipped optional shrinks the positional array and the deserializer
+    /// mis-aligns subsequent fields (observed: "invalid length 1, expected
+    /// struct DocComment with 4 elements"). The field type stays the public
+    /// `Vec<Item>` (the §1.1 data model is unchanged); only its (de)serialization
+    /// is routed through `items_codec`, which encodes the items with
+    /// `rmp_serde::to_vec_named` (named/map form, skip-tolerant) into an opaque
+    /// byte blob — the same shape `BundledModule.bytecode_bytes` already uses to
+    /// embed pre-serialized bytecode inside the compact-encoded bundle. This
+    /// isolates the AST nodes' named encoding from the outer bundle codec and is
+    /// byte-deterministic (a sequence encode preserves order).
+    #[serde(with = "items_codec")]
     pub items: Vec<shape_ast::ast::Item>,
 
     /// Module export surface: names + visibility. Signatures live in `items`.
     /// A `Vec<(K, V)>` (not a `HashMap`) keeps the MessagePack encoding
     /// byte-deterministic for the round-trip stability guard (DESIGN §3.3, R2).
     pub exports: Vec<(String, ExportVisibility)>,
+}
+
+/// Serde adapter for [`ResolvedInterface::items`].
+///
+/// Encodes the `Vec<Item>` with `rmp_serde::to_vec_named` (named/map MessagePack
+/// form, tolerant of `#[serde(skip_serializing_if)]` optionals) into an opaque
+/// byte blob, then defers the blob's own (de)serialization to the surrounding
+/// format. Decode reverses it. See the CODEC NOTE on `ResolvedInterface::items`
+/// for why the compact bundle codec cannot encode these AST nodes directly.
+mod items_codec {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use shape_ast::ast::Item;
+
+    pub fn serialize<S>(items: &[Item], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let bytes = rmp_serde::to_vec_named(items).map_err(serde::ser::Error::custom)?;
+        // Emit the named-encoded blob as an ordinary `Vec<u8>`. Under MessagePack
+        // this is a length-prefixed sequence, so it round-trips under the outer
+        // compact bundle codec and stays byte-deterministic (no new dependency).
+        bytes.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<Item>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let bytes = Vec::<u8>::deserialize(deserializer)?;
+        rmp_serde::from_slice(&bytes).map_err(serde::de::Error::custom)
+    }
 }
 
 /// Metadata about a compiled package bundle.

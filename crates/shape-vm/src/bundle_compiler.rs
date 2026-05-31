@@ -9,7 +9,8 @@ use sha2::{Digest, Sha256};
 use shape_ast::parser::parse_program;
 use shape_runtime::module_manifest::ModuleManifest;
 use shape_runtime::package_bundle::{
-    BundleMetadata, BundledModule, BundledNativeDependencyScope, PackageBundle,
+    BundleMetadata, BundledModule, BundledNativeDependencyScope, ExportVisibility, PackageBundle,
+    ResolvedInterface, KNOWN_INTERFACE_SCHEMA,
 };
 use shape_runtime::project::ProjectRoot;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -35,9 +36,16 @@ impl BundleCompiler {
         let mut modules = Vec::new();
         let mut all_sources = String::new();
         let mut docs: HashMap<String, Vec<shape_runtime::doc_extract::DocItem>> = HashMap::new();
-        // Collect content-addressed programs alongside modules (avoids deserialize roundtrip)
-        let mut compiled_programs: Vec<(String, Vec<String>, Option<bytecode::Program>)> =
-            Vec::new();
+        // Collect content-addressed programs alongside modules (avoids deserialize roundtrip).
+        // The trailing `ResolvedInterface` is the §1.1 source-ordered interface for the
+        // module, carried through to the manifest-build loop (it needs the AST, which is
+        // dropped after the per-file compile).
+        let mut compiled_programs: Vec<(
+            String,
+            Vec<String>,
+            Option<bytecode::Program>,
+            ResolvedInterface,
+        )> = Vec::new();
 
         let mut loader = shape_runtime::module_loader::ModuleLoader::new();
         loader.set_project_root(root, &project.resolved_module_paths());
@@ -96,6 +104,14 @@ impl BundleCompiler {
             // Collect export names from AST (must use original AST)
             let export_names = collect_export_names(&ast);
 
+            // Collect the resolved type-checker interface from the AST (DESIGN
+            // §1.1 / §2.3 PRODUCER step): every interface-relevant item def in
+            // EXACT SOURCE ORDER plus the export surface (names + visibility).
+            // Built from the same AST the compiler just type-checked, so the
+            // loader's two-pass replay (§2.4) sees items in the identical order
+            // a from-source compile would.
+            let resolved_interface = collect_resolved_interface(&ast);
+
             // Build module graph and compile via graph pipeline
             let (graph, stdlib_names, prelude_imports) =
                 crate::module_resolution::build_graph_and_stdlib_names(&ast, &mut loader, &[])
@@ -128,7 +144,12 @@ impl BundleCompiler {
                 )
             })?;
 
-            compiled_programs.push((module_path.clone(), export_names.clone(), content_addressed));
+            compiled_programs.push((
+                module_path.clone(),
+                export_names.clone(),
+                content_addressed,
+                resolved_interface,
+            ));
 
             modules.push(BundledModule {
                 module_path: module_path.clone(),
@@ -151,7 +172,7 @@ impl BundleCompiler {
         //     (content_addressed.rs:124). The same source under a different
         //     permission scope is a different artifact (§2.2 component 4).
         let mut permission_names: HashSet<String> = HashSet::new();
-        for (_module_path, _exports, content_addressed) in &compiled_programs {
+        for (_module_path, _exports, content_addressed, _interface) in &compiled_programs {
             if let Some(ca) = content_addressed {
                 for blob in ca.function_store.values() {
                     for perm in blob.required_permissions.iter() {
@@ -241,7 +262,8 @@ impl BundleCompiler {
         let mut blob_store: HashMap<[u8; 32], Vec<u8>> = HashMap::new();
         let mut manifests: Vec<ModuleManifest> = Vec::new();
 
-        for (module_path, export_names, content_addressed) in &compiled_programs {
+        for (module_path, export_names, content_addressed, resolved_interface) in &compiled_programs
+        {
             if let Some(ca) = content_addressed {
                 // Extract blobs into blob_store
                 for (hash, blob) in &ca.function_store {
@@ -298,6 +320,13 @@ impl BundleCompiler {
                     closure.dedup();
                     manifest.dependency_closure.insert(*export_hash, closure);
                 }
+
+                // Stamp the §1.1 resolved interface for this module. Done before
+                // `finalize()` is immaterial: `resolved_interface` is deliberately
+                // NOT part of `ManifestHashInput` (DESIGN §1.2, supervisor
+                // decision 3) — it is integrity-bound transitively via the bundle
+                // `source_hash`, so it does not perturb `manifest_hash`.
+                manifest.resolved_interface = Some(resolved_interface.clone());
 
                 manifest.finalize();
                 manifests.push(manifest);
@@ -798,6 +827,133 @@ fn collect_export_names(program: &shape_ast::ast::Program) -> Vec<String> {
     names
 }
 
+/// Collect the resolved type-checker interface from a parsed AST (DESIGN §1.1 /
+/// §2.3 PRODUCER step).
+///
+/// Returns a [`ResolvedInterface`] carrying every interface-relevant item def in
+/// EXACT SOURCE ORDER (Function / ForeignFunction / StructType / Enum / Trait /
+/// Impl / Extend / TypeAlias) plus the export surface (names + visibility).
+///
+/// Per DESIGN §1.1 AMENDMENT A this is a SINGLE source-ordered `Vec<Item>` — NOT
+/// grouped-per-kind vectors — because trait/impl/enum registration is
+/// source-order-sensitive (an `impl T for S` textually before `trait T` must
+/// replay before the trait). Per the §1.1 sub-decision we carry ALL
+/// interface-relevant defs regardless of visibility: visibility gates only the
+/// consumer-visible query surface (`exports`), NOT registration order (a private
+/// trait can affect a public impl's registration).
+///
+/// Items wrapped in a `pub` export (`Item::Export(ExportStmt { item, .. })`) are
+/// unwrapped into their equivalent bare `Item` variant so the loader's
+/// `predeclare_item`/`infer_item` replay (§2.4) dispatches on the same node a
+/// from-source compile would. Nested `mod { ... }` blocks are walked recursively
+/// in place to preserve their interface items' source order relative to the
+/// enclosing scope.
+fn collect_resolved_interface(program: &shape_ast::ast::Program) -> ResolvedInterface {
+    let mut items: Vec<shape_ast::ast::Item> = Vec::new();
+    let mut exports: Vec<(String, ExportVisibility)> = Vec::new();
+
+    collect_interface_items(&program.items, &mut items, &mut exports);
+
+    ResolvedInterface {
+        interface_schema: KNOWN_INTERFACE_SCHEMA,
+        items,
+        exports,
+    }
+}
+
+/// Walk a slice of AST items in source order, pushing interface-relevant defs
+/// (unwrapping `pub` exports) into `items` and the export surface into `exports`.
+/// Recurses into `Item::Module` so nested interface items keep their source
+/// order relative to the enclosing scope.
+fn collect_interface_items(
+    src_items: &[shape_ast::ast::Item],
+    items: &mut Vec<shape_ast::ast::Item>,
+    exports: &mut Vec<(String, ExportVisibility)>,
+) {
+    use shape_ast::ast::{ExportItem, Item};
+
+    for item in src_items {
+        match item {
+            // Already-bare interface-relevant defs: carry verbatim in source order.
+            Item::Function(..)
+            | Item::ForeignFunction(..)
+            | Item::StructType(..)
+            | Item::Enum(..)
+            | Item::Trait(..)
+            | Item::Impl(..)
+            | Item::Extend(..)
+            | Item::TypeAlias(..) => {
+                items.push(item.clone());
+            }
+
+            // Nested module: recurse in place to preserve relative source order.
+            Item::Module(module, _span) => {
+                collect_interface_items(&module.items, items, exports);
+            }
+
+            // `pub` exports: record the export surface, and (where the export
+            // carries a def) unwrap into the equivalent bare `Item` so the
+            // replay passes dispatch identically to a from-source compile. Top-
+            // level `export` is the only visibility signal in source ASTs;
+            // comptime-only / internal are extension-registry concepts, so all
+            // source-level exports map to `Public`.
+            Item::Export(export, span) => {
+                match &export.item {
+                    ExportItem::Function(func) => {
+                        exports.push((func.name.clone(), ExportVisibility::Public));
+                        items.push(Item::Function(func.clone(), *span));
+                    }
+                    ExportItem::ForeignFunction(func) => {
+                        exports.push((func.name.clone(), ExportVisibility::Public));
+                        items.push(Item::ForeignFunction(func.clone(), *span));
+                    }
+                    ExportItem::Struct(s) => {
+                        exports.push((s.name.clone(), ExportVisibility::Public));
+                        items.push(Item::StructType(s.clone(), *span));
+                    }
+                    ExportItem::Enum(e) => {
+                        exports.push((e.name.clone(), ExportVisibility::Public));
+                        items.push(Item::Enum(e.clone(), *span));
+                    }
+                    ExportItem::Trait(t) => {
+                        exports.push((t.name.clone(), ExportVisibility::Public));
+                        items.push(Item::Trait(t.clone(), *span));
+                    }
+                    ExportItem::TypeAlias(alias) => {
+                        exports.push((alias.name.clone(), ExportVisibility::Public));
+                        items.push(Item::TypeAlias(alias.clone(), *span));
+                    }
+                    // Re-exports (`pub { name as alias }`): names only, no def to
+                    // register — the def lives in the imported module.
+                    ExportItem::Named(specs) => {
+                        for spec in specs {
+                            let name = spec.alias.clone().unwrap_or_else(|| spec.name.clone());
+                            exports.push((name, ExportVisibility::Public));
+                        }
+                    }
+                    // Not interface-relevant defs in the §1.1 sense (no annotation-
+                    // level signature the consumer type-checks against): record the
+                    // export name for the query surface but emit no replayable item.
+                    ExportItem::BuiltinFunction(func) => {
+                        exports.push((func.name.clone(), ExportVisibility::Public));
+                    }
+                    ExportItem::BuiltinType(ty) => {
+                        exports.push((ty.name.clone(), ExportVisibility::Public));
+                    }
+                    ExportItem::Annotation(annotation) => {
+                        exports.push((annotation.name.clone(), ExportVisibility::Public));
+                    }
+                }
+            }
+
+            // Everything else (imports, top-level statements, queries, tests,
+            // datasources, comptime blocks, builtin decls, …) is not part of the
+            // annotation-level interface surface (DESIGN §5 scope boundary).
+            _ => {}
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -892,6 +1048,152 @@ mod tests {
         assert_ne!(
             k1, k2,
             "component boundaries must be unambiguous (length-framed)"
+        );
+    }
+
+    // ---- §1.1 / §2.3 resolved-interface producer ------------------------
+
+    /// A short order-stable label for an interface item, used to assert that
+    /// `resolved_interface.items` preserves source order across a `.shapec`
+    /// round-trip (DESIGN §1.1 AMENDMENT A: the single source-ordered list is
+    /// load-bearing for trait/impl/enum registration).
+    fn interface_item_label(item: &shape_ast::ast::Item) -> String {
+        use shape_ast::ast::types::TypeName;
+        use shape_ast::ast::Item;
+
+        fn type_name_label(tn: &TypeName) -> String {
+            match tn {
+                TypeName::Simple(p) => p.name().to_string(),
+                TypeName::Generic { name, .. } => name.name().to_string(),
+            }
+        }
+
+        match item {
+            Item::Function(f, _) => format!("fn:{}", f.name),
+            Item::ForeignFunction(f, _) => format!("foreign:{}", f.name),
+            Item::StructType(s, _) => format!("struct:{}", s.name),
+            Item::Enum(e, _) => format!("enum:{}", e.name),
+            Item::Trait(t, _) => format!("trait:{}", t.name),
+            Item::Impl(i, _) => format!(
+                "impl:{}:{}",
+                type_name_label(&i.trait_name),
+                type_name_label(&i.target_type)
+            ),
+            Item::Extend(e, _) => format!("extend:{}", type_name_label(&e.type_name)),
+            Item::TypeAlias(a, _) => format!("alias:{}", a.name),
+            other => format!("other:{:?}", std::mem::discriminant(other)),
+        }
+    }
+
+    #[test]
+    fn resolved_interface_items_round_trip_preserving_source_order() {
+        // A small multi-item module whose `impl` is textually BEFORE its
+        // `trait` — the §1.1 AMENDMENT A order-sensitive case. The producer must
+        // carry items in EXACT source order, and that order must survive the
+        // SHAPEPKG to_bytes/from_bytes round-trip unchanged.
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let root = tmp.path();
+
+        std::fs::write(
+            root.join("shape.toml"),
+            "[project]\nname = \"iface-order\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("write shape.toml");
+
+        // Source order:
+        //   1. type Point        (struct)
+        //   2. impl Greet for Point  (impl, BEFORE the trait it implements)
+        //   3. trait Greet       (trait)
+        //   4. enum Color        (enum)
+        //   5. pub fn run        (function, via export)
+        std::fs::write(
+            root.join("main.shape"),
+            r#"
+type Point { x: int, y: int }
+
+impl Greet for Point {
+    method greet() -> int { 1 }
+}
+
+trait Greet {
+    method greet() -> int;
+}
+
+enum Color { Red, Green, Blue }
+
+pub fn run() -> int { 42 }
+"#,
+        )
+        .expect("write main.shape");
+
+        let project =
+            shape_runtime::project::find_project_root(root).expect("should find project root");
+        let bundle = BundleCompiler::compile(&project).expect("compile should succeed");
+
+        // The producer must have stamped a resolved_interface on the main module
+        // manifest (§2.3 producer step).
+        let main_manifest = bundle
+            .manifests
+            .iter()
+            .find(|m| m.name == "main")
+            .expect("main module manifest should exist");
+        let iface = main_manifest
+            .resolved_interface
+            .as_ref()
+            .expect("main manifest must carry a resolved interface");
+        assert_eq!(
+            iface.interface_schema,
+            shape_runtime::package_bundle::KNOWN_INTERFACE_SCHEMA,
+            "interface_schema must be the current revision"
+        );
+
+        let expected_order = vec![
+            "struct:Point".to_string(),
+            "impl:Greet:Point".to_string(),
+            "trait:Greet".to_string(),
+            "enum:Color".to_string(),
+            "fn:run".to_string(),
+        ];
+        let produced_order: Vec<String> =
+            iface.items.iter().map(interface_item_label).collect();
+        assert_eq!(
+            produced_order, expected_order,
+            "producer must carry interface items in EXACT source order \
+             (impl BEFORE trait), not grouped-per-kind"
+        );
+
+        // The export surface carries the public `run` function.
+        assert!(
+            iface
+                .exports
+                .iter()
+                .any(|(name, vis)| name == "run"
+                    && *vis == shape_runtime::package_bundle::ExportVisibility::Public),
+            "exports must record `run` as Public, got {:?}",
+            iface.exports
+        );
+
+        // Round-trip the whole bundle through the SHAPEPKG container and assert
+        // the restored manifest's interface item order is byte-for-byte the same
+        // ordered sequence — the load-bearing §1.1 property.
+        let bytes = bundle.to_bytes().expect("to_bytes should succeed");
+        let restored = PackageBundle::from_bytes(&bytes).expect("from_bytes should succeed");
+
+        let restored_iface = restored
+            .manifests
+            .iter()
+            .find(|m| m.name == "main")
+            .and_then(|m| m.resolved_interface.as_ref())
+            .expect("restored main manifest must carry a resolved interface");
+        let restored_order: Vec<String> = restored_iface
+            .items
+            .iter()
+            .map(interface_item_label)
+            .collect();
+        assert_eq!(
+            restored_order, expected_order,
+            "resolved_interface.items must round-trip through to_bytes/from_bytes \
+             PRESERVING ORDER"
         );
     }
 
