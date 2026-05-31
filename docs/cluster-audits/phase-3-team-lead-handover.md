@@ -1,5 +1,56 @@
 # Team-lead handover — Shape v0.3.3 fix cycle
 
+---
+## ⟢ ROTATION UPDATE 2026-06-01 (READ FIRST — supersedes stale sections below)
+
+**main HEAD `705cd854`.** First non-docs merges of the cycle landed — both are
+**infra (RESULTS-IDENTICAL, zero semantic effect), landed early per "land it FIRST"**;
+correctness fixes still follow fix-then-flip (merge at tag).
+
+**#1 COMPILE-CACHE — DONE + LANDED + verified across the full close-gate set.**
+- Design: `docs/design/compile-cache/DESIGN.md` (supervisor-ratified: 4a prelude-as-
+  SHAPEPKG, v1 annotation-required, dual version-knob, to_annotation-NOWHERE, 3
+  adversarial closures: source-ordered `Vec<Item>` / build-fingerprint / transitive
+  dep-hashes). Load = replay the FORWARD `resolve_type_annotation` passes; lossy
+  `to_annotation` never on the cache path. `ResolvedInterface` on `ModuleManifest`,
+  SHAPEPKG v3→4.
+- BULK-HANG TRUE ROOT (both my and the orig handover's "re-infers prelude" model were
+  WRONG): TWO costs — (a) interface re-INFERENCE (fixed by the compile-cache replay)
+  and (b) stdlib re-PARSING (Pest backtracking cliff: `std::core::vec` ≈ 2.66s/parse),
+  fixed by **Phase-2 parse-memo** (`705cd854`, process-global content-keyed
+  `OnceLock` AST memo, results-identical, verified). CLI `shape run` ~320ms vs ~3800ms
+  (~12×); test-gate corpus 4→81 binaries/20min (module-chunked-parallel → ~5min).
+- FOLLOW-UP: `vec.shape` 2.66s parse is a grammar pathology — a parser-level fix
+  would help everything, not just tests.
+
+**A(i) MAP-CHAIN — DONE, verified, on branch `ai-map-chain` (`ceb24adf`, awaits tag).**
+Net-new dispatch-routing seam: `resolve_receiver_extend_type` (helpers.rs:4232) had
+`_=>None` for `Expr::MethodCall` receivers → inline `map().filter()` fell to the native
+ckpt-2 SURFACE instead of pure-Shape `Vec.filter`. S fix (MethodCall arm via
+`concrete_type_for_expr`). Triage: `docs/cluster-audits/v0.3.3-map-chain-inference-loss.md`.
+
+**LET-GEN (B) — design-verified, build queued post-A-final.** Sound ONLY with the
+cond-4 NON-EXPANSIVENESS refusal (VERIFIED VR leak: a module `var` read through a
+generalized fn type-checks int AND string into one cell). §5 ruled **A-ENFORCED** (user).
+Spec: `docs/design/let-gen-gating-predicate-spec.md`. NEW sibling ruling
+(`project_generic_types_require_args` memory): Option/HashMap/Array exist ONLY in `<T>`
+form — bare generic name invalid anywhere (type-resolution-layer fix).
+
+**A-FINAL (strict-flip 0-regression gate) — IN PROGRESS.** `strict-flip-collection-
+dispatch` merged onto the compile-cache+parse-memo baseline (strict mode confirmed
+active: `let x:int="hello"` rejects). Next: module-chunked-parallel corpus on both
+baselines → complete FAILED diff → classify delta (TP→negative-suite vs FP-regression=0,
+masked-unknown discipline). Then let-gen+bare-generic build → migration lanes → book.
+
+**PROCESS NOTES (Q3-self-verify earned its keep):** caught (a) the compile-cache's
+test-gate GAP (over-claimed "bulk-hang fixed" off a fail-fast-truncated 103s run —
+the real --no-fail-fast run timed out); (b) my own binder-violation (ran a single-
+threaded full suite — forbidden); (c) the Pest-parse vs inference mis-diagnosis (the
+Phase-2 agent's diagnosis-first corrected it). Adversarial-verify caught the
+compile-cache's 3 closures + the let-gen VR leak.
+
+---
+
 **Refreshed:** 2026-05-27 at main HEAD `7877fc6b` (post-classification-
 audit doc-truth refresh). **v0.3.0 / v0.3.1 / v0.3.2 SHIPPED** to crates.io
 + VS Code Marketplace + playground + book. v0.3.x LSP-parity workstream
