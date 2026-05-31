@@ -243,6 +243,42 @@ impl TypeInferenceEngine {
                                 match &resolved {
                                     Type::Variable(var) => tyvar_to_annotation(var),
                                     Type::Constrained { var, .. } => tyvar_to_annotation(var),
+                                    // A closure-valued field (e.g. `{ greet: |name| ... }`)
+                                    // must keep its unresolved param/return TypeVars as tyvar
+                                    // markers, not collapse them to "unknown" via the lossy
+                                    // Function->annotation path (the documented
+                                    // `Type::Function` TypeVar loss in to_annotation).
+                                    // Otherwise `obj.greet("World")` checks the arg against an
+                                    // "unknown" param and rejects. Mirrors the Variable/
+                                    // Constrained arms so call-site substitution resolves it.
+                                    Type::Function { params, returns } => {
+                                        let unifier = &self.unifier;
+                                        let conv = |t: &Type| -> TypeAnnotation {
+                                            match &unifier.apply_substitutions(t) {
+                                                Type::Variable(v) => tyvar_to_annotation(v),
+                                                Type::Constrained { var, .. } => {
+                                                    tyvar_to_annotation(var)
+                                                }
+                                                other => {
+                                                    other.to_annotation().unwrap_or_else(|| {
+                                                        TypeAnnotation::Basic("unknown".to_string())
+                                                    })
+                                                }
+                                            }
+                                        };
+                                        let param_anns = params
+                                            .iter()
+                                            .map(|p| shape_ast::ast::FunctionParam {
+                                                name: None,
+                                                optional: false,
+                                                type_annotation: conv(p),
+                                            })
+                                            .collect();
+                                        TypeAnnotation::Function {
+                                            params: param_anns,
+                                            returns: Box::new(conv(returns)),
+                                        }
+                                    }
                                     _ => resolved.to_annotation().unwrap_or_else(|| {
                                         TypeAnnotation::Basic("unknown".to_string())
                                     }),
@@ -531,13 +567,27 @@ impl TypeInferenceEngine {
                                 }
 
                                 for (arg_ty, param) in arg_types.iter().zip(params.iter()) {
-                                    self.constraints.push((
-                                        arg_ty.clone(),
-                                        Type::Concrete(param.type_annotation.clone()),
-                                    ));
+                                    // Decode a tyvar marker (a closure-valued field whose
+                                    // param is still an unresolved TypeVar — e.g.
+                                    // `{ greet: |name| ... }`) back to a Variable so the
+                                    // call arg substitutes it, instead of failing the
+                                    // unsolvable constraint `arg ~ "tyvar:Tn"`.
+                                    let param_ty = match annotation_as_tyvar(
+                                        &param.type_annotation,
+                                    ) {
+                                        Some(var) => Type::Variable(var),
+                                        None => Type::Concrete(param.type_annotation.clone()),
+                                    };
+                                    self.constraints.push((arg_ty.clone(), param_ty));
                                 }
 
-                                return Ok(Type::Concrete(*returns));
+                                let ret = match annotation_as_tyvar(&returns) {
+                                    Some(var) => {
+                                        self.unifier.apply_substitutions(&Type::Variable(var))
+                                    }
+                                    None => Type::Concrete(*returns),
+                                };
+                                return Ok(ret);
                             }
                             Type::Function { params, returns } => {
                                 if params.len() != arg_types.len() {

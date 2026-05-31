@@ -648,11 +648,22 @@ impl TypeInferenceEngine {
                 params: concrete_params,
                 returns: concrete_returns,
             }) => {
+                // Decode tyvar markers back into real Variables so call-arg
+                // substitution can resolve them — e.g. a closure-valued object field
+                // `{ greet: |name| ... }` stores greet's param as an unresolved
+                // `tyvar:Tn` marker; `obj.greet("World")` must unify "World" with Tn,
+                // not against the literal marker string.
                 let params: Vec<Type> = concrete_params
                     .iter()
-                    .map(|p| Type::Concrete(p.type_annotation.clone()))
+                    .map(|p| match annotation_as_tyvar(&p.type_annotation) {
+                        Some(var) => Type::Variable(var),
+                        None => Type::Concrete(p.type_annotation.clone()),
+                    })
                     .collect();
-                let returns = Type::Concrete(*concrete_returns.clone());
+                let returns = match annotation_as_tyvar(concrete_returns) {
+                    Some(var) => Type::Variable(var),
+                    None => Type::Concrete(*concrete_returns.clone()),
+                };
                 (params, returns)
             }
             _ => unreachable!("non-function callees are handled above"),
