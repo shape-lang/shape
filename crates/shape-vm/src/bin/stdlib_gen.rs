@@ -87,4 +87,76 @@ fn main() {
         std::fs::write(&out_path, &bytes).expect("Failed to write artifact");
         eprintln!("Wrote {}", out_path.display());
     }
+
+    // DESIGN decision 4a — also bake the degenerate prelude SHAPEPKG bundle
+    // (`embedded/core_prelude.shapec`): the merged bytecode + the prelude
+    // `ResolvedInterface`, routed through the SAME §2.3 gate + §2.4 replay path
+    // at load time. The bare `core_stdlib.msgpack` above is preserved as the R6
+    // last-resort fallback (kept in lockstep here).
+    let prelude_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("embedded/core_prelude.shapec");
+    eprintln!("Building prelude SHAPEPKG bundle...");
+    let prelude_bundle = shape_vm::stdlib::build_core_prelude_bundle()
+        .expect("Failed to build prelude bundle");
+    let prelude_bytes = prelude_bundle
+        .to_bytes()
+        .expect("Failed to serialize prelude bundle");
+
+    if verify {
+        if !prelude_path.exists() {
+            eprintln!(
+                "ERROR: Prelude bundle not found at {}",
+                prelude_path.display()
+            );
+            eprintln!("Run `cargo run -p shape-vm --bin stdlib_gen` to generate it.");
+            std::process::exit(1);
+        }
+        let existing =
+            std::fs::read(&prelude_path).expect("Failed to read existing prelude bundle");
+        let existing_bundle =
+            shape_runtime::package_bundle::PackageBundle::from_bytes(&existing)
+                .expect("Failed to deserialize existing prelude bundle");
+        let mut errors = Vec::new();
+        let existing_iface_items = existing_bundle
+            .manifests
+            .first()
+            .and_then(|m| m.resolved_interface.as_ref())
+            .map(|i| i.items.len())
+            .unwrap_or(0);
+        let fresh_iface_items = prelude_bundle
+            .manifests
+            .first()
+            .and_then(|m| m.resolved_interface.as_ref())
+            .map(|i| i.items.len())
+            .unwrap_or(0);
+        if existing_iface_items != fresh_iface_items {
+            errors.push(format!(
+                "prelude interface item count: existing={}, expected={}",
+                existing_iface_items, fresh_iface_items
+            ));
+        }
+        if errors.is_empty() {
+            eprintln!("OK: Prelude bundle is up-to-date.");
+        } else {
+            eprintln!("ERROR: Prelude bundle is stale!");
+            for e in &errors {
+                eprintln!("  - {}", e);
+            }
+            eprintln!("Run `cargo run -p shape-vm --bin stdlib_gen` to regenerate.");
+            std::process::exit(1);
+        }
+    } else {
+        std::fs::write(&prelude_path, &prelude_bytes).expect("Failed to write prelude bundle");
+        eprintln!(
+            "Wrote {} ({} bytes, {} interface items)",
+            prelude_path.display(),
+            prelude_bytes.len(),
+            prelude_bundle
+                .manifests
+                .first()
+                .and_then(|m| m.resolved_interface.as_ref())
+                .map(|i| i.items.len())
+                .unwrap_or(0)
+        );
+    }
 }

@@ -11,6 +11,25 @@ use std::process::Command;
 fn main() {
     generate_grammar_features();
     emit_compiler_fingerprint();
+    emit_prelude_bundle_presence();
+}
+
+/// DESIGN decision 4a — set `cfg(prelude_bundle_present)` only when the baked
+/// prelude `SHAPEPKG` bundle (`embedded/core_prelude.shapec`) exists. This lets
+/// `stdlib.rs`'s `include_bytes_optional!` resolve the artifact when present and
+/// expand to `None` when it is not yet generated — so the crate builds before
+/// `stdlib_gen` has written the bundle (the R6 fallback chain then applies), and
+/// picks the bundle up on the next build once it is baked.
+fn emit_prelude_bundle_presence() {
+    // Declare the custom cfg so `--check-cfg` (warn-by-default on recent
+    // toolchains) does not flag it.
+    println!("cargo:rustc-check-cfg=cfg(prelude_bundle_present)");
+
+    let path = Path::new("embedded/core_prelude.shapec");
+    if path.exists() {
+        println!("cargo:rustc-cfg=prelude_bundle_present");
+    }
+    println!("cargo:rerun-if-changed=embedded/core_prelude.shapec");
 }
 
 /// Emit `SHAPE_COMPILER_FINGERPRINT` (compile-cache DESIGN §2.2 AMENDMENT B /

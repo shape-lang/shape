@@ -848,7 +848,7 @@ fn collect_export_names(program: &shape_ast::ast::Program) -> Vec<String> {
 /// from-source compile would. Nested `mod { ... }` blocks are walked recursively
 /// in place to preserve their interface items' source order relative to the
 /// enclosing scope.
-fn collect_resolved_interface(program: &shape_ast::ast::Program) -> ResolvedInterface {
+pub(crate) fn collect_resolved_interface(program: &shape_ast::ast::Program) -> ResolvedInterface {
     let mut items: Vec<shape_ast::ast::Item> = Vec::new();
     let mut exports: Vec<(String, ExportVisibility)> = Vec::new();
 

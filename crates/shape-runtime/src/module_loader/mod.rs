@@ -153,6 +153,14 @@ pub struct ModuleLoader {
     /// Optional external blob store for lazy-fetching content-addressed blobs
     /// that are not found in the inline blob cache.
     blob_store: Option<Arc<dyn crate::blob_store::BlobStore>>,
+    /// DESIGN §2.3/§2.4 — resolved interfaces captured on a `.shapec` cache HIT,
+    /// keyed by the prefixed module path. Populated by `load_bundle` when the
+    /// §2.3 gate selects `LoadAndReplay`; the consumer type-checker drains these
+    /// and runs `TypeInferenceEngine::replay_resolved_interface` over each
+    /// module's source-ordered `items` instead of re-parsing + re-inferring the
+    /// dependency from source. A cache MISS (stale / pre-v4 / too-new interface)
+    /// records nothing here, so the consumer falls back to from-source loading.
+    loaded_interfaces: HashMap<String, crate::package_bundle::ResolvedInterface>,
 }
 
 impl ModuleLoader {
@@ -169,6 +177,7 @@ impl ModuleLoader {
             embedded_stdlib_resolver: InMemoryResolver::default(),
             keychain: None,
             blob_store: None,
+            loaded_interfaces: HashMap::new(),
         };
 
         // Add paths from SHAPE_PATH environment variable
@@ -201,6 +210,7 @@ impl ModuleLoader {
             embedded_stdlib_resolver: self.embedded_stdlib_resolver.clone(),
             keychain: None,
             blob_store: self.blob_store.clone(),
+            loaded_interfaces: self.loaded_interfaces.clone(),
         }
     }
 
@@ -382,6 +392,29 @@ impl ModuleLoader {
                 manifest.name.clone()
             };
 
+            // DESIGN §2.3 — load-or-rebuild gate for this module's interface.
+            // The bundle is already deserialized (so `read_from_file` validated
+            // the container version against MIN..=FORMAT_VERSION); a pure
+            // `.shapec` dependency has no local source to recompute the §2.2
+            // key, so `fresh_key = None` and freshness rests on the dep's
+            // embedded `BundleMetadata.source_hash` (the same hash stage-2
+            // CLOSURE C folds into a dependent's key). On a LOAD hit we capture
+            // the `ResolvedInterface` for the consumer type-checker to REPLAY
+            // (§2.4); on a miss (pre-v4 / too-new / absent interface) nothing is
+            // captured and the consumer falls back to from-source loading.
+            let action = crate::package_bundle::decide_cache_action(
+                crate::package_bundle::current_format_version(),
+                &bundle.metadata.source_hash,
+                None,
+                manifest.resolved_interface.as_ref(),
+            );
+            if action.is_load() {
+                if let Some(interface) = &manifest.resolved_interface {
+                    self.loaded_interfaces
+                        .insert(path.clone(), interface.clone());
+                }
+            }
+
             // Collect all blobs referenced by this manifest, including
             // transitive dependencies from the dependency closure.
             let mut module_blobs = HashMap::new();
@@ -480,6 +513,26 @@ impl ModuleLoader {
     /// Get the resolved dependency paths.
     pub fn get_dependency_paths(&self) -> &HashMap<String, PathBuf> {
         &self.dependency_paths
+    }
+
+    /// DESIGN §2.4 — resolved interfaces captured on `.shapec` cache HITs,
+    /// keyed by prefixed module path. A consumer type-checker iterates these
+    /// and runs `TypeInferenceEngine::replay_resolved_interface` over each
+    /// module's `items` to register the dependency's interface WITHOUT
+    /// re-parsing or re-inferring it from source. Empty when no fresh-hit
+    /// bundle was loaded.
+    pub fn loaded_interfaces(
+        &self,
+    ) -> &HashMap<String, crate::package_bundle::ResolvedInterface> {
+        &self.loaded_interfaces
+    }
+
+    /// Look up one module's cached interface (fresh-hit only), by prefixed path.
+    pub fn loaded_interface(
+        &self,
+        module_path: &str,
+    ) -> Option<&crate::package_bundle::ResolvedInterface> {
+        self.loaded_interfaces.get(module_path)
     }
 
     /// Get all module search paths

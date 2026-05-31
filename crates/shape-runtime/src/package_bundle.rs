@@ -288,6 +288,91 @@ impl PackageBundle {
     }
 }
 
+/// Outcome of the DESIGN §2.3 load-or-rebuild freshness gate for one module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheAction {
+    /// All §2.3 preconditions hold: deserialize the [`ResolvedInterface`] and
+    /// REPLAY it via the §2.4 two-pass walk
+    /// (`TypeInferenceEngine::replay_resolved_interface`); skip parse + infer.
+    LoadAndReplay,
+    /// A precondition failed; REBUILD from source and write a fresh `.shapec`.
+    Rebuild(RebuildReason),
+}
+
+impl CacheAction {
+    pub fn is_load(&self) -> bool {
+        matches!(self, CacheAction::LoadAndReplay)
+    }
+}
+
+/// Why the §2.3 gate chose REBUILD over LOAD (diagnostics / tracing only).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RebuildReason {
+    /// Container version outside `MIN_FORMAT_VERSION..=FORMAT_VERSION`.
+    ContainerVersionOutOfRange,
+    /// Stamped `source_hash` does not match the freshly computed §2.2 key
+    /// (only checked when the caller has source to recompute — prelude +
+    /// package rebuild path; a pure `.shapec` dependency passes `None`).
+    SourceHashMismatch,
+    /// Manifest carries no `resolved_interface` (a pre-v4 bundle, or a package
+    /// whose public signatures were unannotated under `interface_schema = 1`,
+    /// DESIGN §3.4 — no interface cached → consumer rebuilds from source).
+    InterfaceAbsent,
+    /// `interface_schema > KNOWN_INTERFACE_SCHEMA`: a too-new interface a
+    /// loader at this binary cannot replay → treat as absent → rebuild.
+    InterfaceSchemaTooNew,
+}
+
+/// DESIGN §2.3 — the load-or-rebuild decision, as a pure predicate.
+///
+/// Returns [`CacheAction::LoadAndReplay`] iff ALL of:
+/// - the `.shapec` exists (the caller only invokes this once it has a bundle),
+/// - `container_version` is in `MIN_FORMAT_VERSION..=FORMAT_VERSION`,
+/// - when `fresh_key` is `Some` (caller has source to recompute the §2.2 key),
+///   the stamped `metadata.source_hash` equals it; a pure `.shapec` dependency
+///   has no local source so passes `None` and relies on the dep's embedded
+///   hash being the recorded freshness (the same hash stage-2 CLOSURE C folds
+///   into a dependent's key),
+/// - `resolved_interface` is `Some`,
+/// - `resolved_interface.interface_schema <= KNOWN_INTERFACE_SCHEMA`.
+///
+/// Otherwise [`CacheAction::Rebuild`] with the failing reason. This is the
+/// single decision both the consumer chokepoint (`ModuleLoader::load_bundle`)
+/// and the prelude chokepoint (`shape-vm` `stdlib.rs`) route through.
+pub fn decide_cache_action(
+    container_version: u32,
+    stamped_source_hash: &str,
+    fresh_key: Option<&str>,
+    resolved_interface: Option<&ResolvedInterface>,
+) -> CacheAction {
+    if container_version < MIN_FORMAT_VERSION || container_version > FORMAT_VERSION {
+        return CacheAction::Rebuild(RebuildReason::ContainerVersionOutOfRange);
+    }
+    if let Some(key) = fresh_key {
+        if stamped_source_hash != key {
+            return CacheAction::Rebuild(RebuildReason::SourceHashMismatch);
+        }
+    }
+    let Some(interface) = resolved_interface else {
+        return CacheAction::Rebuild(RebuildReason::InterfaceAbsent);
+    };
+    if interface.interface_schema > KNOWN_INTERFACE_SCHEMA {
+        return CacheAction::Rebuild(RebuildReason::InterfaceSchemaTooNew);
+    }
+    CacheAction::LoadAndReplay
+}
+
+/// The container [`FORMAT_VERSION`] for callers that need to gate on it
+/// (e.g. a bundle read from raw bytes that wants the §2.3 decision).
+pub const fn current_format_version() -> u32 {
+    FORMAT_VERSION
+}
+
+/// The minimum loadable container version.
+pub const fn min_format_version() -> u32 {
+    MIN_FORMAT_VERSION
+}
+
 /// Verify SHA-256 checksum of raw bundle bytes.
 /// `expected` should be in format "sha256:hexdigest" or just the hex digest.
 pub fn verify_bundle_checksum(bundle_bytes: &[u8], expected: &str) -> bool {
@@ -531,6 +616,89 @@ mod tests {
         let hash = sha256_hex(data).to_uppercase();
         // hex::encode produces lowercase; uppercase should fail
         assert!(!verify_bundle_checksum(data, &hash));
+    }
+
+    // --- DESIGN §2.3 — decide_cache_action freshness gate ---
+
+    fn iface_v(schema: u32) -> ResolvedInterface {
+        ResolvedInterface {
+            interface_schema: schema,
+            items: vec![],
+            exports: vec![],
+        }
+    }
+
+    #[test]
+    fn decide_load_on_all_preconditions() {
+        let iface = iface_v(KNOWN_INTERFACE_SCHEMA);
+        // fresh_key matches the stamped hash; interface present; schema known.
+        let action =
+            decide_cache_action(FORMAT_VERSION, "hashA", Some("hashA"), Some(&iface));
+        assert_eq!(action, CacheAction::LoadAndReplay);
+        assert!(action.is_load());
+    }
+
+    #[test]
+    fn decide_load_when_no_local_source_to_recompute() {
+        // A pure `.shapec` dependency passes fresh_key = None; freshness rests
+        // on the embedded source_hash, so the gate still loads.
+        let iface = iface_v(KNOWN_INTERFACE_SCHEMA);
+        let action = decide_cache_action(FORMAT_VERSION, "embeddedhash", None, Some(&iface));
+        assert_eq!(action, CacheAction::LoadAndReplay);
+    }
+
+    #[test]
+    fn decide_rebuild_on_source_hash_mismatch() {
+        let iface = iface_v(KNOWN_INTERFACE_SCHEMA);
+        let action =
+            decide_cache_action(FORMAT_VERSION, "stale", Some("fresh"), Some(&iface));
+        assert_eq!(action, CacheAction::Rebuild(RebuildReason::SourceHashMismatch));
+    }
+
+    #[test]
+    fn decide_rebuild_on_absent_interface() {
+        let action = decide_cache_action(FORMAT_VERSION, "h", Some("h"), None);
+        assert_eq!(action, CacheAction::Rebuild(RebuildReason::InterfaceAbsent));
+    }
+
+    #[test]
+    fn decide_rebuild_on_too_new_interface_schema() {
+        let iface = iface_v(KNOWN_INTERFACE_SCHEMA + 1);
+        let action = decide_cache_action(FORMAT_VERSION, "h", Some("h"), Some(&iface));
+        assert_eq!(
+            action,
+            CacheAction::Rebuild(RebuildReason::InterfaceSchemaTooNew)
+        );
+    }
+
+    #[test]
+    fn decide_rebuild_on_container_version_out_of_range() {
+        let iface = iface_v(KNOWN_INTERFACE_SCHEMA);
+        // Above FORMAT_VERSION — a future bundle a binary this old cannot load.
+        let action =
+            decide_cache_action(FORMAT_VERSION + 1, "h", Some("h"), Some(&iface));
+        assert_eq!(
+            action,
+            CacheAction::Rebuild(RebuildReason::ContainerVersionOutOfRange)
+        );
+        // Below MIN — a legacy bundle (would also lack the interface anyway).
+        let action_low =
+            decide_cache_action(MIN_FORMAT_VERSION - 1, "h", Some("h"), Some(&iface));
+        assert_eq!(
+            action_low,
+            CacheAction::Rebuild(RebuildReason::ContainerVersionOutOfRange)
+        );
+    }
+
+    #[test]
+    fn decide_container_range_checked_before_interface() {
+        // Out-of-range version with a None interface still reports the version
+        // reason (the §2.3 predicate evaluates container version first).
+        let action = decide_cache_action(FORMAT_VERSION + 5, "h", None, None);
+        assert_eq!(
+            action,
+            CacheAction::Rebuild(RebuildReason::ContainerVersionOutOfRange)
+        );
     }
 
     #[test]
