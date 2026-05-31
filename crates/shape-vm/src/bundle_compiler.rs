@@ -138,12 +138,52 @@ impl BundleCompiler {
             });
         }
 
-        // 3. Compute combined source hash
-        let mut hasher = Sha256::new();
-        hasher.update(all_sources.as_bytes());
-        let source_hash = format!("{:x}", hasher.finalize());
+        // 3. Compute the §2.2 four-part cache key (NOT source bytes alone). The
+        //    tuple is SHA256(source_bytes ‖ compiler_fingerprint ‖
+        //    dep_source_hashes ‖ permission_profile), each component a separately
+        //    length-prefixed field for deterministic, unambiguous framing.
+        //    `all_sources` is the source-bytes component, accumulated in
+        //    file-path-sorted order (`discover_shape_files` sorts at line ~474).
 
-        // 4. Collect dependency versions
+        // 3a. Permission profile: the resolved required_permissions surface
+        //     across every compiled blob, deduped + sorted by permission name —
+        //     same normalization the FunctionBlob hash uses
+        //     (content_addressed.rs:124). The same source under a different
+        //     permission scope is a different artifact (§2.2 component 4).
+        let mut permission_names: HashSet<String> = HashSet::new();
+        for (_module_path, _exports, content_addressed) in &compiled_programs {
+            if let Some(ca) = content_addressed {
+                for blob in ca.function_store.values() {
+                    for perm in blob.required_permissions.iter() {
+                        permission_names.insert(perm.name().to_string());
+                    }
+                }
+            }
+        }
+        let mut permission_profile: Vec<String> = permission_names.into_iter().collect();
+        permission_profile.sort();
+
+        // 3b. Transitive dependency source hashes (§2.2 component 3 / AMENDMENT C).
+        //     Path/workspace/git deps fold in a recomputed hash over THEIR source
+        //     bytes (Merkle-style) so a dep-source edit propagates to the
+        //     dependent's key; registry deps pinned to an immutable published
+        //     version may keep the version string.
+        let dep_source_hashes = collect_transitive_dep_source_hashes(root, &project.config)?;
+
+        // 3c. Compiler fingerprint (§2.2 component 2 / AMENDMENT B): a build
+        //     content-id that changes on every meaningful compiler rebuild, NOT
+        //     the coarse `CARGO_PKG_VERSION` semver. Emitted by build.rs.
+        let compiler_fingerprint = compiler_fingerprint();
+
+        let source_hash = compute_cache_key(
+            all_sources.as_bytes(),
+            &compiler_fingerprint,
+            &dep_source_hashes,
+            &permission_profile,
+        );
+
+        // 4. Collect dependency versions (display/metadata surface; the freshness
+        //    gate keys off the §2.2 tuple above, not these strings).
         let mut dependencies = HashMap::new();
         for (name, spec) in &project.config.dependencies {
             let version = match spec {
@@ -273,6 +313,179 @@ impl BundleCompiler {
             native_dependency_scopes,
             docs,
         })
+    }
+}
+
+/// The build-time compiler fingerprint (compile-cache DESIGN §2.2 AMENDMENT B).
+///
+/// Folded into the cache key so a checker rebuild WITHOUT a `CARGO_PKG_VERSION`
+/// bump (the normal dev cycle) still invalidates stale `.shapec` interfaces.
+/// Emitted by `build.rs` as `SHAPE_COMPILER_FINGERPRINT`; if somehow unset
+/// (e.g. an unusual build path), falls back to the crate semver so the key is
+/// still well-defined.
+fn compiler_fingerprint() -> String {
+    option_env!("SHAPE_COMPILER_FINGERPRINT")
+        .map(str::to_string)
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string())
+}
+
+/// Compute the §2.2 four-part cache key:
+/// `SHA256(source_bytes ‖ compiler_fingerprint ‖ dep_source_hashes ‖ permission_profile)`.
+///
+/// Each component is length-prefixed (a fixed little-endian `u64` length tag,
+/// then the bytes) so distinct decompositions can never collide — e.g. a source
+/// edit that happens to shift a byte into the fingerprint region cannot alias a
+/// different (source, fingerprint) pair. `dep_source_hashes` and
+/// `permission_profile` are sorted by the caller for determinism; each element
+/// is itself length-framed.
+fn compute_cache_key(
+    source_bytes: &[u8],
+    compiler_fingerprint: &str,
+    dep_source_hashes: &[(String, String)],
+    permission_profile: &[String],
+) -> String {
+    let mut hasher = Sha256::new();
+
+    update_framed(&mut hasher, source_bytes);
+    update_framed(&mut hasher, compiler_fingerprint.as_bytes());
+
+    // dep_source_hashes: count, then each (name, hash) pair framed in order.
+    hasher.update((dep_source_hashes.len() as u64).to_le_bytes());
+    for (name, hash) in dep_source_hashes {
+        update_framed(&mut hasher, name.as_bytes());
+        update_framed(&mut hasher, hash.as_bytes());
+    }
+
+    // permission_profile: count, then each framed name in order.
+    hasher.update((permission_profile.len() as u64).to_le_bytes());
+    for perm in permission_profile {
+        update_framed(&mut hasher, perm.as_bytes());
+    }
+
+    format!("{:x}", hasher.finalize())
+}
+
+/// Feed a length-prefixed byte field into the hasher (8-byte LE length, then
+/// the bytes) for unambiguous framing across variable-length components.
+fn update_framed(hasher: &mut Sha256, bytes: &[u8]) {
+    hasher.update((bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
+}
+
+/// Recompute SHA-256 over the combined source bytes of every `.shape` file under
+/// a dependency source directory, in file-path-sorted order — mirroring the
+/// producer's own combined `source_hash` (the `all_sources` accumulation in
+/// `BundleCompiler::compile`). Used for path/workspace/git deps so a dep-source
+/// edit propagates into the dependent's cache key (DESIGN §2.2 AMENDMENT C).
+fn recompute_dir_source_hash(dep_root: &Path) -> Result<String, String> {
+    let mut files: Vec<(PathBuf, String)> = Vec::new();
+    collect_shape_files(dep_root, dep_root, &mut files)?;
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    files.dedup_by(|a, b| a.0 == b.0);
+
+    let mut combined = String::new();
+    for (file_path, _module_path) in &files {
+        let source = std::fs::read_to_string(file_path).map_err(|e| {
+            format!(
+                "Failed to read dependency source '{}': {}",
+                file_path.display(),
+                e
+            )
+        })?;
+        combined.push_str(&source);
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(combined.as_bytes());
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// Collect transitive dependency source hashes for the §2.2 cache key
+/// (AMENDMENT C / CLOSURE C). Returns `(dependency-name, hash-or-version)` pairs
+/// sorted by dependency name.
+///
+/// Classification (DESIGN §2.2 component 3):
+/// - **Path / Git**: recompute a `source_hash` over the dependency's own source
+///   bytes (Merkle-style). Editing the dep's source changes its hash → changes
+///   every dependent's key.
+/// - **Registry**: pinned to an immutable published version → the version string
+///   is sufficient (immutable by registry contract).
+/// - **Bundle (`.shapec`)**: the dependency is already a compiled artifact; its
+///   own embedded `source_hash` (`BundleMetadata.source_hash`) is the
+///   Merkle-stable input, read directly rather than recomputed.
+fn collect_transitive_dep_source_hashes(
+    root: &Path,
+    project: &shape_runtime::project::ShapeProject,
+) -> Result<Vec<(String, String)>, String> {
+    use shape_runtime::dependency_resolver::{DependencyResolver, ResolvedDependencySource};
+
+    if project.dependencies.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let Some(resolver) = DependencyResolver::new(canonical_root) else {
+        // No home dir → cannot resolve transitive paths. Fall back to the
+        // declared version strings so the key is still dep-aware (degrades to
+        // the pre-AMENDMENT-C behavior rather than dropping deps entirely).
+        let mut pairs: Vec<(String, String)> = project
+            .dependencies
+            .iter()
+            .map(|(name, spec)| (name.clone(), dependency_spec_version_string(spec)))
+            .collect();
+        pairs.sort_by(|a, b| a.0.cmp(&b.0));
+        return Ok(pairs);
+    };
+
+    // `resolve` returns the full transitive set in topological order.
+    let resolved = resolver.resolve(&project.dependencies).map_err(|e| {
+        format!(
+            "failed to resolve dependencies for cache-key dep hashing: {}",
+            e
+        )
+    })?;
+
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    for dep in resolved {
+        let hash = match &dep.source {
+            // Immutable published version → version string is sufficient.
+            ResolvedDependencySource::Registry { .. } => format!("registry:{}", dep.version),
+            // Already-compiled artifact: reuse its embedded source_hash.
+            ResolvedDependencySource::Bundle => {
+                match shape_runtime::package_bundle::PackageBundle::read_from_file(&dep.path) {
+                    Ok(bundle) => format!("bundle:{}", bundle.metadata.source_hash),
+                    // Unreadable bundle → fall back to version so a corrupt/stale
+                    // dep still perturbs the key rather than silently dropping.
+                    Err(_) => format!("bundle-version:{}", dep.version),
+                }
+            }
+            // Mutable source on disk → recompute over its source bytes.
+            ResolvedDependencySource::Path | ResolvedDependencySource::Git { .. } => {
+                recompute_dir_source_hash(&dep.path)?
+            }
+        };
+        pairs.push((dep.name.clone(), hash));
+    }
+
+    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(pairs)
+}
+
+/// Display-form version string for a dependency spec (fallback path only).
+fn dependency_spec_version_string(spec: &shape_runtime::project::DependencySpec) -> String {
+    match spec {
+        shape_runtime::project::DependencySpec::Version(v) => format!("version:{}", v),
+        shape_runtime::project::DependencySpec::Detailed(d) => {
+            if let Some(p) = &d.path {
+                format!("path:{}", p)
+            } else if let Some(g) = &d.git {
+                format!("git:{}", g)
+            } else if let Some(v) = &d.version {
+                format!("version:{}", v)
+            } else {
+                "local".to_string()
+            }
+        }
     }
 }
 
@@ -588,6 +801,176 @@ fn collect_export_names(program: &shape_ast::ast::Program) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- §2.2 four-part cache-key (CLOSURE B + C) -------------------------
+
+    /// Baseline inputs for the four-part key. Each `cache_key_*` test perturbs
+    /// exactly one component and asserts the resulting hash differs from this.
+    fn baseline_key_inputs() -> (Vec<u8>, String, Vec<(String, String)>, Vec<String>) {
+        (
+            b"pub fn f() -> int { 1 }".to_vec(),
+            "abc1234".to_string(),
+            vec![("utils".to_string(), "deadbeef".to_string())],
+            vec!["FsRead".to_string(), "NetConnect".to_string()],
+        )
+    }
+
+    #[test]
+    fn cache_key_stable_for_identical_inputs() {
+        let (src, fp, deps, perms) = baseline_key_inputs();
+        let k1 = compute_cache_key(&src, &fp, &deps, &perms);
+        let k2 = compute_cache_key(&src, &fp, &deps, &perms);
+        assert_eq!(k1, k2, "key must be deterministic for identical inputs");
+    }
+
+    #[test]
+    fn cache_key_changes_when_source_bytes_change() {
+        let (src, fp, deps, perms) = baseline_key_inputs();
+        let base = compute_cache_key(&src, &fp, &deps, &perms);
+
+        let edited = b"pub fn f() -> int { 2 }".to_vec();
+        let changed = compute_cache_key(&edited, &fp, &deps, &perms);
+        assert_ne!(
+            base, changed,
+            "(i) editing source bytes must change the cache key"
+        );
+    }
+
+    #[test]
+    fn cache_key_changes_when_fingerprint_changes() {
+        let (src, fp, deps, perms) = baseline_key_inputs();
+        let base = compute_cache_key(&src, &fp, &deps, &perms);
+
+        // Same source + deps + perms, different compiler build (the AMENDMENT B
+        // case: a checker rebuild that does NOT bump CARGO_PKG_VERSION).
+        let changed = compute_cache_key(&src, "def5678-dirty-1700000000", &deps, &perms);
+        assert_ne!(
+            base, changed,
+            "(ii) a different compiler fingerprint must change the cache key"
+        );
+    }
+
+    #[test]
+    fn cache_key_changes_when_path_dep_source_hash_changes() {
+        let (src, fp, _deps, perms) = baseline_key_inputs();
+        let deps_v1 = vec![("utils".to_string(), "deadbeef".to_string())];
+        let deps_v2 = vec![("utils".to_string(), "feedface".to_string())];
+
+        let base = compute_cache_key(&src, &fp, &deps_v1, &perms);
+        let changed = compute_cache_key(&src, &fp, &deps_v2, &perms);
+        assert_ne!(
+            base, changed,
+            "(iii) a changed path-dep source_hash must change the cache key"
+        );
+    }
+
+    #[test]
+    fn cache_key_changes_when_permission_profile_changes() {
+        // Permissions are baked into FunctionBlob.content_hash; the cache key
+        // must mirror that — the same source under a narrower permission scope
+        // is a distinct artifact (§2.2 component 4).
+        let (src, fp, deps, _perms) = baseline_key_inputs();
+        let perms_broad = vec!["FsRead".to_string(), "NetConnect".to_string()];
+        let perms_narrow = vec!["FsRead".to_string()];
+
+        let broad = compute_cache_key(&src, &fp, &deps, &perms_broad);
+        let narrow = compute_cache_key(&src, &fp, &deps, &perms_narrow);
+        assert_ne!(
+            broad, narrow,
+            "a narrowed permission profile must change the cache key"
+        );
+    }
+
+    #[test]
+    fn cache_key_framing_prevents_boundary_collision() {
+        // Length-prefixed framing must keep (source="ab", fp="c") distinct from
+        // (source="a", fp="bc") — naive concatenation would collide.
+        let deps: Vec<(String, String)> = Vec::new();
+        let perms: Vec<String> = Vec::new();
+        let k1 = compute_cache_key(b"ab", "c", &deps, &perms);
+        let k2 = compute_cache_key(b"a", "bc", &deps, &perms);
+        assert_ne!(
+            k1, k2,
+            "component boundaries must be unambiguous (length-framed)"
+        );
+    }
+
+    #[test]
+    fn recompute_dir_source_hash_tracks_dep_source_edits() {
+        // The path-dep source-hash recomputation must change when a .shape file
+        // under the dep dir is edited (the Merkle input to CLOSURE C).
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let dep = tmp.path().join("utils");
+        std::fs::create_dir_all(&dep).expect("create dep dir");
+        std::fs::write(dep.join("lib.shape"), "pub fn util() -> int { 1 }")
+            .expect("write dep source");
+
+        let h1 = recompute_dir_source_hash(&dep).expect("hash v1");
+
+        std::fs::write(dep.join("lib.shape"), "pub fn util() -> int { 2 }")
+            .expect("rewrite dep source");
+        let h2 = recompute_dir_source_hash(&dep).expect("hash v2");
+
+        assert_ne!(h1, h2, "editing a dep .shape file must change its source hash");
+
+        // Stable when unchanged.
+        let h3 = recompute_dir_source_hash(&dep).expect("hash v3");
+        assert_eq!(h2, h3, "unchanged dep source must hash identically");
+    }
+
+    #[test]
+    fn bundle_source_hash_changes_when_path_dep_source_changes() {
+        // End-to-end: a dependent package's BundleMetadata.source_hash must move
+        // when its path dependency's source is edited (CLOSURE C wired through
+        // BundleCompiler::compile).
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let dep_dir = tmp.path().join("dep");
+        let app_dir = tmp.path().join("app");
+        std::fs::create_dir_all(&dep_dir).expect("create dep dir");
+        std::fs::create_dir_all(&app_dir).expect("create app dir");
+
+        std::fs::write(
+            dep_dir.join("shape.toml"),
+            "[project]\nname = \"dep\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("write dep shape.toml");
+        std::fs::write(dep_dir.join("main.shape"), "pub fn dep_val() -> int { 1 }")
+            .expect("write dep source v1");
+
+        std::fs::write(
+            app_dir.join("shape.toml"),
+            "[project]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\ndep = { path = \"../dep\" }\n",
+        )
+        .expect("write app shape.toml");
+        std::fs::write(
+            app_dir.join("main.shape"),
+            "from dep::main use { dep_val }\n\npub fn run() -> int { dep_val() }\n",
+        )
+        .expect("write app source");
+
+        let app_project_v1 =
+            shape_runtime::project::find_project_root(&app_dir).expect("app project root");
+        let key_v1 = BundleCompiler::compile(&app_project_v1)
+            .expect("compile app v1")
+            .metadata
+            .source_hash;
+
+        // Edit ONLY the dependency's source; the app source is untouched.
+        std::fs::write(dep_dir.join("main.shape"), "pub fn dep_val() -> int { 2 }")
+            .expect("write dep source v2");
+
+        let app_project_v2 =
+            shape_runtime::project::find_project_root(&app_dir).expect("app project root");
+        let key_v2 = BundleCompiler::compile(&app_project_v2)
+            .expect("compile app v2")
+            .metadata
+            .source_hash;
+
+        assert_ne!(
+            key_v1, key_v2,
+            "editing a path-dep's source must change the dependent bundle's cache key"
+        );
+    }
 
     fn discover_system_library_alias() -> Option<String> {
         let candidates = [
