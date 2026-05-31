@@ -44,6 +44,36 @@ impl TypeInferenceEngine {
                 .collect(),
         );
 
+        // Register the function's type parameters as in-scope type VARIABLES
+        // before resolving the param/return annotations, in a throwaway scope so
+        // they do not leak to siblings. Without this, `resolve_type_annotation`
+        // resolves a generic param reference (e.g. `T`) to a NOMINAL
+        // `Type::Concrete(Reference("T"))` (items.rs:633, the "name not in scope
+        // as a variable" fallback) rather than `Type::Variable(TypeVar("T"))`.
+        // `make_function_scheme` then quantifies over `TypeVar("T")` while the
+        // function type carries nominal `T`, so call-site instantiation replaces
+        // nothing and a consumer call like `clamp(5, 0, 10)` fails to unify
+        // (`T` ≠ `int`).
+        //
+        // `infer_function` (items.rs:451-465) already registers the type params
+        // as variables before resolving annotations; mirroring that here makes
+        // the PREDECLARED scheme identical to the one `infer_item` later produces.
+        // For a from-source compile this is harmless (infer_item overwrites the
+        // scheme anyway); for the cache LOAD/REPLAY path — which runs predeclare
+        // ONLY, never `infer_function` (DESIGN §2.4) — it is what makes a generic
+        // function's interface RESULTS-IDENTICAL between source-compile and
+        // cache-replay (DESIGN §3.1 binder). Verified by the
+        // `case_generic_fn_with_bounds_clamp` differential test, which diverged
+        // before this fix.
+        self.env.push_scope();
+        if let Some(type_params) = &func.type_params {
+            for tp in type_params {
+                let var = TypeVar::new(tp.name().to_string());
+                self.env
+                    .define(tp.name(), TypeScheme::mono(Type::Variable(var)));
+            }
+        }
+
         let param_types: Vec<Type> = func
             .params
             .iter()
@@ -57,6 +87,8 @@ impl TypeInferenceEngine {
             Some(ann) => self.resolve_type_annotation(ann),
             None => self.fresh_type_var(),
         };
+
+        self.env.pop_scope();
 
         let scheme =
             self.make_function_scheme(func, BuiltinTypes::function(param_types, return_type));

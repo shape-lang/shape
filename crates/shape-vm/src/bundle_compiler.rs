@@ -1654,3 +1654,500 @@ pub fn run() -> number {
         );
     }
 }
+
+// ===========================================================================
+// DESIGN §3.1 / §3.3 — RESULTS-IDENTICAL differential test.
+//
+// For each corpus case (module M + consumer P) this asserts that:
+//   route A: compile M FROM SOURCE, then type-check P
+//   route B: build M's interface, ROUND-TRIP its bytes through
+//            PackageBundle::to_bytes/from_bytes, REPLAY the cached interface
+//            (`replay_resolved_interface`), then type-check P
+// produce
+//   (1) BYTE-IDENTICAL diagnostics — same set, order, spans, messages, LSDS
+//       (Display) rendering — and
+//   (2) an IDENTICAL inferred-type surface for P.
+//
+// Per the §3.3 lower-severity amendment, TypeVar ids are NORMALIZED in the
+// rendered inferred-type surface (first-encounter ordinal, scoped per render)
+// so the comparison neither passes nor fails for the wrong reason. The
+// diagnostic Display surface is already TypeVar-normalized: `TypeError`'s
+// `format_type` lowers `Type::Variable(_) => "unknown"` (errors.rs:181), so no
+// raw TypeVar id leaks into a rendered message.
+//
+// The differential is honest: route A registers M's interface via the SAME
+// from-source passes a real compile runs (`infer_program_best_effort` over M),
+// route B via the SAME loader replay a real cache LOAD runs
+// (`replay_resolved_interface` over the bytes-round-tripped cached items); the
+// consumer-check step (`check_consumer_against_registered_interface`) is byte-
+// for-byte identical on both routes — the only variable is HOW M's interface
+// entered the engine.
+// ===========================================================================
+#[cfg(test)]
+mod results_identical_differential {
+    use super::*;
+    use shape_ast::parser::parse_program;
+    use shape_runtime::type_system::inference::TypeInferenceEngine;
+    use shape_runtime::type_system::{Type, TypeError};
+    use std::collections::HashMap;
+
+    /// LSDS-rendered diagnostic surface: the user-facing Display string for each
+    /// diagnostic, in emission order (NOT sorted — order is part of the binder).
+    /// Display is the §3.3 "LSDS-rendered" message text; it is already TypeVar-id
+    /// normalized via `TypeError::format_type`.
+    fn render_lsds(errors: &[TypeError]) -> Vec<String> {
+        errors.iter().map(|e| format!("{}", e)).collect()
+    }
+
+    /// Stronger structural surface: the full `{:?}` of each diagnostic, in
+    /// emission order. Catches any divergence the human-facing message would
+    /// elide (variant, captured fields, symbol attribution).
+    fn render_structural(errors: &[TypeError]) -> Vec<String> {
+        errors.iter().map(|e| format!("{:?}", e)).collect()
+    }
+
+    /// TypeVar-id-NORMALIZING renderer for the inferred-type surface (§3.3
+    /// amendment). Two routes may start their `fresh_type_var` counter at
+    /// different points, so a raw TypeVar id that leaks into a rendered type
+    /// would make the surfaces differ spuriously — or coincide and mask a real
+    /// difference. We assign each DISTINCT TypeVar a first-encounter ordinal
+    /// (`'#0`, `'#1`, …) scoped to ONE render call, so the rendering depends on
+    /// the *structure* of the type, never on the absolute id.
+    struct VarNormalizer {
+        map: HashMap<String, usize>,
+    }
+    impl VarNormalizer {
+        fn new() -> Self {
+            Self {
+                map: HashMap::new(),
+            }
+        }
+        fn norm(&mut self, raw: &str) -> String {
+            let n = self.map.len();
+            let id = *self.map.entry(raw.to_string()).or_insert(n);
+            format!("'#{}", id)
+        }
+        fn render(&mut self, ty: &Type) -> String {
+            match ty {
+                Type::Concrete(ann) => format!("{:?}", ann),
+                Type::Variable(v) => self.norm(&v.0),
+                Type::Constrained { var, constraint } => {
+                    format!("{}:{:?}", self.norm(&var.0), constraint)
+                }
+                Type::Generic { base, args } => {
+                    let base = self.render(base);
+                    let args: Vec<String> = args.iter().map(|a| self.render(a)).collect();
+                    format!("{}<{}>", base, args.join(", "))
+                }
+                Type::Function { params, returns } => {
+                    let params: Vec<String> = params.iter().map(|p| self.render(p)).collect();
+                    let returns = self.render(returns);
+                    format!("({}) => {}", params.join(", "), returns)
+                }
+            }
+        }
+    }
+
+    /// Render the consumer's inferred-type surface as a SORTED-by-name list of
+    /// `name => normalized-type` lines. Sorted by name because the surface is a
+    /// HashMap; the per-render VarNormalizer keeps id assignment deterministic
+    /// across the (identical) key set the two routes produce.
+    fn inferred_surface(types: &HashMap<String, Type>) -> Vec<String> {
+        let mut names: Vec<&String> = types.keys().collect();
+        names.sort();
+        let mut norm = VarNormalizer::new();
+        names
+            .iter()
+            .map(|n| format!("{} => {}", n, norm.render(&types[*n])))
+            .collect()
+    }
+
+    /// ROUTE A — compile module M FROM SOURCE, then type-check consumer P.
+    /// Returns P's (inferred-type surface, diagnostics).
+    fn route_a(module_src: &str, consumer_src: &str) -> (Vec<String>, Vec<TypeError>) {
+        let m = parse_program(module_src).expect("module M parses");
+        let p = parse_program(consumer_src).expect("consumer P parses");
+
+        let mut engine = TypeInferenceEngine::new();
+        // Full from-source compile of M (predeclare + infer + solve), exactly the
+        // passes a real compile of M runs. We discard M's own diagnostics here:
+        // the binder (§3.1) is scoped to the consumer's view of M's INTERFACE,
+        // not M's body re-checking (M is well-formed in every corpus case).
+        let _ = engine.infer_program_best_effort(&m);
+        let (types, errors) = engine.check_consumer_against_registered_interface(&p);
+        (inferred_surface(&types), errors)
+    }
+
+    /// ROUTE B — build M's interface, ROUND-TRIP its bytes
+    /// (`PackageBundle::to_bytes`/`from_bytes`), REPLAY the cached interface,
+    /// then type-check consumer P. Returns P's (inferred-type surface,
+    /// diagnostics). This drives the SAME loader code (`replay_resolved_interface`
+    /// over `manifest.resolved_interface.items`) a real cache LOAD drives.
+    fn route_b(module_src: &str, consumer_src: &str) -> (Vec<String>, Vec<TypeError>) {
+        let m = parse_program(module_src).expect("module M parses");
+        let p = parse_program(consumer_src).expect("consumer P parses");
+
+        // PRODUCER: AST → ResolvedInterface (DESIGN §1.1, source-ordered items).
+        let interface = collect_resolved_interface(&m);
+
+        // Attach to a manifest, wrap in a minimal SHAPEPKG bundle, serialize.
+        let mut manifest = ModuleManifest::new("m".into(), "1.0.0".into());
+        manifest.resolved_interface = Some(interface);
+        manifest.finalize();
+
+        let bundle = PackageBundle {
+            metadata: BundleMetadata {
+                name: "diff-m".to_string(),
+                version: "1.0.0".to_string(),
+                compiler_version: env!("CARGO_PKG_VERSION").to_string(),
+                source_hash: "diff_hash".to_string(),
+                bundle_kind: "portable-bytecode".to_string(),
+                build_host: "test".to_string(),
+                native_portable: true,
+                entry_module: None,
+                built_at: 0,
+                readme: None,
+            },
+            modules: vec![],
+            dependencies: HashMap::new(),
+            blob_store: HashMap::new(),
+            manifests: vec![manifest],
+            native_dependency_scopes: vec![],
+            docs: HashMap::new(),
+        };
+
+        // BYTE ROUND-TRIP through the SHAPEPKG container.
+        let bytes = bundle.to_bytes().expect("bundle serializes");
+        let restored = PackageBundle::from_bytes(&bytes).expect("bundle deserializes");
+        let cached_interface = restored.manifests[0]
+            .resolved_interface
+            .as_ref()
+            .expect("cached interface survives the byte round-trip");
+
+        // LOADER: replay the cached interface (predeclare + register, no bodies),
+        // then type-check P against it.
+        let mut engine = TypeInferenceEngine::new();
+        let replay_errors = engine.replay_resolved_interface(&cached_interface.items);
+        assert!(
+            replay_errors.is_empty(),
+            "well-formed interface must replay cleanly; got {:?}",
+            replay_errors
+        );
+        let (types, errors) = engine.check_consumer_against_registered_interface(&p);
+        (inferred_surface(&types), errors)
+    }
+
+    /// The §3.3 binder assertion for one corpus case. On any divergence the panic
+    /// message carries the diff (NOT silenced) — a real RESULTS-IDENTICAL
+    /// violation, per the prompt, must be reported, never weakened.
+    fn assert_results_identical(case: &str, module_src: &str, consumer_src: &str) {
+        let (surface_a, diags_a) = route_a(module_src, consumer_src);
+        let (surface_b, diags_b) = route_b(module_src, consumer_src);
+
+        let lsds_a = render_lsds(&diags_a);
+        let lsds_b = render_lsds(&diags_b);
+        assert_eq!(
+            lsds_a, lsds_b,
+            "[{case}] LSDS diagnostics differ between source-compile and \
+             cache-replay routes (RESULTS-IDENTICAL violation)\n  A: {lsds_a:#?}\n  B: {lsds_b:#?}"
+        );
+
+        let struct_a = render_structural(&diags_a);
+        let struct_b = render_structural(&diags_b);
+        assert_eq!(
+            struct_a, struct_b,
+            "[{case}] structural diagnostic surface differs between routes\n  \
+             A: {struct_a:#?}\n  B: {struct_b:#?}"
+        );
+
+        assert_eq!(
+            surface_a, surface_b,
+            "[{case}] inferred-type surface differs between routes \
+             (TypeVar-normalized)\n  A: {surface_a:#?}\n  B: {surface_b:#?}"
+        );
+    }
+
+    // ----- Corpus -----------------------------------------------------------
+    //
+    // Each case is the §3.3 required hard case. The cache would FAIL (diverge)
+    // if a lossy `to_annotation()` round-trip or a reordering encoding crept in.
+
+    /// §3.3 — a generic stdlib fn with bounds + defaults: `clamp<T: Ord>`.
+    /// Consumer calls it concretely; the inferred return type must match on both
+    /// routes (the generic param + bound survive the annotation-level cache).
+    #[test]
+    fn case_generic_fn_with_bounds_clamp() {
+        let m = r#"
+            pub fn clamp<T: Ord>(x: T, lo: T, hi: T) -> T {
+                if x < lo { return lo }
+                if x > hi { return hi }
+                return x
+            }
+        "#;
+        let p = r#"
+            fn use_clamp() -> int {
+                return clamp(5, 0, 10)
+            }
+        "#;
+        assert_results_identical("generic_fn_clamp", m, p);
+    }
+
+    /// §3.3 — a fn with a DEFAULT generic param. The default_type on the
+    /// `TypeParam` is annotation-level (ast/types.rs:210) and survives the cache.
+    #[test]
+    fn case_generic_fn_with_default_param() {
+        let m = r#"
+            pub fn identity<T = int>(x: T) -> T {
+                return x
+            }
+        "#;
+        let p = r#"
+            fn use_identity() -> int {
+                return identity(7)
+            }
+        "#;
+        assert_results_identical("generic_fn_default_param", m, p);
+    }
+
+    /// §3.3 — a generic method table exercising BIDIRECTIONAL inference:
+    /// `extend Vec<T> { method map<U>(f: (T) => U): Vec<U> }`. The consumer does
+    /// `arr.map(|x| ...)` and the closure param `x`'s inferred type must be
+    /// IDENTICAL on both routes (this is the case that would regress to
+    /// `(unknown) => unknown` under a `to_annotation()` seam — §3.3 / Area 1 §c.3).
+    #[test]
+    fn case_generic_method_table_bidirectional_inference() {
+        let m = r#"
+            extend Vec<T> {
+                method map<U>(f: (T) => U) -> Vec<U> {
+                    return this
+                }
+            }
+        "#;
+        let p = r#"
+            fn use_map() -> Vec<int> {
+                let arr: Vec<int> = [1, 2, 3]
+                return arr.map(|x| x + 1)
+            }
+        "#;
+        assert_results_identical("generic_method_table_map", m, p);
+    }
+
+    /// §3.3 — `Some`/`Ok`/`Err` with the `E = AnyError` default. The consumer
+    /// constructs each; the inferred Option/Result surface must match on both
+    /// routes. (These constructors are builtin-seeded, so this case primarily
+    /// guards that the cache replay does not perturb the builtin env that a
+    /// from-source compile leaves intact.)
+    #[test]
+    fn case_some_ok_err_anyerror_default() {
+        let m = r#"
+            pub fn wrap(x: int) -> Option<int> {
+                return Some(x)
+            }
+            pub fn try_it(x: int) -> Result<int, AnyError> {
+                return Ok(x)
+            }
+        "#;
+        let p = r#"
+            fn use_some() -> Option<int> {
+                return Some(1)
+            }
+            fn use_ok() -> Result<int, AnyError> {
+                return Ok(2)
+            }
+            fn use_err() -> Result<int, AnyError> {
+                return Err(AnyError("boom"))
+            }
+            fn use_wrap() -> Option<int> {
+                return wrap(3)
+            }
+        "#;
+        assert_results_identical("some_ok_err_default", m, p);
+    }
+
+    /// §3.3 — a struct with a COMPTIME field + `@range`/`@description`
+    /// annotation. `StructField.is_comptime`/`annotations` are annotation-level
+    /// (ast/types.rs:674) and must survive the cache verbatim.
+    #[test]
+    fn case_struct_comptime_field_and_range_annotation() {
+        let m = r#"
+            pub type Sensor {
+                @description("measured value")
+                @range(0, 100)
+                value: number,
+                comptime max_readings: int,
+            }
+        "#;
+        let p = r#"
+            fn use_sensor(s: Sensor) -> number {
+                return s.value
+            }
+        "#;
+        assert_results_identical("struct_comptime_range", m, p);
+    }
+
+    /// §3.3 — a trait + impl + extend exercising `TypeParamExpr`
+    /// (ReceiverParam/MethodParam). The consumer calls the trait method on the
+    /// impl'ing type; the dispatched return type must match on both routes.
+    #[test]
+    fn case_trait_impl_extend_typeparamexpr() {
+        let m = r#"
+            type Point { x: number, y: number }
+
+            trait Shape {
+                method area() -> number;
+            }
+
+            impl Shape for Point {
+                method area() -> number { return this.x * this.y }
+            }
+
+            extend Vec<T> {
+                method first_or<U>(fallback: U) -> U {
+                    return fallback
+                }
+            }
+        "#;
+        let p = r#"
+            fn use_area(pt: Point) -> number {
+                return pt.area()
+            }
+        "#;
+        assert_results_identical("trait_impl_extend", m, p);
+    }
+
+    /// §3.3 / Amendment A / R3 — an `impl` textually BEFORE its `trait` in M's
+    /// SOURCE ORDER. The cache's single source-ordered `Vec<Item>` (§1.1) must
+    /// replay the impl before the trait, reproducing from-source registration
+    /// behavior; a grouped-per-kind encoding would diverge. The consumer using
+    /// the type must check identically on both routes.
+    #[test]
+    fn case_impl_before_trait_source_order() {
+        let m = r#"
+            type Canvas { w: int }
+
+            impl Drawable for Canvas {
+                method draw() -> string { return "drawn" }
+            }
+
+            trait Drawable {
+                method draw() -> string;
+            }
+        "#;
+        let p = r#"
+            fn use_draw(c: Canvas) -> string {
+                return c.draw()
+            }
+        "#;
+        assert_results_identical("impl_before_trait", m, p);
+    }
+
+    /// §3.3 — the NEGATIVE case: a consumer that SHOULD error against M's
+    /// interface. The SAME error must fire on BOTH routes — proving the cache
+    /// does NOT silently widen M's interface to `unknown` and accept what a
+    /// from-source compile rejects.
+    #[test]
+    fn case_negative_consumer_error_fires_on_both_routes() {
+        let m = r#"
+            pub fn needs_int(x: int) -> int {
+                return x
+            }
+        "#;
+        // P calls a function M does NOT export — must be an undefined-function
+        // error on both routes (the interface does not contain `does_not_exist`).
+        let p = r#"
+            fn bad() -> int {
+                return does_not_exist(1)
+            }
+        "#;
+        let (_, diags_a) = route_a(m, p);
+        let (_, diags_b) = route_b(m, p);
+
+        assert!(
+            !diags_a.is_empty(),
+            "negative case must produce an error on the source-compile route \
+             (else it is not actually a negative case)"
+        );
+        assert_eq!(
+            render_lsds(&diags_a),
+            render_lsds(&diags_b),
+            "negative case: the SAME error must fire on both routes — the cache \
+             must NOT silently widen the interface and accept (RESULTS-IDENTICAL)\n  \
+             A: {:#?}\n  B: {:#?}",
+            render_lsds(&diags_a),
+            render_lsds(&diags_b),
+        );
+        assert_eq!(
+            render_structural(&diags_a),
+            render_structural(&diags_b),
+            "negative case: structural diagnostic surface must match on both routes"
+        );
+    }
+
+    /// §3.3 SECOND GUARD — the container round-trip is BYTE-STABLE:
+    /// `to_bytes -> from_bytes -> to_bytes` is identical. Catches nondeterministic
+    /// map ordering in the MessagePack encoding of `ResolvedInterface` (R2);
+    /// `exports` is a `Vec<(K,V)>` not a HashMap precisely to keep this stable.
+    #[test]
+    fn case_round_trip_is_byte_stable() {
+        // Exercise a rich interface (struct + trait + impl + generic fn + extend)
+        // so the guard covers the full item-node serde surface, not a trivial one.
+        let m = r#"
+            pub type Point { x: number, y: number }
+
+            pub trait Shape {
+                method area() -> number;
+            }
+
+            impl Shape for Point {
+                method area() -> number { return this.x * this.y }
+            }
+
+            pub fn clamp<T: Ord>(x: T, lo: T, hi: T) -> T {
+                return x
+            }
+
+            extend Vec<T> {
+                method map<U>(f: (T) => U) -> Vec<U> {
+                    return this
+                }
+            }
+        "#;
+        let program = parse_program(m).expect("module parses");
+        let interface = collect_resolved_interface(&program);
+
+        let mut manifest = ModuleManifest::new("m".into(), "1.0.0".into());
+        manifest.resolved_interface = Some(interface);
+        manifest.finalize();
+
+        let bundle = PackageBundle {
+            metadata: BundleMetadata {
+                name: "stable".to_string(),
+                version: "1.0.0".to_string(),
+                compiler_version: env!("CARGO_PKG_VERSION").to_string(),
+                source_hash: "stable_hash".to_string(),
+                bundle_kind: "portable-bytecode".to_string(),
+                build_host: "test".to_string(),
+                native_portable: true,
+                entry_module: None,
+                built_at: 0,
+                readme: None,
+            },
+            modules: vec![],
+            dependencies: HashMap::new(),
+            blob_store: HashMap::new(),
+            manifests: vec![manifest],
+            native_dependency_scopes: vec![],
+            docs: HashMap::new(),
+        };
+
+        let bytes1 = bundle.to_bytes().expect("first serialize");
+        let restored = PackageBundle::from_bytes(&bytes1).expect("deserialize");
+        let bytes2 = restored.to_bytes().expect("second serialize");
+
+        assert_eq!(
+            bytes1, bytes2,
+            "to_bytes -> from_bytes -> to_bytes must be byte-identical (R2: \
+             MessagePack map nondeterminism guard)"
+        );
+    }
+}
