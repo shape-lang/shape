@@ -462,6 +462,27 @@ impl TypeInferenceEngine {
         }
     }
 
+    /// Extract the error type `E` of a `Result<T, E>`. `None` for any type that
+    /// is not a 2-arg `Result` carrier (Option has no error payload). Used by
+    /// the bidirectional constructor-payload propagation to feed `Err`'s
+    /// argument the expected error type.
+    pub(crate) fn result_error_type(&self, ty: &Type) -> Option<Type> {
+        match ty {
+            Type::Generic { base, args } if args.len() >= 2 => match base.as_ref() {
+                Type::Concrete(ann) if ann.as_type_name_str() == Some("Result") => {
+                    Some(args[1].clone())
+                }
+                _ => None,
+            },
+            Type::Concrete(TypeAnnotation::Generic { name, args })
+                if name == "Result" && args.len() >= 2 =>
+            {
+                Some(Type::Concrete(args[1].clone()))
+            }
+            _ => None,
+        }
+    }
+
     /// Push the constraint linking an inferred body-return type to a declared
     /// return annotation, modelling Shape's implicit `Ok`/`Some`-wrap of a bare
     /// return value inside a fallible/optional function.

@@ -76,12 +76,20 @@ impl TypeInferenceEngine {
     }
 
     /// Infer a callable body, applying numeric-conversion §4 literal adoption to
-    /// the TAIL expression statement when the enclosing fn declares a numeric
-    /// return type. Only the final expression-style statement is checked against
-    /// the expected return type (a non-tail expression statement keeps plain
-    /// inference, so `foo(); 42` does not wrongly constrain `foo()`). A bare int
-    /// literal tail, or the int-literal arms of a tail `match`/`if`, adopt the
-    /// declared numeric return type via `check_against`.
+    /// the TAIL expression statement when the enclosing fn declares a numeric or
+    /// Result/Option return type. Only the final expression-style statement is
+    /// checked against the expected return type (a non-tail expression statement
+    /// keeps plain inference, so `foo(); 42` does not wrongly constrain
+    /// `foo()`). A bare int literal tail, or the int-literal arms of a tail
+    /// `match`/`if`, adopt the declared numeric return type via `check_against`.
+    ///
+    /// For a Result/Option declared return the tail is checked against the
+    /// carrier ONLY when it is a matching `Ok`/`Err`/`Some` / user-enum
+    /// constructor — so the expected variant payload reaches the constructor's
+    /// argument (`fn f() -> Result<number> { Ok(42) }`). A bare-value tail
+    /// (`{ 42 }`) is LEFT to plain inference so Shape's implicit `Ok`/`Some`-wrap
+    /// (`push_return_constraint`) still applies; constraining a bare `int` tail
+    /// against `Result<number>` would wrongly reject the implicit wrap.
     fn infer_statements_with_return_adoption(
         &mut self,
         stmts: &[Statement],
@@ -90,16 +98,227 @@ impl TypeInferenceEngine {
             Some(Some(ty)) => ty,
             _ => return self.infer_statements(stmts),
         };
+        let expected_is_carrier =
+            self.is_result_type(&expected) || self.is_option_type(&expected);
         let mut last_type = BuiltinTypes::void();
         let n = stmts.len();
         for (idx, stmt) in stmts.iter().enumerate() {
             let is_tail = idx + 1 == n;
             if is_tail {
-                if let Statement::Expression(expr, _) = stmt {
-                    let expr_type = self.check_against(expr, &expected)?;
-                    self.record_implicit_return_type(expr_type.clone());
-                    last_type = expr_type;
-                    continue;
+                match stmt {
+                    Statement::Expression(expr, _) => {
+                        // For a Result/Option carrier, only a matching
+                        // constructor tail goes through `check_against` (payload
+                        // propagation); everything else keeps plain inference +
+                        // implicit-wrap.
+                        if expected_is_carrier
+                            && !self.is_constructor_matching_carrier(expr, &expected)
+                        {
+                            last_type = self.infer_statement(stmt)?;
+                            continue;
+                        }
+                        let expr_type = self.check_against(expr, &expected)?;
+                        self.record_implicit_return_type(expr_type.clone());
+                        last_type = expr_type;
+                        continue;
+                    }
+                    // Tail `if`/`else` whose every branch tail is itself a
+                    // carrier-matching constructor (`if c { Ok(x*2) } else {
+                    // Err("…") }`): thread the expected carrier into each branch
+                    // tail so the constructor-payload adoption fires per branch.
+                    // Gated on ALL branches being constructors so a mixed/bare
+                    // branch (`if c { Ok(1) } else { 2 }`) still keeps the
+                    // per-branch implicit-wrap path (plain inference).
+                    Statement::If(if_stmt, _)
+                        if expected_is_carrier
+                            && self.if_branches_all_carrier_constructors(if_stmt, &expected) =>
+                    {
+                        last_type = self.check_if_stmt_against_carrier(if_stmt, &expected)?;
+                        self.record_implicit_return_type(last_type.clone());
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+            last_type = self.infer_statement(stmt)?;
+        }
+        Ok(last_type)
+    }
+
+    /// Whether `expr` is an `Ok`/`Err`/`Some` constructor whose expected payload
+    /// type can be extracted from the `expected` carrier — i.e. the
+    /// bidirectional constructor-payload arm of `check_against` would fire. Used
+    /// to gate Result/Option tail/return adoption to constructor expressions
+    /// only (bare values keep implicit-wrap).
+    ///
+    /// User enum tuple constructors (`Tagged::N(5)`) parse as
+    /// `Expr::QualifiedFunctionCall` (the grammar's `qualified_function_call_expr`
+    /// alternative wins the ordered choice over `enum_constructor_expr` whenever
+    /// a `(args)` payload is present), and that path does not yet propagate or
+    /// even check payload types — out of scope for this Ok/Err/Some FP-regression
+    /// fix.
+    fn is_constructor_matching_carrier(&self, expr: &Expr, expected: &Type) -> bool {
+        match expr {
+            Expr::FunctionCall { name, args, .. }
+                if matches!(name.as_str(), "Ok" | "Err" | "Some") =>
+            {
+                // Only intercept when the argument is a bare numeric literal
+                // that adopts the expected payload — a non-literal `Ok(x)` is
+                // left to `infer_function_call` (same constraint, but keeps the
+                // unannotated-param callsite refinement the default path feeds).
+                self.constructor_arg_adopts_literal(name, args, expected)
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether `expr` is STRUCTURALLY an `Ok`/`Err`/`Some` constructor that
+    /// matches the `expected` carrier (regardless of whether its argument
+    /// adopts a literal). Used by the conditional-tail gate to require all
+    /// branches be constructors so threading each through `check_against` is
+    /// safe (a non-adopting branch routes through the default path inside
+    /// `check_body_tail_against_carrier`).
+    fn is_carrier_constructor_struct(&self, expr: &Expr, expected: &Type) -> bool {
+        match expr {
+            Expr::FunctionCall { name, args, .. }
+                if matches!(name.as_str(), "Ok" | "Err" | "Some") =>
+            {
+                self.constructor_payload_types_from_expected(name, args.len(), expected)
+                    .is_some()
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether the tail statement of a branch body is structurally a carrier
+    /// constructor (or a nested all-constructor `if`).
+    fn body_tail_is_carrier_constructor(&self, stmts: &[Statement], expected: &Type) -> bool {
+        match stmts.last() {
+            Some(Statement::Expression(expr, _)) => {
+                self.is_carrier_constructor_struct(expr, expected)
+            }
+            Some(Statement::If(if_stmt, _)) => {
+                self.if_branches_all_carrier_constructors(if_stmt, expected)
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether the tail statement of a branch body has a constructor argument
+    /// that ADOPTS a literal — i.e. threading the carrier into this branch
+    /// would actually change the outcome. Used to require at least one branch
+    /// benefit before threading a tail `if` (so a `Result<int>` if/else of two
+    /// identity constructors keeps plain inference unchanged).
+    fn body_tail_adopts_literal(&self, stmts: &[Statement], expected: &Type) -> bool {
+        match stmts.last() {
+            Some(Statement::Expression(expr, _)) => {
+                self.is_constructor_matching_carrier(expr, expected)
+            }
+            Some(Statement::If(if_stmt, _)) => {
+                if let Some(else_body) = &if_stmt.else_body {
+                    self.body_tail_adopts_literal(&if_stmt.then_body, expected)
+                        || self.body_tail_adopts_literal(else_body, expected)
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether to thread the expected carrier into a tail `if`/`else`: BOTH
+    /// branches are structurally carrier constructors (so `check_against`
+    /// per-branch is safe), an `else` branch is present (a one-armed `if` keeps
+    /// plain inference for the implicit fall-through), AND at least one branch's
+    /// constructor argument adopts a numeric literal (so the threading is not a
+    /// no-op that would needlessly re-route identity constructors).
+    fn if_branches_all_carrier_constructors(
+        &self,
+        if_stmt: &shape_ast::ast::IfStatement,
+        expected: &Type,
+    ) -> bool {
+        let Some(else_body) = &if_stmt.else_body else {
+            return false;
+        };
+        let both_constructors = self
+            .body_tail_is_carrier_constructor(&if_stmt.then_body, expected)
+            && self.body_tail_is_carrier_constructor(else_body, expected);
+        let any_adopts = self.body_tail_adopts_literal(&if_stmt.then_body, expected)
+            || self.body_tail_adopts_literal(else_body, expected);
+        both_constructors && any_adopts
+    }
+
+    /// Type-check a tail `if`/`else` against an expected Result/Option carrier,
+    /// threading the carrier into each branch's tail (mirrors the
+    /// `Statement::If` handler in `infer_statement`, including flow narrowing
+    /// and conditional scopes, but uses `check_body_tail_against_carrier` for
+    /// the branch bodies so the constructor-payload adoption fires per branch).
+    /// Caller guarantees both branches are carrier-matching constructors.
+    fn check_if_stmt_against_carrier(
+        &mut self,
+        if_stmt: &shape_ast::ast::IfStatement,
+        expected: &Type,
+    ) -> TypeResult<Type> {
+        self.infer_expr(&if_stmt.condition)?;
+        let narrowings = self.extract_narrowings(&if_stmt.condition);
+
+        self.env.enter_conditional();
+        self.env.push_scope();
+        for (var_name, narrowed_type) in &narrowings {
+            self.env
+                .define(var_name, TypeScheme::mono(narrowed_type.clone()));
+        }
+        let then_type = self.check_body_tail_against_carrier(&if_stmt.then_body, expected)?;
+        self.env.pop_scope();
+        self.env.exit_conditional();
+
+        // Guaranteed Some by the gate (`if_branches_all_carrier_constructors`
+        // requires an else branch), but match defensively.
+        if let Some(else_body) = &if_stmt.else_body {
+            let inverse_narrowings = self.extract_inverse_narrowings(&if_stmt.condition);
+            self.env.enter_conditional();
+            self.env.push_scope();
+            for (var_name, narrowed_type) in &inverse_narrowings {
+                self.env
+                    .define(var_name, TypeScheme::mono(narrowed_type.clone()));
+            }
+            let else_type = self.check_body_tail_against_carrier(else_body, expected)?;
+            self.env.pop_scope();
+            self.env.exit_conditional();
+            self.constraints.push((then_type.clone(), else_type));
+        }
+        Ok(then_type)
+    }
+
+    /// Infer a branch body, threading the expected carrier into the tail
+    /// statement only (non-tail statements keep plain inference). The tail is a
+    /// carrier-matching constructor (→ `check_against` for payload adoption) or
+    /// a nested carrier-`if` (→ recurse). The caller's gate guarantees the tail
+    /// is one of those shapes.
+    fn check_body_tail_against_carrier(
+        &mut self,
+        stmts: &[Statement],
+        expected: &Type,
+    ) -> TypeResult<Type> {
+        let mut last_type = BuiltinTypes::void();
+        let n = stmts.len();
+        for (idx, stmt) in stmts.iter().enumerate() {
+            let is_tail = idx + 1 == n;
+            if is_tail {
+                match stmt {
+                    Statement::Expression(expr, _)
+                        if self.is_constructor_matching_carrier(expr, expected) =>
+                    {
+                        last_type = self.check_against(expr, expected)?;
+                        continue;
+                    }
+                    Statement::If(if_stmt, _)
+                        if self.if_branches_all_carrier_constructors(if_stmt, expected) =>
+                    {
+                        last_type = self.check_if_stmt_against_carrier(if_stmt, expected)?;
+                        continue;
+                    }
+                    _ => {}
                 }
             }
             last_type = self.infer_statement(stmt)?;
@@ -189,13 +408,32 @@ impl TypeInferenceEngine {
         match stmt {
             Statement::Return(expr_opt, _) => {
                 let return_type = if let Some(expr) = expr_opt {
-                    let inferred = self.infer_expr(expr)?;
-                    // Numeric-conversion §4 literal adoption (return context): a
-                    // bare int literal `return <lit>` adopts the enclosing fn's
-                    // declared numeric return type when it losslessly fits, so
-                    // `fn f() -> number { return 42 }` returns `number` (not
-                    // `int`, which the §2 lattice would reject against `number`).
-                    self.adopt_return_literal(expr, inferred)
+                    // Numeric-conversion §4 literal adoption (return context):
+                    //   - a bare int literal `return <lit>` adopts the enclosing
+                    //     fn's declared numeric return type when it losslessly
+                    //     fits (`fn f() -> number { return 42 }` returns
+                    //     `number`, not `int`); and
+                    //   - an `Ok`/`Err`/`Some` (or user-enum) constructor
+                    //     `return Ok(42)` against a declared `Result<number>`
+                    //     propagates the expected payload to the constructor's
+                    //     argument so the literal adopts `number`
+                    //     (constructor-payload-vs-expected path), mirroring the
+                    //     tail-expression handling.
+                    let carrier_expected = match self.expected_return_types.last() {
+                        Some(Some(ty))
+                            if (self.is_result_type(ty) || self.is_option_type(ty))
+                                && self.is_constructor_matching_carrier(expr, ty) =>
+                        {
+                            Some(ty.clone())
+                        }
+                        _ => None,
+                    };
+                    if let Some(expected) = carrier_expected {
+                        self.check_against(expr, &expected)?
+                    } else {
+                        let inferred = self.infer_expr(expr)?;
+                        self.adopt_return_literal(expr, inferred)
+                    }
                 } else {
                     BuiltinTypes::void()
                 };

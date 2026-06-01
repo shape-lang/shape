@@ -583,17 +583,28 @@ impl TypeInferenceEngine {
             func.return_type.is_some() || Self::fn_body_is_non_expansive(func);
 
         // Numeric-conversion §4 literal adoption (return context): make the
-        // declared numeric return type visible to `return <lit>` / tail-literal
-        // adoption inside the body. `None` when the fn has no annotation or a
-        // non-numeric return — only a concrete numeric `-> T` enables adoption.
-        let expected_numeric_return = if func.return_type.is_some()
-            && Self::concrete_numeric_type_name(&declared_return_type).is_some()
+        // declared return type visible to `return <lit>` / tail-expr adoption
+        // inside the body. Two enabling shapes:
+        //   (a) a concrete numeric `-> T` (a bare int-literal tail/return
+        //       adopts `T`), and
+        //   (b) a `Result<…>` / `Option<…>` carrier — so a tail/return
+        //       constructor (`Ok(42)`/`Some(42)`/`Err(e)`) propagates the
+        //       expected variant-payload type to its argument and a bare int
+        //       literal there adopts the expected numeric type
+        //       (constructor-payload-vs-expected path). `None` when the fn has
+        //       no annotation or a return that is neither numeric nor a
+        //       Result/Option carrier — those keep plain inference.
+        let expected_return_for_adoption = if func.return_type.is_none() {
+            None
+        } else if Self::concrete_numeric_type_name(&declared_return_type).is_some()
+            || self.is_result_type(&declared_return_type)
+            || self.is_option_type(&declared_return_type)
         {
             Some(declared_return_type.clone())
         } else {
             None
         };
-        self.expected_return_types.push(expected_numeric_return);
+        self.expected_return_types.push(expected_return_for_adoption);
 
         // Infer callable return type from all explicit returns (or final expression)
         let local_constraint_start = self.constraints.len();

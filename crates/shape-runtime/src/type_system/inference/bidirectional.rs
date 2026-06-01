@@ -151,6 +151,41 @@ impl TypeInferenceEngine {
                 }
             }
 
+            // Numeric-conversion LITERAL ADOPTION through an ENUM-CONSTRUCTOR
+            // payload (spec §4, constructor-payload-vs-expected path). When an
+            // `Ok`/`Err`/`Some` constructor (parsed as a `FunctionCall`) whose
+            // argument is a bare numeric LITERAL is checked against an EXPECTED
+            // `Result<T,E>` / `Option<T>` carrier, propagate the expected
+            // variant-payload type to the constructor's argument so the literal
+            // adopts the expected numeric type — exactly the adoption the direct
+            // contexts (let-annotation, comparison, struct-field, match-arm)
+            // already get. `fn f() -> Result<number> { Ok(42) }` then accepts
+            // (42 adopts `number`).
+            //
+            // GATED on the argument being a literal that ACTUALLY adopts
+            // (`constructor_arg_adopts_literal`). A non-literal argument
+            // (`Ok(x)` / `Ok(x * 2)`) is LEFT to the default `infer_function_call`
+            // path: it carries the same `arg_type ~ payload` constraint via the
+            // builtin `Ok`/`Err`/`Some` signature + `push_return_constraint`, and
+            // intercepting it here would bypass the unannotated-param callsite
+            // refinement that `infer_function_call` feeds (which `Ok(x)` with an
+            // unannotated `x` relies on). An out-of-range literal also does not
+            // adopt, so it too falls through and correctly rejects. This keeps
+            // the intercept to exactly the bare-literal FP-regression class and
+            // never introduces loose numeric widening of a VALUE.
+            Expr::FunctionCall { name, args, .. }
+                if matches!(name.as_str(), "Ok" | "Err" | "Some")
+                    && self.constructor_arg_adopts_literal(name, args, expected) =>
+            {
+                let payloads = self
+                    .constructor_payload_types_from_expected(name, args.len(), expected)
+                    .expect("constructor_arg_adopts_literal proved payloads exist");
+                for (arg, payload) in args.iter().zip(payloads.iter()) {
+                    self.check_against(arg, payload)?;
+                }
+                Ok(expected.clone())
+            }
+
             // Numeric-conversion LITERAL ADOPTION (spec §4): a bare integer
             // literal in a concrete numeric context adopts that context type
             // when its value is losslessly representable in it. `let n: number =
@@ -173,6 +208,66 @@ impl TypeInferenceEngine {
                 Ok(inferred)
             }
         }
+    }
+
+    /// Expected payload type(s) for an `Ok`/`Err`/`Some` constructor checked
+    /// against an EXPECTED `Result<T,E>` / `Option<T>` carrier.
+    ///
+    /// - `Some` against `Option<T>` → `[T]`
+    /// - `Ok` against `Result<T,E>` → `[T]`
+    /// - `Err` against `Result<T,E>` → `[E]`
+    ///
+    /// Returns `None` (so the bidirectional arm falls through to plain
+    /// inference) when the constructor doesn't match the expected carrier, the
+    /// arity isn't 1, or the payload type can't be extracted. The returned
+    /// payload type may be a bare type VARIABLE (an unresolved `Result<T,E>`
+    /// from an annotation still being solved); `check_against` against a
+    /// variable simply pushes the normal equality constraint, so literal
+    /// adoption only fires when the expected payload is concrete-numeric.
+    pub(crate) fn constructor_payload_types_from_expected(
+        &self,
+        name: &str,
+        arity: usize,
+        expected: &Type,
+    ) -> Option<Vec<Type>> {
+        if arity != 1 {
+            return None;
+        }
+        match name {
+            "Some" if self.is_option_type(expected) => {
+                self.result_or_option_success_type(expected).map(|t| vec![t])
+            }
+            "Ok" if self.is_result_type(expected) => {
+                self.result_or_option_success_type(expected).map(|t| vec![t])
+            }
+            "Err" if self.is_result_type(expected) => {
+                self.result_error_type(expected).map(|e| vec![e])
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether the `Ok`/`Err`/`Some` constructor `name(args)` has an argument
+    /// that is a bare numeric LITERAL which ADOPTS the expected variant-payload
+    /// type extracted from `expected`. This is the precise gate for the
+    /// constructor-payload-vs-expected intercept: it fires only when re-routing
+    /// the argument through `check_against` would change the outcome (a literal
+    /// adopting a numeric payload), so non-literal arguments (`Ok(x)`,
+    /// `Ok(x * 2)`) and out-of-range / non-numeric literals fall through to the
+    /// default `infer_function_call` path unchanged.
+    pub(crate) fn constructor_arg_adopts_literal(
+        &self,
+        name: &str,
+        args: &[Expr],
+        expected: &Type,
+    ) -> bool {
+        let Some(payloads) = self.constructor_payload_types_from_expected(name, args.len(), expected)
+        else {
+            return false;
+        };
+        args.iter().zip(payloads.iter()).any(|(arg, payload)| {
+            Self::adopt_int_literal_in_context(arg, payload).is_some()
+        })
     }
 
     /// Synthesize type with a hint (soft constraint)
