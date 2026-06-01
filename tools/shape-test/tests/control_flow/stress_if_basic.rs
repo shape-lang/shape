@@ -161,64 +161,71 @@ fn test_truthiness_false() {
         .expect_number(0.0);
 }
 
-/// Verifies truthiness of zero int (falsy).
+/// Strict Shape requires a bool condition: `if <int>` is rejected (no truthiness
+/// coercion — user ruling 2026-06-01). Rebaselined from `expect_number(0.0)`.
 #[test]
 fn test_truthiness_zero_int() {
     ShapeTest::new(
         "function test() {\n  let x = 0;\n  if x { return 1; } else { return 0; }\n}\ntest()",
     )
-    .expect_number(0.0);
+    .expect_run_err_contains("is not compatible with bool");
 }
 
-/// Verifies truthiness of nonzero int (truthy).
+/// Strict Shape requires a bool condition: `if <int>` is rejected (no truthiness
+/// coercion). Rebaselined from `expect_number(1.0)`.
 #[test]
 fn test_truthiness_nonzero_int() {
     ShapeTest::new(
         "function test() {\n  let x = 42;\n  if x { return 1; } else { return 0; }\n}\ntest()",
     )
-    .expect_number(1.0);
+    .expect_run_err_contains("is not compatible with bool");
 }
 
-/// Verifies truthiness of negative int (truthy).
+/// Strict Shape requires a bool condition: `if <int>` is rejected (no truthiness
+/// coercion). Rebaselined from `expect_number(1.0)`.
 #[test]
 fn test_truthiness_negative_int() {
     ShapeTest::new(
         "function test() {\n  let x = -1;\n  if x { return 1; } else { return 0; }\n}\ntest()",
     )
-    .expect_number(1.0);
+    .expect_run_err_contains("is not compatible with bool");
 }
 
-/// Verifies truthiness of None (falsy).
+/// Strict Shape requires a bool condition: `if <Option>` is rejected (no truthiness
+/// coercion). Rebaselined from `expect_number(0.0)`.
 #[test]
 fn test_truthiness_none_is_falsy() {
     ShapeTest::new(
         "function test() {\n  let x = None;\n  if x { return 1; } else { return 0; }\n}\ntest()",
     )
-    .expect_number(0.0);
+    .expect_run_err_contains("is not compatible with bool");
 }
 
-/// Verifies truthiness of nonempty string (truthy).
+/// Strict Shape requires a bool condition: `if <string>` is rejected (no truthiness
+/// coercion). Rebaselined from `expect_number(1.0)`.
 #[test]
 fn test_truthiness_nonempty_string() {
-    ShapeTest::new("function test() {\n  let x = \"hello\";\n  if x { return 1; } else { return 0; }\n}\ntest()").expect_number(1.0);
+    ShapeTest::new("function test() {\n  let x = \"hello\";\n  if x { return 1; } else { return 0; }\n}\ntest()").expect_run_err_contains("is not compatible with bool");
 }
 
-/// Verifies truthiness of float zero (falsy).
+/// Strict Shape requires a bool condition: `if <number>` is rejected (no truthiness
+/// coercion). Rebaselined from `expect_number(0.0)`.
 #[test]
 fn test_truthiness_float_zero() {
     ShapeTest::new(
         "function test() {\n  let x = 0.0;\n  if x { return 1; } else { return 0; }\n}\ntest()",
     )
-    .expect_number(0.0);
+    .expect_run_err_contains("is not compatible with bool");
 }
 
-/// Verifies truthiness of float nonzero (truthy).
+/// Strict Shape requires a bool condition: `if <number>` is rejected (no truthiness
+/// coercion). Rebaselined from `expect_number(1.0)`.
 #[test]
 fn test_truthiness_float_nonzero() {
     ShapeTest::new(
         "function test() {\n  let x = 0.1;\n  if x { return 1; } else { return 0; }\n}\ntest()",
     )
-    .expect_number(1.0);
+    .expect_run_err_contains("is not compatible with bool");
 }
 
 // ===========================================================================

@@ -386,40 +386,46 @@ fn multi_step_or_chain_all_false() {
 // 32. Truthiness in logical operators
 // ============================================================================
 
-/// Verifies 0 is falsy in && context.
+/// Strict Shape requires a bool operand: `<int> &&` is rejected (no truthiness
+/// coercion — user ruling 2026-06-01). Rebaselined from `expect_bool(false)`.
 #[test]
 fn and_with_zero_int() {
-    ShapeTest::new("0 && true").expect_bool(false);
+    ShapeTest::new("0 && true").expect_run_err_contains("is not compatible with bool");
 }
 
-/// Verifies non-zero int is truthy in && context.
+/// Strict Shape requires a bool operand: `<int> &&` is rejected (no truthiness
+/// coercion). Rebaselined from `expect_bool(true)`.
 #[test]
 fn and_with_nonzero_int() {
-    ShapeTest::new("1 && true").expect_bool(true);
+    ShapeTest::new("1 && true").expect_run_err_contains("is not compatible with bool");
 }
 
-/// Verifies 0 is falsy in || context.
+/// Strict Shape requires a bool operand: `<int> ||` is rejected (no truthiness
+/// coercion). Rebaselined from `expect_bool(true)`.
 #[test]
 fn or_with_zero_int() {
-    ShapeTest::new("0 || true").expect_bool(true);
+    ShapeTest::new("0 || true").expect_run_err_contains("is not compatible with bool");
 }
 
-/// Verifies non-zero int is truthy in || context.
+/// Strict Shape requires a bool operand: `<int> ||` is rejected (no truthiness
+/// coercion). Rebaselined from `expect_bool(true)`.
 #[test]
 fn or_with_nonzero_int() {
-    ShapeTest::new("1 || false").expect_bool(true);
+    ShapeTest::new("1 || false").expect_run_err_contains("is not compatible with bool");
 }
 
-/// Verifies !0 = true (zero is falsy).
+/// Strict Shape requires a bool operand: `!<int>` is rejected (no truthiness
+/// coercion). Rebaselined from `expect_bool(true)`.
 #[test]
 fn not_zero() {
-    ShapeTest::new("!0").expect_bool(true);
+    ShapeTest::new("!0").expect_run_err_contains("is not compatible with bool");
 }
 
-/// Verifies !1 = false (one is truthy).
+/// Strict Shape requires a bool operand: `!<int>` is rejected (no truthiness
+/// coercion). Rebaselined from `expect_bool(false)`.
 #[test]
 fn not_one() {
-    ShapeTest::new("!1").expect_bool(false);
+    ShapeTest::new("!1").expect_run_err_contains("is not compatible with bool");
 }
 
 /// Verifies !None = true (null is falsy).

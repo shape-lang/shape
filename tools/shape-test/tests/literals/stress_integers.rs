@@ -158,22 +158,28 @@ fn test_let_inferred_int() {
 // Truthiness of integers
 // =============================================================================
 
-/// Verifies that int zero is falsy (used in if condition).
+/// Strict Shape requires a bool condition: `if <int>` is rejected (no truthiness
+/// coercion — user ruling 2026-06-01). Rebaselined from `expect_number(0.0)`.
 #[test]
 fn test_int_zero_is_not_truthy() {
-    ShapeTest::new("fn test() -> int { if 0 { 1 } else { 0 } }\ntest()").expect_number(0.0);
+    ShapeTest::new("fn test() -> int { if 0 { 1 } else { 0 } }\ntest()")
+        .expect_run_err_contains("is not compatible with bool");
 }
 
-/// Verifies that int one is truthy.
+/// Strict Shape requires a bool condition: `if <int>` is rejected (no truthiness
+/// coercion). Rebaselined from `expect_number(1.0)`.
 #[test]
 fn test_int_one_is_truthy() {
-    ShapeTest::new("fn test() -> int { if 1 { 1 } else { 0 } }\ntest()").expect_number(1.0);
+    ShapeTest::new("fn test() -> int { if 1 { 1 } else { 0 } }\ntest()")
+        .expect_run_err_contains("is not compatible with bool");
 }
 
-/// Verifies that negative int is truthy.
+/// Strict Shape requires a bool condition: `if <int>` is rejected (no truthiness
+/// coercion). Rebaselined from `expect_number(1.0)`.
 #[test]
 fn test_int_negative_is_truthy() {
-    ShapeTest::new("fn test() -> int { if -1 { 1 } else { 0 } }\ntest()").expect_number(1.0);
+    ShapeTest::new("fn test() -> int { if -1 { 1 } else { 0 } }\ntest()")
+        .expect_run_err_contains("is not compatible with bool");
 }
 
 // =============================================================================
@@ -398,18 +404,20 @@ fn test_bool_in_if_condition() {
     .expect_number(1.0);
 }
 
-/// Verifies non-zero int in if condition (truthy).
+/// Strict Shape requires a bool condition: `if <int>` is rejected (no truthiness
+/// coercion). Rebaselined from `expect_number(10.0)`.
 #[test]
 fn test_int_in_if_condition() {
     ShapeTest::new("fn test() -> int {\n            if 1 { 10 } else { 20 }\n        }\ntest()")
-        .expect_number(10.0);
+        .expect_run_err_contains("is not compatible with bool");
 }
 
-/// Verifies zero in if condition (falsy).
+/// Strict Shape requires a bool condition: `if <int>` is rejected (no truthiness
+/// coercion). Rebaselined from `expect_number(20.0)`.
 #[test]
 fn test_zero_in_if_condition() {
     ShapeTest::new("fn test() -> int {\n            if 0 { 10 } else { 20 }\n        }\ntest()")
-        .expect_number(20.0);
+        .expect_run_err_contains("is not compatible with bool");
 }
 
 /// Verifies as_number_coerce for int.
