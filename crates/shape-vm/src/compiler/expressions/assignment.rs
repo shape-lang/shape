@@ -547,7 +547,23 @@ impl BytecodeCompiler {
                     if let Some(inferred) =
                         super::collections::infer_field_type_from_expr(&assign_expr.value)
                     {
-                        if inferred != place.field_type_info {
+                        // Numeric-conversion §4 literal adoption (field-assignment
+                        // context, THE RULE user 2026-06-01): a bare int-literal RHS
+                        // into a numeric field (`p.x = 10` where `x: number`) adopts
+                        // the field type when the literal value is losslessly
+                        // representable — the construction-side twin
+                        // (`collections.rs::int_literal_adopts_field_type`, used at
+                        // the struct-literal producer) already accepts `P { x: 1 }`,
+                        // so the mutation form must agree. An out-of-range literal
+                        // (`p.x = 300` into u8) does NOT adopt and still rejects;
+                        // a non-literal int VAR keeps the §2 value-level reject in
+                        // the `else` arm below.
+                        let literal_adopts =
+                            super::collections::int_literal_adopts_field_type(
+                                &assign_expr.value,
+                                &place.field_type_info,
+                            );
+                        if inferred != place.field_type_info && !literal_adopts {
                             let value_loc =
                                 self.span_to_source_location(assign_expr.value.span());
                             let mut loc = value_loc;
@@ -705,7 +721,45 @@ impl BytecodeCompiler {
                         &assign_expr.value,
                         OBJECT_REF_STORAGE_ERROR,
                     )?;
-                    self.compile_expr(&assign_expr.value)?;
+                    // Numeric-conversion §4 literal adoption (field-assignment
+                    // widening, THE RULE user 2026-06-01): when a bare int-literal
+                    // RHS adopts a `number`(F64) field, it IS the number literal —
+                    // compile it as a `Number` constant so the value laid into the
+                    // F64 slot is f64-kinded, not Int64 (the assignment path has no
+                    // construction-side `kinded_to_slot` runtime widen, so without
+                    // this the DerefStore lays Int64 bits into the F64 place and the
+                    // §2.7.13 kind-drift invariant fires). This is compile-time
+                    // literal re-typing, NOT a runtime coercion opcode (the literal
+                    // `10` is exactly `10.0` in a number context) — no W4-δ Convert
+                    // defection. Width-int / decimal fields keep their natural
+                    // literal lowering (Int64 bits are the correct slot payload).
+                    let widened_literal = if place.field_type_info == FieldType::F64 {
+                        if let Expr::Literal(lit, lit_span) = assign_expr.value.as_ref() {
+                            match lit {
+                                shape_ast::ast::Literal::Int(v) => {
+                                    Some(Expr::Literal(
+                                        shape_ast::ast::Literal::Number(*v as f64),
+                                        *lit_span,
+                                    ))
+                                }
+                                shape_ast::ast::Literal::UInt(v) => {
+                                    Some(Expr::Literal(
+                                        shape_ast::ast::Literal::Number(*v as f64),
+                                        *lit_span,
+                                    ))
+                                }
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    match &widened_literal {
+                        Some(num_lit) => self.compile_expr(num_lit)?,
+                        None => self.compile_expr(&assign_expr.value)?,
+                    }
                     let value_local = self.declare_temp_local("__assign_value_")?;
                     self.emit(Instruction::simple(OpCode::Dup));
                     self.emit(Instruction::new(

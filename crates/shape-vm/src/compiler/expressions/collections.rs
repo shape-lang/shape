@@ -49,7 +49,7 @@ pub(super) fn infer_field_type_from_expr(expr: &Expr) -> Option<FieldType> {
 /// the field's declared kind at `object_creation.rs:448-487`, so adopting is
 /// value-correct. The c2a-cluster construction-side strict reject is preserved
 /// for non-literal mismatches and for out-of-range literals.
-fn int_literal_adopts_field_type(value_expr: &Expr, field_ty: &FieldType) -> bool {
+pub(super) fn int_literal_adopts_field_type(value_expr: &Expr, field_ty: &FieldType) -> bool {
     let v: i128 = match value_expr {
         Expr::Literal(Literal::Int(v), _) => *v as i128,
         Expr::Literal(Literal::UInt(v), _) => *v as i128,

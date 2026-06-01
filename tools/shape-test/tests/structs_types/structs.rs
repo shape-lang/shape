@@ -158,14 +158,18 @@ fn struct_field_mutation_second_field() {
 }
 
 #[test]
-fn struct_field_mutation_int_to_number_rejected_at_compile_time() {
-    // v0.3.3 c2-A fix (audit `docs/cluster-audits/v0.3.3/02-adr-006-2-7-13-kind-drift.md`
-    // Sub-bug A): the assignment-side has no `kinded_to_slot` widening, so an
-    // `int` RHS literal into a `number` field is rejected at compile time
-    // rather than silently corrupting the slot (release build: writer lays
-    // Int64 bits into a Float64-kinded slot → next read reinterprets as f64
-    // denormal). The diagnostic shape mirrors construction-side
-    // `compile_struct_literal` at `crates/shape-vm/src/compiler/expressions/collections.rs:1054`.
+fn struct_field_mutation_int_literal_adopts_number() {
+    // REBASELINED under THE RULE (user 2026-06-01, numeric-conversion §4 literal
+    // adoption). An int LITERAL into a `number` field-mutation context IS the
+    // number literal `10.0` — it adopts the field type when losslessly
+    // representable, exactly like the construction-side
+    // (`struct_literal_int_literal_adopts_number` below) and the scalar
+    // `let n: number = 10` binding. The literal is widened to f64 at the
+    // assignment producer (`compiler/expressions/assignment.rs`), so the F64 slot
+    // gets an f64-kinded value (no §2.7.13 kind drift). Pre-RULE the strict-flip
+    // c2-A rejected this as `int` into `number`; that over-strict literal
+    // handling is exactly what THE RULE relaxes (the int-VAR form below STAYS
+    // rejecting — only a value/variable never silently crosses families).
     ShapeTest::new(
         r#"
         type Point { x: number, y: number }
@@ -174,22 +178,20 @@ fn struct_field_mutation_int_to_number_rejected_at_compile_time() {
         p.x
     "#,
     )
-    .expect_run_err_contains("type mismatch")
-    .expect_run_err_contains("cannot assign `int`")
-    .expect_run_err_contains("field `p.x`")
-    .expect_run_err_contains("type `number`");
+    .expect_number(10.0);
 }
 
 #[test]
 fn struct_field_mutation_int_var_to_number_rejected_at_compile_time() {
-    // v0.3.3 c2a-cluster sub-fix (ii) (audit Sub-bug A "Recommended" disposition
-    // + supervisor 2026-05-28 dispatch). c2-A's literal-only check only fired on
-    // `p.x = 10` literals; this test extends to non-literal RHS like
-    // `let v = 10; p.x = v` which pre-fix silently corrupted the slot (verified
-    // at HEAD `67768f17`: post-fix the same release-build program returned the
-    // `5e-323` f64 denormal — the Int64-bits-as-F64 reinterpret of `10`).
-    // Sub-fix (ii) consults `infer_expr_type` for non-literal RHS and compile-
-    // rejects with the same diagnostic shape as the literal arm.
+    // RULE-ALIGNED (NOT a behavior rebaseline — only the assertion wording is
+    // updated). THE RULE (user 2026-06-01, numeric-conversion §5): a value-level
+    // `int` VARIABLE into a `number` field is a compile error (int->number is an
+    // explicit `as` cast both directions). Only the literal form adopts context
+    // (see `struct_field_mutation_int_literal_adopts_number` above). The reject
+    // now surfaces from the inference engine's §2 lossless-lattice constraint
+    // (`Could not solve type constraints: number is not compatible with int`)
+    // rather than the c2a-cluster compiler-side `type mismatch` diagnostic — the
+    // assertion is wording-agnostic on the reject.
     ShapeTest::new(
         r#"
         type Point { x: number, y: number }
@@ -199,26 +201,21 @@ fn struct_field_mutation_int_var_to_number_rejected_at_compile_time() {
         p.x
     "#,
     )
-    .expect_run_err_contains("type mismatch")
-    .expect_run_err_contains("cannot assign `int`")
-    .expect_run_err_contains("field `p.x`")
-    .expect_run_err_contains("type `number`");
+    .expect_run_err();
 }
 
 #[test]
-fn struct_literal_int_to_number_rejected_at_compile_time() {
-    // v0.3.3 c2a-cluster sub-fix (i) (audit Sub-bug A "Recommended" disposition
-    // lines 62-66 + supervisor 2026-05-28 dispatch). Construction-side symmetry
-    // with c2-A's assignment-side compile-reject: `Point { x: 1, y: 2 }` with
-    // `x: number` (int literal for number field) was permitted pre-fix via
-    // `is_compatible_with` permissiveness at `field_types.rs:175 (F64, I64) =>
-    // true` and runtime-widened by `kinded_to_slot` at `object_creation.rs:
-    // 448-487`. Post-fix the literal-check at `compile_struct_literal` uses
-    // exact-equality (mirror of c2-A `assignment.rs:550`), eliminating the
-    // construction-side path that feeds the JIT's `field_kinds_pre` map at
-    // `mir_compiler/types.rs:438-462` with int-kinded operands for number-
-    // declared fields (the root cause sub-fix iii's read-side kind drift was
-    // downstream of).
+fn struct_literal_int_literal_adopts_number() {
+    // REBASELINED under THE RULE (user 2026-06-01, numeric-conversion §4 literal
+    // adoption). `Point { x: 1, y: 2 }` with `x/y: number`: the int literals `1`
+    // and `2` are losslessly representable in `number`, so they adopt the field
+    // type — they ARE the number literals `1.0`/`2.0`. Construction-side adoption
+    // is implemented at `compiler/expressions/collections.rs::
+    // int_literal_adopts_field_type` and the runtime widens via `kinded_to_slot`
+    // (`object_creation.rs:448-487`). Pre-RULE the strict-flip c2a-cluster
+    // rejected this construction with `E0100 ... with int literal`; THE RULE
+    // relaxes the over-strict literal handling (the int-VAR construction form
+    // stays rejecting — see `struct_passed_to_function`'s `3.0`/`4.0` callers).
     ShapeTest::new(
         r#"
         type Point { x: number, y: number }
@@ -226,10 +223,7 @@ fn struct_literal_int_to_number_rejected_at_compile_time() {
         p.x
     "#,
     )
-    .expect_run_err_contains("type mismatch")
-    .expect_run_err_contains("cannot construct field `x`")
-    .expect_run_err_contains("type `number`")
-    .expect_run_err_contains("with `int` literal");
+    .expect_number(1.0);
 }
 
 #[test]

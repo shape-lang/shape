@@ -20,17 +20,17 @@ fn object_creation_all_fields_number() {
     .expect_number(7.0);
 }
 
-/// v0.3.3 c2a-cluster sub-fix (i) (audit `docs/cluster-audits/v0.3.3/
-/// 02-adr-006-2-7-13-kind-drift.md` Sub-bug A "Recommended" disposition lines 62-66):
-/// the construction-side int→number widening at `kinded_to_slot`
-/// (`executor/objects/object_creation.rs:448-487`) is now compile-rejected for
-/// symmetry with the c2-A assignment-side fix (commit `516afcad`). The pre-fix
-/// test name "int_widening_to_number" documented the deleted runtime widening;
-/// the post-fix discipline mirrors `struct_field_mutation_int_to_number_rejected_
-/// at_compile_time` in `structs.rs` — the user writes `1.0`/`2.0` (number
-/// literals) or `1 as number` (explicit cast).
+/// REBASELINED under THE RULE (user 2026-06-01, numeric-conversion §4 literal
+/// adoption). `Point { x: 1, y: 2 }` with `x/y: number`: the int literals adopt
+/// the `number` field type (losslessly representable) — they ARE `1.0`/`2.0`.
+/// `p.x + p.y` is then f64 arithmetic == 3.0. Pre-RULE the strict-flip
+/// c2a-cluster rejected the construction with `E0100 ... with int literal`; THE
+/// RULE relaxes the over-strict literal handling. Construction-side adoption is
+/// at `compiler/expressions/collections.rs::int_literal_adopts_field_type`; the
+/// runtime widens via `kinded_to_slot` (`object_creation.rs:448-487`). A
+/// value/variable (`let v = 1; Point { x: v, ... }`) still rejects (§5).
 #[test]
-fn object_creation_int_to_number_rejected_at_compile_time() {
+fn object_creation_int_literal_adopts_number() {
     ShapeTest::new(
         r#"
         type Point { x: number, y: number }
@@ -38,10 +38,7 @@ fn object_creation_int_to_number_rejected_at_compile_time() {
         p.x + p.y
     "#,
     )
-    .expect_run_err_contains("type mismatch")
-    .expect_run_err_contains("cannot construct field `x`")
-    .expect_run_err_contains("type `number`")
-    .expect_run_err_contains("with `int` literal");
+    .expect_number(3.0);
 }
 
 /// Verifies object creation with mixed types.

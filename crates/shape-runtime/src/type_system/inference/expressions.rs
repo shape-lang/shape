@@ -1050,8 +1050,21 @@ impl TypeInferenceEngine {
                 };
 
                 // Assignment must be type-compatible with the target field/variable.
-                self.constraints
-                    .push((target_type.clone(), value_type.clone()));
+                // Numeric-conversion §4 literal adoption (field/property-assignment
+                // context): a bare int-literal RHS into a concrete numeric target
+                // (`p.x = 10` where `x: number`) adopts the target type when the
+                // literal value is losslessly representable — no rejecting
+                // constraint, mirroring the construction-side adoption
+                // (`collections.rs::int_literal_adopts_field_type`) and the scalar
+                // reassignment path (`statements.rs::infer_assignment`). A
+                // non-literal RHS (`p.x = int_var`) keeps the value-level §2 lattice
+                // constraint, so an int VARIABLE into a number field still rejects.
+                if Self::adopt_int_literal_in_context(&assign_expr.value, &target_type).is_some() {
+                    // literal fits the target — no rejecting constraint.
+                } else {
+                    self.constraints
+                        .push((target_type.clone(), value_type.clone()));
+                }
 
                 // Record field evolution for property assignments (a.x = v)
                 if let Expr::PropertyAccess {
