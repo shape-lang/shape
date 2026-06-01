@@ -311,7 +311,10 @@ fn test_sum_first_n_odd() {
 /// Verifies harmonic sum.
 #[test]
 fn test_harmonic_sum() {
-    ShapeTest::new("fn run() {\n    let mut sum = 0.0\n    let mut i = 1\n    while i <= 10 {\n        sum = sum + 1.0 / i\n        i = i + 1\n    }\n    sum\n}\nrun()").expect_number(2.9289682539682538);
+    // R2 TP-rebaseline (strict-flip): `i` is an `int` VALUE; `1.0 / i` is a
+    // cross-family `number / int` which now requires an explicit cast (only int
+    // LITERALS adopt, not int values).
+    ShapeTest::new("fn run() {\n    let mut sum = 0.0\n    let mut i = 1\n    while i <= 10 {\n        sum = sum + 1.0 / (i as number)\n        i = i + 1\n    }\n    sum\n}\nrun()").expect_number(2.9289682539682538);
 }
 
 // =========================================================================
@@ -347,7 +350,10 @@ fn test_two_accumulators() {
 /// Verifies average of values.
 #[test]
 fn test_average_of_values() {
-    ShapeTest::new("fn run() {\n    let mut sum = 0.0\n    let mut count = 0\n    for x in [10, 20, 30, 40, 50] {\n        sum = sum + x\n        count = count + 1\n    }\n    sum / count\n}\nrun()").expect_number(30.0);
+    // R2 TP-rebaseline (strict-flip): `x` (loop var) and `count` are `int`
+    // VALUES; `sum + x` and `sum / count` are cross-family `number op int` which
+    // now require explicit casts (only int LITERALS adopt, not int values).
+    ShapeTest::new("fn run() {\n    let mut sum = 0.0\n    let mut count = 0\n    for x in [10, 20, 30, 40, 50] {\n        sum = sum + (x as number)\n        count = count + 1\n    }\n    sum / (count as number)\n}\nrun()").expect_number(30.0);
 }
 
 // =========================================================================

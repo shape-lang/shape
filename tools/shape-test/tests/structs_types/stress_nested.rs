@@ -440,12 +440,18 @@ fn array_push_on_struct_field() {
 /// Verifies struct constructed from array elements.
 #[test]
 fn struct_from_array_element() {
+    // R2 Group B (strict-flip): NOT a numeric over-constraint. A local named
+    // `data` is parsed as the query-DSL `Expr::DataRef` keyword and typed
+    // `object`, so `data[0]` never reaches index-access inference and
+    // `object + object` fails the Numeric constraint. De-magicked by renaming
+    // the binding to a non-reserved identifier (`pts`); the values are already
+    // `number` literals so no cast is involved.
     ShapeTest::new(
         r#"
         type Point { x: number, y: number }
         function test() {
-            let data = [10.0, 20.0]
-            let p = Point { x: data[0], y: data[1] }
+            let pts = [10.0, 20.0]
+            let p = Point { x: pts[0], y: pts[1] }
             return p.x + p.y
         }
         test()

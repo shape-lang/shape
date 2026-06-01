@@ -554,11 +554,39 @@ impl TypeInferenceEngine {
         args: &[Expr],
         call_span: Span,
     ) -> TypeResult<Type> {
-        // Infer argument types
-        let arg_types: Vec<_> = args
-            .iter()
-            .map(|arg| self.infer_expr(arg))
-            .collect::<Result<_, _>>()?;
+        // Bidirectional closure-arg param inference (R4): when an argument is a
+        // closure literal (`Expr::FunctionExpr`) and the callee's corresponding
+        // parameter is a CONCRETE function type, drive the closure through
+        // `check_against` with that expected function type. This binds the
+        // closure's unannotated parameters to the expected concrete param types
+        // (e.g. `apply(|x| x * 2, 21)` with `apply(f: (x: int) => int, …)` binds
+        // `x: int`) BEFORE body inference, so the closure-eager
+        // `refine_callable_param_types_from_local_constraints` numeric-collapse
+        // (which would otherwise pin a `Numeric`-bounded `x` to `number`) never
+        // fires. No type kind is fabricated and no value widening is introduced:
+        // the param simply adopts the annotated parameter type, exactly as a
+        // closure with an explicit `|x: int|` annotation would.
+        //
+        // CLAUDE.md "Bidirectional closure inference": extends the method-call
+        // closure-param inference to fn-param-typed closures. Only fires when
+        // the expected param is a concrete `Function` shape; everything else
+        // falls through to plain `infer_expr` (unchanged behavior).
+        let expected_closure_param_types = self.callee_concrete_param_fn_types(name, args);
+        let mut arg_types: Vec<Type> = Vec::with_capacity(args.len());
+        for (i, arg) in args.iter().enumerate() {
+            let arg_type = match (
+                arg,
+                expected_closure_param_types
+                    .as_ref()
+                    .and_then(|v| v.get(i).cloned().flatten()),
+            ) {
+                (Expr::FunctionExpr { .. }, Some(expected_fn_ty)) => {
+                    self.check_against(arg, &expected_fn_ty)?
+                }
+                _ => self.infer_expr(arg)?,
+            };
+            arg_types.push(arg_type);
+        }
 
         // Builtin arity special-cases that cannot be represented by a single
         // fixed-arity function type in the symbol table.
@@ -761,6 +789,116 @@ impl TypeInferenceEngine {
         Ok(inferred_result_type)
     }
 
+    /// R4 bidirectional closure-arg support: peek the callee's parameter list
+    /// and return, per argument position, the expected CONCRETE function type
+    /// if (a) the argument at that position is a closure literal and (b) the
+    /// callee's parameter is a fully-concrete `Function` shape.
+    ///
+    /// Returns `None` (the whole vector) when the callee is not a known
+    /// named function in the environment, so builtins and value-call sites are
+    /// completely untouched. Per-slot `None` means "infer this arg normally".
+    ///
+    /// The scheme is only PEEKED (no instantiation, no constraint emission, no
+    /// state mutation). A parameter that still mentions a type variable (a
+    /// generic param, e.g. `fn map<T,U>(f: (T) => U, …)`) yields `None` for its
+    /// slot — we only propagate a closed concrete function type, never a
+    /// partially-resolved one. Method-call closure inference already handles
+    /// the generic case via its own bidirectional path.
+    fn callee_concrete_param_fn_types(
+        &self,
+        name: &str,
+        args: &[Expr],
+    ) -> Option<Vec<Option<Type>>> {
+        // Only fires when at least one arg is a closure literal — avoids the
+        // env lookup on the overwhelmingly common closure-free call.
+        if !args.iter().any(|a| matches!(a, Expr::FunctionExpr { .. })) {
+            return None;
+        }
+        let scheme = self.env.lookup(name)?;
+        match &scheme.ty {
+            Type::Function { params, .. } => Some(
+                args.iter()
+                    .enumerate()
+                    .map(|(i, arg)| {
+                        if !matches!(arg, Expr::FunctionExpr { .. }) {
+                            return None;
+                        }
+                        params.get(i).and_then(|param_ty| {
+                            if matches!(param_ty, Type::Function { .. })
+                                && !Self::type_contains_variable(param_ty)
+                            {
+                                Some(param_ty.clone())
+                            } else {
+                                None
+                            }
+                        })
+                    })
+                    .collect(),
+            ),
+            Type::Concrete(TypeAnnotation::Function { params, .. }) => Some(
+                args.iter()
+                    .enumerate()
+                    .map(|(i, arg)| {
+                        if !matches!(arg, Expr::FunctionExpr { .. }) {
+                            return None;
+                        }
+                        params.get(i).and_then(|p| {
+                            let ty = Type::Concrete(p.type_annotation.clone());
+                            if matches!(&ty, Type::Concrete(TypeAnnotation::Function { .. }))
+                                && !Self::type_contains_variable(&ty)
+                            {
+                                Some(ty)
+                            } else {
+                                None
+                            }
+                        })
+                    })
+                    .collect(),
+            ),
+            _ => None,
+        }
+    }
+
+    /// True if the type mentions any `Type::Variable` / `Type::Constrained`
+    /// anywhere in its structure, or carries an encoded `tyvar:Tn` annotation
+    /// marker. Used to gate R4 closure-arg propagation to fully-closed concrete
+    /// function types only.
+    fn type_contains_variable(ty: &Type) -> bool {
+        match ty {
+            Type::Variable(_) | Type::Constrained { .. } => true,
+            Type::Concrete(ann) => Self::annotation_contains_tyvar(ann),
+            Type::Generic { base, args } => {
+                Self::type_contains_variable(base)
+                    || args.iter().any(Self::type_contains_variable)
+            }
+            Type::Function { params, returns } => {
+                params.iter().any(Self::type_contains_variable)
+                    || Self::type_contains_variable(returns)
+            }
+        }
+    }
+
+    /// True if a `TypeAnnotation` carries an encoded `tyvar:Tn` marker (the
+    /// closure-valued-field representation) anywhere in its structure.
+    fn annotation_contains_tyvar(ann: &TypeAnnotation) -> bool {
+        if annotation_as_tyvar(ann).is_some() {
+            return true;
+        }
+        match ann {
+            TypeAnnotation::Array(inner) => Self::annotation_contains_tyvar(inner),
+            TypeAnnotation::Function { params, returns } => {
+                params
+                    .iter()
+                    .any(|p| Self::annotation_contains_tyvar(&p.type_annotation))
+                    || Self::annotation_contains_tyvar(returns)
+            }
+            TypeAnnotation::Generic { args, .. } => {
+                args.iter().any(Self::annotation_contains_tyvar)
+            }
+            _ => false,
+        }
+    }
+
     /// Infer element type from iterator type
     pub(crate) fn infer_iterator_element_type(&mut self, iter_type: &Type) -> TypeResult<Type> {
         match iter_type {
@@ -886,7 +1024,6 @@ impl TypeInferenceEngine {
         args: &[Expr],
         arg_types: &[Type],
     ) {
-        eprintln!("HOF: outer_name={} args={} arg_types={:?}", outer_name, args.len(), arg_types);
         // Read the outer function's parameter source-vars. An annotated
         // outer parameter has `None` here; we need an unannotated
         // function-typed slot whose body imposed a call-shape constraint,
@@ -895,7 +1032,6 @@ impl TypeInferenceEngine {
         else {
             return;
         };
-        eprintln!("HOF: outer_source_vars={:?}", outer_source_vars);
 
         // Build outer_param_j_src → j lookup for resolving "this slot
         // references the outer's parameter j" once we read the call-shape
@@ -970,7 +1106,6 @@ impl TypeInferenceEngine {
                 // path — `apply_callsite_unions` + `refine_numeric_params_post_callsite`
                 // pick it up exactly as if `callee_name(arg_ty)` had been
                 // written directly.
-                eprintln!("HOF: synthetic callsite for {} arg_types={:?}", callee_name, synthetic_arg_types);
                 self.record_function_callsite(callee_name, &synthetic_arg_types);
             }
         }

@@ -74,16 +74,44 @@ impl TypeEnvironment {
         // Numeric functions
         self.define_builtin("abs", vec![BuiltinTypes::number()], BuiltinTypes::number());
 
-        self.define_builtin(
-            "min",
-            vec![BuiltinTypes::number(), BuiltinTypes::number()],
-            BuiltinTypes::number(),
+        // STRICT-FLIP (v0.3.3, R5): `min`/`max` are genuinely polymorphic over a
+        // single numeric type, mirroring the VM builtins (`math::builtin_min` /
+        // `builtin_max`) which preserve the Int kind when BOTH args are `int`
+        // (`(Int64, Int64) => from_int(a.min(b))`) and otherwise produce
+        // `number`. The pre-fix monomorphic `(number, number) -> number`
+        // rejected every `int` argument value (e.g. `min(max(x, 2), 10)` with
+        // `x: int`) at the checker BEFORE the compiler ran — same FP family as
+        // the cleared `acos`/`pow` numeric signatures, but those take only
+        // `number` so they were fixed by literal-adoption alone, whereas min/max
+        // flow an `int` *value* (a `let`-bound variable and the inner call's
+        // `int` result) that does NOT adopt (§5: only int LITERALS adopt). The
+        // fix registers `(T, T) -> T` with `T: Numeric` — a SINGLE type var, so
+        // `min(int, int) -> int` and `min(number, number) -> number` both
+        // type-check while `min(int, number)` still rejects (no loose
+        // int->number value widening; no dynamic fallback). `T: Numeric` keeps
+        // the checker from accepting `min("a", "b")` which would crash in the VM
+        // (acos/pow comment's "accept-then-crash" hazard).
+        let min_max_t = TypeVar::new("T".to_string());
+        let mut min_max_bounds = HashMap::new();
+        min_max_bounds.insert(min_max_t.0.clone(), vec!["Numeric".to_string()]);
+        let min_max_ty = BuiltinTypes::function(
+            vec![
+                Type::Variable(min_max_t.clone()),
+                Type::Variable(min_max_t.clone()),
+            ],
+            Type::Variable(min_max_t.clone()),
         );
-
-        self.define_builtin(
-            "max",
-            vec![BuiltinTypes::number(), BuiltinTypes::number()],
-            BuiltinTypes::number(),
+        self.builtins.insert(
+            "min".to_string(),
+            TypeScheme::poly_bounded(
+                vec![min_max_t.clone()],
+                min_max_ty.clone(),
+                min_max_bounds.clone(),
+            ),
+        );
+        self.builtins.insert(
+            "max".to_string(),
+            TypeScheme::poly_bounded(vec![min_max_t], min_max_ty, min_max_bounds),
         );
 
         self.define_builtin("sqrt", vec![BuiltinTypes::number()], BuiltinTypes::number());

@@ -263,7 +263,23 @@ impl TypeInferenceEngine {
             {
                 right.clone()
             }
-            // Both operands unresolved (or non-basic) → default to number.
+            // Both operands are still unresolved variables → keep the result
+            // LINKED to the left operand variable rather than eagerly collapsing
+            // to `number`. The eager collapse severs the call-graph link in the
+            // recursive case `n * factorial(n - 1)`: `factorial`'s return is
+            // still a fresh variable while its own body is being inferred, so
+            // the multiply pairs two variables. Collapsing to `number` makes the
+            // if-branch unification `int(then) ~ number(else)` a hard mismatch
+            // under the strict §2 numeric lattice (int->number is now
+            // cast-required), spuriously rejecting valid all-int recursion.
+            // Propagating the variable lets the callsite-union fixpoint resolve
+            // it to the concrete argument type (`int` for `factorial(6)`); the
+            // deferred `number` default in `refine_numeric_params_post_callsite`
+            // still fires when NO call site ever pins the variable, so a
+            // never-called `fn triple(x){x*3}` still resolves its param to
+            // `number`.
+            (Type::Variable(_), Type::Variable(_)) => left.clone(),
+            // Any other operand shape (non-basic concrete) → default to number.
             _ => BuiltinTypes::number(),
         }
     }
@@ -640,6 +656,12 @@ impl TypeInferenceEngine {
                 // the pre-Stage-2 acceptance of either-family `**` operands. The
                 // RESULT stays `number` (the established `**` result type), so
                 // `2 ** 8 = 256.0` is unchanged.
+                //
+                // R3 (int ** int -> int vs number) is classified NEEDS_RULING and
+                // is intentionally NOT applied here — the result-family question
+                // (inference says `number`, the shipped VM/JIT say `int`) is a
+                // user decision, flagged in the run report. Leaving the declared
+                // result as `number` preserves pre-existing main behavior.
                 self.push_numeric_operand_bound(&effective_left, span);
                 self.push_numeric_operand_bound(&effective_right, span);
 

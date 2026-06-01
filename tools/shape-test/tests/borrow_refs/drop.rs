@@ -312,13 +312,18 @@ fn test_drop_custom_type_without_drop_impl() {
 
 #[test]
 fn test_drop_custom_type_in_loop() {
+    // R2 TP-rebaseline (strict-flip): `i` (loop var) is an `int` VALUE; the
+    // field `value: number` now requires the constructor expression to be in the
+    // `number` family (`(i as number) * 10.0`), and the accumulator is `number`
+    // so `sum + w.value` is `number + number`. Only int LITERALS adopt the
+    // target family — an int VALUE/expr requires an explicit cast.
     ShapeTest::new(
         r#"
         type Wrapper { value: number }
         fn f() {
-            let mut sum = 0
+            let mut sum = 0.0
             for i in [1, 2, 3] {
-                let w = Wrapper { value: i * 10 }
+                let w = Wrapper { value: (i as number) * 10.0 }
                 sum = sum + w.value
             }
             return sum
